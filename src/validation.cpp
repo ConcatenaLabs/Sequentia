@@ -3859,6 +3859,30 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
                 return state.Invalid(BlockValidationResult::BLOCK_CHECKPOINT, "bad-fork-prior-to-pos-checkpoint");
             }
         }
+
+        // Operator-configured static checkpoints: a fresh-sync long-range
+        // backstop known before any block is downloaded. A block at a
+        // configured height must carry the configured hash, and any block whose
+        // branch already spans a configured height must agree with it. See
+        // doc/sequentia/06-proof-of-stake.md §11.
+        const std::map<int, uint256> config_cps = GetConfiguredPosCheckpoints();
+        if (!config_cps.empty()) {
+            auto exact = config_cps.find(nHeight);
+            if (exact != config_cps.end() && block.GetHash() != exact->second) {
+                LogPrintf("ERROR: %s: block at height %d does not match the configured checkpoint %s\n", __func__, nHeight, exact->second.ToString());
+                return state.Invalid(BlockValidationResult::BLOCK_CHECKPOINT, "bad-pos-checkpoint");
+            }
+            // Highest configured checkpoint at or below this block's parent.
+            auto hi = config_cps.upper_bound(nHeight - 1);
+            if (hi != config_cps.begin()) {
+                --hi;
+                const CBlockIndex* anc = pindexPrev->GetAncestor(hi->first);
+                if (anc != nullptr && anc->GetBlockHash() != hi->second) {
+                    LogPrintf("ERROR: %s: block forks below the configured checkpoint %s (height %d)\n", __func__, hi->second.ToString(), hi->first);
+                    return state.Invalid(BlockValidationResult::BLOCK_CHECKPOINT, "bad-fork-prior-to-pos-checkpoint");
+                }
+            }
+        }
     }
 
     // Check against checkpoints

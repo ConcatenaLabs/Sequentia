@@ -196,7 +196,22 @@ nodes converge on it — exactly as the federation's round-robin does today.
        `getcheckpointinfo` and the debug log (the fresh-sync / wrong-fork
        case): it cannot finalize a block it never validated, so it never
        silently follows a checkpoint, but it flags that it may be on the
-       losing side of a long-range fork. Automatic fresh-sync chain
-       *selection* from checkpoints (reorganizing onto checkpointed history a
-       node has not yet validated) remains future work — by design.
+       losing side of a long-range fork.
+10. [x] **Operator-configured static checkpoints** (`-poscheckpoint=height:hash`,
+       repeatable): the dynamic checkpoints above only lock in history a node
+       has *already* validated, which does not help a node syncing from
+       genesis against a long-range alternate history. A configured checkpoint
+       is known before any block is downloaded, so a block presented at the
+       pinned height must carry the pinned hash, otherwise it — and any branch
+       built on it — is rejected in `ContextualCheckBlockHeader`
+       (`bad-pos-checkpoint`); a node fed a bogus long-range chain refuses it
+       and disconnects the lying peer rather than following it. This is
+       reject-only and never makes a node seek a particular branch
+       (surfaced in `getcheckpointinfo`'s `configured` array;
+       `feature_pos_config_checkpoints.py`). Automatic fresh-sync chain
+       *selection* from the *dynamic* parent-chain checkpoints (actively
+       reorganizing onto checkpointed history a node has not yet downloaded)
+       remains future work — by design; it needs block-download changes,
+       whereas the static backstop above closes the practical fresh-sync hole
+       without them.
 </content>

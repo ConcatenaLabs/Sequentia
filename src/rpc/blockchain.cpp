@@ -3455,6 +3455,14 @@ static RPCHelpMan getcheckpointinfo()
                             {
                                 {RPCResult::Type::ELISION, "", "same fields as checkpoints[]"},
                             }},
+                        {RPCResult::Type::ARR, "configured", "operator-configured static checkpoints (-poscheckpoint)",
+                            {
+                                {RPCResult::Type::OBJ, "", "",
+                                    {
+                                        {RPCResult::Type::NUM, "height", "the pinned height"},
+                                        {RPCResult::Type::STR_HEX, "blockhash", "the required block hash at that height"},
+                                    }},
+                            }},
                     }},
                 RPCExamples{HelpExampleCli("getcheckpointinfo", "")},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
@@ -3494,6 +3502,14 @@ static RPCHelpMan getcheckpointinfo()
         conflicts.push_back(entry);
     }
     result.pushKV("conflicts", conflicts);
+    UniValue configured(UniValue::VARR);
+    for (const auto& [height, hash] : GetConfiguredPosCheckpoints()) {
+        UniValue entry(UniValue::VOBJ);
+        entry.pushKV("height", height);
+        entry.pushKV("blockhash", hash.GetHex());
+        configured.push_back(entry);
+    }
+    result.pushKV("configured", configured);
     return result;
 },
     };

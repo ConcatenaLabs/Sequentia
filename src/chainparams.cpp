@@ -10,6 +10,7 @@
 #include <deploymentinfo.h>
 #include <hash.h> // for signet block challenge hash
 #include <issuance.h>
+#include <anchor.h>
 #include <pos.h>
 #include <primitives/transaction.h>
 #include <util/system.h>
@@ -971,6 +972,24 @@ protected:
                 std::string err;
                 if (!StakeRegistry::GetInstance().AddFromSpec(spec, err)) {
                     throw std::runtime_error(strprintf("Invalid -staker: %s", err));
+                }
+            }
+            // Operator-configured static checkpoints: "-poscheckpoint=height:hash".
+            ClearConfiguredPosCheckpoints();
+            for (const std::string& spec : args.GetArgs("-poscheckpoint")) {
+                size_t colon = spec.find(':');
+                int height = -1;
+                if (colon == std::string::npos ||
+                    !ParseInt32(spec.substr(0, colon), &height)) {
+                    throw std::runtime_error(strprintf("Invalid -poscheckpoint '%s': expected <height>:<blockhash>", spec));
+                }
+                std::string hash_hex = spec.substr(colon + 1);
+                if (hash_hex.size() != 64 || !IsHex(hash_hex)) {
+                    throw std::runtime_error(strprintf("Invalid -poscheckpoint '%s': block hash must be 64 hex chars", spec));
+                }
+                std::string err;
+                if (!AddConfiguredPosCheckpoint(height, uint256S(hash_hex), err)) {
+                    throw std::runtime_error(strprintf("Invalid -poscheckpoint '%s': %s", spec, err));
                 }
             }
             // The block solution carries the leader's signature plus up to a

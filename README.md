@@ -60,7 +60,7 @@ This fork adds (all gated on the relevant chain features):
   `generateposblock`, `vrfprove` / `vrfverify`, `getcheckpointpayload` /
   `getcheckpointinfo`; options `-con_pos`, `-staker`, `-posslotinterval`,
   `-poscommitteesize`, `-posvrf`, `-posaggcommittee`, `-posunbonding`,
-  `-poscheckpointdepth`.
+  `-poscheckpointdepth`, `-poscheckpoint` (configured static checkpoints).
 - **Addresses/CT:** `-con_default_blinded_addresses` (custom chains);
   `-blindedaddresses` default is now chain-dependent.
 

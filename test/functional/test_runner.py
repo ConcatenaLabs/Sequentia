@@ -183,6 +183,7 @@ BASE_SCRIPTS = [
     'feature_pos_agg_committee.py',
     'feature_pos_stake.py',
     'feature_pos_checkpoints.py',
+    'feature_pos_config_checkpoints.py',
     'feature_ct_opt_in.py',
     'rpc_exchangerates.py',
     # -------------------

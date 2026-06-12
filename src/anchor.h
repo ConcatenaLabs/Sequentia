@@ -18,7 +18,9 @@
 #include <uint256.h>
 
 #include <cstdint>
+#include <map>
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -115,5 +117,25 @@ std::vector<PosCheckpoint> GetPosCheckpoints();
  *  bogus checkpoint exists; the node cannot tell alone). Surfaced via
  *  getcheckpointinfo. */
 std::vector<PosCheckpoint> GetPosCheckpointConflicts();
+
+// --- Operator-configured static checkpoints (-poscheckpoint=height:hash) ---
+//
+// Unlike the dynamic parent-chain checkpoints above (which only lock in history
+// a node has already validated), these are supplied by the operator up front,
+// so they protect a *fresh* sync against a long-range alternate history before
+// any block is downloaded: a block presented at a configured checkpoint height
+// must carry the configured hash, else it (and any branch built on it) is
+// rejected in ContextualCheckBlockHeader. Reject-only — they never make a node
+// seek or download a particular branch.
+
+/** Drop all configured checkpoints (chain-parameter (re)load). */
+void ClearConfiguredPosCheckpoints();
+
+/** Register a configured checkpoint. Fails on a negative height or a height
+ *  already configured with a different hash. */
+bool AddConfiguredPosCheckpoint(int height, const uint256& hash, std::string& error);
+
+/** All configured checkpoints, keyed by Sequentia height. */
+std::map<int, uint256> GetConfiguredPosCheckpoints();
 
 #endif // BITCOIN_ANCHOR_H
