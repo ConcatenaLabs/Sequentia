@@ -5,6 +5,7 @@
 #include <pos.h>
 
 #include <key.h>
+#include <policy/policy.h>
 #include <primitives/block.h>
 #include <vrf.h>
 #include <test/util/setup_common.h>
@@ -308,6 +309,87 @@ BOOST_AUTO_TEST_CASE(pos_vrf_member_commitment_roundtrip)
     cb2.vout.back().scriptPubKey = BuildPosVrfMemberCommitment(member, short_proof);
     bad.vtx.push_back(MakeTransactionRef(cb2));
     BOOST_CHECK(ExtractPosVrfMembers(bad).empty());
+}
+
+// Staking script: build/parse round-trip across CSV encodings, rejection of
+// malformed scripts, and StakeFromTxOut qualification rules.
+BOOST_AUTO_TEST_CASE(pos_stake_script_roundtrip)
+{
+    CPubKey staker = MakeKey();
+
+    // Round-trips for smallint (OP_1..16) and CScriptNum-push CSV values.
+    for (uint32_t csv : {1u, 5u, 16u, 17u, 144u, 65535u}) {
+        CScript script = BuildStakeScript(staker, csv);
+        auto parsed = ParseStakeScript(script);
+        BOOST_REQUIRE_MESSAGE(parsed.has_value(), strprintf("csv=%u", csv));
+        BOOST_CHECK(parsed->first == staker);
+        BOOST_CHECK_EQUAL(parsed->second, csv);
+    }
+
+    // Rejections: zero/oversized csv, wrong opcodes, trailing data, not a key.
+    BOOST_CHECK(!ParseStakeScript(CScript() << (int64_t)0 << OP_CHECKSEQUENCEVERIFY << OP_DROP << ToByteVector(staker) << OP_CHECKSIG).has_value());
+    BOOST_CHECK(!ParseStakeScript(CScript() << (int64_t)0x10000 << OP_CHECKSEQUENCEVERIFY << OP_DROP << ToByteVector(staker) << OP_CHECKSIG).has_value());
+    BOOST_CHECK(!ParseStakeScript(CScript() << (int64_t)5 << OP_CHECKLOCKTIMEVERIFY << OP_DROP << ToByteVector(staker) << OP_CHECKSIG).has_value());
+    BOOST_CHECK(!ParseStakeScript(CScript() << (int64_t)5 << OP_CHECKSEQUENCEVERIFY << OP_DROP << ToByteVector(staker) << OP_CHECKSIGVERIFY).has_value());
+    CScript trailing = BuildStakeScript(staker, 5);
+    trailing << OP_TRUE;
+    BOOST_CHECK(!ParseStakeScript(trailing).has_value());
+    BOOST_CHECK(!ParseStakeScript(BuildPosChallenge(staker)).has_value());
+
+    // StakeFromTxOut qualification.
+    uint32_t old_unbonding = g_pos_unbonding_period;
+    g_pos_unbonding_period = 10;
+    CScript ok_script = BuildStakeScript(staker, 10);
+    CTxOut ok_out(CConfidentialAsset(::policyAsset), CConfidentialValue(50000), ok_script);
+    auto stake = StakeFromTxOut(ok_out);
+    BOOST_REQUIRE(stake.has_value());
+    BOOST_CHECK(stake->first == staker);
+    BOOST_CHECK_EQUAL(stake->second, 50000U);
+
+    // CSV below the unbonding floor does not count.
+    CTxOut low_csv(CConfidentialAsset(::policyAsset), CConfidentialValue(50000), BuildStakeScript(staker, 9));
+    BOOST_CHECK(!StakeFromTxOut(low_csv).has_value());
+    // Wrong asset does not count.
+    CAsset other_asset{uint256S("0xaa")};
+    CTxOut wrong_asset(CConfidentialAsset(other_asset), CConfidentialValue(50000), ok_script);
+    BOOST_CHECK(!StakeFromTxOut(wrong_asset).has_value());
+    // Confidential (committed) value cannot carry verifiable weight.
+    CConfidentialValue blinded;
+    blinded.vchCommitment.assign(33, 0x08);
+    blinded.vchCommitment[0] = 0x08;
+    CTxOut blinded_out(CConfidentialAsset(::policyAsset), blinded, ok_script);
+    BOOST_CHECK(!StakeFromTxOut(blinded_out).has_value());
+    // Zero value does not count.
+    CTxOut zero(CConfidentialAsset(::policyAsset), CConfidentialValue(0), ok_script);
+    BOOST_CHECK(!StakeFromTxOut(zero).has_value());
+    g_pos_unbonding_period = old_unbonding;
+}
+
+// Registry layering: config + UTXO weights sum; UTXO add/sub mirror exactly.
+BOOST_AUTO_TEST_CASE(pos_stake_registry_layers)
+{
+    StakeRegistry reg;
+    CPubKey config_staker = MakeKey();
+    CPubKey utxo_staker = MakeKey();
+    CPubKey both = MakeKey();
+
+    reg.SetStake(config_staker, 100);
+    reg.SetStake(both, 100);
+    reg.AddUtxoStake(utxo_staker, 250);
+    reg.AddUtxoStake(both, 50);
+
+    BOOST_CHECK_EQUAL(reg.GetWeight(config_staker), 100U);
+    BOOST_CHECK_EQUAL(reg.GetWeight(utxo_staker), 250U);
+    BOOST_CHECK_EQUAL(reg.GetWeight(both), 150U);
+    BOOST_CHECK_EQUAL(reg.Size(), 3U);
+    BOOST_CHECK_EQUAL(PosTotalWeight(reg), 500U);
+
+    // Sub mirrors add; weight returns to the config layer alone.
+    reg.SubUtxoStake(both, 50);
+    BOOST_CHECK_EQUAL(reg.GetWeight(both), 100U);
+    reg.SubUtxoStake(utxo_staker, 250);
+    BOOST_CHECK_EQUAL(reg.GetWeight(utxo_staker), 0U);
+    BOOST_CHECK_EQUAL(reg.Size(), 2U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

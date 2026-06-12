@@ -16,6 +16,7 @@
 
 #include <pubkey.h>
 #include <script/script.h>
+#include <sync.h>
 #include <uint256.h>
 
 #include <cstdint>
@@ -58,12 +59,23 @@ extern bool g_pos_vrf;
 static const uint64_t POS_VRF_MAX_SLOT = 1 << 20;
 
 /** The set of stakers eligible to be elected as block leaders, and their
- *  relative stake weights. For this PoC the set is chain configuration; a
- *  production system would track it in chainstate via staking transactions. */
+ *  stake weights. Two layers:
+ *   - a *config* layer from chain configuration (-staker=<pubkeyhex>:<weight>),
+ *     the bootstrap/genesis stake set; and
+ *   - a *UTXO* layer derived from the chainstate: every unspent staking output
+ *     (see BuildStakeScript) adds its amount (in policy-asset atoms) to its
+ *     staker's weight. Rebuilt from the UTXO set at startup and mirrored
+ *     incrementally on every tip connect/disconnect, so it is reorg-safe and a
+ *     pure function of the active chain. Unbonding is the CSV-gated spend of
+ *     the staking output, enforced by the script itself (the paper's stake
+ *     locktime, principle 11).
+ *  A staker's effective weight is the sum of both layers. */
 class StakeRegistry
 {
 private:
-    std::map<CPubKey, uint64_t> m_weights;
+    mutable Mutex m_mutex;
+    std::map<CPubKey, uint64_t> m_config GUARDED_BY(m_mutex);
+    std::map<CPubKey, uint64_t> m_utxo GUARDED_BY(m_mutex);
 
 public:
     static StakeRegistry& GetInstance()
@@ -72,19 +84,85 @@ public:
         return instance;
     }
 
-    void Clear() { m_weights.clear(); }
-    void SetStake(const CPubKey& pubkey, uint64_t weight) { m_weights[pubkey] = weight; }
-    bool Empty() const { return m_weights.empty(); }
-    size_t Size() const { return m_weights.size(); }
+    //! Clear the configuration layer (chain parameter (re)load).
+    void Clear()
+    {
+        LOCK(m_mutex);
+        m_config.clear();
+    }
+    //! Set a configured staker's weight.
+    void SetStake(const CPubKey& pubkey, uint64_t weight)
+    {
+        LOCK(m_mutex);
+        m_config[pubkey] = weight;
+    }
+    //! Replace the UTXO-derived layer wholesale (startup rebuild).
+    void SetUtxoStake(std::map<CPubKey, uint64_t>&& utxo)
+    {
+        LOCK(m_mutex);
+        m_utxo = std::move(utxo);
+    }
+    //! A staking output entered the UTXO set.
+    void AddUtxoStake(const CPubKey& pubkey, uint64_t amount)
+    {
+        LOCK(m_mutex);
+        m_utxo[pubkey] += amount;
+    }
+    //! A staking output left the UTXO set (spent, or its creation reverted).
+    void SubUtxoStake(const CPubKey& pubkey, uint64_t amount)
+    {
+        LOCK(m_mutex);
+        auto it = m_utxo.find(pubkey);
+        if (it == m_utxo.end() || it->second < amount) {
+            // Should be unreachable: connect/disconnect are exact mirrors.
+            if (it != m_utxo.end()) m_utxo.erase(it);
+            return;
+        }
+        it->second -= amount;
+        if (it->second == 0) m_utxo.erase(it);
+    }
+
+    bool Empty() const
+    {
+        LOCK(m_mutex);
+        return m_config.empty() && m_utxo.empty();
+    }
+    size_t Size() const
+    {
+        LOCK(m_mutex);
+        std::map<CPubKey, uint64_t> merged = m_config;
+        for (const auto& e : m_utxo) merged[e.first] += e.second;
+        return merged.size();
+    }
     uint64_t GetWeight(const CPubKey& pubkey) const
     {
-        auto it = m_weights.find(pubkey);
-        return it == m_weights.end() ? 0 : it->second;
+        LOCK(m_mutex);
+        uint64_t weight = 0;
+        auto it = m_config.find(pubkey);
+        if (it != m_config.end()) weight += it->second;
+        auto it2 = m_utxo.find(pubkey);
+        if (it2 != m_utxo.end()) weight += it2->second;
+        return weight;
     }
-    const std::map<CPubKey, uint64_t>& Weights() const { return m_weights; }
+    //! Effective (merged) weights.
+    std::map<CPubKey, uint64_t> Weights() const
+    {
+        LOCK(m_mutex);
+        std::map<CPubKey, uint64_t> merged = m_config;
+        for (const auto& e : m_utxo) merged[e.first] += e.second;
+        return merged;
+    }
+    //! UTXO-layer weight only (for introspection/tests).
+    uint64_t GetUtxoWeight(const CPubKey& pubkey) const
+    {
+        LOCK(m_mutex);
+        auto it = m_utxo.find(pubkey);
+        return it == m_utxo.end() ? 0 : it->second;
+    }
 
-    /** Parse a "<pubkeyhex>:<weight>" specification and add it to the registry.
-     *  Returns false (with an error string) on malformed input. */
+    /** Parse a "<pubkeyhex>:<weight>" specification and add it to the
+     *  configuration layer. Returns false (with an error string) on
+     *  malformed input. */
     bool AddFromSpec(const std::string& spec, std::string& error);
 };
 
@@ -189,5 +267,43 @@ CScript BuildPosVrfMemberCommitment(const CPubKey& member, const std::vector<uns
 /** Extract all committee-member eligibility commitments from a block's
  *  coinbase (malformed entries are skipped). */
 std::vector<PosVrfMember> ExtractPosVrfMembers(const CBlock& block);
+
+// --- On-chain stake registration (locked staking outputs) ---
+
+class CTxOut;
+class CBlockUndo;
+class CCoinsView;
+
+/** Minimum CSV unbonding delay (in blocks) for an output to count as stake;
+ *  also the default delay for BuildStakeScript. */
+extern uint32_t g_pos_unbonding_period;
+static const uint32_t DEFAULT_POS_UNBONDING_PERIOD = 10;
+
+/** The canonical staking output script:
+ *      <csv_blocks> OP_CHECKSEQUENCEVERIFY OP_DROP <pubkey> OP_CHECKSIG
+ *  A bare (unhashed) script so validators can recognize stake at output
+ *  creation. Spending requires the staker's signature and csv_blocks of
+ *  relative-height maturity (BIP112) — unbonding is the spend itself. */
+CScript BuildStakeScript(const CPubKey& pubkey, uint32_t csv_blocks);
+
+/** Parse a staking script, returning (pubkey, csv_blocks), or nullopt if the
+ *  script is not of the exact canonical form. */
+std::optional<std::pair<CPubKey, uint32_t>> ParseStakeScript(const CScript& script);
+
+/** If the output is a qualifying staking output — canonical script, explicit
+ *  policy-asset amount, CSV >= g_pos_unbonding_period — return its staker key
+ *  and weight (the amount in atoms). */
+std::optional<std::pair<CPubKey, uint64_t>> StakeFromTxOut(const CTxOut& out);
+
+/** Mirror a connected block into the UTXO stake layer: outputs that create
+ *  staking UTXOs add weight; inputs that spend them (from the block's undo
+ *  data) subtract it. Must be called exactly once per tip connect. */
+void PosApplyBlockStake(const CBlock& block, const CBlockUndo& undo);
+
+/** Exact inverse of PosApplyBlockStake, for tip disconnects (reorgs). */
+void PosRevertBlockStake(const CBlock& block, const CBlockUndo& undo);
+
+/** Rebuild the UTXO stake layer by scanning the (flushed) UTXO set. */
+bool RebuildUtxoStake(CCoinsView& view);
 
 #endif // BITCOIN_POS_H

@@ -29,23 +29,23 @@ bool CheckChallenge(const CBlockHeader& block, const CBlockIndex& indexLast, con
         }
         const StakeRegistry& registry = StakeRegistry::GetInstance();
         if (g_pos_vrf) {
-            // VRF sortition (doc 07 §4): the header check is structural only —
-            // sortition proofs live in the coinbase, so leader/member
-            // eligibility and the slot time gate are validated in
-            // ContextualCheckBlock, where the full block is available.
-            if (registry.GetWeight(parts->leader) == 0) return false;
+            // VRF sortition (doc 07 §4): the header check is structural only.
+            // Anything registry-dependent (leader/member registration and
+            // eligibility) is validated in ContextualCheckBlock at connect
+            // time: with on-chain stake registration the registry is correct
+            // only in block order, and headers can arrive far ahead of blocks
+            // during headers-first sync.
             if (g_pos_committee_size > 1) {
                 // Committee certification with private sortition: the
                 // challenge lists the *claimed* members (proven eligible in
                 // ContextualCheckBlock). Structurally: a fixed quorum (a
                 // strict majority of the expected committee size), at least
-                // quorum-many distinct registered members.
+                // quorum-many distinct members.
                 if (parts->committee.empty()) return false;
                 if (parts->quorum != PosQuorum((size_t)g_pos_committee_size)) return false;
                 if ((int)parts->committee.size() < parts->quorum) return false;
                 std::set<CPubKey> seen;
                 for (const CPubKey& member : parts->committee) {
-                    if (registry.GetWeight(member) == 0) return false;
                     if (!seen.insert(member).second) return false; // duplicate
                 }
             } else {

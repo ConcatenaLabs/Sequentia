@@ -12,6 +12,7 @@
 #include <addrman.h>
 #include <banman.h>
 #include <anchor.h>
+#include <pos.h>
 #include <blockfilter.h>
 #include <chain.h>
 #include <chainparams.h>
@@ -2030,6 +2031,22 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                 gArgs.SoftSetArg("-validatepegin", "0");
             }
         }
+    }
+
+    // SEQUENTIA PoS: derive the UTXO stake layer from the chainstate. The
+    // registry is a pure function of the UTXO set (plus the -staker config
+    // layer); after this scan it is mirrored incrementally on every tip
+    // connect/disconnect.
+    if (g_con_pos) {
+        LOCK(cs_main);
+        CChainState& stake_chainstate = chainman.ActiveChainstate();
+        stake_chainstate.ForceFlushStateToDisk();
+        if (!RebuildUtxoStake(stake_chainstate.CoinsDB())) {
+            return InitError(_("Failed to rebuild the stake registry from the UTXO set"));
+        }
+        const StakeRegistry& reg = StakeRegistry::GetInstance();
+        LogPrintf("PoS: stake registry loaded: %u staker(s), total weight %llu\n",
+                  (unsigned)reg.Size(), (unsigned long long)PosTotalWeight(reg));
     }
 
     // SEQUENTIA: Bitcoin anchoring. Verify the connection to the parent chain

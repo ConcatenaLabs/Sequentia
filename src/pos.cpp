@@ -6,7 +6,11 @@
 
 #include <arith_uint256.h>
 #include <chain.h>
+#include <coins.h>
+#include <logging.h>
+#include <policy/policy.h>
 #include <primitives/block.h>
+#include <undo.h>
 #include <vrf.h>
 #include <crypto/sha256.h>
 #include <hash.h>
@@ -15,6 +19,7 @@
 #include <algorithm>
 
 bool g_con_pos = false;
+uint32_t g_pos_unbonding_period = DEFAULT_POS_UNBONDING_PERIOD;
 int64_t g_pos_slot_interval = DEFAULT_POS_SLOT_INTERVAL;
 int g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
 bool g_pos_vrf = false;
@@ -318,4 +323,120 @@ std::vector<PosVrfMember> ExtractPosVrfMembers(const CBlock& block)
         members.push_back(member);
     }
     return members;
+}
+
+// --- On-chain stake registration (locked staking outputs) ---
+
+CScript BuildStakeScript(const CPubKey& pubkey, uint32_t csv_blocks)
+{
+    return CScript() << (int64_t)csv_blocks << OP_CHECKSEQUENCEVERIFY << OP_DROP
+                     << ToByteVector(pubkey) << OP_CHECKSIG;
+}
+
+std::optional<std::pair<CPubKey, uint32_t>> ParseStakeScript(const CScript& script)
+{
+    CScript::const_iterator pc = script.begin();
+    opcodetype opcode;
+    std::vector<unsigned char> data;
+
+    // <csv_blocks>: either an OP_1..OP_16 smallint or a minimal CScriptNum push.
+    if (!script.GetOp(pc, opcode, data)) return std::nullopt;
+    int64_t csv = -1;
+    if (opcode >= OP_1 && opcode <= OP_16) {
+        csv = (int)opcode - (int)(OP_1 - 1);
+    } else if (!data.empty() && data.size() <= 4) {
+        try {
+            csv = CScriptNum(data, /*fRequireMinimal=*/true).getint();
+        } catch (const scriptnum_error&) {
+            return std::nullopt;
+        }
+    } else {
+        return std::nullopt;
+    }
+    // Relative-height locks are 16-bit (BIP68); zero adds no lock.
+    if (csv < 1 || csv > 0xFFFF) return std::nullopt;
+
+    if (!script.GetOp(pc, opcode, data) || opcode != OP_CHECKSEQUENCEVERIFY) return std::nullopt;
+    if (!script.GetOp(pc, opcode, data) || opcode != OP_DROP) return std::nullopt;
+    if (!script.GetOp(pc, opcode, data) || data.empty()) return std::nullopt;
+    CPubKey pubkey(data);
+    if (!pubkey.IsFullyValid()) return std::nullopt;
+    if (!script.GetOp(pc, opcode, data) || opcode != OP_CHECKSIG) return std::nullopt;
+    if (pc != script.end()) return std::nullopt;
+    return std::make_pair(pubkey, (uint32_t)csv);
+}
+
+std::optional<std::pair<CPubKey, uint64_t>> StakeFromTxOut(const CTxOut& out)
+{
+    // Stake must be a transparent amount of the policy asset: confidential
+    // outputs hide the amount, so they cannot carry verifiable weight.
+    if (!out.nValue.IsExplicit() || !out.nAsset.IsExplicit()) return std::nullopt;
+    if (out.nAsset.GetAsset() != ::policyAsset) return std::nullopt;
+    CAmount amount = out.nValue.GetAmount();
+    if (amount <= 0) return std::nullopt;
+    auto parsed = ParseStakeScript(out.scriptPubKey);
+    if (!parsed) return std::nullopt;
+    if (parsed->second < g_pos_unbonding_period) return std::nullopt;
+    return std::make_pair(parsed->first, (uint64_t)amount);
+}
+
+void PosApplyBlockStake(const CBlock& block, const CBlockUndo& undo)
+{
+    StakeRegistry& registry = StakeRegistry::GetInstance();
+    // New staking outputs add weight.
+    for (const CTransactionRef& tx : block.vtx) {
+        for (const CTxOut& out : tx->vout) {
+            if (auto stake = StakeFromTxOut(out)) {
+                registry.AddUtxoStake(stake->first, stake->second);
+                LogPrintf("PoS: staking output adds %llu to %s\n", (unsigned long long)stake->second, HexStr(stake->first));
+            }
+        }
+    }
+    // Spent staking outputs (recorded in the block's undo data) remove weight.
+    for (const CTxUndo& txundo : undo.vtxundo) {
+        for (const Coin& coin : txundo.vprevout) {
+            if (auto stake = StakeFromTxOut(coin.out)) {
+                registry.SubUtxoStake(stake->first, stake->second);
+                LogPrintf("PoS: staking output spend removes %llu from %s\n", (unsigned long long)stake->second, HexStr(stake->first));
+            }
+        }
+    }
+}
+
+void PosRevertBlockStake(const CBlock& block, const CBlockUndo& undo)
+{
+    StakeRegistry& registry = StakeRegistry::GetInstance();
+    // Exact mirror of PosApplyBlockStake.
+    for (const CTransactionRef& tx : block.vtx) {
+        for (const CTxOut& out : tx->vout) {
+            if (auto stake = StakeFromTxOut(out)) {
+                registry.SubUtxoStake(stake->first, stake->second);
+            }
+        }
+    }
+    for (const CTxUndo& txundo : undo.vtxundo) {
+        for (const Coin& coin : txundo.vprevout) {
+            if (auto stake = StakeFromTxOut(coin.out)) {
+                registry.AddUtxoStake(stake->first, stake->second);
+            }
+        }
+    }
+}
+
+bool RebuildUtxoStake(CCoinsView& view)
+{
+    std::map<CPubKey, uint64_t> utxo_stake;
+    std::unique_ptr<CCoinsViewCursor> pcursor(view.Cursor());
+    if (!pcursor) return false;
+    while (pcursor->Valid()) {
+        COutPoint key;
+        Coin coin;
+        if (!pcursor->GetKey(key) || !pcursor->GetValue(coin)) return false;
+        if (auto stake = StakeFromTxOut(coin.out)) {
+            utxo_stake[stake->first] += stake->second;
+        }
+        pcursor->Next();
+    }
+    StakeRegistry::GetInstance().SetUtxoStake(std::move(utxo_stake));
+    return true;
 }

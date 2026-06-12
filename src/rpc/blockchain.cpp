@@ -3330,6 +3330,53 @@ static RPCHelpMan getstakerinfo()
     };
 }
 
+// SEQUENTIA PoS: build the canonical staking-output script for a staker key.
+static RPCHelpMan getstakescript()
+{
+    return RPCHelpMan{"getstakescript",
+                "\nFor Proof-of-Stake chains: returns the canonical staking-output script for a staker public key. "
+                "Sending an explicit policy-asset amount to this (bare) script registers that amount as the key's "
+                "on-chain stake while the output remains unspent. Spending it (unbonding) requires the staker's "
+                "signature and csv_blocks of relative-height maturity, enforced by the script itself.\n",
+                {
+                    {"pubkey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The staker public key (hex)."},
+                    {"csv_blocks", RPCArg::Type::NUM, RPCArg::DefaultHint{"the chain's -posunbonding"}, "Relative-height unbonding delay; must be >= the chain's -posunbonding to count as stake."},
+                },
+                RPCResult{
+                    RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::STR_HEX, "script", "the staking scriptPubKey (hex)"},
+                        {RPCResult::Type::NUM, "csv_blocks", "the unbonding delay encoded in the script"},
+                        {RPCResult::Type::NUM, "min_unbonding", "the chain's minimum unbonding delay for stake to count"},
+                    }},
+                RPCExamples{HelpExampleCli("getstakescript", "\"02...\"")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!g_con_pos) {
+        throw JSONRPCError(RPC_MISC_ERROR, "Proof-of-Stake (con_pos) is not enabled on this chain");
+    }
+    std::vector<unsigned char> pubkey_bytes = ParseHexV(request.params[0], "pubkey");
+    CPubKey pubkey(pubkey_bytes);
+    if (!pubkey.IsFullyValid()) {
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid public key");
+    }
+    uint32_t csv = request.params[1].isNull() ? g_pos_unbonding_period : (uint32_t)request.params[1].get_int();
+    if (csv < 1 || csv > 0xFFFF) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "csv_blocks must be between 1 and 65535");
+    }
+    if (csv < g_pos_unbonding_period) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("csv_blocks below the chain's minimum unbonding delay (%u); the output would not count as stake", g_pos_unbonding_period));
+    }
+    CScript script = BuildStakeScript(pubkey, csv);
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("script", HexStr(script));
+    result.pushKV("csv_blocks", (int64_t)csv);
+    result.pushKV("min_unbonding", (int64_t)g_pos_unbonding_period);
+    return result;
+},
+    };
+}
+
 void RegisterBlockchainRPCCommands(CRPCTable &t)
 {
 // clang-format off
@@ -3371,6 +3418,7 @@ static const CRPCCommand commands[] =
     { "blockchain",         &getanchorstatus,                    },
     { "blockchain",         &getposschedule,                     },
     { "blockchain",         &getstakerinfo,                      },
+    { "blockchain",         &getstakescript,                     },
 
     /* Not shown in help */
     { "hidden",              &invalidateblock,                   },

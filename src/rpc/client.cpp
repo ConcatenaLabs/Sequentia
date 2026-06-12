@@ -207,6 +207,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "setfeeexchangerates", 0, "rates"},
     { "setdynamicfeerates", 0, "rates"},
     { "generateposblock", 1, "committeekeys"},
+    { "getstakescript", 1, "csv_blocks"},
     //
     // ELEMENTS:
     { "calcfastmerkleroot", 0, "leaves" },

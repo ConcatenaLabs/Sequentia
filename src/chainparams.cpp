@@ -945,6 +945,7 @@ protected:
         g_pos_slot_interval = args.GetIntArg("-posslotinterval", DEFAULT_POS_SLOT_INTERVAL);
         g_pos_committee_size = args.GetIntArg("-poscommitteesize", DEFAULT_POS_COMMITTEE_SIZE);
         g_pos_vrf = args.GetBoolArg("-posvrf", false);
+        g_pos_unbonding_period = (uint32_t)args.GetIntArg("-posunbonding", DEFAULT_POS_UNBONDING_PERIOD);
         if (g_pos_vrf && !g_con_pos) {
             throw std::runtime_error("-posvrf requires -con_pos");
         }

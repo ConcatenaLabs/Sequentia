@@ -130,8 +130,19 @@ nodes converge on it — exactly as the federation's round-robin does today.
   two blocks at the same height (the paper handles this with the
   enforce-consensus rule, principle 4). Long-range attacks are not yet
   mitigated (needs the Bitcoin checkpoints + stake locktimes of principle 11).
-- **Stake set is configuration.** Until staking transactions land, the registry
-  is operator-configured and identical across honest nodes by assumption.
+- **Stake is on-chain (with a config bootstrap layer).** The registry sums a
+  `-staker` configuration layer (the genesis stake set) and a UTXO layer:
+  every unspent staking output — the bare script
+  `<csv> OP_CHECKSEQUENCEVERIFY OP_DROP <pubkey> OP_CHECKSIG` holding an
+  explicit policy-asset amount with `csv >= -posunbonding` — adds its amount
+  to its key's weight. The layer is a pure function of the UTXO set
+  (rebuilt from it at startup, mirrored exactly on every tip
+  connect/disconnect, hence reorg-safe), and unbonding is the CSV-gated
+  spend, enforced by the script itself — the stake locktime of
+  principle 11. Confidential outputs cannot carry weight (hidden amounts).
+  With on-chain stake, all registry-dependent validation runs at block
+  connect time (`ContextualCheckBlock`), never at header time, so
+  headers-first sync cannot mis-evaluate eligibility (`-posvrf` mode).
 
 ## 6. Roadmap within PoS
 
@@ -156,6 +167,12 @@ nodes converge on it — exactly as the federation's round-robin does today.
        enforced by consensus; `feature_pos_committee.py`). The paper-scale
        100-member committee needs signature aggregation (BLS/MuSig) instead
        of script multisig — still future work.
-8. [ ] On-chain stake registration / unbonding in chainstate.
+8. [x] On-chain stake registration / unbonding: locked staking outputs
+       (`getstakescript`, weight = explicit policy-asset amount, minimum
+       `-posunbonding` CSV), UTXO-derived registry layer mirrored at
+       ConnectTip/DisconnectTip and rebuilt from the UTXO set at startup;
+       registry-dependent VRF checks moved to connect time
+       (`feature_pos_stake.py`: bootstrap, registration, reorg round-trip,
+       restart rebuild, CSV-gated unbond, eligibility loss).
 9. [ ] Bitcoin checkpoints + stake locktimes vs. long-range attacks (principle 11).
 </content>

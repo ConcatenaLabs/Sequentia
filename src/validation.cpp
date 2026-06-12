@@ -2859,6 +2859,17 @@ bool CChainState::DisconnectTip(BlockValidationState& state, DisconnectedBlockTr
     m_chain.SetTip(pindexDelete->pprev);
 
     UpdateTip(pindexDelete->pprev);
+
+    // SEQUENTIA PoS: exact inverse of the ConnectTip stake mirroring.
+    if (g_con_pos && pindexDelete->nHeight > 0) {
+        CBlockUndo block_undo;
+        if (UndoReadFromDisk(block_undo, pindexDelete)) {
+            PosRevertBlockStake(block, block_undo);
+        } else {
+            LogPrintf("ERROR: %s: failed to read undo data for stake tracking at %s\n", __func__, pindexDelete->GetBlockHash().ToString());
+        }
+    }
+
     // Let wallets know transactions went from 1-confirmed to
     // 0-confirmed or conflicted:
     GetMainSignals().BlockDisconnected(pblock, pindexDelete);
@@ -2987,6 +2998,19 @@ bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew
     // Update m_chain & related variables.
     m_chain.SetTip(pindexNew);
     UpdateTip(pindexNew);
+
+    // SEQUENTIA PoS: mirror this block's staking-output creations/spends into
+    // the UTXO stake layer, exactly once per tip transition (DisconnectTip
+    // performs the exact inverse, so the registry is reorg-safe and always a
+    // function of the active chain).
+    if (g_con_pos && pindexNew->nHeight > 0) {
+        CBlockUndo block_undo;
+        if (UndoReadFromDisk(block_undo, pindexNew)) {
+            PosApplyBlockStake(blockConnecting, block_undo);
+        } else {
+            LogPrintf("ERROR: %s: failed to read undo data for stake tracking at %s\n", __func__, pindexNew->GetBlockHash().ToString());
+        }
+    }
 
     int64_t nTime6 = GetTimeMicros(); nTimePostConnect += nTime6 - nTime5; nTimeTotal += nTime6 - nTime1;
     LogPrint(BCLog::BENCH, "  - Connect postprocess: %.2fms [%.2fs (%.2fms/blk)]\n", (nTime6 - nTime5) * MILLI, nTimePostConnect * MICRO, nTimePostConnect * MILLI / nBlocksTotal);
@@ -3946,6 +3970,12 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
         const StakeRegistry& registry = StakeRegistry::GetInstance();
         const uint64_t total_weight = PosTotalWeight(registry);
         uint64_t weight = registry.GetWeight(parts->leader);
+        // With on-chain stake the registry is only correct at connect time
+        // (block order), so the leader's registration is enforced here rather
+        // than in the header-time CheckChallenge.
+        if (weight == 0) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-leader-not-staker", "block leader has no registered stake");
+        }
         uint64_t slot = PosVrfSlot(beta, weight, total_weight);
         if ((int64_t)block.GetBlockTime() < (int64_t)pindexPrev->nTime + (int64_t)slot * g_pos_slot_interval) {
             return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-early", "block produced before its VRF sortition slot opened");
