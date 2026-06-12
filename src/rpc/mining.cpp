@@ -17,6 +17,7 @@
 #include <key_io.h>
 #include <net.h>
 #include <pos.h>
+#include <vrf.h>
 #include <node/context.h>
 #include <node/miner.h>
 #include <policy/fees.h>
@@ -1524,6 +1525,83 @@ static RPCHelpMan combineblocksigs()
 }
 
 // SEQUENTIA PoS: build, sign and submit a block as an elected stake leader.
+// SEQUENTIA: VRF primitive RPCs (cryptographic sortition building block).
+static RPCHelpMan vrfprove()
+{
+    return RPCHelpMan{"vrfprove",
+                "\nCompute a verifiable random function (VRF) proof for an input under a private key. "
+                "The proof can be verified with vrfverify; its output (beta) is a unique pseudorandom value "
+                "that only the key holder could produce. Building block for Proof-of-Stake sortition "
+                "(see doc/sequentia/07-vrf.md).\n",
+                {
+                    {"privkey", RPCArg::Type::STR, RPCArg::Optional::NO, "WIF private key."},
+                    {"input", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Hex-encoded input (alpha)."},
+                },
+                RPCResult{
+                    RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::STR_HEX, "pubkey", "the public key for the given private key"},
+                        {RPCResult::Type::STR_HEX, "proof", "the VRF proof (pi)"},
+                        {RPCResult::Type::STR_HEX, "output", "the 32-byte VRF output (beta)"},
+                    }},
+                RPCExamples{HelpExampleCli("vrfprove", "\"cV...\" \"deadbeef\"")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    CKey key = DecodeSecret(request.params[0].get_str());
+    if (!key.IsValid()) {
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid private key");
+    }
+    std::vector<unsigned char> alpha = ParseHexV(request.params[1], "input");
+    auto proof = VrfProve(key, alpha);
+    if (!proof) {
+        throw JSONRPCError(RPC_MISC_ERROR, "VRF proof generation failed");
+    }
+    uint256 output;
+    if (!VrfVerify(key.GetPubKey(), alpha, *proof, output)) {
+        throw JSONRPCError(RPC_MISC_ERROR, "Internal error: produced proof did not verify");
+    }
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("pubkey", HexStr(key.GetPubKey()));
+    result.pushKV("proof", HexStr(*proof));
+    result.pushKV("output", output.GetHex());
+    return result;
+},
+    };
+}
+
+static RPCHelpMan vrfverify()
+{
+    return RPCHelpMan{"vrfverify",
+                "\nVerify a VRF proof for an input under a public key. Returns whether the proof is valid and, "
+                "if so, its output (beta). See doc/sequentia/07-vrf.md.\n",
+                {
+                    {"pubkey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Hex-encoded public key."},
+                    {"input", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Hex-encoded input (alpha)."},
+                    {"proof", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Hex-encoded VRF proof (pi)."},
+                },
+                RPCResult{
+                    RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::BOOL, "valid", "whether the proof is valid"},
+                        {RPCResult::Type::STR_HEX, "output", /*optional=*/true, "the 32-byte VRF output (beta), if valid"},
+                    }},
+                RPCExamples{HelpExampleCli("vrfverify", "\"02...\" \"deadbeef\" \"<proofhex>\"")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    std::vector<unsigned char> pubkey_bytes = ParseHexV(request.params[0], "pubkey");
+    CPubKey pubkey(pubkey_bytes);
+    std::vector<unsigned char> alpha = ParseHexV(request.params[1], "input");
+    std::vector<unsigned char> proof = ParseHexV(request.params[2], "proof");
+    uint256 output;
+    bool ok = pubkey.IsFullyValid() && VrfVerify(pubkey, alpha, proof, output);
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("valid", ok);
+    if (ok) result.pushKV("output", output.GetHex());
+    return result;
+},
+    };
+}
+
 static RPCHelpMan generateposblock()
 {
     return RPCHelpMan{"generateposblock",
@@ -1964,6 +2042,8 @@ static const CRPCCommand commands[] =
     { "mining",             &getblocktemplate,         },
     { "generating",         &combineblocksigs,         },
     { "generating",         &generateposblock,         },
+    { "util",               &vrfprove,                 },
+    { "util",               &vrfverify,                },
     { "mining",             &submitheader,             },
     { "generating",         &getnewblockhex,           },
     { "generating",         &getcompactsketch,         },

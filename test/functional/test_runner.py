@@ -177,6 +177,7 @@ BASE_SCRIPTS = [
     'feature_anchor_swap_consistency.py',
     'feature_proof_of_stake.py',
     'feature_pos_committee.py',
+    'feature_vrf.py',
     'rpc_exchangerates.py',
     # -------------------
     'wallet_keypool_topup.py --legacy-wallet',
