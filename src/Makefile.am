@@ -213,6 +213,7 @@ BITCOIN_CORE_H = \
   policy/settings.h \
   policy/value.h \
   pos.h \
+  musig.h \
   vrf.h \
   pow.h \
   primitives/pak.h \
@@ -609,6 +610,7 @@ libbitcoin_common_a_SOURCES = \
   chainparams.cpp \
   coins.cpp \
   exchangerates.cpp \
+  musig.cpp \
   pos.cpp \
   vrf.cpp \
   common/bloom.cpp \

@@ -24,13 +24,13 @@ Blockstream's Liquid. All four are implemented and tested as a proof of concept:
    Bitcoin reorganizes away the referenced block, giving immediate finality
    otherwise and friction-free cross-chain atomic swaps. — see
    [`doc/sequentia/03-bitcoin-anchoring.md`](doc/sequentia/03-bitcoin-anchoring.md).
-3. **Proof-of-Stake consensus.** A strong-federation PoC plus, on the
-   `claude/sequentia-proof-of-stake-w6xady` branch, the full theoretical-paper
-   design: stake-weighted **private VRF sortition**, **committee
+3. **Proof-of-Stake consensus.** The theoretical paper's design, implemented
+   in this repository: stake-weighted **private VRF sortition**, **committee
    certification** (sortitioned, majority quorum — immediate finality),
    **on-chain stake** with CSV-enforced unbonding, and **Bitcoin checkpoints**
-   against long-range attacks. — see
-   [`doc/sequentia/06-proof-of-stake.md`](doc/sequentia/06-proof-of-stake.md)
+   against long-range attacks. Enabled per chain with `-con_pos` (the
+   bundled Sequentia test chain currently runs the federated PoC signing). —
+   see [`doc/sequentia/06-proof-of-stake.md`](doc/sequentia/06-proof-of-stake.md)
    and [`07-vrf.md`](doc/sequentia/07-vrf.md).
 4. **Bitcoin-identical addresses, opt-in confidential transactions.** The
    default address format is Bitcoin's, so a wallet can present one receiving
@@ -68,8 +68,9 @@ Sequentia-specific functional tests live in `test/functional/feature_*` (see
 `feature_dynamic_fee_rates`, `feature_bitcoin_anchoring`,
 `feature_anchor_swap_consistency`, `feature_ct_opt_in`, and the `feature_pos_*`
 / `feature_vrf` suites) and unit tests in `src/test/pos_tests.cpp` and
-`src/test/vrf_tests.cpp`. Build with `--enable-any-asset-fees` so the fee-unit
-strings the wallet tests expect ("rfa/vB") match.
+`src/test/vrf_tests.cpp` / `src/test/musig_tests.cpp`. Build with
+`--enable-any-asset-fees` so the fee-unit strings the wallet tests expect
+("rfa/vB") match.
 
 ## Installing Prerequisistes
 
@@ -115,29 +116,44 @@ make -j$(nproc)
 ```
 
 ## Modes
-Elements supports a few different pre-set chains for syncing.
-Note though some are intended for QA and debugging only:
 
-* Liquid mode: `elementsd -chain=liquidv1` (syncs with Liquid network)
-* Bitcoin mainnet mode: `elementsd -chain=main` (not intended to be run for commerce)
-* Bitcoin testnet mode: `elementsd -chain=testnet3`
-* Bitcoin regtest mode: `elementsd -chain=regtest`
-* Elements custom chains: Any other `-chain=` argument. It has regtest-like default parameters that can be over-ridden by the user by a rich set of start-up options.
+The daemon supports several pre-set chains (note: the binary's default chain is
+still `liquidv1`, inherited from Elements — pass `-chain=` explicitly):
 
-## Confidential Assets
-The latest feature in the Elements blockchain platform is Confidential Assets,
-the ability to issue multiple assets on a blockchain where asset identifiers
-and amounts are blinded yet auditable through the use of applied cryptography.
+* **Sequentia test network**: `elementsd -chain=test` — the Sequentia chain:
+  Bitcoin-anchored (requires a Bitcoin node via the `-mainchainrpc*` options),
+  any-asset fees enabled, Bitcoin-testnet-identical addresses with opt-in
+  confidential transactions, federated PoC block signing.
+* **Custom chains**: any other `-chain=` argument; regtest-like defaults
+  overridable by a rich set of start-up options. All Sequentia features are
+  available here (`-con_any_asset_fees`, `-con_bitcoin_anchor`, `-con_pos`,
+  `-posvrf`, `-con_default_blinded_addresses`, …) — this is what the
+  functional tests use.
+* Bitcoin modes (`-chain=main` / `-chain=regtest`), kept for parent-chain
+  interoperability testing, and Liquid modes (`-chain=liquidv1` etc.),
+  inherited from Elements.
 
- * [Announcement of Confidential Assets](https://blockstream.com/2017/04/03/blockstream-releases-elements-confidential-assets.html)
- * [Confidential Assets Whitepaper](https://blockstream.com/bitcoin17-final41.pdf) to be presented [April 7th at Financial Cryptography 2017](http://fc17.ifca.ai/bitcoin/schedule.html) in Malta
- * [Confidential Assets Tutorial](contrib/assets_tutorial/assets_tutorial.py)
- * [Confidential Assets Demo](https://github.com/ElementsProject/confidential-assets-demo)
- * [Elements Code Tutorial](https://elementsproject.org/elements-code-tutorial/overview) covering blockchain configuration and how to use the main features.
+## Confidential Assets and Transactions
 
-## Features of the Elements blockchain platform
+Sequentia inherits Elements' asset issuance and Confidential Transactions
+machinery, with one deliberate difference: **confidential transactions are
+opt-in, not the default** (see
+[`doc/sequentia/08-addresses-and-ct.md`](doc/sequentia/08-addresses-and-ct.md)).
+Wallets hand out plain Bitcoin-format addresses by default — amounts and assets
+are public, exactly like Bitcoin — and users who want confidentiality request a
+confidential address explicitly (`getnewaddress "" "blech32"` or
+`-blindedaddresses=1`). Note that confidential outputs cannot carry
+proof-of-stake weight (their amounts are hidden).
 
-Compared to Bitcoin itself, Elements adds the following features:
+Background on the inherited technology:
+
+ * [Confidential Assets Whitepaper](https://blockstream.com/bitcoin17-final41.pdf)
+ * [Elements Code Tutorial](https://elementsproject.org/elements-code-tutorial/overview)
+
+## Inherited from Elements
+
+Sequentia is built on the Elements platform; compared to Bitcoin itself,
+Elements contributes the following (all retained here):
  * [Confidential Assets][asset-issuance]
  * [Confidential Transactions][confidential-transactions]
  * [Federated Two-Way Peg][federated-peg]

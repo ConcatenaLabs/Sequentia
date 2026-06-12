@@ -173,8 +173,30 @@ Either way the **consensus rule is unchanged in spirit** — leader VRF proof +
 a quorum of sortition-eligibility proofs in the coinbase + one aggregate
 signature over the block — so `ContextualCheckBlock`'s membership checks
 (`bad-posvrf-member-*`) carry over verbatim; only the signature *encoding* and
-its verification opcode change. The committee-membership threshold math
+its verification path change. The committee-membership threshold math
 (`PosVrfIsCommitteeMember`, `PosVrfSlot`) and the `SEQCMT` eligibility
-commitments are already aggregation-ready. Recommended next step: route (2)
-(MuSig2 + Taproot) to avoid a new curve dependency, with the committee size cap
-raised from 16 to the paper's 100 once the aggregate verification path lands.
+commitments are already aggregation-ready.
+
+**The MuSig2 primitive is implemented** (`src/musig.{h,cpp}`, route (2) — no
+new curve): the BIP327 module is enabled in the vendored secp256k1, and the
+primitive aggregates a signer set into one 32-byte x-only key
+(`MuSigAggregatePubkey`, order-independent — the aggregate depends only on the
+*set*), produces a single 64-byte BIP340 signature from all signers
+(`MuSigSign`, full two-round protocol run locally since the producer holds the
+keys), and verifies it (`MuSigVerify`). A `q`-of-`m` quorum is realized by
+aggregating exactly the `q` signing members, so the block would commit to the
+`q` member list (the `SEQCMT` eligibility proofs already name them), carry one
+64-byte signature regardless of `q`, and the verifier re-aggregates the named
+members and Schnorr-verifies. Unit-tested in `src/test/musig_tests.cpp`
+(aggregate/sign/verify round-trip, order-independence, tamper/wrong-set
+rejection, the quorum-subset property, and the n-of-n boundary).
+
+**Remaining for full integration** (the consensus wiring, deferred): the block
+signature today is verified by the script interpreter via the challenge script
+(`CheckProof` → `GenericVerifyScript`), which uses ECDSA `OP_CHECKMULTISIG`.
+Routing a single aggregate BIP340 signature through block validation needs a
+non-script verification path for PoS-VRF-committee blocks (verify the 64-byte
+MuSig signature directly against the aggregate of the named members) plus the
+producer-side two-round signing in `generateposblock`. This is a contained,
+well-specified change — the primitive it depends on is done and tested — and is
+the recommended next step to raise the committee cap from 16 to the paper's 100.

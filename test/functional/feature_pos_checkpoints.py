@@ -158,6 +158,8 @@ class PosCheckpointsTest(BitcoinTestFramework):
         # branch because it forks below the finalized block.
         self.connect_nodes(1, 2)
         time.sleep(3)  # give headers/blocks time to (fail to) propagate
+        # The honest node rejects the attacker's longer branch (forks below
+        # its finalized block) and keeps its own chain...
         assert_equal(honest.getbestblockhash(), honest_tip)
         assert_equal(honest.getblockcount(), 5)
         # The finality point is intact

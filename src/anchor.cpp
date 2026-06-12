@@ -31,6 +31,8 @@ int g_pos_finalized_height GUARDED_BY(g_anchor_mutex) = -1;
 uint256 g_pos_finalized_hash GUARDED_BY(g_anchor_mutex);
 //! Last parent-chain block already scanned for checkpoints.
 uint256 g_last_checkpoint_scan_tip GUARDED_BY(g_anchor_mutex);
+//! Last known parent-chain tip height (for finality updates on quiet ticks).
+int g_last_btc_tip_height GUARDED_BY(g_anchor_mutex) = -1;
 //! Buried, parent-canonical checkpoints whose block is NOT on our active
 //! chain even though our chain has reached the claimed height — the signature
 //! of being on the losing side of a long-range fork (or of a bogus
@@ -104,6 +106,8 @@ bool GetMainchainBlockCount(int& count)
 
 //! Defined below: walk newly-arrived parent blocks for checkpoints.
 void ScanNewMainchainBlocks(ChainstateManager& chainman, const uint256& new_tip);
+//! Defined below: recompute the checkpoint finality point and conflicts.
+void UpdatePosFinality(ChainstateManager& chainman, int btc_tip_height);
 
 } // namespace
 
@@ -181,20 +185,35 @@ void AnchorWatchTask(ChainstateManager& chainman)
 
     uint256 best;
     if (!GetMainchainBestBlockHash(best)) return;
+    bool tip_changed;
     {
         LOCK(g_anchor_mutex);
-        if (best == g_last_mainchain_tip) return; // no parent chain change
-        g_last_mainchain_tip = best;
-        // The parent chain moved: previously confirmed anchors may have been
-        // reorganized away, so drop the cache and re-check.
-        g_anchor_ok_cache.clear();
+        tip_changed = best != g_last_mainchain_tip;
+        if (tip_changed) {
+            g_last_mainchain_tip = best;
+            // The parent chain moved: previously confirmed anchors may have
+            // been reorganized away, so drop the cache and re-check.
+            g_anchor_ok_cache.clear();
+        }
     }
 
-    // PoS checkpoints (paper §11): scan the new parent blocks for committed
-    // Sequentia checkpoints and update the finality point.
+    // PoS checkpoints (paper §11): scan new parent blocks for committed
+    // Sequentia checkpoints when the parent moves, and re-evaluate
+    // finality/conflicts on *every* tick — our own chain may have changed
+    // (e.g. new blocks, a peer-fed fork) even when the parent has not.
     if (g_con_pos) {
-        ScanNewMainchainBlocks(chainman, best);
+        if (tip_changed) {
+            ScanNewMainchainBlocks(chainman, best);
+        } else {
+            int last_height;
+            {
+                LOCK(g_anchor_mutex);
+                last_height = g_last_btc_tip_height;
+            }
+            if (last_height >= 0) UpdatePosFinality(chainman, last_height);
+        }
     }
+    if (!tip_changed) return;
 
     // 1) Reconsider blocks we invalidated earlier whose anchors are canonical
     //    again (the parent chain reorganized back).
@@ -442,6 +461,7 @@ void UpdatePosFinality(ChainstateManager& chainman, int btc_tip_height)
         }
     }
     bool conflicts_changed;
+    bool have_own_checkpoint;
     {
         LOCK(g_anchor_mutex);
         conflicts_changed = conflicts.size() != g_pos_checkpoint_conflicts.size();
@@ -452,13 +472,23 @@ void UpdatePosFinality(ChainstateManager& chainman, int btc_tip_height)
             LogPrintf("PoS: finalized block %s (height %d) via parent-chain checkpoint\n",
                       best_hash.ToString(), best_height);
         }
+        have_own_checkpoint = best_height >= 0 || g_pos_finalized_height >= 0;
     }
+    (void)have_own_checkpoint;
     if (conflicts_changed && !conflicts.empty()) {
         for (const PosCheckpoint& c : conflicts) {
             LogPrintf("WARNING: PoS: parent-chain checkpoint commits block %s at height %u which is NOT on this node's active chain — this node may be on the losing side of a long-range fork. Investigate before trusting recent history.\n",
                       c.seq_hash.ToString(), c.seq_height);
         }
     }
+    // Automatic fresh-sync chain *selection* (reorganizing a longer
+    // non-checkpointed active chain onto a checkpointed branch) is deferred:
+    // a node on a longer fork generally has not downloaded the shorter
+    // checkpointed branch's block bodies, so selection must first drive their
+    // fetch+validation — a block-download change beyond this watcher. The
+    // conflict alarm above is the safe, implemented behavior: the node never
+    // silently follows a checkpoint it cannot validate, and surfaces the
+    // ambiguity for operator action. See doc/sequentia/06 §11.
 }
 
 //! Walk newly-arrived parent blocks (back to the last scanned tip, bounded by
@@ -483,6 +513,7 @@ void ScanNewMainchainBlocks(ChainstateManager& chainman, const uint256& new_tip)
     {
         LOCK(g_anchor_mutex);
         g_last_checkpoint_scan_tip = new_tip;
+        if (tip_height >= 0) g_last_btc_tip_height = tip_height;
     }
     if (tip_height >= 0) {
         UpdatePosFinality(chainman, tip_height);
