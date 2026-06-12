@@ -15,6 +15,7 @@
 #include <secp256k1_schnorrsig.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <map>
 
@@ -98,9 +99,34 @@ bool AggregateNonces(const std::vector<std::vector<unsigned char>>& pubnonces,
 struct PendingSession {
     secp256k1_musig_secnonce secnonce;
     uint256 fingerprint; //!< binds (member set, message); see SessionFingerprint
+    int64_t created;     //!< steady-clock seconds, for TTL eviction
 };
 Mutex g_musig_sessions_mutex;
 std::map<std::string, PendingSession> g_musig_sessions GUARDED_BY(g_musig_sessions_mutex);
+
+//! Bounds so an unfinished round 1 (round 2 never called) cannot grow node
+//! memory without limit: pending sessions expire, and their number is capped.
+const int64_t MUSIG_SESSION_TTL_SECONDS = 600;   // abandoned after 10 minutes
+const size_t MUSIG_SESSION_MAX = 10000;          // hard ceiling on live sessions
+
+int64_t SteadySeconds()
+{
+    return std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+//! Drop sessions older than the TTL. Caller holds g_musig_sessions_mutex.
+void PurgeExpiredSessions() EXCLUSIVE_LOCKS_REQUIRED(g_musig_sessions_mutex)
+{
+    const int64_t now = SteadySeconds();
+    for (auto it = g_musig_sessions.begin(); it != g_musig_sessions.end();) {
+        if (now - it->second.created > MUSIG_SESSION_TTL_SECONDS) {
+            it = g_musig_sessions.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
 
 } // namespace
 
@@ -213,11 +239,17 @@ std::optional<std::vector<unsigned char>> MuSigSessionNonce(
         error = "nonce generation failed"; return std::nullopt;
     }
     sess.fingerprint = SessionFingerprint(pubkeys, msg32);
+    sess.created = SteadySeconds();
 
     {
         LOCK(g_musig_sessions_mutex);
+        PurgeExpiredSessions();
         if (g_musig_sessions.count(session_id)) {
             error = "a signing session with this id already exists (refusing to reuse a secret nonce)";
+            return std::nullopt;
+        }
+        if (g_musig_sessions.size() >= MUSIG_SESSION_MAX) {
+            error = "too many pending signing sessions; retry later";
             return std::nullopt;
         }
         g_musig_sessions.emplace(session_id, sess);
