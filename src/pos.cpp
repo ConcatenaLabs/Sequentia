@@ -14,6 +14,7 @@
 
 bool g_con_pos = false;
 int64_t g_pos_slot_interval = DEFAULT_POS_SLOT_INTERVAL;
+int g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
 
 bool StakeRegistry::AddFromSpec(const std::string& spec, std::string& error)
 {
@@ -111,9 +112,40 @@ std::optional<size_t> PosRank(const StakeRegistry& registry, const uint256& seed
     return std::nullopt;
 }
 
+std::vector<CPubKey> PosCommittee(const StakeRegistry& registry, const uint256& seed)
+{
+    std::vector<CPubKey> schedule = PosSchedule(registry, seed);
+    size_t m = std::min<size_t>(schedule.size(), (size_t)std::max(g_pos_committee_size, 0));
+    schedule.resize(m);
+    return schedule;
+}
+
+int PosQuorum(size_t committee_size)
+{
+    if (committee_size == 0) return 0;
+    return (int)(committee_size / 2) + 1;
+}
+
 CScript BuildPosChallenge(const CPubKey& pubkey)
 {
     return CScript() << ToByteVector(pubkey) << OP_CHECKSIG;
+}
+
+CScript BuildPosBlockChallenge(const CPubKey& leader, const std::vector<CPubKey>& committee)
+{
+    // A committee of one adds nothing over the leader's own signature, so the
+    // committee form is only used from size two upward.
+    if (committee.size() <= 1) {
+        return BuildPosChallenge(leader);
+    }
+    CScript script;
+    script << ToByteVector(leader) << OP_CHECKSIGVERIFY;
+    script << (int64_t)PosQuorum(committee.size());
+    for (const CPubKey& member : committee) {
+        script << ToByteVector(member);
+    }
+    script << (int64_t)committee.size() << OP_CHECKMULTISIG;
+    return script;
 }
 
 std::optional<CPubKey> PosChallengeToPubKey(const CScript& challenge)
@@ -130,6 +162,62 @@ std::optional<CPubKey> PosChallengeToPubKey(const CScript& challenge)
     if (opcode != OP_CHECKSIG) return std::nullopt;
     if (pc != challenge.end()) return std::nullopt; // trailing data
     return pubkey;
+}
+
+namespace {
+//! Decode an OP_1..OP_16 smallint, or -1 for anything else.
+int DecodeSmallInt(opcodetype opcode)
+{
+    if (opcode >= OP_1 && opcode <= OP_16) {
+        return (int)opcode - (int)(OP_1 - 1);
+    }
+    return -1;
+}
+} // namespace
+
+std::optional<PosChallengeParts> ParsePosBlockChallenge(const CScript& challenge)
+{
+    // Leader-only form.
+    if (auto leader = PosChallengeToPubKey(challenge)) {
+        PosChallengeParts parts;
+        parts.leader = *leader;
+        return parts;
+    }
+
+    // Committee form:
+    // <leader> OP_CHECKSIGVERIFY <q> <c_1> ... <c_m> <m> OP_CHECKMULTISIG
+    PosChallengeParts parts;
+    CScript::const_iterator pc = challenge.begin();
+    opcodetype opcode;
+    std::vector<unsigned char> data;
+
+    if (!challenge.GetOp(pc, opcode, data) || data.empty()) return std::nullopt;
+    parts.leader = CPubKey(data);
+    if (!parts.leader.IsFullyValid()) return std::nullopt;
+    if (!challenge.GetOp(pc, opcode, data) || opcode != OP_CHECKSIGVERIFY) return std::nullopt;
+
+    if (!challenge.GetOp(pc, opcode, data)) return std::nullopt;
+    parts.quorum = DecodeSmallInt(opcode);
+    if (parts.quorum < 1) return std::nullopt;
+
+    // Pubkeys until the trailing <m> smallint.
+    while (true) {
+        if (!challenge.GetOp(pc, opcode, data)) return std::nullopt;
+        if (data.empty()) {
+            // Should be the committee size smallint.
+            int m = DecodeSmallInt(opcode);
+            if (m < 1 || (size_t)m != parts.committee.size()) return std::nullopt;
+            break;
+        }
+        CPubKey member(data);
+        if (!member.IsFullyValid()) return std::nullopt;
+        if (parts.committee.size() >= (size_t)MAX_POS_COMMITTEE_SIZE) return std::nullopt;
+        parts.committee.push_back(member);
+    }
+    if (parts.quorum > (int)parts.committee.size()) return std::nullopt;
+    if (!challenge.GetOp(pc, opcode, data) || opcode != OP_CHECKMULTISIG) return std::nullopt;
+    if (pc != challenge.end()) return std::nullopt; // trailing data
+    return parts;
 }
 
 uint256 PosSeedForChild(const CBlockIndex* pindexPrev)

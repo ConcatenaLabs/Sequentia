@@ -1531,7 +1531,12 @@ static RPCHelpMan generateposblock()
                 "sign it, and submit it. The staker must be registered (see -staker) and must be eligible "
                 "for the current slot (its rank's slot must have opened). See doc/sequentia/06-proof-of-stake.md.\n",
                 {
-                    {"stakerkey", RPCArg::Type::STR, RPCArg::Optional::NO, "WIF private key of a registered staker."},
+                    {"stakerkey", RPCArg::Type::STR, RPCArg::Optional::NO, "WIF private key of a registered staker (the proposing leader)."},
+                    {"committeekeys", RPCArg::Type::ARR, RPCArg::Optional::OMITTED, "WIF private keys of committee members for countersigning. Required when committee certification (-poscommitteesize > 1) is enabled: at least a quorum of the slot's committee must be available.",
+                        {
+                            {"", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "WIF private key"},
+                        },
+                    },
                 },
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
@@ -1539,6 +1544,7 @@ static RPCHelpMan generateposblock()
                         {RPCResult::Type::STR_HEX, "hash", "hash of the submitted block"},
                         {RPCResult::Type::NUM, "height", "height of the submitted block"},
                         {RPCResult::Type::NUM, "rank", "the proposer's elected rank for this slot (0 = primary leader)"},
+                        {RPCResult::Type::NUM, "countersignatures", "number of committee countersignatures included"},
                     }},
                 RPCExamples{
                     HelpExampleCli("generateposblock", "\"cV...\"")
@@ -1586,18 +1592,63 @@ static RPCHelpMan generateposblock()
         IncrementExtraNonce(&block, chainman.ActiveChain().Tip(), extra_nonce);
     }
 
-    // Sign the block: produce a signature satisfying "<pubkey> OP_CHECKSIG".
+    // Collect all available signing keys (leader + any committee keys).
     FillableSigningProvider keystore;
     keystore.AddKey(key);
-    SignatureData sig_data;
-    SimpleSignatureCreator signature_creator(block.GetHash(), 0);
-    if (!ProduceSignature(keystore, signature_creator, block.proof.challenge, sig_data, SCRIPT_NO_SIGHASH_BYTE)) {
-        throw JSONRPCError(RPC_MISC_ERROR, "Failed to sign block as staker");
+    if (!request.params[1].isNull()) {
+        for (const UniValue& wif : request.params[1].get_array().getValues()) {
+            CKey ckey = DecodeSecret(wif.get_str());
+            if (!ckey.IsValid()) {
+                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid committee private key");
+            }
+            keystore.AddKey(ckey);
+        }
     }
-    block.proof.solution = sig_data.scriptSig;
+
+    // Sign the block. The challenge is either "<leader> CHECKSIG" (standard
+    // P2PK, solvable generically) or the committee-certification form
+    // "<leader> CHECKSIGVERIFY <q-of-m CHECKMULTISIG>", whose scriptSig we
+    // assemble by hand: OP_0 <committee sigs in committee order> <leader sig>.
+    SimpleSignatureCreator signature_creator(block.GetHash(), 0);
+    std::optional<PosChallengeParts> parts = ParsePosBlockChallenge(block.proof.challenge);
+    if (!parts) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR, "Generated block challenge is not a recognized PoS challenge");
+    }
+    int countersigs = 0;
+    if (parts->committee.empty()) {
+        SignatureData sig_data;
+        if (!ProduceSignature(keystore, signature_creator, block.proof.challenge, sig_data, SCRIPT_NO_SIGHASH_BYTE)) {
+            throw JSONRPCError(RPC_MISC_ERROR, "Failed to sign block as staker");
+        }
+        block.proof.solution = sig_data.scriptSig;
+    } else {
+        std::vector<unsigned char> leader_sig;
+        if (!signature_creator.CreateSig(keystore, leader_sig, parts->leader.GetID(), block.proof.challenge, SigVersion::BASE, 0)) {
+            throw JSONRPCError(RPC_MISC_ERROR, "Failed to sign block as leader");
+        }
+        std::vector<std::vector<unsigned char>> committee_sigs;
+        for (const CPubKey& member : parts->committee) {
+            if ((int)committee_sigs.size() >= parts->quorum) break;
+            std::vector<unsigned char> sig;
+            if (signature_creator.CreateSig(keystore, sig, member.GetID(), block.proof.challenge, SigVersion::BASE, 0)) {
+                committee_sigs.push_back(sig);
+            }
+        }
+        if ((int)committee_sigs.size() < parts->quorum) {
+            throw JSONRPCError(RPC_MISC_ERROR, strprintf(
+                "Insufficient committee keys: %d countersignature(s) available, quorum is %d of %d (pass more committeekeys)",
+                (int)committee_sigs.size(), parts->quorum, (int)parts->committee.size()));
+        }
+        CScript solution;
+        solution << OP_0; // CHECKMULTISIG dummy
+        for (const auto& sig : committee_sigs) solution << sig;
+        solution << leader_sig;
+        block.proof.solution = solution;
+        countersigs = (int)committee_sigs.size();
+    }
 
     if (!CheckProof(block, chainparams.GetConsensus())) {
-        throw JSONRPCError(RPC_MISC_ERROR, "Block signature did not satisfy the leader challenge");
+        throw JSONRPCError(RPC_MISC_ERROR, "Block signature(s) did not satisfy the leader/committee challenge");
     }
 
     std::shared_ptr<const CBlock> shared_pblock = std::make_shared<const CBlock>(block);
@@ -1609,6 +1660,7 @@ static RPCHelpMan generateposblock()
     result.pushKV("hash", block.GetHash().GetHex());
     result.pushKV("height", tip->nHeight + 1);
     result.pushKV("rank", (int)*rank);
+    result.pushKV("countersignatures", countersigs);
     return result;
 },
     };

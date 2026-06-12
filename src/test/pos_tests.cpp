@@ -98,6 +98,65 @@ BOOST_AUTO_TEST_CASE(pos_weighting_is_proportional)
     BOOST_CHECK(big_wins < trials * 0.98);
 }
 
+// The committee-certification challenge round-trips, the committee is the
+// schedule prefix, and the quorum is a strict majority.
+BOOST_AUTO_TEST_CASE(pos_committee_challenge_roundtrip)
+{
+    BOOST_CHECK_EQUAL(PosQuorum(0), 0);
+    BOOST_CHECK_EQUAL(PosQuorum(1), 1);
+    BOOST_CHECK_EQUAL(PosQuorum(2), 2);
+    BOOST_CHECK_EQUAL(PosQuorum(3), 2);
+    BOOST_CHECK_EQUAL(PosQuorum(5), 3);
+    BOOST_CHECK_EQUAL(PosQuorum(16), 9);
+
+    CPubKey leader = MakeKey();
+    std::vector<CPubKey> committee;
+    for (int i = 0; i < 5; ++i) committee.push_back(MakeKey());
+
+    CScript challenge = BuildPosBlockChallenge(leader, committee);
+    auto parts = ParsePosBlockChallenge(challenge);
+    BOOST_REQUIRE(parts.has_value());
+    BOOST_CHECK(parts->leader == leader);
+    BOOST_CHECK(parts->committee == committee);
+    BOOST_CHECK_EQUAL(parts->quorum, PosQuorum(committee.size()));
+
+    // A single-member (or empty) committee degrades to the leader-only form.
+    CScript solo = BuildPosBlockChallenge(leader, {committee[0]});
+    auto solo_parts = ParsePosBlockChallenge(solo);
+    BOOST_REQUIRE(solo_parts.has_value());
+    BOOST_CHECK(solo_parts->leader == leader);
+    BOOST_CHECK(solo_parts->committee.empty());
+
+    // Tampered scripts are rejected.
+    CScript trailing = challenge;
+    trailing << OP_TRUE;
+    BOOST_CHECK(!ParsePosBlockChallenge(trailing).has_value());
+    CScript wrong_count;
+    wrong_count << ToByteVector(leader) << OP_CHECKSIGVERIFY << (int64_t)3
+                << ToByteVector(committee[0]) << ToByteVector(committee[1])
+                << (int64_t)3 << OP_CHECKMULTISIG; // claims 3 keys, has 2
+    BOOST_CHECK(!ParsePosBlockChallenge(wrong_count).has_value());
+}
+
+// The committee is the first g_pos_committee_size entries of the schedule.
+BOOST_AUTO_TEST_CASE(pos_committee_is_schedule_prefix)
+{
+    StakeRegistry reg;
+    for (int i = 0; i < 8; ++i) reg.SetStake(MakeKey(), 1);
+    uint256 seed = ComputePosSeed(uint256S("0x77"), uint256(), 3);
+
+    int old_size = g_pos_committee_size;
+    g_pos_committee_size = 5;
+    std::vector<CPubKey> schedule = PosSchedule(reg, seed);
+    std::vector<CPubKey> committee = PosCommittee(reg, seed);
+    g_pos_committee_size = old_size;
+
+    BOOST_REQUIRE_EQUAL(committee.size(), 5U);
+    for (size_t i = 0; i < committee.size(); ++i) {
+        BOOST_CHECK(committee[i] == schedule[i]);
+    }
+}
+
 // The schedule changes with the seed (so leaders reshuffle each block).
 BOOST_AUTO_TEST_CASE(pos_schedule_reshuffles)
 {

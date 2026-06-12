@@ -206,6 +206,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     // SEQUENTIA
     { "setfeeexchangerates", 0, "rates"},
     { "setdynamicfeerates", 0, "rates"},
+    { "generateposblock", 1, "committeekeys"},
     //
     // ELEMENTS:
     { "calcfastmerkleroot", 0, "leaves" },

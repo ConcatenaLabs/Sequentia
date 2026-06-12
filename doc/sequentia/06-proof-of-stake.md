@@ -26,14 +26,24 @@ What this PoC **does**:
   its slot, where `r` is gated by the time elapsed since the parent (liveness:
   if the primary leader is absent, the next-ranked staker may step in after a
   slot interval).
-- Produces blocks from the miner when the node holds the eligible leader's key.
-- Exposes `getstakerinfo` / `getposschedule` RPCs.
+- **Committee certification** (`-poscommitteesize` 2..16): the slot's committee
+  is the first *n* entries of the schedule, and the block challenge becomes
+  `<leader> OP_CHECKSIGVERIFY <q> <c_1..c_n> <n> OP_CHECKMULTISIG` with `q` a
+  strict majority — the PoC form of the paper's 51-of-100 certification
+  (principle 6): a block *cannot exist* without a committee quorum, which is
+  what gives immediate finality. The script interpreter enforces it via the
+  unchanged `CheckProof`. Sizes beyond 16 need signature aggregation
+  (BLS/MuSig) — future work.
+- Produces blocks from the miner when the node holds the eligible leader's key
+  (plus a committee quorum of keys via `generateposblock`'s `committeekeys`).
+- Exposes `getstakerinfo` / `getposschedule` (incl. committee + quorum) RPCs.
 
 What this PoC **defers** (documented in §6, future work):
 
 - Private VRF sortition (this PoC uses a *public* deterministic election, so the
   schedule is predictable — see §5 security notes).
-- 100-member committee + 51-vote quorum certification (single leader for now).
+- Paper-scale (100-member) committees: script multisig caps the committee at
+  16; larger committees need signature aggregation (BLS/MuSig).
 - On-chain stake registration / unbonding (stake set is chain configuration
   here, not yet chainstate-tracked).
 - Bitcoin checkpoints + stake locktimes against long-range attacks.
@@ -114,9 +124,11 @@ nodes converge on it — exactly as the federation's round-robin does today.
   only the winner can prove they won, after the fact. The election function is
   isolated in `src/pos.cpp` (`PosElection`) precisely so a real EC-VRF
   (RFC 9381) can replace it without touching the consensus wiring.
-- **No slashing / no finality gadget.** A single leader per slot gives
-  probabilistic finality (like the paper's item-6 comparison to Cardano), not
-  the immediate finality of the 51/100 committee. Long-range attacks are not yet
+- **No slashing.** With committee certification enabled (majority quorum), a
+  block cannot exist without most of the committee signing it — the paper's
+  immediate-finality property — but nothing yet punishes a committee that signs
+  two blocks at the same height (the paper handles this with the
+  enforce-consensus rule, principle 4). Long-range attacks are not yet
   mitigated (needs the Bitcoin checkpoints + stake locktimes of principle 11).
 - **Stake set is configuration.** Until staking transactions land, the registry
   is operator-configured and identical across honest nodes by assumption.
@@ -133,8 +145,12 @@ nodes converge on it — exactly as the federation's round-robin does today.
 5. [x] Functional test: stake-weighted schedule, leader-signed block accepted,
        wrong-leader / early block rejected, multi-staker liveness handoff.
 6. [ ] Private VRF sortition (RFC 9381 EC-VRF over secp256k1).
-7. [ ] 100-member committee + 51/100 countersignature certification
-       (immediate finality, principle 6) carried in the dynafed witness.
+7. [~] Committee + majority countersignature certification (immediate
+       finality, principle 6): **done up to 16 members** via the script
+       multisig challenge (`-poscommitteesize`, quorum = strict majority,
+       enforced by consensus; `feature_pos_committee.py`). The paper-scale
+       100-member committee needs signature aggregation (BLS/MuSig) instead
+       of script multisig — still future work.
 8. [ ] On-chain stake registration / unbonding in chainstate.
 9. [ ] Bitcoin checkpoints + stake locktimes vs. long-range attacks (principle 11).
 </content>

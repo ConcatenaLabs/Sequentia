@@ -14,18 +14,20 @@
 bool CheckChallenge(const CBlockHeader& block, const CBlockIndex& indexLast, const Consensus::Params& params)
 {
     if (g_con_pos) {
-        // SEQUENTIA PoS: the block's challenge must be "<leader> OP_CHECKSIG"
-        // for the stake-weighted leader elected for this slot. The signature
-        // that satisfies the challenge is checked separately in CheckProof.
-        // See doc/sequentia/06-proof-of-stake.md.
+        // SEQUENTIA PoS: the block's challenge must require the stake-weighted
+        // leader elected for this slot and, when committee certification is
+        // enabled (g_pos_committee_size > 1), a majority of the slot's
+        // committee as countersigners (the paper's principle 6). The
+        // signatures that satisfy the challenge are checked separately in
+        // CheckProof. See doc/sequentia/06-proof-of-stake.md.
         const CScript& challenge = block.proof.challenge;
-        std::optional<CPubKey> proposer = PosChallengeToPubKey(challenge);
-        if (!proposer) {
-            return false; // challenge is not a single-key CHECKSIG
+        std::optional<PosChallengeParts> parts = ParsePosBlockChallenge(challenge);
+        if (!parts) {
+            return false; // challenge is not a recognized PoS challenge form
         }
         const StakeRegistry& registry = StakeRegistry::GetInstance();
         uint256 seed = PosSeedForChild(&indexLast);
-        std::optional<size_t> rank = PosRank(registry, seed, *proposer);
+        std::optional<size_t> rank = PosRank(registry, seed, parts->leader);
         if (!rank) {
             return false; // proposer is not a registered staker for this slot
         }
@@ -34,6 +36,16 @@ bool CheckChallenge(const CBlockHeader& block, const CBlockIndex& indexLast, con
         // (worse) leader cannot pre-empt a lower-ranked (better) one.
         if ((int64_t)block.nTime < (int64_t)indexLast.nTime + (int64_t)(*rank) * g_pos_slot_interval) {
             return false;
+        }
+        // Committee certification: the challenge's committee and quorum must
+        // be exactly the elected committee for this slot and its majority.
+        std::vector<CPubKey> expected_committee = PosCommittee(registry, seed);
+        if (expected_committee.size() <= 1) {
+            // Committee certification disabled: only the leader-only form is valid.
+            if (!parts->committee.empty()) return false;
+        } else {
+            if (parts->committee != expected_committee) return false;
+            if (parts->quorum != PosQuorum(expected_committee.size())) return false;
         }
         return true;
     } else if (g_signed_blocks) {

@@ -927,7 +927,11 @@ protected:
         // dynafed off when it is enabled. See doc/sequentia/06-proof-of-stake.md.
         g_con_pos = args.GetBoolArg("-con_pos", false);
         g_pos_slot_interval = args.GetIntArg("-posslotinterval", DEFAULT_POS_SLOT_INTERVAL);
+        g_pos_committee_size = args.GetIntArg("-poscommitteesize", DEFAULT_POS_COMMITTEE_SIZE);
         if (g_con_pos) {
+            if (g_pos_committee_size < 1 || g_pos_committee_size > MAX_POS_COMMITTEE_SIZE) {
+                throw std::runtime_error(strprintf("-poscommitteesize must be between 1 and %d", MAX_POS_COMMITTEE_SIZE));
+            }
             g_signed_blocks = true;
             consensus.vDeployments[Consensus::DEPLOYMENT_DYNA_FED].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
             StakeRegistry::GetInstance().Clear();
@@ -937,6 +941,12 @@ protected:
                     throw std::runtime_error(strprintf("Invalid -staker: %s", err));
                 }
             }
+            // The block solution carries the leader's signature plus up to a
+            // committee majority of countersignatures; budget ~80 bytes per
+            // signature (DER + pushes) over the default single-signature cap,
+            // unless the operator overrides it explicitly.
+            int default_sig_size = 80 * (2 + PosQuorum(g_pos_committee_size));
+            consensus.max_block_signature_size = args.GetIntArg("-con_max_block_sig_size", default_sig_size);
         }
 
         // Note: These globals are needed to avoid circular dependencies.

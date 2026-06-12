@@ -3283,6 +3283,15 @@ static RPCHelpMan getposschedule()
     result.pushKV("seed", seed.GetHex());
     result.pushKV("slot_interval", g_pos_slot_interval);
     result.pushKV("schedule", arr);
+    // Committee certification (principle 6): the first committee_size entries
+    // of the schedule certify the block; a strict majority must countersign.
+    std::vector<CPubKey> committee = PosCommittee(registry, seed);
+    if (committee.size() > 1) {
+        UniValue carr(UniValue::VARR);
+        for (const CPubKey& member : committee) carr.push_back(HexStr(member));
+        result.pushKV("committee", carr);
+        result.pushKV("quorum", PosQuorum(committee.size()));
+    }
     return result;
 },
     };

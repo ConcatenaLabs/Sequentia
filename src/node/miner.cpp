@@ -180,8 +180,11 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
         nBlockWeight += chainparams.GetConsensus().max_block_signature_size * WITNESS_SCALE_FACTOR;
         ResetProof(*pblock);
         if (g_con_pos && pos_proposer != nullptr) {
-            // SEQUENTIA PoS: the challenge requires the elected leader's key.
-            pblock->proof.challenge = BuildPosChallenge(*pos_proposer);
+            // SEQUENTIA PoS: the challenge requires the elected leader's key
+            // and, with committee certification enabled, a majority of the
+            // slot's committee as countersigners.
+            std::vector<CPubKey> committee = PosCommittee(StakeRegistry::GetInstance(), PosSeedForChild(pindexPrev));
+            pblock->proof.challenge = BuildPosBlockChallenge(*pos_proposer, committee);
         } else {
             ResetChallenge(*pblock, *pindexPrev, chainparams.GetConsensus());
         }
