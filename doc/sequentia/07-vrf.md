@@ -142,3 +142,39 @@ committee certification (`-poscommitteesize` 2..16) per §4.5.
       for paper-scale 100-member committees remains future work (script
       multisig caps the claimed-member list at 16).
 </content>
+
+## 6. Paper-scale committees — aggregation design (future work)
+
+The committee form caps the claimed-member list at 16 because each member is a
+separate `OP_CHECKMULTISIG` pubkey and each countersignature a separate
+scriptSig push: an `n`-of-`m` script is `O(m)` pubkeys + `O(q)` 72-byte
+signatures, which blows past `max_block_signature_size` for the paper's
+100-member committee. Reaching 100 needs **signature aggregation** so the block
+carries *one* signature regardless of committee size. Two viable routes,
+neither requiring a header-format change:
+
+1. **BLS aggregate signatures.** Each sortition-selected member signs the block
+   hash with a BLS key; the leader aggregates the `q` signatures into a single
+   48/96-byte aggregate. The block challenge becomes
+   `<agg-pubkey-or-list-commitment> <q> OP_CHECK_BLS_AGG` (a new opcode or a
+   tapscript leaf), and the coinbase keeps the per-member `SEQCMT` VRF
+   eligibility proofs (unchanged). *Pros:* smallest blocks, non-interactive
+   aggregation. *Cons:* a new pairing-curve dependency and a new verification
+   opcode — the largest consensus-surface change.
+
+2. **MuSig2 / Schnorr half-aggregation over secp256k1.** Stay on the existing
+   curve: members run MuSig2 to produce one BIP340 Schnorr signature for the
+   slot, verified by a single `OP_CHECKSIGADD`/taproot path. *Pros:* no new
+   curve; reuses secp256k1 and Taproot already in the tree. *Cons:* MuSig2 is
+   interactive (two rounds among the online committee), which fits the paper's
+   synchronous-round committee model but complicates the producer flow.
+
+Either way the **consensus rule is unchanged in spirit** — leader VRF proof +
+a quorum of sortition-eligibility proofs in the coinbase + one aggregate
+signature over the block — so `ContextualCheckBlock`'s membership checks
+(`bad-posvrf-member-*`) carry over verbatim; only the signature *encoding* and
+its verification opcode change. The committee-membership threshold math
+(`PosVrfIsCommitteeMember`, `PosVrfSlot`) and the `SEQCMT` eligibility
+commitments are already aggregation-ready. Recommended next step: route (2)
+(MuSig2 + Taproot) to avoid a new curve dependency, with the committee size cap
+raised from 16 to the paper's 100 once the aggregate verification path lands.

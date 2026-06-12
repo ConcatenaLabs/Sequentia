@@ -3451,6 +3451,10 @@ static RPCHelpMan getcheckpointinfo()
                                         {RPCResult::Type::STR_HEX, "btc_hash", "parent-chain block containing it"},
                                     }},
                             }},
+                        {RPCResult::Type::ARR, "conflicts", "buried checkpoints committing blocks NOT on this node's active chain at heights it has passed — a long-range-fork alarm",
+                            {
+                                {RPCResult::Type::ELISION, "", "same fields as checkpoints[]"},
+                            }},
                     }},
                 RPCExamples{HelpExampleCli("getcheckpointinfo", "")},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
@@ -3478,6 +3482,18 @@ static RPCHelpMan getcheckpointinfo()
         arr.push_back(entry);
     }
     result.pushKV("checkpoints", arr);
+    // Long-range-fork alarm: buried checkpoints whose blocks we do not have
+    // at heights our chain already passed.
+    UniValue conflicts(UniValue::VARR);
+    for (const PosCheckpoint& ckpt : GetPosCheckpointConflicts()) {
+        UniValue entry(UniValue::VOBJ);
+        entry.pushKV("blockhash", ckpt.seq_hash.GetHex());
+        entry.pushKV("height", (int64_t)ckpt.seq_height);
+        entry.pushKV("btc_height", ckpt.btc_height);
+        entry.pushKV("btc_hash", ckpt.btc_hash.GetHex());
+        conflicts.push_back(entry);
+    }
+    result.pushKV("conflicts", conflicts);
     return result;
 },
     };

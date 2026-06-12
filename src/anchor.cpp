@@ -31,6 +31,11 @@ int g_pos_finalized_height GUARDED_BY(g_anchor_mutex) = -1;
 uint256 g_pos_finalized_hash GUARDED_BY(g_anchor_mutex);
 //! Last parent-chain block already scanned for checkpoints.
 uint256 g_last_checkpoint_scan_tip GUARDED_BY(g_anchor_mutex);
+//! Buried, parent-canonical checkpoints whose block is NOT on our active
+//! chain even though our chain has reached the claimed height — the signature
+//! of being on the losing side of a long-range fork (or of a bogus
+//! checkpoint; the node cannot tell alone, which is exactly why it must warn).
+std::vector<PosCheckpoint> g_pos_checkpoint_conflicts GUARDED_BY(g_anchor_mutex);
 
 const unsigned char POS_CKPT_TAG[7] = {'S', 'E', 'Q', 'C', 'K', 'P', 'T'};
 //! Anchors confirmed to be on the parent chain's best chain. Cleared whenever
@@ -332,6 +337,12 @@ std::vector<PosCheckpoint> GetPosCheckpoints()
     return out;
 }
 
+std::vector<PosCheckpoint> GetPosCheckpointConflicts()
+{
+    LOCK(g_anchor_mutex);
+    return g_pos_checkpoint_conflicts;
+}
+
 namespace {
 
 //! Scan one parent-chain block (via getblock verbosity 2, so this works
@@ -398,30 +409,54 @@ void UpdatePosFinality(ChainstateManager& chainman, int btc_tip_height)
     std::vector<PosCheckpoint> candidates = GetPosCheckpoints();
     int best_height = -1;
     uint256 best_hash;
+    std::vector<PosCheckpoint> conflicts;
     for (const PosCheckpoint& ckpt : candidates) {
         if (btc_tip_height - ckpt.btc_height + 1 < depth) continue; // not buried enough
         // The commitment must still be on the parent chain's best chain.
         if (CheckMainchainAnchor((uint32_t)ckpt.btc_height, ckpt.btc_hash) != AnchorCheckResult::OK) continue;
         // The checkpointed block must be on *our* active chain at the claimed
         // height: checkpoints lock in validated history, never replace it.
+        bool on_active_chain = false;
+        bool chain_reached_height = false;
         {
             LOCK(cs_main);
             const CBlockIndex* pindex = chainman.m_blockman.LookupBlockIndex(ckpt.seq_hash);
-            if (!pindex || (uint32_t)pindex->nHeight != ckpt.seq_height) continue;
-            if (!chainman.ActiveChain().Contains(pindex)) continue;
+            on_active_chain = pindex != nullptr && (uint32_t)pindex->nHeight == ckpt.seq_height &&
+                              chainman.ActiveChain().Contains(pindex);
+            const CBlockIndex* tip = chainman.ActiveChain().Tip();
+            chain_reached_height = tip != nullptr && (uint32_t)tip->nHeight >= ckpt.seq_height;
         }
-        if ((int)ckpt.seq_height > best_height) {
-            best_height = (int)ckpt.seq_height;
-            best_hash = ckpt.seq_hash;
+        if (on_active_chain) {
+            if ((int)ckpt.seq_height > best_height) {
+                best_height = (int)ckpt.seq_height;
+                best_hash = ckpt.seq_hash;
+            }
+        } else if (chain_reached_height) {
+            // Fresh-sync / long-range alarm: a buried, parent-canonical
+            // checkpoint commits a block we do NOT have at a height our chain
+            // already passed. Either we are on the losing side of a
+            // long-range fork, or someone checkpointed a bogus block; the
+            // node cannot distinguish these alone, so it must surface it
+            // (getcheckpointinfo "conflicts") for operator attention.
+            conflicts.push_back(ckpt);
         }
     }
-    if (best_height >= 0) {
+    bool conflicts_changed;
+    {
         LOCK(g_anchor_mutex);
-        if (best_height > g_pos_finalized_height) {
+        conflicts_changed = conflicts.size() != g_pos_checkpoint_conflicts.size();
+        g_pos_checkpoint_conflicts = conflicts;
+        if (best_height >= 0 && best_height > g_pos_finalized_height) {
             g_pos_finalized_height = best_height;
             g_pos_finalized_hash = best_hash;
             LogPrintf("PoS: finalized block %s (height %d) via parent-chain checkpoint\n",
                       best_hash.ToString(), best_height);
+        }
+    }
+    if (conflicts_changed && !conflicts.empty()) {
+        for (const PosCheckpoint& c : conflicts) {
+            LogPrintf("WARNING: PoS: parent-chain checkpoint commits block %s at height %u which is NOT on this node's active chain — this node may be on the losing side of a long-range fork. Investigate before trusting recent history.\n",
+                      c.seq_hash.ToString(), c.seq_height);
         }
     }
 }

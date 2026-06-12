@@ -5,14 +5,71 @@ https://sequentia.io/
 
 Current code is based on Elements Version: 23.3.3
 
-## SequentiaByClaude design specification
+## SequentiaByClaude
 
 This repository is a fork of the existing Sequentia project
-(`SequentiaSEQ/SEQ-Core-Elements`), continuing the proof-of-concept toward a
-Bitcoin sidechain with (1) an open "no-coin" fee market, (2) Bitcoin anchoring,
-and (3) — later — proof-of-stake consensus. The design specification, the
-codebase-base decision and its rationale, and the implementation roadmap live in
-[`doc/sequentia/`](doc/sequentia/00-overview-and-base-decision.md).
+(`SequentiaSEQ/SEQ-Core-Elements`), rebased onto Elements 23.3.3, implementing
+the differences that make Sequentia a Bitcoin sidechain distinct from
+Blockstream's Liquid. All four are implemented and tested as a proof of concept:
+
+1. **Open "no-coin" fee market.** No mandatory native fee asset: any issued
+   asset may pay transaction fees. Block producers configure which assets they
+   accept and at what value via a static whitelist or a locally-run **price
+   server** that auto-admits assets from exchange APIs once they cross
+   operator-defined thresholds. Fees across assets are compared in an
+   asset-independent *reference fee atom* unit. — see
+   [`doc/sequentia/02-open-fee-market.md`](doc/sequentia/02-open-fee-market.md).
+2. **Bitcoin anchoring.** Every block commits to a Bitcoin block at a
+   monotonically non-decreasing height; the chain reorganizes if and only if
+   Bitcoin reorganizes away the referenced block, giving immediate finality
+   otherwise and friction-free cross-chain atomic swaps. — see
+   [`doc/sequentia/03-bitcoin-anchoring.md`](doc/sequentia/03-bitcoin-anchoring.md).
+3. **Proof-of-Stake consensus.** A strong-federation PoC plus, on the
+   `claude/sequentia-proof-of-stake-w6xady` branch, the full theoretical-paper
+   design: stake-weighted **private VRF sortition**, **committee
+   certification** (sortitioned, majority quorum — immediate finality),
+   **on-chain stake** with CSV-enforced unbonding, and **Bitcoin checkpoints**
+   against long-range attacks. — see
+   [`doc/sequentia/06-proof-of-stake.md`](doc/sequentia/06-proof-of-stake.md)
+   and [`07-vrf.md`](doc/sequentia/07-vrf.md).
+4. **Bitcoin-identical addresses, opt-in confidential transactions.** The
+   default address format is Bitcoin's, so a wallet can present one receiving
+   address for both chains; confidential transactions are opt-in with a
+   distinct format (Liquid blinds by default). — see
+   [`doc/sequentia/08-addresses-and-ct.md`](doc/sequentia/08-addresses-and-ct.md).
+
+The full design specification, the codebase-base decision and its rationale,
+the implementation roadmap, and the new RPCs/options are in
+[`doc/sequentia/`](doc/sequentia/00-overview-and-base-decision.md) — start with
+[`00-overview-and-base-decision.md`](doc/sequentia/00-overview-and-base-decision.md).
+
+### New RPCs and configuration
+
+This fork adds (all gated on the relevant chain features):
+
+- **Open fee market:** `getfeeexchangerates` / `setfeeexchangerates`,
+  `setdynamicfeerates` / `getdynamicfeerates` / `cleardynamicfeerates`,
+  `getfeeacceptancepolicy`; options `-con_any_asset_fees`,
+  `-dynfeeratemaxage`; the price-server sidecar in
+  [`contrib/price-server/`](contrib/price-server/).
+- **Bitcoin anchoring:** `getanchorstatus`; options `-con_bitcoin_anchor`,
+  `-validateanchor`, `-anchorminconf`, `-anchorpollinterval` (reuses the
+  `-mainchainrpc*` connection).
+- **Proof-of-Stake:** `getstakerinfo`, `getposschedule`, `getstakescript`,
+  `generateposblock`, `vrfprove` / `vrfverify`, `getcheckpointpayload` /
+  `getcheckpointinfo`; options `-con_pos`, `-staker`, `-posslotinterval`,
+  `-poscommitteesize`, `-posvrf`, `-posunbonding`, `-poscheckpointdepth`.
+- **Addresses/CT:** `-con_default_blinded_addresses` (custom chains);
+  `-blindedaddresses` default is now chain-dependent.
+
+### Tests
+
+Sequentia-specific functional tests live in `test/functional/feature_*` (see
+`feature_dynamic_fee_rates`, `feature_bitcoin_anchoring`,
+`feature_anchor_swap_consistency`, `feature_ct_opt_in`, and the `feature_pos_*`
+/ `feature_vrf` suites) and unit tests in `src/test/pos_tests.cpp` and
+`src/test/vrf_tests.cpp`. Build with `--enable-any-asset-fees` so the fee-unit
+strings the wallet tests expect ("rfa/vB") match.
 
 ## Installing Prerequisistes
 

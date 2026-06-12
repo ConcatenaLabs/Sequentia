@@ -109,4 +109,11 @@ struct PosCheckpoint {
 /** All checkpoints observed so far (for RPC introspection). */
 std::vector<PosCheckpoint> GetPosCheckpoints();
 
+/** Buried, parent-canonical checkpoints committing blocks that are NOT on
+ *  this node's active chain at heights it has already passed — the alarm
+ *  that this node may be on the losing side of a long-range fork (or that a
+ *  bogus checkpoint exists; the node cannot tell alone). Surfaced via
+ *  getcheckpointinfo. */
+std::vector<PosCheckpoint> GetPosCheckpointConflicts();
+
 #endif // BITCOIN_ANCHOR_H

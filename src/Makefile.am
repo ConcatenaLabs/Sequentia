@@ -357,7 +357,6 @@ libbitcoin_node_a_SOURCES = \
   dynafed.cpp \
   dbwrapper.cpp \
   deploymentstatus.cpp \
-  exchangerates.cpp \
   flatfile.cpp \
   httprpc.cpp \
   httpserver.cpp \
@@ -609,6 +608,7 @@ libbitcoin_common_a_SOURCES = \
   block_proof.cpp \
   chainparams.cpp \
   coins.cpp \
+  exchangerates.cpp \
   pos.cpp \
   vrf.cpp \
   common/bloom.cpp \

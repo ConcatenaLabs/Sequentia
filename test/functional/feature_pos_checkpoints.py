@@ -168,6 +168,26 @@ class PosCheckpointsTest(BitcoinTestFramework):
         assert_equal(honest.getblockcount(), 6)
         assert_equal(honest.getblockhash(4), ckpt['blockhash'])
 
+        # --- The long-range-fork ALARM: the attacker node also watches the
+        # parent chain and sees the buried checkpoint committing a block it
+        # does NOT have at a height its chain has passed. It cannot finalize
+        # it (checkpoints never replace validated history), but it must
+        # surface the conflict — this is what tells a freshly-synced node it
+        # may be on the losing side of a long-range fork. ---
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            ainfo = attacker.getcheckpointinfo()
+            if len(ainfo.get('conflicts', [])) == 1:
+                break
+            time.sleep(0.25)
+        ainfo = attacker.getcheckpointinfo()
+        assert_equal(len(ainfo['conflicts']), 1)
+        assert_equal(ainfo['conflicts'][0]['blockhash'], ckpt['blockhash'])
+        assert_equal(ainfo['conflicts'][0]['height'], 4)
+        assert_equal(ainfo['finalized_height'], -1)
+        # The honest node, by contrast, has no conflicts.
+        assert_equal(honest.getcheckpointinfo()['conflicts'], [])
+
 
 if __name__ == '__main__':
     PosCheckpointsTest().main()

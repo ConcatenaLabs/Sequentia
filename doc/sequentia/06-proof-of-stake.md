@@ -189,6 +189,12 @@ nodes converge on it — exactly as the federation's round-robin does today.
        (item 8), which must exceed the checkpoint cadence, this closes the
        posterior-corruption window (`feature_pos_checkpoints.py`: a
        longer competing branch from the same staker keys is rejected by the
-       checkpointed node). Fresh-sync bootstrap from checkpoints (choosing
-       between histories with no prior state) remains future work.
+       checkpointed node). A node that has passed a checkpointed height
+       *without* the checkpointed block raises a `conflicts` alarm in
+       `getcheckpointinfo` and the debug log (the fresh-sync / wrong-fork
+       case): it cannot finalize a block it never validated, so it never
+       silently follows a checkpoint, but it flags that it may be on the
+       losing side of a long-range fork. Automatic fresh-sync chain
+       *selection* from checkpoints (reorganizing onto checkpointed history a
+       node has not yet validated) remains future work — by design.
 </content>
