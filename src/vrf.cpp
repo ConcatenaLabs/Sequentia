@@ -15,12 +15,29 @@
 
 namespace {
 
-// Domain-separation tags (the "suite" byte distinguishes hash uses, RFC 9381 §5).
-const unsigned char SUITE = 0xFE; // non-standard: marks this secp256k1 PoC suite
-const unsigned char H2C_DOMAIN = 0x01;     // hash-to-curve
-const unsigned char NONCE_DOMAIN = 0x02;   // nonce derivation
-const unsigned char CHALLENGE_DOMAIN = 0x03; // challenge derivation
-const unsigned char OUTPUT_DOMAIN = 0x04;  // proof-to-hash
+// ECVRF-SECP256K1-SHA256-TAI, structured per RFC 9381 (ECVRF). secp256k1 is not
+// one of the RFC's registered ciphersuites, so following §5.5's convention for
+// an *experimental* suite we use suite octet 0xFF; the rest of the construction
+// (encode_to_curve TAI, challenge generation with the truncated 16-byte
+// challenge, proof_to_hash) follows the RFC's framing and domain separators.
+const unsigned char SUITE = 0xFF; // RFC 9381 §5.5: 0xFF = experimental use
+
+// RFC 9381 domain-separator "front" octets, each paired with a 0x00 "back"
+// octet, hashed as: suite || front || <points/strings> || back.
+const unsigned char H2C_FRONT = 0x01;       // §5.4.1.1 encode_to_curve (TAI)
+const unsigned char CHALLENGE_FRONT = 0x02; // §5.4.3  challenge_generation
+const unsigned char OUTPUT_FRONT = 0x03;    // §5.2    proof_to_hash
+const unsigned char BACK = 0x00;
+// Nonce derivation is a private, unverifiable step (the RFC's P256-TAI suite
+// uses an RFC 6979 HMAC_DRBG); we derive it deterministically from (sk, H) with
+// SHA-256 under a private domain octet. This is the one documented deviation
+// from the RFC framing and is interop-irrelevant: nonce secrecy/determinism is
+// all that the proof's soundness needs (see doc/sequentia/07-vrf.md §2).
+const unsigned char NONCE_FRONT = 0x81;
+
+// Length of the truncated Fiat-Shamir challenge c (RFC 9381 §5.5: cLen = 16 for
+// the 128-bit-security suites; c is a 16-byte big-endian integer, always < n).
+const size_t C_LEN = 16;
 
 const secp256k1_context* Ctx()
 {
@@ -50,28 +67,29 @@ uint256 Sha256Cat(std::initializer_list<Span<const unsigned char>> parts)
     return out;
 }
 
-//! Hash `alpha` (bound to the public key) to a curve point via try-and-
-//! increment: hash to a candidate x-coordinate and attempt to lift it to a
-//! point, incrementing a counter until one lands on the curve.
+//! RFC 9381 §5.4.1.1 ECVRF_encode_to_curve_try_and_increment: bind `alpha` to
+//! the public key (the encode_to_curve_salt) and hash to a candidate point,
+//! incrementing a counter until one lands on the curve. Per the RFC's TAI
+//! suites, arbitrary_string_to_point tries the single 0x02 (even-y) prefix:
+//!   hash = SHA256(suite || 0x01 || PK || alpha || ctr || 0x00)
+//!   H    = string_to_point(0x02 || hash)
 bool HashToCurve(const std::vector<unsigned char>& pubkey_ser, Span<const unsigned char> alpha,
                  secp256k1_pubkey& out)
 {
     const unsigned char suite = SUITE;
-    const unsigned char domain = H2C_DOMAIN;
+    const unsigned char front = H2C_FRONT;
+    const unsigned char back = BACK;
     for (int ctr = 0; ctr < 256; ++ctr) {
         unsigned char ctrb = (unsigned char)ctr;
-        uint256 x = Sha256Cat({{&suite, 1}, {&domain, 1},
+        uint256 x = Sha256Cat({{&suite, 1}, {&front, 1},
                                {pubkey_ser.data(), pubkey_ser.size()},
                                {alpha.data(), (size_t)alpha.size()},
-                               {&ctrb, 1}});
-        // Try both possible y parities for this x.
-        for (unsigned char prefix : {0x02, 0x03}) {
-            unsigned char candidate[33];
-            candidate[0] = prefix;
-            std::memcpy(candidate + 1, x.begin(), 32);
-            if (secp256k1_ec_pubkey_parse(Ctx(), &out, candidate, 33)) {
-                return true;
-            }
+                               {&ctrb, 1}, {&back, 1}});
+        unsigned char candidate[33];
+        candidate[0] = 0x02;
+        std::memcpy(candidate + 1, x.begin(), 32);
+        if (secp256k1_ec_pubkey_parse(Ctx(), &out, candidate, 33)) {
+            return true;
         }
     }
     return false;
@@ -98,15 +116,22 @@ bool HashToScalar(uint256 h, unsigned char out[32])
     return false;
 }
 
-//! c = H(SUITE || CHALLENGE || H || Gamma || U || V) reduced to a scalar.
-bool ChallengeScalar(const unsigned char H[33], const unsigned char Gamma[33],
-                     const unsigned char U[33], const unsigned char V[33],
-                     unsigned char c[32])
+//! RFC 9381 §5.4.3 ECVRF_challenge_generation:
+//!   c_string  = SHA256(suite || 0x02 || Y || H || Gamma || U || V || 0x00)
+//!   c         = string_to_int( c_string[0 .. cLen-1] )   (cLen = 16)
+//! The 16-byte truncated challenge is returned as a full 32-byte big-endian
+//! scalar (zero-padded high), so it is always nonzero (negligibly) and < n.
+void ChallengeScalar(const unsigned char Y[33], const unsigned char H[33],
+                     const unsigned char Gamma[33], const unsigned char U[33],
+                     const unsigned char V[33], unsigned char c[32])
 {
     const unsigned char suite = SUITE;
-    const unsigned char domain = CHALLENGE_DOMAIN;
-    uint256 h = Sha256Cat({{&suite, 1}, {&domain, 1}, {H, 33}, {Gamma, 33}, {U, 33}, {V, 33}});
-    return HashToScalar(h, c);
+    const unsigned char front = CHALLENGE_FRONT;
+    const unsigned char back = BACK;
+    uint256 h = Sha256Cat({{&suite, 1}, {&front, 1}, {Y, 33}, {H, 33},
+                           {Gamma, 33}, {U, 33}, {V, 33}, {&back, 1}});
+    std::memset(c, 0, 32);
+    std::memcpy(c + (32 - C_LEN), h.begin(), C_LEN); // low 16 bytes = truncated c
 }
 
 } // namespace
@@ -132,9 +157,10 @@ std::optional<std::vector<unsigned char>> VrfProve(const CKey& key, Span<const u
     unsigned char Gamma_ser[33];
     if (!SerializePoint(Gamma, Gamma_ser)) return std::nullopt;
 
-    // Deterministic nonce k = HashToScalar(SUITE || NONCE || sk || H)
+    // Deterministic nonce k = HashToScalar(SUITE || NONCE_FRONT || sk || H)
+    // (private/unverifiable step; see the NONCE_FRONT note above).
     const unsigned char suite = SUITE;
-    const unsigned char ndom = NONCE_DOMAIN;
+    const unsigned char ndom = NONCE_FRONT;
     uint256 k_hash = Sha256Cat({{&suite, 1}, {&ndom, 1}, {sk, 32}, {H_ser, 33}});
     unsigned char k[32];
     if (!HashToScalar(k_hash, k)) return std::nullopt;
@@ -151,9 +177,10 @@ std::optional<std::vector<unsigned char>> VrfProve(const CKey& key, Span<const u
     unsigned char V_ser[33];
     if (!SerializePoint(V, V_ser)) return std::nullopt;
 
-    // c = challenge(H, Gamma, U, V)
+    // c = challenge(Y, H, Gamma, U, V); c[32] is the truncated 16-byte value
+    // sitting in its low bytes.
     unsigned char c[32];
-    if (!ChallengeScalar(H_ser, Gamma_ser, U_ser, V_ser, c)) return std::nullopt;
+    ChallengeScalar(pub_ser.data(), H_ser, Gamma_ser, U_ser, V_ser, c);
 
     // s = k + c*sk  (mod n)
     unsigned char s[32];
@@ -161,10 +188,12 @@ std::optional<std::vector<unsigned char>> VrfProve(const CKey& key, Span<const u
     if (!secp256k1_ec_seckey_tweak_mul(Ctx(), s, sk)) return std::nullopt; // s = c*sk
     if (!secp256k1_ec_seckey_tweak_add(Ctx(), s, k)) return std::nullopt;  // s = c*sk + k
 
+    // pi = point_to_string(Gamma) || int_to_string(c, cLen) || int_to_string(s, qLen)
+    //    = Gamma(33) || c(16) || s(32)   (RFC 9381 §5.5)
     std::vector<unsigned char> proof;
     proof.reserve(VRF_PROOF_SIZE);
     proof.insert(proof.end(), Gamma_ser, Gamma_ser + 33);
-    proof.insert(proof.end(), c, c + 32);
+    proof.insert(proof.end(), c + (32 - C_LEN), c + 32); // 16-byte truncated c
     proof.insert(proof.end(), s, s + 32);
     return proof;
 }
@@ -172,16 +201,19 @@ std::optional<std::vector<unsigned char>> VrfProve(const CKey& key, Span<const u
 std::optional<uint256> VrfProofToHash(Span<const unsigned char> proof)
 {
     if ((size_t)proof.size() != VRF_PROOF_SIZE) return std::nullopt;
-    // beta = SHA256(SUITE || OUTPUT || Gamma)
+    // RFC 9381 §5.2 proof_to_hash:
+    //   beta = SHA256(suite || 0x03 || point_to_string(cofactor*Gamma) || 0x00)
+    // secp256k1 has cofactor 1, so cofactor*Gamma = Gamma.
     const unsigned char suite = SUITE;
-    const unsigned char odom = OUTPUT_DOMAIN;
+    const unsigned char front = OUTPUT_FRONT;
+    const unsigned char back = BACK;
     // Re-serialize Gamma in canonical form to bind beta to the point, not the
     // (potentially non-canonical) input bytes.
     secp256k1_pubkey Gamma;
     if (!secp256k1_ec_pubkey_parse(Ctx(), &Gamma, proof.data(), 33)) return std::nullopt;
     unsigned char Gamma_ser[33];
     if (!SerializePoint(Gamma, Gamma_ser)) return std::nullopt;
-    return Sha256Cat({{&suite, 1}, {&odom, 1}, {Gamma_ser, 33}});
+    return Sha256Cat({{&suite, 1}, {&front, 1}, {Gamma_ser, 33}, {&back, 1}});
 }
 
 bool VrfVerify(const CPubKey& pubkey, Span<const unsigned char> alpha,
@@ -190,18 +222,21 @@ bool VrfVerify(const CPubKey& pubkey, Span<const unsigned char> alpha,
     if (!pubkey.IsValid()) return false;
     if ((size_t)proof.size() != VRF_PROOF_SIZE) return false;
 
+    // pi = Gamma(33) || c(16) || s(32)  (RFC 9381 §5.5)
     const unsigned char* Gamma_in = proof.data();
     const unsigned char* c_in = proof.data() + 33;
-    const unsigned char* s_in = proof.data() + 65;
+    const unsigned char* s_in = proof.data() + 33 + C_LEN;
 
-    // Parse Y, Gamma; validate c and s as scalars.
+    // Parse Y, Gamma; load c (16-byte truncated → low bytes of a 32-byte
+    // scalar) and validate s as a scalar.
     secp256k1_pubkey Y;
     if (!secp256k1_ec_pubkey_parse(Ctx(), &Y, pubkey.data(), pubkey.size())) return false;
     secp256k1_pubkey Gamma;
     if (!secp256k1_ec_pubkey_parse(Ctx(), &Gamma, Gamma_in, 33)) return false;
     unsigned char c[32];
-    std::memcpy(c, c_in, 32);
-    if (!secp256k1_ec_seckey_verify(Ctx(), c)) return false;
+    std::memset(c, 0, 32);
+    std::memcpy(c + (32 - C_LEN), c_in, C_LEN);
+    if (!secp256k1_ec_seckey_verify(Ctx(), c)) return false; // c != 0
     unsigned char s[32];
     std::memcpy(s, s_in, 32);
     if (!secp256k1_ec_seckey_verify(Ctx(), s)) return false;
@@ -239,9 +274,9 @@ bool VrfVerify(const CPubKey& pubkey, Span<const unsigned char> alpha,
     unsigned char V_ser[33];
     if (!SerializePoint(V, V_ser)) return false;
 
-    // c' = challenge(H, Gamma, U, V); accept iff c' == c.
+    // c' = challenge(Y, H, Gamma, U, V); accept iff c' == c.
     unsigned char c_check[32];
-    if (!ChallengeScalar(H_ser, Gamma_ser, U_ser, V_ser, c_check)) return false;
+    ChallengeScalar(pub_ser.data(), H_ser, Gamma_ser, U_ser, V_ser, c_check);
     if (std::memcmp(c_check, c, 32) != 0) return false;
 
     auto beta = VrfProofToHash(proof);

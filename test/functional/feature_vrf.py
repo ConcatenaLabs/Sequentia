@@ -39,7 +39,7 @@ class VrfTest(BitcoinTestFramework):
         assert_equal(res['pubkey'], pub)
         proof = res['proof']
         output = res['output']
-        assert_equal(len(proof), 2 * (33 + 32 + 32))  # gamma||c||s, hex
+        assert_equal(len(proof), 2 * (33 + 16 + 32))  # gamma||c||s, hex (RFC 9381)
         assert_equal(len(output), 64)
 
         # Verify on node1 (no shared secret needed)

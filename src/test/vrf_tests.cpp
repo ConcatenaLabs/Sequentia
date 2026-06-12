@@ -59,7 +59,7 @@ BOOST_AUTO_TEST_CASE(vrf_verify_rejects_bad_inputs)
     BOOST_CHECK(!VrfVerify(MakeKey().GetPubKey(), alpha, *proof, beta));
     // Wrong input.
     BOOST_CHECK(!VrfVerify(pub, Bytes("input-B"), *proof, beta));
-    // Tampered proof (flip a byte in each of gamma, c, s).
+    // Tampered proof (flip a byte in each of gamma[0..32], c[33..48], s[49..80]).
     for (size_t idx : {0u, 5u, 40u, 70u}) {
         auto bad = *proof;
         bad[idx] ^= 0x01;
@@ -148,11 +148,11 @@ BOOST_AUTO_TEST_CASE(vrf_known_answer_vectors)
     struct KAT { std::string alpha_hex; std::string proof_hex; std::string output_hex; };
     const KAT kats[] = {
         {"00",
-         "03a936852b636f10beda4a2c25997535372b7ad64b1d26bbef1ab649c0a835cf461cb8b8cd19f77ba8b088666b848acadf05be3e2830d159de959eaa93ae41e353440f476f9c781afe8c7a0d12d395196a537b9f118f5cb2f8fa5333574592f3e7",
-         "2fb2fbaa8ee4b59eb67f6fd3f2782047c7b4781f22c1da36017b742e95e7240e"},
+         "02faadfd917ac0dad8579987655afb4fae84cbe3b50854bdfae86434c98c543f6b8a3d09f751c7c1d9654b741efdbe0a685850e93597fc47968c5c1a6da89cd2c83e1a8676afe53d03cd9b1a72f2f0479b",
+         "6c161979216cc6712a3c8d1d2cbded0dcac38d54e98a148bd650cfe0b23e671d"},
         {"deadbeef",
-         "0202b8fea6e0f8a2aff53b553d3501a68393f39b49df38062f78f85b6ddf8a2aa620d1e727b9a281345db95e475dd0b782ba832452f57bb9b7544efc4c83201f00ffe5e7fb5a39fd44585035055d8a4f2401c910d7770d8efed711ac9f4301a139",
-         "82c57ae53165fe0add83403a4e005899bfdda07cb8e45de5fd0116108b143f8c"},
+         "033a2f69ffea623598b0a6d3013cd416f8f691562c7cc553dc74f68717a6e6faa6ac094f695f8eb7effcc2d4ed2b298e107dc16679023f599bda68d731297162ee97dbb7701c9d27ef528119f95ad855fd",
+         "fea30b726d0052ea49764e169ec4440b1ae65ba1658201396ded2d22a273515c"},
     };
     for (const KAT& kat : kats) {
         std::vector<unsigned char> alpha = ParseHex(kat.alpha_hex);

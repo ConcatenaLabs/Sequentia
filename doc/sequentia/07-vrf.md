@@ -28,30 +28,36 @@ produces a block, and no one can predict future leaders or grind their identity
 
 ## 2. The primitive (`src/vrf.{h,cpp}`) — implemented
 
-An ECVRF-style construction over secp256k1, built on the curve operations the
-vendored library exposes (`parse`/`create`/`tweak_mul`/`combine`/`negate`):
+**ECVRF-SECP256K1-SHA256-TAI**, structured per RFC 9381 over the curve
+operations the vendored library exposes
+(`parse`/`create`/`tweak_mul`/`combine`/`negate`). The suite octet is the RFC's
+experimental value `0xFF` (§5.5), and each hash is domain-separated as
+`suite ‖ front ‖ … ‖ 0x00` with the RFC front octets (`0x01` encode-to-curve,
+`0x02` challenge, `0x03` proof-to-hash):
 
 ```
 prove(sk, alpha):
   Y     = sk·G
-  H     = hash_to_curve(alpha, Y)          # try-and-increment onto secp256k1
+  H     = encode_to_curve(Y, alpha)        # §5.4.1.1 try-and-increment, 0x02 prefix
   Gamma = sk·H
-  k     = HashToScalar(sk, H)              # deterministic nonce
+  k     = HashToScalar(sk, H)              # deterministic nonce (see §2 deviations)
   U     = k·G ;  V = k·H
-  c     = HashToScalar(H, Gamma, U, V)     # Fiat-Shamir challenge
+  c     = challenge(Y, H, Gamma, U, V)     # §5.4.3: SHA256(…), truncated to 16 bytes
   s     = k + c·sk   (mod n)
-  pi    = Gamma(33) ‖ c(32) ‖ s(32)        # 97 bytes
-  beta  = SHA256(suite ‖ 0x04 ‖ Gamma)
+  pi    = Gamma(33) ‖ c(16) ‖ s(32)        # 81 bytes (§5.5)
+  beta  = SHA256(suite ‖ 0x03 ‖ Gamma ‖ 0x00)   # §5.2 proof_to_hash, cofactor 1
 
 verify(Y, alpha, pi):
   recompute H; U = s·G − c·Y ; V = s·H − c·Gamma
-  accept iff HashToScalar(H, Gamma, U, V) == c ; then beta = SHA256(…‖Gamma)
+  accept iff challenge(Y, H, Gamma, U, V) == c ; then beta = proof_to_hash(Gamma)
 ```
 
 The verify identity holds because `s·G = (k + c·sk)·G = U + c·Y` and likewise
 for `V`. Output uniqueness follows from `Gamma = sk·H` being determined by
 `(sk, alpha)`; the proof's `(c, s)` are a Schnorr-style proof of correct
-exponentiation.
+exponentiation. The challenge binds the public key `Y` (RFC ordering), and `c`
+is the leading 16 bytes of the hash interpreted as a big-endian integer
+(always `< n`).
 
 **Properties (unit-tested in `src/test/vrf_tests.cpp`):** prove/verify
 round-trip; rejection of wrong key / wrong input / tampered or mis-sized proof;
@@ -60,12 +66,18 @@ and inputs; all-distinct, balanced outputs over many inputs (pseudorandomness
 smoke test). **Node-level (`feature_vrf.py`):** node A proves, node B verifies
 with no shared secret, plus the negative cases.
 
-**Caveats (why it's a PoC primitive, not a standards drop-in):** it is *not*
-validated against RFC 9381 test vectors and uses a non-standard secp256k1 suite
-byte; the hash-to-curve is try-and-increment (not constant-time, which is
-acceptable since `alpha` is public but should be reviewed); the challenge uses a
-full 32-byte scalar rather than the RFC's truncated `c`. These are isolated in
-`src/vrf.cpp` and do not affect callers.
+**Residual deviations from RFC 9381 (why it's still not a certified drop-in):**
+secp256k1 is *not* one of the RFC's registered ciphersuites (those are P-256 and
+edwards25519), so there are **no official test vectors** to validate against and
+the suite octet uses the RFC's experimental `0xFF`; the deterministic nonce uses
+SHA-256 over `(sk, H)` rather than the RFC 6979 HMAC_DRBG of the P-256 suite
+(an interop-irrelevant, unverifiable step — only nonce secrecy/determinism
+matters for soundness); and the try-and-increment hash-to-curve is not
+constant-time (acceptable because `alpha` is public, but worth a review). The
+verifiable framing — encode-to-curve, the `Y`-bound truncated-16-byte challenge,
+the proof encoding, and proof-to-hash — follows the RFC. All of this is isolated
+in `src/vrf.cpp` and does not affect callers; the construction is pinned by
+golden known-answer vectors in `vrf_tests.cpp`.
 
 ## 3. Node interface — implemented
 
@@ -133,8 +145,12 @@ committee certification (`-poscommitteesize` 2..16) per §4.5.
       leader-only-form in this mode, miner/`generateposblock` integration, and
       `feature_pos_vrf.py` (peer-validated VRF blocks, commitment present,
       slot respected, non-staker and proof-less templates rejected).
-- [ ] Validate the primitive against RFC 9381 vectors / adopt a reviewed
-      secp256k1 VRF ciphersuite.
+- [x] Bring the primitive to RFC 9381 ECVRF structural conformance
+      (ECVRF-SECP256K1-SHA256-TAI: experimental suite octet, RFC domain
+      separators, `Y`-bound challenge truncated to 16 bytes, RFC proof
+      encoding and proof-to-hash). Residual, documented deviations: no
+      official secp256k1 vectors exist, and the nonce uses SHA-256 rather
+      than RFC 6979 (§2).
 - [x] VRF-sortitioned committees: threshold membership (expected size =
       `-poscommitteesize`, weight-proportional), per-member `SEQCMT`
       eligibility commitments validated in consensus, fixed majority quorum,

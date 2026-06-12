@@ -19,11 +19,14 @@
 //   - Collusion-free: a staker cannot grind beta without changing sk (its
 //                     on-chain staking identity).
 //
-// This is an ECVRF-style construction (RFC 9381 shape: hash-to-curve via
-// try-and-increment, gamma = sk*H, Fiat-Shamir proof). It is NOT yet validated
-// against RFC 9381 test vectors and uses secp256k1 (not a standardized RFC 9381
-// ciphersuite), so it should be treated as a proof-of-concept primitive, not a
-// drop-in standards-compliant VRF.
+// This is ECVRF-SECP256K1-SHA256-TAI, structured per RFC 9381: encode_to_curve
+// via try-and-increment, gamma = sk*H, the RFC's challenge_generation with the
+// truncated 16-byte challenge, and the RFC proof_to_hash. secp256k1 is not one
+// of the RFC's registered ciphersuites (those are P-256 and edwards25519), so
+// the suite octet uses the RFC's experimental value 0xFF and there are no
+// official test vectors to validate against; the deterministic nonce uses
+// SHA-256 rather than the RFC 6979 HMAC_DRBG of the P-256 suite. These residual
+// deviations are documented in doc/sequentia/07-vrf.md §2.
 
 #ifndef BITCOIN_VRF_H
 #define BITCOIN_VRF_H
@@ -35,8 +38,9 @@
 #include <optional>
 #include <vector>
 
-/** Serialized VRF proof: gamma (33-byte compressed point) || c (32) || s (32). */
-static const size_t VRF_PROOF_SIZE = 33 + 32 + 32;
+/** Serialized VRF proof (RFC 9381 §5.5): gamma (33-byte compressed point) ||
+ *  c (16-byte truncated challenge) || s (32-byte scalar). */
+static const size_t VRF_PROOF_SIZE = 33 + 16 + 32;
 
 /** Produce a VRF proof for input `alpha` under secret key `key`.
  *  Returns the serialized proof, or nullopt on failure. */
