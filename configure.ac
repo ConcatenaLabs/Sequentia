@@ -1,10 +1,10 @@
 AC_PREREQ([2.69])
 define(_CLIENT_VERSION_MAJOR, 23)
-define(_CLIENT_VERSION_MINOR, 2)
-define(_CLIENT_VERSION_BUILD, 2)
-define(_CLIENT_VERSION_RC, 1)
+define(_CLIENT_VERSION_MINOR, 3)
+define(_CLIENT_VERSION_BUILD, 3)
+define(_CLIENT_VERSION_RC, 0)
 define(_CLIENT_VERSION_IS_RELEASE, true)
-define(_COPYRIGHT_YEAR, 2024)
+define(_COPYRIGHT_YEAR, 2026)
 define(_COPYRIGHT_HOLDERS,[The %s developers])
 define(_COPYRIGHT_HOLDERS_SUBSTITUTION,[[Elements Project]])
 AC_INIT([Elements Core],m4_join([.], _CLIENT_VERSION_MAJOR, _CLIENT_VERSION_MINOR, _CLIENT_VERSION_BUILD)m4_if(_CLIENT_VERSION_RC, [0], [], [rc]_CLIENT_VERSION_RC),[https://github.com/ElementsProject/elements/issues],[elements],[https://elementsproject.org/])
@@ -266,12 +266,6 @@ AC_ARG_ENABLE([liquid],
   [liquid_build=yes],
   [liquid_build=no])
 
-AC_ARG_ENABLE([any_asset_fees],
-  [AS_HELP_STRING([--enable-any-asset-fees],
-  [Enable build that uses constants for any asset fees feature])],
-  [any_asset_fees=yes],
-  [any_asset_fees=no])
-
 if test "$use_asm" = "yes"; then
   AC_DEFINE([USE_ASM], [1], [Define this symbol to build in assembly routines])
 fi
@@ -279,11 +273,6 @@ fi
 if test "$liquid_build" = "yes"; then
   AC_DEFINE(LIQUID, 1, [Define this symbol for Liquid builds])
 fi
-
-if test "$any_asset_fees" = "yes"; then
-  AC_DEFINE(ANY_ASSET_FEES, 1, [Define this symbol to modify constants for any asset fees feature])
-fi
-
 AC_ARG_ENABLE([zmq],
   [AS_HELP_STRING([--disable-zmq],
   [disable ZMQ notifications])],
@@ -862,7 +851,7 @@ if test "$use_lcov" = "yes"; then
 
   AX_CHECK_LINK_FLAG([--coverage], [LDFLAGS="$LDFLAGS --coverage"],
     [AC_MSG_ERROR([lcov testing requested but --coverage linker flag does not work])])
-  AX_CHECK_COMPILE_FLAG([--coverage],[CXXFLAGS="$CXXFLAGS --coverage"],
+  AX_CHECK_COMPILE_FLAG([--coverage],[CXXFLAGS="$CXXFLAGS --coverage";CFLAGS="$CFLAGS --coverage"],
     [AC_MSG_ERROR([lcov testing requested but --coverage flag does not work])])
   CXXFLAGS="$CXXFLAGS -Og"
 fi
@@ -1007,22 +996,6 @@ AC_CHECK_DECLS([bswap_16, bswap_32, bswap_64],,,
     [#if HAVE_BYTESWAP_H
                  #include <byteswap.h>
                  #endif])
-
-AC_MSG_CHECKING([for __builtin_clzl])
-AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[ ]], [[
- (void) __builtin_clzl(0);
-  ]])],
- [ AC_MSG_RESULT([yes]); have_clzl=yes; AC_DEFINE([HAVE_BUILTIN_CLZL], [1], [Define this symbol if you have __builtin_clzl])],
- [ AC_MSG_RESULT([no]); have_clzl=no;]
-)
-
-AC_MSG_CHECKING([for __builtin_clzll])
-AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[ ]], [[
-  (void) __builtin_clzll(0);
-  ]])],
- [ AC_MSG_RESULT([yes]); have_clzll=yes; AC_DEFINE([HAVE_BUILTIN_CLZLL], [1], [Define this symbol if you have __builtin_clzll])],
- [ AC_MSG_RESULT([no]); have_clzll=no;]
-)
 
 dnl Check for malloc_info (for memory statistics information in getmemoryinfo)
 AC_MSG_CHECKING([for getmemoryinfo])
@@ -1844,11 +1817,9 @@ AM_CONDITIONAL([WORDS_BIGENDIAN], [test "$ac_cv_c_bigendian" = "yes"])
 AM_CONDITIONAL([USE_NATPMP], [test "$use_natpmp" = "yes"])
 AM_CONDITIONAL([USE_UPNP], [test "$use_upnp" = "yes"])
 AM_CONDITIONAL([LIQUID], [test "$liquid_build" = "yes"])
-AM_CONDITIONAL([ANY_ASSET_FEES], [test "$any_asset_fees" = "yes"])
 
 dnl for minisketch
 AM_CONDITIONAL([ENABLE_CLMUL], [test "$enable_clmul" = "yes"])
-AM_CONDITIONAL([HAVE_CLZ], [test "$have_clzl$have_clzll" = "yesyes"])
 
 AC_DEFINE([CLIENT_VERSION_MAJOR], [_CLIENT_VERSION_MAJOR], [Major version])
 AC_DEFINE([CLIENT_VERSION_MINOR], [_CLIENT_VERSION_MINOR], [Minor version])
@@ -1998,7 +1969,6 @@ echo "  with upnp       = $use_upnp"
 echo "  with natpmp     = $use_natpmp"
 echo "  use asm         = $use_asm"
 echo "  liquid_build    = $liquid_build"
-echo "  any_asset_fees  = $any_asset_fees"
 echo "  USDT tracing    = $use_usdt"
 echo "  sanitizers      = $use_sanitizers"
 echo "  debug enabled   = $enable_debug"

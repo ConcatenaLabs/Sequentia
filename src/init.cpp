@@ -133,6 +133,7 @@ static const bool DEFAULT_REST_ENABLE = false;
 #endif
 
 static const char* DEFAULT_ASMAP_FILENAME="ip_asn.map";
+static constexpr int MAX_32BIT_MEMPOOL_MB{500};
 
 /**
  * The PID file facilities.
@@ -240,9 +241,9 @@ void Shutdown(NodeContext& node)
 
     // After everything has been shut down, but before things get flushed, stop the
     // CScheduler/checkqueue, scheduler and load block thread.
+    if (node.chainman && node.chainman->m_load_block.joinable()) node.chainman->m_load_block.join();
     if (node.scheduler) node.scheduler->stop();
     if (node.reverification_scheduler) node.reverification_scheduler->stop();
-    if (node.chainman && node.chainman->m_load_block.joinable()) node.chainman->m_load_block.join();
     StopScriptCheckWorkerThreads();
 
     // After the threads that potentially access these pointers have been stopped,
@@ -449,7 +450,7 @@ void SetupServerArgs(ArgsManager& argsman)
     hidden_args.emplace_back("-sysperms");
 #endif
     argsman.AddArg("-txindex", strprintf("Maintain a full transaction index, used by the getrawtransaction rpc call (default: %u)", DEFAULT_TXINDEX), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-trim_headers", strprintf("Trim old headers in memory (by default older than 2 epochs), removing blocksigning and dynafed-related fields. Saves memory, but blocks us from serving blocks or headers to peers, and removes trimmed fields from some JSON RPC outputs. (default: false)"), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-trim_headers", strprintf("Trim old headers in memory (by default older than 2 epochs), removing blocksigning and dynafed-related fields. Saves memory, but blocks us from serving blocks or headers to peers, and removes trimmed fields from some JSON RPC outputs. (default: 0)"), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-blockfilterindex=<type>",
                  strprintf("Maintain an index of compact filters by block (default: %s, values: %s).", DEFAULT_BLOCKFILTERINDEX, ListBlockFilterTypes()) +
                  " If <type> is not supplied or if <type> = 1, indexes for all known types are enabled.",
@@ -624,7 +625,7 @@ void SetupServerArgs(ArgsManager& argsman)
     std::vector<std::string> elements_hidden_args = {"-con_fpowallowmindifficultyblocks", "-con_fpownoretargeting", "-con_nsubsidyhalvinginterval", "-con_bip16exception", "-con_bip34height", "-con_bip65height", "-con_bip66height", "-con_npowtargettimespan", "-con_npowtargetspacing", "-con_nrulechangeactivationthreshold", "-con_nminerconfirmationwindow", "-con_powlimit", "-con_bip34hash", "-con_nminimumchainwork", "-con_defaultassumevalid", "-npruneafterheight", "-fdefaultconsistencychecks", "-fmineblocksondemand", "-fallback_fee_enabled", "-pchmessagestart"};
 
     argsman.AddArg("-initialfreecoins", strprintf("The amount of OP_TRUE coins created in the genesis block. Primarily for testing. (default: %d)", 0), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
-    argsman.AddArg("-validatepegin", "Validate peg-in claims. An RPC connection will be attempted to the trusted mainchain daemon using the `mainchain*` settings below. All functionaries must run this enabled. (default: true if chain has federated peg)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
+    argsman.AddArg("-validatepegin", "Validate peg-in claims. An RPC connection will be attempted to the trusted mainchain daemon using the `mainchain*` settings below. All functionaries must run this enabled. (default: 1 if chain has federated peg)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-mainchainrpchost=<host>", "The address which the daemon will try to connect to the trusted mainchain daemon to validate peg-ins, if enabled. (default: 127.0.0.1)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-mainchainrpcport=<n>", strprintf("The port which the daemon will try to connect to the trusted mainchain daemon to validate peg-ins, if enabled. (default: %u)", defaultBaseParams->MainchainRPCPort()), ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-mainchainrpcuser=<user>", "The rpc username that the daemon will use to connect to the trusted mainchain daemon to validate peg-ins, if enabled. (default: cookie auth)", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::ELEMENTS);
@@ -649,7 +650,8 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-validateanchor", "Validate block anchors against the mainchain daemon, and reorganize when the mainchain reorganizes. Disable only for offline validation of already-anchored chains. Only used when con_bitcoin_anchor is enabled. (default: true)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-anchorminconf=<n>", strprintf("Number of mainchain confirmations a Bitcoin block needs before new blocks anchor to it. 1 anchors to the mainchain tip. Only used when con_bitcoin_anchor is enabled. (default: %d)", DEFAULT_ANCHOR_MIN_CONF), ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-anchorpollinterval=<n>", strprintf("Seconds between polls of the mainchain daemon for new blocks and reorganizations. Only used when con_bitcoin_anchor is enabled. (default: %d)", DEFAULT_ANCHOR_POLL_INTERVAL), ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
-
+    argsman.AddArg("-acceptdiscountct", "Accept discounted fees for Confidential Transactions (default: 1 in liquidtestnet and liquidv1, 0 otherwise)", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
+    argsman.AddArg("-creatediscountct", "Create Confidential Transactions with discounted fees (default: 0). Setting this to 1 will also set 'acceptdiscountct' to 1.", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
 
 #if defined(USE_SYSCALL_SANDBOX)
     argsman.AddArg("-sandbox=<mode>", "Use the experimental syscall sandbox in the specified mode (-sandbox=log-and-abort or -sandbox=abort). Allow only expected syscalls to be used by bitcoind. Note that this is an experimental new feature that may cause bitcoind to exit or crash unexpectedly: use with caution. In the \"log-and-abort\" mode the invocation of an unexpected syscall results in a debug handler being invoked which will log the incident and terminate the program (without executing the unexpected syscall). In the \"abort\" mode the invocation of an unexpected syscall results in the entire process being killed immediately by the kernel without executing the unexpected syscall.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -984,6 +986,10 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     int64_t nMempoolSizeMin = args.GetIntArg("-limitdescendantsize", DEFAULT_DESCENDANT_SIZE_LIMIT) * 1000 * 40;
     if (nMempoolSizeMax < 0 || nMempoolSizeMax < nMempoolSizeMin)
         return InitError(strprintf(_("-maxmempool must be at least %d MB"), std::ceil(nMempoolSizeMin / 1000000.0)));
+    constexpr bool is_32bit{sizeof(void*) == 4};
+    if (is_32bit && nMempoolSizeMax > MAX_32BIT_MEMPOOL_MB * 1000000) {
+        return InitError(strprintf(_("-maxmempool is set to %i but can't be over %i MB on 32-bit systems"), std::ceil(nMempoolSizeMax / 1000000.0), MAX_32BIT_MEMPOOL_MB));
+    }
     // incremental relay fee sets the minimum feerate increase necessary for BIP 125 replacement in the mempool
     // and the amount the mempool min fee increases above the feerate of txs evicted due to mempool limiting.
     if (args.IsArgSet("-incrementalrelayfee")) {
@@ -1019,13 +1025,13 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     }
 
     if (args.GetBoolArg("-trim_headers", false)) {
-        LogPrintf("Configured for header-trimming mode. This will reduce memory usage substantially, but we will be unable to serve as a full P2P peer, and certain header fields may be missing from JSON RPC output.\n");
+        LogPrintf("Configured for header-trimming mode. This will reduce memory usage substantially, but will increase IO usage when the headers need to be temporarily untrimmed.\n");
         node::fTrimHeaders = true;
         // This calculation is driven by GetValidFedpegScripts in pegins.cpp, which walks the chain
         //   back to current epoch start, and then an additional total_valid_epochs on top of that.
         //   We add one epoch here for the current partial epoch, and then another one for good luck.
 
-        node::nMustKeepFullHeaders = (chainparams.GetConsensus().total_valid_epochs + 2) * epoch_length;
+        node::nMustKeepFullHeaders = chainparams.GetConsensus().total_valid_epochs * epoch_length;
         // This is the number of headers we can have in flight downloading at a time, beyond the
         //   set of blocks we've already validated. Capping this is necessary to keep memory usage
         //   bounded during IBD.
@@ -1255,6 +1261,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     const ArgsManager& args = *Assert(node.args);
     const CChainParams& chainparams = Params();
 
+    CBlockIndex::SetNodeContext(&node);
     auto opt_max_upload = ParseByteUnits(args.GetArg("-maxuploadtarget", DEFAULT_MAX_UPLOAD_TARGET), ByteUnit::M);
     if (!opt_max_upload) {
         return InitError(strprintf(_("Unable to parse -maxuploadtarget: '%s'"), args.GetArg("-maxuploadtarget", "")));
@@ -1590,6 +1597,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     }
     LogPrintf("* Using %.1f MiB for chain state database\n", cache_sizes.coins_db * (1.0 / 1024 / 1024));
     LogPrintf("* Using %.1f MiB for in-memory UTXO set (plus up to %.1f MiB of unused mempool space)\n", cache_sizes.coins * (1.0 / 1024 / 1024), nMempoolSizeMax * (1.0 / 1024 / 1024));
+    LogPrintf("ELIP 203 is%s active\n", (chainparams.GetAcceptUnlimitedIssuances())?"":" not");
 
     bool fLoaded = false;
     while (!fLoaded && !ShutdownRequested()) {
@@ -1760,7 +1768,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 
     // if pruning, unset the service bit and perform the initial blockstore prune
     // after any wallet rescanning has taken place.
-    if (fPruneMode || node::fTrimHeaders) {
+    if (fPruneMode) {
         LogPrintf("Unsetting NODE_NETWORK on prune mode\n");
         nLocalServices = ServiceFlags(nLocalServices & ~NODE_NETWORK);
         if (!fReindex) {
@@ -1770,11 +1778,6 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                 chainstate->PruneAndFlush();
             }
         }
-    }
-
-    if (node::fTrimHeaders) {
-        LogPrintf("Unsetting NODE_NETWORK_LIMITED on header trim mode\n");
-        nLocalServices = ServiceFlags(nLocalServices & ~NODE_NETWORK_LIMITED);
     }
 
     // ********************************************************* Step 11: import blocks

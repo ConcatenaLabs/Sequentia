@@ -261,6 +261,10 @@ class PSBTTest(BitcoinTestFramework):
         decoded = self.nodes[1].decodepsbt(walletsignpsbt_out['psbt'])
         assert 'non_witness_utxo' in decoded['inputs'][0]
         assert 'witness_utxo' in decoded['inputs'][0]
+        if 'asset' in decoded['inputs'][0]['witness_utxo']:
+            assert_equal(decoded['inputs'][0]['witness_utxo']['asset'], 'b2e15d0d7a0c94e4e2ce0fe6e8691b9e451377f6e46e8045a86f7c4b5d4f0f23')
+        else:
+            assert 'assetcommitment' in decoded['inputs'][0]['witness_utxo']
         # Check decodepsbt fee calculation (input values shall only be counted once per UTXO)
         #assert_equal(decoded['fee'], created_psbt['fee']) # ELEMENTS: we do not have this field. Should be fixed by #900
         assert_equal(walletsignpsbt_out['complete'], True)
@@ -1147,6 +1151,8 @@ class PSBTTest(BitcoinTestFramework):
         # An external input without solving data should result in an error
         assert_raises_rpc_error(-4, "Insufficient funds", wallet.walletcreatefundedpsbt, [ext_utxo], [{self.nodes[0].getnewaddress(): 15}])
 
+        # ELEMENTS: check psbt version is 2
+        assert_raises_rpc_error(-8, "The PSBT version can only be 2", wallet.walletcreatefundedpsbt, [ext_utxo], [{self.nodes[0].getnewaddress(): 15}], 0, {"add_inputs": True, "solving_data": {"pubkeys": [addr_info['pubkey']], "scripts": [addr_info["embedded"]["scriptPubKey"]]}},True,1)
         # But funding should work when the solving data is provided
         psbt = wallet.walletcreatefundedpsbt([ext_utxo], [{self.nodes[0].getnewaddress(): 15}], 0, {"add_inputs": True, "solving_data": {"pubkeys": [addr_info['pubkey']], "scripts": [addr_info["embedded"]["scriptPubKey"], addr_info["embedded"]["embedded"]["scriptPubKey"]]}})
         signed = wallet.walletprocesspsbt(psbt['psbt'])

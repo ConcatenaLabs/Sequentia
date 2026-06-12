@@ -134,7 +134,10 @@ public:
     const std::string& ParentBech32HRP() const { return parent_bech32_hrp; }
     const std::string& ParentBlech32HRP() const { return parent_blech32_hrp; }
     bool GetEnforcePak() const { return enforce_pak; }
+    bool GetAcceptUnlimitedIssuances() const { return accept_unlimited_issuances; }
     bool GetMultiDataPermitted() const { return multi_data_permitted; }
+    bool GetAcceptDiscountCT() const { return accept_discount_ct; }
+    bool GetCreateDiscountCT() const { return create_discount_ct; }
 
 protected:
     CChainParams() {}
@@ -151,8 +154,11 @@ protected:
     std::string blech32_hrp;
     std::string strNetworkID;
     CBlock genesis;
-    CAmount initialFreeCoins;
-    CAmount initial_reissuance_tokens;
+    // SEQUENTIA: default-initialized; CTestNetParams reads these when building
+    // its genesis block without setting them first, so uninitialized memory
+    // here makes the genesis hash nondeterministic.
+    CAmount initialFreeCoins{0};
+    CAmount initial_reissuance_tokens{0};
     std::vector<uint8_t> vFixedSeeds;
     bool fDefaultConsistencyChecks;
     bool fRequireStandard;
@@ -166,7 +172,10 @@ protected:
     std::string parent_bech32_hrp;
     std::string parent_blech32_hrp;
     bool enforce_pak;
+    bool accept_unlimited_issuances;
     bool multi_data_permitted;
+    bool accept_discount_ct;
+    bool create_discount_ct;
 };
 
 /**

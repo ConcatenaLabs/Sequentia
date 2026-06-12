@@ -37,6 +37,7 @@ from test_framework.script import (
     CScriptOp,
     hash256,
     LEAF_VERSION_TAPSCRIPT,
+    LEAF_VERSION_TAPSIMPLICITY,
     LegacySignatureMsg,
     LOCKTIME_THRESHOLD,
     MAX_SCRIPT_ELEMENT_SIZE,
@@ -75,6 +76,7 @@ from test_framework.script import (
     OP_PUSHDATA1,
     OP_RETURN,
     OP_SWAP,
+    OP_TUCK,
     OP_VERIFY,
     SIGHASH_DEFAULT,
     SIGHASH_ALL,
@@ -98,6 +100,7 @@ from test_framework.script_util import (
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import assert_raises_rpc_error, assert_equal
 from test_framework import util
+from test_framework.wallet_util import generate_keypair
 from test_framework.key import generate_privkey, compute_xonly_pubkey, sign_schnorr, tweak_add_privkey, ECKey
 from test_framework.address import (
     hash160,
@@ -172,9 +175,9 @@ def get(ctx, name):
         ctx[name] = expr
     return expr.value
 
-def getter(name):
+def getter(name, **kwargs):
     """Return a callable that evaluates name in its passed context."""
-    return lambda ctx: get(ctx, name)
+    return lambda ctx: get({**ctx, **kwargs}, name)
 
 def override(expr, **kwargs):
     """Return a callable that evaluates expr in a modified context."""
@@ -218,7 +221,20 @@ def default_controlblock(ctx):
     """Default expression for "controlblock": combine leafversion, negflag, pubkey_internal, merklebranch."""
     return bytes([get(ctx, "leafversion") + get(ctx, "negflag")]) + get(ctx, "pubkey_internal") + get(ctx, "merklebranch")
 
-#ELEMENTS: taphash depends on genesis hash
+def default_scriptcode_suffix(ctx):
+    """Default expression for "scriptcode_suffix", the actually used portion of the scriptcode."""
+    scriptcode = get(ctx, "scriptcode")
+    codesepnum = get(ctx, "codesepnum")
+    if codesepnum == -1:
+        return scriptcode
+    codeseps = 0
+    for (opcode, data, sop_idx) in scriptcode.raw_iter():
+        if opcode == OP_CODESEPARATOR:
+            if codeseps == codesepnum:
+                return CScript(scriptcode[sop_idx+1:])
+            codeseps += 1
+    assert False
+
 def default_sigmsg(ctx):
     """Default expression for "sigmsg": depending on mode, compute BIP341, BIP143, or legacy sigmsg."""
     tx = get(ctx, "tx")
@@ -239,12 +255,12 @@ def default_sigmsg(ctx):
             return TaprootSignatureMsg(tx, utxos, hashtype, genesis_hash, idx, scriptpath=False, annex=annex)
     elif mode == "witv0":
         # BIP143 signature hash
-        scriptcode = get(ctx, "scriptcode")
+        scriptcode = get(ctx, "scriptcode_suffix")
         utxos = get(ctx, "utxos")
         return SegwitV0SignatureMsg(scriptcode, tx, idx, hashtype, utxos[idx].nValue, enable_sighash_rangeproof=False)
     else:
         # Pre-segwit signature hash
-        scriptcode = get(ctx, "scriptcode")
+        scriptcode = get(ctx, "scriptcode_suffix")
         return LegacySignatureMsg(scriptcode, tx, idx, hashtype, enable_sighash_rangeproof=False)[0]
 
 def default_sighash(ctx):
@@ -304,7 +320,12 @@ def default_hashtype_actual(ctx):
 
 def default_bytes_hashtype(ctx):
     """Default expression for "bytes_hashtype": bytes([hashtype_actual]) if not 0, b"" otherwise."""
-    return bytes([x for x in [get(ctx, "hashtype_actual")] if x != 0])
+    mode = get(ctx, "mode")
+    hashtype_actual = get(ctx, "hashtype_actual")
+    if mode != "taproot" or hashtype_actual != 0:
+        return bytes([hashtype_actual])
+    else:
+        return bytes()
 
 def default_sign(ctx):
     """Default expression for "sign": concatenation of signature and bytes_hashtype."""
@@ -322,6 +343,8 @@ def default_witness_taproot(ctx):
         suffix_annex = [annex]
     if get(ctx, "leaf") is None:
         return get(ctx, "inputs_keypath") + suffix_annex
+    elif get(ctx, "leafversion") == LEAF_VERSION_TAPSIMPLICITY:
+        return [bytes(get(ctx, "simplicity_witness")), bytes(get(ctx, "simplicity_program")), bytes(get(ctx, "script_taproot")), get(ctx, "controlblock")] + suffix_annex
     else:
         return get(ctx, "inputs") + [bytes(get(ctx, "script_taproot")), get(ctx, "controlblock")] + suffix_annex
 
@@ -382,6 +405,8 @@ DEFAULT_CONTEXT = {
     "key_tweaked": default_key_tweaked,
     # The tweak to use (None for script path spends, the actual tweak for key path spends).
     "tweak": default_tweak,
+    # The part of the scriptcode after the last executed OP_CODESEPARATOR.
+    "scriptcode_suffix": default_scriptcode_suffix,
     # The sigmsg value (preimage of sighash)
     "sigmsg": default_sigmsg,
     # The sighash value (32 bytes)
@@ -390,6 +415,10 @@ DEFAULT_CONTEXT = {
     "tapleaf": default_tapleaf,
     # The script to push, and include in the sighash, for a taproot script path spend.
     "script_taproot": default_script_taproot,
+    # The simplicity program for a taproot simplicity spend.
+    "simplicity_program": [],
+    # The simplicity witness data for a simplicity program.
+    "simplicity_witness": [],
     # The internal pubkey for a taproot script path spend (32 bytes).
     "pubkey_internal": default_pubkey_internal,
     # The negation flag of the internal pubkey for a taproot script path spend.
@@ -412,6 +441,8 @@ DEFAULT_CONTEXT = {
     "annex": None,
     # The codeseparator position (only when mode=="taproot").
     "codeseppos": -1,
+    # Which OP_CODESEPARATOR is the last executed one in the script (in legacy/P2SH/P2WSH).
+    "codesepnum": -1,
     # The redeemscript to add to the scriptSig (if P2SH; None implies not P2SH).
     "script_p2sh": None,
     # The script to add to the witness in (if P2WSH; None implies P2WPKH)
@@ -637,6 +668,8 @@ ERR_UNDECODABLE = {"err_msg": "Opcode missing or not understood"}
 ERR_NO_SUCCESS = {"err_msg": "Script evaluated without error but finished with a false/empty top stack element"}
 ERR_EMPTY_WITNESS = {"err_msg": "Witness program was passed an empty witness"}
 ERR_CHECKSIGVERIFY = {"err_msg": "Script failed an OP_CHECKSIGVERIFY operation"}
+ERR_SIMPLICITY_BITSTREAM_EOF = {"err_msg": "Unexpected end of bitstream"}
+ERR_SIMPLICITY_BITSTREAM_ILLEGAL_PADDING = {"err_msg": "Illegal padding in final byte of program"}
 
 VALID_SIGHASHES_ECDSA = [
     SIGHASH_ALL,
@@ -1093,8 +1126,8 @@ def spenders_taproot_active():
 
     # Future leaf versions
     for leafver in range(0, 0x100, 2):
-        if leafver == LEAF_VERSION_TAPSCRIPT or leafver == ANNEX_TAG:
-            # Skip the defined LEAF_VERSION_TAPSCRIPT, and the ANNEX_TAG which is not usable as leaf version
+        if leafver in [LEAF_VERSION_TAPSCRIPT, LEAF_VERSION_TAPSIMPLICITY, ANNEX_TAG]:
+            # Skip allocated tapleaf versions and the ANNEX_TAG which is not usable as leaf version
             continue
         scripts = [
             ("bare_c0", CScript([OP_NOP])),
@@ -1161,6 +1194,13 @@ def spenders_taproot_active():
         tap = taproot_construct(pubs[0], scripts)
         add_spender(spenders, "alwaysvalid/notsuccessx", tap=tap, leaf="op_success", inputs=[], standard=False, failure={"leaf": "normal"}) # err_msg differs based on opcode
 
+    # == Simplicity tests ==
+
+    tap = taproot_construct(pubs[0], [("simplicity_iden", bytes.fromhex("541a1a69bd4bcbda7f34310e3078f726443122fbcc1cb5360c7864ec0d323ac0"), LEAF_VERSION_TAPSIMPLICITY)])
+    add_spender(spenders, "simplicity/empty_program", tap=tap, leaf="simplicity_iden", simplicity_program=bytes.fromhex("20"), failure={"simplicity_program": b''}, **ERR_SIMPLICITY_BITSTREAM_EOF)
+    # tempoarily removed because random bit errors will cause differt sorts of Simplicity errors.
+    # add_spender(spenders, "simplicity/iden", tap=tap, leaf="simplicity_iden", simplicity_program=bytes.fromhex("20"), failure={"simplicity_program": bitflipper(bytes.fromhex("20"))}, **ERR_SIMPLICITY_BITSTREAM_ILLEGAL_PADDING)
+
     # == Legacy tests ==
 
     # Also add a few legacy spends into the mix, so that transactions which combine taproot and pre-taproot spends get tested too.
@@ -1183,6 +1223,70 @@ def spenders_taproot_active():
             for hashtype in VALID_SIGHASHES_ECDSA + [random.randrange(0x04, 0x80), random.randrange(0x84, 0x100)]:
                 standard = hashtype in VALID_SIGHASHES_ECDSA and (p2sh or witv0)
                 add_spender(spenders, "compat/nocsa", hashtype=hashtype, p2sh=p2sh, witv0=witv0, standard=standard, script=CScript([OP_IF, OP_11, pubkey1, OP_CHECKSIGADD, OP_12, OP_EQUAL, OP_ELSE, pubkey1, OP_CHECKSIG, OP_ENDIF]), key=eckey1, sigops_weight=4-3*witv0, inputs=[getter("sign"), b''], failure={"inputs": [getter("sign"), b'\x01']}, **ERR_UNDECODABLE)
+
+    # == sighash caching tests ==
+
+    # Sighash caching in legacy.
+    for p2sh in [False, True]:
+        for witv0 in [False, True]:
+            eckey1, pubkey1 = generate_keypair(compressed=compressed)
+            for _ in range(10):
+                # Construct a script with 20 checksig operations (10 sighash types, each 2 times),
+                # randomly ordered and interleaved with 4 OP_CODESEPARATORS.
+                ops = [1, 2, 3, 0x21, 0x42, 0x63, 0x81, 0x83, 0xe1, 0xc2, -1, -1] * 2
+                # Make sure no OP_CODESEPARATOR appears last.
+                while True:
+                    random.shuffle(ops)
+                    if ops[-1] != -1:
+                        break
+                script = [pubkey1]
+                inputs = []
+                codeseps = -1
+                for pos, op in enumerate(ops):
+                    if op == -1:
+                        codeseps += 1
+                        script.append(OP_CODESEPARATOR)
+                    elif pos + 1 != len(ops):
+                        script += [OP_TUCK, OP_CHECKSIGVERIFY]
+                        inputs.append(getter("sign", codesepnum=codeseps, hashtype=op))
+                    else:
+                        script += [OP_CHECKSIG]
+                        inputs.append(getter("sign", codesepnum=codeseps, hashtype=op))
+                inputs.reverse()
+                script = CScript(script)
+                add_spender(spenders, "sighashcache/legacy", p2sh=p2sh, witv0=witv0, standard=False, script=script, inputs=inputs, key=eckey1, sigops_weight=12*8*(4-3*witv0), no_fail=True)
+
+    # Sighash caching in tapscript.
+    for _ in range(10):
+        # Construct a script with 700 checksig operations (7 sighash types, each 100 times),
+        # randomly ordered and interleaved with 100 OP_CODESEPARATORS.
+        ops = [0, 1, 2, 3, 0x81, 0x82, 0x83, -1] * 100
+        # Make sure no OP_CODESEPARATOR appears last.
+        while True:
+            random.shuffle(ops)
+            if ops[-1] != -1:
+                 break
+        script = [pubs[1]]
+        inputs = []
+        opcount = 1
+        codeseppos = -1
+        for pos, op in enumerate(ops):
+            if op == -1:
+                codeseppos = opcount
+                opcount += 1
+                script.append(OP_CODESEPARATOR)
+            elif pos + 1 != len(ops):
+                opcount += 2
+                script += [OP_TUCK, OP_CHECKSIGVERIFY]
+                inputs.append(getter("sign", codeseppos=codeseppos, hashtype=op))
+            else:
+                opcount += 1
+                script += [OP_CHECKSIG]
+                inputs.append(getter("sign", codeseppos=codeseppos, hashtype=op))
+        inputs.reverse()
+        script = CScript(script)
+        tap = taproot_construct(pubs[0], [("leaf", script)])
+        add_spender(spenders, "sighashcache/taproot", tap=tap, leaf="leaf", inputs=inputs, standard=True, key=secs[1], no_fail=True)
 
     return spenders
 
@@ -1286,6 +1390,10 @@ class TaprootTest(BitcoinTestFramework):
             self.wallet_names = [None, self.default_wallet_name]
         else:
             self.extra_args[0].append("-vbparams=taproot:1:1")
+            # ELEMENTS: both nodes have Simplicity active. We activate one with evbparams
+            # and the other with vbparams to check that both work.
+            self.extra_args[0].append("-vbparams=simplicity:-1:1")
+            self.extra_args[1].append("-evbparams=simplicity:-1:::")
 
     def setup_nodes(self):
         self.add_nodes(self.num_nodes, self.extra_args, versions=[

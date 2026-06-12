@@ -3,7 +3,7 @@ Sequentia is a Bitcoin sidechain dedicated to asset tokenization and decentraliz
 
 https://sequentia.io/
 
-Current code is based on Elements Version: 23.2.1
+Current code is based on Elements Version: 23.3.3
 
 ## SequentiaByClaude design specification
 

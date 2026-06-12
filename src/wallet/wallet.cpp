@@ -1430,7 +1430,7 @@ CAmountMap CWallet::GetDebit(const CTransaction& tx, const isminefilter& filter)
     for (const CTxIn& txin : tx.vin)
     {
         nDebit += GetDebit(txin, filter);
-        if (!MoneyRange(nDebit))
+        if (!MoneyRange(nDebit, Params().GetConsensus().pegged_asset))
             throw std::runtime_error(std::string(__func__) + ": value out of range");
     }
     return nDebit;
@@ -1689,6 +1689,11 @@ CWallet::ScanResult CWallet::ScanForWalletTransactions(const uint256& start_bloc
         if (max_height && block_height >= *max_height) {
             break;
         }
+        if (block_height >= WITH_LOCK(cs_wallet, return GetLastBlockHeight())) {
+            WalletLogPrintf("Stopping scan. At block %d. Progress=%f\n", block_height, progress_current);
+            break;
+        }
+
         {
             if (!next_block) {
                 // break successfully when rescan has reached the tip, or
@@ -3024,7 +3029,7 @@ std::shared_ptr<CWallet> CWallet::Create(WalletContext& context, const std::stri
 
     if (args.IsArgSet("-mintxfee")) {
         std::optional<CAmount> min_tx_fee = ParseMoney(args.GetArg("-mintxfee", ""));
-        if (!min_tx_fee || min_tx_fee.value() == 0) {
+        if (!min_tx_fee) {
             error = AmountErrMsg("mintxfee", args.GetArg("-mintxfee", ""));
             return nullptr;
         } else if (min_tx_fee.value() > HIGH_TX_FEE_PER_KB) {

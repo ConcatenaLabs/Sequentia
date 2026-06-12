@@ -214,6 +214,12 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nTimeout = 1628640000; // August 11th, 2021
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 709632; // Approximately November 12th, 2021
 
+        // Simplicity
+        consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].bit = 21;
+        consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
+        consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
+        consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].min_activation_height = 0; // No activation delay
+
         consensus.nMinimumChainWork = uint256S("0x00000000000000000000000000000000000000002927cdceccbd5209e81e80db");
         consensus.defaultAssumeValid = uint256S("0x000000000000000000052d314a259755ca65944e68df6b12a067ea8f1f5a7091"); // 724466
 
@@ -221,8 +227,11 @@ public:
         consensus.connect_genesis_outputs = false;
         consensus.subsidy_asset = CAsset();
         anyonecanspend_aremine = false;
+        accept_unlimited_issuances = false;
         enforce_pak = false;
         multi_data_permitted = false;
+        accept_discount_ct = false;
+        create_discount_ct = false;
         consensus.has_parent_chain = false;
         g_signed_blocks = false;
         g_con_elementsmode = false;
@@ -354,6 +363,13 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nPeriod = 10080; // one week...
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nThreshold = 10080; // ...of 100% signalling
 
+        // Simplicity: never active on the Sequentia chain (set to avoid use
+        // of uninitialized memory, as for the other deployments)
+        consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].bit = 21;
+        consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
+        consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
+        consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].min_activation_height = 0; // No activation delay
+
         consensus.nMinimumChainWork = uint256();
         consensus.defaultAssumeValid = uint256();
 
@@ -361,7 +377,10 @@ public:
         consensus.connect_genesis_outputs = true;
         anyonecanspend_aremine = true;
         enforce_pak = false;
+        accept_unlimited_issuances = false;
         multi_data_permitted = false;
+        accept_discount_ct = false;
+        create_discount_ct = false;
         consensus.has_parent_chain = false;
         g_con_elementsmode = true;
         g_con_blockheightinheader = true;
@@ -535,13 +554,22 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 0; // No activation delay
 
+        // Simplicity
+        consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].bit = 21;
+        consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
+        consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
+        consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].min_activation_height = 0; // No activation delay
+
         // ELEMENTS: copied from Main
         consensus.genesis_subsidy = 50*COIN;
         consensus.connect_genesis_outputs = false;
         consensus.subsidy_asset = CAsset();
         anyonecanspend_aremine = false;
         enforce_pak = false;
+        accept_unlimited_issuances = false;
         multi_data_permitted = false;
+        accept_discount_ct = false;
+        create_discount_ct = false;
         consensus.has_parent_chain = false;
         g_signed_blocks = false; // lol
         g_con_elementsmode = false;
@@ -627,6 +655,14 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nPeriod = 128; // test ability to change from default
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nThreshold = 128;
 
+        // Simplicity
+        consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].bit = 21;
+        consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
+        consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
+        consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].min_activation_height = 0; // No activation delay
+        consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].nPeriod = 128; // test ability to change from default
+        consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].nThreshold = 128;
+
         consensus.nMinimumChainWork = uint256{};
         consensus.defaultAssumeValid = uint256{};
 
@@ -635,7 +671,10 @@ public:
         consensus.subsidy_asset = CAsset();
         anyonecanspend_aremine = false;
         enforce_pak = false;
+        accept_unlimited_issuances = false;
         multi_data_permitted = false;
+        accept_discount_ct = false;
+        create_discount_ct = false;
         consensus.has_parent_chain = false;
         g_signed_blocks = false;
         g_con_elementsmode = false;
@@ -788,6 +827,7 @@ class CCustomParams : public CRegTestParams {
 protected:
     std::string default_magic_str = "5319F20E";
     std::string default_signblockscript = "51";
+    bool use_invalid_seeds = true;
     void UpdateFromArgs(const ArgsManager& args)
     {
         UpdateActivationParametersFromArgs(args);
@@ -855,7 +895,9 @@ protected:
         std::copy(begin(magic_byte), end(magic_byte), pchMessageStart);
 
         vSeeds.clear();
-        vSeeds.emplace_back("dummySeed.invalid.");
+        if (use_invalid_seeds) {
+            vSeeds.emplace_back("dummySeed.invalid.");
+        }
         if (args.IsArgSet("-seednode")) {
             const auto seednodes = args.GetArgs("-seednode");
             if (seednodes.size() != 1 || seednodes[0] != "0") {
@@ -901,6 +943,8 @@ protected:
 
         enforce_pak = args.GetBoolArg("-enforce_pak", false);
 
+        accept_unlimited_issuances = args.GetBoolArg("-acceptunlimitedissuances", accept_unlimited_issuances);
+
         // Allow multiple op_return outputs by relay policy
         multi_data_permitted = args.GetBoolArg("-multi_data_permitted", enforce_pak);
 
@@ -916,6 +960,8 @@ protected:
         const CScript default_script(CScript() << OP_TRUE);
         consensus.fedpegScript = StrHexToScriptWithDefault(args.GetArg("-fedpegscript", ""), default_script);
         consensus.start_p2wsh_script = args.GetIntArg("-con_start_p2wsh_script", consensus.start_p2wsh_script);
+        create_discount_ct = args.GetBoolArg("-creatediscountct", create_discount_ct);
+        accept_discount_ct = args.GetBoolArg("-acceptdiscountct", accept_discount_ct) || create_discount_ct;
 
         // Calculate pegged Bitcoin asset
         std::vector<unsigned char> commit = CommitToArguments(consensus, strNetworkID);
@@ -993,6 +1039,8 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_DYNA_FED].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
         consensus.vDeployments[Consensus::DEPLOYMENT_DYNA_FED].min_activation_height = 0; // No activation delay
 
+        create_discount_ct = false;
+        accept_discount_ct = false;
         UpdateFromArgs(args);
         SetGenesisBlock();
         consensus.hashGenesisBlock = genesis.GetHash();
@@ -1027,15 +1075,22 @@ public:
         base58Prefixes[BLINDED_ADDRESS] = std::vector<unsigned char>(1, 23);
         base58Prefixes[SECRET_KEY]      = std::vector<unsigned char>(1, base58Prefixes[SECRET_KEY][0]);
 
+        // turn on Simplicity unconditionally on Liquid Testnet
+        consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].nStartTime = Consensus::BIP9Deployment::ALWAYS_ACTIVE;
+        consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
+
         // disable automatic dynafed
         consensus.vDeployments[Consensus::DEPLOYMENT_DYNA_FED].nStartTime = 0;
 
         nDefaultPort = 18891;
+        use_invalid_seeds = false;
         vSeeds.clear();
         vFixedSeeds = std::vector<uint8_t>(std::begin(pnSeed6_liquidtestnet), std::end(pnSeed6_liquidtestnet));
 
         default_magic_str = "410EDD62";
         default_signblockscript = "51210217e403ddb181872c32a0cd468c710040b2f53d8cac69f18dad07985ee37e9a7151ae";
+        create_discount_ct = false;
+        accept_discount_ct = true;
         UpdateFromArgs(args);
         multi_data_permitted = true;
         SetGenesisBlock();
@@ -1043,6 +1098,7 @@ public:
         if (!args.IsArgSet("-seednode")) {
             vSeeds.emplace_back("seed.liquid-testnet.blockstream.com");
             vSeeds.emplace_back("seed.liquidtestnet.com");
+            vSeeds.emplace_back("liquid.network.");
         }
     }
 };
@@ -1052,7 +1108,7 @@ public:
  */
 class CLiquidV1Params : public CChainParams {
 public:
-    CLiquidV1Params()
+    explicit CLiquidV1Params(const ArgsManager& args)
     {
 
         strNetworkID = "liquidv1";
@@ -1108,6 +1164,7 @@ public:
 
         vSeeds.clear();
         vSeeds.emplace_back("seed.liquidnetwork.io");
+        vSeeds.emplace_back("liquid.network.");
         vFixedSeeds = std::vector<uint8_t>(std::begin(pnSeed6_liquidv1), std::end(pnSeed6_liquidv1));
 
         //
@@ -1147,7 +1204,11 @@ public:
 
         enforce_pak = true;
 
+        accept_unlimited_issuances = args.GetBoolArg("-acceptunlimitedissuances", false);
+
         multi_data_permitted = true;
+        create_discount_ct = args.GetBoolArg("-creatediscountct", false);
+        accept_discount_ct = args.GetBoolArg("-acceptdiscountct", true) || create_discount_ct;
 
         parentGenesisBlockHash = uint256S("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f");
         const bool parent_genesis_is_null = parentGenesisBlockHash == uint256();
@@ -1271,6 +1332,14 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nPeriod = 10080; // one week...
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nThreshold = 10080; // ...of 100% signalling
 
+        // Simplicity
+        consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].bit = 21;
+        consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].nStartTime = 3333333; // April 14, 2025
+        consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
+        consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].min_activation_height = 0; // No activation delay
+        consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].nPeriod = 10080; // one week...
+        consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].nThreshold = 10080; // ...of 100% signalling
+
         // Activated from block 1,000,000.
         consensus.vDeployments[Consensus::DEPLOYMENT_DYNA_FED].bit = 25;
         // Allow blocksigners to delay activation.
@@ -1291,7 +1360,7 @@ public:
  */
 class CLiquidV1TestParams : public CLiquidV1Params {
 public:
-    explicit CLiquidV1TestParams(const ArgsManager& args)
+    explicit CLiquidV1TestParams(const ArgsManager& args) : CLiquidV1Params(args)
     {
         // Our goal here is to override ONLY the things from liquidv1 that make no sense for a test chain / which are pointless and burdensome to require people to override manually.
 
@@ -1497,6 +1566,8 @@ public:
         enforce_pak = args.GetBoolArg("-enforce_pak", enforce_pak);
 
         multi_data_permitted = args.GetBoolArg("-multi_data_permitted", multi_data_permitted);
+        create_discount_ct = args.GetBoolArg("-creatediscountct", create_discount_ct);
+        accept_discount_ct = args.GetBoolArg("-acceptdiscountct", accept_discount_ct) || create_discount_ct;
 
         if (args.IsArgSet("-parentgenesisblockhash")) {
             parentGenesisBlockHash = uint256S(args.GetArg("-parentgenesisblockhash", ""));
@@ -1588,7 +1659,7 @@ std::unique_ptr<const CChainParams> CreateChainParams(const ArgsManager& args, c
     } else if (chain == CBaseChainParams::REGTEST) {
         return std::unique_ptr<CChainParams>(new CRegTestParams(args));
     } else if (chain == CBaseChainParams::LIQUID1) {
-        return std::unique_ptr<CChainParams>(new CLiquidV1Params());
+        return std::unique_ptr<CChainParams>(new CLiquidV1Params(args));
     } else if (chain == CBaseChainParams::LIQUID1TEST) {
         return std::unique_ptr<CChainParams>(new CLiquidV1TestParams(args));
     } else if (chain == CBaseChainParams::LIQUIDTESTNET) {

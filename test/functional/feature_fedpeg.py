@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import time
+import os
 
 from test_framework.authproxy import JSONRPCException
 from test_framework.test_framework import BitcoinTestFramework
@@ -152,7 +153,7 @@ class FedPegTest(BitcoinTestFramework):
             else:
                 # Need to specify where to find parent cookie file
                 datadir = get_datadir_path(self.options.tmpdir, n)
-                extra_args.append('-mainchainrpccookiefile='+datadir+"/" + parent_chain + "/.cookie")
+                extra_args.append('-mainchainrpccookiefile='+os.path.join(datadir, parent_chain, ".cookie"))
 
             self.add_nodes(1, [extra_args], chain=["elementsregtest"])
             self.start_node(2+n)
@@ -195,7 +196,10 @@ class FedPegTest(BitcoinTestFramework):
         # getting rid of old fedpegscript by making at least another epoch pass by
         WSH_OP_TRUE = self.nodes[0].decodescript("51")["segwit"]["hex"]
         # We just randomize the keys a bit to get another valid fedpegscript
-        new_fedpegscript = sidechain.tweakfedpegscript("f00dbabe")["script"]
+        tweaked = sidechain.tweakfedpegscript("f00dbabe")
+        assert sidechain.getaddressinfo(tweaked['p2wsh'])['iswitness']
+        assert not sidechain.getaddressinfo(tweaked['p2shwsh'])['iswitness']
+        new_fedpegscript = tweaked["script"]
         if self.options.post_transition:
             print("Running test post-transition")
             for _ in range(30):
@@ -217,6 +221,12 @@ class FedPegTest(BitcoinTestFramework):
         addrs = sidechain.getpeginaddress()
         addr = addrs["mainchain_address"]
         assert_equal(sidechain.decodescript(addrs["claim_script"])["type"], "witness_v0_keyhash")
+        current_fedpegscript = sidechain.getsidechaininfo()["current_fedpegscripts"][0]
+        tweaked = sidechain.tweakfedpegscript(addrs["claim_script"], current_fedpegscript)
+        if sidechain.getaddressinfo(addr)['iswitness']:
+            assert_equal(tweaked['p2wsh'], addr)
+        else:
+            assert_equal(tweaked['p2shwsh'], addr)
         txid1 = parent.sendtoaddress(addr, 24)
         vout = find_vout_for_address(parent, txid1, addr)
         # 10+2 confirms required to get into mempool and confirm
@@ -377,7 +387,7 @@ class FedPegTest(BitcoinTestFramework):
 
         # Look at pegin fields
         decoded = sidechain.decoderawtransaction(tx1["hex"])
-        assert decoded["vin"][0]["is_pegin"] == True
+        assert decoded["vin"][0]["is_pegin"]
         assert len(decoded["vin"][0]["pegin_witness"]) > 0
         # Check that there's sufficient fee for the peg-in
         vsize = decoded["vsize"]

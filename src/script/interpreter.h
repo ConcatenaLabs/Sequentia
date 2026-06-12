@@ -155,6 +155,10 @@ enum : uint32_t {
     //
     SCRIPT_SIGHASH_RANGEPROOF = (1U << 22),
 
+    // Support simplicity
+    //
+    SCRIPT_VERIFY_SIMPLICITY = (1U << 23),
+
     // Constants to point to the highest flag in use. Add new flags above this line.
     //
     SCRIPT_VERIFY_END_MARKER
@@ -162,8 +166,19 @@ enum : uint32_t {
 
 bool CheckSignatureEncoding(const std::vector<unsigned char> &vchSig, unsigned int flags, ScriptError* serror);
 
+// Forward declarations of Simplicity structures.
+struct elementsTransaction;
+struct rawElementsTapEnv;
+
+struct SimplicityTransactionDeleter
+{
+    void operator()(elementsTransaction* ptr) const;
+};
+using SimplicityTransactionUniquePtr = std::unique_ptr<elementsTransaction, SimplicityTransactionDeleter>;
+
 struct PrecomputedTransactionData
 {
+    SimplicityTransactionUniquePtr m_simplicity_tx_data;
     // BIP341 precomputed data.
     // These are single-SHA256, see https://github.com/bitcoin/bips/blob/master/bip-0341.mediawiki#cite_note-15.
     uint256 m_prevouts_single_hash;
@@ -195,6 +210,7 @@ struct PrecomputedTransactionData
     bool m_spent_outputs_ready = false;
 
     //! ELEMENTS: parent genesis hash
+    const uint256 m_hash_genesis_block;
     CHashWriter m_tapsighash_hasher;
 
     explicit PrecomputedTransactionData(const uint256& hash_genesis_block);
@@ -261,6 +277,7 @@ static constexpr size_t WITNESS_V1_TAPROOT_SIZE = 32;
 
 static constexpr uint8_t TAPROOT_LEAF_MASK = 0xfe;
 static constexpr uint8_t TAPROOT_LEAF_TAPSCRIPT = 0xc4;
+static constexpr uint8_t TAPROOT_LEAF_TAPSIMPLICITY = 0xbe;
 static constexpr size_t TAPROOT_CONTROL_BASE_SIZE = 33;
 static constexpr size_t TAPROOT_CONTROL_NODE_SIZE = 32;
 static constexpr size_t TAPROOT_CONTROL_MAX_NODE_COUNT = 128;
@@ -270,8 +287,27 @@ extern const CHashWriter HASHER_TAPSIGHASH_ELEMENTS; //!< Hasher with tag "TapSi
 extern const CHashWriter HASHER_TAPLEAF_ELEMENTS;    //!< Hasher with tag "TapLeaf" pre-fed to it.
 extern const CHashWriter HASHER_TAPBRANCH_ELEMENTS;  //!< Hasher with tag "TapBranch" pre-fed to it.
 
+/** Data structure to cache SHA256 midstates for the ECDSA sighash calculations
+ *  (bare, P2SH, P2WPKH, P2WSH). */
+class SigHashCache
+{
+    /** For each sighash mode (ALL, SINGLE, NONE, ALL|ANYONE, SINGLE|ANYONE, NONE|ANYONE, ALL|RANGEPROOF, SINGLE|RANGEPROOF, NONE|RANGEPROOF, ALL|ANYONE|RANGEPROOF, SINGLE|ANYONE|RANGEPROOF, NONE|ANYONE|RANGEPROOF),
+     *  optionally store a scriptCode which the hash is for, plus a midstate for the SHA256
+     *  computation just before adding the hash_type itself. */
+    std::optional<std::pair<CScript, CHashWriter>> m_cache_entries[16];
+
+    /** Given a hash_type, find which of the cache entries is to be used. */
+    int CacheIndex(int32_t hash_type) const noexcept;
+
+public:
+    /** Load into writer the SHA256 midstate if found in this cache. */
+    [[nodiscard]] bool Load(int32_t hash_type, const CScript& script_code, CHashWriter& writer) const noexcept;
+    /** Store into this cache object the provided SHA256 midstate. */
+    void Store(int32_t hash_type, const CScript& script_code, const CHashWriter& writer) noexcept;
+};
+
 template <class T>
-uint256 SignatureHash(const CScript& scriptCode, const T& txTo, unsigned int nIn, int nHashType, const CConfidentialValue& amount, SigVersion sigversion, unsigned int flags, const PrecomputedTransactionData* cache = nullptr);
+uint256 SignatureHash(const CScript& scriptCode, const T& txTo, unsigned int nIn, int nHashType, const CConfidentialValue& amount, SigVersion sigversion, unsigned int flags, const PrecomputedTransactionData* cache = nullptr, SigHashCache* sighash_cache = nullptr);
 
 class BaseSignatureChecker
 {
@@ -326,6 +362,11 @@ public:
         return std::numeric_limits<uint32_t>::max();
     }
 
+    virtual bool CheckSimplicity(const std::vector<unsigned char>& witness, const std::vector<unsigned char>& program, const rawElementsTapEnv& simplicityRawTap, int64_t budget, ScriptError* serror) const
+    {
+         return false;
+    }
+
     virtual ~BaseSignatureChecker() {}
 };
 
@@ -350,6 +391,7 @@ private:
     unsigned int nIn;
     const CConfidentialValue amount;
     const PrecomputedTransactionData* txdata;
+    mutable SigHashCache m_sighash_cache;
 
 protected:
     virtual bool VerifyECDSASignature(const std::vector<unsigned char>& vchSig, const CPubKey& vchPubKey, const uint256& sighash) const;
@@ -369,6 +411,7 @@ public:
 
     const PrecomputedTransactionData* GetPrecomputedTransactionData() const override;
     uint32_t GetnIn() const override;
+    bool CheckSimplicity(const std::vector<unsigned char>& program, const std::vector<unsigned char>& witness, const rawElementsTapEnv& simplicityRawTap, int64_t budget, ScriptError* serror) const override;
 };
 
 using TransactionSignatureChecker = GenericTransactionSignatureChecker<CTransaction>;

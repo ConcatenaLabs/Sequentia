@@ -446,7 +446,7 @@ static RPCHelpMan getmininginfo()
                         {RPCResult::Type::NUM, "difficulty", "The current difficulty"},
                         {RPCResult::Type::NUM, "networkhashps", "The network hashes per second"},
                         {RPCResult::Type::NUM, "pooledtx", "The size of the mempool"},
-                        {RPCResult::Type::STR, "chain", "current network name (main, test, signet, regtest)"},
+                        {RPCResult::Type::STR, "chain", "current network name (main, test, signet, regtest, liquidv1, liquidv1test, liquidtestnet)"},
                         {RPCResult::Type::STR, "warnings", "any network and blockchain warnings"},
                     }},
                 RPCExamples{
@@ -1542,6 +1542,10 @@ static RPCHelpMan getcompactsketch()
     std::vector<unsigned char> block_bytes(ParseHex(request.params[0].get_str()));
     CDataStream ssBlock(block_bytes, SER_NETWORK, PROTOCOL_VERSION);
     ssBlock >> block;
+
+    if (block.vtx.empty()) {
+        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Cannot obtain sketch of empty block.");
+    }
 
     CBlockHeaderAndShortTxIDs cmpctblock(block, true);
 

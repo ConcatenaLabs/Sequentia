@@ -726,6 +726,11 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
         }
     }
 
+    // Check unblinded issuance is in MoneyRange if configured
+    if (!chainparams.GetAcceptUnlimitedIssuances() && !IsIssuanceInMoneyRange(tx)) {
+        return state.Invalid(TxValidationResult::TX_NOT_STANDARD, "issuance-out-of-range", "Issuance is greater than 21 million and acceptunlimitedissuances is not enabled.");
+    }
+
     // Do not work on transactions that are too small.
     // A transaction with 1 segwit input and 1 P2WPHK output has non-witness size of 82 bytes.
     // Transactions smaller than this are not relayed to mitigate CVE-2017-12842 by not relaying
@@ -928,7 +933,9 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
 
     // No transactions are allowed below minRelayTxFee except from disconnected
     // blocks
-    if (!bypass_limits && !CheckFeeRate(ws.m_vsize, ws.m_modified_fees, state)) return false;
+    // ELEMENTS: accept discounted fees for Confidential Transactions only, if enabled.
+    int64_t package_size = Params().GetAcceptDiscountCT() ? GetDiscountVirtualTransactionSize(tx) : ws.m_vsize;
+    if (!bypass_limits && !CheckFeeRate(package_size, ws.m_modified_fees, state)) return false;
 
     ws.m_iters_conflicting = m_pool.GetIterSet(ws.m_conflicts);
     // Calculate in-mempool ancestors, up to a limit.
@@ -1087,13 +1094,8 @@ bool MemPoolAccept::PolicyScriptChecks(const ATMPArgs& args, Workspace& ws)
     // Check input scripts and signatures.
     // This is done last to help prevent CPU exhaustion denial-of-service attacks.
     if (!CheckInputScripts(tx, state, m_view, scriptVerifyFlags, true, false, ws.m_precomputed_txdata)) {
-        // SCRIPT_VERIFY_CLEANSTACK requires SCRIPT_VERIFY_WITNESS, so we
-        // need to turn both off, and compare against just turning off CLEANSTACK
-        // to see if the failure is specifically due to witness validation.
-        TxValidationState state_dummy; // Want reported failures to be from first CheckInputScripts
-        if (!tx.HasWitness() && CheckInputScripts(tx, state_dummy, m_view, scriptVerifyFlags & ~(SCRIPT_VERIFY_WITNESS | SCRIPT_VERIFY_CLEANSTACK), true, false, ws.m_precomputed_txdata) &&
-                !CheckInputScripts(tx, state_dummy, m_view, scriptVerifyFlags & ~SCRIPT_VERIFY_CLEANSTACK, true, false, ws.m_precomputed_txdata)) {
-            // Only the witness is missing, so the transaction itself may be fine.
+        // Detect a failure due to a missing witness so that p2p code can handle rejection caching appropriately.
+        if (!tx.HasWitness() && SpendsNonAnchorWitnessProg(tx, m_view)) {
             state.Invalid(TxValidationResult::TX_WITNESS_STRIPPED,
                     state.GetRejectReason(), state.GetDebugMessage());
         }
@@ -1805,21 +1807,15 @@ bool CheckInputScripts(const CTransaction& tx, TxValidationState& state,
         CCheck* check = new CScriptCheck(txdata.m_spent_outputs[i], tx, i, flags, cacheSigStore, &txdata);
         ScriptError serror = QueueCheck(pvChecks, check);
         if (serror != SCRIPT_ERR_OK) {
+            // Tx failures never trigger disconnections/bans.
+            // This is so that network splits aren't triggered
+            // either due to non-consensus relay policies (such as
+            // non-standard DER encodings or non-null dummy
+            // arguments) or due to new consensus rules introduced in
+            // soft forks.
             if (flags & STANDARD_NOT_MANDATORY_VERIFY_FLAGS) {
-                // Check whether the failure was caused by a
-                // non-mandatory script verification check, such as
-                // non-standard DER encodings or non-null dummy
-                // arguments; if so, ensure we return NOT_STANDARD
-                // instead of CONSENSUS to avoid downstream users
-                // splitting the network between upgraded and
-                // non-upgraded nodes by banning CONSENSUS-failing
-                // data providers.
-                CScriptCheck check2(txdata.m_spent_outputs[i], tx, i,
-                        flags & ~STANDARD_NOT_MANDATORY_VERIFY_FLAGS, cacheSigStore, &txdata);
-                if (check2()) {
-                    return state.Invalid(TxValidationResult::TX_NOT_STANDARD, strprintf("non-mandatory-script-verify-flag (%s)", ScriptErrorString(serror)));
-                }
-            }
+                return state.Invalid(TxValidationResult::TX_NOT_STANDARD, strprintf("mempool-script-verify-flag-failed (%s)", ScriptErrorString(serror)));
+            } else {
             // MANDATORY flag failures correspond to
             // TxValidationResult::TX_CONSENSUS. Because CONSENSUS
             // failures are the most serious case of validation
@@ -1829,7 +1825,8 @@ bool CheckInputScripts(const CTransaction& tx, TxValidationState& state,
             // support, to avoid splitting the network (but this
             // depends on the details of how net_processing handles
             // such errors).
-            return state.Invalid(TxValidationResult::TX_CONSENSUS, strprintf("mandatory-script-verify-flag-failed (%s)", ScriptErrorString(serror)));
+                return state.Invalid(TxValidationResult::TX_CONSENSUS, strprintf("mandatory-script-verify-flag-failed (%s)", ScriptErrorString(serror)));
+            }
         }
     }
 
@@ -2061,6 +2058,10 @@ static unsigned int GetBlockScriptFlags(const CBlockIndex* pindex, const Consens
         flags |= SCRIPT_SIGHASH_RANGEPROOF;
     }
 
+    if (DeploymentActiveAfter(pindex->pprev, consensusparams, Consensus::DEPLOYMENT_SIMPLICITY)) {
+        flags |= SCRIPT_VERIFY_SIMPLICITY;
+    }
+
     return flags;
 }
 
@@ -2156,12 +2157,12 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
 
     nBlocksTotal++;
 
-    // Check that all non-zero coinbase outputs pay to the required destination
+    // Check that all non-zero policyAsset coinbase outputs pay to the required destination
     const CScript& mandatory_coinbase_destination = m_params.GetConsensus().mandatory_coinbase_destination;
     if (mandatory_coinbase_destination != CScript()) {
         for (auto& txout : block.vtx[0]->vout) {
             bool mustPay = !txout.nValue.IsExplicit() || txout.nValue.GetAmount() != 0;
-            if (mustPay && txout.scriptPubKey != mandatory_coinbase_destination) {
+            if (mustPay && txout.nAsset.GetAsset() == policyAsset && txout.scriptPubKey != mandatory_coinbase_destination) {
                 LogPrintf("ERROR: ConnectBlock(): Coinbase outputs didn't match required scriptPubKey\n");
                 return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-coinbase-txos");
             }
@@ -2580,38 +2581,53 @@ bool CChainState::FlushStateToDisk(
                 m_blockman.FlushBlockFile();
             }
 
+            std::set<CBlockIndex*> setTrimmableBlockIndex(m_blockman.m_dirty_blockindex);
             // Then update all block file information (which may refer to block and undo files).
             {
                 LOG_TIME_MILLIS_WITH_CATEGORY("write block index to disk", BCLog::BENCH);
 
+                if (node::fTrimHeaders) {
+                    for (std::set<CBlockIndex*>::iterator it = setTrimmableBlockIndex.begin(); it != setTrimmableBlockIndex.end(); it++) {
+                        (*it)->untrim();
+                    }
+                }
                 if (!m_blockman.WriteBlockIndexDB()) {
                     return AbortNode(state, "Failed to write to block index database");
                 }
 
-                if (node::fTrimHeaders) {
-                    std::set<CBlockIndex*> setTrimmableBlockIndex(m_blockman.m_dirty_blockindex);
+                // This should be done inside WriteBatchSync, but CBlockIndex is const there
+                for (std::set<CBlockIndex*>::iterator it = setTrimmableBlockIndex.begin(); it != setTrimmableBlockIndex.end(); it++) {
+                    (*it)->set_stored();
+                }
+
+                int trim_height = 0;
+                if (pindexBestHeader && (uint64_t)pindexBestHeader->nHeight > node::nMustKeepFullHeaders) { // check first, to prevent underflow
+                    trim_height = pindexBestHeader->nHeight - node::nMustKeepFullHeaders;
+                }
+                if (node::fTrimHeaders && trim_height > 0 && !ShutdownRequested()) {
+                    static int nMinTrimHeight{0};
                     LogPrintf("Flushing block index, trimming headers, setTrimmableBlockIndex.size(): %d\n", setTrimmableBlockIndex.size());
-                    int trim_height = m_chain.Height() - node::nMustKeepFullHeaders;
-                    int min_height = std::numeric_limits<int>::max();
-                    CBlockIndex* min_index = nullptr;
                     for (std::set<CBlockIndex*>::iterator it = setTrimmableBlockIndex.begin(); it != setTrimmableBlockIndex.end(); it++) {
                         (*it)->assert_untrimmed();
                         if ((*it)->nHeight < trim_height) {
                             (*it)->trim();
-                            if ((*it)->nHeight < min_height) {
-                                min_height = (*it)->nHeight;
-                                min_index = *it;
-                            }
                         }
                     }
-
+                    CBlockIndex* min_index = pindexBestHeader->GetAncestor(trim_height-1);
                     // Handle any remaining untrimmed blocks that were too recent for trimming last time we flushed.
                     if (min_index) {
-                        min_index = min_index->pprev;
-                        while (min_index && !min_index->trimmed()) {
-                            min_index->trim();
+                        int nMaxTrimHeightRound = std::max(nMinTrimHeight, min_index->nHeight + 1);
+                        while (min_index && min_index->nHeight >= nMinTrimHeight) {
+                            if (!min_index->trimmed()) {
+                                // there may be gaps due to untrimmed blocks, we need to check them all
+                                if (!min_index->trim()) {
+                                    // Header could not be trimmed, we'll need to try again next round
+                                    nMaxTrimHeightRound = min_index->nHeight;
+                                }
+                            }
                             min_index = min_index->pprev;
                         }
+                        nMinTrimHeight = nMaxTrimHeightRound;
                     }
                 }
             }
@@ -2703,7 +2719,7 @@ static void UpdateTipLog(
 {
 
     AssertLockHeld(::cs_main);
-    LogPrintf("%s%s: new best=%s height=%d version=0x%08x log2_work=%f tx=%lu date='%s' progress=%f cache=%.1fMiB(%utxo)%s\n",
+    LogPrint(BCLog::UNCONDITIONAL_ALWAYS,"%s%s: new best=%s height=%d version=0x%08x log2_work=%f tx=%lu date='%s' progress=%f cache=%.1fMiB(%utxo)%s\n",
         prefix, func_name,
         tip->GetBlockHash().ToString(), tip->nHeight, tip->nVersion,
         log(tip->nChainWork.getdouble()) / log(2.0), (unsigned long)tip->nChainTx,
@@ -2712,6 +2728,18 @@ static void UpdateTipLog(
         coins_tip.DynamicMemoryUsage() * (1.0 / (1 << 20)),
         coins_tip.GetCacheSize(),
         !warning_messages.empty() ? strprintf(" warning='%s'", warning_messages) : "");
+}
+
+void ForceUntrimHeader(const CBlockIndex *pindex_) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    AssertLockHeld(cs_main);
+
+    assert(pindex_);
+    if (!pindex_->trimmed()) {
+        return;
+    }
+    CBlockIndex *pindex=const_cast<CBlockIndex*>(pindex_);
+    pindex->untrim();
 }
 
 void CChainState::UpdateTip(const CBlockIndex* pindexNew)
@@ -2759,11 +2787,13 @@ void CChainState::UpdateTip(const CBlockIndex* pindexNew)
     }
     UpdateTipLog(coins_tip, pindexNew, m_params, __func__, "", warning_messages.original);
 
+    ForceUntrimHeader(pindexNew);
     // Do some logging if dynafed parameters changed.
     if (pindexNew->pprev && !pindexNew->dynafed_params().IsNull()) {
         int height = pindexNew->nHeight;
         uint256 hash = pindexNew->GetBlockHash();
         uint256 root = pindexNew->dynafed_params().m_current.CalculateRoot();
+        ForceUntrimHeader(pindexNew->pprev);
         if (pindexNew->pprev->dynafed_params().IsNull()) {
             LogPrintf("Dynafed activated in block %d:%s: %s\n", height, hash.GetHex(), root.GetHex());
         } else if (root != pindexNew->pprev->dynafed_params().m_current.CalculateRoot()) {
