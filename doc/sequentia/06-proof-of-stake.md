@@ -148,7 +148,8 @@ nodes converge on it — exactly as the federation's round-robin does today.
        `vrfprove`/`vrfverify`) **and** the `-posvrf` consensus mode
        (coinbase-committed proof, proof-derived stake-weighted slots,
        validated in `ContextualCheckBlock`) — see doc/sequentia/07-vrf.md.
-       Not yet combined with committee certification.
+       Now combined with committee certification: VRF-sortitioned
+       committees with per-member eligibility proofs (doc 07 §4.5).
 7. [~] Committee + majority countersignature certification (immediate
        finality, principle 6): **done up to 16 members** via the script
        multisig challenge (`-poscommitteesize`, quorum = strict majority,

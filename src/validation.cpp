@@ -3944,10 +3944,36 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
             return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-invalid", "invalid VRF sortition proof");
         }
         const StakeRegistry& registry = StakeRegistry::GetInstance();
+        const uint64_t total_weight = PosTotalWeight(registry);
         uint64_t weight = registry.GetWeight(parts->leader);
-        uint64_t slot = PosVrfSlot(beta, weight, PosTotalWeight(registry));
+        uint64_t slot = PosVrfSlot(beta, weight, total_weight);
         if ((int64_t)block.GetBlockTime() < (int64_t)pindexPrev->nTime + (int64_t)slot * g_pos_slot_interval) {
             return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-early", "block produced before its VRF sortition slot opened");
+        }
+        // Committee certification under private sortition: every committee
+        // member the challenge claims must carry a coinbase eligibility
+        // commitment whose VRF proof verifies over the slot seed and whose
+        // output passes the sortition membership threshold. The committee
+        // signatures themselves are enforced by the challenge script
+        // (CheckProof). See doc/sequentia/07-vrf.md.
+        if (!parts->committee.empty()) {
+            std::map<CPubKey, std::vector<unsigned char>> claimed;
+            for (const PosVrfMember& member : ExtractPosVrfMembers(block)) {
+                claimed.emplace(member.pubkey, member.proof);
+            }
+            for (const CPubKey& member : parts->committee) {
+                auto it = claimed.find(member);
+                if (it == claimed.end()) {
+                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-member-missing", "committee member lacks a coinbase eligibility commitment");
+                }
+                uint256 member_beta;
+                if (!VrfVerify(member, seed, it->second, member_beta)) {
+                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-member-invalid", "invalid committee member VRF eligibility proof");
+                }
+                if (!PosVrfIsCommitteeMember(member_beta, registry.GetWeight(member), total_weight)) {
+                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-member-not-selected", "claimed committee member was not selected by sortition for this slot");
+                }
+            }
         }
     }
 

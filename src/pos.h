@@ -112,10 +112,13 @@ int PosQuorum(size_t committee_size);
 CScript BuildPosChallenge(const CPubKey& pubkey);
 
 /** Build the per-block challenge for a leader plus committee certification:
- *  "<leader> OP_CHECKSIGVERIFY <q> <c_1> ... <c_m> <m> OP_CHECKMULTISIG"
- *  with q = PosQuorum(m). With an empty committee this degrades to the plain
- *  leader-only challenge. */
-CScript BuildPosBlockChallenge(const CPubKey& leader, const std::vector<CPubKey>& committee);
+ *  "<leader> OP_CHECKSIGVERIFY <q> <c_1> ... <c_m> <m> OP_CHECKMULTISIG".
+ *  q defaults to PosQuorum(m) (the public-schedule mode, where the committee
+ *  is exactly the schedule prefix); under VRF sortition the caller passes the
+ *  chain's fixed quorum (a majority of the *expected* committee size), since
+ *  the claimed member count varies. With an empty committee this degrades to
+ *  the plain leader-only challenge. */
+CScript BuildPosBlockChallenge(const CPubKey& leader, const std::vector<CPubKey>& committee, int quorum_override = 0);
 
 /** Extract the leader pubkey from a "<pubkey> OP_CHECKSIG" challenge, or
  *  nullopt if the script is not of that exact form. */
@@ -160,5 +163,31 @@ CScript BuildPosVrfCommitment(const std::vector<unsigned char>& proof);
 /** Extract the VRF proof from a block's coinbase commitment, or nullopt if no
  *  (or a malformed) commitment is present. */
 std::optional<std::vector<unsigned char>> ExtractPosVrfProof(const CBlock& block);
+
+/** Committee membership under VRF sortition: with private sortition nobody can
+ *  rank stakers (each beta is secret until published), so membership is
+ *  threshold-based, Algorand-style: staker i with VRF output beta is a
+ *  committee member for the slot iff
+ *      PosVrfSlot(beta, weight, total_weight) < g_pos_committee_size.
+ *  P(slot < T) = T * weight / total_weight, so the expected committee size is
+ *  exactly g_pos_committee_size, distributed weight-proportionally. The
+ *  certification quorum stays a strict majority of the *expected* size
+ *  (PosQuorum(g_pos_committee_size)), the paper's 51-of-100. */
+bool PosVrfIsCommitteeMember(const uint256& beta, uint64_t weight, uint64_t total_weight);
+
+/** A committee member's eligibility claim carried in the block: its key and
+ *  its VRF proof over the slot seed. */
+struct PosVrfMember {
+    CPubKey pubkey;
+    std::vector<unsigned char> proof;
+};
+
+/** Build the tagged coinbase OP_RETURN output carrying one committee member's
+ *  eligibility proof: OP_RETURN PUSH("SEQCMT" || pubkey(33) || proof). */
+CScript BuildPosVrfMemberCommitment(const CPubKey& member, const std::vector<unsigned char>& proof);
+
+/** Extract all committee-member eligibility commitments from a block's
+ *  coinbase (malformed entries are skipped). */
+std::vector<PosVrfMember> ExtractPosVrfMembers(const CBlock& block);
 
 #endif // BITCOIN_POS_H

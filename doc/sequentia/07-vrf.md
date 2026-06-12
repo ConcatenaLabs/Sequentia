@@ -101,14 +101,23 @@ convergence):
    now VRF-driven). `CheckChallenge` in VRF mode only checks the challenge is a
    registered staker; the rank/time check moves to `ContextualCheckBlock` where
    the proof is available. The leader signature (`CheckProof`) is unchanged.
-5. **Committee.** Committee certification (doc 06) needs every member's
-   eligibility proof; in VRF mode each member would publish its own sortition
-   proof and the block would aggregate them. For the first VRF integration,
-   committee certification is disabled (`-posvrf` requires
-   `-poscommitteesize=1`); unifying the two is the step after.
+5. **Committee.** Under private sortition nobody can rank stakers (each beta
+   is secret until published), so committee membership is **threshold-based**,
+   Algorand-style: staker `i` is a member iff
+   `PosVrfSlot(beta_i, w_i, W) < committee_size`. Since
+   `P(slot < T) = T·w/W`, the expected committee size is exactly
+   `committee_size`, weight-proportionally. The block's challenge lists the
+   *claimed* members (`<leader> CHECKSIGVERIFY <q>-of-<k> CHECKMULTISIG` with
+   `q` fixed at a majority of the **expected** size — the paper's 51-of-100 —
+   independent of the claimed count `k`); each claimed member's eligibility is
+   proven by a tagged `SEQCMT` coinbase commitment (`pubkey ‖ proof`) verified
+   in `ContextualCheckBlock` (`bad-posvrf-member-missing/-invalid/
+   -not-selected`); the signatures themselves are enforced by the script. A
+   leader needs a quorum of genuinely-selected members to cooperate — exactly
+   the paper's certification model.
 
-**Status: implemented** behind `-posvrf` (requires `-con_pos`), exactly as
-specified above.
+**Status: implemented** behind `-posvrf` (requires `-con_pos`), including
+committee certification (`-poscommitteesize` 2..16) per §4.5.
 
 ## 5. Roadmap position
 
@@ -125,5 +134,11 @@ specified above.
       slot respected, non-staker and proof-less templates rejected).
 - [ ] Validate the primitive against RFC 9381 vectors / adopt a reviewed
       secp256k1 VRF ciphersuite.
-- [ ] VRF-sortitioned committees with aggregated eligibility proofs.
+- [x] VRF-sortitioned committees: threshold membership (expected size =
+      `-poscommitteesize`, weight-proportional), per-member `SEQCMT`
+      eligibility commitments validated in consensus, fixed majority quorum,
+      producer-side eligibility filtering in `generateposblock`
+      (`feature_pos_vrf_committee.py`). Signature *aggregation* (BLS/MuSig)
+      for paper-scale 100-member committees remains future work (script
+      multisig caps the claimed-member list at 16).
 </content>

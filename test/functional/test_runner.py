@@ -179,6 +179,7 @@ BASE_SCRIPTS = [
     'feature_pos_committee.py',
     'feature_vrf.py',
     'feature_pos_vrf.py',
+    'feature_pos_vrf_committee.py',
     'feature_ct_opt_in.py',
     'rpc_exchangerates.py',
     # -------------------

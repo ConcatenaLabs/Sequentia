@@ -134,16 +134,17 @@ CScript BuildPosChallenge(const CPubKey& pubkey)
     return CScript() << ToByteVector(pubkey) << OP_CHECKSIG;
 }
 
-CScript BuildPosBlockChallenge(const CPubKey& leader, const std::vector<CPubKey>& committee)
+CScript BuildPosBlockChallenge(const CPubKey& leader, const std::vector<CPubKey>& committee, int quorum_override)
 {
     // A committee of one adds nothing over the leader's own signature, so the
     // committee form is only used from size two upward.
     if (committee.size() <= 1) {
         return BuildPosChallenge(leader);
     }
+    int quorum = quorum_override > 0 ? quorum_override : PosQuorum(committee.size());
     CScript script;
     script << ToByteVector(leader) << OP_CHECKSIGVERIFY;
-    script << (int64_t)PosQuorum(committee.size());
+    script << (int64_t)quorum;
     for (const CPubKey& member : committee) {
         script << ToByteVector(member);
     }
@@ -234,6 +235,7 @@ uint256 PosSeedForChild(const CBlockIndex* pindexPrev)
 
 namespace {
 const unsigned char POS_VRF_TAG[6] = {'S', 'E', 'Q', 'V', 'R', 'F'};
+const unsigned char POS_CMT_TAG[6] = {'S', 'E', 'Q', 'C', 'M', 'T'};
 } // namespace
 
 uint64_t PosTotalWeight(const StakeRegistry& registry)
@@ -280,4 +282,40 @@ std::optional<std::vector<unsigned char>> ExtractPosVrfProof(const CBlock& block
         return std::vector<unsigned char>(data.begin() + sizeof(POS_VRF_TAG), data.end());
     }
     return std::nullopt;
+}
+
+bool PosVrfIsCommitteeMember(const uint256& beta, uint64_t weight, uint64_t total_weight)
+{
+    return PosVrfSlot(beta, weight, total_weight) < (uint64_t)std::max(g_pos_committee_size, 0);
+}
+
+CScript BuildPosVrfMemberCommitment(const CPubKey& member, const std::vector<unsigned char>& proof)
+{
+    std::vector<unsigned char> data(POS_CMT_TAG, POS_CMT_TAG + sizeof(POS_CMT_TAG));
+    data.insert(data.end(), member.begin(), member.end());
+    data.insert(data.end(), proof.begin(), proof.end());
+    return CScript() << OP_RETURN << data;
+}
+
+std::vector<PosVrfMember> ExtractPosVrfMembers(const CBlock& block)
+{
+    std::vector<PosVrfMember> members;
+    if (block.vtx.empty()) return members;
+    for (const CTxOut& out : block.vtx[0]->vout) {
+        const CScript& spk = out.scriptPubKey;
+        CScript::const_iterator pc = spk.begin();
+        opcodetype opcode;
+        std::vector<unsigned char> data;
+        if (!spk.GetOp(pc, opcode, data) || opcode != OP_RETURN) continue;
+        if (!spk.GetOp(pc, opcode, data)) continue;
+        if (data.size() != sizeof(POS_CMT_TAG) + CPubKey::COMPRESSED_SIZE + VRF_PROOF_SIZE) continue;
+        if (!std::equal(POS_CMT_TAG, POS_CMT_TAG + sizeof(POS_CMT_TAG), data.begin())) continue;
+        PosVrfMember member;
+        member.pubkey = CPubKey(data.begin() + sizeof(POS_CMT_TAG),
+                                data.begin() + sizeof(POS_CMT_TAG) + CPubKey::COMPRESSED_SIZE);
+        if (!member.pubkey.IsValid()) continue;
+        member.proof.assign(data.begin() + sizeof(POS_CMT_TAG) + CPubKey::COMPRESSED_SIZE, data.end());
+        members.push_back(member);
+    }
+    return members;
 }

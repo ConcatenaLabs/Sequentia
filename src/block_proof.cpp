@@ -11,6 +11,8 @@
 #include <script/interpreter.h>
 #include <script/generic.hpp>
 
+#include <set>
+
 bool CheckChallenge(const CBlockHeader& block, const CBlockIndex& indexLast, const Consensus::Params& params)
 {
     if (g_con_pos) {
@@ -27,13 +29,28 @@ bool CheckChallenge(const CBlockHeader& block, const CBlockIndex& indexLast, con
         }
         const StakeRegistry& registry = StakeRegistry::GetInstance();
         if (g_pos_vrf) {
-            // VRF sortition (doc 07 §4): the header check only requires a
-            // registered staker with a leader-only challenge. The leader's
-            // sortition proof lives in the coinbase, so eligibility and the
-            // slot time gate are validated in ContextualCheckBlock, where the
-            // full block is available.
-            if (!parts->committee.empty()) return false;
+            // VRF sortition (doc 07 §4): the header check is structural only —
+            // sortition proofs live in the coinbase, so leader/member
+            // eligibility and the slot time gate are validated in
+            // ContextualCheckBlock, where the full block is available.
             if (registry.GetWeight(parts->leader) == 0) return false;
+            if (g_pos_committee_size > 1) {
+                // Committee certification with private sortition: the
+                // challenge lists the *claimed* members (proven eligible in
+                // ContextualCheckBlock). Structurally: a fixed quorum (a
+                // strict majority of the expected committee size), at least
+                // quorum-many distinct registered members.
+                if (parts->committee.empty()) return false;
+                if (parts->quorum != PosQuorum((size_t)g_pos_committee_size)) return false;
+                if ((int)parts->committee.size() < parts->quorum) return false;
+                std::set<CPubKey> seen;
+                for (const CPubKey& member : parts->committee) {
+                    if (registry.GetWeight(member) == 0) return false;
+                    if (!seen.insert(member).second) return false; // duplicate
+                }
+            } else {
+                if (!parts->committee.empty()) return false;
+            }
             return true;
         }
         uint256 seed = PosSeedForChild(&indexLast);

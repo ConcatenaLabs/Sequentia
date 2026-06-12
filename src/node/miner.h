@@ -179,7 +179,7 @@ public:
      *  is the staker public key that will sign the block; the block's challenge
      *  is set to require that key and the block time is advanced to the start of
      *  that staker's slot. */
-    std::unique_ptr<CBlockTemplate> CreateNewBlock(const CScript& scriptPubKeyIn, std::chrono::seconds min_tx_age = std::chrono::seconds(0), DynaFedParamEntry* = nullptr, const std::vector<CScript>* commit_scripts = nullptr, const CPubKey* pos_proposer = nullptr, const std::vector<unsigned char>* pos_vrf_proof = nullptr);
+    std::unique_ptr<CBlockTemplate> CreateNewBlock(const CScript& scriptPubKeyIn, std::chrono::seconds min_tx_age = std::chrono::seconds(0), DynaFedParamEntry* = nullptr, const std::vector<CScript>* commit_scripts = nullptr, const CPubKey* pos_proposer = nullptr, const std::vector<unsigned char>* pos_vrf_proof = nullptr, const std::vector<CPubKey>* pos_vrf_committee = nullptr);
 
     inline static std::optional<int64_t> m_last_block_num_txs{};
     inline static std::optional<int64_t> m_last_block_weight{};

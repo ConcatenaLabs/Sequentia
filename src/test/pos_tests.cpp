@@ -8,6 +8,7 @@
 #include <primitives/block.h>
 #include <vrf.h>
 #include <test/util/setup_common.h>
+#include <tinyformat.h>
 
 #include <boost/test/unit_test.hpp>
 
@@ -237,6 +238,76 @@ BOOST_AUTO_TEST_CASE(pos_vrf_commitment_roundtrip)
     // Empty block.
     CBlock empty;
     BOOST_CHECK(!ExtractPosVrfProof(empty).has_value());
+}
+
+// VRF committee membership: threshold semantics, determinism, and the
+// expected committee size is ~g_pos_committee_size, weight-proportionally.
+BOOST_AUTO_TEST_CASE(pos_vrf_committee_membership)
+{
+    int old_size = g_pos_committee_size;
+
+    // Threshold semantics match PosVrfSlot.
+    g_pos_committee_size = 4;
+    uint256 beta = uint256S("0x8000000000000000000000000000000000000000000000000000000000000000");
+    // w=1, W=10 => slot 5 (see pos_vrf_slot_math): not < 4.
+    BOOST_CHECK(!PosVrfIsCommitteeMember(beta, 1, 10));
+    // w=10, W=10 => slot 0: member.
+    BOOST_CHECK(PosVrfIsCommitteeMember(beta, 10, 10));
+    // T >= W/w makes membership certain: w=1, W=4, slot in [0,4) < 4.
+    for (int i = 0; i < 50; ++i) {
+        uint256 b = ComputePosSeed(uint256S("0x55"), uint256(), i);
+        BOOST_CHECK(PosVrfIsCommitteeMember(b, 1, 4));
+    }
+
+    // Statistical expected size: 4 unit-weight stakers, T=2 => each member
+    // with probability 1/2; expected #members per slot = 2.
+    g_pos_committee_size = 2;
+    int members = 0;
+    const int slots = 200;
+    for (int i = 0; i < slots; ++i) {
+        for (int k = 0; k < 4; ++k) {
+            uint256 b = ComputePosSeed(uint256S("0x66"), uint256S(strprintf("0x%x", k)), i);
+            if (PosVrfIsCommitteeMember(b, 1, 4)) members++;
+        }
+    }
+    // E = 400; sd = sqrt(800*0.25) ~ 14. Allow generous bounds.
+    BOOST_CHECK(members > 320);
+    BOOST_CHECK(members < 480);
+
+    g_pos_committee_size = old_size;
+}
+
+// Member eligibility commitments round-trip and reject malformed payloads.
+BOOST_AUTO_TEST_CASE(pos_vrf_member_commitment_roundtrip)
+{
+    CPubKey member = MakeKey();
+    std::vector<unsigned char> proof(VRF_PROOF_SIZE, 0xCD);
+
+    CBlock block;
+    CMutableTransaction coinbase;
+    coinbase.vin.resize(1);
+    coinbase.vout.emplace_back();
+    coinbase.vout.back().scriptPubKey = BuildPosVrfCommitment(std::vector<unsigned char>(VRF_PROOF_SIZE, 0xAB)); // leader proof: different tag
+    coinbase.vout.emplace_back();
+    coinbase.vout.back().scriptPubKey = BuildPosVrfMemberCommitment(member, proof);
+    block.vtx.push_back(MakeTransactionRef(coinbase));
+
+    std::vector<PosVrfMember> members = ExtractPosVrfMembers(block);
+    BOOST_REQUIRE_EQUAL(members.size(), 1U);
+    BOOST_CHECK(members[0].pubkey == member);
+    BOOST_CHECK(members[0].proof == proof);
+    // The leader commitment is still independently extractable.
+    BOOST_CHECK(ExtractPosVrfProof(block).has_value());
+
+    // Truncated member payload is skipped.
+    CBlock bad;
+    CMutableTransaction cb2;
+    cb2.vin.resize(1);
+    cb2.vout.emplace_back();
+    std::vector<unsigned char> short_proof(VRF_PROOF_SIZE - 1, 0xCD);
+    cb2.vout.back().scriptPubKey = BuildPosVrfMemberCommitment(member, short_proof);
+    bad.vtx.push_back(MakeTransactionRef(cb2));
+    BOOST_CHECK(ExtractPosVrfMembers(bad).empty());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

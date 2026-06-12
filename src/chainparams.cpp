@@ -952,11 +952,6 @@ protected:
             if (g_pos_committee_size < 1 || g_pos_committee_size > MAX_POS_COMMITTEE_SIZE) {
                 throw std::runtime_error(strprintf("-poscommitteesize must be between 1 and %d", MAX_POS_COMMITTEE_SIZE));
             }
-            // VRF sortition is single-leader for now: each committee member
-            // would need its own published eligibility proof (doc 07 §4).
-            if (g_pos_vrf && g_pos_committee_size != 1) {
-                throw std::runtime_error("-posvrf is not yet compatible with -poscommitteesize > 1");
-            }
             g_signed_blocks = true;
             consensus.vDeployments[Consensus::DEPLOYMENT_DYNA_FED].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
             StakeRegistry::GetInstance().Clear();

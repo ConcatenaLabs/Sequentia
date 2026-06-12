@@ -120,7 +120,7 @@ void BlockAssembler::resetBlock()
     feeMap = CAmountMap();
 }
 
-std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& scriptPubKeyIn, std::chrono::seconds min_tx_age, DynaFedParamEntry* proposed_entry, const std::vector<CScript>* commit_scripts, const CPubKey* pos_proposer, const std::vector<unsigned char>* pos_vrf_proof)
+std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& scriptPubKeyIn, std::chrono::seconds min_tx_age, DynaFedParamEntry* proposed_entry, const std::vector<CScript>* commit_scripts, const CPubKey* pos_proposer, const std::vector<unsigned char>* pos_vrf_proof, const std::vector<CPubKey>* pos_vrf_committee)
 {
     assert(min_tx_age >= std::chrono::seconds(0));
     int64_t nTimeStart = GetTimeMicros();
@@ -183,9 +183,21 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
         if (g_con_pos && pos_proposer != nullptr) {
             // SEQUENTIA PoS: the challenge requires the elected leader's key
             // and, with committee certification enabled, a majority of the
-            // slot's committee as countersigners.
-            std::vector<CPubKey> committee = PosCommittee(StakeRegistry::GetInstance(), PosSeedForChild(pindexPrev));
-            pblock->proof.challenge = BuildPosBlockChallenge(*pos_proposer, committee);
+            // slot's committee as countersigners. Under VRF sortition the
+            // committee is the caller-supplied list of *claimed* members
+            // (each proven eligible via a coinbase commitment); otherwise it
+            // is the public schedule prefix.
+            std::vector<CPubKey> committee;
+            int quorum_override = 0;
+            if (g_pos_vrf) {
+                if (pos_vrf_committee != nullptr) committee = *pos_vrf_committee;
+                // The quorum is fixed by chain config (a majority of the
+                // expected committee size), not by the claimed member count.
+                quorum_override = PosQuorum((size_t)g_pos_committee_size);
+            } else {
+                committee = PosCommittee(StakeRegistry::GetInstance(), PosSeedForChild(pindexPrev));
+            }
+            pblock->proof.challenge = BuildPosBlockChallenge(*pos_proposer, committee, quorum_override);
         } else {
             ResetChallenge(*pblock, *pindexPrev, chainparams.GetConsensus());
         }

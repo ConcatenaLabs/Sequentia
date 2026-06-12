@@ -1657,9 +1657,13 @@ static RPCHelpMan generateposblock()
     if (feeDestinationScript == CScript()) feeDestinationScript = CScript() << OP_TRUE;
 
     // VRF sortition mode: compute this staker's sortition proof over the slot
-    // seed and commit it in the coinbase (doc/sequentia/07-vrf.md §4).
+    // seed and commit it in the coinbase (doc/sequentia/07-vrf.md §4). With
+    // committee certification, also compute each provided committee key's
+    // eligibility proof; only sortition-selected members may countersign, and
+    // at least a quorum of them must be available.
     std::vector<unsigned char> vrf_proof;
     std::vector<CScript> vrf_commitments;
+    std::vector<CPubKey> vrf_committee;
     uint64_t vrf_slot = 0;
     uint256 vrf_output;
     if (g_pos_vrf) {
@@ -1673,15 +1677,51 @@ static RPCHelpMan generateposblock()
             throw JSONRPCError(RPC_INTERNAL_ERROR, "Produced VRF proof did not verify");
         }
         const StakeRegistry& registry = StakeRegistry::GetInstance();
-        vrf_slot = PosVrfSlot(vrf_output, registry.GetWeight(pubkey), PosTotalWeight(registry));
+        const uint64_t total_weight = PosTotalWeight(registry);
+        vrf_slot = PosVrfSlot(vrf_output, registry.GetWeight(pubkey), total_weight);
         vrf_commitments.push_back(BuildPosVrfCommitment(vrf_proof));
+
+        if (g_pos_committee_size > 1) {
+            // Gather candidate committee keys (the leader's own key is a
+            // candidate too), keep the sortition-selected ones.
+            std::map<CPubKey, CKey> candidates;
+            candidates.emplace(pubkey, key);
+            if (!request.params[1].isNull()) {
+                for (const UniValue& wif : request.params[1].get_array().getValues()) {
+                    CKey ckey = DecodeSecret(wif.get_str());
+                    if (!ckey.IsValid()) {
+                        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid committee private key");
+                    }
+                    candidates.emplace(ckey.GetPubKey(), ckey);
+                }
+            }
+            int eligible = 0;
+            for (const auto& [member_pub, member_key] : candidates) {
+                if (registry.GetWeight(member_pub) == 0) continue; // not a staker
+                auto member_proof = VrfProve(member_key, Span<const unsigned char>(seed.begin(), 32));
+                if (!member_proof) continue;
+                uint256 member_beta;
+                if (!VrfVerify(member_pub, Span<const unsigned char>(seed.begin(), 32), *member_proof, member_beta)) continue;
+                if (!PosVrfIsCommitteeMember(member_beta, registry.GetWeight(member_pub), total_weight)) continue;
+                vrf_committee.push_back(member_pub);
+                vrf_commitments.push_back(BuildPosVrfMemberCommitment(member_pub, *member_proof));
+                eligible++;
+            }
+            int quorum = PosQuorum((size_t)g_pos_committee_size);
+            if (eligible < quorum) {
+                throw JSONRPCError(RPC_MISC_ERROR, strprintf(
+                    "Only %d of the provided keys are sortition-selected committee members for this slot; quorum is %d of an expected committee of %d (provide more committeekeys, or retry next slot)",
+                    eligible, quorum, g_pos_committee_size));
+            }
+        }
     }
 
     std::unique_ptr<CBlockTemplate> pblocktemplate(
         BlockAssembler(chainman.ActiveChainstate(), *node.mempool, chainparams)
             .CreateNewBlock(feeDestinationScript, std::chrono::seconds(0), nullptr,
                             g_pos_vrf ? &vrf_commitments : nullptr, &pubkey,
-                            g_pos_vrf ? &vrf_proof : nullptr));
+                            g_pos_vrf ? &vrf_proof : nullptr,
+                            (g_pos_vrf && !vrf_committee.empty()) ? &vrf_committee : nullptr));
     if (!pblocktemplate.get()) {
         throw JSONRPCError(RPC_INTERNAL_ERROR, "Could not create block template");
     }
