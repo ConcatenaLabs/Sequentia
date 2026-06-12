@@ -20,8 +20,18 @@ work depends on.
       not honour; they fail in sqlite-only builds for that environmental
       reason (verified unrelated to the new work — `rpc_exchangerates.py` and
       the new tests pass).
-- [ ] **Merge Elements `23.3.3` downstream** (`git merge elements-23.3.3`),
-      resolve conflicts, re-green. (Same `23.x` series ⇒ patch-level catch-up.)
+- [x] **Merge Elements `23.3.3` downstream** (`git merge elements-23.3.3`):
+      671 upstream commits, 23 conflicted files. Key resolutions kept the
+      rfa (`CValue`) fee model through upstream's modified-fee refactor and
+      discounted-CT additions; see the merge commit message. Re-greened:
+      unit suites + the functional battery pass; binary reports v23.3.3.
+      Also fixed a latent fork bug found in the process: uninitialized
+      `initialFreeCoins`/`initial_reissuance_tokens` members made the
+      testnet genesis hash nondeterministic.
+      Known pre-existing failure: `key_io_tests` (64 cases) fails because
+      the fork changed the testnet chain's address prefixes without
+      updating `src/test/data/key_io_valid.json`; present before this work
+      (neither side of the merge touched those vectors).
 
 ## Milestone 2 — Finish challenge 1 (open fee market)
 1. [ ] Audit/normalise all fee floors to rfa for any-asset txs (doc 02 §A).
