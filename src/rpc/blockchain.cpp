@@ -3377,6 +3377,112 @@ static RPCHelpMan getstakescript()
     };
 }
 
+// SEQUENTIA PoS: the OP_RETURN payload to commit a Sequentia block into the
+// parent chain as a long-range-attack checkpoint.
+static RPCHelpMan getcheckpointpayload()
+{
+    return RPCHelpMan{"getcheckpointpayload",
+                "\nFor Proof-of-Stake chains: returns the OP_RETURN payload (\"SEQCKPT\" || block hash || height) that "
+                "commits a block of this chain into the parent chain as a checkpoint. Embed it in any parent-chain "
+                "transaction (e.g. a `data` output of createrawtransaction). Once the commitment is buried "
+                "-poscheckpointdepth deep, nodes that have the block on their active chain treat it as finalized "
+                "and reject forks below it. See doc/sequentia/06-proof-of-stake.md.\n",
+                {
+                    {"blockhash", RPCArg::Type::STR_HEX, RPCArg::DefaultHint{"the chain tip"}, "The block to checkpoint."},
+                },
+                RPCResult{
+                    RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::STR_HEX, "payload", "the checkpoint payload to embed in a parent-chain OP_RETURN"},
+                        {RPCResult::Type::STR_HEX, "blockhash", "the committed block"},
+                        {RPCResult::Type::NUM, "height", "its height"},
+                    }},
+                RPCExamples{HelpExampleCli("getcheckpointpayload", "")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!g_con_pos) {
+        throw JSONRPCError(RPC_MISC_ERROR, "Proof-of-Stake (con_pos) is not enabled on this chain");
+    }
+    ChainstateManager& chainman = EnsureAnyChainman(request.context);
+    const CBlockIndex* pindex;
+    {
+        LOCK(cs_main);
+        if (request.params[0].isNull()) {
+            pindex = chainman.ActiveChain().Tip();
+        } else {
+            uint256 hash(ParseHashV(request.params[0], "blockhash"));
+            pindex = chainman.m_blockman.LookupBlockIndex(hash);
+            if (!pindex) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
+            if (!chainman.ActiveChain().Contains(pindex)) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Block is not on the active chain");
+            }
+        }
+    }
+    std::vector<unsigned char> payload = BuildCheckpointPayload(pindex->GetBlockHash(), (uint32_t)pindex->nHeight);
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("payload", HexStr(payload));
+    result.pushKV("blockhash", pindex->GetBlockHash().GetHex());
+    result.pushKV("height", pindex->nHeight);
+    return result;
+},
+    };
+}
+
+// SEQUENTIA PoS: observed checkpoints and the current finality point.
+static RPCHelpMan getcheckpointinfo()
+{
+    return RPCHelpMan{"getcheckpointinfo",
+                "\nFor Proof-of-Stake chains: returns the checkpoints observed on the parent chain and the current "
+                "finality point (the highest checkpointed-and-buried block on the active chain).\n",
+                {},
+                RPCResult{
+                    RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::NUM, "depth", "parent-chain confirmations a commitment needs to finalize"},
+                        {RPCResult::Type::NUM, "finalized_height", "height of the finalized block, or -1"},
+                        {RPCResult::Type::STR_HEX, "finalized_hash", /*optional=*/true, "hash of the finalized block"},
+                        {RPCResult::Type::ARR, "checkpoints", "",
+                            {
+                                {RPCResult::Type::OBJ, "", "",
+                                    {
+                                        {RPCResult::Type::STR_HEX, "blockhash", "checkpointed block"},
+                                        {RPCResult::Type::NUM, "height", "its claimed height"},
+                                        {RPCResult::Type::NUM, "btc_height", "parent-chain height of the commitment"},
+                                        {RPCResult::Type::STR_HEX, "btc_hash", "parent-chain block containing it"},
+                                    }},
+                            }},
+                    }},
+                RPCExamples{HelpExampleCli("getcheckpointinfo", "")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!g_con_pos) {
+        throw JSONRPCError(RPC_MISC_ERROR, "Proof-of-Stake (con_pos) is not enabled on this chain");
+    }
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("depth", gArgs.GetIntArg("-poscheckpointdepth", DEFAULT_POS_CHECKPOINT_DEPTH));
+    int fin_height = -1;
+    uint256 fin_hash;
+    if (GetPosFinalizedCheckpoint(fin_height, fin_hash)) {
+        result.pushKV("finalized_height", fin_height);
+        result.pushKV("finalized_hash", fin_hash.GetHex());
+    } else {
+        result.pushKV("finalized_height", -1);
+    }
+    UniValue arr(UniValue::VARR);
+    for (const PosCheckpoint& ckpt : GetPosCheckpoints()) {
+        UniValue entry(UniValue::VOBJ);
+        entry.pushKV("blockhash", ckpt.seq_hash.GetHex());
+        entry.pushKV("height", (int64_t)ckpt.seq_height);
+        entry.pushKV("btc_height", ckpt.btc_height);
+        entry.pushKV("btc_hash", ckpt.btc_hash.GetHex());
+        arr.push_back(entry);
+    }
+    result.pushKV("checkpoints", arr);
+    return result;
+},
+    };
+}
+
 void RegisterBlockchainRPCCommands(CRPCTable &t)
 {
 // clang-format off
@@ -3419,6 +3525,8 @@ static const CRPCCommand commands[] =
     { "blockchain",         &getposschedule,                     },
     { "blockchain",         &getstakerinfo,                      },
     { "blockchain",         &getstakescript,                     },
+    { "blockchain",         &getcheckpointpayload,               },
+    { "blockchain",         &getcheckpointinfo,                  },
 
     /* Not shown in help */
     { "hidden",              &invalidateblock,                   },

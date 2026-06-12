@@ -3839,6 +3839,27 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
     if (!DeploymentActiveAfter(pindexPrev, consensusParams, Consensus::DEPLOYMENT_DYNA_FED) && !CheckChallenge(block, *pindexPrev, consensusParams))
         return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-diffbits", "incorrect proof of work");
 
+    // SEQUENTIA PoS: reject forks at or below the checkpoint-finalized block
+    // (a Sequentia block committed into the parent chain and buried
+    // -poscheckpointdepth deep; see doc/sequentia/06-proof-of-stake.md §11).
+    // This is the long-range-attack defense: history below the finality point
+    // cannot be replaced, even by validly-signed competing branches.
+    if (g_con_pos) {
+        int fin_height = -1;
+        uint256 fin_hash;
+        if (GetPosFinalizedCheckpoint(fin_height, fin_hash)) {
+            if (nHeight <= fin_height) {
+                LogPrintf("ERROR: %s: rejecting block at height %d at or below the checkpoint-finalized height %d\n", __func__, nHeight, fin_height);
+                return state.Invalid(BlockValidationResult::BLOCK_CHECKPOINT, "bad-fork-prior-to-pos-checkpoint");
+            }
+            const CBlockIndex* ancestor = pindexPrev->GetAncestor(fin_height);
+            if (ancestor == nullptr || ancestor->GetBlockHash() != fin_hash) {
+                LogPrintf("ERROR: %s: rejecting block that forks below the checkpoint-finalized block %s (height %d)\n", __func__, fin_hash.ToString(), fin_height);
+                return state.Invalid(BlockValidationResult::BLOCK_CHECKPOINT, "bad-fork-prior-to-pos-checkpoint");
+            }
+        }
+    }
+
     // Check against checkpoints
     if (fCheckpointsEnabled) {
         // Don't accept any forks from the main chain prior to last checkpoint.

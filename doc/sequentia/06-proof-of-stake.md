@@ -128,8 +128,10 @@ nodes converge on it — exactly as the federation's round-robin does today.
   block cannot exist without most of the committee signing it — the paper's
   immediate-finality property — but nothing yet punishes a committee that signs
   two blocks at the same height (the paper handles this with the
-  enforce-consensus rule, principle 4). Long-range attacks are not yet
-  mitigated (needs the Bitcoin checkpoints + stake locktimes of principle 11).
+  enforce-consensus rule, principle 4). Long-range attacks are mitigated for
+  online nodes by the principle-11 defenses (CSV stake locktimes + Bitcoin
+  checkpoints, roadmap items 8/9); bootstrapping a *fresh* node against a
+  long-range fork from checkpoints alone remains future work.
 - **Stake is on-chain (with a config bootstrap layer).** The registry sums a
   `-staker` configuration layer (the genesis stake set) and a UTXO layer:
   every unspent staking output — the bare script
@@ -174,5 +176,19 @@ nodes converge on it — exactly as the federation's round-robin does today.
        registry-dependent VRF checks moved to connect time
        (`feature_pos_stake.py`: bootstrap, registration, reorg round-trip,
        restart rebuild, CSV-gated unbond, eligibility loss).
-9. [ ] Bitcoin checkpoints + stake locktimes vs. long-range attacks (principle 11).
+9. [x] Bitcoin checkpoints vs. long-range attacks (principle 11): anyone may
+       commit a block hash into the parent chain ("SEQCKPT" OP_RETURN, see
+       `getcheckpointpayload`); once buried `-poscheckpointdepth` deep, nodes
+       that have the block on their active chain treat it as finalized,
+       rejecting forks below it (`bad-fork-prior-to-pos-checkpoint`) — even
+       longer, validly-signed branches. Checkpoints only lock in validated
+       history, never replace it, so conflicting/bogus checkpoints are
+       harmless. The anchor watcher scans parent blocks for commitments
+       (`getcheckpointinfo`); the stale-anchor reorg-follower never walks
+       below the finality point. Combined with the CSV unbonding period
+       (item 8), which must exceed the checkpoint cadence, this closes the
+       posterior-corruption window (`feature_pos_checkpoints.py`: a
+       longer competing branch from the same staker keys is rejected by the
+       checkpointed node). Fresh-sync bootstrap from checkpoints (choosing
+       between histories with no prior state) remains future work.
 </content>

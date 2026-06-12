@@ -18,6 +18,9 @@
 #include <uint256.h>
 
 #include <cstdint>
+#include <optional>
+#include <utility>
+#include <vector>
 
 class ChainstateManager;
 
@@ -59,7 +62,51 @@ bool GetAnchorForNewBlock(uint32_t prev_anchor_height, const uint256& prev_ancho
  *  reorganization, invalidate blocks of this chain whose anchors were
  *  reorganized away (the chain then reorganizes onto the last validly
  *  anchored block), and reconsider blocks whose anchors became canonical
- *  again. */
+ *  again. Also scans new parent blocks for Sequentia checkpoints and
+ *  updates the PoS finality point (see below). */
 void AnchorWatchTask(ChainstateManager& chainman);
+
+// --- Bitcoin checkpoints against PoS long-range attacks (paper §11) ---
+//
+// Anyone may commit a Sequentia block reference into the parent chain as a
+// tagged OP_RETURN ("SEQCKPT" || block hash (32) || height (4, LE)). A node
+// treats a checkpointed block as *finalized* once (a) the block is in its own
+// active chain and (b) the committing parent-chain transaction is buried at
+// least -poscheckpointdepth confirmations deep. Checkpoints therefore never
+// force a chain on a node — they only lock in history it already validated —
+// so conflicting or bogus checkpoints are harmless. Together with the CSV
+// stake-unbonding period (which must exceed the checkpoint cadence), this
+// closes the posterior-corruption / long-range attack window: keys that
+// unbonded after a checkpoint cannot rewrite the history below it.
+
+/** Parent-chain confirmations a checkpoint commitment needs before it
+ *  finalizes (0 disables checkpoint processing). */
+static const int DEFAULT_POS_CHECKPOINT_DEPTH = 6;
+/** How many parent-chain blocks to scan backwards for checkpoints on the
+ *  first watcher pass. */
+static const int DEFAULT_POS_CHECKPOINT_SCAN = 100;
+
+/** Build the OP_RETURN payload committing to a Sequentia block:
+ *  "SEQCKPT" || hash || LE32(height). Embed it in any parent-chain
+ *  transaction (e.g. a `data` output). */
+std::vector<unsigned char> BuildCheckpointPayload(const uint256& block_hash, uint32_t height);
+
+/** Parse a checkpoint payload, or nullopt if malformed. */
+std::optional<std::pair<uint256, uint32_t>> ParseCheckpointPayload(const std::vector<unsigned char>& payload);
+
+/** The current finalized block (highest checkpointed-and-buried block on the
+ *  active chain), if any. */
+bool GetPosFinalizedCheckpoint(int& height, uint256& hash);
+
+/** A checkpoint observed on the parent chain. */
+struct PosCheckpoint {
+    uint256 seq_hash;
+    uint32_t seq_height;
+    int btc_height;        //!< parent-chain height of the committing block
+    uint256 btc_hash;      //!< parent-chain block that contains the commitment
+};
+
+/** All checkpoints observed so far (for RPC introspection). */
+std::vector<PosCheckpoint> GetPosCheckpoints();
 
 #endif // BITCOIN_ANCHOR_H

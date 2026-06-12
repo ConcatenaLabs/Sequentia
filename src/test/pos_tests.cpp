@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <pos.h>
+#include <anchor.h>
 
 #include <key.h>
 #include <policy/policy.h>
@@ -390,6 +391,32 @@ BOOST_AUTO_TEST_CASE(pos_stake_registry_layers)
     reg.SubUtxoStake(utxo_staker, 250);
     BOOST_CHECK_EQUAL(reg.GetWeight(utxo_staker), 0U);
     BOOST_CHECK_EQUAL(reg.Size(), 2U);
+}
+
+// Checkpoint payloads round-trip and reject malformed input.
+BOOST_AUTO_TEST_CASE(pos_checkpoint_payload_roundtrip)
+{
+    uint256 hash = uint256S("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
+    for (uint32_t height : {0u, 1u, 65536u, 0xFFFFFFFFu}) {
+        std::vector<unsigned char> payload = BuildCheckpointPayload(hash, height);
+        BOOST_CHECK_EQUAL(payload.size(), 7U + 32U + 4U);
+        auto parsed = ParseCheckpointPayload(payload);
+        BOOST_REQUIRE(parsed.has_value());
+        BOOST_CHECK(parsed->first == hash);
+        BOOST_CHECK_EQUAL(parsed->second, height);
+    }
+    // Wrong tag.
+    std::vector<unsigned char> bad = BuildCheckpointPayload(hash, 5);
+    bad[0] ^= 0x01;
+    BOOST_CHECK(!ParseCheckpointPayload(bad).has_value());
+    // Wrong sizes.
+    std::vector<unsigned char> shorter = BuildCheckpointPayload(hash, 5);
+    shorter.pop_back();
+    BOOST_CHECK(!ParseCheckpointPayload(shorter).has_value());
+    std::vector<unsigned char> longer = BuildCheckpointPayload(hash, 5);
+    longer.push_back(0);
+    BOOST_CHECK(!ParseCheckpointPayload(longer).has_value());
+    BOOST_CHECK(!ParseCheckpointPayload({}).has_value());
 }
 
 BOOST_AUTO_TEST_SUITE_END()
