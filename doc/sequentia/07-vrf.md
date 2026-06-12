@@ -1,10 +1,11 @@
 # Challenge 3 (cont.) — VRF cryptographic sortition
 
-> **Branch:** `claude/sequentia-proof-of-stake-w6xady`. This extends the PoS PoC
-> (doc 06) toward the paper's **private** cryptographic sortition (section iv,
-> principle 3). It adds a verifiable random function (VRF) primitive and its
-> node interface; the consensus integration that replaces the public schedule
-> with private sortition is scoped here as the next step.
+> This extends the PoS design (doc 06) with the paper's **private** cryptographic
+> sortition (section iv, principle 3): a verifiable random function (VRF), its
+> node interface, the `-posvrf` consensus mode that replaces the public schedule
+> with private sortition, VRF-sortitioned committees, and — §6 — MuSig2
+> signature aggregation toward paper-scale committees. All implemented in this
+> repository unless a subsection says otherwise.
 
 ## 1. Why a VRF
 
@@ -71,9 +72,9 @@ full 32-byte scalar rather than the RFC's truncated `c`. These are isolated in
 - `vrfprove "privkey" "input_hex"` → `{pubkey, proof, output}`.
 - `vrfverify "pubkey" "input_hex" "proof_hex"` → `{valid, output?}`.
 
-## 4. Consensus integration — design (next step)
+## 4. Consensus integration (`-posvrf`) — implemented
 
-Replace doc-06's public ranking with **private sortition**, keeping the rest of
+Replaces doc-06's public ranking with **private sortition**, keeping the rest of
 the PoS machinery (signed-block challenge, time-gated production, first-seen
 convergence):
 

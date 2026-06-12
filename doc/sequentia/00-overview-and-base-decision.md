@@ -34,10 +34,12 @@ asset-tokenisation machinery, but diverges from Liquid in these fundamental ways
    reorg-protection timelocks.
 
 3. **Proof-of-Stake consensus** (with voluntary Bitcoin checkpoints to resist
-   long-range attacks), described in the theoretical paper. **Explicitly
-   deprioritised** for the proof of concept: the PoC runs on a *strong federation*
-   instead, which Elements already supports natively (see
-   [`04-consensus-poc.md`](04-consensus-poc.md)).
+   long-range attacks), described in the theoretical paper. Originally
+   deprioritised in favour of a *strong federation* PoC (see
+   [`04-consensus-poc.md`](04-consensus-poc.md)), now implemented in layers:
+   public stake-weighted election ([`06-proof-of-stake.md`](06-proof-of-stake.md)),
+   private VRF sortition, VRF committees and MuSig2 aggregation
+   ([`07-vrf.md`](07-vrf.md)), on-chain stake, and Bitcoin checkpoints.
 
 4. **Bitcoin-identical default addresses, opt-in confidential transactions.**
    The default address format is the same as Bitcoin's, so Sequentia wallet
@@ -47,8 +49,14 @@ asset-tokenisation machinery, but diverges from Liquid in these fundamental ways
    visibly distinct address format — inverting Liquid's blinded-by-default
    behavior (see [`08-addresses-and-ct.md`](08-addresses-and-ct.md)).
 
-This specification focuses on challenges **1** and **2**. Challenge 3 is scoped
-only far enough to confirm the PoC consensus is already provided by Elements.
+A consequence of (1) and (2) worth spelling out: Elements' **federated two-way
+peg is inherited but plays no special role here**. Sequentia is not configured
+with a parent-chain peg, pegged BTC is never the fee currency, and the network
+neither favours nor depends on any pegged asset (unlike Liquid's L-BTC). Any
+user may employ the inherited machinery to issue their own pegged BTC, but
+anchoring-based real-time atomic swaps against *native* BTC make that largely
+unnecessary — the main residual use case is holding BTC value under
+confidential transactions.
 
 ## 2. Result of studying the Elements / Sequentia codebases
 

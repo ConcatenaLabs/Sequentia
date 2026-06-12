@@ -1,10 +1,11 @@
 # Challenge 3 — Proof-of-Stake consensus (PoC)
 
-> **Branch:** `claude/sequentia-proof-of-stake-w6xady`. This is the first
-> proof-of-concept of the Proof-of-Stake consensus from the theoretical paper
-> (section iv, principles 3/6, and the consensus algorithm). It builds on the
-> Bitcoin-anchoring branch, because the paper derives the consensus randomness
-> seed **and** the liveness clock from the Bitcoin anchor.
+> This is the first proof-of-concept of the Proof-of-Stake consensus from the
+> theoretical paper (section iv, principles 3/6, and the consensus algorithm).
+> It builds on the Bitcoin anchoring of doc 03, because the paper derives the
+> consensus randomness seed **and** the liveness clock from the Bitcoin anchor.
+> Docs 07 (VRF sortition, committees, aggregation) and the later roadmap items
+> below extend this layer; all of it now lives on the main development branch.
 
 ## 1. Scope of this PoC
 

@@ -156,7 +156,16 @@ Sequentia is built on the Elements platform; compared to Bitcoin itself,
 Elements contributes the following (all retained here):
  * [Confidential Assets][asset-issuance]
  * [Confidential Transactions][confidential-transactions]
- * [Federated Two-Way Peg][federated-peg]
+ * [Federated Two-Way Peg][federated-peg] — the machinery is inherited but,
+   unlike Liquid's L-BTC, it plays **no special role in Sequentia**: the
+   Sequentia chain is not configured with a parent-chain peg (no peg-in
+   validation, no PAK enforcement), pegged BTC is never the fee currency
+   (any asset can pay fees), and the network neither favours nor depends on
+   any pegged asset. Any user may still use the inherited machinery to issue
+   their own pegged BTC if they want one — largely unnecessary here, since
+   Bitcoin anchoring enables real-time atomic swaps against *native* BTC
+   (see [`doc/sequentia/03`](doc/sequentia/03-bitcoin-anchoring.md)), but
+   potentially useful e.g. to hold BTC value under confidential transactions.
  * [Signed Blocks][signed-blocks]
  * [Additional opcodes][opcodes]
 
