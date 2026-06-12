@@ -10,6 +10,7 @@
 #include <chain.h>
 #include <anchor.h>
 #include <chainparams.h>
+#include <pos.h>
 #include <coins.h>
 #include <consensus/amount.h>
 #include <consensus/params.h>
@@ -3221,6 +3222,98 @@ static RPCHelpMan getanchorstatus()
     };
 }
 
+// SEQUENTIA PoS: the leader schedule for the slot extending the current tip.
+static RPCHelpMan getposschedule()
+{
+    return RPCHelpMan{"getposschedule",
+                "\nFor Proof-of-Stake chains: returns the stake-weighted leader schedule for the next block, "
+                "best-ranked first. The schedule is derived deterministically from the current tip and its Bitcoin "
+                "anchor, so every node computes the same ordering. See doc/sequentia/06-proof-of-stake.md.\n",
+                {
+                    {"count", RPCArg::Type::NUM, RPCArg::Default{10}, "Maximum number of ranked leaders to return."},
+                },
+                RPCResult{
+                    RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::NUM, "height", "height of the next block this schedule applies to"},
+                        {RPCResult::Type::STR_HEX, "seed", "the election seed (H(tip || tip anchor || height))"},
+                        {RPCResult::Type::NUM, "slot_interval", "seconds per rank (the liveness gate)"},
+                        {RPCResult::Type::ARR, "schedule", "",
+                            {
+                                {RPCResult::Type::OBJ, "", "",
+                                    {
+                                        {RPCResult::Type::NUM, "rank", "0 = primary leader"},
+                                        {RPCResult::Type::STR_HEX, "pubkey", "staker public key"},
+                                        {RPCResult::Type::NUM, "weight", "stake weight"},
+                                        {RPCResult::Type::NUM, "slot_opens", "unix time at/after which this rank may produce"},
+                                    }},
+                            }},
+                    }},
+                RPCExamples{HelpExampleCli("getposschedule", "")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!g_con_pos) {
+        throw JSONRPCError(RPC_MISC_ERROR, "Proof-of-Stake (con_pos) is not enabled on this chain");
+    }
+    size_t count = request.params[0].isNull() ? 10 : request.params[0].get_int();
+    ChainstateManager& chainman = EnsureAnyChainman(request.context);
+    const StakeRegistry& registry = StakeRegistry::GetInstance();
+    int next_height;
+    int64_t parent_time;
+    uint256 seed;
+    {
+        LOCK(cs_main);
+        const CBlockIndex* tip = chainman.ActiveChain().Tip();
+        next_height = tip->nHeight + 1;
+        parent_time = (int64_t)tip->nTime;
+        seed = PosSeedForChild(tip);
+    }
+    std::vector<CPubKey> schedule = PosSchedule(registry, seed);
+    UniValue arr(UniValue::VARR);
+    for (size_t i = 0; i < schedule.size() && i < count; ++i) {
+        UniValue entry(UniValue::VOBJ);
+        entry.pushKV("rank", (int)i);
+        entry.pushKV("pubkey", HexStr(schedule[i]));
+        entry.pushKV("weight", (uint64_t)registry.GetWeight(schedule[i]));
+        entry.pushKV("slot_opens", parent_time + (int64_t)i * g_pos_slot_interval);
+        arr.push_back(entry);
+    }
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("height", next_height);
+    result.pushKV("seed", seed.GetHex());
+    result.pushKV("slot_interval", g_pos_slot_interval);
+    result.pushKV("schedule", arr);
+    return result;
+},
+    };
+}
+
+// SEQUENTIA PoS: the full registered stake set.
+static RPCHelpMan getstakerinfo()
+{
+    return RPCHelpMan{"getstakerinfo",
+                "\nFor Proof-of-Stake chains: returns the registered stakers and their stake weights.\n",
+                {},
+                RPCResult{
+                    RPCResult::Type::OBJ_DYN, "", "",
+                    {
+                        {RPCResult::Type::NUM, "pubkey", "stake weight, keyed by staker public key (hex)"},
+                    }},
+                RPCExamples{HelpExampleCli("getstakerinfo", "")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!g_con_pos) {
+        throw JSONRPCError(RPC_MISC_ERROR, "Proof-of-Stake (con_pos) is not enabled on this chain");
+    }
+    UniValue result(UniValue::VOBJ);
+    for (const auto& entry : StakeRegistry::GetInstance().Weights()) {
+        result.pushKV(HexStr(entry.first), (uint64_t)entry.second);
+    }
+    return result;
+},
+    };
+}
+
 void RegisterBlockchainRPCCommands(CRPCTable &t)
 {
 // clang-format off
@@ -3260,6 +3353,8 @@ static const CRPCCommand commands[] =
 
     // SEQUENTIA:
     { "blockchain",         &getanchorstatus,                    },
+    { "blockchain",         &getposschedule,                     },
+    { "blockchain",         &getstakerinfo,                      },
 
     /* Not shown in help */
     { "hidden",              &invalidateblock,                   },

@@ -16,6 +16,7 @@
 #include <exchangerates.h>
 #include <key_io.h>
 #include <net.h>
+#include <pos.h>
 #include <node/context.h>
 #include <node/miner.h>
 #include <policy/fees.h>
@@ -1522,6 +1523,97 @@ static RPCHelpMan combineblocksigs()
     };
 }
 
+// SEQUENTIA PoS: build, sign and submit a block as an elected stake leader.
+static RPCHelpMan generateposblock()
+{
+    return RPCHelpMan{"generateposblock",
+                "\nFor Proof-of-Stake chains: build a block as the staker owning the given private key, "
+                "sign it, and submit it. The staker must be registered (see -staker) and must be eligible "
+                "for the current slot (its rank's slot must have opened). See doc/sequentia/06-proof-of-stake.md.\n",
+                {
+                    {"stakerkey", RPCArg::Type::STR, RPCArg::Optional::NO, "WIF private key of a registered staker."},
+                },
+                RPCResult{
+                    RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::STR_HEX, "hash", "hash of the submitted block"},
+                        {RPCResult::Type::NUM, "height", "height of the submitted block"},
+                        {RPCResult::Type::NUM, "rank", "the proposer's elected rank for this slot (0 = primary leader)"},
+                    }},
+                RPCExamples{
+                    HelpExampleCli("generateposblock", "\"cV...\"")
+                },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!g_con_pos) {
+        throw JSONRPCError(RPC_MISC_ERROR, "Proof-of-Stake (con_pos) is not enabled on this chain");
+    }
+    CKey key = DecodeSecret(request.params[0].get_str());
+    if (!key.IsValid()) {
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid private key");
+    }
+    CPubKey pubkey = key.GetPubKey();
+
+    ChainstateManager& chainman = EnsureAnyChainman(request.context);
+    const NodeContext& node = EnsureAnyNodeContext(request.context);
+    CChainParams chainparams(Params());
+
+    CBlockIndex* tip;
+    {
+        LOCK(cs_main);
+        tip = chainman.ActiveChain().Tip();
+    }
+    uint256 seed = PosSeedForChild(tip);
+    std::optional<size_t> rank = PosRank(StakeRegistry::GetInstance(), seed, pubkey);
+    if (!rank) {
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "This key is not a registered staker for the current slot");
+    }
+
+    CScript feeDestinationScript = chainparams.GetConsensus().mandatory_coinbase_destination;
+    if (feeDestinationScript == CScript()) feeDestinationScript = CScript() << OP_TRUE;
+
+    std::unique_ptr<CBlockTemplate> pblocktemplate(
+        BlockAssembler(chainman.ActiveChainstate(), *node.mempool, chainparams)
+            .CreateNewBlock(feeDestinationScript, std::chrono::seconds(0), nullptr, nullptr, &pubkey));
+    if (!pblocktemplate.get()) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR, "Could not create block template");
+    }
+    CBlock& block = pblocktemplate->block;
+
+    {
+        LOCK(cs_main);
+        unsigned int extra_nonce = 0;
+        IncrementExtraNonce(&block, chainman.ActiveChain().Tip(), extra_nonce);
+    }
+
+    // Sign the block: produce a signature satisfying "<pubkey> OP_CHECKSIG".
+    FillableSigningProvider keystore;
+    keystore.AddKey(key);
+    SignatureData sig_data;
+    SimpleSignatureCreator signature_creator(block.GetHash(), 0);
+    if (!ProduceSignature(keystore, signature_creator, block.proof.challenge, sig_data, SCRIPT_NO_SIGHASH_BYTE)) {
+        throw JSONRPCError(RPC_MISC_ERROR, "Failed to sign block as staker");
+    }
+    block.proof.solution = sig_data.scriptSig;
+
+    if (!CheckProof(block, chainparams.GetConsensus())) {
+        throw JSONRPCError(RPC_MISC_ERROR, "Block signature did not satisfy the leader challenge");
+    }
+
+    std::shared_ptr<const CBlock> shared_pblock = std::make_shared<const CBlock>(block);
+    if (!chainman.ProcessNewBlock(chainparams, shared_pblock, true, nullptr)) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR, "ProcessNewBlock, block not accepted");
+    }
+
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("hash", block.GetHash().GetHex());
+    result.pushKV("height", tip->nHeight + 1);
+    result.pushKV("rank", (int)*rank);
+    return result;
+},
+    };
+}
+
 static RPCHelpMan getcompactsketch()
 {
     return RPCHelpMan{"getcompactsketch",
@@ -1819,6 +1911,7 @@ static const CRPCCommand commands[] =
     { "mining",             &prioritisetransaction,    },
     { "mining",             &getblocktemplate,         },
     { "generating",         &combineblocksigs,         },
+    { "generating",         &generateposblock,         },
     { "mining",             &submitheader,             },
     { "generating",         &getnewblockhex,           },
     { "generating",         &getcompactsketch,         },

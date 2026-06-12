@@ -45,6 +45,9 @@ void SetupChainParamsBaseOptions(ArgsManager& argsman)
     argsman.AddArg("-con_signed_blocks", "Signed blockchain. Uses input of `-signblockscript` to define what signatures are necessary to solve it.", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-signblockscript", "Signed blockchain enumberance. Only active when `-con_signed_blocks` set to true.", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-con_max_block_sig_size", "Max allowed witness data for the signed block header.", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
+    argsman.AddArg("-con_pos", "SEQUENTIA: enable Proof-of-Stake leader election. Each block must be signed by the stake-weighted leader elected for its slot from a seed derived from the previous block and its Bitcoin anchor. Implies signed blocks and disables dynamic federations. (default: 0)", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
+    argsman.AddArg("-staker=<pubkeyhex:weight>", "SEQUENTIA: register a staker public key and its stake weight for Proof-of-Stake leader election. May be specified multiple times. Only used when -con_pos is set.", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
+    argsman.AddArg("-posslotinterval=<n>", "SEQUENTIA: seconds per leader rank; the rank-r leader of a slot may produce a block only once n*r seconds have elapsed since the parent block. Only used when -con_pos is set. (default: 10)", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
 
     argsman.AddArg("-con_has_parent_chain", "Whether or not there is a parent chain.", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-parentgenesisblockhash", "The genesis blockhash of the parent chain.", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);

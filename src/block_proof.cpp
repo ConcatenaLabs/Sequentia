@@ -6,13 +6,37 @@
 #include <pow.h>
 
 #include <chain.h>
+#include <pos.h>
 #include <primitives/block.h>
 #include <script/interpreter.h>
 #include <script/generic.hpp>
 
 bool CheckChallenge(const CBlockHeader& block, const CBlockIndex& indexLast, const Consensus::Params& params)
 {
-    if (g_signed_blocks) {
+    if (g_con_pos) {
+        // SEQUENTIA PoS: the block's challenge must be "<leader> OP_CHECKSIG"
+        // for the stake-weighted leader elected for this slot. The signature
+        // that satisfies the challenge is checked separately in CheckProof.
+        // See doc/sequentia/06-proof-of-stake.md.
+        const CScript& challenge = block.proof.challenge;
+        std::optional<CPubKey> proposer = PosChallengeToPubKey(challenge);
+        if (!proposer) {
+            return false; // challenge is not a single-key CHECKSIG
+        }
+        const StakeRegistry& registry = StakeRegistry::GetInstance();
+        uint256 seed = PosSeedForChild(&indexLast);
+        std::optional<size_t> rank = PosRank(registry, seed, *proposer);
+        if (!rank) {
+            return false; // proposer is not a registered staker for this slot
+        }
+        // Liveness gating: the rank-r leader may only produce once r slot
+        // intervals have elapsed since the parent block, so a higher-ranked
+        // (worse) leader cannot pre-empt a lower-ranked (better) one.
+        if ((int64_t)block.nTime < (int64_t)indexLast.nTime + (int64_t)(*rank) * g_pos_slot_interval) {
+            return false;
+        }
+        return true;
+    } else if (g_signed_blocks) {
         return block.proof.challenge == indexLast.get_proof().challenge;
     } else {
         return block.nBits == GetNextWorkRequired(&indexLast, &block, params);
@@ -51,7 +75,12 @@ bool CheckProof(const CBlockHeader& block, const Consensus::Params& params)
 {
     if (g_signed_blocks) {
         const DynaFedParams& dynafed_params = block.m_dynafed_params;
-        if (dynafed_params.IsNull()) {
+        if (g_con_pos && dynafed_params.IsNull()) {
+            // SEQUENTIA PoS: verify the block signature against the per-block
+            // leader challenge carried in the header (validated as the correct
+            // elected leader by CheckChallenge), not the chain's fixed script.
+            return CheckProofGeneric(block, params.max_block_signature_size, block.proof.challenge, block.proof.solution, CScriptWitness());
+        } else if (dynafed_params.IsNull()) {
             return CheckProofGeneric(block, params.max_block_signature_size, params.signblockscript, block.proof.solution, CScriptWitness());
         } else {
             return CheckProofGeneric(block, dynafed_params.m_current.m_signblock_witness_limit, dynafed_params.m_current.m_signblockscript, CScript(), block.m_signblock_witness);

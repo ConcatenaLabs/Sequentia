@@ -7,6 +7,7 @@
 
 #include <anchor.h>
 #include <chain.h>
+#include <pos.h>
 #include <chainparams.h>
 #include <coins.h>
 #include <consensus/amount.h>
@@ -118,7 +119,7 @@ void BlockAssembler::resetBlock()
     feeMap = CAmountMap();
 }
 
-std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& scriptPubKeyIn, std::chrono::seconds min_tx_age, DynaFedParamEntry* proposed_entry, const std::vector<CScript>* commit_scripts)
+std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& scriptPubKeyIn, std::chrono::seconds min_tx_age, DynaFedParamEntry* proposed_entry, const std::vector<CScript>* commit_scripts, const CPubKey* pos_proposer)
 {
     assert(min_tx_age >= std::chrono::seconds(0));
     int64_t nTimeStart = GetTimeMicros();
@@ -178,7 +179,12 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
         nBlockWeight += chainparams.GetConsensus().signblockscript.size() * WITNESS_SCALE_FACTOR;
         nBlockWeight += chainparams.GetConsensus().max_block_signature_size * WITNESS_SCALE_FACTOR;
         ResetProof(*pblock);
-        ResetChallenge(*pblock, *pindexPrev, chainparams.GetConsensus());
+        if (g_con_pos && pos_proposer != nullptr) {
+            // SEQUENTIA PoS: the challenge requires the elected leader's key.
+            pblock->proof.challenge = BuildPosChallenge(*pos_proposer);
+        } else {
+            ResetChallenge(*pblock, *pindexPrev, chainparams.GetConsensus());
+        }
     }
 
     int nPackagesSelected = 0;
@@ -239,6 +245,20 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
     // Fill in header
     pblock->hashPrevBlock  = pindexPrev->GetBlockHash();
     UpdateTime(pblock, chainparams.GetConsensus(), pindexPrev);
+    // SEQUENTIA PoS: advance the block time to the start of the proposer's slot
+    // so the rank-gating consensus rule (CheckChallenge) is satisfied. The
+    // rank-r leader's slot opens r intervals after the parent block.
+    if (g_con_pos && pos_proposer != nullptr) {
+        uint256 seed = PosSeedForChild(pindexPrev);
+        std::optional<size_t> rank = PosRank(StakeRegistry::GetInstance(), seed, *pos_proposer);
+        if (!rank) {
+            throw std::runtime_error(strprintf("%s: proposer is not a registered staker for this slot", __func__));
+        }
+        int64_t slot_open = (int64_t)pindexPrev->nTime + (int64_t)(*rank) * g_pos_slot_interval;
+        if ((int64_t)pblock->nTime < slot_open) {
+            pblock->nTime = (uint32_t)slot_open;
+        }
+    }
     pblock->nBits          = g_signed_blocks ? 0 : GetNextWorkRequired(pindexPrev, pblock, chainparams.GetConsensus());
     if (g_con_blockheightinheader) {
         pblock->block_height = nHeight;

@@ -10,6 +10,7 @@
 #include <deploymentinfo.h>
 #include <hash.h> // for signet block challenge hash
 #include <issuance.h>
+#include <pos.h>
 #include <primitives/transaction.h>
 #include <util/system.h>
 #include <crypto/sha256.h>
@@ -237,6 +238,7 @@ public:
         g_con_elementsmode = false;
         g_con_blockheightinheader = false;
         g_con_bitcoin_anchor = false;
+        g_con_pos = false;
         consensus.total_valid_epochs = 0;
         consensus.elements_mode = g_con_elementsmode;
 
@@ -387,6 +389,7 @@ public:
         g_con_any_asset_fees = true;
         // SEQUENTIA: every block anchors to a Bitcoin block (see doc/sequentia/03-bitcoin-anchoring.md)
         g_con_bitcoin_anchor = true;
+        g_con_pos = false;
         consensus.elements_mode = g_con_elementsmode;
         consensus.total_valid_epochs = 0;
         consensus.dynamic_epoch_length = 10;
@@ -575,6 +578,7 @@ public:
         g_con_elementsmode = false;
         g_con_blockheightinheader = false;
         g_con_bitcoin_anchor = false;
+        g_con_pos = false;
         consensus.total_valid_epochs = 0;
         consensus.elements_mode = g_con_elementsmode;
 
@@ -681,6 +685,7 @@ public:
         consensus.elements_mode = g_con_elementsmode;
         g_con_blockheightinheader = false;
         g_con_bitcoin_anchor = false;
+        g_con_pos = false;
         consensus.total_valid_epochs = 0;
 
         pchMessageStart[0] = 0xfa;
@@ -916,6 +921,23 @@ protected:
         consensus.signblockscript = CScript(sign_bytes.begin(), sign_bytes.end());
         consensus.max_block_signature_size = args.GetIntArg("-con_max_block_sig_size", consensus.max_block_signature_size);
         g_signed_blocks = args.GetBoolArg("-con_signed_blocks", true);
+
+        // SEQUENTIA: opt-in Proof-of-Stake leader election. PoS requires signed
+        // blocks and the legacy (non-dynafed) signed-block path, so we force
+        // dynafed off when it is enabled. See doc/sequentia/06-proof-of-stake.md.
+        g_con_pos = args.GetBoolArg("-con_pos", false);
+        g_pos_slot_interval = args.GetIntArg("-posslotinterval", DEFAULT_POS_SLOT_INTERVAL);
+        if (g_con_pos) {
+            g_signed_blocks = true;
+            consensus.vDeployments[Consensus::DEPLOYMENT_DYNA_FED].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
+            StakeRegistry::GetInstance().Clear();
+            for (const std::string& spec : args.GetArgs("-staker")) {
+                std::string err;
+                if (!StakeRegistry::GetInstance().AddFromSpec(spec, err)) {
+                    throw std::runtime_error(strprintf("Invalid -staker: %s", err));
+                }
+            }
+        }
 
         // Note: These globals are needed to avoid circular dependencies.
         // Default to true for custom chains.
@@ -1181,6 +1203,7 @@ public:
 
         g_con_blockheightinheader = true;
         g_con_bitcoin_anchor = false;
+        g_con_pos = false;
         g_con_elementsmode = true;
         consensus.elements_mode = g_con_elementsmode;
         consensus.total_valid_epochs = 2;

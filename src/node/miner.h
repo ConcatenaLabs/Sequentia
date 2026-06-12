@@ -7,6 +7,7 @@
 #define BITCOIN_NODE_MINER_H
 
 #include <primitives/block.h>
+#include <pubkey.h>
 #include <txmempool.h>
 
 #include <memory>
@@ -173,8 +174,12 @@ public:
     explicit BlockAssembler(CChainState& chainstate, const CTxMemPool& mempool, const CChainParams& params);
     explicit BlockAssembler(CChainState& chainstate, const CTxMemPool& mempool, const CChainParams& params, const Options& options);
 
-    /** Construct a new block template with coinbase to scriptPubKeyIn */
-    std::unique_ptr<CBlockTemplate> CreateNewBlock(const CScript& scriptPubKeyIn, std::chrono::seconds min_tx_age = std::chrono::seconds(0), DynaFedParamEntry* = nullptr, const std::vector<CScript>* commit_scripts = nullptr);
+    /** Construct a new block template with coinbase to scriptPubKeyIn.
+     *  SEQUENTIA: when the chain uses Proof-of-Stake (g_con_pos), pos_proposer
+     *  is the staker public key that will sign the block; the block's challenge
+     *  is set to require that key and the block time is advanced to the start of
+     *  that staker's slot. */
+    std::unique_ptr<CBlockTemplate> CreateNewBlock(const CScript& scriptPubKeyIn, std::chrono::seconds min_tx_age = std::chrono::seconds(0), DynaFedParamEntry* = nullptr, const std::vector<CScript>* commit_scripts = nullptr, const CPubKey* pos_proposer = nullptr);
 
     inline static std::optional<int64_t> m_last_block_num_txs{};
     inline static std::optional<int64_t> m_last_block_weight{};
