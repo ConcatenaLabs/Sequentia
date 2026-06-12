@@ -11,6 +11,8 @@
 
 bool g_con_blockheightinheader = false;
 bool g_signed_blocks = false;
+// SEQUENTIA
+bool g_con_bitcoin_anchor = false;
 
 std::string CProof::ToString() const
 {

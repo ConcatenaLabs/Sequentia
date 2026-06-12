@@ -867,6 +867,9 @@ void SetSyscallSandboxPolicy(SyscallSandboxPolicy syscall_policy)
         break;
     case SyscallSandboxPolicy::MESSAGE_HANDLER: // Thread: msghand
         seccomp_policy_builder.AllowFileSystem();
+        // SEQUENTIA: header validation contacts the mainchain daemon over RPC
+        // to verify Bitcoin anchors (and peg-ins with -validatepegin).
+        seccomp_policy_builder.AllowNetwork();
         break;
     case SyscallSandboxPolicy::NET: // Thread: net
         seccomp_policy_builder.AllowFileSystem();
@@ -890,6 +893,9 @@ void SetSyscallSandboxPolicy(SyscallSandboxPolicy syscall_policy)
         break;
     case SyscallSandboxPolicy::SCHEDULER: // Thread: scheduler
         seccomp_policy_builder.AllowFileSystem();
+        // SEQUENTIA: the anchor watcher polls the mainchain daemon over RPC
+        // from the scheduler thread.
+        seccomp_policy_builder.AllowNetwork();
         break;
     case SyscallSandboxPolicy::TOR_CONTROL: // Thread: torcontrol
         seccomp_policy_builder.AllowFileSystem();

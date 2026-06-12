@@ -227,6 +227,7 @@ public:
         g_signed_blocks = false;
         g_con_elementsmode = false;
         g_con_blockheightinheader = false;
+        g_con_bitcoin_anchor = false;
         consensus.total_valid_epochs = 0;
         consensus.elements_mode = g_con_elementsmode;
 
@@ -365,6 +366,8 @@ public:
         g_con_elementsmode = true;
         g_con_blockheightinheader = true;
         g_con_any_asset_fees = true;
+        // SEQUENTIA: every block anchors to a Bitcoin block (see doc/sequentia/03-bitcoin-anchoring.md)
+        g_con_bitcoin_anchor = true;
         consensus.elements_mode = g_con_elementsmode;
         consensus.total_valid_epochs = 0;
         consensus.dynamic_epoch_length = 10;
@@ -397,7 +400,14 @@ public:
             AppendInitialIssuance(genesis, COutPoint(uint256(commit), 0), parentGenesisBlockHash, (initialFreeCoins > 0) ? 1 : 0, initialFreeCoins, (initial_reissuance_tokens > 0) ? 1 : 0, initial_reissuance_tokens, CScript() << OP_TRUE);
         }
         consensus.hashGenesisBlock = genesis.GetHash();
-        assert(consensus.hashGenesisBlock == uint256S("0x997d61a708543ee56de675c9afebb690007793429967d7a28c61358a033766cd"));
+        // SEQUENTIA: genesis hash changed when the Bitcoin anchor fields were
+        // added to the header serialization (g_con_bitcoin_anchor).
+        const uint256 expected_genesis = uint256S("0x59e0bcfb9996c34e40bc0dc90c27b8a0069da9e585e7608b66b8584cb616c98f");
+        if (consensus.hashGenesisBlock != expected_genesis) {
+            fprintf(stderr, "testnet genesis hash mismatch: computed %s, expected %s\n",
+                    consensus.hashGenesisBlock.GetHex().c_str(), expected_genesis.GetHex().c_str());
+        }
+        assert(consensus.hashGenesisBlock == expected_genesis);
         assert(genesis.hashMerkleRoot == uint256S("0x3186a7307ae08419ba779733ad36c32841237f0f7909bbd1d2f38285ecd23ed3"));
 
         vFixedSeeds.clear();
@@ -536,6 +546,7 @@ public:
         g_signed_blocks = false; // lol
         g_con_elementsmode = false;
         g_con_blockheightinheader = false;
+        g_con_bitcoin_anchor = false;
         consensus.total_valid_epochs = 0;
         consensus.elements_mode = g_con_elementsmode;
 
@@ -630,6 +641,7 @@ public:
         g_con_elementsmode = false;
         consensus.elements_mode = g_con_elementsmode;
         g_con_blockheightinheader = false;
+        g_con_bitcoin_anchor = false;
         consensus.total_valid_epochs = 0;
 
         pchMessageStart[0] = 0xfa;
@@ -866,6 +878,8 @@ protected:
         // Note: These globals are needed to avoid circular dependencies.
         // Default to true for custom chains.
         g_con_blockheightinheader = args.GetBoolArg("-con_blockheightinheader", true);
+        // SEQUENTIA: opt-in Bitcoin anchoring for custom chains
+        g_con_bitcoin_anchor = args.GetBoolArg("-con_bitcoin_anchor", false);
         g_con_elementsmode = args.GetBoolArg("-con_elementsmode", true);
         consensus.elements_mode = g_con_elementsmode;
 
@@ -1109,6 +1123,7 @@ public:
         g_signed_blocks = true;
 
         g_con_blockheightinheader = true;
+        g_con_bitcoin_anchor = false;
         g_con_elementsmode = true;
         consensus.elements_mode = g_con_elementsmode;
         consensus.total_valid_epochs = 2;
@@ -1456,6 +1471,7 @@ public:
 
         // Note: These globals are needed to avoid circular dependencies.
         g_con_blockheightinheader = args.GetBoolArg("-con_blockheightinheader", g_con_blockheightinheader);
+        g_con_bitcoin_anchor = args.GetBoolArg("-con_bitcoin_anchor", g_con_bitcoin_anchor);
 
         // Doesn't make any sense to use this chain in !elementsmode. Don't do it.
         assert(args.GetBoolArg("-con_elementsmode", true));

@@ -206,6 +206,10 @@ public:
     uint32_t nTime{0};
     uint32_t nBits{0};
     uint32_t nNonce{0};
+    //! SEQUENTIA: parent-chain (Bitcoin) anchor carried in the header when
+    //! g_con_bitcoin_anchor is set.
+    uint32_t m_anchor_height{0};
+    uint256 m_anchor_hash{};
 
 protected:
     std::optional<CProof> proof{};
@@ -277,6 +281,8 @@ public:
           nTime{block.nTime},
           nBits{block.nBits},
           nNonce{block.nNonce},
+          m_anchor_height{block.m_anchor_height},
+          m_anchor_hash{block.m_anchor_hash},
           proof{block.proof},
           m_dynafed_params{block.m_dynafed_params},
           m_signblock_witness{block.m_signblock_witness}
@@ -316,6 +322,10 @@ public:
         block.nTime = nTime;
         if (g_con_blockheightinheader) {
             block.block_height = nHeight;
+        }
+        if (g_con_bitcoin_anchor) {
+            block.m_anchor_height = m_anchor_height;
+            block.m_anchor_hash = m_anchor_hash;
         }
         block.nBits = nBits;
         block.nNonce = nNonce;
@@ -494,6 +504,12 @@ public:
         READWRITE(obj.hashMerkleRoot);
         READWRITE(obj.nTime);
 
+        // SEQUENTIA: persist the parent-chain anchor alongside the header fields
+        if (g_con_bitcoin_anchor) {
+            READWRITE(obj.m_anchor_height);
+            READWRITE(obj.m_anchor_hash);
+        }
+
         // Allocate objects in the optional<> fields when reading, since READWRITE will not do this
         SER_READ(obj, obj.m_dynafed_params = DynaFedParams());
         SER_READ(obj, obj.m_signblock_witness = CScriptWitness());
@@ -523,6 +539,10 @@ public:
         block.nTime = nTime;
         if (g_con_blockheightinheader) {
             block.block_height = nHeight;
+        }
+        if (g_con_bitcoin_anchor) {
+            block.m_anchor_height = m_anchor_height;
+            block.m_anchor_hash = m_anchor_hash;
         }
         block.nBits = nBits;
         block.nNonce = nNonce;

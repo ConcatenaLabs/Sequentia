@@ -177,6 +177,7 @@ BITCOIN_CORE_H = \
   key_io.h \
   logging.h \
   logging/timer.h \
+  anchor.h \
   mainchainrpc.h \
   mapport.h \
   memusage.h \
@@ -363,6 +364,7 @@ libbitcoin_node_a_SOURCES = \
   index/coinstatsindex.cpp \
   index/txindex.cpp \
   init.cpp \
+  anchor.cpp \
   mainchainrpc.cpp \
   mapport.cpp \
   net.cpp \

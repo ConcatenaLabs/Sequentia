@@ -1,0 +1,43 @@
+{
+  "_comment": "Sequentia price server configuration. The reference unit is whatever the operator pegs the node's reference fee atoms to (e.g. USD): rates are computed as round(price_in_reference * 1e8).",
+
+  "poll_interval_secs": 60,
+  "source_timeout": 15,
+  "source_name": "my-price-server",
+
+  "node_rpc": {
+    "host": "127.0.0.1",
+    "port": 7041,
+    "_auth_comment": "either user+password, or a cookie file path",
+    "user": "rpcuser",
+    "password": "rpcpassword"
+  },
+
+  "default_thresholds": {
+    "min_sources": 1,
+    "min_market_cap": 50000000,
+    "min_volume_24h": 1000000,
+    "max_source_spread": 0.05,
+    "max_change_factor": 3.0
+  },
+
+  "assets": [
+    {
+      "label": "USDT",
+      "id": "<64-hex asset id on the Sequentia network>",
+      "sources": [
+        { "kind": "coingecko", "id": "tether", "vs": "usd" },
+        {
+          "kind": "jsonapi",
+          "name": "my-exchange",
+          "url": "https://api.example-exchange.com/v1/ticker/USDTUSD",
+          "price_path": "data.last_price",
+          "volume_24h_path": "data.volume_24h_usd"
+        }
+      ],
+      "thresholds": {
+        "min_market_cap": 1000000000
+      }
+    }
+  ]
+}

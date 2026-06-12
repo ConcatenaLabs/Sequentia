@@ -5,6 +5,7 @@
 
 #include <validation.h>
 
+#include <anchor.h>
 #include <arith_uint256.h>
 #include <asset.h>
 #include <chain.h>
@@ -3802,6 +3803,53 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
     if (g_con_blockheightinheader && (uint32_t)nHeight != block.block_height) {
         LogPrintf("ERROR: %s: block height in header is incorrect (got %d, expected %d)\n", __func__, block.block_height, nHeight);
         return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-header-height");
+    }
+
+    // SEQUENTIA: check the parent-chain (Bitcoin) anchor
+    if (g_con_bitcoin_anchor) {
+        // R1: every non-genesis block must carry an anchor.
+        if (block.m_anchor_hash.IsNull()) {
+            LogPrintf("ERROR: %s: block at height %d carries no parent chain anchor\n", __func__, nHeight);
+            return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-anchor-missing");
+        }
+        // R2: anchor heights must be monotonically non-decreasing along the
+        // chain, and a block anchored at the same height as its parent must
+        // reference the same parent chain block.
+        if (block.m_anchor_height < pindexPrev->m_anchor_height) {
+            LogPrintf("ERROR: %s: anchor height decreased (got %d, prev %d)\n", __func__,
+                      block.m_anchor_height, pindexPrev->m_anchor_height);
+            return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-anchor-not-monotonic");
+        }
+        if (block.m_anchor_height == pindexPrev->m_anchor_height &&
+            !pindexPrev->m_anchor_hash.IsNull() &&
+            block.m_anchor_hash != pindexPrev->m_anchor_hash) {
+            LogPrintf("ERROR: %s: anchor hash changed at unchanged anchor height %d\n", __func__, block.m_anchor_height);
+            return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-anchor-conflict");
+        }
+        // R3: the anchor must be on the parent chain's best chain (requires a
+        // parent chain daemon connection; skipped with -validateanchor=0).
+        // The check is skipped when the anchor is unchanged from the parent
+        // block's already-validated anchor.
+        if (g_validate_anchor && block.m_anchor_hash != pindexPrev->m_anchor_hash) {
+            switch (CheckMainchainAnchor(block.m_anchor_height, block.m_anchor_hash)) {
+            case AnchorCheckResult::OK:
+                break;
+            case AnchorCheckResult::NOT_FOUND:
+                LogPrintf("ERROR: %s: anchor %s not known to the parent chain daemon\n", __func__, block.m_anchor_hash.ToString());
+                return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-anchor-unknown");
+            case AnchorCheckResult::STALE:
+                LogPrintf("ERROR: %s: anchor %s is not on the parent chain's best chain\n", __func__, block.m_anchor_hash.ToString());
+                return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-anchor-stale");
+            case AnchorCheckResult::HEIGHT_MISMATCH:
+                LogPrintf("ERROR: %s: anchor %s is not at claimed parent chain height %d\n", __func__,
+                          block.m_anchor_hash.ToString(), block.m_anchor_height);
+                return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-anchor-height-mismatch");
+            case AnchorCheckResult::NO_CONNECTION:
+                LogPrintf("WARNING: %s: cannot validate anchor %s: parent chain daemon unreachable\n", __func__,
+                          block.m_anchor_hash.ToString());
+                return state.Invalid(BlockValidationResult::BLOCK_MISSING_PREV, "anchor-unverifiable");
+            }
+        }
     }
 
     // Check timestamp

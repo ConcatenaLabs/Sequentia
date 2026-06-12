@@ -15,6 +15,10 @@
 // Globals to avoid circular dependencies.
 extern bool g_con_blockheightinheader;
 extern bool g_signed_blocks;
+// SEQUENTIA: when set, every block header commits to a parent-chain (Bitcoin)
+// block reference (height + block hash), with heights required to be
+// monotonically non-decreasing along the chain. See doc/sequentia/03-bitcoin-anchoring.md.
+extern bool g_con_bitcoin_anchor;
 
 class CProof
 {
@@ -217,6 +221,12 @@ public:
     // Height in header as well as in coinbase for easier hsm validation
     // Is set for serialization with `-con_blockheightinheader=1`
     uint32_t block_height;
+    // SEQUENTIA: anchor to a parent-chain (Bitcoin) block. Serialized (and
+    // therefore committed to by the block hash and any block signature) when
+    // g_con_bitcoin_anchor is set. The height referenced must never decrease
+    // from one block to the next.
+    uint32_t m_anchor_height;
+    uint256 m_anchor_hash;
     uint32_t nBits;
     uint32_t nNonce;
     // Only used pre-dynamic federation
@@ -255,6 +265,10 @@ public:
             s << hashMerkleRoot;
             s << nTime;
             s << block_height;
+            if (g_con_bitcoin_anchor) {
+                s << m_anchor_height;
+                s << m_anchor_hash;
+            }
             s << m_dynafed_params;
             // We do not serialize witness for hashes, or weight calculation
             if (!(s.GetType() & SER_GETHASH) && fAllowWitness) {
@@ -266,6 +280,10 @@ public:
             s << nTime;
             if (g_con_blockheightinheader) {
                 s << block_height;
+            }
+            if (g_con_bitcoin_anchor) {
+                s << m_anchor_height;
+                s << m_anchor_hash;
             }
             if (g_signed_blocks) {
                 s << proof;
@@ -293,6 +311,10 @@ public:
             s >> hashMerkleRoot;
             s >> nTime;
             s >> block_height;
+            if (g_con_bitcoin_anchor) {
+                s >> m_anchor_height;
+                s >> m_anchor_hash;
+            }
             s >> m_dynafed_params;
             // We do not serialize witness for hashes, or weight calculation
             if (!(s.GetType() & SER_GETHASH) && fAllowWitness) {
@@ -304,6 +326,10 @@ public:
             s >> nTime;
             if (g_con_blockheightinheader) {
                 s >> block_height;
+            }
+            if (g_con_bitcoin_anchor) {
+                s >> m_anchor_height;
+                s >> m_anchor_hash;
             }
             if (g_signed_blocks) {
                 s >> proof;
@@ -321,6 +347,8 @@ public:
         hashMerkleRoot.SetNull();
         nTime = 0;
         block_height = 0;
+        m_anchor_height = 0;
+        m_anchor_hash.SetNull();
         nBits = 0;
         nNonce = 0;
         proof.SetNull();
@@ -385,6 +413,8 @@ public:
         block.hashMerkleRoot = hashMerkleRoot;
         block.nTime          = nTime;
         block.block_height   = block_height;
+        block.m_anchor_height = m_anchor_height;
+        block.m_anchor_hash  = m_anchor_hash;
         block.nBits          = nBits;
         block.nNonce         = nNonce;
         block.proof          = proof;

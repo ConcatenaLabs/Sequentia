@@ -8,6 +8,7 @@
 #include <assetsdir.h>
 #include <blockfilter.h>
 #include <chain.h>
+#include <anchor.h>
 #include <chainparams.h>
 #include <coins.h>
 #include <consensus/amount.h>
@@ -210,6 +211,11 @@ UniValue blockheaderToJSON(const CBlockIndex* tip, const CBlockIndex* blockindex
     result.pushKV("merkleroot", blockindex->hashMerkleRoot.GetHex());
     result.pushKV("time", (int64_t)blockindex->nTime);
     result.pushKV("mediantime", (int64_t)blockindex->GetMedianTimePast());
+    // SEQUENTIA: parent chain (Bitcoin) anchor
+    if (g_con_bitcoin_anchor) {
+        result.pushKV("anchorheight", (int64_t)blockindex->m_anchor_height);
+        result.pushKV("anchorhash", blockindex->m_anchor_hash.GetHex());
+    }
     if (!g_signed_blocks) {
         result.pushKV("nonce", (uint64_t)blockindex->nNonce);
         result.pushKV("bits", strprintf("%08x", blockindex->nBits));
@@ -3153,6 +3159,62 @@ static RPCHelpMan getsidechaininfo()
 // END ELEMENTS
 //
 
+// SEQUENTIA: report the chain's view of its parent chain (Bitcoin) anchor.
+static RPCHelpMan getanchorstatus()
+{
+    return RPCHelpMan{"getanchorstatus",
+                "\nReturns information about the chain tip's parent chain (Bitcoin) anchor and the connection to the parent chain daemon. Only available on chains with con_bitcoin_anchor enabled.\n",
+                {},
+                RPCResult{
+                    RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::BOOL, "validateanchor", "whether anchors are validated against the parent chain daemon"},
+                        {RPCResult::Type::NUM, "tipheight", "height of this chain's tip"},
+                        {RPCResult::Type::NUM, "anchorheight", "parent chain height referenced by the tip"},
+                        {RPCResult::Type::STR_HEX, "anchorhash", "parent chain block hash referenced by the tip"},
+                        {RPCResult::Type::STR, "anchorstatus", "result of checking the tip anchor against the parent chain daemon: \"ok\", \"not_found\", \"stale\", \"height_mismatch\", \"no_connection\" or \"not_validated\""},
+                    }},
+                RPCExamples{
+                    HelpExampleCli("getanchorstatus", "")
+            + HelpExampleRpc("getanchorstatus", "")
+                },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!g_con_bitcoin_anchor) {
+        throw JSONRPCError(RPC_MISC_ERROR, "Bitcoin anchoring (con_bitcoin_anchor) is not enabled on this chain");
+    }
+    ChainstateManager& chainman = EnsureAnyChainman(request.context);
+    int tip_height;
+    uint32_t anchor_height;
+    uint256 anchor_hash;
+    {
+        LOCK(cs_main);
+        const CBlockIndex* tip = chainman.ActiveChain().Tip();
+        tip_height = tip->nHeight;
+        anchor_height = tip->m_anchor_height;
+        anchor_hash = tip->m_anchor_hash;
+    }
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("validateanchor", g_validate_anchor);
+    result.pushKV("tipheight", tip_height);
+    result.pushKV("anchorheight", (int64_t)anchor_height);
+    result.pushKV("anchorhash", anchor_hash.GetHex());
+    std::string status = "not_validated";
+    if (g_validate_anchor && !anchor_hash.IsNull()) {
+        switch (CheckMainchainAnchor(anchor_height, anchor_hash)) {
+        case AnchorCheckResult::OK: status = "ok"; break;
+        case AnchorCheckResult::NOT_FOUND: status = "not_found"; break;
+        case AnchorCheckResult::STALE: status = "stale"; break;
+        case AnchorCheckResult::HEIGHT_MISMATCH: status = "height_mismatch"; break;
+        case AnchorCheckResult::NO_CONNECTION: status = "no_connection"; break;
+        }
+    }
+    result.pushKV("anchorstatus", status);
+    return result;
+},
+    };
+}
+
 void RegisterBlockchainRPCCommands(CRPCTable &t)
 {
 // clang-format off
@@ -3189,6 +3251,9 @@ static const CRPCCommand commands[] =
 
     // ELEMENTS:
     { "blockchain",         &getsidechaininfo,                   },
+
+    // SEQUENTIA:
+    { "blockchain",         &getanchorstatus,                    },
 
     /* Not shown in help */
     { "hidden",              &invalidateblock,                   },

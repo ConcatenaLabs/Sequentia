@@ -1076,7 +1076,7 @@ void CTxMemPool::RecomputeFees()
 {
     {
         LOCK(cs);
-        ExchangeRateMap exchangeRateMap = ExchangeRateMap::GetInstance();
+        ExchangeRateMap& exchangeRateMap = ExchangeRateMap::GetInstance();
         for (CTxMemPoolEntry tx : mapTx) {
             txiter it = mapTx.find(tx.GetTx().GetHash());
             CValue newFeeValue = exchangeRateMap.ConvertAmountToValue(tx.GetFee(), tx.GetFeeAsset());

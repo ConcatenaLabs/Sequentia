@@ -5,6 +5,7 @@
 
 #include <node/miner.h>
 
+#include <anchor.h>
 #include <chain.h>
 #include <chainparams.h>
 #include <coins.h>
@@ -241,6 +242,14 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
     pblock->nBits          = g_signed_blocks ? 0 : GetNextWorkRequired(pindexPrev, pblock, chainparams.GetConsensus());
     if (g_con_blockheightinheader) {
         pblock->block_height = nHeight;
+    }
+    // SEQUENTIA: anchor the new block to the parent chain (Bitcoin) tip,
+    // respecting -anchorminconf and never decreasing the anchor height.
+    if (g_con_bitcoin_anchor) {
+        if (!GetAnchorForNewBlock(pindexPrev->m_anchor_height, pindexPrev->m_anchor_hash,
+                                  pblock->m_anchor_height, pblock->m_anchor_hash)) {
+            throw std::runtime_error(strprintf("%s: unable to determine a parent chain anchor; is the mainchain daemon reachable? (see -mainchainrpc* options)", __func__));
+        }
     }
     pblock->nNonce         = 0;
     pblocktemplate->vTxSigOpsCost[0] = WITNESS_SCALE_FACTOR * GetLegacySigOpCount(*pblock->vtx[0]);

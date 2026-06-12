@@ -4,6 +4,7 @@
 #include <policy/value.h>
 #include <util/settings.h>
 #include <util/system.h>
+#include <util/time.h>
 #include <univalue.h>
 
 #include <fstream>
@@ -38,6 +39,21 @@ CAmount ExchangeRateMap::ConvertValueToAmount(const CValue& value, const CAsset&
     }
 }
 
+void ExchangeRateMap::RebuildEffective() {
+    this->clear();
+    int64_t now = GetTime();
+    for (const auto& rate : m_dynamic_rates) {
+        if (m_dynamic_max_age > 0 && now - rate.second.m_updated_at > m_dynamic_max_age) {
+            continue; // stale: fail safe to "not accepted"
+        }
+        (*this)[rate.first] = CAssetExchangeRate(rate.second.m_scaled_value);
+    }
+    // Static entries take precedence over dynamic ones.
+    for (const auto& rate : m_static_rates) {
+        (*this)[rate.first] = rate.second;
+    }
+}
+
 bool ExchangeRateMap::LoadFromDefaultJSONFile(std::vector<std::string>& errors) {
     fs::path file_path = AbsPathForConfigVal(fs::PathFromString(exchange_rates_config_file));
     if (fs::exists(file_path)) {
@@ -56,21 +72,72 @@ bool ExchangeRateMap::LoadFromJSONFile(fs::path file_path, std::vector<std::stri
 }
 
 bool ExchangeRateMap::SaveToJSONFile(std::vector<std::string>& errors) {
-    UniValue json = this->ToJSON();
+    UniValue json = this->StaticToJSON();
     std::map<std::string, util::SettingsValue> settings;
     json.getObjMap(settings);
     fs::path file_path = AbsPathForConfigVal(fs::PathFromString(exchange_rates_config_file));
     return util::WriteSettings(file_path, settings, errors);
 }
 
-UniValue ExchangeRateMap::ToJSON() {
+static UniValue RatesToJSON(const std::map<CAsset, CAssetExchangeRate>& rates) {
     UniValue json = UniValue{UniValue::VOBJ};
-    for (auto rate : *this) {
+    for (const auto& rate : rates) {
         std::string label = gAssetsDir.GetLabel(rate.first);
         if (label == "") {
             label = rate.first.GetHex();
         }
         json.pushKV(label, rate.second.m_scaled_value);
+    }
+    return json;
+}
+
+UniValue ExchangeRateMap::ToJSON() {
+    return RatesToJSON(*this);
+}
+
+UniValue ExchangeRateMap::StaticToJSON() {
+    return RatesToJSON(m_static_rates);
+}
+
+UniValue ExchangeRateMap::DynamicToJSON() {
+    UniValue json = UniValue{UniValue::VOBJ};
+    int64_t now = GetTime();
+    for (const auto& rate : m_dynamic_rates) {
+        std::string label = gAssetsDir.GetLabel(rate.first);
+        if (label == "") {
+            label = rate.first.GetHex();
+        }
+        UniValue entry{UniValue::VOBJ};
+        entry.pushKV("rate", rate.second.m_scaled_value);
+        entry.pushKV("source", rate.second.m_source);
+        entry.pushKV("updated_at", rate.second.m_updated_at);
+        entry.pushKV("age", now - rate.second.m_updated_at);
+        bool stale = m_dynamic_max_age > 0 && now - rate.second.m_updated_at > m_dynamic_max_age;
+        entry.pushKV("stale", stale);
+        json.pushKV(label, entry);
+    }
+    return json;
+}
+
+UniValue ExchangeRateMap::AcceptancePolicyToJSON() {
+    UniValue json = UniValue{UniValue::VOBJ};
+    for (const auto& rate : *this) {
+        std::string label = gAssetsDir.GetLabel(rate.first);
+        if (label == "") {
+            label = rate.first.GetHex();
+        }
+        UniValue entry{UniValue::VOBJ};
+        entry.pushKV("rate", rate.second.m_scaled_value);
+        bool is_static = m_static_rates.count(rate.first) > 0;
+        entry.pushKV("origin", is_static ? "static" : "dynamic");
+        if (!is_static) {
+            auto it = m_dynamic_rates.find(rate.first);
+            if (it != m_dynamic_rates.end()) {
+                entry.pushKV("source", it->second.m_source);
+                entry.pushKV("updated_at", it->second.m_updated_at);
+            }
+        }
+        json.pushKV(label, entry);
     }
     return json;
 }
@@ -89,9 +156,44 @@ bool ExchangeRateMap::LoadFromJSON(std::map<std::string, UniValue> json, std::ve
         }
     }
     if (hasError) return false;
-    this->clear();
+    LOCK(m_write_mutex);
+    m_static_rates.clear();
     for (auto rate : parsedRates) {
-        (*this)[rate.first] = rate.second;
+        m_static_rates[rate.first] = rate.second;
     }
+    RebuildEffective();
     return true;
+}
+
+void ExchangeRateMap::SetDynamicRates(const std::map<CAsset, CAmount>& rates, const std::string& source, int64_t now) {
+    LOCK(m_write_mutex);
+    m_dynamic_rates.clear();
+    for (const auto& rate : rates) {
+        m_dynamic_rates[rate.first] = CDynamicExchangeRate(rate.second, source, now);
+    }
+    RebuildEffective();
+}
+
+void ExchangeRateMap::ClearDynamicRates() {
+    LOCK(m_write_mutex);
+    m_dynamic_rates.clear();
+    RebuildEffective();
+}
+
+bool ExchangeRateMap::PurgeStaleDynamicRates(int64_t now) {
+    if (m_dynamic_max_age <= 0) return false;
+    LOCK(m_write_mutex);
+    bool changed = false;
+    for (auto it = m_dynamic_rates.begin(); it != m_dynamic_rates.end();) {
+        if (now - it->second.m_updated_at > m_dynamic_max_age) {
+            it = m_dynamic_rates.erase(it);
+            changed = true;
+        } else {
+            ++it;
+        }
+    }
+    if (changed) {
+        RebuildEffective();
+    }
+    return changed;
 }
