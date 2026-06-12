@@ -1603,6 +1603,181 @@ static RPCHelpMan vrfverify()
     };
 }
 
+namespace {
+//! Parse a JSON array of hex pubkeys into CPubKeys (all must be fully valid).
+std::vector<CPubKey> ParsePubKeyArray(const UniValue& arr, const std::string& what)
+{
+    std::vector<CPubKey> out;
+    for (const UniValue& v : arr.get_array().getValues()) {
+        CPubKey pk(ParseHexV(v, what));
+        if (!pk.IsFullyValid()) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("Invalid %s public key", what));
+        out.push_back(pk);
+    }
+    return out;
+}
+//! Parse a JSON array of hex blobs into byte vectors.
+std::vector<std::vector<unsigned char>> ParseHexArray(const UniValue& arr, const std::string& what)
+{
+    std::vector<std::vector<unsigned char>> out;
+    for (const UniValue& v : arr.get_array().getValues()) out.push_back(ParseHexV(v, what));
+    return out;
+}
+} // namespace
+
+static RPCHelpMan musigaggregatepubkey()
+{
+    return RPCHelpMan{"musigaggregatepubkey",
+                "\nAggregate a set of public keys into a single 32-byte x-only MuSig2 (BIP327) key. "
+                "The aggregate depends only on the *set* of keys (order-independent). This is the "
+                "committee aggregate key carried in a -posaggcommittee block challenge. "
+                "See doc/sequentia/07-vrf.md §6.\n",
+                {
+                    {"pubkeys", RPCArg::Type::ARR, RPCArg::Optional::NO, "Hex-encoded compressed public keys.",
+                        {{"", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "public key"}}},
+                },
+                RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::STR_HEX, "aggregate_pubkey", "the 32-byte x-only aggregate key"}}},
+                RPCExamples{HelpExampleCli("musigaggregatepubkey", "'[\"02...\",\"03...\"]'")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    std::vector<CPubKey> pubkeys = ParsePubKeyArray(request.params[0], "pubkeys");
+    auto agg = MuSigAggregatePubkey(pubkeys);
+    if (!agg) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Could not aggregate the public keys");
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("aggregate_pubkey", HexStr(*agg));
+    return result;
+},
+    };
+}
+
+static RPCHelpMan musignonce()
+{
+    return RPCHelpMan{"musignonce",
+                "\nDistributed MuSig2 signing, round 1 (run on each committee member's own node). "
+                "Generate this member's public nonce for signing msg32 under the aggregate of pubkeys, "
+                "and stash the matching secret nonce under sessionid for round 2 (musigpartialsign). "
+                "The sessionid must be fresh — a secret nonce is single-use, and reusing one across "
+                "messages leaks the private key. See doc/sequentia/07-vrf.md §6.\n",
+                {
+                    {"sessionid", RPCArg::Type::STR, RPCArg::Optional::NO, "A fresh, caller-chosen session identifier."},
+                    {"privkey", RPCArg::Type::STR, RPCArg::Optional::NO, "WIF private key of this signer."},
+                    {"pubkeys", RPCArg::Type::ARR, RPCArg::Optional::NO, "All members' public keys (the signer set).",
+                        {{"", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "public key"}}},
+                    {"msg", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The 32-byte message to sign (e.g. a block hash)."},
+                },
+                RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::STR_HEX, "pubnonce", "this member's 66-byte public nonce; broadcast it to the other members"}}},
+                RPCExamples{HelpExampleCli("musignonce", "\"slot42\" \"cV...\" '[\"02...\",\"03...\"]' \"<blockhash>\"")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    std::string session_id = request.params[0].get_str();
+    CKey key = DecodeSecret(request.params[1].get_str());
+    if (!key.IsValid()) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid private key");
+    std::vector<CPubKey> pubkeys = ParsePubKeyArray(request.params[2], "member");
+    std::vector<unsigned char> msg = ParseHexV(request.params[3], "msg");
+    if (msg.size() != 32) throw JSONRPCError(RPC_INVALID_PARAMETER, "msg must be 32 bytes");
+    std::string err;
+    auto pubnonce = MuSigSessionNonce(session_id, key, pubkeys, msg, err);
+    if (!pubnonce) throw JSONRPCError(RPC_MISC_ERROR, err);
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("pubnonce", HexStr(*pubnonce));
+    return result;
+},
+    };
+}
+
+static RPCHelpMan musigpartialsign()
+{
+    return RPCHelpMan{"musigpartialsign",
+                "\nDistributed MuSig2 signing, round 2 (run on each committee member's own node). "
+                "Given every member's round-1 public nonce, produce this member's partial signature and "
+                "consume the stored secret nonce (the session is single-use). pubkeys and msg must match "
+                "round 1. See doc/sequentia/07-vrf.md §6.\n",
+                {
+                    {"sessionid", RPCArg::Type::STR, RPCArg::Optional::NO, "The session id used in musignonce."},
+                    {"privkey", RPCArg::Type::STR, RPCArg::Optional::NO, "WIF private key of this signer."},
+                    {"pubkeys", RPCArg::Type::ARR, RPCArg::Optional::NO, "All members' public keys (must match round 1).",
+                        {{"", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "public key"}}},
+                    {"pubnonces", RPCArg::Type::ARR, RPCArg::Optional::NO, "Every member's round-1 pubnonce.",
+                        {{"", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "pubnonce"}}},
+                    {"msg", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The 32-byte message (must match round 1)."},
+                },
+                RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::STR_HEX, "partialsig", "this member's 32-byte partial signature"}}},
+                RPCExamples{HelpExampleCli("musigpartialsign", "\"slot42\" \"cV...\" '[\"02...\"]' '[\"<nonce>\"]' \"<blockhash>\"")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    std::string session_id = request.params[0].get_str();
+    CKey key = DecodeSecret(request.params[1].get_str());
+    if (!key.IsValid()) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid private key");
+    std::vector<CPubKey> pubkeys = ParsePubKeyArray(request.params[2], "member");
+    std::vector<std::vector<unsigned char>> pubnonces = ParseHexArray(request.params[3], "pubnonce");
+    std::vector<unsigned char> msg = ParseHexV(request.params[4], "msg");
+    if (msg.size() != 32) throw JSONRPCError(RPC_INVALID_PARAMETER, "msg must be 32 bytes");
+    std::string err;
+    auto partial = MuSigSessionPartialSign(session_id, key, pubkeys, pubnonces, msg, err);
+    if (!partial) throw JSONRPCError(RPC_MISC_ERROR, err);
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("partialsig", HexStr(*partial));
+    return result;
+},
+    };
+}
+
+static RPCHelpMan musigaggregate()
+{
+    return RPCHelpMan{"musigaggregate",
+                "\nDistributed MuSig2 signing, final step (run by the coordinator; uses only public data). "
+                "Aggregate the members' partial signatures into the single 64-byte BIP340 signature that "
+                "certifies a -posaggcommittee block. See doc/sequentia/07-vrf.md §6.\n",
+                {
+                    {"pubkeys", RPCArg::Type::ARR, RPCArg::Optional::NO, "All members' public keys.",
+                        {{"", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "public key"}}},
+                    {"pubnonces", RPCArg::Type::ARR, RPCArg::Optional::NO, "Every member's round-1 pubnonce.",
+                        {{"", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "pubnonce"}}},
+                    {"partialsigs", RPCArg::Type::ARR, RPCArg::Optional::NO, "Every member's round-2 partial signature.",
+                        {{"", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "partialsig"}}},
+                    {"msg", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The 32-byte message."},
+                },
+                RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::STR_HEX, "signature", "the 64-byte BIP340 aggregate signature"}}},
+                RPCExamples{HelpExampleCli("musigaggregate", "'[\"02...\"]' '[\"<nonce>\"]' '[\"<partial>\"]' \"<blockhash>\"")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    std::vector<CPubKey> pubkeys = ParsePubKeyArray(request.params[0], "member");
+    std::vector<std::vector<unsigned char>> pubnonces = ParseHexArray(request.params[1], "pubnonce");
+    std::vector<std::vector<unsigned char>> partials = ParseHexArray(request.params[2], "partialsig");
+    std::vector<unsigned char> msg = ParseHexV(request.params[3], "msg");
+    if (msg.size() != 32) throw JSONRPCError(RPC_INVALID_PARAMETER, "msg must be 32 bytes");
+    auto sig = MuSigAggregatePartials(pubkeys, pubnonces, partials, msg);
+    if (!sig) throw JSONRPCError(RPC_MISC_ERROR, "Could not aggregate the partial signatures (wrong set, nonces, or partials)");
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("signature", HexStr(*sig));
+    return result;
+},
+    };
+}
+
+static RPCHelpMan musigverify()
+{
+    return RPCHelpMan{"musigverify",
+                "\nVerify a 64-byte MuSig2/BIP340 signature over msg32 under the aggregate of pubkeys.\n",
+                {
+                    {"pubkeys", RPCArg::Type::ARR, RPCArg::Optional::NO, "The member set.",
+                        {{"", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "public key"}}},
+                    {"msg", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The 32-byte message."},
+                    {"signature", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The 64-byte signature."},
+                },
+                RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::BOOL, "valid", "whether the signature is valid"}}},
+                RPCExamples{HelpExampleCli("musigverify", "'[\"02...\"]' \"<msg>\" \"<sig>\"")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    std::vector<CPubKey> pubkeys = ParsePubKeyArray(request.params[0], "member");
+    std::vector<unsigned char> msg = ParseHexV(request.params[1], "msg");
+    std::vector<unsigned char> sig = ParseHexV(request.params[2], "signature");
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("valid", msg.size() == 32 && sig.size() == 64 && MuSigVerify(pubkeys, msg, sig));
+    return result;
+},
+    };
+}
+
 static RPCHelpMan generateposblock()
 {
     return RPCHelpMan{"generateposblock",
@@ -1830,6 +2005,199 @@ static RPCHelpMan generateposblock()
     if (g_pos_vrf) {
         result.pushKV("vrf_output", vrf_output.GetHex());
         result.pushKV("vrf_slot", vrf_slot);
+    }
+    return result;
+},
+    };
+}
+
+static RPCHelpMan getposblocktemplate()
+{
+    return RPCHelpMan{"getposblocktemplate",
+                "\nFor -posaggcommittee chains: assemble (but do not sign) the next block as the given "
+                "leader, committing the leader's VRF sortition proof and the supplied committee members' "
+                "eligibility proofs, and return its hex and the 32-byte hash the committee must sign. The "
+                "committee then signs that hash with the distributed MuSig2 flow (musignonce / "
+                "musigpartialsign / musigaggregate) and the result is submitted with submitposblock. This "
+                "lets a decentralized committee, each member on its own host, produce a block without any "
+                "one node holding all the keys. See doc/sequentia/07-vrf.md §6.\n",
+                {
+                    {"leaderkey", RPCArg::Type::STR, RPCArg::Optional::NO, "WIF private key of the proposing leader (held only on the leader's host)."},
+                    {"members", RPCArg::Type::ARR, RPCArg::Optional::NO, "The committee signer set: one entry per member.",
+                        {
+                            {"", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "",
+                                {
+                                    {"pubkey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "the member's public key"},
+                                    {"vrfproof", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "the member's VRF eligibility proof over the slot seed (from vrfprove)"},
+                                },
+                            },
+                        }},
+                },
+                RPCResult{
+                    RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::STR_HEX, "block", "the unsigned block, hex-encoded (pass to submitposblock unchanged)"},
+                        {RPCResult::Type::STR_HEX, "signhash", "the 32-byte block hash the leader and committee must sign"},
+                        {RPCResult::Type::STR_HEX, "aggregate_pubkey", "the committee's MuSig2 aggregate key committed in the challenge"},
+                        {RPCResult::Type::ARR, "members", "the member pubkeys, in the set the committee must sign under", {{RPCResult::Type::STR_HEX, "", "pubkey"}}},
+                        {RPCResult::Type::NUM, "height", "the block's height"},
+                    }},
+                RPCExamples{HelpExampleCli("getposblocktemplate", "\"cV...\" '[{\"pubkey\":\"02...\",\"vrfproof\":\"...\"}]'")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!g_con_pos || !g_pos_vrf || !g_pos_agg_committee) {
+        throw JSONRPCError(RPC_MISC_ERROR, "getposblocktemplate requires a -posaggcommittee (MuSig2) chain");
+    }
+    CKey key = DecodeSecret(request.params[0].get_str());
+    if (!key.IsValid()) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid leader private key");
+    CPubKey pubkey = key.GetPubKey();
+
+    ChainstateManager& chainman = EnsureAnyChainman(request.context);
+    const NodeContext& node = EnsureAnyNodeContext(request.context);
+    CChainParams chainparams(Params());
+
+    CBlockIndex* tip;
+    {
+        LOCK(cs_main);
+        tip = chainman.ActiveChain().Tip();
+    }
+    uint256 seed = PosSeedForChild(tip);
+    const StakeRegistry& registry = StakeRegistry::GetInstance();
+    if (registry.GetWeight(pubkey) == 0) {
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "The leader key is not a registered staker");
+    }
+    const uint64_t total_weight = PosTotalWeight(registry);
+
+    // Leader's own VRF sortition proof (SEQVRF).
+    auto leader_proof = VrfProve(key, Span<const unsigned char>(seed.begin(), 32));
+    if (!leader_proof) throw JSONRPCError(RPC_MISC_ERROR, "Failed to compute the leader's VRF proof");
+    std::vector<CScript> vrf_commitments;
+    vrf_commitments.push_back(BuildPosVrfCommitment(*leader_proof));
+
+    // Validate each supplied member's eligibility and build its SEQCMT
+    // commitment; the signer set is exactly these members.
+    std::vector<CPubKey> members;
+    for (const UniValue& m : request.params[1].get_array().getValues()) {
+        CPubKey member(ParseHexV(find_value(m, "pubkey"), "pubkey"));
+        if (!member.IsFullyValid()) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid member pubkey");
+        std::vector<unsigned char> mproof = ParseHexV(find_value(m, "vrfproof"), "vrfproof");
+        if (registry.GetWeight(member) == 0) {
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("Member %s is not a registered staker", HexStr(member)));
+        }
+        uint256 mbeta;
+        if (!VrfVerify(member, Span<const unsigned char>(seed.begin(), 32), mproof, mbeta)) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Member %s VRF proof does not verify", HexStr(member)));
+        }
+        if (!PosVrfIsCommitteeMember(mbeta, registry.GetWeight(member), total_weight)) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Member %s is not sortition-selected this slot", HexStr(member)));
+        }
+        members.push_back(member);
+        vrf_commitments.push_back(BuildPosVrfMemberCommitment(member, mproof));
+    }
+    int quorum = PosQuorum((size_t)g_pos_committee_size);
+    if ((int)members.size() < quorum) {
+        throw JSONRPCError(RPC_MISC_ERROR, strprintf("Only %d eligible members supplied; quorum is %d of an expected committee of %d", (int)members.size(), quorum, g_pos_committee_size));
+    }
+
+    CScript feeDestinationScript = chainparams.GetConsensus().mandatory_coinbase_destination;
+    if (feeDestinationScript == CScript()) feeDestinationScript = CScript() << OP_TRUE;
+
+    std::unique_ptr<CBlockTemplate> pblocktemplate(
+        BlockAssembler(chainman.ActiveChainstate(), *node.mempool, chainparams)
+            .CreateNewBlock(feeDestinationScript, std::chrono::seconds(0), nullptr,
+                            &vrf_commitments, &pubkey, &(*leader_proof), &members));
+    if (!pblocktemplate.get()) throw JSONRPCError(RPC_INTERNAL_ERROR, "Could not create block template");
+    CBlock& block = pblocktemplate->block;
+    {
+        LOCK(cs_main);
+        unsigned int extra_nonce = 0;
+        IncrementExtraNonce(&block, chainman.ActiveChain().Tip(), extra_nonce);
+    }
+
+    auto parts = ParsePosBlockChallenge(block.proof.challenge);
+    if (!parts || parts->agg_key.empty()) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR, "Assembled block is not in aggregate-committee form");
+    }
+
+    CDataStream ssBlock(SER_NETWORK, PROTOCOL_VERSION | RPCSerializationFlags());
+    ssBlock << block;
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("block", HexStr(ssBlock));
+    // signhash is returned in internal byte order — the exact 32 bytes the
+    // committee must MuSig-sign and that consensus Schnorr-verifies (not the
+    // reversed GetHex display form).
+    uint256 signhash = block.GetHash();
+    result.pushKV("signhash", HexStr(Span<const unsigned char>(signhash.begin(), 32)));
+    result.pushKV("aggregate_pubkey", HexStr(parts->agg_key));
+    UniValue marr(UniValue::VARR);
+    for (const CPubKey& m : members) marr.push_back(HexStr(m));
+    result.pushKV("members", marr);
+    result.pushKV("height", tip->nHeight + 1);
+    return result;
+},
+    };
+}
+
+static RPCHelpMan submitposblock()
+{
+    return RPCHelpMan{"submitposblock",
+                "\nFor -posaggcommittee chains: finalize and submit a block produced by getposblocktemplate, "
+                "attaching the leader's signature and the committee's distributed MuSig2 aggregate signature "
+                "(from musigaggregate). The chain tip must be unchanged since the template was built. "
+                "See doc/sequentia/07-vrf.md §6.\n",
+                {
+                    {"blockhex", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The block hex from getposblocktemplate, unchanged."},
+                    {"leaderkey", RPCArg::Type::STR, RPCArg::Optional::NO, "WIF private key of the leader (signs the block hash)."},
+                    {"aggregatesig", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The 64-byte committee MuSig2 aggregate signature over signhash."},
+                },
+                RPCResult{
+                    RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::STR_HEX, "hash", "hash of the submitted block"},
+                        {RPCResult::Type::NUM, "height", "its height"},
+                    }},
+                RPCExamples{HelpExampleCli("submitposblock", "\"<blockhex>\" \"cV...\" \"<aggsig>\"")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!g_con_pos || !g_pos_vrf || !g_pos_agg_committee) {
+        throw JSONRPCError(RPC_MISC_ERROR, "submitposblock requires a -posaggcommittee (MuSig2) chain");
+    }
+    CBlock block;
+    if (!DecodeHexBlk(block, request.params[0].get_str())) {
+        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Block decode failed");
+    }
+    CKey key = DecodeSecret(request.params[1].get_str());
+    if (!key.IsValid()) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid leader private key");
+    std::vector<unsigned char> agg_sig = ParseHexV(request.params[2], "aggregatesig");
+    if (agg_sig.size() != 64) throw JSONRPCError(RPC_INVALID_PARAMETER, "aggregatesig must be 64 bytes");
+
+    auto parts = ParsePosBlockChallenge(block.proof.challenge);
+    if (!parts || parts->agg_key.empty()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Block is not an aggregate-committee block");
+    }
+    std::vector<unsigned char> leader_sig;
+    if (!key.Sign(block.GetHash(), leader_sig)) {
+        throw JSONRPCError(RPC_MISC_ERROR, "Failed to sign block as leader");
+    }
+    CScript solution;
+    solution << leader_sig << agg_sig;
+    block.proof.solution = solution;
+
+    CChainParams chainparams(Params());
+    if (!CheckProof(block, chainparams.GetConsensus())) {
+        throw JSONRPCError(RPC_MISC_ERROR, "Leader signature or committee aggregate signature did not satisfy the challenge");
+    }
+    ChainstateManager& chainman = EnsureAnyChainman(request.context);
+    std::shared_ptr<const CBlock> shared_pblock = std::make_shared<const CBlock>(block);
+    if (!chainman.ProcessNewBlock(chainparams, shared_pblock, true, nullptr)) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR, "ProcessNewBlock, block not accepted");
+    }
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("hash", block.GetHash().GetHex());
+    {
+        LOCK(cs_main);
+        const CBlockIndex* pindex = chainman.m_blockman.LookupBlockIndex(block.GetHash());
+        result.pushKV("height", pindex ? pindex->nHeight : -1);
     }
     return result;
 },
@@ -2134,8 +2502,15 @@ static const CRPCCommand commands[] =
     { "mining",             &getblocktemplate,         },
     { "generating",         &combineblocksigs,         },
     { "generating",         &generateposblock,         },
+    { "generating",         &getposblocktemplate,      },
+    { "generating",         &submitposblock,           },
     { "util",               &vrfprove,                 },
     { "util",               &vrfverify,                },
+    { "util",               &musigaggregatepubkey,     },
+    { "util",               &musignonce,               },
+    { "util",               &musigpartialsign,         },
+    { "util",               &musigaggregate,           },
+    { "util",               &musigverify,              },
     { "mining",             &submitheader,             },
     { "generating",         &getnewblockhex,           },
     { "generating",         &getcompactsketch,         },

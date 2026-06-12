@@ -48,4 +48,48 @@ std::optional<std::vector<unsigned char>> MuSigSign(const std::vector<CKey>& key
 bool MuSigVerify(const std::vector<CPubKey>& pubkeys, Span<const unsigned char> msg32,
                  Span<const unsigned char> sig64);
 
+// --- Distributed (multi-host) signing (doc/sequentia/07-vrf.md §6) ---
+//
+// The local MuSigSign above needs every signer's key on one host (the block
+// producer). For a real decentralized committee each member runs on its own
+// host and contributes without revealing its key, via BIP327's two MuSig2
+// rounds. BIP327's secret nonce is deliberately non-serialisable (so it can
+// never be persisted and accidentally reused — reuse leaks the key), so each
+// member's node keeps the live secret nonce in memory between rounds, in a
+// session store, and consumes it exactly once.
+
+/** Round 1 on a member's host: generate this member's public nonce for signing
+ *  `msg32` under the aggregate of `pubkeys`, and stash the matching secret
+ *  nonce under `session_id` for round 2. `session_id` must be fresh (an
+ *  existing id is an error, to prevent secret-nonce reuse). Returns the
+ *  66-byte public nonce to broadcast to the other members. */
+std::optional<std::vector<unsigned char>> MuSigSessionNonce(
+    const std::string& session_id, const CKey& key,
+    const std::vector<CPubKey>& pubkeys, Span<const unsigned char> msg32,
+    std::string& error);
+
+/** Round 2 on a member's host: given every member's round-1 public nonce
+ *  (`pubnonces`, order-independent), produce this member's 32-byte partial
+ *  signature and consume the stored secret nonce (the session is erased, so a
+ *  second call with the same id fails — single-use). The `pubkeys` and `msg32`
+ *  must match round 1. */
+std::optional<std::vector<unsigned char>> MuSigSessionPartialSign(
+    const std::string& session_id, const CKey& key,
+    const std::vector<CPubKey>& pubkeys,
+    const std::vector<std::vector<unsigned char>>& pubnonces,
+    Span<const unsigned char> msg32, std::string& error);
+
+/** Aggregate the members' partial signatures into the final 64-byte BIP340
+ *  signature (public; no secret material). `pubnonces` and `partials` are the
+ *  round-1 and round-2 contributions; `pubkeys`/`msg32` define the context. */
+std::optional<std::vector<unsigned char>> MuSigAggregatePartials(
+    const std::vector<CPubKey>& pubkeys,
+    const std::vector<std::vector<unsigned char>>& pubnonces,
+    const std::vector<std::vector<unsigned char>>& partials,
+    Span<const unsigned char> msg32);
+
+/** Discard a pending round-1 session without signing (cleanup on abort). No-op
+ *  if the id is unknown. */
+void MuSigSessionAbort(const std::string& session_id);
+
 #endif // BITCOIN_MUSIG_H

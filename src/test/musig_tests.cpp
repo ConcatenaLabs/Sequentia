@@ -124,4 +124,88 @@ BOOST_AUTO_TEST_CASE(musig_requires_all_signers)
     BOOST_CHECK(!MuSigSign(keys, pubs, Msg(0x01)).has_value());
 }
 
+// The distributed (per-host) two-round session API produces a signature
+// verifying under the same aggregate key as the local MuSigSign — modelling a
+// committee whose members never share their keys.
+BOOST_AUTO_TEST_CASE(musig_distributed_rounds)
+{
+    const size_t n = 4;
+    std::vector<CKey> keys;
+    std::vector<CPubKey> pubs;
+    for (size_t i = 0; i < n; ++i) {
+        CKey k; k.MakeNewKey(true);
+        keys.push_back(k);
+        pubs.push_back(k.GetPubKey());
+    }
+    std::vector<unsigned char> msg = Msg(0x55);
+
+    // Round 1: each member, in its own session, produces a public nonce.
+    std::vector<std::string> ids;
+    std::vector<std::vector<unsigned char>> pubnonces;
+    for (size_t i = 0; i < n; ++i) {
+        std::string id = "sess-" + std::to_string(i);
+        std::string err;
+        auto pn = MuSigSessionNonce(id, keys[i], pubs, msg, err);
+        BOOST_REQUIRE_MESSAGE(pn.has_value(), err);
+        BOOST_CHECK_EQUAL(pn->size(), 66U);
+        ids.push_back(id);
+        pubnonces.push_back(*pn);
+    }
+
+    // Round 2: each member partial-signs given all the public nonces.
+    std::vector<std::vector<unsigned char>> partials;
+    for (size_t i = 0; i < n; ++i) {
+        std::string err;
+        auto ps = MuSigSessionPartialSign(ids[i], keys[i], pubs, pubnonces, msg, err);
+        BOOST_REQUIRE_MESSAGE(ps.has_value(), err);
+        BOOST_CHECK_EQUAL(ps->size(), 32U);
+        partials.push_back(*ps);
+    }
+
+    // Aggregate (public) → a 64-byte signature valid under the set aggregate.
+    auto sig = MuSigAggregatePartials(pubs, pubnonces, partials, msg);
+    BOOST_REQUIRE(sig.has_value());
+    BOOST_CHECK_EQUAL(sig->size(), 64U);
+    BOOST_CHECK(MuSigVerify(pubs, msg, *sig));
+}
+
+// Safety: a session is single-use (round 2 consumes the secret nonce), a stale
+// id can't be reused, and round 2 refuses a different message/set than round 1.
+BOOST_AUTO_TEST_CASE(musig_session_safety)
+{
+    std::vector<CKey> keys;
+    std::vector<CPubKey> pubs;
+    for (size_t i = 0; i < 3; ++i) {
+        CKey k; k.MakeNewKey(true);
+        keys.push_back(k);
+        pubs.push_back(k.GetPubKey());
+    }
+    std::vector<unsigned char> msg = Msg(0x11);
+    std::string err;
+
+    // Round 1 for all members.
+    std::vector<std::vector<unsigned char>> pubnonces;
+    for (size_t i = 0; i < 3; ++i) {
+        auto pn = MuSigSessionNonce("s" + std::to_string(i), keys[i], pubs, msg, err);
+        BOOST_REQUIRE(pn.has_value());
+        pubnonces.push_back(*pn);
+    }
+
+    // A duplicate session id is refused (would reuse a secret nonce).
+    BOOST_CHECK(!MuSigSessionNonce("s0", keys[0], pubs, msg, err).has_value());
+
+    // Round 2 with a mismatched message is refused without consuming the session.
+    BOOST_CHECK(!MuSigSessionPartialSign("s0", keys[0], pubs, pubnonces, Msg(0x12), err).has_value());
+
+    // The correct round 2 succeeds...
+    BOOST_CHECK(MuSigSessionPartialSign("s0", keys[0], pubs, pubnonces, msg, err).has_value());
+    // ...and the session is now consumed: a second call fails.
+    BOOST_CHECK(!MuSigSessionPartialSign("s0", keys[0], pubs, pubnonces, msg, err).has_value());
+
+    // Abort cleans up the remaining sessions (no crash, idempotent).
+    MuSigSessionAbort("s1");
+    MuSigSessionAbort("s1");
+    BOOST_CHECK(!MuSigSessionPartialSign("s1", keys[1], pubs, pubnonces, msg, err).has_value());
+}
+
 BOOST_AUTO_TEST_SUITE_END()

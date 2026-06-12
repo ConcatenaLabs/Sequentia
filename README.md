@@ -57,7 +57,10 @@ This fork adds (all gated on the relevant chain features):
   `-validateanchor`, `-anchorminconf`, `-anchorpollinterval` (reuses the
   `-mainchainrpc*` connection).
 - **Proof-of-Stake:** `getstakerinfo`, `getposschedule`, `getstakescript`,
-  `generateposblock`, `vrfprove` / `vrfverify`, `getcheckpointpayload` /
+  `generateposblock`, `getposblocktemplate` / `submitposblock` (distributed
+  committee block production), `vrfprove` / `vrfverify`, the MuSig2 suite
+  (`musigaggregatepubkey`, `musignonce`, `musigpartialsign`, `musigaggregate`,
+  `musigverify`), `getcheckpointpayload` /
   `getcheckpointinfo`; options `-con_pos`, `-staker`, `-posslotinterval`,
   `-poscommitteesize`, `-posvrf`, `-posaggcommittee`, `-posunbonding`,
   `-poscheckpointdepth`, `-poscheckpoint` (configured static checkpoints).

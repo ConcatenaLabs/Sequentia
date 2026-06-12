@@ -236,6 +236,49 @@ rejection, the quorum-subset property, and the n-of-n boundary).
 Tested in `feature_pos_agg_committee.py` (quorum enforcement, peer validation
 of the aggregate form, constant-size solution, and that `-poscommitteesize=40`
 starts only with the aggregation flag) and `pos_tests.cpp`
-(`pos_agg_challenge_roundtrip`). Distributed two-round signing among
-separately-hosted members remains an operational layer on top of the same
-primitive (the paper's synchronous committee rounds), out of scope for the PoC.
+(`pos_agg_challenge_roundtrip`). The `generateposblock` path above runs the two
+MuSig2 rounds *locally* (the producer holds every committee key) — convenient
+for a single operator, but not how a decentralized committee works.
+
+### Distributed signing — implemented
+
+For a real committee, each member runs on its own node and never shares its
+key. BIP327's secret nonce is deliberately non-serialisable (so it can't be
+persisted and accidentally reused — reuse leaks the key), so each member's node
+keeps the live secret nonce in an in-memory **session store** (`src/musig.cpp`)
+between the two rounds and consumes it exactly once. Five RPCs expose the flow:
+
+- `musigaggregatepubkey [pubkeys]` → the committee's 32-byte aggregate key
+  (the challenge's `agg_key`).
+- `musignonce sessionid privkey [pubkeys] msg` → **round 1** on a member's
+  node: its 66-byte public nonce, stashing the secret nonce under a *fresh*
+  session id (a duplicate id is refused — single-use).
+- `musigpartialsign sessionid privkey [pubkeys] [pubnonces] msg` → **round 2**:
+  the member's 32-byte partial signature; consumes the session and refuses any
+  message/set that differs from round 1 (binding against nonce-reuse misuse).
+- `musigaggregate [pubkeys] [pubnonces] [partials] msg` → the final 64-byte
+  signature (public; coordinator-side), self-checked against the aggregate key.
+- `musigverify [pubkeys] msg sig` → BIP340 verification.
+
+Two RPCs wire this into block production without any node holding all the keys:
+
+- `getposblocktemplate leaderkey [{pubkey, vrfproof}…]` — the leader assembles
+  the unsigned block (its own `SEQVRF` proof, each member's `SEQCMT`
+  eligibility commitment from the supplied VRF proofs, and the aggregate
+  challenge over the member set) and returns the block hex plus the 32-byte
+  `signhash` (in internal byte order — the exact bytes consensus Schnorr-checks)
+  and the member set.
+- `submitposblock blockhex leaderkey aggregatesig` — the leader attaches its own
+  signature and the committee's aggregate (from `musigaggregate`) and submits;
+  the block is validated and accepted by every node like any other.
+
+`feature_pos_distributed_committee.py` runs the whole loop across **three
+separate nodes**, each holding one member key: every member VRF-proves its
+eligibility, the leader templates the block, the members nonce and partial-sign
+on their own nodes, the partials aggregate into one signature, and the
+committee-certified block is accepted network-wide — for several blocks in a
+row. `musig_tests.cpp` adds the distributed-rounds round-trip and the
+session-safety properties (single-use, duplicate-id refusal, message/set
+binding). What remains purely operational (a transport to ferry nonces and
+partials between hosts, and member liveness/timeout handling) is deployment
+tooling, not consensus — the consensus and signing layers are complete.

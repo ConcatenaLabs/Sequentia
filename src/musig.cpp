@@ -4,7 +4,10 @@
 
 #include <musig.h>
 
+#include <hash.h>
 #include <random.h>
+#include <sync.h>
+#include <uint256.h>
 
 #include <secp256k1.h>
 #include <secp256k1_extrakeys.h>
@@ -13,6 +16,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <map>
 
 namespace {
 
@@ -57,6 +61,46 @@ bool AggKey(const std::vector<CPubKey>& pubkeys, secp256k1_xonly_pubkey& agg_pk,
     for (size_t i = 0; i < parsed.size(); ++i) ptrs[i] = &parsed[i];
     return secp256k1_musig_pubkey_agg(Ctx(), nullptr, &agg_pk, &cache, ptrs.data(), ptrs.size());
 }
+
+//! A fingerprint binding a signing session to its exact (set, message): the
+//! sorted member set and msg32. Reusing a secret nonce with a different
+//! message or set is catastrophic, so round 2 refuses any mismatch.
+uint256 SessionFingerprint(const std::vector<CPubKey>& pubkeys, Span<const unsigned char> msg32)
+{
+    std::vector<std::vector<unsigned char>> sorted;
+    for (const CPubKey& p : pubkeys) sorted.emplace_back(p.begin(), p.end());
+    std::sort(sorted.begin(), sorted.end());
+    CSHA256 sha;
+    for (const auto& p : sorted) sha.Write(p.data(), p.size());
+    sha.Write(msg32.data(), msg32.size());
+    uint256 out;
+    sha.Finalize(out.begin());
+    return out;
+}
+
+//! Aggregate the members' 66-byte public nonces into one aggregate nonce.
+bool AggregateNonces(const std::vector<std::vector<unsigned char>>& pubnonces,
+                     secp256k1_musig_aggnonce& aggnonce)
+{
+    const secp256k1_context* ctx = Ctx();
+    std::vector<secp256k1_musig_pubnonce> parsed(pubnonces.size());
+    std::vector<const secp256k1_musig_pubnonce*> ptrs(pubnonces.size());
+    for (size_t i = 0; i < pubnonces.size(); ++i) {
+        if (pubnonces[i].size() != 66) return false;
+        if (!secp256k1_musig_pubnonce_parse(ctx, &parsed[i], pubnonces[i].data())) return false;
+        ptrs[i] = &parsed[i];
+    }
+    return secp256k1_musig_nonce_agg(ctx, &aggnonce, ptrs.data(), ptrs.size());
+}
+
+//! In-memory round-1 sessions, keyed by a caller-chosen id. Holds the live
+//! (non-serialisable) secret nonce until round 2 consumes it exactly once.
+struct PendingSession {
+    secp256k1_musig_secnonce secnonce;
+    uint256 fingerprint; //!< binds (member set, message); see SessionFingerprint
+};
+Mutex g_musig_sessions_mutex;
+std::map<std::string, PendingSession> g_musig_sessions GUARDED_BY(g_musig_sessions_mutex);
 
 } // namespace
 
@@ -136,4 +180,155 @@ bool MuSigVerify(const std::vector<CPubKey>& pubkeys, Span<const unsigned char> 
     secp256k1_musig_keyagg_cache cache;
     if (!AggKey(pubkeys, agg_pk, cache)) return false;
     return secp256k1_schnorrsig_verify(Ctx(), sig64.data(), msg32.data(), 32, &agg_pk);
+}
+
+std::optional<std::vector<unsigned char>> MuSigSessionNonce(
+    const std::string& session_id, const CKey& key,
+    const std::vector<CPubKey>& pubkeys, Span<const unsigned char> msg32,
+    std::string& error)
+{
+    if (msg32.size() != 32) { error = "message must be 32 bytes"; return std::nullopt; }
+    if (!key.IsValid()) { error = "invalid signing key"; return std::nullopt; }
+    const secp256k1_context* ctx = Ctx();
+
+    secp256k1_xonly_pubkey agg_pk;
+    secp256k1_musig_keyagg_cache cache;
+    if (!AggKey(pubkeys, agg_pk, cache)) { error = "could not aggregate the member set"; return std::nullopt; }
+
+    unsigned char sk[32];
+    std::memcpy(sk, key.begin(), 32);
+    CPubKey cpub = key.GetPubKey();
+    secp256k1_pubkey signer_pubkey;
+    std::vector<unsigned char> pub_ser(cpub.begin(), cpub.end());
+    if (!secp256k1_ec_pubkey_parse(ctx, &signer_pubkey, pub_ser.data(), pub_ser.size())) {
+        error = "invalid signer public key"; return std::nullopt;
+    }
+
+    PendingSession sess;
+    secp256k1_musig_pubnonce pubnonce;
+    unsigned char session_secrand[32];
+    GetRandBytes(session_secrand, 32);
+    if (!secp256k1_musig_nonce_gen(ctx, &sess.secnonce, &pubnonce, session_secrand, sk,
+                                   &signer_pubkey, msg32.data(), &cache, nullptr)) {
+        error = "nonce generation failed"; return std::nullopt;
+    }
+    sess.fingerprint = SessionFingerprint(pubkeys, msg32);
+
+    {
+        LOCK(g_musig_sessions_mutex);
+        if (g_musig_sessions.count(session_id)) {
+            error = "a signing session with this id already exists (refusing to reuse a secret nonce)";
+            return std::nullopt;
+        }
+        g_musig_sessions.emplace(session_id, sess);
+    }
+
+    std::vector<unsigned char> out(66);
+    if (!secp256k1_musig_pubnonce_serialize(ctx, out.data(), &pubnonce)) {
+        LOCK(g_musig_sessions_mutex);
+        g_musig_sessions.erase(session_id);
+        error = "could not serialize public nonce"; return std::nullopt;
+    }
+    return out;
+}
+
+std::optional<std::vector<unsigned char>> MuSigSessionPartialSign(
+    const std::string& session_id, const CKey& key,
+    const std::vector<CPubKey>& pubkeys,
+    const std::vector<std::vector<unsigned char>>& pubnonces,
+    Span<const unsigned char> msg32, std::string& error)
+{
+    if (msg32.size() != 32) { error = "message must be 32 bytes"; return std::nullopt; }
+    if (!key.IsValid()) { error = "invalid signing key"; return std::nullopt; }
+    const secp256k1_context* ctx = Ctx();
+
+    // Look up and *remove* the round-1 session (single-use), after binding it
+    // to the exact (member set, message) round 1 committed to.
+    PendingSession sess;
+    {
+        LOCK(g_musig_sessions_mutex);
+        auto it = g_musig_sessions.find(session_id);
+        if (it == g_musig_sessions.end()) {
+            error = "no round-1 session with this id (call the nonce step first; each session signs once)";
+            return std::nullopt;
+        }
+        if (it->second.fingerprint != SessionFingerprint(pubkeys, msg32)) {
+            // Do NOT consume: the caller may retry with the correct context.
+            error = "member set or message does not match this session's round 1";
+            return std::nullopt;
+        }
+        sess = it->second;
+        g_musig_sessions.erase(it);
+    }
+
+    secp256k1_xonly_pubkey agg_pk;
+    secp256k1_musig_keyagg_cache cache;
+    if (!AggKey(pubkeys, agg_pk, cache)) { error = "could not aggregate the member set"; return std::nullopt; }
+
+    secp256k1_musig_aggnonce aggnonce;
+    if (!AggregateNonces(pubnonces, aggnonce)) { error = "could not aggregate the public nonces"; return std::nullopt; }
+
+    secp256k1_musig_session musig_session;
+    if (!secp256k1_musig_nonce_process(ctx, &musig_session, &aggnonce, msg32.data(), &cache, nullptr)) {
+        error = "nonce processing failed"; return std::nullopt;
+    }
+
+    unsigned char sk[32];
+    std::memcpy(sk, key.begin(), 32);
+    secp256k1_keypair keypair;
+    if (!secp256k1_keypair_create(ctx, &keypair, sk)) { error = "invalid keypair"; return std::nullopt; }
+
+    secp256k1_musig_partial_sig partial;
+    if (!secp256k1_musig_partial_sign(ctx, &partial, &sess.secnonce, &keypair, &cache, &musig_session)) {
+        error = "partial signing failed"; return std::nullopt;
+    }
+    std::vector<unsigned char> out(32);
+    if (!secp256k1_musig_partial_sig_serialize(ctx, out.data(), &partial)) {
+        error = "could not serialize partial signature"; return std::nullopt;
+    }
+    return out;
+}
+
+std::optional<std::vector<unsigned char>> MuSigAggregatePartials(
+    const std::vector<CPubKey>& pubkeys,
+    const std::vector<std::vector<unsigned char>>& pubnonces,
+    const std::vector<std::vector<unsigned char>>& partials,
+    Span<const unsigned char> msg32)
+{
+    if (msg32.size() != 32) return std::nullopt;
+    const secp256k1_context* ctx = Ctx();
+
+    secp256k1_xonly_pubkey agg_pk;
+    secp256k1_musig_keyagg_cache cache;
+    if (!AggKey(pubkeys, agg_pk, cache)) return std::nullopt;
+
+    secp256k1_musig_aggnonce aggnonce;
+    if (!AggregateNonces(pubnonces, aggnonce)) return std::nullopt;
+
+    secp256k1_musig_session musig_session;
+    if (!secp256k1_musig_nonce_process(ctx, &musig_session, &aggnonce, msg32.data(), &cache, nullptr)) {
+        return std::nullopt;
+    }
+
+    std::vector<secp256k1_musig_partial_sig> parsed(partials.size());
+    std::vector<const secp256k1_musig_partial_sig*> ptrs(partials.size());
+    for (size_t i = 0; i < partials.size(); ++i) {
+        if (partials[i].size() != 32) return std::nullopt;
+        if (!secp256k1_musig_partial_sig_parse(ctx, &parsed[i], partials[i].data())) return std::nullopt;
+        ptrs[i] = &parsed[i];
+    }
+
+    std::vector<unsigned char> sig(64);
+    if (!secp256k1_musig_partial_sig_agg(ctx, sig.data(), &musig_session, ptrs.data(), ptrs.size())) {
+        return std::nullopt;
+    }
+    // Self-check against the aggregate key before returning.
+    if (!secp256k1_schnorrsig_verify(ctx, sig.data(), msg32.data(), 32, &agg_pk)) return std::nullopt;
+    return sig;
+}
+
+void MuSigSessionAbort(const std::string& session_id)
+{
+    LOCK(g_musig_sessions_mutex);
+    g_musig_sessions.erase(session_id);
 }

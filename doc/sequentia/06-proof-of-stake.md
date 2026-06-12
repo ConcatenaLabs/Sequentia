@@ -170,7 +170,11 @@ nodes converge on it — exactly as the federation's round-robin does today.
        `feature_pos_committee.py`), and **paper-scale committees up to 100
        members** via MuSig2 signature aggregation (`-posaggcommittee`: one
        BIP340 signature certifies the whole committee — doc 07 §6,
-       `feature_pos_agg_committee.py`).
+       `feature_pos_agg_committee.py`). **Distributed signing** lets a
+       committee of separately-hosted members certify a block without any node
+       holding all the keys: the MuSig2 RPC suite plus
+       `getposblocktemplate`/`submitposblock`, exercised across three nodes in
+       `feature_pos_distributed_committee.py` (doc 07 §6).
 8. [x] On-chain stake registration / unbonding: locked staking outputs
        (`getstakescript`, weight = explicit policy-asset amount, minimum
        `-posunbonding` CSV), UTXO-derived registry layer mirrored at
