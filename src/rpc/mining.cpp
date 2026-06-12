@@ -16,6 +16,7 @@
 #include <exchangerates.h>
 #include <key_io.h>
 #include <net.h>
+#include <musig.h>
 #include <pos.h>
 #include <vrf.h>
 #include <node/context.h>
@@ -1664,6 +1665,7 @@ static RPCHelpMan generateposblock()
     std::vector<unsigned char> vrf_proof;
     std::vector<CScript> vrf_commitments;
     std::vector<CPubKey> vrf_committee;
+    std::map<CPubKey, CKey> candidates; // committee key candidates (leader + provided)
     uint64_t vrf_slot = 0;
     uint256 vrf_output;
     if (g_pos_vrf) {
@@ -1684,7 +1686,6 @@ static RPCHelpMan generateposblock()
         if (g_pos_committee_size > 1) {
             // Gather candidate committee keys (the leader's own key is a
             // candidate too), keep the sortition-selected ones.
-            std::map<CPubKey, CKey> candidates;
             candidates.emplace(pubkey, key);
             if (!request.params[1].isNull()) {
                 for (const UniValue& wif : request.params[1].get_array().getValues()) {
@@ -1756,7 +1757,31 @@ static RPCHelpMan generateposblock()
         throw JSONRPCError(RPC_INTERNAL_ERROR, "Generated block challenge is not a recognized PoS challenge");
     }
     int countersigs = 0;
-    if (parts->committee.empty()) {
+    if (!parts->agg_key.empty()) {
+        // Aggregate-committee form (doc 07 §6): the leader's plain ECDSA
+        // signature plus one MuSig2 (BIP340) signature by *all* the named
+        // members (MuSig2 is n-of-n; the quorum was enforced on the named
+        // set above), both over the block hash, as two script pushes.
+        std::vector<unsigned char> leader_sig;
+        if (!key.Sign(block.GetHash(), leader_sig)) {
+            throw JSONRPCError(RPC_MISC_ERROR, "Failed to sign block as leader");
+        }
+        std::vector<CKey> member_keys;
+        member_keys.reserve(vrf_committee.size());
+        for (const CPubKey& member : vrf_committee) {
+            member_keys.push_back(candidates.at(member));
+        }
+        const uint256 hash = block.GetHash();
+        std::optional<std::vector<unsigned char>> agg_sig =
+            MuSigSign(member_keys, vrf_committee, Span<const unsigned char>(hash.begin(), 32));
+        if (!agg_sig) {
+            throw JSONRPCError(RPC_MISC_ERROR, "Failed to produce the committee's MuSig2 aggregate signature");
+        }
+        CScript solution;
+        solution << leader_sig << *agg_sig;
+        block.proof.solution = solution;
+        countersigs = (int)vrf_committee.size();
+    } else if (parts->committee.empty()) {
         SignatureData sig_data;
         if (!ProduceSignature(keystore, signature_creator, block.proof.challenge, sig_data, SCRIPT_NO_SIGHASH_BYTE)) {
             throw JSONRPCError(RPC_MISC_ERROR, "Failed to sign block as staker");

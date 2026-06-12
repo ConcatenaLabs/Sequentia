@@ -53,6 +53,20 @@ static const int MAX_POS_COMMITTEE_SIZE = 16;
  *  time-gated slot. Only the key holder can compute its slot in advance. */
 extern bool g_pos_vrf;
 
+/** When set (with g_pos_vrf), committee certification uses MuSig2 signature
+ *  aggregation (doc/sequentia/07-vrf.md §6) instead of script multisig: the
+ *  block challenge commits to the leader key plus one 32-byte aggregate of
+ *  the committee member set (named by the coinbase SEQCMT commitments), and
+ *  the block carries a single 64-byte BIP340 signature by all named members
+ *  regardless of committee size — lifting the 16-member script-multisig cap
+ *  to the paper's 100. */
+extern bool g_pos_agg_committee;
+
+/** Committee-size cap under MuSig2 aggregation (-posaggcommittee): the
+ *  paper's 100-member committee. Without aggregation the cap is
+ *  MAX_POS_COMMITTEE_SIZE (script multisig). */
+static const int MAX_POS_AGG_COMMITTEE_SIZE = 100;
+
 /** Upper bound on a VRF sortition slot, capping the time gate
  *  (slot * g_pos_slot_interval seconds after the parent block) regardless of
  *  how stake weights are scaled. */
@@ -202,16 +216,30 @@ CScript BuildPosBlockChallenge(const CPubKey& leader, const std::vector<CPubKey>
  *  nullopt if the script is not of that exact form. */
 std::optional<CPubKey> PosChallengeToPubKey(const CScript& challenge);
 
+/** Build the aggregate-committee block challenge (-posaggcommittee):
+ *      OP_1 <leader(33)> <agg_key(32)>
+ *  where agg_key is the MuSig2 aggregate (x-only) of the committee member
+ *  set. The script is a versioned commitment, not interpreter-executed:
+ *  CheckProof verifies the leader's ECDSA signature and the single BIP340
+ *  aggregate signature directly, and ContextualCheckBlock checks that
+ *  agg_key matches the MuSig2 aggregate of exactly the members named (and
+ *  proven sortition-eligible) by the coinbase SEQCMT commitments. */
+CScript BuildPosAggChallenge(const CPubKey& leader, const std::vector<unsigned char>& agg_key32);
+
 /** The decoded parts of a PoS block challenge. For a leader-only challenge the
- *  committee is empty and quorum 0. */
+ *  committee is empty and quorum 0. For the aggregate-committee form, agg_key
+ *  holds the 32-byte MuSig2 aggregate and the committee list is empty (the
+ *  member set is named by the block's coinbase SEQCMT commitments). */
 struct PosChallengeParts {
     CPubKey leader;
     std::vector<CPubKey> committee;
     int quorum{0};
+    std::vector<unsigned char> agg_key;
 };
 
-/** Parse either form of PoS block challenge (leader-only, or leader plus
- *  committee certification), or nullopt for any other script. */
+/** Parse any form of PoS block challenge (leader-only, leader plus committee
+ *  multisig certification, or leader plus aggregate key), or nullopt for any
+ *  other script. */
 std::optional<PosChallengeParts> ParsePosBlockChallenge(const CScript& challenge);
 
 /** Compute the election seed for the block that would extend `pindexPrev`. */

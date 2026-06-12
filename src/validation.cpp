@@ -34,6 +34,7 @@
 #include <policy/policy.h>
 #include <policy/rbf.h>
 #include <policy/settings.h>
+#include <musig.h>
 #include <pos.h>
 #include <vrf.h>
 #include <policy/value.h>
@@ -4000,6 +4001,41 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
         uint64_t slot = PosVrfSlot(beta, weight, total_weight);
         if ((int64_t)block.GetBlockTime() < (int64_t)pindexPrev->nTime + (int64_t)slot * g_pos_slot_interval) {
             return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-early", "block produced before its VRF sortition slot opened");
+        }
+        // Aggregate committee certification (doc 07 §6): the signer set is
+        // *named by* the coinbase SEQCMT commitments (the challenge carries
+        // only its 32-byte MuSig2 aggregate). Every named member must prove
+        // sortition eligibility for this slot, at least a certification
+        // quorum of the expected committee size must be named, and the
+        // challenge's aggregate key must equal the MuSig2 aggregate of
+        // exactly the named set — so the single BIP340 signature verified in
+        // CheckProof is by precisely these members.
+        if (!parts->agg_key.empty()) {
+            std::map<CPubKey, std::vector<unsigned char>> named;
+            for (const PosVrfMember& member : ExtractPosVrfMembers(block)) {
+                if (!named.emplace(member.pubkey, member.proof).second) {
+                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-member-duplicate", "duplicate committee member eligibility commitment");
+                }
+            }
+            if ((int)named.size() < PosQuorum((size_t)g_pos_committee_size)) {
+                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-agg-quorum", "fewer named committee members than the certification quorum");
+            }
+            std::vector<CPubKey> members;
+            members.reserve(named.size());
+            for (const auto& [member, member_proof] : named) {
+                uint256 member_beta;
+                if (!VrfVerify(member, seed, member_proof, member_beta)) {
+                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-member-invalid", "invalid committee member VRF eligibility proof");
+                }
+                if (!PosVrfIsCommitteeMember(member_beta, registry.GetWeight(member), total_weight)) {
+                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-member-not-selected", "named committee member was not selected by sortition for this slot");
+                }
+                members.push_back(member);
+            }
+            std::optional<std::vector<unsigned char>> agg = MuSigAggregatePubkey(members);
+            if (!agg || *agg != parts->agg_key) {
+                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-agg-key", "challenge aggregate key does not match the named committee member set");
+            }
         }
         // Committee certification under private sortition: every committee
         // member the challenge claims must carry a coinbase eligibility

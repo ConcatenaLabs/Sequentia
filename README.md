@@ -26,7 +26,8 @@ Blockstream's Liquid. All four are implemented and tested as a proof of concept:
    [`doc/sequentia/03-bitcoin-anchoring.md`](doc/sequentia/03-bitcoin-anchoring.md).
 3. **Proof-of-Stake consensus.** The theoretical paper's design, implemented
    in this repository: stake-weighted **private VRF sortition**, **committee
-   certification** (sortitioned, majority quorum — immediate finality),
+   certification** (sortitioned, majority quorum — immediate finality;
+   optionally **MuSig2-aggregated** to paper-scale 100-member committees),
    **on-chain stake** with CSV-enforced unbonding, and **Bitcoin checkpoints**
    against long-range attacks. Enabled per chain with `-con_pos` (the
    bundled Sequentia test chain currently runs the federated PoC signing). —
@@ -58,7 +59,8 @@ This fork adds (all gated on the relevant chain features):
 - **Proof-of-Stake:** `getstakerinfo`, `getposschedule`, `getstakescript`,
   `generateposblock`, `vrfprove` / `vrfverify`, `getcheckpointpayload` /
   `getcheckpointinfo`; options `-con_pos`, `-staker`, `-posslotinterval`,
-  `-poscommitteesize`, `-posvrf`, `-posunbonding`, `-poscheckpointdepth`.
+  `-poscommitteesize`, `-posvrf`, `-posaggcommittee`, `-posunbonding`,
+  `-poscheckpointdepth`.
 - **Addresses/CT:** `-con_default_blinded_addresses` (custom chains);
   `-blindedaddresses` default is now chain-dependent.
 

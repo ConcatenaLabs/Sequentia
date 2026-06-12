@@ -35,6 +35,15 @@ bool CheckChallenge(const CBlockHeader& block, const CBlockIndex& indexLast, con
             // time: with on-chain stake registration the registry is correct
             // only in block order, and headers can arrive far ahead of blocks
             // during headers-first sync.
+            if (g_pos_agg_committee && g_pos_committee_size > 1) {
+                // Aggregate-committee certification (doc 07 §6): the challenge
+                // must be the OP_1 <leader> <agg_key> form. The member set it
+                // aggregates is named by the coinbase SEQCMT commitments and
+                // validated (eligibility, quorum, aggregate match) in
+                // ContextualCheckBlock; the signatures in CheckProof.
+                return !parts->agg_key.empty();
+            }
+            if (!parts->agg_key.empty()) return false; // agg form only valid under -posaggcommittee
             if (g_pos_committee_size > 1) {
                 // Committee certification with private sortition: the
                 // challenge lists the *claimed* members (proven eligible in
@@ -53,6 +62,7 @@ bool CheckChallenge(const CBlockHeader& block, const CBlockIndex& indexLast, con
             }
             return true;
         }
+        if (!parts->agg_key.empty()) return false; // agg form requires -posvrf -posaggcommittee
         uint256 seed = PosSeedForChild(&indexLast);
         std::optional<size_t> rank = PosRank(registry, seed, parts->leader);
         if (!rank) {
@@ -118,6 +128,31 @@ bool CheckProof(const CBlockHeader& block, const Consensus::Params& params)
             // SEQUENTIA PoS: verify the block signature against the per-block
             // leader challenge carried in the header (validated as the correct
             // elected leader by CheckChallenge), not the chain's fixed script.
+            if (g_pos_agg_committee) {
+                std::optional<PosChallengeParts> parts = ParsePosBlockChallenge(block.proof.challenge);
+                if (parts && !parts->agg_key.empty()) {
+                    // Aggregate-committee form (doc 07 §6): the solution is two
+                    // pushes — the leader's DER signature and one 64-byte
+                    // BIP340 signature under the committee aggregate key —
+                    // verified directly rather than through the script
+                    // interpreter (OP_CHECKMULTISIG cannot express a single
+                    // signature over an aggregate of up to 100 keys). That the
+                    // aggregate key covers exactly the sortition-eligible
+                    // members named in the coinbase is enforced in
+                    // ContextualCheckBlock.
+                    if (block.proof.solution.size() > params.max_block_signature_size) return false;
+                    CScript::const_iterator pc = block.proof.solution.begin();
+                    opcodetype opcode;
+                    std::vector<unsigned char> leader_sig, agg_sig;
+                    if (!block.proof.solution.GetOp(pc, opcode, leader_sig) || leader_sig.empty()) return false;
+                    if (!block.proof.solution.GetOp(pc, opcode, agg_sig) || agg_sig.size() != 64) return false;
+                    if (pc != block.proof.solution.end()) return false;
+                    const uint256 hash = block.GetHash();
+                    if (!parts->leader.Verify(hash, leader_sig)) return false;
+                    const XOnlyPubKey agg_pubkey{Span<const unsigned char>(parts->agg_key)};
+                    return agg_pubkey.VerifySchnorr(Span<const unsigned char>(hash.begin(), 32), agg_sig);
+                }
+            }
             return CheckProofGeneric(block, params.max_block_signature_size, block.proof.challenge, block.proof.solution, CScriptWitness());
         } else if (dynafed_params.IsNull()) {
             return CheckProofGeneric(block, params.max_block_signature_size, params.signblockscript, block.proof.solution, CScriptWitness());

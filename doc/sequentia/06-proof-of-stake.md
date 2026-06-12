@@ -164,12 +164,13 @@ nodes converge on it — exactly as the federation's round-robin does today.
        validated in `ContextualCheckBlock`) — see doc/sequentia/07-vrf.md.
        Now combined with committee certification: VRF-sortitioned
        committees with per-member eligibility proofs (doc 07 §4.5).
-7. [~] Committee + majority countersignature certification (immediate
-       finality, principle 6): **done up to 16 members** via the script
-       multisig challenge (`-poscommitteesize`, quorum = strict majority,
-       enforced by consensus; `feature_pos_committee.py`). The paper-scale
-       100-member committee needs signature aggregation (BLS/MuSig) instead
-       of script multisig — still future work.
+7. [x] Committee + majority countersignature certification (immediate
+       finality, principle 6): script multisig up to 16 members
+       (`-poscommitteesize`, quorum = strict majority, enforced by consensus;
+       `feature_pos_committee.py`), and **paper-scale committees up to 100
+       members** via MuSig2 signature aggregation (`-posaggcommittee`: one
+       BIP340 signature certifies the whole committee — doc 07 §6,
+       `feature_pos_agg_committee.py`).
 8. [x] On-chain stake registration / unbonding: locked staking outputs
        (`getstakescript`, weight = explicit policy-asset amount, minimum
        `-posunbonding` CSV), UTXO-derived registry layer mirrored at

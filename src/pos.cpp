@@ -23,6 +23,7 @@ uint32_t g_pos_unbonding_period = DEFAULT_POS_UNBONDING_PERIOD;
 int64_t g_pos_slot_interval = DEFAULT_POS_SLOT_INTERVAL;
 int g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
 bool g_pos_vrf = false;
+bool g_pos_agg_committee = false;
 
 bool StakeRegistry::AddFromSpec(const std::string& spec, std::string& error)
 {
@@ -184,6 +185,11 @@ int DecodeSmallInt(opcodetype opcode)
 }
 } // namespace
 
+CScript BuildPosAggChallenge(const CPubKey& leader, const std::vector<unsigned char>& agg_key32)
+{
+    return CScript() << OP_1 << ToByteVector(leader) << agg_key32;
+}
+
 std::optional<PosChallengeParts> ParsePosBlockChallenge(const CScript& challenge)
 {
     // Leader-only form.
@@ -191,6 +197,25 @@ std::optional<PosChallengeParts> ParsePosBlockChallenge(const CScript& challenge
         PosChallengeParts parts;
         parts.leader = *leader;
         return parts;
+    }
+
+    // Aggregate-committee form: OP_1 <leader> <agg_key(32)>. The leading OP_1
+    // is a version marker that cannot start either other form (both begin
+    // with a pubkey push), so parsing is unambiguous.
+    {
+        CScript::const_iterator pc = challenge.begin();
+        opcodetype opcode;
+        std::vector<unsigned char> data;
+        if (challenge.GetOp(pc, opcode, data) && opcode == OP_1) {
+            PosChallengeParts parts;
+            if (!challenge.GetOp(pc, opcode, data) || data.empty()) return std::nullopt;
+            parts.leader = CPubKey(data);
+            if (!parts.leader.IsFullyValid()) return std::nullopt;
+            if (!challenge.GetOp(pc, opcode, data) || data.size() != 32) return std::nullopt;
+            parts.agg_key = data;
+            if (pc != challenge.end()) return std::nullopt; // trailing data
+            return parts;
+        }
     }
 
     // Committee form:

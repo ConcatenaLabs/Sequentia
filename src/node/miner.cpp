@@ -7,6 +7,7 @@
 
 #include <anchor.h>
 #include <chain.h>
+#include <musig.h>
 #include <pos.h>
 #include <vrf.h>
 #include <chainparams.h>
@@ -197,7 +198,19 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
             } else {
                 committee = PosCommittee(StakeRegistry::GetInstance(), PosSeedForChild(pindexPrev));
             }
-            pblock->proof.challenge = BuildPosBlockChallenge(*pos_proposer, committee, quorum_override);
+            if (g_pos_agg_committee && g_pos_committee_size > 1) {
+                // Aggregate-committee certification (doc 07 §6): the challenge
+                // commits to one MuSig2 aggregate of the member set instead of
+                // listing members; ContextualCheckBlock matches it against the
+                // coinbase SEQCMT-named set.
+                std::optional<std::vector<unsigned char>> agg = MuSigAggregatePubkey(committee);
+                if (!agg) {
+                    return nullptr; // no usable committee (caller enforces quorum)
+                }
+                pblock->proof.challenge = BuildPosAggChallenge(*pos_proposer, *agg);
+            } else {
+                pblock->proof.challenge = BuildPosBlockChallenge(*pos_proposer, committee, quorum_override);
+            }
         } else {
             ResetChallenge(*pblock, *pindexPrev, chainparams.GetConsensus());
         }

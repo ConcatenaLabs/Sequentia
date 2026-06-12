@@ -139,12 +139,12 @@ committee certification (`-poscommitteesize` 2..16) per §4.5.
       `-poscommitteesize`, weight-proportional), per-member `SEQCMT`
       eligibility commitments validated in consensus, fixed majority quorum,
       producer-side eligibility filtering in `generateposblock`
-      (`feature_pos_vrf_committee.py`). Signature *aggregation* (BLS/MuSig)
-      for paper-scale 100-member committees remains future work (script
-      multisig caps the claimed-member list at 16).
+      (`feature_pos_vrf_committee.py`).
+- [x] Paper-scale committees: MuSig2 signature aggregation
+      (`-posaggcommittee`, committee cap 100) — §6.
 </content>
 
-## 6. Paper-scale committees — aggregation design (future work)
+## 6. Paper-scale committees — MuSig2 aggregation (implemented)
 
 The committee form caps the claimed-member list at 16 because each member is a
 separate `OP_CHECKMULTISIG` pubkey and each countersignature a separate
@@ -192,12 +192,34 @@ members and Schnorr-verifies. Unit-tested in `src/test/musig_tests.cpp`
 (aggregate/sign/verify round-trip, order-independence, tamper/wrong-set
 rejection, the quorum-subset property, and the n-of-n boundary).
 
-**Remaining for full integration** (the consensus wiring, deferred): the block
-signature today is verified by the script interpreter via the challenge script
-(`CheckProof` → `GenericVerifyScript`), which uses ECDSA `OP_CHECKMULTISIG`.
-Routing a single aggregate BIP340 signature through block validation needs a
-non-script verification path for PoS-VRF-committee blocks (verify the 64-byte
-MuSig signature directly against the aggregate of the named members) plus the
-producer-side two-round signing in `generateposblock`. This is a contained,
-well-specified change — the primitive it depends on is done and tested — and is
-the recommended next step to raise the committee cap from 16 to the paper's 100.
+**The consensus wiring is implemented** behind `-posaggcommittee` (requires
+`-posvrf`; raises the `-poscommitteesize` cap from 16 to 100):
+
+- **Challenge.** `OP_1 <leader(33)> <agg_key(32)>` (`BuildPosAggChallenge`):
+  the leading `OP_1` is a version marker no other challenge form can start
+  with. The challenge no longer lists members — it commits to the single
+  MuSig2 aggregate of the member set.
+- **Member set = the `SEQCMT` commitments.** Under aggregation the coinbase
+  eligibility commitments don't just *prove* a claimed list, they *are* the
+  list: `ContextualCheckBlock` requires every named member to be distinct and
+  sortition-selected (same `bad-posvrf-member-*` checks), at least
+  `PosQuorum(committee_size)` members to be named (`bad-posvrf-agg-quorum`),
+  and `MuSigAggregatePubkey(named set) == agg_key` (`bad-posvrf-agg-key`) —
+  so the one signature is by precisely the proven-eligible members.
+- **Proof.** The solution is two pushes: the leader's DER signature and the
+  64-byte BIP340 aggregate signature, both over the block hash. `CheckProof`
+  verifies them directly (ECDSA + Schnorr) instead of through the script
+  interpreter — `OP_CHECKMULTISIG` cannot express one signature over an
+  aggregate of up to 100 keys, which is exactly why the cap existed.
+- **Producer.** `generateposblock` filters the provided keys to the
+  sortition-selected members as before, then runs the local two-round MuSig2
+  signing over all of them (n-of-n over the named set realizes the q-of-m
+  quorum). Block size is constant in the committee size: ~105 bytes of
+  challenge + ~137 bytes of solution whether 3 members signed or 100.
+
+Tested in `feature_pos_agg_committee.py` (quorum enforcement, peer validation
+of the aggregate form, constant-size solution, and that `-poscommitteesize=40`
+starts only with the aggregation flag) and `pos_tests.cpp`
+(`pos_agg_challenge_roundtrip`). Distributed two-round signing among
+separately-hosted members remains an operational layer on top of the same
+primitive (the paper's synchronous committee rounds), out of scope for the PoC.

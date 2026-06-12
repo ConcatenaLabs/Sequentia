@@ -240,6 +240,7 @@ public:
         g_con_bitcoin_anchor = false;
         g_con_pos = false;
         g_pos_vrf = false;
+        g_pos_agg_committee = false;
         consensus.total_valid_epochs = 0;
         consensus.elements_mode = g_con_elementsmode;
 
@@ -392,6 +393,7 @@ public:
         g_con_bitcoin_anchor = true;
         g_con_pos = false;
         g_pos_vrf = false;
+        g_pos_agg_committee = false;
         consensus.elements_mode = g_con_elementsmode;
         consensus.total_valid_epochs = 0;
         consensus.dynamic_epoch_length = 10;
@@ -594,6 +596,7 @@ public:
         g_con_bitcoin_anchor = false;
         g_con_pos = false;
         g_pos_vrf = false;
+        g_pos_agg_committee = false;
         consensus.total_valid_epochs = 0;
         consensus.elements_mode = g_con_elementsmode;
 
@@ -702,6 +705,7 @@ public:
         g_con_bitcoin_anchor = false;
         g_con_pos = false;
         g_pos_vrf = false;
+        g_pos_agg_committee = false;
         consensus.total_valid_epochs = 0;
 
         pchMessageStart[0] = 0xfa;
@@ -945,13 +949,20 @@ protected:
         g_pos_slot_interval = args.GetIntArg("-posslotinterval", DEFAULT_POS_SLOT_INTERVAL);
         g_pos_committee_size = args.GetIntArg("-poscommitteesize", DEFAULT_POS_COMMITTEE_SIZE);
         g_pos_vrf = args.GetBoolArg("-posvrf", false);
+        g_pos_agg_committee = args.GetBoolArg("-posaggcommittee", false);
         g_pos_unbonding_period = (uint32_t)args.GetIntArg("-posunbonding", DEFAULT_POS_UNBONDING_PERIOD);
         if (g_pos_vrf && !g_con_pos) {
             throw std::runtime_error("-posvrf requires -con_pos");
         }
+        if (g_pos_agg_committee && !g_pos_vrf) {
+            throw std::runtime_error("-posaggcommittee requires -posvrf");
+        }
         if (g_con_pos) {
-            if (g_pos_committee_size < 1 || g_pos_committee_size > MAX_POS_COMMITTEE_SIZE) {
-                throw std::runtime_error(strprintf("-poscommitteesize must be between 1 and %d", MAX_POS_COMMITTEE_SIZE));
+            // MuSig2 aggregation lifts the script-multisig committee cap of 16
+            // to the paper's 100 (doc 07 §6).
+            const int max_committee = g_pos_agg_committee ? MAX_POS_AGG_COMMITTEE_SIZE : MAX_POS_COMMITTEE_SIZE;
+            if (g_pos_committee_size < 1 || g_pos_committee_size > max_committee) {
+                throw std::runtime_error(strprintf("-poscommitteesize must be between 1 and %d", max_committee));
             }
             g_signed_blocks = true;
             consensus.vDeployments[Consensus::DEPLOYMENT_DYNA_FED].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
@@ -1240,6 +1251,7 @@ public:
         g_con_bitcoin_anchor = false;
         g_con_pos = false;
         g_pos_vrf = false;
+        g_pos_agg_committee = false;
         g_con_elementsmode = true;
         consensus.elements_mode = g_con_elementsmode;
         consensus.total_valid_epochs = 2;

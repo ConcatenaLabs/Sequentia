@@ -6,6 +6,7 @@
 #include <anchor.h>
 
 #include <key.h>
+#include <musig.h>
 #include <policy/policy.h>
 #include <primitives/block.h>
 #include <vrf.h>
@@ -141,6 +142,51 @@ BOOST_AUTO_TEST_CASE(pos_committee_challenge_roundtrip)
                 << ToByteVector(committee[0]) << ToByteVector(committee[1])
                 << (int64_t)3 << OP_CHECKMULTISIG; // claims 3 keys, has 2
     BOOST_CHECK(!ParsePosBlockChallenge(wrong_count).has_value());
+}
+
+// The aggregate-committee challenge (OP_1 <leader> <agg_key>) round-trips and
+// is distinguished from the other challenge forms; malformed variants are
+// rejected. See doc/sequentia/07-vrf.md §6.
+BOOST_AUTO_TEST_CASE(pos_agg_challenge_roundtrip)
+{
+    CPubKey leader = MakeKey();
+    std::vector<CPubKey> members;
+    for (int i = 0; i < 5; ++i) members.push_back(MakeKey());
+    auto agg = MuSigAggregatePubkey(members);
+    BOOST_REQUIRE(agg.has_value());
+    BOOST_REQUIRE_EQUAL(agg->size(), 32U);
+
+    CScript challenge = BuildPosAggChallenge(leader, *agg);
+    auto parts = ParsePosBlockChallenge(challenge);
+    BOOST_REQUIRE(parts.has_value());
+    BOOST_CHECK(parts->leader == leader);
+    BOOST_CHECK(parts->agg_key == *agg);
+    BOOST_CHECK(parts->committee.empty());
+
+    // The other forms parse with an empty agg_key.
+    auto solo = ParsePosBlockChallenge(BuildPosChallenge(leader));
+    BOOST_REQUIRE(solo.has_value());
+    BOOST_CHECK(solo->agg_key.empty());
+    auto multi = ParsePosBlockChallenge(BuildPosBlockChallenge(leader, members));
+    BOOST_REQUIRE(multi.has_value());
+    BOOST_CHECK(multi->agg_key.empty());
+
+    // Malformed: trailing data, wrong agg-key size, invalid leader key.
+    CScript trailing = challenge;
+    trailing << OP_TRUE;
+    BOOST_CHECK(!ParsePosBlockChallenge(trailing).has_value());
+    std::vector<unsigned char> short_key(31, 0x42);
+    BOOST_CHECK(!ParsePosBlockChallenge(CScript() << OP_1 << ToByteVector(leader) << short_key).has_value());
+    std::vector<unsigned char> bogus_leader(33, 0x02);
+    bogus_leader[0] = 0x05; // invalid pubkey header byte
+    BOOST_CHECK(!ParsePosBlockChallenge(CScript() << OP_1 << bogus_leader << *agg).has_value());
+
+    // The aggregate is order-independent, so any committee ordering produces
+    // the same challenge.
+    std::vector<CPubKey> shuffled(members.rbegin(), members.rend());
+    auto agg2 = MuSigAggregatePubkey(shuffled);
+    BOOST_REQUIRE(agg2.has_value());
+    BOOST_CHECK(*agg2 == *agg);
 }
 
 // The committee is the first g_pos_committee_size entries of the schedule.
