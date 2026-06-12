@@ -607,7 +607,7 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-blech32_hrp", strprintf("The human-readable part of the chain's blech32 encoding. Used in confidential addresses.(default: %s)", defaultChainParams->Blech32HRP()), ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-assetdir", "Entries of pet names of assets, in this format:asset=<hex>:<label>. There can be any number of entries.", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-defaultpeggedassetname", "Default name of the pegged asset. (default: bitcoin)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
-    argsman.AddArg("-blindedaddresses", "Give blind addresses by default via getnewaddress and getrawchangeaddress. (default: -con_elementsmode value)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
+    argsman.AddArg("-blindedaddresses", "Give blind addresses by default via getnewaddress and getrawchangeaddress. (default: chain-dependent: 1 on Liquid/Elements chains, 0 on Sequentia chains where confidential transactions are opt-in; always 0 outside elements mode)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-blindedprefix", "The byte prefix, in decimal, of blinded addresses. (default: 4)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
 
 #if HAVE_DECL_FORK

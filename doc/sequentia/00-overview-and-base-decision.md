@@ -11,8 +11,8 @@ Sequentia ("Sequentia Network") is a **Bitcoin sidechain** built as a fork of
 [Elements](https://github.com/ElementsProject/elements) (itself a fork of Bitcoin
 Core). Elements is the technology that also powers Blockstream's *Liquid Network*.
 Sequentia keeps Elements' UTXO model, Bitcoin Script, Confidential Assets and
-asset-tokenisation machinery, but diverges from Liquid in three fundamental ways.
-These are the project's three "challenges", in priority order:
+asset-tokenisation machinery, but diverges from Liquid in these fundamental ways
+(the first three are the project's "challenges", in priority order):
 
 1. **Open / "no-coin" fee market.** There is *no* mandatory native fee asset
    (Liquid forces fees to be paid in L-BTC). Instead a user may offer *any* asset
@@ -38,6 +38,14 @@ These are the project's three "challenges", in priority order:
    deprioritised** for the proof of concept: the PoC runs on a *strong federation*
    instead, which Elements already supports natively (see
    [`04-consensus-poc.md`](04-consensus-poc.md)).
+
+4. **Bitcoin-identical default addresses, opt-in confidential transactions.**
+   The default address format is the same as Bitcoin's, so Sequentia wallet
+   apps (which are intended to always also be Bitcoin wallets) can present one
+   receiving address for both chains. Since a shared Bitcoin-format address
+   cannot carry a blinding key, confidential transactions are **opt-in** with a
+   visibly distinct address format — inverting Liquid's blinded-by-default
+   behavior (see [`08-addresses-and-ct.md`](08-addresses-and-ct.md)).
 
 This specification focuses on challenges **1** and **2**. Challenge 3 is scoped
 only far enough to confirm the PoC consensus is already provided by Elements.

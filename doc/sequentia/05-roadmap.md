@@ -106,6 +106,27 @@ work depends on.
       together, with no extra timelocks. (The property is independent of the
       locking script, so HTLCs ride on top unchanged.)
 
+## Milestone 4b — Bitcoin-identical addresses & opt-in CT
+- [x] Restored the `--enable-any-asset-fees` configure stanza (defines
+      `ANY_ASSET_FEES`, renaming the displayed fee units to RFU/rfa) that the
+      elements-23.3.3 merge silently dropped, and made it the verified build
+      configuration: with it, the fork-modified wallet tests
+      (`wallet_basic`/`wallet_send`/`rpc_psbt` expect "rfa/vB") pass, and
+      `amount_tests/ToStringTest` was made unit-constant-aware so the unit
+      suite is green in both build modes.
+- [x] The Sequentia `test` chain's default address parameters are Bitcoin
+      testnet's (base58 111/196, WIF 239, tpub/tprv, bech32 `tb`), enabling the
+      shared BTC/SEQ receiving-address wallet model; the confidential format
+      stays distinct (blinded 70, blech32 `tsqb`). Upstream `key_io_valid.json`
+      vectors restored (the earlier transcoding to custom prefixes is reverted)
+      and green.
+- [x] Confidential transactions are opt-in: new chain-level default
+      `CChainParams::DefaultBlindedAddresses()` (false on Sequentia chains,
+      true elsewhere) behind the existing `-blindedaddresses` option;
+      per-call opt-in via `getnewaddress "" "blech32"`;
+      `-con_default_blinded_addresses` for custom chains. Functional test
+      `feature_ct_opt_in.py`. See doc 08.
+
 ## Milestone 5 (later) — PoS consensus
 - [ ] Per the theoretical paper and doc 04 §3. Out of scope for the PoC.
 
