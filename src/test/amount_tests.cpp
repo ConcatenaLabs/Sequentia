@@ -106,11 +106,14 @@ BOOST_AUTO_TEST_CASE(BinaryOperatorTest)
 
 BOOST_AUTO_TEST_CASE(ToStringTest)
 {
+    // SEQUENTIA: assert against the build's currency-unit constants so the
+    // test is correct both with and without --enable-any-asset-fees (which
+    // renames BTC/sat to RFU/rfa, the reference fee units).
     CFeeRate feeRate;
     feeRate = CFeeRate(1);
-    BOOST_CHECK_EQUAL(feeRate.ToString(), "0.00000001 BTC/kvB");
-    BOOST_CHECK_EQUAL(feeRate.ToString(FeeEstimateMode::BTC_KVB), "0.00000001 BTC/kvB");
-    BOOST_CHECK_EQUAL(feeRate.ToString(FeeEstimateMode::SAT_VB), "0.001 sat/vB");
+    BOOST_CHECK_EQUAL(feeRate.ToString(), "0.00000001 " + CURRENCY_UNIT + "/kvB");
+    BOOST_CHECK_EQUAL(feeRate.ToString(FeeEstimateMode::BTC_KVB), "0.00000001 " + CURRENCY_UNIT + "/kvB");
+    BOOST_CHECK_EQUAL(feeRate.ToString(FeeEstimateMode::SAT_VB), "0.001 " + CURRENCY_ATOM + "/vB");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

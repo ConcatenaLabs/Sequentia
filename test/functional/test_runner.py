@@ -175,6 +175,7 @@ BASE_SCRIPTS = [
     'feature_dynamic_fee_rates.py',
     'feature_bitcoin_anchoring.py',
     'feature_anchor_swap_consistency.py',
+    'feature_ct_opt_in.py',
     'rpc_exchangerates.py',
     # -------------------
     'wallet_keypool_topup.py --legacy-wallet',

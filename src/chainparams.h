@@ -130,6 +130,11 @@ public:
     // ELEMENTS extra fields:
     const uint256& ParentGenesisBlockHash() const { return parentGenesisBlockHash; }
     const uint256& HashGenesisBlock() const { return consensus.hashGenesisBlock; }
+    //! SEQUENTIA: whether wallets hand out blinded (confidential) addresses by
+    //! default. Liquid/Elements chains do (confidential transactions are
+    //! opt-out); Sequentia chains do not (CT is opt-in, and the default
+    //! address format matches Bitcoin's). See doc/sequentia/08-addresses-and-ct.md.
+    bool DefaultBlindedAddresses() const { return m_default_blinded_addresses; }
     bool anyonecanspend_aremine;
     const std::string& ParentBech32HRP() const { return parent_bech32_hrp; }
     const std::string& ParentBlech32HRP() const { return parent_blech32_hrp; }
@@ -159,6 +164,9 @@ protected:
     // here makes the genesis hash nondeterministic.
     CAmount initialFreeCoins{0};
     CAmount initial_reissuance_tokens{0};
+    //! SEQUENTIA: see DefaultBlindedAddresses(). True preserves the historical
+    //! Liquid/Elements behavior; the Sequentia chain sets this to false.
+    bool m_default_blinded_addresses{true};
     std::vector<uint8_t> vFixedSeeds;
     bool fDefaultConsistencyChecks;
     bool fRequireStandard;

@@ -46,6 +46,7 @@ void SetupChainParamsBaseOptions(ArgsManager& argsman)
     argsman.AddArg("-signblockscript", "Signed blockchain enumberance. Only active when `-con_signed_blocks` set to true.", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-con_max_block_sig_size", "Max allowed witness data for the signed block header.", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
 
+    argsman.AddArg("-con_default_blinded_addresses", "SEQUENTIA: whether wallets give blinded (confidential) addresses by default on this chain. 1 = historical Liquid/Elements behavior (CT opt-out); 0 = Sequentia behavior (CT opt-in; the default address format matches Bitcoin's). Custom chains only. (default: 1)", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-con_has_parent_chain", "Whether or not there is a parent chain.", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-parentgenesisblockhash", "The genesis blockhash of the parent chain.", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-con_parentpowlimit", "The proof-of-work limit value for the parent chain.", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);

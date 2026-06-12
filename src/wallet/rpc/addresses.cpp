@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <core_io.h>
+#include <chainparams.h>
 #include <key_io.h>
 #include <rpc/util.h>
 #include <util/bip32.h>
@@ -50,8 +51,11 @@ RPCHelpMan getnewaddress()
         label = LabelFromValue(request.params[0]);
 
     OutputType output_type = pwallet->m_default_address_type;
-    // default blinding to the blindedaddresses setting
-    bool add_blinding_key = gArgs.GetBoolArg("-blindedaddresses", g_con_elementsmode);
+    // default blinding to the blindedaddresses setting; its default is
+    // chain-level: Liquid/Elements chains blind by default, Sequentia chains
+    // do not (confidential transactions are opt-in there, and the default
+    // address format matches Bitcoin's). See doc/sequentia/08-addresses-and-ct.md.
+    bool add_blinding_key = gArgs.GetBoolArg("-blindedaddresses", g_con_elementsmode && Params().DefaultBlindedAddresses());
 
     if (!request.params[1].isNull()) {
         std::optional<OutputType> parsed = ParseOutputType(request.params[1].get_str());
@@ -125,7 +129,7 @@ RPCHelpMan getrawchangeaddress()
 
     CTxDestination dest;
     bilingual_str error;
-    bool add_blinding_key = force_blind || gArgs.GetBoolArg("-blindedaddresses", g_con_elementsmode);
+    bool add_blinding_key = force_blind || gArgs.GetBoolArg("-blindedaddresses", g_con_elementsmode && Params().DefaultBlindedAddresses());
     if (!pwallet->GetNewChangeDestination(output_type, dest, error, add_blinding_key)) {
         throw JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT, error.original);
     }

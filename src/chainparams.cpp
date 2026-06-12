@@ -434,15 +434,27 @@ public:
         // nodes with support for servicebits filtering should be at the top
         vSeeds.emplace_back("89.216.21.96");
 
-        base58Prefixes[PUBKEY_ADDRESS] = std::vector<unsigned char>(1,52);
-        base58Prefixes[SCRIPT_ADDRESS] = std::vector<unsigned char>(1,193);
-        base58Prefixes[SECRET_KEY] =     std::vector<unsigned char>(1,249);
+        // SEQUENTIA: the default (unblinded) address format is identical to
+        // Bitcoin's, so wallet apps can present one receiving address for both
+        // chains (this is the Bitcoin *testnet* format; a future Sequentia
+        // mainnet uses Bitcoin mainnet's). Confidential (blinded) addresses
+        // are opt-in and use a visibly distinct format below.
+        // See doc/sequentia/08-addresses-and-ct.md.
+        base58Prefixes[PUBKEY_ADDRESS] = std::vector<unsigned char>(1,111);
+        base58Prefixes[SCRIPT_ADDRESS] = std::vector<unsigned char>(1,196);
+        base58Prefixes[SECRET_KEY] =     std::vector<unsigned char>(1,239);
         base58Prefixes[BLINDED_ADDRESS] = std::vector<unsigned char>(1, 70);
-        base58Prefixes[EXT_PUBLIC_KEY] = {0x15, 0xE6, 0xD2, 0x6B};
-        base58Prefixes[EXT_SECRET_KEY] = {0x33, 0x97, 0xC1, 0x9D};
+        base58Prefixes[EXT_PUBLIC_KEY] = {0x04, 0x35, 0x87, 0xCF}; // tpub
+        base58Prefixes[EXT_SECRET_KEY] = {0x04, 0x35, 0x83, 0x94}; // tprv
 
-        bech32_hrp = "tsq";
+        bech32_hrp = "tb";
         blech32_hrp = "tsqb";
+
+        // SEQUENTIA: confidential transactions are opt-in (Liquid/Elements
+        // default to blinded addresses; Sequentia does not). Wallets hand out
+        // Bitcoin-format unblinded addresses unless the user requests a
+        // confidential one (getnewaddress "" "blech32" or -blindedaddresses=1).
+        m_default_blinded_addresses = false;
 
         // vFixedSeeds = std::vector<uint8_t>(std::begin(chainparams_seed_test), std::end(chainparams_seed_test));
 
@@ -922,6 +934,10 @@ protected:
         g_con_blockheightinheader = args.GetBoolArg("-con_blockheightinheader", true);
         // SEQUENTIA: opt-in Bitcoin anchoring for custom chains
         g_con_bitcoin_anchor = args.GetBoolArg("-con_bitcoin_anchor", false);
+        // SEQUENTIA: whether wallets give blinded addresses by default
+        // (true = the historical Liquid/Elements opt-out CT behavior;
+        // Sequentia chains use false, making CT opt-in).
+        m_default_blinded_addresses = args.GetBoolArg("-con_default_blinded_addresses", true);
         g_con_elementsmode = args.GetBoolArg("-con_elementsmode", true);
         consensus.elements_mode = g_con_elementsmode;
 
