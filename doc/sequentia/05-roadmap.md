@@ -28,13 +28,17 @@ work depends on.
       Also fixed a latent fork bug found in the process: uninitialized
       `initialFreeCoins`/`initial_reissuance_tokens` members made the
       testnet genesis hash nondeterministic.
-      Known pre-existing failure: `key_io_tests` (64 cases) fails because
-      the fork changed the testnet chain's address prefixes without
-      updating `src/test/data/key_io_valid.json`; present before this work
-      (neither side of the merge touched those vectors).
+      The pre-existing `key_io_tests` failures (fork-changed testnet address
+      prefixes vs upstream vectors) were fixed by transcoding the
+      `"chain":"test"` vectors in `src/test/data/key_io_valid.json` to the
+      fork's prefixes (base58 111→52, 196→193, WIF 239→249, bech32 tb→tsq),
+      preserving payloads. **The full `test_bitcoin` unit suite is green.**
 
-## Milestone 2 — Finish challenge 1 (open fee market)
-1. [ ] Audit/normalise all fee floors to rfa for any-asset txs (doc 02 §A).
+## Milestone 2 — Finish challenge 1 (open fee market) — COMPLETE
+1. [x] Audit fee floors for any-asset txs: all floors (mempool min, min-relay,
+       block-min, RBF increments, prioritisation deltas) are compared in rfa;
+       configured values are policy-asset atoms pegged 1:1 to rfa. Findings
+       recorded in doc 02 §A.
 2. [x] Layer the `ExchangeRateMap` into static + dynamic with precedence,
        per-entry `source` + `updated_at`, and staleness drop
        (`-dynfeeratemaxage` + scheduler purge) (doc 02 §B.3).
@@ -79,6 +83,12 @@ work depends on.
        surviving block, re-anchoring to the new branch, persistence across
        restart. Sandbox policies for `scheduler`/`msghand` extended with
        network access (they now legitimately call the mainchain daemon).
+8. [x] Robustness: R3 results that depend on the local parent daemon's view
+       (anchor unknown/stale/unreachable) are rejected with
+       `BLOCK_RECENT_CONSENSUS_CHANGE` — no peer punishment, not cached as
+       invalid — so honest nodes whose bitcoinds are transiently out of sync
+       cannot ban each other or permanently reject valid blocks. Only
+       structural violations (R1/R2, height mismatch) are permanent.
 
 ## Milestone 4 — Integration & demo (partially done)
 - [x] End-to-end demo of the two mechanisms together: federated chain anchored
@@ -87,7 +97,14 @@ work depends on.
       chain. (Cross-chain HTLC/atomic-swap walkthrough still to do.)
 - [x] Operator docs: `contrib/price-server/README.md`; anchoring options
       documented in `-help` (ELEMENTS category).
-- [ ] Cross-chain HTLC / atomic-swap demo flow.
+- [x] Cross-chain swap consistency demo:
+      `test/functional/feature_anchor_swap_consistency.py` — BTC leg confirmed
+      on the parent chain, SEQ leg confirmed in a Sequentia block anchored at
+      `>=` the BTC leg's height (paper principle 7), then the parent
+      reorganizes with the BTC leg double-spent away and the anchored chain
+      automatically disconnects the SEQ leg's block: both legs revert
+      together, with no extra timelocks. (The property is independent of the
+      locking script, so HTLCs ride on top unchanged.)
 
 ## Milestone 5 (later) — PoS consensus
 - [ ] Per the theoretical paper and doc 04 §3. Out of scope for the PoC.

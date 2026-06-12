@@ -3860,16 +3860,27 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
         // parent chain daemon connection; skipped with -validateanchor=0).
         // The check is skipped when the anchor is unchanged from the parent
         // block's already-validated anchor.
+        //
+        // NOT_FOUND, STALE and NO_CONNECTION depend on our local parent chain
+        // daemon's view, which can transiently differ between honest nodes
+        // (daemon lagging the network, or mid-reorganization). They are
+        // therefore rejected with BLOCK_RECENT_CONSENSUS_CHANGE: the header is
+        // neither cached as invalid nor does the relaying peer get punished,
+        // and the block can be accepted on a later re-announcement once the
+        // local view catches up. Only HEIGHT_MISMATCH is a permanent
+        // structural violation (a block hash's height never changes).
         if (g_validate_anchor && block.m_anchor_hash != pindexPrev->m_anchor_hash) {
             switch (CheckMainchainAnchor(block.m_anchor_height, block.m_anchor_hash)) {
             case AnchorCheckResult::OK:
                 break;
             case AnchorCheckResult::NOT_FOUND:
-                LogPrintf("ERROR: %s: anchor %s not known to the parent chain daemon\n", __func__, block.m_anchor_hash.ToString());
-                return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-anchor-unknown");
+                LogPrintf("WARNING: %s: anchor %s not (yet) known to the parent chain daemon; rejecting block for now\n",
+                          __func__, block.m_anchor_hash.ToString());
+                return state.Invalid(BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE, "anchor-unknown");
             case AnchorCheckResult::STALE:
-                LogPrintf("ERROR: %s: anchor %s is not on the parent chain's best chain\n", __func__, block.m_anchor_hash.ToString());
-                return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-anchor-stale");
+                LogPrintf("WARNING: %s: anchor %s is not on the parent chain's best chain; rejecting block for now\n",
+                          __func__, block.m_anchor_hash.ToString());
+                return state.Invalid(BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE, "anchor-stale");
             case AnchorCheckResult::HEIGHT_MISMATCH:
                 LogPrintf("ERROR: %s: anchor %s is not at claimed parent chain height %d\n", __func__,
                           block.m_anchor_hash.ToString(), block.m_anchor_height);
@@ -3877,7 +3888,7 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
             case AnchorCheckResult::NO_CONNECTION:
                 LogPrintf("WARNING: %s: cannot validate anchor %s: parent chain daemon unreachable\n", __func__,
                           block.m_anchor_hash.ToString());
-                return state.Invalid(BlockValidationResult::BLOCK_MISSING_PREV, "anchor-unverifiable");
+                return state.Invalid(BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE, "anchor-unverifiable");
             }
         }
     }

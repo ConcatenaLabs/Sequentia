@@ -23,10 +23,25 @@ here so the dynamic work bolts on cleanly; see doc 01 §3 for detail.
 
 ### Small gaps to close in the static path
 
-1. **`blockmintxfee` / min-relay floors in rfa.** Confirm every fee floor
-   (`-minrelaytxfee`, `-blockmintxfee`, `incrementalrelayfee`) is consistently
-   compared in rfa for any-asset txs (audit `src/policy/policy.cpp`,
-   `src/validation.cpp`, `src/node/miner.cpp`). Document the canonical rfa floor.
+1. **`blockmintxfee` / min-relay floors in rfa.** ✅ Audited: every floor is
+   compared in rfa for any-asset txs.
+   - Mempool acceptance (`MemPoolAccept::CheckFeeRate`, `src/validation.cpp`):
+     receives `ws.m_modified_fees`, which is converted to rfa via
+     `ConvertAmountToValue` when `g_con_any_asset_fees` is set, and compares it
+     against (a) the rolling mempool min fee — itself computed from rfa
+     aggregates (`GetModFeesWithDescendants().GetValue()` in
+     `CTxMemPool::TrimToSize`) — and (b) `-minrelaytxfee`.
+   - Mining (`src/node/miner.cpp`): `-blockmintxfee` vs
+     `packageFees.GetValue()` (rfa), including the discounted-CT path.
+   - RBF: `PaysMoreThanConflicts`/`PaysForRBF` compare rfa modified fees with
+     rfa conflicting fees and `incrementalrelayfee`.
+   - Prioritisation: `prioritisetransaction` deltas are applied in rfa to
+     `m_modified_fee` and the rfa ancestor/descendant aggregates, and survive
+     exchange-rate updates (`UpdateFeeValue` shifts `m_modified_fee`).
+   **Convention:** all configured floors (`-minrelaytxfee`, `-blockmintxfee`,
+   `-incrementalrelayfee`, prioritisation deltas) are denominated in
+   policy-asset atoms, which are pegged 1:1 to rfa (the policy asset's rate is
+   fixed at `exchange_rate_scale`), so configured values *are* rfa floors.
 2. **Producer acceptance vs. relay.** Today rate map = both the node's relay
    policy *and* the producer's acceptance set. We keep that for the PoC but note
    the distinction for later (a node might relay assets it won't itself mine).
