@@ -43,6 +43,11 @@ The full design specification, the codebase-base decision and its rationale,
 the implementation roadmap, and the new RPCs/options are in
 [`doc/sequentia/`](doc/sequentia/00-overview-and-base-decision.md) — start with
 [`00-overview-and-base-decision.md`](doc/sequentia/00-overview-and-base-decision.md).
+To stand up the full system end-to-end (validating node, fee price server,
+Bitcoin anchoring, and a single-host or distributed PoS committee), follow the
+operator runbook [`09-running-sequentia.md`](doc/sequentia/09-running-sequentia.md)
+with the reference config in
+[`contrib/sequentia/`](contrib/sequentia/sequentia.conf.example).
 
 ### New RPCs and configuration
 
