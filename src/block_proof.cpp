@@ -26,6 +26,16 @@ bool CheckChallenge(const CBlockHeader& block, const CBlockIndex& indexLast, con
             return false; // challenge is not a recognized PoS challenge form
         }
         const StakeRegistry& registry = StakeRegistry::GetInstance();
+        if (g_pos_vrf) {
+            // VRF sortition (doc 07 §4): the header check only requires a
+            // registered staker with a leader-only challenge. The leader's
+            // sortition proof lives in the coinbase, so eligibility and the
+            // slot time gate are validated in ContextualCheckBlock, where the
+            // full block is available.
+            if (!parts->committee.empty()) return false;
+            if (registry.GetWeight(parts->leader) == 0) return false;
+            return true;
+        }
         uint256 seed = PosSeedForChild(&indexLast);
         std::optional<size_t> rank = PosRank(registry, seed, parts->leader);
         if (!rank) {

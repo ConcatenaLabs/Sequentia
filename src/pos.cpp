@@ -6,6 +6,8 @@
 
 #include <arith_uint256.h>
 #include <chain.h>
+#include <primitives/block.h>
+#include <vrf.h>
 #include <crypto/sha256.h>
 #include <hash.h>
 #include <util/strencodings.h>
@@ -15,6 +17,7 @@
 bool g_con_pos = false;
 int64_t g_pos_slot_interval = DEFAULT_POS_SLOT_INTERVAL;
 int g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
+bool g_pos_vrf = false;
 
 bool StakeRegistry::AddFromSpec(const std::string& spec, std::string& error)
 {
@@ -225,4 +228,56 @@ uint256 PosSeedForChild(const CBlockIndex* pindexPrev)
     if (pindexPrev == nullptr) return uint256();
     return ComputePosSeed(pindexPrev->GetBlockHash(), pindexPrev->m_anchor_hash,
                           (uint32_t)(pindexPrev->nHeight + 1));
+}
+
+// --- VRF sortition (doc/sequentia/07-vrf.md §4) ---
+
+namespace {
+const unsigned char POS_VRF_TAG[6] = {'S', 'E', 'Q', 'V', 'R', 'F'};
+} // namespace
+
+uint64_t PosTotalWeight(const StakeRegistry& registry)
+{
+    uint64_t total = 0;
+    for (const auto& entry : registry.Weights()) {
+        total += entry.second;
+    }
+    return total;
+}
+
+uint64_t PosVrfSlot(const uint256& beta, uint64_t weight, uint64_t total_weight)
+{
+    if (weight == 0 || total_weight == 0) return POS_VRF_MAX_SLOT;
+    arith_uint256 q = UintToArith256(beta);
+    q /= arith_uint256(weight);
+    // top 64 bits of q, scaled by the total weight: fits in 128 bits.
+    arith_uint256 slot_a = (q >> 192) * arith_uint256(total_weight);
+    slot_a >>= 64;
+    uint64_t slot = slot_a.GetLow64();
+    return std::min<uint64_t>(slot, POS_VRF_MAX_SLOT);
+}
+
+CScript BuildPosVrfCommitment(const std::vector<unsigned char>& proof)
+{
+    std::vector<unsigned char> data(POS_VRF_TAG, POS_VRF_TAG + sizeof(POS_VRF_TAG));
+    data.insert(data.end(), proof.begin(), proof.end());
+    return CScript() << OP_RETURN << data;
+}
+
+std::optional<std::vector<unsigned char>> ExtractPosVrfProof(const CBlock& block)
+{
+    if (block.vtx.empty()) return std::nullopt;
+    for (const CTxOut& out : block.vtx[0]->vout) {
+        const CScript& spk = out.scriptPubKey;
+        // Expect exactly: OP_RETURN PUSH(tag || proof)
+        CScript::const_iterator pc = spk.begin();
+        opcodetype opcode;
+        std::vector<unsigned char> data;
+        if (!spk.GetOp(pc, opcode, data) || opcode != OP_RETURN) continue;
+        if (!spk.GetOp(pc, opcode, data)) continue;
+        if (data.size() != sizeof(POS_VRF_TAG) + VRF_PROOF_SIZE) continue;
+        if (!std::equal(POS_VRF_TAG, POS_VRF_TAG + sizeof(POS_VRF_TAG), data.begin())) continue;
+        return std::vector<unsigned char>(data.begin() + sizeof(POS_VRF_TAG), data.end());
+    }
+    return std::nullopt;
 }

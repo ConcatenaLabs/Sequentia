@@ -45,6 +45,18 @@ extern int g_pos_committee_size;
 static const int DEFAULT_POS_COMMITTEE_SIZE = 1;
 static const int MAX_POS_COMMITTEE_SIZE = 16;
 
+/** When set (with g_con_pos), leader election uses *private* VRF sortition
+ *  (doc/sequentia/07-vrf.md §4) instead of the public deterministic schedule:
+ *  each block carries the leader's VRF proof over the slot seed in a tagged
+ *  coinbase OP_RETURN, and the proof's output determines the leader's
+ *  time-gated slot. Only the key holder can compute its slot in advance. */
+extern bool g_pos_vrf;
+
+/** Upper bound on a VRF sortition slot, capping the time gate
+ *  (slot * g_pos_slot_interval seconds after the parent block) regardless of
+ *  how stake weights are scaled. */
+static const uint64_t POS_VRF_MAX_SLOT = 1 << 20;
+
 /** The set of stakers eligible to be elected as block leaders, and their
  *  relative stake weights. For this PoC the set is chain configuration; a
  *  production system would track it in chainstate via staking transactions. */
@@ -123,5 +135,30 @@ std::optional<PosChallengeParts> ParsePosBlockChallenge(const CScript& challenge
 
 /** Compute the election seed for the block that would extend `pindexPrev`. */
 uint256 PosSeedForChild(const CBlockIndex* pindexPrev);
+
+// --- VRF sortition (g_pos_vrf; doc/sequentia/07-vrf.md §4) ---
+
+class CBlock;
+
+/** Sum of all registered stake weights. */
+uint64_t PosTotalWeight(const StakeRegistry& registry);
+
+/** The stake-weighted sortition slot for a VRF output `beta` under stake
+ *  `weight` (total stake `total_weight`):
+ *      slot = min( floor( top64(beta / weight) * total_weight / 2^64 ),
+ *                  POS_VRF_MAX_SLOT )
+ *  Uniform beta gives slot ~ uniform in [0, total/weight): more stake means a
+ *  statistically earlier slot, the continuous analogue of the public
+ *  schedule's rank. The rank-r liveness gate becomes
+ *  nTime >= parent.nTime + slot * g_pos_slot_interval. */
+uint64_t PosVrfSlot(const uint256& beta, uint64_t weight, uint64_t total_weight);
+
+/** Build the tagged coinbase OP_RETURN output script carrying the leader's
+ *  VRF proof: OP_RETURN PUSH("SEQVRF" || proof). */
+CScript BuildPosVrfCommitment(const std::vector<unsigned char>& proof);
+
+/** Extract the VRF proof from a block's coinbase commitment, or nullopt if no
+ *  (or a malformed) commitment is present. */
+std::optional<std::vector<unsigned char>> ExtractPosVrfProof(const CBlock& block);
 
 #endif // BITCOIN_POS_H

@@ -5,6 +5,8 @@
 #include <pos.h>
 
 #include <key.h>
+#include <primitives/block.h>
+#include <vrf.h>
 #include <test/util/setup_common.h>
 
 #include <boost/test/unit_test.hpp>
@@ -173,6 +175,68 @@ BOOST_AUTO_TEST_CASE(pos_schedule_reshuffles)
     }
     // With 10 equal stakers the rank-0 leader should change most of the time.
     BOOST_CHECK(differing_leaders >= 10);
+}
+
+// VRF sortition slots: deterministic, bounded, and stake-weighted (more stake
+// gives statistically earlier slots).
+BOOST_AUTO_TEST_CASE(pos_vrf_slot_math)
+{
+    uint256 beta = uint256S("0x8000000000000000000000000000000000000000000000000000000000000000");
+    // Determinism and degenerate inputs.
+    BOOST_CHECK_EQUAL(PosVrfSlot(beta, 1, 10), PosVrfSlot(beta, 1, 10));
+    BOOST_CHECK_EQUAL(PosVrfSlot(beta, 0, 10), POS_VRF_MAX_SLOT);
+    BOOST_CHECK_EQUAL(PosVrfSlot(beta, 1, 0), POS_VRF_MAX_SLOT);
+    // beta = 2^255, w=1, W=10: q>>192 = 2^63, slot = 2^63*10/2^64 = 5.
+    BOOST_CHECK_EQUAL(PosVrfSlot(beta, 1, 10), 5U);
+    // Ten times the weight divides the slot by ten.
+    BOOST_CHECK_EQUAL(PosVrfSlot(beta, 10, 10), 0U);
+    // The cap holds for tiny weights and huge totals.
+    BOOST_CHECK(PosVrfSlot(beta, 1, std::numeric_limits<uint64_t>::max()) <= POS_VRF_MAX_SLOT);
+
+    // Statistical weighting: across many pseudorandom betas, the 9x staker's
+    // average slot is far lower than the 1x staker's.
+    uint64_t sum_big = 0, sum_small = 0;
+    const int trials = 500;
+    for (int i = 0; i < trials; ++i) {
+        uint256 b = ComputePosSeed(uint256S("0x99"), uint256(), i);
+        sum_big += PosVrfSlot(b, 9, 10);
+        sum_small += PosVrfSlot(b, 1, 10);
+    }
+    BOOST_CHECK(sum_big * 3 < sum_small);
+}
+
+// The coinbase VRF commitment round-trips and rejects malformed payloads.
+BOOST_AUTO_TEST_CASE(pos_vrf_commitment_roundtrip)
+{
+    std::vector<unsigned char> proof(VRF_PROOF_SIZE, 0xAB);
+    CScript commitment = BuildPosVrfCommitment(proof);
+
+    CBlock block;
+    CMutableTransaction coinbase;
+    coinbase.vin.resize(1);
+    coinbase.vout.emplace_back();
+    coinbase.vout.back().scriptPubKey = CScript() << OP_TRUE; // unrelated output
+    coinbase.vout.emplace_back();
+    coinbase.vout.back().scriptPubKey = commitment;
+    block.vtx.push_back(MakeTransactionRef(coinbase));
+
+    auto extracted = ExtractPosVrfProof(block);
+    BOOST_REQUIRE(extracted.has_value());
+    BOOST_CHECK(*extracted == proof);
+
+    // Wrong-size payload is ignored.
+    CBlock bad;
+    CMutableTransaction cb2;
+    cb2.vin.resize(1);
+    cb2.vout.emplace_back();
+    std::vector<unsigned char> short_proof(VRF_PROOF_SIZE - 1, 0xAB);
+    cb2.vout.back().scriptPubKey = BuildPosVrfCommitment(short_proof);
+    bad.vtx.push_back(MakeTransactionRef(cb2));
+    BOOST_CHECK(!ExtractPosVrfProof(bad).has_value());
+
+    // Empty block.
+    CBlock empty;
+    BOOST_CHECK(!ExtractPosVrfProof(empty).has_value());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

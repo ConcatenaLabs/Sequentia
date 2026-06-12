@@ -34,6 +34,8 @@
 #include <policy/policy.h>
 #include <policy/rbf.h>
 #include <policy/settings.h>
+#include <pos.h>
+#include <vrf.h>
 #include <policy/value.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
@@ -3921,6 +3923,33 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
 static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& state, const Consensus::Params& consensusParams, const CBlockIndex* pindexPrev)
 {
     const int nHeight = pindexPrev == nullptr ? 0 : pindexPrev->nHeight + 1;
+
+    // SEQUENTIA PoS, VRF sortition mode (doc/sequentia/07-vrf.md §4): the
+    // block's coinbase must commit to the leader's VRF proof over this slot's
+    // seed; the proof's output determines the leader's time-gated slot. The
+    // proof is covered by the merkle root, hence by the leader's block
+    // signature, so it cannot be altered without invalidating the block.
+    if (g_con_pos && g_pos_vrf && pindexPrev != nullptr) {
+        std::optional<PosChallengeParts> parts = ParsePosBlockChallenge(block.proof.challenge);
+        if (!parts) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-challenge", "block challenge is not a PoS leader challenge");
+        }
+        std::optional<std::vector<unsigned char>> proof = ExtractPosVrfProof(block);
+        if (!proof) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-missing", "missing VRF sortition proof in coinbase");
+        }
+        uint256 seed = PosSeedForChild(pindexPrev);
+        uint256 beta;
+        if (!VrfVerify(parts->leader, seed, *proof, beta)) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-invalid", "invalid VRF sortition proof");
+        }
+        const StakeRegistry& registry = StakeRegistry::GetInstance();
+        uint64_t weight = registry.GetWeight(parts->leader);
+        uint64_t slot = PosVrfSlot(beta, weight, PosTotalWeight(registry));
+        if ((int64_t)block.GetBlockTime() < (int64_t)pindexPrev->nTime + (int64_t)slot * g_pos_slot_interval) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-early", "block produced before its VRF sortition slot opened");
+        }
+    }
 
     // Enforce BIP113 (Median Time Past).
     int nLockTimeFlags = 0;

@@ -144,9 +144,11 @@ nodes converge on it — exactly as the federation's round-robin does today.
        / `-con_pos` options; a `pos` regtest-style chain.
 5. [x] Functional test: stake-weighted schedule, leader-signed block accepted,
        wrong-leader / early block rejected, multi-staker liveness handoff.
-6. [~] Private VRF sortition: the VRF **primitive** is built and tested
-       (`src/vrf.{h,cpp}`, `vrfprove`/`vrfverify` RPCs); the consensus
-       integration is designed in doc/sequentia/07-vrf.md and is the next step.
+6. [x] Private VRF sortition: the VRF primitive (`src/vrf.{h,cpp}`,
+       `vrfprove`/`vrfverify`) **and** the `-posvrf` consensus mode
+       (coinbase-committed proof, proof-derived stake-weighted slots,
+       validated in `ContextualCheckBlock`) — see doc/sequentia/07-vrf.md.
+       Not yet combined with committee certification.
 7. [~] Committee + majority countersignature certification (immediate
        finality, principle 6): **done up to 16 members** via the script
        multisig challenge (`-poscommitteesize`, quorum = strict majority,

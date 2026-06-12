@@ -8,6 +8,7 @@
 #include <anchor.h>
 #include <chain.h>
 #include <pos.h>
+#include <vrf.h>
 #include <chainparams.h>
 #include <coins.h>
 #include <consensus/amount.h>
@@ -119,7 +120,7 @@ void BlockAssembler::resetBlock()
     feeMap = CAmountMap();
 }
 
-std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& scriptPubKeyIn, std::chrono::seconds min_tx_age, DynaFedParamEntry* proposed_entry, const std::vector<CScript>* commit_scripts, const CPubKey* pos_proposer)
+std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& scriptPubKeyIn, std::chrono::seconds min_tx_age, DynaFedParamEntry* proposed_entry, const std::vector<CScript>* commit_scripts, const CPubKey* pos_proposer, const std::vector<unsigned char>* pos_vrf_proof)
 {
     assert(min_tx_age >= std::chrono::seconds(0));
     int64_t nTimeStart = GetTimeMicros();
@@ -252,12 +253,28 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
     // so the rank-gating consensus rule (CheckChallenge) is satisfied. The
     // rank-r leader's slot opens r intervals after the parent block.
     if (g_con_pos && pos_proposer != nullptr) {
+        const StakeRegistry& registry = StakeRegistry::GetInstance();
         uint256 seed = PosSeedForChild(pindexPrev);
-        std::optional<size_t> rank = PosRank(StakeRegistry::GetInstance(), seed, *pos_proposer);
-        if (!rank) {
-            throw std::runtime_error(strprintf("%s: proposer is not a registered staker for this slot", __func__));
+        int64_t slot_open;
+        if (g_pos_vrf) {
+            // VRF sortition: the slot comes from the proposer's own VRF output
+            // over the seed (the proof itself rides in commit_scripts).
+            if (pos_vrf_proof == nullptr) {
+                throw std::runtime_error(strprintf("%s: VRF sortition requires the proposer's VRF proof", __func__));
+            }
+            std::optional<uint256> beta = VrfProofToHash(*pos_vrf_proof);
+            if (!beta) {
+                throw std::runtime_error(strprintf("%s: malformed VRF proof", __func__));
+            }
+            uint64_t slot = PosVrfSlot(*beta, registry.GetWeight(*pos_proposer), PosTotalWeight(registry));
+            slot_open = (int64_t)pindexPrev->nTime + (int64_t)slot * g_pos_slot_interval;
+        } else {
+            std::optional<size_t> rank = PosRank(registry, seed, *pos_proposer);
+            if (!rank) {
+                throw std::runtime_error(strprintf("%s: proposer is not a registered staker for this slot", __func__));
+            }
+            slot_open = (int64_t)pindexPrev->nTime + (int64_t)(*rank) * g_pos_slot_interval;
         }
-        int64_t slot_open = (int64_t)pindexPrev->nTime + (int64_t)(*rank) * g_pos_slot_interval;
         if ((int64_t)pblock->nTime < slot_open) {
             pblock->nTime = (uint32_t)slot_open;
         }

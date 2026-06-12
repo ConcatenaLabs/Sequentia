@@ -239,6 +239,7 @@ public:
         g_con_blockheightinheader = false;
         g_con_bitcoin_anchor = false;
         g_con_pos = false;
+        g_pos_vrf = false;
         consensus.total_valid_epochs = 0;
         consensus.elements_mode = g_con_elementsmode;
 
@@ -390,6 +391,7 @@ public:
         // SEQUENTIA: every block anchors to a Bitcoin block (see doc/sequentia/03-bitcoin-anchoring.md)
         g_con_bitcoin_anchor = true;
         g_con_pos = false;
+        g_pos_vrf = false;
         consensus.elements_mode = g_con_elementsmode;
         consensus.total_valid_epochs = 0;
         consensus.dynamic_epoch_length = 10;
@@ -579,6 +581,7 @@ public:
         g_con_blockheightinheader = false;
         g_con_bitcoin_anchor = false;
         g_con_pos = false;
+        g_pos_vrf = false;
         consensus.total_valid_epochs = 0;
         consensus.elements_mode = g_con_elementsmode;
 
@@ -686,6 +689,7 @@ public:
         g_con_blockheightinheader = false;
         g_con_bitcoin_anchor = false;
         g_con_pos = false;
+        g_pos_vrf = false;
         consensus.total_valid_epochs = 0;
 
         pchMessageStart[0] = 0xfa;
@@ -928,9 +932,18 @@ protected:
         g_con_pos = args.GetBoolArg("-con_pos", false);
         g_pos_slot_interval = args.GetIntArg("-posslotinterval", DEFAULT_POS_SLOT_INTERVAL);
         g_pos_committee_size = args.GetIntArg("-poscommitteesize", DEFAULT_POS_COMMITTEE_SIZE);
+        g_pos_vrf = args.GetBoolArg("-posvrf", false);
+        if (g_pos_vrf && !g_con_pos) {
+            throw std::runtime_error("-posvrf requires -con_pos");
+        }
         if (g_con_pos) {
             if (g_pos_committee_size < 1 || g_pos_committee_size > MAX_POS_COMMITTEE_SIZE) {
                 throw std::runtime_error(strprintf("-poscommitteesize must be between 1 and %d", MAX_POS_COMMITTEE_SIZE));
+            }
+            // VRF sortition is single-leader for now: each committee member
+            // would need its own published eligibility proof (doc 07 §4).
+            if (g_pos_vrf && g_pos_committee_size != 1) {
+                throw std::runtime_error("-posvrf is not yet compatible with -poscommitteesize > 1");
             }
             g_signed_blocks = true;
             consensus.vDeployments[Consensus::DEPLOYMENT_DYNA_FED].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
@@ -1214,6 +1227,7 @@ public:
         g_con_blockheightinheader = true;
         g_con_bitcoin_anchor = false;
         g_con_pos = false;
+        g_pos_vrf = false;
         g_con_elementsmode = true;
         consensus.elements_mode = g_con_elementsmode;
         consensus.total_valid_epochs = 2;

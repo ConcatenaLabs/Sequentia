@@ -104,19 +104,25 @@ convergence):
 5. **Committee.** Committee certification (doc 06) needs every member's
    eligibility proof; in VRF mode each member would publish its own sortition
    proof and the block would aggregate them. For the first VRF integration,
-   committee certification is disabled (single leader); unifying the two is the
-   step after.
+   committee certification is disabled (`-posvrf` requires
+   `-poscommitteesize=1`); unifying the two is the step after.
 
-This is deliberately staged: the primitive (the hard, security-critical crypto)
-is finished and tested now; the consensus wiring above is a contained, well-
-specified change to land next, behind a `-posvrf` flag.
+**Status: implemented** behind `-posvrf` (requires `-con_pos`), exactly as
+specified above.
 
 ## 5. Roadmap position
 
 - [x] VRF primitive (`src/vrf.{h,cpp}`) + unit tests.
 - [x] `vrfprove` / `vrfverify` RPCs + functional test.
-- [ ] `-posvrf` mode: coinbase-committed proof, sortition slot, validation in
-      `ContextualCheckBlock` (§4).
+- [x] `-posvrf` mode: coinbase-committed proof (tagged `SEQVRF` OP_RETURN,
+      covered by the merkle root and hence the leader's signature), the
+      stake-weighted sortition slot `PosVrfSlot` (capped at `POS_VRF_MAX_SLOT`),
+      consensus validation in `ContextualCheckBlock` (proof verifies against
+      the leader's challenge key over the slot seed; block time must respect
+      the proof-derived slot), `CheckChallenge` reduced to registered-staker +
+      leader-only-form in this mode, miner/`generateposblock` integration, and
+      `feature_pos_vrf.py` (peer-validated VRF blocks, commitment present,
+      slot respected, non-staker and proof-less templates rejected).
 - [ ] Validate the primitive against RFC 9381 vectors / adopt a reviewed
       secp256k1 VRF ciphersuite.
 - [ ] VRF-sortitioned committees with aggregated eligibility proofs.

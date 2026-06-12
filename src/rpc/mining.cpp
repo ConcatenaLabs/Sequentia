@@ -1656,9 +1656,32 @@ static RPCHelpMan generateposblock()
     CScript feeDestinationScript = chainparams.GetConsensus().mandatory_coinbase_destination;
     if (feeDestinationScript == CScript()) feeDestinationScript = CScript() << OP_TRUE;
 
+    // VRF sortition mode: compute this staker's sortition proof over the slot
+    // seed and commit it in the coinbase (doc/sequentia/07-vrf.md §4).
+    std::vector<unsigned char> vrf_proof;
+    std::vector<CScript> vrf_commitments;
+    uint64_t vrf_slot = 0;
+    uint256 vrf_output;
+    if (g_pos_vrf) {
+        uint256 seed = PosSeedForChild(tip);
+        auto proof = VrfProve(key, Span<const unsigned char>(seed.begin(), 32));
+        if (!proof) {
+            throw JSONRPCError(RPC_MISC_ERROR, "Failed to compute VRF sortition proof");
+        }
+        vrf_proof = *proof;
+        if (!VrfVerify(pubkey, Span<const unsigned char>(seed.begin(), 32), vrf_proof, vrf_output)) {
+            throw JSONRPCError(RPC_INTERNAL_ERROR, "Produced VRF proof did not verify");
+        }
+        const StakeRegistry& registry = StakeRegistry::GetInstance();
+        vrf_slot = PosVrfSlot(vrf_output, registry.GetWeight(pubkey), PosTotalWeight(registry));
+        vrf_commitments.push_back(BuildPosVrfCommitment(vrf_proof));
+    }
+
     std::unique_ptr<CBlockTemplate> pblocktemplate(
         BlockAssembler(chainman.ActiveChainstate(), *node.mempool, chainparams)
-            .CreateNewBlock(feeDestinationScript, std::chrono::seconds(0), nullptr, nullptr, &pubkey));
+            .CreateNewBlock(feeDestinationScript, std::chrono::seconds(0), nullptr,
+                            g_pos_vrf ? &vrf_commitments : nullptr, &pubkey,
+                            g_pos_vrf ? &vrf_proof : nullptr));
     if (!pblocktemplate.get()) {
         throw JSONRPCError(RPC_INTERNAL_ERROR, "Could not create block template");
     }
@@ -1739,6 +1762,10 @@ static RPCHelpMan generateposblock()
     result.pushKV("height", tip->nHeight + 1);
     result.pushKV("rank", (int)*rank);
     result.pushKV("countersignatures", countersigs);
+    if (g_pos_vrf) {
+        result.pushKV("vrf_output", vrf_output.GetHex());
+        result.pushKV("vrf_slot", vrf_slot);
+    }
     return result;
 },
     };

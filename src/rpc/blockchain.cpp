@@ -3282,6 +3282,13 @@ static RPCHelpMan getposschedule()
     result.pushKV("height", next_height);
     result.pushKV("seed", seed.GetHex());
     result.pushKV("slot_interval", g_pos_slot_interval);
+    if (g_pos_vrf) {
+        // Private sortition: slots depend on each staker's secret key, so no
+        // public ordering exists. The "schedule" below is the legacy public
+        // ranking and is NOT used by consensus in this mode.
+        result.pushKV("sortition", "vrf");
+        result.pushKV("total_weight", (uint64_t)PosTotalWeight(registry));
+    }
     result.pushKV("schedule", arr);
     // Committee certification (principle 6): the first committee_size entries
     // of the schedule certify the block; a strict majority must countersign.
