@@ -5,6 +5,15 @@ https://sequentia.io/
 
 Current code is based on Elements Version: 23.2.1
 
+## SequentiaByClaude design specification
+
+This repository is a fork of the existing Sequentia project
+(`SequentiaSEQ/SEQ-Core-Elements`), continuing the proof-of-concept toward a
+Bitcoin sidechain with (1) an open "no-coin" fee market, (2) Bitcoin anchoring,
+and (3) — later — proof-of-stake consensus. The design specification, the
+codebase-base decision and its rationale, and the implementation roadmap live in
+[`doc/sequentia/`](doc/sequentia/00-overview-and-base-decision.md).
+
 ## Installing Prerequisistes
 
 ### Install build tools
