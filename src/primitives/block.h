@@ -19,6 +19,9 @@ extern bool g_signed_blocks;
 // block reference (height + block hash), with heights required to be
 // monotonically non-decreasing along the chain. See doc/sequentia/03-bitcoin-anchoring.md.
 extern bool g_con_bitcoin_anchor;
+// SEQUENTIA: Proof-of-Stake mode (also declared in pos.h). Needed here so
+// CDiskBlockIndex can persist the PoS fork-choice keys. See doc/sequentia/06.
+extern bool g_con_pos;
 
 class CProof
 {

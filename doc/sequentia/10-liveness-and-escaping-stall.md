@@ -1,12 +1,13 @@
 # Liveness & escaping-stall — design for the anchor-driven model
 
-> **Status: partially implemented.** The **escaping-stall sub-threshold
-> certification** (§3.8, stages 1–2 below) is implemented and tested
-> (`feature_pos_escaping_stall.py`, `pos_tests.cpp pos_escaping_stall_gap`).
-> What remains is the *deterministic fork-choice preference* (full-threshold
-> beats sub-threshold; lowest-VRF tiebreak — stages 3–5), which is a finality
-> refinement, **not** a safety requirement (see §6). This doc specifies the
-> whole model; §6 records exactly what is done vs. pending.
+> **Status: implemented.** The **escaping-stall sub-threshold certification**
+> (§3.8, stages 1–2) and the **deterministic fork-choice preference** (more
+> countersignatures wins, then lowest leader VRF score — stage 3) are both
+> implemented and tested (`feature_pos_escaping_stall.py`,
+> `feature_pos_fork_choice.py`, `pos_tests.cpp`). Stages 4–5 (retiring the
+> wall-clock slot gate; a dynamic committee floor) remain deliberately deferred
+> as fidelity refinements over already-safe mechanisms (see §7). §6 records the
+> implementation.
 
 ## 1. What exists today
 
@@ -127,44 +128,41 @@ the one change that can split consensus if it is non-deterministic.
   (end-to-end over a parent chain: full-quorum accepted; sub-quorum rejected
   with no anchor advance; accepted after a +3 advance; rejected again).
 
-**Why this is safe without the fork-choice preference.** A sub-threshold block
-is *validly certified* — its named members are sortition-eligible and its
-aggregate signature is valid — so a full-vs-sub fork at the same height is an
-ordinary first-seen signed-block fork, with no double-spend beyond normal
-reorg semantics. It is also abuse-proof: a `+3` anchor requires Bitcoin to have
-genuinely produced three blocks (~30 min) since the parent's anchor, which a
-healthy 10-second chain never permits, and each further sub-threshold block
-needs another `+3` of parent-chain progress — so the path self-limits to a
-genuine stall and cannot be used to bypass committee certification.
+The path is also abuse-proof: a `+3` anchor requires Bitcoin to have genuinely
+produced three blocks (~30 min) since the parent's anchor, which a healthy
+10-second chain never permits, and each further sub-threshold block needs
+another `+3` of parent-chain progress — so the path self-limits to a genuine
+stall and cannot be used to bypass committee certification.
 
-**Pending (stages 3–5), with the architectural blocker:** the whitepaper
-prefers a full-threshold block over a sub-threshold one at the same height
-(then lowest VRF). Encoding that in fork choice means reflecting *certification
-strength* in `nChainWork` — but `nChainWork` is fixed at **header**-acceptance
-time, while the countersignature count lives in the **coinbase body**. So a
-faithful deterministic preference requires either surfacing the count into the
-header (a format change / new genesis) or recomputing chain work at connect
-time. Until then, full-vs-sub same-height forks converge by first-seen like any
-signed-block fork — a finality nicety deferred, not a safety gap. Stage 5 (the
-dynamic committee floor) builds on the static `-posminstake` floor (doc 06 §5).
+**Implemented (stage 3) — the deterministic fork-choice preference.** Among
+same-height (equal-work) blocks the chain now prefers more committee
+countersignatures, then the lower leader VRF score (whitepaper §3.8) — so a
+full-threshold block always beats an escaping-stall sub-threshold one. The key
+realisation: this does **not** need `nChainWork` (a header-time quantity).
+`CBlockIndexWorkComparator` (`src/validation.cpp`) already drives equal-work
+reorgs via its secondary keys; we add the preference there, using two keys on
+`CBlockIndex` set at acceptance and never mutated (so the candidate-set ordering
+stays stable):
+- `m_pos_countersigs` — the named committee size (coinbase `SEQCMT` count for
+  the aggregate form; the listed members for multisig). More is better.
+- `m_pos_vrf_score` — the top 64 bits of the leader's VRF `beta` over the slot
+  seed. Lower is better. Registry-independent (just the leader key + seed), so
+  deterministic across nodes.
+Both are computed from the block body in `SetPosForkChoiceKeys` before the
+block enters `setBlockIndexCandidates`, and persisted in `CDiskBlockIndex` so a
+restarted node orders identically. Tested in `feature_pos_fork_choice.py` (a
+2-member tip is reorganized onto a competing 3-member block at the same height)
+and the full PoS/anchoring battery confirms no regression.
 
-## 7. Decisions on the remaining stages (3–5)
+Stages 4–5 (retiring the wall-clock slot gate; a dynamic committee floor)
+remain deferred — see §7.
 
-These are recorded as deliberate calls. All three are **finality/fidelity
-refinements over mechanisms that are already safe and deterministic** — none is
-a safety or liveness gap — and the two that touch fork choice or block timing
-are the highest-split-risk changes in the codebase, so they are flagged for
-human review before mainnet rather than landed unsupervised.
+## 7. Decisions on the remaining stages (4–5)
 
-- **Stage 3 — deterministic fork-choice preference (full > sub, then lowest
-  VRF).** Deferred pending a design decision: it needs certification strength
-  at header-acceptance time (where `nChainWork` is fixed), but that strength
-  lives in the coinbase body — so a faithful implementation requires either a
-  **header/proof format change** (carry the countersig count or a
-  full-threshold bit; implies a new genesis) or a connect-time chain-work
-  recomputation. Both are mainnet-affecting and want review. Safe to defer:
-  sub-threshold blocks are validly certified, so same-height forks converge by
-  first-seen and then by height like any signed-block chain — no double-spend.
+Stage 3 (the fork-choice preference) is implemented — see §6. The two remaining
+stages are **fidelity refinements over mechanisms that are already safe and
+deterministic** — neither is a safety or liveness gap — and are deliberately
+deferred:
 
 - **Stage 4 — replace the wall-clock slot gate with an anchor clock.** Deferred.
   The existing gate (`block.nTime ≥ parent.nTime + slot · interval`) compares

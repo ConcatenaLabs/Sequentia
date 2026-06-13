@@ -185,6 +185,7 @@ BASE_SCRIPTS = [
     'feature_pos_distributed_committee.py',
     'feature_pos_min_stake.py',
     'feature_pos_escaping_stall.py',
+    'feature_pos_fork_choice.py',
     'feature_pos_stake.py',
     'feature_pos_checkpoints.py',
     'feature_pos_config_checkpoints.py',

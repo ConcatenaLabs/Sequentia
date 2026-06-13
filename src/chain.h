@@ -289,6 +289,17 @@ public:
     //! (memory only) Maximum nTime in the chain up to and including this block.
     unsigned int nTimeMax{0};
 
+    //! SEQUENTIA PoS fork-choice keys (whitepaper §3.8), used by
+    //! CBlockIndexWorkComparator to order same-height (equal-work) blocks:
+    //! prefer more committee countersignatures, then the lower leader VRF
+    //! score. Set once at block acceptance (before the block enters
+    //! setBlockIndexCandidates) and never mutated thereafter, so the set
+    //! ordering stays stable. Both are deterministic functions of the block
+    //! (coinbase member count; leader's VRF beta over the slot seed), so all
+    //! nodes agree. Persisted in CDiskBlockIndex on PoS chains.
+    uint16_t m_pos_countersigs{0};
+    uint64_t m_pos_vrf_score{std::numeric_limits<uint64_t>::max()}; // lower = better; max = unset
+
     CBlockIndex()
     {
     }
@@ -547,6 +558,14 @@ public:
         } else {
             READWRITE(obj.nBits);
             READWRITE(obj.nNonce);
+        }
+
+        // SEQUENTIA: persist the PoS fork-choice keys (whitepaper §3.8) so a
+        // restarted node orders same-height blocks identically without
+        // recomputing them from block bodies.
+        if (g_con_pos) {
+            READWRITE(obj.m_pos_countersigs);
+            READWRITE(obj.m_pos_vrf_score);
         }
     }
 

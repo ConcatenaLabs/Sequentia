@@ -160,16 +160,15 @@ Bitcoin-anchor-driven escaping-stall (§3.5/§3.8). Design and staged plan in
       from committed anchor heights; `pos_escaping_stall_gap`).
 - [x] Escaping-stall sub-threshold certification (h+3 rule) in
       `CheckPosStakeRules` + producer RPCs (`feature_pos_escaping_stall.py`).
-- [ ] PoS same-height fork choice (threshold, countersig count, lowest VRF) —
-      blocked on surfacing certification strength into header-time chain work;
-      safety-preserving to defer (doc 10 §6).
+- [x] PoS same-height fork choice — more countersignatures wins, then lowest
+      leader VRF score (`CBlockIndexWorkComparator` keys on `CBlockIndex`;
+      `feature_pos_fork_choice.py`). Done via the comparator, not a header
+      change (doc 10 §6).
 - [ ] Retire the wall-clock slot gate for the anchor clock.
 - [ ] Dynamic committee floor when participation is short.
 
-Decisions on the three open items (all finality/fidelity refinements over
-already-safe, deterministic mechanisms; the fork-choice/timing ones carry
-consensus-split risk and are flagged for human review rather than landed
-unsupervised): see [doc 10 §7](10-liveness-and-escaping-stall.md).
+The two open items are fidelity refinements over already-safe, deterministic
+mechanisms — see [doc 10 §7](10-liveness-and-escaping-stall.md).
 
 ## Status for mainnet
 The four challenges and the full PoS consensus are implemented, tested, and
@@ -177,8 +176,9 @@ adversarially reviewed (crypto, consensus, stake registry, fee market, P2P,
 wallet/CT). The remaining work is enumerated and falls into three buckets,
 none a regression or a safety/consensus-split gap on a correctly-configured
 network:
-- **Consensus refinements pending review** — Milestone 6 stages 3–5
-  (doc 10 §7) and the fork/sibling-block storage hardening (doc 11 §1).
+- **Consensus refinements remaining** — Milestone 6 stages 4–5 (anchor clock,
+  dynamic committee floor; doc 10 §7) and the fork/sibling-block storage
+  hardening (doc 11 §1) — all fidelity/DoS-hardening over already-safe paths.
 - **Launch / governance parameters** — genesis SEQ supply (400M) & distribution,
   the founding staker set, committee size, `-posminstake`, `-posunbonding` — set
   at launch, like any chain's founding constants (doc 12). The block weight cap

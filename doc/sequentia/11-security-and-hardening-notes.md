@@ -62,11 +62,11 @@ relayer of a genuinely-invalid block is correct. No change made.
 ## 3. Anchor-driven liveness fork-choice (cross-reference)
 
 The deterministic full-vs-sub-threshold fork-choice preference (whitepaper §3.8)
-is deferred for the reasons in [doc 10 §6–§7](10-liveness-and-escaping-stall.md):
-it needs certification strength at header-acceptance time (a header/proof format
-change) or a connect-time chain-work recomputation. Safe to defer — sub-threshold
-blocks are validly certified, so same-height forks converge by first-seen then
-by height.
+is **implemented** — via the `CBlockIndexWorkComparator` secondary keys, not a
+header-format change (the earlier "needs header-time work" assessment was
+wrong; the comparator already drives equal-work reorgs). See
+[doc 10 §6](10-liveness-and-escaping-stall.md). The remaining liveness items
+(stages 4–5: anchor clock, dynamic committee floor) are fidelity refinements.
 
 ## 4. Whitepaper features beyond the implemented consensus scope
 

@@ -125,6 +125,19 @@ bool CBlockIndexWorkComparator::operator()(const CBlockIndex *pa, const CBlockIn
     if (pa->nChainWork > pb->nChainWork) return false;
     if (pa->nChainWork < pb->nChainWork) return true;
 
+    // SEQUENTIA PoS (whitepaper §3.8): among equal-work (same-height) blocks,
+    // prefer the stronger certification before falling back to first-seen — a
+    // block with MORE committee countersignatures wins (so a full-threshold
+    // block beats an escaping-stall sub-threshold one), and on a tie the LOWER
+    // leader VRF score wins. Both keys are fixed at acceptance and deterministic
+    // across nodes, so this is a consistent ordering and cannot split consensus.
+    if (g_con_pos) {
+        if (pa->m_pos_countersigs < pb->m_pos_countersigs) return true;
+        if (pa->m_pos_countersigs > pb->m_pos_countersigs) return false;
+        if (pa->m_pos_vrf_score > pb->m_pos_vrf_score) return true;  // higher beta is worse
+        if (pa->m_pos_vrf_score < pb->m_pos_vrf_score) return false;
+    }
+
     // ... then by earliest time received, ...
     if (pa->nSequenceId < pb->nSequenceId) return false;
     if (pa->nSequenceId > pb->nSequenceId) return true;
@@ -2257,6 +2270,34 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
         }
     }
     return true;
+}
+
+//! SEQUENTIA: compute and store the PoS fork-choice keys (whitepaper §3.8) on a
+//! freshly accepted block, from the block body alone — deterministic and
+//! registry-independent (member count from the coinbase; the leader's VRF beta
+//! over the slot seed). MUST be called before the block enters
+//! setBlockIndexCandidates and never again, so CBlockIndexWorkComparator's
+//! ordering stays stable. No-op for non-PoS chains / unrecognized challenges.
+static void SetPosForkChoiceKeys(CBlockIndex* pindex, const CBlock& block)
+{
+    if (!g_con_pos || pindex == nullptr || pindex->pprev == nullptr) return;
+    std::optional<PosChallengeParts> parts = ParsePosBlockChallenge(block.proof.challenge);
+    if (!parts) return;
+    // Countersigners: the named committee (agg form: the SEQCMT set; multisig
+    // form: the listed members). Leader-only blocks have none. More is better.
+    size_t count = !parts->agg_key.empty() ? ExtractPosVrfMembers(block).size() : parts->committee.size();
+    pindex->m_pos_countersigs = (uint16_t)std::min<size_t>(count, std::numeric_limits<uint16_t>::max());
+    // Leader VRF score (the top 64 bits of beta; lower is better). Registry-
+    // independent: it only needs the leader key and the slot seed.
+    if (g_pos_vrf) {
+        if (auto proof = ExtractPosVrfProof(block)) {
+            uint256 seed = PosSeedForChild(pindex->pprev);
+            uint256 beta;
+            if (VrfVerify(parts->leader, seed, *proof, beta)) {
+                pindex->m_pos_vrf_score = beta.GetUint64(3);
+            }
+        }
+    }
 }
 
 /** Apply the effects of this block (with given index) on the UTXO set represented by coins.
@@ -4480,6 +4521,11 @@ bool CChainState::AcceptBlock(const std::shared_ptr<const CBlock>& pblock, Block
     // (but if it does not build on our best tip, let the SendMessages loop relay it)
     if (!IsInitialBlockDownload() && m_chain.Tip() == pindex->pprev)
         GetMainSignals().NewPoWValidBlock(pindex, pblock);
+
+    // SEQUENTIA: fix the PoS fork-choice keys before the block becomes a
+    // chain-selection candidate (ReceivedBlockTransactions inserts it into
+    // setBlockIndexCandidates); they must never change afterward.
+    SetPosForkChoiceKeys(pindex, block);
 
     // Write block to history file
     if (fNewBlock) *fNewBlock = true;
