@@ -242,6 +242,13 @@ public:
         g_con_pos = false;
         g_pos_vrf = false;
         g_pos_agg_committee = false;
+        // Reset the rest of the PoS consensus globals to their defaults too, so
+        // an in-process chain switch can never read a value left over from a
+        // previously-selected (custom PoS) chain.
+        g_pos_min_stake = 0;
+        g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
+        g_pos_slot_interval = DEFAULT_POS_SLOT_INTERVAL;
+        g_pos_unbonding_period = DEFAULT_POS_UNBONDING_PERIOD;
         consensus.total_valid_epochs = 0;
         consensus.elements_mode = g_con_elementsmode;
 
@@ -399,6 +406,13 @@ public:
         g_con_pos = false;
         g_pos_vrf = false;
         g_pos_agg_committee = false;
+        // Reset the rest of the PoS consensus globals to their defaults too, so
+        // an in-process chain switch can never read a value left over from a
+        // previously-selected (custom PoS) chain.
+        g_pos_min_stake = 0;
+        g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
+        g_pos_slot_interval = DEFAULT_POS_SLOT_INTERVAL;
+        g_pos_unbonding_period = DEFAULT_POS_UNBONDING_PERIOD;
         consensus.elements_mode = g_con_elementsmode;
         consensus.total_valid_epochs = 0;
         consensus.dynamic_epoch_length = 10;
@@ -602,6 +616,13 @@ public:
         g_con_pos = false;
         g_pos_vrf = false;
         g_pos_agg_committee = false;
+        // Reset the rest of the PoS consensus globals to their defaults too, so
+        // an in-process chain switch can never read a value left over from a
+        // previously-selected (custom PoS) chain.
+        g_pos_min_stake = 0;
+        g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
+        g_pos_slot_interval = DEFAULT_POS_SLOT_INTERVAL;
+        g_pos_unbonding_period = DEFAULT_POS_UNBONDING_PERIOD;
         consensus.total_valid_epochs = 0;
         consensus.elements_mode = g_con_elementsmode;
 
@@ -711,6 +732,13 @@ public:
         g_con_pos = false;
         g_pos_vrf = false;
         g_pos_agg_committee = false;
+        // Reset the rest of the PoS consensus globals to their defaults too, so
+        // an in-process chain switch can never read a value left over from a
+        // previously-selected (custom PoS) chain.
+        g_pos_min_stake = 0;
+        g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
+        g_pos_slot_interval = DEFAULT_POS_SLOT_INTERVAL;
+        g_pos_unbonding_period = DEFAULT_POS_UNBONDING_PERIOD;
         consensus.total_valid_epochs = 0;
 
         pchMessageStart[0] = 0xfa;
@@ -972,8 +1000,11 @@ protected:
             // These are consensus values shared by every node; out-of-range
             // settings would invert the slot time-gate or (via the int →
             // uint32 cast) make no output ever count as stake.
-            if (g_pos_slot_interval < 1) {
-                throw std::runtime_error("-posslotinterval must be a positive number of seconds");
+            // Floor at 1s; cap at a day so (unbonding x slot) and (CSV value x
+            // slot) durations stay well within int64 (see PosStakeLockSeconds /
+            // PosRequiredUnbondingSeconds).
+            if (g_pos_slot_interval < 1 || g_pos_slot_interval > 86400) {
+                throw std::runtime_error("-posslotinterval must be between 1 and 86400 seconds");
             }
             // The minimum unbonding lock, expressed in (SEQ) blocks; the
             // required wall-clock lock is this times the slot interval. It is
@@ -1299,6 +1330,13 @@ public:
         g_con_pos = false;
         g_pos_vrf = false;
         g_pos_agg_committee = false;
+        // Reset the rest of the PoS consensus globals to their defaults too, so
+        // an in-process chain switch can never read a value left over from a
+        // previously-selected (custom PoS) chain.
+        g_pos_min_stake = 0;
+        g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
+        g_pos_slot_interval = DEFAULT_POS_SLOT_INTERVAL;
+        g_pos_unbonding_period = DEFAULT_POS_UNBONDING_PERIOD;
         g_con_elementsmode = true;
         consensus.elements_mode = g_con_elementsmode;
         consensus.total_valid_epochs = 2;
