@@ -32,6 +32,9 @@ poscommitteesize=100       # expected committee size (<=100 with aggregation);
                            # sortition-eligible members or no block can be certified.
 posslotinterval=10         # seconds per VRF sortition slot
 posunbonding=2016          # CSV blocks a stake locks before it counts / can unbond
+con_blocksubsidy=0         # no inflation: SEQ is pre-mined at genesis, never
+                           # minted by block production; stakers earn fees only
+                           # (whitepaper §3.9). 0 is also the custom-chain default.
 
 # The genesis staker set: one line per founding staker, <pubkey-hex>:<weight>.
 # This is a GOVERNANCE decision and must match on every node. Replace these.

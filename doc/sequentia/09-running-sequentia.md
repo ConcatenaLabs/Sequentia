@@ -64,6 +64,10 @@ posaggcommittee=1
 poscommitteesize=100         # quorum = strict majority of this: the paper's 51-of-100
 posslotinterval=10
 posunbonding=2016            # CSV blocks a stake must lock before it counts
+con_blocksubsidy=0           # no inflation: SEQ is pre-mined at genesis, no
+                             # coinbase generation; producers earn fees only
+                             # (whitepaper §3.9). 0 is the default for a custom
+                             # chain; set explicitly to make the tenet visible.
 # The genesis staker set — IDENTICAL on every node (see §6 / §8). It must
 # hold at least quorum-many (here 51) sortition-eligible members, or no
 # block can ever be certified:

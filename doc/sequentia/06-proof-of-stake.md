@@ -158,6 +158,16 @@ nodes converge on it — exactly as the federation's round-robin does today.
   block-acceptance time, both of which can run far ahead of the active chain
   the registry mirrors — so headers-first sync and parallel block download
   cannot mis-evaluate eligibility, in either election mode.
+- **No inflation; stakers are paid in fees.** Per the whitepaper (§3.9), SEQ is
+  pre-mined and fully distributed at genesis: there is **no block subsidy / no
+  coinbase generation of new SEQ**. The chain's `genesis_subsidy` is therefore
+  0 (`src/chainparams.cpp`, the Sequentia `test` chain), so a block producer's
+  only reward is the transaction fees it collects. The staked asset *is* SEQ —
+  staking outputs are denominated in the chain's policy asset (`::policyAsset`,
+  the genesis-distributed SEQ), which is the unit `StakeFromTxOut` requires.
+  (The policy asset is only a *staking-weight* denominator and an Elements
+  substrate artifact; it is **not** a privileged fee currency — fees are paid
+  in any asset, doc 02.)
 
 ## 6. Roadmap within PoS
 

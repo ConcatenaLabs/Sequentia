@@ -378,7 +378,11 @@ public:
         consensus.nMinimumChainWork = uint256();
         consensus.defaultAssumeValid = uint256();
 
-        consensus.genesis_subsidy = 1*COIN;
+        // SEQUENTIA: no block subsidy. SEQ is pre-mined and fully distributed
+        // at genesis — "there is no coinbase generation and production of new
+        // SEQ tokens through staking" (whitepaper §3.9, No inflation). Block
+        // producers (stakers) are paid in transaction fees, not new SEQ.
+        consensus.genesis_subsidy = 0;
         consensus.connect_genesis_outputs = true;
         anyonecanspend_aremine = true;
         enforce_pak = false;
