@@ -28,17 +28,21 @@ consensus/fund risk: the blocks are never connected, never affect the active
 chain, and are reclaimed by pruning. It requires an actively-malicious peer
 pushing *unrequested* blocks.
 
-**Proper fix (needs review — touches block download / consensus).** Either
-(a) PoS-validate a fork block against the **registry at its own parent** before
+**Proper fix (needs review — touches block download / consensus).**
+PoS-validate a fork block against the **registry at its own parent** before
 persisting — which for a sibling means rewinding the stake registry one block
 (`PosRevertBlockStake(tip)` → validate → `PosApplyBlockStake(tip)`), or more
-generally maintaining short-range registry snapshots; or (b) decline to *store
-unrequested* equal-work blocks that cannot be PoS-validated yet (require
-strictly-more work for unsolicited storage), relying on headers+getdata to
-fetch genuine forks. Option (b) is smaller but changes propagation of honest
-equal-work forks (rare under committee certification; covered by headers
-fetch). Both are propagation/consensus-adjacent and want human review +
-multi-node fork tests before landing.
+generally maintaining short-range registry snapshots. This distinguishes a
+valid-but-competing block (must be kept — the §3.8 fork choice may prefer it)
+from a genuinely-invalid one (drop / mark failed).
+
+Note the tempting cheap alternative — "don't store unsolicited equal-work
+blocks" — is **wrong now that the fork choice is implemented**: a full-threshold
+block that should displace a sub-threshold tip often arrives unsolicited at the
+same height, and dropping it would defeat the §3.8 preference. So the parent-
+registry validation is the only correct fix, and it wants human review +
+multi-node fork tests before landing. (Bounded meanwhile: resource-only,
+pruning-reclaimed, requires an actively-malicious peer.)
 
 ## 2. PoS consensus rejects and peer banning — analyzed, NOT a bug
 
