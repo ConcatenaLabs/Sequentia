@@ -161,3 +161,4 @@ git merge elements-23.3.3        # resolve conflicts, then build & run the test 
 | [`08-addresses-and-ct.md`](08-addresses-and-ct.md) | Bitcoin-identical addresses and opt-in confidential transactions. |
 | [`09-running-sequentia.md`](09-running-sequentia.md) | Operator runbook: deploying the full system end-to-end. |
 | [`10-liveness-and-escaping-stall.md`](10-liveness-and-escaping-stall.md) | Design for the anchor-driven liveness / escaping-stall (the last pre-mainnet consensus item). |
+| [`11-security-and-hardening-notes.md`](11-security-and-hardening-notes.md) | Deferred hardening items + analyses from adversarial review, and whitepaper features beyond the implemented scope. |
