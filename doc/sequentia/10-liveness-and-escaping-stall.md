@@ -147,3 +147,43 @@ header (a format change / new genesis) or recomputing chain work at connect
 time. Until then, full-vs-sub same-height forks converge by first-seen like any
 signed-block fork — a finality nicety deferred, not a safety gap. Stage 5 (the
 dynamic committee floor) builds on the static `-posminstake` floor (doc 06 §5).
+
+## 7. Decisions on the remaining stages (3–5)
+
+These are recorded as deliberate calls. All three are **finality/fidelity
+refinements over mechanisms that are already safe and deterministic** — none is
+a safety or liveness gap — and the two that touch fork choice or block timing
+are the highest-split-risk changes in the codebase, so they are flagged for
+human review before mainnet rather than landed unsupervised.
+
+- **Stage 3 — deterministic fork-choice preference (full > sub, then lowest
+  VRF).** Deferred pending a design decision: it needs certification strength
+  at header-acceptance time (where `nChainWork` is fixed), but that strength
+  lives in the coinbase body — so a faithful implementation requires either a
+  **header/proof format change** (carry the countersig count or a
+  full-threshold bit; implies a new genesis) or a connect-time chain-work
+  recomputation. Both are mainnet-affecting and want review. Safe to defer:
+  sub-threshold blocks are validly certified, so same-height forks converge by
+  first-seen and then by height like any signed-block chain — no double-spend.
+
+- **Stage 4 — replace the wall-clock slot gate with an anchor clock.** Deferred.
+  The existing gate (`block.nTime ≥ parent.nTime + slot · interval`) compares
+  *committed block timestamps*, so it is already deterministic across nodes
+  (not node-local wall time), bounded by MTP and the 2-hour-future rule. An
+  anchor-block-based clock is closer to the paper's letter but is a timing-model
+  redesign with real risk for little safety gain; the escaping-stall rule
+  (implemented) already provides the anchor-driven liveness guarantee that
+  matters (the chain cannot freeze).
+
+- **Stage 5 — dynamic committee floor (lower `-posminstake` when participation
+  is short).** Deferred as largely redundant: its purpose is to keep a
+  committee formable when stake participation is low, but the escaping-stall
+  rule already lets the chain make progress with a sub-quorum (down to one
+  member) when the committee cannot be filled. The static floor (doc 06 §5)
+  plus escaping-stall covers the liveness need without adding a dynamic,
+  state-dependent consensus parameter.
+
+**Net:** the safety- and liveness-critical parts of the anchor-driven model
+(escaping-stall sub-threshold certification, computed unforgeably from
+committed anchor heights under `validateanchor=1`) are implemented and tested.
+The deferred stages are convergence/fidelity polish to schedule with review.
