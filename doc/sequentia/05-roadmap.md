@@ -166,6 +166,26 @@ Bitcoin-anchor-driven escaping-stall (§3.5/§3.8). Design and staged plan in
 - [ ] Retire the wall-clock slot gate for the anchor clock.
 - [ ] Dynamic committee floor when participation is short.
 
+Decisions on the three open items (all finality/fidelity refinements over
+already-safe, deterministic mechanisms; the fork-choice/timing ones carry
+consensus-split risk and are flagged for human review rather than landed
+unsupervised): see [doc 10 §7](10-liveness-and-escaping-stall.md).
+
+## Status for mainnet
+The four challenges and the full PoS consensus are implemented, tested, and
+adversarially reviewed (crypto, consensus, stake registry, fee market, P2P,
+wallet/CT). The remaining work is enumerated and falls into three buckets,
+none a regression or a safety/consensus-split gap on a correctly-configured
+network:
+- **Consensus refinements pending review** — Milestone 6 stages 3–5
+  (doc 10 §7) and the fork/sibling-block storage hardening (doc 11 §1).
+- **Launch / governance parameters** — genesis SEQ supply & distribution, the
+  staker set, committee size, `-posminstake`, `-posunbonding`, and the
+  whitepaper's 0.5 MB block size (doc 11 §4) — set at launch, like any chain's
+  founding constants.
+- **Out-of-scope future subsystems** (beyond the four challenges) — asset ACLs
+  (§4.5), programmable accounts (§4.6), utreexo (doc 11 §4).
+
 ## Risks / watch-items
 - **Build resources.** A full Elements build is heavy (~4-core / 15 GB host
   used for the PoC build). CI should build with BDB so the pre-existing
