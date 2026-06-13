@@ -2188,7 +2188,19 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
                 return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-member-duplicate", "duplicate committee member eligibility commitment");
             }
         }
-        if ((int)named.size() < PosQuorum((size_t)g_pos_committee_size)) {
+        // Normally a strict-majority quorum must countersign. The escaping-stall
+        // rule (whitepaper §3.8) relaxes this to a single member when the chain
+        // has stalled — i.e. the parent chain advanced >= the escaping-stall gap
+        // past the parent block's anchor — so a stuck committee cannot freeze
+        // the chain. This is self-limiting: a +gap anchor requires the parent
+        // chain to genuinely have produced that many blocks, which a healthy
+        // (fast) SEQ chain never lets happen, and the next sub-threshold block
+        // needs another gap of parent-chain progress.
+        const int quorum = PosQuorum((size_t)g_pos_committee_size);
+        const bool escaping_stall = g_con_bitcoin_anchor &&
+            PosEscapingStallAllowed(pindexPrev->m_anchor_height, block.m_anchor_height);
+        const int min_members = escaping_stall ? 1 : quorum;
+        if ((int)named.size() < min_members) {
             return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-agg-quorum", "fewer named committee members than the certification quorum");
         }
         // Cap the named set before any VRF verification: a leader must not be

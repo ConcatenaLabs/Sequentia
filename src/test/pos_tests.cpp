@@ -107,6 +107,21 @@ BOOST_AUTO_TEST_CASE(pos_weighting_is_proportional)
     BOOST_CHECK(big_wins < trials * 0.98);
 }
 
+// Escaping stall (whitepaper §3.8): sub-quorum certification is permitted only
+// once the parent-chain anchor has advanced by the gap (the "h+3" rule).
+BOOST_AUTO_TEST_CASE(pos_escaping_stall_gap)
+{
+    BOOST_CHECK_EQUAL(POS_ESCAPING_STALL_ANCHOR_GAP, 3U);
+    // Parent block anchored at height 100.
+    BOOST_CHECK(!PosEscapingStallAllowed(100, 100)); // no advance
+    BOOST_CHECK(!PosEscapingStallAllowed(100, 102)); // only +2
+    BOOST_CHECK(PosEscapingStallAllowed(100, 103));  // +3: stalled, allowed
+    BOOST_CHECK(PosEscapingStallAllowed(100, 130));  // further forward, allowed
+    // Genesis / anchoring-disabled (heights 0) never allows it.
+    BOOST_CHECK(!PosEscapingStallAllowed(0, 0));
+    BOOST_CHECK(PosEscapingStallAllowed(0, 3));
+}
+
 // The minimum-stake floor (whitepaper §3.3) excludes sub-minimum stakers from
 // the schedule, the rank lookup, the eligible-total weight, and VRF committee
 // membership; with the floor at 0 (default) every registered staker is eligible.

@@ -151,16 +151,18 @@ per the theoretical paper and doc 04 §3. The detailed item list lives in
 - [x] No inflation: SEQ pre-mined at genesis, `con_blocksubsidy=0` (§3.9).
 - [x] Operator runbook for deploying all of it (doc 09).
 
-## Milestone 6 — Anchor-driven liveness & escaping-stall — DESIGNED
-The last major consensus item before mainnet: replace the PoC's wall-clock
-liveness with the whitepaper's Bitcoin-anchor-driven escaping-stall (§3.5/§3.8),
-including sub-threshold certification and the countersig/VRF fork-choice. Full
-design and staged implementation plan in
+## Milestone 6 — Anchor-driven liveness & escaping-stall — IN PROGRESS
+The last major consensus item before mainnet: the whitepaper's
+Bitcoin-anchor-driven escaping-stall (§3.5/§3.8). Design and staged plan in
 [doc 10](10-liveness-and-escaping-stall.md).
 
-- [ ] Consensus-view anchor-depth function (pure, from committed anchor heights).
-- [ ] Escaping-stall sub-threshold certification (depth-4 / h+3 rule).
-- [ ] PoS same-height fork choice (threshold, countersig count, lowest VRF).
+- [x] Consensus-view anchor-depth condition (`PosEscapingStallAllowed`, pure,
+      from committed anchor heights; `pos_escaping_stall_gap`).
+- [x] Escaping-stall sub-threshold certification (h+3 rule) in
+      `CheckPosStakeRules` + producer RPCs (`feature_pos_escaping_stall.py`).
+- [ ] PoS same-height fork choice (threshold, countersig count, lowest VRF) —
+      blocked on surfacing certification strength into header-time chain work;
+      safety-preserving to defer (doc 10 §6).
 - [ ] Retire the wall-clock slot gate for the anchor clock.
 - [ ] Dynamic committee floor when participation is short.
 

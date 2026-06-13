@@ -1,9 +1,12 @@
 # Liveness & escaping-stall — design for the anchor-driven model
 
-> **Status: design, not yet implemented.** This specifies the change from the
-> current wall-clock liveness to the whitepaper's Bitcoin-anchor-driven model
-> (§3.5 immediate finality, §3.8 escaping stall). It is the last major
-> consensus item before mainnet. Everything else in docs 06/07 is implemented.
+> **Status: partially implemented.** The **escaping-stall sub-threshold
+> certification** (§3.8, stages 1–2 below) is implemented and tested
+> (`feature_pos_escaping_stall.py`, `pos_tests.cpp pos_escaping_stall_gap`).
+> What remains is the *deterministic fork-choice preference* (full-threshold
+> beats sub-threshold; lowest-VRF tiebreak — stages 3–5), which is a finality
+> refinement, **not** a safety requirement (see §6). This doc specifies the
+> whole model; §6 records exactly what is done vs. pending.
 
 ## 1. What exists today
 
@@ -104,3 +107,43 @@ to keep the committee populated. (Interacts with `-posminstake`, doc 06 §5.)
 Each stage is a separate commit with its own tests; stage 3 (fork choice)
 should not merge until the competing-block tests are exhaustive, because it is
 the one change that can split consensus if it is non-deterministic.
+
+## 6. Implemented vs. pending
+
+**Implemented (stages 1–2):**
+
+- `PosEscapingStallAllowed(parent_anchor_height, block_anchor_height)`
+  (`src/pos.h`): the pure, deterministic `h + 3` condition (gap
+  `POS_ESCAPING_STALL_ANCHOR_GAP = 3`), computed only from SEQ-committed anchor
+  heights — no live parent query in the validity rule, so all nodes agree.
+- `CheckPosStakeRules` (aggregate-committee path): the named-member quorum is
+  relaxed to a single member when the stall condition holds; the full
+  strict-majority quorum is required otherwise. The block stays a valid
+  aggregate-committee block (every named member sortition-eligible, `agg_key`
+  equal to the aggregate of the named set) — only the *count* relaxes.
+- Producer RPCs (`generateposblock`, `getposblocktemplate`) build sub-quorum
+  aggregate blocks and let consensus validate the stall condition.
+- Tests: `pos_escaping_stall_gap` (unit) and `feature_pos_escaping_stall.py`
+  (end-to-end over a parent chain: full-quorum accepted; sub-quorum rejected
+  with no anchor advance; accepted after a +3 advance; rejected again).
+
+**Why this is safe without the fork-choice preference.** A sub-threshold block
+is *validly certified* — its named members are sortition-eligible and its
+aggregate signature is valid — so a full-vs-sub fork at the same height is an
+ordinary first-seen signed-block fork, with no double-spend beyond normal
+reorg semantics. It is also abuse-proof: a `+3` anchor requires Bitcoin to have
+genuinely produced three blocks (~30 min) since the parent's anchor, which a
+healthy 10-second chain never permits, and each further sub-threshold block
+needs another `+3` of parent-chain progress — so the path self-limits to a
+genuine stall and cannot be used to bypass committee certification.
+
+**Pending (stages 3–5), with the architectural blocker:** the whitepaper
+prefers a full-threshold block over a sub-threshold one at the same height
+(then lowest VRF). Encoding that in fork choice means reflecting *certification
+strength* in `nChainWork` — but `nChainWork` is fixed at **header**-acceptance
+time, while the countersignature count lives in the **coinbase body**. So a
+faithful deterministic preference requires either surfacing the count into the
+header (a format change / new genesis) or recomputing chain work at connect
+time. Until then, full-vs-sub same-height forks converge by first-seen like any
+signed-block fork — a finality nicety deferred, not a safety gap. Stage 5 (the
+dynamic committee floor) builds on the static `-posminstake` floor (doc 06 §5).

@@ -1891,9 +1891,19 @@ static RPCHelpMan generateposblock()
             }
             int quorum = PosQuorum((size_t)g_pos_committee_size);
             if (eligible < quorum) {
-                throw JSONRPCError(RPC_MISC_ERROR, strprintf(
-                    "Only %d of the provided keys are sortition-selected committee members for this slot; quorum is %d of an expected committee of %d (provide more committeekeys, or retry next slot)",
-                    eligible, quorum, g_pos_committee_size));
+                // Aggregate committees may certify below quorum under the
+                // escaping-stall rule (whitepaper §3.8) when the chain has
+                // stalled; consensus validation checks the anchor-gap
+                // condition, so just ensure at least one member signs.
+                // Script-multisig committees always require the full quorum.
+                if (!g_pos_agg_committee) {
+                    throw JSONRPCError(RPC_MISC_ERROR, strprintf(
+                        "Only %d of the provided keys are sortition-selected committee members for this slot; quorum is %d of an expected committee of %d (provide more committeekeys, or retry next slot)",
+                        eligible, quorum, g_pos_committee_size));
+                }
+                if (eligible < 1) {
+                    throw JSONRPCError(RPC_MISC_ERROR, "No sortition-selected committee members available for this slot");
+                }
             }
         }
     }
@@ -2112,7 +2122,14 @@ static RPCHelpMan getposblocktemplate()
     }
     int quorum = PosQuorum((size_t)g_pos_committee_size);
     if ((int)members.size() < quorum) {
-        throw JSONRPCError(RPC_MISC_ERROR, strprintf("Only %d eligible members supplied; quorum is %d of an expected committee of %d", (int)members.size(), quorum, g_pos_committee_size));
+        // Below quorum is valid only under escaping-stall (whitepaper §3.8),
+        // which submitposblock's consensus validation checks against the
+        // anchor gap. Require at least one member here; the template is
+        // otherwise well-formed and the operator submits it when the chain has
+        // genuinely stalled.
+        if (members.empty()) {
+            throw JSONRPCError(RPC_MISC_ERROR, strprintf("No eligible members supplied; quorum is %d (or one member under escaping-stall)", quorum));
+        }
     }
 
     CScript feeDestinationScript = chainparams.GetConsensus().mandatory_coinbase_destination;

@@ -286,6 +286,24 @@ std::optional<std::vector<unsigned char>> ExtractPosVrfProof(const CBlock& block
  *  (PosQuorum(g_pos_committee_size)), the paper's 51-of-100. */
 bool PosVrfIsCommitteeMember(const uint256& beta, uint64_t weight, uint64_t total_weight);
 
+/** Escaping stall (whitepaper §3.8): the number of parent-chain (Bitcoin)
+ *  blocks the chain must have advanced past the last certified block's anchor
+ *  before a block may be certified below the committee quorum (the "h+3"
+ *  rule — the new block references a Bitcoin block 3 past the parent's). */
+static const uint32_t POS_ESCAPING_STALL_ANCHOR_GAP = 3;
+
+/** Whether a block anchoring at `block_anchor_height` may be certified below
+ *  the normal countersignature quorum, given its parent (last certified block)
+ *  anchored at `parent_anchor_height`. True iff the parent chain has advanced
+ *  at least POS_ESCAPING_STALL_ANCHOR_GAP blocks — a genuine stall, since a
+ *  healthy chain re-anchors only gradually and cannot reference a Bitcoin
+ *  block that does not yet exist. Computed purely from the SEQ-committed anchor
+ *  heights, so every node agrees. See doc/sequentia/10-liveness-and-escaping-stall.md. */
+inline bool PosEscapingStallAllowed(uint32_t parent_anchor_height, uint32_t block_anchor_height)
+{
+    return block_anchor_height >= parent_anchor_height + POS_ESCAPING_STALL_ANCHOR_GAP;
+}
+
 /** A committee member's eligibility claim carried in the block: its key and
  *  its VRF proof over the slot seed. */
 struct PosVrfMember {

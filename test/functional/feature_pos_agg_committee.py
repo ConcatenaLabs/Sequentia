@@ -58,10 +58,13 @@ class PosAggCommitteeTest(BitcoinTestFramework):
     def run_test(self):
         n0, n1 = self.nodes[0], self.nodes[1]
 
-        # --- Below quorum: too few sortition-selected members to aggregate ---
-        assert_raises_rpc_error(-1, "sortition-selected committee members",
+        # --- Below quorum: too few sortition-selected members to aggregate.
+        # (Without anchoring there is no escaping-stall relief, so consensus
+        # rejects the sub-quorum block — surfaced from CreateNewBlock's
+        # TestBlockValidity as bad-posvrf-agg-quorum.) ---
+        assert_raises_rpc_error(-1, "fewer named committee members than the certification quorum",
                                 n0.generateposblock, self.wifs[0])
-        assert_raises_rpc_error(-1, "sortition-selected committee members",
+        assert_raises_rpc_error(-1, "fewer named committee members than the certification quorum",
                                 n0.generateposblock, self.wifs[0], self.wifs[1:2])
 
         # --- At quorum: one aggregate signature certifies the block ---
@@ -104,7 +107,7 @@ class PosAggCommitteeTest(BitcoinTestFramework):
 
         # --- Unregistered keys contribute nothing toward the quorum ---
         outsider_wif, _ = make_staker()
-        assert_raises_rpc_error(-1, "sortition-selected committee members",
+        assert_raises_rpc_error(-1, "fewer named committee members than the certification quorum",
                                 n0.generateposblock, self.wifs[0],
                                 [self.wifs[1], outsider_wif])
 
