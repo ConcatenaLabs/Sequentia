@@ -85,8 +85,9 @@ BlockAssembler::BlockAssembler(CChainState& chainstate, const CTxMemPool& mempoo
       m_chainstate(chainstate)
 {
     blockMinFeeRate = options.blockMinFeeRate;
-    // Limit weight to between 4K and MAX_BLOCK_WEIGHT-4K for sanity:
-    nBlockMaxWeight = std::max<size_t>(4000, std::min<size_t>(MAX_BLOCK_WEIGHT - 4000, options.nBlockMaxWeight));
+    // Limit weight to between 4K and (per-chain) MAX_BLOCK_WEIGHT-4K for sanity:
+    const uint32_t chain_max_weight = params.GetConsensus().nMaxBlockWeight ? params.GetConsensus().nMaxBlockWeight : MAX_BLOCK_WEIGHT;
+    nBlockMaxWeight = std::max<size_t>(4000, std::min<size_t>(chain_max_weight - 4000, options.nBlockMaxWeight));
 }
 
 static BlockAssembler::Options DefaultOptions()

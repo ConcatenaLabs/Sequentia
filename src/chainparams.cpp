@@ -6,6 +6,7 @@
 #include <chainparams.h>
 
 #include <chainparamsseeds.h>
+#include <consensus/consensus.h>
 #include <consensus/merkle.h>
 #include <deploymentinfo.h>
 #include <hash.h> // for signet block challenge hash
@@ -390,6 +391,11 @@ public:
         // SEQ tokens through staking" (whitepaper §3.9, No inflation). Block
         // producers (stakers) are paid in transaction fees, not new SEQ.
         consensus.genesis_subsidy = 0;
+        // SEQUENTIA: 400,000 weight units — a tenth of Bitcoin's 4,000,000 — so
+        // that, at ~1-minute blocks (10x Bitcoin's cadence), a saturated chain
+        // grows at the same rate as a saturated Bitcoin chain (whitepaper §3.10;
+        // ~100 KB of base data per block).
+        consensus.nMaxBlockWeight = 400000;
         consensus.connect_genesis_outputs = true;
         anyonecanspend_aremine = true;
         enforce_pak = false;
@@ -1068,6 +1074,15 @@ protected:
         // (true = the historical Liquid/Elements opt-out CT behavior;
         // Sequentia chains use false, making CT opt-in).
         m_default_blinded_addresses = args.GetBoolArg("-con_default_blinded_addresses", true);
+        // SEQUENTIA: per-chain max block weight (0 = the global 4,000,000).
+        // Sequentia uses 400,000 (whitepaper §3.10); set it on custom chains too.
+        {
+            int64_t mbw = args.GetIntArg("-con_maxblockweight", 0);
+            if (mbw < 0 || mbw > MAX_BLOCK_WEIGHT) {
+                throw std::runtime_error(strprintf("-con_maxblockweight must be between 0 and %u", MAX_BLOCK_WEIGHT));
+            }
+            consensus.nMaxBlockWeight = (uint32_t)mbw;
+        }
         g_con_elementsmode = args.GetBoolArg("-con_elementsmode", true);
         consensus.elements_mode = g_con_elementsmode;
 

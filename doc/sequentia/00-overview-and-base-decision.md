@@ -162,3 +162,4 @@ git merge elements-23.3.3        # resolve conflicts, then build & run the test 
 | [`09-running-sequentia.md`](09-running-sequentia.md) | Operator runbook: deploying the full system end-to-end. |
 | [`10-liveness-and-escaping-stall.md`](10-liveness-and-escaping-stall.md) | Design for the anchor-driven liveness / escaping-stall (the last pre-mainnet consensus item). |
 | [`11-security-and-hardening-notes.md`](11-security-and-hardening-notes.md) | Deferred hardening items + analyses from adversarial review, and whitepaper features beyond the implemented scope. |
+| [`12-tokenomics-and-genesis.md`](12-tokenomics-and-genesis.md) | SEQ supply (400M, no inflation), the genesis bootstrap, and what's a launch decision vs. fixed in code. |

@@ -82,6 +82,9 @@ staker=02<pubkey-hex>:1000000
 staker=03<pubkey-hex>:1000000
 # ... one per founding staker ...
 
+# Block weight cap: 400,000 (a tenth of Bitcoin's) for ~1-min blocks (§3.10)
+con_maxblockweight=400000
+
 # (4) Bitcoin-identical addresses, opt-in confidential transactions
 con_default_blinded_addresses=0
 

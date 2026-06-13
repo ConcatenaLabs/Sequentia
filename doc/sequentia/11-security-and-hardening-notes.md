@@ -79,16 +79,23 @@ declared four-challenge scope** — large future consensus subsystems, not
 regressions, and not claimed by the design docs:
 
 - **Asset ACLs (§4.5)** — whitelist/blacklist/freeze/amount/timelock filters on
-  assets. New script/consensus rules beyond Elements Confidential Assets.
-- **Programmable accounts (§4.6)** — `OP_DEPLOY`/`OP_ASSIGN`/`OP_SENDER`, gas, an
-  account VM. The largest missing subsystem; entirely absent.
-- **Utreexo / accumulator statelessness (§3.6, §3.10)** — only generic Bitcoin
-  `-prune` is inherited.
-- **Block-size parameter (§3.10)** — the chain still uses the inherited 4 MB
-  weight limit (`src/consensus/consensus.h`), not the whitepaper's 0.5 MB. This
-  is a one-line consensus parameter but a deliberate throughput/economic choice
-  (and a launch parameter, like the genesis stake set and SEQ supply), so it is
-  left for the launch configuration rather than guessed here.
+  assets. Per the project direction these are to be built with **Simplicity**
+  (the new Elements scripting language), not bespoke opcodes — a future
+  scripting-layer addition, not a base-consensus change here.
+- **Programmable accounts (§4.6)** — an account VM / `OP_DEPLOY` etc.
+  **Deferred long-term, and possibly dropped** if Simplicity proves to make
+  them unnecessary. Not pursued.
+- **Utreexo / accumulator statelessness (§3.6, §3.10)** — a future upgrade to
+  be explored only once it matures in Bitcoin upstream; only generic Bitcoin
+  `-prune` is inherited today.
 
-These are documented so the gap between "the four challenges + PoS" (delivered)
-and "the full whitepaper product roadmap" (multi-subsystem) is explicit.
+**Block-size parameter (§3.10) — DONE.** The chain now caps block weight at a
+per-chain value (`consensus.nMaxBlockWeight`, `-con_maxblockweight`), set to
+**400,000** on the Sequentia chain — a tenth of Bitcoin's 4,000,000, so at the
+~1-minute target cadence (10× Bitcoin) a saturated Sequentia chain grows at the
+same rate as a saturated Bitcoin chain (~100 KB of base data per block).
+Enforced in `CheckBlock`/`ContextualCheckBlock` and respected by the miner;
+tested in `feature_max_block_weight.py`. (See doc 12 for SEQ supply / genesis.)
+
+These notes keep the boundary between "the four challenges + PoS" (delivered)
+and the longer whitepaper roadmap explicit.

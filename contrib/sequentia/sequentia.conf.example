@@ -50,6 +50,10 @@ posminstake=4000000000000  # minimum stake to be a blocksigner, in SEQ atoms:
 #staker=02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:1000000
 #staker=03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:1000000
 
+# Block weight cap: 400,000 (a tenth of Bitcoin's), so at ~1-minute blocks a
+# saturated chain grows at Bitcoin's rate (whitepaper §3.10). ~100 KB/block.
+con_maxblockweight=400000
+
 # (4) Bitcoin-identical default addresses; confidential transactions opt-in.
 con_default_blinded_addresses=0
 

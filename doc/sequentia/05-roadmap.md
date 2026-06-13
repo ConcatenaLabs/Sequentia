@@ -179,12 +179,13 @@ none a regression or a safety/consensus-split gap on a correctly-configured
 network:
 - **Consensus refinements pending review** — Milestone 6 stages 3–5
   (doc 10 §7) and the fork/sibling-block storage hardening (doc 11 §1).
-- **Launch / governance parameters** — genesis SEQ supply & distribution, the
-  staker set, committee size, `-posminstake`, `-posunbonding`, and the
-  whitepaper's 0.5 MB block size (doc 11 §4) — set at launch, like any chain's
-  founding constants.
+- **Launch / governance parameters** — genesis SEQ supply (400M) & distribution,
+  the founding staker set, committee size, `-posminstake`, `-posunbonding` — set
+  at launch, like any chain's founding constants (doc 12). The block weight cap
+  (400,000) is now implemented (doc 11 §4).
 - **Out-of-scope future subsystems** (beyond the four challenges) — asset ACLs
-  (§4.5), programmable accounts (§4.6), utreexo (doc 11 §4).
+  (to be built with Simplicity), programmable accounts (deferred / maybe
+  unnecessary given Simplicity), utreexo (after it matures in Bitcoin) — doc 11 §4.
 
 ## Risks / watch-items
 - **Build resources.** A full Elements build is heavy (~4-core / 15 GB host
