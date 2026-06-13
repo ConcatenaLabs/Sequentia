@@ -496,7 +496,13 @@ void UpdatePosFinality(ChainstateManager& chainman, int btc_tip_height)
     bool have_own_checkpoint;
     {
         LOCK(g_anchor_mutex);
-        conflicts_changed = conflicts.size() != g_pos_checkpoint_conflicts.size();
+        // Compare contents, not just cardinality: one conflict replaced by
+        // another must re-raise the operator alarm below.
+        conflicts_changed = conflicts.size() != g_pos_checkpoint_conflicts.size() ||
+            !std::equal(conflicts.begin(), conflicts.end(), g_pos_checkpoint_conflicts.begin(),
+                        [](const PosCheckpoint& a, const PosCheckpoint& b) {
+                            return a.seq_hash == b.seq_hash && a.seq_height == b.seq_height;
+                        });
         g_pos_checkpoint_conflicts = conflicts;
         if (best_height >= 0 && best_height > g_pos_finalized_height) {
             g_pos_finalized_height = best_height;

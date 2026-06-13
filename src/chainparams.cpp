@@ -965,6 +965,16 @@ protected:
             if (g_pos_committee_size < 1 || g_pos_committee_size > max_committee) {
                 throw std::runtime_error(strprintf("-poscommitteesize must be between 1 and %d", max_committee));
             }
+            // These are consensus values shared by every node; out-of-range
+            // settings would invert the slot time-gate or (via the int →
+            // uint32 cast) make no output ever count as stake.
+            if (g_pos_slot_interval < 1) {
+                throw std::runtime_error("-posslotinterval must be a positive number of seconds");
+            }
+            const int64_t unbonding = args.GetIntArg("-posunbonding", DEFAULT_POS_UNBONDING_PERIOD);
+            if (unbonding < 1 || unbonding > 0xFFFF) {
+                throw std::runtime_error("-posunbonding must be between 1 and 65535 blocks (the CSV relative-locktime range)");
+            }
             g_signed_blocks = true;
             consensus.vDeployments[Consensus::DEPLOYMENT_DYNA_FED].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
             StakeRegistry::GetInstance().Clear();

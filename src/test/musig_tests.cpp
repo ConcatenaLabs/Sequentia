@@ -208,4 +208,63 @@ BOOST_AUTO_TEST_CASE(musig_session_safety)
     BOOST_CHECK(!MuSigSessionPartialSign("s1", keys[1], pubs, pubnonces, msg, err).has_value());
 }
 
+// Malformed inputs must fail cleanly, never reach a libsecp ARG_CHECK abort:
+// mispaired keys/pubkeys, the wrong member's key in round 2, a key outside the
+// member set, and empty or wrong-count nonce/partial vectors.
+BOOST_AUTO_TEST_CASE(musig_rejects_malformed_inputs)
+{
+    std::vector<CKey> keys;
+    std::vector<CPubKey> pubs;
+    for (size_t i = 0; i < 3; ++i) {
+        CKey k; k.MakeNewKey(true);
+        keys.push_back(k);
+        pubs.push_back(k.GetPubKey());
+    }
+    std::vector<unsigned char> msg = Msg(0x33);
+    std::string err;
+
+    // MuSigSign: same sets, mispaired indexes (keys[i] not the key for
+    // pubkeys[i]) — must return nullopt, not abort.
+    std::vector<CKey> mispaired = {keys[1], keys[0], keys[2]};
+    BOOST_CHECK(!MuSigSign(mispaired, pubs, msg).has_value());
+
+    // Round 1 with a key outside the member set is refused.
+    CKey outsider; outsider.MakeNewKey(true);
+    BOOST_CHECK(!MuSigSessionNonce("out", outsider, pubs, msg, err).has_value());
+
+    // Run a proper round 1 for everyone.
+    std::vector<std::vector<unsigned char>> pubnonces;
+    for (size_t i = 0; i < 3; ++i) {
+        auto pn = MuSigSessionNonce("m" + std::to_string(i), keys[i], pubs, msg, err);
+        BOOST_REQUIRE(pn.has_value());
+        pubnonces.push_back(*pn);
+    }
+
+    // Round 2 with a different member's key: refused, and the session is NOT
+    // consumed — the right key still completes it afterwards.
+    BOOST_CHECK(!MuSigSessionPartialSign("m0", keys[1], pubs, pubnonces, msg, err).has_value());
+    // Round 2 with empty or wrong-count nonce vectors: refused, not consumed.
+    BOOST_CHECK(!MuSigSessionPartialSign("m0", keys[0], pubs, {}, msg, err).has_value());
+    std::vector<std::vector<unsigned char>> short_nonces(pubnonces.begin(), pubnonces.end() - 1);
+    BOOST_CHECK(!MuSigSessionPartialSign("m0", keys[0], pubs, short_nonces, msg, err).has_value());
+
+    std::vector<std::vector<unsigned char>> partials;
+    for (size_t i = 0; i < 3; ++i) {
+        auto ps = MuSigSessionPartialSign("m" + std::to_string(i), keys[i], pubs, pubnonces, msg, err);
+        BOOST_REQUIRE_MESSAGE(ps.has_value(), err);
+        partials.push_back(*ps);
+    }
+
+    // Aggregation: empty or wrong-count nonces/partials are refused cleanly.
+    BOOST_CHECK(!MuSigAggregatePartials(pubs, {}, partials, msg).has_value());
+    BOOST_CHECK(!MuSigAggregatePartials(pubs, pubnonces, {}, msg).has_value());
+    std::vector<std::vector<unsigned char>> short_partials(partials.begin(), partials.end() - 1);
+    BOOST_CHECK(!MuSigAggregatePartials(pubs, pubnonces, short_partials, msg).has_value());
+
+    // The well-formed aggregation still succeeds and verifies.
+    auto sig = MuSigAggregatePartials(pubs, pubnonces, partials, msg);
+    BOOST_REQUIRE(sig.has_value());
+    BOOST_CHECK(MuSigVerify(pubs, msg, *sig));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

@@ -27,28 +27,28 @@ bool CheckChallenge(const CBlockHeader& block, const CBlockIndex& indexLast, con
         if (!parts) {
             return false; // challenge is not a recognized PoS challenge form
         }
-        const StakeRegistry& registry = StakeRegistry::GetInstance();
+        // The header check is STRUCTURAL ONLY, in every PoS mode. Anything
+        // registry-dependent — leader registration/rank, slot time-gating,
+        // sortition eligibility, exact committee membership — is validated in
+        // ConnectBlock (CheckPosStakeRules): the stake registry mirrors the
+        // *active tip's* UTXO set, and headers arrive far ahead of (or on a
+        // different branch than) the active chain, where the registry would
+        // be the wrong stake state.
         if (g_pos_vrf) {
-            // VRF sortition (doc 07 §4): the header check is structural only.
-            // Anything registry-dependent (leader/member registration and
-            // eligibility) is validated in ContextualCheckBlock at connect
-            // time: with on-chain stake registration the registry is correct
-            // only in block order, and headers can arrive far ahead of blocks
-            // during headers-first sync.
             if (g_pos_agg_committee && g_pos_committee_size > 1) {
                 // Aggregate-committee certification (doc 07 §6): the challenge
                 // must be the OP_1 <leader> <agg_key> form. The member set it
                 // aggregates is named by the coinbase SEQCMT commitments and
-                // validated (eligibility, quorum, aggregate match) in
-                // ContextualCheckBlock; the signatures in CheckProof.
+                // validated (eligibility, quorum, aggregate match) at connect
+                // time; the signatures in CheckProof.
                 return !parts->agg_key.empty();
             }
             if (!parts->agg_key.empty()) return false; // agg form only valid under -posaggcommittee
             if (g_pos_committee_size > 1) {
                 // Committee certification with private sortition: the
-                // challenge lists the *claimed* members (proven eligible in
-                // ContextualCheckBlock). Structurally: a fixed quorum (a
-                // strict majority of the expected committee size), at least
+                // challenge lists the *claimed* members (proven eligible at
+                // connect time). Structurally: a fixed quorum (a strict
+                // majority of the expected committee size), at least
                 // quorum-many distinct members.
                 if (parts->committee.empty()) return false;
                 if (parts->quorum != PosQuorum((size_t)g_pos_committee_size)) return false;
@@ -62,29 +62,9 @@ bool CheckChallenge(const CBlockHeader& block, const CBlockIndex& indexLast, con
             }
             return true;
         }
-        if (!parts->agg_key.empty()) return false; // agg form requires -posvrf -posaggcommittee
-        uint256 seed = PosSeedForChild(&indexLast);
-        std::optional<size_t> rank = PosRank(registry, seed, parts->leader);
-        if (!rank) {
-            return false; // proposer is not a registered staker for this slot
-        }
-        // Liveness gating: the rank-r leader may only produce once r slot
-        // intervals have elapsed since the parent block, so a higher-ranked
-        // (worse) leader cannot pre-empt a lower-ranked (better) one.
-        if ((int64_t)block.nTime < (int64_t)indexLast.nTime + (int64_t)(*rank) * g_pos_slot_interval) {
-            return false;
-        }
-        // Committee certification: the challenge's committee and quorum must
-        // be exactly the elected committee for this slot and its majority.
-        std::vector<CPubKey> expected_committee = PosCommittee(registry, seed);
-        if (expected_committee.size() <= 1) {
-            // Committee certification disabled: only the leader-only form is valid.
-            if (!parts->committee.empty()) return false;
-        } else {
-            if (parts->committee != expected_committee) return false;
-            if (parts->quorum != PosQuorum(expected_committee.size())) return false;
-        }
-        return true;
+        // Public-schedule mode: structurally just "not the aggregate form";
+        // the elected leader/committee comparison happens at connect time.
+        return parts->agg_key.empty();
     } else if (g_signed_blocks) {
         return block.proof.challenge == indexLast.get_proof().challenge;
     } else {

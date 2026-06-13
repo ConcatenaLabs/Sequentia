@@ -11,11 +11,12 @@
 // signature under a single aggregate public key — independent of the set size
 // — which is the path to the paper's 100-member committees.
 //
-// This is the standalone, tested primitive. Because the block producer holds
-// all the signing keys (they are passed to generateposblock), MuSig functions
-// here run the full two-round protocol locally in one call. Distributed
-// signing among separately-hosted committee members is an operational layer on
-// top of the same primitive and is out of scope for the PoC.
+// Two ways to produce a signature:
+//  - MuSigSign runs the full two-round protocol locally in one call, for a
+//    producer that holds all the signing keys (generateposblock).
+//  - The MuSigSession* functions below split the rounds across separately
+//    hosted members, none of which shares its key (the musig* RPCs +
+//    getposblocktemplate/submitposblock; doc/sequentia/07 §6).
 
 #ifndef BITCOIN_MUSIG_H
 #define BITCOIN_MUSIG_H
@@ -25,6 +26,7 @@
 #include <span.h>
 
 #include <optional>
+#include <string>
 #include <vector>
 
 /** Aggregate a set of public keys into a single 32-byte x-only MuSig2

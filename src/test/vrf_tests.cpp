@@ -169,4 +169,20 @@ BOOST_AUTO_TEST_CASE(vrf_known_answer_vectors)
     }
 }
 
+// Only compressed public keys are valid VRF identities: ChallengeScalar binds
+// a 33-byte point_to_string(Y), so prove and verify both reject uncompressed
+// keys (symmetrically — no consensus split).
+BOOST_AUTO_TEST_CASE(vrf_rejects_uncompressed_keys)
+{
+    CKey key;
+    key.MakeNewKey(false); // uncompressed
+    BOOST_REQUIRE(key.IsValid());
+    std::vector<unsigned char> alpha(32, 0x42);
+    BOOST_CHECK(!VrfProve(key, alpha).has_value());
+
+    uint256 output;
+    std::vector<unsigned char> proof(VRF_PROOF_SIZE, 0x00);
+    BOOST_CHECK(!VrfVerify(key.GetPubKey(), alpha, proof, output));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

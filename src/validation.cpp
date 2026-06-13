@@ -2101,11 +2101,154 @@ bool CheckPeginRipeness(const CBlock& block, const std::vector<std::pair<CScript
     return true;
 }
 
+/** SEQUENTIA PoS: stake-registry-dependent block rules — leader election /
+ *  sortition eligibility, slot time-gating, and committee membership. These
+ *  belong at connect time, NOT in ContextualCheckBlock(Header): the stake
+ *  registry mirrors the UTXO set of the *active tip*, and both headers
+ *  (headers-first sync) and block data (parallel block download) can be
+ *  accepted far ahead of — or on a different branch than — the active chain,
+ *  where the registry would be the wrong stake state. ConnectBlock runs
+ *  exactly in chain order, with the registry equal to the block's parent
+ *  state (ConnectTip/DisconnectTip update it in lockstep). */
+static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state, const CBlockIndex* pindexPrev)
+{
+    if (!g_con_pos || pindexPrev == nullptr) return true;
+    std::optional<PosChallengeParts> parts = ParsePosBlockChallenge(block.proof.challenge);
+    if (!parts) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-pos-challenge", "block challenge is not a PoS leader challenge");
+    }
+    const StakeRegistry& registry = StakeRegistry::GetInstance();
+    const uint256 seed = PosSeedForChild(pindexPrev);
+
+    if (!g_pos_vrf) {
+        // Public-schedule mode: the leader must be the stake-weighted ranked
+        // leader for this slot (rank-r may produce only r slot intervals after
+        // the parent), and the committee must be exactly the elected one.
+        std::optional<size_t> rank = PosRank(registry, seed, parts->leader);
+        if (!rank) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-pos-leader-not-staker", "block leader is not a registered staker for this slot");
+        }
+        if ((int64_t)block.GetBlockTime() < (int64_t)pindexPrev->nTime + (int64_t)(*rank) * g_pos_slot_interval) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-pos-early", "block produced before the leader's slot opened");
+        }
+        std::vector<CPubKey> expected_committee = PosCommittee(registry, seed);
+        if (expected_committee.size() <= 1) {
+            if (!parts->committee.empty()) {
+                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-pos-committee", "committee certification is not enabled for this chain");
+            }
+        } else {
+            if (parts->committee != expected_committee) {
+                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-pos-committee", "challenge committee is not the elected committee for this slot");
+            }
+            if (parts->quorum != PosQuorum(expected_committee.size())) {
+                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-pos-quorum", "challenge quorum is not a strict majority of the committee");
+            }
+        }
+        return true;
+    }
+
+    // VRF sortition mode (doc/sequentia/07-vrf.md §4): the coinbase must
+    // commit to the leader's VRF proof over this slot's seed; the proof's
+    // output determines the leader's time-gated slot. The proof is covered by
+    // the merkle root, hence by the leader's block signature, so it cannot be
+    // altered without invalidating the block.
+    std::optional<std::vector<unsigned char>> proof = ExtractPosVrfProof(block);
+    if (!proof) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-missing", "missing VRF sortition proof in coinbase");
+    }
+    const uint64_t total_weight = PosTotalWeight(registry);
+    uint64_t weight = registry.GetWeight(parts->leader);
+    // Cheap registration check before the expensive VRF verification.
+    if (weight == 0) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-leader-not-staker", "block leader has no registered stake");
+    }
+    uint256 beta;
+    if (!VrfVerify(parts->leader, seed, *proof, beta)) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-invalid", "invalid VRF sortition proof");
+    }
+    uint64_t slot = PosVrfSlot(beta, weight, total_weight);
+    if ((int64_t)block.GetBlockTime() < (int64_t)pindexPrev->nTime + (int64_t)slot * g_pos_slot_interval) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-early", "block produced before its VRF sortition slot opened");
+    }
+    // Aggregate committee certification (doc 07 §6): the signer set is
+    // *named by* the coinbase SEQCMT commitments (the challenge carries
+    // only its 32-byte MuSig2 aggregate). Every named member must prove
+    // sortition eligibility for this slot, at least a certification
+    // quorum of the expected committee size must be named, and the
+    // challenge's aggregate key must equal the MuSig2 aggregate of
+    // exactly the named set — so the single BIP340 signature verified in
+    // CheckProof is by precisely these members.
+    if (!parts->agg_key.empty()) {
+        std::map<CPubKey, std::vector<unsigned char>> named;
+        for (const PosVrfMember& member : ExtractPosVrfMembers(block)) {
+            if (!named.emplace(member.pubkey, member.proof).second) {
+                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-member-duplicate", "duplicate committee member eligibility commitment");
+            }
+        }
+        if ((int)named.size() < PosQuorum((size_t)g_pos_committee_size)) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-agg-quorum", "fewer named committee members than the certification quorum");
+        }
+        // Cap the named set before any VRF verification: a leader must not be
+        // able to stuff the coinbase with bogus commitments that amplify into
+        // unbounded EC work on every validator.
+        if ((int)named.size() > MAX_POS_AGG_COMMITTEE_SIZE) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-member-count", "more named committee members than the aggregate committee cap");
+        }
+        std::vector<CPubKey> members;
+        members.reserve(named.size());
+        for (const auto& [member, member_proof] : named) {
+            // Cheap registration check before the expensive VRF verification
+            // (an unregistered member can never pass the sortition threshold).
+            if (registry.GetWeight(member) == 0) {
+                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-member-not-selected", "named committee member was not selected by sortition for this slot");
+            }
+            uint256 member_beta;
+            if (!VrfVerify(member, seed, member_proof, member_beta)) {
+                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-member-invalid", "invalid committee member VRF eligibility proof");
+            }
+            if (!PosVrfIsCommitteeMember(member_beta, registry.GetWeight(member), total_weight)) {
+                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-member-not-selected", "named committee member was not selected by sortition for this slot");
+            }
+            members.push_back(member);
+        }
+        std::optional<std::vector<unsigned char>> agg = MuSigAggregatePubkey(members);
+        if (!agg || *agg != parts->agg_key) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-agg-key", "challenge aggregate key does not match the named committee member set");
+        }
+    }
+    // Committee certification under private sortition: every committee
+    // member the challenge claims must carry a coinbase eligibility
+    // commitment whose VRF proof verifies over the slot seed and whose
+    // output passes the sortition membership threshold. The committee
+    // signatures themselves are enforced by the challenge script
+    // (CheckProof). See doc/sequentia/07-vrf.md.
+    if (!parts->committee.empty()) {
+        std::map<CPubKey, std::vector<unsigned char>> claimed;
+        for (const PosVrfMember& member : ExtractPosVrfMembers(block)) {
+            claimed.emplace(member.pubkey, member.proof);
+        }
+        for (const CPubKey& member : parts->committee) {
+            auto it = claimed.find(member);
+            if (it == claimed.end()) {
+                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-member-missing", "committee member lacks a coinbase eligibility commitment");
+            }
+            uint256 member_beta;
+            if (!VrfVerify(member, seed, it->second, member_beta)) {
+                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-member-invalid", "invalid committee member VRF eligibility proof");
+            }
+            if (!PosVrfIsCommitteeMember(member_beta, registry.GetWeight(member), total_weight)) {
+                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-member-not-selected", "claimed committee member was not selected by sortition for this slot");
+            }
+        }
+    }
+    return true;
+}
+
 /** Apply the effects of this block (with given index) on the UTXO set represented by coins.
  *  Validity checks that depend on the UTXO set are also done; ConnectBlock()
  *  can fail if those validity checks fail (among other reasons). */
 bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state, CBlockIndex* pindex,
-                  CCoinsViewCache& view, std::set<std::pair<uint256, COutPoint>>* setPeginsSpent, bool fJustCheck)
+                  CCoinsViewCache& view, std::set<std::pair<uint256, COutPoint>>* setPeginsSpent, bool fJustCheck, bool check_pos_rules)
 {
     AssertLockHeld(cs_main);
     assert(pindex);
@@ -2159,6 +2302,14 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
     }
 
     nBlocksTotal++;
+
+    // SEQUENTIA PoS: leader election / sortition eligibility against the
+    // stake registry, which here — and only here — matches the block's parent
+    // state (see CheckPosStakeRules). Skipped by VerifyDB's reconnect pass,
+    // which runs with the registry still at the tip.
+    if (check_pos_rules && !CheckPosStakeRules(block, state, pindex->pprev)) {
+        return error("%s: CheckPosStakeRules: %s", __func__, state.ToString());
+    }
 
     // Check that all non-zero policyAsset coinbase outputs pay to the required destination
     const CScript& mandatory_coinbase_destination = m_params.GetConsensus().mandatory_coinbase_destination;
@@ -2861,13 +3012,16 @@ bool CChainState::DisconnectTip(BlockValidationState& state, DisconnectedBlockTr
 
     UpdateTip(pindexDelete->pprev);
 
-    // SEQUENTIA PoS: exact inverse of the ConnectTip stake mirroring.
+    // SEQUENTIA PoS: exact inverse of the ConnectTip stake mirroring. A
+    // missed update would silently desync the consensus-feeding registry
+    // from peers (different weights ⇒ different sortition results), so a
+    // failure here is fatal, like any other undo-data failure on disconnect.
     if (g_con_pos && pindexDelete->nHeight > 0) {
         CBlockUndo block_undo;
         if (UndoReadFromDisk(block_undo, pindexDelete)) {
             PosRevertBlockStake(block, block_undo);
         } else {
-            LogPrintf("ERROR: %s: failed to read undo data for stake tracking at %s\n", __func__, pindexDelete->GetBlockHash().ToString());
+            return AbortNode(state, "Failed to read undo data for stake tracking; the stake registry would desync from consensus");
         }
     }
 
@@ -3003,13 +3157,14 @@ bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew
     // SEQUENTIA PoS: mirror this block's staking-output creations/spends into
     // the UTXO stake layer, exactly once per tip transition (DisconnectTip
     // performs the exact inverse, so the registry is reorg-safe and always a
-    // function of the active chain).
+    // function of the active chain). A missed update would silently desync
+    // the consensus-feeding registry from peers, so a failure here is fatal.
     if (g_con_pos && pindexNew->nHeight > 0) {
         CBlockUndo block_undo;
         if (UndoReadFromDisk(block_undo, pindexNew)) {
             PosApplyBlockStake(blockConnecting, block_undo);
         } else {
-            LogPrintf("ERROR: %s: failed to read undo data for stake tracking at %s\n", __func__, pindexNew->GetBlockHash().ToString());
+            return AbortNode(state, "Failed to read undo data for stake tracking; the stake registry would desync from consensus");
         }
     }
 
@@ -3994,99 +4149,11 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
 {
     const int nHeight = pindexPrev == nullptr ? 0 : pindexPrev->nHeight + 1;
 
-    // SEQUENTIA PoS, VRF sortition mode (doc/sequentia/07-vrf.md §4): the
-    // block's coinbase must commit to the leader's VRF proof over this slot's
-    // seed; the proof's output determines the leader's time-gated slot. The
-    // proof is covered by the merkle root, hence by the leader's block
-    // signature, so it cannot be altered without invalidating the block.
-    if (g_con_pos && g_pos_vrf && pindexPrev != nullptr) {
-        std::optional<PosChallengeParts> parts = ParsePosBlockChallenge(block.proof.challenge);
-        if (!parts) {
-            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-challenge", "block challenge is not a PoS leader challenge");
-        }
-        std::optional<std::vector<unsigned char>> proof = ExtractPosVrfProof(block);
-        if (!proof) {
-            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-missing", "missing VRF sortition proof in coinbase");
-        }
-        uint256 seed = PosSeedForChild(pindexPrev);
-        uint256 beta;
-        if (!VrfVerify(parts->leader, seed, *proof, beta)) {
-            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-invalid", "invalid VRF sortition proof");
-        }
-        const StakeRegistry& registry = StakeRegistry::GetInstance();
-        const uint64_t total_weight = PosTotalWeight(registry);
-        uint64_t weight = registry.GetWeight(parts->leader);
-        // With on-chain stake the registry is only correct at connect time
-        // (block order), so the leader's registration is enforced here rather
-        // than in the header-time CheckChallenge.
-        if (weight == 0) {
-            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-leader-not-staker", "block leader has no registered stake");
-        }
-        uint64_t slot = PosVrfSlot(beta, weight, total_weight);
-        if ((int64_t)block.GetBlockTime() < (int64_t)pindexPrev->nTime + (int64_t)slot * g_pos_slot_interval) {
-            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-early", "block produced before its VRF sortition slot opened");
-        }
-        // Aggregate committee certification (doc 07 §6): the signer set is
-        // *named by* the coinbase SEQCMT commitments (the challenge carries
-        // only its 32-byte MuSig2 aggregate). Every named member must prove
-        // sortition eligibility for this slot, at least a certification
-        // quorum of the expected committee size must be named, and the
-        // challenge's aggregate key must equal the MuSig2 aggregate of
-        // exactly the named set — so the single BIP340 signature verified in
-        // CheckProof is by precisely these members.
-        if (!parts->agg_key.empty()) {
-            std::map<CPubKey, std::vector<unsigned char>> named;
-            for (const PosVrfMember& member : ExtractPosVrfMembers(block)) {
-                if (!named.emplace(member.pubkey, member.proof).second) {
-                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-member-duplicate", "duplicate committee member eligibility commitment");
-                }
-            }
-            if ((int)named.size() < PosQuorum((size_t)g_pos_committee_size)) {
-                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-agg-quorum", "fewer named committee members than the certification quorum");
-            }
-            std::vector<CPubKey> members;
-            members.reserve(named.size());
-            for (const auto& [member, member_proof] : named) {
-                uint256 member_beta;
-                if (!VrfVerify(member, seed, member_proof, member_beta)) {
-                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-member-invalid", "invalid committee member VRF eligibility proof");
-                }
-                if (!PosVrfIsCommitteeMember(member_beta, registry.GetWeight(member), total_weight)) {
-                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-member-not-selected", "named committee member was not selected by sortition for this slot");
-                }
-                members.push_back(member);
-            }
-            std::optional<std::vector<unsigned char>> agg = MuSigAggregatePubkey(members);
-            if (!agg || *agg != parts->agg_key) {
-                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-agg-key", "challenge aggregate key does not match the named committee member set");
-            }
-        }
-        // Committee certification under private sortition: every committee
-        // member the challenge claims must carry a coinbase eligibility
-        // commitment whose VRF proof verifies over the slot seed and whose
-        // output passes the sortition membership threshold. The committee
-        // signatures themselves are enforced by the challenge script
-        // (CheckProof). See doc/sequentia/07-vrf.md.
-        if (!parts->committee.empty()) {
-            std::map<CPubKey, std::vector<unsigned char>> claimed;
-            for (const PosVrfMember& member : ExtractPosVrfMembers(block)) {
-                claimed.emplace(member.pubkey, member.proof);
-            }
-            for (const CPubKey& member : parts->committee) {
-                auto it = claimed.find(member);
-                if (it == claimed.end()) {
-                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-member-missing", "committee member lacks a coinbase eligibility commitment");
-                }
-                uint256 member_beta;
-                if (!VrfVerify(member, seed, it->second, member_beta)) {
-                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-member-invalid", "invalid committee member VRF eligibility proof");
-                }
-                if (!PosVrfIsCommitteeMember(member_beta, registry.GetWeight(member), total_weight)) {
-                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-member-not-selected", "claimed committee member was not selected by sortition for this slot");
-                }
-            }
-        }
-    }
+    // SEQUENTIA PoS: leader election, VRF sortition eligibility, and committee
+    // membership are enforced in ConnectBlock (CheckPosStakeRules), not here:
+    // this function runs at block-acceptance time, when the stake registry
+    // (which mirrors the *active tip's* UTXO set) need not match this block's
+    // parent state.
 
     // Enforce BIP113 (Median Time Past).
     int nLockTimeFlags = 0;
@@ -4641,7 +4708,7 @@ bool CVerifyDB::VerifyDB(
             if (!ReadBlockFromDisk(block, pindex, consensus_params)) {
                 return error("VerifyDB(): *** ReadBlockFromDisk failed at %d, hash=%s", pindex->nHeight, pindex->GetBlockHash().ToString());
             }
-            if (!chainstate.ConnectBlock(block, state, pindex, coins, nullptr)) {
+            if (!chainstate.ConnectBlock(block, state, pindex, coins, nullptr, /*fJustCheck=*/false, /*check_pos_rules=*/false)) {
                 return error("VerifyDB(): *** found unconnectable block at %d, hash=%s (%s)", pindex->nHeight, pindex->GetBlockHash().ToString(), state.ToString());
             }
             if (ShutdownRequested()) return true;

@@ -124,6 +124,18 @@ class PosDistributedCommitteeTest(BitcoinTestFramework):
         except Exception as e:
             assert "already exists" in str(e), str(e)
 
+        # A member listed twice cannot inflate the template's quorum count:
+        # getposblocktemplate rejects duplicates up front (consensus would
+        # reject the block anyway with bad-posvrf-member-duplicate).
+        seed_internal = bytes.fromhex(seed)[::-1].hex()
+        proof0 = n0.vrfprove(wif0, seed_internal)['proof']
+        try:
+            n0.getposblocktemplate(wif0, [{"pubkey": pubs[0], "vrfproof": proof0},
+                                          {"pubkey": pubs[0], "vrfproof": proof0}])
+            raise AssertionError("expected duplicate-member rejection")
+        except Exception as e:
+            assert "more than once" in str(e), str(e)
+
         # Produce several blocks via the full distributed flow; all nodes stay
         # converged on the committee-certified chain.
         for h in range(1, 6):

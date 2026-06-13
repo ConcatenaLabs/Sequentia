@@ -7,8 +7,10 @@
 #include <crypto/sha256.h>
 #include <random.h>
 #include <span.h>
+#include <support/cleanse.h>
 
 #include <secp256k1.h>
+#include <secp256k1_ecdh.h>
 
 #include <cstring>
 #include <mutex>
@@ -49,10 +51,50 @@ const secp256k1_context* Ctx()
         assert(c != nullptr);
         unsigned char seed[32];
         GetRandBytes(seed, 32);
-        assert(secp256k1_context_randomize(c, seed));
+        const bool ok = secp256k1_context_randomize(c, seed);
+        assert(ok);
+        memory_cleanse(seed, 32);
         return c;
     }();
     return ctx;
+}
+
+//! Wipe a memory region at scope exit, so secret scalars never outlive their
+//! use in stack remnants (cf. src/key.cpp).
+class ScopedCleanse
+{
+    void* m_ptr;
+    size_t m_len;
+
+public:
+    ScopedCleanse(void* ptr, size_t len) : m_ptr(ptr), m_len(len) {}
+    ~ScopedCleanse() { memory_cleanse(m_ptr, m_len); }
+    ScopedCleanse(const ScopedCleanse&) = delete;
+    ScopedCleanse& operator=(const ScopedCleanse&) = delete;
+};
+
+//! secp256k1_ecdh hash callback that returns the raw uncompressed point
+//! instead of hashing it, exposing ecdh's constant-time multiplication.
+extern "C" int EcdhRawPoint(unsigned char* output, const unsigned char* x32,
+                            const unsigned char* y32, void*)
+{
+    output[0] = 0x04;
+    std::memcpy(output + 1, x32, 32);
+    std::memcpy(output + 33, y32, 32);
+    return 1;
+}
+
+//! out = scalar * point, in constant time with respect to `scalar`.
+//! secp256k1_ec_pubkey_tweak_mul is variable-time (its tweak is presumed
+//! public), which would leak our secret scalars (the staking key, the proof
+//! nonce) through timing side channels on this hot, repeated path; ECDH is the
+//! library's public route to the constant-time multiplier.
+bool MulConstTime(const secp256k1_pubkey& point, const unsigned char scalar[32],
+                  secp256k1_pubkey& out)
+{
+    unsigned char raw[65];
+    if (!secp256k1_ecdh(Ctx(), raw, &point, scalar, EcdhRawPoint, nullptr)) return false;
+    return secp256k1_ec_pubkey_parse(Ctx(), &out, raw, 65);
 }
 
 //! SHA256 over a sequence of byte spans.
@@ -140,10 +182,15 @@ std::optional<std::vector<unsigned char>> VrfProve(const CKey& key, Span<const u
 {
     if (!key.IsValid()) return std::nullopt;
     CPubKey cpub = key.GetPubKey();
+    // Only compressed keys: ChallengeScalar binds a 33-byte point_to_string(Y)
+    // per RFC 9381 §5.4.3, and stakers are identified by their exact
+    // serialized bytes. (VrfVerify enforces the same, so prove/verify agree.)
+    if (!cpub.IsCompressed()) return std::nullopt;
     std::vector<unsigned char> pub_ser(cpub.begin(), cpub.end());
 
     unsigned char sk[32];
     std::memcpy(sk, key.begin(), 32);
+    ScopedCleanse cleanse_sk(sk, 32);
 
     // H = hash_to_curve(alpha, Y)
     secp256k1_pubkey H_point;
@@ -151,9 +198,9 @@ std::optional<std::vector<unsigned char>> VrfProve(const CKey& key, Span<const u
     unsigned char H_ser[33];
     if (!SerializePoint(H_point, H_ser)) return std::nullopt;
 
-    // Gamma = sk * H
-    secp256k1_pubkey Gamma = H_point;
-    if (!secp256k1_ec_pubkey_tweak_mul(Ctx(), &Gamma, sk)) return std::nullopt;
+    // Gamma = sk * H (constant-time: sk is the long-term staking secret)
+    secp256k1_pubkey Gamma;
+    if (!MulConstTime(H_point, sk, Gamma)) return std::nullopt;
     unsigned char Gamma_ser[33];
     if (!SerializePoint(Gamma, Gamma_ser)) return std::nullopt;
 
@@ -162,7 +209,9 @@ std::optional<std::vector<unsigned char>> VrfProve(const CKey& key, Span<const u
     const unsigned char suite = SUITE;
     const unsigned char ndom = NONCE_FRONT;
     uint256 k_hash = Sha256Cat({{&suite, 1}, {&ndom, 1}, {sk, 32}, {H_ser, 33}});
+    ScopedCleanse cleanse_k_hash(k_hash.begin(), 32);
     unsigned char k[32];
+    ScopedCleanse cleanse_k(k, 32);
     if (!HashToScalar(k_hash, k)) return std::nullopt;
 
     // U = k*G
@@ -171,9 +220,9 @@ std::optional<std::vector<unsigned char>> VrfProve(const CKey& key, Span<const u
     unsigned char U_ser[33];
     if (!SerializePoint(U, U_ser)) return std::nullopt;
 
-    // V = k*H
-    secp256k1_pubkey V = H_point;
-    if (!secp256k1_ec_pubkey_tweak_mul(Ctx(), &V, k)) return std::nullopt;
+    // V = k*H (constant-time: k is secret — its leak recovers sk from s)
+    secp256k1_pubkey V;
+    if (!MulConstTime(H_point, k, V)) return std::nullopt;
     unsigned char V_ser[33];
     if (!SerializePoint(V, V_ser)) return std::nullopt;
 
@@ -220,6 +269,7 @@ bool VrfVerify(const CPubKey& pubkey, Span<const unsigned char> alpha,
                Span<const unsigned char> proof, uint256& output)
 {
     if (!pubkey.IsValid()) return false;
+    if (!pubkey.IsCompressed()) return false; // must mirror VrfProve
     if ((size_t)proof.size() != VRF_PROOF_SIZE) return false;
 
     // pi = Gamma(33) || c(16) || s(32)  (RFC 9381 §5.5)

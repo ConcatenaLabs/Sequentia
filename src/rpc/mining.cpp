@@ -1871,8 +1871,14 @@ static RPCHelpMan generateposblock()
                     candidates.emplace(ckey.GetPubKey(), ckey);
                 }
             }
+            // Sortition is probabilistic, so more than the expected committee
+            // size can be eligible. The challenge form caps the members it can
+            // carry (script multisig: 16; aggregate: 100); stop at the cap —
+            // any quorum-satisfying subset certifies the block.
+            const int member_cap = g_pos_agg_committee ? MAX_POS_AGG_COMMITTEE_SIZE : MAX_POS_COMMITTEE_SIZE;
             int eligible = 0;
             for (const auto& [member_pub, member_key] : candidates) {
+                if ((int)vrf_committee.size() >= member_cap) break;
                 if (registry.GetWeight(member_pub) == 0) continue; // not a staker
                 auto member_proof = VrfProve(member_key, Span<const unsigned char>(seed.begin(), 32));
                 if (!member_proof) continue;
@@ -2075,11 +2081,21 @@ static RPCHelpMan getposblocktemplate()
     vrf_commitments.push_back(BuildPosVrfCommitment(*leader_proof));
 
     // Validate each supplied member's eligibility and build its SEQCMT
-    // commitment; the signer set is exactly these members.
+    // commitment; the signer set is exactly these members. Consensus requires
+    // the named members to be distinct (bad-posvrf-member-duplicate) and at
+    // most the aggregate cap (bad-posvrf-member-count), so violations here
+    // would doom the block.
+    if ((int)request.params[1].get_array().size() > MAX_POS_AGG_COMMITTEE_SIZE) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("At most %d committee members may be named", MAX_POS_AGG_COMMITTEE_SIZE));
+    }
     std::vector<CPubKey> members;
+    std::set<CPubKey> seen;
     for (const UniValue& m : request.params[1].get_array().getValues()) {
         CPubKey member(ParseHexV(find_value(m, "pubkey"), "pubkey"));
         if (!member.IsFullyValid()) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid member pubkey");
+        if (!seen.insert(member).second) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Member %s listed more than once", HexStr(member)));
+        }
         std::vector<unsigned char> mproof = ParseHexV(find_value(m, "vrfproof"), "vrfproof");
         if (registry.GetWeight(member) == 0) {
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("Member %s is not a registered staker", HexStr(member)));
@@ -2174,6 +2190,9 @@ static RPCHelpMan submitposblock()
     auto parts = ParsePosBlockChallenge(block.proof.challenge);
     if (!parts || parts->agg_key.empty()) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Block is not an aggregate-committee block");
+    }
+    if (key.GetPubKey() != parts->leader) {
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "leaderkey does not match the block challenge's leader");
     }
     std::vector<unsigned char> leader_sig;
     if (!key.Sign(block.GetHash(), leader_sig)) {

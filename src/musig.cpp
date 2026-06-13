@@ -6,6 +6,7 @@
 
 #include <hash.h>
 #include <random.h>
+#include <support/cleanse.h>
 #include <sync.h>
 #include <uint256.h>
 
@@ -28,11 +29,27 @@ const secp256k1_context* Ctx()
         assert(c != nullptr);
         unsigned char seed[32];
         GetRandBytes(seed, 32);
-        assert(secp256k1_context_randomize(c, seed));
+        const bool ok = secp256k1_context_randomize(c, seed);
+        assert(ok);
+        memory_cleanse(seed, 32);
         return c;
     }();
     return ctx;
 }
+
+//! Wipe a memory region at scope exit, so secret material (keys, secnonces)
+//! never outlives its use in stack or heap remnants (cf. src/key.cpp).
+class ScopedCleanse
+{
+    void* m_ptr;
+    size_t m_len;
+
+public:
+    ScopedCleanse(void* ptr, size_t len) : m_ptr(ptr), m_len(len) {}
+    ~ScopedCleanse() { memory_cleanse(m_ptr, m_len); }
+    ScopedCleanse(const ScopedCleanse&) = delete;
+    ScopedCleanse& operator=(const ScopedCleanse&) = delete;
+};
 
 //! Parse + canonically sort pubkeys (by compressed serialization) so the
 //! aggregate depends only on the *set*, not the input order.
@@ -80,9 +97,13 @@ uint256 SessionFingerprint(const std::vector<CPubKey>& pubkeys, Span<const unsig
 }
 
 //! Aggregate the members' 66-byte public nonces into one aggregate nonce.
+//! `expected` is the member-set size: a different count of nonces is a
+//! protocol error (and libsecp ARG_CHECK-aborts on zero nonces, so an empty
+//! vector must never reach it).
 bool AggregateNonces(const std::vector<std::vector<unsigned char>>& pubnonces,
-                     secp256k1_musig_aggnonce& aggnonce)
+                     size_t expected, secp256k1_musig_aggnonce& aggnonce)
 {
+    if (pubnonces.empty() || pubnonces.size() != expected) return false;
     const secp256k1_context* ctx = Ctx();
     std::vector<secp256k1_musig_pubnonce> parsed(pubnonces.size());
     std::vector<const secp256k1_musig_pubnonce*> ptrs(pubnonces.size());
@@ -98,6 +119,7 @@ bool AggregateNonces(const std::vector<std::vector<unsigned char>>& pubnonces,
 //! (non-serialisable) secret nonce until round 2 consumes it exactly once.
 struct PendingSession {
     secp256k1_musig_secnonce secnonce;
+    CPubKey signer;      //!< the key that created the session; round 2 must use it
     uint256 fingerprint; //!< binds (member set, message); see SessionFingerprint
     int64_t created;     //!< steady-clock seconds, for TTL eviction
 };
@@ -115,13 +137,22 @@ int64_t SteadySeconds()
         std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+//! Wipe a session's secret nonce, then erase it. Caller holds the mutex.
+std::map<std::string, PendingSession>::iterator CleanseAndErase(
+    std::map<std::string, PendingSession>::iterator it)
+    EXCLUSIVE_LOCKS_REQUIRED(g_musig_sessions_mutex)
+{
+    memory_cleanse(&it->second, sizeof(PendingSession));
+    return g_musig_sessions.erase(it);
+}
+
 //! Drop sessions older than the TTL. Caller holds g_musig_sessions_mutex.
 void PurgeExpiredSessions() EXCLUSIVE_LOCKS_REQUIRED(g_musig_sessions_mutex)
 {
     const int64_t now = SteadySeconds();
     for (auto it = g_musig_sessions.begin(); it != g_musig_sessions.end();) {
         if (now - it->second.created > MUSIG_SESSION_TTL_SECONDS) {
-            it = g_musig_sessions.erase(it);
+            it = CleanseAndErase(it);
         } else {
             ++it;
         }
@@ -157,11 +188,18 @@ std::optional<std::vector<unsigned char>> MuSigSign(const std::vector<CKey>& key
     std::vector<secp256k1_musig_secnonce> secnonces(n);
     std::vector<secp256k1_musig_pubnonce> pubnonces(n);
     std::vector<const secp256k1_musig_pubnonce*> pubnonce_ptrs(n);
+    // Declared after the vectors so the wipes run before their memory is freed.
+    ScopedCleanse cleanse_keypairs(keypairs.data(), n * sizeof(secp256k1_keypair));
+    ScopedCleanse cleanse_secnonces(secnonces.data(), n * sizeof(secp256k1_musig_secnonce));
 
     for (size_t i = 0; i < n; ++i) {
         if (!keys[i].IsValid()) return std::nullopt;
+        // keys[i] must be the key FOR pubkeys[i]: a mispairing would otherwise
+        // trip a libsecp ARG_CHECK in partial_sign and abort the process.
+        if (keys[i].GetPubKey() != pubkeys[i]) return std::nullopt;
         unsigned char sk[32];
         std::memcpy(sk, keys[i].begin(), 32);
+        ScopedCleanse cleanse_sk(sk, 32);
         if (!secp256k1_keypair_create(ctx, &keypairs[i], sk)) return std::nullopt;
         std::vector<unsigned char> pub_ser(pubkeys[i].begin(), pubkeys[i].end());
         if (!secp256k1_ec_pubkey_parse(ctx, &signer_pubkeys[i], pub_ser.data(), pub_ser.size())) return std::nullopt;
@@ -221,9 +259,14 @@ std::optional<std::vector<unsigned char>> MuSigSessionNonce(
     secp256k1_musig_keyagg_cache cache;
     if (!AggKey(pubkeys, agg_pk, cache)) { error = "could not aggregate the member set"; return std::nullopt; }
 
+    CPubKey cpub = key.GetPubKey();
+    if (std::find(pubkeys.begin(), pubkeys.end(), cpub) == pubkeys.end()) {
+        error = "the signing key is not in the member set"; return std::nullopt;
+    }
+
     unsigned char sk[32];
     std::memcpy(sk, key.begin(), 32);
-    CPubKey cpub = key.GetPubKey();
+    ScopedCleanse cleanse_sk(sk, 32);
     secp256k1_pubkey signer_pubkey;
     std::vector<unsigned char> pub_ser(cpub.begin(), cpub.end());
     if (!secp256k1_ec_pubkey_parse(ctx, &signer_pubkey, pub_ser.data(), pub_ser.size())) {
@@ -231,13 +274,16 @@ std::optional<std::vector<unsigned char>> MuSigSessionNonce(
     }
 
     PendingSession sess;
+    ScopedCleanse cleanse_sess(&sess, sizeof(sess));
     secp256k1_musig_pubnonce pubnonce;
     unsigned char session_secrand[32];
     GetRandBytes(session_secrand, 32);
+    ScopedCleanse cleanse_secrand(session_secrand, 32);
     if (!secp256k1_musig_nonce_gen(ctx, &sess.secnonce, &pubnonce, session_secrand, sk,
                                    &signer_pubkey, msg32.data(), &cache, nullptr)) {
         error = "nonce generation failed"; return std::nullopt;
     }
+    sess.signer = cpub;
     sess.fingerprint = SessionFingerprint(pubkeys, msg32);
     sess.created = SteadySeconds();
 
@@ -258,7 +304,8 @@ std::optional<std::vector<unsigned char>> MuSigSessionNonce(
     std::vector<unsigned char> out(66);
     if (!secp256k1_musig_pubnonce_serialize(ctx, out.data(), &pubnonce)) {
         LOCK(g_musig_sessions_mutex);
-        g_musig_sessions.erase(session_id);
+        auto it = g_musig_sessions.find(session_id);
+        if (it != g_musig_sessions.end()) CleanseAndErase(it);
         error = "could not serialize public nonce"; return std::nullopt;
     }
     return out;
@@ -272,11 +319,15 @@ std::optional<std::vector<unsigned char>> MuSigSessionPartialSign(
 {
     if (msg32.size() != 32) { error = "message must be 32 bytes"; return std::nullopt; }
     if (!key.IsValid()) { error = "invalid signing key"; return std::nullopt; }
+    if (pubnonces.size() != pubkeys.size()) {
+        error = "need exactly one round-1 pubnonce per member"; return std::nullopt;
+    }
     const secp256k1_context* ctx = Ctx();
 
     // Look up and *remove* the round-1 session (single-use), after binding it
-    // to the exact (member set, message) round 1 committed to.
+    // to the exact (signer, member set, message) round 1 committed to.
     PendingSession sess;
+    ScopedCleanse cleanse_sess(&sess, sizeof(sess));
     {
         LOCK(g_musig_sessions_mutex);
         auto it = g_musig_sessions.find(session_id);
@@ -284,13 +335,20 @@ std::optional<std::vector<unsigned char>> MuSigSessionPartialSign(
             error = "no round-1 session with this id (call the nonce step first; each session signs once)";
             return std::nullopt;
         }
+        // The mismatch paths do NOT consume: the caller may retry with the
+        // correct context. The signer check also keeps a mispaired key away
+        // from secp256k1_musig_partial_sign, whose keypair-vs-secnonce
+        // ARG_CHECK would abort the process.
         if (it->second.fingerprint != SessionFingerprint(pubkeys, msg32)) {
-            // Do NOT consume: the caller may retry with the correct context.
             error = "member set or message does not match this session's round 1";
             return std::nullopt;
         }
+        if (it->second.signer != key.GetPubKey()) {
+            error = "signing key does not match the key that started this session";
+            return std::nullopt;
+        }
         sess = it->second;
-        g_musig_sessions.erase(it);
+        CleanseAndErase(it);
     }
 
     secp256k1_xonly_pubkey agg_pk;
@@ -298,7 +356,7 @@ std::optional<std::vector<unsigned char>> MuSigSessionPartialSign(
     if (!AggKey(pubkeys, agg_pk, cache)) { error = "could not aggregate the member set"; return std::nullopt; }
 
     secp256k1_musig_aggnonce aggnonce;
-    if (!AggregateNonces(pubnonces, aggnonce)) { error = "could not aggregate the public nonces"; return std::nullopt; }
+    if (!AggregateNonces(pubnonces, pubkeys.size(), aggnonce)) { error = "could not aggregate the public nonces"; return std::nullopt; }
 
     secp256k1_musig_session musig_session;
     if (!secp256k1_musig_nonce_process(ctx, &musig_session, &aggnonce, msg32.data(), &cache, nullptr)) {
@@ -307,7 +365,9 @@ std::optional<std::vector<unsigned char>> MuSigSessionPartialSign(
 
     unsigned char sk[32];
     std::memcpy(sk, key.begin(), 32);
+    ScopedCleanse cleanse_sk(sk, 32);
     secp256k1_keypair keypair;
+    ScopedCleanse cleanse_keypair(&keypair, sizeof(keypair));
     if (!secp256k1_keypair_create(ctx, &keypair, sk)) { error = "invalid keypair"; return std::nullopt; }
 
     secp256k1_musig_partial_sig partial;
@@ -328,6 +388,11 @@ std::optional<std::vector<unsigned char>> MuSigAggregatePartials(
     Span<const unsigned char> msg32)
 {
     if (msg32.size() != 32) return std::nullopt;
+    // One nonce and one partial per member; empty inputs must never reach the
+    // libsecp aggregation calls (their zero-count ARG_CHECKs abort).
+    if (pubnonces.size() != pubkeys.size() || partials.size() != pubkeys.size() || pubkeys.empty()) {
+        return std::nullopt;
+    }
     const secp256k1_context* ctx = Ctx();
 
     secp256k1_xonly_pubkey agg_pk;
@@ -335,7 +400,7 @@ std::optional<std::vector<unsigned char>> MuSigAggregatePartials(
     if (!AggKey(pubkeys, agg_pk, cache)) return std::nullopt;
 
     secp256k1_musig_aggnonce aggnonce;
-    if (!AggregateNonces(pubnonces, aggnonce)) return std::nullopt;
+    if (!AggregateNonces(pubnonces, pubkeys.size(), aggnonce)) return std::nullopt;
 
     secp256k1_musig_session musig_session;
     if (!secp256k1_musig_nonce_process(ctx, &musig_session, &aggnonce, msg32.data(), &cache, nullptr)) {
@@ -362,5 +427,7 @@ std::optional<std::vector<unsigned char>> MuSigAggregatePartials(
 void MuSigSessionAbort(const std::string& session_id)
 {
     LOCK(g_musig_sessions_mutex);
-    g_musig_sessions.erase(session_id);
+    auto it = g_musig_sessions.find(session_id);
+    if (it != g_musig_sessions.end()) CleanseAndErase(it);
+    PurgeExpiredSessions();
 }
