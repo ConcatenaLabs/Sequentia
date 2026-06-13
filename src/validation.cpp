@@ -4437,6 +4437,29 @@ bool CChainState::AcceptBlock(const std::shared_ptr<const CBlock>& pblock, Block
         return error("%s: %s", __func__, state.ToString());
     }
 
+    // SEQUENTIA PoS: the authoritative stake-rule check is at connect time
+    // (CheckPosStakeRules in ConnectBlock), where the registry matches the
+    // block's parent state. But on a signed/PoS chain header "work" is just
+    // height, so — unlike stock Liquid, where only the fixed federation can
+    // sign a header — an attacker can forge header chains with their own keys.
+    // To keep a bogus-leader block from being written to disk, also check it
+    // here *when it builds directly on the active tip*: that is the one case
+    // where the global registry provably equals this block's parent state, so
+    // the check is authoritative and can never false-reject a valid block
+    // during headers-first sync or fork validation (where pprev != tip and we
+    // correctly defer to connect time). A block at the tip with a wrong leader
+    // is invalid for this exact parent regardless of later reorgs, so marking
+    // it failed is permanent and correct.
+    if (g_con_pos && pindex->pprev != nullptr && pindex->pprev == m_chain.Tip()) {
+        if (!CheckPosStakeRules(block, state, pindex->pprev)) {
+            if (state.IsInvalid() && state.GetResult() != BlockValidationResult::BLOCK_MUTATED) {
+                pindex->nStatus |= BLOCK_FAILED_VALID;
+                m_blockman.m_dirty_blockindex.insert(pindex);
+            }
+            return error("%s: %s", __func__, state.ToString());
+        }
+    }
+
     // Header is valid/has work, merkle tree and segwit merkle tree are good...RELAY NOW
     // (but if it does not build on our best tip, let the SendMessages loop relay it)
     if (!IsInitialBlockDownload() && m_chain.Tip() == pindex->pprev)
