@@ -24,6 +24,7 @@ int64_t g_pos_slot_interval = DEFAULT_POS_SLOT_INTERVAL;
 int g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
 bool g_pos_vrf = false;
 bool g_pos_agg_committee = false;
+uint64_t g_pos_min_stake = 0;
 
 bool StakeRegistry::AddFromSpec(const std::string& spec, std::string& error)
 {
@@ -99,6 +100,7 @@ std::vector<CPubKey> PosSchedule(const StakeRegistry& registry, const uint256& s
     std::vector<std::pair<arith_uint256, CPubKey>> ranked;
     ranked.reserve(registry.Size());
     for (const auto& entry : registry.Weights()) {
+        if (!PosIsEligibleStake(entry.second)) continue; // below the min-stake floor
         ranked.emplace_back(WeightedTicket(seed, entry.first, entry.second), entry.first);
     }
     std::sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) {
@@ -113,7 +115,7 @@ std::vector<CPubKey> PosSchedule(const StakeRegistry& registry, const uint256& s
 
 std::optional<size_t> PosRank(const StakeRegistry& registry, const uint256& seed, const CPubKey& pubkey)
 {
-    if (registry.GetWeight(pubkey) == 0) return std::nullopt;
+    if (!PosIsEligibleStake(registry.GetWeight(pubkey))) return std::nullopt;
     std::vector<CPubKey> schedule = PosSchedule(registry, seed);
     for (size_t i = 0; i < schedule.size(); ++i) {
         if (schedule[i] == pubkey) return i;
@@ -272,6 +274,7 @@ uint64_t PosTotalWeight(const StakeRegistry& registry)
 {
     uint64_t total = 0;
     for (const auto& entry : registry.Weights()) {
+        if (!PosIsEligibleStake(entry.second)) continue; // only eligible stake counts
         total += entry.second;
     }
     return total;
@@ -316,6 +319,7 @@ std::optional<std::vector<unsigned char>> ExtractPosVrfProof(const CBlock& block
 
 bool PosVrfIsCommitteeMember(const uint256& beta, uint64_t weight, uint64_t total_weight)
 {
+    if (!PosIsEligibleStake(weight)) return false; // below the min-stake floor
     return PosVrfSlot(beta, weight, total_weight) < (uint64_t)std::max(g_pos_committee_size, 0);
 }
 

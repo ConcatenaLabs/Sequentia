@@ -107,6 +107,45 @@ BOOST_AUTO_TEST_CASE(pos_weighting_is_proportional)
     BOOST_CHECK(big_wins < trials * 0.98);
 }
 
+// The minimum-stake floor (whitepaper §3.3) excludes sub-minimum stakers from
+// the schedule, the rank lookup, the eligible-total weight, and VRF committee
+// membership; with the floor at 0 (default) every registered staker is eligible.
+BOOST_AUTO_TEST_CASE(pos_min_stake_eligibility)
+{
+    StakeRegistry reg;
+    CPubKey big = MakeKey();   // above the floor
+    CPubKey small = MakeKey(); // below the floor
+    reg.SetStake(big, 100);
+    reg.SetStake(small, 10);
+    uint256 seed = ComputePosSeed(uint256S("0xfeed"), uint256(), 1);
+
+    // Default: no floor — both eligible, both in the schedule and total.
+    g_pos_min_stake = 0;
+    BOOST_CHECK_EQUAL(PosSchedule(reg, seed).size(), 2U);
+    BOOST_CHECK(PosRank(reg, seed, small).has_value());
+    BOOST_CHECK_EQUAL(PosTotalWeight(reg), 110U);
+
+    // Floor at 50: only `big` qualifies. `small` drops out everywhere.
+    g_pos_min_stake = 50;
+    std::vector<CPubKey> sched = PosSchedule(reg, seed);
+    BOOST_CHECK_EQUAL(sched.size(), 1U);
+    BOOST_CHECK(sched.front() == big);
+    BOOST_CHECK(PosRank(reg, seed, big).has_value());
+    BOOST_CHECK(!PosRank(reg, seed, small).has_value());
+    BOOST_CHECK_EQUAL(PosTotalWeight(reg), 100U); // eligible-only denominator
+    BOOST_CHECK(PosIsEligibleStake(100));
+    BOOST_CHECK(!PosIsEligibleStake(10));
+    BOOST_CHECK(!PosIsEligibleStake(49));
+    BOOST_CHECK(PosIsEligibleStake(50));
+
+    // A sub-floor staker is never a VRF committee member, whatever its beta.
+    uint256 lucky = uint256(); // beta 0 → slot 0, normally a member
+    BOOST_CHECK(!PosVrfIsCommitteeMember(lucky, 10, PosTotalWeight(reg)));
+    BOOST_CHECK(PosVrfIsCommitteeMember(lucky, 100, PosTotalWeight(reg)));
+
+    g_pos_min_stake = 0; // restore global for other tests
+}
+
 // The committee-certification challenge round-trips, the committee is the
 // schedule prefix, and the quorum is a strict majority.
 BOOST_AUTO_TEST_CASE(pos_committee_challenge_roundtrip)

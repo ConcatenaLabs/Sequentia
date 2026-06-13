@@ -35,6 +35,9 @@ posunbonding=2016          # CSV blocks a stake locks before it counts / can unb
 con_blocksubsidy=0         # no inflation: SEQ is pre-mined at genesis, never
                            # minted by block production; stakers earn fees only
                            # (whitepaper §3.9). 0 is also the custom-chain default.
+posminstake=4000000000000  # minimum stake to be a blocksigner, in SEQ atoms:
+                           # 0.01% of supply = 40,000 SEQ (whitepaper §3.3).
+                           # 40000 * 1e8 atoms. 0 disables the floor.
 
 # The genesis staker set: one line per founding staker, <pubkey-hex>:<weight>.
 # This is a GOVERNANCE decision and must match on every node. Replace these.

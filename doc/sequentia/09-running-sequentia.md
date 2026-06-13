@@ -68,6 +68,8 @@ con_blocksubsidy=0           # no inflation: SEQ is pre-mined at genesis, no
                              # coinbase generation; producers earn fees only
                              # (whitepaper §3.9). 0 is the default for a custom
                              # chain; set explicitly to make the tenet visible.
+posminstake=4000000000000    # min stake to be a blocksigner: 0.01% of supply =
+                             # 40,000 SEQ (40000 * 1e8 atoms), whitepaper §3.3.
 # The genesis staker set — IDENTICAL on every node (see §6 / §8). It must
 # hold at least quorum-many (here 51) sortition-eligible members, or no
 # block can ever be certified:
@@ -221,6 +223,8 @@ must decide before launch (governance):
 |---|---|---|
 | Which parent chain to anchor to | governance | §5 `mainchainrpc*` |
 | Genesis staker set & weights | **governance** | §3 `staker=` (must be identical on all nodes) |
+| Total SEQ supply & pre-mine distribution | **governance** | genesis issuance (no block subsidy, §3 `con_blocksubsidy=0`) |
+| Minimum blocksigner stake | governance | §3 `posminstake` (whitepaper: 0.01% of supply) |
 | Committee size / quorum | governance | §3 `poscommitteesize` |
 | Unbonding period (CSV) | governance | §3 `posunbonding` |
 | Slot interval | governance | §3 `posslotinterval` |

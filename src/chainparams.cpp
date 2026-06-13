@@ -979,6 +979,13 @@ protected:
             if (unbonding < 1 || unbonding > 0xFFFF) {
                 throw std::runtime_error("-posunbonding must be between 1 and 65535 blocks (the CSV relative-locktime range)");
             }
+            // Minimum stake to be an eligible blocksigner (whitepaper §3.3:
+            // 0.01% of supply = 40,000 SEQ). 0 = no floor. Atoms.
+            const int64_t min_stake = args.GetIntArg("-posminstake", 0);
+            if (min_stake < 0) {
+                throw std::runtime_error("-posminstake must be non-negative (policy-asset atoms; 0 disables the floor)");
+            }
+            g_pos_min_stake = (uint64_t)min_stake;
             g_signed_blocks = true;
             consensus.vDeployments[Consensus::DEPLOYMENT_DYNA_FED].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
             StakeRegistry::GetInstance().Clear();

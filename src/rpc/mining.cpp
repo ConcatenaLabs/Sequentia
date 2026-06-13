@@ -1879,7 +1879,7 @@ static RPCHelpMan generateposblock()
             int eligible = 0;
             for (const auto& [member_pub, member_key] : candidates) {
                 if ((int)vrf_committee.size() >= member_cap) break;
-                if (registry.GetWeight(member_pub) == 0) continue; // not a staker
+                if (!PosIsEligibleStake(registry.GetWeight(member_pub))) continue; // unregistered or below min-stake
                 auto member_proof = VrfProve(member_key, Span<const unsigned char>(seed.begin(), 32));
                 if (!member_proof) continue;
                 uint256 member_beta;
@@ -2069,8 +2069,8 @@ static RPCHelpMan getposblocktemplate()
     }
     uint256 seed = PosSeedForChild(tip);
     const StakeRegistry& registry = StakeRegistry::GetInstance();
-    if (registry.GetWeight(pubkey) == 0) {
-        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "The leader key is not a registered staker");
+    if (!PosIsEligibleStake(registry.GetWeight(pubkey))) {
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "The leader key is not a registered staker, or its stake is below the -posminstake minimum");
     }
     const uint64_t total_weight = PosTotalWeight(registry);
 
@@ -2097,8 +2097,8 @@ static RPCHelpMan getposblocktemplate()
             throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Member %s listed more than once", HexStr(member)));
         }
         std::vector<unsigned char> mproof = ParseHexV(find_value(m, "vrfproof"), "vrfproof");
-        if (registry.GetWeight(member) == 0) {
-            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("Member %s is not a registered staker", HexStr(member)));
+        if (!PosIsEligibleStake(registry.GetWeight(member))) {
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("Member %s is not a registered staker, or its stake is below the -posminstake minimum", HexStr(member)));
         }
         uint256 mbeta;
         if (!VrfVerify(member, Span<const unsigned char>(seed.begin(), 32), mproof, mbeta)) {

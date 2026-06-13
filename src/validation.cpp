@@ -2158,9 +2158,12 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
     }
     const uint64_t total_weight = PosTotalWeight(registry);
     uint64_t weight = registry.GetWeight(parts->leader);
-    // Cheap registration check before the expensive VRF verification.
+    // Cheap registration / min-stake check before the expensive VRF verify.
     if (weight == 0) {
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-leader-not-staker", "block leader has no registered stake");
+    }
+    if (!PosIsEligibleStake(weight)) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-leader-below-min", "block leader's stake is below the minimum to be a blocksigner");
     }
     uint256 beta;
     if (!VrfVerify(parts->leader, seed, *proof, beta)) {

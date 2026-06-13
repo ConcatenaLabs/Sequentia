@@ -19,6 +19,7 @@
 #include <sync.h>
 #include <uint256.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -310,6 +311,20 @@ class CCoinsView;
  *  also the default delay for BuildStakeScript. */
 extern uint32_t g_pos_unbonding_period;
 static const uint32_t DEFAULT_POS_UNBONDING_PERIOD = 10;
+
+/** SEQUENTIA: minimum stake weight (in policy-asset atoms) a key must hold to
+ *  be an eligible blocksigner — leader or committee member (whitepaper §3.3:
+ *  0.01% of supply = 40,000 SEQ). Stake below this is ignored by election,
+ *  sortition, and the eligible-total denominator. 0 disables the floor (the
+ *  default; the Sequentia chain sets it via -posminstake). */
+extern uint64_t g_pos_min_stake;
+
+/** Whether `weight` clears the eligibility floor: registered (>=1) and at least
+ *  the configured minimum. The single chokepoint for stake eligibility. */
+inline bool PosIsEligibleStake(uint64_t weight)
+{
+    return weight >= std::max<uint64_t>(g_pos_min_stake, 1);
+}
 
 /** The canonical staking output script:
  *      <csv_blocks> OP_CHECKSEQUENCEVERIFY OP_DROP <pubkey> OP_CHECKSIG

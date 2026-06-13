@@ -158,6 +158,15 @@ nodes converge on it — exactly as the federation's round-robin does today.
   block-acceptance time, both of which can run far ahead of the active chain
   the registry mirrors — so headers-first sync and parallel block download
   cannot mis-evaluate eligibility, in either election mode.
+- **Minimum-stake floor** (`-posminstake`, atoms; whitepaper §3.3 sets it at
+  0.01% of supply = 40,000 SEQ). A key must hold at least this to be an
+  eligible blocksigner; sub-floor stake is dropped from the leader schedule,
+  VRF committee membership, and the eligible-total sortition denominator
+  (`PosIsEligibleStake`, the single chokepoint). The floor defaults to 0
+  (disabled) so it never silently breaks small-weight test chains; the
+  Sequentia chain sets it. Enforced at connect time (`bad-posvrf-leader-below-min`)
+  and at the producer RPCs. Tested in `feature_pos_min_stake.py` and
+  `pos_tests.cpp` (`pos_min_stake_eligibility`).
 - **No inflation; stakers are paid in fees.** Per the whitepaper (§3.9), SEQ is
   pre-mined and fully distributed at genesis: there is **no block subsidy / no
   coinbase generation of new SEQ**. The chain's `genesis_subsidy` is therefore
