@@ -66,10 +66,10 @@ static RPCHelpMan setfeeexchangerates()
     auto& exchangeRateMap = ExchangeRateMap::GetInstance();
     std::vector<std::string> errors;
     if (!exchangeRateMap.LoadFromJSON(jsonRates, errors)) {
-        throw JSONRPCError(RPC_WALLET_ERROR, strprintf("Error loading rates from JSON: %s", MakeUnorderedList(errors)));
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Error loading rates from JSON: %s", MakeUnorderedList(errors)));
     }
     if (!exchangeRateMap.SaveToJSONFile(errors)) {
-        return JSONRPCError(RPC_WALLET_ERROR, strprintf("Error saving exchange rates to JSON file %s: \n%s\n", exchange_rates_config_file, MakeUnorderedList(errors)));
+        throw JSONRPCError(RPC_DATABASE_ERROR, strprintf("Error saving exchange rates to JSON file %s: \n%s\n", exchange_rates_config_file, MakeUnorderedList(errors)));
     };
     EnsureAnyMemPool(request.context).RecomputeFees();
     return NullUniValue;
@@ -109,7 +109,18 @@ static RPCHelpMan setdynamicfeerates()
             errors.push_back(strprintf("Unknown label and invalid asset hex: %s", rate.first));
             continue;
         }
-        rates[asset] = rate.second.get_int64();
+        if (!rate.second.isNum()) {
+            errors.push_back(strprintf("Rate for %s is not an integer", rate.first));
+            continue;
+        }
+        CAmount value = rate.second.get_int64();
+        // Rates are positive integers (atoms of the asset per reference unit);
+        // a zero or negative rate would crash or bypass fee valuation.
+        if (value <= 0) {
+            errors.push_back(strprintf("Rate for %s must be a positive integer", rate.first));
+            continue;
+        }
+        rates[asset] = value;
     }
     if (!errors.empty()) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Error parsing dynamic rates: %s", MakeUnorderedList(errors)));

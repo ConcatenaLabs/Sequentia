@@ -431,18 +431,25 @@ void PosApplyBlockStake(const CBlock& block, const CBlockUndo& undo)
 void PosRevertBlockStake(const CBlock& block, const CBlockUndo& undo)
 {
     StakeRegistry& registry = StakeRegistry::GetInstance();
-    // Exact mirror of PosApplyBlockStake.
-    for (const CTransactionRef& tx : block.vtx) {
-        for (const CTxOut& out : tx->vout) {
-            if (auto stake = StakeFromTxOut(out)) {
-                registry.SubUtxoStake(stake->first, stake->second);
-            }
-        }
-    }
+    // Exact inverse of PosApplyBlockStake, which added created outputs then
+    // subtracted spent ones. Undoing in reverse order — re-add the spent
+    // outputs FIRST, then subtract the created ones — keeps every per-pubkey
+    // running total non-negative, so it is a true inverse even for a staking
+    // output created and spent within this same block (where the pubkey's
+    // post-block weight is zero and its map entry was erased). Doing the
+    // subtraction first there would hit SubUtxoStake's underflow guard and
+    // corrupt the registry.
     for (const CTxUndo& txundo : undo.vtxundo) {
         for (const Coin& coin : txundo.vprevout) {
             if (auto stake = StakeFromTxOut(coin.out)) {
                 registry.AddUtxoStake(stake->first, stake->second);
+            }
+        }
+    }
+    for (const CTransactionRef& tx : block.vtx) {
+        for (const CTxOut& out : tx->vout) {
+            if (auto stake = StakeFromTxOut(out)) {
+                registry.SubUtxoStake(stake->first, stake->second);
             }
         }
     }
@@ -457,8 +464,15 @@ bool RebuildUtxoStake(CCoinsView& view)
         COutPoint key;
         Coin coin;
         if (!pcursor->GetKey(key) || !pcursor->GetValue(coin)) return false;
-        if (auto stake = StakeFromTxOut(coin.out)) {
-            utxo_stake[stake->first] += stake->second;
+        // Skip genesis (height 0) outputs to match the incremental path, which
+        // only mirrors blocks at height > 0 (PosApply/RevertBlockStake). The
+        // genesis stake bootstrap is the -staker config layer, not the UTXO
+        // layer; counting genesis outputs here would make a restarted node's
+        // registry diverge from a continuously-running one.
+        if (coin.nHeight > 0) {
+            if (auto stake = StakeFromTxOut(coin.out)) {
+                utxo_stake[stake->first] += stake->second;
+            }
         }
         pcursor->Next();
     }

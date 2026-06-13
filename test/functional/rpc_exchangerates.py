@@ -53,6 +53,9 @@ class ExchangeRatesTest(BitcoinTestFramework):
         self.test_invalid_exchange_rates_update(node, "invalid", 1)
         self.test_invalid_exchange_rates_update(node, 1, "invalid")
 
+        # Non-positive rates are rejected
+        self.test_nonpositive_rate_rejected(node)
+
         # Restore rates
         self.test_exchange_rates_update(node, initial_rates | { self.asset: 100000000 })
 
@@ -63,7 +66,14 @@ class ExchangeRatesTest(BitcoinTestFramework):
 
     def test_invalid_exchange_rates_update(self, node, asset_name, value):
         current_rates = node.getfeeexchangerates()
-        assert_raises_rpc_error(-4, "Error loading rates from JSON: - Unknown label and invalid asset hex: %s" % asset_name, node.setfeeexchangerates, { asset_name: value })
+        assert_raises_rpc_error(-8, "Error loading rates from JSON: - Unknown label and invalid asset hex: %s" % asset_name, node.setfeeexchangerates, { asset_name: value })
+        assert node.getfeeexchangerates() == current_rates
+
+    def test_nonpositive_rate_rejected(self, node):
+        # A zero or negative rate must be rejected (would crash / bypass fees).
+        current_rates = node.getfeeexchangerates()
+        assert_raises_rpc_error(-8, "must be a positive integer", node.setfeeexchangerates, { self.asset: 0 })
+        assert_raises_rpc_error(-8, "must be a positive integer", node.setfeeexchangerates, { self.asset: -5 })
         assert node.getfeeexchangerates() == current_rates
 
     def get_exchange_rates_from_database(self, node):

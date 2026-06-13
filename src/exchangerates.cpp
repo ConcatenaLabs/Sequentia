@@ -11,11 +11,19 @@
 
 CValue ExchangeRateMap::ConvertAmountToValue(const CAmount& amount, const CAsset& asset) {
     int64_t int64_max = std::numeric_limits<int64_t>::max();
+    LOCK(m_write_mutex); // serialize against RebuildEffective's clear()/insert
     auto it = this->find(asset);
     if (it == this->end()) {
         return CValue(0);
     }
     auto scaled_value = it->second.m_scaled_value;
+    // A non-positive rate is never valid (rates are atoms-of-asset per
+    // reference unit). Guard regardless of input validation: a negative rate
+    // would otherwise saturate to a huge value (fee-check bypass) and a zero
+    // rate divides by zero in ConvertValueToAmount. Treat as "not accepted".
+    if (scaled_value <= 0) {
+        return CValue(0);
+    }
     __uint128_t result = ((__uint128_t)amount * (__uint128_t)scaled_value) / (__uint128_t)exchange_rate_scale;
     if (result > static_cast<uint64_t>(int64_max)) {
         return CValue(int64_max);
@@ -26,12 +34,16 @@ CValue ExchangeRateMap::ConvertAmountToValue(const CAmount& amount, const CAsset
 
 CAmount ExchangeRateMap::ConvertValueToAmount(const CValue& value, const CAsset& asset) {
     int64_t int64_max = std::numeric_limits<int64_t>::max();
+    LOCK(m_write_mutex); // serialize against RebuildEffective's clear()/insert
     auto it = this->find(asset);
     if (it == this->end()) {
         return 0;
     }
     auto scaled_value = it->second.m_scaled_value;
-    __uint128_t result = ((__uint128_t)value.GetValue() * (__uint128_t)exchange_rate_scale) / (__uint128_t)scaled_value;
+    if (scaled_value <= 0) { // see ConvertAmountToValue; also avoids divide-by-zero
+        return 0;
+    }
+    __uint128_t result = ((__uint128_t)value.GetValue() * (__uint128_t)exchange_rate_scale + (__uint128_t)scaled_value - 1) / (__uint128_t)scaled_value;
     if (result > static_cast<__uint128_t>(int64_max)) {
         return int64_max;
     } else {
@@ -92,14 +104,17 @@ static UniValue RatesToJSON(const std::map<CAsset, CAssetExchangeRate>& rates) {
 }
 
 UniValue ExchangeRateMap::ToJSON() {
+    LOCK(m_write_mutex);
     return RatesToJSON(*this);
 }
 
 UniValue ExchangeRateMap::StaticToJSON() {
+    LOCK(m_write_mutex);
     return RatesToJSON(m_static_rates);
 }
 
 UniValue ExchangeRateMap::DynamicToJSON() {
+    LOCK(m_write_mutex);
     UniValue json = UniValue{UniValue::VOBJ};
     int64_t now = GetTime();
     for (const auto& rate : m_dynamic_rates) {
@@ -120,6 +135,7 @@ UniValue ExchangeRateMap::DynamicToJSON() {
 }
 
 UniValue ExchangeRateMap::AcceptancePolicyToJSON() {
+    LOCK(m_write_mutex);
     UniValue json = UniValue{UniValue::VOBJ};
     for (const auto& rate : *this) {
         std::string label = gAssetsDir.GetLabel(rate.first);
@@ -150,9 +166,21 @@ bool ExchangeRateMap::LoadFromJSON(std::map<std::string, UniValue> json, std::ve
         if (asset.IsNull()) {
             errors.push_back(strprintf("Unknown label and invalid asset hex: %s", rate.first));
             hasError = true;
+        } else if (!rate.second.isNum()) {
+            errors.push_back(strprintf("Rate for %s is not an integer", rate.first));
+            hasError = true;
         } else {
             CAmount newRateValue = rate.second.get_int64();
-            parsedRates[asset] = newRateValue;
+            // Rates are integers: atoms of the asset equal to one reference
+            // unit (exchange_rate_scale). Non-positive rates are invalid — a
+            // zero divides by zero and a negative saturates to a bogus huge
+            // valuation that bypasses fee checks.
+            if (newRateValue <= 0) {
+                errors.push_back(strprintf("Rate for %s must be a positive integer", rate.first));
+                hasError = true;
+            } else {
+                parsedRates[asset] = newRateValue;
+            }
         }
     }
     if (hasError) return false;

@@ -103,6 +103,7 @@ public:
     {
         LOCK(m_mutex);
         m_config.clear();
+        m_utxo.clear();
     }
     //! Set a configured staker's weight.
     void SetStake(const CPubKey& pubkey, uint64_t weight)
@@ -128,8 +129,11 @@ public:
         LOCK(m_mutex);
         auto it = m_utxo.find(pubkey);
         if (it == m_utxo.end() || it->second < amount) {
-            // Should be unreachable: connect/disconnect are exact mirrors.
-            if (it != m_utxo.end()) m_utxo.erase(it);
+            // Should be unreachable: connect/disconnect are exact inverses
+            // (PosApplyBlockStake / PosRevertBlockStake) and the startup
+            // rebuild is a pure function of the UTXO set. If it ever happens
+            // the registry is already inconsistent with consensus; leave the
+            // stored weight untouched rather than silently discarding it.
             return;
         }
         it->second -= amount;

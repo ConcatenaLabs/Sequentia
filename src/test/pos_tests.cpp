@@ -5,10 +5,13 @@
 #include <pos.h>
 #include <anchor.h>
 
+#include <coins.h>
 #include <key.h>
 #include <musig.h>
 #include <policy/policy.h>
 #include <primitives/block.h>
+#include <primitives/transaction.h>
+#include <undo.h>
 #include <vrf.h>
 #include <test/util/setup_common.h>
 #include <tinyformat.h>
@@ -437,6 +440,91 @@ BOOST_AUTO_TEST_CASE(pos_stake_registry_layers)
     reg.SubUtxoStake(utxo_staker, 250);
     BOOST_CHECK_EQUAL(reg.GetWeight(utxo_staker), 0U);
     BOOST_CHECK_EQUAL(reg.Size(), 2U);
+}
+
+namespace {
+//! A coinbase-shaped tx with no stake.
+CMutableTransaction CoinbaseTx()
+{
+    CMutableTransaction tx;
+    tx.vin.emplace_back();
+    tx.vin[0].prevout.SetNull();
+    tx.vout.emplace_back(CConfidentialAsset(::policyAsset), CConfidentialValue(0), CScript() << OP_TRUE);
+    return tx;
+}
+CTxOut StakeOut(const CPubKey& p, uint32_t csv, CAmount amount)
+{
+    return CTxOut(CConfidentialAsset(::policyAsset), CConfidentialValue(amount), BuildStakeScript(p, csv));
+}
+} // namespace
+
+// PosApplyBlockStake and PosRevertBlockStake must be exact inverses, including
+// the corner case of a staking output created AND spent within the same block
+// (the pubkey's post-block UTXO weight is zero and its registry entry erased).
+// Undoing in the wrong order would leave spurious weight behind — a reorg-only
+// consensus split. See src/pos.cpp.
+BOOST_AUTO_TEST_CASE(pos_apply_revert_is_exact_inverse)
+{
+    StakeRegistry& reg = StakeRegistry::GetInstance();
+
+    CPubKey p = MakeKey();   // created-and-spent within the block
+    CPubKey q = MakeKey();   // pre-existing stake, untouched by the block
+    const CAmount a = 70000;
+
+    // tx1 creates p's staking output; tx2 spends it (same block).
+    CMutableTransaction tx1;
+    tx1.vin.emplace_back();
+    tx1.vout.push_back(StakeOut(p, 100, a));
+    CMutableTransaction tx2;
+    tx2.vin.emplace_back(COutPoint(tx1.GetHash(), 0));
+    tx2.vout.emplace_back(CConfidentialAsset(::policyAsset), CConfidentialValue(a), CScript() << OP_TRUE);
+
+    CBlock block;
+    block.vtx.push_back(MakeTransactionRef(CoinbaseTx()));
+    block.vtx.push_back(MakeTransactionRef(tx1));
+    block.vtx.push_back(MakeTransactionRef(tx2));
+
+    // Undo data covers every tx but the coinbase. tx2 spent p's staking output.
+    CBlockUndo undo;
+    undo.vtxundo.emplace_back();                 // tx1: its inputs aren't stake
+    CTxUndo tx2_undo;
+    tx2_undo.vprevout.emplace_back(StakeOut(p, 100, a), /*nHeightIn=*/1, /*fCoinBaseIn=*/false);
+    undo.vtxundo.push_back(tx2_undo);
+
+    reg.Clear();
+    reg.AddUtxoStake(q, 500); // a baseline staker the block must not disturb
+
+    PosApplyBlockStake(block, undo);
+    // p was created and spent in the same block → net zero, entry erased.
+    BOOST_CHECK_EQUAL(reg.GetWeight(p), 0U);
+    BOOST_CHECK_EQUAL(reg.GetWeight(q), 500U);
+
+    PosRevertBlockStake(block, undo);
+    // The exact inverse: p stays absent (the ordering bug would leave it at a),
+    // q is untouched.
+    BOOST_CHECK_EQUAL(reg.GetWeight(p), 0U);
+    BOOST_CHECK_EQUAL(reg.GetWeight(q), 500U);
+    BOOST_CHECK_EQUAL(reg.Size(), 1U);
+
+    // Also the ordinary case: a block that only *creates* a staking output, and
+    // one that only *spends* a pre-existing one, both invert cleanly.
+    CMutableTransaction create_only;
+    create_only.vin.emplace_back();
+    create_only.vout.push_back(StakeOut(p, 100, a));
+    CBlock cblock;
+    cblock.vtx.push_back(MakeTransactionRef(CoinbaseTx()));
+    cblock.vtx.push_back(MakeTransactionRef(create_only));
+    CBlockUndo cundo;
+    cundo.vtxundo.emplace_back();
+
+    reg.Clear();
+    PosApplyBlockStake(cblock, cundo);
+    BOOST_CHECK_EQUAL(reg.GetWeight(p), (uint64_t)a);
+    PosRevertBlockStake(cblock, cundo);
+    BOOST_CHECK_EQUAL(reg.GetWeight(p), 0U);
+    BOOST_CHECK_EQUAL(reg.Size(), 0U);
+
+    reg.Clear();
 }
 
 // Checkpoint payloads round-trip and reject malformed input.
