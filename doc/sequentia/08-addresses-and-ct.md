@@ -89,4 +89,3 @@ A conforming Sequentia wallet app:
       `-blindedaddresses` help updated.
 - [x] Functional test `feature_ct_opt_in.py`.
 - [ ] Sequentia mainnet chain params (when defined) mirror Bitcoin mainnet.
-</content>

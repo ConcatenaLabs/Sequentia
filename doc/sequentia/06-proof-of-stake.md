@@ -27,27 +27,29 @@ What this PoC **does**:
   its slot, where `r` is gated by the time elapsed since the parent (liveness:
   if the primary leader is absent, the next-ranked staker may step in after a
   slot interval).
-- **Committee certification** (`-poscommitteesize` 2..16): the slot's committee
-  is the first *n* entries of the schedule, and the block challenge becomes
+- **Committee certification** (`-poscommitteesize`, 1–16 in this script form,
+  default 1 = disabled): the slot's committee is the first *n* entries of the
+  schedule, and the block challenge becomes
   `<leader> OP_CHECKSIGVERIFY <q> <c_1..c_n> <n> OP_CHECKMULTISIG` with `q` a
   strict majority — the PoC form of the paper's 51-of-100 certification
   (principle 6): a block *cannot exist* without a committee quorum, which is
   what gives immediate finality. The script interpreter enforces it via the
-  unchanged `CheckProof`. Sizes beyond 16 need signature aggregation
-  (BLS/MuSig) — future work.
+  unchanged `CheckProof`. Sizes beyond 16 (up to the paper's 100) use MuSig2
+  signature aggregation — implemented as `-posaggcommittee`, doc 07 §6.
 - Produces blocks from the miner when the node holds the eligible leader's key
   (plus a committee quorum of keys via `generateposblock`'s `committeekeys`).
 - Exposes `getstakerinfo` / `getposschedule` (incl. committee + quorum) RPCs.
 
-What this PoC **defers** (documented in §6, future work):
+What this base layer originally deferred — **all four since implemented** (§6
+roadmap items 6–10, doc 07):
 
-- Private VRF sortition (this PoC uses a *public* deterministic election, so the
-  schedule is predictable — see §5 security notes).
-- Paper-scale (100-member) committees: script multisig caps the committee at
-  16; larger committees need signature aggregation (BLS/MuSig).
-- On-chain stake registration / unbonding (stake set is chain configuration
-  here, not yet chainstate-tracked).
-- Bitcoin checkpoints + stake locktimes against long-range attacks.
+- Private VRF sortition (`-posvrf`; the base layer's *public* deterministic
+  election remains available without the flag — see §5 security notes).
+- Paper-scale (100-member) committees via MuSig2 signature aggregation
+  (`-posaggcommittee`), including distributed signing across hosts.
+- On-chain stake registration / unbonding (CSV-locked staking outputs, §5).
+- Bitcoin checkpoints (dynamic + operator-configured static) and CSV stake
+  locktimes against long-range attacks.
 
 ## 2. How it maps onto Elements' signed blocks
 
@@ -66,12 +68,18 @@ leader_r    = schedule_h[r]
 challenge_h = <leader_r.pubkey> OP_CHECKSIG
 ```
 
-Consensus (`CheckChallenge`, PoS mode):
+Consensus, split across two stages because the stake registry mirrors the
+*active tip's* UTXO set and headers/blocks can be accepted far ahead of it:
 
-1. The block's `proof.challenge` must equal `<some registered staker> CHECKSIG`.
-2. Let `r` be that staker's rank in `schedule_h`. Require
+1. `CheckChallenge` (header time) checks only the challenge's *form* — a
+   recognized PoS leader/committee challenge.
+2. `CheckPosStakeRules` (in `ConnectBlock`, where the registry equals the
+   block's parent state) does the election: the leader must be a registered
+   staker; let `r` be its rank in `schedule_h`, require
    `block.nTime >= P.nTime + r * pos_slot_interval` (the staker's slot has
-   opened — a higher-ranked staker cannot pre-empt a lower-ranked one).
+   opened — a higher-ranked staker cannot pre-empt a lower-ranked one); and
+   the challenge's committee must be exactly the elected one with a
+   strict-majority quorum.
 3. `CheckProof` (unchanged) verifies the block signature satisfies
    `challenge_h` — i.e. the block really is signed by `leader_r`.
 
@@ -83,15 +91,16 @@ block hash the leader signs.
 ## 3. Election in detail
 
 - **Stake registry** (`src/pos.{h,cpp}`, `StakeRegistry`): a singleton
-  `{CPubKey → uint64_t weight}`. Populated for the PoC from chain configuration
-  (`-staker=<pubkeyhex>:<weight>`, repeatable) or the chain's built-in genesis
-  staker set. Future: tracked in chainstate via staking transactions.
+  `{CPubKey → uint64_t weight}`. Populated from chain configuration
+  (`-staker=<pubkeyhex>:<weight>`, repeatable, the genesis staker set) plus
+  the chainstate-tracked UTXO staking layer of §5 (CSV-locked staking
+  outputs, mirrored on every connect/disconnect).
 - **Weighted ticket**: for staker `k`, ticket
   `t_k = H(seed || pubkey_k)` interpreted as a 256-bit big-endian integer.
-  The election compares `t_k / weight_k` (done with 512-bit cross-multiplication
-  to avoid division: `k` ranks before `j` iff
-  `t_k * weight_j < t_j * weight_k`). Lower ⇒ better ⇒ lower rank. Ties broken
-  by pubkey. More stake ⇒ statistically more rank-0 wins, proportional to weight.
+  The election ranks stakers ascending by the 256-bit integer quotient
+  `t_k / weight_k` (`WeightedTicket` in `src/pos.cpp`). Lower ⇒ better ⇒ lower
+  rank. Ties broken by pubkey. More stake ⇒ statistically more rank-0 wins,
+  proportional to weight.
 - **Schedule**: the full ascending ordering; `rank(pubkey)` is its index.
 - **Determinism**: every node computes the identical schedule from the (agreed)
   stake registry and the parent block + anchor. No secret is needed to *verify*
@@ -122,9 +131,10 @@ nodes converge on it — exactly as the federation's round-robin does today.
   schedule is publicly predictable from the stake set + anchor. This enables
   targeted DoS of upcoming leaders and some grinding on the (anchor-derived)
   seed by whoever produces the parent. The paper's *private* VRF fixes this:
-  only the winner can prove they won, after the fact. The election function is
-  isolated in `src/pos.cpp` (`PosElection`) precisely so a real EC-VRF
-  (RFC 9381) can replace it without touching the consensus wiring.
+  only the winner can prove they won, after the fact. The election functions
+  are isolated in `src/pos.cpp` (`PosSchedule` / `PosRank`) precisely so the
+  EC-VRF (RFC 9381) sortition of doc 07 could replace them without touching
+  the consensus wiring — which `-posvrf` now does.
 - **No slashing.** With committee certification enabled (majority quorum), a
   block cannot exist without most of the committee signing it — the paper's
   immediate-finality property — but nothing yet punishes a committee that signs
@@ -144,15 +154,19 @@ nodes converge on it — exactly as the federation's round-robin does today.
   spend, enforced by the script itself — the stake locktime of
   principle 11. Confidential outputs cannot carry weight (hidden amounts).
   With on-chain stake, all registry-dependent validation runs at block
-  connect time (`ContextualCheckBlock`), never at header time, so
-  headers-first sync cannot mis-evaluate eligibility (`-posvrf` mode).
+  connect time (`CheckPosStakeRules` in `ConnectBlock`) — never at header or
+  block-acceptance time, both of which can run far ahead of the active chain
+  the registry mirrors — so headers-first sync and parallel block download
+  cannot mis-evaluate eligibility, in either election mode.
 
 ## 6. Roadmap within PoS
 
 1. [x] Stake registry + deterministic stake-weighted, anchor-seeded ranked
        election (`src/pos.{h,cpp}`).
-2. [x] Consensus enforcement via per-block challenge in `CheckChallenge`;
-       signature check reuses `CheckProof`.
+2. [x] Consensus enforcement via per-block challenge: structural form in
+       `CheckChallenge` (header time), the registry-dependent election in
+       `CheckPosStakeRules`/`ConnectBlock`; signature check reuses
+       `CheckProof`.
 3. [x] Miner elects self and produces when its slot opens.
 4. [x] `getstakerinfo` / `getposschedule` RPCs; `-staker` / `-posslotinterval`
        / `-con_pos` options; a `pos` regtest-style chain.
@@ -161,7 +175,7 @@ nodes converge on it — exactly as the federation's round-robin does today.
 6. [x] Private VRF sortition: the VRF primitive (`src/vrf.{h,cpp}`,
        `vrfprove`/`vrfverify`) **and** the `-posvrf` consensus mode
        (coinbase-committed proof, proof-derived stake-weighted slots,
-       validated in `ContextualCheckBlock`) — see doc/sequentia/07-vrf.md.
+       validated at connect time) — see doc/sequentia/07-vrf.md.
        Now combined with committee certification: VRF-sortitioned
        committees with per-member eligibility proofs (doc 07 §4.5).
 7. [x] Committee + majority countersignature certification (immediate
@@ -218,4 +232,3 @@ nodes converge on it — exactly as the federation's round-robin does today.
        remains future work — by design; it needs block-download changes,
        whereas the static backstop above closes the practical fresh-sync hole
        without them.
-</content>

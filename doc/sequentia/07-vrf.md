@@ -30,7 +30,11 @@ produces a block, and no one can predict future leaders or grind their identity
 
 **ECVRF-SECP256K1-SHA256-TAI**, structured per RFC 9381 over the curve
 operations the vendored library exposes
-(`parse`/`create`/`tweak_mul`/`combine`/`negate`). The suite octet is the RFC's
+(`parse`/`create`/`combine`/`negate`, plus the ECDH module for the
+constant-time secret-scalar multiplications `sk·H` and `k·H`; the
+variable-time `tweak_mul` is used only on the verify side, where every
+scalar is public). Only compressed public keys are valid VRF identities
+(prove and verify both reject uncompressed, symmetrically). The suite octet is the RFC's
 experimental value `0xFF` (§5.5), and each hash is domain-separated as
 `suite ‖ front ‖ … ‖ 0x00` with the RFC front octets (`0x01` encode-to-curve,
 `0x02` challenge, `0x03` proof-to-hash):
@@ -107,13 +111,16 @@ convergence):
    coinbase `OP_RETURN` (tagged `SEQVRF`), so it is covered by the merkle root
    and therefore by the leader's block signature — no header-format change, no
    new genesis.
-4. **Validate.** In `ContextualCheckBlock` (which has the full block and the
-   parent): extract the proof, `VrfVerify` it against the leader's challenge
-   pubkey and the slot seed, recompute `slot`, and require
+4. **Validate.** In `CheckPosStakeRules`, called from `ConnectBlock` (which
+   has the full block, the parent, and — crucially — the stake registry at
+   exactly the parent's state): extract the proof, `VrfVerify` it against the
+   leader's challenge pubkey and the slot seed, recompute `slot`, and require
    `block.nTime ≥ parent.nTime + slot · interval` (the doc-06 liveness gate,
-   now VRF-driven). `CheckChallenge` in VRF mode only checks the challenge is a
-   registered staker; the rank/time check moves to `ContextualCheckBlock` where
-   the proof is available. The leader signature (`CheckProof`) is unchanged.
+   now VRF-driven). `CheckChallenge` at header time is structural only —
+   anything registry-dependent waits for connect time, because headers and
+   block data are accepted ahead of (or on a different branch than) the
+   active chain the registry mirrors. The leader signature (`CheckProof`) is
+   unchanged.
 5. **Committee.** Under private sortition nobody can rank stakers (each beta
    is secret until published), so committee membership is **threshold-based**,
    Algorand-style: staker `i` is a member iff
@@ -124,13 +131,13 @@ convergence):
    `q` fixed at a majority of the **expected** size — the paper's 51-of-100 —
    independent of the claimed count `k`); each claimed member's eligibility is
    proven by a tagged `SEQCMT` coinbase commitment (`pubkey ‖ proof`) verified
-   in `ContextualCheckBlock` (`bad-posvrf-member-missing/-invalid/
+   at connect time (`bad-posvrf-member-missing/-invalid/
    -not-selected`); the signatures themselves are enforced by the script. A
    leader needs a quorum of genuinely-selected members to cooperate — exactly
    the paper's certification model.
 
 **Status: implemented** behind `-posvrf` (requires `-con_pos`), including
-committee certification (`-poscommitteesize` 2..16) per §4.5.
+committee certification (`-poscommitteesize` up to 16 in the script form, up to 100 with `-posaggcommittee`) per §4.5.
 
 ## 5. Roadmap position
 
@@ -139,7 +146,7 @@ committee certification (`-poscommitteesize` 2..16) per §4.5.
 - [x] `-posvrf` mode: coinbase-committed proof (tagged `SEQVRF` OP_RETURN,
       covered by the merkle root and hence the leader's signature), the
       stake-weighted sortition slot `PosVrfSlot` (capped at `POS_VRF_MAX_SLOT`),
-      consensus validation in `ContextualCheckBlock` (proof verifies against
+      consensus validation in `CheckPosStakeRules`/`ConnectBlock` (proof verifies against
       the leader's challenge key over the slot seed; block time must respect
       the proof-derived slot), `CheckChallenge` reduced to registered-staker +
       leader-only-form in this mode, miner/`generateposblock` integration, and
@@ -158,7 +165,6 @@ committee certification (`-poscommitteesize` 2..16) per §4.5.
       (`feature_pos_vrf_committee.py`).
 - [x] Paper-scale committees: MuSig2 signature aggregation
       (`-posaggcommittee`, committee cap 100) — §6.
-</content>
 
 ## 6. Paper-scale committees — MuSig2 aggregation (implemented)
 
@@ -188,7 +194,7 @@ neither requiring a header-format change:
 
 Either way the **consensus rule is unchanged in spirit** — leader VRF proof +
 a quorum of sortition-eligibility proofs in the coinbase + one aggregate
-signature over the block — so `ContextualCheckBlock`'s membership checks
+signature over the block — so the connect-time membership checks
 (`bad-posvrf-member-*`) carry over verbatim; only the signature *encoding* and
 its verification path change. The committee-membership threshold math
 (`PosVrfIsCommitteeMember`, `PosVrfSlot`) and the `SEQCMT` eligibility
@@ -217,7 +223,7 @@ rejection, the quorum-subset property, and the n-of-n boundary).
   MuSig2 aggregate of the member set.
 - **Member set = the `SEQCMT` commitments.** Under aggregation the coinbase
   eligibility commitments don't just *prove* a claimed list, they *are* the
-  list: `ContextualCheckBlock` requires every named member to be distinct and
+  list: `CheckPosStakeRules` (`ConnectBlock`) requires every named member to be distinct, at most the 100-member cap (`bad-posvrf-member-count`), and
   sortition-selected (same `bad-posvrf-member-*` checks), at least
   `PosQuorum(committee_size)` members to be named (`bad-posvrf-agg-quorum`),
   and `MuSigAggregatePubkey(named set) == agg_key` (`bad-posvrf-agg-key`) —
@@ -255,7 +261,8 @@ between the two rounds and consumes it exactly once. Five RPCs expose the flow:
   session id (a duplicate id is refused — single-use).
 - `musigpartialsign sessionid privkey [pubkeys] [pubnonces] msg` → **round 2**:
   the member's 32-byte partial signature; consumes the session and refuses any
-  message/set that differs from round 1 (binding against nonce-reuse misuse).
+  message, member set, or signing key that differs from round 1 (binding
+  against nonce-reuse misuse), as well as a nonce count ≠ the member count.
 - `musigaggregate [pubkeys] [pubnonces] [partials] msg` → the final 64-byte
   signature (public; coordinator-side), self-checked against the aggregate key.
 - `musigverify [pubkeys] msg sig` → BIP340 verification.

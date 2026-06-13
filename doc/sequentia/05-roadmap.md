@@ -90,11 +90,11 @@ work depends on.
        cannot ban each other or permanently reject valid blocks. Only
        structural violations (R1/R2, height mismatch) are permanent.
 
-## Milestone 4 — Integration & demo (partially done)
+## Milestone 4 — Integration & demo — COMPLETE
 - [x] End-to-end demo of the two mechanisms together: federated chain anchored
       to a parent chain, dynamic fee whitelist fed by the price server against
       a mock exchange API, parent reorg correctly reorganizing the anchored
-      chain. (Cross-chain HTLC/atomic-swap walkthrough still to do.)
+      chain.
 - [x] Operator docs: `contrib/price-server/README.md`; anchoring options
       documented in `-help` (ELEMENTS category).
 - [x] Cross-chain swap consistency demo:
@@ -127,8 +127,26 @@ work depends on.
       `-con_default_blinded_addresses` for custom chains. Functional test
       `feature_ct_opt_in.py`. See doc 08.
 
-## Milestone 5 (later) — PoS consensus
-- [ ] Per the theoretical paper and doc 04 §3. Out of scope for the PoC.
+## Milestone 5 — PoS consensus — COMPLETE
+Originally deferred ("out of scope for the PoC"); since implemented in full,
+per the theoretical paper and doc 04 §3. The detailed item list lives in
+[doc 06 §"Implementation roadmap"](06-proof-of-stake.md) (all items checked):
+
+- [x] Stake registry + deterministic stake-weighted leader schedule, enforced
+      by consensus (`-con_pos`, `-staker`, `-posslotinterval`).
+- [x] Private VRF sortition (RFC 9381-structured ECVRF over secp256k1,
+      `-posvrf`; doc 07).
+- [x] Committee certification: script multisig up to 16 members
+      (`-poscommitteesize`) and paper-scale committees up to 100 via MuSig2
+      aggregation (`-posaggcommittee`), including **distributed signing**
+      across separately-hosted members (`getposblocktemplate` /
+      `submitposblock` + the `musig*` RPC suite; doc 07 §6).
+- [x] On-chain stake registration / unbonding (`getstakescript`,
+      `-posunbonding`).
+- [x] Long-range-attack defenses: dynamic Bitcoin checkpoints
+      (`getcheckpointpayload` / `getcheckpointinfo`, `-poscheckpointdepth`)
+      and operator-configured static checkpoints (`-poscheckpoint`).
+- [x] Operator runbook for deploying all of it (doc 09).
 
 ## Risks / watch-items
 - **Build resources.** A full Elements build is heavy (~4-core / 15 GB host
@@ -141,4 +159,3 @@ work depends on.
 - **Consensus correctness of reorg-following** is the subtlest part; treat the
   bitcoind best chain as the shared oracle and keep the invalidation logic
   deterministic across nodes (doc 03 §4).
-</content>

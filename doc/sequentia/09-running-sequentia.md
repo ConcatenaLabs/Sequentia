@@ -61,10 +61,12 @@ con_bitcoin_anchor=1
 con_pos=1
 posvrf=1
 posaggcommittee=1
-poscommitteesize=51          # up to 100 with aggregation; here a 51-of-100-style committee
+poscommitteesize=100         # quorum = strict majority of this: the paper's 51-of-100
 posslotinterval=10
 posunbonding=2016            # CSV blocks a stake must lock before it counts
-# The genesis staker set — IDENTICAL on every node (see §6 / §8):
+# The genesis staker set — IDENTICAL on every node (see §6 / §8). It must
+# hold at least quorum-many (here 51) sortition-eligible members, or no
+# block can ever be certified:
 staker=02<pubkey-hex>:1000000
 staker=03<pubkey-hex>:1000000
 # ... one per founding staker ...
@@ -84,9 +86,12 @@ With `con_any_asset_fees=1`, producers accept fees in any asset they choose,
 valued by a relative exchange-rate table. Two layers (see
 [`02-open-fee-market.md`](02-open-fee-market.md)):
 
-- **Static** — a fixed `{asset → relative value}` whitelist:
+- **Static** — a fixed `{asset → relative value}` whitelist. Rates are
+  *integers*: how many atoms of the asset equal 1 policy unit (100000000
+  atoms), so 100000000 means 1:1 and 50000000 values the asset at twice the
+  policy asset:
   ```
-  elements-cli setfeeexchangerates '{"<asset-hex>": 1.0, "<other-asset>": 0.5}'
+  elements-cli setfeeexchangerates '{"<asset-hex>": 100000000, "<other-asset>": 50000000}'
   elements-cli getfeeexchangerates
   ```
 - **Dynamic** — a locally-run **price server** that polls exchange/DEX APIs and
@@ -97,8 +102,10 @@ valued by a relative exchange-rate table. Two layers (see
   # edit thresholds, asset map, and RPC credentials
   python3 contrib/price-server/price_server.py --config price-server.json
   ```
-  Dynamic rates expire after `-dynfeeratemaxage` seconds if the server stops, so
-  a dead price server fails closed. Inspect with `getdynamicfeerates` /
+  **Set `-dynfeeratemaxage` (e.g. 600).** With it, dynamic rates expire that
+  many seconds after the server stops publishing, so a dead price server fails
+  closed; the default is 0 = *no expiry*, which would honour stale rates
+  forever if the server crashes. Inspect with `getdynamicfeerates` /
   `getfeeacceptancepolicy`; clear with `cleardynamicfeerates`.
 
 ## 5. Bitcoin anchoring
@@ -169,7 +176,7 @@ flow (see [`07-vrf.md`](07-vrf.md) §6), which a coordinator script automates:
    ```
 
 `feature_pos_distributed_committee.py` is a runnable reference for this whole
-loop. A session is single-use and bound to its (member set, message); abandoned
+loop. A session is single-use and bound to its (signer, member set, message); abandoned
 round-1 sessions expire (10 min) and are capped, so an incomplete round can
 never grow node memory.
 
@@ -183,7 +190,7 @@ with `getstakerinfo` / `getposschedule`.
 
 ## 7. Long-range-attack defenses
 
-Two complementary layers (see [`06-proof-of-stake.md`](06-proof-of-stake.md) §11):
+Two complementary layers (see [`06-proof-of-stake.md`](06-proof-of-stake.md) §6, roadmap items 9–10):
 
 - **Dynamic Bitcoin checkpoints.** Anyone commits a block hash into the parent
   chain (`getcheckpointpayload` → an OP_RETURN); once buried

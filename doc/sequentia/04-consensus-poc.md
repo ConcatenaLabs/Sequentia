@@ -1,8 +1,16 @@
-# Challenge 3 — Consensus (PoC: strong federation; future: PoS)
+# Challenge 3 — Consensus (PoC: strong federation; since implemented: PoS)
 
-Challenge 3 (Proof-of-Stake with Bitcoin checkpoints) is **explicitly
-deprioritised**. The proof of concept runs on a **strong federation**, which
-Elements provides natively. No new consensus code is required for the PoC.
+> **Status:** this document captures the original PoC decision to run on a
+> strong federation and the *planned* path to PoS. The full Proof-of-Stake
+> consensus — stake-weighted election, private VRF sortition, committee
+> certification with MuSig2 aggregation, on-chain stake, and Bitcoin
+> checkpoints — has **since been implemented**; see
+> [`06-proof-of-stake.md`](06-proof-of-stake.md) and [`07-vrf.md`](07-vrf.md).
+> §3 below is kept as the design rationale.
+
+Challenge 3 (Proof-of-Stake with Bitcoin checkpoints) was deprioritised for
+the proof of concept, which runs on a **strong federation** that Elements
+provides natively — no new consensus code was required for the PoC.
 
 ## 1. The PoC: Elements "signed blocks" (strong federation)
 
@@ -46,7 +54,7 @@ tooling (`signblock` / `getnewblockhex` / `combineblocksigs` RPCs, and the
   over it. The anchor is committed, so a block's anchor cannot be altered without
   invalidating the signature.
 
-## 3. Path to the full PoS design (out of scope for the PoC)
+## 3. Path to the full PoS design (since implemented — docs 06/07)
 
 Recorded so the PoC doesn't paint us into a corner; see the theoretical paper for
 the full treatment.
@@ -70,4 +78,3 @@ or small `n`, no sortition, no stake weighting), so migrating later is additive
 rather than a rewrite. **Crucially, challenge 2 (anchoring) is already the
 substrate the PoS design depends on for both its randomness seed and its liveness
 clause — building it now is on the critical path regardless of when PoS lands.**
-</content>

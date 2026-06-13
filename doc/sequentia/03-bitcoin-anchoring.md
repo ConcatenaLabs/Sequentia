@@ -6,8 +6,14 @@ Bitcoin reorgs away a referenced block, Sequentia reorgs the dependent blocks;
 otherwise Sequentia has **immediate finality**. This enables real-time
 cross-chain atomic swaps with no extra reorg-protection timelocks.
 
-This feature is **not yet implemented** in the Sequentia fork. The design below
-is the implementation plan.
+> **Status: implemented** (`src/anchor.{h,cpp}`, header fields
+> `m_anchor_height`/`m_anchor_hash`, validation in `ContextualCheckBlockHeader`,
+> the `getanchorstatus` RPC; options `-con_bitcoin_anchor` / `-validateanchor` /
+> `-anchorminconf` / `-anchorpollinterval`; tested in
+> `feature_bitcoin_anchoring.py` and `feature_anchor_swap_consistency.py`).
+> The text below is the original design; where it names a recency window
+> (`-anchormaxlag`/`-anchormaxlead`) or an `-anchorbtc` switch, those were
+> folded into the options above or deferred — see doc 05, Milestone 3 item 6.
 
 ## 1. The anchor datum
 
@@ -71,7 +77,7 @@ don't require re-reading the block.
   on bitcoind's active chain (`confirmations >= 0`, i.e. not on a stale branch).
 - Enforce a **maturity/recency window**: reject anchors whose height is implausibly
   far ahead of, or behind, the validator's view of Bitcoin's tip
-  (`-anchormaxlag` / `-anchormaxlead`), bounding how stale the chain may get
+  (`-anchormaxlag` / `-anchormaxlead` — **deferred**, see the status note above), bounding how stale the chain may get
   (the paper's cross-chain-consistency concern, principle 7) and rejecting
   anchors to not-yet-seen Bitcoin blocks.
 
@@ -122,8 +128,9 @@ oracle.
 
 - Make the Bitcoin connection **mandatory** when `g_con_bitcoin_anchor` (today
   `-validatepegin` defaults on only when `has_parent_chain`). New settings:
-  `-anchorbtc=1` (require bitcoind for anchoring), reusing `-mainchainrpc*` for
-  the connection, plus `-anchormaxlag` / `-anchormaxlead` / `-anchorminconf`.
+  as implemented: `-con_bitcoin_anchor=1`, reusing `-mainchainrpc*` for the
+  connection, plus `-validateanchor` / `-anchorminconf` / `-anchorpollinterval`
+  (the designed `-anchormaxlag` / `-anchormaxlead` window is deferred).
 - Startup probe analogous to `MainchainRPCCheck()`: refuse to start (or run
   validation-only) if anchoring is required but bitcoind is unreachable.
 
@@ -134,7 +141,7 @@ oracle.
 | bitcoind unreachable at startup | Refuse to produce blocks; optionally header-validate with cached data; loud warning. |
 | bitcoind behind the network | Anchors look "ahead"; R3 lead-window rejects until local bitcoind catches up — fail safe, no bad accept. |
 | Deep Bitcoin reorg past maturity window | Cascade invalidation of dependent Sequentia blocks; expected and correct (the swaps those blocks protected are also gone on Bitcoin). |
-| Producer anchors too far in the past (fee-securing incentive, paper principle 7) | Bounded by `-anchormaxlag`; future PoS adds incentive weighting. For the federated PoC, a policy "anchor to tip-minus-`anchorminconf`" suffices. |
+| Producer anchors too far in the past (fee-securing incentive, paper principle 7) | Bounded by anchor monotonicity and R3 (the designed `-anchormaxlag` window is deferred); PoS adds incentive weighting. For the federated PoC, a policy "anchor to tip-minus-`anchorminconf`" suffices. |
 
 ## 7. Test strategy
 
@@ -149,4 +156,3 @@ oracle.
     and rebuilds.
   - guard: reject a block whose anchor height < parent's; reject an anchor to a
     non-existent / stale BTC hash; reject anchors outside the lag/lead window.
-</content>

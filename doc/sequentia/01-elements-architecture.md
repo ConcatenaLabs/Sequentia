@@ -125,4 +125,3 @@ cache, then consult them in header validation and block assembly (doc 03).
   Sequentia blocks whose anchor is no longer on Bitcoin's best chain (doc 03).
 - `CBlockIndex` (`src/chain.h`) — per-block index; we extend it with the cached
   Bitcoin anchor height/hash for fast monotonicity checks without deserialising.
-</content>

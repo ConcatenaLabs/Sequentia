@@ -46,7 +46,7 @@ here so the dynamic work bolts on cleanly; see doc 01 §3 for detail.
    policy *and* the producer's acceptance set. We keep that for the PoC but note
    the distinction for later (a node might relay assets it won't itself mine).
 
-## B. New work — the dynamic price server
+## B. The dynamic price server (implemented — see roadmap M2)
 
 ### B.1 Responsibilities
 
@@ -90,29 +90,31 @@ The sidecar drives the node through new RPCs registered next to the existing
 | `setdynamicfeerates {asset: rate, …}` | Replace the **dynamic** layer of the rate map (distinct from the static layer set by `setfeeexchangerates`), persist, `RecomputeFees()`. |
 | `getdynamicfeerates` | Return the current dynamic layer with metadata (source, age). |
 | `getfeeacceptancepolicy` | Return effective acceptance set = static ∪ dynamic, with provenance per asset. |
-| `cleardynamicfeerates` | Drop stale dynamic entries (e.g. on sidecar shutdown / staleness). |
+| `cleardynamicfeerates` | Drop **all** dynamic entries (e.g. on sidecar shutdown). |
 
 Internally this means **layering** the `ExchangeRateMap`: a `static` map and a
 `dynamic` map with a defined precedence (proposed: explicit static entry wins;
 otherwise dynamic; effective map = merge). This avoids the price server clobbering
 a value the operator pinned by hand. Add a per-entry `source` + `updated_at` so
-staleness can be enforced (a dynamic rate older than `-dynfeerate-maxage` is
+staleness can be enforced (a dynamic rate older than `-dynfeeratemaxage` is
 dropped, failing safe to "not accepted").
 
 ### B.4 Sidecar internals (`contrib/price-server/`)
 
+As implemented, the sidecar is a single stdlib-only script plus a JSON config
+(the original design sketched a package layout; the same responsibilities live
+in one file):
+
 ```
 price-server/
-  config.toml          # API endpoints, asset map, thresholds, poll interval,
-                        # node RPC creds, reference-unit definition
-  sources/             # one adapter per API (binance, coingecko, dex-oracle, …)
-  thresholds.py        # admission predicate over the collected metrics
-  rate.py              # price -> scaled rate (atoms per rfa)
-  publisher.py         # calls setdynamicfeerates / cleardynamicfeerates
-  main.py              # poll loop + staleness + structured logging
+  config.example.json  # API endpoints, asset map, thresholds, poll interval,
+                       # node RPC creds, reference-unit definition
+  price_server.py      # source adapters (coingecko + generic JSON API),
+                       # admission thresholds, price -> rate math,
+                       # setdynamicfeerates publisher, poll loop
 ```
 
-Config sketch:
+Original design config sketch (the implemented config is `config.example.json` with the same fields):
 
 ```toml
 poll_interval_secs = 60
@@ -176,4 +178,3 @@ low-risk starting point.
   by rfa; assert dropping B's rate evicts/deprioritises them via `RecomputeFees`.
 - Sidecar: mock API server; assert admission/withdrawal across threshold
   crossings; assert node RPC calls.
-</content>

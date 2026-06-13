@@ -82,23 +82,26 @@ The relevant findings (detailed in [`01-elements-architecture.md`](01-elements-a
   - Gated by the consensus flag `g_con_any_asset_fees` (set `true` for the
     Sequentia chain in `src/chainparams.cpp`).
 
-  **What is missing from challenge 1:** the *dynamic* price server and its
-  threshold-driven auto-admission. See [`02-open-fee-market.md`](02-open-fee-market.md).
+  The *dynamic* layer — the price server and its threshold-driven
+  auto-admission (`setdynamicfeerates` etc., `contrib/price-server/`) — has
+  since been implemented too. See [`02-open-fee-market.md`](02-open-fee-market.md).
 
 - **Bitcoin-node connectivity already exists.** Elements talks to a trusted
   `bitcoind` over RPC for peg-in validation: `src/mainchainrpc.{h,cpp}`,
   `MainchainRPCCheck()` in `src/init.cpp`, and the `-mainchainrpc*` /
   `-validatepegin` settings. **The anchoring feature reuses this transport** to
-  fetch Bitcoin block hashes/heights rather than inventing a new one. See
-  [`03-bitcoin-anchoring.md`](03-bitcoin-anchoring.md). Challenge 2 is *not* yet
-  implemented in the Sequentia fork.
+  fetch Bitcoin block hashes/heights rather than inventing a new one.
+  Anchoring is implemented (`src/anchor.{h,cpp}`, `-con_bitcoin_anchor`). See
+  [`03-bitcoin-anchoring.md`](03-bitcoin-anchoring.md).
 
 - **Strong-federation consensus already exists.** Elements "signed blocks"
   (`g_signed_blocks`, `consensus.signblockscript`, `CProof` /
   `DynaFedParams` / `m_signblock_witness` in `src/primitives/block.h`) provide a
   federated block-signing consensus out of the box. The Sequentia chain already
-  enables it (`g_signed_blocks = true`). This satisfies the challenge-3 PoC
-  requirement with no new consensus code.
+  enables it (`g_signed_blocks = true`). This satisfied the challenge-3 PoC
+  requirement with no new consensus code; the full Proof-of-Stake consensus
+  (docs 06/07) has since been implemented on top of the same signed-block
+  machinery, behind `-con_pos`.
 
 ## 3. Base decision: fork the existing Sequentia project
 
@@ -153,5 +156,7 @@ git merge elements-23.3.3        # resolve conflicts, then build & run the test 
 | [`03-bitcoin-anchoring.md`](03-bitcoin-anchoring.md) | Challenge 2: block-header change, validation rules, reorg-following, Bitcoin RPC. |
 | [`04-consensus-poc.md`](04-consensus-poc.md) | Challenge 3 PoC: strong federation via Elements signed blocks; path to PoS. |
 | [`05-roadmap.md`](05-roadmap.md) | Milestones, ordering, and test strategy. |
-</content>
-</invoke>
+| [`06-proof-of-stake.md`](06-proof-of-stake.md) | The implemented PoS consensus: stake registry, leader election, committees, on-chain stake, checkpoints. |
+| [`07-vrf.md`](07-vrf.md) | Private VRF sortition (RFC 9381-structured ECVRF) and MuSig2 committee aggregation, incl. distributed signing. |
+| [`08-addresses-and-ct.md`](08-addresses-and-ct.md) | Bitcoin-identical addresses and opt-in confidential transactions. |
+| [`09-running-sequentia.md`](09-running-sequentia.md) | Operator runbook: deploying the full system end-to-end. |

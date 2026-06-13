@@ -26,7 +26,10 @@ con_bitcoin_anchor=1
 con_pos=1
 posvrf=1
 posaggcommittee=1
-poscommitteesize=51        # expected committee size (<=100 with aggregation)
+poscommitteesize=100       # expected committee size (<=100 with aggregation);
+                           # quorum = strict majority: the paper's 51-of-100.
+                           # The staker set below must hold at least quorum-many
+                           # sortition-eligible members or no block can be certified.
 posslotinterval=10         # seconds per VRF sortition slot
 posunbonding=2016          # CSV blocks a stake locks before it counts / can unbond
 
@@ -65,6 +68,8 @@ mainchainrpcport=8332
 # Prefer cookie auth; or set mainchainrpcuser / mainchainrpcpassword.
 mainchainrpccookiefile=/home/YOU/.bitcoin/.cookie
 
-# Dynamic fee rates expire if the price server stops (fail-closed). Tune to
-# your price-server poll cadence (see contrib/price-server/).
-#dynfeeratemaxage=300
+# Make dynamic fee rates expire if the price server stops publishing
+# (fail-closed). The built-in default is 0 = no expiry, which would honour
+# stale rates forever after a price-server crash — set this. Tune to your
+# price-server poll cadence (see contrib/price-server/).
+dynfeeratemaxage=600
