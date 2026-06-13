@@ -147,12 +147,19 @@ nodes converge on it — exactly as the federation's round-robin does today.
   `-staker` configuration layer (the genesis stake set) and a UTXO layer:
   every unspent staking output — the bare script
   `<csv> OP_CHECKSEQUENCEVERIFY OP_DROP <pubkey> OP_CHECKSIG` holding an
-  explicit policy-asset amount with `csv >= -posunbonding` — adds its amount
-  to its key's weight. The layer is a pure function of the UTXO set
-  (rebuilt from it at startup, mirrored exactly on every tip
+  explicit policy-asset amount whose unbonding lock meets the chain minimum —
+  adds its amount to its key's weight. The layer is a pure function of the UTXO
+  set (rebuilt from it at startup, mirrored exactly on every tip
   connect/disconnect, hence reorg-safe), and unbonding is the CSV-gated
   spend, enforced by the script itself — the stake locktime of
   principle 11. Confidential outputs cannot carry weight (hidden amounts).
+  The minimum is compared as a **wall-clock duration** (`PosStakeLockSeconds`
+  vs `-posunbonding × posslotinterval`), so the CSV may be height-based *or*
+  **time-based** (BIP68 512-second units). Time-based is required for the
+  whitepaper's "lock-in longer than the 2016-BTC-block (~2 week) checkpoint
+  window" (§3.11): at fast slot intervals that exceeds the 16-bit height-CSV
+  range (~7.6 days max), which only the time encoding can express.
+  `getstakescript ... csv_seconds=<n>` builds a time-based staking script.
   With on-chain stake, all registry-dependent validation runs at block
   connect time (`CheckPosStakeRules` in `ConnectBlock`) — never at header or
   block-acceptance time, both of which can run far ahead of the active chain

@@ -31,7 +31,13 @@ poscommitteesize=100       # expected committee size (<=100 with aggregation);
                            # The staker set below must hold at least quorum-many
                            # sortition-eligible members or no block can be certified.
 posslotinterval=10         # seconds per VRF sortition slot
-posunbonding=2016          # CSV blocks a stake locks before it counts / can unbond
+# Minimum unbonding lock, in (SEQ) blocks; the required wall-clock lock is this
+# x posslotinterval. The whitepaper (§3.11) requires the lock to exceed the
+# 2016-BTC-block (~2 week) checkpoint window, so stakers cannot unbond and then
+# rewrite checkpointed history. At 10s slots ~2 weeks = 120,960 blocks; 130000
+# (~15 days) clears it. This exceeds the 16-bit height-CSV range, so staking
+# outputs must use a TIME-BASED CSV lock (getstakescript ... csv_seconds=...).
+posunbonding=130000
 con_blocksubsidy=0         # no inflation: SEQ is pre-mined at genesis, never
                            # minted by block production; stakers earn fees only
                            # (whitepaper §3.9). 0 is also the custom-chain default.
@@ -53,7 +59,8 @@ signblockscript=51
 # Published long-range-attack checkpoints (append over the network's life).
 #poscheckpoint=100000:<blockhash>
 #poscheckpoint=200000:<blockhash>
-poscheckpointdepth=6
+poscheckpointdepth=2016    # parent-chain (Bitcoin) confirmations before a
+                           # checkpoint finalizes: ~2 weeks (whitepaper §3.11)
 
 # ============================================================================
 # NODE-LOCAL (per operator — do NOT share)

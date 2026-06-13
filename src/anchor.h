@@ -82,8 +82,11 @@ void AnchorWatchTask(ChainstateManager& chainman);
 // unbonded after a checkpoint cannot rewrite the history below it.
 
 /** Parent-chain confirmations a checkpoint commitment needs before it
- *  finalizes (0 disables checkpoint processing). */
-static const int DEFAULT_POS_CHECKPOINT_DEPTH = 6;
+ *  finalizes (0 disables checkpoint processing). The whitepaper (§3.11) sets
+ *  this at 2016 Bitcoin blocks (~2 weeks): the checkpoint "consolidation"
+ *  window, which the stake-unbonding period must exceed so keys cannot unbond
+ *  and then rewrite history below a checkpoint. */
+static const int DEFAULT_POS_CHECKPOINT_DEPTH = 2016;
 /** How many parent-chain blocks to scan backwards for checkpoints on the
  *  first watcher pass. */
 static const int DEFAULT_POS_CHECKPOINT_SCAN = 100;

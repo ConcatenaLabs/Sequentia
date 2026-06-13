@@ -406,8 +406,10 @@ BOOST_AUTO_TEST_CASE(pos_stake_script_roundtrip)
 {
     CPubKey staker = MakeKey();
 
-    // Round-trips for smallint (OP_1..16) and CScriptNum-push CSV values.
-    for (uint32_t csv : {1u, 5u, 16u, 17u, 144u, 65535u}) {
+    // Round-trips for smallint (OP_1..16), CScriptNum-push height CSV, and
+    // time-based CSV (the BIP68 type flag set, 512-second units).
+    const uint32_t time_csv = CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG | 2363u; // ~2 weeks
+    for (uint32_t csv : {1u, 5u, 16u, 17u, 144u, 65535u, time_csv}) {
         CScript script = BuildStakeScript(staker, csv);
         auto parsed = ParseStakeScript(script);
         BOOST_REQUIRE_MESSAGE(parsed.has_value(), strprintf("csv=%u", csv));
@@ -415,9 +417,11 @@ BOOST_AUTO_TEST_CASE(pos_stake_script_roundtrip)
         BOOST_CHECK_EQUAL(parsed->second, csv);
     }
 
-    // Rejections: zero/oversized csv, wrong opcodes, trailing data, not a key.
+    // Rejections: zero csv, a stray reserved bit (0x10000), the disable flag,
+    // wrong opcodes, trailing data, not a key.
     BOOST_CHECK(!ParseStakeScript(CScript() << (int64_t)0 << OP_CHECKSEQUENCEVERIFY << OP_DROP << ToByteVector(staker) << OP_CHECKSIG).has_value());
     BOOST_CHECK(!ParseStakeScript(CScript() << (int64_t)0x10000 << OP_CHECKSEQUENCEVERIFY << OP_DROP << ToByteVector(staker) << OP_CHECKSIG).has_value());
+    BOOST_CHECK(!ParseStakeScript(CScript() << (int64_t)(CTxIn::SEQUENCE_LOCKTIME_DISABLE_FLAG | 5u) << OP_CHECKSEQUENCEVERIFY << OP_DROP << ToByteVector(staker) << OP_CHECKSIG).has_value());
     BOOST_CHECK(!ParseStakeScript(CScript() << (int64_t)5 << OP_CHECKLOCKTIMEVERIFY << OP_DROP << ToByteVector(staker) << OP_CHECKSIG).has_value());
     BOOST_CHECK(!ParseStakeScript(CScript() << (int64_t)5 << OP_CHECKSEQUENCEVERIFY << OP_DROP << ToByteVector(staker) << OP_CHECKSIGVERIFY).has_value());
     CScript trailing = BuildStakeScript(staker, 5);
@@ -451,6 +455,28 @@ BOOST_AUTO_TEST_CASE(pos_stake_script_roundtrip)
     // Zero value does not count.
     CTxOut zero(CConfidentialAsset(::policyAsset), CConfidentialValue(0), ok_script);
     BOOST_CHECK(!StakeFromTxOut(zero).has_value());
+
+    // A minimum unbonding lock beyond the 16-bit height-CSV range (the
+    // whitepaper's ~2-week / >2016-BTC-block lock at fast slots) can only be
+    // met by a time-based CSV; height-based outputs no longer qualify.
+    int64_t old_slot = g_pos_slot_interval;
+    g_pos_slot_interval = 10;             // 10s slots
+    g_pos_unbonding_period = 120960;      // 2 weeks of 10s blocks (> 65535)
+    // Required ~= 1,209,600 s. A max height CSV (65535 blocks = 655,350 s)
+    // falls short; a time-based CSV of 2363 * 512 = 1,209,856 s clears it.
+    CTxOut height_short(CConfidentialAsset(::policyAsset), CConfidentialValue(50000), BuildStakeScript(staker, 65535));
+    BOOST_CHECK(!StakeFromTxOut(height_short).has_value());
+    CScript time_script = BuildStakeScript(staker, CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG | 2363u);
+    CTxOut time_ok(CConfidentialAsset(::policyAsset), CConfidentialValue(50000), time_script);
+    auto time_stake = StakeFromTxOut(time_ok);
+    BOOST_REQUIRE(time_stake.has_value());
+    BOOST_CHECK_EQUAL(time_stake->second, 50000U);
+    // Just-too-short time lock (one 512s unit under) is rejected.
+    CScript time_short_script = BuildStakeScript(staker, CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG | 2361u);
+    CTxOut time_short(CConfidentialAsset(::policyAsset), CConfidentialValue(50000), time_short_script);
+    BOOST_CHECK(!StakeFromTxOut(time_short).has_value());
+
+    g_pos_slot_interval = old_slot;
     g_pos_unbonding_period = old_unbonding;
 }
 

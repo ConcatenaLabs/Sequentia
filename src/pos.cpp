@@ -368,7 +368,9 @@ std::optional<std::pair<CPubKey, uint32_t>> ParseStakeScript(const CScript& scri
     opcodetype opcode;
     std::vector<unsigned char> data;
 
-    // <csv_blocks>: either an OP_1..OP_16 smallint or a minimal CScriptNum push.
+    // <csv>: an OP_1..OP_16 smallint or a minimal CScriptNum push, carrying a
+    // BIP68 relative-locktime value — either height-based (no type flag) or
+    // time-based (CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG set, 512-second units).
     if (!script.GetOp(pc, opcode, data)) return std::nullopt;
     int64_t csv = -1;
     if (opcode >= OP_1 && opcode <= OP_16) {
@@ -382,8 +384,13 @@ std::optional<std::pair<CPubKey, uint32_t>> ParseStakeScript(const CScript& scri
     } else {
         return std::nullopt;
     }
-    // Relative-height locks are 16-bit (BIP68); zero adds no lock.
-    if (csv < 1 || csv > 0xFFFF) return std::nullopt;
+    if (csv < 1) return std::nullopt; // must be a positive relative lock
+    // Canonical for staking: only the type flag and the 16-bit value may be
+    // set (no disable flag, no stray reserved bits) — so the encoding is
+    // unambiguous across nodes.
+    const uint32_t allowed = CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG | CTxIn::SEQUENCE_LOCKTIME_MASK;
+    if ((uint64_t)csv & ~(uint64_t)allowed) return std::nullopt;
+    if ((csv & CTxIn::SEQUENCE_LOCKTIME_MASK) == 0) return std::nullopt; // value must be non-zero
 
     if (!script.GetOp(pc, opcode, data) || opcode != OP_CHECKSEQUENCEVERIFY) return std::nullopt;
     if (!script.GetOp(pc, opcode, data) || opcode != OP_DROP) return std::nullopt;
@@ -393,6 +400,34 @@ std::optional<std::pair<CPubKey, uint32_t>> ParseStakeScript(const CScript& scri
     if (!script.GetOp(pc, opcode, data) || opcode != OP_CHECKSIG) return std::nullopt;
     if (pc != script.end()) return std::nullopt;
     return std::make_pair(pubkey, (uint32_t)csv);
+}
+
+//! The effective slot interval in seconds (>=1), used to put height- and
+//! time-based locks on one comparable axis.
+static int64_t EffectiveSlotSeconds()
+{
+    return g_pos_slot_interval > 0 ? g_pos_slot_interval : 1;
+}
+
+std::optional<int64_t> PosStakeLockSeconds(uint32_t csv)
+{
+    if (csv & CTxIn::SEQUENCE_LOCKTIME_DISABLE_FLAG) return std::nullopt; // not a relative lock
+    const uint32_t allowed = CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG | CTxIn::SEQUENCE_LOCKTIME_MASK;
+    if (csv & ~allowed) return std::nullopt; // stray reserved bits
+    uint32_t value = csv & CTxIn::SEQUENCE_LOCKTIME_MASK;
+    if (value == 0) return std::nullopt;
+    if (csv & CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG) {
+        // Time-based: 512-second units (the only form that can express a lock
+        // beyond the 16-bit height cap, e.g. the whitepaper's >2016-BTC-block
+        // unbonding at fast slot intervals).
+        return (int64_t)value << CTxIn::SEQUENCE_LOCKTIME_GRANULARITY;
+    }
+    return (int64_t)value * EffectiveSlotSeconds(); // height-based
+}
+
+int64_t PosRequiredUnbondingSeconds()
+{
+    return (int64_t)g_pos_unbonding_period * EffectiveSlotSeconds();
 }
 
 std::optional<std::pair<CPubKey, uint64_t>> StakeFromTxOut(const CTxOut& out)
@@ -405,7 +440,10 @@ std::optional<std::pair<CPubKey, uint64_t>> StakeFromTxOut(const CTxOut& out)
     if (amount <= 0) return std::nullopt;
     auto parsed = ParseStakeScript(out.scriptPubKey);
     if (!parsed) return std::nullopt;
-    if (parsed->second < g_pos_unbonding_period) return std::nullopt;
+    // The unbonding lock must be at least the chain minimum, compared as a
+    // wall-clock duration so height- and time-based CSV are judged uniformly.
+    auto lock = PosStakeLockSeconds(parsed->second);
+    if (!lock || *lock < PosRequiredUnbondingSeconds()) return std::nullopt;
     return std::make_pair(parsed->first, (uint64_t)amount);
 }
 

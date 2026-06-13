@@ -3340,16 +3340,19 @@ static RPCHelpMan getstakescript()
                 "signature and csv_blocks of relative-height maturity, enforced by the script itself.\n",
                 {
                     {"pubkey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The staker public key (hex)."},
-                    {"csv_blocks", RPCArg::Type::NUM, RPCArg::DefaultHint{"the chain's -posunbonding"}, "Relative-height unbonding delay; must be >= the chain's -posunbonding to count as stake."},
+                    {"csv_blocks", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Height-based unbonding delay, in blocks (BIP68 relative-height CSV, max 65535)."},
+                    {"csv_seconds", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Time-based unbonding delay, in seconds (BIP68 relative-time CSV, rounded up to 512s units). Use this when the minimum lock exceeds what a height CSV can express. Mutually exclusive with csv_blocks."},
                 },
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
                     {
                         {RPCResult::Type::STR_HEX, "script", "the staking scriptPubKey (hex)"},
-                        {RPCResult::Type::NUM, "csv_blocks", "the unbonding delay encoded in the script"},
-                        {RPCResult::Type::NUM, "min_unbonding", "the chain's minimum unbonding delay for stake to count"},
+                        {RPCResult::Type::NUM, "csv", "the raw BIP68 CSV value encoded in the script"},
+                        {RPCResult::Type::STR, "csv_type", "\"height\" or \"time\""},
+                        {RPCResult::Type::NUM, "lock_seconds", "the unbonding lock the script enforces, in seconds"},
+                        {RPCResult::Type::NUM, "min_unbonding_seconds", "the chain's minimum unbonding lock for stake to count, in seconds"},
                     }},
-                RPCExamples{HelpExampleCli("getstakescript", "\"02...\"")},
+                RPCExamples{HelpExampleCli("getstakescript", "\"02...\" 0 1209600")},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
     if (!g_con_pos) {
@@ -3360,18 +3363,39 @@ static RPCHelpMan getstakescript()
     if (!pubkey.IsFullyValid()) {
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid public key");
     }
-    uint32_t csv = request.params[1].isNull() ? g_pos_unbonding_period : (uint32_t)request.params[1].get_int();
-    if (csv < 1 || csv > 0xFFFF) {
-        throw JSONRPCError(RPC_INVALID_PARAMETER, "csv_blocks must be between 1 and 65535");
+    const bool has_blocks = !request.params[1].isNull();
+    const bool has_seconds = !request.params[2].isNull();
+    if (has_blocks && has_seconds) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Specify at most one of csv_blocks or csv_seconds");
     }
-    if (csv < g_pos_unbonding_period) {
-        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("csv_blocks below the chain's minimum unbonding delay (%u); the output would not count as stake", g_pos_unbonding_period));
+    uint32_t csv;
+    if (has_seconds) {
+        int64_t secs = request.params[2].get_int64();
+        // Round up to 512-second units; BIP68 time CSV is 16-bit.
+        int64_t units = (secs + (1 << CTxIn::SEQUENCE_LOCKTIME_GRANULARITY) - 1) >> CTxIn::SEQUENCE_LOCKTIME_GRANULARITY;
+        if (units < 1 || units > (int64_t)CTxIn::SEQUENCE_LOCKTIME_MASK) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "csv_seconds out of range (1..33553920 seconds)");
+        }
+        csv = CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG | (uint32_t)units;
+    } else {
+        int64_t blocks = has_blocks ? request.params[1].get_int64() : (int64_t)g_pos_unbonding_period;
+        if (blocks < 1 || blocks > (int64_t)CTxIn::SEQUENCE_LOCKTIME_MASK) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "csv_blocks must be between 1 and 65535 (use csv_seconds for longer locks)");
+        }
+        csv = (uint32_t)blocks;
+    }
+    auto lock = PosStakeLockSeconds(csv);
+    const int64_t required = PosRequiredUnbondingSeconds();
+    if (!lock || *lock < required) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("the requested unbonding lock (%d s) is below the chain's minimum (%d s); the output would not count as stake", lock ? *lock : 0, required));
     }
     CScript script = BuildStakeScript(pubkey, csv);
     UniValue result(UniValue::VOBJ);
     result.pushKV("script", HexStr(script));
-    result.pushKV("csv_blocks", (int64_t)csv);
-    result.pushKV("min_unbonding", (int64_t)g_pos_unbonding_period);
+    result.pushKV("csv", (int64_t)csv);
+    result.pushKV("csv_type", (csv & CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG) ? "time" : "height");
+    result.pushKV("lock_seconds", *lock);
+    result.pushKV("min_unbonding_seconds", required);
     return result;
 },
     };

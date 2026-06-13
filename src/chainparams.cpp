@@ -975,9 +975,16 @@ protected:
             if (g_pos_slot_interval < 1) {
                 throw std::runtime_error("-posslotinterval must be a positive number of seconds");
             }
+            // The minimum unbonding lock, expressed in (SEQ) blocks; the
+            // required wall-clock lock is this times the slot interval. It is
+            // a *minimum*, not itself a CSV value, so it may exceed the 16-bit
+            // height-CSV range — a minimum beyond ~65535 blocks simply forces
+            // staking outputs to use time-based CSV (the only encoding that can
+            // express the whitepaper's >2016-BTC-block / ~2-week lock at fast
+            // slot intervals; see StakeFromTxOut).
             const int64_t unbonding = args.GetIntArg("-posunbonding", DEFAULT_POS_UNBONDING_PERIOD);
-            if (unbonding < 1 || unbonding > 0xFFFF) {
-                throw std::runtime_error("-posunbonding must be between 1 and 65535 blocks (the CSV relative-locktime range)");
+            if (unbonding < 1 || unbonding > 0xFFFFFFFF) {
+                throw std::runtime_error("-posunbonding must be a positive number of blocks");
             }
             // Minimum stake to be an eligible blocksigner (whitepaper §3.3:
             // 0.01% of supply = 40,000 SEQ). 0 = no floor. Atoms.

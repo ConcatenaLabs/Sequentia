@@ -208,6 +208,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "setdynamicfeerates", 0, "rates"},
     { "generateposblock", 1, "committeekeys"},
     { "getstakescript", 1, "csv_blocks"},
+    { "getstakescript", 2, "csv_seconds"},
     //
     // ELEMENTS:
     { "calcfastmerkleroot", 0, "leaves" },

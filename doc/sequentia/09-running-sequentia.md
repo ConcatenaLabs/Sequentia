@@ -63,7 +63,12 @@ posvrf=1
 posaggcommittee=1
 poscommitteesize=100         # quorum = strict majority of this: the paper's 51-of-100
 posslotinterval=10
-posunbonding=2016            # CSV blocks a stake must lock before it counts
+posunbonding=130000          # min unbonding lock in (SEQ) blocks; required
+                             # wall-clock = this x posslotinterval. ~15 days at
+                             # 10s, exceeding the 2016-BTC-block (~2 week)
+                             # checkpoint window (whitepaper §3.11). Beyond the
+                             # 16-bit height-CSV range, so stakers must use a
+                             # time-based CSV lock (getstakescript csv_seconds=).
 con_blocksubsidy=0           # no inflation: SEQ is pre-mined at genesis, no
                              # coinbase generation; producers earn fees only
                              # (whitepaper §3.9). 0 is the default for a custom
@@ -189,10 +194,13 @@ never grow node memory.
 ### Stake lifecycle
 
 Register stake on-chain by paying to a staking script (`getstakescript`), whose
-weight is its explicit policy-asset amount and whose `-posunbonding` CSV delay
-must elapse before it can be spent (unbonding *is* that spend). The registry is
-rebuilt from the UTXO set at startup and mirrored on every reorg. Introspect
-with `getstakerinfo` / `getposschedule`.
+weight is its explicit policy-asset amount and whose CSV lock must elapse before
+it can be spent (unbonding *is* that spend). The lock must meet the chain
+minimum as a wall-clock duration; for a lock past the 16-bit height range
+(e.g. the ~2-week checkpoint window) request a time-based script with
+`getstakescript "<pubkey>" csv_seconds=<seconds>`. The registry is rebuilt from
+the UTXO set at startup and mirrored on every reorg. Introspect with
+`getstakerinfo` / `getposschedule`.
 
 ## 7. Long-range-attack defenses
 

@@ -333,13 +333,24 @@ inline bool PosIsEligibleStake(uint64_t weight)
  *  relative-height maturity (BIP112) — unbonding is the spend itself. */
 CScript BuildStakeScript(const CPubKey& pubkey, uint32_t csv_blocks);
 
-/** Parse a staking script, returning (pubkey, csv_blocks), or nullopt if the
- *  script is not of the exact canonical form. */
+/** Parse a staking script, returning (pubkey, raw BIP68 CSV value), or nullopt
+ *  if the script is not of the exact canonical form. The CSV value may be
+ *  height-based or time-based (SEQUENCE_LOCKTIME_TYPE_FLAG set). */
 std::optional<std::pair<CPubKey, uint32_t>> ParseStakeScript(const CScript& script);
 
+/** The wall-clock lock duration (seconds) a staking CSV value enforces:
+ *  time-based CSV in 512-second units, height-based CSV times the slot
+ *  interval, so both encodings compare on one axis. nullopt if `csv` is not a
+ *  valid relative lock (disable flag or stray bits). */
+std::optional<int64_t> PosStakeLockSeconds(uint32_t csv);
+
+/** The minimum unbonding lock the chain requires, in seconds
+ *  (g_pos_unbonding_period blocks x slot interval). */
+int64_t PosRequiredUnbondingSeconds();
+
 /** If the output is a qualifying staking output — canonical script, explicit
- *  policy-asset amount, CSV >= g_pos_unbonding_period — return its staker key
- *  and weight (the amount in atoms). */
+ *  policy-asset amount, and an unbonding lock of at least
+ *  PosRequiredUnbondingSeconds() — return its staker key and weight (atoms). */
 std::optional<std::pair<CPubKey, uint64_t>> StakeFromTxOut(const CTxOut& out);
 
 /** Mirror a connected block into the UTXO stake layer: outputs that create
