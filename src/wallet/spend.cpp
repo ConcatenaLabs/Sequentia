@@ -948,6 +948,19 @@ static bool CreateTransactionInternal(
     coin_selection_params.m_avoid_partial_spends = coin_control.m_avoid_partial_spends;
     coin_selection_params.m_fee_asset = coin_control.m_fee_asset.value_or(::policyAsset);
 
+    // SEQUENTIA: a fee must be payable in an asset that has a (positive)
+    // exchange rate, or its value is 0 rfa — the node would reject the tx as
+    // paying no fee, and the wallet would otherwise compute a 0 fee requirement
+    // (ConvertValueToAmount returns 0 for an unpriced asset) and build an
+    // unbroadcastable transaction. Refuse up front with a clear error.
+    if (g_con_any_asset_fees && coin_selection_params.m_fee_asset != ::policyAsset) {
+        CAmount probe = ExchangeRateMap::GetInstance().ConvertAmountToValue(exchange_rate_scale, coin_selection_params.m_fee_asset).GetValue();
+        if (probe <= 0) {
+            error = _("The chosen fee asset is not accepted (no exchange rate on this node); choose a different fee asset");
+            return false;
+        }
+    }
+
     CScript dummy_script = CScript() << 0x00;
     CAmountMap map_recipients_sum;
     // Always assume that we are at least sending fee asset.
@@ -1539,7 +1552,12 @@ static bool CreateTransactionInternal(
         // Because we have dropped this change, the tx size and required fee will be different, so let's recalculate those
         tx_sizes = CalculateMaximumSignedTxSize(CTransaction(tx_blinded), &wallet, &coin_control);
         nBytes = tx_sizes.vsize;
-        fee_needed = coin_selection_params.m_effective_feerate.GetFee(nBytes);
+        // SEQUENTIA: denominate the recomputed fee in the selected fee asset
+        // (as the other GetFee calls in this path do). The bare GetFee(nBytes)
+        // returns a policy-asset amount, which is wrong when the fee asset is
+        // a non-policy asset at a non-1:1 rate — it is compared against, and
+        // assigned into, fee-asset-denominated values below.
+        fee_needed = coin_selection_params.m_effective_feerate.GetFee(nBytes, coin_selection_params.m_fee_asset);
     }
 
     // The only time that fee_needed should be less than the amount available for fees (in change_and_fee - change_amount) is when
@@ -1707,6 +1725,13 @@ static bool CreateTransactionInternal(
 
     if (g_con_any_asset_fees) {
         CAmount nFeeRetValue = ExchangeRateMap::GetInstance().ConvertAmountToValue(nFeeRet, coin_selection_params.m_fee_asset).GetValue();
+        // A fee asset with no (or non-positive) exchange rate converts to 0,
+        // which would silently bypass the maxtxfee ceiling. Refuse rather than
+        // wave through an unbounded fee in an unpriced asset.
+        if (nFeeRet > 0 && nFeeRetValue == 0) {
+            error = _("Fee asset has no exchange rate on this node; cannot enforce the maximum-fee limit");
+            return false;
+        }
         if (nFeeRetValue > wallet.m_default_max_tx_fee) {
             error = TransactionErrorString(TransactionError::MAX_FEE_EXCEEDED);
             return false;

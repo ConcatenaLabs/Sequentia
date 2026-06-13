@@ -111,11 +111,16 @@ class DynamicFeeRatesTest(BitcoinTestFramework):
         assert_equal(node.getdynamicfeerates(), {})
         assert self.asset not in node.getfeeexchangerates()
 
-        # A transaction offering a fee in a non-whitelisted asset is rejected
-        # (the wallet cannot fund a fee in an asset that values to 0 rfa)
+        # A transaction offering a fee in a non-whitelisted asset is rejected:
+        # its value is 0 rfa, so it cannot pay a meaningful fee. Use a freshly
+        # issued asset that never receives a rate. (The chain's reference/policy
+        # asset is always payable 1:1, so it can't exhibit this case.)
+        other = node.issueasset(10, 0, False)['asset']
+        self.generate(node, 1)
+        assert other not in node.getfeeexchangerates()
         assert_raises_rpc_error(-6, None,
             node.sendtoaddress,
-            address=addr, amount=1.0, assetlabel=self.asset, fee_asset_label=self.asset)
+            address=addr, amount=1.0, assetlabel=self.asset, fee_asset_label=other)
 
         # Invalid dynamic rates are rejected
         assert_raises_rpc_error(-8, "Error parsing dynamic rates",

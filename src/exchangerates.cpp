@@ -11,6 +11,12 @@
 
 CValue ExchangeRateMap::ConvertAmountToValue(const CAmount& amount, const CAsset& asset) {
     int64_t int64_max = std::numeric_limits<int64_t>::max();
+    // The policy asset is the reference unit by definition (exchange_rate_scale
+    // atoms == 1 reference unit), so it is always valued 1:1 and always
+    // payable — independent of, and not overridable by, the rate map.
+    if (asset == ::policyAsset) {
+        return CValue(amount);
+    }
     LOCK(m_write_mutex); // serialize against RebuildEffective's clear()/insert
     auto it = this->find(asset);
     if (it == this->end()) {
@@ -34,6 +40,10 @@ CValue ExchangeRateMap::ConvertAmountToValue(const CAmount& amount, const CAsset
 
 CAmount ExchangeRateMap::ConvertValueToAmount(const CValue& value, const CAsset& asset) {
     int64_t int64_max = std::numeric_limits<int64_t>::max();
+    // The policy asset is the reference unit, always 1:1 (see ConvertAmountToValue).
+    if (asset == ::policyAsset) {
+        return value.GetValue();
+    }
     LOCK(m_write_mutex); // serialize against RebuildEffective's clear()/insert
     auto it = this->find(asset);
     if (it == this->end()) {

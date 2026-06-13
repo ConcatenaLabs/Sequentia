@@ -301,7 +301,9 @@ static const uint32_t POS_ESCAPING_STALL_ANCHOR_GAP = 3;
  *  heights, so every node agrees. See doc/sequentia/10-liveness-and-escaping-stall.md. */
 inline bool PosEscapingStallAllowed(uint32_t parent_anchor_height, uint32_t block_anchor_height)
 {
-    return block_anchor_height >= parent_anchor_height + POS_ESCAPING_STALL_ANCHOR_GAP;
+    // Subtraction (not addition) avoids any wraparound near UINT32_MAX.
+    return block_anchor_height >= parent_anchor_height &&
+           block_anchor_height - parent_anchor_height >= POS_ESCAPING_STALL_ANCHOR_GAP;
 }
 
 /** A committee member's eligibility claim carried in the block: its key and
