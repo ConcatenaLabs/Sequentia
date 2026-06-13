@@ -160,3 +160,4 @@ git merge elements-23.3.3        # resolve conflicts, then build & run the test 
 | [`07-vrf.md`](07-vrf.md) | Private VRF sortition (RFC 9381-structured ECVRF) and MuSig2 committee aggregation, incl. distributed signing. |
 | [`08-addresses-and-ct.md`](08-addresses-and-ct.md) | Bitcoin-identical addresses and opt-in confidential transactions. |
 | [`09-running-sequentia.md`](09-running-sequentia.md) | Operator runbook: deploying the full system end-to-end. |
+| [`10-liveness-and-escaping-stall.md`](10-liveness-and-escaping-stall.md) | Design for the anchor-driven liveness / escaping-stall (the last pre-mainnet consensus item). |

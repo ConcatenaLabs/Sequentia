@@ -142,11 +142,27 @@ per the theoretical paper and doc 04 §3. The detailed item list lives in
       across separately-hosted members (`getposblocktemplate` /
       `submitposblock` + the `musig*` RPC suite; doc 07 §6).
 - [x] On-chain stake registration / unbonding (`getstakescript`,
-      `-posunbonding`).
+      `-posunbonding`; height- or time-based CSV, doc 06 §5).
+- [x] Minimum-stake blocksigner floor (`-posminstake`, whitepaper §3.3).
 - [x] Long-range-attack defenses: dynamic Bitcoin checkpoints
-      (`getcheckpointpayload` / `getcheckpointinfo`, `-poscheckpointdepth`)
-      and operator-configured static checkpoints (`-poscheckpoint`).
+      (`getcheckpointpayload` / `getcheckpointinfo`, `-poscheckpointdepth`,
+      default 2016 BTC blocks) and operator-configured static checkpoints
+      (`-poscheckpoint`).
+- [x] No inflation: SEQ pre-mined at genesis, `con_blocksubsidy=0` (§3.9).
 - [x] Operator runbook for deploying all of it (doc 09).
+
+## Milestone 6 — Anchor-driven liveness & escaping-stall — DESIGNED
+The last major consensus item before mainnet: replace the PoC's wall-clock
+liveness with the whitepaper's Bitcoin-anchor-driven escaping-stall (§3.5/§3.8),
+including sub-threshold certification and the countersig/VRF fork-choice. Full
+design and staged implementation plan in
+[doc 10](10-liveness-and-escaping-stall.md).
+
+- [ ] Consensus-view anchor-depth function (pure, from committed anchor heights).
+- [ ] Escaping-stall sub-threshold certification (depth-4 / h+3 rule).
+- [ ] PoS same-height fork choice (threshold, countersig count, lowest VRF).
+- [ ] Retire the wall-clock slot gate for the anchor clock.
+- [ ] Dynamic committee floor when participation is short.
 
 ## Risks / watch-items
 - **Build resources.** A full Elements build is heavy (~4-core / 15 GB host
