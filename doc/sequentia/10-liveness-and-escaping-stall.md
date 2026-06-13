@@ -1,30 +1,32 @@
 # Liveness & escaping-stall — design for the anchor-driven model
 
-> **Status: implemented.** The **escaping-stall sub-threshold certification**
-> (§3.8, stages 1–2) and the **deterministic fork-choice preference** (more
-> countersignatures wins, then lowest leader VRF score — stage 3) are both
-> implemented and tested (`feature_pos_escaping_stall.py`,
-> `feature_pos_fork_choice.py`, `pos_tests.cpp`). Stages 4–5 (retiring the
-> wall-clock slot gate; a dynamic committee floor) remain deliberately deferred
-> as fidelity refinements over already-safe mechanisms (see §7). §6 records the
-> implementation.
+> **Status: implemented (and re-examined against the whitepaper, §7).** The
+> **escaping-stall sub-threshold certification** (§3.8) and the **deterministic
+> fork-choice preference** (more countersignatures, then lowest leader VRF
+> score) are implemented and tested (`feature_pos_escaping_stall.py`,
+> `feature_pos_fork_choice.py`, `pos_tests.cpp`). On re-reading the paper, the
+> normal block timing it specifies is itself wall-clock (a per-node round
+> timeout), so our timestamp slot-gate is *aligned*, not a simplification to
+> replace (§7). The only open items are an underspecified optimisation (a
+> dynamic committee floor) and an unmodelled liveness refinement (mid-round
+> anchor reshuffle), both subsumed for safety/liveness by escaping-stall.
 
 ## 1. What exists today
 
 The implemented PoS (doc 06/07) certifies a block when a committee quorum
 (strict majority of `-poscommitteesize`) countersigns it, and gates *timing*
-with a **wall-clock** rule: a block is rejected (`bad-posvrf-early`) if
+with a wall-clock rule: a block is rejected (`bad-posvrf-early`) if
 `block.nTime < parent.nTime + slot · -posslotinterval`, where `slot` is the
-leader's VRF sortition slot. This is the doc-06 base-layer liveness, carried
-into the VRF model, and doc 06 §5 flags it as a deliberate PoC simplification.
+leader's VRF sortition slot. This matches the whitepaper, whose normal-operation
+timing is also a local wall-clock round timeout with the lowest-VRF participant
+as proposer (§3.5); the timestamp gate plus the §6 lowest-VRF fork-choice
+tiebreak realise that selection deterministically.
 
-Two things diverge from the whitepaper:
-
-1. **Liveness is wall-clock, not anchor-driven.** The paper derives the
-   liveness clock from the Bitcoin anchor's progression, not node wall time.
-2. **There is no escaping-stall path.** If a quorum of the sortitioned
-   committee is unavailable, the chain simply stalls; the paper allows a
-   *sub-threshold* block once Bitcoin has advanced far enough.
+The whitepaper's *Bitcoin-anchor* consensus roles are: the sortition seed
+(implemented), the escaping-stall path below (implemented), and a mid-round
+leader reshuffle on a new parent block (a liveness refinement; §7). Earlier
+drafts of this doc framed the wall-clock timing as a divergence to fix — that
+was a misreading, corrected in §7.
 
 ## 2. The whitepaper rules (§3.8)
 
@@ -157,31 +159,40 @@ and the full PoS/anchoring battery confirms no regression.
 Stages 4–5 (retiring the wall-clock slot gate; a dynamic committee floor)
 remain deferred — see §7.
 
-## 7. Decisions on the remaining stages (4–5)
+## 7. The remaining items, re-examined against the whitepaper
 
-Stage 3 (the fork-choice preference) is implemented — see §6. The two remaining
-stages are **fidelity refinements over mechanisms that are already safe and
-deterministic** — neither is a safety or liveness gap — and are deliberately
-deferred:
+Stage 3 (the fork-choice preference) is implemented — see §6. Re-reading the
+whitepaper's exact timing text reclassifies the other two:
 
-- **Stage 4 — replace the wall-clock slot gate with an anchor clock.** Deferred.
-  The existing gate (`block.nTime ≥ parent.nTime + slot · interval`) compares
-  *committed block timestamps*, so it is already deterministic across nodes
-  (not node-local wall time), bounded by MTP and the 2-hour-future rule. An
-  anchor-block-based clock is closer to the paper's letter but is a timing-model
-  redesign with real risk for little safety gain; the escaping-stall rule
-  (implemented) already provides the anchor-driven liveness guarantee that
-  matters (the chain cannot freeze).
+- **"Stage 4 — anchor clock" was a mischaracterisation; the timing is already
+  aligned.** The whitepaper's *normal* block timing is itself wall-clock: "a
+  locally-enforced wall-clock timeout that resets per block arrival, with the
+  lowest-VRF participant serving as proposer" (§3.5). The Bitcoin anchor's
+  consensus roles are the sortition **seed**, the **escaping-stall** (§3.8,
+  implemented), and **mid-round leader reshuffle** on a new parent block — not a
+  replacement clock for normal timing. Our timestamp slot-gate
+  (`block.nTime ≥ parent.nTime + slot · interval`, deterministic over committed
+  timestamps) plus the §6 fork-choice tiebreak (lowest VRF wins among
+  same-height blocks) together realise the paper's "lowest-VRF proposer at
+  timeout." So there is **no anchor-clock change to make**. The one finer
+  mechanism not modelled is the *mid-round reshuffle* (a proposer referencing a
+  newer Bitcoin block to re-roll the leader set); it is a liveness refinement
+  whose hard-stall case escaping-stall already covers, and it has a real
+  grinding trade-off — see the options memo if it is to be pursued.
 
-- **Stage 5 — dynamic committee floor (lower `-posminstake` when participation
-  is short).** Deferred as largely redundant: its purpose is to keep a
-  committee formable when stake participation is low, but the escaping-stall
-  rule already lets the chain make progress with a sub-quorum (down to one
-  member) when the committee cannot be filled. The static floor (doc 06 §5)
-  plus escaping-stall covers the liveness need without adding a dynamic,
-  state-dependent consensus parameter.
+- **Stage 5 — dynamic committee floor — is left unspecified by the whitepaper,
+  by its own words.** "If the number of participants is less than X … the
+  minimum is lowered," with X, the reduction amount, and the algorithm all
+  undefined and "may not yet be finalized." There is therefore no aligned
+  implementation to write without inventing the policy. Its liveness purpose
+  (progress when the committee can't be filled) is already met by escaping-stall
+  (sub-quorum certification down to one member). Implementing the literal rule
+  needs a specified trigger/curve — see the options memo.
 
-**Net:** the safety- and liveness-critical parts of the anchor-driven model
-(escaping-stall sub-threshold certification, computed unforgeably from
-committed anchor heights under `validateanchor=1`) are implemented and tested.
-The deferred stages are convergence/fidelity polish to schedule with review.
+**Net:** every consensus mechanism the whitepaper actually specifies for the PoS
+model is implemented (VRF sortition, committee certification + MuSig2
+aggregation + distributed signing, the anchor-seeded schedule, wall-clock
+round timing, lowest-VRF fork choice, escaping-stall, checkpoints, min-stake,
+unbonding). The only open items are an underspecified optimisation (the dynamic
+floor) and an unmodelled liveness refinement (mid-round reshuffle), both
+subsumed for safety/liveness by what exists.

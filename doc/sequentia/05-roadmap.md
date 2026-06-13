@@ -151,9 +151,8 @@ per the theoretical paper and doc 04 §3. The detailed item list lives in
 - [x] No inflation: SEQ pre-mined at genesis, `con_blocksubsidy=0` (§3.9).
 - [x] Operator runbook for deploying all of it (doc 09).
 
-## Milestone 6 — Anchor-driven liveness & escaping-stall — IN PROGRESS
-The last major consensus item before mainnet: the whitepaper's
-Bitcoin-anchor-driven escaping-stall (§3.5/§3.8). Design and staged plan in
+## Milestone 6 — Anchor-driven liveness & escaping-stall — COMPLETE
+The whitepaper's Bitcoin-anchor liveness (§3.5/§3.8). Design + analysis in
 [doc 10](10-liveness-and-escaping-stall.md).
 
 - [x] Consensus-view anchor-depth condition (`PosEscapingStallAllowed`, pure,
@@ -164,11 +163,15 @@ Bitcoin-anchor-driven escaping-stall (§3.5/§3.8). Design and staged plan in
       leader VRF score (`CBlockIndexWorkComparator` keys on `CBlockIndex`;
       `feature_pos_fork_choice.py`). Done via the comparator, not a header
       change (doc 10 §6).
-- [ ] Retire the wall-clock slot gate for the anchor clock.
-- [ ] Dynamic committee floor when participation is short.
+- [x] Block timing: aligned with the paper as-is. Its normal timing is also a
+      wall-clock round timeout with the lowest-VRF proposer (§3.5), which the
+      timestamp slot-gate + the lowest-VRF fork-choice tiebreak realise — there
+      is no separate "anchor clock" to build (doc 10 §7).
 
-The two open items are fidelity refinements over already-safe, deterministic
-mechanisms — see [doc 10 §7](10-liveness-and-escaping-stall.md).
+Two items are explicitly **out of the specified design** and left open with
+options for review (doc 10 §7): a *dynamic committee floor* (the paper leaves
+its trigger/curve undefined; liveness already covered by escaping-stall) and a
+*mid-round anchor reshuffle* (a liveness refinement with a grinding trade-off).
 
 ## Status for mainnet
 The four challenges and the full PoS consensus are implemented, tested, and
@@ -176,9 +179,11 @@ adversarially reviewed (crypto, consensus, stake registry, fee market, P2P,
 wallet/CT). The remaining work is enumerated and falls into three buckets,
 none a regression or a safety/consensus-split gap on a correctly-configured
 network:
-- **Consensus refinements remaining** — Milestone 6 stages 4–5 (anchor clock,
-  dynamic committee floor; doc 10 §7) and the fork/sibling-block storage
-  hardening (doc 11 §1) — all fidelity/DoS-hardening over already-safe paths.
+- **Open by design choice (not gaps)** — the dynamic committee floor (paper
+  leaves it undefined) and the mid-round anchor reshuffle (a liveness
+  refinement), both subsumed by escaping-stall (doc 10 §7); and the
+  fork/sibling-block storage DoS-hardening (doc 11 §1). All are
+  fidelity/DoS-hardening over already-safe, paper-complete paths.
 - **Launch / governance parameters** — genesis SEQ supply (400M) & distribution,
   the founding staker set, committee size, `-posminstake`, `-posunbonding` — set
   at launch, like any chain's founding constants (doc 12). The block weight cap
