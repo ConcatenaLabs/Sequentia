@@ -1,13 +1,12 @@
-# Sequentia — Proof-of-Concept Design Specification
+# Sequentia — Design Specification
 
-> **Status:** Living design document. This is the first specification produced
-> for the *SequentiaByClaude* effort. It records (a) what Sequentia is, (b) the
-> result of studying the Elements codebase, (c) the decision of which codebase to
-> fork, and (d) the concrete engineering plan for the two priority features.
+> **Status:** Living design document for the *SequentiaByClaude* effort. It
+> records (a) what Sequentia is, (b) the Elements subsystems it builds on, and
+> (c) how the priority features are implemented.
 
 ## 1. What Sequentia is
 
-Sequentia ("Sequentia Network") is a **Bitcoin sidechain** built as a fork of
+Sequentia ("Sequentia Network") is a **Bitcoin sidechain** built on
 [Elements](https://github.com/ElementsProject/elements) (itself a fork of Bitcoin
 Core). Elements is the technology that also powers Blockstream's *Liquid Network*.
 Sequentia keeps Elements' UTXO model, Bitcoin Script, Confidential Assets and
@@ -16,10 +15,13 @@ asset-tokenisation machinery, but diverges from Liquid in these fundamental ways
 
 1. **Open / "no-coin" fee market.** There is *no* mandatory native fee asset
    (Liquid forces fees to be paid in L-BTC). Instead a user may offer *any* asset
-   issued on the network as a transaction fee. Block producers independently
-   decide which assets they will accept and at what relative value, and then build
-   the most valuable block they can from transactions paying in those assets.
-   Producers configure acceptance two ways:
+   issued on the network as a transaction fee. A fee is **permissionless to
+   propose** but **subject to per-producer acceptance**: a transaction is
+   included only if a block producer is willing to accept that asset *and* at the
+   rate the fee is posted. Producers independently decide which assets they will
+   accept and at what relative value, then build the most valuable block they can
+   from transactions paying in those assets. Producers configure acceptance two
+   ways:
    - a **static whitelist** of `{asset → relative value}`, and
    - a **dynamic whitelist** maintained by a locally-run **price server** that
      queries external APIs (exchanges, DEX oracles) and auto-admits assets once
@@ -34,12 +36,12 @@ asset-tokenisation machinery, but diverges from Liquid in these fundamental ways
    reorg-protection timelocks.
 
 3. **Proof-of-Stake consensus** (with voluntary Bitcoin checkpoints to resist
-   long-range attacks), described in the theoretical paper. Originally
-   deprioritised in favour of a *strong federation* PoC (see
-   [`04-consensus-poc.md`](04-consensus-poc.md)), now implemented in layers:
-   public stake-weighted election ([`06-proof-of-stake.md`](06-proof-of-stake.md)),
-   private VRF sortition, VRF committees and MuSig2 aggregation
-   ([`07-vrf.md`](07-vrf.md)), on-chain stake, and Bitcoin checkpoints.
+   long-range attacks), described in the theoretical paper. It is built in
+   layers: a stake-weighted election
+   ([`06-proof-of-stake.md`](06-proof-of-stake.md)), private VRF sortition, VRF
+   committees and MuSig2 aggregation ([`07-vrf.md`](07-vrf.md)), on-chain stake,
+   and Bitcoin checkpoints. It runs on top of Elements' inherited signed-block
+   machinery (see [`04-consensus-poc.md`](04-consensus-poc.md)).
 
 4. **Bitcoin-identical default addresses, opt-in confidential transactions.**
    The default address format is the same as Bitcoin's, so Sequentia wallet
@@ -51,31 +53,35 @@ asset-tokenisation machinery, but diverges from Liquid in these fundamental ways
 
 A consequence of (1) and (2) worth spelling out: Elements' **federated two-way
 peg is inherited but plays no special role here**. Sequentia is not configured
-with a parent-chain peg, pegged BTC is never the fee currency, and the network
-neither favours nor depends on any pegged asset (unlike Liquid's L-BTC). Any
-user may employ the inherited machinery to issue their own pegged BTC, but
-anchoring-based real-time atomic swaps against *native* BTC make that largely
-unnecessary — the main residual use case is holding BTC value under
-confidential transactions.
+with a parent-chain peg, and the network neither favours nor depends on any
+pegged asset (unlike Liquid's L-BTC). Pegged BTC has no special fee status,
+positive or negative: it can be proposed as a fee exactly like any other
+non-policy asset, subject to the same per-producer acceptance (asset + rate).
+(SEQ is special **only** in that it is the asset that unlocks block-production
+eligibility — staking. For *fees* it has no privileged status: like any asset it
+is accepted 1:1 only as the default an unconfigured producer uses, and a producer
+may re-price it, refuse it, or make a different asset the 1:1 reference.) Any user
+may employ the inherited machinery to issue their
+own pegged BTC, but anchoring-based real-time atomic swaps against *native* BTC
+make that largely unnecessary — the main residual use case is holding BTC value
+under confidential transactions.
 
-## 2. Result of studying the Elements / Sequentia codebases
+## 2. The Elements subsystems Sequentia builds on
 
-The relevant findings (detailed in [`01-elements-architecture.md`](01-elements-architecture.md)):
+The relevant Elements groundwork (detailed in
+[`01-elements-architecture.md`](01-elements-architecture.md)):
 
-- **Elements multi-asset + fee plumbing already exists.** Transactions, the UTXO
-  set, and the mempool are asset-aware (Confidential Assets). Liquid restricts
-  fees to `policyAsset`; the open fee market relaxes that restriction.
+- **Elements multi-asset + fee plumbing.** Transactions, the UTXO set, and the
+  mempool are asset-aware (Confidential Assets). Liquid restricts fees to
+  `policyAsset`; the open fee market relaxes that restriction.
 
-- **The existing Sequentia fork already implements challenge 1's *static*
-  whitelist.** On the `master` branch of
-  [`SequentiaSEQ/SEQ-Core-Elements`](https://github.com/SequentiaSEQ/SEQ-Core-Elements)
-  there is a working implementation:
+- **Open fee market (challenge 1).** Built on the Elements multi-asset plumbing:
   - `src/exchangerates.{h,cpp}` — an `ExchangeRateMap` singleton mapping
     `CAsset → scaled rate`, plus JSON load/save (`exchangerates.json`).
   - `src/policy/value.h` — `CValue`, an asset-independent "reference fee atom"
     (rfa) unit used to make heterogeneous fees comparable in the mempool.
   - Mempool entries (`src/txmempool.h`) carry `nFeeAsset` and `nFeeValue` (rfa);
-    the miner (`src/node/miner.cpp`) already orders packages by rfa value via
+    the miner (`src/node/miner.cpp`) orders packages by rfa value via
     `GetModFeesWithAncestors()`.
   - RPCs `getfeeexchangerates` / `setfeeexchangerates`
     (`src/rpc/exchangerates.cpp`).
@@ -83,64 +89,43 @@ The relevant findings (detailed in [`01-elements-architecture.md`](01-elements-a
     Sequentia chain in `src/chainparams.cpp`).
 
   The *dynamic* layer — the price server and its threshold-driven
-  auto-admission (`setdynamicfeerates` etc., `contrib/price-server/`) — has
-  since been implemented too. See [`02-open-fee-market.md`](02-open-fee-market.md).
+  auto-admission (`setdynamicfeerates` etc., `contrib/price-server/`) — sits on
+  top. See [`02-open-fee-market.md`](02-open-fee-market.md).
 
-- **Bitcoin-node connectivity already exists.** Elements talks to a trusted
-  `bitcoind` over RPC for peg-in validation: `src/mainchainrpc.{h,cpp}`,
-  `MainchainRPCCheck()` in `src/init.cpp`, and the `-mainchainrpc*` /
-  `-validatepegin` settings. **The anchoring feature reuses this transport** to
-  fetch Bitcoin block hashes/heights rather than inventing a new one.
-  Anchoring is implemented (`src/anchor.{h,cpp}`, `-con_bitcoin_anchor`). See
+- **Bitcoin-node connectivity.** Elements talks to a trusted `bitcoind` over RPC
+  for peg-in validation: `src/mainchainrpc.{h,cpp}`, `MainchainRPCCheck()` in
+  `src/init.cpp`, and the `-mainchainrpc*` / `-validatepegin` settings. **The
+  anchoring feature reuses this transport** to fetch Bitcoin block
+  hashes/heights rather than inventing a new one. Anchoring is implemented
+  (`src/anchor.{h,cpp}`, `-con_bitcoin_anchor`). See
   [`03-bitcoin-anchoring.md`](03-bitcoin-anchoring.md).
 
-- **Strong-federation consensus already exists.** Elements "signed blocks"
+- **Block-signing machinery (challenge 3).** Elements "signed blocks"
   (`g_signed_blocks`, `consensus.signblockscript`, `CProof` /
-  `DynaFedParams` / `m_signblock_witness` in `src/primitives/block.h`) provide a
-  federated block-signing consensus out of the box. The Sequentia chain already
-  enables it (`g_signed_blocks = true`). This satisfied the challenge-3 PoC
-  requirement with no new consensus code; the full Proof-of-Stake consensus
-  (docs 06/07) has since been implemented on top of the same signed-block
+  `DynaFedParams` / `m_signblock_witness` in `src/primitives/block.h`) replace
+  Bitcoin's proof-of-work with a header block signature. The Sequentia chain
+  enables it (`g_signed_blocks = true`) and drives the per-block signing rule
+  from a stake-weighted election rather than a fixed signer set. The full
+  Proof-of-Stake consensus (docs 06/07) is implemented on top of this signed-block
   machinery, behind `-con_pos`.
 
-## 3. Base decision: fork the existing Sequentia project
+## 3. Base: built on Elements
 
-Per the project constraints the base must be **either** a fork of the existing
-Sequentia project (an older Elements release, needing subsequent Elements
-releases merged downstream) **or** a fresh fork of the latest Elements release.
+Sequentia is built on [Elements](https://github.com/ElementsProject/elements),
+which gives it the entire Bitcoin-Core/Elements stack — the UTXO model, Bitcoin
+Script, Confidential Assets, asset issuance, the trusted `bitcoind` RPC
+transport, and the signed-block machinery — to build the four challenges on.
 
-**Decision: fork the existing Sequentia project** (`SequentiaSEQ/SEQ-Core-Elements`,
-`master`), then track upstream Elements downstream.
+### Tracking upstream Elements
 
-### Rationale
+- The repository is based on Elements `23.3.3` and tracks upstream so future
+  Elements releases can be merged downstream. Shared ancestry with Elements and
+  Bitcoin Core is what makes `git merge` of future releases tractable.
+- The `elements-upstream` remote
+  (`https://github.com/ElementsProject/elements.git`) is configured for
+  downstream tracking.
 
-| Factor | Fork existing Sequentia | Fresh latest Elements |
-|---|---|---|
-| Challenge 1 (static fee market) | **Already implemented & working** | Must be re-implemented from scratch (≈ the entire `exchangerates`/`CValue`/mempool-rfa subsystem) |
-| Base Elements version | `elements-23.x` series | `elements-23.3.3` (latest) |
-| Distance to latest Elements | Small — same `23.x` major series; downstream merge is a patch-level catch-up | N/A (already latest) |
-| Risk | Inherit any Sequentia tech debt; must merge `23.x → 23.3.3` | Re-derive a known-correct subsystem and risk subtle divergence |
-| Net work to reach PoC | Lower | Higher |
-
-The existing fork is already on the **same `23.x` major series** as the latest
-release (`23.3.3`), so "pulling subsequent Elements releases downstream" is a
-manageable patch-level catch-up rather than a major-version jump — while it
-preserves a substantial, working implementation of the highest-priority feature.
-Starting fresh would discard that and force a re-implementation for no
-compensating benefit.
-
-### How this repository is set up as the fork
-
-- This repo's history **is** `SequentiaSEQ/SEQ-Core-Elements@master` (full history,
-  ~38.9k commits, sharing ancestry with Elements and Bitcoin Core). Shared
-  ancestry is what makes `git merge` of future Elements releases tractable.
-- Remotes are configured for downstream tracking:
-  - `elements-upstream` → `https://github.com/ElementsProject/elements.git`
-  - `sequentia-upstream` → `https://github.com/SequentiaSEQ/SEQ-Core-Elements.git`
-- All SequentiaByClaude work happens on branch
-  `claude/sequentia-bitcoin-sidechain-w6xady`.
-
-To catch up to the latest Elements release later:
+To catch up to a later Elements release:
 
 ```sh
 git fetch elements-upstream --tags
@@ -152,9 +137,9 @@ git merge elements-23.3.3        # resolve conflicts, then build & run the test 
 | Doc | Contents |
 |---|---|
 | [`01-elements-architecture.md`](01-elements-architecture.md) | The Elements subsystems that matter for these features, with file/line references. |
-| [`02-open-fee-market.md`](02-open-fee-market.md) | Challenge 1: what exists (static whitelist) and the design for the new dynamic **price server**. |
+| [`02-open-fee-market.md`](02-open-fee-market.md) | Challenge 1: the static whitelist and the dynamic **price server**. |
 | [`03-bitcoin-anchoring.md`](03-bitcoin-anchoring.md) | Challenge 2: block-header change, validation rules, reorg-following, Bitcoin RPC. |
-| [`04-consensus-poc.md`](04-consensus-poc.md) | Challenge 3 PoC: strong federation via Elements signed blocks; path to PoS. |
+| [`04-consensus-poc.md`](04-consensus-poc.md) | Challenge 3: Proof-of-Stake on Elements' inherited signed-block machinery. |
 | [`05-roadmap.md`](05-roadmap.md) | Milestones, ordering, and test strategy. |
 | [`06-proof-of-stake.md`](06-proof-of-stake.md) | The implemented PoS consensus: stake registry, leader election, committees, on-chain stake, checkpoints. |
 | [`07-vrf.md`](07-vrf.md) | Private VRF sortition (RFC 9381-structured ECVRF) and MuSig2 committee aggregation, incl. distributed signing. |

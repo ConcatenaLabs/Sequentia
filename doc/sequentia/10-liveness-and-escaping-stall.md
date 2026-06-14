@@ -132,7 +132,7 @@ the one change that can split consensus if it is non-deterministic.
 
 The path is also abuse-proof: a `+3` anchor requires Bitcoin to have genuinely
 produced three blocks (~30 min) since the parent's anchor, which a healthy
-10-second chain never permits, and each further sub-threshold block needs
+~30-second chain never permits, and each further sub-threshold block needs
 another `+3` of parent-chain progress — so the path self-limits to a genuine
 stall and cannot be used to bypass committee certification.
 

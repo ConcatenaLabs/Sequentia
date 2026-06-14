@@ -3,8 +3,8 @@
 > **Status: implemented.** Both built-in Sequentia chains run Proof-of-Stake by
 > default (`g_con_pos/g_pos_vrf/g_pos_agg_committee = true`), bootstrapping from a
 > **genesis-seeded staking output** with **no `-staker` config layer** — the
-> staker set is entirely on-chain. The signed-block "anyone-signs" PoC path now
-> lives only on the custom/regtest chains (`-con_pos=0`), i.e. the dev harness.
+> staker set is entirely on-chain. The signed-block "anyone-signs" path lives
+> only on the custom/regtest chains (`-con_pos=0`), i.e. the dev harness.
 >
 > - **`-chain=sequentia`** is the **real Sequentia network** (its own dedicated
 >   chain id, mainnet address format, distinct network magic). Its genesis founder
@@ -111,7 +111,7 @@ a custom PoS chain with **no `-staker`**, a genesis-seeded founder who produces
 the first blocks via escaping-stall, distributes coins, and is joined by new
 on-chain stakers until a committee forms.
 
-## 5. Running the signed-block dev/PoC chain
+## 5. Running the signed-block dev chain
 
 The trivially-runnable "anyone-signs" chain (no staker setup, no Bitcoin parent
 required) is now the **custom/regtest** path: start with `-con_pos=0

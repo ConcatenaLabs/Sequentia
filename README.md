@@ -7,13 +7,15 @@ Current code is based on Elements Version: 23.3.3
 
 ## SequentiaByClaude
 
-This repository is a fork of the existing Sequentia project
-(`SequentiaSEQ/SEQ-Core-Elements`), rebased onto Elements 23.3.3, implementing
-the differences that make Sequentia a Bitcoin sidechain distinct from
-Blockstream's Liquid. All four are implemented and tested as a proof of concept:
+This repository builds Sequentia on Elements 23.3.3, implementing the
+differences that make Sequentia a Bitcoin sidechain distinct from Blockstream's
+Liquid. All four are implemented and tested:
 
 1. **Open "no-coin" fee market.** No mandatory native fee asset: any issued
-   asset may pay transaction fees. Block producers configure which assets they
+   asset may be *proposed* as a transaction fee. Proposing a fee is
+   permissionless, but inclusion is subject to per-producer acceptance — a
+   transaction is included only if a block producer accepts that asset *and* the
+   rate at which the fee is posted. Block producers configure which assets they
    accept and at what value via a static whitelist or a locally-run **price
    server** that auto-admits assets from exchange APIs once they cross
    operator-defined thresholds. Fees across assets are compared in an
@@ -33,8 +35,8 @@ Blockstream's Liquid. All four are implemented and tested as a proof of concept:
    default**, bootstrapped from a genesis-seeded staking output with no
    `-staker` config (the staker set is entirely on-chain; see
    [`13-launch-and-bootstrap.md`](doc/sequentia/13-launch-and-bootstrap.md)).
-   The signed-block "anyone-signs" PoC path is now the custom/regtest dev
-   harness (`-con_pos=0`). — see
+   The signed-block "anyone-signs" path is the custom/regtest dev harness
+   (`-con_pos=0`). — see
    [`doc/sequentia/06-proof-of-stake.md`](doc/sequentia/06-proof-of-stake.md)
    and [`07-vrf.md`](doc/sequentia/07-vrf.md).
 4. **Bitcoin-identical addresses, opt-in confidential transactions.** The
@@ -180,11 +182,16 @@ Elements contributes the following (all retained here):
  * [Federated Two-Way Peg][federated-peg] — the machinery is inherited but,
    unlike Liquid's L-BTC, it plays **no special role in Sequentia**: the
    Sequentia chain is not configured with a parent-chain peg (no peg-in
-   validation, no PAK enforcement), pegged BTC is never the fee currency
-   (any asset can pay fees), and the network neither favours nor depends on
-   any pegged asset. Any user may still use the inherited machinery to issue
-   their own pegged BTC if they want one — largely unnecessary here, since
-   Bitcoin anchoring enables real-time atomic swaps against *native* BTC
+   validation, no PAK enforcement), and the network neither favours nor depends
+   on any pegged asset. Pegged BTC has no special fee status: it can be proposed
+   as a fee exactly like any other non-policy asset, subject to the same
+   per-producer acceptance (asset + rate). (SEQ is privileged **only** for
+   staking eligibility; for fees it is just another asset — accepted 1:1 only as
+   the default a producer can re-price or refuse, with any asset usable as the
+   1:1 reference instead.) Any user may still use the inherited
+   machinery to issue their own pegged BTC if they want one — largely
+   unnecessary here, since Bitcoin anchoring enables real-time atomic swaps
+   against *native* BTC
    (see [`doc/sequentia/03`](doc/sequentia/03-bitcoin-anchoring.md)), but
    potentially useful e.g. to hold BTC value under confidential transactions.
  * [Signed Blocks][signed-blocks]

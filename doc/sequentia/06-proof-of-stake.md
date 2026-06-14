@@ -1,30 +1,29 @@
-# Challenge 3 — Proof-of-Stake consensus (PoC)
+# Challenge 3 — Proof-of-Stake consensus
 
 > This is the Proof-of-Stake consensus from the theoretical paper (section iv,
 > principles 3/6, and the consensus algorithm). It builds on the Bitcoin
 > anchoring of doc 03, because the paper derives the consensus randomness seed
 > **and** the liveness clock from the Bitcoin anchor. Docs 07 (VRF sortition,
-> committees, aggregation) and the later roadmap items extend this layer.
+> committees, aggregation) and doc 10 (liveness) extend this layer.
 >
-> **Now the bundled-chain default.** PoS (VRF sortition + MuSig2-aggregated
+> **The bundled-chain default.** PoS (VRF sortition + MuSig2-aggregated
 > committee) is enabled on the bundled Sequentia chain and bootstraps from a
 > genesis-seeded staking output with no `-staker` config — see
-> [doc 13](13-launch-and-bootstrap.md). The "single-leader replaces the fixed
-> federation" framing below is the original first-layer PoC narrative; the full
-> committee, aggregation, escaping-stall, fork choice, and on-chain stake are all
-> implemented (see §6+ and docs 07/10).
+> [doc 13](13-launch-and-bootstrap.md). This document describes the base
+> stake-weighted election layer; the full committee, aggregation,
+> escaping-stall, fork choice, and on-chain stake build on it (see §6+ and docs
+> 07/10).
 
-## 1. Scope of this PoC
+## 1. The PoS consensus
 
-The paper's full design is a BFT protocol with a 100-member committee, private
-VRF cryptographic sortition, 51/100 countersignature certification, and
-Bitcoin checkpoints against long-range attacks. That is a multi-stage build.
-This branch delivers the **first, runnable layer**: a stake-weighted,
-anchor-seeded, deterministic **single-leader** election that replaces Elements'
-fixed federation, with on-chain verification reusing the existing signed-block
-signature machinery.
+The paper's design is a BFT protocol with a 100-member committee, private VRF
+cryptographic sortition, 51/100 countersignature certification, and Bitcoin
+checkpoints against long-range attacks. The base layer this document describes is
+a stake-weighted, anchor-seeded election that drives the per-block signing rule,
+with on-chain verification reusing Elements' signed-block signature machinery;
+VRF sortition (doc 07) and committee certification (§6, doc 07) layer on top.
 
-What this PoC **does**:
+What the base election layer **does**:
 
 - Maintains a **stake registry** `{staker pubkey → stake weight}`.
 - Elects, for every block height, a **deterministic ranked leader schedule**
@@ -38,7 +37,7 @@ What this PoC **does**:
   default 1 = disabled): the slot's committee is the first *n* entries of the
   schedule, and the block challenge becomes
   `<leader> OP_CHECKSIGVERIFY <q> <c_1..c_n> <n> OP_CHECKMULTISIG` with `q` a
-  strict majority — the PoC form of the paper's 51-of-100 certification
+  strict majority — the script form of the paper's 51-of-100 certification
   (principle 6): a block *cannot exist* without a committee quorum, which is
   what gives immediate finality. The script interpreter enforces it via the
   unchanged `CheckProof`. Sizes beyond 16 (up to the paper's 100) use MuSig2
@@ -47,8 +46,7 @@ What this PoC **does**:
   (plus a committee quorum of keys via `generateposblock`'s `committeekeys`).
 - Exposes `getstakerinfo` / `getposschedule` (incl. committee + quorum) RPCs.
 
-What this base layer originally deferred — **all four since implemented** (§6
-roadmap items 6–10, doc 07):
+The layers built on top of this base election (§6 items 6–10, doc 07):
 
 - Private VRF sortition (`-posvrf`; the base layer's *public* deterministic
   election remains available without the flag — see §5 security notes).
@@ -121,27 +119,30 @@ block hash the leader signs.
 - rank `r` may produce once `nTime >= parent.nTime + r * interval`.
 
 So if the primary leader is offline, the chain is delayed by at most
-`interval` before rank 1 may step in, etc. This is the PoC analogue of the
-paper's *escaping-stall* clause (principle 8) — there, the Bitcoin anchor
-falling a bounded number of blocks behind triggers the exception; here, wall
-clock relative to the parent does. A future iteration replaces this with the
-anchor-driven rule and committee voting.
+`interval` before rank 1 may step in, etc. This base-layer time-gate is the
+wall-clock analogue of the paper's *escaping-stall* clause (principle 8) — there,
+the Bitcoin anchor falling a bounded number of blocks behind triggers the
+exception; here, wall clock relative to the parent does. The anchor-driven rule
+and committee voting are implemented on top (doc 10).
 
-Fork choice between same-height blocks uses Elements' existing rule (signed
-blocks have equal "work" = height, so first-seen wins). Time-gating ensures the
-rank-0 leader produces and propagates earliest in the common case, so honest
-nodes converge on it — exactly as the federation's round-robin does today.
+At the base layer, fork choice between same-height blocks uses Elements'
+existing rule (signed blocks have equal "work" = height, so first-seen wins),
+and time-gating ensures the rank-0 leader produces and propagates earliest in
+the common case, so honest nodes converge on it. (Under full PoS the same-height
+fork choice is the deterministic countersignature/VRF/anchor-freshness
+comparator of doc 10.)
 
-## 5. Security notes (why this is a PoC, not production)
+## 5. Security notes
 
-- **Public schedule.** Because the election uses no private VRF, the leader
-  schedule is publicly predictable from the stake set + anchor. This enables
-  targeted DoS of upcoming leaders and some grinding on the (anchor-derived)
-  seed by whoever produces the parent. The paper's *private* VRF fixes this:
-  only the winner can prove they won, after the fact. The election functions
-  are isolated in `src/pos.cpp` (`PosSchedule` / `PosRank`) precisely so the
-  EC-VRF (RFC 9381) sortition of doc 07 could replace them without touching
-  the consensus wiring — which `-posvrf` now does.
+- **Public schedule (base layer only).** Run without private VRF, the base-layer
+  election produces a leader schedule that is publicly predictable from the stake
+  set + anchor. This would enable targeted DoS of upcoming leaders and some
+  grinding on the (anchor-derived) seed by whoever produces the parent. The
+  paper's *private* VRF fixes this: only the winner can prove they won, after the
+  fact. The election functions are isolated in `src/pos.cpp` (`PosSchedule` /
+  `PosRank`) so the EC-VRF (RFC 9381) sortition of doc 07 replaces them without
+  touching the consensus wiring — which `-posvrf` does, and which the bundled
+  Sequentia chain enables by default.
 - **No slashing.** With committee certification enabled (majority quorum), a
   block cannot exist without most of the committee signing it — the paper's
   immediate-finality property — but nothing yet punishes a committee that signs
@@ -188,9 +189,10 @@ nodes converge on it — exactly as the federation's round-robin does today.
   only reward is the transaction fees it collects. The staked asset *is* SEQ —
   staking outputs are denominated in the chain's policy asset (`::policyAsset`,
   the genesis-distributed SEQ), which is the unit `StakeFromTxOut` requires.
-  (The policy asset is only a *staking-weight* denominator and an Elements
-  substrate artifact; it is **not** a privileged fee currency — fees are paid
-  in any asset, doc 02.)
+  (This staking-weight role is SEQ's *only* privileged status. For *fees* SEQ is
+  just another asset — subject to the same per-producer acceptance and valuation
+  as anything else, accepted 1:1 only as the default a producer can re-price or
+  refuse, with any asset usable as the 1:1 reference instead, doc 02.)
 
 ## 6. Roadmap within PoS
 

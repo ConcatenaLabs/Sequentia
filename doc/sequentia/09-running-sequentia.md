@@ -9,7 +9,7 @@ exercised by the functional test suite (`test/functional/feature_pos_*`,
 to work against the binaries this repository builds.
 
 > **What this runbook is not.** It does not pin a *mainnet* genesis, an initial
-> stake distribution, or a federation key set. Those are launch-governance
+> stake distribution, or a founding staker set. Those are launch-governance
 > decisions for the operators founding a network, not engineering defaults —
 > see [§8](#8-launch-checklist-engineering-vs-governance). Everything below is
 > the engineering: how to configure and operate the node once those decisions
@@ -241,7 +241,7 @@ must decide before launch (governance):
 | Decision | Kind | Where |
 |---|---|---|
 | Which parent chain to anchor to | governance | §5 `mainchainrpc*` |
-| Genesis staker set & weights | **governance** | §3 `staker=` (must be identical on all nodes) |
+| Genesis staker seed & distribution | **governance** | §3 `con_genesis_stake` (preferred); optional `staker=` config layer must be identical on all nodes |
 | Total SEQ supply & pre-mine distribution | **governance** | genesis issuance (no block subsidy, §3 `con_blocksubsidy=0`) |
 | Minimum blocksigner stake | governance | §3 `posminstake` (whitepaper: 0.01% of supply) |
 | Committee size / quorum | governance | §3 `poscommitteesize` |

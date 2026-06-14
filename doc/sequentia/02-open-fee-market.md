@@ -1,14 +1,21 @@
 # Challenge 1 — Open ("no-coin") fee market
 
-**Goal.** Any asset issued on Sequentia can be offered as a transaction fee.
-Each block producer independently decides which assets it accepts and their
-relative values, then builds the most valuable block from transactions paying in
-those assets. Two configuration modes: a **static whitelist**, and a **dynamic
-whitelist** maintained by a local **price server**.
+**Goal.** Any asset issued on Sequentia can be *offered* as a transaction fee.
+Proposing a fee in any asset is permissionless; inclusion is not. A transaction
+is included only if a block producer is willing to accept that asset **and** the
+rate at which the fee is posted. Each block producer independently decides which
+assets it accepts and at what relative value, then builds the most valuable block
+from transactions paying in those assets. **SEQ is not privileged here**: it is
+special only as the asset that unlocks block-production (staking), not for fees.
+For fees SEQ is just another asset — accepted 1:1 only as the *default* an
+unconfigured producer uses; a producer may re-price it (any rate), refuse it
+(rate 0), or designate a *different* asset as the 1:1 reference (e.g. USDT). Two
+configuration modes: a **static whitelist**, and a **dynamic whitelist**
+maintained by a local **price server**.
 
-## A. What already exists (static whitelist) — keep
+## A. The static whitelist
 
-The Sequentia fork already implements the static path end-to-end. Summarised
+The static path works end-to-end on Elements' multi-asset plumbing. Summarised
 here so the dynamic work bolts on cleanly; see doc 01 §3 for detail.
 
 - `ExchangeRateMap` singleton: `{CAsset → scaled rate}`, scale `COIN`, persisted
@@ -39,12 +46,14 @@ here so the dynamic work bolts on cleanly; see doc 01 §3 for detail.
      `m_modified_fee` and the rfa ancestor/descendant aggregates, and survive
      exchange-rate updates (`UpdateFeeValue` shifts `m_modified_fee`).
    **Convention:** all configured floors (`-minrelaytxfee`, `-blockmintxfee`,
-   `-incrementalrelayfee`, prioritisation deltas) are denominated in
-   policy-asset atoms, which are pegged 1:1 to rfa (the policy asset's rate is
-   fixed at `exchange_rate_scale`), so configured values *are* rfa floors.
-2. **Producer acceptance vs. relay.** Today rate map = both the node's relay
-   policy *and* the producer's acceptance set. We keep that for the PoC but note
-   the distinction for later (a node might relay assets it won't itself mine).
+   `-incrementalrelayfee`, prioritisation deltas) are denominated in rfa (the
+   abstract reference unit). By default the policy asset (SEQ) is valued 1:1 with
+   rfa, so a SEQ-atom floor equals an rfa floor out of the box — but that 1:1 is
+   only SEQ's default rate; a producer who re-prices SEQ (or pegs a different
+   asset to rfa) changes that equivalence, while the floors stay rfa-denominated.
+2. **Producer acceptance vs. relay.** The rate map serves as both the node's
+   relay policy *and* the producer's acceptance set. The distinction is noted for
+   later refinement (a node might relay assets it won't itself mine).
 
 ## B. The dynamic price server (implemented — see roadmap M2)
 
@@ -65,10 +74,10 @@ A locally-run component that:
 
 ### B.2 Where it runs — design choice
 
-Two viable shapes; the PoC adopts **(1)** for isolation and operator safety, with
-a clean interface so **(2)** remains possible later.
+Two viable shapes; Sequentia adopts **(1)** for isolation and operator safety,
+with a clean interface so **(2)** remains possible later.
 
-1. **Out-of-process sidecar** (recommended for PoC). A standalone program
+1. **Out-of-process sidecar** (the chosen shape). A standalone program
    (Python or Rust) that the operator runs alongside `sequentiad`. It owns all
    outbound HTTP to exchanges, applies thresholds, and feeds the node through a
    new authenticated RPC. *Pros:* keeps third-party HTTP, API keys and parsing
@@ -135,8 +144,9 @@ max_volatility_30d = 0.80
 
 ### B.5 Rate computation & the reference unit
 
-The rfa unit needs an anchor so rates are meaningful. PoC choice: define rfa as a
-**USD-equivalent** atom (e.g. rfa pegged to a chosen stablecoin/oracle). Then for
+The rfa unit needs an anchor so rates are meaningful. The reference choice:
+define rfa as a **USD-equivalent** atom (e.g. rfa pegged to a chosen
+stablecoin/oracle). Then for
 asset `A` priced `price_A` (reference-per-whole-unit) with `d` decimals:
 
 ```

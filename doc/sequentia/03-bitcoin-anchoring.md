@@ -54,16 +54,16 @@ Two options:
 1. **In the block header** (recommended). Add `btc_height` + `btc_blockhash` to
    `CBlockHeader`, behind a new global flag `g_con_bitcoin_anchor`, serialized in
    the hashed region of **both** the dynafed and non-dynafed branches (see doc 01
-   §4). *Pros:* the federation signs over the anchor (it's inside `SER_GETHASH`);
-   light clients see it without the coinbase; matches the conceptual model
-   ("blocks anchor to blocks"). *Cons:* a header-format change ⇒ new genesis /
-   fresh chain (acceptable: PoC is a new network).
+   §4). *Pros:* the block producer signs over the anchor (it's inside
+   `SER_GETHASH`); light clients see it without the coinbase; matches the
+   conceptual model ("blocks anchor to blocks"). *Cons:* a header-format change ⇒
+   new genesis / fresh chain (acceptable: Sequentia is a new network).
 2. **In the coinbase** (an `OP_RETURN` commitment, like merge-mining tags /
    witness commitment). *Pros:* no header-format change. *Cons:* not signed as a
    first-class header field; every validator must parse the coinbase; weaker fit
    with "header references header".
 
-**Decision: header field behind `g_con_bitcoin_anchor`.** Because the PoC is a
+**Decision: header field behind `g_con_bitcoin_anchor`.** Because Sequentia is a
 brand-new chain we are free to change the header; doing it properly (signed,
 first-class) is cleaner than a coinbase commitment.
 
@@ -114,8 +114,8 @@ Sequentia must reorg when Bitcoin reorgs away a referenced block. Mechanism:
    best chain. Any Sequentia block whose `btc_blockhash` is now stale (no longer on
    bitcoind's active chain) is **invalid**. Invalidate the **lowest-height** such
    Sequentia block via the existing `InvalidateBlock` path; Elements'
-   `ActivateBestChain` then disconnects it and all descendants, and the federation
-   resumes building from the last still-valid Sequentia block (whose anchor is
+   `ActivateBestChain` then disconnects it and all descendants, and block
+   production resumes from the last still-valid Sequentia block (whose anchor is
    still canonical on Bitcoin).
 4. **Re-validation.** Disconnected Sequentia transactions return to the mempool
    per existing logic; blocks are rebuilt with anchors to the new Bitcoin best
@@ -125,13 +125,13 @@ Because honest producers only anchor to Bitcoin blocks they consider buried-enou
 (R3 maturity window), routine 1-block Bitcoin reorgs need not cascade if the
 window is set conservatively; the operator tunes the window to trade finality
 latency against reorg exposure. **As long as Bitcoin does not reorg the referenced
-blocks, no Sequentia reorg is possible** (signed blocks give immediate finality),
-which is precisely the paper's principle 6 + principle 5 guarantee.
+blocks, no Sequentia reorg is possible** (committee certification gives immediate
+finality), which is precisely the paper's principle 6 + principle 5 guarantee.
 
 ### Interaction with consensus finality
 
-With strong-federation signed blocks, Sequentia blocks are final on signature.
-The *only* sanctioned reason to discard a signed Sequentia block is R3 failing
+A committee-certified Sequentia block is final on certification. The *only*
+sanctioned reason to discard a certified Sequentia block is R3 failing
 because Bitcoin reorged its anchor away. This must be encoded as a **consensus**
 invalidation (all nodes following the same bitcoind-confirmed best chain reach the
 same decision), not a local policy choice — so the watcher feeds
@@ -173,7 +173,7 @@ proposer-grinding incentive. See doc 10 §7; tested in
 | bitcoind unreachable at startup | Refuse to produce blocks; optionally header-validate with cached data; loud warning. |
 | bitcoind behind the network | Anchors look "ahead"; R3 lead-window rejects until local bitcoind catches up — fail safe, no bad accept. |
 | Deep Bitcoin reorg past maturity window | Cascade invalidation of dependent Sequentia blocks; expected and correct (the swaps those blocks protected are also gone on Bitcoin). |
-| Producer anchors too far in the past (fee-securing incentive, paper principle 7) | Bounded by anchor monotonicity and R3 (the designed `-anchormaxlag` window is deferred); PoS adds incentive weighting. For the federated PoC, a policy "anchor to tip-minus-`anchorminconf`" suffices. |
+| Producer anchors too far in the past (fee-securing incentive, paper principle 7) | Bounded by anchor monotonicity and R3 (the designed `-anchormaxlag` window is deferred); PoS adds incentive weighting, and the anchor-freshness fork choice (§4) prefers the fresher anchor. The producer policy "anchor to tip-minus-`anchorminconf`" keeps anchors current. |
 
 ## 7. Test strategy
 

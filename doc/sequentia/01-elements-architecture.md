@@ -1,9 +1,8 @@
 # Elements architecture — the parts that matter for Sequentia
 
-This is a focused tour of the Elements/Sequentia subsystems the two priority
-features touch. Line numbers refer to the imported Sequentia `master`
-(`elements-23.x` series) and will drift as upstream is merged; treat the symbol
-names as the stable reference.
+This is a focused tour of the Elements subsystems the priority features build on.
+Line numbers refer to the Elements `23.x` series the tree is based on and will
+drift as upstream is merged; treat the symbol names as the stable reference.
 
 ## 1. Chain configuration — `src/chainparams.cpp`
 
@@ -14,7 +13,7 @@ chain sets, among others:
 g_con_elementsmode      = true;   // Confidential-Assets / elements tx format
 g_con_blockheightinheader = true; // block height is serialized in the header
 g_con_any_asset_fees    = true;   // CHALLENGE 1: fees payable in any asset
-g_signed_blocks         = true;   // CHALLENGE 3 PoC: federated signed blocks
+g_signed_blocks         = true;   // CHALLENGE 3: signed blocks (PoS-driven challenge)
 consensus.signblockscript = CScript(0x51 /* OP_TRUE for dev */);
 consensus.has_parent_chain = false;
 ```
@@ -38,8 +37,7 @@ add one more such flag for anchoring** (see doc 03).
 ## 3. The reference-fee-atom (rfa) abstraction — challenge 1's core idea
 
 Because the mempool must *order* transactions by economic value, and fees may be
-in different assets, the existing Sequentia work introduces an asset-independent
-unit:
+in different assets, Sequentia introduces an asset-independent unit:
 
 - `CValue` (`src/policy/value.h`) — a thin `int64_t` wrapper denominated in
   **reference fee atoms (rfa)**. All cross-asset comparisons (mempool ordering,
@@ -95,7 +93,7 @@ Two consequences for anchoring:
    flag and serializing it in **both** the dynafed and non-dynafed branches.
 2. `SER_GETHASH` excludes the witness/solution from the block hash but **includes**
    the committed fields. New anchor fields must be in the hashed region so the
-   federation signs over them (see doc 03 for the exact placement and the
+   block producer signs over them (see doc 03 for the exact placement and the
    block-hash/back-compat implications).
 
 ## 5. Bitcoin-node connectivity — challenge 2's transport (already present)

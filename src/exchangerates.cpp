@@ -11,15 +11,20 @@
 
 CValue ExchangeRateMap::ConvertAmountToValue(const CAmount& amount, const CAsset& asset) {
     int64_t int64_max = std::numeric_limits<int64_t>::max();
-    // The policy asset is the reference unit by definition (exchange_rate_scale
-    // atoms == 1 reference unit), so it is always valued 1:1 and always
-    // payable — independent of, and not overridable by, the rate map.
-    if (asset == ::policyAsset) {
-        return CValue(amount);
-    }
     LOCK(m_write_mutex); // serialize against RebuildEffective's clear()/insert
     auto it = this->find(asset);
     if (it == this->end()) {
+        // No explicit rate set by this producer. The policy asset (SEQ) defaults
+        // to 1:1 — the convenient out-of-box reference — but this is only a
+        // DEFAULT: a producer may set an explicit rate for SEQ (the branch below),
+        // which OVERRIDES this, may refuse SEQ (rate 0), or may make a different
+        // asset the 1:1 reference (e.g. USDT). SEQ is privileged ONLY for staking
+        // eligibility, never for fee acceptance — for fees it is just another
+        // asset, valued and accepted at each producer's discretion. Any other
+        // unlisted asset is not accepted (value 0).
+        if (asset == ::policyAsset) {
+            return CValue(amount);
+        }
         return CValue(0);
     }
     auto scaled_value = it->second.m_scaled_value;
@@ -40,13 +45,14 @@ CValue ExchangeRateMap::ConvertAmountToValue(const CAmount& amount, const CAsset
 
 CAmount ExchangeRateMap::ConvertValueToAmount(const CValue& value, const CAsset& asset) {
     int64_t int64_max = std::numeric_limits<int64_t>::max();
-    // The policy asset is the reference unit, always 1:1 (see ConvertAmountToValue).
-    if (asset == ::policyAsset) {
-        return value.GetValue();
-    }
     LOCK(m_write_mutex); // serialize against RebuildEffective's clear()/insert
     auto it = this->find(asset);
     if (it == this->end()) {
+        // Policy asset (SEQ) defaults to 1:1 when unlisted; overridable per
+        // producer (see ConvertAmountToValue). Other unlisted assets: not accepted.
+        if (asset == ::policyAsset) {
+            return value.GetValue();
+        }
         return 0;
     }
     auto scaled_value = it->second.m_scaled_value;
@@ -182,11 +188,17 @@ bool ExchangeRateMap::LoadFromJSON(std::map<std::string, UniValue> json, std::ve
         } else {
             CAmount newRateValue = rate.second.get_int64();
             // Rates are integers: atoms of the asset equal to one reference
-            // unit (exchange_rate_scale). Non-positive rates are invalid — a
-            // zero divides by zero and a negative saturates to a bogus huge
-            // valuation that bypasses fee checks.
-            if (newRateValue <= 0) {
-                errors.push_back(strprintf("Rate for %s must be a positive integer", rate.first));
+            // unit (exchange_rate_scale). A rate of exactly 0 means "explicitly
+            // refuse this asset" (Convert treats scaled_value <= 0 as
+            // not-accepted, with no divide-by-zero). This is how a producer
+            // declines an asset it would otherwise accept by default — notably
+            // the policy asset SEQ, which is accepted 1:1 only as an unlisted
+            // default and can be re-priced (any rate) or refused (0) here, like
+            // any other asset; SEQ is privileged solely for staking. Negative
+            // rates are invalid (they would saturate to a bogus huge valuation
+            // that bypasses fee checks).
+            if (newRateValue < 0) {
+                errors.push_back(strprintf("Rate for %s must be a non-negative integer (0 = refuse the asset)", rate.first));
                 hasError = true;
             } else {
                 parsedRates[asset] = newRateValue;

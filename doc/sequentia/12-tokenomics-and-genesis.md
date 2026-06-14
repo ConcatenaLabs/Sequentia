@@ -15,9 +15,12 @@ block is created); the *mechanisms* below are implemented and in place.
 - **No inflation / no block subsidy.** `genesis_subsidy = 0` on the Sequentia
   chain (`src/chainparams.cpp`), so block production mints no new SEQ; block
   producers are paid only in transaction fees (whitepaper §3.9, doc 06 §5).
-- SEQ is the chain's policy/reference asset: it is always payable for fees 1:1
-  (`ExchangeRateMap::Convert*`, doc 02), and it is the asset stake weight is
-  denominated in (staking outputs are policy-asset outputs, doc 06 §5).
+- SEQ's only privileged role is **staking**: it is the asset stake weight is
+  denominated in (staking outputs are policy-asset outputs, doc 06 §5). For
+  **fees** SEQ is just another asset (`ExchangeRateMap::Convert*`, doc 02):
+  accepted 1:1 only as the default an unconfigured producer uses, but each
+  producer may re-price it (any rate), refuse it (rate 0), or peg a different
+  asset as the 1:1 reference (e.g. USDT).
 - The **minimum blocksigner stake is 0.01% of supply = 40,000 SEQ**
   (`-posminstake = 4000000000000` atoms; whitepaper §3.3, doc 06 §5).
 
