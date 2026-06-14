@@ -1,48 +1,49 @@
 # Security & hardening notes (pre-mainnet review)
 
-Items found by adversarial review that are **safe to defer** (none risks funds,
-a consensus split, or a stuck chain on a correctly-configured network) but
-should be reviewed/closed before a value-bearing mainnet. Each records the
-analysis so the decision is auditable.
+The record of the pre-mainnet adversarial review: what was found, what was fixed,
+what is accepted by design, and what remains. §5 is the consolidated audit
+summary; §§1–4 give the detailed analysis of specific items. Each records the
+reasoning so the decision is auditable. (Earlier drafts framed some of these as
+"safe to defer"; the consensus/security-relevant ones have since been fixed —
+see §5.)
 
-## 1. Unvalidated fork/sibling blocks can be stored to disk (peer DoS)
+## 1. Unvalidated fork/sibling blocks — tip-siblings FIXED; deeper forks bounded
 
-**What.** On a signed/PoS chain every valid block has equal "work" (height):
-`GetBlockProof` returns 1 for signed blocks (`src/chain.cpp`). PoS leader/
-committee validity is checked in `CheckPosStakeRules`, which runs
-authoritatively at connect time and, at accept time, only when the block builds
-directly on the active tip (`pindex->pprev == m_chain.Tip()`,
-`src/validation.cpp`). A block that is a **sibling of the tip** (same height,
-`pprev == tip->pprev`) passes the unrequested-block work gate (equal work ⇒
-`fHasMoreOrSameWork`), is *not* PoS-checked at accept time (`pprev != tip`),
-passes `CheckBlock`/`ContextualCheckBlock` (PoS rules excluded there), and is
-written to disk. It is never connected (equal work doesn't displace the tip),
-so `CheckPosStakeRules` never runs and the peer is never punished. An attacker
-can sign unlimited distinct siblings with **their own** key (the per-block
-challenge means anyone's self-signed block passes `CheckProof` structurally) and
-push them, filling disk. This is unique to the per-block-challenge PoS model —
-in stock Liquid only the fixed federation can sign a header.
+**What (the original issue).** On a signed/PoS chain every valid block has equal
+"work" (height): `GetBlockProof` returns 1 for signed blocks (`src/chain.cpp`).
+PoS leader/committee validity is checked in `CheckPosStakeRules`. A **sibling of
+the tip** (same height, `pprev == tip->pprev`) passes the unrequested-block work
+gate, was not PoS-checked at accept time, and was written to disk; it is never
+connected, so the peer was never punished. Worse, the fork-choice key
+`m_pos_countersigs` was set from the *unverified* coinbase committee count, so a
+forged sibling could be ranked above the honest tip and force reorg churn. (The
+per-block challenge means anyone's self-signed block passes `CheckProof`
+structurally — unique to this PoS model; in stock Liquid only the fixed
+federation can sign a header.)
 
-**Why it's deferrable.** It is a resource-exhaustion nuisance, not a
-consensus/fund risk: the blocks are never connected, never affect the active
-chain, and are reclaimed by pruning. It requires an actively-malicious peer
-pushing *unrequested* blocks.
+**Fixed (the high-rate vector).** `AcceptBlock` now authoritatively PoS-validates
+a block that builds on the tip **or is a sibling of it**:
+`CheckPosStakeRulesAtAccept` recreates the sibling's parent registry by a
+temporary, exact-inverse `PosRevertBlockStake(tip)` → `CheckPosStakeRules` →
+`PosApplyBlockStake(tip)`, and rejects an invalid sibling (`BLOCK_FAILED`, peer
+punished) before it is stored or given a fork-choice key. `SetPosForkChoiceKeys`
+also now counts only **distinct** committee members and **clamps** the
+fork-choice count to `MAX_POS_AGG_COMMITTEE_SIZE`, so no block can advertise more
+certification weight than a real full committee. This closes the reorg-churn
+lever and the tip-height storage flood (invalid tip-siblings are now banned).
 
-**Proper fix (needs review — touches block download / consensus).**
-PoS-validate a fork block against the **registry at its own parent** before
-persisting — which for a sibling means rewinding the stake registry one block
-(`PosRevertBlockStake(tip)` → validate → `PosApplyBlockStake(tip)`), or more
-generally maintaining short-range registry snapshots. This distinguishes a
-valid-but-competing block (must be kept — the §3.8 fork choice may prefer it)
-from a genuinely-invalid one (drop / mark failed).
-
-Note the tempting cheap alternative — "don't store unsolicited equal-work
-blocks" — is **wrong now that the fork choice is implemented**: a full-threshold
-block that should displace a sub-threshold tip often arrives unsolicited at the
-same height, and dropping it would defeat the §3.8 preference. So the parent-
-registry validation is the only correct fix, and it wants human review +
-multi-node fork tests before landing. (Bounded meanwhile: resource-only,
-pruning-reclaimed, requires an actively-malicious peer.)
+**Residual (deeper forks) — bounded hardening.** A block whose parent is a
+deeper active-chain ancestor (not the tip's parent) is still deferred to connect
+time and may be stored unconnected. It carries *less* work (lower height) so it
+cannot churn the tip, and its fork-choice key is clamped; but an attacker could
+still store self-signed deep-fork siblings (disk only). The complete fix is to
+extend the accept-time validation to any in-range active-chain ancestor (revert
+N blocks, bounded by the finalization depth) and/or add an oldest-evicting cap on
+stored never-connected equal-work-or-lower blocks. Lower priority: pruning
+reclaims them and it requires an actively-malicious peer. (Note the tempting
+"don't store unsolicited equal-work blocks" is **wrong** — a full-threshold block
+that should displace a sub-threshold tip arrives unsolicited at the same height;
+the §3.8 fork choice needs it kept.)
 
 ## 2. PoS consensus rejects and peer banning — analyzed, NOT a bug
 
@@ -111,3 +112,66 @@ tested in `feature_max_block_weight.py`. (See doc 12 for SEQ supply / genesis.)
 
 These notes keep the boundary between "the four challenges + PoS" (delivered)
 and the longer whitepaper roadmap explicit.
+
+## 5. Pre-mainnet adversarial audit — findings & remediation
+
+A structured adversarial review covered six subsystems (PoS block validation;
+anchoring/reorg-following/fork-choice; VRF + MuSig2 crypto; genesis/money/
+tokenomics; stake registry/unbonding; fee market/RPC/DoS). No reviewer found a
+way to steal funds, mint SEQ beyond the 400M cap, or force a permanent consensus
+split. Findings and their disposition:
+
+**Fixed (consensus/security):**
+- **CSV inactive on the real chain (CRITICAL).** The chain's soft-fork
+  activation heights were inherited from Bitcoin (`CSVHeight=419328`, …), so
+  BIP68/BIP112 — and thus the staking-output unbonding lock — were unenforced.
+  Now all set to 0/1 (buried-active from genesis). Without this the unbonding
+  lock was a no-op on spend (nothing-at-stake). (`src/chainparams.cpp`.)
+- **Forged-sibling fork-choice / reorg churn (HIGH).** See §1 — accept-time
+  sibling PoS validation + clamped/deduped fork-choice keys.
+- **Sortition-seed grindability (MEDIUM).** The seed mixed the producer-grindable
+  block hash; now it chains the leader's VRF score (unbiasable) + the Bitcoin
+  anchor + height. (`ComputePosSeed`, doc 06/07.)
+- **Placeholder-genesis safety (HIGH, operational).** A node refuses to start on
+  the real chain (`-chain=sequentia`) with the published placeholder genesis
+  unless `-allowplaceholdergenesis` is set. (`src/init.cpp`, doc 13.)
+- **Single fee asset per tx (MEDIUM).** Mempool now rejects multi-fee-asset txs
+  (attacker-controllable mis-valuation; also fixed an empty-`fee_map` UB).
+- **`generateposblock` committee-array DoS cap (MEDIUM).**
+- **`MAX_MONEY` per-chain.** Bitcoin chains keep 2.1e15; Sequentia uses 4e16
+  (400M SEQ). (Raising it globally had broken inherited Bitcoin tx tests.)
+
+**Accepted by design (documented, not bugs):**
+- **Escaping-stall down to a single signer**, and **genesis→block-1 via
+  escaping-stall**, are the intended bootstrap mechanism (a lone genesis founder
+  must be able to certify until others stake). A "race" between competing
+  sub-threshold blocks is resolved deterministically by the §3.8 fork choice; the
+  economic backstop against short-range equivocation is the **checkpoint depth**
+  (`-poscheckpointdepth`) — there is no slashing (nothing-at-stake is bounded,
+  not eliminated). State this in operator guidance.
+- **Anchor-freshness ordered above the VRF tiebreak** (doc 10 §7): a stale-
+  anchored leader can be orphaned by a fresher-anchored competitor. This is the
+  *intended* real-time-swap behaviour (it incentivises fresh anchoring); churn is
+  bounded to ~1-block reorgs at anchor-advance boundaries, with no oscillation
+  (anchor heights are monotonic).
+- **Anchor R3 (Bitcoin best-chain membership) is a soft, eventually-consistent
+  gate**, not hard consensus: view-dependent results are classified
+  `BLOCK_RECENT_CONSENSUS_CHANGE` (non-banning, retryable), so honest nodes with
+  lagging bitcoind defer rather than split. Corollary: `-validateanchor=0` nodes
+  accept blocks validating nodes defer — a deliberate configuration choice. The
+  hard anchor rules are R1/R2 + the reorg-following watcher.
+
+**Open hardening (lower priority, not launch-blocking):**
+- Deeper-than-sibling fork disk-fill (§1 residual).
+- The anchor watcher and header validation call bitcoind RPC under `cs_main`; a
+  slow/hung parent daemon can stall the node — snapshot under the lock and do the
+  RPC outside it.
+- The stake registry stores sub-min-stake "dust" staking outputs (memory only;
+  deterministic, no split) — drop below-floor outputs at the registry boundary.
+
+**Requires external sign-off (cannot be done in-repo):**
+- Independent crypto review of the vendored secp256k1 **MuSig2** module (confirm
+  it matches a known-good upstream commit, no local patches) and the **ECVRF**
+  byte layout / test vectors (no official SECP256K1 vectors exist).
+- A **BDB** CI build so the `feature_any_asset_fee*` cross-asset RBF/CPFP tests
+  (which need legacy-wallet issuance) actually execute; this build is SQLite-only.
