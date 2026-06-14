@@ -917,14 +917,23 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
 
     int64_t nSigOpsCost = GetTransactionSigOpCost(tx, m_view, STANDARD_SCRIPT_VERIFY_FLAGS);
 
-    // ConstructTransaction() ensures that transactions can only have a single fee output
-    // and therefore that there will be exactly one entry in fee_map.
-    // TODO: For a stronger guarantee, add consensus check for multiple fees and invalidate
-    // if fee_map.size() != 1. Alternatively, extend any asset feature to support multiple
-    // fee assets.
-    CAsset feeAsset = g_con_any_asset_fees ? 
-        fee_map.begin()->first : 
-        ::policyAsset;
+    // ConstructTransaction() ensures the wallet's own txs have a single fee
+    // output, but attacker-built RAW txs are not so constrained. The fee
+    // valuation/relay logic below keys on ONE asset; with multiple fee assets it
+    // would value only the lowest-id one (CAsset ordering, attacker-chosen),
+    // inconsistently across nodes — and `fee_map.begin()` on an empty map is UB.
+    // So require exactly one fee asset at mempool acceptance (audit M5). This is
+    // a standardness/policy check (not consensus), so it cannot split consensus;
+    // ConnectBlock still accounts for every asset, so block validity is
+    // unaffected. The wallet builder always produces a single fee output.
+    CAsset feeAsset = ::policyAsset;
+    if (g_con_any_asset_fees) {
+        if (fee_map.size() != 1) {
+            return state.Invalid(TxValidationResult::TX_NOT_STANDARD,
+                fee_map.empty() ? "bad-txns-no-fee" : "bad-txns-multiple-fee-assets");
+        }
+        feeAsset = fee_map.begin()->first;
+    }
     ws.m_base_fees = fee_map[feeAsset];
 
     // ws.m_modified_fees includes any fee deltas from PrioritiseTransaction

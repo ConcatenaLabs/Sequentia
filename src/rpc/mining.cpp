@@ -1863,6 +1863,11 @@ static RPCHelpMan generateposblock()
             // candidate too), keep the sortition-selected ones.
             candidates.emplace(pubkey, key);
             if (!request.params[1].isNull()) {
+                // Bound the committee-key array before doing per-entry EC work
+                // (DecodeSecret + VRF prove/verify), mirroring getposblocktemplate.
+                if ((int)request.params[1].get_array().size() > MAX_POS_AGG_COMMITTEE_SIZE) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("At most %d committee keys may be supplied", MAX_POS_AGG_COMMITTEE_SIZE));
+                }
                 for (const UniValue& wif : request.params[1].get_array().getValues()) {
                     CKey ckey = DecodeSecret(wif.get_str());
                     if (!ckey.IsValid()) {
