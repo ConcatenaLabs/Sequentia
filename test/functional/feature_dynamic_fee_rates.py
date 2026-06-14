@@ -113,14 +113,28 @@ class DynamicFeeRatesTest(BitcoinTestFramework):
 
         # A transaction offering a fee in a non-whitelisted asset is rejected:
         # its value is 0 rfa, so it cannot pay a meaningful fee. Use a freshly
-        # issued asset that never receives a rate. (The chain's reference/policy
-        # asset is always payable 1:1, so it can't exhibit this case.)
+        # issued asset that never receives a rate.
         other = node.issueasset(10, 0, False)['asset']
         self.generate(node, 1)
         assert other not in node.getfeeexchangerates()
         assert_raises_rpc_error(-6, None,
             node.sendtoaddress,
             address=addr, amount=1.0, assetlabel=self.asset, fee_asset_label=other)
+
+        # SEQ (the policy asset, here 'gasset') is NOT privileged for fees — it
+        # is special only for staking. A producer can re-price or refuse it like
+        # any asset; the 1:1 valuation is only a default, no longer hardcoded.
+        # Refuse it by pinning its rate to 0:
+        node.setfeeexchangerates({'gasset': 0})
+        assert_raises_rpc_error(-6, None,
+            node.sendtoaddress, address=addr, amount=1.0, fee_asset_label='gasset')
+        # Make a DIFFERENT asset the 1:1 reference and value SEQ at half — the map
+        # now honours the custom policy-asset rate (was forced to 1:1 before).
+        node.setfeeexchangerates({self.asset: 100000000, 'gasset': 50000000})
+        assert_equal(node.getfeeexchangerates()['gasset'], 50000000)
+        # Restore the 1:1 default so the wallet can pay fees in SEQ again.
+        node.setfeeexchangerates({'gasset': 100000000})
+        assert_equal(node.getfeeexchangerates()['gasset'], 100000000)
 
         # Invalid dynamic rates are rejected
         assert_raises_rpc_error(-8, "Error parsing dynamic rates",
