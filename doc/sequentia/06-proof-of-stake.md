@@ -67,11 +67,17 @@ PoS changes exactly one thing: the challenge is **computed per block** instead
 of inherited. For a block at height `h` with parent `P`:
 
 ```
-seed_h      = SHA256( P.GetBlockHash() || P.m_anchor_hash || LE32(h) )
+seed_h      = SHA256( P.m_anchor_hash || LE32(h) )
 schedule_h  = rank stakers ascending by  H(seed_h || pubkey) / weight
 leader_r    = schedule_h[r]
 challenge_h = <leader_r.pubkey> OP_CHECKSIG
 ```
+
+The seed is derived from the parent's **Bitcoin anchor hash** (not the SEQ block
+hash): both inputs are header fields fixed at block-index creation, so the seed
+is identical on every node, and the anchor is Bitcoin's PoW — a SEQ producer
+cannot grind it (its only freedom is *which* recent Bitcoin block to anchor to,
+which the anchor-freshness fork choice, doc 10 §7, makes self-defeating).
 
 Consensus, split across two stages because the stake registry mirrors the
 *active tip's* UTXO set and headers/blocks can be accepted far ahead of it:

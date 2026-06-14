@@ -11,8 +11,10 @@
 
 The doc-06 election is a *public* deterministic schedule: anyone can compute
 `H(seed ‖ pubkey)/weight` for every staker, so the entire leader order is known
-in advance. That enables targeted DoS of upcoming leaders and lets whoever
-produces a block grind the (anchor-derived) seed it passes on.
+in advance. That enables targeted DoS of upcoming leaders. (The seed itself is
+not producer-grindable — it is derived from the Bitcoin anchor + height, doc 06,
+which a SEQ producer cannot bias — but the schedule being *public* still exposes
+who is next.)
 
 A **VRF** fixes this. For a secret key `sk` (public key `Y = sk·G`) and input
 `alpha`, the holder of `sk` can compute:

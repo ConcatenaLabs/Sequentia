@@ -21,16 +21,26 @@ per-block challenge means anyone's self-signed block passes `CheckProof`
 structurally — unique to this PoS model; in stock Liquid only the fixed
 federation can sign a header.)
 
-**Fixed (the high-rate vector).** `AcceptBlock` now authoritatively PoS-validates
-a block that builds on the tip **or is a sibling of it**:
-`CheckPosStakeRulesAtAccept` recreates the sibling's parent registry by a
-temporary, exact-inverse `PosRevertBlockStake(tip)` → `CheckPosStakeRules` →
-`PosApplyBlockStake(tip)`, and rejects an invalid sibling (`BLOCK_FAILED`, peer
-punished) before it is stored or given a fork-choice key. `SetPosForkChoiceKeys`
-also now counts only **distinct** committee members and **clamps** the
-fork-choice count to `MAX_POS_AGG_COMMITTEE_SIZE`, so no block can advertise more
-certification weight than a real full committee. This closes the reorg-churn
-lever and the tip-height storage flood (invalid tip-siblings are now banned).
+**Fixed (the churn lever).** `SetPosForkChoiceKeys` now counts only **distinct**
+committee members and **clamps** the fork-choice count to
+`MAX_POS_AGG_COMMITTEE_SIZE`, so no block — forged or not — can advertise more
+certification weight than a real full committee. This removes the gross
+fork-choice-inflation lever (a forged sibling can no longer claim 65535
+countersigs to outrank the honest tip).
+
+**Reverted (the accept-time sibling check) — needs a determinism-safe redesign.**
+An attempt to also reject invalid tip-siblings at accept time by temporarily
+reverting the tip's stake to recreate the sibling's parent registry
+(`CheckPosStakeRulesAtAccept`) produced a verdict that could **differ** from the
+direct tip-child path — a node seeing a block as a sibling rejected it while a
+node seeing it as a tip-child accepted it, causing a consensus split and wrongful
+peer bans (caught by `feature_pos_stake`). That was worse than the bounded DoS it
+targeted, so it was reverted to the original tip-child-only accept-time check.
+The forged-sibling storage flood therefore remains (bounded: resource-only,
+pruning-reclaimed, requires an actively-malicious peer, and the clamped
+fork-choice keys prevent it from churning the tip). A correct fix is a
+determinism-safe parent-registry validation (e.g. against persisted short-range
+registry snapshots rather than a live revert) + multi-node fork tests.
 
 **Why deeper forks are not a storage vector.** `AcceptBlock` only stores a block
 that has **more-or-equal work** than the tip
@@ -135,11 +145,17 @@ split. Findings and their disposition:
   BIP68/BIP112 — and thus the staking-output unbonding lock — were unenforced.
   Now all set to 0/1 (buried-active from genesis). Without this the unbonding
   lock was a no-op on spend (nothing-at-stake). (`src/chainparams.cpp`.)
-- **Forged-sibling fork-choice / reorg churn (HIGH).** See §1 — accept-time
-  sibling PoS validation + clamped/deduped fork-choice keys.
+- **Forged-sibling fork-choice / reorg churn (HIGH) — partially fixed.** The
+  gross lever is closed: fork-choice keys are clamped/deduped so no block can
+  claim more than a full committee's worth of countersigs. The accept-time
+  sibling *rejection* was reverted (its live-revert approach caused a consensus
+  split — see §1); the residual forged-sibling storage flood is bounded.
 - **Sortition-seed grindability (MEDIUM).** The seed mixed the producer-grindable
-  block hash; now it chains the leader's VRF score (unbiasable) + the Bitcoin
-  anchor + height. (`ComputePosSeed`, doc 06/07.)
+  SEQ block hash; now it is derived from the parent's Bitcoin **anchor hash** +
+  height (header fields — deterministic on every node, and unbiasable: it is
+  Bitcoin's PoW). (`ComputePosSeed`, doc 06/07. An earlier VRF-score-chained seed
+  was reverted — that value is set after block-index creation and was not a
+  node-consistent seed input, causing a split.)
 - **Placeholder-genesis safety (HIGH, operational).** A node refuses to start on
   the real chain (`-chain=sequentia`) with the published placeholder genesis
   unless `-allowplaceholdergenesis` is set. (`src/init.cpp`, doc 13.)
