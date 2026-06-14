@@ -6,6 +6,22 @@ Bitcoin reorgs away a referenced block, Sequentia reorgs the dependent blocks;
 otherwise Sequentia has **immediate finality**. This enables real-time
 cross-chain atomic swaps with no extra reorg-protection timelocks.
 
+> **What "real-time" means here.** *Not* "instant / zero-latency." A normal
+> cross-chain swap carries two kinds of timelock: (1) **refund** timelocks
+> intrinsic to the HTLC, which nothing removes, and (2) a **reorg-protection
+> buffer** added *because two unsynchronized chains reorg independently*, so a
+> confirmation on one chain may vanish after you have acted on the other. A
+> Sequentia block committing Bitcoin anchor height `A` is final **iff** Bitcoin
+> block `A` survives — Sequentia carries no independent reorg risk — so #2 drops
+> to **zero**. "Real-time" denotes exactly that: **no extra reorg-protection
+> timelock beyond Bitcoin's own confirmation wait**, with the two chains kept
+> *synchronized* (the Sequentia tip references a current Bitcoin block) to within
+> a **bounded ~1-block lag** (the anchor-freshness fork choice, §4), which is
+> small relative to the Bitcoin-paced swap clock. The claimant still waits for
+> the leg's anchor to reach their desired Bitcoin **confirmation depth** — a
+> fresher anchor is a *shallower* one — but pays no cross-chain buffer on top.
+> With that meaning fixed, the rest of these docs use "real-time" freely.
+
 > **Status: implemented** (`src/anchor.{h,cpp}`, header fields
 > `m_anchor_height`/`m_anchor_hash`, validation in `ContextualCheckBlockHeader`,
 > the `getanchorstatus` RPC; options `-con_bitcoin_anchor` / `-validateanchor` /

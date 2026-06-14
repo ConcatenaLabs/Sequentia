@@ -176,7 +176,9 @@ raised for review have been decided with the project owner:
   latest Bitcoin block so a swap's Sequentia leg confirms with
   `anchor ≥ the Bitcoin leg's height` promptly, giving timelock-free real-time
   cross-chain swaps (the anchoring already provides the reorg *safety*; this is
-  about *latency*). Rather than re-roll the sortition seed from each block's own
+  about keeping the chains *synchronized*). "Real-time" is precise here — **no
+  extra reorg-protection timelock**, not zero latency; see the definition box in
+  [doc 03](03-bitcoin-anchoring.md). Rather than re-roll the sortition seed from each block's own
   anchor (the paper's literal mechanism — which adds proposer grinding and a
   deep sortition change), `CBlockIndexWorkComparator` now prefers, among
   equally-certified same-height blocks, the one with the higher (fresher)
@@ -187,8 +189,9 @@ raised for review have been decided with the project owner:
   *after* certification, so it never displaces a finalized block — a freshly
   arrived Bitcoin block is otherwise picked up within one block (~1 slot).
   Tested in `feature_pos_anchor_freshness.py`. Trade-off vs. the literal
-  reshuffle: ~1-slot lag instead of ~0, in exchange for no grinding and far less
-  risk; the swap *safety* is identical either way.
+  reshuffle: ~1-block *synchronization* lag instead of ~0, in exchange for no
+  grinding and far less risk; the swap *safety* (and the no-extra-timelock
+  property) is identical either way.
 
 - **Dynamic committee floor — not implemented (owner: Option A).** The
   whitepaper leaves its trigger/curve undefined ("may not be finalized"), and
