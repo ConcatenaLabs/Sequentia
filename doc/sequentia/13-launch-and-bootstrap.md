@@ -6,9 +6,12 @@
 > staker set is entirely on-chain. The signed-block "anyone-signs" PoC path now
 > lives only on the custom/regtest chains (`-con_pos=0`), i.e. the dev harness.
 >
-> - **`-chain=main`** is the **real Sequentia network** (mainnet address format,
->   distinct network magic). Its genesis founder key is a placeholder that **must
->   be replaced with a real, secret key at the launch ceremony** (§3).
+> - **`-chain=sequentia`** is the **real Sequentia network** (its own dedicated
+>   chain id, mainnet address format, distinct network magic). Its genesis founder
+>   key is a placeholder that **must be replaced with a real, secret key at the
+>   launch ceremony** (§3). (`-chain=main` is deliberately left as Bitcoin-Elements
+>   — it is the inherited unit-test harness default and a parent-chain interop
+>   target — so Sequentia gets its own slot rather than repurposing `main`.)
 > - **`-chain=test`** is the **public playground**: identical consensus rules,
 >   testnet address format, and a published founder key anyone can use to run and
 >   experiment. It is never "launched" or replaced.
@@ -75,11 +78,13 @@ private key published so anyone can run/spend/stake:
 | Founder pubkey | `028f88c9848c86c311934a5939ceb98408975055fc7ee6b40b479969665afe0e6b` |
 | Founder key (testnet WIF) | `cURsyjY6KwZM9pBk7rfWwdDzYS1R4w85M2pPzh5RySfGpA8n9LB4` |
 
-**Mainnet (`-chain=main`) — the real network. PLACEHOLDER — REPLACE AT LAUNCH.**
-The private key below is published only so the mainnet *config* is runnable
-pre-launch; it controls the entire 400M supply, so a real launch **must**
-regenerate this genesis with a fresh, secret founder key (and the desired
-distribution), producing a new genesis hash:
+**Mainnet (`-chain=sequentia`) — the real network. PLACEHOLDER — REPLACE AT
+LAUNCH.** The private key below is published only so the mainnet *config* is
+runnable pre-launch; it controls the entire 400M supply, so a real launch
+**must** regenerate this genesis with a fresh, secret founder key (and the
+desired distribution), producing a new genesis hash. A node refuses to start on
+`-chain=sequentia` with this placeholder genesis unless `-allowplaceholdergenesis`
+is set (see `src/init.cpp`):
 
 | | |
 |---|---|

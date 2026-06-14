@@ -134,12 +134,14 @@ make -j$(nproc)
 The daemon supports several pre-set chains (note: the binary's default chain is
 still `liquidv1`, inherited from Elements — pass `-chain=` explicitly):
 
-* **Sequentia mainnet**: `elementsd -chain=main` — the real Sequentia network.
-  Proof-of-Stake by default (VRF sortition + aggregate committee, bootstrapped
-  from a genesis-seeded staking output — doc 13), Bitcoin-anchored (requires a
-  Bitcoin node via the `-mainchainrpc*` options), any-asset fees, Bitcoin-mainnet
-  address format with opt-in confidential transactions. **The genesis founder
-  key is a placeholder that must be replaced at the real launch (doc 13).**
+* **Sequentia mainnet**: `elementsd -chain=sequentia` — the real Sequentia
+  network. Proof-of-Stake by default (VRF sortition + aggregate committee,
+  bootstrapped from a genesis-seeded staking output — doc 13), Bitcoin-anchored
+  (requires a Bitcoin node via the `-mainchainrpc*` options), any-asset fees,
+  Bitcoin-mainnet address format with opt-in confidential transactions. **The
+  genesis founder key is a placeholder that must be replaced at the real launch
+  (doc 13).** (The `main` chain is kept as Bitcoin-Elements for the test harness
+  and parent-chain interop — Sequentia has its own dedicated chain id.)
 * **Sequentia testnet**: `elementsd -chain=test` — identical consensus rules, a
   public/published founder key, and testnet address format; the playground.
 * **Custom chains**: any other `-chain=` argument; regtest-like defaults
@@ -148,7 +150,8 @@ still `liquidv1`, inherited from Elements — pass `-chain=` explicitly):
   available here (`-con_any_asset_fees`, `-con_bitcoin_anchor`, `-con_pos`,
   `-posvrf`, `-con_genesis_stake`, `-con_default_blinded_addresses`, …) — this
   is what the functional tests use.
-* `-chain=regtest` (Bitcoin-like, parent-chain interop testing) and Liquid modes
+* `-chain=main` (Bitcoin-Elements; the unit-test harness default and a
+  parent-chain interop target), `-chain=regtest`, and Liquid modes
   (`-chain=liquidv1` etc.) are inherited from Elements.
 
 ## Confidential Assets and Transactions

@@ -11,6 +11,7 @@
 #include <assert.h>
 
 const std::string CBaseChainParams::MAIN = "main";
+const std::string CBaseChainParams::SEQUENTIA = "sequentia";
 const std::string CBaseChainParams::TESTNET = "test";
 const std::string CBaseChainParams::SIGNET = "signet";
 const std::string CBaseChainParams::REGTEST = "regtest";
@@ -93,6 +94,8 @@ std::unique_ptr<CBaseChainParams> CreateBaseChainParams(const std::string& chain
 {
     if (chain == CBaseChainParams::MAIN) {
         return std::make_unique<CBaseChainParams>("", 8332, 18332, 8334);
+    } else if (chain == CBaseChainParams::SEQUENTIA) {
+        return std::make_unique<CBaseChainParams>("sequentia", 7332, 18332, 7334);
     } else if (chain == CBaseChainParams::TESTNET) {
         return std::make_unique<CBaseChainParams>("testnet3", 18776, 18332, 18778);
     } else if (chain == CBaseChainParams::SIGNET) {

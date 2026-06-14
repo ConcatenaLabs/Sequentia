@@ -21,6 +21,7 @@ public:
     ///@{
     /** Chain name strings */
     static const std::string MAIN;
+    static const std::string SEQUENTIA;   // SEQUENTIA: the real Sequentia PoS network
     static const std::string TESTNET;
     static const std::string SIGNET;
     static const std::string REGTEST;
