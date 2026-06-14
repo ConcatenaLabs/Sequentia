@@ -223,12 +223,18 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
         consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].min_activation_height = 0; // No activation delay
 
-        consensus.nMinimumChainWork = uint256S("0x00000000000000000000000000000000000000002927cdceccbd5209e81e80db");
-        consensus.defaultAssumeValid = uint256S("0x000000000000000000052d314a259755ca65944e68df6b12a067ea8f1f5a7091"); // 724466
+        consensus.nMinimumChainWork = uint256();
+        consensus.defaultAssumeValid = uint256();
 
-        consensus.genesis_subsidy = 50*COIN;
-        consensus.connect_genesis_outputs = false;
-        consensus.subsidy_asset = CAsset();
+        // SEQUENTIA mainnet: the real Proof-of-Stake network. (Testnet,
+        // -chain=test, is the public playground with a published founder key.)
+        // Same consensus RULES as testnet; the differences are mainnet address
+        // formats, distinct network magic, and a SEPARATE genesis whose founder
+        // key is a PLACEHOLDER that MUST be replaced with a real, secret key at
+        // the launch ceremony (see doc/sequentia/13-launch-and-bootstrap.md).
+        consensus.genesis_subsidy = 0;                  // no inflation (§3.9)
+        consensus.nMaxBlockWeight = 200000;             // a twentieth of Bitcoin (doc 11 §4)
+        consensus.connect_genesis_outputs = true;
         anyonecanspend_aremine = false;
         accept_unlimited_issuances = false;
         enforce_pak = false;
@@ -236,67 +242,87 @@ public:
         accept_discount_ct = false;
         create_discount_ct = false;
         consensus.has_parent_chain = false;
-        g_signed_blocks = false;
-        g_con_elementsmode = false;
-        g_con_blockheightinheader = false;
-        g_con_bitcoin_anchor = false;
-        g_con_pos = false;
-        g_pos_vrf = false;
-        g_pos_agg_committee = false;
-        // Reset the rest of the PoS consensus globals to their defaults too, so
-        // an in-process chain switch can never read a value left over from a
-        // previously-selected (custom PoS) chain.
-        g_pos_min_stake = 0;
-        g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
-        g_pos_slot_interval = DEFAULT_POS_SLOT_INTERVAL;
-        g_pos_unbonding_period = DEFAULT_POS_UNBONDING_PERIOD;
+        g_con_elementsmode = true;
+        g_con_blockheightinheader = true;
+        g_con_any_asset_fees = true;
+        g_con_bitcoin_anchor = true;
+        g_con_pos = true;
+        g_pos_vrf = true;
+        g_pos_agg_committee = true;
+        g_pos_min_stake = 4000000000000ULL;             // 40,000 SEQ = 0.01% of 400M (§3.3)
+        g_pos_committee_size = 100;                      // 51-of-100 quorum (§3.5)
+        g_pos_slot_interval = 30;                        // 30s nominal block time (doc 11 §4)
+        g_pos_unbonding_period = 43200;                  // x30s = ~15 days (§3.11)
         consensus.total_valid_epochs = 0;
+        consensus.dynamic_epoch_length = 10;
         consensus.elements_mode = g_con_elementsmode;
 
-        /**
-         * The message start string is designed to be unlikely to occur in normal data.
-         * The characters are rarely used upper ASCII, not valid as UTF-8, and produce
-         * a large 32-bit integer with any alignment.
-         */
-        pchMessageStart[0] = 0xf9;
-        pchMessageStart[1] = 0xbe;
-        pchMessageStart[2] = 0xb4;
-        pchMessageStart[3] = 0xd9;
-        nDefaultPort = 8333;
+        // Sequentia mainnet network magic + port (distinct from Bitcoin/testnet).
+        pchMessageStart[0] = 0x53; // 'S'
+        pchMessageStart[1] = 0x45; // 'E'
+        pchMessageStart[2] = 0x51; // 'Q'
+        pchMessageStart[3] = 0x31; // '1'
+        nDefaultPort = 7333;
         nPruneAfterHeight = 100000;
-        m_assumed_blockchain_size = 460;
-        m_assumed_chain_state_size = 6;
+        m_assumed_blockchain_size = 1;
+        m_assumed_chain_state_size = 1;
 
-        genesis = CreateGenesisBlock(1231006505, 2083236893, 0x1d00ffff, 1, 50 * COIN, consensus);
+        std::vector<unsigned char> sign_bytes = ParseHex("51");
+        consensus.signblockscript = CScript(sign_bytes.begin(), sign_bytes.end());
+        consensus.max_block_signature_size = 74;
+        g_signed_blocks = true;
+
+        // Policy asset, from the network-tagged genesis commitment.
+        std::vector<unsigned char> commit = CommitToArguments(consensus, strNetworkID);
+        uint256 entropy;
+        GenerateAssetEntropy(entropy, COutPoint(uint256(commit), 0), uint256{});
+        CalculateAsset(consensus.subsidy_asset, entropy);
+        consensus.pegged_asset = consensus.subsidy_asset;
+
+        consensus.genesis_style = "elements";
+        genesis = CreateGenesisBlock(consensus, CScript() << commit, CScript(OP_RETURN), 1296688602, 2, 0x207fffff, 1, 0);
+        // SEQUENTIA: 400,000,000 SEQ to the founder, with a CSV-locked seed
+        // staking output (the genesis PoS bootstrap, doc 13). PLACEHOLDER founder
+        // key — its private key is published in doc 13 for pre-launch testing and
+        // MUST be replaced with a real, secret key at the launch ceremony.
+        {
+            const CPubKey founder(ParseHex("02a7bcf5525f5385642956c7272c6ae1a18aa8196d8e174864784a53d087b5d6dc"));
+            const uint32_t stake_csv = CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG | 2532; // ~15 days
+            const CScript stake_spk = BuildStakeScript(founder, stake_csv);
+            const CScript founder_spk = CScript() << OP_0 << ToByteVector(founder.GetID()); // P2WPKH
+            const CAmount seed_stake = 1000000 * COIN;   // 1,000,000 SEQ staked to bootstrap
+            const CAmount total = 400000000 * COIN;      // 400,000,000 SEQ hard cap
+            AppendInitialIssuanceToDestinations(genesis, COutPoint(uint256(commit), 0), uint256{},
+                { {stake_spk, seed_stake}, {founder_spk, total - seed_stake} });
+        }
         consensus.hashGenesisBlock = genesis.GetHash();
-        assert(consensus.hashGenesisBlock == uint256S("0x000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"));
-        assert(genesis.hashMerkleRoot == uint256S("0x4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"));
+        // SEQUENTIA mainnet genesis (PLACEHOLDER founder; recomputed at launch).
+        const uint256 expected_genesis = uint256S("0xada33d3a3031b30a19437f66bb92331f31dd3b8fedd56e92c63f270b01c25d51");
+        if (consensus.hashGenesisBlock != expected_genesis) {
+            fprintf(stderr, "main genesis hash mismatch: computed %s, expected %s\n",
+                    consensus.hashGenesisBlock.GetHex().c_str(), expected_genesis.GetHex().c_str());
+        }
+        assert(consensus.hashGenesisBlock == expected_genesis);
+        assert(genesis.hashMerkleRoot == uint256S("0x5912029006ef21e88f677d76786c3d049b8b00a8875da1914f8edf48bc190025"));
 
-        // Note that of those which support the service bits prefix, most only support a subset of
-        // possible options.
-        // This is fine at runtime as we'll fall back to using them as an addrfetch if they don't support the
-        // service bits we want, but we should get them updated to support all service bits wanted by any
-        // release ASAP to avoid it where possible.
-        vSeeds.emplace_back("seed.bitcoin.sipa.be."); // Pieter Wuille, only supports x1, x5, x9, and xd
-        vSeeds.emplace_back("dnsseed.bluematt.me."); // Matt Corallo, only supports x9
-        vSeeds.emplace_back("dnsseed.bitcoin.dashjr.org."); // Luke Dashjr
-        vSeeds.emplace_back("seed.bitcoinstats.com."); // Christian Decker, supports x1 - xf
-        vSeeds.emplace_back("seed.bitcoin.jonasschnelli.ch."); // Jonas Schnelli, only supports x1, x5, x9, and xd
-        vSeeds.emplace_back("seed.btc.petertodd.org."); // Peter Todd, only supports x1, x5, x9, and xd
-        vSeeds.emplace_back("seed.bitcoin.sprovoost.nl."); // Sjors Provoost
-        vSeeds.emplace_back("dnsseed.emzy.de."); // Stephan Oeste
-        vSeeds.emplace_back("seed.bitcoin.wiz.biz."); // Jason Maurice
+        vSeeds.clear();   // fresh network; no DNS seeds yet
 
+        // SEQUENTIA: Bitcoin-mainnet-identical (unblinded) address format, so a
+        // wallet can present one receiving address for both chains (doc 08).
+        // Confidential (blinded) addresses are opt-in with a distinct prefix.
         base58Prefixes[PUBKEY_ADDRESS] = std::vector<unsigned char>(1,0);
         base58Prefixes[SCRIPT_ADDRESS] = std::vector<unsigned char>(1,5);
         base58Prefixes[SECRET_KEY] =     std::vector<unsigned char>(1,128);
+        base58Prefixes[BLINDED_ADDRESS] = std::vector<unsigned char>(1, 12);
         base58Prefixes[EXT_PUBLIC_KEY] = {0x04, 0x88, 0xB2, 0x1E};
         base58Prefixes[EXT_SECRET_KEY] = {0x04, 0x88, 0xAD, 0xE4};
 
         bech32_hrp = "bc";
-        blech32_hrp = bech32_hrp;
+        blech32_hrp = "sqb";   // confidential (opt-in) addresses
 
-        vFixedSeeds = std::vector<uint8_t>(std::begin(chainparams_seed_main), std::end(chainparams_seed_main));
+        m_default_blinded_addresses = false;
+
+        vFixedSeeds.clear();
 
         fDefaultConsistencyChecks = false;
         fRequireStandard = true;
@@ -305,31 +331,16 @@ public:
 
         checkpointData = {
             {
-                { 11111, uint256S("0x0000000069e244f73d78e8fd29ba2fd2ed618bd6fa2ee92559f542fdb26e7c1d")},
-                { 33333, uint256S("0x000000002dd5588a74784eaa7ab0507a18ad16a236e7b1ce69f00d7ddfb5d0a6")},
-                { 74000, uint256S("0x0000000000573993a3c9e41ce34471c079dcf5f52a0e824a81e7f953b8661a20")},
-                {105000, uint256S("0x00000000000291ce28027faea320c8d2b054b2e0fe44a773f3eefb151d6bdc97")},
-                {134444, uint256S("0x00000000000005b12ffd4cd315cd34ffd4a594f430ac814c91184a0d42d2b0fe")},
-                {168000, uint256S("0x000000000000099e61ea72015e79632f216fe6cb33d7899acb35b75c8303b763")},
-                {193000, uint256S("0x000000000000059f452a5f7340de6682a977387c17010ff6e6c3bd83ca8b1317")},
-                {210000, uint256S("0x000000000000048b95347e83192f69cf0366076336c639f9b7228e9ba171342e")},
-                {216116, uint256S("0x00000000000001b4f4b433e81ee46494af945cf96014816a4e2370f11b23df4e")},
-                {225430, uint256S("0x00000000000001c108384350f74090433e7fcf79a606b8e797f065b130575932")},
-                {250000, uint256S("0x000000000000003887df1f29024b06fc2200b55f8af8f35453d7be294df2d214")},
-                {279000, uint256S("0x0000000000000001ae8c72a0b0c301f67e3afca10e819efa9041e458e9bd7e40")},
-                {295000, uint256S("0x00000000000000004d9b4ef50f0f9d686fd69db2e03af35a100370c64632a983")},
             }
         };
 
         m_assumeutxo_data = MapAssumeutxo{
-         // TODO to be specified in a future patch.
         };
 
         chainTxData = ChainTxData{
-            // Data from RPC: getchaintxstats 4096 000000000000000000052d314a259755ca65944e68df6b12a067ea8f1f5a7091
-            /* nTime    */ 1645542140,
-            /* nTxCount */ 712531200,
-            /* dTxRate  */ 2.891036496010309,
+            0,
+            0,
+            0
         };
     }
 };

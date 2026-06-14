@@ -1,11 +1,17 @@
 # Launch & bootstrap — the genesis-seeded PoS chain
 
-> **Status: implemented.** The bundled Sequentia chain is now a Proof-of-Stake
-> chain *by default* (`CTestNetParams`: `g_con_pos/g_pos_vrf/g_pos_agg_committee
-> = true`). It bootstraps from a **genesis-seeded staking output** with **no
-> `-staker` config layer** — the staker set is entirely on-chain. The
-> signed-block "anyone-signs" PoC path now lives only on the custom/regtest
-> chains (`-con_pos=0`), i.e. the dev/test harness.
+> **Status: implemented.** Both built-in Sequentia chains run Proof-of-Stake by
+> default (`g_con_pos/g_pos_vrf/g_pos_agg_committee = true`), bootstrapping from a
+> **genesis-seeded staking output** with **no `-staker` config layer** — the
+> staker set is entirely on-chain. The signed-block "anyone-signs" PoC path now
+> lives only on the custom/regtest chains (`-con_pos=0`), i.e. the dev harness.
+>
+> - **`-chain=main`** is the **real Sequentia network** (mainnet address format,
+>   distinct network magic). Its genesis founder key is a placeholder that **must
+>   be replaced with a real, secret key at the launch ceremony** (§3).
+> - **`-chain=test`** is the **public playground**: identical consensus rules,
+>   testnet address format, and a published founder key anyone can use to run and
+>   experiment. It is never "launched" or replaced.
 
 ## 1. The launch sequence
 
@@ -54,24 +60,41 @@ set, including genesis (height-0) outputs**, at every node start; the incrementa
 on the identical registry. So a genesis staking output alone is enough to
 bootstrap a chain with an empty config layer.
 
-## 3. The bundled chain's placeholder genesis
+## 3. The two built-in genesis blocks (both placeholder for now)
 
-`CTestNetParams` bakes a **placeholder** founder (a throwaway key — regenerate it
-at the real launch ceremony):
+Each built-in chain bakes a fixed genesis: 1,000,000 SEQ in a CSV-locked seed
+staking output (~15-day time-lock, `2532 × 512 s`) + 399,000,000 SEQ in a plain
+P2WPKH output to the founder = **400,000,000 SEQ** total. The only difference is
+the founder key and the address format.
+
+**Testnet (`-chain=test`) — public playground, never replaced.** Throwaway key,
+private key published so anyone can run/spend/stake:
 
 | | |
 |---|---|
 | Founder pubkey | `028f88c9848c86c311934a5939ceb98408975055fc7ee6b40b479969665afe0e6b` |
 | Founder key (testnet WIF) | `cURsyjY6KwZM9pBk7rfWwdDzYS1R4w85M2pPzh5RySfGpA8n9LB4` |
-| Seed staking output | 1,000,000 SEQ, CSV time-lock ~15 days (`2532 × 512 s`) |
-| Plain output (P2WPKH founder) | 399,000,000 SEQ |
-| Total | **400,000,000 SEQ** |
+
+**Mainnet (`-chain=main`) — the real network. PLACEHOLDER — REPLACE AT LAUNCH.**
+The private key below is published only so the mainnet *config* is runnable
+pre-launch; it controls the entire 400M supply, so a real launch **must**
+regenerate this genesis with a fresh, secret founder key (and the desired
+distribution), producing a new genesis hash:
+
+| | |
+|---|---|
+| Founder pubkey | `02a7bcf5525f5385642956c7272c6ae1a18aa8196d8e174864784a53d087b5d6dc` |
+| Founder key (mainnet WIF) | `L2gSRsSrimEchCSiS59H7Uo71MqAac1MKbEUjRg4zTTpLxqTxadA` ⚠️ placeholder |
 
 The 400M cap required raising the inherited money range: `MAX_MONEY` is now
 `400,000,000 × COIN` (4e16 atoms), the hard cap and sanity bound (well below
-int64's ceiling; see `src/consensus/amount.h`). **This is a placeholder** — the
-real mainnet genesis (founder key, exact distribution) is a launch-ceremony
-artifact and replaces this byte-for-byte (a new genesis hash).
+int64's ceiling; see `src/consensus/amount.h`).
+
+**What changes at the real mainnet launch vs. what doesn't.** *Only* the genesis
+block changes — specifically the founder key (placeholder → your secret key) and
+optionally the distribution layout. Every consensus rule/parameter (PoS, 100-
+member committee, 40,000-SEQ min stake, 30s slots, ~15-day unbonding, 200,000
+weight, anchoring, `MAX_MONEY`) is already the real value and stays identical.
 
 ## 4. Custom chains: `-con_genesis_stake`
 

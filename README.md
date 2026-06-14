@@ -134,20 +134,22 @@ make -j$(nproc)
 The daemon supports several pre-set chains (note: the binary's default chain is
 still `liquidv1`, inherited from Elements — pass `-chain=` explicitly):
 
-* **Sequentia network**: `elementsd -chain=test` — the Sequentia chain:
+* **Sequentia mainnet**: `elementsd -chain=main` — the real Sequentia network.
   Proof-of-Stake by default (VRF sortition + aggregate committee, bootstrapped
   from a genesis-seeded staking output — doc 13), Bitcoin-anchored (requires a
-  Bitcoin node via the `-mainchainrpc*` options), any-asset fees enabled,
-  Bitcoin-identical addresses with opt-in confidential transactions.
+  Bitcoin node via the `-mainchainrpc*` options), any-asset fees, Bitcoin-mainnet
+  address format with opt-in confidential transactions. **The genesis founder
+  key is a placeholder that must be replaced at the real launch (doc 13).**
+* **Sequentia testnet**: `elementsd -chain=test` — identical consensus rules, a
+  public/published founder key, and testnet address format; the playground.
 * **Custom chains**: any other `-chain=` argument; regtest-like defaults
   (signed-block "anyone-signs" by default; opt into PoS with `-con_pos=1`),
   overridable by a rich set of start-up options. All Sequentia features are
   available here (`-con_any_asset_fees`, `-con_bitcoin_anchor`, `-con_pos`,
   `-posvrf`, `-con_genesis_stake`, `-con_default_blinded_addresses`, …) — this
   is what the functional tests use.
-* Bitcoin modes (`-chain=main` / `-chain=regtest`), kept for parent-chain
-  interoperability testing, and Liquid modes (`-chain=liquidv1` etc.),
-  inherited from Elements.
+* `-chain=regtest` (Bitcoin-like, parent-chain interop testing) and Liquid modes
+  (`-chain=liquidv1` etc.) are inherited from Elements.
 
 ## Confidential Assets and Transactions
 
