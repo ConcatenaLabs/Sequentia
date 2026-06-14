@@ -203,6 +203,21 @@ network:
   (to be built with Simplicity), programmable accounts (deferred / maybe
   unnecessary given Simplicity), utreexo (after it matures in Bitcoin) — doc 11 §4.
 
+## Pre-mainnet testnet tasks
+- **Measure committee-round latency at the target committee size.** The block
+  cadence is set to 30s (`-posslotinterval=30`, doc 11 §4), chosen because it
+  sits an order of magnitude inside the distributed-MuSig2 certification-round
+  latency floor and so is safe *without* a measurement. Whether the chain can go
+  faster — toward the "snappy" ~10s tier — is gated on a real measurement: run a
+  full-size committee (up to 100 geographically distributed signers) on testnet
+  and record the end-to-end certification-round time (nonce exchange + partial-
+  sig aggregation), including the slowest-responder tail. If a round comfortably
+  completes in a small fraction of 10s with nonce pre-distribution, 10s/~67,000-
+  weight is viable; otherwise stay at 30s. Decide once, before genesis locks
+  (cadence is a fresh-genesis change). See doc 10 §7 / doc 11 §4 for the
+  trade-off analysis (latency & anchor-sync gains vs. overhead, CT-tx size
+  floor, clock-skew, and committee-decentralization costs).
+
 ## Risks / watch-items
 - **Build resources.** A full Elements build is heavy (~4-core / 15 GB host
   used for the PoC build). CI should build with BDB so the pre-existing
