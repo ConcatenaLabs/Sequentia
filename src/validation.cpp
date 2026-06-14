@@ -2282,6 +2282,43 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
     return true;
 }
 
+//! SEQUENTIA: authoritatively validate a freshly-accepted PoS block against the
+//! stake registry as of its parent, at accept time, for a block that builds on
+//! the active tip OR is a SIBLING of it (parent == tip->pprev). The global
+//! registry tracks the tip; for a sibling we temporarily revert the tip's stake
+//! — an exact inverse (see PosApply/RevertBlockStake) — to recreate the parent
+//! state, run CheckPosStakeRules, then restore. This closes the forged-sibling
+//! vector: a bogus-leader / fake-committee sibling is rejected (peer punished)
+//! before it is written to disk or given a fork-choice key, instead of being
+//! stored and silently driving reorg churn. A sibling that fails for its (fixed)
+//! parent is objectively invalid regardless of later reorgs, so a permanent
+//! BLOCK_FAILED mark by the caller is correct. Deeper forks (parent is neither
+//! the tip nor its parent), or any disk-read failure, cannot be cheaply
+//! reconstructed here and are deferred to connect time as before — they carry
+//! less work (lower height) and their fork-choice keys are clamped, so they
+//! cannot churn the tip. Returns true if validated OK (or deferred); on a real
+//! violation sets `state` and returns false.
+static bool CheckPosStakeRulesAtAccept(const CBlock& block, BlockValidationState& state,
+                                       const CBlockIndex* pindexParent, const CBlockIndex* tip,
+                                       const Consensus::Params& params)
+{
+    AssertLockHeld(cs_main);
+    if (!g_con_pos || tip == nullptr || pindexParent == nullptr) return true;
+    if (pindexParent == tip) {
+        return CheckPosStakeRules(block, state, pindexParent); // registry == parent
+    }
+    if (pindexParent != tip->pprev) return true; // deeper/off-chain fork: defer to connect time
+    CBlock tipBlock;
+    CBlockUndo tipUndo;
+    if (!ReadBlockFromDisk(tipBlock, tip, params) || !UndoReadFromDisk(tipUndo, tip)) {
+        return true; // cannot reconstruct the parent registry (e.g. pruned); defer
+    }
+    PosRevertBlockStake(tipBlock, tipUndo);   // registry: tip state -> tip->pprev (== parent)
+    const bool ok = CheckPosStakeRules(block, state, pindexParent);
+    PosApplyBlockStake(tipBlock, tipUndo);    // restore registry to the active tip's state
+    return ok;
+}
+
 //! SEQUENTIA: compute and store the PoS fork-choice keys (whitepaper §3.8) on a
 //! freshly accepted block, from the block body alone — deterministic and
 //! registry-independent (member count from the coinbase; the leader's VRF beta
@@ -2295,8 +2332,27 @@ static void SetPosForkChoiceKeys(CBlockIndex* pindex, const CBlock& block)
     if (!parts) return;
     // Countersigners: the named committee (agg form: the SEQCMT set; multisig
     // form: the listed members). Leader-only blocks have none. More is better.
-    size_t count = !parts->agg_key.empty() ? ExtractPosVrfMembers(block).size() : parts->committee.size();
-    pindex->m_pos_countersigs = (uint16_t)std::min<size_t>(count, std::numeric_limits<uint16_t>::max());
+    //
+    // SECURITY: this key drives same-height fork choice but is computed from the
+    // block body *before* committee certification is verified (the authoritative
+    // CheckPosStakeRules runs at connect time, and at accept time only for
+    // tip-children / tip-siblings). A forged sibling could otherwise claim an
+    // arbitrary member count to outrank the honest tip and force reorg churn. So
+    // we (a) count only DISTINCT members and (b) clamp to the protocol maximum
+    // MAX_POS_AGG_COMMITTEE_SIZE — an attacker can never claim more "weight"
+    // than a real full committee. (The multisig form's member set is already
+    // deduped and capped by ParsePosBlockChallenge.) Full mitigation of forged
+    // siblings is the accept-time fork validation in AcceptBlock.
+    size_t count;
+    if (!parts->agg_key.empty()) {
+        const std::vector<PosVrfMember> members = ExtractPosVrfMembers(block);
+        std::set<CPubKey> distinct;
+        for (const PosVrfMember& m : members) distinct.insert(m.pubkey);
+        count = distinct.size();
+    } else {
+        count = parts->committee.size();
+    }
+    pindex->m_pos_countersigs = (uint16_t)std::min<size_t>(count, (size_t)MAX_POS_AGG_COMMITTEE_SIZE);
     // Leader VRF score (the top 64 bits of beta; lower is better). Registry-
     // independent: it only needs the leader key and the slot seed.
     if (g_pos_vrf) {
@@ -4509,16 +4565,17 @@ bool CChainState::AcceptBlock(const std::shared_ptr<const CBlock>& pblock, Block
     // block's parent state. But on a signed/PoS chain header "work" is just
     // height, so — unlike stock Liquid, where only the fixed federation can
     // sign a header — an attacker can forge header chains with their own keys.
-    // To keep a bogus-leader block from being written to disk, also check it
-    // here *when it builds directly on the active tip*: that is the one case
-    // where the global registry provably equals this block's parent state, so
-    // the check is authoritative and can never false-reject a valid block
-    // during headers-first sync or fork validation (where pprev != tip and we
-    // correctly defer to connect time). A block at the tip with a wrong leader
-    // is invalid for this exact parent regardless of later reorgs, so marking
-    // it failed is permanent and correct.
-    if (g_con_pos && pindex->pprev != nullptr && pindex->pprev == m_chain.Tip()) {
-        if (!CheckPosStakeRules(block, state, pindex->pprev)) {
+    // To keep a bogus-leader / fake-committee block from being written to disk
+    // (and from receiving a fork-choice key able to displace the honest tip),
+    // also check it here for the two cases whose parent registry we can recreate
+    // authoritatively: a block building on the tip, and a SIBLING of the tip
+    // (whose parent state is the tip's, minus the tip's own stake — recreated by
+    // a temporary, exact-inverse revert). A block invalid for its fixed parent
+    // is invalid regardless of later reorgs, so the permanent BLOCK_FAILED mark
+    // is correct. Deeper/off-chain forks are deferred to connect time (they carry
+    // less work and have clamped keys, so they cannot churn the tip).
+    if (g_con_pos && pindex->pprev != nullptr) {
+        if (!CheckPosStakeRulesAtAccept(block, state, pindex->pprev, m_chain.Tip(), m_params.GetConsensus())) {
             if (state.IsInvalid() && state.GetResult() != BlockValidationResult::BLOCK_MUTATED) {
                 pindex->nStatus |= BLOCK_FAILED_VALID;
                 m_blockman.m_dirty_blockindex.insert(pindex);
