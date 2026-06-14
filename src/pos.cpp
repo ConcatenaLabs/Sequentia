@@ -59,10 +59,12 @@ bool StakeRegistry::AddFromSpec(const std::string& spec, std::string& error)
     return true;
 }
 
-uint256 ComputePosSeed(const uint256& parent_hash, const uint256& parent_anchor_hash, uint32_t height)
+uint256 ComputePosSeed(uint64_t parent_vrf_score, const uint256& parent_anchor_hash, uint32_t height)
 {
     CSHA256 sha;
-    sha.Write(parent_hash.begin(), parent_hash.size());
+    unsigned char score_le[8];
+    for (int i = 0; i < 8; ++i) score_le[i] = (unsigned char)((parent_vrf_score >> (8 * i)) & 0xff);
+    sha.Write(score_le, 8);
     sha.Write(parent_anchor_hash.begin(), parent_anchor_hash.size());
     unsigned char height_le[4];
     height_le[0] = (unsigned char)(height & 0xff);
@@ -259,7 +261,10 @@ std::optional<PosChallengeParts> ParsePosBlockChallenge(const CScript& challenge
 uint256 PosSeedForChild(const CBlockIndex* pindexPrev)
 {
     if (pindexPrev == nullptr) return uint256();
-    return ComputePosSeed(pindexPrev->GetBlockHash(), pindexPrev->m_anchor_hash,
+    // m_pos_vrf_score is the parent leader's VRF beta prefix, set at acceptance
+    // (SetPosForkChoiceKeys) and persisted; for genesis / non-VRF parents it is
+    // the UINT64_MAX default, which is fine — the seed only needs determinism.
+    return ComputePosSeed(pindexPrev->m_pos_vrf_score, pindexPrev->m_anchor_hash,
                           (uint32_t)(pindexPrev->nHeight + 1));
 }
 
