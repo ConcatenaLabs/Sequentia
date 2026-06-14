@@ -124,6 +124,22 @@ height is gated on its parent anchor having become stale. Nodes connected to
 honest bitcoind instances converge because Bitcoin's best chain is the shared
 oracle.
 
+### Anchor-freshness fork choice (PoS, real-time swaps)
+
+Reorg-following gives the swap *safety* (a Sequentia leg can never outlive the
+Bitcoin block it anchors). For real-time, **timelock-free** swaps we also want
+the canonical Sequentia tip to track Bitcoin's tip with minimal *latency*, so a
+swap's Sequentia leg confirms with `anchor_height >= the Bitcoin leg's height`
+promptly. Under PoS, `CBlockIndexWorkComparator` (`src/validation.cpp`)
+therefore prefers, among **equally-certified same-height** blocks, the one
+referencing the **fresher (higher) Bitcoin anchor** (then the lower leader VRF
+score). This is ordered *after* the countersignature key, so it never displaces
+a finalized full-threshold block; it only resolves ties toward Bitcoin's tip. A
+newly-arrived Bitcoin block is picked up within one Sequentia block (~1 slot),
+and referencing a *stale* Bitcoin block can only lose — so there is no
+proposer-grinding incentive. See doc 10 §7; tested in
+`feature_pos_anchor_freshness.py`.
+
 ## 5. Node configuration
 
 - Make the Bitcoin connection **mandatory** when `g_con_bitcoin_anchor` (today

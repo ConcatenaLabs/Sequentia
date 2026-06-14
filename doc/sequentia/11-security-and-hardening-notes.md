@@ -68,9 +68,15 @@ relayer of a genuinely-invalid block is correct. No change made.
 The deterministic full-vs-sub-threshold fork-choice preference (whitepaper §3.8)
 is **implemented** — via the `CBlockIndexWorkComparator` secondary keys, not a
 header-format change (the earlier "needs header-time work" assessment was
-wrong; the comparator already drives equal-work reorgs). See
-[doc 10 §6](10-liveness-and-escaping-stall.md). The remaining liveness items
-(stages 4–5: anchor clock, dynamic committee floor) are fidelity refinements.
+wrong; the comparator already drives equal-work reorgs). The same comparator now
+also carries an **anchor-freshness** key (prefer the fresher Bitcoin anchor among
+equally-certified same-height blocks) for real-time, timelock-free cross-chain
+swaps — see doc 03 §4 and [doc 10 §7](10-liveness-and-escaping-stall.md). The
+two formerly-open liveness items are now decided: block timing is already aligned
+with the whitepaper's wall-clock round model (no change), and the dynamic
+committee floor is **not** implemented (its trigger/curve is underspecified in
+the paper and its liveness purpose is already met by escaping-stall). No
+specified consensus mechanism remains open.
 
 ## 4. Whitepaper features beyond the implemented consensus scope
 

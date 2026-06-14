@@ -167,11 +167,20 @@ The whitepaper's Bitcoin-anchor liveness (§3.5/§3.8). Design + analysis in
       wall-clock round timeout with the lowest-VRF proposer (§3.5), which the
       timestamp slot-gate + the lowest-VRF fork-choice tiebreak realise — there
       is no separate "anchor clock" to build (doc 10 §7).
+- [x] Anchor-freshness fork choice — among equally-certified same-height blocks
+      the chain prefers the fresher (higher) Bitcoin anchor, so the tip tracks
+      Bitcoin's tip for real-time, timelock-free cross-chain swaps. Via the
+      `CBlockIndexWorkComparator` `m_anchor_height` key, ordered after
+      certification so it never displaces a finalized block; chosen over the
+      paper's literal seed-reshuffle (no grinding, far less risk; ~1-slot lag,
+      identical safety). `feature_pos_anchor_freshness.py` (doc 03 §4, doc 10 §7).
 
-Two items are explicitly **out of the specified design** and left open with
-options for review (doc 10 §7): a *dynamic committee floor* (the paper leaves
-its trigger/curve undefined; liveness already covered by escaping-stall) and a
-*mid-round anchor reshuffle* (a liveness refinement with a grinding trade-off).
+Both formerly-open liveness items are now **decided** (doc 10 §7): the
+*real-time-swap anchor tracking* is implemented as the anchor-freshness fork
+choice above (chosen over the literal mid-round seed-reshuffle), and the
+*dynamic committee floor* is **not** implemented — the paper leaves its
+trigger/curve undefined and its liveness purpose is already met by
+escaping-stall. No specified consensus mechanism remains open.
 
 ## Status for mainnet
 The four challenges and the full PoS consensus are implemented, tested, and
@@ -180,10 +189,11 @@ wallet/CT). The remaining work is enumerated and falls into three buckets,
 none a regression or a safety/consensus-split gap on a correctly-configured
 network:
 - **Open by design choice (not gaps)** — the dynamic committee floor (paper
-  leaves it undefined) and the mid-round anchor reshuffle (a liveness
-  refinement), both subsumed by escaping-stall (doc 10 §7); and the
-  fork/sibling-block storage DoS-hardening (doc 11 §1). All are
-  fidelity/DoS-hardening over already-safe, paper-complete paths.
+  leaves it undefined; decided **not** to implement, liveness already covered by
+  escaping-stall), and the fork/sibling-block storage DoS-hardening (doc 11 §1,
+  resource-only, bounded, decided to leave). The real-time-swap anchor tracking
+  the mid-round reshuffle aimed at is now implemented as the anchor-freshness
+  fork choice (Milestone 6). All decisions in doc 10 §7.
 - **Launch / governance parameters** — genesis SEQ supply (400M) & distribution,
   the founding staker set, committee size, `-posminstake`, `-posunbonding` — set
   at launch, like any chain's founding constants (doc 12). The block weight cap

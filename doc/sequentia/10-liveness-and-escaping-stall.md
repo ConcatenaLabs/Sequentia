@@ -156,43 +156,47 @@ restarted node orders identically. Tested in `feature_pos_fork_choice.py` (a
 2-member tip is reorganized onto a competing 3-member block at the same height)
 and the full PoS/anchoring battery confirms no regression.
 
-Stages 4–5 (retiring the wall-clock slot gate; a dynamic committee floor)
-remain deferred — see §7.
+## 7. The remaining items — decided
 
-## 7. The remaining items, re-examined against the whitepaper
+Stage 3 (the fork-choice preference) is implemented — see §6. The three items
+raised for review have been decided with the project owner:
 
-Stage 3 (the fork-choice preference) is implemented — see §6. Re-reading the
-whitepaper's exact timing text reclassifies the other two:
+- **Block timing ("stage 4") — already aligned, no change.** The whitepaper's
+  *normal* block timing is itself wall-clock: "a locally-enforced wall-clock
+  timeout that resets per block arrival, with the lowest-VRF participant serving
+  as proposer" (§3.5). The Bitcoin anchor's consensus roles are the sortition
+  **seed**, the **escaping-stall** (§3.8), and **keeping the tip referencing the
+  freshest Bitcoin block** (next item) — not a replacement clock. Our timestamp
+  slot-gate plus the §6 lowest-VRF tiebreak realise "lowest-VRF proposer at
+  timeout." Nothing to change.
 
-- **"Stage 4 — anchor clock" was a mischaracterisation; the timing is already
-  aligned.** The whitepaper's *normal* block timing is itself wall-clock: "a
-  locally-enforced wall-clock timeout that resets per block arrival, with the
-  lowest-VRF participant serving as proposer" (§3.5). The Bitcoin anchor's
-  consensus roles are the sortition **seed**, the **escaping-stall** (§3.8,
-  implemented), and **mid-round leader reshuffle** on a new parent block — not a
-  replacement clock for normal timing. Our timestamp slot-gate
-  (`block.nTime ≥ parent.nTime + slot · interval`, deterministic over committed
-  timestamps) plus the §6 fork-choice tiebreak (lowest VRF wins among
-  same-height blocks) together realise the paper's "lowest-VRF proposer at
-  timeout." So there is **no anchor-clock change to make**. The one finer
-  mechanism not modelled is the *mid-round reshuffle* (a proposer referencing a
-  newer Bitcoin block to re-roll the leader set); it is a liveness refinement
-  whose hard-stall case escaping-stall already covers, and it has a real
-  grinding trade-off — see the options memo if it is to be pursued.
+- **Keeping the tip on the freshest Bitcoin block (real-time swaps) —
+  IMPLEMENTED via an anchor-freshness fork-choice key, chosen over the literal
+  seed-reshuffle.** Motivation (owner): the Sequentia tip must reference the
+  latest Bitcoin block so a swap's Sequentia leg confirms with
+  `anchor ≥ the Bitcoin leg's height` promptly, giving timelock-free real-time
+  cross-chain swaps (the anchoring already provides the reorg *safety*; this is
+  about *latency*). Rather than re-roll the sortition seed from each block's own
+  anchor (the paper's literal mechanism — which adds proposer grinding and a
+  deep sortition change), `CBlockIndexWorkComparator` now prefers, among
+  equally-certified same-height blocks, the one with the higher (fresher)
+  `m_anchor_height`, then the lower VRF score. This makes the canonical chain
+  track Bitcoin's tip (a stale-anchor block loses to a fresher one), with **no
+  grinding** (referencing an older Bitcoin block can only lose) and a tiny, safe
+  change (the field already exists, set at acceptance, never mutated). Ordered
+  *after* certification, so it never displaces a finalized block — a freshly
+  arrived Bitcoin block is otherwise picked up within one block (~1 slot).
+  Tested in `feature_pos_anchor_freshness.py`. Trade-off vs. the literal
+  reshuffle: ~1-slot lag instead of ~0, in exchange for no grinding and far less
+  risk; the swap *safety* is identical either way.
 
-- **Stage 5 — dynamic committee floor — is left unspecified by the whitepaper,
-  by its own words.** "If the number of participants is less than X … the
-  minimum is lowered," with X, the reduction amount, and the algorithm all
-  undefined and "may not yet be finalized." There is therefore no aligned
-  implementation to write without inventing the policy. Its liveness purpose
-  (progress when the committee can't be filled) is already met by escaping-stall
-  (sub-quorum certification down to one member). Implementing the literal rule
-  needs a specified trigger/curve — see the options memo.
+- **Dynamic committee floor — not implemented (owner: Option A).** The
+  whitepaper leaves its trigger/curve undefined ("may not be finalized"), and
+  its liveness purpose is already met by escaping-stall (sub-quorum down to one
+  member). The static `-posminstake` floor stands.
 
-**Net:** every consensus mechanism the whitepaper actually specifies for the PoS
-model is implemented (VRF sortition, committee certification + MuSig2
-aggregation + distributed signing, the anchor-seeded schedule, wall-clock
-round timing, lowest-VRF fork choice, escaping-stall, checkpoints, min-stake,
-unbonding). The only open items are an underspecified optimisation (the dynamic
-floor) and an unmodelled liveness refinement (mid-round reshuffle), both
-subsumed for safety/liveness by what exists.
+**Net:** every consensus mechanism the whitepaper specifies for the PoS model is
+now implemented — VRF sortition, committee certification + MuSig2 aggregation +
+distributed signing, the anchor-seeded schedule, wall-clock round timing,
+lowest-VRF + more-countersignatures + fresher-anchor fork choice, escaping-stall,
+checkpoints, min-stake, unbonding. No specified mechanism remains open.
