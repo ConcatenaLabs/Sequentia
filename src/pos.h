@@ -189,18 +189,15 @@ public:
     bool AddFromSpec(const std::string& spec, std::string& error);
 };
 
-/** Derive the per-block election seed (whitepaper §3.5). The seed mixes:
- *   - the parent's Bitcoin anchor hash (ties the schedule to Bitcoin, and is
- *     unbiasable by a Sequentia producer — it is Bitcoin's PoW),
- *   - the parent leader's VRF score (top 64 bits of its beta): a VRF-output
- *     chain. beta is fixed by the leader's key over the parent's seed, so the
- *     producer cannot grind it (unlike the parent *block hash*, which a producer
- *     can grind via extranonce/txs/time to bias the next slot — audit M1), yet
- *     it is unpredictable until the parent is actually produced, and
- *   - the height.
- *  Replacing the grindable block hash with the VRF score removes the
- *  last-revealer grinding bias while preserving determinism and unpredictability. */
-uint256 ComputePosSeed(uint64_t parent_vrf_score, const uint256& parent_anchor_hash, uint32_t height);
+/** Derive the per-block election seed (whitepaper §3.5) from the parent's
+ *  Bitcoin anchor hash and the height — both header fields, so the seed is
+ *  identical on every node. Using the anchor (Bitcoin's PoW) instead of the SEQ
+ *  block hash removes last-revealer grinding (a producer cannot bias the anchor;
+ *  audit M1): its only freedom is which recent Bitcoin block to anchor to, which
+ *  the anchor-freshness fork choice makes self-defeating. (An earlier attempt to
+ *  chain the leader's VRF score here was reverted — that value is set after
+ *  block-index creation and is not a reliable, node-consistent seed input.) */
+uint256 ComputePosSeed(const uint256& parent_anchor_hash, uint32_t height);
 
 /** Return the registered stakers ranked best-first (lowest weighted ticket
  *  first) for the given seed. */

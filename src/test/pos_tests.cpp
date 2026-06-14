@@ -47,14 +47,12 @@ static CPubKey MakeKey()
 // The election seed is a deterministic function of its inputs.
 BOOST_AUTO_TEST_CASE(pos_seed_deterministic)
 {
-    uint64_t a = 0x01;             // parent leader VRF score (VRF-output chain)
     uint256 b = uint256S("0x02");  // parent Bitcoin anchor hash
-    BOOST_CHECK(ComputePosSeed(a, b, 5) == ComputePosSeed(a, b, 5));
-    BOOST_CHECK(ComputePosSeed(a, b, 5) != ComputePosSeed(a, b, 6));
-    // The VRF score (first input) is part of the seed.
-    BOOST_CHECK(ComputePosSeed(a, b, 5) != ComputePosSeed(0x99, b, 5));
+    BOOST_CHECK(ComputePosSeed(b, 5) == ComputePosSeed(b, 5));
+    // The height is part of the seed.
+    BOOST_CHECK(ComputePosSeed(b, 5) != ComputePosSeed(b, 6));
     // The Bitcoin anchor is part of the seed (ties PoS to challenge 2).
-    BOOST_CHECK(ComputePosSeed(a, b, 5) != ComputePosSeed(a, uint256S("0x03"), 5));
+    BOOST_CHECK(ComputePosSeed(b, 5) != ComputePosSeed(uint256S("0x03"), 5));
 }
 
 // The "<pubkey> OP_CHECKSIG" challenge round-trips, and malformed challenges
@@ -84,7 +82,7 @@ BOOST_AUTO_TEST_CASE(pos_schedule_well_formed)
         keys.push_back(k);
         reg.SetStake(k, 1);
     }
-    uint256 seed = ComputePosSeed(0xab, uint256(), 1);
+    uint256 seed = ComputePosSeed(uint256(), 1);
     std::vector<CPubKey> schedule = PosSchedule(reg, seed);
     BOOST_CHECK_EQUAL(schedule.size(), keys.size());
 
@@ -117,7 +115,7 @@ BOOST_AUTO_TEST_CASE(pos_weighting_is_proportional)
     int big_wins = 0;
     const int trials = 2000;
     for (int i = 0; i < trials; ++i) {
-        uint256 seed = ComputePosSeed(0xcd, uint256(), i);
+        uint256 seed = ComputePosSeed(uint256(), i);
         if (PosSchedule(reg, seed).front() == big) big_wins++;
     }
     // Expect ~90% for the 9:1 weighting; allow generous slack for randomness.
@@ -150,7 +148,7 @@ BOOST_AUTO_TEST_CASE(pos_min_stake_eligibility)
     CPubKey small = MakeKey(); // below the floor
     reg.SetStake(big, 100);
     reg.SetStake(small, 10);
-    uint256 seed = ComputePosSeed(0xfeed, uint256(), 1);
+    uint256 seed = ComputePosSeed(uint256(), 1);
 
     // Default: no floor — both eligible, both in the schedule and total.
     g_pos_min_stake = 0;
@@ -269,7 +267,7 @@ BOOST_AUTO_TEST_CASE(pos_committee_is_schedule_prefix)
 {
     StakeRegistry reg;
     for (int i = 0; i < 8; ++i) reg.SetStake(MakeKey(), 1);
-    uint256 seed = ComputePosSeed(0x77, uint256(), 3);
+    uint256 seed = ComputePosSeed(uint256(), 3);
 
     int old_size = g_pos_committee_size;
     g_pos_committee_size = 5;
@@ -292,7 +290,7 @@ BOOST_AUTO_TEST_CASE(pos_schedule_reshuffles)
     int differing_leaders = 0;
     CPubKey prev_leader;
     for (int i = 0; i < 20; ++i) {
-        uint256 seed = ComputePosSeed(0xef, uint256(), i);
+        uint256 seed = ComputePosSeed(uint256(), i);
         CPubKey leader = PosSchedule(reg, seed).front();
         if (i > 0 && leader != prev_leader) differing_leaders++;
         prev_leader = leader;
@@ -322,7 +320,7 @@ BOOST_AUTO_TEST_CASE(pos_vrf_slot_math)
     uint64_t sum_big = 0, sum_small = 0;
     const int trials = 500;
     for (int i = 0; i < trials; ++i) {
-        uint256 b = ComputePosSeed(0x99, uint256(), i);
+        uint256 b = ComputePosSeed(uint256(), i);
         sum_big += PosVrfSlot(b, 9, 10);
         sum_small += PosVrfSlot(b, 1, 10);
     }
@@ -378,7 +376,7 @@ BOOST_AUTO_TEST_CASE(pos_vrf_committee_membership)
     BOOST_CHECK(PosVrfIsCommitteeMember(beta, 10, 10));
     // T >= W/w makes membership certain: w=1, W=4, slot in [0,4) < 4.
     for (int i = 0; i < 50; ++i) {
-        uint256 b = ComputePosSeed(0x55, uint256(), i);
+        uint256 b = ComputePosSeed(uint256(), i);
         BOOST_CHECK(PosVrfIsCommitteeMember(b, 1, 4));
     }
 
@@ -389,7 +387,7 @@ BOOST_AUTO_TEST_CASE(pos_vrf_committee_membership)
     const int slots = 200;
     for (int i = 0; i < slots; ++i) {
         for (int k = 0; k < 4; ++k) {
-            uint256 b = ComputePosSeed(0x66, uint256S(strprintf("0x%x", k)), i);
+            uint256 b = ComputePosSeed(uint256S(strprintf("0x%x", k)), i);
             if (PosVrfIsCommitteeMember(b, 1, 4)) members++;
         }
     }

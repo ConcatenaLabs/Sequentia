@@ -59,12 +59,9 @@ bool StakeRegistry::AddFromSpec(const std::string& spec, std::string& error)
     return true;
 }
 
-uint256 ComputePosSeed(uint64_t parent_vrf_score, const uint256& parent_anchor_hash, uint32_t height)
+uint256 ComputePosSeed(const uint256& parent_anchor_hash, uint32_t height)
 {
     CSHA256 sha;
-    unsigned char score_le[8];
-    for (int i = 0; i < 8; ++i) score_le[i] = (unsigned char)((parent_vrf_score >> (8 * i)) & 0xff);
-    sha.Write(score_le, 8);
     sha.Write(parent_anchor_hash.begin(), parent_anchor_hash.size());
     unsigned char height_le[4];
     height_le[0] = (unsigned char)(height & 0xff);
@@ -261,11 +258,15 @@ std::optional<PosChallengeParts> ParsePosBlockChallenge(const CScript& challenge
 uint256 PosSeedForChild(const CBlockIndex* pindexPrev)
 {
     if (pindexPrev == nullptr) return uint256();
-    // m_pos_vrf_score is the parent leader's VRF beta prefix, set at acceptance
-    // (SetPosForkChoiceKeys) and persisted; for genesis / non-VRF parents it is
-    // the UINT64_MAX default, which is fine — the seed only needs determinism.
-    return ComputePosSeed(pindexPrev->m_pos_vrf_score, pindexPrev->m_anchor_hash,
-                          (uint32_t)(pindexPrev->nHeight + 1));
+    // Seed from the parent's Bitcoin anchor hash + the height. Both are header
+    // fields fixed at block-index creation, so the seed is identical on every
+    // node (unlike m_pos_vrf_score, which is set later and proved unreliable as a
+    // seed input). The anchor is Bitcoin's PoW, so a SEQ producer cannot bias it;
+    // the only freedom is *which* recent Bitcoin block to anchor to, which the
+    // anchor-freshness fork choice (doc 10 §7) makes self-defeating — referencing
+    // an older anchor to grind the seed loses. Within a Bitcoin interval all SEQ
+    // blocks share the anchor, so the per-height seed is fixed and ungrindable.
+    return ComputePosSeed(pindexPrev->m_anchor_hash, (uint32_t)(pindexPrev->nHeight + 1));
 }
 
 // --- VRF sortition (doc/sequentia/07-vrf.md §4) ---

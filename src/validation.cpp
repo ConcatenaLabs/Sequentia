@@ -2309,23 +2309,29 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
 //! violation sets `state` and returns false.
 static bool CheckPosStakeRulesAtAccept(const CBlock& block, BlockValidationState& state,
                                        const CBlockIndex* pindexParent, const CBlockIndex* tip,
-                                       const Consensus::Params& params)
+                                       const Consensus::Params& /*params*/)
 {
     AssertLockHeld(cs_main);
     if (!g_con_pos || tip == nullptr || pindexParent == nullptr) return true;
+    // Only validate at accept time when the block builds directly on the active
+    // tip: that is the one case where the global stake registry provably equals
+    // this block's parent state, so the verdict is authoritative and identical
+    // on every node. Everything else (siblings, deeper forks) is deferred to
+    // connect time, where the registry is again synced to the block's parent.
+    //
+    // NOTE: an earlier version also validated tip-SIBLINGS here by temporarily
+    // reverting the tip's stake to recreate the parent registry. That produced a
+    // verdict that could differ from the direct tip-child path (a node seeing a
+    // block as a sibling rejected it while a node seeing it as a tip-child
+    // accepted it), causing consensus divergence and wrongful peer bans
+    // (`feature_pos_stake`). The DoS it targeted (forged equal-work siblings) is
+    // bounded — resource-only, pruning-reclaimed — and is mitigated by the
+    // clamped/deduped fork-choice keys (SetPosForkChoiceKeys); fully closing it
+    // needs a determinism-safe sibling check (doc 11 §1) and is deferred.
     if (pindexParent == tip) {
         return CheckPosStakeRules(block, state, pindexParent); // registry == parent
     }
-    if (pindexParent != tip->pprev) return true; // deeper/off-chain fork: defer to connect time
-    CBlock tipBlock;
-    CBlockUndo tipUndo;
-    if (!ReadBlockFromDisk(tipBlock, tip, params) || !UndoReadFromDisk(tipUndo, tip)) {
-        return true; // cannot reconstruct the parent registry (e.g. pruned); defer
-    }
-    PosRevertBlockStake(tipBlock, tipUndo);   // registry: tip state -> tip->pprev (== parent)
-    const bool ok = CheckPosStakeRules(block, state, pindexParent);
-    PosApplyBlockStake(tipBlock, tipUndo);    // restore registry to the active tip's state
-    return ok;
+    return true; // defer to connect time
 }
 
 //! SEQUENTIA: compute and store the PoS fork-choice keys (whitepaper §3.8) on a
