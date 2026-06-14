@@ -599,6 +599,7 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-server", "Accept command line and JSON-RPC commands", ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
 
     // chain params
+    argsman.AddArg("-allowplaceholdergenesis", "SEQUENTIA: allow starting -chain=main on the published PLACEHOLDER genesis (its founder key is public; controls all SEQ). For dry runs only; a real launch must regenerate the genesis with a secret key. (default: 0)", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-pubkeyprefix", strprintf("The byte prefix, in decimal, of the chain's base58 pubkey address. (default: %d)", defaultChainParams->Base58Prefix(CChainParams::PUBKEY_ADDRESS)[0]), ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-scriptprefix", strprintf("The byte prefix, in decimal, of the chain's base58 script address. (default: %d)", defaultChainParams->Base58Prefix(CChainParams::SCRIPT_ADDRESS)[0]), ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-secretprefix", strprintf("The byte prefix, in decimal, of the chain's base58 secret key encoding. (default: %d)", defaultChainParams->Base58Prefix(CChainParams::SECRET_KEY)[0]), ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
@@ -866,6 +867,25 @@ bool AppInitParameterInteraction(const ArgsManager& args)
 {
     const CChainParams& chainparams = Params();
     // ********************************************************* Step 2: parameter interactions
+
+    // SEQUENTIA: refuse to run real mainnet on the PLACEHOLDER genesis. The
+    // bundled -chain=main genesis assigns the entire 400M SEQ supply to a founder
+    // key whose private key is published (doc 13) for pre-launch testing. A real
+    // launch must regenerate the genesis with a fresh, secret founder key — which
+    // changes the genesis hash, automatically lifting this guard. Until then, a
+    // node started on -chain=main with the known placeholder genesis aborts,
+    // unless the operator explicitly accepts the risk (e.g. for a dry run).
+    if (args.GetChainName() == CBaseChainParams::MAIN &&
+        chainparams.GetConsensus().hashGenesisBlock ==
+            uint256S("0xada33d3a3031b30a19437f66bb92331f31dd3b8fedd56e92c63f270b01c25d51") &&
+        !args.GetBoolArg("-allowplaceholdergenesis", false)) {
+        return InitError(Untranslated(
+            "Refusing to start Sequentia mainnet (-chain=main) on the PLACEHOLDER "
+            "genesis block: its founder private key is published (doc/sequentia/13) "
+            "and controls the entire SEQ supply. A real launch must regenerate the "
+            "genesis with a secret founder key. Use -chain=test for the public "
+            "playground, or -allowplaceholdergenesis to override for a dry run."));
+    }
 
     // also see: InitParameterInteraction()
 
