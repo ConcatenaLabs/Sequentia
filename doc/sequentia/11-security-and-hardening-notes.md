@@ -32,18 +32,26 @@ fork-choice count to `MAX_POS_AGG_COMMITTEE_SIZE`, so no block can advertise mor
 certification weight than a real full committee. This closes the reorg-churn
 lever and the tip-height storage flood (invalid tip-siblings are now banned).
 
-**Residual (deeper forks) — bounded hardening.** A block whose parent is a
-deeper active-chain ancestor (not the tip's parent) is still deferred to connect
-time and may be stored unconnected. It carries *less* work (lower height) so it
-cannot churn the tip, and its fork-choice key is clamped; but an attacker could
-still store self-signed deep-fork siblings (disk only). The complete fix is to
-extend the accept-time validation to any in-range active-chain ancestor (revert
-N blocks, bounded by the finalization depth) and/or add an oldest-evicting cap on
-stored never-connected equal-work-or-lower blocks. Lower priority: pruning
-reclaims them and it requires an actively-malicious peer. (Note the tempting
-"don't store unsolicited equal-work blocks" is **wrong** — a full-threshold block
-that should displace a sub-threshold tip arrives unsolicited at the same height;
-the §3.8 fork choice needs it kept.)
+**Why deeper forks are not a storage vector.** `AcceptBlock` only stores a block
+that has **more-or-equal work** than the tip
+(`if (!fHasMoreOrSameWork) return true; // Don't process less-work chains`,
+`src/validation.cpp`). On a height-is-work chain that means only blocks at the
+tip's height (or higher) are ever written to disk — a *lower-height* (deeper)
+fork is rejected before storage. So the only unconnected blocks that can be
+stored are equal-work ones at the tip height, i.e. siblings of the tip, which the
+accept-time check above now validates and rejects if forged.
+
+**Narrow residual.** An equal-work block at the tip height whose parent is *not*
+the tip's parent (a "cousin": built on some other, previously-stored tip-1-height
+block) still skips the accept-time PoS check (its parent registry isn't the one
+we can recreate) and is stored. This requires the attacker to already have gotten
+that alternate parent stored, is bounded (equal work, can't churn the tip; clamped
+fork-choice key), and is pruning-reclaimed. Closing it fully means generalising
+the accept-time validation to any in-range active-chain ancestor (bounded revert)
+or an oldest-evicting cap on stored unconnected blocks — low priority. (Note the
+tempting "don't store unsolicited equal-work blocks" is **wrong**: a
+full-threshold block that should displace a sub-threshold tip arrives unsolicited
+at the same height; the §3.8 fork choice needs it kept.)
 
 ## 2. PoS consensus rejects and peer banning — analyzed, NOT a bug
 
@@ -162,7 +170,8 @@ split. Findings and their disposition:
   hard anchor rules are R1/R2 + the reorg-following watcher.
 
 **Open hardening (lower priority, not launch-blocking):**
-- Deeper-than-sibling fork disk-fill (§1 residual).
+- Narrow equal-work "cousin" fork disk-fill (§1 residual; deeper/lower-work forks
+  are already rejected before storage by the more-or-equal-work gate).
 - **Anchor watcher cs_main RPC — FIXED.** The reorg-following watcher
   (`src/anchor.cpp`) now snapshots each candidate block's (immutable) anchor
   under `cs_main`, then queries bitcoind *outside* the lock, so a slow/hung
