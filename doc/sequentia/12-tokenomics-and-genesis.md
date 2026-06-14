@@ -7,9 +7,11 @@ block is created); the *mechanisms* below are implemented and in place.
 ## SEQ supply
 
 - **Fixed supply: 400,000,000 SEQ**, pre-mined and fully distributed at genesis.
-  The money range was raised to match: `MAX_MONEY = 400,000,000 × COIN` (4e16
-  atoms at 8 decimals — the hard cap and per-output sanity bound;
-  `src/consensus/amount.h`). Bitcoin's was 2.1e15.
+  The money range matches: `MAX_MONEY = 400,000,000 × COIN` (4e16 atoms at 8
+  decimals — the hard cap and per-output sanity bound). `MAX_MONEY` is **per
+  chain** (`src/consensus/amount.h`, set in each `CChainParams` constructor): the
+  Sequentia chains (`sequentia`, `test`) use 4e16; the inherited Bitcoin/Elements
+  chains (incl. `main`, the test harness) keep Bitcoin's 2.1e15.
 - **No inflation / no block subsidy.** `genesis_subsidy = 0` on the Sequentia
   chain (`src/chainparams.cpp`), so block production mints no new SEQ; block
   producers are paid only in transaction fees (whitepaper §3.9, doc 06 §5).

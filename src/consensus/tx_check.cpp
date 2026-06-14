@@ -8,6 +8,11 @@
 #include <primitives/transaction.h>
 #include <consensus/validation.h>
 
+// SEQUENTIA: per-chain money cap (see consensus/amount.h). Default is Bitcoin's
+// 21,000,000-coin cap; each CChainParams constructor sets the chain's value
+// before any consensus check runs. The Sequentia chains set 400,000,000 SEQ.
+CAmount MAX_MONEY = 21000000 * COIN;
+
 bool CheckTransaction(const CTransaction& tx, TxValidationState& state)
 {
     // Basic checks that don't depend on any context

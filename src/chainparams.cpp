@@ -241,6 +241,7 @@ public:
         g_con_blockheightinheader = false;
         g_con_bitcoin_anchor = false;
         g_con_pos = false;
+        MAX_MONEY = 21000000 * COIN;   // SEQUENTIA: per-chain money cap
         g_pos_vrf = false;
         g_pos_agg_committee = false;
         // Reset the rest of the PoS consensus globals to their defaults too, so
@@ -407,6 +408,7 @@ public:
         g_con_any_asset_fees = true;
         g_con_bitcoin_anchor = true;
         g_con_pos = true;
+        MAX_MONEY = 400000000 * COIN;   // SEQUENTIA: per-chain money cap
         g_pos_vrf = true;
         g_pos_agg_committee = true;
         g_pos_min_stake = 4000000000000ULL;             // 40,000 SEQ = 0.01% of 400M (§3.3)
@@ -592,6 +594,7 @@ public:
         // now lives only on the custom/regtest chains (-con_pos=0). See
         // doc/sequentia/13-launch-and-bootstrap.md.
         g_con_pos = true;
+        MAX_MONEY = 400000000 * COIN;   // SEQUENTIA: per-chain money cap
         g_pos_vrf = true;
         g_pos_agg_committee = true;
         g_pos_min_stake = 4000000000000ULL;   // 40,000 SEQ = 0.01% of 400M (§3.3)
@@ -818,6 +821,7 @@ public:
         g_con_blockheightinheader = false;
         g_con_bitcoin_anchor = false;
         g_con_pos = false;
+        MAX_MONEY = 21000000 * COIN;   // SEQUENTIA: per-chain money cap
         g_pos_vrf = false;
         g_pos_agg_committee = false;
         // Reset the rest of the PoS consensus globals to their defaults too, so
@@ -934,6 +938,7 @@ public:
         g_con_blockheightinheader = false;
         g_con_bitcoin_anchor = false;
         g_con_pos = false;
+        MAX_MONEY = 21000000 * COIN;   // SEQUENTIA: per-chain money cap
         g_pos_vrf = false;
         g_pos_agg_committee = false;
         // Reset the rest of the PoS consensus globals to their defaults too, so
@@ -1183,6 +1188,7 @@ protected:
         // blocks and the legacy (non-dynafed) signed-block path, so we force
         // dynafed off when it is enabled. See doc/sequentia/06-proof-of-stake.md.
         g_con_pos = args.GetBoolArg("-con_pos", false);
+        MAX_MONEY = 400000000 * COIN;   // SEQUENTIA: per-chain money cap
         g_pos_slot_interval = args.GetIntArg("-posslotinterval", DEFAULT_POS_SLOT_INTERVAL);
         g_pos_committee_size = args.GetIntArg("-poscommitteesize", DEFAULT_POS_COMMITTEE_SIZE);
         g_pos_vrf = args.GetBoolArg("-posvrf", false);
@@ -1583,6 +1589,7 @@ public:
         g_con_blockheightinheader = true;
         g_con_bitcoin_anchor = false;
         g_con_pos = false;
+        MAX_MONEY = 21000000 * COIN;   // SEQUENTIA: per-chain money cap
         g_pos_vrf = false;
         g_pos_agg_committee = false;
         // Reset the rest of the PoS consensus globals to their defaults too, so
