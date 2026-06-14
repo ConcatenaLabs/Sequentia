@@ -50,4 +50,15 @@ void CalculateReissuanceToken(CAsset& reissuanceToken, const uint256& entropy, b
 
 void AppendInitialIssuance(CBlock& genesis_block, const COutPoint& prevout, const uint256& contract, const int64_t asset_outputs, const int64_t asset_values, const int64_t reissuance_outputs, const int64_t reissuance_values, const CScript& issuance_destination);
 
+/**
+ * SEQUENTIA: append a genesis issuance that distributes the pre-mined supply to
+ * an explicit list of (scriptPubKey, amount) destinations, all of the issued
+ * (policy) asset, with NO reissuance tokens (fixed supply). Used to seed the
+ * PoS bootstrap: e.g. one CSV-locked staking output for the founder plus a
+ * plain output holding the remainder. The total issued equals the sum of the
+ * destination amounts. Like AppendInitialIssuance, the genesis is not validated;
+ * outputs are entered into the UTXO set directly.
+ */
+void AppendInitialIssuanceToDestinations(CBlock& genesis_block, const COutPoint& prevout, const uint256& contract, const std::vector<std::pair<CScript, CAmount>>& destinations);
+
 #endif // BITCOIN_ISSUANCE_H

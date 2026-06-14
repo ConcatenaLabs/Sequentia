@@ -97,3 +97,32 @@ void AppendInitialIssuance(CBlock& genesis_block, const COutPoint& prevout, cons
     genesis_block.vtx.push_back(MakeTransactionRef(std::move(txNew)));
     genesis_block.hashMerkleRoot = BlockMerkleRoot(genesis_block);
 }
+
+void AppendInitialIssuanceToDestinations(CBlock& genesis_block, const COutPoint& prevout, const uint256& contract, const std::vector<std::pair<CScript, CAmount>>& destinations) {
+    uint256 entropy;
+    GenerateAssetEntropy(entropy, prevout, contract);
+
+    CAsset asset;
+    CalculateAsset(asset, entropy);
+
+    CAmount total = 0;
+    for (const auto& dest : destinations) total += dest.second;
+
+    // Note: Genesis block isn't actually validated, outputs are entered into utxo db only
+    CMutableTransaction txNew;
+    txNew.nVersion = 1;
+    txNew.vin.resize(1);
+    txNew.vin[0].prevout = prevout;
+    txNew.vin[0].assetIssuance.assetEntropy = contract;
+    txNew.vin[0].assetIssuance.nAmount = CConfidentialValue(total);
+    // Fixed supply: no reissuance tokens.
+    txNew.vin[0].assetIssuance.nInflationKeys = CConfidentialValue();
+    txNew.vin[0].assetIssuance.nDenomination = 8;
+
+    for (const auto& dest : destinations) {
+        txNew.vout.push_back(CTxOut(asset, CConfidentialValue(dest.second), dest.first));
+    }
+
+    genesis_block.vtx.push_back(MakeTransactionRef(std::move(txNew)));
+    genesis_block.hashMerkleRoot = BlockMerkleRoot(genesis_block);
+}

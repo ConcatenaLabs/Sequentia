@@ -77,12 +77,17 @@ con_blocksubsidy=0           # no inflation: SEQ is pre-mined at genesis, no
                              # chain; set explicitly to make the tenet visible.
 posminstake=4000000000000    # min stake to be a blocksigner: 0.01% of supply =
                              # 40,000 SEQ (40000 * 1e8 atoms), whitepaper §3.3.
-# The genesis staker set — IDENTICAL on every node (see §6 / §8). It must
-# hold at least quorum-many (here 51) sortition-eligible members, or no
-# block can ever be certified:
-staker=02<pubkey-hex>:1000000
-staker=03<pubkey-hex>:1000000
-# ... one per founding staker ...
+# Bootstrap (preferred): seed the founder's stake IN GENESIS so the chain
+# starts with no -staker config and grows its staker set entirely on-chain
+# (the bundled chain does this; doc 13). On a custom chain:
+#   con_genesis_stake=<founderpubkey>:<atoms>:<csv>   # one CSV-locked stake
+#   initialfreecoins=<atoms>                          # spendable remainder
+#
+# Alternatively (optional, legacy): a static config staker set — IDENTICAL on
+# every node (see §6 / §8). If used, it must hold at least quorum-many
+# sortition-eligible members. The two layers are additive (doc 06 §5):
+#staker=02<pubkey-hex>:1000000
+#staker=03<pubkey-hex>:1000000
 
 # Block weight cap: 200,000 (a twentieth of Bitcoin's) for ~30s blocks; total
 # disk grows at Bitcoin's rate: 200,000 / 30s == 4,000,000 / 600s (§3.10)

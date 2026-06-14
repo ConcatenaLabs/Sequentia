@@ -412,16 +412,21 @@ public:
         g_con_any_asset_fees = true;
         // SEQUENTIA: every block anchors to a Bitcoin block (see doc/sequentia/03-bitcoin-anchoring.md)
         g_con_bitcoin_anchor = true;
-        g_con_pos = false;
-        g_pos_vrf = false;
-        g_pos_agg_committee = false;
-        // Reset the rest of the PoS consensus globals to their defaults too, so
-        // an in-process chain switch can never read a value left over from a
-        // previously-selected (custom PoS) chain.
-        g_pos_min_stake = 0;
-        g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
-        g_pos_slot_interval = DEFAULT_POS_SLOT_INTERVAL;
-        g_pos_unbonding_period = DEFAULT_POS_UNBONDING_PERIOD;
+        // SEQUENTIA: the bundled chain IS the Proof-of-Stake network (the paper's
+        // design): private VRF sortition + MuSig2-aggregated committee
+        // certification. There is no -staker config layer — the staker set is
+        // entirely on-chain, bootstrapped from a genesis-seeded staking output
+        // (see the genesis construction below) and grown as recipients of the
+        // pre-mined supply stake. The signed-block dev/PoC path (anyone-signs)
+        // now lives only on the custom/regtest chains (-con_pos=0). See
+        // doc/sequentia/13-launch-and-bootstrap.md.
+        g_con_pos = true;
+        g_pos_vrf = true;
+        g_pos_agg_committee = true;
+        g_pos_min_stake = 4000000000000ULL;   // 40,000 SEQ = 0.01% of 400M (§3.3)
+        g_pos_committee_size = 100;            // paper's 51-of-100 quorum (§3.5)
+        g_pos_slot_interval = 30;              // 30s nominal block time (doc 11 §4)
+        g_pos_unbonding_period = 43200;        // x30s = ~15 days > 2-week checkpoint window (§3.11)
         consensus.elements_mode = g_con_elementsmode;
         consensus.total_valid_epochs = 0;
         consensus.dynamic_epoch_length = 10;
@@ -448,21 +453,40 @@ public:
         consensus.pegged_asset = consensus.subsidy_asset;
 
         consensus.genesis_style = "elements";
-        initialFreeCoins = 1000000000;
         genesis = CreateGenesisBlock(consensus, CScript() << commit, CScript(OP_RETURN), 1296688602, 2, 0x207fffff, 1, 0);
-        if (initialFreeCoins != 0 || initial_reissuance_tokens != 0) {
-            AppendInitialIssuance(genesis, COutPoint(uint256(commit), 0), parentGenesisBlockHash, (initialFreeCoins > 0) ? 1 : 0, initialFreeCoins, (initial_reissuance_tokens > 0) ? 1 : 0, initial_reissuance_tokens, CScript() << OP_TRUE);
+        // SEQUENTIA: distribute the 400,000,000 SEQ hard cap to the founding
+        // block creator, seeding the PoS bootstrap. One CSV-locked staking
+        // output makes the founder the sole genesis staker, so block 1 has a
+        // non-empty stake registry and can be certified under the escaping-stall
+        // rule; the remainder is a plain output the founder distributes to the
+        // first users, who then stake and join. Placeholder founder key
+        // (throwaway, to be regenerated at the real launch ceremony):
+        //   testnet WIF cURsyjY6KwZM9pBk7rfWwdDzYS1R4w85M2pPzh5RySfGpA8n9LB4
+        //   pubkey 028f88c9848c86c311934a5939ceb98408975055fc7ee6b40b479969665afe0e6b
+        // See doc/sequentia/13-launch-and-bootstrap.md.
+        {
+            const CPubKey founder(ParseHex("028f88c9848c86c311934a5939ceb98408975055fc7ee6b40b479969665afe0e6b"));
+            // Time-based CSV lock >= the unbonding requirement
+            // (g_pos_unbonding_period x g_pos_slot_interval = 43200 x 30 s,
+            // ~15 days); 2532 units x 512 s = 1,296,384 s.
+            const uint32_t stake_csv = CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG | 2532;
+            const CScript stake_spk = BuildStakeScript(founder, stake_csv);
+            const CScript founder_spk = CScript() << OP_0 << ToByteVector(founder.GetID()); // P2WPKH
+            const CAmount seed_stake = 1000000 * COIN;   // 1,000,000 SEQ staked to bootstrap
+            const CAmount total = 400000000 * COIN;      // 400,000,000 SEQ hard cap
+            AppendInitialIssuanceToDestinations(genesis, COutPoint(uint256(commit), 0), uint256{},
+                { {stake_spk, seed_stake}, {founder_spk, total - seed_stake} });
         }
         consensus.hashGenesisBlock = genesis.GetHash();
-        // SEQUENTIA: genesis hash changed when the Bitcoin anchor fields were
-        // added to the header serialization (g_con_bitcoin_anchor).
-        const uint256 expected_genesis = uint256S("0x59e0bcfb9996c34e40bc0dc90c27b8a0069da9e585e7608b66b8584cb616c98f");
+        // SEQUENTIA: genesis recomputed for the PoS bootstrap distribution
+        // (400M SEQ: a seed staking output + the founder's plain remainder).
+        const uint256 expected_genesis = uint256S("0xc2a0a99b4c307e8423b98140af1f539aa4e1feec25c62d655d91d8df51c7dfba");
         if (consensus.hashGenesisBlock != expected_genesis) {
             fprintf(stderr, "testnet genesis hash mismatch: computed %s, expected %s\n",
                     consensus.hashGenesisBlock.GetHex().c_str(), expected_genesis.GetHex().c_str());
         }
         assert(consensus.hashGenesisBlock == expected_genesis);
-        assert(genesis.hashMerkleRoot == uint256S("0x3186a7307ae08419ba779733ad36c32841237f0f7909bbd1d2f38285ecd23ed3"));
+        assert(genesis.hashMerkleRoot == uint256S("0x251087ffb5c9e7f07b8e095d5b161e975e3e856231dddc0faf8c9e69b09f762c"));
 
         vFixedSeeds.clear();
         vSeeds.clear();
@@ -1042,6 +1066,37 @@ protected:
                     throw std::runtime_error(strprintf("Invalid -staker: %s", err));
                 }
             }
+            // SEQUENTIA: genesis-seeded staking output (config bootstrap, mirrors
+            // the bundled chain). "-con_genesis_stake=<pubkeyhex>:<atoms>:<csv>"
+            // places one CSV-locked staking output of the policy asset in genesis,
+            // making <pubkey> the sole genesis staker — so the chain can start with
+            // no -staker config. The spendable remainder comes from
+            // -initialfreecoins (an anyone-can-spend output).
+            m_genesis_stake.reset();
+            if (args.IsArgSet("-con_genesis_stake")) {
+                const std::string spec = args.GetArg("-con_genesis_stake", "");
+                const size_t c1 = spec.find(':');
+                const size_t c2 = spec.rfind(':');
+                if (c1 == std::string::npos || c1 == c2) {
+                    throw std::runtime_error("-con_genesis_stake must be <pubkeyhex>:<atoms>:<csv>");
+                }
+                const std::string pub_hex = spec.substr(0, c1);
+                int64_t amt = 0, csv64 = 0;
+                if (!IsHex(pub_hex)) throw std::runtime_error("-con_genesis_stake: pubkey must be hex");
+                const CPubKey pub(ParseHex(pub_hex));
+                // IsValid() only (length/header check): IsFullyValid() needs the
+                // secp256k1 verify context, which is not yet initialised during
+                // chainparams construction. A malformed curve point would simply
+                // never be elected (it can't be a real staker key).
+                if (!pub.IsValid()) throw std::runtime_error("-con_genesis_stake: invalid pubkey");
+                if (!ParseInt64(spec.substr(c1 + 1, c2 - c1 - 1), &amt) || amt <= 0) {
+                    throw std::runtime_error("-con_genesis_stake: amount must be a positive integer (atoms)");
+                }
+                if (!ParseInt64(spec.substr(c2 + 1), &csv64) || csv64 <= 0 || csv64 > 0xFFFFFFFF) {
+                    throw std::runtime_error("-con_genesis_stake: csv must be a positive 32-bit sequence value");
+                }
+                m_genesis_stake = std::make_pair(BuildStakeScript(pub, (uint32_t)csv64), (CAmount)amt);
+            }
             // Operator-configured static checkpoints: "-poscheckpoint=height:hash".
             ClearConfiguredPosCheckpoints();
             for (const std::string& spec : args.GetArgs("-poscheckpoint")) {
@@ -1154,6 +1209,9 @@ protected:
         // END ELEMENTS fields
     }
 
+    // SEQUENTIA: optional genesis-seeded staking output (config bootstrap).
+    std::optional<std::pair<CScript, CAmount>> m_genesis_stake;
+
     void SetGenesisBlock() {
         if (consensus.genesis_style == "bitcoin") {
             // For compatibility with bitcoin (regtest)
@@ -1162,7 +1220,15 @@ protected:
             // Intended compatibility with Liquid v1 and elements-0.14.1
             std::vector<unsigned char> commit = CommitToArguments(consensus, strNetworkID);
             genesis = CreateGenesisBlock(consensus, CScript() << commit, CScript(OP_RETURN), 1296688602, 2, 0x207fffff, 1, 0);
-            if (initialFreeCoins != 0 || initial_reissuance_tokens != 0) {
+            if (m_genesis_stake) {
+                // SEQUENTIA: seed a genesis staking output (the founder) plus the
+                // spendable remainder (-initialfreecoins to anyone-can-spend), so
+                // the chain bootstraps PoS from on-chain stake with no -staker.
+                std::vector<std::pair<CScript, CAmount>> dests;
+                dests.push_back(*m_genesis_stake);
+                if (initialFreeCoins != 0) dests.emplace_back(CScript() << OP_TRUE, (CAmount)initialFreeCoins);
+                AppendInitialIssuanceToDestinations(genesis, COutPoint(uint256(commit), 0), parentGenesisBlockHash, dests);
+            } else if (initialFreeCoins != 0 || initial_reissuance_tokens != 0) {
                 AppendInitialIssuance(genesis, COutPoint(uint256(commit), 0), parentGenesisBlockHash, (initialFreeCoins > 0) ? 1 : 0, initialFreeCoins, (initial_reissuance_tokens > 0) ? 1 : 0, initial_reissuance_tokens, CScript() << OP_TRUE);
             }
         } else if (consensus.genesis_style == "dynamic") {

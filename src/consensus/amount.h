@@ -22,8 +22,14 @@ static constexpr CAmount COIN = 100000000;
  * validation code, the exact value of the MAX_MONEY constant is consensus
  * critical; in unusual circumstances like a(nother) overflow bug that allowed
  * for the creation of coins out of thin air modification could lead to a fork.
+ *
+ * SEQUENTIA: raised to the 400,000,000 SEQ hard cap (at 8 decimals = 4e16
+ * atoms), so the full pre-mined supply can be issued and circulated. This is
+ * the total supply, hence also the per-output/per-tx sanity bound. It stays far
+ * below int64's ~9.2e18 ceiling, and real sums are bounded by the supply, so
+ * there is no overflow exposure. (Bitcoin's 21,000,000 BTC was 2.1e15.)
  * */
-static constexpr CAmount MAX_MONEY = 21000000 * COIN;
+static constexpr CAmount MAX_MONEY = 400000000 * COIN;
 inline bool MoneyRange(const CAmount& nValue) { return (nValue >= 0 && nValue <= MAX_MONEY); }
 
 #endif // BITCOIN_CONSENSUS_AMOUNT_H

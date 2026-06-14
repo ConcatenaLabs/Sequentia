@@ -506,15 +506,17 @@ bool RebuildUtxoStake(CCoinsView& view)
         COutPoint key;
         Coin coin;
         if (!pcursor->GetKey(key) || !pcursor->GetValue(coin)) return false;
-        // Skip genesis (height 0) outputs to match the incremental path, which
-        // only mirrors blocks at height > 0 (PosApply/RevertBlockStake). The
-        // genesis stake bootstrap is the -staker config layer, not the UTXO
-        // layer; counting genesis outputs here would make a restarted node's
-        // registry diverge from a continuously-running one.
-        if (coin.nHeight > 0) {
-            if (auto stake = StakeFromTxOut(coin.out)) {
-                utxo_stake[stake->first] += stake->second;
-            }
+        // Count ALL staking outputs, including genesis (height 0) ones. This is
+        // what lets a chain bootstrap from a genesis-seeded staking output with
+        // no -staker config layer (the founder's pre-mined stake): the registry
+        // is a pure function of the UTXO set. Consistency across fresh / IBD /
+        // restarted nodes holds because the UTXO layer is *always* re-derived by
+        // this scan at init (SetUtxoStake replaces it wholesale), and the
+        // incremental path (PosApply/RevertBlockStake) never adds genesis (it is
+        // special-cased out of ConnectBlock) — it only ever *spends* a genesis
+        // staking output, which this scan also reflects (the coin is gone).
+        if (auto stake = StakeFromTxOut(coin.out)) {
+            utxo_stake[stake->first] += stake->second;
         }
         pcursor->Next();
     }

@@ -29,9 +29,13 @@ Blockstream's Liquid. All four are implemented and tested as a proof of concept:
    certification** (sortitioned, majority quorum — immediate finality;
    optionally **MuSig2-aggregated** to paper-scale 100-member committees),
    **on-chain stake** with CSV-enforced unbonding, and **Bitcoin checkpoints**
-   against long-range attacks. Enabled per chain with `-con_pos` (the
-   bundled Sequentia test chain currently runs the federated PoC signing). —
-   see [`doc/sequentia/06-proof-of-stake.md`](doc/sequentia/06-proof-of-stake.md)
+   against long-range attacks. **The bundled Sequentia chain runs PoS by
+   default**, bootstrapped from a genesis-seeded staking output with no
+   `-staker` config (the staker set is entirely on-chain; see
+   [`13-launch-and-bootstrap.md`](doc/sequentia/13-launch-and-bootstrap.md)).
+   The signed-block "anyone-signs" PoC path is now the custom/regtest dev
+   harness (`-con_pos=0`). — see
+   [`doc/sequentia/06-proof-of-stake.md`](doc/sequentia/06-proof-of-stake.md)
    and [`07-vrf.md`](doc/sequentia/07-vrf.md).
 4. **Bitcoin-identical addresses, opt-in confidential transactions.** The
    default address format is Bitcoin's, so a wallet can present one receiving
@@ -130,15 +134,17 @@ make -j$(nproc)
 The daemon supports several pre-set chains (note: the binary's default chain is
 still `liquidv1`, inherited from Elements — pass `-chain=` explicitly):
 
-* **Sequentia test network**: `elementsd -chain=test` — the Sequentia chain:
-  Bitcoin-anchored (requires a Bitcoin node via the `-mainchainrpc*` options),
-  any-asset fees enabled, Bitcoin-testnet-identical addresses with opt-in
-  confidential transactions, federated PoC block signing.
+* **Sequentia network**: `elementsd -chain=test` — the Sequentia chain:
+  Proof-of-Stake by default (VRF sortition + aggregate committee, bootstrapped
+  from a genesis-seeded staking output — doc 13), Bitcoin-anchored (requires a
+  Bitcoin node via the `-mainchainrpc*` options), any-asset fees enabled,
+  Bitcoin-identical addresses with opt-in confidential transactions.
 * **Custom chains**: any other `-chain=` argument; regtest-like defaults
+  (signed-block "anyone-signs" by default; opt into PoS with `-con_pos=1`),
   overridable by a rich set of start-up options. All Sequentia features are
   available here (`-con_any_asset_fees`, `-con_bitcoin_anchor`, `-con_pos`,
-  `-posvrf`, `-con_default_blinded_addresses`, …) — this is what the
-  functional tests use.
+  `-posvrf`, `-con_genesis_stake`, `-con_default_blinded_addresses`, …) — this
+  is what the functional tests use.
 * Bitcoin modes (`-chain=main` / `-chain=regtest`), kept for parent-chain
   interoperability testing, and Liquid modes (`-chain=liquidv1` etc.),
   inherited from Elements.

@@ -1,11 +1,18 @@
 # Challenge 3 — Proof-of-Stake consensus (PoC)
 
-> This is the first proof-of-concept of the Proof-of-Stake consensus from the
-> theoretical paper (section iv, principles 3/6, and the consensus algorithm).
-> It builds on the Bitcoin anchoring of doc 03, because the paper derives the
-> consensus randomness seed **and** the liveness clock from the Bitcoin anchor.
-> Docs 07 (VRF sortition, committees, aggregation) and the later roadmap items
-> below extend this layer; all of it now lives on the main development branch.
+> This is the Proof-of-Stake consensus from the theoretical paper (section iv,
+> principles 3/6, and the consensus algorithm). It builds on the Bitcoin
+> anchoring of doc 03, because the paper derives the consensus randomness seed
+> **and** the liveness clock from the Bitcoin anchor. Docs 07 (VRF sortition,
+> committees, aggregation) and the later roadmap items extend this layer.
+>
+> **Now the bundled-chain default.** PoS (VRF sortition + MuSig2-aggregated
+> committee) is enabled on the bundled Sequentia chain and bootstraps from a
+> genesis-seeded staking output with no `-staker` config — see
+> [doc 13](13-launch-and-bootstrap.md). The "single-leader replaces the fixed
+> federation" framing below is the original first-layer PoC narrative; the full
+> committee, aggregation, escaping-stall, fork choice, and on-chain stake are all
+> implemented (see §6+ and docs 07/10).
 
 ## 1. Scope of this PoC
 
