@@ -163,11 +163,19 @@ split. Findings and their disposition:
 
 **Open hardening (lower priority, not launch-blocking):**
 - Deeper-than-sibling fork disk-fill (§1 residual).
-- The anchor watcher and header validation call bitcoind RPC under `cs_main`; a
-  slow/hung parent daemon can stall the node — snapshot under the lock and do the
-  RPC outside it.
+- **Anchor watcher cs_main RPC — FIXED.** The reorg-following watcher
+  (`src/anchor.cpp`) now snapshots each candidate block's (immutable) anchor
+  under `cs_main`, then queries bitcoind *outside* the lock, so a slow/hung
+  parent daemon no longer stalls block/RPC/net processing. Residual: header
+  validation (`ContextualCheckBlockHeader`, `src/validation.cpp`) still does the
+  R3 anchor RPC under `cs_main` — but only once per *novel-anchor header* (not a
+  loop), and header acceptance is inherently synchronous under `cs_main`, so the
+  stall surface is bounded; deferred.
 - The stake registry stores sub-min-stake "dust" staking outputs (memory only;
-  deterministic, no split) — drop below-floor outputs at the registry boundary.
+  deterministic, no split). A per-output floor is **not** the fix — it would
+  break legitimate *split stake* (a staker whose total clears the floor across
+  several smaller outputs). Bounded by on-chain cost (each dust output costs a
+  fee + block weight); left as accepted low-risk rather than regress split-stake.
 
 **Requires external sign-off (cannot be done in-repo):**
 - Independent crypto review of the vendored secp256k1 **MuSig2** module (confirm

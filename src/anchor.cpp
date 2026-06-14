@@ -268,28 +268,30 @@ void AnchorWatchTask(ChainstateManager& chainman)
         int finalized_height = -1;
         uint256 finalized_hash;
         (void)GetPosFinalizedCheckpoint(finalized_height, finalized_hash);
+        // Phase 1: snapshot the (immutable) anchor of each candidate block under
+        // cs_main, top-down, stopping at the checkpoint-finalized depth (a deeper
+        // parent reorg needs operator action). We do NOT call bitcoind here: the
+        // RPC must not run under cs_main, or a slow/hung parent daemon would
+        // stall the whole node (block processing, RPC, net) for the RPC timeout.
+        struct AnchorRef { uint256 block_hash; uint32_t anchor_height; uint256 anchor_hash; };
+        std::vector<AnchorRef> to_check;
         {
             LOCK(cs_main);
             const CBlockIndex* pindex = chainman.ActiveChain().Tip();
-            // Never invalidate at or below a checkpoint-finalized block: the
-            // checkpoint's burial depth bounds how deep we follow parent
-            // reorganizations (a deeper parent reorg needs operator action).
             for (; pindex && pindex->nHeight > 0 && pindex->nHeight > finalized_height; pindex = pindex->pprev) {
                 if (pindex->m_anchor_hash.IsNull()) break; // pre-anchor blocks
-                // Skip the RPC when the parent shares the same anchor and has
-                // already been deemed bad (we only need the lowest).
-                AnchorCheckResult res;
-                {
-                    // CheckMainchainAnchor takes g_anchor_mutex internally and
-                    // performs network I/O; we accept doing this under cs_main
-                    // because the watcher is the only caller and results are
-                    // cached per parent-chain tip.
-                    res = CheckMainchainAnchor(pindex->m_anchor_height, pindex->m_anchor_hash);
-                }
-                if (res == AnchorCheckResult::OK) break;
-                if (res == AnchorCheckResult::NO_CONNECTION) return; // cannot judge now
-                lowest_bad = pindex->GetBlockHash();
+                to_check.push_back({pindex->GetBlockHash(), pindex->m_anchor_height, pindex->m_anchor_hash});
             }
+        }
+        // Phase 2: query bitcoind OUTSIDE cs_main. anchor_height/anchor_hash are
+        // fixed per block, so the snapshot stays valid even if the SEQ tip moves
+        // meanwhile; InvalidateBlock below re-looks-up by hash and the loop
+        // re-evaluates, so the (pre-existing) snapshot→act gap is harmless.
+        for (const AnchorRef& ref : to_check) {
+            AnchorCheckResult res = CheckMainchainAnchor(ref.anchor_height, ref.anchor_hash);
+            if (res == AnchorCheckResult::OK) break;
+            if (res == AnchorCheckResult::NO_CONNECTION) return; // cannot judge now
+            lowest_bad = ref.block_hash;
         }
         if (lowest_bad.IsNull()) return;
 
