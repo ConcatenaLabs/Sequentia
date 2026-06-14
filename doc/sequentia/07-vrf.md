@@ -53,7 +53,7 @@ prove(sk, alpha):
 
 verify(Y, alpha, pi):
   recompute H; U = s·G − c·Y ; V = s·H − c·Gamma
-  accept iff challenge(Y, H, Gamma, U, V) == c ; then beta = proof_to_hash(Gamma)
+  accept if and only if challenge(Y, H, Gamma, U, V) == c ; then beta = proof_to_hash(Gamma)
 ```
 
 The verify identity holds because `s·G = (k + c·sk)·G = U + c·Y` and likewise
@@ -123,7 +123,7 @@ convergence):
    unchanged.
 5. **Committee.** Under private sortition nobody can rank stakers (each beta
    is secret until published), so committee membership is **threshold-based**,
-   Algorand-style: staker `i` is a member iff
+   Algorand-style: staker `i` is a member if and only if
    `PosVrfSlot(beta_i, w_i, W) < committee_size`. Since
    `P(slot < T) = T·w/W`, the expected committee size is exactly
    `committee_size`, weight-proportionally. The block's challenge lists the

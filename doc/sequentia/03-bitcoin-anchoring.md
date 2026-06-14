@@ -11,7 +11,7 @@ cross-chain atomic swaps with no extra reorg-protection timelocks.
 > intrinsic to the HTLC, which nothing removes, and (2) a **reorg-protection
 > buffer** added *because two unsynchronized chains reorg independently*, so a
 > confirmation on one chain may vanish after you have acted on the other. A
-> Sequentia block committing Bitcoin anchor height `A` is final **iff** Bitcoin
+> Sequentia block committing Bitcoin anchor height `A` is final **if and only if** Bitcoin
 > block `A` survives — Sequentia carries no independent reorg risk — so #2 drops
 > to **zero**. "Real-time" denotes exactly that: **no extra reorg-protection
 > timelock beyond Bitcoin's own confirmation wait**, with the two chains kept
@@ -80,7 +80,7 @@ don't require re-reading the block.
 ## 3. Validation rules
 
 ### R1 — Anchor well-formedness (`CheckBlockHeader`, context-free)
-- Fields present iff `g_con_bitcoin_anchor`.
+- Fields present if and only if `g_con_bitcoin_anchor`.
 - `btc_blockhash != 0`.
 
 ### R2 — Monotonicity (`ContextualCheckBlockHeader`, needs parent)

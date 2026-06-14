@@ -101,9 +101,11 @@ regressions, and not claimed by the design docs:
 
 **Block-size parameter (§3.10) — DONE.** The chain now caps block weight at a
 per-chain value (`consensus.nMaxBlockWeight`, `-con_maxblockweight`), set to
-**400,000** on the Sequentia chain — a tenth of Bitcoin's 4,000,000, so at the
-~1-minute target cadence (10× Bitcoin) a saturated Sequentia chain grows at the
-same rate as a saturated Bitcoin chain (~100 KB of base data per block).
+**200,000** on the Sequentia chain — a twentieth of Bitcoin's 4,000,000, so at
+the ~30-second target cadence (20× Bitcoin, `-posslotinterval=30`) a saturated
+Sequentia chain grows at exactly the same *total* rate as a saturated Bitcoin
+chain (200,000 / 30 s == 4,000,000 / 600 s; the cap counts full serialized
+weight, so total disk — not just user data — is what is held equal).
 Enforced in `CheckBlock`/`ContextualCheckBlock` and respected by the miner;
 tested in `feature_max_block_weight.py`. (See doc 12 for SEQ supply / genesis.)
 

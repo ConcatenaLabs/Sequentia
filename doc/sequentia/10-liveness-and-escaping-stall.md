@@ -58,7 +58,7 @@ to keep the committee populated. (Interacts with `-posminstake`, doc 06 §5.)
 | Rule | Where it lands |
 |---|---|
 | Anchor-depth liveness (replace wall-clock `bad-posvrf-early`) | `CheckPosStakeRules` (`validation.cpp`): compute the last-certified block's anchor depth on the parent chain (via `src/anchor.{h,cpp}` / `m_anchor_height`) instead of comparing `nTime`. |
-| Sub-threshold (escaping-stall) certification | `CheckPosStakeRules` + `CheckProof` (`block_proof.cpp`): allow a named/aggregate committee below `PosQuorum` **iff** the escaping-stall anchor condition holds; otherwise keep requiring quorum. The aggregate-committee MuSig path must carry the actual signer set used, and the block must record it was certified under the stall rule (a coinbase marker, like `SEQVRF`/`SEQCMT`). |
+| Sub-threshold (escaping-stall) certification | `CheckPosStakeRules` + `CheckProof` (`block_proof.cpp`): allow a named/aggregate committee below `PosQuorum` **if and only if** the escaping-stall anchor condition holds; otherwise keep requiring quorum. The aggregate-committee MuSig path must carry the actual signer set used, and the block must record it was certified under the stall rule (a coinbase marker, like `SEQVRF`/`SEQCMT`). |
 | Fork choice (countersig count, then VRF score; stall < threshold) | the active-chain comparison. Elements signed-block "work" is height (first-seen wins ties); this must change to a PoS-specific comparator that orders same-height blocks by (is-threshold, countersig count, lowest VRF). This is the subtlest and highest-risk part — it touches `CBlockIndex`/`CChainState::ConnectTip` fork selection. |
 | Committee floor lowering | `PosIsEligibleStake` / the registry: a dynamic floor when the eligible set can't fill a committee. |
 

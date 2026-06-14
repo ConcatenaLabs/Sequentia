@@ -391,11 +391,14 @@ public:
         // SEQ tokens through staking" (whitepaper §3.9, No inflation). Block
         // producers (stakers) are paid in transaction fees, not new SEQ.
         consensus.genesis_subsidy = 0;
-        // SEQUENTIA: 400,000 weight units — a tenth of Bitcoin's 4,000,000 — so
-        // that, at ~1-minute blocks (10x Bitcoin's cadence), a saturated chain
-        // grows at the same rate as a saturated Bitcoin chain (whitepaper §3.10;
-        // ~100 KB of base data per block).
-        consensus.nMaxBlockWeight = 400000;
+        // SEQUENTIA: 200,000 weight units — a twentieth of Bitcoin's 4,000,000
+        // — so that, at ~30-second blocks (20x Bitcoin's cadence), a saturated
+        // chain grows at exactly the same total rate as a saturated Bitcoin
+        // chain (whitepaper §3.10): 200,000 / 30 s == 4,000,000 / 600 s. The cap
+        // counts the full serialized weight (coinbase, VRF proof, committee
+        // signature, anchor datum), so "total disk" — not just user data — is
+        // what is held equal to Bitcoin. Cadence is the -posslotinterval (30 s).
+        consensus.nMaxBlockWeight = 200000;
         consensus.connect_genesis_outputs = true;
         anyonecanspend_aremine = true;
         enforce_pak = false;
@@ -1075,7 +1078,7 @@ protected:
         // Sequentia chains use false, making CT opt-in).
         m_default_blinded_addresses = args.GetBoolArg("-con_default_blinded_addresses", true);
         // SEQUENTIA: per-chain max block weight (0 = the global 4,000,000).
-        // Sequentia uses 400,000 (whitepaper §3.10); set it on custom chains too.
+        // Sequentia uses 200,000 (whitepaper §3.10); set it on custom chains too.
         {
             int64_t mbw = args.GetIntArg("-con_maxblockweight", 0);
             if (mbw < 0 || mbw > MAX_BLOCK_WEIGHT) {

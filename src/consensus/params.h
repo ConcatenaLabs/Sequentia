@@ -151,10 +151,10 @@ struct Params {
     CScript mandatory_coinbase_destination;
     CAmount genesis_subsidy;
     //! SEQUENTIA: per-chain maximum block weight (BIP141 weight units). 0 means
-    //! "use the global MAX_BLOCK_WEIGHT". Sequentia sets this to 400,000 (a
-    //! tenth of Bitcoin's 4,000,000) so that, at ~1-minute blocks, a saturated
-    //! Sequentia chain grows at the same rate as a saturated Bitcoin chain
-    //! (whitepaper §3.10).
+    //! "use the global MAX_BLOCK_WEIGHT". Sequentia sets this to 200,000 (a
+    //! twentieth of Bitcoin's 4,000,000) so that, at ~30-second blocks, a
+    //! saturated Sequentia chain grows at the same total rate as a saturated
+    //! Bitcoin chain (whitepaper §3.10).
     uint32_t nMaxBlockWeight{0};
     CAsset subsidy_asset;
     bool connect_genesis_outputs;

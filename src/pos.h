@@ -32,9 +32,13 @@ class CBlockIndex;
 extern bool g_con_pos;
 
 /** Seconds per leader rank: the rank-r leader of a slot may only produce a
- *  block once this many seconds * r have elapsed since the parent block. */
+ *  block once this many seconds * r have elapsed since the parent block. Also
+ *  the chain's nominal block time (one slot = one rank step), used to convert
+ *  block-count locks to wall-clock (see PosRequiredUnbondingSeconds). Sequentia
+ *  targets 30 s blocks; with nMaxBlockWeight = 200,000 the saturated chain grows
+ *  at exactly Bitcoin's total rate (200,000 / 30 s == 4,000,000 / 600 s). */
 extern int64_t g_pos_slot_interval;
-static const int64_t DEFAULT_POS_SLOT_INTERVAL = 10;
+static const int64_t DEFAULT_POS_SLOT_INTERVAL = 30;
 
 /** Number of committee members that must countersign each block (the paper's
  *  blocksigners, principle 6). The committee is the first

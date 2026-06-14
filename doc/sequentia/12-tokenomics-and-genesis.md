@@ -49,4 +49,5 @@ the go/no-go check (doc 09 §8); (3) block production begins under PoS.
 | Founding staker set & weights | `-staker` config (launch / governance, identical on all nodes) |
 | No inflation | fixed in code (`genesis_subsidy = 0`) |
 | Min stake (0.01% = 40,000 SEQ) | `-posminstake` (governance; whitepaper-pinned) |
-| Block weight (400,000) | fixed on the Sequentia chain (`nMaxBlockWeight`; doc 11 §4) |
+| Block weight (200,000) | fixed on the Sequentia chain (`nMaxBlockWeight`; doc 11 §4) |
+| Block cadence (~30s) | `-posslotinterval=30` (nominal block time; doc 11 §4) |

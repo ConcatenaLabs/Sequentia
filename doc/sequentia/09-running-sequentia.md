@@ -62,10 +62,12 @@ con_pos=1
 posvrf=1
 posaggcommittee=1
 poscommitteesize=100         # quorum = strict majority of this: the paper's 51-of-100
-posslotinterval=10
-posunbonding=130000          # min unbonding lock in (SEQ) blocks; required
+posslotinterval=30           # nominal block time: 30s blocks (20x Bitcoin's
+                             # cadence). With con_maxblockweight=200000 below,
+                             # total disk grows at Bitcoin's rate (200000/30s).
+posunbonding=43200           # min unbonding lock in (SEQ) blocks; required
                              # wall-clock = this x posslotinterval. ~15 days at
-                             # 10s, exceeding the 2016-BTC-block (~2 week)
+                             # 30s, exceeding the 2016-BTC-block (~2 week)
                              # checkpoint window (whitepaper §3.11). Beyond the
                              # 16-bit height-CSV range, so stakers must use a
                              # time-based CSV lock (getstakescript csv_seconds=).
@@ -82,8 +84,9 @@ staker=02<pubkey-hex>:1000000
 staker=03<pubkey-hex>:1000000
 # ... one per founding staker ...
 
-# Block weight cap: 400,000 (a tenth of Bitcoin's) for ~1-min blocks (§3.10)
-con_maxblockweight=400000
+# Block weight cap: 200,000 (a twentieth of Bitcoin's) for ~30s blocks; total
+# disk grows at Bitcoin's rate: 200,000 / 30s == 4,000,000 / 600s (§3.10)
+con_maxblockweight=200000
 
 # (4) Bitcoin-identical addresses, opt-in confidential transactions
 con_default_blinded_addresses=0
@@ -136,7 +139,7 @@ mainchainrpccookiefile=/home/user/.bitcoin/.cookie   # or mainchainrpcuser/passw
 ```
 
 Every block then references a parent block at a non-decreasing height, and the
-node reorganizes **iff** the parent reorganizes away a referenced block (see
+node reorganizes **if and only if** the parent reorganizes away a referenced block (see
 [`03-bitcoin-anchoring.md`](03-bitcoin-anchoring.md)). Monitor with
 `getanchorstatus`. This is what gives immediate finality and friction-free
 cross-chain atomic swaps against native BTC.

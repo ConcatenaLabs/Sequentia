@@ -197,7 +197,8 @@ network:
 - **Launch / governance parameters** — genesis SEQ supply (400M) & distribution,
   the founding staker set, committee size, `-posminstake`, `-posunbonding` — set
   at launch, like any chain's founding constants (doc 12). The block weight cap
-  (400,000) is now implemented (doc 11 §4).
+  (200,000) and ~30s cadence (`-posslotinterval=30`) are implemented, sized so a
+  saturated chain grows at Bitcoin's total disk rate (doc 11 §4).
 - **Out-of-scope future subsystems** (beyond the four challenges) — asset ACLs
   (to be built with Simplicity), programmable accounts (deferred / maybe
   unnecessary given Simplicity), utreexo (after it matures in Bitcoin) — doc 11 §4.
