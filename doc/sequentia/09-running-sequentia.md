@@ -202,6 +202,43 @@ loop. A session is single-use and bound to its (signer, member set, message); ab
 round-1 sessions expire (10 min) and are capped, so an incomplete round can
 never grow node memory.
 
+### Anchor-freshness signing preference (real-time swaps)
+
+For real-time, timelock-free cross-chain swaps the canonical tip should track
+Bitcoin's tip. Two layers deliver this, and **neither is a fork-choice rule** —
+a quorum-certified block is final and is never reorged to chase a fresher anchor
+(doc 10 §7):
+
+1. **Leaders anchor fresh (automatic).** `getposblocktemplate` /
+   `generateposblock` build on the freshest Bitcoin block
+   (tip-minus-`anchorminconf`), so in the common single-proposal case the new
+   block already references Bitcoin's tip.
+2. **The committee prefers the freshest proposal (coordination policy).** When
+   more than one valid proposal exists for the same height — e.g. a higher-rank
+   leader proposes after a stale rank-0, or leaders briefly disagree on the
+   Bitcoin tip — the committee should converge its signatures on the one with the
+   highest `anchorheight` (compare the candidates' `getblockheader` /
+   `getposblocktemplate` output). Concretely, in each member's commit decision
+   give the freshest-anchored proposal a **fixed local head-start of
+   ≈`0.3 × quorum` "votes"** (e.g. **+15** at a 100-member committee / 51 quorum):
+   a member starts contributing its partial signature once a proposal's perceived
+   support — *real* partial signatures gathered **plus** that head-start — reaches
+   the quorum, so the freshest proposal cascades to the real threshold first.
+
+   **The head-start is purely local commit-timing; it never counts toward
+   finality.** A block is final if and only if it carries ≥ quorum **real**
+   committee signatures (the on-chain, view-independent rule the node enforces);
+   the weight only steers *which* proposal the committee converges on. So it
+   cannot create two "final" blocks, and a producer cannot use it to manufacture
+   support (the head-start stays well below the quorum, leaving a real-signature
+   floor of ≈`0.7 × quorum`). Keep the value fixed (binary: only the single
+   freshest Bitcoin height gets it — no distance scaling) and identical across
+   the committee's coordination tooling; because it is a liveness heuristic and
+   not consensus, the exact value is not consensus-critical and can be tuned from
+   testnet observation. (The current committee flow is coordinator-driven, so
+   this lives in the coordination tooling; a fully-autonomous gossip-and-sign
+   committee would build the same preference into its voting.)
+
 ### Stake lifecycle
 
 Register stake on-chain by paying to a staking script (`getstakescript`), whose

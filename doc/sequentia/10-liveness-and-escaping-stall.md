@@ -218,9 +218,15 @@ raised for review have been decided with the project owner:
   finalized block) and `feature_pos_anchor_freshness.py` (anchor freshness does
   not drive reorgs; the tip tracks Bitcoin via the next produced block).
 
-  Layer 2 (the committee signing preference for the anchor-boundary race) remains
-  the one pending refinement; layer 1, the comparator change, and the finality
-  gate are implemented.
+  Layer 1 (leaders anchor fresh), the comparator change (anchor key removed), and
+  the finality gate are implemented. Layer 2 — the committee preferring the
+  freshest proposal so it finalizes first — is a **coordination-layer policy**
+  (the committee signing flow is coordinator-driven; the node already exposes each
+  proposal's `anchorheight` and builds templates on the freshest anchor): it is
+  specified for operators in [doc 09 §6](09-running-sequentia.md) (the fixed
+  ≈`0.3 × quorum` local head-start that never counts toward the effective
+  threshold). A fully-autonomous gossip-and-sign committee would build the same
+  preference into its voting.
 
 - **Dynamic committee floor — not implemented (owner: Option A).** The
   whitepaper leaves its trigger/curve undefined ("may not be finalized"), and
