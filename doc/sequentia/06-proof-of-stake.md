@@ -76,8 +76,10 @@ challenge_h = <leader_r.pubkey> OP_CHECKSIG
 The seed is derived from the parent's **Bitcoin anchor hash** (not the SEQ block
 hash): both inputs are header fields fixed at block-index creation, so the seed
 is identical on every node, and the anchor is Bitcoin's PoW — a SEQ producer
-cannot grind it (its only freedom is *which* recent Bitcoin block to anchor to,
-which the anchor-freshness fork choice, doc 10 §7, makes self-defeating).
+cannot grind it. Its only freedom is *which* recent Bitcoin block to anchor to
+(bounded: a real, monotone, anchor-R3-valid recent block), which influences only
+the *next* block's committee, and that committee is privately VRF-sortitioned —
+so the residual grinding is limited and VRF-mitigated.
 
 Consensus, split across two stages because the stake registry mirrors the
 *active tip's* UTXO set and headers/blocks can be accepted far ahead of it:
@@ -135,8 +137,8 @@ At the base layer, fork choice between same-height blocks uses Elements'
 existing rule (signed blocks have equal "work" = height, so first-seen wins),
 and time-gating ensures the rank-0 leader produces and propagates earliest in
 the common case, so honest nodes converge on it. (Under full PoS the same-height
-fork choice is the deterministic countersignature/VRF/anchor-freshness
-comparator of doc 10.)
+fork choice is the deterministic countersignature-then-VRF comparator of doc 10;
+the Bitcoin anchor is deliberately *not* a fork-choice key — see doc 10 §7.)
 
 ## 5. Security notes
 

@@ -134,16 +134,17 @@ bool CBlockIndexWorkComparator::operator()(const CBlockIndex *pa, const CBlockIn
     if (g_con_pos) {
         if (pa->m_pos_countersigs < pb->m_pos_countersigs) return true;
         if (pa->m_pos_countersigs > pb->m_pos_countersigs) return false;
-        // SEQUENTIA real-time cross-chain swaps: among equally-certified
-        // same-height blocks, prefer the one referencing the FRESHER (higher)
-        // Bitcoin anchor, so the canonical tip stays current with Bitcoin's tip
-        // and a swap's Sequentia leg can confirm with anchor >= the Bitcoin
-        // leg's height without extra reorg-protection timelocks (whitepaper
-        // §3.7/§3.8). Ordered after certification so it never displaces a
-        // finalized (full-threshold) block — the fresh anchor is otherwise
-        // picked up within one block.
-        if (pa->m_anchor_height < pb->m_anchor_height) return true;
-        if (pa->m_anchor_height > pb->m_anchor_height) return false;
+        // On equal certification, the LOWER leader VRF score wins (whitepaper
+        // §3.8). The VRF result is the ultimate truth here: there is deliberately
+        // NO anchor-freshness key in the fork choice. In an immediate-finality
+        // system a fork-choice rule keyed on the Bitcoin anchor could let a fresh
+        // Bitcoin block reorder — even overwrite — already-certified blocks, which
+        // must never happen (a quorum-certified block is final; see the
+        // immediate-finality gate in ContextualCheckBlockHeader). Cross-chain-swap
+        // freshness is instead delivered *inside* the committee round: members
+        // preferentially sign the freshest-anchored proposal so it reaches the
+        // 51/100 effective-signature threshold first and is the block that gets
+        // finalized — never by reorging one that already did (doc 10 §7).
         if (pa->m_pos_vrf_score > pb->m_pos_vrf_score) return true;  // higher beta is worse
         if (pa->m_pos_vrf_score < pb->m_pos_vrf_score) return false;
     }

@@ -261,11 +261,12 @@ uint256 PosSeedForChild(const CBlockIndex* pindexPrev)
     // Seed from the parent's Bitcoin anchor hash + the height. Both are header
     // fields fixed at block-index creation, so the seed is identical on every
     // node (unlike m_pos_vrf_score, which is set later and proved unreliable as a
-    // seed input). The anchor is Bitcoin's PoW, so a SEQ producer cannot bias it;
-    // the only freedom is *which* recent Bitcoin block to anchor to, which the
-    // anchor-freshness fork choice (doc 10 §7) makes self-defeating — referencing
-    // an older anchor to grind the seed loses. Within a Bitcoin interval all SEQ
-    // blocks share the anchor, so the per-height seed is fixed and ungrindable.
+    // seed input). The anchor is Bitcoin's PoW, so a SEQ producer cannot bias it.
+    // The parent's anchor is fixed once the parent exists, so within a Bitcoin
+    // interval all same-height candidates share the seed; a producer's only
+    // freedom is which recent Bitcoin block its *own* block anchors to, which
+    // affects only the NEXT block's (privately VRF-sortitioned) committee —
+    // bounded, VRF-mitigated grinding, not a seed-grinding lever here.
     return ComputePosSeed(pindexPrev->m_anchor_hash, (uint32_t)(pindexPrev->nHeight + 1));
 }
 

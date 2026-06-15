@@ -16,7 +16,7 @@ cross-chain atomic swaps with no extra reorg-protection timelocks.
 > to **zero**. "Real-time" denotes exactly that: **no extra reorg-protection
 > timelock beyond Bitcoin's own confirmation wait**, with the two chains kept
 > *synchronized* (the Sequentia tip references a current Bitcoin block) to within
-> a **bounded ~1-block lag** (the anchor-freshness fork choice, §4), which is
+> a **bounded ~1-block lag** (each new block anchors to Bitcoin's tip, §4), which is
 > small relative to the Bitcoin-paced swap clock. The claimant still waits for
 > the leg's anchor to reach their desired Bitcoin **confirmation depth** — a
 > fresher anchor is a *shallower* one — but pays no cross-chain buffer on top.
@@ -140,21 +140,23 @@ height is gated on its parent anchor having become stale. Nodes connected to
 honest bitcoind instances converge because Bitcoin's best chain is the shared
 oracle.
 
-### Anchor-freshness fork choice (PoS, real-time swaps)
+### Anchor freshness for real-time swaps (delivered by production, not fork choice)
 
 Reorg-following gives the swap *safety* (a Sequentia leg can never outlive the
 Bitcoin block it anchors). For real-time, **timelock-free** swaps we also want
 the canonical Sequentia tip to track Bitcoin's tip with minimal *latency*, so a
 swap's Sequentia leg confirms with `anchor_height >= the Bitcoin leg's height`
-promptly. Under PoS, `CBlockIndexWorkComparator` (`src/validation.cpp`)
-therefore prefers, among **equally-certified same-height** blocks, the one
-referencing the **fresher (higher) Bitcoin anchor** (then the lower leader VRF
-score). This is ordered *after* the countersignature key, so it never displaces
-a finalized full-threshold block; it only resolves ties toward Bitcoin's tip. A
-newly-arrived Bitcoin block is picked up within one Sequentia block (~1 slot),
-and referencing a *stale* Bitcoin block can only lose — so there is no
-proposer-grinding incentive. See doc 10 §7; tested in
-`feature_pos_anchor_freshness.py`.
+promptly. This is achieved by block **production**: `GetAnchorForNewBlock`
+anchors every new block to the freshest Bitcoin block (tip-minus-`anchorminconf`),
+so the tip tracks Bitcoin's tip within one Sequentia block (~1 slot) — by
+*extending* the chain, never by reorging it. It is **not** a fork-choice rule:
+an anchor-freshness key in `CBlockIndexWorkComparator` was implemented and then
+**removed** (conceptual-creator review), because in an immediate-finality system
+a fork-choice rule keyed on the anchor could let a new Bitcoin block reorder or
+overwrite already-certified blocks — which must never happen. Among competing
+proposals, the committee preferentially *signs* the freshest-anchored one so it
+is the block that gets finalized (a local commit-timing preference, not a vote;
+doc 10 §7). See doc 10 §7; tested in `feature_pos_anchor_freshness.py`.
 
 ## 5. Node configuration
 
@@ -173,7 +175,7 @@ proposer-grinding incentive. See doc 10 §7; tested in
 | bitcoind unreachable at startup | Refuse to produce blocks; optionally header-validate with cached data; loud warning. |
 | bitcoind behind the network | Anchors look "ahead"; R3 lead-window rejects until local bitcoind catches up — fail safe, no bad accept. |
 | Deep Bitcoin reorg past maturity window | Cascade invalidation of dependent Sequentia blocks; expected and correct (the swaps those blocks protected are also gone on Bitcoin). |
-| Producer anchors too far in the past (fee-securing incentive, paper principle 7) | Bounded by anchor monotonicity and R3 (the designed `-anchormaxlag` window is deferred); PoS adds incentive weighting, and the anchor-freshness fork choice (§4) prefers the fresher anchor. The producer policy "anchor to tip-minus-`anchorminconf`" keeps anchors current. |
+| Producer anchors too far in the past (fee-securing incentive, paper principle 7) | Bounded by anchor monotonicity and R3 (the designed `-anchormaxlag` window is deferred); PoS adds incentive weighting, and the producer policy "anchor to tip-minus-`anchorminconf`" (§4) keeps anchors current. |
 
 ## 7. Test strategy
 

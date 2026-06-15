@@ -2,7 +2,15 @@
 # Copyright (c) 2026 The Sequentia developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
-"""Tests anchor-freshness fork choice (whitepaper §3.7/§3.8 — real-time swaps).
+"""Tests anchor freshness for real-time cross-chain swaps (whitepaper §3.7/§3.8).
+
+Freshness is delivered by block PRODUCTION (leaders anchor each new block to the
+freshest Bitcoin block), NOT by a fork-choice rule: a fresher-anchored competitor
+must never reorg an already-accepted, equally-certified block (that would let a
+new Bitcoin block overwrite finalized history). This test verifies both: a fresh
+competitor does not override an accepted block, and the tip still tracks Bitcoin
+because the next produced block carries the fresher anchor. See doc 10 §7.
+ORIGINAL (now removed) behaviour this replaces:
 
 So that cross-chain atomic swaps need no extra reorg-protection timelocks, the
 Sequentia tip must track Bitcoin's tip: among equally-certified same-height
@@ -104,12 +112,25 @@ class PosAnchorFreshnessTest(BitcoinTestFramework):
         assert_greater_than(anchor_new, anchor_old)   # B_new references a fresher BTC block
         assert_equal(node.getblockheader(b_new)['previousblockhash'], h1)
 
-        # Reconsider B_old (earlier-seen, same height, same countersigs, OLDER
-        # anchor). First-seen alone would pick B_old; anchor-freshness must keep
-        # the chain on the fresher-anchored B_new.
+        # Anchor freshness is NOT a fork-choice rule (doc 10 §7). In an
+        # immediate-finality system a fork-choice key on the Bitcoin anchor could
+        # let a fresher-anchored competitor overwrite an already-accepted,
+        # equally-certified block — exactly what must never happen. So
+        # reconsidering the earlier-seen B_old returns the chain to B_old; the
+        # fresher anchor of B_new does NOT override it (the VRF result / first-seen
+        # is the truth, not the anchor).
         node.reconsiderblock(b_old)
-        assert_equal(node.getbestblockhash(), b_new)
+        assert_equal(node.getbestblockhash(), b_old)
         assert_equal(node.getblockcount(), 2)
+
+        # Cross-chain-swap freshness is instead delivered by block PRODUCTION:
+        # leaders anchor each new block to the freshest Bitcoin block, so the
+        # canonical tip tracks Bitcoin's tip within one block — without ever
+        # reorging a block that's already canonical.
+        res_next = node.generateposblock(leader, committee)  # height 3, built on B_old
+        assert_equal(node.getblockcount(), 3)
+        anchor_next = node.getblockheader(res_next['hash'])['anchorheight']
+        assert_greater_than(anchor_next, anchor_old)  # the new tip references the fresher BTC block
 
 
 if __name__ == '__main__':

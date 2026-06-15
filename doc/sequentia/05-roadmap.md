@@ -69,7 +69,7 @@ work depends on.
        genesis check made conditional). `getanchorstatus` RPC + anchor fields in
        `getblockheader`/`getblock`. Note: the spec'd `-anchormaxlag`/`-anchormaxlead`
        recency window is **deferred** (R3 + monotonicity bound staleness; the
-       anchor-freshness fork choice keeps anchors current).
+       producer policy of anchoring each block to Bitcoin's tip keeps anchors current).
 7. [x] Functional test `feature_bitcoin_anchoring.py` (parent = second
        elementsd, RPC-identical to bitcoind for anchoring): happy path, anchor
        advance/monotonicity, parent reorg ⇒ anchored-chain reorg onto the
@@ -160,17 +160,19 @@ The whitepaper's Bitcoin-anchor liveness (§3.5/§3.8). Design + analysis in
       wall-clock round timeout with the lowest-VRF proposer (§3.5), which the
       timestamp slot-gate + the lowest-VRF fork-choice tiebreak realise — there
       is no separate "anchor clock" to build (doc 10 §7).
-- [x] Anchor-freshness fork choice — among equally-certified same-height blocks
-      the chain prefers the fresher (higher) Bitcoin anchor, so the tip tracks
-      Bitcoin's tip for real-time, timelock-free cross-chain swaps. Via the
-      `CBlockIndexWorkComparator` `m_anchor_height` key, ordered after
-      certification so it never displaces a finalized block; chosen over the
-      paper's literal seed-reshuffle (no grinding, far less risk; ~1-slot lag,
-      identical safety). `feature_pos_anchor_freshness.py` (doc 03 §4, doc 10 §7).
+- [x] Real-time-swap anchor tracking — the tip tracks Bitcoin's tip via block
+      **production** (every new block anchors to the freshest Bitcoin block), not
+      via fork choice. An anchor-freshness `CBlockIndexWorkComparator` key was
+      implemented and then **removed** (conceptual-creator review): in an
+      immediate-finality system a fork-choice rule on the anchor could overwrite
+      already-certified blocks. Freshness among competing proposals is instead a
+      committee signing preference (a local commit-timing signal, not a vote);
+      finality stays ≥51/100 effective signatures. `feature_pos_anchor_freshness.py`
+      (doc 03 §4, doc 10 §7).
 
 Both formerly-open liveness items are now **decided** (doc 10 §7): the
-*real-time-swap anchor tracking* is implemented as the anchor-freshness fork
-choice above (chosen over the literal mid-round seed-reshuffle), and the
+*real-time-swap anchor tracking* is delivered by production + a committee signing
+preference (the anchor is deliberately not a fork-choice key), and the
 *dynamic committee floor* is **not** implemented — the paper leaves its
 trigger/curve undefined and its liveness purpose is already met by
 escaping-stall. No specified consensus mechanism remains open.

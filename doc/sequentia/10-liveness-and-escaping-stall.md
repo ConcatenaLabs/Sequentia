@@ -170,28 +170,45 @@ raised for review have been decided with the project owner:
   slot-gate plus the §6 lowest-VRF tiebreak realise "lowest-VRF proposer at
   timeout." Nothing to change.
 
-- **Keeping the tip on the freshest Bitcoin block (real-time swaps) —
-  IMPLEMENTED via an anchor-freshness fork-choice key, chosen over the literal
-  seed-reshuffle.** Motivation (owner): the Sequentia tip must reference the
-  latest Bitcoin block so a swap's Sequentia leg confirms with
-  `anchor ≥ the Bitcoin leg's height` promptly, giving timelock-free real-time
-  cross-chain swaps (the anchoring already provides the reorg *safety*; this is
-  about keeping the chains *synchronized*). "Real-time" is precise here — **no
+- **Keeping the tip on the freshest Bitcoin block (real-time swaps) — delivered
+  by block PRODUCTION, NOT by fork choice.** Motivation (owner): the Sequentia
+  tip must reference the latest Bitcoin block so a swap's Sequentia leg confirms
+  with `anchor ≥ the Bitcoin leg's height` promptly, giving timelock-free
+  real-time cross-chain swaps (anchoring already provides the reorg *safety*;
+  this is about keeping the chains *synchronized*). "Real-time" is precise — **no
   extra reorg-protection timelock**, not zero latency; see the definition box in
-  [doc 03](03-bitcoin-anchoring.md). Rather than re-roll the sortition seed from each block's own
-  anchor (the paper's literal mechanism — which adds proposer grinding and a
-  deep sortition change), `CBlockIndexWorkComparator` now prefers, among
-  equally-certified same-height blocks, the one with the higher (fresher)
-  `m_anchor_height`, then the lower VRF score. This makes the canonical chain
-  track Bitcoin's tip (a stale-anchor block loses to a fresher one), with **no
-  grinding** (referencing an older Bitcoin block can only lose) and a tiny, safe
-  change (the field already exists, set at acceptance, never mutated). Ordered
-  *after* certification, so it never displaces a finalized block — a freshly
-  arrived Bitcoin block is otherwise picked up within one block (~1 slot).
-  Tested in `feature_pos_anchor_freshness.py`. Trade-off vs. the literal
-  reshuffle: ~1-block *synchronization* lag instead of ~0, in exchange for no
-  grinding and far less risk; the swap *safety* (and the no-extra-timelock
-  property) is identical either way.
+  [doc 03](03-bitcoin-anchoring.md).
+
+  **An anchor-freshness fork-choice key was first implemented and then removed**
+  (conceptual-creator review). In an immediate-finality system there is no
+  longest-chain fallback, so a fork-choice rule that prevails over the VRF result
+  is unsafe: a newly-arrived Bitcoin block could reorder — even overwrite —
+  already-certified blocks (you must never be able to reorg a quorum-certified
+  block because a fresher anchor appeared). The VRF/committee result is the
+  ultimate truth.
+
+  Freshness is delivered instead at two safe layers:
+  1. **Block production.** `GetAnchorForNewBlock` anchors every new block to the
+     freshest Bitcoin block, so the canonical tip tracks Bitcoin's tip within one
+     block — by *extending* the chain, never by reorging it.
+  2. **Committee signing preference (a local commit-timing signal, not a vote).**
+     When committee members face competing proposals at the same height, they
+     preferentially sign the one referencing the freshest Bitcoin block, with the
+     leader's proposal carrying a fixed local weight (≈`0.3 × quorum`, e.g. +15 at
+     100/51) so the freshest proposal reaches the **51/100 effective-signature**
+     threshold first and is the block that gets *finalized*. The weight never
+     counts toward the threshold — finality is always ≥51 real signatures over
+     the VRF-determined committee, view-independent — so it cannot create two
+     "final" blocks (it is purely coordination). This recovers the swap-freshness
+     without any rule that can overwrite a finalized block.
+
+  Backstop: a **hard immediate-finality gate** keeps a quorum-certified block at
+  a height locked against any SEQ-internal competitor (even one that later gathers
+  more signatures), while still yielding to a Bitcoin reorg of its anchor (the
+  anchor watcher) — Bitcoin remains the security root. (Layers 2 and the gate are
+  the next, separately-tested steps; layer 1 + the comparator change are in.)
+  Tested in `feature_pos_anchor_freshness.py` (a fresh competitor does not reorg
+  an accepted block; the tip tracks Bitcoin via the next produced block).
 
 - **Dynamic committee floor — not implemented (owner: Option A).** The
   whitepaper leaves its trigger/curve undefined ("may not be finalized"), and
@@ -201,5 +218,6 @@ raised for review have been decided with the project owner:
 **Net:** every consensus mechanism the whitepaper specifies for the PoS model is
 now implemented — VRF sortition, committee certification + MuSig2 aggregation +
 distributed signing, the anchor-seeded schedule, wall-clock round timing,
-lowest-VRF + more-countersignatures + fresher-anchor fork choice, escaping-stall,
+the more-countersignatures-then-lowest-VRF fork choice (anchor freshness kept out
+of it, delivered by production + committee signing preference), escaping-stall,
 checkpoints, min-stake, unbonding. No specified mechanism remains open.
