@@ -186,6 +186,7 @@ BASE_SCRIPTS = [
     'feature_pos_min_stake.py',
     'feature_pos_escaping_stall.py',
     'feature_pos_fork_choice.py',
+    'feature_pos_finality.py',
     'feature_pos_anchor_freshness.py',
     'feature_pos_genesis_bootstrap.py',
     'feature_pos_stake.py',

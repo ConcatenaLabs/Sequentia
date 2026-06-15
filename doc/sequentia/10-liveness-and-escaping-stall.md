@@ -202,13 +202,25 @@ raised for review have been decided with the project owner:
      "final" blocks (it is purely coordination). This recovers the swap-freshness
      without any rule that can overwrite a finalized block.
 
-  Backstop: a **hard immediate-finality gate** keeps a quorum-certified block at
-  a height locked against any SEQ-internal competitor (even one that later gathers
-  more signatures), while still yielding to a Bitcoin reorg of its anchor (the
-  anchor watcher) — Bitcoin remains the security root. (Layers 2 and the gate are
-  the next, separately-tested steps; layer 1 + the comparator change are in.)
-  Tested in `feature_pos_anchor_freshness.py` (a fresh competitor does not reorg
-  an accepted block; the tip tracks Bitcoin via the next produced block).
+  Backstop — **hard immediate-finality gate (implemented).** `UpdateTip` tracks
+  the highest active-chain quorum-certified block; `ContextualCheckBlockHeader`
+  rejects any block that would fork at or below it — so a quorum-certified block
+  is locked against every SEQ-internal competitor, *including one that later
+  gathers more signatures* (committee equivocation). The rejection is the **soft,
+  non-banning** `BLOCK_RECENT_CONSENSUS_CHANGE`, because the one legitimate
+  exception is a **Bitcoin reorg** of a finalized block's anchor: the anchor
+  watcher invalidates the block (its own path, not the accept-time gate), which
+  lowers the finalized point via `UpdateTip`, after which the Bitcoin-consistent
+  chain is accepted (the soft result makes the arrives-before-the-watcher race
+  retryable). Bitcoin stays the security root — SEQ finality is immediate
+  *modulo* a Bitcoin reorg. Tested in `feature_pos_finality.py` (a higher-
+  countersignature competitor delivered over the network does **not** reorg a
+  finalized block) and `feature_pos_anchor_freshness.py` (anchor freshness does
+  not drive reorgs; the tip tracks Bitcoin via the next produced block).
+
+  Layer 2 (the committee signing preference for the anchor-boundary race) remains
+  the one pending refinement; layer 1, the comparator change, and the finality
+  gate are implemented.
 
 - **Dynamic committee floor — not implemented (owner: Option A).** The
   whitepaper leaves its trigger/curve undefined ("may not be finalized"), and

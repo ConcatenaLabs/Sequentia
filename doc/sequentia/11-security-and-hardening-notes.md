@@ -95,7 +95,12 @@ let a new Bitcoin block reorder — even overwrite — already-certified blocks.
 VRF/committee result is the truth; cross-chain-swap freshness is delivered by
 block *production* (every new block anchors to the freshest Bitcoin block) and,
 as a refinement, a committee signing preference — never by fork choice (doc 10
-§7). The two formerly-open liveness items are now decided: block timing is already aligned
+§7). A **hard immediate-finality gate** (`UpdateTip` + `ContextualCheckBlockHeader`)
+now also locks a quorum-certified block against any SEQ-internal competitor — even
+one carrying more signatures (equivocation) — using a soft, retryable rejection so
+a Bitcoin reorg of the anchor (handled by the watcher, lowering the finalized
+point) is the only thing that can displace it. Tested in `feature_pos_finality.py`.
+The two formerly-open liveness items are now decided: block timing is already aligned
 with the whitepaper's wall-clock round model (no change), and the dynamic
 committee floor is **not** implemented (its trigger/curve is underspecified in
 the paper and its liveness purpose is already met by escaping-stall). No

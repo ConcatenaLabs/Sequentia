@@ -3034,6 +3034,12 @@ void ForceUntrimHeader(const CBlockIndex *pindex_) EXCLUSIVE_LOCKS_REQUIRED(::cs
     pindex->untrim();
 }
 
+// SEQUENTIA immediate finality (see UpdateTip / ContextualCheckBlockHeader and
+// doc 10 §7): the highest active-chain quorum-certified block and its hash, or
+// height -1 when none. Maintained under cs_main.
+static int g_pos_immediate_final_height GUARDED_BY(::cs_main) = -1;
+static uint256 g_pos_immediate_final_hash GUARDED_BY(::cs_main);
+
 void CChainState::UpdateTip(const CBlockIndex* pindexNew)
 {
     AssertLockHeld(::cs_main);
@@ -3048,6 +3054,26 @@ void CChainState::UpdateTip(const CBlockIndex* pindexNew)
             UpdateTipLog(coins_tip, pindexNew, m_params, __func__, "[background validation] ", "");
         }
         return;
+    }
+
+    // SEQUENTIA immediate finality: recompute the highest active-chain block that
+    // carries a full committee quorum (>= PosQuorum). Such a block is "final" —
+    // no SEQ-internal competitor may reorg it (enforced at accept time, below).
+    // Recomputing from the *active* chain on every tip change means a Bitcoin
+    // reorg (the anchor watcher invalidating a finalized block) or a manual
+    // invalidate/reconsider naturally lowers the finalized point — Bitcoin stays
+    // the security root. Escaping-stall / leader-only (sub-quorum) tips simply
+    // leave no immediate-final point until a quorum block is connected.
+    if (g_con_pos) {
+        const int quorum = PosQuorum((size_t)std::max(g_pos_committee_size, 1));
+        g_pos_immediate_final_height = -1;
+        for (const CBlockIndex* f = pindexNew; f && f->nHeight > 0; f = f->pprev) {
+            if ((int)f->m_pos_countersigs >= quorum) {
+                g_pos_immediate_final_height = f->nHeight;
+                g_pos_immediate_final_hash = f->GetBlockHash();
+                break;
+            }
+        }
     }
 
     // New best block
@@ -4175,6 +4201,26 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
                     LogPrintf("ERROR: %s: block forks below the configured checkpoint %s (height %d)\n", __func__, hi->second.ToString(), hi->first);
                     return state.Invalid(BlockValidationResult::BLOCK_CHECKPOINT, "bad-fork-prior-to-pos-checkpoint");
                 }
+            }
+        }
+
+        // Immediate finality (whitepaper §3.8, doc 10 §7): a quorum-certified
+        // block is final. Reject any block that would fork at or below the
+        // highest active-chain finalized block — including a competing
+        // same-height block that carries MORE signatures (committee
+        // equivocation). The result is the *soft*, non-banning
+        // BLOCK_RECENT_CONSENSUS_CHANGE so the one legitimate exception — a
+        // Bitcoin reorg of a finalized block's anchor, which the anchor watcher
+        // invalidates, lowering the finalized point via UpdateTip — is retried
+        // rather than punished. The watcher and manual invalidate/reconsider use
+        // their own paths (not this accept-time gate); Bitcoin stays the root.
+        if (g_pos_immediate_final_height >= 0) {
+            const CBlockIndex* anc_final = pindexPrev->GetAncestor(g_pos_immediate_final_height);
+            if (nHeight <= g_pos_immediate_final_height ||
+                anc_final == nullptr || anc_final->GetBlockHash() != g_pos_immediate_final_hash) {
+                LogPrintf("ERROR: %s: rejecting block (height %d) that forks at/below the immediately-finalized block %s (height %d)\n",
+                          __func__, nHeight, g_pos_immediate_final_hash.ToString(), g_pos_immediate_final_height);
+                return state.Invalid(BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE, "bad-fork-prior-to-pos-final");
             }
         }
     }
