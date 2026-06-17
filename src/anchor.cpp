@@ -39,12 +39,8 @@ int g_last_btc_tip_height GUARDED_BY(g_anchor_mutex) = -1;
 //! of being on the losing side of a long-range fork (or of a bogus
 //! checkpoint; the node cannot tell alone, which is exactly why it must warn).
 std::vector<PosCheckpoint> g_pos_checkpoint_conflicts GUARDED_BY(g_anchor_mutex);
-//! Operator-configured static checkpoints (`-poscheckpoint=height:hash`): a
-//! long-range-attack backstop for fresh sync that, unlike the dynamic
-//! parent-chain checkpoints above, is known before any block is downloaded.
-//! Reject-only — a block at a configured height must carry the configured hash
-//! (enforced in ContextualCheckBlockHeader). Keyed by Sequentia height.
-std::map<int, uint256> g_pos_config_checkpoints GUARDED_BY(g_anchor_mutex);
+// Operator-configured static checkpoints (-poscheckpoint=height:hash) live in
+// the common layer (pos.cpp) so chainparams.cpp / elements-tx can link them.
 
 const unsigned char POS_CKPT_TAG[7] = {'S', 'E', 'Q', 'C', 'K', 'P', 'T'};
 //! Anchors confirmed to be on the parent chain's best chain. Cleared whenever
@@ -371,30 +367,8 @@ std::vector<PosCheckpoint> GetPosCheckpointConflicts()
     return g_pos_checkpoint_conflicts;
 }
 
-void ClearConfiguredPosCheckpoints()
-{
-    LOCK(g_anchor_mutex);
-    g_pos_config_checkpoints.clear();
-}
-
-bool AddConfiguredPosCheckpoint(int height, const uint256& hash, std::string& error)
-{
-    if (height < 0) { error = "checkpoint height must be non-negative"; return false; }
-    LOCK(g_anchor_mutex);
-    auto it = g_pos_config_checkpoints.find(height);
-    if (it != g_pos_config_checkpoints.end() && it->second != hash) {
-        error = strprintf("conflicting checkpoint at height %d", height);
-        return false;
-    }
-    g_pos_config_checkpoints[height] = hash;
-    return true;
-}
-
-std::map<int, uint256> GetConfiguredPosCheckpoints()
-{
-    LOCK(g_anchor_mutex);
-    return g_pos_config_checkpoints;
-}
+// ClearConfiguredPosCheckpoints / AddConfiguredPosCheckpoint /
+// GetConfiguredPosCheckpoints now live in pos.cpp (common layer).
 
 namespace {
 

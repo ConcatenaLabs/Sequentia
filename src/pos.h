@@ -393,4 +393,25 @@ void PosRevertBlockStake(const CBlock& block, const CBlockUndo& undo);
 /** Rebuild the UTXO stake layer by scanning the (flushed) UTXO set. */
 bool RebuildUtxoStake(CCoinsView& view);
 
+// --- Operator-configured static checkpoints (-poscheckpoint=height:hash) ---
+//
+// A long-range-attack backstop supplied by the operator up front, so it protects
+// a *fresh* sync before any block is downloaded: a block presented at a
+// configured height must carry the configured hash, else it (and any branch
+// built on it) is rejected in ContextualCheckBlockHeader. Reject-only — they
+// never make a node seek or download a particular branch. These live in the
+// common layer (here) rather than the node-layer anchor module because
+// chainparams.cpp configures them and must link them into libbitcoin_common
+// (and tools such as elements-tx), which does not link the node module.
+
+/** Drop all configured checkpoints (chain-parameter (re)load). */
+void ClearConfiguredPosCheckpoints();
+
+/** Register a configured checkpoint. Fails on a negative height or a height
+ *  already configured with a different hash. */
+bool AddConfiguredPosCheckpoint(int height, const uint256& hash, std::string& error);
+
+/** All configured checkpoints, keyed by Sequentia height. */
+std::map<int, uint256> GetConfiguredPosCheckpoints();
+
 #endif // BITCOIN_POS_H

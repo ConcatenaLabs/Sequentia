@@ -530,3 +530,38 @@ bool RebuildUtxoStake(CCoinsView& view)
     StakeRegistry::GetInstance().SetUtxoStake(std::move(utxo_stake));
     return true;
 }
+
+// --- Operator-configured static checkpoints (-poscheckpoint=height:hash) ---
+// In the common layer (not the node-layer anchor module) so chainparams.cpp and
+// tools such as elements-tx — which link libbitcoin_common but not the node
+// library — can configure and link them. Reject-only; enforced in
+// ContextualCheckBlockHeader. Guarded by their own mutex.
+namespace {
+Mutex g_pos_config_cp_mutex;
+std::map<int, uint256> g_pos_config_checkpoints GUARDED_BY(g_pos_config_cp_mutex);
+} // namespace
+
+void ClearConfiguredPosCheckpoints()
+{
+    LOCK(g_pos_config_cp_mutex);
+    g_pos_config_checkpoints.clear();
+}
+
+bool AddConfiguredPosCheckpoint(int height, const uint256& hash, std::string& error)
+{
+    if (height < 0) { error = "checkpoint height must be non-negative"; return false; }
+    LOCK(g_pos_config_cp_mutex);
+    auto it = g_pos_config_checkpoints.find(height);
+    if (it != g_pos_config_checkpoints.end() && it->second != hash) {
+        error = strprintf("conflicting checkpoint at height %d", height);
+        return false;
+    }
+    g_pos_config_checkpoints[height] = hash;
+    return true;
+}
+
+std::map<int, uint256> GetConfiguredPosCheckpoints()
+{
+    LOCK(g_pos_config_cp_mutex);
+    return g_pos_config_checkpoints;
+}
