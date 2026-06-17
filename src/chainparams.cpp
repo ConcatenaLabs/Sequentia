@@ -431,7 +431,7 @@ public:
 
         std::vector<unsigned char> sign_bytes = ParseHex("51");
         consensus.signblockscript = CScript(sign_bytes.begin(), sign_bytes.end());
-        consensus.max_block_signature_size = 74;
+        consensus.max_block_signature_size = 150; // PoS aggregate solution: leader DER (~73B) + 64B BIP340 committee aggregate; 74 only fit one sig
         g_signed_blocks = true;
 
         // Policy asset, from the network-tagged genesis commitment.
@@ -625,7 +625,7 @@ public:
 
         std::vector<unsigned char> sign_bytes = ParseHex("51");
         consensus.signblockscript = CScript(sign_bytes.begin(), sign_bytes.end());
-        consensus.max_block_signature_size = 74;
+        consensus.max_block_signature_size = 150; // PoS aggregate solution: leader DER (~73B) + 64B BIP340 committee aggregate; 74 only fit one sig
         g_signed_blocks = true;
 
         // Calculate regcoin asset
