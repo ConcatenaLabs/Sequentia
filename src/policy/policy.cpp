@@ -13,6 +13,7 @@
 #include <script/pegins.h>
 #include <span.h>
 #include <chainparams.h> // Peg-out enforcement
+#include <pos.h> // SEQUENTIA: PoS staking-output standardness
 
 // ELEMENTS:
 CAsset policyAsset;
@@ -74,6 +75,16 @@ bool IsStandard(const CScript& scriptPubKey, TxoutType& whichType)
 
     CChainParams params = Params();
     if (whichType == TxoutType::NONSTANDARD) {
+        // SEQUENTIA: on Proof-of-Stake chains, on-chain stake is registered by
+        // paying to a bare staking script (<csv> OP_CSV OP_DROP <pubkey>
+        // OP_CHECKSIG), which Solver classifies as nonstandard. Accept it as
+        // standard so stake-registration transactions relay and are mined under
+        // default policy — otherwise stake could only ever be registered on a
+        // test chain running -acceptnonstdtxn, breaking staking on mainnet.
+        // ParseStakeScript validates the exact template (see src/pos.cpp).
+        if (g_con_pos && ParseStakeScript(scriptPubKey)) {
+            return true;
+        }
         return false;
     } else if (whichType == TxoutType::MULTISIG) {
         unsigned char m = vSolutions.front()[0];
