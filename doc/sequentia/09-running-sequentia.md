@@ -165,6 +165,34 @@ The node computes the VRF proofs, builds the block, and (under
 testing and for a single operator running several stakers; it requires that one
 host hold every signing key.
 
+### Bootstrapping a committee on a fresh testnet (single operator)
+
+A bundled chain (`-chain=test` / `-chain=sequentia`) seeds exactly one staker
+in genesis (the founder). Until the chain has at least a quorum of stakers, the
+founder can only produce blocks slowly under the escaping-stall rule (§ below);
+normal certification needs a strict majority of the committee to countersign.
+To stand up a small committee that produces blocks at full speed, a single
+operator can use the helper
+[`contrib/sequentia/bootstrap-committee.py`](../../contrib/sequentia/bootstrap-committee.py).
+On testnet, size the committee to the staker count with `-poscommitteesize`
+(e.g. `-poscommitteesize=3` for the founder plus two new stakers), start the
+node on a *fresh* datadir anchored to its parent, and run:
+
+```
+python3 contrib/sequentia/bootstrap-committee.py \
+    --founder-wif "<genesis-founder-WIF>" --members 2
+```
+
+It generates the new staker keys, spends the founder's genesis coins into
+CSV-locked staking outputs (registering them on-chain), mines one escaping-stall
+block to confirm the registrations, and mines a first full-committee block to
+prove the quorum is reachable. It then prints the new staker WIFs and the
+`generateposblock` command to keep producing blocks. The new keys are equal in
+weight to the founder so VRF sortition always selects the whole committee.
+`-poscommitteesize` is honored on testnet for exactly this purpose; on the real
+chain (`-chain=sequentia`) it is the paper's 100, and the committee grows as
+recipients of the distributed supply stake on-chain.
+
 ### Distributed committee (members on separate hosts)
 
 For a real decentralized committee, no node holds more than its own key. The
