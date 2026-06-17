@@ -512,7 +512,7 @@ public:
  */
 class CTestNetParams : public CChainParams {
 public:
-    CTestNetParams() {
+    explicit CTestNetParams(const ArgsManager& args) {
         strNetworkID = CBaseChainParams::TESTNET;
         consensus.signet_blocks = false;
         consensus.signet_challenge.clear();
@@ -607,7 +607,20 @@ public:
         g_pos_vrf = true;
         g_pos_agg_committee = true;
         g_pos_min_stake = 4000000000000ULL;   // 40,000 SEQ = 0.01% of 400M (§3.3)
-        g_pos_committee_size = 100;            // paper's 51-of-100 quorum (§3.5)
+        // Expected committee size (quorum = strict majority). Defaults to the
+        // paper's 100 (51-of-100 quorum, §3.5); configurable on testnet so a
+        // single operator can bootstrap a small committee (e.g. -poscommitteesize=3,
+        // quorum 2). It is NOT part of the genesis commitment (CommitToArguments
+        // hashes only network id, fedpeg and signblock scripts), so changing it
+        // does not change the genesis — but it IS a consensus rule, so every node
+        // on a given testnet must agree on the value.
+        g_pos_committee_size = args.GetIntArg("-poscommitteesize", 100);
+        {
+            const int max_committee = g_pos_agg_committee ? MAX_POS_AGG_COMMITTEE_SIZE : MAX_POS_COMMITTEE_SIZE;
+            if (g_pos_committee_size < 1 || g_pos_committee_size > max_committee) {
+                throw std::runtime_error(strprintf("-poscommitteesize must be between 1 and %d", max_committee));
+            }
+        }
         g_pos_slot_interval = 30;              // 30s nominal block time (doc 11 §4)
         g_pos_unbonding_period = 43200;        // x30s = ~15 days > 2-week checkpoint window (§3.11)
         consensus.elements_mode = g_con_elementsmode;
@@ -2082,7 +2095,7 @@ std::unique_ptr<const CChainParams> CreateChainParams(const ArgsManager& args, c
     } else if (chain == CBaseChainParams::SEQUENTIA) {
         return std::unique_ptr<CChainParams>(new CSequentiaParams());
     } else if (chain == CBaseChainParams::TESTNET) {
-        return std::unique_ptr<CChainParams>(new CTestNetParams());
+        return std::unique_ptr<CChainParams>(new CTestNetParams(args));
     } else if (chain == CBaseChainParams::SIGNET) {
         return std::unique_ptr<CChainParams>(new SigNetParams(args));
     } else if (chain == CBaseChainParams::REGTEST) {
