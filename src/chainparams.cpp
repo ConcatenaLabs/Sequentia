@@ -536,9 +536,18 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].min_activation_height = 0; // No activation delay
-        // DynaFed: never activate (but set to avoid use of uninitialized memory in tests)
+        // DynaFed: never activate. Sequentia is Proof-of-Stake, not a dynamic
+        // federation, and PoS computes the per-block signing challenge itself
+        // (the leader/committee election) — which is incompatible with dynafed's
+        // epoch-based federation signblockscript. On a dynafed chain the PoS
+        // challenge is never set into the block (miner.cpp asserts proof.IsNull()
+        // and skips the signed-block challenge path), so block production fails
+        // with bad-pos-challenge. The sequentia mainnet and the regtest chains
+        // already keep this NEVER_ACTIVE; the testnet had it ALWAYS_ACTIVE by
+        // mistake (the comment always said "never activate"), which is why the
+        // testnet could not produce its first block.
         consensus.vDeployments[Consensus::DEPLOYMENT_DYNA_FED].bit = 25;
-        consensus.vDeployments[Consensus::DEPLOYMENT_DYNA_FED].nStartTime = Consensus::BIP9Deployment::ALWAYS_ACTIVE;
+        consensus.vDeployments[Consensus::DEPLOYMENT_DYNA_FED].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
         consensus.vDeployments[Consensus::DEPLOYMENT_DYNA_FED].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
         consensus.vDeployments[Consensus::DEPLOYMENT_DYNA_FED].min_activation_height = 0; // No activation delay
         // Deployment of Taproot (BIPs 340-342)
