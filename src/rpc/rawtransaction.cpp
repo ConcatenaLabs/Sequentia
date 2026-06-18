@@ -1108,9 +1108,18 @@ static RPCHelpMan testmempoolaccept()
         if (tx_result.m_result_type == MempoolAcceptResult::ResultType::VALID) {
             const CAmount fee = tx_result.m_base_fees.value();
             // Check that fee does not exceed maximum fee
+            // SEQUENTIA: the maxfeerate ceiling is denominated in the policy
+            // asset; value an open-fee-market fee in the policy asset (via the
+            // exchange rate) before comparing, so a fee paid in a low-value
+            // asset is not spuriously flagged "max-fee-exceeded". The tx already
+            // passed ATMP here, so its fee asset is priced (non-zero value).
+            CAmount fee_value = fee;
+            if (g_con_any_asset_fees) {
+                fee_value = ExchangeRateMap::GetInstance().ConvertAmountToValue(fee, tx->GetFeeAsset(::policyAsset)).GetValue();
+            }
             const int64_t virtual_size = tx_result.m_vsize.value();
             const CAmount max_raw_tx_fee = max_raw_tx_fee_rate.GetFee(virtual_size);
-            if (max_raw_tx_fee && fee > max_raw_tx_fee) {
+            if (max_raw_tx_fee && fee_value > max_raw_tx_fee) {
                 result_inner.pushKV("allowed", false);
                 result_inner.pushKV("reject-reason", "max-fee-exceeded");
                 exit_early = true;

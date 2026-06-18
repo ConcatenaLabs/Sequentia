@@ -109,11 +109,26 @@ static feebumper::Result CheckFeeRate(const CWallet& wallet, const CWalletTx& wt
         return feebumper::Result::INVALID_PARAMETER;
     }
 
-    // Check that in all cases the new fee doesn't violate maxTxFee
+    // Check that in all cases the new fee doesn't violate maxTxFee.
+    // SEQUENTIA: -maxtxfee is denominated in the policy asset. With the open fee
+    // market the fee may be paid in another asset, so compare its *reference
+    // value* (via the exchange rate) against the ceiling rather than the raw
+    // asset amount -- otherwise a fee paid in a low-per-unit-value asset trips
+    // the limit even when its real value is modest. Mirrors the send path in
+    // CreateTransactionInternal. An unpriced asset converts to 0, which would
+    // silently bypass the ceiling, so refuse that instead.
     const CAmount max_tx_fee = wallet.m_default_max_tx_fee;
-    if (new_total_fee > max_tx_fee) {
+    CAmount new_total_fee_value = new_total_fee;
+    if (g_con_any_asset_fees) {
+        new_total_fee_value = ExchangeRateMap::GetInstance().ConvertAmountToValue(new_total_fee, fee_asset).GetValue();
+        if (new_total_fee > 0 && new_total_fee_value == 0) {
+            errors.push_back(Untranslated("Fee asset has no exchange rate on this node; cannot enforce the maximum-fee limit"));
+            return feebumper::Result::WALLET_ERROR;
+        }
+    }
+    if (new_total_fee_value > max_tx_fee) {
         errors.push_back(strprintf(Untranslated("Specified or calculated fee %s is too high (cannot be higher than -maxtxfee %s)"),
-            FormatMoney(new_total_fee), FormatMoney(max_tx_fee)));
+            FormatMoney(new_total_fee_value), FormatMoney(max_tx_fee)));
         return feebumper::Result::WALLET_ERROR;
     }
 
