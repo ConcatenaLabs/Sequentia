@@ -21,7 +21,7 @@ bool CheckChallenge(const CBlockHeader& block, const CBlockIndex& indexLast, con
         // enabled (g_pos_committee_size > 1), a majority of the slot's
         // committee as countersigners (the paper's principle 6). The
         // signatures that satisfy the challenge are checked separately in
-        // CheckProof. See doc/sequentia/06-proof-of-stake.md.
+        // CheckProof. See doc/sequentia/04-proof-of-stake.md.
         const CScript& challenge = block.proof.challenge;
         std::optional<PosChallengeParts> parts = ParsePosBlockChallenge(challenge);
         if (!parts) {

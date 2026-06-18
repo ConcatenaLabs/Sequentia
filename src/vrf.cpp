@@ -34,7 +34,7 @@ const unsigned char BACK = 0x00;
 // uses an RFC 6979 HMAC_DRBG); we derive it deterministically from (sk, H) with
 // SHA-256 under a private domain octet. This is the one documented deviation
 // from the RFC framing and is interop-irrelevant: nonce secrecy/determinism is
-// all that the proof's soundness needs (see doc/sequentia/07-vrf.md §2).
+// all that the proof's soundness needs (see doc/sequentia/04-proof-of-stake.md §2).
 const unsigned char NONCE_FRONT = 0x81;
 
 // Length of the truncated Fiat-Shamir challenge c (RFC 9381 §5.5: cLen = 16 for

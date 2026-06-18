@@ -8,7 +8,7 @@ Sequentia inverts Liquid's blinded-by-default behavior: wallets hand out plain
 Bitcoin-format addresses by default (so one address can serve both Bitcoin and
 Sequentia in wallet apps), and confidential addresses — a visibly distinct
 format — are opt-in per call (getnewaddress "" "blech32") or per node
-(-blindedaddresses=1). See doc/sequentia/08-addresses-and-ct.md.
+(-blindedaddresses=1). See doc/sequentia/01-architecture.md.
 
 node0 runs with the Sequentia default (unblinded); node1 runs with an explicit
 -blindedaddresses=1 override as the blinded control. (The test framework writes

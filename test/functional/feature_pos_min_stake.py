@@ -7,7 +7,7 @@
 The whitepaper (§3.3) requires a minimum stake — 0.01% of supply, 40,000 SEQ —
 to be an eligible blocksigner. Stake below the floor is ignored by the leader
 schedule and sortition, while still appearing in the registry. See
-doc/sequentia/06-proof-of-stake.md §5.
+doc/sequentia/04-proof-of-stake.md §5.
 
 Covered:
  - getstakerinfo reports every registered staker (the floor is not a filter on

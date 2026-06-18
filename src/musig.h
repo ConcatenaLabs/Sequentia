@@ -50,7 +50,7 @@ std::optional<std::vector<unsigned char>> MuSigSign(const std::vector<CKey>& key
 bool MuSigVerify(const std::vector<CPubKey>& pubkeys, Span<const unsigned char> msg32,
                  Span<const unsigned char> sig64);
 
-// --- Distributed (multi-host) signing (doc/sequentia/07-vrf.md §6) ---
+// --- Distributed (multi-host) signing (doc/sequentia/04-proof-of-stake.md §6) ---
 //
 // The local MuSigSign above needs every signer's key on one host (the block
 // producer). For a real decentralized committee each member runs on its own

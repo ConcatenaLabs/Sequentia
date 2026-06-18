@@ -8,7 +8,7 @@ With committee certification enabled, each block's challenge requires the
 elected leader's signature AND countersignatures from a strict majority of the
 slot's committee (the first n schedule entries) — the PoC form of the paper's
 51-of-100 certification giving immediate finality (principle 6). A block
-without a committee quorum cannot exist. See doc/sequentia/06-proof-of-stake.md.
+without a committee quorum cannot exist. See doc/sequentia/04-proof-of-stake.md.
 """
 
 from test_framework.test_framework import BitcoinTestFramework

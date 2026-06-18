@@ -54,7 +54,7 @@ RPCHelpMan getnewaddress()
     // default blinding to the blindedaddresses setting; its default is
     // chain-level: Liquid/Elements chains blind by default, Sequentia chains
     // do not (confidential transactions are opt-in there, and the default
-    // address format matches Bitcoin's). See doc/sequentia/08-addresses-and-ct.md.
+    // address format matches Bitcoin's). See doc/sequentia/01-architecture.md.
     bool add_blinding_key = gArgs.GetBoolArg("-blindedaddresses", g_con_elementsmode && Params().DefaultBlindedAddresses());
 
     if (!request.params[1].isNull()) {

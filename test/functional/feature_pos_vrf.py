@@ -8,7 +8,7 @@ In VRF mode each block's coinbase commits to the leader's VRF proof over the
 slot seed (tagged OP_RETURN); validators verify the proof against the leader's
 challenge key and enforce the proof-derived, stake-weighted time slot. Slots
 are private: only a key holder can compute its own slot in advance.
-See doc/sequentia/07-vrf.md §4.
+See doc/sequentia/04-proof-of-stake.md §4.
 """
 
 from test_framework.test_framework import BitcoinTestFramework

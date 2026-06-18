@@ -133,7 +133,7 @@ public:
     //! SEQUENTIA: whether wallets hand out blinded (confidential) addresses by
     //! default. Liquid/Elements chains do (confidential transactions are
     //! opt-out); Sequentia chains do not (CT is opt-in, and the default
-    //! address format matches Bitcoin's). See doc/sequentia/08-addresses-and-ct.md.
+    //! address format matches Bitcoin's). See doc/sequentia/01-architecture.md.
     bool DefaultBlindedAddresses() const { return m_default_blinded_addresses; }
     bool anyonecanspend_aremine;
     const std::string& ParentBech32HRP() const { return parent_bech32_hrp; }

@@ -1533,7 +1533,7 @@ static RPCHelpMan vrfprove()
                 "\nCompute a verifiable random function (VRF) proof for an input under a private key. "
                 "The proof can be verified with vrfverify; its output (beta) is a unique pseudorandom value "
                 "that only the key holder could produce. Building block for Proof-of-Stake sortition "
-                "(see doc/sequentia/07-vrf.md).\n",
+                "(see doc/sequentia/04-proof-of-stake.md).\n",
                 {
                     {"privkey", RPCArg::Type::STR, RPCArg::Optional::NO, "WIF private key."},
                     {"input", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Hex-encoded input (alpha)."},
@@ -1574,7 +1574,7 @@ static RPCHelpMan vrfverify()
 {
     return RPCHelpMan{"vrfverify",
                 "\nVerify a VRF proof for an input under a public key. Returns whether the proof is valid and, "
-                "if so, its output (beta). See doc/sequentia/07-vrf.md.\n",
+                "if so, its output (beta). See doc/sequentia/04-proof-of-stake.md.\n",
                 {
                     {"pubkey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Hex-encoded public key."},
                     {"input", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Hex-encoded input (alpha)."},
@@ -1630,7 +1630,7 @@ static RPCHelpMan musigaggregatepubkey()
                 "\nAggregate a set of public keys into a single 32-byte x-only MuSig2 (BIP327) key. "
                 "The aggregate depends only on the *set* of keys (order-independent). This is the "
                 "committee aggregate key carried in a -posaggcommittee block challenge. "
-                "See doc/sequentia/07-vrf.md §6.\n",
+                "See doc/sequentia/04-proof-of-stake.md §6.\n",
                 {
                     {"pubkeys", RPCArg::Type::ARR, RPCArg::Optional::NO, "Hex-encoded compressed public keys.",
                         {{"", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "public key"}}},
@@ -1656,7 +1656,7 @@ static RPCHelpMan musignonce()
                 "Generate this member's public nonce for signing msg32 under the aggregate of pubkeys, "
                 "and stash the matching secret nonce under sessionid for round 2 (musigpartialsign). "
                 "The sessionid must be fresh — a secret nonce is single-use, and reusing one across "
-                "messages leaks the private key. See doc/sequentia/07-vrf.md §6.\n",
+                "messages leaks the private key. See doc/sequentia/04-proof-of-stake.md §6.\n",
                 {
                     {"sessionid", RPCArg::Type::STR, RPCArg::Optional::NO, "A fresh, caller-chosen session identifier."},
                     {"privkey", RPCArg::Type::STR, RPCArg::Optional::NO, "WIF private key of this signer."},
@@ -1690,7 +1690,7 @@ static RPCHelpMan musigpartialsign()
                 "\nDistributed MuSig2 signing, round 2 (run on each committee member's own node). "
                 "Given every member's round-1 public nonce, produce this member's partial signature and "
                 "consume the stored secret nonce (the session is single-use). pubkeys and msg must match "
-                "round 1. See doc/sequentia/07-vrf.md §6.\n",
+                "round 1. See doc/sequentia/04-proof-of-stake.md §6.\n",
                 {
                     {"sessionid", RPCArg::Type::STR, RPCArg::Optional::NO, "The session id used in musignonce."},
                     {"privkey", RPCArg::Type::STR, RPCArg::Optional::NO, "WIF private key of this signer."},
@@ -1726,7 +1726,7 @@ static RPCHelpMan musigaggregate()
     return RPCHelpMan{"musigaggregate",
                 "\nDistributed MuSig2 signing, final step (run by the coordinator; uses only public data). "
                 "Aggregate the members' partial signatures into the single 64-byte BIP340 signature that "
-                "certifies a -posaggcommittee block. See doc/sequentia/07-vrf.md §6.\n",
+                "certifies a -posaggcommittee block. See doc/sequentia/04-proof-of-stake.md §6.\n",
                 {
                     {"pubkeys", RPCArg::Type::ARR, RPCArg::Optional::NO, "All members' public keys.",
                         {{"", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "public key"}}},
@@ -1783,7 +1783,7 @@ static RPCHelpMan generateposblock()
     return RPCHelpMan{"generateposblock",
                 "\nFor Proof-of-Stake chains: build a block as the staker owning the given private key, "
                 "sign it, and submit it. The staker must be registered (see -staker) and must be eligible "
-                "for the current slot (its rank's slot must have opened). See doc/sequentia/06-proof-of-stake.md.\n",
+                "for the current slot (its rank's slot must have opened). See doc/sequentia/04-proof-of-stake.md.\n",
                 {
                     {"stakerkey", RPCArg::Type::STR, RPCArg::Optional::NO, "WIF private key of a registered staker (the proposing leader)."},
                     {"committeekeys", RPCArg::Type::ARR, RPCArg::Optional::OMITTED, "WIF private keys of committee members for countersigning. Required when committee certification (-poscommitteesize > 1) is enabled: at least a quorum of the slot's committee must be available.",
@@ -1833,7 +1833,7 @@ static RPCHelpMan generateposblock()
     if (feeDestinationScript == CScript()) feeDestinationScript = CScript() << OP_TRUE;
 
     // VRF sortition mode: compute this staker's sortition proof over the slot
-    // seed and commit it in the coinbase (doc/sequentia/07-vrf.md §4). With
+    // seed and commit it in the coinbase (doc/sequentia/04-proof-of-stake.md §4). With
     // committee certification, also compute each provided committee key's
     // eligibility proof; only sortition-selected members may countersign, and
     // at least a quorum of them must be available.
@@ -2041,7 +2041,7 @@ static RPCHelpMan getposblocktemplate()
                 "committee then signs that hash with the distributed MuSig2 flow (musignonce / "
                 "musigpartialsign / musigaggregate) and the result is submitted with submitposblock. This "
                 "lets a decentralized committee, each member on its own host, produce a block without any "
-                "one node holding all the keys. See doc/sequentia/07-vrf.md §6.\n",
+                "one node holding all the keys. See doc/sequentia/04-proof-of-stake.md §6.\n",
                 {
                     {"leaderkey", RPCArg::Type::STR, RPCArg::Optional::NO, "WIF private key of the proposing leader (held only on the leader's host)."},
                     {"members", RPCArg::Type::ARR, RPCArg::Optional::NO, "The committee signer set: one entry per member.",
@@ -2182,7 +2182,7 @@ static RPCHelpMan submitposblock()
                 "\nFor -posaggcommittee chains: finalize and submit a block produced by getposblocktemplate, "
                 "attaching the leader's signature and the committee's distributed MuSig2 aggregate signature "
                 "(from musigaggregate). The chain tip must be unchanged since the template was built. "
-                "See doc/sequentia/07-vrf.md §6.\n",
+                "See doc/sequentia/04-proof-of-stake.md §6.\n",
                 {
                     {"blockhex", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The block hex from getposblocktemplate, unchanged."},
                     {"leaderkey", RPCArg::Type::STR, RPCArg::Optional::NO, "WIF private key of the leader (signs the block hash)."},

@@ -7,7 +7,7 @@
 // Replaces Elements' fixed-federation signed-block challenge with a per-block
 // challenge whose required signer is a stake-weighted leader, elected
 // deterministically from a seed derived from the previous block and its Bitcoin
-// anchor (see doc/sequentia/06-proof-of-stake.md). The block signature itself
+// anchor (see doc/sequentia/04-proof-of-stake.md). The block signature itself
 // still rides the existing signed-block machinery (CheckProof), so PoS only
 // changes *which* key must sign each block, not how the signature is verified.
 
@@ -52,14 +52,14 @@ static const int DEFAULT_POS_COMMITTEE_SIZE = 1;
 static const int MAX_POS_COMMITTEE_SIZE = 16;
 
 /** When set (with g_con_pos), leader election uses *private* VRF sortition
- *  (doc/sequentia/07-vrf.md §4) instead of the public deterministic schedule:
+ *  (doc/sequentia/04-proof-of-stake.md §4) instead of the public deterministic schedule:
  *  each block carries the leader's VRF proof over the slot seed in a tagged
  *  coinbase OP_RETURN, and the proof's output determines the leader's
  *  time-gated slot. Only the key holder can compute its slot in advance. */
 extern bool g_pos_vrf;
 
 /** When set (with g_pos_vrf), committee certification uses MuSig2 signature
- *  aggregation (doc/sequentia/07-vrf.md §6) instead of script multisig: the
+ *  aggregation (doc/sequentia/04-proof-of-stake.md §6) instead of script multisig: the
  *  block challenge commits to the leader key plus one 32-byte aggregate of
  *  the committee member set (named by the coinbase SEQCMT commitments), and
  *  the block carries a single 64-byte BIP340 signature by all named members
@@ -259,7 +259,7 @@ std::optional<PosChallengeParts> ParsePosBlockChallenge(const CScript& challenge
 /** Compute the election seed for the block that would extend `pindexPrev`. */
 uint256 PosSeedForChild(const CBlockIndex* pindexPrev);
 
-// --- VRF sortition (g_pos_vrf; doc/sequentia/07-vrf.md §4) ---
+// --- VRF sortition (g_pos_vrf; doc/sequentia/04-proof-of-stake.md §4) ---
 
 class CBlock;
 
@@ -307,7 +307,7 @@ static const uint32_t POS_ESCAPING_STALL_ANCHOR_GAP = 3;
  *  at least POS_ESCAPING_STALL_ANCHOR_GAP blocks — a genuine stall, since a
  *  healthy chain re-anchors only gradually and cannot reference a Bitcoin
  *  block that does not yet exist. Computed purely from the SEQ-committed anchor
- *  heights, so every node agrees. See doc/sequentia/10-liveness-and-escaping-stall.md. */
+ *  heights, so every node agrees. See doc/sequentia/04-proof-of-stake.md. */
 inline bool PosEscapingStallAllowed(uint32_t parent_anchor_height, uint32_t block_anchor_height)
 {
     // Subtraction (not addition) avoids any wraparound near UINT32_MAX.

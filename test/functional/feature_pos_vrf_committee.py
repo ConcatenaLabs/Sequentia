@@ -10,7 +10,7 @@ membership is itself proven by each member's own VRF proof over the slot seed
 (threshold sortition: member iff PosVrfSlot(beta, w, W) < committee_size, so
 the expected committee size is exactly committee_size, weight-proportionally).
 The challenge script enforces the signatures; coinbase SEQCMT commitments
-prove each claimed member's eligibility. See doc/sequentia/07-vrf.md.
+prove each claimed member's eligibility. See doc/sequentia/04-proof-of-stake.md.
 
 For determinism this test uses 4 unit-weight stakers with committee_size 4:
 membership probability is min(4*1/4, 1) = 1, so every staker is always

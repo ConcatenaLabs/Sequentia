@@ -9,7 +9,7 @@ a node already validated), a configured checkpoint is supplied up front and so
 protects a *fresh* sync against a long-range alternate history: a block
 presented at the pinned height must carry the pinned hash, otherwise it — and
 any branch built on it — is rejected. The mechanism is reject-only and needs no
-block download. See doc/sequentia/06-proof-of-stake.md §11.
+block download. See doc/sequentia/04-proof-of-stake.md §11.
 
 Covered:
  - a configured checkpoint with the WRONG hash makes a fresh node reject the

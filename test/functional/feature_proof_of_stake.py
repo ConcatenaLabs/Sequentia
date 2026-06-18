@@ -7,7 +7,7 @@
 A PoS chain elects, for each block, a stake-weighted leader from a seed derived
 from the previous block (and its Bitcoin anchor). The block is valid only if
 signed by the elected rank-r leader and produced no earlier than r slot
-intervals after the parent. See doc/sequentia/06-proof-of-stake.md.
+intervals after the parent. See doc/sequentia/04-proof-of-stake.md.
 
 Covered:
  - the leader schedule is deterministic and identical across nodes

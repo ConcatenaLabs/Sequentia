@@ -3228,7 +3228,7 @@ static RPCHelpMan getposschedule()
     return RPCHelpMan{"getposschedule",
                 "\nFor Proof-of-Stake chains: returns the stake-weighted leader schedule for the next block, "
                 "best-ranked first. The schedule is derived deterministically from the current tip and its Bitcoin "
-                "anchor, so every node computes the same ordering. See doc/sequentia/06-proof-of-stake.md.\n",
+                "anchor, so every node computes the same ordering. See doc/sequentia/04-proof-of-stake.md.\n",
                 {
                     {"count", RPCArg::Type::NUM, RPCArg::Default{10}, "Maximum number of ranked leaders to return."},
                 },
@@ -3410,7 +3410,7 @@ static RPCHelpMan getcheckpointpayload()
                 "commits a block of this chain into the parent chain as a checkpoint. Embed it in any parent-chain "
                 "transaction (e.g. a `data` output of createrawtransaction). Once the commitment is buried "
                 "-poscheckpointdepth deep, nodes that have the block on their active chain treat it as finalized "
-                "and reject forks below it. See doc/sequentia/06-proof-of-stake.md.\n",
+                "and reject forks below it. See doc/sequentia/04-proof-of-stake.md.\n",
                 {
                     {"blockhash", RPCArg::Type::STR_HEX, RPCArg::DefaultHint{"the chain tip"}, "The block to checkpoint."},
                 },

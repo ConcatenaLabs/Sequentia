@@ -19,7 +19,7 @@ never shares its key. For each block:
 
 No node ever holds more than its own key, yet the committee certifies the block
 with a single signature — the path to the paper's 100-member committees.
-See doc/sequentia/07-vrf.md §6.
+See doc/sequentia/04-proof-of-stake.md §6.
 """
 
 from test_framework.test_framework import BitcoinTestFramework

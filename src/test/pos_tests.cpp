@@ -219,7 +219,7 @@ BOOST_AUTO_TEST_CASE(pos_committee_challenge_roundtrip)
 
 // The aggregate-committee challenge (OP_1 <leader> <agg_key>) round-trips and
 // is distinguished from the other challenge forms; malformed variants are
-// rejected. See doc/sequentia/07-vrf.md §6.
+// rejected. See doc/sequentia/04-proof-of-stake.md §6.
 BOOST_AUTO_TEST_CASE(pos_agg_challenge_roundtrip)
 {
     CPubKey leader = MakeKey();

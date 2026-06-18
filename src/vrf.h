@@ -4,7 +4,7 @@
 //
 // SEQUENTIA: a verifiable random function (VRF) over secp256k1, for private
 // cryptographic sortition in Proof-of-Stake (the paper's principle 3 / section
-// iv consensus algorithm). See doc/sequentia/07-vrf.md.
+// iv consensus algorithm). See doc/sequentia/04-proof-of-stake.md.
 //
 // Given a secret key sk (with public key Y = sk*G) and an input alpha, the
 // holder of sk can compute:
@@ -26,7 +26,7 @@
 // the suite octet uses the RFC's experimental value 0xFF and there are no
 // official test vectors to validate against; the deterministic nonce uses
 // SHA-256 rather than the RFC 6979 HMAC_DRBG of the P-256 suite. These residual
-// deviations are documented in doc/sequentia/07-vrf.md §2.
+// deviations are documented in doc/sequentia/04-proof-of-stake.md §2.
 
 #ifndef BITCOIN_VRF_H
 #define BITCOIN_VRF_H

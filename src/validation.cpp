@@ -2180,7 +2180,7 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
         return true;
     }
 
-    // VRF sortition mode (doc/sequentia/07-vrf.md §4): the coinbase must
+    // VRF sortition mode (doc/sequentia/04-proof-of-stake.md §4): the coinbase must
     // commit to the leader's VRF proof over this slot's seed; the proof's
     // output determines the leader's time-gated slot. The proof is covered by
     // the merkle root, hence by the leader's block signature, so it cannot be
@@ -2269,7 +2269,7 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
     // commitment whose VRF proof verifies over the slot seed and whose
     // output passes the sortition membership threshold. The committee
     // signatures themselves are enforced by the challenge script
-    // (CheckProof). See doc/sequentia/07-vrf.md.
+    // (CheckProof). See doc/sequentia/04-proof-of-stake.md.
     if (!parts->committee.empty()) {
         std::map<CPubKey, std::vector<unsigned char>> claimed;
         for (const PosVrfMember& member : ExtractPosVrfMembers(block)) {
@@ -4162,7 +4162,7 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
 
     // SEQUENTIA PoS: reject forks at or below the checkpoint-finalized block
     // (a Sequentia block committed into the parent chain and buried
-    // -poscheckpointdepth deep; see doc/sequentia/06-proof-of-stake.md §11).
+    // -poscheckpointdepth deep; see doc/sequentia/04-proof-of-stake.md §11).
     // This is the long-range-attack defense: history below the finality point
     // cannot be replaced, even by validly-signed competing branches.
     if (g_con_pos) {
@@ -4184,7 +4184,7 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
         // backstop known before any block is downloaded. A block at a
         // configured height must carry the configured hash, and any block whose
         // branch already spans a configured height must agree with it. See
-        // doc/sequentia/06-proof-of-stake.md §11.
+        // doc/sequentia/04-proof-of-stake.md §11.
         const std::map<int, uint256> config_cps = GetConfiguredPosCheckpoints();
         if (!config_cps.empty()) {
             auto exact = config_cps.find(nHeight);

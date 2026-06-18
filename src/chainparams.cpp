@@ -392,7 +392,7 @@ public:
         // Same consensus RULES as testnet; the differences are mainnet address
         // formats, distinct network magic, and a SEPARATE genesis whose founder
         // key is a PLACEHOLDER that MUST be replaced with a real, secret key at
-        // the launch ceremony (see doc/sequentia/13-launch-and-bootstrap.md).
+        // the launch ceremony (see doc/sequentia/06-tokenomics-and-launch.md).
         consensus.genesis_subsidy = 0;                  // no inflation (§3.9)
         consensus.nMaxBlockWeight = 200000;             // a twentieth of Bitcoin (doc 11 §4)
         consensus.connect_genesis_outputs = true;
@@ -601,7 +601,7 @@ public:
         // (see the genesis construction below) and grown as recipients of the
         // pre-mined supply stake. The signed-block dev/PoC path (anyone-signs)
         // now lives only on the custom/regtest chains (-con_pos=0). See
-        // doc/sequentia/13-launch-and-bootstrap.md.
+        // doc/sequentia/06-tokenomics-and-launch.md.
         g_con_pos = true;
         MAX_MONEY = 400000000 * COIN;   // SEQUENTIA: per-chain money cap
         g_pos_vrf = true;
@@ -659,7 +659,7 @@ public:
         // (throwaway, to be regenerated at the real launch ceremony):
         //   testnet WIF cURsyjY6KwZM9pBk7rfWwdDzYS1R4w85M2pPzh5RySfGpA8n9LB4
         //   pubkey 028f88c9848c86c311934a5939ceb98408975055fc7ee6b40b479969665afe0e6b
-        // See doc/sequentia/13-launch-and-bootstrap.md.
+        // See doc/sequentia/06-tokenomics-and-launch.md.
         {
             const CPubKey founder(ParseHex("028f88c9848c86c311934a5939ceb98408975055fc7ee6b40b479969665afe0e6b"));
             // Time-based CSV lock >= the unbonding requirement
@@ -694,7 +694,7 @@ public:
         // chains (this is the Bitcoin *testnet* format; a future Sequentia
         // mainnet uses Bitcoin mainnet's). Confidential (blinded) addresses
         // are opt-in and use a visibly distinct format below.
-        // See doc/sequentia/08-addresses-and-ct.md.
+        // See doc/sequentia/01-architecture.md.
         base58Prefixes[PUBKEY_ADDRESS] = std::vector<unsigned char>(1,111);
         base58Prefixes[SCRIPT_ADDRESS] = std::vector<unsigned char>(1,196);
         base58Prefixes[SECRET_KEY] =     std::vector<unsigned char>(1,239);
@@ -1208,7 +1208,7 @@ protected:
 
         // SEQUENTIA: opt-in Proof-of-Stake leader election. PoS requires signed
         // blocks and the legacy (non-dynafed) signed-block path, so we force
-        // dynafed off when it is enabled. See doc/sequentia/06-proof-of-stake.md.
+        // dynafed off when it is enabled. See doc/sequentia/04-proof-of-stake.md.
         g_con_pos = args.GetBoolArg("-con_pos", false);
         MAX_MONEY = 400000000 * COIN;   // SEQUENTIA: per-chain money cap
         g_pos_slot_interval = args.GetIntArg("-posslotinterval", DEFAULT_POS_SLOT_INTERVAL);

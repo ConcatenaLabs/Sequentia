@@ -10,7 +10,7 @@ and the block carries one 64-byte BIP340 signature by all named members instead
 of one ECDSA signature per member — lifting the script-multisig committee cap
 from 16 to the paper's 100. Membership is still proven per member by coinbase
 SEQCMT VRF eligibility commitments; validators re-aggregate the named set and
-require it to match the challenge's aggregate key. See doc/sequentia/07-vrf.md §6.
+require it to match the challenge's aggregate key. See doc/sequentia/04-proof-of-stake.md §6.
 
 As in feature_pos_vrf_committee.py, 4 unit-weight stakers with committee_size 4
 make sortition deterministic: every staker is always selected; quorum is 3.

@@ -270,7 +270,7 @@ uint256 PosSeedForChild(const CBlockIndex* pindexPrev)
     return ComputePosSeed(pindexPrev->m_anchor_hash, (uint32_t)(pindexPrev->nHeight + 1));
 }
 
-// --- VRF sortition (doc/sequentia/07-vrf.md §4) ---
+// --- VRF sortition (doc/sequentia/04-proof-of-stake.md §4) ---
 
 namespace {
 const unsigned char POS_VRF_TAG[6] = {'S', 'E', 'Q', 'V', 'R', 'F'};

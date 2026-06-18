@@ -6,7 +6,7 @@
 
 The VRF is the building block for private Proof-of-Stake sortition: a staker
 can produce a unique, pseudorandom, verifiable output for a slot seed that
-nobody else could have produced or predicted. See doc/sequentia/07-vrf.md.
+nobody else could have produced or predicted. See doc/sequentia/04-proof-of-stake.md.
 """
 
 from test_framework.test_framework import BitcoinTestFramework

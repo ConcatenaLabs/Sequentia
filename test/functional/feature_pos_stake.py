@@ -10,7 +10,7 @@ in the policy asset (explicit amount) adds its amount to the key's stake
 weight while unspent. The registry is a pure function of the UTXO set:
 mirrored on every tip connect/disconnect (reorg-safe) and rebuilt from the
 UTXO set at startup. Unbonding is the CSV-gated spend, enforced by the
-script — the paper's stake locktime. See doc/sequentia/06-proof-of-stake.md.
+script — the paper's stake locktime. See doc/sequentia/04-proof-of-stake.md.
 
 Scenario: staker A bootstraps the chain from the -staker config layer;
 key B acquires stake by locking coins on-chain, produces blocks, then
