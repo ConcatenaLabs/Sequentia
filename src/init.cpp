@@ -1373,7 +1373,12 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     // ELEMENTS:
     policyAsset = CAsset(uint256S(gArgs.GetArg("-feeasset", chainparams.GetConsensus().pegged_asset.GetHex())));
 
-    g_con_any_asset_fees = gArgs.GetBoolArg("-con_any_asset_fees", false);
+    // SEQUENTIA: default to the value the chain's params already set (the
+    // bundled PoS chains -- sequentia/test -- bake this on; custom chains leave
+    // it at the false default). Using a hard-coded false default here would
+    // clobber the chain's setting unless every operator also passed
+    // -con_any_asset_fees=1, silently disabling the open fee market on mainnet.
+    g_con_any_asset_fees = gArgs.GetBoolArg("-con_any_asset_fees", g_con_any_asset_fees);
     if (g_con_any_asset_fees) {
         // If fees can be paid in any asset, node operators need to be able to specify asset exchange
         // rates using either the static config file and/or the exchange rates RPCs.
