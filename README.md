@@ -34,24 +34,23 @@ Liquid. All four are implemented and tested:
    against long-range attacks. **The bundled Sequentia chain runs PoS by
    default**, bootstrapped from a genesis-seeded staking output with no
    `-staker` config (the staker set is entirely on-chain; see
-   [`13-launch-and-bootstrap.md`](doc/sequentia/13-launch-and-bootstrap.md)).
+   [`06-tokenomics-and-launch.md`](doc/sequentia/06-tokenomics-and-launch.md)).
    The signed-block "anyone-signs" path is the custom/regtest dev harness
    (`-con_pos=0`). — see
-   [`doc/sequentia/06-proof-of-stake.md`](doc/sequentia/06-proof-of-stake.md)
-   and [`07-vrf.md`](doc/sequentia/07-vrf.md).
+   [`doc/sequentia/04-proof-of-stake.md`](doc/sequentia/04-proof-of-stake.md).
 4. **Bitcoin-identical addresses, opt-in confidential transactions.** The
    default address format is Bitcoin's, so a wallet can present one receiving
    address for both chains; confidential transactions are opt-in with a
    distinct format (Liquid blinds by default). — see
-   [`doc/sequentia/08-addresses-and-ct.md`](doc/sequentia/08-addresses-and-ct.md).
+   [`doc/sequentia/01-architecture.md`](doc/sequentia/01-architecture.md).
 
 The full design specification, the codebase-base decision and its rationale,
-the implementation roadmap, and the new RPCs/options are in
-[`doc/sequentia/`](doc/sequentia/00-overview-and-base-decision.md) — start with
-[`00-overview-and-base-decision.md`](doc/sequentia/00-overview-and-base-decision.md).
+the implementation status, and the new RPCs/options are in
+[`doc/sequentia/`](doc/sequentia/00-overview.md) — start with
+[`00-overview.md`](doc/sequentia/00-overview.md).
 To stand up the full system end-to-end (validating node, fee price server,
 Bitcoin anchoring, and a single-host or distributed PoS committee), follow the
-operator runbook [`09-running-sequentia.md`](doc/sequentia/09-running-sequentia.md)
+operator manual [`05-operating-sequentia.md`](doc/sequentia/05-operating-sequentia.md)
 with the reference config in
 [`contrib/sequentia/`](contrib/sequentia/sequentia.conf.example).
 
@@ -161,7 +160,7 @@ still `liquidv1`, inherited from Elements — pass `-chain=` explicitly):
 Sequentia inherits Elements' asset issuance and Confidential Transactions
 machinery, with one deliberate difference: **confidential transactions are
 opt-in, not the default** (see
-[`doc/sequentia/08-addresses-and-ct.md`](doc/sequentia/08-addresses-and-ct.md)).
+[`doc/sequentia/01-architecture.md`](doc/sequentia/01-architecture.md)).
 Wallets hand out plain Bitcoin-format addresses by default — amounts and assets
 are public, exactly like Bitcoin — and users who want confidentiality request a
 confidential address explicitly (`getnewaddress "" "blech32"` or

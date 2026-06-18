@@ -1,190 +1,154 @@
-# Challenge 1 — Open ("no-coin") fee market
+# Open ("no-coin") fee market
 
-**Goal.** Any asset issued on Sequentia can be *offered* as a transaction fee.
-Proposing a fee in any asset is permissionless; inclusion is not. A transaction
-is included only if a block producer is willing to accept that asset **and** the
-rate at which the fee is posted. Each block producer independently decides which
-assets it accepts and at what relative value, then builds the most valuable block
-from transactions paying in those assets. **SEQ is not privileged here**: it is
-special only as the asset that unlocks block-production (staking), not for fees.
-For fees SEQ is just another asset — accepted 1:1 only as the *default* an
-unconfigured producer uses; a producer may re-price it (any rate), refuse it
-(rate 0), or designate a *different* asset as the 1:1 reference (e.g. USDT). Two
-configuration modes: a **static whitelist**, and a **dynamic whitelist**
-maintained by a local **price server**.
+Any asset issued on Sequentia can be offered as a transaction fee. Proposing a
+fee in a given asset is permissionless; *accepting* it is not. A transaction is
+included only if a block producer is willing to accept that asset **and** the
+rate at which the fee is posted. Each producer independently decides which assets
+it accepts and at what relative value, then builds the most valuable block it can
+from the transactions paying in those assets.
 
-## A. The static whitelist
+**SEQ holds no privileged fee status.** It is special only as the asset that
+unlocks block-production eligibility — staking (see
+[`04-proof-of-stake.md`](04-proof-of-stake.md)). For fees it is just another
+asset: accepted 1:1 only as the *default* an unconfigured producer uses. A
+producer may re-price SEQ at any rate, refuse it, or designate a different asset
+(for example a USD stablecoin) as the reference. The fee market is the design's
+lowest-risk property because it is entirely node-local policy and requires **no
+consensus change** ([§6](#6-why-no-consensus-change)).
 
-The static path works end-to-end on Elements' multi-asset plumbing. Summarised
-here so the dynamic work bolts on cleanly; see doc 01 §3 for detail.
+## 1. Reference-unit valuation
 
-- `ExchangeRateMap` singleton: `{CAsset → scaled rate}`, scale `COIN`, persisted
-  to `<datadir>/exchangerates.json`.
-- `CValue` reference-fee-atom (rfa) unit; mempool stores `nFeeAsset`+`nFeeValue`;
-  miner ranks by rfa; `RecomputeFees()` re-values the mempool on rate change.
-- RPCs `getfeeexchangerates` (read) and `setfeeexchangerates` (write + persist +
-  `RecomputeFees`).
-- Acceptance semantics: **an asset absent from the map values to 0 rfa**, so the
-  whitelist *is* the producer's acceptance set. A producer rejects an asset by
-  simply not listing it (or, below, by the price server not admitting it).
+Heterogeneous fees are made comparable by valuing each in a common abstract unit,
+the **reference fee atom (rfa)** — `CValue` in `src/policy/value.h`. A producer's
+acceptance and pricing live in the `ExchangeRateMap` singleton
+(`src/exchangerates.{h,cpp}`), a `{CAsset → rate}` table persisted to
+`<datadir>/exchangerates.json`. The substrate is described in
+[`01-architecture.md`](01-architecture.md); the valuation rule is:
 
-### Small gaps to close in the static path
+```
+reference_value(amount, asset) = amount × rate(asset) ÷ 100000000
+```
 
-1. **`blockmintxfee` / min-relay floors in rfa.** ✅ Audited: every floor is
-   compared in rfa for any-asset txs.
-   - Mempool acceptance (`MemPoolAccept::CheckFeeRate`, `src/validation.cpp`):
-     receives `ws.m_modified_fees`, which is converted to rfa via
-     `ConvertAmountToValue` when `g_con_any_asset_fees` is set, and compares it
-     against (a) the rolling mempool min fee — itself computed from rfa
-     aggregates (`GetModFeesWithDescendants().GetValue()` in
-     `CTxMemPool::TrimToSize`) — and (b) `-minrelaytxfee`.
-   - Mining (`src/node/miner.cpp`): `-blockmintxfee` vs
-     `packageFees.GetValue()` (rfa), including the discounted-CT path.
-   - RBF: `PaysMoreThanConflicts`/`PaysForRBF` compare rfa modified fees with
-     rfa conflicting fees and `incrementalrelayfee`.
-   - Prioritisation: `prioritisetransaction` deltas are applied in rfa to
-     `m_modified_fee` and the rfa ancestor/descendant aggregates, and survive
-     exchange-rate updates (`UpdateFeeValue` shifts `m_modified_fee`).
-   **Convention:** all configured floors (`-minrelaytxfee`, `-blockmintxfee`,
-   `-incrementalrelayfee`, prioritisation deltas) are denominated in rfa (the
-   abstract reference unit). By default the policy asset (SEQ) is valued 1:1 with
-   rfa, so a SEQ-atom floor equals an rfa floor out of the box — but that 1:1 is
-   only SEQ's default rate; a producer who re-prices SEQ (or pegs a different
-   asset to rfa) changes that equivalence, while the floors stay rfa-denominated.
-2. **Producer acceptance vs. relay.** The rate map serves as both the node's
-   relay policy *and* the producer's acceptance set. The distinction is noted for
-   later refinement (a node might relay assets it won't itself mine).
+The rate is an integer scaled by `COIN` (1e8):
 
-## B. The dynamic price server (implemented — see roadmap M2)
+| rate | meaning |
+|---|---|
+| `100000000` (1e8) | the asset is valued **1:1** with the reference unit |
+| `> 1e8` | the asset is worth **more** than the reference per atom |
+| `< 1e8` | the asset is worth **less** per atom (a "cheap" asset) |
+| `0` | the asset is **explicitly refused** |
 
-### B.1 Responsibilities
+An asset **absent** from the map values to `0` rfa — i.e. not accepted — so the
+table *is* the producer's acceptance set. The one exception is the policy asset,
+SEQ, which is valued 1:1 when unlisted; that default is overridable by listing it
+with any rate (including `0` to refuse it).
 
-A locally-run component that:
+Mempool entries carry `nFeeAsset` and `nFeeValue` (the rfa value); the miner
+(`src/node/miner.cpp`) ranks packages by rfa value, and `RecomputeFees()`
+re-values the mempool whenever rates change.
 
-1. Periodically queries operator-designated **external APIs** (CEX REST
-   endpoints, DEX oracles) for per-asset market data: price (vs. the rfa
-   reference), market cap, 24h volume, volatility, etc.
-2. Applies operator-defined **admission thresholds** to decide which assets
-   belong on the dynamic whitelist (e.g. "admit if mcap > $50M **and** 24h vol >
-   $1M **and** 30d volatility < 80%").
-3. Computes each admitted asset's **rate** (atoms-per-rfa, scaled by `COIN`) from
-   its price relative to the reference unit.
-4. Pushes the resulting `{asset → rate}` into the node, which merges it with the
-   static entries, persists, and calls `RecomputeFees()`.
+## 2. Per-producer acceptance: static and dynamic layers
 
-### B.2 Where it runs — design choice
+A producer configures acceptance two ways, and the effective table is their
+merge (an explicit static entry takes precedence over a dynamic one):
 
-Two viable shapes; Sequentia adopts **(1)** for isolation and operator safety,
-with a clean interface so **(2)** remains possible later.
+- **Static whitelist** — a fixed `{asset → rate}` table set with
+  `setfeeexchangerates` and read with `getfeeexchangerates`. Writing it persists
+  the table and calls `RecomputeFees()`.
+- **Dynamic whitelist** — a layer maintained by a locally-run **price server**
+  ([§5](#5-the-dynamic-price-server)) that admits assets and computes rates from
+  live market data, pushed in via `setdynamicfeerates`.
 
-1. **Out-of-process sidecar** (the chosen shape). A standalone program
-   (Python or Rust) that the operator runs alongside `sequentiad`. It owns all
-   outbound HTTP to exchanges, applies thresholds, and feeds the node through a
-   new authenticated RPC. *Pros:* keeps third-party HTTP, API keys and parsing
-   out of the consensus daemon; independently restartable; testable in isolation;
-   no new outbound-network attack surface in `sequentiad`. *Cons:* an extra
-   process to run.
-2. **In-process price-feed thread.** A scheduler thread inside `sequentiad`
-   (mirroring how `mainchainrpc` reaches out). *Pros:* single binary. *Cons:*
-   pulls HTTP clients, JSON-from-the-internet parsing and credentials into the
-   node; larger attack surface; harder to sandbox.
+`getfeeacceptancepolicy` returns the effective acceptance set with per-asset
+provenance (static or dynamic). The operator-facing setup — listing assets,
+running the price server, and constructing transactions that pay fees in a chosen
+asset — is in [`05-operating-sequentia.md`](05-operating-sequentia.md).
 
-### B.3 Node-side interface (new RPCs)
+## 3. Paying fees in an arbitrary asset
 
-The sidecar drives the node through new RPCs registered next to the existing
-`exchangerates` category (`src/rpc/exchangerates.cpp`):
+A wallet holding **zero SEQ** can transact entirely in another asset, provided a
+producer prices that asset. The fee is paid in the chosen asset and the resulting
+transaction's fee output is denominated in that asset, not SEQ. The wallet flow
+(`assetlabel` for the asset sent, `fee_asset_label` for the fee asset) and worked
+commands are in [`05-operating-sequentia.md`](05-operating-sequentia.md) §4. On-chain
+stake-registration transactions and ordinary asset transfers both relay under
+default policy.
+
+## 4. Fee floors and replacement, in reference units
+
+Every configured fee floor is denominated in the reference unit, so the mempool
+and miner treat all assets uniformly. Because SEQ defaults to 1:1 with rfa, a
+SEQ-atom floor equals an rfa floor out of the box; a producer that re-prices SEQ
+or pegs a different asset to the reference changes that equivalence while the
+floors stay rfa-denominated.
+
+- **Mempool acceptance** (`MemPoolAccept::CheckFeeRate`) compares the
+  rfa-converted modified fee against the rolling mempool minimum (itself an rfa
+  aggregate) and `-minrelaytxfee`.
+- **Mining** (`-blockmintxfee`) compares against the package's rfa value,
+  including the discounted-CT path.
+- **Replacement (RBF)** compares a replacement's fee against the conflicts it
+  evicts **in reference value**, plus `-incrementalrelayfee`. A replacement may
+  pay its fee in a *different* asset than the original (`bumpfee` accepts a
+  `fee_asset`); it is accepted only if its rfa value genuinely exceeds the
+  original's. A replacement that pays a larger *raw* amount of a cheaper asset but
+  a smaller reference value is correctly rejected.
+- **Child-pays-for-parent (CPFP)** works across assets: a child spending an
+  unconfirmed parent contributes its rfa fee to the package's rfa rate.
+- **The absurd-fee ceiling** (`-maxtxfee`, and `testmempoolaccept`'s
+  `maxfeerate`) is also evaluated in reference value, so a fee paid in a
+  low-per-unit-value asset is not spuriously rejected for a large raw amount.
+- **Prioritisation** (`prioritisetransaction`) deltas apply in rfa and survive
+  rate updates.
+
+The operator how-tos for RBF and CPFP with asset fees are in
+[`05-operating-sequentia.md`](05-operating-sequentia.md) §5.
+
+## 5. The dynamic price server
+
+The dynamic layer is a locally-run sidecar (`contrib/price-server/`) — a
+standalone program the operator runs alongside the node. Keeping it out of the
+consensus daemon isolates third-party HTTP, API keys, and JSON parsing from the
+node and keeps that outbound-network surface out of `sequentiad`; the sidecar is
+independently restartable and testable.
+
+It periodically queries operator-designated external APIs (exchange endpoints,
+DEX oracles) for per-asset market data, applies operator-defined **admission
+thresholds** (e.g. market cap, 24h volume, volatility), computes each admitted
+asset's rate from its price relative to the reference unit, and pushes the
+resulting `{asset → rate}` table into the node. It drives the node through RPCs
+registered alongside `setfeeexchangerates` (`src/rpc/exchangerates.cpp`):
 
 | RPC | Purpose |
 |---|---|
-| `setdynamicfeerates {asset: rate, …}` | Replace the **dynamic** layer of the rate map (distinct from the static layer set by `setfeeexchangerates`), persist, `RecomputeFees()`. |
-| `getdynamicfeerates` | Return the current dynamic layer with metadata (source, age). |
-| `getfeeacceptancepolicy` | Return effective acceptance set = static ∪ dynamic, with provenance per asset. |
-| `cleardynamicfeerates` | Drop **all** dynamic entries (e.g. on sidecar shutdown). |
+| `setdynamicfeerates {asset: rate, …}` | Replace the dynamic layer, persist, `RecomputeFees()`. |
+| `getdynamicfeerates` | Return the dynamic layer with metadata (source, age). |
+| `getfeeacceptancepolicy` | Return the effective set (static ∪ dynamic) with provenance. |
+| `cleardynamicfeerates` | Drop all dynamic entries (e.g. on sidecar shutdown). |
 
-Internally this means **layering** the `ExchangeRateMap`: a `static` map and a
-`dynamic` map with a defined precedence (proposed: explicit static entry wins;
-otherwise dynamic; effective map = merge). This avoids the price server clobbering
-a value the operator pinned by hand. Add a per-entry `source` + `updated_at` so
-staleness can be enforced (a dynamic rate older than `-dynfeeratemaxage` is
-dropped, failing safe to "not accepted").
+The reference unit is anchored to a chosen value (for example a USD-equivalent
+stablecoin) so rates are meaningful; the choice is operator policy, not
+consensus. Safety rules keep a producer from mining against bad data:
 
-### B.4 Sidecar internals (`contrib/price-server/`)
-
-As implemented, the sidecar is a single stdlib-only script plus a JSON config
-(the original design sketched a package layout; the same responsibilities live
-in one file):
-
-```
-price-server/
-  config.example.json  # API endpoints, asset map, thresholds, poll interval,
-                       # node RPC creds, reference-unit definition
-  price_server.py      # source adapters (coingecko + generic JSON API),
-                       # admission thresholds, price -> rate math,
-                       # setdynamicfeerates publisher, poll loop
-```
-
-Original design config sketch (the implemented config is `config.example.json` with the same fields):
-
-```toml
-poll_interval_secs = 60
-reference = { asset = "USDT", label = "rfa-usd" }   # rfa pegged to 1 USD-equiv
-
-[node_rpc]
-host = "127.0.0.1"; port = 18776; cookie = "~/.sequentia/.cookie"
-
-[[asset]]
-label   = "USDT"
-id      = "b2e15d0d...f0f23"
-sources = ["binance:USDTUSD", "coingecko:tether"]
-[asset.thresholds]
-min_market_cap_usd = 50_000_000
-min_volume_24h_usd = 1_000_000
-max_volatility_30d = 0.80
-```
-
-### B.5 Rate computation & the reference unit
-
-The rfa unit needs an anchor so rates are meaningful. The reference choice:
-define rfa as a **USD-equivalent** atom (e.g. rfa pegged to a chosen
-stablecoin/oracle). Then for
-asset `A` priced `price_A` (reference-per-whole-unit) with `d` decimals:
-
-```
-rate_A (scaled, atoms-per-rfa) = round( exchange_rate_scale / (price_A in rfa per atom) )
-```
-
-The exact formula and rounding/saturation live next to
-`ExchangeRateMap::ConvertAmountToValue` and must be unit-tested for the
-`INT64_MAX` saturation edge already handled there. The reference choice is an
-operator policy, **not** consensus — different producers may use different
-references; consensus only validates that *included* fees were really paid.
-
-### B.6 Safety / sanity rules
-
-- **Staleness fail-safe:** dynamic rate older than max-age ⇒ dropped ⇒ asset not
-  accepted (never silently keep mining a dead price).
-- **Sanity clamps:** reject implausible jumps (e.g. > Nx between polls) and
-  near-zero rates that would let dust pay for blockspace.
-- **Source quorum:** require agreement across ≥ k sources before admitting, to
-  blunt a single compromised/oddball API.
-- **Operator override:** a statically-pinned asset is never overridden by the
+- **Staleness fail-safe** — a dynamic rate older than `-dynfeeratemaxage` is
+  dropped, so a dead price server fails closed to "not accepted" rather than
+  honouring stale rates.
+- **Sanity clamps** — implausible inter-poll jumps and near-zero rates (which
+  would let dust buy blockspace) are rejected.
+- **Source quorum** — agreement across multiple sources before admitting an
+  asset blunts a single compromised API.
+- **Operator override** — a statically pinned asset is never overridden by the
   dynamic layer.
 
-### B.7 Why this needs **no consensus change**
+The reference-unit rate math lives next to `ExchangeRateMap::ConvertAmountToValue`
+/ `ConvertValueToAmount` and handles the `INT64_MAX` saturation edge. Running and
+configuring the price server is covered in
+[`05-operating-sequentia.md`](05-operating-sequentia.md).
 
-Fee valuation is **node-local policy**: it decides what a producer *chooses* to
+## 6. Why no consensus change
+
+Fee valuation is node-local policy: it decides what a producer *chooses* to
 include, not what the network considers valid. Consensus only checks that the
-fees declared in a block were actually paid by its transactions (in whatever
-asset). So the price server is purely a policy/mempool/mining concern and is safe
-to iterate on without forking the chain — a key reason challenge 1 is the
-low-risk starting point.
-
-## C. Test strategy
-
-- Unit: rate math + saturation (`ConvertAmountToValue/ValueToAmount`); layered
-  map precedence; staleness drop; threshold predicate.
-- Functional (`test/functional/`): two-asset chain; submit txs paying fees in
-  asset B; `setdynamicfeerates` admits B; assert miner includes B-fee txs ranked
-  by rfa; assert dropping B's rate evicts/deprioritises them via `RecomputeFees`.
-- Sidecar: mock API server; assert admission/withdrawal across threshold
-  crossings; assert node RPC calls.
+fees declared in a block were actually paid by its transactions, in whatever
+asset. A producer's acceptance set and the price server are therefore purely a
+policy, mempool, and mining concern, and can be tuned without forking the chain.
