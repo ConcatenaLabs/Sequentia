@@ -149,6 +149,26 @@ node reorganizes **if and only if** the parent reorganizes away a referenced blo
 `getanchorstatus`. This is what gives immediate finality and friction-free
 cross-chain atomic swaps against native BTC.
 
+### Cross-chain atomic swaps
+
+A BTC<->asset swap is a standard hash-time-locked contract (HTLC): both legs are
+locked to `H = sha256(secret)`; redeeming one leg publishes the secret that
+unlocks the other, and each side can refund after its CLTV timeout if the
+counterparty stalls. For a self-contained, runnable demonstration (it spins up a
+"BTC" chain and a Sequentia chain, runs a full swap and the refund path, then
+cleans up):
+
+```
+python3 contrib/sequentia/swap-demo.py
+```
+
+What makes the swap *real-time* on Sequentia is the anchoring property, not the
+HTLC: because a Sequentia block is final iff the Bitcoin block it anchors
+survives, a reorg of the BTC leg reorganizes the SEQ leg with it, so the swap
+needs **no extra reorg-protection timelock** beyond Bitcoin's own confirmation
+wait (doc 03). That consistency property is exercised by
+[`test/functional/feature_anchor_swap_consistency.py`](../../test/functional/feature_anchor_swap_consistency.py).
+
 ## 6. Running a Proof-of-Stake producer
 
 A staker in the configured set produces a block when its VRF sortition slot
