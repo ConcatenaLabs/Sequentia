@@ -84,8 +84,13 @@ Three liveness/safety rules sit alongside the happy path:
 ## 2. Component architecture
 
 Four new pieces, all node-local, behind a `-posproducer` (run the engine) and
-`-posgossip` (relay/participate in committee messages) split so a pure validator
-can relay committee traffic without producing:
+`-posgossip` (relay committee messages) split so a pure validator can relay
+committee traffic without producing. **`-posgossip` defaults on**: every full
+node relays committee traffic by default, which densifies propagation and
+strengthens liveness/convergence, while the eligibility gate (§9) keeps the added
+surface bounded (a node only relays messages from provably-eligible committee
+members). `-posproducer` is off unless the operator stakes and opts in. An
+operator may set `-posgossip=0` to stay quiet.
 
 ```
             ┌──────────────────────────────────────────────┐
@@ -210,19 +215,37 @@ predictable, which is the anti-grinding property):
 The paper is explicit and minimal: **no NTP, no network-adjusted time.** Each
 validator counts local time from the last certified block it received.
 
-- **Lower bound `n`** (the slot interval): a member will not countersign a
-  proposal until `n` seconds have elapsed on its local clock since the previous
-  certified block. This is the anti-fast-frequency floor. The current code uses
-  `-posslotinterval = 30`; the paper's worked target is ~90 s. *Decision point
-  (§13):* which target, and whether it is fixed or auto-adjusted toward a target
-  the way Bitcoin retargets difficulty.
-- **Leader-rank stagger `k·δ`.** The rank-0 leader may propose first; a rank-*k*
-  backup waits an extra `k·δ` before proposing, so backups only fill in when the
-  primary is silent. This keeps the common case to a single proposal.
-- **Upper-bound timeout `T`.** If a proposal has not gathered 51 votes within `T`
-  of the last certified block, the engine begins **round-robin re-voting** on the
-  proposal store (P6 step 9), incrementing a round-robin index that namespaces
-  the votes.
+- **Lower bound `n` = 30 s** (the slot interval, `-posslotinterval`): a member
+  will not countersign a proposal until `n` seconds have elapsed on its local
+  clock since the previous certified block — the anti-fast-frequency floor. This
+  is **fixed at 30 s, not the paper's ~90 s UX target**, because the slot is not
+  a free parameter: it is pinned by the ledger-growth-parity invariant. The block
+  weight cap (`-con_maxblockweight = 200,000`) is chosen so that a saturated
+  Sequentia ledger grows at exactly Bitcoin's saturated rate —
+  `200,000 / 30 s = 4,000,000 / 600 s`. Changing the slot would break that
+  equality unless the weight cap were re-derived in lockstep, so `n` and the
+  weight cap move together and `n` stays at 30 s.
+- **Leader-rank stagger `k·δ`, `δ` = 3 s (default).** The rank-0 leader proposes
+  at the slot boundary; a rank-*k* backup waits an extra `k·δ` and proposes only
+  if it has seen no valid lower-rank proposal, so backups fill in just for missing
+  leaders and the common case stays a single proposal. `δ` = 3 s is a few times
+  the network-propagation time of a ≤200,000-weight block under compact relay
+  (sub-second to ~1–2 s), so a backup reliably observes the primary's proposal
+  before competing, while still absorbing several missing leaders well inside the
+  round-robin window below.
+- **Upper-bound timeout `T` ≈ 45 s (default, ≈ 1.5 · n).** If no proposal has
+  gathered 51 shares within `T` of the last certified block, the engine begins
+  **round-robin re-voting** on the proposal store (P6 step 9), incrementing a
+  round-robin index that namespaces the votes. `T − n` ≈ 15 s ≈ 5 · δ absorbs on
+  the order of five missing/forked leaders plus share propagation before the
+  recovery path engages. Round-robin is the *fast* recovery (seconds); the
+  *slow* recovery, escaping-stall sub-quorum certification, only becomes
+  available once the Bitcoin anchor has advanced +3 (≈ 30 min of Bitcoin), so the
+  two operate on very different timescales.
+
+`n`, `δ`, and `T` are local-clock heuristics, **not** consensus-enforced (the
+paper, P10), so they are configurable defaults; only the 30 s floor is tied to a
+consensus parameter (the weight cap) and should not drift from it.
 - **Anchor reshuffle (P7).** On learning of a new Bitcoin block not referenced by
   the parent, an eligible node may propose a fresher-anchored block; its VRF is
   compared under an **anchor-weighting coefficient** that favours the fresher
@@ -394,12 +417,14 @@ for the single-host/coordinator path. Pixel / protocol-level forward security is
 checkpoint system (2016-confirmation consolidation) together with a stake
 locktime that exceeds the checkpoint depth.
 
-**Still open:**
+**Resolved — timing (§6).** The slot stays **`-posslotinterval = 30 s`**, fixed
+by the ledger-growth-parity invariant (`200,000 weight / 30 s = 4,000,000 / 600
+s`), superseding the paper's ~90 s UX figure. Leader-rank stagger **`δ` = 3 s**
+and round-robin timeout **`T` ≈ 45 s (≈ 1.5 · n)** as local-clock defaults.
 
-1. **Slot target.** Keep `-posslotinterval = 30 s`, or move toward the paper's
-   ~90 s; fixed or retargeted toward a moving average.
-2. **Leader-rank stagger `δ`** and the upper-bound timeout `T` (their ratio sets
-   how aggressively backups and round-robin kick in).
-3. **Validator participation default.** Should a non-staking full node relay
-   committee gossip by default (`-posgossip` on) to strengthen propagation, or
-   stay quiet unless it produces?
+**Resolved — gossip default (§2).** **`-posgossip` defaults on**: every full node
+relays committee traffic, bounded by the eligibility gate; producing
+(`-posproducer`) remains opt-in.
+
+All design decisions for the autonomous committee are now settled; the remaining
+work is implementation per the phased plan (§12).
