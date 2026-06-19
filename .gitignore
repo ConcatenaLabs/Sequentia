@@ -110,7 +110,9 @@ qrc_*.cpp
 
 # Mac specific
 .DS_Store
-build
+# Top-level build/ only — must NOT match the vendored src/blst/build/ assembly,
+# which is required to compile libblst.a (see src/blst/SEQUENTIA-VENDOR.md).
+/build
 
 # Previous releases
 releases
