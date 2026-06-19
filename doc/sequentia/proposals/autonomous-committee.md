@@ -485,15 +485,26 @@ assembly and acceptance.
      window let an early proposer sign before others' proposals arrived, splitting
      shares; the stagger was removed (the window + lowest-VRF convergence already
      resolve multiple proposers).
+   - **Decentralised aggregation**: the leader signs its block hash and ships that
+     signature *in* the proposal, so any node that gathers a quorum assembles and
+     submits (competing assemblies share the block hash, so duplicates are
+     dropped). No single aggregator can stall a round — a leader that proposes
+     then withholds or crashes is covered by another node.
+   - **Validate before backing**: a proposal is fully validated (TestBlockValidity)
+     before it is signed. Since the per-height leader is fixed by the slot seed, an
+     invalid block from the lowest-VRF leader would otherwise be signed, fail to
+     assemble, and stall that height permanently; instead the committee converges
+     on the lowest-VRF *valid* leader.
 
-   Remaining: the **P7 anchor-reshuffle** signing preference and an explicit **P6
-   round-robin index** for a *Byzantine* (present-but-withholding) leader — the
-   reset-based recovery handles a crashed leader but re-converges on a withholding
-   one; and tuning for very large committees/networks: the ~26 KB certificate at
-   100 members (cap/weight sizing) and proposal-flood reduction now that every
-   eligible node proposes per round (a window-coordinated stagger, or
-   compact/inv-style proposal relay, would bound it without the convergence
-   hazard).
+   Together, decentralised aggregation (withholding/crashed leader) and
+   validate-before-backing (invalid leader) close the Byzantine-leader liveness
+   cases, so no explicit P6 round-robin index is needed. Remaining: the **P7
+   anchor-reshuffle** signing preference, and tuning for very large
+   committees/networks — the ~26 KB certificate at 100 members (cap/weight
+   sizing), per-proposal validation cost on the message thread, and proposal-flood
+   reduction now that every eligible node proposes per round (a window-coordinated
+   stagger or inv/getdata-style proposal relay would bound it without the
+   convergence hazard).
 
    **Not a goal — stake slashing.** Unlike economic-finality PoS (where slashing
    *is* the finality guarantee — reverting must burn ≥⅓ of stake), Sequentia's
