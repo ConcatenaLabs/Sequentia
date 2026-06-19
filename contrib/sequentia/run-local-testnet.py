@@ -140,6 +140,9 @@ def main():
     ap.add_argument("--parent-rpcpassword", default="")
     ap.add_argument("--parent-genesis", default="",
                     help="parent genesis block hash (Bitcoin testnet3: %s)" % BITCOIN_TESTNET3_GENESIS)
+    ap.add_argument("--anchorpoll", type=int, default=0,
+                    help="seconds between parent-chain polls per node (0 = slot/2). Raise it "
+                         "for a big committee against a shared/public parent to avoid rate limits.")
     ap.add_argument("--no-anchor", action="store_true", help="disable anchoring entirely (not mainnet-faithful)")
     ap.add_argument("--stop", action="store_true", help="stop a network previously started in --basedir")
     ap.add_argument("--run-seconds", type=int, default=0, help="auto-stop after N seconds (0 = run until Ctrl-C)")
@@ -196,7 +199,7 @@ def main():
         parent_miner = (pdir, p_rpc, addr)
         anchor_lines = [
             "con_bitcoin_anchor=1", "validateanchor=1", "anchorminconf=1",
-            "anchorpollinterval=%d" % max(2, args.slot // 2),
+            "anchorpollinterval=%d" % (args.anchorpoll or max(2, args.slot // 2)),
             "mainchainrpchost=127.0.0.1", "mainchainrpcport=%d" % p_port_rpc,
             "mainchainrpcuser=%s" % p_user, "mainchainrpcpassword=%s" % p_pw,
             "parentgenesisblockhash=%s" % parent_genesis,
@@ -208,7 +211,7 @@ def main():
         parent_genesis = args.parent_genesis
         anchor_lines = [
             "con_bitcoin_anchor=1", "validateanchor=1", "anchorminconf=1",
-            "anchorpollinterval=%d" % max(2, args.slot // 2),
+            "anchorpollinterval=%d" % (args.anchorpoll or max(2, args.slot // 2)),
             "mainchainrpchost=%s" % args.parent_rpchost,
             "mainchainrpcport=%d" % args.parent_rpcport,
             "mainchainrpcuser=%s" % args.parent_rpcuser,
