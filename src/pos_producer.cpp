@@ -847,6 +847,23 @@ PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& blo
             return PosGossipAction::Invalid;
         }
     }
+    // Validate the block fully before backing it: we sign its hash, attesting to
+    // it, and assemble it once a quorum signs. The per-height leader is fixed by
+    // the slot seed, so without this an invalid block from the lowest-VRF leader
+    // would be signed, fail to assemble, and stall that height permanently rather
+    // than the committee routing to the lowest *valid* leader. The proposal's
+    // staging solution is ignored here (signature checks are off; the BLS
+    // certificate is absent, so CheckPosStakeRules' committee branch is skipped).
+    {
+        LOCK(cs_main);
+        CBlockIndex* tip2 = m_chainman.ActiveChain().Tip();
+        if (!tip2 || block->hashPrevBlock != tip2->GetBlockHash()) return PosGossipAction::Ignore; // tip moved
+        BlockValidationState state;
+        if (!TestBlockValidity(state, m_chainparams, m_chainman.ActiveChainstate(), *block, tip2,
+                               /*fCheckPOW=*/false, /*fCheckMerkleRoot=*/true)) {
+            return PosGossipAction::Invalid;
+        }
+    }
     bool recorded;
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
