@@ -907,6 +907,13 @@ PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& blo
             return PosGossipAction::Invalid;
         }
     }
+    // Drop a leader's repeat/equivocating proposal BEFORE the costly full
+    // validation: first-seen wins, so a leader that already has a candidate this
+    // round cannot make us run TestBlockValidity on a flood of further blocks.
+    {
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        if (m_round_height == height && m_candidates.count(parts->leader)) return PosGossipAction::Ignore;
+    }
     // Validate the block fully before backing it: we sign its hash, attesting to
     // it, and assemble it once a quorum signs. The per-height leader is fixed by
     // the slot seed, so without this an invalid block from the lowest-VRF leader
