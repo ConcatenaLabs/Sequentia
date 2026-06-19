@@ -1,11 +1,13 @@
 # Design proposal — the autonomous gossip-and-sign committee
 
-> **Status: proposal / RFC, not implemented.** This document specifies the
-> design for Sequentia's autonomous (coordinator-free) Proof-of-Stake committee.
-> It is a planning artifact, distinct from the as-built specification in
+> **Status: RFC; Phase 1 implemented.** This document specifies the design for
+> Sequentia's autonomous (coordinator-free) Proof-of-Stake committee. It is a
+> planning artifact, distinct from the as-built specification in
 > [`../04-proof-of-stake.md`](../04-proof-of-stake.md). Where it proposes a
 > change to a shipped mechanism (notably the signature scheme, §7) that is
-> called out explicitly.
+> called out explicitly. **Phase 1 (the autonomous producer thread) is built and
+> tested** (`src/pos_producer.*`, `-posproducer`); Phases 2–4 (committee gossip,
+> BLS aggregation, hardening) remain proposal. See §12 for status.
 
 ## 0. Where we are and what this closes
 
@@ -411,10 +413,15 @@ assembly and acceptance.
 
 ## 12. Phased delivery
 
-1. **Engine + self-eligibility + proposal gossip (happy path, committee = 1).**
-   A single eligible node detects leadership, proposes, and certifies via the
-   escaping-stall/sub-quorum path — fully autonomous, no signing committee yet.
-   Proves the thread, the clock, sortition, `posproposal`, and the accept path.
+1. **Engine + self-eligibility + autonomous production (committee ≤ 1).**
+   ✅ *Implemented* (`src/pos_producer.{h,cpp}`, `-posproducer`/`-posproducerkey`;
+   test `feature_pos_autonomous_producer.py`). A node with one or more staking
+   keys elects the best-ranked key each round, waits out the slot clock (with the
+   soft cadence floor), and assembles/signs/submits a block with no coordinator;
+   the produced blocks propagate and validate via the normal block-relay path, so
+   no new wire message is needed at this phase. The shared `ProducePosBlock()`
+   core also backs `generateposblock`. Proves the thread, the clock, sortition,
+   and the accept path.
 2. **Voting + aggregation to 51/100.** Add `posvote`, the chosen
    signature-share gossip (§7), and certificate assembly. Multi-node committee
    produces threshold-certified blocks with no coordinator.
