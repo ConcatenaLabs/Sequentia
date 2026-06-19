@@ -83,10 +83,14 @@ eligibility, the aggregate signature, the anchor, and the finality gate.
 
 - **Escaping-stall down to a single signer**, including genesis→block-1, is the
   intended bootstrap: a lone genesis founder must be able to certify blocks until
-  others stake. Competing sub-threshold blocks are resolved deterministically by
-  the fork choice; the economic backstop against short-range equivocation is the
-  checkpoint depth (`-poscheckpointdepth`) — there is no slashing, so
-  nothing-at-stake is bounded, not eliminated.
+  others stake. At a full majority quorum, immediate finality is fork-free because
+  the committee **excludes any equivocating leader** (Liveness theorem 1; see
+  `proposals/autonomous-committee.md` §12.4), so an equivocator's blocks never
+  reach 51. In the *relaxed* escaping-stall mode the quorum protection is
+  intentionally weakened, so competing sub-threshold blocks are instead resolved
+  deterministically by the fork choice, with the checkpoint depth
+  (`-poscheckpointdepth`) as the long-range backstop — there is no slashing, and
+  none is needed for safety.
 - **Anchor R3 (Bitcoin best-chain membership) is a soft, eventually-consistent
   gate**, not hard consensus: view-dependent results are classified
   `BLOCK_RECENT_CONSENSUS_CHANGE` (non-banning, retryable), so an honest node with

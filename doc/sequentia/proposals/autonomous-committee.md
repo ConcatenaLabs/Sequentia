@@ -496,17 +496,19 @@ assembly and acceptance.
      assemble, and stall that height permanently; instead the committee converges
      on the lowest-VRF *valid* leader.
 
-   - **Deterministic round-robin** (P6 §9, `feature_pos_gossip_byzantine.py`):
-     every eligible member proposes once per height, so the candidate set (hence
-     the leader order) is complete and common; the round index is derived from the
-     aligned clock, and round *r* backs the (r+1)-th lowest-VRF candidate. A round
-     that does not certify within `ROUND_MS` advances all honest nodes to the next
-     leader *in lockstep*, deterministically excluding the failed one. This closes
-     the residual case the recovery-reset only handled probabilistically: a
-     present-but-faulty leader that equivocates into a sub-quorum split or
-     withholds. Verified with a fault injector (`-posbyzantineequivocate`): a
-     committee with a Byzantine equivocating member keeps advancing, certifying at
-     rounds 1–2 (the round-robin actively excluding the leader).
+   - **Equivocator exclusion** (P6 / Liveness theorem 1, `feature_pos_gossip_byzantine.py`):
+     on seeing a leader's second, conflicting block, honest nodes exclude that
+     leader for the height (backing *neither* of its blocks) and relay the block as
+     evidence, so all converge on the next-lowest valid leader. This is what keeps
+     immediate finality fork-free at a majority quorum (see "Quorum" below). The
+     fault injector (`-posbyzantineequivocate`) confirms a Byzantine equivocating
+     leader is excluded at every height and the honest nodes never diverge.
+   - **Deterministic round-robin** (P6 §9): every eligible member proposes once per
+     height, so the candidate/leader order is complete and common; round *r* (a
+     clock-derived index) backs the (r+1)-th lowest-VRF candidate. A round that
+     does not certify within `ROUND_MS` advances all honest nodes to the next
+     leader *in lockstep* — handling a leader that *withholds* (proposes validly
+     then never helps assemble) where exclusion does not apply.
 
    Remaining: the **P7 anchor-reshuffle** signing preference, and tuning for very
    large committees/networks — the ~26 KB certificate at 100 members (cap/weight
@@ -515,56 +517,58 @@ assembly and acceptance.
    announcement so only the elected leader sends a full block, or inv/getdata-style
    proposal relay, would bound it without the convergence hazard).
 
-   **Quorum — a strict majority (51/100), by design, not 2/3.** A block certifies
-   on a simple-majority quorum. Why a majority is correct, and where its limits
-   are, both matter:
+   **Quorum — a strict majority (51/100), and fork-free by leader exclusion, not 2/3.**
+   The certification quorum is a simple majority, exactly as the Theoretical Paper
+   specifies (Principle 6) — and the paper deliberately rejects a 2/3 threshold,
+   because "maximising persistence also stalls blocks if the 2/3rd threshold is
+   unmet because some participants are [offline]" (§i.5). Immediate finality is
+   nonetheless **fork-free under the paper's model** (a simple majority of honest,
+   active members + the slot's synchrony), via **equivocator exclusion**, not via
+   any fork "resolving later":
 
-   - *How a majority quorum can fork.* Two majorities of one committee of size *n*
-     must overlap, so two conflicting blocks can each reach a quorum only if the
-     overlap members double-sign. The minimum such equivocators is `2q − n` with
-     `q = ⌊n/2⌋+1`: **one** when *n* is odd, **two** when *n* is even. (And since
-     the quorum is fixed at a majority of the *expected* size, if the actual
-     sortitioned set ever reaches `2q` members, two *disjoint* quorums fit and a
-     mere partition forks the height with no equivocation at all.) There is no
-     member-level equivocation guard (share dedup is per (block, member)), so this
-     is reachable by a Byzantine member. It is a **transient** fork: fork choice
-     plus the Bitcoin-anchored checkpoint resolve it (the anchored branch wins,
-     irreversibly after consolidation) — a bounded reorg, not a permanent safety
-     break, consistent with deriving hard finality from Bitcoin, not the committee.
-
-   - *Why not 2/3.* A two-thirds quorum would make the committee Byzantine-safe
-     (no fork below ⌊(n−1)/3⌋ equivocators) — but that safety is **redundant** here
-     (the checkpoint already resolves forks) and it is **ruinous for liveness**.
-     The quorum must be reachable by whoever is online; the only fallback when it
-     is not is escaping-stall (§5), which permits a sub-quorum block *only when the
-     Bitcoin anchor has advanced ≥ 3 blocks* (~30 min). So a missed quorum drops
-     the chain to the anchor-gated ~30-min cadence. A 51% threshold is met whenever
-     live participation exceeds ~51% (almost always), so escaping-stall is rare; a
-     67% threshold misses quorum as soon as participation dips toward two-thirds —
-     routine with offline stakers, sortition variance, and latency — forcing
-     constant escaping-stalls and collapsing the fast sidechain to Bitcoin's pace.
-     This is what the Theoretical Paper's participation tables show: the
-     probability of assembling the threshold falls off sharply as it approaches the
-     participation rate. **Decision: 51/100 is retained; 2/3 is rejected on
-     liveness grounds.** Majority quorum gives fast liveness; the Bitcoin checkpoint
-     gives hard safety.
+   - *The would-be fork.* Two majorities of a committee of size *n* must overlap,
+     so two conflicting blocks could each reach a quorum only if the overlap
+     members double-sign — at least `2q − n = 1` (odd *n*) or `2` (even *n*)
+     equivocators (with `q = ⌊n/2⌋+1`).
+   - *Why it cannot happen (Liveness theorem 1 / P6).* Honest nodes collect
+     proposals for the slot window, back the **lowest-VRF *valid*** one, and
+     **exclude any leader that proposes two blocks** — backing *neither* and
+     relaying the conflicting block as evidence so every honest node converges on
+     the next-lowest valid leader. So an equivocator's blocks gather only the
+     dishonest minority (< 51) and never certify; exactly one block reaches 51 and
+     is locked final. Implemented in `OnProposal` (`m_equivocators`) and verified
+     in `feature_pos_gossip_byzantine.py` (a Byzantine equivocating leader is
+     excluded at every height and the honest nodes never diverge). This is why a
+     majority quorum is *safe* without a member-level cryptographic guard: the
+     guard is at the consensus layer (exclude the equivocator), not the signature.
+   - *The residual, and why it's the right trade.* The above relies on synchrony —
+     the window must let the evidence propagate before signing. The ~30 s slot
+     makes that strong (propagation ≪ slot). An adversary who partitions a
+     *majority* of the committee for a whole slot could split it; that is the
+     accepted limit of a majority quorum, and the only alternative — 2/3 — is
+     rejected for the liveness reason above (it would force constant anchor-gated
+     escaping-stalls whenever participation dips toward two-thirds). Beyond that,
+     a finalized block changes only if **Bitcoin reorgs its anchor** — Bitcoin is
+     the security root. **Decision: 51/100 retained; equivocators excluded at the
+     consensus layer; 2/3 rejected (per the paper).**
 
    **Not a goal — stake slashing.** Unlike economic-finality PoS (where slashing
    *is* the finality guarantee — reverting must burn ≥⅓ of stake), Sequentia's
-   safety does not rest on stake-at-risk. Two mechanisms make a slashing deterrent
-   redundant: (a) **independent validation** — every node verifies each block, so
-   a malicious committee can never mint an invalid block (no theft, no inflation),
-   only censor or stall; and (b) **Bitcoin-anchored checkpoints** — deep reversal
-   is bounded by Bitcoin's work, not by stake. The worst equivocation can do is a
-   transient fork at an unconsolidated height (same damage class as a short
-   reorg, ceilinged by the next checkpoint), with no profitable double-spend past
-   finality. That residual griefing is already bounded by the gossip-layer
-   equivocation guard, P2P misbehaviour scoring, and VRF committee rotation. So
-   slashing would be economic insurance against bounded griefing — the same
-   "redundant given the checkpoint guarantee" category as Pixel forward security
-   (§7) — and is deliberately omitted, consistent with deriving security from
-   Bitcoin rather than from token economics. (Posterior corruption, the paper's
-   Principle 11, is likewise a checkpoint + stake-locktime matter, not slashing.)
+   safety does not rest on stake-at-risk, so slashing is redundant on every axis:
+   (a) **independent validation** — every node verifies each block, so a malicious
+   committee can never mint an invalid block (no theft, no inflation), only censor
+   or stall; (b) **equivocator exclusion** (above) — a member that double-proposes
+   is excluded from the round by consensus, so equivocation cannot fork a finalized
+   block under the security model, with no economic penalty needed to prevent it;
+   and (c) **Bitcoin-anchored checkpoints** — the long-range / posterior-corruption
+   defense (Principle 11) is the checkpoint plus a stake locktime exceeding the
+   checkpoint depth, not stake-at-risk. The remaining misbehaviours (a leader
+   censoring or withholding) cost only a round — the round-robin routes around
+   them — and a member's equivocation is detectable evidence usable for off-chain
+   committee governance if ever desired. Slashing would buy nothing the protocol
+   does not already guarantee, at the cost of evolving-key / stake-forfeiture
+   machinery — the same "redundant" category as the rejected Pixel forward
+   security (§7) — and is deliberately omitted.
 
 Each phase is independently testable and leaves the coordinator path working.
 
@@ -590,12 +594,16 @@ relays committee traffic, bounded by the eligibility gate; producing
 (`-posproducer`) remains opt-in.
 
 **Resolved — quorum (§12.4).** The certification quorum is a **strict majority
-(51/100), not two-thirds.** A 2/3 quorum would add committee-level Byzantine
-safety, but that is redundant (the Bitcoin checkpoint already resolves the
-transient forks a majority quorum allows) and would force frequent anchor-gated
-escaping-stalls whenever live participation dips toward two-thirds — collapsing
-the fast sidechain to Bitcoin's cadence (the paper's participation tables).
-Majority quorum provides fast liveness; the checkpoint provides hard safety.
+(51/100), not two-thirds** — exactly the Theoretical Paper (Principle 6), which
+rejects 2/3 because it stalls whenever some members are offline. Immediate
+finality is kept fork-free not by a higher threshold but by **excluding
+equivocating leaders** (Liveness theorem 1): an equivocator's blocks gather only
+the dishonest minority and never certify, so exactly one block reaches 51 and is
+final. A 2/3 quorum would buy committee-level Byzantine safety the exclusion rule
+already provides, while forcing frequent anchor-gated escaping-stalls when live
+participation dips toward two-thirds — collapsing the fast sidechain to Bitcoin's
+cadence (the paper's participation tables). Majority quorum for fast liveness;
+equivocator exclusion for fork-free finality; Bitcoin for the long-range root.
 
 All design decisions for the autonomous committee are now settled; the remaining
 work is implementation per the phased plan (§12).
