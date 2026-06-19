@@ -60,7 +60,7 @@ realization of it. The mapping:
 | 8. Every node votes for the lowest-VRF block | Members emit a **vote** for the winning proposal | `posvote` |
 | 9. After timeout, if < 51 votes, re-vote round-robin | Round-robin re-vote on the proposal store after the upper-bound timeout | `posvote` (new round-id) |
 | 10. Verify consensus-rule compliance *after* the first vote | Full block validation gated to the post-first-vote step; on failure, resume round-robin | (local) |
-| 11. Aggregate the 51 signatures | Gossip the signature shares and aggregate (§7) | `posnonce`/`pospartial` or `posshare` |
+| 11. Aggregate the 51 signatures | Members flood BLS shares; any node aggregates ≥51 (§7) | `posshare` |
 | 12. 51/100 ⇒ certified; its seed drives r+1 | Assemble the certificate, `submitposblock` internally, reset to step 3 | `poscert` (= the certified block) |
 
 Three liveness/safety rules sit alongside the happy path:
@@ -107,7 +107,7 @@ can relay committee traffic without producing:
                  ▼
    ┌────────────────────────────────────────────────────────────┐
    │ net_processing: new NetMsgType handlers + relay rules (§4)  │
-   │   posproposal · posvote · posnonce · pospartial · poscert   │
+   │       posproposal · posvote · posshare · poscert           │
    └────────────────────────────────────────────────────────────┘
 ```
 
@@ -151,8 +151,8 @@ the tip advances past it.
             └─────┬─────┘  invalid ──► back to ROUND-ROBIN
                   ▼ valid
             ┌──────────────────────────┐
-            │ SIGN (§7): collect shares │  posnonce+pospartial (MuSig2)  OR
-            │ until 51 signers present  │  posshare (non-interactive)
+            │ SIGN (§7): members flood  │  BLS posshare; any node
+            │ posshare; collect ≥51     │  aggregates whichever arrive
             └─────┬────────────────────┘
                   ▼  aggregate
             ┌───────────┐  assemble certificate; submitposblock internally;
@@ -167,24 +167,28 @@ competing proposal.
 
 ## 4. New P2P messages
 
-Five message types, added to `NetMsgType` (`src/protocol.{h,cpp}`) and dispatched
-in `net_processing.cpp::ProcessMessage`. All are **eligibility-gated**: a node
-relays a committee message for height *h* only if the sender is provably in *h*'s
-committee (its VRF proof verifies against the registry-derived schedule), which
-is the core anti-DoS lever (§9).
+Four message types, added to `NetMsgType` (`src/protocol.{h,cpp}`) and dispatched
+in `net_processing.cpp::ProcessMessage`. With BLS aggregation (§7) the signing
+half is a single, non-interactive share — there is no nonce/partial round to
+gossip. All messages are **eligibility-gated**: a node relays a committee message
+for height *h* only if the sender is provably in *h*'s committee (its VRF proof
+verifies against the registry-derived schedule), which is the core anti-DoS lever
+(§9).
 
 | Message | Payload (sketch) | Relay rule |
 |---|---|---|
 | `posproposal` | height, parent, anchor ref, leader pubkey, **VRF proof**, block (or block header + txids for compact relay) | Relay only the **lowest-VRF valid** proposal seen for (height, anchor-tier); supersede on a strictly-better (lower-VRF, or anchor-weighted fresher) one; one-per-leader-per-round. |
 | `posvote` | height, round-robin index, proposal id, voter pubkey, signature over the vote | Relay if voter ∈ committee and not already seen; dedupe per (voter, round index). |
-| `posnonce` | height, proposal id, member pubkey, 66-byte BIP327 public nonce *(MuSig2 path only)* | Relay if member ∈ the chosen signer subset; one per member per proposal. |
-| `pospartial` | height, proposal id, member pubkey, 32-byte partial sig *(MuSig2 path)* **or** `posshare`: a 48/96-byte non-interactive signature share *(BLS/Pixel path, §7)* | As above; partials/shares are verifiable individually. |
-| `poscert` | the certified block (header carries the 64-byte aggregate + the committee commitment) | Standard block relay (`cmpctblock`/`block`); this is the existing accept path. |
+| `posshare` | height, proposal id, member pubkey, **BLS signature share** over the proposal's `signhash` | Relay if member ∈ committee; one per member per proposal; each share is individually verifiable. |
+| `poscert` | the certified block (header carries the BLS aggregate + a signer bitmask) | Standard block relay (`cmpctblock`/`block`); this is the existing accept path. |
 
-Proposals should use **compact relay** (announce by id via `inv`, fetch the body
-with `getdata`) to avoid flooding full blocks; votes/nonces/partials/shares are
-small and can flood directly with dedup. Each message is bounded to the current
-and next height; anything older or further ahead is dropped, capping memory.
+A `posvote` and a `posshare` can be the *same* message in practice — a member's
+share over the proposal is itself a vote for it — so the implementation may fold
+voting into share emission and keep `posvote` only for the round-robin re-vote
+index. Proposals should use **compact relay** (announce by id via `inv`, fetch
+the body with `getdata`) to avoid flooding full blocks; votes and shares are
+small and flood directly with dedup. Each message is bounded to the current and
+next height; anything older or further ahead is dropped, capping memory.
 
 ## 5. Self-eligibility detection
 
@@ -233,60 +237,71 @@ None of these bounds is consensus-enforced (they are local clocks); they are
 incentive-shaped, exactly as the paper argues (propose too early → fewer fees;
 too late → risk being replaced by a lower-VRF competitor).
 
-## 7. The pivotal decision: interactive MuSig2 vs. non-interactive aggregation
+## 7. Signature scheme: BLS aggregate (decided)
 
-This is the single most consequential choice, because it determines the shape of
-the signing half of the gossip protocol.
+The autonomous committee certifies blocks with **BLS aggregate signatures
+(BLS12-381), non-interactively.** MuSig2 (BIP327) is retained unchanged for the
+single-host and coordinator paths, where it is ideal. This resolves what was the
+proposal's pivotal open question.
 
-**The shipped scheme is MuSig2 (BIP327)** — an *n-of-n*, *two-round interactive*
-aggregate. To realize 51-of-100 it aggregates *exactly* the 51 chosen signers.
-On the wire that means: fix the signer subset, gossip round-1 `posnonce` from all
-51, then gossip round-2 `pospartial` from all 51, then aggregate. Two problems in
-an open, lossy gossip setting:
+### Why not MuSig2 for the autonomous path
 
-1. **Brittleness to drop-out.** Because it is n-of-n over the chosen subset, if
-   even one of the 51 fails to send its nonce or partial, the aggregate cannot
-   complete — the engine must pick a *different* 51-subset and restart both
-   rounds. In a 100-member committee where ~30% may be offline, subset selection
-   becomes a guessing game and restarts add latency.
-2. **No forward security.** MuSig2 keys are long-lived; the paper's Principle 11
-   flags *posterior corruption* (old keys sold and reused for a long-range
-   attack) and explicitly names **Pixel** (a forward-secure, BLS-based multisig)
-   as the mitigation.
+MuSig2 is an *n-of-n*, *two-round interactive* aggregate. To realize 51-of-100 it
+must aggregate *exactly* the 51 chosen signers, which on the wire means: fix the
+signer subset, gossip round-1 `posnonce` from all 51, gossip round-2 `pospartial`
+from all 51, then aggregate. In an open, lossy committee this is brittle: because
+it is n-of-n over the chosen subset, a single member failing to send its nonce or
+partial fails the whole aggregate, forcing the engine to pick a *different*
+51-subset and restart both rounds. In a 100-member committee where ~30% may be
+offline, subset selection becomes guesswork and restarts add latency. It is a
+fine scheme for a *known, reliable* set (the coordinator path); it fights the
+gossip model.
 
-The paper anticipated exactly this. P6 step 11: *"a Pixel multi-signature scheme
-could be used to support non-interactive aggregation so that any party can
-aggregate signatures after the broadcast without communicating with the original
-signers."* That is the natural fit for gossip: each member signs the proposal
-independently and floods one `posshare`; **any** node aggregates whichever ≥51
-shares arrive, with no subset pre-commitment and no second round.
+### Why BLS
 
-Options:
+BLS aggregation is **non-interactive**, which is exactly what the paper called for
+(P6 step 11: *"any party can aggregate signatures after the broadcast without
+communicating with the original signers"*). Each committee member signs the
+proposal independently and floods a single `posshare`; **any** node aggregates
+whichever ≥51 shares arrive — no subset pre-commitment, no second round, and the
+aggregate is a single constant-size group element regardless of signer count.
+This makes the signing half of the protocol robust to offline members by
+construction: you collect whoever responds rather than betting on a fixed 51.
 
-- **A — Keep MuSig2, gossip both rounds.** *Pro:* zero new crypto; already in the
-  tree; 64-byte signature. *Con:* the n-of-n brittleness above; two interactive
-  rounds; not forward-secure. Best suited to a *known, reliable* committee — i.e.
-  the coordinator path, not an open one.
-- **B — BLS aggregate (non-interactive).** Each member BLS-signs independently;
-  collect any 51 shares; aggregate. *Pro:* robust to drop-out (collect whoever
-  responds), single round, anyone aggregates — matches the paper. *Con:* new
-  curve (BLS12-381) and a per-staker BLS key registered alongside the stake;
-  larger keys; pairing verification cost (amortized by aggregation).
-- **C — Pixel (forward-secure BLS multisig).** Option B plus key evolution per
-  height, giving forward security against posterior corruption. *Pro:* the
-  paper's named choice; non-interactive *and* long-range-attack-resistant. *Con:*
-  the most new machinery (key-update schedule, registry of evolving public keys).
+### On forward security — checkpoints are the accepted defense
 
-**Recommendation.** Keep MuSig2 for the single-host/coordinator path (it is ideal
-there). For the *autonomous* committee, adopt a **non-interactive aggregate**:
-ship **Option B (BLS)** first because it removes the round-2 gossip and the
-subset-restart problem outright, then layer **Pixel key-evolution (Option C)** as
-the forward-secure upgrade once the gossip layer is proven. This is a consensus
-change (a new signature scheme and a per-staker aggregate-key commitment), so it
-must be gated behind a chain flag and shipped on testnet first. If we instead
-keep Option A, the autonomous layer is viable but will be markedly less robust to
-offline members and will leave the posterior-corruption gap that Principle 11
-calls out.
+BLS keys are long-lived and not forward-secure, so the paper's Principle 11
+*posterior corruption* concern (old blocksigner keys sold and reused for a
+long-range attack) is **not** addressed by the signature scheme itself. That is a
+deliberate, accepted trade-off here: Sequentia's long-range defense is the
+**Bitcoin-anchored checkpoint system** (a checkpoint consolidates after 2016
+Bitcoin confirmations ≈ 2 weeks and is then irreversible locally), combined with
+the rule that the **stake locktime exceeds the checkpoint depth** so that a
+signer's keys still control bonded stake throughout the window in which their
+signatures could rewrite history. Within that finalized horizon, leaked
+historical keys cannot reorganize the chain. The paper's forward-secure option,
+**Pixel**, is therefore **not adopted**; it would buy protocol-level forward
+security at the cost of evolving-key operations for every staker (per-period key
+update, mandatory secure deletion, heavier audit) — redundant given the
+checkpoint guarantee. Pixel remains a *possible future upgrade* (it is "BLS plus
+key evolution," so this BLS design is forward-compatible toward it), but it is
+out of scope for this work.
+
+### Implementation notes
+
+- New `src/bls.{h,cpp}` wrapping a vetted BLS12-381 library (e.g. `blst`):
+  sign, verify, aggregate-signatures, aggregate-verify, fast-aggregate-verify.
+- Each staker commits a **BLS public key** alongside its stake (in or bound to
+  the staking output) with a **proof-of-possession** to close the BLS rogue-key
+  attack; the committee's expected signer set for a height is the BLS keys of the
+  sortitioned members, so a node verifies the aggregate against the
+  fast-aggregate of the present signers' keys plus a signer bitmask.
+- This is a consensus change (a new certification scheme + the per-staker key
+  commitment), so it is gated behind a chain flag, never active on the existing
+  bundled chains until a planned activation, and shipped on testnet first.
+- The wire change vs. the MuSig2 sketch in §4: the two-message `posnonce` +
+  `pospartial` exchange collapses to a single `posshare` (member pubkey + BLS
+  signature share), and `poscert` carries the aggregate + signer bitmask.
 
 ## 8. Equivocation, enforce-consensus, convergence
 
@@ -309,15 +324,15 @@ calls out.
 The committee gossip is a new inbound surface, so every rule is designed to be
 *cheap to reject and eligibility-gated*:
 
-- **Eligibility gate.** Relay a `posproposal`/`posvote`/`posnonce`/`pospartial`/
-  `posshare` only if the sender's pubkey is in the height's committee (VRF proof
-  in the proposal; for votes/shares, the pubkey must match a committee slot).
-  Non-committee chatter is dropped without further work.
+- **Eligibility gate.** Relay a `posproposal`/`posvote`/`posshare` only if the
+  sender's pubkey is in the height's committee (VRF proof in the proposal; for
+  votes/shares, the pubkey must match a committee slot). Non-committee chatter is
+  dropped without further work.
 - **Bounded windows.** Accept messages only for the current height and the next
   (anchor-reshuffle look-ahead); drop everything else. Memory is O(committee ×
   small) per height and freed on tip advance.
 - **Per-member, per-round dedupe and rate limits.** One proposal per leader per
-  round-robin index; one vote/nonce/share per member per round index; excess is
+  round-robin index; one vote/share per member per round index; excess is
   misbehaviour-scored.
 - **Validate lazily.** Cheap checks (eligibility, structural, signature-share
   verification) gate relay; full block validation runs once, post-vote (P6 step
@@ -333,7 +348,7 @@ The committee gossip is a new inbound surface, so every rule is designed to be
 | Receive/relay handlers | `src/net_processing.cpp` (`ProcessMessage` cases; relay in the send loop) |
 | Start/stop the producer thread | `src/init.cpp` behind `-posproducer` / `-posgossip` |
 | Internal template/submit (no RPC hop) | factor the bodies of `getposblocktemplate`/`submitposblock` (`src/rpc/mining.cpp`) into callable helpers the engine shares |
-| Signature scheme | reuse `src/musig.*` (Option A) **or** add `src/bls.*` + a staker aggregate-key commitment (Option B/C) |
+| Signature scheme (autonomous) | new `src/bls.*` (BLS12-381) + a per-staker BLS key commitment with proof-of-possession (§7); `src/musig.*` retained unchanged for the coordinator path |
 | Eligibility / schedule | reuse `PosSchedule`, `ComputePosSeed`, `src/vrf.*` unchanged |
 
 The RPCs stay as-is: they remain the coordinator path and the test surface, and
@@ -344,9 +359,9 @@ assembly and acceptance.
 
 - The coordinator/RPC path is untouched and remains supported; the autonomous
   engine is opt-in (`-posproducer`).
-- If a non-interactive scheme (Option B/C) is chosen, it is a consensus change
-  behind a chain flag, never active on the existing bundled chains until a
-  planned activation; testnet first.
+- The BLS certification scheme (§7) is a consensus change behind a chain flag,
+  never active on the existing bundled chains until a planned activation;
+  testnet first.
 - A new functional test, `feature_pos_autonomous_committee.py`, spins up *N*
   nodes (no coordinator), each holding one staking key, and asserts they produce
   and certify a chain end-to-end, including the offline-member and
@@ -365,21 +380,26 @@ assembly and acceptance.
 3. **Anchor reshuffle + round-robin + enforce-consensus.** Add P7 fresher-anchor
    proposals with the anchor weight, the round-robin re-vote, and the LT1
    alternative-certificate path.
-4. **Hardening.** DoS rules (§9), equivocation evidence, and — if Option C —
-   Pixel key evolution for forward security.
+4. **Hardening.** DoS rules (§9), equivocation evidence, and propagation/latency
+   tuning under realistic offline-member rates.
 
 Each phase is independently testable and leaves the coordinator path working.
 
-## 13. Decisions needed before coding
+## 13. Decisions
 
-1. **Signature scheme (§7) — the pivotal one.** A (keep interactive MuSig2),
-   B (non-interactive BLS), or C (forward-secure Pixel). Recommendation: B now,
-   C later; keep MuSig2 for the coordinator path.
-2. **Slot target.** Keep `-posslotinterval = 30 s`, or move toward the paper's
+**Resolved — signature scheme (§7).** The autonomous committee certifies with
+**BLS aggregate signatures (BLS12-381), non-interactively**; MuSig2 is retained
+for the single-host/coordinator path. Pixel / protocol-level forward security is
+**not** adopted: Sequentia's accepted long-range defense is the Bitcoin-anchored
+checkpoint system (2016-confirmation consolidation) together with a stake
+locktime that exceeds the checkpoint depth.
+
+**Still open:**
+
+1. **Slot target.** Keep `-posslotinterval = 30 s`, or move toward the paper's
    ~90 s; fixed or retargeted toward a moving average.
-3. **Leader-rank stagger `δ`** and the upper-bound timeout `T` (their ratio sets
+2. **Leader-rank stagger `δ`** and the upper-bound timeout `T` (their ratio sets
    how aggressively backups and round-robin kick in).
-4. **Forward security now or later** (couples to decision 1).
-5. **Validator participation default.** Should a non-staking full node relay
+3. **Validator participation default.** Should a non-staking full node relay
    committee gossip by default (`-posgossip` on) to strengthen propagation, or
    stay quiet unless it produces?
