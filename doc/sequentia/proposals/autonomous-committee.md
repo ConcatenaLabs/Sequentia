@@ -215,16 +215,32 @@ predictable, which is the anti-grinding property):
 The paper is explicit and minimal: **no NTP, no network-adjusted time.** Each
 validator counts local time from the last certified block it received.
 
-- **Lower bound `n` = 30 s** (the slot interval, `-posslotinterval`): a member
-  will not countersign a proposal until `n` seconds have elapsed on its local
-  clock since the previous certified block — the anti-fast-frequency floor. This
-  is **fixed at 30 s, not the paper's ~90 s UX target**, because the slot is not
-  a free parameter: it is pinned by the ledger-growth-parity invariant. The block
-  weight cap (`-con_maxblockweight = 200,000`) is chosen so that a saturated
-  Sequentia ledger grows at exactly Bitcoin's saturated rate —
-  `200,000 / 30 s = 4,000,000 / 600 s`. Changing the slot would break that
-  equality unless the weight cap were re-derived in lockstep, so `n` and the
-  weight cap move together and `n` stays at 30 s.
+- **Slot floor `n`, target 30 s, timestamp-retargeted.** A member will not
+  countersign a proposal until `n` seconds have elapsed on its local clock since
+  the previous certified block — the anti-fast-frequency floor. The **target is
+  30 s** (not the paper's ~90 s UX figure), pinned by the ledger-growth-parity
+  invariant: the block weight cap (`-con_maxblockweight = 200,000`) satisfies
+  `200,000 / 30 s = 4,000,000 / 600 s`, so a saturated Sequentia ledger grows at
+  exactly Bitcoin's saturated rate. The effective floor is **retargeted to hold
+  the realized average cadence at that 30 s target**, exactly as the paper
+  prescribes (P10: adjust *"based on the timestamps of blocks, similar to how
+  Bitcoin deals with the change of difficulty every 2016 blocks"*). Retargeting
+  does **not** contradict the parity rule — it is the mechanism that makes it hold
+  in practice: the weight cap fixes the *weight* half of `weight / time`, and the
+  retarget steers the *time* half to 30 s, since uncorrected drift in block
+  intervals would otherwise break the equality. The weight cap stays fixed; the
+  cadence is driven to it.
+
+  The retarget is computed **deterministically from block-header timestamps** over
+  an epoch aligned to the paper's ~2-week / 2016-Bitcoin-block boundary (the same
+  clock its lowering-staking-requirement rule uses): at each boundary, compare the
+  epoch's realized average inter-block time to the 30 s target and nudge `n` up
+  (blocks ran fast) or down toward a floor (slow), clamped per step like Bitcoin's
+  4× difficulty limit. Because every node derives the same `n` from the same
+  on-chain timestamps, the floor stays synchronized network-wide **without being a
+  hard validity rule** — consistent with P10's point that the bound is a local
+  clock and not publicly enforceable: a block is never rejected for `n`; nodes
+  simply will not countersign before it.
 - **Leader-rank stagger `k·δ`, `δ` = 3 s (default).** The rank-0 leader proposes
   at the slot boundary; a rank-*k* backup waits an extra `k·δ` and proposes only
   if it has seen no valid lower-rank proposal, so backups fill in just for missing
@@ -243,9 +259,11 @@ validator counts local time from the last certified block it received.
   available once the Bitcoin anchor has advanced +3 (≈ 30 min of Bitcoin), so the
   two operate on very different timescales.
 
-`n`, `δ`, and `T` are local-clock heuristics, **not** consensus-enforced (the
-paper, P10), so they are configurable defaults; only the 30 s floor is tied to a
-consensus parameter (the weight cap) and should not drift from it.
+`δ` and `T` are free local heuristics (configurable defaults). `n` is special:
+its 30 s target is tied to the weight cap by the parity rule, and its retargeted
+value is derived deterministically from on-chain timestamps so every node agrees
+— but, like all the paper's bounds, compliance is soft (a local clock), never a
+hard validity check.
 - **Anchor reshuffle (P7).** On learning of a new Bitcoin block not referenced by
   the parent, an eligible node may propose a fresher-anchored block; its VRF is
   compared under an **anchor-weighting coefficient** that favours the fresher
@@ -417,10 +435,13 @@ for the single-host/coordinator path. Pixel / protocol-level forward security is
 checkpoint system (2016-confirmation consolidation) together with a stake
 locktime that exceeds the checkpoint depth.
 
-**Resolved — timing (§6).** The slot stays **`-posslotinterval = 30 s`**, fixed
-by the ledger-growth-parity invariant (`200,000 weight / 30 s = 4,000,000 / 600
-s`), superseding the paper's ~90 s UX figure. Leader-rank stagger **`δ` = 3 s**
-and round-robin timeout **`T` ≈ 45 s (≈ 1.5 · n)** as local-clock defaults.
+**Resolved — timing (§6).** The slot **target is 30 s**, pinned by the
+ledger-growth-parity invariant (`200,000 weight / 30 s = 4,000,000 / 600 s`) and
+**held there by a timestamp-based retarget** as the paper prescribes (P10,
+Bitcoin-difficulty-style, on the ~2-week / 2016-block epoch) — the retarget is
+what makes parity hold in practice, not a departure from it. Leader-rank stagger
+**`δ` = 3 s** and round-robin timeout **`T` ≈ 45 s (≈ 1.5 · n)** as local-clock
+defaults.
 
 **Resolved — gossip default (§2).** **`-posgossip` defaults on**: every full node
 relays committee traffic, bounded by the eligibility gate; producing
