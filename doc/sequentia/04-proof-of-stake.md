@@ -368,8 +368,9 @@ commitments), the aggregate signature, the leader signature, the Bitcoin anchor,
 the checkpoints, and the immediate-finality gate. Nothing in validation needs a
 coordinator; a certified block is accepted network-wide like any other.
 
-**Block production coordination is RPC/coordinator-driven.** The cryptographic
-protocol and the RPCs to assemble a block exist in full —
+**Block production has both a coordinator/RPC path and autonomous paths.** The
+MuSig2 cryptographic protocol and the RPCs to assemble a block by hand exist in
+full —
 
 | RPC | Role |
 |---|---|
@@ -382,28 +383,38 @@ protocol and the RPCs to assemble a block exist in full —
 | `submitposblock` | the leader attaches its signature plus the aggregate and submits |
 | `generateposblock` | single-host shortcut: one node holding all keys produces a block |
 
-— but organizing a committee to assemble a block each slot is done by external
-tooling. There is no automatic block-producer thread and no autonomous
-peer-to-peer gossip-and-sign committee. BIP327's secret nonce is deliberately
-non-serializable; each member's node keeps the live secret nonce in an in-memory
-session store between the two rounds and consumes it exactly once
-(`feature_pos_distributed_committee.py` runs the full loop across three separate
-nodes, each holding one key).
+— with this path, organizing the committee each slot is done by external tooling
+(BIP327's secret nonce is deliberately non-serializable; each member's node keeps
+the live secret nonce in an in-memory session store between the two rounds and
+consumes it once; `feature_pos_distributed_committee.py` runs the full loop
+across three separate nodes). Alongside it, a built-in producer thread and a BLS
+gossip committee remove the coordinator entirely (next).
 
-Two paths lead to a live network:
+Three paths lead to a live network:
 
-- **A coordinator-driven committee** works with the current code and suits a
+- **A coordinator-driven committee** works with the MuSig2 RPCs and suits a
   known founding committee: a coordinator orchestrates `getposblocktemplate`,
   the per-member `musignonce` / `musigpartialsign` round trips,
   `musigaggregate`, and `submitposblock`. This is semi-centralized at the
   *production* layer — the coordinator is a liveness and orchestration point —
   while validation stays fully trustless.
 
-- **An autonomous gossip-and-sign committee** is the full decentralization and
-  is named future work: each node detects its own eligibility and gossips
-  proposals, nonces, and partials to assemble the quorum with no coordinator.
-  The anchor-freshness signing preference of §7 is designed to live in this
-  layer.
+- **An autonomous single-node producer** (`-posproducer`): a node holding one or
+  more staking keys elects itself each slot and produces blocks on its own —
+  the leader-only and single-host-committee cases — with no coordinator and no
+  RPC (`src/pos_producer.*`).
+
+- **An autonomous gossip-and-sign committee** (`-posbls` + `-posproducer`): the
+  full decentralization. Each node detects its own eligibility; the elected
+  leader floods its unsigned block, every node signs the lowest-VRF proposal and
+  floods a non-interactive BLS share, and the leader aggregates a quorum into the
+  certificate — assembling a committee-certified block across separate hosts with
+  no coordinator. This rests on BLS aggregation and the member-independent block
+  hash (the certificate lives in the proof solution); the design and its status
+  are in [`proposals/autonomous-committee.md`](proposals/autonomous-committee.md).
+  Hardening (anti-DoS, equivocation evidence, round-robin/anchor-reshuffle,
+  large-committee tuning) is the remaining work; the anchor-freshness signing
+  preference of §7 is designed to live in this layer.
 
 Operating a producer and the surrounding tooling are covered in
 [`05-operating-sequentia.md`](05-operating-sequentia.md); the security model and

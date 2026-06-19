@@ -112,8 +112,11 @@ eligibility, the aggregate signature, the anchor, and the finality gate.
 ### Requires external sign-off (cannot be done in-repo)
 
 - Independent cryptographic review of the vendored secp256k1 **MuSig2** module
-  (confirm it matches a known-good upstream commit with no local patches) and the
-  **ECVRF** byte layout and test vectors.
+  (confirm it matches a known-good upstream commit with no local patches), the
+  **ECVRF** byte layout and test vectors, and the vendored **blst** (BLS12-381)
+  library used for committee certification (pinned in `src/blst/`; confirm it
+  matches the named upstream commit with no local patches, per
+  `src/blst/SEQUENTIA-VENDOR.md`).
 - A **BDB** CI build so the cross-asset RBF/CPFP fee tests (which need
   legacy-wallet issuance) execute; this build is SQLite-only.
 
@@ -187,13 +190,16 @@ The following whitepaper items are node-level but outside the four-property scop
 ## 6. Implementation status
 
 All four defining properties and the Proof-of-Stake consensus are implemented and
-validated by every node. The one substantial piece of named future work is at the
-production layer, not the validation layer: block production is currently
-coordinator/RPC-driven, and an autonomous peer-to-peer gossip-and-sign committee —
-which would let independent committee members assemble each block without a
-coordinator — is not yet built. That distinction, and the two paths to a live
-network (a coordinator-driven committee today, or the autonomous committee as
-future work), is specified in
-[`04-proof-of-stake.md`](04-proof-of-stake.md) §9. The open hardening items and
-external sign-offs in [§1](#1-audit-findings-and-their-disposition) are the
+validated by every node. Block production has three paths
+([`04-proof-of-stake.md`](04-proof-of-stake.md) §9): the coordinator/RPC MuSig2
+flow, an autonomous single-node producer (`-posproducer`), and an autonomous
+peer-to-peer **gossip-and-sign committee** (`-posbls`) that assembles a
+BLS-certified block across separate hosts with no coordinator — built and tested
+(`feature_pos_bls_gossip.py`). The remaining work on it is hardening, not
+mechanism: the anti-DoS relay bounds, equivocation evidence, the round-robin /
+anchor-reshuffle recovery paths, and tuning for large (100-member) committees,
+detailed in [`proposals/autonomous-committee.md`](proposals/autonomous-committee.md)
+§12.4. BLS certification is gated behind `-posbls` and is not yet activated on the
+bundled chains. The open hardening items and external sign-offs in
+[§1](#1-audit-findings-and-their-disposition) are the
 remaining pre-mainnet review tasks.

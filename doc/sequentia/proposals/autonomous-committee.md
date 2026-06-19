@@ -5,9 +5,12 @@
 > planning artifact, distinct from the as-built specification in
 > [`../04-proof-of-stake.md`](../04-proof-of-stake.md). Where it proposes a
 > change to a shipped mechanism (notably the signature scheme, §7) that is
-> called out explicitly. **Phase 1 (the autonomous producer thread) is built and
-> tested** (`src/pos_producer.*`, `-posproducer`); Phases 2–4 (committee gossip,
-> BLS aggregation, hardening) remain proposal. See §12 for status.
+> called out explicitly. **Phases 1–3 are built and tested** — the autonomous
+> producer thread, BLS aggregate certification (`-posbls`), and the single-round
+> gossip committee (`posproposal`/`posshare`) that assembles a BLS-certified
+> block across separate hosts with no coordinator. Phase 4 (hardening: anti-DoS,
+> equivocation evidence, round-robin/anchor-reshuffle, large-committee tuning)
+> remains. See §12 for status.
 
 ## 0. Where we are and what this closes
 
@@ -451,17 +454,25 @@ assembly and acceptance.
    solution so the signed block hash is member-independent (the member-independent
    block hash, §7) — the format the gossip rounds assemble. Verified single-host
    (one node holding the committee keys) and validated by a non-producing node.
-3. **The gossip rounds.** Add `posproposal` (the leader's unsigned block) and
-   `posshare` (a member's signature share with its eligibility) and the round
-   engine: the elected leader floods its proposal; each node that is sortitioned
-   for the slot signs the member-independent block hash and floods a share; the
-   leader (an elected participant, not an external coordinator) collects a quorum
-   of shares, assembles the certificate into the solution, and submits. Because
-   the signed hash is member-independent, this is a **single round** — no announce
-   step. Multi-node committee certifies blocks across separate hosts with no
-   coordinator.
-4. **Hardening.** DoS rules (§9), equivocation evidence, and propagation/latency
-   tuning under realistic offline-member rates.
+3. **The gossip rounds.**
+   ✅ *Implemented* (`posproposal` / `posshare` in `src/protocol.*`, the round
+   engine in `src/pos_producer.*`, dispatch/relay in `src/net_processing.cpp`;
+   test `feature_pos_bls_gossip.py`). The elected leader floods its unsigned
+   block; each node collects proposals for a short window, signs the single
+   lowest-leader-VRF proposal once (P6 step 6/8 convergence) and floods its share
+   over the member-independent block hash; the winning leader (an elected
+   participant, not an external coordinator) collects a quorum, assembles the
+   certificate into the solution, and submits, after which the block propagates
+   by normal block relay. Because the signed hash is member-independent this is a
+   **single round** — no announce step. Verified with three hosts holding one
+   committee key each (no single-host quorum) certifying a chain over gossip with
+   no forks.
+4. **Hardening (future).** The current round engine is a working first cut: a
+   fixed collection window and leader stagger, leader-as-aggregator, sign-once
+   per height. Still to do: the anti-DoS rules of §9 (eligibility-gated relay
+   bounds, rate limits), equivocation evidence, P7 anchor-reshuffle and the P6
+   round-robin re-vote for contended/lossy rounds, and propagation/latency tuning
+   under realistic offline-member rates and large (100-member) committees.
 
 Each phase is independently testable and leaves the coordinator path working.
 
