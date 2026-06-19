@@ -668,13 +668,23 @@ void PosProducer::RecordCandidate(const std::shared_ptr<const CBlock>& block, co
 
 std::shared_ptr<const CBlock> PosProducer::BackedForRound(int r) const
 {
-    // m_gossip_mutex held. The round-r leader is the (r+1)-th lowest VRF candidate.
+    // m_gossip_mutex held. Candidates are ordered by (1) freshest Bitcoin anchor,
+    // then (2) lowest leader VRF; the round-r leader is the (r+1)-th in that order.
+    // The anchor-freshness preference (paper Principle 7, rule III) keeps the tip
+    // tracking Bitcoin's tip: a proposal referencing a more recent Bitcoin block
+    // is backed over a staler one, so producers are incentivised to anchor fresh.
+    // In the common case all proposals carry the same (freshest) anchor, so it
+    // reduces to pure lowest-VRF election; it only bites when a producer is stale.
     if (r < 0 || (size_t)r >= m_candidates.size()) return nullptr;
     std::vector<const RoundCandidate*> ordered;
     ordered.reserve(m_candidates.size());
     for (const auto& [leader, cand] : m_candidates) ordered.push_back(&cand);
     std::sort(ordered.begin(), ordered.end(),
-              [](const RoundCandidate* a, const RoundCandidate* b) { return a->beta < b->beta; });
+              [](const RoundCandidate* a, const RoundCandidate* b) {
+                  if (a->block->m_anchor_height != b->block->m_anchor_height)
+                      return a->block->m_anchor_height > b->block->m_anchor_height; // fresher anchor first
+                  return a->beta < b->beta;                                          // then lowest VRF
+              });
     return ordered[r]->block;
 }
 

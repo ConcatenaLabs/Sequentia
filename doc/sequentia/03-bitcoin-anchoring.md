@@ -171,12 +171,14 @@ This freshness is delivered by **production**, not by a fork-choice rule.
 `GetAnchorForNewBlock` anchors every new block to the freshest Bitcoin block
 (tip minus `anchorminconf-1`), so the tip tracks Bitcoin's tip within one
 Sequentia block — by *extending* the chain, never by reorganizing it. Among
-competing proposals for the same height, the committee preferentially *signs* the
-freshest-anchored one, so that is the block that gets finalized. This is a local
-commit-timing preference, not a fork-choice vote, and the anchor is deliberately
-not a key in fork choice: in an immediate-finality system, keying fork choice on
-the anchor could let a new Bitcoin block reorder or overwrite already-certified
-blocks, which must never happen. The fork-choice and finality details are in
+competing proposals for the same height, the committee backs the freshest-anchored
+one (then the lowest leader VRF among equally-fresh proposals), so that is the
+block that gets certified — the paper's Principle 7 freshness preference,
+implemented in the gossip committee's candidate ordering. This is a
+*pre-certification* signing preference, not a fork-choice vote, and the anchor is
+deliberately not a key in fork choice: in an immediate-finality system, keying
+fork choice on the anchor could let a new Bitcoin block reorder or overwrite
+already-certified blocks, which must never happen. The fork-choice and finality details are in
 [`04-proof-of-stake.md`](04-proof-of-stake.md).
 
 ## 6. Cross-chain atomic swaps

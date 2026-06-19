@@ -320,17 +320,18 @@ Freshness is delivered at two safe layers:
    Bitcoin's tip within one block — by *extending* the chain, never reorging it.
 
 2. **A committee signing preference.** When members face competing proposals at
-   the same height, they preferentially sign the one referencing the freshest
-   Bitcoin block. The leader's freshest-anchored proposal carries a **fixed local
-   commit-timing weight of about `0.3 × quorum`** (e.g. **+15** at a 100-member,
-   51-quorum committee) so it reaches the effective-signature threshold first and
-   is the proposal the committee converges on. This weight **never counts toward
-   the 51/100 real-signature finality threshold** — finality is always at least
-   51 genuine signatures over the VRF-determined committee, view-independent — so
-   the preference is pure coordination and can never create two "final" blocks.
-
-This signing preference lives in the production layer (§9); it is designed to be
-built into an autonomous gossip-and-sign committee's voting.
+   the same height, the autonomous gossip committee backs the one referencing the
+   **freshest Bitcoin anchor**, falling back to the lowest leader VRF among
+   equally-fresh proposals (`BackedForRound` orders candidates by anchor height
+   then VRF; `src/pos_producer.cpp`). This realises the paper's Principle 7
+   rule III (a weighting that favours the newest Bitcoin block) as a strict
+   ordering: a staler proposal can never out-rank a fresher one, so producers are
+   incentivised to anchor fresh — and in the common case where all proposals
+   already carry the freshest anchor it reduces to pure lowest-VRF election. It is
+   a **pre-certification** preference only: it selects which proposal the committee
+   converges on, never reorders an already-certified block (the immediate-finality
+   gate forbids that; §6), and it never lowers the 51-genuine-signature finality
+   threshold — so it is pure coordination and can never create two "final" blocks.
 
 ## 8. Long-range-attack defenses
 
