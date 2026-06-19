@@ -536,22 +536,27 @@ assembly and acceptance.
      (same exclusion path as equivocation) and the committee re-picks the next
      valid one; only validated blocks are ever signed, so safety is unchanged.
 
-   Remaining (scale tuning, not needed at launch — the committee is small at
-   launch, so the certificate is a few KB): **certificate weight at a *maximum*
-   100-member committee.** The cert is ~26 KB (257 B/member: secp key 33 + VRF
-   proof 80 + BLS key 48 + PoP 96, plus the leader sig and aggregate). It currently
-   lives in the legacy `CProof.solution`, which `GetBlockWeight` counts in *both*
-   serialization passes (×4, like base data), so 26 KB ≈ 104 K weight ≈ **52%** of
-   Sequentia's 200 K block-weight cap. This is **not inherent** — two independent
-   fixes bring it to ~6–13%:
-   1. *Witness-discount it.* Elements' dynafed signed blocks put the block
-      signature in `m_signblock_witness`, which the serializer omits from the base
-      pass ("we do not serialize witness for ... weight calculation"), i.e. ×1.
-      Moving the cert there cuts it 4× → ~26 K weight ≈ 13%.
-   2. *Don't carry static keys per block.* The BLS key (48) + PoP (96) are static
-      per staker; registering them once in the stake registry leaves ~113 B/member
-      ≈ 11.5 KB (the VRF proof and secp key are genuinely per-slot). Combined with
-      (1): ~11.5 K weight ≈ **6%**.
+   **Certificate weight at a *maximum* 100-member committee.** The cert is ~26 KB
+   (257 B/member: secp key 33 + VRF proof 80 + BLS key 48 + PoP 96, plus the leader
+   sig and aggregate). It lives in the legacy `CProof.solution`. Naively that script
+   is counted by `GetBlockWeight` in *both* serialization passes (×4, like base
+   data), so 26 KB would be ≈ 104 K weight ≈ **52%** of Sequentia's 200 K
+   block-weight cap. This is **not inherent**, and is now mostly addressed:
+   1. *Witness-discount it* — **implemented.** Elements' dynafed signed blocks put
+      the block signature in `m_signblock_witness`, which the serializer omits from
+      the base (NO_WITNESS) pass ("we do not serialize witness for ... weight
+      calculation"), i.e. ×1. Rather than physically relocate the cert, on PoS
+      chains `CProof::Serialize` now skips the `solution` in the NO_WITNESS pass
+      too (gated on `g_con_pos`; other signed chains such as Liquid are unchanged),
+      so the cert is weighted ×1 exactly like a witness. The hash already excluded
+      the solution, so what the committee signs is unchanged. This cuts the cert 4×
+      → ~26 K weight ≈ **13%**. (Verified by `feature_pos_cert_weight.py`: a
+      12-member committee produces sustained blocks under a `-con_maxblockweight`
+      that the ×4 accounting could not fit.)
+   2. *Don't carry static keys per block* — remaining scale tuning, not needed at
+      launch. The BLS key (48) + PoP (96) are static per staker; registering them
+      once in the stake registry leaves ~113 B/member ≈ 11.5 KB (the VRF proof and
+      secp key are genuinely per-slot). Combined with (1): ~11.5 K weight ≈ **6%**.
 
    (A two-phase lightweight VRF announcement would cut origination further, but
    compact proposals already make per-round traffic flat in transaction volume.)

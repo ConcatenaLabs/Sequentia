@@ -180,7 +180,11 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
         // Old style signed blocks
         // Pad block weight by block proof fields (including upper-bound of signature)
         nBlockWeight += chainparams.GetConsensus().signblockscript.size() * WITNESS_SCALE_FACTOR;
-        nBlockWeight += chainparams.GetConsensus().max_block_signature_size * WITNESS_SCALE_FACTOR;
+        // SEQUENTIA: under PoS the solution (block signature / committee
+        // certificate) is witness-discounted (CProof::Serialize), so reserve it at
+        // x1, not the x4 of base data — otherwise a large certificate's reservation
+        // would needlessly crowd out transactions. Other signed chains keep x4.
+        nBlockWeight += chainparams.GetConsensus().max_block_signature_size * (g_con_pos ? 1 : WITNESS_SCALE_FACTOR);
         ResetProof(*pblock);
         if (g_con_pos && pos_proposer != nullptr) {
             // SEQUENTIA PoS: the challenge requires the elected leader's key

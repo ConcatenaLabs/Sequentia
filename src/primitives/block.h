@@ -35,14 +35,24 @@ public:
     template <typename Stream>
     inline void Serialize(Stream& s) const {
         s << *(CScriptBase*)(&challenge);
-        if (!(s.GetType() & SER_GETHASH))
+        // SEQUENTIA: on PoS chains the block signature/solution is witness-
+        // discounted — excluded from the NO_WITNESS (weight base) pass as well as
+        // the hash, mirroring how the dynafed signblock witness is treated — so a
+        // large committee certificate is weighted x1, not x4. Other signed chains
+        // (e.g. Liquid) are unaffected. The hash already excludes the solution, so
+        // what the committee signs is unchanged.
+        const bool skip_solution = (s.GetType() & SER_GETHASH) ||
+            (g_con_pos && (s.GetVersion() & SERIALIZE_TRANSACTION_NO_WITNESS));
+        if (!skip_solution)
             s << *(CScriptBase*)(&solution);
     }
 
     template <typename Stream>
     inline void Unserialize(Stream& s) const {
         s >> *(CScriptBase*)(&challenge);
-        if (!(s.GetType() & SER_GETHASH))
+        const bool skip_solution = (s.GetType() & SER_GETHASH) ||
+            (g_con_pos && (s.GetVersion() & SERIALIZE_TRANSACTION_NO_WITNESS));
+        if (!skip_solution)
             s >> *(CScriptBase*)(&solution);
     }
 
