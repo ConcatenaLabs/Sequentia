@@ -517,19 +517,22 @@ assembly and acceptance.
      II — a new Bitcoin block re-running the leader VRF) is not implemented; with
      production-time freshest anchoring it is a marginal refinement, deferred.
 
+   - **Compact proposals** (`poscmpctprop`, BIP152-style; `test/pos_compact_tests.cpp`):
+     proposals flood as header + coinbase + the other transactions' *ids*,
+     reconstructed from the receiver's mempool, removing the redundant tx data of
+     ~100 near-identical full blocks per round at scale. The header merkle root
+     verifies the reconstruction; on a miss the receiver fetches the full block
+     (`getposprop` → `posproposal`). It is pure transport — the round-robin,
+     exclusion and finality operate on the reconstructed block — and self-correcting
+     (any failure degrades to the full block, never a wrong one). The paper's "relay
+     only the lowest-VRF proposal" (step 6) was *not* used: it would leave nodes
+     different candidate sets and break the deterministic round-robin.
+
    Remaining (scale tuning, not needed at launch): the ~26 KB certificate at 100
-   members (cap/weight sizing), per-proposal validation cost on the message thread,
-   and **proposal-flood reduction**. Every node proposing a *full* block each round
-   is negligible at modest committee/load but wasteful at 100 members under high tx
-   volume (≈100 near-identical full blocks of redundant tx data). The paper's "relay
-   only the lowest-VRF proposal" (step 6) cannot be applied naively here — it would
-   leave each node a different candidate set and break the deterministic
-   round-robin. The right fix is **compact proposals** (BIP152-style: a proposal
-   carries txids, reconstructed from the mempool), which removes the redundant tx
-   data without changing the round-robin; alternatively a two-phase lightweight VRF
-   announcement (all members announce cheaply; only the elected leader sends a full
-   block). Both are focused efforts, scoped here for a dedicated pass rather than
-   rushed onto the now-hardened committee.
+   members (cap/weight sizing) and the per-proposal validation cost on the message
+   thread. A two-phase lightweight VRF announcement (all members announce cheaply;
+   only the elected leader sends a block) would cut origination further, but compact
+   proposals already make the per-round traffic flat in transaction volume.
 
    **Quorum — a strict majority (51/100), and fork-free by leader exclusion, not 2/3.**
    The certification quorum is a simple majority, exactly as the Theoretical Paper
