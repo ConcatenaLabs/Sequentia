@@ -115,6 +115,7 @@ BITCOIN_TESTS =\
   test/policy_fee_tests.cpp \
   test/policyestimator_tests.cpp \
   test/bls_tests.cpp \
+  test/pos_compact_tests.cpp \
   test/musig_tests.cpp \
   test/pos_tests.cpp \
   test/vrf_tests.cpp \

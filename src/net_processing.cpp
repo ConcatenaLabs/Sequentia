@@ -4146,25 +4146,66 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
     // to the local producer (if any), which validates it, signs/aggregates, and
     // returns whether it was new; if new, relay it to our other peers so it
     // floods the committee. (doc/sequentia/proposals/autonomous-committee.md §4.)
+    // Flood a validated proposal onward in compact form (the normal relay path).
+    const auto relay_compact = [&](const CBlock& block) {
+        PosCompactProposal compact = MakePosCompactProposal(block);
+        m_connman.ForEachNode([&](CNode* pnode) {
+            if (pnode->GetId() == pfrom.GetId()) return;
+            m_connman.PushMessage(pnode, CNetMsgMaker(pnode->GetCommonVersion()).Make(NetMsgType::POSCMPCTPROPOSAL, compact));
+        });
+    };
+
     if (msg_type == NetMsgType::POSPROPOSAL) {
+        // A full proposal: a getposproposal reply (or an unsolicited full block).
         std::shared_ptr<CBlock> pblock = std::make_shared<CBlock>();
         vRecv >> *pblock;
         PosProducer* prod = GetActivePosProducer();
         if (!prod) return; // not participating; do not relay committee traffic
         switch (prod->OnProposal(pblock)) {
         case PosGossipAction::Invalid:
-            // Honest nodes validate before relaying, so a bad message means the
-            // sender originated or forwarded garbage.
             Misbehaving(pfrom.GetId(), 10, "invalid posproposal");
             break;
         case PosGossipAction::Relay:
-            m_connman.ForEachNode([&](CNode* pnode) {
-                if (pnode->GetId() == pfrom.GetId()) return;
-                m_connman.PushMessage(pnode, CNetMsgMaker(pnode->GetCommonVersion()).Make(NetMsgType::POSPROPOSAL, *pblock));
-            });
+            relay_compact(*pblock); // propagate compactly, never re-flood the full block
             break;
         case PosGossipAction::Ignore:
             break;
+        }
+        return;
+    }
+
+    if (msg_type == NetMsgType::POSCMPCTPROPOSAL) {
+        PosCompactProposal compact;
+        vRecv >> compact;
+        PosProducer* prod = GetActivePosProducer();
+        if (!prod) return;
+        std::shared_ptr<CBlock> pblock = ReconstructPosProposal(compact, m_mempool);
+        if (!pblock) {
+            // A referenced transaction is missing (or the merkle root did not
+            // verify): fetch the full block from the sender and process that.
+            m_connman.PushMessage(&pfrom, CNetMsgMaker(pfrom.GetCommonVersion()).Make(NetMsgType::GETPOSPROPOSAL, compact.header.GetHash()));
+            return;
+        }
+        switch (prod->OnProposal(pblock)) {
+        case PosGossipAction::Invalid:
+            Misbehaving(pfrom.GetId(), 10, "invalid poscmpctproposal");
+            break;
+        case PosGossipAction::Relay:
+            relay_compact(*pblock);
+            break;
+        case PosGossipAction::Ignore:
+            break;
+        }
+        return;
+    }
+
+    if (msg_type == NetMsgType::GETPOSPROPOSAL) {
+        uint256 hash;
+        vRecv >> hash;
+        PosProducer* prod = GetActivePosProducer();
+        if (!prod) return;
+        if (std::shared_ptr<const CBlock> block = prod->GetProposalBlock(hash)) {
+            m_connman.PushMessage(&pfrom, CNetMsgMaker(pfrom.GetCommonVersion()).Make(NetMsgType::POSPROPOSAL, *block));
         }
         return;
     }

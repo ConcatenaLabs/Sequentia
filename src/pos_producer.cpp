@@ -9,6 +9,7 @@
 #include <chainparams.h>
 #include <crypto/sha256.h>
 #include <logging.h>
+#include <consensus/merkle.h>
 #include <musig.h>
 #include <net.h>
 #include <netmessagemaker.h>
@@ -93,6 +94,36 @@ std::shared_ptr<CBlock> BuildUnsignedBlsBlock(ChainstateManager& chainman, CTxMe
 //! The running producer, for net_processing to deliver gossip to.
 static std::atomic<PosProducer*> g_active_producer{nullptr};
 PosProducer* GetActivePosProducer() { return g_active_producer.load(); }
+
+PosCompactProposal MakePosCompactProposal(const CBlock& block)
+{
+    PosCompactProposal c;
+    c.header = block; // slice CBlock -> CBlockHeader (header incl. the proof)
+    if (!block.vtx.empty()) c.coinbase = block.vtx[0];
+    for (size_t i = 1; i < block.vtx.size(); ++i) c.txids.push_back(block.vtx[i]->GetHash());
+    return c;
+}
+
+std::shared_ptr<CBlock> ReconstructPosProposal(const PosCompactProposal& compact, CTxMemPool& mempool)
+{
+    if (!compact.coinbase) return nullptr;
+    auto block = std::make_shared<CBlock>();
+    *static_cast<CBlockHeader*>(block.get()) = compact.header;
+    block->vtx.push_back(compact.coinbase);
+    {
+        LOCK(mempool.cs);
+        for (const uint256& txid : compact.txids) {
+            CTransactionRef tx = mempool.get(txid);
+            if (!tx) return nullptr; // a referenced transaction is not in our mempool
+            block->vtx.push_back(std::move(tx));
+        }
+    }
+    // The header's merkle root verifies the reconstruction: if it matches, the
+    // looked-up transactions are exactly the ones the proposer committed to.
+    bool mutated = false;
+    if (BlockMerkleRoot(*block, &mutated) != block->hashMerkleRoot || mutated) return nullptr;
+    return block;
+}
 
 bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
                      const CChainParams& chainparams, const CKey& leader_key,
@@ -579,6 +610,24 @@ void PosProducer::FloodProposal(const CBlock& block)
     });
 }
 
+void PosProducer::FloodCompactProposal(const CBlock& block)
+{
+    if (!m_connman) return;
+    PosCompactProposal compact = MakePosCompactProposal(block);
+    m_connman->ForEachNode([&](CNode* pnode) {
+        m_connman->PushMessage(pnode, CNetMsgMaker(pnode->GetCommonVersion()).Make(NetMsgType::POSCMPCTPROPOSAL, compact));
+    });
+}
+
+std::shared_ptr<const CBlock> PosProducer::GetProposalBlock(const uint256& hash)
+{
+    std::lock_guard<std::mutex> lock(m_gossip_mutex);
+    for (const auto& [leader, cand] : m_candidates) {
+        if (cand.block->GetHash() == hash) return cand.block;
+    }
+    return nullptr;
+}
+
 void PosProducer::FloodProposalSplit(const CBlock& a, const CBlock& b)
 {
     if (!m_connman) return;
@@ -745,7 +794,7 @@ void PosProducer::ProposeGossip(const CKey& leader_key)
     }
 
     LogPrintf("PoS gossip: proposing block %s at height %d\n", hash.GetHex(), height);
-    FloodProposal(*block);
+    FloodCompactProposal(*block);
 }
 
 int64_t PosProducer::DriveRound()

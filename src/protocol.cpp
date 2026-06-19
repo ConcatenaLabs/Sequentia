@@ -45,6 +45,8 @@ const char *GETCFCHECKPT="getcfcheckpt";
 const char *CFCHECKPT="cfcheckpt";
 const char *WTXIDRELAY="wtxidrelay";
 const char *POSPROPOSAL="posproposal";
+const char *POSCMPCTPROPOSAL="poscmpctprop";
+const char *GETPOSPROPOSAL="getposprop";
 const char *POSSHARE="posshare";
 } // namespace NetMsgType
 
@@ -87,6 +89,8 @@ const static std::string allNetMessageTypes[] = {
     NetMsgType::CFCHECKPT,
     NetMsgType::WTXIDRELAY,
     NetMsgType::POSPROPOSAL,
+    NetMsgType::POSCMPCTPROPOSAL,
+    NetMsgType::GETPOSPROPOSAL,
     NetMsgType::POSSHARE,
 };
 const static std::vector<std::string> allNetMessageTypesVec(std::begin(allNetMessageTypes), std::end(allNetMessageTypes));

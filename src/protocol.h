@@ -269,6 +269,18 @@ extern const char* WTXIDRELAY;
  */
 extern const char* POSPROPOSAL;
 /**
+ * SEQUENTIA: poscmpctproposal is the bandwidth-efficient form of posproposal — the
+ * header and coinbase plus the other transactions' ids, reconstructed from the
+ * receiver's mempool (BIP152-style). On a reconstruction miss the receiver fetches
+ * the full block with getposproposal.
+ */
+extern const char* POSCMPCTPROPOSAL;
+/**
+ * SEQUENTIA: getposproposal requests the full posproposal for a block hash when a
+ * poscmpctproposal could not be reconstructed from the mempool.
+ */
+extern const char* GETPOSPROPOSAL;
+/**
  * SEQUENTIA: posshare carries one committee member's BLS signature share over a
  * proposed block's (member-independent) hash, plus its sortition-eligibility
  * proof and BLS key, so the leader can aggregate a quorum into a certificate.

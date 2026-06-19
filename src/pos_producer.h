@@ -22,6 +22,8 @@
 #define BITCOIN_POS_PRODUCER_H
 
 #include <key.h>
+#include <primitives/block.h>
+#include <primitives/transaction.h>
 #include <pubkey.h>
 #include <serialize.h>
 #include <uint256.h>
@@ -70,6 +72,32 @@ struct PosShare {
         READWRITE(obj.block_hash, obj.pubkey, obj.vrf_proof, obj.bls_pubkey, obj.bls_pop, obj.bls_share);
     }
 };
+
+/** SEQUENTIA: the bandwidth-efficient form of a `posproposal` (BIP152-style). It
+ *  carries the block header (which includes the proof, so the leader's staging
+ *  signature rides along) and the coinbase in full — both unique to the proposer —
+ *  plus the *ids* of the remaining transactions, which the receiver looks up in
+ *  its mempool to rebuild the block. The header's merkle root verifies the
+ *  reconstruction; a miss is repaired by fetching the full block (getposproposal).*/
+struct PosCompactProposal {
+    CBlockHeader header;
+    CTransactionRef coinbase;
+    std::vector<uint256> txids; //!< non-coinbase transaction ids, in block order
+
+    SERIALIZE_METHODS(PosCompactProposal, obj)
+    {
+        READWRITE(obj.header, obj.coinbase, obj.txids);
+    }
+};
+
+/** Build the compact form of an assembled/unsigned proposal block. */
+PosCompactProposal MakePosCompactProposal(const CBlock& block);
+
+/** Rebuild the full block from a compact proposal using `mempool`. Returns the
+ *  block only if every referenced transaction is present AND the reconstructed
+ *  merkle root matches the header; otherwise nullptr (the caller fetches the full
+ *  block). */
+std::shared_ptr<CBlock> ReconstructPosProposal(const PosCompactProposal& compact, CTxMemPool& mempool);
 
 /** The outcome of producing one PoS block, for RPC result formatting. */
 struct PosProduceResult {
@@ -139,6 +167,9 @@ public:
     //! Ingest a peer's `posshare`. Collects it if it matches a block we proposed
     //! and the signer is sortition-eligible. Returns the relay/penalty action.
     PosGossipAction OnShare(const PosShare& share);
+    //! Return the full proposal block we hold for `hash` (a round candidate), to
+    //! answer a peer's getposproposal, or nullptr.
+    std::shared_ptr<const CBlock> GetProposalBlock(const uint256& hash);
 
 protected:
     void UpdatedBlockTip(const CBlockIndex* pindexNew, const CBlockIndex* pindexFork,
@@ -173,6 +204,9 @@ private:
     //! `block`'s slot.
     std::vector<PosShare> MakeLocalShares(const CBlock& block);
     void FloodProposal(const CBlock& block);
+    //! Flood the compact form of a proposal (the normal path; the full block goes
+    //! only point-to-point as a getposproposal reply).
+    void FloodCompactProposal(const CBlock& block);
     //! Send `a` to half our peers and `b` to the other half — used only by the
     //! regtest equivocation fault-injection to split the committee.
     void FloodProposalSplit(const CBlock& a, const CBlock& b);
