@@ -205,6 +205,15 @@ def main():
                "members": [{"wif": w, "pub": p} for w, p in members]},
               open(os.path.join(base, "committee_keys.json"), "w"), indent=2)
     fund_total = (N + 4) * stake_atoms                        # founder change + fee headroom
+    # Stake locks must meet the chain's unbonding minimum (posunbonding * slot
+    # seconds). Bump --csv-seconds to clear it, and lock the founder's GENESIS
+    # stake with the same BIP68 *time-based* sequence (a height-based count fails
+    # once posunbonding exceeds it).
+    min_csv = max(1, args.posunbonding * args.slot)
+    if args.csv_seconds < min_csv:
+        args.csv_seconds = min_csv + 512
+        print("  (raised --csv-seconds to %d to clear posunbonding*slot)" % args.csv_seconds)
+    genesis_csv_seq = (1 << 22) | ((args.csv_seconds + 511) // 512)   # BIP68 time-based
     consensus = [
         "con_pos=1", "posvrf=1", "posbls=1",
         "poscommitteesize=%d" % N, "posslotinterval=%d" % args.slot,
@@ -215,7 +224,7 @@ def main():
         # so the founder can mine the registration tx (relay policy, not consensus).
         "acceptnonstdtxn=1",
         "con_bitcoin_anchor=1",
-        "con_genesis_stake=%s:%d:15" % (founder_pub, stake_atoms),
+        "con_genesis_stake=%s:%d:%d" % (founder_pub, stake_atoms, genesis_csv_seq),
         "con_connect_genesis_outputs=1", "initialfreecoins=%d" % fund_total,
     ]
 
