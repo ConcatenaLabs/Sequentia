@@ -230,6 +230,10 @@ private:
     //! two different blocks to disjoint halves of the committee and contribute no
     //! shares, to test that the round-robin routes around a Byzantine leader.
     bool m_byzantine_equivocate{false};
+    //! Regtest fault injection (-posbyzantineinvalid): when leading, propose a
+    //! consensus-invalid block (two coinbases), to test that lazy validation
+    //! excludes the leader and the committee routes to the next valid one.
+    bool m_byzantine_invalid{false};
 
     //! One round candidate: a validated proposal and its leader's VRF.
     struct RoundCandidate {
@@ -246,7 +250,7 @@ private:
     int m_round_height{0};                             //!< height we are running rounds for
     int64_t m_round_start_ms{0};                       //!< when this height's collection started
     std::map<CPubKey, RoundCandidate> m_candidates;    //!< leader -> its validated proposal this round
-    std::set<CPubKey> m_equivocators;                  //!< leaders seen to propose two blocks this height (excluded)
+    std::set<CPubKey> m_excluded;                      //!< leaders excluded this height (equivocated, or proposed an invalid block)
     std::map<CPubKey, PosShare> m_collected;           //!< shares for the currently-backed proposal
     uint256 m_backed_hash;                             //!< hash of the proposal we are signing/collecting for
     int m_signed_round{-1};                            //!< highest round index we have signed for

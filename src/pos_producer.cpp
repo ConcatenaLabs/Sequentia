@@ -427,6 +427,7 @@ PosProducer::PosProducer(ChainstateManager& chainman, CTxMemPool& mempool,
       m_connman(connman), m_keys(std::move(keys))
 {
     m_byzantine_equivocate = gArgs.GetBoolArg("-posbyzantineequivocate", false);
+    m_byzantine_invalid = gArgs.GetBoolArg("-posbyzantineinvalid", false);
 }
 
 PosProducer::~PosProducer() { Stop(); }
@@ -701,14 +702,14 @@ void PosProducer::RecordCandidate(const std::shared_ptr<const CBlock>& block, co
         m_round_height = height;
         m_round_start_ms = GetTimeMillis();
         m_candidates.clear();
-        m_equivocators.clear();
+        m_excluded.clear();
         m_collected.clear();
         m_backed_hash.SetNull();
         m_signed_round = -1;
     }
     // A leader excluded for equivocation (proposing two blocks this height) is
     // never recorded — the committee backs neither of its blocks.
-    if (m_equivocators.count(leader)) return;
+    if (m_excluded.count(leader)) return;
     auto it = m_candidates.find(leader);
     if (it != m_candidates.end()) return;                       // already have this leader's block
     if (m_candidates.size() >= (size_t)MAX_POS_AGG_COMMITTEE_SIZE) return;
@@ -793,6 +794,24 @@ void PosProducer::ProposeGossip(const CKey& leader_key)
         }
     }
 
+    if (m_byzantine_invalid) {
+        // Fault injection: propose a consensus-invalid block (a second coinbase →
+        // bad-cb-multiple). Cheap checks (VRF, leader signature) pass, so it is
+        // recorded as a candidate; lazy validation must reject it at sign time and
+        // exclude the leader.
+        auto bad = std::make_shared<CBlock>(*block);
+        bad->vtx.push_back(bad->vtx[0]);
+        bad->hashMerkleRoot = BlockMerkleRoot(*bad);
+        bad->proof.solution = CScript();
+        std::vector<unsigned char> sig_bad;
+        if (leader_key.Sign(bad->GetHash(), sig_bad)) {
+            bad->proof.solution = CScript() << sig_bad;
+            LogPrintf("PoS gossip: BYZANTINE proposing invalid block %s at height %d\n", bad->GetHash().GetHex(), height);
+            FloodCompactProposal(*bad);
+            return;
+        }
+    }
+
     LogPrintf("PoS gossip: proposing block %s at height %d\n", hash.GetHex(), height);
     FloodCompactProposal(*block);
 }
@@ -841,28 +860,50 @@ int64_t PosProducer::DriveRound()
         }
     }
 
-    // Sign the round's backed proposal once. We collect our own shares (we are a
-    // potential aggregator) and flood them (so every node is too).
-    bool do_sign = false;
+    // Decide whether this is a new proposal to sign — the round advanced, or the
+    // backed leader changed (the one we were backing was excluded). Don't commit
+    // until we've validated it.
+    bool want_sign = false;
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
-        // Sign when the round advances, or when the backed proposal changed —
-        // e.g. the leader we were backing was just excluded for equivocation, so
-        // the backed leader became the next-lowest-VRF one.
         if (m_round_height == height && (m_signed_round < round_index || m_backed_hash != backed->GetHash())) {
-            m_signed_round = round_index;
-            if (m_backed_hash != backed->GetHash()) {
-                m_backed_hash = backed->GetHash();
-                m_collected.clear(); // shares were for the previous backed leader
-            }
-            do_sign = true;
+            want_sign = true;
         }
     }
-    if (do_sign && !m_byzantine_equivocate) {
+    if (want_sign && !m_byzantine_equivocate) {
+        // Lazy validation (paper P6 step 10): validate the backed block only now,
+        // when we are about to sign it — not every proposal on the message thread.
+        // An invalid block excludes its leader; next pass we back the next-lowest
+        // valid candidate.
+        bool valid = false;
+        {
+            LOCK(cs_main);
+            CBlockIndex* tip2 = m_chainman.ActiveChain().Tip();
+            if (tip2 && backed->hashPrevBlock == tip2->GetBlockHash()) {
+                BlockValidationState state;
+                valid = TestBlockValidity(state, m_chainparams, m_chainman.ActiveChainstate(), *backed, tip2,
+                                          /*fCheckPOW=*/false, /*fCheckMerkleRoot=*/true);
+            }
+        }
+        if (!valid) {
+            std::lock_guard<std::mutex> lock(m_gossip_mutex);
+            if (auto parts = ParsePosBlockChallenge(backed->proof.challenge)) {
+                m_excluded.insert(parts->leader);
+                m_candidates.erase(parts->leader);
+            }
+            return 150; // re-pick the next-lowest valid leader promptly
+        }
+        // Valid: commit, collect our own shares (we are a potential aggregator)
+        // and flood them (so every node is too).
         std::vector<PosShare> shares = MakeLocalShares(*backed);
         {
             std::lock_guard<std::mutex> lock(m_gossip_mutex);
-            if (m_backed_hash == backed->GetHash()) {
+            if (m_round_height == height) {
+                m_signed_round = round_index;
+                if (m_backed_hash != backed->GetHash()) {
+                    m_backed_hash = backed->GetHash();
+                    m_collected.clear(); // shares were for the previous backed leader
+                }
                 for (PosShare& sh : shares) {
                     if (m_collected.size() < (size_t)MAX_POS_AGG_COMMITTEE_SIZE) m_collected[sh.pubkey] = sh;
                 }
@@ -983,11 +1024,11 @@ PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& blo
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
         if (m_round_height == height) {
-            if (m_equivocators.count(parts->leader)) return PosGossipAction::Ignore;
+            if (m_excluded.count(parts->leader)) return PosGossipAction::Ignore;
             auto it = m_candidates.find(parts->leader);
             if (it != m_candidates.end()) {
                 if (it->second.block->GetHash() != hash) {
-                    m_equivocators.insert(parts->leader); // exclude the equivocator
+                    m_excluded.insert(parts->leader); // exclude the equivocator
                     m_candidates.erase(it);               // drop the block we had backed too
                     equivocation_evidence = true;
                 } else {
@@ -1002,23 +1043,14 @@ PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& blo
         Wake();                              // re-pick the backed leader promptly
         return PosGossipAction::Relay;       // propagate the evidence so all nodes exclude it
     }
-    // Validate the block fully before backing it: we sign its hash, attesting to
-    // it, and assemble it once a quorum signs. The per-height leader is fixed by
-    // the slot seed, so without this an invalid block from the lowest-VRF leader
-    // would be signed, fail to assemble, and stall that height permanently rather
-    // than the committee routing to the lowest *valid* leader. The proposal's
-    // staging solution is ignored here (signature checks are off; the BLS
-    // certificate is absent, so CheckPosStakeRules' committee branch is skipped).
-    {
-        LOCK(cs_main);
-        CBlockIndex* tip2 = m_chainman.ActiveChain().Tip();
-        if (!tip2 || block->hashPrevBlock != tip2->GetBlockHash()) return PosGossipAction::Ignore; // tip moved
-        BlockValidationState state;
-        if (!TestBlockValidity(state, m_chainparams, m_chainman.ActiveChainstate(), *block, tip2,
-                               /*fCheckPOW=*/false, /*fCheckMerkleRoot=*/true)) {
-            return PosGossipAction::Invalid;
-        }
-    }
+    // Record the proposal as a candidate after only the cheap, objective checks
+    // (sortition eligibility, leader signature, equivocation). Full block
+    // validation (TestBlockValidity) is deferred to the moment we are about to
+    // *sign* the backed proposal — paper Principle 6 step 10, "verify only after
+    // the first vote, to reduce the effort of verifying more than one block." So
+    // we validate ~one block per round instead of every proposal on the message
+    // thread; an invalid backed block is caught at sign time and its leader is
+    // excluded (the committee routes to the next valid leader).
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
         RecordCandidate(block, parts->leader, lbeta, height);
