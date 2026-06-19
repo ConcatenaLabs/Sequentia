@@ -187,6 +187,7 @@ BASE_SCRIPTS = [
     'feature_pos_bls_committee.py',
     'feature_pos_bls_gossip.py',
     'feature_pos_gossip_dos.py',
+    'feature_pos_gossip_failover.py',
     'feature_pos_min_stake.py',
     'feature_pos_escaping_stall.py',
     'feature_pos_fork_choice.py',

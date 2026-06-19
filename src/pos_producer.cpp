@@ -692,6 +692,11 @@ int64_t PosProducer::DriveRound()
     // Length of the proposal-collection window before we sign the lowest-VRF
     // proposal. Long enough for proposals to propagate, short for fast blocks.
     static const int64_t WINDOW_MS = 500;
+    // If a round produces no block within this long (e.g. the lowest-VRF leader
+    // went offline after we signed its proposal), reset and re-converge: the
+    // leaders re-propose, a since-departed one simply does not, and the committee
+    // settles on an available leader (the paper's round-robin recovery, P6 §9).
+    static const int64_t RECOVER_MS = 2500;
     CBlockIndex* tip;
     {
         LOCK(cs_main);
@@ -699,6 +704,18 @@ int64_t PosProducer::DriveRound()
     }
     if (!tip) return POS_PRODUCER_POLL_MS;
     const int height = tip->nHeight + 1;
+
+    {
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        if (m_round_height == height && GetTimeMillis() > m_round_start_ms + RECOVER_MS) {
+            m_round_height = 0; // force a fresh round; producers re-propose
+            m_best_proposal.reset();
+            m_signed = false;
+            m_proposal.reset();
+            m_collected.clear();
+            m_proposers.clear();
+        }
+    }
 
     // Once the window closes, sign the round's best proposal exactly once.
     std::shared_ptr<const CBlock> to_sign;
