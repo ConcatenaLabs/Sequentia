@@ -150,24 +150,32 @@ private:
     //! block. Returns how long to sleep (ms) before the next evaluation.
     int64_t Step();
 
-    //! Leader path for a distributed BLS committee: build the unsigned block and
-    //! flood it as a proposal (it enters this round as a candidate; signing and
-    //! assembly happen in the round driver once the collection window closes).
+    //! Leader path for a distributed BLS committee: build the unsigned block,
+    //! sign it, and flood it as a proposal. Every eligible member proposes, so
+    //! the candidate set (and thus the round-robin leader order) is complete and
+    //! common to all nodes.
     void ProposeGossip(const CKey& leader_key);
-    //! Drive the active gossip round on the worker thread: once the collection
-    //! window has closed, sign the lowest-VRF proposal once; if we are that
-    //! proposal's leader and hold a quorum of shares, assemble and submit.
+    //! Drive the active gossip round on the worker thread: sign the round's
+    //! backed proposal (the round-robin leader), collect/flood shares, and — on a
+    //! quorum — assemble and submit. The round index advances with time so a
+    //! failed (equivocating/withholding) leader is deterministically excluded and
+    //! the committee converges on the next-lowest-VRF leader (paper P6 §9).
     //! Returns the poll interval (short while a round is in progress).
     int64_t DriveRound();
-    //! Record a proposal into the current round (resetting on a new height,
-    //! keeping the lowest-leader-VRF one). Returns false if it is an equivocating
-    //! duplicate from a leader that already proposed a different block this height.
-    //! m_gossip_mutex held.
-    bool RecordProposal(const std::shared_ptr<const CBlock>& block, const CPubKey& leader, const uint256& leader_beta, int height);
+    //! Record a proposal as a round candidate (resetting on a new height). The
+    //! first block seen from a given leader wins, so an equivocating leader's
+    //! later blocks are dropped. m_gossip_mutex held.
+    void RecordCandidate(const std::shared_ptr<const CBlock>& block, const CPubKey& leader, const uint256& leader_beta, int height);
+    //! The proposal backed in round `r`: the (r+1)-th lowest-leader-VRF candidate,
+    //! or nullptr if fewer than r+1 candidates are known. m_gossip_mutex held.
+    std::shared_ptr<const CBlock> BackedForRound(int r) const;
     //! Produce shares for every locally-held key that is sortition-eligible for
     //! `block`'s slot.
     std::vector<PosShare> MakeLocalShares(const CBlock& block);
     void FloodProposal(const CBlock& block);
+    //! Send `a` to half our peers and `b` to the other half — used only by the
+    //! regtest equivocation fault-injection to split the committee.
+    void FloodProposalSplit(const CBlock& a, const CBlock& b);
     void FloodShare(const PosShare& share);
     //! Wake the worker thread (e.g. when a gossip message advances a round).
     void Wake();
@@ -184,18 +192,30 @@ private:
     bool m_stop{false};
     bool m_wake{false};
     bool m_running{false};
+    //! Regtest fault injection (-posbyzantineequivocate): when leading, propose
+    //! two different blocks to disjoint halves of the committee and contribute no
+    //! shares, to test that the round-robin routes around a Byzantine leader.
+    bool m_byzantine_equivocate{false};
 
-    // Gossip round state (one round per height). The leader ships its block
-    // signature inside the proposal, so any node that collects a quorum can
-    // assemble — no single aggregator to stall the round.
+    //! One round candidate: a validated proposal and its leader's VRF.
+    struct RoundCandidate {
+        std::shared_ptr<const CBlock> block;
+        uint256 beta;
+    };
+
+    // Gossip round state (one round per height). Every eligible member proposes,
+    // so all nodes share the candidate set; the round-robin leader for round r is
+    // the r-th lowest VRF, advanced by a time-derived index so all nodes exclude
+    // the same failed leaders in lockstep. The leader ships its block signature
+    // in the proposal, so any node that gathers a quorum assembles.
     std::mutex m_gossip_mutex;
-    int m_round_height{0};                             //!< height we are collecting proposals for
-    int64_t m_round_start_ms{0};                       //!< when this round started (first proposal)
-    std::shared_ptr<const CBlock> m_best_proposal;     //!< lowest-leader-VRF proposal this round (carries the leader sig)
-    uint256 m_best_beta;                               //!< its leader VRF (lower is better)
-    bool m_signed{false};                              //!< have we signed (once) this round
-    std::map<CPubKey, PosShare> m_collected;           //!< shares for m_best_proposal
-    std::map<CPubKey, uint256> m_proposers;            //!< leader -> proposal hash this round (equivocation guard)
+    int m_round_height{0};                             //!< height we are running rounds for
+    int64_t m_round_start_ms{0};                       //!< when this height's collection started
+    std::map<CPubKey, RoundCandidate> m_candidates;    //!< leader -> first-seen validated proposal
+    std::map<CPubKey, PosShare> m_collected;           //!< shares for the currently-backed proposal
+    uint256 m_backed_hash;                             //!< hash of the proposal we are signing/collecting for
+    int m_signed_round{-1};                            //!< highest round index we have signed for
+    int m_proposed_height{0};                          //!< height we have already proposed our own block at
     std::set<uint256> m_seen_proposals;                //!< proposal dedup
     std::set<std::pair<uint256, CPubKey>> m_seen_shares; //!< share dedup
 };

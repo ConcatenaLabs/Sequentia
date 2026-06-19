@@ -22,6 +22,7 @@
 #include <txmempool.h>
 #include <util/thread.h>
 #include <util/time.h>
+#include <util/system.h>
 #include <validation.h>
 #include <vrf.h>
 
@@ -391,7 +392,10 @@ static constexpr int64_t POS_PRODUCER_POLL_MS = 1000;
 PosProducer::PosProducer(ChainstateManager& chainman, CTxMemPool& mempool,
                          const CChainParams& chainparams, CConnman* connman, std::vector<CKey> keys)
     : m_chainman(chainman), m_mempool(mempool), m_chainparams(chainparams),
-      m_connman(connman), m_keys(std::move(keys)) {}
+      m_connman(connman), m_keys(std::move(keys))
+{
+    m_byzantine_equivocate = gArgs.GetBoolArg("-posbyzantineequivocate", false);
+}
 
 PosProducer::~PosProducer() { Stop(); }
 
@@ -521,7 +525,11 @@ int64_t PosProducer::Step()
             bool start;
             {
                 std::lock_guard<std::mutex> lock(m_gossip_mutex);
-                start = (m_round_height < height); // no proposal seen yet this height
+                // Every eligible member proposes once per height (regardless of
+                // having seen others' proposals), so the candidate set — and thus
+                // the round-robin leader order — is complete and common to all.
+                start = (m_proposed_height < height);
+                if (start) m_proposed_height = height;
             }
             if (start) {
                 ProposeGossip(m_keys[best_idx]);
@@ -567,6 +575,16 @@ void PosProducer::FloodProposal(const CBlock& block)
     if (!m_connman) return;
     m_connman->ForEachNode([&](CNode* pnode) {
         m_connman->PushMessage(pnode, CNetMsgMaker(pnode->GetCommonVersion()).Make(NetMsgType::POSPROPOSAL, block));
+    });
+}
+
+void PosProducer::FloodProposalSplit(const CBlock& a, const CBlock& b)
+{
+    if (!m_connman) return;
+    int i = 0;
+    m_connman->ForEachNode([&](CNode* pnode) {
+        const CBlock& which = (i++ % 2 == 0) ? a : b;
+        m_connman->PushMessage(pnode, CNetMsgMaker(pnode->GetCommonVersion()).Make(NetMsgType::POSPROPOSAL, which));
     });
 }
 
@@ -625,33 +643,38 @@ std::vector<PosShare> PosProducer::MakeLocalShares(const CBlock& block)
     return out;
 }
 
-bool PosProducer::RecordProposal(const std::shared_ptr<const CBlock>& block, const CPubKey& leader, const uint256& leader_beta, int height)
+void PosProducer::RecordCandidate(const std::shared_ptr<const CBlock>& block, const CPubKey& leader, const uint256& leader_beta, int height)
 {
-    // m_gossip_mutex held. One round per height; within a round keep the
-    // lowest-leader-VRF proposal (paper P6 step 6/8 convergence).
-    if (height < m_round_height) return false; // stale
+    // m_gossip_mutex held. One round set per height.
+    if (height < m_round_height) return; // stale
     if (height > m_round_height) {
         m_round_height = height;
         m_round_start_ms = GetTimeMillis();
-        m_best_proposal.reset();
-        m_signed = false;
+        m_candidates.clear();
         m_collected.clear();
-        m_proposers.clear();
+        m_backed_hash.SetNull();
+        m_signed_round = -1;
     }
-    // Equivocation guard: a leader gets one block per height. A second, different
-    // block from the same leader is dropped (we keep backing the first we saw).
-    auto it = m_proposers.find(leader);
-    if (it != m_proposers.end()) {
-        if (it->second != block->GetHash()) return false; // equivocating duplicate
-    } else {
-        if (m_proposers.size() < (size_t)MAX_POS_AGG_COMMITTEE_SIZE) m_proposers[leader] = block->GetHash();
-    }
-    if (!m_best_proposal || leader_beta < m_best_beta) {
-        m_best_proposal = block;
-        m_best_beta = leader_beta;
-        m_collected.clear(); // any shares collected were for the previous best
-    }
-    return true;
+    // First block seen from a leader wins; an equivocating leader's later, different
+    // block is dropped here — and because every node keeps the first it saw, an
+    // equivocator that splits the committee is excluded by the round-robin (its
+    // round backs the same leader for all, so all advance past it together).
+    auto it = m_candidates.find(leader);
+    if (it != m_candidates.end()) return;                       // already have a block from this leader
+    if (m_candidates.size() >= (size_t)MAX_POS_AGG_COMMITTEE_SIZE) return;
+    m_candidates.emplace(leader, RoundCandidate{block, leader_beta});
+}
+
+std::shared_ptr<const CBlock> PosProducer::BackedForRound(int r) const
+{
+    // m_gossip_mutex held. The round-r leader is the (r+1)-th lowest VRF candidate.
+    if (r < 0 || (size_t)r >= m_candidates.size()) return nullptr;
+    std::vector<const RoundCandidate*> ordered;
+    ordered.reserve(m_candidates.size());
+    for (const auto& [leader, cand] : m_candidates) ordered.push_back(&cand);
+    std::sort(ordered.begin(), ordered.end(),
+              [](const RoundCandidate* a, const RoundCandidate* b) { return a->beta < b->beta; });
+    return ordered[r]->block;
 }
 
 void PosProducer::ProposeGossip(const CKey& leader_key)
@@ -688,22 +711,44 @@ void PosProducer::ProposeGossip(const CKey& leader_key)
     }
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
-        RecordProposal(block, leader_key.GetPubKey(), own_beta, height);
+        RecordCandidate(block, leader_key.GetPubKey(), own_beta, height);
     }
+
+    if (m_byzantine_equivocate) {
+        // Fault injection: build a second, different valid block (later nTime →
+        // different hash, same leader/VRF), re-sign it, and send the two blocks to
+        // disjoint halves of the committee to split it. We also contribute no
+        // shares (below), so neither half can reach a quorum — exactly the
+        // present-but-failing leader the round-robin must route around.
+        auto block_b = std::make_shared<CBlock>(*block);
+        block_b->nTime += 1;
+        block_b->proof.solution = CScript();
+        std::vector<unsigned char> sig_b;
+        if (leader_key.Sign(block_b->GetHash(), sig_b)) {
+            block_b->proof.solution = CScript() << sig_b;
+            LogPrintf("PoS gossip: BYZANTINE equivocating %s / %s at height %d\n",
+                      hash.GetHex(), block_b->GetHash().GetHex(), height);
+            FloodProposalSplit(*block, *block_b);
+            return;
+        }
+    }
+
     LogPrintf("PoS gossip: proposing block %s at height %d\n", hash.GetHex(), height);
     FloodProposal(*block);
 }
 
 int64_t PosProducer::DriveRound()
 {
-    // Length of the proposal-collection window before we sign the lowest-VRF
-    // proposal. Long enough for proposals to propagate, short for fast blocks.
+    // Proposals are collected for WINDOW_MS, then we sign round 0's backed leader
+    // (the lowest-VRF candidate). Each subsequent ROUND_MS advances the round
+    // index: the backed leader becomes the next-lowest-VRF candidate, so a leader
+    // whose round failed to certify (it withheld, equivocated into a sub-quorum
+    // split, or too few of its backers were online) is deterministically excluded
+    // and the committee converges on the next leader in lockstep — the paper's
+    // round-robin re-vote (P6 §9). The index is derived from the (aligned) clock,
+    // so all nodes step through the same leader order together.
     static const int64_t WINDOW_MS = 500;
-    // If a round produces no block within this long (e.g. the lowest-VRF leader
-    // went offline after we signed its proposal), reset and re-converge: the
-    // leaders re-propose, a since-departed one simply does not, and the committee
-    // settles on an available leader (the paper's round-robin recovery, P6 §9).
-    static const int64_t RECOVER_MS = 2500;
+    static const int64_t ROUND_MS = 700;
     CBlockIndex* tip;
     {
         LOCK(cs_main);
@@ -711,35 +756,50 @@ int64_t PosProducer::DriveRound()
     }
     if (!tip) return POS_PRODUCER_POLL_MS;
     const int height = tip->nHeight + 1;
+    const int64_t now = GetTimeMillis();
 
+    // Determine the current round index and the proposal it backs.
+    int round_index;
+    std::shared_ptr<const CBlock> backed;
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
-        if (m_round_height == height && GetTimeMillis() > m_round_start_ms + RECOVER_MS) {
-            m_round_height = 0; // force a fresh round; producers re-propose
-            m_best_proposal.reset();
-            m_signed = false;
+        if (m_round_height != height) return POS_PRODUCER_POLL_MS; // no active round yet
+        const int64_t elapsed = now - m_round_start_ms;
+        if (elapsed < WINDOW_MS) return 150;                        // still collecting proposals
+        round_index = (int)((elapsed - WINDOW_MS) / ROUND_MS);
+        backed = BackedForRound(round_index);
+        if (!backed) {
+            // We have excluded every candidate we know without certifying. This
+            // needs more than (#candidates) leaders to have failed — beyond our
+            // fault assumption. Restart collection so producers re-seed candidates.
+            m_round_height = 0;
+            m_candidates.clear();
             m_collected.clear();
-            m_proposers.clear();
+            m_backed_hash.SetNull();
+            m_signed_round = -1;
+            return 150;
         }
     }
 
-    // Once the window closes, sign the round's best proposal exactly once. We
-    // both collect our own shares (we are a potential aggregator) and flood them
-    // (so every other node is too).
-    std::shared_ptr<const CBlock> to_sign;
+    // Sign the round's backed proposal once. We collect our own shares (we are a
+    // potential aggregator) and flood them (so every node is too).
+    bool do_sign = false;
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
-        if (m_round_height == height && !m_signed && m_best_proposal &&
-            GetTimeMillis() >= m_round_start_ms + WINDOW_MS) {
-            to_sign = m_best_proposal;
-            m_signed = true;
+        if (m_round_height == height && m_signed_round < round_index) {
+            m_signed_round = round_index;
+            if (m_backed_hash != backed->GetHash()) {
+                m_backed_hash = backed->GetHash();
+                m_collected.clear(); // shares were for the previous round's leader
+            }
+            do_sign = true;
         }
     }
-    if (to_sign) {
-        std::vector<PosShare> shares = MakeLocalShares(*to_sign);
+    if (do_sign && !m_byzantine_equivocate) {
+        std::vector<PosShare> shares = MakeLocalShares(*backed);
         {
             std::lock_guard<std::mutex> lock(m_gossip_mutex);
-            if (m_best_proposal && m_best_proposal->GetHash() == to_sign->GetHash()) {
+            if (m_backed_hash == backed->GetHash()) {
                 for (PosShare& sh : shares) {
                     if (m_collected.size() < (size_t)MAX_POS_AGG_COMMITTEE_SIZE) m_collected[sh.pubkey] = sh;
                 }
@@ -748,8 +808,8 @@ int64_t PosProducer::DriveRound()
         for (const PosShare& sh : shares) FloodShare(sh);
     }
 
-    // Any node that holds a quorum of shares for the backed proposal assembles
-    // the certificate and submits — the leader's authorising signature is in the
+    // Any node holding a quorum of shares for the backed proposal assembles the
+    // certificate and submits — the leader's authorising signature is in the
     // proposal, so no single aggregator can stall the round. Competing assemblies
     // share the same block hash, so duplicates are dropped by ProcessNewBlock.
     std::shared_ptr<CBlock> final_block;
@@ -757,13 +817,12 @@ int64_t PosProducer::DriveRound()
     size_t members_n = 0;
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
-        if (m_round_height == height && m_best_proposal &&
-            GetTimeMillis() >= m_round_start_ms + WINDOW_MS &&
+        if (m_round_height == height && m_backed_hash == backed->GetHash() &&
             (int)m_collected.size() >= PosQuorum((size_t)g_pos_committee_size)) {
-            CScript::const_iterator pc = m_best_proposal->proof.solution.begin();
+            CScript::const_iterator pc = backed->proof.solution.begin();
             opcodetype op;
             std::vector<unsigned char> leader_sig;
-            if (m_best_proposal->proof.solution.GetOp(pc, op, leader_sig) && !leader_sig.empty()) {
+            if (backed->proof.solution.GetOp(pc, op, leader_sig) && !leader_sig.empty()) {
                 std::vector<PosBlsMember> members;
                 std::vector<std::vector<unsigned char>> shares;
                 for (const auto& [pub, sh] : m_collected) {
@@ -777,19 +836,20 @@ int64_t PosProducer::DriveRound()
                 }
                 auto agg = BlsAggregate(shares);
                 if (agg) {
-                    final_block = std::make_shared<CBlock>(*m_best_proposal);
+                    final_block = std::make_shared<CBlock>(*backed);
                     final_block->proof.solution = BuildPosBlsSolution(leader_sig, *agg, members);
-                    final_hash = m_best_proposal->GetHash();
+                    final_hash = backed->GetHash();
                     members_n = members.size();
-                    m_best_proposal.reset(); // assembled; round done from our view
+                    m_collected.clear();   // assembled; do not re-assemble until the tip advances
+                    m_backed_hash.SetNull();
                 }
             }
         }
     }
     if (final_block) {
         if (m_chainman.ProcessNewBlock(m_chainparams, final_block, /*force_processing=*/true, nullptr)) {
-            LogPrintf("PoS gossip: certified block %s at height %d with %d committee member(s)\n",
-                      final_hash.GetHex(), height, (int)members_n);
+            LogPrintf("PoS gossip: certified block %s at height %d (round %d, %d committee member(s))\n",
+                      final_hash.GetHex(), height, round_index, (int)members_n);
         } else {
             LogPrint(BCLog::VALIDATION, "PoS gossip: assembled block %s was not accepted\n", final_hash.GetHex());
         }
@@ -798,7 +858,7 @@ int64_t PosProducer::DriveRound()
     // Poll fast while a round for the current height is still in progress.
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
-        if (m_round_height == height && m_best_proposal) return 150;
+        if (m_round_height == height) return 150;
     }
     return POS_PRODUCER_POLL_MS;
 }
@@ -864,14 +924,10 @@ PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& blo
             return PosGossipAction::Invalid;
         }
     }
-    bool recorded;
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
-        recorded = RecordProposal(block, parts->leader, lbeta, height);
+        RecordCandidate(block, parts->leader, lbeta, height);
     }
-    // An equivocating duplicate (same leader, different block this height) is
-    // dropped without penalty — it may be benign reordering at the sender.
-    if (!recorded) return PosGossipAction::Ignore;
     Wake(); // let the worker drive this round promptly
     return PosGossipAction::Relay;
 }
@@ -891,23 +947,33 @@ PosGossipAction PosProducer::OnShare(const PosShare& share)
     }
     if (!BlsVerifyPossession(share.bls_pubkey, share.bls_pop)) return PosGossipAction::Invalid;
     if (!BlsVerify(share.bls_pubkey, Span<const unsigned char>(share.block_hash.begin(), 32), share.bls_share)) return PosGossipAction::Invalid;
-    // Is it for the proposal we are backing this round? If not, it is a
-    // crypto-valid share for some other proposal whose sortition we cannot check
-    // here — relay it, do not collect.
-    uint256 prev_hash;
+    // Classify the share: for the proposal we are backing this round, for some
+    // other known candidate (a different round's leader — relay so its aggregators
+    // get it), or for nothing we know (junk — drop, do not amplify).
+    bool is_backed = false, is_candidate = false;
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
-        if (!m_best_proposal || share.block_hash != m_best_proposal->GetHash()) return PosGossipAction::Relay;
-        prev_hash = m_best_proposal->hashPrevBlock;
+        is_backed = (!m_backed_hash.IsNull() && share.block_hash == m_backed_hash);
+        if (!is_backed) {
+            for (const auto& [leader, cand] : m_candidates) {
+                if (cand.block->GetHash() == share.block_hash) { is_candidate = true; break; }
+            }
+        }
     }
-    // For the backed proposal we can (and must) check the signer's sortition.
-    CBlockIndex* prev;
+    if (!is_backed) return is_candidate ? PosGossipAction::Relay : PosGossipAction::Ignore;
+    // For the backed proposal we can (and must) check the signer's sortition. The
+    // proposal extends the active tip, so the slot seed is that of the tip.
+    CBlockIndex* tip;
     {
         LOCK(cs_main);
-        prev = m_chainman.m_blockman.LookupBlockIndex(prev_hash);
+        tip = m_chainman.ActiveChain().Tip();
     }
-    if (!prev) return PosGossipAction::Relay;
-    const uint256 seed = PosSeedForChild(prev);
+    if (!tip) return PosGossipAction::Relay;
+    {
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        if (m_round_height != tip->nHeight + 1 || m_backed_hash != share.block_hash) return PosGossipAction::Relay; // round moved on
+    }
+    const uint256 seed = PosSeedForChild(tip);
     const StakeRegistry& reg = StakeRegistry::GetInstance();
     const uint64_t weight = reg.GetWeight(share.pubkey);
     if (weight == 0) return PosGossipAction::Invalid;
@@ -916,8 +982,7 @@ PosGossipAction PosProducer::OnShare(const PosShare& share)
     if (!PosVrfIsCommitteeMember(beta, weight, PosTotalWeight(reg))) return PosGossipAction::Invalid;
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
-        if (m_best_proposal && share.block_hash == m_best_proposal->GetHash() &&
-            m_collected.size() < (size_t)MAX_POS_AGG_COMMITTEE_SIZE) {
+        if (m_backed_hash == share.block_hash && m_collected.size() < (size_t)MAX_POS_AGG_COMMITTEE_SIZE) {
             m_collected[share.pubkey] = share;
         }
     }
