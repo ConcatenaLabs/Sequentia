@@ -76,17 +76,21 @@ def asset_bytes_for(ec, d, port, asset_hex):
 
 
 def find_optrue_output(ec, d, port):
-    """The spendable -initialfreecoins genesis output (script OP_TRUE = '51')."""
-    g0, _ = cli(ec, d, port, ["getblockhash", "0"])
-    gb, _ = jcli(ec, d, port, ["getblock", g0, "2"])
-    for tx in gb["tx"]:
-        for v in tx["vout"]:
-            spk = v["scriptPubKey"]
-            if spk.get("hex") == "51" and Decimal(str(v["value"])) > 0:
-                utxo, _ = cli(ec, d, port, ["gettxout", tx["txid"], str(v["n"])], check=False)
-                if utxo:
-                    return {"txid": tx["txid"], "vout": v["n"],
-                            "value": Decimal(str(v["value"])), "asset": v["asset"]}
+    """The spendable -initialfreecoins genesis output (script OP_TRUE = '51').
+    Polls briefly: right after startup the genesis UTXO may not be queryable yet."""
+    for _ in range(20):
+        g0, _ = cli(ec, d, port, ["getblockhash", "0"])
+        gb, _ = jcli(ec, d, port, ["getblock", g0, "2"])
+        if gb:
+            for tx in gb["tx"]:
+                for v in tx["vout"]:
+                    spk = v["scriptPubKey"]
+                    if spk.get("hex") == "51" and Decimal(str(v["value"])) > 0:
+                        utxo, _ = cli(ec, d, port, ["gettxout", tx["txid"], str(v["n"])], check=False)
+                        if utxo:
+                            return {"txid": tx["txid"], "vout": v["n"],
+                                    "value": Decimal(str(v["value"])), "asset": v["asset"]}
+        time.sleep(1)
     raise RuntimeError("no spendable OP_TRUE initialfreecoins output in genesis")
 
 
