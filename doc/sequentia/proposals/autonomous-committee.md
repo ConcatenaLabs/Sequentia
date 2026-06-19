@@ -496,15 +496,39 @@ assembly and acceptance.
      assemble, and stall that height permanently; instead the committee converges
      on the lowest-VRF *valid* leader.
 
-   Together, decentralised aggregation (withholding/crashed leader) and
-   validate-before-backing (invalid leader) close the Byzantine-leader liveness
-   cases, so no explicit P6 round-robin index is needed. Remaining: the **P7
-   anchor-reshuffle** signing preference, and tuning for very large
-   committees/networks — the ~26 KB certificate at 100 members (cap/weight
+   - **Deterministic round-robin** (P6 §9, `feature_pos_gossip_byzantine.py`):
+     every eligible member proposes once per height, so the candidate set (hence
+     the leader order) is complete and common; the round index is derived from the
+     aligned clock, and round *r* backs the (r+1)-th lowest-VRF candidate. A round
+     that does not certify within `ROUND_MS` advances all honest nodes to the next
+     leader *in lockstep*, deterministically excluding the failed one. This closes
+     the residual case the recovery-reset only handled probabilistically: a
+     present-but-faulty leader that equivocates into a sub-quorum split or
+     withholds. Verified with a fault injector (`-posbyzantineequivocate`): a
+     committee with a Byzantine equivocating member keeps advancing, certifying at
+     rounds 1–2 (the round-robin actively excluding the leader).
+
+   Remaining: the **P7 anchor-reshuffle** signing preference, and tuning for very
+   large committees/networks — the ~26 KB certificate at 100 members (cap/weight
    sizing), per-proposal validation cost on the message thread, and proposal-flood
-   reduction now that every eligible node proposes per round (a window-coordinated
-   stagger or inv/getdata-style proposal relay would bound it without the
-   convergence hazard).
+   reduction now that every eligible node proposes per round (a lightweight VRF
+   announcement so only the elected leader sends a full block, or inv/getdata-style
+   proposal relay, would bound it without the convergence hazard).
+
+   **Safety note — the committee quorum is crash-tolerant, not Byzantine-safe.**
+   The certification quorum is a simple majority (51/100). That tolerates crash
+   faults and, combined with first-seen/round-robin, the Byzantine-leader liveness
+   cases above. It does *not* make the committee Byzantine-safe against conflicting
+   finalisation: there is no member-level equivocation guard (the share dedup is
+   per (block, member)), so equivocating *members* — one in an odd committee, two
+   in an even one — can push two conflicting blocks to a majority each and certify
+   both, a transient fork. As with all forks here, this is resolved by the
+   Bitcoin-anchored checkpoint (the anchored branch wins; §before), so it is a
+   bounded liveness/reorg event, not a permanent safety break — consistent with
+   deriving safety from Bitcoin rather than the committee. Committee-level
+   Byzantine *safety* (tolerating up to ⌊(n−1)/3⌋ equivocators with no transient
+   fork) would require a **two-thirds quorum**, a separate quorum-policy decision
+   against the paper's 51/100; it is noted here, not adopted unilaterally.
 
    **Not a goal — stake slashing.** Unlike economic-finality PoS (where slashing
    *is* the finality guarantee — reverting must burn ≥⅓ of stake), Sequentia's
