@@ -478,11 +478,22 @@ assembly and acceptance.
      no block within a recovery timeout resets so the committee re-converges on an
      available leader — a member crash (even of the round leader) does not stall
      the chain.
+   - **Scale** (`feature_pos_bls_large_committee.py`): validated to a 15-member
+     committee (quorum 8) with multi-key hosts and the larger in-solution
+     certificate, including through a host failure. This surfaced and fixed a
+     convergence bug — a per-slot leader *stagger* wider than the collection
+     window let an early proposer sign before others' proposals arrived, splitting
+     shares; the stagger was removed (the window + lowest-VRF convergence already
+     resolve multiple proposers).
 
    Remaining: the **P7 anchor-reshuffle** signing preference and an explicit **P6
-   round-robin index** for repeated contention (the reset-based recovery covers
-   the common case), and propagation/latency plus solution-size tuning for large
-   (100-member) committees.
+   round-robin index** for a *Byzantine* (present-but-withholding) leader — the
+   reset-based recovery handles a crashed leader but re-converges on a withholding
+   one; and tuning for very large committees/networks: the ~26 KB certificate at
+   100 members (cap/weight sizing) and proposal-flood reduction now that every
+   eligible node proposes per round (a window-coordinated stagger, or
+   compact/inv-style proposal relay, would bound it without the convergence
+   hazard).
 
    **Not a goal — stake slashing.** Unlike economic-finality PoS (where slashing
    *is* the finality guarantee — reverting must burn ≥⅓ of stake), Sequentia's
