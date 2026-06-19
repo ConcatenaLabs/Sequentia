@@ -528,11 +528,20 @@ assembly and acceptance.
      only the lowest-VRF proposal" (step 6) was *not* used: it would leave nodes
      different candidate sets and break the deterministic round-robin.
 
+   - **Lazy validation** (P6 step 10; `feature_pos_gossip_invalid.py`): proposals
+     are recorded after only the cheap objective checks (sortition, leader
+     signature, equivocation); full `TestBlockValidity` is deferred to the moment a
+     node signs the backed proposal — ~one validation per round, not one per
+     proposal on the message thread. An invalid backed block excludes its leader
+     (same exclusion path as equivocation) and the committee re-picks the next
+     valid one; only validated blocks are ever signed, so safety is unchanged.
+
    Remaining (scale tuning, not needed at launch): the ~26 KB certificate at 100
-   members (cap/weight sizing) and the per-proposal validation cost on the message
-   thread. A two-phase lightweight VRF announcement (all members announce cheaply;
-   only the elected leader sends a block) would cut origination further, but compact
-   proposals already make the per-round traffic flat in transaction volume.
+   members (cap/weight sizing — it reserves ~half the block-weight budget, a
+   config tradeoff inherent to a 100-member committee). A two-phase lightweight VRF
+   announcement (all members announce cheaply; only the elected leader sends a
+   block) would cut origination further, but compact proposals already make the
+   per-round traffic flat in transaction volume.
 
    **Quorum — a strict majority (51/100), and fork-free by leader exclusion, not 2/3.**
    The certification quorum is a simple majority, exactly as the Theoretical Paper
