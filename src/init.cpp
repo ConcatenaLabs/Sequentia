@@ -2104,7 +2104,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         if (producer_keys.empty()) {
             return InitError(_("-posproducer requires at least one -posproducerkey"));
         }
-        node.pos_producer = std::make_unique<PosProducer>(chainman, *node.mempool, chainparams, std::move(producer_keys));
+        node.pos_producer = std::make_unique<PosProducer>(chainman, *node.mempool, chainparams, node.connman.get(), std::move(producer_keys));
         node.pos_producer->Start();
     }
 

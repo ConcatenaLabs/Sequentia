@@ -10,9 +10,12 @@
 #include <crypto/sha256.h>
 #include <logging.h>
 #include <musig.h>
+#include <net.h>
+#include <netmessagemaker.h>
 #include <node/miner.h>
 #include <pos.h>
 #include <primitives/block.h>
+#include <protocol.h>
 #include <script/generic.hpp>
 #include <script/sign.h>
 #include <timedata.h>
@@ -21,6 +24,8 @@
 #include <util/time.h>
 #include <validation.h>
 #include <vrf.h>
+
+#include <atomic>
 
 #include <algorithm>
 #include <map>
@@ -45,7 +50,47 @@ std::vector<unsigned char> PosBlsSeedFromKey(const CKey& key)
              .Finalize(out);
     return std::vector<unsigned char>(out, out + 32);
 }
+
+//! Build the leader's unsigned BLS committee block extending the active tip:
+//! the OP_2 <leader> challenge, the leader's VRF commitment in the coinbase, an
+//! empty solution (the certificate is assembled once members sign). Returns the
+//! block and its height, or nullptr.
+std::shared_ptr<CBlock> BuildUnsignedBlsBlock(ChainstateManager& chainman, CTxMemPool& mempool,
+                                              const CChainParams& chainparams, const CKey& leader_key,
+                                              int& out_height)
+{
+    const CPubKey pubkey = leader_key.GetPubKey();
+    CBlockIndex* tip;
+    {
+        LOCK(cs_main);
+        tip = chainman.ActiveChain().Tip();
+    }
+    if (!tip) return nullptr;
+    const uint256 seed = PosSeedForChild(tip);
+    auto proof = VrfProve(leader_key, Span<const unsigned char>(seed.begin(), 32));
+    if (!proof) return nullptr;
+    std::vector<CScript> vrf_commitments;
+    vrf_commitments.push_back(BuildPosVrfCommitment(*proof));
+    CScript feeDest = chainparams.GetConsensus().mandatory_coinbase_destination;
+    if (feeDest == CScript()) feeDest = CScript() << OP_TRUE;
+    std::unique_ptr<CBlockTemplate> tmpl(
+        BlockAssembler(chainman.ActiveChainstate(), mempool, chainparams)
+            .CreateNewBlock(feeDest, std::chrono::seconds(0), nullptr, &vrf_commitments, &pubkey, &*proof, nullptr));
+    if (!tmpl) return nullptr;
+    auto block = std::make_shared<CBlock>(tmpl->block);
+    {
+        LOCK(cs_main);
+        unsigned int extra_nonce = 0;
+        IncrementExtraNonce(block.get(), chainman.ActiveChain().Tip(), extra_nonce);
+    }
+    out_height = tip->nHeight + 1;
+    return block;
+}
 } // namespace
+
+//! The running producer, for net_processing to deliver gossip to.
+static std::atomic<PosProducer*> g_active_producer{nullptr};
+PosProducer* GetActivePosProducer() { return g_active_producer.load(); }
 
 bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
                      const CChainParams& chainparams, const CKey& leader_key,
@@ -344,9 +389,9 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
 static constexpr int64_t POS_PRODUCER_POLL_MS = 1000;
 
 PosProducer::PosProducer(ChainstateManager& chainman, CTxMemPool& mempool,
-                         const CChainParams& chainparams, std::vector<CKey> keys)
+                         const CChainParams& chainparams, CConnman* connman, std::vector<CKey> keys)
     : m_chainman(chainman), m_mempool(mempool), m_chainparams(chainparams),
-      m_keys(std::move(keys)) {}
+      m_connman(connman), m_keys(std::move(keys)) {}
 
 PosProducer::~PosProducer() { Stop(); }
 
@@ -354,6 +399,7 @@ void PosProducer::Start()
 {
     if (m_running) return;
     m_running = true;
+    g_active_producer.store(this);
     RegisterValidationInterface(this);
     m_thread = std::thread(&util::TraceThread, "posproducer", [this] { ThreadLoop(); });
     LogPrintf("PoS producer: started with %d staking key(s)\n", (int)m_keys.size());
@@ -362,6 +408,7 @@ void PosProducer::Start()
 void PosProducer::Stop()
 {
     if (!m_running) return;
+    g_active_producer.store(nullptr);
     UnregisterValidationInterface(this);
     {
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -420,6 +467,7 @@ int64_t PosProducer::Step()
     // slot elsewhere produces first and wakes us for the next height.
     int best_idx = -1;
     uint64_t best_slot = 0;
+    int local_committee_eligible = 0; // how many of our keys are committee members this slot
     for (size_t i = 0; i < m_keys.size(); ++i) {
         const CPubKey pub = m_keys[i].GetPubKey();
         if (!PosIsEligibleStake(registry.GetWeight(pub))) continue;
@@ -430,6 +478,7 @@ int64_t PosProducer::Step()
             uint256 beta;
             if (!VrfVerify(pub, Span<const unsigned char>(seed.begin(), 32), *proof, beta)) continue;
             slot = PosVrfSlot(beta, registry.GetWeight(pub), total_weight);
+            if (PosVrfIsCommitteeMember(beta, registry.GetWeight(pub), total_weight)) local_committee_eligible++;
         } else {
             std::optional<size_t> rank = PosRank(registry, seed, pub);
             if (!rank) continue;
@@ -442,19 +491,54 @@ int64_t PosProducer::Step()
     }
     if (best_idx < 0) return POS_PRODUCER_POLL_MS; // none of our keys is an eligible staker
 
+    const int quorum = PosQuorum((size_t)g_pos_committee_size);
+
     // Slot timing: the leader's slot opens slot*interval after the parent, and
     // we never produce faster than one interval since the parent — the paper's
     // soft lower-bound cadence floor (Principle 10; consensus only enforces the
-    // slot gate). Wait until the later of the two.
+    // slot gate). A sub-second leader stagger (finer than the 1-second block
+    // clock) on top lets the lowest-VRF-slot node propose first; staggering from
+    // the later of the slot time and the current second keeps it effective during
+    // catch-up (when the slot time is far in the past).
+    static const int64_t POS_LEADER_STAGGER_MS = 300;
     const int64_t slot_open = (int64_t)tip->nTime + (int64_t)best_slot * g_pos_slot_interval;
     const int64_t cadence_floor = (int64_t)tip->nTime + g_pos_slot_interval;
-    const int64_t earliest = std::max(slot_open, cadence_floor);
-    const int64_t now = GetAdjustedTime();
-    if (now < earliest) {
-        // Sleep until our slot, but cap the wait so a new tip or shutdown is
-        // noticed promptly even if the cv wakeup is missed.
-        const int64_t wait_ms = (earliest - now) * 1000;
-        return std::clamp<int64_t>(wait_ms, 1, POS_PRODUCER_POLL_MS * 5);
+    const int64_t earliest_sec = std::max(slot_open, cadence_floor);
+    const int64_t now_ms = GetTimeMillis();
+    const int64_t base_ms = std::max(earliest_sec * 1000, (now_ms / 1000) * 1000);
+    const int64_t target_ms = base_ms + (int64_t)best_slot * POS_LEADER_STAGGER_MS;
+
+    // BLS distributed committee (we lack a local quorum, e.g. one key per host):
+    // drive the gossip round every poll — sign the lowest-VRF proposal once the
+    // collection window closes, and assemble if our own proposal wins with a
+    // quorum — and propose when our slot is due if no round has started yet.
+    if (g_pos_bls && g_pos_committee_size > 1 && local_committee_eligible < quorum) {
+        const int height = tip->nHeight + 1;
+        int64_t round_poll = DriveRound();
+        const bool connected = m_connman && m_connman->GetNodeCount(ConnectionDirection::Both) > 0;
+        if (now_ms >= target_ms && connected) {
+            bool start;
+            {
+                std::lock_guard<std::mutex> lock(m_gossip_mutex);
+                start = (m_round_height < height); // no proposal seen yet this height
+            }
+            if (start) {
+                ProposeGossip(m_keys[best_idx]);
+                round_poll = 150;
+            }
+        }
+        int64_t wait = std::min<int64_t>(round_poll, POS_PRODUCER_POLL_MS);
+        // No active round and not yet due to propose: wake right at our slot
+        // target (the stagger is sub-second, so we must not overshoot it with a
+        // full poll interval).
+        if (wait >= POS_PRODUCER_POLL_MS && now_ms < target_ms) {
+            wait = std::clamp<int64_t>(target_ms - now_ms, 1, POS_PRODUCER_POLL_MS);
+        }
+        return wait;
+    }
+
+    if (now_ms < target_ms) {
+        return std::clamp<int64_t>(target_ms - now_ms, 1, POS_PRODUCER_POLL_MS * 5);
     }
 
     // Due now: assemble, sign, submit. The remaining keys serve as committee
@@ -473,4 +557,286 @@ int64_t PosProducer::Step()
         LogPrint(BCLog::VALIDATION, "PoS producer: no block this round: %s\n", err);
     }
     return POS_PRODUCER_POLL_MS;
+}
+
+// --- Gossip committee --------------------------------------------------------
+
+void PosProducer::FloodProposal(const CBlock& block)
+{
+    if (!m_connman) return;
+    m_connman->ForEachNode([&](CNode* pnode) {
+        m_connman->PushMessage(pnode, CNetMsgMaker(pnode->GetCommonVersion()).Make(NetMsgType::POSPROPOSAL, block));
+    });
+}
+
+void PosProducer::Wake()
+{
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_wake = true;
+    }
+    m_cv.notify_all();
+}
+
+void PosProducer::FloodShare(const PosShare& share)
+{
+    if (!m_connman) return;
+    m_connman->ForEachNode([&](CNode* pnode) {
+        m_connman->PushMessage(pnode, CNetMsgMaker(pnode->GetCommonVersion()).Make(NetMsgType::POSSHARE, share));
+    });
+}
+
+std::vector<PosShare> PosProducer::MakeLocalShares(const CBlock& block)
+{
+    std::vector<PosShare> out;
+    CBlockIndex* prev;
+    {
+        LOCK(cs_main);
+        prev = m_chainman.m_blockman.LookupBlockIndex(block.hashPrevBlock);
+    }
+    if (!prev) return out;
+    const uint256 seed = PosSeedForChild(prev);
+    const StakeRegistry& reg = StakeRegistry::GetInstance();
+    const uint64_t total = PosTotalWeight(reg);
+    const uint256 hash = block.GetHash();
+    for (const CKey& k : m_keys) {
+        const CPubKey pub = k.GetPubKey();
+        if (!PosIsEligibleStake(reg.GetWeight(pub))) continue;
+        auto proof = VrfProve(k, Span<const unsigned char>(seed.begin(), 32));
+        if (!proof) continue;
+        uint256 beta;
+        if (!VrfVerify(pub, Span<const unsigned char>(seed.begin(), 32), *proof, beta)) continue;
+        if (!PosVrfIsCommitteeMember(beta, reg.GetWeight(pub), total)) continue;
+        const std::vector<unsigned char> bls_seed = PosBlsSeedFromKey(k);
+        auto bls_pub = BlsDerivePubKey(bls_seed);
+        auto bls_pop = BlsProvePossession(bls_seed);
+        auto share_sig = BlsSign(bls_seed, Span<const unsigned char>(hash.begin(), 32));
+        if (!bls_pub || !bls_pop || !share_sig) continue;
+        PosShare sh;
+        sh.block_hash = hash;
+        sh.pubkey = pub;
+        sh.vrf_proof = *proof;
+        sh.bls_pubkey = *bls_pub;
+        sh.bls_pop = *bls_pop;
+        sh.bls_share = *share_sig;
+        out.push_back(std::move(sh));
+    }
+    return out;
+}
+
+void PosProducer::RecordProposal(const std::shared_ptr<const CBlock>& block, const uint256& leader_beta, int height)
+{
+    // m_gossip_mutex held. One round per height; within a round keep the
+    // lowest-leader-VRF proposal (paper P6 step 6/8 convergence).
+    if (height < m_round_height) return; // stale
+    if (height > m_round_height) {
+        m_round_height = height;
+        m_round_start_ms = GetTimeMillis();
+        m_best_proposal = block;
+        m_best_beta = leader_beta;
+        m_signed = false;
+        m_proposal.reset();
+        m_collected.clear();
+    } else if (!m_best_proposal || leader_beta < m_best_beta) {
+        m_best_proposal = block;
+        m_best_beta = leader_beta;
+    }
+}
+
+void PosProducer::ProposeGossip(const CKey& leader_key)
+{
+    int height = 0;
+    auto block = BuildUnsignedBlsBlock(m_chainman, m_mempool, m_chainparams, leader_key, height);
+    if (!block) {
+        LogPrint(BCLog::VALIDATION, "PoS gossip: failed to build a proposal\n");
+        return;
+    }
+    const uint256 hash = block->GetHash();
+    uint256 own_beta;
+    {
+        CBlockIndex* prev;
+        {
+            LOCK(cs_main);
+            prev = m_chainman.m_blockman.LookupBlockIndex(block->hashPrevBlock);
+        }
+        if (prev) {
+            const uint256 seed = PosSeedForChild(prev);
+            auto pr = VrfProve(leader_key, Span<const unsigned char>(seed.begin(), 32));
+            if (pr) VrfVerify(leader_key.GetPubKey(), Span<const unsigned char>(seed.begin(), 32), *pr, own_beta);
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        RecordProposal(block, own_beta, height);
+        // Remember this is OUR proposal so we collect shares for it (and assemble
+        // it if it wins the round).
+        m_proposal = block;
+        m_proposal_hash = hash;
+    }
+    LogPrintf("PoS gossip: proposing block %s at height %d\n", hash.GetHex(), height);
+    FloodProposal(*block);
+}
+
+int64_t PosProducer::DriveRound()
+{
+    // Length of the proposal-collection window before we sign the lowest-VRF
+    // proposal. Long enough for proposals to propagate, short for fast blocks.
+    static const int64_t WINDOW_MS = 500;
+    CBlockIndex* tip;
+    {
+        LOCK(cs_main);
+        tip = m_chainman.ActiveChain().Tip();
+    }
+    if (!tip) return POS_PRODUCER_POLL_MS;
+    const int height = tip->nHeight + 1;
+
+    // Once the window closes, sign the round's best proposal exactly once.
+    std::shared_ptr<const CBlock> to_sign;
+    bool sign_is_own = false;
+    {
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        if (m_round_height == height && !m_signed && m_best_proposal &&
+            GetTimeMillis() >= m_round_start_ms + WINDOW_MS) {
+            to_sign = m_best_proposal;
+            m_signed = true;
+            sign_is_own = m_proposal && (m_best_proposal->GetHash() == m_proposal_hash);
+        }
+    }
+    if (to_sign) {
+        std::vector<PosShare> shares = MakeLocalShares(*to_sign);
+        if (sign_is_own) {
+            std::lock_guard<std::mutex> lock(m_gossip_mutex);
+            for (PosShare& sh : shares) m_collected[sh.pubkey] = sh;
+        } else {
+            for (const PosShare& sh : shares) FloodShare(sh);
+        }
+    }
+
+    // If our own proposal won the round and we hold a quorum, assemble + submit.
+    std::shared_ptr<CBlock> final_block;
+    uint256 final_hash;
+    size_t members_n = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        if (m_round_height == height && m_proposal && m_best_proposal &&
+            m_best_proposal->GetHash() == m_proposal_hash &&
+            GetTimeMillis() >= m_round_start_ms + WINDOW_MS) {
+            const int quorum = PosQuorum((size_t)g_pos_committee_size);
+            if ((int)m_collected.size() >= quorum) {
+                auto parts = ParsePosBlockChallenge(m_proposal->proof.challenge);
+                CKey leader_key;
+                if (parts) {
+                    for (const CKey& k : m_keys) {
+                        if (k.GetPubKey() == parts->leader) { leader_key = k; break; }
+                    }
+                }
+                std::vector<unsigned char> leader_sig;
+                if (parts && leader_key.IsValid() && leader_key.Sign(m_proposal->GetHash(), leader_sig)) {
+                    std::vector<PosBlsMember> members;
+                    std::vector<std::vector<unsigned char>> shares;
+                    for (const auto& [pub, sh] : m_collected) {
+                        PosBlsMember m;
+                        m.pubkey = pub;
+                        m.proof = sh.vrf_proof;
+                        m.bls_pubkey = sh.bls_pubkey;
+                        m.bls_pop = sh.bls_pop;
+                        members.push_back(std::move(m));
+                        shares.push_back(sh.bls_share);
+                    }
+                    auto agg = BlsAggregate(shares);
+                    if (agg) {
+                        final_block = std::make_shared<CBlock>(*m_proposal);
+                        final_block->proof.solution = BuildPosBlsSolution(leader_sig, *agg, members);
+                        final_hash = m_proposal->GetHash();
+                        members_n = members.size();
+                        m_proposal.reset(); // assembled; stop collecting
+                    }
+                }
+            }
+        }
+    }
+    if (final_block) {
+        if (m_chainman.ProcessNewBlock(m_chainparams, final_block, /*force_processing=*/true, nullptr)) {
+            LogPrintf("PoS gossip: certified block %s at height %d with %d committee member(s)\n",
+                      final_hash.GetHex(), height, (int)members_n);
+        } else {
+            LogPrint(BCLog::VALIDATION, "PoS gossip: assembled block %s was not accepted\n", final_hash.GetHex());
+        }
+    }
+
+    // Poll fast while a round for the current height is in progress.
+    {
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        if (m_round_height == height && (m_proposal || !m_signed)) return 150;
+    }
+    return POS_PRODUCER_POLL_MS;
+}
+
+bool PosProducer::OnProposal(const std::shared_ptr<const CBlock>& block)
+{
+    const uint256 hash = block->GetHash();
+    {
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        if (!m_seen_proposals.insert(hash).second) return false; // already seen; don't relay
+        if (m_seen_proposals.size() > 20000) m_seen_proposals.clear();
+    }
+    CBlockIndex* tip;
+    {
+        LOCK(cs_main);
+        tip = m_chainman.ActiveChain().Tip();
+    }
+    if (!tip || block->hashPrevBlock != tip->GetBlockHash()) return true; // relay; not on our tip
+    const int height = tip->nHeight + 1;
+    auto parts = ParsePosBlockChallenge(block->proof.challenge);
+    if (!parts || !parts->is_bls) return true;
+    const uint256 seed = PosSeedForChild(tip);
+    auto leader_proof = ExtractPosVrfProof(*block);
+    uint256 lbeta;
+    if (!leader_proof || !VrfVerify(parts->leader, Span<const unsigned char>(seed.begin(), 32), *leader_proof, lbeta)) return true;
+    if (StakeRegistry::GetInstance().GetWeight(parts->leader) == 0) return true;
+    {
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        RecordProposal(block, lbeta, height);
+    }
+    Wake(); // let the worker drive this round promptly
+    return true;
+}
+
+bool PosProducer::OnShare(const PosShare& share)
+{
+    {
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        if (!m_seen_shares.insert({share.block_hash, share.pubkey}).second) return false;
+        if (m_seen_shares.size() > 200000) m_seen_shares.clear();
+    }
+    // Crypto validation (registry-independent).
+    if (share.bls_pubkey.size() != BLS_PK_SIZE || share.bls_pop.size() != BLS_SIG_SIZE || share.bls_share.size() != BLS_SIG_SIZE) return true;
+    if (!BlsVerifyPossession(share.bls_pubkey, share.bls_pop)) return true;
+    if (!BlsVerify(share.bls_pubkey, Span<const unsigned char>(share.block_hash.begin(), 32), share.bls_share)) return true;
+    // Only collect shares for our own proposal.
+    uint256 prev_hash;
+    {
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        if (!m_proposal || share.block_hash != m_proposal_hash) return true; // not ours; relay
+        prev_hash = m_proposal->hashPrevBlock;
+    }
+    // Member sortition eligibility for the proposal's slot.
+    CBlockIndex* prev;
+    {
+        LOCK(cs_main);
+        prev = m_chainman.m_blockman.LookupBlockIndex(prev_hash);
+    }
+    if (!prev) return true;
+    const uint256 seed = PosSeedForChild(prev);
+    const StakeRegistry& reg = StakeRegistry::GetInstance();
+    if (reg.GetWeight(share.pubkey) == 0) return true;
+    uint256 beta;
+    if (!VrfVerify(share.pubkey, Span<const unsigned char>(seed.begin(), 32), share.vrf_proof, beta)) return true;
+    if (!PosVrfIsCommitteeMember(beta, reg.GetWeight(share.pubkey), PosTotalWeight(reg))) return true;
+    {
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        if (m_proposal && share.block_hash == m_proposal_hash) m_collected[share.pubkey] = share;
+    }
+    Wake(); // a new share may complete our quorum
+    return true;
 }

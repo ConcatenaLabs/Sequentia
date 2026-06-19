@@ -22,18 +22,45 @@
 #define BITCOIN_POS_PRODUCER_H
 
 #include <key.h>
+#include <pubkey.h>
+#include <serialize.h>
 #include <uint256.h>
 #include <validationinterface.h>
 
 #include <condition_variable>
+#include <map>
+#include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
+class CBlock;
 class CChainParams;
+class CConnman;
 class CTxMemPool;
 class ChainstateManager;
+
+/** SEQUENTIA: one committee member's contribution to a proposed block, gossiped
+ *  as a `posshare`: its BLS signature share over the proposal's (member-
+ *  independent) block hash, plus everything the leader needs to put the member
+ *  into the certificate — its staking key, sortition-eligibility VRF proof, BLS
+ *  public key, and BLS proof-of-possession. */
+struct PosShare {
+    uint256 block_hash;
+    CPubKey pubkey;
+    std::vector<unsigned char> vrf_proof;
+    std::vector<unsigned char> bls_pubkey;
+    std::vector<unsigned char> bls_pop;
+    std::vector<unsigned char> bls_share;
+
+    SERIALIZE_METHODS(PosShare, obj)
+    {
+        READWRITE(obj.block_hash, obj.pubkey, obj.vrf_proof, obj.bls_pubkey, obj.bls_pop, obj.bls_share);
+    }
+};
 
 /** The outcome of producing one PoS block, for RPC result formatting. */
 struct PosProduceResult {
@@ -87,13 +114,24 @@ class PosProducer final : public CValidationInterface
 {
 public:
     PosProducer(ChainstateManager& chainman, CTxMemPool& mempool,
-                const CChainParams& chainparams, std::vector<CKey> keys);
+                const CChainParams& chainparams, CConnman* connman, std::vector<CKey> keys);
     ~PosProducer();
 
     /** Register for tip notifications and start the worker thread. */
     void Start();
     /** Unregister, stop the worker thread, and join it. Idempotent. */
     void Stop();
+
+    // --- Gossip committee (called from net_processing on the message thread) ---
+    //
+    //! Ingest a peer's `posproposal` (an elected leader's unsigned block). If it
+    //! is new and valid, sign it with any locally-held sortitioned keys and
+    //! flood the resulting shares. Returns true if the proposal was new (relay).
+    bool OnProposal(const std::shared_ptr<const CBlock>& block);
+    //! Ingest a peer's `posshare`. If it matches a block we proposed, collect it
+    //! and, on reaching the quorum, assemble the certificate and submit the
+    //! block. Returns true if the share was new (relay).
+    bool OnShare(const PosShare& share);
 
 protected:
     void UpdatedBlockTip(const CBlockIndex* pindexNew, const CBlockIndex* pindexFork,
@@ -105,9 +143,30 @@ private:
     //! block. Returns how long to sleep (ms) before the next evaluation.
     int64_t Step();
 
+    //! Leader path for a distributed BLS committee: build the unsigned block and
+    //! flood it as a proposal (it enters this round as a candidate; signing and
+    //! assembly happen in the round driver once the collection window closes).
+    void ProposeGossip(const CKey& leader_key);
+    //! Drive the active gossip round on the worker thread: once the collection
+    //! window has closed, sign the lowest-VRF proposal once; if we are that
+    //! proposal's leader and hold a quorum of shares, assemble and submit.
+    //! Returns the poll interval (short while a round is in progress).
+    int64_t DriveRound();
+    //! Record a proposal into the current round (resetting on a new height,
+    //! keeping the lowest-leader-VRF one). m_gossip_mutex held.
+    void RecordProposal(const std::shared_ptr<const CBlock>& block, const uint256& leader_beta, int height);
+    //! Produce shares for every locally-held key that is sortition-eligible for
+    //! `block`'s slot.
+    std::vector<PosShare> MakeLocalShares(const CBlock& block);
+    void FloodProposal(const CBlock& block);
+    void FloodShare(const PosShare& share);
+    //! Wake the worker thread (e.g. when a gossip message advances a round).
+    void Wake();
+
     ChainstateManager& m_chainman;
     CTxMemPool& m_mempool;
     const CChainParams& m_chainparams;
+    CConnman* const m_connman;
     const std::vector<CKey> m_keys;
 
     std::thread m_thread;
@@ -116,6 +175,22 @@ private:
     bool m_stop{false};
     bool m_wake{false};
     bool m_running{false};
+
+    // Gossip round state (one round per height).
+    std::mutex m_gossip_mutex;
+    int m_round_height{0};                             //!< height we are collecting proposals for
+    int64_t m_round_start_ms{0};                       //!< when this round's first proposal was seen
+    std::shared_ptr<const CBlock> m_best_proposal;     //!< lowest-leader-VRF proposal this round
+    uint256 m_best_beta;                               //!< its leader VRF (lower is better)
+    bool m_signed{false};                              //!< have we signed (once) this round
+    std::shared_ptr<const CBlock> m_proposal;          //!< our own proposal this round (if we proposed)
+    uint256 m_proposal_hash;
+    std::map<CPubKey, PosShare> m_collected;           //!< shares for our own proposal
+    std::set<uint256> m_seen_proposals;                //!< proposal dedup
+    std::set<std::pair<uint256, CPubKey>> m_seen_shares; //!< share dedup
 };
+
+/** The running producer (for net_processing to deliver gossip to), or nullptr. */
+PosProducer* GetActivePosProducer();
 
 #endif // BITCOIN_POS_PRODUCER_H

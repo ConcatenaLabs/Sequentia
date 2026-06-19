@@ -18,6 +18,7 @@
 #include <merkleblock.h>
 #include <netbase.h>
 #include <netmessagemaker.h>
+#include <pos_producer.h>
 #include <node/blockstorage.h>
 #include <policy/fees.h>
 #include <policy/policy.h>
@@ -4137,6 +4138,36 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                     m_txrequest.ReceivedResponse(pfrom.GetId(), inv.hash);
                 }
             }
+        }
+        return;
+    }
+
+    // SEQUENTIA: autonomous Proof-of-Stake committee gossip. Deliver the message
+    // to the local producer (if any), which validates it, signs/aggregates, and
+    // returns whether it was new; if new, relay it to our other peers so it
+    // floods the committee. (doc/sequentia/proposals/autonomous-committee.md §4.)
+    if (msg_type == NetMsgType::POSPROPOSAL) {
+        std::shared_ptr<CBlock> pblock = std::make_shared<CBlock>();
+        vRecv >> *pblock;
+        PosProducer* prod = GetActivePosProducer();
+        if (prod && prod->OnProposal(pblock)) {
+            m_connman.ForEachNode([&](CNode* pnode) {
+                if (pnode->GetId() == pfrom.GetId()) return;
+                m_connman.PushMessage(pnode, CNetMsgMaker(pnode->GetCommonVersion()).Make(NetMsgType::POSPROPOSAL, *pblock));
+            });
+        }
+        return;
+    }
+
+    if (msg_type == NetMsgType::POSSHARE) {
+        PosShare share;
+        vRecv >> share;
+        PosProducer* prod = GetActivePosProducer();
+        if (prod && prod->OnShare(share)) {
+            m_connman.ForEachNode([&](CNode* pnode) {
+                if (pnode->GetId() == pfrom.GetId()) return;
+                m_connman.PushMessage(pnode, CNetMsgMaker(pnode->GetCommonVersion()).Make(NetMsgType::POSSHARE, share));
+            });
         }
         return;
     }

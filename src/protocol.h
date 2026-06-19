@@ -262,6 +262,18 @@ extern const char* CFCHECKPT;
  * @since protocol version 70016 as described by BIP 339.
  */
 extern const char* WTXIDRELAY;
+/**
+ * SEQUENTIA: posproposal carries an elected leader's unsigned Proof-of-Stake
+ * block to the autonomous committee for countersigning (the certificate is
+ * assembled into its proof solution after members reply with posshare).
+ */
+extern const char* POSPROPOSAL;
+/**
+ * SEQUENTIA: posshare carries one committee member's BLS signature share over a
+ * proposed block's (member-independent) hash, plus its sortition-eligibility
+ * proof and BLS key, so the leader can aggregate a quorum into a certificate.
+ */
+extern const char* POSSHARE;
 }; // namespace NetMsgType
 
 /* Get a vector of all valid message types (see above) */
