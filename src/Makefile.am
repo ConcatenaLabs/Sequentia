@@ -15,7 +15,7 @@ AM_LIBTOOLFLAGS = --preserve-dup-deps
 PTHREAD_FLAGS = $(PTHREAD_CFLAGS) $(PTHREAD_LIBS)
 EXTRA_LIBRARIES =
 
-BITCOIN_INCLUDES=-I$(builddir) -I$(srcdir)/$(MINISKETCH_INCLUDE_DIR_INT) -I$(srcdir)/secp256k1/include -I$(srcdir)/$(UNIVALUE_INCLUDE_DIR_INT) -I$(srcdir)/$(ELEMENTS_SIMPLICITY_INCLUDE_DIR_INT) $(BDB_CPPFLAGS) $(BOOST_CPPFLAGS) $(LEVELDB_CPPFLAGS)
+BITCOIN_INCLUDES=-I$(builddir) -I$(srcdir)/$(MINISKETCH_INCLUDE_DIR_INT) -I$(srcdir)/secp256k1/include -I$(srcdir)/blst/bindings -I$(srcdir)/$(UNIVALUE_INCLUDE_DIR_INT) -I$(srcdir)/$(ELEMENTS_SIMPLICITY_INCLUDE_DIR_INT) $(BDB_CPPFLAGS) $(BOOST_CPPFLAGS) $(LEVELDB_CPPFLAGS)
 
 LIBBITCOIN_NODE=libbitcoin_node.a
 LIBBITCOIN_COMMON=libbitcoin_common.a
@@ -25,6 +25,7 @@ LIBBITCOIN_UTIL=libbitcoin_util.a
 LIBBITCOIN_CRYPTO_BASE=crypto/libbitcoin_crypto_base.a
 LIBBITCOINQT=qt/libbitcoinqt.a
 LIBSECP256K1=secp256k1/libsecp256k1.la
+LIBBLST=libblst.a
 
 if ENABLE_ZMQ
 LIBBITCOIN_ZMQ=libbitcoin_zmq.a
@@ -57,6 +58,17 @@ endif
 
 $(LIBSECP256K1): $(wildcard secp256k1/src/*.h) $(wildcard secp256k1/src/*.c) $(wildcard secp256k1/include/*)
 	$(AM_V_at)$(MAKE) $(AM_MAKEFLAGS) -C $(@D) $(@F)
+
+# SEQUENTIA: BLS12-381 (blst) as a convenience static library. blst is not
+# autotools, so build it with an explicit rule from its C amalgamation
+# (src/server.c) plus the x86-64/ELF assembly amalgamation (build/assembly.S);
+# the flags follow blst's own recommended build.
+BLST_BUILD_CFLAGS = -O2 -fno-builtin -fPIC -Wall
+$(LIBBLST): $(srcdir)/blst/src/server.c $(srcdir)/blst/build/assembly.S $(wildcard $(srcdir)/blst/src/*) $(wildcard $(srcdir)/blst/build/elf/*) $(srcdir)/blst/bindings/blst.h
+	$(AM_V_at)$(CC) $(BLST_BUILD_CFLAGS) -I$(srcdir)/blst/bindings -c $(srcdir)/blst/src/server.c -o blst-server.o
+	$(AM_V_at)$(CC) $(BLST_BUILD_CFLAGS) -c $(srcdir)/blst/build/assembly.S -o blst-assembly.o
+	$(AM_V_at)$(AR) cr $@ blst-server.o blst-assembly.o
+	$(AM_V_at)$(RANLIB) $@
 
 # Make is not made aware of per-object dependencies to avoid limiting building parallelization
 # But to build the less dependent modules first, we manually select their order here:
@@ -214,6 +226,7 @@ BITCOIN_CORE_H = \
   policy/value.h \
   pos.h \
   pos_producer.h \
+  bls.h \
   musig.h \
   vrf.h \
   pow.h \
@@ -612,6 +625,7 @@ libbitcoin_common_a_SOURCES = \
   chainparams.cpp \
   coins.cpp \
   exchangerates.cpp \
+  bls.cpp \
   musig.cpp \
   pos.cpp \
   vrf.cpp \
@@ -732,6 +746,7 @@ elements_bin_ldadd = \
   $(LIBLEVELDB_SSE42) \
   $(LIBMEMENV) \
   $(LIBSECP256K1) \
+  $(LIBBLST) \
   $(LIBELEMENTSSIMPLICITY)
 
 elements_bin_ldadd += $(BDB_LIBS) $(MINIUPNPC_LIBS) $(NATPMP_LIBS) $(EVENT_PTHREADS_LIBS) $(EVENT_LIBS) $(ZMQ_LIBS) $(SQLITE_LIBS)
@@ -855,6 +870,7 @@ CTAES_DIST += crypto/ctaes/README.md
 CTAES_DIST += crypto/ctaes/test.c
 
 CLEANFILES = $(EXTRA_LIBRARIES)
+CLEANFILES += $(LIBBLST) blst-server.o blst-assembly.o
 
 CLEANFILES += *.gcda *.gcno
 CLEANFILES += compat/*.gcda compat/*.gcno
