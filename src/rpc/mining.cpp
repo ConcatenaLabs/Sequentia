@@ -18,6 +18,7 @@
 #include <net.h>
 #include <musig.h>
 #include <pos.h>
+#include <pos_producer.h>
 #include <vrf.h>
 #include <node/context.h>
 #include <node/miner.h>
@@ -1812,220 +1813,50 @@ static RPCHelpMan generateposblock()
     if (!key.IsValid()) {
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid private key");
     }
-    CPubKey pubkey = key.GetPubKey();
-
     ChainstateManager& chainman = EnsureAnyChainman(request.context);
     const NodeContext& node = EnsureAnyNodeContext(request.context);
-    CChainParams chainparams(Params());
+    const CChainParams& chainparams = Params();
 
-    CBlockIndex* tip;
-    {
-        LOCK(cs_main);
-        tip = chainman.ActiveChain().Tip();
-    }
-    uint256 seed = PosSeedForChild(tip);
-    std::optional<size_t> rank = PosRank(StakeRegistry::GetInstance(), seed, pubkey);
-    if (!rank) {
-        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "This key is not a registered staker for the current slot");
-    }
-
-    CScript feeDestinationScript = chainparams.GetConsensus().mandatory_coinbase_destination;
-    if (feeDestinationScript == CScript()) feeDestinationScript = CScript() << OP_TRUE;
-
-    // VRF sortition mode: compute this staker's sortition proof over the slot
-    // seed and commit it in the coinbase (doc/sequentia/04-proof-of-stake.md §4). With
-    // committee certification, also compute each provided committee key's
-    // eligibility proof; only sortition-selected members may countersign, and
-    // at least a quorum of them must be available.
-    std::vector<unsigned char> vrf_proof;
-    std::vector<CScript> vrf_commitments;
-    std::vector<CPubKey> vrf_committee;
-    std::map<CPubKey, CKey> candidates; // committee key candidates (leader + provided)
-    uint64_t vrf_slot = 0;
-    uint256 vrf_output;
-    if (g_pos_vrf) {
-        uint256 seed = PosSeedForChild(tip);
-        auto proof = VrfProve(key, Span<const unsigned char>(seed.begin(), 32));
-        if (!proof) {
-            throw JSONRPCError(RPC_MISC_ERROR, "Failed to compute VRF sortition proof");
-        }
-        vrf_proof = *proof;
-        if (!VrfVerify(pubkey, Span<const unsigned char>(seed.begin(), 32), vrf_proof, vrf_output)) {
-            throw JSONRPCError(RPC_INTERNAL_ERROR, "Produced VRF proof did not verify");
-        }
-        const StakeRegistry& registry = StakeRegistry::GetInstance();
-        const uint64_t total_weight = PosTotalWeight(registry);
-        vrf_slot = PosVrfSlot(vrf_output, registry.GetWeight(pubkey), total_weight);
-        vrf_commitments.push_back(BuildPosVrfCommitment(vrf_proof));
-
-        if (g_pos_committee_size > 1) {
-            // Gather candidate committee keys (the leader's own key is a
-            // candidate too), keep the sortition-selected ones.
-            candidates.emplace(pubkey, key);
-            if (!request.params[1].isNull()) {
-                // Bound the committee-key array before doing per-entry EC work
-                // (DecodeSecret + VRF prove/verify), mirroring getposblocktemplate.
-                if ((int)request.params[1].get_array().size() > MAX_POS_AGG_COMMITTEE_SIZE) {
-                    throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("At most %d committee keys may be supplied", MAX_POS_AGG_COMMITTEE_SIZE));
-                }
-                for (const UniValue& wif : request.params[1].get_array().getValues()) {
-                    CKey ckey = DecodeSecret(wif.get_str());
-                    if (!ckey.IsValid()) {
-                        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid committee private key");
-                    }
-                    candidates.emplace(ckey.GetPubKey(), ckey);
-                }
-            }
-            // Sortition is probabilistic, so more than the expected committee
-            // size can be eligible. The challenge form caps the members it can
-            // carry (script multisig: 16; aggregate: 100); stop at the cap —
-            // any quorum-satisfying subset certifies the block.
-            const int member_cap = g_pos_agg_committee ? MAX_POS_AGG_COMMITTEE_SIZE : MAX_POS_COMMITTEE_SIZE;
-            int eligible = 0;
-            for (const auto& [member_pub, member_key] : candidates) {
-                if ((int)vrf_committee.size() >= member_cap) break;
-                if (!PosIsEligibleStake(registry.GetWeight(member_pub))) continue; // unregistered or below min-stake
-                auto member_proof = VrfProve(member_key, Span<const unsigned char>(seed.begin(), 32));
-                if (!member_proof) continue;
-                uint256 member_beta;
-                if (!VrfVerify(member_pub, Span<const unsigned char>(seed.begin(), 32), *member_proof, member_beta)) continue;
-                if (!PosVrfIsCommitteeMember(member_beta, registry.GetWeight(member_pub), total_weight)) continue;
-                vrf_committee.push_back(member_pub);
-                vrf_commitments.push_back(BuildPosVrfMemberCommitment(member_pub, *member_proof));
-                eligible++;
-            }
-            int quorum = PosQuorum((size_t)g_pos_committee_size);
-            if (eligible < quorum) {
-                // Aggregate committees may certify below quorum under the
-                // escaping-stall rule (whitepaper §3.8) when the chain has
-                // stalled; consensus validation checks the anchor-gap
-                // condition, so just ensure at least one member signs.
-                // Script-multisig committees always require the full quorum.
-                if (!g_pos_agg_committee) {
-                    throw JSONRPCError(RPC_MISC_ERROR, strprintf(
-                        "Only %d of the provided keys are sortition-selected committee members for this slot; quorum is %d of an expected committee of %d (provide more committeekeys, or retry next slot)",
-                        eligible, quorum, g_pos_committee_size));
-                }
-                if (eligible < 1) {
-                    throw JSONRPCError(RPC_MISC_ERROR, "No sortition-selected committee members available for this slot");
-                }
-            }
-        }
-    }
-
-    std::unique_ptr<CBlockTemplate> pblocktemplate(
-        BlockAssembler(chainman.ActiveChainstate(), *node.mempool, chainparams)
-            .CreateNewBlock(feeDestinationScript, std::chrono::seconds(0), nullptr,
-                            g_pos_vrf ? &vrf_commitments : nullptr, &pubkey,
-                            g_pos_vrf ? &vrf_proof : nullptr,
-                            (g_pos_vrf && !vrf_committee.empty()) ? &vrf_committee : nullptr));
-    if (!pblocktemplate.get()) {
-        throw JSONRPCError(RPC_INTERNAL_ERROR, "Could not create block template");
-    }
-    CBlock& block = pblocktemplate->block;
-
-    {
-        LOCK(cs_main);
-        unsigned int extra_nonce = 0;
-        IncrementExtraNonce(&block, chainman.ActiveChain().Tip(), extra_nonce);
-    }
-
-    // Collect all available signing keys (leader + any committee keys).
-    FillableSigningProvider keystore;
-    keystore.AddKey(key);
+    // Parse any committee signing keys (WIF). The shared produce-one-block core
+    // (ProducePosBlock, src/pos_producer.*) does the slot election, VRF
+    // sortition, committee eligibility, block assembly, leader/committee signing
+    // and submission -- the exact logic the autonomous -posproducer thread runs.
+    std::vector<CKey> committee_keys;
     if (!request.params[1].isNull()) {
         for (const UniValue& wif : request.params[1].get_array().getValues()) {
             CKey ckey = DecodeSecret(wif.get_str());
             if (!ckey.IsValid()) {
                 throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid committee private key");
             }
-            keystore.AddKey(ckey);
+            committee_keys.push_back(ckey);
         }
     }
 
-    // Sign the block. The challenge is either "<leader> CHECKSIG" (standard
-    // P2PK, solvable generically) or the committee-certification form
-    // "<leader> CHECKSIGVERIFY <q-of-m CHECKMULTISIG>", whose scriptSig we
-    // assemble by hand: OP_0 <committee sigs in committee order> <leader sig>.
-    SimpleSignatureCreator signature_creator(block.GetHash(), 0);
-    std::optional<PosChallengeParts> parts = ParsePosBlockChallenge(block.proof.challenge);
-    if (!parts) {
-        throw JSONRPCError(RPC_INTERNAL_ERROR, "Generated block challenge is not a recognized PoS challenge");
-    }
-    int countersigs = 0;
-    if (!parts->agg_key.empty()) {
-        // Aggregate-committee form (doc 07 §6): the leader's plain ECDSA
-        // signature plus one MuSig2 (BIP340) signature by *all* the named
-        // members (MuSig2 is n-of-n; the quorum was enforced on the named
-        // set above), both over the block hash, as two script pushes.
-        std::vector<unsigned char> leader_sig;
-        if (!key.Sign(block.GetHash(), leader_sig)) {
-            throw JSONRPCError(RPC_MISC_ERROR, "Failed to sign block as leader");
+    PosProduceResult produced;
+    std::string produce_error;
+    PosProduceError kind = PosProduceError::NONE;
+    if (!ProducePosBlock(chainman, *node.mempool, chainparams, key, committee_keys, produced, produce_error, kind)) {
+        switch (kind) {
+        case PosProduceError::NOT_STAKER:
+        case PosProduceError::INVALID_KEY:
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, produce_error);
+        case PosProduceError::BAD_PARAM:
+            throw JSONRPCError(RPC_INVALID_PARAMETER, produce_error);
+        case PosProduceError::INTERNAL:
+            throw JSONRPCError(RPC_INTERNAL_ERROR, produce_error);
+        default:
+            throw JSONRPCError(RPC_MISC_ERROR, produce_error);
         }
-        std::vector<CKey> member_keys;
-        member_keys.reserve(vrf_committee.size());
-        for (const CPubKey& member : vrf_committee) {
-            member_keys.push_back(candidates.at(member));
-        }
-        const uint256 hash = block.GetHash();
-        std::optional<std::vector<unsigned char>> agg_sig =
-            MuSigSign(member_keys, vrf_committee, Span<const unsigned char>(hash.begin(), 32));
-        if (!agg_sig) {
-            throw JSONRPCError(RPC_MISC_ERROR, "Failed to produce the committee's MuSig2 aggregate signature");
-        }
-        CScript solution;
-        solution << leader_sig << *agg_sig;
-        block.proof.solution = solution;
-        countersigs = (int)vrf_committee.size();
-    } else if (parts->committee.empty()) {
-        SignatureData sig_data;
-        if (!ProduceSignature(keystore, signature_creator, block.proof.challenge, sig_data, SCRIPT_NO_SIGHASH_BYTE)) {
-            throw JSONRPCError(RPC_MISC_ERROR, "Failed to sign block as staker");
-        }
-        block.proof.solution = sig_data.scriptSig;
-    } else {
-        std::vector<unsigned char> leader_sig;
-        if (!signature_creator.CreateSig(keystore, leader_sig, parts->leader.GetID(), block.proof.challenge, SigVersion::BASE, 0)) {
-            throw JSONRPCError(RPC_MISC_ERROR, "Failed to sign block as leader");
-        }
-        std::vector<std::vector<unsigned char>> committee_sigs;
-        for (const CPubKey& member : parts->committee) {
-            if ((int)committee_sigs.size() >= parts->quorum) break;
-            std::vector<unsigned char> sig;
-            if (signature_creator.CreateSig(keystore, sig, member.GetID(), block.proof.challenge, SigVersion::BASE, 0)) {
-                committee_sigs.push_back(sig);
-            }
-        }
-        if ((int)committee_sigs.size() < parts->quorum) {
-            throw JSONRPCError(RPC_MISC_ERROR, strprintf(
-                "Insufficient committee keys: %d countersignature(s) available, quorum is %d of %d (pass more committeekeys)",
-                (int)committee_sigs.size(), parts->quorum, (int)parts->committee.size()));
-        }
-        CScript solution;
-        solution << OP_0; // CHECKMULTISIG dummy
-        for (const auto& sig : committee_sigs) solution << sig;
-        solution << leader_sig;
-        block.proof.solution = solution;
-        countersigs = (int)committee_sigs.size();
-    }
-
-    if (!CheckProof(block, chainparams.GetConsensus())) {
-        throw JSONRPCError(RPC_MISC_ERROR, "Block signature(s) did not satisfy the leader/committee challenge");
-    }
-
-    std::shared_ptr<const CBlock> shared_pblock = std::make_shared<const CBlock>(block);
-    if (!chainman.ProcessNewBlock(chainparams, shared_pblock, true, nullptr)) {
-        throw JSONRPCError(RPC_INTERNAL_ERROR, "ProcessNewBlock, block not accepted");
     }
 
     UniValue result(UniValue::VOBJ);
-    result.pushKV("hash", block.GetHash().GetHex());
-    result.pushKV("height", tip->nHeight + 1);
-    result.pushKV("rank", (int)*rank);
-    result.pushKV("countersignatures", countersigs);
-    if (g_pos_vrf) {
-        result.pushKV("vrf_output", vrf_output.GetHex());
-        result.pushKV("vrf_slot", vrf_slot);
+    result.pushKV("hash", produced.hash.GetHex());
+    result.pushKV("height", produced.height);
+    result.pushKV("rank", (int)produced.rank);
+    result.pushKV("countersignatures", produced.countersignatures);
+    if (produced.vrf) {
+        result.pushKV("vrf_output", produced.vrf_output.GetHex());
+        result.pushKV("vrf_slot", produced.vrf_slot);
     }
     return result;
 },

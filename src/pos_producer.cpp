@@ -32,12 +32,12 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
                      const CChainParams& chainparams, const CKey& leader_key,
                      const std::vector<CKey>& committee_keys,
                      PosProduceResult& result, std::string& error,
-                     bool& usage_error)
+                     PosProduceError& err_kind)
 {
-    usage_error = false;
+    err_kind = PosProduceError::NONE;
     if (!leader_key.IsValid()) {
         error = "Invalid leader key";
-        usage_error = true;
+        err_kind = PosProduceError::INVALID_KEY;
         return false;
     }
     const CPubKey pubkey = leader_key.GetPubKey();
@@ -49,6 +49,7 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
     }
     if (!tip) {
         error = "No active chain tip";
+        err_kind = PosProduceError::INTERNAL;
         return false;
     }
 
@@ -56,7 +57,7 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
     std::optional<size_t> rank = PosRank(StakeRegistry::GetInstance(), seed, pubkey);
     if (!rank) {
         error = "This key is not a registered staker for the current slot";
-        usage_error = true;
+        err_kind = PosProduceError::NOT_STAKER;
         return false;
     }
 
@@ -77,11 +78,13 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
         auto proof = VrfProve(leader_key, Span<const unsigned char>(seed.begin(), 32));
         if (!proof) {
             error = "Failed to compute VRF sortition proof";
+            err_kind = PosProduceError::MISC;
             return false;
         }
         vrf_proof = *proof;
         if (!VrfVerify(pubkey, Span<const unsigned char>(seed.begin(), 32), vrf_proof, vrf_output)) {
             error = "Produced VRF proof did not verify";
+            err_kind = PosProduceError::INTERNAL;
             return false;
         }
         const StakeRegistry& registry = StakeRegistry::GetInstance();
@@ -93,13 +96,13 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
             candidates.emplace(pubkey, leader_key);
             if ((int)committee_keys.size() > MAX_POS_AGG_COMMITTEE_SIZE) {
                 error = strprintf("At most %d committee keys may be supplied", MAX_POS_AGG_COMMITTEE_SIZE);
-                usage_error = true;
+                err_kind = PosProduceError::BAD_PARAM;
                 return false;
             }
             for (const CKey& ckey : committee_keys) {
                 if (!ckey.IsValid()) {
                     error = "Invalid committee private key";
-                    usage_error = true;
+                    err_kind = PosProduceError::INVALID_KEY;
                     return false;
                 }
                 candidates.emplace(ckey.GetPubKey(), ckey);
@@ -124,11 +127,12 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
                 // escaping-stall rule; script multisig always needs the quorum.
                 if (!g_pos_agg_committee) {
                     error = strprintf("Only %d of the provided keys are sortition-selected committee members for this slot; quorum is %d of an expected committee of %d", eligible, quorum, g_pos_committee_size);
-                    usage_error = true;
+                    err_kind = PosProduceError::MISC;
                     return false;
                 }
                 if (eligible < 1) {
                     error = "No sortition-selected committee members available for this slot";
+                    err_kind = PosProduceError::MISC;
                     return false;
                 }
             }
@@ -143,6 +147,7 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
                             (g_pos_vrf && !vrf_committee.empty()) ? &vrf_committee : nullptr));
     if (!pblocktemplate.get()) {
         error = "Could not create block template";
+        err_kind = PosProduceError::INTERNAL;
         return false;
     }
     CBlock& block = pblocktemplate->block;
@@ -159,7 +164,7 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
     for (const CKey& ckey : committee_keys) {
         if (!ckey.IsValid()) {
             error = "Invalid committee private key";
-            usage_error = true;
+            err_kind = PosProduceError::INVALID_KEY;
             return false;
         }
         keystore.AddKey(ckey);
@@ -172,6 +177,7 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
     std::optional<PosChallengeParts> parts = ParsePosBlockChallenge(block.proof.challenge);
     if (!parts) {
         error = "Generated block challenge is not a recognized PoS challenge";
+        err_kind = PosProduceError::INTERNAL;
         return false;
     }
     int countersigs = 0;
@@ -179,6 +185,7 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
         std::vector<unsigned char> leader_sig;
         if (!leader_key.Sign(block.GetHash(), leader_sig)) {
             error = "Failed to sign block as leader";
+            err_kind = PosProduceError::MISC;
             return false;
         }
         std::vector<CKey> member_keys;
@@ -189,6 +196,7 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
             MuSigSign(member_keys, vrf_committee, Span<const unsigned char>(hash.begin(), 32));
         if (!agg_sig) {
             error = "Failed to produce the committee's MuSig2 aggregate signature";
+            err_kind = PosProduceError::MISC;
             return false;
         }
         CScript solution;
@@ -199,6 +207,7 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
         SignatureData sig_data;
         if (!ProduceSignature(keystore, signature_creator, block.proof.challenge, sig_data, SCRIPT_NO_SIGHASH_BYTE)) {
             error = "Failed to sign block as staker";
+            err_kind = PosProduceError::MISC;
             return false;
         }
         block.proof.solution = sig_data.scriptSig;
@@ -206,6 +215,7 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
         std::vector<unsigned char> leader_sig;
         if (!signature_creator.CreateSig(keystore, leader_sig, parts->leader.GetID(), block.proof.challenge, SigVersion::BASE, 0)) {
             error = "Failed to sign block as leader";
+            err_kind = PosProduceError::MISC;
             return false;
         }
         std::vector<std::vector<unsigned char>> committee_sigs;
@@ -218,7 +228,7 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
         }
         if ((int)committee_sigs.size() < parts->quorum) {
             error = strprintf("Insufficient committee keys: %d countersignature(s) available, quorum is %d of %d", (int)committee_sigs.size(), parts->quorum, (int)parts->committee.size());
-            usage_error = true;
+            err_kind = PosProduceError::MISC;
             return false;
         }
         CScript solution;
@@ -231,12 +241,14 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
 
     if (!CheckProof(block, chainparams.GetConsensus())) {
         error = "Block signature(s) did not satisfy the leader/committee challenge";
+        err_kind = PosProduceError::MISC;
         return false;
     }
 
     std::shared_ptr<const CBlock> shared_pblock = std::make_shared<const CBlock>(block);
     if (!chainman.ProcessNewBlock(chainparams, shared_pblock, /*force_processing=*/true, nullptr)) {
         error = "ProcessNewBlock, block not accepted";
+        err_kind = PosProduceError::INTERNAL;
         return false;
     }
 
@@ -377,8 +389,8 @@ int64_t PosProducer::Step()
     }
     PosProduceResult res;
     std::string err;
-    bool usage_error = false;
-    if (ProducePosBlock(m_chainman, m_mempool, m_chainparams, m_keys[best_idx], committee_keys, res, err, usage_error)) {
+    PosProduceError kind = PosProduceError::NONE;
+    if (ProducePosBlock(m_chainman, m_mempool, m_chainparams, m_keys[best_idx], committee_keys, res, err, kind)) {
         LogPrintf("PoS producer: created block %s at height %d (rank %d, %d countersignature(s))\n",
                   res.hash.GetHex(), res.height, (int)res.rank, res.countersignatures);
     } else {

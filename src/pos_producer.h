@@ -46,6 +46,18 @@ struct PosProduceResult {
     uint64_t vrf_slot{0};
 };
 
+/** Failure category for ProducePosBlock, so an RPC caller can map it to the
+ *  matching JSON-RPC error code while the node-layer helper stays free of any
+ *  RPC dependency. */
+enum class PosProduceError {
+    NONE,        //!< success
+    NOT_STAKER,  //!< the key is not a registered staker for this slot
+    INVALID_KEY, //!< a supplied key is invalid
+    BAD_PARAM,   //!< a caller parameter is out of range (e.g. too many keys)
+    MISC,        //!< a recoverable failure (signing, sub-quorum committee, ...)
+    INTERNAL,    //!< an internal error (template assembly, block not accepted)
+};
+
 /** Assemble, sign, and submit one PoS block extending the active tip, with
  *  `leader_key` as the elected proposer and `committee_keys` as any additional
  *  committee signing keys held locally (empty for leader-only / committee=1).
@@ -58,13 +70,12 @@ struct PosProduceResult {
  *  block's own nTime is advanced to the proposer's slot so it is consensus-valid.
  *
  *  Returns true with `result` filled on success; false with a human-readable
- *  `error` (and, when the failure is a caller/usage error rather than an
- *  internal one, `usage_error` set true) otherwise. */
+ *  `error` and an `err_kind` category otherwise. */
 bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
                      const CChainParams& chainparams, const CKey& leader_key,
                      const std::vector<CKey>& committee_keys,
                      PosProduceResult& result, std::string& error,
-                     bool& usage_error);
+                     PosProduceError& err_kind);
 
 /** Background thread that produces PoS blocks autonomously from a set of staking
  *  keys, with no external coordinator. Reacts to new tips via the validation
