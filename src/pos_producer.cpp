@@ -448,6 +448,7 @@ PosProducer::PosProducer(ChainstateManager& chainman, CTxMemPool& mempool,
 {
     m_byzantine_equivocate = gArgs.GetBoolArg("-posbyzantineequivocate", false);
     m_byzantine_invalid = gArgs.GetBoolArg("-posbyzantineinvalid", false);
+    m_debug_round_skew_ms = gArgs.GetIntArg("-posdebugroundskewms", 0);
 }
 
 PosProducer::~PosProducer() { Stop(); }
@@ -864,7 +865,11 @@ int64_t PosProducer::DriveRound()
     }
     if (!tip) return POS_PRODUCER_POLL_MS;
     const int height = tip->nHeight + 1;
-    const int64_t now = GetTimeMillis();
+    // m_debug_round_skew_ms is a DEBUG-ONLY injection of inter-node clock skew
+    // (-posdebugroundskewms), used to measure how much synchrony loss the
+    // global-clock round anchor tolerates before rounds desync. Always 0 in
+    // production.
+    const int64_t now = GetTimeMillis() + m_debug_round_skew_ms;
 
     // Determine the current round index and the proposal it backs.
     int round_index;

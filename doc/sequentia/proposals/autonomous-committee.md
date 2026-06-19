@@ -596,6 +596,44 @@ assembly and acceptance.
      the security root. **Decision: 51/100 retained; equivocators excluded at the
      consensus layer; 2/3 rejected (per the paper).**
 
+   **Round-schedule alignment — the synchrony assumption, made concrete.** The
+   equivocator-exclusion argument above assumes honest nodes are in the *same
+   round* of the round-robin re-vote when they sign: only then do they all back
+   one leader, so only one block per height reaches a quorum. The round index is a
+   function of time, so this is really a clock-agreement assumption. The first
+   implementation derived the index from each node's *local* arrival time for the
+   height — which gossip latency desynchronizes — so two honest nodes could sit in
+   different rounds at once, sign different leaders' blocks at the same height, and
+   (because a member that signs across a round boundary double-signs) form two
+   competing 51-of-100 certificates: a real fork, observed at 100-member scale.
+   The fix anchors the schedule to the round-0 leader's own block timestamp, a
+   value every node reads identically off the same gossiped block, so honest nodes
+   step through rounds together regardless of when each received the proposal
+   (`DriveRound`, `src/pos_producer.cpp`).
+
+   This reduces the requirement to *bounded clock skew*, and the bound is
+   quantified. Injecting a gradient of per-node round-clock skew
+   (`-posdebugroundskewms`, regtest only) and checking hash agreement at every
+   height (`test/functional/pos_round_skew_experiment.py`) gives, over five trials
+   each at a 12-member committee (ROUND_MS = 700):
+
+   | Max inter-node skew | Forks |
+   |---|---|
+   | 0 ms (synchronized)     | 0 / 5 |
+   | 528 ms (< ROUND_MS)     | 0 / 5 |
+   | 1056 ms (> ROUND_MS)    | 3 / 5 |
+
+   So the committee is fork-free as long as inter-node clock skew stays below one
+   round (~700 ms); past that, nodes land in different rounds and forks appear
+   (~60 % at 1.5× ROUND_MS), and at extreme skew (several × ROUND_MS) no block
+   certifies at all (a stall, not a fork). Real-world NTP keeps skew at the
+   millisecond scale — ~1000× inside this margin — so the assumption holds
+   comfortably in practice. A future hardening option, if unconditional safety
+   independent of any clock assumption is wanted, is a per-height member-level
+   "sign at most one block" lock; that is a deliberate safety/liveness trade
+   (it constrains the round-robin's ability to abandon a stalled leader) and is
+   left as a separate decision rather than adopted by default.
+
    **Not a goal — stake slashing.** Unlike economic-finality PoS (where slashing
    *is* the finality guarantee — reverting must burn ≥⅓ of stake), Sequentia's
    safety does not rest on stake-at-risk, so slashing is redundant on every axis:

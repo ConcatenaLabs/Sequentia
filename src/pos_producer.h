@@ -234,6 +234,10 @@ private:
     //! consensus-invalid block (two coinbases), to test that lazy validation
     //! excludes the leader and the committee routes to the next valid one.
     bool m_byzantine_invalid{false};
+    //! Regtest only (-posdebugroundskewms): offset added to this node's round
+    //! scheduler clock, to study how inter-node clock skew affects round
+    //! agreement. Always 0 on a real node.
+    int64_t m_debug_round_skew_ms{0};
 
     //! One round candidate: a validated proposal and its leader's VRF.
     struct RoundCandidate {
