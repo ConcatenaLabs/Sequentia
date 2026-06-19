@@ -12,6 +12,7 @@
 #include <primitives/block.h>
 #include <undo.h>
 #include <vrf.h>
+#include <bls.h>
 #include <crypto/sha256.h>
 #include <hash.h>
 #include <util/strencodings.h>
@@ -24,6 +25,7 @@ int64_t g_pos_slot_interval = DEFAULT_POS_SLOT_INTERVAL;
 int g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
 bool g_pos_vrf = false;
 bool g_pos_agg_committee = false;
+bool g_pos_bls = false;
 uint64_t g_pos_min_stake = 0;
 
 bool StakeRegistry::AddFromSpec(const std::string& spec, std::string& error)
@@ -191,6 +193,11 @@ CScript BuildPosAggChallenge(const CPubKey& leader, const std::vector<unsigned c
     return CScript() << OP_1 << ToByteVector(leader) << agg_key32;
 }
 
+CScript BuildPosBlsChallenge(const CPubKey& leader, const std::vector<unsigned char>& bls_agg_pk48)
+{
+    return CScript() << OP_2 << ToByteVector(leader) << bls_agg_pk48;
+}
+
 std::optional<PosChallengeParts> ParsePosBlockChallenge(const CScript& challenge)
 {
     // Leader-only form.
@@ -214,6 +221,25 @@ std::optional<PosChallengeParts> ParsePosBlockChallenge(const CScript& challenge
             if (!parts.leader.IsFullyValid()) return std::nullopt;
             if (!challenge.GetOp(pc, opcode, data) || data.size() != 32) return std::nullopt;
             parts.agg_key = data;
+            if (pc != challenge.end()) return std::nullopt; // trailing data
+            return parts;
+        }
+    }
+
+    // BLS aggregate-committee form: OP_2 <leader> <bls_agg_pk(48)>. OP_2 is the
+    // version marker for the BLS form (OP_1 is MuSig2), again unambiguous since
+    // the other forms begin with a pubkey push.
+    {
+        CScript::const_iterator pc = challenge.begin();
+        opcodetype opcode;
+        std::vector<unsigned char> data;
+        if (challenge.GetOp(pc, opcode, data) && opcode == OP_2) {
+            PosChallengeParts parts;
+            if (!challenge.GetOp(pc, opcode, data) || data.empty()) return std::nullopt;
+            parts.leader = CPubKey(data);
+            if (!parts.leader.IsFullyValid()) return std::nullopt;
+            if (!challenge.GetOp(pc, opcode, data) || data.size() != BLS_PK_SIZE) return std::nullopt;
+            parts.bls_agg_key = data;
             if (pc != challenge.end()) return std::nullopt; // trailing data
             return parts;
         }
@@ -275,6 +301,7 @@ uint256 PosSeedForChild(const CBlockIndex* pindexPrev)
 namespace {
 const unsigned char POS_VRF_TAG[6] = {'S', 'E', 'Q', 'V', 'R', 'F'};
 const unsigned char POS_CMT_TAG[6] = {'S', 'E', 'Q', 'C', 'M', 'T'};
+const unsigned char POS_BLS_TAG[6] = {'S', 'E', 'Q', 'B', 'L', 'S'};
 } // namespace
 
 uint64_t PosTotalWeight(const StakeRegistry& registry)
@@ -357,6 +384,48 @@ std::vector<PosVrfMember> ExtractPosVrfMembers(const CBlock& block)
         if (!member.pubkey.IsValid()) continue;
         member.proof.assign(data.begin() + sizeof(POS_CMT_TAG) + CPubKey::COMPRESSED_SIZE, data.end());
         members.push_back(member);
+    }
+    return members;
+}
+
+CScript BuildPosBlsMemberCommitment(const CPubKey& member,
+                                    const std::vector<unsigned char>& vrf_proof,
+                                    const std::vector<unsigned char>& bls_pubkey,
+                                    const std::vector<unsigned char>& bls_pop)
+{
+    std::vector<unsigned char> data(POS_BLS_TAG, POS_BLS_TAG + sizeof(POS_BLS_TAG));
+    data.insert(data.end(), member.begin(), member.end());
+    data.insert(data.end(), vrf_proof.begin(), vrf_proof.end());
+    data.insert(data.end(), bls_pubkey.begin(), bls_pubkey.end());
+    data.insert(data.end(), bls_pop.begin(), bls_pop.end());
+    return CScript() << OP_RETURN << data;
+}
+
+std::vector<PosBlsMember> ExtractPosBlsMembers(const CBlock& block)
+{
+    std::vector<PosBlsMember> members;
+    if (block.vtx.empty()) return members;
+    const size_t want = sizeof(POS_BLS_TAG) + CPubKey::COMPRESSED_SIZE + VRF_PROOF_SIZE + BLS_PK_SIZE + BLS_SIG_SIZE;
+    for (const CTxOut& out : block.vtx[0]->vout) {
+        const CScript& spk = out.scriptPubKey;
+        CScript::const_iterator pc = spk.begin();
+        opcodetype opcode;
+        std::vector<unsigned char> data;
+        if (!spk.GetOp(pc, opcode, data) || opcode != OP_RETURN) continue;
+        if (!spk.GetOp(pc, opcode, data)) continue;
+        if (data.size() != want) continue;
+        if (!std::equal(POS_BLS_TAG, POS_BLS_TAG + sizeof(POS_BLS_TAG), data.begin())) continue;
+        size_t off = sizeof(POS_BLS_TAG);
+        PosBlsMember m;
+        m.pubkey = CPubKey(data.begin() + off, data.begin() + off + CPubKey::COMPRESSED_SIZE);
+        off += CPubKey::COMPRESSED_SIZE;
+        if (!m.pubkey.IsValid()) continue;
+        m.proof.assign(data.begin() + off, data.begin() + off + VRF_PROOF_SIZE);
+        off += VRF_PROOF_SIZE;
+        m.bls_pubkey.assign(data.begin() + off, data.begin() + off + BLS_PK_SIZE);
+        off += BLS_PK_SIZE;
+        m.bls_pop.assign(data.begin() + off, data.begin() + off + BLS_SIG_SIZE);
+        members.push_back(m);
     }
     return members;
 }

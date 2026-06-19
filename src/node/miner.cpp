@@ -122,7 +122,7 @@ void BlockAssembler::resetBlock()
     feeMap = CAmountMap();
 }
 
-std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& scriptPubKeyIn, std::chrono::seconds min_tx_age, DynaFedParamEntry* proposed_entry, const std::vector<CScript>* commit_scripts, const CPubKey* pos_proposer, const std::vector<unsigned char>* pos_vrf_proof, const std::vector<CPubKey>* pos_vrf_committee)
+std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& scriptPubKeyIn, std::chrono::seconds min_tx_age, DynaFedParamEntry* proposed_entry, const std::vector<CScript>* commit_scripts, const CPubKey* pos_proposer, const std::vector<unsigned char>* pos_vrf_proof, const std::vector<CPubKey>* pos_vrf_committee, const std::vector<unsigned char>* pos_bls_agg_pk)
 {
     assert(min_tx_age >= std::chrono::seconds(0));
     int64_t nTimeStart = GetTimeMicros();
@@ -199,7 +199,17 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
             } else {
                 committee = PosCommittee(StakeRegistry::GetInstance(), PosSeedForChild(pindexPrev));
             }
-            if (g_pos_agg_committee && g_pos_committee_size > 1) {
+            if (g_pos_bls && g_pos_committee_size > 1) {
+                // BLS aggregate-committee certification (doc proposals/
+                // autonomous-committee §7): the challenge commits to the 48-byte
+                // BLS aggregate of the member set (supplied by the caller, which
+                // holds the member keys); ContextualCheckBlock matches it against
+                // the coinbase SEQBLS-named set. Takes precedence over MuSig2.
+                if (pos_bls_agg_pk == nullptr || pos_bls_agg_pk->empty()) {
+                    return nullptr; // caller must supply the BLS aggregate key
+                }
+                pblock->proof.challenge = BuildPosBlsChallenge(*pos_proposer, *pos_bls_agg_pk);
+            } else if (g_pos_agg_committee && g_pos_committee_size > 1) {
                 // Aggregate-committee certification (doc 07 §6): the challenge
                 // commits to one MuSig2 aggregate of the member set instead of
                 // listing members; ContextualCheckBlock matches it against the

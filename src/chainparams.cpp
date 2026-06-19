@@ -244,6 +244,7 @@ public:
         MAX_MONEY = 21000000 * COIN;   // SEQUENTIA: per-chain money cap
         g_pos_vrf = false;
         g_pos_agg_committee = false;
+        g_pos_bls = false;
         // Reset the rest of the PoS consensus globals to their defaults too, so
         // an in-process chain switch can never read a value left over from a
         // previously-selected (custom PoS) chain.
@@ -411,6 +412,7 @@ public:
         MAX_MONEY = 400000000 * COIN;   // SEQUENTIA: per-chain money cap
         g_pos_vrf = true;
         g_pos_agg_committee = true;
+        g_pos_bls = false;
         g_pos_min_stake = 4000000000000ULL;             // 40,000 SEQ = 0.01% of 400M (§3.3)
         g_pos_committee_size = 100;                      // 51-of-100 quorum (§3.5)
         g_pos_slot_interval = 30;                        // 30s nominal block time (doc 11 §4)
@@ -431,7 +433,7 @@ public:
 
         std::vector<unsigned char> sign_bytes = ParseHex("51");
         consensus.signblockscript = CScript(sign_bytes.begin(), sign_bytes.end());
-        consensus.max_block_signature_size = 150; // PoS aggregate solution: leader DER (~73B) + 64B BIP340 committee aggregate; 74 only fit one sig
+        consensus.max_block_signature_size = 200; // PoS aggregate solution: leader DER (~73B) + a 64B BIP340 MuSig2 or 96B BLS12-381 committee aggregate
         g_signed_blocks = true;
 
         // Policy asset, from the network-tagged genesis commitment.
@@ -606,6 +608,7 @@ public:
         MAX_MONEY = 400000000 * COIN;   // SEQUENTIA: per-chain money cap
         g_pos_vrf = true;
         g_pos_agg_committee = true;
+        g_pos_bls = false;
         g_pos_min_stake = 4000000000000ULL;   // 40,000 SEQ = 0.01% of 400M (§3.3)
         // Expected committee size (quorum = strict majority). Defaults to the
         // paper's 100 (51-of-100 quorum, §3.5); configurable on testnet so a
@@ -616,7 +619,7 @@ public:
         // on a given testnet must agree on the value.
         g_pos_committee_size = args.GetIntArg("-poscommitteesize", 100);
         {
-            const int max_committee = g_pos_agg_committee ? MAX_POS_AGG_COMMITTEE_SIZE : MAX_POS_COMMITTEE_SIZE;
+            const int max_committee = (g_pos_agg_committee || g_pos_bls) ? MAX_POS_AGG_COMMITTEE_SIZE : MAX_POS_COMMITTEE_SIZE;
             if (g_pos_committee_size < 1 || g_pos_committee_size > max_committee) {
                 throw std::runtime_error(strprintf("-poscommitteesize must be between 1 and %d", max_committee));
             }
@@ -638,7 +641,7 @@ public:
 
         std::vector<unsigned char> sign_bytes = ParseHex("51");
         consensus.signblockscript = CScript(sign_bytes.begin(), sign_bytes.end());
-        consensus.max_block_signature_size = 150; // PoS aggregate solution: leader DER (~73B) + 64B BIP340 committee aggregate; 74 only fit one sig
+        consensus.max_block_signature_size = 200; // PoS aggregate solution: leader DER (~73B) + a 64B BIP340 MuSig2 or 96B BLS12-381 committee aggregate
         g_signed_blocks = true;
 
         // Calculate regcoin asset
@@ -846,6 +849,7 @@ public:
         MAX_MONEY = 21000000 * COIN;   // SEQUENTIA: per-chain money cap
         g_pos_vrf = false;
         g_pos_agg_committee = false;
+        g_pos_bls = false;
         // Reset the rest of the PoS consensus globals to their defaults too, so
         // an in-process chain switch can never read a value left over from a
         // previously-selected (custom PoS) chain.
@@ -963,6 +967,7 @@ public:
         MAX_MONEY = 21000000 * COIN;   // SEQUENTIA: per-chain money cap
         g_pos_vrf = false;
         g_pos_agg_committee = false;
+        g_pos_bls = false;
         // Reset the rest of the PoS consensus globals to their defaults too, so
         // an in-process chain switch can never read a value left over from a
         // previously-selected (custom PoS) chain.
@@ -1215,6 +1220,7 @@ protected:
         g_pos_committee_size = args.GetIntArg("-poscommitteesize", DEFAULT_POS_COMMITTEE_SIZE);
         g_pos_vrf = args.GetBoolArg("-posvrf", false);
         g_pos_agg_committee = args.GetBoolArg("-posaggcommittee", false);
+        g_pos_bls = args.GetBoolArg("-posbls", false);
         g_pos_unbonding_period = (uint32_t)args.GetIntArg("-posunbonding", DEFAULT_POS_UNBONDING_PERIOD);
         if (g_pos_vrf && !g_con_pos) {
             throw std::runtime_error("-posvrf requires -con_pos");
@@ -1222,10 +1228,13 @@ protected:
         if (g_pos_agg_committee && !g_pos_vrf) {
             throw std::runtime_error("-posaggcommittee requires -posvrf");
         }
+        if (g_pos_bls && !g_pos_vrf) {
+            throw std::runtime_error("-posbls requires -posvrf");
+        }
         if (g_con_pos) {
             // MuSig2 aggregation lifts the script-multisig committee cap of 16
             // to the paper's 100 (doc 07 §6).
-            const int max_committee = g_pos_agg_committee ? MAX_POS_AGG_COMMITTEE_SIZE : MAX_POS_COMMITTEE_SIZE;
+            const int max_committee = (g_pos_agg_committee || g_pos_bls) ? MAX_POS_AGG_COMMITTEE_SIZE : MAX_POS_COMMITTEE_SIZE;
             if (g_pos_committee_size < 1 || g_pos_committee_size > max_committee) {
                 throw std::runtime_error(strprintf("-poscommitteesize must be between 1 and %d", max_committee));
             }
@@ -1614,6 +1623,7 @@ public:
         MAX_MONEY = 21000000 * COIN;   // SEQUENTIA: per-chain money cap
         g_pos_vrf = false;
         g_pos_agg_committee = false;
+        g_pos_bls = false;
         // Reset the rest of the PoS consensus globals to their defaults too, so
         // an in-process chain switch can never read a value left over from a
         // previously-selected (custom PoS) chain.

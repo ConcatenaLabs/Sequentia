@@ -60,6 +60,25 @@ bool BlsVerify(Span<const unsigned char> pk, Span<const unsigned char> msg32,
     }
 }
 
+std::optional<std::vector<unsigned char>> BlsAggregatePublicKeys(
+    const std::vector<std::vector<unsigned char>>& pks)
+{
+    if (pks.empty()) return std::nullopt;
+    try {
+        if (pks[0].size() != BLS_PK_SIZE) return std::nullopt;
+        blst::P1 agg(pks[0].data());
+        for (size_t i = 1; i < pks.size(); ++i) {
+            if (pks[i].size() != BLS_PK_SIZE) return std::nullopt;
+            agg.aggregate(blst::P1_Affine(pks[i].data()));
+        }
+        std::vector<unsigned char> out(BLS_PK_SIZE);
+        agg.compress(out.data());
+        return out;
+    } catch (const BLST_ERROR&) {
+        return std::nullopt;
+    }
+}
+
 std::optional<std::vector<unsigned char>> BlsAggregate(
     const std::vector<std::vector<unsigned char>>& sigs)
 {

@@ -5,7 +5,9 @@
 #include <pos_producer.h>
 
 #include <block_proof.h>
+#include <bls.h>
 #include <chainparams.h>
+#include <crypto/sha256.h>
 #include <logging.h>
 #include <musig.h>
 #include <node/miner.h>
@@ -27,6 +29,23 @@
 using node::BlockAssembler;
 using node::CBlockTemplate;
 using node::IncrementExtraNonce;
+
+namespace {
+//! Derive a staker's BLS secret seed deterministically from its secp256k1
+//! staking key (domain-separated by a tag), so a staker needs no separate BLS
+//! key to manage. The matching BLS public key and proof-of-possession are
+//! published per-block in the coinbase SEQBLS commitment; validators never
+//! derive it (they read it from the block).
+std::vector<unsigned char> PosBlsSeedFromKey(const CKey& key)
+{
+    static const std::string tag = "sequentia/pos-bls/v1";
+    unsigned char out[32];
+    CSHA256().Write(reinterpret_cast<const unsigned char*>(tag.data()), tag.size())
+             .Write(key.begin(), key.size())
+             .Finalize(out);
+    return std::vector<unsigned char>(out, out + 32);
+}
+} // namespace
 
 bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
                      const CChainParams& chainparams, const CKey& leader_key,
@@ -72,6 +91,9 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
     std::vector<CScript> vrf_commitments;
     std::vector<CPubKey> vrf_committee;
     std::map<CPubKey, CKey> candidates; // committee key candidates (leader + provided)
+    std::vector<std::vector<unsigned char>> bls_member_seeds;   // BLS signing seeds (g_pos_bls)
+    std::vector<std::vector<unsigned char>> bls_member_pubkeys; // matching BLS public keys
+    std::vector<unsigned char> bls_agg_pk;                      // their 48-byte aggregate
     uint64_t vrf_slot = 0;
     uint256 vrf_output;
     if (g_pos_vrf) {
@@ -107,7 +129,7 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
                 }
                 candidates.emplace(ckey.GetPubKey(), ckey);
             }
-            const int member_cap = g_pos_agg_committee ? MAX_POS_AGG_COMMITTEE_SIZE : MAX_POS_COMMITTEE_SIZE;
+            const int member_cap = (g_pos_agg_committee || g_pos_bls) ? MAX_POS_AGG_COMMITTEE_SIZE : MAX_POS_COMMITTEE_SIZE;
             int eligible = 0;
             for (const auto& [member_pub, member_key] : candidates) {
                 if ((int)vrf_committee.size() >= member_cap) break;
@@ -118,14 +140,31 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
                 if (!VrfVerify(member_pub, Span<const unsigned char>(seed.begin(), 32), *member_proof, member_beta)) continue;
                 if (!PosVrfIsCommitteeMember(member_beta, registry.GetWeight(member_pub), total_weight)) continue;
                 vrf_committee.push_back(member_pub);
-                vrf_commitments.push_back(BuildPosVrfMemberCommitment(member_pub, *member_proof));
+                if (g_pos_bls) {
+                    // Each member derives its BLS key from its staking key and
+                    // commits its BLS pubkey + proof-of-possession (SEQBLS).
+                    std::vector<unsigned char> bls_seed = PosBlsSeedFromKey(member_key);
+                    auto bls_pub = BlsDerivePubKey(bls_seed);
+                    auto bls_pop = BlsProvePossession(bls_seed);
+                    if (!bls_pub || !bls_pop) {
+                        error = "Failed to derive committee member BLS key";
+                        err_kind = PosProduceError::INTERNAL;
+                        return false;
+                    }
+                    vrf_commitments.push_back(BuildPosBlsMemberCommitment(member_pub, *member_proof, *bls_pub, *bls_pop));
+                    bls_member_seeds.push_back(std::move(bls_seed));
+                    bls_member_pubkeys.push_back(*bls_pub);
+                } else {
+                    vrf_commitments.push_back(BuildPosVrfMemberCommitment(member_pub, *member_proof));
+                }
                 eligible++;
             }
             const int quorum = PosQuorum((size_t)g_pos_committee_size);
             if (eligible < quorum) {
-                // Aggregate committees may certify below quorum under the
-                // escaping-stall rule; script multisig always needs the quorum.
-                if (!g_pos_agg_committee) {
+                // Aggregate committees (MuSig2 or BLS) may certify below quorum
+                // under the escaping-stall rule; script multisig always needs
+                // the quorum.
+                if (!g_pos_agg_committee && !g_pos_bls) {
                     error = strprintf("Only %d of the provided keys are sortition-selected committee members for this slot; quorum is %d of an expected committee of %d", eligible, quorum, g_pos_committee_size);
                     err_kind = PosProduceError::MISC;
                     return false;
@@ -136,6 +175,15 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
                     return false;
                 }
             }
+            if (g_pos_bls) {
+                auto agg = BlsAggregatePublicKeys(bls_member_pubkeys);
+                if (!agg) {
+                    error = "Failed to aggregate committee BLS keys";
+                    err_kind = PosProduceError::INTERNAL;
+                    return false;
+                }
+                bls_agg_pk = *agg;
+            }
         }
     }
 
@@ -144,7 +192,8 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
             .CreateNewBlock(feeDestinationScript, std::chrono::seconds(0), nullptr,
                             g_pos_vrf ? &vrf_commitments : nullptr, &pubkey,
                             g_pos_vrf ? &vrf_proof : nullptr,
-                            (g_pos_vrf && !vrf_committee.empty()) ? &vrf_committee : nullptr));
+                            (g_pos_vrf && !vrf_committee.empty()) ? &vrf_committee : nullptr,
+                            (g_pos_bls && !bls_agg_pk.empty()) ? &bls_agg_pk : nullptr));
     if (!pblocktemplate.get()) {
         error = "Could not create block template";
         err_kind = PosProduceError::INTERNAL;
@@ -181,7 +230,40 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
         return false;
     }
     int countersigs = 0;
-    if (!parts->agg_key.empty()) {
+    if (!parts->bls_agg_key.empty()) {
+        // BLS aggregate-committee form: the leader's plain ECDSA signature plus
+        // one 96-byte BLS aggregate of the members' shares, both over the block
+        // hash, as two script pushes. Each member signs with the BLS key derived
+        // from its staking key; any subset's shares aggregate non-interactively.
+        std::vector<unsigned char> leader_sig;
+        if (!leader_key.Sign(block.GetHash(), leader_sig)) {
+            error = "Failed to sign block as leader";
+            err_kind = PosProduceError::MISC;
+            return false;
+        }
+        const uint256 hash = block.GetHash();
+        std::vector<std::vector<unsigned char>> shares;
+        shares.reserve(bls_member_seeds.size());
+        for (const std::vector<unsigned char>& member_seed : bls_member_seeds) {
+            auto share = BlsSign(member_seed, Span<const unsigned char>(hash.begin(), 32));
+            if (!share) {
+                error = "Failed to produce a committee BLS signature share";
+                err_kind = PosProduceError::MISC;
+                return false;
+            }
+            shares.push_back(std::move(*share));
+        }
+        auto agg_sig = BlsAggregate(shares);
+        if (!agg_sig) {
+            error = "Failed to aggregate the committee BLS signatures";
+            err_kind = PosProduceError::MISC;
+            return false;
+        }
+        CScript solution;
+        solution << leader_sig << *agg_sig;
+        block.proof.solution = solution;
+        countersigs = (int)bls_member_seeds.size();
+    } else if (!parts->agg_key.empty()) {
         std::vector<unsigned char> leader_sig;
         if (!leader_key.Sign(block.GetHash(), leader_sig)) {
             error = "Failed to sign block as leader";

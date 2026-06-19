@@ -46,6 +46,14 @@ std::optional<std::vector<unsigned char>> BlsSign(Span<const unsigned char> sk,
 bool BlsVerify(Span<const unsigned char> pk, Span<const unsigned char> msg32,
                Span<const unsigned char> sig);
 
+/** Aggregate public keys into one 48-byte aggregate key. The aggregate of the
+ *  members' keys is what a block's BLS challenge commits to; a 96-byte aggregate
+ *  signature then verifies against it (BlsVerify) exactly when every member
+ *  signed. Order-independent. nullopt if the set is empty or any encoding is
+ *  invalid. */
+std::optional<std::vector<unsigned char>> BlsAggregatePublicKeys(
+    const std::vector<std::vector<unsigned char>>& pks);
+
 /** Aggregate signatures (each over the *same* message) into one 96-byte
  *  signature. The inputs are individual 96-byte signatures in any order; the
  *  result verifies with BlsFastAggregateVerify against the signers' pubkeys.
