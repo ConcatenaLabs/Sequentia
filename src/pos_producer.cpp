@@ -76,9 +76,19 @@ std::shared_ptr<CBlock> BuildUnsignedBlsBlock(ChainstateManager& chainman, CTxMe
     vrf_commitments.push_back(BuildPosVrfCommitment(*proof));
     CScript feeDest = chainparams.GetConsensus().mandatory_coinbase_destination;
     if (feeDest == CScript()) feeDest = CScript() << OP_TRUE;
-    std::unique_ptr<CBlockTemplate> tmpl(
-        BlockAssembler(chainman.ActiveChainstate(), mempool, chainparams)
-            .CreateNewBlock(feeDest, std::chrono::seconds(0), nullptr, &vrf_commitments, &pubkey, &*proof, nullptr));
+    std::unique_ptr<CBlockTemplate> tmpl;
+    try {
+        tmpl = BlockAssembler(chainman.ActiveChainstate(), mempool, chainparams)
+            .CreateNewBlock(feeDest, std::chrono::seconds(0), nullptr, &vrf_commitments, &pubkey, &*proof, nullptr);
+    } catch (const std::exception& e) {
+        // CreateNewBlock throws if its final TestBlockValidity fails — e.g. the tip
+        // advanced between computing our VRF proof (against the old parent) and
+        // assembly, so the proof no longer matches. That is a transient race, not a
+        // fault: skip this slot and the next poll re-proposes on the current tip.
+        // A staker must never abort the daemon over one unbuildable slot.
+        LogPrint(BCLog::VALIDATION, "PoS gossip: skipping proposal, block assembly failed: %s\n", e.what());
+        return nullptr;
+    }
     if (!tmpl) return nullptr;
     auto block = std::make_shared<CBlock>(tmpl->block);
     {
@@ -261,12 +271,22 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
         }
     }
 
-    std::unique_ptr<CBlockTemplate> pblocktemplate(
-        BlockAssembler(chainman.ActiveChainstate(), mempool, chainparams)
+    std::unique_ptr<CBlockTemplate> pblocktemplate;
+    try {
+        pblocktemplate = BlockAssembler(chainman.ActiveChainstate(), mempool, chainparams)
             .CreateNewBlock(feeDestinationScript, std::chrono::seconds(0), nullptr,
                             g_pos_vrf ? &vrf_commitments : nullptr, &pubkey,
                             g_pos_vrf ? &vrf_proof : nullptr,
-                            (g_pos_vrf && !vrf_committee.empty()) ? &vrf_committee : nullptr));
+                            (g_pos_vrf && !vrf_committee.empty()) ? &vrf_committee : nullptr);
+    } catch (const std::exception& e) {
+        // CreateNewBlock throws if its final TestBlockValidity fails (e.g. the tip
+        // advanced between computing our VRF proof and assembly, leaving the proof
+        // bound to a stale parent). Treat it as a transient, recoverable skip — a
+        // staker must not abort the daemon over one unbuildable slot.
+        error = strprintf("Block assembly failed: %s", e.what());
+        err_kind = PosProduceError::INTERNAL;
+        return false;
+    }
     if (!pblocktemplate.get()) {
         error = "Could not create block template";
         err_kind = PosProduceError::INTERNAL;
