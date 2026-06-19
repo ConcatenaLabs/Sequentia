@@ -311,6 +311,28 @@ aggregate is a single constant-size group element regardless of signer count.
 This makes the signing half of the protocol robust to offline members by
 construction: you collect whoever responds rather than betting on a fixed 51.
 
+### Member-independent block hash (the single-round enabler)
+
+Private VRF sortition means the leader cannot enumerate the committee before
+members reveal themselves, so the message the committee signs must not depend on
+*who* signs — otherwise the leader could not fix a block for them to sign, and
+the committee would need a second round (announce eligibility, then sign). The
+paper's Principle 6 already implies the resolution: members countersign the
+*leader's fixed block*; the certificate (who signed, and the aggregate) is
+separate from the block content.
+
+This is realized by putting the **entire BLS certificate in the block proof
+`solution`** — the leader signature, each member (key, VRF proof, BLS key,
+proof-of-possession), and the 96-byte aggregate — which Elements already excludes
+from `block.GetHash()`. So the hash is determined by the leader's proposal alone
+(its transactions, anchor, VRF), independent of the member set: members sign it
+the instant they receive the proposal, **one round**, and any node aggregates
+whatever shares arrive. The challenge collapses to `OP_2 <leader>`; `CheckProof`
+reads the certificate from the solution and fast-aggregate-verifies it against
+the member-independent hash; `CheckPosStakeRules` adds the sortition checks
+(`src/pos.cpp`, `src/block_proof.cpp`, `src/validation.cpp`). This is implemented
+and tested single-host; it is the format the gossip rounds assemble.
+
 ### On forward security — checkpoints are the accepted defense
 
 BLS keys are long-lived and not forward-secure, so the paper's Principle 11
@@ -422,12 +444,22 @@ assembly and acceptance.
    no new wire message is needed at this phase. The shared `ProducePosBlock()`
    core also backs `generateposblock`. Proves the thread, the clock, sortition,
    and the accept path.
-2. **Voting + aggregation to 51/100.** Add `posvote`, the chosen
-   signature-share gossip (§7), and certificate assembly. Multi-node committee
-   produces threshold-certified blocks with no coordinator.
-3. **Anchor reshuffle + round-robin + enforce-consensus.** Add P7 fresher-anchor
-   proposals with the anchor weight, the round-robin re-vote, and the LT1
-   alternative-certificate path.
+2. **BLS certification format + single-host production.**
+   ✅ *Implemented* (`src/bls.*`, `-posbls`; tests `bls_tests`,
+   `feature_pos_bls_committee.py`). Blocks are certified by a non-interactive
+   BLS12-381 aggregate (§7), with the whole certificate carried in the proof
+   solution so the signed block hash is member-independent (the member-independent
+   block hash, §7) — the format the gossip rounds assemble. Verified single-host
+   (one node holding the committee keys) and validated by a non-producing node.
+3. **The gossip rounds.** Add `posproposal` (the leader's unsigned block) and
+   `posshare` (a member's signature share with its eligibility) and the round
+   engine: the elected leader floods its proposal; each node that is sortitioned
+   for the slot signs the member-independent block hash and floods a share; the
+   leader (an elected participant, not an external coordinator) collects a quorum
+   of shares, assembles the certificate into the solution, and submits. Because
+   the signed hash is member-independent, this is a **single round** — no announce
+   step. Multi-node committee certifies blocks across separate hosts with no
+   coordinator.
 4. **Hardening.** DoS rules (§9), equivocation evidence, and propagation/latency
    tuning under realistic offline-member rates.
 
