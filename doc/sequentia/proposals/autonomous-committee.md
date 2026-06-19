@@ -515,20 +515,39 @@ assembly and acceptance.
    announcement so only the elected leader sends a full block, or inv/getdata-style
    proposal relay, would bound it without the convergence hazard).
 
-   **Safety note — the committee quorum is crash-tolerant, not Byzantine-safe.**
-   The certification quorum is a simple majority (51/100). That tolerates crash
-   faults and, combined with first-seen/round-robin, the Byzantine-leader liveness
-   cases above. It does *not* make the committee Byzantine-safe against conflicting
-   finalisation: there is no member-level equivocation guard (the share dedup is
-   per (block, member)), so equivocating *members* — one in an odd committee, two
-   in an even one — can push two conflicting blocks to a majority each and certify
-   both, a transient fork. As with all forks here, this is resolved by the
-   Bitcoin-anchored checkpoint (the anchored branch wins; §before), so it is a
-   bounded liveness/reorg event, not a permanent safety break — consistent with
-   deriving safety from Bitcoin rather than the committee. Committee-level
-   Byzantine *safety* (tolerating up to ⌊(n−1)/3⌋ equivocators with no transient
-   fork) would require a **two-thirds quorum**, a separate quorum-policy decision
-   against the paper's 51/100; it is noted here, not adopted unilaterally.
+   **Quorum — a strict majority (51/100), by design, not 2/3.** A block certifies
+   on a simple-majority quorum. Why a majority is correct, and where its limits
+   are, both matter:
+
+   - *How a majority quorum can fork.* Two majorities of one committee of size *n*
+     must overlap, so two conflicting blocks can each reach a quorum only if the
+     overlap members double-sign. The minimum such equivocators is `2q − n` with
+     `q = ⌊n/2⌋+1`: **one** when *n* is odd, **two** when *n* is even. (And since
+     the quorum is fixed at a majority of the *expected* size, if the actual
+     sortitioned set ever reaches `2q` members, two *disjoint* quorums fit and a
+     mere partition forks the height with no equivocation at all.) There is no
+     member-level equivocation guard (share dedup is per (block, member)), so this
+     is reachable by a Byzantine member. It is a **transient** fork: fork choice
+     plus the Bitcoin-anchored checkpoint resolve it (the anchored branch wins,
+     irreversibly after consolidation) — a bounded reorg, not a permanent safety
+     break, consistent with deriving hard finality from Bitcoin, not the committee.
+
+   - *Why not 2/3.* A two-thirds quorum would make the committee Byzantine-safe
+     (no fork below ⌊(n−1)/3⌋ equivocators) — but that safety is **redundant** here
+     (the checkpoint already resolves forks) and it is **ruinous for liveness**.
+     The quorum must be reachable by whoever is online; the only fallback when it
+     is not is escaping-stall (§5), which permits a sub-quorum block *only when the
+     Bitcoin anchor has advanced ≥ 3 blocks* (~30 min). So a missed quorum drops
+     the chain to the anchor-gated ~30-min cadence. A 51% threshold is met whenever
+     live participation exceeds ~51% (almost always), so escaping-stall is rare; a
+     67% threshold misses quorum as soon as participation dips toward two-thirds —
+     routine with offline stakers, sortition variance, and latency — forcing
+     constant escaping-stalls and collapsing the fast sidechain to Bitcoin's pace.
+     This is what the Theoretical Paper's participation tables show: the
+     probability of assembling the threshold falls off sharply as it approaches the
+     participation rate. **Decision: 51/100 is retained; 2/3 is rejected on
+     liveness grounds.** Majority quorum gives fast liveness; the Bitcoin checkpoint
+     gives hard safety.
 
    **Not a goal — stake slashing.** Unlike economic-finality PoS (where slashing
    *is* the finality guarantee — reverting must burn ≥⅓ of stake), Sequentia's
@@ -569,6 +588,14 @@ defaults.
 **Resolved — gossip default (§2).** **`-posgossip` defaults on**: every full node
 relays committee traffic, bounded by the eligibility gate; producing
 (`-posproducer`) remains opt-in.
+
+**Resolved — quorum (§12.4).** The certification quorum is a **strict majority
+(51/100), not two-thirds.** A 2/3 quorum would add committee-level Byzantine
+safety, but that is redundant (the Bitcoin checkpoint already resolves the
+transient forks a majority quorum allows) and would force frequent anchor-gated
+escaping-stalls whenever live participation dips toward two-thirds — collapsing
+the fast sidechain to Bitcoin's cadence (the paper's participation tables).
+Majority quorum provides fast liveness; the checkpoint provides hard safety.
 
 All design decisions for the autonomous committee are now settled; the remaining
 work is implementation per the phased plan (§12).
