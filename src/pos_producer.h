@@ -248,7 +248,6 @@ private:
     // in the proposal, so any node that gathers a quorum assembles.
     std::mutex m_gossip_mutex;
     int m_round_height{0};                             //!< height we are running rounds for
-    int64_t m_round_start_ms{0};                       //!< when this height's collection started
     std::map<CPubKey, RoundCandidate> m_candidates;    //!< leader -> its validated proposal this round
     std::set<CPubKey> m_excluded;                      //!< leaders excluded this height (equivocated, or proposed an invalid block)
     std::map<CPubKey, PosShare> m_collected;           //!< shares for the currently-backed proposal

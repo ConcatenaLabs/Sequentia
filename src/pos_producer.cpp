@@ -284,7 +284,7 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
         // bound to a stale parent). Treat it as a transient, recoverable skip — a
         // staker must not abort the daemon over one unbuildable slot.
         error = strprintf("Block assembly failed: %s", e.what());
-        err_kind = PosProduceError::INTERNAL;
+        err_kind = PosProduceError::MISC;  // recoverable: a stale-tip race or, via RPC, too few committee keys
         return false;
     }
     if (!pblocktemplate.get()) {
@@ -720,7 +720,6 @@ void PosProducer::RecordCandidate(const std::shared_ptr<const CBlock>& block, co
     if (height < m_round_height) return; // stale
     if (height > m_round_height) {
         m_round_height = height;
-        m_round_start_ms = GetTimeMillis();
         m_candidates.clear();
         m_excluded.clear();
         m_collected.clear();
@@ -844,8 +843,18 @@ int64_t PosProducer::DriveRound()
     // whose round failed to certify (it withheld, equivocated into a sub-quorum
     // split, or too few of its backers were online) is deterministically excluded
     // and the committee converges on the next leader in lockstep — the paper's
-    // round-robin re-vote (P6 §9). The index is derived from the (aligned) clock,
-    // so all nodes step through the same leader order together.
+    // round-robin re-vote (P6 §9).
+    //
+    // The round index MUST be derived from a network-global reference, not each
+    // node's local round-start: anchoring to a local arrival time lets gossip
+    // latency put two honest nodes in different rounds at the same instant, so
+    // they sign different leaders' blocks at the same height — two sub-quorum
+    // halves, or, worse, two competing quorums and a fork. We anchor instead to
+    // the round-0 leader's own block timestamp: the leader stamps it at ~real
+    // production time, and every node reads the identical value off the same
+    // gossiped block, so all honest nodes compute the same round_index together.
+    // (Requires only loose clock agreement, well within one slot — the same
+    // assumption the slot schedule already makes.)
     static const int64_t WINDOW_MS = 500;
     static const int64_t ROUND_MS = 700;
     CBlockIndex* tip;
@@ -863,7 +872,10 @@ int64_t PosProducer::DriveRound()
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
         if (m_round_height != height) return POS_PRODUCER_POLL_MS; // no active round yet
-        const int64_t elapsed = now - m_round_start_ms;
+        std::shared_ptr<const CBlock> round0 = BackedForRound(0);
+        if (!round0) return 150;                                    // no candidates yet, still collecting
+        const int64_t anchor_ms = (int64_t)round0->nTime * 1000;    // network-global schedule origin
+        const int64_t elapsed = now - anchor_ms;
         if (elapsed < WINDOW_MS) return 150;                        // still collecting proposals
         round_index = (int)((elapsed - WINDOW_MS) / ROUND_MS);
         backed = BackedForRound(round_index);
