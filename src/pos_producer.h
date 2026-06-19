@@ -185,16 +185,16 @@ private:
     bool m_wake{false};
     bool m_running{false};
 
-    // Gossip round state (one round per height).
+    // Gossip round state (one round per height). The leader ships its block
+    // signature inside the proposal, so any node that collects a quorum can
+    // assemble — no single aggregator to stall the round.
     std::mutex m_gossip_mutex;
     int m_round_height{0};                             //!< height we are collecting proposals for
-    int64_t m_round_start_ms{0};                       //!< when this round's first proposal was seen
-    std::shared_ptr<const CBlock> m_best_proposal;     //!< lowest-leader-VRF proposal this round
+    int64_t m_round_start_ms{0};                       //!< when this round started (first proposal)
+    std::shared_ptr<const CBlock> m_best_proposal;     //!< lowest-leader-VRF proposal this round (carries the leader sig)
     uint256 m_best_beta;                               //!< its leader VRF (lower is better)
     bool m_signed{false};                              //!< have we signed (once) this round
-    std::shared_ptr<const CBlock> m_proposal;          //!< our own proposal this round (if we proposed)
-    uint256 m_proposal_hash;
-    std::map<CPubKey, PosShare> m_collected;           //!< shares for our own proposal
+    std::map<CPubKey, PosShare> m_collected;           //!< shares for m_best_proposal
     std::map<CPubKey, uint256> m_proposers;            //!< leader -> proposal hash this round (equivocation guard)
     std::set<uint256> m_seen_proposals;                //!< proposal dedup
     std::set<std::pair<uint256, CPubKey>> m_seen_shares; //!< share dedup

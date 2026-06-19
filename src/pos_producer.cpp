@@ -635,7 +635,6 @@ bool PosProducer::RecordProposal(const std::shared_ptr<const CBlock>& block, con
         m_round_start_ms = GetTimeMillis();
         m_best_proposal.reset();
         m_signed = false;
-        m_proposal.reset();
         m_collected.clear();
         m_proposers.clear();
     }
@@ -650,6 +649,7 @@ bool PosProducer::RecordProposal(const std::shared_ptr<const CBlock>& block, con
     if (!m_best_proposal || leader_beta < m_best_beta) {
         m_best_proposal = block;
         m_best_beta = leader_beta;
+        m_collected.clear(); // any shares collected were for the previous best
     }
     return true;
 }
@@ -662,7 +662,17 @@ void PosProducer::ProposeGossip(const CKey& leader_key)
         LogPrint(BCLog::VALIDATION, "PoS gossip: failed to build a proposal\n");
         return;
     }
+    // The leader authorises its block by signing the (member-independent) hash,
+    // and ships that signature inside the proposal — staged in the otherwise-empty
+    // proof solution, which is excluded from the hash — so any node that later
+    // gathers a quorum of shares can assemble the certificate without us.
     const uint256 hash = block->GetHash();
+    std::vector<unsigned char> leader_sig;
+    if (!leader_key.Sign(hash, leader_sig)) {
+        LogPrint(BCLog::VALIDATION, "PoS gossip: failed to sign proposal\n");
+        return;
+    }
+    block->proof.solution = CScript() << leader_sig;
     uint256 own_beta;
     {
         CBlockIndex* prev;
@@ -679,10 +689,6 @@ void PosProducer::ProposeGossip(const CKey& leader_key)
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
         RecordProposal(block, leader_key.GetPubKey(), own_beta, height);
-        // Remember this is OUR proposal so we collect shares for it (and assemble
-        // it if it wins the round).
-        m_proposal = block;
-        m_proposal_hash = hash;
     }
     LogPrintf("PoS gossip: proposing block %s at height %d\n", hash.GetHex(), height);
     FloodProposal(*block);
@@ -712,73 +718,70 @@ int64_t PosProducer::DriveRound()
             m_round_height = 0; // force a fresh round; producers re-propose
             m_best_proposal.reset();
             m_signed = false;
-            m_proposal.reset();
             m_collected.clear();
             m_proposers.clear();
         }
     }
 
-    // Once the window closes, sign the round's best proposal exactly once.
+    // Once the window closes, sign the round's best proposal exactly once. We
+    // both collect our own shares (we are a potential aggregator) and flood them
+    // (so every other node is too).
     std::shared_ptr<const CBlock> to_sign;
-    bool sign_is_own = false;
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
         if (m_round_height == height && !m_signed && m_best_proposal &&
             GetTimeMillis() >= m_round_start_ms + WINDOW_MS) {
             to_sign = m_best_proposal;
             m_signed = true;
-            sign_is_own = m_proposal && (m_best_proposal->GetHash() == m_proposal_hash);
         }
     }
     if (to_sign) {
         std::vector<PosShare> shares = MakeLocalShares(*to_sign);
-        if (sign_is_own) {
+        {
             std::lock_guard<std::mutex> lock(m_gossip_mutex);
-            for (PosShare& sh : shares) m_collected[sh.pubkey] = sh;
-        } else {
-            for (const PosShare& sh : shares) FloodShare(sh);
+            if (m_best_proposal && m_best_proposal->GetHash() == to_sign->GetHash()) {
+                for (PosShare& sh : shares) {
+                    if (m_collected.size() < (size_t)MAX_POS_AGG_COMMITTEE_SIZE) m_collected[sh.pubkey] = sh;
+                }
+            }
         }
+        for (const PosShare& sh : shares) FloodShare(sh);
     }
 
-    // If our own proposal won the round and we hold a quorum, assemble + submit.
+    // Any node that holds a quorum of shares for the backed proposal assembles
+    // the certificate and submits — the leader's authorising signature is in the
+    // proposal, so no single aggregator can stall the round. Competing assemblies
+    // share the same block hash, so duplicates are dropped by ProcessNewBlock.
     std::shared_ptr<CBlock> final_block;
     uint256 final_hash;
     size_t members_n = 0;
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
-        if (m_round_height == height && m_proposal && m_best_proposal &&
-            m_best_proposal->GetHash() == m_proposal_hash &&
-            GetTimeMillis() >= m_round_start_ms + WINDOW_MS) {
-            const int quorum = PosQuorum((size_t)g_pos_committee_size);
-            if ((int)m_collected.size() >= quorum) {
-                auto parts = ParsePosBlockChallenge(m_proposal->proof.challenge);
-                CKey leader_key;
-                if (parts) {
-                    for (const CKey& k : m_keys) {
-                        if (k.GetPubKey() == parts->leader) { leader_key = k; break; }
-                    }
+        if (m_round_height == height && m_best_proposal &&
+            GetTimeMillis() >= m_round_start_ms + WINDOW_MS &&
+            (int)m_collected.size() >= PosQuorum((size_t)g_pos_committee_size)) {
+            CScript::const_iterator pc = m_best_proposal->proof.solution.begin();
+            opcodetype op;
+            std::vector<unsigned char> leader_sig;
+            if (m_best_proposal->proof.solution.GetOp(pc, op, leader_sig) && !leader_sig.empty()) {
+                std::vector<PosBlsMember> members;
+                std::vector<std::vector<unsigned char>> shares;
+                for (const auto& [pub, sh] : m_collected) {
+                    PosBlsMember m;
+                    m.pubkey = pub;
+                    m.proof = sh.vrf_proof;
+                    m.bls_pubkey = sh.bls_pubkey;
+                    m.bls_pop = sh.bls_pop;
+                    members.push_back(std::move(m));
+                    shares.push_back(sh.bls_share);
                 }
-                std::vector<unsigned char> leader_sig;
-                if (parts && leader_key.IsValid() && leader_key.Sign(m_proposal->GetHash(), leader_sig)) {
-                    std::vector<PosBlsMember> members;
-                    std::vector<std::vector<unsigned char>> shares;
-                    for (const auto& [pub, sh] : m_collected) {
-                        PosBlsMember m;
-                        m.pubkey = pub;
-                        m.proof = sh.vrf_proof;
-                        m.bls_pubkey = sh.bls_pubkey;
-                        m.bls_pop = sh.bls_pop;
-                        members.push_back(std::move(m));
-                        shares.push_back(sh.bls_share);
-                    }
-                    auto agg = BlsAggregate(shares);
-                    if (agg) {
-                        final_block = std::make_shared<CBlock>(*m_proposal);
-                        final_block->proof.solution = BuildPosBlsSolution(leader_sig, *agg, members);
-                        final_hash = m_proposal->GetHash();
-                        members_n = members.size();
-                        m_proposal.reset(); // assembled; stop collecting
-                    }
+                auto agg = BlsAggregate(shares);
+                if (agg) {
+                    final_block = std::make_shared<CBlock>(*m_best_proposal);
+                    final_block->proof.solution = BuildPosBlsSolution(leader_sig, *agg, members);
+                    final_hash = m_best_proposal->GetHash();
+                    members_n = members.size();
+                    m_best_proposal.reset(); // assembled; round done from our view
                 }
             }
         }
@@ -792,10 +795,10 @@ int64_t PosProducer::DriveRound()
         }
     }
 
-    // Poll fast while a round for the current height is in progress.
+    // Poll fast while a round for the current height is still in progress.
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
-        if (m_round_height == height && (m_proposal || !m_signed)) return 150;
+        if (m_round_height == height && m_best_proposal) return 150;
     }
     return POS_PRODUCER_POLL_MS;
 }
@@ -832,6 +835,18 @@ PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& blo
     uint256 lbeta;
     if (!leader_proof || !VrfVerify(parts->leader, Span<const unsigned char>(seed.begin(), 32), *leader_proof, lbeta)) return PosGossipAction::Invalid;
     if (!PosVrfIsCommitteeMember(lbeta, weight, PosTotalWeight(reg))) return PosGossipAction::Invalid; // leader not sortitioned
+    // The leader's authorising signature rides in the proposal's staging solution
+    // (a single push). It must verify against the block hash so any node can later
+    // assemble using it.
+    {
+        CScript::const_iterator pc = block->proof.solution.begin();
+        opcodetype op;
+        std::vector<unsigned char> leader_sig;
+        if (!block->proof.solution.GetOp(pc, op, leader_sig) || leader_sig.empty() ||
+            !parts->leader.Verify(hash, leader_sig)) {
+            return PosGossipAction::Invalid;
+        }
+    }
     bool recorded;
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
@@ -859,15 +874,16 @@ PosGossipAction PosProducer::OnShare(const PosShare& share)
     }
     if (!BlsVerifyPossession(share.bls_pubkey, share.bls_pop)) return PosGossipAction::Invalid;
     if (!BlsVerify(share.bls_pubkey, Span<const unsigned char>(share.block_hash.begin(), 32), share.bls_share)) return PosGossipAction::Invalid;
-    // Is it for a block we proposed? If not, it is a crypto-valid share for some
-    // other proposal we cannot check sortition for — relay it, do not collect.
+    // Is it for the proposal we are backing this round? If not, it is a
+    // crypto-valid share for some other proposal whose sortition we cannot check
+    // here — relay it, do not collect.
     uint256 prev_hash;
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
-        if (!m_proposal || share.block_hash != m_proposal_hash) return PosGossipAction::Relay;
-        prev_hash = m_proposal->hashPrevBlock;
+        if (!m_best_proposal || share.block_hash != m_best_proposal->GetHash()) return PosGossipAction::Relay;
+        prev_hash = m_best_proposal->hashPrevBlock;
     }
-    // For our own proposal we can (and must) check the signer's sortition.
+    // For the backed proposal we can (and must) check the signer's sortition.
     CBlockIndex* prev;
     {
         LOCK(cs_main);
@@ -883,11 +899,11 @@ PosGossipAction PosProducer::OnShare(const PosShare& share)
     if (!PosVrfIsCommitteeMember(beta, weight, PosTotalWeight(reg))) return PosGossipAction::Invalid;
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
-        if (m_proposal && share.block_hash == m_proposal_hash &&
+        if (m_best_proposal && share.block_hash == m_best_proposal->GetHash() &&
             m_collected.size() < (size_t)MAX_POS_AGG_COMMITTEE_SIZE) {
             m_collected[share.pubkey] = share;
         }
     }
-    Wake(); // a new share may complete our quorum
+    Wake(); // a new share may complete the quorum
     return PosGossipAction::Relay;
 }
