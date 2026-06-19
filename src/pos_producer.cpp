@@ -496,17 +496,18 @@ int64_t PosProducer::Step()
     // Slot timing: the leader's slot opens slot*interval after the parent, and
     // we never produce faster than one interval since the parent — the paper's
     // soft lower-bound cadence floor (Principle 10; consensus only enforces the
-    // slot gate). A sub-second leader stagger (finer than the 1-second block
-    // clock) on top lets the lowest-VRF-slot node propose first; staggering from
-    // the later of the slot time and the current second keeps it effective during
-    // catch-up (when the slot time is far in the past).
-    static const int64_t POS_LEADER_STAGGER_MS = 300;
+    // slot gate). We propose as soon as that opens and do NOT add a sub-second
+    // per-slot leader stagger: the gossip collection window plus lowest-VRF
+    // convergence already resolve multiple simultaneous proposers, whereas a
+    // stagger wider than the window would let an early (low-slot) proposer sign
+    // before higher-slot proposals arrive — splitting shares and stalling the
+    // round at larger committee sizes. Anchoring to the current second keeps the
+    // round starts of all nodes aligned during catch-up (past slot times).
     const int64_t slot_open = (int64_t)tip->nTime + (int64_t)best_slot * g_pos_slot_interval;
     const int64_t cadence_floor = (int64_t)tip->nTime + g_pos_slot_interval;
     const int64_t earliest_sec = std::max(slot_open, cadence_floor);
     const int64_t now_ms = GetTimeMillis();
-    const int64_t base_ms = std::max(earliest_sec * 1000, (now_ms / 1000) * 1000);
-    const int64_t target_ms = base_ms + (int64_t)best_slot * POS_LEADER_STAGGER_MS;
+    const int64_t target_ms = std::max(earliest_sec * 1000, (now_ms / 1000) * 1000);
 
     // BLS distributed committee (we lack a local quorum, e.g. one key per host):
     // drive the gossip round every poll — sign the lowest-VRF proposal once the
