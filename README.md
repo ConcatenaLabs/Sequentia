@@ -26,14 +26,18 @@ Liquid. All four are implemented and tested:
    Bitcoin reorganizes away the referenced block, giving immediate finality
    otherwise and friction-free cross-chain atomic swaps. — see
    [`doc/sequentia/03-bitcoin-anchoring.md`](doc/sequentia/03-bitcoin-anchoring.md).
-3. **Proof-of-Stake consensus.** The theoretical paper's design, implemented
-   in this repository: stake-weighted **private VRF sortition**, **committee
-   certification** (sortitioned, majority quorum — immediate finality;
-   optionally **MuSig2-aggregated** to paper-scale 100-member committees),
-   **on-chain stake** with CSV-enforced unbonding, and **Bitcoin checkpoints**
-   against long-range attacks. **The bundled Sequentia chain runs PoS by
-   default**, bootstrapped from a genesis-seeded staking output with no
-   `-staker` config (the staker set is entirely on-chain; see
+3. **Proof-of-Stake consensus.** The theoretical paper's design: stake-weighted
+   **private VRF sortition**, **committee certification** (sortitioned, majority
+   quorum — immediate finality; optionally **MuSig2-aggregated** to paper-scale
+   100-member committees), **on-chain stake** with CSV-enforced unbonding, and
+   **Bitcoin checkpoints** against long-range attacks. Block **validation** is
+   fully decentralized — every node verifies the VRF proofs, the committee
+   signature, the anchor, and the finality gate — while multi-host block
+   **production** is currently coordinator/RPC-driven; an autonomous
+   peer-to-peer gossip-and-sign committee is named future work. **The bundled
+   Sequentia chain runs PoS by default**, bootstrapped from a genesis-seeded
+   staking output with no `-staker` config (the staker set is entirely on-chain;
+   see
    [`06-tokenomics-and-launch.md`](doc/sequentia/06-tokenomics-and-launch.md)).
    The signed-block "anyone-signs" path is the custom/regtest dev harness
    (`-con_pos=0`). — see
@@ -137,11 +141,11 @@ still `liquidv1`, inherited from Elements — pass `-chain=` explicitly):
 
 * **Sequentia mainnet**: `elementsd -chain=sequentia` — the real Sequentia
   network. Proof-of-Stake by default (VRF sortition + aggregate committee,
-  bootstrapped from a genesis-seeded staking output — doc 13), Bitcoin-anchored
+  bootstrapped from a genesis-seeded staking output — doc 06-tokenomics-and-launch.md), Bitcoin-anchored
   (requires a Bitcoin node via the `-mainchainrpc*` options), any-asset fees,
   Bitcoin-mainnet address format with opt-in confidential transactions. **The
   genesis founder key is a placeholder that must be replaced at the real launch
-  (doc 13).** (The `main` chain is kept as Bitcoin-Elements for the test harness
+  (doc 06-tokenomics-and-launch.md).** (The `main` chain is kept as Bitcoin-Elements for the test harness
   and parent-chain interop — Sequentia has its own dedicated chain id.)
 * **Sequentia testnet**: `elementsd -chain=test` — identical consensus rules, a
   public/published founder key, and testnet address format; the playground.
