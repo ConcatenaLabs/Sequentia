@@ -43,6 +43,15 @@ class CConnman;
 class CTxMemPool;
 class ChainstateManager;
 
+/** What a peer should do with a gossip message after the local producer has
+ *  examined it (the producer is the only component with the round/registry
+ *  context to judge a committee message). */
+enum class PosGossipAction {
+    Ignore,   //!< duplicate, off-tip, stale, or an equivocating duplicate — drop, no relay, no penalty
+    Relay,    //!< new and valid — relay to our other peers
+    Invalid,  //!< malformed, forged eligibility, or bad signature — drop and penalise the sender
+};
+
 /** SEQUENTIA: one committee member's contribution to a proposed block, gossiped
  *  as a `posshare`: its BLS signature share over the proposal's (member-
  *  independent) block hash, plus everything the leader needs to put the member
@@ -124,14 +133,12 @@ public:
 
     // --- Gossip committee (called from net_processing on the message thread) ---
     //
-    //! Ingest a peer's `posproposal` (an elected leader's unsigned block). If it
-    //! is new and valid, sign it with any locally-held sortitioned keys and
-    //! flood the resulting shares. Returns true if the proposal was new (relay).
-    bool OnProposal(const std::shared_ptr<const CBlock>& block);
-    //! Ingest a peer's `posshare`. If it matches a block we proposed, collect it
-    //! and, on reaching the quorum, assemble the certificate and submit the
-    //! block. Returns true if the share was new (relay).
-    bool OnShare(const PosShare& share);
+    //! Ingest a peer's `posproposal` (an elected leader's unsigned block). Records
+    //! it into the current round if new and valid. Returns the relay/penalty action.
+    PosGossipAction OnProposal(const std::shared_ptr<const CBlock>& block);
+    //! Ingest a peer's `posshare`. Collects it if it matches a block we proposed
+    //! and the signer is sortition-eligible. Returns the relay/penalty action.
+    PosGossipAction OnShare(const PosShare& share);
 
 protected:
     void UpdatedBlockTip(const CBlockIndex* pindexNew, const CBlockIndex* pindexFork,
@@ -153,8 +160,10 @@ private:
     //! Returns the poll interval (short while a round is in progress).
     int64_t DriveRound();
     //! Record a proposal into the current round (resetting on a new height,
-    //! keeping the lowest-leader-VRF one). m_gossip_mutex held.
-    void RecordProposal(const std::shared_ptr<const CBlock>& block, const uint256& leader_beta, int height);
+    //! keeping the lowest-leader-VRF one). Returns false if it is an equivocating
+    //! duplicate from a leader that already proposed a different block this height.
+    //! m_gossip_mutex held.
+    bool RecordProposal(const std::shared_ptr<const CBlock>& block, const CPubKey& leader, const uint256& leader_beta, int height);
     //! Produce shares for every locally-held key that is sortition-eligible for
     //! `block`'s slot.
     std::vector<PosShare> MakeLocalShares(const CBlock& block);
@@ -186,6 +195,7 @@ private:
     std::shared_ptr<const CBlock> m_proposal;          //!< our own proposal this round (if we proposed)
     uint256 m_proposal_hash;
     std::map<CPubKey, PosShare> m_collected;           //!< shares for our own proposal
+    std::map<CPubKey, uint256> m_proposers;            //!< leader -> proposal hash this round (equivocation guard)
     std::set<uint256> m_seen_proposals;                //!< proposal dedup
     std::set<std::pair<uint256, CPubKey>> m_seen_shares; //!< share dedup
 };

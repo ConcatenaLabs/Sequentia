@@ -4150,11 +4150,21 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         std::shared_ptr<CBlock> pblock = std::make_shared<CBlock>();
         vRecv >> *pblock;
         PosProducer* prod = GetActivePosProducer();
-        if (prod && prod->OnProposal(pblock)) {
+        if (!prod) return; // not participating; do not relay committee traffic
+        switch (prod->OnProposal(pblock)) {
+        case PosGossipAction::Invalid:
+            // Honest nodes validate before relaying, so a bad message means the
+            // sender originated or forwarded garbage.
+            Misbehaving(pfrom.GetId(), 10, "invalid posproposal");
+            break;
+        case PosGossipAction::Relay:
             m_connman.ForEachNode([&](CNode* pnode) {
                 if (pnode->GetId() == pfrom.GetId()) return;
                 m_connman.PushMessage(pnode, CNetMsgMaker(pnode->GetCommonVersion()).Make(NetMsgType::POSPROPOSAL, *pblock));
             });
+            break;
+        case PosGossipAction::Ignore:
+            break;
         }
         return;
     }
@@ -4163,11 +4173,19 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         PosShare share;
         vRecv >> share;
         PosProducer* prod = GetActivePosProducer();
-        if (prod && prod->OnShare(share)) {
+        if (!prod) return;
+        switch (prod->OnShare(share)) {
+        case PosGossipAction::Invalid:
+            Misbehaving(pfrom.GetId(), 10, "invalid posshare");
+            break;
+        case PosGossipAction::Relay:
             m_connman.ForEachNode([&](CNode* pnode) {
                 if (pnode->GetId() == pfrom.GetId()) return;
                 m_connman.PushMessage(pnode, CNetMsgMaker(pnode->GetCommonVersion()).Make(NetMsgType::POSSHARE, share));
             });
+            break;
+        case PosGossipAction::Ignore:
+            break;
         }
         return;
     }

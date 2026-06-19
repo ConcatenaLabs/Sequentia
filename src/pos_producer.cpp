@@ -624,23 +624,33 @@ std::vector<PosShare> PosProducer::MakeLocalShares(const CBlock& block)
     return out;
 }
 
-void PosProducer::RecordProposal(const std::shared_ptr<const CBlock>& block, const uint256& leader_beta, int height)
+bool PosProducer::RecordProposal(const std::shared_ptr<const CBlock>& block, const CPubKey& leader, const uint256& leader_beta, int height)
 {
     // m_gossip_mutex held. One round per height; within a round keep the
     // lowest-leader-VRF proposal (paper P6 step 6/8 convergence).
-    if (height < m_round_height) return; // stale
+    if (height < m_round_height) return false; // stale
     if (height > m_round_height) {
         m_round_height = height;
         m_round_start_ms = GetTimeMillis();
-        m_best_proposal = block;
-        m_best_beta = leader_beta;
+        m_best_proposal.reset();
         m_signed = false;
         m_proposal.reset();
         m_collected.clear();
-    } else if (!m_best_proposal || leader_beta < m_best_beta) {
+        m_proposers.clear();
+    }
+    // Equivocation guard: a leader gets one block per height. A second, different
+    // block from the same leader is dropped (we keep backing the first we saw).
+    auto it = m_proposers.find(leader);
+    if (it != m_proposers.end()) {
+        if (it->second != block->GetHash()) return false; // equivocating duplicate
+    } else {
+        if (m_proposers.size() < (size_t)MAX_POS_AGG_COMMITTEE_SIZE) m_proposers[leader] = block->GetHash();
+    }
+    if (!m_best_proposal || leader_beta < m_best_beta) {
         m_best_proposal = block;
         m_best_beta = leader_beta;
     }
+    return true;
 }
 
 void PosProducer::ProposeGossip(const CKey& leader_key)
@@ -667,7 +677,7 @@ void PosProducer::ProposeGossip(const CKey& leader_key)
     }
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
-        RecordProposal(block, own_beta, height);
+        RecordProposal(block, leader_key.GetPubKey(), own_beta, height);
         // Remember this is OUR proposal so we collect shares for it (and assemble
         // it if it wins the round).
         m_proposal = block;
@@ -772,71 +782,92 @@ int64_t PosProducer::DriveRound()
     return POS_PRODUCER_POLL_MS;
 }
 
-bool PosProducer::OnProposal(const std::shared_ptr<const CBlock>& block)
+PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& block)
 {
     const uint256 hash = block->GetHash();
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
-        if (!m_seen_proposals.insert(hash).second) return false; // already seen; don't relay
+        if (!m_seen_proposals.insert(hash).second) return PosGossipAction::Ignore; // already seen
         if (m_seen_proposals.size() > 20000) m_seen_proposals.clear();
     }
+    // A posproposal that is not even the BLS committee form is malformed: no
+    // honest node would originate or relay it.
+    auto parts = ParsePosBlockChallenge(block->proof.challenge);
+    if (!parts || !parts->is_bls) return PosGossipAction::Invalid;
     CBlockIndex* tip;
     {
         LOCK(cs_main);
         tip = m_chainman.ActiveChain().Tip();
     }
-    if (!tip || block->hashPrevBlock != tip->GetBlockHash()) return true; // relay; not on our tip
+    if (!tip) return PosGossipAction::Ignore;
+    if (block->hashPrevBlock != tip->GetBlockHash()) return PosGossipAction::Ignore; // not on our tip (benign race)
     const int height = tip->nHeight + 1;
-    auto parts = ParsePosBlockChallenge(block->proof.challenge);
-    if (!parts || !parts->is_bls) return true;
+    // The leader must prove sortition eligibility (objective: an honest relayer
+    // checked this, so a failure means the sender sent garbage).
     const uint256 seed = PosSeedForChild(tip);
     auto leader_proof = ExtractPosVrfProof(*block);
     uint256 lbeta;
-    if (!leader_proof || !VrfVerify(parts->leader, Span<const unsigned char>(seed.begin(), 32), *leader_proof, lbeta)) return true;
-    if (StakeRegistry::GetInstance().GetWeight(parts->leader) == 0) return true;
+    if (!leader_proof || !VrfVerify(parts->leader, Span<const unsigned char>(seed.begin(), 32), *leader_proof, lbeta)) return PosGossipAction::Invalid;
+    const StakeRegistry& reg = StakeRegistry::GetInstance();
+    const uint64_t weight = reg.GetWeight(parts->leader);
+    if (weight == 0) return PosGossipAction::Invalid;
+    if (!PosVrfIsCommitteeMember(lbeta, weight, PosTotalWeight(reg))) return PosGossipAction::Invalid; // leader not sortitioned
+    bool recorded;
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
-        RecordProposal(block, lbeta, height);
+        recorded = RecordProposal(block, parts->leader, lbeta, height);
     }
+    // An equivocating duplicate (same leader, different block this height) is
+    // dropped without penalty — it may be benign reordering at the sender.
+    if (!recorded) return PosGossipAction::Ignore;
     Wake(); // let the worker drive this round promptly
-    return true;
+    return PosGossipAction::Relay;
 }
 
-bool PosProducer::OnShare(const PosShare& share)
+PosGossipAction PosProducer::OnShare(const PosShare& share)
 {
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
-        if (!m_seen_shares.insert({share.block_hash, share.pubkey}).second) return false;
+        if (!m_seen_shares.insert({share.block_hash, share.pubkey}).second) return PosGossipAction::Ignore;
         if (m_seen_shares.size() > 200000) m_seen_shares.clear();
     }
-    // Crypto validation (registry-independent).
-    if (share.bls_pubkey.size() != BLS_PK_SIZE || share.bls_pop.size() != BLS_SIG_SIZE || share.bls_share.size() != BLS_SIG_SIZE) return true;
-    if (!BlsVerifyPossession(share.bls_pubkey, share.bls_pop)) return true;
-    if (!BlsVerify(share.bls_pubkey, Span<const unsigned char>(share.block_hash.begin(), 32), share.bls_share)) return true;
-    // Only collect shares for our own proposal.
+    // Crypto validation (registry-independent, objective): malformed sizes, a bad
+    // proof-of-possession, or a signature that does not verify is provable garbage.
+    if (share.bls_pubkey.size() != BLS_PK_SIZE || share.bls_pop.size() != BLS_SIG_SIZE ||
+        share.bls_share.size() != BLS_SIG_SIZE || share.vrf_proof.size() != VRF_PROOF_SIZE || !share.pubkey.IsValid()) {
+        return PosGossipAction::Invalid;
+    }
+    if (!BlsVerifyPossession(share.bls_pubkey, share.bls_pop)) return PosGossipAction::Invalid;
+    if (!BlsVerify(share.bls_pubkey, Span<const unsigned char>(share.block_hash.begin(), 32), share.bls_share)) return PosGossipAction::Invalid;
+    // Is it for a block we proposed? If not, it is a crypto-valid share for some
+    // other proposal we cannot check sortition for — relay it, do not collect.
     uint256 prev_hash;
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
-        if (!m_proposal || share.block_hash != m_proposal_hash) return true; // not ours; relay
+        if (!m_proposal || share.block_hash != m_proposal_hash) return PosGossipAction::Relay;
         prev_hash = m_proposal->hashPrevBlock;
     }
-    // Member sortition eligibility for the proposal's slot.
+    // For our own proposal we can (and must) check the signer's sortition.
     CBlockIndex* prev;
     {
         LOCK(cs_main);
         prev = m_chainman.m_blockman.LookupBlockIndex(prev_hash);
     }
-    if (!prev) return true;
+    if (!prev) return PosGossipAction::Relay;
     const uint256 seed = PosSeedForChild(prev);
     const StakeRegistry& reg = StakeRegistry::GetInstance();
-    if (reg.GetWeight(share.pubkey) == 0) return true;
+    const uint64_t weight = reg.GetWeight(share.pubkey);
+    if (weight == 0) return PosGossipAction::Invalid;
     uint256 beta;
-    if (!VrfVerify(share.pubkey, Span<const unsigned char>(seed.begin(), 32), share.vrf_proof, beta)) return true;
-    if (!PosVrfIsCommitteeMember(beta, reg.GetWeight(share.pubkey), PosTotalWeight(reg))) return true;
+    if (!VrfVerify(share.pubkey, Span<const unsigned char>(seed.begin(), 32), share.vrf_proof, beta)) return PosGossipAction::Invalid;
+    if (!PosVrfIsCommitteeMember(beta, weight, PosTotalWeight(reg))) return PosGossipAction::Invalid;
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
-        if (m_proposal && share.block_hash == m_proposal_hash) m_collected[share.pubkey] = share;
+        if (m_proposal && share.block_hash == m_proposal_hash &&
+            m_collected.size() < (size_t)MAX_POS_AGG_COMMITTEE_SIZE) {
+            m_collected[share.pubkey] = share;
+        }
     }
     Wake(); // a new share may complete our quorum
-    return true;
+    return PosGossipAction::Relay;
 }
