@@ -195,11 +195,16 @@ validated by every node. Block production has three paths
 flow, an autonomous single-node producer (`-posproducer`), and an autonomous
 peer-to-peer **gossip-and-sign committee** (`-posbls`) that assembles a
 BLS-certified block across separate hosts with no coordinator — built and tested
-(`feature_pos_bls_gossip.py`). The remaining work on it is hardening, not
-mechanism: the anti-DoS relay bounds, equivocation evidence, the round-robin /
-anchor-reshuffle recovery paths, and tuning for large (100-member) committees,
-detailed in [`proposals/autonomous-committee.md`](proposals/autonomous-committee.md)
-§12.4. BLS certification is gated behind `-posbls` and is not yet activated on the
-bundled chains. The open hardening items and external sign-offs in
+(`feature_pos_bls_gossip.py`), with anti-DoS validate-before-relay/misbehaviour
+scoring and crashed-member round recovery added
+(`feature_pos_gossip_dos.py`, `feature_pos_gossip_failover.py`). The remaining
+work is hardening, not mechanism: the round-robin / anchor-reshuffle recovery
+paths and tuning for large (100-member) committees, detailed in
+[`proposals/autonomous-committee.md`](proposals/autonomous-committee.md)
+§12.4 — which also explains why **stake slashing is a deliberate non-goal**
+(safety rests on independent validation and Bitcoin checkpoints, not stake-at-
+risk, so the deterrent is redundant). BLS certification is gated behind `-posbls`
+and is not yet activated on the bundled chains. The open hardening items and
+external sign-offs in
 [§1](#1-audit-findings-and-their-disposition) are the
 remaining pre-mainnet review tasks.

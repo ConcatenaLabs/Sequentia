@@ -479,10 +479,27 @@ assembly and acceptance.
      available leader — a member crash (even of the round leader) does not stall
      the chain.
 
-   Remaining: on-chain **equivocation evidence / slashing** (P11), the **P7
-   anchor-reshuffle** signing preference and the explicit **P6 round-robin index**
-   for repeated contention, and propagation/latency plus solution-size tuning for
-   large (100-member) committees.
+   Remaining: the **P7 anchor-reshuffle** signing preference and an explicit **P6
+   round-robin index** for repeated contention (the reset-based recovery covers
+   the common case), and propagation/latency plus solution-size tuning for large
+   (100-member) committees.
+
+   **Not a goal — stake slashing.** Unlike economic-finality PoS (where slashing
+   *is* the finality guarantee — reverting must burn ≥⅓ of stake), Sequentia's
+   safety does not rest on stake-at-risk. Two mechanisms make a slashing deterrent
+   redundant: (a) **independent validation** — every node verifies each block, so
+   a malicious committee can never mint an invalid block (no theft, no inflation),
+   only censor or stall; and (b) **Bitcoin-anchored checkpoints** — deep reversal
+   is bounded by Bitcoin's work, not by stake. The worst equivocation can do is a
+   transient fork at an unconsolidated height (same damage class as a short
+   reorg, ceilinged by the next checkpoint), with no profitable double-spend past
+   finality. That residual griefing is already bounded by the gossip-layer
+   equivocation guard, P2P misbehaviour scoring, and VRF committee rotation. So
+   slashing would be economic insurance against bounded griefing — the same
+   "redundant given the checkpoint guarantee" category as Pixel forward security
+   (§7) — and is deliberately omitted, consistent with deriving security from
+   Bitcoin rather than from token economics. (Posterior corruption, the paper's
+   Principle 11, is likewise a checkpoint + stake-locktime matter, not slashing.)
 
 Each phase is independently testable and leaves the coordinator path working.
 
