@@ -820,14 +820,16 @@ PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& blo
     if (block->hashPrevBlock != tip->GetBlockHash()) return PosGossipAction::Ignore; // not on our tip (benign race)
     const int height = tip->nHeight + 1;
     // The leader must prove sortition eligibility (objective: an honest relayer
-    // checked this, so a failure means the sender sent garbage).
+    // checked this, so a failure means the sender sent garbage). Reject a
+    // non-staker leader with the cheap registry lookup before the VRF verify, so
+    // forged proposals cost an attacker as little of our CPU as possible.
+    const StakeRegistry& reg = StakeRegistry::GetInstance();
+    const uint64_t weight = reg.GetWeight(parts->leader);
+    if (weight == 0) return PosGossipAction::Invalid;
     const uint256 seed = PosSeedForChild(tip);
     auto leader_proof = ExtractPosVrfProof(*block);
     uint256 lbeta;
     if (!leader_proof || !VrfVerify(parts->leader, Span<const unsigned char>(seed.begin(), 32), *leader_proof, lbeta)) return PosGossipAction::Invalid;
-    const StakeRegistry& reg = StakeRegistry::GetInstance();
-    const uint64_t weight = reg.GetWeight(parts->leader);
-    if (weight == 0) return PosGossipAction::Invalid;
     if (!PosVrfIsCommitteeMember(lbeta, weight, PosTotalWeight(reg))) return PosGossipAction::Invalid; // leader not sortitioned
     bool recorded;
     {

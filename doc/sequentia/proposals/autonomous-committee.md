@@ -467,12 +467,22 @@ assembly and acceptance.
    **single round** — no announce step. Verified with three hosts holding one
    committee key each (no single-host quorum) certifying a chain over gossip with
    no forks.
-4. **Hardening (future).** The current round engine is a working first cut: a
-   fixed collection window and leader stagger, leader-as-aggregator, sign-once
-   per height. Still to do: the anti-DoS rules of §9 (eligibility-gated relay
-   bounds, rate limits), equivocation evidence, P7 anchor-reshuffle and the P6
-   round-robin re-vote for contended/lossy rounds, and propagation/latency tuning
-   under realistic offline-member rates and large (100-member) committees.
+4. **Hardening.** *In progress.* Done:
+   - **Anti-DoS** (`feature_pos_gossip_dos.py`): every `posproposal`/`posshare` is
+     fully validated before relay (malformed form, forged leader/member VRF
+     eligibility, bad BLS proof-of-possession or signature → dropped and the
+     sender is misbehaviour-scored to disconnection); a leader-equivocation guard
+     (one block per leader per height); per-round caps on the proposer and
+     share maps; and non-producing nodes do not relay committee traffic.
+   - **Liveness recovery** (`feature_pos_gossip_failover.py`): a round that yields
+     no block within a recovery timeout resets so the committee re-converges on an
+     available leader — a member crash (even of the round leader) does not stall
+     the chain.
+
+   Remaining: on-chain **equivocation evidence / slashing** (P11), the **P7
+   anchor-reshuffle** signing preference and the explicit **P6 round-robin index**
+   for repeated contention, and propagation/latency plus solution-size tuning for
+   large (100-member) committees.
 
 Each phase is independently testable and leaves the coordinator path working.
 
