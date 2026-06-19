@@ -91,9 +91,8 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
     std::vector<CScript> vrf_commitments;
     std::vector<CPubKey> vrf_committee;
     std::map<CPubKey, CKey> candidates; // committee key candidates (leader + provided)
-    std::vector<std::vector<unsigned char>> bls_member_seeds;   // BLS signing seeds (g_pos_bls)
-    std::vector<std::vector<unsigned char>> bls_member_pubkeys; // matching BLS public keys
-    std::vector<unsigned char> bls_agg_pk;                      // their 48-byte aggregate
+    std::vector<PosBlsMember> bls_members;                    // BLS committee (for the solution)
+    std::vector<std::vector<unsigned char>> bls_member_seeds; // their BLS signing seeds (parallel)
     uint64_t vrf_slot = 0;
     uint256 vrf_output;
     if (g_pos_vrf) {
@@ -141,8 +140,10 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
                 if (!PosVrfIsCommitteeMember(member_beta, registry.GetWeight(member_pub), total_weight)) continue;
                 vrf_committee.push_back(member_pub);
                 if (g_pos_bls) {
-                    // Each member derives its BLS key from its staking key and
-                    // commits its BLS pubkey + proof-of-possession (SEQBLS).
+                    // Each member derives its BLS key from its staking key; the
+                    // member (key, VRF proof, BLS key, proof-of-possession) goes
+                    // into the certificate carried in the proof solution, not the
+                    // coinbase — so the signed block hash is member-independent.
                     std::vector<unsigned char> bls_seed = PosBlsSeedFromKey(member_key);
                     auto bls_pub = BlsDerivePubKey(bls_seed);
                     auto bls_pop = BlsProvePossession(bls_seed);
@@ -151,9 +152,13 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
                         err_kind = PosProduceError::INTERNAL;
                         return false;
                     }
-                    vrf_commitments.push_back(BuildPosBlsMemberCommitment(member_pub, *member_proof, *bls_pub, *bls_pop));
+                    PosBlsMember m;
+                    m.pubkey = member_pub;
+                    m.proof = *member_proof;
+                    m.bls_pubkey = *bls_pub;
+                    m.bls_pop = *bls_pop;
+                    bls_members.push_back(std::move(m));
                     bls_member_seeds.push_back(std::move(bls_seed));
-                    bls_member_pubkeys.push_back(*bls_pub);
                 } else {
                     vrf_commitments.push_back(BuildPosVrfMemberCommitment(member_pub, *member_proof));
                 }
@@ -175,15 +180,6 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
                     return false;
                 }
             }
-            if (g_pos_bls) {
-                auto agg = BlsAggregatePublicKeys(bls_member_pubkeys);
-                if (!agg) {
-                    error = "Failed to aggregate committee BLS keys";
-                    err_kind = PosProduceError::INTERNAL;
-                    return false;
-                }
-                bls_agg_pk = *agg;
-            }
         }
     }
 
@@ -192,8 +188,7 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
             .CreateNewBlock(feeDestinationScript, std::chrono::seconds(0), nullptr,
                             g_pos_vrf ? &vrf_commitments : nullptr, &pubkey,
                             g_pos_vrf ? &vrf_proof : nullptr,
-                            (g_pos_vrf && !vrf_committee.empty()) ? &vrf_committee : nullptr,
-                            (g_pos_bls && !bls_agg_pk.empty()) ? &bls_agg_pk : nullptr));
+                            (g_pos_vrf && !vrf_committee.empty()) ? &vrf_committee : nullptr));
     if (!pblocktemplate.get()) {
         error = "Could not create block template";
         err_kind = PosProduceError::INTERNAL;
@@ -230,11 +225,12 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
         return false;
     }
     int countersigs = 0;
-    if (!parts->bls_agg_key.empty()) {
-        // BLS aggregate-committee form: the leader's plain ECDSA signature plus
-        // one 96-byte BLS aggregate of the members' shares, both over the block
-        // hash, as two script pushes. Each member signs with the BLS key derived
-        // from its staking key; any subset's shares aggregate non-interactively.
+    if (parts->is_bls) {
+        // BLS aggregate-committee form: the leader's ECDSA signature, the
+        // aggregate of the members' shares, and the member set — all assembled
+        // into the proof solution (excluded from the block hash, so the members
+        // could sign it non-interactively; here one host holds all the keys).
+        // Each member signs with the BLS key derived from its staking key.
         std::vector<unsigned char> leader_sig;
         if (!leader_key.Sign(block.GetHash(), leader_sig)) {
             error = "Failed to sign block as leader";
@@ -259,10 +255,8 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
             err_kind = PosProduceError::MISC;
             return false;
         }
-        CScript solution;
-        solution << leader_sig << *agg_sig;
-        block.proof.solution = solution;
-        countersigs = (int)bls_member_seeds.size();
+        block.proof.solution = BuildPosBlsSolution(leader_sig, *agg_sig, bls_members);
+        countersigs = (int)bls_members.size();
     } else if (!parts->agg_key.empty()) {
         std::vector<unsigned char> leader_sig;
         if (!leader_key.Sign(block.GetHash(), leader_sig)) {

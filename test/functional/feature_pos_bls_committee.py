@@ -43,7 +43,7 @@ class PosBlsCommitteeTest(BitcoinTestFramework):
             "-posbls=1",
             "-poscommitteesize=3",
             "-posslotinterval=%d" % SLOT_INTERVAL,
-            "-con_max_block_sig_size=200",  # BLS solution: ~73B leader DER + 96B aggregate
+            "-con_max_block_sig_size=4000",  # BLS solution carries the leader sig, the 96B aggregate, and the member certificate
             "-signblockscript=51",
             "-con_blocksubsidy=5000000000",
             "-anyonecanspendaremine=1",
@@ -58,21 +58,20 @@ class PosBlsCommitteeTest(BitcoinTestFramework):
         producer, validator = self.nodes[0], self.nodes[1]
 
         # The producer autonomously certifies blocks with a BLS aggregate — no
-        # RPC drives it — and a plain node validates and syncs them.
+        # RPC drives it — and a plain node validates and follows them. The
+        # producer advances continuously (1s slots), so compare a *buried* block
+        # rather than the moving tip to avoid racing block production.
         self.log.info("Producer should create BLS-certified blocks unaided")
-        self.wait_until(lambda: producer.getblockcount() >= 4, timeout=60)
-        height = producer.getblockcount()
-        assert_greater_than(height, 3)
+        self.wait_until(lambda: producer.getblockcount() >= 5, timeout=60)
+        self.wait_until(lambda: validator.getblockcount() >= 5, timeout=60)
+        assert_equal(producer.getblockhash(4), validator.getblockhash(4))
 
-        self.sync_blocks(timeout=60)
-        assert_equal(validator.getblockcount(), producer.getblockcount())
-        assert_equal(validator.getbestblockhash(), producer.getbestblockhash())
-
-        # Liveness: the BLS committee keeps the chain advancing.
-        self.wait_until(lambda: producer.getblockcount() >= height + 3, timeout=60)
-        self.sync_blocks(timeout=60)
-        assert_equal(validator.getblockcount(), producer.getblockcount())
-        self.log.info("BLS committee advanced the chain to height %d" % producer.getblockcount())
+        # Liveness: the BLS committee keeps the chain advancing, validated by the
+        # non-producing node.
+        target = producer.getblockcount() + 3
+        self.wait_until(lambda: validator.getblockcount() >= target, timeout=60)
+        assert_equal(producer.getblockhash(target), validator.getblockhash(target))
+        self.log.info("BLS committee chain followed to height %d" % validator.getblockcount())
 
 
 if __name__ == '__main__':

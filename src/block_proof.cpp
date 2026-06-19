@@ -38,14 +38,14 @@ bool CheckChallenge(const CBlockHeader& block, const CBlockIndex& indexLast, con
         if (g_pos_vrf) {
             // BLS aggregate-committee certification (-posbls) takes precedence
             // over MuSig2 when both are enabled: the challenge must be the OP_2
-            // <leader> <bls_agg_pk> form. The member set it aggregates is named
-            // by the coinbase SEQBLS commitments and validated (eligibility,
-            // proof-of-possession, quorum, aggregate match) at connect time; the
-            // signatures in CheckProof. The BLS form is invalid in any other mode.
+            // <leader> form. The committee certificate is in the proof solution;
+            // its members' sortition eligibility and quorum are validated at
+            // connect time, the signatures (leader + BLS aggregate) in CheckProof.
+            // The BLS form is invalid in any other mode.
             if (g_pos_bls && g_pos_committee_size > 1) {
-                return !parts->bls_agg_key.empty();
+                return parts->is_bls;
             }
-            if (!parts->bls_agg_key.empty()) return false; // BLS form only valid under -posbls
+            if (parts->is_bls) return false; // BLS form only valid under -posbls
             if (g_pos_agg_committee && g_pos_committee_size > 1) {
                 // Aggregate-committee certification (doc 07 §6): the challenge
                 // must be the OP_1 <leader> <agg_key> form. The member set it
@@ -75,7 +75,7 @@ bool CheckChallenge(const CBlockHeader& block, const CBlockIndex& indexLast, con
         }
         // Public-schedule mode: structurally just "neither aggregate form";
         // the elected leader/committee comparison happens at connect time.
-        return parts->agg_key.empty() && parts->bls_agg_key.empty();
+        return parts->agg_key.empty() && !parts->is_bls;
     } else if (g_signed_blocks) {
         return block.proof.challenge == indexLast.get_proof().challenge;
     } else {
@@ -146,26 +146,29 @@ bool CheckProof(const CBlockHeader& block, const Consensus::Params& params)
             }
             if (g_pos_bls) {
                 std::optional<PosChallengeParts> parts = ParsePosBlockChallenge(block.proof.challenge);
-                if (parts && !parts->bls_agg_key.empty()) {
+                if (parts && parts->is_bls) {
                     // BLS aggregate-committee form (doc proposals/autonomous-committee
-                    // §7): the solution is two pushes — the leader's DER signature
-                    // and one 96-byte BLS12-381 aggregate signature over the block
-                    // hash. Fast-aggregate verification against the precomputed
-                    // aggregate key carried in the challenge is equivalent to
-                    // verifying against every member key; that the aggregate key
-                    // covers exactly the sortition-eligible members named (with a
-                    // valid proof-of-possession) in the coinbase is enforced in
+                    // §7): the whole certificate is in the proof solution — the
+                    // leader's DER signature, one 96-byte BLS aggregate, and each
+                    // member's (key, VRF proof, BLS key, proof-of-possession).
+                    // Because the solution is excluded from the block hash, that
+                    // hash is independent of which members signed, so the members
+                    // could sign it non-interactively. Verify the leader ECDSA,
+                    // every member's BLS PoP, and the aggregate against the member
+                    // keys; sortition eligibility and quorum are enforced in
                     // ContextualCheckBlock.
                     if (block.proof.solution.size() > params.max_block_signature_size) return false;
-                    CScript::const_iterator pc = block.proof.solution.begin();
-                    opcodetype opcode;
-                    std::vector<unsigned char> leader_sig, agg_sig;
-                    if (!block.proof.solution.GetOp(pc, opcode, leader_sig) || leader_sig.empty()) return false;
-                    if (!block.proof.solution.GetOp(pc, opcode, agg_sig) || agg_sig.size() != BLS_SIG_SIZE) return false;
-                    if (pc != block.proof.solution.end()) return false;
+                    std::optional<PosBlsCertificate> cert = ParsePosBlsSolution(block.proof.solution);
+                    if (!cert || cert->members.empty()) return false;
                     const uint256 hash = block.GetHash();
-                    if (!parts->leader.Verify(hash, leader_sig)) return false;
-                    return BlsVerify(parts->bls_agg_key, Span<const unsigned char>(hash.begin(), 32), agg_sig);
+                    if (!parts->leader.Verify(hash, cert->leader_sig)) return false;
+                    std::vector<std::vector<unsigned char>> bls_pubkeys;
+                    bls_pubkeys.reserve(cert->members.size());
+                    for (const PosBlsMember& m : cert->members) {
+                        if (!BlsVerifyPossession(m.bls_pubkey, m.bls_pop)) return false;
+                        bls_pubkeys.push_back(m.bls_pubkey);
+                    }
+                    return BlsFastAggregateVerify(bls_pubkeys, Span<const unsigned char>(hash.begin(), 32), cert->agg_sig);
                 }
             }
             return CheckProofGeneric(block, params.max_block_signature_size, block.proof.challenge, block.proof.solution, CScriptWitness());

@@ -56,28 +56,23 @@ class PosAutonomousProducerTest(BitcoinTestFramework):
         producer, validator = self.nodes[0], self.nodes[1]
 
         # Nothing drives the producer — no generateposblock call anywhere in this
-        # test — yet the chain must advance on its own.
+        # test — yet the chain must advance on its own. The producer advances
+        # continuously (1s slots), so compare a *buried* block rather than the
+        # moving tip to avoid racing block production.
         self.log.info("Autonomous producer should advance the chain unaided")
         self.wait_until(lambda: producer.getblockcount() >= 5, timeout=60)
-        height = producer.getblockcount()
-        assert_greater_than(height, 4)
-
         # The autonomously-produced blocks propagate to and validate on a node
         # that is not producing (default network connects node0<->node1).
-        self.sync_blocks(timeout=60)
-        assert_equal(validator.getblockcount(), producer.getblockcount())
-        assert_equal(validator.getbestblockhash(), producer.getbestblockhash())
+        self.wait_until(lambda: validator.getblockcount() >= 5, timeout=60)
+        assert_equal(producer.getblockhash(4), validator.getblockhash(4))
 
-        # The tip is a real PoS block: a leader elected by VRF sortition.
-        tip = producer.getblock(producer.getbestblockhash())
-        assert_greater_than(tip['height'], 4)
-
-        # Liveness: the chain keeps advancing at the slot cadence.
+        # Liveness: the chain keeps advancing at the slot cadence, validated by
+        # the non-producing node.
         self.log.info("Producer keeps advancing the chain")
-        self.wait_until(lambda: producer.getblockcount() >= height + 3, timeout=60)
-        self.sync_blocks(timeout=60)
-        assert_equal(validator.getblockcount(), producer.getblockcount())
-        self.log.info("Autonomous producer reached height %d" % producer.getblockcount())
+        target = producer.getblockcount() + 3
+        self.wait_until(lambda: validator.getblockcount() >= target, timeout=60)
+        assert_equal(producer.getblockhash(target), validator.getblockhash(target))
+        self.log.info("Autonomous producer chain followed to height %d" % validator.getblockcount())
 
 
 if __name__ == '__main__':

@@ -193,9 +193,9 @@ CScript BuildPosAggChallenge(const CPubKey& leader, const std::vector<unsigned c
     return CScript() << OP_1 << ToByteVector(leader) << agg_key32;
 }
 
-CScript BuildPosBlsChallenge(const CPubKey& leader, const std::vector<unsigned char>& bls_agg_pk48)
+CScript BuildPosBlsChallenge(const CPubKey& leader)
 {
-    return CScript() << OP_2 << ToByteVector(leader) << bls_agg_pk48;
+    return CScript() << OP_2 << ToByteVector(leader);
 }
 
 std::optional<PosChallengeParts> ParsePosBlockChallenge(const CScript& challenge)
@@ -226,9 +226,10 @@ std::optional<PosChallengeParts> ParsePosBlockChallenge(const CScript& challenge
         }
     }
 
-    // BLS aggregate-committee form: OP_2 <leader> <bls_agg_pk(48)>. OP_2 is the
-    // version marker for the BLS form (OP_1 is MuSig2), again unambiguous since
-    // the other forms begin with a pubkey push.
+    // BLS aggregate-committee form: OP_2 <leader>. OP_2 is the version marker
+    // for the BLS form (OP_1 is MuSig2), again unambiguous since the other forms
+    // begin with a pubkey push. The committee certificate is not here — it is in
+    // the proof solution (so the signed block hash is member-independent).
     {
         CScript::const_iterator pc = challenge.begin();
         opcodetype opcode;
@@ -238,9 +239,8 @@ std::optional<PosChallengeParts> ParsePosBlockChallenge(const CScript& challenge
             if (!challenge.GetOp(pc, opcode, data) || data.empty()) return std::nullopt;
             parts.leader = CPubKey(data);
             if (!parts.leader.IsFullyValid()) return std::nullopt;
-            if (!challenge.GetOp(pc, opcode, data) || data.size() != BLS_PK_SIZE) return std::nullopt;
-            parts.bls_agg_key = data;
             if (pc != challenge.end()) return std::nullopt; // trailing data
+            parts.is_bls = true;
             return parts;
         }
     }
@@ -301,7 +301,6 @@ uint256 PosSeedForChild(const CBlockIndex* pindexPrev)
 namespace {
 const unsigned char POS_VRF_TAG[6] = {'S', 'E', 'Q', 'V', 'R', 'F'};
 const unsigned char POS_CMT_TAG[6] = {'S', 'E', 'Q', 'C', 'M', 'T'};
-const unsigned char POS_BLS_TAG[6] = {'S', 'E', 'Q', 'B', 'L', 'S'};
 } // namespace
 
 uint64_t PosTotalWeight(const StakeRegistry& registry)
@@ -388,46 +387,51 @@ std::vector<PosVrfMember> ExtractPosVrfMembers(const CBlock& block)
     return members;
 }
 
-CScript BuildPosBlsMemberCommitment(const CPubKey& member,
-                                    const std::vector<unsigned char>& vrf_proof,
-                                    const std::vector<unsigned char>& bls_pubkey,
-                                    const std::vector<unsigned char>& bls_pop)
+CScript BuildPosBlsSolution(const std::vector<unsigned char>& leader_sig,
+                            const std::vector<unsigned char>& agg_sig,
+                            const std::vector<PosBlsMember>& members)
 {
-    std::vector<unsigned char> data(POS_BLS_TAG, POS_BLS_TAG + sizeof(POS_BLS_TAG));
-    data.insert(data.end(), member.begin(), member.end());
-    data.insert(data.end(), vrf_proof.begin(), vrf_proof.end());
-    data.insert(data.end(), bls_pubkey.begin(), bls_pubkey.end());
-    data.insert(data.end(), bls_pop.begin(), bls_pop.end());
-    return CScript() << OP_RETURN << data;
+    CScript s;
+    s << leader_sig << agg_sig;
+    for (const PosBlsMember& m : members) {
+        std::vector<unsigned char> blob;
+        blob.reserve(CPubKey::COMPRESSED_SIZE + VRF_PROOF_SIZE + BLS_PK_SIZE + BLS_SIG_SIZE);
+        blob.insert(blob.end(), m.pubkey.begin(), m.pubkey.end());
+        blob.insert(blob.end(), m.proof.begin(), m.proof.end());
+        blob.insert(blob.end(), m.bls_pubkey.begin(), m.bls_pubkey.end());
+        blob.insert(blob.end(), m.bls_pop.begin(), m.bls_pop.end());
+        s << blob;
+    }
+    return s;
 }
 
-std::vector<PosBlsMember> ExtractPosBlsMembers(const CBlock& block)
+std::optional<PosBlsCertificate> ParsePosBlsSolution(const CScript& solution)
 {
-    std::vector<PosBlsMember> members;
-    if (block.vtx.empty()) return members;
-    const size_t want = sizeof(POS_BLS_TAG) + CPubKey::COMPRESSED_SIZE + VRF_PROOF_SIZE + BLS_PK_SIZE + BLS_SIG_SIZE;
-    for (const CTxOut& out : block.vtx[0]->vout) {
-        const CScript& spk = out.scriptPubKey;
-        CScript::const_iterator pc = spk.begin();
-        opcodetype opcode;
-        std::vector<unsigned char> data;
-        if (!spk.GetOp(pc, opcode, data) || opcode != OP_RETURN) continue;
-        if (!spk.GetOp(pc, opcode, data)) continue;
-        if (data.size() != want) continue;
-        if (!std::equal(POS_BLS_TAG, POS_BLS_TAG + sizeof(POS_BLS_TAG), data.begin())) continue;
-        size_t off = sizeof(POS_BLS_TAG);
+    PosBlsCertificate cert;
+    CScript::const_iterator pc = solution.begin();
+    opcodetype opcode;
+    std::vector<unsigned char> data;
+    if (!solution.GetOp(pc, opcode, data) || data.empty()) return std::nullopt;
+    cert.leader_sig = data;
+    if (!solution.GetOp(pc, opcode, data) || data.size() != BLS_SIG_SIZE) return std::nullopt;
+    cert.agg_sig = data;
+    const size_t member_size = CPubKey::COMPRESSED_SIZE + VRF_PROOF_SIZE + BLS_PK_SIZE + BLS_SIG_SIZE;
+    while (solution.GetOp(pc, opcode, data)) {
+        if (data.size() != member_size) return std::nullopt;
+        if (cert.members.size() >= (size_t)MAX_POS_AGG_COMMITTEE_SIZE) return std::nullopt;
         PosBlsMember m;
+        size_t off = 0;
         m.pubkey = CPubKey(data.begin() + off, data.begin() + off + CPubKey::COMPRESSED_SIZE);
         off += CPubKey::COMPRESSED_SIZE;
-        if (!m.pubkey.IsValid()) continue;
+        if (!m.pubkey.IsValid()) return std::nullopt;
         m.proof.assign(data.begin() + off, data.begin() + off + VRF_PROOF_SIZE);
         off += VRF_PROOF_SIZE;
         m.bls_pubkey.assign(data.begin() + off, data.begin() + off + BLS_PK_SIZE);
         off += BLS_PK_SIZE;
         m.bls_pop.assign(data.begin() + off, data.begin() + off + BLS_SIG_SIZE);
-        members.push_back(m);
+        cert.members.push_back(std::move(m));
     }
-    return members;
+    return cert;
 }
 
 // --- On-chain stake registration (locked staking outputs) ---

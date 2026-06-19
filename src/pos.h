@@ -253,16 +253,18 @@ std::optional<CPubKey> PosChallengeToPubKey(const CScript& challenge);
 CScript BuildPosAggChallenge(const CPubKey& leader, const std::vector<unsigned char>& agg_key32);
 
 /** Build the BLS aggregate-committee block challenge (-posbls):
- *      OP_2 <leader(33)> <bls_agg_pk(48)>
- *  where bls_agg_pk is the BLS12-381 (min-pk) aggregate public key of the
- *  committee member set. Like the MuSig2 form this is a versioned commitment,
- *  not interpreter-executed: CheckProof verifies the leader's ECDSA signature
- *  and the single 96-byte BLS aggregate signature directly, and
- *  ContextualCheckBlock checks that bls_agg_pk is the aggregate of exactly the
- *  members (each proven sortition-eligible, with a valid BLS proof-of-possession)
- *  named by the coinbase SEQBLS commitments. The OP_2 version marker
- *  distinguishes it from the MuSig2 (OP_1) and leader-only/multisig forms. */
-CScript BuildPosBlsChallenge(const CPubKey& leader, const std::vector<unsigned char>& bls_agg_pk48);
+ *      OP_2 <leader(33)>
+ *  Just the elected leader and the OP_2 version marker. Unlike the MuSig2 form,
+ *  the committee's aggregate key is NOT in the challenge: the whole BLS
+ *  certificate (the member set and the aggregate signature) lives in the block's
+ *  proof *solution*, which is excluded from the block hash. That makes the hash
+ *  the committee signs independent of which members sign — so members sign
+ *  immediately and non-interactively and any node aggregates whatever shares
+ *  arrive (doc/sequentia/proposals/autonomous-committee.md §7). CheckProof
+ *  verifies the leader's ECDSA signature and the BLS aggregate (against the
+ *  member keys in the solution); ContextualCheckBlock checks every member's
+ *  sortition eligibility. */
+CScript BuildPosBlsChallenge(const CPubKey& leader);
 
 /** The decoded parts of a PoS block challenge. For a leader-only challenge the
  *  committee is empty and quorum 0. For the aggregate-committee form, agg_key
@@ -272,8 +274,8 @@ struct PosChallengeParts {
     CPubKey leader;
     std::vector<CPubKey> committee;
     int quorum{0};
-    std::vector<unsigned char> agg_key;      //!< 32-byte MuSig2 aggregate (OP_1 form)
-    std::vector<unsigned char> bls_agg_key;  //!< 48-byte BLS aggregate (OP_2 form)
+    std::vector<unsigned char> agg_key;  //!< 32-byte MuSig2 aggregate (OP_1 form)
+    bool is_bls{false};                  //!< OP_2 BLS form (certificate is in the solution)
 };
 
 /** Parse any form of PoS block challenge (leader-only, leader plus committee
@@ -355,10 +357,11 @@ CScript BuildPosVrfMemberCommitment(const CPubKey& member, const std::vector<uns
  *  coinbase (malformed entries are skipped). */
 std::vector<PosVrfMember> ExtractPosVrfMembers(const CBlock& block);
 
-/** A BLS committee member's per-block commitment: its staking (secp256k1) key
- *  and VRF proof (proving sortition eligibility, exactly as PosVrfMember), plus
- *  its 48-byte BLS public key and a 96-byte BLS proof-of-possession (binding the
- *  member to that BLS key and closing the rogue-key attack). */
+/** A BLS committee member, as carried in the block's proof solution: its staking
+ *  (secp256k1) key and VRF proof (proving sortition eligibility, exactly as
+ *  PosVrfMember), plus its 48-byte BLS public key and a 96-byte BLS
+ *  proof-of-possession (binding the member to that BLS key and closing the
+ *  rogue-key attack). */
 struct PosBlsMember {
     CPubKey pubkey;
     std::vector<unsigned char> proof;       //!< VRF proof over the slot seed
@@ -366,17 +369,25 @@ struct PosBlsMember {
     std::vector<unsigned char> bls_pop;     //!< 96-byte BLS proof-of-possession
 };
 
-/** Build the tagged coinbase OP_RETURN output carrying one BLS committee
- *  member's commitment:
- *      OP_RETURN PUSH("SEQBLS" || pubkey(33) || vrf_proof(80) || bls_pubkey(48) || bls_pop(96)). */
-CScript BuildPosBlsMemberCommitment(const CPubKey& member,
-                                    const std::vector<unsigned char>& vrf_proof,
-                                    const std::vector<unsigned char>& bls_pubkey,
-                                    const std::vector<unsigned char>& bls_pop);
+/** The decoded BLS committee certificate carried in a block's proof solution. */
+struct PosBlsCertificate {
+    std::vector<unsigned char> leader_sig;  //!< the leader's ECDSA signature over the block hash
+    std::vector<unsigned char> agg_sig;     //!< 96-byte BLS aggregate of the members' shares
+    std::vector<PosBlsMember> members;       //!< the signing committee
+};
 
-/** Extract all BLS committee-member commitments from a block's coinbase
- *  (malformed entries are skipped). */
-std::vector<PosBlsMember> ExtractPosBlsMembers(const CBlock& block);
+/** Encode a BLS committee certificate into a block proof solution:
+ *      <leader_sig> <agg_sig(96)> <member_1(257)> ... <member_m(257)>
+ *  each member being secp_pubkey(33) || vrf_proof(80) || bls_pubkey(48) || bls_pop(96).
+ *  The certificate lives in the solution (excluded from the block hash), so the
+ *  hash the committee signs does not depend on who signs. */
+CScript BuildPosBlsSolution(const std::vector<unsigned char>& leader_sig,
+                            const std::vector<unsigned char>& agg_sig,
+                            const std::vector<PosBlsMember>& members);
+
+/** Decode a BLS committee certificate solution, or nullopt if malformed (wrong
+ *  field sizes, an invalid member key, or more members than the committee cap). */
+std::optional<PosBlsCertificate> ParsePosBlsSolution(const CScript& solution);
 
 // --- On-chain stake registration (locked staking outputs) ---
 

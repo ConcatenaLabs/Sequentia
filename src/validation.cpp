@@ -2266,52 +2266,48 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
         }
     }
     // BLS aggregate-committee certification (doc proposals/autonomous-committee
-    // §7): like the MuSig2 form above, but each named member also commits a BLS
-    // public key and a proof-of-possession (SEQBLS), and the challenge carries
-    // the 48-byte aggregate of the member BLS keys, against which CheckProof
-    // verified the 96-byte aggregate signature. Every named member must prove
-    // sortition eligibility AND a valid BLS PoP; a quorum (or, when stalled, one)
-    // must be named; and the aggregate of the named BLS keys must equal the
-    // challenge's aggregate key — so the BLS signature is by exactly these
-    // sortition-eligible members.
-    if (!parts->bls_agg_key.empty()) {
-        std::map<CPubKey, PosBlsMember> named;
-        for (const PosBlsMember& member : ExtractPosBlsMembers(block)) {
-            if (!named.emplace(member.pubkey, member).second) {
-                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-member-duplicate", "duplicate BLS committee member commitment");
+    // §7): the committee certificate is in the proof solution (so the signed
+    // block hash is member-independent). CheckProof already verified the leader
+    // signature, every member's BLS proof-of-possession, and the aggregate
+    // signature against the member keys. Here we add the registry-dependent
+    // checks: every member must be sortition-eligible for this slot, the set is
+    // deduplicated and capped, and a quorum (or, when stalled, one) must sign.
+    if (parts->is_bls) {
+        // The committee certificate lives in the proof solution. An unsigned
+        // template (CreateNewBlock/TestBlockValidity) carries no certificate yet;
+        // a real block's certificate (leader sig, member set, aggregate) is gated
+        // by CheckProof in CheckBlockHeader before connect. So validate the
+        // members' sortition eligibility only when the certificate is present.
+        std::optional<PosBlsCertificate> cert = ParsePosBlsSolution(block.proof.solution);
+        if (cert && !cert->members.empty()) {
+            std::map<CPubKey, PosBlsMember> named;
+            for (const PosBlsMember& member : cert->members) {
+                if (!named.emplace(member.pubkey, member).second) {
+                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-member-duplicate", "duplicate BLS committee member");
+                }
             }
-        }
-        const int quorum = PosQuorum((size_t)g_pos_committee_size);
-        const bool escaping_stall = g_con_bitcoin_anchor &&
-            PosEscapingStallAllowed(pindexPrev->m_anchor_height, block.m_anchor_height);
-        const int min_members = escaping_stall ? 1 : quorum;
-        if ((int)named.size() < min_members) {
-            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-agg-quorum", "fewer named BLS committee members than the certification quorum");
-        }
-        if ((int)named.size() > MAX_POS_AGG_COMMITTEE_SIZE) {
-            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-member-count", "more named BLS committee members than the aggregate committee cap");
-        }
-        std::vector<std::vector<unsigned char>> bls_pubkeys;
-        bls_pubkeys.reserve(named.size());
-        for (const auto& [member, entry] : named) {
-            if (registry.GetWeight(member) == 0) {
-                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-member-not-selected", "named BLS committee member was not selected by sortition for this slot");
+            const int quorum = PosQuorum((size_t)g_pos_committee_size);
+            const bool escaping_stall = g_con_bitcoin_anchor &&
+                PosEscapingStallAllowed(pindexPrev->m_anchor_height, block.m_anchor_height);
+            const int min_members = escaping_stall ? 1 : quorum;
+            if ((int)named.size() < min_members) {
+                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-agg-quorum", "fewer BLS committee members than the certification quorum");
             }
-            uint256 member_beta;
-            if (!VrfVerify(member, seed, entry.proof, member_beta)) {
-                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-member-invalid", "invalid BLS committee member VRF eligibility proof");
+            if ((int)named.size() > MAX_POS_AGG_COMMITTEE_SIZE) {
+                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-member-count", "more BLS committee members than the aggregate committee cap");
             }
-            if (!PosVrfIsCommitteeMember(member_beta, registry.GetWeight(member), total_weight)) {
-                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-member-not-selected", "named BLS committee member was not selected by sortition for this slot");
+            for (const auto& [member, entry] : named) {
+                if (registry.GetWeight(member) == 0) {
+                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-member-not-selected", "BLS committee member was not selected by sortition for this slot");
+                }
+                uint256 member_beta;
+                if (!VrfVerify(member, seed, entry.proof, member_beta)) {
+                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-member-invalid", "invalid BLS committee member VRF eligibility proof");
+                }
+                if (!PosVrfIsCommitteeMember(member_beta, registry.GetWeight(member), total_weight)) {
+                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-member-not-selected", "BLS committee member was not selected by sortition for this slot");
+                }
             }
-            if (!BlsVerifyPossession(entry.bls_pubkey, entry.bls_pop)) {
-                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-member-pop", "invalid BLS proof-of-possession for committee member");
-            }
-            bls_pubkeys.push_back(entry.bls_pubkey);
-        }
-        std::optional<std::vector<unsigned char>> agg = BlsAggregatePublicKeys(bls_pubkeys);
-        if (!agg || *agg != parts->bls_agg_key) {
-            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-agg-key", "challenge BLS aggregate key does not match the named committee member set");
         }
     }
     // Committee certification under private sortition: every committee
@@ -2415,10 +2411,11 @@ static void SetPosForkChoiceKeys(CBlockIndex* pindex, const CBlock& block)
         std::set<CPubKey> distinct;
         for (const PosVrfMember& m : members) distinct.insert(m.pubkey);
         count = distinct.size();
-    } else if (!parts->bls_agg_key.empty()) {
-        const std::vector<PosBlsMember> members = ExtractPosBlsMembers(block);
+    } else if (parts->is_bls) {
         std::set<CPubKey> distinct;
-        for (const PosBlsMember& m : members) distinct.insert(m.pubkey);
+        if (auto cert = ParsePosBlsSolution(block.proof.solution)) {
+            for (const PosBlsMember& m : cert->members) distinct.insert(m.pubkey);
+        }
         count = distinct.size();
     } else {
         count = parts->committee.size();
