@@ -536,12 +536,25 @@ assembly and acceptance.
      (same exclusion path as equivocation) and the committee re-picks the next
      valid one; only validated blocks are ever signed, so safety is unchanged.
 
-   Remaining (scale tuning, not needed at launch): the ~26 KB certificate at 100
-   members (cap/weight sizing — it reserves ~half the block-weight budget, a
-   config tradeoff inherent to a 100-member committee). A two-phase lightweight VRF
-   announcement (all members announce cheaply; only the elected leader sends a
-   block) would cut origination further, but compact proposals already make the
-   per-round traffic flat in transaction volume.
+   Remaining (scale tuning, not needed at launch — the committee is small at
+   launch, so the certificate is a few KB): **certificate weight at a *maximum*
+   100-member committee.** The cert is ~26 KB (257 B/member: secp key 33 + VRF
+   proof 80 + BLS key 48 + PoP 96, plus the leader sig and aggregate). It currently
+   lives in the legacy `CProof.solution`, which `GetBlockWeight` counts in *both*
+   serialization passes (×4, like base data), so 26 KB ≈ 104 K weight ≈ **52%** of
+   Sequentia's 200 K block-weight cap. This is **not inherent** — two independent
+   fixes bring it to ~6–13%:
+   1. *Witness-discount it.* Elements' dynafed signed blocks put the block
+      signature in `m_signblock_witness`, which the serializer omits from the base
+      pass ("we do not serialize witness for ... weight calculation"), i.e. ×1.
+      Moving the cert there cuts it 4× → ~26 K weight ≈ 13%.
+   2. *Don't carry static keys per block.* The BLS key (48) + PoP (96) are static
+      per staker; registering them once in the stake registry leaves ~113 B/member
+      ≈ 11.5 KB (the VRF proof and secp key are genuinely per-slot). Combined with
+      (1): ~11.5 K weight ≈ **6%**.
+
+   (A two-phase lightweight VRF announcement would cut origination further, but
+   compact proposals already make per-round traffic flat in transaction volume.)
 
    **Quorum — a strict majority (51/100), and fork-free by leader exclusion, not 2/3.**
    The certification quorum is a simple majority, exactly as the Theoretical Paper
