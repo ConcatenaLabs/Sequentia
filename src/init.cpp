@@ -13,6 +13,8 @@
 #include <banman.h>
 #include <anchor.h>
 #include <pos.h>
+#include <pos_producer.h>
+#include <key_io.h>
 #include <blockfilter.h>
 #include <chain.h>
 #include <chainparams.h>
@@ -232,6 +234,13 @@ void Shutdown(NodeContext& node)
         client->flush();
     }
     StopMapPort();
+
+    // SEQUENTIA: stop the autonomous PoS producer (unregisters its validation
+    // interface and joins its worker thread) before tearing down chain state.
+    if (node.pos_producer) {
+        node.pos_producer->Stop();
+        node.pos_producer.reset();
+    }
 
     // Because these depend on each-other, we make sure that neither can be
     // using the other before destroying them.
@@ -654,6 +663,8 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-poscheckpointdepth=<n>", strprintf("SEQUENTIA: parent-chain confirmations a SEQCKPT checkpoint commitment needs before the checkpointed block (if on this node's active chain) is treated as finalized, rejecting forks below it. 0 disables checkpoint processing. Only used with con_pos + con_bitcoin_anchor. (default: %d)", DEFAULT_POS_CHECKPOINT_DEPTH), ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-poscheckpointscan=<n>", strprintf("SEQUENTIA: how many parent-chain blocks to scan backwards for checkpoints on the first pass. (default: %d)", DEFAULT_POS_CHECKPOINT_SCAN), ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-poscheckpoint=<height:blockhash>", "SEQUENTIA: an operator-configured static checkpoint pinning the block at <height> to <blockhash> (a long-range-attack backstop for fresh sync: a block presented at this height must carry this hash, else it and any branch on it are rejected). May be specified multiple times. Only used when con_pos is set.", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
+    argsman.AddArg("-posproducer", "SEQUENTIA: run the autonomous Proof-of-Stake block producer, electing this node's staking keys each round and producing blocks with no external coordinator. Requires at least one -posproducerkey. Only used when con_pos is set. (default: 0)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
+    argsman.AddArg("-posproducerkey=<wif>", "SEQUENTIA: a staking private key (WIF) the autonomous producer (-posproducer) signs blocks with. May be specified multiple times (a leader plus, for a single-host committee, its committee keys). Keep this value secret.", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::ELEMENTS);
     argsman.AddArg("-anchorpollinterval=<n>", strprintf("Seconds between polls of the mainchain daemon for new blocks and reorganizations. Only used when con_bitcoin_anchor is enabled. (default: %d)", DEFAULT_ANCHOR_POLL_INTERVAL), ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-acceptdiscountct", "Accept discounted fees for Confidential Transactions (default: 1 in liquidtestnet and liquidv1, 0 otherwise)", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-creatediscountct", "Create Confidential Transactions with discounted fees (default: 0). Setting this to 1 will also set 'acceptdiscountct' to 1.", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
@@ -2075,6 +2086,26 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         const StakeRegistry& reg = StakeRegistry::GetInstance();
         LogPrintf("PoS: stake registry loaded: %u staker(s), total weight %llu\n",
                   (unsigned)reg.Size(), (unsigned long long)PosTotalWeight(reg));
+    }
+
+    // SEQUENTIA PoS: start the autonomous block producer if configured. With
+    // one or more staking keys it elects the best-ranked key each round, waits
+    // out the slot clock, and produces blocks with no external coordinator
+    // (doc/sequentia/proposals/autonomous-committee.md, Phase 1).
+    if (g_con_pos && args.GetBoolArg("-posproducer", false)) {
+        std::vector<CKey> producer_keys;
+        for (const std::string& wif : args.GetArgs("-posproducerkey")) {
+            CKey key = DecodeSecret(wif);
+            if (!key.IsValid()) {
+                return InitError(_("Invalid -posproducerkey (expected a WIF private key)"));
+            }
+            producer_keys.push_back(key);
+        }
+        if (producer_keys.empty()) {
+            return InitError(_("-posproducer requires at least one -posproducerkey"));
+        }
+        node.pos_producer = std::make_unique<PosProducer>(chainman, *node.mempool, chainparams, std::move(producer_keys));
+        node.pos_producer->Start();
     }
 
     // SEQUENTIA: Bitcoin anchoring. Verify the connection to the parent chain

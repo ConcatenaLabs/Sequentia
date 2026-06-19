@@ -19,6 +19,7 @@ class CScheduler;
 class CTxMemPool;
 class ChainstateManager;
 class PeerManager;
+class PosProducer;
 namespace interfaces {
 class Chain;
 class ChainClient;
@@ -56,6 +57,8 @@ struct NodeContext {
     interfaces::WalletLoader* wallet_loader{nullptr};
     std::unique_ptr<CScheduler> scheduler;
     std::unique_ptr<CScheduler> reverification_scheduler;
+    //! SEQUENTIA: autonomous Proof-of-Stake block producer (-posproducer).
+    std::unique_ptr<PosProducer> pos_producer;
     std::function<void()> rpc_interruption_point = [] {};
 
     //! Declare default constructor and destructor that are not inline, so code

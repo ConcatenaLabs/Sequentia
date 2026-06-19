@@ -183,6 +183,7 @@ BASE_SCRIPTS = [
     'feature_pos_vrf_committee.py',
     'feature_pos_agg_committee.py',
     'feature_pos_distributed_committee.py',
+    'feature_pos_autonomous_producer.py',
     'feature_pos_min_stake.py',
     'feature_pos_escaping_stall.py',
     'feature_pos_fork_choice.py',
