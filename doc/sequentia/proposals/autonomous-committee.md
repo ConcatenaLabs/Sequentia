@@ -510,12 +510,26 @@ assembly and acceptance.
      leader *in lockstep* — handling a leader that *withholds* (proposes validly
      then never helps assemble) where exclusion does not apply.
 
-   Remaining: the **P7 anchor-reshuffle** signing preference, and tuning for very
-   large committees/networks — the ~26 KB certificate at 100 members (cap/weight
-   sizing), per-proposal validation cost on the message thread, and proposal-flood
-   reduction now that every eligible node proposes per round (a lightweight VRF
-   announcement so only the elected leader sends a full block, or inv/getdata-style
-   proposal relay, would bound it without the convergence hazard).
+   - **Freshest-anchor preference** (P7 rule III): `BackedForRound` orders
+     candidates by Bitcoin anchor height then VRF, so the committee converges on
+     the freshest-anchored proposal and the tip tracks Bitcoin's tip
+     (`04-proof-of-stake.md` §7). The Bitcoin-hash *leadership reshuffle* (P7 rule
+     II — a new Bitcoin block re-running the leader VRF) is not implemented; with
+     production-time freshest anchoring it is a marginal refinement, deferred.
+
+   Remaining (scale tuning, not needed at launch): the ~26 KB certificate at 100
+   members (cap/weight sizing), per-proposal validation cost on the message thread,
+   and **proposal-flood reduction**. Every node proposing a *full* block each round
+   is negligible at modest committee/load but wasteful at 100 members under high tx
+   volume (≈100 near-identical full blocks of redundant tx data). The paper's "relay
+   only the lowest-VRF proposal" (step 6) cannot be applied naively here — it would
+   leave each node a different candidate set and break the deterministic
+   round-robin. The right fix is **compact proposals** (BIP152-style: a proposal
+   carries txids, reconstructed from the mempool), which removes the redundant tx
+   data without changing the round-robin; alternatively a two-phase lightweight VRF
+   announcement (all members announce cheaply; only the elected leader sends a full
+   block). Both are focused efforts, scoped here for a dedicated pass rather than
+   rushed onto the now-hardened committee.
 
    **Quorum — a strict majority (51/100), and fork-free by leader exclusion, not 2/3.**
    The certification quorum is a simple majority, exactly as the Theoretical Paper
