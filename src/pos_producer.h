@@ -211,7 +211,8 @@ private:
     std::mutex m_gossip_mutex;
     int m_round_height{0};                             //!< height we are running rounds for
     int64_t m_round_start_ms{0};                       //!< when this height's collection started
-    std::map<CPubKey, RoundCandidate> m_candidates;    //!< leader -> first-seen validated proposal
+    std::map<CPubKey, RoundCandidate> m_candidates;    //!< leader -> its validated proposal this round
+    std::set<CPubKey> m_equivocators;                  //!< leaders seen to propose two blocks this height (excluded)
     std::map<CPubKey, PosShare> m_collected;           //!< shares for the currently-backed proposal
     uint256 m_backed_hash;                             //!< hash of the proposal we are signing/collecting for
     int m_signed_round{-1};                            //!< highest round index we have signed for

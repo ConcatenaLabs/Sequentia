@@ -22,6 +22,7 @@
 #include <txmempool.h>
 #include <util/thread.h>
 #include <util/time.h>
+#include <util/strencodings.h>
 #include <util/system.h>
 #include <validation.h>
 #include <vrf.h>
@@ -651,16 +652,16 @@ void PosProducer::RecordCandidate(const std::shared_ptr<const CBlock>& block, co
         m_round_height = height;
         m_round_start_ms = GetTimeMillis();
         m_candidates.clear();
+        m_equivocators.clear();
         m_collected.clear();
         m_backed_hash.SetNull();
         m_signed_round = -1;
     }
-    // First block seen from a leader wins; an equivocating leader's later, different
-    // block is dropped here — and because every node keeps the first it saw, an
-    // equivocator that splits the committee is excluded by the round-robin (its
-    // round backs the same leader for all, so all advance past it together).
+    // A leader excluded for equivocation (proposing two blocks this height) is
+    // never recorded — the committee backs neither of its blocks.
+    if (m_equivocators.count(leader)) return;
     auto it = m_candidates.find(leader);
-    if (it != m_candidates.end()) return;                       // already have a block from this leader
+    if (it != m_candidates.end()) return;                       // already have this leader's block
     if (m_candidates.size() >= (size_t)MAX_POS_AGG_COMMITTEE_SIZE) return;
     m_candidates.emplace(leader, RoundCandidate{block, leader_beta});
 }
@@ -786,11 +787,14 @@ int64_t PosProducer::DriveRound()
     bool do_sign = false;
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
-        if (m_round_height == height && m_signed_round < round_index) {
+        // Sign when the round advances, or when the backed proposal changed —
+        // e.g. the leader we were backing was just excluded for equivocation, so
+        // the backed leader became the next-lowest-VRF one.
+        if (m_round_height == height && (m_signed_round < round_index || m_backed_hash != backed->GetHash())) {
             m_signed_round = round_index;
             if (m_backed_hash != backed->GetHash()) {
                 m_backed_hash = backed->GetHash();
-                m_collected.clear(); // shares were for the previous round's leader
+                m_collected.clear(); // shares were for the previous backed leader
             }
             do_sign = true;
         }
@@ -907,12 +911,37 @@ PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& blo
             return PosGossipAction::Invalid;
         }
     }
-    // Drop a leader's repeat/equivocating proposal BEFORE the costly full
-    // validation: first-seen wins, so a leader that already has a candidate this
-    // round cannot make us run TestBlockValidity on a flood of further blocks.
+    // Equivocation handling BEFORE the costly full validation (the leader's
+    // signature already proves authorship of this hash). Two cases, both cheap:
+    //   - The leader is already excluded for equivocation → drop silently.
+    //   - The leader already has a *different* block this round → this is the
+    //     equivocation: exclude the leader (the committee backs neither of its
+    //     blocks, paper Liveness theorem 1) and RELAY this block as evidence, so
+    //     every honest node detects it and converges on the next-lowest valid
+    //     leader instead of splitting on the two. Bounds validation too: an
+    //     equivocator's later blocks never reach TestBlockValidity.
+    bool equivocation_evidence = false;
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
-        if (m_round_height == height && m_candidates.count(parts->leader)) return PosGossipAction::Ignore;
+        if (m_round_height == height) {
+            if (m_equivocators.count(parts->leader)) return PosGossipAction::Ignore;
+            auto it = m_candidates.find(parts->leader);
+            if (it != m_candidates.end()) {
+                if (it->second.block->GetHash() != hash) {
+                    m_equivocators.insert(parts->leader); // exclude the equivocator
+                    m_candidates.erase(it);               // drop the block we had backed too
+                    equivocation_evidence = true;
+                } else {
+                    return PosGossipAction::Ignore;       // same block, duplicate
+                }
+            }
+        }
+    }
+    if (equivocation_evidence) {
+        LogPrintf("PoS gossip: leader %s equivocated at height %d — excluding it\n",
+                  HexStr(parts->leader).substr(0, 16), height);
+        Wake();                              // re-pick the backed leader promptly
+        return PosGossipAction::Relay;       // propagate the evidence so all nodes exclude it
     }
     // Validate the block fully before backing it: we sign its hash, attesting to
     // it, and assemble it once a quorum signs. The per-height leader is fixed by
