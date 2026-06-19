@@ -61,7 +61,9 @@ def make_staker():
 
 QUORUM = COMMITTEE // 2 + 1   # strict majority
 HUBS = [0, 1, 2, 3][:HOSTS]   # low-diameter relay backbone (diameter <= 3)
-SLOT = 2                      # seconds/slot — room for multi-hop gossip at scale
+# seconds/slot — room for multi-hop gossip at scale; raise it (POS_DEMO_SLOT) if a
+# big one-key-per-node network needs more headroom on a busy machine.
+SLOT = int(os.environ.get("POS_DEMO_SLOT", "2"))
 
 
 class Pos100NodeNetworkTest(BitcoinTestFramework):
