@@ -127,6 +127,10 @@ def main():
     ap.add_argument("--run-seconds", type=int, default=0)
     ap.add_argument("--stop", action="store_true")
     args = ap.parse_args()
+    try:
+        sys.stdout.reconfigure(line_buffering=True)   # live progress when piped to a log
+    except Exception:
+        pass
 
     elementsd = os.path.join(args.bindir, "elementsd")
     ec = os.path.join(args.bindir, "elements-cli")
