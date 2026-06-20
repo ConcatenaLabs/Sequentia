@@ -1092,9 +1092,24 @@ void CTxMemPool::RecomputeFees()
     {
         LOCK(cs);
         ExchangeRateMap& exchangeRateMap = ExchangeRateMap::GetInstance();
+        // SEQUENTIA open fee market: a transaction admitted while its fee asset was
+        // priced becomes unrelayable and unincludable on this node once the operator
+        // stops accepting that asset (setfeeexchangerates rate -> 0), since its
+        // reference fee value drops to 0 (below the relay minimum that gated entry).
+        // Leaving it in the mempool is both wrong (this node could never mine it) and
+        // hazardous: a node that is also a block producer would then carry a tx whose
+        // fee asset it does not price into block assembly. Collect such txs and evict
+        // them after the recompute pass (removeRecursive mutates mapTx, so it must run
+        // outside the iteration). The wallet keeps its own copy, so the owner can
+        // still RBF/replace it with an accepted fee asset.
+        std::vector<CTransactionRef> to_evict;
         for (CTxMemPoolEntry tx : mapTx) {
             txiter it = mapTx.find(tx.GetTx().GetHash());
             CValue newFeeValue = exchangeRateMap.ConvertAmountToValue(tx.GetFee(), tx.GetFeeAsset());
+            if (tx.GetFeeAsset() != ::policyAsset && tx.GetFee() > 0 && newFeeValue.GetValue() <= 0) {
+                to_evict.push_back(it->GetSharedTx());
+                continue;
+            }
             CValue feeValueDelta = newFeeValue - tx.GetFeeValue();
             if (feeValueDelta != 0) {
                 mapTx.modify(it, update_fee_value(newFeeValue));
@@ -1115,6 +1130,11 @@ void CTxMemPool::RecomputeFees()
                     mapTx.modify(descendantIt, update_ancestor_state(0, feeValueDelta, 0, 0, 0));
                 }
                 ++nTransactionsUpdated;
+            }
+        }
+        for (const CTransactionRef& evicted : to_evict) {
+            if (mapTx.find(evicted->GetHash()) != mapTx.end()) {
+                removeRecursive(*evicted, MemPoolRemovalReason::EXPIRY);
             }
         }
     }
