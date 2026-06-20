@@ -856,8 +856,17 @@ int64_t PosProducer::DriveRound()
     // gossiped block, so all honest nodes compute the same round_index together.
     // (Requires only loose clock agreement, well within one slot — the same
     // assumption the slot schedule already makes.)
-    static const int64_t WINDOW_MS = 500;
-    static const int64_t ROUND_MS = 700;
+    // Scale the collection window and round length with committee size: at large
+    // N, every node's proposal (to agree on the lowest-VRF leader) and a quorum of
+    // BLS shares must propagate across a multi-hop gossip mesh and be verified
+    // within the window/round, which the small-committee 500/700 ms values are far
+    // too tight for (a 100-member committee stalls — nodes never converge on one
+    // leader with a quorum). These are local liveness timings, identical on every
+    // node, not consensus rules, so enlarging them is safe. ~25 ms/member of
+    // window and ~35 ms/member of round keeps small committees near the old values
+    // while giving a 100-member committee ~3 s to collect.
+    const int64_t WINDOW_MS = 500 + 25 * (int64_t)g_pos_committee_size;
+    const int64_t ROUND_MS = 700 + 35 * (int64_t)g_pos_committee_size;
     CBlockIndex* tip;
     {
         LOCK(cs_main);
