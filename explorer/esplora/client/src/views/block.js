@@ -1,7 +1,7 @@
 import layout from './layout'
 import { txBox } from './tx'
 import { updateQuery } from '../util'
-import { formatTime, formatHex, formatNumber } from './util'
+import { formatTime, formatHex, formatNumber, linkToParentBlock } from './util'
 import { blockTxsPerPage as perPage } from '../const'
 import loader from '../components/loading'
 
@@ -78,9 +78,7 @@ export default ({ t, block: b, blockStatus: status, blockTxs, openTx, spends, op
           <div>
             <div>{t`Bitcoin anchor`}</div>
             <div className="mono">
-              <a href={`https://mempool.space/testnet4/block/${b.bitcoin_anchor.hash}`} target="_blank" rel="noopener noreferrer" title={t`View on Bitcoin testnet4`}>
-                {`#${b.bitcoin_anchor.height}`}
-              </a>
+              {linkToParentBlock(b.bitcoin_anchor.hash, `#${b.bitcoin_anchor.height}`)}
               {' '}
               <span className="text-gray">{b.bitcoin_anchor.hash}</span>
             </div>

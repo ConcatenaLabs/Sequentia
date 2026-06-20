@@ -109,14 +109,38 @@ export const formatJson = obj =>
     //.replace(/^ /mg, '')
     //.replace(/^\{|\}$/g, '')
 
+// Rewrite a loopback URL's host to the host the page was actually loaded from
+// (keeping the port), so links to sibling explorer instances (e.g. our Bitcoin
+// testnet4 explorer on :5002) work over localhost, Tailscale, or a reverse proxy.
+// Non-loopback (external) URLs are left untouched, and SSR returns the URL as-is.
+export const rebaseHost = url => {
+  if (!process.browser) return url
+  try {
+    const u = new URL(url, window.location.href)
+    if (['127.0.0.1', 'localhost', '::1', '[::1]'].includes(u.hostname)) {
+      u.protocol = window.location.protocol
+      u.hostname = window.location.hostname
+    }
+    return u.toString()
+  } catch (e) {
+    return url
+  }
+}
+
 const parentChainExplorerTxOut = process.env.PARENT_CHAIN_EXPLORER_TXOUT || '/tx/{txid}?output:{vout}'
 const parentChainExplorerAddr  = process.env.PARENT_CHAIN_EXPLORER_ADDR || '/address/{addr}'
+const parentChainExplorerBlock = process.env.PARENT_CHAIN_EXPLORER_BLOCK || 'https://mempool.space/testnet4/block/{hash}'
 
 export const linkToParentOut = ({ txid, vout }, label=`${txid}:${vout}`) =>
   <a href={parentChainExplorerTxOut.replace('{txid}', txid).replace('{vout}', vout)} target="_blank" rel="external">{label}</a>
 
 export const linkToParentAddr = (addr, label=addr) =>
   <a href={parentChainExplorerAddr.replace('{addr}', addr)} target="_blank" rel="external">{label}</a>
+
+// SEQUENTIA: link a block's Bitcoin anchor to the parent chain's explorer (our
+// own Bitcoin testnet4 esplora instance), host-relative via rebaseHost.
+export const linkToParentBlock = (hash, label=hash) =>
+  <a href={rebaseHost(parentChainExplorerBlock.replace('{hash}', hash))} target="_blank" rel="noopener noreferrer">{label}</a>
 
 export const linkToAddr = addr => <a href={`address/${addr}`}>{addr}</a>
 

@@ -1,3 +1,5 @@
+import { rebaseHost } from "./util";
+
 const items = process.env.MENU_ITEMS && JSON.parse(process.env.MENU_ITEMS),
   active = process.env.MENU_ACTIVE;
 
@@ -9,17 +11,7 @@ const activeId = activeName && activeName.replace(/ /g, "");
 // Cross-link to the other network on whatever host the page was actually loaded
 // from (keeping the configured port), so the switcher works over localhost,
 // Tailscale, or any reverse proxy without hardcoding the host in MENU_ITEMS.
-const rebase = url => {
-  if (!process.browser) return url;
-  try {
-    const u = new URL(url, window.location.href);
-    u.protocol = window.location.protocol;
-    u.hostname = window.location.hostname;
-    return u.toString();
-  } catch (e) {
-    return url;
-  }
-};
+const rebase = rebaseHost;
 
 export default ({ t, page }) => (
   <div className="main-nav-container">
