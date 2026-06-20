@@ -967,8 +967,21 @@ int64_t PosProducer::DriveRound()
     size_t members_n = 0;
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        // Escaping stall (paper §i.5): when the chain has stalled — the parent
+        // anchor advanced >= POS_ESCAPING_STALL_ANCHOR_GAP since the backed
+        // block's parent — consensus accepts a sub-quorum (down to 1-member)
+        // block (validation.cpp). Honor the same relaxation here so the
+        // autonomous producer can self-certify under stall, including a lone
+        // genesis founder bringing up the chain from a single staking output
+        // (otherwise it would be stranded in the gossip path, unable to reach a
+        // full quorum). In steady state Bitcoin is slower than the slot, so the
+        // gap is never met and this stays a strict quorum.
+        const int min_members =
+            (g_con_bitcoin_anchor &&
+             PosEscapingStallAllowed(tip->m_anchor_height, backed->m_anchor_height))
+            ? 1 : PosQuorum((size_t)g_pos_committee_size);
         if (m_round_height == height && m_backed_hash == backed->GetHash() &&
-            (int)m_collected.size() >= PosQuorum((size_t)g_pos_committee_size)) {
+            (int)m_collected.size() >= min_members) {
             CScript::const_iterator pc = backed->proof.solution.begin();
             opcodetype op;
             std::vector<unsigned char> leader_sig;
