@@ -1,0 +1,31 @@
+/* SEQUENTIA testnet explorer — branding + Sequentia-specific row styling. */
+
+:root {
+  --primary-color: #4f7cff; /* Sequentia blue */
+}
+
+/* Finality badges on the block page */
+.seq-finalized {
+  color: #15a34a;
+  font-weight: 600;
+}
+.seq-finalized::before {
+  content: "\2714\00a0"; /* ✔ */
+}
+.seq-unfinalized {
+  color: #78838e;
+}
+
+/* The Bitcoin-anchor row links out to a testnet4 explorer */
+.stats-table .mono a {
+  color: var(--primary-color);
+}
+
+/* Long hex (anchor hash, signatures, committee pubkeys) should wrap, not
+   overflow the stats table. */
+.stats-table .mono {
+  word-break: break-all;
+}
+.stats-table .mono .text-gray {
+  word-break: break-all;
+}

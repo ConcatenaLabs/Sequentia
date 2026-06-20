@@ -1,0 +1,135 @@
+import moveDec from 'move-decimal-point'
+import { sat2btc } from 'fmtbtc'
+import { nativeAssetLabel } from '../const'
+import { isNativeOut } from '../util'
+
+const DEFAULT_ISSUED_PRECISION = 0
+    , NATIVE_PRECISION = 8
+
+const pad = n => n < 10 ? '0'+n : n
+
+const formatTimezone = time => {
+  const tzOffset = time.getTimezoneOffset() * -1;
+  return tzOffset == 0 ? 'UTC' : 'GMT ' + (tzOffset < 0 ? '' : '+') + (tzOffset/60)
+}
+
+export const formatTime = (unix, with_tz = true) => {
+  const time = new Date(unix*1000)
+
+  return `${time.getFullYear()}-${pad(time.getMonth() + 1)}-${pad(time.getDate())}`
+       + ` ${pad(time.getHours())}:${pad(time.getMinutes())}:${pad(time.getSeconds())}`
+       + (with_tz ? ' ' + formatTimezone(time) : '')
+}
+
+export const formatSat = (sats, label=nativeAssetLabel) => `${formatNumber(sat2btc(sats), NATIVE_PRECISION)} ${label}`
+
+export const formatAssetAmount = (value, precision=0, t) =>
+  <span>
+    {formatNumber(precision > 0 ? moveDec(value, -precision) : value, precision)}
+  </span>
+
+export const formatOutAmount = (vout, { t, assetMap }, shortDisplay=false) => {
+  if (vout.value == null) return t`Confidential`
+
+  if (isNativeOut(vout)) {
+    return <span>
+      {formatNumber(sat2btc(vout.value), NATIVE_PRECISION)}
+      { ' ' }
+      {!vout.asset ? nativeAssetLabel : <a href={`asset/${vout.asset}`}>{nativeAssetLabel}</a>}
+    </span>
+  }
+
+  const [ domain, ticker, name, _precision ] = vout.asset && assetMap && assetMap[vout.asset] || []
+      , precision = _precision != null ? _precision : DEFAULT_ISSUED_PRECISION
+      , short_id = vout.asset && vout.asset.substr(0, 10)
+      , asset_url = vout.asset && `asset/${vout.asset}`
+
+  const amount_el = formatAssetAmount(vout.value, precision, t)
+      , asset_link = vout.asset && <a href={asset_url}>{short_id}</a>
+
+  return domain ? <span>{amount_el} {ticker && <span title={name}>{ticker}</span>} {shortDisplay||<br />} {domain}{shortDisplay || [<br/>,<em title={vout.asset}>{asset_link}</em>]}</span>
+       : vout.asset ? <span>{amount_el} <em title={vout.asset}>{asset_link}</em></span>
+       : <span>{amount_el} {t`Unknown`}</span> // should never happen
+}
+
+export const formatHex = num => {
+  const str = num.toString(16)
+  return '0x' + (str.length%2 ? '0' : '') + str
+}
+
+// Formats a number for display. Treats the number as a string to avoid rounding errors.
+export const formatNumber = (s, precision=null) => {
+  let [ whole, dec ] = s.toString().split('.')
+
+  // divide numbers into groups of three separated with a thin space (U+202F, "NARROW NO-BREAK SPACE"),
+  // but only when there are more than a total of 5 non-decimal digits.
+  // if (whole.length >= 5) {
+  //   whole = whole.replace(/\B(?=(\d{3})+(?!\d))/g, "\u202F")
+  // }
+
+  if (precision != null && precision > 0) {
+    if (dec == null) dec = '0'.repeat(precision)
+    else if (dec.length < precision) dec += '0'.repeat(precision - dec.length)
+  }
+
+  return whole + (dec != null ? '.'+dec : '')
+}
+
+export const formatRelativeTime = (fromDate, toDate = new Date()) => {
+  if (typeof fromDate === 'number') {
+    fromDate = fromDate < 1e12
+      ? new Date(fromDate * 1000)
+      : new Date(fromDate)
+  }
+
+  const diffSeconds = Math.floor((toDate - fromDate) / 1000)
+
+  if (diffSeconds < 5) return 'just now'
+  if (diffSeconds < 60) return `${diffSeconds} seconds ago`
+
+  const diffMinutes = Math.floor(diffSeconds / 60)
+  if (diffMinutes < 60) {
+    return diffMinutes === 1 ? '1 minute ago' : `${diffMinutes} minutes ago`
+  }
+
+  const diffHours = Math.floor(diffMinutes / 60)
+  if (diffHours < 24) {
+    return diffHours === 1 ? '1 hour ago' : `${diffHours} hours ago`
+  }
+
+  const diffDays = Math.floor(diffHours / 24)
+  return diffDays === 1 ? '1 day ago' : `${diffDays} days ago`
+}
+
+export const getBlockPercentageUsed = blockWeight =>
+  Math.round((blockWeight / 4000000) * 10000) / 100
+
+export const formatJson = obj =>
+  JSON.stringify(obj, null, 1)
+    //.replace(/^ /mg, '')
+    //.replace(/^\{|\}$/g, '')
+
+const parentChainExplorerTxOut = process.env.PARENT_CHAIN_EXPLORER_TXOUT || '/tx/{txid}?output:{vout}'
+const parentChainExplorerAddr  = process.env.PARENT_CHAIN_EXPLORER_ADDR || '/address/{addr}'
+
+export const linkToParentOut = ({ txid, vout }, label=`${txid}:${vout}`) =>
+  <a href={parentChainExplorerTxOut.replace('{txid}', txid).replace('{vout}', vout)} target="_blank" rel="external">{label}</a>
+
+export const linkToParentAddr = (addr, label=addr) =>
+  <a href={parentChainExplorerAddr.replace('{addr}', addr)} target="_blank" rel="external">{label}</a>
+
+export const linkToAddr = addr => <a href={`address/${addr}`}>{addr}</a>
+
+export const formatVMB = (bytes, suffix) =>
+  bytes >= 10000 || bytes == 0 ? `${(bytes / 1000000).toFixed(2)} ${suffix ?? "vMB"}`
+: `< 0.01 ${suffix ?? "vMB"}`
+
+
+export const strTruncate  = (str) => str.substr(0, 10) + '...' + str.substr(str.length-4, str.length);
+
+export const truncateTxid  = (txid) => txid.substr(0, 5) + '...' + txid.substr(txid.length - 5, txid.length);
+
+// Convert hex string to base64
+export const hexToBase64 = (hex) => {
+    return Buffer.from(hex, 'hex').toString('base64')
+}

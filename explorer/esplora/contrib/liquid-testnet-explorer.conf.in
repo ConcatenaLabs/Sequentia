@@ -1,0 +1,15 @@
+chain=liquidtestnet
+# Liquid Testnet (liquidtestnet) settings:
+[liquidtestnet]
+
+# General settings:
+addnode=liquid-testnet.blockstream.com:18892
+addnode=liquidtestnet.com:18891
+addnode=liquidcert.com:18886
+addnode=liquid.network:18444
+fallbackfee=0.00000100
+listenonion=1
+listen=1
+disablewallet=1
+blocknotify=pkill -USR1 electrs
+rpcport=7040

@@ -1,0 +1,17 @@
+{
+  "name": "esplora-serverside-render",
+  "version": "0.1.0",
+  "author": "Nadav Ivgi",
+  "license": "MIT",
+  "dependencies": {
+    "body-parser": "^1.19.0",
+    "cookie-parser": "^1.4.5",
+    "express-queue": "^0.0.13",
+    "prom-client": "^14.0.0",
+    "superagent": "^6.1.0"
+  },
+  "scripts": {
+    "start": "./start.sh",
+    "dist": "./build.sh"
+  }
+}
