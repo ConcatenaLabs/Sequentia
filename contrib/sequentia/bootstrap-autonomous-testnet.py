@@ -221,7 +221,11 @@ def main():
         "con_pos=1", "posvrf=1", "posbls=1",
         "poscommitteesize=%d" % N, "posslotinterval=%d" % args.slot,
         "posunbonding=%d" % args.posunbonding, "posminstake=%d" % args.posminstake,
-        "con_max_block_sig_size=8000", "signblockscript=51",
+        # The BLS committee certificate costs ~257 bytes per signing member; size
+        # the cap for the whole committee signing (quorum..N) plus headroom, or a
+        # 100-member cert (~13-26 KB) is rejected as block-proof-invalid.
+        "con_max_block_sig_size=%d" % (280 * N + 2000),
+        "signblockscript=51",
         "con_blocksubsidy=5000000000", "anyonecanspendaremine=1", "validatepegin=0",
         # The CSV staking outputs are non-standard; accept them into the mempool
         # so the founder can mine the registration tx (relay policy, not consensus).

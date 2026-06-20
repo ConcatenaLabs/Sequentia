@@ -228,7 +228,9 @@ def main():
     consensus = [
         "con_pos=1", "posvrf=1", "posbls=1",
         "poscommitteesize=%d" % N, "posslotinterval=%d" % args.slot,
-        "con_max_block_sig_size=8000", "signblockscript=51",
+        # BLS cert ~257 B/signing member; size for the whole committee + headroom
+        # (a fixed 8000 rejects a 100-member cert as block-proof-invalid).
+        "con_max_block_sig_size=%d" % (280 * N + 2000), "signblockscript=51",
         "con_blocksubsidy=5000000000", "anyonecanspendaremine=1", "validatepegin=0",
     ] + (["con_bitcoin_anchor=1"] if not args.no_anchor else []) \
       + ["staker=%s:1" % pub for _, pub in stakers]
