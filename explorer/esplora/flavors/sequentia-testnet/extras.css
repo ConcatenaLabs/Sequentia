@@ -1,31 +1,112 @@
-/* SEQUENTIA testnet explorer — branding + Sequentia-specific row styling. */
+/* ============================================================================
+   SEQUENTIA explorer identity.
+
+   Grounded in Sequentia's own brand (the app-icon palette): violet #7D3FA5 +
+   periwinkle #6C8ADD. The parent chain (Bitcoin testnet4) keeps Bitcoin's
+   orange #F7931A. The accent IS the chain you're viewing, so switching networks
+   recolors the chrome — and the network switcher is restyled as an "anchor link"
+   that names the parent/child relationship (a Sequentia block is anchored into
+   a Bitcoin testnet4 block).
+
+   This file ships with the sequentia-testnet flavor; the network-switcher block
+   is shared (it reads --primary-color), so the testnet4 flavor loads it too and
+   only overrides the accent to orange.
+   ============================================================================ */
 
 :root {
-  --primary-color: #4f7cff; /* Sequentia blue */
+  --primary-color: #7d3fa5;   /* Sequentia violet (from the brand icon) */
+  --seq-violet: #7d3fa5;
+  --seq-blue: #6c8add;        /* Sequentia periwinkle (from the brand icon) */
+  --btc-orange: #f7931a;      /* parent chain: Bitcoin */
 }
 
-/* Finality badges on the block page */
-.seq-finalized {
-  color: #15a34a;
+/* Concatena Labs brand logo: scale to a consistent height in the 50px navbar
+   regardless of the SVG's intrinsic size. */
+.navbar-brand img { height: 30px; width: auto; }
+
+/* ---- Reuse Liquid's asset-table layout (assets view) ---------------------- */
+/* (loaded separately via flavors/liquid/extras.css) */
+
+/* ---- Sequentia block rows: anchor / committee / finality ------------------ */
+
+.seq-finalized { color: #15a34a; font-weight: 600; }
+.seq-finalized::before { content: "\2714\00a0"; }
+.seq-unfinalized { color: #78838e; }
+
+/* Long hex (anchor hash, signatures, committee pubkeys) wraps inside the table
+   instead of overflowing. */
+.stats-table .mono,
+.stats-table .mono .text-gray { word-break: break-all; }
+
+/* The Bitcoin-anchor row links out to a testnet4 explorer — tint it like the
+   parent chain so the cross-chain reference reads as "this points at Bitcoin". */
+.stats-table .mono a[href*="testnet4"] {
+  color: var(--btc-orange);
+  text-decoration-color: rgba(247, 147, 26, 0.4);
+}
+
+/* ============================================================================
+   SIGNATURE: the network switcher as a parent/child "anchor link".
+   Structure from views/network-selection.js:
+     .network-selector-toggle (the pill) > .menu-logo + name + chevron
+     .network-hover-menu > .network-hover-menu-option-container.<chain>
+   Each chain option is tinted with its OWN brand color (Sequentia violet,
+   Bitcoin orange) regardless of which explorer you're on.
+   ============================================================================ */
+
+.network-selector-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border: 1px solid color-mix(in srgb, var(--primary-color) 35%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--primary-color) 8%, transparent);
+  color: var(--primary-color);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.network-selector-toggle:hover {
+  background: color-mix(in srgb, var(--primary-color) 14%, transparent);
+  border-color: color-mix(in srgb, var(--primary-color) 55%, transparent);
+}
+.network-selector-toggle .menu-logo { height: 18px; width: 18px; }
+.network-selector-toggle .network-angle-down { fill: var(--primary-color); opacity: 0.7; }
+
+/* The dropdown: a small "you are here ⚓ its parent" card. */
+.network-hover-menu {
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 10px 30px rgba(17, 19, 22, 0.18);
+}
+.network-hover-menu-option-container {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 16px;
+  border-left: 3px solid transparent;
+}
+/* per-chain brand tint */
+.network-hover-menu-option-container.sequentiatestnet { --chain: var(--seq-violet); }
+.network-hover-menu-option-container.bitcointestnet4  { --chain: var(--btc-orange); }
+.network-hover-menu-option-container .menu-logo { height: 20px; width: 20px; }
+.network-hover-menu-option-container:hover {
+  background: color-mix(in srgb, var(--chain, var(--primary-color)) 10%, transparent);
+  border-left-color: var(--chain, var(--primary-color));
+}
+.network-hover-menu-option-container.active {
+  background: color-mix(in srgb, var(--chain, var(--primary-color)) 12%, transparent);
+  border-left-color: var(--chain, var(--primary-color));
   font-weight: 600;
 }
-.seq-finalized::before {
-  content: "\2714\00a0"; /* ✔ */
-}
-.seq-unfinalized {
-  color: #78838e;
-}
+.network-hover-menu-option-container.active .network-hover-menu-option { color: var(--chain); }
 
-/* The Bitcoin-anchor row links out to a testnet4 explorer */
-.stats-table .mono a {
-  color: var(--primary-color);
-}
-
-/* Long hex (anchor hash, signatures, committee pubkeys) should wrap, not
-   overflow the stats table. */
-.stats-table .mono {
-  word-break: break-all;
-}
-.stats-table .mono .text-gray {
-  word-break: break-all;
+/* "anchored to" connector between the two chains in the dropdown: the divider
+   between the active (child) row and the parent row reads as an anchor link. */
+.network-hover-menu-option-container.sequentiatestnet::after {
+  content: "\2693";                 /* ⚓ anchored into Bitcoin */
+  margin-left: auto;
+  font-size: 13px;
+  color: color-mix(in srgb, var(--seq-violet) 60%, #78838e);
 }

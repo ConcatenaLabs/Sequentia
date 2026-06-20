@@ -1,0 +1,5 @@
+/* Parent-chain view (Bitcoin testnet4): recolor the chrome to Bitcoin orange so
+   the active accent always tells you which chain you're on. Loaded AFTER the
+   Sequentia extras.css (which defines the shared network switcher), so this
+   --primary-color wins on the testnet4 explorer. */
+:root { --primary-color: #f7931a; }

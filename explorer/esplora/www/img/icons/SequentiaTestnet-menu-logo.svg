@@ -1,0 +1,21 @@
+<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Sequentia">
+  <!-- Sequentia: a chain anchored into Bitcoin. Violet #7D3FA5 brand mark:
+       three stacked "blocks" (the sequence) descending into an anchor. -->
+  <defs>
+    <linearGradient id="seq-g" x1="12" y1="2" x2="12" y2="22" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8C57B4"/>
+      <stop offset="1" stop-color="#7D3FA5"/>
+    </linearGradient>
+  </defs>
+  <!-- ring -->
+  <circle cx="12" cy="4.4" r="2.3" stroke="url(#seq-g)" stroke-width="1.7"/>
+  <!-- stem (the sequence spine) -->
+  <rect x="11.1" y="6.4" width="1.8" height="11.4" rx="0.9" fill="url(#seq-g)"/>
+  <!-- stock / crossbar -->
+  <rect x="7.2" y="8.7" width="9.6" height="1.7" rx="0.85" fill="#6C8ADD"/>
+  <!-- flukes (the anchor arms) -->
+  <path d="M5 13.2c0 3.9 3.1 6.3 7 6.6M19 13.2c0 3.9-3.1 6.3-7 6.6"
+        stroke="url(#seq-g)" stroke-width="1.7" stroke-linecap="round" fill="none"/>
+  <path d="M5 13.2l-1.6 1.1M5 13.2l1.7 1M19 13.2l1.6 1.1M19 13.2l-1.7 1"
+        stroke="url(#seq-g)" stroke-width="1.7" stroke-linecap="round"/>
+</svg>
