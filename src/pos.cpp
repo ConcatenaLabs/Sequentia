@@ -604,6 +604,30 @@ bool RebuildUtxoStake(CCoinsView& view)
     return true;
 }
 
+void SeedGenesisStake(const CBlock& genesis)
+{
+    // Register the genesis block's staking output(s) into the registry BEFORE any
+    // chainstate (re)activation at startup. Genesis stake is otherwise registered
+    // only by the UTXO scan (RebuildUtxoStake), which runs AFTER the chain is
+    // loaded/activated; but chain (re)activation validates PoS blocks via
+    // CheckPosStakeRules, and the very first block's leader is the genesis staker.
+    // On a reload that re-validates blocks during load (a node restarted with the
+    // coins tip behind the block index, or -reindex/-reindex-chainstate), the
+    // first block would be checked against an empty registry and rejected
+    // ("leader-not-staker"), marking the whole chain invalid and stranding the
+    // node at genesis. Genesis is special-cased out of the incremental
+    // ConnectBlock stake path, so this is the only early entry point. Idempotent
+    // with the later UTXO scan, which replaces the registry wholesale.
+    StakeRegistry& registry = StakeRegistry::GetInstance();
+    for (const CTransactionRef& tx : genesis.vtx) {
+        for (const CTxOut& out : tx->vout) {
+            if (auto stake = StakeFromTxOut(out)) {
+                registry.AddUtxoStake(stake->first, stake->second);
+            }
+        }
+    }
+}
+
 // --- Operator-configured static checkpoints (-poscheckpoint=height:hash) ---
 // In the common layer (not the node-layer anchor module) so chainparams.cpp and
 // tools such as elements-tx — which link libbitcoin_common but not the node

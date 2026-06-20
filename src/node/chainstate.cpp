@@ -6,6 +6,7 @@
 
 #include <consensus/params.h>
 #include <node/blockstorage.h>
+#include <pos.h>
 #include <validation.h>
 
 namespace node {
@@ -106,6 +107,21 @@ std::optional<ChainstateLoadingError> LoadChainstate(bool fReset,
         assert(chainstate->CanFlushToDisk());
 
         if (!is_coinsview_empty(chainstate)) {
+            // SEQUENTIA PoS: seed the stake registry from the UTXO set BEFORE the
+            // tip is activated. LoadChainTip -> ActivateBestChain (re)connects PoS
+            // blocks during load — e.g. a from-genesis re-activation when the coins
+            // tip is behind the block index after an unclean shutdown, or a node
+            // replaying historical blocks. Block connection runs CheckPosStakeRules,
+            // which needs the genesis staker already registered; without this the
+            // first PoS block fails "leader-not-staker" and the whole chain is
+            // marked invalid, stranding the node at genesis (observed on the testnet
+            // when nodes restarted with blocks on disk but the coins tip rolled
+            // back). The registry is a pure function of the UTXO set, so this scan
+            // is correct and idempotent; it is refreshed again post-init (AppInitMain)
+            // once the tip is final.
+            if (g_con_pos && !RebuildUtxoStake(chainstate->CoinsDB())) {
+                return ChainstateLoadingError::ERROR_GENERIC_BLOCKDB_OPEN_FAILED;
+            }
             // LoadChainTip initializes the chain based on CoinsTip()'s best block
             if (!chainstate->LoadChainTip()) {
                 return ChainstateLoadingError::ERROR_LOADCHAINTIP_FAILED;

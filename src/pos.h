@@ -452,6 +452,11 @@ void PosRevertBlockStake(const CBlock& block, const CBlockUndo& undo);
 /** Rebuild the UTXO stake layer by scanning the (flushed) UTXO set. */
 bool RebuildUtxoStake(CCoinsView& view);
 
+/** Register the genesis block's staking output(s) before any chainstate
+ *  activation, so PoS blocks re-validated during a reload/reindex are checked
+ *  against a registry that already contains the genesis staker. */
+void SeedGenesisStake(const CBlock& genesis);
+
 // --- Operator-configured static checkpoints (-poscheckpoint=height:hash) ---
 //
 // A long-range-attack backstop supplied by the operator up front, so it protects

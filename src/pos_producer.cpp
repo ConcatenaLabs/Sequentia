@@ -515,6 +515,39 @@ int64_t PosProducer::Step()
     }
     if (!tip) return POS_PRODUCER_POLL_MS;
 
+    // A parent-chain (Bitcoin) reorganization can roll our anchored tip BACKWARD
+    // (validation.cpp invalidates every block whose anchor left the parent's best
+    // chain, rolling back to the last anchor-canonical height) or replace the
+    // block at the current height. Our per-height round high-water marks
+    // (m_round_height, m_proposed_height) are monotonic, so after a backward move
+    // they sit ABOVE the now-current height: no leader would propose again at
+    // that height (Step()'s `m_proposed_height < height` gate) and receivers
+    // would reject any lower-height proposal (OnProposal's `height < m_round_height`
+    // gate) — a permanent stall, even though a block extending the rolled-back
+    // tip with a fresh anchor is fully consensus-valid. Detect a non-forward tip
+    // change and reset the round state so the committee resumes on the new tip. A
+    // pure forward advance leaves the marks below next_height and needs no reset.
+    {
+        const uint256 tip_hash = tip->GetBlockHash();
+        const int next_height = tip->nHeight + 1;
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        if (tip_hash != m_last_tip) {
+            if (m_round_height >= next_height || m_proposed_height >= next_height) {
+                LogPrintf("PoS producer: tip moved to %s (height %d) at/below tracked round height "
+                          "%d/%d; resetting round state (parent-chain reorg recovery)\n",
+                          tip_hash.ToString(), tip->nHeight, m_round_height, m_proposed_height);
+                m_round_height = 0;
+                m_proposed_height = 0;
+                m_candidates.clear();
+                m_collected.clear();
+                m_excluded.clear();
+                m_backed_hash.SetNull();
+                m_signed_round = -1;
+            }
+            m_last_tip = tip_hash;
+        }
+    }
+
     const uint256 seed = PosSeedForChild(tip);
     const StakeRegistry& registry = StakeRegistry::GetInstance();
     const uint64_t total_weight = PosTotalWeight(registry);

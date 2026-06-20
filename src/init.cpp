@@ -1642,6 +1642,17 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     LogPrintf("* Using %.1f MiB for in-memory UTXO set (plus up to %.1f MiB of unused mempool space)\n", cache_sizes.coins * (1.0 / 1024 / 1024), nMempoolSizeMax * (1.0 / 1024 / 1024));
     LogPrintf("ELIP 203 is%s active\n", (chainparams.GetAcceptUnlimitedIssuances())?"":" not");
 
+    // SEQUENTIA PoS: seed the genesis staker into the registry BEFORE the chain is
+    // loaded/activated below. Chainstate (re)activation during load validates PoS
+    // blocks, and the first block's leader is the genesis staker; without this it
+    // is checked against an empty registry, rejected "leader-not-staker", and the
+    // whole chain is marked invalid (a node restarted with blocks on disk, or run
+    // with -reindex/-reindex-chainstate, would be stranded at genesis). The full
+    // UTXO scan (RebuildUtxoStake) refreshes the registry again after init.
+    if (g_con_pos) {
+        SeedGenesisStake(chainparams.GenesisBlock());
+    }
+
     bool fLoaded = false;
     while (!fLoaded && !ShutdownRequested()) {
         const bool fReset = fReindex;
