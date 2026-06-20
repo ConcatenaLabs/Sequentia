@@ -412,8 +412,11 @@ public:
         MAX_MONEY = 400000000 * COIN;   // SEQUENTIA: per-chain money cap
         g_pos_vrf = true;
         g_pos_agg_committee = true;
-        // Autonomous BLS gossip committee is the default certification model;
-        // -posbls=0 falls back to the manual MuSig2 coordinator (g_pos_agg_committee).
+        // Autonomous BLS gossip committee is the default certification model.
+        // g_pos_bls is a NETWORK-WIDE CONSENSUS RULE, not a per-node toggle:
+        // -posbls=0 selects the manual MuSig2 coordinator instead, and a node set
+        // differently from the rest of the network rejects the other form's blocks
+        // and forks off. Every node and producer on the chain must use the same value.
         g_pos_bls = args.GetBoolArg("-posbls", true);
         g_pos_min_stake = 4000000000000ULL;             // 40,000 SEQ = 0.01% of 400M (§3.3)
         g_pos_committee_size = 100;                      // 51-of-100 quorum (§3.5)
@@ -440,7 +443,11 @@ public:
         // (pubkey, VRF proof, BLS pubkey + PoP), so size it for the full committee
         // when BLS is active. The block proof is a separate consensus limit, not
         // counted against con_maxblockweight.
-        consensus.max_block_signature_size = g_pos_bls ? (300 * g_pos_committee_size + 2000) : 200;
+        // Size for the HARD committee cap (MAX_POS_AGG_COMMITTEE_SIZE), not the
+        // expected committee size: VRF sortition is a threshold, so an above-mean
+        // draw can legitimately select more members than the configured size (up
+        // to the cap), and the cert must still fit.
+        consensus.max_block_signature_size = g_pos_bls ? (300 * MAX_POS_AGG_COMMITTEE_SIZE + 2000) : 200;
         g_signed_blocks = true;
 
         // Policy asset, from the network-tagged genesis commitment.
@@ -615,8 +622,10 @@ public:
         MAX_MONEY = 400000000 * COIN;   // SEQUENTIA: per-chain money cap
         g_pos_vrf = true;
         g_pos_agg_committee = true;
-        // Autonomous BLS gossip committee is the default; -posbls=0 falls back to
-        // the manual MuSig2 coordinator (g_pos_agg_committee).
+        // Autonomous BLS gossip committee is the default. g_pos_bls is a
+        // NETWORK-WIDE consensus rule (not a per-node toggle): -posbls=0 selects
+        // the manual MuSig2 coordinator, and a node set differently from the rest
+        // of the testnet forks off. Every node on a given testnet must agree.
         g_pos_bls = args.GetBoolArg("-posbls", true);
         g_pos_min_stake = 4000000000000ULL;   // 40,000 SEQ = 0.01% of 400M (§3.3)
         // Expected committee size (quorum = strict majority). Defaults to the
@@ -654,7 +663,10 @@ public:
         // size it for the committee when BLS is active; the MuSig2 fallback needs
         // only ~200 B. Allow an explicit override on this configurable testnet.
         {
-            const int bls_default = 300 * g_pos_committee_size + 2000;
+            // Size for the HARD committee cap, not the configured size: VRF
+            // sortition is a threshold, so an above-mean draw can select more
+            // members than -poscommitteesize (up to the cap) and must still fit.
+            const int bls_default = 300 * MAX_POS_AGG_COMMITTEE_SIZE + 2000;
             consensus.max_block_signature_size = args.GetIntArg(
                 "-con_max_block_sig_size", g_pos_bls ? bls_default : 200);
         }
