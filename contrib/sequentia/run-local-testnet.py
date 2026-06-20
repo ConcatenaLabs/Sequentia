@@ -72,16 +72,27 @@ def cli(binary, datadir, port, args, user="seq", pw="seq", timeout=60, check=Tru
     cmd = [binary, "-datadir=%s" % datadir, "-chain=%s" % CHAIN,
            "-rpcconnect=127.0.0.1", "-rpcport=%d" % port,
            "-rpcuser=%s" % user, "-rpcpassword=%s" % pw, "-rpcwait"] + args
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # -rpcwait blocks until the RPC is ready; a not-yet-ready daemon hits this.
+        # Return a soft failure so pollers (wait_rpc) retry instead of the whole
+        # run crashing on one slow daemon during a large startup.
+        if check:
+            raise RuntimeError("cli %s timed out after %ss" % (args, timeout))
+        return "", -1
     if check and r.returncode != 0:
         raise RuntimeError("cli %s failed: %s" % (args, r.stderr.strip()))
     return r.stdout.strip(), r.returncode
 
 
-def wait_rpc(cli_bin, datadir, port, label, deadline_s=90):
+def wait_rpc(cli_bin, datadir, port, label, deadline_s=300):
+    # Poll with a SHORT per-call timeout (fast retry) and a generous overall
+    # deadline: starting ~100 daemons against one parent makes RPC warmup slow,
+    # but it does come up. One slow node must not abort the run.
     end = time.time() + deadline_s
     while time.time() < end:
-        out, rc = cli(cli_bin, datadir, port, ["getblockcount"], check=False)
+        out, rc = cli(cli_bin, datadir, port, ["getblockcount"], check=False, timeout=5)
         if rc == 0 and out.isdigit():
             return
         time.sleep(1)

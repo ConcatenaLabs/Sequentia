@@ -413,6 +413,7 @@ def main():
         start_daemon(elementsd, d)
         pids["node%03d" % i] = {"datadir": d, "rpcport": rb + i, "pid": read_pid(d, subdir)}
         if i % 10 == 0: print("  started %d/%d" % (i, N - 1))
+        time.sleep(0.25)   # stagger init so ~100 daemons don't spike memory/CPU at once
     json.dump(pids, open(os.path.join(base, "pids.json"), "w"))
     for i in range(1, N):
         wait_rpc(ec, pids["node%03d" % i]["datadir"], rb + i, "node%d" % i)
