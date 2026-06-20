@@ -65,8 +65,10 @@ def _key_lock(key):
 
 
 def _upstream(body):
+    # application/json (not text/plain): stricter gateways (e.g. Tatum) reject
+    # text/plain; standard endpoints accept JSON either way.
     cmd = ["curl", "-s", "-m", str(UPSTREAM_TIMEOUT), "-A", UA,
-           "--data-binary", "@-", "-H", "content-type: text/plain"]
+           "--data-binary", "@-", "-H", "content-type: application/json"]
     if EXTRA_HEADER:
         cmd += ["-H", EXTRA_HEADER]
     cmd.append(TARGET)
