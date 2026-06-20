@@ -338,7 +338,7 @@ public:
 
 class CSequentiaParams : public CChainParams {
 public:
-    CSequentiaParams() {
+    explicit CSequentiaParams(const ArgsManager& args) {
         strNetworkID = CBaseChainParams::SEQUENTIA;
         consensus.signet_blocks = false;
         consensus.signet_challenge.clear();
@@ -412,7 +412,9 @@ public:
         MAX_MONEY = 400000000 * COIN;   // SEQUENTIA: per-chain money cap
         g_pos_vrf = true;
         g_pos_agg_committee = true;
-        g_pos_bls = false;
+        // Autonomous BLS gossip committee is the default certification model;
+        // -posbls=0 falls back to the manual MuSig2 coordinator (g_pos_agg_committee).
+        g_pos_bls = args.GetBoolArg("-posbls", true);
         g_pos_min_stake = 4000000000000ULL;             // 40,000 SEQ = 0.01% of 400M (§3.3)
         g_pos_committee_size = 100;                      // 51-of-100 quorum (§3.5)
         g_pos_slot_interval = 30;                        // 30s nominal block time (doc 11 §4)
@@ -433,7 +435,12 @@ public:
 
         std::vector<unsigned char> sign_bytes = ParseHex("51");
         consensus.signblockscript = CScript(sign_bytes.begin(), sign_bytes.end());
-        consensus.max_block_signature_size = 200; // PoS aggregate solution: leader DER (~73B) + a 64B BIP340 MuSig2 or 96B BLS12-381 committee aggregate
+        // MuSig2 fallback needs ~200 B (leader DER + one 64 B aggregate). The
+        // autonomous BLS certificate instead carries ~257 B per signing member
+        // (pubkey, VRF proof, BLS pubkey + PoP), so size it for the full committee
+        // when BLS is active. The block proof is a separate consensus limit, not
+        // counted against con_maxblockweight.
+        consensus.max_block_signature_size = g_pos_bls ? (300 * g_pos_committee_size + 2000) : 200;
         g_signed_blocks = true;
 
         // Policy asset, from the network-tagged genesis commitment.
@@ -608,7 +615,9 @@ public:
         MAX_MONEY = 400000000 * COIN;   // SEQUENTIA: per-chain money cap
         g_pos_vrf = true;
         g_pos_agg_committee = true;
-        g_pos_bls = false;
+        // Autonomous BLS gossip committee is the default; -posbls=0 falls back to
+        // the manual MuSig2 coordinator (g_pos_agg_committee).
+        g_pos_bls = args.GetBoolArg("-posbls", true);
         g_pos_min_stake = 4000000000000ULL;   // 40,000 SEQ = 0.01% of 400M (§3.3)
         // Expected committee size (quorum = strict majority). Defaults to the
         // paper's 100 (51-of-100 quorum, §3.5); configurable on testnet so a
@@ -641,7 +650,14 @@ public:
 
         std::vector<unsigned char> sign_bytes = ParseHex("51");
         consensus.signblockscript = CScript(sign_bytes.begin(), sign_bytes.end());
-        consensus.max_block_signature_size = 200; // PoS aggregate solution: leader DER (~73B) + a 64B BIP340 MuSig2 or 96B BLS12-381 committee aggregate
+        // The autonomous BLS certificate carries ~257 B per signing member, so
+        // size it for the committee when BLS is active; the MuSig2 fallback needs
+        // only ~200 B. Allow an explicit override on this configurable testnet.
+        {
+            const int bls_default = 300 * g_pos_committee_size + 2000;
+            consensus.max_block_signature_size = args.GetIntArg(
+                "-con_max_block_sig_size", g_pos_bls ? bls_default : 200);
+        }
         g_signed_blocks = true;
 
         // Calculate regcoin asset
@@ -2103,7 +2119,7 @@ std::unique_ptr<const CChainParams> CreateChainParams(const ArgsManager& args, c
     if (chain == CBaseChainParams::MAIN) {
         return std::unique_ptr<CChainParams>(new CMainParams());
     } else if (chain == CBaseChainParams::SEQUENTIA) {
-        return std::unique_ptr<CChainParams>(new CSequentiaParams());
+        return std::unique_ptr<CChainParams>(new CSequentiaParams(args));
     } else if (chain == CBaseChainParams::TESTNET) {
         return std::unique_ptr<CChainParams>(new CTestNetParams(args));
     } else if (chain == CBaseChainParams::SIGNET) {
