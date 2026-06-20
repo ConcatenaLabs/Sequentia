@@ -43,6 +43,14 @@ table *is* the producer's acceptance set. The one exception is the policy asset,
 SEQ, which is valued 1:1 when unlisted; that default is overridable by listing it
 with any rate (including `0` to refuse it).
 
+A rate of `0` as an explicit *refusal* applies to the **static / operator-set
+layer** (`setfeeexchangerates`), which accepts any non-negative rate and reads `0`
+as "refuse this asset". The **dynamic price-server layer**
+([§5](#5-the-dynamic-price-server), `setdynamicfeerates`) is stricter: it requires
+**positive** rates. A price server quoting `0` for an asset is treated as an
+error, not a refusal — to stop accepting an asset the server omits it (or
+`cleardynamicfeerates`), it does not push a `0`.
+
 Mempool entries carry `nFeeAsset` and `nFeeValue` (the rfa value); the miner
 (`src/node/miner.cpp`) ranks packages by rfa value, and `RecomputeFees()`
 re-values the mempool whenever rates change.
@@ -133,8 +141,12 @@ consensus. Safety rules keep a producer from mining against bad data:
 - **Staleness fail-safe** — a dynamic rate older than `-dynfeeratemaxage` is
   dropped, so a dead price server fails closed to "not accepted" rather than
   honouring stale rates.
-- **Sanity clamps** — implausible inter-poll jumps and near-zero rates (which
-  would let dust buy blockspace) are rejected.
+- **Positive-rate enforcement** — the node accepts dynamic rates only as
+  **positive** integers; a zero or negative quote is rejected outright by
+  `setdynamicfeerates` rather than admitted. Guarding against implausible
+  inter-poll jumps and dust-priced rates is the price feed's responsibility: the
+  operator's server vets its source data before pushing, and the node enforces
+  only the non-zero/positive floor.
 - **Source quorum** — agreement across multiple sources before admitting an
   asset blunts a single compromised API.
 - **Operator override** — a statically pinned asset is never overridden by the

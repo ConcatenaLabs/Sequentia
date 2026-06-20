@@ -2,7 +2,8 @@
 
 Sequentia's consensus is Proof-of-Stake. Block production is a stake-weighted
 election with private VRF sortition; a committee certifies each block with a
-single MuSig2-aggregated signature; and the certified block is final the moment
+single aggregated signature (BLS12-381 by default; MuSig2 the `-posbls=0`
+fallback); and the certified block is final the moment
 it is accepted. SEQ is the staking asset and the one thing that confers
 production eligibility. Voluntary Bitcoin checkpoints resist long-range attacks.
 
@@ -43,8 +44,9 @@ the block's parent state, so headers-first sync and parallel block download can
 never mis-evaluate eligibility.
 
 The chain is enabled with `-con_pos`. The defining flags layered on it are
-`-posvrf` (private sortition), `-posaggcommittee` (MuSig2 committee
-aggregation), `-poscommitteesize`, `-posslotinterval`, `-posunbonding`,
+`-posvrf` (private sortition), `-posaggcommittee` (single-signature committee
+aggregation; `-posbls` selects the scheme), `-poscommitteesize`,
+`-posslotinterval`, `-posunbonding`,
 `-posminstake`, `-poscheckpoint`, and `-poscheckpointdepth`. The bundled
 Sequentia chains enable VRF and committee aggregation by default.
 
@@ -194,12 +196,14 @@ the chain immediate finality (§6).
 ### Aggregation into one signature
 
 With `-posaggcommittee` (which raises the `-poscommitteesize` cap to 100), the
-members' signatures are **MuSig2-aggregated** into a single 64-byte BIP340
-Schnorr signature, so block size is constant in committee size. The primitive is
-BIP327 over the vendored secp256k1 (`src/musig.{h,cpp}`): it aggregates a signer
-set into one 32-byte x-only key (order-independent — the aggregate depends only
-on the *set*), produces one 64-byte signature, and verifies it. A `q`-of-`m`
-quorum is realized by aggregating exactly the `q` signing members.
+members' signatures are aggregated into a single signature, so block size is
+constant in committee size. The default scheme on the bundled chains is
+BLS12-381 (`-posbls`, see §9); the `-posbls=0` fallback uses MuSig2. Under
+MuSig2 the primitive is BIP327 over the vendored secp256k1 (`src/musig.{h,cpp}`):
+it aggregates a signer set into one 32-byte x-only key (order-independent — the
+aggregate depends only on the *set*), produces one 64-byte signature, and
+verifies it. A `q`-of-`m` quorum is realized by aggregating exactly the `q`
+signing members.
 
 The block challenge commits to the leader plus the aggregate key:
 
@@ -208,7 +212,7 @@ OP_1 <leader(33)> <aggkey(32)>      # BuildPosAggChallenge
 ```
 
 The leading `OP_1` is a version marker no other challenge form begins with. The
-challenge no longer lists members — it commits to the single MuSig2 aggregate of
+challenge no longer lists members — it commits to the single aggregate key of
 the member set.
 
 ### Independent re-verification
@@ -231,7 +235,9 @@ BIP340 aggregate, both over the block hash. `CheckProof` verifies them directly
 (ECDSA for the leader, Schnorr for the aggregate) rather than through the script
 interpreter, because `OP_CHECKMULTISIG` cannot express one signature over an
 aggregate of up to 100 keys. The per-chain `max_block_signature_size` is sized
-for this combined solution — **150** on the bundled chains.
+for the certification in force: both forms are supported — **200** bytes for the
+MuSig2 path, and **32,000** bytes (`300 × MAX_POS_AGG_COMMITTEE_SIZE(=100) +
+2000`) for the BLS path when `-posbls` is enabled. Sequentia defaults to BLS.
 
 (For small custom committees a script form also exists:
 `<leader> OP_CHECKSIGVERIFY <q> <c_1..c_n> <n> OP_CHECKMULTISIG`, capped at 16
@@ -406,16 +412,19 @@ Three paths lead to a live network:
   RPC (`src/pos_producer.*`).
 
 - **An autonomous gossip-and-sign committee** (`-posbls` + `-posproducer`): the
-  full decentralization. Each node detects its own eligibility; the elected
-  leader floods its unsigned block, every node signs the lowest-VRF proposal and
-  floods a non-interactive BLS share, and the leader aggregates a quorum into the
-  certificate — assembling a committee-certified block across separate hosts with
-  no coordinator. This rests on BLS aggregation and the member-independent block
-  hash (the certificate lives in the proof solution); the design and its status
-  are in [`proposals/autonomous-committee.md`](proposals/autonomous-committee.md).
-  Hardening (anti-DoS, equivocation evidence, round-robin/anchor-reshuffle,
-  large-committee tuning) is the remaining work; the anchor-freshness signing
-  preference of §7 is designed to live in this layer.
+  full decentralization, fully implemented and the default on the bundled chains.
+  Each node detects its own eligibility; the elected leader floods its unsigned
+  block, every node signs the lowest-VRF proposal and floods a non-interactive
+  BLS share, and the leader aggregates a quorum into the certificate — assembling
+  a committee-certified block across separate hosts with no coordinator. This
+  rests on BLS aggregation and the member-independent block hash (the certificate
+  lives in the proof solution). The producer thread, BLS aggregate certification,
+  the gossip rounds (`posproposal` / `poscmpctprop` / `getposprop` /
+  `posshare`), and the hardening features — anti-DoS validate-before-relay,
+  equivocation evidence, crashed-member failover, large-committee tuning, and the
+  anchor-freshness signing preference of §7 — are all implemented and tested. The
+  design is in
+  [`proposals/autonomous-committee.md`](proposals/autonomous-committee.md).
 
 Operating a producer and the surrounding tooling are covered in
 [`05-operating-sequentia.md`](05-operating-sequentia.md); the security model and

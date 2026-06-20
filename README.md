@@ -28,13 +28,18 @@ Liquid. All four are implemented and tested:
    [`doc/sequentia/03-bitcoin-anchoring.md`](doc/sequentia/03-bitcoin-anchoring.md).
 3. **Proof-of-Stake consensus.** The theoretical paper's design: stake-weighted
    **private VRF sortition**, **committee certification** (sortitioned, majority
-   quorum — immediate finality; optionally **MuSig2-aggregated** to paper-scale
-   100-member committees), **on-chain stake** with CSV-enforced unbonding, and
-   **Bitcoin checkpoints** against long-range attacks. Block **validation** is
-   fully decentralized — every node verifies the VRF proofs, the committee
-   signature, the anchor, and the finality gate — while multi-host block
-   **production** is currently coordinator/RPC-driven; an autonomous
-   peer-to-peer gossip-and-sign committee is named future work. **The bundled
+   quorum — immediate finality; the per-member signature shares are
+   **aggregated via BLS12-381** (default) or **MuSig2** (legacy, `-posbls=0`)
+   to paper-scale 100-member committees), **on-chain stake** with CSV-enforced
+   unbonding, and **Bitcoin checkpoints** against long-range attacks. Block
+   **validation** is fully decentralized — every node verifies the VRF proofs,
+   the committee signature, the anchor, and the finality gate. Block
+   **production** supports both the coordinator/RPC path
+   (`getposblocktemplate` / `submitposblock`) and autonomous modes: the
+   `-posproducer` production thread runs the committee with no external
+   coordinator, distributing certification across hosts via `-posbls` BLS
+   aggregation and a peer-to-peer gossip-and-sign relay (the `posproposal` /
+   `poscmpctprop` / `posshare` messages). **The bundled
    Sequentia chain runs PoS by default**, bootstrapped from a genesis-seeded
    staking output with no `-staker` config (the staker set is entirely on-chain;
    see
@@ -76,7 +81,9 @@ This fork adds (all gated on the relevant chain features):
   (`musigaggregatepubkey`, `musignonce`, `musigpartialsign`, `musigaggregate`,
   `musigverify`), `getcheckpointpayload` /
   `getcheckpointinfo`; options `-con_pos`, `-staker`, `-posslotinterval`,
-  `-poscommitteesize`, `-posvrf`, `-posaggcommittee`, `-posunbonding`,
+  `-poscommitteesize`, `-posvrf`, `-posaggcommittee`, `-posbls` (BLS aggregate
+  certification, default true on the bundled chains), `-posproducer` /
+  `-posproducerkey` (the autonomous producer), `-posunbonding`,
   `-poscheckpointdepth`, `-poscheckpoint` (configured static checkpoints).
 - **Addresses/CT:** `-con_default_blinded_addresses` (custom chains);
   `-blindedaddresses` default is now chain-dependent.

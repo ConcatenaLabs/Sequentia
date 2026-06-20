@@ -26,7 +26,11 @@ eligibility, the aggregate signature, the anchor, and the finality gate.
   per-chain `max_block_signature_size` (74) was smaller than a real certified
   block's solution — the leader's ~73-byte DER signature plus the 64-byte MuSig2
   committee aggregate (~138 bytes) — so `CheckProof` rejected every committee
-  block. It is `150` on the bundled chains (`src/chainparams.cpp`).
+  block. With the default BLS certificate it is `300 ·
+  MAX_POS_AGG_COMMITTEE_SIZE + 2000 ≈ 32,000` bytes on the bundled chains, sized
+  for a full 100-member certificate; the `-posbls=0` MuSig2 fallback uses `200`
+  bytes (leader DER plus one aggregate). The historical `150` was the
+  MuSig2/Liquid figure and is wrong for Sequentia (`src/chainparams.cpp`).
 - **Stake-registration outputs were non-standard (critical, blocked staking on
   mainnet).** The bare staking script solved to `TX_NONSTANDARD`, so a
   stake-registration transaction was refused by default relay policy; because
@@ -198,17 +202,20 @@ validated by every node. Block production has three paths
 ([`04-proof-of-stake.md`](04-proof-of-stake.md) §9): the coordinator/RPC MuSig2
 flow, an autonomous single-node producer (`-posproducer`), and an autonomous
 peer-to-peer **gossip-and-sign committee** (`-posbls`) that assembles a
-BLS-certified block across separate hosts with no coordinator — built and tested
-(`feature_pos_bls_gossip.py`), with anti-DoS validate-before-relay/misbehaviour
-scoring and crashed-member round recovery added
-(`feature_pos_gossip_dos.py`, `feature_pos_gossip_failover.py`). The remaining
-work is hardening, not mechanism: the round-robin / anchor-reshuffle recovery
-paths and tuning for large (100-member) committees, detailed in
+BLS-certified block across separate hosts with no coordinator — fully
+implemented and tested (`feature_pos_bls_gossip.py`), with anti-DoS
+validate-before-relay/misbehaviour scoring and crashed-member round recovery
+(`feature_pos_gossip_dos.py`, `feature_pos_gossip_failover.py`), including the
+round-robin / anchor-reshuffle recovery paths and large (100-member) committees,
+detailed in
 [`proposals/autonomous-committee.md`](proposals/autonomous-committee.md)
 §12.4 — which also explains why **stake slashing is a deliberate non-goal**
 (safety rests on independent validation and Bitcoin checkpoints, not stake-at-
-risk, so the deterrent is redundant). BLS certification is gated behind `-posbls`
-and is not yet activated on the bundled chains. The open hardening items and
-external sign-offs in
+risk, so the deterrent is redundant). BLS certification is the **default**
+committee certification on the bundled chains (`-posbls` defaults true on
+`-chain=sequentia` and `-chain=test`, false on custom chains); MuSig2 is the
+legacy fallback selected by `-posbls=0`. The autonomous gossip-and-sign
+committee is how the bundled chains run, including the 100-node testnet. The open
+hardening items and external sign-offs in
 [§1](#1-audit-findings-and-their-disposition) are the
 remaining pre-mainnet review tasks.

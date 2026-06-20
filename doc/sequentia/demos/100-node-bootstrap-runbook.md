@@ -13,13 +13,12 @@ Tool: [`contrib/sequentia/bootstrap-autonomous-testnet.py`](../../../contrib/seq
 This reproduces the real launch **economics and liveness**: one founder seeded in
 genesis (`-con_genesis_stake`), funding and registering the other 99 stakers
 on-chain, gated by the escaping-stall rule (a sub-quorum block needs Bitcoin to
-advance ≥ 3 blocks), then a quorum forming and certifying autonomously. The chain
-uses the Elements **custom-chain** path with `-posbls=1` (the autonomous
-gossip-and-sign layer) — that is what lets 100 nodes self-run. The bundled
-`chain=sequentia`/`chain=test` mainnet params currently default to MuSig2 +
-manual coordination and have no autonomous gossip, so the faithful *autonomous*
-run lives on the custom chain. Consensus rules, anchoring, cadence, unbonding,
-stake floor and bootstrap flow are the mainnet ones.
+advance ≥ 3 blocks), then a quorum forming and certifying autonomously. The
+bundled `chain=sequentia`/`chain=test` mainnet params **default to BLS autonomous
+gossip** (`-posbls=true`, the gossip-and-sign layer that lets 100 nodes self-run),
+so the 100-node bootstrap works on the bundled path as well as the Elements
+**custom-chain** path. Consensus rules, anchoring, cadence, unbonding, stake floor
+and bootstrap flow are identical across both.
 
 ## The four phases you will watch
 
@@ -191,7 +190,7 @@ rm -rf ~/seq-bootstrap100 ~/seq-bootstrap100.log ~/seq-bootstrap100.pid
 
 | Symptom | Cause / fix |
 |---|---|
-| `No rule to make target 'blst/build/assembly.S'` | Stale checkout — `git pull` (the vendored blst is now committed), rebuild. |
+| `No rule to make target 'blst/build/assembly.S'` | Stale checkout — `git pull` (the vendored blst is committed in the tree), rebuild. |
 | `strings … posdebugroundskewms` empty | Build didn't finish — `make clean && make -j$(nproc)`, no sudo. |
 | Step 2 curl errors | Proxy down / wrong port / missing method. Anchor needs `getblockcount`, `getblockhash`, `getbestblockhash`, `getblockheader`, `getblock`. |
 | `founder registered from genesis stake: False` | Stale tool — `git pull` (the genesis lock is now time-based). |

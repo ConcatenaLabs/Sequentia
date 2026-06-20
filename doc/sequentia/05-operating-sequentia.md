@@ -46,19 +46,21 @@ con_any_asset_fees=1
 #     non-decreasing height; the chain reorganizes iff Bitcoin does.
 con_bitcoin_anchor=1
 
-# (3) Proof-of-Stake: private VRF sortition + MuSig2-aggregated committee.
+# (3) Proof-of-Stake: private VRF sortition + BLS-aggregated committee
+#     (MuSig2 is the -posbls=0 fallback).
 con_pos=1
 posvrf=1
 posaggcommittee=1
 poscommitteesize=100         # expected committee size; quorum = strict majority
                              # (the paper's 51-of-100). The staker set must hold
                              # at least quorum-many sortition-eligible members.
-posslotinterval=10           # seconds per VRF sortition slot
-posunbonding=130000          # minimum unbonding lock in (SEQ) blocks; required
-                             # wall-clock = this x posslotinterval. Exceeds the
-                             # 2016-BTC-block (~2 week) checkpoint window and the
-                             # 16-bit height-CSV range, so staking outputs use a
-                             # time-based CSV lock (getstakescript csv_seconds=).
+posslotinterval=30           # seconds per VRF sortition slot; 30s on
+                             # mainnet/testnet, configurable on custom chains.
+posunbonding=43200           # minimum unbonding lock in (SEQ) blocks; required
+                             # wall-clock = this x posslotinterval (x30s ~= 15
+                             # days). Exceeds the 16-bit height-CSV range, so
+                             # staking outputs use a time-based CSV lock
+                             # (getstakescript csv_seconds=).
 con_blocksubsidy=0           # no inflation: SEQ is pre-mined at genesis, never
                              # minted by production; producers earn fees only.
 posminstake=4000000000000    # minimum blocksigner stake in SEQ atoms: 0.01% of
@@ -68,8 +70,9 @@ posminstake=4000000000000    # minimum blocksigner stake in SEQ atoms: 0.01% of
 #staker=02<pubkey-hex>:1000000
 #staker=03<pubkey-hex>:1000000
 
-con_maxblockweight=400000    # block weight cap; with the slot interval, a
-                             # saturated chain grows at Bitcoin's rate.
+con_maxblockweight=200000    # block weight cap, a twentieth of Bitcoin's
+                             # 4,000,000; with the slot interval, a saturated
+                             # chain grows at Bitcoin's rate.
 con_default_blinded_addresses=0   # Bitcoin-identical addresses; CT opt-in.
 signblockscript=51           # PoS computes the per-block challenge; placeholder.
 
@@ -260,8 +263,9 @@ there.
 ## 7. Running a Proof-of-Stake producer
 
 A staker in the configured set produces a block when its VRF sortition slot
-opens; the committee then certifies it with a single MuSig2-aggregated
-signature. See [`04-proof-of-stake.md`](04-proof-of-stake.md) for the consensus.
+opens; the committee then certifies it with a single BLS-aggregated signature
+(MuSig2 is the `-posbls=0` fallback). See
+[`04-proof-of-stake.md`](04-proof-of-stake.md) for the consensus.
 
 ### Single host (one operator holds a committee quorum of keys)
 

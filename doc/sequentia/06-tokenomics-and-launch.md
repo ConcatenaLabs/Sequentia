@@ -142,8 +142,8 @@ first blocks via escaping-stall, distributes coins, and is joined by new on-chai
 stakers until a committee forms.
 
 The signed-block **"anyone-signs" dev path** lives only on the custom/regtest
-chains: start with `-con_pos=0 -signblockscript=51` (the framework default for
-`elementsregtest`). This is the dev/test harness — trivially runnable, no staker
+chains: start with `-con_pos=0 -signblockscript=51` (the defaults for custom
+chains via `CCustomParams`; `elementsregtest` is one example custom-chain name). This is the dev/test harness — trivially runnable, no staker
 setup, no Bitcoin parent required — and it is **not** Sequentia consensus. See
 [`04-proof-of-stake.md`](04-proof-of-stake.md).
 
@@ -160,10 +160,10 @@ between honest operators without forking the chain (see
 | Total supply (400,000,000 SEQ) | Launch governance | Genesis issuance; `MAX_MONEY` in `src/consensus/amount.h` |
 | Genesis staker seed & SEQ distribution | Launch governance | Genesis outputs (`-con_genesis_stake`, `-initialfreecoins`); no `-staker` needed |
 | No inflation / no block subsidy | Launch governance | `con_blocksubsidy = 0`, fixed in code |
-| Minimum stake (0.01% = 40,000 SEQ) | Launch governance | `posminstake` |
+| Minimum stake (0.01% = 40,000 SEQ) | Launch governance | Hardcoded `g_pos_min_stake` in `CSequentiaParams`; `-posminstake` on custom chains |
 | Committee size (100) | Launch governance | Consensus config |
 | Unbonding period (~15 days) | Launch governance | Staking-output CSV requirement |
-| Slot interval (~30s) | Launch governance | `posslotinterval` |
+| Slot interval (~30s) | Launch governance | Hardcoded `g_pos_slot_interval = 30` in `CSequentiaParams`; `-posslotinterval` on custom chains |
 | Published Bitcoin checkpoints | Launch governance | Consensus config; see [`04-proof-of-stake.md`](04-proof-of-stake.md) |
 | Which parent chain to anchor to | Launch governance | Consensus config; see [`03-bitcoin-anchoring.md`](03-bitcoin-anchoring.md) |
 | Bitcoin-RPC endpoint & credentials | Per operator | Node config |

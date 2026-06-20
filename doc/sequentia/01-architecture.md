@@ -149,7 +149,8 @@ per block from a stake-weighted, anchor-seeded election (and, with `-posvrf`,
 private VRF sortition), rather than inherited as a fixed federation script. The
 signature itself rides the existing `proof.solution` / `m_signblock_witness`
 plumbing unchanged. Committee quorums reach paper-scale 100-member committees via
-MuSig2 aggregation carried in the dynafed/signed-block witness. The full
+signature aggregation (BLS12-381 by default, MuSig2 the `-posbls=0` fallback)
+carried in the dynafed/signed-block witness. The full
 consensus — stake registry, sortition and leader election, quorum certification,
 liveness, fork choice, the finality gate and checkpoints — is in
 [`04-proof-of-stake.md`](04-proof-of-stake.md).

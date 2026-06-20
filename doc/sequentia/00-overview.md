@@ -32,7 +32,8 @@ manual for operating the network. It describes the system as built.
 
 3. **Proof-of-Stake consensus.** Block production is a stake-weighted election
    with private VRF sortition; a committee certifies each block with a single
-   MuSig2-aggregated signature, giving the chain its immediate finality. Voluntary
+   aggregated signature (BLS12-381 by default; MuSig2 the `-posbls=0` fallback),
+   giving the chain its immediate finality. Voluntary
    Bitcoin checkpoints resist long-range attacks. SEQ is the staking asset and the
    one thing that confers production eligibility. See
    [`04-proof-of-stake.md`](04-proof-of-stake.md).
@@ -76,7 +77,7 @@ The chapters build from design through operation to review:
 | [`01-architecture.md`](01-architecture.md) | The Elements substrate and how the four properties attach to it: multi-asset/fee plumbing, the Bitcoin-RPC transport, signed blocks, addresses & confidential transactions, validation entry points. |
 | [`02-open-fee-market.md`](02-open-fee-market.md) | The reference-unit fee valuation, the static and dynamic exchange-rate tables, per-producer acceptance, fee-replacement (RBF/CPFP) across assets, and paying fees in an arbitrary asset. |
 | [`03-bitcoin-anchoring.md`](03-bitcoin-anchoring.md) | The anchor commitment, validation and reorg-following rules, immediate finality, and real-time cross-chain atomic swaps. |
-| [`04-proof-of-stake.md`](04-proof-of-stake.md) | The full consensus: stake registry, VRF sortition and leader election, committee certification with MuSig2 aggregation, liveness (escaping-stall), fork choice and the finality gate, checkpoints, and the production layer. |
+| [`04-proof-of-stake.md`](04-proof-of-stake.md) | The full consensus: stake registry, VRF sortition and leader election, committee certification with BLS aggregation (MuSig2 the `-posbls=0` fallback), liveness (escaping-stall), fork choice and the finality gate, checkpoints, and the production layer. |
 | [`05-operating-sequentia.md`](05-operating-sequentia.md) | The operator and wallet manual: configuration, the fee market and price server, anchoring, running a producer, the stake lifecycle, monitoring, the bundled tooling, and the launch checklist. |
 | [`06-tokenomics-and-launch.md`](06-tokenomics-and-launch.md) | SEQ supply and distribution, the genesis-seeded bootstrap, the bundled chains, and what is a governance decision versus fixed in code. |
 | [`07-security-and-audit.md`](07-security-and-audit.md) | The security model, the pre-mainnet audit and its resolved findings, features beyond the implemented scope, and implementation status. |

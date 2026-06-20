@@ -67,7 +67,7 @@ Anchoring is governed by these settings:
 con_bitcoin_anchor=1     # enable anchoring (a chain-parameter property)
 validateanchor=1         # validate each anchor against the Bitcoin daemon
 anchorminconf=1          # confirmations required of the anchored Bitcoin block
-anchorpollinterval=10    # seconds between Bitcoin tip/reorg polls
+anchorpollinterval=5     # seconds between Bitcoin tip/reorg polls
 ```
 
 The Bitcoin connection becomes mandatory when `con_bitcoin_anchor` is set,
