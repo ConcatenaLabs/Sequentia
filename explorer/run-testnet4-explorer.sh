@@ -5,7 +5,8 @@
 set -e
 cd "$(dirname "$0")/esplora"
 source flavors/bitcoin-testnet4/config.env
-export API_URL="${API_URL:-http://127.0.0.1:3004}"
+export ELECTRS_HTTP="${ELECTRS_HTTP:-127.0.0.1:3004}"   # Bitcoin testnet4 electrs REST
+export API_URL="${API_URL:-/api}"                       # same-origin, proxied
 export PORT="${PORT:-5002}"
 export BASE_HREF='/'
 export MENU_ACTIVE='Bitcoin Testnet4'

@@ -6,6 +6,21 @@ const itemEntries = items ? Object.entries(items) : [];
 const activeName = active || (itemEntries[0] && itemEntries[0][0]);
 const activeId = activeName && activeName.replace(/ /g, "");
 
+// Cross-link to the other network on whatever host the page was actually loaded
+// from (keeping the configured port), so the switcher works over localhost,
+// Tailscale, or any reverse proxy without hardcoding the host in MENU_ITEMS.
+const rebase = url => {
+  if (!process.browser) return url;
+  try {
+    const u = new URL(url, window.location.href);
+    u.protocol = window.location.protocol;
+    u.hostname = window.location.hostname;
+    return u.toString();
+  } catch (e) {
+    return url;
+  }
+};
+
 export default ({ t, page }) => (
   <div className="main-nav-container">
     {activeName && (
@@ -43,7 +58,7 @@ export default ({ t, page }) => (
                   return (
                     <a
                       id={name.replace(/ /g, "")}
-                      href={url}
+                      href={rebase(url)}
                       className={`network-hover-menu-option-container ${name.replace(/ /g, "").toLowerCase()} ${name === activeName ? "active" : ""}`}
                       rel="external"
                     >

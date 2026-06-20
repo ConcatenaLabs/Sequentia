@@ -1,4 +1,5 @@
 import fs, { promises as fsp } from 'fs'
+import http from 'http'
 import pug from 'pug'
 import pathu from 'path'
 import glob from 'glob'
@@ -63,6 +64,27 @@ const prepCss = async _ =>
 // Automatically adjust CSS for RTL using cssjanus
 router.get('/style-rtl.css', p(async (req, res) =>
   res.type('css').send(cssjanus.transform(await prepCss()))))
+
+// Proxy /api/* to the backend electrs (ELECTRS_HTTP=host:port) so the explorer
+// works over any origin — localhost or a remote host like Tailscale — without
+// baking the API address into the client bundle. Set API_URL=/api to use it.
+const electrsTarget = process.env.ELECTRS_HTTP
+if (electrsTarget) {
+  const [ehost, eport] = electrsTarget.split(':')
+  router.use('/api', (req, res) => {
+    const headers = { ...req.headers, host: electrsTarget }
+    delete headers['accept-encoding']
+    const upstream = http.request(
+      { host: ehost, port: eport || 80, method: req.method, path: req.url || '/', headers },
+      upRes => { res.writeHead(upRes.statusCode, upRes.headers); upRes.pipe(res) }
+    )
+    upstream.on('error', err => {
+      if (!res.headersSent) res.status(502)
+      res.end('electrs proxy error: ' + err.message)
+    })
+    req.pipe(upstream)
+  })
+}
 
 // Add handlers for custom asset overrides
 custom_assets.forEach(pattern => {
