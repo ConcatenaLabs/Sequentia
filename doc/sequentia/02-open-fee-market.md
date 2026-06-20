@@ -43,13 +43,13 @@ table *is* the producer's acceptance set. The one exception is the policy asset,
 SEQ, which is valued 1:1 when unlisted; that default is overridable by listing it
 with any rate (including `0` to refuse it).
 
-A rate of `0` as an explicit *refusal* applies to the **static / operator-set
-layer** (`setfeeexchangerates`), which accepts any non-negative rate and reads `0`
-as "refuse this asset". The **dynamic price-server layer**
-([§5](#5-the-dynamic-price-server), `setdynamicfeerates`) is stricter: it requires
-**positive** rates. A price server quoting `0` for an asset is treated as an
-error, not a refusal — to stop accepting an asset the server omits it (or
-`cleardynamicfeerates`), it does not push a `0`.
+A rate of `0` reads as "refuse this asset" in **both** layers. The
+**static / operator-set layer** (`setfeeexchangerates`) and the **dynamic
+price-server layer** ([§5](#5-the-dynamic-price-server), `setdynamicfeerates`)
+each accept any **non-negative** rate; a stored `0` flows through to the effective
+map, where the conversion treats it as "not accepted". A price server can
+therefore either omit an asset (or `cleardynamicfeerates`) or push an explicit `0`
+to refuse it. Only negative rates are rejected.
 
 Mempool entries carry `nFeeAsset` and `nFeeValue` (the rfa value); the miner
 (`src/node/miner.cpp`) ranks packages by rfa value, and `RecomputeFees()`

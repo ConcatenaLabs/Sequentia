@@ -140,6 +140,22 @@ class DynamicFeeRatesTest(BitcoinTestFramework):
         assert_raises_rpc_error(-8, "Error parsing dynamic rates",
             node.setdynamicfeerates, {"not-an-asset": 100000000})
 
+        # A dynamic rate of 0 is ACCEPTED and means "refuse this asset" — the
+        # same semantics as the static setfeeexchangerates layer (the effective
+        # map sees scaled_value 0, which the conversion treats as not-accepted).
+        # Only negative rates are rejected. (Harmonized: the dynamic layer used
+        # to reject 0; now it matches the static layer.)
+        node.setdynamicfeerates({self.asset: 0}, "test-price-server")
+        assert_equal(node.getdynamicfeerates()[self.asset]['rate'], 0)
+        # The 0 surfaces in the effective whitelist as a refusal (rate 0), exactly
+        # like a static 0 — the conversion treats scaled_value <= 0 as not-accepted.
+        assert_equal(node.getfeeexchangerates()[self.asset], 0)
+        # Negative dynamic rates remain invalid.
+        assert_raises_rpc_error(-8, "must be a non-negative integer",
+            node.setdynamicfeerates, {self.asset: -5})
+        node.cleardynamicfeerates()
+        assert self.asset not in node.getfeeexchangerates()
+
 
 if __name__ == '__main__':
     DynamicFeeRatesTest().main()

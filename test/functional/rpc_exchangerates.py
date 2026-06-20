@@ -53,8 +53,8 @@ class ExchangeRatesTest(BitcoinTestFramework):
         self.test_invalid_exchange_rates_update(node, "invalid", 1)
         self.test_invalid_exchange_rates_update(node, 1, "invalid")
 
-        # Non-positive rates are rejected
-        self.test_nonpositive_rate_rejected(node)
+        # Zero refuses the asset (accepted); only negative rates are rejected
+        self.test_zero_refused_negative_rejected(node)
 
         # Restore rates
         self.test_exchange_rates_update(node, initial_rates | { self.asset: 100000000 })
@@ -69,11 +69,17 @@ class ExchangeRatesTest(BitcoinTestFramework):
         assert_raises_rpc_error(-8, "Error loading rates from JSON: - Unknown label and invalid asset hex: %s" % asset_name, node.setfeeexchangerates, { asset_name: value })
         assert node.getfeeexchangerates() == current_rates
 
-    def test_nonpositive_rate_rejected(self, node):
-        # A zero or negative rate must be rejected (would crash / bypass fees).
+    def test_zero_refused_negative_rejected(self, node):
+        # A rate of 0 is ACCEPTED and means "refuse this asset" (Convert treats
+        # scaled_value <= 0 as not-accepted, with no divide-by-zero). Only a
+        # negative rate is rejected. Same semantics as the dynamic layer.
         current_rates = node.getfeeexchangerates()
-        assert_raises_rpc_error(-8, "must be a positive integer", node.setfeeexchangerates, { self.asset: 0 })
-        assert_raises_rpc_error(-8, "must be a positive integer", node.setfeeexchangerates, { self.asset: -5 })
+        node.setfeeexchangerates({ self.asset: 0 })
+        assert node.getfeeexchangerates()[self.asset] == 0
+        assert self.get_exchange_rates_from_database(node)[self.asset] == 0
+        assert_raises_rpc_error(-8, "must be a non-negative integer", node.setfeeexchangerates, { self.asset: -5 })
+        # restore
+        node.setfeeexchangerates(current_rates)
         assert node.getfeeexchangerates() == current_rates
 
     def get_exchange_rates_from_database(self, node):

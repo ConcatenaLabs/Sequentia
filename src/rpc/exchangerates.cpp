@@ -114,10 +114,15 @@ static RPCHelpMan setdynamicfeerates()
             continue;
         }
         CAmount value = rate.second.get_int64();
-        // Rates are positive integers (atoms of the asset per reference unit);
-        // a zero or negative rate would crash or bypass fee valuation.
-        if (value <= 0) {
-            errors.push_back(strprintf("Rate for %s must be a positive integer", rate.first));
+        // Rates are non-negative integers (atoms of the asset per reference unit).
+        // 0 means "refuse this asset" — the same semantics as the static
+        // setfeeexchangerates / exchangerates.json layer. A stored 0 flows through
+        // RebuildEffective into the effective map, where ConvertAmountToValue
+        // treats scaled_value <= 0 as "not accepted" (no divide-by-zero). A
+        // negative rate is never valid (it would saturate Convert and bypass fee
+        // valuation).
+        if (value < 0) {
+            errors.push_back(strprintf("Rate for %s must be a non-negative integer (0 = refuse the asset)", rate.first));
             continue;
         }
         rates[asset] = value;
