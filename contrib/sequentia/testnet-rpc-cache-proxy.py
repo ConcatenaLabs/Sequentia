@@ -28,13 +28,24 @@ Run it and leave it open:  python3 testnet-rpc-cache-proxy.py
 
 import http.server
 import json
+import os
 import socketserver
 import subprocess
 import threading
 import time
 
-TARGET = "https://bitcoin-testnet-rpc.publicnode.com/"
-LISTEN = ("127.0.0.1", 18332)
+# Upstream Bitcoin RPC endpoint and listen address are env-configurable so the
+# same proxy serves testnet3, testnet4, or any gateway:
+#   SEQ_PROXY_TARGET   upstream URL (default: a public testnet3 endpoint)
+#   SEQ_PROXY_HEADER   an extra HTTP header to send upstream, e.g. an API key
+#                      'x-api-key: <KEY>' for gateways like Tatum (optional)
+#   SEQ_PROXY_PORT     local listen port (default 18332)
+# testnet4 via Tatum:
+#   SEQ_PROXY_TARGET=https://bitcoin-testnet4.gateway.tatum.io/ \
+#   SEQ_PROXY_HEADER='x-api-key: <your-tatum-key>' python3 testnet-rpc-cache-proxy.py
+TARGET = os.environ.get("SEQ_PROXY_TARGET", "https://bitcoin-testnet-rpc.publicnode.com/")
+EXTRA_HEADER = os.environ.get("SEQ_PROXY_HEADER", "")     # e.g. "x-api-key: ..."
+LISTEN = ("127.0.0.1", int(os.environ.get("SEQ_PROXY_PORT", "18332")))
 UA = "curl/8.5.0"
 TTL = 10.0                       # seconds a cached result stays fresh
 UPSTREAM_TIMEOUT = 25            # curl -m
@@ -54,9 +65,12 @@ def _key_lock(key):
 
 
 def _upstream(body):
-    p = subprocess.run(["curl", "-s", "-m", str(UPSTREAM_TIMEOUT), "-A", UA,
-                        "--data-binary", "@-", "-H", "content-type: text/plain", TARGET],
-                       input=body, capture_output=True)
+    cmd = ["curl", "-s", "-m", str(UPSTREAM_TIMEOUT), "-A", UA,
+           "--data-binary", "@-", "-H", "content-type: text/plain"]
+    if EXTRA_HEADER:
+        cmd += ["-H", EXTRA_HEADER]
+    cmd.append(TARGET)
+    p = subprocess.run(cmd, input=body, capture_output=True)
     return p.stdout
 
 
