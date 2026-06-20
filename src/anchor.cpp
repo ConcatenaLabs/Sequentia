@@ -256,9 +256,22 @@ void AnchorWatchTask(ChainstateManager& chainman)
     }
 
     // 2) Walk the active chain down from the tip looking for blocks whose
-    //    anchors were reorganized away. Anchor heights are monotone along the
-    //    chain, so once a block's anchor is confirmed canonical, all blocks
-    //    below it are anchored to canonical blocks too.
+    //    anchors were reorganized away, and invalidate the LOWEST such block.
+    //
+    //    Anchor *heights* are monotone along the chain, but anchor *canonicality*
+    //    is NOT: a low block can anchor to a Bitcoin block that is later orphaned
+    //    while a higher block anchors to a still-canonical Bitcoin block on a
+    //    different/newer parent branch (heights stay monotone, e.g. 140803 then
+    //    140838). So a canonical tip does NOT imply the blocks below it are
+    //    anchored canonically — we must NOT stop the walk at the first OK block.
+    //    Doing so left the chain permanently wedged on a stale base: SEQ 1..4
+    //    anchored to an orphaned parent block with canonical SEQ 5+ built on top,
+    //    where the down-walk saw the canonical tip, broke, and never reached the
+    //    stale low blocks. We instead descend to height 1 and track the lowest
+    //    block whose anchor is off Bitcoin's best chain, then invalidate it:
+    //    InvalidateBlock + ActivateBestChain disconnects it AND every block above
+    //    it (including the canonical-anchor blocks built on the stale base), and
+    //    the chain rebuilds on the parent's best chain.
     //
     //    This runs on EVERY tick, not only when the parent tip just changed: a
     //    block is invalid iff its anchor is off Bitcoin's best chain (doc 03
@@ -267,8 +280,18 @@ void AnchorWatchTask(ChainstateManager& chainman)
     //    reorg was missed/coalesced, the node restarted onto an already-reorged
     //    parent, or a transiently-canonical anchor was cached OK and then went
     //    stale). Gating the walk on tip_changed left such a tip stuck forever.
-    //    The walk is cheap when the tip is canonical: the top block's anchor is
-    //    served from g_anchor_ok_cache and the walk breaks immediately.
+    //
+    //    Cost: with no break-on-OK the walk examines every anchored block on the
+    //    active chain each tick. Canonical anchors are served from
+    //    g_anchor_ok_cache (a single in-memory set lookup, no RPC), so on a quiet
+    //    tick where nothing changed every entry is a cache hit and the walk is
+    //    cheap; only blocks whose anchor is not (yet) cached OK cost a bitcoind
+    //    RPC. Per the invariant the walk must reach ANY depth (doc 03 §intro/§3,
+    //    doc 04 §6) — there is deliberately NO depth floor or reorg horizon. For a
+    //    very long chain the per-tick RPC cost of re-checking not-yet-cached
+    //    entries could be bounded by re-checking only entries above the parent
+    //    reorg's fork height (instead of clearing the whole cache on tip_changed);
+    //    that is a future optimization and must not introduce a correctness floor.
     uint256 lowest_bad;
     while (true) {
         lowest_bad.SetNull();
@@ -298,11 +321,29 @@ void AnchorWatchTask(ChainstateManager& chainman)
         // fixed per block, so the snapshot stays valid even if the SEQ tip moves
         // meanwhile; InvalidateBlock below re-looks-up by hash and the loop
         // re-evaluates, so the (pre-existing) snapshot→act gap is harmless.
+        //
+        // to_check is top-down (tip first, height 1 last). Descend the WHOLE
+        // chain — do NOT break on OK (canonicality is not monotone, see above) —
+        // and remember the lowest (deepest) block whose anchor is definitively
+        // off Bitcoin's best chain (STALE/NOT_FOUND/HEIGHT_MISMATCH); since we
+        // overwrite lowest_bad as we descend, the last bad we record is the
+        // lowest one. g_anchor_ok_cache can only ever mark an anchor OK, never
+        // bad: a now-orphaned anchor is NOT in the OK cache (it is cleared on
+        // tip_changed, and an anchor that was cached OK but then went stale
+        // without a tip change returns STALE here on the live RPC), so the cache
+        // cannot hide a stale low block from this walk.
+        //
+        // NO_CONNECTION partway is indeterminate, not a verdict, so we stop
+        // descending (cannot judge blocks below). But it must NOT discard a lower
+        // stale block we already found above it: invalidating a definitively
+        // off-best-chain block is always correct, and a NO_CONNECTION block sits
+        // ABOVE it (higher height) and so will be reconnected automatically once
+        // it (re-)checks OK. If no stale block was found before the
+        // NO_CONNECTION, there is nothing to act on — bail and retry next tick.
         for (const AnchorRef& ref : to_check) {
             AnchorCheckResult res = CheckMainchainAnchor(ref.anchor_height, ref.anchor_hash);
-            if (res == AnchorCheckResult::OK) break;
-            if (res == AnchorCheckResult::NO_CONNECTION) return; // cannot judge now
-            lowest_bad = ref.block_hash;
+            if (res == AnchorCheckResult::NO_CONNECTION) break; // cannot judge deeper
+            if (res != AnchorCheckResult::OK) lowest_bad = ref.block_hash;
         }
         if (lowest_bad.IsNull()) return;
 

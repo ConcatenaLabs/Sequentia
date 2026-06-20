@@ -40,6 +40,22 @@ canonical chain. No node may remain stuck on the orphaned-anchor blocks.
   stuck on a block whose anchor is off Bitcoin's best chain — the forbidden
   compromise.
 
+  Scenario C (stale-LOW under canonical-HIGH — non-monotone canonicality): the
+  down-walk must NOT assume that a canonical tip implies the blocks below it are
+  anchored canonically. Anchor *heights* are monotone but anchor *canonicality*
+  is not. We build: SEQ 1..4 anchored to an OLD parent block B_old; then the
+  parent is reorged onto a DIFFERENT, longer branch whose tip B_new is NOT a
+  descendant of B_old (B_old is orphaned, B_new is canonical and HIGHER); then,
+  with the anchor watcher held dormant (huge poll interval), SEQ 5 is produced
+  anchored to the fresh canonical B_new. The active chain is now stale-LOW
+  (1..4 → orphaned B_old) under canonical-HIGH (5 → B_new). On the BUGGY code the
+  watcher checks the tip (block 5, OK), breaks, and NEVER examines the stale low
+  blocks — the chain wedges permanently on a stale base (the live-testnet
+  failure: SEQ 1..4 at confirmations -1 with canonical blocks on top, yet no
+  rollback). With the fix the walk descends to the lowest stale block and
+  invalidates it, disconnecting it AND the canonical-anchor block(s) above; the
+  chain rebuilds on the parent's best chain and a fresh node syncs it.
+
 Topology:
   node0: the parent chain (stands in for Bitcoin); holds a wallet.
   node1: the Sequentia chain, anchored to node0, single genesis-config staker so
@@ -125,8 +141,8 @@ class PosDeepAnchorReorgTest(BitcoinTestFramework):
             "-mainchainrpcpassword=%s" % rpc_p,
             "-parentgenesisblockhash=%s" % self.parentgenesis,
         ]
-        seq_args = ["-port=" + str(p2p_port(1)), "-rpcport=" + str(rpc_port(1))] + self.pos_common
-        self.add_nodes(1, [seq_args], chain=["elementsregtest"])
+        self.seq_node_args = ["-port=" + str(p2p_port(1)), "-rpcport=" + str(rpc_port(1))] + self.pos_common
+        self.add_nodes(1, [self.seq_node_args], chain=["elementsregtest"])
         self.start_node(1)
 
         # node2 is added but NOT started yet: it joins fresh, after the reorg,
@@ -160,6 +176,14 @@ class PosDeepAnchorReorgTest(BitcoinTestFramework):
         assert_equal(anchors, {(b_height, b_hash)})
         assert_equal(seq.getanchorstatus()['anchorstatus'], 'ok')
         return b_height, b_hash
+
+    def restart_seq_with_poll_interval(self, seconds):
+        """Restart node1 (the Sequentia node) with a specific anchor poll
+        interval. The interval is appended LAST on the command line, which
+        overrides the -anchorpollinterval=1 already in pos_common (command-line
+        settings are last-wins). A huge interval holds the watcher dormant while
+        we construct a state; a small one lets it fire."""
+        self.restart_node(1, self.seq_node_args + ["-anchorpollinterval=%d" % seconds])
 
     def deep_orphan_B(self, parent, b_hash, b_height, evict_txids=None):
         """Invalidate B on the parent and mine a strictly longer competing
@@ -328,6 +352,115 @@ class PosDeepAnchorReorgTest(BitcoinTestFramework):
         for n in (seq, fresh):
             assert n.getbestblockhash() != orphaned_tip_b
         self.log.info("[B] fresh node synced the rebuilt canonical chain; no node stuck")
+
+        # ============================================================
+        # Scenario C — stale-LOW under canonical-HIGH (non-monotone canonicality).
+        # ============================================================
+        # Keep the fresh node out of the way while we hand-build the state.
+        self.disconnect_nodes(1, 2)
+
+        # Hold the anchor watcher dormant so we can construct the stale-low /
+        # canonical-high state deterministically, with NO race against a watcher
+        # tick. (Block production / anchor selection is synchronous in
+        # generateposblock and independent of the watcher.)
+        self.restart_seq_with_poll_interval(1_000_000)
+
+        # Establish a parent fork point f, then a block B_old = f+1 on top of it.
+        # Mine B_old to a dedicated fresh address so its coinbase (hence its block
+        # hash) differs from the competing branch we build below — otherwise
+        # regtest can re-mine an identical block and AcceptBlock rejects the
+        # duplicate.
+        fork_hash = parent.getbestblockhash()
+        fork_height = parent.getblockcount()
+        b_old_addr = parent.getnewaddress()
+        self.generatetoaddress(parent, 1, b_old_addr, sync_fun=self.no_op)
+        b_old_height = parent.getblockcount()
+        b_old_hash = parent.getbestblockhash()
+        assert_equal(b_old_height, fork_height + 1)
+
+        # SEQ low blocks 1..4 all anchored to B_old (parent kept still).
+        c_base = seq.getblockcount()
+        low_anchors = set()
+        for _ in range(4):
+            seq.generateposblock(self.staker_wif)
+            hdr = seq.getblockheader(seq.getbestblockhash())
+            low_anchors.add((hdr['anchorheight'], hdr['anchorhash']))
+        assert_equal(seq.getblockcount(), c_base + 4)
+        assert_equal(low_anchors, {(b_old_height, b_old_hash)})
+        assert_equal(seq.getanchorstatus()['anchorstatus'], 'ok')
+        first_low_block = seq.getblockhash(c_base + 1)   # the LOWEST stale block
+        self.log.info("[C] produced 4 SEQ low blocks all anchored to B_old=%s (h=%d)"
+                      % (b_old_hash[:16], b_old_height))
+
+        # Reorg the parent onto a DIFFERENT, longer branch off the fork point so
+        # B_old is orphaned but the new tip B_new is canonical and HIGHER, and is
+        # NOT a descendant of B_old. (Mine from fork_hash, not from B_old.)
+        parent.invalidateblock(b_old_hash)
+        assert_equal(parent.getbestblockhash(), fork_hash)
+        # Mine the competing branch to a different fresh address so its blocks
+        # cannot hash-collide with the just-invalidated B_old branch.
+        self.generatetoaddress(parent, 5, parent.getnewaddress(), sync_fun=self.no_op)
+        b_new_height = parent.getblockcount()
+        b_new_hash = parent.getbestblockhash()
+        assert b_new_height > b_old_height                       # canonical-HIGH
+        assert_equal(parent.getblockheader(b_old_hash)['confirmations'], -1)  # B_old orphaned
+        # B_new must NOT descend from B_old.
+        anc = b_new_hash
+        for _ in range(b_new_height - fork_height):
+            anc = parent.getblockheader(anc)['previousblockhash']
+        assert_equal(anc, fork_hash)
+        self.log.info("[C] parent reorged: B_old orphaned; B_new=%s (h=%d) canonical on a different branch"
+                      % (b_new_hash[:16], b_new_height))
+
+        # With the watcher still dormant, produce SEQ block 5 anchored to the
+        # fresh, canonical B_new. The anchor height (b_new_height) is >= the low
+        # blocks' anchor height (b_old_height), so monotonicity holds and the
+        # block is accepted. End state on the active chain: stale-LOW (1..4 ->
+        # orphaned B_old) under canonical-HIGH (5 -> canonical B_new).
+        seq.generateposblock(self.staker_wif)
+        high_hdr = seq.getblockheader(seq.getbestblockhash())
+        assert_equal((high_hdr['anchorheight'], high_hdr['anchorhash']), (b_new_height, b_new_hash))
+        # Confirm the constructed state precisely: the LOW blocks' anchor is off
+        # the parent's best chain while the tip's anchor is on it.
+        assert_equal(parent.getblockheader(b_old_hash)['confirmations'], -1)
+        assert_equal(seq.getanchorstatus()['anchorstatus'], 'ok')  # the TIP looks fine...
+        orphaned_tip_c = seq.getbestblockhash()
+        stuck_height = seq.getblockcount()
+        self.log.info("[C] built stale-low/canonical-high: tip=%d anchorstatus ok, "
+                      "but low block %s anchors to orphaned B_old"
+                      % (stuck_height, first_low_block[:16]))
+
+        # Now wake the watcher (small poll interval). It must descend PAST the
+        # canonical tip to the lowest stale block and invalidate it, rolling the
+        # whole chain (low stale blocks AND the canonical-anchor block above) back.
+        self.restart_seq_with_poll_interval(1)
+
+        # The chain must roll back below the lowest stale block (to the genesis-
+        # relative base, here height c_base which is the pre-scenario-C tip).
+        self.wait_until_count(seq, c_base, timeout=120)
+        assert_equal(seq.getblockheader(first_low_block)['confirmations'], -1)
+        assert_equal(seq.getblockheader(orphaned_tip_c)['confirmations'], -1)
+        assert seq.getbestblockhash() != orphaned_tip_c
+        self.log.info("[C] watcher rolled back PAST the stale low blocks despite a canonical tip above")
+
+        # Production resumes on the parent's new best chain, on a fresh anchor.
+        for _ in range(3):
+            seq.generateposblock(self.staker_wif)
+        self.wait_until_count(seq, c_base + 3, timeout=60)
+        assert seq.getblockhash(c_base + 1) != first_low_block
+        c_hdr = seq.getblockheader(seq.getbestblockhash())
+        assert (c_hdr['anchorheight'], c_hdr['anchorhash']) != (b_old_height, b_old_hash)
+        assert_equal(seq.getanchorstatus()['anchorstatus'], 'ok')
+
+        # A fresh node syncs the rebuilt canonical chain and is not stuck.
+        canonical_tip_c = seq.getbestblockhash()
+        self.connect_nodes(1, 2)
+        self.wait_until_count(fresh, c_base + 3, timeout=120)
+        assert_equal(fresh.getbestblockhash(), canonical_tip_c)
+        for n in (seq, fresh):
+            assert_equal(n.getbestblockhash(), canonical_tip_c)
+            assert n.getbestblockhash() != orphaned_tip_c
+        self.log.info("[C] fresh node synced the rebuilt canonical chain; no node stuck")
 
 
 if __name__ == '__main__':
