@@ -251,6 +251,10 @@ void Shutdown(NodeContext& node)
 
     // After everything has been shut down, but before things get flushed, stop the
     // CScheduler/checkqueue, scheduler and load block thread.
+    // Join the anchor watcher first: it captures node.chainman, so it must finish
+    // before chainman is torn down below. ShutdownRequested() is already set by the
+    // time we reach Shutdown(), so the watcher's poll loop exits promptly.
+    if (node.anchor_watch_thread.joinable()) node.anchor_watch_thread.join();
     if (node.chainman && node.chainman->m_load_block.joinable()) node.chainman->m_load_block.join();
     if (node.scheduler) node.scheduler->stop();
     if (node.reverification_scheduler) node.reverification_scheduler->stop();
@@ -2140,9 +2144,24 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         } else {
             ChainstateManager* anchor_chainman = node.chainman.get();
             const int64_t anchor_poll = std::max<int64_t>(1, gArgs.GetIntArg("-anchorpollinterval", DEFAULT_ANCHOR_POLL_INTERVAL));
-            node.scheduler->scheduleEvery([anchor_chainman]{
-                AnchorWatchTask(*anchor_chainman);
-            }, std::chrono::seconds{anchor_poll});
+            // Run the anchor watcher on its OWN thread, not the main scheduler.
+            // When a parent reorg orphans an anchor, AnchorWatchTask calls
+            // InvalidateBlock -> SyncWithValidationInterfaceQueue(), which blocks
+            // until the validation-interface queue drains. That queue is serviced
+            // by node.scheduler, so running the watcher on the scheduler would make
+            // that thread wait on itself -> self-deadlock (and cs_main is held the
+            // whole time, freezing every other thread). On a dedicated thread the
+            // free scheduler drains the queue and the watcher makes progress.
+            node.anchor_watch_thread = std::thread(&util::TraceThread, "anchorwatch", [anchor_chainman, anchor_poll] {
+                while (!ShutdownRequested()) {
+                    AnchorWatchTask(*anchor_chainman);
+                    // Interruptible poll sleep: wake promptly on shutdown rather
+                    // than sleeping the full interval.
+                    for (int64_t i = 0; i < anchor_poll * 10 && !ShutdownRequested(); ++i) {
+                        UninterruptibleSleep(std::chrono::milliseconds{100});
+                    }
+                }
+            });
         }
     }
 

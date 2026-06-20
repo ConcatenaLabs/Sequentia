@@ -8,6 +8,7 @@
 #include <cassert>
 #include <functional>
 #include <memory>
+#include <thread>
 #include <vector>
 
 class ArgsManager;
@@ -57,6 +58,14 @@ struct NodeContext {
     interfaces::WalletLoader* wallet_loader{nullptr};
     std::unique_ptr<CScheduler> scheduler;
     std::unique_ptr<CScheduler> reverification_scheduler;
+    //! SEQUENTIA: dedicated thread running the Bitcoin-anchor reorg watcher
+    //! (AnchorWatchTask). It must NOT run on the main scheduler: the watcher
+    //! calls InvalidateBlock -> SyncWithValidationInterfaceQueue(), which blocks
+    //! until the validation-interface queue (serviced by node.scheduler) drains.
+    //! Running it on the scheduler would make that thread wait on itself
+    //! (self-deadlock under load). Joined during shutdown before chainman is
+    //! reset.
+    std::thread anchor_watch_thread;
     //! SEQUENTIA: autonomous Proof-of-Stake block producer (-posproducer).
     std::unique_ptr<PosProducer> pos_producer;
     std::function<void()> rpc_interruption_point = [] {};
