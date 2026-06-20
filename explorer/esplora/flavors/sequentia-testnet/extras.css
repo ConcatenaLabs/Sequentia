@@ -1,31 +1,37 @@
 /* ============================================================================
-   SEQUENTIA explorer identity.
+   SEQUENTIA / CONCATENA explorer identity.
 
-   Grounded in Sequentia's own brand (the app-icon palette): violet #7D3FA5 +
-   periwinkle #6C8ADD. The parent chain (Bitcoin testnet4) keeps Bitcoin's
-   orange #F7931A. The accent IS the chain you're viewing, so switching networks
-   recolors the chrome — and the network switcher is restyled as an "anchor link"
-   that names the parent/child relationship (a Sequentia block is anchored into
-   a Bitcoin testnet4 block).
+   Grounded in the official brand assets: Sequentia's mark is an amber "S" on a
+   near-black disc, and Concatena Labs' wordmark is the same amber. So the brand
+   is amber-gold #F5B301 on dark #141416. The parent chain (Bitcoin testnet4)
+   keeps Bitcoin orange #F7931A. The accent IS the chain you're viewing, so
+   switching networks recolors the chrome; the network switcher is the signature
+   element (a parent/child "anchor link"), styled dark so the amber/orange
+   accents stay legible and on-brand.
 
-   This file ships with the sequentia-testnet flavor; the network-switcher block
-   is shared (it reads --primary-color), so the testnet4 flavor loads it too and
-   only overrides the accent to orange.
+   Shipped with the sequentia-testnet flavor; the switcher block reads
+   --primary-color, so the testnet4 flavor loads it too and only overrides the
+   accent to orange (parent-accent.css).
    ============================================================================ */
 
 :root {
-  --primary-color: #7d3fa5;   /* Sequentia violet (from the brand icon) */
-  --seq-violet: #7d3fa5;
-  --seq-blue: #6c8add;        /* Sequentia periwinkle (from the brand icon) */
+  --primary-color: #f5b301;   /* Sequentia/Concatena amber (brand) */
+  --seq-amber: #f5b301;
+  --seq-dark: #141416;        /* the Sequentia mark's near-black disc */
   --btc-orange: #f7931a;      /* parent chain: Bitcoin */
 }
 
-/* Concatena Labs brand logo: scale to a consistent height in the 50px navbar
-   regardless of the SVG's intrinsic size. */
-.navbar-brand img { height: 30px; width: auto; }
-
-/* ---- Reuse Liquid's asset-table layout (assets view) ---------------------- */
-/* (loaded separately via flavors/liquid/extras.css) */
+/* ---- Concatena Labs brand logo ------------------------------------------- */
+/* The wordmark is amber + white "LABS"; seat it on a dark chip (echoing the
+   Sequentia mark's black disc) so the whole logo reads on the light navbar. */
+.navbar-brand {
+  display: inline-flex;
+  align-items: center;
+  background: var(--seq-dark);
+  border-radius: 9px;
+  padding: 6px 13px;
+}
+.navbar-brand img { height: 25px; width: auto; display: block; }
 
 /* ---- Sequentia block rows: anchor / committee / finality ------------------ */
 
@@ -47,66 +53,68 @@
 
 /* ============================================================================
    SIGNATURE: the network switcher as a parent/child "anchor link".
-   Structure from views/network-selection.js:
+   Structure (views/network-selection.js):
      .network-selector-toggle (the pill) > .menu-logo + name + chevron
      .network-hover-menu > .network-hover-menu-option-container.<chain>
-   Each chain option is tinted with its OWN brand color (Sequentia violet,
-   Bitcoin orange) regardless of which explorer you're on.
+   Dark-themed (amber-on-dark brand); each chain option carries its own brand
+   color (Sequentia amber, Bitcoin orange).
    ============================================================================ */
 
 .network-selector-toggle {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 12px;
-  border: 1px solid color-mix(in srgb, var(--primary-color) 35%, transparent);
+  padding: 6px 13px;
+  border: 1px solid color-mix(in srgb, var(--primary-color) 45%, var(--seq-dark));
   border-radius: 999px;
-  background: color-mix(in srgb, var(--primary-color) 8%, transparent);
+  background: var(--seq-dark);
   color: var(--primary-color);
   font-weight: 600;
   letter-spacing: 0.02em;
-  transition: background 120ms ease, border-color 120ms ease;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
 }
 .network-selector-toggle:hover {
-  background: color-mix(in srgb, var(--primary-color) 14%, transparent);
-  border-color: color-mix(in srgb, var(--primary-color) 55%, transparent);
+  border-color: var(--primary-color);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary-color) 22%, transparent);
 }
 .network-selector-toggle .menu-logo { height: 18px; width: 18px; }
-.network-selector-toggle .network-angle-down { fill: var(--primary-color); opacity: 0.7; }
+.network-selector-toggle .network-angle-down { fill: var(--primary-color); opacity: 0.8; }
 
-/* The dropdown: a small "you are here ⚓ its parent" card. */
+/* The dropdown: a small dark "you are here ⚓ its parent" card. */
 .network-hover-menu {
+  background: var(--seq-dark);
   border-radius: 12px;
   overflow: hidden;
-  box-shadow: 0 10px 30px rgba(17, 19, 22, 0.18);
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.4);
 }
 .network-hover-menu-option-container {
   display: flex;
   align-items: center;
   gap: 10px;
   padding: 11px 16px;
+  color: #e7e7ea;
   border-left: 3px solid transparent;
 }
 /* per-chain brand tint */
-.network-hover-menu-option-container.sequentiatestnet { --chain: var(--seq-violet); }
+.network-hover-menu-option-container.sequentiatestnet { --chain: var(--seq-amber); }
 .network-hover-menu-option-container.bitcointestnet4  { --chain: var(--btc-orange); }
 .network-hover-menu-option-container .menu-logo { height: 20px; width: 20px; }
 .network-hover-menu-option-container:hover {
-  background: color-mix(in srgb, var(--chain, var(--primary-color)) 10%, transparent);
+  background: color-mix(in srgb, var(--chain, var(--primary-color)) 16%, var(--seq-dark));
   border-left-color: var(--chain, var(--primary-color));
 }
 .network-hover-menu-option-container.active {
-  background: color-mix(in srgb, var(--chain, var(--primary-color)) 12%, transparent);
+  background: color-mix(in srgb, var(--chain, var(--primary-color)) 20%, var(--seq-dark));
   border-left-color: var(--chain, var(--primary-color));
   font-weight: 600;
 }
 .network-hover-menu-option-container.active .network-hover-menu-option { color: var(--chain); }
 
-/* "anchored to" connector between the two chains in the dropdown: the divider
-   between the active (child) row and the parent row reads as an anchor link. */
+/* "anchored to" connector: the Sequentia (child) option carries an anchor glyph,
+   naming the relationship to its Bitcoin parent. */
 .network-hover-menu-option-container.sequentiatestnet::after {
   content: "\2693";                 /* ⚓ anchored into Bitcoin */
   margin-left: auto;
   font-size: 13px;
-  color: color-mix(in srgb, var(--seq-violet) 60%, #78838e);
+  color: color-mix(in srgb, var(--seq-amber) 70%, #888);
 }

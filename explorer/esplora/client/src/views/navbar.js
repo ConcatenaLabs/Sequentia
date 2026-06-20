@@ -6,7 +6,7 @@ export default S =>
 
   <nav className="container nav-container">
       <a className="navbar-brand" href=".">
-        <img src={`${staticRoot}img/icons/logo.svg`}></img>
+        <img src={`${staticRoot}img/icons/concatena-labs.png`} alt="Concatena Labs"></img>
       </a>
         <div className="sub-nav font-h5">
             <a href="." class={{ active: S.activeTab == 'dashBoard' }}>Dashboard</a>
