@@ -171,6 +171,9 @@ def main():
             "port=%d" % (pb - 2), "rpcport=%d" % p_rpc,
             "bind=127.0.0.1", "rpcbind=127.0.0.1", "rpcallowip=127.0.0.1",
             "listen=1", "discover=0", "dnsseed=0", "validatepegin=0", "initialfreecoins=0",
+            # Serve many committee nodes' anchor checks without 503 ("work queue
+            # exceeded"): a real Bitcoin parent / the caching proxy does this too.
+            "rpcthreads=32", "rpcworkqueue=4096",
             "con_blocksubsidy=5000000000", "anyonecanspendaremine=1", "signblockscript=51",
             "fallbackfee=0.0001",
         ])
