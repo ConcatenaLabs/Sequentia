@@ -216,40 +216,41 @@ void AnchorWatchTask(ChainstateManager& chainman)
             if (last_height >= 0) UpdatePosFinality(chainman, last_height);
         }
     }
-    if (!tip_changed) return;
-
     // 1) Reconsider blocks we invalidated earlier whose anchors are canonical
-    //    again (the parent chain reorganized back).
-    std::set<uint256> invalidated;
-    {
-        LOCK(g_anchor_mutex);
-        invalidated = g_anchor_invalidated;
-    }
-    for (const uint256& hash : invalidated) {
-        CBlockIndex* pindex;
-        uint32_t anchor_height;
-        uint256 anchor_hash;
+    //    again (the parent chain reorganized back). This only matters when the
+    //    parent moved, so it is gated on tip_changed.
+    if (tip_changed) {
+        std::set<uint256> invalidated;
         {
-            LOCK(cs_main);
-            pindex = chainman.m_blockman.LookupBlockIndex(hash);
-            if (!pindex) continue;
-            anchor_height = pindex->m_anchor_height;
-            anchor_hash = pindex->m_anchor_hash;
+            LOCK(g_anchor_mutex);
+            invalidated = g_anchor_invalidated;
         }
-        if (CheckMainchainAnchor(anchor_height, anchor_hash) == AnchorCheckResult::OK) {
-            LogPrintf("Anchor %s (height %d) of block %s is canonical again; reconsidering\n",
-                      anchor_hash.ToString(), anchor_height, hash.ToString());
+        for (const uint256& hash : invalidated) {
+            CBlockIndex* pindex;
+            uint32_t anchor_height;
+            uint256 anchor_hash;
             {
                 LOCK(cs_main);
-                chainman.ActiveChainstate().ResetBlockFailureFlags(pindex);
+                pindex = chainman.m_blockman.LookupBlockIndex(hash);
+                if (!pindex) continue;
+                anchor_height = pindex->m_anchor_height;
+                anchor_hash = pindex->m_anchor_hash;
             }
-            {
-                LOCK(g_anchor_mutex);
-                g_anchor_invalidated.erase(hash);
-            }
-            BlockValidationState state;
-            if (!chainman.ActiveChainstate().ActivateBestChain(state)) {
-                LogPrintf("WARNING: ActivateBestChain failed after anchor reconsideration: %s\n", state.ToString());
+            if (CheckMainchainAnchor(anchor_height, anchor_hash) == AnchorCheckResult::OK) {
+                LogPrintf("Anchor %s (height %d) of block %s is canonical again; reconsidering\n",
+                          anchor_hash.ToString(), anchor_height, hash.ToString());
+                {
+                    LOCK(cs_main);
+                    chainman.ActiveChainstate().ResetBlockFailureFlags(pindex);
+                }
+                {
+                    LOCK(g_anchor_mutex);
+                    g_anchor_invalidated.erase(hash);
+                }
+                BlockValidationState state;
+                if (!chainman.ActiveChainstate().ActivateBestChain(state)) {
+                    LogPrintf("WARNING: ActivateBestChain failed after anchor reconsideration: %s\n", state.ToString());
+                }
             }
         }
     }
@@ -258,23 +259,37 @@ void AnchorWatchTask(ChainstateManager& chainman)
     //    anchors were reorganized away. Anchor heights are monotone along the
     //    chain, so once a block's anchor is confirmed canonical, all blocks
     //    below it are anchored to canonical blocks too.
+    //
+    //    This runs on EVERY tick, not only when the parent tip just changed: a
+    //    block is invalid iff its anchor is off Bitcoin's best chain (doc 03
+    //    §intro, §3), and the active tip could be stale on a tick where the
+    //    parent tip did not change since the previous tick (e.g. the parent
+    //    reorg was missed/coalesced, the node restarted onto an already-reorged
+    //    parent, or a transiently-canonical anchor was cached OK and then went
+    //    stale). Gating the walk on tip_changed left such a tip stuck forever.
+    //    The walk is cheap when the tip is canonical: the top block's anchor is
+    //    served from g_anchor_ok_cache and the walk breaks immediately.
     uint256 lowest_bad;
     while (true) {
         lowest_bad.SetNull();
-        int finalized_height = -1;
-        uint256 finalized_hash;
-        (void)GetPosFinalizedCheckpoint(finalized_height, finalized_hash);
         // Phase 1: snapshot the (immutable) anchor of each candidate block under
-        // cs_main, top-down, stopping at the checkpoint-finalized depth (a deeper
-        // parent reorg needs operator action). We do NOT call bitcoind here: the
-        // RPC must not run under cs_main, or a slow/hung parent daemon would
-        // stall the whole node (block processing, RPC, net) for the RPC timeout.
+        // cs_main, top-down, down to height 1 — there is NO finality floor on
+        // this walk. A block is valid iff its anchor is on Bitcoin's best chain,
+        // to ANY depth (doc 03 §intro/§3, doc 04 §6); a checkpoint-finalized
+        // block whose anchor was reorged away is just as invalid as any other,
+        // and finality is always modulo a Bitcoin reorg. (The checkpoint floor
+        // is a defense against SEQ-INTERNAL long-range forks, enforced at
+        // accept time in ContextualCheckBlockHeader — it must never keep a block
+        // whose Bitcoin anchor is off the best chain.) We do NOT call bitcoind
+        // here: the RPC must not run under cs_main, or a slow/hung parent daemon
+        // would stall the whole node (block processing, RPC, net) for the RPC
+        // timeout.
         struct AnchorRef { uint256 block_hash; uint32_t anchor_height; uint256 anchor_hash; };
         std::vector<AnchorRef> to_check;
         {
             LOCK(cs_main);
             const CBlockIndex* pindex = chainman.ActiveChain().Tip();
-            for (; pindex && pindex->nHeight > 0 && pindex->nHeight > finalized_height; pindex = pindex->pprev) {
+            for (; pindex && pindex->nHeight > 0; pindex = pindex->pprev) {
                 if (pindex->m_anchor_hash.IsNull()) break; // pre-anchor blocks
                 to_check.push_back({pindex->GetBlockHash(), pindex->m_anchor_height, pindex->m_anchor_hash});
             }
@@ -433,14 +448,40 @@ void UpdatePosFinality(ChainstateManager& chainman, int btc_tip_height)
     const int depth = (int)gArgs.GetIntArg("-poscheckpointdepth", DEFAULT_POS_CHECKPOINT_DEPTH);
     if (depth <= 0) return;
 
+    // Snapshot the current finality point so a transient parent-RPC outage
+    // (NO_CONNECTION) does not spuriously retreat it below: the floor must only
+    // retreat when a commitment is DEFINITIVELY off Bitcoin's best chain
+    // (STALE/NOT_FOUND/HEIGHT_MISMATCH), not when we merely cannot reach Bitcoin
+    // to judge it right now.
+    int prev_fin_height;
+    uint256 prev_fin_hash;
+    {
+        LOCK(g_anchor_mutex);
+        prev_fin_height = g_pos_finalized_height;
+        prev_fin_hash = g_pos_finalized_hash;
+    }
+
     std::vector<PosCheckpoint> candidates = GetPosCheckpoints();
     int best_height = -1;
     uint256 best_hash;
+    bool finalized_indeterminate = false; // current floor's commitment unjudgeable now
     std::vector<PosCheckpoint> conflicts;
     for (const PosCheckpoint& ckpt : candidates) {
         if (btc_tip_height - ckpt.btc_height + 1 < depth) continue; // not buried enough
         // The commitment must still be on the parent chain's best chain.
-        if (CheckMainchainAnchor((uint32_t)ckpt.btc_height, ckpt.btc_hash) != AnchorCheckResult::OK) continue;
+        AnchorCheckResult commit_res = CheckMainchainAnchor((uint32_t)ckpt.btc_height, ckpt.btc_hash);
+        if (commit_res != AnchorCheckResult::OK) {
+            // If we cannot reach Bitcoin to judge the checkpoint that is
+            // currently holding the floor, remember that so we hold (rather
+            // than drop) the floor below; a definitive STALE/NOT_FOUND instead
+            // correctly lets the floor retreat.
+            if (commit_res == AnchorCheckResult::NO_CONNECTION &&
+                prev_fin_height >= 0 && (int)ckpt.seq_height == prev_fin_height &&
+                ckpt.seq_hash == prev_fin_hash) {
+                finalized_indeterminate = true;
+            }
+            continue;
+        }
         // The checkpointed block must be on *our* active chain at the claimed
         // height: checkpoints lock in validated history, never replace it.
         bool on_active_chain = false;
@@ -480,11 +521,37 @@ void UpdatePosFinality(ChainstateManager& chainman, int btc_tip_height)
                             return a.seq_hash == b.seq_hash && a.seq_height == b.seq_height;
                         });
         g_pos_checkpoint_conflicts = conflicts;
-        if (best_height >= 0 && best_height > g_pos_finalized_height) {
+        // best_height/best_hash is the highest checkpoint that is STILL valid on
+        // this pass: buried >= depth, its commitment still on Bitcoin's best
+        // chain, and its block on our active chain. Track it exactly — the
+        // finalized point may RISE (a new checkpoint buried) or RETREAT (a
+        // previously-finalizing checkpoint whose own Bitcoin commitment was
+        // reorged away, or whose block left our active chain because a Bitcoin
+        // reorg invalidated its anchor). Finality is always modulo a Bitcoin
+        // reorg (doc 04 §6): a checkpoint can never hold the floor once its
+        // commitment is off Bitcoin's best chain, otherwise it would keep a
+        // block whose anchor is orphaned, violating the core invariant.
+        //
+        // The one exception is a RETREAT that would be caused only by an
+        // inability to reach Bitcoin (NO_CONNECTION) for the checkpoint that is
+        // currently holding the floor: that is indeterminate, not a definitive
+        // "off the best chain", so we hold the existing floor until we can judge
+        // it (it self-corrects on the next reachable tick). A RISE is always
+        // applied; a retreat caused by a definitive STALE/NOT_FOUND is applied.
+        const bool would_retreat = best_height < g_pos_finalized_height;
+        const bool hold_floor = would_retreat && finalized_indeterminate &&
+                                g_pos_finalized_height == prev_fin_height &&
+                                g_pos_finalized_hash == prev_fin_hash;
+        if (!hold_floor && (best_height != g_pos_finalized_height || best_hash != g_pos_finalized_hash)) {
+            if (best_height > g_pos_finalized_height) {
+                LogPrintf("PoS: finalized block %s (height %d) via parent-chain checkpoint\n",
+                          best_hash.ToString(), best_height);
+            } else {
+                LogPrintf("PoS: checkpoint finality retreated to height %d (was %d) — a checkpoint's parent-chain commitment is no longer canonical (Bitcoin reorg)\n",
+                          best_height, g_pos_finalized_height);
+            }
             g_pos_finalized_height = best_height;
             g_pos_finalized_hash = best_hash;
-            LogPrintf("PoS: finalized block %s (height %d) via parent-chain checkpoint\n",
-                      best_hash.ToString(), best_height);
         }
         have_own_checkpoint = best_height >= 0 || g_pos_finalized_height >= 0;
     }
