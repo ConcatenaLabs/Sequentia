@@ -60,12 +60,11 @@ class AnyAssetFeeScenariosTest(BitcoinTestFramework):
 
         self.nodes[0].generatetoaddress(1, self.node0_address, invalid_call=False)  # confirm the tx
 
-        self.issuance_addr1 = self.nodes[0].gettransaction(self.issuance_txid1)['details'][0]['address']
-        self.nodes[1].importaddress(self.issuance_addr1)
-
-        issuance_key1 = self.nodes[0].dumpissuanceblindingkey(self.issuance_txid1, self.issuance_vin1)
-        self.nodes[1].importissuanceblindingkey(self.issuance_txid1, self.issuance_vin1, issuance_key1)
-        issuances = self.nodes[1].listissuances()
+        # SEQUENTIA: assets are issued UNBLINDED here (-blindedaddresses=0), so there
+        # is no issuance blinding key to share with node1 (confidential transactions
+        # are opt-in). node1 sees any asset it receives directly via the explicit
+        # amounts, so the old importaddress/importissuanceblindingkey dance is gone.
+        issuances = self.nodes[0].listissuances()
         assert (issuances[0]['tokenamount'] == 1 and issuances[0]['assetamount'] == self.issue_amount1) \
             or (issuances[1]['tokenamount'] == 1 and issuances[1]['assetamount'] == self.issue_amount1)
 
@@ -111,6 +110,10 @@ class AnyAssetFeeScenariosTest(BitcoinTestFramework):
         self.sync_all()
 
     def scenario2(self):
+        # node1 explicitly refuses asset2 as a fee asset (rate 0 == "refuse"), so
+        # it will not relay a transaction whose fee is paid in asset2.
+        self.nodes[1].setfeeexchangerates({ "gasset": 100000000, self.asset1: 100000000, self.asset2: 0})
+
         tx = self.nodes[0].sendtoaddress(
             address=self.node1_address,
             amount=1.0,

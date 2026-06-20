@@ -48,11 +48,11 @@ class AnyAssetFeeTest(BitcoinTestFramework):
 
         self.nodes[0].generatetoaddress(1, self.nodes[0].getnewaddress(), invalid_call=False)  # confirm the tx
 
-        self.issuance_addr = self.nodes[0].gettransaction(self.issuance_txid)['details'][0]['address']
-        self.nodes[1].importaddress(self.issuance_addr)
-
-        issuance_key = self.nodes[0].dumpissuanceblindingkey(self.issuance_txid, self.issuance_vin)
-        self.nodes[1].importissuanceblindingkey(self.issuance_txid, self.issuance_vin, issuance_key)
+        # SEQUENTIA: assets are issued UNBLINDED by default here (-blindedaddresses=0),
+        # so there is no issuance blinding key to share — node1 receives the asset on
+        # its own (unblinded) address below and sees it directly. (Confidential
+        # transactions are opt-in; this test exercises the transparent path so it can
+        # bumpfee, which only operates on unblinded transactions.)
 
         self.node0_address = self.nodes[0].getnewaddress()
         self.node1_address = self.nodes[1].getnewaddress()

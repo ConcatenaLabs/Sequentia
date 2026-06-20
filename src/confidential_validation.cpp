@@ -252,13 +252,17 @@ bool VerifyAmounts(const std::vector<CTxOut>& inputs, const CTransaction& tx, st
             return false;
         }
         if (!issuance.nAmount.IsNull()) {
-            // Note: This check disallows issuances in transactions with *no* witness data.
-            // This can be relaxed in a future update as a HF by passing in an empty rangeproof
-            // to `VerifyIssuanceAmount` instead.
-            if (i >= tx.witness.vtxinwit.size()) {
-                return false;
-            }
-            if (!VerifyIssuanceAmount(commit, gen, assetID, issuance.nAmount, tx.witness.vtxinwit[i].vchIssuanceAmountRangeproof, checks, store_result)) {
+            // SEQUENTIA: An explicit (unblinded) issuance carries no rangeproof, so a
+            // fully-transparent issuance transaction whose inputs also need no witness
+            // (e.g. an OP_TRUE / anyonecanspend funding input) legitimately has *no*
+            // witness data at all. Rather than reject such a transaction, fall back to
+            // an empty rangeproof when the witness slot is absent. `VerifyIssuanceAmount`
+            // requires the rangeproof to be empty for explicit values and non-empty for
+            // blinded ones, so a genuinely blinded issuance with no witness still fails.
+            static const std::vector<unsigned char> empty_rangeproof;
+            const std::vector<unsigned char>& issuance_rangeproof =
+                i < tx.witness.vtxinwit.size() ? tx.witness.vtxinwit[i].vchIssuanceAmountRangeproof : empty_rangeproof;
+            if (!VerifyIssuanceAmount(commit, gen, assetID, issuance.nAmount, issuance_rangeproof, checks, store_result)) {
                 return false;
             }
             target_generators.push_back(gen);
@@ -278,13 +282,13 @@ bool VerifyAmounts(const std::vector<CTxOut>& inputs, const CTransaction& tx, st
                 return false;
             }
 
-            // Note: This check disallows issuances in transactions with *no* witness data.
-            // This can be relaxed in a future update as a HF by passing in an empty rangeproof
-            // to `VerifyIssuanceAmount` instead.
-            if (i >= tx.witness.vtxinwit.size()) {
-                return false;
-            }
-            if (!VerifyIssuanceAmount(commit, gen, assetTokenID, issuance.nInflationKeys, tx.witness.vtxinwit[i].vchInflationKeysRangeproof, checks, store_result)) {
+            // SEQUENTIA: see the explicit-issuance note above. An explicit reissuance
+            // token amount needs no rangeproof, so fall back to an empty one when the
+            // witness slot is absent (a blinded token issuance still requires its proof).
+            static const std::vector<unsigned char> empty_rangeproof;
+            const std::vector<unsigned char>& inflation_rangeproof =
+                i < tx.witness.vtxinwit.size() ? tx.witness.vtxinwit[i].vchInflationKeysRangeproof : empty_rangeproof;
+            if (!VerifyIssuanceAmount(commit, gen, assetTokenID, issuance.nInflationKeys, inflation_rangeproof, checks, store_result)) {
                 return false;
             }
             target_generators.push_back(gen);
