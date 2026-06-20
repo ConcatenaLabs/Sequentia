@@ -132,14 +132,36 @@ AnchorCheckResult CheckMainchainAnchor(uint32_t height, const uint256& hash)
         if (!result.isObject()) {
             return AnchorCheckResult::NOT_FOUND;
         }
-        UniValue confirmations = find_value(result.get_obj(), "confirmations");
-        if (!confirmations.isNum() || confirmations.get_int64() < 1) {
-            // confirmations == -1 means the block is not on the best chain
-            return AnchorCheckResult::STALE;
-        }
+        // The block must sit at its claimed height (a block hash's height never
+        // changes, even on a fork), or it is a structural lie — checked first so it
+        // applies whether or not the block is currently on the best chain.
         UniValue blockheight = find_value(result.get_obj(), "height");
         if (!blockheight.isNum() || blockheight.get_int64() != (int64_t)height) {
             return AnchorCheckResult::HEIGHT_MISMATCH;
+        }
+        UniValue confirmations = find_value(result.get_obj(), "confirmations");
+        if (!confirmations.isNum() || confirmations.get_int64() < 1) {
+            // confirmations == -1: the anchor block exists on the parent but is not
+            // on its best chain — it was reorganized away. Distinguish a PERMANENT
+            // reorg (the parent has since built its best chain well past this
+            // height) from a TRANSIENT lag (our local parent daemon simply has not
+            // reached/seen the canonical block at this height yet). If the parent's
+            // best chain is now POS_ANCHOR_REORG_SETTLE_DEPTH blocks beyond the
+            // anchor height, the reorg is settled: the anchor was a real block, the
+            // Sequentia block that committed to it was valid when produced and is
+            // secured by its committee certificate, so accept it — otherwise the
+            // chain's buried history becomes permanently unsyncable for new nodes
+            // after a parent reorg. While the reorg is still recent the anchor stays
+            // STALE (soft, retried), so the anchor watcher rolls the tip back and
+            // the producer re-anchors to a fresh, canonical parent block.
+            int parent_count = 0;
+            if (GetMainchainBlockCount(parent_count) &&
+                parent_count >= (int)height + POS_ANCHOR_REORG_SETTLE_DEPTH) {
+                LOCK(g_anchor_mutex);
+                g_anchor_ok_cache.emplace(height, hash);
+                return AnchorCheckResult::OK;
+            }
+            return AnchorCheckResult::STALE;
         }
         LOCK(g_anchor_mutex);
         g_anchor_ok_cache.emplace(height, hash);

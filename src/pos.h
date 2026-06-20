@@ -328,6 +328,20 @@ bool PosVrfIsCommitteeMember(const uint256& beta, uint64_t weight, uint64_t tota
  *  rule — the new block references a Bitcoin block 3 past the parent's). */
 static const uint32_t POS_ESCAPING_STALL_ANCHOR_GAP = 3;
 
+/** Anchor reorg-settle depth: how far the parent chain's best chain must have
+ *  advanced PAST an off-best-chain (reorganized-away) anchor before that anchor
+ *  is treated as permanently orphaned-but-real rather than a transient local lag.
+ *  An anchored block whose parent anchor is later reorganized away would, without
+ *  this, become permanently unsyncable for new nodes (the anchor never returns to
+ *  the parent's best chain) — making the chain's own buried, committee-certified
+ *  history unreplayable after a parent reorg, which is fatal on a reorg-prone
+ *  parent like Bitcoin testnet4. Once the parent has buried the anchor height this
+ *  many blocks deep on its real chain, the reorg is settled: the block was valid
+ *  when produced and is secured by its committee certificate, so it is accepted.
+ *  Recent (unsettled) orphaned anchors stay STALE so the anchor watcher still
+ *  rolls back the tip and the producer re-anchors fresh. Consensus-wide. */
+static const int POS_ANCHOR_REORG_SETTLE_DEPTH = 6;
+
 /** Whether a block anchoring at `block_anchor_height` may be certified below
  *  the normal countersignature quorum, given its parent (last certified block)
  *  anchored at `parent_anchor_height`. True iff the parent chain has advanced

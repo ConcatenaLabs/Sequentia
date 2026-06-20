@@ -197,6 +197,7 @@ BASE_SCRIPTS = [
     'feature_pos_autonomous_escaping_stall.py',
     'feature_pos_parent_reorg_recovery.py',
     'feature_pos_reload_registry.py',
+    'feature_pos_anchor_reorg_settle.py',
     'feature_pos_fork_choice.py',
     'feature_pos_finality.py',
     'feature_pos_anchor_freshness.py',
