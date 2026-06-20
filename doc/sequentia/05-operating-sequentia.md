@@ -312,8 +312,21 @@ producing blocks at full speed.
 
 ### Distributed committee (members on separate hosts)
 
-For a real decentralized committee, no node holds more than its own key. The
-per-slot flow:
+For a real decentralized committee, no node holds more than its own key.
+
+**The default: the autonomous committee.** On `chain=test` and `chain=sequentia`
+the autonomous BLS gossip-and-sign layer is **on by default** (`g_pos_bls`, set
+with `-posbls`). Each staker simply runs `-posproducer -posproducerkey=<its WIF>`;
+the nodes elect the round's leader, gossip BLS signature shares, and aggregate the
+committee certificate themselves — no coordinator, no per-slot RPC choreography.
+This is the production path. A worked single-machine bring-up (founder →
+escaping-stall bootstrap → autonomous quorum, anchored to Bitcoin) is in
+[`contrib/sequentia/bootstrap-autonomous-testnet.py`](../../contrib/sequentia/bootstrap-autonomous-testnet.py)
+and [`doc/sequentia/demos/100-node-bootstrap-runbook.md`](demos/100-node-bootstrap-runbook.md).
+
+**Manual MuSig2 fallback (`-posbls=0`).** Setting `-posbls=0` reverts to the
+older coordinator model, where each slot's certificate is assembled by hand
+(or by external tooling) over the per-slot flow below:
 
 1. **Eligibility.** Each member proves its slot eligibility over the seed from
    `getposschedule` (fed in internal byte order — reverse the `getposschedule`
@@ -341,10 +354,9 @@ per-slot flow:
    ```
 
 A signing session is single-use and bound to its `(signer, member set, message)`
-triple. As noted in [`04-proof-of-stake.md`](04-proof-of-stake.md) under the
-production layer, organizing this flow across hosts each slot is the job of a
-coordinator or external tooling today; there is no autonomous gossip-and-sign
-layer.
+triple. This manual flow is only needed under the `-posbls=0` fallback; with the
+default autonomous committee the nodes perform the equivalent share exchange and
+aggregation themselves over gossip.
 
 ## 8. Stake lifecycle
 
