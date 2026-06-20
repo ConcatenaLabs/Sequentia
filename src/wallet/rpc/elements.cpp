@@ -1455,17 +1455,25 @@ RPCHelpMan issueasset()
     CPubKey asset_dest_blindpub;
     CPubKey token_dest_blindpub;
 
+    // SEQUENTIA: confidential transactions are opt-in. Only blind the issued asset
+    // and reissuance-token outputs when this chain blinds addresses by default (or
+    // -blindedaddresses is forced on) -- the same lever getnewaddress uses. On
+    // Sequentia (DefaultBlindedAddresses() == false) issued assets are public, so
+    // spending them does not force every downstream transaction to be confidential
+    // (which, among other things, would make bumpfee/RBF impossible). A null
+    // blinding pubkey produces an unblinded output.
+    const bool blind_issued_outputs = gArgs.GetBoolArg("-blindedaddresses", g_con_elementsmode && Params().DefaultBlindedAddresses());
     if (nAmount > 0) {
         if (!pwallet->GetNewDestination(OutputType::BECH32, "", asset_dest, error)) {
             throw JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT, error.original);
         }
-        asset_dest_blindpub = pwallet->GetBlindingPubKey(GetScriptForDestination(asset_dest));
+        if (blind_issued_outputs) asset_dest_blindpub = pwallet->GetBlindingPubKey(GetScriptForDestination(asset_dest));
     }
     if (nTokens > 0) {
         if (!pwallet->GetNewDestination(OutputType::BECH32, "", token_dest, error)) {
             throw JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT, error.original);
         }
-        token_dest_blindpub = pwallet->GetBlindingPubKey(GetScriptForDestination(token_dest));
+        if (blind_issued_outputs) token_dest_blindpub = pwallet->GetBlindingPubKey(GetScriptForDestination(token_dest));
     }
 
     CAsset dummyasset;
@@ -1571,20 +1579,26 @@ RPCHelpMan reissueasset()
         throw JSONRPCError(RPC_WALLET_ERROR, "Asset reissuance token definition could not be found in wallet.");
     }
 
-    // Add destination for the to-be-created asset
+    // Add destination for the to-be-created asset. SEQUENTIA: blind the reissued
+    // outputs only when this chain blinds by default (mirrors getnewaddress /
+    // issueasset) -- confidential transactions are opt-in. A null blinding pubkey
+    // produces an unblinded output.
+    const bool blind_issued_outputs = gArgs.GetBoolArg("-blindedaddresses", g_con_elementsmode && Params().DefaultBlindedAddresses());
     bilingual_str error;
     CTxDestination asset_dest;
     if (!pwallet->GetNewDestination(OutputType::BECH32, "", asset_dest, error)) {
         throw JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT, error.original);
     }
-    CPubKey asset_dest_blindpub = pwallet->GetBlindingPubKey(GetScriptForDestination(asset_dest));
+    CPubKey asset_dest_blindpub;
+    if (blind_issued_outputs) asset_dest_blindpub = pwallet->GetBlindingPubKey(GetScriptForDestination(asset_dest));
 
     // Add destination for tokens we are moving
     CTxDestination token_dest;
     if (!pwallet->GetNewDestination(OutputType::BECH32, "", token_dest, error)) {
         throw JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT, error.original);
     }
-    CPubKey token_dest_blindpub = pwallet->GetBlindingPubKey(GetScriptForDestination(token_dest));
+    CPubKey token_dest_blindpub;
+    if (blind_issued_outputs) token_dest_blindpub = pwallet->GetBlindingPubKey(GetScriptForDestination(token_dest));
 
     CCoinControl coin_control;
     if (g_con_any_asset_fees && request.params.size() > 2) {
