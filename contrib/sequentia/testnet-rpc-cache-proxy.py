@@ -45,7 +45,7 @@ import time
 #   SEQ_PROXY_HEADER='x-api-key: <your-tatum-key>' python3 testnet-rpc-cache-proxy.py
 TARGET = os.environ.get("SEQ_PROXY_TARGET", "https://bitcoin-testnet-rpc.publicnode.com/")
 EXTRA_HEADER = os.environ.get("SEQ_PROXY_HEADER", "")     # e.g. "x-api-key: ..."
-LISTEN = ("127.0.0.1", int(os.environ.get("SEQ_PROXY_PORT", "18332")))
+LISTEN = (os.environ.get("SEQ_PROXY_BIND", "127.0.0.1"), int(os.environ.get("SEQ_PROXY_PORT", "18332")))
 UA = "curl/8.5.0"
 TTL = 10.0                       # seconds a cached result stays fresh
 UPSTREAM_TIMEOUT = 25            # curl -m
@@ -54,6 +54,26 @@ _cache = {}                      # key -> (expiry, result_obj)
 _locks = {}                      # key -> Lock (in-flight dedup)
 _guard = threading.Lock()
 _stats = {"hits": 0, "upstream": 0}
+
+# When this proxy is exposed beyond localhost (e.g. over a tailnet to an external
+# tester), block everything that isn't a read-only block/chain query: node
+# control, mining, and all wallet/key RPCs. The Sequentia mainchain client only
+# ever calls read-only block/header/chain methods, which pass through.
+_DENY = {"stop", "setban", "clearbanned", "setnetworkactive", "addnode",
+         "disconnectnode", "invalidateblock", "reconsiderblock", "submitblock",
+         "submitheader", "generatetoaddress", "generateblock", "setmocktime",
+         "pruneblockchain", "savemempool", "addconnection"}
+_DENY_PREFIX = ("wallet", "import", "dump", "backup", "encrypt", "send", "sign",
+                "sethdseed", "createwallet", "loadwallet", "unloadwallet",
+                "getnewaddress", "getrawchangeaddress", "listunspent",
+                "listtransactions", "abandontransaction", "rescan", "keypool")
+
+
+def _denied(method):
+    if not isinstance(method, str):
+        return True
+    m = method.lower()
+    return m in _DENY or any(m.startswith(p) for p in _DENY_PREFIX)
 
 
 def _key_lock(key):
@@ -103,10 +123,12 @@ class H(http.server.BaseHTTPRequestHandler):
             req = json.loads(body)
         except Exception:
             return _upstream(body) or b'{"result":null,"error":{"code":-1,"message":"proxy: bad request"},"id":null}'
-        if isinstance(req, list):                      # batch: forward uncached
-            return _upstream(body) or b'{"result":null,"error":{"code":-1,"message":"proxy: empty upstream"},"id":null}'
+        if isinstance(req, list):                      # batch bypasses the deny-check; refuse it
+            return b'{"result":null,"error":{"code":-32600,"message":"proxy: batch not permitted"},"id":null}'
 
         method, params, rid = req.get("method"), req.get("params", []), req.get("id")
+        if _denied(method):
+            return json.dumps({"result": None, "error": {"code": -32601, "message": "proxy: method not permitted"}, "id": rid}).encode()
         key = json.dumps([method, params], sort_keys=True)
         now = time.time()
 
