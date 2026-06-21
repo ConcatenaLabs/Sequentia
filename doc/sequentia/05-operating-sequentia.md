@@ -364,19 +364,59 @@ aggregation themselves over gossip.
 
 ## 8. Stake lifecycle
 
-Register stake on-chain by paying to a staking script from `getstakescript`,
-whose weight is its explicit policy-asset amount and whose CSV lock must elapse
-before it can be spent — **unbonding is that spend**. For a lock beyond the
-16-bit height-CSV range (e.g. the ~2-week checkpoint window), request a
-time-based script:
+Staking is **opt-in and explicit — holding SEQ does nothing on its own.** SEQ
+confers stake weight only while it sits in a dedicated **staking output**, the
+bare script
 
 ```
-elements-cli getstakescript "<pubkey>" null <csv_seconds>
+<csv> OP_CHECKSEQUENCEVERIFY OP_DROP <pubkey> OP_CHECKSIG
 ```
 
-The registry is rebuilt from the UTXO set at startup and mirrored on every
-reorg. Introspect with `getstakerinfo` (the active stake registry) and
-`getposschedule` (the next slot's seed, leader schedule, committee, and quorum).
+holding an *explicit* (unblinded) policy-asset amount. A confidential output
+carries no weight (its amount is hidden), and an amount below `-posminstake`
+(40,000 SEQ on the bundled chains) is ignored for eligibility.
+
+**Becoming a staker.**
+
+1. Get the staking script for your staker key:
+   ```
+   elements-cli getstakescript "<pubkey>" null <csv_seconds>
+   ```
+   It returns the `scriptPubKey`, the lock it encodes (`lock_seconds`), and the
+   chain's required minimum (`min_unbonding_seconds`); a lock below that minimum
+   is refused, because the output would not count as stake. `null` skips the
+   height-based `csv_blocks` form — the ~2-week lock exceeds the 16-bit
+   height-CSV range, so the bundled chains use a **time-based** CSV
+   (`csv_seconds`).
+2. Pay at least the minimum stake to that script in an ordinary transaction (it
+   relays and mines under standard policy — no special configuration). Once it
+   confirms and stays unspent, its weight registers automatically: the registry
+   is rebuilt from the UTXO set at startup and mirrored on every connect,
+   disconnect, and reorg.
+3. Run a producer holding that key (`-posproducer`, with the default BLS gossip
+   committee) so the node signs and produces when its VRF sortition selects it.
+
+Introspect with `getstakerinfo` (the active registry) and `getposschedule` (the
+next slot's seed, leader schedule, committee, and quorum).
+
+**The lock is the unbonding delay, not a staking term — staking is indefinite.**
+The CSV is a BIP68 *relative* locktime measured from the output's confirmation;
+on the bundled chains it is `-posunbonding × -posslotinterval` = 43200 × 30 s ≈
+**15 days** (it must exceed the Bitcoin-checkpoint window — §9). It neither
+expires your stake nor needs renewing:
+
+- While the lock is still maturing, the output **counts as stake** and is
+  **unspendable** — you are committed.
+- After the lock matures, the output **still counts as stake** — it is merely now
+  *spendable* if you choose to withdraw. Maturity gates withdrawal, never
+  participation.
+- So an output stakes **continuously for as long as it is unspent — indefinitely.**
+  There is no re-locking, renewal, or keep-alive: to keep staking, do nothing.
+
+**Unbonding** is simply spending the staking output once its lock has matured
+(the staker's signature satisfies the script) — there is no separate ceremony.
+That spend ends the stake; the freed SEQ becomes ordinary coin to hold or to pay
+into a fresh staking output and stake again.
 
 ## 9. Long-range-attack defenses
 

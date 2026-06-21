@@ -65,7 +65,11 @@ Stake is registered by holding SEQ in a **staking output** — the bare script
 ```
 
 holding an explicit policy-asset (SEQ) amount. While such an output is unspent,
-its amount adds to its key's weight. Unbonding is simply the CSV-gated spend:
+its amount adds to its key's weight, indefinitely: the lock gates *withdrawal*,
+not participation, so a staking output keeps its weight for as long as it is
+unspent — once the lock matures it still stakes until actually spent, and it
+never needs renewing. Holding ordinary (non-staking-output) SEQ confers no
+weight; staking is opt-in. Unbonding is simply the CSV-gated spend:
 the `OP_CHECKSEQUENCEVERIFY` lock — the whitepaper's stake locktime — is
 enforced by the script itself, so unstaking is delayed by the configured period
 and there is no separate unbonding ceremony.
