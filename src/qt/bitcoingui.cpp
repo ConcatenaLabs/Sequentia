@@ -255,18 +255,25 @@ void BitcoinGUI::createActions()
     tabGroup->addAction(overviewAction);
 
     sendCoinsAction = new QAction(platformStyle->SingleColorIcon(":/icons/send"), tr("&Send"), this);
-    sendCoinsAction->setStatusTip(tr("Send coins to a %1 address").arg("Liquid"));
+    sendCoinsAction->setStatusTip(tr("Send coins to a %1 address").arg("Sequentia"));
     sendCoinsAction->setToolTip(sendCoinsAction->statusTip());
     sendCoinsAction->setCheckable(true);
     sendCoinsAction->setShortcut(QKeySequence(Qt::ALT + Qt::Key_2));
     tabGroup->addAction(sendCoinsAction);
 
     receiveCoinsAction = new QAction(platformStyle->SingleColorIcon(":/icons/receiving_addresses"), tr("&Receive"), this);
-    receiveCoinsAction->setStatusTip(tr("Request payments (generates QR codes and %1 addresses)").arg("Liquid"));
+    receiveCoinsAction->setStatusTip(tr("Request payments (generates QR codes and %1 addresses)").arg("Sequentia"));
     receiveCoinsAction->setToolTip(receiveCoinsAction->statusTip());
     receiveCoinsAction->setCheckable(true);
     receiveCoinsAction->setShortcut(QKeySequence(Qt::ALT + Qt::Key_3));
     tabGroup->addAction(receiveCoinsAction);
+
+    stakingAction = new QAction(platformStyle->SingleColorIcon(":/icons/tx_mined"), tr("&Staking"), this);
+    stakingAction->setStatusTip(tr("Monitor Proof-of-Stake and create staking outputs"));
+    stakingAction->setToolTip(stakingAction->statusTip());
+    stakingAction->setCheckable(true);
+    stakingAction->setShortcut(QKeySequence(Qt::ALT + Qt::Key_5));
+    tabGroup->addAction(stakingAction);
 
     historyAction = new QAction(platformStyle->SingleColorIcon(":/icons/history"), tr("&Transactions"), this);
     historyAction->setStatusTip(tr("Browse transaction history"));
@@ -284,6 +291,8 @@ void BitcoinGUI::createActions()
     connect(sendCoinsAction, &QAction::triggered, [this]{ gotoSendCoinsPage(); });
     connect(receiveCoinsAction, &QAction::triggered, [this]{ showNormalIfMinimized(); });
     connect(receiveCoinsAction, &QAction::triggered, this, &BitcoinGUI::gotoReceiveCoinsPage);
+    connect(stakingAction, &QAction::triggered, [this]{ showNormalIfMinimized(); });
+    connect(stakingAction, &QAction::triggered, this, &BitcoinGUI::gotoStakingPage);
     connect(historyAction, &QAction::triggered, [this]{ showNormalIfMinimized(); });
     connect(historyAction, &QAction::triggered, this, &BitcoinGUI::gotoHistoryPage);
 #endif // ENABLE_WALLET
@@ -312,9 +321,9 @@ void BitcoinGUI::createActions()
     changePassphraseAction = new QAction(tr("&Change Passphrase…"), this);
     changePassphraseAction->setStatusTip(tr("Change the passphrase used for wallet encryption"));
     signMessageAction = new QAction(tr("Sign &message…"), this);
-    signMessageAction->setStatusTip(tr("Sign messages with your %1 addresses to prove you own them").arg("Liquid"));
+    signMessageAction->setStatusTip(tr("Sign messages with your %1 addresses to prove you own them").arg("Sequentia"));
     verifyMessageAction = new QAction(tr("&Verify message…"), this);
-    verifyMessageAction->setStatusTip(tr("Verify messages to ensure they were signed with specified %1 addresses").arg("Liquid"));
+    verifyMessageAction->setStatusTip(tr("Verify messages to ensure they were signed with specified %1 addresses").arg("Sequentia"));
     m_load_psbt_action = new QAction(tr("&Load PSET from file…"), this);
     m_load_psbt_action->setStatusTip(tr("Load Partially Signed Elements Transaction"));
     m_load_psbt_clipboard_action = new QAction(tr("Load PSET from &clipboard…"), this);
@@ -532,6 +541,7 @@ void BitcoinGUI::createToolBars()
         toolbar->addAction(overviewAction);
         toolbar->addAction(sendCoinsAction);
         toolbar->addAction(receiveCoinsAction);
+        toolbar->addAction(stakingAction);
         toolbar->addAction(historyAction);
         overviewAction->setChecked(true);
 
@@ -731,6 +741,7 @@ void BitcoinGUI::setWalletActionsEnabled(bool enabled)
     overviewAction->setEnabled(enabled);
     sendCoinsAction->setEnabled(enabled);
     receiveCoinsAction->setEnabled(enabled);
+    stakingAction->setEnabled(enabled);
     historyAction->setEnabled(enabled);
     encryptWalletAction->setEnabled(enabled);
     backupWalletAction->setEnabled(enabled);
@@ -886,6 +897,12 @@ void BitcoinGUI::gotoReceiveCoinsPage()
     if (walletFrame) walletFrame->gotoReceiveCoinsPage();
 }
 
+void BitcoinGUI::gotoStakingPage()
+{
+    stakingAction->setChecked(true);
+    if (walletFrame) walletFrame->gotoStakingPage();
+}
+
 void BitcoinGUI::gotoSendCoinsPage(QString addr)
 {
     sendCoinsAction->setChecked(true);
@@ -924,7 +941,7 @@ void BitcoinGUI::updateNetworkState()
 
     if (m_node.getNetworkActive()) {
         //: A substring of the tooltip.
-        tooltip = tr("%n active connection(s) to %1 network", "", count).arg("Liquid");
+        tooltip = tr("%n active connection(s) to %1 network", "", count).arg("Sequentia");
     } else {
         //: A substring of the tooltip.
         tooltip = tr("Network activity disabled.");

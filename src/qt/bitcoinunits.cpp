@@ -5,6 +5,7 @@
 #include <qt/bitcoinunits.h>
 
 #include <consensus/amount.h>
+#include <chainparamsbase.h>
 
 #include <QStringList>
 
@@ -43,53 +44,51 @@ bool BitcoinUnits::valid(int unit)
     }
 }
 
+// SEQUENTIA: ticker shown for the native (policy) asset. An explicit
+// -defaultpeggedassetname overrides it (that option also relabels the asset for
+// RPC/wallet); otherwise it is chain-aware: SEQ on mainnet/regtest, tSEQ on
+// testnet/signet. This is display-only — the consensus pegged_asset ID is
+// derived independently of any name.
+static QString seqBaseTicker()
+{
+    const std::string override_name = gArgs.GetArg("-defaultpeggedassetname", "");
+    if (!override_name.empty())
+        return QString::fromStdString(override_name);
+    const std::string chain = gArgs.GetChainName();
+    if (chain == CBaseChainParams::TESTNET || chain == CBaseChainParams::SIGNET)
+        return QStringLiteral("tSEQ");
+    return QStringLiteral("SEQ");
+}
+
 QString BitcoinUnits::longName(int unit)
 {
-    const std::string default_asset_name = gArgs.GetArg("-defaultpeggedassetname", "");
-    if (default_asset_name != "") {
-        std::string rv;
-        switch(unit)
-        {
-        case BTC: rv=default_asset_name;break;
-        case mBTC: rv=std::string("m-")+default_asset_name;break;
-        case uBTC: rv=std::string("μ-")+default_asset_name;break;
-        case SAT: rv=std::string("sat-")+default_asset_name;break;
-        default: rv="???";break;
-        }
-        return QString::fromUtf8(rv.c_str());
-    }
+    const QString ticker = seqBaseTicker();
     switch(unit)
     {
-    case BTC: return QString("LBTC");
-    case mBTC: return QString("mLBTC");
-    case uBTC: return QString::fromUtf8("μLBTC");
-    case SAT: return QString("Satoshi (Lsat)");
-    default: return QString("???");
+    case BTC: return ticker;
+    case mBTC: return QStringLiteral("m") + ticker;
+    case uBTC: return QString::fromUtf8("μ") + ticker;
+    case SAT: return QStringLiteral("sat");
+    default: return QStringLiteral("???");
     }
 }
 
 QString BitcoinUnits::shortName(int unit)
 {
-    if (gArgs.GetArg("-defaultpeggedassetname", "") != "") {
-        return longName(unit);
-    }
-    switch(unit)
-    {
-    case uBTC: return QString::fromUtf8("Lbits");
-    case SAT: return QString("Lsat");
-    default: return longName(unit);
-    }
+    // Same compact ticker for both the long (dropdown) and short (amount suffix) forms.
+    return longName(unit);
 }
 
 QString BitcoinUnits::description(int unit)
 {
+    const QString ticker = seqBaseTicker();
     switch(unit)
     {
-    case BTC: return QString("Bitcoins");
-    case mBTC: return QString("Milli-Bitcoins (1 / 1" THIN_SP_UTF8 "000)");
-    case uBTC: return QString("Micro-Bitcoins (bits) (1 / 1" THIN_SP_UTF8 "000" THIN_SP_UTF8 "000)");
-    case SAT: return QString("Satoshi (sat) (1 / 100" THIN_SP_UTF8 "000" THIN_SP_UTF8 "000)");
-    default: return QString("???");
+    case BTC: return ticker;
+    case mBTC: return QString::fromUtf8("Milli-") + ticker + QString::fromUtf8(" (1 / 1" THIN_SP_UTF8 "000)");
+    case uBTC: return QString::fromUtf8("Micro-") + ticker + QString::fromUtf8(" (1 / 1" THIN_SP_UTF8 "000" THIN_SP_UTF8 "000)");
+    case SAT: return QString::fromUtf8("sat (1 / 100" THIN_SP_UTF8 "000" THIN_SP_UTF8 "000)");
+    default: return QStringLiteral("???");
     }
 }
 

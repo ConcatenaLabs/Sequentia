@@ -49,12 +49,12 @@ static const int TOOLTIP_WRAP_THRESHOLD = 80;
 #define QAPP_ORG_NAME "Bitcoin"
 #define QAPP_ORG_DOMAIN "bitcoin.org"
 
-#define QAPP_APP_NAME_DEFAULT "Elements-Qt"
-#define QAPP_APP_NAME_TESTNET "Elements-Qt-testnet"
-#define QAPP_APP_NAME_SIGNET "Elements-Qt-signet"
-#define QAPP_APP_NAME_REGTEST "Elements-Qt-regtest"
-#define QAPP_APP_NAME_LIQUID "Elements-Qt (Liquid)"
-#define QAPP_APP_NAME_LIQUIDTESTNET "Elements-Qt (liquidtestnet)"
+#define QAPP_APP_NAME_DEFAULT "Sequentia"
+#define QAPP_APP_NAME_TESTNET "Sequentia-testnet"
+#define QAPP_APP_NAME_SIGNET "Sequentia-signet"
+#define QAPP_APP_NAME_REGTEST "Sequentia-regtest"
+#define QAPP_APP_NAME_LIQUID "Sequentia (Liquid)"
+#define QAPP_APP_NAME_LIQUIDTESTNET "Sequentia (liquidtestnet)"
 
 /* One gigabyte (GB) in bytes */
 static constexpr uint64_t GB_BYTES{1000000000};

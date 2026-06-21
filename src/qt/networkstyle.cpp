@@ -18,7 +18,10 @@ static const struct {
     const int iconColorSaturationReduction;
 } network_styles[] = {
     {"main", QAPP_APP_NAME_DEFAULT, 0, 0},
-    {"test", QAPP_APP_NAME_TESTNET, 70, 30},
+    // SEQUENTIA: chain=test is the Sequentia testnet; don't hue-shift the
+    // (already amber) Sequentia icon — the "(testnet)" title distinguishes it.
+    {"test", QAPP_APP_NAME_TESTNET, 0, 0},
+    {"sequentia", QAPP_APP_NAME_DEFAULT, 0, 0},
     {"liquidv1", QAPP_APP_NAME_LIQUID, 0, 0},
     {"liquidtestnet", QAPP_APP_NAME_LIQUIDTESTNET, 80, 80},
     {"signet", QAPP_APP_NAME_SIGNET, 35, 15},
