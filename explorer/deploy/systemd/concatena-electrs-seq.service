@@ -1,0 +1,15 @@
+[Unit]
+Description=Concatena explorer — Sequentia electrs (supervised, REST :3003)
+After=network-online.target
+
+[Service]
+Type=simple
+# The supervisor loops electrs and wipes its DB on a crash, which is needed for
+# the churny chain=test node. Persistent DB path (not /tmp).
+Environment=DB_DIR=%h/.local/share/concatena-explorer/seq-db
+ExecStart=/home/aejkohl/SequentiaByClaude/explorer/run-electrs-supervised.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

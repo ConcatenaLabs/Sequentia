@@ -1,6 +1,21 @@
 import { getSupply } from "../lib/elements.js";
+import { nativeAssetId, nativeAssetLabel, nativeAssetName } from "../const";
 import layout from "./layout";
 import loader from "../components/loading";
+
+// Resolve a display label for an asset. electrs has no curated registry on
+// Sequentia, so issued assets carry no name/ticker — fall back to the static
+// asset map ([domain, ticker, name, precision] keyed by asset id) and the
+// configured native-asset label.
+const resolveLabel = (asset, assetMap) => {
+  const [domain, ticker, name] = (assetMap && assetMap[asset.asset_id]) || [];
+  const isNative = asset.asset_id === nativeAssetId;
+  return {
+    name: asset.name || name || (isNative ? nativeAssetName : null),
+    ticker: asset.ticker || ticker || (isNative ? nativeAssetLabel : null),
+    domain: (asset.entity && asset.entity.domain) || domain || null,
+  };
+};
 import {
   CurrencyDollarIcon,
   ChevronLeftIcon,
@@ -10,7 +25,7 @@ import {
 } from "../components/icons";
 
 const staticRoot = process.env.STATIC_ROOT || "";
-export default ({ assetList, goAssetList, loading, t, ...S }) => {
+export default ({ assetList, goAssetList, loading, t, assetMap, ...S }) => {
   const { assets, total } = assetList || {};
   const { start_index, sort_dir, sort_field, limit } = goAssetList;
   const pageLink = `assets?sort_field=${encodeURIComponent(sort_field)}&sort_dir=${encodeURIComponent(sort_dir)}`;
@@ -44,27 +59,30 @@ export default ({ assetList, goAssetList, loading, t, ...S }) => {
             </div>
 
             <div className={`asset-list-body ${loading ? "asset-list-body-loading" : ""}`}>
-              {assets.map((asset) => (
+              {assets.map((asset) => {
+                const label = resolveLabel(asset, assetMap);
+                return (
                 <a href={`asset/${asset.asset_id}`}>
                 <div className="assets-table-link-row">
                   <div className="assets-table-row">
                     <div className="asset-list-name" data-label={t`Name`}>
                       <CurrencyDollarIcon className="currency-dollar" />
-                      {asset.name}
+                      {label.name || <span className="mono">{asset.asset_id.substring(0, 12)}…</span>}
                     </div>
                     <div className="asset-list-ticker" data-label={t`Ticker`}>
-                      {asset.ticker || <em>None</em>}
+                      {label.ticker || <em>None</em>}
                     </div>
                     <div className="asset-list-total-supply" data-label={t`Total Supply`}>
                       {getSupply(asset, t)}
                     </div>
                     <div className="asset-list-issuer-domain" data-label={t`Issuer domain`}>
-                      {asset.entity.domain}
+                      {label.domain || <em>None</em>}
                     </div>
                   </div>
                 </div>
                 </a>
-              ))}
+                );
+              })}
             </div>
             <div className="asset-list-footer">
               {paginationControls(total, start_index, limit, pageLink)}

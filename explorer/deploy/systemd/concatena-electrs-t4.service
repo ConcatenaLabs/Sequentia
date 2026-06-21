@@ -1,0 +1,12 @@
+[Unit]
+Description=Concatena explorer — Bitcoin testnet4 electrs (REST :3004)
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/home/aejkohl/SequentiaByClaude/explorer/run-electrs-testnet4.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
