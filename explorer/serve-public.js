@@ -19,6 +19,9 @@ const PORT = process.env.PORT || 8080
 // Optional release-artifact downloads served at /download (Linux tarball,
 // Windows installer, landing page). Defaults to ./downloads next to this file.
 const DOWNLOAD_DIR = process.env.DOWNLOAD_DIR || path.join(__dirname, 'downloads')
+// The SWK WebAssembly browser wallet served at /wallet (index.html + built
+// pkg/). Defaults to ./wallet next to this file.
+const WALLET_DIR = process.env.WALLET_DIR || path.join(__dirname, 'wallet')
 
 const proxyTo = target => {
   const [host, port] = target.split(':')
@@ -46,6 +49,10 @@ app.use('/api', proxyTo(SEQ_ELECTRS))
 // /download/* is served from DOWNLOAD_DIR, not the esplora index.html).
 app.use('/download', express.static(DOWNLOAD_DIR))
 
+// SWK browser wallet (static page + WebAssembly pkg/; express serves .wasm with
+// the application/wasm MIME). Before the SPA fallback so /wallet/* is its own.
+app.use('/wallet', express.static(WALLET_DIR))
+
 // Static assets (serves dist/** including dist/testnet4/**).
 app.use(express.static(DIST))
 
@@ -54,4 +61,4 @@ app.get('/testnet4/*', (req, res) => res.sendFile(path.join(DIST, 'testnet4', 'i
 app.get('*', (req, res) => res.sendFile(path.join(DIST, 'index.html')))
 
 app.listen(PORT, () =>
-  console.log(`explorer (static+proxy) on :${PORT}  /api->${SEQ_ELECTRS}  /testnet4/api->${T4_ELECTRS}  /download->${DOWNLOAD_DIR}`))
+  console.log(`explorer (static+proxy) on :${PORT}  /api->${SEQ_ELECTRS}  /testnet4/api->${T4_ELECTRS}  /download->${DOWNLOAD_DIR}  /wallet->${WALLET_DIR}`))
