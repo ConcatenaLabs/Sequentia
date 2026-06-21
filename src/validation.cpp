@@ -4266,7 +4266,22 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
         // invalidates, lowering the finalized point via UpdateTip — is retried
         // rather than punished. The watcher and manual invalidate/reconsider use
         // their own paths (not this accept-time gate); Bitcoin stays the root.
-        if (g_pos_immediate_final_height >= 0) {
+        //
+        // The gate is enforced only where its release valve exists. On a
+        // Bitcoin-anchored chain that valve is the anchor watcher, so this node
+        // must be running it (-validateanchor): a node that does not watch
+        // Bitcoin has no way to lower the finalized point when Bitcoin reorgs a
+        // finalized block's anchor, and would reject the canonical recovery
+        // chain forever (it forks below the node's frozen tip) — a permanent
+        // stall (observed on a validateanchor=0 follower). Such a follower
+        // delegates anchor validation to the network and must use plain
+        // most-work fork choice, which follows the Bitcoin reorg transitively.
+        // "Finality modulo Bitcoin" requires watching Bitcoin; without the
+        // watcher there is no sound finality floor to impose. A non-anchored PoS
+        // chain has no Bitcoin to be modulo of, so the gate is absolute there.
+        // See doc/sequentia/04-proof-of-stake.md §6.
+        const bool anchor_can_release_finality = (!g_con_bitcoin_anchor || g_validate_anchor);
+        if (anchor_can_release_finality && g_pos_immediate_final_height >= 0) {
             const CBlockIndex* anc_final = pindexPrev->GetAncestor(g_pos_immediate_final_height);
             if (nHeight <= g_pos_immediate_final_height ||
                 anc_final == nullptr || anc_final->GetBlockHash() != g_pos_immediate_final_hash) {

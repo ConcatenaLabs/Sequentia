@@ -312,6 +312,18 @@ SEQ finality is immediate *modulo* a Bitcoin reorg. Tested in
 `feature_pos_finality.py` (a higher-countersignature competitor does not reorg a
 finalized block) and `feature_pos_fork_choice.py`.
 
+Because the watcher is the gate's only release valve, the gate is enforced only
+by nodes that run it — `-validateanchor`, the default on a Bitcoin-anchored
+chain. A node configured `validateanchor=0` does not watch Bitcoin, so it could
+never lower its finalized point when Bitcoin reorgs a finalized block's anchor;
+enforcing the gate there would make it reject the canonical recovery chain
+forever and stall. Such a follower instead uses plain most-work fork choice and
+follows the Bitcoin reorg transitively through the peers it relies on for anchor
+validation — *finality modulo Bitcoin requires watching Bitcoin*. (A non-anchored
+PoS chain has no Bitcoin to be modulo of, so the gate is absolute there.) The
+gate and the watcher must therefore be coupled: enforced iff
+`!con_bitcoin_anchor || validateanchor`.
+
 ## 7. Anchor freshness for real-time swaps
 
 Real-time cross-chain atomic swaps need the Sequentia tip to reference the
