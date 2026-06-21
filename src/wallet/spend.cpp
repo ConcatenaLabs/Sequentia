@@ -952,8 +952,12 @@ static bool CreateTransactionInternal(
     // exchange rate, or its value is 0 rfa — the node would reject the tx as
     // paying no fee, and the wallet would otherwise compute a 0 fee requirement
     // (ConvertValueToAmount returns 0 for an unpriced asset) and build an
-    // unbroadcastable transaction. Refuse up front with a clear error.
-    if (g_con_any_asset_fees && coin_selection_params.m_fee_asset != ::policyAsset) {
+    // unbroadcastable transaction. Refuse up front with a clear error. This
+    // applies to the policy asset too: SEQ is not privileged for fees (its 1:1
+    // rate is only a default), so a producer that refuses it (rate 0) must also
+    // refuse fees paid in it. ConvertAmountToValue already returns the policy
+    // asset's configured rate, falling back to 1:1 only when unset.
+    if (g_con_any_asset_fees) {
         CAmount probe = ExchangeRateMap::GetInstance().ConvertAmountToValue(exchange_rate_scale, coin_selection_params.m_fee_asset).GetValue();
         if (probe <= 0) {
             error = _("The chosen fee asset is not accepted (no exchange rate on this node); choose a different fee asset");

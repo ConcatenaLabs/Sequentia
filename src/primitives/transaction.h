@@ -584,11 +584,19 @@ public:
         return !witness.IsNull();
     }
 
-    const CAsset& GetFeeAsset(CAsset& default_asset) const 
+    // SEQUENTIA: return the asset the transaction pays its fee in, falling back
+    // to default_asset when there is no explicit fee output. The default is
+    // taken BY VALUE and never mutated: callers routinely pass the global
+    // ::policyAsset here, and an earlier version aliased default_asset and
+    // assigned the tx's fee asset into it, silently clobbering ::policyAsset for
+    // the whole process (poisoning fee valuation, dust checks, RecomputeFees
+    // eviction, block assembly, ...). Returning by value keeps the result self
+    // contained.
+    CAsset GetFeeAsset(CAsset default_asset) const
     {
-        CAsset& feeAsset = default_asset;
+        CAsset feeAsset = default_asset;
         for (size_t i = 0; i < vout.size(); i++) {
-            if (vout[i].IsFee()) { 
+            if (vout[i].IsFee()) {
                 feeAsset = vout[i].nAsset.GetAsset();
             }
         }

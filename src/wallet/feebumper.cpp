@@ -223,9 +223,19 @@ Result CreateRateBumpTransaction(CWallet& wallet, const uint256& txid, const CCo
     if (g_con_elementsmode || g_con_any_asset_fees) {
         old_fee = GetFeeMap(*wtx.tx)[old_fee_asset];
     }
+    // SEQUENTIA: a fee bump that does not explicitly request a different fee
+    // asset must keep paying in the ORIGINAL transaction's fee asset, not fall
+    // back to ::policyAsset. (Previously this happened to work only because
+    // CTransaction::GetFeeAsset clobbered ::policyAsset with the last admitted
+    // fee asset; with that aliasing fixed, an unset fee asset must be pinned
+    // here explicitly.) Pin it on new_coin_control so both the change-destination
+    // logic below and CreateTransaction's coin selection agree on the asset.
+    if (g_con_any_asset_fees && !new_coin_control.m_fee_asset.has_value()) {
+        new_coin_control.m_fee_asset = old_fee_asset;
+    }
     // ELEMENTS: Ensure that the fee asset has a change destination in case the user wants
     // to switch to paying with a fee asset that isn't used in the original transaction.
-    CAsset fee_asset = coin_control.m_fee_asset.value_or(::policyAsset);
+    CAsset fee_asset = new_coin_control.m_fee_asset.value_or(::policyAsset);
     if (g_con_any_asset_fees && !destinations.count(fee_asset)) {
         CTxDestination change_dest;
         OutputType output_type = wallet.m_default_change_type.value_or(wallet.m_default_address_type);

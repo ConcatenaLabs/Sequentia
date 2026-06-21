@@ -173,6 +173,7 @@ BASE_SCRIPTS = [
     "feature_any_asset_fee_rbf.py",
     "feature_any_asset_fee_scenarios.py",
     'feature_dynamic_fee_rates.py',
+    'feature_recompute_fees_evict.py',
     'feature_max_block_weight.py',
     'feature_bitcoin_anchoring.py',
     'feature_anchor_swap_consistency.py',

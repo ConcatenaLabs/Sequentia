@@ -1103,14 +1103,29 @@ void CTxMemPool::RecomputeFees()
         // outside the iteration). The wallet keeps its own copy, so the owner can
         // still RBF/replace it with an accepted fee asset.
         std::vector<CTransactionRef> to_evict;
-        for (CTxMemPoolEntry tx : mapTx) {
-            txiter it = mapTx.find(tx.GetTx().GetHash());
-            CValue newFeeValue = exchangeRateMap.ConvertAmountToValue(tx.GetFee(), tx.GetFeeAsset());
-            if (tx.GetFeeAsset() != ::policyAsset && tx.GetFee() > 0 && newFeeValue.GetValue() <= 0) {
+        // SEQUENTIA: do NOT iterate mapTx (a boost::multi_index) while mutating
+        // it. The body calls mapTx.modify(...) on the current entry, its
+        // ancestors and its descendants; mutating a multi_index mid-iteration is
+        // undefined behaviour and was crashing producer nodes. Snapshot the
+        // txids first, then re-find and operate on the *live* entry each pass.
+        // Operating on a by-value CTxMemPoolEntry copy was doubly wrong: a copy
+        // is not in mapTx, so CalculateMemPoolAncestors(copy, ..., /*search*/false)
+        // walked parent links that point at the live container from an object
+        // that is not part of it.
+        std::vector<uint256> hashes;
+        hashes.reserve(mapTx.size());
+        for (const CTxMemPoolEntry& e : mapTx) {
+            hashes.push_back(e.GetTx().GetHash());
+        }
+        for (const uint256& hash : hashes) {
+            txiter it = mapTx.find(hash);
+            if (it == mapTx.end()) continue; // already evicted as someone's descendant
+            CValue newFeeValue = exchangeRateMap.ConvertAmountToValue(it->GetFee(), it->GetFeeAsset());
+            if (it->GetFeeAsset() != ::policyAsset && it->GetFee() > 0 && newFeeValue.GetValue() <= 0) {
                 to_evict.push_back(it->GetSharedTx());
                 continue;
             }
-            CValue feeValueDelta = newFeeValue - tx.GetFeeValue();
+            CValue feeValueDelta = newFeeValue - it->GetFeeValue();
             if (feeValueDelta != 0) {
                 mapTx.modify(it, update_fee_value(newFeeValue));
 
@@ -1118,7 +1133,7 @@ void CTxMemPool::RecomputeFees()
                 setEntries setAncestors;
                 uint64_t nNoLimit = std::numeric_limits<uint64_t>::max();
                 std::string dummy;
-                CalculateMemPoolAncestors(tx, setAncestors, nNoLimit, nNoLimit, nNoLimit, nNoLimit, dummy, false);
+                CalculateMemPoolAncestors(*it, setAncestors, nNoLimit, nNoLimit, nNoLimit, nNoLimit, dummy, false);
                 for (txiter ancestorIt : setAncestors) {
                     mapTx.modify(ancestorIt, update_descendant_state(0, feeValueDelta, 0));
                 }
