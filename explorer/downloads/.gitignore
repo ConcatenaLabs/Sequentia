@@ -1,0 +1,9 @@
+# Release artifacts are built outputs (large), not source — don't commit them.
+# Drop the built tarball / installer here at deploy time; the landing page
+# (index.html) links to them by name.
+*.exe
+*.tar.gz
+*.tar.xz
+*.zip
+*.dmg
+*.AppImage

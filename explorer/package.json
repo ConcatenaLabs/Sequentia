@@ -1,0 +1,10 @@
+{
+  "name": "sequentia-explorer-serve",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Static + /api proxy server for the public Sequentia explorer (serve-public.js).",
+  "comment": "Express is pinned to v4: serve-public.js uses the v4 '*' wildcard route syntax, which Express 5 removed.",
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}
