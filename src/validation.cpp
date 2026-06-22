@@ -3814,7 +3814,19 @@ bool CChainState::InvalidateBlock(BlockValidationState& state, CBlockIndex* pind
         // transactions back to the mempool if disconnecting was successful,
         // and we're not doing a very deep invalidation (in which case
         // keeping the mempool up to date is probably futile anyway).
-        MaybeUpdateMempoolForReorg(disconnectpool, /* fAddToMempool = */ (++disconnected <= 10) && ret);
+        // SEQUENTIA: the chain follows Bitcoin reorgs to ANY depth (real-time
+        // anchoring is the whole point — see doc/sequentia/03-bitcoin-anchoring.md),
+        // and a reorg must RE-ORDER transactions, never DROP them. Otherwise the
+        // txs in orphaned blocks (and the funds they move) are silently lost
+        // instead of being re-mined on the new chain — observed as a wallet's
+        // balance vanishing after a deep parent-chain reorg. So on a
+        // Bitcoin-anchored chain, re-add every disconnected block's transactions
+        // to the mempool regardless of reorg depth; each iteration uses a fresh
+        // per-block disconnectpool, so memory is bounded by the mempool's own
+        // size limit. Upstream's 10-block cap is kept only for non-anchored
+        // chains, where deep invalidation is a rare manual op.
+        const bool add_to_mempool = (g_con_bitcoin_anchor || (++disconnected <= 10)) && ret;
+        MaybeUpdateMempoolForReorg(disconnectpool, /* fAddToMempool = */ add_to_mempool);
         if (!ret) return false;
         assert(invalid_walk_tip->pprev == m_chain.Tip());
 
