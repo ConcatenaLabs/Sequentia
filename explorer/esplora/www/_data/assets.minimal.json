@@ -1,3 +1,9 @@
 {
-  "c8eccacf0953e1931cd31e434d8319101cc36e6c38b0e2104d8687552fae3e40": ["sequentia.io", "tSEQ", "Sequentia", 8]
+  "c8eccacf0953e1931cd31e434d8319101cc36e6c38b0e2104d8687552fae3e40": ["sequentia.io", "tSEQ", "Sequentia", 8],
+  "dc7f45fcfeb17c8ae74e284472d85543395f50e88f4a36cb652e8102703b7027": ["sequentia.io", "USDX", "USD Stablecoin", 8],
+  "f7a756b4e966623065543e52b754324629295c895046a0916a939898ad373667": ["sequentia.io", "EURX", "Euro Stablecoin", 8],
+  "c28fc933ce41f7a9188da029c6f7377fc961e2d58588372ef4073438610b9283": ["sequentia.io", "GOLD", "Gold (troy ounce)", 8],
+  "3e30ad0ebd13cc7ac1bbd12df1414b213708a6048b745d185fe935d9624024db": ["sequentia.io", "WBTC", "Wrapped Bitcoin", 8],
+  "50a00211d7074d5f857a3dec6cb84a1f3fefb26e56a94a954a299b28ac9f32df": ["sequentia.io", "SILVR", "Silver (troy ounce)", 8],
+  "f9b069ac00f4dc57381a304704fac93301f90d3d509d207cfbddc8367d4e9cfb": ["sequentia.io", "OILX", "Crude Oil (barrel)", 8]
 }

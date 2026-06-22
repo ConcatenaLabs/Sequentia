@@ -66,22 +66,48 @@ app.use('/download', express.static(DOWNLOAD_DIR))
 // the application/wasm MIME). Before the SPA fallback so /wallet/* is its own.
 app.use('/wallet', express.static(WALLET_DIR))
 
-// Testnet faucet. execFile (no shell) + a strict address regex means the
-// user-supplied address can't inject anything; it's only ever an argv element.
+// Testnet faucet. execFile (no shell) + a strict address regex means the user-supplied
+// address can't inject anything; it's only ever an argv element. The optional `asset` is
+// validated against a fixed allowlist (label -> amount), so it's injection-safe too.
+const FAUCET_ASSETS = { USDX: '10', EURX: '10', GOLD: '10', WBTC: '10', SILVR: '10', OILX: '10' }
 app.post('/faucet', express.json({ limit: '4kb' }), (req, res) => {
   const address = String((req.body && req.body.address) || '').trim()
   if (!FAUCET_ADDR_RE.test(address)) return res.status(400).json({ error: 'Enter a valid Sequentia address.' })
+  const asset = String((req.body && req.body.asset) || '').trim()   // '' = native tSEQ
+  if (asset && !Object.prototype.hasOwnProperty.call(FAUCET_ASSETS, asset))
+    return res.status(400).json({ error: 'Unknown faucet asset.' })
+  const unit = asset || 'tSEQ'
+  const amount = asset ? FAUCET_ASSETS[asset] : FAUCET_AMOUNT
   const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim()
-  if (faucetTooSoon('a:' + address) || faucetTooSoon('i:' + ip))
+  if (faucetTooSoon('a:' + unit + ':' + address) || faucetTooSoon('i:' + unit + ':' + ip))
     return res.status(429).json({ error: 'Already funded recently — please wait before requesting again.' })
-  execFile(FAUCET_CLI,
-    ['-datadir=' + FAUCET_DATADIR, '-rpcwallet=' + FAUCET_WALLET, '-named', 'sendtoaddress',
-      'address=' + address, 'amount=' + FAUCET_AMOUNT, 'fee_rate=2'],
-    { timeout: 30000 },
+  const args = ['-datadir=' + FAUCET_DATADIR, '-rpcwallet=' + FAUCET_WALLET, '-named', 'sendtoaddress',
+    'address=' + address, 'amount=' + amount, 'fee_rate=2']
+  if (asset) args.push('assetlabel=' + asset)
+  execFile(FAUCET_CLI, args, { timeout: 30000 },
     (err, stdout, stderr) => {
       if (err) return res.status(502).json({ error: String(stderr || err.message).trim().split('\n').pop() || 'faucet send failed' })
-      faucetSeen.set('a:' + address, Date.now()); faucetSeen.set('i:' + ip, Date.now())
-      res.json({ txid: stdout.trim(), amount: FAUCET_AMOUNT })
+      faucetSeen.set('a:' + unit + ':' + address, Date.now()); faucetSeen.set('i:' + unit + ':' + ip, Date.now())
+      res.json({ txid: stdout.trim(), amount, asset: unit })
+    })
+})
+
+// Fee-asset exchange rates (Sequentia any-asset-fees): GET /feerates returns the
+// node's EFFECTIVE acceptance set {("bitcoin"|assetHex): rate} via getfeeexchangerates
+// — i.e. static + non-stale dynamic rates, exactly what the node accepts for fees right
+// now (stale dynamic entries are already dropped). The wallet uses these to let users
+// pay a Sequentia tx fee in a non-policy asset. No user input → no injection surface;
+// short-cached since rates move ~per block.
+const FEERATES_CLI = process.env.FEERATES_CLI || FAUCET_CLI
+const FEERATES_DATADIR = process.env.FEERATES_DATADIR || '/root/sequentia/explorer-node'
+let feeratesCache = { at: 0, body: null }
+app.get('/feerates', (req, res) => {
+  if (feeratesCache.body && Date.now() - feeratesCache.at < 15000) return res.type('json').send(feeratesCache.body)
+  execFile(FEERATES_CLI, ['-datadir=' + FEERATES_DATADIR, 'getfeeexchangerates'], { timeout: 10000 },
+    (err, stdout) => {
+      if (err) return res.status(502).json({ error: 'fee rates unavailable' })
+      feeratesCache = { at: Date.now(), body: stdout }
+      res.type('json').send(stdout)
     })
 })
 
