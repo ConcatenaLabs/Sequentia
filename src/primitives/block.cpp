@@ -13,6 +13,11 @@ bool g_con_blockheightinheader = false;
 bool g_signed_blocks = false;
 // SEQUENTIA
 bool g_con_bitcoin_anchor = false;
+// SEQUENTIA: Proof-of-Stake mode. Defined here in the consensus library (not
+// pos.cpp) because CProof's inline (de)serialization in block.h reads it, so
+// the standalone libelementsconsensus must carry the symbol. Mirrors
+// g_con_bitcoin_anchor above; pos.cpp keeps the extern declaration via pos.h.
+bool g_con_pos = false;
 
 std::string CProof::ToString() const
 {

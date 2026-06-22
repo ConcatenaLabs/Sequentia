@@ -19,7 +19,9 @@
 
 #include <algorithm>
 
-bool g_con_pos = false;
+// g_con_pos is defined in primitives/block.cpp (the consensus library) so the
+// standalone libelementsconsensus resolves CProof's serialization; it is
+// declared extern in pos.h.
 uint32_t g_pos_unbonding_period = DEFAULT_POS_UNBONDING_PERIOD;
 int64_t g_pos_slot_interval = DEFAULT_POS_SLOT_INTERVAL;
 int g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
