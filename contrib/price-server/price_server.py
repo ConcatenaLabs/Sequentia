@@ -213,24 +213,62 @@ class PriceServer:
     def __init__(self, config, dry_run=False):
         self.cfg = config
         self.dry_run = dry_run
-        self.rpc = None if dry_run else NodeRPC(config["node_rpc"])
+        # Publish to one node ("node_rpc") or many ("node_rpcs"). A single box can
+        # run a whole committee, so one price server feeds them all — then whichever
+        # producer the VRF elects in a round already prices the fee assets.
+        if dry_run:
+            self.rpcs = []
+        elif "node_rpcs" in config:
+            self.rpcs = [NodeRPC(n) for n in config["node_rpcs"]]
+        else:
+            self.rpcs = [NodeRPC(config["node_rpc"])]
         timeout = config.get("source_timeout", 15)
         defaults = config.get("default_thresholds", {})
         self.feeds = [AssetFeed(a, defaults, timeout) for a in config["assets"]]
         self.source_name = config.get("source_name", "price-server")
         self.stopping = False
 
+    def _denominate(self, raw, labels):
+        """Optionally re-express every rate relative to a reference asset.
+
+        Sources quote prices in some common currency (e.g. USD). A Sequentia
+        node, however, prices fees in its native gas/policy asset, whose rate is
+        definitionally 1e8 (you cannot price the reference against itself). When
+        `reference_asset_label` is configured we divide every raw rate by the
+        reference asset's raw rate, so the reference lands at exactly 1e8 and
+        every other asset is expressed in units of it (e.g. "how many SEQ equal
+        one unit of GOLD"). Without it, rates are published as the sources quote
+        them."""
+        ref_label = self.cfg.get("reference_asset_label")
+        if not ref_label:
+            return dict(raw)
+        ref_id = next((aid for aid, lbl in labels.items() if lbl == ref_label), None)
+        if ref_id is None or not raw.get(ref_id):
+            log.warning("reference asset %r unavailable this round; skipping "
+                        "publish to avoid a denomination discontinuity", ref_label)
+            return {}
+        ref_rate = raw[ref_id]
+        return {aid: max(1, round(r * COIN / ref_rate)) for aid, r in raw.items()}
+
     def poll_once(self):
-        rates = {}
+        raw, labels = {}, {}
         for feed in self.feeds:
             rate = feed.poll()
             if rate is not None:
-                rates[feed.asset_id] = rate
+                raw[feed.asset_id] = rate
+                labels[feed.asset_id] = feed.label
+        rates = self._denominate(raw, labels)
         if self.dry_run:
             log.info("dry-run: would publish %s", json.dumps(rates))
             return rates
-        self.rpc.call("setdynamicfeerates", rates, self.source_name)
-        log.info("published %d rate(s) to node", len(rates))
+        ok = 0
+        for rpc in self.rpcs:
+            try:
+                rpc.call("setdynamicfeerates", rates, self.source_name)
+                ok += 1
+            except Exception as e:
+                log.warning("publish to %s failed: %s", rpc.url, e)
+        log.info("published %d rate(s) to %d/%d node(s)", len(rates), ok, len(self.rpcs))
         return rates
 
     def run(self):
@@ -249,11 +287,12 @@ class PriceServer:
                 time.sleep(0.5)
         # Fail safe: leave no dynamic rates behind on clean shutdown.
         if not self.dry_run:
-            try:
-                self.rpc.call("cleardynamicfeerates")
-                log.info("cleared dynamic rates on shutdown")
-            except Exception as e:
-                log.warning("could not clear dynamic rates on shutdown: %s", e)
+            for rpc in self.rpcs:
+                try:
+                    rpc.call("cleardynamicfeerates")
+                except Exception as e:
+                    log.warning("could not clear dynamic rates on %s: %s", rpc.url, e)
+            log.info("cleared dynamic rates on shutdown")
 
     def _stop(self, _sig, _frame):
         self.stopping = True
