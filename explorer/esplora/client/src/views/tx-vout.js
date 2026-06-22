@@ -19,7 +19,10 @@ const isActive = (vout, { index, view, query, addr }) =>
 
 const fee = (vout, { t, index, ...S }) => layout(vout, t`Transaction fees`, null, { t, index, ...S })
 
-const isUnblinded = vout => vout.valuecommitment != null && vout.value != null
+// An output is showable if it has a concrete value: either explicit (Sequentia's
+// non-confidential default — value present, no commitment) or a wallet-unblinded
+// confidential output. Truly blinded outputs (value == null) stay "Confidential".
+const isUnblinded = vout => vout.value != null
 
 const standard = (vout, { isOpen, spend, t, ...S }) => layout(
   vout

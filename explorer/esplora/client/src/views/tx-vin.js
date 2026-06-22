@@ -16,7 +16,9 @@ const isActive = (vin, { index, view, query, addr }) =>
    (view == 'tx' && query && !!query[`input:${index}`])
 || (view == 'addr' && addr && vin.prevout && vin.prevout.scriptpubkey_address == addr.address)
 
-const isUnblinded = vin => vin.prevout && vin.prevout.valuecommitment != null && vin.prevout.value != null
+// See tx-vout.js: an input's prevout is showable whenever it has a concrete value
+// (explicit Sequentia outputs have value but no commitment).
+const isUnblinded = vin => vin.prevout && vin.prevout.value != null
 
 const pegin = (vin, { isOpen, t, ...S }) => layout(
   vin
