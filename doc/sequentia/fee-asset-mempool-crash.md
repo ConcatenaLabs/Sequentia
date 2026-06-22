@@ -81,8 +81,16 @@ and block connect — versus a SIGABRT within ~30 s before the fix.
   restart has a ≤30 s window before the next push, after which fee values are
   corrected (now without crashing). Reduce `poll_interval_secs` in the price-server
   config if faster post-restart recovery is wanted.
-- **Producer rollout.** The same crash affects any node that holds a fee-asset tx
-  across a rate refresh. Block producers (the committee) don't currently receive
-  externally-submitted txs (relay gap; txs are pushed to a miner manually), so they
-  weren't crashing — but they need this same binary before fee-asset txs can be
-  mined end-to-end.
+- **Producer rollout (done).** The same crash affects any node that holds a fee-asset
+  tx across a rate refresh, so the fix was built and the committee restarted onto it
+  (block production resumed normally). Both the explorer node and the producers now run
+  the fixed binary.
+- **Relay gap (fixed).** The PoS committee mesh does not relay externally-submitted
+  transactions to producers, so a tx that only reached the explorer node's mempool was
+  never mined (it showed `"unbroadcast": true`); the workaround was to `sendrawtransaction`
+  it to a miner by hand. `explorer/serve-public.js` now intercepts `POST /api/tx` and
+  forwards the raw tx straight to a producer (which accepts, mines and relays it) plus the
+  explorer node (immediate electrs indexing), returning the txid like esplora. Verified:
+  a fee-in-USDX tx broadcast through the normal web-wallet path was mined without any
+  manual step (recipient received the asset, confirmed on-chain). BTC (`/testnet4/api/tx`)
+  is untouched — it relays on the real testnet4 network.

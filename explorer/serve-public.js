@@ -35,6 +35,11 @@ const FAUCET_COOLDOWN_MS = Number(process.env.FAUCET_COOLDOWN_MS || 3600000)
 const FAUCET_ADDR_RE = /^(tb1|tsqb1)[ac-hj-np-z02-9]{20,180}$/   // bech32/blech32 data charset
 const faucetSeen = new Map()                                    // key -> last-served epoch ms
 const faucetTooSoon = k => { const t = faucetSeen.get(k); return t && (Date.now() - t) < FAUCET_COOLDOWN_MS }
+// Broadcast forwarding (see below): the PoS committee mesh doesn't relay externally-
+// submitted txs to producers, so we push raw Sequentia txs straight to a producer.
+const PRODUCER_DATADIR = process.env.PRODUCER_DATADIR || '/root/seq-testnet/node000'
+const BROADCAST_DATADIR = process.env.BROADCAST_DATADIR || '/root/sequentia/explorer-node'
+const TXHEX_RE = /^[0-9a-fA-F]{2,400000}$/
 
 const proxyTo = target => {
   const [host, port] = target.split(':')
@@ -56,6 +61,28 @@ app.disable('x-powered-by')
 // API proxies first (the /testnet4 prefix is stripped by the mount, so the
 // upstream electrs sees /blocks/... etc). Order matters: /testnet4/api before /api.
 app.use('/testnet4/api', proxyTo(T4_ELECTRS))
+
+// Sequentia tx broadcast. The PoS committee mesh does not relay externally-submitted
+// transactions to block producers, so a tx that only reaches the explorer node's mempool
+// is never mined. Push the raw tx straight to a producer (which accepts, mines and relays
+// it) plus the explorer node (so electrs indexes it immediately), and return the txid like
+// esplora's POST /tx. GET /api/tx/:txid (queries) still falls through to electrs below.
+// The hex is validated to [0-9a-f] so it can only ever be one argv element to elements-cli.
+// BTC (/testnet4/api/tx) is untouched above — it relays on the real testnet4 network.
+app.post('/api/tx', express.text({ type: () => true, limit: '500kb' }), (req, res) => {
+  const rawhex = String(req.body || '').trim()
+  if (!TXHEX_RE.test(rawhex)) return res.status(400).type('text').send('invalid transaction hex')
+  const send = (dd, cb) => execFile(FAUCET_CLI, ['-datadir=' + dd, 'sendrawtransaction', rawhex], { timeout: 25000 }, cb)
+  send(PRODUCER_DATADIR, (err, stdout, stderr) => {
+    send(BROADCAST_DATADIR, () => {})                                  // best-effort: index on the explorer node too
+    const out = String(stdout || '').trim()
+    const emsg = String(stderr || (err && err.message) || '')
+    if (/^[0-9a-f]{64}$/i.test(out)) return res.type('text').send(out)                          // accepted -> txid
+    if (/already in (block chain|mempool)|txn-already/i.test(emsg)) return res.type('text').send(out)  // benign re-broadcast
+    res.status(400).type('text').send(emsg.trim().split('\n').pop() || 'broadcast failed')
+  })
+})
+
 app.use('/api', proxyTo(SEQ_ELECTRS))
 
 // Release-artifact downloads + landing page (before the SPA fallback so
