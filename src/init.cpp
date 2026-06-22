@@ -821,6 +821,13 @@ void InitParameterInteraction(ArgsManager& args)
             LogPrintf("%s: chain=test -> setting -anchorminconf=1\n", __func__);
         if (args.SoftSetArg("-anchorpollinterval", "15"))
             LogPrintf("%s: chain=test -> setting -anchorpollinterval=15\n", __func__);
+        // Peer with the shared testnet gateway. Done as an -addnode default
+        // (explicit IP:port) rather than via vSeeds: vSeeds are DNS hostnames
+        // resolved without a port (LookupHost), and the gateway's P2P port
+        // (18444) differs from this chain's nDefaultPort, so a vSeeds entry
+        // can't reach it. -addnode takes IP:port directly (as the README did).
+        if (args.SoftSetArg("-addnode", "159.195.15.140:18444"))
+            LogPrintf("%s: chain=test -> setting -addnode=159.195.15.140:18444 (shared testnet gateway)\n", __func__);
     }
 }
 
