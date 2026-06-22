@@ -145,5 +145,22 @@ app.use(express.static(DIST))
 app.get('/testnet4/*', (req, res) => res.sendFile(path.join(DIST, 'testnet4', 'index.html')))
 app.get('*', (req, res) => res.sendFile(path.join(DIST, 'index.html')))
 
+// Backstop: every 20s, forward any still-unbroadcast tx in the explorer node's mempool to
+// a producer, so nothing sits unmined even if it arrived before this server started or via
+// a path other than POST /api/tx. txids come from the node's own mempool, never from users.
+setInterval(() => {
+  execFile(FAUCET_CLI, ['-datadir=' + BROADCAST_DATADIR, 'getrawmempool', 'true'], { timeout: 15000 }, (err, stdout) => {
+    if (err) return
+    let m; try { m = JSON.parse(stdout) } catch { return }
+    for (const [txid, info] of Object.entries(m)) {
+      if (!info || !info.unbroadcast) continue
+      execFile(FAUCET_CLI, ['-datadir=' + BROADCAST_DATADIR, 'getrawtransaction', txid], { timeout: 15000 }, (e, hex) => {
+        if (e || !hex) return
+        execFile(FAUCET_CLI, ['-datadir=' + PRODUCER_DATADIR, 'sendrawtransaction', String(hex).trim()], { timeout: 20000 }, () => {})
+      })
+    }
+  })
+}, 20000)
+
 app.listen(PORT, () =>
   console.log(`explorer (static+proxy) on :${PORT}  /api->${SEQ_ELECTRS}  /testnet4/api->${T4_ELECTRS}  /download->${DOWNLOAD_DIR}  /wallet->${WALLET_DIR}  /faucet->${FAUCET_AMOUNT} tSEQ from ${FAUCET_WALLET}`))

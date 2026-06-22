@@ -90,7 +90,11 @@ and block connect — versus a SIGABRT within ~30 s before the fix.
   never mined (it showed `"unbroadcast": true`); the workaround was to `sendrawtransaction`
   it to a miner by hand. `explorer/serve-public.js` now intercepts `POST /api/tx` and
   forwards the raw tx straight to a producer (which accepts, mines and relays it) plus the
-  explorer node (immediate electrs indexing), returning the txid like esplora. Verified:
-  a fee-in-USDX tx broadcast through the normal web-wallet path was mined without any
-  manual step (recipient received the asset, confirmed on-chain). BTC (`/testnet4/api/tx`)
-  is untouched — it relays on the real testnet4 network.
+  explorer node (immediate electrs indexing), returning the txid like esplora. It also
+  runs a 20 s backstop that forwards any still-`unbroadcast` mempool tx to a producer, so
+  a tx can't sit stuck even if it entered before the server started or arrived by another
+  path. Verified: a fee-in-asset tx broadcast through the normal web-wallet path was mined
+  without any manual step (recipient received the asset, confirmed on-chain). BTC
+  (`/testnet4/api/tx`) is untouched — it relays on the real testnet4 network. Note: mining
+  can take a few blocks (producer rotation), so a single early "not confirmed" check is not
+  a failure.
