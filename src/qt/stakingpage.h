@@ -1,4 +1,4 @@
-// Copyright (c) 2024 The Sequentia developers
+// Copyright (c) 2026 The Sequentia developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -7,68 +7,57 @@
 
 #include <QWidget>
 
-class ClientModel;
+#include <univalue.h>
+
 class WalletModel;
 class PlatformStyle;
 
 QT_BEGIN_NAMESPACE
-class QLabel;
-class QLineEdit;
-class QSpinBox;
-class QPlainTextEdit;
-class QPushButton;
 class QTableWidget;
-class QTimer;
+class QLineEdit;
+class QLabel;
+class QPushButton;
+class QShowEvent;
 QT_END_NAMESPACE
 
-/** SEQUENTIA: Proof-of-Stake monitoring + staking-output helper page.
- *
- *  Read-only status is derived from the node's PoS RPCs (getposschedule,
- *  getstakerinfo); the stake-script helper wraps getstakescript so a user can
- *  obtain the canonical staking output to fund (and the unbonding lock it
- *  enforces). All RPC calls go through clientModel->node().executeRpc(). */
+/**
+ * Sequentia "Staking" page: one-click staking. Locks SEQ into a staking output
+ * (via the registerstake wallet RPC) and shows the committee/registry status and
+ * how to enable block production. All actions go through the node RPCs.
+ */
 class StakingPage : public QWidget
 {
     Q_OBJECT
 
 public:
     explicit StakingPage(const PlatformStyle* platformStyle, QWidget* parent = nullptr);
-    ~StakingPage();
-
-    void setClientModel(ClientModel* clientModel);
-    void setWalletModel(WalletModel* walletModel);
+    void setModel(WalletModel* model);
 
 public Q_SLOTS:
     void refresh();
 
+protected:
+    void showEvent(QShowEvent* event) override;
+
 private Q_SLOTS:
-    void generateStakeScript();
-    void copyScript();
+    void onStake();
 
 private:
-    const PlatformStyle* m_platform_style;
-    ClientModel* m_client_model{nullptr};
     WalletModel* m_wallet_model{nullptr};
-    QTimer* m_timer{nullptr};
+    const PlatformStyle* m_platform_style;
 
-    // status
+    QLabel* m_producer_status{nullptr};
+    QLabel* m_summary{nullptr};
+    QTableWidget* m_stakers{nullptr};
+    QLineEdit* m_stake_amount{nullptr};
+    QPushButton* m_stake_button{nullptr};
+    QLabel* m_result{nullptr};
     QLabel* m_status{nullptr};
-    QLabel* m_height{nullptr};
-    QLabel* m_stakers{nullptr};
-    QLabel* m_total_weight{nullptr};
-    QLabel* m_committee{nullptr};
-    QLabel* m_slot{nullptr};
-    QTableWidget* m_table{nullptr};
 
-    // stake-script helper
-    QLineEdit* m_pubkey_in{nullptr};
-    QSpinBox* m_csv_blocks{nullptr};
-    QPushButton* m_generate{nullptr};
-    QPlainTextEdit* m_script_out{nullptr};
-    QLabel* m_script_info{nullptr};
-    QPushButton* m_copy{nullptr};
-
-    void setStatusMessage(const QString& msg, bool error);
+    //! Run an RPC (wallet=true uses the /wallet/<name> endpoint; false the node endpoint).
+    UniValue callRpc(const std::string& method, const UniValue& params, bool& ok, QString& error, bool wallet = true);
+    std::string walletUri() const;
+    void setStatus(const QString& msg, bool error = false);
 };
 
 #endif // BITCOIN_QT_STAKINGPAGE_H

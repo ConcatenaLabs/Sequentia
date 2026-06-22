@@ -16,16 +16,27 @@
 #include <qt/transactiontablemodel.h>
 #include <qt/walletmodel.h>
 
+#include <interfaces/node.h>
 #include <policy/policy.h>
+#include <univalue.h>
+#include <util/system.h>
 
 #include <QAbstractItemDelegate>
 #include <QApplication>
 #include <QDateTime>
+#include <QFrame>
+#include <QHBoxLayout>
+#include <QLabel>
 #include <QPainter>
+#include <QPointer>
+#include <QPushButton>
 #include <QStatusTipEvent>
+#include <QTimer>
+#include <QVBoxLayout>
 
 #include <algorithm>
 #include <map>
+#include <thread>
 
 #define DECORATION_SIZE 54
 #define NUM_ITEMS 5
@@ -165,6 +176,45 @@ OverviewPage::OverviewPage(const PlatformStyle *platformStyle, QWidget *parent) 
     showOutOfSyncWarning(true);
     connect(ui->labelWalletStatus, &QPushButton::clicked, this, &OverviewPage::outOfSyncWarningClicked);
     connect(ui->labelTransactionsStatus, &QPushButton::clicked, this, &OverviewPage::outOfSyncWarningClicked);
+
+    // --- Sequentia network status panel (Bitcoin anchor + staking / producer) ---
+    {
+        QFrame* seqFrame = new QFrame(this);
+        seqFrame->setFrameShape(QFrame::StyledPanel);
+        QVBoxLayout* seqLayout = new QVBoxLayout(seqFrame);
+        seqLayout->setContentsMargins(10, 6, 10, 6);
+        QLabel* seqTitle = new QLabel(tr("Sequentia network"), seqFrame);
+        QFont stf = seqTitle->font(); stf.setBold(true); seqTitle->setFont(stf);
+        seqLayout->addWidget(seqTitle);
+        m_anchor_label = new QLabel(tr("Bitcoin anchor: ..."), seqFrame);
+        m_anchor_label->setWordWrap(true);
+        seqLayout->addWidget(m_anchor_label);
+        m_staking_label = new QLabel(tr("Staking: ..."), seqFrame);
+        m_staking_label->setWordWrap(true);
+        seqLayout->addWidget(m_staking_label);
+        m_finality_label = new QLabel(tr("Finality: ..."), seqFrame);
+        m_finality_label->setWordWrap(true);
+        seqLayout->addWidget(m_finality_label);
+        QLabel* dualLabel = new QLabel(tr("Bitcoin (testnet4): your receiving address is also a Bitcoin testnet4 address - "
+                                          "the same address receives both SEQ and tBTC. (Sending tBTC requires a Bitcoin node.)"), seqFrame);
+        dualLabel->setWordWrap(true);
+        dualLabel->setStyleSheet("color:#555;");
+        seqLayout->addWidget(dualLabel);
+        QHBoxLayout* btcRow = new QHBoxLayout();
+        m_btc_label = new QLabel(tr("testnet4 BTC: not checked"), seqFrame);
+        m_btc_label->setWordWrap(true);
+        m_btc_button = new QPushButton(tr("Check BTC balance"), seqFrame);
+        btcRow->addWidget(m_btc_label, 1);
+        btcRow->addWidget(m_btc_button, 0);
+        seqLayout->addLayout(btcRow);
+        connect(m_btc_button, &QPushButton::clicked, this, &OverviewPage::onCheckBtc);
+        if (QVBoxLayout* top = qobject_cast<QVBoxLayout*>(layout())) {
+            top->insertWidget(1, seqFrame); // after labelAlerts (index 0), above the balances row
+        }
+    }
+    m_seq_status_timer = new QTimer(this);
+    m_seq_status_timer->setInterval(8000);
+    connect(m_seq_status_timer, &QTimer::timeout, this, &OverviewPage::updateSeqStatus);
 }
 
 void OverviewPage::handleTransactionClicked(const QModelIndex &index)
@@ -295,6 +345,132 @@ void OverviewPage::setWalletModel(WalletModel *model)
 
     // update the display unit, to not use the default ("BTC")
     updateDisplayUnit();
+
+    // Kick off the Sequentia network-status panel (anchor + staking)
+    if (m_seq_status_timer && walletModel) {
+        updateSeqStatus();
+        m_seq_status_timer->start();
+    }
+}
+
+void OverviewPage::updateSeqStatus()
+{
+    if (!walletModel) return;
+    interfaces::Node& node = walletModel->node();
+
+    // Bitcoin anchor status (node RPC)
+    if (m_anchor_label) {
+        try {
+            UniValue r = node.executeRpc("getanchorstatus", UniValue(UniValue::VARR), std::string());
+            if (r.isObject()) {
+                const int tip = r.exists("tipheight") ? r["tipheight"].get_int() : -1;
+                const int anc = r.exists("anchorheight") ? r["anchorheight"].get_int() : -1;
+                const QString st = r.exists("anchorstatus") ? QString::fromStdString(r["anchorstatus"].get_str()) : tr("unknown");
+                const bool ok = (st == QLatin1String("ok"));
+                m_anchor_label->setText(tr("Bitcoin anchor: %1  -  Sequentia height %2, anchored to testnet4 block %3")
+                                        .arg(ok ? tr("OK") : st).arg(tip).arg(anc));
+                m_anchor_label->setStyleSheet(ok ? "color:#1e7e34;" : "color:#a00;");
+            } else {
+                m_anchor_label->setText(tr("Bitcoin anchor: unavailable"));
+            }
+        } catch (const UniValue&) {
+            m_anchor_label->setText(tr("Bitcoin anchor: unavailable"));
+        } catch (const std::exception&) {
+            m_anchor_label->setText(tr("Bitcoin anchor: unavailable"));
+        }
+    }
+
+    // Staking / committee size + this node's producer status (from its own config)
+    if (m_staking_label) {
+        int n = -1;
+        try {
+            UniValue r = node.executeRpc("getstakerinfo", UniValue(UniValue::VARR), std::string());
+            if (r.isObject()) n = (int)r.getKeys().size();
+        } catch (const UniValue&) {
+        } catch (const std::exception&) {}
+        const bool producer = gArgs.GetBoolArg("-posproducer", false) && !gArgs.GetArgs("-posproducerkey").empty();
+        // n is the number of *registered* stakers (the full registry), which is
+        // distinct from and may exceed the per-block committee cap; label it as such.
+        const QString registered = (n >= 0) ? tr("%1 registered staker(s)").arg(n) : tr("staker count unavailable");
+        m_staking_label->setText(tr("Staking: %1 - this node is %2")
+                                 .arg(registered, producer ? tr("configured to produce") : tr("not producing")));
+    }
+
+    // Finality + long-range-fork (checkpoint) status. No finalized checkpoint
+    // means the chain still follows Bitcoin reorgs to any depth (the core
+    // real-time-anchoring invariant); a non-empty conflicts set is a loud alarm.
+    if (m_finality_label) {
+        try {
+            UniValue r = node.executeRpc("getcheckpointinfo", UniValue(UniValue::VARR), std::string());
+            if (r.isObject()) {
+                const int fin = r.exists("finalized_height") ? r["finalized_height"].get_int() : -1;
+                const int depth = r.exists("depth") ? r["depth"].get_int() : 0;
+                const size_t nconf = (r.exists("conflicts") && r["conflicts"].isArray()) ? r["conflicts"].size() : 0;
+                if (nconf > 0) {
+                    m_finality_label->setText(tr("WARNING - CHECKPOINT CONFLICT: %1 conflicting checkpoint(s) on Bitcoin. "
+                                                 "A long-range fork may be in progress; do not rely on finality.").arg((int)nconf));
+                    m_finality_label->setStyleSheet("QLabel{padding:6px;border-radius:4px;background:#f8d7da;color:#a00;font-weight:bold;}");
+                } else if (fin >= 0) {
+                    m_finality_label->setText(tr("Finality: finalized up to Sequentia height %1 (checkpoint buried %2 Bitcoin blocks deep). "
+                                                 "Below that height the chain still follows Bitcoin reorgs.").arg(fin).arg(depth));
+                    m_finality_label->setStyleSheet("color:#1e7e34;");
+                } else {
+                    m_finality_label->setText(tr("Finality: no checkpoint finalized yet - the chain follows Bitcoin reorgs to any depth "
+                                                 "(real-time anchoring). A checkpoint finalizes once buried %1 Bitcoin blocks deep.").arg(depth));
+                    m_finality_label->setStyleSheet("color:#856404;");
+                }
+            } else {
+                m_finality_label->setText(tr("Finality: unavailable"));
+            }
+        } catch (const UniValue&) {
+            m_finality_label->setText(tr("Finality: unavailable"));
+        } catch (const std::exception&) {
+            m_finality_label->setText(tr("Finality: unavailable"));
+        }
+    }
+}
+
+void OverviewPage::onCheckBtc()
+{
+    if (!walletModel || !m_btc_button || !m_btc_label) return;
+    m_btc_button->setEnabled(false);
+    m_btc_label->setText(tr("testnet4 BTC: scanning the parent chain (a few seconds)..."));
+    const std::string uri = "/wallet/" + walletModel->getWalletName().toStdString();
+    interfaces::Node* nodePtr = &walletModel->node();
+    QPointer<OverviewPage> self(this);
+    // Run the (slow) parent-chain scantxoutset off the GUI thread, then post the
+    // result back to the GUI thread. Avoids freezing the UI; no extra Qt module.
+    std::thread([self, nodePtr, uri]() {
+        QString text;
+        try {
+            UniValue r = nodePtr->executeRpc("getbtcbalance", UniValue(UniValue::VARR), uri);
+            if (r.isObject()) {
+                const std::string e = r.exists("error") ? r["error"].getValStr() : std::string();
+                if (!e.empty()) {
+                    text = QStringLiteral("testnet4 BTC: ") + QString::fromStdString(e);
+                } else {
+                    const QString amt = r.exists("btc") ? QString::fromStdString(r["btc"].getValStr()) : QStringLiteral("0");
+                    const int naddr = r.exists("addresses") ? r["addresses"].get_int() : 0;
+                    text = QStringLiteral("Bitcoin (testnet4): ") + amt + QStringLiteral(" tBTC across ")
+                           + QString::number(naddr) + QStringLiteral(" of your addresses");
+                }
+            } else {
+                text = QStringLiteral("testnet4 BTC: unexpected response");
+            }
+        } catch (const UniValue&) {
+            text = QStringLiteral("testnet4 BTC: query failed");
+        } catch (const std::exception& ex) {
+            text = QStringLiteral("testnet4 BTC: ") + QString::fromStdString(ex.what());
+        } catch (...) {
+            text = QStringLiteral("testnet4 BTC: query failed");
+        }
+        QMetaObject::invokeMethod(qApp, [self, text]() {
+            if (self) {
+                if (self->m_btc_label) self->m_btc_label->setText(text);
+                if (self->m_btc_button) self->m_btc_button->setEnabled(true);
+            }
+        });
+    }).detach();
 }
 
 void OverviewPage::changeEvent(QEvent* e)

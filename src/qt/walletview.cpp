@@ -6,6 +6,8 @@
 
 #include <qt/addressbookpage.h>
 #include <qt/askpassphrasedialog.h>
+#include <qt/assetspage.h>
+#include <qt/stakingpage.h>
 #include <qt/clientmodel.h>
 #include <qt/guiutil.h>
 #include <qt/optionsmodel.h>
@@ -14,7 +16,6 @@
 #include <qt/receivecoinsdialog.h>
 #include <qt/sendcoinsdialog.h>
 #include <qt/signverifymessagedialog.h>
-#include <qt/stakingpage.h>
 #include <qt/transactiontablemodel.h>
 #include <qt/transactionview.h>
 #include <qt/walletmodel.h>
@@ -66,8 +67,11 @@ WalletView::WalletView(WalletModel* wallet_model, const PlatformStyle* _platform
     sendCoinsPage = new SendCoinsDialog(platformStyle);
     sendCoinsPage->setModel(walletModel);
 
+    assetsPage = new AssetsPage(platformStyle);
+    assetsPage->setModel(walletModel);
+
     stakingPage = new StakingPage(platformStyle);
-    stakingPage->setWalletModel(walletModel);
+    stakingPage->setModel(walletModel);
 
     usedSendingAddressesPage = new AddressBookPage(platformStyle, AddressBookPage::ForEditing, AddressBookPage::SendingTab, this);
     usedSendingAddressesPage->setModel(walletModel->getAddressTableModel());
@@ -79,6 +83,7 @@ WalletView::WalletView(WalletModel* wallet_model, const PlatformStyle* _platform
     addWidget(transactionsPage);
     addWidget(receiveCoinsPage);
     addWidget(sendCoinsPage);
+    addWidget(assetsPage);
     addWidget(stakingPage);
 
     connect(overviewPage, &OverviewPage::transactionClicked, this, &WalletView::transactionClicked);
@@ -127,7 +132,6 @@ void WalletView::setClientModel(ClientModel *_clientModel)
 
     overviewPage->setClientModel(_clientModel);
     sendCoinsPage->setClientModel(_clientModel);
-    stakingPage->setClientModel(_clientModel);
     walletModel->setClientModel(_clientModel);
 }
 
@@ -167,17 +171,22 @@ void WalletView::gotoReceiveCoinsPage()
     setCurrentWidget(receiveCoinsPage);
 }
 
+void WalletView::gotoAssetsPage()
+{
+    setCurrentWidget(assetsPage);
+}
+
+void WalletView::gotoStakingPage()
+{
+    setCurrentWidget(stakingPage);
+}
+
 void WalletView::gotoSendCoinsPage(QString addr)
 {
     setCurrentWidget(sendCoinsPage);
 
     if (!addr.isEmpty())
         sendCoinsPage->setAddress(addr);
-}
-
-void WalletView::gotoStakingPage()
-{
-    setCurrentWidget(stakingPage);
 }
 
 void WalletView::gotoSignMessageTab(QString addr)

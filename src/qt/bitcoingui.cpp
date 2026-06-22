@@ -268,19 +268,26 @@ void BitcoinGUI::createActions()
     receiveCoinsAction->setShortcut(QKeySequence(Qt::ALT + Qt::Key_3));
     tabGroup->addAction(receiveCoinsAction);
 
-    stakingAction = new QAction(platformStyle->SingleColorIcon(":/icons/tx_mined"), tr("&Staking"), this);
-    stakingAction->setStatusTip(tr("Monitor Proof-of-Stake and create staking outputs"));
-    stakingAction->setToolTip(stakingAction->statusTip());
-    stakingAction->setCheckable(true);
-    stakingAction->setShortcut(QKeySequence(Qt::ALT + Qt::Key_5));
-    tabGroup->addAction(stakingAction);
-
     historyAction = new QAction(platformStyle->SingleColorIcon(":/icons/history"), tr("&Transactions"), this);
     historyAction->setStatusTip(tr("Browse transaction history"));
     historyAction->setToolTip(historyAction->statusTip());
     historyAction->setCheckable(true);
     historyAction->setShortcut(QKeySequence(Qt::ALT + Qt::Key_4));
     tabGroup->addAction(historyAction);
+
+    assetsAction = new QAction(platformStyle->SingleColorIcon(":/icons/receiving_addresses"), tr("&Assets"), this);
+    assetsAction->setStatusTip(tr("Issue, reissue and manage Sequentia assets"));
+    assetsAction->setToolTip(assetsAction->statusTip());
+    assetsAction->setCheckable(true);
+    assetsAction->setShortcut(QKeySequence(Qt::ALT + Qt::Key_5));
+    tabGroup->addAction(assetsAction);
+
+    stakingAction = new QAction(platformStyle->SingleColorIcon(":/icons/receiving_addresses"), tr("&Staking"), this);
+    stakingAction->setStatusTip(tr("Stake SEQ and manage block production"));
+    stakingAction->setToolTip(stakingAction->statusTip());
+    stakingAction->setCheckable(true);
+    stakingAction->setShortcut(QKeySequence(Qt::ALT + Qt::Key_6));
+    tabGroup->addAction(stakingAction);
 
 #ifdef ENABLE_WALLET
     // These showNormalIfMinimized are needed because Send Coins and Receive Coins
@@ -291,10 +298,12 @@ void BitcoinGUI::createActions()
     connect(sendCoinsAction, &QAction::triggered, [this]{ gotoSendCoinsPage(); });
     connect(receiveCoinsAction, &QAction::triggered, [this]{ showNormalIfMinimized(); });
     connect(receiveCoinsAction, &QAction::triggered, this, &BitcoinGUI::gotoReceiveCoinsPage);
-    connect(stakingAction, &QAction::triggered, [this]{ showNormalIfMinimized(); });
-    connect(stakingAction, &QAction::triggered, this, &BitcoinGUI::gotoStakingPage);
     connect(historyAction, &QAction::triggered, [this]{ showNormalIfMinimized(); });
     connect(historyAction, &QAction::triggered, this, &BitcoinGUI::gotoHistoryPage);
+    connect(assetsAction, &QAction::triggered, [this]{ showNormalIfMinimized(); });
+    connect(assetsAction, &QAction::triggered, this, &BitcoinGUI::gotoAssetsPage);
+    connect(stakingAction, &QAction::triggered, [this]{ showNormalIfMinimized(); });
+    connect(stakingAction, &QAction::triggered, this, &BitcoinGUI::gotoStakingPage);
 #endif // ENABLE_WALLET
 
     quitAction = new QAction(tr("E&xit"), this);
@@ -541,8 +550,9 @@ void BitcoinGUI::createToolBars()
         toolbar->addAction(overviewAction);
         toolbar->addAction(sendCoinsAction);
         toolbar->addAction(receiveCoinsAction);
-        toolbar->addAction(stakingAction);
         toolbar->addAction(historyAction);
+        toolbar->addAction(assetsAction);
+        toolbar->addAction(stakingAction);
         overviewAction->setChecked(true);
 
 #ifdef ENABLE_WALLET
@@ -741,8 +751,9 @@ void BitcoinGUI::setWalletActionsEnabled(bool enabled)
     overviewAction->setEnabled(enabled);
     sendCoinsAction->setEnabled(enabled);
     receiveCoinsAction->setEnabled(enabled);
-    stakingAction->setEnabled(enabled);
     historyAction->setEnabled(enabled);
+    assetsAction->setEnabled(enabled);
+    stakingAction->setEnabled(enabled);
     encryptWalletAction->setEnabled(enabled);
     backupWalletAction->setEnabled(enabled);
     changePassphraseAction->setEnabled(enabled);
@@ -895,6 +906,12 @@ void BitcoinGUI::gotoReceiveCoinsPage()
 {
     receiveCoinsAction->setChecked(true);
     if (walletFrame) walletFrame->gotoReceiveCoinsPage();
+}
+
+void BitcoinGUI::gotoAssetsPage()
+{
+    assetsAction->setChecked(true);
+    if (walletFrame) walletFrame->gotoAssetsPage();
 }
 
 void BitcoinGUI::gotoStakingPage()

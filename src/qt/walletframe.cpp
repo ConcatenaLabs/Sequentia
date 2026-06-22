@@ -171,11 +171,11 @@ void WalletFrame::gotoReceiveCoinsPage()
         i.value()->gotoReceiveCoinsPage();
 }
 
-void WalletFrame::gotoSendCoinsPage(QString addr)
+void WalletFrame::gotoAssetsPage()
 {
     QMap<WalletModel*, WalletView*>::const_iterator i;
     for (i = mapWalletViews.constBegin(); i != mapWalletViews.constEnd(); ++i)
-        i.value()->gotoSendCoinsPage(addr);
+        i.value()->gotoAssetsPage();
 }
 
 void WalletFrame::gotoStakingPage()
@@ -183,6 +183,13 @@ void WalletFrame::gotoStakingPage()
     QMap<WalletModel*, WalletView*>::const_iterator i;
     for (i = mapWalletViews.constBegin(); i != mapWalletViews.constEnd(); ++i)
         i.value()->gotoStakingPage();
+}
+
+void WalletFrame::gotoSendCoinsPage(QString addr)
+{
+    QMap<WalletModel*, WalletView*>::const_iterator i;
+    for (i = mapWalletViews.constBegin(); i != mapWalletViews.constEnd(); ++i)
+        i.value()->gotoSendCoinsPage(addr);
 }
 
 void WalletFrame::gotoSignMessageTab(QString addr)

@@ -144,6 +144,7 @@ private:
     QAction* m_load_psbt_clipboard_action = nullptr;
     QAction* aboutAction = nullptr;
     QAction* receiveCoinsAction = nullptr;
+    QAction* assetsAction = nullptr;
     QAction* stakingAction = nullptr;
     QAction* optionsAction = nullptr;
     QAction* encryptWalletAction = nullptr;
@@ -276,10 +277,12 @@ public Q_SLOTS:
     void gotoHistoryPage();
     /** Switch to receive coins page */
     void gotoReceiveCoinsPage();
+    /** Switch to the Assets page */
+    void gotoAssetsPage();
+    /** Switch to the Staking page */
+    void gotoStakingPage();
     /** Switch to send coins page */
     void gotoSendCoinsPage(QString addr = "");
-    /** Switch to staking page */
-    void gotoStakingPage();
 
     /** Show Sign/Verify Message dialog and switch to sign message tab */
     void gotoSignMessageTab(QString addr = "");

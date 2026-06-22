@@ -8,7 +8,9 @@
 #include <exchangerates.h>
 #include <issuance.h>
 #include <key_io.h>
+#include <mainchainrpc.h>
 #include <policy/policy.h>
+#include <pos.h>
 #include <rpc/rawtransaction_util.h>
 #include <rpc/util.h>
 #include <script/pegins.h>
@@ -99,6 +101,162 @@ UniValue SendMoney(CWallet& wallet, const CCoinControl &coin_control, std::vecto
         return entry;
     }
     return tx->GetHash().GetHex();
+}
+
+RPCHelpMan registerstake()
+{
+    return RPCHelpMan{"registerstake",
+                "\nRegister an amount of SEQ as proof-of-stake for a staker public key, by funding the\n"
+                "canonical staking output (see getstakescript) from this wallet. The amount counts as the\n"
+                "key's on-chain stake while the output stays unspent; spending it (unbonding) requires the\n"
+                "staker key and the script's CSV maturity. Get a staker pubkey with getnewaddress followed\n"
+                "by getaddressinfo. To then produce blocks, run with -posproducer and -posproducerkey set\n"
+                "to the staker key.\n",
+                {
+                    {"pubkey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The staker public key (hex)."},
+                    {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "Amount of SEQ to stake (at or above the chain's minimum stake)."},
+                    {"csv_blocks", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Height-based unbonding delay in blocks (default: the chain minimum)."},
+                    {"csv_seconds", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Time-based unbonding delay in seconds (mutually exclusive with csv_blocks)."},
+                },
+                RPCResult{RPCResult::Type::OBJ, "", "", {
+                    {RPCResult::Type::STR_HEX, "txid", "the registration transaction id"},
+                    {RPCResult::Type::STR_HEX, "script", "the staking scriptPubKey that was funded"},
+                    {RPCResult::Type::NUM, "csv", "the BIP68 CSV value encoded in the script"},
+                    {RPCResult::Type::NUM, "unbonding_seconds", "the unbonding lock in seconds before the stake can be withdrawn"},
+                }},
+                RPCExamples{HelpExampleCli("registerstake", "\"02abc...\" 50000")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!g_con_pos) throw JSONRPCError(RPC_MISC_ERROR, "Proof-of-Stake (con_pos) is not enabled on this chain");
+    std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
+    if (!pwallet) return NullUniValue;
+    pwallet->BlockUntilSyncedToCurrentChain();
+
+    std::vector<unsigned char> pubkey_bytes = ParseHexV(request.params[0], "pubkey");
+    CPubKey pubkey(pubkey_bytes);
+    if (!pubkey.IsFullyValid()) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid public key");
+
+    const bool has_blocks = !request.params[2].isNull();
+    const bool has_seconds = !request.params[3].isNull();
+    if (has_blocks && has_seconds) throw JSONRPCError(RPC_INVALID_PARAMETER, "Specify at most one of csv_blocks or csv_seconds");
+    uint32_t csv;
+    if (has_seconds) {
+        int64_t secs = request.params[3].get_int64();
+        int64_t units = (secs + (1 << CTxIn::SEQUENCE_LOCKTIME_GRANULARITY) - 1) >> CTxIn::SEQUENCE_LOCKTIME_GRANULARITY;
+        if (units < 1 || units > (int64_t)CTxIn::SEQUENCE_LOCKTIME_MASK) throw JSONRPCError(RPC_INVALID_PARAMETER, "csv_seconds out of range");
+        csv = CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG | (uint32_t)units;
+    } else {
+        int64_t blocks = has_blocks ? request.params[2].get_int64() : (int64_t)g_pos_unbonding_period;
+        if (blocks < 1 || blocks > (int64_t)CTxIn::SEQUENCE_LOCKTIME_MASK) throw JSONRPCError(RPC_INVALID_PARAMETER, "csv_blocks must be between 1 and 65535");
+        csv = (uint32_t)blocks;
+    }
+    auto lock = PosStakeLockSeconds(csv);
+    const int64_t required = PosRequiredUnbondingSeconds();
+    if (!lock || *lock < required) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("the unbonding lock (%d s) is below the chain's minimum (%d s); it would not count as stake", lock ? *lock : 0, required));
+
+    CScript stake_script = BuildStakeScript(pubkey, csv);
+    CAmount amount = AmountFromValue(request.params[1], true);
+    // Enforce the chain's minimum-stake floor: a sub-floor output is silently
+    // dropped from the schedule/committee by PosIsEligibleStake and would never
+    // count, so refuse it here rather than fund a stake that does nothing.
+    if (g_pos_min_stake > 0 && (uint64_t)amount < g_pos_min_stake)
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("amount is below the chain's minimum stake of %d SEQ; it would not count as stake", g_pos_min_stake / 100000000ULL));
+
+    LOCK(pwallet->cs_wallet);
+    EnsureWalletIsUnlocked(*pwallet);
+
+    CRecipient recipient = {stake_script, amount, Params().GetConsensus().pegged_asset, CPubKey(), false};
+    std::vector<CRecipient> recipients = {recipient};
+    CCoinControl coin_control;
+    mapValue_t mapValue;
+    UniValue txid = SendMoney(*pwallet, coin_control, recipients, mapValue, /*verbose=*/false, /*ignore_blind_fail=*/true);
+
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("txid", txid);
+    result.pushKV("script", HexStr(stake_script));
+    result.pushKV("csv", (int64_t)csv);
+    if (lock) result.pushKV("unbonding_seconds", (int64_t)*lock);
+    return result;
+},
+    };
+}
+
+RPCHelpMan getbtcbalance()
+{
+    return RPCHelpMan{"getbtcbalance",
+                "\nReturn the Bitcoin (parent-chain) balance held at this wallet's receiving addresses.\n"
+                "Sequentia addresses are Bitcoin-identical, so each receiving address is also valid on\n"
+                "the Bitcoin parent chain; this scans the parent chain's UTXO set (via the configured\n"
+                "-mainchainrpc connection) for unspent outputs paying those addresses. Read-only: the\n"
+                "wallet holds the keys, but sending BTC requires a full (non read-only) Bitcoin node.\n",
+                {},
+                RPCResult{RPCResult::Type::OBJ, "", "", {
+                    {RPCResult::Type::STR_AMOUNT, "btc", "total unspent parent-chain balance across this wallet's addresses"},
+                    {RPCResult::Type::NUM, "addresses", "number of wallet receiving addresses scanned"},
+                    {RPCResult::Type::NUM, "parent_height", "the parent-chain height the scan covered"},
+                    {RPCResult::Type::STR, "error", "non-empty if the parent chain could not be queried"},
+                }},
+                RPCExamples{HelpExampleCli("getbtcbalance", "") + HelpExampleRpc("getbtcbalance", "")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
+    if (!pwallet) return NullUniValue;
+    pwallet->BlockUntilSyncedToCurrentChain();
+
+    // Gather this wallet's receiving addresses (Bitcoin-identical) as scan descriptors.
+    UniValue descriptors(UniValue::VARR);
+    int naddr = 0;
+    {
+        LOCK(pwallet->cs_wallet);
+        for (const auto& item : pwallet->m_address_book) {
+            if (item.second.IsChange()) continue;
+            const std::string addr = EncodeDestination(item.first);
+            if (addr.empty()) continue;
+            descriptors.push_back("addr(" + addr + ")");
+            ++naddr;
+        }
+    }
+
+    UniValue result(UniValue::VOBJ);
+    if (naddr == 0) {
+        result.pushKV("btc", ValueFromAmount(0));
+        result.pushKV("addresses", 0);
+        result.pushKV("parent_height", 0);
+        result.pushKV("error", "no receiving addresses yet - create one on the Receive tab");
+        return result;
+    }
+
+    // Scan the parent chain's UTXO set for those addresses. The cs_wallet lock is
+    // released above, so the slow scantxoutset HTTP call does not block the wallet.
+    UniValue params(UniValue::VARR);
+    params.push_back("start");
+    params.push_back(descriptors);
+    CAmount total = 0;
+    int parent_height = 0;
+    std::string err;
+    try {
+        UniValue reply = CallMainChainRPC("scantxoutset", params);
+        if (reply.exists("error") && !reply["error"].isNull()) {
+            const UniValue& e = reply["error"];
+            err = (e.isObject() && e.exists("message")) ? e["message"].get_str() : e.write();
+        } else if (reply.exists("result") && reply["result"].isObject()) {
+            const UniValue& res = reply["result"];
+            if (res.exists("total_amount")) total = AmountFromValue(res["total_amount"]);
+            if (res.exists("height") && res["height"].isNum()) parent_height = res["height"].get_int();
+        }
+    } catch (const std::exception& e) {
+        err = std::string("parent chain unreachable: ") + e.what();
+    } catch (...) {
+        err = "parent chain query failed";
+    }
+
+    result.pushKV("btc", ValueFromAmount(total));
+    result.pushKV("addresses", naddr);
+    result.pushKV("parent_height", parent_height);
+    result.pushKV("error", err);
+    return result;
+},
+    };
 }
 
 

@@ -22,6 +22,9 @@ namespace Ui {
 
 QT_BEGIN_NAMESPACE
 class QModelIndex;
+class QTimer;
+class QLabel;
+class QPushButton;
 QT_END_NAMESPACE
 
 /** Overview ("home") page widget */
@@ -55,6 +58,14 @@ private:
     interfaces::WalletBalances m_balances;
     bool m_privacy{false};
 
+    // Sequentia network-status panel (Bitcoin anchor + staking / producer)
+    QTimer *m_seq_status_timer{nullptr};
+    QLabel *m_anchor_label{nullptr};
+    QLabel *m_staking_label{nullptr};
+    QLabel *m_finality_label{nullptr};
+    QLabel *m_btc_label{nullptr};
+    QPushButton *m_btc_button{nullptr};
+
     const PlatformStyle* m_platform_style;
 
     TxViewDelegate *txdelegate;
@@ -66,6 +77,8 @@ private Q_SLOTS:
     void updateAlerts(const QString &warnings);
     void updateWatchOnlyLabels(bool showWatchOnly);
     void setMonospacedFont(bool use_embedded_font);
+    void updateSeqStatus();
+    void onCheckBtc();
 };
 
 #endif // BITCOIN_QT_OVERVIEWPAGE_H

@@ -1,264 +1,270 @@
-// Copyright (c) 2024 The Sequentia developers
+// Copyright (c) 2026 The Sequentia developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <qt/stakingpage.h>
 
-#include <qt/clientmodel.h>
 #include <qt/platformstyle.h>
 #include <qt/walletmodel.h>
 
 #include <interfaces/node.h>
-#include <univalue.h>
+#include <key.h>
+#include <key_io.h>
+#include <pos.h>
+#include <util/strencodings.h>
+#include <util/system.h>
 
-#include <vector>
+#include <algorithm>
+#include <cmath>
 
-#include <QApplication>
-#include <QClipboard>
-#include <QDateTime>
-#include <QFont>
+#include <QDoubleValidator>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
 #include <QLineEdit>
-#include <QPlainTextEdit>
+#include <QLocale>
 #include <QPushButton>
-#include <QSpinBox>
+#include <QShowEvent>
 #include <QTableWidget>
-#include <QTableWidgetItem>
-#include <QTimer>
 #include <QVBoxLayout>
-
-namespace {
-// Call an RPC through the node interface; on failure return NullUniValue and set err.
-UniValue callRpc(ClientModel* model, const std::string& method, const UniValue& params, QString& err)
-{
-    err.clear();
-    if (!model) { err = QObject::tr("No node connection."); return NullUniValue; }
-    try {
-        return model->node().executeRpc(method, params, "");
-    } catch (const UniValue& e) {
-        if (e.isObject() && e.exists("message")) err = QString::fromStdString(e["message"].get_str());
-        else err = QString::fromStdString(e.write());
-    } catch (const std::exception& e) {
-        err = QString::fromUtf8(e.what());
-    } catch (...) {
-        err = QObject::tr("Unknown RPC error.");
-    }
-    return NullUniValue;
-}
-
-QString shortHex(const std::string& h)
-{
-    QString s = QString::fromStdString(h);
-    if (s.size() > 20) return s.left(10) + QStringLiteral("…") + s.right(8);
-    return s;
-}
-} // namespace
 
 StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
     : QWidget(parent), m_platform_style(platformStyle)
 {
-    QVBoxLayout* root = new QVBoxLayout(this);
+    QVBoxLayout* layout = new QVBoxLayout(this);
 
-    QLabel* title = new QLabel(tr("Proof-of-Stake"), this);
+    QLabel* title = new QLabel(tr("Staking"), this);
     QFont tf = title->font();
     tf.setPointSizeF(tf.pointSizeF() * 1.4);
     tf.setBold(true);
     title->setFont(tf);
-    root->addWidget(title);
+    layout->addWidget(title);
 
-    m_status = new QLabel(tr("Loading staking status…"), this);
-    m_status->setWordWrap(true);
-    root->addWidget(m_status);
+    QLabel* intro = new QLabel(
+        tr("Stake SEQ to help produce blocks and earn the right to do so. Staking locks SEQ into a "
+           "special output; it keeps counting while locked, and the lock is only the unbonding delay "
+           "before you could withdraw. The more you stake, the more often you're chosen to produce."), this);
+    intro->setWordWrap(true);
+    layout->addWidget(intro);
 
-    // --- network status ---
-    QGroupBox* statusBox = new QGroupBox(tr("Network staking status"), this);
-    QFormLayout* form = new QFormLayout(statusBox);
-    m_height = new QLabel(QStringLiteral("—"), this);
-    m_stakers = new QLabel(QStringLiteral("—"), this);
-    m_total_weight = new QLabel(QStringLiteral("—"), this);
-    m_committee = new QLabel(QStringLiteral("—"), this);
-    m_slot = new QLabel(QStringLiteral("—"), this);
-    form->addRow(tr("Next block height:"), m_height);
-    form->addRow(tr("Registered stakers:"), m_stakers);
-    form->addRow(tr("Total stake weight:"), m_total_weight);
-    form->addRow(tr("Committee / quorum:"), m_committee);
-    form->addRow(tr("Slot interval:"), m_slot);
-    root->addWidget(statusBox);
+    // --- Block-production status (read from this node's own config; the GUI shares the node process) ---
+    m_producer_status = new QLabel(this);
+    m_producer_status->setWordWrap(true);
+    m_producer_status->setTextFormat(Qt::PlainText);
+    layout->addWidget(m_producer_status);
 
-    // --- leader schedule ---
-    QGroupBox* schedBox = new QGroupBox(tr("Leader schedule (next block)"), this);
-    QVBoxLayout* schedLayout = new QVBoxLayout(schedBox);
-    m_table = new QTableWidget(0, 5, this);
-    QStringList headers;
-    headers << tr("Rank") << tr("Staker public key") << tr("Weight") << tr("Share") << tr("Slot opens");
-    m_table->setHorizontalHeaderLabels(headers);
-    m_table->horizontalHeader()->setStretchLastSection(true);
-    m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
-    m_table->verticalHeader()->setVisible(false);
-    schedLayout->addWidget(m_table);
-    root->addWidget(schedBox, 1);
-
-    // --- staking output helper ---
-    QGroupBox* stakeBox = new QGroupBox(tr("Create a staking output"), this);
-    QVBoxLayout* stakeLayout = new QVBoxLayout(stakeBox);
-    QLabel* hint = new QLabel(tr("Generate the canonical staking script for your staker public key, then send the policy asset to it to register stake. The output unlocks (unbonds) only after the delay below."), this);
-    hint->setWordWrap(true);
-    stakeLayout->addWidget(hint);
-    QHBoxLayout* inRow = new QHBoxLayout();
-    m_pubkey_in = new QLineEdit(this);
-    m_pubkey_in->setPlaceholderText(tr("Staker public key (hex)"));
-    m_csv_blocks = new QSpinBox(this);
-    m_csv_blocks->setRange(0, 65535);
-    m_csv_blocks->setValue(0);
-    m_csv_blocks->setSpecialValueText(tr("chain default"));
-    m_csv_blocks->setSuffix(tr(" blocks"));
-    m_generate = new QPushButton(tr("Generate"), this);
-    inRow->addWidget(m_pubkey_in, 1);
-    inRow->addWidget(new QLabel(tr("Unbonding:"), this));
-    inRow->addWidget(m_csv_blocks);
-    inRow->addWidget(m_generate);
-    stakeLayout->addLayout(inRow);
-    m_script_out = new QPlainTextEdit(this);
-    m_script_out->setReadOnly(true);
-    m_script_out->setMaximumHeight(60);
-    m_script_out->setPlaceholderText(tr("Staking scriptPubKey (hex) appears here"));
-    stakeLayout->addWidget(m_script_out);
-    m_script_info = new QLabel(this);
-    m_script_info->setWordWrap(true);
-    stakeLayout->addWidget(m_script_info);
-    m_copy = new QPushButton(tr("Copy script"), this);
-    m_copy->setEnabled(false);
-    QHBoxLayout* btnRow = new QHBoxLayout();
-    btnRow->addStretch();
-    btnRow->addWidget(m_copy);
-    stakeLayout->addLayout(btnRow);
-    root->addWidget(stakeBox);
-
-    connect(m_generate, &QPushButton::clicked, this, &StakingPage::generateStakeScript);
-    connect(m_copy, &QPushButton::clicked, this, &StakingPage::copyScript);
-
-    m_timer = new QTimer(this);
-    m_timer->setInterval(10000);
-    connect(m_timer, &QTimer::timeout, this, &StakingPage::refresh);
-}
-
-StakingPage::~StakingPage() = default;
-
-void StakingPage::setClientModel(ClientModel* clientModel)
-{
-    m_client_model = clientModel;
-    if (clientModel) {
-        refresh();
-        m_timer->start();
-    } else {
-        m_timer->stop();
+    // --- Stake action ---
+    QGroupBox* stakeGroup = new QGroupBox(tr("Stake SEQ"), this);
+    QFormLayout* stakeForm = new QFormLayout(stakeGroup);
+    m_stake_amount = new QLineEdit(stakeGroup);
+    m_stake_amount->setPlaceholderText(tr("amount of SEQ (at or above the chain minimum, e.g. 50000)"));
+    {
+        QLocale lc(QLocale::C); lc.setNumberOptions(QLocale::RejectGroupSeparator);
+        auto* v = new QDoubleValidator(0, 1e15, 8, m_stake_amount);
+        v->setLocale(lc);
+        m_stake_amount->setValidator(v);
     }
+    m_stake_button = new QPushButton(tr("Stake"), stakeGroup);
+    m_result = new QLabel(stakeGroup);
+    m_result->setWordWrap(true);
+    m_result->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    stakeForm->addRow(tr("Amount:"), m_stake_amount);
+    stakeForm->addRow(QString(), m_stake_button);
+    stakeForm->addRow(tr("Result:"), m_result);
+    layout->addWidget(stakeGroup);
+
+    // --- Committee / registry status ---
+    QGroupBox* statusGroup = new QGroupBox(tr("Stake registry"), this);
+    QVBoxLayout* statusLayout = new QVBoxLayout(statusGroup);
+    m_summary = new QLabel(statusGroup);
+    statusLayout->addWidget(m_summary);
+    m_stakers = new QTableWidget(0, 2, statusGroup);
+    m_stakers->setHorizontalHeaderLabels({tr("Staker public key"), tr("Weight (SEQ)")});
+    m_stakers->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    m_stakers->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    m_stakers->verticalHeader()->setVisible(false);
+    m_stakers->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    statusLayout->addWidget(m_stakers);
+    QPushButton* refreshBtn = new QPushButton(tr("Refresh"), statusGroup);
+    QHBoxLayout* refreshRow = new QHBoxLayout();
+    refreshRow->addStretch();
+    refreshRow->addWidget(refreshBtn);
+    statusLayout->addLayout(refreshRow);
+    layout->addWidget(statusGroup);
+
+    m_status = new QLabel(this);
+    m_status->setWordWrap(true);
+    layout->addWidget(m_status);
+    layout->addStretch();
+
+    connect(m_stake_button, &QPushButton::clicked, this, &StakingPage::onStake);
+    connect(refreshBtn, &QPushButton::clicked, this, &StakingPage::refresh);
 }
 
-void StakingPage::setWalletModel(WalletModel* walletModel)
+void StakingPage::setModel(WalletModel* model)
 {
-    m_wallet_model = walletModel;
+    m_wallet_model = model;
+    if (m_wallet_model) refresh();
 }
 
-void StakingPage::setStatusMessage(const QString& msg, bool error)
+std::string StakingPage::walletUri() const
 {
+    if (!m_wallet_model) return std::string();
+    return "/wallet/" + m_wallet_model->getWalletName().toStdString();
+}
+
+UniValue StakingPage::callRpc(const std::string& method, const UniValue& params, bool& ok, QString& error, bool wallet)
+{
+    ok = false;
+    if (!m_wallet_model) { error = tr("No wallet loaded."); return UniValue(); }
+    try {
+        UniValue r = m_wallet_model->node().executeRpc(method, params, wallet ? walletUri() : std::string());
+        ok = true;
+        return r;
+    } catch (const UniValue& e) {
+        if (e.isObject() && e.exists("message")) error = QString::fromStdString(e["message"].get_str());
+        else error = QString::fromStdString(e.write());
+    } catch (const std::exception& e) {
+        error = QString::fromStdString(e.what());
+    } catch (...) {
+        error = tr("Unknown error.");
+    }
+    return UniValue();
+}
+
+void StakingPage::setStatus(const QString& msg, bool error)
+{
+    m_status->setStyleSheet(error ? "color:#a00;" : "color:#070;");
     m_status->setText(msg);
-    m_status->setStyleSheet(error ? QStringLiteral("color:#c0392b;") : QStringLiteral("color:#27ae60;"));
 }
 
 void StakingPage::refresh()
 {
-    if (!m_client_model) return;
-
-    QString err;
-    UniValue sched = callRpc(m_client_model, "getposschedule", UniValue(UniValue::VARR), err);
-    if (!err.isEmpty()) {
-        setStatusMessage(tr("Proof-of-Stake unavailable: %1").arg(err), true);
-        return;
+    // Fetch the stake registry first; the producer banner needs it to verify that a
+    // configured producer key is actually staked at/above the chain minimum.
+    UniValue reg; bool haveReg = false; QString regErr;
+    if (m_wallet_model) {
+        bool rok;
+        reg = callRpc("getstakerinfo", UniValue(UniValue::VARR), rok, regErr, /*wallet=*/false);
+        haveReg = rok && reg.isObject();
     }
 
-    QString err2;
-    UniValue stakers = callRpc(m_client_model, "getstakerinfo", UniValue(UniValue::VARR), err2);
-    qulonglong total = 0;
-    int nstakers = 0;
-    if (err2.isEmpty() && stakers.isObject()) {
-        const std::vector<UniValue>& vals = stakers.getValues();
-        nstakers = (int)vals.size();
-        for (const UniValue& v : vals) total += (qulonglong)v.get_int64();
-    }
-
-    setStatusMessage(tr("Proof-of-Stake is active on this chain."), false);
-    if (sched.exists("height")) m_height->setText(QString::number(sched["height"].get_int()));
-    m_stakers->setText(QString::number(nstakers));
-    m_total_weight->setText(QString::number(total));
-    if (sched.exists("committee")) {
-        int csize = (int)sched["committee"].size();
-        int quorum = sched.exists("quorum") ? sched["quorum"].get_int() : 0;
-        m_committee->setText(tr("%1 members, quorum %2").arg(csize).arg(quorum));
-    } else {
-        m_committee->setText(tr("single-signer (no committee)"));
-    }
-    if (sched.exists("slot_interval")) m_slot->setText(tr("%1 s").arg(QString::number(sched["slot_interval"].get_int64())));
-
-    m_table->setRowCount(0);
-    if (sched.exists("schedule") && sched["schedule"].isArray()) {
-        const std::vector<UniValue>& rows = sched["schedule"].getValues();
-        for (size_t i = 0; i < rows.size(); ++i) {
-            const UniValue& e = rows[i];
-            int row = (int)i;
-            m_table->insertRow(row);
-            int rank = e.exists("rank") ? e["rank"].get_int() : (int)i;
-            qulonglong w = e.exists("weight") ? (qulonglong)e["weight"].get_int64() : 0;
-            QString pk = e.exists("pubkey") ? shortHex(e["pubkey"].get_str()) : QStringLiteral("—");
-            double share = total > 0 ? (100.0 * (double)w / (double)total) : 0.0;
-            QString slot = QStringLiteral("—");
-            if (e.exists("slot_opens")) {
-                slot = QDateTime::fromSecsSinceEpoch(e["slot_opens"].get_int64()).toString("yyyy-MM-dd HH:mm:ss");
+    // Block-production status from this node's own config (gArgs; the GUI shares the
+    // node process), gated on a configured key actually holding an eligible stake.
+    // Config alone does not produce blocks, so green requires on-chain eligibility.
+    if (m_producer_status) {
+        const bool configured = gArgs.GetBoolArg("-posproducer", false);
+        const std::vector<std::string> wifs = gArgs.GetArgs("-posproducerkey");
+        int eligible = 0;
+        if (configured && haveReg) {
+            const uint64_t floor = std::max<uint64_t>(g_pos_min_stake, 1);
+            for (const std::string& w : wifs) {
+                CKey key = DecodeSecret(w);
+                if (!key.IsValid()) continue;
+                const std::string pk = HexStr(key.GetPubKey());
+                if (reg.exists(pk) && (uint64_t)reg[pk].get_int64() >= floor) ++eligible;
             }
-            m_table->setItem(row, 0, new QTableWidgetItem(rank == 0 ? tr("%1 (leader)").arg(rank) : QString::number(rank)));
-            m_table->setItem(row, 1, new QTableWidgetItem(pk));
-            m_table->setItem(row, 2, new QTableWidgetItem(QString::number(w)));
-            m_table->setItem(row, 3, new QTableWidgetItem(QString::asprintf("%.2f%%", share)));
-            m_table->setItem(row, 4, new QTableWidgetItem(slot));
+        }
+        if (configured && !wifs.empty() && eligible > 0) {
+            m_producer_status->setText(tr("Block production: ENABLED - %1 configured key(s) hold an eligible stake. "
+                                          "You produce whenever the committee elects one of them.").arg(eligible));
+            m_producer_status->setStyleSheet("QLabel{padding:8px;border-radius:4px;background:#e6f4ea;color:#1e7e34;}");
+        } else if (configured && !wifs.empty()) {
+            m_producer_status->setText(tr("Block production: configured but NOT yet eligible - your producer key(s) are not "
+                                          "registered with a stake at or above the chain minimum, or the stake has not "
+                                          "confirmed yet. Stake below and wait for confirmation."));
+            m_producer_status->setStyleSheet("QLabel{padding:8px;border-radius:4px;background:#fff3cd;color:#856404;}");
+        } else {
+            m_producer_status->setText(tr("Block production: not enabled. After staking, add posproducer=1 and "
+                                          "posproducerkey=<WIF> to your configuration and restart to produce."));
+            m_producer_status->setStyleSheet("QLabel{padding:8px;border-radius:4px;background:#fff3cd;color:#856404;}");
         }
     }
-    m_table->resizeColumnsToContents();
+
+    if (!m_wallet_model) return;
+    if (!haveReg) { m_summary->setText(tr("Stake registry unavailable: %1").arg(regErr)); return; }
+    const std::vector<std::string>& keys = reg.getKeys();
+    m_stakers->setRowCount(0);
+    for (size_t i = 0; i < keys.size(); ++i) {
+        int row = m_stakers->rowCount();
+        m_stakers->insertRow(row);
+        m_stakers->setItem(row, 0, new QTableWidgetItem(QString::fromStdString(keys[i])));
+        // Stake weight is atoms of the policy asset; show it in SEQ (1 SEQ = 1e8 atoms).
+        const int64_t w = reg[i].get_int64();
+        QString seq = QString::number((double)w / 100000000.0, 'f', 8);
+        if (seq.contains('.')) { while (seq.endsWith('0')) seq.chop(1); if (seq.endsWith('.')) seq.chop(1); }
+        m_stakers->setItem(row, 1, new QTableWidgetItem(seq));
+    }
+    m_summary->setText(tr("%1 registered staker(s).").arg(keys.size()));
 }
 
-void StakingPage::generateStakeScript()
+void StakingPage::showEvent(QShowEvent* event)
 {
-    if (!m_client_model) return;
-    const std::string pk = m_pubkey_in->text().trimmed().toStdString();
-    if (pk.empty()) {
-        m_script_info->setText(tr("Enter a staker public key (hex) first."));
-        return;
-    }
-    UniValue params(UniValue::VARR);
-    params.push_back(UniValue(pk));
-    if (m_csv_blocks->value() > 0) params.push_back(UniValue(m_csv_blocks->value()));
-    QString err;
-    UniValue res = callRpc(m_client_model, "getstakescript", params, err);
-    if (!err.isEmpty()) {
-        m_script_out->clear();
-        m_copy->setEnabled(false);
-        m_script_info->setText(tr("Error: %1").arg(err));
-        return;
-    }
-    if (res.exists("script")) m_script_out->setPlainText(QString::fromStdString(res["script"].get_str()));
-    m_copy->setEnabled(res.exists("script"));
-    QString type = res.exists("csv_type") ? QString::fromStdString(res["csv_type"].get_str()) : QStringLiteral("?");
-    qlonglong lock = res.exists("lock_seconds") ? (qlonglong)res["lock_seconds"].get_int64() : 0;
-    qlonglong minl = res.exists("min_unbonding_seconds") ? (qlonglong)res["min_unbonding_seconds"].get_int64() : 0;
-    m_script_info->setText(tr("Unbonding lock: %1 s (%2). Chain minimum: %3 s. Send the policy asset to this script to stake.")
-                               .arg(QString::number(lock), type, QString::number(minl)));
+    QWidget::showEvent(event);
+    refresh();
 }
 
-void StakingPage::copyScript()
+void StakingPage::onStake()
 {
-    QApplication::clipboard()->setText(m_script_out->toPlainText());
+    if (!m_wallet_model) return;
+    const QString amount = m_stake_amount->text().trimmed();
+    if (amount.isEmpty()) { setStatus(tr("Enter an amount of SEQ to stake."), true); return; }
+    bool amtok = false; const double amtval = amount.toDouble(&amtok);
+    if (!amtok || amtval <= 0) { setStatus(tr("Enter a positive SEQ amount."), true); return; }
+    // Reject sub-floor stakes up front: the consensus rule (and registerstake) drop
+    // anything below the chain minimum, so it would never count toward production.
+    if (g_pos_min_stake > 0) {
+        const int64_t amt_sats = (int64_t)std::llround(amtval * 100000000.0);
+        if (amt_sats < (int64_t)g_pos_min_stake) {
+            setStatus(tr("Minimum stake on this network is %1 SEQ - a smaller stake would never count.")
+                          .arg(QString::number((double)g_pos_min_stake / 100000000.0, 'f', 0)), true);
+            return;
+        }
+    }
+    bool ok; QString err;
+
+    // 1) a fresh address whose key we'll stake with
+    UniValue addrv = callRpc("getnewaddress", UniValue(UniValue::VARR), ok, err);
+    if (!ok) { setStatus(tr("Could not create a staking address: %1").arg(err), true); return; }
+    const QString addr = QString::fromStdString(addrv.getValStr());
+
+    // 2) its public key
+    UniValue aiparams(UniValue::VARR); aiparams.push_back(addr.toStdString());
+    UniValue info = callRpc("getaddressinfo", aiparams, ok, err);
+    if (!ok || !info.exists("pubkey")) { setStatus(tr("Could not read the staking key: %1").arg(err), true); return; }
+    const QString pubkey = QString::fromStdString(info["pubkey"].get_str());
+
+    // 3) register the stake (funds the staking output)
+    UniValue rsparams(UniValue::VARR);
+    rsparams.push_back(pubkey.toStdString());
+    rsparams.push_back(UniValue(UniValue::VNUM, amount.toStdString()));
+    UniValue res = callRpc("registerstake", rsparams, ok, err);
+    if (!ok) { setStatus(tr("Staking failed: %1").arg(err), true); return; }
+    const QString txid = res.exists("txid") ? QString::fromStdString(res["txid"].getValStr()) : QString();
+    const qint64 unbond = res.exists("unbonding_seconds") ? (qint64)res["unbonding_seconds"].get_int64() : 0;
+
+    // 4) the WIF, so the user can enable production (best-effort; legacy wallets only)
+    QString wif;
+    UniValue dpparams(UniValue::VARR); dpparams.push_back(addr.toStdString());
+    bool dok; QString derr;
+    UniValue wifv = callRpc("dumpprivkey", dpparams, dok, derr);
+    if (dok) wif = QString::fromStdString(wifv.getValStr());
+
+    QString msg = tr("Staked %1 SEQ.\nRegistration txid: %2\nStaking public key: %3").arg(amount, txid, pubkey);
+    if (unbond > 0) {
+        msg += tr("\nUnbonding lock: ~%1 day(s) before you could withdraw (the stake keeps counting the whole time).")
+                   .arg(QString::number((double)unbond / 86400.0, 'f', 1));
+    }
+    if (!wif.isEmpty()) {
+        msg += tr("\n\nTo start producing blocks, add these to your config and restart:\n"
+                  "  posproducer=1\n  posproducerkey=%1").arg(wif);
+    } else {
+        msg += tr("\n\nTo start producing blocks, run the node as a producer (posproducer=1) with this "
+                  "key's WIF as posproducerkey (use dumpprivkey on a legacy wallet to get it).");
+    }
+    m_result->setText(msg);
+    setStatus(tr("Stake registered. It will count once the transaction confirms."), false);
+    refresh();
 }
