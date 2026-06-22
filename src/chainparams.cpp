@@ -395,6 +395,9 @@ public:
         // key is a PLACEHOLDER that MUST be replaced with a real, secret key at
         // the launch ceremony (see doc/sequentia/06-tokenomics-and-launch.md).
         consensus.genesis_subsidy = 0;                  // no inflation (§3.9)
+        // SEQUENTIA PoS: enforce leader-paid coinbase fees from genesis. Mainnet
+        // has no pre-rule history to grandfather (cf. CTestNetParams).
+        consensus.pos_coinbase_leader_height = 0;
         consensus.nMaxBlockWeight = 200000;             // a twentieth of Bitcoin (doc 11 §4)
         consensus.connect_genesis_outputs = true;
         anyonecanspend_aremine = false;
@@ -589,6 +592,13 @@ public:
         // SEQ tokens through staking" (whitepaper §3.9, No inflation). Block
         // producers (stakers) are paid in transaction fees, not new SEQ.
         consensus.genesis_subsidy = 0;
+        // SEQUENTIA PoS: from this height a block's coinbase must pay all fees to
+        // the elected leader's own key (PosLeaderFeeScript; see validation.cpp
+        // ConnectBlock). This testnet ran before the rule existed, paying fees to
+        // the anyone-can-spend fallback, so blocks below this height are
+        // grandfathered while every block from here on binds fees to its leader.
+        // The mainnet chain (CSequentiaParams) enforces from genesis (0).
+        consensus.pos_coinbase_leader_height = 3500;
         // SEQUENTIA: 200,000 weight units — a twentieth of Bitcoin's 4,000,000
         // — so that, at ~30-second blocks (20x Bitcoin's cadence), a saturated
         // chain grows at exactly the same total rate as a saturated Bitcoin
@@ -598,7 +608,11 @@ public:
         // what is held equal to Bitcoin. Cadence is the -posslotinterval (30 s).
         consensus.nMaxBlockWeight = 200000;
         consensus.connect_genesis_outputs = true;
-        anyonecanspend_aremine = true;
+        // SEQUENTIA: match mainnet (CSequentiaParams) — anyone-can-spend (OP_TRUE)
+        // outputs are NOT the wallet's own. Block fees now pay to the elected
+        // leader's key, not OP_TRUE, so a non-staking wallet must never count
+        // historical OP_TRUE coinbase outputs as "mined" income.
+        anyonecanspend_aremine = false;
         enforce_pak = false;
         accept_unlimited_issuances = false;
         multi_data_permitted = false;

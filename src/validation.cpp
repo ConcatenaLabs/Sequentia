@@ -2513,6 +2513,30 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
         }
     }
 
+    // SEQUENTIA PoS: the elected leader is the block producer and, since there is
+    // no block subsidy (genesis_subsidy = 0), is paid only in the transaction
+    // fees of the block it leads (01-architecture.md, 06-tokenomics-and-launch.md).
+    // Bind every fee-bearing coinbase output — in any asset, the open fee market
+    // accumulates one output per fee asset — to the leader's own key, so fees can
+    // never be diverted to a third party or to an anyone-can-spend script that any
+    // wallet would claim. The leader is taken from the block's own proof challenge
+    // (already proven sortition-eligible by CheckPosStakeRules above). Gated by
+    // pos_coinbase_leader_height to grandfather pre-rule blocks an already-running
+    // chain produced before this rule activated. Zero-value commitment/OP_RETURN
+    // outputs (SEQCMT/SEQBLS/VRF, witness commitment) carry no value and are exempt.
+    if (g_con_pos && pindex->nHeight >= m_params.GetConsensus().pos_coinbase_leader_height) {
+        if (std::optional<PosChallengeParts> parts = ParsePosBlockChallenge(block.proof.challenge); parts && parts->leader.IsValid()) {
+            const CScript leader_script = PosLeaderFeeScript(parts->leader);
+            for (const auto& txout : block.vtx[0]->vout) {
+                const bool mustPay = !txout.nValue.IsExplicit() || txout.nValue.GetAmount() != 0;
+                if (mustPay && txout.scriptPubKey != leader_script) {
+                    LogPrintf("ERROR: ConnectBlock(): coinbase fee output does not pay the elected leader\n");
+                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-coinbase-not-leader");
+                }
+            }
+        }
+    }
+
     bool fScriptChecks = true;
     if (!hashAssumeValid.IsNull()) {
         // We've been configured with the hash of a block which has been externally verified to have a valid history.

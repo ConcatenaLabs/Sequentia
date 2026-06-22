@@ -75,7 +75,11 @@ std::shared_ptr<CBlock> BuildUnsignedBlsBlock(ChainstateManager& chainman, CTxMe
     std::vector<CScript> vrf_commitments;
     vrf_commitments.push_back(BuildPosVrfCommitment(*proof));
     CScript feeDest = chainparams.GetConsensus().mandatory_coinbase_destination;
-    if (feeDest == CScript()) feeDest = CScript() << OP_TRUE;
+    // SEQUENTIA PoS: pay the block's fees to the elected leader's own key (the
+    // producer is paid only in fees; there is no subsidy). Consensus binds this
+    // from pos_coinbase_leader_height onward, so a leader that pays elsewhere is
+    // rejected. Fall back to the legacy anyone-can-spend only for non-PoS chains.
+    if (feeDest == CScript()) feeDest = g_con_pos ? PosLeaderFeeScript(pubkey) : (CScript() << OP_TRUE);
     std::unique_ptr<CBlockTemplate> tmpl;
     try {
         tmpl = BlockAssembler(chainman.ActiveChainstate(), mempool, chainparams)
@@ -169,7 +173,9 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
     }
 
     CScript feeDestinationScript = chainparams.GetConsensus().mandatory_coinbase_destination;
-    if (feeDestinationScript == CScript()) feeDestinationScript = CScript() << OP_TRUE;
+    // SEQUENTIA PoS: fees are paid to the elected leader's own key (see
+    // PosLeaderFeeScript); consensus enforces it from pos_coinbase_leader_height.
+    if (feeDestinationScript == CScript()) feeDestinationScript = g_con_pos ? PosLeaderFeeScript(pubkey) : (CScript() << OP_TRUE);
 
     // VRF sortition mode: compute this staker's sortition proof over the slot
     // seed and commit it in the coinbase. With committee certification, also

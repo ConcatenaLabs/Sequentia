@@ -10,6 +10,7 @@
 #include <logging.h>
 #include <policy/policy.h>
 #include <primitives/block.h>
+#include <script/standard.h>
 #include <undo.h>
 #include <vrf.h>
 #include <bls.h>
@@ -198,6 +199,11 @@ CScript BuildPosAggChallenge(const CPubKey& leader, const std::vector<unsigned c
 CScript BuildPosBlsChallenge(const CPubKey& leader)
 {
     return CScript() << OP_2 << ToByteVector(leader);
+}
+
+CScript PosLeaderFeeScript(const CPubKey& leader)
+{
+    return GetScriptForDestination(WitnessV0KeyHash(leader));
 }
 
 std::optional<PosChallengeParts> ParsePosBlockChallenge(const CScript& challenge)

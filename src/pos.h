@@ -283,6 +283,15 @@ struct PosChallengeParts {
  *  other script. */
 std::optional<PosChallengeParts> ParsePosBlockChallenge(const CScript& challenge);
 
+/** The script a con_pos block's coinbase fee outputs must pay to: the elected
+ *  leader's own key as a native-segwit (Bitcoin-format) P2WPKH output. Sequentia
+ *  has no block subsidy, so a producer is paid only in the transaction fees of
+ *  the block it leads; binding the coinbase to this script (consensus, gated by
+ *  Consensus::Params::pos_coinbase_leader_height) makes fees unspendable by
+ *  anyone but the elected leader. Producer and validator both derive it from the
+ *  same leader pubkey so they agree byte-for-byte. */
+CScript PosLeaderFeeScript(const CPubKey& leader);
+
 /** Compute the election seed for the block that would extend `pindexPrev`. */
 uint256 PosSeedForChild(const CBlockIndex* pindexPrev);
 

@@ -149,6 +149,14 @@ struct Params {
     //
     // ELEMENTS CHAIN PARAMS
     CScript mandatory_coinbase_destination;
+    //! SEQUENTIA PoS: block height from which a con_pos block's coinbase must pay
+    //! every fee-bearing output to the elected leader's own key (P2WPKH of the
+    //! challenge leader). 0 = enforce from genesis (the Sequentia mainnet
+    //! default). On an already-running chain that produced pre-rule blocks paying
+    //! fees to the anyone-can-spend fallback, set this above the existing tip so
+    //! those historical blocks are grandfathered while the rule binds all blocks
+    //! from H onward. See doc/sequentia/04-proof-of-stake.md.
+    int pos_coinbase_leader_height{0};
     CAmount genesis_subsidy;
     //! SEQUENTIA: per-chain maximum block weight (BIP141 weight units). 0 means
     //! "use the global MAX_BLOCK_WEIGHT". Sequentia sets this to 200,000 (a
