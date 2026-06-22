@@ -798,6 +798,30 @@ void InitParameterInteraction(ArgsManager& args)
         if (args.SoftSetBoolArg("-whitelistrelay", true))
             LogPrintf("%s: parameter interaction: -whitelistforcerelay=1 -> setting -whitelistrelay=1\n", __func__);
     }
+
+    // SEQUENTIA: on the public test network (-chain=test) default the parent
+    // (Bitcoin) anchor RPC connection to the shared testnet gateway so a fresh
+    // GUI/node validates anchors with zero elements.conf. GetChainName() reads the
+    // -chain arg directly (no dependency on SelectParams), and SoftSet only fills
+    // UNSET args, so an explicit user value is never overridden; the network guard
+    // leaves main/liquid*/signet/regtest untouched. con_bitcoin_anchor is already
+    // forced on for this chain in CTestNetParams.
+    if (args.GetChainName() == CBaseChainParams::TESTNET) {
+        if (args.SoftSetArg("-mainchainrpchost", "159.195.15.140"))
+            LogPrintf("%s: chain=test -> setting -mainchainrpchost=159.195.15.140\n", __func__);
+        if (args.SoftSetArg("-mainchainrpcport", "48400"))
+            LogPrintf("%s: chain=test -> setting -mainchainrpcport=48400\n", __func__);
+        if (args.SoftSetArg("-mainchainrpcuser", "x"))
+            LogPrintf("%s: chain=test -> setting -mainchainrpcuser=x\n", __func__);
+        if (args.SoftSetArg("-mainchainrpcpassword", "x"))
+            LogPrintf("%s: chain=test -> setting -mainchainrpcpassword (value hidden)\n", __func__);
+        if (args.SoftSetBoolArg("-validateanchor", true))
+            LogPrintf("%s: chain=test -> setting -validateanchor=1\n", __func__);
+        if (args.SoftSetArg("-anchorminconf", "1"))
+            LogPrintf("%s: chain=test -> setting -anchorminconf=1\n", __func__);
+        if (args.SoftSetArg("-anchorpollinterval", "15"))
+            LogPrintf("%s: chain=test -> setting -anchorpollinterval=15\n", __func__);
+    }
 }
 
 /**

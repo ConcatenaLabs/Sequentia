@@ -718,7 +718,11 @@ public:
         vFixedSeeds.clear();
         vSeeds.clear();
         // nodes with support for servicebits filtering should be at the top
-        vSeeds.emplace_back("89.216.21.96");
+        // SEQUENTIA: shared testnet gateway. Explicit :18444 (the gateway's P2P
+        // port) since it differs from this chain's nDefaultPort (18777). Replaces
+        // the retired 89.216.21.96 so a fresh -chain=test node finds a peer with
+        // no addnode/conf needed.
+        vSeeds.emplace_back("159.195.15.140:18444");
 
         // SEQUENTIA: the default (unblinded) address format is identical to
         // Bitcoin's, so wallet apps can present one receiving address for both

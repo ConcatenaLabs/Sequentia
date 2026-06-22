@@ -19,7 +19,11 @@ const std::string CBaseChainParams::LIQUID1 = "liquidv1";
 const std::string CBaseChainParams::LIQUID1TEST = "liquidv1test";
 const std::string CBaseChainParams::LIQUIDTESTNET = "liquidtestnet";
 
-const std::string CBaseChainParams::DEFAULT = CBaseChainParams::LIQUID1;
+// SEQUENTIA: this build targets the Sequentia testnet ("test" / CTestNetParams),
+// which is the chain the live committee, gateway and explorer all run. Default to
+// it so the GUI, daemon and CLI all connect to the testnet without -chain.
+// (For a mainnet release build, set this to CBaseChainParams::SEQUENTIA.)
+const std::string CBaseChainParams::DEFAULT = CBaseChainParams::TESTNET;
 
 void SetupChainParamsBaseOptions(ArgsManager& argsman)
 {

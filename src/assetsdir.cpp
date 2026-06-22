@@ -4,6 +4,7 @@
 
 #include <assetsdir.h>
 #include <chainparams.h>
+#include <chainparamsbase.h>
 
 #include <tinyformat.h>
 #include <util/strencodings.h>
@@ -49,6 +50,27 @@ void CAssetsDir::InitFromStrings(const std::vector<std::string>& assetsToInit, c
     }
     // Set "bitcoin" to the pegged asset for tests
     Set(Params().GetConsensus().pegged_asset, AssetMetadata(pegged_asset_name));
+
+    // SEQUENTIA testnet: built-in tickers for the public demo assets, so the GUI
+    // shows USDX/GOLD/etc. with no -assetdir config. Any user-supplied -assetdir
+    // entry (parsed above) or the pegged "bitcoin" label takes precedence — we
+    // skip anything whose asset or label is already mapped.
+    if (Params().NetworkIDString() == CBaseChainParams::TESTNET) {
+        static const std::pair<const char*, const char*> kSeqTestnetAssets[] = {
+            {"dc7f45fcfeb17c8ae74e284472d85543395f50e88f4a36cb652e8102703b7027", "USDX"},
+            {"f7a756b4e966623065543e52b754324629295c895046a0916a939898ad373667", "EURX"},
+            {"c28fc933ce41f7a9188da029c6f7377fc961e2d58588372ef4073438610b9283", "GOLD"},
+            {"3e30ad0ebd13cc7ac1bbd12df1414b213708a6048b745d185fe935d9624024db", "WBTC"},
+            {"50a00211d7074d5f857a3dec6cb84a1f3fefb26e56a94a954a299b28ac9f32df", "SILVR"},
+            {"f9b069ac00f4dc57381a304704fac93301f90d3d509d207cfbddc8367d4e9cfb", "OILX"},
+        };
+        for (const auto& [assetHex, label] : kSeqTestnetAssets) {
+            const CAsset asset(uint256S(assetHex));
+            if (GetLabel(asset).empty() && GetAsset(label) == CAsset()) {
+                Set(asset, AssetMetadata(label));
+            }
+        }
+    }
 }
 
 CAsset CAssetsDir::GetAsset(const std::string& label) const
