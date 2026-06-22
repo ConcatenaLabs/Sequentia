@@ -1128,6 +1128,13 @@ void CTxMemPool::RecomputeFees()
             CValue feeValueDelta = newFeeValue - it->GetFeeValue();
             if (feeValueDelta != 0) {
                 mapTx.modify(it, update_fee_value(newFeeValue));
+                // SEQUENTIA: keep the mempool-wide fee total in sync with this entry's
+                // fee-value change. m_total_fee is otherwise only adjusted on add/remove,
+                // so without this a fee-asset rate update leaves it stale and the next
+                // CheckMempool() aborts the node on `m_total_fee == sum(GetFeeValue())`
+                // (txmempool.cpp:941) — crashing producers/explorer nodes whenever a
+                // fee-asset transaction sits in the mempool across a rate refresh.
+                m_total_fee += feeValueDelta;
 
                 // Now update all ancestors' modified fees with descendants
                 setEntries setAncestors;
