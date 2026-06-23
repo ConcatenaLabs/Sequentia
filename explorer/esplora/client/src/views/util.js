@@ -1,6 +1,6 @@
 import moveDec from 'move-decimal-point'
 import { sat2btc } from 'fmtbtc'
-import { nativeAssetLabel } from '../const'
+import { nativeAssetId, nativeAssetLabel } from '../const'
 import { isNativeOut } from '../util'
 
 const DEFAULT_ISSUED_PRECISION = 0
@@ -51,6 +51,36 @@ export const formatOutAmount = (vout, { t, assetMap }, shortDisplay=false) => {
        : vout.asset ? <span>{amount_el} <em title={vout.asset}>{asset_link}</em></span>
        : <span>{amount_el} {t`Unknown`}</span> // should never happen
 }
+
+// SEQUENTIA: format a raw (asset, value) pair as a compact "amount TICKER" string,
+// using the asset registry for ticker + precision. The native asset and unknown
+// assets are both handled; an unknown asset falls back to a short id. Returns a
+// plain string (not JSX) so it can be used in tables, hover titles and links.
+export const formatAssetValue = (asset, value, assetMap = {}) => {
+  if (value == null) return ''
+  if (!asset || asset === nativeAssetId) {
+    return `${formatNumber(sat2btc(value), NATIVE_PRECISION)} ${nativeAssetLabel}`
+  }
+  const [ , ticker, , _precision ] = (assetMap && assetMap[asset]) || []
+      , precision = _precision != null ? _precision : DEFAULT_ISSUED_PRECISION
+      , amount = formatNumber(precision > 0 ? moveDec(value, -precision) : value, precision)
+      , label = ticker || `${asset.substr(0, 6)}…`
+  return `${amount} ${label}`
+}
+
+// SEQUENTIA: the ticker for an asset (native asset and unknown assets handled).
+export const tickerOf = (asset, assetMap = {}) => {
+  if (!asset || asset === nativeAssetId) return nativeAssetLabel
+  const meta = assetMap && assetMap[asset]
+  return (meta && meta[1]) || `${asset.substr(0, 6)}…`
+}
+
+// SEQUENTIA: a fee rate per vByte (in the fee asset's base units). One decimal for
+// normal rates; for sub-unit rates show enough precision to avoid a misleading 0.0.
+export const formatFeeRate = rate =>
+  !isFinite(rate) || rate <= 0 ? '0'
+  : rate >= 1 ? rate.toFixed(1)
+  : parseFloat(rate.toPrecision(2)).toString()
 
 export const formatHex = num => {
   const str = num.toString(16)

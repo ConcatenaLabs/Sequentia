@@ -3733,6 +3733,15 @@ a.back-link img{
   color: white;
 }
 
+/* SEQUENTIA: "+N" badge for extra assets moved in a multi-asset transaction. */
+.transaction-table-transaction-value .value-more {
+  font-style: normal;
+  font-size: .8em;
+  color: #9a9a9a;
+  margin-left: .25em;
+  cursor: help;
+}
+
 .transaction-table-transaction-size {
   flex: .5;
   color: white;

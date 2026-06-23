@@ -1,4 +1,5 @@
-import { formatSat, formatNumber, truncateTxid } from "./util";
+import { formatSat, formatNumber, truncateTxid, formatAssetValue, tickerOf, formatFeeRate } from "./util";
+import { nativeAssetId } from "../const";
 import loader from "../components/loading";
 import { CopyIcon, TxArrowsIcon } from "../components/icons";
 
@@ -12,6 +13,41 @@ const feeRateClass = (feerate, feeEst) => {
     : feerate <= feeEst[3]
       ? "warning"
       : "danger";
+}
+
+// SEQUENTIA: the VALUE column. The Elements/Sequentia backend exposes per-asset
+// explicit output totals (`out_values`) and a `confidential` flag instead of a
+// single native value. Show the largest transfer plus a "+N" badge (the rest on
+// hover); only fall back to "Confidential" when an output is actually blinded.
+// The Bitcoin build (no `out_values`) keeps the original single-value behaviour.
+const renderTxValue = (txo, assetMap) => {
+  if (txo.out_values === undefined) {
+    return txo.value != null ? formatSat(txo.value) : "Confidential";
+  }
+  if (txo.confidential) return "Confidential";
+  if (!txo.out_values.length) return "—";
+  const ov = txo.out_values
+      , primary = formatAssetValue(ov[0].asset, ov[0].value, assetMap)
+      , rest = ov.slice(1);
+  return rest.length
+    ? <span title={rest.map(v => formatAssetValue(v.asset, v.value, assetMap)).join("\n")}>
+        {primary} <em className="value-more">+{rest.length}</em>
+      </span>
+    : primary;
+}
+
+// SEQUENTIA: the FEE column. Fees may be paid in any asset (open fee market). Keep
+// the useful per-vByte rate, but denominate it in the asset the fee was actually
+// paid in (e.g. "50.0 tSEQ/vB", "0.015 USDX/vB") instead of a native-only "sat/vB".
+const feeIsNative = txo => txo.fee_asset === undefined || !txo.fee_asset || txo.fee_asset === nativeAssetId;
+
+const renderTxFee = (txo, assetMap) => {
+  const rate = txo.fee / txo.vsize;
+  if (txo.fee_asset === undefined) return `${formatFeeRate(rate)} sat/vB`; // Bitcoin build
+  // Tooltip carries the absolute fee in the same asset for context.
+  return <span title={formatAssetValue(txo.fee_asset, txo.fee, assetMap)}>
+    {`${formatFeeRate(rate)} ${tickerOf(txo.fee_asset, assetMap)}/vB`}
+  </span>;
 }
 
 export const transactions = (txs, viewMore, { t, ...S }) => (
@@ -41,7 +77,8 @@ export const transactions = (txs, viewMore, { t, ...S }) => (
         <div className="transaction-table-body">
           {txs.map((txOverview) => {
             const feerate = txOverview.fee / txOverview.vsize;
-            const feeClass = feeRateClass(feerate, S.feeEst);
+            // Colour-code the rate only when the fee market applies (native asset).
+            const feeClass = feeIsNative(txOverview) ? feeRateClass(feerate, S.feeEst) : "";
             return (
               <a href={`tx/${txOverview.txid}`}>
               <div className={`transaction-table-row ${S.newTxEntries && S.newTxEntries[txOverview.txid] ? "new-table-entry" : ""}`}>
@@ -58,11 +95,10 @@ export const transactions = (txs, viewMore, { t, ...S }) => (
                   </div>
                 </div>
                 <div className="transaction-table-transaction-value">
-                  {txOverview.value ?
-                    formatSat(txOverview.value) : "Confidential"}
+                  {renderTxValue(txOverview, S.assetMap)}
                 </div>
                 <div className="transaction-table-transaction-size">{`${formatNumber(txOverview.vsize)} vB`}</div>
-                <div className={`transaction-table-transaction-fee ${feeClass}`}>{`${feerate.toFixed(1)} sat/vB`}</div>
+                <div className={`transaction-table-transaction-fee ${feeClass}`}>{renderTxFee(txOverview, S.assetMap)}</div>
               </div>
               </a>
             );

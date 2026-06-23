@@ -4,8 +4,9 @@ import vinView from './tx-vin'
 import voutView from './tx-vout'
 import privacyAnalysisView from './tx-privacy-analysis'
 import segwitGainsView from './tx-segwit-gains'
-import { formatSat, formatTime, formatVMB, formatNumber } from './util'
+import { formatSat, formatTime, formatVMB, formatNumber, formatAssetValue, tickerOf, formatFeeRate } from './util'
 import { isAllUnconfidential, isAllNative, isRbf, outTotal, updateQuery } from '../util'
+import { nativeAssetId } from '../const'
 
 // Require behind env conditional so it gets removed by `envify` on non-elements builds
 const deduceBlinded = process.env.IS_ELEMENTS && require('../lib/deduce-blinded').deduceBlinded
@@ -104,8 +105,19 @@ const btnDetailsContent = (isOpen, t) =>
     <div className={isOpen?'minus':'plus'}></div>
   </div>
 
-const txHeader = (tx, { tipHeight, mempool, feeEst, t
+const txHeader = (tx, { tipHeight, mempool, feeEst, t, assetMap
                       , txAnalysis: { feerate, mempoolDepth, confEstimate, overpaying, privacyAnalysis, segwitGains } }) => {
+
+  // SEQUENTIA: fees may be paid in any asset (open fee market). The native-only
+  // `tx.fee`/`feerate` are 0/null for a non-native fee, which previously hid the
+  // fee line entirely. Read the explicit `fee`-type output to show the fee — and
+  // its per-vByte rate — in the asset it was actually paid in.
+  const feeOut = process.env.IS_ELEMENTS ? (tx.vout || []).find(v => v.scriptpubkey_type === 'fee') : null
+      , feeAsset = feeOut && feeOut.asset
+      , feeAmount = process.env.IS_ELEMENTS ? (feeOut && feeOut.value) : tx.fee
+      , feeNative = !feeAsset || feeAsset === nativeAssetId
+      , feeRatePerVb = tx.weight ? feeAmount / Math.ceil(tx.weight / 4) : null
+      , showFee = process.env.IS_ELEMENTS ? feeAmount != null : feerate != null
 
   return (
   <div className="stats-table font-p2">
@@ -136,11 +148,15 @@ const txHeader = (tx, { tipHeight, mempool, feeEst, t
       </div>
     </div> }
 
-    { feerate != null && <div>
+    { showFee && <div>
       <div>{t`Transaction fees`}</div>
       <div>
-        <span className="amount">{t`${formatSat(tx.fee)} (${feerate.toFixed(2)} sat/vB)`}</span>
-        { overpaying > OVERPAYMENT_WARN &&
+        <span className="amount">{
+          !process.env.IS_ELEMENTS
+            ? t`${formatSat(tx.fee)} (${feerate.toFixed(2)} sat/vB)`
+            : t`${formatAssetValue(feeAsset, feeAmount, assetMap)} (${formatFeeRate(feeRatePerVb)} ${tickerOf(feeAsset, assetMap)}/vB)`
+        }</span>
+        { (!process.env.IS_ELEMENTS || feeNative) && overpaying > OVERPAYMENT_WARN &&
           <p className={`text-${ overpaying > OVERPAYMENT_WARN*1.5 ? 'danger' : 'warning' } mb-0`} title={t`compared to the suggested fee of ${feeEst[2].toFixed(1)} sat/vB for confirmation within 2 blocks`}>
             ⓘ {t`overpaying by ${Math.round((overpaying-1)*100)}%`}
           </p>
