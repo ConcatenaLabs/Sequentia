@@ -138,101 +138,121 @@ class AssetFeed:
         self.label = cfg.get("label", self.asset_id[:8])
         self.sources = [Source(s, timeout) for s in cfg["sources"]]
         self.thresholds = {**defaults, **cfg.get("thresholds", {})}
+        # Issuer identity, operator-declared (or filled from the Asset Registry),
+        # used by the issuer_domains / issuer_pubkeys admission criteria.
+        self.issuer_domain = cfg.get("issuer_domain")
+        self.issuer_pubkey = cfg.get("issuer_pubkey")
         self.last_rate = None
-        # Rolling window of recent median prices, for the volatility threshold.
+        # Rolling window of recent median prices, for the volatility criterion.
         window = int(self.thresholds.get("volatility_window", 30))
         self.price_history = collections.deque(maxlen=max(2, window))
 
+    def _volatility_ok(self, t):
+        """Rolling stddev of log-returns over the window <= max_volatility.
+        Returns True until there are enough samples (don't gate on no data)."""
+        min_samples = int(t.get("volatility_min_samples", 5))
+        hist = list(self.price_history)
+        if len(hist) < max(3, min_samples):
+            return True
+        rets = [math.log(hist[i] / hist[i - 1])
+                for i in range(1, len(hist)) if hist[i - 1] > 0 and hist[i] > 0]
+        if len(rets) < 2:
+            return True
+        vol = statistics.pstdev(rets)
+        if vol > t["max_volatility"]:
+            log.warning("[%s] volatility %.4f over %d samples above max_volatility %g",
+                        self.label, vol, len(hist), t["max_volatility"])
+            return False
+        return True
+
     def poll(self):
-        """Returns the scaled rate if the asset qualifies, else None."""
+        """Return the scaled rate if the asset qualifies, else None.
+
+        Admission is a configurable rule engine: a set of OPTIONAL criteria
+        combined by `require` ("all" = every configured criterion must pass,
+        "any" = at least one), plus always_admit / always_reject exceptions and a
+        few always-on sanity checks (quorum, positive price/rate). Adding a new
+        criterion is a single entry in the checks list below."""
+        t = self.thresholds
+        aid, lbl = self.asset_id, self.label
+
+        def _listed(key):
+            vals = t.get(key, [])
+            return aid in vals or lbl in vals
+
+        # Exceptions: reject wins over admit.
+        if _listed("always_reject"):
+            log.info("[%s] rejected: in always_reject", lbl)
+            return None
+
+        # Mandatory: need a quorum of sources to compute a price at all.
         results = []
         for source in self.sources:
             try:
                 results.append(source.fetch())
             except Exception as e:
-                log.warning("[%s] source %s failed: %s", self.label, source.name, e)
-
-        quorum = int(self.thresholds.get("min_sources", 1))
+                log.warning("[%s] source %s failed: %s", lbl, source.name, e)
+        quorum = int(t.get("min_sources", 1))
         if len(results) < quorum:
-            log.info("[%s] rejected: only %d/%d sources responded",
-                     self.label, len(results), quorum)
+            log.info("[%s] rejected: only %d/%d sources responded", lbl, len(results), quorum)
             return None
 
         price = statistics.median(r["price"] for r in results)
+        if price <= 0:
+            log.info("[%s] rejected: non-positive price", lbl)
+            return None
         market_caps = [r["market_cap"] for r in results if r["market_cap"] is not None]
         volumes = [r["volume_24h"] for r in results if r["volume_24h"] is not None]
         market_cap = statistics.median(market_caps) if market_caps else None
         volume_24h = statistics.median(volumes) if volumes else None
-        # Record the observed price for the rolling volatility window (every poll
-        # that reached quorum, regardless of whether other thresholds admit it).
-        if price > 0:
-            self.price_history.append(price)
+        self.price_history.append(price)
+        new_rate = round(price * COIN)
 
-        # Admission thresholds
-        t = self.thresholds
-        if price <= 0:
-            log.info("[%s] rejected: non-positive price", self.label)
-            return None
-        if "min_price" in t and price < t["min_price"]:
-            log.info("[%s] rejected: price %g below min_price %g", self.label, price, t["min_price"])
-            return None
-        if "max_price" in t and price > t["max_price"]:
-            log.info("[%s] rejected: price %g above max_price %g", self.label, price, t["max_price"])
-            return None
-        if "min_market_cap" in t:
-            if market_cap is None or market_cap < t["min_market_cap"]:
-                log.info("[%s] rejected: market cap %s below min_market_cap %g",
-                         self.label, market_cap, t["min_market_cap"])
-                return None
-        if "min_volume_24h" in t:
-            if volume_24h is None or volume_24h < t["min_volume_24h"]:
-                log.info("[%s] rejected: 24h volume %s below min_volume_24h %g",
-                         self.label, volume_24h, t["min_volume_24h"])
-                return None
-        # Source agreement: max relative spread between sources
-        if len(results) > 1 and "max_source_spread" in t:
-            prices = [r["price"] for r in results]
-            spread = (max(prices) - min(prices)) / price
-            if spread > t["max_source_spread"]:
-                log.info("[%s] rejected: source price spread %.2f%% above limit",
-                         self.label, 100 * spread)
-                return None
-        # Volatility: rolling standard deviation of log-returns over the window.
-        # Distinct from max_source_spread (cross-source agreement at one instant)
-        # and max_change_factor (a single-step jump clamp) — this rejects an asset
-        # that is calm per-source and per-step but churning over time, covering the
-        # node against repricing an unstable asset. Needs a few samples first.
-        if "max_volatility" in t:
-            min_samples = int(t.get("volatility_min_samples", 5))
-            hist = list(self.price_history)
-            if len(hist) >= max(3, min_samples):
-                rets = [math.log(hist[i] / hist[i - 1])
-                        for i in range(1, len(hist)) if hist[i - 1] > 0 and hist[i] > 0]
-                if len(rets) >= 2:
-                    vol = statistics.pstdev(rets)
-                    if vol > t["max_volatility"]:
-                        log.warning("[%s] rejected: volatility %.4f over %d samples above "
-                                    "max_volatility %g", self.label, vol, len(hist), t["max_volatility"])
-                        return None
-        # Sanity clamp: reject implausible jumps between polls
-        if self.last_rate is not None and "max_change_factor" in t:
-            f = t["max_change_factor"]
-            new_rate = round(price * COIN)
-            if new_rate > self.last_rate * f or new_rate < self.last_rate / f:
-                log.warning("[%s] rejected: rate jumped more than %gx between polls "
-                            "(old %d, new %d); keeping asset out until it stabilizes",
-                            self.label, f, self.last_rate, new_rate)
-                self.last_rate = None  # require a fresh baseline
-                return None
+        forced = _listed("always_admit")
+        change_ok = True  # tracked so a rejected jump resets the baseline
+        if not forced:
+            # Each configured criterion -> (name, passed). All optional.
+            checks = []
+            if "min_price" in t:
+                checks.append(("min_price", price >= t["min_price"]))
+            if "max_price" in t:
+                checks.append(("max_price", price <= t["max_price"]))
+            if "min_market_cap" in t:
+                checks.append(("min_market_cap", market_cap is not None and market_cap >= t["min_market_cap"]))
+            if "min_volume_24h" in t:
+                checks.append(("min_volume_24h", volume_24h is not None and volume_24h >= t["min_volume_24h"]))
+            if "max_source_spread" in t and len(results) > 1:
+                spread = (max(r["price"] for r in results) - min(r["price"] for r in results)) / price
+                checks.append(("max_source_spread", spread <= t["max_source_spread"]))
+            if "max_volatility" in t:
+                checks.append(("max_volatility", self._volatility_ok(t)))
+            if "max_change_factor" in t and self.last_rate is not None:
+                f = t["max_change_factor"]
+                change_ok = (self.last_rate / f) <= new_rate <= (self.last_rate * f)
+                checks.append(("max_change_factor", change_ok))
+            if "issuer_domains" in t or "issuer_pubkeys" in t:
+                issuer_ok = (self.issuer_domain in t.get("issuer_domains", [])) or \
+                            (self.issuer_pubkey in t.get("issuer_pubkeys", []))
+                checks.append(("issuer", issuer_ok))
 
-        rate = round(price * COIN)
-        if rate <= 0:
-            log.info("[%s] rejected: scaled rate rounds to zero", self.label)
+            if checks:
+                require = t.get("require", "all")
+                admit = (any(ok for _, ok in checks) if require == "any"
+                         else all(ok for _, ok in checks))
+                if not admit:
+                    failed = [n for n, ok in checks if not ok]
+                    log.info("[%s] rejected (require=%s): failed %s", lbl, require, failed)
+                    if not change_ok:
+                        self.last_rate = None  # fresh baseline after a rejected jump
+                    return None
+
+        if new_rate <= 0:
+            log.info("[%s] rejected: scaled rate rounds to zero", lbl)
             return None
-        self.last_rate = rate
-        log.info("[%s] admitted: price=%g rate=%d mcap=%s vol24h=%s",
-                 self.label, price, rate, market_cap, volume_24h)
-        return rate
+        self.last_rate = new_rate
+        log.info("[%s] admitted%s: price=%g rate=%d mcap=%s vol24h=%s",
+                 lbl, " (forced)" if forced else "", price, new_rate, market_cap, volume_24h)
+        return new_rate
 
 
 class PriceServer:

@@ -48,16 +48,15 @@ cfg = {
     # every other asset expressed in SEQ units (driven by SEQ's market price).
     "reference_asset_label": "SEQ",
     "node_rpcs": nodes,
-    # Admission thresholds (operator-tunable). mcap/volume gate which assets are
-    # eligible; spread is cross-source agreement; change is a single-poll jump
-    # clamp; volatility is the rolling stddev of log-returns over the last
-    # volatility_window polls (rejects assets that churn over time even if calm
-    # per-step). All optional — drop a key to disable that check.
-    "default_thresholds": {"min_sources": 1, "min_market_cap": 50000000,
-                           "min_volume_24h": 1000000, "max_source_spread": 0.05,
-                           "max_change_factor": 5.0,
-                           "max_volatility": 0.15, "volatility_window": 30,
-                           "volatility_min_samples": 5},
+    # Admission rule engine (see contrib/price-server/README.md). ALL criteria are
+    # optional; combine them with "require": "all" (every configured criterion must
+    # pass) or "any" (one suffices), plus always_admit/always_reject exceptions and
+    # issuer_domains/issuer_pubkeys. The demo enables mcap/volume/spread/change but
+    # deliberately NOT max_volatility — the mock feed is a random walk, so volatility
+    # gating is opt-in to avoid dropping demo assets.
+    "default_thresholds": {"min_sources": 1, "require": "all",
+                           "min_market_cap": 50000000, "min_volume_24h": 1000000,
+                           "max_source_spread": 0.05, "max_change_factor": 5.0},
     "assets": [{"label": t, "id": i,
                 "sources": [{"kind": "jsonapi", "name": "mock",
                              "url": "http://127.0.0.1:8088/price/%s" % t,
