@@ -82,6 +82,26 @@ export const formatFeeRate = rate =>
   : rate >= 1 ? rate.toFixed(1)
   : parseFloat(rate.toPrecision(2)).toString()
 
+// SEQUENTIA: list every explicit (asset, value) transfer equally — no headline/primary asset.
+// In the open fee market the native asset (tSEQ) is often just change or fee, so promoting any
+// single asset misleads; show them all compactly, e.g. "1,000 USDX, 0.5 tSEQ".
+export const formatAssetValues = (outValues, assetMap = {}) =>
+  outValues.map(v => formatAssetValue(v.asset, v.value, assetMap)).join(', ')
+
+// SEQUENTIA: per-asset totals of a full tx's EXPLICIT outputs (for the detail view), excluding
+// the fee output and any blinded output. Mirrors the backend's `out_values` (overview), so a tx
+// with a blinded CHANGE output but an explicit payment still shows the payment, not "Confidential".
+export const explicitOutValues = vout => {
+  const totals = new Map()
+  for (const o of vout || []) {
+    if (o.scriptpubkey_type === 'fee') continue
+    if (o.value == null) continue // blinded value
+    const asset = o.asset || nativeAssetId
+    totals.set(asset, (totals.get(asset) || 0) + o.value)
+  }
+  return [...totals].map(([asset, value]) => ({ asset, value }))
+}
+
 export const formatHex = num => {
   const str = num.toString(16)
   return '0x' + (str.length%2 ? '0' : '') + str

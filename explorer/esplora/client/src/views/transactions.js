@@ -1,4 +1,4 @@
-import { formatSat, formatNumber, truncateTxid, formatAssetValue, tickerOf, formatFeeRate } from "./util";
+import { formatSat, formatNumber, truncateTxid, formatAssetValue, formatAssetValues, tickerOf, formatFeeRate } from "./util";
 import { nativeAssetId } from "../const";
 import loader from "../components/loading";
 import { CopyIcon, TxArrowsIcon } from "../components/icons";
@@ -16,24 +16,17 @@ const feeRateClass = (feerate, feeEst) => {
 }
 
 // SEQUENTIA: the VALUE column. The Elements/Sequentia backend exposes per-asset
-// explicit output totals (`out_values`) and a `confidential` flag instead of a
-// single native value. Show the largest transfer plus a "+N" badge (the rest on
-// hover); only fall back to "Confidential" when an output is actually blinded.
+// explicit output totals (`out_values`) and a `confidential` flag. Show EVERY explicit
+// transfer equally (no single "primary" — the native asset is often just change/fee in the
+// open fee market). Only print "Confidential" when there are NO explicit outputs at all: a
+// blinded CHANGE output alongside an explicit payment must not hide the known payment.
 // The Bitcoin build (no `out_values`) keeps the original single-value behaviour.
 const renderTxValue = (txo, assetMap) => {
   if (txo.out_values === undefined) {
     return txo.value != null ? formatSat(txo.value) : "Confidential";
   }
-  if (txo.confidential) return "Confidential";
-  if (!txo.out_values.length) return "—";
-  const ov = txo.out_values
-      , primary = formatAssetValue(ov[0].asset, ov[0].value, assetMap)
-      , rest = ov.slice(1);
-  return rest.length
-    ? <span title={rest.map(v => formatAssetValue(v.asset, v.value, assetMap)).join("\n")}>
-        {primary} <em className="value-more">+{rest.length}</em>
-      </span>
-    : primary;
+  if (!txo.out_values.length) return txo.confidential ? "Confidential" : "—";
+  return formatAssetValues(txo.out_values, assetMap);
 }
 
 // SEQUENTIA: the FEE column. Fees may be paid in any asset (open fee market). Keep

@@ -4,7 +4,7 @@ import vinView from './tx-vin'
 import voutView from './tx-vout'
 import privacyAnalysisView from './tx-privacy-analysis'
 import segwitGainsView from './tx-segwit-gains'
-import { formatSat, formatTime, formatVMB, formatNumber, formatAssetValue, tickerOf, formatFeeRate } from './util'
+import { formatSat, formatTime, formatVMB, formatNumber, formatAssetValue, formatAssetValues, explicitOutValues, tickerOf, formatFeeRate } from './util'
 import { isAllUnconfidential, isAllNative, isRbf, outTotal, updateQuery } from '../util'
 import { nativeAssetId } from '../const'
 
@@ -84,10 +84,18 @@ export const txBox = (tx, { t, openTx, tipHeight, spends, query, unblinded, ...S
       <div></div>
       <div>
         {tx.status && <span>{confirmationText(tx.status, tipHeight, t)} {!tx.status.confirmed && isRbf(tx) ? t`(RBF)` : ''}</span>}
-        <span className="amount">{
-              !isAllUnconfidential(tx) ? t`Confidential`
-              : isAllNative(tx)        ? formatSat(outTotal(tx))
-              : ''}</span>
+        <span className="amount">{(() => {
+              // SEQUENTIA: show every explicit asset output (incl. native), not just an all-native
+              // sum, and don't print "Confidential" when an explicit payment is present alongside a
+              // blinded change. Only fully-blinded txs (no explicit non-fee output) read Confidential.
+              if (process.env.IS_ELEMENTS) {
+                const ovs = explicitOutValues(tx.vout)
+                return ovs.length ? formatAssetValues(ovs, S.assetMap) : t`Confidential`
+              }
+              return !isAllUnconfidential(tx) ? t`Confidential`
+                   : isAllNative(tx)          ? formatSat(outTotal(tx))
+                   : ''
+            })()}</span>
       </div>
     </div>
   </div>
