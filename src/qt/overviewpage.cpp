@@ -196,12 +196,13 @@ OverviewPage::OverviewPage(const PlatformStyle *platformStyle, QWidget *parent) 
         m_finality_label->setWordWrap(true);
         seqLayout->addWidget(m_finality_label);
         QLabel* dualLabel = new QLabel(tr("Bitcoin (testnet4): your receiving address is also a Bitcoin testnet4 address - "
-                                          "the same address receives both SEQ and tBTC. (Sending tBTC requires a Bitcoin node.)"), seqFrame);
+                                          "the same address receives both %1 and tBTC. (Sending tBTC requires a Bitcoin node.)")
+                                          .arg(BitcoinUnits::policyAssetTicker()), seqFrame);
         dualLabel->setWordWrap(true);
         dualLabel->setStyleSheet("color:#555;");
         seqLayout->addWidget(dualLabel);
         QHBoxLayout* btcRow = new QHBoxLayout();
-        m_btc_label = new QLabel(tr("testnet4 BTC: not checked"), seqFrame);
+        m_btc_label = new QLabel(tr("Bitcoin (testnet4): not checked"), seqFrame);
         m_btc_label->setWordWrap(true);
         m_btc_button = new QPushButton(tr("Check BTC balance"), seqFrame);
         btcRow->addWidget(m_btc_label, 1);
@@ -434,7 +435,7 @@ void OverviewPage::onCheckBtc()
 {
     if (!walletModel || !m_btc_button || !m_btc_label) return;
     m_btc_button->setEnabled(false);
-    m_btc_label->setText(tr("testnet4 BTC: scanning the parent chain (a few seconds)..."));
+    m_btc_label->setText(tr("Bitcoin (testnet4): scanning the parent chain (a few seconds)..."));
     const std::string uri = "/wallet/" + walletModel->getWalletName().toStdString();
     interfaces::Node* nodePtr = &walletModel->node();
     QPointer<OverviewPage> self(this);
@@ -447,7 +448,7 @@ void OverviewPage::onCheckBtc()
             if (r.isObject()) {
                 const std::string e = r.exists("error") ? r["error"].getValStr() : std::string();
                 if (!e.empty()) {
-                    text = QStringLiteral("testnet4 BTC: ") + QString::fromStdString(e);
+                    text = QStringLiteral("Bitcoin (testnet4): ") + QString::fromStdString(e);
                 } else {
                     const QString amt = r.exists("btc") ? QString::fromStdString(r["btc"].getValStr()) : QStringLiteral("0");
                     const int naddr = r.exists("addresses") ? r["addresses"].get_int() : 0;
@@ -455,14 +456,14 @@ void OverviewPage::onCheckBtc()
                            + QString::number(naddr) + QStringLiteral(" of your addresses");
                 }
             } else {
-                text = QStringLiteral("testnet4 BTC: unexpected response");
+                text = QStringLiteral("Bitcoin (testnet4): unexpected response");
             }
         } catch (const UniValue&) {
-            text = QStringLiteral("testnet4 BTC: query failed");
+            text = QStringLiteral("Bitcoin (testnet4): query failed");
         } catch (const std::exception& ex) {
-            text = QStringLiteral("testnet4 BTC: ") + QString::fromStdString(ex.what());
+            text = QStringLiteral("Bitcoin (testnet4): ") + QString::fromStdString(ex.what());
         } catch (...) {
-            text = QStringLiteral("testnet4 BTC: query failed");
+            text = QStringLiteral("Bitcoin (testnet4): query failed");
         }
         QMetaObject::invokeMethod(qApp, [self, text]() {
             if (self) {

@@ -4,6 +4,7 @@
 
 #include <qt/stakingpage.h>
 
+#include <qt/bitcoinunits.h>
 #include <qt/platformstyle.h>
 #include <qt/walletmodel.h>
 
@@ -43,9 +44,9 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
     layout->addWidget(title);
 
     QLabel* intro = new QLabel(
-        tr("Stake SEQ to help produce blocks and earn the right to do so. Staking locks SEQ into a "
-           "special output; it keeps counting while locked, and the lock is only the unbonding delay "
-           "before you could withdraw. The more you stake, the more often you're chosen to produce."), this);
+        tr("Stake %1 to help produce blocks and earn the right to do so. Staked %1 stays locked and "
+           "keeps counting; the lock is just the unbonding delay you'd wait before withdrawing. "
+           "The more you stake, the more often you're chosen to produce.").arg(BitcoinUnits::policyAssetTicker()), this);
     intro->setWordWrap(true);
     layout->addWidget(intro);
 
@@ -56,10 +57,10 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
     layout->addWidget(m_producer_status);
 
     // --- Stake action ---
-    QGroupBox* stakeGroup = new QGroupBox(tr("Stake SEQ"), this);
+    QGroupBox* stakeGroup = new QGroupBox(tr("Stake %1").arg(BitcoinUnits::policyAssetTicker()), this);
     QFormLayout* stakeForm = new QFormLayout(stakeGroup);
     m_stake_amount = new QLineEdit(stakeGroup);
-    m_stake_amount->setPlaceholderText(tr("amount of SEQ (at or above the chain minimum, e.g. 50000)"));
+    m_stake_amount->setPlaceholderText(tr("amount of %1 (at or above the chain minimum, e.g. 50000)").arg(BitcoinUnits::policyAssetTicker()));
     {
         QLocale lc(QLocale::C); lc.setNumberOptions(QLocale::RejectGroupSeparator);
         auto* v = new QDoubleValidator(0, 1e15, 8, m_stake_amount);
@@ -81,7 +82,7 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
     m_summary = new QLabel(statusGroup);
     statusLayout->addWidget(m_summary);
     m_stakers = new QTableWidget(0, 2, statusGroup);
-    m_stakers->setHorizontalHeaderLabels({tr("Staker public key"), tr("Weight (SEQ)")});
+    m_stakers->setHorizontalHeaderLabels({tr("Staker public key"), tr("Weight (%1)").arg(BitcoinUnits::policyAssetTicker())});
     m_stakers->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
     m_stakers->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
     m_stakers->verticalHeader()->setVisible(false);
@@ -210,16 +211,16 @@ void StakingPage::onStake()
 {
     if (!m_wallet_model) return;
     const QString amount = m_stake_amount->text().trimmed();
-    if (amount.isEmpty()) { setStatus(tr("Enter an amount of SEQ to stake."), true); return; }
+    if (amount.isEmpty()) { setStatus(tr("Enter an amount of %1 to stake.").arg(BitcoinUnits::policyAssetTicker()), true); return; }
     bool amtok = false; const double amtval = amount.toDouble(&amtok);
-    if (!amtok || amtval <= 0) { setStatus(tr("Enter a positive SEQ amount."), true); return; }
+    if (!amtok || amtval <= 0) { setStatus(tr("Enter a positive %1 amount.").arg(BitcoinUnits::policyAssetTicker()), true); return; }
     // Reject sub-floor stakes up front: the consensus rule (and registerstake) drop
     // anything below the chain minimum, so it would never count toward production.
     if (g_pos_min_stake > 0) {
         const int64_t amt_sats = (int64_t)std::llround(amtval * 100000000.0);
         if (amt_sats < (int64_t)g_pos_min_stake) {
-            setStatus(tr("Minimum stake on this network is %1 SEQ - a smaller stake would never count.")
-                          .arg(QString::number((double)g_pos_min_stake / 100000000.0, 'f', 0)), true);
+            setStatus(tr("Minimum stake on this network is %1 %2 - a smaller stake would never count.")
+                          .arg(QString::number((double)g_pos_min_stake / 100000000.0, 'f', 0), BitcoinUnits::policyAssetTicker()), true);
             return;
         }
     }
@@ -252,7 +253,7 @@ void StakingPage::onStake()
     UniValue wifv = callRpc("dumpprivkey", dpparams, dok, derr);
     if (dok) wif = QString::fromStdString(wifv.getValStr());
 
-    QString msg = tr("Staked %1 SEQ.\nRegistration txid: %2\nStaking public key: %3").arg(amount, txid, pubkey);
+    QString msg = tr("Staked %1 %4.\nRegistration txid: %2\nStaking public key: %3").arg(amount, txid, pubkey, BitcoinUnits::policyAssetTicker());
     if (unbond > 0) {
         msg += tr("\nUnbonding lock: ~%1 day(s) before you could withdraw (the stake keeps counting the whole time).")
                    .arg(QString::number((double)unbond / 86400.0, 'f', 1));

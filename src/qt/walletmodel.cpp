@@ -572,7 +572,7 @@ bool WalletModel::bumpFee(uint256 hash, uint256& new_hash)
     CAmount new_fee;
     CMutableTransaction mtx;
     if (!m_wallet->createBumpTransaction(hash, coin_control, errors, old_fee, new_fee, mtx)) {
-        QMessageBox::critical(nullptr, tr("Fee bump error"), tr("Increasing transaction fee failed") + "<br />(" +
+        QMessageBox::critical(nullptr, tr("Increase fee error"), tr("Increasing transaction fee failed") + "<br />(" +
             (errors.size() ? QString::fromStdString(errors[0].translated) : "") +")");
         return false;
     }
@@ -602,13 +602,13 @@ bool WalletModel::bumpFee(uint256 hash, uint256& new_hash)
     questionString.append(GUIUtil::formatAssetAmount(new_fee_asset, new_fee, unit, BitcoinUnits::SeparatorStyle::STANDARD, true));
     questionString.append("</td></tr></table>");
 
-    // Display warning in the "Confirm fee bump" window if the "Coin Control Features" option is enabled
+    // Display warning in the "Confirm fee increase" window if the "Coin Control Features" option is enabled
     if (getOptionsModel()->getCoinControlFeatures()) {
         questionString.append("<br><br>");
         questionString.append(tr("Warning: This may pay the additional fee by reducing change outputs or adding inputs, when necessary. It may add a new change output if one does not already exist. These changes may potentially leak privacy."));
     }
 
-    auto confirmationDialog = new SendConfirmationDialog(tr("Confirm fee bump"), questionString, "", "", SEND_CONFIRM_DELAY, !m_wallet->privateKeysDisabled(), getOptionsModel()->getEnablePSBTControls(), nullptr);
+    auto confirmationDialog = new SendConfirmationDialog(tr("Confirm fee increase"), questionString, "", "", SEND_CONFIRM_DELAY, !m_wallet->privateKeysDisabled(), getOptionsModel()->getEnablePSBTControls(), nullptr);
     confirmationDialog->setAttribute(Qt::WA_DeleteOnClose);
     // TODO: Replace QDialog::exec() with safer QDialog::show().
     const auto retval = static_cast<QMessageBox::StandardButton>(confirmationDialog->exec());
@@ -630,7 +630,7 @@ bool WalletModel::bumpFee(uint256 hash, uint256& new_hash)
         bool complete = false;
         const TransactionError err = wallet().fillPSBT(SIGHASH_ALL, false /* sign */, true /* bip32derivs */, nullptr, psbtx, complete);
         if (err != TransactionError::OK || complete) {
-            QMessageBox::critical(nullptr, tr("Fee bump error"), tr("Can't draft transaction."));
+            QMessageBox::critical(nullptr, tr("Increase fee error"), tr("Can't draft transaction."));
             return false;
         }
         // Serialize the PSBT
@@ -645,12 +645,12 @@ bool WalletModel::bumpFee(uint256 hash, uint256& new_hash)
 
     // sign bumped transaction
     if (!m_wallet->signBumpTransaction(mtx)) {
-        QMessageBox::critical(nullptr, tr("Fee bump error"), tr("Can't sign transaction."));
+        QMessageBox::critical(nullptr, tr("Increase fee error"), tr("Can't sign transaction."));
         return false;
     }
     // commit the bumped transaction
     if(!m_wallet->commitBumpTransaction(hash, std::move(mtx), errors, new_hash)) {
-        QMessageBox::critical(nullptr, tr("Fee bump error"), tr("Could not commit transaction") + "<br />(" +
+        QMessageBox::critical(nullptr, tr("Increase fee error"), tr("Could not commit transaction") + "<br />(" +
             QString::fromStdString(errors[0].translated)+")");
         return false;
     }
@@ -712,7 +712,7 @@ bool WalletModel::createChildPaysForParent(uint256 parentHash, uint256& childHas
     CAsset feeAsset = ::policyAsset;
     if (g_con_any_asset_fees) {
         QStringList labels; QList<QString> hexes;
-        labels << tr("tSEQ (recommended)");
+        labels << tr("%1 (recommended)").arg(BitcoinUnits::policyAssetTicker());
         hexes  << QString::fromStdString(::policyAsset.GetHex());
         for (const CAsset& asset : getAssetTypes()) {
             if (asset == ::policyAsset) continue;
@@ -815,7 +815,7 @@ bool WalletModel::replaceTransaction(uint256 hash, uint256& new_hash)
     if (g_con_any_asset_fees) {
         for (const CAsset& a : getAssetTypes()) assetCombo->addItem(QString::fromStdString(gAssetsDir.GetIdentifier(a)), QString::fromStdString(a.GetHex()));
     } else {
-        assetCombo->addItem(QString::fromStdString(gAssetsDir.GetIdentifier(::policyAsset)), QString::fromStdString(::policyAsset.GetHex()));
+        assetCombo->addItem(BitcoinUnits::policyAssetTicker(), QString::fromStdString(::policyAsset.GetHex()));
     }
     lay->addWidget(assetCombo);
     auto* feeCombo = new QComboBox(&dlg);
@@ -825,7 +825,7 @@ bool WalletModel::replaceTransaction(uint256 hash, uint256& new_hash)
         for (const CAsset& a : getAssetTypes()) { if (a == old_fee_asset) continue; feeCombo->addItem(QString::fromStdString(gAssetsDir.GetIdentifier(a)), QString::fromStdString(a.GetHex())); }
         lay->addWidget(feeCombo);
     }
-    lay->addWidget(new QLabel(tr("Fee rate (sat/vB):"), &dlg));
+    lay->addWidget(new QLabel(tr("Fee rate (atoms/vB):"), &dlg));
     auto* feerateEdit = new QLineEdit("2", &dlg); lay->addWidget(feerateEdit);
     auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
     lay->addWidget(bb);

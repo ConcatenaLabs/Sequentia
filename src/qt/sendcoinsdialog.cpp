@@ -522,7 +522,7 @@ void SendCoinsDialog::sendButtonClicked([[maybe_unused]] bool checked)
     assert(m_current_transaction);
     assert(!g_con_elementsmode || m_current_blind_details);
 
-    const QString confirmation = tr("Confirm send coins");
+    const QString confirmation = tr("Confirm Send Coins");
     const bool enable_send{!model->wallet().privateKeysDisabled() || model->wallet().hasExternalSigner()};
     const bool always_show_unsigned{model->getOptionsModel()->getEnablePSBTControls()};
     auto confirmationDialog = new SendConfirmationDialog(confirmation, question_string, informative_text, detailed_text, SEND_CONFIRM_DELAY, enable_send, always_show_unsigned, this);

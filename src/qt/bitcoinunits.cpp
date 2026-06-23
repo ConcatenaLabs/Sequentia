@@ -60,6 +60,11 @@ static QString seqBaseTicker()
     return QStringLiteral("SEQ");
 }
 
+QString BitcoinUnits::policyAssetTicker()
+{
+    return seqBaseTicker();
+}
+
 QString BitcoinUnits::longName(int unit)
 {
     const QString ticker = seqBaseTicker();

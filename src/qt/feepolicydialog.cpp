@@ -42,7 +42,7 @@ FeePolicyDialog::FeePolicyDialog(const PlatformStyle* platformStyle, QWidget* pa
 
     layout->addWidget(new QLabel(tr("Assets this node accepts for transaction fees. Sequentia "
                                     "privileges no asset — the policy asset is just one entry. "
-                                    "Rates are integer atoms of the asset equal to one reference unit."),
+                                    "Rates are integer atoms of the asset equal to one reference fee atom (rfa)."),
                                  this));
 
     // Effective acceptance set (static ∪ dynamic).
@@ -65,7 +65,7 @@ FeePolicyDialog::FeePolicyDialog(const PlatformStyle* platformStyle, QWidget* pa
     form->addRow(tr("Asset:"), m_asset);
     m_rate = new QLineEdit(edit);
     m_rate->setValidator(new QIntValidator(0, INT_MAX, m_rate));
-    m_rate->setToolTip(tr("Atoms of the asset equal to one reference unit. 0 = refuse this asset."));
+    m_rate->setToolTip(tr("Atoms of the asset equal to one reference fee atom (rfa). 0 = refuse this asset."));
     form->addRow(tr("Rate:"), m_rate);
     auto* btns = new QHBoxLayout();
     m_add = new QPushButton(tr("Add / update"), edit);

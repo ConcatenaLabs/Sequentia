@@ -53,8 +53,8 @@ static const int TOOLTIP_WRAP_THRESHOLD = 80;
 #define QAPP_APP_NAME_TESTNET "Sequentia-testnet"
 #define QAPP_APP_NAME_SIGNET "Sequentia-signet"
 #define QAPP_APP_NAME_REGTEST "Sequentia-regtest"
-#define QAPP_APP_NAME_LIQUID "Sequentia (Liquid)"
-#define QAPP_APP_NAME_LIQUIDTESTNET "Sequentia (liquidtestnet)"
+#define QAPP_APP_NAME_LIQUID "Sequentia"
+#define QAPP_APP_NAME_LIQUIDTESTNET "Sequentia"
 
 /* One gigabyte (GB) in bytes */
 static constexpr uint64_t GB_BYTES{1000000000};

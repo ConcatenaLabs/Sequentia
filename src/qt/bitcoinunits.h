@@ -65,6 +65,9 @@ public:
     static QString longName(int unit);
     //! Short name
     static QString shortName(int unit);
+    //! Ticker shown for the native (policy) asset: chain-aware "tSEQ"/"SEQ"
+    //! (or an explicit -defaultpeggedassetname override). Display-only.
+    static QString policyAssetTicker();
     //! Longer description
     static QString description(int unit);
     //! Number of Satoshis (1e-8) per unit
