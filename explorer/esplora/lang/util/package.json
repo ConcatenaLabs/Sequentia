@@ -1,7 +1,0 @@
-{
-  "name": "esplora-lang-utils",
-  "dependencies": {
-    "@babel/parser": "^7.12.11",
-    "@babel/traverse": "^7.12.10"
-  }
-}
