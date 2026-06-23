@@ -164,7 +164,7 @@ void StakingPage::refresh()
                 CKey key = DecodeSecret(w);
                 if (!key.IsValid()) continue;
                 const std::string pk = HexStr(key.GetPubKey());
-                if (reg.exists(pk) && (uint64_t)reg[pk].get_int64() >= floor) ++eligible;
+                if (reg[pk].isNum() && (uint64_t)reg[pk].get_int64() >= floor) ++eligible;
             }
         }
         if (configured && !wifs.empty() && eligible > 0) {
@@ -192,7 +192,7 @@ void StakingPage::refresh()
         m_stakers->insertRow(row);
         m_stakers->setItem(row, 0, new QTableWidgetItem(QString::fromStdString(keys[i])));
         // Stake weight is atoms of the policy asset; show it in SEQ (1 SEQ = 1e8 atoms).
-        const int64_t w = reg[i].get_int64();
+        const int64_t w = reg[i].isNum() ? reg[i].get_int64() : 0;
         QString seq = QString::number((double)w / 100000000.0, 'f', 8);
         if (seq.contains('.')) { while (seq.endsWith('0')) seq.chop(1); if (seq.endsWith('.')) seq.chop(1); }
         m_stakers->setItem(row, 1, new QTableWidgetItem(seq));

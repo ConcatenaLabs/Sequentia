@@ -145,7 +145,7 @@ std::map<std::string, int64_t> FeePolicyDialog::currentStaticRates(bool& ok, QSt
     if (!ok) return out;
     for (const std::string& k : p.getKeys()) {
         const UniValue& e = p[k];
-        if (e.exists("origin") && e["origin"].get_str() == "static") {
+        if (e.exists("origin") && e["origin"].isStr() && e["origin"].get_str() == "static" && e["rate"].isNum()) {
             out[k] = e["rate"].get_int64();
         }
     }
@@ -166,11 +166,11 @@ void FeePolicyDialog::refresh()
         for (int row = 0; row < (int)keys.size(); ++row) {
             const std::string& k = keys[row];
             const UniValue& e = policy[k];
-            const QString origin = e.exists("origin") ? QString::fromStdString(e["origin"].get_str()) : "";
+            const QString origin = e["origin"].isStr() ? QString::fromStdString(e["origin"].get_str()) : "";
             m_effective->setItem(row, 0, roItem(QString::fromStdString(k)));
-            m_effective->setItem(row, 1, roItem(QString::number(e["rate"].get_int64())));
+            m_effective->setItem(row, 1, roItem(e["rate"].isNum() ? QString::number(e["rate"].get_int64()) : QString()));
             m_effective->setItem(row, 2, roItem(origin));
-            m_effective->setItem(row, 3, roItem(e.exists("source") ? QString::fromStdString(e["source"].get_str()) : ""));
+            m_effective->setItem(row, 3, roItem(e["source"].isStr() ? QString::fromStdString(e["source"].get_str()) : ""));
         }
         setStatus(tr("Loaded %1 accepted asset(s).").arg(keys.size()));
     } else {
@@ -187,10 +187,10 @@ void FeePolicyDialog::refresh()
             const std::string& k = keys[row];
             const UniValue& e = dyn[k];
             m_dynamic->setItem(row, 0, roItem(QString::fromStdString(k)));
-            m_dynamic->setItem(row, 1, roItem(QString::number(e["rate"].get_int64())));
-            m_dynamic->setItem(row, 2, roItem(e.exists("source") ? QString::fromStdString(e["source"].get_str()) : ""));
-            m_dynamic->setItem(row, 3, roItem(e.exists("age") ? QString::number(e["age"].get_int64()) : ""));
-            m_dynamic->setItem(row, 4, roItem(e.exists("stale") && e["stale"].get_bool() ? tr("yes") : tr("no")));
+            m_dynamic->setItem(row, 1, roItem(e["rate"].isNum() ? QString::number(e["rate"].get_int64()) : QString()));
+            m_dynamic->setItem(row, 2, roItem(e["source"].isStr() ? QString::fromStdString(e["source"].get_str()) : ""));
+            m_dynamic->setItem(row, 3, roItem(e["age"].isNum() ? QString::number(e["age"].get_int64()) : QString()));
+            m_dynamic->setItem(row, 4, roItem(e["stale"].isBool() && e["stale"].get_bool() ? tr("yes") : tr("no")));
         }
     }
     // Enable Remove only when a static row is selected.

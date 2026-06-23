@@ -2187,7 +2187,18 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             // free scheduler drains the queue and the watcher makes progress.
             node.anchor_watch_thread = std::thread(&util::TraceThread, "anchorwatch", [anchor_chainman, anchor_poll] {
                 while (!ShutdownRequested()) {
-                    AnchorWatchTask(*anchor_chainman);
+                    // A parent-chain RPC reply that doesn't parse (e.g. a field a given Bitcoin Core
+                    // version returns as null instead of an integer) must never escape this thread:
+                    // TraceThread re-throws, which would std::terminate the whole process (the GUI
+                    // surfaces it as a "Runaway exception" crash). Treat any such failure as a
+                    // transient skipped tick and retry next interval.
+                    try {
+                        AnchorWatchTask(*anchor_chainman);
+                    } catch (const std::exception& e) {
+                        LogPrintf("WARNING: anchor watcher tick failed, retrying next interval: %s\n", e.what());
+                    } catch (...) {
+                        LogPrintf("WARNING: anchor watcher tick failed (non-standard exception), retrying next interval\n");
+                    }
                     // Interruptible poll sleep: wake promptly on shutdown rather
                     // than sleeping the full interval.
                     for (int64_t i = 0; i < anchor_poll * 10 && !ShutdownRequested(); ++i) {
