@@ -39,6 +39,7 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMessageBox>
 #include <QSet>
 #include <QTimer>
@@ -782,6 +783,103 @@ bool WalletModel::createChildPaysForParent(uint256 parentHash, uint256& childHas
     }
     m_wallet->commitTransaction(child, {} /* mapValue */, {} /* orderForm */, blind_details.get());
     childHash = child->GetHash();
+    return true;
+}
+
+bool WalletModel::replaceTransaction(uint256 hash, uint256& new_hash)
+{
+    interfaces::WalletTxStatus st;
+    interfaces::WalletOrderForm of;
+    bool in_mempool = false;
+    int nblocks = 0;
+    interfaces::WalletTx wtx = m_wallet->getWalletTxDetails(hash, st, of, in_mempool, nblocks);
+    CTransactionRef orig = m_wallet->getTx(hash);
+    if (!orig || st.depth_in_main_chain != 0 || !in_mempool || st.is_abandoned) {
+        QMessageBox::critical(nullptr, tr("Replace transaction"), tr("This transaction is no longer unconfirmed."));
+        return false;
+    }
+    const CAsset old_fee_asset = orig->GetFeeAsset(::policyAsset);
+
+    // Dialog: brand-new outputs (address + amount + asset) + fee asset + fee rate. Unlike "Increase
+    // fee" (same payment, higher fee), Replace re-pins this tx's inputs but sends what you specify —
+    // to correct a still-unconfirmed payment.
+    QDialog dlg(nullptr);
+    dlg.setWindowTitle(tr("Replace transaction (RBF)"));
+    auto* lay = new QVBoxLayout(&dlg);
+    lay->addWidget(new QLabel(tr("Re-spends this transaction's inputs with NEW outputs, replacing the\noriginal before it confirms. The new fee must exceed the original's."), &dlg));
+    lay->addWidget(new QLabel(tr("Send to:"), &dlg));
+    auto* addrEdit = new QLineEdit(&dlg); lay->addWidget(addrEdit);
+    lay->addWidget(new QLabel(tr("Amount:"), &dlg));
+    auto* amtEdit = new QLineEdit(&dlg); lay->addWidget(amtEdit);
+    auto* assetCombo = new QComboBox(&dlg);
+    if (g_con_any_asset_fees) {
+        for (const CAsset& a : getAssetTypes()) assetCombo->addItem(QString::fromStdString(gAssetsDir.GetIdentifier(a)), QString::fromStdString(a.GetHex()));
+    } else {
+        assetCombo->addItem(QString::fromStdString(gAssetsDir.GetIdentifier(::policyAsset)), QString::fromStdString(::policyAsset.GetHex()));
+    }
+    lay->addWidget(assetCombo);
+    auto* feeCombo = new QComboBox(&dlg);
+    if (g_con_any_asset_fees) {
+        lay->addWidget(new QLabel(tr("Pay the fee in:"), &dlg));
+        feeCombo->addItem(tr("Keep original (%1)").arg(QString::fromStdString(gAssetsDir.GetIdentifier(old_fee_asset))), QString::fromStdString(old_fee_asset.GetHex()));
+        for (const CAsset& a : getAssetTypes()) { if (a == old_fee_asset) continue; feeCombo->addItem(QString::fromStdString(gAssetsDir.GetIdentifier(a)), QString::fromStdString(a.GetHex())); }
+        lay->addWidget(feeCombo);
+    }
+    lay->addWidget(new QLabel(tr("Fee rate (sat/vB):"), &dlg));
+    auto* feerateEdit = new QLineEdit("2", &dlg); lay->addWidget(feerateEdit);
+    auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    lay->addWidget(bb);
+    connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    if (dlg.exec() != QDialog::Accepted) return false;
+
+    if (!IsValidDestinationString(addrEdit->text().toStdString())) {
+        QMessageBox::critical(nullptr, tr("Replace transaction"), tr("Invalid address.")); return false;
+    }
+    CTxDestination dest = DecodeDestination(addrEdit->text().toStdString());
+    const CAsset sendAsset = g_con_any_asset_fees ? GetAssetFromString(assetCombo->currentData().toString().toStdString()) : ::policyAsset;
+    CAmount amount = 0;
+    if (!GUIUtil::parseAssetAmount(sendAsset, amtEdit->text(), getOptionsModel()->getDisplayUnit(), &amount) || amount <= 0) {
+        QMessageBox::critical(nullptr, tr("Replace transaction"), tr("Invalid amount.")); return false;
+    }
+    bool frok = false; double frate = feerateEdit->text().toDouble(&frok);
+    if (!frok || frate <= 0) frate = 2.0;
+
+    // Re-pin the original's inputs (BIP125 conflict). Allow CONFIRMED top-ups only (m_min_depth=1) so
+    // coin selection can never pull in the original's own unconfirmed change — which would make the
+    // replacement a descendant of the tx it replaces and be rejected under BIP125 Rule 2. This is the
+    // feebumper input-pinning pattern, with brand-new recipients.
+    CCoinControl cc;
+    for (const CTxIn& txin : orig->vin) cc.Select(txin.prevout);
+    cc.fAllowOtherInputs = true;
+    cc.m_min_depth = 1;
+    cc.m_signal_bip125_rbf = true;
+    if (g_con_any_asset_fees) {
+        const CAsset feeAsset = GetAssetFromString(feeCombo->currentData().toString().toStdString());
+        if (!feeAsset.IsNull() && feeAsset != ::policyAsset) cc.m_fee_asset = feeAsset;
+    }
+    cc.m_feerate = CFeeRate((CAmount)(frate * 1000)); // sat/vB -> sat/kvB
+    cc.fOverrideFeeRate = true;
+
+    CScript spk = GetScriptForDestination(dest);
+    CPubKey blind = GetDestinationBlindingKey(dest);
+    std::vector<CRecipient> vecSend{ {spk, amount, sendAsset, blind, /*fSubtractFeeFromAmount=*/false} };
+
+    UnlockContext ctx(requestUnlock());
+    if (!ctx.isValid()) return false;
+    auto blind_details = std::make_unique<wallet::BlindDetails>();
+    int changePos = -1;
+    CAmount fee = 0;
+    bilingual_str err;
+    CTransactionRef rep = m_wallet->createTransaction(
+        vecSend, cc, !wallet().privateKeysDisabled() /*sign*/, changePos, fee, blind_details.get(), err);
+    if (!rep) {
+        QMessageBox::critical(nullptr, tr("Replace transaction"), tr("Could not create the replacement") + "<br />(" +
+            QString::fromStdString(err.translated) + ")");
+        return false;
+    }
+    m_wallet->commitTransaction(rep, {} /* mapValue */, {} /* orderForm */, blind_details.get());
+    new_hash = rep->GetHash();
     return true;
 }
 

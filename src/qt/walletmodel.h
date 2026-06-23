@@ -146,6 +146,9 @@ public:
     // Build, sign, and broadcast a child-pays-for-parent tx spending the parent's unconfirmed
     // wallet-owned output (paying the child fee in that output's own asset).
     bool createChildPaysForParent(uint256 parentHash, uint256& childHash);
+    // Build, sign, and broadcast an opt-in-RBF replacement that re-pins this tx's inputs but sends
+    // brand-new outputs (a different address/asset/amount) — to correct a still-unconfirmed payment.
+    bool replaceTransaction(uint256 hash, uint256& new_hash);
     bool displayAddress(std::string sAddress);
 
     static bool isWalletEnabled();

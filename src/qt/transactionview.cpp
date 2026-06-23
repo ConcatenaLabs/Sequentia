@@ -181,6 +181,9 @@ TransactionView::TransactionView(const PlatformStyle *platformStyle, QWidget *pa
     speedUpAction = contextMenu->addAction(tr("&Speed up (pay child fee)"));
     GUIUtil::ExceptionSafeConnect(speedUpAction, &QAction::triggered, this, &TransactionView::speedUp);
     speedUpAction->setObjectName("speedUpAction");
+    replaceAction = contextMenu->addAction(tr("&Replace transaction…"));
+    GUIUtil::ExceptionSafeConnect(replaceAction, &QAction::triggered, this, &TransactionView::replace);
+    replaceAction->setObjectName("replaceAction");
     abandonAction = contextMenu->addAction(tr("A&bandon transaction"), this, &TransactionView::abandonTx);
     contextMenu->addAction(tr("&Edit address label"), this, &TransactionView::editLabel);
 
@@ -405,6 +408,8 @@ void TransactionView::contextualMenu(const QPoint &point)
     abandonAction->setEnabled(model->wallet().transactionCanBeAbandoned(hash));
     bumpFeeAction->setEnabled(model->wallet().transactionCanBeBumped(hash));
     speedUpAction->setEnabled(model->canDoCPFP(hash));
+    // Replaceable = the same condition as bumpable (unconfirmed, ours, opt-in RBF signalled).
+    replaceAction->setEnabled(model->wallet().transactionCanBeBumped(hash));
     copyAddressAction->setEnabled(GUIUtil::hasEntryData(transactionView, 0, TransactionTableModel::AddressRole));
     copyLabelAction->setEnabled(GUIUtil::hasEntryData(transactionView, 0, TransactionTableModel::LabelRole));
 
@@ -473,6 +478,28 @@ void TransactionView::speedUp([[maybe_unused]] bool checked)
         model->getTransactionTableModel()->updateTransaction(hashQStr, CT_UPDATED, true);
         qApp->processEvents();
         Q_EMIT bumpedFee(childHash); // reuse the focus-after-fee-change signal
+    }
+}
+
+void TransactionView::replace([[maybe_unused]] bool checked)
+{
+    if (!transactionView || !transactionView->selectionModel())
+        return;
+    QModelIndexList selection = transactionView->selectionModel()->selectedRows(0);
+    if (selection.isEmpty())
+        return;
+
+    uint256 hash;
+    QString hashQStr = selection.at(0).data(TransactionTableModel::TxHashRole).toString();
+    hash.SetHex(hashQStr.toStdString());
+
+    // Build an opt-in-RBF replacement with brand-new outputs over the walletModel.
+    uint256 newHash;
+    if (model->replaceTransaction(hash, newHash)) {
+        transactionView->selectionModel()->clearSelection();
+        model->getTransactionTableModel()->updateTransaction(hashQStr, CT_UPDATED, true);
+        qApp->processEvents();
+        Q_EMIT bumpedFee(newHash); // reuse the focus-after-fee-change signal
     }
 }
 

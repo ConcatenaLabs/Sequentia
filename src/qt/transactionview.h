@@ -82,6 +82,7 @@ private:
     QAction *abandonAction{nullptr};
     QAction *bumpFeeAction{nullptr};
     QAction *speedUpAction{nullptr};
+    QAction *replaceAction{nullptr};
     QAction *copyAddressAction{nullptr};
     QAction *copyLabelAction{nullptr};
 
@@ -107,6 +108,7 @@ private Q_SLOTS:
     void abandonTx();
     void bumpFee(bool checked);
     void speedUp(bool checked);
+    void replace(bool checked);
 
 Q_SIGNALS:
     void doubleClicked(const QModelIndex&);
