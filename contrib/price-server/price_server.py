@@ -27,13 +27,19 @@ Usage:
 import argparse
 import base64
 import collections
+import html
+import http.server
 import json
 import logging
 import math
+import os
+import re
 import signal
 import statistics
 import sys
+import threading
 import time
+import urllib.parse
 import urllib.request
 
 log = logging.getLogger("price-server")
@@ -256,9 +262,12 @@ class AssetFeed:
 
 
 class PriceServer:
-    def __init__(self, config, dry_run=False):
+    def __init__(self, config, dry_run=False, config_path=None):
         self.cfg = config
         self.dry_run = dry_run
+        self.config_path = config_path
+        self._lock = threading.Lock()  # guards cfg/feeds between the poll + UI threads
+        self.last_rates = {}
         # Publish to one node ("node_rpc") or many ("node_rpcs"). A single box can
         # run a whole committee, so one price server feeds them all — then whichever
         # producer the VRF elects in a round already prices the fee assets.
@@ -268,11 +277,31 @@ class PriceServer:
             self.rpcs = [NodeRPC(n) for n in config["node_rpcs"]]
         else:
             self.rpcs = [NodeRPC(config["node_rpc"])]
-        timeout = config.get("source_timeout", 15)
-        defaults = config.get("default_thresholds", {})
-        self.feeds = [AssetFeed(a, defaults, timeout) for a in config["assets"]]
         self.source_name = config.get("source_name", "price-server")
         self.stopping = False
+        self._build_feeds()
+
+    def _build_feeds(self):
+        timeout = self.cfg.get("source_timeout", 15)
+        defaults = self.cfg.get("default_thresholds", {})
+        self.feeds = [AssetFeed(a, defaults, timeout) for a in self.cfg["assets"]]
+
+    def apply_admission(self, thresholds, poll_interval=None, reference=None):
+        """Runtime update from the config UI: replace the admission rule set (and a
+        couple of globals), rebuild the feeds, and persist to the config file."""
+        with self._lock:
+            self.cfg["default_thresholds"] = thresholds
+            if poll_interval is not None:
+                self.cfg["poll_interval_secs"] = poll_interval
+            if reference is not None:
+                self.cfg["reference_asset_label"] = reference
+            self._build_feeds()
+            if self.config_path:
+                tmp = self.config_path + ".tmp"
+                with open(tmp, "w") as f:
+                    json.dump(self.cfg, f, indent=2)
+                os.replace(tmp, self.config_path)
+        log.info("admission rules updated via config UI and persisted")
 
     def _denominate(self, raw, labels):
         """Optionally re-express every rate relative to a reference asset.
@@ -297,13 +326,16 @@ class PriceServer:
         return {aid: max(1, round(r * COIN / ref_rate)) for aid, r in raw.items()}
 
     def poll_once(self):
+        with self._lock:
+            feeds = list(self.feeds)  # snapshot; the UI thread may rebuild them
         raw, labels = {}, {}
-        for feed in self.feeds:
+        for feed in feeds:
             rate = feed.poll()
             if rate is not None:
                 raw[feed.asset_id] = rate
                 labels[feed.asset_id] = feed.label
         rates = self._denominate(raw, labels)
+        self.last_rates = rates
         if self.dry_run:
             log.info("dry-run: would publish %s", json.dumps(rates))
             return rates
@@ -318,17 +350,18 @@ class PriceServer:
         return rates
 
     def run(self):
-        interval = self.cfg.get("poll_interval_secs", 60)
         signal.signal(signal.SIGTERM, self._stop)
         signal.signal(signal.SIGINT, self._stop)
-        log.info("starting: %d asset(s), poll every %ds", len(self.feeds), interval)
+        log.info("starting: %d asset(s), poll every %ds",
+                 len(self.feeds), self.cfg.get("poll_interval_secs", 60))
         while not self.stopping:
             try:
                 self.poll_once()
             except Exception as e:
                 log.error("poll failed: %s", e)
-            # sleep in small steps so shutdown stays responsive
-            deadline = time.time() + interval
+            # sleep in small steps so shutdown stays responsive; re-read the
+            # interval each round so a config-UI change takes effect promptly.
+            deadline = time.time() + self.cfg.get("poll_interval_secs", 60)
             while not self.stopping and time.time() < deadline:
                 time.sleep(0.5)
         # Fail safe: leave no dynamic rates behind on clean shutdown.
@@ -344,6 +377,136 @@ class PriceServer:
         self.stopping = True
 
 
+# ---------------------------------------------------------------------------
+# Config UI: a tiny self-served web page (localhost) to edit the admission rules
+# without hand-editing JSON. Pure stdlib (http.server); enabled with --ui-port.
+# ---------------------------------------------------------------------------
+
+_UI_CRITERIA = [  # (key, label, example)
+    ("min_market_cap", "Min market cap", "50000000"),
+    ("min_volume_24h", "Min 24h volume", "1000000"),
+    ("max_source_spread", "Max cross-source spread (0-1)", "0.05"),
+    ("max_change_factor", "Max change factor per poll", "5"),
+    ("max_volatility", "Max volatility (stddev of log-returns)", "0.15"),
+]
+_UI_LISTS = [
+    ("issuer_domains", "Issuer domains to auto-admit"),
+    ("issuer_pubkeys", "Issuer pubkeys to auto-admit"),
+    ("always_admit", "Always admit (asset id or label)"),
+    ("always_reject", "Always reject (asset id or label)"),
+]
+
+
+def _ui_render(srv, saved=False):
+    t = srv.cfg.get("default_thresholds", {})
+    req = t.get("require", "all")
+    ck = lambda v: "checked" if v else ""
+    crit = "".join(
+        '<tr><td><input type=checkbox name="en_%s" %s></td><td>%s</td>'
+        '<td><input name="%s" value="%s" placeholder="%s"></td></tr>'
+        % (k, ck(k in t), html.escape(lbl), k, html.escape(str(t.get(k, ""))), ph)
+        for k, lbl, ph in _UI_CRITERIA)
+    lists = "".join(
+        '<tr><td>%s</td><td><input name="%s" value="%s"></td></tr>'
+        % (html.escape(lbl), k, html.escape(" ".join(t.get(k, [])) if isinstance(t.get(k), list) else ""))
+        for k, lbl in _UI_LISTS)
+    assets = ", ".join(a.get("label", a["id"][:8]) for a in srv.cfg.get("assets", []))
+    banner = '<p style="color:#0a0"><b>Saved &amp; applied.</b></p>' if saved else ""
+    return (
+        "<!doctype html><meta charset=utf-8><title>Sequentia price server</title>"
+        "<style>body{font-family:system-ui,Arial;max-width:780px;margin:2rem auto;padding:0 1rem;color:#222}"
+        "table{border-collapse:collapse;width:100%}td{padding:.35rem .5rem;border-bottom:1px solid #eee}"
+        "input:not([type=checkbox]){width:100%;box-sizing:border-box;padding:.3rem}h1{font-size:1.3rem}"
+        ".muted{color:#777;font-size:.9rem}button{padding:.6rem 1.2rem;font-size:1rem;cursor:pointer}"
+        "pre{background:#f6f6f6;padding:.8rem;overflow:auto;border-radius:6px}</style>"
+        "<h1>Sequentia price server &mdash; admission rules</h1>" + banner +
+        "<form method=post action=/save>"
+        "<p><b>Combine criteria:</b> "
+        "<label><input type=radio name=require value=all " + ck(req != "any") + "> ALL must pass</label> &nbsp; "
+        "<label><input type=radio name=require value=any " + ck(req == "any") + "> ANY one passes</label></p>"
+        "<p class=muted>Tick a criterion to enforce it; untick to ignore it. All optional.</p>"
+        "<table>" + crit + "</table>"
+        "<h3>Exceptions &amp; issuer</h3>"
+        "<p class=muted>Space/comma separated. Exceptions override the criteria (reject wins); issuer lists admit assets from a trusted issuer.</p>"
+        "<table>" + lists + "</table>"
+        "<h3>General</h3><table>"
+        '<tr><td>Poll interval (seconds)</td><td><input name=poll_interval value="' + html.escape(str(srv.cfg.get("poll_interval_secs", 60))) + '"></td></tr>'
+        '<tr><td>Reference asset label</td><td><input name=reference value="' + html.escape(str(srv.cfg.get("reference_asset_label", ""))) + '"></td></tr>'
+        "</table>"
+        "<p><button type=submit>Save &amp; apply</button></p></form>"
+        "<p class=muted>Assets (" + html.escape(assets or "none") + ") and their price sources are edited in the config file.</p>"
+        "<h3>Last published rates</h3><pre>" + html.escape(json.dumps(srv.last_rates, indent=2)) + "</pre>")
+
+
+def _ui_parse(srv, form):
+    """New default_thresholds from the posted form, preserving keys the form does
+    not expose (min_sources, volatility_window, ...)."""
+    t = dict(srv.cfg.get("default_thresholds", {}))
+    t["require"] = "any" if form.get("require", ["all"])[0] == "any" else "all"
+    for key, _, _ in _UI_CRITERIA:
+        if form.get("en_" + key, [""])[0]:
+            raw = form.get(key, [""])[0].strip()
+            try:
+                t[key] = float(raw) if re.search(r"[.eE]", raw) else int(raw)
+            except ValueError:
+                t.pop(key, None)
+        else:
+            t.pop(key, None)
+    for key, _ in _UI_LISTS:
+        items = [x for x in re.split(r"[,\s]+", form.get(key, [""])[0].strip()) if x]
+        if items:
+            t[key] = items
+        else:
+            t.pop(key, None)
+    try:
+        poll = max(1, int(form.get("poll_interval", ["60"])[0]))
+    except ValueError:
+        poll = None
+    ref = form.get("reference", [""])[0].strip() or None
+    return t, poll, ref
+
+
+def start_config_ui(price_server, host, port):
+    srv = price_server
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def _send(self, code, body, ctype="text/html; charset=utf-8"):
+            data = body.encode()
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self):
+            if self.path.startswith("/status"):
+                self._send(200, json.dumps(srv.last_rates, indent=2), "application/json")
+            elif self.path == "/" or self.path.startswith("/?"):
+                self._send(200, _ui_render(srv, saved=self.path.endswith("saved=1")))
+            else:
+                self._send(404, "not found")
+
+        def do_POST(self):
+            if self.path != "/save":
+                self._send(404, "not found"); return
+            n = int(self.headers.get("Content-Length", 0) or 0)
+            form = urllib.parse.parse_qs(self.rfile.read(n).decode())
+            try:
+                t, poll, ref = _ui_parse(srv, form)
+                srv.apply_admission(t, poll, ref)
+            except Exception as e:
+                self._send(400, "error: " + html.escape(str(e))); return
+            self.send_response(303); self.send_header("Location", "/?saved=1"); self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    httpd = http.server.ThreadingHTTPServer((host, port), Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    log.info("config UI on http://%s:%d", host, port)
+    return httpd
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -352,6 +515,10 @@ def main():
     parser.add_argument("--dry-run", action="store_true",
                         help="don't publish to the node, just log decisions")
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--ui-port", type=int, default=0,
+                        help="serve a config UI to edit the admission rules on this port (0 = off)")
+    parser.add_argument("--ui-host", default="127.0.0.1",
+                        help="config UI bind address (default: localhost only)")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
@@ -360,7 +527,9 @@ def main():
     with open(args.config) as f:
         config = json.load(f)
 
-    server = PriceServer(config, dry_run=args.dry_run)
+    server = PriceServer(config, dry_run=args.dry_run, config_path=args.config)
+    if args.ui_port:
+        start_config_ui(server, args.ui_host, args.ui_port)
     if args.once:
         rates = server.poll_once()
         print(json.dumps(rates, indent=2))
