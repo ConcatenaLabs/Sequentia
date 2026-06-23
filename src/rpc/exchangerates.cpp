@@ -80,9 +80,9 @@ static RPCHelpMan setfeeexchangerates()
 static RPCHelpMan setdynamicfeerates()
 {
     return RPCHelpMan{"setdynamicfeerates",
-                "\nReplace the dynamic layer of the fee-asset whitelist, typically called by a locally run price server. "
-                "Statically configured rates (setfeeexchangerates / exchangerates.json) always take precedence over dynamic "
-                "rates for the same asset. Dynamic rates are dropped once older than -dynfeeratemaxage (if set).\n",
+                "\nDEPRECATED alias for setfeeexchangerates intended for a price-server sidecar: it replaces the single "
+                "fee-asset whitelist at runtime but, unlike setfeeexchangerates, does NOT persist to exchangerates.json "
+                "(a running sidecar re-pushes after a restart). The node keeps ONE whitelist; there are no static/dynamic layers.\n",
                 {
                     {"rates", RPCArg::Type::OBJ_USER_KEYS, RPCArg::Optional::NO, "",
                         {
@@ -115,12 +115,9 @@ static RPCHelpMan setdynamicfeerates()
         }
         CAmount value = rate.second.get_int64();
         // Rates are non-negative integers (atoms of the asset per reference unit).
-        // 0 means "refuse this asset" — the same semantics as the static
-        // setfeeexchangerates / exchangerates.json layer. A stored 0 flows through
-        // RebuildEffective into the effective map, where ConvertAmountToValue
-        // treats scaled_value <= 0 as "not accepted" (no divide-by-zero). A
-        // negative rate is never valid (it would saturate Convert and bypass fee
-        // valuation).
+        // 0 means "refuse this asset": ConvertAmountToValue treats scaled_value <= 0
+        // as "not accepted" (no divide-by-zero). A negative rate is never valid (it
+        // would saturate Convert and bypass fee valuation).
         if (value < 0) {
             errors.push_back(strprintf("Rate for %s must be a non-negative integer (0 = refuse the asset)", rate.first));
             continue;
@@ -130,8 +127,8 @@ static RPCHelpMan setdynamicfeerates()
     if (!errors.empty()) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Error parsing dynamic rates: %s", MakeUnorderedList(errors)));
     }
-    std::string source = request.params[1].isNull() ? "price-server" : request.params[1].get_str();
-    ExchangeRateMap::GetInstance().SetDynamicRates(rates, source, GetTime());
+    (void)request.params[1]; // 'source' accepted for backward compatibility, no longer recorded
+    ExchangeRateMap::GetInstance().SetRates(rates);
     EnsureAnyMemPool(request.context).RecomputeFees();
     return NullUniValue;
 }
@@ -141,20 +138,12 @@ static RPCHelpMan setdynamicfeerates()
 static RPCHelpMan getdynamicfeerates()
 {
     return RPCHelpMan{"getdynamicfeerates",
-                "\nGet the dynamic layer of the fee-asset whitelist, with per-entry source and freshness metadata.\n",
+                "\nDEPRECATED alias for getfeeexchangerates (the node keeps a single whitelist). Returns asset -> rate.\n",
                 {},
                 {
                     RPCResult{"rates", RPCResult::Type::OBJ, "", "",
                         {
-                            RPCResult{RPCResult::Type::OBJ, "asset", "",
-                                {
-                                    RPCResult{RPCResult::Type::NUM, "rate", CreateExchangeRatesDescription()},
-                                    RPCResult{RPCResult::Type::STR, "source", "Publisher identifier"},
-                                    RPCResult{RPCResult::Type::NUM, "updated_at", "Unix time of last update"},
-                                    RPCResult{RPCResult::Type::NUM, "age", "Seconds since last update"},
-                                    RPCResult{RPCResult::Type::BOOL, "stale", "Whether the entry exceeds -dynfeeratemaxage"},
-                                }
-                            },
+                            RPCResult{RPCResult::Type::NUM, "asset", CreateExchangeRatesDescription()},
                             RPCResult{RPCResult::Type::ELISION, "", ""}
                         }
                     }
@@ -165,7 +154,7 @@ static RPCHelpMan getdynamicfeerates()
                 },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
     {
-        return ExchangeRateMap::GetInstance().DynamicToJSON();
+        return ExchangeRateMap::GetInstance().ToJSON();
     }
     };
 }
@@ -173,7 +162,8 @@ static RPCHelpMan getdynamicfeerates()
 static RPCHelpMan cleardynamicfeerates()
 {
     return RPCHelpMan{"cleardynamicfeerates",
-                "\nDrop all dynamic fee-asset rates (e.g. on price server shutdown). Statically configured rates are unaffected.\n",
+                "\nEmpty the fee-asset whitelist (only the policy asset's 1:1 default remains). DEPRECATED alias; "
+                "the node keeps a single whitelist with no separate dynamic layer.\n",
                 {},
                 RPCResult{RPCResult::Type::NONE, "", ""},
                 RPCExamples{
@@ -182,7 +172,7 @@ static RPCHelpMan cleardynamicfeerates()
                 },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
-    ExchangeRateMap::GetInstance().ClearDynamicRates();
+    ExchangeRateMap::GetInstance().ClearRates();
     EnsureAnyMemPool(request.context).RecomputeFees();
     return NullUniValue;
 }
@@ -192,8 +182,7 @@ static RPCHelpMan cleardynamicfeerates()
 static RPCHelpMan getfeeacceptancepolicy()
 {
     return RPCHelpMan{"getfeeacceptancepolicy",
-                "\nGet the effective fee-asset acceptance policy: every asset currently accepted for fee payment, "
-                "its exchange rate, and whether the rate originates from the static or dynamic layer.\n",
+                "\nGet the fee-asset acceptance policy: every asset currently accepted for fee payment and its exchange rate.\n",
                 {},
                 {
                     RPCResult{"policy", RPCResult::Type::OBJ, "", "",
@@ -201,9 +190,6 @@ static RPCHelpMan getfeeacceptancepolicy()
                             RPCResult{RPCResult::Type::OBJ, "asset", "",
                                 {
                                     RPCResult{RPCResult::Type::NUM, "rate", CreateExchangeRatesDescription()},
-                                    RPCResult{RPCResult::Type::STR, "origin", "\"static\" or \"dynamic\""},
-                                    RPCResult{RPCResult::Type::STR, "source", /*optional=*/true, "Publisher identifier (dynamic entries only)"},
-                                    RPCResult{RPCResult::Type::NUM, "updated_at", /*optional=*/true, "Unix time of last update (dynamic entries only)"},
                                 }
                             },
                             RPCResult{RPCResult::Type::ELISION, "", ""}

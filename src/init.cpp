@@ -664,7 +664,6 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-ct_exponent", strprintf("The hiding exponent. (default: %s)", 0), ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-con_any_asset_fees", "Enable transaction fees to be paid with any asset (default: false)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-initialexchangeratesjsonfile=<file>", strprintf("Specify path to read-only configuration file with asset valuations. Only used when con_any_asset_fees is enabled. Relative paths will be prefixed by datadir location. (default: %s)", "exchangerates.json"), ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
-    argsman.AddArg("-dynfeeratemaxage=<n>", strprintf("Maximum age in seconds of dynamically published fee-asset exchange rates (see setdynamicfeerates) before they are dropped from the whitelist. 0 disables expiry. Only used when con_any_asset_fees is enabled. (default: %d)", DEFAULT_DYNAMIC_RATE_MAX_AGE), ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-con_bitcoin_anchor", "Require every block header to anchor to a Bitcoin (parent chain) block at a monotonically non-decreasing height. Requires a mainchain daemon connection (see -mainchainrpc* options) for full validation and block production. (default: false)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-validateanchor", "Validate block anchors against the mainchain daemon, and reorganize when the mainchain reorganizes. Disable only for offline validation of already-anchored chains. Only used when con_bitcoin_anchor is enabled. (default: true)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-anchorminconf=<n>", strprintf("Number of mainchain confirmations a Bitcoin block needs before new blocks anchor to it. 1 anchors to the mainchain tip. Only used when con_bitcoin_anchor is enabled. (default: %d)", DEFAULT_ANCHOR_MIN_CONF), ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
@@ -1460,19 +1459,10 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         if (!exchangeRateMap.SaveToJSONFile(errors)) {
             return InitError(strprintf(_("Unable to save exchange rates to JSON file %s: \n%s\n"), exchange_rates_config_file, MakeUnorderedList(errors)));
         };
-
-        // Expire dynamically published rates (see setdynamicfeerates) that have
-        // outlived -dynfeeratemaxage, failing safe to "asset not accepted".
-        int64_t dyn_max_age = gArgs.GetIntArg("-dynfeeratemaxage", DEFAULT_DYNAMIC_RATE_MAX_AGE);
-        exchangeRateMap.SetDynamicMaxAge(dyn_max_age);
-        if (dyn_max_age > 0) {
-            node.scheduler->scheduleEvery([&node]{
-                if (ExchangeRateMap::GetInstance().PurgeStaleDynamicRates(GetTime()) && node.mempool) {
-                    LogPrintf("Dropped stale dynamic fee-asset rates; recomputing mempool fee values\n");
-                    node.mempool->RecomputeFees();
-                }
-            }, std::chrono::seconds{std::max<int64_t>(1, dyn_max_age / 4)});
-        }
+        // SEQUENTIA: the node keeps a SINGLE fee-asset whitelist (no static/dynamic
+        // layers, no node-side staleness). Freshness/admission is the price-server
+        // sidecar's job — it adds/removes assets and re-pushes via setdynamicfeerates
+        // (or setfeeexchangerates). The node just holds whatever was last set.
     }
 
     /* Start the RPC server already.  It will be started in "warmup" mode
