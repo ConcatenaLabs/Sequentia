@@ -15,6 +15,7 @@ const path = require('path')
 const DIST = path.join(__dirname, 'esplora', 'dist')
 const SEQ_ELECTRS = process.env.SEQ_ELECTRS || '127.0.0.1:3003'
 const T4_ELECTRS = process.env.T4_ELECTRS || '127.0.0.1:3004'
+const SEQ_REGISTRY = process.env.SEQ_REGISTRY || '127.0.0.1:3005' // Sequentia Asset Registry
 const PORT = process.env.PORT || 8080
 // Optional release-artifact downloads served at /download (Linux tarball,
 // Windows installer, landing page). Defaults to ./downloads next to this file.
@@ -84,6 +85,10 @@ app.post('/api/tx', express.text({ type: () => true, limit: '500kb' }), (req, re
 })
 
 app.use('/api', proxyTo(SEQ_ELECTRS))
+
+// Sequentia Asset Registry (asset metadata). Mount strips /registry, so the
+// upstream sees /index.minimal.json, /<assetid>, /health, POST /, etc.
+app.use('/registry', proxyTo(SEQ_REGISTRY))
 
 // Release-artifact downloads + landing page (before the SPA fallback so
 // /download/* is served from DOWNLOAD_DIR, not the esplora index.html).
