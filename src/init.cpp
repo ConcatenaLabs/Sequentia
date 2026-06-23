@@ -99,6 +99,7 @@
 #include <boost/signals2/signal.hpp>
 
 #include <assetsdir.h> // InitGlobalAssetDir
+#include <assetregistry.h> // StartAssetRegistry
 #include <pegins.h>
 
 #if ENABLE_ZMQ
@@ -621,6 +622,9 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-bech32_hrp", strprintf("The human-readable part of the chain's bech32 encoding. (default: %s)", defaultChainParams->Bech32HRP()), ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-blech32_hrp", strprintf("The human-readable part of the chain's blech32 encoding. Used in confidential addresses.(default: %s)", defaultChainParams->Blech32HRP()), ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-assetdir", "Entries of pet names of assets, in this format:asset=<hex>:<label>. There can be any number of entries.", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
+    argsman.AddArg("-assetregistryurl=<url>", "Sequentia Asset Registry index URL (http only). When set, the node periodically fetches verified asset labels and merges them into the asset directory (used by RPC output and the GUI). Operator -assetdir entries always take precedence.", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
+    argsman.AddArg("-assetregistrypoll=<n>", "Seconds between Asset Registry refreshes (0 disables periodic refresh; only the initial fetch runs). (default: 300)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
+    argsman.AddArg("-assetregistrytimeout=<n>", "Timeout in seconds for an Asset Registry fetch. (default: 15)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-defaultpeggedassetname", "Default name of the pegged asset. (default: bitcoin)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-blindedaddresses", "Give blind addresses by default via getnewaddress and getrawchangeaddress. (default: chain-dependent: 1 on Liquid/Elements chains, 0 on Sequentia chains where confidential transactions are opt-in; always 0 outside elements mode)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-blindedprefix", "The byte prefix, in decimal, of blinded addresses. (default: 4)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
@@ -828,6 +832,10 @@ void InitParameterInteraction(ArgsManager& args)
         // can't reach it. -addnode takes IP:port directly (as the README did).
         if (args.SoftSetArg("-addnode", "159.195.15.140:18444"))
             LogPrintf("%s: chain=test -> setting -addnode=159.195.15.140:18444 (shared testnet gateway)\n", __func__);
+        // Fetch verified asset labels from the shared Sequentia Asset Registry, so
+        // a fresh testnet node/GUI shows USDX/GOLD/etc. with no -assetdir config.
+        if (args.SoftSetArg("-assetregistryurl", "http://159.195.15.140/registry/index.minimal.json"))
+            LogPrintf("%s: chain=test -> setting -assetregistryurl=http://159.195.15.140/registry/index.minimal.json\n", __func__);
     }
 }
 
@@ -1400,6 +1408,10 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     }, std::chrono::minutes{1});
 
     GetMainSignals().RegisterBackgroundSignalScheduler(*node.scheduler);
+
+    // SEQUENTIA: fetch verified asset labels from the Asset Registry (if
+    // -assetregistryurl is set) and refresh them periodically.
+    StartAssetRegistry(*node.scheduler);
 
     // Create client interfaces for wallets that are supposed to be loaded
     // according to -wallet and -disablewallet options. This only constructs

@@ -14,6 +14,7 @@
 
 void CAssetsDir::Set(const CAsset& asset, const AssetMetadata& metadata)
 {
+    LOCK(cs);
     // No asset or label repetition
     if (GetLabel(asset) != "")
         throw std::runtime_error(strprintf("duplicated asset '%s'", asset.GetHex()));
@@ -26,6 +27,7 @@ void CAssetsDir::Set(const CAsset& asset, const AssetMetadata& metadata)
 
 void CAssetsDir::SetHex(const std::string& assetHex, const std::string& label)
 {
+    LOCK(cs);
     if (!IsHex(assetHex) || assetHex.size() != 64)
         throw std::runtime_error("The asset must be hex string of length 64");
 
@@ -40,6 +42,7 @@ void CAssetsDir::SetHex(const std::string& assetHex, const std::string& label)
 
 void CAssetsDir::InitFromStrings(const std::vector<std::string>& assetsToInit, const std::string& pegged_asset_name)
 {
+    LOCK(cs);
     for (std::string strToSplit : assetsToInit) {
         std::vector<std::string> vAssets;
         boost::split(vAssets, strToSplit, boost::is_any_of(":"));
@@ -73,8 +76,30 @@ void CAssetsDir::InitFromStrings(const std::vector<std::string>& assetsToInit, c
     }
 }
 
+int CAssetsDir::Merge(const std::vector<std::pair<std::string, std::string>>& id_label_pairs)
+{
+    LOCK(cs);
+    int added = 0;
+    static const std::vector<std::string> protectedLabels = {"", "*", "bitcoin", "Bitcoin", "btc"};
+    for (const auto& [assetHex, label] : id_label_pairs) {
+        if (!IsHex(assetHex) || assetHex.size() != 64) continue;
+        bool prot = false;
+        for (const auto& p : protectedLabels) if (label == p) { prot = true; break; }
+        if (prot) continue;
+        const CAsset asset(uint256S(assetHex));
+        // Additive + idempotent: a user -assetdir entry, the native label, or an
+        // already-registered asset/label always wins — skip if either is mapped.
+        if (mapAssetMetadata.count(asset) || mapAssets.count(label)) continue;
+        mapAssetMetadata[asset] = AssetMetadata(label);
+        mapAssets[label] = asset;
+        added++;
+    }
+    return added;
+}
+
 CAsset CAssetsDir::GetAsset(const std::string& label) const
 {
+    LOCK(cs);
     auto it = mapAssets.find(label);
     if (it != mapAssets.end())
         return it->second;
@@ -83,6 +108,7 @@ CAsset CAssetsDir::GetAsset(const std::string& label) const
 
 AssetMetadata CAssetsDir::GetMetadata(const CAsset& asset) const
 {
+    LOCK(cs);
     auto it = mapAssetMetadata.find(asset);
     if (it != mapAssetMetadata.end())
         return it->second;
@@ -103,6 +129,7 @@ std::string CAssetsDir::GetIdentifier(const CAsset& asset) const
 
 std::vector<CAsset> CAssetsDir::GetKnownAssets() const
 {
+    LOCK(cs);
     std::vector<CAsset> knownAssets;
     for (auto it = mapAssets.begin(); it != mapAssets.end(); it++) {
         knownAssets.push_back(it->second);
@@ -127,9 +154,21 @@ void InitGlobalAssetDir(const std::vector<std::string>& assetsToInit, const std:
     _gAssetsDir.InitFromStrings(assetsToInit, pegged_asset_name);
 }
 
+int MergeGlobalAssetDir(const std::vector<std::pair<std::string, std::string>>& id_label_pairs)
+{
+    return _gAssetsDir.Merge(id_label_pairs);
+}
+
+void CAssetsDir::Clear()
+{
+    LOCK(cs);
+    mapAssetMetadata.clear();
+    mapAssets.clear();
+}
+
 // Used in testing
 void ClearGlobalAssetDir()
 {
-    _gAssetsDir = CAssetsDir();
+    _gAssetsDir.Clear();
 }
 
