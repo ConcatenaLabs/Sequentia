@@ -24,6 +24,8 @@
 #include <node/ui_interface.h>
 #include <policy/fees.h>
 #include <policy/policy.h>
+#include <assetsdir.h>
+#include <primitives/transaction.h>
 #include <txmempool.h>
 #include <validation.h>
 #include <wallet/coincontrol.h>
@@ -206,6 +208,31 @@ void SendCoinsDialog::setModel(WalletModel *_model)
 
         // set default rbf checkbox state
         ui->optInRBF->setCheckState(Qt::Checked);
+
+        // Sequentia any-asset fees: let the user pay the fee in any asset they hold. The fee
+        // asset is a free choice — no asset is privileged (the policy asset is just the default
+        // option). The node accepts whatever a block producer prices; RBF (above) is on by
+        // default so a fee in an asset the network won't relay can be replaced.
+        ui->feeAssetSelector->setVisible(g_con_any_asset_fees);
+        if (g_con_any_asset_fees) {
+            auto populateFeeAssets = [this]() {
+                const QString prev = ui->feeAssetSelector->currentData().toString();
+                ui->feeAssetSelector->clear();
+                ui->feeAssetSelector->addItem(QString::fromStdString(gAssetsDir.GetIdentifier(::policyAsset)),
+                                              QString::fromStdString(::policyAsset.GetHex()));
+                for (const CAsset& asset : model->getAssetTypes()) {
+                    if (asset == ::policyAsset) continue;
+                    ui->feeAssetSelector->addItem(QString::fromStdString(gAssetsDir.GetIdentifier(asset)),
+                                                  QString::fromStdString(asset.GetHex()));
+                }
+                const int idx = ui->feeAssetSelector->findData(prev);
+                if (idx >= 0) ui->feeAssetSelector->setCurrentIndex(idx);
+            };
+            populateFeeAssets();
+            connect(model, &WalletModel::assetTypesChanged, this, populateFeeAssets);
+            connect(ui->feeAssetSelector, qOverload<int>(&QComboBox::currentIndexChanged),
+                    this, &SendCoinsDialog::coinControlUpdateLabels);
+        }
 
         if (model->wallet().hasExternalSigner()) {
             //: "device" usually means a hardware wallet.
@@ -866,6 +893,16 @@ void SendCoinsDialog::updateCoinControlState()
     // Either custom fee will be used or if not selected, the confirmation target from dropdown box
     m_coin_control->m_confirm_target = getConfTargetForIndex(ui->confTargetSelector->currentIndex());
     m_coin_control->m_signal_bip125_rbf = ui->optInRBF->isChecked();
+    // Sequentia: pay the fee in the selected asset. The policy asset is the default and leaves
+    // m_fee_asset unset (so the wallet uses the policy asset); any other choice sets it.
+    if (g_con_any_asset_fees && ui->feeAssetSelector->count() > 0) {
+        const CAsset sel = GetAssetFromString(ui->feeAssetSelector->currentData().toString().toStdString());
+        if (!sel.IsNull() && sel != ::policyAsset) {
+            m_coin_control->m_fee_asset = sel;
+        } else {
+            m_coin_control->m_fee_asset.reset();
+        }
+    }
     // Include watch-only for wallets without private key
     m_coin_control->fAllowWatchOnly = model->wallet().privateKeysDisabled() && !model->wallet().hasExternalSigner();
 }

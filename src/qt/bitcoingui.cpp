@@ -289,6 +289,11 @@ void BitcoinGUI::createActions()
     stakingAction->setShortcut(QKeySequence(Qt::ALT + Qt::Key_6));
     tabGroup->addAction(stakingAction);
 
+    // Sequentia operator tool (menu action, not a tab): view/edit which assets this node
+    // accepts for fees.
+    feePolicyAction = new QAction(tr("&Fee acceptance…"), this);
+    feePolicyAction->setStatusTip(tr("View and edit which assets this node accepts for fee payment"));
+
 #ifdef ENABLE_WALLET
     // These showNormalIfMinimized are needed because Send Coins and Receive Coins
     // can be triggered from the tray menu, and need to show the GUI to be useful.
@@ -304,6 +309,8 @@ void BitcoinGUI::createActions()
     connect(assetsAction, &QAction::triggered, this, &BitcoinGUI::gotoAssetsPage);
     connect(stakingAction, &QAction::triggered, [this]{ showNormalIfMinimized(); });
     connect(stakingAction, &QAction::triggered, this, &BitcoinGUI::gotoStakingPage);
+    connect(feePolicyAction, &QAction::triggered, [this]{ showNormalIfMinimized(); });
+    connect(feePolicyAction, &QAction::triggered, this, &BitcoinGUI::gotoFeePolicyDialog);
 #endif // ENABLE_WALLET
 
     quitAction = new QAction(tr("E&xit"), this);
@@ -478,6 +485,7 @@ void BitcoinGUI::createMenuBar()
         settings->addAction(changePassphraseAction);
         settings->addSeparator();
         settings->addAction(m_mask_values_action);
+        settings->addAction(feePolicyAction);
         settings->addSeparator();
     }
     settings->addAction(optionsAction);
@@ -754,6 +762,7 @@ void BitcoinGUI::setWalletActionsEnabled(bool enabled)
     historyAction->setEnabled(enabled);
     assetsAction->setEnabled(enabled);
     stakingAction->setEnabled(enabled);
+    feePolicyAction->setEnabled(enabled);
     encryptWalletAction->setEnabled(enabled);
     backupWalletAction->setEnabled(enabled);
     changePassphraseAction->setEnabled(enabled);
@@ -918,6 +927,11 @@ void BitcoinGUI::gotoStakingPage()
 {
     stakingAction->setChecked(true);
     if (walletFrame) walletFrame->gotoStakingPage();
+}
+
+void BitcoinGUI::gotoFeePolicyDialog()
+{
+    if (walletFrame) walletFrame->gotoFeePolicyDialog();
 }
 
 void BitcoinGUI::gotoSendCoinsPage(QString addr)

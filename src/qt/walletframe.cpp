@@ -185,6 +185,12 @@ void WalletFrame::gotoStakingPage()
         i.value()->gotoStakingPage();
 }
 
+void WalletFrame::gotoFeePolicyDialog()
+{
+    WalletView* view = currentWalletView();
+    if (view) view->gotoFeePolicyDialog();
+}
+
 void WalletFrame::gotoSendCoinsPage(QString addr)
 {
     QMap<WalletModel*, WalletView*>::const_iterator i;

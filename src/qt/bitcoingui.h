@@ -146,6 +146,7 @@ private:
     QAction* receiveCoinsAction = nullptr;
     QAction* assetsAction = nullptr;
     QAction* stakingAction = nullptr;
+    QAction* feePolicyAction = nullptr;
     QAction* optionsAction = nullptr;
     QAction* encryptWalletAction = nullptr;
     QAction* backupWalletAction = nullptr;
@@ -281,6 +282,8 @@ public Q_SLOTS:
     void gotoAssetsPage();
     /** Switch to the Staking page */
     void gotoStakingPage();
+    /** Open the fee-acceptance policy dialog */
+    void gotoFeePolicyDialog();
     /** Switch to send coins page */
     void gotoSendCoinsPage(QString addr = "");
 

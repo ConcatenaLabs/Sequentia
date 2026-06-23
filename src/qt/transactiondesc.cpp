@@ -244,9 +244,17 @@ QString TransactionDesc::toHTML(interfaces::Node& node, interfaces::Wallet& wall
                 strHTML += "<b>" + tr("Total credit") + ":</b> " + BitcoinUnits::formatHtmlWithUnit(unit, nValue) + "<br>";
             }
 
-            CAmount nTxFee = GetFeeMap(*wtx.tx)[::policyAsset];
-            if (nTxFee > 0)
-                strHTML += "<b>" + tr("Transaction fee") + ":</b> " + BitcoinUnits::formatHtmlWithUnit(unit, -nTxFee) + "<br>";
+            // Sequentia: the fee may be paid in a non-policy asset; read the tx's actual fee
+            // asset instead of assuming the policy asset (which dropped the fee row entirely
+            // for any-asset-fee transactions).
+            const CAsset feeAsset = wtx.tx->GetFeeAsset(::policyAsset);
+            CAmount nTxFee = GetFeeMap(*wtx.tx)[feeAsset];
+            if (nTxFee > 0) {
+                QString feeStr = (feeAsset == ::policyAsset)
+                    ? BitcoinUnits::formatHtmlWithUnit(unit, -nTxFee)
+                    : GUIUtil::formatAssetAmount(feeAsset, -nTxFee, unit, BitcoinUnits::SeparatorStyle::STANDARD, true).toHtmlEscaped();
+                strHTML += "<b>" + tr("Transaction fee") + ":</b> " + feeStr + "<br>";
+            }
         }
         else
         {

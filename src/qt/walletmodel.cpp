@@ -22,6 +22,8 @@
 #include <key_io.h>
 #include <node/ui_interface.h>
 #include <policy/policy.h>
+#include <assetsdir.h>              // gAssetsDir, GetAssetFromString
+#include <primitives/transaction.h> // g_con_any_asset_fees, CTransaction::GetFeeAsset
 #include <psbt.h>
 #include <util/system.h> // for GetBoolArg
 #include <util/translation.h>
@@ -32,10 +34,15 @@
 #include <stdint.h>
 #include <functional>
 
+#include <QComboBox>
 #include <QDebug>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QLabel>
 #include <QMessageBox>
 #include <QSet>
 #include <QTimer>
+#include <QVBoxLayout>
 
 using wallet::CCoinControl;
 using wallet::CRecipient;
@@ -517,6 +524,48 @@ bool WalletModel::bumpFee(uint256 hash, uint256& new_hash)
 {
     CCoinControl coin_control;
     coin_control.m_signal_bip125_rbf = true;
+
+    // Recover the ORIGINAL tx's fee asset — the default for the bump and for display.
+    CAsset old_fee_asset = ::policyAsset;
+    if (CTransactionRef orig = m_wallet->getTx(hash)) {
+        old_fee_asset = orig->GetFeeAsset(::policyAsset);
+    }
+    CAsset new_fee_asset = old_fee_asset; // unless the user switches it below
+
+    // Sequentia any-asset fees: let the user choose which asset pays the increased fee — any
+    // held asset; no asset is privileged. The default keeps the original tx's fee asset (also
+    // what feebumper pins when m_fee_asset is unset). Switching to a more widely accepted asset
+    // is how a stranded any-asset-fee tx is rescued.
+    if (g_con_any_asset_fees) {
+        QStringList labels; QList<QString> hexes;
+        labels << tr("Keep original (%1)").arg(QString::fromStdString(gAssetsDir.GetIdentifier(old_fee_asset)));
+        hexes  << QString::fromStdString(old_fee_asset.GetHex());
+        for (const CAsset& asset : getAssetTypes()) {
+            if (asset == old_fee_asset) continue;
+            labels << QString::fromStdString(gAssetsDir.GetIdentifier(asset));
+            hexes  << QString::fromStdString(asset.GetHex());
+        }
+        if (labels.size() > 1) {
+            QDialog dlg(nullptr);
+            dlg.setWindowTitle(tr("Choose fee asset"));
+            auto* lay = new QVBoxLayout(&dlg);
+            lay->addWidget(new QLabel(tr("Pay the increased fee in:"), &dlg));
+            auto* combo = new QComboBox(&dlg);
+            for (int i = 0; i < labels.size(); ++i) combo->addItem(labels[i], hexes[i]);
+            lay->addWidget(combo);
+            auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+            lay->addWidget(bb);
+            connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+            connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+            if (dlg.exec() != QDialog::Accepted) return false;
+            const CAsset sel = GetAssetFromString(combo->currentData().toString().toStdString());
+            if (!sel.IsNull() && sel != old_fee_asset) {
+                coin_control.m_fee_asset = sel; // honored by feebumper
+                new_fee_asset = sel;
+            }
+        }
+    }
+
     std::vector<bilingual_str> errors;
     CAmount old_fee;
     CAmount new_fee;
@@ -531,19 +580,25 @@ bool WalletModel::bumpFee(uint256 hash, uint256& new_hash)
     /*: Asks a user if they would like to manually increase the fee of a transaction that has already been created. */
     QString questionString = tr("Do you want to increase the fee?");
     questionString.append("<br />");
+    const int unit = getOptionsModel()->getDisplayUnit();
     questionString.append("<table style=\"text-align: left;\">");
     questionString.append("<tr><td>");
     questionString.append(tr("Current fee:"));
     questionString.append("</td><td>");
-    questionString.append(BitcoinUnits::formatHtmlWithUnit(getOptionsModel()->getDisplayUnit(), old_fee));
-    questionString.append("</td></tr><tr><td>");
-    questionString.append(tr("Increase:"));
-    questionString.append("</td><td>");
-    questionString.append(BitcoinUnits::formatHtmlWithUnit(getOptionsModel()->getDisplayUnit(), new_fee - old_fee));
-    questionString.append("</td></tr><tr><td>");
+    questionString.append(GUIUtil::formatAssetAmount(old_fee_asset, old_fee, unit, BitcoinUnits::SeparatorStyle::STANDARD, true));
+    questionString.append("</td></tr>");
+    if (new_fee_asset == old_fee_asset) {
+        questionString.append("<tr><td>");
+        questionString.append(tr("Increase:"));
+        questionString.append("</td><td>");
+        questionString.append(GUIUtil::formatAssetAmount(new_fee_asset, new_fee - old_fee, unit, BitcoinUnits::SeparatorStyle::STANDARD, true));
+        questionString.append("</td></tr>");
+    }
+    // A cross-asset switch makes the new-minus-old diff meaningless, so omit the Increase row.
+    questionString.append("<tr><td>");
     questionString.append(tr("New fee:"));
     questionString.append("</td><td>");
-    questionString.append(BitcoinUnits::formatHtmlWithUnit(getOptionsModel()->getDisplayUnit(), new_fee));
+    questionString.append(GUIUtil::formatAssetAmount(new_fee_asset, new_fee, unit, BitcoinUnits::SeparatorStyle::STANDARD, true));
     questionString.append("</td></tr></table>");
 
     // Display warning in the "Confirm fee bump" window if the "Coin Control Features" option is enabled
@@ -598,6 +653,96 @@ bool WalletModel::bumpFee(uint256 hash, uint256& new_hash)
             QString::fromStdString(errors[0].translated)+")");
         return false;
     }
+    return true;
+}
+
+bool WalletModel::canDoCPFP(uint256 hash)
+{
+    interfaces::WalletTxStatus st;
+    interfaces::WalletOrderForm of;
+    bool in_mempool = false;
+    int nblocks = 0;
+    interfaces::WalletTx wtx = m_wallet->getWalletTxDetails(hash, st, of, in_mempool, nblocks);
+    if (!wtx.tx) return false;
+    if (st.depth_in_main_chain != 0 || !in_mempool || st.is_abandoned) return false;
+    for (size_t n = 0; n < wtx.tx->vout.size(); ++n) {
+        if (n >= wtx.txout_is_mine.size() || wtx.txout_is_mine[n] == wallet::ISMINE_NO) continue;
+        const auto coins = m_wallet->getCoins({COutPoint(hash, (uint32_t)n)});
+        if (coins.empty() || coins[0].is_spent) continue;
+        return true; // an unconfirmed, unspent, wallet-owned output to attach a child to
+    }
+    return false;
+}
+
+bool WalletModel::createChildPaysForParent(uint256 parentHash, uint256& childHash)
+{
+    interfaces::WalletTxStatus st;
+    interfaces::WalletOrderForm of;
+    bool in_mempool = false;
+    int nblocks = 0;
+    interfaces::WalletTx wtx = m_wallet->getWalletTxDetails(parentHash, st, of, in_mempool, nblocks);
+    if (!wtx.tx || st.depth_in_main_chain != 0 || !in_mempool) {
+        QMessageBox::critical(nullptr, tr("Speed up"), tr("This transaction is no longer unconfirmed."));
+        return false;
+    }
+
+    // Pick a spendable wallet-owned output of the parent — prefer its change.
+    std::optional<size_t> pick;
+    for (size_t n = 0; n < wtx.tx->vout.size(); ++n) {
+        if (n >= wtx.txout_is_mine.size() || wtx.txout_is_mine[n] == wallet::ISMINE_NO) continue;
+        const auto coins = m_wallet->getCoins({COutPoint(parentHash, (uint32_t)n)});
+        if (coins.empty() || coins[0].is_spent) continue;
+        if (n < wtx.txout_is_change.size() && wtx.txout_is_change[n]) { pick = n; break; }
+        if (!pick) pick = n;
+    }
+    if (!pick) {
+        QMessageBox::critical(nullptr, tr("Speed up"), tr("No spendable output to attach a child fee to."));
+        return false;
+    }
+    const size_t n = *pick;
+    const CAsset childAsset = wtx.txout_assets[n];
+    const CAmount childValue = wtx.txout_amounts[n];
+
+    // Force the parent output as input, allow same-asset top-ups, use a high feerate, and pay
+    // the child fee in that output's OWN asset (no asset privileged). The high child fee lifts
+    // the parent+child package's effective fee rate (CPFP).
+    CCoinControl cc;
+    cc.Select(COutPoint(parentHash, (uint32_t)n));
+    cc.fAllowOtherInputs = true;
+    cc.m_include_unsafe_inputs = true; // a received unconfirmed output we own is not "trusted"
+    cc.m_signal_bip125_rbf = true;
+    const CAmount min_per_k = m_wallet->getMinimumFee(1000, cc, nullptr, nullptr);
+    cc.m_feerate = CFeeRate(min_per_k * 5); // generous CPFP bump
+    cc.fOverrideFeeRate = true;
+    if (g_con_any_asset_fees && childAsset != ::policyAsset) cc.m_fee_asset = childAsset;
+
+    // Send to a fresh wallet address, subtracting the fee from the spent output.
+    CTxDestination dest;
+    if (!m_wallet->getNewDestination(m_wallet->getDefaultAddressType(), "CPFP", dest, /*add_blinding_key=*/true)) {
+        QMessageBox::critical(nullptr, tr("Speed up"), tr("Could not get a new address."));
+        return false;
+    }
+    CScript spk = GetScriptForDestination(dest);
+    CPubKey blind = GetDestinationBlindingKey(dest);
+    std::vector<CRecipient> vecSend{ {spk, childValue, childAsset, blind, /*fSubtractFeeFromAmount=*/true} };
+
+    UnlockContext ctx(requestUnlock());
+    if (!ctx.isValid()) return false;
+
+    // Elements txs require BlindDetails (asserted in elements mode); createTransaction fills it.
+    auto blind_details = std::make_unique<wallet::BlindDetails>();
+    int changePos = -1;
+    CAmount fee = 0;
+    bilingual_str err;
+    CTransactionRef child = m_wallet->createTransaction(
+        vecSend, cc, !wallet().privateKeysDisabled() /*sign*/, changePos, fee, blind_details.get(), err);
+    if (!child) {
+        QMessageBox::critical(nullptr, tr("Speed up"), tr("Could not create the child transaction") + "<br />(" +
+            QString::fromStdString(err.translated) + ")");
+        return false;
+    }
+    m_wallet->commitTransaction(child, {} /* mapValue */, {} /* orderForm */, blind_details.get());
+    childHash = child->GetHash();
     return true;
 }
 

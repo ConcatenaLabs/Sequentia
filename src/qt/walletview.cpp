@@ -8,6 +8,7 @@
 #include <qt/askpassphrasedialog.h>
 #include <qt/assetspage.h>
 #include <qt/stakingpage.h>
+#include <qt/feepolicydialog.h>
 #include <qt/clientmodel.h>
 #include <qt/guiutil.h>
 #include <qt/optionsmodel.h>
@@ -179,6 +180,14 @@ void WalletView::gotoAssetsPage()
 void WalletView::gotoStakingPage()
 {
     setCurrentWidget(stakingPage);
+}
+
+void WalletView::gotoFeePolicyDialog()
+{
+    FeePolicyDialog* dlg = new FeePolicyDialog(platformStyle, this);
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->setModel(walletModel);
+    dlg->show();
 }
 
 void WalletView::gotoSendCoinsPage(QString addr)

@@ -84,6 +84,8 @@ public Q_SLOTS:
     void gotoAssetsPage();
     /** Switch to the Staking page */
     void gotoStakingPage();
+    /** Open the fee-acceptance policy dialog */
+    void gotoFeePolicyDialog();
     /** Switch to send coins page */
     void gotoSendCoinsPage(QString addr = "");
 

@@ -178,6 +178,9 @@ TransactionView::TransactionView(const PlatformStyle *platformStyle, QWidget *pa
     bumpFeeAction = contextMenu->addAction(tr("Increase transaction &fee"));
     GUIUtil::ExceptionSafeConnect(bumpFeeAction, &QAction::triggered, this, &TransactionView::bumpFee);
     bumpFeeAction->setObjectName("bumpFeeAction");
+    speedUpAction = contextMenu->addAction(tr("&Speed up (pay child fee)"));
+    GUIUtil::ExceptionSafeConnect(speedUpAction, &QAction::triggered, this, &TransactionView::speedUp);
+    speedUpAction->setObjectName("speedUpAction");
     abandonAction = contextMenu->addAction(tr("A&bandon transaction"), this, &TransactionView::abandonTx);
     contextMenu->addAction(tr("&Edit address label"), this, &TransactionView::editLabel);
 
@@ -401,6 +404,7 @@ void TransactionView::contextualMenu(const QPoint &point)
     hash.SetHex(selection.at(0).data(TransactionTableModel::TxHashRole).toString().toStdString());
     abandonAction->setEnabled(model->wallet().transactionCanBeAbandoned(hash));
     bumpFeeAction->setEnabled(model->wallet().transactionCanBeBumped(hash));
+    speedUpAction->setEnabled(model->canDoCPFP(hash));
     copyAddressAction->setEnabled(GUIUtil::hasEntryData(transactionView, 0, TransactionTableModel::AddressRole));
     copyLabelAction->setEnabled(GUIUtil::hasEntryData(transactionView, 0, TransactionTableModel::LabelRole));
 
@@ -447,6 +451,28 @@ void TransactionView::bumpFee([[maybe_unused]] bool checked)
 
         qApp->processEvents();
         Q_EMIT bumpedFee(newHash);
+    }
+}
+
+void TransactionView::speedUp([[maybe_unused]] bool checked)
+{
+    if (!transactionView || !transactionView->selectionModel())
+        return;
+    QModelIndexList selection = transactionView->selectionModel()->selectedRows(0);
+    if (selection.isEmpty())
+        return;
+
+    uint256 hash;
+    QString hashQStr = selection.at(0).data(TransactionTableModel::TxHashRole).toString();
+    hash.SetHex(hashQStr.toStdString());
+
+    // Attach a child-pays-for-parent child over the walletModel.
+    uint256 childHash;
+    if (model->createChildPaysForParent(hash, childHash)) {
+        transactionView->selectionModel()->clearSelection();
+        model->getTransactionTableModel()->updateTransaction(hashQStr, CT_UPDATED, true);
+        qApp->processEvents();
+        Q_EMIT bumpedFee(childHash); // reuse the focus-after-fee-change signal
     }
 }
 
