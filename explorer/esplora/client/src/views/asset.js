@@ -8,7 +8,7 @@ import loader from '../components/loading'
 
 const staticRoot = process.env.STATIC_ROOT || ''
 
-export default ({ t, asset, assetTxs, goAsset, openTx, spends, tipHeight, loading, ...S }) => {
+export default ({ t, asset, assetTxs, goAsset, openTx, spends, tipHeight, loading, assetMap, ...S }) => {
   if (!asset) return;
 
   const { chain_stats = {}, mempool_stats = {} } = asset
@@ -33,6 +33,14 @@ export default ({ t, asset, assetTxs, goAsset, openTx, spends, tipHeight, loadin
       // </>
 
       , is_native_asset = !asset.issuance_txin
+
+      // SEQUENTIA: fall back to the Asset Registry (assetMap) for metadata that
+      // electrs doesn't carry on-chain (name/ticker/precision/issuer domain).
+      , [ reg_domain, reg_ticker, reg_name, reg_precision ] = (assetMap && assetMap[asset.asset_id]) || []
+      , disp_name = asset.name || reg_name
+      , disp_ticker = asset.ticker || reg_ticker
+      , disp_precision = asset.precision != null ? asset.precision : (reg_precision != null ? reg_precision : 0)
+      , disp_domain = (asset.entity && entity_type && asset.entity[entity_type]) || reg_domain
 
       , circulating =
           is_native_asset
@@ -127,24 +135,24 @@ export default ({ t, asset, assetTxs, goAsset, openTx, spends, tipHeight, loadin
 
             // Issued assets
             : [
-                asset.name && <div>
+                disp_name && <div>
                   <div>{t`Name`}</div>
-                  <div>{asset.name}</div>
+                  <div>{disp_name}</div>
                 </div>
 
               , <div>
                   <div>{t`Precision - decimal places`}</div>
-                  <div>{asset.precision || 0}</div>
+                  <div>{disp_precision}</div>
                 </div>
 
-              , asset.ticker && <div>
+              , disp_ticker && <div>
                   <div>{t`Ticker`}</div>
-                  <div>{asset.ticker}</div>
+                  <div>{disp_ticker}</div>
                 </div>
 
-              , asset.entity && <div>
-                  <div>{t(`Issuer ${entity_type}`)}</div>
-                  <div>{asset.entity[entity_type]}</div>
+              , disp_domain && <div>
+                  <div>{t`Issuer domain`}</div>
+                  <div>{disp_domain}</div>
                 </div>
 
               , <div>

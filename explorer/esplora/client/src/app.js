@@ -27,7 +27,9 @@ import l10n, { defaultLang } from './l10n'
 import * as views from './views'
 
 const apiBase = (process.env.API_URL || '/api').replace(/\/+$/, '')
-    , setBase = ({ path, ...r }) => ({ ...r, url: path.includes('://') || path.startsWith('./') ? path : apiBase + path })
+    // '/registry/...' is the Asset Registry mount (origin-absolute), not an electrs
+    // API path — pass it through instead of prefixing apiBase (which would 404).
+    , setBase = ({ path, ...r }) => ({ ...r, url: path.includes('://') || path.startsWith('./') || path.startsWith('/registry') ? path : apiBase + path })
 
 const reservedPaths = [ 'mempool', 'assets', 'search' ]
     , NEW_TABLE_ENTRY_MS = 2000
