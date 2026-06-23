@@ -703,20 +703,59 @@ bool WalletModel::createChildPaysForParent(uint256 parentHash, uint256& childHas
     const CAsset childAsset = wtx.txout_assets[n];
     const CAmount childValue = wtx.txout_amounts[n];
 
-    // Force the parent output as input, allow same-asset top-ups, use a high feerate, and pay
-    // the child fee in that output's OWN asset (no asset privileged). The high child fee lifts
-    // the parent+child package's effective fee rate (CPFP).
+    // CPFP: spend the parent's unconfirmed output (the link a miner evaluates as a package) and pay
+    // a HIGH child fee, funded from the wallet in a PRODUCER-ACCEPTED asset (default the policy
+    // asset, which producers always mine) — NOT confined to the pinned output's asset, which may be
+    // exactly the one producers reject (confining the fee to the change asset was the old bug, and
+    // makes the child strand alongside the parent). The user may pick any accepted asset.
+    CAsset feeAsset = ::policyAsset;
+    if (g_con_any_asset_fees) {
+        QStringList labels; QList<QString> hexes;
+        labels << tr("tSEQ (recommended)");
+        hexes  << QString::fromStdString(::policyAsset.GetHex());
+        for (const CAsset& asset : getAssetTypes()) {
+            if (asset == ::policyAsset) continue;
+            labels << QString::fromStdString(gAssetsDir.GetIdentifier(asset));
+            hexes  << QString::fromStdString(asset.GetHex());
+        }
+        if (labels.size() > 1) {
+            QDialog dlg(nullptr);
+            dlg.setWindowTitle(tr("Speed up — fee asset"));
+            auto* lay = new QVBoxLayout(&dlg);
+            lay->addWidget(new QLabel(tr("Pay the child fee in (a producer-accepted asset lets the package confirm):"), &dlg));
+            auto* combo = new QComboBox(&dlg);
+            for (int i = 0; i < labels.size(); ++i) combo->addItem(labels[i], hexes[i]);
+            lay->addWidget(combo);
+            auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+            lay->addWidget(bb);
+            connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+            connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+            if (dlg.exec() != QDialog::Accepted) return false;
+            feeAsset = GetAssetFromString(combo->currentData().toString().toStdString());
+            if (feeAsset.IsNull()) feeAsset = ::policyAsset;
+        }
+    }
+
     CCoinControl cc;
     cc.Select(COutPoint(parentHash, (uint32_t)n));
-    cc.fAllowOtherInputs = true;
-    cc.m_include_unsafe_inputs = true; // a received unconfirmed output we own is not "trusted"
+    cc.fAllowOtherInputs = true;       // pull in fee-asset funds to pay the child fee
+    cc.m_include_unsafe_inputs = true; // an unconfirmed output we own is not "trusted"
     cc.m_signal_bip125_rbf = true;
-    const CAmount min_per_k = m_wallet->getMinimumFee(1000, cc, nullptr, nullptr);
-    cc.m_feerate = CFeeRate(min_per_k * 5); // generous CPFP bump
-    cc.fOverrideFeeRate = true;
-    if (g_con_any_asset_fees && childAsset != ::policyAsset) cc.m_fee_asset = childAsset;
+    if (g_con_any_asset_fees && feeAsset != ::policyAsset) cc.m_fee_asset = feeAsset;
 
-    // Send to a fresh wallet address, subtracting the fee from the spent output.
+    // Package-aware feerate: size the child so that, even crediting the parent with zero effective
+    // fee, the {parent, child} package clears the target (mirrors Wollet::cpfp_suggested_feerate).
+    const CAmount min_per_k = m_wallet->getMinimumFee(1000, cc, nullptr, nullptr);
+    const int64_t parent_vsize = GetVirtualTransactionSize(*wtx.tx);
+    const int64_t child_vsize = 1100; // conservative confidential-child estimate
+    const CAmount target_per_k = min_per_k * 5; // a healthy confirmation target
+    cc.m_feerate = CFeeRate(target_per_k * (parent_vsize + child_vsize) / child_vsize);
+    cc.fOverrideFeeRate = true;
+
+    // Send the pinned output's value back to the wallet in its OWN asset. Subtract the fee from it
+    // only when the fee is paid in that same asset; otherwise preserve it and fund the fee from the
+    // separately-selected fee-asset inputs.
+    const bool sameAsset = (feeAsset == childAsset);
     CTxDestination dest;
     if (!m_wallet->getNewDestination(m_wallet->getDefaultAddressType(), "CPFP", dest, /*add_blinding_key=*/true)) {
         QMessageBox::critical(nullptr, tr("Speed up"), tr("Could not get a new address."));
@@ -724,7 +763,7 @@ bool WalletModel::createChildPaysForParent(uint256 parentHash, uint256& childHas
     }
     CScript spk = GetScriptForDestination(dest);
     CPubKey blind = GetDestinationBlindingKey(dest);
-    std::vector<CRecipient> vecSend{ {spk, childValue, childAsset, blind, /*fSubtractFeeFromAmount=*/true} };
+    std::vector<CRecipient> vecSend{ {spk, childValue, childAsset, blind, /*fSubtractFeeFromAmount=*/sameAsset} };
 
     UnlockContext ctx(requestUnlock());
     if (!ctx.isValid()) return false;
