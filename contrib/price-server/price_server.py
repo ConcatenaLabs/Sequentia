@@ -26,8 +26,10 @@ Usage:
 
 import argparse
 import base64
+import collections
 import json
 import logging
+import math
 import signal
 import statistics
 import sys
@@ -137,6 +139,9 @@ class AssetFeed:
         self.sources = [Source(s, timeout) for s in cfg["sources"]]
         self.thresholds = {**defaults, **cfg.get("thresholds", {})}
         self.last_rate = None
+        # Rolling window of recent median prices, for the volatility threshold.
+        window = int(self.thresholds.get("volatility_window", 30))
+        self.price_history = collections.deque(maxlen=max(2, window))
 
     def poll(self):
         """Returns the scaled rate if the asset qualifies, else None."""
@@ -158,6 +163,10 @@ class AssetFeed:
         volumes = [r["volume_24h"] for r in results if r["volume_24h"] is not None]
         market_cap = statistics.median(market_caps) if market_caps else None
         volume_24h = statistics.median(volumes) if volumes else None
+        # Record the observed price for the rolling volatility window (every poll
+        # that reached quorum, regardless of whether other thresholds admit it).
+        if price > 0:
+            self.price_history.append(price)
 
         # Admission thresholds
         t = self.thresholds
@@ -188,6 +197,23 @@ class AssetFeed:
                 log.info("[%s] rejected: source price spread %.2f%% above limit",
                          self.label, 100 * spread)
                 return None
+        # Volatility: rolling standard deviation of log-returns over the window.
+        # Distinct from max_source_spread (cross-source agreement at one instant)
+        # and max_change_factor (a single-step jump clamp) — this rejects an asset
+        # that is calm per-source and per-step but churning over time, covering the
+        # node against repricing an unstable asset. Needs a few samples first.
+        if "max_volatility" in t:
+            min_samples = int(t.get("volatility_min_samples", 5))
+            hist = list(self.price_history)
+            if len(hist) >= max(3, min_samples):
+                rets = [math.log(hist[i] / hist[i - 1])
+                        for i in range(1, len(hist)) if hist[i - 1] > 0 and hist[i] > 0]
+                if len(rets) >= 2:
+                    vol = statistics.pstdev(rets)
+                    if vol > t["max_volatility"]:
+                        log.warning("[%s] rejected: volatility %.4f over %d samples above "
+                                    "max_volatility %g", self.label, vol, len(hist), t["max_volatility"])
+                        return None
         # Sanity clamp: reject implausible jumps between polls
         if self.last_rate is not None and "max_change_factor" in t:
             f = t["max_change_factor"]
