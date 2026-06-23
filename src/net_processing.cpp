@@ -5002,8 +5002,13 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                         const uint256& hash = state.m_wtxid_relay ? txinfo.tx->GetWitnessHash() : txinfo.tx->GetHash();
                         CInv inv(state.m_wtxid_relay ? MSG_WTX : MSG_TX, hash);
                         pto->m_tx_relay->setInventoryTxToSend.erase(hash);
-                        // Don't send transactions that peers will not put into their mempool
-                        if (txinfo.fee < filterrate.GetFee(txinfo.vsize)) {
+                        // Don't send transactions that peers will not put into their mempool.
+                        // SEQUENTIA: compare the native-equivalent fee value, not the raw fee
+                        // (which is denominated in the tx's fee asset). The BIP133 feefilter is
+                        // native-denominated, so a tx paying its fee in a non-native asset would
+                        // otherwise look like fee 0 and be dropped from relay even though peers
+                        // would accept it.
+                        if (txinfo.fee_value < filterrate.GetFee(txinfo.vsize)) {
                             continue;
                         }
                         if (pto->m_tx_relay->pfilter) {
@@ -5062,7 +5067,11 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                         // Peer told you to not send transactions at that feerate? Don't bother sending it.
                         // ELEMENTS: use the discounted vsize here so that discounted CTs are relayed.
                         // discountvsize only differs from vsize if accept_discount_ct is true.
-                        if (txinfo.fee < filterrate.GetFee(txinfo.discountvsize)) {
+                        // SEQUENTIA: compare the native-equivalent fee value (nFeeValue), not the
+                        // raw fee in the tx's fee asset, so non-native-asset fees (open fee market)
+                        // are evaluated against the native-denominated feefilter rather than being
+                        // treated as fee 0 and suppressed.
+                        if (txinfo.fee_value < filterrate.GetFee(txinfo.discountvsize)) {
                             continue;
                         }
                         if (pto->m_tx_relay->pfilter && !pto->m_tx_relay->pfilter->IsRelevantAndUpdate(*txinfo.tx)) continue;

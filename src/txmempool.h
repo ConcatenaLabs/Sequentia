@@ -405,6 +405,15 @@ struct TxMempoolInfo
 
     /** ELEMENTS: Discounted CT size. */
     size_t discountvsize;
+
+    /** SEQUENTIA: the fee expressed in the native reference unit (nFeeValue) —
+     *  i.e. the fee converted from its (possibly non-native) asset via the
+     *  configured exchange rates. Equals `fee` when the fee is paid in the policy
+     *  asset. Used for relay/feefilter decisions so a tx paying its fee in a
+     *  non-native asset (open fee market) is compared in the same units as the
+     *  native-denominated BIP133 feefilter, instead of having a native fee of 0
+     *  and being silently dropped from relay. */
+    CAmount fee_value;
 };
 
 /** Reason why a transaction was removed from the mempool,
