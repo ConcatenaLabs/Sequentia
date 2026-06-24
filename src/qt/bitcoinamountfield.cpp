@@ -412,34 +412,25 @@ void BitcoinAmountField::setReadOnly(bool fReadOnly)
 
 bool BitcoinAmountField::hasAssetChoice(const CAsset& asset) const
 {
-    if (asset == Params().GetConsensus().pegged_asset) {
-        return -1 != unit->findData(0, Qt::UserRole);
-    }
     return -1 != unit->findData(QVariant::fromValue(asset), Qt::UserRole);
 }
 
 void BitcoinAmountField::addAssetChoice(const CAsset& asset)
 {
+    // SEQUENTIA: this is an ASSET selector (whole units), not a precision/unit picker. The native
+    // asset is listed once like any other asset (tSEQ) — no mtSEQ/µtSEQ/sat sub-denominations.
     if (asset == Params().GetConsensus().pegged_asset) {
-        // Special handling
-        for (const auto& pegged_unit : BitcoinUnits::availableUnits()) {
-            unit->addItem(BitcoinUnits::shortName(pegged_unit), int(pegged_unit));
-        }
-        return;
+        unit->addItem(BitcoinUnits::policyAssetTicker(), QVariant::fromValue(asset));
+    } else {
+        unit->addItem(QString::fromStdString(gAssetsDir.GetIdentifier(asset)), QVariant::fromValue(asset));
     }
-    unit->addItem(QString::fromStdString(gAssetsDir.GetIdentifier(asset)), QVariant::fromValue(asset));
+    unit->setVisible(unit->count() > 1);  // hide the selector when only one asset is available
 }
 
 void BitcoinAmountField::removeAssetChoice(const CAsset& asset)
 {
-    if (asset == Params().GetConsensus().pegged_asset) {
-        // Special handling
-        for (const auto& pegged_unit : BitcoinUnits::availableUnits()) {
-            unit->removeItem(unit->findData(int(pegged_unit), Qt::UserRole));
-        }
-        return;
-    }
     unit->removeItem(unit->findData(QVariant::fromValue(asset), Qt::UserRole));
+    unit->setVisible(unit->count() > 1);
 }
 
 void BitcoinAmountField::setAllowedAssets(const std::set<CAsset>& allowed_assets)

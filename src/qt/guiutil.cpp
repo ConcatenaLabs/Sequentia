@@ -853,20 +853,26 @@ QString formatReferenceApproxByLabel(const QString& assetLabel, double wholeUnit
 QString formatMultiAssetAmount(const CAmountMap& amountmap, const int bitcoin_unit, BitcoinUnits::SeparatorStyle separators, QString line_separator)
 {
     QStringList ret;
+    // SEQUENTIA: the native asset is NOT special — list it only when it holds a positive balance,
+    // exactly like every other asset. This avoids a phantom "0/null tSEQ" row when the wallet is
+    // empty or unloaded (the design principle: SEQ is not privileged outside of staking).
     if (bitcoin_unit >= 0) {
-        ret << formatAssetAmount(Params().GetConsensus().pegged_asset, amountmap.count(Params().GetConsensus().pegged_asset) ? amountmap.at(Params().GetConsensus().pegged_asset) : 0, bitcoin_unit, separators);
+        const CAsset& pegged = Params().GetConsensus().pegged_asset;
+        const CAmount nat = amountmap.count(pegged) ? amountmap.at(pegged) : 0;
+        if (nat > 0) ret << formatAssetAmount(pegged, nat, bitcoin_unit, separators);
     }
     for (const auto& assetamount : amountmap) {
         if (assetamount.first == Params().GetConsensus().pegged_asset) {
             // Already handled first
             continue;
         }
-        if (!assetamount.second) {
-            // Don't include zero-amount assets
+        if (assetamount.second <= 0) {
+            // Don't include zero (or sentinel-negative / unloaded) amounts
             continue;
         }
         ret << formatAssetAmount(assetamount.first, assetamount.second, bitcoin_unit, separators);
     }
+    if (ret.isEmpty()) return bitcoin_unit >= 0 ? QString::fromUtf8("\xE2\x80\x94") : QString(); // em dash when nothing to show
     return ret.join(line_separator);
 }
 

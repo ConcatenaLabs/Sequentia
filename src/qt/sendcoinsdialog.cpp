@@ -171,6 +171,7 @@ void SendCoinsDialog::setModel(WalletModel *_model)
         setBalance(balances);
         connect(_model, &WalletModel::balanceChanged, this, &SendCoinsDialog::setBalance);
         connect(_model->getOptionsModel(), &OptionsModel::displayUnitChanged, this, &SendCoinsDialog::updateDisplayUnit);
+        connect(_model->getOptionsModel(), &OptionsModel::referenceCurrencyChanged, this, &SendCoinsDialog::updateDisplayUnit);
         updateDisplayUnit();
 
         // Coin Control
@@ -760,7 +761,11 @@ void SendCoinsDialog::setBalance(const interfaces::WalletBalances& balances)
             balance = valueFor(balances.watch_only_balance, ::policyAsset);
             ui->labelBalanceName->setText(tr("Watch-only balance:"));
         }
-        ui->labelBalance->setText(BitcoinUnits::formatWithUnit(model->getOptionsModel()->getDisplayUnit(), balance));
+        // SEQUENTIA: show the balance valued in the chosen reference currency (≈), like elsewhere.
+        QString balText = BitcoinUnits::formatWithUnit(model->getOptionsModel()->getDisplayUnit(), balance);
+        const QString balRef = GUIUtil::formatReferenceApprox(::policyAsset, balance, model->getOptionsModel()->getReferenceCurrency());
+        if (!balRef.isEmpty()) balText += QStringLiteral("  ") + balRef;
+        ui->labelBalance->setText(balText);
     }
 }
 

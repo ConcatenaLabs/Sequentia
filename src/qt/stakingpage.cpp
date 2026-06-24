@@ -44,9 +44,10 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
     layout->addWidget(title);
 
     QLabel* intro = new QLabel(
-        tr("Stake %1 to help produce blocks and earn the right to do so. Staked %1 stays locked and "
-           "keeps counting; the lock is just the unbonding delay you'd wait before withdrawing. "
-           "The more you stake, the more often you're chosen to produce.").arg(BitcoinUnits::policyAssetTicker()), this);
+        tr("Stake %1 to become a block producer. Your stake stays yours — it is time-locked only for "
+           "the unbonding period you would wait before withdrawing, and it keeps counting the entire "
+           "time. The more you stake, the more often the committee elects you to produce a block and "
+           "collect its fees.").arg(BitcoinUnits::policyAssetTicker()), this);
     intro->setWordWrap(true);
     layout->addWidget(intro);
 
@@ -178,8 +179,8 @@ void StakingPage::refresh()
                                           "confirmed yet. Stake below and wait for confirmation."));
             m_producer_status->setStyleSheet("QLabel{padding:8px;border-radius:4px;background:#fff3cd;color:#856404;}");
         } else {
-            m_producer_status->setText(tr("Block production: not enabled. After staking, add posproducer=1 and "
-                                          "posproducerkey=<WIF> to your configuration and restart to produce."));
+            m_producer_status->setText(tr("Block production: not enabled on this node yet. Stake below to "
+                                          "qualify — once your stake confirms you become eligible to produce."));
             m_producer_status->setStyleSheet("QLabel{padding:8px;border-radius:4px;background:#fff3cd;color:#856404;}");
         }
     }

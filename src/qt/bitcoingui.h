@@ -14,6 +14,7 @@
 
 #include <consensus/amount.h>
 
+#include <QComboBox>
 #include <QLabel>
 #include <QMainWindow>
 #include <QMap>
@@ -325,8 +326,9 @@ public Q_SLOTS:
 };
 
 /** SEQUENTIA: status-bar control to pick the reference currency used for the "≈" valuation
- *  shown beside displayed amounts (USD, BTC, or any priced asset). Mirrors the unit picker. */
-class ReferenceCurrencyStatusBarControl : public QLabel
+ *  shown beside displayed amounts (USD, BTC, or any priced asset). A QComboBox (not a
+ *  QLabel+QMenu) so its popup grabs the mouse reliably under Xwayland/xcb. */
+class ReferenceCurrencyStatusBarControl : public QComboBox
 {
     Q_OBJECT
 
@@ -336,25 +338,22 @@ public:
     void setOptionsModel(OptionsModel *optionsModel);
 
 protected:
-    /** So that it responds to left-button clicks */
-    void mousePressEvent(QMouseEvent *event) override;
-    void changeEvent(QEvent* e) override;
+    /** Refresh the option list (late-arriving prices) just before the popup opens. */
+    void showPopup() override;
 
 private:
     OptionsModel *optionsModel;
-    QMenu* menu;
     const PlatformStyle* m_platform_style;
+    bool m_updating{false};
 
-    /** Shows the context menu of reference-currency options at the mouse coordinates */
-    void onReferenceClicked(const QPoint& point);
-    /** (Re)builds the menu from USD + BTC + every currently-priced asset ticker. */
-    void rebuildMenu();
+    /** (Re)builds the list from USD + BTC + every currently-priced asset ticker. */
+    void rebuild();
 
 private Q_SLOTS:
-    /** Refresh the status-bar text when the reference currency changes in the model. */
+    /** Keep the selection in sync when the reference currency changes in the model. */
     void updateReferenceCurrency(const QString& ticker);
     /** Tells the underlying optionsModel to update its current reference currency. */
-    void onMenuSelection(QAction* action);
+    void onActivated(int index);
 };
 
 #endif // BITCOIN_QT_BITCOINGUI_H

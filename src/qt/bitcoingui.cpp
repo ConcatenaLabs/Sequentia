@@ -958,60 +958,56 @@ void BitcoinGUI::launchPriceServer()
     showNormalIfMinimized();
     const QString appDir = QCoreApplication::applicationDirPath();
 
-    // Resolve a file from the bundled sidecar (next to the binary) with a dev-tree fallback.
-    auto resolve = [&](const QStringList& candidates) -> QString {
-        for (const QString& c : candidates) {
-            if (QFileInfo::exists(c)) return QFileInfo(c).absoluteFilePath();
+    // Locate the bundled sidecar by walking UP from the binary: it lives in price-server/ next to a
+    // packaged binary, or in contrib/price-server/ inside a (possibly out-of-tree) build tree.
+    auto findUp = [&](const QStringList& rels) -> QString {
+        QDir d(appDir);
+        for (int i = 0; i < 7; ++i) {
+            for (const QString& rel : rels) {
+                const QString c = d.absoluteFilePath(rel);
+                if (QFileInfo::exists(c)) return QFileInfo(c).absoluteFilePath();
+            }
+            if (!d.cdUp()) break;
         }
         return QString();
     };
 
-    // The price_server.py script: bundled (<appdir>/price-server/) or the dev source tree.
-    const QString script = resolve({
-        appDir + "/price-server/price_server.py",
-        appDir + "/../price-server/price_server.py",
-        appDir + "/../../contrib/price-server/price_server.py", // dev: src/qt -> repo/contrib
-        appDir + "/../contrib/price-server/price_server.py",
-    });
+    const QString script = findUp({QStringLiteral("price-server/price_server.py"),
+                                   QStringLiteral("contrib/price-server/price_server.py")});
     if (script.isEmpty()) {
         QMessageBox::warning(this, tr("Price server"),
             tr("Could not find the price-server script (price_server.py). It ships bundled with the node."));
         return;
     }
+    const QString sdir = QFileInfo(script).absolutePath();
 
-    // A Python interpreter: bundled, else rely on the system 'python3' on PATH.
-    QString python = resolve({
-        appDir + "/price-server/python/python3",
-        appDir + "/price-server/python/python.exe",
-        appDir + "/python/python3",
-        appDir + "/python/python.exe",
-    });
+    // A Python interpreter: bundled next to the script (packaged build), else the system python3.
+    QString python;
+    const QStringList pyCands{ sdir + "/python/python3", sdir + "/python/python.exe",
+                              appDir + "/python/python3", appDir + "/python/python.exe" };
+    for (const QString& c : pyCands) {
+        if (QFileInfo::exists(c)) { python = QFileInfo(c).absoluteFilePath(); break; }
+    }
     if (python.isEmpty()) python = QStringLiteral("python3");
 
-    // Config file in the per-user app data dir; seed a default via gen-price-config.py if missing.
+    // Per-user config in the app data dir; seed it from the bundled config.example.json on first run.
+    // (Do NOT use gen-price-config.py — it writes a demo config to /root and prints only a summary.)
     const QString dataDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
     if (!dataDir.isEmpty()) QDir().mkpath(dataDir);
-    const QString cfg = (dataDir.isEmpty() ? QFileInfo(script).absolutePath() : dataDir) + "/price-server.json";
+    const QString cfg = (dataDir.isEmpty() ? sdir : dataDir) + "/price-server.json";
     if (!QFileInfo::exists(cfg)) {
-        const QString gen = resolve({
-            QFileInfo(script).absolutePath() + "/gen-price-config.py",
-            appDir + "/price-server/gen-price-config.py",
-            appDir + "/../../contrib/sequentia/gen-price-config.py",
-            appDir + "/../contrib/sequentia/gen-price-config.py",
-        });
-        if (!gen.isEmpty()) {
-            QProcess p;
-            p.start(python, {gen});
-            if (p.waitForFinished(15000) && p.exitStatus() == QProcess::NormalExit && p.exitCode() == 0) {
-                QFile f(cfg);
-                if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) { f.write(p.readAllStandardOutput()); f.close(); }
-            }
+        const QString example = findUp({QStringLiteral("price-server/config.example.json"),
+                                        QStringLiteral("contrib/price-server/config.example.json")});
+        if (example.isEmpty() || !QFile::copy(example, cfg)) {
+            QMessageBox::warning(this, tr("Price server"),
+                tr("Could not create a default price-server config at %1.").arg(cfg));
+            return;
         }
     }
 
     const int uiPort = 8089;
     const QStringList args{script, "--config", cfg, "--ui-port", QString::number(uiPort), "--ui-host", "127.0.0.1"};
-    if (!QProcess::startDetached(python, args, QFileInfo(script).absolutePath())) {
+    if (!QProcess::startDetached(python, args, sdir)) {
         QMessageBox::warning(this, tr("Price server"),
             tr("Failed to start the price server using '%1'. Ensure Python is available.").arg(python));
         return;
@@ -1608,37 +1604,21 @@ bool BitcoinGUI::isPrivacyModeActivated() const
 
 ReferenceCurrencyStatusBarControl::ReferenceCurrencyStatusBarControl(const PlatformStyle *platformStyle)
     : optionsModel(nullptr),
-      menu(nullptr),
       m_platform_style{platformStyle}
 {
-    menu = new QMenu(this);
-    connect(menu, &QMenu::triggered, this, &ReferenceCurrencyStatusBarControl::onMenuSelection);
-    setToolTip(tr("Reference currency for the \xE2\x89\x88 valuation. Click to select another."));
-    setText(QStringLiteral("USD"));
-    setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    setStyleSheet(QString("QLabel { color : %1 }").arg(m_platform_style->SingleColor().name()));
+    setToolTip(tr("Reference currency for the \xE2\x89\x88 valuation."));
+    setFocusPolicy(Qt::StrongFocus);
+    setSizeAdjustPolicy(QComboBox::AdjustToContents);
+    addItem(QStringLiteral("USD"));
+    connect(this, qOverload<int>(&QComboBox::activated), this, &ReferenceCurrencyStatusBarControl::onActivated);
 }
 
-void ReferenceCurrencyStatusBarControl::mousePressEvent(QMouseEvent *event)
+// (Re)build the list: USD + BTC + every currently-priced asset ticker (WBTC shown as BTC),
+// always including the current choice. Guarded so programmatic changes don't fire onActivated.
+void ReferenceCurrencyStatusBarControl::rebuild()
 {
-    onReferenceClicked(event->pos());
-}
-
-void ReferenceCurrencyStatusBarControl::changeEvent(QEvent* e)
-{
-    if (e->type() == QEvent::PaletteChange) {
-        QString style = QString("QLabel { color : %1 }").arg(m_platform_style->SingleColor().name());
-        if (style != styleSheet()) {
-            setStyleSheet(style);
-        }
-    }
-    QLabel::changeEvent(e);
-}
-
-void ReferenceCurrencyStatusBarControl::rebuildMenu()
-{
-    menu->clear();
-    // USD and BTC are always offered; add every currently-priced asset ticker (WBTC shown as BTC).
+    m_updating = true;
+    const QString cur = optionsModel ? optionsModel->getReferenceCurrency() : QStringLiteral("USD");
     QStringList opts;
     opts << QStringLiteral("USD") << QStringLiteral("BTC");
     for (const auto& it : GetReferencePrices()) {
@@ -1646,13 +1626,18 @@ void ReferenceCurrencyStatusBarControl::rebuildMenu()
         if (t == QLatin1String("WBTC")) t = QStringLiteral("BTC");
         if (!opts.contains(t)) opts << t;
     }
-    if (optionsModel) {
-        const QString cur = optionsModel->getReferenceCurrency();
-        if (!cur.isEmpty() && !opts.contains(cur)) opts << cur;
-    }
-    for (const QString& t : opts) {
-        menu->addAction(t)->setData(QVariant(t));
-    }
+    if (!cur.isEmpty() && !opts.contains(cur)) opts << cur;
+    clear();
+    addItems(opts);
+    const int idx = findText(cur.isEmpty() ? QStringLiteral("USD") : cur);
+    if (idx >= 0) setCurrentIndex(idx);
+    m_updating = false;
+}
+
+void ReferenceCurrencyStatusBarControl::showPopup()
+{
+    rebuild(); // pick up late-arriving prices before the user sees the list
+    QComboBox::showPopup();
 }
 
 void ReferenceCurrencyStatusBarControl::setOptionsModel(OptionsModel *_optionsModel)
@@ -1660,28 +1645,21 @@ void ReferenceCurrencyStatusBarControl::setOptionsModel(OptionsModel *_optionsMo
     if (_optionsModel)
     {
         this->optionsModel = _optionsModel;
-        // be aware of a reference-currency change reported by the OptionsModel object.
         connect(_optionsModel, &OptionsModel::referenceCurrencyChanged, this, &ReferenceCurrencyStatusBarControl::updateReferenceCurrency);
-        // initialize the label with the current value in the model.
-        updateReferenceCurrency(_optionsModel->getReferenceCurrency());
+        rebuild();
     }
 }
 
 void ReferenceCurrencyStatusBarControl::updateReferenceCurrency(const QString& ticker)
 {
-    setText(ticker.isEmpty() ? QStringLiteral("USD") : ticker);
+    if (m_updating) return;
+    const int idx = findText(ticker.isEmpty() ? QStringLiteral("USD") : ticker);
+    if (idx >= 0) { m_updating = true; setCurrentIndex(idx); m_updating = false; }
+    else rebuild();
 }
 
-void ReferenceCurrencyStatusBarControl::onReferenceClicked(const QPoint& point)
+void ReferenceCurrencyStatusBarControl::onActivated(int index)
 {
-    rebuildMenu(); // rebuild each time so late-arriving prices show up
-    menu->exec(mapToGlobal(point));
-}
-
-void ReferenceCurrencyStatusBarControl::onMenuSelection(QAction* action)
-{
-    if (action && optionsModel)
-    {
-        optionsModel->setReferenceCurrency(action->data());
-    }
+    if (m_updating || !optionsModel) return;
+    optionsModel->setReferenceCurrency(itemText(index));
 }
