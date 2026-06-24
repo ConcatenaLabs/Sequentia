@@ -68,9 +68,6 @@ MAX_RATE = 1_000_000_000_000_000  # 1e15, comfortably below INT64_MAX
 DEFAULT_SOURCE_URL = "http://159.195.15.140/prices"
 DEFAULT_REGISTRY_URL = "http://159.195.15.140/registry/index.minimal.json"
 DEFAULT_QUOTE = "USD"
-# Native/policy assets are always accepted for fees, so they need no published
-# rate; discovered native tickers are shown but not whitelisted.
-NATIVE_TICKERS = {"SEQ", "TSEQ"}
 
 
 class NodeRPC:
@@ -374,35 +371,35 @@ class PriceServer:
             log.error("registry fetch failed (%s); cannot map tickers to ids this round", e)
             return self.last_rates
 
-        # 2) fetch prices for the discovered tickers
-        tickers = list(registry.keys())
+        # 2) fetch prices. feed_aliases remaps a registry ticker to the key the price
+        #    feed uses for that asset — e.g. the native coin is the SAME asset whether
+        #    the registry calls it "TSEQ" (its display ticker) or the feed prices it as
+        #    "SEQ" (the chain-independent pricing key the node GUI + explorer also use).
+        #    The alias merges them into ONE asset so the native is not double-counted.
+        aliases = {str(k).upper(): str(v).upper()
+                   for k, v in self.cfg.get("feed_aliases", {"TSEQ": "SEQ"}).items()
+                   if not str(k).startswith("_")}
+        reg_tickers = list(registry.keys())
+        feed_keys = sorted({aliases.get(t.upper(), t.upper()) for t in reg_tickers})
         try:
             if src.get("format", "sequentia") == "sequentia":
-                prices = fetch_prices(src, timeout)
+                prices = fetch_prices(src, timeout)                    # combined feed: every key
             else:
-                prices = fetch_prices_custom(src, tickers, timeout)
+                prices = fetch_prices_custom(src, feed_keys, timeout)  # per feed-key
         except Exception as e:
             log.error("price fetch failed: %s", e)
             return self.last_rates
 
-        # 3) admit per asset; build id -> rate
+        # 3) admit each REGISTERED asset (the asset universe) and build id -> rate. The
+        #    native/policy asset is NOT special-cased: it goes through the same admission
+        #    rules and can be admitted OR rejected, exactly like any other asset (the
+        #    only thing special about SEQ is staking, never the fee market).
         raw, report, ticker_of_id = {}, [], {}
         with self._lock:
-            for ticker in sorted(set(tickers) | set(prices.keys())):
-                aid_dom = registry.get(ticker)
-                m = prices.get(ticker)
-                if aid_dom is None:
-                    if m:
-                        report.append({"ticker": ticker, "id": None, "domain": None,
-                                       "price": m.get("price"), "rate": None, "status": "skipped: not in registry"})
-                    continue
-                asset_id, domain = aid_dom
+            for ticker in sorted(reg_tickers):
+                asset_id, domain = registry[ticker]
                 ticker_of_id[asset_id] = ticker
-                if ticker.upper() in NATIVE_TICKERS:
-                    report.append({"ticker": ticker, "id": asset_id, "domain": domain,
-                                   "price": (m or {}).get("price"), "rate": None,
-                                   "status": "native: always accepted (not whitelisted)"})
-                    continue
+                m = prices.get(aliases.get(ticker.upper(), ticker.upper()))
                 if not m:
                     report.append({"ticker": ticker, "id": asset_id, "domain": domain,
                                    "price": None, "rate": None, "status": "skipped: no price from API"})
