@@ -4318,12 +4318,29 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
         // See doc/sequentia/04-proof-of-stake.md §6.
         const bool anchor_can_release_finality = (!g_con_bitcoin_anchor || g_validate_anchor);
         if (anchor_can_release_finality && g_pos_immediate_final_height >= 0) {
-            const CBlockIndex* anc_final = pindexPrev->GetAncestor(g_pos_immediate_final_height);
-            if (nHeight <= g_pos_immediate_final_height ||
-                anc_final == nullptr || anc_final->GetBlockHash() != g_pos_immediate_final_hash) {
-                LogPrintf("ERROR: %s: rejecting block (height %d) that forks at/below the immediately-finalized block %s (height %d)\n",
-                          __func__, nHeight, g_pos_immediate_final_hash.ToString(), g_pos_immediate_final_height);
-                return state.Invalid(BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE, "bad-fork-prior-to-pos-final");
+            // SEQUENTIA anchoring supremacy (paper §5 Anchoring theorem, §6 immediate
+            // finality "unless a change in the status of the Bitcoin blockchain enforces a
+            // chain reorganisation", §11 "the Anchoring theorem has priority over
+            // checkpoints"): immediate finality is finality MODULO BITCOIN. If the
+            // finalized block has itself been invalidated because its Bitcoin anchor was
+            // orphaned by a parent-chain reorg (the anchor watcher sets BLOCK_FAILED via
+            // InvalidateBlock), finality no longer protects it — Bitcoin wins. A stale
+            // finalized point must never pin the chain to an orphaned block, or the node
+            // deadlocks forever rejecting the anchor-canonical recovery chain (observed
+            // live: a testnet4 reorg froze the explorer/gateway and a committee minority at
+            // the orphaned finalized height while the rest of the committee reorged with
+            // Bitcoin). Release the gate when the finalized block is gone/failed; UpdateTip
+            // recomputes a fresh finalized point from the recovered active chain.
+            const CBlockIndex* pf = blockman.LookupBlockIndex(g_pos_immediate_final_hash);
+            const bool final_anchor_orphaned = (pf == nullptr) || (pf->nStatus & BLOCK_FAILED_MASK);
+            if (!final_anchor_orphaned) {
+                const CBlockIndex* anc_final = pindexPrev->GetAncestor(g_pos_immediate_final_height);
+                if (nHeight <= g_pos_immediate_final_height ||
+                    anc_final == nullptr || anc_final->GetBlockHash() != g_pos_immediate_final_hash) {
+                    LogPrintf("ERROR: %s: rejecting block (height %d) that forks at/below the immediately-finalized block %s (height %d)\n",
+                              __func__, nHeight, g_pos_immediate_final_hash.ToString(), g_pos_immediate_final_height);
+                    return state.Invalid(BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE, "bad-fork-prior-to-pos-final");
+                }
             }
         }
     }
