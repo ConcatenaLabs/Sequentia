@@ -159,6 +159,10 @@ public:
     /** Unregister, stop the worker thread, and join it. Idempotent. */
     void Stop();
 
+    /** The producer's signing keys (read-only). Used to rebuild the producer with
+     *  a merged key set when enabling another staking key at runtime. */
+    const std::vector<CKey>& Keys() const { return m_keys; }
+
     // --- Gossip committee (called from net_processing on the message thread) ---
     //
     //! Ingest a peer's `posproposal` (an elected leader's unsigned block). Records

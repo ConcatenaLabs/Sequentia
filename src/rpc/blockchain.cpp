@@ -10,7 +10,11 @@
 #include <chain.h>
 #include <anchor.h>
 #include <chainparams.h>
+#include <key_io.h>
 #include <pos.h>
+#include <pos_producer.h>
+#include <util/settings.h>
+#include <set>
 #include <coins.h>
 #include <consensus/amount.h>
 #include <consensus/params.h>
@@ -3330,6 +3334,83 @@ static RPCHelpMan getstakerinfo()
     };
 }
 
+// SEQUENTIA PoS: enable autonomous block production at runtime, with no restart.
+static RPCHelpMan startposproducer()
+{
+    return RPCHelpMan{"startposproducer",
+                "\nEnable autonomous Proof-of-Stake block production at runtime, with no restart.\n"
+                "Adds the given staker private key(s) to the running producer (creating it if this\n"
+                "node was not producing yet), and persists the choice (settings.json in the datadir)\n"
+                "so production resumes automatically after a restart. Each key must hold an eligible\n"
+                "registered stake (see registerstake / getstakerinfo) to actually produce blocks.\n",
+                {
+                    {"keys", RPCArg::Type::ARR, RPCArg::Optional::NO, "Staker private key(s) in WIF. Kept secret in the datadir.",
+                        {{"wif", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "A staker private key (WIF)."}}},
+                },
+                RPCResult{RPCResult::Type::OBJ, "", "", {
+                    {RPCResult::Type::BOOL, "producing", "true if the autonomous producer is now running"},
+                    {RPCResult::Type::NUM, "keys", "number of distinct producer keys now loaded"},
+                    {RPCResult::Type::BOOL, "persisted", "true if the choice was saved for the next restart"},
+                }},
+                RPCExamples{HelpExampleCli("startposproducer", "'[\"cV…WIF…\"]'")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!g_con_pos) throw JSONRPCError(RPC_MISC_ERROR, "Proof-of-Stake (con_pos) is not enabled on this chain");
+    NodeContext& node = EnsureAnyNodeContext(request.context);
+
+    // Merge any keys already loaded in a running producer with the requested ones, so
+    // enabling a new staking key never drops the keys this node was already producing
+    // with. De-duplicate by public key.
+    std::vector<CKey> keys;
+    std::set<CPubKey> seen;
+    std::vector<std::string> all_wifs;
+    if (node.pos_producer) {
+        for (const CKey& k : node.pos_producer->Keys()) {
+            if (seen.insert(k.GetPubKey()).second) { keys.push_back(k); all_wifs.push_back(EncodeSecret(k)); }
+        }
+    }
+    const UniValue& arr = request.params[0].get_array();
+    for (size_t i = 0; i < arr.size(); ++i) {
+        CKey key = DecodeSecret(arr[i].get_str());
+        if (!key.IsValid()) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid staker private key (expected a WIF)");
+        if (seen.insert(key.GetPubKey()).second) { keys.push_back(key); all_wifs.push_back(EncodeSecret(key)); }
+    }
+    if (keys.empty()) throw JSONRPCError(RPC_INVALID_PARAMETER, "Provide at least one staker private key (WIF)");
+
+    // (Re)create the producer with the merged key set and start it. Stop() is
+    // idempotent and joins the old worker before we swap, so this is safe live.
+    CTxMemPool& mempool = EnsureMemPool(node);
+    ChainstateManager& chainman = EnsureChainman(node);
+    CConnman& connman = EnsureConnman(node);
+    if (node.pos_producer) node.pos_producer->Stop();
+    node.pos_producer = std::make_unique<PosProducer>(chainman, mempool, Params(), &connman, keys);
+    node.pos_producer->Start();
+
+    // Reflect into the live args so status readers (GUI overview / staking page) see it
+    // immediately, and persist to settings.json so the existing startup path
+    // (AppInitMain: -posproducer + -posproducerkey) resumes production after a restart
+    // with no manual config editing.
+    gArgs.ForceSetArg("-posproducer", "1");
+    bool persisted = false;
+    {
+        UniValue wif_arr(UniValue::VARR);
+        for (const std::string& w : all_wifs) wif_arr.push_back(w);
+        gArgs.LockSettings([&](util::Settings& settings) {
+            settings.rw_settings["posproducer"] = true;
+            settings.rw_settings["posproducerkey"] = wif_arr;
+        });
+        persisted = gArgs.WriteSettingsFile();
+    }
+
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("producing", true);
+    result.pushKV("keys", (int)keys.size());
+    result.pushKV("persisted", persisted);
+    return result;
+},
+    };
+}
+
 // SEQUENTIA PoS: build the canonical staking-output script for a staker key.
 static RPCHelpMan getstakescript()
 {
@@ -3580,6 +3661,7 @@ static const CRPCCommand commands[] =
     { "blockchain",         &getanchorstatus,                    },
     { "blockchain",         &getposschedule,                     },
     { "blockchain",         &getstakerinfo,                      },
+    { "blockchain",         &startposproducer,                   },
     { "blockchain",         &getstakescript,                     },
     { "blockchain",         &getcheckpointpayload,               },
     { "blockchain",         &getcheckpointinfo,                  },

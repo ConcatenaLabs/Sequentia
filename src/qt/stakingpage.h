@@ -41,12 +41,14 @@ protected:
 
 private Q_SLOTS:
     void onStake();
+    void onEnableProduction();
 
 private:
     WalletModel* m_wallet_model{nullptr};
     const PlatformStyle* m_platform_style;
 
     QLabel* m_producer_status{nullptr};
+    QPushButton* m_enable_button{nullptr};
     QLabel* m_summary{nullptr};
     QTableWidget* m_stakers{nullptr};
     QLineEdit* m_stake_amount{nullptr};
@@ -58,6 +60,12 @@ private:
     UniValue callRpc(const std::string& method, const UniValue& params, bool& ok, QString& error, bool wallet = true);
     std::string walletUri() const;
     void setStatus(const QString& msg, bool error = false);
+    //! Enable autonomous block production at runtime for the given staking WIF(s)
+    //! (via startposproducer). No restart. Returns true if the node is now producing.
+    bool enableProduction(const QStringList& wifs, QString& err);
+    //! Export WIFs for every registered stake this wallet controls (best-effort;
+    //! legacy wallets only, like dumpprivkey).
+    QStringList walletStakingWifs();
 };
 
 #endif // BITCOIN_QT_STAKINGPAGE_H
