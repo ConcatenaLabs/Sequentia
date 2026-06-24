@@ -29,6 +29,15 @@ or **ANY** must pass, set issuer allow-lists and always-admit/always-reject
 exceptions, and the poll interval. **Save & apply** writes the config file and
 reloads live. (Assets and their price sources are still edited in the config file.)
 
+The UI binds to `127.0.0.1` by default and is intended for a single local
+operator. `/save` rewrites the live admission ruleset, so it is protected by a
+same-origin check (cross-site or Origin/Referer-less POSTs are rejected with
+`403`) and a per-process CSRF token embedded in the form. The token rotates on
+each restart, so reload the page after restarting the server. Binding to a
+non-loopback `--ui-host` is **refused** unless you also pass `--ui-allow-remote`;
+even then there is no real authentication, so put it behind your own auth and
+firewall.
+
 ## Admission rule engine
 
 Each asset is admitted to the whitelist if it passes the configured criteria,

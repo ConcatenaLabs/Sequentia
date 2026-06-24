@@ -122,14 +122,32 @@ int RefreshAssetRegistry()
         return -1;
     }
 
-    // index.minimal.json shape: { "<assetid>": [domain, ticker, name, precision] }
+    // index.minimal.json shape:
+    //   { "<assetid>": [domain, ticker, name, precision, verified] }
+    // The 5th element (verified: 1/0) is appended by the registry. We only merge
+    // chain+domain-verified entries; unverified legacy/seed labels are advisory
+    // and are NOT trusted into the global asset directory. For backward
+    // compatibility, an index that omits v[4] (older registry) is treated as
+    // unverified and skipped, so the node never silently trusts unlabelled data.
     std::vector<std::pair<std::string, std::string>> pairs;
+    int skipped_unverified = 0;
     for (const std::string& id : idx.getKeys()) {
         const UniValue& v = idx[id];
         if (!v.isArray() || v.size() < 2 || !v[1].isStr()) continue;
         const std::string ticker = v[1].get_str();
-        if (id.size() == 64 && !ticker.empty()) pairs.emplace_back(id, ticker);
+        if (id.size() != 64 || ticker.empty()) continue;
+        // verified flag (v[4]); absent or falsy => not verified => skip.
+        bool verified = false;
+        if (v.size() >= 5) {
+            const UniValue& vf = v[4];
+            if (vf.isNum()) verified = vf.get_int() != 0;
+            else if (vf.isBool()) verified = vf.get_bool();
+        }
+        if (!verified) { skipped_unverified++; continue; }
+        pairs.emplace_back(id, ticker);
     }
+    if (skipped_unverified > 0)
+        LogPrintf("AssetRegistry: skipped %d unverified (advisory) label(s) from %s\n", skipped_unverified, url);
 
     const int n = MergeGlobalAssetDir(pairs);
     if (n > 0) LogPrintf("AssetRegistry: merged %d new asset label(s) from %s\n", n, url);

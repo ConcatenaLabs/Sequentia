@@ -43,34 +43,30 @@ table *is* the producer's acceptance set. The one exception is the policy asset,
 SEQ, which is valued 1:1 when unlisted; that default is overridable by listing it
 with any rate (including `0` to refuse it).
 
-A rate of `0` reads as "refuse this asset" in **both** layers. The
-**static / operator-set layer** (`setfeeexchangerates`) and the **dynamic
-price-server layer** ([§5](#5-the-dynamic-price-server), `setdynamicfeerates`)
-each accept any **non-negative** rate; a stored `0` flows through to the effective
-map, where the conversion treats it as "not accepted". A price server can
-therefore either omit an asset (or `cleardynamicfeerates`) or push an explicit `0`
-to refuse it. Only negative rates are rejected.
+A rate of `0` reads as "refuse this asset": it is a valid stored value that flows
+through to the conversion as "not accepted". Setting a rate accepts any
+**non-negative** value; only **negative** rates are rejected by the RPCs. A
+producer can therefore drop an asset either by omitting it from the next write or
+by listing it with an explicit `0`.
 
 Mempool entries carry `nFeeAsset` and `nFeeValue` (the rfa value); the miner
 (`src/node/miner.cpp`) ranks packages by rfa value, and `RecomputeFees()`
 re-values the mempool whenever rates change.
 
-## 2. Per-producer acceptance: static and dynamic layers
+## 2. Per-producer acceptance: a single whitelist
 
-A producer configures acceptance two ways, and the effective table is their
-merge (an explicit static entry takes precedence over a dynamic one):
+A producer keeps **one** `{asset → rate}` whitelist — the `ExchangeRateMap`
+singleton. There are no static and dynamic layers and no precedence between
+writers: the most recent write replaces the table (last-writer-wins), and there
+is no per-asset "source" or provenance.
 
-- **Static whitelist** — a fixed `{asset → rate}` table set with
-  `setfeeexchangerates` and read with `getfeeexchangerates`. Writing it persists
-  the table and calls `RecomputeFees()`.
-- **Dynamic whitelist** — a layer maintained by a locally-run **price server**
-  ([§5](#5-the-dynamic-price-server)) that admits assets and computes rates from
-  live market data, pushed in via `setdynamicfeerates`.
-
-`getfeeacceptancepolicy` returns the effective acceptance set with per-asset
-provenance (static or dynamic). The operator-facing setup — listing assets,
-running the price server, and constructing transactions that pay fees in a chosen
-asset — is in [`05-operating-sequentia.md`](05-operating-sequentia.md).
+The table is written with `setfeeexchangerates` and read with
+`getfeeexchangerates`. Writing persists the table to `exchangerates.json` and
+calls `RecomputeFees()`. A price server ([§5](#5-the-dynamic-price-server)) writes
+the same single table; `getfeeacceptancepolicy` returns the current acceptance
+set. The operator-facing setup — listing assets, running the price server, and
+constructing transactions that pay fees in a chosen asset — is in
+[`05-operating-sequentia.md`](05-operating-sequentia.md).
 
 ## 3. Paying fees in an arbitrary asset
 
@@ -112,45 +108,42 @@ floors stay rfa-denominated.
 The operator how-tos for RBF and CPFP with asset fees are in
 [`05-operating-sequentia.md`](05-operating-sequentia.md) §5.
 
-## 5. The dynamic price server
+## 5. The price server
 
-The dynamic layer is a locally-run sidecar (`contrib/price-server/`) — a
-standalone program the operator runs alongside the node. Keeping it out of the
-consensus daemon isolates third-party HTTP, API keys, and JSON parsing from the
-node and keeps that outbound-network surface out of `sequentiad`; the sidecar is
+The price server is a locally-run sidecar (`contrib/price-server/`) — a standalone
+program the operator runs alongside the node. Keeping it out of the consensus
+daemon isolates third-party HTTP, API keys, and JSON parsing from the node and
+keeps that outbound-network surface out of `sequentiad`; the sidecar is
 independently restartable and testable.
 
 It periodically queries operator-designated external APIs (exchange endpoints,
 DEX oracles) for per-asset market data, applies operator-defined **admission
 thresholds** (e.g. market cap, 24h volume, volatility), computes each admitted
-asset's rate from its price relative to the reference unit, and pushes the
-resulting `{asset → rate}` table into the node. It drives the node through RPCs
-registered alongside `setfeeexchangerates` (`src/rpc/exchangerates.cpp`):
+asset's rate from its price relative to the reference unit, and writes the
+resulting `{asset → rate}` table into the node's single whitelist. It can do so
+through `setfeeexchangerates` directly, or through deprecated aliases retained for
+sidecar convenience (`src/rpc/exchangerates.cpp`):
 
 | RPC | Purpose |
 |---|---|
-| `setdynamicfeerates {asset: rate, …}` | Replace the dynamic layer, persist, `RecomputeFees()`. |
-| `getdynamicfeerates` | Return the dynamic layer with metadata (source, age). |
-| `getfeeacceptancepolicy` | Return the effective set (static ∪ dynamic) with provenance. |
-| `cleardynamicfeerates` | Drop all dynamic entries (e.g. on sidecar shutdown). |
+| `setdynamicfeerates {asset: rate, …}` | Deprecated alias: replaces the whitelist and `RecomputeFees()`, but does **not** persist to `exchangerates.json` (it calls `SetRates`, not the persisting path). |
+| `getdynamicfeerates` | Deprecated alias: returns the current whitelist. |
+| `cleardynamicfeerates` | Deprecated alias: clears the whitelist (e.g. on sidecar shutdown). |
+| `getfeeacceptancepolicy` | Return the current acceptance set. |
+
+Because the deprecated `setdynamicfeerates` path does not persist, an operator who
+wants the table to survive a restart writes it with `setfeeexchangerates`, which
+does persist.
 
 The reference unit is anchored to a chosen value (for example a USD-equivalent
-stablecoin) so rates are meaningful; the choice is operator policy, not
-consensus. Safety rules keep a producer from mining against bad data:
-
-- **Staleness fail-safe** — a dynamic rate older than `-dynfeeratemaxage` is
-  dropped, so a dead price server fails closed to "not accepted" rather than
-  honouring stale rates.
-- **Positive-rate enforcement** — the node accepts dynamic rates only as
-  **positive** integers; a zero or negative quote is rejected outright by
-  `setdynamicfeerates` rather than admitted. Guarding against implausible
-  inter-poll jumps and dust-priced rates is the price feed's responsibility: the
-  operator's server vets its source data before pushing, and the node enforces
-  only the non-zero/positive floor.
-- **Source quorum** — agreement across multiple sources before admitting an
-  asset blunts a single compromised API.
-- **Operator override** — a statically pinned asset is never overridden by the
-  dynamic layer.
+stablecoin) so rates are meaningful; the choice is operator policy, not consensus.
+The node holds the last-set rates indefinitely — there is **no** staleness or
+max-age option; keeping rates fresh (and refusing assets when a feed dies, by
+writing `0` or omitting them) is the sidecar's job. The one rule the node enforces
+is the **non-negative-rate** floor: a negative quote is rejected outright, while a
+zero is accepted and read as "refuse this asset". Vetting source data — quorum
+across feeds, guarding implausible inter-poll jumps and dust-priced rates — is the
+price server's responsibility before it writes.
 
 The reference-unit rate math lives next to `ExchangeRateMap::ConvertAmountToValue`
 / `ConvertValueToAmount` and handles the `INT64_MAX` saturation edge. Running and

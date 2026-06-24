@@ -49,7 +49,7 @@ private:
     WalletModel* m_wallet_model{nullptr};
     const PlatformStyle* m_platform_style;
 
-    QTableWidget* m_whitelist{nullptr}; // Asset | Rate | Managed by
+    QTableWidget* m_whitelist{nullptr}; // Asset | Rate
     QComboBox* m_asset{nullptr};         // editable: label or hex
     QLineEdit* m_rate{nullptr};
     QPushButton* m_add{nullptr};
@@ -57,12 +57,14 @@ private:
     QPushButton* m_refresh{nullptr};
     QPushButton* m_launch_price_server{nullptr};
     QLabel* m_status{nullptr};
+    bool m_remove_selection_connected{false};
 
     UniValue callRpc(const std::string& method, const UniValue& params, bool& ok, QString& error);
     void setStatus(const QString& msg, bool error = false);
-    // The manually-set (operator) entries, recovered from getfeeacceptancepolicy (origin=="static").
-    // Used to rebuild the full map for setfeeexchangerates, which REPLACES the whole manual layer.
-    std::map<std::string, int64_t> currentManualRates(bool& ok, QString& err);
+    // The FULL current acceptance policy (every accepted asset and its rate), read from
+    // getfeeacceptancepolicy. setfeeexchangerates REPLACES the whole map, so callers must start
+    // from this full set and then add/overwrite/erase only the edited asset to preserve the rest.
+    std::map<std::string, int64_t> currentRates(bool& ok, QString& err);
 };
 
 #endif // BITCOIN_QT_FEEPOLICYDIALOG_H
