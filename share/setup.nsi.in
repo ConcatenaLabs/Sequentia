@@ -82,6 +82,10 @@ Section -Main SEC0000
     File @abs_top_builddir@/release/@BITCOIN_WALLET_TOOL_NAME@@EXEEXT@
     SetOutPath $INSTDIR\doc
     File /r /x Makefile* @abs_top_srcdir@/doc\*.*
+    # SEQUENTIA: bundled price-server sidecar (scripts + embeddable Python) so the node GUI's
+    # Settings -> Price server launcher works out of the box.
+    SetOutPath $INSTDIR\price-server
+    File /r @abs_top_builddir@/release/price-server\*.*
     SetOutPath $INSTDIR
     WriteRegStr HKCU "${REGKEY}\Components" Main 1
 SectionEnd
@@ -130,6 +134,7 @@ Section /o -un.Main UNSEC0000
     Delete /REBOOTOK $INSTDIR\readme.txt
     RMDir /r /REBOOTOK $INSTDIR\daemon
     RMDir /r /REBOOTOK $INSTDIR\doc
+    RMDir /r /REBOOTOK $INSTDIR\price-server
     DeleteRegValue HKCU "${REGKEY}\Components" Main
 SectionEnd
 
