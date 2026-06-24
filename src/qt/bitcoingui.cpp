@@ -1638,20 +1638,24 @@ ReferenceCurrencyStatusBarControl::ReferenceCurrencyStatusBarControl(const Platf
     connect(this, qOverload<int>(&QComboBox::activated), this, &ReferenceCurrencyStatusBarControl::onActivated);
 }
 
-// (Re)build the list: USD + BTC + every currently-priced asset ticker (WBTC shown as BTC),
-// always including the current choice. Guarded so programmatic changes don't fire onActivated.
+// (Re)build the list in the canonical order (matching the web explorer): BTC, USD,
+// SEQ first (always shown), then every other currently-priced asset ticker (WBTC shown
+// as BTC) ALPHABETICALLY, always including the current choice. Guarded so programmatic
+// changes don't fire onActivated.
 void ReferenceCurrencyStatusBarControl::rebuild()
 {
     m_updating = true;
     const QString cur = optionsModel ? optionsModel->getReferenceCurrency() : QStringLiteral("USD");
-    QStringList opts;
-    opts << QStringLiteral("USD") << QStringLiteral("BTC");
+    QStringList head; head << QStringLiteral("BTC") << QStringLiteral("USD") << QStringLiteral("SEQ");
+    QStringList rest;
     for (const auto& it : GetReferencePrices()) {
         QString t = QString::fromStdString(it.first).toUpper();
         if (t == QLatin1String("WBTC")) t = QStringLiteral("BTC");
-        if (!opts.contains(t)) opts << t;
+        if (!head.contains(t) && !rest.contains(t)) rest << t;
     }
-    if (!cur.isEmpty() && !opts.contains(cur)) opts << cur;
+    if (!cur.isEmpty() && !head.contains(cur) && !rest.contains(cur)) rest << cur;
+    rest.sort();
+    QStringList opts = head; opts << rest;
     clear();
     addItems(opts);
     const int idx = findText(cur.isEmpty() ? QStringLiteral("USD") : cur);

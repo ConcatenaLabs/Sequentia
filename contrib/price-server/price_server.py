@@ -58,6 +58,14 @@ COIN = 100_000_000
 # dropped per-asset and logged instead.
 MAX_RATE = 1_000_000_000_000_000  # 1e15, comfortably below INT64_MAX
 
+# Defaults for the UI-managed price source. One HTTP endpoint serves every asset;
+# the paths read each asset's numbers out of the JSON, with "{label}" replaced by
+# the asset's label/ticker. Pre-fills the bundled mock combined feed.
+DEFAULT_SOURCE_URL = "http://127.0.0.1:5055/prices"
+DEFAULT_PRICE_PATH = "{label}.price"
+DEFAULT_MCAP_PATH = "{label}.market_cap"
+DEFAULT_VOL_PATH = "{label}.volume_24h"
+
 
 class NodeRPC:
     """Minimal JSON-RPC client for the Sequentia node."""
@@ -350,22 +358,50 @@ class PriceServer:
         defaults = self.cfg.get("default_thresholds", {})
         self.feeds = [AssetFeed(a, defaults, timeout) for a in self.cfg["assets"]]
 
-    def apply_admission(self, thresholds, poll_interval=None, reference=None):
-        """Runtime update from the config UI: replace the admission rule set (and a
-        couple of globals), rebuild the feeds, and persist to the config file."""
+    def apply_admission(self, thresholds, poll_interval=None, reference=None, source=None):
+        """Runtime update from the config UI: replace the admission rule set, the price
+        source, and a couple of globals; rebuild the feeds; and persist to the config
+        file."""
         with self._lock:
             self.cfg["default_thresholds"] = thresholds
             if poll_interval is not None:
                 self.cfg["poll_interval_secs"] = poll_interval
             if reference is not None:
                 self.cfg["reference_asset_label"] = reference
+            if source is not None:
+                self._apply_source_locked(source)
             self._build_feeds()
             if self.config_path:
                 tmp = self.config_path + ".tmp"
                 with open(tmp, "w") as f:
                     json.dump(self.cfg, f, indent=2)
                 os.replace(tmp, self.config_path)
-        log.info("admission rules updated via config UI and persisted")
+        log.info("config updated via UI and persisted")
+
+    def _apply_source_locked(self, source):
+        """Rebuild every asset's `sources` from a single UI-defined HTTP endpoint, and
+        remember the raw URL/paths so the UI can re-render them. Caller holds self._lock.
+        A blank URL leaves the existing (file-defined) per-asset sources untouched."""
+        url = (source.get("url") or "").strip()
+        price_t = (source.get("price_path") or "").strip() or DEFAULT_PRICE_PATH
+        mcap_t = (source.get("market_cap_path") or "").strip()
+        vol_t = (source.get("volume_24h_path") or "").strip()
+        self.cfg["source_url"] = url
+        self.cfg["source_price_path"] = price_t
+        self.cfg["source_market_cap_path"] = mcap_t
+        self.cfg["source_volume_24h_path"] = vol_t
+        if not url:
+            return
+        for a in self.cfg.get("assets", []):
+            label = a.get("label", a.get("id", "")[:8])
+            src = {"kind": "jsonapi", "name": "ui-source",
+                   "url": url.replace("{label}", label),
+                   "price_path": price_t.replace("{label}", label)}
+            if mcap_t:
+                src["market_cap_path"] = mcap_t.replace("{label}", label)
+            if vol_t:
+                src["volume_24h_path"] = vol_t.replace("{label}", label)
+            a["sources"] = [src]
 
     def _denominate(self, raw, labels):
         """Optionally re-express every rate relative to a reference asset.
@@ -470,69 +506,154 @@ class PriceServer:
 # without hand-editing JSON. Pure stdlib (http.server); enabled with --ui-port.
 # ---------------------------------------------------------------------------
 
-_UI_CRITERIA = [  # (key, label, example)
-    ("min_market_cap", "Min market cap", "50000000"),
-    ("min_volume_24h", "Min 24h volume", "1000000"),
-    ("max_source_spread", "Max cross-source spread (0-1)", "0.05"),
-    ("max_change_factor", "Max change factor per poll", "5"),
-    ("max_volatility", "Max volatility (stddev of log-returns)", "0.15"),
+_UI_CRITERIA = [  # (key, label, example, hint)
+    ("min_market_cap", "Minimum market cap", "50000000",
+     "Admit only if the asset's market cap is at least this (in the source's currency, e.g. USD). "
+     "Keeps tiny, illiquid tokens out of the fee whitelist. Needs the market-cap path set above."),
+    ("min_volume_24h", "Minimum 24h volume", "1000000",
+     "Admit only if 24h traded volume is at least this. A liquidity floor — a quoted price with no "
+     "volume behind it is easy to manipulate. Needs the 24h-volume path set above."),
+    ("max_source_spread", "Maximum cross-source spread", "0.05",
+     "Reject if the price sources disagree by more than this fraction (0.05 = 5%). "
+     "Only meaningful with two or more sources per asset."),
+    ("max_change_factor", "Maximum change per poll", "5",
+     "Reject a new price that moved more than this multiple from the last accepted one "
+     "(5 = up to 5x either way). Blocks sudden spikes and flash-crashes."),
+    ("max_volatility", "Maximum volatility", "0.15",
+     "Reject if recent volatility (standard deviation of log-returns over the rolling window) "
+     "exceeds this. Keeps very jumpy assets out of the fee market."),
 ]
+# (key, label, hint) — free-form lists, ONE entry per line.
 _UI_LISTS = [
-    ("issuer_domains", "Issuer domains to auto-admit"),
-    ("issuer_pubkeys", "Issuer pubkeys to auto-admit"),
-    ("always_admit", "Always admit (asset id or label)"),
-    ("always_reject", "Always reject (asset id or label)"),
+    ("always_admit", "Always admit",
+     "Admit these even if they fail the rules above. One asset id or label per line."),
+    ("always_reject", "Always reject",
+     "Never admit these. One asset id or label per line. always_reject always wins over always_admit."),
+    ("issuer_domains", "Auto-admit issuer domains",
+     "Admit any asset issued from one of these domains, bypassing the rules. One domain per line."),
+    ("issuer_pubkeys", "Auto-admit issuer pubkeys",
+     "Admit any asset issued by one of these pubkeys, bypassing the rules. One pubkey per line."),
 ]
+
+
+def _current_source(srv):
+    """The price-source config used to pre-fill the UI: the explicit cfg keys if the
+    operator has saved any, else derived from the first asset's first source URL, else
+    the bundled mock defaults."""
+    c = srv.cfg
+    url = c.get("source_url")
+    if not url:
+        for a in c.get("assets", []):
+            for s in a.get("sources", []):
+                if s.get("url"):
+                    url = s["url"]
+                    break
+            if url:
+                break
+    return (url or DEFAULT_SOURCE_URL,
+            c.get("source_price_path", DEFAULT_PRICE_PATH),
+            c.get("source_market_cap_path", DEFAULT_MCAP_PATH),
+            c.get("source_volume_24h_path", DEFAULT_VOL_PATH))
 
 
 def _ui_render(srv, csrf_token, saved=False):
     t = srv.cfg.get("default_thresholds", {})
     req = t.get("require", "all")
     ck = lambda v: "checked" if v else ""
+    esc = html.escape
+    src_url, src_price, src_mcap, src_vol = _current_source(srv)
+
     crit = "".join(
-        '<tr><td><input type=checkbox name="en_%s" %s></td><td>%s</td>'
+        '<tr><td style="text-align:center"><input type=checkbox name="en_%s" %s></td>'
+        '<td><b>%s</b><div class=muted>%s</div></td>'
         '<td><input name="%s" value="%s" placeholder="%s"></td></tr>'
-        % (k, ck(k in t), html.escape(lbl), k, html.escape(str(t.get(k, ""))), ph)
-        for k, lbl, ph in _UI_CRITERIA)
+        % (k, ck(k in t), esc(lbl), esc(hint), k, esc(str(t.get(k, ""))), ph)
+        for k, lbl, ph, hint in _UI_CRITERIA)
+
+    def _lines(key):
+        v = t.get(key)
+        return "\n".join(v) if isinstance(v, list) else ""
     lists = "".join(
-        '<tr><td>%s</td><td><input name="%s" value="%s"></td></tr>'
-        % (html.escape(lbl), k, html.escape(" ".join(t.get(k, [])) if isinstance(t.get(k), list) else ""))
-        for k, lbl in _UI_LISTS)
+        '<tr><td><b>%s</b><div class=muted>%s</div></td>'
+        '<td><textarea name="%s" rows=3 placeholder="one per line">%s</textarea></td></tr>'
+        % (esc(lbl), esc(hint), key, esc(_lines(key)))
+        for key, lbl, hint in _UI_LISTS)
+
     assets = ", ".join(a.get("label", a["id"][:8]) for a in srv.cfg.get("assets", []))
-    banner = '<p style="color:#0a0"><b>Saved &amp; applied.</b></p>' if saved else ""
+    banner = '<p class=ok><b>Saved &amp; applied.</b></p>' if saved else ""
     return (
         "<!doctype html><meta charset=utf-8><title>Sequentia price server</title>"
-        "<style>body{font-family:system-ui,Arial;max-width:780px;margin:2rem auto;padding:0 1rem;color:#222}"
-        "table{border-collapse:collapse;width:100%}td{padding:.35rem .5rem;border-bottom:1px solid #eee}"
-        "input:not([type=checkbox]){width:100%;box-sizing:border-box;padding:.3rem}h1{font-size:1.3rem}"
-        ".muted{color:#777;font-size:.9rem}button{padding:.6rem 1.2rem;font-size:1rem;cursor:pointer}"
+        "<style>body{font-family:system-ui,Arial;max-width:820px;margin:2rem auto;padding:0 1rem;color:#222;line-height:1.45}"
+        "table{border-collapse:collapse;width:100%;margin:.3rem 0}"
+        "td{padding:.45rem .5rem;border-bottom:1px solid #eee;vertical-align:top}"
+        "input:not([type=checkbox]),textarea{width:100%;box-sizing:border-box;padding:.35rem;font:inherit}"
+        "textarea{resize:vertical}h1{font-size:1.35rem}h3{margin-top:1.7rem}"
+        ".muted{color:#777;font-size:.85rem;margin-top:.15rem}.ok{color:#0a7d23}"
+        "button{padding:.6rem 1.3rem;font-size:1rem;cursor:pointer;background:#141416;color:#f5b301;border:0;border-radius:6px}"
+        "code{background:#f0f0f0;padding:.05rem .3rem;border-radius:3px}"
         "pre{background:#f6f6f6;padding:.8rem;overflow:auto;border-radius:6px}</style>"
-        "<h1>Sequentia price server &mdash; admission rules</h1>" + banner +
+        "<h1>Sequentia price server</h1>"
+        "<p class=muted>This sidecar fetches a price for each fee asset, applies the admission rules "
+        "below, and publishes the survivors as the node's dynamic fee-asset whitelist. Every change here "
+        "is saved to the config file and takes effect on the next poll.</p>" + banner +
         "<form method=post action=/save>"
-        '<input type=hidden name=csrf_token value="' + html.escape(csrf_token) + '">'
-        "<p><b>Combine criteria:</b> "
-        "<label><input type=radio name=require value=all " + ck(req != "any") + "> ALL must pass</label> &nbsp; "
-        "<label><input type=radio name=require value=any " + ck(req == "any") + "> ANY one passes</label></p>"
-        "<p class=muted>Tick a criterion to enforce it; untick to ignore it. All optional.</p>"
-        "<table>" + crit + "</table>"
-        "<h3>Exceptions &amp; issuer</h3>"
-        "<p class=muted>Space/comma separated. Exceptions override the criteria (reject wins); issuer lists admit assets from a trusted issuer.</p>"
-        "<table>" + lists + "</table>"
-        "<h3>General</h3><table>"
-        '<tr><td>Poll interval (seconds)</td><td><input name=poll_interval value="' + html.escape(str(srv.cfg.get("poll_interval_secs", 60))) + '"></td></tr>'
-        '<tr><td>Reference asset label</td><td><input name=reference value="' + html.escape(str(srv.cfg.get("reference_asset_label", ""))) + '"></td></tr>'
+        '<input type=hidden name=csrf_token value="' + esc(csrf_token) + '">'
+
+        "<h3>Price source</h3>"
+        "<p class=muted>Where prices come from. One HTTP endpoint serves every asset; the paths tell the "
+        "server where to read each asset's numbers out of the JSON response. <code>{label}</code> is "
+        "replaced with each asset's label/ticker. Example: a response of "
+        "<code>{&quot;SEQ&quot;:{&quot;price&quot;:0.05}}</code> with price path <code>{label}.price</code> "
+        "reads <code>SEQ.price</code> = 0.05.</p>"
+        "<table>"
+        '<tr><td><b>API URL</b><div class=muted>Any JSON HTTP endpoint (the bundled mock is pre-filled). '
+        'Put <code>{label}</code> in the URL too if the API needs one request per asset.</div></td>'
+        '<td><input name=source_url value="' + esc(src_url) + '" placeholder="https://…/prices"></td></tr>'
+        '<tr><td><b>Price path</b><div class=muted>Path to each asset\'s price in the response.</div></td>'
+        '<td><input name=source_price_path value="' + esc(src_price) + '" placeholder="' + DEFAULT_PRICE_PATH + '"></td></tr>'
+        '<tr><td>Market-cap path <span class=muted>(optional)</span>'
+        '<div class=muted>Only needed for the &ldquo;minimum market cap&rdquo; rule; leave blank otherwise.</div></td>'
+        '<td><input name=source_market_cap_path value="' + esc(src_mcap) + '" placeholder="' + DEFAULT_MCAP_PATH + '"></td></tr>'
+        '<tr><td>24h-volume path <span class=muted>(optional)</span>'
+        '<div class=muted>Only needed for the &ldquo;minimum 24h volume&rdquo; rule; leave blank otherwise.</div></td>'
+        '<td><input name=source_volume_24h_path value="' + esc(src_vol) + '" placeholder="' + DEFAULT_VOL_PATH + '"></td></tr>'
         "</table>"
+
+        "<h3>Admission rules</h3>"
+        "<p class=muted>An asset is priced into the fee whitelist only if it passes these checks. "
+        "<b>Require ALL</b> = every ticked rule must pass; <b>Require ANY</b> = at least one ticked rule passes. "
+        "Untick a rule to ignore it.</p>"
+        "<p><label><input type=radio name=require value=all " + ck(req != "any") + "> Require ALL ticked rules</label> &nbsp; "
+        "<label><input type=radio name=require value=any " + ck(req == "any") + "> Require ANY one</label></p>"
+        "<table><tr><td style='text-align:center'><b>On</b></td><td><b>Rule</b></td><td><b>Threshold</b></td></tr>"
+        + crit + "</table>"
+
+        "<h3>Exceptions &amp; trusted issuers</h3>"
+        "<p class=muted>Overrides for the rules above &mdash; add as many as you like, one entry per line.</p>"
+        "<table>" + lists + "</table>"
+
+        "<h3>General</h3><table>"
+        '<tr><td><b>Poll interval (seconds)</b><div class=muted>How often to re-fetch prices and republish the whitelist.</div></td>'
+        '<td><input name=poll_interval value="' + esc(str(srv.cfg.get("poll_interval_secs", 60))) + '"></td></tr>'
+        '<tr><td><b>Reference asset</b> <span class=muted>(optional)</span>'
+        '<div class=muted>If set, every rate is re-expressed relative to this asset\'s label (it becomes exactly 1.0). '
+        'Leave blank to publish prices as the source quotes them.</div></td>'
+        '<td><input name=reference value="' + esc(str(srv.cfg.get("reference_asset_label", ""))) + '"></td></tr>'
+        "</table>"
+
         "<p><button type=submit>Save &amp; apply</button></p></form>"
-        "<p class=muted>Assets (" + html.escape(assets or "none") + ") and their price sources are edited in the config file.</p>"
-        "<h3>Last published rates</h3><pre>" + html.escape(json.dumps(srv.last_rates, indent=2)) + "</pre>")
+        "<p class=muted>Assets currently configured: " + esc(assets or "none") + ". "
+        "(Add or remove assets, or set per-asset overrides, in the config file.)</p>"
+        "<h3>Last published rates</h3><pre>" + esc(json.dumps(srv.last_rates, indent=2)) + "</pre>")
 
 
 def _ui_parse(srv, form):
-    """New default_thresholds from the posted form, preserving keys the form does
-    not expose (min_sources, volatility_window, ...)."""
+    """Parse the posted form into (thresholds, poll_interval, reference, source).
+    Preserves default_thresholds keys the form does not expose (min_sources,
+    volatility_window, ...)."""
     t = dict(srv.cfg.get("default_thresholds", {}))
     t["require"] = "any" if form.get("require", ["all"])[0] == "any" else "all"
-    for key, _, _ in _UI_CRITERIA:
+    for key, _, _, _ in _UI_CRITERIA:
         if form.get("en_" + key, [""])[0]:
             raw = form.get(key, [""])[0].strip()
             try:
@@ -541,7 +662,8 @@ def _ui_parse(srv, form):
                 t.pop(key, None)
         else:
             t.pop(key, None)
-    for key, _ in _UI_LISTS:
+    for key, _, _ in _UI_LISTS:
+        # textareas: one entry per line, but also tolerate commas/spaces.
         items = [x for x in re.split(r"[,\s]+", form.get(key, [""])[0].strip()) if x]
         if items:
             t[key] = items
@@ -552,7 +674,13 @@ def _ui_parse(srv, form):
     except ValueError:
         poll = None
     ref = form.get("reference", [""])[0].strip() or None
-    return t, poll, ref
+    source = {
+        "url": form.get("source_url", [""])[0].strip(),
+        "price_path": form.get("source_price_path", [""])[0].strip(),
+        "market_cap_path": form.get("source_market_cap_path", [""])[0].strip(),
+        "volume_24h_path": form.get("source_volume_24h_path", [""])[0].strip(),
+    }
+    return t, poll, ref, source
 
 
 def _is_loopback(host):
@@ -628,8 +756,8 @@ def start_config_ui(price_server, host, port):
                 log.warning("rejected /save: bad or missing CSRF token")
                 self._send(403, "forbidden: invalid CSRF token"); return
             try:
-                t, poll, ref = _ui_parse(srv, form)
-                srv.apply_admission(t, poll, ref)
+                t, poll, ref, source = _ui_parse(srv, form)
+                srv.apply_admission(t, poll, ref, source)
             except Exception as e:
                 self._send(400, "error: " + html.escape(str(e))); return
             self.send_response(303); self.send_header("Location", "/?saved=1"); self.end_headers()
