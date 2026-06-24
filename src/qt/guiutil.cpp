@@ -763,6 +763,93 @@ QString formatAssetAmount(const CAsset& asset, const CAmount& amount, const int 
     return str;
 }
 
+// SEQUENTIA reference-currency valuation helpers.
+//
+// The reference currency is whatever the user picks (refTicker): USD, BTC, or ANY ticker the
+// price server publishes in the feed — it need not be a Sequentia asset and can be abstract.
+// Prices come from the node's cached feed (GetReferencePrices(): { TICKER -> price in the feed's
+// common base, USD today }). value_in_ref = amount * price[asset] / price[refTicker]; the price
+// server controls which references are available simply by what it lists. Amounts are scaled by
+// 1e8 like formatAssetAmount. Nothing here privileges SEQ as a reference.
+namespace {
+// USD (the feed's common base) price of one whole unit of `ticker` (the chosen reference).
+// USD is the base (=1); BTC maps to the WBTC entry; any other ticker is looked up directly.
+double RefBasePriceOf(const std::map<std::string, double>& prices, const QString& ticker)
+{
+    if (ticker == QLatin1String("USD")) return 1.0;
+    const std::string key = (ticker == QLatin1String("BTC") ? std::string("WBTC") : ticker.toStdString());
+    const auto it = prices.find(key);
+    return it != prices.end() ? it->second : 0.0;
+}
+// The feed's price KEY for an asset (NOT a reference): the feed names the native asset "SEQ"
+// (independent of the chain-aware display ticker tSEQ); issued assets use their registry ticker.
+QString MarketTickerOf(const CAsset& asset)
+{
+    if (asset == Params().GetConsensus().pegged_asset) return QStringLiteral("SEQ");
+    return QString::fromStdString(gAssetsDir.GetIdentifier(asset)).toUpper();
+}
+QString FormatRefValue(double value, const QString& ref)
+{
+    const int dp = (ref == QLatin1String("BTC")) ? 8 : (qAbs(value) >= 1.0 ? 2 : 6);
+    QString num = QString::number(value, 'f', dp);
+    if (num.contains('.')) { while (num.endsWith('0')) num.chop(1); if (num.endsWith('.')) num.chop(1); }
+    return QString::fromUtf8("\xE2\x89\x88 ") + num + QStringLiteral(" ") + ref; // "≈ "
+}
+} // namespace
+
+QString formatReferenceApprox(const CAsset& asset, const CAmount& amount, const QString& refTicker)
+{
+    if (amount == 0) return QString();
+    const std::map<std::string, double> prices = GetReferencePrices();
+    if (prices.empty()) return QString();
+    const QString ref = refTicker.isEmpty() ? QSettings().value("strReferenceCurrency", "USD").toString() : refTicker;
+    const QString assetTicker = MarketTickerOf(asset);
+    // Suppress when the amount is already in the chosen reference denomination (redundant).
+    if (assetTicker == ref || (ref == QLatin1String("BTC") && assetTicker == QLatin1String("WBTC"))) return QString();
+    const auto itA = prices.find(assetTicker.toStdString());
+    const double pa = itA != prices.end() ? itA->second : 0.0;
+    const double pr = RefBasePriceOf(prices, ref);
+    if (!(pa > 0.0) || !(pr > 0.0)) return QString();
+    return FormatRefValue((static_cast<double>(amount) / 100000000.0) * pa / pr, ref);
+}
+
+QString formatMultiAssetReferenceApprox(const CAmountMap& amountmap, const QString& refTicker)
+{
+    const std::map<std::string, double> prices = GetReferencePrices();
+    if (prices.empty()) return QString();
+    const QString ref = refTicker.isEmpty() ? QSettings().value("strReferenceCurrency", "USD").toString() : refTicker;
+    const double pr = RefBasePriceOf(prices, ref);
+    if (!(pr > 0.0)) return QString();
+    double sum = 0.0; bool any = false;
+    for (const auto& it : amountmap) {
+        if (it.second == 0) continue;
+        const auto itA = prices.find(MarketTickerOf(it.first).toStdString());
+        if (itA == prices.end() || !(itA->second > 0.0)) continue;
+        sum += (static_cast<double>(it.second) / 100000000.0) * itA->second / pr;
+        any = true;
+    }
+    return any ? FormatRefValue(sum, ref) : QString();
+}
+
+QString formatReferenceApproxByLabel(const QString& assetLabel, double wholeUnits, const QString& refTicker)
+{
+    if (wholeUnits == 0.0) return QString();
+    const std::map<std::string, double> prices = GetReferencePrices();
+    if (prices.empty()) return QString();
+    const QString ref = refTicker.isEmpty() ? QSettings().value("strReferenceCurrency", "USD").toString() : refTicker;
+    // Map the label to a price key: the native asset (shown as tSEQ, or the RPC default "bitcoin")
+    // is priced as "SEQ"; everything else uses its uppercased label/ticker.
+    QString assetKey = assetLabel.toUpper();
+    if (assetLabel == BitcoinUnits::policyAssetTicker() || assetLabel.compare(QStringLiteral("bitcoin"), Qt::CaseInsensitive) == 0)
+        assetKey = QStringLiteral("SEQ");
+    if (assetKey == ref || (ref == QLatin1String("BTC") && assetKey == QLatin1String("WBTC"))) return QString();
+    const auto itA = prices.find(assetKey.toStdString());
+    const double pa = itA != prices.end() ? itA->second : 0.0;
+    const double pr = RefBasePriceOf(prices, ref);
+    if (!(pa > 0.0) || !(pr > 0.0)) return QString();
+    return FormatRefValue(wholeUnits * pa / pr, ref);
+}
+
 QString formatMultiAssetAmount(const CAmountMap& amountmap, const int bitcoin_unit, BitcoinUnits::SeparatorStyle separators, QString line_separator)
 {
     QStringList ret;

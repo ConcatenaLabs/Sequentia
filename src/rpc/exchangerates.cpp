@@ -4,6 +4,7 @@
 
 #include <assetsdir.h>
 #include <exchangerates.h>
+#include <referenceprices.h>
 #include <rpc/register.h>
 #include <rpc/server.h>
 #include <rpc/server_util.h>
@@ -207,6 +208,36 @@ static RPCHelpMan getfeeacceptancepolicy()
     };
 }
 
+static RPCHelpMan getreferenceprices()
+{
+    return RPCHelpMan{"getreferenceprices",
+                "\nGet the cached per-asset USD reference prices. DISPLAY ONLY: the node GUI uses these to\n"
+                "value amounts in a user-chosen reference currency (USD, BTC, or any priced asset). This\n"
+                "never affects consensus, fees or the mempool. Empty unless -referencepricesurl is set.\n",
+                {},
+                {
+                    RPCResult{"prices", RPCResult::Type::OBJ, "", "",
+                        {
+                            RPCResult{RPCResult::Type::NUM, "TICKER", "USD price of one whole unit of the asset"},
+                            RPCResult{RPCResult::Type::ELISION, "", ""}
+                        }
+                    }
+                },
+                RPCExamples{
+                    HelpExampleCli("getreferenceprices", "")
+                  + HelpExampleRpc("getreferenceprices", "")
+                },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+    {
+        UniValue out(UniValue::VOBJ);
+        for (const auto& [ticker, price] : GetReferencePrices()) {
+            out.pushKV(ticker, UniValue(price));
+        }
+        return out;
+    }
+    };
+}
+
 void RegisterExchangeRatesRPCCommands(CRPCTable &t)
 {
 // clang-format off
@@ -215,6 +246,7 @@ static const CRPCCommand commands[] =
 { //  category              actor (function)
   //  --------------------- ------------------------
     { "exchangerates",      &getfeeexchangerates,                  },
+    { "exchangerates",      &getreferenceprices,                   },
     { "exchangerates",      &setfeeexchangerates,                  },
     { "exchangerates",      &setdynamicfeerates,                   },
     { "exchangerates",      &getdynamicfeerates,                   },

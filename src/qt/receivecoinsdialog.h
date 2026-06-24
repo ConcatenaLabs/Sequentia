@@ -17,6 +17,9 @@
 
 class PlatformStyle;
 class WalletModel;
+QT_BEGIN_NAMESPACE
+class QCheckBox;
+QT_END_NAMESPACE
 
 namespace Ui {
     class ReceiveCoinsDialog;
@@ -57,6 +60,7 @@ private:
     QAction* copyMessageAction;
     QAction* copyAmountAction;
     const PlatformStyle *platformStyle;
+    QCheckBox* m_reqConfidential = nullptr; // SEQUENTIA: opt-in confidential (blinded) receive address
 
     QModelIndex selectedRow();
     void copyColumnToClipboard(int column);

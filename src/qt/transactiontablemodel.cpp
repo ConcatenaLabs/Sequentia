@@ -264,6 +264,7 @@ TransactionTableModel::TransactionTableModel(const PlatformStyle *_platformStyle
     priv->refreshWallet(walletModel->wallet());
 
     connect(walletModel->getOptionsModel(), &OptionsModel::displayUnitChanged, this, &TransactionTableModel::updateDisplayUnit);
+    connect(walletModel->getOptionsModel(), &OptionsModel::referenceCurrencyChanged, this, &TransactionTableModel::updateDisplayUnit);
 }
 
 TransactionTableModel::~TransactionTableModel()
@@ -558,8 +559,13 @@ QVariant TransactionTableModel::data(const QModelIndex &index, int role) const
             return formatTxType(rec);
         case ToAddress:
             return formatTxToAddress(rec, false);
-        case Amount:
-            return formatTxAmount(rec, true, BitcoinUnits::SeparatorStyle::ALWAYS);
+        case Amount: {
+            // SEQUENTIA: append a muted "≈ <ref>" in the chosen reference currency (display only;
+            // FormattedAmountRole / plaintext copy paths below are left as the raw amount).
+            QString s = formatTxAmount(rec, true, BitcoinUnits::SeparatorStyle::ALWAYS);
+            const QString ref = GUIUtil::formatReferenceApprox(rec->asset, rec->amount, walletModel->getOptionsModel()->getReferenceCurrency());
+            return ref.isEmpty() ? s : (s + QStringLiteral("  ") + ref);
+        }
         } // no default case, so the compiler can warn about missing cases
         assert(false);
     case Qt::EditRole:

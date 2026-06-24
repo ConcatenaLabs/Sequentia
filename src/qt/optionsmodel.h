@@ -56,6 +56,7 @@ public:
         ProxyIPTor,             // QString
         ProxyPortTor,           // int
         DisplayUnit,            // BitcoinUnits::Unit
+        ReferenceCurrency,      // QString (USD/BTC/asset ticker for the "≈" valuation)
         ThirdPartyTxUrls,       // QString
         Language,               // QString
         UseEmbeddedMonospacedFont, // bool
@@ -81,12 +82,15 @@ public:
     bool setData(const QModelIndex & index, const QVariant & value, int role = Qt::EditRole) override;
     /** Updates current unit in memory, settings and emits displayUnitChanged(newUnit) signal */
     void setDisplayUnit(const QVariant &value);
+    /** Updates the reference currency in memory + settings and emits referenceCurrencyChanged() */
+    void setReferenceCurrency(const QVariant &value);
 
     /* Explicit getters */
     bool getShowTrayIcon() const { return m_show_tray_icon; }
     bool getMinimizeToTray() const { return fMinimizeToTray; }
     bool getMinimizeOnClose() const { return fMinimizeOnClose; }
     int getDisplayUnit() const { return nDisplayUnit; }
+    QString getReferenceCurrency() const { return m_reference_currency; }
     QString getThirdPartyTxUrls() const { return strThirdPartyTxUrls; }
     bool getUseEmbeddedMonospacedFont() const { return m_use_embedded_monospaced_font; }
     bool getCoinControlFeatures() const { return fCoinControlFeatures; }
@@ -113,6 +117,7 @@ private:
     bool fMinimizeOnClose;
     QString language;
     int nDisplayUnit;
+    QString m_reference_currency;
     QString strThirdPartyTxUrls;
     bool m_use_embedded_monospaced_font;
     bool fCoinControlFeatures;
@@ -128,6 +133,7 @@ private:
     void checkAndMigrate();
 Q_SIGNALS:
     void displayUnitChanged(int unit);
+    void referenceCurrencyChanged(const QString& ticker);
     void coinControlFeaturesChanged(bool);
     void showTrayIconChanged(bool);
     void useEmbeddedMonospacedFontChanged(bool);

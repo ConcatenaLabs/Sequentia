@@ -253,7 +253,11 @@ QString TransactionDesc::toHTML(interfaces::Node& node, interfaces::Wallet& wall
                 QString feeStr = (feeAsset == ::policyAsset)
                     ? BitcoinUnits::formatHtmlWithUnit(unit, -nTxFee)
                     : GUIUtil::formatAssetAmount(feeAsset, -nTxFee, unit, BitcoinUnits::SeparatorStyle::STANDARD, true).toHtmlEscaped();
-                strHTML += "<b>" + tr("Transaction fee") + ":</b> " + feeStr + "<br>";
+                // SEQUENTIA: append the fee valued in the user's reference currency (display only).
+                const QString feeRef = GUIUtil::formatReferenceApprox(feeAsset, nTxFee, QString());
+                strHTML += "<b>" + tr("Transaction fee") + ":</b> " + feeStr;
+                if (!feeRef.isEmpty()) strHTML += " <span style='color:#888'>" + feeRef.toHtmlEscaped() + "</span>";
+                strHTML += "<br>";
             }
         }
         else

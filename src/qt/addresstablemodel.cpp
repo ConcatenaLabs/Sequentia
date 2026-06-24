@@ -340,7 +340,7 @@ void AddressTableModel::updateEntry(const QString &address,
     priv->updateEntry(address, label, isMine, purpose, status);
 }
 
-QString AddressTableModel::addRow(const QString &type, const QString &label, const QString &address, const OutputType address_type)
+QString AddressTableModel::addRow(const QString &type, const QString &label, const QString &address, const OutputType address_type, bool confidential)
 {
     std::string strLabel = label.toStdString();
     std::string strAddress = address.toStdString();
@@ -371,7 +371,9 @@ QString AddressTableModel::addRow(const QString &type, const QString &label, con
     {
         // Generate a new address to associate with given label
         CTxDestination dest;
-        if(!walletModel->wallet().getNewDestination(address_type, strLabel, dest, true))
+        // SEQUENTIA: explicit (non-confidential) receive addresses by default — Bitcoin-identical,
+        // matching the web wallet (tb1...). add_blinding_key=false; a confidential option can be opt-in.
+        if(!walletModel->wallet().getNewDestination(address_type, strLabel, dest, confidential))
         {
             WalletModel::UnlockContext ctx(walletModel->requestUnlock());
             if(!ctx.isValid())
@@ -380,7 +382,9 @@ QString AddressTableModel::addRow(const QString &type, const QString &label, con
                 editStatus = WALLET_UNLOCK_FAILURE;
                 return QString();
             }
-            if(!walletModel->wallet().getNewDestination(address_type, strLabel, dest, true))
+            // SEQUENTIA: explicit (non-confidential) receive addresses by default — Bitcoin-identical,
+        // matching the web wallet (tb1...). add_blinding_key=false; a confidential option can be opt-in.
+        if(!walletModel->wallet().getNewDestination(address_type, strLabel, dest, confidential))
             {
                 editStatus = KEY_GENERATION_FAILURE;
                 return QString();

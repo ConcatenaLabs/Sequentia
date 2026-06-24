@@ -15,6 +15,8 @@
 #include <qt/openuridialog.h>
 #include <qt/optionsdialog.h>
 #include <qt/optionsmodel.h>
+
+#include <referenceprices.h>
 #include <qt/platformstyle.h>
 #include <qt/rpcconsole.h>
 #include <qt/utilitydialog.h>
@@ -42,6 +44,14 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QCoreApplication>
+#include <QDesktopServices>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QProcess>
+#include <QStandardPaths>
+#include <QUrl>
 #include <QComboBox>
 #include <QCursor>
 #include <QDateTime>
@@ -158,7 +168,8 @@ BitcoinGUI::BitcoinGUI(interfaces::Node& node, const PlatformStyle *_platformSty
     QHBoxLayout *frameBlocksLayout = new QHBoxLayout(frameBlocks);
     frameBlocksLayout->setContentsMargins(3,0,3,0);
     frameBlocksLayout->setSpacing(3);
-    unitDisplayControl = new UnitDisplayStatusBarControl(platformStyle);
+    // SEQUENTIA: no native-unit (tSEQ/mtSEQ/sat) picker — amounts show in whole asset units.
+    refCurrencyControl = new ReferenceCurrencyStatusBarControl(platformStyle);
     labelWalletEncryptionIcon = new GUIUtil::ThemedLabel(platformStyle);
     labelWalletHDStatusIcon = new GUIUtil::ThemedLabel(platformStyle);
     labelProxyIcon = new GUIUtil::ClickableLabel(platformStyle);
@@ -167,7 +178,7 @@ BitcoinGUI::BitcoinGUI(interfaces::Node& node, const PlatformStyle *_platformSty
     if(enableWallet)
     {
         frameBlocksLayout->addStretch();
-        frameBlocksLayout->addWidget(unitDisplayControl);
+        frameBlocksLayout->addWidget(refCurrencyControl);
         frameBlocksLayout->addStretch();
         frameBlocksLayout->addWidget(labelWalletEncryptionIcon);
         labelWalletEncryptionIcon->hide();
@@ -293,6 +304,12 @@ void BitcoinGUI::createActions()
     // accepts for fees.
     feePolicyAction = new QAction(tr("&Fee acceptance…"), this);
     feePolicyAction->setStatusTip(tr("View and edit which assets this node accepts for fee payment"));
+
+    // Sequentia operator tool: launch the bundled price-server sidecar (which keeps the dynamic fee
+    // whitelist updated) and open its configuration page in a browser. Node-level; no wallet needed.
+    priceServerAction = new QAction(tr("&Price server…"), this);
+    priceServerAction->setStatusTip(tr("Start the price-server sidecar and open its configuration page"));
+    connect(priceServerAction, &QAction::triggered, this, &BitcoinGUI::launchPriceServer);
 
 #ifdef ENABLE_WALLET
     // These showNormalIfMinimized are needed because Send Coins and Receive Coins
@@ -489,6 +506,8 @@ void BitcoinGUI::createMenuBar()
         settings->addSeparator();
     }
     settings->addAction(optionsAction);
+    settings->addSeparator();
+    settings->addAction(priceServerAction);
 
     QMenu* window_menu = appMenuBar->addMenu(tr("&Window"));
 
@@ -624,7 +643,7 @@ void BitcoinGUI::setClientModel(ClientModel *_clientModel, interfaces::BlockAndH
             walletFrame->setClientModel(_clientModel);
         }
 #endif // ENABLE_WALLET
-        unitDisplayControl->setOptionsModel(_clientModel->getOptionsModel());
+        refCurrencyControl->setOptionsModel(_clientModel->getOptionsModel());
 
         OptionsModel* optionsModel = _clientModel->getOptionsModel();
         if (optionsModel && trayIcon) {
@@ -648,7 +667,7 @@ void BitcoinGUI::setClientModel(ClientModel *_clientModel, interfaces::BlockAndH
             walletFrame->setClientModel(nullptr);
         }
 #endif // ENABLE_WALLET
-        unitDisplayControl->setOptionsModel(nullptr);
+        refCurrencyControl->setOptionsModel(nullptr);
     }
 }
 
@@ -932,6 +951,77 @@ void BitcoinGUI::gotoStakingPage()
 void BitcoinGUI::gotoFeePolicyDialog()
 {
     if (walletFrame) walletFrame->gotoFeePolicyDialog();
+}
+
+void BitcoinGUI::launchPriceServer()
+{
+    showNormalIfMinimized();
+    const QString appDir = QCoreApplication::applicationDirPath();
+
+    // Resolve a file from the bundled sidecar (next to the binary) with a dev-tree fallback.
+    auto resolve = [&](const QStringList& candidates) -> QString {
+        for (const QString& c : candidates) {
+            if (QFileInfo::exists(c)) return QFileInfo(c).absoluteFilePath();
+        }
+        return QString();
+    };
+
+    // The price_server.py script: bundled (<appdir>/price-server/) or the dev source tree.
+    const QString script = resolve({
+        appDir + "/price-server/price_server.py",
+        appDir + "/../price-server/price_server.py",
+        appDir + "/../../contrib/price-server/price_server.py", // dev: src/qt -> repo/contrib
+        appDir + "/../contrib/price-server/price_server.py",
+    });
+    if (script.isEmpty()) {
+        QMessageBox::warning(this, tr("Price server"),
+            tr("Could not find the price-server script (price_server.py). It ships bundled with the node."));
+        return;
+    }
+
+    // A Python interpreter: bundled, else rely on the system 'python3' on PATH.
+    QString python = resolve({
+        appDir + "/price-server/python/python3",
+        appDir + "/price-server/python/python.exe",
+        appDir + "/python/python3",
+        appDir + "/python/python.exe",
+    });
+    if (python.isEmpty()) python = QStringLiteral("python3");
+
+    // Config file in the per-user app data dir; seed a default via gen-price-config.py if missing.
+    const QString dataDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    if (!dataDir.isEmpty()) QDir().mkpath(dataDir);
+    const QString cfg = (dataDir.isEmpty() ? QFileInfo(script).absolutePath() : dataDir) + "/price-server.json";
+    if (!QFileInfo::exists(cfg)) {
+        const QString gen = resolve({
+            QFileInfo(script).absolutePath() + "/gen-price-config.py",
+            appDir + "/price-server/gen-price-config.py",
+            appDir + "/../../contrib/sequentia/gen-price-config.py",
+            appDir + "/../contrib/sequentia/gen-price-config.py",
+        });
+        if (!gen.isEmpty()) {
+            QProcess p;
+            p.start(python, {gen});
+            if (p.waitForFinished(15000) && p.exitStatus() == QProcess::NormalExit && p.exitCode() == 0) {
+                QFile f(cfg);
+                if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) { f.write(p.readAllStandardOutput()); f.close(); }
+            }
+        }
+    }
+
+    const int uiPort = 8089;
+    const QStringList args{script, "--config", cfg, "--ui-port", QString::number(uiPort), "--ui-host", "127.0.0.1"};
+    if (!QProcess::startDetached(python, args, QFileInfo(script).absolutePath())) {
+        QMessageBox::warning(this, tr("Price server"),
+            tr("Failed to start the price server using '%1'. Ensure Python is available.").arg(python));
+        return;
+    }
+
+    // Give the sidecar a moment to bind, then open its configuration UI in the browser.
+    const QString url = QString("http://127.0.0.1:%1/").arg(uiPort);
+    QTimer::singleShot(1500, this, [url]{ QDesktopServices::openUrl(QUrl(url)); });
+    QMessageBox::information(this, tr("Price server"),
+        tr("The price server is starting. Its configuration page will open at %1.").arg(url));
 }
 
 void BitcoinGUI::gotoSendCoinsPage(QString addr)
@@ -1514,32 +1604,27 @@ bool BitcoinGUI::isPrivacyModeActivated() const
     return m_mask_values_action->isChecked();
 }
 
-UnitDisplayStatusBarControl::UnitDisplayStatusBarControl(const PlatformStyle *platformStyle)
+// ---- SEQUENTIA reference-currency status-bar control ----
+
+ReferenceCurrencyStatusBarControl::ReferenceCurrencyStatusBarControl(const PlatformStyle *platformStyle)
     : optionsModel(nullptr),
       menu(nullptr),
       m_platform_style{platformStyle}
 {
-    createContextMenu();
-    setToolTip(tr("Unit to show amounts in. Click to select another unit."));
-    QList<BitcoinUnits::Unit> units = BitcoinUnits::availableUnits();
-    int max_width = 0;
-    const QFontMetrics fm(font());
-    for (const BitcoinUnits::Unit unit : units)
-    {
-        max_width = qMax(max_width, GUIUtil::TextWidth(fm, BitcoinUnits::longName(unit)));
-    }
-    setMinimumSize(max_width, 0);
+    menu = new QMenu(this);
+    connect(menu, &QMenu::triggered, this, &ReferenceCurrencyStatusBarControl::onMenuSelection);
+    setToolTip(tr("Reference currency for the \xE2\x89\x88 valuation. Click to select another."));
+    setText(QStringLiteral("USD"));
     setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     setStyleSheet(QString("QLabel { color : %1 }").arg(m_platform_style->SingleColor().name()));
 }
 
-/** So that it responds to button clicks */
-void UnitDisplayStatusBarControl::mousePressEvent(QMouseEvent *event)
+void ReferenceCurrencyStatusBarControl::mousePressEvent(QMouseEvent *event)
 {
-    onDisplayUnitsClicked(event->pos());
+    onReferenceClicked(event->pos());
 }
 
-void UnitDisplayStatusBarControl::changeEvent(QEvent* e)
+void ReferenceCurrencyStatusBarControl::changeEvent(QEvent* e)
 {
     if (e->type() == QEvent::PaletteChange) {
         QString style = QString("QLabel { color : %1 }").arg(m_platform_style->SingleColor().name());
@@ -1547,53 +1632,56 @@ void UnitDisplayStatusBarControl::changeEvent(QEvent* e)
             setStyleSheet(style);
         }
     }
-
     QLabel::changeEvent(e);
 }
 
-/** Creates context menu, its actions, and wires up all the relevant signals for mouse events. */
-void UnitDisplayStatusBarControl::createContextMenu()
+void ReferenceCurrencyStatusBarControl::rebuildMenu()
 {
-    menu = new QMenu(this);
-    for (const BitcoinUnits::Unit u : BitcoinUnits::availableUnits()) {
-        menu->addAction(BitcoinUnits::longName(u))->setData(QVariant(u));
+    menu->clear();
+    // USD and BTC are always offered; add every currently-priced asset ticker (WBTC shown as BTC).
+    QStringList opts;
+    opts << QStringLiteral("USD") << QStringLiteral("BTC");
+    for (const auto& it : GetReferencePrices()) {
+        QString t = QString::fromStdString(it.first).toUpper();
+        if (t == QLatin1String("WBTC")) t = QStringLiteral("BTC");
+        if (!opts.contains(t)) opts << t;
     }
-    connect(menu, &QMenu::triggered, this, &UnitDisplayStatusBarControl::onMenuSelection);
+    if (optionsModel) {
+        const QString cur = optionsModel->getReferenceCurrency();
+        if (!cur.isEmpty() && !opts.contains(cur)) opts << cur;
+    }
+    for (const QString& t : opts) {
+        menu->addAction(t)->setData(QVariant(t));
+    }
 }
 
-/** Lets the control know about the Options Model (and its signals) */
-void UnitDisplayStatusBarControl::setOptionsModel(OptionsModel *_optionsModel)
+void ReferenceCurrencyStatusBarControl::setOptionsModel(OptionsModel *_optionsModel)
 {
     if (_optionsModel)
     {
         this->optionsModel = _optionsModel;
-
-        // be aware of a display unit change reported by the OptionsModel object.
-        connect(_optionsModel, &OptionsModel::displayUnitChanged, this, &UnitDisplayStatusBarControl::updateDisplayUnit);
-
-        // initialize the display units label with the current value in the model.
-        updateDisplayUnit(_optionsModel->getDisplayUnit());
+        // be aware of a reference-currency change reported by the OptionsModel object.
+        connect(_optionsModel, &OptionsModel::referenceCurrencyChanged, this, &ReferenceCurrencyStatusBarControl::updateReferenceCurrency);
+        // initialize the label with the current value in the model.
+        updateReferenceCurrency(_optionsModel->getReferenceCurrency());
     }
 }
 
-/** When Display Units are changed on OptionsModel it will refresh the display text of the control on the status bar */
-void UnitDisplayStatusBarControl::updateDisplayUnit(int newUnits)
+void ReferenceCurrencyStatusBarControl::updateReferenceCurrency(const QString& ticker)
 {
-    setText(BitcoinUnits::longName(newUnits));
+    setText(ticker.isEmpty() ? QStringLiteral("USD") : ticker);
 }
 
-/** Shows context menu with Display Unit options by the mouse coordinates */
-void UnitDisplayStatusBarControl::onDisplayUnitsClicked(const QPoint& point)
+void ReferenceCurrencyStatusBarControl::onReferenceClicked(const QPoint& point)
 {
-    QPoint globalPos = mapToGlobal(point);
-    menu->exec(globalPos);
+    rebuildMenu(); // rebuild each time so late-arriving prices show up
+    menu->exec(mapToGlobal(point));
 }
 
-/** Tells underlying optionsModel to update its current display unit. */
-void UnitDisplayStatusBarControl::onMenuSelection(QAction* action)
+void ReferenceCurrencyStatusBarControl::onMenuSelection(QAction* action)
 {
-    if (action)
+    if (action && optionsModel)
     {
-        optionsModel->setDisplayUnit(action->data());
+        optionsModel->setReferenceCurrency(action->data());
     }
 }

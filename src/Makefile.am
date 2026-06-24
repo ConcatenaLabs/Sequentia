@@ -126,6 +126,7 @@ BITCOIN_CORE_H = \
   asset.h \
   assetsdir.h \
   assetregistry.h \
+  referenceprices.h \
   addrman_impl.h \
   attributes.h \
   banman.h \
@@ -385,6 +386,7 @@ libbitcoin_node_a_SOURCES = \
   anchor.cpp \
   mainchainrpc.cpp \
   assetregistry.cpp \
+  referenceprices.cpp \
   mapport.cpp \
   net.cpp \
   net_processing.cpp \

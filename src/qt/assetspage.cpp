@@ -4,6 +4,7 @@
 
 #include <qt/assetspage.h>
 
+#include <qt/guiutil.h>
 #include <qt/platformstyle.h>
 #include <qt/walletmodel.h>
 
@@ -45,10 +46,11 @@ AssetsPage::AssetsPage(const PlatformStyle* platformStyle, QWidget* parent)
     // --- Balances ---
     QGroupBox* balGroup = new QGroupBox(tr("Your asset balances"), this);
     QVBoxLayout* balLayout = new QVBoxLayout(balGroup);
-    m_balances = new QTableWidget(0, 2, balGroup);
-    m_balances->setHorizontalHeaderLabels({tr("Asset"), tr("Balance")});
+    m_balances = new QTableWidget(0, 3, balGroup);
+    m_balances->setHorizontalHeaderLabels({tr("Asset"), tr("Balance"), tr("Value")});
     m_balances->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
     m_balances->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    m_balances->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     m_balances->verticalHeader()->setVisible(false);
     m_balances->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_balances->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -177,8 +179,12 @@ void AssetsPage::refresh()
         for (size_t i = 0; i < keys.size(); ++i) {
             int row = m_balances->rowCount();
             m_balances->insertRow(row);
-            m_balances->setItem(row, 0, new QTableWidgetItem(QString::fromStdString(keys[i])));
+            const QString label = QString::fromStdString(keys[i]);
+            m_balances->setItem(row, 0, new QTableWidgetItem(label));
             m_balances->setItem(row, 1, new QTableWidgetItem(QString::fromStdString(bal[i].getValStr())));
+            // SEQUENTIA: value the balance in the user's chosen reference currency (blank if unpriced).
+            double units = 0.0; try { units = bal[i].get_real(); } catch (...) {}
+            m_balances->setItem(row, 2, new QTableWidgetItem(GUIUtil::formatReferenceApproxByLabel(label, units, QString())));
         }
     } else if (!ok) {
         setStatus(tr("Could not load balances: %1").arg(err), true);

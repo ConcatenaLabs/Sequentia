@@ -233,6 +233,9 @@ namespace GUIUtil
     QString formatReferenceApprox(const CAsset& asset, const CAmount& amount, const QString& refTicker);
     /* SEQUENTIA: as above, summed across a multi-asset map (e.g. a total balance). */
     QString formatMultiAssetReferenceApprox(const CAmountMap& amountmap, const QString& refTicker);
+    /* SEQUENTIA: "≈ <ref>" from an asset LABEL/ticker + a whole-unit amount (for RPC-string tables
+       like the assets page, where no CAsset/CAmount is available). Empty if unpriced. */
+    QString formatReferenceApproxByLabel(const QString& assetLabel, double wholeUnits, const QString& refTicker);
 
     /* Parse an amount of a given asset from text */
     bool parseAssetAmount(const CAsset&, const QString& text, int bitcoin_unit, CAmount *val_out);

@@ -249,17 +249,26 @@ void OverviewPage::setBalance(const interfaces::WalletBalances& balances)
     int unit = walletModel->getOptionsModel()->getDisplayUnit();
     m_balances = balances;
 
+    // SEQUENTIA: format a total balance map, appending a muted "≈ <ref>" summed in the chosen
+    // reference currency. Suppressed in privacy mode so the masked balance isn't leaked via the ≈.
+    auto withRef = [&](const CAmountMap& m) -> QString {
+        const QString s = GUIUtil::formatMultiAssetAmount(m, unit, BitcoinUnits::SeparatorStyle::ALWAYS, "\n");
+        if (m_privacy) return s;
+        const QString r = GUIUtil::formatMultiAssetReferenceApprox(m, walletModel->getOptionsModel()->getReferenceCurrency());
+        return r.isEmpty() ? s : (s + "\n" + r);
+    };
+
     if (walletModel->wallet().isLegacy()) {
         if (walletModel->wallet().privateKeysDisabled()) {
             ui->labelBalance->setText(GUIUtil::formatMultiAssetAmount(balances.watch_only_balance, unit, BitcoinUnits::SeparatorStyle::ALWAYS, "\n"));
             ui->labelUnconfirmed->setText(GUIUtil::formatMultiAssetAmount(balances.unconfirmed_watch_only_balance, unit, BitcoinUnits::SeparatorStyle::ALWAYS, "\n"));
             ui->labelImmature->setText(GUIUtil::formatMultiAssetAmount(balances.immature_watch_only_balance, unit, BitcoinUnits::SeparatorStyle::ALWAYS, "\n"));
-            ui->labelTotal->setText(GUIUtil::formatMultiAssetAmount(balances.watch_only_balance + balances.unconfirmed_watch_only_balance + balances.immature_watch_only_balance, unit, BitcoinUnits::SeparatorStyle::ALWAYS, "\n"));
+            ui->labelTotal->setText(withRef(balances.watch_only_balance + balances.unconfirmed_watch_only_balance + balances.immature_watch_only_balance));
         } else {
             ui->labelBalance->setText(GUIUtil::formatMultiAssetAmount(balances.balance, unit, BitcoinUnits::SeparatorStyle::ALWAYS, "\n"));
             ui->labelUnconfirmed->setText(GUIUtil::formatMultiAssetAmount(balances.unconfirmed_balance, unit, BitcoinUnits::SeparatorStyle::ALWAYS, "\n"));
             ui->labelImmature->setText(GUIUtil::formatMultiAssetAmount(balances.immature_balance, unit, BitcoinUnits::SeparatorStyle::ALWAYS, "\n"));
-            ui->labelTotal->setText(GUIUtil::formatMultiAssetAmount(balances.balance + balances.unconfirmed_balance + balances.immature_balance, unit, BitcoinUnits::SeparatorStyle::ALWAYS, "\n"));
+            ui->labelTotal->setText(withRef(balances.balance + balances.unconfirmed_balance + balances.immature_balance));
             ui->labelWatchAvailable->setText(GUIUtil::formatMultiAssetAmount(balances.watch_only_balance, unit, BitcoinUnits::SeparatorStyle::ALWAYS, "\n"));
             ui->labelWatchPending->setText(GUIUtil::formatMultiAssetAmount(balances.unconfirmed_watch_only_balance, unit, BitcoinUnits::SeparatorStyle::ALWAYS, "\n"));
             ui->labelWatchImmature->setText(GUIUtil::formatMultiAssetAmount(balances.immature_watch_only_balance, unit, BitcoinUnits::SeparatorStyle::ALWAYS, "\n"));
@@ -269,7 +278,7 @@ void OverviewPage::setBalance(const interfaces::WalletBalances& balances)
         ui->labelBalance->setText(GUIUtil::formatMultiAssetAmount(balances.balance, unit, BitcoinUnits::SeparatorStyle::ALWAYS, "\n"));
         ui->labelUnconfirmed->setText(GUIUtil::formatMultiAssetAmount(balances.unconfirmed_balance, unit, BitcoinUnits::SeparatorStyle::ALWAYS, "\n"));
         ui->labelImmature->setText(GUIUtil::formatMultiAssetAmount(balances.immature_balance, unit, BitcoinUnits::SeparatorStyle::ALWAYS, "\n"));
-        ui->labelTotal->setText(GUIUtil::formatMultiAssetAmount(balances.balance + balances.unconfirmed_balance + balances.immature_balance, unit, BitcoinUnits::SeparatorStyle::ALWAYS, "\n"));
+        ui->labelTotal->setText(withRef(balances.balance + balances.unconfirmed_balance + balances.immature_balance));
     }
     // only show immature (newly mined) balance if it's non-zero, so as not to complicate things
     // for the non-mining users
@@ -337,6 +346,7 @@ void OverviewPage::setWalletModel(WalletModel *model)
         connect(model, &WalletModel::balanceChanged, this, &OverviewPage::setBalance);
 
         connect(model->getOptionsModel(), &OptionsModel::displayUnitChanged, this, &OverviewPage::updateDisplayUnit);
+        connect(model->getOptionsModel(), &OptionsModel::referenceCurrencyChanged, this, &OverviewPage::updateDisplayUnit);
 
         updateWatchOnlyLabels(wallet.haveWatchOnly() && !model->wallet().privateKeysDisabled());
         connect(model, &WalletModel::notifyWatchonlyChanged, [this](bool showWatchOnly) {

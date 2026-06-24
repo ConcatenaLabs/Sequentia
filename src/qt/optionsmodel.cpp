@@ -75,6 +75,11 @@ void OptionsModel::Init(bool resetSettings)
         settings.setValue("nDisplayUnit", BitcoinUnits::BTC);
     nDisplayUnit = settings.value("nDisplayUnit").toInt();
 
+    // SEQUENTIA: reference currency for the "≈" valuation (USD/BTC/asset ticker).
+    if (!settings.contains("strReferenceCurrency"))
+        settings.setValue("strReferenceCurrency", "USD");
+    m_reference_currency = settings.value("strReferenceCurrency").toString();
+
     if (!settings.contains("strThirdPartyTxUrls"))
         settings.setValue("strThirdPartyTxUrls", "");
     strThirdPartyTxUrls = settings.value("strThirdPartyTxUrls", "").toString();
@@ -360,6 +365,8 @@ QVariant OptionsModel::data(const QModelIndex & index, int role) const
 #endif
         case DisplayUnit:
             return nDisplayUnit;
+        case ReferenceCurrency:
+            return m_reference_currency;
         case ThirdPartyTxUrls:
             return strThirdPartyTxUrls;
         case Language:
@@ -494,6 +501,9 @@ bool OptionsModel::setData(const QModelIndex & index, const QVariant & value, in
         case DisplayUnit:
             setDisplayUnit(value);
             break;
+        case ReferenceCurrency:
+            setReferenceCurrency(value);
+            break;
         case ThirdPartyTxUrls:
             if (strThirdPartyTxUrls != value.toString()) {
                 strThirdPartyTxUrls = value.toString();
@@ -576,6 +586,17 @@ void OptionsModel::setDisplayUnit(const QVariant &value)
         nDisplayUnit = value.toInt();
         settings.setValue("nDisplayUnit", nDisplayUnit);
         Q_EMIT displayUnitChanged(nDisplayUnit);
+    }
+}
+
+void OptionsModel::setReferenceCurrency(const QVariant &value)
+{
+    if (!value.isNull())
+    {
+        QSettings settings;
+        m_reference_currency = value.toString();
+        settings.setValue("strReferenceCurrency", m_reference_currency);
+        Q_EMIT referenceCurrencyChanged(m_reference_currency);
     }
 }
 

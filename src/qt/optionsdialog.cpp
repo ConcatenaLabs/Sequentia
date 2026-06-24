@@ -128,6 +128,10 @@ OptionsDialog::OptionsDialog(QWidget *parent, bool enableWallet) :
         }
     }
     ui->unit->setModel(new BitcoinUnits(this));
+    // SEQUENTIA: no native-unit (tSEQ/mtSEQ/sat) subdivision picker — amounts are shown in whole
+    // asset units. Hide the selector; DisplayUnit stays at its whole-unit default.
+    ui->unit->setVisible(false);
+    ui->unitLabel->setVisible(false);
 
     /* Widget-to-option mapper */
     mapper = new QDataWidgetMapper(this);

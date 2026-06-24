@@ -100,6 +100,7 @@
 
 #include <assetsdir.h> // InitGlobalAssetDir
 #include <assetregistry.h> // StartAssetRegistry
+#include <referenceprices.h> // StartReferencePrices
 #include <pegins.h>
 
 #if ENABLE_ZMQ
@@ -625,6 +626,9 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-assetregistryurl=<url>", "Sequentia Asset Registry index URL (http only). When set, the node periodically fetches verified asset labels and merges them into the asset directory (used by RPC output and the GUI). Operator -assetdir entries always take precedence.", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-assetregistrypoll=<n>", "Seconds between Asset Registry refreshes (0 disables periodic refresh; only the initial fetch runs). (default: 300)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-assetregistrytimeout=<n>", "Timeout in seconds for an Asset Registry fetch. (default: 15)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
+    argsman.AddArg("-referencepricesurl=<url>", "Sequentia reference-price feed URL (http only). When set, the node periodically fetches per-asset USD prices used by the GUI to value displayed amounts in a user-chosen reference currency (display only; never affects consensus or fees).", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
+    argsman.AddArg("-referencepricespoll=<n>", "Seconds between reference-price refreshes (0 disables periodic refresh; only the initial fetch runs). (default: 120)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
+    argsman.AddArg("-referencepricestimeout=<n>", "Timeout in seconds for a reference-price fetch. (default: 15)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-defaultpeggedassetname", "Default name of the pegged asset. (default: bitcoin)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-blindedaddresses", "Give blind addresses by default via getnewaddress and getrawchangeaddress. (default: chain-dependent: 1 on Liquid/Elements chains, 0 on Sequentia chains where confidential transactions are opt-in; always 0 outside elements mode)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-blindedprefix", "The byte prefix, in decimal, of blinded addresses. (default: 4)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
@@ -835,6 +839,10 @@ void InitParameterInteraction(ArgsManager& args)
         // a fresh testnet node/GUI shows USDX/GOLD/etc. with no -assetdir config.
         if (args.SoftSetArg("-assetregistryurl", "http://159.195.15.140/registry/index.minimal.json"))
             LogPrintf("%s: chain=test -> setting -assetregistryurl=http://159.195.15.140/registry/index.minimal.json\n", __func__);
+        // Fetch per-asset USD prices from the shared feed, so the GUI can value
+        // amounts in a user-chosen reference currency with no extra config.
+        if (args.SoftSetArg("-referencepricesurl", "http://159.195.15.140/prices"))
+            LogPrintf("%s: chain=test -> setting -referencepricesurl=http://159.195.15.140/prices\n", __func__);
     }
 }
 
@@ -1411,6 +1419,10 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     // SEQUENTIA: fetch verified asset labels from the Asset Registry (if
     // -assetregistryurl is set) and refresh them periodically.
     StartAssetRegistry(*node.scheduler);
+
+    // SEQUENTIA: fetch per-asset USD prices for the GUI's reference-currency
+    // valuation (if -referencepricesurl is set) and refresh them periodically.
+    StartReferencePrices(*node.scheduler);
 
     // Create client interfaces for wallets that are supposed to be loaded
     // according to -wallet and -disablewallet options. This only constructs

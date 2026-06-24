@@ -16,6 +16,7 @@
 #include <qt/walletmodel.h>
 
 #include <QAction>
+#include <QCheckBox>
 #include <QCursor>
 #include <QMessageBox>
 #include <QScrollBar>
@@ -34,6 +35,12 @@ ReceiveCoinsDialog::ReceiveCoinsDialog(const PlatformStyle *_platformStyle, QWid
     ui->label_5->hide();
     ui->label->hide(); ui->reqAmount->hide();
     ui->label_3->hide(); ui->reqMessage->hide();
+
+    // SEQUENTIA: opt-in confidential (blinded) receive address. Default OFF — new addresses are
+    // explicit (Bitcoin-identical, tb1…) by default; tick this to generate a confidential address.
+    m_reqConfidential = new QCheckBox(tr("Confidential"), this);
+    m_reqConfidential->setToolTip(tr("Generate a confidential (blinded) address instead of an explicit one."));
+    ui->horizontalLayout_6->addWidget(m_reqConfidential);
 
     if (!_platformStyle->getImagesOnButtons()) {
         ui->clearButton->setIcon(QIcon());
@@ -159,7 +166,7 @@ void ReceiveCoinsDialog::on_receiveButton_clicked()
     QString label = ui->reqLabel->text();
     /* Generate new receiving address */
     const OutputType address_type = (OutputType)ui->addressType->currentData().toInt();
-    address = model->getAddressTableModel()->addRow(AddressTableModel::Receive, label, "", address_type);
+    address = model->getAddressTableModel()->addRow(AddressTableModel::Receive, label, "", address_type, m_reqConfidential && m_reqConfidential->isChecked());
 
     switch(model->getAddressTableModel()->getEditStatus())
     {

@@ -34,7 +34,7 @@ class OptionsModel;
 class PlatformStyle;
 class RPCConsole;
 class SendCoinsRecipient;
-class UnitDisplayStatusBarControl;
+class ReferenceCurrencyStatusBarControl;
 class WalletController;
 class WalletFrame;
 class WalletModel;
@@ -120,7 +120,7 @@ private:
     ClientModel* clientModel = nullptr;
     WalletFrame* walletFrame = nullptr;
 
-    UnitDisplayStatusBarControl* unitDisplayControl = nullptr;
+    ReferenceCurrencyStatusBarControl* refCurrencyControl = nullptr;
     GUIUtil::ThemedLabel* labelWalletEncryptionIcon = nullptr;
     GUIUtil::ThemedLabel* labelWalletHDStatusIcon = nullptr;
     GUIUtil::ClickableLabel* labelProxyIcon = nullptr;
@@ -147,6 +147,7 @@ private:
     QAction* assetsAction = nullptr;
     QAction* stakingAction = nullptr;
     QAction* feePolicyAction = nullptr;
+    QAction* priceServerAction = nullptr;
     QAction* optionsAction = nullptr;
     QAction* encryptWalletAction = nullptr;
     QAction* backupWalletAction = nullptr;
@@ -284,6 +285,8 @@ public Q_SLOTS:
     void gotoStakingPage();
     /** Open the fee-acceptance policy dialog */
     void gotoFeePolicyDialog();
+    /** Launch the bundled price-server sidecar and open its configuration page */
+    void launchPriceServer();
     /** Switch to send coins page */
     void gotoSendCoinsPage(QString addr = "");
 
@@ -321,12 +324,14 @@ public Q_SLOTS:
     void showModalOverlay();
 };
 
-class UnitDisplayStatusBarControl : public QLabel
+/** SEQUENTIA: status-bar control to pick the reference currency used for the "≈" valuation
+ *  shown beside displayed amounts (USD, BTC, or any priced asset). Mirrors the unit picker. */
+class ReferenceCurrencyStatusBarControl : public QLabel
 {
     Q_OBJECT
 
 public:
-    explicit UnitDisplayStatusBarControl(const PlatformStyle *platformStyle);
+    explicit ReferenceCurrencyStatusBarControl(const PlatformStyle *platformStyle);
     /** Lets the control know about the Options Model (and its signals) */
     void setOptionsModel(OptionsModel *optionsModel);
 
@@ -340,15 +345,15 @@ private:
     QMenu* menu;
     const PlatformStyle* m_platform_style;
 
-    /** Shows context menu with Display Unit options by the mouse coordinates */
-    void onDisplayUnitsClicked(const QPoint& point);
-    /** Creates context menu, its actions, and wires up all the relevant signals for mouse events. */
-    void createContextMenu();
+    /** Shows the context menu of reference-currency options at the mouse coordinates */
+    void onReferenceClicked(const QPoint& point);
+    /** (Re)builds the menu from USD + BTC + every currently-priced asset ticker. */
+    void rebuildMenu();
 
 private Q_SLOTS:
-    /** When Display Units are changed on OptionsModel it will refresh the display text of the control on the status bar */
-    void updateDisplayUnit(int newUnits);
-    /** Tells underlying optionsModel to update its current display unit. */
+    /** Refresh the status-bar text when the reference currency changes in the model. */
+    void updateReferenceCurrency(const QString& ticker);
+    /** Tells the underlying optionsModel to update its current reference currency. */
     void onMenuSelection(QAction* action);
 };
 

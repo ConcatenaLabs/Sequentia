@@ -339,6 +339,11 @@ bool SendCoinsDialog::PrepareSendText(QString& question_string, QString& informa
     {
         // generate amount string with wallet name in case of multiwallet
         QString amount = GUIUtil::formatAssetAmount(rcp.asset, rcp.asset_amount, bitcoin_unit, BitcoinUnits::SeparatorStyle::STANDARD, true);
+        // SEQUENTIA: append the amount valued in the user's reference currency (display only).
+        const QString amountRef = GUIUtil::formatReferenceApprox(rcp.asset, rcp.asset_amount, QString());
+        if (!amountRef.isEmpty()) {
+            amount.append(QString(" <span style='color:#888'>%1</span>").arg(amountRef.toHtmlEscaped()));
+        }
         if (model->isMultiwallet()) {
             amount.append(tr(" from wallet '%1'").arg(GUIUtil::HtmlEscape(model->getWalletName())));
         }
