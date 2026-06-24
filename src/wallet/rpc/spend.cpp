@@ -210,7 +210,15 @@ RPCHelpMan getbtcbalance()
         LOCK(pwallet->cs_wallet);
         for (const auto& item : pwallet->m_address_book) {
             if (item.second.IsChange()) continue;
-            const std::string addr = EncodeDestination(item.first);
+            // The parent chain is Bitcoin (testnet4); it cannot parse a Sequentia
+            // CONFIDENTIAL address (blech32 "tsqb..."), which Elements hands out by
+            // default — scantxoutset would reject the descriptor with "Address is not
+            // valid". Strip the blinding pubkey so we encode the UNCONFIDENTIAL,
+            // Bitcoin-identical form (bech32 "tb1...", base58 m/n/2...) the parent
+            // accepts. The scriptPubKey is identical, so the scan still finds the funds.
+            CTxDestination dest = item.first;
+            std::visit(SetBlindingPubKeyVisitor(CPubKey()), dest);
+            const std::string addr = EncodeDestination(dest);
             if (addr.empty()) continue;
             descriptors.push_back("addr(" + addr + ")");
             ++naddr;

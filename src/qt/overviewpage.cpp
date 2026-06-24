@@ -201,14 +201,9 @@ OverviewPage::OverviewPage(const PlatformStyle *platformStyle, QWidget *parent) 
         dualLabel->setWordWrap(true);
         dualLabel->setStyleSheet("color:#555;");
         seqLayout->addWidget(dualLabel);
-        QHBoxLayout* btcRow = new QHBoxLayout();
-        m_btc_label = new QLabel(tr("Bitcoin (testnet4): not checked"), seqFrame);
+        m_btc_label = new QLabel(tr("Bitcoin (testnet4): loading..."), seqFrame);
         m_btc_label->setWordWrap(true);
-        m_btc_button = new QPushButton(tr("Check BTC balance"), seqFrame);
-        btcRow->addWidget(m_btc_label, 1);
-        btcRow->addWidget(m_btc_button, 0);
-        seqLayout->addLayout(btcRow);
-        connect(m_btc_button, &QPushButton::clicked, this, &OverviewPage::onCheckBtc);
+        seqLayout->addWidget(m_btc_label);
         if (QVBoxLayout* top = qobject_cast<QVBoxLayout*>(layout())) {
             top->insertWidget(1, seqFrame); // after labelAlerts (index 0), above the balances row
         }
@@ -361,6 +356,7 @@ void OverviewPage::setWalletModel(WalletModel *model)
     if (m_seq_status_timer && walletModel) {
         updateSeqStatus();
         m_seq_status_timer->start();
+        refreshBtcBalance(); // auto-load the dual (tBTC) balance; no manual button
     }
 }
 
@@ -368,6 +364,11 @@ void OverviewPage::updateSeqStatus()
 {
     if (!walletModel) return;
     interfaces::Node& node = walletModel->node();
+
+    // Periodically re-scan the parent chain for the dual (tBTC) balance. The status
+    // timer fires every 8s; refresh roughly once a minute so the slow scantxoutset
+    // does not hammer the parent node (refreshBtcBalance also self-guards re-entry).
+    if (++m_btc_refresh_tick % 8 == 1) refreshBtcBalance();
 
     // Bitcoin anchor status (node RPC)
     if (m_anchor_label) {
@@ -441,11 +442,15 @@ void OverviewPage::updateSeqStatus()
     }
 }
 
-void OverviewPage::onCheckBtc()
+void OverviewPage::refreshBtcBalance()
 {
-    if (!walletModel || !m_btc_button || !m_btc_label) return;
-    m_btc_button->setEnabled(false);
-    m_btc_label->setText(tr("Bitcoin (testnet4): scanning the parent chain (a few seconds)..."));
+    if (!walletModel || !m_btc_label) return;
+    // The parent-chain scantxoutset is slow (a few seconds); never run two at once.
+    if (m_btc_scan_inflight) return;
+    m_btc_scan_inflight = true;
+    if (m_btc_label->text() == tr("Bitcoin (testnet4): loading...")) {
+        m_btc_label->setText(tr("Bitcoin (testnet4): scanning the parent chain..."));
+    }
     const std::string uri = "/wallet/" + walletModel->getWalletName().toStdString();
     interfaces::Node* nodePtr = &walletModel->node();
     QPointer<OverviewPage> self(this);
@@ -478,7 +483,7 @@ void OverviewPage::onCheckBtc()
         QMetaObject::invokeMethod(qApp, [self, text]() {
             if (self) {
                 if (self->m_btc_label) self->m_btc_label->setText(text);
-                if (self->m_btc_button) self->m_btc_button->setEnabled(true);
+                self->m_btc_scan_inflight = false;
             }
         });
     }).detach();

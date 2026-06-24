@@ -64,7 +64,8 @@ private:
     QLabel *m_staking_label{nullptr};
     QLabel *m_finality_label{nullptr};
     QLabel *m_btc_label{nullptr};
-    QPushButton *m_btc_button{nullptr};
+    bool m_btc_scan_inflight{false};      // guards re-entry of the slow parent-chain scan
+    unsigned m_btc_refresh_tick{0};       // throttles the periodic dual-balance refresh
 
     const PlatformStyle* m_platform_style;
 
@@ -78,7 +79,7 @@ private Q_SLOTS:
     void updateWatchOnlyLabels(bool showWatchOnly);
     void setMonospacedFont(bool use_embedded_font);
     void updateSeqStatus();
-    void onCheckBtc();
+    void refreshBtcBalance();
 };
 
 #endif // BITCOIN_QT_OVERVIEWPAGE_H
