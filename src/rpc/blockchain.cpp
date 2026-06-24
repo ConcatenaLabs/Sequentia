@@ -3358,38 +3358,46 @@ static RPCHelpMan startposproducer()
     if (!g_con_pos) throw JSONRPCError(RPC_MISC_ERROR, "Proof-of-Stake (con_pos) is not enabled on this chain");
     NodeContext& node = EnsureAnyNodeContext(request.context);
 
-    // Merge any keys already loaded in a running producer with the requested ones, so
-    // enabling a new staking key never drops the keys this node was already producing
-    // with. De-duplicate by public key.
-    std::vector<CKey> keys;
+    // Validate and de-duplicate the requested keys. Also gather the keys a running
+    // producer already holds (merged with the new ones) so the PERSISTED set never
+    // drops a key this node was already producing with.
     std::set<CPubKey> seen;
-    std::vector<std::string> all_wifs;
-    if (node.pos_producer) {
+    std::vector<std::string> all_wifs;          // merged set, for persistence
+    std::vector<CKey> new_keys;                 // newly requested keys not already loaded
+    const bool already_running = (node.pos_producer != nullptr);
+    if (already_running) {
         for (const CKey& k : node.pos_producer->Keys()) {
-            if (seen.insert(k.GetPubKey()).second) { keys.push_back(k); all_wifs.push_back(EncodeSecret(k)); }
+            if (seen.insert(k.GetPubKey()).second) all_wifs.push_back(EncodeSecret(k));
         }
     }
     const UniValue& arr = request.params[0].get_array();
     for (size_t i = 0; i < arr.size(); ++i) {
         CKey key = DecodeSecret(arr[i].get_str());
         if (!key.IsValid()) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid staker private key (expected a WIF)");
-        if (seen.insert(key.GetPubKey()).second) { keys.push_back(key); all_wifs.push_back(EncodeSecret(key)); }
+        if (seen.insert(key.GetPubKey()).second) { all_wifs.push_back(EncodeSecret(key)); new_keys.push_back(key); }
     }
-    if (keys.empty()) throw JSONRPCError(RPC_INVALID_PARAMETER, "Provide at least one staker private key (WIF)");
+    if (all_wifs.empty()) throw JSONRPCError(RPC_INVALID_PARAMETER, "Provide at least one staker private key (WIF)");
 
-    // (Re)create the producer with the merged key set and start it. Stop() is
-    // idempotent and joins the old worker before we swap, so this is safe live.
-    CTxMemPool& mempool = EnsureMemPool(node);
-    ChainstateManager& chainman = EnsureChainman(node);
-    CConnman& connman = EnsureConnman(node);
-    if (node.pos_producer) node.pos_producer->Stop();
-    node.pos_producer = std::make_unique<PosProducer>(chainman, mempool, Params(), &connman, keys);
-    node.pos_producer->Start();
+    // Start the autonomous producer if this node is not producing yet. We deliberately
+    // do NOT rebuild a *running* producer here: net_processing reads the active producer
+    // pointer locklessly on the message thread (GetActivePosProducer), so destroying a
+    // live producer would be a use-after-free. When already running, the merged keys are
+    // persisted instead and take effect on the next restart (handled below).
+    bool started_now = false;
+    if (!already_running) {
+        std::vector<CKey> keys = new_keys;
+        CTxMemPool& mempool = EnsureMemPool(node);
+        ChainstateManager& chainman = EnsureChainman(node);
+        CConnman& connman = EnsureConnman(node);
+        node.pos_producer = std::make_unique<PosProducer>(chainman, mempool, Params(), &connman, std::move(keys));
+        node.pos_producer->Start();
+        started_now = true;
+    }
 
-    // Reflect into the live args so status readers (GUI overview / staking page) see it
-    // immediately, and persist to settings.json so the existing startup path
-    // (AppInitMain: -posproducer + -posproducerkey) resumes production after a restart
-    // with no manual config editing.
+    // Reflect into the live args so status readers (GUI overview / staking page) update,
+    // and persist to settings.json so the existing startup path (AppInitMain:
+    // -posproducer + -posproducerkey) resumes production after a restart with no manual
+    // config editing.
     gArgs.ForceSetArg("-posproducer", "1");
     bool persisted = false;
     {
@@ -3402,10 +3410,12 @@ static RPCHelpMan startposproducer()
         persisted = gArgs.WriteSettingsFile();
     }
 
+    const int live_keys = node.pos_producer ? (int)node.pos_producer->Keys().size() : 0;
     UniValue result(UniValue::VOBJ);
-    result.pushKV("producing", true);
-    result.pushKV("keys", (int)keys.size());
-    result.pushKV("persisted", persisted);
+    result.pushKV("producing", node.pos_producer != nullptr);
+    result.pushKV("keys", live_keys);                 // keys active in the running producer now
+    result.pushKV("persisted", persisted);            // saved set (size all_wifs) applies next restart
+    result.pushKV("started", started_now);            // false if it was already producing
     return result;
 },
     };
