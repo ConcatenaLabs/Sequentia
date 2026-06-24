@@ -240,6 +240,9 @@ BitcoinGUI::BitcoinGUI(interfaces::Node& node, const PlatformStyle *_platformSty
 
 BitcoinGUI::~BitcoinGUI()
 {
+    // SEQUENTIA: stop the price-server sidecar so it never outlives the GUI.
+    stopPriceServer();
+
     // Unsubscribe from notifications from core
     unsubscribeFromCoreSignals();
 
@@ -1009,19 +1012,35 @@ void BitcoinGUI::launchPriceServer()
     }
 
     const int uiPort = 8089;
-    const QStringList args{script, "--config", cfg, "--ui-port", QString::number(uiPort), "--ui-host", "127.0.0.1"};
-    if (!QProcess::startDetached(python, args, sdir)) {
+    const QString url = QString("http://127.0.0.1:%1/").arg(uiPort);
+
+    // Already running (from an earlier click)? Just reopen the page — never spawn a
+    // second copy.
+    if (m_price_server && m_price_server->state() != QProcess::NotRunning) {
+        QDesktopServices::openUrl(QUrl(url));
+        return;
+    }
+
+    // Launch as a TRACKED child bound to LOOPBACK ONLY (never 0.0.0.0), so it cannot
+    // outlive the GUI: stopPriceServer() (called from the destructor) terminates it,
+    // which triggers the sidecar's own clean shutdown (clearing the dynamic fee
+    // whitelist). This replaces the old startDetached(), which orphaned the process.
+    if (m_price_server) { m_price_server->deleteLater(); m_price_server = nullptr; }
+    m_price_server = new QProcess(this);
+    m_price_server->setWorkingDirectory(sdir);
+    m_price_server->start(python, {script, "--config", cfg,
+                                   "--ui-port", QString::number(uiPort), "--ui-host", "127.0.0.1"});
+    if (!m_price_server->waitForStarted(4000)) {
         QMessageBox::warning(this, tr("Price server"),
             tr("Failed to start the price server using '%1'. Ensure Python is available.").arg(python));
+        m_price_server->deleteLater(); m_price_server = nullptr;
         return;
     }
 
     // Poll the UI port until the sidecar actually binds, then open its configuration
-    // page. startDetached() only tells us python launched, not that the script started
-    // cleanly — a bad config or a missing dependency exits immediately, which the old
-    // fixed delay silently masked (the browser opened onto a dead port). Open on the
+    // page. A bound port (not just "python launched") confirms the script started
+    // cleanly — a bad config or missing dependency exits immediately. Open on the
     // first successful connection; warn if it never comes up.
-    const QString url = QString("http://127.0.0.1:%1/").arg(uiPort);
     if (statusBar()) statusBar()->showMessage(tr("Price server starting…"), 3000);
     QTimer* pollTimer = new QTimer(this);
     auto attempts = std::make_shared<int>(0);
@@ -1043,6 +1062,22 @@ void BitcoinGUI::launchPriceServer()
         }
     });
     pollTimer->start(300);
+}
+
+void BitcoinGUI::stopPriceServer()
+{
+    if (!m_price_server) return;
+    if (m_price_server->state() != QProcess::NotRunning) {
+        // SIGTERM lets the sidecar run its own clean shutdown (it clears the dynamic
+        // fee whitelist on the node); fall back to kill() if it doesn't exit promptly.
+        m_price_server->terminate();
+        if (!m_price_server->waitForFinished(3000)) {
+            m_price_server->kill();
+            m_price_server->waitForFinished(1000);
+        }
+    }
+    delete m_price_server;
+    m_price_server = nullptr;
 }
 
 void BitcoinGUI::gotoSendCoinsPage(QString addr)

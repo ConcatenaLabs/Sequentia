@@ -53,6 +53,7 @@ QT_BEGIN_NAMESPACE
 class QAction;
 class QComboBox;
 class QDateTime;
+class QProcess;
 class QProgressBar;
 class QProgressDialog;
 QT_END_NAMESPACE
@@ -149,6 +150,7 @@ private:
     QAction* stakingAction = nullptr;
     QAction* feePolicyAction = nullptr;
     QAction* priceServerAction = nullptr;
+    QProcess* m_price_server = nullptr; // SEQUENTIA: tracked price-server sidecar (killed on exit)
     QAction* optionsAction = nullptr;
     QAction* encryptWalletAction = nullptr;
     QAction* backupWalletAction = nullptr;
@@ -288,6 +290,8 @@ public Q_SLOTS:
     void gotoFeePolicyDialog();
     /** Launch the bundled price-server sidecar and open its configuration page */
     void launchPriceServer();
+    /** Terminate the price-server sidecar if running (called on GUI teardown). */
+    void stopPriceServer();
     /** Switch to send coins page */
     void gotoSendCoinsPage(QString addr = "");
 

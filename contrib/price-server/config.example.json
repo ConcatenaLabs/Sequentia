@@ -1,43 +1,34 @@
 {
-  "_comment": "Sequentia price server configuration. The reference unit is whatever the operator pegs the node's reference fee atoms to (e.g. USD): rates are computed as round(price_in_reference * 1e8).",
+  "_comment": "Sequentia price server. It DISCOVERS your network's assets from the Asset Registry (ticker -> id), prices them from ONE market-data API, applies the admission rules below, and publishes the resulting fee-asset whitelist to your node via setdynamicfeerates. You do NOT list assets here. These defaults point at the public Sequentia testnet demo, so a fresh install works out of the box; edit node_rpc to match your local node, and tune the rules in the config UI.",
 
   "poll_interval_secs": 60,
   "source_timeout": 15,
-  "source_name": "my-price-server",
+  "source_name": "sequentia-price-server",
 
   "node_rpc": {
+    "_comment": "Your LOCAL Sequentia node's RPC (where the whitelist is published). Use either user+password or a cookie file path.",
     "host": "127.0.0.1",
     "port": 7041,
-    "_auth_comment": "either user+password, or a cookie file path",
     "user": "rpcuser",
     "password": "rpcpassword"
   },
 
-  "default_thresholds": {
-    "min_sources": 1,
-    "min_market_cap": 50000000,
-    "min_volume_24h": 1000000,
-    "max_source_spread": 0.05,
-    "max_change_factor": 3.0
+  "registry_url": "http://159.195.15.140/registry/index.minimal.json",
+
+  "source": {
+    "_comment": "A Sequentia-format API returns every asset keyed by ticker ({\"SEQ\":{\"price\":..,\"market_cap\":..,\"volume_24h\":..}, ...}) in one call, so no JSON paths are needed. For a third-party API set format=custom and add price_path / market_cap_path / volume_24h_path (with an optional {ticker} placeholder).",
+    "url": "http://159.195.15.140/prices",
+    "quote_currency": "USD",
+    "format": "sequentia"
   },
 
-  "assets": [
-    {
-      "label": "USDT",
-      "id": "<64-hex asset id on the Sequentia network>",
-      "sources": [
-        { "kind": "coingecko", "id": "tether", "vs": "usd" },
-        {
-          "kind": "jsonapi",
-          "name": "my-exchange",
-          "url": "https://api.example-exchange.com/v1/ticker/USDTUSD",
-          "price_path": "data.last_price",
-          "volume_24h_path": "data.volume_24h_usd"
-        }
-      ],
-      "thresholds": {
-        "min_market_cap": 1000000000
-      }
-    }
-  ]
+  "default_thresholds": {
+    "_comment": "Admission rules. Empty (only 'require') = admit every discovered asset that has a valid price. Add keys to tighten: min_market_cap, min_volume_24h, max_change_factor, max_volatility, min_price, max_price, issuer_domains. 'require' is 'all' or 'any'.",
+    "require": "all"
+  },
+
+  "exceptions": {
+    "always_admit": [],
+    "always_reject": []
+  }
 }
