@@ -25,10 +25,11 @@ class QPushButton;
 QT_END_NAMESPACE
 
 /**
- * Operator panel for Sequentia's open fee market: view the assets this node accepts for fee
- * payment (the effective acceptance set = static ∪ dynamic, via getfeeacceptancepolicy), see the
- * price-server-published dynamic layer (getdynamicfeerates), and edit the operator's STATIC
- * whitelist (setfeeexchangerates). No asset is privileged — the policy asset is just one entry.
+ * Operator panel for Sequentia's open fee market. The node accepts a set of assets for fee
+ * payment at given rates — that is ONE whitelist (the "fee acceptance policy", via
+ * getfeeacceptancepolicy). Entries are set manually by the operator (setfeeexchangerates) or
+ * maintained by a price-server sidecar if one is running. No asset is privileged — the policy
+ * asset is just one entry.
  */
 class FeePolicyDialog : public QDialog
 {
@@ -42,25 +43,26 @@ private Q_SLOTS:
     void refresh();
     void onAddOrUpdate();
     void onRemoveSelected();
+    void onLaunchPriceServer();
 
 private:
     WalletModel* m_wallet_model{nullptr};
     const PlatformStyle* m_platform_style;
 
-    QTableWidget* m_effective{nullptr}; // Asset | Rate | Origin | Source
-    QTableWidget* m_dynamic{nullptr};   // Asset | Rate | Source | Age(s) | Stale
+    QTableWidget* m_whitelist{nullptr}; // Asset | Rate | Managed by
     QComboBox* m_asset{nullptr};         // editable: label or hex
     QLineEdit* m_rate{nullptr};
     QPushButton* m_add{nullptr};
     QPushButton* m_remove{nullptr};
     QPushButton* m_refresh{nullptr};
+    QPushButton* m_launch_price_server{nullptr};
     QLabel* m_status{nullptr};
 
     UniValue callRpc(const std::string& method, const UniValue& params, bool& ok, QString& error);
     void setStatus(const QString& msg, bool error = false);
-    // The current STATIC layer, recovered from getfeeacceptancepolicy (origin=="static"). Used to
-    // rebuild the full map for setfeeexchangerates, which REPLACES the whole static layer.
-    std::map<std::string, int64_t> currentStaticRates(bool& ok, QString& err);
+    // The manually-set (operator) entries, recovered from getfeeacceptancepolicy (origin=="static").
+    // Used to rebuild the full map for setfeeexchangerates, which REPLACES the whole manual layer.
+    std::map<std::string, int64_t> currentManualRates(bool& ok, QString& err);
 };
 
 #endif // BITCOIN_QT_FEEPOLICYDIALOG_H

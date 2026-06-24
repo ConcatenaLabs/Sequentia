@@ -218,11 +218,11 @@ void SendCoinsDialog::setModel(WalletModel *_model)
             auto populateFeeAssets = [this]() {
                 const QString prev = ui->feeAssetSelector->currentData().toString();
                 ui->feeAssetSelector->clear();
-                ui->feeAssetSelector->addItem(QString::fromStdString(gAssetsDir.GetIdentifier(::policyAsset)),
+                ui->feeAssetSelector->addItem(GUIUtil::assetDisplayName(::policyAsset),
                                               QString::fromStdString(::policyAsset.GetHex()));
                 for (const CAsset& asset : model->getAssetTypes()) {
                     if (asset == ::policyAsset) continue;
-                    ui->feeAssetSelector->addItem(QString::fromStdString(gAssetsDir.GetIdentifier(asset)),
+                    ui->feeAssetSelector->addItem(GUIUtil::assetDisplayName(asset),
                                                   QString::fromStdString(asset.GetHex()));
                 }
                 const int idx = ui->feeAssetSelector->findData(prev);

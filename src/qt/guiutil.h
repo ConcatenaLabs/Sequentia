@@ -216,11 +216,23 @@ namespace GUIUtil
     /** Convert OS specific boost path to QString through UTF-8 */
     QString PathToQString(const fs::path &path);
 
+    /* User-facing label for an asset: the chain-aware ticker (tSEQ/SEQ) for the policy asset,
+       otherwise the asset registry identifier. Avoids the policy asset rendering as "bitcoin"
+       (its default pegged-asset name) in selectors and amount labels. */
+    QString assetDisplayName(const CAsset& asset);
+
     /* Format an amount of assets in a user-friendly style */
     QString formatAssetAmount(const CAsset&, const CAmount&, int bitcoin_unit, BitcoinUnits::SeparatorStyle, bool include_asset_name = true);
 
     /* Format one or more asset+amounts in a user-friendly style */
     QString formatMultiAssetAmount(const CAmountMap&, int bitcoin_unit, BitcoinUnits::SeparatorStyle, QString line_separator);
+
+    /* SEQUENTIA: a muted "≈ <amount> <REF>" valuing (asset, amount) in the user-chosen reference
+       currency, using the node's cached USD price feed. Empty when unpriced/unavailable or when the
+       amount is already in the reference denomination. Display-only — never used for copy/export. */
+    QString formatReferenceApprox(const CAsset& asset, const CAmount& amount, const QString& refTicker);
+    /* SEQUENTIA: as above, summed across a multi-asset map (e.g. a total balance). */
+    QString formatMultiAssetReferenceApprox(const CAmountMap& amountmap, const QString& refTicker);
 
     /* Parse an amount of a given asset from text */
     bool parseAssetAmount(const CAsset&, const QString& text, int bitcoin_unit, CAmount *val_out);

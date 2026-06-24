@@ -539,11 +539,11 @@ bool WalletModel::bumpFee(uint256 hash, uint256& new_hash)
     // is how a stranded any-asset-fee tx is rescued.
     if (g_con_any_asset_fees) {
         QStringList labels; QList<QString> hexes;
-        labels << tr("Keep original (%1)").arg(QString::fromStdString(gAssetsDir.GetIdentifier(old_fee_asset)));
+        labels << tr("Keep original (%1)").arg(GUIUtil::assetDisplayName(old_fee_asset));
         hexes  << QString::fromStdString(old_fee_asset.GetHex());
         for (const CAsset& asset : getAssetTypes()) {
             if (asset == old_fee_asset) continue;
-            labels << QString::fromStdString(gAssetsDir.GetIdentifier(asset));
+            labels << GUIUtil::assetDisplayName(asset);
             hexes  << QString::fromStdString(asset.GetHex());
         }
         if (labels.size() > 1) {
@@ -716,7 +716,7 @@ bool WalletModel::createChildPaysForParent(uint256 parentHash, uint256& childHas
         hexes  << QString::fromStdString(::policyAsset.GetHex());
         for (const CAsset& asset : getAssetTypes()) {
             if (asset == ::policyAsset) continue;
-            labels << QString::fromStdString(gAssetsDir.GetIdentifier(asset));
+            labels << GUIUtil::assetDisplayName(asset);
             hexes  << QString::fromStdString(asset.GetHex());
         }
         if (labels.size() > 1) {
@@ -813,7 +813,7 @@ bool WalletModel::replaceTransaction(uint256 hash, uint256& new_hash)
     auto* amtEdit = new QLineEdit(&dlg); lay->addWidget(amtEdit);
     auto* assetCombo = new QComboBox(&dlg);
     if (g_con_any_asset_fees) {
-        for (const CAsset& a : getAssetTypes()) assetCombo->addItem(QString::fromStdString(gAssetsDir.GetIdentifier(a)), QString::fromStdString(a.GetHex()));
+        for (const CAsset& a : getAssetTypes()) assetCombo->addItem(GUIUtil::assetDisplayName(a), QString::fromStdString(a.GetHex()));
     } else {
         assetCombo->addItem(BitcoinUnits::policyAssetTicker(), QString::fromStdString(::policyAsset.GetHex()));
     }
@@ -821,8 +821,8 @@ bool WalletModel::replaceTransaction(uint256 hash, uint256& new_hash)
     auto* feeCombo = new QComboBox(&dlg);
     if (g_con_any_asset_fees) {
         lay->addWidget(new QLabel(tr("Pay the fee in:"), &dlg));
-        feeCombo->addItem(tr("Keep original (%1)").arg(QString::fromStdString(gAssetsDir.GetIdentifier(old_fee_asset))), QString::fromStdString(old_fee_asset.GetHex()));
-        for (const CAsset& a : getAssetTypes()) { if (a == old_fee_asset) continue; feeCombo->addItem(QString::fromStdString(gAssetsDir.GetIdentifier(a)), QString::fromStdString(a.GetHex())); }
+        feeCombo->addItem(tr("Keep original (%1)").arg(GUIUtil::assetDisplayName(old_fee_asset)), QString::fromStdString(old_fee_asset.GetHex()));
+        for (const CAsset& a : getAssetTypes()) { if (a == old_fee_asset) continue; feeCombo->addItem(GUIUtil::assetDisplayName(a), QString::fromStdString(a.GetHex())); }
         lay->addWidget(feeCombo);
     }
     lay->addWidget(new QLabel(tr("Fee rate (atoms/vB):"), &dlg));

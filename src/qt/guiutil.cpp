@@ -14,6 +14,7 @@
 #include <base58.h>
 #include <assetsdir.h>
 #include <chainparams.h>
+#include <referenceprices.h>
 #include <fs.h>
 #include <interfaces/node.h>
 #include <key_io.h>
@@ -728,6 +729,14 @@ QString ConnectionTypeToQString(ConnectionType conn_type, bool prepend_direction
     assert(false);
 }
 
+QString assetDisplayName(const CAsset& asset)
+{
+    // The policy asset's registry identifier defaults to "bitcoin"; show the chain-aware
+    // ticker (tSEQ/SEQ) used by amount fields instead, so labels stay consistent.
+    if (asset == ::policyAsset) return BitcoinUnits::policyAssetTicker();
+    return QString::fromStdString(gAssetsDir.GetIdentifier(asset));
+}
+
 QString formatAssetAmount(const CAsset& asset, const CAmount& amount, const int bitcoin_unit, BitcoinUnits::SeparatorStyle separators, bool include_asset_name)
 {
     if (asset == Params().GetConsensus().pegged_asset) {
@@ -749,7 +758,7 @@ QString formatAssetAmount(const CAsset& asset, const CAmount& amount, const int 
         str += QString(".%1").arg(fraction, 8, 10, QLatin1Char('0'));
     }
     if (include_asset_name) {
-        str += QString(" ") + QString::fromStdString(gAssetsDir.GetIdentifier(asset));
+        str += QString(" ") + assetDisplayName(asset);
     }
     return str;
 }
