@@ -42,6 +42,8 @@
 #include <util/translation.h>
 #include <validation.h>
 
+#include <memory>
+
 #include <QAction>
 #include <QApplication>
 #include <QCoreApplication>
@@ -67,6 +69,7 @@
 #include <QShortcut>
 #include <QStackedWidget>
 #include <QStatusBar>
+#include <QTcpSocket>
 #include <QStyle>
 #include <QSystemTrayIcon>
 #include <QTimer>
@@ -1013,11 +1016,33 @@ void BitcoinGUI::launchPriceServer()
         return;
     }
 
-    // Give the sidecar a moment to bind, then open its configuration UI in the browser.
+    // Poll the UI port until the sidecar actually binds, then open its configuration
+    // page. startDetached() only tells us python launched, not that the script started
+    // cleanly — a bad config or a missing dependency exits immediately, which the old
+    // fixed delay silently masked (the browser opened onto a dead port). Open on the
+    // first successful connection; warn if it never comes up.
     const QString url = QString("http://127.0.0.1:%1/").arg(uiPort);
-    QTimer::singleShot(1500, this, [url]{ QDesktopServices::openUrl(QUrl(url)); });
-    QMessageBox::information(this, tr("Price server"),
-        tr("The price server is starting. Its configuration page will open at %1.").arg(url));
+    if (statusBar()) statusBar()->showMessage(tr("Price server starting…"), 3000);
+    QTimer* pollTimer = new QTimer(this);
+    auto attempts = std::make_shared<int>(0);
+    connect(pollTimer, &QTimer::timeout, this, [this, pollTimer, attempts, uiPort, url]() {
+        QTcpSocket probe;
+        probe.connectToHost(QStringLiteral("127.0.0.1"), static_cast<quint16>(uiPort));
+        const bool up = probe.waitForConnected(200);
+        probe.abort();
+        if (up) {
+            pollTimer->stop();
+            pollTimer->deleteLater();
+            QDesktopServices::openUrl(QUrl(url));
+        } else if (++(*attempts) >= 30) { // ~9s of 300ms polls
+            pollTimer->stop();
+            pollTimer->deleteLater();
+            QMessageBox::warning(this, tr("Price server"),
+                tr("The price server did not come up at %1. It likely failed to start — check that "
+                   "Python and its dependencies are installed and that the price-server config is valid.").arg(url));
+        }
+    });
+    pollTimer->start(300);
 }
 
 void BitcoinGUI::gotoSendCoinsPage(QString addr)
