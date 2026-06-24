@@ -110,8 +110,9 @@ RPCHelpMan registerstake()
                 "canonical staking output (see getstakescript) from this wallet. The amount counts as the\n"
                 "key's on-chain stake while the output stays unspent; spending it (unbonding) requires the\n"
                 "staker key and the script's CSV maturity. Get a staker pubkey with getnewaddress followed\n"
-                "by getaddressinfo. To then produce blocks, run with -posproducer and -posproducerkey set\n"
-                "to the staker key.\n",
+                "by getaddressinfo. To then produce blocks, call startposproducer with the staker key's WIF\n"
+                "(no restart needed; it persists across restarts) — or start the node with -posproducer and\n"
+                "-posproducerkey.\n",
                 {
                     {"pubkey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The staker public key (hex)."},
                     {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "Amount of SEQ to stake (at or above the chain's minimum stake)."},
