@@ -52,7 +52,7 @@ FeePolicyDialog::FeePolicyDialog(const PlatformStyle* platformStyle, QWidget* pa
     resize(640, 560);
     auto* layout = new QVBoxLayout(this);
 
-    layout->addWidget(new QLabel(tr("Assets this node accepts for transaction fees — the fee "
+    layout->addWidget(new QLabel(tr("Assets this node accepts for transaction fees: the fee "
                                     "whitelist. Sequentia privileges no asset; the policy asset is "
                                     "just one entry. Rates are integer atoms of the asset equal to "
                                     "one reference fee atom (rfa). Entries are set manually below, "
@@ -300,6 +300,6 @@ void FeePolicyDialog::onLaunchPriceServer()
     // Give the sidecar a moment to bind, then open its configuration UI in the browser.
     const QString url = QString("http://127.0.0.1:%1/").arg(uiPort);
     QTimer::singleShot(1500, this, [url]{ QDesktopServices::openUrl(QUrl(url)); });
-    setStatus(tr("The price server is starting — its configuration page will open at %1. "
+    setStatus(tr("The price server is starting; its configuration page will open at %1. "
                  "It will maintain the whitelist; Refresh to see updates.").arg(url));
 }

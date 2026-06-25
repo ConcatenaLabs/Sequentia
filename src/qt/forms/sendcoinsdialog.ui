@@ -863,7 +863,7 @@ Note:  Since the fee is calculated on a per-byte basis, a fee rate of "100 atoms
                  <item>
                   <widget class="QComboBox" name="feeAssetSelector">
                    <property name="toolTip">
-                    <string>Pay the transaction fee in this asset. Sequentia accepts fees in any asset a block producer prices — no asset is privileged. If it doesn't confirm, you can replace it (RBF, on by default).</string>
+                    <string>Pay the transaction fee in this asset. Sequentia accepts fees in any asset a block producer prices; no asset is privileged. If it doesn't confirm, you can replace it (RBF, on by default).</string>
                    </property>
                   </widget>
                  </item>

@@ -86,7 +86,7 @@ AssetsPage::AssetsPage(const PlatformStyle* platformStyle, QWidget* parent)
     QGroupBox* reissueGroup = new QGroupBox(tr("Mint more of an existing asset (reissue)"), this);
     QFormLayout* reissueForm = new QFormLayout(reissueGroup);
     m_reissue_asset = new QLineEdit(reissueGroup);
-    m_reissue_asset->setPlaceholderText(tr("asset id (hex) — you must hold its reissuance token"));
+    m_reissue_asset->setPlaceholderText(tr("asset id (hex); you must hold its reissuance token"));
     m_reissue_amount = new QLineEdit(reissueGroup);
     m_reissue_amount->setPlaceholderText(tr("amount to mint"));
     m_reissue_button = new QPushButton(tr("Reissue"), reissueGroup);
@@ -234,7 +234,7 @@ void AssetsPage::onIssue()
     QString asset = r.exists("asset") ? QString::fromStdString(r["asset"].get_str()) : QString();
     QString token = r.exists("token") ? QString::fromStdString(r["token"].get_str()) : QString();
     m_issue_result->setText(tr("Asset id: %1\nReissuance token: %2").arg(asset, token));
-    setStatus(tr("Issued. Save the asset id above — it identifies your asset."), false);
+    setStatus(tr("Issued. Save the asset id above; it identifies your asset."), false);
     refresh();
 }
 

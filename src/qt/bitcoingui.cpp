@@ -1057,7 +1057,7 @@ void BitcoinGUI::launchPriceServer()
             pollTimer->stop();
             pollTimer->deleteLater();
             QMessageBox::warning(this, tr("Price server"),
-                tr("The price server did not come up at %1. It likely failed to start — check that "
+                tr("The price server did not come up at %1. It likely failed to start; check that "
                    "Python and its dependencies are installed and that the price-server config is valid.").arg(url));
         }
     });

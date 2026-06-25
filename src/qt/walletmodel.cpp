@@ -721,7 +721,7 @@ bool WalletModel::createChildPaysForParent(uint256 parentHash, uint256& childHas
         }
         if (labels.size() > 1) {
             QDialog dlg(nullptr);
-            dlg.setWindowTitle(tr("Speed up — fee asset"));
+            dlg.setWindowTitle(tr("Speed up: fee asset"));
             auto* lay = new QVBoxLayout(&dlg);
             lay->addWidget(new QLabel(tr("Pay the child fee in (a producer-accepted asset lets the package confirm):"), &dlg));
             auto* combo = new QComboBox(&dlg);

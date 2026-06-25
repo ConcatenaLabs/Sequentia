@@ -45,7 +45,7 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
     layout->addWidget(title);
 
     QLabel* intro = new QLabel(
-        tr("Stake %1 to become a block producer. Your stake stays yours — it is time-locked only for "
+        tr("Stake %1 to become a block producer. Your stake stays yours; it is time-locked only for "
            "the unbonding period you would wait before withdrawing, and it keeps counting the entire "
            "time. The more you stake, the more often the committee elects you to produce a block and "
            "collect its fees.").arg(BitcoinUnits::policyAssetTicker()), this);
@@ -182,19 +182,19 @@ void StakingPage::refresh()
             }
         }
         if (configured && !wifs.empty() && eligible > 0) {
-            m_producer_status->setText(tr("Block production: ON — %1 key(s) hold an eligible stake. You produce "
+            m_producer_status->setText(tr("Block production: ON. %1 key(s) hold an eligible stake. You produce "
                                           "automatically whenever the committee elects one of them. This resumes "
                                           "by itself after a restart.").arg(eligible));
             m_producer_status->setStyleSheet("QLabel{padding:8px;border-radius:4px;background:#e6f4ea;color:#1e7e34;}");
             if (m_enable_button) m_enable_button->setVisible(false);
         } else if (configured && !wifs.empty()) {
-            m_producer_status->setText(tr("Block production: ON, waiting for your stake to count — your producer key(s) "
+            m_producer_status->setText(tr("Block production: ON, waiting for your stake to count. Your producer key(s) "
                                           "are not yet registered at or above the chain minimum, or the stake has not "
                                           "confirmed yet. Stake below; you'll start producing as soon as it confirms."));
             m_producer_status->setStyleSheet("QLabel{padding:8px;border-radius:4px;background:#fff3cd;color:#856404;}");
             if (m_enable_button) m_enable_button->setVisible(false);
         } else {
-            m_producer_status->setText(tr("Block production: off. Stake below and it turns on automatically — or, if you "
+            m_producer_status->setText(tr("Block production: off. Stake below and it turns on automatically, or, if you "
                                           "already have a stake, click \"Start producing blocks\". No config editing or "
                                           "restart needed."));
             m_producer_status->setStyleSheet("QLabel{padding:8px;border-radius:4px;background:#fff3cd;color:#856404;}");
@@ -283,7 +283,7 @@ void StakingPage::onStake()
     bool enabled = false; QString enErr;
     if (!wif.isEmpty()) enabled = enableProduction(QStringList{wif}, enErr);
     if (enabled) {
-        msg += tr("\n\nBlock production is now ON for this key — automatically, no restart. You'll start "
+        msg += tr("\n\nBlock production is now ON for this key, automatically, no restart. You'll start "
                   "producing as soon as the stake confirms and the committee elects you, and it resumes "
                   "by itself after a restart.");
     } else if (!wif.isEmpty()) {
@@ -294,7 +294,7 @@ void StakingPage::onStake()
                   "click \"Start producing blocks\" once the stake confirms to begin producing.");
     }
     m_result->setText(msg);
-    setStatus(enabled ? tr("Staked — block production is on. The stake counts once the transaction confirms.")
+    setStatus(enabled ? tr("Staked. Block production is on. The stake counts once the transaction confirms.")
                       : tr("Stake registered. It will count once the transaction confirms."), false);
     refresh();
 }
