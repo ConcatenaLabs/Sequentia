@@ -1,6 +1,6 @@
 # Tokenomics, genesis & launch
 
-SEQ is the staking asset and the only token native to Sequentia. Its supply is
+Sequence (SEQ) is the staking asset and the only token native to Sequentia. Its supply is
 fixed, minted once at genesis, and never inflated. This chapter describes the
 supply and what it confers, how the genesis block is constructed to seed the
 first staker, how a chain bootstraps from that seed with no operator-side staker

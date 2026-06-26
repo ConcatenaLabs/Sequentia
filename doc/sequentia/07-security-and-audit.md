@@ -168,7 +168,7 @@ already-certified block. The VRF/committee result is the truth; cross-chain-swap
 freshness is delivered by block production and a committee signing preference, not
 by fork choice. A hard immediate-finality gate (`UpdateTip` +
 `ContextualCheckBlockHeader`) locks a quorum-certified block against any
-SEQ-internal competitor — even one carrying more signatures — using a soft,
+Sequentia-internal competitor — even one carrying more signatures — using a soft,
 retryable rejection, so only a Bitcoin reorg of the anchor (via the watcher,
 which lowers the finalized point) can displace it. The mechanics are specified in
 [`04-proof-of-stake.md`](04-proof-of-stake.md); the behaviour is exercised by

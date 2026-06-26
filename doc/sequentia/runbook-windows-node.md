@@ -176,7 +176,7 @@ When the tSEQ arrives, confirm it:
 elements-cli.exe -rpcwallet=main getbalance "*"
 ```
 
-You should see a `"bitcoin"` balance (that's the policy asset, SEQ — it carries
+You should see a `"bitcoin"` balance (that's the policy asset, the Sequence token (SEQ) — it carries
 the Elements default label "bitcoin"). You can also see individual coins with
 `elements-cli.exe -rpcwallet=main listunspent`.
 
@@ -298,7 +298,7 @@ elements-cli.exe -rpcwallet=main -named sendmany ^
   output_assets="{\"%D1%\":\"%A%\",\"%D2%\":\"%B%\"}"
 ```
 
-**7.2 Pay a fee in a non-SEQ asset.** For a producer to mine a fee paid in your
+**7.2 Pay a fee in a different asset.** For a producer to mine a fee paid in your
 asset, the producer must *price* that asset. On your own node you set the price
 (this controls what *you* accept when you produce a block):
 

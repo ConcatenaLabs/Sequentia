@@ -300,7 +300,7 @@ void BitcoinGUI::createActions()
     tabGroup->addAction(assetsAction);
 
     stakingAction = new QAction(platformStyle->SingleColorIcon(":/icons/receiving_addresses"), tr("&Staking"), this);
-    stakingAction->setStatusTip(tr("Stake SEQ and manage block production"));
+    stakingAction->setStatusTip(tr("Stake Sequence (SEQ) and manage block production"));
     stakingAction->setToolTip(stakingAction->statusTip());
     stakingAction->setCheckable(true);
     stakingAction->setShortcut(QKeySequence(Qt::ALT + Qt::Key_6));
@@ -364,9 +364,9 @@ void BitcoinGUI::createActions()
     verifyMessageAction = new QAction(tr("&Verify message…"), this);
     verifyMessageAction->setStatusTip(tr("Verify messages to ensure they were signed with specified %1 addresses").arg("Sequentia"));
     m_load_psbt_action = new QAction(tr("&Load PSET from file…"), this);
-    m_load_psbt_action->setStatusTip(tr("Load Partially Signed Bitcoin Transaction"));
+    m_load_psbt_action->setStatusTip(tr("Load Partially Signed Elements Transaction"));
     m_load_psbt_clipboard_action = new QAction(tr("Load PSET from &clipboard…"), this);
-    m_load_psbt_clipboard_action->setStatusTip(tr("Load Partially Signed Bitcoin Transaction from clipboard"));
+    m_load_psbt_clipboard_action->setStatusTip(tr("Load Partially Signed Elements Transaction from clipboard"));
 
     openRPCConsoleAction = new QAction(tr("Node window"), this);
     openRPCConsoleAction->setStatusTip(tr("Open node debugging and diagnostic console"));

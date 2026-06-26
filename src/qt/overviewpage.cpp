@@ -427,8 +427,8 @@ void OverviewPage::updateSeqStatus()
                                                  "Below that height the chain still follows Bitcoin reorgs.").arg(fin).arg(depth));
                     m_finality_label->setStyleSheet("color:#1e7e34;");
                 } else {
-                    m_finality_label->setText(tr("Finality: no checkpoint finalized yet - the chain follows Bitcoin reorgs to any depth "
-                                                 "(real-time anchoring). A checkpoint finalizes once buried %1 Bitcoin blocks deep.").arg(depth));
+                    m_finality_label->setText(tr("Finality: no checkpoint finalized yet - the chain follows Bitcoin reorgs to any depth. "
+                                                 "A checkpoint finalizes once buried %1 Bitcoin blocks deep.").arg(depth));
                     m_finality_label->setStyleSheet("color:#856404;");
                 }
             } else {

@@ -712,7 +712,7 @@ bool WalletModel::createChildPaysForParent(uint256 parentHash, uint256& childHas
     CAsset feeAsset = ::policyAsset;
     if (g_con_any_asset_fees) {
         QStringList labels; QList<QString> hexes;
-        labels << tr("%1 (recommended)").arg(BitcoinUnits::policyAssetTicker());
+        labels << BitcoinUnits::policyAssetTicker();
         hexes  << QString::fromStdString(::policyAsset.GetHex());
         for (const CAsset& asset : getAssetTypes()) {
             if (asset == ::policyAsset) continue;

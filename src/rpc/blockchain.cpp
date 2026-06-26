@@ -3426,7 +3426,7 @@ static RPCHelpMan getstakescript()
 {
     return RPCHelpMan{"getstakescript",
                 "\nFor Proof-of-Stake chains: returns the canonical staking-output script for a staker public key. "
-                "Sending an explicit policy-asset amount to this (bare) script registers that amount as the key's "
+                "Sending an explicit Sequence (SEQ) amount to this (bare) script registers that amount as the key's "
                 "on-chain stake while the output remains unspent. Spending it (unbonding) requires the staker's "
                 "signature and csv_blocks of relative-height maturity, enforced by the script itself.\n",
                 {

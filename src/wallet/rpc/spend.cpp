@@ -106,7 +106,7 @@ UniValue SendMoney(CWallet& wallet, const CCoinControl &coin_control, std::vecto
 RPCHelpMan registerstake()
 {
     return RPCHelpMan{"registerstake",
-                "\nRegister an amount of SEQ as proof-of-stake for a staker public key, by funding the\n"
+                "\nRegister an amount of Sequence (SEQ) as proof-of-stake for a staker public key, by funding the\n"
                 "canonical staking output (see getstakescript) from this wallet. The amount counts as the\n"
                 "key's on-chain stake while the output stays unspent; spending it (unbonding) requires the\n"
                 "staker key and the script's CSV maturity. Get a staker pubkey with getnewaddress followed\n"
@@ -115,7 +115,7 @@ RPCHelpMan registerstake()
                 "-posproducerkey.\n",
                 {
                     {"pubkey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The staker public key (hex)."},
-                    {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "Amount of SEQ to stake (at or above the chain's minimum stake)."},
+                    {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "Amount of Sequence (SEQ) to stake (at or above the chain's minimum stake)."},
                     {"csv_blocks", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Height-based unbonding delay in blocks (default: the chain minimum)."},
                     {"csv_seconds", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Time-based unbonding delay in seconds (mutually exclusive with csv_blocks)."},
                 },

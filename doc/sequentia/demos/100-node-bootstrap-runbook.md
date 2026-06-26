@@ -2,7 +2,7 @@
 
 Stand up a **100-member autonomous Sequentia committee the way mainnet launches**:
 from a single genesis founder, through escaping-stall solo-mining, to a
-self-running quorum — anchored to **live Bitcoin testnet** at **mainnet cadence**
+self-running quorum — anchored to **live Bitcoin testnet3** at **mainnet cadence**
 (30-second slots, ~15-day unbonding). Everything here is exact and assumes a
 single Linux box (Pop!_OS/Ubuntu).
 
@@ -202,4 +202,4 @@ rm -rf ~/seq-bootstrap100 ~/seq-bootstrap100.log ~/seq-bootstrap100.pid
 The `~/seq-bootstrap100.log` reaching Phase 4 with climbing heights, `fork=no`, and
 `anchor=ok@btc<testnet height>` is the proof: a 100-member committee that
 bootstrapped from one founder via escaping stall and now self-certifies, anchored
-to live Bitcoin testnet.
+to live Bitcoin testnet3.

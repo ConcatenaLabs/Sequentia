@@ -94,8 +94,8 @@ Example — admit if market cap ≥ 50M **or** issued by `sequentia.io`, except 
 
 ## Rate semantics
 
-The node values fees in **reference fee atoms**: an asset's rate is *how many
-atoms of the asset equal one whole reference unit (1e8)*, scaled by 1e8. The
+The node values fees in **reference fee atoms**: an asset's rate is *the value of one whole asset unit expressed in the
+reference*, scaled by 1e8 (e.g. if GOLD is worth 1000 SEQ, rate(GOLD) = 1000 × 1e8). The
 operator picks the reference (e.g. SEQ or USD) by pricing all sources in it;
 `reference_asset_label` then re-expresses every rate against that asset, which
 lands at exactly `100000000`.
