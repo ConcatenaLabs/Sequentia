@@ -197,10 +197,10 @@ that revealed secret to redeem the other leg. Either both legs are claimed or, o
 timeout, both are refunded — the usual atomic-swap guarantee.
 
 The Sequentia value-add is **anchoring consistency**. In a swap against native
-BTC, the SEQ leg lives in a Sequentia block, and that block anchors to a Bitcoin
+BTC, the Sequentia leg lives in a Sequentia block, and that block anchors to a Bitcoin
 block. If the BTC leg is reorged away on Bitcoin, the anchor of the Sequentia
-block holding the SEQ leg goes stale, the reorg-following watcher invalidates
-that block, and the SEQ leg reverts with it. Both legs revert together: neither
+block holding the Sequentia leg goes stale, the reorg-following watcher invalidates
+that block, and the Sequentia leg reverts with it. Both legs revert together: neither
 party is left having paid without being paid. This is exactly the property that
 removes the reorg-protection buffer (§4) — there is no independent Sequentia
 reorg for the buffer to guard against.

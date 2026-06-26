@@ -200,8 +200,8 @@ Elements contributes the following (all retained here):
    the default a producer can re-price or refuse, with any asset usable as the
    1:1 reference instead.) Any user may still use the inherited
    machinery to issue their own pegged BTC if they want one — largely
-   unnecessary here, since Bitcoin anchoring enables real-time atomic swaps
-   against *native* BTC
+   unnecessary here, since Bitcoin anchoring enables atomic swaps against *native* BTC
+   without long confirmation timelocks
    (see [`doc/sequentia/03`](doc/sequentia/03-bitcoin-anchoring.md)), but
    potentially useful e.g. to hold BTC value under confidential transactions.
  * [Signed Blocks][signed-blocks]

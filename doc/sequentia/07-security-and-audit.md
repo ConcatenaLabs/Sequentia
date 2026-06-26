@@ -52,7 +52,7 @@ eligibility, the aggregate signature, the anchor, and the finality gate.
   comparison (`src/wallet/feebumper.cpp`, `src/rpc/rawtransaction.cpp`), matching
   the relay and RBF checks (see [`02-open-fee-market.md`](02-open-fee-market.md) §4).
 - **Sortition-seed grindability (medium).** The election seed mixed the
-  producer-grindable SEQ block hash; it is derived from the parent block's Bitcoin
+  producer-grindable Sequentia block hash; it is derived from the parent block's Bitcoin
   anchor hash and height — deterministic on every node and unbiasable, since it is
   Bitcoin's proof-of-work (`ComputePosSeed`, see
   [`04-proof-of-stake.md`](04-proof-of-stake.md)).

@@ -4,7 +4,7 @@ Sequentia's consensus is Proof-of-Stake. Block production is a stake-weighted
 election with private VRF sortition; a committee certifies each block with a
 single aggregated signature (BLS12-381 by default; MuSig2 the `-posbls=0`
 fallback); and the certified block is final the moment
-it is accepted. SEQ is the staking asset and the one thing that confers
+it is accepted, subject only to a Bitcoin reorg of its anchor. SEQ is the staking asset and the one thing that confers
 production eligibility. Voluntary Bitcoin checkpoints resist long-range attacks.
 
 This chapter is the full consensus specification: the stake registry, leader
@@ -127,9 +127,9 @@ seed_h = ComputePosSeed( parent block's Bitcoin-anchor hash, height h )
 
 The seed is built from the parent's committed Bitcoin-anchor hash and the
 height — both header fields fixed at block-index creation, so the seed is
-identical on every node. It is deliberately *not* the SEQ block hash (which a
+identical on every node. It is deliberately *not* the Sequentia block hash (which a
 producer could grind) and *not* a VRF score. The anchor hash is Bitcoin's
-proof-of-work, which a SEQ producer cannot bias; its only freedom is which
+proof-of-work, which a Sequentia producer cannot bias; its only freedom is which
 recent, monotone, anchor-valid Bitcoin block to reference, and that influences
 only the *next* block's committee — a committee that is itself privately
 VRF-sortitioned, so the residual grinding is limited and VRF-mitigated. See

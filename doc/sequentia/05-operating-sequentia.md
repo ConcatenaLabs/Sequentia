@@ -56,7 +56,7 @@ poscommitteesize=100         # expected committee size; quorum = strict majority
                              # at least quorum-many sortition-eligible members.
 posslotinterval=30           # seconds per VRF sortition slot; 30s on
                              # mainnet/testnet, configurable on custom chains.
-posunbonding=43200           # minimum unbonding lock in (SEQ) blocks; required
+posunbonding=43200           # minimum unbonding lock in (Sequentia) blocks; required
                              # wall-clock = this x posslotinterval (x30s ~= 15
                              # days). Exceeds the 16-bit height-CSV range, so
                              # staking outputs use a time-based CSV lock
