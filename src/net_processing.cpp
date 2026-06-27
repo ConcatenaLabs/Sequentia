@@ -5176,6 +5176,65 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         // GetTime() is used by this anti-DoS logic so we can test this using mocktime
         ConsiderEviction(*pto, GetTime<std::chrono::seconds>());
 
+        // SEQUENTIA: net-layer self-recovery after a Bitcoin-anchored reorg.
+        //
+        // Bitcoin anchoring is supreme. When a referenced parent-chain block is
+        // orphaned, the anchor-watcher (src/anchor.cpp) calls InvalidateBlock on
+        // the orphaned-anchor subtree and reorgs our active chain down to the
+        // highest VALID block we have data for. That is CORRECT and is not
+        // weakened here; this repair is purely in net state. InvalidateBlock only
+        // flips status bits; it never lowers nChainWork nor touches the per-peer
+        // download pointers. CNodeState::pindexBestKnownBlock is chainwork
+        // monotonic (ProcessBlockAvailability / UpdateBlockAvailability only raise
+        // it on >= nChainWork, never demote), so a peer whose best known block was
+        // the now-invalidated higher-work fork tip stays pinned to a
+        // BLOCK_FAILED_MASK block. FindNextBlocksToDownload then returns early
+        // (pindexLastCommonBlock == pindexBestKnownBlock, both on the dead fork)
+        // and never requests the valid active chain, which is a sibling branch,
+        // not an ancestor of the dead fork. Result: the node is wedged at the dead
+        // fork's height until a restart rebuilds CNodeState and re-derives the
+        // peer's best known block from its current (valid) headers.
+        //
+        // Detect that here, before the download scheduling below (the wedge is the
+        // early return inside FindNextBlocksToDownload, so this must run first):
+        // demote the peer's pointers to the highest non-failed ancestor and send a
+        // fresh getheaders so the next round repins them to the peer's real chain.
+        // The check is O(1) in the common case (best known block not failed), so
+        // it is cheap, and it is idempotent (after demotion the block is no longer
+        // failed, so it will not fire again until a new invalidation pins it).
+        if (state.pindexBestKnownBlock != nullptr &&
+            (state.pindexBestKnownBlock->nStatus & BLOCK_FAILED_MASK)) {
+            // Walk back to the highest BLOCK_VALID_TREE (non-failed) ancestor.
+            // This always terminates: genesis is never failed.
+            const CBlockIndex* recover = state.pindexBestKnownBlock;
+            while (recover != nullptr && (recover->nStatus & BLOCK_FAILED_MASK)) {
+                recover = recover->pprev;
+            }
+            LogPrintf("Anchor-reorg recovery: peer=%d best known block %s is in an "
+                      "invalidated (orphaned-anchor) subtree; demoting to %s and "
+                      "re-requesting headers\n",
+                      pto->GetId(),
+                      state.pindexBestKnownBlock->GetBlockHash().ToString(),
+                      recover ? recover->GetBlockHash().ToString() : "<none>");
+            state.pindexBestKnownBlock = recover;
+            // pindexLastCommonBlock pointed into the dead fork too; force it to
+            // re-bootstrap (FindNextBlocksToDownload reseeds it when null).
+            state.pindexLastCommonBlock = nullptr;
+            if (recover == nullptr) {
+                state.hashLastUnknownBlock.SetNull();
+            }
+            // Re-arm the headers sync state machine for this peer, mirroring a
+            // fresh node (which starts with fSyncStarted == false).
+            if (state.fSyncStarted) {
+                state.fSyncStarted = false;
+                nSyncStarted--;
+            }
+            // Request headers building on our current valid active tip so the next
+            // header round re-derives this peer's real (valid) best known block.
+            m_connman.PushMessage(pto, msgMaker.Make(NetMsgType::GETHEADERS,
+                m_chainman.ActiveChain().GetLocator(), uint256()));
+        }
+
         //
         // Message: getdata (blocks)
         //
