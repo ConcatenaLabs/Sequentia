@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  body { font-family: "Liberation Sans", Arial, sans-serif; font-size: 11pt; line-height: 1.45; color: #1a1a1a; margin: 2.2cm 2.4cm; }
+  h1 { font-size: 19pt; margin: 0 0 2pt 0; color: #b8860b; }
+  .sub { color: #555; font-size: 10pt; margin: 0 0 16pt 0; }
+  h2 { font-size: 13.5pt; margin: 20pt 0 4pt 0; border-bottom: 1.5px solid #b8860b; padding-bottom: 2pt; }
+  h3 { font-size: 11.5pt; margin: 13pt 0 3pt 0; color: #222; }
+  p { margin: 5pt 0; }
+  code, .mono { font-family: "Liberation Mono", "Courier New", monospace; font-size: 9.5pt; background: #f3f1ea; padding: 0 2px; }
+  ul, ol { margin: 4pt 0 6pt 0; }
+  li { margin: 2.5pt 0; }
+  .box { background: #fbf7e9; padding: 8pt 12pt; margin: 10pt 0; }
+  .q { background: #fdeee9; padding: 8pt 12pt; margin: 8pt 0; }
+  .small { font-size: 9.5pt; color: #555; }
+  .tag { display: inline-block; font-size: 8.5pt; font-weight: bold; padding: 1px 6px; border-radius: 3px; color: #fff; }
+  .ship { background: #2e7d32; }
+  .pend { background: #c0392b; }
+  table { border-collapse: collapse; width: 100%; margin: 6pt 0; font-size: 10pt; }
+  th, td { border: 1px solid #ccc; padding: 4pt 7pt; text-align: left; vertical-align: top; }
+  th { background: #f0ead6; }
+</style>
+</head>
+<body>
+
+<h1>Anchor reorg-of-reorg recovery: three changes shipped, one for your call</h1>
+<p class="sub">Andreas Kohl &middot; Sequentia testnet &middot; 2026-06-28 &middot; commit <span class="mono">23b1be0b1</span> (branch <span class="mono">claude/sequentia-bitcoin-sidechain-w6xady</span>)</p>
+
+<p>This follows up our exchange about the recovery gap you endorsed fixing: on a Bitcoin reorg-of-reorg (A &rarr; B &rarr; A, routine on testnet4), Sequentia blocks anchored to A that the node invalidated when Bitcoin left A must be <strong>re-validated and re-finalized</strong> when Bitcoin returns to A, not replaced by a fresh block on top. As you noted, minting fresh would let an atomic swap that is valid again on the Bitcoin side be double-spent on the Sequentia side.</p>
+
+<p>Three changes are implemented, reviewed (two adversarial passes), tested, and deployed to the testnet committee. A fourth, distinct issue surfaced during the work and needs a consensus-rule decision from you; it is described last. None of the three shipped changes alters a consensus rule: the new state is node-local, so old and new binaries are consensus-compatible.</p>
+
+<h2>The defect</h2>
+<p>The anchor watcher (<span class="mono">AnchorWatchTask</span>, <span class="mono">src/anchor.cpp</span>) has two halves. <em>Invalidation</em> walks the active chain every tick and, from live Bitcoin ground truth, invalidates any block whose anchor is off Bitcoin's best chain. <em>Recovery</em> was asymmetric: it only iterated an in-memory set of blocks the watcher had invalidated, and only when the parent tip changed. The <span class="mono">BLOCK_FAILED</span> flags persist across a restart; that in-memory set does not. So a restart (or a missed/coalesced parent flap) between the invalidation and the anchor's return left the previously valid-and-finalized blocks <span class="mono">BLOCK_FAILED</span> forever, and a branch known only as headers never re-requested its bodies.</p>
+
+<h2>The three changes <span class="tag ship">SHIPPED</span></h2>
+
+<h3>1. A recovery worklist that survives a restart</h3>
+<p>At startup, <span class="mono">BlockManager::LoadBlockIndex</span> re-seeds the recovery worklist from the persisted block index (new <span class="mono">SeedAnchorInvalidated</span>), and the reconsider loop now runs whenever the worklist is non-empty rather than only on a parent tip change. Together these recover the blocks after a restart and after a coalesced flap. Reconsideration still clears a block only when <span class="mono">CheckMainchainAnchor</span> returns OK on a live parent-chain check (&ge; 1 confirmation on the parent best chain at the claimed height); it never acts on NOT_FOUND / STALE / NO_CONNECTION.</p>
+
+<h3>2. A provenance marker so only anchor invalidations are recovered</h3>
+<p>This one is load-bearing for safety. <span class="mono">BLOCK_FAILED_VALID</span> records <em>that</em> a block failed, never <em>why</em>: the anchor watcher, the <span class="mono">invalidateblock</span> RPC, and consensus connect-failures all set the same flag, and every anchored block carries an anchor. An earlier version inferred "anchor-invalidated" from <span class="mono">BLOCK_FAILED_VALID</span> + an anchor being present; an adversarial review showed that would <strong>resurrect operator- and consensus-invalidated blocks on restart</strong> (their anchor was never the problem, so it checks OK and gets reconsidered). That would silently undo the documented finality-split recovery (an operator <span class="mono">invalidateblock</span>-ing a stuck tip) and break the standard guarantee that <span class="mono">invalidateblock</span> persists across a restart.</p>
+<p>The fix is a dedicated node-local status bit <span class="mono">BLOCK_FAILED_ANCHOR = 512</span> (<span class="mono">chain.h</span>), kept <strong>outside</strong> <span class="mono">BLOCK_FAILED_MASK</span> so it is pure provenance, set only by the watcher's invalidation (<span class="mono">CChainState::MarkAnchorInvalid</span>) and cleared in <span class="mono">ResetBlockFailureFlags</span>. Seeding and recovery consider only marked blocks; manual and consensus invalidations stay durably invalid.</p>
+
+<h3>3. Best-header recovery, without an RPC storm</h3>
+<p>After clearing the failure flags, <span class="mono">RecalculateBestHeader</span> raises <span class="mono">pindexBestHeader</span> onto the recovered branch (highest <span class="mono">BLOCK_VALID_TREE</span> block, which excludes any failed block), so a branch held only as headers re-requests its bodies; <span class="mono">ActivateBestChain</span> + <span class="mono">UpdateTip</span> then reconnect and re-finalize the whole restored chain, exactly as you required, rather than minting fresh. Because the reconsider loop now runs every tick, a negative anchor cache (<span class="mono">g_anchor_stale_cache</span>, cleared on a parent tip change like the existing OK cache) ensures each orphaned anchor is checked against bitcoind at most once per parent-tip epoch, and the loop bails on NO_CONNECTION rather than hammering a busy parent daemon.</p>
+
+<div class="box">
+<strong>Safety.</strong> Anchoring supremacy is preserved by construction. A block is un-failed only when its stored anchor returns OK on a live parent-chain check; the invalidation half keeps re-deriving bad-ness from ground truth every tick, so a block reconsidered just before its anchor re-orphans is re-invalidated on the next tick. <span class="mono">RecalculateBestHeader</span> uses <span class="mono">BLOCK_VALID_TREE</span>, so best-header can never land on a failed/orphaned branch, and <span class="mono">UpdateTip</span> remains the only finalizer, recomputing the finalized point from the resulting active chain. Files: <span class="mono">chain.h</span>, <span class="mono">anchor.{h,cpp}</span>, <span class="mono">validation.{h,cpp}</span>, <span class="mono">node/blockstorage.cpp</span>. Test: <span class="mono">feature_pos_reorg_of_reorg_recovery.py</span> (recovery across a restart restores the original blocks verbatim; a manual <span class="mono">invalidateblock</span> is not resurrected across a restart).</p>
+</div>
+
+<h2>The fourth change: committee-equivocation finality split <span class="tag pend">NEEDS YOUR CALL</span></h2>
+<p>This is distinct from the reorg-of-reorg case and is a genuine consensus-rule question, so I did not implement it. It is the 96/4 split we saw live: two <em>different</em> blocks at the same height, both anchored to the <em>same</em> valid Bitcoin block, each reaching quorum among a disjoint subset of the committee. The minority's finalized block has an intact anchor, so the immediate-finality gate's anchor-release valve stays false and it rejects the longer rival chain (<span class="mono">bad-fork-prior-to-pos-final</span>), and <span class="mono">AcceptBlockHeader</span> bails before storing it, so the rival is held only as headers. Anchoring cannot break this tie because both anchors are equally valid.</p>
+<p>The shape I would propose, for your judgement: when a rival branch is (i) anchored to the current best Bitcoin chain and (ii) <em>strictly better committee-certified</em> than the local immediate-finalized block, the gate yields, the header is stored, and the existing comparator (more countersigs, then lower VRF) plus <span class="mono">ActivateBestChain</span> switch to it, with <span class="mono">UpdateTip</span> re-finalizing on the winner. The comparator already encodes the tie-break; the only blockers are the accept-time gate and the not-stored bail.</p>
+
+<div class="q">
+<strong>Questions for you:</strong>
+<ol>
+<li>Is un-finalizing a quorum-certified block ever admissible in favour of a same-anchor, strictly-better-certified sibling? If so, what is the exact deterministic predicate: countersig count only, or plus VRF, or plus chainwork?</li>
+<li>If the two siblings carry <em>equal</em> certification (true equivocation from disjoint subgroups), the comparator falls through to VRF / first-seen. Do we need an explicit equivocation rule there, and what should it be?</li>
+<li>Guardrails I would keep regardless: never yield across the Bitcoin checkpoint floor, and keep the rejection soft (no peer banning). Are those sufficient in your view?</li>
+</ol>
+</div>
+
+<p class="small">Interim operational handling until this lands: an operator <span class="mono">invalidateblock</span>s the stuck minority tip (now durable across restart thanks to change 2). The live 96/4 split this week resolved itself when a deep testnet4 reorg rolled the chain back below the split point, but the gap remains. Full design notes and the open questions are in <span class="mono">doc/sequentia/anchor-reorg-of-reorg-recovery-design.md</span>.</p>
+
+</body>
+</html>
