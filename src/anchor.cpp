@@ -46,6 +46,14 @@ const unsigned char POS_CKPT_TAG[7] = {'S', 'E', 'Q', 'C', 'K', 'P', 'T'};
 //! Anchors confirmed to be on the parent chain's best chain. Cleared whenever
 //! the parent chain tip changes, since a reorganization can make them stale.
 std::set<std::pair<uint32_t, uint256>> g_anchor_ok_cache GUARDED_BY(g_anchor_mutex);
+//! Anchors confirmed DEFINITIVELY off the parent chain's best chain
+//! (STALE/NOT_FOUND/HEIGHT_MISMATCH — never NO_CONNECTION, which is
+//! indeterminate). Like the OK cache it is cleared on every parent tip change,
+//! since only a parent move can turn a stale anchor canonical again. This lets
+//! the recovery loop run every tick without re-hitting bitcoind for the same
+//! permanently-orphaned anchors: it RPC-checks each anchor at most once per
+//! parent-tip epoch instead of every poll, avoiding a self-inflicted RPC storm.
+std::set<std::pair<uint32_t, uint256>> g_anchor_stale_cache GUARDED_BY(g_anchor_mutex);
 //! Blocks invalidated by the anchor watcher, so they can be reconsidered if
 //! the parent chain reorganizes back.
 std::set<uint256> g_anchor_invalidated GUARDED_BY(g_anchor_mutex);
@@ -119,27 +127,38 @@ AnchorCheckResult CheckMainchainAnchor(uint32_t height, const uint256& hash)
     {
         LOCK(g_anchor_mutex);
         if (g_anchor_ok_cache.count({height, hash})) return AnchorCheckResult::OK;
+        // Negative cache: a definitively-off-best-chain anchor stays off until the
+        // parent tip moves (which clears this cache), so serve it without an RPC.
+        if (g_anchor_stale_cache.count({height, hash})) return AnchorCheckResult::STALE;
     }
+    // Memoize a DEFINITIVE off-best-chain verdict (not NO_CONNECTION) so the
+    // every-tick recovery loop does not re-RPC the same orphaned anchor until the
+    // parent tip moves (which clears the cache).
+    auto cache_stale = [&](AnchorCheckResult r) {
+        LOCK(g_anchor_mutex);
+        g_anchor_stale_cache.emplace(height, hash);
+        return r;
+    };
     try {
         UniValue params(UniValue::VARR);
         params.push_back(hash.GetHex());
         UniValue reply = CallMainChainRPC("getblockheader", params);
         UniValue errval = find_value(reply, "error");
         if (!errval.isNull()) {
-            return AnchorCheckResult::NOT_FOUND;
+            return cache_stale(AnchorCheckResult::NOT_FOUND);
         }
         UniValue result = find_value(reply, "result");
         if (!result.isObject()) {
-            return AnchorCheckResult::NOT_FOUND;
+            return cache_stale(AnchorCheckResult::NOT_FOUND);
         }
         UniValue confirmations = find_value(result.get_obj(), "confirmations");
         if (!confirmations.isNum() || confirmations.get_int64() < 1) {
             // confirmations == -1 means the block is not on the best chain
-            return AnchorCheckResult::STALE;
+            return cache_stale(AnchorCheckResult::STALE);
         }
         UniValue blockheight = find_value(result.get_obj(), "height");
         if (!blockheight.isNum() || blockheight.get_int64() != (int64_t)height) {
-            return AnchorCheckResult::HEIGHT_MISMATCH;
+            return cache_stale(AnchorCheckResult::HEIGHT_MISMATCH);
         }
         LOCK(g_anchor_mutex);
         g_anchor_ok_cache.emplace(height, hash);
@@ -182,6 +201,15 @@ bool GetAnchorForNewBlock(uint32_t prev_anchor_height, const uint256& prev_ancho
     return false;
 }
 
+void SeedAnchorInvalidated(const std::vector<uint256>& block_hashes)
+{
+    if (block_hashes.empty()) return;
+    LOCK(g_anchor_mutex);
+    for (const uint256& h : block_hashes) g_anchor_invalidated.insert(h);
+    LogPrintf("Anchor: seeded %u previously-invalidated block(s) from the block index for reorg-of-reorg recovery\n",
+              (unsigned)block_hashes.size());
+}
+
 void AnchorWatchTask(ChainstateManager& chainman)
 {
     if (!g_con_bitcoin_anchor || !g_validate_anchor) return;
@@ -194,9 +222,11 @@ void AnchorWatchTask(ChainstateManager& chainman)
         tip_changed = best != g_last_mainchain_tip;
         if (tip_changed) {
             g_last_mainchain_tip = best;
-            // The parent chain moved: previously confirmed anchors may have
-            // been reorganized away, so drop the cache and re-check.
+            // The parent chain moved: previously confirmed anchors may have been
+            // reorganized away (drop the OK cache) and previously-orphaned anchors
+            // may be canonical again (drop the negative cache), so re-check both.
             g_anchor_ok_cache.clear();
+            g_anchor_stale_cache.clear();
         }
     }
 
@@ -217,41 +247,81 @@ void AnchorWatchTask(ChainstateManager& chainman)
         }
     }
     // 1) Reconsider blocks we invalidated earlier whose anchors are canonical
-    //    again (the parent chain reorganized back). This only matters when the
-    //    parent moved, so it is gated on tip_changed.
-    if (tip_changed) {
+    //    again (the parent chain reorganized back — a reorg-of-reorg, common on
+    //    testnet4). This runs whenever the recovery set is non-empty, NOT only on
+    //    tip_changed: gating on tip_changed missed (a) a coalesced/missed parent
+    //    flap where the parent went off then back within one poll so the tip
+    //    looks unchanged, and (b) a restart, where the set is re-seeded from the
+    //    persisted block index (SeedAnchorInvalidated, called by LoadBlockIndex)
+    //    but the very first post-restart tick may or may not register as a tip
+    //    change. The set holds only directly-invalidated blocks awaiting restore,
+    //    so it is small and an empty set skips the work entirely. Reconsidering
+    //    only ever CLEARS a block whose anchor returns OK on a live parent-chain
+    //    check, so this never un-finalizes anything the canonical Bitcoin chain
+    //    does not back; section 2 below re-derives bad-ness from ground truth
+    //    every tick, so a block reconsidered just before its anchor re-orphans is
+    //    re-invalidated on the next tick.
+    {
         std::set<uint256> invalidated;
         {
             LOCK(g_anchor_mutex);
             invalidated = g_anchor_invalidated;
         }
+        bool any_reconsidered = false;
         for (const uint256& hash : invalidated) {
-            CBlockIndex* pindex;
-            uint32_t anchor_height;
+            CBlockIndex* pindex = nullptr;
+            uint32_t anchor_height = 0;
             uint256 anchor_hash;
             {
                 LOCK(cs_main);
                 pindex = chainman.m_blockman.LookupBlockIndex(hash);
-                if (!pindex) continue;
-                anchor_height = pindex->m_anchor_height;
-                anchor_hash = pindex->m_anchor_hash;
-            }
-            if (CheckMainchainAnchor(anchor_height, anchor_hash) == AnchorCheckResult::OK) {
-                LogPrintf("Anchor %s (height %d) of block %s is canonical again; reconsidering\n",
-                          anchor_hash.ToString(), anchor_height, hash.ToString());
-                {
-                    LOCK(cs_main);
-                    chainman.ActiveChainstate().ResetBlockFailureFlags(pindex);
-                }
-                {
-                    LOCK(g_anchor_mutex);
-                    g_anchor_invalidated.erase(hash);
-                }
-                BlockValidationState state;
-                if (!chainman.ActiveChainstate().ActivateBestChain(state)) {
-                    LogPrintf("WARNING: ActivateBestChain failed after anchor reconsideration: %s\n", state.ToString());
+                if (pindex) {
+                    anchor_height = pindex->m_anchor_height;
+                    anchor_hash = pindex->m_anchor_hash;
                 }
             }
+            if (!pindex) {
+                // The block index entry is gone; drop the stale hint. Done outside
+                // cs_main so g_anchor_mutex and cs_main are never nested.
+                LOCK(g_anchor_mutex);
+                g_anchor_invalidated.erase(hash);
+                continue;
+            }
+            AnchorCheckResult res = CheckMainchainAnchor(anchor_height, anchor_hash);
+            if (res == AnchorCheckResult::NO_CONNECTION) {
+                // Parent daemon unreachable: cannot judge, retry next tick. Stop
+                // rather than hammer a down/overloaded daemon (the documented
+                // 'Work queue depth exceeded' stall vector).
+                break;
+            }
+            if (res != AnchorCheckResult::OK) {
+                // Still orphaned. The negative cache serves this without an RPC
+                // until the parent tip moves, so the every-tick scan stays cheap.
+                continue;
+            }
+            LogPrintf("Anchor %s (height %d) of block %s is canonical again; reconsidering\n",
+                      anchor_hash.ToString(), anchor_height, hash.ToString());
+            {
+                LOCK(cs_main);
+                // ResetBlockFailureFlags also clears the BLOCK_FAILED_ANCHOR marker.
+                chainman.ActiveChainstate().ResetBlockFailureFlags(pindex);
+            }
+            {
+                LOCK(g_anchor_mutex);
+                g_anchor_invalidated.erase(hash);
+            }
+            any_reconsidered = true;
+        }
+        if (any_reconsidered) {
+            BlockValidationState state;
+            if (!chainman.ActiveChainstate().ActivateBestChain(state)) {
+                LogPrintf("WARNING: ActivateBestChain failed after anchor reconsideration: %s\n", state.ToString());
+            }
+            // Raise pindexBestHeader onto the recovered branch (once per batch) so
+            // a branch known only as headers re-requests its bodies and reconnects,
+            // re-finalizing the original blocks rather than minting fresh on top.
+            LOCK(cs_main);
+            chainman.ActiveChainstate().RecalculateBestHeader();
         }
     }
 
@@ -334,12 +404,14 @@ void AnchorWatchTask(ChainstateManager& chainman)
         // cannot hide a stale low block from this walk.
         //
         // NO_CONNECTION partway is indeterminate, not a verdict, so we stop
-        // descending (cannot judge blocks below). But it must NOT discard a lower
-        // stale block we already found above it: invalidating a definitively
-        // off-best-chain block is always correct, and a NO_CONNECTION block sits
-        // ABOVE it (higher height) and so will be reconnected automatically once
-        // it (re-)checks OK. If no stale block was found before the
-        // NO_CONNECTION, there is nothing to act on — bail and retry next tick.
+        // descending (cannot judge the NO_CONNECTION block or anything below it).
+        // Any stale block already recorded sits ABOVE the NO_CONNECTION block
+        // (the walk is top-down, so it was found earlier/higher), and invalidating
+        // a definitively off-best-chain block is always correct: InvalidateBlock
+        // disconnects that block and everything ABOVE it, while the NO_CONNECTION
+        // block (below it) stays connected and is simply re-judged next tick. If no
+        // stale block was found before the NO_CONNECTION, there is nothing to act
+        // on — bail and retry next tick.
         for (const AnchorRef& ref : to_check) {
             AnchorCheckResult res = CheckMainchainAnchor(ref.anchor_height, ref.anchor_hash);
             if (res == AnchorCheckResult::NO_CONNECTION) break; // cannot judge deeper
@@ -364,6 +436,14 @@ void AnchorWatchTask(ChainstateManager& chainman)
         {
             LOCK(g_anchor_mutex);
             g_anchor_invalidated.insert(lowest_bad);
+        }
+        // Persist the provenance: tag this block as ANCHOR-invalidated (distinct
+        // from `invalidateblock` / consensus failures) so the recovery worklist
+        // can be re-seeded from the block index after a restart and ONLY anchor-
+        // orphaned blocks are reconsidered. pindex_bad is stable across the lock gap.
+        {
+            LOCK(cs_main);
+            chainman.ActiveChainstate().MarkAnchorInvalid(pindex_bad);
         }
         BlockValidationState abc_state;
         if (!chainman.ActiveChainstate().ActivateBestChain(abc_state)) {

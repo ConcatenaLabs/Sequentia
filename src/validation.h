@@ -680,6 +680,21 @@ public:
     /** Remove invalidity status from a block and its descendants. */
     void ResetBlockFailureFlags(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
+    /** Recompute pindexBestHeader as the highest-work block still valid up to
+     *  BLOCK_VALID_TREE (which excludes any BLOCK_FAILED block). Used after
+     *  clearing failure flags during anchor reorg-of-reorg recovery so
+     *  best-header is raised onto the recovered branch and its bodies are
+     *  re-requested; mirrors the startup recompute in LoadBlockIndex. */
+    void RecalculateBestHeader() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+    /** Tag a block as invalidated by the Bitcoin-anchor watcher (sets the
+     *  node-local BLOCK_FAILED_ANCHOR provenance marker and persists it). Called
+     *  by AnchorWatchTask right after it InvalidateBlock()s an anchor-orphaned
+     *  block, so the marker (NOT generic BLOCK_FAILED_VALID, which `invalidateblock`
+     *  and consensus failures also set) can re-seed the recovery worklist on
+     *  restart. The matching clear happens in ResetBlockFailureFlags. */
+    void MarkAnchorInvalid(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
     /** Replay blocks that aren't fully applied to the database. */
     bool ReplayBlocks();
 

@@ -4,6 +4,7 @@
 
 #include <node/blockstorage.h>
 
+#include <anchor.h>
 #include <block_proof.h>
 #include <chain.h>
 #include <chainparams.h>
@@ -258,6 +259,15 @@ bool BlockManager::LoadBlockIndex(
         }
     }
 
+    // Re-seed the anchor-reorg recovery worklist from persisted state: blocks
+    // the anchor watcher directly invalidated (BLOCK_FAILED_VALID, anchor set)
+    // when their parent-chain anchor was orphaned. Its in-memory worklist is
+    // lost on restart while these flags persist, so without this a restart
+    // between an anchor invalidation and the parent reorganizing back would
+    // strand them BLOCK_FAILED forever. The watcher reconsiders each only when
+    // its anchor checks OK again (reorg-of-reorg recovery).
+    std::vector<uint256> anchor_invalidated_seed;
+
     for (const std::pair<int, CBlockIndex*>& item : vSortedByHeight) {
         if (ShutdownRequested()) return false;
         CBlockIndex* pindex = item.second;
@@ -283,6 +293,18 @@ bool BlockManager::LoadBlockIndex(
         if (!(pindex->nStatus & BLOCK_FAILED_MASK) && pindex->pprev && (pindex->pprev->nStatus & BLOCK_FAILED_MASK)) {
             pindex->nStatus |= BLOCK_FAILED_CHILD;
             m_dirty_blockindex.insert(pindex);
+        }
+        // Seed ONLY blocks the anchor watcher itself invalidated, identified by
+        // the dedicated BLOCK_FAILED_ANCHOR provenance marker. BLOCK_FAILED_VALID
+        // alone is ambiguous: `invalidateblock` and consensus failures set it too
+        // (and every anchored block has an anchor), so seeding on that would
+        // resurrect operator-/consensus-invalidated blocks on restart — defeating
+        // the finality-split-stall recovery and the cross-restart persistence of
+        // invalidateblock. Reconsidering an anchor-invalidated block also clears
+        // its descendants (ResetBlockFailureFlags), so only the directly-
+        // invalidated blocks carry the marker and need seeding.
+        if ((pindex->nStatus & BLOCK_FAILED_ANCHOR) && (pindex->nStatus & BLOCK_FAILED_VALID)) {
+            anchor_invalidated_seed.push_back(pindex->GetBlockHash());
         }
         if (pindex->IsAssumedValid() ||
                 (pindex->IsValid(BLOCK_VALID_TRANSACTIONS) &&
@@ -332,6 +354,7 @@ bool BlockManager::LoadBlockIndex(
     if (pindexBestHeader) {
         ForceUntrimHeader(pindexBestHeader);
     }
+    SeedAnchorInvalidated(anchor_invalidated_seed);
     return true;
 }
 

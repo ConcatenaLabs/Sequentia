@@ -144,6 +144,17 @@ enum BlockStatus : uint32_t {
      * on a background chainstate. See `doc/assumeutxo.md`.
      */
     BLOCK_ASSUMED_VALID      =   256,
+
+    //! SEQUENTIA, node-local: this block was invalidated by the Bitcoin-anchor
+    //! watcher because its anchor was orphaned (NOT by `invalidateblock` or a
+    //! consensus failure). Deliberately OUTSIDE BLOCK_FAILED_MASK — it is pure
+    //! provenance, never a validity/failure bit. It lets the anchor watcher
+    //! re-seed its reorg-of-reorg recovery worklist from the persisted index at
+    //! startup and reconsider ONLY anchor-orphaned blocks, so operator
+    //! `invalidateblock` and consensus failures stay durably invalidated across
+    //! restarts. Set only by AnchorWatchTask's invalidation; cleared when the
+    //! block is reconsidered.
+    BLOCK_FAILED_ANCHOR      =   512,
 };
 
 /** The block chain is a tree shaped structure starting with the

@@ -3935,7 +3935,7 @@ void CChainState::ResetBlockFailureFlags(CBlockIndex *pindex) {
     BlockMap::iterator it = m_blockman.m_block_index.begin();
     while (it != m_blockman.m_block_index.end()) {
         if (!it->second->IsValid() && it->second->GetAncestor(nHeight) == pindex) {
-            it->second->nStatus &= ~BLOCK_FAILED_MASK;
+            it->second->nStatus &= ~(BLOCK_FAILED_MASK | BLOCK_FAILED_ANCHOR);
             m_blockman.m_dirty_blockindex.insert(it->second);
             if (it->second->IsValid(BLOCK_VALID_TRANSACTIONS) && it->second->HaveTxsDownloaded() && setBlockIndexCandidates.value_comp()(m_chain.Tip(), it->second)) {
                 setBlockIndexCandidates.insert(it->second);
@@ -3951,13 +3951,32 @@ void CChainState::ResetBlockFailureFlags(CBlockIndex *pindex) {
 
     // Remove the invalidity flag from all ancestors too.
     while (pindex != nullptr) {
-        if (pindex->nStatus & BLOCK_FAILED_MASK) {
-            pindex->nStatus &= ~BLOCK_FAILED_MASK;
+        if (pindex->nStatus & (BLOCK_FAILED_MASK | BLOCK_FAILED_ANCHOR)) {
+            pindex->nStatus &= ~(BLOCK_FAILED_MASK | BLOCK_FAILED_ANCHOR);
             m_blockman.m_dirty_blockindex.insert(pindex);
             m_chainman.m_failed_blocks.erase(pindex);
         }
         pindex = pindex->pprev;
     }
+}
+
+void CChainState::RecalculateBestHeader()
+{
+    AssertLockHeld(cs_main);
+    pindexBestHeader = m_chain.Tip();
+    for (const std::pair<const uint256, CBlockIndex*>& item : m_blockman.m_block_index) {
+        CBlockIndex* pindex = item.second;
+        if (pindex->IsValid(BLOCK_VALID_TREE) && (pindexBestHeader == nullptr || CBlockIndexWorkComparator()(pindexBestHeader, pindex))) {
+            pindexBestHeader = pindex;
+        }
+    }
+}
+
+void CChainState::MarkAnchorInvalid(CBlockIndex* pindex)
+{
+    AssertLockHeld(cs_main);
+    pindex->nStatus |= BLOCK_FAILED_ANCHOR;
+    m_blockman.m_dirty_blockindex.insert(pindex);
 }
 
 /** Mark a block as having its data received and checked (up to BLOCK_VALID_TRANSACTIONS). */

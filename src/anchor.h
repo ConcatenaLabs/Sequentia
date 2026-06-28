@@ -68,6 +68,18 @@ bool GetAnchorForNewBlock(uint32_t prev_anchor_height, const uint256& prev_ancho
  *  updates the PoS finality point (see below). */
 void AnchorWatchTask(ChainstateManager& chainman);
 
+/** Seed the anchor-reorg recovery worklist from the block index at startup.
+ *  The watcher's recovery set (blocks it invalidated when their parent-chain
+ *  anchor was orphaned) is in-memory only, so a restart between the
+ *  invalidation and the parent chain reorganizing back would otherwise strand
+ *  those blocks BLOCK_FAILED forever (the BLOCK_FAILED flags persist, the
+ *  worklist does not). LoadBlockIndex calls this with the persisted directly-
+ *  invalidated blocks so the watcher reconsiders them once their anchor is
+ *  canonical again (reorg-of-reorg). Reconsideration only ever clears a block
+ *  whose anchor returns OK on a live parent-chain check, so a non-anchor
+ *  failure that gets seeded is simply re-validated and re-failed once. */
+void SeedAnchorInvalidated(const std::vector<uint256>& block_hashes);
+
 // --- Bitcoin checkpoints against PoS long-range attacks (paper §11) ---
 //
 // Anyone may commit a Sequentia block reference into the parent chain as a
