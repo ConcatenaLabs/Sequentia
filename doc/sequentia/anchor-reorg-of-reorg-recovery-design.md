@@ -74,15 +74,36 @@ Extract the skip-invalid best-header recompute into a runtime `RecalculateBestHe
 no longer pin best-header. Existing net path then re-issues `getheaders` and fetches bodies;
 `ActivateBestChain`/`UpdateTip` reconnect and re-finalize the WHOLE restored chain.
 
-### Change 4 — ALBERTO-GATED finality-split tie-break (`src/validation.cpp`)
-Do NOT ship without Alberto. Shape: when a rival branch (i) is anchored to the CURRENT best
-Bitcoin chain (never below the Bitcoin checkpoint floor) AND (ii) is STRICTLY better committee-
-certified than the local immediate-finalized block, the gate must YIELD — store the header (move
-the finality check off the pre-`AddToBlockIndex` bail) and let the existing comparator
-(`validation.cpp` ~135-150: more countersigs, then lower VRF) + `ActivateBestChain` switch, with
-`UpdateTip` re-finalizing on the winner. HIGH risk: it un-finalizes a quorum-certified block.
-Guardrails: same-best-Bitcoin-anchor AND strictly-greater certification AND never below the
-checkpoint floor AND keep the soft non-banning rejection.
+### Change 4 — REVISED 2026-07-01 after Alberto's review (see alberto-96-4-answers-2026-07-01.md)
+
+The original shape here (yield to a strictly-better-certified SAME-HEIGHT sibling) is
+**WITHDRAWN**: comparing certificates at the same height reopens the posterior-corruption
+channel (accumulate signatures after the fact, reorg a finalized block), which the gate
+deliberately forbids (`validation.cpp:4314-4318`, and Alberto's 2026-06-28/30 analysis).
+Replaced by two parts:
+
+- **4a — PREVENTION (node-local, no consensus change; deploy gated on Alberto's ack).**
+  The producer/countersigner must not treat height h as vacant while the node holds a
+  quorum-certified block at h (`m_pos_countersigs >= quorum`, persisted on the index) that
+  is awaiting, or has received, a favorable anchor verdict after a parent-chain move. It
+  neither proposes nor backs a rival at h; bounded patience (about one block interval) so
+  production can never deadlock; a negative verdict (anchor genuinely off the best chain)
+  releases the guard immediately. Closes the fresh-mint-vs-watcher-tick race that
+  manufactured the live 96/4 (proposer fires instantly after a rollback,
+  `pos_producer.cpp:536-555, 613-631`, while recovery needs a watcher tick + bitcoind RPC).
+- **4b — RECONCILIATION (consensus rule, Alberto's call).** A node abandons its finalized
+  block ONLY for a rival branch that (i) forks no lower than the Bitcoin checkpoint floor,
+  (ii) is anchor-valid throughout on Bitcoin's current best chain, and (iii) contains a
+  quorum-certified block at a height STRICTLY ABOVE the local finalized height. Never a
+  same-height certificate comparison. Converges the live 96/4 (the minority yields to the
+  majority's quorum progress; the majority never yields because a 4-of-100 branch can never
+  produce another quorum certificate).
+- **Residual (Alberto to choose):** near-symmetric splits where neither side can
+  quorum-advance; operator-only, or a last-resort same-height tie-break (more sigs, then
+  lower VRF) after N Bitcoin blocks without quorum progress.
+- **Footnote:** the finality gate is accept-time only (`ContextualCheckBlockHeader`); a
+  rival indexed BEFORE local finalization can still win via the comparator. The 4b
+  predicate can also be enforced at activation time to make the gate symmetric.
 
 ## Safety (Changes 1-3 preserve anchoring supremacy by construction)
 They only ever CLEAR `BLOCK_FAILED` on a block whose stored anchor returns
