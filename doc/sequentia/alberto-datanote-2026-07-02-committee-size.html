@@ -1,0 +1,87 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>Committee-size distribution data note</title>
+<style>
+  body { font-family: "Liberation Sans", Arial, sans-serif; font-size: 11pt; line-height: 1.45; color: #1a1a1a; margin: 2.2cm 2.4cm; }
+  h1 { font-size: 17pt; margin: 0 0 2pt 0; color: #b8860b; }
+  .sub { color: #555; font-size: 10pt; margin: 0 0 16pt 0; }
+  h2 { font-size: 12.5pt; margin: 16pt 0 4pt 0; border-bottom: 1.5px solid #b8860b; padding-bottom: 2pt; }
+  p { margin: 5pt 0; }
+  code { font-family: "Liberation Mono","Courier New",monospace; font-size: 9.5pt; background: #f3f1ea; padding: 0 2px; }
+  table { border-collapse: collapse; margin: 8pt 0; font-size: 10.5pt; }
+  td, th { border: 1px solid #d8d2be; padding: 3pt 9pt; text-align: left; }
+  th { background: #fbf7e9; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .hist { margin: 8pt 0 4pt 0; }
+  .hrow { display: flex; align-items: center; height: 13px; }
+  .hlab { width: 22px; text-align: right; font-size: 8pt; color: #555; margin-right: 6px; }
+  .hbar { height: 9px; border-radius: 1px; }
+  .safe { background: #c9a227; }
+  .win { background: #c0392b; }
+  .hpct { font-size: 7.5pt; color: #777; margin-left: 6px; }
+  .legend { font-size: 9pt; color: #555; margin: 2pt 0 8pt 0; }
+  .sw { display:inline-block; width:10px; height:10px; border-radius:2px; vertical-align:middle; margin: 0 3px 0 10px; }
+  .box { background: #fbf7e9; padding: 7pt 12pt; margin: 9pt 0; }
+  .small { font-size: 9.5pt; color: #555; }
+</style></head><body>
+<h1>Committee-size distribution under threshold sortition</h1>
+<p class="sub">Empirical follow-up to the honest-split memo: how often the disjoint-quorum window opens. Measured directly from the sortition code (<code>PosVrfSlot</code>, pos.cpp:324-335), not a model.</p>
+
+<h2>Method</h2>
+<p>Exact transcription of <code>PosVrfSlot</code> (floor-divide beta by weight, take the top 64 bits, scale by total weight, shift down 64, cap at 1&lt;&lt;20); a staker is in the committee for a slot iff that slot value is below the committee size. 100 equal-weight stakers, VRF betas drawn as uniform 256-bit values (independent per staker per slot), 100,000 slots. Measured per-staker membership was 0.3002 against the expected 0.30, confirming the sortition is unbiased and the transcription faithful.</p>
+
+<h2>Result: committee 30, quorum 16, 100 stakers (your proposed config)</h2>
+<table>
+<tr><th>metric</th><th>value</th></tr>
+<tr><td>per-staker P(in committee)</td><td class="num">0.3002 (expected 0.30)</td></tr>
+<tr><td>eligible committee size</td><td class="num">mean 30.0, std 4.6, range [12, 51]</td></tr>
+<tr><td>P(size &le; 31) &mdash; safe, quorums must intersect</td><td class="num">63.1%</td></tr>
+<tr><td><b>P(size &ge; 32) &mdash; double-cert window open</b></td><td class="num"><b>36.9%</b></td></tr>
+<tr><td>P(size &ge; 33)</td><td class="num">29.2%</td></tr>
+</table>
+<div class="legend"><span class="sw" style="background:#c9a227"></span>safe (&le;31, 2Q &gt; size)
+<span class="sw" style="background:#c0392b"></span>window open (&ge;32, two disjoint 16-quorums fit)</div>
+<div class="hist">
+<div class="hrow"><span class="hlab">16</span><span class="hbar safe" style="width:2px"></span><span class="hpct">0.1%</span></div>
+<div class="hrow"><span class="hlab">17</span><span class="hbar safe" style="width:2px"></span><span class="hpct">0.1%</span></div>
+<div class="hrow"><span class="hlab">18</span><span class="hbar safe" style="width:6px"></span><span class="hpct">0.3%</span></div>
+<div class="hrow"><span class="hlab">19</span><span class="hbar safe" style="width:10px"></span><span class="hpct">0.5%</span></div>
+<div class="hrow"><span class="hlab">20</span><span class="hbar safe" style="width:14px"></span><span class="hpct">0.7%</span></div>
+<div class="hrow"><span class="hlab">21</span><span class="hbar safe" style="width:24px"></span><span class="hpct">1.2%</span></div>
+<div class="hrow"><span class="hlab">22</span><span class="hbar safe" style="width:38px"></span><span class="hpct">1.9%</span></div>
+<div class="hrow"><span class="hlab">23</span><span class="hbar safe" style="width:56px"></span><span class="hpct">2.8%</span></div>
+<div class="hrow"><span class="hlab">24</span><span class="hbar safe" style="width:76px"></span><span class="hpct">3.8%</span></div>
+<div class="hrow"><span class="hlab">25</span><span class="hbar safe" style="width:100px"></span><span class="hpct">5.0%</span></div>
+<div class="hrow"><span class="hlab">26</span><span class="hbar safe" style="width:122px"></span><span class="hpct">6.1%</span></div>
+<div class="hrow"><span class="hlab">27</span><span class="hbar safe" style="width:144px"></span><span class="hpct">7.2%</span></div>
+<div class="hrow"><span class="hlab">28</span><span class="hbar safe" style="width:162px"></span><span class="hpct">8.1%</span></div>
+<div class="hrow"><span class="hlab">29</span><span class="hbar safe" style="width:170px"></span><span class="hpct">8.5%</span></div>
+<div class="hrow"><span class="hlab">30</span><span class="hbar safe" style="width:170px"></span><span class="hpct">8.5%</span></div>
+<div class="hrow"><span class="hlab">31</span><span class="hbar safe" style="width:166px"></span><span class="hpct">8.3%</span></div>
+<div class="hrow"><span class="hlab">32</span><span class="hbar win" style="width:156px"></span><span class="hpct">7.8%</span></div>
+<div class="hrow"><span class="hlab">33</span><span class="hbar win" style="width:138px"></span><span class="hpct">6.9%</span></div>
+<div class="hrow"><span class="hlab">34</span><span class="hbar win" style="width:118px"></span><span class="hpct">5.9%</span></div>
+<div class="hrow"><span class="hlab">35</span><span class="hbar win" style="width:92px"></span><span class="hpct">4.6%</span></div>
+<div class="hrow"><span class="hlab">36</span><span class="hbar win" style="width:72px"></span><span class="hpct">3.6%</span></div>
+<div class="hrow"><span class="hlab">37</span><span class="hbar win" style="width:56px"></span><span class="hpct">2.8%</span></div>
+<div class="hrow"><span class="hlab">38</span><span class="hbar win" style="width:38px"></span><span class="hpct">1.9%</span></div>
+<div class="hrow"><span class="hlab">39</span><span class="hbar win" style="width:26px"></span><span class="hpct">1.3%</span></div>
+<div class="hrow"><span class="hlab">40</span><span class="hbar win" style="width:18px"></span><span class="hpct">0.9%</span></div>
+<div class="hrow"><span class="hlab">41</span><span class="hbar win" style="width:10px"></span><span class="hpct">0.5%</span></div>
+<div class="hrow"><span class="hlab">42</span><span class="hbar win" style="width:6px"></span><span class="hpct">0.3%</span></div>
+<div class="hrow"><span class="hlab">43</span><span class="hbar win" style="width:4px"></span><span class="hpct">0.2%</span></div>
+<div class="hrow"><span class="hlab">44</span><span class="hbar win" style="width:2px"></span><span class="hpct">0.1%</span></div>
+<div class="hrow"><span class="hlab">45</span><span class="hbar win" style="width:2px"></span><span class="hpct">0.1%</span></div>
+</div>
+<p>Quorum intersection is guaranteed only while 2&middot;quorum &gt; eligible, i.e. eligible &le; 31 (63.1% of slots). The other 36.9% are the vulnerable regime. The distribution is a clean Binomial(100, 0.3), peaked at 29 to 31. On a 100-staker testbed with committee 30 the window is open in more than a third of all slots &mdash; frequent enough to observe directly.</p>
+
+<h2>Cross-checks</h2>
+<p><b>Current testnet (committee 100, 100 stakers):</b> eligible is ALWAYS exactly 100 (std 0), window probability 0%. When the staker pool equals the committee target, threshold sortition admits every staker every slot, so there is no size variance and the split cannot occur. This is precisely why the issue is invisible on the live chain today.</p>
+<p><b>Mainnet analog (committee 100, 1000 stakers):</b> mean 100, std 9.4, range [62, 141], P(size &ge; 102) = 43%. Confirms the residual is real and common at genuine decentralization, matching the ~40% estimate from the code sweep.</p>
+
+<h2>Reading the 36.9%</h2>
+<p>It is how often the window is OPEN (eligible &ge; 32), not the realized split rate. A realized double-certification additionally requires a network partition that splits the eligible members into two disjoint groups of at least 16, each backing a different block. So 36.9% bounds the per-slot opportunity; the sandbox cluster (100 stakers, committee 30, with an induced partition) is what would demonstrate an actual split.</p>
+
+<h2>The fix removes the window entirely</h2>
+<p>Deriving the quorum from the ACTUAL eligible count for the slot makes 2&middot;quorum &gt; eligible hold by construction (P(window) &rarr; 0). Alternatively, capping membership to a deterministic top-<code>committee_size</code> by VRF rank makes eligible &le; committee_size always. Either restores quorum intersection, so honest double-certification becomes impossible again.</p>
+
+<div class="box"><p style="margin:0" class="small"><b>Practical note.</b> This cannot ride the live testnet: committee size and quorum are validated per block against the current global value (validation.cpp:2254/2279/2310/3165), so switching the running chain to 30/16 would re-derive committee membership for the existing ~17.6k blocks under the new threshold and reject them, making the chain un-syncable. The clean paths are a separate sandbox cluster with <code>-poscommitteesize 30</code> (quorum 16 follows automatically) for observation, and folding 30/16 into the planned re-genesis.</p></div>
+</body></html>
