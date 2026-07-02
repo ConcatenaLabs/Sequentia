@@ -1,0 +1,32 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>Sequentia reply 2026-07-02 tiebreak</title>
+<style>
+  body { font-family: "Liberation Sans", Arial, sans-serif; font-size: 11pt; line-height: 1.45; color: #1a1a1a; margin: 2.2cm 2.4cm; }
+  h1 { font-size: 18pt; margin: 0 0 2pt 0; color: #b8860b; }
+  .sub { color: #555; font-size: 10pt; margin: 0 0 16pt 0; }
+  h2 { font-size: 13pt; margin: 18pt 0 4pt 0; border-bottom: 1.5px solid #b8860b; padding-bottom: 2pt; }
+  h3 { font-size: 11.5pt; margin: 12pt 0 3pt 0; color: #222; }
+  p { margin: 5pt 0; }
+  code, .mono { font-family: "Liberation Mono", "Courier New", monospace; font-size: 9.5pt; background: #f3f1ea; padding: 0 2px; }
+  ul, ol { margin: 4pt 0 6pt 0; }
+  li { margin: 2.5pt 0; }
+  .box { background: #fbf7e9; padding: 8pt 12pt; margin: 10pt 0; }
+  .small { font-size: 9.5pt; color: #555; }
+</style>
+</head><body>
+<h1>Reply: fork-choice tiebreak implemented; 4b left out</h1>
+<p class="sub">Done, exactly as you decided.</p>
+
+<h2>1. Lower-hash tiebreak after the VRF check: implemented</h2>
+<p>Among same-height candidates the fork-choice comparator now orders by (1) most countersignature power, (2) lowest leader VRF score, and (3) as the final key, lowest block hash. The hash key sits AFTER the VRF check and replaces the old node-local first-seen (<code>nSequenceId</code>) step for PoS blocks. Because the block hash is globally deterministic, every honest node breaks a residual tie identically, so two equally-certified same-height blocks can no longer persist as a split. That first-seen fallthrough was the only non-deterministic step left in the fork choice; it is now closed.</p>
+<p>The key sits strictly below total work and countersignature power, so it never reorders across work, certification, immediate finality, or a Bitcoin-driven reorg. It only decides among blocks that already tie on all of those. No anchor key in the fork choice, as before.</p>
+
+<h2>2. 4b reconciliation: left out, and I agree</h2>
+<p>No reconciliation or convergence rule was added. Your reasoning is right and worth stating plainly: the asymmetric stall costs liveness, not safety; it self-resolves in the common case and is trivially operator-recoverable otherwise. A height- or frequency-based reconciliation would trade that rare liveness cost for a real safety hole, letting an attacker outrun the honest chain from the last checkpoint just by spamming certified blocks at a higher frequency to reach a greater height. Not worth it. The deterministic hash tiebreak gives every node one answer without opening that door.</p>
+
+<h2>3. One behavior change worth flagging</h2>
+<p><code>preciousblock</code> no longer overrides a PoS fork-choice tie. It works by lowering a block's <code>nSequenceId</code>, which now sits below the deterministic hash key, so for equal-work, equal-certification, equal-VRF-score PoS blocks the hash decides regardless. This is consistent with the design (deterministic convergence replaces manual preference), and operator recovery of a stuck tip is unaffected: <code>invalidateblock</code> on the losing tip and <code>reconsiderblock</code> act on validity, not on sequence order.</p>
+
+<h2>Status</h2>
+<p>Committed and pushed (<code>fc06176a6</code>); elementsd builds clean. I ran a six-lens adversarial review (ordering soundness, network convergence, anchoring and finality interaction, attack surface including hash-grinding and the 51 percent certified-block spam vector you flagged, directive compliance, and dead-code and direction); zero confirmed issues. On grinding: a proposer can only influence the hash among blocks that already tie on work, certification, and VRF, so it buys nothing beyond resolving that rare tie, with no safety impact.</p>
+<div class="box"><p style="margin:0">Not yet rolled out to the committee. Since it is a consensus change I am holding the deploy for your go-ahead and a coordinated rolling restart, the same way we did 4a. It is node-local and non-forking (old and new nodes interoperate), so the rollout can be incremental with no fork risk.</p></div>
+</body></html>
