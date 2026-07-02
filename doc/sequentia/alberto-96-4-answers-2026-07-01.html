@@ -59,10 +59,13 @@
 <p><strong>Residual case for you:</strong> a near-perfect half-and-half split, where neither side can reach quorum again. Change 4b never fires there. Either we leave it to operators (it needs an almost exactly simultaneous certification race, which we have never observed), or we allow your same-height rule (more signatures, then lower VRF) as a last resort, gated on N Bitcoin blocks passing with no quorum progress on either side.</p>
 <p class="small"><strong>Footnote:</strong> today the finality gate acts only at header acceptance; a rival that entered a node's index before that node finalized can still win through the comparator. The 4b predicate can also be enforced at chain-activation time to close that residual window; cheap to include if you want it.</p>
 
+<h3>Addendum: a real defect found while testing Change 4a</h3>
+<p>Change 4a is now implemented and its regression test reproduces the live race deterministically: with the guard disabled the producer mints and certifies a rival at the rolled-back height, exactly the 96/4 mechanism; with the guard enabled the original blocks are restored verbatim and no rival exists. Writing that test surfaced a real defect in the currently deployed binary, now fixed alongside 4a: the per-block certification count and leader VRF score used by fork choice and by the immediate-finality point are saved to disk but were never READ BACK at startup. After any restart a node therefore saw its whole existing chain as carrying zero countersignatures: it had no immediately-final block until the first new quorum block connected after boot, and its same-height comparator treated every pre-restart block as weaker than any fresh rival. The window is short on a healthy chain (one block interval) but it is exactly the kind of window the 96/4 taught us to close. The on-disk values were always written correctly, so the fix heals every node at its next restart with no resync.</p>
+
 <div class="q">
 <strong>Questions:</strong>
 <ol>
-<li>Do you approve Change 4a (prevention)? It deploys to the testnet on your ack.</li>
+<li>Do you approve Change 4a (prevention)? It is implemented and tested; it deploys to the testnet on your ack.</li>
 <li>Do you approve the Change 4b predicate: yield only to checkpoint-floored, fully anchor-valid quorum progress strictly above the finalized height, never a same-height comparison?</li>
 <li>The symmetric residual: operator-only, or a last-resort same-height tie-break (more signatures, then lower VRF) after N Bitcoin blocks without quorum progress? If the latter, what N?</li>
 </ol>

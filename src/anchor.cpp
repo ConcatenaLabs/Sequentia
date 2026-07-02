@@ -210,6 +210,80 @@ void SeedAnchorInvalidated(const std::vector<uint256>& block_hashes)
               (unsigned)block_hashes.size());
 }
 
+std::optional<uint256> AnchorCertifiedSiblingPending(ChainstateManager& chainman,
+                                                     const uint256& tip_hash, int child_height)
+{
+    if (!g_con_pos || !g_con_bitcoin_anchor || !g_validate_anchor) return std::nullopt;
+    AssertLockNotHeld(cs_main);
+    AssertLockNotHeld(g_anchor_mutex);
+    // Snapshot under g_anchor_mutex WITHOUT cs_main held (this file never nests
+    // the two in that order; both sets are tiny). A stale snapshot is benign:
+    // worst case one extra short hold, re-evaluated on the producer's next poll.
+    std::set<uint256> invalidated;
+    std::set<std::pair<uint32_t, uint256>> stale;
+    {
+        LOCK(g_anchor_mutex);
+        if (g_anchor_invalidated.empty()) return std::nullopt;
+        invalidated = g_anchor_invalidated;
+        stale = g_anchor_stale_cache;
+    }
+    // Mirror UpdateTip's immediate-finality quorum exactly (incl. the
+    // degenerate-size floor), so "guarded" == "could have been final".
+    const int quorum = PosQuorum((size_t)std::max(g_pos_committee_size, 1));
+    LOCK(cs_main);
+    // Roots: recovery-set entries that could still be restored at/below our
+    // height. Skip manual/consensus invalidations (failed WITHOUT the
+    // watcher's provenance marker: they stay invalid, a rival there is
+    // legitimate) and anchors confirmed off the parent's best chain this
+    // epoch (a genuine departure: the height is truly vacant and production
+    // must proceed). An un-failed root (verdict OK, reconnect still pending)
+    // stays a root: the set holds entries until their branch actually
+    // reconnects, so the whole un-fail -> reconnect window stays guarded.
+    std::vector<const CBlockIndex*> roots;
+    for (const uint256& hash : invalidated) {
+        const CBlockIndex* p = chainman.m_blockman.LookupBlockIndex(hash);
+        if (!p || p->nHeight > child_height) continue;
+        const bool failed = p->nStatus & BLOCK_FAILED_MASK;
+        if (failed && !(p->nStatus & BLOCK_FAILED_ANCHOR)) continue;
+        if (stale.count({p->m_anchor_height, p->m_anchor_hash})) continue;
+        roots.push_back(p);
+    }
+    if (roots.empty()) return std::nullopt;
+    // The branch block that would occupy our height: a child of the current
+    // tip descending from a root. Matching through the root covers the whole
+    // recovery window: while the root awaits its verdict the child IS the
+    // root; once the watcher un-fails the branch and ActivateBestChain is
+    // reconnecting it block by block, the next branch block is a clean
+    // (un-failed) child of the advancing tip and must stay protected until
+    // it connects. Both index scans below run only inside a recovery window
+    // (non-empty, non-stale set), never on the steady-state Step path.
+    const CBlockIndex* target = nullptr;
+    for (const auto& [hash, p] : chainman.m_blockman.m_block_index) {
+        if (p->nHeight != child_height || !p->pprev || p->pprev->GetBlockHash() != tip_hash) continue;
+        for (const CBlockIndex* root : roots) {
+            if (p->GetAncestor(root->nHeight) == root) { target = p; break; }
+        }
+        if (target) break;
+    }
+    if (!target) return std::nullopt;
+    // The certification that matters is the strongest at/above the vacant
+    // height on the branch: the lowest orphaned block may itself be a
+    // sub-quorum escaping-stall block with a quorum-certified DESCENDANT, and
+    // that descendant is what recovery must protect (it held finality and may
+    // carry e.g. an atomic-swap leg). A branch that is sub-quorum throughout
+    // is deliberately not guarded: it never held finality, and the
+    // countersignature comparator arbitrates rivals there.
+    int best = target->m_pos_countersigs;
+    if (best < quorum) {
+        for (const auto& [hash, p] : chainman.m_blockman.m_block_index) {
+            if (p->nHeight <= child_height || (int)p->m_pos_countersigs <= best) continue;
+            if (p->GetAncestor(child_height) == target) best = p->m_pos_countersigs;
+        }
+    }
+    if (best < quorum) return std::nullopt;
+    return target->GetBlockHash();
+}
+
 void AnchorWatchTask(ChainstateManager& chainman)
 {
     if (!g_con_bitcoin_anchor || !g_validate_anchor) return;
@@ -272,12 +346,16 @@ void AnchorWatchTask(ChainstateManager& chainman)
             CBlockIndex* pindex = nullptr;
             uint32_t anchor_height = 0;
             uint256 anchor_hash;
+            bool connected = false;
+            bool still_failed = false;
             {
                 LOCK(cs_main);
                 pindex = chainman.m_blockman.LookupBlockIndex(hash);
                 if (pindex) {
                     anchor_height = pindex->m_anchor_height;
                     anchor_hash = pindex->m_anchor_hash;
+                    connected = chainman.ActiveChain().Contains(pindex);
+                    still_failed = pindex->nStatus & (BLOCK_FAILED_MASK | BLOCK_FAILED_ANCHOR);
                 }
             }
             if (!pindex) {
@@ -285,6 +363,22 @@ void AnchorWatchTask(ChainstateManager& chainman)
                 // cs_main so g_anchor_mutex and cs_main are never nested.
                 LOCK(g_anchor_mutex);
                 g_anchor_invalidated.erase(hash);
+                continue;
+            }
+            if (connected) {
+                // Fully recovered: the branch reconnected to the active chain.
+                // Only NOW drop the hint — the certified-sibling guard (Change
+                // 4a) keys on this set, so dropping it earlier (at reconsider
+                // time) would unguard the still-vacant height for the window
+                // between un-failing the branch and reconnecting its bodies.
+                LOCK(g_anchor_mutex);
+                g_anchor_invalidated.erase(hash);
+                continue;
+            }
+            if (!still_failed) {
+                // Already un-failed, awaiting reconnect (bodies may still be in
+                // flight): nothing to re-check this tick. The entry deliberately
+                // stays so the guard keeps holding until the branch connects.
                 continue;
             }
             AnchorCheckResult res = CheckMainchainAnchor(anchor_height, anchor_hash);
@@ -306,10 +400,9 @@ void AnchorWatchTask(ChainstateManager& chainman)
                 // ResetBlockFailureFlags also clears the BLOCK_FAILED_ANCHOR marker.
                 chainman.ActiveChainstate().ResetBlockFailureFlags(pindex);
             }
-            {
-                LOCK(g_anchor_mutex);
-                g_anchor_invalidated.erase(hash);
-            }
+            // The hint is NOT erased here: it lives until the branch is seen
+            // connected (above), so the certified-sibling guard covers the
+            // whole un-fail -> reconnect window.
             any_reconsidered = true;
         }
         if (any_reconsidered) {

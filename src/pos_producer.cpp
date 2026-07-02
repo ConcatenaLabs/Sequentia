@@ -4,6 +4,7 @@
 
 #include <pos_producer.h>
 
+#include <anchor.h>
 #include <block_proof.h>
 #include <bls.h>
 #include <chainparams.h>
@@ -31,6 +32,7 @@
 #include <atomic>
 
 #include <algorithm>
+#include <chrono>
 #include <map>
 #include <memory>
 
@@ -455,6 +457,7 @@ PosProducer::PosProducer(ChainstateManager& chainman, CTxMemPool& mempool,
     m_byzantine_equivocate = gArgs.GetBoolArg("-posbyzantineequivocate", false);
     m_byzantine_invalid = gArgs.GetBoolArg("-posbyzantineinvalid", false);
     m_debug_round_skew_ms = gArgs.GetIntArg("-posdebugroundskewms", 0);
+    m_recovery_wait_ms = std::clamp<int64_t>(gArgs.GetIntArg("-posanchorrecoverywait", 30), 0, 3600) * 1000;
 }
 
 PosProducer::~PosProducer() { Stop(); }
@@ -551,6 +554,57 @@ int64_t PosProducer::Step()
                 m_signed_round = -1;
             }
             m_last_tip = tip_hash;
+        }
+    }
+
+    // Committee-equivocation prevention (Change 4a). After an anchor rollback
+    // this producer would otherwise treat the rolled-back height as vacant
+    // IMMEDIATELY (the reset above cleared the round marks and the slot
+    // deadlines are long past), while restoring the original quorum-certified
+    // block takes the anchor watcher at least one poll tick plus a live parent
+    // check. Losing that race mints a rival that part of the committee then
+    // certifies: two quorum-certified siblings at one height, both anchored to
+    // the returned parent chain — a committee equivocation immediate finality
+    // freezes on different nodes (the live 96/4 split) and anchoring cannot
+    // arbitrate. So while the watcher holds a quorum-certified child of our tip
+    // that is not confirmed off the parent's best chain, neither propose nor
+    // drive rounds (no rival backed or signed) at this height. The hold
+    // resolves by verdict — the block is restored (tip advances past it) or its
+    // anchor is confirmed stale (a genuine parent departure; produce as usual,
+    // which is why a normal forward reorg never holds: the invalidation walk
+    // caches the stale verdict before the producer ever sees the rollback) —
+    // and is bounded by -posanchorrecoverywait so an unreachable parent daemon
+    // can only ever delay production, never deadlock it. Rival proposals and
+    // shares arriving meanwhile are still recorded and relayed (OnProposal is
+    // deliberately untouched): the hold withholds only OUR proposal and OUR
+    // signature; relaying keeps the node a good gossip citizen and the
+    // recorded candidates stay usable if the hold expires.
+    if (m_recovery_wait_ms > 0) {
+        const uint256 tip_hash = tip->GetBlockHash();
+        const std::optional<uint256> pending =
+            AnchorCertifiedSiblingPending(m_chainman, tip_hash, tip->nHeight + 1);
+        if (pending) {
+            // Steady clock: an NTP step must not stretch or shrink the
+            // bounded patience.
+            const int64_t now_hold_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            if (m_recovery_hold_tip != tip_hash) {
+                m_recovery_hold_tip = tip_hash;
+                m_recovery_hold_since_ms = now_hold_ms;
+                m_recovery_hold_expired_logged = false;
+                LogPrintf("PoS producer: holding production at height %d: quorum-certified block %s awaits anchor recovery\n",
+                          tip->nHeight + 1, pending->ToString());
+            }
+            if (now_hold_ms - m_recovery_hold_since_ms < m_recovery_wait_ms) {
+                return 500; // re-evaluate shortly; recovery normally lands within one watcher tick
+            }
+            if (!m_recovery_hold_expired_logged) {
+                m_recovery_hold_expired_logged = true;
+                LogPrintf("PoS producer: anchor-recovery hold at height %d expired after %ds; resuming production\n",
+                          tip->nHeight + 1, (int)(m_recovery_wait_ms / 1000));
+            }
+        } else if (!m_recovery_hold_tip.IsNull()) {
+            m_recovery_hold_tip.SetNull();
         }
     }
 

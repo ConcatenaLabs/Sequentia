@@ -265,6 +265,19 @@ private:
     uint256 m_last_tip;                                //!< active tip last seen by Step(); detects parent-reorg rollbacks
     std::set<uint256> m_seen_proposals;                //!< proposal dedup
     std::set<std::pair<uint256, CPubKey>> m_seen_shares; //!< share dedup
+
+    // Committee-equivocation prevention (Change 4a), worker thread only. While
+    // the anchor watcher holds a quorum-certified child of the current tip that
+    // is not confirmed off the parent chain's best chain
+    // (AnchorCertifiedSiblingPending), Step() neither proposes nor drives
+    // rounds — no rival is backed or signed at that height — until the block is
+    // restored, its anchor is confirmed stale, or the bounded patience
+    // (-posanchorrecoverywait; 0 disables) expires so production can never
+    // deadlock on an unreachable parent daemon.
+    int64_t m_recovery_wait_ms{30000};
+    uint256 m_recovery_hold_tip;                       //!< tip the current hold started under
+    int64_t m_recovery_hold_since_ms{0};
+    bool m_recovery_hold_expired_logged{false};
 };
 
 /** The running producer (for net_processing to deliver gossip to), or nullptr. */

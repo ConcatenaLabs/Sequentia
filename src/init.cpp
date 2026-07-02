@@ -679,6 +679,7 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-posbyzantineequivocate", "SEQUENTIA TEST ONLY: make the autonomous producer act as a Byzantine leader — when elected it equivocates (proposes two different blocks to disjoint halves of the committee) and contributes no signature shares. Used to test that the committee's round-robin routes around a faulty leader. Never set this on a real node.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-posbyzantineinvalid", "SEQUENTIA TEST ONLY: make the autonomous producer propose a consensus-invalid block when elected, to test that lazy validation excludes the leader and the committee routes to the next valid one. Never set this on a real node.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-posdebugroundskewms", "SEQUENTIA TEST ONLY: add this many milliseconds of clock skew to the autonomous producer's gossip round scheduler, to measure how much inter-node synchrony loss the round anchor tolerates before rounds desync. Never set this on a real node.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::ELEMENTS);
+    argsman.AddArg("-posanchorrecoverywait=<n>", "SEQUENTIA: seconds the autonomous producer refuses to treat a height as vacant while a quorum-certified block at that height awaits anchor-reorg recovery (committee-equivocation prevention: it neither proposes nor countersigns a rival there). The hold ends early when the block is restored or its anchor is confirmed off the parent chain's best chain; 0 disables the guard. (default: 30)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-anchorpollinterval=<n>", strprintf("Seconds between polls of the mainchain daemon for new blocks and reorganizations. Only used when con_bitcoin_anchor is enabled. (default: %d)", DEFAULT_ANCHOR_POLL_INTERVAL), ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-acceptdiscountct", "Accept discounted fees for Confidential Transactions (default: 1 in liquidtestnet and liquidv1, 0 otherwise)", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-creatediscountct", "Create Confidential Transactions with discounted fees (default: 0). Setting this to 1 will also set 'acceptdiscountct' to 1.", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
@@ -2151,6 +2152,13 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                   (unsigned)reg.Size(), (unsigned long long)PosTotalWeight(reg));
     }
 
+    // SEQUENTIA: resolve -validateanchor BEFORE the producer starts. The
+    // producer's certified-sibling guard (AnchorCertifiedSiblingPending) reads
+    // g_validate_anchor from its worker thread, so assigning it only after the
+    // producer thread is running would be an unsynchronized cross-thread write
+    // (and a -validateanchor=0 producer could take a pointless first hold).
+    g_validate_anchor = gArgs.GetBoolArg("-validateanchor", true);
+
     // SEQUENTIA PoS: start the autonomous block producer if configured. With
     // one or more staking keys it elects the best-ranked key each round, waits
     // out the slot clock, and produces blocks with no external coordinator
@@ -2173,7 +2181,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 
     // SEQUENTIA: Bitcoin anchoring. Verify the connection to the parent chain
     // daemon and start the watcher that follows parent chain reorganizations.
-    g_validate_anchor = gArgs.GetBoolArg("-validateanchor", true);
+    // (g_validate_anchor was resolved above, before the producer started.)
     if (g_con_bitcoin_anchor && g_validate_anchor) {
         uiInterface.InitMessage(_("Awaiting mainchain RPC warmup (anchoring)").translated);
         if (!MainchainRPCCheck()) {

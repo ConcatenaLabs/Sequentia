@@ -80,6 +80,27 @@ void AnchorWatchTask(ChainstateManager& chainman);
  *  failure that gets seeded is simply re-validated and re-failed once. */
 void SeedAnchorInvalidated(const std::vector<uint256>& block_hashes);
 
+/** SEQUENTIA committee-equivocation prevention (Change 4a): if a child of
+ *  `tip_hash` at `child_height` lies on a watcher-invalidated branch that is
+ *  not confirmed off the parent chain's best chain this parent-tip epoch, and
+ *  that branch carries a quorum certification at or above the child (the
+ *  lowest orphaned block may itself be a sub-quorum escaping-stall block with
+ *  a certified descendant), return that child's hash. Such a branch is either
+ *  awaiting the watcher's verdict, or already un-failed and reconnecting;
+ *  while this returns a value the block producer must not treat the height as
+ *  vacant (propose or countersign a rival there), or it manufactures a
+ *  same-height committee equivocation: two quorum-certified siblings that
+ *  immediate finality then freezes on different nodes (the live 96/4 finality
+ *  split), a tie anchoring cannot break. Returns nullopt when nothing is
+ *  pending, when the branch's anchor is confirmed off the best chain (a
+ *  genuine parent departure: the height is truly vacant, produce as usual),
+ *  when the branch never reached quorum anywhere at/above the child (it never
+ *  held finality; the countersignature comparator arbitrates), or when
+ *  PoS/anchor validation is off. Takes cs_main and g_anchor_mutex internally;
+ *  call with neither held. */
+std::optional<uint256> AnchorCertifiedSiblingPending(ChainstateManager& chainman,
+                                                     const uint256& tip_hash, int child_height);
+
 // --- Bitcoin checkpoints against PoS long-range attacks (paper §11) ---
 //
 // Anyone may commit a Sequentia block reference into the parent chain as a

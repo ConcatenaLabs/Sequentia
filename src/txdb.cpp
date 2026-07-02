@@ -405,6 +405,16 @@ bool CBlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, 
                 pindexNew->nNonce         = diskindex.nNonce;
                 pindexNew->m_anchor_height = diskindex.m_anchor_height;
                 pindexNew->m_anchor_hash  = diskindex.m_anchor_hash;
+                // SEQUENTIA: the PoS fork-choice keys are serialized (chain.h)
+                // but were never copied back on load, so a restarted node saw
+                // every historical block as countersigs=0 / vrf=unset: no
+                // immediate-final point until the next quorum block connected,
+                // a neutered same-height comparator for pre-restart history,
+                // and the Change 4a certified-sibling guard blind after a
+                // restart. The on-disk values were always written correctly,
+                // so this heals existing datadirs with no reindex.
+                pindexNew->m_pos_countersigs = diskindex.m_pos_countersigs;
+                pindexNew->m_pos_vrf_score = diskindex.m_pos_vrf_score;
                 pindexNew->nStatus        = diskindex.nStatus;
                 pindexNew->nTx            = diskindex.nTx;
 

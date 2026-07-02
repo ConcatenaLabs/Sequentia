@@ -135,9 +135,26 @@ node's block index before that node finalized can still win through the comparat
 predicate can also be enforced at chain-activation time to close that residual window; cheap
 to include if you want it.
 
+### Addendum: a real defect found while testing Change 4a
+
+Change 4a is now implemented and its regression test reproduces the live race
+deterministically: with the guard disabled the producer mints and certifies a rival at the
+rolled-back height, exactly the 96/4 mechanism; with the guard enabled the original blocks are
+restored verbatim and no rival exists. Writing that test surfaced a real defect in the
+currently deployed binary, now fixed alongside 4a: the per-block certification count and
+leader VRF score used by fork choice and by the immediate-finality point are saved to disk but
+were never READ BACK at startup. After any restart a node therefore saw its whole existing
+chain as carrying zero countersignatures: it had no immediately-final block until the first
+new quorum block connected after boot, and its same-height comparator treated every
+pre-restart block as weaker than any fresh rival. The window is short on a healthy chain (one
+block interval) but it is exactly the kind of window the 96/4 taught us to close. The on-disk
+values were always written correctly, so the fix heals every node at its next restart with no
+resync.
+
 ### Questions
 
-1. Do you approve Change 4a (prevention)? It deploys to the testnet on your ack.
+1. Do you approve Change 4a (prevention)? It is implemented and tested; it deploys to the
+   testnet on your ack.
 2. Do you approve the Change 4b predicate: yield only to checkpoint-floored, fully
    anchor-valid quorum progress strictly above the finalized height, never a same-height
    comparison?

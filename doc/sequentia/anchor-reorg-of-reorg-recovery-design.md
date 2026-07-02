@@ -168,6 +168,58 @@ asserts BOTH recovery across a restart (original tip hash restored verbatim) AND
 `invalidateblock` is NOT resurrected across a restart. All existing anchor/finality/reconsider
 functional tests still pass.
 
+### Change 4a implementation (2026-07-01; deploy gated on Alberto's ack)
+
+- `AnchorCertifiedSiblingPending(chainman, tip_hash, child_height)` (`anchor.{h,cpp}`): returns
+  the hash of a child of the tip at the next height that lies on a watcher-invalidated branch
+  (recovery-set root with `BLOCK_FAILED_ANCHOR` provenance; manual/consensus invalidations are
+  skipped) that is NOT in `g_anchor_stale_cache` (not confirmed off the parent's best chain
+  this parent-tip epoch) and that carries a quorum certification AT OR ABOVE the child
+  (`max(m_pos_countersigs) >= PosQuorum`, so a sub-quorum escaping-stall block with a certified
+  descendant is still protected, per adversarial review; a branch that is sub-quorum throughout
+  is deliberately unguarded — it never held finality). Recovery-set entries now live until
+  their branch actually RECONNECTS (section 1 erases on `ActiveChain().Contains`), so the guard
+  covers the whole un-fail-to-reconnect window. Snapshots under `g_anchor_mutex`, then takes
+  `cs_main`; strictly sequential, never nested.
+- `PosProducer::Step()` evaluates it after the round-state reset: while pending, neither
+  proposes nor calls `DriveRound` (no rival backed or signed), re-polling at 500 ms, bounded by
+  `-posanchorrecoverywait` (default 30 s; 0 disables) so an unreachable parent daemon can only
+  delay production. A plain forward reorg never holds: the invalidation walk caches the stale
+  verdict before the producer sees the rollback.
+- Test `test/functional/feature_pos_certified_sibling_guard.py`: 3 unit-weight stakers,
+  committee 3, quorum 2 (a committee=1 chain names no certificate members, so it can never
+  exercise the guard). Reproduces the boot race deterministically (the first watcher tick is
+  delayed by a large `-poscheckpointscan` window over a 3000-block parent chain while the
+  producer's slot is due immediately); asserts the hold log, verbatim restoration, no rival
+  branch, resumed production, and stale-verdict liveness. The negative control
+  (`-posanchorrecoverywait=0`) reproduces the pre-guard rival branch and fails the test.
+
+### Found by the 4a test: fork-choice keys were not reloaded from disk (FIXED)
+
+`m_pos_countersigs` / `m_pos_vrf_score` were serialized in `CDiskBlockIndex` (`chain.h`) but
+never copied back in `CBlockTreeDB::LoadBlockIndexGuts` (`txdb.cpp`). Every restarted node
+therefore saw ALL historical blocks as countersigs=0 / vrf=unset: no immediate-final point
+until the next quorum block connected after boot (the finality gate was down for pre-restart
+history in that window), a neutered same-height comparator for historical blocks (a fresh
+post-restart rival outranked any pre-restart block), and the 4a guard blind after a restart.
+Fixed by copying the two fields on load; on-disk values were always written correctly, so
+existing datadirs heal on the next restart with no reindex.
+
+### Adversarial review outcome (3 independent reviewers, 2026-07-01)
+
+Verdicts: 3 x ship-with-nits. Addressed: the sub-quorum-root coverage gap (max-certification
+at/above the child, above); the erase-before-reconnect window (entries live until connected);
+`g_validate_anchor` assigned before the producer thread starts (`init.cpp`; was an
+unsynchronized cross-thread read); the hold timer moved to a steady clock (NTP-step-proof);
+`-posanchorrecoverywait` clamped to [0, 3600]; `AssertLockNotHeld` at the helper entry; the
+test's guard patience decoupled from checkpoint-scan latency (120 s). Deliberate and
+documented, not changed: rival proposals/shares are still recorded and relayed during a hold
+(only OUR proposal/signature is withheld); `generateposblock` (RPC) bypasses the guard — it is
+an explicit operator action, like `invalidateblock`. Accepted residual: a flaky parent RPC
+during a genuine departure can hold production for the full bounded patience (latency wart,
+no supremacy violation); a reviewer verified empirically that the committed test FAILS on the
+pre-guard binary (rival minted 22 ms after producer start) and PASSES on the guarded one.
+
 ## Live evidence (2026-06-27 ~23:26-23:45Z)
 A real testnet4 reorg-of-reorg exercised this end to end: bitcoind advanced to 141991 while the
 SEQ anchor `0000…e06c41` left Bitcoin's best chain; the watcher logged
