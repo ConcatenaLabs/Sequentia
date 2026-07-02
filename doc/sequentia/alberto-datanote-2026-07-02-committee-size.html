@@ -6,19 +6,17 @@
   h2 { font-size: 12.5pt; margin: 16pt 0 4pt 0; border-bottom: 1.5px solid #b8860b; padding-bottom: 2pt; }
   p { margin: 5pt 0; }
   code { font-family: "Liberation Mono","Courier New",monospace; font-size: 9.5pt; background: #f3f1ea; padding: 0 2px; }
-  table { border-collapse: collapse; margin: 8pt 0; font-size: 10.5pt; }
-  td, th { border: 1px solid #d8d2be; padding: 3pt 9pt; text-align: left; }
-  th { background: #fbf7e9; }
-  .num { text-align: right; font-variant-numeric: tabular-nums; }
-  .hist { margin: 8pt 0 4pt 0; }
-  .hrow { display: flex; align-items: center; height: 13px; }
-  .hlab { width: 22px; text-align: right; font-size: 8pt; color: #555; margin-right: 6px; }
-  .hbar { height: 9px; border-radius: 1px; }
-  .safe { background: #c9a227; }
-  .win { background: #c0392b; }
-  .hpct { font-size: 7.5pt; color: #777; margin-left: 6px; }
-  .legend { font-size: 9pt; color: #555; margin: 2pt 0 8pt 0; }
-  .sw { display:inline-block; width:10px; height:10px; border-radius:2px; vertical-align:middle; margin: 0 3px 0 10px; }
+  table.kv { border-collapse: collapse; margin: 8pt 0; font-size: 10.5pt; }
+  table.kv td, table.kv th { border: 1px solid #d8d2be; padding: 3pt 9pt; text-align: left; }
+  table.kv th { background: #fbf7e9; }
+  table.kv td.num { text-align: right; }
+  table.hist { border-collapse: collapse; margin: 4pt 0 2pt 0; }
+  table.hist td { border: none; padding: 0 5px; line-height: 1.15; }
+  .hs { text-align: right; font-size: 8.5pt; color: #555; }
+  .hb { font-family: "Liberation Mono","DejaVu Sans Mono",monospace; font-size: 9pt; }
+  .hp { font-size: 8pt; color: #777; }
+  .legend { font-size: 9.5pt; color: #555; margin: 2pt 0 6pt 0; }
+  .blk { font-family:"Liberation Mono","DejaVu Sans Mono",monospace; }
   .box { background: #fbf7e9; padding: 7pt 12pt; margin: 9pt 0; }
   .small { font-size: 9.5pt; color: #555; }
 </style></head><body>
@@ -29,7 +27,7 @@
 <p>Exact transcription of <code>PosVrfSlot</code> (floor-divide beta by weight, take the top 64 bits, scale by total weight, shift down 64, cap at 1&lt;&lt;20); a staker is in the committee for a slot iff that slot value is below the committee size. 100 equal-weight stakers, VRF betas drawn as uniform 256-bit values (independent per staker per slot), 100,000 slots. Measured per-staker membership was 0.3002 against the expected 0.30, confirming the sortition is unbiased and the transcription faithful.</p>
 
 <h2>Result: committee 30, quorum 16, 100 stakers (your proposed config)</h2>
-<table>
+<table class="kv">
 <tr><th>metric</th><th>value</th></tr>
 <tr><td>per-staker P(in committee)</td><td class="num">0.3002 (expected 0.30)</td></tr>
 <tr><td>eligible committee size</td><td class="num">mean 30.0, std 4.6, range [12, 51]</td></tr>
@@ -37,41 +35,41 @@
 <tr><td><b>P(size &ge; 32) &mdash; double-cert window open</b></td><td class="num"><b>36.9%</b></td></tr>
 <tr><td>P(size &ge; 33)</td><td class="num">29.2%</td></tr>
 </table>
-<div class="legend"><span class="sw" style="background:#c9a227"></span>safe (&le;31, 2Q &gt; size)
-<span class="sw" style="background:#c0392b"></span>window open (&ge;32, two disjoint 16-quorums fit)</div>
-<div class="hist">
-<div class="hrow"><span class="hlab">16</span><span class="hbar safe" style="width:2px"></span><span class="hpct">0.1%</span></div>
-<div class="hrow"><span class="hlab">17</span><span class="hbar safe" style="width:2px"></span><span class="hpct">0.1%</span></div>
-<div class="hrow"><span class="hlab">18</span><span class="hbar safe" style="width:6px"></span><span class="hpct">0.3%</span></div>
-<div class="hrow"><span class="hlab">19</span><span class="hbar safe" style="width:10px"></span><span class="hpct">0.5%</span></div>
-<div class="hrow"><span class="hlab">20</span><span class="hbar safe" style="width:14px"></span><span class="hpct">0.7%</span></div>
-<div class="hrow"><span class="hlab">21</span><span class="hbar safe" style="width:24px"></span><span class="hpct">1.2%</span></div>
-<div class="hrow"><span class="hlab">22</span><span class="hbar safe" style="width:38px"></span><span class="hpct">1.9%</span></div>
-<div class="hrow"><span class="hlab">23</span><span class="hbar safe" style="width:56px"></span><span class="hpct">2.8%</span></div>
-<div class="hrow"><span class="hlab">24</span><span class="hbar safe" style="width:76px"></span><span class="hpct">3.8%</span></div>
-<div class="hrow"><span class="hlab">25</span><span class="hbar safe" style="width:100px"></span><span class="hpct">5.0%</span></div>
-<div class="hrow"><span class="hlab">26</span><span class="hbar safe" style="width:122px"></span><span class="hpct">6.1%</span></div>
-<div class="hrow"><span class="hlab">27</span><span class="hbar safe" style="width:144px"></span><span class="hpct">7.2%</span></div>
-<div class="hrow"><span class="hlab">28</span><span class="hbar safe" style="width:162px"></span><span class="hpct">8.1%</span></div>
-<div class="hrow"><span class="hlab">29</span><span class="hbar safe" style="width:170px"></span><span class="hpct">8.5%</span></div>
-<div class="hrow"><span class="hlab">30</span><span class="hbar safe" style="width:170px"></span><span class="hpct">8.5%</span></div>
-<div class="hrow"><span class="hlab">31</span><span class="hbar safe" style="width:166px"></span><span class="hpct">8.3%</span></div>
-<div class="hrow"><span class="hlab">32</span><span class="hbar win" style="width:156px"></span><span class="hpct">7.8%</span></div>
-<div class="hrow"><span class="hlab">33</span><span class="hbar win" style="width:138px"></span><span class="hpct">6.9%</span></div>
-<div class="hrow"><span class="hlab">34</span><span class="hbar win" style="width:118px"></span><span class="hpct">5.9%</span></div>
-<div class="hrow"><span class="hlab">35</span><span class="hbar win" style="width:92px"></span><span class="hpct">4.6%</span></div>
-<div class="hrow"><span class="hlab">36</span><span class="hbar win" style="width:72px"></span><span class="hpct">3.6%</span></div>
-<div class="hrow"><span class="hlab">37</span><span class="hbar win" style="width:56px"></span><span class="hpct">2.8%</span></div>
-<div class="hrow"><span class="hlab">38</span><span class="hbar win" style="width:38px"></span><span class="hpct">1.9%</span></div>
-<div class="hrow"><span class="hlab">39</span><span class="hbar win" style="width:26px"></span><span class="hpct">1.3%</span></div>
-<div class="hrow"><span class="hlab">40</span><span class="hbar win" style="width:18px"></span><span class="hpct">0.9%</span></div>
-<div class="hrow"><span class="hlab">41</span><span class="hbar win" style="width:10px"></span><span class="hpct">0.5%</span></div>
-<div class="hrow"><span class="hlab">42</span><span class="hbar win" style="width:6px"></span><span class="hpct">0.3%</span></div>
-<div class="hrow"><span class="hlab">43</span><span class="hbar win" style="width:4px"></span><span class="hpct">0.2%</span></div>
-<div class="hrow"><span class="hlab">44</span><span class="hbar win" style="width:2px"></span><span class="hpct">0.1%</span></div>
-<div class="hrow"><span class="hlab">45</span><span class="hbar win" style="width:2px"></span><span class="hpct">0.1%</span></div>
-</div>
-<p>Quorum intersection is guaranteed only while 2&middot;quorum &gt; eligible, i.e. eligible &le; 31 (63.1% of slots). The other 36.9% are the vulnerable regime. The distribution is a clean Binomial(100, 0.3), peaked at 29 to 31. On a 100-staker testbed with committee 30 the window is open in more than a third of all slots &mdash; frequent enough to observe directly.</p>
+
+<p class="legend"><span class="blk" style="color:#c9a227">&#9608;&#9608;&#9608;</span> safe (size &le; 31, 2Q &gt; size) &nbsp;&nbsp; <span class="blk" style="color:#c0392b">&#9608;&#9608;&#9608;</span> window open (size &ge; 32, two disjoint 16-quorums fit)</p>
+<table class="hist">
+<tr><td class="hs">16</td><td class="hb"><span style="color:#c9a227">&#9608;</span></td><td class="hp">0.1%</td></tr>
+<tr><td class="hs">17</td><td class="hb"><span style="color:#c9a227">&#9608;</span></td><td class="hp">0.1%</td></tr>
+<tr><td class="hs">18</td><td class="hb"><span style="color:#c9a227">&#9608;</span></td><td class="hp">0.3%</td></tr>
+<tr><td class="hs">19</td><td class="hb"><span style="color:#c9a227">&#9608;</span></td><td class="hp">0.5%</td></tr>
+<tr><td class="hs">20</td><td class="hb"><span style="color:#c9a227">&#9608;&#9608;</span></td><td class="hp">0.7%</td></tr>
+<tr><td class="hs">21</td><td class="hb"><span style="color:#c9a227">&#9608;&#9608;&#9608;</span></td><td class="hp">1.2%</td></tr>
+<tr><td class="hs">22</td><td class="hb"><span style="color:#c9a227">&#9608;&#9608;&#9608;&#9608;&#9608;</span></td><td class="hp">1.9%</td></tr>
+<tr><td class="hs">23</td><td class="hb"><span style="color:#c9a227">&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;</span></td><td class="hp">2.8%</td></tr>
+<tr><td class="hs">24</td><td class="hb"><span style="color:#c9a227">&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;</span></td><td class="hp">3.8%</td></tr>
+<tr><td class="hs">25</td><td class="hb"><span style="color:#c9a227">&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;</span></td><td class="hp">5.0%</td></tr>
+<tr><td class="hs">26</td><td class="hb"><span style="color:#c9a227">&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;</span></td><td class="hp">6.1%</td></tr>
+<tr><td class="hs">27</td><td class="hb"><span style="color:#c9a227">&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;</span></td><td class="hp">7.2%</td></tr>
+<tr><td class="hs">28</td><td class="hb"><span style="color:#c9a227">&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;</span></td><td class="hp">8.1%</td></tr>
+<tr><td class="hs">29</td><td class="hb"><span style="color:#c9a227">&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;</span></td><td class="hp">8.5%</td></tr>
+<tr><td class="hs">30</td><td class="hb"><span style="color:#c9a227">&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;</span></td><td class="hp">8.5%</td></tr>
+<tr><td class="hs">31</td><td class="hb"><span style="color:#c9a227">&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;</span></td><td class="hp">8.3%</td></tr>
+<tr><td class="hs">32</td><td class="hb"><span style="color:#c0392b">&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;</span></td><td class="hp">7.8%</td></tr>
+<tr><td class="hs">33</td><td class="hb"><span style="color:#c0392b">&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;</span></td><td class="hp">6.9%</td></tr>
+<tr><td class="hs">34</td><td class="hb"><span style="color:#c0392b">&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;</span></td><td class="hp">5.9%</td></tr>
+<tr><td class="hs">35</td><td class="hb"><span style="color:#c0392b">&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;</span></td><td class="hp">4.6%</td></tr>
+<tr><td class="hs">36</td><td class="hb"><span style="color:#c0392b">&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;</span></td><td class="hp">3.6%</td></tr>
+<tr><td class="hs">37</td><td class="hb"><span style="color:#c0392b">&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;</span></td><td class="hp">2.8%</td></tr>
+<tr><td class="hs">38</td><td class="hb"><span style="color:#c0392b">&#9608;&#9608;&#9608;&#9608;&#9608;</span></td><td class="hp">1.9%</td></tr>
+<tr><td class="hs">39</td><td class="hb"><span style="color:#c0392b">&#9608;&#9608;&#9608;</span></td><td class="hp">1.3%</td></tr>
+<tr><td class="hs">40</td><td class="hb"><span style="color:#c0392b">&#9608;&#9608;</span></td><td class="hp">0.9%</td></tr>
+<tr><td class="hs">41</td><td class="hb"><span style="color:#c0392b">&#9608;</span></td><td class="hp">0.5%</td></tr>
+<tr><td class="hs">42</td><td class="hb"><span style="color:#c0392b">&#9608;</span></td><td class="hp">0.3%</td></tr>
+<tr><td class="hs">43</td><td class="hb"><span style="color:#c0392b">&#9608;</span></td><td class="hp">0.2%</td></tr>
+<tr><td class="hs">44</td><td class="hb"><span style="color:#c0392b">&#9608;</span></td><td class="hp">0.1%</td></tr>
+<tr><td class="hs">45</td><td class="hb"><span style="color:#c0392b">&#9608;</span></td><td class="hp">0.1%</td></tr>
+</table>
+<p>Quorum intersection is guaranteed only while 2&middot;quorum &gt; eligible, i.e. eligible &le; 31 (63.1% of slots). The other 36.9% are the vulnerable regime. The distribution is a clean Binomial(100, 0.3), peaked at 29 to 31. On a 100-staker testbed with committee 30 the window is open in more than a third of all slots, frequent enough to observe directly.</p>
 
 <h2>Cross-checks</h2>
 <p><b>Current testnet (committee 100, 100 stakers):</b> eligible is ALWAYS exactly 100 (std 0), window probability 0%. When the staker pool equals the committee target, threshold sortition admits every staker every slot, so there is no size variance and the split cannot occur. This is precisely why the issue is invisible on the live chain today.</p>
