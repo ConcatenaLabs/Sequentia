@@ -228,6 +228,17 @@ UniValue blockheaderToJSON(const CBlockIndex* tip, const CBlockIndex* blockindex
         result.pushKV("anchorheight", (int64_t)blockindex->m_anchor_height);
         result.pushKV("anchorhash", blockindex->m_anchor_hash.GetHex());
     }
+    // SEQUENTIA: PoS committee certification of THIS block. Cross-chain swap
+    // safety wants a leg's block to be quorum-certified (immediately final), not
+    // merely anchored — anchoring binds the leg to Bitcoin, quorum-certification
+    // means the committee finalized it. Exposed so an off-node swap driver
+    // (VerifySeqLegSafe) and the wallet cross-maker can require both.
+    if (g_con_pos) {
+        const int pos_quorum = PosQuorum((size_t)std::max(g_pos_committee_size, 1));
+        result.pushKV("poscountersigs", (int)blockindex->m_pos_countersigs);
+        result.pushKV("posquorum", pos_quorum);
+        result.pushKV("poscertified", (int)blockindex->m_pos_countersigs >= pos_quorum);
+    }
     if (!g_signed_blocks) {
         result.pushKV("nonce", (uint64_t)blockindex->nNonce);
         result.pushKV("bits", strprintf("%08x", blockindex->nBits));
