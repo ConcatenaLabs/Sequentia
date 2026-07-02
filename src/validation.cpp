@@ -148,6 +148,27 @@ bool CBlockIndexWorkComparator::operator()(const CBlockIndex *pa, const CBlockIn
         // finalized — never by reorging one that already did (doc 10 §7).
         if (pa->m_pos_vrf_score > pb->m_pos_vrf_score) return true;  // higher beta is worse
         if (pa->m_pos_vrf_score < pb->m_pos_vrf_score) return false;
+        // On an equal VRF score, converge on the LOWER block hash. Unlike
+        // nSequenceId below (node-local first-seen order, which two honest nodes
+        // can observe differently), the block hash is globally deterministic, so
+        // every honest node breaks the tie identically and two equally-certified
+        // same-height blocks cannot persist as a network split (the rare
+        // asymmetric-liveness stall). This deliberately does NOT add any
+        // reconciliation rule that reorders certified blocks by height or arrival
+        // frequency: such a rule would let an attacker outrun the honest chain
+        // from the last checkpoint by spamming certified blocks at a higher
+        // frequency to reach a greater height, a safety break far worse than the
+        // rare liveness stall it would paper over. The stall reduces liveness
+        // only (never safety), self-resolves in the common case, and is otherwise
+        // trivially operator-recoverable; this deterministic hash tie-break just
+        // gives every node the same single answer without opening that hole.
+        // uint256 (base_blob) defines operator< but not operator>, so express the
+        // comparison with < only. hash_b < hash_a means pa has the higher hash and
+        // is the worse (later-ordered) candidate; the LOWER block hash wins.
+        const uint256 hash_a = pa->GetBlockHash();
+        const uint256 hash_b = pb->GetBlockHash();
+        if (hash_b < hash_a) return true;   // pa has the higher hash -> worse; lower hash wins
+        if (hash_a < hash_b) return false;
     }
 
     // ... then by earliest time received, ...
