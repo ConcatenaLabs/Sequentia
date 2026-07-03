@@ -127,9 +127,41 @@ coordinate). Phase 2 plugs into it; do NOT rebuild the SEQ leg or the anchor gat
   path, so leave headroom above channel + funding-fee + 25k when sizing a small funded node. Also: keep
   lightningd + all subdaemons + plugins at the SAME build (version-string check `bad version` kills the
   node if you rebuild only lightningd).
-- **Still net-new (the real cross-chain work, in the seqdex maker daemon — see §5b):** the hold invoice
-  (via the `htlc_accepted` hook — confirmed as the mechanism; belongs in the Go maker, not a throwaway
-  plugin), the `lnLeg`/`swapLeg` generalisation, and the LN<->SEQ stitching with the anchor-depth gate.
+- **LN leg + stitching state machine IMPLEMENTED (compiles, vet-clean) in the seqdex maker daemon**
+  (`pkg/xchain`, branch `phase2-submarine-ln`):
+  - `leg_lightning.go` — the `LNLeg` interface + `clnLNLeg`, a minimal CLN `lightning-rpc` unix-socket
+    JSON-RPC client. `NORMAL`-direction `Pay(bolt11, wantHash, amountMsat)` uses CLN core (`decodepay` +
+    `pay`) and works against a STOCK SeqLN/CLN node; it refuses to pay unless the invoice's `payment_hash`
+    equals the swap `H` and double-checks the revealed preimage hashes to `H`. `REVERSE`-direction
+    `CreateHoldInvoice`/`WaitHeld`/`SettleHold`/`CancelHold` drive the hold-invoice plugin (see §5d).
+  - `submarine.go` — `SubmarineSwap` EMBEDS `*Swap` purely to reuse the SEQ leg unchanged
+    (`VerifySEQLeg`/`LockSEQLeg`/`ClaimSEQLeg`/`RefundSEQLeg`/`WatchSEQClaim`/`InjectSecret`); the embedded
+    `btcBackend` is nil and never touched (the BTC leg is the `LNLeg`). `RunNormal` and `RunReverse` are the
+    two Case-A flows, each with its refund/cancel path on error.
+  - **Anchor-depth gate implemented as `VerifySeqAnchorBuried`** (NOT `VerifySeqLegSafe`): it requires the
+    relevant Sequentia block's Bitcoin anchor to be BURIED by `min_anchor_depth` Bitcoin blocks
+    (`node anchor tip − block anchorheight >= min_anchor_depth`), plus quorum-certified + `anchorstatus==ok`.
+    `min_anchor_depth` is enforced `>= 2` (1 is unsafe, §3.2). `NORMAL` gates the SEQ *funding* before
+    `Pay`; `REVERSE` gates the taker's SEQ *claim* (which revealed `P`) before `SettleHold`. This is a
+    deliberate WAIT for real-time anchoring to bury the tx — consistent with anchoring supremacy (it does
+    not block a reorg; it declines the irreversible LN action until a reorg is implausible).
+  - Helpers added: `hexEq`/`hashEqualsPreimage` (`util.go`), errors `ErrLNLegInvalid`/`ErrLNLegTimeout`.
+- **Still to do for the exit criterion:** deploy the CLN `holdinvoice` plugin on the maker's SeqLN-Bitcoin
+  node (§5d), then run both directions end to end on testnets against a live Sequentia asset HTLC + a funded
+  BTC-LN channel, and exercise the refund/timeout path.
+
+## 5d. Hold invoices: plugin over RPC (decision)
+
+The original plan (§5b) anticipated implementing the hold inside the Go maker via CLN's `htlc_accepted`
+hook. That would make the Go maker itself a CLN plugin (an in-process subdaemon subscribed to the hook),
+which is invasive. Instead the maker stays a plain RPC CLIENT of its node and the hold is provided by the
+mature CLN **`holdinvoice` plugin** (daywalker90; Rust), which exposes exactly the RPC methods
+`clnLNLeg` calls — `holdinvoice`, `holdinvoicelookup` (state `accepted`/`settled`/`cancelled`),
+`holdinvoicesettle`, `holdinvoicecancel` — all backed by the `htlc_accepted` hook internally. This keeps the
+"maker runs a SeqLN/CLN node and talks to it over RPC" architecture intact and avoids reimplementing a
+hold-invoice state machine. Deploy step: build/load that plugin on the maker's `--network=testnet4` SeqLN
+node; if the deployed plugin's method/param names differ, they are localised to `clnLNLeg` (leg_lightning.go).
+The NORMAL direction needs NO plugin (core `pay` only).
 
 ## 6. Exit criterion
 
