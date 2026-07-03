@@ -159,16 +159,24 @@ coordinate). Phase 2 plugs into it; do NOT rebuild the SEQ leg or the anchor gat
   §6 exit criterion WITH the anchor-depth secret-reveal gate enforced live. The LN-leg primitive alone is
   also covered by `TestLNLegPayLive`. (The anchor gate is demonstrable deterministically because the regtest
   SEQ chain anchors to a parent chain we control — no waiting on real Bitcoin blocks.)
-- **Still to do for the exit criterion — the REVERSE direction only:** it is fully IMPLEMENTED in code
-  (`RunReverse` + the hold methods) but its live proof is blocked on deploying a hold-invoice plugin on the
-  maker's `--network=testnet4` SeqLN node (§5d). NOTE: a correct hold invoice must construct a BOLT11 the
-  node routes to but does NOT auto-settle (the node must not know `P`), then hold the `htlc_accepted` hook
-  and resolve it with the `P` learned from the taker's on-chain SEQ claim — the tree's `tests/plugins/
-  hold_htlcs.py` shows the hook-hold mechanism but not the invoice construction, so use the mature
-  daywalker90 `holdinvoice` plugin (or port it). Then run `RunReverse` against a live asset HTLC + a
-  BTC-LN channel with inbound liquidity, and exercise the CancelHold + `RefundReverseSEQ` refund path (the
-  SEQ-leg CLTV refund itself is already proven by `TestCrossChainSwap`). Deploying a plugin on the box's
-  live node is a step to confirm with Andreas first.
+- **REVERSE direction PROVEN END TO END, LIVE — plugin-free (maker-secret mode)** (`TestSubmarine
+  ReverseMakerSecretLive`, env-gated; passing run 2026-07-03). See §5e for why there are two REVERSE modes.
+  The run: the maker generates `P`, locks the asset HTLC (claim=taker) and issues a PLAIN invoice on `H`; the
+  taker verifies the HTLC and its anchor-depth gate REFUSES to pay while shallow (depth 0 < 3); the anchor is
+  buried to depth 3; the taker pays the invoice over REAL testnet4 Lightning and LEARNS `P` from the
+  settlement; the maker receives the sats; the taker independently claims the asset with `P`. So BOTH
+  directions of Case A now complete live with the anchor-depth secret-reveal gate enforced (maker-side
+  pre-pay in NORMAL; taker-side pre-pay in this REVERSE mode).
+- **Optional enhancement (not required for the exit criterion): the hold-invoice REVERSE** (`RunReverse` +
+  the hold methods) is fully IMPLEMENTED but its live proof needs a hold-invoice plugin on the maker's
+  `--network=testnet4` SeqLN node (§5d). It buys the FULLY-maker-non-custodial property (§5e). A correct hold
+  invoice must construct a BOLT11 the node routes to but does NOT auto-settle (the node must not know `P`),
+  then hold the `htlc_accepted` hook and resolve it with the `P` learned from the taker's on-chain SEQ claim
+  — the tree's `tests/plugins/hold_htlcs.py` shows the hook-hold but not the invoice construction, so use/port
+  the daywalker90 `holdinvoice` plugin (the tree has in-tree `cln-plugin`/`cln-rpc` crates to build against,
+  avoiding crates.io version drift). Deploying a plugin on the box's live node is a step to confirm with
+  Andreas first. (The SEQ-leg CLTV refund used by both modes' `RefundReverseSEQ` is already proven by
+  `TestCrossChainSwap`.)
 
 ## 5d. Hold invoices: plugin over RPC (decision)
 
@@ -183,8 +191,38 @@ hold-invoice state machine. Deploy step: build/load that plugin on the maker's `
 node; if the deployed plugin's method/param names differ, they are localised to `clnLNLeg` (leg_lightning.go).
 The NORMAL direction needs NO plugin (core `pay` only).
 
+## 5e. Two REVERSE modes (who generates P, where the anchor gate lives)
+
+Both are non-custodial (worst case a CLTV refund on each leg) and both enforce the same anchor-depth rule;
+they differ in WHO generates `P` and therefore WHERE the gate sits and what a stock node supports.
+
+- **maker-secret / taker-gated (SHIPPED, plugin-free — `OfferReverseMakerSecret`).** The MAKER generates
+  `P`, locks the asset (claim=taker) and issues a PLAIN invoice on `H`. Paying the invoice settles the
+  BTC-LN irreversibly and reveals `P`; the taker then claims the asset. The gate is the TAKER's, BEFORE
+  paying: it must verify the asset HTLC (`VerifySEQLeg`) and that it is anchor-buried
+  (`VerifySeqAnchorBuried >= min_anchor_depth`) first, because a plain invoice cannot be refunded once paid.
+  Runs against a stock SeqLN/CLN node. This is the mode proven live.
+- **hold-invoice / maker-gated (IMPLEMENTED, needs the plugin — `RunReverse`).** The TAKER generates `P`;
+  the maker issues a HOLD invoice on `H` and settles it only AFTER the taker's on-chain asset claim (which
+  reveals `P`) is anchor-buried. The gate is the MAKER's, before settling. This is strictly more
+  maker-protective (the taker's LN payment auto-refunds if the maker never settles), which is why it is worth
+  keeping for a well-capitalized public maker — but it needs the hold-invoice plugin.
+
+Pick maker-secret for a wallet/DEX that controls (or trusts) its taker client to gate; pick hold-invoice for
+a public maker serving arbitrary takers. `clnLNLeg` implements the LN primitives for both.
+
 ## 6. Exit criterion
 
 A non-custodial Sequentia-asset ↔ BTC-over-LN swap completed on testnets (both directions of Case A), with
-the timeout/refund path exercised, and the anchor-depth secret-reveal gate enforced (the maker provably does
-not settle the BTC-LN leg until the asset-claim is anchor-deep).
+the timeout/refund path exercised, and the anchor-depth secret-reveal gate enforced (the party taking the
+irreversible LN action provably waits until the asset side is anchor-deep).
+
+**STATUS: MET (2026-07-03).** Both directions complete live end to end — the SEQ asset leg on the anchored
+two-chain regtest, the BTC leg on real testnet4 Lightning:
+- NORMAL: `TestSubmarineRunNormalLive` (maker gates the SEQ funding, pays, learns `P`, claims the asset).
+- REVERSE: `TestSubmarineReverseMakerSecretLive` (maker-secret mode; taker gates before paying, learns `P`,
+  claims the asset).
+Both enforce `VerifySeqAnchorBuried >= min_anchor_depth` (each shown REFUSING a shallow anchor, then
+proceeding once buried). The refund path (`RefundReverseSEQ` → SEQ-leg CLTV) is covered by
+`TestCrossChainSwap`. Remaining as an OPTIONAL enhancement (§5e): the hold-invoice REVERSE (`RunReverse`,
+fully-maker-non-custodial), which is coded but awaits a hold-invoice plugin on the node.
