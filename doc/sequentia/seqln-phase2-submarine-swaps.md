@@ -80,6 +80,37 @@ Net-new for Phase 2:
    only after the taker's asset-claim reaches `min_anchor_depth` Bitcoin-anchor blocks.
 6. **End-to-end + refund** — a non-custodial asset↔BTC-LN swap on testnets, and the refund path exercised.
 
+## 5b. Implementation seam (mapped against the live seqdex code)
+
+The cross-chain maker already exists in `~/seqdex/daemon` (branch `main`; SHARED with another session —
+coordinate). Phase 2 plugs into it; do NOT rebuild the SEQ leg or the anchor gate.
+
+- `pkg/xchain/orchestrator.go` — the 5-step swap: (1) Alice locks the BTC leg (longer CLTV), (2) Bob locks
+  the SEQ leg (shorter CLTV), (3) **`VerifySeqLegSafe`** = the anchor-depth gate (SEQ leg's block
+  `anchorheight >= Hp` AND `getanchorstatus == ok` AND quorum-certified; commit `444d26a` added the
+  certification requirement), (4) Alice redeems SEQ with the preimage (reveals it on-chain), (5) Bob reads
+  the preimage and redeems the BTC leg. The BTC leg is **pluggable via the `btcBackend` interface**
+  (`pkg/xchain/btc_backend.go:26`): `LockBTCLeg` / `VerifyBTCLeg` / `ClaimBTCLeg` / `RefundBTCLeg`
+  (`elementsBTCBackend`, and `NewSwapBitcoin` for real testnet4).
+- **The catch:** that interface assumes an ON-CHAIN funded HTLC — `LockBTCLeg` returns a funded P2SH +
+  block height, `ClaimBTCLeg`/`RefundBTCLeg` return txids. A Lightning leg has none of that: it's a hold
+  invoice + an off-chain HTLC inside a channel, settled/cancelled by preimage. So a Lightning backend does
+  NOT fit `btcBackend` cleanly.
+- **Recommended approach:** generalise the parent leg to a `swapLeg` interface with two implementations —
+  the existing on-chain-HTLC leg, and a new `lnLeg` (hold invoice). `lnLeg.Lock` = issue/observe a hold
+  invoice on `H` (reverse) or prepare to pay a BOLT11 (normal); `lnLeg.Claim` = settle the hold invoice with
+  the preimage; `lnLeg.Refund` = cancel/let it time out. The orchestrator's step order and the SEQ-leg
+  anchor gate (`VerifySeqLegSafe`) stay IDENTICAL — the only Sequentia-safety rule is unchanged: the maker
+  settles the BTC-LN hold invoice ONLY after Alice's SEQ redeem is anchor-deep (step 3 before step 5's
+  LN settle). The `lnLeg` talks to a SeqLN/CLN node on Bitcoin (step 1 of §5, done) via its RPC.
+- **Hold invoices:** core CLN has the primitives (`createinvoice`, the `htlc_accepted` hook,
+  `preapproveinvoice`) but no turnkey hold command — the `lnLeg`/maker implements the hold via the
+  `htlc_accepted` hook (accept-and-hold until preimage known, then resolve), à la Boltz. This is the main
+  net-new LN plumbing.
+- **Infra to test end-to-end:** a funded BTC(testnet4) channel with inbound liquidity for the receive role
+  (hold-invoice payee). Two local SeqLN-on-Bitcoin nodes with a channel between them is the simplest
+  self-contained harness once one has testnet4 coins.
+
 ## 6. Exit criterion
 
 A non-custodial Sequentia-asset ↔ BTC-over-LN swap completed on testnets (both directions of Case A), with
