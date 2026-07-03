@@ -98,5 +98,16 @@ before adding the REVERSE take-flow and the hold-invoice option.
      (now fixed): the maker's `AnchorTimeout` defaulted to 0 (gate failed instead of waiting), and the flat
      asset-claim fee could exceed a small leg (`bad-txns-vout-negative`) — clamped with `xcSafeFee`. The
      Sequentia node also needs a fee exchange rate for the asset (`setfeeexchangerates`) for the taker to fund.
-- **THEN — REVERSE** (maker-secret first, then hold-invoice) mirrors the same driver + cmd shape, and the
-  **wallet** take-flow (Phoenix-like UX) consumes the taker driver.
+- **DONE — REVERSE (maker-secret), PROVEN LIVE END TO END** (merged to `main`): the mirror of NORMAL.
+  `RunMakerReverseSubmarine` / `RunTakerReverseSubmarine` + `SubReverse{Maker,Taker}Ops`; `cmd/seqob-maker
+  -mode lightning -side sell` posts a SELL/`LnBTCForAsset` offer and the serve loop branches on `ln_direction`;
+  `cmd/seqob-cli xsubbuy` is the taker (buys the asset with BTC-LN). Node-free handshake test green.
+  **Live e2e PASSED** (2026-07-03, same rig): maker posts the SELL offer → relay rests it → maker locks the
+  asset HTLC (claim=taker) + issues a plain invoice on H → taker VERIFIES the HTLC and runs the anchor-depth
+  gate BEFORE paying (logged `asset HTLC anchor-buried (depth=5); paying`), pays the invoice (maker receives
+  1,000,000 msat), learns P, and claims the asset on-chain. Both sides logged SETTLED. Here the anchor gate is
+  TAKER-side (pre-pay) — a plain invoice is irreversible once paid — vs maker-side in NORMAL. So BOTH
+  directions of the plugin-free submarine swap now run through the binaries.
+- **THEN — the wallet** take-flow (Phoenix-like UX) consumes the taker drivers (`RunTakerSubmarineNormal` /
+  `RunTakerReverseSubmarine`); the hold-invoice REVERSE (fully-maker-non-custodial) and asset-aware channels
+  (pure-LN) remain.
