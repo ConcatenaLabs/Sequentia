@@ -99,6 +99,12 @@ DONE — the **asset-denomination tx foundation** (the subtle, byte-identical-cr
   2of2-weight, full_channel tests green).
 - `initial_commit_tx()` threads `channel_asset` and calls `bitcoin_tx_set_output_asset()` — the OPEN
   commitment now denominates in the channel asset (commit `70211e2`; `run-full_channel` green).
+- Input witness_utxo asset: `psbt_input_set_wit_utxo_asset()` + `bitcoin_tx_add_input` routes through
+  `tx->output_asset`, so a tx's INPUTS (the funding UTXO → the elements sighash) carry the channel asset too,
+  or an asset channel's signatures would be invalid (commit `35028dc`; tx + full_channel tests green).
+- **Whole-daemon build verified:** lightningd + channeld + openingd + dualopend + closingd + onchaind + hsmd
+  all build + link cleanly with the six commits above. The tx-denomination CORE (inputs + outputs) is done and
+  integrates across every channel subdaemon; default (policy asset) is byte-for-byte identical.
 
 REMAINING for M1 (a large, funds-critical, REGTEST-GATED integration — verifiable only end-to-end, so it must
 be done carefully, not rushed):
