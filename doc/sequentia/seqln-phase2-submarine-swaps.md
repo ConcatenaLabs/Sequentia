@@ -130,10 +130,13 @@ coordinate). Phase 2 plugs into it; do NOT rebuild the SEQ leg or the anchor gat
 - **LN leg + stitching state machine IMPLEMENTED (compiles, vet-clean) in the seqdex maker daemon**
   (`pkg/xchain`, branch `phase2-submarine-ln`):
   - `leg_lightning.go` — the `LNLeg` interface + `clnLNLeg`, a minimal CLN `lightning-rpc` unix-socket
-    JSON-RPC client. `NORMAL`-direction `Pay(bolt11, wantHash, amountMsat)` uses CLN core (`decodepay` +
+    JSON-RPC client. `NORMAL`-direction `Pay(bolt11, wantHash, amountMsat)` uses CLN core (`decode` +
     `pay`) and works against a STOCK SeqLN/CLN node; it refuses to pay unless the invoice's `payment_hash`
     equals the swap `H` and double-checks the revealed preimage hashes to `H`. `REVERSE`-direction
     `CreateHoldInvoice`/`WaitHeld`/`SettleHold`/`CancelHold` drive the hold-invoice plugin (see §5d).
+    (Three live-CLN bugs were found + fixed here: the decoder command is `decode` not `decodepay`; `pay`
+    takes `invstring` not `bolt11`; and the request encoder must set `SetEscapeHTML(false)` — Go's default
+    turns `<>&` into `\uXXXX`, which CLN's JSON parser rejects, e.g. a description containing `->`.)
   - `submarine.go` — `SubmarineSwap` EMBEDS `*Swap` purely to reuse the SEQ leg unchanged
     (`VerifySEQLeg`/`LockSEQLeg`/`ClaimSEQLeg`/`RefundSEQLeg`/`WatchSEQClaim`/`InjectSecret`); the embedded
     `btcBackend` is nil and never touched (the BTC leg is the `LNLeg`). `RunNormal` and `RunReverse` are the
@@ -146,9 +149,26 @@ coordinate). Phase 2 plugs into it; do NOT rebuild the SEQ leg or the anchor gat
     deliberate WAIT for real-time anchoring to bury the tx — consistent with anchoring supremacy (it does
     not block a reorg; it declines the irreversible LN action until a reorg is implausible).
   - Helpers added: `hexEq`/`hashEqualsPreimage` (`util.go`), errors `ErrLNLegInvalid`/`ErrLNLegTimeout`.
-- **Still to do for the exit criterion:** deploy the CLN `holdinvoice` plugin on the maker's SeqLN-Bitcoin
-  node (§5d), then run both directions end to end on testnets against a live Sequentia asset HTLC + a funded
-  BTC-LN channel, and exercise the refund/timeout path.
+- **NORMAL direction PROVEN END TO END, LIVE** (`TestSubmarineRunNormalLive`, env-gated; passing run
+  2026-07-03): the SEQ asset leg on the anchored two-chain regtest, the BTC leg on REAL testnet4 Lightning
+  (the two SeqLN-on-Bitcoin nodes + the 40k channel). The run: taker mints a BOLT11 on a chosen preimage `P`
+  (payment_hash `H`) and funds the SEQ HTLC (claim=maker); the maker verifies it, the anchor gate REFUSES
+  while shallow (depth 0 < 3), the parent (Bitcoin-stand-in) chain is advanced to bury the anchor to depth 3,
+  then `RunNormal` pays the invoice over testnet4 (learning `P`), and claims the SEQ asset with `P` — the
+  same `P` settles both legs, SEQ claim confirmed with the preimage on-chain. This is the NORMAL half of the
+  §6 exit criterion WITH the anchor-depth secret-reveal gate enforced live. The LN-leg primitive alone is
+  also covered by `TestLNLegPayLive`. (The anchor gate is demonstrable deterministically because the regtest
+  SEQ chain anchors to a parent chain we control — no waiting on real Bitcoin blocks.)
+- **Still to do for the exit criterion — the REVERSE direction only:** it is fully IMPLEMENTED in code
+  (`RunReverse` + the hold methods) but its live proof is blocked on deploying a hold-invoice plugin on the
+  maker's `--network=testnet4` SeqLN node (§5d). NOTE: a correct hold invoice must construct a BOLT11 the
+  node routes to but does NOT auto-settle (the node must not know `P`), then hold the `htlc_accepted` hook
+  and resolve it with the `P` learned from the taker's on-chain SEQ claim — the tree's `tests/plugins/
+  hold_htlcs.py` shows the hook-hold mechanism but not the invoice construction, so use the mature
+  daywalker90 `holdinvoice` plugin (or port it). Then run `RunReverse` against a live asset HTLC + a
+  BTC-LN channel with inbound liquidity, and exercise the CancelHold + `RefundReverseSEQ` refund path (the
+  SEQ-leg CLTV refund itself is already proven by `TestCrossChainSwap`). Deploying a plugin on the box's
+  live node is a step to confirm with Andreas first.
 
 ## 5d. Hold invoices: plugin over RPC (decision)
 
