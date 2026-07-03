@@ -138,9 +138,39 @@ lightning-dirs `$JOB/tmp/ln{1,2}`; `--force-feerates=5000` since regtest has no 
   close are byte-behaviour-intact; the tx-core + lightningd/channeld work is proven not to regress.
 - **GOLD blocker pinned (the wallet):** issued a GOLD asset, sent 100 to ln1 — `listfunds` shows ONLY the
   policy-asset outputs; the GOLD UTXO is invisible. CLN's wallet records/coin-selects only the policy asset
-  (`amount_asset_is_main` filters in `wallet/wallet.c`). So the next milestone is teaching the wallet to
-  RECORD + COIN-SELECT a non-policy asset (record GOLD UTXOs; select them for funding; add the funding output
-  in GOLD), then the `fundchannel` asset param + open-negotiation wire. The regtest env is ready for that loop.
+  (`amount_asset_is_main` filters in `wallet/wallet.c`).
+
+## Wallet now RECORDS non-policy assets + CRITICAL libwally issuance bug fixed (2026-07-03)
+
+DONE + verified (commit `ff1f492b` main repo; libwally submodule branch `sequentia-issuance-denomination`
+commit `5bc915e3`):
+
+- **Wallet records any issued asset.** `struct utxo` gained `asset[33]`; `got_utxo()` records each output's
+  own asset+value with no policy assert; `wallet_extract_owned_outputs()` no longer skips non-policy outputs;
+  `outputs` table gained an `asset` BLOB column (migration + INSERT + every SELECT + `wallet_stmt2output`
+  read). `migrate_setup_coinmoves()` was crashing the DB migration (it runs the now-asset-aware utxo SELECT
+  *before* the asset column exists) — gave it a minimal direct query. `chaintopology` skips the policy-only
+  on-chain-invoice check for non-policy owned outputs (the wallet still records them).
+- **CRITICAL: libwally could not parse Sequentia issuance txs.** Root cause: Sequentia's `CAssetIssuance`
+  (`SequentiaByClaude src/primitives/confidential.h:200,208`) adds a 1-byte `nDenomination` after the inflation
+  keys; SeqLN vendors stock libwally 1.4.0, which under-read every issuance input by 1 byte → `wally_tx_from_
+  bytes` EINVAL → `bitcoin/block.c:231` NULL-deref → **lightningd SIGSEGV on any block with an issuance.** This
+  blocked not just asset channels but SeqLN syncing the real Sequentia chain at all (the live node only
+  survives because it hasn't re-parsed an issuance block). Patched `transaction.c` (analyze_tx count, field
+  parser + new `wally_tx_input.issuance_denomination`, `get_txin_issuance_size` +1, `tx_to_bytes` re-emit) so
+  issuance txs round-trip byte-exact; non-issuance inputs untouched. See memory
+  `seqln-issuance-denomination-parse-bug`.
+- **Verified end-to-end on liquid-regtest:** rebuilt the chain transparent-only (`blindedaddresses=0`, matching
+  Sequentia's default), issued GOLD unblinded, a node **synced past the issuance block without crashing** and
+  recorded a **100-GOLD UTXO with the correct GOLD asset tag** (DB `outputs.asset` = reversed `83053bb2…499d`).
+
+**DEPLOY NOTE:** the libwally fix lives in the `external/libwally-core` submodule (`ignore = dirty`, remote =
+ElementsProject). To ship it to the box, the submodule must be forked (e.g. `GracedEternalKingCabbageMan/
+libwally-core`), the patch pushed there, and the seqln `.gitmodules` URL + submodule pointer updated — a
+deliberate repo-structure step (not yet done). Until then the fix is local-only.
+
+Two follow-up display/UX gaps (non-blocking): `listfunds` doesn't yet expose the `asset` field; the elements
+node needs a fee exchange rate set for an asset before it will send it (`setfeeexchangerates`).
 
 REMAINING for M1 (a large, funds-critical, REGTEST-GATED integration — verifiable only end-to-end, so it must
 be done carefully, not rushed):
@@ -148,8 +178,8 @@ be done carefully, not rushed):
 2. **Wire codegen**: add channel_asset to `openingd`/`channeld`/`closingd` init messages (`.csv` +
    `tools/generate-wire.py`), so subdaemons learn the asset.
 3. `lightningd/channel.h` struct channel + **DB persistence** (schema migration) of channel_asset.
-4. **Wallet coin-selection for a non-policy funding asset** (CLN's wallet is policy-asset-centric —
-   `amount_asset_is_main` skips in `wallet.c`) + the funding output in the channel asset.
+4. Wallet **RECORDING** of non-policy assets — DONE + verified (above). Still needed: **coin-selection** by
+   asset (pick GOLD UTXOs for funding) + build the **funding output** in the channel asset.
 5. Open negotiation: `open_channel2`/`accept_channel2` `asset_id` TLV; `fundchannel` asset param.
 6. Regtest e2e: `fundchannel` a GOLD channel → CHANNELD_NORMAL → cooperative close → GOLD returns.
 
