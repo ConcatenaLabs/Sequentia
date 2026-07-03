@@ -1,71 +1,125 @@
-# Committee sizing: the cap, the sampling tables, and 3A explained again
+# Committee sizing under the (quorum-1)x2 cap: the tables, the decision the cap forces, and 3A/3B by example
 
-Reply to your 2026-07-03 note on `alberto-reply-2026-07-02-honest-splits` and
-`alberto-datanote-2026-07-02-committee-size`. Five things: (1) the section-2 cap you
-specified, and what it does; (2) the representativeness table you asked for; (3) the
-stall-probability tables at 20%, 35%, and 45% sleepy, by the hypergeometric you named;
-(4) dynamic-vs-fixed committee size and the value I suggest; (5) 3A explained again with
-a worked example. All the numbers below come from `committee-sizing-tables.py` (exact
-hypergeometric, checked in beside this note); nothing is a simulation or an estimate.
+Reply to your 2026-07-03 note. Contents: (1) your cap is exactly the right invariant, and
+enforcing it forces one concrete design decision that I spell out; (2) the representativeness
+table; (3) the stall tables at 20/35/45% sleepy, with the true cost of a stall measured from
+the code; (4) the table you asked for implicitly, malicious capture, which turns out to be the
+binding constraint on committee size; (5) dynamic vs fixed and the value I suggest; (6) 3A
+explained again with a worked example and a two-tier fix; (7) 3B the same way, and one
+mechanism that closes both. Every number is exact hypergeometric or exact binomial from
+`committee-sizing-tables.py` (checked in next to this note, pure Python, no dependencies);
+nothing is simulated or estimated.
 
-## 1. Section 2: the cap you specified is exactly the fix, and here is what it enforces
+## 1. Your cap is the right invariant, and it forces one design decision
 
-You said: committee capped at `(quorum - 1) * 2`, e.g. `(51 - 1) * 2 = 100`. That is the
-right rule and it is precisely the missing invariant. What it buys, stated plainly:
+The invariant. If two blocks at the same height each collect a quorum Q from an eligible set
+of size K, the two signer sets overlap in at least 2Q - K members. Your cap K <= (Q-1)x2
+makes that overlap at least 2: no two conflicting certificates can form unless at least two
+members sign both. Honest members with a durable signing record never sign twice, so under
+the cap an honest-node double-certification is impossible by arithmetic, and even one
+Byzantine equivocator is tolerated.
 
-If two different blocks at the same height each collect a quorum Q from a committee of N,
-their two signer sets must overlap in at least `2Q - N` members. With `N <= (Q-1)*2` that
-overlap is at least 2. So no two conflicting blocks can BOTH be certified unless at least
-two members signed both. Honest members that keep a signing record never sign twice, so
-with the cap in place a same-height double-certification cannot happen from honest nodes.
+Why the code violates it today. Membership is a per-staker threshold on a private VRF output:
+`PosVrfSlot(beta, weight, total) < 100` (pos.cpp:364). Each staker's beta is independent, so
+the eligible count is a random variable with mean 100, while the quorum stays pinned at 51
+(validation.cpp:2254). Once the pool exceeds 100 stakers, the eligible set exceeds 102 on
+roughly 40% of heights and two disjoint 51-quorums fit inside it.
 
-The bug today is that the cap is not actually enforced on the certifying set. Committee
-membership is decided by a per-staker THRESHOLD, `PosVrfSlot(...) < committee_size`
-(`pos.cpp:364`), so the number of eligible members is a random variable (Binomial), not a
-fixed 100. The quorum stays pinned at 51 (`PosQuorum`, `pos.cpp:138`). Once the staker
-pool exceeds 100, the eligible set often exceeds 100 (your datanote measured >= 102 on
-about 40% of slots at 1000 stakers), and then two DISJOINT 51-quorums fit inside it. Your
-cap closes this by construction.
+The decision the cap forces. The natural fix, "take the 100 best-ranked stakers," cannot be
+bolted onto the current sortition, and the code itself says why (pos.h:323): "with private
+sortition nobody can rank stakers (each beta is secret until published), so membership is
+threshold-based." A sleepy member never publishes its beta, so no node can ever know the true
+top-100, and any cap computed from the betas a node happens to have seen is node-local, which
+is exactly the disease we are curing. There are only two honest ways out, and the numbers
+decide between them:
 
-The clean way to enforce it is a RANK cap rather than a threshold: the committee for a
-slot is the `(quorum-1)*2` stakers with the lowest VRF slot values for that slot's seed,
-ties broken deterministically (by pubkey). Every node computes the same set from the
-registry plus the seed, so the eligible count is exactly `min(pool, cap)` on every slot,
-never more. Note the schedule path already does this (`PosCommittee`, `pos.cpp:133`, takes
-`min(pool, committee_size)` of the ranked schedule); the fix is to make the VRF/aggregate
-sortition path (`PosVrfIsCommitteeMember`) agree with it instead of using the independent
-threshold. This is consensus-level, so it cannot be switched on the live testnet (the
-running chain would re-derive membership for its ~17.6k existing blocks under the new rule
-and reject them). It folds into the planned re-genesis. Alternative to the rank cap, if
-you prefer: derive the quorum from the ACTUAL eligible count each slot (`2Q > eligible`
-holds by construction). The rank cap is simpler to validate and matches your `(quorum-1)*2`
-framing directly, so that is what I recommend.
+**Option A, public committee.** Compute membership from public data: the committee for height
+H is the first K entries of the deterministic schedule `PosSchedule(registry, seed)`, the
+ranking by H(seed || pubkey) / weight that the code already uses for leader ordering
+(pos.cpp:87-118, PosCommittee at pos.cpp:130). The seed is already
+`H(parent_anchor_hash, height)` (PosSeedForChild, pos.cpp:292-304): it comes from Bitcoin's
+proof of work, so a Sequentia producer cannot grind it, and it is fixed per height on every
+node. Every node then agrees on exactly who the K members are, K = min(pool, cap), and the
+eligible set can never exceed the cap. This is your formula, enforced by construction.
 
-One consequence worth stating, because it answers your launch concern below: while the
-staker pool is at or below the cap, the committee is the WHOLE pool, quorum is
-`pool/2 + 1`, and `2Q = pool + 2 > pool`, so two quorums always intersect. The disjoint-
-quorum split is impossible by definition until the pool grows past the cap. A small launch
-is safe; the cap only starts doing work once you have more stakers than the cap.
+**Option B, keep private sortition and out-margin the variance.** Keep the threshold rule and
+raise the quorum until two disjoint quorums are statistically impossible even at the top of
+the size distribution. Exact numbers, requiring P(eligible >= 2Q) below 1e-9 per height and
+then asking what happens at 35% sleepy:
+
+| expected committee | safe quorum | quorum as % of committee | P(stall) at 35% sleepy |
+| --- | --- | --- | --- |
+| 100 | 83 | 83% | 98.2% (chain dead) |
+| 500 | 320 | 64% | 38.3% (chain dead) |
+| 1000 | 597 | 60% | 1.64% (stall every 30 min) |
+| 2000 | 1135 | 57% | 0.0001% (stall every ~11 months) |
+| 3000 | 1663 | 55% | negligible |
+
+Private sortition with real safety margins needs a committee of two to three thousand. That
+is Algorand's regime, and it is why Algorand runs committees of that size. It contradicts
+everything you want: small, efficient, launchable with few nodes. So Option A is the answer,
+and the private VRF stays where it still earns its keep, leader election (the leader's slot
+remains secret until the proposal appears, which keeps leader-targeted DoS blind).
+
+What Option A costs. The committee for height H+1 becomes computable as soon as block H
+exists, and, since the seed only changes when the parent's Bitcoin anchor changes, an
+observer can project committees a few minutes ahead within one Bitcoin block interval. That
+is a targeted-DoS surface that private sortition does not have. Two mitigations: members are
+pubkeys, not IP addresses, and mapping key to machine is the hard part for an attacker; and
+the precedent is mainstream, Ethereum publishes its attestation committees an epoch in
+advance. I judge the trade clearly worth it; you should confirm you do too.
+
+What Option A gives back, beyond the safety fix. Two things I did not expect when I started
+measuring:
+
+1. **The certificate shrinks about 100x.** Today each certificate carries ~257 bytes per
+   member (chainparams.cpp:444, sized at `300 x 100 + 2000` = ~32 KB per block): pubkey, VRF
+   proof, BLS pubkey, proof of possession. All of it exists only to prove private-sortition
+   membership. With a public committee the member set is known to every validator from the
+   registry and the seed, so the certificate reduces to the leader signature, one 96-byte BLS
+   aggregate, and a K-bit signer bitfield (~13 bytes at K=100), with BLS keys registered once
+   at staking time instead of re-proven in every block. Cost per block drops from ~32 KB to
+   ~300 bytes. This removes the main efficiency penalty of larger committees, which matters
+   for section 5.
+
+2. **The stall probability drops 23x to 59x at the same nominal size.** Under the threshold
+   rule the committee size itself varies, and both variances count against the fixed quorum.
+   Exact comparison at 35% sleepy, target 100, quorum 51:
+
+| staker pool | threshold sortition (today) | fixed-size cap (Option A) | improvement |
+| --- | --- | --- | --- |
+| 500 | 2.39% (stall every ~20 min) | 0.041% (every ~20 h) | 59x |
+| 1000 | 2.80% | 0.083% (every ~10 h) | 34x |
+| 10000 | 3.17% | 0.14% (every ~6 h) | 23x |
+
+   So the cap is not only the safety fix, it rescues liveness at scale: with today's rule and
+   a large pool, a 35%-sleepy network would stall every twenty minutes.
+
+Spec details that come with it: quorum must derive from the actual K, not the nominal cap
+(today validation pins quorum to PosQuorum(100) even if the pool is 60, which would demand 51
+of 60, an 85% quorum; with K = min(pool, cap) and Q = PosQuorum(K), a 60-staker launch runs
+31-of-60). For odd K a bare majority gives overlap 1 instead of 2; if you want the
+one-equivocator margin at every size, use Q = floor((K+1)/2) + 1, which is identical to the
+current rule at every even K including 51-of-100. All of this is consensus-level: it cannot
+be switched on under the live chain (existing blocks would re-derive membership and fail) and
+folds into the planned re-genesis. One deployment note that makes it painless: with any cap
+of 100 or more, a re-genesis chain over the current 100-staker fleet behaves identically to
+today in normal operation, K = min(100, cap) = 100 and Q = 51, so the fix changes nothing
+observable until the pool actually grows.
 
 ## 2. Representativeness: how far the committee drifts from the staker distribution
 
-Your goal: if 33% of stakers are in Europe, 33% in the US, 33% in Asia, the committee
-should be close to 33/33/33. The relevant quantity is the standard deviation of a group's
-SHARE of the committee, under sampling without replacement (hypergeometric), with the
-finite-population correction. I report it in percentage points for a group that is `p =
-1/3` of the population (your example). It scales as `sqrt(p(1-p))`, so the largest single
-region, `p = 0.5`, is a x1.061 multiplier on these numbers; smaller regions are less. A
-committee's share of a 33% region lands within about `+/- 1.96 * SD` of 33.3% on 95% of
-slots.
+The quantity that answers your EU/US/Asia question is the standard deviation of a group's
+share of the committee under sampling without replacement (hypergeometric), with the finite
+population correction. I report the SD directly, in percentage points, for a group that is
+one third of the population; variance is its square and less readable. The worst case single
+region, one holding 50% of stakers, multiplies these numbers by 1.061; smaller regions come
+in below them.
 
-I give SD, not raw variance, because it is in the same unit as the thing you care about (a
-percentage of the committee); it is just the square root of the variance.
+**Table 1. SD of a 33.3% region's committee share, percentage points.** Rows committee size,
+columns staker population. n/a where the committee cannot exceed the population.
 
-**Table 1. SD of a 33% region's committee share, in percentage points.** Rows are
-committee size, columns are staker population. `n/a` means the committee cannot exceed the
-population.
-
-| committee \ population | 100 | 500 | 1000 | 10000 | 50000 |
+| committee | 100 | 500 | 1000 | 10000 | 50000 |
 | --- | --- | --- | --- | --- | --- |
 | 20 | 9.48 | 10.34 | 10.44 | 10.53 | 10.54 |
 | 30 | 7.24 | 8.35 | 8.48 | 8.59 | 8.60 |
@@ -75,54 +129,74 @@ population.
 | 250 | n/a | 2.11 | 2.58 | 2.94 | 2.97 |
 | 500 | n/a | 0.00 | 1.49 | 2.05 | 2.10 |
 
-Reading it:
+The same numbers as 95% ranges, population 10,000: on 95% of heights a region that is
+exactly one third of the stakers holds this share of the committee:
 
-- **Representativeness depends almost entirely on the committee SIZE, not the population.**
-  Look along any row from population 1000 rightward: the number barely moves. Once the
-  population is more than about 10x the committee, the finite-population correction is ~1
-  and the SD is set by the sample size alone. This is the single most important fact for
-  the dynamic-vs-fixed question in section 4.
-- **The population only matters when the committee is a large fraction of it.** Down the
-  left column (population 100), sampling 100-of-100 gives SD 0 (the committee IS the
-  population), and 80-of-100 gives 2.37 rather than the 5.27 you get from a large pool.
-  Taking a big slice of a small pool is what drives the error toward zero.
-- **The knee is around 80 to 100.** At committee 100 a 33% region sits at 33.3% +/- 9.2pp
-  on 95% of slots (roughly 24% to 42%). At 250 it tightens to +/- 5.8pp, at 500 to +/-
-  4.1pp: real, but diminishing, and bought at 2.5x to 5x the nodes. Below 50 it gets loose
-  fast (committee 30: +/- 16.9pp, so a region could be 16% or 50% of the committee).
+| committee | 95% range of the region's share |
+| --- | --- |
+| 30 | 16.5% to 50.2% |
+| 50 | 20.3% to 46.4% |
+| 100 | 24.1% to 42.5% |
+| 150 | 25.8% to 40.8% |
+| 200 | 26.9% to 39.8% |
+| 250 | 27.6% to 39.1% |
+| 500 | 29.3% to 37.4% |
 
-There is a second reason representativeness matters, beyond fairness: **sleepiness is
-correlated with geography** (a whole region's nodes are offline overnight in their
-timezone; one cloud provider has an outage). A committee spread evenly across regions has
-members awake in every timezone, so it is far more robust to that correlated sleep than a
-committee that happened to concentrate in one region. The stall tables in the next section
-assume INDEPENDENT sleepiness, which is optimistic; a representative committee is what
-makes that assumption closer to true.
+Readings:
 
-## 3. Stall probability, by the hypergeometric, at 20% / 35% / 45% sleepy
+- Your intuition that "a sample of 100 in general is good" is exactly the classical result,
+  and the table confirms why: away from the left column the numbers barely move as the
+  population grows. Once the population is more than about ten times the committee, accuracy
+  is set by committee size alone. This is the fact that settles dynamic-vs-fixed in section 5.
+- The population only matters when the committee is a large slice of it (left column): a
+  100-of-100 committee is the population, error zero. This is the launch regime, and it is
+  the best one.
+- The knee is around 100 to 250. Committee 100 holds a one-third region within roughly 24% to
+  42%; committee 250 within 28% to 39%; going to 500 buys little more.
+- One caveat: sortition is stake-weighted, so the committee mirrors the distribution of
+  stake, not of headcount. If Europe has a third of the stakers but half the stake, expect
+  half the committee. The tables are per unit of stake (equivalently, equal-weight stakers).
+- Representativeness is not only fairness: sleep is correlated with geography (a region's
+  night, a cloud provider's outage). A committee spread like the population always has
+  members awake somewhere, which is what makes the independence assumption in the next
+  section approximately true.
 
-You are right that this is hypergeometric. Model: the population has `N` stakers of which
-a fraction `s` are sleepy (offline); a committee of `n` is drawn without replacement; the
-number of sleepy members is `Hypergeometric(N, round(s*N), n)`. A slot STALLS when the
-awake members cannot reach quorum. Under your cap the quorum is `n/2 + 1`, so a slot
-stalls exactly when at least half the committee (`ceil(n/2)`) is asleep. `n/a` where the
-committee cannot exceed the population.
+## 3. Sleepy nodes: the stall tables, and what a stall actually costs
 
-**Table 2. P(slot stall), 20% of stakers sleepy.**
+Model, per your hypergeometric framing: the population has N stakers, a fraction s of them
+sleepy; the committee of size n is drawn without replacement; sleepy members in committee
+follow Hypergeometric(N, round(sN), n). The height stalls when awake members cannot reach
+quorum, i.e. when at least n - Q + 1 = ceil(n/2) members are asleep.
 
-| committee \ population | 100 | 500 | 1000 | 10000 | 50000 |
+Before the tables, the cost of a stall, measured from the code, because it is worse than "try
+again next block." The election seed for a height is fixed (parent anchor hash plus height,
+pos.cpp:292), so a stalled height keeps the same committee; rounds rotate the leader
+(pos_producer.cpp DriveRound) but never the committee. The stall therefore persists until the
+escaping-stall valve opens: the chain may accept a below-quorum certificate, as low as a
+single member, only once the new block's Bitcoin anchor is at least 3 blocks past the
+parent's (whitepaper section 3.8; POS_ESCAPING_STALL_ANCHOR_GAP, pos.h:338;
+validation.cpp:2257). Three Bitcoin blocks average about 30 minutes. So each stall is a
+roughly half-hour outage, after which the chain limps forward on sub-quorum blocks; those
+escape blocks are deliberately second-class, they are not immediately final (finality needs a
+full quorum, validation.cpp:3168) and they lose fork-choice to any quorum-certified sibling
+(the countersignature key, validation.cpp:136). Full-stall throughput floor: about one block
+per 30 minutes. Graceful, but you do not want to live there.
+
+**Table 2. P(height stalls), 20% sleepy.**
+
+| committee | 100 | 500 | 1000 | 10000 | 50000 |
 | --- | --- | --- | --- | --- | --- |
 | 20 | 0.065% | 0.21% | 0.23% | 0.26% | 0.26% |
-| 30 | 0.00038% | 0.014% | 0.018% | 0.023% | 0.023% |
+| 30 | 0.0004% | 0.014% | 0.018% | 0.023% | 0.023% |
 | 50 | 0 | 4e-7 | 0.0001% | 0.0002% | 0.0002% |
 | 80 | 0 | 2e-11 | 3e-10 | 2e-9 | 2e-9 |
 | 100 | 0 | 1e-14 | 9e-13 | 2e-11 | 2e-11 |
 | 250 | n/a | 0 | 6e-38 | 6e-27 | 3e-26 |
 | 500 | n/a | 0 | 0 | 9e-54 | 4e-51 |
 
-**Table 3. P(slot stall), 35% of stakers sleepy** (your central case).
+**Table 3. P(height stalls), 35% sleepy.**
 
-| committee \ population | 100 | 500 | 1000 | 10000 | 50000 |
+| committee | 100 | 500 | 1000 | 10000 | 50000 |
 | --- | --- | --- | --- | --- | --- |
 | 20 | 9.64% | 11.7% | 11.9% | 12.2% | 12.2% |
 | 30 | 3.47% | 5.93% | 6.23% | 6.49% | 6.51% |
@@ -132,9 +206,9 @@ committee cannot exceed the population.
 | 250 | n/a | 1e-12 | 1e-8 | 6e-7 | 8e-7 |
 | 500 | n/a | 0 | 8e-24 | 1e-12 | 3e-12 |
 
-**Table 4. P(slot stall), 45% of stakers sleepy** (the stress case).
+**Table 4. P(height stalls), 45% sleepy.**
 
-| committee \ population | 100 | 500 | 1000 | 10000 | 50000 |
+| committee | 100 | 500 | 1000 | 10000 | 50000 |
 | --- | --- | --- | --- | --- | --- |
 | 20 | 39.9% | 40.7% | 40.8% | 40.9% | 40.9% |
 | 30 | 33.0% | 35.1% | 35.3% | 35.5% | 35.5% |
@@ -144,190 +218,324 @@ committee cannot exceed the population.
 | 250 | n/a | 1.54% | 3.92% | 6.14% | 6.33% |
 | 500 | n/a | 0 | 0.091% | 1.21% | 1.36% |
 
-Reading them:
+Translated into expected time between half-hour outages (population 10,000, 30-second
+blocks, 2,880 heights/day):
 
-- **At 20% sleepy, everything from committee 50 up is effectively immune** (below one in a
-  million per slot). Even committee 30 is one stalled slot in ~4300.
-- **At 35% sleepy, committee 100 is comfortable: 0.14% per slot, about one stalled slot in
-  700, and it self-heals** (the next proposer / next slot simply carries on; a stall is a
-  brief liveness pause, not a split). Committee 50 is 2% (one in 50, noticeable), committee
-  30 is 6.5% (one in 15, bad).
-- **At 45% sleepy, no small committee is good.** Committee 100 stalls 18% of slots, 250
-  stalls 6%, 500 stalls 1.4%. This is inherent: with a bare-majority quorum you are asking
-  whether the majority is awake, and at 45% asleep only 55% are awake on average, so the
-  sample crosses 50% often. Larger committees help (the sample concentrates near 45% and
-  crosses 50% less), but 45% sleepy means nearly half the network is offline, which is an
-  extreme you design to survive, not to run in.
-- **The whole-population rows show a subtlety.** Committee 100 of a 100-staker pool never
-  stalls at 45% (the committee IS the pool, exactly 45 asleep, 55 awake > 51). Sampling a
-  large pool is what INTRODUCES the stall risk: with the whole small pool as committee
-  there is no sampling variance, so 45% asleep is just 45%, safely under half. Growing the
-  network past the cap is what first exposes you to draw-to-draw variance.
-
-**Why bare-majority quorum, and not 2/3.** These tables use your `(quorum-1)*2` cap, i.e. a
-51% quorum. If instead the quorum were the classic BFT 2/3 (67 of 100), a slot would stall
-whenever more than a third is asleep. At 35% sleepy that is a coin-flip per slot (~55%),
-which is unusable. So the sleepy-liveness requirement essentially FORCES the bare-majority
-quorum; your cap is not just safe, it is close to the only workable quorum under real sleep
-rates. The cost is that a bare majority tolerates only honest faults and a single
-equivocator by itself; resistance to a genuinely malicious member signing two blocks has to
-come from staking and slashing plus the durable per-height signing record, not from a
-supermajority. That is a reasonable split of duties for a staked committee, but it is a
-threat-model choice worth making on purpose.
-
-## 4. Dynamic or fixed, and the value I suggest
-
-Your instinct is right on both halves: there is a dynamic component, and there must be a
-fixed cap. Put together they give one rule:
-
-> **committee = min(staker_pool, CAP)**, quorum = committee / 2 + 1, with CAP fixed.
-
-This is dynamic while the pool is small (below CAP you take the whole pool, so the
-committee grows with the network and representativeness is perfect because you are not
-sampling at all), and fixed once the pool exceeds CAP. It is also exactly the rank-cap fix
-from section 1, so the safety fix and the sizing policy are the same mechanism.
-
-Why the cap must be FIXED, not population-proportional: Table 1 showed representativeness
-depends on committee size alone once the population is large. Growing the committee from
-100 to 500 as the network grows would only tighten a 33% region from +/- 9.2pp to +/-
-4.1pp, at 5x the signing and bandwidth cost per block. A population-proportional committee
-spends linearly more resources for a benefit that has already flattened out. So: grow to
-the cap, then stop.
-
-**Suggested CAP: 100 (quorum 51).** Reasons:
-
-- It is the knee of the representativeness curve (+/- 4.7pp SD, a 33% region within about
-  +/- 9pp on 95% of slots).
-- Stall is negligible at the realistic design point. At <= 35% sleepy it is at most 0.14%
-  per slot and self-heals; it is not a split.
-- It is the value the chain already uses, so re-genesis keeps the parameter rather than
-  introducing a new one, and 100 BLS-aggregated signatures per block is cheap (the
-  aggregate committee path already exists).
-- It handles your launch case cleanly: with 40 or 60 stakers the committee is simply all
-  40 or 60, fully representative and split-immune, and the cap only engages once you pass
-  100 stakers. You can launch small and decentralize into the cap.
-
-**If you want more margin against sustained near-half-offline conditions**, CAP = 128
-(quorum 65) roughly halves the 45%-sleepy stall (18% down to 15%) and tightens
-representativeness to +/- 4.2pp, for 28% more nodes. I would not go there unless you expect
-to routinely run with 40%+ of stakers asleep; at 35% and below, 100 and 128 are both
-effectively perfect and 100 is cheaper.
-
-**Do not go below about 80.** Committee 64 to 80 is defensible only if you are confident
-sleepiness stays under 30% and you accept +/- 5.3 to 5.9pp representativeness; it saves
-nodes but gives up margin on exactly the two failure modes you are trying to minimize.
-Below 50, both representativeness and 35%-sleepy liveness degrade sharply. The scan (at a
-50,000 population, so the finite-population correction is ~1) makes the trade explicit:
-
-| size | quorum | SD(33%) pp | stall@20% | stall@35% | stall@45% |
+| committee | 20% sleepy | 30% | 35% | 40% | 45% |
 | --- | --- | --- | --- | --- | --- |
-| 20 | 11 | 10.54 | 0.26% | 12.2% | 40.9% |
-| 30 | 16 | 8.60 | 0.023% | 6.51% | 35.5% |
-| 50 | 26 | 6.66 | 0.0002% | 2.06% | 28.4% |
-| 64 | 33 | 5.89 | 8e-8 | 0.96% | 24.8% |
-| 80 | 41 | 5.27 | 2e-9 | 0.41% | 21.5% |
-| **100** | **51** | **4.71** | **2e-11** | **0.14%** | **18.2%** |
-| 128 | 65 | 4.16 | 3e-14 | 0.034% | 14.7% |
-| 160 | 81 | 3.72 | 2e-17 | 0.0067% | 11.6% |
-| 250 | 126 | 2.97 | 3e-26 | 8e-7 | 6.33% |
-| 500 | 251 | 2.10 | 4e-51 | 3e-12 | 1.36% |
+| 50 | every ~6 months | hours | continual | continual | continual |
+| 100 | never (60,000 yr) | every ~17 days | every ~6 h | continual | continual |
+| 150 | never | every ~5 yr | every ~3.4 days | hourly | continual |
+| 200 | never | every ~540 yr | every ~45 days | every ~4 h | continual |
+| 250 | never | never (60,000 yr) | every ~1.6 yr | every ~11 h | continual |
 
-## 5. 3A explained again, with a worked example
+Readings:
 
-3A is a different disease from section 2, and the section-1 fixes do not touch it, which is
-what makes it confusing. Here it is from the start.
+- At 20% sleepy everything from committee 50 upward is effectively immune.
+- 35% sleepy is where sizes separate: committee 100 takes a half-hour outage every six
+  hours, roughly 10% downtime; committee 200 one outage per six weeks; committee 250 one per
+  year and a half.
+- At 45% sleepy no practical committee survives: the transition these curves cross sits at
+  50% asleep, and the closer s gets to it the more the sample straddles it. The chain then
+  runs at the escape-valve floor regardless of size (thousands of members would be needed to
+  change that). Treat 45% as a disaster mode the protocol survives degraded, not a design
+  point.
+- Why the quorum must stay a bare majority, exact, committee 100: with the classical BFT 2/3
+  quorum (67), P(stall) at 20% sleepy is 0.073% (a stall every ~11 hours) and at 35% sleepy
+  62% (dead). Your (Q-1)x2 formula, i.e. majority quorum, is not just compatible with sleepy
+  tolerance, it is essentially forced by it. The price is that the Byzantine margin has to
+  come from somewhere other than the quorum fraction, which is section 4.
 
-**The setup.** A block is CERTIFIED in two steps that are separated in time. First the
-committee members each emit a signature SHARE for the proposed block. Then one node (the
-assembler) collects the shares into the finished certificate and broadcasts the completed
-block. A member who emitted a share does NOT automatically hold the finished certificate;
-it only knows it contributed a share. The certificate lives in the assembled block.
+## 4. Malicious nodes: capture, the table that actually binds the committee size
 
-**The failure.** Take a committee of 4, {A, B, C, D}, quorum 3, and let H be the last
-agreed height. At H+1:
+Your goal names "attack in case malicious nodes," so here is the same hypergeometric applied
+to an adversary. A coalition holding a fraction m of the stake gets a hypergeometric number
+of committee seats each height. Two thresholds matter, and with a majority quorum they are
+nearly the same number:
 
-1. Leader A proposes block X. A, B, C emit shares for X. Three shares is quorum, so X CAN
-   be certified.
-2. A assembles X with its certificate and broadcasts the finished block.
-3. **A partition strikes exactly between the sharing and the assembly reaching everyone.**
-   The finished X reaches A's side only. B, C, D never receive it. They each emitted a
-   share, but none of them holds the finished certificate, so none of them knows X actually
-   certified.
-4. A's side sees X certified and finalizes it. A's finality floor is now H+1 = X.
-5. B, C, D see H+1 as unfinished. After the Bitcoin anchor gap, the escaping-stall rule
-   lets them treat H+1 as still open and mint a RIVAL block Y at H+1. They adopt Y (to
-   them, Y is the only H+1 block that exists). At H+2 they sign a block Z on top of Y.
-   Three signatures, so Z is fully certified at H+2. Crucially, signing Z at H+2 does NOT
-   violate a one-signature-per-height rule, because H+2 is a NEW height.
-6. Now B's chain is `... H, Y@H+1, Z@H+2` with Z certified, and A's chain is `... H, X@H+1`
-   with X certified. Work equals height here, so B's chain (height H+2) outgrows A's chain
-   (height H+1).
-7. **Heal.** A is floor-pinned to X at H+1 and rejects B's taller chain because it forks
-   below A's finalized block. B, C, D are on the Y chain with a certified Z at H+2 and
-   reject X. Permanent split, and a CERTIFIED block, X, has been orphaned by three of the
-   four honest members. No node ever signed two blocks at the same height.
+- **Veto** (liveness): with n - Q + 1 seats (50 of 100) the coalition can refuse to sign and
+  stall the height. Numerically this is the sleepy tables read at s = m, and the outcome is
+  bounded: a half-hour outage into the escape valve, unpleasant, self-healing.
+- **Capture** (safety): with Q seats (51 of 100) the coalition alone certifies. Malicious
+  members equivocate freely, so a captured height lets them certify two conflicting blocks,
+  which is a permanent double-certification split (the wedge we know operationally), and it
+  is the primitive behind the cross-chain double-spend from the 4b memo. Honest members
+  cannot counter-certify: with the cap in force, the remaining honest seats are fewer than Q
+  by construction. Anchoring does not arbitrate it, both blocks anchor to the same Bitcoin
+  block. Checkpoints bound how much history it can rewrite, nothing smaller stops it at that
+  height.
 
-**Why the earlier fixes miss it.** The durable per-height signing record (the section-1
-fix) stops a node from signing two blocks at the SAME height. But B, C, D never do that:
-they signed X's share at H+1, then signed Z at H+2, a different height. The double-signing
-channel is not present, so the signing record has nothing to catch. Section 2's cap does
-not help either: this needs only 4 members and one partition, it does not need the eligible
-set to exceed the cap.
+The adversary does not need luck on a chosen height; committee draws are public in Option A,
+so it simply waits for a height it captures and acts then. The per-height probability
+therefore converts directly into an expected time to the first attack opportunity.
 
-**The fix, in two parts.**
+**Table 5. P(coalition captures >= quorum) per height, population 50,000.** Columns are the
+coalition's share of stake. Two conservatisms: smaller populations make capture strictly
+harder (the min-stake floor of 40,000 tSEQ actually caps the registry at 10,000 entries, so
+50,000 is the worst case beyond worst case), and splitting a given stake across more keys
+does not raise the coalition's expected seats.
 
-1. **Gossip the certificate as its own object.** The quorum certificate is small and
-   self-verifying: the block hash, the set of signers, and their aggregate signature, a few
-   hundred bytes. Gossip it independently of the full block body. Then, even when the
-   assembled block X is lost to the partition, X's CERTIFICATE still floods to B, C, D. The
-   moment they receive it they learn "H+1 is certified to X", pin their finality floor to X,
-   and fetch X's body from any peer that has it. The certificate is the piece of
-   information that has to cross the partition, and today only the full block carries it.
-2. **Suppress escaping-stall at any height where a certified sibling is known.** Escaping-
-   stall exists to recover from a genuine stall where nobody certified anything. A node that
-   holds a certificate for H+1 (via the gossip in part 1) must NOT use escaping-stall to
-   mint a rival at H+1. So B, C, D, once they have X's certificate, never mint Y in the
-   first place.
+| committee | 20% | 25% | 30% | 33% | 40% | 45% |
+| --- | --- | --- | --- | --- | --- | --- |
+| 20 | 0.056% | 0.39% | 1.71% | 3.76% | 12.7% | 24.9% |
+| 30 | 0.0052% | 0.082% | 0.64% | 1.88% | 9.70% | 23.1% |
+| 50 | 5e-7 | 0.0038% | 0.093% | 0.49% | 5.73% | 19.7% |
+| 80 | 5e-10 | 4e-7 | 0.0056% | 0.070% | 2.70% | 15.6% |
+| 100 | 5e-12 | 2e-8 | 0.00088% | 0.020% | 1.67% | 13.4% |
+| 150 | 5e-17 | 1e-11 | 9e-8 | 0.00086% | 0.52% | 9.45% |
+| 200 | 6e-22 | 8e-15 | 1e-9 | 4e-7 | 0.17% | 6.77% |
+| 250 | 7e-27 | 5e-18 | 1e-11 | 2e-8 | 0.054% | 4.91% |
+| 500 | 1e-51 | 4e-34 | 2e-21 | 4e-15 | 0.00022% | 1.07% |
 
-**Same example, with the fix.** At step 3 the partition still drops the finished block X,
-but X's certificate reaches B, C, D by gossip. They pin to X at H+1 (part 1) and
-escaping-stall is suppressed there (part 2), so they never mint Y. They request X's body
-and adopt it. No rival, no split. The worst case, if X's body is briefly unavailable, is
-that B, C, D STALL at H+1 waiting for it, which is a recoverable liveness pause. The fix
-converts a permanent safety split into, at worst, a temporary stall, which is the trade you
-already accepted for the tiebreak.
+As expected time to the first captured height (30-second blocks):
 
-To be explicit about scope: the section-2 cap and the 3A fix are independent. The cap stops
-two disjoint quorums at the same height; certificate gossip stops a certificate from failing
-to cross a partition. Neither fixes the other, and both are prevention-class: neither
-reorders a certified block or weakens finality, so neither is the 4b you rejected.
+| committee | m=25% | m=30% | m=33.3% | m=40% | m=45% |
+| --- | --- | --- | --- | --- | --- |
+| 100 | 46 yr | 39 days | 1.8 days | 30 min | minutes |
+| 150 | 80,000 yr | 10 yr | 41 days | 1.6 h | minutes |
+| 200 | never | 950 yr | 2.4 yr | 5 h | minutes |
+| 250 | never | 90,000 yr | 53 yr | 16 h | minutes |
+| 500 | never | never | never | 156 days | 48 min |
 
-## 6. 3B, briefly, plus a testing note
+And as a tolerance statement, the largest coalition a size withstands:
 
-**3B (the round-advance re-vote), one paragraph so you have it while you re-read.** The
-round number is a pure function of wall-clock time (`DriveRound`). If the round-0 leader
-L1 gathers its quorum right at a round boundary, but L1's assembled block propagates slower
-than one round, the nodes that have not yet seen L1 advance to round 1 by their clocks and
-re-sign the round-1 leader L2 at the SAME height, while L1's round-0 shares are still live
-and assemblable. If both cohorts reach quorum, both L1 and L2 certify at that height, and
-the nodes that re-voted signed BOTH. That is a second way honest nodes double-sign, driven
-by the clock, not by memory loss. The fix is a round-change lock: do not back a round-1
-rival at a height while an earlier-round block there could still certify. Say the word and I
-will write 3B up as its own worked example like section 5.
+| committee | capture rarer than once a decade | rarer than once a century |
+| --- | --- | --- |
+| 100 | 26.0% | 24.3% |
+| 128 | 28.5% | 27.0% |
+| 150 | 30.0% | 28.5% |
+| 200 | 32.3% | 31.0% |
+| 250 | 34.0% | 33.0% |
+| 500 | 38.5% | 37.8% |
 
-**Testing, since you want stakers > committee empirically.** You do not need another box.
-Run more staker processes than the committee cap on the hardware you have: a sandbox with,
-say, 60 stakers and committee 30 (or 100 stakers and committee 30, the config in your
-datanote) already has pool > committee, so the disjoint-quorum window from section 2 is
-open on about a third of slots and an induced partition can demonstrate the actual split.
-The same sandbox is where you confirm the rank cap CLOSES it: with the fix, the eligible
-set is `min(pool, cap)` every slot and the window probability drops to 0. This lines up
-with your point that we have caught real issues only in empirical scenarios, and it fits
-the re-genesis plan (a separate cluster now for observation, the fix folded into
-re-genesis, not switched on the live chain).
+Readings, and they are the crux of the sizing question:
 
----
+- **Capture, not sleepiness, is what binds the committee size.** Committee 100 is fine
+  against sleepy nodes at 35%, but a coalition with one third of the stake captures a quorum
+  within two days. Committee 100 defends, for practical horizons, against coalitions up to
+  about a quarter of the stake.
+- **The classical one-third Byzantine bound costs about 250 members.** Committee 250 holds
+  a one-third coalition to one opportunity in ~53 years and a 30% coalition to one in
+  ~90,000 years. Committee 200 gets to 32%, just shy.
+- **Above roughly 40% no practical committee defends by sampling.** The margin to the 50%
+  quorum line is too thin; this is the same mathematics as the 45%-sleepy row. Against a
+  near-half coalition the defenses are economic (a 40% stakeholder attacking the chain is
+  burning its own asset; min stake 40,000 tSEQ each, CSV-locked), forensic (with the durable
+  signing record and certificate gossip, a double-certification carries compact cryptographic
+  proof of who equivocated, the natural basis for slashing later), and structural
+  (checkpoints cap the rewrite depth; anchoring means the attack cannot touch Bitcoin legs of
+  swaps that waited for anchor depth). Those defenses exist at any committee size; the table
+  is about what sampling alone guarantees.
+- The escape valve is also attack surface: any stall, sleepy or veto-induced, lets a single
+  member certify after the gap, and a coalition always has members in the committee. What
+  keeps this contained is that sub-quorum blocks never gain immediate finality and lose
+  fork-choice to quorum siblings; the 3A fixes below close the remaining abuse of that valve
+  (minting a rival where a certificate exists). It is one more reason to size the committee
+  so stalls stay rare.
 
-Numbers: `doc/sequentia/committee-sizing-tables.py` (exact hypergeometric, no external
-deps). Nothing here is implemented in consensus code yet; the rank cap, certificate gossip,
-and round-change lock are all consensus-level and yours to weigh, same as before.
+## 5. Dynamic vs fixed, and the value I suggest
+
+The rule that answers both halves of your question:
+
+> committee K = min(staker pool, CAP), quorum Q = PosQuorum(K), CAP a fixed constant.
+
+This is dynamic exactly where dynamism helps and fixed exactly where it must be. While the
+pool is at or below the CAP, the committee is the whole pool: representativeness is perfect
+(no sampling), capture requires a true majority of stake, disjoint quorums are impossible,
+and a network of 40 stakers runs 21-of-40. That is your small launch, safe by construction.
+Past the CAP, the committee stops growing, because the tables say growth stops buying:
+representativeness saturates (Table 1, flat along each row), sleepy immunity at the design
+point saturates (Table 3), and the certificate cost, after Option A, is a bitfield, so the
+only quantity that keeps improving with size is the tolerated coalition share, with sharply
+diminishing returns after ~250 (34% at 250 against 38.5% at 500).
+
+A population-proportional cap (say committee = pool/10) is strictly worse than a fixed one:
+below it wastes the perfect-representation regime, above it spends linearly more signatures
+and latency for a benefit Table 1 shows flattening out.
+
+**Suggested CAP: 250, quorum 126.** The reasons, in the order the tables give them:
+
+- It is the smallest size that clears the classical one-third Byzantine bound with real
+  margin (34% once-a-decade, 33% once-a-century tolerance).
+- Sleepy liveness at the stress point becomes a non-issue: at 35% sleepy, one half-hour
+  outage per ~1.6 years, against one per six hours at CAP 100.
+- Representativeness: a one-third region stays within 27.6% to 39.1% of the committee on 95%
+  of heights.
+- Efficiency no longer opposes it. This is what changed my recommendation from the obvious
+  "keep 100": under Option A the certificate is ~300 bytes regardless of K (a 250-bit
+  bitfield is 32 bytes), the gossip round timing at K=250 is 500+25x250 = 6.75 s of
+  collection window and 700+35x250 = 9.45 s rounds (pos_producer.cpp:961), comfortable in a
+  30-second slot, and the schedule sort is microseconds. The old 32 KB-per-block, 257-bytes-
+  per-member cost that made 100 feel like a ceiling is an artifact of private sortition, and
+  it goes away with it.
+- It costs nothing until it binds. With min(pool, CAP) the chain runs whole-pool committees
+  until 250 stakers exist; on the current 100-staker fleet the re-genesis chain behaves
+  identically to today (100-member committee, quorum 51).
+
+If you weigh raw committee size harder than the one-third bound, CAP 200 (quorum 101) keeps
+a 32% tolerance and one 35%-sleepy outage per six weeks; CAP 100 is the floor I would defend,
+26% tolerance and 10% downtime if a 35%-sleepy day ever happens. Below 100 the capture column
+degrades fast (committee 50 loses to a 30% coalition within a day). My pick is 250; the cap
+is one constant at re-genesis, and every number you need to move it later is in the scan
+table at the end of the script.
+
+## 6. 3A explained again, with the example you asked for
+
+First, one precision on your restatement, because it locates the fix exactly. The co-signers
+do see the full proposed block: a member validates the complete proposal before signing it
+(TestBlockValidity, pos_producer.cpp:1023) and signs its hash. What a member never learns, if
+the partition hits, is whether the certificate completed, because the certificate is not part
+of what it signed: the member set and aggregate signature live in the block's proof solution,
+which is deliberately excluded from the signed hash so that shares are non-interactive
+(pos.h:255-266). So the dangerous object is not the block, which the co-signers already hold,
+it is the few hundred bytes of completed certificate. That asymmetry is the whole problem,
+and the whole fix.
+
+**The failure, step by step.** Committee {A, B, C, D}, quorum 3, last agreed height H.
+
+1. Leader A proposes block X at H+1. A, B, C validate X and flood their signature shares.
+   Each of them now holds a full, validated copy of X, and knows only that it emitted a
+   share.
+2. A (any node with a quorum of shares may do this) assembles the certificate into X and
+   broadcasts the finished block.
+3. The partition lands exactly here: the finished X reaches only A's side. B, C, D emitted
+   shares but never see the completed certificate. They cannot distinguish "X certified" from
+   "X died with the leader."
+4. A's side connects X, sees a quorum certificate, marks H+1 immediately final. Finality
+   floor: X.
+5. On the other side, nothing arrives at H+1. After the Bitcoin anchor advances 3 blocks, the
+   escaping-stall valve opens, and B, C, D mint a rival Y at H+1 (sub-quorum, legal under the
+   valve). Then at H+2 they produce Z on top of Y with all three signatures: a full quorum.
+   Nobody signed two blocks at the same height; Z is at a new height.
+6. Heal. A's side is pinned to final X at H+1 and rejects the taller Y-Z chain as forking
+   below finality. B, C, D's side has full-quorum Z at H+2 and rejects X. A certified block
+   has been orphaned by an honest supermajority on one side, a finalized block wedges the
+   other: permanent split, no equivocation anywhere, so the durable signing record (the
+   section-1 fix of the last memo) never triggers, and the hash tiebreak never runs because
+   the sides are pinned, not tied.
+
+**Tier 1 of the fix: gossip the certificate as its own object, and gate the valve on it.**
+
+The certificate is self-verifying and tiny: block hash, signer bitfield, one BLS aggregate,
+roughly 300 bytes against a block of up to 200 KB. Flood it as an independent gossip message
+the moment any node assembles it. Two protocol rules attach:
+
+- A node that receives a valid certificate for height H+1 pins its finality floor to that
+  block, exactly as if it had connected it, and fetches the body if it lacks it. Committee
+  members usually need no fetch at all, they validated the proposal before signing; they
+  attach the certificate and connect.
+- The escaping-stall valve is suppressed at any height where the node knows a certificate
+  (this is 4a's "do not treat the height as vacant" hold, keyed on certificates instead of
+  anchor verdicts).
+
+Replay the example: at step 3 the 200 KB block is lost to one side, but the 300-byte
+certificate crosses on any surviving path, and it is retransmitted by every node that has it,
+not just the assembler. B, C, D receive it, pin to X, connect it (they already hold X), and
+step 5 never happens. The realistic failure, a lossy flood or a slow link at the wrong
+moment, is closed, because the object that must cross shrank by three orders of magnitude
+and gained every gossip path and every holder as a sender.
+
+**The honest residual, and Tier 2.** If the partition is total, no path exists for even 300
+bytes, and it lasts longer than the ~30-minute anchor gap, the B, C, D side still cannot
+learn of X. At that point no protocol can give both sides progress and safety; the only
+choice is which one loses. Tier 2 chooses safety, in 4a's style: a member that share-signed X
+at H+1 must not sign any block, at H+1 or any later height, whose chain excludes X, until it
+has both waited out the escape gap and actively queried its reachable peers for a certificate
+at H+1 and heard nothing. In the example, B, C, D hold instead of building on Y-Z: the worst
+case degrades from a permanent split to the partitioned minority stalling until heal, which
+is the CAP trade-off you already chose everywhere else in Sequentia (a stall is recoverable,
+a split is not). The cost is real but bounded: if X genuinely died with its leader (no
+certificate exists anywhere), the same hold delays that height by the gap plus one query
+round before the members may back a rival. If you want a wider safety margin at share-signed
+heights specifically, the gap there can be lengthened (say 6 anchor blocks instead of 3)
+without touching normal operation. Neither tier reorders a certified block or weakens
+finality; both prevent the second certificate from forming. Neither is 4b.
+
+## 7. 3B, the same treatment, and one mechanism that closes both
+
+The mechanics, with the real constants at committee 100: after the round-0 leader's proposal
+is seen, nodes collect proposals for WINDOW = 500+25x100 = 3.0 s, then rounds of ROUND =
+700+35x100 = 4.2 s rotate the leadership; the round index is pure wall clock from the round-0
+leader's block timestamp (pos_producer.cpp:961-987). When the round index advances, a node
+re-signs the new round's leader at the same height (m_signed_round < round_index,
+pos_producer.cpp:1008). Its earlier-round shares are not revoked by this; they are already
+flooded and sit in other nodes' collections, assemblable (pos_producer.cpp:1042-1051).
+
+**Worked example.** Committee 100, quorum 51. Round-0 leader L1's proposal carries timestamp
+T. Rounds: round 0 ends at T+3.0+4.2 = T+7.2 s.
+
+1. By T+7.0 s, 51 shares for L1's block X have reached one aggregator, which assembles X and
+   starts broadcasting.
+2. X's flood takes 1.5 s. At T+7.2 s the clock rolls every node that has not yet connected X
+   into round 1. Suppose 60 members are in that set: they now sign round-1 leader L2's block
+   X' at the same height. Among them are at least 11 members whose round-0 shares for X are
+   in flight or already collected (51+60 > 100 forces overlap).
+3. X' reaches 51 shares by T+9 s and assembles. Both X and X' now carry valid quorum
+   certificates at the same height. The 11 overlap members signed both, honestly: the round
+   schedule told them to.
+
+That is the second honest double-signing channel: no amnesia, no partition even, just a
+certificate that completes near a round boundary and propagates slower than one round. It
+breaks the "only via memory loss" reasoning the same way section 2's variance did.
+
+**The fix, and it is the same mechanism as Tier 2.** State it once, per height:
+
+> Having share-signed block X at height H in round r, do not sign any other block at H (any
+> round), and do not sign at any height above H on a chain excluding X, until X's
+> certifiability has lapsed: the round has advanced, you have queried peers for a certificate
+> on X, heard nothing for a grace period, and, for heights (3A), the escape gap has passed.
+
+For 3B the grace period is small, one extra round (4.2 s) plus a certificate query before
+backing L2, which is exactly the propagation margin the example lacked; a genuinely failed
+round 0 (leader crashed before assembling) costs one round of delay, which is what round
+rotation costs anyway. For 3A the lapse condition is the anchor gap plus the query. One rule,
+two bugs: it removes the protocol-induced re-vote channel entirely (an honest member can no
+longer hold live shares on two blocks at one height) and converts the 3A residual from split
+to stall. It also restores the arithmetic your cap gives us: with the cap enforcing overlap 2
+and no honest path to a double signature, a same-height double-certification requires two
+actually-Byzantine members, which is Table 5's problem, not an honest network's.
+
+## 8. Testing, per your directive: pool larger than committee, no new box
+
+Agreed, and the empirical record supports you, the last three real bugs were caught by
+scenario, not review. All of this fits the existing box (the sandbox is lighter than the live
+100-node committee):
+
+1. **Deterministic functional test** (style of feature_pos_certified_sibling_guard.py, which
+   reproduced the 96/4 race): a regtest cluster with pool > committee under the current
+   threshold rule, netsplit injected, asserting the disjoint-quorum double-certification
+   fires; then the same test against the capped committee, asserting it cannot. Red today,
+   green with the fix: the regression test for section 1.
+2. **Sandbox cluster** on the box: ~150 staker processes, cap 30 (quorum 16), the datanote
+   config where the vulnerable window is open on about a third of heights, with induced
+   partitions, to watch a real split happen and then not happen. The same cluster, with
+   stakers tagged EU/US/Asia synthetically, measures representation against Table 1, and
+   with 20/35/45% of processes stopped measures stall frequency against Tables 2 to 4 and
+   the 30-minute outage cost against section 3.
+3. **3A/3B race harness**: the partition timed into the share-to-assembly window (3A) and a
+   delayed-flood race at the round boundary (3B), first to reproduce each split, then to
+   verify certificate gossip and the share-lock close them. 3A and 3B were medium-confidence
+   in the last memo precisely because I could not exercise them on the live committee; this
+   is where they become either demonstrated or retired.
+
+## 9. What I need from you
+
+1. **Section 2 fix**: confirm Option A, the public fixed-size committee (this is the only
+   implementation of your (Q-1)x2 cap compatible with a small committee), with private VRF
+   retained for leader election.
+2. **CAP value**: my recommendation is 250 (quorum 126); 200 and 100 are the documented
+   fallbacks, the trade is Table 5's tolerance column.
+3. **Quorum from actual K** = min(pool, CAP), and whether you want the odd-K variant that
+   keeps the overlap at 2 for every size.
+4. **3A Tier 1**, certificate gossip plus valve suppression: go/no-go.
+5. **The unified share-lock** (3A Tier 2 + 3B): go/no-go, and if go, whether the escape gap
+   at share-signed heights stays 3 anchor blocks or widens.
+6. The test plan in section 8.
+
+Items 1 to 3 are the re-genesis committee spec; 4 and 5 are node-local prevention rules that
+could roll earlier, like 4a did. Nothing here reorders certified blocks or weakens finality;
+every fix is prevention-class. Nothing is implemented yet; on your confirmation I will build
+it with the tests of section 8 first.
+
+Numbers: doc/sequentia/committee-sizing-tables.py, exact hypergeometric and binomial tails,
+runs anywhere Python does.
