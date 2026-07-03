@@ -194,10 +194,42 @@ single-asset funding tx.
   selects only the policy asset and never touches GOLD.
 
 The channel 2-of-2 **funding output** is now just `psbt_append_output_asset` with a p2wsh script — the
-primitive is proven. **Next for M1:** thread the channel asset through the open negotiation
-(`fundchannel`/`openchannel_init` -> `openingd`/`dualopend` `add_funding_output` in the asset + the
-`asset_id` TLV) and cooperative close (`create_close_tx`/closingd), then run a real GOLD `fundchannel` ->
-CHANNELD_NORMAL -> close on the 2-node regtest.
+primitive is proven.
+
+## M1 DONE — GOLD channel opens to CHANNELD_NORMAL + cooperative close (2026-07-03)
+
+Commit `ac829e0a` (seqln `sequentia-stable`): the single-funder open path (openingd) is asset-aware, so a
+Lightning channel can be **funded in an issued asset** end to end.
+
+- `fundchannel_start` gains an `asset` param -> `funding_channel.channel_asset` -> `openingd_funder_start`
+  (new `channel_asset` wire field). `open_channel` carries the asset in a new `asset_id` TLV
+  (`open_channel_tlvs` type 3); the fundee adopts it (absent TLV == policy asset, so ordinary opens are
+  wire-identical). Both sides `memcpy` the negotiated asset onto `channel->channel_asset` right after
+  `new_initial_channel()`, so the already-asset-aware `initial_commit_tx()` builds **byte-identical GOLD
+  commitment txs** on funder + fundee. openingd returns the asset to lightningd in `openingd_funder_reply`/
+  `openingd_fundee`; `wallet_commit_channel` stamps it on the new channel.
+- Fixed the asset-blind asserts that crashed/blocked GOLD channels: `bitcoin_tx_compute_fee` /
+  `psbt_input_get_amount` / `bitcoin_tx_output_get_amount_sat` now read the raw explicit value instead of
+  asserting the policy asset; the `watch.c` funding-output watch matches the funding amount by raw value (it
+  is pinned to the exact scriptpubkey+outpoint) so a GOLD funding output fires the lockin callback.
+- **Verified on liquid-regtest** (raw `fundchannel_start`/`fundchannel_complete` + the asset-aware
+  `fundpsbt`/`addpsbtoutput`, since the `multifundchannel` plugin is not yet asset-aware): a 10-GOLD channel
+  opened -> **CHANNELD_NORMAL on both nodes** (single-asset GOLD funding tx: 10 GOLD funding + GOLD change +
+  GOLD fee) -> cooperative close -> **CLOSINGD_COMPLETE**. The open succeeding at all proves both peers built
+  the same GOLD commitment tx (mismatched sigs would have failed `funding_signed`). Default (no-asset) opens
+  are unchanged.
+
+The commit-tx + closing-tx builders were already asset-driven via `channel->channel_asset`, so no channeld/
+closingd changes were needed for the no-HTLC path.
+
+**Remaining for a production M1 / next milestones:**
+- **DB persistence** of `channel_asset` (channels table column + save/load) so an asset channel survives a
+  lightningd restart (currently in-memory only; fine for a single session).
+- `listfunds`/`listpeerchannels` **asset display** (RPC output field), and the `multifundchannel` plugin +
+  `openchannel_init`/`dualopend` (v2 dual-funding) asset path, so the normal `fundchannel` RPC works without
+  the manual PSBT dance.
+- **M2**: HTLCs denominated in the asset (the 11 commit_tx call sites + channeld amount audit) -> a GOLD
+  payment across the channel. Then M3 (onchaind/force-close), M4 (invoices+routing), M5 (pure-LN swap).
 
 REMAINING for M1 (a large, funds-critical, REGTEST-GATED integration — verifiable only end-to-end, so it must
 be done carefully, not rushed):
