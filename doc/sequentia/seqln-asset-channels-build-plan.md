@@ -105,6 +105,24 @@ DONE — the **asset-denomination tx foundation** (the subtle, byte-identical-cr
 - **Whole-daemon build verified:** lightningd + channeld + openingd + dualopend + closingd + onchaind + hsmd
   all build + link cleanly with the six commits above. The tx-denomination CORE (inputs + outputs) is done and
   integrates across every channel subdaemon; default (policy asset) is byte-for-byte identical.
+- **lightningd + channeld channel_asset path** (commit `f92bcce`): channel_asset in lightningd's struct channel
+  (defaulted to policy; not yet DB-persisted → defaults on reload), threaded through the `channeld_init` wire
+  (byte,33) — lightningd sends it, channeld overrides its policy-defaulted initial_channel with it. Wire
+  codegen regenerated; both build+link. So channeld denominates its initial commitment in the channel asset.
+
+REMAINING — the wallet-coupled OPEN linchpin (traced; e2e-only-verifiable, needs a live regtest debug loop):
+- In dual-funding (dualopend) the funding output is already IN the PSBT — dualopend just `find_txout`s it. So
+  making it GOLD lives in **lightningd's dual-funding PSBT construction + wallet coin-selection** (select GOLD
+  inputs, add the funding output in GOLD). This is the funds-critical wallet piece.
+- Plus: an `asset` param on the `fundchannel`/`openchannel_init` RPC → set lightningd `channel->channel_asset`;
+  thread it into the `dualopend`/`openingd` init wire (so they build the initial commitment in GOLD); the
+  `open_channel2` `asset_id` TLV so the accepter learns it; the `closingd_init` wire + `create_close_tx`
+  channel_asset for the coop close; and hsmd signing (should follow automatically since the PSBT witness_utxos
+  now carry the asset).
+- These are tightly coupled through lightningd's wallet/funding and produce no live signal until a full
+  `fundchannel(GOLD)` → CHANNELD_NORMAL runs, so they MUST be built in an iterative build-run-debug regtest
+  loop (rebuild + 2-node Sequentia regtest + attempt open + read logs + fix), not blind. That is the dedicated
+  next effort; the tx-core + channeld path above is the reusable foundation it plugs into.
 
 REMAINING for M1 (a large, funds-critical, REGTEST-GATED integration — verifiable only end-to-end, so it must
 be done carefully, not rushed):
