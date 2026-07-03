@@ -87,7 +87,30 @@ reason multi-asset LN routing was declared dead).
 - **Amounts:** integer atoms per the asset; follow Taproot Assets — keep BOLT11/onion fields structurally
   intact, carry asset id + integer amount, apply display precision at the wallet layer.
 
-## First step
+## Progress (SeqLN `sequentia-stable`; all commits byte-for-byte identical by default, tests green)
 
-M0: add `channel_asset` to `struct channel` (both defs), default = `fee_asset_tag`, plumb it through the
-channeld/onchaind init messages, add `amount_asset_is(amount, asset)` — all no-behavior-change, Phase 1 green.
+DONE — the **asset-denomination tx foundation** (the subtle, byte-identical-critical layer):
+- `amount_asset_is(amount, asset_id)` primitive; `amount_asset_is_main` delegates to it (commit `ed4fc18`).
+- `channel_asset[33]` in the shared commitment `struct channel`, defaulted to the policy asset in
+  `new_initial_channel()` (commit `7d3da5f`; `run-full_channel` green).
+- Per-tx `output_asset` on `struct bitcoin_tx` (default = policy asset) so setting it once denominates a whole
+  tx (to_local/to_remote/HTLC + the fee output) in the channel asset; fee-computation + get_amount paths use
+  it too. `wally_tx_output_asset()` variant + `bitcoin_tx_set_output_asset()` (commit `067832a`; tx-encode,
+  2of2-weight, full_channel tests green).
+- `initial_commit_tx()` threads `channel_asset` and calls `bitcoin_tx_set_output_asset()` — the OPEN
+  commitment now denominates in the channel asset (commit `70211e2`; `run-full_channel` green).
+
+REMAINING for M1 (a large, funds-critical, REGTEST-GATED integration — verifiable only end-to-end, so it must
+be done carefully, not rushed):
+1. `create_close_tx()` + closingd: thread channel_asset (cooperative close in the asset).
+2. **Wire codegen**: add channel_asset to `openingd`/`channeld`/`closingd` init messages (`.csv` +
+   `tools/generate-wire.py`), so subdaemons learn the asset.
+3. `lightningd/channel.h` struct channel + **DB persistence** (schema migration) of channel_asset.
+4. **Wallet coin-selection for a non-policy funding asset** (CLN's wallet is policy-asset-centric —
+   `amount_asset_is_main` skips in `wallet.c`) + the funding output in the channel asset.
+5. Open negotiation: `open_channel2`/`accept_channel2` `asset_id` TLV; `fundchannel` asset param.
+6. Regtest e2e: `fundchannel` a GOLD channel → CHANNELD_NORMAL → cooperative close → GOLD returns.
+
+Then M2 (commit_tx + HTLCs in the asset; the 11 commit_tx call sites), M3 (onchaind/force-close), M4
+(invoices+routing), M5 (pure-LN cross-network swap). Each is further multi-day funds-critical work with no
+prior art. The tx foundation above is the reusable core the rest builds on.
