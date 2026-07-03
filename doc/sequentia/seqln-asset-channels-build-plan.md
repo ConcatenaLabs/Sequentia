@@ -223,8 +223,11 @@ The commit-tx + closing-tx builders were already asset-driven via `channel->chan
 closingd changes were needed for the no-HTLC path.
 
 **Remaining for a production M1 / next milestones:**
-- **DB persistence** of `channel_asset` (channels table column + save/load) so an asset channel survives a
-  lightningd restart (currently in-memory only; fine for a single session).
+- ~~DB persistence of `channel_asset`~~ **DONE** (commit `3aa834d1`): `channels.channel_asset` column +
+  save in `wallet_channel_save` + load in `wallet_stmt2channel` (NULL -> policy). Verified: a GOLD channel's
+  asset is stored as the GOLD tag, and after restarting lightningd the channel reloads to CHANNELD_NORMAL and
+  cooperatively closes (CLOSINGD_COMPLETE), which only validates if the reloaded asset is GOLD. NB: upgrading an
+  existing node's DB on a non-release (`-modded`) build needs `--database-upgrade=true` once.
 - `listfunds`/`listpeerchannels` **asset display** (RPC output field), and the `multifundchannel` plugin +
   `openchannel_init`/`dualopend` (v2 dual-funding) asset path, so the normal `fundchannel` RPC works without
   the manual PSBT dance.
