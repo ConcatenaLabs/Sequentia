@@ -164,10 +164,13 @@ commit `5bc915e3`):
   Sequentia's default), issued GOLD unblinded, a node **synced past the issuance block without crashing** and
   recorded a **100-GOLD UTXO with the correct GOLD asset tag** (DB `outputs.asset` = reversed `83053bb2…499d`).
 
-**DEPLOY NOTE:** the libwally fix lives in the `external/libwally-core` submodule (`ignore = dirty`, remote =
-ElementsProject). To ship it to the box, the submodule must be forked (e.g. `GracedEternalKingCabbageMan/
-libwally-core`), the patch pushed there, and the seqln `.gitmodules` URL + submodule pointer updated — a
-deliberate repo-structure step (not yet done). Until then the fix is local-only.
+**DEPLOY — DONE.** The libwally fix is now shippable: forked to `GracedEternalKingCabbageMan/libwally-core`
+(public), pushed to branch `sequentia-issuance-denomination` (commit `5bc915e3`); seqln `.gitmodules` now
+points at the fork + branch and the submodule pointer records `5bc915e3` (seqln `sequentia-stable` commit
+`ee0fcaab`, pushed). A fresh `git clone --recursive` (or `submodule update --init`) delivers the patch —
+verified. When pulling on the box, run `git submodule sync && git submodule update --init` after `git pull`
+so the changed submodule URL is picked up (a plain `submodule update` would still try the old ElementsProject
+URL and fail to find `5bc915e3`).
 
 Two follow-up display/UX gaps (non-blocking): `listfunds` doesn't yet expose the `asset` field; the elements
 node needs a fee exchange rate set for an asset before it will send it (`setfeeexchangerates`).
