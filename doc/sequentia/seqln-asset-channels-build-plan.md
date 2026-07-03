@@ -228,9 +228,13 @@ closingd changes were needed for the no-HTLC path.
   asset is stored as the GOLD tag, and after restarting lightningd the channel reloads to CHANNELD_NORMAL and
   cooperatively closes (CLOSINGD_COMPLETE), which only validates if the reloaded asset is GOLD. NB: upgrading an
   existing node's DB on a non-release (`-modded`) build needs `--database-upgrade=true` once.
-- `listfunds`/`listpeerchannels` **asset display** (RPC output field), and the `multifundchannel` plugin +
-  `openchannel_init`/`dualopend` (v2 dual-funding) asset path, so the normal `fundchannel` RPC works without
-  the manual PSBT dance.
+- ~~`listfunds`/`listpeerchannels` asset display + `multifundchannel` plugin~~ **DONE** (commit `816fd758`):
+  `fundchannel id amount asset=GOLD` now opens a GOLD channel to CHANNELD_NORMAL in ONE call (the plugin
+  threads `asset` to fundchannel_start + fundpsbt and builds the 2-of-2 funding output via
+  `psbt_insert_output_asset`); `psbt_elements_normalize_fees` was fixed to balance per-asset (it emitted a
+  policy fee = whole input for a GOLD tx). `listfunds` outputs + `listpeerchannels`/`listfunds` channels
+  surface a non-policy asset's display id. Still TODO: `openchannel_init`/`dualopend` (v2 dual-funding) asset
+  path; `psbt_compute_fee` has the same policy-only bug (only matters for onchaind/anchor/force-close = M3).
 - **M2**: HTLCs denominated in the asset (the 11 commit_tx call sites + channeld amount audit) -> a GOLD
   payment across the channel. Then M3 (onchaind/force-close), M4 (invoices+routing), M5 (pure-LN swap).
 
