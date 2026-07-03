@@ -1,0 +1,71 @@
+# SeqLN Phase 2 → SeqDEX/wallet integration plan
+
+Phase 2 delivered the submarine-swap PRIMITIVES (both directions, proven live; see
+`seqln-phase2-submarine-swaps.md`). This note maps them onto the EXISTING SeqDEX order-book
+architecture so a wallet user can trade a Sequentia asset ↔ BTC-over-Lightning. It is the §5b-style
+seam map for the integration layer, grounded in the live code (`~/seqdex/daemon`, branch `main`).
+
+## 1. What already exists (reuse, do not rebuild)
+
+- **Order-book offer schema** (`api-spec/protobuf/seqob/v1/offer.proto`): the settlement `oneof` already
+  reserves `LightningTerms lightning = 22`, and `LightningTerms` is drafted with the fields the primitives
+  need: `ln_direction` (0 = ASSET_ONCHAIN_FOR_BTC_LN, 1 = BTC_LN_FOR_ASSET_ONCHAIN), `maker_claim_pub`,
+  `maker_refund_pub`, `onchain_cltv`, `maker_issues_hold_invoice` (selects the two REVERSE modes), and
+  `max_0conf_amount`. The Offer also carries `min_anchor_depth` (=16), `maker_ln_node_pubkey` (=17), and
+  `ln_connect_hints` (=18). So the schema is additive-ready — likely NO proto change needed for v1.
+- **Cross-chain driver + courier pattern** (`internal/seqob/client/xdriver.go`, `xdriver_reverse.go`,
+  `xcourier.go`): the maker runs an opaque relay-couriered lift handshake and settles via the `XcOps` seam
+  bound to `*xchain.Swap` (`LiveXcOps`). Everything from the peer is untrusted (re-derived scripts,
+  byte-compared, checked against the SIGNED offer). This is the exact shape the submarine flow mirrors,
+  minus the on-chain BTC leg.
+- **Maker application service** (`internal/core/application/xchainmaker/{maker.go,handler.go,
+  handler_reverse.go}`) + gRPC (`api-spec/.../seqdex/v1/xchain.proto`): constructs the swap
+  (`NewSwap`/`NewSwapBitcoin`) and drives Verify/Lock/Claim. The Lightning path adds a sibling that
+  constructs `NewSubmarineSwap` instead.
+- **The proven submarine primitives** (`pkg/xchain/{leg_lightning.go,submarine.go}`): `SubmarineSwap`
+  (`RunNormal`, `OfferReverseMakerSecret`/`AwaitReversePayment`, `RunReverse`), `clnLNLeg`, and the
+  anchor-depth gate `VerifySeqAnchorBuried`.
+
+## 2. Net-new for the integration (build order)
+
+1. **Config: the maker's LN node.** Add the maker's `lightning-rpc` socket path (and derived
+   `maker_ln_node_pubkey` via `clnLNLeg.NodeID()`) to the daemon config, alongside the existing SEQ/BTC
+   chain config. This is the only new external dependency (a SeqLN-on-Bitcoin node; already running for the
+   tests). The BTC *chain* backend is NOT needed for the LN leg.
+2. **Submarine seam.** A thin `SubmarineOps`-style binding (mirroring `LiveXcOps`) over `*SubmarineSwap`, OR
+   call `SubmarineSwap` directly from the handler — it is already a high-level orchestrator (unlike
+   `*xchain.Swap`, which needed the `XcOps` wrapper). Decide by whether the courier handshake wants a
+   fake-able seam for tests (the on-chain driver did).
+3. **Submarine courier handshake** in a new `xdriver_submarine.go`: negotiate H, the maker's LN endpoint,
+   the asset-HTLC terms, and the direction over the SAME opaque relay courier (`xcourier.go`). NORMAL: taker
+   funds the asset HTLC + hands the maker a BOLT11; maker gates + pays + claims. REVERSE (maker-secret):
+   maker locks the asset + returns the invoice; taker gates + pays + claims. This is the bulk of the work;
+   it reuses the courier/crypter, not settlement.
+4. **Handler dispatch.** In the maker service, branch on `offer.GetLightning()` to the submarine driver,
+   as the existing code branches on `GetSameChain()`/`GetCrossChain()`.
+5. **Taker/wallet flow.** The taker side (in the wallet) must, for the maker-secret REVERSE, run the
+   anchor-depth gate (`VerifySeqAnchorBuried >= min_anchor_depth`) BEFORE paying, and surface it honestly
+   (never "final" at 0-conf; §DEX-0conf policy). For NORMAL the wallet funds the asset HTLC and mints the
+   BOLT11 with a chosen preimage.
+6. **UX (later):** the wallet Swap screen shows Lightning offers and lets a user take one; per the SeqOB UX
+   directive, never error "no price" — show the book and let the user post their own LN offer as maker.
+
+## 3. Open design forks (need a steer before step 3)
+
+- **Which REVERSE mode does the DEX default to?** The shipped, plugin-free **maker-secret / taker-gated**
+  mode works against a stock node TODAY and fits a wallet/DEX that controls its own taker client (it runs
+  the gate). The **hold-invoice / maker-gated** mode (`RunReverse`) is strictly more maker-protective for a
+  public maker serving arbitrary takers, but needs the hold-invoice plugin on the node (task #20). The
+  offer schema already carries `maker_issues_hold_invoice` to advertise which a given maker supports, so
+  both can coexist — but v1 should implement one end-to-end first.
+- **Relay-courier session shape for submarine swaps.** Reuse the existing `SwapMsg` opaque frames
+  (`xcourier.go`) verbatim, or add a submarine-specific session type? The legs differ (one side is an LN
+  invoice, not an on-chain HTLC), so the courier PAYLOADS differ even if the transport is identical.
+- **0-conf caps + fee policy** for the LN leg (`max_0conf_amount`, `min_anchor_depth` defaults per pair).
+
+## 4. Smallest shippable first slice
+
+Implement the **NORMAL** direction end-to-end through the daemon (taker sells an asset for BTC-LN): it needs
+no plugin, no new proto, and reuses the courier. That makes "sell a Sequentia asset, receive BTC on
+Lightning" work from the wallet against the live maker, and is the lowest-risk way to prove the integration
+before adding the REVERSE take-flow and the hold-invoice option.
