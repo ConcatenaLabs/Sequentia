@@ -175,14 +175,38 @@ URL and fail to find `5bc915e3`).
 Two follow-up display/UX gaps (non-blocking): `listfunds` doesn't yet expose the `asset` field; the elements
 node needs a fee exchange rate set for an asset before it will send it (`setfeeexchangerates`).
 
+## Asset-aware coin selection + funding output DONE + broadcast-verified (2026-07-03)
+
+Commit `27019a6d` (seqln `sequentia-stable`): the wallet can now select an issued asset and build a
+single-asset funding tx.
+
+- `wallet_find_utxo()` takes an `asset` and never mixes assets — only returns UTXOs of that asset, defaulting
+  to the policy asset when NULL. This also closes a latent bug: now that non-policy UTXOs are recorded, the
+  old (unfiltered) selection could have grabbed a GOLD UTXO and spent its value as policy sats.
+- `fundpsbt` / `addpsbtoutput` accept an optional `asset` (display id, parsed to the 33-byte `0x01||reversed`
+  tag). `finish_psbt` denominates the change and the elements fee output in that asset; `psbt_using_utxos`
+  tags each input with its own `utxo->asset`. New `psbt_append_output_asset` builds outputs in a given asset.
+  Result: the whole funding tx is single-asset (Sequentia's open fee market lets the fee be paid in the
+  channel asset), which is exactly what keeps the downstream commitment tx single-asset.
+- **Broadcast-verified on liquid-regtest:** `fundpsbt asset=GOLD` -> `addpsbtoutput asset=GOLD` -> `signpsbt`
+  -> `sendpsbt` produced a **consensus-valid, on-chain-confirmed single-asset GOLD tx** (1 GOLD input of 100;
+  outputs: 50 GOLD dest + 49.9999 GOLD change + 0.0000 GOLD fee, all GOLD). The default (no-asset) path still
+  selects only the policy asset and never touches GOLD.
+
+The channel 2-of-2 **funding output** is now just `psbt_append_output_asset` with a p2wsh script — the
+primitive is proven. **Next for M1:** thread the channel asset through the open negotiation
+(`fundchannel`/`openchannel_init` -> `openingd`/`dualopend` `add_funding_output` in the asset + the
+`asset_id` TLV) and cooperative close (`create_close_tx`/closingd), then run a real GOLD `fundchannel` ->
+CHANNELD_NORMAL -> close on the 2-node regtest.
+
 REMAINING for M1 (a large, funds-critical, REGTEST-GATED integration — verifiable only end-to-end, so it must
 be done carefully, not rushed):
 1. `create_close_tx()` + closingd: thread channel_asset (cooperative close in the asset).
 2. **Wire codegen**: add channel_asset to `openingd`/`channeld`/`closingd` init messages (`.csv` +
    `tools/generate-wire.py`), so subdaemons learn the asset.
 3. `lightningd/channel.h` struct channel + **DB persistence** (schema migration) of channel_asset.
-4. Wallet **RECORDING** of non-policy assets — DONE + verified (above). Still needed: **coin-selection** by
-   asset (pick GOLD UTXOs for funding) + build the **funding output** in the channel asset.
+4. Wallet **RECORDING** + **coin-selection** + **funding output** of non-policy assets — DONE + verified
+   (below).
 5. Open negotiation: `open_channel2`/`accept_channel2` `asset_id` TLV; `fundchannel` asset param.
 6. Regtest e2e: `fundchannel` a GOLD channel → CHANNELD_NORMAL → cooperative close → GOLD returns.
 
