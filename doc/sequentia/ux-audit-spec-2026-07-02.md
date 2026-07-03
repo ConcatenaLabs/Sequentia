@@ -502,3 +502,75 @@ backup/verify, reference-currency total on home, any-asset send with a true pre-
 anchor-gated cross-chain swap, opt-in confidential receive, shared-tb1 messaging on Receive. Bridge: honest
 about being centralized, and the release is correctly gated on Bitcoin-anchor finality (never a Sequentia
 block count).
+
+## 7. Alberto's UI/UX requests (2026-07-02), mapped
+
+Relayed by Andreas. Each item is marked COVERED (already a finding above; cross-referenced) or NEW, with a
+concrete fix. Several motivate one new cross-cutting theme.
+
+**T15 (new theme). Now that HTTPS + the domain are live, sweep every explorer/API/backend link base to
+`https://sequentiatestnet.com`, and make same-origin explorer links include the `/explorer/` prefix.** The
+wallet's tx links already use `/explorer/tx/...` but the asset-id link omits the prefix (W1 below); Ambra
+still defaults to the plain-HTTP raw IP (`ambra/app/lib/config.dart:11`) and has a Sequentia-only explorer URL
+(`config.dart:38`). One sweep across surfaces.
+
+### Web wallet
+- **W1 (NEW, P1) Asset-id link lands on the greeting page.** Expect: clicking an asset id opens its explorer
+  page. Reality: `index.html:1371` links `/asset/<hex>` (root-relative), but the explorer is served under
+  `/explorer/`, so `/asset/...` hits the SPA catch-all and redirects to the greeting page (what Alberto saw as
+  "159.195.15.140"); the tx links correctly use `/explorer/tx/...` (e.g. `index.html:1661`). Fix:
+  `/explorer/asset/<hex>`, and audit every explorer link for the `/explorer/` prefix.
+- **W2 (extends the "label it before sending" P1 + T9) Store and show wallet-local asset labels, marked as
+  local.** Expect: a name you gave an asset persists and shows even when the price server/registry does not
+  know it, visibly distinguished from registry/price-server labels. Reality: no labeling UI; unknown assets
+  show raw hex. Fix: persist user labels and render them with a "local label (not in the registry)" marker
+  (small badge or italics) so the user knows it is wallet-only.
+- **W3 (NEW, P2) Info/help on the asset-creation page.** Expect: an info button explaining, with examples: how
+  the name you give relates to the price server/registry and how the wallet determines price; if the
+  functionality is active, how to connect to another price server; what "precision" means; what "reissue"
+  means; and what "burn" means (does it burn my balance, other people's, all wallets?). Reality: no help
+  affordance; these are opaque. Fix: a per-field info popover with plain-language explanations and one worked
+  example each for precision, reissue, and burn.
+- **W4 (extends "no thousand separators", DEX P2 / wallet P3) Thousand separators everywhere + a locale
+  decimal/grouping toggle.** Expect: grouped amounts (1,250,000.5) in all displays across the web wallet AND
+  Ambra, plus a setting to swap comma/dot for locales that reverse them. Reality: plain digit strings; only
+  `refValueStr` groups. Fix: group thousands in all display contexts; add a Settings toggle for decimal and
+  grouping style; keep inputs tolerant of both.
+- **W5 (NEW, P2) Reissue shows the destination address.** Expect: the reissue flow shows where the newly
+  minted tokens go. Reality: not shown. Fix: display and confirm the reissuance destination address in the
+  reissue modal.
+
+### Staking and swap (Alberto wants documentation first)
+- **S1 (NEW, docs + UX) Staking is a black box.** Alberto cannot yet specify improvements because the mechanics
+  are undocumented: when you stake in the web wallet, which node manages it, how you benefit, who co-signs
+  blocks, how you monitor it. Requirement: (a) user-facing documentation of the staking model, and (b) a
+  staking UX that does more than freeze coins behind one button (show what the stake does, its status and
+  rewards, and how to monitor it). Relates to "stake list is device-local fiction" (wallet P2). Blocked on the
+  docs.
+- **S2 (reframes T14) Market-buy is the primary DEX use case, not trading.** Expect: the headline Swap action
+  is "spend X of asset A, receive Y of asset B at the market price", where entering the spend amount instantly
+  fills the receive amount at the current best book price (and the reverse), and the entry can be denominated
+  in the reference currency (e.g. "buy $1,000 of tSEQ"). Limit orders are a secondary, less-used tab. Reality:
+  the composer auto-quotes against the best offer but has no market-buy framing, no reference-currency-
+  denominated entry, and it is take-only when the book is non-empty (T14). Fix: a market-buy/sell mode as the
+  default (one-sided entry, auto-fill from the book, reference-currency amount supported); limit orders behind
+  a secondary control. Open design question Alberto raised: is a "market order" a dynamic order-book entry, and
+  must a maker close and reopen an order when the price moves? Resolve this in the order-book design before
+  implementing (likely: takers hit resting offers at market; makers reprice by cancel + repost, or a future
+  auto-reprice; document the answer).
+- **S3 (NEW, docs) Atomic-swap documentation.** Document how the same-chain atomic swap and the cross-chain
+  HTLC actually work, for both users and the implementing team.
+
+### Ambra transaction history
+- **B1 (NEW, P2) Show date and time** on each history row (`ambra/app/lib/history_screen.dart`); currently
+  absent.
+- **B2 (NEW, P2) Show the USD value at the time of the tx** (Alberto: value at tx time, not current). Requires
+  capturing the price at broadcast/confirmation and storing it (or backfilling from a price history).
+- **B3 (extends Ambra "History fee hardcoded tSEQ" P1) Show the fee and its unit-of-account value for outgoing
+  txs**, in the correct fee asset (fix the tSEQ hardcode at `history_screen.dart:271` via the `fee_asset` add
+  to `TxRow`) plus a USD equivalent.
+- **B4 (NEW, P2) Filters/ordering** at the top of history: by date, asset type, asset amount, fee asset type.
+- **B5 (NEW, P2) Drop the txid from the list view** (still reachable in the row detail) and, for outgoing txs,
+  use the freed space for an optional **description/memo**: a wallet-DB-stored note, character-limited (pick a
+  limit that fits the row), set at create/broadcast time and, if UX-clean, editable in the tx detail view.
+  Good cross-wallet feature; consider the web wallet too.
