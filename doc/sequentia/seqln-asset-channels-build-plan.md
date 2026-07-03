@@ -124,6 +124,24 @@ REMAINING — the wallet-coupled OPEN linchpin (traced; e2e-only-verifiable, nee
   loop (rebuild + 2-node Sequentia regtest + attempt open + read logs + fix), not blind. That is the dedicated
   next effort; the tx-core + channeld path above is the reusable foundation it plugs into.
 
+## Regtest loop — LIVE, policy path RUNTIME-verified, GOLD blocker pinned (2026-07-03)
+
+Stood up a 2-node Sequentia lightning regtest (elementsd `-chain=liquid-regtest`, whose policy asset matches
+CLN's `liquid_regtest_fee_asset`; two lightningd built from `sequentia-stable` with these changes; port 17300 /
+lightning-dirs `$JOB/tmp/ln{1,2}`; `--force-feerates=5000` since regtest has no fee estimate).
+- **Runtime bug caught + fixed** (commit `3e50f69`): a chain-PARSED / CLONED bitcoin_tx skipped `bitcoin_tx()`'s
+  `output_asset` init → the asset-aware `get_amount_sat` assert read garbage and aborted lightningd on a wallet
+  output. Fixed via `set_default_output_asset()` in `pull_bitcoin_tx_only`/`clone_bitcoin_tx`. Unit tests
+  missed it; the live loop caught it immediately.
+- **Policy-asset channel fully verified with all changes:** `fundchannel` → CHANNELD_NORMAL on both nodes → a
+  50k-sat payment (HTLC + commit_tx) completed → cooperative close → CLOSINGD_COMPLETE. So open + operate +
+  close are byte-behaviour-intact; the tx-core + lightningd/channeld work is proven not to regress.
+- **GOLD blocker pinned (the wallet):** issued a GOLD asset, sent 100 to ln1 — `listfunds` shows ONLY the
+  policy-asset outputs; the GOLD UTXO is invisible. CLN's wallet records/coin-selects only the policy asset
+  (`amount_asset_is_main` filters in `wallet/wallet.c`). So the next milestone is teaching the wallet to
+  RECORD + COIN-SELECT a non-policy asset (record GOLD UTXOs; select them for funding; add the funding output
+  in GOLD), then the `fundchannel` asset param + open-negotiation wire. The regtest env is ready for that loop.
+
 REMAINING for M1 (a large, funds-critical, REGTEST-GATED integration — verifiable only end-to-end, so it must
 be done carefully, not rushed):
 1. `create_close_tx()` + closingd: thread channel_asset (cooperative close in the asset).
