@@ -14,7 +14,7 @@
 
 ## 2. Lightning-on-Sequentia feasibility (asset-denominated channels) — Analysis A
 
-Running Lightning on Sequentia is technically feasible for **single-asset channels** because every script Lightning needs (HTLC hashlock + CLTV, `to_self_delay` via CSV, revocation/penalty branch, anchor outputs, PTLC/Taproot) is plain Bitcoin Script, and Elements/Sequentia is a strict superset. It was done in limited form on Liquid in 2019 (c-lightning `--network liquid`, L-BTC only), but that path was never productized and Core Lightning has since dropped Liquid entirely. What actually ships today is **swaps, not channels** (Blockstream's 2025 Boltz integration; PeerSwap).
+Running Lightning on Sequentia is technically feasible for **single-asset channels** because every script Lightning needs (HTLC hashlock + CLTV, `to_self_delay` via CSV, revocation/penalty branch, anchor outputs, PTLC/Taproot) is plain Bitcoin Script, and Elements/Sequentia is a strict superset. It was done in limited form on Liquid in 2019 (c-lightning `--network liquid`, L-BTC only). **CORRECTION (2026-07-02 research): CLN did NOT drop Liquid** — Elements support (`liquid`/`liquid-regtest` in `bitcoin/chainparams.c`) is in-tree and CI-tested against Elements Core 23.2.1; it is L-BTC-only and dormant, not removed. What actually ships in production Liquid LN is still **swaps, not channels** (Blockstream's Boltz integration; PeerSwap). See the full fork spec `seqln-core-lightning-fork-spec.md`.
 
 What it takes, in increasing difficulty:
 
