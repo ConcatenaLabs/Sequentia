@@ -80,19 +80,23 @@ before adding the REVERSE take-flow and the hold-invoice option.
   recovers `P`, the taker gets paid, and a maker quoting the wrong `seq_amount` is refused. This is the
   protocol logic — the hard part — and it is at parity with the on-chain cross-chain driver (both are
   driver+test; the cmd wiring below is the last mile for BOTH).
-- **NEXT — cmd wiring to run it through the binaries (an operational e2e slice):**
-  1. `cmd/seqob-maker`: add an `lnSocket` config flag (the maker's SeqLN-Bitcoin `lightning-rpc`); in the
-     lift-session dispatch (currently `reverse := o.GetCrossChain().GetDirection()...`), branch on
-     `o.GetLightning() != nil` → build `NewMakerOps` returning `&client.LiveSubMakerOps{Sub:
-     xchain.NewSubmarineSwap(seqChain, xchain.NewCLNLNLeg(lnSocket), xchain.NewHashLockFromHash(h))}` and call
-     `RunMakerSubmarineNormal`.
-  2. Offer posting: let the maker post a `LightningTerms` offer (ln_direction=ASSET_ONCHAIN_FOR_BTC_LN,
-     maker_ln_node_pubkey).
-  3. `internal/seqob/validator`: accept + sanity-check `GetLightning()` offers (mirror the `GetCrossChain`
-     branch).
-  4. `cmd/seqob-cli`: a submarine lift command → `RunTakerSubmarineNormal` (mints the invoice on a chosen P,
-     funds the asset HTLC, awaits its BTC-LN; `RefundTakerSubmarine` after T_seq).
-  5. Live e2e: maker + relay + taker binaries against the two SeqLN-on-Bitcoin nodes + a Sequentia node.
-     This is an operational run (needs the running services), best done as a focused cycle.
+- **DONE — cmd wiring, PROVEN LIVE END TO END through the binaries** (merged to `main`):
+  1. `cmd/seqob-maker`: `-mode lightning` (+ `-ln-socket`, `-sub-anchor-depth`, `-onchain-cltv`);
+     `runSubmarineMaker` posts a NORMAL Lightning offer and `serveSubmarine` dispatches
+     `RunMakerSubmarineNormal` (no bitcoind — only the Sequentia node + the maker's `lightning-rpc`). The
+     maker BUYS the asset for BTC-LN (`trade_dir=BUY`, `ln_direction=LnAssetForBTC`).
+  2. Offer posting: `buildSubmarineOffer` (base=asset, quote=BTC sentinel, `maker_ln_node_pubkey` from
+     `NodeID()`).
+  3. `internal/seqob/validator`: `checkLightning` accepts `GetLightning()` offers; `offer.LnDirectionConsistent`
+     (the maker's trade side is the INVERSE of the flow name, unlike cross-chain).
+  4. `cmd/seqob-cli xsublift`: the taker sells the asset for BTC-LN via `RunTakerSubmarineNormal`, persisting
+     the asset refund material before funding.
+  5. **Live e2e PASSED** (2026-07-03, isolated regtest + relay + the two SeqLN-on-Bitcoin nodes): maker posts
+     the offer → relay validates + rests it → taker funds the asset HTLC + mints a BOLT11 on `P` → maker gates
+     on anchor depth (buried by a parent-chain block generator), pays the invoice (taker receives 1,000,000
+     msat), learns `P`, and claims the asset on-chain. Both sides logged SETTLED. The run caught two real bugs
+     (now fixed): the maker's `AnchorTimeout` defaulted to 0 (gate failed instead of waiting), and the flat
+     asset-claim fee could exceed a small leg (`bad-txns-vout-negative`) — clamped with `xcSafeFee`. The
+     Sequentia node also needs a fee exchange rate for the asset (`setfeeexchangerates`) for the taker to fund.
 - **THEN — REVERSE** (maker-secret first, then hold-invoice) mirrors the same driver + cmd shape, and the
   **wallet** take-flow (Phoenix-like UX) consumes the taker driver.
