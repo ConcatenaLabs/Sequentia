@@ -111,6 +111,26 @@ coordinate). Phase 2 plugs into it; do NOT rebuild the SEQ leg or the anchor gat
   (hold-invoice payee). Two local SeqLN-on-Bitcoin nodes with a channel between them is the simplest
   self-contained harness once one has testnet4 coins.
 
+## 5c. Progress (live on testnet)
+
+- **Step 1 done:** the same SeqLN binary runs `--network=testnet4` on real Bitcoin (bcli -> box testnet4
+  bitcoind via tunnel, `/usr/local/bin/bitcoin-cli`), fully synced, "Server started" — dual-chain validated.
+- **BTC-LN channel + bidirectional payments done** (the maker's LN-leg foundation): two SeqLN-on-Bitcoin
+  nodes, funded node 1 with 0.0008 tBTC from the `w` wallet (left the DEX `seqdex-mm-btc` untouched),
+  opened a 40k-sat channel (`fundchannel ... push_msat=10000000msat`) -> CHANNELD_NORMAL after one
+  testnet4 block, and routed payments BOTH ways (3000 sat n1->n2 and 2000 sat n2->n1, both complete;
+  `lntb` invoices). So SeqLN does genuine Bitcoin Lightning end to end, both send and receive.
+- Two fixes were needed and are general (committed to `sequentia-stable`): (a) `--force-feerates` now
+  satisfies `unknown_feerates()` (`chaintopology.c`) so a node whose backend does no fee estimation
+  (Sequentia, or a sparse testnet4 node) can open channels with `--force-feerates`; (b) operational
+  gotcha: CLN reserves `min-emergency-msat` (25k sat default, anchor force-close fees) on the Bitcoin
+  path, so leave headroom above channel + funding-fee + 25k when sizing a small funded node. Also: keep
+  lightningd + all subdaemons + plugins at the SAME build (version-string check `bad version` kills the
+  node if you rebuild only lightningd).
+- **Still net-new (the real cross-chain work, in the seqdex maker daemon — see §5b):** the hold invoice
+  (via the `htlc_accepted` hook — confirmed as the mechanism; belongs in the Go maker, not a throwaway
+  plugin), the `lnLeg`/`swapLeg` generalisation, and the LN<->SEQ stitching with the anchor-depth gate.
+
 ## 6. Exit criterion
 
 A non-custodial Sequentia-asset ↔ BTC-over-LN swap completed on testnets (both directions of Case A), with
