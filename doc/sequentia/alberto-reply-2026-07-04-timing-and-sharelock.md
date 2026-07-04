@@ -131,8 +131,8 @@ clocks (pos_producer.cpp:942-951). The "about 8 seconds" you remember is T + 3.0
 4.2 s (one round) = T + 7.2 s, the end of round 0 at K=100. It is not measured or averaged
 from anything; both numbers come from the two formulas above with K = 100.
 
-The failure, in those terms. Block X gathers its 51st share at T + 7.0 s, just inside round
-0. Some node assembles the certificate and starts flooding it, but flooding a block takes a
+The failure, in those terms. Block X gathers its 51st share at T + 7.0 s, just inside
+round 0. Some node assembles the certificate and starts flooding it, but flooding a block takes a
 second or two, and at T + 7.2 s the clock rolls into round 1. Every member that has not yet
 seen assembled-X now signs round 1's leader at the same height. Their round-0 shares for X
 are already out and remain valid, so X's certificate still completes. If the round-1 block
