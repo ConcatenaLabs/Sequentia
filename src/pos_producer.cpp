@@ -40,12 +40,11 @@ using node::BlockAssembler;
 using node::CBlockTemplate;
 using node::IncrementExtraNonce;
 
-namespace {
 //! Derive a staker's BLS secret seed deterministically from its secp256k1
 //! staking key (domain-separated by a tag), so a staker needs no separate BLS
-//! key to manage. The matching BLS public key and proof-of-possession are
-//! published per-block in the coinbase SEQBLS commitment; validators never
-//! derive it (they read it from the block).
+//! key to manage. Declared in pos.h (global) so the config layer and the
+//! getblsregistration RPC can derive a staker's committee registration; the
+//! registered BLS public key MUST equal BlsDerivePubKey of this seed.
 std::vector<unsigned char> PosBlsSeedFromKey(const CKey& key)
 {
     static const std::string tag = "sequentia/pos-bls/v1";
@@ -54,6 +53,22 @@ std::vector<unsigned char> PosBlsSeedFromKey(const CKey& key)
              .Write(key.begin(), key.size())
              .Finalize(out);
     return std::vector<unsigned char>(out, out + 32);
+}
+
+namespace {
+//! Build the signer bitfield for a bitfield BLS certificate (impl spec Option A
+//! phase 2): bit i is set iff the i-th member of the ordered public committee
+//! is in `signers`. Producer and validator derive the committee identically, so
+//! the certificate needs no member keys — the validator reads them from the
+//! registry by committee position.
+std::vector<unsigned char> BuildSignerBitfield(const std::vector<CPubKey>& committee,
+                                               const std::set<CPubKey>& signers)
+{
+    std::vector<unsigned char> bf;
+    for (size_t i = 0; i < committee.size(); ++i) {
+        if (signers.count(committee[i])) PosBitfieldSet(bf, i);
+    }
+    return bf;
 }
 
 //! Build the leader's unsigned BLS committee block extending the active tip:
@@ -369,7 +384,18 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
             err_kind = PosProduceError::MISC;
             return false;
         }
-        block.proof.solution = BuildPosBlsSolution(leader_sig, *agg_sig, bls_members);
+        if (g_pos_public_committee) {
+            // Bitfield certificate (impl spec Option A phase 2): name the
+            // signers by a bitfield over the ordered public committee instead
+            // of carrying each member's key and proof.
+            const StakeRegistry& reg = StakeRegistry::GetInstance();
+            std::vector<CPubKey> committee = PosPublicCommittee(reg, seed);
+            std::set<CPubKey> signers;
+            for (const PosBlsMember& m : bls_members) signers.insert(m.pubkey);
+            block.proof.solution = BuildPosBlsBitfieldSolution(leader_sig, *agg_sig, BuildSignerBitfield(committee, signers));
+        } else {
+            block.proof.solution = BuildPosBlsSolution(leader_sig, *agg_sig, bls_members);
+        }
         countersigs = (int)bls_members.size();
     } else if (!parts->agg_key.empty()) {
         std::vector<unsigned char> leader_sig;
@@ -1258,7 +1284,16 @@ int64_t PosProducer::DriveRound()
                 auto agg = BlsAggregate(shares);
                 if (agg) {
                     final_block = std::make_shared<CBlock>(*backed);
-                    final_block->proof.solution = BuildPosBlsSolution(leader_sig, *agg, members);
+                    if (g_pos_public_committee) {
+                        // Bitfield certificate (impl spec Option A phase 2).
+                        const StakeRegistry& reg = StakeRegistry::GetInstance();
+                        std::vector<CPubKey> committee = PosPublicCommittee(reg, PosSeedForChild(tip));
+                        std::set<CPubKey> signers;
+                        for (const PosBlsMember& m : members) signers.insert(m.pubkey);
+                        final_block->proof.solution = BuildPosBlsBitfieldSolution(leader_sig, *agg, BuildSignerBitfield(committee, signers));
+                    } else {
+                        final_block->proof.solution = BuildPosBlsSolution(leader_sig, *agg, members);
+                    }
                     final_hash = backed->GetHash();
                     members_n = members.size();
                     m_collected.clear();   // assembled; do not re-assemble until the tip advances
@@ -1483,8 +1518,12 @@ PosGossipAction PosProducer::OnShare(const PosShare& share)
     if (weight == 0) return PosGossipAction::Invalid;
     if (g_pos_public_committee) {
         // Membership is the deterministic schedule prefix; the share's VRF
-        // proof is vestigial in this mode and not verified.
+        // proof is vestigial in this mode and not verified. The share must be
+        // signed with the member's REGISTERED BLS key, since the certificate's
+        // aggregate is verified against registry keys — a share under any other
+        // key would only assemble into a certificate that fails validation.
         if (!PosPublicCommitteeSet(reg, seed).count(share.pubkey)) return PosGossipAction::Invalid;
+        if (reg.GetBls(share.pubkey) != share.bls_pubkey) return PosGossipAction::Invalid;
     } else {
     uint256 beta;
     if (!VrfVerify(share.pubkey, Span<const unsigned char>(seed.begin(), 32), share.vrf_proof, beta)) return PosGossipAction::Invalid;
@@ -1574,17 +1613,11 @@ PosGossipAction PosProducer::OnCertificate(const CBlockHeader& header)
     // Certificates exist only under the BLS committee (the certificate is the
     // header's proof solution, member-independent block hash).
     if (!g_pos_bls || g_pos_committee_size <= 1) return PosGossipAction::Ignore;
-    // Structural checks: provable garbage is penalised.
+    // Structural: it must be the BLS challenge form.
     std::optional<PosChallengeParts> parts = ParsePosBlockChallenge(header.proof.challenge);
     if (!parts || !parts->is_bls) return PosGossipAction::Invalid;
-    std::optional<PosBlsCertificate> cert = ParsePosBlsSolution(header.proof.solution);
-    if (!cert || cert->members.empty()) return PosGossipAction::Invalid; // an unsigned header is not a certificate
-    std::set<CPubKey> named;
-    for (const PosBlsMember& m : cert->members) {
-        if (!named.insert(m.pubkey).second) return PosGossipAction::Invalid; // duplicate member
-    }
-    // Parent lookup: gives the height and the slot seed. A certificate on an
-    // unknown branch cannot be verified — neither pin nor relay it.
+    // Parent lookup: gives the height and the slot seed / registry context. A
+    // certificate on an unknown branch cannot be verified — neither pin nor relay.
     const CBlockIndex* parent;
     bool already_have = false;
     {
@@ -1596,22 +1629,41 @@ PosGossipAction PosProducer::OnCertificate(const CBlockHeader& header)
     if (already_have) return PosGossipAction::Ignore; // nothing new: the block itself already arrived
     if (!parent) return PosGossipAction::Ignore;
     const int height = parent->nHeight + 1;
+    const StakeRegistry& reg = StakeRegistry::GetInstance();
+    // The leader signature (and structural size) is self-contained and objective,
+    // so provable garbage is penalised. Under the bitfield form this is all
+    // CheckProof verifies; the aggregate is registry-dependent (below).
+    if (!CheckProof(header, m_chainparams.GetConsensus())) return PosGossipAction::Invalid;
     // Only a FULL-quorum certificate pins anyone: a sub-quorum escaping-stall
     // block is deliberately second-class (never immediately final, loses
     // fork-choice to quorum siblings) and must not suppress production.
-    // Membership and quorum mirror ConnectBlock's rules; these are
-    // registry-dependent, so failures are ignored (not penalised) — the
-    // registry follows OUR active tip, which may not be the cert's branch.
-    const StakeRegistry& reg = StakeRegistry::GetInstance();
-    if ((int)named.size() < PosSlotQuorum(reg)) return PosGossipAction::Ignore;
-    if ((int)named.size() > PosMaxCommitteeMembers()) return PosGossipAction::Ignore;
-    const uint256 seed = PosSeedForChild(parent);
+    int signer_count = 0;
     if (g_pos_public_committee) {
-        const std::set<CPubKey> committee = PosPublicCommitteeSet(reg, seed);
-        for (const CPubKey& m : named) {
-            if (!committee.count(m)) return PosGossipAction::Ignore;
+        // Bitfield certificate: aggregate + membership verified against the
+        // registry via the SAME helper as ConnectBlock (so gossip-accept and
+        // block-validation cannot diverge). Registry-dependent failures are
+        // subjective (Ignore, our tip may not be the cert's branch); only a
+        // malformed structure is objective (Invalid).
+        std::string reason;
+        const int signers = PosVerifyBitfieldCertificate(header, parent, reg, reason);
+        if (signers < 0) {
+            return reason == "bad-posbls-bitfield-malformed" ? PosGossipAction::Invalid : PosGossipAction::Ignore;
         }
+        if (signers < PosSlotQuorum(reg)) return PosGossipAction::Ignore;
+        signer_count = signers;
     } else {
+        // Full-member certificate: members carry their own keys and VRF proofs;
+        // membership and quorum mirror ConnectBlock, registry-dependent so
+        // failures are ignored (not penalised).
+        std::optional<PosBlsCertificate> cert = ParsePosBlsSolution(header.proof.solution);
+        if (!cert || cert->members.empty()) return PosGossipAction::Invalid; // an unsigned header is not a certificate
+        std::set<CPubKey> named;
+        for (const PosBlsMember& m : cert->members) {
+            if (!named.insert(m.pubkey).second) return PosGossipAction::Invalid; // duplicate member
+        }
+        if ((int)named.size() < PosSlotQuorum(reg)) return PosGossipAction::Ignore;
+        if ((int)named.size() > PosMaxCommitteeMembers()) return PosGossipAction::Ignore;
+        const uint256 seed = PosSeedForChild(parent);
         const uint64_t total = PosTotalWeight(reg);
         for (const PosBlsMember& m : cert->members) {
             if (reg.GetWeight(m.pubkey) == 0) return PosGossipAction::Ignore;
@@ -1619,11 +1671,8 @@ PosGossipAction PosProducer::OnCertificate(const CBlockHeader& header)
             if (!VrfVerify(m.pubkey, Span<const unsigned char>(seed.begin(), 32), m.proof, beta)) return PosGossipAction::Invalid;
             if (!PosVrfIsCommitteeMember(beta, reg.GetWeight(m.pubkey), total)) return PosGossipAction::Ignore;
         }
+        signer_count = (int)named.size();
     }
-    // Signatures: the leader's ECDSA over the block hash, every member's BLS
-    // proof-of-possession, and the single aggregate — registry-independent
-    // and objective, so failure is penalised.
-    if (!CheckProof(header, m_chainparams.GetConsensus())) return PosGossipAction::Invalid;
     // A verified quorum certificate: pin this height. No rival will be
     // proposed, backed or signed here (Step/DriveRound), and the block is
     // completed on the spot if we hold its validated proposal body.
@@ -1645,7 +1694,7 @@ PosGossipAction PosProducer::OnCertificate(const CBlockHeader& header)
         }
     }
     LogPrintf("PoS gossip: certificate received for block %s at height %d (%d members)\n",
-              hash.GetHex(), height, (int)named.size());
+              hash.GetHex(), height, signer_count);
     TryConnectCertified();
     Wake(); // re-evaluate holds and rounds immediately
     return PosGossipAction::Relay;

@@ -17,6 +17,7 @@
 #include <key_io.h>
 #include <net.h>
 #include <musig.h>
+#include <bls.h>
 #include <pos.h>
 #include <pos_producer.h>
 #include <vrf.h>
@@ -1571,6 +1572,49 @@ static RPCHelpMan vrfprove()
     };
 }
 
+static RPCHelpMan getblsregistration()
+{
+    return RPCHelpMan{"getblsregistration",
+                "\nSEQUENTIA: derive a staking key's committee BLS registration (impl spec Option A). "
+                "Under the public fixed-size committee (-pospubliccommittee) a staker registers the "
+                "BLS public key it signs committee certificates with, plus a proof-of-possession. "
+                "The BLS key is derived deterministically from the staking key, so this is reproducible. "
+                "The `spec` field is ready to append to a -staker config entry: "
+                "-staker=<pubkey>:<weight>:<blspubkey>:<pop>.\n",
+                {
+                    {"privkey", RPCArg::Type::STR, RPCArg::Optional::NO, "WIF staking private key."},
+                },
+                RPCResult{
+                    RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::STR_HEX, "pubkey", "the staking public key"},
+                        {RPCResult::Type::STR_HEX, "blspubkey", "the 48-byte committee BLS public key"},
+                        {RPCResult::Type::STR_HEX, "pop", "the 96-byte BLS proof-of-possession"},
+                        {RPCResult::Type::STR, "spec", "the ':blspubkey:pop' suffix for a -staker config entry"},
+                    }},
+                RPCExamples{HelpExampleCli("getblsregistration", "\"cV...\"")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    CKey key = DecodeSecret(request.params[0].get_str());
+    if (!key.IsValid()) {
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid private key");
+    }
+    const std::vector<unsigned char> bls_seed = PosBlsSeedFromKey(key);
+    auto bls_pub = BlsDerivePubKey(bls_seed);
+    auto bls_pop = BlsProvePossession(bls_seed);
+    if (!bls_pub || !bls_pop) {
+        throw JSONRPCError(RPC_MISC_ERROR, "BLS registration derivation failed");
+    }
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("pubkey", HexStr(key.GetPubKey()));
+    result.pushKV("blspubkey", HexStr(*bls_pub));
+    result.pushKV("pop", HexStr(*bls_pop));
+    result.pushKV("spec", ":" + HexStr(*bls_pub) + ":" + HexStr(*bls_pop));
+    return result;
+},
+    };
+}
+
 static RPCHelpMan vrfverify()
 {
     return RPCHelpMan{"vrfverify",
@@ -2378,6 +2422,7 @@ static const CRPCCommand commands[] =
     { "generating",         &submitposblock,           },
     { "util",               &vrfprove,                 },
     { "util",               &vrfverify,                },
+    { "util",               &getblsregistration,       },
     { "util",               &musigaggregatepubkey,     },
     { "util",               &musignonce,               },
     { "util",               &musigpartialsign,         },

@@ -27,6 +27,8 @@
 #include <vector>
 
 class CBlockIndex;
+class CBlockHeader;
+class CKey;
 
 /** When set, the chain uses Proof-of-Stake leader election for block validity
  *  (layered on g_signed_blocks). */
@@ -128,6 +130,15 @@ private:
     mutable Mutex m_mutex;
     std::map<CPubKey, uint64_t> m_config GUARDED_BY(m_mutex);
     std::map<CPubKey, uint64_t> m_utxo GUARDED_BY(m_mutex);
+    //! Registered BLS public key per staker (impl spec Option A, phase 2). Under
+    //! the public fixed-size committee with the bitfield certificate, a staker's
+    //! BLS signing key must be registered so validators can aggregate and verify
+    //! a certificate that names members only by a bitfield over the committee.
+    //! Populated from the config/genesis layer (SetBls) today; the runtime
+    //! UTXO-layer registration is separate future work. The BLS pubkey is
+    //! derived from the staking key (PosBlsSeedFromKey), so it is stable per
+    //! staker, and its proof-of-possession is verified once at registration.
+    std::map<CPubKey, std::vector<unsigned char>> m_bls GUARDED_BY(m_mutex);
 
 public:
     static StakeRegistry& GetInstance()
@@ -142,12 +153,32 @@ public:
         LOCK(m_mutex);
         m_config.clear();
         m_utxo.clear();
+        m_bls.clear();
     }
     //! Set a configured staker's weight.
     void SetStake(const CPubKey& pubkey, uint64_t weight)
     {
         LOCK(m_mutex);
         m_config[pubkey] = weight;
+    }
+    //! Register a staker's BLS public key (impl spec Option A, phase 2). The
+    //! caller has verified its proof-of-possession.
+    void SetBls(const CPubKey& pubkey, const std::vector<unsigned char>& bls_pubkey)
+    {
+        LOCK(m_mutex);
+        m_bls[pubkey] = bls_pubkey;
+    }
+    //! A staker's registered BLS public key, or an empty vector if none.
+    std::vector<unsigned char> GetBls(const CPubKey& pubkey) const
+    {
+        LOCK(m_mutex);
+        auto it = m_bls.find(pubkey);
+        return it == m_bls.end() ? std::vector<unsigned char>() : it->second;
+    }
+    bool HasBls(const CPubKey& pubkey) const
+    {
+        LOCK(m_mutex);
+        return m_bls.count(pubkey) > 0;
     }
     //! Replace the UTXO-derived layer wholesale (startup rebuild).
     void SetUtxoStake(std::map<CPubKey, uint64_t>&& utxo)
@@ -266,8 +297,13 @@ int PosPublicQuorum(int k);
  *  PosQuorum(g_pos_committee_size) of the nominal size. */
 int PosSlotQuorum(const StakeRegistry& registry);
 
-/** The public committee for a slot as a set, for membership checks: exactly
- *  the members of PosCommittee(registry, seed). */
+/** The ordered public committee for a slot under g_pos_public_committee: the
+ *  schedule prefix (PosSchedule order) restricted to BLS-registered stakers and
+ *  capped at g_pos_committee_size. The ORDER is the bitfield index order of the
+ *  certificate, so producer and validator must derive it identically. */
+std::vector<CPubKey> PosPublicCommittee(const StakeRegistry& registry, const uint256& seed);
+
+/** The public committee for a slot as a set, for membership checks. */
 std::set<CPubKey> PosPublicCommitteeSet(const StakeRegistry& registry, const uint256& seed);
 
 /** Cap on the number of committee members a certificate may name (and a node
@@ -448,6 +484,55 @@ CScript BuildPosBlsSolution(const std::vector<unsigned char>& leader_sig,
 /** Decode a BLS committee certificate solution, or nullopt if malformed (wrong
  *  field sizes, an invalid member key, or more members than the committee cap). */
 std::optional<PosBlsCertificate> ParsePosBlsSolution(const CScript& solution);
+
+// --- Bitfield BLS certificate (g_pos_public_committee; impl spec Option A ph.2) ---
+
+/** The BLS signing seed for a staking key: a domain-separated hash of the key,
+ *  so a staker needs no separate BLS key to manage. Its public key
+ *  (BlsDerivePubKey) is what a staker registers (StakeRegistry::SetBls). */
+std::vector<unsigned char> PosBlsSeedFromKey(const CKey& key);
+
+/** The decoded bitfield BLS certificate. Under the public fixed-size committee
+ *  the member SET is public (the ordered PosCommittee schedule prefix), so the
+ *  certificate names its signers by a bitfield over that order instead of
+ *  carrying each member's key and proof — collapsing a ~257-byte-per-member
+ *  certificate to the leader signature, one aggregate, and ~one bit per seat. */
+struct PosBlsBitfieldCert {
+    std::vector<unsigned char> leader_sig;  //!< the leader's ECDSA signature over the block hash
+    std::vector<unsigned char> agg_sig;     //!< 96-byte BLS aggregate of the signers' shares
+    std::vector<unsigned char> bitfield;    //!< bit i set == committee[i] signed (LSB-first)
+};
+
+/** Encode a bitfield BLS certificate into a block proof solution:
+ *      <leader_sig> <agg_sig(96)> <bitfield(ceil(committee/8))>
+ *  The signed block hash excludes the solution, so it is member-independent. */
+CScript BuildPosBlsBitfieldSolution(const std::vector<unsigned char>& leader_sig,
+                                    const std::vector<unsigned char>& agg_sig,
+                                    const std::vector<unsigned char>& bitfield);
+
+/** Decode a bitfield BLS certificate solution, or nullopt if malformed. */
+std::optional<PosBlsBitfieldCert> ParsePosBlsBitfieldSolution(const CScript& solution);
+
+/** Verify a bitfield BLS certificate's aggregate signature and membership
+ *  against the registry at `pindexPrev`'s stake state (the global registry must
+ *  mirror that tip; true in ConnectBlock and for a gossiped cert whose parent
+ *  is the active tip). Recomputes the ordered public committee from the seed,
+ *  resolves each set bit to that member's REGISTERED BLS key, rejects bits
+ *  beyond the committee (phantom signers), and checks the one aggregate against
+ *  all signer keys (the batch verification: one pairing check, not one per
+ *  member). Returns the number of signers, or -1 on any failure (reason set to
+ *  a bad-posbls-* string). Does NOT check the leader signature (self-contained,
+ *  done in CheckProof) or the quorum policy (the caller applies it, since the
+ *  escaping-stall floor differs from the pin-a-height full-quorum rule). */
+int PosVerifyBitfieldCertificate(const CBlockHeader& header, const CBlockIndex* pindexPrev,
+                                 const StakeRegistry& registry, std::string& reason);
+
+/** Test bit i (LSB-first) of a signer bitfield. */
+bool PosBitfieldTest(const std::vector<unsigned char>& bitfield, size_t i);
+/** Set bit i (LSB-first) of a signer bitfield, growing it as needed. */
+void PosBitfieldSet(std::vector<unsigned char>& bitfield, size_t i);
+/** Count set bits in a signer bitfield. */
+int PosBitfieldPopcount(const std::vector<unsigned char>& bitfield);
 
 // --- On-chain stake registration (locked staking outputs) ---
 

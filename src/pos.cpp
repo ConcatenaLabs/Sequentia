@@ -34,13 +34,22 @@ uint64_t g_pos_min_stake = 0;
 
 bool StakeRegistry::AddFromSpec(const std::string& spec, std::string& error)
 {
-    size_t colon = spec.rfind(':');
-    if (colon == std::string::npos) {
-        error = strprintf("staker spec '%s' must be <pubkeyhex>:<weight>", spec);
+    // <pubkeyhex>:<weight>  or, with a BLS committee registration (impl spec
+    // Option A phase 2),  <pubkeyhex>:<weight>:<blspubkeyhex>:<pophex>.
+    std::vector<std::string> f;
+    size_t start = 0;
+    for (;;) {
+        size_t colon = spec.find(':', start);
+        if (colon == std::string::npos) { f.push_back(spec.substr(start)); break; }
+        f.push_back(spec.substr(start, colon - start));
+        start = colon + 1;
+    }
+    if (f.size() != 2 && f.size() != 4) {
+        error = strprintf("staker spec '%s' must be <pubkeyhex>:<weight> or <pubkeyhex>:<weight>:<blspubkeyhex>:<pophex>", spec);
         return false;
     }
-    std::string pubkey_hex = spec.substr(0, colon);
-    std::string weight_str = spec.substr(colon + 1);
+    const std::string& pubkey_hex = f[0];
+    const std::string& weight_str = f[1];
     if (!IsHex(pubkey_hex)) {
         error = strprintf("staker pubkey '%s' is not valid hex", pubkey_hex);
         return false;
@@ -60,6 +69,29 @@ bool StakeRegistry::AddFromSpec(const std::string& spec, std::string& error)
     if (!ParseInt64(weight_str, &weight) || weight <= 0) {
         error = strprintf("staker weight '%s' must be a positive integer", weight_str);
         return false;
+    }
+    if (f.size() == 4) {
+        // Optional BLS committee registration. The proof-of-possession is
+        // verified once, here at registration; blst is independent of the
+        // secp256k1 context, so this is safe before ECC_Start().
+        if (!IsHex(f[2]) || !IsHex(f[3])) {
+            error = strprintf("staker BLS registration for '%s' is not valid hex", pubkey_hex);
+            return false;
+        }
+        std::vector<unsigned char> bls_pubkey = ParseHex(f[2]);
+        std::vector<unsigned char> bls_pop = ParseHex(f[3]);
+        if (bls_pubkey.size() != BLS_PK_SIZE || bls_pop.size() != BLS_SIG_SIZE) {
+            error = strprintf("staker BLS key/pop for '%s' have wrong sizes (want %d/%d bytes)", pubkey_hex, BLS_PK_SIZE, BLS_SIG_SIZE);
+            return false;
+        }
+        // Structural check only: the cryptographic proof-of-possession is NOT
+        // verified here. This runs in every tool that parses -staker (including
+        // ones that do not link blst), and the config/genesis staker set is
+        // trusted; a bad key is also self-punishing (its shares never verify and
+        // the block's aggregate is rejected at connect). Runtime UTXO-layer
+        // registration (future work) verifies the PoP on-chain, where blst is
+        // linked. The registered key MUST be BlsDerivePubKey(PosBlsSeedFromKey).
+        SetBls(pubkey, bls_pubkey);
     }
     SetStake(pubkey, (uint64_t)weight);
     return true;
@@ -142,11 +174,31 @@ int PosQuorum(size_t committee_size)
     return (int)(committee_size / 2) + 1;
 }
 
+std::vector<CPubKey> PosPublicCommittee(const StakeRegistry& registry, const uint256& seed)
+{
+    // The public committee is the schedule prefix, but under the bitfield
+    // certificate a member must have a registered BLS key (validators name
+    // signers by a bitfield and look their keys up), so ineligible-by-missing-
+    // key stakers are skipped in schedule order before the cap is applied. The
+    // leader role has no such requirement (it signs with ECDSA).
+    std::vector<CPubKey> schedule = PosSchedule(registry, seed);
+    std::vector<CPubKey> committee;
+    const size_t cap = (size_t)std::max(g_pos_committee_size, 0);
+    for (const CPubKey& s : schedule) {
+        if (!registry.HasBls(s)) continue;
+        committee.push_back(s);
+        if (committee.size() >= cap) break;
+    }
+    return committee;
+}
+
 int PosPublicCommitteeSize(const StakeRegistry& registry)
 {
+    // Seat count is min(#eligible registered stakers, cap) and does not depend
+    // on the seed (the seed only orders/selects WHICH stakers fill the seats).
     size_t pool = 0;
     for (const auto& entry : registry.Weights()) {
-        if (PosIsEligibleStake(entry.second)) pool++;
+        if (PosIsEligibleStake(entry.second) && registry.HasBls(entry.first)) pool++;
     }
     return (int)std::min<size_t>(pool, (size_t)std::max(g_pos_committee_size, 0));
 }
@@ -170,7 +222,7 @@ int PosSlotQuorum(const StakeRegistry& registry)
 
 std::set<CPubKey> PosPublicCommitteeSet(const StakeRegistry& registry, const uint256& seed)
 {
-    std::vector<CPubKey> members = PosCommittee(registry, seed);
+    std::vector<CPubKey> members = PosPublicCommittee(registry, seed);
     return std::set<CPubKey>(members.begin(), members.end());
 }
 
@@ -480,6 +532,61 @@ std::optional<PosBlsCertificate> ParsePosBlsSolution(const CScript& solution)
     }
     return cert;
 }
+
+bool PosBitfieldTest(const std::vector<unsigned char>& bitfield, size_t i)
+{
+    const size_t byte = i >> 3;
+    if (byte >= bitfield.size()) return false;
+    return (bitfield[byte] >> (i & 7)) & 1;
+}
+
+void PosBitfieldSet(std::vector<unsigned char>& bitfield, size_t i)
+{
+    const size_t byte = i >> 3;
+    if (byte >= bitfield.size()) bitfield.resize(byte + 1, 0);
+    bitfield[byte] |= (unsigned char)(1u << (i & 7));
+}
+
+int PosBitfieldPopcount(const std::vector<unsigned char>& bitfield)
+{
+    int n = 0;
+    for (unsigned char b : bitfield) {
+        while (b) { n += b & 1; b >>= 1; }
+    }
+    return n;
+}
+
+CScript BuildPosBlsBitfieldSolution(const std::vector<unsigned char>& leader_sig,
+                                    const std::vector<unsigned char>& agg_sig,
+                                    const std::vector<unsigned char>& bitfield)
+{
+    CScript s;
+    s << leader_sig << agg_sig << bitfield;
+    return s;
+}
+
+std::optional<PosBlsBitfieldCert> ParsePosBlsBitfieldSolution(const CScript& solution)
+{
+    PosBlsBitfieldCert cert;
+    CScript::const_iterator pc = solution.begin();
+    opcodetype opcode;
+    std::vector<unsigned char> data;
+    if (!solution.GetOp(pc, opcode, data) || data.empty()) return std::nullopt;
+    cert.leader_sig = data;
+    if (!solution.GetOp(pc, opcode, data) || data.size() != BLS_SIG_SIZE) return std::nullopt;
+    cert.agg_sig = data;
+    if (!solution.GetOp(pc, opcode, data) || data.empty()) return std::nullopt; // a certificate names >= 1 signer
+    // Cap the bitfield at the committee cap (in bytes) to bound work.
+    if (data.size() > (size_t)(MAX_POS_PUBLIC_COMMITTEE_SIZE + 7) / 8) return std::nullopt;
+    cert.bitfield = data;
+    if (pc != solution.end()) return std::nullopt; // trailing data
+    return cert;
+}
+
+// PosVerifyBitfieldCertificate is defined in validation.cpp (the node library,
+// which links blst) rather than here in libbitcoin_common, so that lightweight
+// tools linking pos.o (elements-tx/util) do not pull in the BLS aggregate
+// verification and its blst dependency. It is declared in pos.h.
 
 // --- On-chain stake registration (locked staking outputs) ---
 

@@ -146,6 +146,18 @@ bool CheckProof(const CBlockHeader& block, const Consensus::Params& params)
             }
             if (g_pos_bls) {
                 std::optional<PosChallengeParts> parts = ParsePosBlockChallenge(block.proof.challenge);
+                if (parts && parts->is_bls && g_pos_public_committee) {
+                    // Bitfield certificate (impl spec Option A phase 2): the
+                    // signers' BLS keys are in the registry (a parent-tip stake
+                    // quantity, wrong for headers off the active branch), so the
+                    // aggregate is verified at connect time (CheckPosStakeRules).
+                    // Here, verify only the self-contained parts: the size bound
+                    // and the leader's ECDSA signature over the block hash.
+                    if (block.proof.solution.size() > params.max_block_signature_size) return false;
+                    std::optional<PosBlsBitfieldCert> cert = ParsePosBlsBitfieldSolution(block.proof.solution);
+                    if (!cert) return false;
+                    return parts->leader.Verify(block.GetHash(), cert->leader_sig);
+                }
                 if (parts && parts->is_bls) {
                     // BLS aggregate-committee form (doc proposals/autonomous-committee
                     // §7): the whole certificate is in the proof solution — the

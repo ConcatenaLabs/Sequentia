@@ -679,7 +679,10 @@ BOOST_AUTO_TEST_CASE(pos_public_committee_quorum_and_size)
     }
 
     // Committee size and membership: min(pool, cap), exactly the schedule
-    // prefix, and the slot quorum follows the flag.
+    // prefix, and the slot quorum follows the flag. Under the bitfield
+    // certificate a member must have a REGISTERED BLS key, so every staker is
+    // registered here (a dummy 48-byte key; the committee filter checks only
+    // presence, not the key's validity).
     StakeRegistry& reg = StakeRegistry::GetInstance();
     reg.Clear();
     std::vector<CPubKey> stakers;
@@ -687,6 +690,7 @@ BOOST_AUTO_TEST_CASE(pos_public_committee_quorum_and_size)
         CPubKey p = MakeKey();
         stakers.push_back(p);
         reg.SetStake(p, 100);
+        reg.SetBls(p, std::vector<unsigned char>(48, (unsigned char)(i + 1)));
     }
     const uint256 seed = ComputePosSeed(uint256S("0x07"), 42);
 
@@ -714,6 +718,41 @@ BOOST_AUTO_TEST_CASE(pos_public_committee_quorum_and_size)
 
     g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
     reg.Clear();
+}
+
+// The bitfield certificate codec (impl spec Option A phase 2): the signer
+// bitfield round-trips through a proof solution, indexes members by their
+// committee position, and rejects malformed solutions.
+BOOST_AUTO_TEST_CASE(pos_bitfield_certificate_codec)
+{
+    // Bit helpers: LSB-first, growable, correct popcount.
+    std::vector<unsigned char> bf;
+    BOOST_CHECK(!PosBitfieldTest(bf, 0));
+    PosBitfieldSet(bf, 0);
+    PosBitfieldSet(bf, 3);
+    PosBitfieldSet(bf, 9);   // grows into a second byte
+    BOOST_CHECK(PosBitfieldTest(bf, 0));
+    BOOST_CHECK(PosBitfieldTest(bf, 3));
+    BOOST_CHECK(PosBitfieldTest(bf, 9));
+    BOOST_CHECK(!PosBitfieldTest(bf, 1));
+    BOOST_CHECK(!PosBitfieldTest(bf, 8));
+    BOOST_CHECK(!PosBitfieldTest(bf, 99)); // out of range reads false
+    BOOST_CHECK_EQUAL(PosBitfieldPopcount(bf), 3);
+    BOOST_CHECK_EQUAL(bf.size(), 2U);
+
+    // Solution round-trip: leader sig + 96-byte aggregate + bitfield.
+    std::vector<unsigned char> leader_sig(72, 0xAB);
+    std::vector<unsigned char> agg(96, 0xCD);
+    CScript sol = BuildPosBlsBitfieldSolution(leader_sig, agg, bf);
+    auto cert = ParsePosBlsBitfieldSolution(sol);
+    BOOST_REQUIRE(cert.has_value());
+    BOOST_CHECK(cert->leader_sig == leader_sig);
+    BOOST_CHECK(cert->agg_sig == agg);
+    BOOST_CHECK(cert->bitfield == bf);
+
+    // Malformed: wrong aggregate size, empty bitfield, trailing junk.
+    BOOST_CHECK(!ParsePosBlsBitfieldSolution(BuildPosBlsBitfieldSolution(leader_sig, std::vector<unsigned char>(64, 0), bf)).has_value());
+    BOOST_CHECK(!ParsePosBlsBitfieldSolution(CScript() << leader_sig << agg).has_value()); // no bitfield
 }
 
 BOOST_AUTO_TEST_SUITE_END()

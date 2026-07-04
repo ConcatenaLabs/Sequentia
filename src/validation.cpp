@@ -2156,6 +2156,37 @@ bool CheckPeginRipeness(const CBlock& block, const std::vector<std::pair<CScript
     return true;
 }
 
+// Declared in pos.h; defined here in the node library (not pos.cpp in
+// libbitcoin_common) so lightweight tools linking pos.o do not pull in the BLS
+// aggregate verification's blst dependency. See the note at its declaration.
+int PosVerifyBitfieldCertificate(const CBlockHeader& header, const CBlockIndex* pindexPrev,
+                                 const StakeRegistry& registry, std::string& reason)
+{
+    std::optional<PosBlsBitfieldCert> cert = ParsePosBlsBitfieldSolution(header.proof.solution);
+    if (!cert) { reason = "bad-posbls-bitfield-malformed"; return -1; }
+    const uint256 seed = PosSeedForChild(pindexPrev);
+    const std::vector<CPubKey> committee = PosPublicCommittee(registry, seed);
+    std::vector<std::vector<unsigned char>> bls_pubkeys;
+    for (size_t i = 0; i < committee.size(); ++i) {
+        if (!PosBitfieldTest(cert->bitfield, i)) continue;
+        std::vector<unsigned char> bls = registry.GetBls(committee[i]);
+        if (bls.size() != BLS_PK_SIZE) { reason = "bad-posbls-member-unregistered"; return -1; }
+        bls_pubkeys.push_back(std::move(bls));
+    }
+    // Every set bit must map to a committee seat: a bit beyond the committee is a
+    // phantom signer inflating the count, so reject if the popcount exceeds the
+    // resolved signers.
+    if (PosBitfieldPopcount(cert->bitfield) != (int)bls_pubkeys.size()) {
+        reason = "bad-posbls-bitfield-range"; return -1;
+    }
+    if (bls_pubkeys.empty()) { reason = "bad-posbls-bitfield-empty"; return -1; }
+    const uint256 hash = header.GetHash();
+    if (!BlsFastAggregateVerify(bls_pubkeys, Span<const unsigned char>(hash.begin(), 32), cert->agg_sig)) {
+        reason = "bad-posbls-agg-invalid"; return -1;
+    }
+    return (int)bls_pubkeys.size();
+}
+
 /** SEQUENTIA PoS: stake-registry-dependent block rules — leader election /
  *  sortition eligibility, slot time-gating, and committee membership. These
  *  belong at connect time, NOT in ContextualCheckBlock(Header): the stake
@@ -2293,7 +2324,27 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
     // signature against the member keys. Here we add the registry-dependent
     // checks: every member must be sortition-eligible for this slot, the set is
     // deduplicated and capped, and a quorum (or, when stalled, one) must sign.
-    if (parts->is_bls) {
+    if (parts->is_bls && g_pos_public_committee) {
+        // Bitfield certificate (impl spec Option A phase 2): the members' BLS
+        // keys are in the registry (a parent-tip stake-state quantity), so the
+        // aggregate is verified HERE, at connect time, not in CheckProof (where
+        // the registry may mirror a different branch during header sync).
+        // Unsigned templates carry an empty solution and are skipped.
+        if (!block.proof.solution.empty()) {
+            std::string reason;
+            const int signers = PosVerifyBitfieldCertificate(block, pindexPrev, registry, reason);
+            if (signers < 0) {
+                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, reason, "invalid bitfield BLS certificate");
+            }
+            const int quorum = PosSlotQuorum(registry);
+            const bool escaping_stall = g_con_bitcoin_anchor &&
+                PosEscapingStallAllowed(pindexPrev->m_anchor_height, block.m_anchor_height);
+            const int min_members = escaping_stall ? 1 : quorum;
+            if (signers < min_members) {
+                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-agg-quorum", "fewer BLS committee members than the certification quorum");
+            }
+        }
+    } else if (parts->is_bls) {
         // The committee certificate lives in the proof solution. An unsigned
         // template (CreateNewBlock/TestBlockValidity) carries no certificate yet;
         // a real block's certificate (leader sig, member set, aggregate) is gated
@@ -2322,18 +2373,9 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
             if ((int)named.size() > PosMaxCommitteeMembers()) {
                 return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-member-count", "more BLS committee members than the aggregate committee cap");
             }
-            if (g_pos_public_committee) {
-                // Membership is a lookup against the slot's public committee
-                // (the deterministic schedule prefix). The per-member VRF
-                // eligibility proofs are vestigial in this mode: membership no
-                // longer depends on them, so they are not verified.
-                const std::set<CPubKey> committee = PosPublicCommitteeSet(registry, seed);
-                for (const auto& [member, entry] : named) {
-                    if (!committee.count(member)) {
-                        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-member-not-selected", "BLS committee member is not in the slot's public committee");
-                    }
-                }
-            } else {
+            // Private threshold sortition: each named member proves its own VRF
+            // eligibility over the slot seed (the public-committee bitfield form
+            // is handled above).
             for (const auto& [member, entry] : named) {
                 if (registry.GetWeight(member) == 0) {
                     return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-member-not-selected", "BLS committee member was not selected by sortition for this slot");
@@ -2345,7 +2387,6 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
                 if (!PosVrfIsCommitteeMember(member_beta, registry.GetWeight(member), total_weight)) {
                     return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-member-not-selected", "BLS committee member was not selected by sortition for this slot");
                 }
-            }
             }
         }
     }
@@ -2450,6 +2491,12 @@ static void SetPosForkChoiceKeys(CBlockIndex* pindex, const CBlock& block)
         std::set<CPubKey> distinct;
         for (const PosVrfMember& m : members) distinct.insert(m.pubkey);
         count = distinct.size();
+    } else if (parts->is_bls && g_pos_public_committee) {
+        // Bitfield certificate: the signer count is the bitfield popcount.
+        count = 0;
+        if (auto cert = ParsePosBlsBitfieldSolution(block.proof.solution)) {
+            count = (size_t)PosBitfieldPopcount(cert->bitfield);
+        }
     } else if (parts->is_bls) {
         std::set<CPubKey> distinct;
         if (auto cert = ParsePosBlsSolution(block.proof.solution)) {
