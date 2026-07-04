@@ -119,6 +119,16 @@ mirroring the pure-LN M0-M5 discipline.
   secured link, wire entropy 7.97 bits/byte with no plaintext hsmd markers, and wrong-key/no-handshake
   connectors REJECTED with 0 frames served (node fails closed). Resolves the prior blocking-for-production
   security note. Deferred: transport-key rotation (re-pin flow) + the browser WebSocket adapter over `noise.rs`.
+- **WASM DEVICE SIGNER + BROWSER TOPOLOGY — DONE (2026-07-04, seqln `43c166364`).** The signer compiles to
+  `wasm32` (sub-crate `contrib/seqln-signer/wasm`, wasm-bindgen; secp256k1 C via clang; native crate untouched).
+  JS API: `Signer{fromMnemonic,processFrame,setEnforce}` + `NoiseSession` (Noise_XK initiator) + `devicePubkey`.
+  PROVEN byte-exact IN WASM: all 99 real-corpus frames (incl. 58 low-R ECDSA sigs) reproduce libhsmd identically
+  (wasm == native == libhsmd, re-verified), and the enforce policy runs in wasm (refuses a tampered commitment).
+  Browser topology (device connects OUT, can't listen): a Noise_XK RESPONDER + a proxy `SEQLN_SIGNER_LISTEN`
+  mode; a WASM signer as INITIATOR connected out and a KEYLESS hosted lightningd booted, derived its node_id
+  over the channel, and connected to ln1 as a live peer. Remaining for the real browser: a WebSocket adapter
+  (browsers can't open raw TCP; `noise::Transport` + the frame codec are transport-agnostic) + a
+  `wasm-pack --target web` page holding the mnemonic (IndexedDB/WebCrypto).
 - **M4 — policy + ECDH latency. DONE (2026-07-04, seqln `7695806c5`).** The device is now a VALIDATING signer:
   `policy.rs` tracks channel state (funding amount/outpoint, remote basepoints + funding pubkey, to_self_delay,
   channel_type) from SETUP_CHANNEL, and on SIGN_REMOTE_COMMITMENT_TX (the fundee theft vector) +
