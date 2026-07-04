@@ -109,9 +109,16 @@ mirroring the pure-LN M0-M5 discipline.
   the hosted node reached CHANNELD_NORMAL and mutual-closed, the Rust signer signing the asset-channel
   commitments over the transport (Elements sighash serializes the GOLD asset/value commitment identically).
   Topology confirmed: the device node is the FUNDEE (inbound liquidity from the LP), so `sign_withdrawal` being
-  out of the M2 subset is correct. **SECURITY (blocking for production, not for the demo):** the TCP link is
-  unauthenticated + unencrypted; production MUST wrap it in a Noise/TLS + per-wallet-auth channel before the
-  device signer holds real keys or faces a public network.
+  out of the M2 subset is correct.
+- **SECURE TRANSPORT — DONE (2026-07-04, seqln `a581a5d90`).** The device↔hosted link (raw TCP topology proof)
+  is now **BOLT-8 Noise_XK** (`Noise_XK_secp256k1_ChaChaPoly_SHA256` + per-message ChaCha20-Poly1305, 1000-nonce
+  rotation) — the project's own idiom, the C proxy reusing CLN's audited `common/cryptomsg` and the Rust device
+  a pure I/O-free `noise.rs` (both roles, WASM-ready). Encrypted + integrity-protected + forward secrecy +
+  MUTUAL static-key auth from pinned keys (`SEQLN_HOST_*`/`SEQLN_SIGNER_*`; `--genkey` provisions), fail-CLOSED
+  in remote mode (no unauth fallback); local fork mode unchanged. Verified: full channel lifecycle over the
+  secured link, wire entropy 7.97 bits/byte with no plaintext hsmd markers, and wrong-key/no-handshake
+  connectors REJECTED with 0 frames served (node fails closed). Resolves the prior blocking-for-production
+  security note. Deferred: transport-key rotation (re-pin flow) + the browser WebSocket adapter over `noise.rs`.
 - **M4 — policy + ECDH latency. DONE (2026-07-04, seqln `7695806c5`).** The device is now a VALIDATING signer:
   `policy.rs` tracks channel state (funding amount/outpoint, remote basepoints + funding pubkey, to_self_delay,
   channel_type) from SETUP_CHANNEL, and on SIGN_REMOTE_COMMITMENT_TX (the fundee theft vector) +
