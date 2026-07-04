@@ -1,5 +1,19 @@
 # Fulmen: click-and-play bundled SeqLN — work plan
 
+> **STATUS 2026-07-04: EXECUTED AND SHIPPED (v0.2.0).** All milestones done in
+> fulmen `5d37ba2`; artifacts on https://sequentiatestnet.com/download/.
+> Deltas from this plan: no Docker available, so the Linux bundle is built on
+> the laptop (glibc 2.39 / noble baseline, not jammy) and the WSL rootfs is
+> assembled dockerlessly from an ubuntu-base 24.04 tarball + /opt/seqln overlay
+> (`build/make-wsl-rootfs.sh`); clnrest came from the existing seqln Rust build.
+> Verified headless against live infra: bundled + packaged lightningd synced
+> fresh nodes on sequentia-testnet (bundled elements-cli) AND Bitcoin testnet4
+> (bundled bitcoin-cli), hsm_secret/emergency.recover created, clean stop.
+> NOT verified: GUI click-through (no display here), the whole Windows/WSL2
+> path on a real Windows machine (§6.8 still owed), backend flags vs box
+> config (box ran no lightningd at ship time; minimal config proven live
+> instead).
+
 Goal: Fulmen installs and runs like a normal desktop app, ships SeqLN inside it, and
 starts/supervises `lightningd` itself. The user never builds, installs, or configures
 SeqLN by hand. External dependencies:
