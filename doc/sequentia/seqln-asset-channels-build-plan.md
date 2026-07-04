@@ -235,8 +235,18 @@ closingd changes were needed for the no-HTLC path.
   policy fee = whole input for a GOLD tx). `listfunds` outputs + `listpeerchannels`/`listfunds` channels
   surface a non-policy asset's display id. Still TODO: `openchannel_init`/`dualopend` (v2 dual-funding) asset
   path; `psbt_compute_fee` has the same policy-only bug (only matters for onchaind/anchor/force-close = M3).
-- **M2**: HTLCs denominated in the asset (the 11 commit_tx call sites + channeld amount audit) -> a GOLD
-  payment across the channel. Then M3 (onchaind/force-close), M4 (invoices+routing), M5 (pure-LN swap).
+- ~~**M2**: HTLCs denominated in the asset~~ **DONE + regtest-verified** (commit `9a2a6ec2`): a `pay` of a
+  0.1-GOLD invoice settles `complete` over a 10-GOLD channel, moving exactly 0.1 GOLD ln1->ln2. The asset is a
+  per-tx property, so it was one `bitcoin_tx_set_output_asset()` in `commit_tx()` (covers to_local/to_remote/
+  HTLC/anchor/fee outputs) + a `channel_asset` param on `htlc_tx()`/`htlc_success_tx()`/`htlc_timeout_tx()`,
+  threaded from `channel->channel_asset` in `channeld/full_channel.c`. Dust/trim + implicit-fee + msat->atom
+  math needed no change (atoms == sat base unit). NULL asset == policy, so the BOLT-3 vector tests still pass
+  byte-exact.
+- **M3** (onchaind/force-close): onchaind + onchain_control currently pass NULL (policy) to the htlc-tx
+  builders (FIXMEs mark them) and `psbt_compute_fee` still balances only the policy asset -- so a GOLD channel
+  FORCE-close would build policy-asset resolution txs. M3 = thread channel_asset through `onchaind_init` + fix
+  `psbt_compute_fee`, then verify unilateral close + HTLC-timeout/success sweep GOLD. Then M4 (invoices+routing
+  carry asset id + display precision), M5 (pure-LN cross-network swap).
 
 REMAINING for M1 (a large, funds-critical, REGTEST-GATED integration — verifiable only end-to-end, so it must
 be done carefully, not rushed):
