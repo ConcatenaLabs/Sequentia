@@ -472,6 +472,13 @@ PosProducer::PosProducer(ChainstateManager& chainman, CTxMemPool& mempool,
     m_byzantine_invalid = gArgs.GetBoolArg("-posbyzantineinvalid", false);
     m_debug_round_skew_ms = gArgs.GetIntArg("-posdebugroundskewms", 0);
     m_recovery_wait_ms = std::clamp<int64_t>(gArgs.GetIntArg("-posanchorrecoverywait", 30), 0, 3600) * 1000;
+    // Local liveness timings, NOT consensus rules (every node derives the
+    // round index from the same global anchor, so nodes with different
+    // values still agree on the round): an operator on weak hardware or a
+    // slow link can lengthen them without asking anyone. 0 = the per-member
+    // formula default (500+25/member window, 700+35/member rounds).
+    m_window_override_ms = std::clamp<int64_t>(gArgs.GetIntArg("-poswindowms", 0), 0, 60000);
+    m_round_override_ms = std::clamp<int64_t>(gArgs.GetIntArg("-posroundms", 0), 0, 60000);
 }
 
 PosProducer::~PosProducer() { Stop(); }
@@ -1029,8 +1036,10 @@ int64_t PosProducer::DriveRound()
     // node, not consensus rules, so enlarging them is safe. ~25 ms/member of
     // window and ~35 ms/member of round keeps small committees near the old values
     // while giving a 100-member committee ~3 s to collect.
-    const int64_t WINDOW_MS = 500 + 25 * (int64_t)g_pos_committee_size;
-    const int64_t ROUND_MS = 700 + 35 * (int64_t)g_pos_committee_size;
+    const int64_t WINDOW_MS = m_window_override_ms > 0 ? m_window_override_ms
+        : 500 + 25 * (int64_t)g_pos_committee_size;
+    const int64_t ROUND_MS = m_round_override_ms > 0 ? m_round_override_ms
+        : 700 + 35 * (int64_t)g_pos_committee_size;
     CBlockIndex* tip;
     {
         LOCK(cs_main);
@@ -1419,7 +1428,28 @@ PosGossipAction PosProducer::OnShare(const PosShare& share)
         share.bls_share.size() != BLS_SIG_SIZE || share.vrf_proof.size() != VRF_PROOF_SIZE || !share.pubkey.IsValid()) {
         return PosGossipAction::Invalid;
     }
-    if (!BlsVerifyPossession(share.bls_pubkey, share.bls_pop)) return PosGossipAction::Invalid;
+    // A member's proof-of-possession is the same bytes every block, so its
+    // (costly) pairing check is cached after the first success — measured to
+    // halve the per-share cost at large committees. The signature share is
+    // per-block and always verified.
+    uint256 pop_key;
+    {
+        CSHA256 hasher;
+        hasher.Write(share.bls_pubkey.data(), share.bls_pubkey.size());
+        hasher.Write(share.bls_pop.data(), share.bls_pop.size());
+        hasher.Finalize(pop_key.begin());
+    }
+    bool pop_cached;
+    {
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        pop_cached = m_pop_verified.count(pop_key) > 0;
+    }
+    if (!pop_cached) {
+        if (!BlsVerifyPossession(share.bls_pubkey, share.bls_pop)) return PosGossipAction::Invalid;
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        if (m_pop_verified.size() > 4096) m_pop_verified.clear();
+        m_pop_verified.insert(pop_key);
+    }
     if (!BlsVerify(share.bls_pubkey, Span<const unsigned char>(share.block_hash.begin(), 32), share.bls_share)) return PosGossipAction::Invalid;
     // Classify the share: for the proposal we are backing this round, for some
     // other known candidate (a different round's leader — relay so its aggregators

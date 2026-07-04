@@ -304,6 +304,7 @@ private:
     int64_t m_cert_hold_since_ms{0};                   //!< when the hold started
     bool m_cert_hold_logged{false};
     std::map<uint256, CBlockHeader> m_recent_certs;    //!< certificates verified or assembled (serves getposcert; not height-pruned)
+    std::set<uint256> m_pop_verified;                  //!< H(bls_pubkey||pop) pairs that verified: a member's PoP is identical every block, so cache the pairing (registry-held BLS keys retire this entirely)
 
     // Share-lock (honest-splits fix 3B + the 3A residual). Having share-signed
     // block X at height H, this node does not sign a same-height rival until
@@ -330,6 +331,16 @@ private:
     // restored, its anchor is confirmed stale, or the bounded patience
     // (-posanchorrecoverywait; 0 disables) expires so production can never
     // deadlock on an unreachable parent daemon.
+    //! Local liveness overrides for the gossip collection window and round
+    //! length (-poswindowms / -posroundms; 0 = per-member formula). Not
+    //! consensus rules: no block is valid or invalid because of them. A node
+    //! tuned differently from its peers lags or leads the round schedule and
+    //! simply contributes late (its shares may miss their round) — a
+    //! liveness cost for that node only; the share-lock keeps any timing
+    //! disagreement from ever becoming a double-sign.
+    int64_t m_window_override_ms{0};
+    int64_t m_round_override_ms{0};
+
     int64_t m_recovery_wait_ms{30000};
     uint256 m_recovery_hold_tip;                       //!< tip the current hold started under
     int64_t m_recovery_hold_since_ms{0};
