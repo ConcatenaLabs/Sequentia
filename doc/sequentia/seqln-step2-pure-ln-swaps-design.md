@@ -253,19 +253,23 @@ single-onion conversion to a Step-2b**; it is not needed for "pure-LN swaps work
   relies on LN's native HTLC timeout + force-close and is not exercised here — a deeper follow-up, not on the
   happy/adversarial-app path proven so far. Also: the refund test is slow (~72s) only because CLN `pay`
   retries an unroutable amount until `retry_for`; a maker would cap retries.
-- **M4 — seqob integration. DRIVER DONE (2026-07-04, seqdex `phase3-pure-ln` commit `d499194`).** The pure-LN
-  `ln_direction` values (`LnAssetLNForBTCLN`/`LnBTCLNForAssetLN`, `IsPureLN`; commit `efc9434`) + the opaque
-  courier atoms (`xcourier_pureln.go`: `XcPln{TermsRequest,Terms,AssetInvoice,HoldReady,Settled}`, and
-  `XcMsg.MakerLNNodeID`) + the **BUY driver** over the relay (`xdriver_pureln.go`
-  `RunMakerPureLNBuy`/`RunTakerPureLNBuy`, `PlnMakerOps`/`PlnTakerOps` seams with `LivePln*Ops` wrapping the M3
-  `PureLNSwap`). Handshake: taker→`TermsRequest`; maker→`Terms{maker_ln_node_id,btc_amount,seq_amount}`;
-  taker→`AssetInvoice{H,bolt11}` (invoice on a fresh P); maker→`HoldReady` (BTC hold registered on H); taker
-  pays the maker's BTC hold by bare hash and blocks; maker pays the asset invoice (learns P), settles the hold,
-  →`Settled`. Taker verifies the revealed preimage is its own P. No on-chain leg → no anchor watcher on the
-  happy path. Pinned by an in-process fake-ops handshake test (both drivers over channel couriers) + a
-  bad-terms rejection test; full client suite + daemon build green. **LEFT:** the SELL driver (mirror), then
-  wire both through the seqob binaries (`seqob-maker`/`seqob-cli`) with an RFQ quote (§5.3) off the order book,
-  then a live e2e over the real relay.
+- **M4 — seqob integration. DRIVER DONE, BOTH DIRECTIONS (2026-07-04, seqdex `phase3-pure-ln` commits
+  `d499194`+`3216996`).** The pure-LN `ln_direction` values (`LnAssetLNForBTCLN`/`LnBTCLNForAssetLN`,
+  `IsPureLN`; commit `efc9434`) + the opaque courier atoms (`xcourier_pureln.go`:
+  `XcPln{TermsRequest,Terms,AssetInvoice,HoldReady,Settled}`, and `XcMsg.MakerLNNodeID`) + the **driver** over
+  the relay (`xdriver_pureln.go`). Handshake: taker→`TermsRequest`; maker→`Terms{maker_ln_node_id,btc_amount,
+  seq_amount}`; taker→`AssetInvoice{H,bolt11}` (invoice on a fresh P for its INCOMING leg); maker→`HoldReady`
+  (hold registered on H); taker pays the maker's hold by bare hash and blocks; maker pays the taker's invoice
+  (learns P), settles the hold, →`Settled`. Taker verifies the revealed preimage is its own P. No on-chain leg
+  → no anchor watcher on the happy path. **The driver is direction-parameterized** (`PlnDirection`,
+  `holdPayAmts`) because BUY/SELL are genuinely symmetric — the taker always originates P, invoices its incoming
+  leg, and pays the maker's hold on its outgoing leg. Neutral seams `PlnMakerOps{HoldNodeID,RegisterHold,
+  Fulfill}` / `PlnTakerOps{PrepareInvoice,PayHold}`, with `LivePln{Maker,Taker}{Buy,Sell}Ops` over the M3
+  engine's BUY vs `*Sell` wrappers; SELL is the mirror (maker holds the *asset* leg, taker mints a *BTC*
+  invoice). Pinned by in-process fake-ops handshake tests for BUY + SELL (one direction-agnostic fake serves
+  both) + a bad-terms rejection test; full client suite + daemon build green. **LEFT:** wire both through the
+  seqob binaries (`seqob-maker`/`seqob-cli`) with an RFQ quote (§5.3) off the order book, then a live e2e over
+  the real relay.
 - **M5 — reach the GLOBAL BTC LN.** Route the BTC leg over a real multi-hop Bitcoin-LN path (not just the
   maker's two local nodes) to a third-party invoice, proving a Sequentia asset genuinely reaches the open
   Bitcoin Lightning Network. This is the "assets at the edges" reach demonstration.
