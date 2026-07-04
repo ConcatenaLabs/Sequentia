@@ -284,13 +284,24 @@ the invoice, determines the asset). What remains is genuinely optional/separable
 - **Same-asset multi-hop routing (additive, generic, optional):** add a `channel_asset` field to the routing
   gossip (channel_announcement/update) so routers find same-asset paths. Any asset, no per-asset code; only
   needed for a PUBLIC announced asset-LN network, not wallet↔LP direct channels.
-- **Cross-asset routing = the DEX, not core payments:** an intermediate hop swapping asset X→Y is the
-  submarine / pure-LN swap machinery (seqob/seqdex), where an asset-typed swap request lives.
+- **Assets at the edges (Taproot-Assets model — the RIGHT reach model; corrected 2026-07-04):** cross-asset
+  conversion is NOT a separate DEX product — it is the payment, done at the EDGES. In TAP, BTC is the universal
+  routing medium: an edge node RFQ-converts asset↔BTC, the HTLC routes over the existing global Bitcoin LN as
+  plain BTC (the middle never sees the asset), the receiving edge converts back → a decentralized FX network,
+  assets only at the two endpoints. The asset channels we built are exactly the EDGE primitive; the cross-chain
+  swap machinery (submarine/pure-LN) is the EDGE CONVERSION and must be INTEGRATED into the payment (RFQ-style
+  quote, one payment to the user), not surfaced as a bolt-on swap. Sequentia difference vs TAP: TAP's asset+BTC
+  are same-chain (instant edge) but assets are a trust-y overlay; Sequentia's assets are consensus-native
+  (harder) but on a different chain than BTC, so the edge is CROSS-chain — and Bitcoin ANCHORING (Principle 1)
+  is exactly what makes that cross-chain edge atomic/trustless. No privileged coin (Principle 3): BTC via the
+  anchoring-secured cross-chain edge to Bitcoin LN is the natural universal medium for GLOBAL reach (fits the
+  dual-chain wallet); intra-Sequentia same-asset hops need no medium.
 
-- **M5 / real next prize — pure-LN cross-asset swap (the DEX endgame):** a wallet with a GOLD-LN channel + a
-  BTC-LN channel to an LP does an ATOMIC cross-asset swap (pay GOLD-LN, receive BTC-LN, same payment_hash).
-  This is where asset channels pay off — the submarine/pure-LN swap machinery now runs on TOP of real asset
-  channels. Higher value than invoice/routing asset-ids.
+- **M5 / real next prize — the "assets at the edges" reach layer:** an RFQ mechanism + an edge/LP node that
+  bridges a Sequentia asset-LN channel to a Bitcoin-LN channel, converting asset↔BTC per-payment (same payment
+  hash), so a Sequentia asset holder can pay/receive over the ENTIRE global Bitcoin LN with the FX invisible at
+  the edge. This is where asset channels + anchoring + the cross-chain swap machinery converge; it is the
+  endgame, higher value than invoice/routing asset-ids.
 
 REMAINING for M1 (a large, funds-critical, REGTEST-GATED integration — verifiable only end-to-end, so it must
 be done carefully, not rushed):
