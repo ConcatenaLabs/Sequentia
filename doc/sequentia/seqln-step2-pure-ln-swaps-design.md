@@ -236,10 +236,14 @@ single-onion conversion to a Step-2b**; it is not needed for "pure-LN swaps work
   **Seam simplification:** because `clnLNLeg` now serves both policy and asset, the "two-LN-leg seam" needs
   **no new `AssetLeg` interface** — a pure-LN swap just holds two `LNLeg`s (one `NewCLNAssetLNLeg`, one
   `NewCLNLNLeg`). The `Sub*Ops`-refactor option from §4 is unnecessary for pure-LN; that orchestration is M2.
-- **M2 — pure-LN swap, buy-GOLD-with-BTC, happy path.** `PureLNSwap` with two LN-style legs (asset + BTC), no
-  on-chain SEQ leg, no anchor gate; maker's incoming BTC leg is the M0 hold invoice. Prove end to end on the
-  two-daemon harness (Sequentia regtest asset channel + testnet4 BTC channel), stitched by one `P`; **measure
-  that it settles in seconds with no anchor wait** (the headline result).
+- **M2 — pure-LN buy-with-BTC, happy path. DONE (2026-07-04, seqdex `phase3-pure-ln` commit `d0d70b9`).**
+  `PureLNSwap{assetLeg, btcLeg LNLeg}` (both `*clnLNLeg`, no new interface): `PrepareTakerBuy` (taker issues
+  the asset invoice on P) → `MakerRegisterHold` (maker holds incoming BTC on H, no P) → `MakerFulfill` (wait
+  held → pay asset leg, learning P → settle BTC; cancels on failure = refund) + `RunTakerBuy` (taker pays the
+  BTC hold by bare hash, blocks until settle). **Proven live end to end** (`TestPureLNBuyLive`, ln1 taker /
+  ln2 maker; GOLD asset leg + a 2nd Sequentia asset as the BTC stand-in since the mechanism is
+  network-agnostic): **settled in ~2.1s, both sides on one shared preimage, NO on-chain tx / NO anchor wait**
+  — the headline win over anchor-gated submarine swaps. (Real global-BTC-LN leg = M5.)
 - **M3 — sell direction + refund/timeout.** Sell-GOLD-for-BTC (asset hold invoice from M1), plus the CLTV
   refund/timeout path on each leg with the wall-clock ladder from §5.2. Prove a stuck swap refunds both sides.
 - **M4 — seqob integration.** `LightningTerms` pure-LN `Direction` + the RFQ quote (§5.3) + the opaque courier
