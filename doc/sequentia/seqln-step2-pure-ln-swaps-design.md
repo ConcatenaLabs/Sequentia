@@ -267,9 +267,18 @@ single-onion conversion to a Step-2b**; it is not needed for "pure-LN swaps work
   Fulfill}` / `PlnTakerOps{PrepareInvoice,PayHold}`, with `LivePln{Maker,Taker}{Buy,Sell}Ops` over the M3
   engine's BUY vs `*Sell` wrappers; SELL is the mirror (maker holds the *asset* leg, taker mints a *BTC*
   invoice). Pinned by in-process fake-ops handshake tests for BUY + SELL (one direction-agnostic fake serves
-  both) + a bad-terms rejection test; full client suite + daemon build green. **LEFT:** wire both through the
-  seqob binaries (`seqob-maker`/`seqob-cli`) with an RFQ quote (§5.3) off the order book, then a live e2e over
-  the real relay.
+  both) + a bad-terms rejection test; full client suite + daemon build green. **WIRED THROUGH THE BINARIES
+  (2026-07-04, commit `f22da9d`):** `seqob-maker -mode pureln` posts a pure-LN offer and serves each swap with
+  `RunMakerPureLN` (no Sequentia RPC, no bitcoind — only two lightning-rpc sockets: `-asset-ln-socket`
+  SeqLN-on-Sequentia + `-ln-socket` SeqLN-on-Bitcoin; `-side` picks direction, `servePureLN` mirrors
+  `serveSubmarine`'s one-in-flight/cancel-after-fill discipline but with no anchor gate). `seqob-cli xpln -side
+  buy|sell` is the taker — no on-chain leg means no asset HTLC to fund and no refund state file (a stall unwinds
+  via the LN hold timeout); it finds+verifies the matching pure-LN offer by `ln_direction` and drives
+  `RunTakerPureLN` over the WS courier. Amounts are msat on both legs (atoms/sats ×1000). Flag/dispatch wiring
+  smoke-tested; whole-daemon build + vet green. **LEFT:** a live e2e over the real relay + two SeqLN-on-Bitcoin
+  and two SeqLN-on-Sequentia nodes (needs box coordination). An RFQ quote (§5.3) off the order book is still a
+  fixed-amount offer today (whole-swap), same as the submarine wiring — dynamic per-lift pricing is a later
+  refinement, not a blocker.
 - **M5 — reach the GLOBAL BTC LN.** Route the BTC leg over a real multi-hop Bitcoin-LN path (not just the
   maker's two local nodes) to a third-party invoice, proving a Sequentia asset genuinely reaches the open
   Bitcoin Lightning Network. This is the "assets at the edges" reach demonstration.
