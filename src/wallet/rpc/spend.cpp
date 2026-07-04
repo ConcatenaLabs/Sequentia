@@ -118,6 +118,8 @@ RPCHelpMan registerstake()
                     {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "Amount of Sequence (SEQ) to stake (at or above the chain's minimum stake)."},
                     {"csv_blocks", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Height-based unbonding delay in blocks (default: the chain minimum)."},
                     {"csv_seconds", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Time-based unbonding delay in seconds (mutually exclusive with csv_blocks)."},
+                    {"blspubkey", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "SEQUENTIA: committee BLS public key to register with this stake (from getblsregistration), so the staker can join the public fixed-size committee. Requires pop."},
+                    {"pop", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "SEQUENTIA: the BLS proof-of-possession for blspubkey (from getblsregistration)."},
                 },
                 RPCResult{RPCResult::Type::OBJ, "", "", {
                     {RPCResult::Type::STR_HEX, "txid", "the registration transaction id"},
@@ -155,7 +157,20 @@ RPCHelpMan registerstake()
     const int64_t required = PosRequiredUnbondingSeconds();
     if (!lock || *lock < required) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("the unbonding lock (%d s) is below the chain's minimum (%d s); it would not count as stake", lock ? *lock : 0, required));
 
-    CScript stake_script = BuildStakeScript(pubkey, csv);
+    // Optional committee BLS registration (impl spec Option A phase 2): the key
+    // rides in the staking output, so the registry learns it as a pure function
+    // of the UTXO set. Its PoP is verified when the funding block connects.
+    std::vector<unsigned char> bls_pubkey, bls_pop;
+    const bool has_bls = !request.params[4].isNull() || !request.params[5].isNull();
+    if (has_bls) {
+        if (request.params[4].isNull() || request.params[5].isNull())
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "blspubkey and pop must be given together");
+        bls_pubkey = ParseHexV(request.params[4], "blspubkey");
+        bls_pop = ParseHexV(request.params[5], "pop");
+        if (bls_pubkey.size() != 48 || bls_pop.size() != 96)
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "blspubkey must be 48 bytes and pop 96 bytes (see getblsregistration)");
+    }
+    CScript stake_script = BuildStakeScript(pubkey, csv, bls_pubkey, bls_pop);
     CAmount amount = AmountFromValue(request.params[1], true);
     // Enforce the chain's minimum-stake floor: a sub-floor output is silently
     // dropped from the schedule/committee by PosIsEligibleStake and would never

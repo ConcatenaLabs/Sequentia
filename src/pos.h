@@ -134,11 +134,15 @@ private:
     //! the public fixed-size committee with the bitfield certificate, a staker's
     //! BLS signing key must be registered so validators can aggregate and verify
     //! a certificate that names members only by a bitfield over the committee.
-    //! Populated from the config/genesis layer (SetBls) today; the runtime
-    //! UTXO-layer registration is separate future work. The BLS pubkey is
-    //! derived from the staking key (PosBlsSeedFromKey), so it is stable per
-    //! staker, and its proof-of-possession is verified once at registration.
+    //! The BLS pubkey is derived from the staking key (PosBlsSeedFromKey), so it
+    //! is stable per staker, and its proof-of-possession is verified once at
+    //! registration. Two layers, mirroring the weight: a config/genesis layer
+    //! (SetBls) and a UTXO layer (m_bls_utxo) that a staking output carries and
+    //! whose lifecycle is tied to the staker's UTXO weight (dropped when the
+    //! last staking output is spent), so it is reorg-safe by construction. The
+    //! config layer takes precedence when both are present.
     std::map<CPubKey, std::vector<unsigned char>> m_bls GUARDED_BY(m_mutex);
+    std::map<CPubKey, std::vector<unsigned char>> m_bls_utxo GUARDED_BY(m_mutex);
 
 public:
     static StakeRegistry& GetInstance()
@@ -154,6 +158,7 @@ public:
         m_config.clear();
         m_utxo.clear();
         m_bls.clear();
+        m_bls_utxo.clear();
     }
     //! Set a configured staker's weight.
     void SetStake(const CPubKey& pubkey, uint64_t weight)
@@ -161,38 +166,50 @@ public:
         LOCK(m_mutex);
         m_config[pubkey] = weight;
     }
-    //! Register a staker's BLS public key (impl spec Option A, phase 2). The
-    //! caller has verified its proof-of-possession.
+    //! Register a CONFIG-layer staker's BLS public key (impl spec Option A,
+    //! phase 2). The caller has verified its proof-of-possession.
     void SetBls(const CPubKey& pubkey, const std::vector<unsigned char>& bls_pubkey)
     {
         LOCK(m_mutex);
         m_bls[pubkey] = bls_pubkey;
     }
-    //! A staker's registered BLS public key, or an empty vector if none.
+    //! A staker's registered BLS public key (config layer preferred, else UTXO
+    //! layer), or an empty vector if none.
     std::vector<unsigned char> GetBls(const CPubKey& pubkey) const
     {
         LOCK(m_mutex);
         auto it = m_bls.find(pubkey);
-        return it == m_bls.end() ? std::vector<unsigned char>() : it->second;
+        if (it != m_bls.end()) return it->second;
+        auto it2 = m_bls_utxo.find(pubkey);
+        return it2 == m_bls_utxo.end() ? std::vector<unsigned char>() : it2->second;
     }
     bool HasBls(const CPubKey& pubkey) const
     {
         LOCK(m_mutex);
-        return m_bls.count(pubkey) > 0;
+        return m_bls.count(pubkey) > 0 || m_bls_utxo.count(pubkey) > 0;
     }
-    //! Replace the UTXO-derived layer wholesale (startup rebuild).
-    void SetUtxoStake(std::map<CPubKey, uint64_t>&& utxo)
+    //! Replace the UTXO-derived layers wholesale (startup rebuild): weights and
+    //! the UTXO BLS registrations, both pure functions of the UTXO set.
+    void SetUtxoStake(std::map<CPubKey, uint64_t>&& utxo,
+                      std::map<CPubKey, std::vector<unsigned char>>&& bls_utxo = {})
     {
         LOCK(m_mutex);
         m_utxo = std::move(utxo);
+        m_bls_utxo = std::move(bls_utxo);
     }
-    //! A staking output entered the UTXO set.
-    void AddUtxoStake(const CPubKey& pubkey, uint64_t amount)
+    //! A staking output entered the UTXO set. A non-empty bls_pubkey registers
+    //! (or re-affirms) the staker's UTXO-layer committee BLS key; ConnectBlock
+    //! has verified its PoP and that it does not conflict with an existing key.
+    void AddUtxoStake(const CPubKey& pubkey, uint64_t amount,
+                      const std::vector<unsigned char>& bls_pubkey = {})
     {
         LOCK(m_mutex);
         m_utxo[pubkey] += amount;
+        if (!bls_pubkey.empty()) m_bls_utxo[pubkey] = bls_pubkey;
     }
-    //! A staking output left the UTXO set (spent, or its creation reverted).
+    //! A staking output left the UTXO set (spent, or its creation reverted). The
+    //! UTXO BLS key is tied to the staker having any UTXO weight: when the last
+    //! staking output is gone, the registration goes with it.
     void SubUtxoStake(const CPubKey& pubkey, uint64_t amount)
     {
         LOCK(m_mutex);
@@ -206,7 +223,10 @@ public:
             return;
         }
         it->second -= amount;
-        if (it->second == 0) m_utxo.erase(it);
+        if (it->second == 0) {
+            m_utxo.erase(it);
+            m_bls_utxo.erase(pubkey);
+        }
     }
 
     bool Empty() const
@@ -560,16 +580,45 @@ inline bool PosIsEligibleStake(uint64_t weight)
 }
 
 /** The canonical staking output script:
- *      <csv_blocks> OP_CHECKSEQUENCEVERIFY OP_DROP <pubkey> OP_CHECKSIG
+ *      <csv_blocks> OP_CHECKSEQUENCEVERIFY OP_DROP [<bls_pubkey(48)> OP_DROP
+ *      <bls_pop(96)> OP_DROP] <pubkey> OP_CHECKSIG
  *  A bare (unhashed) script so validators can recognize stake at output
  *  creation. Spending requires the staker's signature and csv_blocks of
- *  relative-height maturity (BIP112) — unbonding is the spend itself. */
-CScript BuildStakeScript(const CPubKey& pubkey, uint32_t csv_blocks);
+ *  relative-height maturity (BIP112) — unbonding is the spend itself. When
+ *  bls_pubkey/bls_pop are non-empty (impl spec Option A phase 2, runtime
+ *  committee registration) they are pushed and OP_DROPed (spend semantics
+ *  unchanged), so the BLS key rides in the UTXO and the registry's UTXO layer
+ *  learns it as a pure function of the UTXO set (reorg-safe like the weight).
+ *  The 48-byte BLS-pubkey push is unambiguous: a staking pubkey is 33 or 65
+ *  bytes, never 48. */
+CScript BuildStakeScript(const CPubKey& pubkey, uint32_t csv_blocks,
+                         const std::vector<unsigned char>& bls_pubkey = {},
+                         const std::vector<unsigned char>& bls_pop = {});
+
+/** A parsed staking script. bls_pubkey/bls_pop are empty when the output carries
+ *  no committee registration (the old form, or a leader-only staker). */
+struct ParsedStake {
+    CPubKey pubkey;
+    uint32_t csv{0};
+    std::vector<unsigned char> bls_pubkey;
+    std::vector<unsigned char> bls_pop;
+};
+
+/** Parse a staking script (either form), or nullopt if not of the canonical
+ *  template. */
+std::optional<ParsedStake> ParseStakeScriptFull(const CScript& script);
 
 /** Parse a staking script, returning (pubkey, raw BIP68 CSV value), or nullopt
- *  if the script is not of the exact canonical form. The CSV value may be
- *  height-based or time-based (SEQUENCE_LOCKTIME_TYPE_FLAG set). */
+ *  if the script is not of the canonical form. The CSV value may be height-based
+ *  or time-based (SEQUENCE_LOCKTIME_TYPE_FLAG set). */
 std::optional<std::pair<CPubKey, uint32_t>> ParseStakeScript(const CScript& script);
+
+/** The BLS committee registration (pubkey, proof-of-possession) carried by a
+ *  staking output, or nullopt if it carries none. The PoP is NOT verified here
+ *  (no crypto in libbitcoin_common); ConnectBlock verifies it in the node
+ *  library and rejects a block whose new staking output has an invalid PoP. */
+std::optional<std::pair<std::vector<unsigned char>, std::vector<unsigned char>>>
+ParseStakeBlsRegistration(const CScript& script);
 
 /** The wall-clock lock duration (seconds) a staking CSV value enforces:
  *  time-based CSV in 512-second units, height-based CSV times the slot

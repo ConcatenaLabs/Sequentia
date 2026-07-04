@@ -2206,6 +2206,36 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
     const StakeRegistry& registry = StakeRegistry::GetInstance();
     const uint256 seed = PosSeedForChild(pindexPrev);
 
+    // Committee BLS registrations carried by NEW staking outputs (impl spec
+    // Option A phase 2, runtime registration). Verify the proof-of-possession
+    // ONCE here at connect, so PosApplyBlockStake / RebuildUtxoStake (which do
+    // no crypto) can trust every stored key; and enforce ONE key per staker
+    // (against the staker's parent-state registration and within this block).
+    // A bad PoP or a conflicting key invalidates the block, so the UTXO set
+    // never holds an unverified or ambiguous committee key.
+    if (g_pos_public_committee) {
+        std::map<CPubKey, std::vector<unsigned char>> block_keys;
+        for (const CTransactionRef& tx : block.vtx) {
+            for (const CTxOut& out : tx->vout) {
+                if (!StakeFromTxOut(out)) continue;
+                auto full = ParseStakeScriptFull(out.scriptPubKey);
+                if (!full || full->bls_pubkey.empty()) continue;
+                if (!BlsVerifyPossession(full->bls_pubkey, full->bls_pop)) {
+                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-stake-bls-pop", "staking output BLS proof-of-possession does not verify");
+                }
+                const std::vector<unsigned char> existing = registry.GetBls(full->pubkey);
+                if (!existing.empty() && existing != full->bls_pubkey) {
+                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-stake-bls-conflict", "staking output BLS key conflicts with the staker's registered key");
+                }
+                auto seen = block_keys.find(full->pubkey);
+                if (seen != block_keys.end() && seen->second != full->bls_pubkey) {
+                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-stake-bls-conflict", "two staking outputs register different BLS keys for one staker");
+                }
+                block_keys[full->pubkey] = full->bls_pubkey;
+            }
+        }
+    }
+
     if (!g_pos_vrf) {
         // Public-schedule mode: the leader must be the stake-weighted ranked
         // leader for this slot (rank-r may produce only r slot intervals after

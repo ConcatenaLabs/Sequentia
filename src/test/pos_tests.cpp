@@ -720,6 +720,74 @@ BOOST_AUTO_TEST_CASE(pos_public_committee_quorum_and_size)
     reg.Clear();
 }
 
+// Runtime UTXO-layer BLS registration (impl spec Option A phase 2): the BLS
+// key rides in the staking output, round-trips through the script, and the
+// registry's UTXO-BLS layer follows the staker's weight lifecycle (dropped
+// when the last output is spent) so it is reorg-safe.
+BOOST_AUTO_TEST_CASE(pos_stake_bls_registration)
+{
+    const CPubKey staker = MakeKey();
+    const std::vector<unsigned char> blspub(48, 0x11), pop(96, 0x22);
+
+    // Round-trip through the staking script (with and without a registration).
+    CScript reg_script = BuildStakeScript(staker, 10, blspub, pop);
+    auto full = ParseStakeScriptFull(reg_script);
+    BOOST_REQUIRE(full.has_value());
+    BOOST_CHECK(full->pubkey == staker);
+    BOOST_CHECK_EQUAL(full->csv, 10U);
+    BOOST_CHECK(full->bls_pubkey == blspub);
+    BOOST_CHECK(full->bls_pop == pop);
+    // The plain parser still returns pubkey + csv, and the spend template is
+    // unchanged (the extra pushes are dropped).
+    auto plain = ParseStakeScript(reg_script);
+    BOOST_REQUIRE(plain.has_value());
+    BOOST_CHECK(plain->first == staker);
+    auto bls = ParseStakeBlsRegistration(reg_script);
+    BOOST_REQUIRE(bls.has_value());
+    BOOST_CHECK(bls->first == blspub);
+    // An output with no registration parses fine and carries no BLS key.
+    CScript plain_script = BuildStakeScript(staker, 10);
+    auto full2 = ParseStakeScriptFull(plain_script);
+    BOOST_REQUIRE(full2.has_value());
+    BOOST_CHECK(full2->bls_pubkey.empty());
+    BOOST_CHECK(!ParseStakeBlsRegistration(plain_script).has_value());
+    // A malformed registration (wrong PoP size) is rejected wholesale.
+    CScript bad;
+    bad << (int64_t)10 << OP_CHECKSEQUENCEVERIFY << OP_DROP
+        << blspub << OP_DROP << std::vector<unsigned char>(50, 0) << OP_DROP
+        << ToByteVector(staker) << OP_CHECKSIG;
+    BOOST_CHECK(!ParseStakeScriptFull(bad).has_value());
+
+    // Registry UTXO-BLS lifecycle: the key is present while the staker has UTXO
+    // weight and vanishes when the last output is spent.
+    StakeRegistry& reg = StakeRegistry::GetInstance();
+    reg.Clear();
+    reg.AddUtxoStake(staker, 100, blspub);       // first output
+    BOOST_CHECK(reg.HasBls(staker));
+    BOOST_CHECK(reg.GetBls(staker) == blspub);
+    reg.AddUtxoStake(staker, 50, blspub);        // second output, same key
+    reg.SubUtxoStake(staker, 50);                // spend one — key stays
+    BOOST_CHECK(reg.HasBls(staker));
+    reg.SubUtxoStake(staker, 100);               // spend the last — key gone
+    BOOST_CHECK(!reg.HasBls(staker));
+    BOOST_CHECK(reg.GetBls(staker).empty());
+
+    // Config layer takes precedence over the UTXO layer.
+    const std::vector<unsigned char> cfgkey(48, 0x33);
+    reg.Clear();
+    reg.SetBls(staker, cfgkey);
+    reg.AddUtxoStake(staker, 100, blspub);
+    BOOST_CHECK(reg.GetBls(staker) == cfgkey);
+
+    // Wholesale rebuild (startup scan) restores the UTXO-BLS layer.
+    reg.Clear();
+    std::map<CPubKey, uint64_t> w{{staker, 100}};
+    std::map<CPubKey, std::vector<unsigned char>> b{{staker, blspub}};
+    reg.SetUtxoStake(std::move(w), std::move(b));
+    BOOST_CHECK(reg.GetBls(staker) == blspub);
+    reg.Clear();
+}
+
 // The bitfield certificate codec (impl spec Option A phase 2): the signer
 // bitfield round-trips through a proof solution, indexes members by their
 // committee position, and rejects malformed solutions.

@@ -590,13 +590,22 @@ std::optional<PosBlsBitfieldCert> ParsePosBlsBitfieldSolution(const CScript& sol
 
 // --- On-chain stake registration (locked staking outputs) ---
 
-CScript BuildStakeScript(const CPubKey& pubkey, uint32_t csv_blocks)
+CScript BuildStakeScript(const CPubKey& pubkey, uint32_t csv_blocks,
+                         const std::vector<unsigned char>& bls_pubkey,
+                         const std::vector<unsigned char>& bls_pop)
 {
-    return CScript() << (int64_t)csv_blocks << OP_CHECKSEQUENCEVERIFY << OP_DROP
-                     << ToByteVector(pubkey) << OP_CHECKSIG;
+    CScript s;
+    s << (int64_t)csv_blocks << OP_CHECKSEQUENCEVERIFY << OP_DROP;
+    if (!bls_pubkey.empty() || !bls_pop.empty()) {
+        // Committee registration: push and drop the BLS key and its PoP so they
+        // are committed in the UTXO without affecting the spend path.
+        s << bls_pubkey << OP_DROP << bls_pop << OP_DROP;
+    }
+    s << ToByteVector(pubkey) << OP_CHECKSIG;
+    return s;
 }
 
-std::optional<std::pair<CPubKey, uint32_t>> ParseStakeScript(const CScript& script)
+std::optional<ParsedStake> ParseStakeScriptFull(const CScript& script)
 {
     CScript::const_iterator pc = script.begin();
     opcodetype opcode;
@@ -629,11 +638,40 @@ std::optional<std::pair<CPubKey, uint32_t>> ParseStakeScript(const CScript& scri
     if (!script.GetOp(pc, opcode, data) || opcode != OP_CHECKSEQUENCEVERIFY) return std::nullopt;
     if (!script.GetOp(pc, opcode, data) || opcode != OP_DROP) return std::nullopt;
     if (!script.GetOp(pc, opcode, data) || data.empty()) return std::nullopt;
+    // Optional committee registration: a 48-byte push here is the BLS pubkey
+    // (a staking pubkey is 33 or 65 bytes, never 48, so this is unambiguous),
+    // followed by OP_DROP, the 96-byte PoP, OP_DROP, then the staking pubkey.
+    ParsedStake out;
+    if (data.size() == BLS_PK_SIZE) {
+        out.bls_pubkey = data;
+        if (!script.GetOp(pc, opcode, data) || opcode != OP_DROP) return std::nullopt;
+        if (!script.GetOp(pc, opcode, data) || data.size() != BLS_SIG_SIZE) return std::nullopt;
+        out.bls_pop = data;
+        if (!script.GetOp(pc, opcode, data) || opcode != OP_DROP) return std::nullopt;
+        if (!script.GetOp(pc, opcode, data) || data.empty()) return std::nullopt;
+    }
     CPubKey pubkey(data);
     if (!pubkey.IsFullyValid()) return std::nullopt;
     if (!script.GetOp(pc, opcode, data) || opcode != OP_CHECKSIG) return std::nullopt;
     if (pc != script.end()) return std::nullopt;
-    return std::make_pair(pubkey, (uint32_t)csv);
+    out.pubkey = pubkey;
+    out.csv = (uint32_t)csv;
+    return out;
+}
+
+std::optional<std::pair<CPubKey, uint32_t>> ParseStakeScript(const CScript& script)
+{
+    auto full = ParseStakeScriptFull(script);
+    if (!full) return std::nullopt;
+    return std::make_pair(full->pubkey, full->csv);
+}
+
+std::optional<std::pair<std::vector<unsigned char>, std::vector<unsigned char>>>
+ParseStakeBlsRegistration(const CScript& script)
+{
+    auto full = ParseStakeScriptFull(script);
+    if (!full || full->bls_pubkey.empty()) return std::nullopt;
+    return std::make_pair(full->bls_pubkey, full->bls_pop);
 }
 
 //! The effective slot interval in seconds (>=1), used to put height- and
@@ -684,11 +722,14 @@ std::optional<std::pair<CPubKey, uint64_t>> StakeFromTxOut(const CTxOut& out)
 void PosApplyBlockStake(const CBlock& block, const CBlockUndo& undo)
 {
     StakeRegistry& registry = StakeRegistry::GetInstance();
-    // New staking outputs add weight.
+    // New staking outputs add weight (and, if they carry a committee BLS
+    // registration whose PoP ConnectBlock has verified, register the key).
     for (const CTransactionRef& tx : block.vtx) {
         for (const CTxOut& out : tx->vout) {
             if (auto stake = StakeFromTxOut(out)) {
-                registry.AddUtxoStake(stake->first, stake->second);
+                std::vector<unsigned char> bls_pubkey;
+                if (auto reg = ParseStakeBlsRegistration(out.scriptPubKey)) bls_pubkey = reg->first;
+                registry.AddUtxoStake(stake->first, stake->second, bls_pubkey);
                 LogPrintf("PoS: staking output adds %llu to %s\n", (unsigned long long)stake->second, HexStr(stake->first));
             }
         }
@@ -718,7 +759,9 @@ void PosRevertBlockStake(const CBlock& block, const CBlockUndo& undo)
     for (const CTxUndo& txundo : undo.vtxundo) {
         for (const Coin& coin : txundo.vprevout) {
             if (auto stake = StakeFromTxOut(coin.out)) {
-                registry.AddUtxoStake(stake->first, stake->second);
+                std::vector<unsigned char> bls_pubkey;
+                if (auto reg = ParseStakeBlsRegistration(coin.out.scriptPubKey)) bls_pubkey = reg->first;
+                registry.AddUtxoStake(stake->first, stake->second, bls_pubkey);
             }
         }
     }
@@ -734,6 +777,7 @@ void PosRevertBlockStake(const CBlock& block, const CBlockUndo& undo)
 bool RebuildUtxoStake(CCoinsView& view)
 {
     std::map<CPubKey, uint64_t> utxo_stake;
+    std::map<CPubKey, std::vector<unsigned char>> utxo_bls;
     std::unique_ptr<CCoinsViewCursor> pcursor(view.Cursor());
     if (!pcursor) return false;
     while (pcursor->Valid()) {
@@ -751,10 +795,17 @@ bool RebuildUtxoStake(CCoinsView& view)
         // staking output, which this scan also reflects (the coin is gone).
         if (auto stake = StakeFromTxOut(coin.out)) {
             utxo_stake[stake->first] += stake->second;
+            // A staking output's BLS registration (its PoP was verified when the
+            // output's block connected; the UTXO set is trusted here). All of a
+            // staker's outputs carry the same key (a consensus rule at connect),
+            // so any one is authoritative.
+            if (auto reg = ParseStakeBlsRegistration(coin.out.scriptPubKey)) {
+                utxo_bls[stake->first] = reg->first;
+            }
         }
         pcursor->Next();
     }
-    StakeRegistry::GetInstance().SetUtxoStake(std::move(utxo_stake));
+    StakeRegistry::GetInstance().SetUtxoStake(std::move(utxo_stake), std::move(utxo_bls));
     return true;
 }
 

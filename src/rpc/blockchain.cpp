@@ -3326,21 +3326,38 @@ static RPCHelpMan getstakerinfo()
 {
     return RPCHelpMan{"getstakerinfo",
                 "\nFor Proof-of-Stake chains: returns the registered stakers and their stake weights.\n",
-                {},
-                RPCResult{
-                    RPCResult::Type::OBJ_DYN, "", "",
-                    {
-                        {RPCResult::Type::NUM, "pubkey", "stake weight, keyed by staker public key (hex)"},
-                    }},
+                {
+                    {"verbose", RPCArg::Type::BOOL, RPCArg::Default{false}, "If true, each value is an object with the stake weight and (impl spec Option A) the registered committee BLS public key, if any."},
+                },
+                {
+                    RPCResult{"for verbose=false (default)",
+                        RPCResult::Type::OBJ_DYN, "", "",
+                        {{RPCResult::Type::NUM, "pubkey", "stake weight, keyed by staker public key (hex)"}}},
+                    RPCResult{"for verbose=true",
+                        RPCResult::Type::OBJ_DYN, "", "",
+                        {{RPCResult::Type::OBJ, "pubkey", "keyed by staker public key (hex)", {
+                            {RPCResult::Type::NUM, "weight", "stake weight"},
+                            {RPCResult::Type::STR_HEX, "blspubkey", "the registered committee BLS public key, or empty if none"},
+                        }}}},
+                },
                 RPCExamples{HelpExampleCli("getstakerinfo", "")},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
     if (!g_con_pos) {
         throw JSONRPCError(RPC_MISC_ERROR, "Proof-of-Stake (con_pos) is not enabled on this chain");
     }
+    const bool verbose = !request.params[0].isNull() && request.params[0].get_bool();
+    const StakeRegistry& reg = StakeRegistry::GetInstance();
     UniValue result(UniValue::VOBJ);
-    for (const auto& entry : StakeRegistry::GetInstance().Weights()) {
-        result.pushKV(HexStr(entry.first), (uint64_t)entry.second);
+    for (const auto& entry : reg.Weights()) {
+        if (!verbose) {
+            result.pushKV(HexStr(entry.first), (uint64_t)entry.second);
+        } else {
+            UniValue o(UniValue::VOBJ);
+            o.pushKV("weight", (uint64_t)entry.second);
+            o.pushKV("blspubkey", HexStr(reg.GetBls(entry.first)));
+            result.pushKV(HexStr(entry.first), o);
+        }
     }
     return result;
 },
@@ -3446,6 +3463,8 @@ static RPCHelpMan getstakescript()
                     {"pubkey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The staker public key (hex)."},
                     {"csv_blocks", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Height-based unbonding delay, in blocks (BIP68 relative-height CSV, max 65535)."},
                     {"csv_seconds", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Time-based unbonding delay, in seconds (BIP68 relative-time CSV, rounded up to 512s units). Use this when the minimum lock exceeds what a height CSV can express. Mutually exclusive with csv_blocks."},
+                    {"blspubkey", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "SEQUENTIA: committee BLS public key to register with this stake (from getblsregistration), so the staker can join the public fixed-size committee. Requires pop."},
+                    {"pop", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "SEQUENTIA: the BLS proof-of-possession for blspubkey (from getblsregistration)."},
                 },
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
@@ -3493,7 +3512,19 @@ static RPCHelpMan getstakescript()
     if (!lock || *lock < required) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("the requested unbonding lock (%d s) is below the chain's minimum (%d s); the output would not count as stake", lock ? *lock : 0, required));
     }
-    CScript script = BuildStakeScript(pubkey, csv);
+    std::vector<unsigned char> bls_pubkey, bls_pop;
+    const bool has_bls = !request.params[3].isNull() || !request.params[4].isNull();
+    if (has_bls) {
+        if (request.params[3].isNull() || request.params[4].isNull()) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "blspubkey and pop must be given together");
+        }
+        bls_pubkey = ParseHexV(request.params[3], "blspubkey");
+        bls_pop = ParseHexV(request.params[4], "pop");
+        if (bls_pubkey.size() != 48 || bls_pop.size() != 96) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "blspubkey must be 48 bytes and pop 96 bytes (see getblsregistration)");
+        }
+    }
+    CScript script = BuildStakeScript(pubkey, csv, bls_pubkey, bls_pop);
     UniValue result(UniValue::VOBJ);
     result.pushKV("script", HexStr(script));
     result.pushKV("csv", (int64_t)csv);
