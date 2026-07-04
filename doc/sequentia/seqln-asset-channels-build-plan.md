@@ -254,10 +254,15 @@ closingd changes were needed for the no-HTLC path.
   onchaind_tx_unsigned set_output_asset + htlc_tx channel_asset cover them). It found TWO verified hazards, both
   on the **anchor-CPFP** path (`lightningd/anchorspend.c`, only reachable for anchor channels — my verified
   channels use static_remotekey): the anchor input's witness_utxo was policy-tagged (fixed, commit `54a8c3c3`:
-  `psbt_input_set_wit_utxo_asset`), and the CPFP tx is inherently MIXED-asset (GOLD anchor + policy wallet fee)
-  so it needs a separate channel-asset change output + per-fee-asset `psbt_compute_fee` to balance (FIXME'd).
-  **Until then a GOLD ANCHOR channel cannot CPFP-fee-bump its force-close (funds-at-risk); WORKAROUND: use
-  non-anchor channel types for asset channels.** Guarded-skip follow-ups (no crash): gossip utxoset scans
+  `psbt_input_set_wit_utxo_asset`), and the CPFP fee/change defaults to the policy asset. The RIGHT design is a
+  **single-asset** CPFP: the 330-atom anchor is the channel asset, so bump it in the SAME asset (open fee
+  market — NO privileged coin, NOT the policy asset). Stock CLN's fee-funding utxo selection
+  (`wallet_utxo_boost`) + `psbt_append_output` aren't asset-aware, so as-is a GOLD anchor's bump is funded with
+  policy utxos → an accidental unbalanced two-asset tx that is rejected. Fix = make the anchor-CPFP asset-aware
+  exactly like funding (select channel-asset utxos + fee/change in channel_asset). **Until then a GOLD ANCHOR
+  channel cannot CPFP-fee-bump its force-close (funds-at-risk); WORKAROUND: use non-anchor channel types for
+  asset channels.** (Operational caveat, same as Bitcoin LN: bumping needs a free channel-asset utxo on hand,
+  since the channel balance is CSV-locked in to_local after close.) Guarded-skip follow-ups (no crash): gossip utxoset scans
   (`bitcoind.c`/`chaintopology.c`) + coop-close fee (`closing_control.c`) skip non-policy outputs — matters for
   PUBLIC asset channels + display, not resolution.
 - Then **M4** (invoices+routing carry asset id + display precision), **M5** (pure-LN cross-network swap).
