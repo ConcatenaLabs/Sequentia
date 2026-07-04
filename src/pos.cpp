@@ -29,6 +29,7 @@ int g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
 bool g_pos_vrf = false;
 bool g_pos_agg_committee = false;
 bool g_pos_bls = false;
+bool g_pos_public_committee = false;
 uint64_t g_pos_min_stake = 0;
 
 bool StakeRegistry::AddFromSpec(const std::string& spec, std::string& error)
@@ -139,6 +140,44 @@ int PosQuorum(size_t committee_size)
 {
     if (committee_size == 0) return 0;
     return (int)(committee_size / 2) + 1;
+}
+
+int PosPublicCommitteeSize(const StakeRegistry& registry)
+{
+    size_t pool = 0;
+    for (const auto& entry : registry.Weights()) {
+        if (PosIsEligibleStake(entry.second)) pool++;
+    }
+    return (int)std::min<size_t>(pool, (size_t)std::max(g_pos_committee_size, 0));
+}
+
+int PosPublicQuorum(int k)
+{
+    if (k <= 0) return 0;
+    // Strict majority, plus one at odd k: any two quorums then overlap in
+    // 2q - k >= 2 members at every size, so a double-certification needs at
+    // least two equivocating signers regardless of parity. Identical to
+    // PosQuorum at every even k.
+    int q = k / 2 + 1 + (k & 1);
+    return std::min(k, q);
+}
+
+int PosSlotQuorum(const StakeRegistry& registry)
+{
+    if (g_pos_public_committee) return PosPublicQuorum(PosPublicCommitteeSize(registry));
+    return PosQuorum((size_t)std::max(g_pos_committee_size, 1));
+}
+
+std::set<CPubKey> PosPublicCommitteeSet(const StakeRegistry& registry, const uint256& seed)
+{
+    std::vector<CPubKey> members = PosCommittee(registry, seed);
+    return std::set<CPubKey>(members.begin(), members.end());
+}
+
+int PosMaxCommitteeMembers()
+{
+    if (g_pos_public_committee) return std::max(g_pos_committee_size, 1);
+    return MAX_POS_AGG_COMMITTEE_SIZE;
 }
 
 CScript BuildPosChallenge(const CPubKey& pubkey)

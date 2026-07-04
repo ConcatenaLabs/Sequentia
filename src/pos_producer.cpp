@@ -224,16 +224,24 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
                 }
                 candidates.emplace(ckey.GetPubKey(), ckey);
             }
-            const int member_cap = (g_pos_agg_committee || g_pos_bls) ? MAX_POS_AGG_COMMITTEE_SIZE : MAX_POS_COMMITTEE_SIZE;
+            const int member_cap = g_pos_public_committee ? PosMaxCommitteeMembers() :
+                (g_pos_agg_committee || g_pos_bls) ? MAX_POS_AGG_COMMITTEE_SIZE : MAX_POS_COMMITTEE_SIZE;
+            // Under the public fixed-size committee, membership is the
+            // deterministic schedule prefix; the VRF proof is still produced
+            // (the certificate format carries it) but no longer decides
+            // membership and is not verified by validators in this mode.
+            std::set<CPubKey> public_committee;
+            if (g_pos_public_committee) public_committee = PosPublicCommitteeSet(registry, seed);
             int eligible = 0;
             for (const auto& [member_pub, member_key] : candidates) {
                 if ((int)vrf_committee.size() >= member_cap) break;
                 if (!PosIsEligibleStake(registry.GetWeight(member_pub))) continue;
+                if (g_pos_public_committee && !public_committee.count(member_pub)) continue;
                 auto member_proof = VrfProve(member_key, Span<const unsigned char>(seed.begin(), 32));
                 if (!member_proof) continue;
                 uint256 member_beta;
                 if (!VrfVerify(member_pub, Span<const unsigned char>(seed.begin(), 32), *member_proof, member_beta)) continue;
-                if (!PosVrfIsCommitteeMember(member_beta, registry.GetWeight(member_pub), total_weight)) continue;
+                if (!g_pos_public_committee && !PosVrfIsCommitteeMember(member_beta, registry.GetWeight(member_pub), total_weight)) continue;
                 vrf_committee.push_back(member_pub);
                 if (g_pos_bls) {
                     // Each member derives its BLS key from its staking key; the
@@ -260,7 +268,7 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
                 }
                 eligible++;
             }
-            const int quorum = PosQuorum((size_t)g_pos_committee_size);
+            const int quorum = PosSlotQuorum(registry);
             if (eligible < quorum) {
                 // Aggregate committees (MuSig2 or BLS) may certify below quorum
                 // under the escaping-stall rule; script multisig always needs
@@ -616,6 +624,10 @@ int64_t PosProducer::Step()
     // VRF sortition the slot is private (computed from our own key); we cannot
     // see other stakers' slots, so we simply race at our slot time — a lower
     // slot elsewhere produces first and wakes us for the next height.
+    // Under the public fixed-size committee, MEMBERSHIP is the deterministic
+    // schedule prefix (leader election stays private-VRF).
+    std::set<CPubKey> public_committee;
+    if (g_pos_public_committee) public_committee = PosPublicCommitteeSet(registry, seed);
     int best_idx = -1;
     uint64_t best_slot = 0;
     int local_committee_eligible = 0; // how many of our keys are committee members this slot
@@ -629,7 +641,10 @@ int64_t PosProducer::Step()
             uint256 beta;
             if (!VrfVerify(pub, Span<const unsigned char>(seed.begin(), 32), *proof, beta)) continue;
             slot = PosVrfSlot(beta, registry.GetWeight(pub), total_weight);
-            if (PosVrfIsCommitteeMember(beta, registry.GetWeight(pub), total_weight)) local_committee_eligible++;
+            if (g_pos_public_committee ? public_committee.count(pub) > 0
+                                       : PosVrfIsCommitteeMember(beta, registry.GetWeight(pub), total_weight)) {
+                local_committee_eligible++;
+            }
         } else {
             std::optional<size_t> rank = PosRank(registry, seed, pub);
             if (!rank) continue;
@@ -642,7 +657,7 @@ int64_t PosProducer::Step()
     }
     if (best_idx < 0) return POS_PRODUCER_POLL_MS; // none of our keys is an eligible staker
 
-    const int quorum = PosQuorum((size_t)g_pos_committee_size);
+    const int quorum = PosSlotQuorum(registry);
 
     // Slot timing: the leader's slot opens slot*interval after the parent, and
     // we never produce faster than one interval since the parent — the paper's
@@ -783,14 +798,20 @@ std::vector<PosShare> PosProducer::MakeLocalShares(const CBlock& block)
     const StakeRegistry& reg = StakeRegistry::GetInstance();
     const uint64_t total = PosTotalWeight(reg);
     const uint256 hash = block.GetHash();
+    // Under the public fixed-size committee, membership is the deterministic
+    // schedule prefix; the VRF proof still rides in the share (certificate
+    // format) but no longer decides membership.
+    std::set<CPubKey> public_committee;
+    if (g_pos_public_committee) public_committee = PosPublicCommitteeSet(reg, seed);
     for (const CKey& k : m_keys) {
         const CPubKey pub = k.GetPubKey();
         if (!PosIsEligibleStake(reg.GetWeight(pub))) continue;
+        if (g_pos_public_committee && !public_committee.count(pub)) continue;
         auto proof = VrfProve(k, Span<const unsigned char>(seed.begin(), 32));
         if (!proof) continue;
         uint256 beta;
         if (!VrfVerify(pub, Span<const unsigned char>(seed.begin(), 32), *proof, beta)) continue;
-        if (!PosVrfIsCommitteeMember(beta, reg.GetWeight(pub), total)) continue;
+        if (!g_pos_public_committee && !PosVrfIsCommitteeMember(beta, reg.GetWeight(pub), total)) continue;
         const std::vector<unsigned char> bls_seed = PosBlsSeedFromKey(k);
         auto bls_pub = BlsDerivePubKey(bls_seed);
         auto bls_pop = BlsProvePossession(bls_seed);
@@ -1044,7 +1065,7 @@ int64_t PosProducer::DriveRound()
                     m_collected.clear(); // shares were for the previous backed leader
                 }
                 for (PosShare& sh : shares) {
-                    if (m_collected.size() < (size_t)MAX_POS_AGG_COMMITTEE_SIZE) m_collected[sh.pubkey] = sh;
+                    if (m_collected.size() < (size_t)PosMaxCommitteeMembers()) m_collected[sh.pubkey] = sh;
                 }
             }
         }
@@ -1072,7 +1093,7 @@ int64_t PosProducer::DriveRound()
         const int min_members =
             (g_con_bitcoin_anchor &&
              PosEscapingStallAllowed(tip->m_anchor_height, backed->m_anchor_height))
-            ? 1 : PosQuorum((size_t)g_pos_committee_size);
+            ? 1 : PosSlotQuorum(StakeRegistry::GetInstance());
         if (m_round_height == height && m_backed_hash == backed->GetHash() &&
             (int)m_collected.size() >= min_members) {
             CScript::const_iterator pc = backed->proof.solution.begin();
@@ -1256,12 +1277,18 @@ PosGossipAction PosProducer::OnShare(const PosShare& share)
     const StakeRegistry& reg = StakeRegistry::GetInstance();
     const uint64_t weight = reg.GetWeight(share.pubkey);
     if (weight == 0) return PosGossipAction::Invalid;
+    if (g_pos_public_committee) {
+        // Membership is the deterministic schedule prefix; the share's VRF
+        // proof is vestigial in this mode and not verified.
+        if (!PosPublicCommitteeSet(reg, seed).count(share.pubkey)) return PosGossipAction::Invalid;
+    } else {
     uint256 beta;
     if (!VrfVerify(share.pubkey, Span<const unsigned char>(seed.begin(), 32), share.vrf_proof, beta)) return PosGossipAction::Invalid;
     if (!PosVrfIsCommitteeMember(beta, weight, PosTotalWeight(reg))) return PosGossipAction::Invalid;
+    }
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
-        if (m_backed_hash == share.block_hash && m_collected.size() < (size_t)MAX_POS_AGG_COMMITTEE_SIZE) {
+        if (m_backed_hash == share.block_hash && m_collected.size() < (size_t)PosMaxCommitteeMembers()) {
             m_collected[share.pubkey] = share;
         }
     }

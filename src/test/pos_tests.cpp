@@ -32,6 +32,7 @@ struct PosTestingSetup : public BasicTestingSetup {
         g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
         g_pos_slot_interval = DEFAULT_POS_SLOT_INTERVAL;
         g_pos_unbonding_period = DEFAULT_POS_UNBONDING_PERIOD;
+        g_pos_public_committee = false;
     }
 };
 
@@ -647,6 +648,72 @@ BOOST_AUTO_TEST_CASE(pos_checkpoint_payload_roundtrip)
     longer.push_back(0);
     BOOST_CHECK(!ParseCheckpointPayload(longer).has_value());
     BOOST_CHECK(!ParseCheckpointPayload({}).has_value());
+}
+
+// Public fixed-size committee (impl spec Option A): the quorum derives from
+// the ACTUAL committee size with a +1 at odd sizes, so any two quorums overlap
+// in at least 2 members at every size; the committee itself is the schedule
+// prefix capped at min(pool, cap).
+BOOST_AUTO_TEST_CASE(pos_public_committee_quorum_and_size)
+{
+    // Quorum table: identical to PosQuorum at even k (51-of-100, 126-of-250),
+    // one higher at odd k.
+    BOOST_CHECK_EQUAL(PosPublicQuorum(0), 0);
+    BOOST_CHECK_EQUAL(PosPublicQuorum(1), 1);
+    BOOST_CHECK_EQUAL(PosPublicQuorum(2), 2);
+    BOOST_CHECK_EQUAL(PosPublicQuorum(3), 3);
+    BOOST_CHECK_EQUAL(PosPublicQuorum(4), 3);
+    BOOST_CHECK_EQUAL(PosPublicQuorum(5), 4);
+    BOOST_CHECK_EQUAL(PosPublicQuorum(59), 31);
+    BOOST_CHECK_EQUAL(PosPublicQuorum(100), 51);
+    BOOST_CHECK_EQUAL(PosPublicQuorum(249), 126);
+    BOOST_CHECK_EQUAL(PosPublicQuorum(250), 126);
+    BOOST_CHECK_EQUAL(PosPublicQuorum(251), 127);
+    // The overlap invariant that makes disjoint quorums impossible: two
+    // quorums out of k members share at least 2q - k >= 2 signers, at every
+    // size from 2 upward, and the quorum never exceeds the committee.
+    for (int k = 1; k <= 400; ++k) {
+        const int q = PosPublicQuorum(k);
+        BOOST_CHECK_LE(q, k);
+        if (k >= 2) BOOST_CHECK_GE(2 * q - k, 2);
+    }
+
+    // Committee size and membership: min(pool, cap), exactly the schedule
+    // prefix, and the slot quorum follows the flag.
+    StakeRegistry& reg = StakeRegistry::GetInstance();
+    reg.Clear();
+    std::vector<CPubKey> stakers;
+    for (int i = 0; i < 5; ++i) {
+        CPubKey p = MakeKey();
+        stakers.push_back(p);
+        reg.SetStake(p, 100);
+    }
+    const uint256 seed = ComputePosSeed(uint256S("0x07"), 42);
+
+    g_pos_committee_size = 3;
+    BOOST_CHECK_EQUAL(PosPublicCommitteeSize(reg), 3);
+    std::set<CPubKey> committee = PosPublicCommitteeSet(reg, seed);
+    BOOST_CHECK_EQUAL(committee.size(), 3U);
+    {
+        std::vector<CPubKey> schedule = PosSchedule(reg, seed);
+        for (size_t i = 0; i < schedule.size(); ++i) {
+            BOOST_CHECK_EQUAL(committee.count(schedule[i]), i < 3 ? 1U : 0U);
+        }
+    }
+
+    g_pos_committee_size = 10; // pool below the cap: the committee is everyone
+    BOOST_CHECK_EQUAL(PosPublicCommitteeSize(reg), 5);
+    BOOST_CHECK_EQUAL(PosPublicCommitteeSet(reg, seed).size(), 5U);
+
+    g_pos_public_committee = true;
+    BOOST_CHECK_EQUAL(PosSlotQuorum(reg), PosPublicQuorum(5)); // 4-of-5 (odd bump)
+    g_pos_committee_size = 4;
+    BOOST_CHECK_EQUAL(PosSlotQuorum(reg), 3); // 3-of-4
+    g_pos_public_committee = false;
+    BOOST_CHECK_EQUAL(PosSlotQuorum(reg), PosQuorum(4)); // nominal when off
+
+    g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
+    reg.Clear();
 }
 
 BOOST_AUTO_TEST_SUITE_END()

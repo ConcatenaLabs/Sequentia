@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <set>
 #include <vector>
 
 class CBlockIndex;
@@ -83,6 +84,26 @@ static const int MAX_POS_AGG_COMMITTEE_SIZE = 100;
  *  committee aggregate "whichever members respond". Supersedes g_pos_agg_committee
  *  when both are set. */
 extern bool g_pos_bls;
+
+/** When set (requires g_pos_vrf + g_pos_bls), committee MEMBERSHIP is public
+ *  and fixed-size (doc/sequentia/committee-public-selection-impl-spec.md,
+ *  Option A): the certifying committee for a slot is the first
+ *  min(#eligible stakers, g_pos_committee_size) entries of the deterministic
+ *  public schedule (PosCommittee), and the quorum derives from that ACTUAL
+ *  size (PosPublicQuorum). This restores quorum intersection — any two quorums
+ *  overlap in at least 2 members at every size — so two disjoint quorums can
+ *  never certify rival same-height blocks, which threshold VRF sortition
+ *  cannot guarantee once the staker pool exceeds the committee target (its
+ *  eligible count is a random variable while the quorum is fixed). Leader
+ *  election stays private-VRF. Under this mode the per-member VRF eligibility
+ *  proofs in the certificate are vestigial and are not verified. NETWORK-WIDE
+ *  consensus rule: every node on a chain must agree on the value. */
+extern bool g_pos_public_committee;
+
+/** Sanity bound on -poscommitteesize under g_pos_public_committee. The
+ *  recommended cap is 250 (quorum 126, the classical one-third Byzantine
+ *  bound); the bound only guards against absurd configurations. */
+static const int MAX_POS_PUBLIC_COMMITTEE_SIZE = 1000;
 
 /** Upper bound on a VRF sortition slot, capping the time gate
  *  (slot * g_pos_slot_interval seconds after the parent block) regardless of
@@ -225,6 +246,36 @@ std::vector<CPubKey> PosCommittee(const StakeRegistry& registry, const uint256& 
 /** Countersignature quorum for a committee of m members: a strict majority
  *  (the paper's 51-of-100). */
 int PosQuorum(size_t committee_size);
+
+// --- Public fixed-size committee (g_pos_public_committee; impl spec Option A) ---
+
+/** The ACTUAL committee size under the public fixed-size committee:
+ *  min(#eligible stakers, g_pos_committee_size). Depends only on the registry
+ *  (the seed decides WHO is in the committee, not how many). */
+int PosPublicCommitteeSize(const StakeRegistry& registry);
+
+/** Countersignature quorum for an actual committee of k members under the
+ *  public fixed-size committee: a strict majority, plus one when k is odd, so
+ *  that any two quorums overlap in at least 2 members at EVERY size (one
+ *  tolerated equivocator; identical to PosQuorum at every even k, including
+ *  the paper's 51-of-100 and the recommended 126-of-250). Never exceeds k. */
+int PosPublicQuorum(int k);
+
+/** The certification quorum for the current slot: PosPublicQuorum of the
+ *  actual size under g_pos_public_committee, else the fixed
+ *  PosQuorum(g_pos_committee_size) of the nominal size. */
+int PosSlotQuorum(const StakeRegistry& registry);
+
+/** The public committee for a slot as a set, for membership checks: exactly
+ *  the members of PosCommittee(registry, seed). */
+std::set<CPubKey> PosPublicCommitteeSet(const StakeRegistry& registry, const uint256& seed);
+
+/** Cap on the number of committee members a certificate may name (and a node
+ *  collects shares for): the configured committee size under the public
+ *  fixed-size committee (the schedule prefix cannot exceed it), else the
+ *  aggregate-committee hard cap (threshold sortition can legitimately draw
+ *  above the expected size, but never above this). */
+int PosMaxCommitteeMembers();
 
 /** Build the per-block challenge script for a leader: "<pubkey> OP_CHECKSIG". */
 CScript BuildPosChallenge(const CPubKey& pubkey);

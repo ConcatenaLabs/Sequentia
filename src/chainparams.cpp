@@ -245,6 +245,7 @@ public:
         g_pos_vrf = false;
         g_pos_agg_committee = false;
         g_pos_bls = false;
+        g_pos_public_committee = false;
         // Reset the rest of the PoS consensus globals to their defaults too, so
         // an in-process chain switch can never read a value left over from a
         // previously-selected (custom PoS) chain.
@@ -421,6 +422,12 @@ public:
         // differently from the rest of the network rejects the other form's blocks
         // and forks off. Every node and producer on the chain must use the same value.
         g_pos_bls = args.GetBoolArg("-posbls", true);
+        // Public fixed-size committee (impl spec Option A): membership is the
+        // deterministic schedule prefix and the quorum derives from the actual
+        // size, so two disjoint quorums cannot exist. Default OFF here so the
+        // pre-re-genesis chain is untouched; the re-genesis flips the default
+        // to true with the recommended cap 250 (quorum 126).
+        g_pos_public_committee = args.GetBoolArg("-pospubliccommittee", false);
         g_pos_min_stake = 4000000000000ULL;             // 40,000 SEQ = 0.01% of 400M (§3.3)
         g_pos_committee_size = 100;                      // 51-of-100 quorum (§3.5)
         g_pos_slot_interval = 30;                        // 30s nominal block time (doc 11 §4)
@@ -650,8 +657,15 @@ public:
         // does not change the genesis — but it IS a consensus rule, so every node
         // on a given testnet must agree on the value.
         g_pos_committee_size = args.GetIntArg("-poscommitteesize", 100);
+        // Public fixed-size committee (impl spec Option A). NETWORK-WIDE
+        // consensus rule, like -posbls above.
+        g_pos_public_committee = args.GetBoolArg("-pospubliccommittee", false);
+        if (g_pos_public_committee && !g_pos_bls) {
+            throw std::runtime_error("-pospubliccommittee requires -posbls");
+        }
         {
-            const int max_committee = (g_pos_agg_committee || g_pos_bls) ? MAX_POS_AGG_COMMITTEE_SIZE : MAX_POS_COMMITTEE_SIZE;
+            const int max_committee = g_pos_public_committee ? MAX_POS_PUBLIC_COMMITTEE_SIZE :
+                (g_pos_agg_committee || g_pos_bls) ? MAX_POS_AGG_COMMITTEE_SIZE : MAX_POS_COMMITTEE_SIZE;
             if (g_pos_committee_size < 1 || g_pos_committee_size > max_committee) {
                 throw std::runtime_error(strprintf("-poscommitteesize must be between 1 and %d", max_committee));
             }
@@ -895,6 +909,7 @@ public:
         g_pos_vrf = false;
         g_pos_agg_committee = false;
         g_pos_bls = false;
+        g_pos_public_committee = false;
         // Reset the rest of the PoS consensus globals to their defaults too, so
         // an in-process chain switch can never read a value left over from a
         // previously-selected (custom PoS) chain.
@@ -1013,6 +1028,7 @@ public:
         g_pos_vrf = false;
         g_pos_agg_committee = false;
         g_pos_bls = false;
+        g_pos_public_committee = false;
         // Reset the rest of the PoS consensus globals to their defaults too, so
         // an in-process chain switch can never read a value left over from a
         // previously-selected (custom PoS) chain.
@@ -1275,6 +1291,16 @@ protected:
         }
         if (g_pos_bls && !g_pos_vrf) {
             throw std::runtime_error("-posbls requires -posvrf");
+        }
+        // Public fixed-size committee (impl spec Option A): consensus rule,
+        // every node on a chain must agree.
+        g_pos_public_committee = args.GetBoolArg("-pospubliccommittee", false);
+        if (g_pos_public_committee && !g_pos_bls) {
+            throw std::runtime_error("-pospubliccommittee requires -posbls");
+        }
+        if (g_pos_public_committee &&
+            (g_pos_committee_size < 1 || g_pos_committee_size > MAX_POS_PUBLIC_COMMITTEE_SIZE)) {
+            throw std::runtime_error(strprintf("-poscommitteesize must be between 1 and %d under -pospubliccommittee", MAX_POS_PUBLIC_COMMITTEE_SIZE));
         }
         if (g_con_pos) {
             // MuSig2 aggregation lifts the script-multisig committee cap of 16
@@ -1669,6 +1695,7 @@ public:
         g_pos_vrf = false;
         g_pos_agg_committee = false;
         g_pos_bls = false;
+        g_pos_public_committee = false;
         // Reset the rest of the PoS consensus globals to their defaults too, so
         // an in-process chain switch can never read a value left over from a
         // previously-selected (custom PoS) chain.

@@ -2307,16 +2307,33 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
                     return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-member-duplicate", "duplicate BLS committee member");
                 }
             }
-            const int quorum = PosQuorum((size_t)g_pos_committee_size);
+            // Under the public fixed-size committee (-pospubliccommittee, impl
+            // spec Option A) the quorum derives from the ACTUAL committee size
+            // min(#stakers, cap) — restoring quorum intersection (any two
+            // quorums share >= 2 members), which threshold sortition loses
+            // once the staker pool exceeds the committee target.
+            const int quorum = PosSlotQuorum(registry);
             const bool escaping_stall = g_con_bitcoin_anchor &&
                 PosEscapingStallAllowed(pindexPrev->m_anchor_height, block.m_anchor_height);
             const int min_members = escaping_stall ? 1 : quorum;
             if ((int)named.size() < min_members) {
                 return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-agg-quorum", "fewer BLS committee members than the certification quorum");
             }
-            if ((int)named.size() > MAX_POS_AGG_COMMITTEE_SIZE) {
+            if ((int)named.size() > PosMaxCommitteeMembers()) {
                 return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-member-count", "more BLS committee members than the aggregate committee cap");
             }
+            if (g_pos_public_committee) {
+                // Membership is a lookup against the slot's public committee
+                // (the deterministic schedule prefix). The per-member VRF
+                // eligibility proofs are vestigial in this mode: membership no
+                // longer depends on them, so they are not verified.
+                const std::set<CPubKey> committee = PosPublicCommitteeSet(registry, seed);
+                for (const auto& [member, entry] : named) {
+                    if (!committee.count(member)) {
+                        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-member-not-selected", "BLS committee member is not in the slot's public committee");
+                    }
+                }
+            } else {
             for (const auto& [member, entry] : named) {
                 if (registry.GetWeight(member) == 0) {
                     return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-member-not-selected", "BLS committee member was not selected by sortition for this slot");
@@ -2328,6 +2345,7 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
                 if (!PosVrfIsCommitteeMember(member_beta, registry.GetWeight(member), total_weight)) {
                     return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-member-not-selected", "BLS committee member was not selected by sortition for this slot");
                 }
+            }
             }
         }
     }
@@ -2441,7 +2459,7 @@ static void SetPosForkChoiceKeys(CBlockIndex* pindex, const CBlock& block)
     } else {
         count = parts->committee.size();
     }
-    pindex->m_pos_countersigs = (uint16_t)std::min<size_t>(count, (size_t)MAX_POS_AGG_COMMITTEE_SIZE);
+    pindex->m_pos_countersigs = (uint16_t)std::min<size_t>(count, (size_t)PosMaxCommitteeMembers());
     // Leader VRF score (the top 64 bits of beta; lower is better). Registry-
     // independent: it only needs the leader key and the slot seed.
     if (g_pos_vrf) {
@@ -3162,7 +3180,7 @@ void CChainState::UpdateTip(const CBlockIndex* pindexNew)
     // the security root. Escaping-stall / leader-only (sub-quorum) tips simply
     // leave no immediate-final point until a quorum block is connected.
     if (g_con_pos) {
-        const int quorum = PosQuorum((size_t)std::max(g_pos_committee_size, 1));
+        const int quorum = PosSlotQuorum(StakeRegistry::GetInstance());
         g_pos_immediate_final_height = -1;
         for (const CBlockIndex* f = pindexNew; f && f->nHeight > 0; f = f->pprev) {
             if ((int)f->m_pos_countersigs >= quorum) {

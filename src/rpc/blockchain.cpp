@@ -234,9 +234,7 @@ UniValue blockheaderToJSON(const CBlockIndex* tip, const CBlockIndex* blockindex
     // means the committee finalized it. Exposed so an off-node swap driver
     // (VerifySeqLegSafe) and the wallet cross-maker can require both.
     if (g_con_pos) {
-        int committee = g_pos_committee_size;
-        if (committee < 1) committee = 1;
-        const int pos_quorum = PosQuorum((size_t)committee);
+        const int pos_quorum = PosSlotQuorum(StakeRegistry::GetInstance());
         const int pos_countersigs = (int)blockindex->m_pos_countersigs;
         const bool pos_certified = pos_countersigs >= pos_quorum;
         result.pushKV("poscountersigs", pos_countersigs);
