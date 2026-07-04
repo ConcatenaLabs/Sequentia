@@ -100,13 +100,18 @@ mirroring the pure-LN M0-M5 discipline.
   signer ALONE (no fallback) completed a full channel lifecycle (open→CHANNELD_NORMAL→120k-sat payment→mutual
   close), the peer validating every signature, 0 BROKEN. Crypto pinned to the ambra_core 0.32 line for phone +
   WASM. So the device signer is functionally complete for the pure-LN hosted-channel path.
-- **M3 — asset-channel + issuance conformance.** Largely established already: the M2b sighash port serializes
-  the Elements asset/value commitments and was proven byte-exact on a real Elements (liquid-regtest) channel,
-  and the signer is asset-agnostic by construction. Remaining: a live confirmation on an ISSUED-asset (GOLD)
-  channel (asset differs only in the 33-byte commitment the sighash serializes identically), and the libwally
-  issuance-denomination edge (the device wally needs the `transaction.c` patch only if it re-parses arbitrary
-  txs; commitment/HTLC signing is safe, and `sign_withdrawal` prev-txs — the edge — are out of the device-fundee
-  role anyway).
+- **NETWORK TRANSPORT + M3 — DONE (2026-07-04, seqln `0db3812bd`).** The signer split now runs over a real
+  network link, making the hosted model concrete: `hsmd_proxy.c` `connect_remote_signer()` (env
+  `SEQLN_SIGNER_ADDR`) reaches a REMOTE `seqln-signer --listen host:port` over TCP instead of fork+socketpair
+  (fork stays the default). PROVEN: a hosted node with NO local `hsm_secret` derived its node_id from a
+  separate, detached remote signer over TCP, then completed a full channel lifecycle (open→NORMAL→50k
+  payment→mutual close) with every signature crossing the network. **M3 confirmed:** a GOLD asset channel to
+  the hosted node reached CHANNELD_NORMAL and mutual-closed, the Rust signer signing the asset-channel
+  commitments over the transport (Elements sighash serializes the GOLD asset/value commitment identically).
+  Topology confirmed: the device node is the FUNDEE (inbound liquidity from the LP), so `sign_withdrawal` being
+  out of the M2 subset is correct. **SECURITY (blocking for production, not for the demo):** the TCP link is
+  unauthenticated + unencrypted; production MUST wrap it in a Noise/TLS + per-wallet-auth channel before the
+  device signer holds real keys or faces a public network.
 - **M4 — policy + ECDH latency.** `validate_commitment_tx` is a libhsmd stub (`:1898`); make the device a TRUE
   validating signer (verify amounts/destinations before signing — this is where "device co-signs" earns its
   keep vs a dumb signer). Resolve the ECDH hot-path strategy (device-authorized session key / delegated ECDH /
