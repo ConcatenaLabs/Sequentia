@@ -242,11 +242,19 @@ closingd changes were needed for the no-HTLC path.
   threaded from `channel->channel_asset` in `channeld/full_channel.c`. Dust/trim + implicit-fee + msat->atom
   math needed no change (atoms == sat base unit). NULL asset == policy, so the BOLT-3 vector tests still pass
   byte-exact.
-- **M3** (onchaind/force-close): onchaind + onchain_control currently pass NULL (policy) to the htlc-tx
-  builders (FIXMEs mark them) and `psbt_compute_fee` still balances only the policy asset -- so a GOLD channel
-  FORCE-close would build policy-asset resolution txs. M3 = thread channel_asset through `onchaind_init` + fix
-  `psbt_compute_fee`, then verify unilateral close + HTLC-timeout/success sweep GOLD. Then M4 (invoices+routing
-  carry asset id + display precision), M5 (pure-LN cross-network swap).
+- **M3** (onchaind/force-close) — **core DONE + regtest-verified** (commit `286952e1`): a unilateral close of
+  a 10-GOLD channel resolves on-chain — the commitment tx is single-asset GOLD and after the to_self CSV
+  onchaind sweeps DELAYED_OUTPUT_TO_US, landing 9.8999 GOLD in ln1's wallet. Threaded `channel_asset` through
+  `onchaind_init` (new byte,33 field) into an onchaind global; `onchaind_tx_unsigned()` (the real sweep
+  builder) sets the tx asset; the onchaind grind/verify htlc builders + onchain_control htlc_tx calls pass it;
+  relaxed the ~9 policy asserts in onchaind.c; fixed two generic asset-blind asserts that abort while PARSING a
+  GOLD force-close tx (`bitcoin/tx_parts.c` cached-value assert + `psbt_output_get_amount`); `psbt_compute_fee`
+  now balances per-asset. BOLT-3 vector tests still pass. **Remaining M3:** HTLC-sweep + penalty +
+  their-unilateral paths are threaded but not yet live-tested with a pending HTLC at close (an adversarial
+  audit workflow is sweeping them for missed asset-blind hazards). Guarded-skip follow-ups (no crash): the
+  gossip utxoset scans (`bitcoind.c`/`chaintopology.c`) and coop-close fee (`closing_control.c`) still skip
+  non-policy outputs — matters for PUBLIC asset channels + display, not resolution.
+- Then **M4** (invoices+routing carry asset id + display precision), **M5** (pure-LN cross-network swap).
 
 REMAINING for M1 (a large, funds-critical, REGTEST-GATED integration — verifiable only end-to-end, so it must
 be done carefully, not rushed):
