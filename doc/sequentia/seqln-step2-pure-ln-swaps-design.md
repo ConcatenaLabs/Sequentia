@@ -253,8 +253,8 @@ single-onion conversion to a Step-2b**; it is not needed for "pure-LN swaps work
   relies on LN's native HTLC timeout + force-close and is not exercised here — a deeper follow-up, not on the
   happy/adversarial-app path proven so far. Also: the refund test is slow (~72s) only because CLN `pay`
   retries an unroutable amount until `retry_for`; a maker would cap retries.
-- **M4 — seqob integration. DRIVER DONE, BOTH DIRECTIONS (2026-07-04, seqdex `phase3-pure-ln` commits
-  `d499194`+`3216996`).** The pure-LN `ln_direction` values (`LnAssetLNForBTCLN`/`LnBTCLNForAssetLN`,
+- **M4 — seqob integration. DONE — DRIVER + BINARIES + LIVE E2E, BOTH DIRECTIONS (2026-07-04, seqdex
+  `phase3-pure-ln` commits `d499194`+`3216996`+`f22da9d`+`e347291`).** The pure-LN `ln_direction` values (`LnAssetLNForBTCLN`/`LnBTCLNForAssetLN`,
   `IsPureLN`; commit `efc9434`) + the opaque courier atoms (`xcourier_pureln.go`:
   `XcPln{TermsRequest,Terms,AssetInvoice,HoldReady,Settled}`, and `XcMsg.MakerLNNodeID`) + the **driver** over
   the relay (`xdriver_pureln.go`). Handshake: taker→`TermsRequest`; maker→`Terms{maker_ln_node_id,btc_amount,
@@ -274,11 +274,17 @@ single-onion conversion to a Step-2b**; it is not needed for "pure-LN swaps work
   `serveSubmarine`'s one-in-flight/cancel-after-fill discipline but with no anchor gate). `seqob-cli xpln -side
   buy|sell` is the taker — no on-chain leg means no asset HTLC to fund and no refund state file (a stall unwinds
   via the LN hold timeout); it finds+verifies the matching pure-LN offer by `ln_direction` and drives
-  `RunTakerPureLN` over the WS courier. Amounts are msat on both legs (atoms/sats ×1000). Flag/dispatch wiring
-  smoke-tested; whole-daemon build + vet green. **LEFT:** a live e2e over the real relay + two SeqLN-on-Bitcoin
-  and two SeqLN-on-Sequentia nodes (needs box coordination). An RFQ quote (§5.3) off the order book is still a
-  fixed-amount offer today (whole-swap), same as the submarine wiring — dynamic per-lift pricing is a later
-  refinement, not a blocker.
+  `RunTakerPureLN` over the WS courier. Amounts are msat on both legs (atoms/sats ×1000). **LIVE E2E PROVEN
+  (2026-07-04, commit `e347291`):** on the laptop SeqLN regtest (ln2 maker w/ holdinvoice-seq, ln1 taker; GOLD
+  `83053bb2…` asset leg + `cbe3b48f…` as the BTC stand-in — the mechanism is network-agnostic, same as the M2/M3
+  engine proof), BOTH directions settled end-to-end through the real `seqobd` relay + encrypted courier in
+  seconds, both legs off-chain, no anchor wait: BUY (`xpln -side buy`, maker `-side sell`) and SELL (mirror),
+  each with maker+taker converging on one preimage. Two fixes fell out: (a) the seqobd **validator** capped
+  `ln_direction` at 1 (rejected every pure-LN offer) → widened to 2/3 + require `maker_ln_node_pubkey` for
+  pure-LN; (b) added **`-btc-asset`** to maker+cli so the BTC leg can route over a 2nd issued asset (regtest
+  stand-in; empty = real BTC-LN). An RFQ quote (§5.3) off the order book is still a fixed-amount offer today
+  (whole-swap), same as the submarine wiring — dynamic per-lift pricing is a later refinement, not a blocker.
+  **M4 DONE.**
 - **M5 — reach the GLOBAL BTC LN.** Route the BTC leg over a real multi-hop Bitcoin-LN path (not just the
   maker's two local nodes) to a third-party invoice, proving a Sequentia asset genuinely reaches the open
   Bitcoin Lightning Network. This is the "assets at the edges" reach demonstration.
