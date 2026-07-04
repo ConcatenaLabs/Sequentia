@@ -48,6 +48,7 @@ const char *POSPROPOSAL="posproposal";
 const char *POSCMPCTPROPOSAL="poscmpctprop";
 const char *GETPOSPROPOSAL="getposprop";
 const char *POSSHARE="posshare";
+const char *POSCERT="poscert";
 } // namespace NetMsgType
 
 /** All known message types. Keep this in the same order as the list of
@@ -92,6 +93,7 @@ const static std::string allNetMessageTypes[] = {
     NetMsgType::POSCMPCTPROPOSAL,
     NetMsgType::GETPOSPROPOSAL,
     NetMsgType::POSSHARE,
+    NetMsgType::POSCERT,
 };
 const static std::vector<std::string> allNetMessageTypesVec(std::begin(allNetMessageTypes), std::end(allNetMessageTypes));
 

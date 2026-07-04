@@ -4206,6 +4206,23 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         if (!prod) return;
         if (std::shared_ptr<const CBlock> block = prod->GetProposalBlock(hash)) {
             m_connman.PushMessage(&pfrom, CNetMsgMaker(pfrom.GetCommonVersion()).Make(NetMsgType::POSPROPOSAL, *block));
+            return;
+        }
+        // Not a live round candidate: serve a CONNECTED block from disk. A
+        // peer that learned of a certified block from poscert gossip fetches
+        // the body this way when the original flood never reached it (3A).
+        {
+            const CBlockIndex* pindex;
+            {
+                LOCK(cs_main);
+                pindex = m_chainman.m_blockman.LookupBlockIndex(hash);
+            }
+            if (pindex && (pindex->nStatus & BLOCK_HAVE_DATA)) {
+                CBlock block;
+                if (ReadBlockFromDisk(block, pindex, m_chainparams.GetConsensus())) {
+                    m_connman.PushMessage(&pfrom, CNetMsgMaker(pfrom.GetCommonVersion()).Make(NetMsgType::POSPROPOSAL, block));
+                }
+            }
         }
         return;
     }
@@ -4225,6 +4242,42 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 m_connman.PushMessage(pnode, CNetMsgMaker(pnode->GetCommonVersion()).Make(NetMsgType::POSSHARE, share));
             });
             break;
+        case PosGossipAction::Ignore:
+            break;
+        }
+        return;
+    }
+
+    if (msg_type == NetMsgType::POSCERT) {
+        // The header of a quorum-certified block: the certificate is its proof
+        // solution (3A). Verified and pinned by the producer; relayed onward
+        // so it crosses partitions that the full block could not; the body is
+        // fetched from the sender when we lack it.
+        CBlockHeader header;
+        vRecv >> header;
+        PosProducer* prod = GetActivePosProducer();
+        if (!prod) return;
+        switch (prod->OnCertificate(header)) {
+        case PosGossipAction::Invalid:
+            Misbehaving(pfrom.GetId(), 10, "invalid poscert");
+            break;
+        case PosGossipAction::Relay: {
+            const uint256 hash = header.GetHash();
+            bool have_body = prod->GetProposalBlock(hash) != nullptr;
+            if (!have_body) {
+                LOCK(cs_main);
+                const CBlockIndex* pindex = m_chainman.m_blockman.LookupBlockIndex(hash);
+                have_body = pindex && (pindex->nStatus & BLOCK_HAVE_DATA);
+            }
+            if (!have_body) {
+                m_connman.PushMessage(&pfrom, CNetMsgMaker(pfrom.GetCommonVersion()).Make(NetMsgType::GETPOSPROPOSAL, hash));
+            }
+            m_connman.ForEachNode([&](CNode* pnode) {
+                if (pnode->GetId() == pfrom.GetId()) return;
+                m_connman.PushMessage(pnode, CNetMsgMaker(pnode->GetCommonVersion()).Make(NetMsgType::POSCERT, header));
+            });
+            break;
+        }
         case PosGossipAction::Ignore:
             break;
         }

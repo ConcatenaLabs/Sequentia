@@ -174,6 +174,15 @@ public:
     //! Return the full proposal block we hold for `hash` (a round candidate), to
     //! answer a peer's getposproposal, or nullptr.
     std::shared_ptr<const CBlock> GetProposalBlock(const uint256& hash);
+    //! Ingest a peer's `poscert` (the header of a quorum-certified block; the
+    //! completed certificate is in its proof solution). A valid certificate is
+    //! the partition-crossing finality signal (honest-splits fix 3A): it pins
+    //! this node to the certified block at that height — no rival is proposed,
+    //! backed or signed there — and if we already hold the validated proposal
+    //! body (we share-signed it, or collected it as a round candidate) the
+    //! block is completed and connected on the spot. Returns the relay/penalty
+    //! action; the caller fetches the body via getposproposal when we lack it.
+    PosGossipAction OnCertificate(const CBlockHeader& header);
 
 protected:
     void UpdatedBlockTip(const CBlockIndex* pindexNew, const CBlockIndex* pindexFork,
@@ -215,6 +224,12 @@ private:
     //! regtest equivocation fault-injection to split the committee.
     void FloodProposalSplit(const CBlock& a, const CBlock& b);
     void FloodShare(const PosShare& share);
+    //! Flood a certified block's header (the certificate) to all peers.
+    void BroadcastCertificate(const CBlockHeader& header);
+    //! If we hold both a certificate and the proposal body for the same block,
+    //! attach the certificate and submit the completed block. Returns true if
+    //! a block was submitted. Takes m_gossip_mutex internally.
+    bool TryConnectCertified();
     //! Wake the worker thread (e.g. when a gossip message advances a round).
     void Wake();
 
@@ -265,6 +280,22 @@ private:
     uint256 m_last_tip;                                //!< active tip last seen by Step(); detects parent-reorg rollbacks
     std::set<uint256> m_seen_proposals;                //!< proposal dedup
     std::set<std::pair<uint256, CPubKey>> m_seen_shares; //!< share dedup
+
+    // Certificate gossip (honest-splits fix 3A, Tier 1). A verified quorum
+    // certificate for a height pins this node: it will not propose, back or
+    // sign a rival there (this includes the escaping-stall valve — a node
+    // that KNOWS a certificate never mints a sub-quorum rival at that
+    // height), it tries to complete the block from a held proposal body, and
+    // the hold is TIME-BOUNDED (POS_CERT_HOLD_MS) so a certificate whose
+    // body is deliberately withheld degrades into a bounded pause, never a
+    // deadlock: the share-lock (Tier 2) is where the stronger guarantee
+    // lands. State under m_gossip_mutex.
+    std::set<uint256> m_seen_certs;                    //!< certificate dedup
+    std::map<uint256, CBlockHeader> m_certified;       //!< block hash -> certified header (the certificate)
+    std::map<int, uint256> m_certified_heights;        //!< height -> certified block hash
+    int m_cert_hold_height{0};                         //!< height the current hold is for
+    int64_t m_cert_hold_since_ms{0};                   //!< when the hold started
+    bool m_cert_hold_logged{false};
 
     // Committee-equivocation prevention (Change 4a), worker thread only. While
     // the anchor watcher holds a quorum-certified child of the current tip that

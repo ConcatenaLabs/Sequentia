@@ -286,6 +286,18 @@ extern const char* GETPOSPROPOSAL;
  * proof and BLS key, so the leader can aggregate a quorum into a certificate.
  */
 extern const char* POSSHARE;
+/**
+ * SEQUENTIA: poscert carries the HEADER of a quorum-certified block (the
+ * completed certificate lives in the header's proof solution), gossiped as its
+ * own small object independently of the block body. The certificate is the
+ * partition-crossing finality signal (honest-splits fix 3A): a full block can
+ * be lost to a partition or a slow flood, but the certificate is a few hundred
+ * bytes with every holder as a sender, so a committee member that share-signed
+ * the proposal learns it certified, pins to it, and never backs a rival at
+ * that height; members already hold the validated proposal body, so they
+ * attach the certificate and connect without any further fetch.
+ */
+extern const char* POSCERT;
 }; // namespace NetMsgType
 
 /* Get a vector of all valid message types (see above) */
