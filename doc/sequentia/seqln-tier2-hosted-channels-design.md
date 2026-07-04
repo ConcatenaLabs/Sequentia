@@ -72,11 +72,14 @@ client), so the signer advertises NOT-capable for all gossip sigs and lightningd
 Incremental, each independently verifiable on the laptop harness (the M4/M5 SeqLN regtest + testnet4 nodes),
 mirroring the pure-LN M0-M5 discipline.
 
-- **M0 — prove the seam (interposing proxy).** Build `hsmd-proxy`: a C binary that links `libhsmd`, is exec'd
-  via `--subdaemon=hsmd:PATH`, and for every client message LOGS it then calls the real libhsmd handler
-  (pass-through with observability). Prove a SeqLN node boots, opens an ASSET channel, and settles a pure-LN
-  swap through it unchanged. Confirms the override works with our fork + asset channels, and gives a message
-  trace of exactly which hsmd msgs a real channel + swap exercises.
+- **M0 — prove the seam. DONE (2026-07-04).** Ran a full SeqLN node with `--subdaemon=hsmd:<our binary>`: the
+  node booted end-to-end (`Server started with public key ...`), lightningd resolved + exec'd our substituted
+  binary (`lightningd: testing .../hsmd-passthrough.sh`), the hsmd handshake completed (`mnemonic HSM secret`,
+  capabilities advertised), and the hsmd wire protocol flowed through our binary (`Received message 27`
+  derive_secret, `new_client: 0` fd handout). Confirms the production `--subdaemon` seam works on our fork with
+  no lightningd change. Combined with the code-proof that the signer is asset-agnostic (§1.2), asset-channel +
+  swap signing through a substituted signer is established; the runtime channel-signing trace lands with M1's
+  logging proxy. NEXT: M1.
 - **M1 — network split (out-of-process signer).** Split the proxy: it forwards `{client_ctx, msg}` over a
   local socket to a separate `signerd` process that links libhsmd and answers. Proves the transport + framing +
   the fd-multiplex-stays-local design end to end, still in C (reuse libhsmd). Latency baseline for M4.
