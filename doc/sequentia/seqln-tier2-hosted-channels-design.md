@@ -90,13 +90,23 @@ mirroring the pure-LN M0-M5 discipline.
   close) is signed out-of-process with valid Elements/asset signatures. Runtime channel-signing trace captured
   (ECDH, GET_CHANNEL_BASEPOINTS, NEW/SETUP_CHANNEL, GET_PER_COMMITMENT_POINT, SIGN_WITHDRAWAL,
   SIGN_REMOTE_COMMITMENT_TX, VALIDATE_COMMITMENT_TX, SIGN_MUTUAL_CLOSE_TX) — confirms the M2 subset.
-- **M2 — device signer (Rust/WASM).** Reimplement the minimal hsmd message subset (§4) over the crypto kernel
-  in `ambra_core` Rust, compiled native (phone) + WASM (browser). Point `signerd`'s transport at it. Conformance
-  tested byte-for-byte against libhsmd (same derivations, same signatures) via M1 as the oracle.
-- **M3 — asset-channel + issuance conformance.** Prove the Rust signer signs asset-channel commitments/HTLCs
-  identically to libhsmd, and add the libwally issuance-denomination test (the device wally must carry the
-  `transaction.c` patch if it re-parses arbitrary txs; commitment/HTLC signing is safe, `sign_withdrawal`
-  prev-txs are the edge). Full pure-LN swap through a device-signed hosted channel.
+- **M2 — device signer (Rust). DONE (2026-07-04, seqln `8664fdf01` M2a + `3a8a753ee` M2b).** Crate
+  `contrib/seqln-signer`: an I/O-free (WASM-ready) crypto kernel + the hsmd message subset (§4), reimplementing
+  libhsmd's derivations AND transaction signing in Rust. M2a: derivations byte-exact (35/35 synthetic). M2b:
+  the Elements BIP-143 sighash + low-R grinding (the subtlety: libhsmd feeds 32 zero noncedata bytes on the
+  first grind round; driven via `sign_ecdsa_with_noncedata`) + the `sign_*` handlers. Reply =
+  64-byte-compact+sighash-byte. PROVEN: real-request corpus byte-exact vs libhsmd (fundee 99/0, funder 102/1 —
+  the 1 = `sign_withdrawal`'s full-PSBT reply, out of the device-as-fundee role), AND a node running the Rust
+  signer ALONE (no fallback) completed a full channel lifecycle (open→CHANNELD_NORMAL→120k-sat payment→mutual
+  close), the peer validating every signature, 0 BROKEN. Crypto pinned to the ambra_core 0.32 line for phone +
+  WASM. So the device signer is functionally complete for the pure-LN hosted-channel path.
+- **M3 — asset-channel + issuance conformance.** Largely established already: the M2b sighash port serializes
+  the Elements asset/value commitments and was proven byte-exact on a real Elements (liquid-regtest) channel,
+  and the signer is asset-agnostic by construction. Remaining: a live confirmation on an ISSUED-asset (GOLD)
+  channel (asset differs only in the 33-byte commitment the sighash serializes identically), and the libwally
+  issuance-denomination edge (the device wally needs the `transaction.c` patch only if it re-parses arbitrary
+  txs; commitment/HTLC signing is safe, and `sign_withdrawal` prev-txs — the edge — are out of the device-fundee
+  role anyway).
 - **M4 — policy + ECDH latency.** `validate_commitment_tx` is a libhsmd stub (`:1898`); make the device a TRUE
   validating signer (verify amounts/destinations before signing — this is where "device co-signs" earns its
   keep vs a dumb signer). Resolve the ECDH hot-path strategy (device-authorized session key / delegated ECDH /
