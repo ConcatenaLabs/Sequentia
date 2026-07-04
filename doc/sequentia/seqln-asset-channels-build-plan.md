@@ -317,3 +317,60 @@ be done carefully, not rushed):
 Then M2 (commit_tx + HTLCs in the asset; the 11 commit_tx call sites), M3 (onchaind/force-close), M4
 (invoices+routing), M5 (pure-LN cross-network swap). Each is further multi-day funds-critical work with no
 prior art. The tx foundation above is the reusable core the rest builds on.
+
+## Step 1 DONE — PUBLIC asset-LN network with edge-forwarding (2026-07-04)
+
+User directive (build order): (1) public asset-LN networks with edge-forwarding → (2) pure-LN swaps →
+(3) wallet+DEX integration. This section closes **Step 1**, proven live on a 3-node line
+`ln1 — ln2 — ln3` (liquid-regtest) with GOLD **and** a second issued asset (cbe3b48f) in the graph.
+
+**What Step 1 required (and why the earlier M1-M3 per-channel work was not enough):** M1-M3 made a
+*single* channel asset-aware. A public network additionally needs (a) asset channels to PROPAGATE (remote
+nodes learn them via gossip), (b) forwarding nodes to REFUSE cross-asset hops, and (c) pathfinding to only
+build same-asset routes. Discovered empirically, in order:
+
+1. **Multi-hop same-asset forwarding already worked** (M2 gave per-channel HTLC asset-awareness). Proven by a
+   hand-built `sendpay` GOLD route ln1→ln2→ln3: ln2 forwarded (earned a GOLD fee), ln3 settled. No forwarding
+   code change was needed for the same-asset case.
+
+2. **Asset channels did NOT propagate** — the core public-network bug. `topo_add_utxos`
+   (`lightningd/chaintopology.c`) skipped every non-policy output (`if (!amount_asset_is_main) continue`), so
+   an asset channel's funding output never entered the `utxoset`; a remote node could not verify its
+   `channel_announcement` and silently dropped it ("Bad gossip order" on the orphaned updates). Fix: record
+   asset funding outputs (raw value + the 33-byte asset). Proven: a non-party node now learns a remote GOLD
+   channel via gossip and `getroute`/`pay` reach it.
+
+3. **Cross-asset value corruption** — asset-blind forwarding let ln2 receive 0.1 cbe3b48f and pay out 0.1 GOLD
+   at par (empirically confirmed via `listforwards`: `in_channel` cbe3b48f, `out_channel` GOLD). Fix: a
+   forward-time guard (`lightningd/peer_htlcs.c forward_htlc`) refuses when in-channel `channel_asset` !=
+   out-channel `channel_asset` (reported `unknown_next_peer`). Proven: cross-asset `sendpay` fails with the
+   invoice unpaid; same-asset still settles. NOTE this is a **safety backstop**, not the router — with the
+   guard alone, asset-blind auto-`pay` **thrashed 26,738 attempts then failed**, because pathfinding kept
+   proposing cross-asset routes. Hence (4).
+
+4. **Asset-aware gossip + pathfinding** (the real Step-1 code). The asset is learned from the on-chain funding
+   output (trustless; no announcement/TLV change) and flows to the routing graph exactly like capacity:
+   - `utxoset` gets an `asset` column; `wallet_outpoint_for_scid` returns it.
+   - `gossipd_get_txout_reply` carries the asset (remote channels); `addgossip` `known_asset` carries it for
+     local announcements.
+   - new `gossip_store_channel_asset` record (4108), written right AFTER `gossip_store_channel_amount` (so the
+     capacity reader's "record after the announcement" invariant holds); `gossmap_chan_get_asset()` reads it
+     on demand, absent → policy asset.
+   - `getroute` gains an optional `asset` param (32-byte id, same `0x01||reversed` transform as `fundchannel`);
+     `can_carry` skips any channel whose asset != the requested asset, so dijkstra only builds same-asset
+     routes.
+
+**Proven end-to-end** (fresh channels, so they carry asset records): `getroute id=ln3 asset=GOLD` → clean
+all-GOLD 2-hop route that AVOIDS the cbe3b48f decoy channel to the same peer; `getroute asset=cbe3b48f` →
+"Could not find a route" (ln3 has no cbe3b48f channel — no cross-asset route invented); `sendpay` of the GOLD
+route → **settles, invoice paid**. Commits (seqln `sequentia-stable`): `825c5db` (propagate + forward guard),
+`3ab36eec` (asset-aware gossip + pathfinding).
+
+**Remaining Step-1 polish (optional, boundary with Step 3):** thread the `asset` param through the `pay`
+plugin so fully-automatic `pay bolt11=... asset=GOLD` routes correctly (today the asset filter lives in
+`getroute`; consumers use `getroute`+`sendpay`, or plain `pay` which is still asset-blind + backstopped by
+the guard). Also: asset support for local/unannounced (localmod) channels in `gossmap_chan_get_asset` (today
+returns policy for localmods).
+
+**Next: Step 2 — pure-LN swaps** (asset↔asset / asset↔BTC entirely within LN via the edge-conversion / RFQ
+layer, the "assets at the edges" M5 reach layer), then Step 3 (wallet + DEX integration).
