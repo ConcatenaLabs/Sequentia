@@ -122,9 +122,22 @@ mirroring the pure-LN M0-M5 discipline.
   a tampered commitment (output redirected to an attacker script) is REJECTED in enforce, signs unmodified,
   signs in permissive. Deferred to VLS-parity (labeled): SIGN_COMMITMENT_TX HTLC set (off the fundee path),
   HTLC-tx/sweep/penalty signs (pay to keys we own), rate limits. **ECDH decision RESOLVED** (see §5).
-- **M5 — recovery / escape hatch.** Wire static-remotekey + SCB (`emergency.recover`) + peer-storage +
-  `recover.c` so a user whose hosted node vanishes can force-close/sweep with only their device (mnemonic). The
-  device already holds every secret to sign penalty + to-us sweeps.
+- **M5 — recovery / escape hatch. DONE (2026-07-04, seqln `7527d3fbd`).** Proven: with the hosted node's WHOLE
+  database destroyed, the device recovered its channel funds from only its mnemonic + the SCB
+  (`emergency.recover`) — node_id reconstituted from the mnemonic, `emergencyrecover`/`recoverchannel` restored
+  the stub, reconnect drove the peer to force-close, and the recovered node delivered the 700k-sat
+  static_remotekey `to_remote` to a device-controlled key. Separately proved the device signer produces a VALID
+  on-chain to-us sweep (`SIGN_ANY_DELAYED_PAYMENT_TO_US` after CSV; tx accepted + confirmed). So hosting carries
+  no custody risk. Follow-ups (hardening, funds are already safe): add a `sign_withdrawal` handler (Elements
+  PSET partial-sig) so recovered `to_remote` is re-spendable hands-off (also the M2b VLS-parity gap); fix the
+  fork's `guesstoremote` (memcpy's 32 of the 64-byte BIP39 seed); harden the `emergencyrecover` onchaind stub.
+
+**Signer split M0-M5 COMPLETE** (seqln `7527d3fbd`): the non-custodial CLN native signer split is proven
+end-to-end — hosted node with no local key, remote Rust device signer (byte-exact vs libhsmd, WASM-ready),
+network transport, asset channels, a validating policy that refuses theft, and device-only fund recovery. The
+remaining work is PRODUCTIZATION (§below): secure the transport (Noise/TLS + per-wallet auth), the hosted-LSP
+infra (JIT/pay-to-open liquidity + a wallet-facing API), and wallet integration (the signer as WASM/FFI + an
+SDK), then the parked UX overhaul.
 
 Then Tier-2 hosted channels are available to the wallets: the wallet SDK opens a hosted channel (pay-to-open /
 JIT liquidity from our LP), holds its keys, co-signs, and trades asset<->BTC over pure-LN truly instantly.
