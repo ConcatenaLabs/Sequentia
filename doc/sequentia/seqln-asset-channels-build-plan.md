@@ -366,11 +366,16 @@ all-GOLD 2-hop route that AVOIDS the cbe3b48f decoy channel to the same peer; `g
 route → **settles, invoice paid**. Commits (seqln `sequentia-stable`): `825c5db` (propagate + forward guard),
 `3ab36eec` (asset-aware gossip + pathfinding).
 
-**Remaining Step-1 polish (optional, boundary with Step 3):** thread the `asset` param through the `pay`
-plugin so fully-automatic `pay bolt11=... asset=GOLD` routes correctly (today the asset filter lives in
-`getroute`; consumers use `getroute`+`sendpay`, or plain `pay` which is still asset-blind + backstopped by
-the guard). Also: asset support for local/unannounced (localmod) channels in `gossmap_chan_get_asset` (today
-returns policy for localmods).
+**`pay asset=<id>` DONE (commit `0a21f40`):** the `pay` plugin routes internally (not via the getroute RPC),
+so it got its own asset filter — an optional `asset` param stored on the root payment, enforced in
+`payment_route_check` (the single choke point for every routing variant incl. MPP). Proven:
+`pay bolt11=<GOLD invoice> asset=GOLD` settles in one part over the all-GOLD path, no thrashing. So Step 1 is
+usable end-to-end with a single command.
+
+**Remaining Step-1 polish (minor, boundary with Step 3):** asset support for local/unannounced (localmod)
+channels in `gossmap_chan_get_asset` (today returns policy for localmods, so a first hop over a PRIVATE asset
+channel isn't asset-filtered); and a fast-fail (rather than retry-until-timeout) when a `pay asset=` has no
+same-asset path to the destination (pre-existing pay retry behavior, not asset-specific).
 
 **Next: Step 2 — pure-LN swaps** (asset↔asset / asset↔BTC entirely within LN via the edge-conversion / RFQ
 layer, the "assets at the edges" M5 reach layer), then Step 3 (wallet + DEX integration).
