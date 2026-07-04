@@ -227,10 +227,15 @@ single-onion conversion to a Step-2b**; it is not needed for "pure-LN swaps work
   (as in Step-1 testing), so **create-by-hash BOLT11 / HSM `sign_invoice` is NOT needed** (the anticipated
   hardest dependency, and the daywalker90 Rust plugin, are both eliminated). TODO before production: file-
   backed hold state (survive plugin restart) + amount/cltv validation.
-- **M1 — asset `LNLeg` + two-LN-leg wiring.** Add asset-aware `Pay(asset=…)` to `clnLNLeg` (Step-1 param) and
-  a hold-leg pay via `sendpay`-to-hash; introduce the asset-LN `Sub*Ops`/`AssetLeg` seam (§4) so a swap can
-  pair two LN legs. The asset-hold risk is already retired by M0; M1 is now the seam + `Pay asset=` + the
-  hold-flow wiring (`WaitHeld`/`SettleHold`/`CancelHold`), no plugin risk.
+- **M1 — asset `LNLeg` primitives. DONE (2026-07-04, seqdex branch `phase3-pure-ln`, commit `7e7fe94`).**
+  `clnLNLeg` gained an `assetID` (+ `NewCLNAssetLNLeg`); `Pay` now passes `asset=` so the maker's asset leg
+  routes in its issued asset; new `PayHash` pays a BARE hash (no BOLT11) via `getroute(asset=)`+`sendpay`+
+  `waitsendpay` and returns the preimage on settle (the taker's hold-pay primitive); `SettleHold` now passes
+  the preimage (matching holdinvoice-seq). **Both proven live** on GOLD channels: `TestLNLegAssetPayLive`
+  (asset Pay recovers P) and `TestLNLegPayHashLive` (PayHash of a held bare hash recovers P on settle).
+  **Seam simplification:** because `clnLNLeg` now serves both policy and asset, the "two-LN-leg seam" needs
+  **no new `AssetLeg` interface** — a pure-LN swap just holds two `LNLeg`s (one `NewCLNAssetLNLeg`, one
+  `NewCLNLNLeg`). The `Sub*Ops`-refactor option from §4 is unnecessary for pure-LN; that orchestration is M2.
 - **M2 — pure-LN swap, buy-GOLD-with-BTC, happy path.** `PureLNSwap` with two LN-style legs (asset + BTC), no
   on-chain SEQ leg, no anchor gate; maker's incoming BTC leg is the M0 hold invoice. Prove end to end on the
   two-daemon harness (Sequentia regtest asset channel + testnet4 BTC channel), stitched by one `P`; **measure
