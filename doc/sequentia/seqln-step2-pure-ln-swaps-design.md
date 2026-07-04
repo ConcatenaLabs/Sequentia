@@ -244,8 +244,15 @@ single-onion conversion to a Step-2b**; it is not needed for "pure-LN swaps work
   ln2 maker; GOLD asset leg + a 2nd Sequentia asset as the BTC stand-in since the mechanism is
   network-agnostic): **settled in ~2.1s, both sides on one shared preimage, NO on-chain tx / NO anchor wait**
   — the headline win over anchor-gated submarine swaps. (Real global-BTC-LN leg = M5.)
-- **M3 — sell direction + refund/timeout.** Sell-GOLD-for-BTC (asset hold invoice from M1), plus the CLTV
-  refund/timeout path on each leg with the wall-clock ladder from §5.2. Prove a stuck swap refunds both sides.
+- **M3 — sell direction + refund. DONE (2026-07-04, seqdex `phase3-pure-ln` commit `6b4dbab`).** Refactored
+  `PureLNSwap` into direction-agnostic incoming/outgoing helpers with thin BUY/SELL wrappers. **SELL** (taker
+  sells the asset for BTC = the mirror: maker holds the *asset* leg, pays BTC) settles ~2.1s live. **Atomic
+  refund** proven: when the maker's outgoing pay fails (unroutable), `MakerFulfill` cancels the hold and the
+  taker's incoming HTLC is failed back — neither leg completes, no partial. (`TestPureLNSellLive`,
+  `TestPureLNRefundLive`.) NOTE the on-chain CLTV-timeout path for an *offline* party (§5.2, wall-clock ladder)
+  relies on LN's native HTLC timeout + force-close and is not exercised here — a deeper follow-up, not on the
+  happy/adversarial-app path proven so far. Also: the refund test is slow (~72s) only because CLN `pay`
+  retries an unroutable amount until `retry_for`; a maker would cap retries.
 - **M4 — seqob integration.** `LightningTerms` pure-LN `Direction` + the RFQ quote (§5.3) + the opaque courier
   message; a taker discovers a resting priced offer, gets a quote, runs the swap over the relay. No anchor
   watcher needed for the happy path.
