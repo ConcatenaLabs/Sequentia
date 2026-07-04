@@ -1,0 +1,258 @@
+# SeqLN Step 2 — Pure-LN asset↔BTC swaps (the "assets at the edges" reach layer) — design
+
+STATUS: design/scoping pass (2026-07-04). Step 1 (asset-aware channels + routing + `pay asset=`) is DONE and
+proven (doc `seqln-asset-channels-build-plan.md`). This scopes Step 2, the user's stated next phase:
+"pure-LN swaps working" before wallet/DEX integration.
+
+Grounding docs: `seqdex-lightning-feasibility.md` (§4 the pure-LN mechanism, §3 the anchoring↔LN safety
+result, §8 phasing — this is that doc's **Phase 3**), `seqln-dex-instant-swap-latency.md` (§"endgame" — this
+is the instant-both-ways path), `seqln-phase2-submarine-swaps.md` (§5b/§5c/§5d — the live code seam we reuse).
+
+---
+
+## 0. Where this sits, in one paragraph
+
+Step 1 put issued assets (GOLD, USDX, …) into Sequentia Lightning channels and made SeqLN route them
+correctly. Step 2 uses those channels as the **edge** of a Taproot-Assets-style "assets at the edges"
+network: BTC is the universal medium in the middle (the global Bitcoin Lightning Network), a Sequentia asset
+lives only at the edges, and a **translating node** converts asset-LN ↔ BTC-LN per payment. The result: a
+Sequentia GOLD holder can pay/receive over the entire Bitcoin LN with the FX invisible at the edge, and the
+swap is **instant and trustless** — no on-chain transaction in the happy path, so the anchor-depth wait that
+gates today's submarine swaps disappears.
+
+In the feasibility doc's phasing this is **Phase 3**, which explicitly *depends on* Phase 2 (asset channels)
+— now delivered.
+
+---
+
+## 1. Why this, why now (the payoff)
+
+- **Instant.** Both legs are off-chain LN payments settling in hundreds of ms. There is **no on-chain tx in
+  the success path**, so no 0-conf risk and — crucially — **no `min_anchor_depth` wait**. Submarine swaps
+  (live today) are gated by burying the on-chain asset claim to Bitcoin-anchor depth (~20–30 min); the
+  pure-LN swap removes the on-chain leg entirely, so that gate is gone. This is the whole point of
+  `seqln-dex-instant-swap-latency.md`: *"the 'instant' lives entirely in the pure-LN leg."*
+- **Trustless (custody), both directions.** One shared secret reused across two LN payments, stitched at the
+  translating node; the node can never take one leg without settling the other. Worst case is a timelock
+  refund. Non-custodial exactly like Boltz.
+- **Reach.** The medium leg is plain BTC over the *global* Bitcoin LN, so a Sequentia asset can be spent to /
+  received from any Bitcoin-LN counterparty in the world — not just a Sequentia-local peer.
+- **It composes with what we already shipped.** The asset leg is Step-1 `pay asset=`; the BTC leg + the
+  stitching state machine already exist (submarine swaps); the only structural change is *upgrading the asset
+  leg from on-chain to LN*, which mostly *deletes* code (the on-chain HTLC + the anchor gate) from the happy
+  path.
+
+Honest residual (Principle 1): anchoring is irrelevant to the happy path (nothing touches chain), but the
+**dispute/refund path** falls back to on-chain HTLC timeouts, where timelock sizing (below) and anchoring
+still matter. "Instant and final" is honest for the pure-LN happy path; the refund path is the rare exception.
+
+---
+
+## 2. Mechanism (both directions)
+
+Shared secret `P`, `H = SHA256(P)`. Two **independently routed** LN payments on two **separate** networks
+(SeqLN-on-Sequentia for the asset, the global Bitcoin LN for BTC), stitched at the translating node by `P`.
+This is NOT one onion across both networks (the networks are disjoint routing graphs / different chains); it
+is two payments glued by the shared secret, exactly the submarine-swap pattern with both legs now off-chain.
+The maker's **incoming** (held) leg must carry the **longer** CLTV than the **outgoing** leg it settles.
+
+**Buy GOLD with BTC** (taker holds BTC-LN, wants GOLD in a Sequentia asset channel):
+1. Taker generates `P`, `H`. Taker issues (or is quoted) a GOLD invoice on `H` on the Sequentia network.
+2. Maker issues a BTC **hold** invoice on `H`. Taker pays it → BTC HTLC held (unsettled) at the maker.
+3. Maker pays the taker's GOLD invoice over Sequentia asset-LN (`pay asset=GOLD`) → taker claims GOLD,
+   revealing `P`.
+4. Maker reads `P` (off its own asset payment's success) and **settles** the held BTC invoice.
+Atomicity: the maker only learns `P` by paying GOLD; settling BTC needs `P`. Ladder: BTC (incoming/held) CLTV
+> GOLD (outgoing) CLTV.
+
+**Sell GOLD for BTC** (taker holds GOLD in an asset channel, wants BTC-LN): symmetric, hold invoice on the
+**asset** leg. Maker issues a GOLD **hold** invoice on `H`; taker pays it in GOLD (held); maker pays the
+taker's BTC invoice over Bitcoin LN → taker claims BTC revealing `P`; maker settles the held GOLD invoice.
+Ladder: GOLD (incoming/held) CLTV > BTC (outgoing) CLTV.
+
+Either direction needs a **hold invoice on exactly one leg** (the maker's incoming). HTLC (SHA256 reuse) is
+the v1 primitive; **PTLC** (point-based, no hash reuse, no wormhole/correlation, scriptless) is the better
+long-term target but needs Taproot/Schnorr adaptor work and is not required for v1.
+
+---
+
+## 3. Architecture — the translating node (a.k.a. the edge / interchain router)
+
+The translating node is the **seqob maker in the LP role**, running two Lightning daemons:
+- a **SeqLN-on-Sequentia** node — holds the asset channels (Step 1: GOLD/USDX/tSEQ), asset-aware routing;
+- a **SeqLN-on-Bitcoin** node — a real Bitcoin-LN node (SeqLN runs `--network=testnet4`/bitcoin unchanged;
+  proven live in `seqln-phase2-submarine-swaps.md` §5c: genuine BTC channels + bidirectional payments).
+
+A single Go coordinator (the existing swap orchestrator) stitches the two by the shared `P`. The taker needs
+LN liquidity only on the side they start from (asset-LN to buy-with-nothing… no: to *buy GOLD* the taker pays
+BTC, so needs BTC-LN outbound; to *sell GOLD* the taker pays GOLD, so needs an asset channel). Receiving a leg
+needs inbound liquidity on that network — the usual LN constraint.
+
+"Assets at the edges" mapping: the **middle** is BTC over the global LN (any hop count, asset-blind); the
+**edges** are Sequentia asset channels; the **edge node** = this translating node. The FX (GOLD↔BTC rate) is
+applied once, at the edge, per an RFQ quote (§5.3).
+
+---
+
+## 4. Reuse map (grounded in the live code — the elegant part)
+
+Everything below already exists in `~/seqdex/pkg/xchain` (branch `phase2-submarine-ln`; SHARED repo —
+coordinate). Step 2 is mostly *reuse + delete*, not new construction.
+
+- **`LNLeg` interface + `clnLNLeg`** (`leg_lightning.go`) — a minimal CLN unix-socket JSON-RPC client. Already
+  has `Pay(bolt11, wantHash, amountMsat)` (verifies `payment_hash == H` and the revealed preimage) and the
+  hold methods `CreateHoldInvoice`/`WaitHeld`/`SettleHold`/`CancelHold`. **This is the whole asset leg** — I
+  instantiate a *second* `clnLNLeg` pointed at the Sequentia SeqLN node's rpc socket. Delta: teach `Pay` to
+  pass `asset=<id>` to CLN `pay` (Step-1 param) so it routes in the asset. (~small.)
+- **The preimage/HTLC primitive** `pkg/xchain/primitive.go` — `HashLock` (`:99`) behind a `LockPrimitive`
+  interface (`:76`), so a PTLC/adaptor can drop in later (§5.4). Shared `H` across both legs, unchanged.
+- **seqob order book = the quote source** — `api-spec/protobuf/seqob/v1/offer.proto`: `Offer` (`:27`) uses an
+  integer `offer_amount`/`want_amount` ratio (no float price) with a **mandatory `expires_at_unix` (`:43`)`;
+  `LightningTerms` (`:92`) already carries `ln_direction` (`ASSET_ONCHAIN_FOR_BTC_LN`/`BTC_LN_FOR_ASSET_ONCHAIN`),
+  `maker_issues_hold_invoice` (`:97`), `max_0conf_amount` (`:98`). Whole-oneof signing in
+  `internal/seqob/offer/offer.go`. **There is NO interactive RFQ today — the resting signed offer IS the quote,
+  `expires_at_unix` is its expiry** (§5.3).
+- **Opaque courier / relay** — `relay.proto` `SwapMsg{session_id,ciphertext}` (`:71`, relay never decrypts);
+  router `internal/seqob/session/router.go` (has a `ReorgWatcher` reopen hook `:38`); sealed handshake atoms
+  `internal/seqob/client/xcourier_submarine.go` (`XcSubTermsRequest`/`XcSubTerms`/`XcSubAssetFunded`/
+  `XcSubAssetLocked`/`XcSubSettled` `:31–37`) — pure-LN renames the "asset funded" atom to "asset invoice/held".
+- **Binaries** — `cmd/seqob-maker` (`-mode lightning -side buy|sell -ln-socket`; `serveSubmarine` dispatches on
+  `ln_direction`); taker `cmd/seqob-cli` `xsublift` (sell asset for BTC-LN) / `xsubbuy` (buy asset with BTC-LN).
+- **Step 1** — `pay asset=<id>` is the asset-leg payment primitive; the asset channels are the LP inventory.
+
+**The one asymmetry to fix (the crux of the work).** The **BTC leg is cleanly abstracted** (`LNLeg` interface
+`leg_lightning.go:40`; on-chain `btcBackend` interface `orchestrator.go:56`), but the **asset (SEQ) leg is NOT
+— it is hardcoded**: `SubmarineSwap` embeds a concrete `*Swap` (`submarine.go:32`) whose SEQ ops
+(`LockSEQLeg`/`ClaimSEQLeg`/`RefundSEQLeg`/`VerifySEQLeg`/`WatchSEQClaim`, `orchestrator.go:113–251`,
+`maker.go:112`) call a concrete `*ElementsLeg` (`leg_elements.go`) + `*Chain` (`chain.go`). There is **no
+`AssetLeg` interface**, so "add a second `LNLeg`" needs a small refactor. Two options:
+  - **(minimal, do first)** implement asset-LN backends at the **`Sub*Ops` seam** — the per-role settlement
+    interfaces the drivers run against (`internal/seqob/client/xdriver_submarine.go:26` `SubMakerOps`/`SubTakerOps`,
+    `..._reverse.go:34`), today satisfied by `LiveSub*Ops` wrapping `*SubmarineSwap`. The drivers
+    (`RunMaker/TakerSubmarine*`) are written purely against these interfaces + the courier and never touch
+    `ElementsLeg`, so blast radius is contained. The seam atoms (`NormalParams`/`ReverseMakerSecretParams`,
+    `submarine.go:133,:382`) carry on-chain outpoint fields (`SeqRedeemScript`, `SeqTxID/Vout`, `SeqLocktime`)
+    that an asset-LN leg replaces with channel/invoice identifiers.
+  - **(deeper, cleaner end-state)** introduce an `AssetLeg` interface mirroring `LNLeg`; give a new `PureLNSwap`
+    **two LN-style legs** (asset + BTC), on-chain leg gone. Preferred once M2 proves the seam.
+
+- **Anchor gate `VerifySeqAnchorBuried`** (`submarine.go:73,:108`) — waits for the on-chain SEQ claim to bury
+  to `min_anchor_depth`. Pure-LN happy path has **no on-chain claim → the gate is removed** (kept only on the
+  on-chain refund/timeout fallback). This deletion *is* the latency win.
+- **Hold invoices — net-new wiring, not just a plugin deploy.** `clnLNLeg` already *calls* the daywalker90
+  `holdinvoice` methods (`leg_lightning.go:165–217`), BUT the scout confirmed the **hold-invoice REVERSE engine
+  is implemented yet NOT wired into any binary** — only the **plain-invoice / taker-gated maker-secret reverse**
+  (`OfferReverseMakerSecret` `submarine.go:411`, driven by `xsubbuy`) is reachable end-to-end;
+  `maker_issues_hold_invoice`/`max_0conf_amount` are declared but unused. So Step 2 must (a) deploy the plugin
+  on the **Sequentia** SeqLN node for the asset hold invoice (§5.1, confirm it holds an *asset* HTLC), and
+  (b) actually wire a hold-invoice flow through the drivers/binaries.
+
+Net-new is contained: an asset-aware `Pay` on `clnLNLeg`; asset-LN `Sub*Ops` (or an `AssetLeg` interface); a
+`PureLNSwap` orchestration (the submarine flow minus the anchor gate); the holdinvoice plugin on the Sequentia
+node + hold-flow wiring; and the seqob pure-LN direction + quote reuse.
+
+---
+
+## 5. Hard problems / design decisions
+
+### 5.1 Hold invoices on the ASSET leg (prerequisite)
+The sell direction needs a **GOLD hold invoice** on the Sequentia SeqLN node. A Sequentia "asset invoice" is
+today just a normal BOLT11 whose msat amount is interpreted as asset-atom-msat and paid via `pay asset=GOLD`
+(Step 1). The `holdinvoice` plugin holds via the `htlc_accepted` hook, which is asset-agnostic (it holds
+*any* HTLC), so it *should* hold an asset HTLC — but this must be **verified on a Sequentia (elements) SeqLN
+node**, since the plugin was validated on the Bitcoin node. This is M0. (Relates to task #20.)
+
+### 5.2 Timelock laddering across TWO LN networks (get the units right)
+Feasibility §3 is load-bearing here. The two legs live on chains with different block cadence (~6–7× ratio,
+Sequentia faster). Rules:
+- Size every timelock in **wall-clock**, converting each leg's CLTV by its own chain's block time.
+- The maker's **incoming/held** leg CLTV must exceed the **outgoing** leg's by a safe margin (standard hop
+  laddering), computed in wall-clock, not raw block counts.
+- Per-hop CLTV delta ≈ Bitcoin's ~40 blocks (≈6.7 h) ⇒ ~270 Sequentia blocks; `to_self_delay` ~1000–2000
+  Sequentia blocks (~1–2 days) for the asset channels.
+- Do **not** add a cross-chain reorg buffer for the happy path (no chain touched); the refund path uses each
+  leg's native HTLC timeout, and anchoring makes the Sequentia side's finality Bitcoin-bounded (a plus).
+
+### 5.3 RFQ / quote (the two legs have different amounts)
+GOLD amount ≠ BTC amount; they are bound by a rate. Decision: the **rate comes from the seqob order book**
+(the maker rests a priced GOLD↔BTC offer), and the taker gets a **short-lived quote** (RFQ) before initiating,
+so both invoices' amounts are consistent and the maker's spread is locked for the session. Design the quote as
+a signed, expiring courier message referencing the resting offer; the maker honors it for the session or the
+swap aborts (refund). This mirrors Taproot-Assets' RFQ. Reuse the existing seqob price-server / offer signing;
+do not invent a second pricing path (Principle 4: the any-asset fee/rate math is already correct — don't
+re-derive it).
+
+### 5.4 HTLC vs PTLC
+v1 = HTLC (SHA256 `H` reused on both legs) — reuses all existing machinery, matches submarine swaps. Known
+cost: hash reuse is correlatable across the two networks and carries the classic wormhole risk at multi-hop.
+PTLC (point `T = P·G`, adaptor signatures) fixes both and is scriptless, but needs Taproot/Schnorr adaptor
+work on both legs and is not production-ready in CLN. **Recommend HTLC for v1**, PTLC as a later hardening.
+
+### 5.5 Liquidity (structural, not custody)
+The LP must be capitalized on **both** networks (asset channels on Sequentia + BTC channels on Bitcoin). This
+is liquidity provision, not custody — the LP can refuse a quote but can never abscond (worst case: timelock
+refund). Non-custodial by construction; a capitalized, reputable maker dominates for *liveness*, not trust.
+Cannot be removed (you cannot conjure cross-network liquidity). Honest and documented.
+
+### 5.6 Intra-Sequentia cross-asset (GOLD↔USDX) — deliberately OUT of scope for v1
+A same-network asset↔asset swap (both legs on SeqLN-on-Sequentia) could in principle be a **single-onion edge
+forward** (one payment, the edge node converting GOLD→USDX mid-route per the RFQ quote) — true Taproot-Assets
+edge forwarding, and the direct inverse of Step-1's cross-asset *guard*. But it requires the harder work of a
+unit-changing forward (in-amount and out-amount are different assets, so `check_fwd_amount` must apply the
+quoted rate, and the onion must carry the quote reference). The cross-chain asset↔BTC swap above is
+higher-value (reaches the global BTC LN, kills the anchor wait) and reuses far more. **Defer intra-Sequentia
+single-onion conversion to a Step-2b**; it is not needed for "pure-LN swaps working."
+
+---
+
+## 6. Milestone breakdown (incremental, each independently verifiable)
+
+> **Load-bearing fact that shapes the order:** the wired submarine flows never use a hold invoice — they lean
+> on the on-chain **anchor-depth gate** to make a plain-invoice irreversibility safe. Pure-LN has **no on-chain
+> leg → no anchor gate**, so the maker's incoming leg **must** be a hold invoice (held until the maker learns
+> `P` by paying the outgoing leg). Hold invoices are therefore *mandatory*, not optional, and are the main
+> net-new wiring. Which node holds depends on direction: **buy GOLD → hold on the BTC (Bitcoin) node; sell GOLD
+> → hold on the asset (Sequentia) node.** Buy-first is lowest-risk because a BTC hold invoice is a plain CLN
+> HTLC the plugin already handles, whereas an *asset* hold invoice must be confirmed to hold correctly (M1).
+
+- **M0 — BTC hold-invoice flow, wired.** Deploy the `holdinvoice` plugin on the SeqLN-on-Bitcoin node and wire
+  a hold flow through `clnLNLeg` (`CreateHoldInvoice`→`WaitHeld`→`SettleHold`/`CancelHold`, `leg_lightning.go:
+  165–217`, currently unwired): pay it from a second node, confirm `accepted`(held), then settle/cancel by `P`.
+  This is the safety primitive the whole thing rests on.
+- **M1 — asset hold invoice + asset `LNLeg`.** Add asset-aware `Pay(asset=…)` to `clnLNLeg`; stand up a second
+  `clnLNLeg`/asset-`Sub*Ops` against the Sequentia node. **Confirm the `holdinvoice` plugin holds an *asset*
+  HTLC on a Sequentia (elements) SeqLN node** (§5.1 — the real risk: the plugin was validated on Bitcoin).
+  Issue a GOLD hold invoice, `pay asset=GOLD` it, confirm held, settle/cancel by `P`. (Extends task #20 to the
+  asset node.)
+- **M2 — pure-LN swap, buy-GOLD-with-BTC, happy path.** `PureLNSwap` with two LN-style legs (asset + BTC), no
+  on-chain SEQ leg, no anchor gate; maker's incoming BTC leg is the M0 hold invoice. Prove end to end on the
+  two-daemon harness (Sequentia regtest asset channel + testnet4 BTC channel), stitched by one `P`; **measure
+  that it settles in seconds with no anchor wait** (the headline result).
+- **M3 — sell direction + refund/timeout.** Sell-GOLD-for-BTC (asset hold invoice from M1), plus the CLTV
+  refund/timeout path on each leg with the wall-clock ladder from §5.2. Prove a stuck swap refunds both sides.
+- **M4 — seqob integration.** `LightningTerms` pure-LN `Direction` + the RFQ quote (§5.3) + the opaque courier
+  message; a taker discovers a resting priced offer, gets a quote, runs the swap over the relay. No anchor
+  watcher needed for the happy path.
+- **M5 — reach the GLOBAL BTC LN.** Route the BTC leg over a real multi-hop Bitcoin-LN path (not just the
+  maker's two local nodes) to a third-party invoice, proving a Sequentia asset genuinely reaches the open
+  Bitcoin Lightning Network. This is the "assets at the edges" reach demonstration.
+
+Then Step 3 (wallet + DEX integration) surfaces this in the wallets (Phoenix-like UX; the instant-swap-latency
+doc's action items).
+
+---
+
+## 7. Open questions for the user (decisions that steer M2+)
+
+1. **Direction first?** Buy-GOLD-with-BTC (hold invoice on the BTC/Bitcoin leg — a plain CLN HTLC, lower risk)
+   vs Sell-GOLD-for-BTC (hold invoice on the *asset*/Sequentia leg — must first confirm the plugin holds an
+   asset HTLC). Neither hold-invoice flow is wired today (the shipped submarine reverses use the on-chain
+   anchor gate instead), so both need wiring — but buy-first avoids the asset-hold-invoice risk. Recommend
+   **buy-first** to get the headline "instant, no anchor wait" result soonest, then sell.
+2. **HTLC now, PTLC later?** Recommend yes (HTLC v1 reuses everything; PTLC is a later hardening).
+3. **Scope of "pure-LN swaps" for this step:** just cross-chain asset-LN ↔ BTC-LN (recommended — it's the
+   "assets at the edges" reach and the instant path), or also the intra-Sequentia GOLD↔USDX single-onion
+   edge-forward (§5.6, harder, deferrable)?
+4. **Where the LP/translating node runs:** the box (alongside the existing seqob maker + the SeqLN-on-Bitcoin
+   nodes), confirmed with Andreas before any box deploy (per the deploy pipeline). Regtest+testnet4 harness
+   for development, as with submarine swaps.
