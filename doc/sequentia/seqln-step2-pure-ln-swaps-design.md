@@ -285,9 +285,22 @@ single-onion conversion to a Step-2b**; it is not needed for "pure-LN swaps work
   stand-in; empty = real BTC-LN). An RFQ quote (§5.3) off the order book is still a fixed-amount offer today
   (whole-swap), same as the submarine wiring — dynamic per-lift pricing is a later refinement, not a blocker.
   **M4 DONE.**
-- **M5 — reach the GLOBAL BTC LN.** Route the BTC leg over a real multi-hop Bitcoin-LN path (not just the
-  maker's two local nodes) to a third-party invoice, proving a Sequentia asset genuinely reaches the open
-  Bitcoin Lightning Network. This is the "assets at the edges" reach demonstration.
+- **M5 — real Bitcoin-LN BTC leg (testnet4). DONE, BOTH DIRECTIONS (2026-07-04).** Replaced M4's same-network
+  2nd-asset "BTC" stand-in with a GENUINE Bitcoin **testnet4** Lightning leg: a policy-asset HTLC on a
+  `bitcoind(testnet4)`-backed SeqLN node (`--network=testnet4`, `-btc-asset` omitted → `NewCLNLNLeg`). **ZERO
+  code change** — the `-btc-asset`/validator work from M4 already covered it. Topology (all on the laptop, unix
+  sockets local): asset leg on the Sequentia SeqLN pair (ln2 maker / ln1 taker, GOLD `83053bb2…`), BTC leg on a
+  real testnet4 SeqLN pair (`seqln-btc2` maker-side w/ holdinvoice / `seqln-btc` taker-side, a 40k-sat testnet4
+  channel), backed by the box's fully-synced testnet4 bitcoind over an auto-reconnecting SSH tunnel
+  (`-L 48332`). BUY (taker buys GOLD for 5000 real testnet4 sats, preimage `cd39c6a9…`) and SELL (mirror,
+  preimage `68194e6a…`) both settled off-chain in seconds through the `seqobd` relay + courier, no anchor wait;
+  5000 real testnet4 sats moved each way over the real channel. Ops lessons: (i) the M0 holdinvoice-seq plugin
+  is asset-agnostic and works unchanged on a bitcoind-backed (policy-asset) node — verified; (ii) CLN won't
+  route while `warning_lightningd_sync` ("Still loading latest blocks") is set, so the testnet4 nodes must be
+  fully caught up to the tip before a swap; (iii) DB migrates `282→285` needed `--database-upgrade=true` after
+  the `-12→-33` lightningd bump. **"Assets at the edges" now reaches real Bitcoin Lightning.** Remaining reach
+  polish (not a blocker): route to a THIRD-PARTY public testnet4 invoice over multiple hops (here the two BTC
+  nodes are directly channeled), and a larger BTC channel for bigger amounts.
 
 Then Step 3 (wallet + DEX integration) surfaces this in the wallets (Phoenix-like UX; the instant-swap-latency
 doc's action items).
