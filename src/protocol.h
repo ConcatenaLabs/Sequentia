@@ -298,6 +298,14 @@ extern const char* POSSHARE;
  * attach the certificate and connect without any further fetch.
  */
 extern const char* POSCERT;
+/**
+ * SEQUENTIA: getposcert asks a peer whether it holds the certificate for a
+ * block hash (reply: poscert). Sent by a member entering the share-lock (fix
+ * 3B + the 3A residual): having share-signed a block, it will not sign a
+ * same-height rival until it has actively asked its peers for a certificate
+ * on the first block and heard nothing for a grace round.
+ */
+extern const char* GETPOSCERT;
 }; // namespace NetMsgType
 
 /* Get a vector of all valid message types (see above) */

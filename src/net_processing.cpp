@@ -4248,6 +4248,19 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         return;
     }
 
+    if (msg_type == NetMsgType::GETPOSCERT) {
+        // A share-locked member asking whether anyone certified `hash` (3B):
+        // answer with the certificate if we hold one; silence otherwise.
+        uint256 hash;
+        vRecv >> hash;
+        PosProducer* prod = GetActivePosProducer();
+        if (!prod) return;
+        if (std::optional<CBlockHeader> cert = prod->GetCertificate(hash)) {
+            m_connman.PushMessage(&pfrom, CNetMsgMaker(pfrom.GetCommonVersion()).Make(NetMsgType::POSCERT, *cert));
+        }
+        return;
+    }
+
     if (msg_type == NetMsgType::POSCERT) {
         // The header of a quorum-certified block: the certificate is its proof
         // solution (3A). Verified and pinned by the producer; relayed onward

@@ -85,6 +85,20 @@ class msg_posproposal:
         return "msg_posproposal(%d bytes)" % len(self.payload)
 
 
+class msg_getposcert:
+    """A raw `getposcert` carrying a block hash (share-lock certificate query)."""
+    msgtype = b"getposcert"
+
+    def __init__(self, payload=b""):
+        self.payload = payload
+
+    def serialize(self):
+        return self.payload
+
+    def __repr__(self):
+        return "msg_getposcert(%d bytes)" % len(self.payload)
+
+
 def make_staker():
     k = ECKey()
     k.generate(compressed=True)
@@ -165,6 +179,11 @@ class PosCertGossipTest(BitcoinTestFramework):
         cert_peer.send_message(msg_posproposal(raw_block))
         self.wait_until(lambda: follower.getbestblockhash() == cert_hash, timeout=30)
         assert_equal(follower.getblockheader(cert_hash)["poscertified"], True)
+
+        self.log.info("A share-lock certificate query (getposcert) is answered")
+        seen = relay_peer.message_count["poscert"]
+        relay_peer.send_message(msg_getposcert(bytes.fromhex(cert_hash)[::-1]))
+        self.wait_until(lambda: relay_peer.message_count["poscert"] > seen, timeout=30)
 
         self.log.info("Invalid certificates are penalised")
         bad_peer = follower.add_p2p_connection(CertPeer())

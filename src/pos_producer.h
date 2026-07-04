@@ -183,6 +183,10 @@ public:
     //! block is completed and connected on the spot. Returns the relay/penalty
     //! action; the caller fetches the body via getposproposal when we lack it.
     PosGossipAction OnCertificate(const CBlockHeader& header);
+    //! The certificate (certified header) we hold for `hash`, to answer a
+    //! peer's getposcert, or nullopt. Served from the recent-certificate
+    //! cache, which keeps certificates we verified OR assembled ourselves.
+    std::optional<CBlockHeader> GetCertificate(const uint256& hash);
 
 protected:
     void UpdatedBlockTip(const CBlockIndex* pindexNew, const CBlockIndex* pindexFork,
@@ -226,6 +230,9 @@ private:
     void FloodShare(const PosShare& share);
     //! Flood a certified block's header (the certificate) to all peers.
     void BroadcastCertificate(const CBlockHeader& header);
+    //! Ask all peers whether anyone holds a certificate for `hash`
+    //! (getposcert), at most once per lock. Takes m_gossip_mutex internally.
+    void SendCertQueryOnce(const uint256& hash);
     //! If we hold both a certificate and the proposal body for the same block,
     //! attach the certificate and submit the completed block. Returns true if
     //! a block was submitted. Takes m_gossip_mutex internally.
@@ -296,6 +303,24 @@ private:
     int m_cert_hold_height{0};                         //!< height the current hold is for
     int64_t m_cert_hold_since_ms{0};                   //!< when the hold started
     bool m_cert_hold_logged{false};
+    std::map<uint256, CBlockHeader> m_recent_certs;    //!< certificates verified or assembled (serves getposcert; not height-pruned)
+
+    // Share-lock (honest-splits fix 3B + the 3A residual). Having share-signed
+    // block X at height H, this node does not sign a same-height rival until
+    // (a) the round advanced (implicit in the re-vote trigger), (b) it ASKED
+    // its peers for a certificate on X (getposcert) and (c) one grace round
+    // passed with no certificate arriving; and it does not sign or lead at
+    // H+1 on a parent that is a same-height rival of X until the
+    // escaping-stall anchor gap has passed (or a bounded grace without
+    // anchoring). If X's certificate exists anywhere, it arrives within the
+    // grace (a ~few-hundred-byte poscert, one round-trip) and the certificate
+    // pin takes over; the quorum arithmetic then makes a second certificate
+    // impossible (X's >= quorum signers are all locked, fewer than a quorum
+    // remain free). State under m_gossip_mutex.
+    uint256 m_lock_hash;                               //!< the block we most recently share-signed
+    int m_lock_height{0};                              //!< its height
+    int64_t m_lock_grace_start_ms{0};                  //!< when the lock's grace began (0 = not started)
+    bool m_lock_queried{false};                        //!< getposcert sent for m_lock_hash
 
     // Committee-equivocation prevention (Change 4a), worker thread only. While
     // the anchor watcher holds a quorum-certified child of the current tip that
