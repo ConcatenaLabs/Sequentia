@@ -112,10 +112,16 @@ mirroring the pure-LN M0-M5 discipline.
   out of the M2 subset is correct. **SECURITY (blocking for production, not for the demo):** the TCP link is
   unauthenticated + unencrypted; production MUST wrap it in a Noise/TLS + per-wallet-auth channel before the
   device signer holds real keys or faces a public network.
-- **M4 — policy + ECDH latency.** `validate_commitment_tx` is a libhsmd stub (`:1898`); make the device a TRUE
-  validating signer (verify amounts/destinations before signing — this is where "device co-signs" earns its
-  keep vs a dumb signer). Resolve the ECDH hot-path strategy (device-authorized session key / delegated ECDH /
-  batching) so peer-connect + onion-forward stay fast.
+- **M4 — policy + ECDH latency. DONE (2026-07-04, seqln `7695806c5`).** The device is now a VALIDATING signer:
+  `policy.rs` tracks channel state (funding amount/outpoint, remote basepoints + funding pubkey, to_self_delay,
+  channel_type) from SETUP_CHANNEL, and on SIGN_REMOTE_COMMITMENT_TX (the fundee theft vector) +
+  VALIDATE_COMMITMENT_TX rebuilds every expected output (to_local revocable-delayed, to_remote, per-HTLC,
+  anchors) from the channel keys + per-commitment point, rejecting any output not derivable from them plus
+  enforcing value conservation. Toggle `SEQLN_SIGNER_POLICY=enforce|permissive` (default permissive = no
+  regression). PROVEN: enforce-mode replay of the real corpus is 99/0 byte-exact (legitimate signs untouched);
+  a tampered commitment (output redirected to an attacker script) is REJECTED in enforce, signs unmodified,
+  signs in permissive. Deferred to VLS-parity (labeled): SIGN_COMMITMENT_TX HTLC set (off the fundee path),
+  HTLC-tx/sweep/penalty signs (pay to keys we own), rate limits. **ECDH decision RESOLVED** (see §5).
 - **M5 — recovery / escape hatch.** Wire static-remotekey + SCB (`emergency.recover`) + peer-storage +
   `recover.c` so a user whose hosted node vanishes can force-close/sweep with only their device (mnemonic). The
   device already holds every secret to sign penalty + to-us sweeps.
@@ -144,10 +150,14 @@ CAN skip (advertise NOT-capable so lightningd adapts): all gossip sigs (`node_an
 
 ## 5. Open decisions (resolve during M4)
 
-- **ECDH latency (load-bearing).** ECDH (`common/ecdh_hsmd.c`) is on peer-connect + every onion hop; a naive
-  per-ECDH network round-trip to a phone hurts connect + forward time. Options: a device-authorized ECDH
-  session key provisioned at channel open; delegated node-ECDH via a subkey connectd can use; or batching.
-  Decide with real M1 latency numbers. (Mirrors UX-spec §8.9.)
+- **ECDH latency (load-bearing). RESOLVED (M4, 2026-07-04).** Measured: ECDH is ~113 µs in-process and ~212 µs
+  round-trip over the localhost TCP transport (the framing/syscall overhead is ~0.1 ms). On a device the WAN
+  RTT replaces the transport term ~1:1, so a naive per-ECDH round-trip at a phone RTT of 50-150 ms would add
+  100-300 ms to every peer-connect (2 ECDH) and 50-150 ms to every onion hop (1 ECDH) — unacceptable.
+  DECISION: do NOT ship naive per-ECDH round-trips; **provision a device-authorized ECDH session key at channel
+  open** (or a connectd-held ECDH subkey / delegated node-ECDH), rotated periodically, collapsing the hot path
+  back to the in-process figure. The funds-moving commitment signs stay per-request round-trips (not
+  latency-critical, and the device must gate them). (Mirrors UX-spec §8.9.)
 - **Validation policy depth (M4).** MVP can mirror the libhsmd stub (sign on request); the security win is a
   VLS-style policy (never sign a commitment that moves funds to a non-channel destination, enforce
   value-conservation, rate-limit). Depth vs latency tradeoff.
