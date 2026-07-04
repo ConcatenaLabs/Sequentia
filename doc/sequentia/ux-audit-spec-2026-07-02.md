@@ -5,6 +5,12 @@ the code level ("what does an average user expect, and is it there?"). This spec
 change, ranked, with file:line evidence and a concrete fix, plus the systemic themes that let one fix
 resolve many findings.
 
+> **Lightning pass added 2026-07-04.** Pure-LN and submarine asset<->BTC-LN swaps are now proven live end
+> to end (seqdex `phase3-pure-ln`, M0-M5, including a real Bitcoin testnet4 leg), but no wallet can reach
+> them yet. Section 8 (new) specifies bringing Lightning to the Web wallet, Ambra, and the DEX under the
+> LSP / hosted-SeqLN model (we run SeqLN; users do not run a node, Phoenix-style), with cross-cutting theme
+> T16, per-surface additions in 4.1-4.3, and punch-list Tier G. Start with 8.9's custody/trust decision.
+
 ## 0. How to use this document
 
 - Work section 3 (cross-cutting themes) FIRST. Those are root-cause fixes that clear findings across
@@ -31,6 +37,7 @@ on :8080); see [[sequentia-server-deploy]].
 | Desktop GUI | `SequentiaByClaude` (claude/...) | `src/qt/**`, `src/qt/forms/*.ui` | Core download |
 | Ambra mobile | `ambra` (main) | `app/lib/**` (Dart UI), `ambra_core/src/api/mod.rs` (Rust API), `app/android/**` | APK on `/download/` |
 | Registry data | `sequentia-registry` (main) | `seed/legacy-assets.json` (correct) + the DB row on the box (some wrong) | `/registry/` |
+| Hosted SeqLN LSP (NEW) | `seqln` + `seqdex` (`phase3-pure-ln`) | SeqLN nodes on both networks + `seqob-maker -mode pureln\|lightning` + a Boltz-shaped swap gateway | behind `/lsp` for web + Ambra |
 
 ## 2. Global severity tally
 
@@ -38,6 +45,8 @@ on :8080); see [[sequentia-server-deploy]].
 - P1 (approx 45), P2 (approx 55), P3 (approx 40).
 - The heaviest surfaces are the DEX Swap tab (thin snapshot book bolted onto a pay/receive composer)
   and the Qt/Ambra fee-display layer (any-asset-fee engine correct, display still assumes tSEQ).
+- Section 8 (NEW): Lightning integration across all surfaces. Net-new capability (proven at the daemon,
+  absent from every wallet), so it grades mostly P1; the single P0 is LN finality + custody honesty.
 
 ## 3. Cross-cutting themes (fix once, resolve many)
 
@@ -160,6 +169,14 @@ size capping, and zero-receive quotes (`swap.js:403-495,1128-1146`). Root fix: r
 spread/mid/depth from data already fetched, subscribe to the relay `public_book` WS frames, add a persistent
 "post a limit order at my price" action, and add dust/zero-receive/oversize guards.
 
+**T16. Lightning swaps are proven at the daemon but no wallet can reach them (the taker still runs a SeqLN node).**
+The pure-LN and submarine lanes settle live through the seqob relay + encrypted courier (seqdex `phase3-pure-ln`,
+M0-M5, ~2.1s both directions, no anchor wait on the happy path), but every wallet is LN-blind: the web Swap cannot
+even parse an LN offer (`seqob.js:245`, field 22 unencoded), Ambra Swap is still on the retired RFQ model, and the
+taker itself needs `-asset-ln-socket` + `-ln-socket` (`seqdex/cmd/seqob-cli/xpln.go`) that a browser wasm wallet and
+a Flutter phone do not have. Root fix: host SeqLN for web + Ambra users (LSP / Phoenix model), so the taker needs no
+local node. Full architecture, honest custody tiers, finality wording, and the per-surface build: section 8.
+
 ## 4. Per-surface findings (full detail)
 
 ### 4.1 DEX / Swap tab (`sequentia-web-wallet`: index.html + swap.js + seqob.js + xswap.js + xrswap.js + xmaker.js + xcourier.js)
@@ -223,6 +240,15 @@ P3: "Order book: ..." error prefix noise; spinner flicker on every keystroke; BT
 tab static "sat/vB" label until JS rewrites it (`index.html:276`); dead code `randId` and legacy
 `xQuoteForm`.
 
+**Lightning (net-new capability; see section 8)**
+
+Lightning (net-new capability, not a defect in existing code; see section 8)
+
+P1
+
+- No Lightning swap route: findRoute returns only `same`/`cross` (`swap.js:247-262`) and the wallet cannot even parse an LN offer (`seqob.js:245`, LightningTerms field 22 "reserved and not yet encoded"), so verifyOffer (`seqob.js:289-298`) drops every LN offer as forged. The proven instant lanes (pure-LN + submarine, seqdex `phase3-pure-ln` M0-M5) are unreachable from the wallet. Fix: encode + verify field 22 in canonicalOfferBytes (`seqob.js:221-249`), add a `kind:'ln'` route selected when a resting offer carries LightningTerms, and drive it through the LSP-hosted SeqLN node so no local taker node is needed. See 8.2 + 8.5.
+- No instant-vs-anchored control for a BTC<->asset pair: the user cannot choose the Lightning route (instant, off-chain) over the on-chain cross-chain HTLC route (~1 block + anchor wait). Fix: a segmented control on the route row; extend setFinality (`swap.js:753-758`) with pure-LN / submarine-0-1-conf / capped-0-conf branches; never label a 0-conf leg final. See 8.4.
+
 ### 4.2 Web wallet core (`sequentia-web-wallet/index.html`, `btc.js`; shared: `SWK/lwk_common/src/qr.rs`, `SWK/lwk_wasm`)
 
 P1
@@ -268,6 +294,13 @@ BIP39 passphrase option.
 
 XSS sweep: clean. All attacker-influenced strings go through `el()`/`textContent`; registry strings strip
 angle brackets (`591`). Only innerHTML sinks are the boot error and the seed grid (both safe content).
+
+**Lightning (net-new capability; see section 8)**
+
+P1
+
+- No bolt11 BTC-LN receive or send: the wallet has no Lightning path at all, so the dual-chain principle (T6) is incomplete on its Lightning axis. The compiled `lwk_wasm` pkg already exports an `Invoice` BOLT11/BOLT12 parser (`SWK/lwk_wasm/src/boltz.rs:215-274`) that `index.html` does not import (`index.html:529`), and the Send scanner already strips a `lightning:` URI (`index.html:1489-1497`). Fix: a Lightning Receive mode (reverse submarine swap into an on-chain asset, any asset, equal standing) on renderReceive (`index.html:294-306`), and an LN Send path (submarine swap paying an external bolt11) branched off btnReview (`index.html:1714-1734`); the wallet's own keys hold P and the on-chain HTLC while the LSP owns the BTC-LN leg (non-custodial). See 8.5.
+- No asset-LN balance surface (Tier-2 hosted channels, later): hosted asset-LN balances must count as equal-standing rows (T13), labeled "Lightning / instant-spendable", never shown more final than on-chain, with the LSP-liveness dependency disclosed. See 8.3.
 
 ### 4.3 Ambra mobile (`ambra/app/lib/**`, `ambra/ambra_core/src/api/mod.rs`, `ambra/app/android/**`)
 
@@ -317,6 +350,13 @@ no per-word import feedback (`onboarding.dart:295`); too-many-decimals rejected 
 sync chip says "offline" with no timestamp (`shell.dart:318`); Android back exits from any tab; issue/burn/
 stake dialogs name the fee asset but not the amount; faucet funds index 0 while Receive cycles; welcome copy
 overstates lock protection (`onboarding.dart:47`).
+
+**Lightning (net-new capability; see section 8)**
+
+P1
+
+- Swap is still on the retired RFQ model (already P2 at `swap_screen.dart:122,287`, T7) and cross-chain is buy-only + anchor-gated (~20-30 min) with no reverse (`xchain_swap_screen.dart`; `xchain_swap_service.dart` XchainStore holds the secret P). Fix: add the LSP-hosted instant Lightning swap for BOTH buy AND sell, reusing the existing on-device secret-P persistence, and keep the on-chain HTLC path as the refund rail. Lands the T7 "no price" fix and the instant swap together. See 8.5.
+- No bolt11 BTC-LN receive/send and no push: the send scanner reads BIP21 only (`send_screen.dart:251`), the manifest declares INTERNET + CAMERA only (no POST_NOTIFICATIONS / messaging service, `ambra/app/android/app/src/main/AndroidManifest.xml`), and the only lifecycle handling is re-lock on pause (`main.dart:50-57`). Fix: an LN receive (hosted/JIT-channel invoice) + send (pay bolt11) path via a new `ambra/app/lib/lsp_client.dart` + `ln_*` FFI in `ambra/ambra_core/src/api/mod.rs`, plus push (FCM/APNs or a self-hosted/UnifiedPush channel to match the no-Play-Services stance) so a backgrounded incoming payment or settled swap can complete. Mirrors 4.2. See 8.5.
 
 ### 4.4 Desktop GUI / Qt (`SequentiaByClaude/src/qt/**`, `src/qt/forms/*.ui`)
 
@@ -492,6 +532,28 @@ Tier E. Explorer/landing data legibility and onboarding.
 
 Tier F. Reload/resume, honesty polish, and the long P2/P3 tails per surface.
 
+Tier G (NEW). Lightning on all surfaces (LSP / hosted-SeqLN model; see section 8).
+
+18. LSP backend + gateway: deploy the hosted SeqLN cluster (SeqLN-on-Sequentia asset channels + SeqLN-on-Bitcoin testnet4 + holdinvoice-seq + `seqob-maker -mode pureln|lightning`) and a Boltz-shaped submarine swap-as-a-service in front of it. Accept: an authenticated thin client with NO local SeqLN node completes buy-asset-with-BTC-LN and sell-asset-for-BTC-LN end to end through the hosted LSP on testnet4, and the wallet's funds are refundable at its own CLTV if the LSP stalls.
+
+19. seqob.js LightningTerms (offer field 22) encode + verify. Accept: an LN offer served by the relay passes local verifyOffer and appears in the book; its canonical bytes match a Go deterministic-marshal ground-truth vector byte for byte.
+
+20. Web + Ambra "Instant (Lightning)" swap lane over the LSP-hosted SeqLN node. Accept: the Swap composer offers an instant-LN route for a BTC<->asset pair, distinct from the on-chain cross route, and a web/Ambra user with no local SeqLN node completes both directions (buy asset with BTC-LN, sell asset for BTC-LN) end to end.
+
+21. bolt11 BTC-LN receive + send in web + Ambra (dual-chain LN axis, T6). Accept: a bolt11 invoice can be generated for the BTC leg (receive) and an external bolt11 paid (send) from both wallets, non-custodially, from ANY asset at the open-fee-market rate (no privileged coin).
+
+22. LN finality + custody honesty (the only P0 in the LN set). Accept: the pure-LN happy path may be shown final; a submarine 0-conf receipt is shown provisional with the anchor gate + ETA; the hosted-channel custody + LSP-liveness statement appears BEFORE commit; grep shows no LN surface labels a 0-conf leg "final".
+
+23. Two net-new LSP submarine modes: issue-a-hold-invoice-for-a-third-party-payer (LN receive) and pay-an-arbitrary-external-bolt11 (LN send). Accept: a non-LN wallet receives from a third-party BTC-LN payer into an on-chain asset, and pays an arbitrary external bolt11 from an on-chain asset; both are refundable at the wallet's CLTV.
+
+24. Backend fast-path prerequisites: wire the hold-invoice reverse for fast BUY and honor `LightningTerms.max_0conf_amount` for fast small SELL. Accept: buying an asset with BTC-LN delivers at 0-1 conf while the LSP absorbs the anchor wait; a sell under the offer cap fronts BTC-LN at 0-conf; both surface finality honestly and never say "final" at 0-conf.
+
+25. Ambra push + background-safe resumable LN swap. Accept: an incoming LN payment or a settled swap wakes the app via push and completes even if the app was backgrounded; hold-invoice timeouts are sized so a backgrounded swap does not silently expire, and an interrupted swap resumes from a persisted record.
+
+26. Hosted-channel inventory + LN balances surface (Tier 2). Accept: asset-LN + BTC-LN hosted-channel balances render as equal-standing rows (no privileged coin, T13) labeled "Lightning / instant-spendable", never shown more final than on-chain, with inbound/outbound liquidity and a top-up flow, and the LSP-liveness dependency disclosed.
+
+27. Tier-2 on-device signer + hosted channels (pure-LN endgame). Accept: a phone/browser holds the channel + commitment keys and co-signs every state over a per-wallet method+param-restricted rune; force-close reclaims funds on-chain (option_data_loss_protect + our watchtower); the LSP cannot move channel funds unilaterally.
+
 ## 6. Do not regress (already correct)
 
 Web wallet: any-asset fee UX end to end, XSS-clean rendering, opt-in confidentiality copy, tethered
@@ -574,3 +636,85 @@ still defaults to the plain-HTTP raw IP (`ambra/app/lib/config.dart:11`) and has
   use the freed space for an optional **description/memo**: a wallet-DB-stored note, character-limited (pick a
   limit that fits the row), set at create/broadcast time and, if UX-clean, editable in the tx detail view.
   Good cross-wallet feature; consider the web wallet too.
+
+---
+
+## 8. Lightning integration (SeqLN) across all surfaces
+
+Lightning is proven at the daemon + relay layer and absent from every wallet, so this is a net-new build, not an existing surface with defects to audit. Asset-LN <-> BTC-LN pure-LN swaps AND asset-on-chain <-> BTC-LN submarine swaps settle end to end through the seqob order-book relay + encrypted courier (seqdex `phase3-pure-ln`, milestones M0-M5 all done 2026-07-04): ~2.1s, both directions (buy asset with BTC / sell asset for BTC), atomic refund proven, a real testnet4 Bitcoin-LN leg, and no anchor-depth wait on the happy path. The one thing keeping it out of the wallets is that the TAKER runs two SeqLN nodes: `seqdex/cmd/seqob-cli/xpln.go` requires `-asset-ln-socket` + `-ln-socket`, and its two irreducible LN acts (mint an invoice on its incoming leg, pay the maker's hold by bare hash on its outgoing leg) each need a channel + liquidity on both networks. A browser wasm wallet and a Flutter phone have neither. Removing that requirement is this whole section.
+
+The removal is an LSP: WE host SeqLN Phoenix-style (liquidity, hosted channels, watchtower), the wallet stays a thin client, non-custodial for the user's keys and funds where possible. This adds one new backend surface absent from the section-1 table (the hosted SeqLN LSP: repos `seqln` + `seqdex` `phase3-pure-ln`, served behind web + Ambra). Scope for this section is the two thin clients, web + Ambra; Qt (full node-GUI, 4.4) and Fulmen (an LSP-operator GUI, not a thin taker) are outside the Phoenix model and deferred (8.7, open decision).
+
+### 8.1 What already works, and the one gap
+
+Proven and do-not-regress at the daemon (8.7): the seqob relay (`seqdex/internal/seqob/api/server.go` + `ws.go`) is a pure non-custodial matchmaker carrying opaque E2E-encrypted `SwapMsg`; the pure-LN engine (`seqdex/pkg/xchain/pureln.go`, `internal/seqob/client/xdriver_pureln.go` + `xcourier_pureln.go`) and the submarine engine (`submarine.go`, `xdriver_submarine*.go`) settle on one shared preimage; the CLN client `seqdex/pkg/xchain/leg_lightning.go` (clnLNLeg: Pay, PayHash-by-bare-hash, CreateInvoice, and the hold methods) drives both; the hold primitive is `seqln/contrib/holdinvoice-seq/holdinvoice.py`; the LP is `seqob-maker -mode pureln|lightning`. The validator already accepts LN offers (`seqdex/internal/seqob/validator.go:235-285`, `ln_direction` 0-3, requires `maker_ln_node_pubkey` for reverse/pure-LN), so the relay serves them today. No wallet can see them.
+
+The gap, restated so the fix is unambiguous: a channel-less thin wallet CANNOT literally be a pure-LN taker (minting an invoice needs an incoming channel, paying a hold needs an outgoing one). So the fix is not "make the wallet a smaller node" but "move the LN legs onto a node we host and hand the wallet a shape it can already sign". That splits by where the user's funds live, giving two tiers.
+
+### 8.2 The hosted-SeqLN LSP (two tiers)
+
+Tier 1 (ship first; non-custodial; ZERO LN on the device) is a submarine swap-as-a-service. The user's leg stays ON-CHAIN, which both wallets already do end to end: web has the full HTLC toolkit (generateSwapSecret / buildSeqHtlcRedeemScript / ClaimTx / RefundTx imported at `sequentia-web-wallet/index.html:529`, the btcLeg fund/claim/refund bridge `index.html:1028-1078`, the asset seqLeg bridge `index.html:1088+`, and a generic sealed courier `xcourier.js`); Ambra persists the swap secret P on device (`ambra/app/lib/xchain_swap_service.dart` XchainStore); the SWK core has the on-chain HTLC + anchor-reveal gate (`SWK/lwk_wollet/src/btc/xchain.rs`). Only the LSP's leg is Lightning. A new stateless authenticated REST+WS gateway fronts the live `seqob-maker` LP and runs the taker-side LN acts the wallet cannot; it touches the wallet only via {a receive address, the wallet's chosen payment-hash H or a bolt11 to pay, the wallet's signature on its own on-chain leg} and never holds the wallet's keys or P. This maps 1:1 onto the Boltz-v2 submarine client SWK already ships (`SWK/lwk_boltz/`, `boltz_client::BoltzApiClientV2`), so the gateway exposes a Boltz-shaped createswap/quote/status(WS) surface extended with a Sequentia asset id, and the wallet reuses that client pointed at our host instead of boltz.exchange. Two net-new LSP MODES are required that the shipped xsub* flows do not have (those assume the taker runs SeqLN): (a) issue a BTC-LN hold invoice bound to a user-supplied H that a THIRD PARTY on the public Bitcoin LN pays, then fund an on-chain asset HTLC to the user (LN receive); (b) pay an ARBITRARY external bolt11 on the user's behalf, reimbursed by the user's on-chain asset HTLC (LN send). Both are Boltz-shaped and reuse serveSubmarine, but are a different role assignment. Tier 1 needs the wallet to run nothing new except point its swap client at us.
+
+Tier 2 (endgame; truly-instant pure-LN from a phone) is Greenlight/Phoenix-style hosted channels with an on-device signer. The pure-LN "no anchor wait" leg needs the user's value to live in a channel; for a thin client that means WE host the lightningd pair (SeqLN-on-Sequentia asset channels + SeqLN-on-Bitcoin) while the DEVICE holds the channel + commitment keys via a remote-signer split and co-signs each state over clnrest gated by a per-wallet, method+param-restricted RUNE, plus option_data_loss_protect for recovery and a watchtower we run. SeqLN has clnrest built (`seqln/target/release/clnrest`) + createrune/checkrune, but NO remote-signer / hsmproxy yet; that split is the core net-new Tier-2 build. Evaluate porting Greenlight gl-client or VLS rather than a bespoke on-device LN stack, which is very large given SWK/LWK has zero Lightning. Anchoring helps here: a Bitcoin-driven reorg is a tail-truncation that RESETS the CSV clock in the defender's favor, no novel penalty-evasion, so trust collapses to liveness + watchtower, not custody.
+
+Rejected as the primary model: a hosted per-user SeqLN node behind clnrest WITHOUT the signer split, and a plain custodial swap endpoint; both hold the hsm_secret or the in-flight funds and are fully custodial, bounded only by reputation. Acceptable only for tiny amounts, or as the transport skeleton that Tier 2's signer split later hardens. Cross-network liquidity on both networks is structural (the LP must be capitalized on Sequentia AND on Bitcoin-LN); that is liquidity provision, not custody, and cannot be conjured. It bounds swap size and is the liveness backbone, not a trust component.
+
+### 8.3 Custody and trust, stated honestly (the decision the user must make)
+
+This is the load-bearing honesty section. Get the wording right before shipping any LN surface, and disclose it BEFORE the irreversible action (reuse the pre-submit-preview discipline of T4 and the bridge honesty precedent of T8 + section 6).
+
+Tier 1 is non-custodial by construction. The user's money always sits in an on-chain HTLC the user can unilaterally refund after a timelock; the LSP can never take it without paying or receiving the matching BTC-LN payment (which requires revealing or learning P). Worst case is the user's CLTV refund; censorship (the LSP refuses to pay or settle) resolves to the same refund. No LN balance is ever custodied. This is exactly the Boltz trust model.
+
+Two honest residuals in Tier 1, both priceable, both surfaced and never hidden. (1) The fast-buy path uses a hold-invoice reverse so the user gets the asset at 0-1 conf while the LSP absorbs the anchor wait (`seqln-dex-instant-swap-latency.md`); a malicious LSP could settle the hold early and pray for a deep Bitcoin reorg, which it cannot cause, which only pays off on a rare deep reorg, and which burns reputation. Same risk grade as 0-conf, capped, NEVER shown as final. (2) Small sells fronted at 0-conf under `LightningTerms.max_0conf_amount` carry that same 0-conf grade, above which the wallet falls back to the anchor-gated path.
+
+Tier 2 is non-custodial for keys IF the signer split is built: the LSP runs the node and routing but cannot move channel funds unilaterally because the device must co-sign every commitment. Without the signer split, a hosted node holds the hsm_secret and is fully custodial. Either way, hosted channels add a LIVENESS dependency on the LSP that must be disclosed: instant-spendable, but the LSP is the sole channel peer; the escape hatch is force-close to reclaim on-chain, backed by option_data_loss_protect + our watchtower. Under the equal-standing rule (T13) any hosted asset-LN balance is one row among equals, labeled "Lightning / instant-spendable", and never rendered more final than an on-chain balance.
+
+The user decision, flagged in the open questions: Tier-1-now / Tier-2-later is recommended, but the Tier-2 custody mechanism (Greenlight gl-client vs VLS vs a CLN hsmproxy on-device signer split, versus an honestly-labelled custodial interim for small amounts) is the single biggest architecture call and gates whether pure-LN from a phone is genuinely non-custodial.
+
+### 8.4 Finality honesty across the Lightning states
+
+Extend the existing anchor-honest surfacing (web `sequentia-web-wallet/swap.js:753-758` setFinality + the swFinality row `index.html:390-394`; Ambra the quote-view string in `ambra/app/lib/swap_screen.dart`) with the LN states, and centralize the wording in one shared helper per wallet so it cannot regress to "instant/final" where it should not (the strings are already duplicated across same-chain, cross, and the anchor gate, and LN adds three more). Honest per the DEX 0-conf policy and Principle 1:
+
+- Pure-LN happy path (Tier 2): genuinely instant and final, nothing on-chain, zero reorg risk. This one MAY say final.
+- Submarine BUY (Tier 1, hold-invoice reverse): "asset delivered now (0-1 conf), Bitcoin-anchor-final in ~20-30 min" while the LSP absorbs the anchor wait. Provisional at receipt, never final at 0-conf.
+- Capped small SELL (Tier 1): "instant up to N <asset>, larger sells settle in ~1 block". The 0-conf receipt of irreversible BTC-LN is fronted by the LSP under the cap; never call it final.
+- Refund path, all tiers: "if the swap stalls, nothing moved, your funds are refunded (atomic)".
+
+### 8.5 Per-surface build
+
+Web wallet (4.1 Swap + 4.2 core). The wallet is already submarine-swap-shaped, so near-term LN is submarine-only and needs no LN node in the browser. Add a front-end LSP client module (e.g. `seqln.js`) + a `window.SEQ_LSP_URL` global mirroring the `SEQ_SEQOB_URL` / `SEQ_DEX_BASE` pattern (`sequentia-web-wallet/index.html:1261-1307`; default `location.origin + '/lsp'` or reuse `/seqob`), talking to our hosted LSP over REST + the existing `/seqob` WS courier. LN RECEIVE = a Lightning mode on renderReceive (`index.html:294-306`): the user picks an amount + which asset to receive (any asset, equal standing), the wallet generates P via generateSwapSecret, POSTs H + amount + asset + its HTLC pubkey to the LSP, and displays the returned BTC-LN hold invoice; a third party pays it, the LSP funds a Sequentia asset HTLC, and the wallet watches esplora and claims with P via the seqLeg + buildSeqHtlcClaimTx path (the xrswap.js on-chain-claim mechanics, with the LSP issuing the invoice for a third-party payer). LN SEND = detect a pasted/scanned bolt11 (the scanner already strips a `lightning:` URI at `index.html:1489-1497`), parse it with the already-compiled `Invoice` class (`SWK/lwk_wasm/src/boltz.rs:215-274`; add to the import at `index.html:529`) to read amount + payment_hash, request a quote from the LSP, fund a Sequentia asset HTLC locked to H via seqLeg.fund + buildSeqHtlcRedeemScript (LSP claims with P, wallet refunds after T_seq), courier the funded outpoint, and the LSP pays the external invoice and claims. Do NOT wire `BoltzSession` / `BoltzSessionBuilder` from the same pkg: that client targets the public Boltz API on Liquid, a different counterparty than our LSP; it is a mechanics reference only. Swap tab: extend findRoute (`swap.js:247-262`, today returns only `kind:'same'`/`kind:'cross'`) with `kind:'ln'` when the pair is a Sequentia asset <-> BTC over Lightning, route it in onReview (`swap.js:862-869`), and wire an `ln` handle in initSwapTab (`index.html:1239-1331`) beside the xswap/xrswap/xmaker handles; the composer, panes, picker, fee market, and reference-currency hints are reused unchanged. Codec: add the LN atom types to xcourier.js's XcType union (`xcourier.js:31-42`; the Go side already defines XcPln/XcSub) so the sealed CourierSession (`xcourier.js:67-99`) can drive the handshake, and add encodeLightningTerms in seqob.js emitting offer field 22 (`seqob.js:221-249`, byte-exact against the Go deterministic marshal) so LN offers pass verifyOffer (`seqob.js:289-298`) instead of being dropped as forged. Send composer: detect a bolt11 in collectRows/buildSendPset/btnReview (`index.html:1549-1594,1714-1734`) so an invoice routes to the LN driver instead of `new Address()` (which throws on an lnbc string), and adjust the fee-asset UI (`index.html:1453-1459`) since an LN send's cost is the LSP's quoted asset amount + the on-chain funding fee, not a per-vByte rate. The pure-LN endgame (instant, no anchor wait) is deferred: it needs the user to hold funds in a hosted channel with wallet-held keys, which a browser JS+WASM wallet cannot run without an embedded LN state-machine (Tier 2, 8.2).
+
+Ambra (4.3). Ambra is a generation behind the web wallet: Swap is on the retired RFQ `SeqdexClient` (`ambra/app/lib/swap_screen.dart:122,287`, already flagged T7), and cross-chain is buy-only + anchor-gated with no reverse (`ambra/app/lib/xchain_swap_screen.dart`). It can reach LN two ways: migrate its Swap to the SeqOB order-book/courier first, or shortcut LN straight through the LSP REST endpoint without migrating the same-chain path (the faster route to instant LN on mobile, since the LN take goes through the LSP anyway). Add `Backend.lsp => $_origin/lsp` in `ambra/app/lib/config.dart` (co-located with dex/feerates, reusing the node auth-header plumbing), a new `ambra/app/lib/lsp_client.dart` mirroring xchain_client.dart's _post pattern, and `ln_*` FFI in `ambra/ambra_core/src/api/mod.rs` (invoice create/pay shims + the courier sealing beside seqdex.rs; plain LSP REST can stay pure Dart). Surface a Lightning mode on the ReceiveTab beside tb1/tsqb1, an LN branch in the send scanner (`ambra/app/lib/send_screen.dart:251`, today BIP21-only) and the recipient field, and upgrade XchainSwapScreen to the instant LN path for BOTH buy AND sell (today buy-only), keeping the on-chain HTLC path as the refund rail and reusing the on-device secret-P persistence (XchainStore) unchanged. Mobile adds two problems the web wallet does not have. (1) A phone cannot hold a socket open in the background, so the LSP must PUSH (FCM/APNs, or a self-hosted/UnifiedPush channel to match the app's deliberate no-Play-Services stance, consistent with the pure-Dart no-ML-Kit QR choice) to wake the app to claim an incoming payment or complete a backgrounded swap; today the manifest declares INTERNET + CAMERA only (`ambra/app/android/app/src/main/AndroidManifest.xml`) and the only lifecycle handling is re-lock on pause (`ambra/app/lib/main.dart:50-57`). (2) LN hold invoices expire in seconds-to-minutes while the OS suspends backgrounded apps, so an LN swap needs a persisted resumable record, a short foreground-service window while active, and push-driven resume; size LSP-side hold timeouts generously and lean on push, not on the app staying foregrounded. iOS parity (APNs + background + the Tier-2 signer) is deferred, it needs a Mac.
+
+### 8.6 Quote, RFQ, and fee-spread display
+
+An LN offer is a fixed-amount resting seqob offer with a mandatory expiry today; dynamic per-lift pricing is a later refinement (design section 5.3, M4 note), which is the SAME open question as Alberto's S2 market-buy ("buy $1,000 of tSEQ at current price") and must be resolved with the LN quote design, not separately. The LSP gateway needs a short-lived SIGNED quote so the two legs stay consistent and the spread is locked per swap; reuse the existing price-server + offer signing and do NOT re-derive the any-asset rate math (Principle 4, T1). Show the quote + LP spread BEFORE commit (T4): the LN "fee" is the maker spread baked into the rate, not a separate taker-funded network fee, so there is no fee-asset selector on the LN leg (same as the cross leg, where paintFee already disables it); render it in the correct rate/fee asset next to the open-fee-market same-chain UX without implying a privileged asset. When the LSP adds short-lived RFQ, reuse the xswap.js startCountdown pattern for the quote-expiry countdown so the user knows the spread is locked only for the session. BTC-denominated LN entry additionally depends on the T2 BTC price-key fix.
+
+### 8.7 Backend prerequisites and do-not-regress
+
+Backend work that must land before the UI can honestly offer the fast paths: wire the hold-invoice reverse for fast BUY (`seqdex/internal/seqob/client/xdriver_submarine_reverse.go`; the hold primitive is proven, only the driver/binary wiring is missing) so the user gets the asset at 0-1 conf while the LSP absorbs the anchor wait; honor `LightningTerms.max_0conf_amount` for fast small SELLS (the field exists in the proto + validator, but the submarine driver still floors min_anchor_depth at 2 and ignores it); harden holdinvoice-seq (in-memory only today, must survive restart + validate amount/cltv before a production LSP relies on it); confirm the LSP always holds a committee-accepted fee asset so its on-chain HTLC claim/refund and any Tier-2 force-close are relayable. Deploy the hosted SeqLN cluster (SeqLN-on-Sequentia asset channels for any issued asset + tSEQ equally, SeqLN-on-Bitcoin real testnet4 channels, holdinvoice-seq, `seqob-maker -mode pureln` + `-mode lightning`) on the box under systemd, funded with two-network liquidity, confirmed with Andreas before any box deploy (per the pipeline; all proven so far only on the laptop regtest + testnet4 harness).
+
+Do-not-regress at the daemon (section 6, extended): the M0-M5 flows, the ~2.1s both-direction settlement, the atomic refund, the wall-clock timelock ladder, and the seqob relay staying a pure non-custodial matchmaker. Wire-format prerequisite: the seqob.js LightningTerms encoding must be byte-exact against the Go deterministic marshal or LN offers will not verify locally; this needs the ground-truth vectors the same-chain + cross-chain encoders were validated against, and it blocks the wallet even SEEING an LN offer.
+
+Housekeeping (fold into the earlier sections when editing this doc): the section-1 surfaces table gets a hosted-SeqLN-LSP backend row (`seqln` + `seqdex` `phase3-pure-ln`, served behind web + Ambra); the section-2 tally gets the LN P-counts once graded (LN is net-new missing capability, so most items grade P1 under the P0=blocked/misled definition, with the finality-honesty item the only P0 candidate); section 7 cross-refs S2 (market-buy) and S3 (atomic-swap docs, which now span same-chain + on-chain HTLC + pure-LN + submarine) to the LN docs; and add cross-cutting theme T16 in section 3 as the one-paragraph pointer to this section, ready to paste:
+
+**T16. Lightning swaps are proven at the daemon but no wallet can reach them (the taker still runs a SeqLN node).** The pure-LN and submarine lanes settle live through the seqob relay + encrypted courier (seqdex `phase3-pure-ln`, M0-M5), ~2.1s both directions, no anchor wait on the happy path, but every wallet is LN-blind. Hits: the web Swap has no LN route and cannot even parse an LN offer (`sequentia-web-wallet/seqob.js:245` offer field 22 "reserved and not yet encoded"; findRoute returns only `same`/`cross` at `swap.js:247-262`, so `verifyOffer` at `seqob.js:289-298` drops every LN offer as forged); Ambra Swap has no LN route and is still on the retired RFQ model (`ambra/app/lib/swap_screen.dart:122,287`, overlaps T7); the taker requirement itself is `seqdex/cmd/seqob-cli/xpln.go` needing `-asset-ln-socket` + `-ln-socket`; Qt and Fulmen are outside the thin-client model. Root fix: host SeqLN for web + Ambra users (LSP/Phoenix model, section 8) so the taker needs no local node, expose an "Instant (Lightning)" swap lane + a bolt11 BTC-LN receive/send path from ANY asset, and surface hosted-channel custody + LN-vs-on-chain finality honestly.
+
+### 8.8 Do not regress (LN-specific)
+
+The seqob relay stays a pure non-custodial matchmaker in both tiers; only the new HTTP/WS swap gateway (Tier 1) and the hosted-channel + signer plane (Tier 2) are added. The wallet does not currently speak the seqob opaque courier for the swap-as-a-service path and should not have to; keep the Tier-1 boundary at HTTP/WS so the wallet reuses its Boltz-style client. Never present a submarine 0-conf leg or a hosted-channel balance as more final than the underlying Bitcoin anchor allows; pure-LN is the only state that may say final.
+
+### 8.9 Open decisions (fold into planning before the LN build starts)
+
+These are the choices this section deliberately leaves open; the custody/trust tier is the load-bearing one.
+
+- CUSTODY/TRUST, the central decision: ship Tier 1 submarine swap-as-a-service now (non-custodial by HTLC atomicity, no LN node on the device) and defer Tier 2 hosted channels? And for the Tier-2 pure-LN endgame, which non-custodial signer path: Greenlight gl-client vs VLS vs a CLN hsmproxy on-device signer split, versus an honestly-labelled LSP-custodial interim for small amounts? This gates whether pure-LN from a phone is genuinely non-custodial and is the single biggest architecture call.
+- Is an authenticated LSP-runs-the-taker REST endpoint (more custodial than the hosted-channel signer split) acceptable as the interim, given the directive is non-custodial "where possible"? It is the fastest path to LN on Ambra without first migrating its Swap to the SeqOB courier.
+- Confirm the LSP will run the two net-new submarine modes the shipped xsub* flows do not have: (a) issue a BTC-LN hold invoice on a user-supplied H that a third party pays, then fund an on-chain asset HTLC to the user (LN receive); (b) pay an arbitrary external bolt11 on the user's behalf, reimbursed by the user's on-chain asset HTLC (LN send).
+- LSP API shape: reuse SWK's Boltz-v2 client (`lwk_boltz`) verbatim against a Boltz-shaped gateway extended with a Sequentia asset id, or build a Sequentia-native REST+WS API? Boltz v2 has no asset-id concept, so asset submarine swaps need an extended create-swap request; fork boltz_client vs a thin new client.
+- Ambra sequencing: migrate its Swap to the SeqOB order-book/courier first and then add LN, or shortcut LN straight through the LSP REST endpoint without migrating the same-chain path? Affects a large amount of mobile work.
+- Scope: confirm LN is scoped to the two thin clients (web + Ambra) and that Qt (full node-GUI) plus Fulmen (LSP-operator GUI) are deferred, and add the hosted-SeqLN-LSP backend row to the section-1 surfaces table.
+- Direction/amount for v1: buy-first (hold on the BTC leg, lower risk) then sell; and submarine-first (on-chain user leg) before pure-LN (which needs the user holding asset-LN inventory in a hosted channel)?
+- Push infrastructure for Ambra: FCM/APNs, or a self-hosted/UnifiedPush channel to match the app's deliberate no-Play-Services stance (pure-Dart no-ML-Kit QR)?
+- Liquidity economics: who funds the LP's both-network inventory and the inbound liquidity for a brand-new wallet, and what is the pay-to-open fee model? Structural, bounds swap size and liveness, cannot be conjured.
+- Deploy: confirm the hosted SeqLN + LSP nodes run on the box (clone -> run-dir -> binary confirmed with Andreas) and the testnet4 BTC-LN liquidity is sized for real end-to-end receive/send, before any box deploy (proven so far only on the laptop regtest + testnet4 harness).
