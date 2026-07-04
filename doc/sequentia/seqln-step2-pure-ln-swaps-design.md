@@ -284,7 +284,14 @@ single-onion conversion to a Step-2b**; it is not needed for "pure-LN swaps work
   pure-LN; (b) added **`-btc-asset`** to maker+cli so the BTC leg can route over a 2nd issued asset (regtest
   stand-in; empty = real BTC-LN). An RFQ quote (§5.3) off the order book is still a fixed-amount offer today
   (whole-swap), same as the submarine wiring — dynamic per-lift pricing is a later refinement, not a blocker.
-  **M4 DONE.**
+  **M4 DONE.** CAVEAT (found 2026-07-04 during the Tier-2 capstone): the M4 same-network stand-in ran BOTH legs
+  over the SAME node pair (ln1↔ln2) carrying two assets, and verified settle/preimage but NOT per-asset
+  movement. The `pay` plugin's route selection does not constrain to the asset channel when a peer is reachable
+  via multiple channels, so the GOLD leg could misroute over the cbe3b48f channel — the swap still settles on
+  the shared preimage but the wrong asset moves. So the M4 e2e proves the courier + driver handshake but its
+  per-asset correctness needs re-verification with the legs on separate peers (as the capstone did). **M5 below
+  is unaffected** (its legs are on separate networks). PRIORITY FIX: constrain `pay`'s route selection to the
+  payment asset (pay.c / libplugin-pay.c).
 - **M5 — real Bitcoin-LN BTC leg (testnet4). DONE, BOTH DIRECTIONS (2026-07-04).** Replaced M4's same-network
   2nd-asset "BTC" stand-in with a GENUINE Bitcoin **testnet4** Lightning leg: a policy-asset HTLC on a
   `bitcoind(testnet4)`-backed SeqLN node (`--network=testnet4`, `-btc-asset` omitted → `NewCLNLNLeg`). **ZERO

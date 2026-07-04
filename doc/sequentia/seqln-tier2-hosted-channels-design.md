@@ -139,6 +139,29 @@ remaining work is PRODUCTIZATION (§below): secure the transport (Noise/TLS + pe
 infra (JIT/pay-to-open liquidity + a wallet-facing API), and wallet integration (the signer as WASM/FFI + an
 SDK), then the parked UX overhaul.
 
+- **CAPSTONE — vision proven end-to-end (2026-07-04).** A hosted node with NO local key (keys only on the
+  remote Rust device signer) completed a real pure-LN GOLD<->BTC-stand-in trade through the `seqobd` order book,
+  non-custodially: received 100k GOLD, paid 200k cbe3b48f, both legs off-chain, settled in ~2-3s, the device
+  signing every commitment update across the transport. Proven TWICE — permissive AND with
+  `SEQLN_SIGNER_POLICY=enforce` (the validating signer witnessed both channel opens via SETUP_CHANNEL and
+  permitted the legitimate swap with 0 policy rejects). Topology = the faithful production shape: the GOLD leg
+  on one peer (ln3), the BTC-stand-in hold leg on another (ln2), mirroring separate asset/BTC daemons.
+- **CAPSTONE FINDINGS (real, actionable):**
+  1. **Same-peer multi-asset misrouting (PRIORITY BUG).** With both legs over the SAME node pair carrying
+     multiple assets, the maker's `pay asset=GOLD` misrouted over the cbe3b48f channel — the swap settled on the
+     shared preimage but the WRONG asset moved (taker got 0 GOLD). `getroute(asset=)` filters correctly; the
+     `pay` plugin's route SELECTION does not constrain to the asset channel when the peer is reachable via
+     several. Fix: constrain `pay`'s first-hop/route selection to the payment asset (pay.c / libplugin-pay.c).
+     Consequence for the record: the **M4 same-network pure-LN e2e verified settle/preimage but NOT per-asset
+     movement**, so it is subject to this bug and needs re-verification with per-asset checks. The **M5
+     real-testnet4 proof is unaffected** (its legs were on separate networks, no same-peer ambiguity). The
+     capstone fixed it via separate peers and verified real per-asset movement.
+  2. **Enforce + mutual close (VLS-parity gap).** The enforce validator rejects a cooperative-close output (pays
+     a plain wallet address, not a commitment script). Mutual close needs its own validation path.
+  3. **Policy state is per-process in-memory.** A signer restart into enforce cannot resume pre-existing
+     channels (channeld issues SIGN_COMMITMENT_TX on reestablish before any SETUP_CHANNEL re-sync) and
+     fail-safe-refuses. Correct behavior; productization needs persistent policy state or a SETUP re-sync.
+
 Then Tier-2 hosted channels are available to the wallets: the wallet SDK opens a hosted channel (pay-to-open /
 JIT liquidity from our LP), holds its keys, co-signs, and trades asset<->BTC over pure-LN truly instantly.
 
