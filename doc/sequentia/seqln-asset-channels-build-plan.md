@@ -263,7 +263,34 @@ closingd changes were needed for the no-HTLC path.
   utxo on hand, since the channel balance is CSV-locked in to_local after close. Guarded-skip follow-ups (no crash): gossip utxoset scans
   (`bitcoind.c`/`chaintopology.c`) + coop-close fee (`closing_control.c`) skip non-policy outputs — matters for
   PUBLIC asset channels + display, not resolution.
-- Then **M4** (invoices+routing carry asset id + display precision), **M5** (pure-LN cross-network swap).
+## "Any asset, no code change" — PROVEN + M4 reframed (2026-07-04)
+
+The design goal (per Andreas): a user can open + transact an LN channel in ANY asset — even one nobody has
+used on LN before — with **zero changes to our CLN code**, the only external requirement being that some block
+producer accepts that asset for tx fees. **Verified live:** issued a brand-new asset id (`cbe3b48f…`), ran
+`setfeeexchangerates` (the producer-accepts-it-for-fees step, a node config, not code), and with the SAME
+binaries that handled GOLD: `fundchannel asset=<new>` → CHANNELD_NORMAL, then `pay` of a plain BOLT11 invoice
+(NO asset id in the invoice) settled, moving 0.2 of the new asset. Why it works: the asset lives in the
+CHANNEL (`channel_asset`, a generic 33-byte tag), amounts flow through the existing msat machinery as
+atoms*1000, and nothing hardcodes any asset — the code is asset-blind, so it works for all assets.
+
+**This reframes "M4".** Baking asset ids into BOLT11 invoices / core routing is NOT needed for the base vision
+and works against it. Direct (single-hop) asset payments already work invoice-agnostically (the channel, not
+the invoice, determines the asset). What remains is genuinely optional/separable:
+- **Unit hint (optional, wallet convention):** the invoice amount is "msat" interpreted as the channel asset's
+  atoms*1000; unambiguous when a payer↔payee pair is single-asset (the common case). If a pair spans multiple
+  assets, an OPTIONAL bolt11 TLV / wallet metadata can hint the asset — not a hard CLN change, doesn't affect
+  "any asset works". Plus display precision = wallet + registry (data), not CLN code.
+- **Same-asset multi-hop routing (additive, generic, optional):** add a `channel_asset` field to the routing
+  gossip (channel_announcement/update) so routers find same-asset paths. Any asset, no per-asset code; only
+  needed for a PUBLIC announced asset-LN network, not wallet↔LP direct channels.
+- **Cross-asset routing = the DEX, not core payments:** an intermediate hop swapping asset X→Y is the
+  submarine / pure-LN swap machinery (seqob/seqdex), where an asset-typed swap request lives.
+
+- **M5 / real next prize — pure-LN cross-asset swap (the DEX endgame):** a wallet with a GOLD-LN channel + a
+  BTC-LN channel to an LP does an ATOMIC cross-asset swap (pay GOLD-LN, receive BTC-LN, same payment_hash).
+  This is where asset channels pay off — the submarine/pure-LN swap machinery now runs on TOP of real asset
+  channels. Higher value than invoice/routing asset-ids.
 
 REMAINING for M1 (a large, funds-critical, REGTEST-GATED integration — verifiable only end-to-end, so it must
 be done carefully, not rushed):
