@@ -80,9 +80,16 @@ mirroring the pure-LN M0-M5 discipline.
   no lightningd change. Combined with the code-proof that the signer is asset-agnostic (§1.2), asset-channel +
   swap signing through a substituted signer is established; the runtime channel-signing trace lands with M1's
   logging proxy. NEXT: M1.
-- **M1 — network split (out-of-process signer).** Split the proxy: it forwards `{client_ctx, msg}` over a
-  local socket to a separate `signerd` process that links libhsmd and answers. Proves the transport + framing +
-  the fd-multiplex-stays-local design end to end, still in C (reuse libhsmd). Latency baseline for M4.
+- **M1 — network split (out-of-process signer). DONE (2026-07-04, seqln `1e131300a`).** `hsmd-proxy`
+  (`hsmd/hsmd_proxy.c`, substituted via `--subdaemon=hsmd:PATH`) keeps all ccan/io + fd machinery, answers
+  `WIRE_HSMD_CLIENT_HSMFD` LOCALLY (fd-multiplexing never crosses the wire), loads no secret, and forwards every
+  secret-bearing request over one socket (fork+socketpair) to `signerd` (`hsmd/signerd.c`), which owns the
+  hsm_secret + libhsmd and reconstructs the `hsmd_client` per request. `hsmd/signer_frame.h` = the tiny
+  little-endian frame (`is_main|node_id|dbid|capabilities|hsmd_msg`), self-describing for M2 reuse. VERIFIED:
+  a node boots through the split AND a full channel lifecycle (connect ln2, fund, open→CHANNELD_NORMAL, mutual
+  close) is signed out-of-process with valid Elements/asset signatures. Runtime channel-signing trace captured
+  (ECDH, GET_CHANNEL_BASEPOINTS, NEW/SETUP_CHANNEL, GET_PER_COMMITMENT_POINT, SIGN_WITHDRAWAL,
+  SIGN_REMOTE_COMMITMENT_TX, VALIDATE_COMMITMENT_TX, SIGN_MUTUAL_CLOSE_TX) — confirms the M2 subset.
 - **M2 — device signer (Rust/WASM).** Reimplement the minimal hsmd message subset (§4) over the crypto kernel
   in `ambra_core` Rust, compiled native (phone) + WASM (browser). Point `signerd`'s transport at it. Conformance
   tested byte-for-byte against libhsmd (same derivations, same signatures) via M1 as the oracle.
