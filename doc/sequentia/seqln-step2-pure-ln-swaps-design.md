@@ -212,18 +212,25 @@ single-onion conversion to a Step-2b**; it is not needed for "pure-LN swaps work
 > leg → no anchor gate**, so the maker's incoming leg **must** be a hold invoice (held until the maker learns
 > `P` by paying the outgoing leg). Hold invoices are therefore *mandatory*, not optional, and are the main
 > net-new wiring. Which node holds depends on direction: **buy GOLD → hold on the BTC (Bitcoin) node; sell GOLD
-> → hold on the asset (Sequentia) node.** Buy-first is lowest-risk because a BTC hold invoice is a plain CLN
-> HTLC the plugin already handles, whereas an *asset* hold invoice must be confirmed to hold correctly (M1).
+> → hold on the asset (Sequentia) node.** M0 (below) built the hold plugin and proved it holds even an *asset*
+> HTLC by an externally-supplied hash with no invoice — so the hold primitive is settled for BOTH legs, and
+> buy-first is now preferred just for its shorter cross-chain harness, not for any remaining hold risk.
 
-- **M0 — BTC hold-invoice flow, wired.** Deploy the `holdinvoice` plugin on the SeqLN-on-Bitcoin node and wire
-  a hold flow through `clnLNLeg` (`CreateHoldInvoice`→`WaitHeld`→`SettleHold`/`CancelHold`, `leg_lightning.go:
-  165–217`, currently unwired): pay it from a second node, confirm `accepted`(held), then settle/cancel by `P`.
-  This is the safety primitive the whole thing rests on.
-- **M1 — asset hold invoice + asset `LNLeg`.** Add asset-aware `Pay(asset=…)` to `clnLNLeg`; stand up a second
-  `clnLNLeg`/asset-`Sub*Ops` against the Sequentia node. **Confirm the `holdinvoice` plugin holds an *asset*
-  HTLC on a Sequentia (elements) SeqLN node** (§5.1 — the real risk: the plugin was validated on Bitcoin).
-  Issue a GOLD hold invoice, `pay asset=GOLD` it, confirm held, settle/cancel by `P`. (Extends task #20 to the
-  asset node.)
+- **M0 — hold primitive. DONE (2026-07-04).** Built a minimal CLN hold plugin
+  (`seqln/contrib/holdinvoice-seq/holdinvoice.py`) exposing exactly `clnLNLeg`'s RPC contract
+  (`holdinvoice`/`holdinvoicelookup`/`holdinvoicesettle`/`holdinvoicecancel`) via an async `htlc_accepted`
+  hook + `Request.set_result`. **Proven live on a GOLD (asset) HTLC:** hold→settle(P)→`complete`,
+  hold→cancel→`failed`, and unregistered payments pass through untouched. **Two findings that shrink M1/M2:**
+  (a) it holds fine on an *asset* (elements) HTLC, so §5.1's "does it hold an asset HTLC?" risk is already
+  retired; (b) the maker can hold an **externally-supplied hash with NO local invoice and NO knowledge of
+  `P`** — the taker generates `P`, the maker only sees `H`, and the taker pays the *bare hash* via `sendpay`
+  (as in Step-1 testing), so **create-by-hash BOLT11 / HSM `sign_invoice` is NOT needed** (the anticipated
+  hardest dependency, and the daywalker90 Rust plugin, are both eliminated). TODO before production: file-
+  backed hold state (survive plugin restart) + amount/cltv validation.
+- **M1 — asset `LNLeg` + two-LN-leg wiring.** Add asset-aware `Pay(asset=…)` to `clnLNLeg` (Step-1 param) and
+  a hold-leg pay via `sendpay`-to-hash; introduce the asset-LN `Sub*Ops`/`AssetLeg` seam (§4) so a swap can
+  pair two LN legs. The asset-hold risk is already retired by M0; M1 is now the seam + `Pay asset=` + the
+  hold-flow wiring (`WaitHeld`/`SettleHold`/`CancelHold`), no plugin risk.
 - **M2 — pure-LN swap, buy-GOLD-with-BTC, happy path.** `PureLNSwap` with two LN-style legs (asset + BTC), no
   on-chain SEQ leg, no anchor gate; maker's incoming BTC leg is the M0 hold invoice. Prove end to end on the
   two-daemon harness (Sequentia regtest asset channel + testnet4 BTC channel), stitched by one `P`; **measure
