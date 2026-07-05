@@ -21,7 +21,12 @@ resolve many findings.
 > - **Web wallet non-LN** — DONE (branch `claude/lightning-ux-overhaul`, pushed): T2, T13, T5, T6, T9, T7, T14,
 >   T11, T12 + 4.1/4.2 cleanups. Flagged browser-verify: T4 (PSET fee preview), T5 Max-with-same-asset-fee, T3
 >   (needs the qr.rs wasm rebuild).
-> - **Web wallet Lightning UI** — IN PROGRESS (same branch): the Instant-LN Swap lane + LSP endpoint wiring.
+> - **Web wallet Lightning UI** — DONE (same branch): the "Instant (Lightning)" Swap rail + on-device wasm
+>   signer connect on unlock + `seqln.js` LSP client, and a runnable hosted-LSP service (`tooling/lsp/`). PROVEN
+>   in Node 11/11: the wallet's SDK connects the device signer, a keyless hosted node boots, and a pure-LN
+>   GOLD<->BTC buy settles ~2.1s with the device co-signing and REAL per-asset movement. Needs for LIVE: a
+>   deployed hosted-LSP endpoint (`SEQ_LSP_URL`) + a real browser for the DOM/wss/IndexedDB. Requirement found:
+>   hosted asset channels must be ANNOUNCED (not private) for the taker's asset-getroute.
 > - **Ambra non-LN** — DONE (branch `claude/lightning-ux-overhaul`): the T10 seed/app-lock P0s (FLAG_SECURE,
 >   lock pops sensitive sheets, onboarding lock default-on), T1 (fee_asset via the Rust FFI), T6 safe subset
 >   (cached BTC balance + offline marker + Lock-BTC auth + faucet guidance), T9 (registry service), T12 copy.
