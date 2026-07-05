@@ -422,14 +422,31 @@ public:
         // differently from the rest of the network rejects the other form's blocks
         // and forks off. Every node and producer on the chain must use the same value.
         g_pos_bls = args.GetBoolArg("-posbls", true);
-        // Public fixed-size committee (impl spec Option A): membership is the
-        // deterministic schedule prefix and the quorum derives from the actual
-        // size, so two disjoint quorums cannot exist. Default OFF here so the
-        // pre-re-genesis chain is untouched; the re-genesis flips the default
-        // to true with the recommended cap 250 (quorum 126).
+        // Public fixed-size committee (impl spec Option A; CONFIRMED 2026-07-04):
+        // membership is the deterministic schedule prefix and the quorum derives
+        // from the ACTUAL size, so two disjoint quorums cannot exist. Default OFF
+        // + committee 100 here, so the PRE-RE-GENESIS chain is byte-identical even
+        // under this binary; the re-genesis launches with -pospubliccommittee=1
+        // and -poscommitteesize=250 (126-of-250, the classical 1/3 Byzantine
+        // bound). The election seed stays the Bitcoin anchor (option 1A); Option B
+        // (a VRF-chain seed) and 1B (a buried anchor) are PERMANENTLY REJECTED
+        // (docs alberto-reply-2026-07-04c / 2026-07-04d).
         g_pos_public_committee = args.GetBoolArg("-pospubliccommittee", false);
+        if (g_pos_public_committee && !g_pos_bls) {
+            throw std::runtime_error("-pospubliccommittee requires -posbls");
+        }
         g_pos_min_stake = 4000000000000ULL;             // 40,000 SEQ = 0.01% of 400M (§3.3)
-        g_pos_committee_size = 100;                      // 51-of-100 quorum (§3.5)
+        // 51-of-100 pre-re-genesis; the re-genesis passes -poscommitteesize=250
+        // (126-of-250). Arg-overridable so the cap is a launch-config choice, but
+        // the default keeps the live chain on 100.
+        g_pos_committee_size = args.GetIntArg("-poscommitteesize", 100);
+        {
+            const int max_committee = g_pos_public_committee ? MAX_POS_PUBLIC_COMMITTEE_SIZE :
+                (g_pos_agg_committee || g_pos_bls) ? MAX_POS_AGG_COMMITTEE_SIZE : MAX_POS_COMMITTEE_SIZE;
+            if (g_pos_committee_size < 1 || g_pos_committee_size > max_committee) {
+                throw std::runtime_error(strprintf("-poscommitteesize must be between 1 and %d", max_committee));
+            }
+        }
         g_pos_slot_interval = 30;                        // 30s nominal block time (doc 11 §4)
         g_pos_unbonding_period = 43200;                  // x30s = ~15 days (§3.11)
         consensus.total_valid_epochs = 0;
