@@ -229,7 +229,7 @@ std::optional<uint256> AnchorCertifiedSiblingPending(ChainstateManager& chainman
     }
     // Mirror UpdateTip's immediate-finality quorum exactly (incl. the
     // degenerate-size floor), so "guarded" == "could have been final".
-    const int quorum = PosQuorum((size_t)std::max(g_pos_committee_size, 1));
+    const int quorum = PosSlotQuorum(StakeRegistry::GetInstance());
     LOCK(cs_main);
     // Roots: recovery-set entries that could still be restored at/below our
     // height. Skip manual/consensus invalidations (failed WITHOUT the

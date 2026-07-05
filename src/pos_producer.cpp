@@ -40,12 +40,11 @@ using node::BlockAssembler;
 using node::CBlockTemplate;
 using node::IncrementExtraNonce;
 
-namespace {
 //! Derive a staker's BLS secret seed deterministically from its secp256k1
 //! staking key (domain-separated by a tag), so a staker needs no separate BLS
-//! key to manage. The matching BLS public key and proof-of-possession are
-//! published per-block in the coinbase SEQBLS commitment; validators never
-//! derive it (they read it from the block).
+//! key to manage. Declared in pos.h (global) so the config layer and the
+//! getblsregistration RPC can derive a staker's committee registration; the
+//! registered BLS public key MUST equal BlsDerivePubKey of this seed.
 std::vector<unsigned char> PosBlsSeedFromKey(const CKey& key)
 {
     static const std::string tag = "sequentia/pos-bls/v1";
@@ -54,6 +53,22 @@ std::vector<unsigned char> PosBlsSeedFromKey(const CKey& key)
              .Write(key.begin(), key.size())
              .Finalize(out);
     return std::vector<unsigned char>(out, out + 32);
+}
+
+namespace {
+//! Build the signer bitfield for a bitfield BLS certificate (impl spec Option A
+//! phase 2): bit i is set iff the i-th member of the ordered public committee
+//! is in `signers`. Producer and validator derive the committee identically, so
+//! the certificate needs no member keys — the validator reads them from the
+//! registry by committee position.
+std::vector<unsigned char> BuildSignerBitfield(const std::vector<CPubKey>& committee,
+                                               const std::set<CPubKey>& signers)
+{
+    std::vector<unsigned char> bf;
+    for (size_t i = 0; i < committee.size(); ++i) {
+        if (signers.count(committee[i])) PosBitfieldSet(bf, i);
+    }
+    return bf;
 }
 
 //! Build the leader's unsigned BLS committee block extending the active tip:
@@ -224,16 +239,24 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
                 }
                 candidates.emplace(ckey.GetPubKey(), ckey);
             }
-            const int member_cap = (g_pos_agg_committee || g_pos_bls) ? MAX_POS_AGG_COMMITTEE_SIZE : MAX_POS_COMMITTEE_SIZE;
+            const int member_cap = g_pos_public_committee ? PosMaxCommitteeMembers() :
+                (g_pos_agg_committee || g_pos_bls) ? MAX_POS_AGG_COMMITTEE_SIZE : MAX_POS_COMMITTEE_SIZE;
+            // Under the public fixed-size committee, membership is the
+            // deterministic schedule prefix; the VRF proof is still produced
+            // (the certificate format carries it) but no longer decides
+            // membership and is not verified by validators in this mode.
+            std::set<CPubKey> public_committee;
+            if (g_pos_public_committee) public_committee = PosPublicCommitteeSet(registry, seed);
             int eligible = 0;
             for (const auto& [member_pub, member_key] : candidates) {
                 if ((int)vrf_committee.size() >= member_cap) break;
                 if (!PosIsEligibleStake(registry.GetWeight(member_pub))) continue;
+                if (g_pos_public_committee && !public_committee.count(member_pub)) continue;
                 auto member_proof = VrfProve(member_key, Span<const unsigned char>(seed.begin(), 32));
                 if (!member_proof) continue;
                 uint256 member_beta;
                 if (!VrfVerify(member_pub, Span<const unsigned char>(seed.begin(), 32), *member_proof, member_beta)) continue;
-                if (!PosVrfIsCommitteeMember(member_beta, registry.GetWeight(member_pub), total_weight)) continue;
+                if (!g_pos_public_committee && !PosVrfIsCommitteeMember(member_beta, registry.GetWeight(member_pub), total_weight)) continue;
                 vrf_committee.push_back(member_pub);
                 if (g_pos_bls) {
                     // Each member derives its BLS key from its staking key; the
@@ -260,7 +283,7 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
                 }
                 eligible++;
             }
-            const int quorum = PosQuorum((size_t)g_pos_committee_size);
+            const int quorum = PosSlotQuorum(registry);
             if (eligible < quorum) {
                 // Aggregate committees (MuSig2 or BLS) may certify below quorum
                 // under the escaping-stall rule; script multisig always needs
@@ -361,7 +384,18 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
             err_kind = PosProduceError::MISC;
             return false;
         }
-        block.proof.solution = BuildPosBlsSolution(leader_sig, *agg_sig, bls_members);
+        if (g_pos_public_committee) {
+            // Bitfield certificate (impl spec Option A phase 2): name the
+            // signers by a bitfield over the ordered public committee instead
+            // of carrying each member's key and proof.
+            const StakeRegistry& reg = StakeRegistry::GetInstance();
+            std::vector<CPubKey> committee = PosPublicCommittee(reg, seed);
+            std::set<CPubKey> signers;
+            for (const PosBlsMember& m : bls_members) signers.insert(m.pubkey);
+            block.proof.solution = BuildPosBlsBitfieldSolution(leader_sig, *agg_sig, BuildSignerBitfield(committee, signers));
+        } else {
+            block.proof.solution = BuildPosBlsSolution(leader_sig, *agg_sig, bls_members);
+        }
         countersigs = (int)bls_members.size();
     } else if (!parts->agg_key.empty()) {
         std::vector<unsigned char> leader_sig;
@@ -448,6 +482,12 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
 
 //! Default re-evaluation cadence when there is nothing to do right now.
 static constexpr int64_t POS_PRODUCER_POLL_MS = 1000;
+//! How long a node holds production at a height for which it knows a quorum
+//! certificate but lacks the block body (3A Tier 1). Long enough for any peer
+//! holding the ~few-hundred-byte-certified block to serve it (one
+//! getposproposal round-trip), short enough that a certificate whose body is
+//! deliberately withheld costs a bounded pause, never a deadlock.
+static constexpr int64_t POS_CERT_HOLD_MS = 30000;
 
 PosProducer::PosProducer(ChainstateManager& chainman, CTxMemPool& mempool,
                          const CChainParams& chainparams, CConnman* connman, std::vector<CKey> keys)
@@ -458,6 +498,13 @@ PosProducer::PosProducer(ChainstateManager& chainman, CTxMemPool& mempool,
     m_byzantine_invalid = gArgs.GetBoolArg("-posbyzantineinvalid", false);
     m_debug_round_skew_ms = gArgs.GetIntArg("-posdebugroundskewms", 0);
     m_recovery_wait_ms = std::clamp<int64_t>(gArgs.GetIntArg("-posanchorrecoverywait", 30), 0, 3600) * 1000;
+    // Local liveness timings, NOT consensus rules (every node derives the
+    // round index from the same global anchor, so nodes with different
+    // values still agree on the round): an operator on weak hardware or a
+    // slow link can lengthen them without asking anyone. 0 = the per-member
+    // formula default (500+25/member window, 700+35/member rounds).
+    m_window_override_ms = std::clamp<int64_t>(gArgs.GetIntArg("-poswindowms", 0), 0, 60000);
+    m_round_override_ms = std::clamp<int64_t>(gArgs.GetIntArg("-posroundms", 0), 0, 60000);
 }
 
 PosProducer::~PosProducer() { Stop(); }
@@ -608,6 +655,50 @@ int64_t PosProducer::Step()
         }
     }
 
+    // Certificate pin (honest-splits fix 3A, Tier 1): a verified quorum
+    // certificate for the next height means that height is TAKEN — proposing,
+    // backing or signing a rival there (including via the escaping-stall
+    // valve) is exactly the asymmetric-finality split. Try to complete the
+    // certified block from a held proposal body; otherwise hold production at
+    // this height while the body is fetched. The hold is time-bounded so a
+    // deliberately withheld body degrades into a bounded pause, not a
+    // deadlock (the share-lock is where the stronger guarantee lands).
+    {
+        bool held = false;
+        {
+            std::lock_guard<std::mutex> lock(m_gossip_mutex);
+            // Prune certificates for heights the chain has passed.
+            while (!m_certified_heights.empty() && m_certified_heights.begin()->first <= tip->nHeight) {
+                m_certified.erase(m_certified_heights.begin()->second);
+                m_certified_heights.erase(m_certified_heights.begin());
+            }
+            held = m_certified_heights.count(tip->nHeight + 1) > 0;
+        }
+        if (held) {
+            if (TryConnectCertified()) return 100; // connected; re-evaluate at the new tip
+            const int64_t now_hold = GetTimeMillis();
+            {
+                std::lock_guard<std::mutex> lock(m_gossip_mutex);
+                if (m_cert_hold_height != tip->nHeight + 1) {
+                    m_cert_hold_height = tip->nHeight + 1;
+                    m_cert_hold_since_ms = now_hold;
+                    m_cert_hold_logged = false;
+                }
+                if (now_hold - m_cert_hold_since_ms < POS_CERT_HOLD_MS) {
+                    if (!m_cert_hold_logged) {
+                        m_cert_hold_logged = true;
+                        LogPrintf("PoS producer: holding production at height %d: a quorum certificate is known; awaiting the block body\n",
+                                  tip->nHeight + 1);
+                    }
+                    held = true;
+                } else {
+                    held = false; // patience expired: resume (bounded liveness)
+                }
+            }
+            if (held) return 500;
+        }
+    }
+
     const uint256 seed = PosSeedForChild(tip);
     const StakeRegistry& registry = StakeRegistry::GetInstance();
     const uint64_t total_weight = PosTotalWeight(registry);
@@ -616,6 +707,10 @@ int64_t PosProducer::Step()
     // VRF sortition the slot is private (computed from our own key); we cannot
     // see other stakers' slots, so we simply race at our slot time — a lower
     // slot elsewhere produces first and wakes us for the next height.
+    // Under the public fixed-size committee, MEMBERSHIP is the deterministic
+    // schedule prefix (leader election stays private-VRF).
+    std::set<CPubKey> public_committee;
+    if (g_pos_public_committee) public_committee = PosPublicCommitteeSet(registry, seed);
     int best_idx = -1;
     uint64_t best_slot = 0;
     int local_committee_eligible = 0; // how many of our keys are committee members this slot
@@ -629,7 +724,10 @@ int64_t PosProducer::Step()
             uint256 beta;
             if (!VrfVerify(pub, Span<const unsigned char>(seed.begin(), 32), *proof, beta)) continue;
             slot = PosVrfSlot(beta, registry.GetWeight(pub), total_weight);
-            if (PosVrfIsCommitteeMember(beta, registry.GetWeight(pub), total_weight)) local_committee_eligible++;
+            if (g_pos_public_committee ? public_committee.count(pub) > 0
+                                       : PosVrfIsCommitteeMember(beta, registry.GetWeight(pub), total_weight)) {
+                local_committee_eligible++;
+            }
         } else {
             std::optional<size_t> rank = PosRank(registry, seed, pub);
             if (!rank) continue;
@@ -642,7 +740,7 @@ int64_t PosProducer::Step()
     }
     if (best_idx < 0) return POS_PRODUCER_POLL_MS; // none of our keys is an eligible staker
 
-    const int quorum = PosQuorum((size_t)g_pos_committee_size);
+    const int quorum = PosSlotQuorum(registry);
 
     // Slot timing: the leader's slot opens slot*interval after the parent, and
     // we never produce faster than one interval since the parent — the paper's
@@ -783,14 +881,20 @@ std::vector<PosShare> PosProducer::MakeLocalShares(const CBlock& block)
     const StakeRegistry& reg = StakeRegistry::GetInstance();
     const uint64_t total = PosTotalWeight(reg);
     const uint256 hash = block.GetHash();
+    // Under the public fixed-size committee, membership is the deterministic
+    // schedule prefix; the VRF proof still rides in the share (certificate
+    // format) but no longer decides membership.
+    std::set<CPubKey> public_committee;
+    if (g_pos_public_committee) public_committee = PosPublicCommitteeSet(reg, seed);
     for (const CKey& k : m_keys) {
         const CPubKey pub = k.GetPubKey();
         if (!PosIsEligibleStake(reg.GetWeight(pub))) continue;
+        if (g_pos_public_committee && !public_committee.count(pub)) continue;
         auto proof = VrfProve(k, Span<const unsigned char>(seed.begin(), 32));
         if (!proof) continue;
         uint256 beta;
         if (!VrfVerify(pub, Span<const unsigned char>(seed.begin(), 32), *proof, beta)) continue;
-        if (!PosVrfIsCommitteeMember(beta, reg.GetWeight(pub), total)) continue;
+        if (!g_pos_public_committee && !PosVrfIsCommitteeMember(beta, reg.GetWeight(pub), total)) continue;
         const std::vector<unsigned char> bls_seed = PosBlsSeedFromKey(k);
         auto bls_pub = BlsDerivePubKey(bls_seed);
         auto bls_pop = BlsProvePossession(bls_seed);
@@ -958,8 +1062,10 @@ int64_t PosProducer::DriveRound()
     // node, not consensus rules, so enlarging them is safe. ~25 ms/member of
     // window and ~35 ms/member of round keeps small committees near the old values
     // while giving a 100-member committee ~3 s to collect.
-    const int64_t WINDOW_MS = 500 + 25 * (int64_t)g_pos_committee_size;
-    const int64_t ROUND_MS = 700 + 35 * (int64_t)g_pos_committee_size;
+    const int64_t WINDOW_MS = m_window_override_ms > 0 ? m_window_override_ms
+        : 500 + 25 * (int64_t)g_pos_committee_size;
+    const int64_t ROUND_MS = m_round_override_ms > 0 ? m_round_override_ms
+        : 700 + 35 * (int64_t)g_pos_committee_size;
     CBlockIndex* tip;
     {
         LOCK(cs_main);
@@ -972,6 +1078,23 @@ int64_t PosProducer::DriveRound()
     // global-clock round anchor tolerates before rounds desync. Always 0 in
     // production.
     const int64_t now = GetTimeMillis() + m_debug_round_skew_ms;
+
+    // Certificate pin (3A Tier 1): once a quorum certificate for this height
+    // is known, the round is OVER — sign nothing more here (this is also the
+    // 3B round-advance re-vote cut short: a certificate that arrives near a
+    // round boundary stops the re-vote instead of racing it). Complete the
+    // block from a held proposal body if we can.
+    {
+        bool certified_here = false;
+        {
+            std::lock_guard<std::mutex> lock(m_gossip_mutex);
+            certified_here = m_certified_heights.count(height) > 0;
+        }
+        if (certified_here) {
+            TryConnectCertified();
+            return 150; // poll while the body is fetched / the tip advances
+        }
+    }
 
     // Determine the current round index and the proposal it backs.
     int round_index;
@@ -999,6 +1122,36 @@ int64_t PosProducer::DriveRound()
         }
     }
 
+    // Share-lock, ancestry arm (3A residual): our current parent is a
+    // same-height RIVAL of a block we share-signed. Signing on top of it
+    // would help certify a chain that orphans a block that may have quietly
+    // certified elsewhere. Hold until the escaping-stall anchor gap passes
+    // (the same valve the whitepaper uses for a genuine stall: a partition
+    // hiding X's certificate can outlast any number of rounds, so the
+    // release is keyed on parent-chain progress, not the clock) — or, when
+    // anchoring is off, a bounded grace of two rounds.
+    {
+        bool ancestry_hold = false;
+        uint256 locked;
+        {
+            std::lock_guard<std::mutex> lock(m_gossip_mutex);
+            if (m_lock_height == tip->nHeight && !m_lock_hash.IsNull() &&
+                m_lock_hash != tip->GetBlockHash()) {
+                if (m_lock_grace_start_ms == 0) m_lock_grace_start_ms = now;
+                locked = m_lock_hash;
+                const bool gap_passed = g_con_bitcoin_anchor && tip->pprev &&
+                    PosEscapingStallAllowed(tip->pprev->m_anchor_height, backed->m_anchor_height);
+                const bool grace_passed = !g_con_bitcoin_anchor &&
+                    (now - m_lock_grace_start_ms >= 2 * ROUND_MS);
+                ancestry_hold = !(gap_passed || grace_passed);
+            }
+        }
+        if (ancestry_hold) {
+            SendCertQueryOnce(locked);
+            return 150; // keep polling: a certificate for X releases via the pin, the gap/grace via time
+        }
+    }
+
     // Decide whether this is a new proposal to sign — the round advanced, or the
     // backed leader changed (the one we were backing was excluded). Don't commit
     // until we've validated it.
@@ -1008,6 +1161,37 @@ int64_t PosProducer::DriveRound()
         if (m_round_height == height && (m_signed_round < round_index || m_backed_hash != backed->GetHash())) {
             want_sign = true;
         }
+        // Share-lock, same-height arm (3B): we already share-signed a
+        // DIFFERENT block at this height. The round schedule says re-vote,
+        // but our shares for the first block are still live and assemblable:
+        // signing the rival now is exactly the protocol-induced double-sign
+        // that lets two blocks certify at one height. Ask the network for a
+        // certificate on the first block (a certificate anywhere is one
+        // ~300-byte round-trip away) and wait ONE grace round; only silence
+        // releases the re-vote. With every signer of X held this way, a
+        // rival cannot reach quorum while X can still certify.
+        if (want_sign && !m_lock_hash.IsNull() && m_lock_height == height &&
+            m_lock_hash != backed->GetHash()) {
+            if (m_lock_grace_start_ms == 0) {
+                m_lock_grace_start_ms = now;
+                want_sign = false;
+            } else if (now - m_lock_grace_start_ms < ROUND_MS) {
+                want_sign = false;
+            }
+            // else: grace expired with no certificate — the re-vote proceeds.
+        }
+    }
+    {
+        bool need_query = false;
+        uint256 locked;
+        {
+            std::lock_guard<std::mutex> lock(m_gossip_mutex);
+            if (!want_sign && !m_lock_queried && m_lock_grace_start_ms != 0 && !m_lock_hash.IsNull()) {
+                need_query = true;
+                locked = m_lock_hash;
+            }
+        }
+        if (need_query) SendCertQueryOnce(locked);
     }
     if (want_sign && !m_byzantine_equivocate) {
         // Lazy validation (paper P6 step 10): validate the backed block only now,
@@ -1043,8 +1227,15 @@ int64_t PosProducer::DriveRound()
                     m_backed_hash = backed->GetHash();
                     m_collected.clear(); // shares were for the previous backed leader
                 }
+                // Share-lock: remember what we signed here. Signing anything
+                // ELSE at this height (or on a rival parent) is now gated on
+                // the certificate query + grace above.
+                m_lock_hash = backed->GetHash();
+                m_lock_height = height;
+                m_lock_grace_start_ms = 0;
+                m_lock_queried = false;
                 for (PosShare& sh : shares) {
-                    if (m_collected.size() < (size_t)MAX_POS_AGG_COMMITTEE_SIZE) m_collected[sh.pubkey] = sh;
+                    if (m_collected.size() < (size_t)PosMaxCommitteeMembers()) m_collected[sh.pubkey] = sh;
                 }
             }
         }
@@ -1072,7 +1263,7 @@ int64_t PosProducer::DriveRound()
         const int min_members =
             (g_con_bitcoin_anchor &&
              PosEscapingStallAllowed(tip->m_anchor_height, backed->m_anchor_height))
-            ? 1 : PosQuorum((size_t)g_pos_committee_size);
+            ? 1 : PosSlotQuorum(StakeRegistry::GetInstance());
         if (m_round_height == height && m_backed_hash == backed->GetHash() &&
             (int)m_collected.size() >= min_members) {
             CScript::const_iterator pc = backed->proof.solution.begin();
@@ -1093,7 +1284,16 @@ int64_t PosProducer::DriveRound()
                 auto agg = BlsAggregate(shares);
                 if (agg) {
                     final_block = std::make_shared<CBlock>(*backed);
-                    final_block->proof.solution = BuildPosBlsSolution(leader_sig, *agg, members);
+                    if (g_pos_public_committee) {
+                        // Bitfield certificate (impl spec Option A phase 2).
+                        const StakeRegistry& reg = StakeRegistry::GetInstance();
+                        std::vector<CPubKey> committee = PosPublicCommittee(reg, PosSeedForChild(tip));
+                        std::set<CPubKey> signers;
+                        for (const PosBlsMember& m : members) signers.insert(m.pubkey);
+                        final_block->proof.solution = BuildPosBlsBitfieldSolution(leader_sig, *agg, BuildSignerBitfield(committee, signers));
+                    } else {
+                        final_block->proof.solution = BuildPosBlsSolution(leader_sig, *agg, members);
+                    }
                     final_hash = backed->GetHash();
                     members_n = members.size();
                     m_collected.clear();   // assembled; do not re-assemble until the tip advances
@@ -1106,6 +1306,18 @@ int64_t PosProducer::DriveRound()
         if (m_chainman.ProcessNewBlock(m_chainparams, final_block, /*force_processing=*/true, nullptr)) {
             LogPrintf("PoS gossip: certified block %s at height %d (round %d, %d committee member(s))\n",
                       final_hash.GetHex(), height, round_index, (int)members_n);
+            // Flood the certificate (the certified header) as its own small
+            // object (3A Tier 1): the full block can be lost to a partition
+            // or a slow flood; the ~few-hundred-byte certificate crosses on
+            // any surviving path and pins every member that share-signed
+            // the proposal — they already hold the body and connect on
+            // receipt, so no rival is ever minted at this height.
+            {
+                std::lock_guard<std::mutex> lock(m_gossip_mutex);
+                m_recent_certs[final_hash] = final_block->GetBlockHeader();
+                if (m_recent_certs.size() > 100) m_recent_certs.erase(m_recent_certs.begin());
+            }
+            BroadcastCertificate(final_block->GetBlockHeader());
         } else {
             LogPrint(BCLog::VALIDATION, "PoS gossip: assembled block %s was not accepted\n", final_hash.GetHex());
         }
@@ -1122,6 +1334,33 @@ int64_t PosProducer::DriveRound()
 PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& block)
 {
     const uint256 hash = block->GetHash();
+    // A body arriving for a block we hold a quorum certificate for (3A): it
+    // is not a round candidate — attach the certificate and connect it. The
+    // block hash excludes the proof solution, so the fetched body's hash
+    // matches the certified header's; ProcessNewBlock still fully validates
+    // (a body whose transactions do not match the merkle root is rejected).
+    // Checked before the dedup so a re-fetched body always completes.
+    {
+        CBlockHeader cert_header;
+        bool have_cert = false;
+        {
+            std::lock_guard<std::mutex> lock(m_gossip_mutex);
+            auto it = m_certified.find(hash);
+            if (it != m_certified.end()) {
+                cert_header = it->second;
+                have_cert = true;
+            }
+        }
+        if (have_cert) {
+            auto full = std::make_shared<CBlock>(*block);
+            full->proof.solution = cert_header.proof.solution;
+            if (m_chainman.ProcessNewBlock(m_chainparams, full, /*force_processing=*/true, nullptr)) {
+                LogPrintf("PoS gossip: adopted certified block %s at height %d (body fetched after certificate)\n",
+                          hash.GetHex(), (int)full->block_height);
+            }
+            return PosGossipAction::Ignore;
+        }
+    }
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
         if (!m_seen_proposals.insert(hash).second) return PosGossipAction::Ignore; // already seen
@@ -1224,7 +1463,28 @@ PosGossipAction PosProducer::OnShare(const PosShare& share)
         share.bls_share.size() != BLS_SIG_SIZE || share.vrf_proof.size() != VRF_PROOF_SIZE || !share.pubkey.IsValid()) {
         return PosGossipAction::Invalid;
     }
-    if (!BlsVerifyPossession(share.bls_pubkey, share.bls_pop)) return PosGossipAction::Invalid;
+    // A member's proof-of-possession is the same bytes every block, so its
+    // (costly) pairing check is cached after the first success — measured to
+    // halve the per-share cost at large committees. The signature share is
+    // per-block and always verified.
+    uint256 pop_key;
+    {
+        CSHA256 hasher;
+        hasher.Write(share.bls_pubkey.data(), share.bls_pubkey.size());
+        hasher.Write(share.bls_pop.data(), share.bls_pop.size());
+        hasher.Finalize(pop_key.begin());
+    }
+    bool pop_cached;
+    {
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        pop_cached = m_pop_verified.count(pop_key) > 0;
+    }
+    if (!pop_cached) {
+        if (!BlsVerifyPossession(share.bls_pubkey, share.bls_pop)) return PosGossipAction::Invalid;
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        if (m_pop_verified.size() > 4096) m_pop_verified.clear();
+        m_pop_verified.insert(pop_key);
+    }
     if (!BlsVerify(share.bls_pubkey, Span<const unsigned char>(share.block_hash.begin(), 32), share.bls_share)) return PosGossipAction::Invalid;
     // Classify the share: for the proposal we are backing this round, for some
     // other known candidate (a different round's leader — relay so its aggregators
@@ -1256,15 +1516,186 @@ PosGossipAction PosProducer::OnShare(const PosShare& share)
     const StakeRegistry& reg = StakeRegistry::GetInstance();
     const uint64_t weight = reg.GetWeight(share.pubkey);
     if (weight == 0) return PosGossipAction::Invalid;
+    if (g_pos_public_committee) {
+        // Membership is the deterministic schedule prefix; the share's VRF
+        // proof is vestigial in this mode and not verified. The share must be
+        // signed with the member's REGISTERED BLS key, since the certificate's
+        // aggregate is verified against registry keys — a share under any other
+        // key would only assemble into a certificate that fails validation.
+        if (!PosPublicCommitteeSet(reg, seed).count(share.pubkey)) return PosGossipAction::Invalid;
+        if (reg.GetBls(share.pubkey) != share.bls_pubkey) return PosGossipAction::Invalid;
+    } else {
     uint256 beta;
     if (!VrfVerify(share.pubkey, Span<const unsigned char>(seed.begin(), 32), share.vrf_proof, beta)) return PosGossipAction::Invalid;
     if (!PosVrfIsCommitteeMember(beta, weight, PosTotalWeight(reg))) return PosGossipAction::Invalid;
+    }
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
-        if (m_backed_hash == share.block_hash && m_collected.size() < (size_t)MAX_POS_AGG_COMMITTEE_SIZE) {
+        if (m_backed_hash == share.block_hash && m_collected.size() < (size_t)PosMaxCommitteeMembers()) {
             m_collected[share.pubkey] = share;
         }
     }
     Wake(); // a new share may complete the quorum
+    return PosGossipAction::Relay;
+}
+
+void PosProducer::BroadcastCertificate(const CBlockHeader& header)
+{
+    if (!m_connman) return;
+    m_connman->ForEachNode([&](CNode* pnode) {
+        m_connman->PushMessage(pnode, CNetMsgMaker(pnode->GetCommonVersion()).Make(NetMsgType::POSCERT, header));
+    });
+}
+
+void PosProducer::SendCertQueryOnce(const uint256& hash)
+{
+    {
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        if (m_lock_queried || m_lock_hash != hash) return;
+        m_lock_queried = true;
+    }
+    if (!m_connman) return;
+    LogPrintf("PoS gossip: share-lock at %s — querying peers for a certificate\n", hash.GetHex());
+    m_connman->ForEachNode([&](CNode* pnode) {
+        m_connman->PushMessage(pnode, CNetMsgMaker(pnode->GetCommonVersion()).Make(NetMsgType::GETPOSCERT, hash));
+    });
+}
+
+std::optional<CBlockHeader> PosProducer::GetCertificate(const uint256& hash)
+{
+    std::lock_guard<std::mutex> lock(m_gossip_mutex);
+    auto it = m_recent_certs.find(hash);
+    if (it == m_recent_certs.end()) return std::nullopt;
+    return it->second;
+}
+
+bool PosProducer::TryConnectCertified()
+{
+    // A committee member that share-signed the proposal (or collected it as a
+    // round candidate) already validated and holds the FULL block body; the
+    // certificate was the only missing piece. Attach it and connect.
+    uint256 hash;
+    CBlockHeader header;
+    std::shared_ptr<const CBlock> body;
+    {
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        for (const auto& [h, hdr] : m_certified) {
+            for (const auto& [leader, cand] : m_candidates) {
+                if (cand.block->GetHash() == h) {
+                    hash = h;
+                    header = hdr;
+                    body = cand.block;
+                    break;
+                }
+            }
+            if (body) break;
+        }
+    }
+    if (!body) return false;
+    auto full = std::make_shared<CBlock>(*body);
+    full->proof.solution = header.proof.solution;
+    if (m_chainman.ProcessNewBlock(m_chainparams, full, /*force_processing=*/true, nullptr)) {
+        LogPrintf("PoS gossip: adopted certified block %s at height %d from certificate gossip\n",
+                  hash.GetHex(), (int)full->block_height);
+        return true;
+    }
+    return false;
+}
+
+PosGossipAction PosProducer::OnCertificate(const CBlockHeader& header)
+{
+    const uint256 hash = header.GetHash();
+    {
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        if (!m_seen_certs.insert(hash).second) return PosGossipAction::Ignore;
+        if (m_seen_certs.size() > 20000) m_seen_certs.clear();
+    }
+    // Certificates exist only under the BLS committee (the certificate is the
+    // header's proof solution, member-independent block hash).
+    if (!g_pos_bls || g_pos_committee_size <= 1) return PosGossipAction::Ignore;
+    // Structural: it must be the BLS challenge form.
+    std::optional<PosChallengeParts> parts = ParsePosBlockChallenge(header.proof.challenge);
+    if (!parts || !parts->is_bls) return PosGossipAction::Invalid;
+    // Parent lookup: gives the height and the slot seed / registry context. A
+    // certificate on an unknown branch cannot be verified — neither pin nor relay.
+    const CBlockIndex* parent;
+    bool already_have = false;
+    {
+        LOCK(cs_main);
+        const CBlockIndex* self = m_chainman.m_blockman.LookupBlockIndex(hash);
+        already_have = self && (self->nStatus & BLOCK_HAVE_DATA);
+        parent = m_chainman.m_blockman.LookupBlockIndex(header.hashPrevBlock);
+    }
+    if (already_have) return PosGossipAction::Ignore; // nothing new: the block itself already arrived
+    if (!parent) return PosGossipAction::Ignore;
+    const int height = parent->nHeight + 1;
+    const StakeRegistry& reg = StakeRegistry::GetInstance();
+    // The leader signature (and structural size) is self-contained and objective,
+    // so provable garbage is penalised. Under the bitfield form this is all
+    // CheckProof verifies; the aggregate is registry-dependent (below).
+    if (!CheckProof(header, m_chainparams.GetConsensus())) return PosGossipAction::Invalid;
+    // Only a FULL-quorum certificate pins anyone: a sub-quorum escaping-stall
+    // block is deliberately second-class (never immediately final, loses
+    // fork-choice to quorum siblings) and must not suppress production.
+    int signer_count = 0;
+    if (g_pos_public_committee) {
+        // Bitfield certificate: aggregate + membership verified against the
+        // registry via the SAME helper as ConnectBlock (so gossip-accept and
+        // block-validation cannot diverge). Registry-dependent failures are
+        // subjective (Ignore, our tip may not be the cert's branch); only a
+        // malformed structure is objective (Invalid).
+        std::string reason;
+        const int signers = PosVerifyBitfieldCertificate(header, parent, reg, reason);
+        if (signers < 0) {
+            return reason == "bad-posbls-bitfield-malformed" ? PosGossipAction::Invalid : PosGossipAction::Ignore;
+        }
+        if (signers < PosSlotQuorum(reg)) return PosGossipAction::Ignore;
+        signer_count = signers;
+    } else {
+        // Full-member certificate: members carry their own keys and VRF proofs;
+        // membership and quorum mirror ConnectBlock, registry-dependent so
+        // failures are ignored (not penalised).
+        std::optional<PosBlsCertificate> cert = ParsePosBlsSolution(header.proof.solution);
+        if (!cert || cert->members.empty()) return PosGossipAction::Invalid; // an unsigned header is not a certificate
+        std::set<CPubKey> named;
+        for (const PosBlsMember& m : cert->members) {
+            if (!named.insert(m.pubkey).second) return PosGossipAction::Invalid; // duplicate member
+        }
+        if ((int)named.size() < PosSlotQuorum(reg)) return PosGossipAction::Ignore;
+        if ((int)named.size() > PosMaxCommitteeMembers()) return PosGossipAction::Ignore;
+        const uint256 seed = PosSeedForChild(parent);
+        const uint64_t total = PosTotalWeight(reg);
+        for (const PosBlsMember& m : cert->members) {
+            if (reg.GetWeight(m.pubkey) == 0) return PosGossipAction::Ignore;
+            uint256 beta;
+            if (!VrfVerify(m.pubkey, Span<const unsigned char>(seed.begin(), 32), m.proof, beta)) return PosGossipAction::Invalid;
+            if (!PosVrfIsCommitteeMember(beta, reg.GetWeight(m.pubkey), total)) return PosGossipAction::Ignore;
+        }
+        signer_count = (int)named.size();
+    }
+    // A verified quorum certificate: pin this height. No rival will be
+    // proposed, backed or signed here (Step/DriveRound), and the block is
+    // completed on the spot if we hold its validated proposal body.
+    {
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        m_certified[hash] = header;
+        m_certified_heights[height] = hash;
+        m_recent_certs[hash] = header; // answers getposcert share-lock queries
+        // Bound the maps (certificates for live heights only; stale entries
+        // are pruned as the tip advances in Step).
+        if (m_certified.size() > 100) {
+            m_certified.erase(m_certified.begin());
+        }
+        if (m_certified_heights.size() > 100) {
+            m_certified_heights.erase(m_certified_heights.begin());
+        }
+        if (m_recent_certs.size() > 100) {
+            m_recent_certs.erase(m_recent_certs.begin());
+        }
+    }
+    LogPrintf("PoS gossip: certificate received for block %s at height %d (%d members)\n",
+              hash.GetHex(), height, signer_count);
+    TryConnectCertified();
+    Wake(); // re-evaluate holds and rounds immediately
     return PosGossipAction::Relay;
 }

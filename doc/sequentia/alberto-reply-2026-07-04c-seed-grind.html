@@ -1,0 +1,48 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>Correction: burying the committee seed (1B) does not reduce grinding</title>
+<style>
+  body { font-family: "Liberation Sans", Arial, sans-serif; font-size: 11pt; line-height: 1.45; color: #1a1a1a; margin: 2.2cm 2.4cm; }
+  h1 { font-size: 18pt; margin: 0 0 2pt 0; color: #b8860b; }
+  .sub { color: #555; font-size: 10pt; margin: 0 0 16pt 0; }
+  h2 { font-size: 13pt; margin: 18pt 0 4pt 0; border-bottom: 1.5px solid #b8860b; padding-bottom: 2pt; }
+  h3 { font-size: 11.5pt; margin: 12pt 0 3pt 0; color: #222; }
+  p { margin: 5pt 0; }
+  code, .mono { font-family: "Liberation Mono", "Courier New", monospace; font-size: 9.5pt; background: #f3f1ea; padding: 0 2px; }
+  ul { margin: 4pt 0 6pt 0; }
+  li { margin: 3pt 0; }
+  ol { margin: 4pt 0 6pt 0; }
+  blockquote { background: #fbf7e9; padding: 8pt 12pt; margin: 10pt 0; border-left: 3px solid #b8860b; }
+  blockquote p { margin: 0; }
+  table { border-collapse: collapse; margin: 8pt 0; font-size: 8.5pt; }
+  th, td { border: 1px solid #d8d2c0; padding: 1pt 5pt; }
+  th { background: #f3f1ea; }
+  hr { border: none; border-top: 1px solid #d8d2c0; margin: 14pt 0; }
+  .small { font-size: 9.5pt; color: #555; }
+</style>
+</head><body>
+<h1>Correction: burying the committee seed (1B) does not reduce grinding</h1>
+<p class="sub">I owe you a correction. In the implementation spec I recommended decision 1B, seeding the committee from an anchor two blocks back, to remove the grind that a public committee opens, and you confirmed 1B. Building it, I proved it does not work: burying the seed by any fixed depth just moves the same grind from the leader of the block before the target to the leader of the block that many blocks before it. The lever is one producer freely selecting a single seed input, and shifting which producer holds it changes nothing. So I did not ship 1B; the seed is unchanged (the current rule, 1A). This does not change anything else we have built or any number I have sent you: the cap-250 capture figures already assumed this grind. But the spec&#x27;s reasoning was wrong and you approved it on my recommendation, so here is exactly what is true, why, and the honest options. Numbers are from <code>committee-seed-grind.py</code>, checked in beside this note.</p>
+<h2>1. What the grind is, and why the public committee is what turns it on</h2>
+<p>A Sequentia block anchors to a Bitcoin block, and the committee for the next height is seeded from that anchor&#x27;s hash. A producer&#x27;s one freedom is which recent Bitcoin block to anchor to. The consensus rules bound that freedom tightly (anchor heights only advance, and the anchor must be a real block on Bitcoin&#x27;s best chain), so in practice a producer chooses among a handful of fresh Bitcoin blocks, call it k, usually two to a few. Each choice yields a different seed and therefore a different committee at the next height.</p>
+<p>This lever has always existed. The code that derives the seed even says so, and says why it was considered harmless: it calls the producer&#x27;s anchor choice &quot;bounded, VRF-mitigated grinding.&quot; The mitigation was the private committee. Under the old private sortition, a producer could shift the next seed but could not SEE the resulting committee, because membership was each staker&#x27;s secret VRF output; grinding was pointless because you could not tell which anchor helped you.</p>
+<p>Option A, the public committee you approved, removes that mitigation. The committee is now a public function of the seed and the staker registry, so a producer can compute the committee for every anchor it could choose and pick the one that seats the most of its own coalition. The grind that was dormant becomes live. This is a real and expected consequence of going public, and it is what decision 1 in the spec was meant to answer.</p>
+<h2>2. Why burying the anchor does not answer it</h2>
+<p>The seed for height H is a hash of the anchor of some earlier block and H. Move that earlier block from one-back to two-back and the producer of the two-back block now chooses the anchor that sets H&#x27;s committee. That producer can compute H&#x27;s committee for each of its anchor choices just as well as the one-back producer could: the registry is public and barely moves over two blocks. So the grinder is always &quot;the producer of the block that supplies the seed,&quot; whichever block that is, and its power is the same: best of k choices, available only on a block it leads, which it does with probability equal to its stake share. The capture probability has no dependence on the burial depth at all. The script prints it four ways, for depth one, two, three and five, and they are byte-identical (3.6e-8 per height at cap 250 against a one-third coalition); the formula simply contains no depth term.</p>
+<p>Two related dead ends, so we do not revisit them: mixing several past anchors into the seed (RANDAO-style) also fails here, because a producer that controls even one of the mixed inputs and varies it k ways still gets k selectable seeds; and burying deeper (three, five, ten blocks) is not only equally ineffective, it is worse, because it makes the committee knowable further ahead, which only helps a denial-of-service attacker pick its targets.</p>
+<h2>3. How big it actually is, and why the cap already covers it</h2>
+<p>The grind multiplies the base capture probability by roughly one plus (stake share times k-minus-one): a small factor at realistic k. What matters is that at the cap we chose it stays in the range the cap was picked to give.</p>
+<p>Committee cap 250 (the recommendation), population 50,000, per height and as time to the first captured block at 30-second spacing:</p>
+<table width="100%">
+<thead><tr><th align="left" nowrap>coalition stake</th><th align="right" nowrap>no grind (k=1)</th><th align="right" nowrap>grind k=4</th><th align="right" nowrap>grind k=8</th></tr></thead>
+<tbody>
+<tr><td align="left" nowrap>25%</td><td align="right" nowrap>3e11 yr</td><td align="right" nowrap>3e11 yr</td><td align="right" nowrap>3e11 yr</td></tr>
+<tr><td align="left" nowrap>33%</td><td align="right" nowrap>53 yr</td><td align="right" nowrap>27 yr</td><td align="right" nowrap>16 yr</td></tr>
+<tr><td align="left" nowrap>40%</td><td align="right" nowrap>15.5 h</td><td align="right" nowrap>7 h</td><td align="right" nowrap>4 h</td></tr>
+</tbody></table>
+<p>The grind roughly halves the time-to-capture for a one-third coalition, from once in ~50 years to once in ~20, which is still decades and still well inside the budget I gave you when recommending 250. For contrast, at cap 100 the same one-third coalition captures roughly once every one to two days with or without the grind, which is exactly why I recommended against 100 for a one-third threat in the first place. So this finding does not move the cap recommendation: 250 absorbs the grind; 100 was already too weak on the base numbers. Above 40% nothing sampling-based holds, grind or no grind, as before.</p>
+<h2>4. Options going forward</h2>
+<ul><li><strong>A (recommended): accept it, keep cap 250, ship the seed as built (1A).</strong> The residual is a one-in-decades event for a coalition approaching the classical one-third bound, it was already priced into the numbers behind 250, and the seed stays simple and reorg-safe. This is what the implementation is on now.</li><li><strong>B (a real fix, as separate future work): seed the committee from the leader&#x27;s own VRF output.</strong> A leader cannot select its VRF output without changing whether it is the leader at all, so this collapses the k choices to one and removes the grind entirely. The catch is in our own code: this exact input was tried before and reverted as unreliable, because the leader&#x27;s VRF score is set after the block index is built, so nodes transiently disagree on the seed. Making it work is real, isolated consensus work; I would scope it as its own change, not fold it into the re-genesis, and it is not needed to make 250 safe.</li><li><strong>C (partial): remove the producer&#x27;s anchor choice for seeding.</strong> Derive the committee seed from a Bitcoin block at a fixed height offset rather than the producer&#x27;s chosen anchor, so there is nothing to select among. This reduces k toward one but couples committee membership to Bitcoin reorgs and wants care; I mention it for completeness and do not recommend it over A.</li></ul>
+<p>My recommendation is A now, with B tracked as the eventual grinding-resistance upgrade if we ever want to push the safe committee size below 250 or harden against coalitions past a third.</p>
+<h2>5. Status, so nothing is ambiguous</h2>
+<p>The public committee, certificate gossip, the share-lock, and the timing controls are all built and tested on the unchanged 1A seed, flag-gated so the live chain is untouched, on the implementation branch. Nothing needs redoing because of this finding. The only thing that was wrong is the spec&#x27;s decision 1, and it is corrected here. What I need from you is one word: accept A (and I will note B as tracked future work), or tell me to build B or C before the re-genesis.</p>
+<p>Numbers: <code>doc/sequentia/committee-seed-grind.py</code>. The grinding lever and its old mitigation are documented in-tree at <code>PosSeedForChild</code> (src/pos.cpp); the anchor-choice bound is the monotonic-advance rule in <code>ContextualCheckBlockHeader</code> (src/validation.cpp).</p>
+</body></html>

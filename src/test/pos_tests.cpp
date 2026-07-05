@@ -32,6 +32,7 @@ struct PosTestingSetup : public BasicTestingSetup {
         g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
         g_pos_slot_interval = DEFAULT_POS_SLOT_INTERVAL;
         g_pos_unbonding_period = DEFAULT_POS_UNBONDING_PERIOD;
+        g_pos_public_committee = false;
     }
 };
 
@@ -647,6 +648,179 @@ BOOST_AUTO_TEST_CASE(pos_checkpoint_payload_roundtrip)
     longer.push_back(0);
     BOOST_CHECK(!ParseCheckpointPayload(longer).has_value());
     BOOST_CHECK(!ParseCheckpointPayload({}).has_value());
+}
+
+// Public fixed-size committee (impl spec Option A): the quorum derives from
+// the ACTUAL committee size with a +1 at odd sizes, so any two quorums overlap
+// in at least 2 members at every size; the committee itself is the schedule
+// prefix capped at min(pool, cap).
+BOOST_AUTO_TEST_CASE(pos_public_committee_quorum_and_size)
+{
+    // Quorum table: identical to PosQuorum at even k (51-of-100, 126-of-250),
+    // one higher at odd k.
+    BOOST_CHECK_EQUAL(PosPublicQuorum(0), 0);
+    BOOST_CHECK_EQUAL(PosPublicQuorum(1), 1);
+    BOOST_CHECK_EQUAL(PosPublicQuorum(2), 2);
+    BOOST_CHECK_EQUAL(PosPublicQuorum(3), 3);
+    BOOST_CHECK_EQUAL(PosPublicQuorum(4), 3);
+    BOOST_CHECK_EQUAL(PosPublicQuorum(5), 4);
+    BOOST_CHECK_EQUAL(PosPublicQuorum(59), 31);
+    BOOST_CHECK_EQUAL(PosPublicQuorum(100), 51);
+    BOOST_CHECK_EQUAL(PosPublicQuorum(249), 126);
+    BOOST_CHECK_EQUAL(PosPublicQuorum(250), 126);
+    BOOST_CHECK_EQUAL(PosPublicQuorum(251), 127);
+    // The overlap invariant that makes disjoint quorums impossible: two
+    // quorums out of k members share at least 2q - k >= 2 signers, at every
+    // size from 2 upward, and the quorum never exceeds the committee.
+    for (int k = 1; k <= 400; ++k) {
+        const int q = PosPublicQuorum(k);
+        BOOST_CHECK_LE(q, k);
+        if (k >= 2) BOOST_CHECK_GE(2 * q - k, 2);
+    }
+
+    // Committee size and membership: min(pool, cap), exactly the schedule
+    // prefix, and the slot quorum follows the flag. Under the bitfield
+    // certificate a member must have a REGISTERED BLS key, so every staker is
+    // registered here (a dummy 48-byte key; the committee filter checks only
+    // presence, not the key's validity).
+    StakeRegistry& reg = StakeRegistry::GetInstance();
+    reg.Clear();
+    std::vector<CPubKey> stakers;
+    for (int i = 0; i < 5; ++i) {
+        CPubKey p = MakeKey();
+        stakers.push_back(p);
+        reg.SetStake(p, 100);
+        reg.SetBls(p, std::vector<unsigned char>(48, (unsigned char)(i + 1)));
+    }
+    const uint256 seed = ComputePosSeed(uint256S("0x07"), 42);
+
+    g_pos_committee_size = 3;
+    BOOST_CHECK_EQUAL(PosPublicCommitteeSize(reg), 3);
+    std::set<CPubKey> committee = PosPublicCommitteeSet(reg, seed);
+    BOOST_CHECK_EQUAL(committee.size(), 3U);
+    {
+        std::vector<CPubKey> schedule = PosSchedule(reg, seed);
+        for (size_t i = 0; i < schedule.size(); ++i) {
+            BOOST_CHECK_EQUAL(committee.count(schedule[i]), i < 3 ? 1U : 0U);
+        }
+    }
+
+    g_pos_committee_size = 10; // pool below the cap: the committee is everyone
+    BOOST_CHECK_EQUAL(PosPublicCommitteeSize(reg), 5);
+    BOOST_CHECK_EQUAL(PosPublicCommitteeSet(reg, seed).size(), 5U);
+
+    g_pos_public_committee = true;
+    BOOST_CHECK_EQUAL(PosSlotQuorum(reg), PosPublicQuorum(5)); // 4-of-5 (odd bump)
+    g_pos_committee_size = 4;
+    BOOST_CHECK_EQUAL(PosSlotQuorum(reg), 3); // 3-of-4
+    g_pos_public_committee = false;
+    BOOST_CHECK_EQUAL(PosSlotQuorum(reg), PosQuorum(4)); // nominal when off
+
+    g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
+    reg.Clear();
+}
+
+// Runtime UTXO-layer BLS registration (impl spec Option A phase 2): the BLS
+// key rides in the staking output, round-trips through the script, and the
+// registry's UTXO-BLS layer follows the staker's weight lifecycle (dropped
+// when the last output is spent) so it is reorg-safe.
+BOOST_AUTO_TEST_CASE(pos_stake_bls_registration)
+{
+    const CPubKey staker = MakeKey();
+    const std::vector<unsigned char> blspub(48, 0x11), pop(96, 0x22);
+
+    // Round-trip through the staking script (with and without a registration).
+    CScript reg_script = BuildStakeScript(staker, 10, blspub, pop);
+    auto full = ParseStakeScriptFull(reg_script);
+    BOOST_REQUIRE(full.has_value());
+    BOOST_CHECK(full->pubkey == staker);
+    BOOST_CHECK_EQUAL(full->csv, 10U);
+    BOOST_CHECK(full->bls_pubkey == blspub);
+    BOOST_CHECK(full->bls_pop == pop);
+    // The plain parser still returns pubkey + csv, and the spend template is
+    // unchanged (the extra pushes are dropped).
+    auto plain = ParseStakeScript(reg_script);
+    BOOST_REQUIRE(plain.has_value());
+    BOOST_CHECK(plain->first == staker);
+    auto bls = ParseStakeBlsRegistration(reg_script);
+    BOOST_REQUIRE(bls.has_value());
+    BOOST_CHECK(bls->first == blspub);
+    // An output with no registration parses fine and carries no BLS key.
+    CScript plain_script = BuildStakeScript(staker, 10);
+    auto full2 = ParseStakeScriptFull(plain_script);
+    BOOST_REQUIRE(full2.has_value());
+    BOOST_CHECK(full2->bls_pubkey.empty());
+    BOOST_CHECK(!ParseStakeBlsRegistration(plain_script).has_value());
+    // A malformed registration (wrong PoP size) is rejected wholesale.
+    CScript bad;
+    bad << (int64_t)10 << OP_CHECKSEQUENCEVERIFY << OP_DROP
+        << blspub << OP_DROP << std::vector<unsigned char>(50, 0) << OP_DROP
+        << ToByteVector(staker) << OP_CHECKSIG;
+    BOOST_CHECK(!ParseStakeScriptFull(bad).has_value());
+
+    // Registry UTXO-BLS lifecycle: the key is present while the staker has UTXO
+    // weight and vanishes when the last output is spent.
+    StakeRegistry& reg = StakeRegistry::GetInstance();
+    reg.Clear();
+    reg.AddUtxoStake(staker, 100, blspub);       // first output
+    BOOST_CHECK(reg.HasBls(staker));
+    BOOST_CHECK(reg.GetBls(staker) == blspub);
+    reg.AddUtxoStake(staker, 50, blspub);        // second output, same key
+    reg.SubUtxoStake(staker, 50);                // spend one — key stays
+    BOOST_CHECK(reg.HasBls(staker));
+    reg.SubUtxoStake(staker, 100);               // spend the last — key gone
+    BOOST_CHECK(!reg.HasBls(staker));
+    BOOST_CHECK(reg.GetBls(staker).empty());
+
+    // Config layer takes precedence over the UTXO layer.
+    const std::vector<unsigned char> cfgkey(48, 0x33);
+    reg.Clear();
+    reg.SetBls(staker, cfgkey);
+    reg.AddUtxoStake(staker, 100, blspub);
+    BOOST_CHECK(reg.GetBls(staker) == cfgkey);
+
+    // Wholesale rebuild (startup scan) restores the UTXO-BLS layer.
+    reg.Clear();
+    std::map<CPubKey, uint64_t> w{{staker, 100}};
+    std::map<CPubKey, std::vector<unsigned char>> b{{staker, blspub}};
+    reg.SetUtxoStake(std::move(w), std::move(b));
+    BOOST_CHECK(reg.GetBls(staker) == blspub);
+    reg.Clear();
+}
+
+// The bitfield certificate codec (impl spec Option A phase 2): the signer
+// bitfield round-trips through a proof solution, indexes members by their
+// committee position, and rejects malformed solutions.
+BOOST_AUTO_TEST_CASE(pos_bitfield_certificate_codec)
+{
+    // Bit helpers: LSB-first, growable, correct popcount.
+    std::vector<unsigned char> bf;
+    BOOST_CHECK(!PosBitfieldTest(bf, 0));
+    PosBitfieldSet(bf, 0);
+    PosBitfieldSet(bf, 3);
+    PosBitfieldSet(bf, 9);   // grows into a second byte
+    BOOST_CHECK(PosBitfieldTest(bf, 0));
+    BOOST_CHECK(PosBitfieldTest(bf, 3));
+    BOOST_CHECK(PosBitfieldTest(bf, 9));
+    BOOST_CHECK(!PosBitfieldTest(bf, 1));
+    BOOST_CHECK(!PosBitfieldTest(bf, 8));
+    BOOST_CHECK(!PosBitfieldTest(bf, 99)); // out of range reads false
+    BOOST_CHECK_EQUAL(PosBitfieldPopcount(bf), 3);
+    BOOST_CHECK_EQUAL(bf.size(), 2U);
+
+    // Solution round-trip: leader sig + 96-byte aggregate + bitfield.
+    std::vector<unsigned char> leader_sig(72, 0xAB);
+    std::vector<unsigned char> agg(96, 0xCD);
+    CScript sol = BuildPosBlsBitfieldSolution(leader_sig, agg, bf);
+    auto cert = ParsePosBlsBitfieldSolution(sol);
+    BOOST_REQUIRE(cert.has_value());
+    BOOST_CHECK(cert->leader_sig == leader_sig);
+    BOOST_CHECK(cert->agg_sig == agg);
+    BOOST_CHECK(cert->bitfield == bf);
+
+    // Malformed: wrong aggregate size, empty bitfield, trailing junk.
+    BOOST_CHECK(!ParsePosBlsBitfieldSolution(BuildPosBlsBitfieldSolution(leader_sig, std::vector<unsigned char>(64, 0), bf)).has_value());
+    BOOST_CHECK(!ParsePosBlsBitfieldSolution(CScript() << leader_sig << agg).has_value()); // no bitfield
 }
 
 BOOST_AUTO_TEST_SUITE_END()

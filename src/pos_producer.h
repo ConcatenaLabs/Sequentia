@@ -174,6 +174,19 @@ public:
     //! Return the full proposal block we hold for `hash` (a round candidate), to
     //! answer a peer's getposproposal, or nullptr.
     std::shared_ptr<const CBlock> GetProposalBlock(const uint256& hash);
+    //! Ingest a peer's `poscert` (the header of a quorum-certified block; the
+    //! completed certificate is in its proof solution). A valid certificate is
+    //! the partition-crossing finality signal (honest-splits fix 3A): it pins
+    //! this node to the certified block at that height — no rival is proposed,
+    //! backed or signed there — and if we already hold the validated proposal
+    //! body (we share-signed it, or collected it as a round candidate) the
+    //! block is completed and connected on the spot. Returns the relay/penalty
+    //! action; the caller fetches the body via getposproposal when we lack it.
+    PosGossipAction OnCertificate(const CBlockHeader& header);
+    //! The certificate (certified header) we hold for `hash`, to answer a
+    //! peer's getposcert, or nullopt. Served from the recent-certificate
+    //! cache, which keeps certificates we verified OR assembled ourselves.
+    std::optional<CBlockHeader> GetCertificate(const uint256& hash);
 
 protected:
     void UpdatedBlockTip(const CBlockIndex* pindexNew, const CBlockIndex* pindexFork,
@@ -215,6 +228,15 @@ private:
     //! regtest equivocation fault-injection to split the committee.
     void FloodProposalSplit(const CBlock& a, const CBlock& b);
     void FloodShare(const PosShare& share);
+    //! Flood a certified block's header (the certificate) to all peers.
+    void BroadcastCertificate(const CBlockHeader& header);
+    //! Ask all peers whether anyone holds a certificate for `hash`
+    //! (getposcert), at most once per lock. Takes m_gossip_mutex internally.
+    void SendCertQueryOnce(const uint256& hash);
+    //! If we hold both a certificate and the proposal body for the same block,
+    //! attach the certificate and submit the completed block. Returns true if
+    //! a block was submitted. Takes m_gossip_mutex internally.
+    bool TryConnectCertified();
     //! Wake the worker thread (e.g. when a gossip message advances a round).
     void Wake();
 
@@ -266,6 +288,41 @@ private:
     std::set<uint256> m_seen_proposals;                //!< proposal dedup
     std::set<std::pair<uint256, CPubKey>> m_seen_shares; //!< share dedup
 
+    // Certificate gossip (honest-splits fix 3A, Tier 1). A verified quorum
+    // certificate for a height pins this node: it will not propose, back or
+    // sign a rival there (this includes the escaping-stall valve — a node
+    // that KNOWS a certificate never mints a sub-quorum rival at that
+    // height), it tries to complete the block from a held proposal body, and
+    // the hold is TIME-BOUNDED (POS_CERT_HOLD_MS) so a certificate whose
+    // body is deliberately withheld degrades into a bounded pause, never a
+    // deadlock: the share-lock (Tier 2) is where the stronger guarantee
+    // lands. State under m_gossip_mutex.
+    std::set<uint256> m_seen_certs;                    //!< certificate dedup
+    std::map<uint256, CBlockHeader> m_certified;       //!< block hash -> certified header (the certificate)
+    std::map<int, uint256> m_certified_heights;        //!< height -> certified block hash
+    int m_cert_hold_height{0};                         //!< height the current hold is for
+    int64_t m_cert_hold_since_ms{0};                   //!< when the hold started
+    bool m_cert_hold_logged{false};
+    std::map<uint256, CBlockHeader> m_recent_certs;    //!< certificates verified or assembled (serves getposcert; not height-pruned)
+    std::set<uint256> m_pop_verified;                  //!< H(bls_pubkey||pop) pairs that verified: a member's PoP is identical every block, so cache the pairing (registry-held BLS keys retire this entirely)
+
+    // Share-lock (honest-splits fix 3B + the 3A residual). Having share-signed
+    // block X at height H, this node does not sign a same-height rival until
+    // (a) the round advanced (implicit in the re-vote trigger), (b) it ASKED
+    // its peers for a certificate on X (getposcert) and (c) one grace round
+    // passed with no certificate arriving; and it does not sign or lead at
+    // H+1 on a parent that is a same-height rival of X until the
+    // escaping-stall anchor gap has passed (or a bounded grace without
+    // anchoring). If X's certificate exists anywhere, it arrives within the
+    // grace (a ~few-hundred-byte poscert, one round-trip) and the certificate
+    // pin takes over; the quorum arithmetic then makes a second certificate
+    // impossible (X's >= quorum signers are all locked, fewer than a quorum
+    // remain free). State under m_gossip_mutex.
+    uint256 m_lock_hash;                               //!< the block we most recently share-signed
+    int m_lock_height{0};                              //!< its height
+    int64_t m_lock_grace_start_ms{0};                  //!< when the lock's grace began (0 = not started)
+    bool m_lock_queried{false};                        //!< getposcert sent for m_lock_hash
+
     // Committee-equivocation prevention (Change 4a), worker thread only. While
     // the anchor watcher holds a quorum-certified child of the current tip that
     // is not confirmed off the parent chain's best chain
@@ -274,6 +331,16 @@ private:
     // restored, its anchor is confirmed stale, or the bounded patience
     // (-posanchorrecoverywait; 0 disables) expires so production can never
     // deadlock on an unreachable parent daemon.
+    //! Local liveness overrides for the gossip collection window and round
+    //! length (-poswindowms / -posroundms; 0 = per-member formula). Not
+    //! consensus rules: no block is valid or invalid because of them. A node
+    //! tuned differently from its peers lags or leads the round schedule and
+    //! simply contributes late (its shares may miss their round) — a
+    //! liveness cost for that node only; the share-lock keeps any timing
+    //! disagreement from ever becoming a double-sign.
+    int64_t m_window_override_ms{0};
+    int64_t m_round_override_ms{0};
+
     int64_t m_recovery_wait_ms{30000};
     uint256 m_recovery_hold_tip;                       //!< tip the current hold started under
     int64_t m_recovery_hold_since_ms{0};

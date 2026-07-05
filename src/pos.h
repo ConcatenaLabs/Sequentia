@@ -23,9 +23,12 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <set>
 #include <vector>
 
 class CBlockIndex;
+class CBlockHeader;
+class CKey;
 
 /** When set, the chain uses Proof-of-Stake leader election for block validity
  *  (layered on g_signed_blocks). */
@@ -84,6 +87,26 @@ static const int MAX_POS_AGG_COMMITTEE_SIZE = 100;
  *  when both are set. */
 extern bool g_pos_bls;
 
+/** When set (requires g_pos_vrf + g_pos_bls), committee MEMBERSHIP is public
+ *  and fixed-size (doc/sequentia/committee-public-selection-impl-spec.md,
+ *  Option A): the certifying committee for a slot is the first
+ *  min(#eligible stakers, g_pos_committee_size) entries of the deterministic
+ *  public schedule (PosCommittee), and the quorum derives from that ACTUAL
+ *  size (PosPublicQuorum). This restores quorum intersection — any two quorums
+ *  overlap in at least 2 members at every size — so two disjoint quorums can
+ *  never certify rival same-height blocks, which threshold VRF sortition
+ *  cannot guarantee once the staker pool exceeds the committee target (its
+ *  eligible count is a random variable while the quorum is fixed). Leader
+ *  election stays private-VRF. Under this mode the per-member VRF eligibility
+ *  proofs in the certificate are vestigial and are not verified. NETWORK-WIDE
+ *  consensus rule: every node on a chain must agree on the value. */
+extern bool g_pos_public_committee;
+
+/** Sanity bound on -poscommitteesize under g_pos_public_committee. The
+ *  recommended cap is 250 (quorum 126, the classical one-third Byzantine
+ *  bound); the bound only guards against absurd configurations. */
+static const int MAX_POS_PUBLIC_COMMITTEE_SIZE = 1000;
+
 /** Upper bound on a VRF sortition slot, capping the time gate
  *  (slot * g_pos_slot_interval seconds after the parent block) regardless of
  *  how stake weights are scaled. */
@@ -107,6 +130,19 @@ private:
     mutable Mutex m_mutex;
     std::map<CPubKey, uint64_t> m_config GUARDED_BY(m_mutex);
     std::map<CPubKey, uint64_t> m_utxo GUARDED_BY(m_mutex);
+    //! Registered BLS public key per staker (impl spec Option A, phase 2). Under
+    //! the public fixed-size committee with the bitfield certificate, a staker's
+    //! BLS signing key must be registered so validators can aggregate and verify
+    //! a certificate that names members only by a bitfield over the committee.
+    //! The BLS pubkey is derived from the staking key (PosBlsSeedFromKey), so it
+    //! is stable per staker, and its proof-of-possession is verified once at
+    //! registration. Two layers, mirroring the weight: a config/genesis layer
+    //! (SetBls) and a UTXO layer (m_bls_utxo) that a staking output carries and
+    //! whose lifecycle is tied to the staker's UTXO weight (dropped when the
+    //! last staking output is spent), so it is reorg-safe by construction. The
+    //! config layer takes precedence when both are present.
+    std::map<CPubKey, std::vector<unsigned char>> m_bls GUARDED_BY(m_mutex);
+    std::map<CPubKey, std::vector<unsigned char>> m_bls_utxo GUARDED_BY(m_mutex);
 
 public:
     static StakeRegistry& GetInstance()
@@ -121,6 +157,8 @@ public:
         LOCK(m_mutex);
         m_config.clear();
         m_utxo.clear();
+        m_bls.clear();
+        m_bls_utxo.clear();
     }
     //! Set a configured staker's weight.
     void SetStake(const CPubKey& pubkey, uint64_t weight)
@@ -128,19 +166,50 @@ public:
         LOCK(m_mutex);
         m_config[pubkey] = weight;
     }
-    //! Replace the UTXO-derived layer wholesale (startup rebuild).
-    void SetUtxoStake(std::map<CPubKey, uint64_t>&& utxo)
+    //! Register a CONFIG-layer staker's BLS public key (impl spec Option A,
+    //! phase 2). The caller has verified its proof-of-possession.
+    void SetBls(const CPubKey& pubkey, const std::vector<unsigned char>& bls_pubkey)
+    {
+        LOCK(m_mutex);
+        m_bls[pubkey] = bls_pubkey;
+    }
+    //! A staker's registered BLS public key (config layer preferred, else UTXO
+    //! layer), or an empty vector if none.
+    std::vector<unsigned char> GetBls(const CPubKey& pubkey) const
+    {
+        LOCK(m_mutex);
+        auto it = m_bls.find(pubkey);
+        if (it != m_bls.end()) return it->second;
+        auto it2 = m_bls_utxo.find(pubkey);
+        return it2 == m_bls_utxo.end() ? std::vector<unsigned char>() : it2->second;
+    }
+    bool HasBls(const CPubKey& pubkey) const
+    {
+        LOCK(m_mutex);
+        return m_bls.count(pubkey) > 0 || m_bls_utxo.count(pubkey) > 0;
+    }
+    //! Replace the UTXO-derived layers wholesale (startup rebuild): weights and
+    //! the UTXO BLS registrations, both pure functions of the UTXO set.
+    void SetUtxoStake(std::map<CPubKey, uint64_t>&& utxo,
+                      std::map<CPubKey, std::vector<unsigned char>>&& bls_utxo = {})
     {
         LOCK(m_mutex);
         m_utxo = std::move(utxo);
+        m_bls_utxo = std::move(bls_utxo);
     }
-    //! A staking output entered the UTXO set.
-    void AddUtxoStake(const CPubKey& pubkey, uint64_t amount)
+    //! A staking output entered the UTXO set. A non-empty bls_pubkey registers
+    //! (or re-affirms) the staker's UTXO-layer committee BLS key; ConnectBlock
+    //! has verified its PoP and that it does not conflict with an existing key.
+    void AddUtxoStake(const CPubKey& pubkey, uint64_t amount,
+                      const std::vector<unsigned char>& bls_pubkey = {})
     {
         LOCK(m_mutex);
         m_utxo[pubkey] += amount;
+        if (!bls_pubkey.empty()) m_bls_utxo[pubkey] = bls_pubkey;
     }
-    //! A staking output left the UTXO set (spent, or its creation reverted).
+    //! A staking output left the UTXO set (spent, or its creation reverted). The
+    //! UTXO BLS key is tied to the staker having any UTXO weight: when the last
+    //! staking output is gone, the registration goes with it.
     void SubUtxoStake(const CPubKey& pubkey, uint64_t amount)
     {
         LOCK(m_mutex);
@@ -154,7 +223,10 @@ public:
             return;
         }
         it->second -= amount;
-        if (it->second == 0) m_utxo.erase(it);
+        if (it->second == 0) {
+            m_utxo.erase(it);
+            m_bls_utxo.erase(pubkey);
+        }
     }
 
     bool Empty() const
@@ -225,6 +297,41 @@ std::vector<CPubKey> PosCommittee(const StakeRegistry& registry, const uint256& 
 /** Countersignature quorum for a committee of m members: a strict majority
  *  (the paper's 51-of-100). */
 int PosQuorum(size_t committee_size);
+
+// --- Public fixed-size committee (g_pos_public_committee; impl spec Option A) ---
+
+/** The ACTUAL committee size under the public fixed-size committee:
+ *  min(#eligible stakers, g_pos_committee_size). Depends only on the registry
+ *  (the seed decides WHO is in the committee, not how many). */
+int PosPublicCommitteeSize(const StakeRegistry& registry);
+
+/** Countersignature quorum for an actual committee of k members under the
+ *  public fixed-size committee: a strict majority, plus one when k is odd, so
+ *  that any two quorums overlap in at least 2 members at EVERY size (one
+ *  tolerated equivocator; identical to PosQuorum at every even k, including
+ *  the paper's 51-of-100 and the recommended 126-of-250). Never exceeds k. */
+int PosPublicQuorum(int k);
+
+/** The certification quorum for the current slot: PosPublicQuorum of the
+ *  actual size under g_pos_public_committee, else the fixed
+ *  PosQuorum(g_pos_committee_size) of the nominal size. */
+int PosSlotQuorum(const StakeRegistry& registry);
+
+/** The ordered public committee for a slot under g_pos_public_committee: the
+ *  schedule prefix (PosSchedule order) restricted to BLS-registered stakers and
+ *  capped at g_pos_committee_size. The ORDER is the bitfield index order of the
+ *  certificate, so producer and validator must derive it identically. */
+std::vector<CPubKey> PosPublicCommittee(const StakeRegistry& registry, const uint256& seed);
+
+/** The public committee for a slot as a set, for membership checks. */
+std::set<CPubKey> PosPublicCommitteeSet(const StakeRegistry& registry, const uint256& seed);
+
+/** Cap on the number of committee members a certificate may name (and a node
+ *  collects shares for): the configured committee size under the public
+ *  fixed-size committee (the schedule prefix cannot exceed it), else the
+ *  aggregate-committee hard cap (threshold sortition can legitimately draw
+ *  above the expected size, but never above this). */
+int PosMaxCommitteeMembers();
 
 /** Build the per-block challenge script for a leader: "<pubkey> OP_CHECKSIG". */
 CScript BuildPosChallenge(const CPubKey& pubkey);
@@ -398,6 +505,55 @@ CScript BuildPosBlsSolution(const std::vector<unsigned char>& leader_sig,
  *  field sizes, an invalid member key, or more members than the committee cap). */
 std::optional<PosBlsCertificate> ParsePosBlsSolution(const CScript& solution);
 
+// --- Bitfield BLS certificate (g_pos_public_committee; impl spec Option A ph.2) ---
+
+/** The BLS signing seed for a staking key: a domain-separated hash of the key,
+ *  so a staker needs no separate BLS key to manage. Its public key
+ *  (BlsDerivePubKey) is what a staker registers (StakeRegistry::SetBls). */
+std::vector<unsigned char> PosBlsSeedFromKey(const CKey& key);
+
+/** The decoded bitfield BLS certificate. Under the public fixed-size committee
+ *  the member SET is public (the ordered PosCommittee schedule prefix), so the
+ *  certificate names its signers by a bitfield over that order instead of
+ *  carrying each member's key and proof — collapsing a ~257-byte-per-member
+ *  certificate to the leader signature, one aggregate, and ~one bit per seat. */
+struct PosBlsBitfieldCert {
+    std::vector<unsigned char> leader_sig;  //!< the leader's ECDSA signature over the block hash
+    std::vector<unsigned char> agg_sig;     //!< 96-byte BLS aggregate of the signers' shares
+    std::vector<unsigned char> bitfield;    //!< bit i set == committee[i] signed (LSB-first)
+};
+
+/** Encode a bitfield BLS certificate into a block proof solution:
+ *      <leader_sig> <agg_sig(96)> <bitfield(ceil(committee/8))>
+ *  The signed block hash excludes the solution, so it is member-independent. */
+CScript BuildPosBlsBitfieldSolution(const std::vector<unsigned char>& leader_sig,
+                                    const std::vector<unsigned char>& agg_sig,
+                                    const std::vector<unsigned char>& bitfield);
+
+/** Decode a bitfield BLS certificate solution, or nullopt if malformed. */
+std::optional<PosBlsBitfieldCert> ParsePosBlsBitfieldSolution(const CScript& solution);
+
+/** Verify a bitfield BLS certificate's aggregate signature and membership
+ *  against the registry at `pindexPrev`'s stake state (the global registry must
+ *  mirror that tip; true in ConnectBlock and for a gossiped cert whose parent
+ *  is the active tip). Recomputes the ordered public committee from the seed,
+ *  resolves each set bit to that member's REGISTERED BLS key, rejects bits
+ *  beyond the committee (phantom signers), and checks the one aggregate against
+ *  all signer keys (the batch verification: one pairing check, not one per
+ *  member). Returns the number of signers, or -1 on any failure (reason set to
+ *  a bad-posbls-* string). Does NOT check the leader signature (self-contained,
+ *  done in CheckProof) or the quorum policy (the caller applies it, since the
+ *  escaping-stall floor differs from the pin-a-height full-quorum rule). */
+int PosVerifyBitfieldCertificate(const CBlockHeader& header, const CBlockIndex* pindexPrev,
+                                 const StakeRegistry& registry, std::string& reason);
+
+/** Test bit i (LSB-first) of a signer bitfield. */
+bool PosBitfieldTest(const std::vector<unsigned char>& bitfield, size_t i);
+/** Set bit i (LSB-first) of a signer bitfield, growing it as needed. */
+void PosBitfieldSet(std::vector<unsigned char>& bitfield, size_t i);
+/** Count set bits in a signer bitfield. */
+int PosBitfieldPopcount(const std::vector<unsigned char>& bitfield);
+
 // --- On-chain stake registration (locked staking outputs) ---
 
 class CTxOut;
@@ -424,16 +580,45 @@ inline bool PosIsEligibleStake(uint64_t weight)
 }
 
 /** The canonical staking output script:
- *      <csv_blocks> OP_CHECKSEQUENCEVERIFY OP_DROP <pubkey> OP_CHECKSIG
+ *      <csv_blocks> OP_CHECKSEQUENCEVERIFY OP_DROP [<bls_pubkey(48)> OP_DROP
+ *      <bls_pop(96)> OP_DROP] <pubkey> OP_CHECKSIG
  *  A bare (unhashed) script so validators can recognize stake at output
  *  creation. Spending requires the staker's signature and csv_blocks of
- *  relative-height maturity (BIP112) — unbonding is the spend itself. */
-CScript BuildStakeScript(const CPubKey& pubkey, uint32_t csv_blocks);
+ *  relative-height maturity (BIP112) — unbonding is the spend itself. When
+ *  bls_pubkey/bls_pop are non-empty (impl spec Option A phase 2, runtime
+ *  committee registration) they are pushed and OP_DROPed (spend semantics
+ *  unchanged), so the BLS key rides in the UTXO and the registry's UTXO layer
+ *  learns it as a pure function of the UTXO set (reorg-safe like the weight).
+ *  The 48-byte BLS-pubkey push is unambiguous: a staking pubkey is 33 or 65
+ *  bytes, never 48. */
+CScript BuildStakeScript(const CPubKey& pubkey, uint32_t csv_blocks,
+                         const std::vector<unsigned char>& bls_pubkey = {},
+                         const std::vector<unsigned char>& bls_pop = {});
+
+/** A parsed staking script. bls_pubkey/bls_pop are empty when the output carries
+ *  no committee registration (the old form, or a leader-only staker). */
+struct ParsedStake {
+    CPubKey pubkey;
+    uint32_t csv{0};
+    std::vector<unsigned char> bls_pubkey;
+    std::vector<unsigned char> bls_pop;
+};
+
+/** Parse a staking script (either form), or nullopt if not of the canonical
+ *  template. */
+std::optional<ParsedStake> ParseStakeScriptFull(const CScript& script);
 
 /** Parse a staking script, returning (pubkey, raw BIP68 CSV value), or nullopt
- *  if the script is not of the exact canonical form. The CSV value may be
- *  height-based or time-based (SEQUENCE_LOCKTIME_TYPE_FLAG set). */
+ *  if the script is not of the canonical form. The CSV value may be height-based
+ *  or time-based (SEQUENCE_LOCKTIME_TYPE_FLAG set). */
 std::optional<std::pair<CPubKey, uint32_t>> ParseStakeScript(const CScript& script);
+
+/** The BLS committee registration (pubkey, proof-of-possession) carried by a
+ *  staking output, or nullopt if it carries none. The PoP is NOT verified here
+ *  (no crypto in libbitcoin_common); ConnectBlock verifies it in the node
+ *  library and rejects a block whose new staking output has an invalid PoP. */
+std::optional<std::pair<std::vector<unsigned char>, std::vector<unsigned char>>>
+ParseStakeBlsRegistration(const CScript& script);
 
 /** The wall-clock lock duration (seconds) a staking CSV value enforces:
  *  time-based CSV in 512-second units, height-based CSV times the slot

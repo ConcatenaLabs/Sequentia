@@ -245,6 +245,7 @@ public:
         g_pos_vrf = false;
         g_pos_agg_committee = false;
         g_pos_bls = false;
+        g_pos_public_committee = false;
         // Reset the rest of the PoS consensus globals to their defaults too, so
         // an in-process chain switch can never read a value left over from a
         // previously-selected (custom PoS) chain.
@@ -421,8 +422,31 @@ public:
         // differently from the rest of the network rejects the other form's blocks
         // and forks off. Every node and producer on the chain must use the same value.
         g_pos_bls = args.GetBoolArg("-posbls", true);
+        // Public fixed-size committee (impl spec Option A; CONFIRMED 2026-07-04):
+        // membership is the deterministic schedule prefix and the quorum derives
+        // from the ACTUAL size, so two disjoint quorums cannot exist. Default OFF
+        // + committee 100 here, so the PRE-RE-GENESIS chain is byte-identical even
+        // under this binary; the re-genesis launches with -pospubliccommittee=1
+        // and -poscommitteesize=250 (126-of-250, the classical 1/3 Byzantine
+        // bound). The election seed stays the Bitcoin anchor (option 1A); Option B
+        // (a VRF-chain seed) and 1B (a buried anchor) are PERMANENTLY REJECTED
+        // (docs alberto-reply-2026-07-04c / 2026-07-04d).
+        g_pos_public_committee = args.GetBoolArg("-pospubliccommittee", false);
+        if (g_pos_public_committee && !g_pos_bls) {
+            throw std::runtime_error("-pospubliccommittee requires -posbls");
+        }
         g_pos_min_stake = 4000000000000ULL;             // 40,000 SEQ = 0.01% of 400M (§3.3)
-        g_pos_committee_size = 100;                      // 51-of-100 quorum (§3.5)
+        // 51-of-100 pre-re-genesis; the re-genesis passes -poscommitteesize=250
+        // (126-of-250). Arg-overridable so the cap is a launch-config choice, but
+        // the default keeps the live chain on 100.
+        g_pos_committee_size = args.GetIntArg("-poscommitteesize", 100);
+        {
+            const int max_committee = g_pos_public_committee ? MAX_POS_PUBLIC_COMMITTEE_SIZE :
+                (g_pos_agg_committee || g_pos_bls) ? MAX_POS_AGG_COMMITTEE_SIZE : MAX_POS_COMMITTEE_SIZE;
+            if (g_pos_committee_size < 1 || g_pos_committee_size > max_committee) {
+                throw std::runtime_error(strprintf("-poscommitteesize must be between 1 and %d", max_committee));
+            }
+        }
         g_pos_slot_interval = 30;                        // 30s nominal block time (doc 11 §4)
         g_pos_unbonding_period = 43200;                  // x30s = ~15 days (§3.11)
         consensus.total_valid_epochs = 0;
@@ -650,8 +674,15 @@ public:
         // does not change the genesis — but it IS a consensus rule, so every node
         // on a given testnet must agree on the value.
         g_pos_committee_size = args.GetIntArg("-poscommitteesize", 100);
+        // Public fixed-size committee (impl spec Option A). NETWORK-WIDE
+        // consensus rule, like -posbls above.
+        g_pos_public_committee = args.GetBoolArg("-pospubliccommittee", false);
+        if (g_pos_public_committee && !g_pos_bls) {
+            throw std::runtime_error("-pospubliccommittee requires -posbls");
+        }
         {
-            const int max_committee = (g_pos_agg_committee || g_pos_bls) ? MAX_POS_AGG_COMMITTEE_SIZE : MAX_POS_COMMITTEE_SIZE;
+            const int max_committee = g_pos_public_committee ? MAX_POS_PUBLIC_COMMITTEE_SIZE :
+                (g_pos_agg_committee || g_pos_bls) ? MAX_POS_AGG_COMMITTEE_SIZE : MAX_POS_COMMITTEE_SIZE;
             if (g_pos_committee_size < 1 || g_pos_committee_size > max_committee) {
                 throw std::runtime_error(strprintf("-poscommitteesize must be between 1 and %d", max_committee));
             }
@@ -711,7 +742,22 @@ public:
             // (g_pos_unbonding_period x g_pos_slot_interval = 43200 x 30 s,
             // ~15 days); 2532 units x 512 s = 1,296,384 s.
             const uint32_t stake_csv = CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG | 2532;
-            const CScript stake_spk = BuildStakeScript(founder, stake_csv);
+            // The founder's committee BLS registration (impl spec Option A,
+            // -pospubliccommittee), baked into the genesis stake output so the
+            // founder is a size-1 public committee (quorum 1) that self-certifies
+            // block 1 and can then register the first runtime stakers. Without it
+            // a public committee cannot bootstrap: with zero BLS-registered members
+            // the founder is not a committee member and no block can be certified
+            // (a public committee draws its members from the BLS-registered stake).
+            // Derived deterministically from the founder key (getblsregistration):
+            // 48-byte pubkey + 96-byte proof-of-possession, pushed and OP_DROPed
+            // into the staking output so the registry's UTXO layer learns them
+            // (RebuildUtxoStake / SeedGenesisStake). Inert pushes when the public
+            // committee is off, but they change the genesis hash — this is the
+            // re-genesis genesis, deliberately distinct from the prior testnet.
+            const std::vector<unsigned char> founder_blspub = ParseHex("817ffa1dc89051ab64a40847935413863e646b7552caa0ca16e1eb4306cc4e74417a77ec366d4642e12a14c0d5afcd57");
+            const std::vector<unsigned char> founder_blspop = ParseHex("a6d45071d685c1f25df3b7a7c44f6536ce2f5f26feccff78cf0537128a203bda1c95d3cf6829220464128fb147df882f01aa1cdea93428a9655a8f52602f01e3c53512220cbba643e1020b6e3fb12c3eba5e0f3f44098549769daf3c44fa141e");
+            const CScript stake_spk = BuildStakeScript(founder, stake_csv, founder_blspub, founder_blspop);
             const CScript founder_spk = CScript() << OP_0 << ToByteVector(founder.GetID()); // P2WPKH
             const CAmount seed_stake = 1000000 * COIN;   // 1,000,000 SEQ staked to bootstrap
             const CAmount total = 400000000 * COIN;      // 400,000,000 SEQ hard cap
@@ -719,15 +765,19 @@ public:
                 { {stake_spk, seed_stake}, {founder_spk, total - seed_stake} });
         }
         consensus.hashGenesisBlock = genesis.GetHash();
-        // SEQUENTIA: genesis recomputed for the PoS bootstrap distribution
-        // (400M SEQ: a seed staking output + the founder's plain remainder).
-        const uint256 expected_genesis = uint256S("0xc2a0a99b4c307e8423b98140af1f539aa4e1feec25c62d655d91d8df51c7dfba");
+        // SEQUENTIA: genesis recomputed for the PoS bootstrap distribution (400M
+        // SEQ: a seed staking output + the founder's plain remainder). The seed
+        // staking output now also carries the founder's committee BLS registration
+        // (impl spec Option A), so this hash differs from the prior testnet genesis
+        // (c2a0a99b...): this is the re-genesis genesis, and a node on this binary
+        // will not join the old chain.
+        const uint256 expected_genesis = uint256S("0xddd11d54c87a2bd94400fd31ce05d8e1110bb4b78e7103f738342086fc4ea92e");
         if (consensus.hashGenesisBlock != expected_genesis) {
             fprintf(stderr, "testnet genesis hash mismatch: computed %s, expected %s\n",
                     consensus.hashGenesisBlock.GetHex().c_str(), expected_genesis.GetHex().c_str());
         }
         assert(consensus.hashGenesisBlock == expected_genesis);
-        assert(genesis.hashMerkleRoot == uint256S("0x251087ffb5c9e7f07b8e095d5b161e975e3e856231dddc0faf8c9e69b09f762c"));
+        assert(genesis.hashMerkleRoot == uint256S("0x94ccd459b890e0eed4f26e0a500b7c2adafef231742ac88531c204597502fbf2"));
 
         vFixedSeeds.clear();
         vSeeds.clear();
@@ -895,6 +945,7 @@ public:
         g_pos_vrf = false;
         g_pos_agg_committee = false;
         g_pos_bls = false;
+        g_pos_public_committee = false;
         // Reset the rest of the PoS consensus globals to their defaults too, so
         // an in-process chain switch can never read a value left over from a
         // previously-selected (custom PoS) chain.
@@ -1013,6 +1064,7 @@ public:
         g_pos_vrf = false;
         g_pos_agg_committee = false;
         g_pos_bls = false;
+        g_pos_public_committee = false;
         // Reset the rest of the PoS consensus globals to their defaults too, so
         // an in-process chain switch can never read a value left over from a
         // previously-selected (custom PoS) chain.
@@ -1275,6 +1327,16 @@ protected:
         }
         if (g_pos_bls && !g_pos_vrf) {
             throw std::runtime_error("-posbls requires -posvrf");
+        }
+        // Public fixed-size committee (impl spec Option A): consensus rule,
+        // every node on a chain must agree.
+        g_pos_public_committee = args.GetBoolArg("-pospubliccommittee", false);
+        if (g_pos_public_committee && !g_pos_bls) {
+            throw std::runtime_error("-pospubliccommittee requires -posbls");
+        }
+        if (g_pos_public_committee &&
+            (g_pos_committee_size < 1 || g_pos_committee_size > MAX_POS_PUBLIC_COMMITTEE_SIZE)) {
+            throw std::runtime_error(strprintf("-poscommitteesize must be between 1 and %d under -pospubliccommittee", MAX_POS_PUBLIC_COMMITTEE_SIZE));
         }
         if (g_con_pos) {
             // MuSig2 aggregation lifts the script-multisig committee cap of 16
@@ -1669,6 +1731,7 @@ public:
         g_pos_vrf = false;
         g_pos_agg_committee = false;
         g_pos_bls = false;
+        g_pos_public_committee = false;
         // Reset the rest of the PoS consensus globals to their defaults too, so
         // an in-process chain switch can never read a value left over from a
         // previously-selected (custom PoS) chain.

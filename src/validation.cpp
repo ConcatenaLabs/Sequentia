@@ -2156,6 +2156,37 @@ bool CheckPeginRipeness(const CBlock& block, const std::vector<std::pair<CScript
     return true;
 }
 
+// Declared in pos.h; defined here in the node library (not pos.cpp in
+// libbitcoin_common) so lightweight tools linking pos.o do not pull in the BLS
+// aggregate verification's blst dependency. See the note at its declaration.
+int PosVerifyBitfieldCertificate(const CBlockHeader& header, const CBlockIndex* pindexPrev,
+                                 const StakeRegistry& registry, std::string& reason)
+{
+    std::optional<PosBlsBitfieldCert> cert = ParsePosBlsBitfieldSolution(header.proof.solution);
+    if (!cert) { reason = "bad-posbls-bitfield-malformed"; return -1; }
+    const uint256 seed = PosSeedForChild(pindexPrev);
+    const std::vector<CPubKey> committee = PosPublicCommittee(registry, seed);
+    std::vector<std::vector<unsigned char>> bls_pubkeys;
+    for (size_t i = 0; i < committee.size(); ++i) {
+        if (!PosBitfieldTest(cert->bitfield, i)) continue;
+        std::vector<unsigned char> bls = registry.GetBls(committee[i]);
+        if (bls.size() != BLS_PK_SIZE) { reason = "bad-posbls-member-unregistered"; return -1; }
+        bls_pubkeys.push_back(std::move(bls));
+    }
+    // Every set bit must map to a committee seat: a bit beyond the committee is a
+    // phantom signer inflating the count, so reject if the popcount exceeds the
+    // resolved signers.
+    if (PosBitfieldPopcount(cert->bitfield) != (int)bls_pubkeys.size()) {
+        reason = "bad-posbls-bitfield-range"; return -1;
+    }
+    if (bls_pubkeys.empty()) { reason = "bad-posbls-bitfield-empty"; return -1; }
+    const uint256 hash = header.GetHash();
+    if (!BlsFastAggregateVerify(bls_pubkeys, Span<const unsigned char>(hash.begin(), 32), cert->agg_sig)) {
+        reason = "bad-posbls-agg-invalid"; return -1;
+    }
+    return (int)bls_pubkeys.size();
+}
+
 /** SEQUENTIA PoS: stake-registry-dependent block rules — leader election /
  *  sortition eligibility, slot time-gating, and committee membership. These
  *  belong at connect time, NOT in ContextualCheckBlock(Header): the stake
@@ -2165,7 +2196,7 @@ bool CheckPeginRipeness(const CBlock& block, const std::vector<std::pair<CScript
  *  where the registry would be the wrong stake state. ConnectBlock runs
  *  exactly in chain order, with the registry equal to the block's parent
  *  state (ConnectTip/DisconnectTip update it in lockstep). */
-static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state, const CBlockIndex* pindexPrev)
+static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state, const CBlockIndex* pindexPrev, bool fJustCheck)
 {
     if (!g_con_pos || pindexPrev == nullptr) return true;
     std::optional<PosChallengeParts> parts = ParsePosBlockChallenge(block.proof.challenge);
@@ -2174,6 +2205,36 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
     }
     const StakeRegistry& registry = StakeRegistry::GetInstance();
     const uint256 seed = PosSeedForChild(pindexPrev);
+
+    // Committee BLS registrations carried by NEW staking outputs (impl spec
+    // Option A phase 2, runtime registration). Verify the proof-of-possession
+    // ONCE here at connect, so PosApplyBlockStake / RebuildUtxoStake (which do
+    // no crypto) can trust every stored key; and enforce ONE key per staker
+    // (against the staker's parent-state registration and within this block).
+    // A bad PoP or a conflicting key invalidates the block, so the UTXO set
+    // never holds an unverified or ambiguous committee key.
+    if (g_pos_public_committee) {
+        std::map<CPubKey, std::vector<unsigned char>> block_keys;
+        for (const CTransactionRef& tx : block.vtx) {
+            for (const CTxOut& out : tx->vout) {
+                if (!StakeFromTxOut(out)) continue;
+                auto full = ParseStakeScriptFull(out.scriptPubKey);
+                if (!full || full->bls_pubkey.empty()) continue;
+                if (!BlsVerifyPossession(full->bls_pubkey, full->bls_pop)) {
+                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-stake-bls-pop", "staking output BLS proof-of-possession does not verify");
+                }
+                const std::vector<unsigned char> existing = registry.GetBls(full->pubkey);
+                if (!existing.empty() && existing != full->bls_pubkey) {
+                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-stake-bls-conflict", "staking output BLS key conflicts with the staker's registered key");
+                }
+                auto seen = block_keys.find(full->pubkey);
+                if (seen != block_keys.end() && seen->second != full->bls_pubkey) {
+                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-stake-bls-conflict", "two staking outputs register different BLS keys for one staker");
+                }
+                block_keys[full->pubkey] = full->bls_pubkey;
+            }
+        }
+    }
 
     if (!g_pos_vrf) {
         // Public-schedule mode: the leader must be the stake-weighted ranked
@@ -2293,7 +2354,36 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
     // signature against the member keys. Here we add the registry-dependent
     // checks: every member must be sortition-eligible for this slot, the set is
     // deduplicated and capped, and a quorum (or, when stalled, one) must sign.
-    if (parts->is_bls) {
+    if (parts->is_bls && g_pos_public_committee) {
+        // Bitfield certificate (impl spec Option A phase 2): the members' BLS
+        // keys are in the registry (a parent-tip stake-state quantity), so the
+        // aggregate is verified HERE, at connect time, not in CheckProof (where
+        // the registry may mirror a different branch during header sync).
+        // Unsigned templates carry an empty solution and are skipped; so is any
+        // block seen under fJustCheck. TestBlockValidity (the miner's
+        // CreateNewBlock, and — crucially — a committee member validating a
+        // leader's PROPOSAL before it will countersign) runs before the
+        // certificate is assembled. A proposal carries only the leader's staging
+        // signature (a single push), which is not a full bitfield certificate;
+        // verifying it here would reject every proposal as malformed, so no member
+        // would countersign and the committee could never advance. The real
+        // certificate is verified when the assembled block actually connects
+        // (fJustCheck == false); no block joins the chain via a fJustCheck pass.
+        if (!fJustCheck && !block.proof.solution.empty()) {
+            std::string reason;
+            const int signers = PosVerifyBitfieldCertificate(block, pindexPrev, registry, reason);
+            if (signers < 0) {
+                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, reason, "invalid bitfield BLS certificate");
+            }
+            const int quorum = PosSlotQuorum(registry);
+            const bool escaping_stall = g_con_bitcoin_anchor &&
+                PosEscapingStallAllowed(pindexPrev->m_anchor_height, block.m_anchor_height);
+            const int min_members = escaping_stall ? 1 : quorum;
+            if (signers < min_members) {
+                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-agg-quorum", "fewer BLS committee members than the certification quorum");
+            }
+        }
+    } else if (parts->is_bls) {
         // The committee certificate lives in the proof solution. An unsigned
         // template (CreateNewBlock/TestBlockValidity) carries no certificate yet;
         // a real block's certificate (leader sig, member set, aggregate) is gated
@@ -2307,16 +2397,24 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
                     return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-member-duplicate", "duplicate BLS committee member");
                 }
             }
-            const int quorum = PosQuorum((size_t)g_pos_committee_size);
+            // Under the public fixed-size committee (-pospubliccommittee, impl
+            // spec Option A) the quorum derives from the ACTUAL committee size
+            // min(#stakers, cap) — restoring quorum intersection (any two
+            // quorums share >= 2 members), which threshold sortition loses
+            // once the staker pool exceeds the committee target.
+            const int quorum = PosSlotQuorum(registry);
             const bool escaping_stall = g_con_bitcoin_anchor &&
                 PosEscapingStallAllowed(pindexPrev->m_anchor_height, block.m_anchor_height);
             const int min_members = escaping_stall ? 1 : quorum;
             if ((int)named.size() < min_members) {
                 return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-agg-quorum", "fewer BLS committee members than the certification quorum");
             }
-            if ((int)named.size() > MAX_POS_AGG_COMMITTEE_SIZE) {
+            if ((int)named.size() > PosMaxCommitteeMembers()) {
                 return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-member-count", "more BLS committee members than the aggregate committee cap");
             }
+            // Private threshold sortition: each named member proves its own VRF
+            // eligibility over the slot seed (the public-committee bitfield form
+            // is handled above).
             for (const auto& [member, entry] : named) {
                 if (registry.GetWeight(member) == 0) {
                     return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-member-not-selected", "BLS committee member was not selected by sortition for this slot");
@@ -2397,7 +2495,10 @@ static bool CheckPosStakeRulesAtAccept(const CBlock& block, BlockValidationState
     // clamped/deduped fork-choice keys (SetPosForkChoiceKeys); fully closing it
     // needs a determinism-safe sibling check (doc 11 §1) and is deferred.
     if (pindexParent == tip) {
-        return CheckPosStakeRules(block, state, pindexParent); // registry == parent
+        // Accept-time check of a fully-formed block: enforce the certificate
+        // (fJustCheck=false). Proposals never reach here — they are validated via
+        // TestBlockValidity, not AcceptBlock.
+        return CheckPosStakeRules(block, state, pindexParent, /*fJustCheck=*/false); // registry == parent
     }
     return true; // defer to connect time
 }
@@ -2432,6 +2533,12 @@ static void SetPosForkChoiceKeys(CBlockIndex* pindex, const CBlock& block)
         std::set<CPubKey> distinct;
         for (const PosVrfMember& m : members) distinct.insert(m.pubkey);
         count = distinct.size();
+    } else if (parts->is_bls && g_pos_public_committee) {
+        // Bitfield certificate: the signer count is the bitfield popcount.
+        count = 0;
+        if (auto cert = ParsePosBlsBitfieldSolution(block.proof.solution)) {
+            count = (size_t)PosBitfieldPopcount(cert->bitfield);
+        }
     } else if (parts->is_bls) {
         std::set<CPubKey> distinct;
         if (auto cert = ParsePosBlsSolution(block.proof.solution)) {
@@ -2441,7 +2548,7 @@ static void SetPosForkChoiceKeys(CBlockIndex* pindex, const CBlock& block)
     } else {
         count = parts->committee.size();
     }
-    pindex->m_pos_countersigs = (uint16_t)std::min<size_t>(count, (size_t)MAX_POS_AGG_COMMITTEE_SIZE);
+    pindex->m_pos_countersigs = (uint16_t)std::min<size_t>(count, (size_t)PosMaxCommitteeMembers());
     // Leader VRF score (the top 64 bits of beta; lower is better). Registry-
     // independent: it only needs the leader key and the slot seed.
     if (g_pos_vrf) {
@@ -2518,7 +2625,7 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
     // stake registry, which here — and only here — matches the block's parent
     // state (see CheckPosStakeRules). Skipped by VerifyDB's reconnect pass,
     // which runs with the registry still at the tip.
-    if (check_pos_rules && !CheckPosStakeRules(block, state, pindex->pprev)) {
+    if (check_pos_rules && !CheckPosStakeRules(block, state, pindex->pprev, fJustCheck)) {
         return error("%s: CheckPosStakeRules: %s", __func__, state.ToString());
     }
 
@@ -3162,7 +3269,7 @@ void CChainState::UpdateTip(const CBlockIndex* pindexNew)
     // the security root. Escaping-stall / leader-only (sub-quorum) tips simply
     // leave no immediate-final point until a quorum block is connected.
     if (g_con_pos) {
-        const int quorum = PosQuorum((size_t)std::max(g_pos_committee_size, 1));
+        const int quorum = PosSlotQuorum(StakeRegistry::GetInstance());
         g_pos_immediate_final_height = -1;
         for (const CBlockIndex* f = pindexNew; f && f->nHeight > 0; f = f->pprev) {
             if ((int)f->m_pos_countersigs >= quorum) {

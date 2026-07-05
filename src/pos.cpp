@@ -29,17 +29,27 @@ int g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
 bool g_pos_vrf = false;
 bool g_pos_agg_committee = false;
 bool g_pos_bls = false;
+bool g_pos_public_committee = false;
 uint64_t g_pos_min_stake = 0;
 
 bool StakeRegistry::AddFromSpec(const std::string& spec, std::string& error)
 {
-    size_t colon = spec.rfind(':');
-    if (colon == std::string::npos) {
-        error = strprintf("staker spec '%s' must be <pubkeyhex>:<weight>", spec);
+    // <pubkeyhex>:<weight>  or, with a BLS committee registration (impl spec
+    // Option A phase 2),  <pubkeyhex>:<weight>:<blspubkeyhex>:<pophex>.
+    std::vector<std::string> f;
+    size_t start = 0;
+    for (;;) {
+        size_t colon = spec.find(':', start);
+        if (colon == std::string::npos) { f.push_back(spec.substr(start)); break; }
+        f.push_back(spec.substr(start, colon - start));
+        start = colon + 1;
+    }
+    if (f.size() != 2 && f.size() != 4) {
+        error = strprintf("staker spec '%s' must be <pubkeyhex>:<weight> or <pubkeyhex>:<weight>:<blspubkeyhex>:<pophex>", spec);
         return false;
     }
-    std::string pubkey_hex = spec.substr(0, colon);
-    std::string weight_str = spec.substr(colon + 1);
+    const std::string& pubkey_hex = f[0];
+    const std::string& weight_str = f[1];
     if (!IsHex(pubkey_hex)) {
         error = strprintf("staker pubkey '%s' is not valid hex", pubkey_hex);
         return false;
@@ -59,6 +69,29 @@ bool StakeRegistry::AddFromSpec(const std::string& spec, std::string& error)
     if (!ParseInt64(weight_str, &weight) || weight <= 0) {
         error = strprintf("staker weight '%s' must be a positive integer", weight_str);
         return false;
+    }
+    if (f.size() == 4) {
+        // Optional BLS committee registration. The proof-of-possession is
+        // verified once, here at registration; blst is independent of the
+        // secp256k1 context, so this is safe before ECC_Start().
+        if (!IsHex(f[2]) || !IsHex(f[3])) {
+            error = strprintf("staker BLS registration for '%s' is not valid hex", pubkey_hex);
+            return false;
+        }
+        std::vector<unsigned char> bls_pubkey = ParseHex(f[2]);
+        std::vector<unsigned char> bls_pop = ParseHex(f[3]);
+        if (bls_pubkey.size() != BLS_PK_SIZE || bls_pop.size() != BLS_SIG_SIZE) {
+            error = strprintf("staker BLS key/pop for '%s' have wrong sizes (want %d/%d bytes)", pubkey_hex, BLS_PK_SIZE, BLS_SIG_SIZE);
+            return false;
+        }
+        // Structural check only: the cryptographic proof-of-possession is NOT
+        // verified here. This runs in every tool that parses -staker (including
+        // ones that do not link blst), and the config/genesis staker set is
+        // trusted; a bad key is also self-punishing (its shares never verify and
+        // the block's aggregate is rejected at connect). Runtime UTXO-layer
+        // registration (future work) verifies the PoP on-chain, where blst is
+        // linked. The registered key MUST be BlsDerivePubKey(PosBlsSeedFromKey).
+        SetBls(pubkey, bls_pubkey);
     }
     SetStake(pubkey, (uint64_t)weight);
     return true;
@@ -139,6 +172,64 @@ int PosQuorum(size_t committee_size)
 {
     if (committee_size == 0) return 0;
     return (int)(committee_size / 2) + 1;
+}
+
+std::vector<CPubKey> PosPublicCommittee(const StakeRegistry& registry, const uint256& seed)
+{
+    // The public committee is the schedule prefix, but under the bitfield
+    // certificate a member must have a registered BLS key (validators name
+    // signers by a bitfield and look their keys up), so ineligible-by-missing-
+    // key stakers are skipped in schedule order before the cap is applied. The
+    // leader role has no such requirement (it signs with ECDSA).
+    std::vector<CPubKey> schedule = PosSchedule(registry, seed);
+    std::vector<CPubKey> committee;
+    const size_t cap = (size_t)std::max(g_pos_committee_size, 0);
+    for (const CPubKey& s : schedule) {
+        if (!registry.HasBls(s)) continue;
+        committee.push_back(s);
+        if (committee.size() >= cap) break;
+    }
+    return committee;
+}
+
+int PosPublicCommitteeSize(const StakeRegistry& registry)
+{
+    // Seat count is min(#eligible registered stakers, cap) and does not depend
+    // on the seed (the seed only orders/selects WHICH stakers fill the seats).
+    size_t pool = 0;
+    for (const auto& entry : registry.Weights()) {
+        if (PosIsEligibleStake(entry.second) && registry.HasBls(entry.first)) pool++;
+    }
+    return (int)std::min<size_t>(pool, (size_t)std::max(g_pos_committee_size, 0));
+}
+
+int PosPublicQuorum(int k)
+{
+    if (k <= 0) return 0;
+    // Strict majority, plus one at odd k: any two quorums then overlap in
+    // 2q - k >= 2 members at every size, so a double-certification needs at
+    // least two equivocating signers regardless of parity. Identical to
+    // PosQuorum at every even k.
+    int q = k / 2 + 1 + (k & 1);
+    return std::min(k, q);
+}
+
+int PosSlotQuorum(const StakeRegistry& registry)
+{
+    if (g_pos_public_committee) return PosPublicQuorum(PosPublicCommitteeSize(registry));
+    return PosQuorum((size_t)std::max(g_pos_committee_size, 1));
+}
+
+std::set<CPubKey> PosPublicCommitteeSet(const StakeRegistry& registry, const uint256& seed)
+{
+    std::vector<CPubKey> members = PosPublicCommittee(registry, seed);
+    return std::set<CPubKey>(members.begin(), members.end());
+}
+
+int PosMaxCommitteeMembers()
+{
+    if (g_pos_public_committee) return std::max(g_pos_committee_size, 1);
+    return MAX_POS_AGG_COMMITTEE_SIZE;
 }
 
 CScript BuildPosChallenge(const CPubKey& pubkey)
@@ -442,15 +533,79 @@ std::optional<PosBlsCertificate> ParsePosBlsSolution(const CScript& solution)
     return cert;
 }
 
-// --- On-chain stake registration (locked staking outputs) ---
-
-CScript BuildStakeScript(const CPubKey& pubkey, uint32_t csv_blocks)
+bool PosBitfieldTest(const std::vector<unsigned char>& bitfield, size_t i)
 {
-    return CScript() << (int64_t)csv_blocks << OP_CHECKSEQUENCEVERIFY << OP_DROP
-                     << ToByteVector(pubkey) << OP_CHECKSIG;
+    const size_t byte = i >> 3;
+    if (byte >= bitfield.size()) return false;
+    return (bitfield[byte] >> (i & 7)) & 1;
 }
 
-std::optional<std::pair<CPubKey, uint32_t>> ParseStakeScript(const CScript& script)
+void PosBitfieldSet(std::vector<unsigned char>& bitfield, size_t i)
+{
+    const size_t byte = i >> 3;
+    if (byte >= bitfield.size()) bitfield.resize(byte + 1, 0);
+    bitfield[byte] |= (unsigned char)(1u << (i & 7));
+}
+
+int PosBitfieldPopcount(const std::vector<unsigned char>& bitfield)
+{
+    int n = 0;
+    for (unsigned char b : bitfield) {
+        while (b) { n += b & 1; b >>= 1; }
+    }
+    return n;
+}
+
+CScript BuildPosBlsBitfieldSolution(const std::vector<unsigned char>& leader_sig,
+                                    const std::vector<unsigned char>& agg_sig,
+                                    const std::vector<unsigned char>& bitfield)
+{
+    CScript s;
+    s << leader_sig << agg_sig << bitfield;
+    return s;
+}
+
+std::optional<PosBlsBitfieldCert> ParsePosBlsBitfieldSolution(const CScript& solution)
+{
+    PosBlsBitfieldCert cert;
+    CScript::const_iterator pc = solution.begin();
+    opcodetype opcode;
+    std::vector<unsigned char> data;
+    if (!solution.GetOp(pc, opcode, data) || data.empty()) return std::nullopt;
+    cert.leader_sig = data;
+    if (!solution.GetOp(pc, opcode, data) || data.size() != BLS_SIG_SIZE) return std::nullopt;
+    cert.agg_sig = data;
+    if (!solution.GetOp(pc, opcode, data) || data.empty()) return std::nullopt; // a certificate names >= 1 signer
+    // Cap the bitfield at the committee cap (in bytes) to bound work.
+    if (data.size() > (size_t)(MAX_POS_PUBLIC_COMMITTEE_SIZE + 7) / 8) return std::nullopt;
+    cert.bitfield = data;
+    if (pc != solution.end()) return std::nullopt; // trailing data
+    return cert;
+}
+
+// PosVerifyBitfieldCertificate is defined in validation.cpp (the node library,
+// which links blst) rather than here in libbitcoin_common, so that lightweight
+// tools linking pos.o (elements-tx/util) do not pull in the BLS aggregate
+// verification and its blst dependency. It is declared in pos.h.
+
+// --- On-chain stake registration (locked staking outputs) ---
+
+CScript BuildStakeScript(const CPubKey& pubkey, uint32_t csv_blocks,
+                         const std::vector<unsigned char>& bls_pubkey,
+                         const std::vector<unsigned char>& bls_pop)
+{
+    CScript s;
+    s << (int64_t)csv_blocks << OP_CHECKSEQUENCEVERIFY << OP_DROP;
+    if (!bls_pubkey.empty() || !bls_pop.empty()) {
+        // Committee registration: push and drop the BLS key and its PoP so they
+        // are committed in the UTXO without affecting the spend path.
+        s << bls_pubkey << OP_DROP << bls_pop << OP_DROP;
+    }
+    s << ToByteVector(pubkey) << OP_CHECKSIG;
+    return s;
+}
+
+std::optional<ParsedStake> ParseStakeScriptFull(const CScript& script)
 {
     CScript::const_iterator pc = script.begin();
     opcodetype opcode;
@@ -483,11 +638,40 @@ std::optional<std::pair<CPubKey, uint32_t>> ParseStakeScript(const CScript& scri
     if (!script.GetOp(pc, opcode, data) || opcode != OP_CHECKSEQUENCEVERIFY) return std::nullopt;
     if (!script.GetOp(pc, opcode, data) || opcode != OP_DROP) return std::nullopt;
     if (!script.GetOp(pc, opcode, data) || data.empty()) return std::nullopt;
+    // Optional committee registration: a 48-byte push here is the BLS pubkey
+    // (a staking pubkey is 33 or 65 bytes, never 48, so this is unambiguous),
+    // followed by OP_DROP, the 96-byte PoP, OP_DROP, then the staking pubkey.
+    ParsedStake out;
+    if (data.size() == BLS_PK_SIZE) {
+        out.bls_pubkey = data;
+        if (!script.GetOp(pc, opcode, data) || opcode != OP_DROP) return std::nullopt;
+        if (!script.GetOp(pc, opcode, data) || data.size() != BLS_SIG_SIZE) return std::nullopt;
+        out.bls_pop = data;
+        if (!script.GetOp(pc, opcode, data) || opcode != OP_DROP) return std::nullopt;
+        if (!script.GetOp(pc, opcode, data) || data.empty()) return std::nullopt;
+    }
     CPubKey pubkey(data);
     if (!pubkey.IsFullyValid()) return std::nullopt;
     if (!script.GetOp(pc, opcode, data) || opcode != OP_CHECKSIG) return std::nullopt;
     if (pc != script.end()) return std::nullopt;
-    return std::make_pair(pubkey, (uint32_t)csv);
+    out.pubkey = pubkey;
+    out.csv = (uint32_t)csv;
+    return out;
+}
+
+std::optional<std::pair<CPubKey, uint32_t>> ParseStakeScript(const CScript& script)
+{
+    auto full = ParseStakeScriptFull(script);
+    if (!full) return std::nullopt;
+    return std::make_pair(full->pubkey, full->csv);
+}
+
+std::optional<std::pair<std::vector<unsigned char>, std::vector<unsigned char>>>
+ParseStakeBlsRegistration(const CScript& script)
+{
+    auto full = ParseStakeScriptFull(script);
+    if (!full || full->bls_pubkey.empty()) return std::nullopt;
+    return std::make_pair(full->bls_pubkey, full->bls_pop);
 }
 
 //! The effective slot interval in seconds (>=1), used to put height- and
@@ -538,11 +722,14 @@ std::optional<std::pair<CPubKey, uint64_t>> StakeFromTxOut(const CTxOut& out)
 void PosApplyBlockStake(const CBlock& block, const CBlockUndo& undo)
 {
     StakeRegistry& registry = StakeRegistry::GetInstance();
-    // New staking outputs add weight.
+    // New staking outputs add weight (and, if they carry a committee BLS
+    // registration whose PoP ConnectBlock has verified, register the key).
     for (const CTransactionRef& tx : block.vtx) {
         for (const CTxOut& out : tx->vout) {
             if (auto stake = StakeFromTxOut(out)) {
-                registry.AddUtxoStake(stake->first, stake->second);
+                std::vector<unsigned char> bls_pubkey;
+                if (auto reg = ParseStakeBlsRegistration(out.scriptPubKey)) bls_pubkey = reg->first;
+                registry.AddUtxoStake(stake->first, stake->second, bls_pubkey);
                 LogPrintf("PoS: staking output adds %llu to %s\n", (unsigned long long)stake->second, HexStr(stake->first));
             }
         }
@@ -572,7 +759,9 @@ void PosRevertBlockStake(const CBlock& block, const CBlockUndo& undo)
     for (const CTxUndo& txundo : undo.vtxundo) {
         for (const Coin& coin : txundo.vprevout) {
             if (auto stake = StakeFromTxOut(coin.out)) {
-                registry.AddUtxoStake(stake->first, stake->second);
+                std::vector<unsigned char> bls_pubkey;
+                if (auto reg = ParseStakeBlsRegistration(coin.out.scriptPubKey)) bls_pubkey = reg->first;
+                registry.AddUtxoStake(stake->first, stake->second, bls_pubkey);
             }
         }
     }
@@ -588,6 +777,7 @@ void PosRevertBlockStake(const CBlock& block, const CBlockUndo& undo)
 bool RebuildUtxoStake(CCoinsView& view)
 {
     std::map<CPubKey, uint64_t> utxo_stake;
+    std::map<CPubKey, std::vector<unsigned char>> utxo_bls;
     std::unique_ptr<CCoinsViewCursor> pcursor(view.Cursor());
     if (!pcursor) return false;
     while (pcursor->Valid()) {
@@ -605,10 +795,17 @@ bool RebuildUtxoStake(CCoinsView& view)
         // staking output, which this scan also reflects (the coin is gone).
         if (auto stake = StakeFromTxOut(coin.out)) {
             utxo_stake[stake->first] += stake->second;
+            // A staking output's BLS registration (its PoP was verified when the
+            // output's block connected; the UTXO set is trusted here). All of a
+            // staker's outputs carry the same key (a consensus rule at connect),
+            // so any one is authoritative.
+            if (auto reg = ParseStakeBlsRegistration(coin.out.scriptPubKey)) {
+                utxo_bls[stake->first] = reg->first;
+            }
         }
         pcursor->Next();
     }
-    StakeRegistry::GetInstance().SetUtxoStake(std::move(utxo_stake));
+    StakeRegistry::GetInstance().SetUtxoStake(std::move(utxo_stake), std::move(utxo_bls));
     return true;
 }
 
@@ -630,7 +827,17 @@ void SeedGenesisStake(const CBlock& genesis)
     for (const CTransactionRef& tx : genesis.vtx) {
         for (const CTxOut& out : tx->vout) {
             if (auto stake = StakeFromTxOut(out)) {
-                registry.AddUtxoStake(stake->first, stake->second);
+                // Thread the genesis staker's committee BLS registration too (as
+                // RebuildUtxoStake does), so a public committee (-pospubliccommittee)
+                // can bootstrap on this early path: restart / -reindex re-validates
+                // block 1 BEFORE the later UTXO scan, and its leader is the genesis
+                // staker, who must be a BLS-registered committee member to certify.
+                // Without it the founder is registered here with weight but no BLS
+                // key, block 1's certificate fails to verify, and the chain strands
+                // at genesis. Idempotent with the UTXO scan (replaces the registry).
+                std::vector<unsigned char> bls;
+                if (auto reg = ParseStakeBlsRegistration(out.scriptPubKey)) bls = reg->first;
+                registry.AddUtxoStake(stake->first, stake->second, bls);
             }
         }
     }
