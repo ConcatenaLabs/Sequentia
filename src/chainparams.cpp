@@ -742,7 +742,22 @@ public:
             // (g_pos_unbonding_period x g_pos_slot_interval = 43200 x 30 s,
             // ~15 days); 2532 units x 512 s = 1,296,384 s.
             const uint32_t stake_csv = CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG | 2532;
-            const CScript stake_spk = BuildStakeScript(founder, stake_csv);
+            // The founder's committee BLS registration (impl spec Option A,
+            // -pospubliccommittee), baked into the genesis stake output so the
+            // founder is a size-1 public committee (quorum 1) that self-certifies
+            // block 1 and can then register the first runtime stakers. Without it
+            // a public committee cannot bootstrap: with zero BLS-registered members
+            // the founder is not a committee member and no block can be certified
+            // (a public committee draws its members from the BLS-registered stake).
+            // Derived deterministically from the founder key (getblsregistration):
+            // 48-byte pubkey + 96-byte proof-of-possession, pushed and OP_DROPed
+            // into the staking output so the registry's UTXO layer learns them
+            // (RebuildUtxoStake / SeedGenesisStake). Inert pushes when the public
+            // committee is off, but they change the genesis hash — this is the
+            // re-genesis genesis, deliberately distinct from the prior testnet.
+            const std::vector<unsigned char> founder_blspub = ParseHex("817ffa1dc89051ab64a40847935413863e646b7552caa0ca16e1eb4306cc4e74417a77ec366d4642e12a14c0d5afcd57");
+            const std::vector<unsigned char> founder_blspop = ParseHex("a6d45071d685c1f25df3b7a7c44f6536ce2f5f26feccff78cf0537128a203bda1c95d3cf6829220464128fb147df882f01aa1cdea93428a9655a8f52602f01e3c53512220cbba643e1020b6e3fb12c3eba5e0f3f44098549769daf3c44fa141e");
+            const CScript stake_spk = BuildStakeScript(founder, stake_csv, founder_blspub, founder_blspop);
             const CScript founder_spk = CScript() << OP_0 << ToByteVector(founder.GetID()); // P2WPKH
             const CAmount seed_stake = 1000000 * COIN;   // 1,000,000 SEQ staked to bootstrap
             const CAmount total = 400000000 * COIN;      // 400,000,000 SEQ hard cap
@@ -750,15 +765,19 @@ public:
                 { {stake_spk, seed_stake}, {founder_spk, total - seed_stake} });
         }
         consensus.hashGenesisBlock = genesis.GetHash();
-        // SEQUENTIA: genesis recomputed for the PoS bootstrap distribution
-        // (400M SEQ: a seed staking output + the founder's plain remainder).
-        const uint256 expected_genesis = uint256S("0xc2a0a99b4c307e8423b98140af1f539aa4e1feec25c62d655d91d8df51c7dfba");
+        // SEQUENTIA: genesis recomputed for the PoS bootstrap distribution (400M
+        // SEQ: a seed staking output + the founder's plain remainder). The seed
+        // staking output now also carries the founder's committee BLS registration
+        // (impl spec Option A), so this hash differs from the prior testnet genesis
+        // (c2a0a99b...): this is the re-genesis genesis, and a node on this binary
+        // will not join the old chain.
+        const uint256 expected_genesis = uint256S("0xddd11d54c87a2bd94400fd31ce05d8e1110bb4b78e7103f738342086fc4ea92e");
         if (consensus.hashGenesisBlock != expected_genesis) {
             fprintf(stderr, "testnet genesis hash mismatch: computed %s, expected %s\n",
                     consensus.hashGenesisBlock.GetHex().c_str(), expected_genesis.GetHex().c_str());
         }
         assert(consensus.hashGenesisBlock == expected_genesis);
-        assert(genesis.hashMerkleRoot == uint256S("0x251087ffb5c9e7f07b8e095d5b161e975e3e856231dddc0faf8c9e69b09f762c"));
+        assert(genesis.hashMerkleRoot == uint256S("0x94ccd459b890e0eed4f26e0a500b7c2adafef231742ac88531c204597502fbf2"));
 
         vFixedSeeds.clear();
         vSeeds.clear();

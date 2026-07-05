@@ -827,7 +827,17 @@ void SeedGenesisStake(const CBlock& genesis)
     for (const CTransactionRef& tx : genesis.vtx) {
         for (const CTxOut& out : tx->vout) {
             if (auto stake = StakeFromTxOut(out)) {
-                registry.AddUtxoStake(stake->first, stake->second);
+                // Thread the genesis staker's committee BLS registration too (as
+                // RebuildUtxoStake does), so a public committee (-pospubliccommittee)
+                // can bootstrap on this early path: restart / -reindex re-validates
+                // block 1 BEFORE the later UTXO scan, and its leader is the genesis
+                // staker, who must be a BLS-registered committee member to certify.
+                // Without it the founder is registered here with weight but no BLS
+                // key, block 1's certificate fails to verify, and the chain strands
+                // at genesis. Idempotent with the UTXO scan (replaces the registry).
+                std::vector<unsigned char> bls;
+                if (auto reg = ParseStakeBlsRegistration(out.scriptPubKey)) bls = reg->first;
+                registry.AddUtxoStake(stake->first, stake->second, bls);
             }
         }
     }

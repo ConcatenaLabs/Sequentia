@@ -2196,7 +2196,7 @@ int PosVerifyBitfieldCertificate(const CBlockHeader& header, const CBlockIndex* 
  *  where the registry would be the wrong stake state. ConnectBlock runs
  *  exactly in chain order, with the registry equal to the block's parent
  *  state (ConnectTip/DisconnectTip update it in lockstep). */
-static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state, const CBlockIndex* pindexPrev)
+static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state, const CBlockIndex* pindexPrev, bool fJustCheck)
 {
     if (!g_con_pos || pindexPrev == nullptr) return true;
     std::optional<PosChallengeParts> parts = ParsePosBlockChallenge(block.proof.challenge);
@@ -2359,8 +2359,17 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
         // keys are in the registry (a parent-tip stake-state quantity), so the
         // aggregate is verified HERE, at connect time, not in CheckProof (where
         // the registry may mirror a different branch during header sync).
-        // Unsigned templates carry an empty solution and are skipped.
-        if (!block.proof.solution.empty()) {
+        // Unsigned templates carry an empty solution and are skipped; so is any
+        // block seen under fJustCheck. TestBlockValidity (the miner's
+        // CreateNewBlock, and — crucially — a committee member validating a
+        // leader's PROPOSAL before it will countersign) runs before the
+        // certificate is assembled. A proposal carries only the leader's staging
+        // signature (a single push), which is not a full bitfield certificate;
+        // verifying it here would reject every proposal as malformed, so no member
+        // would countersign and the committee could never advance. The real
+        // certificate is verified when the assembled block actually connects
+        // (fJustCheck == false); no block joins the chain via a fJustCheck pass.
+        if (!fJustCheck && !block.proof.solution.empty()) {
             std::string reason;
             const int signers = PosVerifyBitfieldCertificate(block, pindexPrev, registry, reason);
             if (signers < 0) {
@@ -2486,7 +2495,10 @@ static bool CheckPosStakeRulesAtAccept(const CBlock& block, BlockValidationState
     // clamped/deduped fork-choice keys (SetPosForkChoiceKeys); fully closing it
     // needs a determinism-safe sibling check (doc 11 §1) and is deferred.
     if (pindexParent == tip) {
-        return CheckPosStakeRules(block, state, pindexParent); // registry == parent
+        // Accept-time check of a fully-formed block: enforce the certificate
+        // (fJustCheck=false). Proposals never reach here — they are validated via
+        // TestBlockValidity, not AcceptBlock.
+        return CheckPosStakeRules(block, state, pindexParent, /*fJustCheck=*/false); // registry == parent
     }
     return true; // defer to connect time
 }
@@ -2613,7 +2625,7 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
     // stake registry, which here — and only here — matches the block's parent
     // state (see CheckPosStakeRules). Skipped by VerifyDB's reconnect pass,
     // which runs with the registry still at the tip.
-    if (check_pos_rules && !CheckPosStakeRules(block, state, pindex->pprev)) {
+    if (check_pos_rules && !CheckPosStakeRules(block, state, pindex->pprev, fJustCheck)) {
         return error("%s: CheckPosStakeRules: %s", __func__, state.ToString());
     }
 
