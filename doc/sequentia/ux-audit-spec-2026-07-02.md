@@ -11,6 +11,26 @@ resolve many findings.
 > LSP / hosted-SeqLN model (we run SeqLN; users do not run a node, Phoenix-style), with cross-cutting theme
 > T16, per-surface additions in 4.1-4.3, and punch-list Tier G. Start with 8.9's custody/trust decision.
 
+> **Implementation status (2026-07-04, in progress).** Being implemented on feature branches (NOT merged;
+> pending browser/device verification). Custody/trust decision (8.9): RESOLVED — Tier-1 dropped, Tier-2 via a
+> **CLN native signer split** (device holds keys, we host the node). Progress:
+> - **Lightning backend — COMPLETE + proven** (`seqln` `sequentia-stable`, committed): the non-custodial signer
+>   split M0-M5 (Rust device signer byte-exact vs libhsmd), the capstone (a device-keyed hosted-channel node did
+>   a real pure-LN GOLD<->BTC seqob trade), the secure BOLT-8 Noise_XK transport, the WASM browser signer, and a
+>   WebSocket transport + wallet SDK (`contrib/seqln-signer/wasm`). See `seqln-tier2-hosted-channels-design.md`.
+> - **Web wallet non-LN** — DONE (branch `claude/lightning-ux-overhaul`, pushed): T2, T13, T5, T6, T9, T7, T14,
+>   T11, T12 + 4.1/4.2 cleanups. Flagged browser-verify: T4 (PSET fee preview), T5 Max-with-same-asset-fee, T3
+>   (needs the qr.rs wasm rebuild).
+> - **Web wallet Lightning UI** — IN PROGRESS (same branch): the Instant-LN Swap lane + LSP endpoint wiring.
+> - **Ambra non-LN** — DONE (branch `claude/lightning-ux-overhaul`): the T10 seed/app-lock P0s (FLAG_SECURE,
+>   lock pops sensitive sheets, onboarding lock default-on), T1 (fee_asset via the Rust FFI), T6 safe subset
+>   (cached BTC balance + offline marker + Lock-BTC auth + faucet guidance), T9 (registry service), T12 copy.
+>   Deferred: BTC tx history (needs a new FFI + esplora scanning), fee-amount in issue/burn/stake dialogs.
+> - **Explorer** — DONE (branch `claude/ux-audit`, pushed): T2, T1, T9.
+> - **Bridge** — DONE (branch `claude/ux-audit`, pushed): T8 (0-conf delivered honesty), T4, T11, T12.
+> - **Remaining:** Ambra Lightning (needs the signer as a Rust FFI, mirroring the WASM build), the Qt surface
+>   (4.4), the hosted-LSP box deploy (for a live demo), then browser/device verification + merge.
+
 ## 0. How to use this document
 
 - Work section 3 (cross-cutting themes) FIRST. Those are root-cause fixes that clear findings across
