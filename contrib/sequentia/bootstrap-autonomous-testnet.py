@@ -156,6 +156,13 @@ def main():
     ap.add_argument("--founder-wif", default="",
                     help="chain=test founder WIF (default: the baked placeholder)")
     ap.add_argument("--nodes", type=int, default=100, help="committee size N = founder + (N-1) registered (default 100)")
+    ap.add_argument("--public-committee", action="store_true",
+                    help="SEQUENTIA (impl spec Option A): launch a PUBLIC fixed-size committee (-pospubliccommittee) "
+                         "instead of private threshold sortition. Membership is the deterministic schedule prefix; "
+                         "each staker registers its committee BLS key on-chain in its staking output. The committee "
+                         "is min(#stakers, --committee-cap).")
+    ap.add_argument("--committee-cap", type=int, default=250,
+                    help="SEQUENTIA: committee size cap under --public-committee (default 250, quorum 126).")
     ap.add_argument("--slot", type=int, default=10, help="seconds/slot (ignored on chain=test, which bakes 30)")
     ap.add_argument("--basedir", default=os.path.abspath("./seq-bootstrap"))
     ap.add_argument("--bindir", default=os.path.join(REPO_ROOT, "src"))
@@ -289,8 +296,14 @@ def main():
     if is_test:
         # chain=test bakes con_pos/posvrf/posbls(default on)/anchor/slot/unbonding/
         # minstake/genesis/sig-size. We only set the committee size and accept the
-        # non-standard staking-output tx into the mempool.
-        consensus = ["poscommitteesize=%d" % N, "acceptnonstdtxn=1"]
+        # non-standard staking-output tx into the mempool. Under --public-committee
+        # the committee is the deterministic schedule prefix capped at
+        # --committee-cap (250), so we pass the CAP as the size (the actual
+        # committee is min(#stakers, cap)) and turn on -pospubliccommittee.
+        cap = args.committee_cap if args.public_committee else N
+        consensus = ["poscommitteesize=%d" % cap, "acceptnonstdtxn=1"]
+        if args.public_committee:
+            consensus.append("pospubliccommittee=1")
     else:
         genesis_csv_seq = (1 << 22) | ((args.csv_seconds + 511) // 512)   # BIP68 time-based
         fund_total = (N + 4) * stake_atoms                                 # founder change + fee headroom
@@ -352,10 +365,18 @@ def main():
     if change < 0:
         stop_all(base, elementsd)
         sys.exit("founder funding output (%s SEQ) too small for %d x %s SEQ" % (fund["value"], N - 1, stake_seq))
+    def bls_args(wif):
+        # Committee BLS registration for a public-committee re-genesis: the
+        # staker's BLS pubkey + PoP (deterministic from its key), so its staking
+        # output registers the key on-chain and it becomes committee-eligible.
+        if not args.public_committee:
+            return []
+        reg, _ = jcli(ec, fdir, rb, ["getblsregistration", wif])
+        return [reg["blspubkey"], reg["pop"]]
     tx = CTransaction(); tx.nVersion = 2
     tx.vin = [CTxIn(COutPoint(int(fund["txid"], 16), fund["vout"]))]
-    for _, pub in members:
-        ss, _ = jcli(ec, fdir, rb, ["getstakescript", pub, "null", str(args.csv_seconds)])
+    for wif, pub in members:
+        ss, _ = jcli(ec, fdir, rb, ["getstakescript", pub, "null", str(args.csv_seconds)] + bls_args(wif))
         tx.vout.append(CTxOut(stake_atoms, bytes.fromhex(ss["script"]), nAsset=asset))
     change_spk = bytes.fromhex(fund["spk"]) if is_test else CScript([0x51])   # back to founder / OP_TRUE
     tx.vout.append(CTxOut(change, change_spk, nAsset=asset))
