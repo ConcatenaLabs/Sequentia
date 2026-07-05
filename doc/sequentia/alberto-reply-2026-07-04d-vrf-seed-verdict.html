@@ -1,0 +1,51 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>Option B (a VRF-chain committee seed): a permanent no</title>
+<style>
+  body { font-family: "Liberation Sans", Arial, sans-serif; font-size: 11pt; line-height: 1.45; color: #1a1a1a; margin: 2.2cm 2.4cm; }
+  h1 { font-size: 18pt; margin: 0 0 2pt 0; color: #b8860b; }
+  .sub { color: #555; font-size: 10pt; margin: 0 0 16pt 0; }
+  h2 { font-size: 13pt; margin: 18pt 0 4pt 0; border-bottom: 1.5px solid #b8860b; padding-bottom: 2pt; }
+  h3 { font-size: 11.5pt; margin: 12pt 0 3pt 0; color: #222; }
+  p { margin: 5pt 0; }
+  code, .mono { font-family: "Liberation Mono", "Courier New", monospace; font-size: 9.5pt; background: #f3f1ea; padding: 0 2px; }
+  ul { margin: 4pt 0 6pt 0; }
+  li { margin: 3pt 0; }
+  ol { margin: 4pt 0 6pt 0; }
+  blockquote { background: #fbf7e9; padding: 8pt 12pt; margin: 10pt 0; border-left: 3px solid #b8860b; }
+  blockquote p { margin: 0; }
+  table { border-collapse: collapse; margin: 8pt 0; font-size: 8.5pt; }
+  th, td { border: 1px solid #d8d2c0; padding: 1pt 5pt; }
+  th { background: #f3f1ea; }
+  hr { border: none; border-top: 1px solid #d8d2c0; margin: 14pt 0; }
+  .small { font-size: 9.5pt; color: #555; }
+</style>
+</head><body>
+<h1>Option B (a VRF-chain committee seed): a permanent no</h1>
+<p class="sub">You asked me to take Option B all the way down and come back with a decision that stands for good: do it now, or never do it. My answer is never. We should keep the Bitcoin-anchor seed we have (option 1A), close the question, and if the residual grind ever matters the lever is the committee cap, not this. This is not a &quot;later&quot; deferral. It is a considered no, and below is the precise reasoning so it does not have to be re-opened.</p>
+<p>I went into the code first, and I owe you one correction to my own earlier letter, because the case against Option B should stand on the real reason, not a wrong one.</p>
+<h2>1. Option B is technically buildable; the old &quot;unreliable&quot; objection was fixable</h2>
+<p>Option B seeds each height&#x27;s committee from the previous block&#x27;s LEADER VRF output instead of from its Bitcoin anchor. A leader cannot choose its own VRF output (it is the VRF of its key over the election seed), so the free &quot;best of k anchors&quot; grind disappears.</p>
+<p>In the earlier letter I leaned on our code having tried this and reverted it as unreliable. Reading it again, that is only half true and not the real objection. Every VRF block already carries a mandatory, verifiable leader VRF proof in its coinbase (a block without one is rejected, <code>bad-posvrf-missing</code>), so the leader&#x27;s value is deterministically recomputable from the block itself. What we reverted was CACHING it in a mutable block-index field (<code>m_pos_vrf_score</code>) that is filled in late, after a block connects, so nodes mid-sync disagreed on it. That is a fixable engineering mistake: recompute the value from the committed coinbase proof at the moment you need it, do not cache it. So I will not argue Option B is impossible. It is buildable. The case against it is that it is a bad trade, and that case is airtight.</p>
+<h2>2. The grind it removes is already a non-issue at the size we chose</h2>
+<p>The residual anchor grind, at cap 250, against a coalition holding a full third of ALL staked value, expected time to a single captured block (population 50,000, 30-second blocks):</p>
+<table width="100%">
+<thead><tr><th align="left" nowrap>committee</th><th align="right" nowrap>no grind</th><th align="right" nowrap>grind k=4</th><th align="right" nowrap>grind k=16</th><th align="right" nowrap>k=100 (stalled)</th></tr></thead>
+<tbody>
+<tr><td align="left" nowrap>250</td><td align="right" nowrap>53 yr</td><td align="right" nowrap>27 yr</td><td align="right" nowrap>9 yr</td><td align="right" nowrap>2 yr</td></tr>
+<tr><td align="left" nowrap>500</td><td align="right" nowrap>2e8 yr</td><td align="right" nowrap>1e8 yr</td><td align="right" nowrap>4e7 yr</td><td align="right" nowrap>7e6 yr</td></tr>
+</tbody></table>
+<p>Even the worst realistic column at cap 250 is a once-in-years event that additionally requires a coalition to hold a third of the whole staked supply (it is attacking an asset it owns a third of), and any capture it does achieve is bounded by the checkpoint window (about two weeks of rewrite, no deeper). This is not a live wound. It is a small, bounded, fully quantified leak that the cap-250 recommendation already prices in.</p>
+<h2>3. The cap dominates Option B at every threat level</h2>
+<p>Look at the second row. Raising the cap to 500 moves the same grind from once in 9 years to once in forty million years. That is a one-constant change at re-genesis, it adds ZERO new attack surface, and it also improves the two things you actually care about (sleepy-node liveness and how closely the committee tracks the staker distribution).</p>
+<p>So there is no threat level at which Option B is the right instrument:</p>
+<ul><li>If you judge a once-in-a-decade, third-of-all-stake, checkpoint-bounded event acceptable (I do), you do nothing and 250 stands.</li><li>If you ever judge it unacceptable, you raise the cap. It crushes the grind far harder than Option B, in one line, with nothing new to reason about.</li></ul>
+<p>Option B is a large, delicate rewrite of the most load-bearing primitive in the protocol to buy an improvement that a single constant already buys more of. That alone settles it. The next section is why it is not merely unnecessary but actively wrong.</p>
+<h2>4. It replaces an external beacon with an internal one, which is backwards for Sequentia</h2>
+<p>This is the part that makes it a permanent no rather than a &quot;not now.&quot;</p>
+<p>The Bitcoin anchor is a near-ideal randomness beacon for committee selection, for one deep reason: it is EXTERNAL. No Sequentia actor, honest or not, has any influence whatsoever over FUTURE Bitcoin blocks. So every future committee is unbiasable by construction. The only leak is that, for the CURRENT committee, a producer may choose among a handful of already-mined recent Bitcoin blocks. That leak is bounded (a few choices), memoryless (each committee is seeded by an independent Bitcoin block, nothing compounds), and priced in above.</p>
+<p>A VRF-chain seed is INTERNAL. The seed is now generated by the validators themselves, each leader&#x27;s value feeding the next height&#x27;s seed in a chain. The moment the beacon is produced by the participants, a participating adversary has a lever on it that it can never have on Bitcoin: it can choose whether to reveal or to withhold. And because the seed is a chain, a withheld value does not just re-roll one committee, it perturbs the entire downstream sequence of seeds. This is the seed-manipulation-by-selective-participation problem that Algorand had to devote real cryptographic analysis to, and to mitigate with look-ahead and a deterministic fallback. We would be signing up to build and prove out that same machinery.</p>
+<p>And note the irony against the grind we are trying to kill. To actually STEER the committee by withholding, an attacker at cap 250 would need to lead roughly 56 million rounds in a row and hit a favorable draw, which is impossible, so the steerable effect is nil. What is NOT nil is the compounding bias on the future seed chain, which is subtle, stateful, and hard to bound. So Option B does not even remove grinding. It trades a memoryless, external, fully-understood, bounded grind for a stateful, internal, harder-to-analyze one. It makes the security story messier, not cleaner.</p>
+<p>Stepping back: Sequentia&#x27;s entire thesis is that Bitcoin is the external source of truth and the security root. Seeding the committee from Bitcoin&#x27;s proof of work is that thesis applied exactly where randomness is needed. Replacing it with a self-referential seed the validators mint among themselves runs directly against the grain of the whole design. You cannot make an internal beacon as unbiasable to a participant as an external one. That is not an engineering gap to close; it is the reason the external beacon is the right choice.</p>
+<h2>5. The verdict, to stand</h2>
+<p>Do not implement Option B, now or ever. Keep the Bitcoin-anchor committee seed (1A). The residual anchor grind is bounded, memoryless, checkpoint-limited, requires a third of all stake, and is already inside the cap-250 budget. If it ever needs to shrink further, raise the cap, which dominates Option B on the grind and improves liveness and representativeness besides. The external Bitcoin beacon is not a compromise we are tolerating; it is the correct primitive, and an internal VRF-chain seed would be a step down disguised as a step up.</p>
+<p>Numbers: <code>doc/sequentia/committee-seed-grind.py</code> and the model in this note. Code: the seed is <code>PosSeedForChild</code> (src/pos.cpp); the mandatory leader VRF proof is enforced at <code>ContextualCheckBlock</code> (<code>bad-posvrf-missing</code>); the reverted cache was <code>m_pos_vrf_score</code> (src/chain.h, set in <code>SetPosForkChoiceKeys</code>).</p>
+</body></html>
