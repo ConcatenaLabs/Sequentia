@@ -122,7 +122,7 @@ mirroring the pure-LN M0-M5 discipline.
 - **WASM DEVICE SIGNER + BROWSER TOPOLOGY — DONE (2026-07-04, seqln `43c166364`).** The signer compiles to
   `wasm32` (sub-crate `contrib/seqln-signer/wasm`, wasm-bindgen; secp256k1 C via clang; native crate untouched).
   JS API: `Signer{fromMnemonic,processFrame,setEnforce}` + `NoiseSession` (Noise_XK initiator) + `devicePubkey`.
-  PROVEN byte-exact IN WASM: all 99 real-corpus frames (incl. 58 low-R ECDSA sigs) reproduce libhsmd identically
+  PROVEN byte-exact IN WASM: all 99 real-corpus frames (incl. real signing ops (13 SIGN_TX + gossip/invoice)) reproduce libhsmd identically
   (wasm == native == libhsmd, re-verified), and the enforce policy runs in wasm (refuses a tampered commitment).
   Browser topology (device connects OUT, can't listen): a Noise_XK RESPONDER + a proxy `SEQLN_SIGNER_LISTEN`
   mode; a WASM signer as INITIATOR connected out and a KEYLESS hosted lightningd booted, derived its node_id
