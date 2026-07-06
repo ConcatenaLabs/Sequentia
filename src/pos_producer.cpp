@@ -1118,6 +1118,16 @@ int64_t PosProducer::DriveRound()
             m_collected.clear();
             m_backed_hash.SetNull();
             m_signed_round = -1;
+            // Re-arm our own proposal: restarting collection only helps if
+            // producers actually re-seed, and Step()'s once-per-height gate
+            // (m_proposed_height) would otherwise keep every node mute at this
+            // height forever — no round ever forms again and the escaping-stall
+            // valve, being only a quorum relaxation on an existing proposal,
+            // has nothing to fire on: a permanent liveness deadlock. The
+            // re-proposal is safe: the share-lock arms still gate what we SIGN,
+            // and RecordCandidate re-clears the per-height exclusions when the
+            // re-seeded round arrives.
+            m_proposed_height = 0;
             return 150;
         }
     }
