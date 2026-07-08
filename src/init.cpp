@@ -840,12 +840,17 @@ void InitParameterInteraction(ArgsManager& args)
             LogPrintf("%s: chain=test -> setting -addnode=159.195.15.140:18444 (shared testnet gateway)\n", __func__);
         // Fetch verified asset labels from the shared Sequentia Asset Registry, so
         // a fresh testnet node/GUI shows USDX/GOLD/etc. with no -assetdir config.
-        if (args.SoftSetArg("-assetregistryurl", "http://159.195.15.140/registry/index.minimal.json"))
-            LogPrintf("%s: chain=test -> setting -assetregistryurl=http://159.195.15.140/registry/index.minimal.json\n", __func__);
+        // Use the domain, not the raw IP: the box 301-redirects raw-IP http to
+        // https, and the minimal fetcher (assetregistry.cpp) follows neither
+        // redirects nor TLS, so the raw-IP default silently stopped working.
+        if (args.SoftSetArg("-assetregistryurl", "http://sequentiatestnet.com/registry/index.minimal.json"))
+            LogPrintf("%s: chain=test -> setting -assetregistryurl=http://sequentiatestnet.com/registry/index.minimal.json\n", __func__);
         // Fetch per-asset USD prices from the shared feed, so the GUI can value
         // amounts in a user-chosen reference currency with no extra config.
-        if (args.SoftSetArg("-referencepricesurl", "http://159.195.15.140/prices"))
-            LogPrintf("%s: chain=test -> setting -referencepricesurl=http://159.195.15.140/prices\n", __func__);
+        // Same plain-HTTP fetcher (referenceprices.cpp), same raw-IP redirect
+        // breakage, same fix.
+        if (args.SoftSetArg("-referencepricesurl", "http://sequentiatestnet.com/prices"))
+            LogPrintf("%s: chain=test -> setting -referencepricesurl=http://sequentiatestnet.com/prices\n", __func__);
     }
 }
 

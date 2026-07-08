@@ -180,4 +180,64 @@ BOOST_AUTO_TEST_CASE(BlockPolicyEstimates)
     }
 }
 
+// SEQUENTIA: with any-asset fees the estimator's two recording paths must use
+// the SAME unit. processTransaction() buckets a tx by its fee VALUE (reference
+// fee atoms, CTxMemPoolEntry::GetFeeValue()) while processBlockTx() used to
+// record the confirmation by the RAW amount in the tx's own fee asset
+// (GetFee()). For a fee asset worth ~1000x the reference unit the raw amount
+// is ~1000x smaller, so confirmed feerates landed in far-too-low buckets and
+// the resulting estimates (which every consumer converts FROM reference units
+// into a chosen fee asset via CFeeRate::GetFee(bytes, asset)) collapsed by the
+// same factor. CValue is documented (policy/value.h) as the unit that makes
+// amounts comparable "for fee estimation".
+BOOST_AUTO_TEST_CASE(BlockPolicyEstimatesAnyAssetFeeUnits)
+{
+    CBlockPolicyEstimator feeEst;
+
+    // A fee asset ~1000x more valuable than the reference unit: fees paid in
+    // it are tiny raw atoms with a normal reference-unit value.
+    const CAsset altAsset{uint256S("0x0000000000000000000000000000000000000000000000000000000000000abc")};
+    const CAmount rawFee{20};          // atoms of altAsset
+    const CValue feeValue{20 * 1000};  // the same fee in reference fee atoms
+
+    // Create a transaction template
+    CScript garbage;
+    for (unsigned int i = 0; i < 128; i++)
+        garbage.push_back('X');
+    CMutableTransaction tx;
+    tx.vin.resize(1);
+    tx.vin[0].scriptSig = garbage;
+    tx.vout.resize(1);
+    tx.vout[0].nValue = 0LL;
+    const uint32_t txSize = GetVirtualTransactionSize(CTransaction(tx));
+    const CFeeRate valueRate(feeValue.GetValue(), txSize);
+
+    const std::set<std::pair<uint256, COutPoint>> no_pegins;
+    LockPoints lp;
+
+    // Every block 10 unique such txs enter the mempool and all of them confirm
+    // in the very next block, so a 2-block estimate must come out at valueRate.
+    for (unsigned int blocknum = 0; blocknum < 100; blocknum++) {
+        std::vector<CTxMemPoolEntry> added;
+        added.reserve(10);
+        for (unsigned int k = 0; k < 10; k++) {
+            tx.vin[0].prevout.n = 100*blocknum+k; // make transaction unique
+            added.emplace_back(MakeTransactionRef(tx), rawFee, altAsset, feeValue,
+                               GetTime(), blocknum, false, 4, lp, no_pegins);
+            feeEst.processTransaction(added.back(), true);
+        }
+        std::vector<const CTxMemPoolEntry*> block;
+        for (const CTxMemPoolEntry& e : added) block.push_back(&e);
+        feeEst.processBlock(blocknum + 1, block);
+    }
+
+    const CAmount est = feeEst.estimateFee(2).GetFeePerK();
+    // The estimate must be the reference-unit feerate, not the raw-asset-atom
+    // feerate (valueRate / 1000, which is what the mixed-unit bug produced).
+    BOOST_CHECK_MESSAGE(est > valueRate.GetFeePerK() * 9 / 10,
+                        "estimate " << est << " is not in reference fee atoms (expected ~" << valueRate.GetFeePerK() << ")");
+    BOOST_CHECK_MESSAGE(est < valueRate.GetFeePerK() * 11 / 10,
+                        "estimate " << est << " too high (expected ~" << valueRate.GetFeePerK() << ")");
+}
+
 BOOST_AUTO_TEST_SUITE_END()

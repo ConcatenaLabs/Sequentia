@@ -568,7 +568,7 @@ void CBlockPolicyEstimator::processTransaction(const CTxMemPoolEntry& entry, boo
     }
     trackedTxs++;
 
-    // Feerates are stored and reported as BTC-per-kb:
+    // Feerates are stored and reported in reference fee atoms per kvB:
     CFeeRate feeRate(entry.GetFeeValue().GetValue(), entry.GetTxSize());
 
     mapMemPoolTxs[hash].blockHeight = txHeight;
@@ -599,8 +599,12 @@ bool CBlockPolicyEstimator::processBlockTx(unsigned int nBlockHeight, const CTxM
         return false;
     }
 
-    // Feerates are stored and reported as BTC-per-kb:
-    CFeeRate feeRate(entry->GetFee(), entry->GetTxSize());
+    // Feerates are stored and reported in reference fee atoms per kvB.
+    // SEQUENTIA: use GetFeeValue() (the fee converted to the reference unit),
+    // matching processTransaction() above — GetFee() is the raw amount in the
+    // tx's own fee asset, which is not comparable across assets and would be
+    // recorded into the wrong bucket for any non-policy-asset fee.
+    CFeeRate feeRate(entry->GetFeeValue().GetValue(), entry->GetTxSize());
 
     feeStats->Record(blocksToConfirm, (double)feeRate.GetFeePerK());
     shortStats->Record(blocksToConfirm, (double)feeRate.GetFeePerK());
