@@ -1,10 +1,10 @@
 # OpenAMP: issuer-governed assets for Sequentia (design)
 
-STATUS: 2026-07-08. Design only, nothing implemented. Supersedes the externally drafted "OpenAMP Architecture Specification" memo (Gemini, 2026-07): that memo's problem statement is adopted, its consensus-level solution is rejected (see §10).
+STATUS: 2026-07-08. Design approved by Andreas; decided: name stays OpenAMP, clawback default ON. M0 in progress. Supersedes the externally drafted "OpenAMP Architecture Specification" memo (Gemini, 2026-07): that memo's problem statement is adopted, its consensus-level solution is rejected (see §10).
 
 Grounding docs: `02-open-fee-market.md` (any-asset fees, producer whitelists), `01-architecture.md`, `simplicity-dex-covenant-offers-design.md` (introspection and Simplicity background), `seqdex-orderbook-design.md` (registered-user trading, later phase).
 
-Working title: **OpenAMP**. Note the name collides with the established OpenAMP embedded-systems standard (openampproject.org). Proposed house-style name, matching Compages / Emissio / Fulmen: **Pactum** (Latin: covenant, binding agreement), daemon `pactumd`. Final name is an open question (§13); this document says OpenAMP throughout.
+Name: **OpenAMP** (decided 2026-07-08; the collision with the OpenAMP embedded-systems standard is accepted). Daemon: `openampd`. Repo: `GracedEternalKingCabbageMan/openamp`.
 
 ---
 
@@ -113,7 +113,7 @@ Every restricted-asset UTXO pays to a taproot output with **internal key = NUMS*
 
 - **L_user** (per holder): `<K_user> OP_CHECKSIGVERIFY <K_policy> OP_CHECKSIG`, the co-signed transfer leaf. `K_user` is derived from the holder's registered account xpub at a per-address BIP32 path; `K_policy` is the asset-wide policy key from the contract.
 - **L_cov** (Tier B only, asset-wide constant): the containment covenant, §6. It also requires both signatures, so it is the same 2-of-2 with structural checks prepended; L_user then exists as the cheap path for small transactions and as the upgrade seam (Tier A trees are just `{L_user}`).
-- **L_claw** (optional, only if `"clawback": true`): `<K_issuer> OP_CHECKSIGVERIFY <K_policy> OP_CHECKSIG`. Issuer plus policy server, no user key: court-ordered seizure, lost-key recovery, estate execution. Its presence is committed in the contract hash, so holders accept it knowingly at purchase time. Without it, lost keys mean provable-burn-then-reissue (AMP0's recovery model).
+- **L_claw** (default ON, opt-out via `"clawback": false`): `<K_issuer> OP_CHECKSIGVERIFY <K_policy> OP_CHECKSIG`. Issuer plus policy server, no user key: court-ordered seizure, lost-key recovery, estate execution. Its presence is committed in the contract hash, so holders accept it knowingly at purchase time. Without it, lost keys mean provable-burn-then-reissue (AMP0's recovery model).
 
 Design decisions and their reasons:
 
@@ -158,10 +158,10 @@ Consequences worth stating explicitly:
 
 ## 7. Fees for restricted-asset transfers
 
-The fee output is always in an ordinary asset (Rule 1), but the sender has three ways to fund it:
+The fee output is always in an ordinary asset (Rule 1), and the sender has three ways to fund it:
 
-- **Fee conversion (primary UX)**: the sender pays in the restricted asset; the issuer bridges to the fee market atomically. The co-sign transaction contains: the sender's enclave inputs (asset `A`) and an issuer fee-asset input (say USDX); the recipient's enclave output and sender's enclave change in `A`; a **conversion output** paying `ceil(fee_value x rate)` atoms of `A` to the issuer's own enclave address; the fee output in USDX; and the issuer's USDX change. The conversion output is an ordinary enclave-to-enclave transfer to a registered holder, so the Tier B covenant permits it with no special case. Atomicity is inherent: the sender's signatures cover the conversion output and the issuer's signature covers the fee input, so neither leg can exist without the other, and the sender approves the quoted rate by signing. From the user's perspective the fee is paid in `A`; economically the issuer collected fee-equivalent value in `A` and is made whole by construction, so the flow is self-funding, not a subsidy. The conversion rate is published at the policy endpoint (price-server-fed or issuer-set, per contract), quoted to the wallet before signing, and displayed in `A`'s own units. The same value-preserving rounding as the fee market applies: a high-value asset pays few atoms, and that is correct.
-- **Self-paid**: the sender's wallet adds fee-asset inputs (tSEQ, USDX, whatever the wallet's existing any-asset fee logic selects from what the user holds and producers accept) plus the fee output and fee-asset change. The restricted enclave inputs/outputs and the fee legs coexist in one transaction; Tier B requires the fee asset outputs to be explicit, which they are by default.
+- **Self-paid**: the sender's wallet adds fee-asset inputs (tSEQ, USDX, whatever the wallet's existing any-asset fee logic selects from what the user holds and producers accept) plus the fee output and fee-asset change. The issuer is not involved in the fee leg at all; the policy server's only role is the ordinary transfer co-sign. The restricted enclave inputs/outputs and the fee legs coexist in one transaction; Tier B requires the fee asset outputs to be explicit, which they are by default.
+- **Fee conversion** (for senders who hold only the restricted asset): the sender pays in the restricted asset; the issuer bridges to the fee market atomically. The co-sign transaction contains: the sender's enclave inputs (asset `A`) and an issuer fee-asset input (say USDX); the recipient's enclave output and sender's enclave change in `A`; a **conversion output** paying `ceil(fee_value x rate)` atoms of `A` to the issuer's own enclave address; the fee output in USDX; and the issuer's USDX change. The conversion output is an ordinary enclave-to-enclave transfer to a registered holder, so the Tier B covenant permits it with no special case. Atomicity is inherent: the sender's signatures cover the conversion output and the issuer's signature covers the fee input, so neither leg can exist without the other, and the sender approves the quoted rate by signing. From the user's perspective the fee is paid in `A`; economically the issuer collected fee-equivalent value in `A` and is made whole by construction, so the flow is self-funding, not a subsidy. The conversion rate is published at the policy endpoint (price-server-fed or issuer-set, per contract), quoted to the wallet before signing, and displayed in `A`'s own units. The same value-preserving rounding as the fee market applies: a high-value asset pays few atoms, and that is correct.
 - **Sponsored**: as fee conversion but with no conversion output; the issuer eats the (tiny) fee as a service cost, at their discretion.
 
 Fee brokers: nothing in the conversion flow requires the converter to be the issuer. Any registered holder of `A` willing to receive the conversion output and attach the fee input can serve, and the policy server co-signs it like any transfer between registered users. A standing broker market keeps conversion rates honest; the issuer is simply the default, always-registered, always-willing counterparty.
@@ -174,7 +174,7 @@ Producer guidance (docs + default config): never add an OpenAMP restricted asset
 
 ---
 
-## 8. The policy server: `pactumd`
+## 8. The policy server: `openampd`
 
 A Go daemon, deployed like our other services (systemd on the box for the testnet instance; issuers self-host in production). Modules:
 
@@ -195,7 +195,7 @@ Distributions (dividends/coupons): ownership snapshot at an anchor-confirmed hei
 
 ## 9. Wallet and ecosystem integration
 
-- **SWK web wallet** (primary lane): a "managed assets" account per issuer server: register AID, receive (enclave addresses), send (PSET round-trip through `pactumd`), display vesting/limits/freeze state from the wallet API. Dual-chain behavior is untouched: BTC and ordinary Sequentia assets work exactly as today, and the existing fee-asset selector covers the fee leg (restricted assets are excluded from fee selection by contract type). SEQ equal-standing rules apply: a restricted asset is one row among equals, no special hero treatment.
+- **SWK web wallet** (primary lane): a "managed assets" account per issuer server: register AID, receive (enclave addresses), send (PSET round-trip through `openampd`), display vesting/limits/freeze state from the wallet API. Dual-chain behavior is untouched: BTC and ordinary Sequentia assets work exactly as today, and the existing fee-asset selector covers the fee leg (restricted assets are excluded from fee selection by contract type). SEQ equal-standing rules apply: a restricted asset is one row among equals, no special hero treatment.
 - **Ambra**: same flows over `ambra_core`; QR-carried PSETs stay under the co-sign round-trip anyway.
 - **Explorer**: badge OpenAMP assets (from the registry contract), show tier, clawback flag, policy endpoints, and verify-the-binding status; enclave outputs render as "restricted (issuer-governed)".
 - **SeqDEX** (later phase): restricted assets trade only between registered users; the maker's resting intent and the taker's fill both carry enclave legs, and settlement PSETs get the policy co-sign like any transfer. The policy engine sees a swap as a transfer with counterparty-delivery conditions, nothing new consensus-side. Cross-chain BTC legs are unaffected (the restricted leg is the Sequentia side).
@@ -232,20 +232,20 @@ Distributions (dividends/coupons): ownership snapshot at an anchor-confirmed hei
 ## 12. Milestones
 
 - **M0, enclave proof (regtest)**: canonical contract JSON + hashing spec; issue a restricted asset with `contract_hash` into Tier A enclave addresses; transfer with a stub co-signer (test harness holding `K_policy`); freeze-by-refusal demo; verify the asset-to-policy binding end to end. Proves the taproot 2-of-2 script path on Sequentia.
-- **M1, `pactumd` v0**: Go daemon with chain follower (anchor/reorg-aware), user registration (AID/xpub), per-asset policy docs (registration + categories + freeze), PSET validation + co-sign with software HSM, fee-conversion and sponsorship flows, issuer and wallet REST APIs; regtest e2e including refusals, fee conversion, and reorg rollback of counters.
+- **M1, `openampd` v0**: Go daemon with chain follower (anchor/reorg-aware), user registration (AID/xpub), per-asset policy docs (registration + categories + freeze), PSET validation + co-sign with software HSM, fee-conversion and sponsorship flows, issuer and wallet REST APIs; regtest e2e including refusals, fee conversion, and reorg rollback of counters.
 - **M2, Tier B covenant**: implement `L_cov`, byte-exact leaf spec frozen as v1; functional tests: enclave-to-enclave pass; out-of-enclave, fee-output, confidential-output, and mis-sorted-branch cases fail; measure leaf size, witness weight, `OP_TWEAKVERIFY` budget; fix `MAX_OUTPUTS`.
 - **M3, issuer operations**: assignments, distributions with snapshot reports, vesting, velocity, holder caps, issuer authorization endpoint, ownership/proof-of-balance/proof-of-transfer reports, transparency log with on-chain anchoring, clawback ceremony.
-- **M4, ecosystem**: SWK managed-assets account, explorer badges + binding verification, registry integration, deploy `pactumd` to the box, issue a demo restricted asset (BONDX) on the public testnet, public docs.
+- **M4, ecosystem**: SWK managed-assets account, explorer badges + binding verification, registry integration, deploy `openampd` to the box, issue a demo restricted asset (BONDX) on the public testnet, public docs.
 - **M5, hardening + trading**: FROST 2-of-3 policy key, Ambra integration, SeqDEX registered-user trading, Tier A confidential-outputs option with blinding-key disclosure.
 
-Repo: new public repo `openamp` (or `pactum`) under GracedEternalKingCabbageMan, Go daemon + specs; chain-side changes: none (that is the point).
+Repo: public repo `openamp` under GracedEternalKingCabbageMan, Go daemon + specs; chain-side changes: none (that is the point). The M0 regtest proof lives in SequentiaByClaude as a functional test (it needs the node test framework's taproot tooling); everything from M1 on lives in `openamp`.
 
 ---
 
 ## 13. Open questions (for Andreas)
 
-1. **Name**: keep OpenAMP (collides with the embedded-systems standard) or adopt Pactum?
-2. **Clawback default**: recommended ON for securities (regulators will ask), always disclosed via contract; confirm.
-3. **Continuity leaf**: default OFF (rely on FROST policy key), confirm.
-4. **Testnet hosting**: one shared `pactumd` on the box acting as policy server for demo issuers, with self-hosting documented?
-5. **Tier default**: issue new assets as Tier B from the start (M2 lands before any real issuer), or Tier A first with a migration sweep later?
+Resolved 2026-07-08: name stays **OpenAMP**; **clawback default ON** (opt-out disclosed in the contract). Still open:
+
+1. **Continuity leaf**: default OFF (rely on FROST policy key), confirm.
+2. **Testnet hosting**: one shared `openampd` on the box acting as policy server for demo issuers, with self-hosting documented?
+3. **Tier default**: issue new assets as Tier B from the start (M2 lands before any real issuer), or Tier A first with a migration sweep later?
