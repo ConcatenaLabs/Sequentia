@@ -10,7 +10,7 @@ Working title: **OpenAMP**. Note the name collides with the established OpenAMP 
 
 ## 0. One paragraph
 
-OpenAMP is an open-source, self-hostable equivalent of Blockstream's AMP2 for Sequentia: issuers manage regulated assets (securities, funds, bonds) whose every transfer requires co-signature from an issuer-controlled policy server, with KYC whitelisting, categories, velocity limits, vesting, freezing, distributions, and auditor reports. Restricted assets live only in 2-of-2 taproot outputs (user key + policy key: the "enclave"). The asset ID cryptographically commits to the policy key through the issuance contract hash, so the asset-to-policy binding is verifiable by anyone with no consensus change and no node state. The covenant escape loophole (restricted assets leaking through the multi-asset fee pool into an unrestricted coinbase output) is closed structurally: a restricted asset can never be a fee asset, enforced at four independent layers, the strongest being a per-UTXO Tapscript introspection covenant that makes any out-of-enclave output, including a fee output, invalid by consensus. Fees for restricted-asset transfers ride in any ordinary fee asset per Sequentia's open fee market, which also enables issuer-sponsored ("gasless") compliant transfers.
+OpenAMP is an open-source, self-hostable equivalent of Blockstream's AMP2 for Sequentia: issuers manage regulated assets (securities, funds, bonds) whose every transfer requires co-signature from an issuer-controlled policy server, with KYC whitelisting, categories, velocity limits, vesting, freezing, distributions, and auditor reports. Restricted assets live only in 2-of-2 taproot outputs (user key + policy key: the "enclave"). The asset ID cryptographically commits to the policy key through the issuance contract hash, so the asset-to-policy binding is verifiable by anyone with no consensus change and no node state. The covenant escape loophole (restricted assets leaking through the multi-asset fee pool into an unrestricted coinbase output) is closed structurally: a restricted asset never appears in a fee output, enforced at four independent layers, the strongest being a per-UTXO Tapscript introspection covenant that makes any out-of-enclave output, including a fee output, invalid by consensus. The fee output of a restricted-asset transfer is always in an ordinary fee asset per Sequentia's open fee market; users can nonetheless pay in the restricted asset itself through atomic in-transaction fee conversion with the issuer (or any registered fee broker), who takes a fee-equivalent slice of the asset into their own enclave account and attaches the real fee.
 
 ---
 
@@ -29,7 +29,7 @@ Where OpenAMP deliberately goes beyond AMP2:
 2. **Cryptographic asset-to-policy binding**: the asset ID itself commits to the policy key (§4). In AMP the binding between an asset and its cosigner is a platform database row.
 3. **Covenant hardening tier**: with AMP, a compromised or coerced cosigner can sign assets out of the compliance enclave. OpenAMP Tier B makes that impossible below the enclave boundary by consensus (§6).
 4. **Transparency log**: every policy decision is written to an append-only hash chain whose root is periodically committed on-chain, so issuers and regulators can audit the server after the fact (§8).
-5. **Fee sponsorship**: because Sequentia fees can be paid in any accepted asset by any party, the issuer can attach the fee to a user's transfer, so end users need not hold a separate gas asset (§7).
+5. **Fee conversion and sponsorship**: because Sequentia fees can be paid in any accepted asset by any party, users can pay transaction costs in the restricted asset itself, with the issuer atomically bridging to the fee market inside the same transaction, or the issuer can simply sponsor the fee (§7). End users never need a separate gas asset. AMP2 on Liquid cannot offer either: L-BTC is mandatory there.
 
 ---
 
@@ -54,7 +54,7 @@ The externally drafted memo frames the core threat: on a chain where fees can be
 
 The loophole is real only if a restricted asset can reach a fee output at all. The correct fix is to make that structurally impossible, not to teach the coinbase about compliance:
 
-**Rule 1 (the load-bearing rule): a restricted asset is never a fee asset.** Fees for restricted-asset transfers are paid in some ordinary accepted asset chosen by the sender (or sponsor). This is not a limitation; it is Sequentia's open fee market working as designed: block producers choose which assets they accept for fees, and no producer can lawfully accept an asset it is not KYC'd to receive, so no producer would ever whitelist one.
+**Rule 1 (the load-bearing rule): a restricted asset never appears in a fee output.** The fee output of any transaction moving a restricted asset is in some ordinary accepted asset, so the asset never enters the floating fee pool and never reaches a coinbase. This is a protocol-layer statement, not an economic one: the sender can still denominate the cost in the restricted asset by atomically converting with the issuer or a registered fee broker inside the same transaction (§7), and from the user's perspective the fee is then paid in the asset. What can never happen is the asset itself being the thing a block producer sweeps. That framing is Sequentia's open fee market working as designed: block producers choose which assets they accept for fees, no producer can lawfully accept an asset it is not KYC'd to receive, so producers never whitelist restricted assets, and registered intermediaries fill the gap by accepting them for fee payment instead.
 
 Rule 1 is enforced at four independent layers, ordered weakest to strongest:
 
@@ -146,7 +146,7 @@ Tagged hashes (`TapLeaf`, `TapBranch`, `TapTweak`) are computed in-script with `
 
 Consequences worth stating explicitly:
 
-- A fee output in asset `A` fails step 2 (empty scriptPubKey is neither the enclave template nor `OP_RETURN`), so **no transaction paying fees in a Tier B asset can exist**, regardless of what any server, wallet, or producer does.
+- A fee output in asset `A` fails step 2 (empty scriptPubKey is neither the enclave template nor `OP_RETURN`), so **no transaction with a fee output in a Tier B asset can exist**, regardless of what any server, wallet, or producer does. Users still pay costs denominated in `A` via fee conversion (§7); what cannot exist is `A` in the fee pool.
 - The block producer's sweep never sees asset `A`, so `bad-coinbase-not-leader` and the fee pool are simply never involved. The memo's "pre-cleared miner payouts" machinery is unnecessary, and on Sequentia impossible (§2).
 - Inputs need no inspection: Elements consensus already enforces per-asset amount conservation for explicit transactions, so asset `A` appearing in outputs beyond inputs is impossible without issuance, and the issuance path is issuer-controlled (§3 residual trust).
 - Multiple enclave inputs in one transaction each run the same output checks redundantly; harmless.
@@ -158,12 +158,17 @@ Consequences worth stating explicitly:
 
 ## 7. Fees for restricted-asset transfers
 
-A restricted-asset transfer pays its fee in an ordinary asset:
+The fee output is always in an ordinary asset (Rule 1), but the sender has three ways to fund it:
 
+- **Fee conversion (primary UX)**: the sender pays in the restricted asset; the issuer bridges to the fee market atomically. The co-sign transaction contains: the sender's enclave inputs (asset `A`) and an issuer fee-asset input (say USDX); the recipient's enclave output and sender's enclave change in `A`; a **conversion output** paying `ceil(fee_value x rate)` atoms of `A` to the issuer's own enclave address; the fee output in USDX; and the issuer's USDX change. The conversion output is an ordinary enclave-to-enclave transfer to a registered holder, so the Tier B covenant permits it with no special case. Atomicity is inherent: the sender's signatures cover the conversion output and the issuer's signature covers the fee input, so neither leg can exist without the other, and the sender approves the quoted rate by signing. From the user's perspective the fee is paid in `A`; economically the issuer collected fee-equivalent value in `A` and is made whole by construction, so the flow is self-funding, not a subsidy. The conversion rate is published at the policy endpoint (price-server-fed or issuer-set, per contract), quoted to the wallet before signing, and displayed in `A`'s own units. The same value-preserving rounding as the fee market applies: a high-value asset pays few atoms, and that is correct.
 - **Self-paid**: the sender's wallet adds fee-asset inputs (tSEQ, USDX, whatever the wallet's existing any-asset fee logic selects from what the user holds and producers accept) plus the fee output and fee-asset change. The restricted enclave inputs/outputs and the fee legs coexist in one transaction; Tier B requires the fee asset outputs to be explicit, which they are by default.
-- **Sponsored**: the policy server (or issuer) adds the fee input and fee output itself while co-signing, per the asset's service terms. End users then never need a second asset to move their bonds. This is a first-class flow in `pactumd`, priced or free at issuer discretion; it exists because Sequentia deliberately has no privileged fee coin, and it is a UX capability AMP2 on Liquid cannot offer (L-BTC is mandatory there).
+- **Sponsored**: as fee conversion but with no conversion output; the issuer eats the (tiny) fee as a service cost, at their discretion.
 
-One fee asset per transaction is a mempool rule (`bad-txns-multiple-fee-assets`), so sponsor and sender never both attach fees; the PSET protocol makes the fee leg explicit and single.
+Fee brokers: nothing in the conversion flow requires the converter to be the issuer. Any registered holder of `A` willing to receive the conversion output and attach the fee input can serve, and the policy server co-signs it like any transfer between registered users. A standing broker market keeps conversion rates honest; the issuer is simply the default, always-registered, always-willing counterparty.
+
+Policy-engine treatment of conversion outputs: the receiving broker/issuer is a registered holder, so holder caps are unaffected (issuer accounts are cap-exempt anyway); whether conversion is permitted during a lock-in period, and whether it counts against velocity, are per-asset policy flags (default: permitted, counted).
+
+One fee asset per transaction is a mempool rule (`bad-txns-multiple-fee-assets`), so converter and sender never both attach fees; the PSET protocol makes the fee leg explicit and single.
 
 Producer guidance (docs + default config): never add an OpenAMP restricted asset to `setfeeexchangerates`. Defense in depth only; L3/L4 make violations unmineable/invalid respectively.
 
@@ -214,7 +219,7 @@ Distributions (dividends/coupons): ownership snapshot at an anchor-confirmed hei
 | Guarantee | Enforced by | Survives compromised policy server |
 |---|---|---|
 | containment: asset only in enclave outputs or burns | Tier B covenant (consensus, per UTXO); Tier A: server refusal | Tier B: yes / Tier A: no |
-| never a fee asset | covenant (B) + server (A) + default-deny producer whitelist + wallet | Tier B: yes |
+| never in a fee output (fee pool and coinbase unreachable; fee conversion covers the UX) | covenant (B) + server (A) + default-deny producer whitelist + wallet | Tier B: yes |
 | transfers only between registered/authorized users | policy server co-sign | no (same as AMP2) |
 | velocity, holder caps, vesting, categories, jurisdiction | policy server rules engine | no (same as AMP2) |
 | freeze | server refusal (and only that: no consensus freeze) | no |
@@ -227,7 +232,7 @@ Distributions (dividends/coupons): ownership snapshot at an anchor-confirmed hei
 ## 12. Milestones
 
 - **M0, enclave proof (regtest)**: canonical contract JSON + hashing spec; issue a restricted asset with `contract_hash` into Tier A enclave addresses; transfer with a stub co-signer (test harness holding `K_policy`); freeze-by-refusal demo; verify the asset-to-policy binding end to end. Proves the taproot 2-of-2 script path on Sequentia.
-- **M1, `pactumd` v0**: Go daemon with chain follower (anchor/reorg-aware), user registration (AID/xpub), per-asset policy docs (registration + categories + freeze), PSET validation + co-sign with software HSM, issuer and wallet REST APIs; regtest e2e including refusals and reorg rollback of counters.
+- **M1, `pactumd` v0**: Go daemon with chain follower (anchor/reorg-aware), user registration (AID/xpub), per-asset policy docs (registration + categories + freeze), PSET validation + co-sign with software HSM, fee-conversion and sponsorship flows, issuer and wallet REST APIs; regtest e2e including refusals, fee conversion, and reorg rollback of counters.
 - **M2, Tier B covenant**: implement `L_cov`, byte-exact leaf spec frozen as v1; functional tests: enclave-to-enclave pass; out-of-enclave, fee-output, confidential-output, and mis-sorted-branch cases fail; measure leaf size, witness weight, `OP_TWEAKVERIFY` budget; fix `MAX_OUTPUTS`.
 - **M3, issuer operations**: assignments, distributions with snapshot reports, vesting, velocity, holder caps, issuer authorization endpoint, ownership/proof-of-balance/proof-of-transfer reports, transparency log with on-chain anchoring, clawback ceremony.
 - **M4, ecosystem**: SWK managed-assets account, explorer badges + binding verification, registry integration, deploy `pactumd` to the box, issue a demo restricted asset (BONDX) on the public testnet, public docs.
