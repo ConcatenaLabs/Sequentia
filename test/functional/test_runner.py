@@ -149,6 +149,7 @@ BASE_SCRIPTS = [
     'feature_taphash_pegins_issuances.py',
     'feature_tapscript_opcodes.py',
     'feature_openamp_m0.py',
+    'feature_openamp_m2.py',
     # vv Tests less than 60s vv
     'p2p_sendheaders.py',
     'wallet_importmulti.py --legacy-wallet',
