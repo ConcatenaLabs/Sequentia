@@ -148,6 +148,7 @@ BASE_SCRIPTS = [
     'wallet_signer.py --descriptors',
     'feature_taphash_pegins_issuances.py',
     'feature_tapscript_opcodes.py',
+    'feature_openamp_m0.py',
     # vv Tests less than 60s vv
     'p2p_sendheaders.py',
     'wallet_importmulti.py --legacy-wallet',
