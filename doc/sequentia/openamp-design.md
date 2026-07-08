@@ -1,6 +1,6 @@
 # OpenAMP: issuer-governed assets for Sequentia (design)
 
-STATUS: 2026-07-08. Name: OpenAMP (daemon `openampd`, repo `GracedEternalKingCabbageMan/openamp`). Single enforcement model: server co-signed 2-of-2 enclaves with a threshold (FROST) policy key. Confidentiality is opt-in per asset, exactly as for any other Sequentia asset. There is NO consensus-covenant tier: an earlier "Tier B" containment covenant was designed, built, and then scrapped because consensus-enforced containment forces all-explicit outputs, which would publish every holding to outside observers, and hiding holdings from outsiders (while the issuer sees everything) matters more than trustless containment for regulated assets. See §9 for that reasoning.
+STATUS: 2026-07-08. Name: OpenAMP (daemon `openampd`, repo `GracedEternalKingCabbageMan/openamp`). Single enforcement model: server co-signed 2-of-2 enclaves with a threshold (FROST) policy key. Confidentiality is opt-in per asset, exactly as for any other Sequentia asset. A consensus-covenant containment approach is deliberately not pursued (§8): it would force all-explicit outputs and publish every holding, and hiding holdings from outsiders while the issuer sees everything is the requirement for a regulated asset.
 
 Build state: `openampd` policy server is LIVE on the box (systemd `openampd`, node000 RPC, wallet `openampd-demo`, fee asset tSEQ) at `https://sequentiatestnet.com/openamp/` (Caddy; wallet endpoints public, issuer endpoints token-gated). A demo restricted asset **BONDX** (`8d1dbf45…`, clawback on, contract hash `42f5d9e5…` committing to the policy key) was issued on the public testnet, a real transfer settled with fee conversion, the ownership report shows exact conservation, and the transparency log is anchored on-chain. Registry serves BONDX with its `openamp` block for discovery; the SWK web wallet and Ambra v0.10.3 both ship restricted-asset support (register, balances, enclave receive, send with on-device schnorr signing).
 
@@ -141,21 +141,15 @@ One fee asset per transaction is a mempool rule, so converter and sender never b
 ## 8. Rejected alternatives
 
 - **Consensus-level asset-bound covenants (the Gemini memo)**: rejected. It breaks stateless UTXO validation (every node maintains an indexed issuance-commitment database, the state bloat the memo concedes); it is consensus-incompatible with Sequentia (`bad-coinbase-not-leader` pins every value-bearing coinbase output to the leader's fee script); KYC'd block producers fragment the open fee market; and it solves a problem that "never a fee output" dissolves. Consensus surface is our scarcest resource; a compliance feature must not add reorg-relevant code paths.
-- **A consensus-enforced containment covenant (our own former "Tier B")**: designed and built (a recursive Tapscript covenant that self-proved its leaf hash via `OP_TWEAKVERIFY` and forced every asset-A output to be enclave-shaped), then removed. It gave trustless containment (survives a fully compromised policy server) but required all-explicit outputs, because the covenant reads each output's asset tag in-script and cannot identify a confidential output's asset without either revealing it (defeating the point) or verifying a zero-knowledge proof (impossible in tapscript). That publishes every holding to outside observers. For a regulated asset, hiding holdings from outsiders while the issuer sees everything is the requirement, and it is incompatible with consensus containment given current primitives. The threshold policy key (§5) raises the "compromised server" bar the covenant was meant to address, without going transparent. Removed entirely.
+- **A consensus-enforced containment covenant**: a Tapscript covenant could make containment trustless (survive a fully compromised policy server), but it must read each output's asset tag in-script, so it forces all-explicit outputs and cannot work over confidential ones (identifying a blinded output's asset needs either revealing it or a zero-knowledge proof tapscript can't verify). That publishes every holding to outside observers. For a regulated asset the requirement is the opposite (issuer sees all, outsiders see nothing), so this is rejected; the threshold policy key (§5) instead raises the "compromised server" bar without going transparent.
 - **Pure-covenant compliance (no server)**: KYC, velocity, holder caps, and vesting are inherently off-chain facts; the server stays.
 - **Omnibus enclave (single asset-wide address, server-side ledger)**: makes the server custodial; rejected because user keys must be required for every move (non-custodial 2-of-2 is the AMP property worth keeping).
 
 ---
 
-## 9. Why no trustless-containment tier
+## 9. Design principle: confidentiality over trustless containment
 
-The requirement for a regulated instrument is: the issuer (and its policy server) can know who owns what at any time; outside observers cannot. Three properties are in tension and, with current Sequentia primitives, you can have at most two:
-
-- **consensus-enforced containment** (no trusted party can free the asset),
-- **outsider-confidentiality** (holdings blinded to the public),
-- **server-enforced only** (a trusted policy server, hardened by a threshold, enforces the rules).
-
-A consensus covenant buys containment without a trusted party, but must read explicit asset tags, so it forfeits confidentiality. OpenAMP takes outsider-confidentiality plus a threshold-hardened server, which is exactly AMP2's model, and hardens the "trusted server" corner with FROST so freeing the asset needs a quorum rather than one machine. This matches the first principle that Sequentia flipped Liquid's confidential-by-default to transparent-by-default: privacy for a governed asset is an opt-in the issuer chooses, bounded by what the policy server must see.
+The requirement for a regulated instrument is that the issuer (and its policy server) can know who owns what at any time while outside observers cannot. Given current Sequentia primitives, at most two of these three hold at once: no-trusted-party containment, outsider-confidentiality, and a trusted-but-threshold-hardened server. OpenAMP takes outsider-confidentiality plus a FROST-hardened server (exactly AMP2's model), so freeing the asset needs a quorum rather than one machine. This matches the first principle that Sequentia flipped Liquid's confidential-by-default to transparent-by-default: privacy for a governed asset is an opt-in the issuer chooses, bounded by what the policy server must see.
 
 ---
 
