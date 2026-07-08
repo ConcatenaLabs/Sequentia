@@ -91,7 +91,7 @@ Sequentia is transparent by default and confidentiality is opt-in per output; Op
 
 The honest limit, stated in the UI: a confidential restricted asset is confidential against third parties, never against the issuer or its policy server. That is the correct property for a regulated instrument (the issuer must be able to know who owns what at any time), and it is exactly AMP2's model on Liquid. It is narrower than a normal Sequentia confidential address, where nobody but the counterparties sees the amount.
 
-Transparent (unblinded) assets remain fully supported for issuers who want public, auditable holdings; `confidential` is a per-asset choice made once at issuance. Status: the `confidential` flag is committed in the contract and carried through the registry and specs; the end-to-end `openampd` CT flow (confidential issuance, blinded transfer, watch-wallet unblinding, blinded co-sign) and the wallet toggle are the remaining M5 build, with the primitives proven feasible.
+Transparent (unblinded) assets remain fully supported for issuers who want public, auditable holdings; `confidential` is a per-asset choice made once at issuance. Status: DONE and proven end to end on regtest (`test/functional/feature_openamp_confidential.py`): confidential issuance and transfers blind on-chain, the server reports exact unblinded balances via its watch wallet, and fee conversion works confidentially. Requires the issuer's funding wallet to be CT-capable (`-blindedaddresses=1`).
 
 ---
 
@@ -173,7 +173,7 @@ For confidential assets, receive shows the blech32 enclave address, and the wall
 - **M1, `openampd` v0**: DONE. Chain follower, registration, per-asset policy, PSET validation + co-sign (software key), REST APIs. `feature_openamp_daemon.py`.
 - **M3, issuer operations**: DONE. Assignments, distributions with snapshot reports, vesting, velocity, holder caps, issuer authorization endpoint, ownership/proof-of-balance reports, anchored transparency log, clawback ceremony.
 - **M4, ecosystem + deploy**: DONE. Box deployment, live BONDX on the public testnet, registry, SWK and Ambra integration.
-- **M5, confidentiality + threshold + trading**: IN PROGRESS. Opt-in confidential assets end to end (blech32 enclave addresses, blinding-key handling, blinded co-sign); FROST threshold policy key; SeqDEX registered-user trading.
+- **M5, confidentiality + threshold + trading**: opt-in confidential assets end to end DONE (blech32 enclave addresses, watch-wallet blinding-key handling, blinded co-sign; `feature_openamp_confidential.py`); the `PolicySigner` interface (single-key backend on testnet, documented FROST/MPC seam) DONE. Remaining: the FROST quorum backend itself (mainnet prep, built and hardened behind the interface with no chain change) and SeqDEX registered-user trading.
 
 Repo: public `openamp` (Go daemon + specs). Chain-side changes: none.
 
