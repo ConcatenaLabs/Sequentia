@@ -153,6 +153,7 @@ BASE_SCRIPTS = [
     'feature_seqob_matcher_covenant.py',
     'feature_seqob_joint_covenant.py',
     'feature_seqob_watcher.py',
+    'feature_seqob_bridge.py',
     # vv Tests less than 60s vv
     'p2p_sendheaders.py',
     'wallet_importmulti.py --legacy-wallet',
