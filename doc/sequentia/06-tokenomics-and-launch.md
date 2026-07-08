@@ -1,6 +1,7 @@
 # Tokenomics, genesis & launch
 
-Sequence (SEQ) is the staking asset and the only token native to Sequentia. Its supply is
+The Sequence token (SEQ; tSEQ on testnet) is the staking asset and the only
+token native to Sequentia. Its supply is
 fixed, minted once at genesis, and never inflated. This chapter describes the
 supply and what it confers, how the genesis block is constructed to seed the
 first staker, how a chain bootstraps from that seed with no operator-side staker
@@ -11,7 +12,7 @@ governance versus per-node engineering.
 
 - **Fixed supply: 400,000,000 SEQ**, pre-mined and fully distributed at genesis.
   The money range matches: `MAX_MONEY = 400,000,000 × COIN` (4e16 atoms at 8
-  decimals — the hard cap and per-output sanity bound, well below int64's
+  decimals - the hard cap and per-output sanity bound, well below int64's
   ceiling). `MAX_MONEY` is **per chain** (`src/consensus/amount.h`, set in each
   `CChainParams` constructor): the Sequentia chains (`sequentia`, `test`) use
   4e16; the inherited Bitcoin/Elements chains keep Bitcoin's 2.1e15.
@@ -39,7 +40,7 @@ for how the threshold gates sortition eligibility.
 
 The genesis block distributes the entire supply and seeds the first staker. It
 is the one block that needs no staker and no prior history: **height 0 is exempt
-from PoS validation** — `CheckPosStakeRules` returns early when
+from PoS validation** - `CheckPosStakeRules` returns early when
 `pindexPrev == nullptr`, and `ConnectBlock` adds genesis outputs without
 validating them (`connect_genesis_outputs = true` places them in the UTXO set).
 So genesis is accepted without a leader, committee, or VRF proof; the chain
@@ -53,7 +54,7 @@ Genesis carries two kinds of output:
   (`<csv> CSV DROP <pubkey> CHECKSIG`), of the policy asset, with a relative
   timelock at least the unbonding requirement. Because `RebuildUtxoStake`
   counts staking outputs at *all* heights including genesis, block 1 sees a
-  non-empty stake registry and the founder is a registered staker — so block 1
+  non-empty stake registry and the founder is a registered staker - so block 1
   can be certified. The bundled chains use a **time-based CSV lock** of ~15 days
   (`2532 × 512 s`).
 - A **plain (P2WPKH) output** holding the spendable remainder of the supply, the
@@ -61,8 +62,17 @@ Genesis carries two kinds of output:
 
 On the bundled chains a fixed genesis bakes both: 1,000,000 SEQ in the CSV-locked
 seed staking output + 399,000,000 SEQ in the plain founder output =
-**400,000,000 SEQ** total. The only thing that varies between bundled chains is
-the founder key and the address format.
+**400,000,000 SEQ** total. On the `test` chain the seed staking output
+additionally carries the founder's **committee BLS registration** (the
+extended staking-script form of [`04-proof-of-stake.md`](04-proof-of-stake.md)
+§2), so under the public fixed-size committee the founder is a size-1
+committee (quorum 1) that can self-certify block 1 - this is what makes the
+2026-07-05 re-genesis genesis
+(`ddd11d54c87a2bd94400fd31ce05d8e1110bb4b78e7103f738342086fc4ea92e`) distinct
+from the prior testnet genesis. What varies between the bundled chains is the
+founder key, the address format, and that BLS registration (the
+`-chain=sequentia` placeholder genesis predates it and would be regenerated at
+launch anyway).
 
 A real launch regenerates this genesis with a **fresh, secret founder key** and
 the desired distribution, producing a new genesis hash. The founder key shipped
@@ -70,7 +80,7 @@ on `-chain=sequentia` is a **placeholder**: it is published only so the mainnet
 *config* is runnable before launch, and it controls the entire 400M supply, so it
 must be replaced. A node refuses to start on `-chain=sequentia` with the
 placeholder genesis unless `-allowplaceholdergenesis` is set (see
-`src/init.cpp`). Only the genesis block changes at launch — the founder key and
+`src/init.cpp`). Only the genesis block changes at launch - the founder key and
 optionally the distribution layout; every consensus rule and parameter (PoS, the
 100-member committee, the 40,000-SEQ min stake, 30s slots, ~15-day unbonding, the
 block weight, anchoring, `MAX_MONEY`) is already the real value and stays
@@ -82,9 +92,9 @@ A Sequentia chain needs **no `-staker` configuration**. The staker set is
 entirely on-chain, derived from staking outputs by the `StakeRegistry`
 (`src/pos.h`), which merges two layers and sorts on their sum:
 
-- `m_config` — the `-staker pubkey:weight` layer, a static all-nodes-identical
+- `m_config` - the `-staker pubkey:weight` layer, a static all-nodes-identical
   set. It is still supported but **optional**.
-- `m_utxo` — derived from on-chain staking outputs. `RebuildUtxoStake`
+- `m_utxo` - derived from on-chain staking outputs. `RebuildUtxoStake`
   (`src/pos.cpp`) re-derives this layer from the **entire UTXO set, including
   genesis (height-0) outputs**, at every node start, while the incremental
   `PosApplyBlockStake` / `PosRevertBlockStake` mirror connects and disconnects at
@@ -98,20 +108,23 @@ The launch sequence runs through three regimes:
 1. **Empty → founder-only.** Genesis distributes the 400M supply and seeds the
    founder's CSV-locked staking output. As of block 1 the founder is the rank-0
    leader and the entire size-1 committee.
-2. **Slow start under escaping-stall.** A full quorum is impossible with one
-   staker, so each early block is certified under the **escaping-stall rule**
-   (sub-threshold certification, down to a single signer, permitted when the
-   Bitcoin anchor advances by +3) — roughly one block per ~3 Bitcoin blocks
-   (~30 min). The slow cadence is harmless during setup. See
-   [`04-proof-of-stake.md`](04-proof-of-stake.md) for escaping-stall.
+2. **Founder-only certification.** Under the public fixed-size committee (the
+   current testnet's regime) the founder is a size-1 committee with quorum 1,
+   so it certifies blocks at full cadence immediately. Under threshold
+   sortition a full quorum is impossible with one
+   staker, so each early block is instead certified under the **escaping-stall
+   rule** (sub-threshold certification, down to a single signer, permitted when
+   the Bitcoin anchor advances by +3) - roughly one block per ~3 Bitcoin blocks
+   (~30 min); the slow cadence is harmless during setup. See
+   [`04-proof-of-stake.md`](04-proof-of-stake.md).
 3. **Full speed.** The founder spends the plain portion of the supply to the
    first users, who lock their own staking outputs. Each on-chain staking output
    enters `m_utxo`, so the eligible set grows. Once a committee quorum of
    sortition-eligible stakers participates, normal full-committee certification
    takes over and the chain runs at its nominal 30s cadence.
 
-The bootstrap tooling that drives a fresh network through this growth — seeding
-the founder, distributing to and registering the first committee members — lives
+The bootstrap tooling that drives a fresh network through this growth - seeding
+the founder, distributing to and registering the first committee members - lives
 in `contrib/sequentia/bootstrap-committee.py`; see
 [`05-operating-sequentia.md`](05-operating-sequentia.md).
 
@@ -125,13 +138,16 @@ never active on either.
 - **`-chain=sequentia`** is the **real Sequentia network**: its own dedicated
   chain id, mainnet address format, and distinct network magic. Its genesis
   founder key is the placeholder that must be replaced at the launch ceremony
-  (above). (`-chain=main` is deliberately left as Bitcoin-Elements — the
-  inherited unit-test harness default and a parent-chain interop target — so
+  (above). (`-chain=main` is deliberately left as Bitcoin-Elements - the
+  inherited unit-test harness default and a parent-chain interop target - so
   Sequentia gets its own slot rather than repurposing `main`.)
 - **`-chain=test`** is the **public testnet**: identical consensus rules, testnet
   address format, and a published founder key anyone can use to run and
-  experiment. Its founder key is a **throwaway** whose private key is published on
-  purpose (testnet only); the network is never "launched" or replaced.
+  experiment. Its founder key is a **throwaway** whose private key is published
+  on purpose (testnet only). As a test network it can be reset: the current
+  chain dates from the 2026-07-05 re-genesis (public fixed-size committee,
+  `pospubliccommittee=1 poscommitteesize=250`, anchored to Bitcoin testnet4),
+  which abandoned the previous chain.
 
 **Custom chains** assemble the same mechanism from config:
 `-con_genesis_stake=<pubkeyhex>:<amount_atoms>:<csv>` places a genesis staking
@@ -143,8 +159,8 @@ stakers until a committee forms.
 
 The signed-block **"anyone-signs" dev path** lives only on the custom/regtest
 chains: start with `-con_pos=0 -signblockscript=51` (the defaults for custom
-chains via `CCustomParams`; `elementsregtest` is one example custom-chain name). This is the dev/test harness — trivially runnable, no staker
-setup, no Bitcoin parent required — and it is **not** Sequentia consensus. See
+chains via `CCustomParams`; `elementsregtest` is one example custom-chain name). This is the dev/test harness - trivially runnable, no staker
+setup, no Bitcoin parent required - and it is **not** Sequentia consensus. See
 [`04-proof-of-stake.md`](04-proof-of-stake.md).
 
 ## Governance versus engineering
@@ -161,7 +177,7 @@ between honest operators without forking the chain (see
 | Genesis staker seed & SEQ distribution | Launch governance | Genesis outputs (`-con_genesis_stake`, `-initialfreecoins`); no `-staker` needed |
 | No inflation / no block subsidy | Launch governance | `con_blocksubsidy = 0`, fixed in code |
 | Minimum stake (0.01% = 40,000 SEQ) | Launch governance | Hardcoded `g_pos_min_stake` in `CSequentiaParams`; `-posminstake` on custom chains |
-| Committee size (100) | Launch governance | Consensus config |
+| Committee regime & size (public fixed-size, cap 250 with quorum 126 on the testnet; threshold sortition caps at 100) | Launch governance | Consensus config (`pospubliccommittee`, `poscommitteesize`) |
 | Unbonding period (~15 days) | Launch governance | Staking-output CSV requirement |
 | Slot interval (~30s) | Launch governance | Hardcoded `g_pos_slot_interval = 30` in `CSequentiaParams`; `-posslotinterval` on custom chains |
 | Published Bitcoin checkpoints | Launch governance | Consensus config; see [`04-proof-of-stake.md`](04-proof-of-stake.md) |

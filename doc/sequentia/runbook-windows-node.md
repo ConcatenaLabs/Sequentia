@@ -1,4 +1,4 @@
-# Runbook — running a Sequentia testnet node on Windows (stake, create assets, run asset tests)
+# Runbook - running a Sequentia testnet node on Windows (stake, create assets, run asset tests)
 
 This is a complete, do-it-yourself guide for a tester (e.g. Alberto) to run a
 Sequentia node on a Windows laptop, join the shared testnet, stake tSEQ, issue
@@ -16,18 +16,19 @@ prior Sequentia experience. Commands are shown for the **Windows Command Prompt
 ## A. What the testnet operator gives you
 
 Before you start, the person running the testnet (the "operator") gives you
-**four things**. Keep them handy — you'll paste them into the config in §2.
+**two things**:
 
 | # | Item | Looks like | Used for |
 |---|------|-----------|----------|
-| 1 | The installer | `SequentiaTestnetSetup-x.y.z.exe` (or a ZIP of the binaries) | installing the node |
-| 2 | A Sequentia peer to connect to | `addnode` = `host:port`, e.g. `seqtest.example.com:18444` | finding the testnet |
-| 3 | A Bitcoin testnet4 RPC endpoint | host / port / user / password | validating the Bitcoin anchors and producing blocks |
-| 4 | Your tSEQ | sent to an address you generate in §4, **after** your node is synced | staking, fees, asset issuance |
+| 1 | The installer | `SequentiaTestnetSetup-x.y.z.exe` (or a ZIP of the binaries), built from the current branch (post-2026-07-05 re-genesis) | installing the node |
+| 2 | Your tSEQ | sent to an address you generate in §4, **after** your node is synced | staking, fees, asset issuance |
 
-Items 2 and 3 are the only network-specific values; everything else is baked
-into the installer's default config. The operator sends your tSEQ (item 4) once
-you confirm your node is synced (end of §3).
+The network endpoints are built into the node: on `chain=test` it defaults to
+the shared gateway as a peer (`addnode=159.195.15.140:18444`) and to a shared
+Bitcoin testnet4 RPC endpoint for anchor validation. If the operator gives you
+your own peer or testnet4 endpoint, set those in §2 instead - an explicit
+value always overrides the built-in default. The operator sends your tSEQ
+(item 2) once you confirm your node is synced (end of §3).
 
 ---
 
@@ -72,17 +73,15 @@ Open the config file in Notepad:
 notepad "%APPDATA%\Elements\elements.conf"
 ```
 
-Paste in the following, then **fill the three `<...>` values** from §A and
-**choose your own `rpcpassword`**:
+Paste in the following and **choose your own `rpcpassword`**:
 
 ```ini
 chain=test
 
 [test]
 # --- consensus params: these MUST match the testnet (do not change) ---
-poscommitteesize=100
-acceptnonstdtxn=1
-parentgenesisblockhash=00000000da84f2bafbbc53dee25a72ae507ff4914b867c565be350b0da8bf043
+pospubliccommittee=1
+poscommitteesize=250
 
 # --- your node's local RPC (used by elements-cli on this machine only) ---
 server=1
@@ -92,28 +91,25 @@ rpcbind=127.0.0.1
 rpcallowip=127.0.0.1
 rpcport=18201
 
-# --- peer-to-peer: connect to the testnet ---
-listen=1
-discover=0
-dnsseed=0
-upnp=0
-addnode=<SEQ_PEER_HOST:PORT>          # item 2 from §A
-
-# --- Bitcoin testnet4 anchor source (item 3 from §A) ---
-con_bitcoin_anchor=1
-validateanchor=1
-anchorminconf=1
-anchorpollinterval=15
-mainchainrpchost=<TESTNET4_RPC_HOST>
-mainchainrpcport=<TESTNET4_RPC_PORT>
-mainchainrpcuser=<TESTNET4_RPC_USER>
-mainchainrpcpassword=<TESTNET4_RPC_PASSWORD>
+# --- OPTIONAL: your own peer / Bitcoin testnet4 anchor source. The node
+# defaults both to the shared public-testnet endpoints; only set these if the
+# operator gave you your own (explicit values override the defaults).
+#addnode=<SEQ_PEER_HOST:PORT>
+#mainchainrpchost=<TESTNET4_RPC_HOST>
+#mainchainrpcport=<TESTNET4_RPC_PORT>
+#mainchainrpcuser=<TESTNET4_RPC_USER>
+#mainchainrpcpassword=<TESTNET4_RPC_PASSWORD>
 ```
 
-Save and close. (Leave the staking lines out for now — you add them in §5,
+Save and close. (Leave the staking lines out for now - you add them in §5,
 *after* you have a funded staking output.)
 
-> Why the Bitcoin RPC? Every Sequentia block commits a Bitcoin testnet4 block as
+> Why `pospubliccommittee` and `poscommitteesize`? They are network-wide
+> consensus rules of the current chain (the 2026-07-05 re-genesis runs the
+> public fixed-size committee, cap 250) that are not yet the binary's
+> defaults; a node without them rejects the network's blocks.
+
+> Why a Bitcoin RPC? Every Sequentia block commits a Bitcoin testnet4 block as
 > its anchor; your node checks that anchor against testnet4, and when you stake
 > it anchors the blocks *you* produce to fresh testnet4 blocks. Without it the
 > node can't validate the tip or produce. See `doc/sequentia/03-bitcoin-anchoring.md`.
@@ -146,7 +142,7 @@ elements-cli.exe getstakerinfo
 elements-cli.exe getanchorstatus
 ```
 
-`getanchorstatus` should read `"anchorstatus": "ok"` — that confirms your
+`getanchorstatus` should read `"anchorstatus": "ok"` - that confirms your
 testnet4 RPC is reachable and the tip's anchor checks out. **Tell the operator
 once you're synced; they'll send your tSEQ.**
 
@@ -157,7 +153,7 @@ Stop the node any time with `elements-cli.exe stop`; restart with
 
 ## 4. Create a wallet and receive your tSEQ
 
-Create a wallet (use a legacy wallet — it makes the staking key step in §5
+Create a wallet (use a legacy wallet - it makes the staking key step in §5
 straightforward):
 
 ```
@@ -176,7 +172,7 @@ When the tSEQ arrives, confirm it:
 elements-cli.exe -rpcwallet=main getbalance "*"
 ```
 
-You should see a `"bitcoin"` balance (that's the policy asset, the Sequence token (SEQ) — it carries
+You should see a `"bitcoin"` balance (that's the policy asset, the Sequence token (SEQ) - it carries
 the Elements default label "bitcoin"). You can also see individual coins with
 `elements-cli.exe -rpcwallet=main listunspent`.
 
@@ -186,24 +182,40 @@ the Elements default label "bitcoin"). You can also see individual coins with
 
 Staking is **opt-in**: holding tSEQ does nothing on its own. You must lock some
 tSEQ into a **staking output**, after which its weight counts continuously (for
-as long as the output stays unspent — indefinitely; the lock is only the
+as long as the output stays unspent - indefinitely; the lock is only the
 *unbonding delay* before you could withdraw). See
 `doc/sequentia/04-proof-of-stake.md` §2 and `05-operating-sequentia.md` §8.
 
-A staking output pays to a special script (`getstakescript`) that an ordinary
-`sendtoaddress` can't target, so use the provided helper, which builds, funds,
-signs and broadcasts it for you and prints the staker key:
+Registering stake takes three ingredients, all from your own node:
 
-```
-register-stake.exe --rpcport 18201 --rpcuser alberto --rpcpassword <yours> ^
-                   --wallet main --amount 50000
-```
+1. **A staker key.** Generate one and note its pubkey and WIF (private key):
+   ```
+   elements-cli.exe -rpcwallet=main getnewaddress
+   elements-cli.exe -rpcwallet=main getaddressinfo <that-address>
+   elements-cli.exe -rpcwallet=main dumpprivkey <that-address>
+   ```
+   (`getaddressinfo` shows the `pubkey`; `dumpprivkey` the WIF.)
+2. **Your committee BLS registration**, derived from the staker key (the
+   public committee names its signers by their registered BLS keys):
+   ```
+   elements-cli.exe getblsregistration "<staker-WIF>"
+   ```
+   Note the `blspubkey` and `pop` values it returns.
+3. **The staking script** for that key with the ~15-day unbonding lock:
+   ```
+   elements-cli.exe getstakescript "<staker-pubkey>" null 1296384 <blspubkey> <pop>
+   ```
+   It returns the `script` (hex) your stake must pay to.
 
-(`50000` tSEQ is well above the 40,000-SEQ minimum stake; adjust as you like.)
-It prints two things:
-
-- the **staker WIF** (private key) — you'll put this in the config next, and
-- the **registration txid**.
+The staking script is a **bare script with no address form**, so an ordinary
+`sendtoaddress` cannot pay it; the funding transaction has to be built raw
+(the repo tool `contrib/sequentia/bootstrap-autonomous-testnet.py` shows the
+construction). The practical path for a Windows tester today is to send the
+`script` hex from step 3 to the operator together with the amount you want to
+stake (e.g. `50000` tSEQ, comfortably above the 40,000-tSEQ minimum): the
+operator funds the script from your tSEQ with their tooling and returns the
+**registration txid**. Keep the staker WIF from step 1 - you'll put it in the
+config next.
 
 Wait for that txid to confirm (the live committee mines it within a block or
 two):
@@ -219,7 +231,7 @@ of `elements.conf`, and restart:
 
 ```ini
 posproducer=1
-posproducerkey=<your-staker-WIF-from-register-stake>
+posproducerkey=<your-staker-WIF-from-step-1>
 ```
 
 ```
@@ -238,7 +250,7 @@ Look for your pubkey in the schedule/committee. The more you stake, the more
 often you're selected (it's proportional to your share of total stake).
 
 **To stop staking later (unbond):** after the ~15-day lock has matured, spend the
-staking output back to a normal address. There's no separate ceremony — that
+staking output back to a normal address. There's no separate ceremony - that
 spend *is* the unbonding. Until you do, it keeps staking.
 
 ---
@@ -282,7 +294,7 @@ elements-cli.exe -rpcwallet=main destroyamount <asset-id> 100
 
 ## 7. Run asset / fee tests yourself
 
-Sequentia's distinctive feature is the **open fee market** — a transaction can
+Sequentia's distinctive feature is the **open fee market** - a transaction can
 pay its fee in *any* asset a block producer prices, not just SEQ. Here's how to
 exercise it.
 
@@ -318,7 +330,7 @@ elements-cli.exe -rpcwallet=main -named sendtoaddress ^
 ```
 
 **7.3 Replace-by-fee (RBF), including a fee-asset swap.** Send a replaceable
-transaction, then bump it — optionally switching the fee asset:
+transaction, then bump it - optionally switching the fee asset:
 
 ```
 elements-cli.exe -rpcwallet=main -named sendtoaddress ^
@@ -353,7 +365,7 @@ elements-cli.exe getcheckpointinfo
 ```
 
 If testnet4 reorgs a referenced block, you'll see the Sequentia tip roll back and
-re-extend, with finality holding modulo the Bitcoin reorg — exactly as designed.
+re-extend, with finality holding modulo the Bitcoin reorg - exactly as designed.
 
 ---
 
@@ -363,8 +375,8 @@ re-extend, with finality holding modulo the Bitcoin reorg — exactly as designe
 |---|---|
 | `getconnectioncount` is 0 | the `addnode` host/port (item 2) is wrong or not reachable; confirm with the operator; check Windows Firewall isn't blocking `elementsd.exe`. |
 | Stuck in `initialblockdownload` | give it time on first sync; confirm you have a peer (§3) and the testnet4 RPC works (`getanchorstatus`). |
-| `getanchorstatus` not `"ok"` | your `mainchainrpc*` settings (item 3) are wrong/unreachable — fix them in `elements.conf` and restart. |
-| `register-stake` says "below the chain's minimum" | raise `--amount` above 40,000, or pass `--csv-seconds 1296000`. |
+| `getanchorstatus` not `"ok"` | your `mainchainrpc*` settings (item 3) are wrong/unreachable - fix them in `elements.conf` and restart. |
+| `getstakescript` says the lock "is below the chain's minimum" | raise the `csv_seconds` argument to at least `1296000` (~15 days). |
 | Your staker never appears in `getposschedule` | confirm the registration tx is mined (`getstakerinfo`), that `posproducer=1` and `posproducerkey` are set, and the node has been restarted. |
 | A fee-in-asset tx won't confirm | no producer prices that asset; ask the operator to price it across the committee. |
 | Node won't start after edits | run `elementsd.exe` (without `-daemon`) to see the error in the console. |

@@ -76,7 +76,7 @@ Net rule: the LN leg is safe to lean on as instant; the Sequentia leg is only sa
 
 ## 6. DEX integration — extending the order-book DEX to LN
 
-The existing design (`/home/aejkohl/SequentiaByClaude/doc/sequentia/seqdex-orderbook-design.md`) already carries an **intent, not a PSET**, in resting offers, with a `oneof settlement` (same_chain / cross_chain) and a relay that couriers opaque swap-session messages. A submarine swap is a third settlement variant that reuses all of that plumbing.
+The existing design (`/home/aejkohl/Sequentia/doc/sequentia/seqdex-orderbook-design.md`) already carries an **intent, not a PSET**, in resting offers, with a `oneof settlement` (same_chain / cross_chain) and a relay that couriers opaque swap-session messages. A submarine swap is a third settlement variant that reuses all of that plumbing.
 
 **Offer schema** — add a Lightning variant to the `settlement` oneof:
 ```protobuf
@@ -147,4 +147,4 @@ Be truthful per Principle 1 — never claim irreversible if an on-chain leg can 
 
 **Cross-cutting hard constraints (all phases):** denominate confirmation depth as **Bitcoin-anchor confirmations** (via `getanchorstatus` + bitcoind), never Sequentia tip-distance; size `to_self_delay`/CLTV in **wall-clock**, accounting for the ~6–7× Sequentia/Bitcoin block-rate ratio; defenders must hold a **committee-accepted fee asset** so penalty/claim txs are includable under the open fee market; standard LN watchtower/online liveness assumptions apply. None of these are anchoring bugs — they are the price of getting the units right, after which LN-on-Sequentia is as safe as LN-on-Bitcoin and strictly safer cross-chain.
 
-Grounding files: `/home/aejkohl/SequentiaByClaude/doc/sequentia/03-bitcoin-anchoring.md` (tail-truncation watcher §3, real-time/finality §4, swaps §6); `/home/aejkohl/SequentiaByClaude/doc/sequentia/04-proof-of-stake.md` (finality/fork-choice); `/home/aejkohl/SequentiaByClaude/src/anchor.cpp`, `/home/aejkohl/SequentiaByClaude/src/anchor.h`; `/home/aejkohl/SequentiaByClaude/doc/sequentia/seqdex-orderbook-design.md` (offer schema §2, relay envelope/lift session §3, cross-chain HTLC reuse §6, blockers B1/B3/B4).
+Grounding files: `/home/aejkohl/Sequentia/doc/sequentia/03-bitcoin-anchoring.md` (tail-truncation watcher §3, real-time/finality §4, swaps §6); `/home/aejkohl/Sequentia/doc/sequentia/04-proof-of-stake.md` (finality/fork-choice); `/home/aejkohl/Sequentia/src/anchor.cpp`, `/home/aejkohl/Sequentia/src/anchor.h`; `/home/aejkohl/Sequentia/doc/sequentia/seqdex-orderbook-design.md` (offer schema §2, relay envelope/lift session §3, cross-chain HTLC reuse §6, blockers B1/B3/B4).

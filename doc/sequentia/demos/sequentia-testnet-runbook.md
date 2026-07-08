@@ -1,5 +1,13 @@
 # Sequentia testnet (chain=test) — local runbook
 
+> **STATUS (2026-07-08):** written before the 2026-07-05 public-testnet
+> re-genesis. The flow is still valid for a LOCAL bring-up, with two updates:
+> (1) the live public chain runs the public fixed-size committee, so pass
+> `--public-committee` (i.e. `pospubliccommittee=1`, cap 250) to reproduce it;
+> (2) `chain=test` now auto-adds the public gateway (159.195.15.140:18444) as
+> a peer, so isolate a local network from the public one before producing
+> blocks. See `doc/sequentia/05-operating-sequentia.md`.
+
 Stand up the **genuine Sequentia testnet** locally: `chain=test` (CTestNetParams) —
 the real baked genesis founder, the **autonomous BLS committee on by default**, 30-second
 slots, ~15-day unbonding, the 40,000-SEQ stake floor — bootstrapped from the founder via
@@ -28,7 +36,7 @@ A large committee plus 100+ daemons is memory-heavy. Stop any prior run first:
 
 ```bash
 # stop the old elementsregtest 100-node run, if present:
-python3 ~/SequentiaByClaude/contrib/sequentia/bootstrap-autonomous-testnet.py --stop --basedir ~/seq-bootstrap100 2>/dev/null
+python3 ~/Sequentia/contrib/sequentia/bootstrap-autonomous-testnet.py --stop --basedir ~/seq-bootstrap100 2>/dev/null
 pgrep -c elementsd        # confirm it drops
 ```
 
@@ -37,7 +45,7 @@ pgrep -c elementsd        # confirm it drops
 Validates the whole `chain=test` flow with a throwaway parent it advances on demand:
 
 ```bash
-cd ~/SequentiaByClaude
+cd ~/Sequentia
 ulimit -n 65535
 python3 contrib/sequentia/bootstrap-autonomous-testnet.py \
   --chain test --local-parent --nodes 5 --run-seconds 200 \
@@ -52,7 +60,7 @@ climbing (autonomous BLS certification on chain=test).
 ## Step 2 — The real run: chain=test anchored to local Bitcoin testnet4
 
 ```bash
-cd ~/SequentiaByClaude
+cd ~/Sequentia
 ulimit -n 65535
 nohup python3 contrib/sequentia/bootstrap-autonomous-testnet.py \
   --chain test --nodes 10 --run-seconds 0 \
@@ -84,7 +92,7 @@ blocks autonomously with no coordinator.
 ## Step 3 — Watch / inspect (second terminal)
 
 ```bash
-B="$HOME/SequentiaByClaude/src/elements-cli -chain=test -rpcuser=seq -rpcpassword=seq"
+B="$HOME/Sequentia/src/elements-cli -chain=test -rpcuser=seq -rpcpassword=seq"
 D=$HOME/seq-testnet
 q(){ $B -datadir=$D/node$1 -rpcport=$((18200+10#$1)) "${@:2}" 2>&1; }
 for n in 000 001 005 009; do echo -n "node$n: "; q $n getblockcount; done
@@ -96,7 +104,7 @@ q 000 getstakerinfo | grep -c ':'      # registered staker count
 
 ```bash
 kill -INT $(cat ~/seq-testnet.pid); sleep 5
-python3 ~/SequentiaByClaude/contrib/sequentia/bootstrap-autonomous-testnet.py --stop --basedir ~/seq-testnet
+python3 ~/Sequentia/contrib/sequentia/bootstrap-autonomous-testnet.py --stop --basedir ~/seq-testnet
 rm -rf ~/seq-testnet ~/seq-testnet.log ~/seq-testnet.pid
 ```
 

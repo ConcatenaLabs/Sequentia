@@ -1,242 +1,249 @@
-# Sequentia Project blockchain platform
-Sequentia is a Bitcoin sidechain dedicated to asset tokenization and decentralized exchanges.
+# Sequentia
 
-https://sequentia.io/
+Sequentia is a Bitcoin sidechain for asset tokenization and decentralized
+exchange, built as a fork of [Blockstream Elements](https://github.com/ElementsProject/elements) 23.3.3.
+This repository is the Sequentia node (`elementsd`): consensus, Bitcoin
+anchoring, proof of stake, the open fee market, and the canonical protocol
+documentation in [`doc/sequentia/`](doc/sequentia/README.md).
 
-Current code is based on Elements Version: 23.3.3
+Website: https://sequentia.io/ · Public testnet: https://sequentiatestnet.com
+· Development company: Concatena Labs.
 
-## SequentiaByClaude
+**Everything here is testnet software.** There is no Sequentia mainnet; the
+`-chain=sequentia` mainnet parameters exist in the code but carry a placeholder
+genesis that must be regenerated at a real launch.
 
-This repository builds Sequentia on Elements 23.3.3, implementing the
-differences that make Sequentia a Bitcoin sidechain distinct from Blockstream's
-Liquid. All four are implemented and tested:
+## How Sequentia differs from Elements/Liquid
 
-1. **Open "no-coin" fee market.** No mandatory native fee asset: any issued
-   asset may be *proposed* as a transaction fee. Proposing a fee is
-   permissionless, but inclusion is subject to per-producer acceptance — a
-   transaction is included only if a block producer accepts that asset *and* the
-   rate at which the fee is posted. Block producers configure which assets they
-   accept and at what value via a static whitelist or a locally-run **price
-   server** that auto-admits assets from exchange APIs once they cross
-   operator-defined thresholds. Fees across assets are compared in an
-   asset-independent *reference fee atom* unit. — see
-   [`doc/sequentia/02-open-fee-market.md`](doc/sequentia/02-open-fee-market.md).
-2. **Bitcoin anchoring.** Every block commits to a Bitcoin block at a
-   monotonically non-decreasing height; the chain reorganizes if and only if
-   Bitcoin reorganizes away the referenced block, giving immediate finality
-   otherwise and friction-free cross-chain atomic swaps. — see
-   [`doc/sequentia/03-bitcoin-anchoring.md`](doc/sequentia/03-bitcoin-anchoring.md).
-3. **Proof-of-Stake consensus.** The theoretical paper's design: stake-weighted
-   **private VRF sortition**, **committee certification** (sortitioned, majority
-   quorum — immediate finality; the per-member signature shares are
-   **aggregated via BLS12-381** (default) or **MuSig2** (legacy, `-posbls=0`)
-   to paper-scale 100-member committees), **on-chain stake** with CSV-enforced
-   unbonding, and **Bitcoin checkpoints** against long-range attacks. Block
-   **validation** is fully decentralized — every node verifies the VRF proofs,
-   the committee signature, the anchor, and the finality gate. Block
-   **production** supports both the coordinator/RPC path
-   (`getposblocktemplate` / `submitposblock`) and autonomous modes: the
-   `-posproducer` production thread runs the committee with no external
-   coordinator, distributing certification across hosts via `-posbls` BLS
-   aggregation and a peer-to-peer gossip-and-sign relay (the `posproposal` /
-   `poscmpctprop` / `posshare` messages). **The bundled
-   Sequentia chain runs PoS by default**, bootstrapped from a genesis-seeded
-   staking output with no `-staker` config (the staker set is entirely on-chain;
-   see
-   [`06-tokenomics-and-launch.md`](doc/sequentia/06-tokenomics-and-launch.md)).
-   The signed-block "anyone-signs" path is the custom/regtest dev harness
-   (`-con_pos=0`). — see
-   [`doc/sequentia/04-proof-of-stake.md`](doc/sequentia/04-proof-of-stake.md).
-4. **Bitcoin-identical addresses, opt-in confidential transactions.** The
-   default address format is Bitcoin's, so a wallet can present one receiving
-   address for both chains; confidential transactions are opt-in with a
-   distinct format (Liquid blinds by default). — see
-   [`doc/sequentia/01-architecture.md`](doc/sequentia/01-architecture.md).
+Four defining properties, all implemented and tested in this repository:
 
-The full design specification, the codebase-base decision and its rationale,
-the implementation status, and the new RPCs/options are in
-[`doc/sequentia/`](doc/sequentia/00-overview.md) — start with
-[`00-overview.md`](doc/sequentia/00-overview.md).
-To stand up the full system end-to-end (validating node, fee price server,
-Bitcoin anchoring, and a single-host or distributed PoS committee), follow the
-operator manual [`05-operating-sequentia.md`](doc/sequentia/05-operating-sequentia.md)
-with the reference config in
-[`contrib/sequentia/`](contrib/sequentia/sequentia.conf.example).
+1. **Open ("no-coin") fee market.** There is no privileged native fee asset.
+   Fees may be proposed in ANY issued asset; block producers choose which
+   assets they accept and at what rate (a whitelist kept fresh by hand or by a
+   bundled price-server sidecar). The Sequence token (SEQ; tSEQ on testnet)
+   has equal standing with every issued asset everywhere except staking.
+   See [`doc/sequentia/02-open-fee-market.md`](doc/sequentia/02-open-fee-market.md).
+2. **Bitcoin anchoring is supreme.** Every Sequentia block references a
+   Bitcoin block header at a non-decreasing height; if Bitcoin reorganizes
+   away an anchor, Sequentia reorganizes with it, in real time, no exception.
+   Otherwise a committee-certified block is final. This real-time
+   reorg-following is what makes cross-chain atomic swaps and Lightning swaps
+   safe without extra reorg-protection timelocks.
+   See [`doc/sequentia/03-bitcoin-anchoring.md`](doc/sequentia/03-bitcoin-anchoring.md).
+3. **Proof of stake.** Stake-weighted private VRF leader sortition plus
+   committee certification with BLS12-381 aggregation (MuSig2 legacy,
+   `-posbls=0`), on-chain stake with CSV-enforced unbonding, and Bitcoin
+   checkpoints against long-range attacks. No inflation: all Sequence tokens
+   are pre-mined (`genesis_subsidy=0`); block reward = fees only. Staking
+   minimum: 40,000 SEQ. The public testnet runs the **public fixed-size
+   committee** (`-pospubliccommittee`, cap 250, quorum 126) with compact
+   bitfield certificates.
+   See [`doc/sequentia/04-proof-of-stake.md`](doc/sequentia/04-proof-of-stake.md).
+4. **Transparent by default, confidentiality opt-in.** This deliberately flips
+   the Elements/Liquid default (`m_default_blinded_addresses=false` in
+   `src/chainparams.cpp`). Default addresses are unblinded and use Bitcoin's
+   own bech32 format (`tb1...` on testnet), so one address can serve a
+   dual-chain Bitcoin+Sequentia wallet. Confidential addresses are opt-in and
+   use blech32 with HRP `tsqb` (testnet) / `sqb` (mainnet params); the CT
+   machinery still exists, it is just not the default.
+   See [`doc/sequentia/01-architecture.md`](doc/sequentia/01-architecture.md).
 
-### New RPCs and configuration
+A consequence of (1) and (2): Elements' federated two-way peg is inherited but
+plays no role. Sequentia configures no parent-chain peg and depends on no
+pegged asset; anchoring-based atomic swaps against native BTC replace the peg's
+main use.
 
-This fork adds (all gated on the relevant chain features):
+## Public testnet status
 
-- **Open fee market:** `getfeeexchangerates` / `setfeeexchangerates`,
-  `setdynamicfeerates` / `getdynamicfeerates` / `cleardynamicfeerates`,
-  `getfeeacceptancepolicy`; options `-con_any_asset_fees`,
-  `-dynfeeratemaxage`; the price-server sidecar in
-  [`contrib/price-server/`](contrib/price-server/).
-- **Bitcoin anchoring:** `getanchorstatus`; options `-con_bitcoin_anchor`,
-  `-validateanchor`, `-anchorminconf`, `-anchorpollinterval` (reuses the
-  `-mainchainrpc*` connection).
-- **Proof-of-Stake:** `getstakerinfo`, `getposschedule`, `getstakescript`,
-  `generateposblock`, `getposblocktemplate` / `submitposblock` (distributed
-  committee block production), `vrfprove` / `vrfverify`, the MuSig2 suite
-  (`musigaggregatepubkey`, `musignonce`, `musigpartialsign`, `musigaggregate`,
-  `musigverify`), `getcheckpointpayload` /
-  `getcheckpointinfo`; options `-con_pos`, `-staker`, `-posslotinterval`,
-  `-poscommitteesize`, `-posvrf`, `-posaggcommittee`, `-posbls` (BLS aggregate
-  certification, default true on the bundled chains), `-posproducer` /
-  `-posproducerkey` (the autonomous producer), `-posunbonding`,
-  `-poscheckpointdepth`, `-poscheckpoint` (configured static checkpoints).
-- **Addresses/CT:** `-con_default_blinded_addresses` (custom chains);
-  `-blindedaddresses` default is now chain-dependent.
+- Re-genesis on **2026-07-05**: genesis
+  `ddd11d54c87a2bd94400fd31ce05d8e1110bb4b78e7103f738342086fc4ea92e`, a public
+  BLS committee (20 producers at launch), parent chain **Bitcoin testnet4**.
+- Issued testnet assets: GOLD, USDX, EURX, SILVR, OILX (all reissuable), plus
+  demo assets such as BONDX (OpenAMP).
+- Live services (all under https://sequentiatestnet.com):
+  - `/` block explorer + `/api` REST API (electrs esplora API)
+  - `/wallet` web wallet
+  - `/bridge/` Compages Ethereum (Sepolia) bridge
+  - `/emissio/` Emissio community rewards platform
+  - `/openamp/v1/*` OpenAMP restricted-asset REST API
+  - `/download/` binaries, Ambra APK, Fulmen AppImage
+  - `/faucet` testnet faucet (tSEQ + assets)
 
-### Tests
+## Connecting a node to the public testnet
 
-Sequentia-specific functional tests live in `test/functional/feature_*` (see
-`feature_dynamic_fee_rates`, `feature_bitcoin_anchoring`,
-`feature_anchor_swap_consistency`, `feature_ct_opt_in`, and the `feature_pos_*`
-/ `feature_vrf` suites) and unit tests in `src/test/pos_tests.cpp` and
-`src/test/vrf_tests.cpp` / `src/test/musig_tests.cpp`. Build with
-`--enable-any-asset-fees` so the fee-unit strings the wallet tests expect
-("rfa/vB") match.
+The public testnet is the built-in `test` chain, which is also the binary's
+**default chain** (`CBaseChainParams::DEFAULT` in `src/chainparamsbase.cpp`).
+On `-chain=test` the node auto-configures the shared gateway with zero config
+(`InitParameterInteraction` in `src/init.cpp`): it adds
+`-addnode=159.195.15.140:18444` as a peer, points the anchor validation RPC
+(`-mainchainrpc*`) at a shared Bitcoin testnet4 endpoint, and fetches asset
+labels and reference prices from the public registry and price feed.
 
-## Installing Prerequisistes
+Two settings are **network-wide consensus rules** on the current chain and are
+not yet defaults, so set them explicitly:
 
-### Install build tools
-On Ubuntu (and probably Debian), you should be able to install the prerequisite
-build tools with the following command:
+```ini
+# elements.conf
+chain=test
+
+[test]
+pospubliccommittee=1     # public fixed-size committee (the 2026-07-05 re-genesis runs this)
+poscommitteesize=250     # committee cap 250, quorum 126
+```
+
+Then:
+
+```bash
+elementsd -daemon
+elements-cli getblockhash 0      # ddd11d54c87a2bd94400fd31ce05d8e1110bb4b78e7103f738342086fc4ea92e
+elements-cli getblockchaininfo   # watch it sync
+elements-cli getanchorstatus     # "ok" once the testnet4 anchor RPC is reachable
+elements-cli getposschedule      # the live committee and next-slot schedule
+```
+
+Build from source on this branch (below): the prebuilt bundle currently on
+`/download/` predates the 2026-07-05 re-genesis and bakes the old genesis, so
+it cannot join the current chain.
+
+To stake and produce blocks, see the operator manual
+[`doc/sequentia/05-operating-sequentia.md`](doc/sequentia/05-operating-sequentia.md)
+and, for a hand-held Windows walkthrough,
+[`doc/sequentia/runbook-windows-node.md`](doc/sequentia/runbook-windows-node.md).
+
+## Building
+
+On Ubuntu/Debian:
+
 ```bash
 sudo apt install ccache build-essential libtool autotools-dev automake pkg-config bsdmainutils python3
-```
-YMMV on other software distributions.
-
-### Setup ccache
-You may achieve speedups when building and rebuilding by using ccache,
-that you may install and configure as follows:
-```bash
-sudo /usr/sbin/update-ccache-symlinks
-echo 'export PATH="/usr/lib/ccache:$PATH"' | tee -a ~/.bashrc
-source ~/.bashrc
-```
-
-## Configure and Build
-
-### Prepare configuration
-
-```bash
 ./autogen.sh
 make -j$(nproc) -C depends NO_QT=1 NO_NATPMP=1 NO_UPNP=1 NO_ZMQ=1 NO_USDT=1
-export CONFIG_SITE=$PWD/depends/x86_64-pc-linux-gnu/share/config.site NOWARN_CXXFLAGS='-Wno-deprecated -Wno-unused-result'
-```
-
-### Configure
-```bash
-./configure --enable-any-asset-fees --enable-debug --disable-bench --disable-tests --disable-fuzz-binary
-```
-
-Note that the `--enable-any-asset-fees` flag is an addition by Sequentia,
-that will configure RPC documentation to denominate fee rates
-using RFU and rfa instead of BTC and sat.
-
-### Last But Not Least, Build
-```bash
+export CONFIG_SITE=$PWD/depends/x86_64-pc-linux-gnu/share/config.site
+./configure --enable-any-asset-fees --disable-bench --disable-fuzz-binary
 make -j$(nproc)
 ```
 
-## Modes
+`--enable-any-asset-fees` is a Sequentia addition: it makes RPC documentation
+denominate fee rates in the reference fee unit (RFU/rfa) instead of BTC/sat.
+Fee-rate units in Sequentia are always the chosen fee asset's own units per
+vByte, never "sat/vB".
 
-The daemon supports several pre-set chains (note: the binary's default chain is
-still `liquidv1`, inherited from Elements — pass `-chain=` explicitly):
+Full platform build docs are the inherited Elements/Bitcoin ones:
+[`doc/build-unix.md`](doc/build-unix.md), [`doc/build-osx.md`](doc/build-osx.md),
+[`doc/build-windows.md`](doc/build-windows.md).
 
-* **Sequentia mainnet**: `elementsd -chain=sequentia` — the real Sequentia
-  network. Proof-of-Stake by default (VRF sortition + aggregate committee,
-  bootstrapped from a genesis-seeded staking output — doc 06-tokenomics-and-launch.md), Bitcoin-anchored
-  (requires a Bitcoin node via the `-mainchainrpc*` options), any-asset fees,
-  Bitcoin-mainnet address format with opt-in confidential transactions. **The
-  genesis founder key is a placeholder that must be replaced at the real launch
-  (doc 06-tokenomics-and-launch.md).** (The `main` chain is kept as Bitcoin-Elements for the test harness
-  and parent-chain interop — Sequentia has its own dedicated chain id.)
-* **Sequentia testnet**: `elementsd -chain=test` — identical consensus rules, a
-  public/published founder key, and testnet address format; the playground.
-* **Custom chains**: any other `-chain=` argument; regtest-like defaults
-  (signed-block "anyone-signs" by default; opt into PoS with `-con_pos=1`),
-  overridable by a rich set of start-up options. All Sequentia features are
-  available here (`-con_any_asset_fees`, `-con_bitcoin_anchor`, `-con_pos`,
-  `-posvrf`, `-con_genesis_stake`, `-con_default_blinded_addresses`, …) — this
-  is what the functional tests use.
-* `-chain=main` (Bitcoin-Elements; the unit-test harness default and a
-  parent-chain interop target), `-chain=regtest`, and Liquid modes
-  (`-chain=liquidv1` etc.) are inherited from Elements.
+## Chains ("modes")
 
-## Confidential Assets and Transactions
+| `-chain=` | What it is |
+|---|---|
+| `test` (**default**) | The public Sequentia testnet: PoS with the autonomous BLS committee, anchored to Bitcoin testnet4, any-asset fees, Bitcoin-testnet address format, published throwaway founder key. |
+| `sequentia` | The future Sequentia mainnet parameters: same consensus, Bitcoin-mainnet address format, distinct network magic. Its genesis founder key is a **placeholder**; the node refuses to start on it without `-allowplaceholdergenesis`. |
+| custom (any other name) | Regtest-like config-derived chains, e.g. `elementsregtest`: signed-block "anyone-signs" by default, opt into every Sequentia feature (`-con_pos`, `-con_bitcoin_anchor`, `-con_any_asset_fees`, `-posvrf`, `-pospubliccommittee`, `-con_genesis_stake`, `-con_default_blinded_addresses`, ...). This is what the functional tests use. |
+| `main`, `regtest`, `liquidv1`, ... | Inherited Bitcoin-Elements/Liquid chains, kept for the test harness and parent-chain interop. |
 
-Sequentia inherits Elements' asset issuance and Confidential Transactions
-machinery, with one deliberate difference: **confidential transactions are
-opt-in, not the default** (see
-[`doc/sequentia/01-architecture.md`](doc/sequentia/01-architecture.md)).
-Wallets hand out plain Bitcoin-format addresses by default — amounts and assets
-are public, exactly like Bitcoin — and users who want confidentiality request a
-confidential address explicitly (`getnewaddress "" "blech32"` or
-`-blindedaddresses=1`). Note that confidential outputs cannot carry
-proof-of-stake weight (their amounts are hidden).
+## Sequentia RPCs and options
 
-Background on the inherited technology:
+Added by this fork (each gated on the relevant chain feature):
 
- * [Confidential Assets Whitepaper](https://blockstream.com/bitcoin17-final41.pdf)
- * [Elements Code Tutorial](https://elementsproject.org/elements-code-tutorial/overview)
+- **Open fee market:** `getfeeexchangerates` / `setfeeexchangerates`,
+  `getfeeacceptancepolicy` (plus deprecated sidecar aliases
+  `setdynamicfeerates` / `getdynamicfeerates` / `cleardynamicfeerates`);
+  option `-con_any_asset_fees`; the price-server sidecar in
+  [`contrib/price-server/`](contrib/price-server/) (this is the canonical
+  price-server location; the node holds a single fee-asset whitelist that the
+  sidecar keeps fresh).
+- **Bitcoin anchoring:** `getanchorstatus`; options `-con_bitcoin_anchor`,
+  `-validateanchor`, `-anchorminconf`, `-anchorpollinterval` (reuses the
+  `-mainchainrpc*` connection).
+- **Proof of stake:** `getstakerinfo`, `getposschedule`, `getstakescript`,
+  `getblsregistration`, `generateposblock`, `getposblocktemplate` /
+  `submitposblock` (coordinator-driven block production), `vrfprove` /
+  `vrfverify`, the MuSig2 suite (`musigaggregatepubkey`, `musignonce`,
+  `musigpartialsign`, `musigaggregate`, `musigverify`),
+  `getcheckpointpayload` / `getcheckpointinfo`; options `-con_pos`, `-staker`,
+  `-posslotinterval`, `-poscommitteesize`, `-posvrf`, `-posaggcommittee`,
+  `-posbls` (BLS aggregate certification, default on the bundled chains),
+  `-pospubliccommittee` (public fixed-size committee, run by the public
+  testnet), `-posproducer` / `-posproducerkey` (the autonomous producer),
+  `-posunbonding`, `-posminstake`, `-poscheckpointdepth`, `-poscheckpoint`.
+- **Addresses/CT:** `-con_default_blinded_addresses` (custom chains);
+  `-blindedaddresses` defaults to the chain's setting (off on Sequentia
+  chains). Opt in per call with `getnewaddress "" blech32`.
+- **Display/registry helpers:** `-assetregistryurl` (advisory asset labels
+  from the shared registry), `-referencepricesurl` (per-asset USD prices for
+  GUI display only).
+
+## Tests
+
+Unit tests: `src/test/pos_tests.cpp`, `src/test/vrf_tests.cpp`,
+`src/test/musig_tests.cpp` (run with `make check`).
+
+Sequentia functional tests live in `test/functional/`. Run one with
+`test/functional/<name>.py`; run the suite with
+`test/functional/test_runner.py`. A tour of the features:
+
+| Test | Shows |
+|---|---|
+| `feature_any_asset_fee.py`, `feature_any_asset_fee_rates.py`, `feature_any_asset_fee_rbf.py`, `feature_any_asset_fee_scenarios.py`, `feature_dynamic_fee_rates.py` | fees in arbitrary assets, exchange-rate valuation, cross-asset RBF/CPFP |
+| `feature_bitcoin_anchoring.py`, `feature_anchor_swap_consistency.py` | anchor validation, reorg-following, atomic-swap consistency across a Bitcoin reorg |
+| `feature_pos_stake.py`, `feature_pos_min_stake.py`, `feature_vrf.py`, `feature_pos_vrf_committee.py` | on-chain staking, the 40,000-SEQ floor, VRF sortition |
+| `feature_pos_bls_gossip.py`, `feature_pos_public_committee.py`, `feature_pos_distributed_committee.py` | the autonomous BLS gossip committee, the public bitfield committee, the manual MuSig2 flow |
+| `feature_pos_finality.py`, `feature_pos_fork_choice.py`, `feature_pos_checkpoints.py`, `feature_pos_escaping_stall.py` | immediate finality, fork choice, Bitcoin checkpoints, the escaping-stall liveness valve |
+| `feature_pos_genesis_bootstrap.py` | bootstrapping a chain from a genesis-seeded staking output |
+| `feature_ct_opt_in.py` | transparent-by-default addresses with opt-in confidential transactions |
+
+Build with `--enable-any-asset-fees` so the fee-unit strings the wallet tests
+expect ("rfa/vB") match.
+
+## Repository map
+
+| Path | Contents |
+|---|---|
+| [`doc/sequentia/`](doc/sequentia/README.md) | The canonical Sequentia protocol documentation (start at its README index). |
+| `src/` | The node. Sequentia-specific code: `src/pos.{h,cpp}`, `src/pos_producer.*` (proof of stake), `src/anchor.{h,cpp}` (Bitcoin anchoring), `src/exchangerates.{h,cpp}`, `src/policy/value.h`, `src/rpc/exchangerates.cpp` (open fee market), `src/vrf.{h,cpp}`, `src/musig.{h,cpp}`, `src/blst/` (crypto), `src/assetregistry.*`, `src/referenceprices.*` (display helpers), plus edits in `src/chainparams.cpp`, `src/validation.cpp`, `src/node/miner.cpp`. |
+| [`contrib/sequentia/`](contrib/sequentia/) | Reference config, bootstrap tooling, the atomic-swap demo. |
+| [`contrib/price-server/`](contrib/price-server/) | The fee price-server sidecar. |
+| `test/functional/` | Functional tests (Sequentia ones listed above). |
+| `doc/` (everything else) | Inherited Elements/Bitcoin documentation. |
+
+Contributions: PRs against branch `claude/sequentia-bitcoin-sidechain-w6xady`
+of https://github.com/GracedEternalKingCabbageMan/Sequentia (the default
+branch). See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## The Sequentia ecosystem
+
+All repos live at https://github.com/GracedEternalKingCabbageMan/ and are public.
+
+| Repo | One-liner |
+|---|---|
+| `Sequentia` | The Sequentia node (`elementsd` fork of Elements 23.3.3): consensus, anchoring, proof of stake, open fee market, plus the canonical protocol documentation in `doc/sequentia/`. (This repository.) |
+| `SWK` | Sequentia Wallet Kit: a fork of Blockstream LWK, with Rust wallet library, CLI, and WASM bindings for building Sequentia (and Bitcoin testnet4) wallets. |
+| `sequentia-web-wallet` | Proof-of-concept browser wallet built on SWK, live at https://sequentiatestnet.com/wallet. |
+| `ambra` | Ambra: non-custodial dual-chain (Bitcoin testnet4 + Sequentia) mobile wallet, a Flutter UI over a Rust core built on SWK. |
+| `fulmen` | Fulmen: desktop (Electron) wallet for SeqLN with a bundled Lightning node. |
+| `seqln` | SeqLN: a Core Lightning fork that runs on Sequentia and Bitcoin from the same binary, with asset channels, any-asset payments, pure-Lightning swaps. |
+| `seqdex` | SeqDEX: non-custodial atomic-swap DEX built on a P2P order book (seqob), same-chain swaps, and cross-chain BTC↔asset swaps made safe by Bitcoin anchoring. |
+| `sequentia-explorer` | Sequentia block explorer frontend (esplora fork); the indexer lives in sequentia-electrs. |
+| `sequentia-electrs` | The electrs fork: Rust indexer + Esplora REST API for Sequentia and its Bitcoin testnet4 parent chain. |
+| `sequentia-registry` | Sequentia Asset Registry service (asset metadata). |
+| `openamp` | OpenAMP: open-source restricted-asset issuance/transfer-approval service (an AMP2 equivalent) with opt-in confidentiality; zero consensus changes. |
+| `compages` | Compages: centralized Ethereum (Sepolia) ↔ Sequentia bridge proof-of-concept. |
+| `emissio` | Emissio: community rewards platform, earning Sequence tokens (SEQ) for testnet contributions. |
+| `libwally-core` | libwally fork with the Sequentia transaction-parsing patch (issuance denomination byte) used by SeqLN. |
 
 ## Inherited from Elements
 
-Sequentia is built on the Elements platform; compared to Bitcoin itself,
-Elements contributes the following (all retained here):
- * [Confidential Assets][asset-issuance]
- * [Confidential Transactions][confidential-transactions]
- * [Federated Two-Way Peg][federated-peg] — the machinery is inherited but,
-   unlike Liquid's L-BTC, it plays **no special role in Sequentia**: the
-   Sequentia chain is not configured with a parent-chain peg (no peg-in
-   validation, no PAK enforcement), and the network neither favours nor depends
-   on any pegged asset. Pegged BTC has no special fee status: it can be proposed
-   as a fee exactly like any other non-policy asset, subject to the same
-   per-producer acceptance (asset + rate). (SEQ is privileged **only** for
-   staking eligibility; for fees it is just another asset — accepted 1:1 only as
-   the default a producer can re-price or refuse, with any asset usable as the
-   1:1 reference instead.) Any user may still use the inherited
-   machinery to issue their own pegged BTC if they want one — largely
-   unnecessary here, since Bitcoin anchoring enables atomic swaps against *native* BTC
-   without long confirmation timelocks
-   (see [`doc/sequentia/03`](doc/sequentia/03-bitcoin-anchoring.md)), but
-   potentially useful e.g. to hold BTC value under confidential transactions.
- * [Signed Blocks][signed-blocks]
- * [Additional opcodes][opcodes]
-
-Previous elements that have been integrated into Bitcoin:
- * Segregated Witness
- * Relative Lock Time
-
-Elements deferred for additional research and standardization:
- * [Schnorr Signatures][schnorr-signatures]
-
-Additional RPC commands and parameters:
-* [RPC Docs](https://elementsproject.org/en/doc/)
-
-The CI (Continuous Integration) systems make sure that every pull request is built for Windows, Linux, and macOS,
-and that unit/sanity tests are run automatically.
+Sequentia retains Elements' Confidential Assets and Confidential Transactions
+machinery (opt-in here), asset issuance, signed blocks, and additional opcodes.
+Background: the [Confidential Assets whitepaper](https://blockstream.com/bitcoin17-final41.pdf)
+and the [Elements project](https://elementsproject.org). Upstream Elements RPC
+documentation: https://elementsproject.org/en/doc/.
 
 ## License
-Elements is released under the terms of the MIT license. See [COPYING](COPYING) for more
-information or see http://opensource.org/licenses/MIT.
 
-[confidential-transactions]: https://elementsproject.org/features/confidential-transactions
-[opcodes]: https://elementsproject.org/features/opcodes
-[federated-peg]: https://elementsproject.org/features#federatedpeg
-[signed-blocks]: https://elementsproject.org/features#signedblocks
-[asset-issuance]: https://elementsproject.org/features/issued-assets
-[schnorr-signatures]: https://elementsproject.org/features/schnorr-signatures
+Released under the terms of the MIT license. See [COPYING](COPYING) or
+http://opensource.org/licenses/MIT.
 
-## What is the Elements Project?
-Elements is an open source, sidechain-capable blockchain platform. It also allows experiments to more rapidly bring technical innovation to the Bitcoin ecosystem.
+## Secure reporting
 
-Learn more on the [Elements Project website](https://elementsproject.org)
-
-https://github.com/ElementsProject/elementsproject.github.io
-
-## Secure Reporting
-See [our vulnerability reporting guide](SECURITY.md)
+See [our vulnerability reporting guide](SECURITY.md).

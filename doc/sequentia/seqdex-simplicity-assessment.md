@@ -36,7 +36,7 @@ For a confidential output the program receives only the **Pedersen commitment po
 
 **The explicit tradeoff:** the *enforced legs* of any covenant offer — the resting amount, the asset id, and the credited output — must be **explicit (non-confidential)**. A covenant cannot police an amount it cannot see. Confidentiality and covenant-enforced amounts are mutually exclusive on the same output.
 
-**Is that acceptable given confidential-by-default?** Yes, as an *added tier*, not a replacement. The honest framing is a two-tier DEX:
+**Is that acceptable, given that outputs may be blinded opt-in (Sequentia is transparent by default)?** Yes, as an *added tier*, not a replacement. The honest framing is a two-tier DEX:
 - **Transparent covenant tier:** funded, non-interactive, relay-as-discovery — but resting size/asset are public on-chain (a transparent CLOB). Best for liquid price-discovery markets.
 - **Confidential interactive tier (today's path):** blinded PSET co-sign / HTLC, preserving privacy at the cost of liveness and relay trust. Best for size/privacy-sensitive flow.
 
@@ -78,4 +78,4 @@ This experiment is cheap, validates the activation path against our own tree, an
 | Confidential + covenant on same output | CLOSED (introspection can't read blinded values) |
 | Activation on Sequentia | gated, one flag — best at testnet re-genesis |
 
-Relevant codebase paths: `/home/aejkohl/SequentiaByClaude/src/chainparams.cpp:582-585` (the `NEVER_ACTIVE` flag to flip), `/home/aejkohl/SequentiaByClaude/src/validation.cpp:2098-2099`, `/home/aejkohl/SequentiaByClaude/src/script/interpreter.cpp:3355-3365`, `/home/aejkohl/SequentiaByClaude/src/simplicity/` (vendored interpreter + jets).
+Relevant codebase paths: `/home/aejkohl/Sequentia/src/chainparams.cpp:582-585` (the `NEVER_ACTIVE` flag to flip), `/home/aejkohl/Sequentia/src/validation.cpp:2098-2099`, `/home/aejkohl/Sequentia/src/script/interpreter.cpp:3355-3365`, `/home/aejkohl/Sequentia/src/simplicity/` (vendored interpreter + jets).

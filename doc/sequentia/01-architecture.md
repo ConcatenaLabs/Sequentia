@@ -1,4 +1,4 @@
-# Architecture — the Elements substrate
+# Architecture - the Elements substrate
 
 Sequentia is based on Elements `23.3.3` and tracks it downstream. Its four
 defining properties (see [`00-overview.md`](00-overview.md)) are not a rewrite of
@@ -45,7 +45,7 @@ Because `has_parent_chain` is false, Elements' federated two-way peg is inherite
 but plays no role: Sequentia configures no parent-chain peg and depends on no
 pegged asset (see [`00-overview.md`](00-overview.md)).
 
-## Multi-asset and fee plumbing — the open fee market substrate
+## Multi-asset and fee plumbing - the open fee market substrate
 
 A `CAmount` is an `int64_t` count of atoms *of a specific asset*. Amounts in
 different assets are not directly comparable, yet the mempool must order
@@ -55,14 +55,14 @@ substrate resolves this with an asset-independent unit.
 ### The reference fee atom (rfa)
 
 - **`CValue`** (`src/policy/value.h`) is a thin `int64_t` wrapper denominated in
-  **reference fee atoms (rfa)**. All cross-asset comparisons — mempool ordering,
-  fee-floor checks, fee estimation — happen in rfa.
+  **reference fee atoms (rfa)**. All cross-asset comparisons - mempool ordering,
+  fee-floor checks, fee estimation - happen in rfa.
 - **`ExchangeRateMap`** (`src/exchangerates.{h,cpp}`) is a singleton
   `std::map<CAsset, CAssetExchangeRate>`. Each rate is scaled by
   `exchange_rate_scale = COIN (1e8)`; `policyAsset` is seeded at scale `1.0`.
   - `ConvertAmountToValue(amount, asset)` → rfa, computed as
     `amount * rate / scale` (128-bit intermediate, saturating at `INT64_MAX`).
-    An asset **absent from the map converts to 0 rfa** — i.e. "not accepted".
+    An asset **absent from the map converts to 0 rfa** - i.e. "not accepted".
   - `ConvertValueToAmount(value, asset)` → atoms of `asset`.
   - The map is persisted as JSON in `<datadir>/exchangerates.json` via
     `LoadFromDefaultJSONFile` / `SaveToJSONFile`.
@@ -76,28 +76,28 @@ A transaction's fee asset is obtained via `CTransaction::GetFeeAsset()`.
 | Mempool entry | `CTxMemPoolEntry` (`src/txmempool.h`) | Stores `const CAsset nFeeAsset` and `CValue nFeeValue`; ancestor/descendant aggregates `nModFeesWith{Descendants,Ancestors}` are `CValue`. `GetModifiedFee()` returns rfa. |
 | Acceptance | `MemPoolAccept` (`src/validation.cpp`) | With `g_con_any_asset_fees`, `feeAsset` is taken from the tx and `m_modified_fees` is computed via `ConvertAmountToValue(...)`. This is the policy gate that lets a non-policy asset pay. |
 | Re-valuation | `CTxMemPool::RecomputeFees()` (`src/txmempool.cpp`) | Walks every entry and recomputes `nFeeValue` from the current `ExchangeRateMap`. Invoked when rates change (e.g. from `setfeeexchangerates`). |
-| Mining | `addPackageTxs()` (`src/node/miner.cpp`) | Orders by `GetModFeesWithAncestors()` (rfa), so the assembled block is the highest-rfa-value block. The guard `if (!g_con_any_asset_fees && feeAsset != ::policyAsset)` — which restricts Liquid to policy-asset fees — is bypassed for Sequentia. |
+| Mining | `addPackageTxs()` (`src/node/miner.cpp`) | Orders by `GetModFeesWithAncestors()` (rfa), so the assembled block is the highest-rfa-value block. The guard `if (!g_con_any_asset_fees && feeAsset != ::policyAsset)` - which restricts Liquid to policy-asset fees - is bypassed for Sequentia. |
 | RPC / wallet | `getfeeexchangerates` / `setfeeexchangerates` (`src/rpc/exchangerates.cpp`); wallet fee logic (`src/wallet/spend.cpp`, `feebumper.cpp`) | All value fees through the map. |
 
 This plumbing is the foundation; it makes no policy decisions of its own beyond
 "absent asset = 0 rfa = not accepted". The seam a dynamic price server plugs into
 is `RecomputeFees()`: a price server updates the `ExchangeRateMap` and calls that
-path — exactly as `setfeeexchangerates` does — without touching consensus. The
-static and dynamic exchange-rate tables, per-producer acceptance, cross-asset
+path - exactly as `setfeeexchangerates` does - without touching consensus. The
+single exchange-rate whitelist, per-producer acceptance, cross-asset
 fee replacement, and paying fees in an arbitrary asset are the full design in
 [`02-open-fee-market.md`](02-open-fee-market.md).
 
-## The Bitcoin-node RPC transport — the anchoring substrate
+## The Bitcoin-node RPC transport - the anchoring substrate
 
 Elements already maintains a trusted connection to a Bitcoin full node, used for
 peg-in validation. Anchoring reuses this transport rather than introducing a
 second client.
 
-- **`src/mainchainrpc.{h,cpp}`** — an `evhttp`-based JSON-RPC client to
+- **`src/mainchainrpc.{h,cpp}`** - an `evhttp`-based JSON-RPC client to
   `bitcoind`. Authentication is by cookie or `-mainchainrpcuser` /
   `-mainchainrpcpassword`; host, port and timeout come from `-mainchainrpchost`,
   `-mainchainrpcport`, `-mainchainrpctimeout`.
-- **`MainchainRPCCheck()`** (`src/init.cpp`) — a startup probe of the mainchain
+- **`MainchainRPCCheck()`** (`src/init.cpp`) - a startup probe of the mainchain
   daemon, wired to `-validatepegin` (default on when the chain
   `has_parent_chain`).
 - The existing callers live in `src/pegins.cpp`.
@@ -108,7 +108,7 @@ cache, then consults them in header validation and block assembly. The anchor
 commitment, the validation and reorg-following rules, and immediate finality are
 described in [`03-bitcoin-anchoring.md`](03-bitcoin-anchoring.md).
 
-## Signed-block machinery — the Proof-of-Stake substrate
+## Signed-block machinery - the Proof-of-Stake substrate
 
 Elements replaces Bitcoin's proof-of-work with a **header block signature**.
 Sequentia keeps that plumbing untouched and changes only the rule that decides
@@ -137,7 +137,7 @@ the committed fields. The block signature is therefore taken over the committed
 header. Two consequences follow:
 
 1. There is an established pattern for adding a header field behind a global flag
-   and serializing it in **both** the dynafed and non-dynafed branches — the
+   and serializing it in **both** the dynafed and non-dynafed branches - the
    pattern anchoring uses for its anchor field.
 2. The Bitcoin anchor is placed in the hashed region, so the producer signs over
    it and a block's anchor cannot be altered without invalidating the signature.
@@ -151,8 +151,8 @@ signature itself rides the existing `proof.solution` / `m_signblock_witness`
 plumbing unchanged. Committee quorums reach paper-scale 100-member committees via
 signature aggregation (BLS12-381 by default, MuSig2 the `-posbls=0` fallback)
 carried in the dynafed/signed-block witness. The full
-consensus — stake registry, sortition and leader election, quorum certification,
-liveness, fork choice, the finality gate and checkpoints — is in
+consensus - stake registry, sortition and leader election, quorum certification,
+liveness, fork choice, the finality gate and checkpoints - is in
 [`04-proof-of-stake.md`](04-proof-of-stake.md).
 
 The fee market and anchoring compose cleanly with this layer: the elected leader
@@ -186,7 +186,7 @@ Two address-layer choices distinguish Sequentia from Liquid/Elements:
 Key properties:
 
 - A confidential address **cannot** be Bitcoin-compatible, because it embeds a
-  blinding pubkey — which is exactly why confidential transactions must be opt-in
+  blinding pubkey - which is exactly why confidential transactions must be opt-in
   for the shared-address story to hold. The confidential format stays
   deliberately distinct so a sender always knows whether an output will be
   blinded.
@@ -236,16 +236,16 @@ only guarantees the formats line up.
 
 Where these properties hook into block and transaction validation:
 
-- **`CheckBlockHeader` / `ContextualCheckBlockHeader`** (`src/validation.cpp`) —
+- **`CheckBlockHeader` / `ContextualCheckBlockHeader`** (`src/validation.cpp`) -
   context-free and context-dependent header checks. The anchoring monotonicity
   rule (`btc_height(X+1) >= btc_height(X)`) and the "referenced Bitcoin block is
   on the bitcoind best chain" rule live here.
-- **`MemPoolAccept`** (`src/validation.cpp`) — the any-asset fee gate, valuing
+- **`MemPoolAccept`** (`src/validation.cpp`) - the any-asset fee gate, valuing
   fees through the `ExchangeRateMap` (see the fee-plumbing table above).
-- **`CChainState::ActivateBestChain` / `InvalidateBlock`** — reorg machinery.
+- **`CChainState::ActivateBestChain` / `InvalidateBlock`** - reorg machinery.
   "Reorg Sequentia when Bitcoin reorgs" is implemented by invalidating Sequentia
   blocks whose anchor is no longer on Bitcoin's best chain.
-- **`CBlockIndex`** (`src/chain.h`) — the per-block index, extended with the
+- **`CBlockIndex`** (`src/chain.h`) - the per-block index, extended with the
   cached Bitcoin anchor height/hash for fast monotonicity checks without
   deserialising.
 

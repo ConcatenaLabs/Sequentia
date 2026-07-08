@@ -24,8 +24,8 @@ Each Sequentia block header carries two anchor fields:
 | `m_anchor_height` | Height of the referenced Bitcoin block. |
 | `m_anchor_hash` | The referenced Bitcoin block's header hash (double-SHA256), on Bitcoin's best chain. |
 
-`m_anchor_hash` is the security-bearing field — heights are not unique across
-Bitcoin forks — while `m_anchor_height` is carried for cheap monotonicity checks
+`m_anchor_hash` is the security-bearing field - heights are not unique across
+Bitcoin forks - while `m_anchor_height` is carried for cheap monotonicity checks
 and indexing. Validation requires `m_anchor_height` to equal the real height of
 `m_anchor_hash` on the connected Bitcoin node.
 
@@ -85,7 +85,7 @@ A block's anchor is checked against its parent and against the Bitcoin daemon:
 - **Well-formedness.** The fields are present exactly when `g_con_bitcoin_anchor`
   is set; `m_anchor_hash` is non-null on anchored blocks.
 - **Monotonicity.** `m_anchor_height` is not less than the parent's. If the
-  height is unchanged from the parent, the hash must be unchanged too — a
+  height is unchanged from the parent, the hash must be unchanged too - a
   producer cannot silently swap which Bitcoin block a height refers to.
 - **Bitcoin existence and best-chain membership.** When `g_validate_anchor` is
   set and the anchor differs from the parent's, the node calls
@@ -112,8 +112,8 @@ This is a **consensus** invalidation, not a local policy choice: every node
 following the same Bitcoin best chain reaches the same decision, because
 Bitcoin's best chain is the shared oracle. The only sanctioned reason to discard
 a certified Sequentia block is its anchor being reorged away on Bitcoin. As long
-as Bitcoin does not reorganize a referenced block, no Sequentia reorg is possible
-— committee certification gives immediate finality (see
+as Bitcoin does not reorganize a referenced block, no Sequentia reorg is
+possible: committee certification gives immediate finality (see
 [`04-proof-of-stake.md`](04-proof-of-stake.md)).
 
 ### The `getanchorstatus` RPC
@@ -146,18 +146,18 @@ rooted in the two kinds of timelock a cross-chain swap carries:
    out that independent reorg risk.
 
 Sequentia drops #2 to zero. A Sequentia block committing Bitcoin anchor height
-`A` is final **if and only if** Bitcoin block `A` survives — Sequentia carries no
+`A` is final **if and only if** Bitcoin block `A` survives - Sequentia carries no
 independent reorg risk of its own, because reorg-following ties its only reorg
 condition to Bitcoin's. So there is no second chain reorganizing on its own
 schedule, and no buffer is needed to absorb it.
 
 **"Real-time" therefore denotes: no extra reorg-protection timelock beyond
-Bitcoin's own confirmation wait**, with the two chains kept *synchronized* — the
-Sequentia tip references a current Bitcoin block — to within a bounded ~1-block
+Bitcoin's own confirmation wait**, with the two chains kept *synchronized* - the
+Sequentia tip references a current Bitcoin block - to within a bounded ~1-block
 lag, since each new block anchors to Bitcoin's tip (§2). That lag is small
 relative to the Bitcoin-paced swap clock. A claimant still waits for the leg's
-anchor to reach their desired Bitcoin **confirmation depth** — a fresher anchor
-is a *shallower* one — but pays no cross-chain buffer on top of that wait.
+anchor to reach their desired Bitcoin **confirmation depth** - a fresher anchor
+is a *shallower* one - but pays no cross-chain buffer on top of that wait.
 
 ## 5. Anchor freshness for real-time swaps
 
@@ -170,10 +170,10 @@ quickly.
 This freshness is delivered by **production**, not by a fork-choice rule.
 `GetAnchorForNewBlock` anchors every new block to the freshest Bitcoin block
 (tip minus `anchorminconf-1`), so the tip tracks Bitcoin's tip within one
-Sequentia block — by *extending* the chain, never by reorganizing it. Among
+Sequentia block - by *extending* the chain, never by reorganizing it. Among
 competing proposals for the same height, the committee backs the freshest-anchored
 one (then the lowest leader VRF among equally-fresh proposals), so that is the
-block that gets certified — the paper's Principle 7 freshness preference,
+block that gets certified - the paper's Principle 7 freshness preference,
 implemented in the gossip committee's candidate ordering. This is a
 *pre-certification* signing preference, not a fork-choice vote, and the anchor is
 deliberately not a key in fork choice: in an immediate-finality system, keying
@@ -186,15 +186,15 @@ already-certified blocks, which must never happen. The fork-choice and finality 
 A Sequentia ↔ Bitcoin swap uses a standard hash time-locked contract (HTLC) on
 both legs. Each leg locks funds under two conditions:
 
-- a **hashlock** — redeemable by revealing a secret preimage whose hash is
+- a **hashlock** - redeemable by revealing a secret preimage whose hash is
   committed in the script; and
-- a **CLTV refund timelock** — reclaimable by the funder after a deadline if the
+- a **CLTV refund timelock** - reclaimable by the funder after a deadline if the
   swap never completes.
 
 The two legs share the same hash. When the party holding the preimage redeems one
 leg, the act of redeeming reveals the secret on-chain, and the counterparty uses
 that revealed secret to redeem the other leg. Either both legs are claimed or, on
-timeout, both are refunded — the usual atomic-swap guarantee.
+timeout, both are refunded - the usual atomic-swap guarantee.
 
 The Sequentia value-add is **anchoring consistency**. In a swap against native
 BTC, the Sequentia leg lives in a Sequentia block, and that block anchors to a Bitcoin
@@ -202,13 +202,13 @@ block. If the BTC leg is reorged away on Bitcoin, the anchor of the Sequentia
 block holding the Sequentia leg goes stale, the reorg-following watcher invalidates
 that block, and the Sequentia leg reverts with it. Both legs revert together: neither
 party is left having paid without being paid. This is exactly the property that
-removes the reorg-protection buffer (§4) — there is no independent Sequentia
+removes the reorg-protection buffer (§4) - there is no independent Sequentia
 reorg for the buffer to guard against.
 
 The consistency property is exercised by
 [`test/functional/feature_anchor_swap_consistency.py`](../../test/functional/feature_anchor_swap_consistency.py),
 which drives a regtest Bitcoin reorg and asserts that the dependent Sequentia
 block reverts with it. A self-contained, runnable demonstration of a complete
-swap — including the timeout-refund path — is
+swap - including the timeout-refund path - is
 [`contrib/sequentia/swap-demo.py`](../../contrib/sequentia/swap-demo.py); see
 [`05-operating-sequentia.md`](05-operating-sequentia.md) for running it.

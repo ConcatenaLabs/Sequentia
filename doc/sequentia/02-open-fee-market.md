@@ -8,7 +8,7 @@ it accepts and at what relative value, then builds the most valuable block it ca
 from the transactions paying in those assets.
 
 **SEQ holds no privileged fee status.** It is special only as the asset that
-unlocks block-production eligibility — staking (see
+unlocks block-production eligibility - staking (see
 [`04-proof-of-stake.md`](04-proof-of-stake.md)). For fees it is just another
 asset: accepted 1:1 only as the *default* an unconfigured producer uses. A
 producer may re-price SEQ at any rate, refuse it, or designate a different asset
@@ -19,7 +19,7 @@ consensus change** ([§6](#6-why-no-consensus-change)).
 ## 1. Reference-unit valuation
 
 Heterogeneous fees are made comparable by valuing each in a common abstract unit,
-the **reference fee atom (rfa)** — `CValue` in `src/policy/value.h`. A producer's
+the **reference fee atom (rfa)** - `CValue` in `src/policy/value.h`. A producer's
 acceptance and pricing live in the `ExchangeRateMap` singleton
 (`src/exchangerates.{h,cpp}`), a `{CAsset → rate}` table persisted to
 `<datadir>/exchangerates.json`. The substrate is described in
@@ -38,7 +38,7 @@ The rate is an integer scaled by `COIN` (1e8):
 | `< 1e8` | the asset is worth **less** per atom (a "cheap" asset) |
 | `0` | the asset is **explicitly refused** |
 
-An asset **absent** from the map values to `0` rfa — i.e. not accepted — so the
+An asset **absent** from the map values to `0` rfa - i.e. not accepted - so the
 table *is* the producer's acceptance set. The one exception is the policy asset,
 SEQ, which is valued 1:1 when unlisted; that default is overridable by listing it
 with any rate (including `0` to refuse it).
@@ -55,17 +55,17 @@ re-values the mempool whenever rates change.
 
 ## 2. Per-producer acceptance: a single whitelist
 
-A producer keeps **one** `{asset → rate}` whitelist — the `ExchangeRateMap`
+A producer keeps **one** `{asset → rate}` whitelist - the `ExchangeRateMap`
 singleton. There are no static and dynamic layers and no precedence between
 writers: the most recent write replaces the table (last-writer-wins), and there
 is no per-asset "source" or provenance.
 
 The table is written with `setfeeexchangerates` and read with
 `getfeeexchangerates`. Writing persists the table to `exchangerates.json` and
-calls `RecomputeFees()`. A price server ([§5](#5-the-dynamic-price-server)) writes
+calls `RecomputeFees()`. A price server ([§5](#5-the-price-server)) writes
 the same single table; `getfeeacceptancepolicy` returns the current acceptance
-set. The operator-facing setup — listing assets, running the price server, and
-constructing transactions that pay fees in a chosen asset — is in
+set. The operator-facing setup - listing assets, running the price server, and
+constructing transactions that pay fees in a chosen asset - is in
 [`05-operating-sequentia.md`](05-operating-sequentia.md).
 
 ## 3. Paying fees in an arbitrary asset
@@ -104,13 +104,19 @@ floors stay rfa-denominated.
   low-per-unit-value asset is not spuriously rejected for a large raw amount.
 - **Prioritisation** (`prioritisetransaction`) deltas apply in rfa and survive
   rate updates.
+- **Fee estimation** works for any fee asset through the same unit: the
+  block-policy estimator's feerate is converted into the wallet's chosen fee
+  asset at query time via the whitelist (`CFeeRate::GetFee(num_bytes, asset)`,
+  `src/policy/feerate.cpp`; the wallet threads `coin_control.m_fee_asset`
+  through `GetMinimumFeeRate`, `src/wallet/fees.cpp`). Fee rates therefore
+  surface in the fee asset's own units per vByte, never in a foreign unit.
 
 The operator how-tos for RBF and CPFP with asset fees are in
 [`05-operating-sequentia.md`](05-operating-sequentia.md) §5.
 
 ## 5. The price server
 
-The price server is a locally-run sidecar (`contrib/price-server/`) — a standalone
+The price server is a locally-run sidecar (`contrib/price-server/`) - a standalone
 program the operator runs alongside the node. Keeping it out of the consensus
 daemon isolates third-party HTTP, API keys, and JSON parsing from the node and
 keeps that outbound-network surface out of `sequentiad`; the sidecar is
@@ -137,12 +143,12 @@ does persist.
 
 The reference unit is anchored to a chosen value (for example a USD-equivalent
 stablecoin) so rates are meaningful; the choice is operator policy, not consensus.
-The node holds the last-set rates indefinitely — there is **no** staleness or
+The node holds the last-set rates indefinitely - there is **no** staleness or
 max-age option; keeping rates fresh (and refusing assets when a feed dies, by
 writing `0` or omitting them) is the sidecar's job. The one rule the node enforces
 is the **non-negative-rate** floor: a negative quote is rejected outright, while a
-zero is accepted and read as "refuse this asset". Vetting source data — quorum
-across feeds, guarding implausible inter-poll jumps and dust-priced rates — is the
+zero is accepted and read as "refuse this asset". Vetting source data - quorum
+across feeds, guarding implausible inter-poll jumps and dust-priced rates - is the
 price server's responsibility before it writes.
 
 The reference-unit rate math lives next to `ExchangeRateMap::ConvertAmountToValue`

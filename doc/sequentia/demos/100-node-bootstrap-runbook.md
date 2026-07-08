@@ -1,5 +1,11 @@
 # 100-node mainnet-style bootstrap runbook
 
+> **STATUS (2026-07-08):** historical demo record. It predates the 2026-07-05
+> re-genesis (public fixed-size committee; Bitcoin **testnet4** parent) and
+> describes a 100-node threshold-sortition bring-up anchored to testnet3. The
+> tool it drives (`contrib/sequentia/bootstrap-autonomous-testnet.py`) is
+> current; see `doc/sequentia/05-operating-sequentia.md` for today's flags.
+
 Stand up a **100-member autonomous Sequentia committee the way mainnet launches**:
 from a single genesis founder, through escaping-stall solo-mining, to a
 self-running quorum — anchored to **live Bitcoin testnet3** at **mainnet cadence**
@@ -42,7 +48,7 @@ attempt is mid-flight), clear it first:
 ```bash
 # stop the orchestrator if it's running, kill stray daemons, remove the dir:
 pkill -f bootstrap-autonomous-testnet.py 2>/dev/null
-python3 ~/SequentiaByClaude/contrib/sequentia/bootstrap-autonomous-testnet.py \
+python3 ~/Sequentia/contrib/sequentia/bootstrap-autonomous-testnet.py \
   --stop --basedir ~/seq-bootstrap100 2>/dev/null
 pkill -9 elementsd 2>/dev/null
 rm -rf ~/seq-bootstrap100
@@ -53,8 +59,8 @@ rm -rf ~/seq-bootstrap100
 ## Step 1 — Latest code, build green
 
 ```bash
-cd ~/SequentiaByClaude
-sudo chown -R $USER:$USER ~/SequentiaByClaude   # undo any earlier `sudo make`
+cd ~/Sequentia
+sudo chown -R $USER:$USER ~/Sequentia   # undo any earlier `sudo make`
 git pull origin claude/sequentia-bitcoin-sidechain-w6xady
 make -j$(nproc)                                  # NO sudo
 strings src/elementsd | grep posdebugroundskewms # must print the knob
@@ -92,7 +98,7 @@ Validates the whole bootstrap with a throwaway parent it advances on demand:
 
 ```bash
 ulimit -n 65535
-cd ~/SequentiaByClaude
+cd ~/Sequentia
 python3 contrib/sequentia/bootstrap-autonomous-testnet.py \
   --local-parent --nodes 5 --slot 2 --run-seconds 60 \
   --basedir /tmp/seq-bootA
@@ -109,7 +115,7 @@ Same flow against live testnet; **Phase 3 will wait** for testnet + 3.
 
 ```bash
 ulimit -n 65535
-cd ~/SequentiaByClaude
+cd ~/Sequentia
 nohup python3 contrib/sequentia/bootstrap-autonomous-testnet.py \
   --nodes 5 --slot 10 --anchorpoll 15 \
   --basedir ~/seq-bootB \
@@ -137,7 +143,7 @@ rm -rf ~/seq-bootB ~/seq-bootB.log ~/seq-bootB.pid
 
 ```bash
 ulimit -n 65535
-cd ~/SequentiaByClaude
+cd ~/Sequentia
 nohup python3 contrib/sequentia/bootstrap-autonomous-testnet.py \
   --nodes 100 \
   --slot 30 --posunbonding 43200 --posminstake 4000000000000 --stake-seq 50000 \
@@ -168,7 +174,7 @@ Notes:
 
 ```bash
 ND=$HOME/seq-bootstrap100/node000
-CLI="$HOME/SequentiaByClaude/src/elements-cli -datadir=$ND -chain=elementsregtest -rpcport=18200 -rpcuser=seq -rpcpassword=seq"
+CLI="$HOME/Sequentia/src/elements-cli -datadir=$ND -chain=elementsregtest -rpcport=18200 -rpcuser=seq -rpcpassword=seq"
 watch -n 3 "pgrep -c elementsd; echo '--- stakers registered:'; $CLI getstakerinfo | grep -c ':'; echo '--- anchor:'; $CLI getanchorstatus"
 ```
 `getstakerinfo` shows **1** during Phase 3 (founder only), then **100** after block 1;

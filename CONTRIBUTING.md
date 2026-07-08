@@ -1,5 +1,26 @@
-Contributing to Bitcoin Core
-============================
+Contributing to Sequentia
+=========================
+
+Sequentia is a fork of Elements (itself a fork of Bitcoin Core), and this
+document is inherited from Bitcoin Core: its workflow conventions (commit
+hygiene, PR structure, review language, squashing) apply here, but the
+project-specific pointers below it (IRC channels, mailing lists, issue links,
+maintainer lists) describe the upstream Bitcoin Core project, not Sequentia.
+
+For this repository:
+
+- Send pull requests to https://github.com/GracedEternalKingCabbageMan/Sequentia
+  against the default branch `claude/sequentia-bitcoin-sidechain-w6xady`.
+- Sequentia-specific code and documentation are mapped in the top-level
+  [README](README.md); the protocol documentation lives in
+  [doc/sequentia/](doc/sequentia/README.md).
+- Run the Sequentia functional tests (`test/functional/feature_pos_*`,
+  `feature_any_asset_fee*`, `feature_bitcoin_anchoring*`, ...) before
+  submitting consensus-adjacent changes.
+
+The original Bitcoin Core document follows.
+
+---
 
 The Bitcoin Core project operates an open contributor model where anyone is
 welcome to contribute towards development in the form of peer review, testing

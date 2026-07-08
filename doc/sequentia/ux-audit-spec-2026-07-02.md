@@ -59,7 +59,7 @@ on :8080); see [[sequentia-server-deploy]].
 | Wallet kit (LWK) | `SWK` (sequentia) | `lwk_common/src/qr.rs`, `lwk_wasm/src/*` (the wasm the wallet calls) | rebuilt into `/wallet/pkg` |
 | Explorer + landing | `sequentia-explorer` (main) | `esplora/client/src/**` (built by `build-public.sh`), `downloads/index.html`, `serve-public.js` (routes/faucet) | `/explorer/`, `/testnet4/`, `/download/`, `/` |
 | Bridge UI | `compages` (main) | `web/index.html`, `web/app.js`, `daemon/lib/*.js` (user-visible API strings), `contracts/src/CompagesVault.sol` | `/bridge/` |
-| Desktop GUI | `SequentiaByClaude` (claude/...) | `src/qt/**`, `src/qt/forms/*.ui` | Core download |
+| Desktop GUI | `Sequentia` (claude/...) | `src/qt/**`, `src/qt/forms/*.ui` | Core download |
 | Ambra mobile | `ambra` (main) | `app/lib/**` (Dart UI), `ambra_core/src/api/mod.rs` (Rust API), `app/android/**` | APK on `/download/` |
 | Registry data | `sequentia-registry` (main) | `seed/legacy-assets.json` (correct) + the DB row on the box (some wrong) | `/registry/` |
 | Hosted SeqLN LSP (NEW) | `seqln` + `seqdex` (`phase3-pure-ln`) | SeqLN nodes on both networks + `seqob-maker -mode pureln\|lightning` + a Boltz-shaped swap gateway | behind `/lsp` for web + Ambra |
@@ -77,7 +77,7 @@ on :8080); see [[sequentia-server-deploy]].
 
 **T1. Any-asset fee/amount is displayed as tSEQ (the display layer still assumes one asset).**
 The fee engine is correct everywhere; the presentation is not. Hits: Qt send-confirm labels a non-tSEQ
-fee as tSEQ and folds it into a bogus "Total Amount" (`SequentiaByClaude/src/qt/sendcoinsdialog.cpp:403,419`);
+fee as tSEQ and folds it into a bogus "Total Amount" (`Sequentia/src/qt/sendcoinsdialog.cpp:403,419`);
 Qt tx-details Debit/Credit/Net rows all tSEQ (`transactiondesc.cpp:233-283`); Ambra history hardcodes the
 fee label "tSEQ" (`ambra/app/lib/history_screen.dart:271`, needs `fee_asset` added to `TxRow` in
 `ambra_core/src/api/mod.rs:569`); explorer mempool total shown as tSEQ + "sat/vB"
@@ -383,7 +383,7 @@ P1
 - Swap is still on the retired RFQ model (already P2 at `swap_screen.dart:122,287`, T7) and cross-chain is buy-only + anchor-gated (~20-30 min) with no reverse (`xchain_swap_screen.dart`; `xchain_swap_service.dart` XchainStore holds the secret P). Fix: add the LSP-hosted instant Lightning swap for BOTH buy AND sell, reusing the existing on-device secret-P persistence, and keep the on-chain HTLC path as the refund rail. Lands the T7 "no price" fix and the instant swap together. See 8.5.
 - No bolt11 BTC-LN receive/send and no push: the send scanner reads BIP21 only (`send_screen.dart:251`), the manifest declares INTERNET + CAMERA only (no POST_NOTIFICATIONS / messaging service, `ambra/app/android/app/src/main/AndroidManifest.xml`), and the only lifecycle handling is re-lock on pause (`main.dart:50-57`). Fix: an LN receive (hosted/JIT-channel invoice) + send (pay bolt11) path via a new `ambra/app/lib/lsp_client.dart` + `ln_*` FFI in `ambra/ambra_core/src/api/mod.rs`, plus push (FCM/APNs or a self-hosted/UnifiedPush channel to match the no-Play-Services stance) so a backgrounded incoming payment or settled swap can complete. Mirrors 4.2. See 8.5.
 
-### 4.4 Desktop GUI / Qt (`SequentiaByClaude/src/qt/**`, `src/qt/forms/*.ui`)
+### 4.4 Desktop GUI / Qt (`Sequentia/src/qt/**`, `src/qt/forms/*.ui`)
 
 P0
 

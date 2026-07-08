@@ -152,7 +152,7 @@ commit `5bc915e3`):
   *before* the asset column exists) — gave it a minimal direct query. `chaintopology` skips the policy-only
   on-chain-invoice check for non-policy owned outputs (the wallet still records them).
 - **CRITICAL: libwally could not parse Sequentia issuance txs.** Root cause: Sequentia's `CAssetIssuance`
-  (`SequentiaByClaude src/primitives/confidential.h:200,208`) adds a 1-byte `nDenomination` after the inflation
+  (`Sequentia src/primitives/confidential.h:200,208`) adds a 1-byte `nDenomination` after the inflation
   keys; SeqLN vendors stock libwally 1.4.0, which under-read every issuance input by 1 byte → `wally_tx_from_
   bytes` EINVAL → `bitcoin/block.c:231` NULL-deref → **lightningd SIGSEGV on any block with an issuance.** This
   blocked not just asset channels but SeqLN syncing the real Sequentia chain at all (the live node only
