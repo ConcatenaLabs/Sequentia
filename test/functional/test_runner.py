@@ -150,6 +150,7 @@ BASE_SCRIPTS = [
     'feature_tapscript_opcodes.py',
     'feature_openamp_m0.py',
     'feature_openamp_m2.py',
+    'feature_seqob_covenant_fill.py',
     # vv Tests less than 60s vv
     'p2p_sendheaders.py',
     'wallet_importmulti.py --legacy-wallet',

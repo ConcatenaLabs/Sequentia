@@ -1,0 +1,39 @@
+{
+  "_comment": "Sequentia price server. It DISCOVERS your network's assets from the Asset Registry (ticker -> id), prices them from ONE market-data API, applies the admission rules below, and publishes the resulting fee-asset whitelist to your node via setdynamicfeerates. You do NOT list assets here. These defaults point at the public Sequentia testnet demo, so a fresh install works out of the box; edit node_rpc to match your local node, and tune the rules in the config UI.",
+
+  "poll_interval_secs": 60,
+  "source_timeout": 15,
+  "source_name": "sequentia-price-server",
+
+  "node_rpc": {
+    "_comment": "Your LOCAL Sequentia node's RPC (where the whitelist is published). Use either user+password or a cookie file path.",
+    "host": "127.0.0.1",
+    "port": 7041,
+    "user": "rpcuser",
+    "password": "rpcpassword"
+  },
+
+  "registry_url": "http://159.195.15.140/registry/index.minimal.json",
+
+  "source": {
+    "_comment": "A Sequentia-format API returns every asset keyed by ticker ({\"SEQ\":{\"price\":..,\"market_cap\":..,\"volume_24h\":..}, ...}) in one call, so no JSON paths are needed. For a third-party API set format=custom and add price_path / market_cap_path / volume_24h_path (with an optional {ticker} placeholder).",
+    "url": "http://159.195.15.140/prices",
+    "quote_currency": "USD",
+    "format": "sequentia"
+  },
+
+  "feed_aliases": {
+    "_comment": "Map a registry ticker to the key the price feed uses for that asset, when they differ. The native coin's registry/display ticker is tSEQ (TSEQ) but the feed prices it under the chain-independent key SEQ (as the node GUI and explorer also do), so they refer to the same asset and merge into one row.",
+    "TSEQ": "SEQ"
+  },
+
+  "default_thresholds": {
+    "_comment": "Admission rules. Empty (only 'require') = admit every discovered asset that has a valid price. Add keys to tighten: min_market_cap, min_volume_24h, max_change_factor, max_volatility, min_price, max_price, issuer_domains. 'require' is 'all' or 'any'.",
+    "require": "all"
+  },
+
+  "exceptions": {
+    "always_admit": [],
+    "always_reject": []
+  }
+}

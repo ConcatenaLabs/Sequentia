@@ -1,255 +1,192 @@
 # OpenAMP: issuer-governed assets for Sequentia (design)
 
-STATUS: 2026-07-08. Design approved by Andreas; decided: name stays OpenAMP, clawback default ON, the box hosts a shared testnet policy server. Build state: M0 (enclave proof), M1 (`openampd` policy server), M2 (Tier B containment covenant), and M3 (issuer operations, reports, anchored transparency log) all DONE and proven end to end on regtest against a real node. Tier A is complete AMP2 parity; Tier B enforces containment by consensus (`test/functional/feature_openamp_m2.py`, in the runner: enclave-to-enclave and burn succeed, out-of-enclave and restricted-asset-fee outputs are rejected by the script interpreter; the covenant self-proves its leaf hash via `OP_TWEAKVERIFY`, see §6 and `openamp_covenant.py`). **M4 DONE 2026-07-08**: `openampd` is LIVE on the box (systemd `openampd`, node000 RPC, wallet `openampd-demo`, fee asset tSEQ), exposed at `https://sequentiatestnet.com/openamp/` (Caddy; wallet endpoints public, issuer endpoints token-gated). A demo restricted asset **BONDX** (`8d1dbf45…`, clawback on, contract hash `42f5d9e5…` committing to the policy key) was issued on the public testnet (1,000,000 units into an enclave), a real transfer settled with fee conversion (Alice paid the fee in BONDX; issuer bridged to tSEQ), the ownership report shows exact conservation, and the transparency log is anchored on-chain. Supersedes the externally drafted "OpenAMP Architecture Specification" memo (Gemini, 2026-07): that memo's problem statement is adopted, its consensus-level solution is rejected (see §10).
+STATUS: 2026-07-08. Name: OpenAMP (daemon `openampd`, repo `GracedEternalKingCabbageMan/openamp`). Single enforcement model: server co-signed 2-of-2 enclaves with a threshold (FROST) policy key. Confidentiality is opt-in per asset, exactly as for any other Sequentia asset. There is NO consensus-covenant tier: an earlier "Tier B" containment covenant was designed, built, and then scrapped because consensus-enforced containment forces all-explicit outputs, which would publish every holding to outside observers, and hiding holdings from outsiders (while the issuer sees everything) matters more than trustless containment for regulated assets. See §9 for that reasoning.
 
-Ecosystem integration (all live 2026-07-08): the asset registry serves BONDX with its `openamp` block for discovery at `https://sequentiatestnet.com/registry/` (server accepts an optional `openamp` block and x-only issuer keys), and both wallets ship restricted-asset support: the SWK web wallet at `/wallet` (register, restricted-asset rows, enclave receive address, send via the policy server with on-device schnorr signing) and Ambra v0.10.3 (same flows over a new Rust FFI schnorr signer at BIP32 `m/5/0`). Wallets verify the asset-to-policy binding by fetching the contract from the policy server and recomputing the asset id.
+Build state: `openampd` policy server is LIVE on the box (systemd `openampd`, node000 RPC, wallet `openampd-demo`, fee asset tSEQ) at `https://sequentiatestnet.com/openamp/` (Caddy; wallet endpoints public, issuer endpoints token-gated). A demo restricted asset **BONDX** (`8d1dbf45…`, clawback on, contract hash `42f5d9e5…` committing to the policy key) was issued on the public testnet, a real transfer settled with fee conversion, the ownership report shows exact conservation, and the transparency log is anchored on-chain. Registry serves BONDX with its `openamp` block for discovery; the SWK web wallet and Ambra v0.10.3 both ship restricted-asset support (register, balances, enclave receive, send with on-device schnorr signing).
 
-Repos: node-side proofs and design in SequentiaByClaude (`test/functional/feature_openamp_m0.py`, `feature_openamp_daemon.py`, `feature_openamp_m2.py`, `openamp_covenant.py`); the daemon and specs in the public repo `GracedEternalKingCabbageMan/openamp`; registry in `sequentia-registry`; wallets in `sequentia-web-wallet` and `ambra`.
+Proven end to end on regtest against a real node: `test/functional/feature_openamp_m0.py` (enclave issuance + co-signed transfer + freeze + fee conversion + clawback, in the runner) and `feature_openamp_daemon.py` (drives a real `openampd`: registration, hosted issuance, fee conversion, freeze, velocity, holder caps, clawback, reports, anchored transparency log).
 
-Grounding docs: `02-open-fee-market.md` (any-asset fees, producer whitelists), `01-architecture.md`, `simplicity-dex-covenant-offers-design.md` (introspection and Simplicity background), `seqdex-orderbook-design.md` (registered-user trading, later phase).
+Supersedes the externally drafted "OpenAMP Architecture Specification" memo (Gemini, 2026-07): its problem statement is adopted, its consensus-level solution is rejected (§8).
 
-Name: **OpenAMP** (decided 2026-07-08; the collision with the OpenAMP embedded-systems standard is accepted). Daemon: `openampd`. Repo: `GracedEternalKingCabbageMan/openamp`.
+Grounding docs: `02-open-fee-market.md` (any-asset fees, producer whitelists), `01-architecture.md`.
 
 ---
 
 ## 0. One paragraph
 
-OpenAMP is an open-source, self-hostable equivalent of Blockstream's AMP2 for Sequentia: issuers manage regulated assets (securities, funds, bonds) whose every transfer requires co-signature from an issuer-controlled policy server, with KYC whitelisting, categories, velocity limits, vesting, freezing, distributions, and auditor reports. Restricted assets live only in 2-of-2 taproot outputs (user key + policy key: the "enclave"). The asset ID cryptographically commits to the policy key through the issuance contract hash, so the asset-to-policy binding is verifiable by anyone with no consensus change and no node state. The covenant escape loophole (restricted assets leaking through the multi-asset fee pool into an unrestricted coinbase output) is closed structurally: a restricted asset never appears in a fee output, enforced at four independent layers, the strongest being a per-UTXO Tapscript introspection covenant that makes any out-of-enclave output, including a fee output, invalid by consensus. The fee output of a restricted-asset transfer is always in an ordinary fee asset per Sequentia's open fee market; users can nonetheless pay in the restricted asset itself through atomic in-transaction fee conversion with the issuer (or any registered fee broker), who takes a fee-equivalent slice of the asset into their own enclave account and attaches the real fee.
+OpenAMP is an open-source, self-hostable equivalent of Blockstream's AMP2 for Sequentia: issuers manage regulated assets (securities, funds, bonds) whose every transfer requires co-signature from an issuer-controlled policy server, with KYC whitelisting, categories, velocity limits, vesting, freezing, distributions, clawback, and auditor reports. Restricted assets live only in 2-of-2 taproot outputs (holder key + policy key: the "enclave"); the policy key is a FROST threshold, so freeing the asset requires compromising a quorum of signers, not one machine. The asset ID cryptographically commits to the policy key through the issuance contract hash, so the asset-to-policy binding is verifiable by anyone with no consensus change and no node state. Confidentiality is opt-in per asset with the same one-flag ease as any Sequentia asset: the amounts and asset tags are blinded to outside observers, while the policy server holds the blinding keys and therefore always sees who owns what. A restricted asset never appears in a fee output (so it can never leak into a block producer's coinbase); fees ride in an ordinary asset, and a holder who owns only the restricted asset pays through atomic in-transaction fee conversion with the issuer or any registered broker.
 
 ---
 
 ## 1. Parity target: what AMP2 does
 
-Blockstream AMP manages two asset classes on Liquid, enforced by a co-signing server and a registry of **registered users** (identified by GAID, the Green Account ID):
+Blockstream AMP manages regulated assets on Liquid, enforced by a co-signing server and a registry of **registered users** (identified by GAID, the Green Account ID). Transfer-restricted assets are held in 2-of-2 multisig; the AMP cosigner refuses to sign any transfer to an unregistered or unauthorized recipient. It supports **categories**, an **issuer authorization endpoint**, **assignments** and **distributions**, **vesting**, **freezing/blacklisting**, **reissuance and burn**, and **reports** (balances, ownership at a block height, proof of transfer and proof of balance). Liquid is confidential by default, so AMP restricted assets are blinded to outside observers while the issuer sees ownership through the registered accounts.
 
-- **Issuer-tracked assets**: no transfer restriction; the platform tracks ownership for reporting.
-- **Transfer-restricted assets**: held in 2-of-2 multisig accounts; the AMP cosigner refuses to sign any transfer to an unregistered or unauthorized recipient. Supports **categories** (group-based restrictions), an **issuer authorization endpoint** (issuer's own API approves each transfer), **assignments** and **distributions** (allocating and paying out to registered users), **vesting**, **freezing/blacklisting** (refusal to co-sign), **reissuance and burn**, and **reports**: balances, ownership at a given block height, proof of transfer and proof of balance for auditors and regulators.
+AMP2 (public release targeted Q3 2026) keeps this model and consolidates delivery: issuers no longer run node infrastructure; transaction construction, policy enforcement, investor onboarding, and HSM-backed co-signing are one hosted flow. OpenAMP targets that feature set, open source, on Sequentia.
 
-AMP2 (public release targeted Q3 2026) keeps this model and re-architects delivery: issuers no longer run node infrastructure; transaction construction, policy enforcement, investor onboarding, and HSM-backed co-signing are consolidated into one hosted flow. Public technical documentation on AMP2 internals is thin; this design targets feature parity with the documented AMP feature set plus AMP2's integration model (PSET in, PSET out; no issuer node), delivered as open source.
-
-Where OpenAMP deliberately goes beyond AMP2:
+Where OpenAMP differs from AMP2:
 
 1. **Self-hostable and open-source**: any issuer runs their own policy server; no platform dependency.
-2. **Cryptographic asset-to-policy binding**: the asset ID itself commits to the policy key (§4). In AMP the binding between an asset and its cosigner is a platform database row.
-3. **Covenant hardening tier**: with AMP, a compromised or coerced cosigner can sign assets out of the compliance enclave. OpenAMP Tier B makes that impossible below the enclave boundary by consensus (§6).
-4. **Transparency log**: every policy decision is written to an append-only hash chain whose root is periodically committed on-chain, so issuers and regulators can audit the server after the fact (§8).
-5. **Fee conversion and sponsorship**: because Sequentia fees can be paid in any accepted asset by any party, users can pay transaction costs in the restricted asset itself, with the issuer atomically bridging to the fee market inside the same transaction, or the issuer can simply sponsor the fee (§7). End users never need a separate gas asset. AMP2 on Liquid cannot offer either: L-BTC is mandatory there.
+2. **Cryptographic asset-to-policy binding**: the asset ID itself commits to the policy key (§3). In AMP the binding between an asset and its cosigner is a platform database row.
+3. **Threshold policy key**: the co-signing key is a FROST t-of-n threshold by default, so a single compromised machine cannot sign the asset out of its enclave (§5).
+4. **Transparency log**: every policy decision is written to an append-only hash chain whose root is periodically committed on-chain, so issuers and regulators can audit the server after the fact (§6).
+5. **Fee flexibility**: because Sequentia fees can be paid in any accepted asset by any party, users can pay in the restricted asset itself (issuer bridges to the fee market atomically) or the issuer can sponsor the fee (§7). AMP2 on Liquid cannot: L-BTC is mandatory there.
+6. **Confidential-optional on a transparent chain**: Sequentia is transparent by default (a deliberate flip from Liquid), so confidentiality is opt-in per asset. OpenAMP makes that opt-in as easy for a restricted asset as for any other (§4).
 
 ---
 
 ## 2. Chain facts this design stands on
 
-All verified in the current tree (branch `claude/sequentia-bitcoin-sidechain-w6xady`):
+Verified in the current tree:
 
-- **Fee outputs** are Elements explicit fee outputs: empty `scriptPubKey`, explicit value, explicit asset (`CTxOut::IsFee()`, `src/primitives/transaction.h:328`). A fee output can carry any explicit asset. Mempool acceptance requires exactly one fee asset per transaction (`src/validation.cpp:951-960`, `bad-txns-multiple-fee-assets`).
-- **The per-node fee-asset whitelist is default-deny**: the `ExchangeRateMap` (`src/exchangerates.h:25`) converts fee value; any asset not explicitly listed converts to 0, meaning the transaction is non-paying and never mined by that producer (`src/exchangerates.cpp:24-37`). Producers add assets via `setfeeexchangerates`. A restricted asset is simply never listed.
-- **Coinbase outputs are consensus-pinned to the leader**: from `pos_coinbase_leader_height`, every value-bearing coinbase output must equal `PosLeaderFeeScript(leader)` or the block is rejected (`bad-coinbase-not-leader`, `src/validation.cpp:2548-2559`). A "compliant 2-of-2 coinbase output" is therefore consensus-invalid on Sequentia. Coinbase may not contain fee outputs (`bad-cb-fee`, `src/consensus/tx_check.cpp:60-64`). There is no subsidy and no coinbase issuance (`genesis_subsidy = 0`, `src/chainparams.cpp:397/594`).
-- **Tapscript introspection is live**: `OP_INSPECTOUTPUTASSET` (pushes 32-byte asset plus a 1-byte prefix distinguishing explicit `0x01` from confidential), `OP_INSPECTOUTPUTSCRIPTPUBKEY` (pushes witness program plus version for witness outputs, else sha256 of the script and version -1; `src/script/interpreter.cpp:124-135`), `OP_INSPECTNUMOUTPUTS`, `OP_PUSHCURRENTINPUTINDEX`, `OP_INSPECTINPUTSCRIPTPUBKEY`, `OP_TWEAKVERIFY` (verifies taproot pay-to-contract: 33-byte tweaked key, 32-byte tweak, 32-byte internal key; `src/script/interpreter.cpp:2220`), `OP_ECMULSCALARVERIFY`, 64-bit arithmetic, `OP_CAT` (`src/script/interpreter.cpp:1048`), and streaming SHA256 (`OP_SHA256INITIALIZE/UPDATE/FINALIZE`, `:1761-1804`). All available in taproot leaves, active now, no deployment needed.
-- **Asset IDs commit to a contract hash**: entropy `E = H(H(prevout) || contract_hash)`, `asset = H(E || 0)`, reissuance token `= H(E || 1)` (`src/issuance.cpp:23-64`). `issueasset` accepts `contract_hash` and `denomination` directly (`src/wallet/rpc/elements.cpp:1391-1417`).
-- **Transparent by default**: `m_default_blinded_addresses = false` (`src/chainparams.cpp:504/760`); confidential outputs are opt-in and detectable in script via the asset/value prefix byte.
-- **Simplicity is vendored but NEVER_ACTIVE on all Sequentia chains** (`src/chainparams.cpp:382-386/582-585`). Nothing in this design depends on it; §6 notes it as an optional future tier.
-- **PSET (Elements PSBT v2) RPCs exist end to end**: `createpsbt`, `walletcreatefundedpsbt`, `walletprocesspsbt`, `combinepsbt`, `finalizepsbt`, `analyzepsbt`, `decodepsbt`.
+- **Fee outputs** are Elements explicit fee outputs: empty `scriptPubKey`, explicit value, explicit asset (`CTxOut::IsFee()`, `src/primitives/transaction.h:328`). Mempool acceptance requires exactly one fee asset per transaction (`src/validation.cpp:951-960`, `bad-txns-multiple-fee-assets`).
+- **The per-node fee-asset whitelist is default-deny**: the `ExchangeRateMap` (`src/exchangerates.h:25`) converts fee value; an asset not explicitly listed converts to 0, so the transaction is non-paying and never mined by that producer (`src/exchangerates.cpp:24-37`). A restricted asset is never listed.
+- **Coinbase outputs are consensus-pinned to the leader**: from `pos_coinbase_leader_height`, every value-bearing coinbase output must equal `PosLeaderFeeScript(leader)` (`bad-coinbase-not-leader`, `src/validation.cpp:2548-2559`). Coinbase may not contain fee outputs (`bad-cb-fee`, `src/consensus/tx_check.cpp:60-64`). No subsidy, no coinbase issuance (`genesis_subsidy = 0`).
+- **Asset IDs commit to a contract hash**: entropy `E = H(H(prevout) || contract_hash)`, `asset = H(E || 0)`, reissuance token `= H(E || 1)` (`src/issuance.cpp:23-64`). `issueasset` accepts `contract_hash` and `denomination`.
+- **Transparent by default, confidential opt-in**: `m_default_blinded_addresses = false` (`src/chainparams.cpp:504/760`); any output can carry a blinding nonce, and Elements allows blinding the asset and value independently. Confidential (blinded) addresses use the blech32 HRP; the node's PSET/`rawblindrawtransaction` RPCs build the rangeproofs and surjection proofs.
+- **PSET (Elements PSBT v2) RPCs exist end to end**: `createpsbt`, `walletcreatefundedpsbt`, `walletprocesspsbt`, `combinepsbt`, `finalizepsbt`, `analyzepsbt`, `decodepsbt`, `rawblindrawtransaction`.
 
 ---
 
-## 3. Threat model, and the covenant escape loophole re-examined
+## 3. Genesis anchor without consensus: the contract commitment
 
-The externally drafted memo frames the core threat: on a chain where fees can be paid in any asset, a restricted asset used as a fee is swept by the block producer into an unrestricted coinbase output and "escapes" its compliance enclave. Its proposed fix is consensus-level "asset-bound covenants": a genesis-registered script template that every output of the asset, including coinbase outputs, must match, with KYC'd block producers using compliant 2-of-2 coinbase addresses.
-
-The loophole is real only if a restricted asset can reach a fee output at all. The correct fix is to make that structurally impossible, not to teach the coinbase about compliance:
-
-**Rule 1 (the load-bearing rule): a restricted asset never appears in a fee output.** The fee output of any transaction moving a restricted asset is in some ordinary accepted asset, so the asset never enters the floating fee pool and never reaches a coinbase. This is a protocol-layer statement, not an economic one: the sender can still denominate the cost in the restricted asset by atomically converting with the issuer or a registered fee broker inside the same transaction (§7), and from the user's perspective the fee is then paid in the asset. What can never happen is the asset itself being the thing a block producer sweeps. That framing is Sequentia's open fee market working as designed: block producers choose which assets they accept for fees, no producer can lawfully accept an asset it is not KYC'd to receive, so producers never whitelist restricted assets, and registered intermediaries fill the gap by accepting them for fee payment instead.
-
-Rule 1 is enforced at four independent layers, ordered weakest to strongest:
-
-| Layer | Mechanism | Survives... |
-|---|---|---|
-| L1 wallet | wallet never selects a restricted asset as the fee asset | honest software |
-| L2 policy server | server refuses to co-sign any transaction containing a fee output (or any non-enclave output) in the restricted asset | malicious user |
-| L3 producer whitelist | fee-asset whitelist is default-deny (`ExchangeRateMap`); a fee in an unlisted asset is non-paying, so the transaction is never mined; and `bad-coinbase-not-leader` means the sweep output could not be covenant-shaped anyway | malicious user and lazy server |
-| L4 covenant (Tier B) | the UTXO's own Tapscript covenant makes any transaction with an out-of-enclave output in the asset, including a fee output (empty scriptPubKey can never match the enclave template), invalid by consensus on every node | malicious user, compromised or coerced policy server, and colluding block producer |
-
-With L2 alone (Tier A) the design already has AMP2-equivalent security: AMP has exactly one layer, the cosigner. L3 comes free from Sequentia's existing consensus and policy. L4 is the beyond-AMP2 hardening tier.
-
-What the on-chain layers deliberately do NOT enforce: KYC identity, velocity limits, holder caps, vesting schedules, category rules. Those need off-chain data and stay in the policy server, exactly as in AMP2. The on-chain guarantee is precisely **containment**: units of the asset exist only inside enclave outputs (or provable burns), forever, no matter who misbehaves.
-
-Residual trust (identical to AMP2, stated honestly):
-
-- The **issuer** is trusted at issuance and reissuance time to mint into enclave outputs (the reissuance token is an issuer-held bearer instrument; consensus cannot stop an issuer reissuing to a bare address). Issuer tooling enforces it; the registry and any verifier can detect a violation instantly on the transparent chain, which voids the asset's compliance claims.
-- The **policy server** is trusted for policy correctness (whom it lets transact). Under Tier B it is NOT trusted for containment.
-- Server availability: if the policy key is lost or the server is gone, enclave funds are stuck. Mitigations in §5 (threshold policy key, optional continuity leaf).
-
----
-
-## 4. Genesis anchor without consensus: the contract commitment
-
-Elements already gives us a genesis-anchored, stateless registry: the asset ID is a hash commitment to the issuance contract. OpenAMP defines a canonical contract JSON (an extension of the `sequentia-registry` entry format):
+Elements already gives a genesis-anchored, stateless registry: the asset ID is a hash commitment to the issuance contract. OpenAMP defines a canonical contract JSON extending the `sequentia-registry` entry format:
 
 ```json
 {
   "name": "Example Bond 2027",
   "ticker": "BONDX",
   "precision": 8,
-  "issuer_pubkey": "<33-byte hex>",
+  "issuer_pubkey": "<33-byte or 32-byte x-only hex>",
   "version": 0,
   "openamp": {
     "version": 1,
-    "type": "restricted",            // "restricted" | "tracked"
-    "policy_pubkey": "<32-byte x-only hex>",
-    "tier": "B",                     // "A" | "B": enclave script family
-    "clawback": true,                // clawback leaf present in enclave tree
-    "burn_allowed": true,            // covenant permits OP_RETURN burns
+    "type": "restricted",             // "restricted" | "tracked"
+    "policy_pubkey": "<32-byte x-only hex>",   // the FROST group public key
+    "clawback": true,                 // clawback leaf present in the enclave tree
+    "burn_allowed": true,             // OP_RETURN burns permitted
+    "confidential": false,            // whether the asset is issued/held blinded
     "policy_endpoints": ["https://amp.example-issuer.com"],
-    "terms_hash": "<sha256 of legal terms document>"
+    "terms_hash": "<sha256 of legal terms>"
   }
 }
 ```
 
-`contract_hash = sha256(canonical-json)` is passed to `issueasset`/`rawissueasset`, so `asset_id` commits to `policy_pubkey`, the tier, and the clawback terms. Anyone holding the contract JSON (served by the registry and by the policy server) verifies the binding offline by recomputing the entropy chain. Wallets refuse to treat an asset as an OpenAMP asset unless this verification passes. This is the memo's "issuance commitment" done statelessly: no consensus lookup table, no state bloat, no protocol change; full nodes remain oblivious.
+`contract_hash = sha256(canonical-json)` is passed to `issueasset`/`rawissueasset`, so `asset_id` commits to `policy_pubkey`, the clawback terms, and whether the asset is confidential. Anyone holding the contract JSON (served by the registry and the policy server) verifies the binding offline by recomputing the entropy chain. Wallets refuse to treat an asset as an OpenAMP asset unless this verification passes. No consensus lookup table, no state bloat, no protocol change; full nodes remain oblivious.
 
-Holder terms are therefore fixed and disclosed at issuance: whether clawback exists, whether burns are allowed, which tier applies. An issuer cannot quietly change them later (a new policy key means a new asset ID).
-
----
-
-## 5. The enclave: addresses and key structure
-
-Every restricted-asset UTXO pays to a taproot output with **internal key = NUMS** (the BIP341 nothing-up-my-sleeve point, so there is no key-path spend) and a script tree of:
-
-- **L_user** (per holder): `<K_user> OP_CHECKSIGVERIFY <K_policy> OP_CHECKSIG`, the co-signed transfer leaf. `K_user` is derived from the holder's registered account xpub at a per-address BIP32 path; `K_policy` is the asset-wide policy key from the contract.
-- **L_cov** (Tier B only, asset-wide constant): the containment covenant, §6. It also requires both signatures, so it is the same 2-of-2 with structural checks prepended; L_user then exists as the cheap path for small transactions and as the upgrade seam (Tier A trees are just `{L_user}`).
-- **L_claw** (default ON, opt-out via `"clawback": false`): `<K_issuer> OP_CHECKSIGVERIFY <K_policy> OP_CHECKSIG`. Issuer plus policy server, no user key: court-ordered seizure, lost-key recovery, estate execution. Its presence is committed in the contract hash, so holders accept it knowingly at purchase time. Without it, lost keys mean provable-burn-then-reissue (AMP0's recovery model).
-
-Design decisions and their reasons:
-
-- **Script-path 2-of-2, not MuSig2 key-path, for the MVP.** Plain `CHECKSIGVERIFY` chains are simple for every wallet (SWK, Ambra, hardware later) and make the co-signing protocol a one-round PSET exchange instead of a two-round nonce ceremony. A MuSig2 key-path variant is a later fee optimization and would anyway forfeit Tier B (a key-path spend bypasses all leaves), so Tier B assets must keep NUMS internal keys permanently.
-- **The policy key is one x-only point on-chain, threshold behind the scenes.** Recommended deployment: FROST 2-of-3 among issuer-held signers (or issuer + two jurisdictionally separated operators), so no single machine compromise leaks `K_policy` and no single loss bricks the asset. MVP runs a single encrypted key with the HSM interface abstracted; FROST lands in M5.
-- **Account IDs.** The GAID analog is the **AID**: `base58check(ripemd160(sha256(account-xpub)))` for the holder's registered restricted-asset account. Registration = KYC dossier + AID + xpub. Because the server knows every xpub, it derives every enclave address: full watch capability on a transparent chain, which is what makes ownership reports (§8) exact.
-- **Confidentiality.** Tier A assets may opt into confidential outputs with mandatory blinding-key disclosure to the policy server (the AMP model). Tier B assets are transparent-only: the covenant must read asset tags, and Sequentia is transparent by default anyway. Stated in the contract.
-
-Server-death continuity (open design dial, default OFF): an optional **L_cont** leaf, `<Δ> OP_CHECKSEQUENCEVERIFY OP_DROP <K_issuer> OP_CHECKSIG` (or user-key variant), lets funds move after a long inactivity window Δ if the policy server is permanently gone. Issuer-key variant preserves compliance but adds custody risk; user-key variant becomes a compliance time bomb. Default is no continuity leaf and reliance on the threshold policy key; per-asset choice, disclosed in the contract.
+Holder terms are fixed and disclosed at issuance: whether clawback exists, whether burns are allowed, whether the asset is confidential. An issuer cannot quietly change them later (a new policy key, or a change of any committed field, means a new asset ID).
 
 ---
 
-## 6. Tier B: the containment covenant
+## 4. Confidentiality (opt-in, equal to any asset)
 
-Goal: a consensus-enforced guarantee that every output carrying asset `A` in any transaction spending an enclave UTXO is itself an enclave output (or a permitted burn). This closes the fee loophole absolutely: a fee output has an empty scriptPubKey and can never match the enclave template.
+Sequentia is transparent by default and confidentiality is opt-in per output; OpenAMP makes that opt-in as easy for a restricted asset as for an ordinary one. When an asset's contract sets `"confidential": true`:
 
-The classic obstacle to recursive covenants is self-reference: the leaf script would need to contain its own hash. We avoid the quine with a **fixed covenant leaf + templated sibling + self-check against the current input**:
+- Enclave addresses are **blech32 confidential taproot addresses**: the same 2-of-2 taproot output (§5) plus a blinding public key in the output nonce. The policy server returns them from the address endpoint exactly as it returns unblinded ones.
+- Amounts and asset tags are **blinded to outside observers**. The chain shows enclave outputs with committed values; an outsider cannot read who holds how much, nor even that a given output carries the restricted asset.
+- The **policy server holds the blinding keys** and therefore always sees who owns what. This is required for it to scan balances, enforce velocity limits and holder caps, and produce ownership and proof-of-balance reports. The holder learns the blinding key for their own outputs (to know their balance and to spend); the server learns it for every output (that is the point). Blinding-key distribution is part of the enclave-address handshake, not a separate disclosure step.
+- Transfers are constructed and blinded through the node's PSET / `rawblindrawtransaction` machinery (tested consensus crypto), then policy-checked and co-signed. The co-signing engine unblinds with the server-held keys to re-derive amounts and destinations before signing.
 
-- `L_cov` is byte-identical for all holders of asset `A` (it embeds `K_policy` and constants, never `K_user`).
-- The per-holder key lives only in the sibling `L_user`, whose script is a fixed template `T(K) = 0x20 || K || OP_CHECKSIGVERIFY || 0x20 || K_policy || OP_CHECKSIG` differing only in the 32-byte key.
-- The tree root is `TapBranch(H(L_cov), H(T(K_user)))` (plus `L_claw` folded in at a fixed position when present).
+The honest limit, stated in the UI: a confidential restricted asset is confidential against third parties, never against the issuer or its policy server. That is the correct property for a regulated instrument (the issuer must be able to know who owns what at any time), and it is exactly AMP2's model on Liquid. It is narrower than a normal Sequentia confidential address, where nobody but the counterparties sees the amount.
 
-Execution of `L_cov` (witness supplies: `h_cov` claimed hash of L_cov, own `K_user`, and per-output recipient keys `K_i` with parity and ordering bits):
+Transparent (unblinded) assets remain fully supported for issuers who want public, auditable holdings; `confidential` is a per-asset choice made once at issuance.
 
-1. **Self-check**: compute `root_self = TapBranch(h_cov, TapLeafHash(T(K_user)))`, then verify `TapTweak(NUMS, root_self)` equals this input's own scriptPubKey (`OP_PUSHCURRENTINPUTINDEX` + `OP_INSPECTINPUTSCRIPTPUBKEY`, compare via `OP_TWEAKVERIFY` after `OP_CAT`-ing the witness parity byte onto the 32-byte program). Because taproot spend verification already proved the executing leaf is committed by that scriptPubKey, and `T(K)` can never equal `L_cov` for any `K` (different template bytes), collision resistance forces `h_cov = H(L_cov)`. The script now holds its own hash without containing it.
-2. **Per-output checks** (unrolled to a fixed maximum, with `OP_INSPECTNUMOUTPUTS` bounding the count): for each output, `OP_INSPECTOUTPUTASSET`; require the explicit prefix `0x01` (a confidential output could smuggle asset `A`, so transactions spending Tier B enclave inputs are all-explicit). If the asset is not `A`: no constraint. If it is `A`: the output scriptPubKey must be witness v1 with program `Q_i` such that `TapTweak(NUMS, TapBranch(h_cov, TapLeafHash(T(K_i)))) = Q_i` (`OP_TWEAKVERIFY` again, `K_i` from witness), or, if `burn_allowed`, scriptPubKey exactly `OP_RETURN` (compare the sha256 pushed by `OP_INSPECTOUTPUTSCRIPTPUBKEY` for non-witness scripts against the constant `sha256(0x6a)`).
-3. **Authorization**: `<K_policy> OP_CHECKSIGVERIFY <K_user> OP_CHECKSIG` (with `K_user` bound by step 1, taken from witness). Both signatures still required; the covenant adds structure, it does not replace the co-sign.
+---
 
-Tagged hashes (`TapLeaf`, `TapBranch`, `TapTweak`) are computed in-script with `OP_SHA256INITIALIZE/UPDATE/FINALIZE` seeded with the 64-byte precomputed tag-midstate prefixes as push constants, and `OP_CAT` for concatenation. `TapBranch` requires lexicographic ordering of the two child hashes; the witness supplies a swap bit and honest wallets sort. (A dishonest sender could mis-sort and produce a check-passing but unspendable destination; that is equivalent to burning funds they were sending, not an escape, and receiving wallets independently validate their own derived addresses before crediting a payment. Verified in M2 tests.)
+## 5. The enclave: addresses and keys
 
-Consequences worth stating explicitly:
+Every restricted-asset UTXO pays to a taproot output with **internal key = NUMS** (the BIP341 nothing-up-my-sleeve point, so no key-path spend) and a script tree of:
 
-- A fee output in asset `A` fails step 2 (empty scriptPubKey is neither the enclave template nor `OP_RETURN`), so **no transaction with a fee output in a Tier B asset can exist**, regardless of what any server, wallet, or producer does. Users still pay costs denominated in `A` via fee conversion (§7); what cannot exist is `A` in the fee pool.
-- The block producer's sweep never sees asset `A`, so `bad-coinbase-not-leader` and the fee pool are simply never involved. The memo's "pre-cleared miner payouts" machinery is unnecessary, and on Sequentia impossible (§2).
-- Inputs need no inspection: Elements consensus already enforces per-asset amount conservation for explicit transactions, so asset `A` appearing in outputs beyond inputs is impossible without issuance, and the issuance path is issuer-controlled (§3 residual trust).
-- Multiple enclave inputs in one transaction each run the same output checks redundantly; harmless.
-- Estimated leaf size is 2-4 kB with checks unrolled for up to 8 outputs (exact figure and the `OP_TWEAKVERIFY` validation-weight budget, 50 WU each against the witness-size budget, measured in M2). This is witness data on a chain with cheap blockspace, paid only on restricted-asset spends. If it proves tight, the per-asset constant `MAX_OUTPUTS` is a contract field.
+- **L_user** (per holder): `<K_user> OP_CHECKSIGVERIFY <K_policy> OP_CHECKSIG`, the co-signed transfer leaf. `K_user` is derived from the holder's registered account key; `K_policy` is the asset-wide policy key from the contract.
+- **L_claw** (default ON, opt-out via `"clawback": false`): `<K_issuer> OP_CHECKSIGVERIFY <K_policy> OP_CHECKSIG`. Issuer plus policy, no user key: court-ordered seizure, lost-key recovery, estate execution. Its presence is committed in the contract hash, so holders accept it knowingly at purchase. Without it, lost keys mean provable-burn-then-reissue.
 
-**Tier C (optional future)**: the same containment predicate in Simplicity would be smaller and cleaner (real recursion via `disconnect`, no unrolling). Simplicity is vendored but NEVER_ACTIVE on Sequentia; if it is ever activated for SeqDEX covenants, OpenAMP gains a leaf variant, nothing else changes. Not on any critical path.
+Key structure and reasons:
+
+- **The policy key is a FROST threshold.** On-chain it is a single x-only point `K_policy` (the FROST group public key). Off-chain, signing under it requires a t-of-n quorum of policy signers. Recommended deployment: 2-of-3 across the issuer plus two jurisdictionally separated operators, so no single machine compromise can co-sign the asset out of its enclave and no single loss bricks the asset. This is the primary defense: the enclave is a 2-of-2 (holder + policy), and "the policy side" is itself a threshold. `openampd` produces BIP340-compatible threshold Schnorr signatures that verify under `K_policy` (§6). The signing engine sits behind a signer interface (single software key for the testnet demo, FROST quorum in production).
+- **Script-path 2-of-2, not MuSig2 key-path.** Plain `CHECKSIGVERIFY` chains are simple for every wallet (SWK, Ambra, hardware later) and make co-signing a one-round PSET exchange. The FROST ceremony happens entirely on the policy side to produce the single `K_policy` signature; the holder just signs `K_user`.
+- **Account IDs.** The GAID analog is the **AID**: a hash of the holder's registered account key. Registration = KYC dossier + AID + key. Because the server knows every account key it derives every enclave address, which is what makes ownership reports exact (and, for confidential assets, why it holds the blinding keys).
+
+Server-continuity (open dial, default OFF): an optional inactivity-timeout recovery leaf lets funds move if the policy quorum is permanently gone. Default is no such leaf and reliance on the threshold key; per-asset choice, disclosed in the contract.
+
+---
+
+## 6. The policy server: `openampd`
+
+A Go daemon, deployed like our other services. Modules:
+
+- **Chain follower**: tracks the chain via `elementsd` RPC, anchor-aware; all stateful accounting keys on (block hash, Bitcoin-anchor depth) and rolls back on reorgs, per anchoring supremacy. Velocity windows and snapshot heights are measured in anchor-confirmed blocks; co-sign decisions are idempotent.
+- **Registry of record**: registered users (AID, account key, KYC dossier reference, jurisdiction tags, categories), assets (contract JSON, policy rules), assignments, vesting schedules, freeze lists. For confidential assets it also holds the blinding keys.
+- **Policy engine**: a declarative per-asset policy document evaluated on every co-sign request: recipient registered and in an allowed category; sender not frozen; UTXOs not frozen; velocity limits; holder cap (exact from full address derivation); vesting; lock-in periods; jurisdiction rules; optional forwarding to an issuer authorization endpoint.
+- **Co-signing engine**: input is a PSET plus transfer metadata; it independently re-derives every claim from the PSET (never trusts metadata), unblinding confidential outputs with the server-held keys: all restricted inputs are enclave UTXOs of the claimed sender, all restricted outputs pay enclave scripts of registered recipients or permitted burns, no restricted fee output, fee asset not restricted. Then policy engine, then sign `K_policy` for each restricted input via the signer interface (software key for the demo, FROST quorum in production), return the PSET.
+- **Threshold signer (FROST)**: produces BIP340-compatible threshold Schnorr signatures under the group key `K_policy`. A signing request fans out to the quorum, which return signature shares that aggregate to a single 64-byte signature verifying under `K_policy` in the enclave's `OP_CHECKSIG`. Key generation is a one-time DKG per asset; the group public key becomes the asset's `policy_pubkey`. For the testnet demo `openampd` runs a single in-process key behind the same interface.
+- **Transparency log**: every decision (co-sign granted/refused, freeze, clawback, registration change) appends to a hash-chained log; the head is committed on-chain in an `OP_RETURN` periodically. Regulators and issuers can replay and verify the server never rewrote history.
+- **APIs** (REST, token/mTLS): issuer surface (users, categories, assets, assignments, distributions, freezes, clawback, reports) and wallet surface (register account, get enclave receive address for an AID, request co-sign, query policy and own limits).
+
+Freeze: user-freeze and UTXO-freeze are server-side refusals; global asset freeze halts co-signing. Clawback is a deliberately heavyweight ceremony (dual authorization, transparency-log entry with reason code before signing, spend via `L_claw` into a designated issuer enclave address). Distributions: ownership snapshot at an anchor-confirmed height, then batch payments of an ordinary asset to holders, reconciled against entitlement, vesting-aware.
 
 ---
 
 ## 7. Fees for restricted-asset transfers
 
-The fee output is always in an ordinary asset (Rule 1), and the sender has three ways to fund it:
+A restricted asset never appears in a fee output, so it can never enter the floating fee pool or a coinbase. This is enforced by the wallet (never selects it as fee asset), the policy server (refuses to co-sign any transaction with a fee output in the restricted asset), and Sequentia's default-deny producer whitelist (a fee in an unlisted asset is non-paying, and no producer would whitelist an asset it is not KYC'd to receive). The fee output is always in an ordinary asset. Three ways to fund it:
 
-- **Self-paid**: the sender's wallet adds fee-asset inputs (tSEQ, USDX, whatever the wallet's existing any-asset fee logic selects from what the user holds and producers accept) plus the fee output and fee-asset change. The issuer is not involved in the fee leg at all; the policy server's only role is the ordinary transfer co-sign. The restricted enclave inputs/outputs and the fee legs coexist in one transaction; Tier B requires the fee asset outputs to be explicit, which they are by default.
-- **Fee conversion** (for senders who hold only the restricted asset): the sender pays in the restricted asset; the issuer bridges to the fee market atomically. The co-sign transaction contains: the sender's enclave inputs (asset `A`) and an issuer fee-asset input (say USDX); the recipient's enclave output and sender's enclave change in `A`; a **conversion output** paying `ceil(fee_value x rate)` atoms of `A` to the issuer's own enclave address; the fee output in USDX; and the issuer's USDX change. The conversion output is an ordinary enclave-to-enclave transfer to a registered holder, so the Tier B covenant permits it with no special case. Atomicity is inherent: the sender's signatures cover the conversion output and the issuer's signature covers the fee input, so neither leg can exist without the other, and the sender approves the quoted rate by signing. From the user's perspective the fee is paid in `A`; economically the issuer collected fee-equivalent value in `A` and is made whole by construction, so the flow is self-funding, not a subsidy. The conversion rate is published at the policy endpoint (price-server-fed or issuer-set, per contract), quoted to the wallet before signing, and displayed in `A`'s own units. The same value-preserving rounding as the fee market applies: a high-value asset pays few atoms, and that is correct.
-- **Sponsored**: as fee conversion but with no conversion output; the issuer eats the (tiny) fee as a service cost, at their discretion.
+- **Self-paid**: the sender's wallet adds ordinary-asset fee inputs plus the fee output and change. The issuer is not involved.
+- **Fee conversion** (for senders who hold only the restricted asset): one atomic transaction where the issuer (or any registered broker) receives a fee-equivalent slice of the asset into its own enclave account and attaches the real fee in an ordinary asset. Atomicity is inherent (the sender's signatures cover the conversion output, the issuer's signature covers the fee input); the sender approves the quoted rate by signing. Self-funding, not a subsidy. Rate published at the policy endpoint, quoted before signing, displayed in the asset's own units.
+- **Sponsored**: fee conversion with no conversion output; the issuer eats the tiny fee.
 
-Fee brokers: nothing in the conversion flow requires the converter to be the issuer. Any registered holder of `A` willing to receive the conversion output and attach the fee input can serve, and the policy server co-signs it like any transfer between registered users. A standing broker market keeps conversion rates honest; the issuer is simply the default, always-registered, always-willing counterparty.
-
-Policy-engine treatment of conversion outputs: the receiving broker/issuer is a registered holder, so holder caps are unaffected (issuer accounts are cap-exempt anyway); whether conversion is permitted during a lock-in period, and whether it counts against velocity, are per-asset policy flags (default: permitted, counted).
-
-One fee asset per transaction is a mempool rule (`bad-txns-multiple-fee-assets`), so converter and sender never both attach fees; the PSET protocol makes the fee leg explicit and single.
-
-Producer guidance (docs + default config): never add an OpenAMP restricted asset to `setfeeexchangerates`. Defense in depth only; L3/L4 make violations unmineable/invalid respectively.
+One fee asset per transaction is a mempool rule, so converter and sender never both attach fees.
 
 ---
 
-## 8. The policy server: `openampd`
+## 8. Rejected alternatives
 
-A Go daemon, deployed like our other services (systemd on the box for the testnet instance; issuers self-host in production). Modules:
-
-- **Chain follower**: tracks the Sequentia chain via `elementsd` RPC, anchor-aware: all stateful accounting keys on (block hash, Bitcoin-anchor depth) and rolls back on reorgs, per anchoring supremacy. Velocity windows and snapshot heights are measured in anchor-confirmed blocks; co-sign decisions on unconfirmed state are idempotent (double-requesting a co-sign for the same outpoints returns the same signature; two co-signs spending the same UTXO to different destinations is a plain double-spend race the chain resolves, and confirmed-state counters make it economically pointless).
-- **Registry of record**: registered users (AID, xpub, KYC dossier reference, jurisdiction tags, categories), assets (contract JSON, tier, policy rules), assignments, vesting schedules, freeze lists (per user, per UTXO, per asset). SQLite first, Postgres interface-compatible.
-- **Policy engine**: a declarative per-asset policy document evaluated on every co-sign request: recipient registered and in an allowed category; sender not frozen; UTXOs not frozen; velocity limits (amount per window per account); holder cap (count of accounts with nonzero balance after the transfer, exact thanks to full address derivation on a transparent chain); vesting (assigned-but-unvested amounts unspendable); lock-in periods; jurisdiction rules; optional forwarding to an **issuer authorization endpoint** (AMP parity: the issuer's own API gets the final yes/no).
-- **Co-signing engine**: input is a PSET plus transfer metadata; it independently re-derives every claim from the PSET (never trusts metadata): all restricted inputs are enclave UTXOs of the claimed sender, all restricted outputs pay enclave scripts of registered recipients or permitted burns, no restricted fee output, fee asset not restricted, all outputs explicit for Tier B. Then policy engine, then sign `K_policy` for each restricted input (HSM interface; software key MVP, FROST 2-of-3 in M5), return the PSET.
-- **Transparency log**: every decision (co-sign granted/refused, freeze, clawback, registration change) appends to a hash-chained log; the head is committed on-chain in an `OP_RETURN` output periodically (fee in any asset, trivially cheap). Regulators and issuers can replay and verify the server never rewrote history. This is the open-source answer to "why trust the policy server's records".
-- **APIs** (REST, mTLS/token-authenticated): issuer surface: users, categories, assets, assignments, distributions, freezes, clawback ceremonies, reports (balances, ownership at height, proof-of-balance, proof-of-transfer, transfer history). Wallet surface: register account, get enclave receive address for AID, request co-sign (PSET), query per-asset policy and own limits/vesting.
-
-Freeze semantics: user-freeze and UTXO-freeze are server-side refusals (Tier A and B); global asset freeze halts all co-signing. Under Tier B even a legally compelled emergency cannot move funds out of the enclave; it can only stop movement or, with `L_claw`, seize into issuer custody with the on-chain trail visible to everyone.
-
-Clawback ceremony: a deliberately heavyweight flow: issuer request, dual authorization (issuer key is offline/cold), transparency-log entry with reason code before the transaction is signed, spend via `L_claw` into a designated issuer enclave address (never a bare address).
-
-Distributions (dividends/coupons): ownership snapshot at an anchor-confirmed height (exact from derived addresses), then batch payments of any asset (typically USDX or tSEQ, not the restricted asset) to holders' ordinary addresses, with the report reconciling entitlement vs paid. Vesting-aware.
+- **Consensus-level asset-bound covenants (the Gemini memo)**: rejected. It breaks stateless UTXO validation (every node maintains an indexed issuance-commitment database, the state bloat the memo concedes); it is consensus-incompatible with Sequentia (`bad-coinbase-not-leader` pins every value-bearing coinbase output to the leader's fee script); KYC'd block producers fragment the open fee market; and it solves a problem that "never a fee output" dissolves. Consensus surface is our scarcest resource; a compliance feature must not add reorg-relevant code paths.
+- **A consensus-enforced containment covenant (our own former "Tier B")**: designed and built (a recursive Tapscript covenant that self-proved its leaf hash via `OP_TWEAKVERIFY` and forced every asset-A output to be enclave-shaped), then removed. It gave trustless containment (survives a fully compromised policy server) but required all-explicit outputs, because the covenant reads each output's asset tag in-script and cannot identify a confidential output's asset without either revealing it (defeating the point) or verifying a zero-knowledge proof (impossible in tapscript). That publishes every holding to outside observers. For a regulated asset, hiding holdings from outsiders while the issuer sees everything is the requirement, and it is incompatible with consensus containment given current primitives. The threshold policy key (§5) raises the "compromised server" bar the covenant was meant to address, without going transparent. Removed entirely.
+- **Pure-covenant compliance (no server)**: KYC, velocity, holder caps, and vesting are inherently off-chain facts; the server stays.
+- **Omnibus enclave (single asset-wide address, server-side ledger)**: makes the server custodial; rejected because user keys must be required for every move (non-custodial 2-of-2 is the AMP property worth keeping).
 
 ---
 
-## 9. Wallet and ecosystem integration
+## 9. Why no trustless-containment tier
 
-- **SWK web wallet** (primary lane): a "managed assets" account per issuer server: register AID, receive (enclave addresses), send (PSET round-trip through `openampd`), display vesting/limits/freeze state from the wallet API. Dual-chain behavior is untouched: BTC and ordinary Sequentia assets work exactly as today, and the existing fee-asset selector covers the fee leg (restricted assets are excluded from fee selection by contract type). SEQ equal-standing rules apply: a restricted asset is one row among equals, no special hero treatment.
-- **Ambra**: same flows over `ambra_core`; QR-carried PSETs stay under the co-sign round-trip anyway.
-- **Explorer**: badge OpenAMP assets (from the registry contract), show tier, clawback flag, policy endpoints, and verify-the-binding status; enclave outputs render as "restricted (issuer-governed)".
-- **SeqDEX** (later phase): restricted assets trade only between registered users; the maker's resting intent and the taker's fill both carry enclave legs, and settlement PSETs get the policy co-sign like any transfer. The policy engine sees a swap as a transfer with counterparty-delivery conditions, nothing new consensus-side. Cross-chain BTC legs are unaffected (the restricted leg is the Sequentia side).
-- **Registry** (`sequentia-registry`): serves contract JSONs, marks `openamp` assets, links policy endpoints.
+The requirement for a regulated instrument is: the issuer (and its policy server) can know who owns what at any time; outside observers cannot. Three properties are in tension and, with current Sequentia primitives, you can have at most two:
 
----
+- **consensus-enforced containment** (no trusted party can free the asset),
+- **outsider-confidentiality** (holdings blinded to the public),
+- **server-enforced only** (a trusted policy server, hardened by a threshold, enforces the rules).
 
-## 10. Rejected alternatives
-
-- **Consensus-level asset-bound covenants (the memo's proposal)**: rejected on five grounds. (1) It breaks stateless UTXO validation: every node must maintain an indexed issuance-commitment database consulted during block validation, the exact state bloat the memo itself concedes. (2) It is consensus-incompatible with Sequentia as built: `bad-coinbase-not-leader` pins every value-bearing coinbase output to the leader's fee script, so "compliant 2-of-2 coinbase outputs" would require weakening a rule we rely on. (3) KYC'd block producers fragment the open fee market and graft an identity requirement onto block production, against the no-privileged-asset, open-producer design. (4) It solves a problem that Rule 1 dissolves: once the asset can never be a fee, the coinbase never touches it. (5) Consensus surface is our scarcest resource; a compliance feature must not add reorg-relevant code paths.
-- **Mempool-policy-only enforcement** (reject restricted-asset fee outputs in `AcceptToMemoryPool`): not consensus; a colluding producer defeats it; and it adds a protocol-level notion of "restricted asset" that L3 already provides asset-agnostically.
-- **Consensus freeze/blacklist flags**: violates full-node sovereignty and asset neutrality; freezing is an issuer-layer concern and stays there.
-- **Pure-covenant compliance (no server)**: KYC, velocity, holder caps, and vesting are inherently off-chain facts; encoding approximations on-chain bloats witnesses and still needs an issuer registry. The server stays; the covenant only guarantees what it can guarantee perfectly: containment.
-- **Omnibus enclave (single asset-wide address, server-side ledger)**: makes the covenant trivial but the server custodial; rejected because user keys must be required for every move (non-custodial 2-of-2 is the AMP property worth keeping).
-- **MuSig2 key-path enclave**: nicer fees, but a key-path spend bypasses every leaf, so Tier B containment dies. Possible later for Tier A assets only.
+A consensus covenant buys containment without a trusted party, but must read explicit asset tags, so it forfeits confidentiality. OpenAMP takes outsider-confidentiality plus a threshold-hardened server, which is exactly AMP2's model, and hardens the "trusted server" corner with FROST so freeing the asset needs a quorum rather than one machine. This matches the first principle that Sequentia flipped Liquid's confidential-by-default to transparent-by-default: privacy for a governed asset is an opt-in the issuer chooses, bounded by what the policy server must see.
 
 ---
 
-## 11. What is enforced where (summary table)
+## 10. Wallet and ecosystem integration (built)
 
-| Guarantee | Enforced by | Survives compromised policy server |
-|---|---|---|
-| containment: asset only in enclave outputs or burns | Tier B covenant (consensus, per UTXO); Tier A: server refusal | Tier B: yes / Tier A: no |
-| never in a fee output (fee pool and coinbase unreachable; fee conversion covers the UX) | covenant (B) + server (A) + default-deny producer whitelist + wallet | Tier B: yes |
-| transfers only between registered/authorized users | policy server co-sign | no (same as AMP2) |
-| velocity, holder caps, vesting, categories, jurisdiction | policy server rules engine | no (same as AMP2) |
-| freeze | server refusal (and only that: no consensus freeze) | no |
-| clawback only per disclosed terms | L_claw presence committed in asset ID via contract hash | yes (terms cannot be retrofitted) |
-| asset-to-policy-key binding | contract hash in issuance entropy | yes (verifiable by anyone) |
-| decision-history integrity | transparency log anchored on-chain | detectable after the fact |
+- **SWK web wallet** (`/wallet`): a managed-assets flow per issuer server: register the account key as an AID, restricted-asset balance rows rendered as ordinary rows (SEQ-equal-standing: no privileged labels), enclave receive address, and send through `/openamp/v1/transfers` with on-device schnorr signing of the returned sighashes. Fails soft if the policy server is unreachable.
+- **Ambra** (v0.10.3): the same flows over a Rust FFI schnorr signer (`openamp_xonly_pubkey` / `openamp_sign_sighash`, BIP32 `m/5/0`).
+- **Registry** (`sequentia-registry`): serves the `openamp` block (policy key, clawback, `confidential`, policy endpoints) for discovery; accepts x-only issuer keys. Wallets verify the asset-to-policy binding by fetching the contract from the policy server and recomputing the asset id.
+- **Explorer** (nice-to-have, not built): badge OpenAMP assets, show the clawback flag and policy endpoints, render enclave outputs as "restricted (issuer-governed)".
+- **SeqDEX** (later): restricted assets trade only between registered users; the settlement PSET gets the policy co-sign like any transfer.
+
+For confidential assets, receive shows the blech32 enclave address, and the wallet's normal confidential toggle applies to restricted assets too, with UI copy that is honest the issuer still sees the amount.
 
 ---
 
-## 12. Milestones
+## 11. Milestones
 
-- **M0, enclave proof (regtest)**: canonical contract JSON + hashing spec; issue a restricted asset with `contract_hash` into Tier A enclave addresses; transfer with a stub co-signer (test harness holding `K_policy`); freeze-by-refusal demo; verify the asset-to-policy binding end to end. Proves the taproot 2-of-2 script path on Sequentia.
-- **M1, `openampd` v0**: Go daemon with chain follower (anchor/reorg-aware), user registration (AID/xpub), per-asset policy docs (registration + categories + freeze), PSET validation + co-sign with software HSM, fee-conversion and sponsorship flows, issuer and wallet REST APIs; regtest e2e including refusals, fee conversion, and reorg rollback of counters.
-- **M2, Tier B covenant**: implement `L_cov`, byte-exact leaf spec frozen as v1; functional tests: enclave-to-enclave pass; out-of-enclave, fee-output, confidential-output, and mis-sorted-branch cases fail; measure leaf size, witness weight, `OP_TWEAKVERIFY` budget; fix `MAX_OUTPUTS`.
-- **M3, issuer operations**: assignments, distributions with snapshot reports, vesting, velocity, holder caps, issuer authorization endpoint, ownership/proof-of-balance/proof-of-transfer reports, transparency log with on-chain anchoring, clawback ceremony.
-- **M4, ecosystem**: SWK managed-assets account, explorer badges + binding verification, registry integration, deploy `openampd` to the box, issue a demo restricted asset (BONDX) on the public testnet, public docs.
-- **M5, hardening + trading**: FROST 2-of-3 policy key, Ambra integration, SeqDEX registered-user trading, Tier A confidential-outputs option with blinding-key disclosure.
+- **M0, enclave proof (regtest)**: DONE. Contract hashing, issuance into enclave addresses, python-recomputed asset ids validated by consensus, co-signed transfers, freeze-by-refusal, fee conversion, clawback. `feature_openamp_m0.py`.
+- **M1, `openampd` v0**: DONE. Chain follower, registration, per-asset policy, PSET validation + co-sign (software key), REST APIs. `feature_openamp_daemon.py`.
+- **M3, issuer operations**: DONE. Assignments, distributions with snapshot reports, vesting, velocity, holder caps, issuer authorization endpoint, ownership/proof-of-balance reports, anchored transparency log, clawback ceremony.
+- **M4, ecosystem + deploy**: DONE. Box deployment, live BONDX on the public testnet, registry, SWK and Ambra integration.
+- **M5, confidentiality + threshold + trading**: IN PROGRESS. Opt-in confidential assets end to end (blech32 enclave addresses, blinding-key handling, blinded co-sign); FROST threshold policy key; SeqDEX registered-user trading.
 
-Repo: public repo `openamp` under GracedEternalKingCabbageMan, Go daemon + specs; chain-side changes: none (that is the point). The M0 regtest proof lives in SequentiaByClaude as a functional test (it needs the node test framework's taproot tooling); everything from M1 on lives in `openamp`.
+Repo: public `openamp` (Go daemon + specs). Chain-side changes: none.
 
 ---
 
-## 13. Open questions (for Andreas)
+## 12. Open questions (for Andreas)
 
-Resolved 2026-07-08: name stays **OpenAMP**; **clawback default ON** (opt-out disclosed in the contract). Still open:
+Resolved: name OpenAMP; clawback default ON; the box hosts a shared testnet policy server; no consensus-covenant tier (scrapped); confidentiality opt-in and as easy as any asset; policy key is a FROST threshold. Still open:
 
-1. **Continuity leaf**: default OFF (rely on FROST policy key), confirm.
-2. **Testnet hosting**: one shared `openampd` on the box acting as policy server for demo issuers, with self-hosting documented?
-3. **Tier default**: issue new assets as Tier B from the start (M2 lands before any real issuer), or Tier A first with a migration sweep later?
+1. **FROST parameters**: default t-of-n (2-of-3 proposed) and who holds the shares (issuer + which operators).
+2. **Confidential by default?**: issue new restricted assets confidential by default, or transparent unless the issuer opts in.
+3. **Continuity leaf**: default OFF (rely on the threshold key), confirm.

@@ -1,0 +1,2 @@
+Sequentia price-server sidecar. Launch from the node GUI: Settings -> Price server.
+Bundled Python: .\python\python.exe (no install needed).

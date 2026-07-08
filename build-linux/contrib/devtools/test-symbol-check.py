@@ -1,0 +1,1 @@
+../../../contrib/devtools/test-symbol-check.py

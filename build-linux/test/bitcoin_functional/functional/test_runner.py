@@ -1,0 +1,1 @@
+../../../../test/bitcoin_functional/functional/test_runner.py
