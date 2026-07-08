@@ -1,6 +1,8 @@
 # OpenAMP: issuer-governed assets for Sequentia (design)
 
-STATUS: 2026-07-08. Design approved by Andreas; decided: name stays OpenAMP, clawback default ON. M0 in progress. Supersedes the externally drafted "OpenAMP Architecture Specification" memo (Gemini, 2026-07): that memo's problem statement is adopted, its consensus-level solution is rejected (see §10).
+STATUS: 2026-07-08. Design approved by Andreas; decided: name stays OpenAMP, clawback default ON, the box hosts a shared testnet policy server. Build state: M0 (enclave proof), M1 (`openampd` policy server), and M3 (issuer operations, reports, anchored transparency log) DONE and proven end to end on regtest against a real node; Tier A is complete AMP2 parity. M2 (Tier B containment covenant) mechanism proven, full multi-output leaf integration in progress (see §6 and `openamp_covenant.py`). M4 deploy artifacts ready (`deploy/` in the openamp repo); box execution pending box reachability. Supersedes the externally drafted "OpenAMP Architecture Specification" memo (Gemini, 2026-07): that memo's problem statement is adopted, its consensus-level solution is rejected (see §10).
+
+Repos: node-side proofs and design in SequentiaByClaude (`test/functional/feature_openamp_m0.py`, `feature_openamp_daemon.py`, `feature_openamp_m2.py` [WIP], `openamp_covenant.py`); the daemon and specs in the public repo `GracedEternalKingCabbageMan/openamp`.
 
 Grounding docs: `02-open-fee-market.md` (any-asset fees, producer whitelists), `01-architecture.md`, `simplicity-dex-covenant-offers-design.md` (introspection and Simplicity background), `seqdex-orderbook-design.md` (registered-user trading, later phase).
 
