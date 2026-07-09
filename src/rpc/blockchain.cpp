@@ -3495,6 +3495,140 @@ static RPCHelpMan getdelegationscript()
     };
 }
 
+static RPCHelpMan getpayoutscript()
+{
+    return RPCHelpMan{"getpayoutscript",
+                "\nSEQUENTIA: returns the canonical payout-record script, by which a block producer commits to how\n"
+                "the fees it earns will be paid. Fund this bare script with a small amount to announce the policy.\n"
+                "\nMODES:\n"
+                "  direct  - the coinbase must pay `payout_script`. The operator cannot silently redirect the reward,\n"
+                "            but the chain does not check that the destination shares anything with delegators.\n"
+                "  lottery - the coinbase must pay ONE participant, drawn from everyone who delegated to this signer,\n"
+                "            weighted by stake, from a seed derived from Bitcoin's proof of work (so it cannot be\n"
+                "            biased). Each delegator earns its exact proportional share over time, with no accounting,\n"
+                "            at the cost of rare lumpy payouts rather than smoothed income. `commission_bp` is the\n"
+                "            share of blocks the operator keeps, in basis points (10000 = 100%).\n"
+                "\nA policy may not take effect until `activation`, which must be at least the chain's notice period\n"
+                "(-pospayoutnotice) beyond the block that announces it. That delay is what lets delegators audit a pool\n"
+                "and leave (instantly, unilaterally) before a hostile change binds. Announcing does not cancel an\n"
+                "earlier policy: the one in force at a height is the announced policy with the greatest activation at\n"
+                "or below it. Inspect any producer's committed policies with getpayoutinfo before delegating.\n",
+                {
+                    {"signer", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The block-producing public key this policy binds (hex). It alone may spend this record."},
+                    {"activation", RPCArg::Type::NUM, RPCArg::Optional::NO, "Block height from which the policy binds."},
+                    {"mode", RPCArg::Type::STR, RPCArg::Optional::NO, "\"direct\" or \"lottery\"."},
+                    {"payout_script", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "direct mode: the scriptPubKey the coinbase must pay (hex, at most 110 bytes)."},
+                    {"commission_bp", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "lottery mode: basis points of blocks the operator keeps (0..10000, default 0)."},
+                },
+                RPCResult{
+                    RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::STR_HEX, "script", "the payout-record scriptPubKey (hex)"},
+                        {RPCResult::Type::STR, "mode", "\"direct\" or \"lottery\""},
+                        {RPCResult::Type::NUM, "activation", "the height from which the policy binds"},
+                        {RPCResult::Type::NUM, "notice_blocks", "the chain's minimum notice period, in blocks"},
+                    }},
+                RPCExamples{HelpExampleCli("getpayoutscript", "\"02bb...\" 5000 \"lottery\" null 500")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!g_con_pos) {
+        throw JSONRPCError(RPC_MISC_ERROR, "Proof-of-Stake (con_pos) is not enabled on this chain");
+    }
+    CPubKey signer(ParseHexV(request.params[0], "signer"));
+    if (!signer.IsFullyValid()) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid signer public key");
+
+    PosPayoutPolicy policy;
+    policy.activation = request.params[1].get_int64();
+    if (policy.activation <= 0 || policy.activation > 0xffffffffLL) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "activation must be between 1 and 4294967295");
+    }
+    const std::string mode = request.params[2].get_str();
+    if (mode == "direct") {
+        policy.mode = PosPayoutMode::DIRECT;
+        if (request.params[3].isNull()) throw JSONRPCError(RPC_INVALID_PARAMETER, "direct mode requires payout_script");
+        std::vector<unsigned char> spk = ParseHexV(request.params[3], "payout_script");
+        if (spk.empty() || spk.size() > 110) throw JSONRPCError(RPC_INVALID_PARAMETER, "payout_script must be 1..110 bytes");
+        policy.script = CScript(spk.begin(), spk.end());
+    } else if (mode == "lottery") {
+        policy.mode = PosPayoutMode::LOTTERY;
+        int64_t bp = request.params[4].isNull() ? 0 : request.params[4].get_int64();
+        if (bp < 0 || bp > (int64_t)POS_COMMISSION_DENOM) throw JSONRPCError(RPC_INVALID_PARAMETER, "commission_bp must be 0..10000");
+        policy.commission_bp = (uint32_t)bp;
+    } else {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "mode must be \"direct\" or \"lottery\"");
+    }
+
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("script", HexStr(BuildPayoutScript(signer, policy)));
+    result.pushKV("mode", mode);
+    result.pushKV("activation", policy.activation);
+    result.pushKV("notice_blocks", (int64_t)g_pos_payout_notice);
+    return result;
+},
+    };
+}
+
+static RPCHelpMan getpayoutinfo()
+{
+    return RPCHelpMan{"getpayoutinfo",
+                "\nSEQUENTIA: every payout policy committed on-chain, per block producer, derived from unspent payout\n"
+                "records. This is the audit surface: before delegating to a pool, check what it has committed to, and\n"
+                "watch it afterwards -- a change must be announced at least the notice period in advance, and you can\n"
+                "leave a pool instantly and unilaterally. Producers absent here pay themselves (the default).\n",
+                {
+                    {"signer", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Restrict to one block-producing public key (hex)."},
+                },
+                RPCResult{RPCResult::Type::OBJ_DYN, "", "", {
+                    {RPCResult::Type::ARR, "signer", "policies announced by this signer, by activation height", {
+                        {RPCResult::Type::OBJ, "", "", {
+                            {RPCResult::Type::NUM, "activation", "height from which the policy binds"},
+                            {RPCResult::Type::BOOL, "in_force", "whether it binds at the current tip"},
+                            {RPCResult::Type::STR, "mode", "\"direct\" or \"lottery\""},
+                            {RPCResult::Type::STR_HEX, "payout_script", /*optional=*/true, "direct: the committed payee"},
+                            {RPCResult::Type::NUM, "commission_bp", /*optional=*/true, "lottery: operator's basis points"},
+                        }},
+                    }},
+                }},
+                RPCExamples{HelpExampleCli("getpayoutinfo", "")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!g_con_pos) {
+        throw JSONRPCError(RPC_MISC_ERROR, "Proof-of-Stake (con_pos) is not enabled on this chain");
+    }
+    std::string filter;
+    if (!request.params[0].isNull()) filter = request.params[0].get_str();
+
+    ChainstateManager& chainman = EnsureAnyChainman(request.context);
+    int64_t height;
+    {
+        LOCK(cs_main);
+        height = chainman.ActiveChain().Height();
+    }
+
+    StakeRegistry& registry = StakeRegistry::GetInstance();
+    UniValue result(UniValue::VOBJ);
+    for (const auto& signer_entry : registry.Payouts()) {
+        const std::string signer_hex = HexStr(signer_entry.first);
+        if (!filter.empty() && signer_hex != filter) continue;
+        const auto in_force = registry.PayoutFor(signer_entry.first, height);
+        UniValue arr(UniValue::VARR);
+        for (const auto& e : signer_entry.second) {
+            const PosPayoutPolicy& p = e.second;
+            UniValue o(UniValue::VOBJ);
+            o.pushKV("activation", p.activation);
+            o.pushKV("in_force", in_force.has_value() && *in_force == p);
+            o.pushKV("mode", p.mode == PosPayoutMode::DIRECT ? "direct" : "lottery");
+            if (p.mode == PosPayoutMode::DIRECT) o.pushKV("payout_script", HexStr(p.script));
+            else o.pushKV("commission_bp", (int64_t)p.commission_bp);
+            arr.push_back(o);
+        }
+        result.pushKV(signer_hex, arr);
+    }
+    return result;
+},
+    };
+}
+
 static RPCHelpMan getdelegationinfo()
 {
     return RPCHelpMan{"getdelegationinfo",
@@ -3797,6 +3931,8 @@ static const CRPCCommand commands[] =
     { "blockchain",         &getstakescript,                     },
     { "blockchain",         &getdelegationscript,                },
     { "blockchain",         &getdelegationinfo,                  },
+    { "blockchain",         &getpayoutscript,                    },
+    { "blockchain",         &getpayoutinfo,                      },
     { "blockchain",         &getcheckpointpayload,               },
     { "blockchain",         &getcheckpointinfo,                  },
 

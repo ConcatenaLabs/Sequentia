@@ -2654,11 +2654,16 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
     // outputs (SEQCMT/SEQBLS/VRF, witness commitment) carry no value and are exempt.
     if (g_con_pos && pindex->nHeight >= m_params.GetConsensus().pos_coinbase_leader_height) {
         if (std::optional<PosChallengeParts> parts = ParsePosBlockChallenge(block.proof.challenge); parts && parts->leader.IsValid()) {
-            const CScript leader_script = PosLeaderFeeScript(parts->leader);
+            // The leader is paid unless it has committed a payout policy, which
+            // may redirect the reward (DIRECT) or hand it to one of its
+            // delegators drawn by stake weight (LOTTERY). The producer builds the
+            // coinbase from this same function, so the two cannot disagree.
+            const uint256 payout_seed = PosSeedForChild(pindex->pprev);
+            const CScript required_script = PosRequiredCoinbaseScript(parts->leader, pindex->nHeight, payout_seed);
             for (const auto& txout : block.vtx[0]->vout) {
                 const bool mustPay = !txout.nValue.IsExplicit() || txout.nValue.GetAmount() != 0;
-                if (mustPay && txout.scriptPubKey != leader_script) {
-                    LogPrintf("ERROR: ConnectBlock(): coinbase fee output does not pay the elected leader\n");
+                if (mustPay && txout.scriptPubKey != required_script) {
+                    LogPrintf("ERROR: ConnectBlock(): coinbase fee output does not pay the required payee\n");
                     return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-coinbase-not-leader");
                 }
             }
@@ -2944,6 +2949,40 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
                 if (registry.HasDelegation(deleg->first) && !spent_records.count(deleg->first)) {
                     return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-delegation-exists",
                                          "delegation record for a controller that already has one unspent");
+                }
+            }
+        }
+
+        // SEQUENTIA payout policies: a newly announced policy must not bind for
+        // at least g_pos_payout_notice blocks. A delegator can leave a pool
+        // unilaterally and instantly, so this notice is what makes auditing a
+        // pool before delegating to it meaningful: an operator cannot redirect
+        // the rewards to itself and collect before its delegators can react.
+        // Two unspent records sharing a (signer, activation) would make the
+        // policy in force at that height ambiguous.
+        std::set<std::pair<CPubKey, int64_t>> spent_payouts;
+        for (const CTxUndo& txundo : blockundo.vtxundo) {
+            for (const Coin& coin : txundo.vprevout) {
+                if (auto p = PayoutFromTxOut(coin.out)) spent_payouts.emplace(p->first, p->second.activation);
+            }
+        }
+        std::set<std::pair<CPubKey, int64_t>> created_payouts;
+        for (const CTransactionRef& tx : block.vtx) {
+            for (const CTxOut& out : tx->vout) {
+                auto p = PayoutFromTxOut(out);
+                if (!p) continue;
+                if (p->second.activation < pindex->nHeight + (int64_t)g_pos_payout_notice) {
+                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-payout-notice",
+                                         "payout policy would bind before its notice period elapses");
+                }
+                const auto key = std::make_pair(p->first, p->second.activation);
+                if (!created_payouts.insert(key).second) {
+                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-payout-conflict",
+                                         "two payout records for one signer at one activation height");
+                }
+                if (registry.HasPayoutAt(p->first, p->second.activation) && !spent_payouts.count(key)) {
+                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-payout-exists",
+                                         "payout record duplicates an unspent record's activation height");
                 }
             }
         }

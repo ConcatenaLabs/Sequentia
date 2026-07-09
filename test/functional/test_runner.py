@@ -197,6 +197,7 @@ BASE_SCRIPTS = [
     'feature_pos_bls_registration.py',
     'feature_pos_stake_vesting.py',
     'feature_pos_delegation.py',
+    'feature_pos_payout.py',
     'feature_pos_bls_gossip.py',
     'feature_pos_gossip_dos.py',
     'feature_pos_gossip_failover.py',

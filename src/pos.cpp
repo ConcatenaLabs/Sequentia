@@ -650,6 +650,138 @@ std::optional<std::pair<CPubKey, CPubKey>> DelegationFromTxOut(const CTxOut& out
     return ParseDelegationScript(out.scriptPubKey);
 }
 
+static int64_t StakeDecodeScriptInt64(const std::vector<unsigned char>& vch);
+
+uint32_t g_pos_payout_notice = DEFAULT_POS_PAYOUT_NOTICE;
+
+static const std::vector<unsigned char> PAYOUT_MARKER = {'S', 'E', 'Q', 'P', 'A', 'Y'};
+//! An operator's committed payout script is bounded: it rides in a bare output,
+//! and an unbounded push would bloat every node's UTXO set.
+static const size_t MAX_PAYOUT_SCRIPT_SIZE = 110;
+
+CScript BuildPayoutScript(const CPubKey& signer, const PosPayoutPolicy& policy)
+{
+    CScript s;
+    s << PAYOUT_MARKER << OP_DROP;
+    s << policy.activation << OP_DROP;
+    s << (int64_t)(uint8_t)policy.mode << OP_DROP;
+    if (policy.mode == PosPayoutMode::DIRECT) {
+        s << std::vector<unsigned char>(policy.script.begin(), policy.script.end());
+    } else {
+        s << (int64_t)policy.commission_bp;
+    }
+    s << OP_DROP;
+    s << ToByteVector(signer) << OP_CHECKSIG;
+    return s;
+}
+
+//! Read a numeric token (OP_0, OP_1..OP_16, or a minimal push of <= max_size).
+static bool ReadScriptNumToken(opcodetype opcode, const std::vector<unsigned char>& data,
+                               size_t max_size, int64_t& out)
+{
+    if (opcode == OP_0) { out = 0; return true; }
+    if (opcode >= OP_1 && opcode <= OP_16) { out = (int)opcode - (int)(OP_1 - 1); return true; }
+    if (data.empty() || data.size() > max_size) return false;
+    try {
+        CScriptNum(data, /*fRequireMinimal=*/true, max_size); // enforces minimality
+    } catch (const scriptnum_error&) {
+        return false;
+    }
+    out = StakeDecodeScriptInt64(data);
+    return true;
+}
+
+std::optional<std::pair<CPubKey, PosPayoutPolicy>> ParsePayoutScript(const CScript& script)
+{
+    CScript::const_iterator pc = script.begin();
+    opcodetype opcode;
+    std::vector<unsigned char> data;
+
+    if (!script.GetOp(pc, opcode, data) || data != PAYOUT_MARKER) return std::nullopt;
+    if (!script.GetOp(pc, opcode, data) || opcode != OP_DROP) return std::nullopt;
+
+    PosPayoutPolicy policy;
+    // <activation>
+    if (!script.GetOp(pc, opcode, data)) return std::nullopt;
+    if (!ReadScriptNumToken(opcode, data, 5, policy.activation)) return std::nullopt;
+    if (policy.activation <= 0 || policy.activation > 0xffffffffLL) return std::nullopt;
+    if (!script.GetOp(pc, opcode, data) || opcode != OP_DROP) return std::nullopt;
+
+    // <mode>
+    int64_t mode = 0;
+    if (!script.GetOp(pc, opcode, data)) return std::nullopt;
+    if (!ReadScriptNumToken(opcode, data, 1, mode)) return std::nullopt;
+    if (mode != (int64_t)PosPayoutMode::DIRECT && mode != (int64_t)PosPayoutMode::LOTTERY) return std::nullopt;
+    policy.mode = (PosPayoutMode)mode;
+    if (!script.GetOp(pc, opcode, data) || opcode != OP_DROP) return std::nullopt;
+
+    // <param>: the payout scriptPubKey (DIRECT) or the commission (LOTTERY).
+    if (!script.GetOp(pc, opcode, data)) return std::nullopt;
+    if (policy.mode == PosPayoutMode::DIRECT) {
+        if (data.empty() || data.size() > MAX_PAYOUT_SCRIPT_SIZE) return std::nullopt;
+        policy.script = CScript(data.begin(), data.end());
+    } else {
+        int64_t bp = 0;
+        if (!ReadScriptNumToken(opcode, data, 3, bp)) return std::nullopt;
+        if (bp < 0 || bp > (int64_t)POS_COMMISSION_DENOM) return std::nullopt;
+        policy.commission_bp = (uint32_t)bp;
+    }
+    if (!script.GetOp(pc, opcode, data) || opcode != OP_DROP) return std::nullopt;
+
+    if (!script.GetOp(pc, opcode, data) || data.empty()) return std::nullopt;
+    CPubKey signer(data);
+    if (!signer.IsFullyValid()) return std::nullopt;
+    if (!script.GetOp(pc, opcode, data) || opcode != OP_CHECKSIG) return std::nullopt;
+    if (pc != script.end()) return std::nullopt;
+    return std::make_pair(signer, policy);
+}
+
+std::optional<std::pair<CPubKey, PosPayoutPolicy>> PayoutFromTxOut(const CTxOut& out)
+{
+    return ParsePayoutScript(out.scriptPubKey);
+}
+
+//! A uniform 64-bit draw from the block's election seed, domain-separated by tag.
+static uint64_t PayoutDraw(const uint256& seed, const std::string& tag)
+{
+    CSHA256 sha;
+    sha.Write(seed.begin(), seed.size());
+    sha.Write((const unsigned char*)tag.data(), tag.size());
+    unsigned char out[CSHA256::OUTPUT_SIZE];
+    sha.Finalize(out);
+    uint64_t v = 0;
+    for (int i = 0; i < 8; ++i) v |= (uint64_t)out[i] << (8 * i);
+    return v;
+}
+
+CScript PosRequiredCoinbaseScript(const CPubKey& leader, int64_t height, const uint256& seed)
+{
+    const StakeRegistry& registry = StakeRegistry::GetInstance();
+    const auto policy = registry.PayoutFor(leader, height);
+    if (!policy) return PosLeaderFeeScript(leader);   // no committed policy
+
+    if (policy->mode == PosPayoutMode::DIRECT) return policy->script;
+
+    // LOTTERY: draw one participant, weighted by the stake it lent this signer.
+    // The seed is SHA256(parent Bitcoin anchor hash || height) -- supplied by
+    // Bitcoin's proof of work -- so the leader cannot grind the outcome.
+    if (policy->commission_bp > 0 &&
+        PayoutDraw(seed, "seqpay:commission") % POS_COMMISSION_DENOM < policy->commission_bp) {
+        return PosLeaderFeeScript(leader);
+    }
+    const std::map<CPubKey, uint64_t> participants = registry.ParticipantsFor(leader);
+    uint64_t total = 0;
+    for (const auto& e : participants) total += e.second;
+    if (total == 0) return PosLeaderFeeScript(leader); // nothing staked; pay the leader
+
+    uint64_t ticket = PayoutDraw(seed, "seqpay:winner") % total;
+    for (const auto& e : participants) { // std::map iteration: deterministic order
+        if (ticket < e.second) return PosLeaderFeeScript(e.first);
+        ticket -= e.second;
+    }
+    return PosLeaderFeeScript(leader); // unreachable: ticket < total
+}
+
 //! Decode a script number's little-endian sign-magnitude encoding to int64.
 //! CScriptNum::getint() saturates at INT_MAX, which would silently corrupt a
 //! locktime past 2038, so decode the full width here. The caller must already
@@ -832,6 +964,11 @@ void PosApplyBlockStake(const CBlock& block, const CBlockUndo& undo)
                 registry.AddUtxoDelegation(deleg->first, deleg->second);
                 LogPrintf("PoS: %s delegates its stake weight to %s\n", HexStr(deleg->first), HexStr(deleg->second));
             }
+            if (auto payout = PayoutFromTxOut(out)) {
+                registry.AddUtxoPayout(payout->first, payout->second);
+                LogPrintf("PoS: %s announces a payout policy effective at height %d\n",
+                          HexStr(payout->first), (int)payout->second.activation);
+            }
         }
     }
     // Spent staking outputs (recorded in the block's undo data) remove weight.
@@ -846,6 +983,9 @@ void PosApplyBlockStake(const CBlock& block, const CBlockUndo& undo)
             // outputs were applied above.
             if (auto deleg = DelegationFromTxOut(coin.out)) {
                 registry.SubUtxoDelegation(deleg->first, deleg->second);
+            }
+            if (auto payout = PayoutFromTxOut(coin.out)) {
+                registry.SubUtxoPayout(payout->first, payout->second);
             }
         }
     }
@@ -875,6 +1015,9 @@ void PosRevertBlockStake(const CBlock& block, const CBlockUndo& undo)
             if (auto deleg = DelegationFromTxOut(coin.out)) {
                 registry.AddUtxoDelegation(deleg->first, deleg->second);
             }
+            if (auto payout = PayoutFromTxOut(coin.out)) {
+                registry.AddUtxoPayout(payout->first, payout->second);
+            }
         }
     }
     for (const CTransactionRef& tx : block.vtx) {
@@ -885,6 +1028,9 @@ void PosRevertBlockStake(const CBlock& block, const CBlockUndo& undo)
             if (auto deleg = DelegationFromTxOut(out)) {
                 registry.SubUtxoDelegation(deleg->first, deleg->second);
             }
+            if (auto payout = PayoutFromTxOut(out)) {
+                registry.SubUtxoPayout(payout->first, payout->second);
+            }
         }
     }
 }
@@ -894,6 +1040,7 @@ bool RebuildUtxoStake(CCoinsView& view)
     std::map<CPubKey, uint64_t> utxo_stake;
     std::map<CPubKey, std::vector<unsigned char>> utxo_bls;
     std::map<CPubKey, CPubKey> utxo_deleg;
+    std::map<CPubKey, std::map<int64_t, PosPayoutPolicy>> utxo_payout;
     std::unique_ptr<CCoinsViewCursor> pcursor(view.Cursor());
     if (!pcursor) return false;
     while (pcursor->Valid()) {
@@ -925,9 +1072,16 @@ bool RebuildUtxoStake(CCoinsView& view)
         if (auto deleg = DelegationFromTxOut(coin.out)) {
             utxo_deleg[deleg->first] = deleg->second;
         }
+        // Unspent payout records. Keyed by activation height, so a pending policy
+        // and the one it will replace coexist unambiguously (a consensus rule
+        // forbids two records sharing a (signer, activation)).
+        if (auto payout = PayoutFromTxOut(coin.out)) {
+            utxo_payout[payout->first][payout->second.activation] = payout->second;
+        }
         pcursor->Next();
     }
-    StakeRegistry::GetInstance().SetUtxoStake(std::move(utxo_stake), std::move(utxo_bls), std::move(utxo_deleg));
+    StakeRegistry::GetInstance().SetUtxoStake(std::move(utxo_stake), std::move(utxo_bls),
+                                              std::move(utxo_deleg), std::move(utxo_payout));
     return true;
 }
 

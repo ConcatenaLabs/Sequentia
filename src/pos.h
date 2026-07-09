@@ -124,6 +124,41 @@ static const uint64_t POS_VRF_MAX_SLOT = 1 << 20;
  *     the staking output, enforced by the script itself (the paper's stake
  *     locktime, principle 11).
  *  A staker's effective weight is the sum of both layers. */
+/** How a block producer's fee reward is paid out. */
+enum class PosPayoutMode : uint8_t {
+    LEADER = 0,   //!< default: the coinbase pays the elected leader (no record)
+    DIRECT = 1,   //!< the coinbase pays a scriptPubKey the operator committed to
+    LOTTERY = 2,  //!< the coinbase pays one participant, drawn by stake weight
+};
+
+/** A payout policy an operator has committed to, effective from `activation`. */
+struct PosPayoutPolicy {
+    PosPayoutMode mode{PosPayoutMode::LEADER};
+    int64_t activation{0};      //!< block height from which this policy binds
+    CScript script;             //!< DIRECT: the committed payout scriptPubKey
+    uint32_t commission_bp{0};  //!< LOTTERY: basis points the operator keeps
+
+    friend bool operator==(const PosPayoutPolicy& a, const PosPayoutPolicy& b)
+    {
+        return a.mode == b.mode && a.activation == b.activation &&
+               a.script == b.script && a.commission_bp == b.commission_bp;
+    }
+};
+
+/** Notice period, in blocks, before a newly announced payout policy may bind.
+ *  A delegator can leave a pool unilaterally and instantly, so a mandatory delay
+ *  between announcing a payout change and its taking effect is what makes
+ *  "audit the pool before you commit" mean anything: an operator cannot flip the
+ *  rewards to themselves and collect before their delegators can react. Without
+ *  it, auditing is worthless -- you would inspect a pool, delegate, and be
+ *  redirected on the very next block. It bounds the loss to zero for a delegator
+ *  who is watching; it cannot help one who is not. */
+extern uint32_t g_pos_payout_notice;
+static const uint32_t DEFAULT_POS_PAYOUT_NOTICE = 2880; // ~1 day at 30s slots
+
+/** Basis-point denominator for a LOTTERY operator commission. */
+static const uint32_t POS_COMMISSION_DENOM = 10000;
+
 class StakeRegistry
 {
 private:
@@ -160,6 +195,13 @@ private:
     //! to C, A's weight goes to B and B's own weight goes to C. Chasing chains
     //! would admit cycles.
     std::map<CPubKey, CPubKey> m_deleg_utxo GUARDED_BY(m_mutex);
+    //! SEQUENTIA payout policies: signer -> (activation height -> policy), from
+    //! unspent payout records. A pure function of the UTXO set, like the layers
+    //! above. Several records may coexist for one signer -- a pending one during
+    //! its notice period, and the one it will replace -- so they are keyed by
+    //! activation height and resolved by height at lookup, never by "latest
+    //! seen". Consensus forbids two records sharing a (signer, activation).
+    std::map<CPubKey, std::map<int64_t, PosPayoutPolicy>> m_payout_utxo GUARDED_BY(m_mutex);
 
     //! The signer for a controller (itself when it has delegated nothing).
     CPubKey SignerForLocked(const CPubKey& controller) const EXCLUSIVE_LOCKS_REQUIRED(m_mutex)
@@ -198,6 +240,7 @@ public:
         m_bls.clear();
         m_bls_utxo.clear();
         m_deleg_utxo.clear();
+        m_payout_utxo.clear();
     }
     //! Set a configured staker's weight.
     void SetStake(const CPubKey& pubkey, uint64_t weight)
@@ -231,12 +274,14 @@ public:
     //! the UTXO BLS registrations, both pure functions of the UTXO set.
     void SetUtxoStake(std::map<CPubKey, uint64_t>&& utxo,
                       std::map<CPubKey, std::vector<unsigned char>>&& bls_utxo = {},
-                      std::map<CPubKey, CPubKey>&& deleg_utxo = {})
+                      std::map<CPubKey, CPubKey>&& deleg_utxo = {},
+                      std::map<CPubKey, std::map<int64_t, PosPayoutPolicy>>&& payout_utxo = {})
     {
         LOCK(m_mutex);
         m_utxo = std::move(utxo);
         m_bls_utxo = std::move(bls_utxo);
         m_deleg_utxo = std::move(deleg_utxo);
+        m_payout_utxo = std::move(payout_utxo);
     }
     //! A staking output entered the UTXO set. A non-empty bls_pubkey registers
     //! (or re-affirms) the staker's UTXO-layer committee BLS key; ConnectBlock
@@ -337,6 +382,62 @@ public:
         LOCK(m_mutex);
         auto it = m_deleg_utxo.find(controller);
         if (it != m_deleg_utxo.end() && it->second == signer) m_deleg_utxo.erase(it);
+    }
+
+    //! A payout record entered the UTXO set.
+    void AddUtxoPayout(const CPubKey& signer, const PosPayoutPolicy& policy)
+    {
+        LOCK(m_mutex);
+        m_payout_utxo[signer][policy.activation] = policy;
+    }
+    //! A payout record left the UTXO set. Erase only the exact policy, so that a
+    //! record replaced within one block is not clobbered (see SubUtxoDelegation).
+    void SubUtxoPayout(const CPubKey& signer, const PosPayoutPolicy& policy)
+    {
+        LOCK(m_mutex);
+        auto it = m_payout_utxo.find(signer);
+        if (it == m_payout_utxo.end()) return;
+        auto jt = it->second.find(policy.activation);
+        if (jt != it->second.end() && jt->second == policy) it->second.erase(jt);
+        if (it->second.empty()) m_payout_utxo.erase(it);
+    }
+    //! Whether a record already exists for this exact (signer, activation).
+    bool HasPayoutAt(const CPubKey& signer, int64_t activation) const
+    {
+        LOCK(m_mutex);
+        auto it = m_payout_utxo.find(signer);
+        return it != m_payout_utxo.end() && it->second.count(activation) > 0;
+    }
+    //! The policy binding a signer at `height`: the record with the greatest
+    //! activation <= height. Nullopt when the signer has announced none yet, or
+    //! when every announced policy is still inside its notice period.
+    std::optional<PosPayoutPolicy> PayoutFor(const CPubKey& signer, int64_t height) const
+    {
+        LOCK(m_mutex);
+        auto it = m_payout_utxo.find(signer);
+        if (it == m_payout_utxo.end() || it->second.empty()) return std::nullopt;
+        // upper_bound(height) is the first activation strictly after height.
+        auto jt = it->second.upper_bound(height);
+        if (jt == it->second.begin()) return std::nullopt; // all still pending
+        --jt;
+        return jt->second;
+    }
+    std::map<CPubKey, std::map<int64_t, PosPayoutPolicy>> Payouts() const
+    {
+        LOCK(m_mutex);
+        return m_payout_utxo;
+    }
+    //! Every controller whose weight counts for `signer`, with that weight. The
+    //! signer itself is included when it has not delegated its own stake away.
+    //! This is the LOTTERY draw's participant set.
+    std::map<CPubKey, uint64_t> ParticipantsFor(const CPubKey& signer) const
+    {
+        LOCK(m_mutex);
+        std::map<CPubKey, uint64_t> out;
+        for (const auto& e : MergedLocked()) {
+            if (e.second > 0 && SignerForLocked(e.first) == signer) out[e.first] = e.second;
+        }
+        return out;
     }
     //! UTXO-layer weight only (for introspection/tests).
     uint64_t GetUtxoWeight(const CPubKey& pubkey) const
@@ -711,9 +812,40 @@ CScript BuildStakeScript(const CPubKey& pubkey, uint32_t csv_blocks,
  *      actually move the coins offline. A signer can never spend the stake.
  *
  *  Rewards are unaffected by this file: the coinbase must pay the elected leader
- *  (the SIGNER), enforced in ConnectBlock. Splitting a pool's rewards among its
- *  delegators is therefore not yet enforced on-chain. */
+ *  (the SIGNER), enforced in ConnectBlock -- unless that signer has committed a
+ *  payout policy (BuildPayoutScript), which may redirect or share the reward. */
 CScript BuildDelegationScript(const CPubKey& controller, const CPubKey& signer);
+
+
+/** The canonical PAYOUT-RECORD script:
+ *      <"SEQPAY"> OP_DROP <activation> OP_DROP <mode> OP_DROP <param> OP_DROP
+ *      <signer_pubkey> OP_CHECKSIG
+ *  param is the payout scriptPubKey (DIRECT) or the commission in basis points
+ *  (LOTTERY). Bare, like the staking and delegation scripts, and spendable by
+ *  the signer alone. Consensus requires activation >= creation_height +
+ *  g_pos_payout_notice, and forbids two unspent records sharing one
+ *  (signer, activation). The policy in force at height h is the record with the
+ *  greatest activation <= h; older records linger harmlessly until spent. */
+CScript BuildPayoutScript(const CPubKey& signer, const PosPayoutPolicy& policy);
+
+/** The (signer, policy) a payout-record script names, or nullopt. */
+std::optional<std::pair<CPubKey, PosPayoutPolicy>> ParsePayoutScript(const CScript& script);
+std::optional<std::pair<CPubKey, PosPayoutPolicy>> PayoutFromTxOut(const CTxOut& out);
+
+/** The scriptPubKey a block's coinbase MUST pay its fees to, given the elected
+ *  leader, the block height, and the block's election seed. This is the single
+ *  seam shared by the producer (which builds the coinbase) and ConnectBlock
+ *  (which enforces it), so the two can never disagree.
+ *
+ *  LEADER  -> P2WPKH(leader): the default, and the pre-existing behaviour.
+ *  DIRECT  -> the operator's committed script.
+ *  LOTTERY -> P2WPKH of one participant, drawn deterministically from the seed,
+ *             weighted by stake. The seed is SHA256(parent Bitcoin anchor hash ||
+ *             height), supplied by Bitcoin's proof of work, so no operator can
+ *             bias the draw. Over many blocks each delegator earns its exact
+ *             proportional share with no per-delegator accounting -- at the cost
+ *             of lumpy, infrequent payouts rather than a smoothed income. */
+CScript PosRequiredCoinbaseScript(const CPubKey& leader, int64_t height, const uint256& seed);
 
 /** The (controller, signer) a delegation-record script names, or nullopt if the
  *  script is not of the canonical form. */

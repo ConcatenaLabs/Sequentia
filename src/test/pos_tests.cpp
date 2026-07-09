@@ -1014,4 +1014,184 @@ BOOST_AUTO_TEST_CASE(pos_delegation_registry_weights)
     reg.Clear();
 }
 
+
+// SEQUENTIA payout policies: how a producer's fee reward is paid.
+BOOST_AUTO_TEST_CASE(pos_payout_script_roundtrip)
+{
+    CPubKey signer = MakeKey();
+
+    PosPayoutPolicy direct;
+    direct.mode = PosPayoutMode::DIRECT;
+    direct.activation = 5000;
+    direct.script = CScript() << OP_DUP << OP_HASH160 << std::vector<unsigned char>(20, 0x07) << OP_EQUALVERIFY << OP_CHECKSIG;
+    auto pd = ParsePayoutScript(BuildPayoutScript(signer, direct));
+    BOOST_REQUIRE(pd.has_value());
+    BOOST_CHECK(pd->first == signer);
+    BOOST_CHECK(pd->second == direct);
+
+    for (uint32_t bp : {0u, 1u, 16u, 500u, 9999u, 10000u}) {
+        PosPayoutPolicy lot;
+        lot.mode = PosPayoutMode::LOTTERY;
+        lot.activation = 1;
+        lot.commission_bp = bp;
+        auto pl = ParsePayoutScript(BuildPayoutScript(signer, lot));
+        BOOST_REQUIRE_MESSAGE(pl.has_value(), strprintf("bp=%u", bp));
+        BOOST_CHECK(pl->second == lot);
+    }
+
+    // Not confusable with the other bare templates.
+    BOOST_CHECK(!ParseStakeScript(BuildPayoutScript(signer, direct)).has_value());
+    BOOST_CHECK(!ParseDelegationScript(BuildPayoutScript(signer, direct)).has_value());
+    BOOST_CHECK(!ParsePayoutScript(BuildDelegationScript(signer, signer)).has_value());
+    BOOST_CHECK(!ParsePayoutScript(BuildStakeScript(signer, 10)).has_value());
+    // It carries no stake weight and is not a delegation.
+    CTxOut rec(CConfidentialAsset(::policyAsset), CConfidentialValue(1000), BuildPayoutScript(signer, direct));
+    BOOST_CHECK(!StakeFromTxOut(rec).has_value());
+    BOOST_CHECK(PayoutFromTxOut(rec).has_value());
+
+    // Rejections: zero/negative activation, unknown mode, commission > 100%,
+    // an empty or oversized direct script, trailing junk.
+    PosPayoutPolicy bad = direct;
+    bad.activation = 0;
+    BOOST_CHECK(!ParsePayoutScript(BuildPayoutScript(signer, bad)).has_value());
+    PosPayoutPolicy big_bp;
+    big_bp.mode = PosPayoutMode::LOTTERY;
+    big_bp.activation = 1;
+    big_bp.commission_bp = POS_COMMISSION_DENOM + 1;
+    BOOST_CHECK(!ParsePayoutScript(BuildPayoutScript(signer, big_bp)).has_value());
+    PosPayoutPolicy empty_spk = direct;
+    empty_spk.script = CScript();
+    BOOST_CHECK(!ParsePayoutScript(BuildPayoutScript(signer, empty_spk)).has_value());
+    PosPayoutPolicy huge = direct;
+    const std::vector<unsigned char> huge_bytes(111, 0x51); // one past MAX_PAYOUT_SCRIPT_SIZE
+    huge.script = CScript(huge_bytes.begin(), huge_bytes.end());
+    BOOST_CHECK(!ParsePayoutScript(BuildPayoutScript(signer, huge)).has_value());
+    CScript trailing = BuildPayoutScript(signer, direct);
+    trailing << OP_TRUE;
+    BOOST_CHECK(!ParsePayoutScript(trailing).has_value());
+    // Mode 0 (LEADER) is not an announceable policy.
+    BOOST_CHECK(!ParsePayoutScript(CScript() << std::vector<unsigned char>{'S','E','Q','P','A','Y'} << OP_DROP
+                                             << (int64_t)5000 << OP_DROP << (int64_t)0 << OP_DROP
+                                             << (int64_t)0 << OP_DROP
+                                             << ToByteVector(signer) << OP_CHECKSIG).has_value());
+}
+
+// The policy in force at a height is the announced policy with the greatest
+// activation <= that height, so a pending policy does not bind during its
+// notice period and the one it replaces stays in force until it does.
+BOOST_AUTO_TEST_CASE(pos_payout_notice_period_lookup)
+{
+    StakeRegistry& reg = StakeRegistry::GetInstance();
+    reg.Clear();
+    CPubKey signer = MakeKey();
+
+    BOOST_CHECK(!reg.PayoutFor(signer, 100).has_value()); // none announced
+
+    PosPayoutPolicy first;
+    first.mode = PosPayoutMode::LOTTERY;
+    first.activation = 100;
+    first.commission_bp = 500;
+    reg.AddUtxoPayout(signer, first);
+
+    BOOST_CHECK(!reg.PayoutFor(signer, 99).has_value());  // still pending
+    BOOST_REQUIRE(reg.PayoutFor(signer, 100).has_value()); // binds exactly at activation
+    BOOST_CHECK(*reg.PayoutFor(signer, 100) == first);
+    BOOST_CHECK(*reg.PayoutFor(signer, 5000) == first);
+
+    // A hostile change announced for height 200 does NOT bind before then: the
+    // old policy stays in force, which is the whole point of the notice period.
+    PosPayoutPolicy hostile;
+    hostile.mode = PosPayoutMode::DIRECT;
+    hostile.activation = 200;
+    hostile.script = CScript() << OP_TRUE;
+    reg.AddUtxoPayout(signer, hostile);
+    BOOST_CHECK(*reg.PayoutFor(signer, 150) == first);
+    BOOST_CHECK(*reg.PayoutFor(signer, 199) == first);
+    BOOST_CHECK(*reg.PayoutFor(signer, 200) == hostile);
+
+    BOOST_CHECK(reg.HasPayoutAt(signer, 200));
+    BOOST_CHECK(!reg.HasPayoutAt(signer, 201));
+
+    // Spending the pending record (before it binds) reverts to the old policy.
+    reg.SubUtxoPayout(signer, hostile);
+    BOOST_CHECK(*reg.PayoutFor(signer, 250) == first);
+    reg.SubUtxoPayout(signer, first);
+    BOOST_CHECK(!reg.PayoutFor(signer, 250).has_value());
+    reg.Clear();
+}
+
+// The coinbase payee: default, DIRECT redirect, and the LOTTERY draw. The draw
+// must be deterministic (every node computes the same winner), unbiasable by the
+// leader (the seed comes from Bitcoin), and proportional to stake over time.
+BOOST_AUTO_TEST_CASE(pos_payout_required_coinbase_script)
+{
+    StakeRegistry& reg = StakeRegistry::GetInstance();
+    reg.Clear();
+    CPubKey pool = MakeKey(), alice = MakeKey(), bob = MakeKey();
+    const uint256 seed = ComputePosSeed(uint256S("0xbeef"), 7);
+
+    // No policy: the leader is paid, exactly as before this feature existed.
+    BOOST_CHECK(PosRequiredCoinbaseScript(pool, 10, seed) == PosLeaderFeeScript(pool));
+
+    // DIRECT: the committed script, whatever it is.
+    PosPayoutPolicy direct;
+    direct.mode = PosPayoutMode::DIRECT;
+    direct.activation = 100;
+    direct.script = CScript() << OP_TRUE;
+    reg.AddUtxoPayout(pool, direct);
+    BOOST_CHECK(PosRequiredCoinbaseScript(pool, 99, seed) == PosLeaderFeeScript(pool)); // pending
+    BOOST_CHECK(PosRequiredCoinbaseScript(pool, 100, seed) == direct.script);           // bound
+    reg.SubUtxoPayout(pool, direct);
+
+    // LOTTERY with no commission and two delegators, 3:1 by stake.
+    PosPayoutPolicy lot;
+    lot.mode = PosPayoutMode::LOTTERY;
+    lot.activation = 1;
+    lot.commission_bp = 0;
+    reg.AddUtxoPayout(pool, lot);
+    reg.AddUtxoStake(alice, 3000);
+    reg.AddUtxoStake(bob, 1000);
+    reg.AddUtxoDelegation(alice, pool);
+    reg.AddUtxoDelegation(bob, pool);
+
+    // Deterministic: the same seed always yields the same winner.
+    const CScript w1 = PosRequiredCoinbaseScript(pool, 10, seed);
+    BOOST_CHECK(PosRequiredCoinbaseScript(pool, 10, seed) == w1);
+    BOOST_CHECK(w1 == PosLeaderFeeScript(alice) || w1 == PosLeaderFeeScript(bob));
+
+    // Proportional: across many seeds, alice (3x bob's stake) wins ~75%.
+    int alice_wins = 0, bob_wins = 0, other = 0;
+    const int trials = 4000;
+    for (int i = 0; i < trials; ++i) {
+        const CScript w = PosRequiredCoinbaseScript(pool, 10, ComputePosSeed(uint256(), i));
+        if (w == PosLeaderFeeScript(alice)) alice_wins++;
+        else if (w == PosLeaderFeeScript(bob)) bob_wins++;
+        else other++;
+    }
+    BOOST_CHECK_EQUAL(other, 0);                       // the pool never pays itself: 0 commission
+    BOOST_CHECK_EQUAL(alice_wins + bob_wins, trials);
+    BOOST_CHECK(alice_wins > trials * 0.70);           // expect ~0.75
+    BOOST_CHECK(alice_wins < trials * 0.80);
+
+    // Commission: the operator keeps ~20% of blocks outright.
+    reg.SubUtxoPayout(pool, lot);
+    lot.commission_bp = 2000;
+    reg.AddUtxoPayout(pool, lot);
+    int pool_wins = 0;
+    for (int i = 0; i < trials; ++i) {
+        if (PosRequiredCoinbaseScript(pool, 10, ComputePosSeed(uint256(), i)) == PosLeaderFeeScript(pool)) pool_wins++;
+    }
+    BOOST_CHECK(pool_wins > trials * 0.15);
+    BOOST_CHECK(pool_wins < trials * 0.25);
+
+    // A pool with nothing delegated to it pays itself rather than nobody.
+    CPubKey lonely = MakeKey();
+    PosPayoutPolicy lot2 = lot;
+    lot2.commission_bp = 0;
+    reg.AddUtxoPayout(lonely, lot2);
+    BOOST_CHECK(PosRequiredCoinbaseScript(lonely, 10, seed) == PosLeaderFeeScript(lonely));
+
+    reg.Clear();
+}
+
 BOOST_AUTO_TEST_SUITE_END()

@@ -92,6 +92,11 @@ bool IsStandard(const CScript& scriptPubKey, TxoutType& whichType)
         if (g_con_pos && ParseDelegationScript(scriptPubKey)) {
             return true;
         }
+        // ...and the bare payout-record script, by which a pool operator commits
+        // to how it will pay its delegators. It must relay under default policy.
+        if (g_con_pos && ParsePayoutScript(scriptPubKey)) {
+            return true;
+        }
         return false;
     } else if (whichType == TxoutType::MULTISIG) {
         unsigned char m = vSolutions.front()[0];

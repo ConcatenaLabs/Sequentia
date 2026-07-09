@@ -1332,6 +1332,9 @@ protected:
         g_pos_agg_committee = args.GetBoolArg("-posaggcommittee", false);
         g_pos_bls = args.GetBoolArg("-posbls", false);
         g_pos_unbonding_period = (uint32_t)args.GetIntArg("-posunbonding", DEFAULT_POS_UNBONDING_PERIOD);
+        // Consensus-critical: every node on a chain must agree on the notice
+        // period, or they will disagree about when a payout policy binds.
+        g_pos_payout_notice = (uint32_t)args.GetIntArg("-pospayoutnotice", DEFAULT_POS_PAYOUT_NOTICE);
         if (g_pos_vrf && !g_con_pos) {
             throw std::runtime_error("-posvrf requires -con_pos");
         }
