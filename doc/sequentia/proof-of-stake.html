@@ -22,15 +22,15 @@
 </head><body>
 
 <h1>Proof of Stake on Sequentia</h1>
-<p class="sub">How blocks are produced, who is allowed to produce them, and how producers are paid. This document describes the consensus mechanism as it is specified and implemented: what a stake is, how a producer is elected, how a block is certified, how tokens can stake while remaining non-transferable, how staking rights can be lent to a pool without surrendering custody, and how a pool's rewards are distributed. It closes with an honest account of the trust model and its limits. Written for a reader who understands Bitcoin.</p>
+<p class="sub">How blocks are produced, who is allowed to produce them, and how producers are paid. This document describes the consensus mechanism as it is specified and implemented: what a stake is, how a producer is elected, how a block is certified, how tokens can stake while remaining non-transferable, how staking rights can be lent to a pool without surrendering custody, and how a pool's rewards are distributed. It explains what makes a block final, why Bitcoin's proof of work has the last word over Sequentia's own consensus, and closes with an honest account of the trust model and its limits. Written for a reader who understands Bitcoin.</p>
 
 <h2>1. The three commitments that shape everything else</h2>
 
-<p>Sequentia is a UTXO chain, forked from Elements, using Bitcoin Script rather than a general-purpose virtual machine. It replaces Elements' fixed-federation signed block with a stake-weighted leader and a certifying committee. The block <em>signature</em> machinery is inherited unchanged: a block is valid if it satisfies a challenge script. Proof of Stake only decides <strong>which key must sign</strong> each block, never how a signature is verified.</p>
+<p>Sequentia is a UTXO chain using Bitcoin Script rather than a general-purpose virtual machine. It is forked from Elements, the Bitcoin sidechain codebase, and inherits its transaction format and its issued-asset support. It replaces Elements' fixed-federation signed block with a stake-weighted leader and a certifying committee. The block <em>signature</em> machinery is inherited unchanged: a block is valid if it satisfies a challenge script. Proof of Stake only decides <strong>which key must sign</strong> each block, never how a signature is verified.</p>
 
 <p>Three commitments frame the rest of this document. Each explains design decisions that would otherwise look arbitrary.</p>
 
-<p><strong>Bitcoin anchoring is supreme.</strong> Every Sequentia block references a Bitcoin block header, and Sequentia reorganises whenever Bitcoin reorganises. Anchoring outranks checkpoints and outranks finality. This is not a safety net added afterwards; it is load-bearing in Proof of Stake specifically, because the per-block election seed is derived from the anchored Bitcoin hash. Bitcoin's proof of work is where Sequentia's randomness comes from. That is why no block producer can grind the election, and why none can bias the reward lottery described in section 8.</p>
+<p><strong>Bitcoin anchoring is supreme.</strong> Every Sequentia block references a Bitcoin block header, and Sequentia reorganises whenever Bitcoin reorganises. It does so in real time, and it does so even when that means discarding blocks the network had already treated as settled. Section 4 defines what "settled" means here and explains why anchoring is allowed to override it. This is not a safety net added afterwards; it is load-bearing in Proof of Stake specifically, because the per-block election seed is derived from the anchored Bitcoin hash. Bitcoin's proof of work is where Sequentia's randomness comes from. That is why no block producer can grind the election, and why none can bias the reward lottery described in section 9.</p>
 
 <p><strong>There is no inflation.</strong> The entire supply of the Sequence token is pre-mined. There is no coinbase issuance and no block subsidy. A producer's whole reward is the transaction fees contained in the block it produced. Wherever this document says "reward," it means fees. It is also why the coinbase rules are unusually strict: the coinbase is the only place in a block where value can be claimed.</p>
 
@@ -46,7 +46,7 @@
 
 <pre>&lt;csv&gt; OP_CHECKSEQUENCEVERIFY OP_DROP
     [ &lt;bls_pubkey&gt; OP_DROP &lt;bls_proof_of_possession&gt; OP_DROP ]   # optional committee registration
-    [ &lt;liquid_locktime&gt; OP_CHECKLOCKTIMEVERIFY OP_DROP ]          # optional vesting lock, section 6
+    [ &lt;liquid_locktime&gt; OP_CHECKLOCKTIMEVERIFY OP_DROP ]          # optional vesting lock, section 7
 &lt;pubkey&gt; OP_CHECKSIG</pre>
 
 <p>An output counts as stake, contributing its full value as <em>weight</em>, if and only if three conditions hold:</p>
@@ -113,7 +113,35 @@ value  = ticket / weight        # more weight gives a lower value, and a better 
 
 <p>If the committee cannot reach quorum, a naive chain would stall forever. Sequentia permits a below-quorum block once the parent chain's anchor has advanced by three Bitcoin blocks, roughly thirty minutes. Liveness is restored by Bitcoin's clock rather than by weakening the safety threshold during normal operation.</p>
 
-<h2>4. How a producer proves it controls the stake</h2>
+<h2>4. Finality, checkpoints, and the order of precedence</h2>
+
+<p>A Proof of Work chain has no notion of a block being final; it only ever becomes expensive to undo. A Proof of Stake chain must say something more definite, because rewriting old history costs a stakeholder nothing once their stake is gone. Sequentia answers this in three layers, and the ordering between them is a consensus rule in its own right.</p>
+
+<h3>Immediate finality</h3>
+
+<p>Once a committee quorum has certified a block, nodes treat that block as final and will not reorganise away from it. This is affordable precisely because of the quorum-intersection property in section 3: two rival blocks at the same height cannot both be certified without at least two committee members signing both, which is publicly attributable misbehaviour rather than an anonymous race.</p>
+
+<p>Immediate finality protects a node that was online and watching. It does nothing for a node syncing from scratch, which is where the second layer comes in.</p>
+
+<h3>The long-range attack, and what a checkpoint is</h3>
+
+<p>Consider the keys that held a large fraction of stake a year ago. They have since unbonded and sold their tokens, so they have nothing left to lose. Nothing prevents them from going back to a block from a year ago and signing an entirely different history from that point forward. It costs them no electricity and no capital. A node that was online throughout will simply ignore that history, because it already finalised the real one. But a node syncing for the first time sees two histories, both properly signed by keys that genuinely held stake at the time, and has no intrinsic way to tell which is the one the world actually used. This is the <em>long-range attack</em>, sometimes called posterior corruption, and every Proof of Stake design must answer it somehow.</p>
+
+<p>Sequentia answers it by borrowing Bitcoin's history. <strong>A checkpoint is a reference to a Sequentia block, published inside a Bitcoin transaction.</strong> Anyone may create one: it is a small tagged output containing the Sequentia block's hash and height. A node treats a checkpointed Sequentia block as finalised once two conditions hold: the block is already in that node's own validated chain, and the Bitcoin transaction carrying the reference is buried deep in Bitcoin, by default 2,016 Bitcoin blocks, roughly two weeks.</p>
+
+<p>The crucial property is what a checkpoint <em>cannot</em> do. It never causes a node to seek, download, or adopt any chain. It only locks in history the node had already validated for itself. A forged checkpoint, or two conflicting ones, is therefore harmless: a node that has not independently validated the referenced block simply ignores the reference. Checkpoints add finality; they can never impose a chain.</p>
+
+<p>To rewrite Sequentia history below a checkpoint, an attacker would have to rewrite two weeks of Bitcoin's proof of work. This is why the unbonding delay in the parameters table is what it is. Roughly fifteen days of unbonding exceeds the roughly fourteen-day checkpoint burial window, so a staker's coins are still locked at the moment a checkpoint consolidates over the blocks they signed. Nobody can unbond, walk away, and then costlessly rewrite the history they helped build. The long-range window is closed.</p>
+
+<p>A node may additionally be started with a hard-coded height-and-hash pair. This is a blunter instrument that protects a completely fresh sync before any block has been downloaded, and it is reject-only for the same reason: it can refuse a branch, never demand one.</p>
+
+<h3>Why Bitcoin anchoring outranks both</h3>
+
+<p>Every Sequentia block names a Bitcoin block as its anchor. If Bitcoin reorganises and the anchored block is orphaned, then <strong>the Sequentia block is discarded, even if a committee certified it, and even if it was finalised.</strong> Anchoring outranks checkpoints, which outrank immediate finality. A node that throws away a finalised block because Bitcoin abandoned its anchor is behaving correctly, not suffering a fault.</p>
+
+<p>This ordering looks severe until one asks what it is for. Sequentia follows Bitcoin's reorganisations in real time so that a Sequentia transaction is never more settled than the Bitcoin history it refers to. That is exactly the property a cross-chain atomic swap or a Lightning payment needs: the two chains can never disagree about which of them saw an event first, because one of them is definitionally right. A design that let a finality rule veto a Bitcoin-driven reorganisation would break that guarantee, and would do so precisely in the rare situations where it matters most.</p>
+
+<h2>5. How a producer proves it controls the stake</h2>
 
 <p>It does not prove it separately. The chain checks two things:</p>
 
@@ -124,15 +152,15 @@ value  = ticket / weight        # more weight gives a lower value, and a better 
 
 <p>The proof of control is the block signature itself. The per-block challenge is <code>&lt;leader&gt; OP_CHECKSIG</code>, so only the holder of the corresponding private key can produce a valid block. The chain never asks anyone to sign over their coins and never inspects a producer's inputs.</p>
 
-<p>One corollary deserves emphasis, because sections 6 and 7 exist to address it. In the plain arrangement, <strong>the key that signs blocks is also the key that can spend the staked coins.</strong> A block-signing key must be online continuously. Left unaddressed, that would force a staker to keep the key controlling its money on an internet-facing machine.</p>
+<p>One corollary deserves emphasis, because sections 7 and 8 exist to address it. In the plain arrangement, <strong>the key that signs blocks is also the key that can spend the staked coins.</strong> A block-signing key must be online continuously. Left unaddressed, that would force a staker to keep the key controlling its money on an internet-facing machine.</p>
 
-<h2>5. How a producer is paid</h2>
+<h2>6. How a producer is paid</h2>
 
 <p>There is no subsidy, so a producer's reward is exactly the fees in its block. Consensus requires that <em>every</em> coinbase output carrying value pays the required payee, which by default is a pay-to-witness-public-key-hash of the elected leader's key. Zero-value outputs, such as commitments, are exempt. A block whose coinbase pays anyone else is invalid.</p>
 
-<p>Two details matter downstream. Rewards land in a <strong>separate output</strong>, never inside the staking output, so staking income is immediately spendable even when the stake itself is frozen. And because the default rule is "pay the leader, and only the leader," a pool operator producing blocks with borrowed weight would collect the entire reward. Section 8 is the answer to that.</p>
+<p>Two details matter downstream. Rewards land in a <strong>separate output</strong>, never inside the staking output, so staking income is immediately spendable even when the stake itself is frozen. And because the default rule is "pay the leader, and only the leader," a pool operator producing blocks with borrowed weight would collect the entire reward. Section 9 is the answer to that.</p>
 
-<h2>6. Staking-only periods: tokens that earn but cannot be sold</h2>
+<h2>7. Staking-only periods: tokens that earn but cannot be sold</h2>
 
 <p>Sequentia's supply is distributed at genesis, with allocations subject to a cliff, a linear vesting schedule, and a <strong>staking-only period</strong>. Tokens unlock for staking first, and become liquid, meaning sellable or transferable to third parties, only some months afterwards. An allocation might, for instance, unlock a slice for staking in month seven that does not become liquid until month thirty-one.</p>
 
@@ -144,9 +172,9 @@ value  = ticket / weight        # more weight gives a lower value, and a better 
 
 <p>Enforcing the cliff, as distinct from the liquidity date, is a matter of not making the output a staking output yet: the tranche waits in an ordinary timelocked output and is converted into a staking output when the cliff ends. Where the transition itself must be trustless rather than merely observable, the pre-cliff output can be a tapscript covenant that permits exactly one destination, namely the staking script it will become. Every field of that destination is a constant known when the tranche is created, so this is a fixed hash comparison rather than a recursive covenant.</p>
 
-<h2>7. Delegation: lending the right to produce, never the coins</h2>
+<h2>8. Delegation: lending the right to produce, never the coins</h2>
 
-<p>Section 4 ended on a hazard: one key both signs blocks and spends the coins. Section 6 sharpens it, because a staking output frozen for years cannot be respent, so a producer named <em>inside</em> such an output could never be replaced. A compromised block-signing key would be irrevocable for the whole lock.</p>
+<p>Section 5 ended on a hazard: one key both signs blocks and spends the coins. Section 7 sharpens it, because a staking output frozen for years cannot be respent, so a producer named <em>inside</em> such an output could never be replaced. A compromised block-signing key would be irrevocable for the whole lock.</p>
 
 <p>The resolution is an indirection. A staker, called the <strong>controller</strong>, lends its weight to a <strong>signer</strong> by funding a separate, small record:</p>
 
@@ -168,9 +196,9 @@ value  = ticket / weight        # more weight gives a lower value, and a better 
 
 <p>Two rules keep the mechanism sound. A rotation spends the old record and creates the new one in a single transaction, so the removal of the old record must not erase the new one; removal is conditional on the record still being the one in force, and the disconnect path is its exact inverse. And consensus forbids two unspent records for one controller, because two would make the signer, and therefore the leader election, ambiguous and node-dependent, which is to say a chain split.</p>
 
-<h2>8. Payout policies: how a pool's rewards are distributed</h2>
+<h2>9. Payout policies: how a pool's rewards are distributed</h2>
 
-<p>Delegation protects the coins but says nothing about the rewards. Under the default rule of section 5, an operator producing blocks with borrowed weight collects all of the fees and is trusted to pass a share back. A producer may instead <strong>commit</strong> to a payout policy, announced on-chain in a record spendable by itself:</p>
+<p>Delegation protects the coins but says nothing about the rewards. Under the default rule of section 6, an operator producing blocks with borrowed weight collects all of the fees and is trusted to pass a share back. A producer may instead <strong>commit</strong> to a payout policy, announced on-chain in a record spendable by itself:</p>
 
 <pre>&lt;"SEQPAY"&gt; OP_DROP &lt;activation&gt; OP_DROP &lt;mode&gt; OP_DROP &lt;parameter&gt; OP_DROP &lt;signer&gt; OP_CHECKSIG</pre>
 
@@ -196,17 +224,17 @@ value  = ticket / weight        # more weight gives a lower value, and a better 
 
 <p>Between them, exit and notice do the work that a fairness rule cannot. The chain guarantees that a commitment is public, that it cannot change without warning, and that nobody is ever trapped.</p>
 
-<h2>9. The trust model, stated plainly</h2>
+<h2>10. The trust model, stated plainly</h2>
 
 <p>It is worth separating what mathematics guarantees from what incentives and vigilance guarantee.</p>
 
-<p><strong>Guaranteed by the protocol.</strong> A pool can never spend a delegator's coins. A delegator can always leave, immediately, without permission. A staking output under a vesting lock cannot be sold or transferred before its date, whatever its owner intends. A committed payout policy cannot change without a day's public notice. Under lottery mode, each participant's expected share of rewards is exact, and the draw cannot be biased by any participant, because its randomness is Bitcoin's.</p>
+<p><strong>Guaranteed by the protocol.</strong> History buried beneath a Bitcoin checkpoint cannot be rewritten without rewriting Bitcoin's proof of work, so stakers who have unbonded and departed cannot forge an alternative past. A pool can never spend a delegator's coins. A delegator can always leave, immediately, without permission. A staking output under a vesting lock cannot be sold or transferred before its date, whatever its owner intends. A committed payout policy cannot change without a day's public notice. Under lottery mode, each participant's expected share of rewards is exact, and the draw cannot be biased by any participant, because its randomness is Bitcoin's.</p>
 
 <p><strong>Not guaranteed by the protocol.</strong> Direct mode does not ensure an operator's committed destination shares anything with its delegators; it only ensures the destination is public and stable. A notice period protects a delegator who <em>notices</em>, and no consensus rule can make anyone look, so wallets and explorers are expected to watch delegated pools and raise a warning when a change is announced. Lottery mode gives correct expected income but lumpy realisation; a delegator wanting smooth income must either accept a direct-mode operator's terms or hold enough stake to produce blocks itself. A pool operator that has never staked has nowhere to place its committee registration, since that key rides inside a staking output, and so must hold a stake of its own to join the committee.</p>
 
 <p>What the design refuses to do is pretend. It does not claim that a pool is honest because it says so, and it does not build an accounting subsystem to enforce fairness that would then have to be trusted in its own right. It gives the delegator three things instead: custody that is never surrendered, an exit that is never blocked, and a commitment that cannot change behind their back. A delegator who wants no trust at all can choose a lottery pool and rely on nothing but Bitcoin's dice.</p>
 
-<h2>10. Reference</h2>
+<h2>11. Reference</h2>
 
 <h3>Consensus rejections specific to staking</h3>
 
@@ -232,9 +260,9 @@ value  = ticket / weight        # more weight gives a lower value, and a better 
 <tr><td><code>getpayoutscript</code>, <code>getpayoutinfo</code></td><td>announce a payout policy; inspect what each producer has committed to and whether it is yet in force</td></tr>
 </tbody></table>
 
-<h2>11. Summary</h2>
+<h2>12. Summary</h2>
 
-<p>A stake on Sequentia is a coin sitting still in a recognisable output. Bitcoin's proof of work supplies the randomness that elects who produces the next block, weighted by how much is sitting there, and a committee of the top-ranked stakers certifies it with a single aggregated signature. Because a coin never moves in order to earn, a coin that is forbidden to move can still earn, which is what a staking-only vesting period is. Because the right to produce blocks is named in a separate small output rather than inside the coin, that right can be lent to a pool, reclaimed instantly, and rotated even while the coin is frozen for years, and the pool can never touch the coin. And because a block's reward must go where its producer publicly committed it a day in advance, a delegator can read what a pool promises, watch it, and leave before any change takes effect, or else choose a pool that has handed the decision to Bitcoin's dice and promised nothing at all.</p>
+<p>A stake on Sequentia is a coin sitting still in a recognisable output. Bitcoin's proof of work supplies the randomness that elects who produces the next block, weighted by how much is sitting there, and a committee of the top-ranked stakers certifies it with a single aggregated signature. A certified block is final at once; a block whose reference has been buried in Bitcoin for a fortnight is final beyond the reach of anyone who has since sold their stake; and a block whose Bitcoin anchor is orphaned is discarded regardless, because no rule of Sequentia's may outrank the chain it is anchored to. Because a coin never moves in order to earn, a coin that is forbidden to move can still earn, which is what a staking-only vesting period is. Because the right to produce blocks is named in a separate small output rather than inside the coin, that right can be lent to a pool, reclaimed instantly, and rotated even while the coin is frozen for years, and the pool can never touch the coin. And because a block's reward must go where its producer publicly committed it a day in advance, a delegator can read what a pool promises, watch it, and leave before any change takes effect, or else choose a pool that has handed the decision to Bitcoin's dice and promised nothing at all.</p>
 
 <hr>
 <p class="small">Sequentia is developed by Concatena Labs. The network is called Sequentia; its token is called Sequence, ticker SEQ.</p>
