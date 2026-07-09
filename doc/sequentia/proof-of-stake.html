@@ -23,33 +23,33 @@
 <h1>Proof of Stake on Sequentia</h1>
 <p class="sub">Consensus specification</p>
 
-<p class="abstract"><strong>Abstract.</strong> Sequentia is a UTXO blockchain for issued assets that subordinates itself to Bitcoin. Every Sequentia block commits to a Bitcoin block, and the chain reorganises whenever Bitcoin does, so a Sequentia transaction is never more settled than the Bitcoin history it is anchored to. This property exists for one purpose: it lets an asset issued on Sequentia be exchanged for bitcoin on the Bitcoin chain in real time, without the confirmation depth or protective timelocks that cross-chain trades otherwise require, because a Bitcoin reorganisation that reverses the bitcoin leg reverses the Sequentia leg by consensus rule. Block production is by proof of stake. A stake is an ordinary unspent output that never moves; a verifiable random function elects producers privately, in proportion to stake; a public committee of 250 certifies each block with one aggregate signature; and finality is layered, with quorum finality subordinated to Bitcoin checkpoints and both subordinated to the anchor. The protocol further expresses vesting schedules whose tokens stake while non-transferable, non-custodial delegation, and consensus-enforced reward distribution for staking pools. This document specifies the mechanism and states which of its guarantees are enforced by consensus and which rest on incentives and monitoring.</p>
+<p class="abstract"><strong>Abstract.</strong> Sequentia is a UTXO blockchain for issued assets that subordinates itself to Bitcoin. Every Sequentia block commits to a Bitcoin block, and the chain reorganises whenever Bitcoin does, so a Sequentia transaction is never more settled than the Bitcoin history it is anchored to. This property exists for one purpose: it lets an asset issued on Sequentia be exchanged for bitcoin on the Bitcoin chain in real time, without the confirmation depth or protective timelocks that cross-chain trades otherwise require, because a Bitcoin reorganisation that reverses the bitcoin leg reverses the Sequentia leg by consensus rule. Block production is by proof of stake. A stake is an ordinary unspent output of the staking token, Sequence, and it never moves; a verifiable random function elects producers privately, in proportion to stake; a public committee of 250 certifies each block with one aggregate signature; and finality is layered, with quorum finality subordinated to Bitcoin checkpoints and both subordinated to the anchor. The protocol further expresses vesting schedules whose tokens stake while non-transferable, non-custodial delegation, and consensus-enforced reward distribution for staking pools. This document specifies the mechanism and states which of its guarantees are enforced by consensus and which rest on incentives and monitoring.</p>
 
 <h2>1. Introduction</h2>
 
-<p>Sequentia is a blockchain for issued assets built on the unspent-transaction-output model and Bitcoin Script, extended with Taproot and the Elements introspection opcodes. It derives from the Elements codebase, from which it inherits its transaction format and its support for asset issuance. Where Elements assigns block production to a fixed federation, Sequentia assigns it by proof of stake. The signed-block machinery itself is inherited unchanged: a block is valid only if it satisfies a challenge script, and the rules of this document determine which keys that script names.</p>
+<p>Sequentia is a blockchain for issued assets built on the unspent-transaction-output model and Bitcoin Script. It derives from Elements, the Bitcoin sidechain codebase, from which it inherits its transaction format, its support for asset issuance, and its script extensions, Taproot and transaction introspection among them. Where Elements assigns block production to a fixed federation, Sequentia assigns it by proof of stake. The signed-block machinery is inherited unchanged: a block is valid only if it satisfies a challenge script fixed by consensus, and the rules of this document determine which keys that script names.</p>
 
 <p>Three commitments govern the design.</p>
 
-<p><strong>Anchoring supremacy.</strong> Every Sequentia block commits to a Bitcoin block, and Sequentia reorganises whenever Bitcoin reorganises, immediately and unconditionally. No internal notion of finality can veto an anchor-driven reorganisation. Section 2 develops the mechanism and the settlement guarantee it exists to provide; Section 6 places it above both of the protocol's finality layers.</p>
+<p><strong>Bitcoin's history prevails.</strong> Every Sequentia block commits to a Bitcoin block, and Sequentia reorganises whenever Bitcoin reorganises, immediately and unconditionally; no internal notion of finality can veto a reorganisation driven by Bitcoin. Section 2 develops this mechanism, anchoring, and the settlement guarantee it exists to provide; Section 6 places it above both of the protocol's finality layers.</p>
 
-<p><strong>Zero issuance.</strong> The supply of the Sequence token (SEQ) is 400,000,000 units, issued in full at genesis. There is no block subsidy and no coinbase issuance of any kind. A block producer's entire income is the transaction fees of its block, and fees are payable in any issued asset the producer accepts.</p>
+<p><strong>New assets may be issued at any time; new Sequence may not.</strong> Sequentia carries assets created on it by their issuers, and asset issuance is an ordinary, ongoing use of the chain. Its staking token, named Sequence with ticker SEQ, is the exception: its supply of 400,000,000 units exists in full from the genesis block, no coinbase ever creates more, and there is no block subsidy. A block producer's entire income is the transaction fees of its block.</p>
 
-<p><strong>A single privilege.</strong> The Sequence token otherwise stands equal to every asset issued on the network. Its one privileged role is staking: consensus admits only Sequence as stake and verifies the asset identifier explicitly.</p>
+<p><strong>Sequence is privileged only as stake.</strong> In every other respect Sequence stands equal to the assets issued on the network: transaction fees are payable in any issued asset a producer accepts, and holding Sequence is not a requirement for transacting. Its single privileged role is staking, and consensus admits only Sequence as stake, verifying the asset identifier explicitly.</p>
 
 <p>Table 1 lists the protocol's constants. Every value in the table is a consensus rule of the network, identical on every node. None is a node setting: a Sequentia node whose configuration attempts to alter any of them refuses to start.</p>
 
 <table>
 <thead><tr><th>constant</th><th>value</th><th>definition</th></tr></thead>
 <tbody>
-<tr><td>token supply</td><td>400,000,000 SEQ</td><td>issued in full at genesis; no further issuance</td></tr>
-<tr><td>minimum stake</td><td>40,000 SEQ</td><td>0.01% of supply; the least aggregate weight with which a key participates in production</td></tr>
-<tr><td>slot interval</td><td>30 seconds</td><td>the nominal block interval and the unit of the sortition time gate</td></tr>
+<tr><td>supply of Sequence</td><td>400,000,000 SEQ</td><td>issued in full at genesis; never increased</td></tr>
+<tr><td>minimum stake</td><td>40,000 SEQ</td><td>0.01% of the supply; the least total stake with which a key participates in block production (Section 3)</td></tr>
+<tr><td>slot interval</td><td>30 seconds</td><td>the nominal block interval; also the unit of the production time gate (Section 4.2)</td></tr>
 <tr><td>maximum block weight</td><td>200,000</td><td>one twentieth of Bitcoin's, so that at the slot interval the chain's capacity per unit time equals Bitcoin's</td></tr>
 <tr><td>unbonding period</td><td>43,200 blocks</td><td>15 days of slots; the least relative timelock of a staking output (Section 3)</td></tr>
 <tr><td>committee cap</td><td>250</td><td>the certifying committee is the smaller of the cap and the number of eligible registered stakers (Section 4.3)</td></tr>
 <tr><td>quorum</td><td>floor(K/2) + 1, plus 1 at odd K</td><td>computed from the actual committee size K; 126 at the cap</td></tr>
-<tr><td>escape anchor gap</td><td>3 Bitcoin blocks</td><td>the anchor progress that admits a below-quorum block (Section 5.4)</td></tr>
+<tr><td>escape anchor gap</td><td>3 Bitcoin blocks</td><td>the Bitcoin progress after which a stalled chain accepts a below-quorum block (Section 5.4)</td></tr>
 <tr><td>checkpoint burial depth</td><td>2,016 Bitcoin blocks</td><td>approximately two weeks; the burial at which a checkpoint finalises (Section 6.3)</td></tr>
 <tr><td>payout notice period</td><td>2,880 blocks</td><td>24 hours of slots; the least delay before a declared payout policy binds (Section 10)</td></tr>
 </tbody></table>
@@ -212,13 +212,13 @@
 
 <h2>7. Producer Rewards</h2>
 
-<p>There being no issuance, a block's reward is the fees of its transactions, in whatever assets they were paid. Consensus fixes the destination: every coinbase output carrying value must pay the required payee of the height, a script R(H) determined by the rules of Section 10, and a block whose coinbase pays anything else is invalid. In the ground state, with no distribution policy declared, R(H) is a pay-to-witness-public-key-hash of the producer's key.</p>
+<p>No block creates new Sequence, so a block's reward is the fees of its transactions, in whatever assets they were paid. Consensus fixes the destination: every coinbase output carrying value must pay the required payee of the height, a script R(H) determined by the rules of Section 10, and a block whose coinbase pays anything else is invalid. Where the producer has declared no distribution policy, R(H) is a pay-to-witness-public-key-hash of the producer's key.</p>
 
 <p>The producer constructs its coinbase by evaluating the same function that validators enforce, so the two cannot diverge. Rewards are paid in ordinary outputs distinct from any staking output: income from staking is transferable immediately, whatever locks encumber the stake itself.</p>
 
 <h2>8. Vesting and Staking-Only Periods</h2>
 
-<p>Token distribution schedules on Sequentia comprise a cliff, a linear vesting schedule, and a <em>staking-only period</em>: an interval in which tokens can stake but cannot yet be transferred. The staking-only period rests on the independence of weight from spendability established in Section 3.</p>
+<p>Allocations of Sequence distributed at genesis vest under schedules comprising a cliff, a linear vesting period, and a <em>staking-only period</em>: an interval in which the tokens can stake but cannot yet be transferred. The staking-only period rests on the independence of weight from spendability established in Section 3.</p>
 
 <p>A staking output may carry an absolute timelock, the <code>liquid_locktime</code> field of the template. Until the stated time the output cannot be spent, and therefore cannot be sold, transferred, or pledged; throughout, it holds its full weight, produces blocks when elected, and earns fees, which are paid outside the output and are immediately transferable. Non-transferability is obtained as non-spendability, with no covenant, no escrow, and no custodian.</p>
 
@@ -248,7 +248,7 @@
 
 <h2>10. Reward Distribution Policies</h2>
 
-<p>Delegation lends weight, and under the ground rule of Section 7 the rewards it generates would accrue wholly to the pool operator, leaving delegators dependent on the operator's bookkeeping. A producer may instead bind itself to a distribution policy, declared in a payout record, a bare output of the form</p>
+<p>Delegation lends weight, and under Section 7 the rewards it generates accrue wholly to the pool operator, leaving delegators dependent on the operator's bookkeeping. A producer may instead bind itself to a distribution policy, declared in a payout record, a bare output of the form</p>
 
 <pre>&lt;"SEQPAY"&gt; OP_DROP &lt;activation&gt; OP_DROP &lt;mode&gt; OP_DROP &lt;parameter&gt; OP_DROP &lt;signer&gt; OP_CHECKSIG</pre>
 
@@ -272,7 +272,7 @@
 
 <h2>12. Summary</h2>
 
-<p>A stake on Sequentia is an unspent output that never moves, conferring the right to be elected in proportion to its value. Bitcoin supplies the election's randomness through the anchor each block carries, and the anchor subordinates the whole chain to Bitcoin's history, which is what lets bitcoin and Sequentia assets change hands against each other in real time. A block is produced by a privately elected staker, certified by one aggregate signature of a public committee of 250, final upon that certificate, and immovable beneath a Bitcoin checkpoint, always excepting the anchor rule, which outranks both. Because weight is independent of spendability, tokens under vesting locks stake and earn while non-transferable. Because production rights are assigned in a revocable record separate from the stake, delegation conveys no custody and exit is immediate. And because a producer's reward destination is a consensus rule bound to its declared policy, a pool's delegators stand behind a commitment their operator can neither break quietly nor change quickly.</p>
+<p>A stake on Sequentia is an unspent output of Sequence that never moves, conferring the right to be elected in proportion to its value. Bitcoin supplies the election's randomness through the anchor each block carries, and the anchor subordinates the whole chain to Bitcoin's history, which is what lets bitcoin and Sequentia assets change hands against each other in real time. A block is produced by a privately elected staker, certified by one aggregate signature of a public committee of 250, final upon that certificate, and immovable beneath a Bitcoin checkpoint, always excepting the anchor rule, which outranks both. Because weight is independent of spendability, tokens under vesting locks stake and earn while non-transferable. Because production rights are assigned in a revocable record separate from the stake, delegation conveys no custody and exit is immediate. And because a producer's reward destination is a consensus rule bound to its declared policy, a pool's delegators stand behind a commitment their operator can neither break quietly nor change quickly.</p>
 
 <hr>
 <p class="small">Sequentia is developed by Concatena Labs. The network is named Sequentia; the token used for staking is named Sequence, with ticker SEQ.</p>
