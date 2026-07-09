@@ -3452,6 +3452,74 @@ static RPCHelpMan startposproducer()
 }
 
 // SEQUENTIA PoS: build the canonical staking-output script for a staker key.
+static RPCHelpMan getdelegationscript()
+{
+    return RPCHelpMan{"getdelegationscript",
+                "\nSEQUENTIA: returns the canonical delegation-record script, which lends a staker's block-signing\n"
+                "rights to a signer (a staking-pool operator, or the staker's own online key) WITHOUT moving the\n"
+                "stake. Fund this bare script with a small amount to activate it. While the output is unspent, all\n"
+                "of the controller's stake weight counts for the signer, and the signer is the key that must\n"
+                "produce and sign blocks (and which the coinbase pays).\n"
+                "\nThe signer can NEVER spend the staked coins: only the controller key can. Spending this record\n"
+                "(which only the controller can do) reclaims the rights; spending it and creating another in the\n"
+                "same transaction rotates to a new signer. Because the record is a separate output, this works\n"
+                "even while the staking output itself is frozen by a vesting lock (see getstakescript).\n",
+                {
+                    {"controller", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The staker public key that owns the stake (hex). It alone may spend this record."},
+                    {"signer", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The public key that will produce blocks with the controller's weight (hex)."},
+                },
+                RPCResult{
+                    RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::STR_HEX, "script", "the delegation-record scriptPubKey (hex)"},
+                        {RPCResult::Type::STR_HEX, "controller", "the controller public key"},
+                        {RPCResult::Type::STR_HEX, "signer", "the signer public key"},
+                    }},
+                RPCExamples{HelpExampleCli("getdelegationscript", "\"02aa...\" \"02bb...\"")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!g_con_pos) {
+        throw JSONRPCError(RPC_MISC_ERROR, "Proof-of-Stake (con_pos) is not enabled on this chain");
+    }
+    CPubKey controller(ParseHexV(request.params[0], "controller"));
+    CPubKey signer(ParseHexV(request.params[1], "signer"));
+    if (!controller.IsFullyValid()) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid controller public key");
+    if (!signer.IsFullyValid()) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid signer public key");
+
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("script", HexStr(BuildDelegationScript(controller, signer)));
+    result.pushKV("controller", HexStr(controller));
+    result.pushKV("signer", HexStr(signer));
+    return result;
+},
+    };
+}
+
+static RPCHelpMan getdelegationinfo()
+{
+    return RPCHelpMan{"getdelegationinfo",
+                "\nSEQUENTIA: the live delegation map, derived from unspent delegation records in the UTXO set.\n"
+                "Each entry maps a controller (the key that owns the stake) to the signer currently producing\n"
+                "blocks with that stake's weight. Stakers absent from this map sign for themselves.\n",
+                {},
+                RPCResult{RPCResult::Type::OBJ_DYN, "", "", {
+                    {RPCResult::Type::STR_HEX, "controller", "the signer public key that this controller's weight counts for"},
+                }},
+                RPCExamples{HelpExampleCli("getdelegationinfo", "")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!g_con_pos) {
+        throw JSONRPCError(RPC_MISC_ERROR, "Proof-of-Stake (con_pos) is not enabled on this chain");
+    }
+    UniValue result(UniValue::VOBJ);
+    for (const auto& e : StakeRegistry::GetInstance().Delegations()) {
+        result.pushKV(HexStr(e.first), HexStr(e.second));
+    }
+    return result;
+},
+    };
+}
+
 static RPCHelpMan getstakescript()
 {
     return RPCHelpMan{"getstakescript",
@@ -3727,6 +3795,8 @@ static const CRPCCommand commands[] =
     { "blockchain",         &getstakerinfo,                      },
     { "blockchain",         &startposproducer,                   },
     { "blockchain",         &getstakescript,                     },
+    { "blockchain",         &getdelegationscript,                },
+    { "blockchain",         &getdelegationinfo,                  },
     { "blockchain",         &getcheckpointpayload,               },
     { "blockchain",         &getcheckpointinfo,                  },
 

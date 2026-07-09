@@ -143,6 +143,44 @@ private:
     //! config layer takes precedence when both are present.
     std::map<CPubKey, std::vector<unsigned char>> m_bls GUARDED_BY(m_mutex);
     std::map<CPubKey, std::vector<unsigned char>> m_bls_utxo GUARDED_BY(m_mutex);
+    //! SEQUENTIA delegation: controller pubkey -> the signer that produces blocks
+    //! with the controller's weight. Derived from unspent delegation-record
+    //! outputs (BuildDelegationScript), so it is a pure function of the UTXO set,
+    //! exactly like the weight and the UTXO BLS layer. A controller with no
+    //! record signs for itself.
+    //!
+    //! The record lives in its OWN small output, never inside the staking output.
+    //! That is what lets a staker re-point (or reclaim) its block-signing rights
+    //! WITHOUT spending the stake -- essential once a staking output carries a
+    //! multi-year vesting lock (liquid_locktime) and therefore cannot be spent at
+    //! all. It also separates the hot block-signing key from the cold key that
+    //! can actually move the coins.
+    //!
+    //! Resolution is ONE HOP, never chained: if A delegates to B and B delegates
+    //! to C, A's weight goes to B and B's own weight goes to C. Chasing chains
+    //! would admit cycles.
+    std::map<CPubKey, CPubKey> m_deleg_utxo GUARDED_BY(m_mutex);
+
+    //! The signer for a controller (itself when it has delegated nothing).
+    CPubKey SignerForLocked(const CPubKey& controller) const EXCLUSIVE_LOCKS_REQUIRED(m_mutex)
+    {
+        auto it = m_deleg_utxo.find(controller);
+        return it == m_deleg_utxo.end() ? controller : it->second;
+    }
+    //! config + utxo weight, keyed by CONTROLLER (before delegation is applied).
+    std::map<CPubKey, uint64_t> MergedLocked() const EXCLUSIVE_LOCKS_REQUIRED(m_mutex)
+    {
+        std::map<CPubKey, uint64_t> merged = m_config;
+        for (const auto& e : m_utxo) merged[e.first] += e.second;
+        return merged;
+    }
+    //! Merged weight re-keyed onto signers (delegation applied, one hop).
+    std::map<CPubKey, uint64_t> WeightsLocked() const EXCLUSIVE_LOCKS_REQUIRED(m_mutex)
+    {
+        std::map<CPubKey, uint64_t> out;
+        for (const auto& e : MergedLocked()) out[SignerForLocked(e.first)] += e.second;
+        return out;
+    }
 
 public:
     static StakeRegistry& GetInstance()
@@ -159,6 +197,7 @@ public:
         m_utxo.clear();
         m_bls.clear();
         m_bls_utxo.clear();
+        m_deleg_utxo.clear();
     }
     //! Set a configured staker's weight.
     void SetStake(const CPubKey& pubkey, uint64_t weight)
@@ -191,11 +230,13 @@ public:
     //! Replace the UTXO-derived layers wholesale (startup rebuild): weights and
     //! the UTXO BLS registrations, both pure functions of the UTXO set.
     void SetUtxoStake(std::map<CPubKey, uint64_t>&& utxo,
-                      std::map<CPubKey, std::vector<unsigned char>>&& bls_utxo = {})
+                      std::map<CPubKey, std::vector<unsigned char>>&& bls_utxo = {},
+                      std::map<CPubKey, CPubKey>&& deleg_utxo = {})
     {
         LOCK(m_mutex);
         m_utxo = std::move(utxo);
         m_bls_utxo = std::move(bls_utxo);
+        m_deleg_utxo = std::move(deleg_utxo);
     }
     //! A staking output entered the UTXO set. A non-empty bls_pubkey registers
     //! (or re-affirms) the staker's UTXO-layer committee BLS key; ConnectBlock
@@ -237,27 +278,65 @@ public:
     size_t Size() const
     {
         LOCK(m_mutex);
-        std::map<CPubKey, uint64_t> merged = m_config;
-        for (const auto& e : m_utxo) merged[e.first] += e.second;
-        return merged.size();
+        return WeightsLocked().size();
     }
+    //! The weight a SIGNER commands: its own, plus every controller's that has
+    //! delegated to it. This is the number the leader election, the sortition and
+    //! the eligibility floor all see, so a pool operator is ranked on the weight
+    //! it has been lent -- while the coins themselves never move.
     uint64_t GetWeight(const CPubKey& pubkey) const
     {
         LOCK(m_mutex);
         uint64_t weight = 0;
-        auto it = m_config.find(pubkey);
-        if (it != m_config.end()) weight += it->second;
-        auto it2 = m_utxo.find(pubkey);
-        if (it2 != m_utxo.end()) weight += it2->second;
+        for (const auto& e : MergedLocked()) {
+            if (SignerForLocked(e.first) == pubkey) weight += e.second;
+        }
         return weight;
     }
-    //! Effective (merged) weights.
+    //! Effective weights, keyed by signer (delegation applied).
     std::map<CPubKey, uint64_t> Weights() const
     {
         LOCK(m_mutex);
-        std::map<CPubKey, uint64_t> merged = m_config;
-        for (const auto& e : m_utxo) merged[e.first] += e.second;
-        return merged;
+        return WeightsLocked();
+    }
+    //! Raw weights keyed by controller, before delegation (introspection/tests).
+    std::map<CPubKey, uint64_t> ControllerWeights() const
+    {
+        LOCK(m_mutex);
+        return MergedLocked();
+    }
+    //! The signer a controller's weight currently counts for.
+    CPubKey SignerFor(const CPubKey& controller) const
+    {
+        LOCK(m_mutex);
+        return SignerForLocked(controller);
+    }
+    bool HasDelegation(const CPubKey& controller) const
+    {
+        LOCK(m_mutex);
+        return m_deleg_utxo.count(controller) > 0;
+    }
+    std::map<CPubKey, CPubKey> Delegations() const
+    {
+        LOCK(m_mutex);
+        return m_deleg_utxo;
+    }
+    //! A delegation record entered the UTXO set.
+    void AddUtxoDelegation(const CPubKey& controller, const CPubKey& signer)
+    {
+        LOCK(m_mutex);
+        m_deleg_utxo[controller] = signer;
+    }
+    //! A delegation record left the UTXO set. Erase only if it is still the
+    //! record in force: a rotation spends the old record and creates a new one in
+    //! the same transaction, and PosApplyBlockStake adds created outputs before
+    //! subtracting spent ones. Without this guard the freshly-installed record
+    //! would be erased by the removal of the one it replaced.
+    void SubUtxoDelegation(const CPubKey& controller, const CPubKey& signer)
+    {
+        LOCK(m_mutex);
+        auto it = m_deleg_utxo.find(controller);
+        if (it != m_deleg_utxo.end() && it->second == signer) m_deleg_utxo.erase(it);
     }
     //! UTXO-layer weight only (for introspection/tests).
     uint64_t GetUtxoWeight(const CPubKey& pubkey) const
@@ -611,6 +690,39 @@ CScript BuildStakeScript(const CPubKey& pubkey, uint32_t csv_blocks,
                          const std::vector<unsigned char>& bls_pubkey = {},
                          const std::vector<unsigned char>& bls_pop = {},
                          int64_t liquid_locktime = 0);
+
+/** The canonical DELEGATION-RECORD script:
+ *      <"SEQDEL"> OP_DROP <signer_pubkey> OP_DROP <controller_pubkey> OP_CHECKSIG
+ *
+ *  A bare script, like the staking output, so validators recognize it at output
+ *  creation and the delegation layer stays a pure function of the UTXO set.
+ *  While this output is unspent, all of `controller`'s stake weight counts for
+ *  `signer`, which is the key that must produce and sign blocks. The record is
+ *  spendable by the CONTROLLER alone: only the owner of the stake may re-point
+ *  or reclaim its block-signing rights.
+ *
+ *  Why the record lives in its own output rather than inside the staking script:
+ *    - Rotation. Re-pointing to a new signer spends only this tiny output, never
+ *      the stake. A staking output with a multi-year vesting lock cannot be spent
+ *      at all, so a signer named inside it could never be changed -- a compromised
+ *      operator key would be irrevocable for the whole lock.
+ *    - Custody. The staking output's own pubkey never has to be online. Delegate
+ *      to a hot signing key (your own, or a pool's) and keep the key that can
+ *      actually move the coins offline. A signer can never spend the stake.
+ *
+ *  Rewards are unaffected by this file: the coinbase must pay the elected leader
+ *  (the SIGNER), enforced in ConnectBlock. Splitting a pool's rewards among its
+ *  delegators is therefore not yet enforced on-chain. */
+CScript BuildDelegationScript(const CPubKey& controller, const CPubKey& signer);
+
+/** The (controller, signer) a delegation-record script names, or nullopt if the
+ *  script is not of the canonical form. */
+std::optional<std::pair<CPubKey, CPubKey>> ParseDelegationScript(const CScript& script);
+
+/** The (controller, signer) a txout registers, or nullopt if it is not a
+ *  delegation record. Value and asset are unconstrained: the record carries no
+ *  weight of its own, it only re-points weight the staking outputs already hold. */
+std::optional<std::pair<CPubKey, CPubKey>> DelegationFromTxOut(const CTxOut& out);
 
 /** A parsed staking script. bls_pubkey/bls_pop are empty when the output carries
  *  no committee registration (the old form, or a leader-only staker).

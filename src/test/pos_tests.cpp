@@ -911,4 +911,107 @@ BOOST_AUTO_TEST_CASE(pos_stake_script_vesting_locktime)
     g_pos_unbonding_period = old_unbonding;
 }
 
+// SEQUENTIA delegation: a staker lends its block-signing rights to a signer (a
+// pool operator, or its own hot key) via a separate record output, so the stake
+// itself -- which may be frozen for years by a vesting lock -- never moves.
+BOOST_AUTO_TEST_CASE(pos_delegation_script_roundtrip)
+{
+    CPubKey controller = MakeKey();
+    CPubKey signer = MakeKey();
+
+    CScript script = BuildDelegationScript(controller, signer);
+    auto parsed = ParseDelegationScript(script);
+    BOOST_REQUIRE(parsed.has_value());
+    BOOST_CHECK(parsed->first == controller);
+    BOOST_CHECK(parsed->second == signer);
+
+    // A delegation record is not a staking output, and vice versa: the templates
+    // cannot be confused (a stake script opens with a CSV number push).
+    BOOST_CHECK(!ParseStakeScript(script).has_value());
+    BOOST_CHECK(!ParseDelegationScript(BuildStakeScript(controller, 10)).has_value());
+    BOOST_CHECK(!ParseDelegationScript(BuildStakeScript(controller, 10, {}, {}, 1893456000)).has_value());
+
+    // The record carries no weight of its own.
+    CTxOut rec(CConfidentialAsset(::policyAsset), CConfidentialValue(1000), script);
+    BOOST_CHECK(!StakeFromTxOut(rec).has_value());
+    BOOST_CHECK(DelegationFromTxOut(rec).has_value());
+
+    // Rejections: bad marker, wrong opcodes, trailing junk, not a key.
+    BOOST_CHECK(!ParseDelegationScript(CScript() << std::vector<unsigned char>{'X'} << OP_DROP
+                                                 << ToByteVector(signer) << OP_DROP
+                                                 << ToByteVector(controller) << OP_CHECKSIG).has_value());
+    BOOST_CHECK(!ParseDelegationScript(CScript() << std::vector<unsigned char>{'S','E','Q','D','E','L'} << OP_DROP
+                                                 << ToByteVector(signer) << OP_DROP
+                                                 << ToByteVector(controller) << OP_CHECKSIGVERIFY).has_value());
+    CScript trailing = BuildDelegationScript(controller, signer);
+    trailing << OP_TRUE;
+    BOOST_CHECK(!ParseDelegationScript(trailing).has_value());
+    BOOST_CHECK(!ParseDelegationScript(CScript() << std::vector<unsigned char>{'S','E','Q','D','E','L'} << OP_DROP
+                                                 << std::vector<unsigned char>(33, 0x01) << OP_DROP
+                                                 << ToByteVector(controller) << OP_CHECKSIG).has_value());
+}
+
+// The registry: delegation re-keys weight onto the signer, one hop, and a
+// rotation performed inside one block leaves the NEW signer in force.
+BOOST_AUTO_TEST_CASE(pos_delegation_registry_weights)
+{
+    StakeRegistry& reg = StakeRegistry::GetInstance();
+    reg.Clear();
+
+    CPubKey alice = MakeKey();   // a staker who will delegate
+    CPubKey pool1 = MakeKey();
+    CPubKey pool2 = MakeKey();
+
+    reg.AddUtxoStake(alice, 1000);
+    BOOST_CHECK_EQUAL(reg.GetWeight(alice), 1000U);
+    BOOST_CHECK_EQUAL(reg.GetWeight(pool1), 0U);
+    BOOST_CHECK(reg.SignerFor(alice) == alice);
+
+    // Delegating moves the WEIGHT to the pool. The coins have not moved: the
+    // raw, controller-keyed weight is untouched.
+    reg.AddUtxoDelegation(alice, pool1);
+    BOOST_CHECK_EQUAL(reg.GetWeight(pool1), 1000U);
+    BOOST_CHECK_EQUAL(reg.GetWeight(alice), 0U);
+    BOOST_CHECK_EQUAL(reg.ControllerWeights().at(alice), 1000U);
+    BOOST_CHECK(reg.SignerFor(alice) == pool1);
+    BOOST_CHECK_EQUAL(reg.Weights().at(pool1), 1000U);
+
+    // A pool's own stake adds to what it has been lent.
+    reg.AddUtxoStake(pool1, 500);
+    BOOST_CHECK_EQUAL(reg.GetWeight(pool1), 1500U);
+
+    // Rotation within one block: PosApplyBlockStake adds created outputs before
+    // subtracting spent ones, so the removal of the old record must NOT erase
+    // the new one. This is the ordering hazard SubUtxoDelegation guards against.
+    reg.AddUtxoDelegation(alice, pool2);   // new record created
+    reg.SubUtxoDelegation(alice, pool1);   // old record spent
+    BOOST_CHECK(reg.SignerFor(alice) == pool2);
+    BOOST_CHECK_EQUAL(reg.GetWeight(pool2), 1000U);
+    BOOST_CHECK_EQUAL(reg.GetWeight(pool1), 500U); // only its own stake now
+
+    // Reclaiming: spending the record with nothing to replace it.
+    reg.SubUtxoDelegation(alice, pool2);
+    BOOST_CHECK(reg.SignerFor(alice) == alice);
+    BOOST_CHECK_EQUAL(reg.GetWeight(alice), 1000U);
+    BOOST_CHECK_EQUAL(reg.GetWeight(pool2), 0U);
+
+    // One hop, never chained: alice->pool1, pool1->pool2 sends alice's weight to
+    // pool1 (not pool2). Chasing chains would admit cycles.
+    reg.AddUtxoDelegation(alice, pool1);
+    reg.AddUtxoDelegation(pool1, pool2);
+    BOOST_CHECK_EQUAL(reg.GetWeight(pool1), 1000U); // alice's, lent one hop
+    BOOST_CHECK_EQUAL(reg.GetWeight(pool2), 500U);  // pool1's own, lent onward
+    BOOST_CHECK_EQUAL(reg.GetWeight(alice), 0U);
+
+    // A cycle must terminate rather than hang. Give pool2 stake of its own, then
+    // close the loop: alice->pool1->pool2->alice. Each hop resolves exactly once.
+    reg.AddUtxoStake(pool2, 700);
+    reg.AddUtxoDelegation(pool2, alice);
+    BOOST_CHECK_EQUAL(reg.GetWeight(alice), 700U);  // pool2's own weight, one hop
+    BOOST_CHECK_EQUAL(reg.GetWeight(pool1), 1000U); // alice's
+    BOOST_CHECK_EQUAL(reg.GetWeight(pool2), 500U);  // pool1's
+
+    reg.Clear();
+}
+
 BOOST_AUTO_TEST_SUITE_END()

@@ -611,6 +611,45 @@ CScript BuildStakeScript(const CPubKey& pubkey, uint32_t csv_blocks,
     return s;
 }
 
+//! Marker distinguishing a delegation record from any other bare script. The
+//! staking script begins with a small CSV number push followed by
+//! OP_CHECKSEQUENCEVERIFY, so the two templates can never be confused.
+static const std::vector<unsigned char> DELEGATION_MARKER = {'S', 'E', 'Q', 'D', 'E', 'L'};
+
+CScript BuildDelegationScript(const CPubKey& controller, const CPubKey& signer)
+{
+    CScript s;
+    s << DELEGATION_MARKER << OP_DROP;
+    s << ToByteVector(signer) << OP_DROP;
+    s << ToByteVector(controller) << OP_CHECKSIG;
+    return s;
+}
+
+std::optional<std::pair<CPubKey, CPubKey>> ParseDelegationScript(const CScript& script)
+{
+    CScript::const_iterator pc = script.begin();
+    opcodetype opcode;
+    std::vector<unsigned char> data;
+
+    if (!script.GetOp(pc, opcode, data) || data != DELEGATION_MARKER) return std::nullopt;
+    if (!script.GetOp(pc, opcode, data) || opcode != OP_DROP) return std::nullopt;
+    if (!script.GetOp(pc, opcode, data) || data.empty()) return std::nullopt;
+    CPubKey signer(data);
+    if (!signer.IsFullyValid()) return std::nullopt;
+    if (!script.GetOp(pc, opcode, data) || opcode != OP_DROP) return std::nullopt;
+    if (!script.GetOp(pc, opcode, data) || data.empty()) return std::nullopt;
+    CPubKey controller(data);
+    if (!controller.IsFullyValid()) return std::nullopt;
+    if (!script.GetOp(pc, opcode, data) || opcode != OP_CHECKSIG) return std::nullopt;
+    if (pc != script.end()) return std::nullopt;
+    return std::make_pair(controller, signer);
+}
+
+std::optional<std::pair<CPubKey, CPubKey>> DelegationFromTxOut(const CTxOut& out)
+{
+    return ParseDelegationScript(out.scriptPubKey);
+}
+
 //! Decode a script number's little-endian sign-magnitude encoding to int64.
 //! CScriptNum::getint() saturates at INT_MAX, which would silently corrupt a
 //! locktime past 2038, so decode the full width here. The caller must already
@@ -789,6 +828,10 @@ void PosApplyBlockStake(const CBlock& block, const CBlockUndo& undo)
                 registry.AddUtxoStake(stake->first, stake->second, bls_pubkey);
                 LogPrintf("PoS: staking output adds %llu to %s\n", (unsigned long long)stake->second, HexStr(stake->first));
             }
+            if (auto deleg = DelegationFromTxOut(out)) {
+                registry.AddUtxoDelegation(deleg->first, deleg->second);
+                LogPrintf("PoS: %s delegates its stake weight to %s\n", HexStr(deleg->first), HexStr(deleg->second));
+            }
         }
     }
     // Spent staking outputs (recorded in the block's undo data) remove weight.
@@ -797,6 +840,12 @@ void PosApplyBlockStake(const CBlock& block, const CBlockUndo& undo)
             if (auto stake = StakeFromTxOut(coin.out)) {
                 registry.SubUtxoStake(stake->first, stake->second);
                 LogPrintf("PoS: staking output spend removes %llu from %s\n", (unsigned long long)stake->second, HexStr(stake->first));
+            }
+            // Conditional erase, so a rotation (old record spent + new record
+            // created in one transaction) keeps the NEW signer: the created
+            // outputs were applied above.
+            if (auto deleg = DelegationFromTxOut(coin.out)) {
+                registry.SubUtxoDelegation(deleg->first, deleg->second);
             }
         }
     }
@@ -820,12 +869,21 @@ void PosRevertBlockStake(const CBlock& block, const CBlockUndo& undo)
                 if (auto reg = ParseStakeBlsRegistration(coin.out.scriptPubKey)) bls_pubkey = reg->first;
                 registry.AddUtxoStake(stake->first, stake->second, bls_pubkey);
             }
+            // Restore the record this block spent, before the created records
+            // are removed below. A rotation then lands back on the old signer:
+            // the erase of the created record is conditional and will not fire.
+            if (auto deleg = DelegationFromTxOut(coin.out)) {
+                registry.AddUtxoDelegation(deleg->first, deleg->second);
+            }
         }
     }
     for (const CTransactionRef& tx : block.vtx) {
         for (const CTxOut& out : tx->vout) {
             if (auto stake = StakeFromTxOut(out)) {
                 registry.SubUtxoStake(stake->first, stake->second);
+            }
+            if (auto deleg = DelegationFromTxOut(out)) {
+                registry.SubUtxoDelegation(deleg->first, deleg->second);
             }
         }
     }
@@ -835,6 +893,7 @@ bool RebuildUtxoStake(CCoinsView& view)
 {
     std::map<CPubKey, uint64_t> utxo_stake;
     std::map<CPubKey, std::vector<unsigned char>> utxo_bls;
+    std::map<CPubKey, CPubKey> utxo_deleg;
     std::unique_ptr<CCoinsViewCursor> pcursor(view.Cursor());
     if (!pcursor) return false;
     while (pcursor->Valid()) {
@@ -860,9 +919,15 @@ bool RebuildUtxoStake(CCoinsView& view)
                 utxo_bls[stake->first] = reg->first;
             }
         }
+        // Unspent delegation records re-point weight onto signers. A consensus
+        // rule (CheckPosDelegationRules) keeps at most one unspent record per
+        // controller, so this scan is unambiguous however the UTXOs are ordered.
+        if (auto deleg = DelegationFromTxOut(coin.out)) {
+            utxo_deleg[deleg->first] = deleg->second;
+        }
         pcursor->Next();
     }
-    StakeRegistry::GetInstance().SetUtxoStake(std::move(utxo_stake), std::move(utxo_bls));
+    StakeRegistry::GetInstance().SetUtxoStake(std::move(utxo_stake), std::move(utxo_bls), std::move(utxo_deleg));
     return true;
 }
 

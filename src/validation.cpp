@@ -2917,6 +2917,38 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
     int64_t nTime3 = GetTimeMicros(); nTimeConnect += nTime3 - nTime2;
     LogPrint(BCLog::BENCH, "      - Connect %u transactions: %.2fms (%.3fms/tx, %.3fms/txin) [%.2fs (%.2fms/blk)]\n", (unsigned)block.vtx.size(), MILLI * (nTime3 - nTime2), MILLI * (nTime3 - nTime2) / block.vtx.size(), nInputs <= 1 ? 0 : MILLI * (nTime3 - nTime2) / (nInputs-1), nTimeConnect * MICRO, nTimeConnect * MILLI / nBlocksTotal);
 
+    // SEQUENTIA delegation: at most ONE unspent delegation record per controller.
+    // The registry resolves a controller's signer by a plain UTXO-set lookup, so
+    // two live records for one controller would make the block-signing rights --
+    // and thus the leader election -- ambiguous and node-dependent. A rotation is
+    // legal: it spends the old record and creates the new one. The record's
+    // script already restricts spending to the controller, so only the stake's
+    // owner can re-point or reclaim it.
+    if (g_con_pos && !fJustCheck) {
+        std::set<CPubKey> spent_records;
+        for (const CTxUndo& txundo : blockundo.vtxundo) {
+            for (const Coin& coin : txundo.vprevout) {
+                if (auto deleg = DelegationFromTxOut(coin.out)) spent_records.insert(deleg->first);
+            }
+        }
+        const StakeRegistry& registry = StakeRegistry::GetInstance();
+        std::set<CPubKey> created_records;
+        for (const CTransactionRef& tx : block.vtx) {
+            for (const CTxOut& out : tx->vout) {
+                auto deleg = DelegationFromTxOut(out);
+                if (!deleg) continue;
+                if (!created_records.insert(deleg->first).second) {
+                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-delegation-conflict",
+                                         "two delegation records for one controller in a block");
+                }
+                if (registry.HasDelegation(deleg->first) && !spent_records.count(deleg->first)) {
+                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-delegation-exists",
+                                         "delegation record for a controller that already has one unspent");
+                }
+            }
+        }
+    }
+
     CAmountMap block_reward = fee_map;
     block_reward[consensusParams.subsidy_asset] += GetBlockSubsidy(pindex->nHeight, consensusParams);
     if (!MoneyRange(block_reward)) {

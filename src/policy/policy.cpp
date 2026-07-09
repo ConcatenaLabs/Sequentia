@@ -85,6 +85,13 @@ bool IsStandard(const CScript& scriptPubKey, TxoutType& whichType)
         if (g_con_pos && ParseStakeScript(scriptPubKey)) {
             return true;
         }
+        // Likewise the bare delegation-record script, which re-points a staker's
+        // block-signing rights to a signer (a pool operator, or the staker's own
+        // hot key) without moving the stake. It must relay under default policy
+        // or delegation would be impossible on mainnet.
+        if (g_con_pos && ParseDelegationScript(scriptPubKey)) {
+            return true;
+        }
         return false;
     } else if (whichType == TxoutType::MULTISIG) {
         unsigned char m = vSolutions.front()[0];
