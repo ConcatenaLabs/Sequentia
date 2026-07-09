@@ -77,7 +77,8 @@
 <tr><td>minimum stake</td><td>40,000 SEQ</td><td>0.01% of supply. Below this a key is ignored by election, by sortition, and by the eligible-total denominator</td></tr>
 <tr><td>slot interval</td><td>30 seconds</td><td>nominal block time, and the rank time gate</td></tr>
 <tr><td>unbonding delay</td><td>43,200 blocks (about 15 days)</td><td>minimum relative timelock for an output to count as stake</td></tr>
-<tr><td>committee size</td><td>100</td><td>signers certifying each block</td></tr>
+<tr><td>committee size</td><td>250</td><td>signers certifying each block. Fixed when a network launches</td></tr>
+<tr><td>quorum</td><td>126 of 250</td><td>a strict majority, plus one at odd committee sizes. The classical one-third Byzantine bound</td></tr>
 <tr><td>payout notice</td><td>2,880 blocks (about 1 day)</td><td>delay before an announced payout policy binds, section 8</td></tr>
 </tbody></table>
 
@@ -105,7 +106,7 @@ value  = ticket / weight        # more weight gives a lower value, and a better 
 <li><strong>Public fixed-size committee with a bitfield certificate.</strong> The committee is the schedule prefix restricted to stakers who have registered a BLS key. The certificate names its signers by a bitfield over that ordered prefix, and one aggregate signature verifies against the registered keys.</li>
 </ul>
 
-<p>Quorum is a strict majority, plus one at odd committee sizes. Any two quorums therefore overlap in at least two members, so two disjoint quorums cannot certify rival blocks at the same height unless at least two signers equivocate. Equivocation is attributable, which is the property the design is buying.</p>
+<p>Quorum is a strict majority, plus one at odd committee sizes: 126 of a 250-member committee. Any two quorums therefore overlap in at least two members, so two disjoint quorums cannot certify rival blocks at the same height unless at least two signers equivocate. Equivocation is attributable, which is the property the design is buying. Tolerating up to a third of the committee being Byzantine, the classical bound, is what fixes the size at 250: the committee must be large enough that a hostile minority cannot reach quorum, and small enough that a hundred-odd signatures still aggregate and propagate inside a thirty-second slot.</p>
 
 <p>A staker's BLS committee key is carried <em>inside</em> its staking output, pushed and immediately dropped so it cannot affect the spend path. The registry therefore learns it as a pure function of the UTXO set, exactly as it learns the weight, and the key's proof of possession is verified once, when the block creating the output connects.</p>
 
