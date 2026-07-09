@@ -75,14 +75,14 @@
 <tbody>
 <tr><td>total supply</td><td>400,000,000 SEQ</td><td>fully pre-mined; no issuance, ever</td></tr>
 <tr><td>minimum stake</td><td>40,000 SEQ</td><td>0.01% of supply. Below this a key is ignored by election, by sortition, and by the eligible-total denominator</td></tr>
-<tr><td>slot interval</td><td>30 seconds</td><td>nominal block time, and the rank time gate</td></tr>
+<tr><td>slot interval</td><td>30 seconds</td><td>nominal block time, and the unit of the sortition time gate</td></tr>
 <tr><td>unbonding delay</td><td>43,200 blocks (about 15 days)</td><td>minimum relative timelock for an output to count as stake</td></tr>
 <tr><td>committee size</td><td>250</td><td>signers certifying each block. Fixed when a network launches</td></tr>
 <tr><td>quorum</td><td>126 of 250</td><td>a strict majority, plus one at odd committee sizes. The classical one-third Byzantine bound</td></tr>
 <tr><td>payout notice</td><td>2,880 blocks (about 1 day)</td><td>delay before an announced payout policy binds, section 8</td></tr>
 </tbody></table>
 
-<h2>3. Electing a producer</h2>
+<h2>3. Electing a producer, and certifying its block</h2>
 
 <p>Every block height has a seed, and the seed comes from Bitcoin:</p>
 
@@ -90,25 +90,32 @@
 
 <p>Because that anchor hash is the output of Bitcoin's proof of work, no Sequentia participant chooses it, and no producer can grind for a favourable one. Every node derives the same seed independently, with no communication.</p>
 
-<p>From the seed, each eligible staker receives a <em>weighted ticket</em>:</p>
+<p>Two distinct things are decided from that seed: who may <em>produce</em> the next block, and who must <em>certify</em> it.</p>
+
+<h3>The producer, by private sortition</h3>
+
+<p>Each staker privately evaluates a verifiable random function over the seed with its own key, obtaining a value that nobody else can compute or predict. From that value, and from the staker's share of total stake, it derives a <em>slot</em>:</p>
+
+<pre>slot ~ uniform in [ 0, total_weight / own_weight )</pre>
+
+<p>A staker may publish a block only once <code>slot x 30</code> seconds have elapsed since the parent block. More stake gives a statistically earlier slot, so a large staker leads more often, in proportion to its holdings. When it publishes, the producer includes its VRF proof in the block, and every node verifies that the proof really does correspond to that key, that seed, and therefore that slot.</p>
+
+<p>The important word is <em>private</em>. Until a block appears, nobody, including the staker's peers, knows who is entitled to produce it. There is no published rota to attack, bribe, or censor in advance. If the earliest-slot staker is offline or unwilling, the chain does not stall and does not vote: the next staker's slot simply arrives thirty seconds later, and it produces instead.</p>
+
+<h3>The committee, by public schedule</h3>
+
+<p>Certification is the opposite: it must be public, because a validator has to know which signatures to expect. Every node computes the same schedule from the seed by giving each staker a <em>weighted ticket</em>:</p>
 
 <pre>ticket = SHA256(seed || pubkey), read as a 256-bit integer
-value  = ticket / weight        # more weight gives a lower value, and a better rank</pre>
+value  = ticket / weight        # more weight gives a lower value, and an earlier place</pre>
 
-<p>Sorting stakers by that value yields the slot's schedule. Rank zero is the leader. A staker at rank <em>r</em> may only produce once <code>r x 30</code> seconds have passed since the parent block. This is how the chain routes around a dead or absent leader with no voting and no timeout negotiation: the next-ranked producer simply becomes eligible, and the one after that, and so on.</p>
+<p>Sorting by that value orders the stakers. The committee is the first 250 of them that have registered a BLS signing key, taken in schedule order. Registration is not a separate ceremony: a staker's BLS public key and its proof of possession are carried inside its own staking output, so the committee, like the weight, is a pure function of the UTXO set. The proof of possession is verified once, when the block creating that output connects.</p>
 
-<p>Several signing modes exist. They form a progression, and the last is the operating design.</p>
+<p>Each committee member signs the block with its BLS key. Because BLS signatures over the same message aggregate, the certificate carried by the block is a single signature plus a bitfield naming which members of the ordered committee contributed to it. A block certified by two hundred and fifty signers is no larger than one certified by two, and a validator checks the whole certificate with one aggregate verification against the registered keys.</p>
 
-<ul>
-<li><strong>Public deterministic schedule.</strong> The schedule above, certified by a script multisig committee, capped at sixteen members by the script encoding.</li>
-<li><strong>Private verifiable-random-function sortition.</strong> A producer proves, with a VRF evaluated over the seed, that it was selected. Only the holder of a key can compute that key's slot in advance, so an adversary cannot know whom to attack before a block appears. Under this mode any staker holding weight may produce a block when its slot arrives.</li>
-<li><strong>Aggregate committees.</strong> First MuSig2, then BLS12-381, so that a hundred signatures compress into one and the committee can exceed the script multisig limit.</li>
-<li><strong>Public fixed-size committee with a bitfield certificate.</strong> The committee is the schedule prefix restricted to stakers who have registered a BLS key. The certificate names its signers by a bitfield over that ordered prefix, and one aggregate signature verifies against the registered keys.</li>
-</ul>
+<p>The block itself is signed by the producer with an ordinary ECDSA key, exactly as the challenge script requires. Only the certificate uses BLS.</p>
 
-<p>Quorum is a strict majority, plus one at odd committee sizes: 126 of a 250-member committee. Any two quorums therefore overlap in at least two members, so two disjoint quorums cannot certify rival blocks at the same height unless at least two signers equivocate. Equivocation is attributable, which is the property the design is buying. Tolerating up to a third of the committee being Byzantine, the classical bound, is what fixes the size at 250: the committee must be large enough that a hostile minority cannot reach quorum, and small enough that a hundred-odd signatures still aggregate and propagate inside a thirty-second slot.</p>
-
-<p>A staker's BLS committee key is carried <em>inside</em> its staking output, pushed and immediately dropped so it cannot affect the spend path. The registry therefore learns it as a pure function of the UTXO set, exactly as it learns the weight, and the key's proof of possession is verified once, when the block creating the output connects.</p>
+<p>Quorum is a strict majority, plus one at odd committee sizes: 126 of 250. Any two quorums therefore overlap in at least two members, so two disjoint quorums cannot certify rival blocks at the same height unless at least two signers equivocate, and an equivocating signer has published two contradictory signatures over its own registered key. Equivocation is attributable, which is the property the design is buying. Tolerating a hostile third of the committee, the classical Byzantine bound, is what fixes the size at 250: large enough that a hostile minority cannot reach quorum, small enough that the shares still propagate and verify inside a thirty-second slot.</p>
 
 <h3>The anti-freeze valve</h3>
 
