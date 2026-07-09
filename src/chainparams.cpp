@@ -374,11 +374,24 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_DYNA_FED].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
         consensus.vDeployments[Consensus::DEPLOYMENT_DYNA_FED].min_activation_height = 0; // No activation delay
 
-        // Deployment of Taproot (BIPs 340-342)
+        // Deployment of Taproot (BIPs 340-342). Buried-active from genesis, as
+        // for every other Sequentia network and for the Bitcoin soft forks
+        // above: a fresh chain has no pre-Taproot history to signal through.
+        // CRITICAL: SCRIPT_VERIFY_TAPROOT is gated on this deployment (see
+        // GetBlockScriptFlags in validation.cpp), so while Taproot is inactive
+        // a witness-v1 output is an unencumbered anyone-can-spend. It also
+        // gates tapscript, and with it the introspection opcodes every covenant
+        // we ship depends on (SeqOB's passive order book).
+        //
+        // The values inherited from Bitcoin mainnet were doubly wrong here:
+        // under elements_mode, nStartTime/nTimeout are read as BLOCK HEIGHTS,
+        // not times (GetBIP9Time, versionbits.cpp), so 1619222400 denoted not
+        // "April 2021" but height 1.6 billion -- ~1,540 years out at 30s slots.
+        // Taproot could never have activated on this chain.
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].bit = 2;
-        consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nStartTime = 1619222400; // April 24th, 2021
-        consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nTimeout = 1628640000; // August 11th, 2021
-        consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 709632; // Approximately November 12th, 2021
+        consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nStartTime = Consensus::BIP9Deployment::ALWAYS_ACTIVE;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 0; // No activation delay
 
         // Simplicity
         consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].bit = 21;
