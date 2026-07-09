@@ -253,6 +253,7 @@ public:
         g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
         g_pos_slot_interval = DEFAULT_POS_SLOT_INTERVAL;
         g_pos_unbonding_period = DEFAULT_POS_UNBONDING_PERIOD;
+        g_pos_payout_notice = DEFAULT_POS_PAYOUT_NOTICE;
         consensus.total_valid_epochs = 0;
         consensus.elements_mode = g_con_elementsmode;
 
@@ -462,6 +463,9 @@ public:
         }
         g_pos_slot_interval = 30;                        // 30s nominal block time (doc 11 §4)
         g_pos_unbonding_period = 43200;                  // x30s = ~15 days (§3.11)
+        // Consensus-critical: pin the payout notice period so no node can change
+        // when a producer's payout policy binds by passing -pospayoutnotice.
+        g_pos_payout_notice = DEFAULT_POS_PAYOUT_NOTICE;   // 2880 x 30s = ~1 day
         consensus.total_valid_epochs = 0;
         consensus.dynamic_epoch_length = 10;
         consensus.elements_mode = g_con_elementsmode;
@@ -702,6 +706,9 @@ public:
         }
         g_pos_slot_interval = 30;              // 30s nominal block time (doc 11 §4)
         g_pos_unbonding_period = 43200;        // x30s = ~15 days > 2-week checkpoint window (§3.11)
+        // Consensus-critical: pin the payout notice period so no node can change
+        // when a producer's payout policy binds by passing -pospayoutnotice.
+        g_pos_payout_notice = DEFAULT_POS_PAYOUT_NOTICE;   // 2880 x 30s = ~1 day
         consensus.elements_mode = g_con_elementsmode;
         consensus.total_valid_epochs = 0;
         consensus.dynamic_epoch_length = 10;
@@ -966,6 +973,7 @@ public:
         g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
         g_pos_slot_interval = DEFAULT_POS_SLOT_INTERVAL;
         g_pos_unbonding_period = DEFAULT_POS_UNBONDING_PERIOD;
+        g_pos_payout_notice = DEFAULT_POS_PAYOUT_NOTICE;
         consensus.total_valid_epochs = 0;
         consensus.elements_mode = g_con_elementsmode;
 
@@ -1085,6 +1093,7 @@ public:
         g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
         g_pos_slot_interval = DEFAULT_POS_SLOT_INTERVAL;
         g_pos_unbonding_period = DEFAULT_POS_UNBONDING_PERIOD;
+        g_pos_payout_notice = DEFAULT_POS_PAYOUT_NOTICE;
         consensus.total_valid_epochs = 0;
 
         pchMessageStart[0] = 0xfa;
@@ -1755,6 +1764,7 @@ public:
         g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
         g_pos_slot_interval = DEFAULT_POS_SLOT_INTERVAL;
         g_pos_unbonding_period = DEFAULT_POS_UNBONDING_PERIOD;
+        g_pos_payout_notice = DEFAULT_POS_PAYOUT_NOTICE;
         g_con_elementsmode = true;
         consensus.elements_mode = g_con_elementsmode;
         consensus.total_valid_epochs = 2;
