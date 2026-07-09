@@ -77,7 +77,7 @@
 <tr><td>minimum stake</td><td>40,000 SEQ</td><td>0.01% of supply. Below this a key is ignored by election, by sortition, and by the eligible-total denominator</td></tr>
 <tr><td>slot interval</td><td>30 seconds</td><td>nominal block time, and the unit of the sortition time gate</td></tr>
 <tr><td>unbonding delay</td><td>43,200 blocks (about 15 days)</td><td>minimum relative timelock for an output to count as stake</td></tr>
-<tr><td>committee cap</td><td>250</td><td>fixed for a network at genesis. The committee is the smaller of this cap and the number of eligible stakers. Sized to resist capture by a hostile third of all stake</td></tr>
+<tr><td>committee cap</td><td>250</td><td>a consensus rule, not a setting: a node cannot override it. The committee is the smaller of this cap and the number of eligible stakers. Sized to resist capture by a hostile third of all stake</td></tr>
 <tr><td>quorum</td><td>126 of 250</td><td>a strict majority of the actual committee, plus one at odd sizes. A majority rather than two thirds, so a sleepy third cannot halt the chain</td></tr>
 <tr><td>payout notice</td><td>2,880 blocks (about 1 day)</td><td>delay before an announced payout policy binds, section 8</td></tr>
 </tbody></table>
@@ -159,7 +159,7 @@ value  = ticket / weight        # more weight gives a lower value, and an earlie
 
 <p>When a node sees two blocks at one height it orders them deterministically: first by certification, the block backed by more countersignature power winning; then, on a tie, by the leader's VRF value, the lower winning; and finally by the lower block hash. The block hash is the last key on purpose. It is globally deterministic, so two honest nodes that have seen the same two blocks always choose the same one, and a rare symmetric split heals itself without any node having to be told which chain to prefer.</p>
 
-<p>What the ordering deliberately does <em>not</em> contain is any rule that reorders certified blocks by height, by arrival rate, or by the freshness of their Bitcoin anchor. Such a rule sounds attractive, since it would resolve a stalled split faster. It would also let an attacker with no Bitcoin hashpower overtake honest history by producing certified blocks more quickly, which trades a rare and recoverable loss of liveness for a permanent loss of safety. That trade is refused.</p>
+<p>Nothing in the ordering reorders a block that is already certified. Certification is never revisited on the basis of height, arrival rate, or anchor freshness, because a chain that reordered certified blocks by any of those could be overtaken by an attacker holding no Bitcoin hashpower at all.</p>
 
 <h2>5. Finality, checkpoints, and the order of precedence</h2>
 
