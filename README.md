@@ -101,9 +101,9 @@ elements-cli getanchorstatus     # "ok" once the testnet4 anchor RPC is reachabl
 elements-cli getposschedule      # the live committee and next-slot schedule
 ```
 
-Build from source on this branch (below): the prebuilt bundle currently on
-`/download/` predates the 2026-07-05 re-genesis and bakes the old genesis, so
-it cannot join the current chain.
+Prebuilt binaries for the current chain (rebuilt 2026-07-09 from this branch,
+genesis verified) are on https://sequentiatestnet.com/download/, or build from
+source as described below.
 
 To stake and produce blocks, see the operator manual
 [`doc/sequentia/05-operating-sequentia.md`](doc/sequentia/05-operating-sequentia.md)
