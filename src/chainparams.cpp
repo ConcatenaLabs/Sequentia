@@ -458,7 +458,7 @@ public:
         // -poscommitteesize on the real network is a node whose operator believes
         // they are changing a consensus rule; silently overriding them would leave
         // that belief intact until the fork.
-        for (const char* flag : {"-posbls", "-pospubliccommittee", "-poscommitteesize", "-posvrf", "-posaggcommittee", "-posunbonding", "-posminstake", "-pospayoutnotice", "-posslotinterval"}) {
+        for (const char* flag : {"-posbls", "-pospubliccommittee", "-poscommitteesize", "-posvrf", "-posaggcommittee", "-posunbonding", "-posminstake", "-pospayoutnotice", "-posslotinterval", "-poscheckpointdepth"}) {
             if (args.IsArgSet(flag)) {
                 throw std::runtime_error(strprintf("%s is a consensus rule of the Sequentia network and cannot be overridden; remove it from the configuration", flag));
             }

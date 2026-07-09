@@ -89,7 +89,8 @@ BOOST_AUTO_TEST_CASE(sequentia_pos_consensus_rules_are_pinned)
 
     // Passing a consensus rule as a flag must be refused, not silently ignored.
     for (const char* flag : {"-poscommitteesize", "-pospubliccommittee", "-posbls",
-                             "-posunbonding", "-posminstake", "-pospayoutnotice"}) {
+                             "-posunbonding", "-posminstake", "-pospayoutnotice",
+                             "-poscheckpointdepth"}) {
         ArgsManager bad;
         bad.ForceSetArg(flag, "1");
         BOOST_CHECK_THROW(CreateChainParams(bad, CBaseChainParams::SEQUENTIA), std::runtime_error);
