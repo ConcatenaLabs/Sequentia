@@ -120,12 +120,14 @@ RPCHelpMan registerstake()
                     {"csv_seconds", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Time-based unbonding delay in seconds (mutually exclusive with csv_blocks)."},
                     {"blspubkey", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "SEQUENTIA: committee BLS public key to register with this stake (from getblsregistration), so the staker can join the public fixed-size committee. Requires pop."},
                     {"pop", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "SEQUENTIA: the BLS proof-of-possession for blspubkey (from getblsregistration)."},
+                    {"liquid_locktime", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "SEQUENTIA vesting: an absolute timelock (BIP65) before which the stake cannot be spent, sold, or transferred, while still accruing stake weight throughout (a \"staking-only period\"). A unix time (>=500000000) or a block height (<500000000)."},
                 },
                 RPCResult{RPCResult::Type::OBJ, "", "", {
                     {RPCResult::Type::STR_HEX, "txid", "the registration transaction id"},
                     {RPCResult::Type::STR_HEX, "script", "the staking scriptPubKey that was funded"},
                     {RPCResult::Type::NUM, "csv", "the BIP68 CSV value encoded in the script"},
                     {RPCResult::Type::NUM, "unbonding_seconds", "the unbonding lock in seconds before the stake can be withdrawn"},
+                    {RPCResult::Type::NUM, "liquid_locktime", /*optional=*/true, "the absolute vesting locktime encoded in the script, if any"},
                 }},
                 RPCExamples{HelpExampleCli("registerstake", "\"02abc...\" 50000")},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
@@ -170,7 +172,13 @@ RPCHelpMan registerstake()
         if (bls_pubkey.size() != 48 || bls_pop.size() != 96)
             throw JSONRPCError(RPC_INVALID_PARAMETER, "blspubkey must be 48 bytes and pop 96 bytes (see getblsregistration)");
     }
-    CScript stake_script = BuildStakeScript(pubkey, csv, bls_pubkey, bls_pop);
+    int64_t liquid_locktime = 0;
+    if (!request.params[6].isNull()) {
+        liquid_locktime = request.params[6].get_int64();
+        if (liquid_locktime <= 0 || liquid_locktime > 0xffffffffLL)
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "liquid_locktime must be between 1 and 4294967295 (a unix time, or a block height below 500000000)");
+    }
+    CScript stake_script = BuildStakeScript(pubkey, csv, bls_pubkey, bls_pop, liquid_locktime);
     CAmount amount = AmountFromValue(request.params[1], true);
     // Enforce the chain's minimum-stake floor: a sub-floor output is silently
     // dropped from the schedule/committee by PosIsEligibleStake and would never
@@ -192,6 +200,7 @@ RPCHelpMan registerstake()
     result.pushKV("script", HexStr(stake_script));
     result.pushKV("csv", (int64_t)csv);
     if (lock) result.pushKV("unbonding_seconds", (int64_t)*lock);
+    if (liquid_locktime > 0) result.pushKV("liquid_locktime", liquid_locktime);
     return result;
 },
     };

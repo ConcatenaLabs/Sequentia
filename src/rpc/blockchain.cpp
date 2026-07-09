@@ -3465,6 +3465,7 @@ static RPCHelpMan getstakescript()
                     {"csv_seconds", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Time-based unbonding delay, in seconds (BIP68 relative-time CSV, rounded up to 512s units). Use this when the minimum lock exceeds what a height CSV can express. Mutually exclusive with csv_blocks."},
                     {"blspubkey", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "SEQUENTIA: committee BLS public key to register with this stake (from getblsregistration), so the staker can join the public fixed-size committee. Requires pop."},
                     {"pop", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "SEQUENTIA: the BLS proof-of-possession for blspubkey (from getblsregistration)."},
+                    {"liquid_locktime", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "SEQUENTIA vesting: an absolute timelock (BIP65) before which the stake cannot be spent, and so cannot be sold or transferred. A unix time (>=500000000) or a block height (<500000000). The output still accrues stake weight for the whole period, which is what makes a \"staking-only period\" expressible. Prefer a unix time: block heights drift against a calendar over a multi-year vest."},
                 },
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
@@ -3474,6 +3475,7 @@ static RPCHelpMan getstakescript()
                         {RPCResult::Type::STR, "csv_type", "\"height\" or \"time\""},
                         {RPCResult::Type::NUM, "lock_seconds", "the unbonding lock the script enforces, in seconds"},
                         {RPCResult::Type::NUM, "min_unbonding_seconds", "the chain's minimum unbonding lock for stake to count, in seconds"},
+                        {RPCResult::Type::NUM, "liquid_locktime", /*optional=*/true, "the absolute vesting locktime encoded in the script, if any"},
                     }},
                 RPCExamples{HelpExampleCli("getstakescript", "\"02...\" 0 1209600")},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
@@ -3524,10 +3526,18 @@ static RPCHelpMan getstakescript()
             throw JSONRPCError(RPC_INVALID_PARAMETER, "blspubkey must be 48 bytes and pop 96 bytes (see getblsregistration)");
         }
     }
-    CScript script = BuildStakeScript(pubkey, csv, bls_pubkey, bls_pop);
+    int64_t liquid_locktime = 0;
+    if (!request.params[5].isNull()) {
+        liquid_locktime = request.params[5].get_int64();
+        if (liquid_locktime <= 0 || liquid_locktime > 0xffffffffLL) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "liquid_locktime must be between 1 and 4294967295 (a unix time, or a block height below 500000000)");
+        }
+    }
+    CScript script = BuildStakeScript(pubkey, csv, bls_pubkey, bls_pop, liquid_locktime);
     UniValue result(UniValue::VOBJ);
     result.pushKV("script", HexStr(script));
     result.pushKV("csv", (int64_t)csv);
+    if (liquid_locktime > 0) result.pushKV("liquid_locktime", liquid_locktime);
     result.pushKV("csv_type", (csv & CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG) ? "time" : "height");
     result.pushKV("lock_seconds", *lock);
     result.pushKV("min_unbonding_seconds", required);

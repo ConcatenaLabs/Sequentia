@@ -195,6 +195,7 @@ BASE_SCRIPTS = [
     'feature_pos_public_committee.py',
     'feature_pos_cert_gossip.py',
     'feature_pos_bls_registration.py',
+    'feature_pos_stake_vesting.py',
     'feature_pos_bls_gossip.py',
     'feature_pos_gossip_dos.py',
     'feature_pos_gossip_failover.py',

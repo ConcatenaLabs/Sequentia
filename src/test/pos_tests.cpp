@@ -823,4 +823,92 @@ BOOST_AUTO_TEST_CASE(pos_bitfield_certificate_codec)
     BOOST_CHECK(!ParsePosBlsBitfieldSolution(CScript() << leader_sig << agg).has_value()); // no bitfield
 }
 
+// SEQUENTIA vesting: the optional absolute (BIP65) lock in the staking script.
+//
+// The point of the whole construction is the pairing asserted below: a stake
+// output carrying a liquid_locktime is UNSPENDABLE until that time -- so it
+// cannot be sold or transferred -- yet StakeFromTxOut still credits its full
+// weight, because weight is granted for a staking UTXO merely existing. That is
+// a "staking-only period": the tokens stake and earn fees while illiquid.
+BOOST_AUTO_TEST_CASE(pos_stake_script_vesting_locktime)
+{
+    CPubKey staker = MakeKey();
+    const std::vector<unsigned char> bls_pk(48, 0x11);   // BLS_PK_SIZE
+    const std::vector<unsigned char> bls_pop(96, 0x22);  // BLS_SIG_SIZE
+
+    // Round-trip across smallint (OP_1..OP_16), multi-byte, the height/time
+    // boundary, and the uint32 ceiling -- with and without BLS registration.
+    for (int64_t lt : {int64_t{1}, int64_t{16}, int64_t{17}, int64_t{144},
+                       int64_t{499999999}, int64_t{500000000}, int64_t{1893456000},
+                       int64_t{0xffffffffLL}}) {
+        for (bool with_bls : {false, true}) {
+            CScript script = with_bls ? BuildStakeScript(staker, 10, bls_pk, bls_pop, lt)
+                                      : BuildStakeScript(staker, 10, {}, {}, lt);
+            auto parsed = ParseStakeScriptFull(script);
+            BOOST_REQUIRE_MESSAGE(parsed.has_value(), strprintf("locktime=%d bls=%d", lt, with_bls));
+            BOOST_CHECK(parsed->pubkey == staker);
+            BOOST_CHECK_EQUAL(parsed->csv, 10U);
+            BOOST_CHECK_EQUAL(parsed->liquid_locktime, lt);
+            BOOST_CHECK(with_bls ? (parsed->bls_pubkey == bls_pk) : parsed->bls_pubkey.empty());
+            // The BLS registration must still be recoverable alongside the lock.
+            BOOST_CHECK_EQUAL(ParseStakeBlsRegistration(script).has_value(), with_bls);
+        }
+    }
+
+    // Backward compatibility: a script with no lock parses, reporting 0.
+    auto no_lock = ParseStakeScriptFull(BuildStakeScript(staker, 10));
+    BOOST_REQUIRE(no_lock.has_value());
+    BOOST_CHECK_EQUAL(no_lock->liquid_locktime, 0);
+    auto no_lock_bls = ParseStakeScriptFull(BuildStakeScript(staker, 10, bls_pk, bls_pop));
+    BOOST_REQUIRE(no_lock_bls.has_value());
+    BOOST_CHECK_EQUAL(no_lock_bls->liquid_locktime, 0);
+
+    // THE LOAD-BEARING PROPERTY: a vesting-locked stake still carries weight.
+    uint32_t old_unbonding = g_pos_unbonding_period;
+    g_pos_unbonding_period = 10;
+    CScript vested = BuildStakeScript(staker, 10, {}, {}, /*liquid_locktime=*/1893456000);
+    CTxOut vested_out(CConfidentialAsset(::policyAsset), CConfidentialValue(50000), vested);
+    auto stake = StakeFromTxOut(vested_out);
+    BOOST_REQUIRE(stake.has_value());
+    BOOST_CHECK(stake->first == staker);
+    BOOST_CHECK_EQUAL(stake->second, 50000U);
+
+    // Rejections. The locktime must be positive, minimally encoded, and within
+    // the uint32 range of nLockTime (a larger value could never be satisfied,
+    // burning the stake rather than vesting it).
+    const CScript prefix = CScript() << (int64_t)10 << OP_CHECKSEQUENCEVERIFY << OP_DROP;
+    auto with_lock_bytes = [&](const std::vector<unsigned char>& lt_push) {
+        CScript s = prefix;
+        s << lt_push << OP_CHECKLOCKTIMEVERIFY << OP_DROP << ToByteVector(staker) << OP_CHECKSIG;
+        return s;
+    };
+    // Zero (OP_0 pushes an empty vector).
+    BOOST_CHECK(!ParseStakeScriptFull(CScript() << (int64_t)10 << OP_CHECKSEQUENCEVERIFY << OP_DROP
+                                                << (int64_t)0 << OP_CHECKLOCKTIMEVERIFY << OP_DROP
+                                                << ToByteVector(staker) << OP_CHECKSIG).has_value());
+    // Negative (-5 in sign-magnitude).
+    BOOST_CHECK(!ParseStakeScriptFull(with_lock_bytes({0x85})).has_value());
+    // Non-minimal encoding of 5.
+    BOOST_CHECK(!ParseStakeScriptFull(with_lock_bytes({0x05, 0x00})).has_value());
+    // 2^32, one past the nLockTime ceiling.
+    BOOST_CHECK(!ParseStakeScriptFull(with_lock_bytes({0x00, 0x00, 0x00, 0x00, 0x01})).has_value());
+    // Six-byte push: beyond what OP_CHECKLOCKTIMEVERIFY itself accepts.
+    BOOST_CHECK(!ParseStakeScriptFull(with_lock_bytes({0x01, 0x02, 0x03, 0x04, 0x05, 0x06})).has_value());
+    // Missing the OP_DROP after OP_CHECKLOCKTIMEVERIFY.
+    BOOST_CHECK(!ParseStakeScriptFull(CScript() << (int64_t)10 << OP_CHECKSEQUENCEVERIFY << OP_DROP
+                                                << (int64_t)144 << OP_CHECKLOCKTIMEVERIFY
+                                                << ToByteVector(staker) << OP_CHECKSIG).has_value());
+    // Trailing junk after a well-formed vesting script is still rejected.
+    CScript trailing = BuildStakeScript(staker, 10, {}, {}, 144);
+    trailing << OP_TRUE;
+    BOOST_CHECK(!ParseStakeScriptFull(trailing).has_value());
+    // The lock must sit after the BLS block, not before it.
+    BOOST_CHECK(!ParseStakeScriptFull(CScript() << (int64_t)10 << OP_CHECKSEQUENCEVERIFY << OP_DROP
+                                                << (int64_t)144 << OP_CHECKLOCKTIMEVERIFY << OP_DROP
+                                                << bls_pk << OP_DROP << bls_pop << OP_DROP
+                                                << ToByteVector(staker) << OP_CHECKSIG).has_value());
+
+    g_pos_unbonding_period = old_unbonding;
+}
+
 BOOST_AUTO_TEST_SUITE_END()

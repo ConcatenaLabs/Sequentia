@@ -581,7 +581,8 @@ inline bool PosIsEligibleStake(uint64_t weight)
 
 /** The canonical staking output script:
  *      <csv_blocks> OP_CHECKSEQUENCEVERIFY OP_DROP [<bls_pubkey(48)> OP_DROP
- *      <bls_pop(96)> OP_DROP] <pubkey> OP_CHECKSIG
+ *      <bls_pop(96)> OP_DROP] [<liquid_locktime> OP_CHECKLOCKTIMEVERIFY OP_DROP]
+ *      <pubkey> OP_CHECKSIG
  *  A bare (unhashed) script so validators can recognize stake at output
  *  creation. Spending requires the staker's signature and csv_blocks of
  *  relative-height maturity (BIP112) — unbonding is the spend itself. When
@@ -590,18 +591,36 @@ inline bool PosIsEligibleStake(uint64_t weight)
  *  unchanged), so the BLS key rides in the UTXO and the registry's UTXO layer
  *  learns it as a pure function of the UTXO set (reorg-safe like the weight).
  *  The 48-byte BLS-pubkey push is unambiguous: a staking pubkey is 33 or 65
- *  bytes, never 48. */
+ *  bytes, never 48.
+ *
+ *  SEQUENTIA vesting: when liquid_locktime is non-zero the output additionally
+ *  carries an ABSOLUTE timelock (BIP65), so it cannot be spent — and therefore
+ *  cannot be sold or transferred — until that height/time. It still accrues
+ *  stake weight the whole time, because weight is credited for a staking UTXO
+ *  merely EXISTING (StakeFromTxOut); the coin is never moved or signed over to
+ *  produce a block. That is what makes a "staking-only period" expressible: the
+ *  tokens stake and earn fees while being unsellable. Non-transferability falls
+ *  out of non-spendability, so no covenant is needed.
+ *
+ *  A relative (CSV) lock cannot serve this purpose: BIP68 locks are 16-bit, so
+ *  the time-based encoding tops out at 65535*512s = 388 days. Absolute locks are
+ *  32-bit and reach any calendar date. Prefer a time-based (unix-time)
+ *  liquid_locktime over a height: block heights drift against a calendar over a
+ *  multi-year vesting schedule. */
 CScript BuildStakeScript(const CPubKey& pubkey, uint32_t csv_blocks,
                          const std::vector<unsigned char>& bls_pubkey = {},
-                         const std::vector<unsigned char>& bls_pop = {});
+                         const std::vector<unsigned char>& bls_pop = {},
+                         int64_t liquid_locktime = 0);
 
 /** A parsed staking script. bls_pubkey/bls_pop are empty when the output carries
- *  no committee registration (the old form, or a leader-only staker). */
+ *  no committee registration (the old form, or a leader-only staker).
+ *  liquid_locktime is 0 when the output carries no absolute vesting lock. */
 struct ParsedStake {
     CPubKey pubkey;
     uint32_t csv{0};
     std::vector<unsigned char> bls_pubkey;
     std::vector<unsigned char> bls_pop;
+    int64_t liquid_locktime{0};
 };
 
 /** Parse a staking script (either form), or nullopt if not of the canonical

@@ -592,7 +592,8 @@ std::optional<PosBlsBitfieldCert> ParsePosBlsBitfieldSolution(const CScript& sol
 
 CScript BuildStakeScript(const CPubKey& pubkey, uint32_t csv_blocks,
                          const std::vector<unsigned char>& bls_pubkey,
-                         const std::vector<unsigned char>& bls_pop)
+                         const std::vector<unsigned char>& bls_pop,
+                         int64_t liquid_locktime)
 {
     CScript s;
     s << (int64_t)csv_blocks << OP_CHECKSEQUENCEVERIFY << OP_DROP;
@@ -601,8 +602,28 @@ CScript BuildStakeScript(const CPubKey& pubkey, uint32_t csv_blocks,
         // are committed in the UTXO without affecting the spend path.
         s << bls_pubkey << OP_DROP << bls_pop << OP_DROP;
     }
+    if (liquid_locktime > 0) {
+        // Vesting: an absolute timelock making the stake unspendable (hence
+        // unsellable) until liquid_locktime, while it keeps accruing weight.
+        s << liquid_locktime << OP_CHECKLOCKTIMEVERIFY << OP_DROP;
+    }
     s << ToByteVector(pubkey) << OP_CHECKSIG;
     return s;
+}
+
+//! Decode a script number's little-endian sign-magnitude encoding to int64.
+//! CScriptNum::getint() saturates at INT_MAX, which would silently corrupt a
+//! locktime past 2038, so decode the full width here. The caller must already
+//! have validated minimality (by constructing a CScriptNum).
+static int64_t StakeDecodeScriptInt64(const std::vector<unsigned char>& vch)
+{
+    if (vch.empty()) return 0;
+    int64_t result = 0;
+    for (size_t i = 0; i != vch.size(); ++i) result |= static_cast<int64_t>(vch[i]) << (8 * i);
+    if (vch.back() & 0x80) {
+        return -(static_cast<int64_t>(result & ~(int64_t{0x80} << (8 * (vch.size() - 1)))));
+    }
+    return result;
 }
 
 std::optional<ParsedStake> ParseStakeScriptFull(const CScript& script)
@@ -637,7 +658,7 @@ std::optional<ParsedStake> ParseStakeScriptFull(const CScript& script)
 
     if (!script.GetOp(pc, opcode, data) || opcode != OP_CHECKSEQUENCEVERIFY) return std::nullopt;
     if (!script.GetOp(pc, opcode, data) || opcode != OP_DROP) return std::nullopt;
-    if (!script.GetOp(pc, opcode, data) || data.empty()) return std::nullopt;
+    if (!script.GetOp(pc, opcode, data)) return std::nullopt;
     // Optional committee registration: a 48-byte push here is the BLS pubkey
     // (a staking pubkey is 33 or 65 bytes, never 48, so this is unambiguous),
     // followed by OP_DROP, the 96-byte PoP, OP_DROP, then the staking pubkey.
@@ -648,8 +669,44 @@ std::optional<ParsedStake> ParseStakeScriptFull(const CScript& script)
         if (!script.GetOp(pc, opcode, data) || data.size() != BLS_SIG_SIZE) return std::nullopt;
         out.bls_pop = data;
         if (!script.GetOp(pc, opcode, data) || opcode != OP_DROP) return std::nullopt;
-        if (!script.GetOp(pc, opcode, data) || data.empty()) return std::nullopt;
+        if (!script.GetOp(pc, opcode, data)) return std::nullopt;
     }
+    // Optional absolute vesting lock: <liquid_locktime> OP_CHECKLOCKTIMEVERIFY
+    // OP_DROP. Disambiguated by one-token lookahead rather than by push size:
+    // the token just read is the locktime only if OP_CHECKLOCKTIMEVERIFY
+    // follows it, otherwise it is the staking pubkey and we rewind.
+    {
+        const CScript::const_iterator before_lookahead = pc;
+        opcodetype next_op;
+        std::vector<unsigned char> next_data;
+        if (script.GetOp(pc, next_op, next_data) && next_op == OP_CHECKLOCKTIMEVERIFY) {
+            int64_t locktime = -1;
+            if (opcode >= OP_1 && opcode <= OP_16) {
+                locktime = (int)opcode - (int)(OP_1 - 1);
+            } else if (!data.empty() && data.size() <= 5) {
+                // 5-byte bignums, as OP_CHECKLOCKTIMEVERIFY itself accepts.
+                // Constructing the CScriptNum enforces minimal encoding.
+                try {
+                    CScriptNum(data, /*fRequireMinimal=*/true, /*nMaxNumSize=*/5);
+                } catch (const scriptnum_error&) {
+                    return std::nullopt;
+                }
+                locktime = StakeDecodeScriptInt64(data);
+            } else {
+                return std::nullopt;
+            }
+            // Must be positive (0 is no lock; negative fails CLTV outright) and
+            // within the uint32 range of nLockTime -- a larger value can never
+            // be satisfied, which would burn the stake rather than vest it.
+            if (locktime <= 0 || locktime > 0xffffffffLL) return std::nullopt;
+            out.liquid_locktime = locktime;
+            if (!script.GetOp(pc, opcode, data) || opcode != OP_DROP) return std::nullopt;
+            if (!script.GetOp(pc, opcode, data)) return std::nullopt;
+        } else {
+            pc = before_lookahead; // no vesting lock; the token read is the pubkey
+        }
+    }
+    if (data.empty()) return std::nullopt;
     CPubKey pubkey(data);
     if (!pubkey.IsFullyValid()) return std::nullopt;
     if (!script.GetOp(pc, opcode, data) || opcode != OP_CHECKSIG) return std::nullopt;
