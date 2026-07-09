@@ -431,36 +431,39 @@ public:
         g_pos_vrf = true;
         g_pos_agg_committee = true;
         // Autonomous BLS gossip committee is the default certification model.
-        // g_pos_bls is a NETWORK-WIDE CONSENSUS RULE, not a per-node toggle:
-        // -posbls=0 selects the manual MuSig2 coordinator instead, and a node set
-        // differently from the rest of the network rejects the other form's blocks
-        // and forks off. Every node and producer on the chain must use the same value.
-        g_pos_bls = args.GetBoolArg("-posbls", true);
-        // Public fixed-size committee (impl spec Option A; CONFIRMED 2026-07-04):
-        // membership is the deterministic schedule prefix and the quorum derives
-        // from the ACTUAL size, so two disjoint quorums cannot exist. Default OFF
-        // + committee 100 here, so the PRE-RE-GENESIS chain is byte-identical even
-        // under this binary; the re-genesis launches with -pospubliccommittee=1
-        // and -poscommitteesize=250 (126-of-250, the classical 1/3 Byzantine
-        // bound). The election seed stays the Bitcoin anchor (option 1A); Option B
-        // (a VRF-chain seed) and 1B (a buried anchor) are PERMANENTLY REJECTED
-        // (docs alberto-reply-2026-07-04c / 2026-07-04d).
-        g_pos_public_committee = args.GetBoolArg("-pospubliccommittee", false);
-        if (g_pos_public_committee && !g_pos_bls) {
-            throw std::runtime_error("-pospubliccommittee requires -posbls");
-        }
-        g_pos_min_stake = 4000000000000ULL;             // 40,000 SEQ = 0.01% of 400M (§3.3)
-        // 51-of-100 pre-re-genesis; the re-genesis passes -poscommitteesize=250
-        // (126-of-250). Arg-overridable so the cap is a launch-config choice, but
-        // the default keeps the live chain on 100.
-        g_pos_committee_size = args.GetIntArg("-poscommitteesize", 100);
-        {
-            const int max_committee = g_pos_public_committee ? MAX_POS_PUBLIC_COMMITTEE_SIZE :
-                (g_pos_agg_committee || g_pos_bls) ? MAX_POS_AGG_COMMITTEE_SIZE : MAX_POS_COMMITTEE_SIZE;
-            if (g_pos_committee_size < 1 || g_pos_committee_size > max_committee) {
-                throw std::runtime_error(strprintf("-poscommitteesize must be between 1 and %d", max_committee));
+        // These three are NETWORK-WIDE CONSENSUS RULES, not per-node toggles. A node
+        // configured differently from the rest of the network rejects the others'
+        // blocks and forks off, silently. They are therefore PINNED here rather
+        // than read from -posbls / -pospubliccommittee / -poscommitteesize: on the
+        // real network there is no legitimate reason to run any other value, and
+        // leaving them arg-readable made a stray flag a chain split. (Only
+        // CCustomParams, the throwaway regtest chain, reads them from args.)
+        //
+        // BLS aggregate committee certification (rather than the manual MuSig2
+        // coordinator), the public fixed-size committee (impl spec Option A), and
+        // a 250-member cap. Committee membership is the deterministic schedule
+        // prefix restricted to BLS-registered stakers, and the quorum derives from
+        // the ACTUAL size (min(pool, cap)), so two disjoint quorums cannot exist.
+        // At the cap the quorum is 126 of 250: a bare majority, because a
+        // two-thirds quorum is unreachable when a third of the committee is merely
+        // asleep; the SIZE is what resists capture by a hostile third of all stake.
+        //
+        // The election seed stays the parent block's own Bitcoin anchor (option
+        // 1A). Option B (a VRF-chain seed) and 1B (a buried anchor) are
+        // PERMANENTLY REJECTED (docs alberto-reply-2026-07-04c / 2026-07-04d).
+        g_pos_bls = true;
+        g_pos_public_committee = true;
+        g_pos_committee_size = 250;
+        // Refuse the flags outright rather than ignore them. A node started with
+        // -poscommitteesize on the real network is a node whose operator believes
+        // they are changing a consensus rule; silently overriding them would leave
+        // that belief intact until the fork.
+        for (const char* flag : {"-posbls", "-pospubliccommittee", "-poscommitteesize", "-posvrf", "-posaggcommittee", "-posunbonding", "-posminstake", "-pospayoutnotice", "-posslotinterval"}) {
+            if (args.IsArgSet(flag)) {
+                throw std::runtime_error(strprintf("%s is a consensus rule of the Sequentia network and cannot be overridden; remove it from the configuration", flag));
             }
         }
+        g_pos_min_stake = 4000000000000ULL;             // 40,000 SEQ = 0.01% of 400M (§3.3)
         g_pos_slot_interval = 30;                        // 30s nominal block time (doc 11 §4)
         g_pos_unbonding_period = 43200;                  // x30s = ~15 days (§3.11)
         // Consensus-critical: pin the payout notice period so no node can change
@@ -508,9 +511,21 @@ public:
         // key — its private key is published in doc 13 for pre-launch testing and
         // MUST be replaced with a real, secret key at the launch ceremony.
         {
-            const CPubKey founder(ParseHex("02a7bcf5525f5385642956c7272c6ae1a18aa8196d8e174864784a53d087b5d6dc"));
+            // PLACEHOLDER founder, regenerated with a secret key at the launch
+            // ceremony together with its BLS registration below. Unlike testnet's
+            // founder, this key's PRIVATE half is deliberately not published: the
+            // mainnet placeholder exists so the config is runnable before launch,
+            // not so anyone can spend or produce on it.
+            const CPubKey founder(ParseHex("026c3e119e1b54242a2ca7b44e94037b4270fac1283330c0e5f156755062911898"));
+            // The genesis staker MUST carry a committee BLS registration: under the
+            // public fixed-size committee the schedule prefix admits only registered
+            // stakers, so an unregistered genesis staker would leave the committee
+            // empty and nothing could ever be certified. Derived deterministically
+            // from the founder key (getblsregistration).
+            const std::vector<unsigned char> founder_blspub = ParseHex("8531075ed36ad383aa1a06ffc5b7590e35295295be4e28e93855e2496c20dc7390aa86b1b2a9475ee18ff09796dda1ed");
+            const std::vector<unsigned char> founder_blspop = ParseHex("8ed7da59e0fdbb657815c2caf39e4907fb5ca808f780637f1dd0d31047f170bd68a666c46399c8d323af4675ebf08d530128e30bb0cc0b09a7a41aa25b25f6a9569dd05af527f63ece5a3b868d64f117f1e254e056c29e30534624a76e9e87e9");
             const uint32_t stake_csv = CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG | 2532; // ~15 days
-            const CScript stake_spk = BuildStakeScript(founder, stake_csv);
+            const CScript stake_spk = BuildStakeScript(founder, stake_csv, founder_blspub, founder_blspop);
             const CScript founder_spk = CScript() << OP_0 << ToByteVector(founder.GetID()); // P2WPKH
             const CAmount seed_stake = 1000000 * COIN;   // 1,000,000 SEQ staked to bootstrap
             const CAmount total = 400000000 * COIN;      // 400,000,000 SEQ hard cap
@@ -519,13 +534,13 @@ public:
         }
         consensus.hashGenesisBlock = genesis.GetHash();
         // SEQUENTIA genesis (PLACEHOLDER founder; recomputed at launch).
-        const uint256 expected_genesis = uint256S("0x35775fa374dd84b07bea09f89fc2fd930097957aa30f0e9358680aabdf19af5e");
+        const uint256 expected_genesis = uint256S("0x35770fd00f7a4ce6cc550b3682ca9cd5b07e2cff4f0478ac0ecaf29de5638660");
         if (consensus.hashGenesisBlock != expected_genesis) {
             fprintf(stderr, "sequentia genesis hash mismatch: computed %s, expected %s\n",
                     consensus.hashGenesisBlock.GetHex().c_str(), expected_genesis.GetHex().c_str());
         }
         assert(consensus.hashGenesisBlock == expected_genesis);
-        assert(genesis.hashMerkleRoot == uint256S("0x9291ce6dd1058edd150394462dd6b943db6bd12b1f12587260a3d8a069835fef"));
+        assert(genesis.hashMerkleRoot == uint256S("0xf59bd2bf622fe907c93742913999bd7da121373bfcd8d5c8d354f7bebd15d91c"));
 
         vSeeds.clear();   // fresh network; no DNS seeds yet
 

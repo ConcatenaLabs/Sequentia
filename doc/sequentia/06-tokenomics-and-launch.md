@@ -80,11 +80,15 @@ on `-chain=sequentia` is a **placeholder**: it is published only so the mainnet
 *config* is runnable before launch, and it controls the entire 400M supply, so it
 must be replaced. A node refuses to start on `-chain=sequentia` with the
 placeholder genesis unless `-allowplaceholdergenesis` is set (see
-`src/init.cpp`). Only the genesis block changes at launch - the founder key and
-optionally the distribution layout; every consensus rule and parameter (PoS, the
-100-member committee, the 40,000-SEQ min stake, 30s slots, ~15-day unbonding, the
-block weight, anchoring, `MAX_MONEY`) is already the real value and stays
-identical.
+`src/init.cpp`). Only the genesis block changes at launch - the founder key, its
+BLS committee registration, and optionally the distribution layout; every
+consensus rule and parameter (PoS, the public 250-member committee, the
+40,000-SEQ min stake, 30s slots, ~15-day unbonding, the block weight, anchoring,
+`MAX_MONEY`) is already the real value and stays identical. Those rules are
+pinned in `CSequentiaParams`, not read from the configuration: a node started
+with `-poscommitteesize`, `-pospubliccommittee`, `-posbls`, `-posunbonding`,
+`-posminstake`, `-posslotinterval` or `-pospayoutnotice` on `-chain=sequentia`
+refuses to start rather than silently fork.
 
 ## The genesis-seeded bootstrap
 

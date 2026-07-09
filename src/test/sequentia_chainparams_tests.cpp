@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <chainparams.h>
+#include <pos.h>
 #include <chainparamsbase.h>
 #include <consensus/params.h>
 #include <util/system.h>
@@ -63,6 +64,36 @@ BOOST_AUTO_TEST_CASE(sequentia_soft_forks_buried_active)
     BOOST_CHECK_EQUAL(consensus.CSVHeight, 1);   // OP_CHECKSEQUENCEVERIFY / BIP68
     BOOST_CHECK_EQUAL(consensus.SegwitHeight, 0);
 
+    SelectParams(CBaseChainParams::REGTEST);
+}
+
+//! The consensus rules of the Sequentia network are PINNED, not configurable.
+//! A node that disagrees about the committee, the quorum, the unbonding delay or
+//! the payout notice forks off silently, so these must not be arg-readable.
+BOOST_AUTO_TEST_CASE(sequentia_pos_consensus_rules_are_pinned)
+{
+    ArgsManager args;
+    const auto params = CreateChainParams(args, CBaseChainParams::SEQUENTIA);
+    BOOST_CHECK(g_pos_bls);                       // BLS aggregate certification
+    BOOST_CHECK(g_pos_public_committee);          // public fixed-size committee
+    BOOST_CHECK_EQUAL(g_pos_committee_size, 250); // quorum 126 at the cap
+    BOOST_CHECK_EQUAL(PosPublicQuorum(250), 126);
+    BOOST_CHECK_EQUAL(g_pos_min_stake, 4000000000000ULL);
+    BOOST_CHECK_EQUAL(g_pos_slot_interval, 30);
+    BOOST_CHECK_EQUAL(g_pos_unbonding_period, 43200U);
+    BOOST_CHECK_EQUAL(g_pos_payout_notice, DEFAULT_POS_PAYOUT_NOTICE);
+
+    // Any two quorums of the committee overlap in at least two members, so no
+    // two blocks at a height can be certified without two signers on both.
+    BOOST_CHECK(2 * PosPublicQuorum(250) - 250 >= 2);
+
+    // Passing a consensus rule as a flag must be refused, not silently ignored.
+    for (const char* flag : {"-poscommitteesize", "-pospubliccommittee", "-posbls",
+                             "-posunbonding", "-posminstake", "-pospayoutnotice"}) {
+        ArgsManager bad;
+        bad.ForceSetArg(flag, "1");
+        BOOST_CHECK_THROW(CreateChainParams(bad, CBaseChainParams::SEQUENTIA), std::runtime_error);
+    }
     SelectParams(CBaseChainParams::REGTEST);
 }
 
