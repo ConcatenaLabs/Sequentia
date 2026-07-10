@@ -18,12 +18,16 @@ whitelist (see doc/sequentia/02-open-fee-market.md). Each round it:
      always-reject exceptions) to decide which discovered assets to whitelist.
   4. converts each admitted asset's price (in the API's quote currency, e.g.
      USD) into the node's scaled rate (rate = round(price_in_quote * 1e8)) and
-  5. publishes the result via the node's `setdynamicfeerates` RPC.
+  5. publishes the result via the node's `setfeeexchangerates` RPC with
+     persist=false.
 
 The node keeps a SINGLE fee-asset whitelist; this sidecar owns it in full.
-`setdynamicfeerates` replaces the published set wholesale, so whatever this
-server emits each round IS the whitelist. On clean shutdown the rates are
-cleared (fail safe: assets leave the whitelist rather than ride a dead price).
+`setfeeexchangerates` replaces the published set wholesale, so whatever this
+server emits each round IS the whitelist. persist=false keeps these automated
+pushes out of the node's exchangerates.json, so a restart falls back to the
+operator's hand-configured (static) whitelist rather than a dead price server's
+last rates. On clean shutdown the rates are cleared (fail safe: assets leave the
+whitelist rather than ride a dead price).
 Stdlib only; no external dependencies.
 
 Usage:
@@ -56,7 +60,7 @@ COIN = 100_000_000
 
 # Published rates must satisfy 0 < rate <= MAX_RATE. The node parses each rate
 # with get_int64; a value above INT64_MAX (~9.22e18) makes that parse throw and
-# the node drops the WHOLE setdynamicfeerates batch. We clamp well below that so
+# the node drops the WHOLE setfeeexchangerates batch. We clamp well below that so
 # one absurd quote can never poison every other asset's rate; offenders are
 # dropped per-asset and logged instead.
 MAX_RATE = 1_000_000_000_000_000  # 1e15, comfortably below INT64_MAX
@@ -427,7 +431,7 @@ class PriceServer:
         ok = 0
         for rpc in self.rpcs:
             try:
-                rpc.call("setdynamicfeerates", rates, self.source_name)
+                rpc.call("setfeeexchangerates", rates, False)  # persist=False: re-pushed each poll
                 ok += 1
             except Exception as e:
                 log.warning("publish to %s failed: %s", rpc.url, e)
@@ -453,10 +457,10 @@ class PriceServer:
         if not self.dry_run:
             for rpc in self.rpcs:
                 try:
-                    rpc.call("cleardynamicfeerates")
+                    rpc.call("setfeeexchangerates", {}, False)  # persist=False: clear without touching the static file
                 except Exception as e:
-                    log.warning("could not clear dynamic rates on %s: %s", rpc.url, e)
-            log.info("cleared dynamic rates on shutdown")
+                    log.warning("could not clear the fee-asset whitelist on %s: %s", rpc.url, e)
+            log.info("cleared the fee-asset whitelist on shutdown")
 
     def _stop(self, _sig, _frame):
         self.stopping = True

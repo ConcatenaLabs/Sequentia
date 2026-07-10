@@ -3,7 +3,7 @@
 A small, stdlib-only Python sidecar that keeps a node's **fee-asset whitelist**
 up to date. It polls market-data sources for each configured asset, decides which
 assets to admit (and at what rate) via a configurable **admission rule engine**,
-and pushes the result to one or more nodes' `setdynamicfeerates` RPC.
+and pushes the result to one or more nodes' `setfeeexchangerates` RPC (with `persist=false`).
 
 The node itself keeps a **single** whitelist and is unaware of all this — running
 this sidecar is simply what makes the whitelist "dynamic". Stop the sidecar and
@@ -94,8 +94,8 @@ Example — admit if market cap ≥ 50M **or** issued by `sequentia.io`, except 
 
 ## Rate semantics
 
-The node values fees in **reference fee atoms**: an asset's rate is *how many
-atoms of the asset equal one whole reference unit (1e8)*, scaled by 1e8. The
+The node values fees in **reference fee atoms**: an asset's rate is *the value of one whole asset unit expressed in the
+reference*, scaled by 1e8 (e.g. if GOLD is worth 1000 SEQ, rate(GOLD) = 1000 × 1e8). The
 operator picks the reference (e.g. SEQ or USD) by pricing all sources in it;
 `reference_asset_label` then re-expresses every rate against that asset, which
 lands at exactly `100000000`.
@@ -103,10 +103,10 @@ lands at exactly `100000000`.
 ## Inspecting state on the node
 
 ```sh
-elements-cli getfeeexchangerates     # the whitelist (asset -> rate)
-elements-cli getfeeacceptancepolicy  # the whitelist as {asset: {rate}}
-elements-cli setfeeexchangerates ... # operator manual set (persists to exchangerates.json)
-elements-cli cleardynamicfeerates    # empty the whitelist (deprecated alias)
+elements-cli getfeeexchangerates            # the whitelist (asset -> rate)
+elements-cli getfeeacceptancepolicy         # the whitelist as {asset: {rate}}
+elements-cli setfeeexchangerates '{...}'    # operator manual set (persists to exchangerates.json)
+elements-cli setfeeexchangerates '{}'       # empty the whitelist
 ```
 
 For wiring real market-data oracles (providers, keys, rate limits) and the

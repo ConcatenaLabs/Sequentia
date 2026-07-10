@@ -126,20 +126,21 @@ It periodically queries operator-designated external APIs (exchange endpoints,
 DEX oracles) for per-asset market data, applies operator-defined **admission
 thresholds** (e.g. market cap, 24h volume, volatility), computes each admitted
 asset's rate from its price relative to the reference unit, and writes the
-resulting `{asset → rate}` table into the node's single whitelist. It can do so
-through `setfeeexchangerates` directly, or through deprecated aliases retained for
-sidecar convenience (`src/rpc/exchangerates.cpp`):
+resulting `{asset → rate}` table into the node's single whitelist through
+`setfeeexchangerates` (`src/rpc/exchangerates.cpp`):
 
 | RPC | Purpose |
 |---|---|
-| `setdynamicfeerates {asset: rate, …}` | Deprecated alias: replaces the whitelist and `RecomputeFees()`, but does **not** persist to `exchangerates.json` (it calls `SetRates`, not the persisting path). |
-| `getdynamicfeerates` | Deprecated alias: returns the current whitelist. |
-| `cleardynamicfeerates` | Deprecated alias: clears the whitelist (e.g. on sidecar shutdown). |
+| `setfeeexchangerates {asset: rate, …} [persist=true]` | Replace the whole whitelist and `RecomputeFees()`. With `persist=true` (the default) it also writes `exchangerates.json` so the table survives a restart; with `persist=false` it updates only the in-memory whitelist. Pass `{}` to clear it. |
+| `getfeeexchangerates` | Return the current whitelist as `{asset: rate}`. |
 | `getfeeacceptancepolicy` | Return the current acceptance set. |
 
-Because the deprecated `setdynamicfeerates` path does not persist, an operator who
-wants the table to survive a restart writes it with `setfeeexchangerates`, which
-does persist.
+There is a single whitelist; "static" versus "dynamic" is only how it is
+*operated*, not a protocol distinction. An operator setting rates by hand uses
+the default `persist=true` so the table survives a restart. A price server driving
+the whitelist automatically uses `persist=false`: it re-pushes every poll, so
+persisting would only churn the file and, worse, leave its last rates in force
+across a restart instead of failing back to the persisted static whitelist.
 
 The reference unit is anchored to a chosen value (for example a USD-equivalent
 stablecoin) so rates are meaningful; the choice is operator policy, not consensus.

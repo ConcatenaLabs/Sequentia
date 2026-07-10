@@ -205,19 +205,21 @@ python3 contrib/price-server/price_server.py --config config.json --dry-run  # d
 A rate is `round(price_in_reference * 1e8)`; an asset trading at exactly one
 reference unit has rate `100000000`.
 
-The sidecar publishes through `setdynamicfeerates`, a deprecated alias of
-`setfeeexchangerates` that does **not** persist to `exchangerates.json` (a
-running sidecar re-pushes after a node restart). Two consequences to know:
+The sidecar publishes through `setfeeexchangerates` with `persist=false`, which
+updates the whitelist in memory but does **not** write `exchangerates.json` (a
+running sidecar re-pushes after a node restart; persisting would leave its last
+rates in force across a restart instead of failing back to the operator's static
+whitelist). Two consequences to know:
 
 - The node holds the last-set rates **indefinitely** - there is no built-in
   staleness or expiry. Keeping rates fresh, and refusing assets when a feed
   dies (by writing `0` or omitting them), is the sidecar's job. On clean
-  shutdown the sidecar clears the whitelist (`cleardynamicfeerates`), leaving
-  only the policy asset's 1:1 default.
+  shutdown the sidecar clears the whitelist (`setfeeexchangerates '{}' false`),
+  leaving only the policy asset's 1:1 default.
 - Writes are last-writer-wins on the whole table: a manual
   `setfeeexchangerates` is simply overwritten at the sidecar's next poll.
 
-Manual kill-switch: `elements-cli cleardynamicfeerates` (empties the
+Manual kill-switch: `elements-cli setfeeexchangerates '{}'` (empties the
 whitelist).
 
 ## 4. Paying fees in an arbitrary asset
@@ -534,7 +536,7 @@ Two complementary layers (see [`04-proof-of-stake.md`](04-proof-of-stake.md)):
 | [`contrib/sequentia/bootstrap-committee.py`](../../contrib/sequentia/bootstrap-committee.py) | Stand up a small threshold-sortition PoS committee for a single operator on a fresh chain (creates N stakers, registers them, produces a first full-committee block). | `python3 contrib/sequentia/bootstrap-committee.py --founder-wif <WIF> --members 2` |
 | [`contrib/sequentia/run-local-testnet.py`](../../contrib/sequentia/run-local-testnet.py) | Run a small local network for development. | `python3 contrib/sequentia/run-local-testnet.py` |
 | [`contrib/sequentia/swap-demo.py`](../../contrib/sequentia/swap-demo.py) | Self-contained cross-chain BTC<->asset atomic-swap demonstration: spins up two local chains, runs the HTLC swap and the timeout-refund path, then cleans up. | `python3 contrib/sequentia/swap-demo.py` |
-| [`contrib/price-server/`](../../contrib/price-server) | The dynamic-fee price server: polls market-data APIs and publishes qualifying assets' rates via `setdynamicfeerates`. | `python3 contrib/price-server/price_server.py --config config.json` |
+| [`contrib/price-server/`](../../contrib/price-server) | The dynamic-fee price server: polls market-data APIs and publishes qualifying assets' rates via `setfeeexchangerates` (`persist=false`). | `python3 contrib/price-server/price_server.py --config config.json` |
 
 ## 11. Monitoring quick reference
 

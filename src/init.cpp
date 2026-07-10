@@ -1481,8 +1481,9 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         };
         // SEQUENTIA: the node keeps a SINGLE fee-asset whitelist (no static/dynamic
         // layers, no node-side staleness). Freshness/admission is the price-server
-        // sidecar's job — it adds/removes assets and re-pushes via setdynamicfeerates
-        // (or setfeeexchangerates). The node just holds whatever was last set.
+        // sidecar's job — it adds/removes assets and re-pushes via
+        // setfeeexchangerates with persist=false. The node just holds whatever was
+        // last set.
     }
 
     /* Start the RPC server already.  It will be started in "warmup" mode

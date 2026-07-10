@@ -89,5 +89,5 @@ Worked example from the prototype (RFU = USD, `decimals: 9`; USD token uses cent
   currency across the node GUI / explorer / SWK (value anything in the user's RFU
   via `getrates`-style data), and for per-asset fee incentives via `fudge_factor`.
 - The node consumes only the final per-asset rate (atoms-of-asset per reference
-  unit) via `setfeeexchangerates`/`setdynamicfeerates`; all of the above lives in
+  unit) via `setfeeexchangerates` (`persist=false` for automated pushes); all of the above lives in
   the sidecar.

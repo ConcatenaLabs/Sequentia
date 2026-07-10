@@ -205,7 +205,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     //
     // SEQUENTIA
     { "setfeeexchangerates", 0, "rates"},
-    { "setdynamicfeerates", 0, "rates"},
+    { "setfeeexchangerates", 1, "persist"},
     { "generateposblock", 1, "committeekeys"},
     { "getstakescript", 1, "csv_blocks"},
     { "getstakescript", 2, "csv_seconds"},

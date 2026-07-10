@@ -7,7 +7,7 @@
 Serves RANDOMIZED (random-walk) prices for the demo test assets in exactly the
 JSON shape the price server's `jsonapi` source expects, so the price server can
 poll it like any real exchange/aggregator and push the resulting rates into each
-node's dynamic fee-asset whitelist via setdynamicfeerates.
+node's fee-asset whitelist via setfeeexchangerates (persist=false).
 
 This is NOT real market data — it's a deterministic-free random walk for testing
 the open fee market end to end.

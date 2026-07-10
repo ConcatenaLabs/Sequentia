@@ -25,7 +25,7 @@ entry is **added** (`m_total_fee += entry.GetFeeValue()`) or **removed**
 (`m_total_fee -= it->GetFeeValue()`).
 
 The open-fee-market code re-values mempool fees whenever exchange rates change, in
-`CTxMemPool::RecomputeFees()` (called on every `setdynamicfeerates` push — the
+`CTxMemPool::RecomputeFees()` (called on every `setfeeexchangerates` push — the
 price server publishes every 30 s). For each entry it updates the per-entry fee
 value via `UpdateFeeValue()` and propagates the delta to ancestor/descendant
 aggregates — **but it never adjusted `m_total_fee`.** So after the first rate

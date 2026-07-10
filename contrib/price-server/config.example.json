@@ -1,5 +1,5 @@
 {
-  "_comment": "Sequentia price server. It DISCOVERS your network's assets from the Asset Registry (ticker -> id), prices them from ONE market-data API, applies the admission rules below, and publishes the resulting fee-asset whitelist to your node via setdynamicfeerates. You do NOT list assets here. These defaults point at the public Sequentia testnet demo, so a fresh install works out of the box; edit node_rpc to match your local node, and tune the rules in the config UI.",
+  "_comment": "Sequentia price server. It DISCOVERS your network's assets from the Asset Registry (ticker -> id), prices them from ONE market-data API, applies the admission rules below, and publishes the resulting fee-asset whitelist to your node via setfeeexchangerates (persist=false). You do NOT list assets here. These defaults point at the public Sequentia testnet demo, so a fresh install works out of the box; edit node_rpc to match your local node, and tune the rules in the config UI.",
 
   "poll_interval_secs": 60,
   "source_timeout": 15,
