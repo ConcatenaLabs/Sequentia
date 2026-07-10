@@ -734,7 +734,12 @@ public:
         pchMessageStart[3] = 0xe0;
         nDefaultPort = 18777;
         nPruneAfterHeight = 1000;
-        m_assumed_blockchain_size = 40;
+        // SEQUENTIA: honest estimate for the young, lightly used testnet (the
+        // previous 40 GB was inherited from Bitcoin's testnet3). Today's chain
+        // of mostly-empty blocks is well under 1 GB; with the 200,000-WU cap
+        // at 30 s blocks even a fully saturated chain adds only ~53 GB/year,
+        // and light use adds a small fraction of that. Revisit as it grows.
+        m_assumed_blockchain_size = 2;
         m_assumed_chain_state_size = 2;
 
         std::vector<unsigned char> sign_bytes = ParseHex("51");

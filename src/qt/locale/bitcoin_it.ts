@@ -1914,8 +1914,8 @@ E' possibile firmare solo con indirizzi di tipo "legacy".</translation>
         </translation>
     </message>
     <message>
-        <source>%1 will download and store a copy of the Bitcoin block chain.</source>
-        <translation type="unfinished">%1 scaricherà e salverà una copia della catena di blocchi Bitcoin.</translation>
+        <source>%1 will download and store a copy of the %2 block chain.</source>
+        <translation type="unfinished">%1 scaricherà e salverà una copia della block chain di %2.</translation>
     </message>
     <message>
         <source>The wallet will also be stored in this directory.</source>
@@ -1942,24 +1942,32 @@ E' possibile firmare solo con indirizzi di tipo "legacy".</translation>
         <translation type="unfinished">Dato che questa è la prima volta che il programma viene lanciato, puoi scegliere dove %1 salverà i suoi dati.</translation>
     </message>
     <message>
-        <source>When you click OK, %1 will begin to download and process the full %4 block chain (%2GB) starting with the earliest transactions in %3 when %4 initially launched.</source>
-        <translation type="unfinished">Quando fai click su OK, %1 comincerà a scaricare e processare l'intera %4 catena di blocchi (%2GB) a partire dalla prime transazioni del %3 quando %4 venne inaugurato.</translation>
+        <source>When you click OK, %1 will begin to download and process the full %2 block chain (approximately %3 GB), starting from the network's first block.</source>
+        <translation type="unfinished">Quando premi OK, %1 inizierà a scaricare ed elaborare l'intera block chain di %2 (circa %3 GB), a partire dal primo blocco della rete.</translation>
+    </message>
+    <message>
+        <source>%1 is an independent Bitcoin sidechain with its own block chain: this is not a download of the Bitcoin block chain.</source>
+        <translation type="unfinished">%1 è una sidechain di Bitcoin indipendente, con una propria block chain: questo non è un download della block chain di Bitcoin.</translation>
+    </message>
+    <message>
+        <source>For reference: the block chain only grows as the network is actually used. With one block every %5 seconds and the current block size limit, it cannot grow by more than about %6 per year even if every block were completely full — a hard ceiling, not a forecast. Sustained heavy usage, with blocks as full as Bitcoin's during its busiest periods, would add roughly %7 per year; a lightly used network adds far less. You can raise the storage limit at any time; removing it later requires re-downloading the chain.</source>
+        <translation type="unfinished">Per riferimento: la block chain cresce solo quanto la rete viene effettivamente usata. Con un blocco ogni %5 secondi e l'attuale limite di dimensione dei blocchi, non può crescere più di circa %6 all'anno nemmeno se ogni blocco fosse completamente pieno — un tetto massimo, non una previsione. Un uso intenso e continuativo, con blocchi pieni quanto quelli di Bitcoin nei periodi più affollati, aggiungerebbe circa %7 all'anno; una rete poco usata molto meno. Puoi aumentare il limite di spazio in qualsiasi momento; rimuoverlo in seguito richiede di riscaricare la catena.</translation>
     </message>
     <message>
         <source>Limit block chain storage to</source>
         <translation type="unfinished">Limita l'archiviazione della catena di blocchi a</translation>
     </message>
     <message>
-        <source>Reverting this setting requires re-downloading the entire blockchain. It is faster to download the full chain first and prune it later. Disables some advanced features.</source>
-        <translation type="unfinished">Cambiare questa impostazione richiede di riscaricare l'intera catena di blocchi. E' più veloce scaricare prima tutta la catena e poi fare l'epurazione. Disabilita alcune impostazioni avanzate.</translation>
+        <source>Your node still verifies the entire chain, but discards blocks older than your limit after verification. Security and your funds are unaffected; your node just stops serving historical blocks to other nodes, and importing a wallet older than the retained window will require re-downloading the chain (the node will warn you if so). Reverting this setting also requires re-downloading the entire block chain.</source>
+        <translation type="unfinished">Il nodo verifica comunque l'intera catena, ma dopo la verifica scarta i blocchi più vecchi del limite impostato. La sicurezza e i tuoi fondi non sono toccati; il nodo smette solo di servire blocchi storici agli altri nodi, e importare un wallet più vecchio della finestra conservata richiederà di riscaricare la catena (il nodo ti avviserà in tal caso). Anche annullare questa impostazione richiede di riscaricare l'intera block chain.</translation>
     </message>
     <message>
         <source>This initial synchronisation is very demanding, and may expose hardware problems with your computer that had previously gone unnoticed. Each time you run %1, it will continue downloading where it left off.</source>
         <translation type="unfinished">La sincronizzazione iniziale è molto dispendiosa e potrebbe mettere in luce problemi harware del tuo computer che passavano prima inosservati. Ogni volta che lanci %1 continuerà a scaricare da dove si era interrotto.</translation>
     </message>
     <message>
-        <source>If you have chosen to limit block chain storage (pruning), the historical data must still be downloaded and processed, but will be deleted afterward to keep your disk usage low.</source>
-        <translation type="unfinished">Se hai scelto di limitare lo spazio della catena di blocchi (epurazione), i dati storici devono comunque essere scaricati e processati, ma verranno cancellati in seguito per mantenere basso l'utilizzo del tuo disco.</translation>
+        <source>Limiting block chain storage ("pruning") does not reduce your security: %1 still downloads and fully verifies every block of the chain, so nothing is taken on trust. After verification, the raw data of older blocks is deleted to keep disk usage under the limit you set. Your node always keeps the complete, up-to-date state of the network (every balance and unspent output) and the most recent blocks.&#10;&#10;Two things change with pruning. First, your node can no longer help newcomers join the network: new nodes start by downloading the old blocks from nodes that keep the full history, so the network needs at least some non-pruned ("archive") nodes — by pruning, you simply leave that role to others. Second, a pruned node only keeps a recent "window" of blocks, whose depth depends on the limit you set (the estimate next to the limit shows how many days of history it covers). If you import a wallet whose transactions are in blocks older than the oldest block your node still keeps, the node cannot look up that wallet's coins locally: it will detect this and stop with a clear warning instead of showing a wrong balance, and it will ask you to download the chain again before that wallet can be used from this node. This never happens automatically — you decide when. Your coins remain intact on the block chain throughout; nothing is lost, and wallets already in use on this node keep working normally.</source>
+        <translation type="unfinished">Limitare lo spazio della block chain ("pruning") non riduce la tua sicurezza: %1 scarica e verifica comunque integralmente ogni blocco della catena, quindi nulla viene accettato sulla fiducia. Dopo la verifica, i dati grezzi dei blocchi più vecchi vengono eliminati per mantenere l'uso del disco entro il limite impostato. Il nodo conserva sempre lo stato completo e aggiornato della rete (ogni saldo e output non speso) e i blocchi più recenti.&#10;&#10;Con il pruning cambiano due cose. Primo: il tuo nodo non può più aiutare i nuovi arrivati a entrare nella rete: un nuovo nodo parte scaricando i vecchi blocchi dai nodi che conservano l'intera storia, quindi alla rete servono almeno alcuni nodi non-pruned ("archivio") — facendo pruning, semplicemente lasci quel ruolo ad altri. Secondo: un nodo pruned conserva solo una "finestra" recente di blocchi, la cui profondità dipende dal limite impostato (la stima accanto al limite indica quanti giorni di storia copre). Se importi un wallet le cui transazioni si trovano in blocchi più vecchi del blocco più antico che il tuo nodo conserva ancora, il nodo non può ritrovare localmente le monete di quel wallet: se ne accorge da solo e si ferma con un avviso chiaro invece di mostrare un saldo sbagliato, e ti chiederà di riscaricare la catena prima che quel wallet sia utilizzabile da questo nodo. Questo non avviene mai automaticamente: decidi tu quando. Le tue monete restano intatte sulla block chain per tutto il tempo; nulla va perso, e i wallet già in uso su questo nodo continuano a funzionare normalmente.</translation>
     </message>
     <message>
         <source>Use the default data directory</source>

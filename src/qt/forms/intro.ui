@@ -203,7 +203,17 @@
    <item>
     <widget class="QLabel" name="lblExplanation1">
      <property name="text">
-      <string>When you click OK, %1 will begin to download and process the full %4 block chain (%2GB) starting with its earliest blocks.</string>
+      <string>When you click OK, %1 will begin to download and process the full %2 block chain (approximately %3 GB), starting from the network's first block.</string>
+     </property>
+     <property name="wordWrap">
+      <bool>true</bool>
+     </property>
+    </widget>
+   </item>
+   <item>
+    <widget class="QLabel" name="lblExplanation1b">
+     <property name="text">
+      <string>For reference: the block chain only grows as the network is actually used. With one block every %5 seconds and the current block size limit, it cannot grow by more than about %6 per year even if every block were completely full — a hard ceiling, not a forecast. Sustained heavy usage, with blocks as full as Bitcoin's during its busiest periods, would add roughly %7 per year; a lightly used network adds far less. You can raise the storage limit at any time; removing it later requires re-downloading the chain.</string>
      </property>
      <property name="wordWrap">
       <bool>true</bool>
@@ -223,7 +233,7 @@
    <item>
     <widget class="QLabel" name="lblExplanation3">
      <property name="text">
-      <string>If you have chosen to limit block chain storage (pruning), the historical data must still be downloaded and processed, but will be deleted afterward to keep your disk usage low.</string>
+      <string>Limiting block chain storage ("pruning") does not reduce your security: %1 still downloads and fully verifies every block of the chain, so nothing is taken on trust. After verification, the raw data of older blocks is deleted to keep disk usage under the limit you set. Your node always keeps the complete, up-to-date state of the network (every balance and unspent output) and the most recent blocks.&#10;&#10;Two things change with pruning. First, your node can no longer help newcomers join the network: new nodes start by downloading the old blocks from nodes that keep the full history, so the network needs at least some non-pruned ("archive") nodes — by pruning, you simply leave that role to others. Second, a pruned node only keeps a recent "window" of blocks, whose depth depends on the limit you set (the estimate next to the limit shows how many days of history it covers). If you import a wallet whose transactions are in blocks older than the oldest block your node still keeps, the node cannot look up that wallet's coins locally: it will detect this and stop with a clear warning instead of showing a wrong balance, and it will ask you to download the chain again before that wallet can be used from this node. This never happens automatically — you decide when. Your coins remain intact on the block chain throughout; nothing is lost, and wallets already in use on this node keep working normally.</string>
      </property>
      <property name="wordWrap">
       <bool>true</bool>
@@ -238,7 +248,7 @@
         <string>Limit block chain storage to</string>
        </property>
        <property name="toolTip">
-        <string>Reverting this setting requires re-downloading the entire blockchain. It is faster to download the full chain first and prune it later. Disables some advanced features.</string>
+        <string>Your node still verifies the entire chain, but discards blocks older than your limit after verification. Security and your funds are unaffected; your node just stops serving historical blocks to other nodes, and importing a wallet older than the retained window will require re-downloading the chain (the node will warn you if so). Reverting this setting also requires re-downloading the entire block chain.</string>
        </property>
       </widget>
      </item>

@@ -7,7 +7,10 @@
 #endif
 
 #include <chainparams.h>
+#include <chainparamsbase.h>
+#include <consensus/consensus.h>
 #include <fs.h>
+#include <pos.h>
 #include <qt/intro.h>
 #include <qt/forms/ui_intro.h>
 
@@ -117,6 +120,45 @@ int GetPruneTargetGB()
     // >1 means automatic pruning is enabled by config, 1 means manual pruning, 0 means no pruning.
     return prune_target_mib > 1 ? PruneMiBtoGB(prune_target_mib) : DEFAULT_PRUNE_TARGET_GB;
 }
+
+// Params() is usable throughout this dialog: SelectParams() always runs before
+// Intro is constructed (see Intro::showIfNeeded()).
+
+//! Human-readable name of the selected network for the intro texts, derived
+//! from the chain id so the dialog never claims "Sequentia" on an unrelated
+//! chain (regtest, signet, custom chains show their raw chain id instead).
+QString NetworkDisplayName()
+{
+    const std::string& id = Params().NetworkIDString();
+    if (id == CBaseChainParams::SEQUENTIA) return QStringLiteral("Sequentia");
+    if (id == CBaseChainParams::TESTNET) return QStringLiteral("Sequentia testnet");
+    return QString::fromStdString(id);
+}
+
+//! Whether the selected network is one of the Sequentia chains, for texts that
+//! only make sense there (the Bitcoin-sidechain disclaimer).
+bool IsSequentiaChain()
+{
+    const std::string& id = Params().NetworkIDString();
+    return id == CBaseChainParams::SEQUENTIA || id == CBaseChainParams::TESTNET;
+}
+
+//! Nominal seconds between blocks on the selected network: the PoS slot
+//! interval on PoS chains (30 s on Sequentia, see pos.h), the PoW target
+//! spacing otherwise.
+int64_t NominalBlockSpacing()
+{
+    return g_con_pos ? g_pos_slot_interval : Params().GetConsensus().nPowTargetSpacing;
+}
+
+//! Consensus block-weight cap of the selected network (200,000 WU on the
+//! Sequentia chains); 0 in chainparams means the global MAX_BLOCK_WEIGHT
+//! applies (see the GetBlockWeight() checks in validation.cpp).
+uint32_t ChainMaxBlockWeight()
+{
+    const uint32_t max_weight = Params().GetConsensus().nMaxBlockWeight;
+    return max_weight ? max_weight : MAX_BLOCK_WEIGHT;
+}
 } // namespace
 
 Intro::Intro(QWidget *parent, int64_t blockchain_size_gb, int64_t chain_state_size_gb) :
@@ -132,13 +174,43 @@ Intro::Intro(QWidget *parent, int64_t blockchain_size_gb, int64_t chain_state_si
     ui->welcomeLabel->setText(ui->welcomeLabel->text().arg(PACKAGE_NAME));
     ui->storageLabel->setText(ui->storageLabel->text().arg(PACKAGE_NAME));
 
-    ui->lblExplanation1->setText(ui->lblExplanation1->text()
+    const QString network_name = NetworkDisplayName();
+    QString explanation1 = ui->lblExplanation1->text()
         .arg(PACKAGE_NAME)
-        .arg(m_blockchain_size_gb)
-        .arg(2009)
-        .arg(tr("Sequentia"))
+        .arg(network_name)
+        .arg(m_blockchain_size_gb);
+    if (IsSequentiaChain()) {
+        explanation1 += QLatin1Char(' ') + tr("%1 is an independent Bitcoin sidechain with its own block chain: this is not a download of the Bitcoin block chain.").arg(network_name);
+    }
+    ui->lblExplanation1->setText(explanation1);
+
+    // Hard ceiling on yearly block-data growth (lblExplanation1b): one block
+    // every NominalBlockSpacing() seconds, each capped at nMaxBlockWeight
+    // weight units, counted as weight / WITNESS_SCALE_FACTOR bytes (virtual
+    // size, the standard byte measure for a weight cap). For Sequentia —
+    // 200,000 WU per 30 s block (whitepaper §3.10, pos.h) — this is ~53 GB
+    // per year.
+    constexpr double SECONDS_PER_YEAR{31557600.0}; // Julian year
+    const int64_t block_spacing = NominalBlockSpacing();
+    const double max_block_bytes = double(ChainMaxBlockWeight()) / WITNESS_SCALE_FACTOR;
+    const double ceiling_bytes_per_year = (SECONDS_PER_YEAR / block_spacing) * max_block_bytes;
+    // During Bitcoin's busiest sustained periods real blocks filled roughly
+    // 45% of that theoretical byte ceiling (~1.5-2 MB average against the 4 MB
+    // witness-stuffed maximum); reuse that observed ratio for the "sustained
+    // heavy usage" figure.
+    constexpr double HEAVY_USAGE_FILL_RATIO{0.45};
+    const auto format_yearly_bytes = [](double bytes) {
+        return bytes >= 1e12 ? tr("%1 TB").arg(QString::number(bytes / 1e12, 'f', 1))
+                             : tr("%1 GB").arg(QString::number(std::llround(bytes / 1e9)));
+    };
+    ui->lblExplanation1b->setText(ui->lblExplanation1b->text()
+        .arg(block_spacing)
+        .arg(format_yearly_bytes(ceiling_bytes_per_year))
+        .arg(format_yearly_bytes(ceiling_bytes_per_year * HEAVY_USAGE_FILL_RATIO))
     );
+
     ui->lblExplanation2->setText(ui->lblExplanation2->text().arg(PACKAGE_NAME));
+    ui->lblExplanation3->setText(ui->lblExplanation3->text().arg(PACKAGE_NAME));
 
     const int min_prune_target_GB = std::ceil(MIN_DISK_SPACE_FOR_BLOCK_FILES / 1e9);
     ui->pruneGB->setRange(min_prune_target_GB, std::numeric_limits<int>::max());
@@ -382,14 +454,19 @@ void Intro::UpdatePruneLabels(bool prune_checked)
     }
     ui->lblExplanation3->setVisible(prune_checked);
     ui->pruneGB->setEnabled(prune_checked);
-    static constexpr uint64_t nPowTargetSpacing = 10 * 60;  // from chainparams, which we don't have at this stage
-    static constexpr uint32_t expected_block_data_size = 2250000;  // includes undo data
-    const uint64_t expected_backup_days = m_prune_target_gb * 1e9 / (uint64_t(expected_block_data_size) * 86400 / nPowTargetSpacing);
+    // Days of history covered by the prune target, from the selected chain's
+    // actual cadence and block cap (Sequentia: 30 s slots, 200,000 WU). For
+    // the on-disk footprint per block (block + undo data) reuse Bitcoin Core's
+    // assumption of 2.25 MB stored per 4,000,000-weight block, i.e. 9/16 byte
+    // per weight unit — 112,500 bytes per full Sequentia block.
+    const uint64_t block_spacing{uint64_t(NominalBlockSpacing())};
+    const uint64_t expected_block_data_size{uint64_t(ChainMaxBlockWeight()) * 9 / 16};
+    const uint64_t expected_backup_days = m_prune_target_gb * 1e9 / (expected_block_data_size * 86400 / block_spacing);
     ui->lblPruneSuffix->setText(
         //: Explanatory text on the capability of the current prune target.
         tr("(sufficient to restore backups %n day(s) old)", "", expected_backup_days));
     ui->sizeWarningLabel->setText(
-        tr("%1 will download and store a copy of the Sequentia block chain.").arg(PACKAGE_NAME) + " " +
+        tr("%1 will download and store a copy of the %2 block chain.").arg(PACKAGE_NAME, NetworkDisplayName()) + " " +
         storageRequiresMsg.arg(m_required_space_gb) + " " +
         tr("The wallet will also be stored in this directory.")
     );
