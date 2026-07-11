@@ -295,15 +295,18 @@ def main():
     # ---- Shared consensus block ----------------------------------------------
     if is_test:
         # chain=test bakes con_pos/posvrf/posbls(default on)/anchor/slot/unbonding/
-        # minstake/genesis/sig-size. We only set the committee size and accept the
-        # non-standard staking-output tx into the mempool. Under --public-committee
-        # the committee is the deterministic schedule prefix capped at
-        # --committee-cap (250), so we pass the CAP as the size (the actual
+        # minstake/genesis/sig-size, and now DEFAULTS pospubliccommittee=1 +
+        # poscommitteesize=250 to match the live testnet. We only set the committee
+        # size and accept the non-standard staking-output tx into the mempool. Under
+        # --public-committee the committee is the deterministic schedule prefix
+        # capped at --committee-cap (250), so we pass the CAP as the size (the actual
         # committee is min(#stakers, cap)) and turn on -pospubliccommittee.
         cap = args.committee_cap if args.public_committee else N
         consensus = ["poscommitteesize=%d" % cap, "acceptnonstdtxn=1"]
-        if args.public_committee:
-            consensus.append("pospubliccommittee=1")
+        # Pass -pospubliccommittee EXPLICITLY either way: chain=test now defaults it
+        # ON, so a non-public local bootstrap must set =0 to stay on VRF sortition
+        # rather than inherit the binary's (live-testnet) default.
+        consensus.append("pospubliccommittee=%d" % (1 if args.public_committee else 0))
     else:
         genesis_csv_seq = (1 << 22) | ((args.csv_seconds + 511) // 512)   # BIP68 time-based
         fund_total = (N + 4) * stake_atoms                                 # founder change + fee headroom

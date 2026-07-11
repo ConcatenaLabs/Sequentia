@@ -698,17 +698,26 @@ public:
         // of the testnet forks off. Every node on a given testnet must agree.
         g_pos_bls = args.GetBoolArg("-posbls", true);
         g_pos_min_stake = 4000000000000ULL;   // 40,000 SEQ = 0.01% of 400M (§3.3)
-        // Expected committee size (quorum = strict majority). Defaults to the
-        // paper's 100 (51-of-100 quorum, §3.5); configurable on testnet so a
-        // single operator can bootstrap a small committee (e.g. -poscommitteesize=3,
-        // quorum 2). It is NOT part of the genesis commitment (CommitToArguments
-        // hashes only network id, fedpeg and signblock scripts), so changing it
-        // does not change the genesis — but it IS a consensus rule, so every node
-        // on a given testnet must agree on the value.
-        g_pos_committee_size = args.GetIntArg("-poscommitteesize", 100);
-        // Public fixed-size committee (impl spec Option A). NETWORK-WIDE
-        // consensus rule, like -posbls above.
-        g_pos_public_committee = args.GetBoolArg("-pospubliccommittee", false);
+        // Expected committee size. DEFAULT 250 to MATCH THE LIVE PUBLIC TESTNET
+        // (126-of-250 quorum): these params are NETWORK-WIDE consensus rules, so a
+        // chain=test node started from a bare/default config must reach the same
+        // consensus as the network, not silently fork. Before this default the live
+        // testnet only agreed because every node passed poscommitteesize=250 in its
+        // config; a node that forgot it forked in silence (every network header
+        // failed CheckProof with "block-proof-invalid", unlogged at default level).
+        // That was the root cause of issue #3. Still OVERRIDABLE on this configurable
+        // testnet so a single operator can bootstrap a small local committee (e.g.
+        // -poscommitteesize=3, quorum 2). It is NOT part of the genesis commitment
+        // (CommitToArguments hashes only network id, fedpeg and signblock scripts),
+        // so the default value does not change the genesis.
+        g_pos_committee_size = args.GetIntArg("-poscommitteesize", 250);
+        // Public fixed-size committee (impl spec Option A). NETWORK-WIDE consensus
+        // rule, like -posbls above; DEFAULT ON to match the live testnet (same
+        // silent-fork reasoning as -poscommitteesize). Overridable for local test
+        // committees that want VRF sortition instead (-pospubliccommittee=0). The
+        // genesis stake output bakes the founder's BLS registration unconditionally
+        // (see below), so flipping this default does NOT change the genesis hash.
+        g_pos_public_committee = args.GetBoolArg("-pospubliccommittee", true);
         if (g_pos_public_committee && !g_pos_bls) {
             throw std::runtime_error("-pospubliccommittee requires -posbls");
         }

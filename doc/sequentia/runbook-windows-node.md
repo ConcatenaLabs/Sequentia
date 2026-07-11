@@ -79,7 +79,8 @@ Paste in the following and **choose your own `rpcpassword`**:
 chain=test
 
 [test]
-# --- consensus params: these MUST match the testnet (do not change) ---
+# --- consensus params: now the chain=test defaults (issue #3 fix); shown
+#     explicitly so the config is self-documenting and correct on older binaries ---
 pospubliccommittee=1
 poscommitteesize=250
 
@@ -108,12 +109,14 @@ Save and close. (Leave the staking lines out for now - you add them in §5,
 
 > Why `pospubliccommittee` and `poscommitteesize`? They are network-wide
 > consensus rules of the current chain (the 2026-07-05 re-genesis runs the
-> public fixed-size committee, cap 250) that are not yet the binary's
-> defaults **on `chain=test`** (they are pinned on the mainnet chain); a node
-> without them rejects the network's blocks — silently: peers stay connected,
-> but every header fails `block-proof-invalid` and the tip never moves. If you
+> public fixed-size committee, cap 250). As of the issue #3 fix these ARE the
+> binary's `chain=test` defaults (they were always pinned on the mainnet chain),
+> so a bare config now reaches consensus. On earlier binaries a node without them
+> rejected the network's blocks — silently: peers stay connected, but every
+> header fails `block-proof-invalid` and the tip never moves. Keep them in the
+> config anyway: it is self-documenting, stays correct on any binary, and if you
 > ever rewrite this file from scratch (e.g. while debugging the mainchain RPC
-> settings), make sure these two lines survive.
+> settings) it guarantees these two lines survive.
 
 > Why a Bitcoin RPC? Every Sequentia block commits a Bitcoin testnet4 block as
 > its anchor; your node checks that anchor against testnet4, and when you stake
