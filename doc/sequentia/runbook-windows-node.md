@@ -93,7 +93,9 @@ rpcport=18201
 
 # --- OPTIONAL: your own peer / Bitcoin testnet4 anchor source. The node
 # defaults both to the shared public-testnet endpoints; only set these if the
-# operator gave you your own (explicit values override the defaults).
+# operator gave you your own, or if you run your own Bitcoin testnet4 node
+# (see §2b - the recommended fallback when the shared endpoint is unreachable).
+# Explicit values override the defaults.
 #addnode=<SEQ_PEER_HOST:PORT>
 #mainchainrpchost=<TESTNET4_RPC_HOST>
 #mainchainrpcport=<TESTNET4_RPC_PORT>
@@ -107,12 +109,94 @@ Save and close. (Leave the staking lines out for now - you add them in §5,
 > Why `pospubliccommittee` and `poscommitteesize`? They are network-wide
 > consensus rules of the current chain (the 2026-07-05 re-genesis runs the
 > public fixed-size committee, cap 250) that are not yet the binary's
-> defaults; a node without them rejects the network's blocks.
+> defaults **on `chain=test`** (they are pinned on the mainnet chain); a node
+> without them rejects the network's blocks — silently: peers stay connected,
+> but every header fails `block-proof-invalid` and the tip never moves. If you
+> ever rewrite this file from scratch (e.g. while debugging the mainchain RPC
+> settings), make sure these two lines survive.
 
 > Why a Bitcoin RPC? Every Sequentia block commits a Bitcoin testnet4 block as
 > its anchor; your node checks that anchor against testnet4, and when you stake
 > it anchors the blocks *you* produce to fresh testnet4 blocks. Without it the
 > node can't validate the tip or produce. See `doc/sequentia/03-bitcoin-anchoring.md`.
+
+---
+
+## 2b. Running your own Bitcoin testnet4 node (Windows)
+
+If the shared testnet4 RPC endpoint is unreachable (or you simply want your own
+anchor source — the more robust setup), run Bitcoin Core locally on testnet4
+and point the `mainchainrpc*` options at it. Three Windows-specific pitfalls
+make this the single most error-prone step of the whole setup, so follow this
+section exactly.
+
+**1. Install and start Bitcoin Core on testnet4.** Download Bitcoin Core
+(v28 or later) from bitcoincore.org and launch it on the testnet4 chain:
+
+```
+"C:\Program Files\Bitcoin\bitcoin-qt.exe" -testnet4
+```
+
+**2. Find the REAL data directory before writing bitcoin.conf.** Older guides
+say the Windows data directory is `%APPDATA%\Bitcoin` (a `Roaming` path).
+**Recent Bitcoin Core versions default fresh installs to `%LOCALAPPDATA%\Bitcoin`
+instead** (a `Local` path), and the GUI's first-run dialog stores whatever you
+picked there in the registry — not in any file you can grep. A `bitcoin.conf`
+placed in `%APPDATA%\Bitcoin` is then **silently ignored**: the node runs,
+syncs, and looks healthy, but none of your settings (in particular `server=1`)
+apply, and the RPC port never opens. The reliable way to locate the directory
+in use: in bitcoin-qt open **Window → Information (or Help → Debug window)**
+and read the *Datadir* field, or **Settings → Options → Open Configuration
+File**, which creates/opens the `bitcoin.conf` the node will actually read.
+
+**3. Write this into that bitcoin.conf** (choose your own password):
+
+```ini
+testnet4=1
+server=1
+rpcuser=<user>
+rpcpassword=<choose-a-long-random-password>
+rpcallowip=127.0.0.1
+
+[testnet4]
+rpcport=48400
+```
+
+Without `server=1` bitcoin-qt does not serve RPC at all (`bitcoind` does).
+Note that `rpcport` must sit under the `[testnet4]` section header; in the
+global section it would apply to mainnet only. Restart bitcoin-qt after
+editing — the file is read once at startup. Verify the RPC is up:
+
+```
+curl.exe -s -u <user>:<password> --data-binary "{\"jsonrpc\":\"1.0\",\"id\":\"t\",\"method\":\"getblockchaininfo\",\"params\":[]}" -H "content-type: text/plain;" http://127.0.0.1:48400/
+```
+
+You should get a JSON reply with `"chain": "testnet4"`. "Failed to connect"
+means the RPC is not listening — almost always the wrong-datadir pitfall above.
+
+**4. Point Sequentia at it** in `elements.conf` (§2):
+
+```ini
+mainchainrpchost=127.0.0.1
+mainchainrpcport=48400
+mainchainrpcuser=<user>
+mainchainrpcpassword=<the-same-password>
+```
+
+**5. Let Bitcoin Core finish its initial sync before expecting Sequentia to
+sync.** Sequentia blocks anchor to *recent* testnet4 blocks. While your local
+Bitcoin Core is still in initial block download it does not yet know those
+blocks, so your Sequentia node rejects every incoming header with
+`anchor-unknown` ("not (yet) known to the parent chain daemon; rejecting block
+for now" in the log). This is deliberate and transient — nothing is banned and
+the headers are re-accepted automatically — but the practical effect is that
+**Sequentia stays at 0 blocks until `getblockchaininfo` on the Bitcoin node
+shows `"initialblockdownload": false`**. Testnet4 is small (well under 10 GB);
+first sync typically takes under an hour on a normal connection.
+
+Disk note: a full testnet4 node currently needs ~10 GB. If that is a problem,
+add `prune=2000` to the bitcoin.conf above (limits block storage to ~2 GB).
+Pruning is fine for anchor validation, which only queries headers/tip.
 
 ---
 
@@ -375,7 +459,10 @@ re-extend, with finality holding modulo the Bitcoin reorg - exactly as designed.
 |---|---|
 | `getconnectioncount` is 0 | the `addnode` host/port (item 2) is wrong or not reachable; confirm with the operator; check Windows Firewall isn't blocking `elementsd.exe`. |
 | Stuck in `initialblockdownload` | give it time on first sync; confirm you have a peer (§3) and the testnet4 RPC works (`getanchorstatus`). |
-| `getanchorstatus` not `"ok"` | your `mainchainrpc*` settings (item 3) are wrong/unreachable - fix them in `elements.conf` and restart. |
+| `getanchorstatus` not `"ok"` | your `mainchainrpc*` settings are wrong/unreachable - fix them in `elements.conf` and restart. |
+| Startup error "no valid response was received from the mainchain daemon" | the testnet4 RPC endpoint in `mainchainrpc*` is down or refusing the connection. If it points at your own Bitcoin Core, test it with the `curl.exe` command in §2b - if that fails too, it's the wrong-datadir pitfall (§2b step 2) or a missing `server=1`. |
+| Peer connected but `blocks`/`headers` stay at 0 | your own Bitcoin testnet4 node is still in initial block download, so anchors can't be verified yet (`anchor-unknown` in the log). Wait until Bitcoin Core's `getblockchaininfo` shows `"initialblockdownload": false` (§2b step 5). |
+| Peer connected, still 0 blocks, and the log (with `-debug=validation`) shows `block-proof-invalid, proof of work failed` / `Misbehaving: ... invalid header received` | your `elements.conf` is missing the consensus params from §2 (`pospubliccommittee=1`, `poscommitteesize=250` under `[test]`). Without them the node expects a different committee-certificate form and rejects every network block as invalid. Nothing is logged at the default level, which makes this the most silent failure in this table. Add the two lines and restart. |
 | `getstakescript` says the lock "is below the chain's minimum" | raise the `csv_seconds` argument to at least `1296000` (~15 days). |
 | Your staker never appears in `getposschedule` | confirm the registration tx is mined (`getstakerinfo`), that `posproducer=1` and `posproducerkey` are set, and the node has been restarted. |
 | A fee-in-asset tx won't confirm | no producer prices that asset; ask the operator to price it across the committee. |

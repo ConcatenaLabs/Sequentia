@@ -29,6 +29,7 @@ Operating runbooks (current):
 | [`demos/sequentia-testnet-runbook.md`](demos/sequentia-testnet-runbook.md) | Stand up a local `chain=test` committee with the bootstrap tooling. Written before the 2026-07-05 re-genesis: for the current public chain add `--public-committee` (i.e. `pospubliccommittee=1`, cap 250), and note `chain=test` now auto-adds the public gateway as a peer. |
 | [`demos/100-node-bootstrap-runbook.md`](demos/100-node-bootstrap-runbook.md) | Historical demo: the 100-node mainnet-style bootstrap (pre-public-committee, anchored to Bitcoin testnet3 at the time). The tooling it drives is current (`contrib/sequentia/bootstrap-autonomous-testnet.py`). |
 | [`regenesis-box-runbook.md`](regenesis-box-runbook.md) | Historical record: the box-side execution plan for the 2026-07-05 testnet re-genesis (executed; kept as the record of how the current chain was launched). |
+| [`release-versioning.md`](release-versioning.md) | Policy: official releases are git-tagged at the build commit; private/test rebuilds keep the version number and identify via `-uacomment` instead. |
 
 ## 2. Design documents
 
