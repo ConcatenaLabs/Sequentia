@@ -2131,7 +2131,13 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     if (gArgs.GetBoolArg("-validatepegin", Params().GetConsensus().has_parent_chain)) {
         uiInterface.InitMessage(_("Awaiting mainchain RPC warmup").translated);
         if (!MainchainRPCCheck()) {
-            const std::string err_msg = "ERROR: elements is set to verify pegins but cannot get a valid response from the mainchain daemon. Please check debug.log for more information.\n\nIf you haven't setup a bitcoind please get the latest stable version from https://bitcoincore.org/en/download/ or if you do not need to validate pegins set in your elements configuration validatepegin=0";
+            const std::string err_msg =
+                "Sequentia could not reach the Bitcoin node it uses to verify peg-ins.\n\n"
+                "Things to try, in order:\n"
+                "1. Open Bitcoin Core and wait until it has finished starting up, then restart Sequentia.\n"
+                "2. If Bitcoin Core is already running, make sure its RPC server is enabled (server=1 in bitcoin.conf).\n"
+                "3. Check the mainchainrpc* connection settings in your Sequentia configuration.\n\n"
+                "To run without a Bitcoin node, set validatepegin=0 in your configuration. Technical details are in debug.log.";
             // We fail immediately if this node has RPC server enabled
             if (gArgs.GetBoolArg("-server", false)) {
                 InitError(Untranslated(err_msg));
@@ -2193,7 +2199,13 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     if (g_con_bitcoin_anchor && g_validate_anchor) {
         uiInterface.InitMessage(_("Awaiting mainchain RPC warmup (anchoring)").translated);
         if (!MainchainRPCCheck()) {
-            const std::string err_msg = "ERROR: this chain anchors its blocks to a parent chain (con_bitcoin_anchor) but no valid response was received from the mainchain daemon. Configure the connection with the -mainchainrpc* options (and run a Bitcoin node), or set validateanchor=0 to validate offline; note that block production requires the mainchain connection.";
+            const std::string err_msg =
+                "Sequentia could not reach the Bitcoin node it anchors its blocks to.\n\n"
+                "Things to try, in order:\n"
+                "1. Open Bitcoin Core and wait until it has finished starting up, then restart Sequentia.\n"
+                "2. If Bitcoin Core is already running, make sure its RPC server is enabled (server=1 in bitcoin.conf).\n"
+                "3. Check the mainchainrpc* connection settings in your Sequentia configuration.\n\n"
+                "To validate offline without a Bitcoin node, set validateanchor=0 (producing blocks still requires the Bitcoin connection). Technical details are in debug.log.";
             if (gArgs.GetBoolArg("-server", false)) {
                 InitError(Untranslated(err_msg));
                 return false;

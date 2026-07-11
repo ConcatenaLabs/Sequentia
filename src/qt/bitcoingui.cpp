@@ -1260,8 +1260,23 @@ void BitcoinGUI::setNumBlocks(int count, const QDateTime& blockDate, double nVer
     {
         QString timeBehindText = GUIUtil::formatNiceTimeOffset(secs);
 
+        // SEQUENTIA: report catch-up as blocks remaining plus a percentage
+        // instead of upstream's wall-clock "%1 behind" (block timestamps make
+        // "18 hours behind" sound alarming when the actual catch-up is minutes
+        // of download and validation).
+        const int header_height = clientModel->getHeaderTipHeight();
+        const QString percent_done = QString::number(nVerificationProgress * 100.0, 'f', 1);
+        QString progressText;
+        if (header_height > count) {
+            progressText = tr("%n block(s) remaining (%1% done)", "", header_height - count).arg(percent_done);
+        } else {
+            // Header tip not yet known to be ahead of the validated tip, so a
+            // block count would be misleading; show only the percentage.
+            progressText = tr("%1% done").arg(percent_done);
+        }
+
         progressBarLabel->setVisible(true);
-        progressBar->setFormat(tr("%1 behind").arg(timeBehindText));
+        progressBar->setFormat(progressText);
         progressBar->setMaximum(1000000000);
         progressBar->setValue(nVerificationProgress * 1000000000.0 + 0.5);
         progressBar->setVisible(true);

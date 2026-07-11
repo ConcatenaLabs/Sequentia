@@ -43,7 +43,10 @@ SplashScreen::SplashScreen(const NetworkStyle* networkStyle)
     // define text to place
     QString titleText       = PACKAGE_NAME;
     QString versionText     = QString("Version %1").arg(QString::fromStdString(FormatFullVersion()));
-    QString copyrightText   = QString::fromUtf8(CopyrightHolders(strprintf("\xc2\xA9 %u-%u ", 2009, COPYRIGHT_YEAR)).c_str());
+    // SEQUENTIA: show only this project's copyright line on the splash screen
+    // (no inherited "2009-…" Bitcoin range); full upstream attribution lives
+    // in the About dialog and COPYING.
+    QString copyrightText   = QString::fromUtf8(strprintf("\xc2\xA9 %u %s", COPYRIGHT_YEAR, COPYRIGHT_HOLDERS_FINAL).c_str());
     QString titleAddText    = networkStyle->getTitleAddText();
 
     QString font            = QApplication::font().toString();
