@@ -15,10 +15,27 @@
 #include <util/system.h>
 #include <validation.h>
 
+#include <atomic>
 #include <map>
 #include <set>
 
 bool g_validate_anchor = true;
+
+//! Wall-clock time of the last finality-gate rejection of a rival branch
+//! (NotePosFinalForkRejection). Atomic, not GUARDED_BY(g_anchor_mutex):
+//! written from block validation with cs_main held, read by the GUI status
+//! poller and getanchorstatus — neither may take locks for this.
+static std::atomic<int64_t> g_last_posfinal_fork_reject{0};
+
+void NotePosFinalForkRejection()
+{
+    g_last_posfinal_fork_reject.store(GetTime(), std::memory_order_relaxed);
+}
+
+int64_t GetLastPosFinalForkRejectionTime()
+{
+    return g_last_posfinal_fork_reject.load(std::memory_order_relaxed);
+}
 
 namespace {
 

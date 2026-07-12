@@ -1069,6 +1069,30 @@ E' possibile firmare solo con indirizzi di tipo "legacy".</translation>
 <context>
     <name>BitcoinGUI</name>
     <message>
+        <source>Waiting for the Bitcoin network to settle…</source>
+        <translation type="unfinished">In attesa che la rete Bitcoin si stabilizzi…</translation>
+    </message>
+    <message>
+        <source>Sequentia records its history on the Bitcoin network, and Bitcoin is currently settling on a recent change.</source>
+        <translation type="unfinished">Sequentia registra la propria storia sulla rete Bitcoin, e Bitcoin sta ancora consolidando un cambiamento recente.</translation>
+    </message>
+    <message>
+        <source>New blocks are paused and resume automatically, usually within minutes. Your funds are safe; no action is needed.</source>
+        <translation type="unfinished">I nuovi blocchi sono in pausa e riprenderanno automaticamente, di solito entro pochi minuti. I tuoi fondi sono al sicuro; non è richiesta alcuna azione.</translation>
+    </message>
+    <message>
+        <source>Waiting for the Bitcoin connection…</source>
+        <translation type="unfinished">In attesa della connessione a Bitcoin…</translation>
+    </message>
+    <message>
+        <source>New blocks are paused because the Bitcoin program this node works with cannot be reached.</source>
+        <translation type="unfinished">I nuovi blocchi sono in pausa perché il programma Bitcoin con cui questo nodo lavora non è raggiungibile.</translation>
+    </message>
+    <message>
+        <source>Open Bitcoin Core and leave it running; blocks resume on their own once it is reachable again.</source>
+        <translation type="unfinished">Apri Bitcoin Core e lascialo in esecuzione; i blocchi riprenderanno da soli non appena tornerà raggiungibile.</translation>
+    </message>
+    <message>
         <source>&amp;Overview</source>
         <translation type="unfinished">&amp;Panoramica</translation>
     </message>

@@ -188,6 +188,14 @@ private:
     int prevBlocks = 0;
     int spinnerFrame = 0;
 
+    /** SEQUENTIA "waiting for the Bitcoin network" stall notice (incident
+        2026-07-11 §8.3). The timer only queries the node while the tip is
+        stalled; m_last_tip_advance is when the tip last moved (wall clock,
+        seeded from the tip block's own timestamp at startup). */
+    QTimer* m_anchor_wait_timer = nullptr;
+    int64_t m_last_tip_advance = 0;
+    bool m_anchor_wait_active = false;
+
     const PlatformStyle *platformStyle;
     const NetworkStyle* const m_network_style;
 
@@ -212,6 +220,11 @@ private:
     void updateNetworkState();
 
     void updateHeadersSyncProgressLabel();
+
+    /** SEQUENTIA: show (or retire) the status-bar notice that the chain has
+        paused because of Bitcoin — fork being settled, or Bitcoin daemon
+        unreachable. Runs on m_anchor_wait_timer. */
+    void updateAnchorWaitStatus();
 
     /** Open the OptionsDialog on the specified tab index */
     void openOptionsDialogWithTab(OptionsDialog::Tab tab);

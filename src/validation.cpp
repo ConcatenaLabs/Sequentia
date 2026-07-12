@@ -4557,6 +4557,10 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
                     anc_final == nullptr || anc_final->GetBlockHash() != g_pos_immediate_final_hash) {
                     LogPrintf("ERROR: %s: rejecting block (height %d) that forks at/below the immediately-finalized block %s (height %d)\n",
                               __func__, nHeight, g_pos_immediate_final_hash.ToString(), g_pos_immediate_final_height);
+                    // Repeated rejections here while the tip stands still mark
+                    // a contested parent-chain fork; the GUI/RPC surface it as
+                    // "waiting for Bitcoin" (incident 2026-07-11 §8.3).
+                    NotePosFinalForkRejection();
                     return state.Invalid(BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE, "bad-fork-prior-to-pos-final");
                 }
             }

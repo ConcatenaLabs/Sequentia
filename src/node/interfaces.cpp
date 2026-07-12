@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <addrdb.h>
+#include <anchor.h>
 #include <banman.h>
 #include <chain.h>
 #include <chainparams.h>
@@ -259,6 +260,37 @@ public:
     }
     bool getNetworkActive() override { return m_context->connman && m_context->connman->GetNetworkActive(); }
     CFeeRate getDustRelayFee() override { return ::dustRelayFee; }
+    interfaces::AnchorTipState getAnchorTipState() override
+    {
+        interfaces::AnchorTipState state;
+        state.validated = g_con_bitcoin_anchor && g_validate_anchor;
+        state.last_finality_fork_rejection = GetLastPosFinalForkRejectionTime();
+        if (!state.validated) return state;
+        uint32_t anchor_height{0};
+        uint256 anchor_hash;
+        {
+            LOCK(::cs_main);
+            const CBlockIndex* tip = chainman().ActiveChain().Tip();
+            if (!tip) return state;
+            anchor_height = tip->m_anchor_height;
+            anchor_hash = tip->m_anchor_hash;
+        }
+        if (anchor_hash.IsNull()) return state;
+        // Outside cs_main: may round-trip to the Bitcoin daemon (OK results
+        // are cached per parent-tip epoch and served without any RPC).
+        switch (CheckMainchainAnchor(anchor_height, anchor_hash)) {
+        case AnchorCheckResult::OK:
+            break;
+        case AnchorCheckResult::NO_CONNECTION:
+            state.anchor_ok = false;
+            state.no_connection = true;
+            break;
+        default: // STALE / NOT_FOUND / HEIGHT_MISMATCH: off the Bitcoin best chain
+            state.anchor_ok = false;
+            break;
+        }
+        return state;
+    }
     UniValue executeRpc(const std::string& command, const UniValue& params, const std::string& uri) override
     {
         JSONRPCRequest req;

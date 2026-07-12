@@ -54,6 +54,24 @@ struct BlockAndHeaderTipInfo
     double verification_progress;
 };
 
+//! SEQUENTIA: the GUI-relevant state of the chain tip's Bitcoin anchor, for
+//! the status bar's "waiting for the Bitcoin network" indicator (incident
+//! 2026-07-11 §8.3). Only meaningful when `validated` is true.
+struct AnchorTipState
+{
+    //! This chain anchors to Bitcoin AND this node checks anchors against a
+    //! Bitcoin daemon (g_con_bitcoin_anchor && -validateanchor).
+    bool validated{false};
+    //! Tip anchor confirmed on the Bitcoin best chain on the last check.
+    bool anchor_ok{true};
+    //! The Bitcoin daemon could not be reached on the last check.
+    bool no_connection{false};
+    //! Unix time of the most recent rival branch rejected at the PoS finality
+    //! gate (0 = none since startup). Recent rejections while the tip stands
+    //! still signal a contested Bitcoin fork.
+    int64_t last_finality_fork_rejection{0};
+};
+
 //! External signer interface used by the GUI.
 class ExternalSigner
 {
@@ -172,6 +190,12 @@ public:
 
     //! Get dust relay fee.
     virtual CFeeRate getDustRelayFee() = 0;
+
+    //! SEQUENTIA: state of the chain tip's Bitcoin anchor (see AnchorTipState).
+    //! May perform one RPC round-trip to the local Bitcoin daemon when the
+    //! result is not cached; call it sparingly (the GUI polls it only while
+    //! the tip is stalled).
+    virtual AnchorTipState getAnchorTipState() = 0;
 
     //! Execute rpc command.
     virtual UniValue executeRpc(const std::string& command, const UniValue& params, const std::string& uri) = 0;

@@ -128,6 +128,18 @@ void SeedAnchorInvalidated(const std::vector<uint256>& block_hashes);
 std::optional<uint256> AnchorCertifiedSiblingPending(ChainstateManager& chainman,
                                                      const uint256& tip_hash, int child_height);
 
+/** Record that the PoS finality gate rejected a rival branch
+ *  (bad-fork-prior-to-pos-final in ContextualCheckBlockHeader). Rivals being
+ *  re-offered and re-rejected every few peer retries while the tip stands
+ *  still is the live signature of a contested parent-chain (Bitcoin) fork —
+ *  the 2026-07-11 testnet4 incident. The GUI and getanchorstatus read this to
+ *  tell the user to wait for Bitcoin instead of showing a generic sync state. */
+void NotePosFinalForkRejection();
+
+/** Unix time of the most recent NotePosFinalForkRejection (0 = none since
+ *  startup). Lock-free; safe from any thread. */
+int64_t GetLastPosFinalForkRejectionTime();
+
 // --- Bitcoin checkpoints against PoS long-range attacks (paper §11) ---
 //
 // Anyone may commit a Sequentia block reference into the parent chain as a

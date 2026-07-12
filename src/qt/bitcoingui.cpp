@@ -631,6 +631,18 @@ void BitcoinGUI::setClientModel(ClientModel *_clientModel, interfaces::BlockAndH
         setNumBlocks(tip_info->block_height, QDateTime::fromSecsSinceEpoch(tip_info->block_time), tip_info->verification_progress, false, SynchronizationState::INIT_DOWNLOAD);
         connect(_clientModel, &ClientModel::numBlocksChanged, this, &BitcoinGUI::setNumBlocks);
 
+        // SEQUENTIA: watch for a Bitcoin-driven stall of the chain tip and
+        // say so in the status bar (see updateAnchorWaitStatus). The initial
+        // setNumBlocks call above seeded m_last_tip_advance from the tip
+        // block's timestamp, so a chain already stalled before the GUI opened
+        // is noticed on the first tick.
+        if (!m_anchor_wait_timer) {
+            m_anchor_wait_timer = new QTimer(this);
+            m_anchor_wait_timer->setInterval(15 * 1000);
+            connect(m_anchor_wait_timer, &QTimer::timeout, this, &BitcoinGUI::updateAnchorWaitStatus);
+        }
+        m_anchor_wait_timer->start();
+
         // Receive and report messages from client model
         connect(_clientModel, &ClientModel::message, [this](const QString &title, const QString &message, unsigned int style){
             this->message(title, message, style);
@@ -665,6 +677,7 @@ void BitcoinGUI::setClientModel(ClientModel *_clientModel, interfaces::BlockAndH
             // Disable context menu on tray icon
             trayIconMenu->clear();
         }
+        if (m_anchor_wait_timer) m_anchor_wait_timer->stop();
         // Propagate cleared model to child objects
         rpcConsole->setClientModel(nullptr);
 #ifdef ENABLE_WALLET
@@ -1168,6 +1181,60 @@ void BitcoinGUI::updateHeadersSyncProgressLabel()
         progressBarLabel->setText(tr("Syncing Headers (%1%)…").arg(QString::number(100.0 / (headersTipHeight+estHeadersLeft)*headersTipHeight, 'f', 1)));
 }
 
+// SEQUENTIA: when the chain pauses because of Bitcoin — the tip's anchor is
+// off the Bitcoin best chain (a Bitcoin fork/reorganization being settled),
+// rival branches are being rejected at the PoS finality gate, or the Bitcoin
+// daemon is unreachable — the status bar would otherwise show nothing at all
+// ("up to date" hides the progress texts until MAX_BLOCK_TIME_GAP, 90 min).
+// Say explicitly that the node is waiting for Bitcoin, so users know the
+// right action is simply to wait (incident 2026-07-11 §8.3).
+void BitcoinGUI::updateAnchorWaitStatus()
+{
+    if (!clientModel) return;
+
+    // No block for this long counts as a stall: 10 slots at the 30 s block
+    // interval — a pause this long means production is blocked, not unlucky.
+    constexpr int64_t STALL_SECS = 5 * 60;
+    // A finality-gate rejection within this window means the fork contest is
+    // still live (rivals are re-offered roughly every 30 s while it lasts).
+    constexpr int64_t FORK_REJECT_RECENT_SECS = 10 * 60;
+
+    const int64_t now = QDateTime::currentSecsSinceEpoch();
+    QString text;
+    QString explain;
+    // Cheap wall-clock test first: outside a stall the node is not queried at
+    // all (the anchor check may round-trip to the Bitcoin daemon).
+    if (m_last_tip_advance > 0 && now - m_last_tip_advance >= STALL_SECS) {
+        const interfaces::AnchorTipState state = m_node.getAnchorTipState();
+        const bool fork_contested = state.last_finality_fork_rejection > 0 &&
+                                    now - state.last_finality_fork_rejection <= FORK_REJECT_RECENT_SECS;
+        if (state.validated && (!state.anchor_ok || fork_contested)) {
+            if (state.no_connection && !fork_contested) {
+                text = tr("Waiting for the Bitcoin connection…");
+                explain = tr("New blocks are paused because the Bitcoin program this node works with cannot be reached.") + QString("<br>") +
+                          tr("Open Bitcoin Core and leave it running; blocks resume on their own once it is reachable again.");
+            } else {
+                text = tr("Waiting for the Bitcoin network to settle…");
+                explain = tr("Sequentia records its history on the Bitcoin network, and Bitcoin is currently settling on a recent change.") + QString("<br>") +
+                          tr("New blocks are paused and resume automatically, usually within minutes. Your funds are safe; no action is needed.");
+            }
+        }
+    }
+
+    if (!text.isEmpty()) {
+        m_anchor_wait_active = true;
+        progressBarLabel->setText(text);
+        progressBarLabel->setToolTip(explain);
+        labelBlocksIcon->setToolTip(explain);
+        progressBarLabel->setVisible(true);
+    } else if (m_anchor_wait_active) {
+        // Condition cleared without a new block yet: restore the normal
+        // status-bar state (setNumBlocks repaints fully on the next block).
+        m_anchor_wait_active = false;
+        progressBarLabel->setVisible(progressBar->isVisible());
+    }
+}
+
 void BitcoinGUI::openOptionsDialogWithTab(OptionsDialog::Tab tab)
 {
     if (!clientModel || !clientModel->getOptionsModel())
@@ -1200,6 +1267,17 @@ void BitcoinGUI::setNumBlocks(int count, const QDateTime& blockDate, double nVer
     }
     if (!clientModel)
         return;
+
+    // SEQUENTIA: a (non-header) tip update means the chain is moving again;
+    // note when, and retire any "waiting for Bitcoin" stall notice — the
+    // normal paths below repaint the status bar. The block's own timestamp
+    // (clamped to now) is used instead of the wall clock so that at startup
+    // a chain that was already stalled before the GUI opened is noticed on
+    // the first timer tick rather than a full stall period later.
+    if (!header) {
+        m_last_tip_advance = qMin<qint64>(blockDate.toSecsSinceEpoch(), QDateTime::currentSecsSinceEpoch());
+        m_anchor_wait_active = false;
+    }
 
     // Prevent orphan statusbar messages (e.g. hover Quit in main menu, wait until chain-sync starts -> garbled text)
     statusBar()->clearMessage();

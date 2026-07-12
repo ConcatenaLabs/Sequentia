@@ -3197,6 +3197,7 @@ static RPCHelpMan getanchorstatus()
                         {RPCResult::Type::NUM, "anchorheight", "parent chain height referenced by the tip"},
                         {RPCResult::Type::STR_HEX, "anchorhash", "parent chain block hash referenced by the tip"},
                         {RPCResult::Type::STR, "anchorstatus", "result of checking the tip anchor against the parent chain daemon: \"ok\", \"not_found\", \"stale\", \"height_mismatch\", \"no_connection\" or \"not_validated\""},
+                        {RPCResult::Type::NUM_TIME, "lastposfinalreject", "unix time of the most recent rival branch rejected at the PoS finality gate (0 = none since startup); recent rejections while the tip stands still signal a contested parent-chain fork"},
                     }},
                 RPCExamples{
                     HelpExampleCli("getanchorstatus", "")
@@ -3234,6 +3235,7 @@ static RPCHelpMan getanchorstatus()
         }
     }
     result.pushKV("anchorstatus", status);
+    result.pushKV("lastposfinalreject", GetLastPosFinalForkRejectionTime());
     return result;
 },
     };
