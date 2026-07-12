@@ -79,6 +79,7 @@
 #include <walletinitinterface.h>
 
 #include <condition_variable>
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
@@ -831,13 +832,11 @@ void InitParameterInteraction(ArgsManager& args)
             LogPrintf("%s: chain=test -> setting -anchorminconf=1\n", __func__);
         if (args.SoftSetArg("-anchorpollinterval", "15"))
             LogPrintf("%s: chain=test -> setting -anchorpollinterval=15\n", __func__);
-        // Peer with the shared testnet gateway. Done as an -addnode default
-        // (explicit IP:port) rather than via vSeeds: vSeeds are DNS hostnames
-        // resolved without a port (LookupHost), and the gateway's P2P port
-        // (18444) differs from this chain's nDefaultPort, so a vSeeds entry
-        // can't reach it. -addnode takes IP:port directly (as the README did).
-        if (args.SoftSetArg("-addnode", "159.195.15.140:18444"))
-            LogPrintf("%s: chain=test -> setting -addnode=159.195.15.140:18444 (shared testnet gateway)\n", __func__);
+        // Peering with the shared seed nodes is handled in AppInitMain (they
+        // are appended to connOptions.m_added_nodes alongside any user
+        // -addnode entries), not via a SoftSet default here: a SoftSet default
+        // vanishes as soon as the user configures a single -addnode of their
+        // own, and it can only carry one value.
         // Fetch verified asset labels from the shared Sequentia Asset Registry, so
         // a fresh testnet node/GUI shows USDX/GOLD/etc. with no -assetdir config.
         // Use the domain, not the raw IP: the box 301-redirects raw-IP http to
@@ -1989,6 +1988,23 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     connOptions.nSendBufferMaxSize = 1000 * args.GetIntArg("-maxsendbuffer", DEFAULT_MAXSENDBUFFER);
     connOptions.nReceiveFloodSize = 1000 * args.GetIntArg("-maxreceivebuffer", DEFAULT_MAXRECEIVEBUFFER);
     connOptions.m_added_nodes = args.GetArgs("-addnode");
+    // SEQUENTIA: on the public test network, always peer with the known seed
+    // nodes in addition to any user-configured -addnode entries, so a fresh
+    // node syncs even when one of them is down. Done here rather than via
+    // vSeeds: vSeeds entries are DNS names resolved without a port
+    // (LookupHost), and the seeds' P2P port (18444) differs from this chain's
+    // nDefaultPort, so a vSeeds entry can't reach them. -addnode entries only
+    // supplement automatic connections (MAX_ADDNODE_CONNECTIONS slots), and
+    // -connect still overrides peer selection entirely.
+    if (Params().NetworkIDString() == CBaseChainParams::TESTNET) {
+        for (const std::string seed : {"159.195.15.140:18444",   // shared testnet gateway
+                                       "13.140.162.77:18444"}) { // community seed (Contabo)
+            if (std::find(connOptions.m_added_nodes.begin(), connOptions.m_added_nodes.end(), seed) == connOptions.m_added_nodes.end()) {
+                connOptions.m_added_nodes.push_back(seed);
+                LogPrintf("AppInitMain: chain=test -> adding seed peer %s\n", seed);
+            }
+        }
+    }
     connOptions.nMaxOutboundLimit = *opt_max_upload;
     connOptions.m_peer_connect_timeout = peer_connect_timeout;
 

@@ -830,10 +830,10 @@ public:
 
         vFixedSeeds.clear();
         vSeeds.clear();
-        // SEQUENTIA: peers come from the shared testnet gateway via a built-in
-        // -addnode default (see InitParameterInteraction in init.cpp) using an
+        // SEQUENTIA: peers come from the built-in seed nodes (gateway +
+        // community VPS), appended to -addnode in AppInitMain (init.cpp) with
         // explicit IP:port. vSeeds (DNS hostnames, resolved without a port via
-        // LookupHost) can't carry the gateway's non-default P2P port, so it is
+        // LookupHost) can't carry their non-default P2P port (18444), so it is
         // left empty here. The retired 89.216.21.96 seed is gone.
 
         // SEQUENTIA: the default (unblinded) address format is identical to
