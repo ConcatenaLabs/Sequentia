@@ -47,11 +47,21 @@ _state = {
 }
 
 
+# Offering-reference tickers seeded via POST /seed. These are NOT market prices
+# (they are the fixed offering price an issuer set), so they stay static and are
+# excluded from the random walk. This is data only: it adds a row to /prices so a
+# newly issued asset resolves for reference-currency display. It does not touch
+# any rate calculation, which lives in price_server.py and is left untouched.
+_static = set()
+
+
 def _walk(tick_secs):
     while True:
         time.sleep(tick_secs)
         with _lock:
             for t, s in _state.items():
+                if t in _static:
+                    continue
                 drift = random.uniform(-0.02, 0.02)              # +/- 2% per tick
                 revert = (BASE[t] - s["price"]) / BASE[t] * 0.05  # gentle mean reversion
                 s["price"] = max(1e-6, s["price"] * (1 + drift + revert))
@@ -79,6 +89,24 @@ class Handler(BaseHTTPRequestHandler):
                 if t in _state:
                     self._json(_state[t]); return
         self._json({"error": "not found"}, 404)
+
+    def do_POST(self):
+        if self.path != "/seed":
+            self._json({"error": "not found"}, 404); return
+        try:
+            n = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(n) or b"{}")
+            t = str(body["ticker"]).upper()
+            price = float(body["price"])
+        except (ValueError, KeyError, TypeError):
+            self._json({"error": "expected {ticker, price, quote?, kind?}"}, 400); return
+        with _lock:
+            _state[t] = {"price": max(1e-6, price),
+                         "market_cap": 0.0, "volume_24h": 0.0,
+                         "kind": body.get("kind", "offering-reference"),
+                         "quote": body.get("quote", "USD")}
+            _static.add(t)  # offering-reference: static, not random-walked
+        self._json({"ok": True, "ticker": t, "price": price})
 
     def log_message(self, *_a):  # quiet
         pass
