@@ -30,6 +30,8 @@
 #include <QShowEvent>
 #include <QStringList>
 #include <QTableWidget>
+#include <QTime>
+#include <QTimer>
 #include <QVBoxLayout>
 
 StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
@@ -101,10 +103,10 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
     m_stakers->verticalHeader()->setVisible(false);
     m_stakers->setEditTriggers(QAbstractItemView::NoEditTriggers);
     statusLayout->addWidget(m_stakers);
-    QPushButton* refreshBtn = new QPushButton(tr("Refresh"), statusGroup);
+    m_refresh_button = new QPushButton(tr("Refresh"), statusGroup);
     QHBoxLayout* refreshRow = new QHBoxLayout();
     refreshRow->addStretch();
-    refreshRow->addWidget(refreshBtn);
+    refreshRow->addWidget(m_refresh_button);
     statusLayout->addLayout(refreshRow);
     layout->addWidget(statusGroup);
 
@@ -114,7 +116,7 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
     layout->addStretch();
 
     connect(m_stake_button, &QPushButton::clicked, this, &StakingPage::onStake);
-    connect(refreshBtn, &QPushButton::clicked, this, &StakingPage::refresh);
+    connect(m_refresh_button, &QPushButton::clicked, this, &StakingPage::onRefreshClicked);
 }
 
 void StakingPage::setModel(WalletModel* model)
@@ -217,13 +219,34 @@ void StakingPage::refresh()
         if (seq.contains('.')) { while (seq.endsWith('0')) seq.chop(1); if (seq.endsWith('.')) seq.chop(1); }
         m_stakers->setItem(row, 1, new QTableWidgetItem(seq));
     }
-    m_summary->setText(tr("%1 registered staker(s).").arg(keys.size()));
+    // Always stamp the update time: it is the only visible change when the
+    // registry contents did not move between two refreshes.
+    m_summary->setText(tr("%1 registered staker(s) — updated at %2.")
+                           .arg(keys.size())
+                           .arg(QTime::currentTime().toString(Qt::TextDate)));
 }
 
 void StakingPage::showEvent(QShowEvent* event)
 {
     QWidget::showEvent(event);
     refresh();
+}
+
+void StakingPage::onRefreshClicked()
+{
+    // The registry RPCs are fast enough to run synchronously, so without explicit
+    // feedback a click looks like a no-op whenever the list is unchanged. Show the
+    // in-progress state, let the event loop paint it, then refresh (which stamps
+    // the summary with the update time) and restore the button.
+    if (!m_refresh_button) return;
+    m_refresh_button->setEnabled(false);
+    m_refresh_button->setText(tr("Refreshing…"));
+    if (m_summary) m_summary->setText(tr("Refreshing the stake registry…"));
+    QTimer::singleShot(100, this, [this] {
+        refresh();
+        m_refresh_button->setText(tr("Refresh"));
+        m_refresh_button->setEnabled(true);
+    });
 }
 
 void StakingPage::onStake()
