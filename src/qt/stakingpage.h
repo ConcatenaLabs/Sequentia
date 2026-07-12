@@ -42,6 +42,7 @@ protected:
 private Q_SLOTS:
     void onStake();
     void onEnableProduction();
+    void onRefreshClicked();
 
 private:
     WalletModel* m_wallet_model{nullptr};
@@ -51,6 +52,7 @@ private:
     QPushButton* m_enable_button{nullptr};
     QLabel* m_summary{nullptr};
     QTableWidget* m_stakers{nullptr};
+    QPushButton* m_refresh_button{nullptr};
     QLineEdit* m_stake_amount{nullptr};
     QPushButton* m_stake_button{nullptr};
     QLabel* m_result{nullptr};
