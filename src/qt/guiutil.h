@@ -227,6 +227,10 @@ namespace GUIUtil
     /* Format one or more asset+amounts in a user-friendly style */
     QString formatMultiAssetAmount(const CAmountMap&, int bitcoin_unit, BitcoinUnits::SeparatorStyle, QString line_separator);
 
+    /* SEQUENTIA: as formatMultiAssetAmount, but each asset line gets its own muted
+       "≈ <value> <REF>" appended (via formatReferenceApprox). Display-only. */
+    QString formatMultiAssetAmountWithValue(const CAmountMap&, int bitcoin_unit, BitcoinUnits::SeparatorStyle, const QString& refTicker, QString line_separator);
+
     /* SEQUENTIA: a muted "≈ <amount> <REF>" valuing (asset, amount) in the user-chosen reference
        currency, using the node's cached USD price feed. Empty when unpriced/unavailable or when the
        amount is already in the reference denomination. Display-only — never used for copy/export. */

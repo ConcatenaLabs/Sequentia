@@ -876,6 +876,31 @@ QString formatMultiAssetAmount(const CAmountMap& amountmap, const int bitcoin_un
     return ret.join(line_separator);
 }
 
+QString formatMultiAssetAmountWithValue(const CAmountMap& amountmap, const int bitcoin_unit, BitcoinUnits::SeparatorStyle separators, const QString& refTicker, QString line_separator)
+{
+    QStringList ret;
+    // Same ordering/filtering rules as formatMultiAssetAmount (native first when positive,
+    // skip non-positive amounts), but append a muted per-asset "≈ <value> <REF>" to each line.
+    auto line = [&](const CAsset& asset, const CAmount amt) -> QString {
+        QString s = formatAssetAmount(asset, amt, bitcoin_unit, separators);
+        const QString v = formatReferenceApprox(asset, amt, refTicker);
+        if (!v.isEmpty()) s += QStringLiteral("   ") + v;
+        return s;
+    };
+    if (bitcoin_unit >= 0) {
+        const CAsset& pegged = Params().GetConsensus().pegged_asset;
+        const CAmount nat = amountmap.count(pegged) ? amountmap.at(pegged) : 0;
+        if (nat > 0) ret << line(pegged, nat);
+    }
+    for (const auto& assetamount : amountmap) {
+        if (assetamount.first == Params().GetConsensus().pegged_asset) continue;
+        if (assetamount.second <= 0) continue;
+        ret << line(assetamount.first, assetamount.second);
+    }
+    if (ret.isEmpty()) return bitcoin_unit >= 0 ? QString::fromUtf8("\xE2\x80\x94") : QString();
+    return ret.join(line_separator);
+}
+
 bool parseAssetAmount(const CAsset& asset, const QString& text, const int bitcoin_unit, CAmount *val_out)
 {
     if (asset == Params().GetConsensus().pegged_asset) {
