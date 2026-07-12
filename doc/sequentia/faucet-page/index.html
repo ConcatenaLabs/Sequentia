@@ -1,0 +1,119 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sequentia testnet faucet</title>
+<link rel="icon" href="/explorer/img/icons/SequentiaTestnet-menu-logo.svg">
+<style>
+  :root{color-scheme:dark}
+  body{margin:0;font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#0f1216;color:#e8eaed;display:flex;min-height:100vh;align-items:center;justify-content:center}
+  .wrap{max-width:720px;padding:48px 24px;width:100%}
+  .brand{display:flex;align-items:center;gap:14px;margin:0 0 8px}
+  .brand img{height:52px;width:52px}
+  h1{font-size:30px;margin:0} h1 .t{color:#f5b301}
+  .sub{color:#9aa0a6;margin:0 0 28px}
+  .panel{background:#171b21;border:1px solid #262b33;border-radius:12px;padding:22px}
+  label{display:block;font-size:13px;color:#9aa0a6;margin:0 0 6px}
+  input[type=text]{width:100%;box-sizing:border-box;background:#0f1216;border:1px solid #262b33;border-radius:8px;color:#e8eaed;font:14px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace;padding:11px 12px;outline:none}
+  input[type=text]:focus{border-color:#f5b301}
+  .hint{font-size:12.5px;color:#6b7280;margin:8px 0 0}
+  .hint code{color:#9aa0a6;font-size:12px}
+  .assets{display:flex;flex-wrap:wrap;gap:10px;margin-top:18px}
+  .assets button{background:#0f1216;border:1px solid #262b33;border-radius:8px;color:#e8eaed;font-size:14px;padding:9px 16px;cursor:pointer;transition:border-color .15s,transform .05s}
+  .assets button:hover:not(:disabled){border-color:#f5b301;transform:translateY(-1px)}
+  .assets button:disabled{opacity:.45;cursor:default}
+  .assets button.all{border-color:#f5b301;color:#f5b301;font-weight:600}
+  .assets button b{color:#f5b301;font-weight:600} .assets button.all b{color:inherit}
+  .assets button small{color:#6b7280;font-size:11.5px;display:block;line-height:1.2}
+  #log{margin-top:18px;display:grid;gap:8px}
+  .msg{font-size:14px;border-radius:8px;padding:10px 12px;border:1px solid #262b33;background:#0f1216;overflow-wrap:anywhere}
+  .msg.ok{border-color:#1d4429;color:#7ee2a0}
+  .msg.err{border-color:#5a2626;color:#f0a1a1}
+  .msg.busy{color:#9aa0a6}
+  .msg a{color:#f5b301;text-decoration:none} .msg a:hover{text-decoration:underline}
+  .spin{display:inline-block;width:12px;height:12px;border:2px solid #6b7280;border-top-color:#f5b301;border-radius:50%;margin-right:8px;vertical-align:-1px;animation:r .8s linear infinite}
+  @keyframes r{to{transform:rotate(360deg)}}
+  footer{margin-top:32px;border-top:1px solid #262b33;padding-top:20px;color:#6b7280;font-size:13px}
+  footer a{color:#f5b301;text-decoration:none} footer a:hover{text-decoration:underline}
+</style></head><body><div class="wrap">
+  <div class="brand">
+    <a href="/"><img src="/explorer/img/icons/SequentiaTestnet-menu-logo.svg" alt="Sequentia"></a>
+    <h1>Sequentia <span class="t">faucet</span></h1>
+  </div>
+  <p class="sub">Free testnet coins, sent straight to any Sequentia testnet address &mdash; your full node, desktop wallet, mobile wallet or web wallet.</p>
+
+  <div class="panel">
+    <label for="addr">Your Sequentia testnet address</label>
+    <input type="text" id="addr" placeholder="tb1q&hellip;" spellcheck="false" autocomplete="off">
+    <p class="hint">In the desktop wallet: <b>Receive &rarr; Create new address</b>. From a node: <code>sequentia-cli getnewaddress</code>. In the <a href="/wallet/" style="color:#f5b301;text-decoration:none">web wallet</a>: the receive address on the main screen.</p>
+
+    <div class="assets" id="assets">
+      <button data-asset=""><b>tSEQ</b><small>Sequence token</small></button>
+      <button data-asset="USDX"><b>USDX</b><small>test dollar</small></button>
+      <button data-asset="EURX"><b>EURX</b><small>test euro</small></button>
+      <button data-asset="GOLD"><b>GOLD</b><small>test gold</small></button>
+      <button data-asset="SILVR"><b>SILVR</b><small>test silver</small></button>
+      <button data-asset="OILX"><b>OILX</b><small>test oil</small></button>
+      <button class="all" id="allBtn"><b>All of them</b><small>one of each</small></button>
+    </div>
+
+    <div id="log"></div>
+  </div>
+
+  <footer>
+    Testnet only; assets carry no value. &middot; <a href="/">sequentiatestnet.com</a>
+  </footer>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+const addrInput=$('addr');
+addrInput.value=localStorage.getItem('faucetAddr')||'';
+addrInput.addEventListener('input',()=>localStorage.setItem('faucetAddr',addrInput.value.trim()));
+
+function msg(cls,html){const d=document.createElement('div');d.className='msg '+cls;d.innerHTML=html;$('log').prepend(d);return d;}
+function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+
+function checkAddr(){
+  const a=addrInput.value.trim();
+  if(!a){msg('err','Enter an address first.');addrInput.focus();return null;}
+  if(!/^[a-zA-Z0-9]{14,120}$/.test(a)){msg('err','That doesn’t look like a valid address.');return null;}
+  return a;
+}
+
+async function requestOne(asset,addr){
+  const label=asset||'tSEQ';
+  const busy=msg('busy','<span class="spin"></span>Requesting '+esc(label)+'…');
+  try{
+    const body=asset?{address:addr,asset}:{address:addr};
+    const r=await fetch('/faucet',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    let j; try{j=await r.json();}catch(e){j={};}
+    if(!r.ok) throw new Error(j.error||('HTTP '+r.status));
+    busy.className='msg ok';
+    busy.innerHTML='Sent '+esc(Number(j.amount).toLocaleString('en-US'))+' '+esc(j.asset)+
+      ' &mdash; <a href="/explorer/tx/'+esc(j.txid)+'" target="_blank" rel="noopener">'+esc(String(j.txid).slice(0,16))+'&hellip;</a>'+
+      ' It will appear once it confirms (about a minute).';
+  }catch(e){
+    busy.className='msg err';
+    busy.textContent=label+': '+(e&&e.message?e.message:e);
+  }
+}
+
+let running=false;
+async function withButtons(fn){
+  if(running)return; running=true;
+  const btns=[...document.querySelectorAll('.assets button')];
+  btns.forEach(b=>b.disabled=true);
+  try{await fn();}finally{btns.forEach(b=>b.disabled=false);running=false;}
+}
+
+document.querySelectorAll('#assets button[data-asset]').forEach(b=>{
+  b.addEventListener('click',()=>{const a=checkAddr();if(a)withButtons(()=>requestOne(b.dataset.asset,a));});
+});
+$('allBtn').addEventListener('click',()=>{
+  const a=checkAddr(); if(!a)return;
+  withButtons(async()=>{
+    for(const b of document.querySelectorAll('#assets button[data-asset]')){
+      await requestOne(b.dataset.asset,a);
+    }
+  });
+});
+</script>
+</body></html>
