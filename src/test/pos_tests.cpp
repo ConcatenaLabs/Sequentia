@@ -1194,4 +1194,44 @@ BOOST_AUTO_TEST_CASE(pos_payout_required_coinbase_script)
     reg.Clear();
 }
 
+// Fix A: the block producer backs its new block's anchor down below any
+// parent-chain height a live competing branch is contesting, but never for
+// forks that have already fallen out of the contest window.
+BOOST_AUTO_TEST_CASE(anchor_uncontested_height)
+{
+    using Br = std::vector<std::pair<int, int>>; // {tip height, branchlen}
+
+    // No competing branches: the whole tip is uncontested.
+    BOOST_CHECK_EQUAL(AnchorUncontestedHeight(1000, 2, {}), 1000);
+
+    // A rival at the same height forking 3 blocks back: everything from the fork
+    // point (997) upward is contested, so back off to 997.
+    BOOST_CHECK_EQUAL(AnchorUncontestedHeight(1000, 2, Br{{1000, 3}}), 997);
+
+    // The deepest live fork wins the back-off (lowest fork point among rivals):
+    // 1000-3=997 vs 999-1=998 -> 997.
+    BOOST_CHECK_EQUAL(AnchorUncontestedHeight(1000, 2, Br{{1000, 3}, {999, 1}}), 997);
+
+    // Today's testnet4 shape: several equal-height rivals with deep branches.
+    // Lowest fork point is 1000-23=977.
+    BOOST_CHECK_EQUAL(AnchorUncontestedHeight(1000, 2, Br{{1000, 23}, {1000, 18}, {1000, 1}}), 977);
+
+    // A rival whose tip is further than the window behind the active tip is
+    // losing the race and ignored: with window 2, a tip at 997 (3 behind) does
+    // not lower the anchor, so the tip stays uncontested.
+    BOOST_CHECK_EQUAL(AnchorUncontestedHeight(1000, 2, Br{{997, 1}}), 1000);
+    // Exactly at the window edge (2 behind) still counts.
+    BOOST_CHECK_EQUAL(AnchorUncontestedHeight(1000, 2, Br{{998, 1}}), 997);
+
+    // branchlen 0 (shares the active chain, e.g. a stray active-looking entry)
+    // is never a fork.
+    BOOST_CHECK_EQUAL(AnchorUncontestedHeight(1000, 2, Br{{1000, 0}}), 1000);
+
+    // Window 0: only rivals reaching the exact active height contest it.
+    BOOST_CHECK_EQUAL(AnchorUncontestedHeight(1000, 0, Br{{1000, 4}, {999, 1}}), 996);
+
+    // Negative window is clamped to 0 (never widens acceptance oddly).
+    BOOST_CHECK_EQUAL(AnchorUncontestedHeight(1000, -5, Br{{1000, 4}}), 996);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

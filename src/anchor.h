@@ -32,6 +32,15 @@ static const int DEFAULT_ANCHOR_MIN_CONF = 1;
 /** Default seconds between polls of the parent chain daemon for new blocks
  *  and reorganizations. */
 static const int DEFAULT_ANCHOR_POLL_INTERVAL = 5;
+/** Whether the block producer avoids anchoring a new block onto a parent-chain
+ *  height that a competing branch is currently contesting (-anchoravoidcontested).
+ *  Pure producer-side policy; see GetAnchorForNewBlock. */
+static const bool DEFAULT_ANCHOR_AVOID_CONTESTED = true;
+/** A competing parent-chain branch counts as a live contest for the anchor
+ *  back-off only when its tip is within this many blocks of the active tip
+ *  (-anchorcontestwindow). A branch that has fallen further behind is losing
+ *  the race and is ignored, so old resolved forks never drag the anchor down. */
+static const int DEFAULT_ANCHOR_CONTEST_WINDOW = 2;
 
 /** Whether anchors are validated against the parent chain daemon
  *  (-validateanchor). When false, only the structural rules (presence and
@@ -52,11 +61,29 @@ enum class AnchorCheckResult {
  *  changes (see AnchorWatchTask). */
 AnchorCheckResult CheckMainchainAnchor(uint32_t height, const uint256& hash);
 
+/** Pure selection math for the anti-contested-anchor policy (Fix A), testable
+ *  without a parent chain daemon. Given the active tip height, the contest
+ *  window, and the competing branches (each a {tip height, branchlen} pair,
+ *  with the active tip and daemon-rejected/invalid tips already filtered out),
+ *  returns the highest uncontested parent-chain height: the lowest fork point
+ *  (tip height - branchlen) among branches whose tip is within `window` of the
+ *  active tip, or the active tip height when none qualify. A branch further
+ *  than `window` behind the active tip is losing the race and ignored. */
+int AnchorUncontestedHeight(int active_tip_height, int window,
+                            const std::vector<std::pair<int, int>>& competing_branches);
+
 /** Pick the anchor for a new block: the highest parent-chain block with at
  *  least -anchorminconf confirmations, but never below the previous block's
- *  anchor (monotonicity). Falls back to the previous block's anchor if the
- *  parent chain daemon is unreachable. Returns false if no valid (non-null)
- *  anchor can be determined. */
+ *  anchor (monotonicity). With -anchoravoidcontested (default), the target is
+ *  additionally backed down below any parent-chain height a live competing
+ *  branch is contesting, so a new block anchors to Bitcoin ground every current
+ *  contender agrees on and needs no Sequentia reorg when the parent fork
+ *  resolves. This back-off is purely a block-producer policy — it changes only
+ *  which anchor THIS node picks for blocks it produces, never which blocks it
+ *  accepts — and costs anchor freshness only while a parent fork is actually
+ *  live. Falls back to the previous block's anchor if the parent chain daemon
+ *  is unreachable. Returns false if no valid (non-null) anchor can be
+ *  determined. */
 bool GetAnchorForNewBlock(uint32_t prev_anchor_height, const uint256& prev_anchor_hash,
                           uint32_t& anchor_height, uint256& anchor_hash);
 
