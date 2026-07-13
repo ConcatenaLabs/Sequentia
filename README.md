@@ -206,7 +206,7 @@ expect ("rfa/vB") match.
 | `test/functional/` | Functional tests (Sequentia ones listed above). |
 | `doc/` (everything else) | Inherited Elements/Bitcoin documentation. |
 
-Contributions: PRs against branch `claude/sequentia-bitcoin-sidechain-w6xady`
+Contributions: PRs against branch `master`
 of https://github.com/GracedEternalKingCabbageMan/Sequentia (the default
 branch). See [CONTRIBUTING.md](CONTRIBUTING.md).
 
