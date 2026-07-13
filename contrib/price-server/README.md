@@ -21,6 +21,15 @@ python3 price_server.py --config config.json --ui-port 8089  # + config UI on ht
 
 No dependencies — just Python 3. Run the node with `-con_any_asset_fees=1`.
 
+## Windows installer bundle
+
+The Windows installer ships this sidecar with a self-contained interpreter so
+the node GUI's **Settings → Price server** launcher works with no Python
+install. That interpreter (the official embeddable CPython) is **not** vendored
+in git — run `./fetch-embeddable-python.sh` once before `make deploy` to
+download and verify it into `./python/` (git-ignored). `price_server.py` is
+stdlib-only, so the stock embeddable distribution suffices.
+
 ## Config UI
 
 `--ui-port <port>` serves a localhost web page to edit the **admission rules**

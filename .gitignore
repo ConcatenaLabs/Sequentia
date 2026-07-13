@@ -3,6 +3,7 @@
 # Out-of-tree build directories (never commit build artifacts)
 /build-linux/
 /build-win/
+/contrib/price-server/python/
 
 *.exe
 *.pdb
