@@ -292,14 +292,14 @@ void BitcoinGUI::createActions()
     historyAction->setShortcut(QKeySequence(Qt::ALT + Qt::Key_4));
     tabGroup->addAction(historyAction);
 
-    assetsAction = new QAction(platformStyle->SingleColorIcon(":/icons/receiving_addresses"), tr("&Assets"), this);
+    assetsAction = new QAction(platformStyle->SingleColorIcon(":/icons/assets"), tr("&Assets"), this);
     assetsAction->setStatusTip(tr("Issue, reissue and manage Sequentia assets"));
     assetsAction->setToolTip(assetsAction->statusTip());
     assetsAction->setCheckable(true);
     assetsAction->setShortcut(QKeySequence(Qt::ALT + Qt::Key_5));
     tabGroup->addAction(assetsAction);
 
-    stakingAction = new QAction(platformStyle->SingleColorIcon(":/icons/receiving_addresses"), tr("&Staking"), this);
+    stakingAction = new QAction(platformStyle->SingleColorIcon(":/icons/staking"), tr("&Staking"), this);
     stakingAction->setStatusTip(tr("Stake Sequence (SEQ) and manage block production"));
     stakingAction->setToolTip(stakingAction->statusTip());
     stakingAction->setCheckable(true);

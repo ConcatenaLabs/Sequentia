@@ -195,18 +195,29 @@ OverviewPage::OverviewPage(const PlatformStyle *platformStyle, QWidget *parent) 
         m_finality_label = new QLabel(tr("Finality: ..."), seqFrame);
         m_finality_label->setWordWrap(true);
         seqLayout->addWidget(m_finality_label);
-        QLabel* dualLabel = new QLabel(tr("Bitcoin (testnet4): your receiving address is also a Bitcoin testnet4 address - "
-                                          "the same address receives both %1 and tBTC. (Sending tBTC requires a Bitcoin node.)")
-                                          .arg(BitcoinUnits::policyAssetTicker()), seqFrame);
-        dualLabel->setWordWrap(true);
-        dualLabel->setStyleSheet("color:#555;");
-        seqLayout->addWidget(dualLabel);
-        m_btc_label = new QLabel(tr("Bitcoin (testnet4): loading..."), seqFrame);
-        m_btc_label->setWordWrap(true);
-        seqLayout->addWidget(m_btc_label);
         if (QVBoxLayout* top = qobject_cast<QVBoxLayout*>(layout())) {
             top->insertWidget(1, seqFrame); // after labelAlerts (index 0), above the balances row
         }
+    }
+
+    // Parent-chain (Bitcoin testnet4) balance, shown inside the Balances panel rather
+    // than the network-status panel: a Sequentia receiving address is ALSO a Bitcoin
+    // testnet4 address, so the same address can hold real tBTC. It is scanned from the
+    // parent chain (not part of the Sequentia wallet balance), so it sits on its own
+    // separated row below the asset balances, with the dual-address note as a tooltip.
+    {
+        QFrame* btcSep = new QFrame(ui->frame);
+        btcSep->setFrameShape(QFrame::HLine);
+        btcSep->setFrameShadow(QFrame::Sunken);
+        ui->verticalLayout_4->addWidget(btcSep);
+        m_btc_label = new QLabel(tr("Bitcoin (testnet4): loading..."), ui->frame);
+        m_btc_label->setWordWrap(true);
+        m_btc_label->setStyleSheet("color:#555;");
+        m_btc_label->setToolTip(tr("Your Sequentia receiving address is also a Bitcoin testnet4 address, so the same "
+                                   "address can hold real testnet Bitcoin (tBTC). This amount is scanned from the "
+                                   "Bitcoin testnet4 chain; it is not a Sequentia balance and spending it requires a "
+                                   "Bitcoin node."));
+        ui->verticalLayout_4->addWidget(m_btc_label);
     }
     m_seq_status_timer = new QTimer(this);
     m_seq_status_timer->setInterval(8000);
@@ -244,36 +255,48 @@ void OverviewPage::setBalance(const interfaces::WalletBalances& balances)
     int unit = walletModel->getOptionsModel()->getDisplayUnit();
     m_balances = balances;
 
-    // SEQUENTIA: format a total balance map, appending a muted "≈ <ref>" summed in the chosen
-    // reference currency. Suppressed in privacy mode so the masked balance isn't leaked via the ≈.
-    auto withRef = [&](const CAmountMap& m) -> QString {
-        const QString s = GUIUtil::formatMultiAssetAmount(m, unit, BitcoinUnits::SeparatorStyle::ALWAYS, "\n");
+    // SEQUENTIA: each asset line carries its own muted "≈ <value> <REF>" in the chosen
+    // reference currency. In privacy mode we fall back to the plain (value-less) format so
+    // the masked balance isn't leaked via the ≈.
+    const QString refCur = walletModel->getOptionsModel()->getReferenceCurrency();
+    auto perAsset = [&](const CAmountMap& m) -> QString {
+        if (m_privacy)
+            return GUIUtil::formatMultiAssetAmount(m, unit, BitcoinUnits::SeparatorStyle::ALWAYS, "\n");
+        return GUIUtil::formatMultiAssetAmountWithValue(m, unit, BitcoinUnits::SeparatorStyle::ALWAYS, refCur, "\n");
+    };
+    // Total rows: per-asset values, plus a summed grand total — but only when 2+ assets are
+    // valued, otherwise the grand total just repeats the single asset's per-line value.
+    auto withTotalValue = [&](const CAmountMap& m) -> QString {
+        const QString s = perAsset(m);
         if (m_privacy) return s;
-        const QString r = GUIUtil::formatMultiAssetReferenceApprox(m, walletModel->getOptionsModel()->getReferenceCurrency());
+        int valued = 0;
+        for (const auto& it : m) if (it.second > 0) ++valued;
+        if (valued < 2) return s;
+        const QString r = GUIUtil::formatMultiAssetReferenceApprox(m, refCur);
         return r.isEmpty() ? s : (s + "\n" + r);
     };
 
     if (walletModel->wallet().isLegacy()) {
         if (walletModel->wallet().privateKeysDisabled()) {
-            ui->labelBalance->setText(GUIUtil::formatMultiAssetAmount(balances.watch_only_balance, unit, BitcoinUnits::SeparatorStyle::ALWAYS, "\n"));
-            ui->labelUnconfirmed->setText(GUIUtil::formatMultiAssetAmount(balances.unconfirmed_watch_only_balance, unit, BitcoinUnits::SeparatorStyle::ALWAYS, "\n"));
-            ui->labelImmature->setText(GUIUtil::formatMultiAssetAmount(balances.immature_watch_only_balance, unit, BitcoinUnits::SeparatorStyle::ALWAYS, "\n"));
-            ui->labelTotal->setText(withRef(balances.watch_only_balance + balances.unconfirmed_watch_only_balance + balances.immature_watch_only_balance));
+            ui->labelBalance->setText(perAsset(balances.watch_only_balance));
+            ui->labelUnconfirmed->setText(perAsset(balances.unconfirmed_watch_only_balance));
+            ui->labelImmature->setText(perAsset(balances.immature_watch_only_balance));
+            ui->labelTotal->setText(withTotalValue(balances.watch_only_balance + balances.unconfirmed_watch_only_balance + balances.immature_watch_only_balance));
         } else {
-            ui->labelBalance->setText(GUIUtil::formatMultiAssetAmount(balances.balance, unit, BitcoinUnits::SeparatorStyle::ALWAYS, "\n"));
-            ui->labelUnconfirmed->setText(GUIUtil::formatMultiAssetAmount(balances.unconfirmed_balance, unit, BitcoinUnits::SeparatorStyle::ALWAYS, "\n"));
-            ui->labelImmature->setText(GUIUtil::formatMultiAssetAmount(balances.immature_balance, unit, BitcoinUnits::SeparatorStyle::ALWAYS, "\n"));
-            ui->labelTotal->setText(withRef(balances.balance + balances.unconfirmed_balance + balances.immature_balance));
-            ui->labelWatchAvailable->setText(GUIUtil::formatMultiAssetAmount(balances.watch_only_balance, unit, BitcoinUnits::SeparatorStyle::ALWAYS, "\n"));
-            ui->labelWatchPending->setText(GUIUtil::formatMultiAssetAmount(balances.unconfirmed_watch_only_balance, unit, BitcoinUnits::SeparatorStyle::ALWAYS, "\n"));
-            ui->labelWatchImmature->setText(GUIUtil::formatMultiAssetAmount(balances.immature_watch_only_balance, unit, BitcoinUnits::SeparatorStyle::ALWAYS, "\n"));
-            ui->labelWatchTotal->setText(GUIUtil::formatMultiAssetAmount(balances.watch_only_balance + balances.unconfirmed_watch_only_balance + balances.immature_watch_only_balance, unit, BitcoinUnits::SeparatorStyle::ALWAYS, "\n"));
+            ui->labelBalance->setText(perAsset(balances.balance));
+            ui->labelUnconfirmed->setText(perAsset(balances.unconfirmed_balance));
+            ui->labelImmature->setText(perAsset(balances.immature_balance));
+            ui->labelTotal->setText(withTotalValue(balances.balance + balances.unconfirmed_balance + balances.immature_balance));
+            ui->labelWatchAvailable->setText(perAsset(balances.watch_only_balance));
+            ui->labelWatchPending->setText(perAsset(balances.unconfirmed_watch_only_balance));
+            ui->labelWatchImmature->setText(perAsset(balances.immature_watch_only_balance));
+            ui->labelWatchTotal->setText(withTotalValue(balances.watch_only_balance + balances.unconfirmed_watch_only_balance + balances.immature_watch_only_balance));
         }
     } else {
-        ui->labelBalance->setText(GUIUtil::formatMultiAssetAmount(balances.balance, unit, BitcoinUnits::SeparatorStyle::ALWAYS, "\n"));
-        ui->labelUnconfirmed->setText(GUIUtil::formatMultiAssetAmount(balances.unconfirmed_balance, unit, BitcoinUnits::SeparatorStyle::ALWAYS, "\n"));
-        ui->labelImmature->setText(GUIUtil::formatMultiAssetAmount(balances.immature_balance, unit, BitcoinUnits::SeparatorStyle::ALWAYS, "\n"));
-        ui->labelTotal->setText(withRef(balances.balance + balances.unconfirmed_balance + balances.immature_balance));
+        ui->labelBalance->setText(perAsset(balances.balance));
+        ui->labelUnconfirmed->setText(perAsset(balances.unconfirmed_balance));
+        ui->labelImmature->setText(perAsset(balances.immature_balance));
+        ui->labelTotal->setText(withTotalValue(balances.balance + balances.unconfirmed_balance + balances.immature_balance));
     }
     // only show immature (newly mined) balance if it's non-zero, so as not to complicate things
     // for the non-mining users
