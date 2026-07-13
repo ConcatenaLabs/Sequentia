@@ -26,7 +26,7 @@
 <body>
 
 <h1>Anchor reorg-of-reorg recovery: three changes shipped, one for your call</h1>
-<p class="sub">Andreas Kohl &middot; Sequentia testnet &middot; 2026-06-28 &middot; commit <span class="mono">23b1be0b1</span> (branch <span class="mono">claude/sequentia-bitcoin-sidechain-w6xady</span>)</p>
+<p class="sub">Andreas Kohl &middot; Sequentia testnet &middot; 2026-06-28 &middot; commit <span class="mono">23b1be0b1</span> (branch <span class="mono">master</span>)</p>
 
 <p>This follows up our exchange about the recovery gap you endorsed fixing: on a Bitcoin reorg-of-reorg (A &rarr; B &rarr; A, routine on testnet4), Sequentia blocks anchored to A that the node invalidated when Bitcoin left A must be <strong>re-validated and re-finalized</strong> when Bitcoin returns to A, not replaced by a fresh block on top. As you noted, minting fresh would let an atomic swap that is valid again on the Bitcoin side be double-spent on the Sequentia side.</p>
 

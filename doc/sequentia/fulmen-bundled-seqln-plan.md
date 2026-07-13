@@ -171,7 +171,7 @@ backend CLI. Distinct clnrest ports on Windows (e.g. 9737/9738).
 1. **Staging script** `build/make-seqln-bundle.sh` in the fulmen repo:
    - build seqln in a jammy container (`RUST=0`, sqlite3, no postgres);
    - stage the layout from §2 into `build/seqln-linux-x64/`;
-   - copy `elements-cli` (from a jammy-built SequentiaByClaude, same glibc rule)
+   - copy `elements-cli` (from a jammy-built Sequentia, same glibc rule)
      and `bitcoin-cli`;
    - copy `libsqlite3.so.0` + `libsodium.so.23` from the build container into `lib/`;
    - `strip` everything (subdaemons+plugins are ~60-80 MB unstripped; stripping

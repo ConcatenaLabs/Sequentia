@@ -18,7 +18,7 @@ resolve many findings.
 >   split M0-M5 (Rust device signer byte-exact vs libhsmd), the capstone (a device-keyed hosted-channel node did
 >   a real pure-LN GOLD<->BTC seqob trade), the secure BOLT-8 Noise_XK transport, the WASM browser signer, and a
 >   WebSocket transport + wallet SDK (`contrib/seqln-signer/wasm`). See `seqln-tier2-hosted-channels-design.md`.
-> - **Web wallet non-LN** — DONE (branch `claude/lightning-ux-overhaul`, pushed): T2, T13, T5, T6, T9, T7, T14,
+> - **Web wallet non-LN** — DONE (branch `lightning-ux-overhaul`, pushed): T2, T13, T5, T6, T9, T7, T14,
 >   T11, T12 + 4.1/4.2 cleanups. Flagged browser-verify: T4 (PSET fee preview), T5 Max-with-same-asset-fee, T3
 >   (needs the qr.rs wasm rebuild).
 > - **Web wallet Lightning UI** — DONE (same branch): the "Instant (Lightning)" Swap rail + on-device wasm
@@ -27,12 +27,12 @@ resolve many findings.
 >   GOLD<->BTC buy settles ~2.1s with the device co-signing and REAL per-asset movement. Needs for LIVE: a
 >   deployed hosted-LSP endpoint (`SEQ_LSP_URL`) + a real browser for the DOM/wss/IndexedDB. Requirement found:
 >   hosted asset channels must be ANNOUNCED (not private) for the taker's asset-getroute.
-> - **Ambra non-LN** — DONE (branch `claude/lightning-ux-overhaul`): the T10 seed/app-lock P0s (FLAG_SECURE,
+> - **Ambra non-LN** — DONE (branch `lightning-ux-overhaul`): the T10 seed/app-lock P0s (FLAG_SECURE,
 >   lock pops sensitive sheets, onboarding lock default-on), T1 (fee_asset via the Rust FFI), T6 safe subset
 >   (cached BTC balance + offline marker + Lock-BTC auth + faucet guidance), T9 (registry service), T12 copy.
 >   Deferred: BTC tx history (needs a new FFI + esplora scanning), fee-amount in issue/burn/stake dialogs.
-> - **Explorer** — DONE (branch `claude/ux-audit`, pushed): T2, T1, T9.
-> - **Bridge** — DONE (branch `claude/ux-audit`, pushed): T8 (0-conf delivered honesty), T4, T11, T12.
+> - **Explorer** — DONE (branch `ux-audit`, pushed): T2, T1, T9.
+> - **Bridge** — DONE (branch `ux-audit`, pushed): T8 (0-conf delivered honesty), T4, T11, T12.
 > - **Remaining:** Ambra Lightning (needs the signer as a Rust FFI, mirroring the WASM build), the Qt surface
 >   (4.4), the hosted-LSP box deploy (for a live demo), then browser/device verification + merge.
 
@@ -59,7 +59,7 @@ on :8080); see [[sequentia-server-deploy]].
 | Wallet kit (LWK) | `SWK` (sequentia) | `lwk_common/src/qr.rs`, `lwk_wasm/src/*` (the wasm the wallet calls) | rebuilt into `/wallet/pkg` |
 | Explorer + landing | `sequentia-explorer` (main) | `esplora/client/src/**` (built by `build-public.sh`), `downloads/index.html`, `serve-public.js` (routes/faucet) | `/explorer/`, `/testnet4/`, `/download/`, `/` |
 | Bridge UI | `compages` (main) | `web/index.html`, `web/app.js`, `daemon/lib/*.js` (user-visible API strings), `contracts/src/CompagesVault.sol` | `/bridge/` |
-| Desktop GUI | `Sequentia` (claude/...) | `src/qt/**`, `src/qt/forms/*.ui` | Core download |
+| Desktop GUI | `Sequentia` (master) | `src/qt/**`, `src/qt/forms/*.ui` | Core download |
 | Ambra mobile | `ambra` (main) | `app/lib/**` (Dart UI), `ambra_core/src/api/mod.rs` (Rust API), `app/android/**` | APK on `/download/` |
 | Registry data | `sequentia-registry` (main) | `seed/legacy-assets.json` (correct) + the DB row on the box (some wrong) | `/registry/` |
 | Hosted SeqLN LSP (NEW) | `seqln` + `seqdex` (`phase3-pure-ln`) | SeqLN nodes on both networks + `seqob-maker -mode pureln\|lightning` + a Boltz-shaped swap gateway | behind `/lsp` for web + Ambra |

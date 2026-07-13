@@ -61,7 +61,7 @@ rm -rf ~/seq-bootstrap100
 ```bash
 cd ~/Sequentia
 sudo chown -R $USER:$USER ~/Sequentia   # undo any earlier `sudo make`
-git pull origin claude/sequentia-bitcoin-sidechain-w6xady
+git pull origin master
 make -j$(nproc)                                  # NO sudo
 strings src/elementsd | grep posdebugroundskewms # must print the knob
 ls contrib/sequentia/bootstrap-autonomous-testnet.py

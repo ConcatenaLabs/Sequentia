@@ -164,4 +164,4 @@ resync.
 
 Full code citations for every claim are in
 `doc/sequentia/anchor-reorg-of-reorg-recovery-design.md` (updated alongside this memo) in
-the SequentiaByClaude repository.
+the Sequentia repository.
