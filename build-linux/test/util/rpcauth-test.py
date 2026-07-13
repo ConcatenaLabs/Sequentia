@@ -1,1 +1,0 @@
-../../../test/util/rpcauth-test.py

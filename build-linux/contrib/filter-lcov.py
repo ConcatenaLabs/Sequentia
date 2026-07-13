@@ -1,1 +1,0 @@
-../../contrib/filter-lcov.py

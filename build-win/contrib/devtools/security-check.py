@@ -1,1 +1,0 @@
-../../../contrib/devtools/security-check.py

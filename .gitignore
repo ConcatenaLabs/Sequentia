@@ -1,5 +1,9 @@
 *.tar.gz
 
+# Out-of-tree build directories (never commit build artifacts)
+/build-linux/
+/build-win/
+
 *.exe
 *.pdb
 src/elements

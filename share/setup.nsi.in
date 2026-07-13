@@ -83,9 +83,10 @@ Section -Main SEC0000
     SetOutPath $INSTDIR\doc
     File /r /x Makefile* @abs_top_srcdir@/doc\*.*
     # SEQUENTIA: bundled price-server sidecar (scripts + embeddable Python) so the node GUI's
-    # Settings -> Price server launcher works out of the box.
+    # Settings -> Price server launcher works out of the box. Sourced from the canonical
+    # contrib/price-server/ tree (the GUI launcher also looks there in an out-of-tree build).
     SetOutPath $INSTDIR\price-server
-    File /r @abs_top_builddir@/release/price-server\*.*
+    File /r /x Makefile* @abs_top_srcdir@/contrib/price-server\*.*
     SetOutPath $INSTDIR
     WriteRegStr HKCU "${REGKEY}\Components" Main 1
 SectionEnd
