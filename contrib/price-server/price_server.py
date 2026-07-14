@@ -37,6 +37,7 @@ Usage:
 import argparse
 import base64
 import collections
+import hashlib
 import hmac
 import html
 import http.server
@@ -221,6 +222,9 @@ class PriceServer:
         self._states = {}            # TICKER -> AssetState
         self.last_rates = {}         # asset_id -> rate (last published)
         self.last_report = []        # [{ticker, id, domain, price, rate, status}] for the UI
+        self.last_prices = {}        # TICKER -> {price, market_cap, volume_24h} (for the public API)
+        self.last_poll_ts = None     # unix time of the last completed poll
+        self.node_status = []        # [{url, ok, error, ts}] result of the last publish per node
         if dry_run:
             self.rpcs = []
         elif "node_rpcs" in config:
@@ -242,7 +246,7 @@ class PriceServer:
 
     def apply_config(self, *, source=None, thresholds=None, exceptions=None,
                      poll_interval=None, source_name=None, registry_url=None,
-                     reference=None):
+                     reference=None, nodes=None, ui=None):
         """Replace config sections from the UI and persist atomically."""
         with self._lock:
             if source is not None:
@@ -260,6 +264,15 @@ class PriceServer:
                 self.cfg["registry_url"] = registry_url
             if reference is not None:
                 self.cfg["reference_asset_label"] = reference
+            if nodes is not None:
+                self.cfg["node_rpcs"] = nodes
+                self.cfg.pop("node_rpc", None)
+                if not self.dry_run:
+                    self.rpcs = [NodeRPC(n) for n in nodes]
+            if ui is not None:
+                merged = dict(self.cfg.get("ui", {}))
+                merged.update(ui)
+                self.cfg["ui"] = merged
             if self.config_path:
                 tmp = self.config_path + ".tmp"
                 with open(tmp, "w") as f:
@@ -423,18 +436,24 @@ class PriceServer:
         rates = self._clamp(rates)
         self.last_rates = rates
         self.last_report = report
+        self.last_prices = prices
+        self.last_poll_ts = time.time()
         admitted = sum(1 for r in report if r["rate"] is not None)
         if self.dry_run:
             log.info("dry-run: %d/%d discovered assets admitted; would publish %s",
                      admitted, len(report), json.dumps(rates))
             return rates
         ok = 0
+        node_status = []
         for rpc in self.rpcs:
             try:
                 rpc.call("setfeeexchangerates", rates, False)  # persist=False: re-pushed each poll
                 ok += 1
+                node_status.append({"url": rpc.url, "ok": True, "error": "", "ts": time.time()})
             except Exception as e:
                 log.warning("publish to %s failed: %s", rpc.url, e)
+                node_status.append({"url": rpc.url, "ok": False, "error": str(e), "ts": time.time()})
+        self.node_status = node_status
         log.info("published %d rate(s) to %d/%d node(s) (%d/%d discovered admitted)",
                  len(rates), ok, len(self.rpcs), admitted, len(report))
         return rates
@@ -467,8 +486,21 @@ class PriceServer:
 
 
 # ---------------------------------------------------------------------------
-# Config UI: a tiny self-served localhost web page to point the server at an API
-# and tune the admission rules without hand-editing JSON. Pure stdlib.
+# Web UI & API. Two audiences share one port:
+#
+#   PUBLIC (optional, off by default): a read-only price page at / and a JSON
+#   API — /api/prices in the Sequentia combined format (so another operator can
+#   point THEIR price server at this one as its market source) and
+#   /api/whitelist (rates + admission decisions). Both are rate-limited per
+#   client IP: the typical host is a small VPS, not an exchange.
+#
+#   ADMIN (login): every setting — market source, admission rules, nodes,
+#   access. Without a password the admin area answers only to 127.0.0.1
+#   requests (the desktop-GUI flow: launch + open browser, no setup); binding
+#   beyond loopback requires a password so the config is never writable, nor
+#   node RPC details visible, to the open internet.
+#
+# Pure stdlib.
 # ---------------------------------------------------------------------------
 
 _UI_CRITERIA = [  # (key, label, placeholder, hint)
@@ -497,129 +529,447 @@ def _src(srv):
     }
 
 
-def _ui_render(srv, csrf_token, saved=False):
+def _hash_password(pw, iterations=200_000):
+    salt = secrets.token_bytes(16)
+    dk = hashlib.pbkdf2_hmac("sha256", pw.encode(), salt, iterations)
+    return "pbkdf2$%d$%s$%s" % (iterations, salt.hex(), dk.hex())
+
+
+def _check_password(stored, pw):
+    try:
+        _scheme, it, salt, want = stored.split("$")
+        dk = hashlib.pbkdf2_hmac("sha256", pw.encode(), bytes.fromhex(salt), int(it))
+        return hmac.compare_digest(dk.hex(), want)
+    except Exception:
+        return False
+
+
+class _RateLimiter:
+    """Per-IP sliding-window limiter for the public endpoints. In-memory and
+    deliberately simple: the goal is to keep a hobby VPS responsive, not to
+    survive a determined flood (put a real proxy in front for that)."""
+
+    def __init__(self):
+        self._hits = {}
+        self._lock = threading.Lock()
+
+    def allow(self, ip, per_min):
+        now = time.time()
+        with self._lock:
+            q = self._hits.setdefault(ip, collections.deque())
+            while q and q[0] < now - 60:
+                q.popleft()
+            if len(q) >= per_min:
+                return False
+            q.append(now)
+            if len(self._hits) > 10_000:  # shed idle IPs so memory stays bounded
+                self._hits = {k: v for k, v in self._hits.items() if v}
+            return True
+
+
+# Shared look for every served page (public, login, admin): Sequentia yellow on
+# near-black, matching the node dashboard. Plain constant so no brace-escaping.
+_CSS = """
+:root{--bg:#0b0b0d;--panel:#141417;--panel2:#191920;--line:#26262c;--text:#f2f0ea;
+--muted:#9b988e;--faint:#6d6a62;--accent:#f5b301;--accent-ink:#1a1400;
+--good:#3ecf7a;--good-bg:rgba(62,207,122,.12);--warn:#ffb84d;--warn-bg:rgba(255,160,50,.12);
+--bad:#ff6b6b;--bad-bg:rgba(255,90,90,.12);--mono:ui-monospace,'Cascadia Mono',Consolas,Menlo,monospace}
+html,body{background:var(--bg);color:var(--text);margin:0}
+body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;font-size:15px;line-height:1.45}
+.wrap{max-width:1040px;margin:0 auto;padding:20px 18px 48px}
+header{display:flex;align-items:center;gap:14px;padding:6px 0 14px;flex-wrap:wrap}
+.mark{width:42px;height:42px;border-radius:8px;background:var(--accent);color:var(--accent-ink);
+display:flex;align-items:center;justify-content:center;font-weight:800;font-size:1.25rem;font-family:var(--mono)}
+.htitle h1{font-size:1.2rem;margin:0;font-weight:650}
+.htitle .sub{color:var(--muted);font-size:.8rem;margin-top:2px}
+.hchips{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.chip{font-size:.68rem;font-weight:700;letter-spacing:.09em;text-transform:uppercase;
+padding:4px 10px;border-radius:3px;border:1px solid var(--line);color:var(--muted)}
+.chip.live{border-color:var(--good);color:var(--good)}
+.chip a{color:inherit;text-decoration:none}
+nav{display:flex;gap:2px;border-bottom:1px solid var(--line);margin-bottom:16px;flex-wrap:wrap}
+nav button{background:none;border:none;color:var(--muted);font:inherit;font-size:.88rem;font-weight:600;
+padding:10px 16px;cursor:pointer;border-bottom:2px solid transparent}
+nav button:hover{color:var(--text)}
+nav button.on{color:var(--accent);border-bottom-color:var(--accent)}
+.tab{display:none}.tab.on{display:block}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:6px;overflow:hidden;margin-bottom:14px}
+.card h2{font-size:.72rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);
+margin:0;padding:12px 16px 10px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px}
+.card h2 .right{margin-left:auto;text-transform:none;letter-spacing:0;color:var(--faint);font-weight:400}
+table{width:100%;border-collapse:collapse;font-size:.88rem}
+th{font-size:.68rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);
+text-align:left;padding:8px 14px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:8px 14px;border-bottom:1px solid rgba(255,255,255,.04);vertical-align:middle}
+tr:last-child td{border-bottom:none}
+.num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.r{text-align:right}th.r{text-align:right}
+.mut{color:var(--muted);font-weight:400}
+.pill{display:inline-block;font-size:.7rem;font-weight:700;padding:2px 8px;border-radius:10px}
+.pill.good{background:var(--good-bg);color:var(--good)}
+.pill.warn{background:var(--warn-bg);color:var(--warn)}
+.pill.bad{background:var(--bad-bg);color:var(--bad)}
+.why{color:var(--faint);font-size:.76rem;white-space:normal}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:14px}
+@media(max-width:820px){.kpis{grid-template-columns:repeat(2,1fr)}}
+.kpi{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px 14px}
+.kpi .l{color:var(--faint);font-size:.7rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase}
+.kpi .v{font-family:var(--mono);font-size:1.25rem;font-weight:700;margin-top:4px}
+.kpi .s{color:var(--muted);font-size:.74rem;margin-top:2px}
+.frm{padding:14px 16px;display:grid;gap:12px}
+.frow{display:grid;grid-template-columns:250px 1fr;gap:12px;align-items:center}
+@media(max-width:640px){.frow{grid-template-columns:1fr}}
+.frow label{color:var(--muted);font-size:.88rem}
+.hint{color:var(--faint);font-size:.75rem;line-height:1.4}
+input:not([type=checkbox]):not([type=radio]),select{
+background:var(--panel2);border:1px solid var(--line);border-radius:4px;color:var(--text);
+font:inherit;font-size:.88rem;padding:8px 10px;width:100%;box-sizing:border-box}
+input:focus,select:focus{outline:none;border-color:var(--accent)}
+input[type=checkbox],input[type=radio]{accent-color:var(--accent);width:16px;height:16px}
+.check{display:flex;gap:10px;align-items:center;color:var(--text);font-size:.88rem}
+.mono{font-family:var(--mono);font-size:.8rem}
+button.btn{background:var(--accent);color:var(--accent-ink);border:none;border-radius:4px;
+font-weight:700;font-size:.82rem;padding:9px 16px;cursor:pointer}
+button.btn:hover{filter:brightness(1.08)}
+button.ghost{background:none;border:1px solid var(--line);color:var(--muted);border-radius:4px;
+font-size:.8rem;padding:7px 12px;cursor:pointer}
+button.ghost:hover{border-color:var(--accent);color:var(--accent)}
+button.rm{background:none;border:1px solid rgba(255,90,90,.4);color:var(--bad);border-radius:4px;cursor:pointer;padding:6px 10px}
+.savebar{background:var(--panel2);border-top:1px solid var(--line);padding:12px 16px;
+display:flex;gap:12px;align-items:center}
+.savebar .mut{font-size:.78rem}
+.excrow{display:flex;gap:8px;margin:4px 0}.excrow input{flex:1}
+.noterow{padding:10px 16px;color:var(--muted);font-size:.82rem}
+.saved{background:var(--good-bg);color:var(--good);font-weight:600;font-size:.85rem;
+padding:9px 14px;border-radius:4px;margin-bottom:14px}
+.err{background:var(--bad-bg);color:var(--bad);font-weight:600;font-size:.85rem;
+padding:9px 14px;border-radius:4px;margin-bottom:14px}
+footer{color:var(--faint);font-size:.76rem;text-align:center;margin-top:20px}
+code{font-family:var(--mono);font-size:.82em;background:var(--panel2);padding:1px 5px;border-radius:3px}
+a{color:var(--accent)}
+.login{max-width:360px;margin:10vh auto 0}
+"""
+
+_TAB_SCRIPT = """<script>
+function tab(ev,id){
+  document.querySelectorAll('nav button').forEach(function(b){b.classList.remove('on')});
+  ev.target.classList.add('on');
+  document.querySelectorAll('.tab').forEach(function(t){t.classList.toggle('on',t.id===id)});
+}
+function addExc(k){var l=document.getElementById('list_'+k);var d=document.createElement('div');d.className='excrow';
+var i=document.createElement('input');i.name=k;var b=document.createElement('button');b.type='button';b.className='rm';
+b.innerHTML='\\u00d7';b.onclick=function(){d.remove()};d.appendChild(i);d.appendChild(b);l.appendChild(d);i.focus();}
+function addNode(){var t=document.getElementById('nodetpl');var c=t.content.cloneNode(true);
+document.getElementById('nodelist').appendChild(c);}
+function rmNode(b){b.closest('tr').remove();}
+var radios=document.querySelectorAll('input[name=format]');var cp=document.getElementById('custompaths');
+function syncFmt(){if(cp)cp.style.display=document.querySelector('input[name=format]:checked').value==='custom'?'':'none';}
+radios.forEach(function(r){r.addEventListener('change',syncFmt)});
+</script>"""
+
+
+def _page(title, body, chips=""):
+    esc = html.escape
+    return "".join([
+        "<!doctype html><html lang=en><head><meta charset=utf-8>",
+        '<meta name=viewport content="width=device-width, initial-scale=1">',
+        "<title>", esc(title), "</title><style>", _CSS, "</style></head><body><div class=wrap>",
+        "<header><div class=mark>$</div><div class=htitle><h1>Sequentia Price Server</h1>",
+        '<div class=sub>prices &amp; fee-asset whitelist</div></div>',
+        '<div class=hchips>', chips, "</div></header>",
+        body,
+        "<footer>Sequentia price server \xb7 nothing here touches consensus — it only feeds the fee-asset whitelist</footer>",
+        "</div>", _TAB_SCRIPT, "</body></html>",
+    ])
+
+
+def _fmt_qty(v):
+    if v is None:
+        return "—"
+    a = abs(v)
+    for cut, suf in ((1e9, " B"), (1e6, " M"), (1e3, " k")):
+        if a >= cut:
+            return "%.1f%s" % (v / cut, suf)
+    return "%.6g" % v
+
+
+def _fmt_age(ts):
+    if not ts:
+        return "never"
+    d = int(time.time() - ts)
+    if d < 90: return "%d s ago" % d
+    if d < 5400: return "%d min ago" % (d // 60)
+    return "%d h ago" % (d // 3600)
+
+
+def _decisions_table(srv):
+    """The per-asset decisions table, shared by the public page and the admin
+    Status tab. Everything in it is already public information (prices and the
+    resulting whitelist); node details never appear here."""
+    esc = html.escape
+    quote = _src(srv)["quote_currency"]
+    if not srv.last_report:
+        return ('<div class=noterow>No poll has completed yet — assets discovered from the registry '
+                "will appear here with the admission decision for each.</div>")
+    aliases = {str(k).upper(): str(v).upper()
+               for k, v in srv.cfg.get("feed_aliases", {"TSEQ": "SEQ"}).items()
+               if not str(k).startswith("_")}
+    rows = []
+    for r in srv.last_report:
+        tk = r["ticker"].upper()
+        m = srv.last_prices.get(aliases.get(tk, tk)) or {}
+        ok = r["rate"] is not None
+        pill = '<span class="pill good">ADMITTED</span>' if ok else (
+            '<span class="pill bad">REJECTED</span>' if str(r["status"]).startswith("rejected")
+            else '<span class="pill warn">SKIPPED</span>')
+        rows.append("".join([
+            "<tr><td><b>", esc(r["ticker"]), "</b><div class='mut mono'>", esc((r["id"] or "")[:8]), "…</div></td>",
+            '<td class="num r">', esc("%.6g" % r["price"]) if r.get("price") else "—", "</td>",
+            '<td class="num r">', _fmt_qty(m.get("market_cap")), "</td>",
+            '<td class="num r">', _fmt_qty(m.get("volume_24h")), "</td>",
+            "<td>", pill, "</td>",
+            "<td class=why>", esc(r["status"]), "</td></tr>",
+        ]))
+    return "".join([
+        "<table><tr><th>Asset</th><th class=r>Price (", esc(quote), ")</th>",
+        "<th class=r>Market cap</th><th class=r>24h volume</th><th>Decision</th><th>Why</th></tr>",
+        "".join(rows), "</table>",
+    ])
+
+
+def _render_public(srv):
+    esc = html.escape
+    quote = _src(srv)["quote_currency"]
+    admitted = sum(1 for r in srv.last_report if r["rate"] is not None)
+    api_on = bool(srv.cfg.get("ui", {}).get("public_api"))
+    chips = '<span class="chip live">Live</span><span class=chip>quote: ' + esc(quote) + "</span>"
+    body = "".join([
+        "<div class=kpis>",
+        '<div class=kpi><div class=l>Whitelisted assets</div><div class=v>', str(admitted), " / ",
+        str(len(srv.last_report)), "</div><div class=s>re-evaluated every poll</div></div>",
+        '<div class=kpi><div class=l>Last update</div><div class=v>', _fmt_age(srv.last_poll_ts),
+        "</div><div class=s>polls every ", esc(str(srv.cfg.get("poll_interval_secs", 60))), " s</div></div>",
+        '<div class=kpi><div class=l>Quote currency</div><div class=v>', esc(quote),
+        "</div><div class=s>all prices and caps in this unit</div></div>",
+        '<div class=kpi><div class=l>Publisher</div><div class=v style="font-size:.95rem">', esc(srv.source_name),
+        "</div><div class=s>read-only public view</div></div>",
+        "</div>",
+        "<div class=card><h2>Assets &amp; admission decisions</h2>", _decisions_table(srv), "</div>",
+        "<div class=card><h2>API</h2><div class=noterow>",
+        ("Machine-readable endpoints (rate-limited): <code>GET /api/prices</code> — every asset keyed by ticker "
+         "in the Sequentia combined format, so you can point your own price server at this URL as its market source; "
+         "<code>GET /api/whitelist</code> — published rates and per-asset decisions."
+         if api_on else "The public JSON API is disabled by the operator."),
+        "</div></div>",
+    ])
+    return _page("Sequentia Price Server", body, chips)
+
+
+def _render_login(msg=""):
+    err = '<div class=err>' + html.escape(msg) + "</div>" if msg else ""
+    body = "".join([
+        '<div class=login><div class=card><h2>Admin login</h2><div class=frm>', err,
+        '<form method=post action=/login>',
+        '<input type=password name=password placeholder="admin password" autofocus>',
+        '<div style="margin-top:10px"><button class=btn type=submit>Log in</button></div>',
+        "</form></div></div></div>",
+    ])
+    return _page("Price server — login", body)
+
+
+def _nodes_current(srv):
+    if "node_rpcs" in srv.cfg:
+        return list(srv.cfg["node_rpcs"])
+    if "node_rpc" in srv.cfg:
+        return [srv.cfg["node_rpc"]]
+    return []
+
+
+def _render_admin(srv, csrf_token, saved=False, error=""):
     esc = html.escape
     t = srv.thresholds()
     exc = srv.exceptions()
     s = _src(srv)
+    ui = srv.cfg.get("ui", {})
     ck = lambda v: "checked" if v else ""
     is_custom = (s["format"] != "sequentia")
+    quote = s["quote_currency"]
 
+    # -- status tab --
+    admitted = sum(1 for r in srv.last_report if r["rate"] is not None)
+    nodes_ok = sum(1 for n in srv.node_status if n["ok"])
+    node_rows = "".join(
+        "".join(["<tr><td class='num mono'>", esc(n["url"]), "</td>",
+                 "<td class=num>", _fmt_age(n["ts"]), "</td>",
+                 "<td>", ('<span class="pill good">OK</span>' if n["ok"]
+                          else '<span class="pill bad">' + esc(n["error"][:80] or "failed") + "</span>"), "</td></tr>"])
+        for n in srv.node_status) or '<tr><td colspan=3 class=noterow>No publish attempted yet.</td></tr>'
+    status_tab = "".join([
+        "<div class=kpis>",
+        '<div class=kpi><div class=l>Whitelisted</div><div class=v>', str(admitted), " / ", str(len(srv.last_report)), "</div>",
+        '<div class=s>rule set: require ', esc(t.get("require", "all").upper()), "</div></div>",
+        '<div class=kpi><div class=l>Last poll</div><div class=v>', _fmt_age(srv.last_poll_ts),
+        "</div><div class=s>every ", esc(str(srv.cfg.get("poll_interval_secs", 60))), " s</div></div>",
+        '<div class=kpi><div class=l>Quote currency</div><div class=v>', esc(quote), "</div>",
+        '<div class=s>set in Market source</div></div>',
+        '<div class=kpi><div class=l>Nodes updated</div><div class=v>', str(nodes_ok), " / ", str(len(srv.rpcs)),
+        "</div><div class=s>last push per node below</div></div>",
+        "</div>",
+        "<div class=card><h2>Assets &amp; admission decisions</h2>", _decisions_table(srv), "</div>",
+        "<div class=card><h2>Node pushes <span class=right>setfeeexchangerates \xb7 persist=false</span></h2>",
+        "<table><tr><th>Node RPC</th><th>Last push</th><th>Status</th></tr>", node_rows, "</table></div>",
+    ])
+
+    # -- market source tab (part of the main /save form) --
+    custom_disp = "" if is_custom else "display:none"
+    source_tab = "".join([
+        "<div class=card><h2>Market data source</h2><div class=frm>",
+        "<div class=frow><label>API URL</label><input class=mono name=source_url value=\"", esc(s["url"]), "\"></div>",
+        "<div class=frow><label>Quote currency</label><div><input name=quote_currency value=\"", esc(quote),
+        "\" style=\"max-width:120px\"><div class=hint>The currency the API reports prices in — usually plain USD "
+        "(it does not need to exist as an on-chain asset). Every price, market cap and volume on these pages, and the "
+        "rates pushed to your nodes, are expressed in it.</div></div></div>",
+        "<div class=frow><label>API format</label><div>",
+        '<label class=check style="display:inline-flex;margin-right:16px"><input type=radio name=format value=sequentia ',
+        ck(not is_custom), "> Sequentia-format</label>",
+        '<label class=check style="display:inline-flex"><input type=radio name=format value=custom ', ck(is_custom), "> Custom</label>",
+        '<div class=hint>A Sequentia-format API returns every asset keyed by ticker in one call — no paths needed. '
+        "Another operator's price server exposes exactly this at <code>/api/prices</code>.</div></div></div>",
+        '<div id=custompaths style="', custom_disp, ';display:grid;gap:12px">',
+        "<div class=frow><label>Price JSON path</label><input class=mono name=price_path value=\"", esc(s["price_path"]), "\"></div>",
+        "<div class=frow><label>Market-cap JSON path</label><input class=mono name=market_cap_path value=\"", esc(s["market_cap_path"]), "\"></div>",
+        "<div class=frow><label>24h-volume JSON path</label><input class=mono name=volume_24h_path value=\"", esc(s["volume_24h_path"]), "\"></div>",
+        "</div>",
+        "<div class=frow><label>Asset registry URL</label><div><input class=mono name=registry_url value=\"",
+        esc(str(srv.cfg.get("registry_url", DEFAULT_REGISTRY_URL))),
+        "\"><div class=hint>The asset universe (ticker → id, issuer) is discovered here — you never list assets by hand.</div></div></div>",
+        "</div></div>",
+        "<div class=card><h2>Polling &amp; identity</h2><div class=frm>",
+        "<div class=frow><label>Poll interval (seconds)</label><input name=poll_interval value=\"",
+        esc(str(srv.cfg.get("poll_interval_secs", 60))), "\" style=\"max-width:120px\"></div>",
+        "<div class=frow><label>Publisher name</label><input name=source_name value=\"", esc(str(srv.source_name)), "\"></div>",
+        "</div></div>",
+    ])
+
+    # -- admission rules tab (same form) --
     crit = "".join(
-        '<tr><td><input type=checkbox name="en_%s" %s></td>'
-        '<td><div><b>%s</b></div><div class=hint>%s</div></td>'
-        '<td><input name="%s" value="%s" placeholder="%s"></td></tr>'
-        % (k, ck(k in t), esc(lbl), esc(hint), k, esc(str(t.get(k, ""))), esc(ph))
+        "".join(["<tr><td style='width:30px'><input type=checkbox name=en_", k, " ", ck(k in t), "></td>",
+                 "<td><b>", esc(lbl), "</b><div class=hint>", esc(hint), "</div></td>",
+                 "<td style='width:180px'><input class=num name=", k, " value=\"", esc(str(t.get(k, ""))),
+                 "\" placeholder=\"", esc(ph), "\"></td></tr>"])
         for k, lbl, ph, hint in _UI_CRITERIA)
 
     def exc_list(key, label, hint):
         items = [str(x) for x in exc.get(key, [])]
         rows = "".join(
-            '<div class=excrow><input name="%s" value="%s">'
-            '<button type=button class=rm onclick="this.parentNode.remove()">&times;</button></div>'
-            % (key, esc(v)) for v in items)
-        return (
-            '<div class=excblock><div><b>%s</b></div><div class=hint>%s</div>'
-            '<div id="list_%s">%s</div>'
-            '<button type=button class=add onclick="addExc(\'%s\')">+ Add</button></div>'
-            % (esc(label), esc(hint), key, rows, key))
+            "<div class=excrow><input name=" + key + " value=\"" + esc(v) + "\">"
+            "<button type=button class=rm onclick='this.parentNode.remove()'>&times;</button></div>"
+            for v in items)
+        return "".join(["<div class=card><h2>", esc(label), "</h2><div class=frm><div class=hint>", esc(hint), "</div>",
+                        "<div id=list_", key, ">", rows, "</div>",
+                        "<div><button type=button class=ghost onclick=\"addExc('", key, "')\">+ Add</button></div></div></div>"])
 
-    discovered = srv.last_report
-    if discovered:
-        drows = "".join(
-            '<tr><td>%s</td><td class=mono>%s</td><td>%s</td><td class=st-%s>%s</td></tr>'
-            % (esc(r["ticker"]),
-               esc((r["id"] or "")[:12] + ("…" if r["id"] and len(r["id"]) > 12 else "")),
-               esc("%.6g" % r["price"]) if r.get("price") else "—",
-               "ok" if r["rate"] is not None else "no",
-               esc(r["status"]))
-            for r in discovered)
-        disc_html = ("<table class=disc><tr><th>Ticker</th><th>Asset id</th><th>Price (%s)</th><th>Decision</th></tr>%s</table>"
-                     % (esc(s["quote_currency"]), drows))
-    else:
-        disc_html = "<p class=hint>No poll has completed yet — assets discovered from the registry + API will appear here, with the admission decision for each.</p>"
+    rules_tab = "".join([
+        "<div class=card><h2>Admission criteria</h2><div class=frm>",
+        "<div class=frow><label>Combine criteria with</label><div>",
+        '<label class=check style="display:inline-flex;margin-right:16px"><input type=radio name=require value=all ',
+        ck(t.get("require", "all") != "any"), "> ALL must pass</label>",
+        '<label class=check style="display:inline-flex"><input type=radio name=require value=any ',
+        ck(t.get("require", "all") == "any"), "> ANY one passes</label></div></div>",
+        "</div><table>", crit, "</table></div>",
+        exc_list("always_admit", "Always admit", "Always whitelist these (if a valid price is available), skipping the rules. Ticker or 64-hex asset id."),
+        exc_list("always_reject", "Always reject", "Never whitelist these, whatever the rules say — reject wins over admit."),
+        exc_list("issuer_domains", "Trusted issuer domains", "Assets whose registry-verified issuer domain is in this list pass the issuer rule."),
+    ])
 
-    banner = '<p class=saved><b>Saved &amp; applied.</b></p>' if saved else ""
-    custom_disp = "" if is_custom else "display:none"
-    css = ("body{font-family:system-ui,Arial,sans-serif;max-width:820px;margin:2rem auto;padding:0 1rem;color:#1a1c1f}"
-           "h1{font-size:1.35rem}h2{font-size:1.05rem;margin:1.6rem 0 .4rem;border-bottom:1px solid #eee;padding-bottom:.3rem}"
-           "table{border-collapse:collapse;width:100%}td,th{padding:.4rem .5rem;border-bottom:1px solid #eee;text-align:left;vertical-align:top}"
-           "input:not([type=checkbox]),select{width:100%;box-sizing:border-box;padding:.4rem}"
-           ".hint{color:#667;font-size:.85rem;line-height:1.35;margin-top:.15rem}"
-           ".excrow{display:flex;gap:.4rem;margin:.3rem 0}.excrow input{flex:1}"
-           ".rm{flex:0 0 auto;cursor:pointer}.add{margin-top:.3rem;cursor:pointer}"
-           ".excblock{margin:.8rem 0}.mono{font-family:ui-monospace,Consolas,monospace;font-size:.85rem}"
-           ".st-ok{color:#1e7e34}.st-no{color:#9a6f00}.saved{color:#1e7e34}"
-           "button{padding:.5rem 1rem;font-size:.95rem;cursor:pointer}.primary{padding:.7rem 1.4rem;font-size:1rem}"
-           "label.fmt{font-weight:normal;margin-right:1rem}")
-    script = ("<script>"
-              "function addExc(k){var l=document.getElementById('list_'+k);var d=document.createElement('div');d.className='excrow';"
-              "var i=document.createElement('input');i.name=k;var b=document.createElement('button');b.type='button';b.className='rm';"
-              "b.innerHTML='\\u00d7';b.onclick=function(){d.remove()};d.appendChild(i);d.appendChild(b);l.appendChild(d);i.focus();}"
-              "var radios=document.querySelectorAll('input[name=format]');var cp=document.getElementById('custompaths');"
-              "function syncFmt(){cp.style.display=document.querySelector('input[name=format]:checked').value==='custom'?'':'none';}"
-              "radios.forEach(function(r){r.addEventListener('change',syncFmt)});"
-              "</script>")
-    return "".join([
-        "<!doctype html><meta charset=utf-8><title>Sequentia price server</title>",
-        "<style>", css, "</style>",
-        "<h1>Sequentia price server</h1>", banner,
-        "<p class=hint>This sidecar discovers your network's assets from the Asset Registry, prices them from a "
-        "market-data API, and publishes the resulting fee-asset whitelist to your node. You don't list assets by "
-        "hand — admission rules below decide which discovered assets get whitelisted.</p>",
+    # -- nodes tab (its own form) --
+    nodes = _nodes_current(srv)
+    def node_row(n):
+        return "".join([
+            "<tr><td><input name=node_name value=\"", esc(str(n.get("name", ""))), "\" placeholder=\"my node\"></td>",
+            "<td><input class=mono name=node_host value=\"", esc(str(n.get("host", "127.0.0.1"))), "\"></td>",
+            "<td style='width:90px'><input class=num name=node_port value=\"", esc(str(n.get("port", ""))), "\"></td>",
+            "<td><input name=node_user value=\"", esc(str(n.get("user", ""))), "\" autocomplete=off></td>",
+            "<td><input type=password name=node_password value=\"", esc(str(n.get("password", ""))), "\" autocomplete=new-password></td>",
+            "<td><input class=mono name=node_cookie value=\"", esc(str(n.get("cookie", ""))), "\" placeholder=\"(or cookie file)\"></td>",
+            "<td><button type=button class=rm onclick=rmNode(this)>&times;</button></td></tr>",
+        ])
+    nodes_tab = "".join([
+        '<form method=post action=/nodes>',
+        '<input type=hidden name=csrf_token value="', esc(csrf_token), '">',
+        "<div class=card><h2>Nodes receiving the whitelist <span class=right>setfeeexchangerates \xb7 persist=false</span></h2>",
+        "<table><tr><th>Name</th><th>Host</th><th>RPC port</th><th>RPC user</th><th>RPC password</th><th>Cookie file</th><th></th></tr>",
+        "<tbody id=nodelist>", "".join(node_row(n) for n in nodes), "</tbody></table>",
+        "<template id=nodetpl><table>", node_row({}), "</table></template>",
+        '<div class=frm><div><button type=button class=ghost onclick=addNode()>+ Add node</button></div>',
+        "<div class=hint>Each node must run with <code>-con_any_asset_fees=1</code>. Give either user+password or a "
+        "cookie file path. If the price server stops, every node simply keeps the last whitelist it received.</div></div>",
+        '<div class=savebar><button class=btn type=submit>Save nodes</button>',
+        "<span class=mut>applies live — the next poll publishes to the new list</span></div></div></form>",
+    ])
+
+    # -- access tab (its own form) --
+    has_pw = bool(ui.get("password_hash"))
+    access_tab = "".join([
+        '<form method=post action=/access>',
+        '<input type=hidden name=csrf_token value="', esc(csrf_token), '">',
+        "<div class=card><h2>Public access</h2><div class=frm>",
+        '<label class=check><input type=checkbox name=public_status ', ck(ui.get("public_status")),
+        "> Public read-only price page <span class=mut>anyone reaching this URL can view prices and decisions — never the config or your nodes</span></label>",
+        '<label class=check><input type=checkbox name=public_api ', ck(ui.get("public_api")),
+        "> Public JSON API <span class=mut><code>/api/prices</code> \xb7 <code>/api/whitelist</code> — lets others use this server as their market source</span></label>",
+        "<div class=frow><label>Rate limit (requests / min / IP)</label><input class=num name=api_rate_limit value=\"",
+        esc(str(ui.get("api_rate_limit_per_min", 30))), "\" style=\"max-width:120px\"></div>",
+        "<div class=hint>Applies to unauthenticated visitors only. Keep it low — this protects your VPS, not the data (it is public anyway once enabled).</div>",
+        "</div></div>",
+        "<div class=card><h2>Admin password</h2><div class=frm>",
+        ("<div class=frow><label>Current password</label><input type=password name=cur_password autocomplete=off></div>" if has_pw else
+         "<div class=hint>No password set: the admin area only answers to this machine (127.0.0.1). Set one to manage the server remotely.</div>"),
+        "<div class=frow><label>New password</label><input type=password name=new_password autocomplete=new-password></div>",
+        "<div class=frow><label>Repeat new password</label><input type=password name=new_password2 autocomplete=new-password></div>",
+        "<div class=hint>With a password set, the admin area asks for login wherever it is reached from; "
+        "to expose it beyond this machine restart with <code>--ui-host 0.0.0.0</code>.</div>",
+        "</div></div>",
+        "<div class=card><h2>Configuration file</h2><div class=noterow>",
+        "The UI reads and writes the same file passed to <code>--config</code>. ",
+        '<a href="/admin/config.json">Download the current config</a> (includes node RPC credentials — keep it private).',
+        "</div></div>",
+        '<div class=card><div class=savebar><button class=btn type=submit>Save access settings</button></div></div></form>',
+    ])
+
+    chips = ('<span class="chip live">Running</span><span class=chip><a href="/public">public view</a></span>'
+             + ('<span class=chip><a href="/logout">log out</a></span>' if has_pw else ""))
+    banner = ('<div class=saved>Saved &amp; applied.</div>' if saved else "") + \
+             ('<div class=err>' + html.escape(error) + "</div>" if error else "")
+    body = "".join([
+        banner,
+        "<nav>",
+        '<button class=on onclick="tab(event,\'t-status\')">Status</button>',
+        '<button onclick="tab(event,\'t-source\')">Market source</button>',
+        '<button onclick="tab(event,\'t-rules\')">Admission rules</button>',
+        '<button onclick="tab(event,\'t-nodes\')">Nodes</button>',
+        '<button onclick="tab(event,\'t-access\')">Access</button>',
+        "</nav>",
+        '<div class="tab on" id=t-status>', status_tab, "</div>",
         '<form method=post action=/save>',
         '<input type=hidden name=csrf_token value="', esc(csrf_token), '">',
-
-        "<h2>Price source</h2><table>",
-        '<tr><td style="width:36%"><b>API URL</b><div class=hint>The market-data API to poll. Default: the Sequentia testnet demo feed.</div></td>',
-        '<td><input name=source_url value="', esc(s["url"]), '" placeholder="', DEFAULT_SOURCE_URL, '"></td></tr>',
-        '<tr><td><b>Quote currency</b><div class=hint>The currency the API reports prices in. Fees are priced in this unit. Usually real USD.</div></td>',
-        '<td><input name=quote_currency value="', esc(s["quote_currency"]), '" placeholder="USD"></td></tr>',
-        '<tr><td><b>API format</b><div class=hint>A <b>Sequentia-format</b> API returns every asset keyed by ticker '
-        '(<span class=mono>{"SEQ":{"price":…}}</span>) in one call — no paths needed. Choose <b>Custom</b> only for a '
-        'third-party API, then map where each field lives in its JSON.</div></td>',
-        '<td><label class=fmt><input type=radio name=format value=sequentia ', ck(not is_custom), '> Sequentia-format</label>',
-        '<label class=fmt><input type=radio name=format value=custom ', ck(is_custom), '> Custom</label></td></tr></table>',
-        '<table id=custompaths style="', custom_disp, '">',
-        '<tr><td style="width:36%"><b>Price path</b><div class=hint>Dotted JSON path to the price in the API response. '
-        'Use <span class=mono>{ticker}</span> for the asset ticker; put it in the URL too for per-asset endpoints.</div></td>',
-        '<td><input name=price_path value="', esc(s["price_path"]), '" placeholder="data.price"></td></tr>',
-        '<tr><td><b>Market-cap path</b> <span class=hint>(optional)</span></td>',
-        '<td><input name=market_cap_path value="', esc(s["market_cap_path"]), '" placeholder="data.market_cap"></td></tr>',
-        '<tr><td><b>24h-volume path</b> <span class=hint>(optional)</span></td>',
-        '<td><input name=volume_24h_path value="', esc(s["volume_24h_path"]), '" placeholder="data.volume_24h"></td></tr></table>',
-
-        "<h2>Admission rules</h2>",
-        "<p class=hint>Tick a rule to enforce it; untick to ignore. Then choose whether an asset must pass "
-        "<b>all</b> ticked rules or <b>any</b> one.</p>",
-        '<p><label class=fmt><input type=radio name=require value=all ', ck(t.get("require", "all") != "any"), '> Require ALL ticked</label>',
-        '<label class=fmt><input type=radio name=require value=any ', ck(t.get("require", "all") == "any"), '> Require ANY one</label></p>',
-        "<table>", crit, "</table>",
-
-        "<h2>Exceptions &amp; trusted issuers</h2>",
-        "<p class=hint>Exceptions override the rules above. Each entry is an asset ticker or id; add as many as you like.</p>",
-        exc_list("always_reject", "Always reject", "Never whitelist these, whatever the rules say (reject wins over admit)."),
-        exc_list("always_admit", "Always admit", "Always whitelist these (if a valid price is available), skipping the rules."),
-        exc_list("issuer_domains", "Trusted issuer domains",
-                 "If the 'issuer domain' rule is ticked above, assets whose registry domain is in this list pass it."),
-
-        "<h2>General</h2><table>",
-        '<tr><td style="width:36%">Poll interval (seconds)</td><td><input name=poll_interval value="', esc(str(srv.cfg.get("poll_interval_secs", 60))), '"></td></tr>',
-        '<tr><td>Registry URL<div class=hint>Where the asset universe (ticker &rarr; id) is read from.</div></td>',
-        '<td><input name=registry_url value="', esc(str(srv.cfg.get("registry_url", DEFAULT_REGISTRY_URL))), '"></td></tr>',
-        '<tr><td>Publisher name</td><td><input name=source_name value="', esc(str(srv.source_name)), '"></td></tr></table>',
-
-        "<p><button type=submit class=primary>Save &amp; apply</button></p></form>",
-        "<h2>Discovered assets &amp; decisions</h2>", disc_html,
-        script,
+        '<div class=tab id=t-source>', source_tab,
+        '<div class=card><div class=savebar><button class=btn type=submit>Save &amp; apply</button>',
+        "<span class=mut>applies live, no restart</span></div></div></div>",
+        '<div class=tab id=t-rules>', rules_tab,
+        '<div class=card><div class=savebar><button class=btn type=submit>Save &amp; apply</button>',
+        "<span class=mut>applies live, no restart</span></div></div></div>",
+        "</form>",
+        '<div class=tab id=t-nodes>', nodes_tab, "</div>",
+        '<div class=tab id=t-access>', access_tab, "</div>",
     ])
+    return _page("Price server — admin", body, chips)
 
 
 def _ui_parse(srv, form):
-    """Parse the posted form into kwargs for apply_config(). Preserves
-    default_thresholds keys the form doesn't expose (volatility_window, etc.)."""
+    """Parse the main config form (/save) into kwargs for apply_config().
+    Preserves default_thresholds keys the form doesn't expose."""
     g = lambda k, d="": form.get(k, [d])[0]
-    # thresholds
     t = dict(srv.thresholds())
     t["require"] = "any" if g("require", "all") == "any" else "all"
     for key, _, _, _ in _UI_CRITERIA:
@@ -631,7 +981,6 @@ def _ui_parse(srv, form):
                 t.pop(key, None)
         else:
             t.pop(key, None)
-    # exceptions: multiple inputs share a name -> a list of rows
     exc = dict(srv.exceptions())
     for key in ("always_reject", "always_admit", "issuer_domains"):
         items = [x.strip() for x in form.get(key, []) if x.strip()]
@@ -639,15 +988,13 @@ def _ui_parse(srv, form):
             exc[key] = items
         else:
             exc.pop(key, None)
-    # carry issuer_domains into thresholds too (the rule reads it there)
     if "issuer_domains" in exc:
         t["issuer_domains"] = exc["issuer_domains"]
     else:
         t.pop("issuer_domains", None)
-    # source
     fmt = "custom" if g("format", "sequentia") == "custom" else "sequentia"
     source = {"url": g("source_url").strip() or DEFAULT_SOURCE_URL,
-              "quote_currency": g("quote_currency").strip() or DEFAULT_QUOTE,
+              "quote_currency": g("quote_currency").strip().upper() or DEFAULT_QUOTE,
               "format": fmt}
     if fmt == "custom":
         source["price_path"] = g("price_path").strip() or "price"
@@ -661,7 +1008,37 @@ def _ui_parse(srv, form):
         poll = None
     registry_url = g("registry_url").strip() or DEFAULT_REGISTRY_URL
     return {"source": source, "thresholds": t, "exceptions": exc,
-            "poll_interval": poll, "registry_url": registry_url}
+            "poll_interval": poll, "registry_url": registry_url,
+            "source_name": g("source_name").strip() or srv.source_name}
+
+
+def _nodes_parse(form):
+    """Parse the Nodes form: parallel input lists, one entry per row."""
+    names = form.get("node_name", [])
+    hosts = form.get("node_host", [])
+    ports = form.get("node_port", [])
+    users = form.get("node_user", [])
+    pws = form.get("node_password", [])
+    cookies = form.get("node_cookie", [])
+    nodes = []
+    for i in range(len(hosts)):
+        host = hosts[i].strip()
+        try:
+            port = int(ports[i].strip()) if i < len(ports) else 0
+        except ValueError:
+            port = 0
+        if not host or not port:
+            continue  # an all-empty template row, or one without the essentials
+        n = {"host": host, "port": port}
+        if i < len(names) and names[i].strip():
+            n["name"] = names[i].strip()
+        if i < len(cookies) and cookies[i].strip():
+            n["cookie"] = cookies[i].strip()
+        else:
+            n["user"] = users[i].strip() if i < len(users) else ""
+            n["password"] = pws[i] if i < len(pws) else ""
+        nodes.append(n)
+    return nodes
 
 
 def _is_loopback(host):
@@ -677,6 +1054,12 @@ def _is_loopback(host):
 def start_config_ui(price_server, host, port):
     srv = price_server
     csrf_token = secrets.token_urlsafe(32)
+    sessions = {}          # token -> expiry (unix)
+    SESSION_TTL = 12 * 3600
+    limiter = _RateLimiter()
+
+    def ui_cfg():
+        return srv.cfg.get("ui", {})
 
     def _same_origin(handler):
         host_hdr = handler.headers.get("Host", "")
@@ -689,46 +1072,179 @@ def start_config_ui(price_server, host, port):
             return False
 
     class Handler(http.server.BaseHTTPRequestHandler):
-        def _send(self, code, body, ctype="text/html; charset=utf-8"):
-            data = body.encode()
+        def _send(self, code, body, ctype="text/html; charset=utf-8", headers=None):
+            data = body.encode() if isinstance(body, str) else body
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(data)))
+            for k, v in (headers or {}).items():
+                self.send_header(k, v)
             self.end_headers()
             self.wfile.write(data)
 
+        def _redirect(self, where, headers=None):
+            self.send_response(303)
+            self.send_header("Location", where)
+            for k, v in (headers or {}).items():
+                self.send_header(k, v)
+            self.end_headers()
+
+        def _client_local(self):
+            return self.client_address[0] in ("127.0.0.1", "::1")
+
+        def _authed(self):
+            """Admin? With no password set, only loopback clients qualify (the
+            desktop-GUI flow). With one set, a valid session cookie is required
+            from everyone, loopback included."""
+            pw = ui_cfg().get("password_hash")
+            if not pw:
+                return self._client_local()
+            cookie = self.headers.get("Cookie", "")
+            m = re.search(r"(?:^|;\s*)psid=([A-Za-z0-9_-]+)", cookie)
+            if not m:
+                return False
+            tok = m.group(1)
+            exp = sessions.get(tok)
+            if not exp or exp < time.time():
+                sessions.pop(tok, None)
+                return False
+            sessions[tok] = time.time() + SESSION_TTL  # sliding renewal
+            return True
+
+        def _public_gate(self, enabled):
+            """Returns None if the request may proceed, else sends the refusal."""
+            if self._authed():
+                return None  # the admin is never rate-limited or blocked
+            if not enabled:
+                self._send(403, json.dumps({"error": "disabled by the operator"}), "application/json")
+                return True
+            per_min = int(ui_cfg().get("api_rate_limit_per_min", 30) or 30)
+            if not limiter.allow(self.client_address[0], per_min):
+                self._send(429, json.dumps({"error": "rate limit exceeded, slow down"}), "application/json",
+                           headers={"Retry-After": "30"})
+                return True
+            return None
+
         def do_GET(self):
-            if self.path.startswith("/status"):
-                self._send(200, json.dumps({"rates": srv.last_rates, "report": srv.last_report}, indent=2),
-                           "application/json")
-            elif self.path == "/" or self.path.startswith("/?"):
-                self._send(200, _ui_render(srv, csrf_token, saved=self.path.endswith("saved=1")))
+            path = urllib.parse.urlsplit(self.path).path
+            if path == "/api/prices":
+                if self._public_gate(ui_cfg().get("public_api")): return
+                data = dict(srv.last_prices)
+                data["_meta"] = {"quote_currency": _src(srv)["quote_currency"],
+                                 "updated": srv.last_poll_ts, "publisher": srv.source_name,
+                                 "format": "sequentia"}
+                self._send(200, json.dumps(data, indent=2), "application/json")
+            elif path in ("/api/whitelist", "/status"):  # /status: legacy alias
+                if self._public_gate(ui_cfg().get("public_api")): return
+                self._send(200, json.dumps({
+                    "updated": srv.last_poll_ts,
+                    "quote_currency": _src(srv)["quote_currency"],
+                    "rates": srv.last_rates, "decisions": srv.last_report}, indent=2),
+                    "application/json")
+            elif path == "/":
+                if self._authed():
+                    self._redirect("/admin")  # the desktop GUI opens the root URL
+                    return
+                if self._public_gate(ui_cfg().get("public_status")): return
+                self._send(200, _render_public(srv))
+            elif path == "/public":
+                if self._public_gate(ui_cfg().get("public_status")): return
+                self._send(200, _render_public(srv))
+            elif path == "/admin":
+                if self._authed():
+                    self._send(200, _render_admin(srv, csrf_token,
+                                                  saved=self.path.endswith("saved=1")))
+                else:
+                    self._send(200, _render_login())
+            elif path == "/admin/config.json":
+                if not self._authed():
+                    self._redirect("/admin"); return
+                self._send(200, json.dumps(srv.cfg, indent=2), "application/json",
+                           headers={"Content-Disposition": "attachment; filename=price-server-config.json"})
+            elif path == "/logout":
+                cookie = self.headers.get("Cookie", "")
+                m = re.search(r"(?:^|;\s*)psid=([A-Za-z0-9_-]+)", cookie)
+                if m:
+                    sessions.pop(m.group(1), None)
+                self._redirect("/admin", headers={"Set-Cookie": "psid=; Max-Age=0; Path=/"})
             else:
                 self._send(404, "not found")
 
         def do_POST(self):
-            if self.path != "/save":
-                self._send(404, "not found"); return
-            if not _same_origin(self):
-                log.warning("rejected /save: cross-origin or missing Origin/Referer")
-                self._send(403, "forbidden: cross-origin request"); return
+            path = urllib.parse.urlsplit(self.path).path
             n = int(self.headers.get("Content-Length", 0) or 0)
+            if n > 1_000_000:
+                self._send(413, "request too large"); return
             form = urllib.parse.parse_qs(self.rfile.read(n).decode())
-            if not hmac.compare_digest(form.get("csrf_token", [""])[0], csrf_token):
-                log.warning("rejected /save: bad or missing CSRF token")
+            g = lambda k, d="": form.get(k, [d])[0]
+
+            if path == "/login":
+                pw_hash = ui_cfg().get("password_hash")
+                if not pw_hash:
+                    self._redirect("/admin"); return
+                time.sleep(0.3)  # flat cost per attempt; blunts online guessing
+                if _check_password(pw_hash, g("password")):
+                    tok = secrets.token_urlsafe(32)
+                    sessions[tok] = time.time() + SESSION_TTL
+                    self._redirect("/admin", headers={
+                        "Set-Cookie": "psid=%s; HttpOnly; SameSite=Strict; Path=/" % tok})
+                else:
+                    log.warning("admin login failed from %s", self.client_address[0])
+                    self._send(200, _render_login("Wrong password."))
+                return
+
+            # Everything below changes the config: admin + same-origin + CSRF.
+            if not self._authed():
+                self._send(403, "forbidden: not logged in"); return
+            if not _same_origin(self):
+                log.warning("rejected %s: cross-origin or missing Origin/Referer", path)
+                self._send(403, "forbidden: cross-origin request"); return
+            if not hmac.compare_digest(g("csrf_token"), csrf_token):
+                log.warning("rejected %s: bad or missing CSRF token", path)
                 self._send(403, "forbidden: invalid CSRF token"); return
+
             try:
-                srv.apply_config(**_ui_parse(srv, form))
+                if path == "/save":
+                    srv.apply_config(**_ui_parse(srv, form))
+                elif path == "/nodes":
+                    nodes = _nodes_parse(form)
+                    if not nodes:
+                        self._send(200, _render_admin(srv, csrf_token,
+                                                      error="No valid node rows (each needs host + port).")); return
+                    srv.apply_config(nodes=nodes)
+                elif path == "/access":
+                    ui = {"public_status": bool(g("public_status")),
+                          "public_api": bool(g("public_api"))}
+                    try:
+                        ui["api_rate_limit_per_min"] = max(1, int(g("api_rate_limit", "30")))
+                    except ValueError:
+                        pass
+                    new_pw = g("new_password")
+                    if new_pw:
+                        cur_hash = ui_cfg().get("password_hash")
+                        if cur_hash and not _check_password(cur_hash, g("cur_password")):
+                            self._send(200, _render_admin(srv, csrf_token,
+                                                          error="Current password is wrong.")); return
+                        if new_pw != g("new_password2"):
+                            self._send(200, _render_admin(srv, csrf_token,
+                                                          error="The new passwords don't match.")); return
+                        if len(new_pw) < 8:
+                            self._send(200, _render_admin(srv, csrf_token,
+                                                          error="Password too short — use at least 8 characters.")); return
+                        ui["password_hash"] = _hash_password(new_pw)
+                    srv.apply_config(ui=ui)
+                else:
+                    self._send(404, "not found"); return
             except Exception as e:
                 self._send(400, "error: " + html.escape(str(e))); return
-            self.send_response(303); self.send_header("Location", "/?saved=1"); self.end_headers()
+            self._redirect("/admin?saved=1")
 
         def log_message(self, *a):
             pass
 
     httpd = http.server.ThreadingHTTPServer((host, port), Handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    log.info("config UI on http://%s:%d", host, port)
+    log.info("web UI on http://%s:%d (admin at /admin)", host, port)
     return httpd
 
 
@@ -741,11 +1257,13 @@ def main():
                         help="don't publish to the node, just log decisions")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--ui-port", type=int, default=0,
-                        help="serve the config UI on this port (0 = off)")
+                        help="serve the web UI/API on this port (0 = off)")
     parser.add_argument("--ui-host", default="127.0.0.1",
-                        help="config UI bind address (default: localhost only)")
+                        help="web UI bind address (default: localhost only)")
     parser.add_argument("--ui-allow-remote", action="store_true",
-                        help="permit binding the config UI to a non-loopback address")
+                        help="permit a non-loopback bind even without an admin password (NOT recommended)")
+    parser.add_argument("--set-password", action="store_true",
+                        help="prompt for an admin password, store its hash in the config, and exit")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
@@ -754,13 +1272,31 @@ def main():
     with open(args.config) as f:
         config = json.load(f)
 
+    if args.set_password:
+        import getpass
+        pw = getpass.getpass("New admin password: ")
+        if len(pw) < 8:
+            parser.error("password too short — use at least 8 characters")
+        if pw != getpass.getpass("Repeat it: "):
+            parser.error("the passwords don't match")
+        config.setdefault("ui", {})["password_hash"] = _hash_password(pw)
+        tmp = args.config + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(config, f, indent=2)
+        os.replace(tmp, args.config)
+        print("Admin password set. Restart the price server to pick it up.")
+        return 0
+
     server = PriceServer(config, dry_run=args.dry_run, config_path=args.config)
     if args.ui_port:
-        if not _is_loopback(args.ui_host) and not args.ui_allow_remote:
+        if (not _is_loopback(args.ui_host)
+                and not config.get("ui", {}).get("password_hash")
+                and not args.ui_allow_remote):
             parser.error(
-                "refusing to bind the config UI to non-loopback address %r: it has no "
-                "authentication beyond same-origin/CSRF and writes the live config. Pass "
-                "--ui-allow-remote to override (and put it behind your own auth/firewall)." % args.ui_host)
+                "refusing to bind the web UI to non-loopback address %r without an admin "
+                "password: the config (and your node RPC details) would be writable by "
+                "anyone. Set one first with --set-password (or from the Access tab on "
+                "localhost). --ui-allow-remote overrides, at your own risk." % args.ui_host)
         start_config_ui(server, args.ui_host, args.ui_port)
     if args.once:
         print(json.dumps(server.poll_once(), indent=2))

@@ -16,7 +16,8 @@ sidecar owns the admission thresholds and the add/remove logic.
 python3 price_server.py --config config.json                 # poll forever
 python3 price_server.py --config config.json --once          # one poll, print, exit
 python3 price_server.py --config config.json --dry-run       # decide + log, don't publish
-python3 price_server.py --config config.json --ui-port 8089  # + config UI on http://127.0.0.1:8089
+python3 price_server.py --config config.json --ui-port 8089  # + web UI on http://127.0.0.1:8089
+python3 price_server.py --config config.json --set-password  # set the admin password, then exit
 ```
 
 No dependencies — just Python 3. Run the node with `-con_any_asset_fees=1`.
@@ -30,22 +31,37 @@ in git — run `./fetch-embeddable-python.sh` once before `make deploy` to
 download and verify it into `./python/` (git-ignored). `price_server.py` is
 stdlib-only, so the stock embeddable distribution suffices.
 
-## Config UI
+## Web UI & API
 
-`--ui-port <port>` serves a localhost web page to edit the **admission rules**
-without hand-editing JSON: tick which criteria to enforce, choose whether **ALL**
-or **ANY** must pass, set issuer allow-lists and always-admit/always-reject
-exceptions, and the poll interval. **Save & apply** writes the config file and
-reloads live. (Assets and their price sources are still edited in the config file.)
+`--ui-port <port>` serves a web UI with two separate audiences:
 
-The UI binds to `127.0.0.1` by default and is intended for a single local
-operator. `/save` rewrites the live admission ruleset, so it is protected by a
-same-origin check (cross-site or Origin/Referer-less POSTs are rejected with
-`403`) and a per-process CSRF token embedded in the form. The token rotates on
-each restart, so reload the page after restarting the server. Binding to a
-non-loopback `--ui-host` is **refused** unless you also pass `--ui-allow-remote`;
-even then there is no real authentication, so put it behind your own auth and
-firewall.
+**Admin area** (`/admin`) — every setting, no JSON editing: the market source
+(API URL, quote currency, format), the admission rules and exceptions, the
+**nodes** that receive the whitelist, polling, and access control. With no
+password set the admin area answers only to `127.0.0.1` (the desktop-GUI
+flow). Set a password (Access tab, or `--set-password` on the CLI) to log in
+from anywhere the UI is reachable; sessions are cookie-based, config writes
+keep the same-origin + CSRF protection (the token rotates on restart).
+
+**Public area** (both **off by default**, enabled per toggle in the Access tab):
+
+- `/` — a read-only price page: per-asset price, market cap, volume and the
+  admission decision with its reason. Never shows the config or your nodes.
+- `GET /api/prices` — every asset keyed by ticker in the Sequentia combined
+  format, so **another operator can point their price server at yours** as its
+  market source.
+- `GET /api/whitelist` — the published rates plus per-asset decisions.
+
+Public requests are rate-limited per client IP (default 30/min, configurable):
+the typical host is a small VPS, and the limiter protects the box, not the
+data. Logged-in admins are never limited.
+
+All prices, caps and volumes — and the rates pushed to the nodes — are
+expressed in the source's **quote currency** (usually plain USD; it does not
+need to exist as an on-chain asset).
+
+Binding a non-loopback `--ui-host` is refused until an admin password is set
+(`--ui-allow-remote` overrides, at your own risk).
 
 ## Admission rule engine
 

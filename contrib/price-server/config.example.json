@@ -35,5 +35,13 @@
   "exceptions": {
     "always_admit": [],
     "always_reject": []
+  },
+
+  "ui": {
+    "_comment": "Web UI access. public_status / public_api expose the read-only price page and the JSON API (/api/prices, /api/whitelist) to anyone who can reach the UI port, rate-limited per IP. password_hash gates the admin area; set it from the Access tab or with --set-password (never write it by hand).",
+    "public_status": false,
+    "public_api": false,
+    "api_rate_limit_per_min": 30,
+    "password_hash": ""
   }
 }
