@@ -30,6 +30,7 @@ Operating runbooks (current):
 | [`demos/100-node-bootstrap-runbook.md`](demos/100-node-bootstrap-runbook.md) | Historical demo: the 100-node mainnet-style bootstrap (pre-public-committee, anchored to Bitcoin testnet3 at the time). The tooling it drives is current (`contrib/sequentia/bootstrap-autonomous-testnet.py`). |
 | [`regenesis-box-runbook.md`](regenesis-box-runbook.md) | Historical record: the box-side execution plan for the 2026-07-05 testnet re-genesis (executed; kept as the record of how the current chain was launched). |
 | [`release-versioning.md`](release-versioning.md) | Policy: official releases are git-tagged at the build commit; private/test rebuilds keep the version number and identify via `-uacomment` instead. |
+| [`build-windows-installer.md`](build-windows-installer.md) | Build the Windows setup executable (MinGW cross-compile + NSIS from Linux/WSL), including the bundled price server and its Python runtime. |
 
 ## 2. Design documents
 
