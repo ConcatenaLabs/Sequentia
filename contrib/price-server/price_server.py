@@ -246,7 +246,7 @@ class PriceServer:
 
     def apply_config(self, *, source=None, thresholds=None, exceptions=None,
                      poll_interval=None, source_name=None, registry_url=None,
-                     reference=None, nodes=None, ui=None):
+                     reference=None, nodes=None, ui=None, manual_prices=None):
         """Replace config sections from the UI and persist atomically."""
         with self._lock:
             if source is not None:
@@ -269,6 +269,8 @@ class PriceServer:
                 self.cfg.pop("node_rpc", None)
                 if not self.dry_run:
                     self.rpcs = [NodeRPC(n) for n in nodes]
+            if manual_prices is not None:
+                self.cfg["manual_prices"] = manual_prices
             if ui is not None:
                 merged = dict(self.cfg.get("ui", {}))
                 merged.update(ui)
@@ -411,15 +413,59 @@ class PriceServer:
         #    native/policy asset is NOT special-cased: it goes through the same admission
         #    rules and can be admitted OR rejected, exactly like any other asset (the
         #    only thing special about SEQ is staking, never the fee market).
+        #
+        #    The market source can be scoped (source.mode = all | except | only, with
+        #    source.assets). An asset with no market price — out of scope, or simply
+        #    missing from the feed — can carry an operator-set MANUAL price (in the
+        #    quote currency): it is admitted at that fixed rate, bypassing the market
+        #    criteria (the operator setting a price by hand IS the decision), but
+        #    always_reject still wins.
+        smode = src.get("mode", "all")
+        sassets = {str(x).upper() for x in src.get("assets", [])}
+        def source_covers(tk, feed_key, asset_id):
+            # An entry matches by registry ticker, feed key (alias) or asset id,
+            # so "SEQ" covers the native whether the registry calls it TSEQ or SEQ.
+            hit = tk in sassets or feed_key in sassets or asset_id.upper() in sassets
+            if smode == "only": return hit
+            if smode == "except": return not hit
+            return True
+        manual = {}
+        for k, v in self.cfg.get("manual_prices", {}).items():
+            if str(k).startswith("_"):
+                continue
+            try:
+                manual[str(k).upper()] = float(v)
+            except (TypeError, ValueError):
+                pass
         raw, report, ticker_of_id = {}, [], {}
         with self._lock:
+            rejects = [str(x).upper() for x in self.exceptions().get("always_reject", [])]
             for ticker in sorted(reg_tickers):
                 asset_id, domain = registry[ticker]
                 ticker_of_id[asset_id] = ticker
-                m = prices.get(aliases.get(ticker.upper(), ticker.upper()))
+                tk_u = ticker.upper()
+                feed_key = aliases.get(tk_u, tk_u)
+                covered = source_covers(tk_u, feed_key, asset_id)
+                m = prices.get(feed_key) if covered else None
                 if not m:
+                    mp = manual.get(tk_u, manual.get(feed_key))
+                    if mp and mp > 0:
+                        if tk_u in rejects or asset_id.upper() in rejects:
+                            status, rate = "rejected: always_reject", None
+                        else:
+                            rate = round(mp * COIN)
+                            if not (0 < rate <= MAX_RATE):
+                                status, rate = "skipped: manual rate out of range", None
+                            else:
+                                status = "admitted (manual price)"
+                                raw[asset_id] = rate
+                        report.append({"ticker": ticker, "id": asset_id, "domain": domain,
+                                       "price": mp, "rate": rate, "status": status})
+                        continue
+                    why = ("skipped: outside the market-source scope, no manual price"
+                           if not covered else "skipped: no price from API")
                     report.append({"ticker": ticker, "id": asset_id, "domain": domain,
-                                   "price": None, "rate": None, "status": "skipped: no price from API"})
+                                   "price": None, "rate": None, "status": why})
                     continue
                 state = self._states.setdefault(ticker, AssetState(vol_window))
                 rate, status = self._admit(ticker, asset_id, domain, m, state)
@@ -640,6 +686,10 @@ display:flex;gap:12px;align-items:center}
 .savebar .mut{font-size:.78rem}
 .excrow{display:flex;gap:8px;margin:4px 0}.excrow input{flex:1}
 .noterow{padding:10px 16px;color:var(--muted);font-size:.82rem}
+.tbar{display:flex;gap:10px;align-items:center;padding:10px 14px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.tbar input{max-width:300px}.tbar select{width:auto}
+.tbar .mut{font-size:.76rem;margin-left:auto}
+th.sortcol{cursor:pointer}th.sortcol:hover{color:var(--accent)}
 .saved{background:var(--good-bg);color:var(--good);font-weight:600;font-size:.85rem;
 padding:9px 14px;border-radius:4px;margin-bottom:14px}
 .err{background:var(--bad-bg);color:var(--bad);font-weight:600;font-size:.85rem;
@@ -662,6 +712,45 @@ b.innerHTML='\\u00d7';b.onclick=function(){d.remove()};d.appendChild(i);d.append
 function addNode(){var t=document.getElementById('nodetpl');var c=t.content.cloneNode(true);
 document.getElementById('nodelist').appendChild(c);}
 function rmNode(b){b.closest('tr').remove();}
+function addManual(){var l=document.getElementById('list_manual');var d=document.createElement('div');d.className='excrow';
+d.innerHTML='<input name=manual_ticker placeholder="TICKER or 64-hex id" style="flex:2">'+
+'<input name=manual_price placeholder="price in the quote currency" style="flex:1">'+
+'<button type=button class=rm onclick="this.parentNode.remove()">\\u00d7</button>';
+l.appendChild(d);d.querySelector('input').focus();}
+function cellVal(tr,i){var td=tr.cells[i];if(!td)return'';var v=td.getAttribute('data-v');
+if(v!==null){var n=parseFloat(v);return isNaN(n)?v:n;}return td.textContent.trim();}
+function applyView(tb){
+ var q=((document.getElementById('flt_'+tb.id)||{}).value||'').toLowerCase();
+ var max=parseInt((document.getElementById('pgs_'+tb.id)||{}).value||'0')||0;
+ var shown=0,total=0;
+ tb.querySelectorAll('tbody tr').forEach(function(r){
+  var ok=!q||r.textContent.toLowerCase().indexOf(q)>=0;
+  if(ok)total++;
+  var vis=ok&&(!max||shown<max);
+  if(vis)shown++;
+  r.style.display=vis?'':'none';
+ });
+ var n=document.getElementById('cnt_'+tb.id);if(n)n.textContent='showing '+shown+' of '+total;
+}
+document.querySelectorAll('table.sortable').forEach(function(tb){
+ var dir={};
+ tb.querySelectorAll('thead th').forEach(function(th,i){
+  th.classList.add('sortcol');
+  th.addEventListener('click',function(){
+   dir[i]=!dir[i];
+   var rows=Array.from(tb.querySelectorAll('tbody tr'));
+   rows.sort(function(a,b){
+    var x=cellVal(a,i),y=cellVal(b,i);
+    if(typeof x=='number'&&typeof y=='number')return dir[i]?x-y:y-x;
+    return dir[i]?String(x).localeCompare(String(y)):String(y).localeCompare(String(x));
+   });
+   var tbody=tb.querySelector('tbody');
+   rows.forEach(function(r){tbody.appendChild(r)});
+   applyView(tb);
+  });
+ });
+ applyView(tb);
+});
 var radios=document.querySelectorAll('input[name=format]');var cp=document.getElementById('custompaths');
 function syncFmt(){if(cp)cp.style.display=document.querySelector('input[name=format]:checked').value==='custom'?'':'none';}
 radios.forEach(function(r){r.addEventListener('change',syncFmt)});
@@ -704,8 +793,10 @@ def _fmt_age(ts):
 
 def _decisions_table(srv):
     """The per-asset decisions table, shared by the public page and the admin
-    Status tab. Everything in it is already public information (prices and the
-    resulting whitelist); node details never appear here."""
+    Status tab: sortable columns (click a header), a text filter and a
+    rows-per-page selector, all client-side. Everything in it is already public
+    information (prices and the resulting whitelist); node details never
+    appear here."""
     esc = html.escape
     quote = _src(srv)["quote_currency"]
     if not srv.last_report:
@@ -722,18 +813,30 @@ def _decisions_table(srv):
         pill = '<span class="pill good">ADMITTED</span>' if ok else (
             '<span class="pill bad">REJECTED</span>' if str(r["status"]).startswith("rejected")
             else '<span class="pill warn">SKIPPED</span>')
+        price = r.get("price")
+        mcap, vol = m.get("market_cap"), m.get("volume_24h")
         rows.append("".join([
-            "<tr><td><b>", esc(r["ticker"]), "</b><div class='mut mono'>", esc((r["id"] or "")[:8]), "…</div></td>",
-            '<td class="num r">', esc("%.6g" % r["price"]) if r.get("price") else "—", "</td>",
-            '<td class="num r">', _fmt_qty(m.get("market_cap")), "</td>",
-            '<td class="num r">', _fmt_qty(m.get("volume_24h")), "</td>",
-            "<td>", pill, "</td>",
+            '<tr><td data-v="', esc(r["ticker"]), '"><b>', esc(r["ticker"]), "</b><div class='mut mono'>",
+            esc((r["id"] or "")[:8]), "…</div></td>",
+            '<td class="num r" data-v="', "%.10g" % price if price else "-1", '">',
+            esc("%.6g" % price) if price else "—", "</td>",
+            '<td class="num r" data-v="', "%.10g" % mcap if mcap is not None else "-1", '">', _fmt_qty(mcap), "</td>",
+            '<td class="num r" data-v="', "%.10g" % vol if vol is not None else "-1", '">', _fmt_qty(vol), "</td>",
+            '<td data-v="', ("0" if ok else "1"), '">', pill, "</td>",
             "<td class=why>", esc(r["status"]), "</td></tr>",
         ]))
+    page = int(srv.cfg.get("ui", {}).get("page_size", 50) or 50)
+    opts = "".join('<option value="%d"%s>%d</option>' % (n, " selected" if n == page else "", n)
+                   for n in (10, 25, 50, 100, 250))
     return "".join([
-        "<table><tr><th>Asset</th><th class=r>Price (", esc(quote), ")</th>",
-        "<th class=r>Market cap</th><th class=r>24h volume</th><th>Decision</th><th>Why</th></tr>",
-        "".join(rows), "</table>",
+        '<div class=tbar>',
+        '<input id=flt_dec placeholder="filter: ticker, id, decision, reason…" oninput=applyView(dec)>',
+        '<select id=pgs_dec onchange=applyView(dec)>', opts,
+        '<option value=0', " selected" if not page else "", ">all</option></select>",
+        '<span id=cnt_dec class=mut></span></div>',
+        '<table class=sortable id=dec><thead><tr><th>Asset</th><th class=r>Price (', esc(quote), ")</th>",
+        "<th class=r>Market cap</th><th class=r>24h volume</th><th>Decision</th><th>Why</th></tr></thead>",
+        "<tbody>", "".join(rows), "</tbody></table>",
     ])
 
 
@@ -775,6 +878,47 @@ def _render_login(msg=""):
         "</form></div></div></div>",
     ])
     return _page("Price server — login", body)
+
+
+def _scope_and_manual_cards(srv):
+    """Market-source scope (all / all-except / only) and the manual fixed
+    prices for assets the source doesn't cover. Part of the main /save form."""
+    esc = html.escape
+    s = dict(srv.source())
+    quote = _src(srv)["quote_currency"]
+    smode = s.get("mode", "all")
+    ck = lambda v: "checked" if v else ""
+    assets_rows = "".join(
+        "<div class=excrow><input name=source_assets value=\"" + esc(str(v)) + "\">"
+        "<button type=button class=rm onclick='this.parentNode.remove()'>&times;</button></div>"
+        for v in s.get("assets", []))
+    manual_rows = "".join(
+        "<div class=excrow><input name=manual_ticker value=\"" + esc(str(k)) + "\" style=\"flex:2\">"
+        "<input name=manual_price value=\"" + esc("%g" % v if isinstance(v, (int, float)) else str(v)) + "\" style=\"flex:1\">"
+        "<button type=button class=rm onclick='this.parentNode.remove()'>&times;</button></div>"
+        for k, v in srv.cfg.get("manual_prices", {}).items() if not str(k).startswith("_"))
+    return "".join([
+        "<div class=card><h2>Which assets use the market source</h2><div class=frm>",
+        "<div>",
+        '<label class=check style="display:inline-flex;margin-right:16px"><input type=radio name=source_mode value=all ',
+        ck(smode not in ("except", "only")), "> All assets (standard)</label>",
+        '<label class=check style="display:inline-flex;margin-right:16px"><input type=radio name=source_mode value=except ',
+        ck(smode == "except"), "> All except the listed ones</label>",
+        '<label class=check style="display:inline-flex"><input type=radio name=source_mode value=only ',
+        ck(smode == "only"), "> Only the listed ones</label></div>",
+        "<div class=hint>Tickers or 64-hex asset ids. Assets left without a market price fall back to a manual price "
+        "below, or are skipped.</div>",
+        "<div id=list_source_assets>", assets_rows, "</div>",
+        "<div><button type=button class=ghost onclick=\"addExc('source_assets')\">+ Add asset</button></div>",
+        "</div></div>",
+        "<div class=card><h2>Manual prices <span class=right>in ", esc(quote), ", for assets without a market source</span></h2><div class=frm>",
+        "<div class=hint>A fixed price per unit, in the quote currency — e.g. 0.5 means 1 unit = 0.5 ", esc(quote),
+        ". Used only when the asset has no market price (out of scope above, or missing from the feed). A manually "
+        "priced asset is admitted at that rate — setting it by hand IS the decision — but an always-reject exception still wins.</div>",
+        "<div id=list_manual>", manual_rows, "</div>",
+        "<div><button type=button class=ghost onclick=addManual()>+ Add manual price</button></div>",
+        "</div></div>",
+    ])
 
 
 def _nodes_current(srv):
@@ -844,6 +988,7 @@ def _render_admin(srv, csrf_token, saved=False, error=""):
         esc(str(srv.cfg.get("registry_url", DEFAULT_REGISTRY_URL))),
         "\"><div class=hint>The asset universe (ticker → id, issuer) is discovered here — you never list assets by hand.</div></div></div>",
         "</div></div>",
+        _scope_and_manual_cards(srv),
         "<div class=card><h2>Polling &amp; identity</h2><div class=frm>",
         "<div class=frow><label>Poll interval (seconds)</label><input name=poll_interval value=\"",
         esc(str(srv.cfg.get("poll_interval_secs", 60))), "\" style=\"max-width:120px\"></div>",
@@ -900,7 +1045,7 @@ def _render_admin(srv, csrf_token, saved=False, error=""):
         "<div class=card><h2>Nodes receiving the whitelist <span class=right>setfeeexchangerates \xb7 persist=false</span></h2>",
         "<table><tr><th>Name</th><th>Host</th><th>RPC port</th><th>RPC user</th><th>RPC password</th><th>Cookie file</th><th></th></tr>",
         "<tbody id=nodelist>", "".join(node_row(n) for n in nodes), "</tbody></table>",
-        "<template id=nodetpl><table>", node_row({}), "</table></template>",
+        "<template id=nodetpl>", node_row({}), "</template>",
         '<div class=frm><div><button type=button class=ghost onclick=addNode()>+ Add node</button></div>',
         "<div class=hint>Each node must run with <code>-con_any_asset_fees=1</code>. Give either user+password or a "
         "cookie file path. If the price server stops, every node simply keeps the last whitelist it received.</div></div>",
@@ -921,6 +1066,9 @@ def _render_admin(srv, csrf_token, saved=False, error=""):
         "<div class=frow><label>Rate limit (requests / min / IP)</label><input class=num name=api_rate_limit value=\"",
         esc(str(ui.get("api_rate_limit_per_min", 30))), "\" style=\"max-width:120px\"></div>",
         "<div class=hint>Applies to unauthenticated visitors only. Keep it low — this protects your VPS, not the data (it is public anyway once enabled).</div>",
+        "<div class=frow><label>Table rows per page (default)</label><input class=num name=page_size value=\"",
+        esc(str(ui.get("page_size", 50))), "\" style=\"max-width:120px\"></div>",
+        "<div class=hint>Default page size of the asset tables (0 = show all); viewers can still change it per view.</div>",
         "</div></div>",
         "<div class=card><h2>Admin password</h2><div class=frm>",
         ("<div class=frow><label>Current password</label><input type=password name=cur_password autocomplete=off></div>" if has_pw else
@@ -1002,6 +1150,20 @@ def _ui_parse(srv, form):
             source["market_cap_path"] = g("market_cap_path").strip()
         if g("volume_24h_path").strip():
             source["volume_24h_path"] = g("volume_24h_path").strip()
+    smode = g("source_mode", "all")
+    sassets = [x.strip().upper() for x in form.get("source_assets", []) if x.strip()]
+    if smode in ("except", "only"):
+        source["mode"] = smode
+        source["assets"] = sassets
+    manual = {}
+    for tk, pr in zip(form.get("manual_ticker", []), form.get("manual_price", [])):
+        tk = tk.strip().upper()
+        try:
+            pr = float(pr.strip().replace(",", "."))
+        except ValueError:
+            continue
+        if tk and pr > 0:
+            manual[tk] = pr
     try:
         poll = max(1, int(g("poll_interval", "60")))
     except ValueError:
@@ -1009,7 +1171,8 @@ def _ui_parse(srv, form):
     registry_url = g("registry_url").strip() or DEFAULT_REGISTRY_URL
     return {"source": source, "thresholds": t, "exceptions": exc,
             "poll_interval": poll, "registry_url": registry_url,
-            "source_name": g("source_name").strip() or srv.source_name}
+            "source_name": g("source_name").strip() or srv.source_name,
+            "manual_prices": manual}
 
 
 def _nodes_parse(form):
@@ -1217,6 +1380,10 @@ def start_config_ui(price_server, host, port):
                           "public_api": bool(g("public_api"))}
                     try:
                         ui["api_rate_limit_per_min"] = max(1, int(g("api_rate_limit", "30")))
+                    except ValueError:
+                        pass
+                    try:
+                        ui["page_size"] = max(0, int(g("page_size", "50")))
                     except ValueError:
                         pass
                     new_pw = g("new_password")

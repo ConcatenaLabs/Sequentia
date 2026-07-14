@@ -45,10 +45,15 @@ Everything is configurable here; the config file never needs hand-editing.
 | Tab | What it controls |
 |---|---|
 | **Status** | Live decisions per asset (price, market cap, volume, admitted/rejected **and why**), last push result per node. |
-| **Market source** | The market-data API URL, its **quote currency** (see below), API format, the Asset Registry URL, poll interval, publisher name. |
+| **Market source** | The market-data API URL, its **quote currency** (see below), API format, the Asset Registry URL, the source **scope** and **manual prices** (see below), poll interval, publisher name. |
 | **Admission rules** | The criteria (market cap, volume, price-jump, volatility, issuer allow-list), ALL/ANY combination, always-admit / always-reject exceptions. |
 | **Nodes** | The node RPCs that receive the whitelist — as many as you like (host, port, user+password or cookie file). |
-| **Access** | The public toggles, the rate limit, and the admin password. |
+| **Access** | The public toggles, the rate limit, the default table page size, and the admin password. |
+
+The asset tables (public page and admin Status) are **sortable** — click any
+column header — with a **text filter** and a **rows-per-page selector**, so
+they stay usable with hundreds of assets. The default page size is
+configurable (Access tab, `ui.page_size`; 0 = show all).
 
 **How admin access works:**
 
@@ -136,6 +141,26 @@ and every rate pushed to the nodes, is in that unit. (A legacy
 asset; it is advanced, off by default, and not exposed in the UI — see
 `ORACLE-AND-REFERENCE-DESIGN.md`.)
 
+## Market-source scope & manual prices
+
+By default the market source prices **every** asset discovered from the
+registry. In the *Market source* tab you can scope it:
+
+- **All assets** — the standard behaviour.
+- **All except the listed ones** — the listed assets are not priced from the
+  market source.
+- **Only the listed ones** — everything else is not priced from it.
+
+Entries match by registry ticker, feed key (alias) or 64-hex asset id.
+
+An asset left **without a market price** — because it is out of scope, or the
+feed simply doesn't quote it — can carry a **manual price**: a fixed value per
+unit in the quote currency (e.g. `0.5` = 1 unit is worth 0.5 USD). A manually
+priced asset is admitted at that fixed rate, bypassing the market criteria —
+the operator setting a price by hand *is* the decision — but an
+**always-reject** exception still wins. Without a market price *and* without a
+manual price, the asset is skipped (not whitelisted).
+
 ## Admission rule engine
 
 An asset is admitted to the whitelist if it passes the configured criteria,
@@ -185,9 +210,12 @@ keep it private.
   "source": {
     "url": "http://159.195.15.140/prices",  // or another operator's /api/prices
     "quote_currency": "USD",
-    "format": "sequentia"                   // "custom" adds price_path / market_cap_path / volume_24h_path
+    "format": "sequentia",                  // "custom" adds price_path / market_cap_path / volume_24h_path
+    "mode": "all",                          // "all" | "except" | "only" (scope, see above)
+    "assets": []                            // tickers/ids the mode refers to
   },
 
+  "manual_prices": {},                      // {"TICKER": price-in-quote} for assets without a market source
   "feed_aliases": {"TSEQ": "SEQ"},          // registry ticker -> feed key, when they differ
 
   "default_thresholds": {"require": "all"}, // admission rules (see above)
@@ -197,6 +225,7 @@ keep it private.
     "public_status": false,                 // read-only price page at /
     "public_api": false,                    // /api/prices + /api/whitelist
     "api_rate_limit_per_min": 30,           // per client IP; admins exempt
+    "page_size": 50,                        // default table rows per page (0 = all)
     "password_hash": ""                     // set via --set-password or the Access tab, never by hand
   }
 }

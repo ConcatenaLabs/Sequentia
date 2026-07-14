@@ -16,10 +16,14 @@
   "registry_url": "http://159.195.15.140/registry/index.minimal.json",
 
   "source": {
-    "_comment": "A Sequentia-format API returns every asset keyed by ticker ({\"SEQ\":{\"price\":..,\"market_cap\":..,\"volume_24h\":..}, ...}) in one call, so no JSON paths are needed. For a third-party API set format=custom and add price_path / market_cap_path / volume_24h_path (with an optional {ticker} placeholder).",
+    "_comment": "A Sequentia-format API returns every asset keyed by ticker ({\"SEQ\":{\"price\":..,\"market_cap\":..,\"volume_24h\":..}, ...}) in one call, so no JSON paths are needed. For a third-party API set format=custom and add price_path / market_cap_path / volume_24h_path (with an optional {ticker} placeholder). Optional scoping: mode = \"all\" (default) | \"except\" | \"only\", with assets = a list of tickers or asset ids the mode refers to.",
     "url": "http://159.195.15.140/prices",
     "quote_currency": "USD",
     "format": "sequentia"
+  },
+
+  "manual_prices": {
+    "_comment": "Fixed prices (in the quote currency) for assets the market source does not cover: {\"TICKER\": 0.5} means 1 unit = 0.5 USD. Used only when an asset has no market price; such an asset is admitted at that rate (always_reject still wins)."
   },
 
   "feed_aliases": {
@@ -42,6 +46,7 @@
     "public_status": false,
     "public_api": false,
     "api_rate_limit_per_min": 30,
+    "page_size": 50,
     "password_hash": ""
   }
 }
