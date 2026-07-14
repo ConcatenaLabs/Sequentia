@@ -1157,6 +1157,13 @@ void CConnman::AcceptConnection(const ListenSocket& hListenSocket) {
         return;
     }
 
+    // Accepted sockets are inheritable by default; make sure a child process
+    // (e.g. the GUI's price-server sidecar) cannot keep this connection alive
+    // after we exit.
+    if (!SetSocketNoInherit(sock->Get())) {
+        LogPrint(BCLog::NET, "Error setting accepted socket to non-inheritable\n");
+    }
+
     if (!addr.SetSockAddr((const struct sockaddr*)&sockaddr)) {
         LogPrintLevel(BCLog::Level::Warning, BCLog::NET, "Unknown socket family\n");
     } else {

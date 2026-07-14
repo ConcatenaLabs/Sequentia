@@ -324,6 +324,14 @@ static bool HTTPBindAddresses(struct evhttp* http)
         LogPrint(BCLog::HTTP, "Binding RPC on address %s port %i\n", i->first, i->second);
         evhttp_bound_socket *bind_handle = evhttp_bind_socket_with_handle(http, i->first.empty() ? nullptr : i->first.c_str(), i->second);
         if (bind_handle) {
+            // Prevent child processes (e.g. the GUI's price-server sidecar) from
+            // inheriting the listening socket: an orphaned child would otherwise
+            // keep the RPC port bound after this process exits, and every later
+            // start would fail with "Unable to start HTTP server".
+            const evutil_socket_t bound_fd{evhttp_bound_socket_get_fd(bind_handle)};
+            if (!SetSocketNoInherit(bound_fd)) {
+                LogPrintf("Error setting RPC listening socket to non-inheritable\n");
+            }
             CNetAddr addr;
             if (i->first.empty() || (LookupHost(i->first, addr, false) && addr.IsBindAny())) {
                 LogPrintf("WARNING: the RPC server is not safe to expose to untrusted networks such as the public internet\n");
