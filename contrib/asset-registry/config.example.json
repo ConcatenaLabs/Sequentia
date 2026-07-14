@@ -1,0 +1,15 @@
+{
+  "_comment": "Sequentia asset registry server. Mirrors an upstream registry (last good copy kept when it is down) and overlays the operator's local entries: add/edit/verify/remove from the admin UI at /admin. The merged index is served at /registry/index.minimal.json in the standard format, a drop-in registry URL for nodes (assetregistryurl), price servers and wallets.",
+  "registry_name": "Sequentia Asset Registry",
+  "upstream_url": "https://sequentiatestnet.com/registry/index.minimal.json",
+  "sync_interval_secs": 300,
+  "upstream_timeout": 15,
+  "ui": {
+    "_comment": "public_page/public_index expose the human table and the JSON index (both ON by default: a registry exists to be read), rate-limited per IP. password_hash gates the admin area; set it with --set-password, never by hand.",
+    "public_page": true,
+    "public_index": true,
+    "api_rate_limit_per_min": 60,
+    "page_size": 50,
+    "password_hash": ""
+  }
+}
