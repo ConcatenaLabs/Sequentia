@@ -21,6 +21,12 @@ verified against the source on this branch. Start at `00`.
 | [`06-tokenomics-and-launch.md`](06-tokenomics-and-launch.md) | Sequence token (SEQ) supply, genesis construction, the genesis-seeded bootstrap, bundled and custom chains, governance vs engineering. |
 | [`07-security-and-audit.md`](07-security-and-audit.md) | Security model, audit findings and their disposition, implementation status. |
 
+Reference (current):
+
+| Document | Contents |
+|---|---|
+| [`asset-contracts-and-verification.md`](asset-contracts-and-verification.md) | How an asset gets a name: the contract committed into the asset id at issuance, the domain proof, the registry, and why none of it can be added afterwards. Read this before issuing an asset. |
+
 Operating runbooks (current):
 
 | Runbook | Status |

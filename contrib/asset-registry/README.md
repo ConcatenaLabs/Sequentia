@@ -48,6 +48,48 @@ who the entry says — wallets and nodes only trust verified entries for
 display, which is what prevents ticker spoofing (anyone can issue an asset
 on-chain and *call* it "USDX"; the registry decides which USDX is shown).
 
+### How `verified` is meant to be earned
+
+> **This server lets the operator set `verified` by hand. That is a deliberate
+> override, and it is not how a public registry should work.** Read this before
+> copying the pattern.
+
+The standard way an issuer earns the flag has nothing to do with the
+registrar's opinion, and requires no trust in them:
+
+1. The issuer commits a **contract** — name, ticker, precision, issuer domain —
+   into the asset id at issuance, by way of `SHA256(canonical contract)`. See
+   [asset contracts](../../doc/sequentia/asset-contracts-and-verification.md).
+2. The issuer publishes a **domain proof** at
+   `https://<domain>/.well-known/sequentia-asset-proof-<assetid>`, which only
+   whoever controls the domain can do.
+3. The registrar **re-derives** the asset id from the chain, checks the
+   submitted contract hashes to the committed value, fetches the proof, and only
+   then sets `verified: 1`.
+
+That chain is cryptographic: the registrar cannot invent metadata for someone
+else's asset, and a registrar that lies can be caught by anyone repeating the
+same checks. The reference implementation is the
+[sequentia-registry](https://github.com/GracedEternalKingCabbageMan/sequentia-registry)
+server, which does exactly this and offers no manual override at all.
+
+The manual flag here exists for the cases that chain cannot serve:
+
+- **Legacy assets** issued before contracts existed, which commit to nothing and
+  so can never pass the checks — the public testnet demo assets are exactly this.
+- **Local experiments**, where re-issuing and publishing a file for every throwaway
+  asset is pure friction.
+- **Assets with no domain**, by choice, whose issuer is vouched for by the
+  registrar directly.
+- **Continuity**, when an issuer's domain has lapsed but the asset is still real.
+
+If you are running a registry that other people point their wallets at, prefer
+the domain proof and treat the manual flag as the exception you can justify.
+A registry whose `verified` column means "the operator said so" is a registry
+whose users are trusting the operator, not the issuer — which may be exactly
+what you want for a private group, and is exactly what you do not want for a
+public network.
+
 ## Who reads it
 
 - **Sequentia Core** — `elements.conf`:
