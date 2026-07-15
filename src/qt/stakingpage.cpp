@@ -169,15 +169,18 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
 
         m_next_slot = new QLabel(tr("…"), mine);
         m_next_slot->setWordWrap(true);
-        // The honest explanation for THIS chain: sortition is private, so there is
-        // no public queue and no "position out of N" to show.
-        m_next_slot->setToolTip(tr("Sequentia elects the producer of each block by private draw: from the previous "
-                                   "block and its Bitcoin anchor every staker derives a seed, then draws a slot with "
-                                   "their own secret key. Slot 0 may produce the block right away; each further slot "
-                                   "waits %1 more seconds, so the chain keeps moving even when the earlier slots stay "
-                                   "silent. More stake draws a low slot more often. Only you can compute your own "
-                                   "slot — and nobody can compute yours, which is what stops anyone from targeting "
-                                   "the next producer.").arg(g_pos_slot_interval));
+        // The draw gates when you may PROPOSE; the committee then backs the lowest
+        // draw among the proposals it collected. Saying "slot 0 produces" would
+        // promise a block that neither the cadence floor nor the vote guarantees.
+        m_next_slot->setToolTip(tr("From the previous block and its Bitcoin anchor every staker derives the same "
+                                   "seed, then draws from it with their own secret key — so your draw is yours "
+                                   "alone to know, and nobody can tell in advance who comes next. The draw sets the "
+                                   "earliest you may offer a block: slot 0 at the usual %1 s cadence, each further "
+                                   "slot %1 s later. Whoever is due offers a block, the committee gathers the offers "
+                                   "for a few seconds, and then everyone signs the one whose draw came out lowest. "
+                                   "So a low slot gets you into that gathering; the draw itself decides who wins it. "
+                                   "You find out you led when your block comes back signed by the committee.")
+                                    .arg(g_pos_slot_interval));
         QFormLayout* f2 = new QFormLayout();
         f2->addRow(tr("Your draw for the next block:"), m_next_slot);
         v->addLayout(f2);
@@ -475,21 +478,17 @@ void StakingPage::refreshOwnStake(const UniValue& registry)
             m_next_slot->setText(tr("no eligible stake — your keys are not in this block's draw"));
         } else {
             const int64_t s = slot["best_slot"].get_int64();
-            const int64_t opens = slot.exists("best_slot_opens") ? slot["best_slot_opens"].get_int64() : 0;
-            const int64_t wait = opens - QDateTime::currentSecsSinceEpoch();
-            if (s == 0) {
-                m_next_slot->setText(tr("slot 0 — you may produce block %1 as soon as it is due")
-                                         .arg(slot.exists("height") ? slot["height"].get_int() : 0));
-            } else {
-                m_next_slot->setText(wait > 0
-                    ? tr("slot %1 — you may produce block %2 in about %3 s, if no earlier slot does first")
-                          .arg(s)
-                          .arg(slot.exists("height") ? slot["height"].get_int() : 0)
-                          .arg(wait)
-                    : tr("slot %1 — your slot for block %2 is open now")
-                          .arg(s)
-                          .arg(slot.exists("height") ? slot["height"].get_int() : 0));
-            }
+            const int height = slot.exists("height") ? slot["height"].get_int() : 0;
+            const int64_t at = slot.exists("best_propose_at") ? slot["best_propose_at"].get_int64() : 0;
+            const int64_t wait = at - QDateTime::currentSecsSinceEpoch();
+            // Offering the block is what the draw earns you; whether it is the one
+            // the committee signs depends on the other offers, which nobody can see
+            // in advance. The text must not promise the block.
+            m_next_slot->setText(wait > 0
+                ? tr("slot %1 — you offer block %2 in about %3 s; it stands if no lower draw offers too")
+                      .arg(s).arg(height).arg(wait)
+                : tr("slot %1 — you offer block %2 now; it stands if no lower draw offers too")
+                      .arg(s).arg(height));
         }
     }
 }

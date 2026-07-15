@@ -3374,9 +3374,13 @@ static RPCHelpMan getposslot()
                 "\nFor Proof-of-Stake chains: this node's own standing in the election for the NEXT block.\n"
                 "\nUnder VRF sortition (the Sequentia default) each staker draws a private slot from their own\n"
                 "secret key, so no node can know another's slot in advance and no public ranking exists. This\n"
-                "returns the slots of the keys THIS node produces with: slot 0 may produce as soon as the next\n"
-                "block is due, and each further slot waits one slot interval more. More stake draws a lower\n"
-                "slot more often. Under the legacy public schedule the slot is simply the staker's rank.\n",
+                "returns the draw of the keys THIS node produces with.\n"
+                "\nA slot gates when a staker may PROPOSE, not who wins: every eligible staker proposes once its\n"
+                "slot has opened (and never sooner than one slot interval after the parent), the committee\n"
+                "collects the proposals for a short window, and then backs the one whose leader drew the\n"
+                "lowest VRF output (after preferring the freshest Bitcoin anchor). So a low slot proposes\n"
+                "early enough to be in the window, and the draw decides among those. A staker learns it led\n"
+                "only when its proposal collects a quorum certificate.\n",
                 {},
                 RPCResult{RPCResult::Type::OBJ, "", "", {
                     {RPCResult::Type::NUM, "height", "height of the next block these slots apply to"},
@@ -3387,7 +3391,7 @@ static RPCHelpMan getposslot()
                     {RPCResult::Type::NUM, "stakers", "number of registered stakers"},
                     {RPCResult::Type::BOOL, "producing", "true if the autonomous producer is running on this node"},
                     {RPCResult::Type::NUM, "best_slot", "lowest slot among this node's keys (-1 if none is eligible)"},
-                    {RPCResult::Type::NUM_TIME, "best_slot_opens", "unix time at/after which the best slot may produce"},
+                    {RPCResult::Type::NUM_TIME, "best_propose_at", "unix time at which the best slot actually proposes"},
                     {RPCResult::Type::ARR, "keys", "one entry per producing key holding an eligible stake",
                         {
                             {RPCResult::Type::OBJ, "", "",
@@ -3396,7 +3400,9 @@ static RPCHelpMan getposslot()
                                     {RPCResult::Type::NUM, "weight", "this key's registered stake weight"},
                                     {RPCResult::Type::NUM, "share", "this key's share of the total stake (0..1)"},
                                     {RPCResult::Type::NUM, "slot", "the slot this key drew for the next block"},
-                                    {RPCResult::Type::NUM_TIME, "slot_opens", "unix time at/after which this key may produce"},
+                                    {RPCResult::Type::STR_HEX, "vrf", "this key's VRF output for the slot; the committee backs the LOWEST among the proposals it collects, so this is what decides who leads"},
+                                    {RPCResult::Type::NUM_TIME, "slot_opens", "unix time from which this slot may produce (the consensus gate)"},
+                                    {RPCResult::Type::NUM_TIME, "propose_at", "unix time this key actually proposes: the slot gate, but never sooner than one slot interval after the parent"},
                                     {RPCResult::Type::BOOL, "committee", "true if this key certifies this block as a committee member"},
                                 }},
                         }},
@@ -3445,10 +3451,10 @@ static RPCHelpMan getposslot()
             if (!PosIsEligibleStake(weight)) continue;
             uint64_t slot = 0;
             bool committee = false;
+            uint256 beta;
             if (g_pos_vrf) {
                 auto proof = VrfProve(key, Span<const unsigned char>(seed.begin(), 32));
                 if (!proof) continue;
-                uint256 beta;
                 if (!VrfVerify(pub, Span<const unsigned char>(seed.begin(), 32), *proof, beta)) continue;
                 slot = PosVrfSlot(beta, weight, total_weight);
                 committee = g_pos_public_committee ? public_committee.count(pub) > 0
@@ -3460,19 +3466,27 @@ static RPCHelpMan getposslot()
                 const std::vector<CPubKey> cmt = PosCommittee(registry, seed);
                 committee = std::find(cmt.begin(), cmt.end(), pub) != cmt.end();
             }
+            // The producer holds a cadence floor of one interval since the parent
+            // (PosProducer::Step), so slots 0 and 1 both propose at the same time;
+            // reporting the bare slot gate would promise a block that early.
+            const int64_t slot_opens = parent_time + (int64_t)slot * g_pos_slot_interval;
+            const int64_t propose_at = std::max(slot_opens, parent_time + g_pos_slot_interval);
             UniValue entry(UniValue::VOBJ);
             entry.pushKV("pubkey", HexStr(pub));
             entry.pushKV("weight", weight);
             entry.pushKV("share", total_weight > 0 ? (double)weight / (double)total_weight : 0.0);
             entry.pushKV("slot", slot);
-            entry.pushKV("slot_opens", parent_time + (int64_t)slot * g_pos_slot_interval);
+            if (g_pos_vrf) entry.pushKV("vrf", beta.GetHex());
+            entry.pushKV("slot_opens", slot_opens);
+            entry.pushKV("propose_at", propose_at);
             entry.pushKV("committee", committee);
             arr.push_back(entry);
             if (best_slot < 0 || (int64_t)slot < best_slot) best_slot = (int64_t)slot;
         }
     }
     result.pushKV("best_slot", best_slot);
-    result.pushKV("best_slot_opens", best_slot < 0 ? 0 : parent_time + best_slot * g_pos_slot_interval);
+    result.pushKV("best_propose_at", best_slot < 0 ? 0
+        : std::max(parent_time + best_slot * g_pos_slot_interval, parent_time + g_pos_slot_interval));
     result.pushKV("keys", arr);
     return result;
 },
