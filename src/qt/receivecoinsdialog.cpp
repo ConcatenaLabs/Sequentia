@@ -39,7 +39,10 @@ ReceiveCoinsDialog::ReceiveCoinsDialog(const PlatformStyle *_platformStyle, QWid
     // SEQUENTIA: opt-in confidential (blinded) receive address. Default OFF — new addresses are
     // explicit (Bitcoin-identical, tb1…) by default; tick this to generate a confidential address.
     m_reqConfidential = new QCheckBox(tr("Confidential"), this);
-    m_reqConfidential->setToolTip(tr("Generate a confidential (blinded) address instead of an explicit one."));
+    m_reqConfidential->setToolTip(tr("Hide what you receive. On a confidential address, the amount and which asset "
+                                     "it is stay visible only to you and the sender — everyone else sees that a "
+                                     "payment happened, but not what moved. The payment confirms like any other, "
+                                     "and the address looks different (it is longer)."));
     ui->horizontalLayout_6->addWidget(m_reqConfidential);
 
     if (!_platformStyle->getImagesOnButtons()) {

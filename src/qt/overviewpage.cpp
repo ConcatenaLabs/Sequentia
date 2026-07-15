@@ -217,11 +217,10 @@ OverviewPage::OverviewPage(const PlatformStyle *platformStyle, QWidget *parent) 
     {
         m_total_value = new QLabel(ui->frame);
         QFont f = m_total_value->font();
-        f.setPointSizeF(f.pointSizeF() * 1.9);
+        m_headline_point_size = f.pointSizeF() * 1.9;
+        f.setPointSizeF(m_headline_point_size);
         f.setBold(true);
         m_total_value->setFont(f);
-        m_total_value->setToolTip(tr("Everything in this wallet, valued at the latest prices the node has. "
-                                     "Assets with no published price are not counted."));
         m_total_value->setVisible(false);
         // Row 1 of the panel: under the "Balances" title, above the amounts.
         ui->verticalLayout_4->insertWidget(1, m_total_value);
@@ -304,15 +303,34 @@ void OverviewPage::setBalance(const interfaces::WalletBalances& balances)
     };
 
     // The headline: everything spendable plus everything still confirming, valued
-    // in one number. Hidden in privacy mode (it would unmask the masked rows) and
-    // whenever no asset in the wallet has a price to value it with.
+    // in one number. Hidden in privacy mode (it would unmask the masked rows).
     if (m_total_value) {
         const CAmountMap all = walletModel->wallet().privateKeysDisabled()
             ? balances.watch_only_balance + balances.unconfirmed_watch_only_balance + balances.immature_watch_only_balance
             : balances.balance + balances.unconfirmed_balance + balances.immature_balance;
-        const QString total = m_privacy ? QString() : GUIUtil::formatMultiAssetReferenceApprox(all, refCur);
-        m_total_value->setText(total);
-        m_total_value->setVisible(!total.isEmpty());
+        bool holds_anything = false;
+        for (const auto& it : all) if (it.second > 0) { holds_anything = true; break; }
+
+        QString text;
+        QFont f = m_total_value->font();
+        if (!holds_anything) {
+            // An empty wallet holds no assets — not "0 of the native one". Say that
+            // plainly instead of leaving the rows to imply it with dashes.
+            text = tr("No assets yet");
+            f.setPointSizeF(m_headline_point_size * 0.62);
+            m_total_value->setStyleSheet("color:#9b988e;");
+            m_total_value->setToolTip(tr("Anything you receive shows up here, each asset on its own line. "
+                                         "Use the Receive tab to get an address."));
+        } else {
+            text = GUIUtil::formatMultiAssetReferenceApprox(all, refCur);
+            f.setPointSizeF(m_headline_point_size);
+            m_total_value->setStyleSheet(QString());
+            m_total_value->setToolTip(tr("Everything in this wallet, valued at the latest prices the node has. "
+                                         "Assets with no published price are not counted."));
+        }
+        m_total_value->setFont(f);
+        m_total_value->setText(m_privacy ? QString() : text);
+        m_total_value->setVisible(!m_privacy && !text.isEmpty());
     }
 
     if (walletModel->wallet().isLegacy()) {

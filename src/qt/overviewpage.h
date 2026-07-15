@@ -59,8 +59,10 @@ private:
     bool m_privacy{false};
 
     // Sequentia: the wallet's whole worth in the chosen reference currency, shown
-    // above the per-asset rows (see setBalance).
+    // above the per-asset rows (see setBalance). Shrinks to carry the empty-wallet
+    // line, so the headline size is kept rather than re-derived from the font.
     QLabel *m_total_value{nullptr};
+    qreal m_headline_point_size{0};
 
     // Sequentia network-status panel (Bitcoin anchor + staking / producer)
     QTimer *m_seq_status_timer{nullptr};
