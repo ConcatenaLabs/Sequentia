@@ -225,6 +225,13 @@ bool ConnectThroughProxy(const Proxy& proxy, const std::string& strDest, uint16_
 bool SetSocketNonBlocking(const SOCKET& hSocket, bool fNonBlocking);
 /** Set the TCP_NODELAY flag on a socket */
 bool SetSocketNoDelay(const SOCKET& hSocket);
+/**
+ * Prevent a socket from being inherited by child processes. On Windows this
+ * clears HANDLE_FLAG_INHERIT, so a spawned process (e.g. the GUI's
+ * price-server sidecar) cannot keep a listening port alive after this process
+ * exits. On POSIX it sets the close-on-exec flag.
+ */
+bool SetSocketNoInherit(const SOCKET& hSocket);
 void InterruptSocks5(bool interrupt);
 
 /**

@@ -44,6 +44,13 @@
 
 #include <memory>
 
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 #include <QAction>
 #include <QApplication>
 #include <QCoreApplication>
@@ -1066,6 +1073,32 @@ void BitcoinGUI::launchPriceServer()
         m_price_server->deleteLater(); m_price_server = nullptr;
         return;
     }
+
+#ifdef Q_OS_WIN
+    // Put the sidecar in a kill-on-close job object. stopPriceServer() only runs on a
+    // clean exit; if the GUI dies any other way (crash, forced termination) the OS
+    // closes the job handle and kills the sidecar with it, so it can never linger as
+    // an orphan. The handle is deliberately kept open for the life of the process.
+    static HANDLE job_handle = []() -> HANDLE {
+        HANDLE h = CreateJobObjectW(nullptr, nullptr);
+        if (h) {
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION info{};
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if (!SetInformationJobObject(h, JobObjectExtendedLimitInformation, &info, sizeof(info))) {
+                CloseHandle(h);
+                h = nullptr;
+            }
+        }
+        return h;
+    }();
+    if (job_handle) {
+        if (HANDLE proc = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, FALSE,
+                                      static_cast<DWORD>(m_price_server->processId()))) {
+            AssignProcessToJobObject(job_handle, proc);
+            CloseHandle(proc);
+        }
+    }
+#endif
 
     // Poll the UI port until the sidecar actually binds, then open its configuration
     // page. A bound port (not just "python launched") confirms the script started

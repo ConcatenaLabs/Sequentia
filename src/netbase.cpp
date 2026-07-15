@@ -523,6 +523,14 @@ std::unique_ptr<Sock> CreateSockTCP(const CService& address_family)
         LogPrintf("Error setting socket to non-blocking: %s\n", NetworkErrorString(WSAGetLastError()));
         return nullptr;
     }
+
+    // Do not let child processes (e.g. the GUI's price-server sidecar) inherit
+    // this socket: an inherited listening socket would keep the port bound
+    // after this process exits, making later restarts fail to bind.
+    if (!SetSocketNoInherit(hSocket)) {
+        LogPrintf("Error setting socket to non-inheritable: %s\n", NetworkErrorString(WSAGetLastError()));
+    }
+
     return std::make_unique<Sock>(hSocket);
 }
 
@@ -743,6 +751,19 @@ bool SetSocketNoDelay(const SOCKET& hSocket)
     int set = 1;
     int rc = setsockopt(hSocket, IPPROTO_TCP, TCP_NODELAY, (const char*)&set, sizeof(int));
     return rc == 0;
+}
+
+bool SetSocketNoInherit(const SOCKET& hSocket)
+{
+#ifdef WIN32
+    return SetHandleInformation((HANDLE)hSocket, HANDLE_FLAG_INHERIT, 0) != 0;
+#else
+    int flags = fcntl(hSocket, F_GETFD, 0);
+    if (flags == -1) {
+        return false;
+    }
+    return fcntl(hSocket, F_SETFD, flags | FD_CLOEXEC) != -1;
+#endif
 }
 
 void InterruptSocks5(bool interrupt)
