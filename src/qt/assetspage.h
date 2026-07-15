@@ -19,6 +19,7 @@ class QCheckBox;
 class QLabel;
 class QPushButton;
 class QShowEvent;
+class QSpinBox;
 QT_END_NAMESPACE
 
 /**
@@ -45,6 +46,7 @@ protected:
 private Q_SLOTS:
     void onIssue();
     void onReissue();
+    void onSaveProofFile();
 
 private:
     WalletModel* m_wallet_model{nullptr};
@@ -54,6 +56,10 @@ private:
     QLabel* m_balances_empty{nullptr};
     QTableWidget* m_issuances{nullptr};
 
+    QLineEdit* m_issue_name{nullptr};
+    QLineEdit* m_issue_ticker{nullptr};
+    QLineEdit* m_issue_domain{nullptr};
+    QSpinBox* m_issue_precision{nullptr};
     QLineEdit* m_issue_amount{nullptr};
     QLineEdit* m_issue_tokens{nullptr};
     QCheckBox* m_issue_blind{nullptr};
@@ -66,10 +72,22 @@ private:
 
     QLabel* m_status{nullptr};
 
+    //! The proof the last issuance needs published, kept so it can be saved to a
+    //! file. Empty until an asset is issued in this session.
+    QString m_proof_domain;
+    QString m_proof_asset;
+    QString m_proof_line;
+    QPushButton* m_proof_save_button{nullptr};
+    QLabel* m_proof_explainer{nullptr};
+
     //! Run a wallet RPC; returns the result, sets ok=false and a message on error.
     UniValue callWalletRpc(const std::string& method, const UniValue& params, bool& ok, QString& error);
     std::string walletUri() const;
     void setStatus(const QString& msg, bool error = false);
+    //! Ask the user to confirm what issuance permanently commits to; false to abort.
+    bool confirmIssuance(const QString& name, const QString& ticker, const QString& domain);
+    //! Warn if the issuer domain does not resolve, since a typo cannot be undone.
+    bool domainResolves(const QString& domain) const;
 };
 
 #endif // BITCOIN_QT_ASSETSPAGE_H

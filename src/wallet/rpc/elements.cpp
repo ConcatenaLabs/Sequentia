@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <assetcontract.h>
 #include <assetsdir.h>
 #include <block_proof.h>
 #include <core_io.h>
@@ -14,7 +15,9 @@
 #include <rpc/util.h>
 #include <script/generic.hpp>
 #include <script/pegins.h>
+#include <script/signingprovider.h>
 #include <secp256k1.h>
+#include <util/string.h>
 #include <wallet/coincontrol.h>
 #include <wallet/fees.h>
 #include <wallet/rpc/util.h>
@@ -1392,14 +1395,29 @@ RPCHelpMan issueasset()
 {
     return RPCHelpMan{"issueasset",
                 "\nCreate an asset. Must have funds in wallet to do so. Returns asset hex id.\n"
-                "For more fine-grained control such as multiple issuances, see `rawissueasset` RPC call.\n",
+                "For more fine-grained control such as multiple issuances, see `rawissueasset` RPC call.\n"
+                "\nPass `contract` to give the asset a name, a ticker and an issuer domain. Doing so is\n"
+                "what allows an asset registry to vouch for the asset later, so that wallets show its\n"
+                "name instead of its hex id. The contract is committed into the asset id at issuance and\n"
+                "cannot be added or changed afterwards: an asset issued without one stays anonymous for\n"
+                "as long as it exists. After issuing, publish the returned proof line at the returned\n"
+                "proof_url, then register the returned contract with the asset registry.\n",
                 {
                     {"assetamount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "Amount of asset to generate. Note that the amount is BTC-like, with 8 decimal places."},
                     {"tokenamount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "Amount of reissuance tokens to generate. Note that the amount is BTC-like, with 8 decimal places. These will allow you to reissue the asset if in wallet using `reissueasset`. These tokens are not consumed during reissuance."},
                     {"blind", RPCArg::Type::BOOL, RPCArg::Default{false}, "Whether to blind the issuances."},
-                    {"contract_hash", RPCArg::Type::STR_HEX, RPCArg::Default{"0000...0000"}, "Contract hash that is put into issuance definition. Must be 32 bytes worth in hex string form. This will affect the asset id."},
+                    {"contract_hash", RPCArg::Type::STR_HEX, RPCArg::Default{"0000...0000"}, "Raw contract hash to commit, as 32 bytes of hex. Prefer `contract`, which builds and hashes the contract for you. Note this argument is read big-endian, like a txid, so it is NOT the SHA256 digest of a contract as printed by sha256sum; passing one here commits the reversed bytes and yields an asset no registry can verify. Cannot be combined with `contract`."},
                     {"fee_asset", RPCArg::Type::STR, RPCArg::DefaultHint{"not set, fall back to fee asset in existing transaction"}, "Asset to use to pay the fees"},
-                    {"denomination", RPCArg::Type::NUM, RPCArg::Default{8}, "Number of decimals to denominate the asset - default: 8\n"},
+                    {"denomination", RPCArg::Type::NUM, RPCArg::Default{8}, "Number of decimals to denominate the asset - default: 8. When `contract` is given, its precision sets this and the two must agree.\n"},
+                    {"contract", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "The asset's public identity, committed into the asset id.",
+                        {
+                            {"name", RPCArg::Type::STR, RPCArg::Optional::NO, "Display name, 1 to 255 characters, e.g. \"Gold (troy ounce)\"."},
+                            {"ticker", RPCArg::Type::STR, RPCArg::Optional::NO, "Short symbol, 1 to 12 characters of letters, digits, '.' or '-', e.g. \"GOLD\". Registries hand tickers out first-come, so a taken one will be refused at registration."},
+                            {"domain", RPCArg::Type::STR, RPCArg::Optional::NO, "Internet domain you control, e.g. \"example.com\". This is the issuer's identity: to be verified you must serve the proof file from it. Choose carefully, it is permanent."},
+                            {"precision", RPCArg::Type::NUM, RPCArg::Default{8}, "Number of decimal places the asset is divided into, 0 to 8."},
+                            {"issuer_pubkey", RPCArg::Type::STR_HEX, RPCArg::DefaultHint{"a fresh key from this wallet"}, "The issuer's public key, as 33-byte compressed or 32-byte x-only lower-case hex."},
+                        },
+                    },
                 },
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
@@ -1409,10 +1427,16 @@ RPCHelpMan issueasset()
                         {RPCResult::Type::STR_HEX, "entropy", "Entropy of the asset type"},
                         {RPCResult::Type::STR_HEX, "asset", "Asset type for issuance"},
                         {RPCResult::Type::STR_HEX, "token", "Token type for issuance"},
+                        {RPCResult::Type::OBJ_DYN, "contract", /*optional=*/true, "The contract committed to, as it must be submitted to the asset registry. Only present when `contract` was given. Keep it: the chain stores only its hash, so losing it means losing the ability to register the asset.", {}},
+                        {RPCResult::Type::STR_HEX, "contract_hash", /*optional=*/true, "SHA256 of the canonical contract, the value committed on chain"},
+                        {RPCResult::Type::STR, "proof_url", /*optional=*/true, "Where the proof line must be served, as text/plain and with nothing else in the body"},
+                        {RPCResult::Type::STR, "proof_line", /*optional=*/true, "The exact line to serve at proof_url"},
                     }
                 },
                 RPCExamples{
                     HelpExampleCli("issueasset", "10 0")
+            + "\nIssue 1000 units of a named asset your domain vouches for\n"
+            + HelpExampleCli("issueasset", "1000 1 false null null null \"{\\\"name\\\":\\\"Gold (troy ounce)\\\",\\\"ticker\\\":\\\"GOLD\\\",\\\"domain\\\":\\\"example.com\\\"}\"")
             + HelpExampleRpc("issueasset", "10, 0")
                 },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
@@ -1441,11 +1465,70 @@ RPCHelpMan issueasset()
     // Check for optional contract to hash into definition
     uint256 contract_hash;
     if (!request.params[3].isNull()) {
+        if (!request.params[6].isNull()) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Pass either contract or contract_hash, not both: contract_hash is what issueasset derives from contract.");
+        }
         contract_hash = ParseHashV(request.params[3], "contract_hash");
     }
 
     if (!pwallet->IsLocked())
         pwallet->TopUpKeyPool();
+
+    // SEQUENTIA: build the asset's contract and commit its hash. The contract is
+    // the asset's public identity; only its hash reaches the chain, and the asset
+    // id is derived from that hash, so this is the one and only moment at which an
+    // asset can be given a name, a ticker and an issuer. Nothing here can be
+    // corrected later -- a wrong domain means starting over with a new asset id.
+    UniValue contract(UniValue::VNULL);
+    int contract_precision = -1;
+    if (!request.params[6].isNull()) {
+        const UniValue& in = request.params[6].get_obj();
+        RPCTypeCheckObj(in,
+            {
+                {"name", UniValueType(UniValue::VSTR)},
+                {"ticker", UniValueType(UniValue::VSTR)},
+                {"domain", UniValueType(UniValue::VSTR)},
+                {"precision", UniValueType(UniValue::VNUM)},
+                {"issuer_pubkey", UniValueType(UniValue::VSTR)},
+            }, /*fAllowNull=*/true, /*fStrict=*/true);
+        for (const std::string& required : {"name", "ticker", "domain"}) {
+            if (!in.exists(required)) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("contract.%s is required", required));
+            }
+        }
+        contract_precision = in.exists("precision") ? in["precision"].get_int() : 8;
+
+        std::string issuer_pubkey;
+        if (in.exists("issuer_pubkey")) {
+            issuer_pubkey = in["issuer_pubkey"].get_str();
+        } else {
+            // Default the issuer's identity to a fresh key of this wallet's, so
+            // that an issuer who has no opinion about it still ends up with a real
+            // key rather than a placeholder the registry would reject.
+            bilingual_str key_error;
+            CTxDestination issuer_dest;
+            if (!pwallet->GetNewDestination(OutputType::BECH32, "", issuer_dest, key_error)) {
+                throw JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT, key_error.original);
+            }
+            std::unique_ptr<SigningProvider> provider = pwallet->GetSolvingProvider(GetScriptForDestination(issuer_dest));
+            CPubKey issuer_key;
+            const CKeyID issuer_keyid = provider ? GetKeyForDestination(*provider, issuer_dest) : CKeyID();
+            if (issuer_keyid.IsNull() || !provider->GetPubKey(issuer_keyid, issuer_key)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, "Could not take an issuer key from this wallet; pass contract.issuer_pubkey instead.");
+            }
+            issuer_pubkey = HexStr(issuer_key);
+        }
+
+        contract = AssetContract::Build(in["name"].get_str(), in["ticker"].get_str(), contract_precision,
+                                        in["domain"].get_str(), issuer_pubkey);
+        const std::vector<std::string> contract_errors = AssetContract::Validate(contract);
+        if (!contract_errors.empty()) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                               "This contract would be rejected by the asset registry, and an issued asset cannot be corrected: " +
+                                   Join(contract_errors, "; "));
+        }
+        contract_hash = AssetContract::Hash(contract);
+    }
 
     // Generate a new key that is added to wallet
     bilingual_str error;
@@ -1496,6 +1579,18 @@ RPCHelpMan issueasset()
         }
     }
 
+    // SEQUENTIA: the contract's precision and the chain denomination are the same
+    // quantity stated twice. Letting them drift would ship an asset whose stated
+    // number of decimals is not the number it is actually divisible into.
+    if (contract_precision >= 0) {
+        if (!request.params[5].isNull() && request.params[5].get_int() != contract_precision) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                               strprintf("denomination (%d) and contract precision (%d) must match; they are the same thing",
+                                         request.params[5].get_int(), contract_precision));
+        }
+        issuance_details.denomination = contract_precision;
+    }
+
     CTransactionRef tx_ref = SendGenerationTransaction(GetScriptForDestination(asset_dest), asset_dest_blindpub, GetScriptForDestination(token_dest), token_dest_blindpub, nAmount, nTokens, &issuance_details, coin_control, pwallet);
 
     // Calculate asset type, assumes first vin is used for issuance
@@ -1512,6 +1607,16 @@ RPCHelpMan issueasset()
     ret.pushKV("entropy", issuance_details.entropy.GetHex());
     ret.pushKV("asset", asset.GetHex());
     ret.pushKV("token", token.GetHex());
+    if (!contract.isNull()) {
+        // Hand back everything registration needs, because the chain kept only the
+        // hash: the contract itself, and the proof the issuer's domain must serve
+        // for a registry to believe the two belong together.
+        const std::string domain = contract["entity"]["domain"].get_str();
+        ret.pushKV("contract", contract);
+        ret.pushKV("contract_hash", HexStr(issuance_details.contract_hash));
+        ret.pushKV("proof_url", AssetContract::AssetProofUrl(domain, asset.GetHex()));
+        ret.pushKV("proof_line", AssetContract::AssetProofLine(domain, asset.GetHex()));
+    }
     return ret;
 },
     };
