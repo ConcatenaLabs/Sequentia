@@ -480,6 +480,14 @@ void BitcoinAmountField::unitChanged(int idx)
     if (!(m_allowed_assets.count(previous_asset) || amount->value().first == previous_asset)) {
         removeAssetChoice(previous_asset);
     }
+
+    // Switching the asset changes what the field holds just as much as editing the
+    // number does, and listeners (e.g. the fee-asset default in the send dialog)
+    // need to hear about it. The initial setup call lands on the same asset, so it
+    // does not emit.
+    if (amount->value().first != previous_asset) {
+        Q_EMIT valueChanged();
+    }
 }
 
 void BitcoinAmountField::setDisplayUnit(const CAsset& asset)
