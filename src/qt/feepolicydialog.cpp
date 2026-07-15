@@ -140,7 +140,7 @@ UniValue FeePolicyDialog::callRpc(const std::string& method, const UniValue& par
 
 void FeePolicyDialog::setStatus(const QString& msg, bool error)
 {
-    m_status->setStyleSheet(error ? "color:#a00;" : "color:#070;");
+    m_status->setStyleSheet(error ? "color:#ff6b6b;" : "color:#3ecf7a;");
     m_status->setText(msg);
 }
 

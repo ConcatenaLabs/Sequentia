@@ -88,4 +88,7 @@
     <qresource prefix="/fonts">
         <file alias="monospace">res/fonts/RobotoMono-Bold.ttf</file>
     </qresource>
+    <qresource prefix="/css">
+        <file alias="sequentia">res/css/sequentia.css</file>
+    </qresource>
 </RCC>

@@ -19,7 +19,10 @@ static const struct {
     const bool useExtraSpacing;
 } platform_styles[] = {
     {"macosx", false, true, true},
-    {"windows", true, false, false},
+    // Sequentia: colorize icons on every platform. The dark theme repaints the
+    // single-colour icons to the palette highlight; without this the dark PNGs
+    // would be invisible on Windows against the dark background.
+    {"windows", true, true, false},
     /* Other: linux, unix, ... */
     {"other", true, true, false}
 };

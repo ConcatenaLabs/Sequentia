@@ -24,6 +24,7 @@
 #include <qt/networkstyle.h>
 #include <qt/optionsmodel.h>
 #include <qt/platformstyle.h>
+#include <qt/sequentiatheme.h>
 #include <qt/splashscreen.h>
 #include <qt/utilitydialog.h>
 #include <qt/winshutdownmonitor.h>
@@ -503,6 +504,10 @@ int GuiMain(int argc, char* argv[])
 
     // Now that the QApplication is setup and we have parsed our parameters, we can set the platform style
     app.setupPlatformStyle();
+
+    // Sequentia: install the dark theme before any window, dialog or message box
+    // exists, so the whole application inherits it.
+    SequentiaTheme::Apply(app);
 
     /// 3. Application identification
     // must be set before OptionsModel is initialized or translations are loaded,

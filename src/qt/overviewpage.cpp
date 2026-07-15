@@ -212,7 +212,7 @@ OverviewPage::OverviewPage(const PlatformStyle *platformStyle, QWidget *parent) 
         ui->verticalLayout_4->addWidget(btcSep);
         m_btc_label = new QLabel(tr("Bitcoin (testnet4): loading..."), ui->frame);
         m_btc_label->setWordWrap(true);
-        m_btc_label->setStyleSheet("color:#555;");
+        m_btc_label->setStyleSheet("color:#9b988e;");
         m_btc_label->setToolTip(tr("Your Sequentia receiving address is also a Bitcoin testnet4 address, so the same "
                                    "address can hold real testnet Bitcoin (tBTC). This amount is scanned from the "
                                    "Bitcoin testnet4 chain; it is not a Sequentia balance and spending it requires a "
@@ -404,7 +404,7 @@ void OverviewPage::updateSeqStatus()
                 const bool ok = (st == QLatin1String("ok"));
                 m_anchor_label->setText(tr("Bitcoin anchor: %1  -  Sequentia height %2, anchored to testnet4 block %3")
                                         .arg(ok ? tr("OK") : st).arg(tip).arg(anc));
-                m_anchor_label->setStyleSheet(ok ? "color:#1e7e34;" : "color:#a00;");
+                m_anchor_label->setStyleSheet(ok ? "color:#3ecf7a;" : "color:#ff6b6b;");
             } else {
                 m_anchor_label->setText(tr("Bitcoin anchor: unavailable"));
             }
@@ -444,15 +444,15 @@ void OverviewPage::updateSeqStatus()
                 if (nconf > 0) {
                     m_finality_label->setText(tr("WARNING - CHECKPOINT CONFLICT: %1 conflicting checkpoint(s) on Bitcoin. "
                                                  "A long-range fork may be in progress; do not rely on finality.").arg((int)nconf));
-                    m_finality_label->setStyleSheet("QLabel{padding:6px;border-radius:4px;background:#f8d7da;color:#a00;font-weight:bold;}");
+                    m_finality_label->setStyleSheet("QLabel{padding:6px;border-radius:4px;background:rgba(255,90,90,0.12);color:#ff6b6b;font-weight:bold;}");
                 } else if (fin >= 0) {
                     m_finality_label->setText(tr("Finality: finalized up to Sequentia height %1 (checkpoint buried %2 Bitcoin blocks deep). "
                                                  "Below that height the chain still follows Bitcoin reorgs.").arg(fin).arg(depth));
-                    m_finality_label->setStyleSheet("color:#1e7e34;");
+                    m_finality_label->setStyleSheet("color:#3ecf7a;");
                 } else {
                     m_finality_label->setText(tr("Finality: no checkpoint finalized yet - the chain follows Bitcoin reorgs to any depth. "
                                                  "A checkpoint finalizes once buried %1 Bitcoin blocks deep.").arg(depth));
-                    m_finality_label->setStyleSheet("color:#856404;");
+                    m_finality_label->setStyleSheet("color:#ffb84d;");
                 }
             } else {
                 m_finality_label->setText(tr("Finality: unavailable"));
