@@ -36,6 +36,8 @@ public:
     void setModel(WalletModel *model);
     bool validate(interfaces::Node& node);
     SendAssetsRecipient getValue();
+    /** The asset currently picked in the amount field (cheap, no validation). */
+    CAsset sendAsset() const;
 
     /** Return whether the entry is still empty and unedited */
     bool isClear();

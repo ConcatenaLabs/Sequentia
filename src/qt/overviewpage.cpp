@@ -188,16 +188,42 @@ OverviewPage::OverviewPage(const PlatformStyle *platformStyle, QWidget *parent) 
         seqLayout->addWidget(seqTitle);
         m_anchor_label = new QLabel(tr("Bitcoin anchor: ..."), seqFrame);
         m_anchor_label->setWordWrap(true);
+        m_anchor_label->setToolTip(tr("Every Sequentia block points at a recent Bitcoin block — its \"anchor\". "
+                                      "This borrows Bitcoin's ordering of history: to rewrite Sequentia you would "
+                                      "have to rewrite Bitcoin. When Bitcoin is settling a change of its own, new "
+                                      "Sequentia blocks pause briefly and resume on their own."));
         seqLayout->addWidget(m_anchor_label);
         m_staking_label = new QLabel(tr("Staking: ..."), seqFrame);
         m_staking_label->setWordWrap(true);
+        m_staking_label->setToolTip(tr("Staking makes this node a block producer: the more %1 you stake, the more "
+                                       "often you are chosen to produce a block and collect its fees. The stake "
+                                       "stays yours the whole time. Set it up in the Staking tab.")
+                                        .arg(BitcoinUnits::policyAssetTicker()));
         seqLayout->addWidget(m_staking_label);
         m_finality_label = new QLabel(tr("Finality: ..."), seqFrame);
         m_finality_label->setWordWrap(true);
+        m_finality_label->setToolTip(tr("A checkpoint of Sequentia's history is written on Bitcoin. Once it is "
+                                        "buried deep enough there, everything below it is final: it can no longer "
+                                        "change, no matter what happens on Bitcoin above it."));
         seqLayout->addWidget(m_finality_label);
         if (QVBoxLayout* top = qobject_cast<QVBoxLayout*>(layout())) {
             top->insertWidget(1, seqFrame); // after labelAlerts (index 0), above the balances row
         }
+    }
+
+    // Sequentia: what the whole wallet is worth, above the per-asset rows. With
+    // several assets in play a bare list of amounts answers "how much of each",
+    // never "how much do I have" — that is this line's job.
+    {
+        m_total_value = new QLabel(ui->frame);
+        QFont f = m_total_value->font();
+        m_headline_point_size = f.pointSizeF() * 1.9;
+        f.setPointSizeF(m_headline_point_size);
+        f.setBold(true);
+        m_total_value->setFont(f);
+        m_total_value->setVisible(false);
+        // Row 1 of the panel: under the "Balances" title, above the amounts.
+        ui->verticalLayout_4->insertWidget(1, m_total_value);
     }
 
     // Parent-chain (Bitcoin testnet4) balance, shown inside the Balances panel rather
@@ -212,7 +238,7 @@ OverviewPage::OverviewPage(const PlatformStyle *platformStyle, QWidget *parent) 
         ui->verticalLayout_4->addWidget(btcSep);
         m_btc_label = new QLabel(tr("Bitcoin (testnet4): loading..."), ui->frame);
         m_btc_label->setWordWrap(true);
-        m_btc_label->setStyleSheet("color:#555;");
+        m_btc_label->setStyleSheet("color:#9b988e;");
         m_btc_label->setToolTip(tr("Your Sequentia receiving address is also a Bitcoin testnet4 address, so the same "
                                    "address can hold real testnet Bitcoin (tBTC). This amount is scanned from the "
                                    "Bitcoin testnet4 chain; it is not a Sequentia balance and spending it requires a "
@@ -275,6 +301,37 @@ void OverviewPage::setBalance(const interfaces::WalletBalances& balances)
         const QString r = GUIUtil::formatMultiAssetReferenceApprox(m, refCur);
         return r.isEmpty() ? s : (s + "\n" + r);
     };
+
+    // The headline: everything spendable plus everything still confirming, valued
+    // in one number. Hidden in privacy mode (it would unmask the masked rows).
+    if (m_total_value) {
+        const CAmountMap all = walletModel->wallet().privateKeysDisabled()
+            ? balances.watch_only_balance + balances.unconfirmed_watch_only_balance + balances.immature_watch_only_balance
+            : balances.balance + balances.unconfirmed_balance + balances.immature_balance;
+        bool holds_anything = false;
+        for (const auto& it : all) if (it.second > 0) { holds_anything = true; break; }
+
+        QString text;
+        QFont f = m_total_value->font();
+        if (!holds_anything) {
+            // An empty wallet holds no assets — not "0 of the native one". Say that
+            // plainly instead of leaving the rows to imply it with dashes.
+            text = tr("No assets yet");
+            f.setPointSizeF(m_headline_point_size * 0.62);
+            m_total_value->setStyleSheet("color:#9b988e;");
+            m_total_value->setToolTip(tr("Anything you receive shows up here, each asset on its own line. "
+                                         "Use the Receive tab to get an address."));
+        } else {
+            text = GUIUtil::formatMultiAssetReferenceApprox(all, refCur);
+            f.setPointSizeF(m_headline_point_size);
+            m_total_value->setStyleSheet(QString());
+            m_total_value->setToolTip(tr("Everything in this wallet, valued at the latest prices the node has. "
+                                         "Assets with no published price are not counted."));
+        }
+        m_total_value->setFont(f);
+        m_total_value->setText(m_privacy ? QString() : text);
+        m_total_value->setVisible(!m_privacy && !text.isEmpty());
+    }
 
     if (walletModel->wallet().isLegacy()) {
         if (walletModel->wallet().privateKeysDisabled()) {
@@ -404,7 +461,7 @@ void OverviewPage::updateSeqStatus()
                 const bool ok = (st == QLatin1String("ok"));
                 m_anchor_label->setText(tr("Bitcoin anchor: %1  -  Sequentia height %2, anchored to testnet4 block %3")
                                         .arg(ok ? tr("OK") : st).arg(tip).arg(anc));
-                m_anchor_label->setStyleSheet(ok ? "color:#1e7e34;" : "color:#a00;");
+                m_anchor_label->setStyleSheet(ok ? "color:#3ecf7a;" : "color:#ff6b6b;");
             } else {
                 m_anchor_label->setText(tr("Bitcoin anchor: unavailable"));
             }
@@ -444,15 +501,15 @@ void OverviewPage::updateSeqStatus()
                 if (nconf > 0) {
                     m_finality_label->setText(tr("WARNING - CHECKPOINT CONFLICT: %1 conflicting checkpoint(s) on Bitcoin. "
                                                  "A long-range fork may be in progress; do not rely on finality.").arg((int)nconf));
-                    m_finality_label->setStyleSheet("QLabel{padding:6px;border-radius:4px;background:#f8d7da;color:#a00;font-weight:bold;}");
+                    m_finality_label->setStyleSheet("QLabel{padding:6px;border-radius:4px;background:rgba(255,90,90,0.12);color:#ff6b6b;font-weight:bold;}");
                 } else if (fin >= 0) {
                     m_finality_label->setText(tr("Finality: finalized up to Sequentia height %1 (checkpoint buried %2 Bitcoin blocks deep). "
                                                  "Below that height the chain still follows Bitcoin reorgs.").arg(fin).arg(depth));
-                    m_finality_label->setStyleSheet("color:#1e7e34;");
+                    m_finality_label->setStyleSheet("color:#3ecf7a;");
                 } else {
                     m_finality_label->setText(tr("Finality: no checkpoint finalized yet - the chain follows Bitcoin reorgs to any depth. "
                                                  "A checkpoint finalizes once buried %1 Bitcoin blocks deep.").arg(depth));
-                    m_finality_label->setStyleSheet("color:#856404;");
+                    m_finality_label->setStyleSheet("color:#ffb84d;");
                 }
             } else {
                 m_finality_label->setText(tr("Finality: unavailable"));

@@ -863,7 +863,7 @@ Note:  Since the fee is calculated on a per-byte basis, a fee rate of "100 atoms
                  <item>
                   <widget class="QComboBox" name="feeAssetSelector">
                    <property name="toolTip">
-                    <string>Pay the transaction fee in this asset. Sequentia accepts fees in any asset a block producer prices; no asset is privileged. If it doesn't confirm, you can replace it (RBF, on by default).</string>
+                    <string>Pay the network fee in this asset. By default it follows the asset you are sending, as long as that asset has a published price — no asset is privileged. Block producers accept a fee they can value: paying in an asset with no price, hardly any liquidity or high volatility risks a payment that never confirms.</string>
                    </property>
                   </widget>
                  </item>
@@ -881,6 +881,22 @@ Note:  Since the fee is calculated on a per-byte basis, a fee rate of "100 atoms
                   </spacer>
                  </item>
                 </layout>
+               </item>
+               <item>
+                <widget class="QLabel" name="labelFeeAssetWarning">
+                 <property name="visible">
+                  <bool>false</bool>
+                 </property>
+                 <property name="wordWrap">
+                  <bool>true</bool>
+                 </property>
+                 <property name="styleSheet">
+                  <string notr="true">color: #ffb84d;</string>
+                 </property>
+                 <property name="text">
+                  <string>This fee asset has no published price, so block producers cannot value it and the payment may never confirm. Pick an asset with a price.</string>
+                 </property>
+                </widget>
                </item>
                <item>
                 <layout class="QHBoxLayout" name="horizontalLayoutFee8">
@@ -1095,7 +1111,7 @@ Note:  Since the fee is calculated on a per-byte basis, a fee rate of "100 atoms
               <string>Enable Replace-By-Fee</string>
              </property>
              <property name="toolTip">
-              <string>With Replace-By-Fee (BIP-125) you can increase a transaction's fee after it is sent. Without this, a higher fee may be recommended to compensate for increased transaction delay risk.</string>
+              <string>Keep this on. If the payment sits unconfirmed, right-click it in the Transactions tab and choose "Increase transaction fee": you can raise the fee AND switch it to a different asset you hold. That switch matters here: block producers only take fees they can value, so a fee paid in an asset with no published price, little liquidity or wild swings may never be accepted at any amount — the fix is changing the fee asset, not paying more of it. Turning this off locks both, leaving a second transaction that spends the first (Speed up) as the only remedy.</string>
              </property>
             </widget>
            </item>

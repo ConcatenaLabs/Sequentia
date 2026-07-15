@@ -813,6 +813,14 @@ QString formatReferenceApprox(const CAsset& asset, const CAmount& amount, const 
     return FormatRefValue((static_cast<double>(amount) / 100000000.0) * pa / pr, ref);
 }
 
+bool assetHasMarketPrice(const CAsset& asset)
+{
+    const std::map<std::string, double> prices = GetReferencePrices();
+    if (prices.empty()) return false;
+    const auto it = prices.find(MarketTickerOf(asset).toStdString());
+    return it != prices.end() && it->second > 0.0;
+}
+
 QString formatMultiAssetReferenceApprox(const CAmountMap& amountmap, const QString& refTicker)
 {
     const std::map<std::string, double> prices = GetReferencePrices();

@@ -55,6 +55,12 @@ AssetsPage::AssetsPage(const PlatformStyle* platformStyle, QWidget* parent)
     m_balances->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_balances->setSelectionBehavior(QAbstractItemView::SelectRows);
     balLayout->addWidget(m_balances);
+    // Empty state: an empty wallet holds no assets at all — never a "0" row for any
+    // particular asset (no asset is privileged, so none deserves a phantom line).
+    m_balances_empty = new QLabel(tr("No assets yet. Receive any asset - or issue your own below - and it will show up here."), balGroup);
+    m_balances_empty->setWordWrap(true);
+    m_balances_empty->setVisible(false);
+    balLayout->addWidget(m_balances_empty);
     QPushButton* refreshBtn = new QPushButton(tr("Refresh"), balGroup);
     QHBoxLayout* refreshRow = new QHBoxLayout();
     refreshRow->addStretch();
@@ -160,7 +166,7 @@ UniValue AssetsPage::callWalletRpc(const std::string& method, const UniValue& pa
 
 void AssetsPage::setStatus(const QString& msg, bool error)
 {
-    m_status->setStyleSheet(error ? "color:#a00;" : "color:#070;");
+    m_status->setStyleSheet(error ? "color:#ff6b6b;" : "color:#3ecf7a;");
     m_status->setText(msg);
 }
 
@@ -177,15 +183,21 @@ void AssetsPage::refresh()
         const std::vector<std::string>& keys = bal.getKeys();
         m_balances->setRowCount(0);
         for (size_t i = 0; i < keys.size(); ++i) {
+            // Zero balances are assets the wallet does not hold; listing them (the
+            // policy asset included) would just be noise. No asset is privileged.
+            double units = 0.0; try { units = bal[i].get_real(); } catch (...) {}
+            if (units <= 0.0) continue;
             int row = m_balances->rowCount();
             m_balances->insertRow(row);
             const QString label = QString::fromStdString(keys[i]);
             m_balances->setItem(row, 0, new QTableWidgetItem(label));
             m_balances->setItem(row, 1, new QTableWidgetItem(QString::fromStdString(bal[i].getValStr())));
             // SEQUENTIA: value the balance in the user's chosen reference currency (blank if unpriced).
-            double units = 0.0; try { units = bal[i].get_real(); } catch (...) {}
             m_balances->setItem(row, 2, new QTableWidgetItem(GUIUtil::formatReferenceApproxByLabel(label, units, QString())));
         }
+        const bool empty = m_balances->rowCount() == 0;
+        m_balances->setVisible(!empty);
+        if (m_balances_empty) m_balances_empty->setVisible(empty);
     } else if (!ok) {
         setStatus(tr("Could not load balances: %1").arg(err), true);
     }

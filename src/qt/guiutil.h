@@ -241,6 +241,11 @@ namespace GUIUtil
        like the assets page, where no CAsset/CAmount is available). Empty if unpriced. */
     QString formatReferenceApproxByLabel(const QString& assetLabel, double wholeUnits, const QString& refTicker);
 
+    /* SEQUENTIA: whether the node's cached price feed carries a positive price for this asset.
+       Fees paid in an unpriced asset are unlikely to ever be accepted by a block producer, so
+       the send dialog uses this to pick a sane default fee asset and to warn about bad picks. */
+    bool assetHasMarketPrice(const CAsset& asset);
+
     /* Parse an amount of a given asset from text */
     bool parseAssetAmount(const CAsset&, const QString& text, int bitcoin_unit, CAmount *val_out);
 

@@ -93,6 +93,15 @@ private:
     void updateFeeMinimizedLabel();
     void updateCoinControlState();
 
+    /** SEQUENTIA any-asset fees: the fee defaults to the asset being sent (first
+        recipient), because that is what the user demonstrably holds and wants to
+        move — but only while that asset has a published price; producers are
+        unlikely to ever accept a fee they cannot value. A manual pick in the
+        selector wins until the form is cleared. */
+    bool m_fee_asset_user_choice{false};
+    void updateDefaultFeeAsset();
+    void updateFeeAssetWarning();
+
 private Q_SLOTS:
     void sendButtonClicked(bool checked);
     void on_buttonChooseFee_clicked();

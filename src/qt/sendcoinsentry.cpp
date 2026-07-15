@@ -185,6 +185,11 @@ bool SendCoinsEntry::validate(interfaces::Node& node)
     return retval;
 }
 
+CAsset SendCoinsEntry::sendAsset() const
+{
+    return ui->payAmount->fullValue().first;
+}
+
 SendAssetsRecipient SendCoinsEntry::getValue()
 {
     recipient.address = ui->payTo->text();

@@ -211,10 +211,11 @@ void SendCoinsDialog::setModel(WalletModel *_model)
         ui->optInRBF->setCheckState(Qt::Checked);
 
         // Sequentia any-asset fees: let the user pay the fee in any asset they hold. The fee
-        // asset is a free choice — no asset is privileged (the policy asset is just the default
-        // option). The node accepts whatever a block producer prices; RBF (above) is on by
-        // default so a fee in an asset the network won't relay can be replaced.
+        // asset is a free choice — no asset is privileged. The default follows the asset being
+        // sent while it has a published price (see updateDefaultFeeAsset); producers are
+        // unlikely to ever accept a fee they cannot value, so unpriced picks get a warning.
         ui->feeAssetSelector->setVisible(g_con_any_asset_fees);
+        ui->labelFeeAssetWarning->setVisible(false);
         if (g_con_any_asset_fees) {
             auto populateFeeAssets = [this]() {
                 const QString prev = ui->feeAssetSelector->currentData().toString();
@@ -228,11 +229,18 @@ void SendCoinsDialog::setModel(WalletModel *_model)
                 }
                 const int idx = ui->feeAssetSelector->findData(prev);
                 if (idx >= 0) ui->feeAssetSelector->setCurrentIndex(idx);
+                updateDefaultFeeAsset();
             };
             populateFeeAssets();
             connect(model, &WalletModel::assetTypesChanged, this, populateFeeAssets);
             connect(ui->feeAssetSelector, qOverload<int>(&QComboBox::currentIndexChanged),
                     this, &SendCoinsDialog::coinControlUpdateLabels);
+            connect(ui->feeAssetSelector, qOverload<int>(&QComboBox::currentIndexChanged),
+                    this, [this](int) { updateFeeAssetWarning(); });
+            // activated() fires only on a real user pick (never programmatically): from
+            // then on the user's choice is respected until the form is cleared.
+            connect(ui->feeAssetSelector, qOverload<int>(&QComboBox::activated),
+                    this, [this](int) { m_fee_asset_user_choice = true; });
         }
 
         if (model->wallet().hasExternalSigner()) {
@@ -399,7 +407,7 @@ bool SendCoinsDialog::PrepareSendText(QString& question_string, QString& informa
         question_string.append(" (" + QString::number((double)m_current_transaction->getTransactionSize() / 1000) + " kB): ");
 
         // append transaction fee value
-        question_string.append("<span style='color:#aa0000; font-weight:bold;'>");
+        question_string.append("<span style='color:#ff6b6b; font-weight:bold;'>");
         question_string.append(BitcoinUnits::formatHtmlWithUnit(model->getOptionsModel()->getDisplayUnit(), txFee));
         question_string.append("</span><br />");
 
@@ -627,6 +635,11 @@ void SendCoinsDialog::clear()
     }
     addEntry();
 
+    // A fresh form starts over on the fee asset too: the default follows
+    // whatever the user sends next.
+    m_fee_asset_user_choice = false;
+    updateDefaultFeeAsset();
+
     updateTabsAndLabels();
 }
 
@@ -648,6 +661,9 @@ SendCoinsEntry *SendCoinsDialog::addEntry()
     connect(entry, &SendCoinsEntry::removeEntry, this, &SendCoinsDialog::removeEntry);
     connect(entry, &SendCoinsEntry::useAvailableBalance, this, &SendCoinsDialog::useAvailableBalance);
     connect(entry, &SendCoinsEntry::payAmountChanged, this, &SendCoinsDialog::coinControlUpdateLabels);
+    // The amount field also signals asset switches, so the fee-asset default can
+    // follow the asset being sent.
+    connect(entry, &SendCoinsEntry::payAmountChanged, this, &SendCoinsDialog::updateDefaultFeeAsset);
     connect(entry, &SendCoinsEntry::subtractFeeFromAmountChanged, this, &SendCoinsDialog::coinControlUpdateLabels);
 
     // Focus the field, so that entry can start immediately
@@ -915,6 +931,47 @@ void SendCoinsDialog::updateCoinControlState()
     }
     // Include watch-only for wallets without private key
     m_coin_control->fAllowWatchOnly = model->wallet().privateKeysDisabled() && !model->wallet().hasExternalSigner();
+}
+
+void SendCoinsDialog::updateDefaultFeeAsset()
+{
+    if (!g_con_any_asset_fees || !model || ui->feeAssetSelector->count() == 0) return;
+    if (m_fee_asset_user_choice) { updateFeeAssetWarning(); return; }
+
+    // The asset of the first recipient is the transaction's subject; paying the fee
+    // in it is the least surprising default and needs no extra asset in the wallet.
+    CAsset sent = ::policyAsset;
+    if (ui->entries->count() > 0) {
+        if (auto* entry = qobject_cast<SendCoinsEntry*>(ui->entries->itemAt(0)->widget())) {
+            sent = entry->sendAsset();
+        }
+    }
+
+    // Only a priced asset makes a sane default; otherwise fall back to the first
+    // selector entry with a published price. If nothing is priced (price feed down,
+    // exotic wallet) leave the selection alone — the warning label takes over.
+    CAsset pick = sent;
+    if (!GUIUtil::assetHasMarketPrice(pick)) {
+        for (int i = 0; i < ui->feeAssetSelector->count(); ++i) {
+            const CAsset candidate = GetAssetFromString(ui->feeAssetSelector->itemData(i).toString().toStdString());
+            if (!candidate.IsNull() && GUIUtil::assetHasMarketPrice(candidate)) { pick = candidate; break; }
+        }
+    }
+    const int idx = ui->feeAssetSelector->findData(QString::fromStdString(pick.GetHex()));
+    if (idx >= 0 && idx != ui->feeAssetSelector->currentIndex()) {
+        ui->feeAssetSelector->setCurrentIndex(idx);
+    }
+    updateFeeAssetWarning();
+}
+
+void SendCoinsDialog::updateFeeAssetWarning()
+{
+    if (!g_con_any_asset_fees || ui->feeAssetSelector->count() == 0) {
+        ui->labelFeeAssetWarning->setVisible(false);
+        return;
+    }
+    const CAsset sel = GetAssetFromString(ui->feeAssetSelector->currentData().toString().toStdString());
+    ui->labelFeeAssetWarning->setVisible(!sel.IsNull() && !GUIUtil::assetHasMarketPrice(sel));
 }
 
 void SendCoinsDialog::updateNumberOfBlocks(int count, const QDateTime& blockDate, double nVerificationProgress, bool headers, SynchronizationState sync_state) {

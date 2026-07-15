@@ -9,6 +9,10 @@
 
 #include <univalue.h>
 
+#include <set>
+#include <string>
+#include <vector>
+
 class WalletModel;
 class PlatformStyle;
 
@@ -18,7 +22,42 @@ class QLineEdit;
 class QLabel;
 class QPushButton;
 class QShowEvent;
+class QPaintEvent;
 QT_END_NAMESPACE
+
+/** A thin horizontal bar filled to `share` (0..1): this node's slice of the
+ *  network's total stake. Painted rather than styled because QProgressBar
+ *  cannot show a fraction of a percent, which is the interesting case here. */
+class StakeShareBar : public QWidget
+{
+    Q_OBJECT
+public:
+    explicit StakeShareBar(QWidget* parent = nullptr);
+    void setShare(double share);
+
+protected:
+    void paintEvent(QPaintEvent* event) override;
+
+private:
+    double m_share{0.0};
+};
+
+/** One tick per recent block, highlighted where this node produced it: the
+ *  shape of "how often do I actually produce" at a glance. */
+class BlockStripe : public QWidget
+{
+    Q_OBJECT
+public:
+    explicit BlockStripe(QWidget* parent = nullptr);
+    //! `mine[i] == true` marks the i-th block (oldest first) as produced here.
+    void setBlocks(const std::vector<bool>& mine);
+
+protected:
+    void paintEvent(QPaintEvent* event) override;
+
+private:
+    std::vector<bool> m_mine;
+};
 
 /**
  * Sequentia "Staking" page: one-click staking. Locks SEQ into a staking output
@@ -57,6 +96,32 @@ private:
     QPushButton* m_stake_button{nullptr};
     QLabel* m_result{nullptr};
     QLabel* m_status{nullptr};
+
+    // --- "Your stake" card ---
+    QLabel* m_my_stake{nullptr};
+    QLabel* m_my_share{nullptr};
+    StakeShareBar* m_share_bar{nullptr};
+    QLabel* m_next_slot{nullptr};
+    // --- "Block production" card ---
+    QLabel* m_produced_count{nullptr};
+    BlockStripe* m_stripe{nullptr};
+    QLabel* m_produced_fees{nullptr};
+    QLabel* m_last_produced{nullptr};
+    // --- watch-only key ---
+    QLineEdit* m_xpub{nullptr};
+    QPushButton* m_xpub_copy{nullptr};
+    // --- blocks produced by this node ---
+    QLabel* m_blocks_summary{nullptr};
+    QTableWidget* m_blocks{nullptr};
+
+    //! Public keys of the stakes this wallet controls, for "is this block ours".
+    std::set<std::string> m_my_pubkeys;
+
+    //! Refresh the cards fed by getposslot / getposrecentblocks. Split out of
+    //! refresh() because they read the chain rather than the wallet.
+    void refreshOwnStake(const UniValue& registry);
+    void refreshProducedBlocks();
+    void refreshWatchOnlyKey();
 
     //! Run an RPC (wallet=true uses the /wallet/<name> endpoint; false the node endpoint).
     UniValue callRpc(const std::string& method, const UniValue& params, bool& ok, QString& error, bool wallet = true);
