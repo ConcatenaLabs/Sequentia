@@ -13,6 +13,7 @@
 #include <key_io.h>
 #include <pos.h>
 #include <pos_producer.h>
+#include <vrf.h>
 #include <util/settings.h>
 #include <set>
 #include <coins.h>
@@ -3366,6 +3367,229 @@ static RPCHelpMan getstakerinfo()
     };
 }
 
+// SEQUENTIA PoS: this node's own sortition standing for the next block.
+static RPCHelpMan getposslot()
+{
+    return RPCHelpMan{"getposslot",
+                "\nFor Proof-of-Stake chains: this node's own standing in the election for the NEXT block.\n"
+                "\nUnder VRF sortition (the Sequentia default) each staker draws a private slot from their own\n"
+                "secret key, so no node can know another's slot in advance and no public ranking exists. This\n"
+                "returns the slots of the keys THIS node produces with: slot 0 may produce as soon as the next\n"
+                "block is due, and each further slot waits one slot interval more. More stake draws a lower\n"
+                "slot more often. Under the legacy public schedule the slot is simply the staker's rank.\n",
+                {},
+                RPCResult{RPCResult::Type::OBJ, "", "", {
+                    {RPCResult::Type::NUM, "height", "height of the next block these slots apply to"},
+                    {RPCResult::Type::STR, "sortition", "\"vrf\" (private per-staker draw) or \"schedule\" (public ranking)"},
+                    {RPCResult::Type::STR_HEX, "seed", "the election seed (from the tip and its Bitcoin anchor)"},
+                    {RPCResult::Type::NUM, "slot_interval", "seconds a slot must wait per step"},
+                    {RPCResult::Type::NUM, "total_weight", "total registered stake weight on the network"},
+                    {RPCResult::Type::NUM, "stakers", "number of registered stakers"},
+                    {RPCResult::Type::BOOL, "producing", "true if the autonomous producer is running on this node"},
+                    {RPCResult::Type::NUM, "best_slot", "lowest slot among this node's keys (-1 if none is eligible)"},
+                    {RPCResult::Type::NUM_TIME, "best_slot_opens", "unix time at/after which the best slot may produce"},
+                    {RPCResult::Type::ARR, "keys", "one entry per producing key holding an eligible stake",
+                        {
+                            {RPCResult::Type::OBJ, "", "",
+                                {
+                                    {RPCResult::Type::STR_HEX, "pubkey", "staker public key"},
+                                    {RPCResult::Type::NUM, "weight", "this key's registered stake weight"},
+                                    {RPCResult::Type::NUM, "share", "this key's share of the total stake (0..1)"},
+                                    {RPCResult::Type::NUM, "slot", "the slot this key drew for the next block"},
+                                    {RPCResult::Type::NUM_TIME, "slot_opens", "unix time at/after which this key may produce"},
+                                    {RPCResult::Type::BOOL, "committee", "true if this key certifies this block as a committee member"},
+                                }},
+                        }},
+                }},
+                RPCExamples{HelpExampleCli("getposslot", "") + HelpExampleRpc("getposslot", "")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!g_con_pos) {
+        throw JSONRPCError(RPC_MISC_ERROR, "Proof-of-Stake (con_pos) is not enabled on this chain");
+    }
+    ChainstateManager& chainman = EnsureAnyChainman(request.context);
+    const StakeRegistry& registry = StakeRegistry::GetInstance();
+    int next_height;
+    int64_t parent_time;
+    uint256 seed;
+    {
+        LOCK(cs_main);
+        const CBlockIndex* tip = chainman.ActiveChain().Tip();
+        next_height = tip->nHeight + 1;
+        parent_time = (int64_t)tip->nTime;
+        seed = PosSeedForChild(tip);
+    }
+    const uint64_t total_weight = PosTotalWeight(registry);
+
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("height", next_height);
+    result.pushKV("sortition", g_pos_vrf ? "vrf" : "schedule");
+    result.pushKV("seed", seed.GetHex());
+    result.pushKV("slot_interval", g_pos_slot_interval);
+    result.pushKV("total_weight", total_weight);
+    result.pushKV("stakers", (int)registry.Weights().size());
+
+    // Only the running producer holds the secret keys the VRF draw needs; with no
+    // producer there is nothing to report beyond the network-wide numbers above.
+    PosProducer* producer = GetActivePosProducer();
+    result.pushKV("producing", producer != nullptr);
+
+    UniValue arr(UniValue::VARR);
+    int64_t best_slot = -1;
+    if (producer) {
+        std::set<CPubKey> public_committee;
+        if (g_pos_public_committee) public_committee = PosPublicCommitteeSet(registry, seed);
+        for (const CKey& key : producer->Keys()) {
+            const CPubKey pub = key.GetPubKey();
+            const uint64_t weight = registry.GetWeight(pub);
+            if (!PosIsEligibleStake(weight)) continue;
+            uint64_t slot = 0;
+            bool committee = false;
+            if (g_pos_vrf) {
+                auto proof = VrfProve(key, Span<const unsigned char>(seed.begin(), 32));
+                if (!proof) continue;
+                uint256 beta;
+                if (!VrfVerify(pub, Span<const unsigned char>(seed.begin(), 32), *proof, beta)) continue;
+                slot = PosVrfSlot(beta, weight, total_weight);
+                committee = g_pos_public_committee ? public_committee.count(pub) > 0
+                                                   : PosVrfIsCommitteeMember(beta, weight, total_weight);
+            } else {
+                std::optional<size_t> rank = PosRank(registry, seed, pub);
+                if (!rank) continue;
+                slot = (uint64_t)*rank;
+                const std::vector<CPubKey> cmt = PosCommittee(registry, seed);
+                committee = std::find(cmt.begin(), cmt.end(), pub) != cmt.end();
+            }
+            UniValue entry(UniValue::VOBJ);
+            entry.pushKV("pubkey", HexStr(pub));
+            entry.pushKV("weight", weight);
+            entry.pushKV("share", total_weight > 0 ? (double)weight / (double)total_weight : 0.0);
+            entry.pushKV("slot", slot);
+            entry.pushKV("slot_opens", parent_time + (int64_t)slot * g_pos_slot_interval);
+            entry.pushKV("committee", committee);
+            arr.push_back(entry);
+            if (best_slot < 0 || (int64_t)slot < best_slot) best_slot = (int64_t)slot;
+        }
+    }
+    result.pushKV("best_slot", best_slot);
+    result.pushKV("best_slot_opens", best_slot < 0 ? 0 : parent_time + best_slot * g_pos_slot_interval);
+    result.pushKV("keys", arr);
+    return result;
+},
+    };
+}
+
+// SEQUENTIA PoS: who produced the recent blocks, and what they earned.
+static RPCHelpMan getposrecentblocks()
+{
+    return RPCHelpMan{"getposrecentblocks",
+                "\nFor Proof-of-Stake chains: the most recent blocks with the staker that produced each one\n"
+                "and the fees it collected. Sequentia has no block subsidy, so a producer is paid exactly the\n"
+                "fees of the block it leads: those are the block's coinbase outputs, listed here per asset.\n",
+                {
+                    {"count", RPCArg::Type::NUM, RPCArg::Default{100}, "How many blocks back from the tip to report (max 1000)."},
+                    {"producer", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Only report blocks produced by this staker public key."},
+                },
+                RPCResult{RPCResult::Type::OBJ, "", "", {
+                    {RPCResult::Type::NUM, "scanned", "how many blocks were examined"},
+                    {RPCResult::Type::NUM, "from_height", "lowest height examined"},
+                    {RPCResult::Type::NUM, "to_height", "highest height examined (the tip)"},
+                    {RPCResult::Type::ARR, "blocks", "newest first",
+                        {
+                            {RPCResult::Type::OBJ, "", "",
+                                {
+                                    {RPCResult::Type::NUM, "height", "block height"},
+                                    {RPCResult::Type::STR_HEX, "hash", "block hash"},
+                                    {RPCResult::Type::NUM_TIME, "time", "block time"},
+                                    {RPCResult::Type::NUM, "wait", "seconds after the previous block that this one landed"},
+                                    {RPCResult::Type::STR_HEX, "producer", "public key of the staker that produced it"},
+                                    {RPCResult::Type::NUM, "txs", "transactions in the block, excluding the coinbase"},
+                                    {RPCResult::Type::OBJ_DYN, "fees", "fees the producer collected, keyed by asset id",
+                                        {{RPCResult::Type::STR_AMOUNT, "asset", "amount of that asset"}}},
+                                }},
+                        }},
+                }},
+                RPCExamples{HelpExampleCli("getposrecentblocks", "100") + HelpExampleRpc("getposrecentblocks", "100")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!g_con_pos) {
+        throw JSONRPCError(RPC_MISC_ERROR, "Proof-of-Stake (con_pos) is not enabled on this chain");
+    }
+    int count = request.params[0].isNull() ? 100 : request.params[0].get_int();
+    if (count < 1 || count > 1000) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "count must be between 1 and 1000");
+    }
+    std::optional<CPubKey> filter;
+    if (!request.params[1].isNull()) {
+        const std::vector<unsigned char> raw = ParseHexV(request.params[1], "producer");
+        CPubKey pub(raw);
+        if (!pub.IsFullyValid()) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "producer is not a valid public key");
+        }
+        filter = pub;
+    }
+    ChainstateManager& chainman = EnsureAnyChainman(request.context);
+
+    // Collect the indices under cs_main, then read the bodies without it: reading
+    // up to 1000 blocks off disk should not hold up the whole node.
+    std::vector<const CBlockIndex*> indices;
+    int tip_height;
+    {
+        LOCK(cs_main);
+        const CBlockIndex* pindex = chainman.ActiveChain().Tip();
+        tip_height = pindex->nHeight;
+        for (int i = 0; i < count && pindex && pindex->nHeight > 0; ++i) {
+            indices.push_back(pindex);
+            pindex = pindex->pprev;
+        }
+    }
+
+    UniValue arr(UniValue::VARR);
+    for (const CBlockIndex* pindex : indices) {
+        CBlock block;
+        if (!ReadBlockFromDisk(block, pindex, Params().GetConsensus())) continue;
+        std::optional<PosChallengeParts> parts = ParsePosBlockChallenge(block.proof.challenge);
+        if (!parts) continue;
+        if (filter && parts->leader != *filter) continue;
+
+        UniValue entry(UniValue::VOBJ);
+        entry.pushKV("height", pindex->nHeight);
+        entry.pushKV("hash", pindex->GetBlockHash().GetHex());
+        entry.pushKV("time", (int64_t)pindex->nTime);
+        entry.pushKV("wait", pindex->pprev ? (int64_t)pindex->nTime - (int64_t)pindex->pprev->nTime : 0);
+        entry.pushKV("producer", HexStr(parts->leader));
+        entry.pushKV("txs", (int)(block.vtx.empty() ? 0 : block.vtx.size() - 1));
+
+        // The coinbase pays the leader one output per fee asset. Commitment
+        // outputs (OP_RETURN markers, the VRF proof) carry no value, and blinded
+        // amounts cannot be read here — both are simply skipped.
+        UniValue fees(UniValue::VOBJ);
+        if (!block.vtx.empty()) {
+            CAmountMap collected;
+            for (const CTxOut& out : block.vtx[0]->vout) {
+                if (out.scriptPubKey.IsUnspendable()) continue;
+                if (!out.nAsset.IsExplicit() || !out.nValue.IsExplicit()) continue;
+                if (out.nValue.GetAmount() <= 0) continue;
+                collected[out.nAsset.GetAsset()] += out.nValue.GetAmount();
+            }
+            for (const auto& it : collected) {
+                fees.pushKV(it.first.GetHex(), ValueFromAmount(it.second));
+            }
+        }
+        entry.pushKV("fees", fees);
+        arr.push_back(entry);
+    }
+
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("scanned", (int)indices.size());
+    result.pushKV("from_height", indices.empty() ? tip_height : indices.back()->nHeight);
+    result.pushKV("to_height", tip_height);
+    result.pushKV("blocks", arr);
+    return result;
+},
+    };
+}
+
 // SEQUENTIA PoS: enable autonomous block production at runtime, with no restart.
 static RPCHelpMan startposproducer()
 {
@@ -3928,6 +4152,8 @@ static const CRPCCommand commands[] =
     // SEQUENTIA:
     { "blockchain",         &getanchorstatus,                    },
     { "blockchain",         &getposschedule,                     },
+    { "blockchain",         &getposslot,                         },
+    { "blockchain",         &getposrecentblocks,                 },
     { "blockchain",         &getstakerinfo,                      },
     { "blockchain",         &startposproducer,                   },
     { "blockchain",         &getstakescript,                     },
