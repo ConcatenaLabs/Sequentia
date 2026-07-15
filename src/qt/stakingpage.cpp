@@ -5,8 +5,14 @@
 #include <qt/stakingpage.h>
 
 #include <qt/bitcoinunits.h>
+#include <qt/guiutil.h>
+#include <qt/optionsmodel.h>
 #include <qt/platformstyle.h>
 #include <qt/walletmodel.h>
+
+#include <asset.h>
+#include <assetsdir.h>
+#include <rpc/util.h>
 
 #include <interfaces/node.h>
 #include <key.h>
@@ -18,6 +24,9 @@
 #include <algorithm>
 #include <cmath>
 
+#include <QApplication>
+#include <QClipboard>
+#include <QDateTime>
 #include <QDoubleValidator>
 #include <QFormLayout>
 #include <QGroupBox>
@@ -26,6 +35,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QLocale>
+#include <QPainter>
 #include <QPushButton>
 #include <QShowEvent>
 #include <QStringList>
@@ -33,6 +43,74 @@
 #include <QTime>
 #include <QTimer>
 #include <QVBoxLayout>
+
+namespace {
+// Sequentia theme colours (see qt/res/css/sequentia.css).
+const QColor kAccent(0xf5, 0xb3, 0x01);
+const QColor kTrack(0x25, 0x25, 0x2c);
+
+//! Format a stake weight (atoms of the policy asset) as whole units, trimmed.
+QString FormatWeight(uint64_t atoms)
+{
+    QString s = QString::number((double)atoms / 100000000.0, 'f', 8);
+    if (s.contains('.')) { while (s.endsWith('0')) s.chop(1); if (s.endsWith('.')) s.chop(1); }
+    return s;
+}
+} // namespace
+
+StakeShareBar::StakeShareBar(QWidget* parent) : QWidget(parent)
+{
+    setFixedHeight(8);
+    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+}
+
+void StakeShareBar::setShare(double share)
+{
+    m_share = qBound(0.0, share, 1.0);
+    update();
+}
+
+void StakeShareBar::paintEvent(QPaintEvent*)
+{
+    QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setPen(Qt::NoPen);
+    p.setBrush(kTrack);
+    p.drawRoundedRect(rect(), 4, 4);
+    if (m_share <= 0.0) return;
+    // A share this small still deserves a visible sliver: rounding it away would
+    // read as "no stake at all".
+    const int w = qMax(2, (int)(width() * m_share));
+    p.setBrush(kAccent);
+    p.drawRoundedRect(QRect(0, 0, w, height()), 4, 4);
+}
+
+BlockStripe::BlockStripe(QWidget* parent) : QWidget(parent)
+{
+    setFixedHeight(10);
+    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+}
+
+void BlockStripe::setBlocks(const std::vector<bool>& mine)
+{
+    m_mine = mine;
+    update();
+}
+
+void BlockStripe::paintEvent(QPaintEvent*)
+{
+    if (m_mine.empty()) return;
+    QPainter p(this);
+    p.setPen(Qt::NoPen);
+    const int n = (int)m_mine.size();
+    const double step = (double)width() / n;
+    for (int i = 0; i < n; ++i) {
+        const int x = (int)(i * step);
+        const int w = qMax(1, (int)(step) - 1);
+        p.setBrush(m_mine[i] ? kAccent : kTrack);
+        p.drawRect(QRect(x, 0, w, height()));
+    }
+}
 
 StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
     : QWidget(parent), m_platform_style(platformStyle)
@@ -73,6 +151,58 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
         layout->addLayout(enRow);
     }
     connect(m_enable_button, &QPushButton::clicked, this, &StakingPage::onEnableProduction);
+
+    // --- Your stake: what you hold, how it compares, when you may produce next ---
+    {
+        QGroupBox* mine = new QGroupBox(tr("Your stake"), this);
+        QVBoxLayout* v = new QVBoxLayout(mine);
+        QFormLayout* f = new QFormLayout();
+        m_my_stake = new QLabel(tr("…"), mine);
+        m_my_share = new QLabel(tr("…"), mine);
+        f->addRow(tr("Registered stake:"), m_my_stake);
+        f->addRow(tr("Share of network stake:"), m_my_share);
+        v->addLayout(f);
+        m_share_bar = new StakeShareBar(mine);
+        m_share_bar->setToolTip(tr("Your slice of all the stake registered on the network. Over time this is "
+                                   "roughly the share of blocks — and of the fees — you can expect to collect."));
+        v->addWidget(m_share_bar);
+
+        m_next_slot = new QLabel(tr("…"), mine);
+        m_next_slot->setWordWrap(true);
+        // The honest explanation for THIS chain: sortition is private, so there is
+        // no public queue and no "position out of N" to show.
+        m_next_slot->setToolTip(tr("Sequentia elects the producer of each block by private draw: from the previous "
+                                   "block and its Bitcoin anchor every staker derives a seed, then draws a slot with "
+                                   "their own secret key. Slot 0 may produce the block right away; each further slot "
+                                   "waits %1 more seconds, so the chain keeps moving even when the earlier slots stay "
+                                   "silent. More stake draws a low slot more often. Only you can compute your own "
+                                   "slot — and nobody can compute yours, which is what stops anyone from targeting "
+                                   "the next producer.").arg(g_pos_slot_interval));
+        QFormLayout* f2 = new QFormLayout();
+        f2->addRow(tr("Your draw for the next block:"), m_next_slot);
+        v->addLayout(f2);
+        layout->addWidget(mine);
+    }
+
+    // --- Block production over the recent chain ---
+    {
+        QGroupBox* prod = new QGroupBox(tr("Block production"), this);
+        QVBoxLayout* v = new QVBoxLayout(prod);
+        m_produced_count = new QLabel(tr("…"), prod);
+        m_produced_count->setWordWrap(true);
+        v->addWidget(m_produced_count);
+        m_stripe = new BlockStripe(prod);
+        m_stripe->setToolTip(tr("One tick per recent block, oldest on the left. The highlighted ones are yours."));
+        v->addWidget(m_stripe);
+        m_produced_fees = new QLabel(tr("…"), prod);
+        m_produced_fees->setWordWrap(true);
+        m_produced_fees->setToolTip(tr("Sequentia pays no block subsidy: a producer earns exactly the fees of the "
+                                       "blocks it produces, in whichever assets those fees were paid."));
+        v->addWidget(m_produced_fees);
+        m_last_produced = new QLabel(tr("…"), prod);
+        v->addWidget(m_last_produced);
+        layout->addWidget(prod);
+    }
 
     // --- Stake action ---
     QGroupBox* stakeGroup = new QGroupBox(tr("Stake %1").arg(BitcoinUnits::policyAssetTicker()), this);
@@ -118,6 +248,58 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
     refreshRow->addWidget(m_refresh_button);
     statusLayout->addLayout(refreshRow);
     layout->addWidget(statusGroup);
+
+    // --- Watch-only key: follow the staking wallet from anywhere, spend from nowhere ---
+    {
+        QGroupBox* wo = new QGroupBox(tr("Watch-only key"), this);
+        QVBoxLayout* v = new QVBoxLayout(wo);
+        QLabel* hint = new QLabel(tr("Master public key of this wallet. Import it into any watch-only wallet to follow "
+                                     "your funds and the fees you collect from your phone or another computer. It "
+                                     "cannot spend anything."), wo);
+        hint->setWordWrap(true);
+        v->addWidget(hint);
+        QHBoxLayout* row = new QHBoxLayout();
+        m_xpub = new QLineEdit(wo);
+        m_xpub->setReadOnly(true);
+        m_xpub->setPlaceholderText(tr("not available for this wallet type"));
+        row->addWidget(m_xpub);
+        m_xpub_copy = new QPushButton(tr("Copy"), wo);
+        row->addWidget(m_xpub_copy);
+        v->addLayout(row);
+        layout->addWidget(wo);
+        connect(m_xpub_copy, &QPushButton::clicked, this, [this] {
+            if (!m_xpub || m_xpub->text().isEmpty()) return;
+            QApplication::clipboard()->setText(m_xpub->text());
+            m_xpub_copy->setText(tr("Copied"));
+            QTimer::singleShot(1500, this, [this] { if (m_xpub_copy) m_xpub_copy->setText(tr("Copy")); });
+        });
+    }
+
+    // --- The blocks this node produced ---
+    {
+        QGroupBox* blocks = new QGroupBox(tr("Blocks produced by this node"), this);
+        QVBoxLayout* v = new QVBoxLayout(blocks);
+        m_blocks_summary = new QLabel(tr("…"), blocks);
+        m_blocks_summary->setWordWrap(true);
+        v->addWidget(m_blocks_summary);
+        m_blocks = new QTableWidget(0, 5, blocks);
+        m_blocks->setHorizontalHeaderLabels({tr("Height"), tr("Time"), tr("Wait"), tr("Transactions"), tr("Fees collected")});
+        m_blocks->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+        m_blocks->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+        m_blocks->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+        m_blocks->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+        m_blocks->horizontalHeader()->setSectionResizeMode(4, QHeaderView::Stretch);
+        m_blocks->verticalHeader()->setVisible(false);
+        m_blocks->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        m_blocks->setSelectionBehavior(QAbstractItemView::SelectRows);
+        // "Wait" is a fact of the block (its time minus its parent's), not the slot
+        // the producer drew: the drawn slot depended on the stake registry as it
+        // stood back then, which the node no longer has.
+        m_blocks->horizontalHeaderItem(2)->setToolTip(tr("How long after the previous block this one landed. A short "
+                                                         "wait means your draw came up early for that block."));
+        v->addWidget(m_blocks);
+        layout->addWidget(blocks);
+    }
 
     m_status = new QLabel(this);
     m_status->setWordWrap(true);
@@ -233,6 +415,188 @@ void StakingPage::refresh()
     m_summary->setText(tr("%1 registered staker(s) — updated at %2.")
                            .arg(keys.size())
                            .arg(QTime::currentTime().toString(Qt::TextDate)));
+
+    refreshOwnStake(reg);
+    refreshProducedBlocks();
+    refreshWatchOnlyKey();
+}
+
+void StakingPage::refreshOwnStake(const UniValue& registry)
+{
+    // Which stakes are ours: the registered keys this wallet controls. Also the
+    // key set that tells "was this block ours" further down.
+    m_my_pubkeys.clear();
+    uint64_t mine = 0, total = 0;
+    if (registry.isObject()) {
+        for (const std::string& pk : registry.getKeys()) {
+            const uint64_t w = registry[pk].isNum() ? (uint64_t)registry[pk].get_int64() : 0;
+            total += w;
+            // wpkh(<pubkey>) -> address -> does this wallet own it?
+            bool ok; QString err;
+            UniValue di(UniValue::VARR); di.push_back("wpkh(" + pk + ")");
+            UniValue info = callRpc("getdescriptorinfo", di, ok, err, /*wallet=*/false);
+            if (!ok || !info.exists("descriptor")) continue;
+            UniValue da(UniValue::VARR); da.push_back(info["descriptor"].get_str());
+            UniValue addrs = callRpc("deriveaddresses", da, ok, err, /*wallet=*/false);
+            if (!ok || !addrs.isArray() || addrs.empty()) continue;
+            UniValue ai(UniValue::VARR); ai.push_back(addrs[0].getValStr());
+            UniValue ainfo = callRpc("getaddressinfo", ai, ok, err);
+            if (!ok || !(ainfo.exists("ismine") && ainfo["ismine"].get_bool())) continue;
+            m_my_pubkeys.insert(pk);
+            mine += w;
+        }
+    }
+    const double share = total > 0 ? (double)mine / (double)total : 0.0;
+    if (m_my_stake) {
+        m_my_stake->setText(mine > 0
+            ? tr("%1 %2").arg(FormatWeight(mine), BitcoinUnits::policyAssetTicker())
+            : tr("none yet — stake below to start producing"));
+    }
+    if (m_my_share) {
+        m_my_share->setText(total > 0
+            ? tr("%1% of %2 %3 staked by %4 staker(s)")
+                  .arg(QString::number(share * 100.0, 'f', share < 0.01 ? 3 : 1),
+                       FormatWeight(total), BitcoinUnits::policyAssetTicker())
+                  .arg(registry.isObject() ? (int)registry.getKeys().size() : 0)
+            : tr("nothing is staked on the network yet"));
+    }
+    if (m_share_bar) m_share_bar->setShare(share);
+
+    // Our own draw for the next block. Only the running producer can answer this:
+    // the draw needs the staking secret key (see getposslot).
+    if (m_next_slot) {
+        bool ok; QString err;
+        UniValue slot = callRpc("getposslot", UniValue(UniValue::VARR), ok, err, /*wallet=*/false);
+        if (!ok || !slot.isObject()) {
+            m_next_slot->setText(tr("unavailable: %1").arg(err));
+        } else if (!(slot.exists("producing") && slot["producing"].get_bool())) {
+            m_next_slot->setText(tr("not producing — no draw is made for this node"));
+        } else if (!slot.exists("best_slot") || slot["best_slot"].get_int64() < 0) {
+            m_next_slot->setText(tr("no eligible stake — your keys are not in this block's draw"));
+        } else {
+            const int64_t s = slot["best_slot"].get_int64();
+            const int64_t opens = slot.exists("best_slot_opens") ? slot["best_slot_opens"].get_int64() : 0;
+            const int64_t wait = opens - QDateTime::currentSecsSinceEpoch();
+            if (s == 0) {
+                m_next_slot->setText(tr("slot 0 — you may produce block %1 as soon as it is due")
+                                         .arg(slot.exists("height") ? slot["height"].get_int() : 0));
+            } else {
+                m_next_slot->setText(wait > 0
+                    ? tr("slot %1 — you may produce block %2 in about %3 s, if no earlier slot does first")
+                          .arg(s)
+                          .arg(slot.exists("height") ? slot["height"].get_int() : 0)
+                          .arg(wait)
+                    : tr("slot %1 — your slot for block %2 is open now")
+                          .arg(s)
+                          .arg(slot.exists("height") ? slot["height"].get_int() : 0));
+            }
+        }
+    }
+}
+
+void StakingPage::refreshProducedBlocks()
+{
+    if (!m_blocks) return;
+    bool ok; QString err;
+    UniValue p(UniValue::VARR);
+    p.push_back(100);
+    UniValue res = callRpc("getposrecentblocks", p, ok, err, /*wallet=*/false);
+    if (!ok || !res.isObject() || !res["blocks"].isArray()) {
+        if (m_blocks_summary) m_blocks_summary->setText(tr("Recent blocks unavailable: %1").arg(err));
+        return;
+    }
+    const UniValue& blocks = res["blocks"];
+
+    // The RPC returns newest first; the stripe reads oldest-left.
+    std::vector<bool> stripe;
+    stripe.reserve(blocks.size());
+    for (int i = (int)blocks.size() - 1; i >= 0; --i) {
+        const std::string prod = blocks[i]["producer"].getValStr();
+        stripe.push_back(m_my_pubkeys.count(prod) > 0);
+    }
+    if (m_stripe) m_stripe->setBlocks(stripe);
+
+    m_blocks->setRowCount(0);
+    CAmountMap fees_total;
+    int produced = 0;
+    int last_height = -1;
+    int64_t last_time = 0;
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        const UniValue& b = blocks[i];
+        if (!m_my_pubkeys.count(b["producer"].getValStr())) continue;
+        ++produced;
+        if (last_height < 0) { last_height = b["height"].get_int(); last_time = b["time"].get_int64(); }
+
+        // Fees are keyed by asset id; sum them for the card above and render one
+        // "<amount> <TICKER>" per asset on the row.
+        QStringList parts;
+        if (b["fees"].isObject()) {
+            for (const std::string& asset_hex : b["fees"].getKeys()) {
+                const CAsset asset = GetAssetFromString(asset_hex);
+                if (asset.IsNull()) continue;
+                const CAmount amt = AmountFromValue(b["fees"][asset_hex]);
+                fees_total[asset] += amt;
+                parts << GUIUtil::formatAssetAmount(asset, amt, BitcoinUnits::BTC,
+                                                    BitcoinUnits::SeparatorStyle::STANDARD, /*include_asset_name=*/true);
+            }
+        }
+        const int row = m_blocks->rowCount();
+        m_blocks->insertRow(row);
+        m_blocks->setItem(row, 0, new QTableWidgetItem(QString::number(b["height"].get_int())));
+        m_blocks->setItem(row, 1, new QTableWidgetItem(
+            QDateTime::fromSecsSinceEpoch(b["time"].get_int64()).toString("yyyy-MM-dd HH:mm")));
+        m_blocks->setItem(row, 2, new QTableWidgetItem(tr("%1 s").arg(b["wait"].get_int64())));
+        m_blocks->setItem(row, 3, new QTableWidgetItem(QString::number(b["txs"].get_int())));
+        m_blocks->setItem(row, 4, new QTableWidgetItem(parts.isEmpty() ? QString::fromUtf8("\xE2\x80\x94")
+                                                                       : parts.join(" + ")));
+    }
+
+    const int scanned = res.exists("scanned") ? res["scanned"].get_int() : 0;
+    if (m_produced_count) {
+        m_produced_count->setText(produced > 0
+            ? tr("%1 of the last %2 blocks were produced by this node.").arg(produced).arg(scanned)
+            : tr("None of the last %1 blocks were produced by this node.").arg(scanned));
+    }
+    if (m_produced_fees) {
+        const QString sum = GUIUtil::formatMultiAssetAmountWithValue(
+            fees_total, BitcoinUnits::BTC, BitcoinUnits::SeparatorStyle::STANDARD,
+            m_wallet_model ? m_wallet_model->getOptionsModel()->getReferenceCurrency() : QString(), ", ");
+        m_produced_fees->setText(produced > 0 ? tr("Fees collected over them: %1").arg(sum)
+                                              : tr("Fees collected over them: none"));
+    }
+    if (m_last_produced) {
+        m_last_produced->setText(last_height >= 0
+            ? tr("Last block produced: %1, at %2").arg(last_height)
+                  .arg(QDateTime::fromSecsSinceEpoch(last_time).toString("yyyy-MM-dd HH:mm"))
+            : QString());
+        m_last_produced->setVisible(last_height >= 0);
+    }
+    if (m_blocks_summary) {
+        m_blocks_summary->setText(produced > 0
+            ? tr("Every block below paid you its fees. Blocks scanned: %1 (heights %2–%3).")
+                  .arg(scanned).arg(res["from_height"].get_int()).arg(res["to_height"].get_int())
+            : tr("Nothing yet in the last %1 blocks. With a small share of the stake this is normal — "
+                 "your draw comes up less often.").arg(scanned));
+    }
+}
+
+void StakingPage::refreshWatchOnlyKey()
+{
+    if (!m_xpub || !m_xpub->text().isEmpty()) return; // fetched once; it does not change
+    bool ok; QString err;
+    UniValue descs = callRpc("listdescriptors", UniValue(UniValue::VARR), ok, err);
+    if (!ok || !descs.isObject() || !descs["descriptors"].isArray()) return;
+    // The receiving descriptor carries the wallet's master public key; hand the
+    // whole descriptor over, since that is what a watch-only wallet imports.
+    const UniValue& arr = descs["descriptors"];
+    for (size_t i = 0; i < arr.size(); ++i) {
+        const UniValue& d = arr[i];
+        if (d.exists("internal") && d["internal"].get_bool()) continue;
+        if (!d.exists("desc")) continue;
+        m_xpub->setText(QString::fromStdString(d["desc"].get_str()));
+        m_xpub->setCursorPosition(0);
+        return;
+    }
 }
 
 void StakingPage::showEvent(QShowEvent* event)
