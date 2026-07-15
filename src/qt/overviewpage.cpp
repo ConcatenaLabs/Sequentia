@@ -188,12 +188,23 @@ OverviewPage::OverviewPage(const PlatformStyle *platformStyle, QWidget *parent) 
         seqLayout->addWidget(seqTitle);
         m_anchor_label = new QLabel(tr("Bitcoin anchor: ..."), seqFrame);
         m_anchor_label->setWordWrap(true);
+        m_anchor_label->setToolTip(tr("Every Sequentia block points at a recent Bitcoin block — its \"anchor\". "
+                                      "This borrows Bitcoin's ordering of history: to rewrite Sequentia you would "
+                                      "have to rewrite Bitcoin. When Bitcoin is settling a change of its own, new "
+                                      "Sequentia blocks pause briefly and resume on their own."));
         seqLayout->addWidget(m_anchor_label);
         m_staking_label = new QLabel(tr("Staking: ..."), seqFrame);
         m_staking_label->setWordWrap(true);
+        m_staking_label->setToolTip(tr("Staking makes this node a block producer: the more %1 you stake, the more "
+                                       "often you are chosen to produce a block and collect its fees. The stake "
+                                       "stays yours the whole time. Set it up in the Staking tab.")
+                                        .arg(BitcoinUnits::policyAssetTicker()));
         seqLayout->addWidget(m_staking_label);
         m_finality_label = new QLabel(tr("Finality: ..."), seqFrame);
         m_finality_label->setWordWrap(true);
+        m_finality_label->setToolTip(tr("A checkpoint of Sequentia's history is written on Bitcoin. Once it is "
+                                        "buried deep enough there, everything below it is final: it can no longer "
+                                        "change, no matter what happens on Bitcoin above it."));
         seqLayout->addWidget(m_finality_label);
         if (QVBoxLayout* top = qobject_cast<QVBoxLayout*>(layout())) {
             top->insertWidget(1, seqFrame); // after labelAlerts (index 0), above the balances row

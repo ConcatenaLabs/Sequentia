@@ -62,6 +62,9 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
     // One-click enable: starts the autonomous producer at runtime (no restart) for the
     // staking keys this wallet controls, and persists it so it resumes after a restart.
     m_enable_button = new QPushButton(tr("Start producing blocks"), this);
+    m_enable_button->setToolTip(tr("Turns block production on right now for the staking keys this wallet controls - "
+                                   "no config editing, no restart. From then on the node produces a block whenever "
+                                   "the committee elects it, collecting the fees, and resumes by itself after a restart."));
     m_enable_button->setVisible(false);
     {
         QHBoxLayout* enRow = new QHBoxLayout();
@@ -76,6 +79,10 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
     QFormLayout* stakeForm = new QFormLayout(stakeGroup);
     m_stake_amount = new QLineEdit(stakeGroup);
     m_stake_amount->setPlaceholderText(tr("amount of %1 (at or above the chain minimum, e.g. 50000)").arg(BitcoinUnits::policyAssetTicker()));
+    m_stake_amount->setToolTip(tr("What happens when you stake: this amount moves into a staking output that stays "
+                                  "yours. It starts counting as soon as the transaction confirms, block production "
+                                  "turns on automatically, and every block you produce pays you its fees. If you "
+                                  "later withdraw, the only cost is waiting out the unbonding period."));
     {
         QLocale lc(QLocale::C); lc.setNumberOptions(QLocale::RejectGroupSeparator);
         auto* v = new QDoubleValidator(0, 1e15, 8, m_stake_amount);
@@ -93,6 +100,8 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
 
     // --- Committee / registry status ---
     QGroupBox* statusGroup = new QGroupBox(tr("Stake registry"), this);
+    statusGroup->setToolTip(tr("Everyone staking on the network right now, and with how much weight. Your share of "
+                               "the total weight is, on average, the share of blocks (and fees) you produce."));
     QVBoxLayout* statusLayout = new QVBoxLayout(statusGroup);
     m_summary = new QLabel(statusGroup);
     statusLayout->addWidget(m_summary);

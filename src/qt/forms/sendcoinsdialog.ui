@@ -1095,7 +1095,7 @@ Note:  Since the fee is calculated on a per-byte basis, a fee rate of "100 atoms
               <string>Enable Replace-By-Fee</string>
              </property>
              <property name="toolTip">
-              <string>With Replace-By-Fee (BIP-125) you can increase a transaction's fee after it is sent. Without this, a higher fee may be recommended to compensate for increased transaction delay risk.</string>
+              <string>Keep this on. It lets you raise the fee later — right-click the payment in the Transactions tab and choose "Increase transaction fee" — if the network gets busy and it sits unconfirmed. Turning it off locks the fee: the only remedy left is a second transaction that spends the first (Speed up).</string>
              </property>
             </widget>
            </item>
