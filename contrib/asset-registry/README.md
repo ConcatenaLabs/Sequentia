@@ -71,7 +71,12 @@ That chain is cryptographic: the registrar cannot invent metadata for someone
 else's asset, and a registrar that lies can be caught by anyone repeating the
 same checks. The reference implementation is the
 [sequentia-registry](https://github.com/GracedEternalKingCabbageMan/sequentia-registry)
-server, which does exactly this and offers no manual override at all.
+server, which does exactly this on `POST /`, and confines its own operator
+override to seed entries marked `operator_verified` — recording
+`verified_by: "operator"` and leaving `verified_chain`/`verified_domain` false,
+so the audit trail never claims a proof that does not exist. If you set the flag
+by hand here, keep that distinction in mind: it is the difference between "the
+issuer proved it" and "the operator says so".
 
 The manual flag here exists for the cases that chain cannot serve:
 

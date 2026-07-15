@@ -163,11 +163,17 @@ $ curl -s https://sequentiatestnet.com/api/tx/<their issuance txid> | jq '.vin[0
 
 They commit to no contract and therefore to no domain. The `sequentia.io` shown
 against them in the registry is a label typed into its seed file, not something
-the chain attests; it was never binding. They cannot be verified by any code path
-in the registry — the contract check runs before the domain proof is even
-fetched — so publishing proof files for them changes nothing. They are seeded as
-`legacy: true, verified: false` and Core deliberately skips them.
+the chain attests; it was never binding. They cannot be verified cryptographically
+by any code path — the contract check runs before the domain proof is even
+fetched — so publishing proof files for them would change nothing.
 
-They are the reason this document exists. Anything issued from now on commits its
-contract properly and can be verified; those six cannot, and would have to be
-re-issued under new asset ids to get names in Core.
+They do show names in Core today, and it is worth understanding why: the public
+registry marks them `operator_verified`, which sets the `verified: 1` that Core
+reads while leaving `verified_chain` and `verified_domain` false, so the entry
+still admits that no proof exists. That is the registry operator vouching for
+assets it issued itself — a reasonable thing on a testnet whose demo assets
+predate the contract scheme, and not a model for a public network. Anything you
+issue from now on should earn `verified` the real way; these six are the exception
+that could only be fixed properly by re-issuing them under new asset ids.
+
+They are the reason this document exists.
