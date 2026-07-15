@@ -25,7 +25,8 @@ Reference (current):
 
 | Document | Contents |
 |---|---|
-| [`asset-contracts-and-verification.md`](asset-contracts-and-verification.md) | How an asset gets a name: the contract committed into the asset id at issuance, the domain proof, the registry, and why none of it can be added afterwards. Read this before issuing an asset. |
+| [`issuing-an-asset-guide.md`](issuing-an-asset-guide.md) | For issuers who are not web developers: finding your exact domain (the `www` question), what to type into Core, publishing the proof file on your site (WordPress included), checking it worked, and the usual questions. |
+| [`asset-contracts-and-verification.md`](asset-contracts-and-verification.md) | The mechanism underneath: the contract committed into the asset id at issuance, the canonical hash, the domain proof, the registry, and why none of it can be added afterwards. |
 
 Operating runbooks (current):
 
