@@ -74,6 +74,7 @@
 #include <QSystemTrayIcon>
 #include <QTimer>
 #include <QToolBar>
+#include <QToolButton>
 #include <QUrlQuery>
 #include <QVBoxLayout>
 #include <QWindow>
@@ -576,9 +577,16 @@ void BitcoinGUI::createToolBars()
 {
     if(walletFrame)
     {
-        QToolBar *toolbar = addToolBar(tr("Tabs toolbar"));
+        // A vertical sidebar rather than a strip across the top: the tab names read
+        // as a list, the window keeps its height for content, and there is room for
+        // the wallet selector to sit under the tabs instead of squeezing them.
+        QToolBar *toolbar = new QToolBar(tr("Tabs toolbar"), this);
+        addToolBar(Qt::LeftToolBarArea, toolbar);
         appToolBar = toolbar;
+        toolbar->setObjectName("appToolBar"); // styled as the sidebar in sequentia.css
         toolbar->setMovable(false);
+        toolbar->setOrientation(Qt::Vertical);
+        toolbar->setIconSize(QSize(18, 18));
         toolbar->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
         toolbar->addAction(overviewAction);
         toolbar->addAction(sendCoinsAction);
@@ -587,6 +595,15 @@ void BitcoinGUI::createToolBars()
         toolbar->addAction(assetsAction);
         toolbar->addAction(stakingAction);
         overviewAction->setChecked(true);
+        // Every tab button gets the sidebar's full width, so the list reads as a
+        // column of rows rather than a ragged stack of centred labels.
+        for (QAction* action : {overviewAction, sendCoinsAction, receiveCoinsAction,
+                                historyAction, assetsAction, stakingAction}) {
+            if (QToolButton* button = qobject_cast<QToolButton*>(toolbar->widgetForAction(action))) {
+                button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+                button->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+            }
+        }
 
 #ifdef ENABLE_WALLET
         QWidget *spacer = new QWidget();

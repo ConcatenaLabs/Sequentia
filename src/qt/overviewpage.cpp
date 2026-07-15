@@ -211,6 +211,22 @@ OverviewPage::OverviewPage(const PlatformStyle *platformStyle, QWidget *parent) 
         }
     }
 
+    // Sequentia: what the whole wallet is worth, above the per-asset rows. With
+    // several assets in play a bare list of amounts answers "how much of each",
+    // never "how much do I have" — that is this line's job.
+    {
+        m_total_value = new QLabel(ui->frame);
+        QFont f = m_total_value->font();
+        f.setPointSizeF(f.pointSizeF() * 1.9);
+        f.setBold(true);
+        m_total_value->setFont(f);
+        m_total_value->setToolTip(tr("Everything in this wallet, valued at the latest prices the node has. "
+                                     "Assets with no published price are not counted."));
+        m_total_value->setVisible(false);
+        // Row 1 of the panel: under the "Balances" title, above the amounts.
+        ui->verticalLayout_4->insertWidget(1, m_total_value);
+    }
+
     // Parent-chain (Bitcoin testnet4) balance, shown inside the Balances panel rather
     // than the network-status panel: a Sequentia receiving address is ALSO a Bitcoin
     // testnet4 address, so the same address can hold real tBTC. It is scanned from the
@@ -286,6 +302,18 @@ void OverviewPage::setBalance(const interfaces::WalletBalances& balances)
         const QString r = GUIUtil::formatMultiAssetReferenceApprox(m, refCur);
         return r.isEmpty() ? s : (s + "\n" + r);
     };
+
+    // The headline: everything spendable plus everything still confirming, valued
+    // in one number. Hidden in privacy mode (it would unmask the masked rows) and
+    // whenever no asset in the wallet has a price to value it with.
+    if (m_total_value) {
+        const CAmountMap all = walletModel->wallet().privateKeysDisabled()
+            ? balances.watch_only_balance + balances.unconfirmed_watch_only_balance + balances.immature_watch_only_balance
+            : balances.balance + balances.unconfirmed_balance + balances.immature_balance;
+        const QString total = m_privacy ? QString() : GUIUtil::formatMultiAssetReferenceApprox(all, refCur);
+        m_total_value->setText(total);
+        m_total_value->setVisible(!total.isEmpty());
+    }
 
     if (walletModel->wallet().isLegacy()) {
         if (walletModel->wallet().privateKeysDisabled()) {

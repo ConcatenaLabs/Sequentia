@@ -58,6 +58,10 @@ private:
     interfaces::WalletBalances m_balances;
     bool m_privacy{false};
 
+    // Sequentia: the wallet's whole worth in the chosen reference currency, shown
+    // above the per-asset rows (see setBalance).
+    QLabel *m_total_value{nullptr};
+
     // Sequentia network-status panel (Bitcoin anchor + staking / producer)
     QTimer *m_seq_status_timer{nullptr};
     QLabel *m_anchor_label{nullptr};

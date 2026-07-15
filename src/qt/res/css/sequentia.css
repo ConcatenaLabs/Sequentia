@@ -83,8 +83,57 @@ QMenu::separator {
     margin: 5px 8px;
 }
 
-/* ---------- toolbar (main navigation) ---------- */
+/* ---------- sidebar (main navigation) ---------- */
 
+QToolBar#appToolBar {
+    background-color: #0e0e11;
+    border: none;
+    border-right: 1px solid #26262c;
+    padding: 8px 6px;
+    spacing: 2px;
+    min-width: 176px;
+}
+
+/* The accent rail on the left edge marks the current tab; transparent elsewhere
+   keeps every label on the same x, so the list does not shift when it moves. */
+QToolBar#appToolBar QToolButton {
+    background: transparent;
+    border: none;
+    border-left: 3px solid transparent;
+    border-radius: 4px;
+    color: #9b988e;
+    font-weight: 500;
+    padding: 9px 12px;
+    text-align: left;
+}
+
+QToolBar#appToolBar QToolButton:hover {
+    background-color: rgba(255, 255, 255, 0.05);
+    color: #f2f0ea;
+}
+
+QToolBar#appToolBar QToolButton:checked {
+    background-color: rgba(245, 179, 1, 0.10);
+    border-left-color: #f5b301;
+    color: #f5b301;
+    font-weight: bold;
+}
+
+QToolBar#appToolBar QToolButton:disabled {
+    color: #6d6a62;
+}
+
+QToolBar#appToolBar QLabel {
+    color: #6d6a62;
+    font-size: 11px;
+    padding: 0 12px;
+}
+
+QToolBar#appToolBar QComboBox {
+    margin: 0 8px 6px 8px;
+}
+
+/* Other toolbars (the console's, for instance) keep a plain horizontal look. */
 QToolBar {
     background-color: #0e0e11;
     border: none;
@@ -100,7 +149,6 @@ QToolBar QToolButton {
     color: #9b988e;
     font-weight: 500;
     padding: 8px 14px;
-    margin: 0 1px;
 }
 
 QToolBar QToolButton:hover {
@@ -112,10 +160,6 @@ QToolBar QToolButton:checked {
     background-color: rgba(245, 179, 1, 0.10);
     color: #f5b301;
     font-weight: bold;
-}
-
-QToolBar QToolButton:disabled {
-    color: #6d6a62;
 }
 
 /* ---------- status bar ---------- */
