@@ -15,12 +15,14 @@
 #include <QAbstractButton>
 #include <QByteArray>
 #include <QCheckBox>
+#include <QDesktopServices>
 #include <QDoubleValidator>
 #include <QFile>
 #include <QFileDialog>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QHash>
 #include <QHeaderView>
 #include <QIntValidator>
 #include <QLabel>
@@ -33,6 +35,7 @@
 #include <QShowEvent>
 #include <QSpinBox>
 #include <QTableWidget>
+#include <QUrl>
 #include <QVBoxLayout>
 
 #include <vector>
@@ -89,8 +92,11 @@ AssetsPage::AssetsPage(const PlatformStyle* platformStyle, QWidget* parent)
     // wallet, for good, so the page asks for them rather than offering them.
     QLabel* issueIntro = new QLabel(
         tr("An asset's name, ticker and domain become part of its identity the moment you issue it, "
-           "and can never be changed afterwards. Take a moment over them."), issueGroup);
+           "and can never be changed afterwards. Take a moment over them. "
+           "<a href=\"https://github.com/GracedEternalKingCabbageMan/Sequentia/blob/master/doc/sequentia/issuing-an-asset-guide.md\">"
+           "Step-by-step guide, including how to put the file on your site</a>."), issueGroup);
     issueIntro->setWordWrap(true);
+    issueIntro->setOpenExternalLinks(true);
     issueOuter->addWidget(issueIntro);
 
     QFormLayout* issueForm = new QFormLayout();
@@ -119,10 +125,23 @@ AssetsPage::AssetsPage(const PlatformStyle* platformStyle, QWidget* parent)
 
     issueForm->addRow(tr("Name:"), m_issue_name);
     issueForm->addRow(tr("Ticker:"), m_issue_ticker);
-    issueForm->addRow(tr("Your domain:"), m_issue_domain);
+
+    // The www question decides whether the asset can ever be verified, and Core
+    // cannot answer it (it speaks no HTTPS, so it cannot see a redirect). The
+    // browser can, so hand the job to the browser rather than pretend.
+    m_issue_domain_open = new QPushButton(tr("Open my site"), issueGroup);
+    m_issue_domain_open->setToolTip(tr("Opens the domain exactly as you typed it, so you can see where you end up."));
+    QHBoxLayout* domainRow = new QHBoxLayout();
+    domainRow->addWidget(m_issue_domain, 1);
+    domainRow->addWidget(m_issue_domain_open);
+    issueForm->addRow(tr("Your domain:"), domainRow);
     QLabel* domainHint = new QLabel(
         tr("The website of whoever issues this asset - it is how wallets tell your asset apart from an "
-           "imitation. You will need to put a small file on it afterwards to prove the domain is yours."),
+           "imitation, so you will have to put a small file on it afterwards to prove it is yours."
+           "<br><br><b>Get this exactly right: it cannot be changed later.</b> Many sites answer to two "
+           "names, <tt>example.com</tt> and <tt>www.example.com</tt>, and only one of them will work. "
+           "Open your site, let it finish loading, and use whatever the address bar says <i>then</i> - "
+           "if it moved you, the place it moved you to is the right one."),
         issueGroup);
     domainHint->setWordWrap(true);
     issueForm->addRow(QString(), domainHint);
@@ -164,8 +183,8 @@ AssetsPage::AssetsPage(const PlatformStyle* platformStyle, QWidget* parent)
     // --- Issuances ---
     QGroupBox* issGroup = new QGroupBox(tr("Your issuances"), this);
     QVBoxLayout* issLayout = new QVBoxLayout(issGroup);
-    m_issuances = new QTableWidget(0, 3, issGroup);
-    m_issuances->setHorizontalHeaderLabels({tr("Asset"), tr("Reissuance token"), tr("Issued amount")});
+    m_issuances = new QTableWidget(0, 4, issGroup);
+    m_issuances->setHorizontalHeaderLabels({tr("Asset"), tr("Reissuance token"), tr("Issued amount"), tr("Registry")});
     m_issuances->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     m_issuances->verticalHeader()->setVisible(false);
     m_issuances->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -195,6 +214,7 @@ AssetsPage::AssetsPage(const PlatformStyle* platformStyle, QWidget* parent)
     connect(m_issue_button, &QPushButton::clicked, this, &AssetsPage::onIssue);
     connect(m_reissue_button, &QPushButton::clicked, this, &AssetsPage::onReissue);
     connect(m_proof_save_button, &QPushButton::clicked, this, &AssetsPage::onSaveProofFile);
+    connect(m_issue_domain_open, &QPushButton::clicked, this, &AssetsPage::onOpenDomain);
 }
 
 void AssetsPage::setModel(WalletModel* model)
@@ -266,6 +286,20 @@ void AssetsPage::refresh()
         setStatus(tr("Could not load balances: %1").arg(err), true);
     }
 
+    // Which assets does the registry vouch for? The node merges an entry only once
+    // the registry marks it verified, so an asset having a label here is exactly
+    // the confirmation an issuer is waiting for -- and its absence is the honest
+    // answer that the proof or the registration is still missing.
+    QHash<QString, QString> verified_labels;
+    UniValue labels = callWalletRpc("dumpassetlabels", UniValue(UniValue::VARR), ok, err);
+    if (ok && labels.isObject()) {
+        const std::vector<std::string>& keys = labels.getKeys();
+        for (size_t i = 0; i < keys.size(); ++i) {
+            verified_labels.insert(QString::fromStdString(labels[i].getValStr()),
+                                   QString::fromStdString(keys[i]));
+        }
+    }
+
     // Issuances: listissuances
     UniValue iss = callWalletRpc("listissuances", UniValue(UniValue::VARR), ok, err);
     if (ok && iss.isArray()) {
@@ -277,9 +311,22 @@ void AssetsPage::refresh()
             auto field = [&](const char* k) {
                 return e.exists(k) ? QString::fromStdString(e[k].getValStr()) : QString();
             };
-            m_issuances->setItem(row, 0, new QTableWidgetItem(field("asset")));
+            const QString asset = field("asset");
+            m_issuances->setItem(row, 0, new QTableWidgetItem(asset));
             m_issuances->setItem(row, 1, new QTableWidgetItem(field("token")));
             m_issuances->setItem(row, 2, new QTableWidgetItem(field("assetamount")));
+
+            QTableWidgetItem* registry = new QTableWidgetItem();
+            const auto found = verified_labels.constFind(asset);
+            if (found != verified_labels.constEnd()) {
+                registry->setText(found.value());
+                registry->setToolTip(tr("The asset registry vouches for this asset, so wallets show this name."));
+            } else {
+                registry->setText(tr("not registered yet"));
+                registry->setToolTip(tr("Wallets show this asset as a hex id. Publish the proof file on your "
+                                        "domain and register the asset, then this becomes its name."));
+            }
+            m_issuances->setItem(row, 3, registry);
         }
     }
 }
@@ -288,6 +335,24 @@ void AssetsPage::showEvent(QShowEvent* event)
 {
     QWidget::showEvent(event);
     if (m_wallet_model) refresh();
+}
+
+QString AssetsPage::issuerDomain() const
+{
+    // People paste a URL when asked for a domain; take the host out of it rather
+    // than refusing, but keep the result strict enough for the registry.
+    QString domain = m_issue_domain->text().trimmed().toLower();
+    domain.remove(QRegularExpression("^[a-z]+://"));
+    return domain.section('/', 0, 0);
+}
+
+void AssetsPage::onOpenDomain()
+{
+    const QString domain = issuerDomain();
+    if (domain.isEmpty()) { setStatus(tr("Type your website's address first."), true); m_issue_domain->setFocus(); return; }
+    QDesktopServices::openUrl(QUrl("https://" + domain));
+    setStatus(tr("Opened https://%1 - once it has loaded, read your browser's address bar. "
+                 "If it now shows a different name, that one is your domain, not this one.").arg(domain), false);
 }
 
 bool AssetsPage::domainResolves(const QString& domain) const
@@ -322,12 +387,7 @@ void AssetsPage::onIssue()
     const QString ticker = m_issue_ticker->text().trimmed();
     const QString amount = m_issue_amount->text().trimmed();
     const QString tokens = m_issue_tokens->text().trimmed();
-
-    // People paste a URL when asked for a domain; take the host out of it rather
-    // than refusing, but keep the result strict enough for the registry.
-    QString domain = m_issue_domain->text().trimmed().toLower();
-    domain.remove(QRegularExpression("^[a-z]+://"));
-    domain = domain.section('/', 0, 0);
+    const QString domain = issuerDomain();
 
     if (name.isEmpty()) { setStatus(tr("Give the asset a name. It cannot be added later."), true); m_issue_name->setFocus(); return; }
     if (ticker.isEmpty()) { setStatus(tr("Give the asset a ticker, such as GOLD. It cannot be added later."), true); m_issue_ticker->setFocus(); return; }
@@ -390,11 +450,22 @@ void AssetsPage::onIssue()
     const QString proof_url = r.exists("proof_url") ? QString::fromStdString(r["proof_url"].get_str()) : QString();
     if (!m_proof_line.isEmpty()) {
         m_proof_explainer->setText(
-            tr("<b>One step left.</b> %1 is issued, but wallets will show it as a hex id until you prove "
-               "that %2 is yours.<br><br>Put a file containing exactly this line:<br><br>"
-               "<tt>%3</tt><br><br>at this address, served as plain text:<br><br><tt>%4</tt><br><br>"
-               "Then ask an asset registry to record the asset. Save the file with the button below.")
-                .arg(ticker.toHtmlEscaped(), domain.toHtmlEscaped(), m_proof_line.toHtmlEscaped(), proof_url.toHtmlEscaped()));
+            tr("<b>%1 exists. Two steps left before wallets show its name.</b>"
+               "<br><br><b>1. Put a file on your website.</b> Save it with the button below, then upload it "
+               "to a folder called <tt>.well-known</tt> at the very top of %2 - the folder that holds your "
+               "site itself, not your media or uploads folder. Do not rename the file. When it is right, "
+               "opening this in a browser shows one line of plain text and nothing else:"
+               "<br><br><tt>%3</tt>"
+               "<br><br>If the browser downloads the file instead of showing it, your web server is not "
+               "calling it text; the guide has the two-line fix for that."
+               "<br><br><b>2. Register the asset</b> with an asset registry, which will then read that file. "
+               "Keep the asset id above - and if you use the RPC, keep the contract it returned too: the "
+               "chain stores only its fingerprint, so nobody can reconstruct it for you."
+               "<br><br>You will know it worked when the Registry column below stops saying "
+               "<i>not registered yet</i>. <a href=\"%4\">The step-by-step guide</a> covers uploading on "
+               "WordPress and what to do when it does not work.")
+                .arg(ticker.toHtmlEscaped(), domain.toHtmlEscaped(), proof_url.toHtmlEscaped(),
+                     "https://github.com/GracedEternalKingCabbageMan/Sequentia/blob/master/doc/sequentia/issuing-an-asset-guide.md"));
         m_proof_explainer->setVisible(true);
         m_proof_save_button->setVisible(true);
     }

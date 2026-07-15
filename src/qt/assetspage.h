@@ -47,6 +47,7 @@ private Q_SLOTS:
     void onIssue();
     void onReissue();
     void onSaveProofFile();
+    void onOpenDomain();
 
 private:
     WalletModel* m_wallet_model{nullptr};
@@ -59,6 +60,7 @@ private:
     QLineEdit* m_issue_name{nullptr};
     QLineEdit* m_issue_ticker{nullptr};
     QLineEdit* m_issue_domain{nullptr};
+    QPushButton* m_issue_domain_open{nullptr};
     QSpinBox* m_issue_precision{nullptr};
     QLineEdit* m_issue_amount{nullptr};
     QLineEdit* m_issue_tokens{nullptr};
@@ -88,6 +90,8 @@ private:
     bool confirmIssuance(const QString& name, const QString& ticker, const QString& domain);
     //! Warn if the issuer domain does not resolve, since a typo cannot be undone.
     bool domainResolves(const QString& domain) const;
+    //! The domain as it will be committed: no scheme, no path, lower case.
+    QString issuerDomain() const;
 };
 
 #endif // BITCOIN_QT_ASSETSPAGE_H
