@@ -12,6 +12,8 @@
 
 #include <qt/guiutil.h>
 
+#include <QColor>
+#include <QPalette>
 #include <QPushButton>
 
 CreateWalletDialog::CreateWalletDialog(QWidget* parent) :
@@ -21,10 +23,23 @@ CreateWalletDialog::CreateWalletDialog(QWidget* parent) :
     ui->setupUi(this);
     ui->buttonBox->button(QDialogButtonBox::Ok)->setText(tr("Create"));
     ui->buttonBox->button(QDialogButtonBox::Ok)->setEnabled(false);
+    ui->buttonBox->button(QDialogButtonBox::Ok)->setToolTip(tr("Type a name for the wallet first."));
     ui->wallet_name_line_edit->setFocus(Qt::ActiveWindowFocusReason);
 
-    connect(ui->wallet_name_line_edit, &QLineEdit::textEdited, [this](const QString& text) {
-        ui->buttonBox->button(QDialogButtonBox::Ok)->setEnabled(!text.isEmpty());
+    // Dim the placeholder so it reads as a hint, not a filled-in value. The dark
+    // theme's default placeholder colour sits too close to the text colour, which
+    // made the empty field look like it already held the name "Wallet" -- with
+    // Create greyed out and no hint as to why.
+    {
+        QPalette pal = ui->wallet_name_line_edit->palette();
+        pal.setColor(QPalette::PlaceholderText, QColor(0x6b, 0x6b, 0x72));
+        ui->wallet_name_line_edit->setPalette(pal);
+    }
+
+    connect(ui->wallet_name_line_edit, &QLineEdit::textChanged, [this](const QString& text) {
+        // textChanged (not textEdited) so a name set programmatically -- e.g. from
+        // an external signer -- also enables Create.
+        ui->buttonBox->button(QDialogButtonBox::Ok)->setEnabled(!text.trimmed().isEmpty());
     });
 
     connect(ui->encrypt_wallet_checkbox, &QCheckBox::toggled, [this](bool checked) {
