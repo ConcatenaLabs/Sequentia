@@ -354,9 +354,22 @@ class PriceServer:
         return new_rate, ("admitted (forced)" if forced else "admitted")
 
     def _denominate(self, raw, ticker_of_id):
-        """Optionally re-express rates relative to a reference Sequentia asset
-        (advanced; default off). With no reference, rates are published in the
-        API's quote currency directly (the simple model)."""
+        """Optionally re-express rates relative to a reference. Two modes:
+          - reference_price_usd: a FIXED ABSTRACT numeraire (a value in the API's
+            quote currency that matches NO token). Every asset — including the
+            policy asset — floats against it; nothing is a privileged 1:1 anchor.
+            This is the no-privileged-coin model (first principle #3/#4): set it to
+            the policy asset's price at config time to keep current fee valuations,
+            and the policy asset then floats like any other asset as prices move.
+          - reference_asset_label: pins a Sequentia TOKEN to COIN (legacy; that
+            token IS privileged as the 1:1 anchor).
+        With neither, rates are published in the API's quote currency directly."""
+        ref_price = self.cfg.get("reference_price_usd")
+        if ref_price:
+            ref_rate = round(float(ref_price) * COIN)
+            if ref_rate <= 0:
+                return dict(raw)
+            return {aid: max(1, round(r * COIN / ref_rate)) for aid, r in raw.items()}
         ref_label = self.cfg.get("reference_asset_label")
         if not ref_label:
             return dict(raw)
