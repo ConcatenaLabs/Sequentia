@@ -95,8 +95,11 @@ QToolBar#appToolBar {
 }
 
 /* The accent rail on the left edge marks the current tab; transparent elsewhere
-   keeps every label on the same x, so the list does not shift when it moves. */
-QToolBar#appToolBar QToolButton {
+   keeps every label on the same x, so the list does not shift when it moves.
+   The tabs are QPushButtons (see createToolBars): unlike QToolButton, a
+   QPushButton honours text-align:left here, so icon+label sit flush left rather
+   than centred as a group. */
+QToolBar#appToolBar QPushButton {
     background: transparent;
     border: none;
     border-left: 3px solid transparent;
@@ -107,19 +110,19 @@ QToolBar#appToolBar QToolButton {
     text-align: left;
 }
 
-QToolBar#appToolBar QToolButton:hover {
+QToolBar#appToolBar QPushButton:hover {
     background-color: rgba(255, 255, 255, 0.05);
     color: #f2f0ea;
 }
 
-QToolBar#appToolBar QToolButton:checked {
+QToolBar#appToolBar QPushButton:checked {
     background-color: rgba(245, 179, 1, 0.10);
     border-left-color: #f5b301;
     color: #f5b301;
     font-weight: bold;
 }
 
-QToolBar#appToolBar QToolButton:disabled {
+QToolBar#appToolBar QPushButton:disabled {
     color: #6d6a62;
 }
 

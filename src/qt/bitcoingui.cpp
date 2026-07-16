@@ -81,6 +81,8 @@
 #include <QSystemTrayIcon>
 #include <QTimer>
 #include <QToolBar>
+#include <QButtonGroup>
+#include <QPushButton>
 #include <QToolButton>
 #include <QUrlQuery>
 #include <QVBoxLayout>
@@ -609,22 +611,34 @@ void BitcoinGUI::createToolBars()
         toolbar->setMovable(false);
         toolbar->setOrientation(Qt::Vertical);
         toolbar->setIconSize(QSize(18, 18));
-        toolbar->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-        toolbar->addAction(overviewAction);
-        toolbar->addAction(sendCoinsAction);
-        toolbar->addAction(receiveCoinsAction);
-        toolbar->addAction(historyAction);
-        toolbar->addAction(assetsAction);
-        toolbar->addAction(stakingAction);
         overviewAction->setChecked(true);
-        // Every tab button gets the sidebar's full width, so the list reads as a
-        // column of rows rather than a ragged stack of centred labels.
+        // The tabs are QPushButtons, not the QToolButtons addAction() would make.
+        // A QToolButton centres its icon+text as a group, so short labels float in
+        // the middle of a full-width button and the column reads ragged; Qt gives
+        // no way to left-align that under an active stylesheet (a QProxyStyle is
+        // bypassed by QStyleSheetStyle). A QPushButton honours `text-align: left`
+        // in the stylesheet, so the icons and labels line up. Each button mirrors
+        // its action: clicking it triggers the action (page switch), and the
+        // action toggling back keeps the button's checked state in sync.
+        QButtonGroup* navGroup = new QButtonGroup(this);
+        navGroup->setExclusive(true);
         for (QAction* action : {overviewAction, sendCoinsAction, receiveCoinsAction,
                                 historyAction, assetsAction, stakingAction}) {
-            if (QToolButton* button = qobject_cast<QToolButton*>(toolbar->widgetForAction(action))) {
-                button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-                button->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-            }
+            // Recolour the icon to the muted text colour: the action's icon is
+            // single-colour amber, and a QPushButton shows it at full strength for
+            // every state, which made every tab look selected. Amber is left to
+            // mark the current tab via its rail and label.
+            QPushButton* button = new QPushButton(platformStyle->TextColorIcon(action->icon()), action->text(), toolbar);
+            button->setCheckable(true);
+            button->setChecked(action->isChecked());
+            button->setIconSize(QSize(18, 18));
+            button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+            button->setCursor(Qt::PointingHandCursor);
+            button->setToolTip(action->toolTip());
+            navGroup->addButton(button);
+            toolbar->addWidget(button);
+            connect(button, &QPushButton::clicked, action, &QAction::trigger);
+            connect(action, &QAction::toggled, button, &QPushButton::setChecked);
         }
 
 #ifdef ENABLE_WALLET
