@@ -151,7 +151,12 @@ AssetsPage::AssetsPage(const PlatformStyle* platformStyle, QWidget* parent)
            "so you will need to put a small file on it afterwards to prove it is yours."),
         issueGroup);
     domainHint->setWordWrap(true);
-    issueForm->addRow(QString(), domainHint);
+    // Span the full form width as its own row. In the field column a wordwrapped
+    // QLabel is clipped -- QFormLayout under-computes its heightForWidth there, so
+    // only the top of the text shows (it read as stray dots above the next row).
+    // A spanning row gets the full width and the correct height.
+    domainHint->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
+    issueForm->addRow(domainHint);
     issueForm->addRow(tr("Decimal places:"), m_issue_precision);
     issueForm->addRow(tr("Amount of units:"), m_issue_amount);
     issueForm->addRow(tr("Reissuance tokens:"), m_issue_tokens);
