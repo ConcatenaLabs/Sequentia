@@ -22,6 +22,9 @@
     "format": "sequentia"
   },
 
+  "_reference_comment": "The numeraire the published rates are denominated in, as a price in the source's quote_currency. 1.0 = USD is the reference unit: a $1 stablecoin (USDX) gets rate 1e8, and the native token FLOATS against it. The node does NOT force the native/policy asset to be the 1:1 reference -- it is 1:1 only when UNLISTED, and the price server publishes it explicitly like any asset (ConvertAmountToValue in src/exchangerates.cpp), so the numeraire is free. Set this to the native token's own price to make IT the 1:1 reference instead. A local real-price feed is contrib/price-server/mock-price-api.py (Yahoo Finance; tBTC=BTC/USD, EURX/GOLD/SILVR/OILX real, tSEQ mocked at 0.375).",
+  "reference_price_usd": 1.0,
+
   "manual_prices": {
     "_comment": "Fixed prices (in the quote currency) for assets the market source does not cover: {\"TICKER\": 0.5} means 1 unit = 0.5 USD. Used only when an asset has no market price; such an asset is admitted at that rate (always_reject still wins)."
   },
