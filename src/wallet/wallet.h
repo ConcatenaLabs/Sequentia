@@ -75,8 +75,19 @@ std::unique_ptr<WalletDatabase> MakeWalletDatabase(const std::string& name, cons
 
 //! -paytxfee default
 constexpr CAmount DEFAULT_PAY_TX_FEE = 0;
-//! -fallbackfee default
-static const CAmount DEFAULT_FALLBACK_FEE = 0; // ELEMENTS: no fallback fee
+//! -fallbackfee default.
+//! SEQUENTIA: unlike upstream Elements (which disables the fallback, 0), a low-volume or
+//! empty chain has no smart-fee data, so the wallet would otherwise fall back to exactly the
+//! mempool/relay floor (DEFAULT_TRANSACTION_MINFEE, 0.1 atoms/vB). Under the any-asset fee
+//! market the node re-values every fee through the (floating) exchange rate, so a tx paying
+//! *exactly* the floor drops below block inclusion (DEFAULT_BLOCK_MIN_TX_FEE) the moment its
+//! fee asset ticks below 1e8 — and stalls until it recovers (observed on testnet: issuance
+//! txs sat unconfirmed while the committee produced empty blocks). A non-zero fallback of
+//! 2000 atoms/kvB (2 atoms/vB, ~20x the floor) gives the same headroom the web wallet already
+//! carries (DEFAULT_FEERATE), so a fallback-fee'd tx clears inclusion even under normal
+//! rate float. It only applies when smart-fee estimation has no data; a busy chain uses the
+//! estimator as before.
+static const CAmount DEFAULT_FALLBACK_FEE = 2000;
 //! -discardfee default
 static const CAmount DEFAULT_DISCARD_FEE = 10000;
 //! -mintxfee default
