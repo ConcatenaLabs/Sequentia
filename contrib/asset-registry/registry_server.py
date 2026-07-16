@@ -34,22 +34,32 @@ import hashlib
 import hmac
 import html
 import http.server
+import ipaddress
 import json
 import logging
 import os
 import re
 import secrets
+import socket
+import struct
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
 log = logging.getLogger("asset-registry")
 
 DEFAULT_UPSTREAM = "https://sequentiatestnet.com/registry/index.minimal.json"
+DEFAULT_EXPLORER = "https://sequentiatestnet.com/api"
 DEFAULT_NAME = "Sequentia Asset Registry"
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
+PUBKEY_HEX = re.compile(r"^[0-9a-f]{66}$")   # 33-byte compressed
+XONLY_HEX = re.compile(r"^[0-9a-f]{64}$")    # 32-byte x-only (OpenAMP enclave keys)
+TICKER_RE = re.compile(r"^[A-Za-z0-9.\-]{1,12}$")
+DOMAIN_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9](-?[a-z0-9])*\.)+[a-z]{2,}$", re.I)
+PLACEHOLDER_PUBKEY = re.compile(r"^(?:[0-9a-f]{2})?0{64}$", re.I)
 
 
 def http_get_json(url, timeout):
@@ -70,6 +80,315 @@ def _entry_ok(e):
     return (isinstance(e, list) and len(e) >= 5
             and isinstance(e[0], str) and isinstance(e[1], str) and isinstance(e[2], str)
             and isinstance(e[3], int) and 0 <= e[3] <= 8 and e[4] in (0, 1))
+
+
+# ---------------------------------------------------------------------------
+# Registration API: earning `verified` instead of being granted it.
+#
+# The admin UI's verified checkbox is the operator's word. This is the other
+# way, the one that needs no trust in the operator at all:
+#
+#   1. the asset's metadata lives in a "contract" whose SHA256 the issuance
+#      committed on-chain, and from which the asset id is derived, so nobody can
+#      register metadata for someone else's asset;
+#   2. the issuer publishes a proof at their contract's domain, so nobody can
+#      claim a domain they do not control.
+#
+# Every rule below deliberately mirrors the reference implementation
+# (sequentia-registry, server.js). An asset accepted here must be an asset that
+# registry would accept and vice versa, or "run your own registry" means running
+# an incompatible one.
+# ---------------------------------------------------------------------------
+
+class ApiError(Exception):
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+def _canonical_json(v):
+    """Canonical JSON: keys sorted, no insignificant whitespace.
+
+    json.dumps with sort_keys and tight separators matches JavaScript's
+    JSON.stringify for the values a contract may carry (strings, integers).
+    ensure_ascii must stay off: JSON.stringify emits non-ASCII raw, and one
+    escaped character would be a different hash, hence a different asset id.
+    """
+    return json.dumps(v, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _contract_hash(contract):
+    return hashlib.sha256(_canonical_json(contract).encode("utf-8")).hexdigest()
+
+
+# --- asset id derivation ---------------------------------------------------
+# Elements/Sequentia derive the asset id from (issuance prevout, contract_hash)
+# through a "fast" merkle tree whose node hash is the SHA256 *midstate* of the
+# two 32-byte children: one 64-byte block, no length padding, no finalisation.
+# hashlib cannot express that, so the compression function is spelled out here.
+# See src/issuance.cpp (GenerateAssetEntropy/CalculateAsset) and
+# src/primitives/txwitness.cpp (MerkleHash_Sha256Midstate).
+
+_SHA256_K = (
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+)
+_SHA256_IV = (0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+              0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19)
+_M32 = 0xffffffff
+
+
+def _rotr(x, n):
+    return ((x >> n) | (x << (32 - n))) & _M32
+
+
+def _sha256_midstate(block64):
+    """Compress one 64-byte block and return the raw chaining state (32 bytes)."""
+    assert len(block64) == 64
+    w = list(struct.unpack(">16I", block64)) + [0] * 48
+    for i in range(16, 64):
+        s0 = _rotr(w[i - 15], 7) ^ _rotr(w[i - 15], 18) ^ (w[i - 15] >> 3)
+        s1 = _rotr(w[i - 2], 17) ^ _rotr(w[i - 2], 19) ^ (w[i - 2] >> 10)
+        w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & _M32
+    a, b, c, d, e, f, g, h = _SHA256_IV
+    for i in range(64):
+        S1 = _rotr(e, 6) ^ _rotr(e, 11) ^ _rotr(e, 25)
+        ch = (e & f) ^ ((~e & _M32) & g)
+        t1 = (h + S1 + ch + _SHA256_K[i] + w[i]) & _M32
+        S0 = _rotr(a, 2) ^ _rotr(a, 13) ^ _rotr(a, 22)
+        maj = (a & b) ^ (a & c) ^ (b & c)
+        t2 = (S0 + maj) & _M32
+        h, g, f, e, d, c, b, a = g, f, e, (d + t1) & _M32, c, b, a, (t1 + t2) & _M32
+    return struct.pack(">8I", *[(iv + v) & _M32 for iv, v in zip(_SHA256_IV, (a, b, c, d, e, f, g, h))])
+
+
+def _merkle_node(left, right):
+    return _sha256_midstate(left + right)
+
+
+def _derive_asset_id(prevout_txid, prevout_vout, contract_hash_hex):
+    """The asset id the chain would derive, or None if the inputs are malformed.
+
+    leaf    = SHA256d(COutPoint), COutPoint = txid(internal order) || vout(LE32)
+    entropy = merkle(leaf, contract_hash)
+    asset   = merkle(entropy, 0^32), printed reversed like every uint256
+    """
+    if not HEX64.match(prevout_txid or "") or not HEX64.match(contract_hash_hex or ""):
+        return None
+    if not isinstance(prevout_vout, int) or not 0 <= prevout_vout <= 0xffffffff:
+        return None
+    # explorers print txids reversed; COutPoint serialises the internal order
+    outpoint = bytes.fromhex(prevout_txid)[::-1] + struct.pack("<I", prevout_vout)
+    leaf = hashlib.sha256(hashlib.sha256(outpoint).digest()).digest()
+    entropy = _merkle_node(leaf, bytes.fromhex(contract_hash_hex))
+    asset_internal = _merkle_node(entropy, b"\x00" * 32)
+    return asset_internal[::-1].hex()
+
+
+# --- contract validation ---------------------------------------------------
+
+def _validate_contract(c):
+    """Liquid-compatible shape: {name, ticker, precision, entity:{domain},
+    issuer_pubkey, version}. Returns a list of problems, empty if good."""
+    errs = []
+    if not isinstance(c, dict):
+        return ["contract must be an object"]
+    name = c.get("name")
+    if not isinstance(name, str) or not 1 <= len(name) <= 255:
+        errs.append("name: 1..255 chars")
+    if not isinstance(c.get("ticker"), str) or not TICKER_RE.match(c["ticker"]):
+        errs.append("ticker: 1..12 of [A-Za-z0-9.-]")
+    if not isinstance(c.get("precision"), int) or isinstance(c.get("precision"), bool) \
+            or not 0 <= c["precision"] <= 8:
+        errs.append("precision: integer 0..8")
+    entity = c.get("entity")
+    if not isinstance(entity, dict) or not isinstance(entity.get("domain"), str) \
+            or not DOMAIN_RE.match(entity["domain"]):
+        errs.append("entity.domain: valid domain")
+    else:
+        for k in entity:
+            if k not in ("domain", "issuer"):
+                errs.append("unexpected entity field: %s" % k)
+        if "issuer" in entity and not isinstance(entity["issuer"], str):
+            errs.append("entity.issuer: string")
+    pk = c.get("issuer_pubkey")
+    if not isinstance(pk, str) or not (PUBKEY_HEX.match(pk) or XONLY_HEX.match(pk)):
+        errs.append("issuer_pubkey: 33-byte compressed or 32-byte x-only hex")
+    elif PLACEHOLDER_PUBKEY.match(pk):
+        errs.append("issuer_pubkey: must not have an all-zeros X coordinate (placeholder)")
+    if c.get("version") != 0:
+        errs.append("version: must be 0")
+    # Unknown top-level keys are refused so the canonical hash is well defined.
+    allowed = {"name", "ticker", "precision", "entity", "issuer_pubkey", "version", "openamp", "operator"}
+    for k in c:
+        if k not in allowed:
+            errs.append("unexpected field: %s" % k)
+    return errs
+
+
+# --- fetching --------------------------------------------------------------
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse to follow redirects.
+
+    The reference registry uses a bare Node http.get, which does not follow
+    them, so a domain that answers the proof with a 301 (to www, say) fails
+    there. Following them here would accept assets that registry rejects.
+    """
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _assert_public_host(host):
+    """Refuse to fetch loopback/private/link-local/metadata addresses, so an
+    issuer domain cannot point this server at things behind its own firewall."""
+    try:
+        infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+    except OSError:
+        raise ApiError(400, "dns lookup failed for %s" % host)
+    if not infos:
+        raise ApiError(400, "dns lookup empty for %s" % host)
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            raise ApiError(400, "unparseable address for %s" % host)
+        if not ip.is_global:
+            raise ApiError(400, "%s resolves to a non-public address" % host)
+
+
+def _proof_text(domain, asset_id):
+    return "Authorize linking the domain name %s to the Sequentia asset %s" % (domain, asset_id)
+
+
+def _verify_domain_proof(domain, asset_id, timeout):
+    url = "https://%s/.well-known/sequentia-asset-proof-%s" % (domain, asset_id)
+    _assert_public_host(domain)
+    opener = urllib.request.build_opener(_NoRedirect)
+    req = urllib.request.Request(url, headers={"User-Agent": "sequentia-asset-registry/0.1"})
+    try:
+        with opener.open(req, timeout=timeout) as resp:
+            ctype = resp.headers.get_content_type()
+            body = resp.read(1_000_000).decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        raise ApiError(400, "domain proof not found at %s (HTTP %d)" % (url, e.code))
+    except Exception as e:
+        raise ApiError(400, "domain proof fetch failed: %s" % e)
+    # text/plain is required so nobody can smuggle the line inside an HTML page
+    # (a user-content page, say) they do not actually control.
+    if ctype != "text/plain":
+        raise ApiError(400, "domain proof at %s must be served as text/plain (got '%s')" % (url, ctype or "none"))
+    # The whole body must BE the line, not merely contain it: a substring match
+    # would let attacker-influenced content pass.
+    if body.strip() != _proof_text(domain, asset_id):
+        raise ApiError(400, "domain proof at %s must contain exactly the authorization line and nothing else" % url)
+    return url
+
+
+def _onchain_contract(asset_id, explorer, timeout):
+    """{contract_hash (natural order), prevout_txid, prevout_vout, issuance_txid}."""
+    base = explorer.rstrip("/")
+    try:
+        asset = http_get_json("%s/asset/%s" % (base, asset_id), timeout)
+    except Exception as e:
+        raise ApiError(400, "asset %s not found on chain (%s)" % (asset_id, e))
+    itx = asset.get("issuance_txin") or {}
+    if not itx.get("txid"):
+        raise ApiError(400, "asset has no issuance on chain")
+    try:
+        tx = http_get_json("%s/tx/%s" % (base, itx["txid"]), timeout)
+    except Exception as e:
+        raise ApiError(400, "issuance tx not found (%s)" % e)
+    try:
+        vin = tx["vin"][itx["vin"]]
+    except Exception:
+        raise ApiError(400, "issuance input not found in issuance tx")
+    iss = vin.get("issuance")
+    if not iss:
+        raise ApiError(400, "issuance input not found in issuance tx")
+    if iss.get("is_reissuance"):
+        raise ApiError(400, "issuance input is a reissuance, not the initial issuance")
+    ch = iss.get("contract_hash") or ""
+    if not HEX64.match(ch):
+        raise ApiError(400, "issuance input has no valid contract_hash on chain")
+    # Explorers print the contract_hash as a uint256, i.e. reversed. The
+    # commitment is SHA256(canonical contract) in natural order, so put it back.
+    return {
+        "contract_hash": bytes.fromhex(ch)[::-1].hex(),
+        "prevout_txid": vin.get("txid"),
+        "prevout_vout": vin.get("vout"),
+        "issuance_txid": itx["txid"],
+    }
+
+
+def register_asset(reg, asset_id, contract):
+    """Verify an asset against the chain and its issuer's domain, then record it.
+
+    Raises ApiError with a message meant to be read by whoever is trying to
+    register: every rejection here is something they can go and fix.
+    """
+    asset_id = str(asset_id or "").lower()
+    if not HEX64.match(asset_id):
+        raise ApiError(400, "asset_id: 64-hex")
+    errs = _validate_contract(contract)
+    if errs:
+        raise ApiError(400, "invalid contract: " + "; ".join(errs))
+
+    ch = _contract_hash(contract)
+    ticker = contract["ticker"]
+    domain = contract["entity"]["domain"]
+
+    # Tickers are first-come and case-insensitive; refuse to let a later
+    # registration squat one somebody already holds.
+    for aid, e in reg.merged().items():
+        if aid != asset_id and isinstance(e, list) and len(e) >= 2 \
+                and str(e[1]).lower() == ticker.lower():
+            raise ApiError(409, "ticker '%s' is already registered to a different asset" % ticker)
+
+    explorer = reg.cfg.get("explorer_url", DEFAULT_EXPLORER)
+    if not explorer:
+        raise ApiError(503, "this registry has no explorer configured, so it cannot verify assets "
+                            "against the chain; the operator must set explorer_url")
+    timeout = int(reg.cfg.get("proof_timeout", 15) or 15)
+
+    oc = _onchain_contract(asset_id, explorer, timeout)
+    if oc["contract_hash"] != ch:
+        raise ApiError(400, "contract does not match on-chain commitment: on-chain contract_hash=%s, "
+                            "SHA256(contract)=%s. The asset must have been issued with this exact contract."
+                            % (oc["contract_hash"], ch))
+    # Re-derive the id from the issuance as well, so a wrong or hostile explorer
+    # answer cannot decouple the asset id from the contract we just checked.
+    derived = _derive_asset_id(oc["prevout_txid"], oc["prevout_vout"], oc["contract_hash"])
+    if derived is None:
+        raise ApiError(400, "could not re-derive asset id from issuance prevout (incomplete chain data)")
+    if derived != asset_id:
+        raise ApiError(400, "asset id does not match its on-chain derivation: derived=%s, submitted=%s"
+                            % (derived, asset_id))
+
+    proof_url = None
+    if reg.cfg.get("require_domain_proof", True):
+        proof_url = _verify_domain_proof(domain, asset_id, timeout)
+
+    reg.set_entry(asset_id, [domain, ticker, contract["name"], int(contract["precision"]), 1])
+    log.info("registered %s (%s) for %s", asset_id, ticker, domain)
+    return {
+        "asset_id": asset_id,
+        "contract": contract,
+        "contract_hash": ch,
+        "issuance_txid": oc["issuance_txid"],
+        "verified": True,
+        "verified_chain": True,
+        "verified_domain": proof_url is not None,
+        "verified_by": "issuer",
+        "proof_url": proof_url,
+    }
 
 
 class Registry:
@@ -672,7 +991,28 @@ def serve(reg, host, port):
             n = int(self.headers.get("Content-Length", 0) or 0)
             if n > 1_000_000:
                 self._send(413, "request too large"); return
-            form = urllib.parse.parse_qs(self.rfile.read(n).decode())
+            raw = self.rfile.read(n)
+
+            # Registration API: public, unauthenticated, JSON. Anyone may submit
+            # an asset; what decides the outcome is the chain and their domain,
+            # not this operator's opinion, so there is nothing here to gate on.
+            if path in ("/", "/registry/") and \
+                    self.headers.get("Content-Type", "").split(";")[0].strip() == "application/json":
+                if self._public_gate(reg.ui().get("public_registration", True)): return
+                try:
+                    body = json.loads(raw.decode() or "{}")
+                    result = register_asset(reg, body.get("asset_id"), body.get("contract"))
+                    self._send(200, json.dumps(result, indent=2), "application/json")
+                except ApiError as e:
+                    self._send(e.status, json.dumps({"error": e.message}, indent=2), "application/json")
+                except json.JSONDecodeError:
+                    self._send(400, json.dumps({"error": "body must be JSON"}), "application/json")
+                except Exception as e:
+                    log.exception("registration failed")
+                    self._send(500, json.dumps({"error": str(e)}), "application/json")
+                return
+
+            form = urllib.parse.parse_qs(raw.decode())
             g = lambda k, d="": form.get(k, [d])[0]
 
             if path == "/login":

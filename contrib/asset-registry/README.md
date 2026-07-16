@@ -156,10 +156,68 @@ unreachable the last snapshot keeps being served (that is the mirror role).
 |---|---|
 | `/` and `/public` | Human-readable table of every asset with provenance (upstream / edited here / local). |
 | `/registry/index.minimal.json` | The machine index (also at `/index.minimal.json`). |
+| `POST /` | Register an asset by proving it: chain + domain. See below. |
 
 Public requests are rate-limited per client IP (default 60/min, configurable);
 `429` with `Retry-After` when exceeded. Admins are never limited. Disabled
 endpoints answer `403`.
+
+## `POST /` — registering an asset
+
+This is how an issuer earns `verified` without the operator's say-so, and the
+reason this server is a registry rather than a mirror with a checkbox. It takes
+no authentication and no approval: what decides the outcome is the chain and the
+issuer's domain, neither of which the operator controls.
+
+```bash
+curl -X POST http://localhost:8092/ -H 'Content-Type: application/json' -d '{
+  "asset_id": "<64-hex>",
+  "contract": {
+    "name": "Gold (troy ounce)", "ticker": "GOLD", "precision": 8,
+    "entity": {"domain": "example.com"},
+    "issuer_pubkey": "02...", "version": 0
+  }
+}'
+```
+
+Sequentia Core hands you both fields when you issue with a contract; see
+[issuing an asset](../../doc/sequentia/issuing-an-asset-guide.md).
+
+Three things are checked, in this order, and all must hold:
+
+1. **The contract matches the chain.** `SHA256(canonical contract)` must equal the
+   `contract_hash` the issuance committed. This is what stops anyone registering
+   metadata for an asset that is not theirs.
+2. **The asset id derives from its own issuance.** Re-computed from
+   `(issuance prevout, contract_hash)`, so a wrong or hostile explorer answer
+   cannot decouple the id from the contract just checked.
+3. **The domain vouches for the asset.** `https://<domain>/.well-known/sequentia-asset-proof-<assetid>`
+   must return `200`, `Content-Type: text/plain`, and a body that *is* the
+   authorization line once trimmed.
+
+On success the entry is stored as a local override with `verified: 1` and the
+response reports `verified_by: "issuer"` — as against `"operator"`, which is what
+the admin checkbox amounts to.
+
+Rejections are specific, because each one is something the issuer can go and fix:
+
+| Status | Meaning |
+|---|---|
+| `400 invalid contract: ...` | A field breaks the rules (see the table above). |
+| `400 contract does not match on-chain commitment` | This is not the contract the asset was issued with. If the asset was issued with `contract_hash = 0` it commits to nothing and can never pass. |
+| `400 domain proof not found ... (HTTP 301)` | The domain redirected. The proof must be served **directly** by the domain in the contract: `example.com` and `www.example.com` are different domains here. |
+| `400 ... must be served as text/plain` | The file is there but the web server does not declare it as text. |
+| `409 ticker ... already registered` | Tickers are first-come, case-insensitive. |
+| `503 no explorer configured` | Set `explorer_url`; without a chain source this server cannot verify anything. |
+
+### Compatibility is the point
+
+Every rule above deliberately mirrors the reference implementation
+([sequentia-registry](https://github.com/GracedEternalKingCabbageMan/sequentia-registry)),
+down to refusing to follow redirects on the proof fetch. An asset this server
+accepts is one that registry accepts, and vice versa. That is what makes "point
+your node at a different registry" a real option rather than a slogan: the
+protocol is the standard, the operator is not.
 
 ## Config schema
 
@@ -169,9 +227,13 @@ endpoints answer `403`.
   "upstream_url": "https://sequentiatestnet.com/registry/index.minimal.json",
   "sync_interval_secs": 300,
   "upstream_timeout": 15,
+  "explorer_url": "https://sequentiatestnet.com/api",  // chain source for POST /; without it registration is refused
+  "require_domain_proof": true,  // false accepts a chain-verified asset without its domain proof — testing only
+  "proof_timeout": 15,
   "ui": {
     "public_page": true,
     "public_index": true,
+    "public_registration": true, // false turns POST / off, leaving this a mirror the operator curates
     "api_rate_limit_per_min": 60,
     "page_size": 50,
     "password_hash": ""          // via --set-password or the Access section, never by hand
