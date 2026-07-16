@@ -443,14 +443,29 @@ void BitcoinGUI::createActions()
                 // the string, but only the first occurrence. So replace only
                 // the first & with &&.
                 name.replace(name.indexOf(QChar('&')), 1, QString("&&"));
-                QAction* action = m_open_wallet_menu->addAction(name);
-
                 if (i.second) {
-                    // This wallet is already loaded
-                    action->setEnabled(false);
+                    // Already loaded. Rather than grey it out -- which read as
+                    // "broken" to someone who just wanted to switch back to it --
+                    // let it switch to that wallet, which is what picking an
+                    // already-open wallet plainly ought to do. The models live in
+                    // the sidebar selector; find the one whose name matches.
+                    WalletModel* loaded = nullptr;
+                    if (m_wallet_selector) {
+                        for (int idx = 0; idx < m_wallet_selector->count(); ++idx) {
+                            WalletModel* wm = m_wallet_selector->itemData(idx).value<WalletModel*>();
+                            if (wm && wm->getWalletName().toStdString() == path) { loaded = wm; break; }
+                        }
+                    }
+                    QAction* action = m_open_wallet_menu->addAction(name + "  " + tr("(open)"));
+                    if (loaded) {
+                        connect(action, &QAction::triggered, this, [this, loaded] { setCurrentWallet(loaded); });
+                    } else {
+                        action->setEnabled(false);
+                    }
                     continue;
                 }
 
+                QAction* action = m_open_wallet_menu->addAction(name);
                 connect(action, &QAction::triggered, [this, path] {
                     auto activity = new OpenWalletActivity(m_wallet_controller, this);
                     connect(activity, &OpenWalletActivity::opened, this, &BitcoinGUI::setCurrentWallet);
