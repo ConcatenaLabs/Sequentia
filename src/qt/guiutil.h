@@ -221,6 +221,11 @@ namespace GUIUtil
        (its default pegged-asset name) in selectors and amount labels. */
     QString assetDisplayName(const CAsset& asset);
 
+    /* SEQUENTIA: the number of decimal places to display/parse for an asset — the
+       on-chain denomination when known, else the registry precision, else 8. The
+       policy asset (SEQ) is always 8. */
+    int assetPrecision(const CAsset& asset);
+
     /* Format an amount of assets in a user-friendly style */
     QString formatAssetAmount(const CAsset&, const CAmount&, int bitcoin_unit, BitcoinUnits::SeparatorStyle, bool include_asset_name = true);
 

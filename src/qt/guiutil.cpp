@@ -737,6 +737,27 @@ QString assetDisplayName(const CAsset& asset)
     return QString::fromStdString(gAssetsDir.GetIdentifier(asset));
 }
 
+// SEQUENTIA: an asset's decimal places for display/parsing. Non-policy assets
+// honour the denomination recorded in the asset directory (on-chain
+// nDenomination when known, else the registry's precision, else 8). The policy
+// asset (SEQ) always uses the BitcoinUnits path and never comes here.
+int assetPrecision(const CAsset& asset)
+{
+    if (asset == Params().GetConsensus().pegged_asset) return 8;
+    return gAssetsDir.GetPrecision(asset);
+}
+
+namespace {
+// 10^decimals as an int64 factor (atoms per whole unit). decimals is 0..18, so
+// this stays well within int64.
+qlonglong AssetAtomFactor(int decimals)
+{
+    qlonglong f = 1;
+    for (int i = 0; i < decimals; ++i) f *= 10;
+    return f;
+}
+} // namespace
+
 QString formatAssetAmount(const CAsset& asset, const CAmount& amount, const int bitcoin_unit, BitcoinUnits::SeparatorStyle separators, bool include_asset_name)
 {
     if (asset == Params().GetConsensus().pegged_asset) {
@@ -747,15 +768,17 @@ QString formatAssetAmount(const CAsset& asset, const CAmount& amount, const int 
         }
     }
 
+    const int dec = assetPrecision(asset);
+    const qlonglong factor = AssetAtomFactor(dec);
     qlonglong abs = qAbs(amount);
-    qlonglong whole = abs / 100000000;
-    qlonglong fraction = abs % 100000000;
+    qlonglong whole = abs / factor;
+    qlonglong fraction = abs % factor;
     QString str = QString("%1").arg(whole);
     if (amount < 0) {
         str.insert(0, '-');
     }
-    if (fraction) {
-        str += QString(".%1").arg(fraction, 8, 10, QLatin1Char('0'));
+    if (dec > 0 && fraction) {
+        str += QString(".%1").arg(fraction, dec, 10, QLatin1Char('0'));
     }
     if (include_asset_name) {
         str += QString(" ") + assetDisplayName(asset);
@@ -810,7 +833,8 @@ QString formatReferenceApprox(const CAsset& asset, const CAmount& amount, const 
     const double pa = itA != prices.end() ? itA->second : 0.0;
     const double pr = RefBasePriceOf(prices, ref);
     if (!(pa > 0.0) || !(pr > 0.0)) return QString();
-    return FormatRefValue((static_cast<double>(amount) / 100000000.0) * pa / pr, ref);
+    const double factor = static_cast<double>(AssetAtomFactor(assetPrecision(asset)));
+    return FormatRefValue((static_cast<double>(amount) / factor) * pa / pr, ref);
 }
 
 bool assetHasMarketPrice(const CAsset& asset)
@@ -833,7 +857,8 @@ QString formatMultiAssetReferenceApprox(const CAmountMap& amountmap, const QStri
         if (it.second == 0) continue;
         const auto itA = prices.find(MarketTickerOf(it.first).toStdString());
         if (itA == prices.end() || !(itA->second > 0.0)) continue;
-        sum += (static_cast<double>(it.second) / 100000000.0) * itA->second / pr;
+        const double factor = static_cast<double>(AssetAtomFactor(assetPrecision(it.first)));
+        sum += (static_cast<double>(it.second) / factor) * itA->second / pr;
         any = true;
     }
     return any ? FormatRefValue(sum, ref) : QString();
@@ -915,7 +940,22 @@ bool parseAssetAmount(const CAsset& asset, const QString& text, const int bitcoi
         return BitcoinUnits::parse(bitcoin_unit, text, val_out);
     }
 
-    return BitcoinUnits::parse(BitcoinUnits::BTC, text, val_out);
+    // SEQUENTIA: parse a non-policy asset amount at its own precision. Mirrors
+    // BitcoinUnits::parse but with an arbitrary number of decimal places, so the
+    // amount round-trips with formatAssetAmount (which uses the same precision).
+    const int num_decimals = assetPrecision(asset);
+    if (text.isEmpty()) return false;
+    QStringList parts = BitcoinUnits::removeSpaces(text).split(".");
+    if (parts.size() > 2) return false; // more than one dot
+    const QString whole = parts[0];
+    const QString decimals = parts.size() > 1 ? parts[1] : QString();
+    if (decimals.size() > num_decimals) return false; // exceeds this asset's precision
+    const QString str = whole + decimals.leftJustified(num_decimals, '0');
+    if (str.size() > 18) return false; // longer numbers would exceed 63 bits
+    bool ok = false;
+    const CAmount retvalue(str.toLongLong(&ok));
+    if (val_out) *val_out = retvalue;
+    return ok;
 }
 
 QString formatDurationStr(std::chrono::seconds dur)

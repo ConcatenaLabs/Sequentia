@@ -50,6 +50,7 @@
 
 #include <boost/algorithm/string/replace.hpp>
 
+#include <assetsdir.h>
 #include <blind.h>
 #include <issuance.h>
 #include <crypto/hmac_sha256.h>
@@ -3301,6 +3302,26 @@ void CWallet::postInitProcess()
 
     // Update wallet transactions with current mempool transactions.
     chain().requestMempoolTransactions(*this);
+
+    // SEQUENTIA: record the on-chain denomination (nDenomination) of every asset
+    // this wallet issued, so the GUI/formatting layer shows and parses their
+    // amounts at the right number of decimals — even for assets that are not in
+    // the (verified-only) Asset Registry. This is the authoritative source and
+    // overrides any registry-supplied precision.
+    for (const auto& [hash, wtx] : mapWallet) {
+        for (unsigned int i = 0; i < wtx.tx->vin.size(); i++) {
+            const CAssetIssuance& issuance = wtx.tx->vin[i].assetIssuance;
+            if (issuance.IsNull()) continue;
+            // Only initial issuances carry the authoritative denomination and let
+            // us derive the asset id from the input's entropy; skip reissuances.
+            if (!issuance.assetBlindingNonce.IsNull()) continue;
+            uint256 entropy;
+            CAsset asset;
+            GenerateAssetEntropy(entropy, wtx.tx->vin[i].prevout, issuance.assetEntropy);
+            CalculateAsset(asset, entropy);
+            RegisterGlobalChainAssetPrecision(asset, issuance.nDenomination);
+        }
+    }
 }
 
 bool CWallet::BackupWallet(const std::string& strDest) const

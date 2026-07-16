@@ -777,7 +777,7 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
 
     // Check unblinded issuance is in MoneyRange if configured
     if (!chainparams.GetAcceptUnlimitedIssuances() && !IsIssuanceInMoneyRange(tx)) {
-        return state.Invalid(TxValidationResult::TX_NOT_STANDARD, "issuance-out-of-range", "Issuance is greater than 21 million and acceptunlimitedissuances is not enabled.");
+        return state.Invalid(TxValidationResult::TX_NOT_STANDARD, "issuance-out-of-range", "Issuance exceeds the money cap and acceptunlimitedissuances is not enabled.");
     }
 
     // Do not work on transactions that are too small.
