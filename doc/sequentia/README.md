@@ -38,6 +38,12 @@ Design notes, investigations, and audits. These record how decisions were
 reached and may describe superseded iterations; the numbered chapters above,
 not these, are authoritative for current behavior. Status of each:
 
+**Cross-cutting protocol specs (living, code-accurate)**
+
+| Document | Status |
+|---|---|
+| [`asset-denomination.md`](asset-denomination.md) | Canonical reference for the per-asset denomination (precision) field and the integration contract every wallet/service shares (Core, web wallet, Ambra, explorer, SeqDEX, bridges, registry). Core + desktop GUI implemented on this branch; other components tracked with a checklist. |
+
 **Consensus / node (this repository)**
 
 | Document | Status |
