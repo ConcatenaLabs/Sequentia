@@ -1492,7 +1492,11 @@ RPCHelpMan issueasset()
             coin_control.m_fee_asset = fee_asset;
         }
         if (!request.params[5].isNull()) {
-            issuance_details.denomination = request.params[5].get_int();
+            const int d = request.params[5].get_int();
+            if (d < 0 || d > MAX_ASSET_PRECISION) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("denomination must be between 0 and %d", MAX_ASSET_PRECISION));
+            }
+            issuance_details.denomination = static_cast<uint8_t>(d);
         }
     }
 

@@ -129,7 +129,7 @@ int RefreshAssetRegistry()
     // and are NOT trusted into the global asset directory. For backward
     // compatibility, an index that omits v[4] (older registry) is treated as
     // unverified and skipped, so the node never silently trusts unlabelled data.
-    std::vector<std::pair<std::string, std::string>> pairs;
+    std::vector<AssetRegistryEntry> entries;
     int skipped_unverified = 0;
     for (const std::string& id : idx.getKeys()) {
         const UniValue& v = idx[id];
@@ -144,12 +144,20 @@ int RefreshAssetRegistry()
             else if (vf.isBool()) verified = vf.get_bool();
         }
         if (!verified) { skipped_unverified++; continue; }
-        pairs.emplace_back(id, ticker);
+        // precision (v[3]): the asset's decimal places, matching the on-chain
+        // nDenomination for assets issued by this software. Advisory (chain wins
+        // when known); clamp out-of-range or non-numeric to the default of 8.
+        uint8_t precision = DEFAULT_ASSET_PRECISION;
+        if (v.size() >= 4 && v[3].isNum()) {
+            const int p = v[3].get_int();
+            if (p >= 0 && p <= MAX_ASSET_PRECISION) precision = static_cast<uint8_t>(p);
+        }
+        entries.push_back(AssetRegistryEntry{id, ticker, precision});
     }
     if (skipped_unverified > 0)
         LogPrintf("AssetRegistry: skipped %d unverified (advisory) label(s) from %s\n", skipped_unverified, url);
 
-    const int n = MergeGlobalAssetDir(pairs);
+    const int n = MergeGlobalAssetDir(entries);
     if (n > 0) LogPrintf("AssetRegistry: merged %d new asset label(s) from %s\n", n, url);
     return n;
 }

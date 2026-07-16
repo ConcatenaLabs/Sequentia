@@ -4,11 +4,17 @@
 
 #include <qt/assetspage.h>
 
+#include <qt/bitcoinunits.h>
 #include <qt/guiutil.h>
+#include <qt/optionsmodel.h>
 #include <qt/platformstyle.h>
 #include <qt/walletmodel.h>
 
+#include <assetsdir.h>
 #include <interfaces/node.h>
+#include <rpc/util.h>
+
+#include <cmath>
 
 #include <QCheckBox>
 #include <QDoubleValidator>
@@ -182,18 +188,28 @@ void AssetsPage::refresh()
     if (ok && bal.isObject()) {
         const std::vector<std::string>& keys = bal.getKeys();
         m_balances->setRowCount(0);
+        const int display_unit = m_wallet_model->getOptionsModel() ? m_wallet_model->getOptionsModel()->getDisplayUnit() : BitcoinUnits::BTC;
         for (size_t i = 0; i < keys.size(); ++i) {
+            // getbalance reports every amount 1e8-scaled (atoms/1e8), like all RPC
+            // output. Recover the exact atom count and render it at the asset's own
+            // precision, so an asset with a denomination other than 8 shows the
+            // right number of decimals here instead of always eight.
+            CAmount atoms = 0;
+            try { atoms = AmountFromValue(bal[i], /*check_range=*/false); } catch (...) { continue; }
             // Zero balances are assets the wallet does not hold; listing them (the
             // policy asset included) would just be noise. No asset is privileged.
-            double units = 0.0; try { units = bal[i].get_real(); } catch (...) {}
-            if (units <= 0.0) continue;
+            if (atoms <= 0) continue;
+            const std::string& key = keys[i];
+            const CAsset asset = GetAssetFromString(key);
+            const QString label = QString::fromStdString(key);
+            const double wholeUnits = static_cast<double>(atoms) / std::pow(10.0, GUIUtil::assetPrecision(asset));
+
             int row = m_balances->rowCount();
             m_balances->insertRow(row);
-            const QString label = QString::fromStdString(keys[i]);
             m_balances->setItem(row, 0, new QTableWidgetItem(label));
-            m_balances->setItem(row, 1, new QTableWidgetItem(QString::fromStdString(bal[i].getValStr())));
+            m_balances->setItem(row, 1, new QTableWidgetItem(GUIUtil::formatAssetAmount(asset, atoms, display_unit, BitcoinUnits::SeparatorStyle::STANDARD, false)));
             // SEQUENTIA: value the balance in the user's chosen reference currency (blank if unpriced).
-            m_balances->setItem(row, 2, new QTableWidgetItem(GUIUtil::formatReferenceApproxByLabel(label, units, QString())));
+            m_balances->setItem(row, 2, new QTableWidgetItem(GUIUtil::formatReferenceApproxByLabel(label, wholeUnits, QString())));
         }
         const bool empty = m_balances->rowCount() == 0;
         m_balances->setVisible(!empty);
@@ -215,7 +231,17 @@ void AssetsPage::refresh()
             };
             m_issuances->setItem(row, 0, new QTableWidgetItem(field("asset")));
             m_issuances->setItem(row, 1, new QTableWidgetItem(field("token")));
-            m_issuances->setItem(row, 2, new QTableWidgetItem(field("assetamount")));
+            // assetamount is 1e8-scaled like all RPC amounts, or -1 when the amount
+            // is blinded/unknown. Render known amounts at the asset's precision.
+            QString amtStr = field("assetamount");
+            if (amtStr != "-1" && e.exists("assetamount")) {
+                try {
+                    const CAmount a = AmountFromValue(e["assetamount"], /*check_range=*/false);
+                    const CAsset as = GetAssetFromString(e["asset"].getValStr());
+                    amtStr = GUIUtil::formatAssetAmount(as, a, BitcoinUnits::BTC, BitcoinUnits::SeparatorStyle::STANDARD, false);
+                } catch (...) {}
+            }
+            m_issuances->setItem(row, 2, new QTableWidgetItem(amtStr));
         }
     }
 }

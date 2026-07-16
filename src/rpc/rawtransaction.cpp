@@ -4,6 +4,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <asset.h>
+#include <assetsdir.h>
 #include <base58.h>
 #include <block_proof.h>
 #include <chain.h>
@@ -2938,8 +2939,11 @@ void issueasset_base(CMutableTransaction& mtx, RawIssuanceDetails& issuance_deta
     issuance_details.entropy = entropy;
     issuance_details.asset = asset;
     issuance_details.token = token;
-    if (denomination)
-        issuance_details.denomination = denomination;
+    // SEQUENTIA: honour the requested denomination verbatim, including 0 (an asset
+    // with no fractional units, the highest whole-unit ceiling). The old
+    // `if (denomination)` guard silently rewrote 0 to the default of 8. Callers
+    // pass 8 when the field is unset, so no sentinel is needed here.
+    issuance_details.denomination = denomination;
 
     mtx.vin[issuance_input_index].assetIssuance.assetEntropy = contract_hash;
     mtx.vin[issuance_input_index].assetIssuance.nDenomination = issuance_details.denomination;
@@ -3131,7 +3135,11 @@ static RPCHelpMan rawissueasset()
 
         uint8_t denomination = 8;
         if (!issuance_o["denomination"].isNull()) {
-            denomination = issuance_o["denomination"].get_int();
+            const int d = issuance_o["denomination"].get_int();
+            if (d < 0 || d > MAX_ASSET_PRECISION) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("denomination must be between 0 and %d", MAX_ASSET_PRECISION));
+            }
+            denomination = static_cast<uint8_t>(d);
         }
 
         RawIssuanceDetails details;

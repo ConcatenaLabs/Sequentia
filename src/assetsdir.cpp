@@ -63,25 +63,54 @@ void CAssetsDir::InitFromStrings(const std::vector<std::string>& assetsToInit, c
     // Assets with no registry entry simply fall back to their hex identifier.
 }
 
-int CAssetsDir::Merge(const std::vector<std::pair<std::string, std::string>>& id_label_pairs)
+int CAssetsDir::Merge(const std::vector<AssetRegistryEntry>& entries)
 {
     LOCK(cs);
     int added = 0;
     static const std::vector<std::string> protectedLabels = {"", "*", "bitcoin", "Bitcoin", "btc"};
-    for (const auto& [assetHex, label] : id_label_pairs) {
+    for (const auto& entry : entries) {
+        const std::string& assetHex = entry.id_hex;
+        const std::string& label = entry.label;
         if (!IsHex(assetHex) || assetHex.size() != 64) continue;
         bool prot = false;
         for (const auto& p : protectedLabels) if (label == p) { prot = true; break; }
         if (prot) continue;
+        const uint8_t precision = entry.precision > MAX_ASSET_PRECISION ? DEFAULT_ASSET_PRECISION : entry.precision;
         const CAsset asset(uint256S(assetHex));
-        // Additive + idempotent: a user -assetdir entry, the native label, or an
-        // already-registered asset/label always wins — skip if either is mapped.
-        if (mapAssetMetadata.count(asset) || mapAssets.count(label)) continue;
-        mapAssetMetadata[asset] = AssetMetadata(label);
+
+        auto it = mapAssetMetadata.find(asset);
+        if (it != mapAssetMetadata.end()) {
+            // Asset already known (operator -assetdir entry, native label, a
+            // prior merge, or a chain-precision-only record). Let the registry
+            // supply precision if nothing more authoritative (chain) claimed it.
+            it->second.SetPrecision(precision, AssetMetadata::PrecisionSource::Registry);
+            // A chain-precision-only record has no label yet (the wallet may have
+            // registered the asset's denomination before this merge ran). Adopt
+            // the registry label now, preserving the recorded precision, unless
+            // the label is already taken by another asset.
+            if (it->second.GetLabel().empty() && !mapAssets.count(label)) {
+                it->second = AssetMetadata(label, it->second.GetPrecision(), it->second.GetPrecisionSource());
+                mapAssets[label] = asset;
+                added++;
+            }
+            continue;
+        }
+        // Label collisions: an already-mapped label always wins.
+        if (mapAssets.count(label)) continue;
+        mapAssetMetadata[asset] = AssetMetadata(label, precision, AssetMetadata::PrecisionSource::Registry);
         mapAssets[label] = asset;
         added++;
     }
     return added;
+}
+
+void CAssetsDir::SetChainPrecision(const CAsset& asset, uint8_t precision)
+{
+    LOCK(cs);
+    if (precision > MAX_ASSET_PRECISION) precision = DEFAULT_ASSET_PRECISION;
+    // Creates a label-less metadata record if the asset is otherwise unknown, so
+    // an asset held only by hex still formats with the right number of decimals.
+    mapAssetMetadata[asset].SetPrecision(precision, AssetMetadata::PrecisionSource::Chain);
 }
 
 CAsset CAssetsDir::GetAsset(const std::string& label) const
@@ -100,6 +129,11 @@ AssetMetadata CAssetsDir::GetMetadata(const CAsset& asset) const
     if (it != mapAssetMetadata.end())
         return it->second;
     return AssetMetadata("");
+}
+
+uint8_t CAssetsDir::GetPrecision(const CAsset& asset) const
+{
+    return GetMetadata(asset).GetPrecision();
 }
 
 std::string CAssetsDir::GetLabel(const CAsset& asset) const
@@ -141,9 +175,14 @@ void InitGlobalAssetDir(const std::vector<std::string>& assetsToInit, const std:
     _gAssetsDir.InitFromStrings(assetsToInit, pegged_asset_name);
 }
 
-int MergeGlobalAssetDir(const std::vector<std::pair<std::string, std::string>>& id_label_pairs)
+int MergeGlobalAssetDir(const std::vector<AssetRegistryEntry>& entries)
 {
-    return _gAssetsDir.Merge(id_label_pairs);
+    return _gAssetsDir.Merge(entries);
+}
+
+void RegisterGlobalChainAssetPrecision(const CAsset& asset, uint8_t precision)
+{
+    _gAssetsDir.SetChainPrecision(asset, precision);
 }
 
 void CAssetsDir::Clear()

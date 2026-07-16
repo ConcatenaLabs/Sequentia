@@ -207,7 +207,7 @@ public:
 
     SERIALIZE_METHODS(CAssetIssuance, obj) { READWRITE(obj.assetBlindingNonce, obj.assetEntropy, obj.nAmount, obj.nInflationKeys, obj.nDenomination); }
 
-    void SetNull() { nAmount.SetNull(); nInflationKeys.SetNull(); }
+    void SetNull() { nAmount.SetNull(); nInflationKeys.SetNull(); nDenomination = 8; }
     bool IsNull() const { return (nAmount.IsNull() && nInflationKeys.IsNull()); }
 
     friend bool operator==(const CAssetIssuance& a, const CAssetIssuance& b)
