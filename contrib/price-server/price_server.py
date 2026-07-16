@@ -17,7 +17,13 @@ whitelist (see doc/sequentia/02-open-fee-market.md). Each round it:
   3. applies operator-defined ADMISSION RULES (thresholds + always-admit /
      always-reject exceptions) to decide which discovered assets to whitelist.
   4. converts each admitted asset's price (in the API's quote currency, e.g.
-     USD) into the node's scaled rate (rate = round(price_in_quote * 1e8)) and
+     USD) into the node's scaled rate. The node values a fee paid in an asset as
+     `atoms * rate / 1e8` and is precision-blind (it works purely in atoms), so
+     the rate MUST carry the asset's denomination: for an asset with `precision`
+     decimals the rate is `round(price * 1e8 * 10**(8 - precision))`. That is
+     `round(price * 1e8)` for the common 8-decimal case (a no-op) and corrects
+     the valuation for any asset with a different denomination — otherwise a fee
+     paid in, say, a 2-decimal asset would be mis-valued by 1e6. Then it
   5. publishes the result via the node's `setfeeexchangerates` RPC with
      persist=false.
 
@@ -58,13 +64,27 @@ import urllib.request
 log = logging.getLogger("price-server")
 
 COIN = 100_000_000
+DEFAULT_PRECISION = 8  # asset decimals when the registry omits them; also the reference scale
+
+
+def scaled_rate(price, precision):
+    """The node's fee rate for `price` (in the quote currency, per whole unit) of
+    an asset with `precision` decimals: atoms of the asset worth one reference
+    unit. The node values fees precision-blind (atoms * rate / 1e8), so the
+    denomination is carried here — 10**(8 - precision) is 1 for 8-decimal assets
+    (unchanged) and rescales the rest so a fee in a non-8-decimal asset is valued
+    correctly rather than off by 10**(8 - precision)."""
+    return round(price * COIN * (10 ** (DEFAULT_PRECISION - precision)))
+
 
 # Published rates must satisfy 0 < rate <= MAX_RATE. The node parses each rate
 # with get_int64; a value above INT64_MAX (~9.22e18) makes that parse throw and
 # the node drops the WHOLE setfeeexchangerates batch. We clamp well below that so
 # one absurd quote can never poison every other asset's rate; offenders are
-# dropped per-asset and logged instead.
-MAX_RATE = 1_000_000_000_000_000  # 1e15, comfortably below INT64_MAX
+# dropped per-asset and logged instead. The ceiling leaves headroom above 1e8x
+# precision scaling (a 0-decimal asset multiplies the rate by 1e8) and the
+# change-gate / re-denomination that run on top of it.
+MAX_RATE = 1_000_000_000_000_000_000  # 1e18, comfortably below INT64_MAX (~9.22e18)
 
 # Defaults for a fresh install pointed at the public Sequentia testnet demo. The
 # config UI pre-fills these, so a freshly downloaded node's price server works
@@ -123,9 +143,11 @@ def jsonpath(obj, path):
 
 def fetch_registry(url, timeout):
     """Fetch the Asset Registry minimal index and return {TICKER: (asset_id,
-    domain)}. The index is { id: [domain, ticker, name, precision, verified] }.
-    A registry tells us the asset universe and the id we publish rates against,
-    so the operator never maintains an asset list by hand."""
+    domain, precision)}. The index is { id: [domain, ticker, name, precision,
+    verified] }. A registry tells us the asset universe, the id we publish rates
+    against, and each asset's denomination (precision) — which the rate must
+    carry (see scaled_rate) — so the operator never maintains an asset list, or a
+    per-asset precision, by hand."""
     data = http_get_json(url, timeout)
     out = {}
     for asset_id, meta in data.items():
@@ -134,7 +156,12 @@ def fetch_registry(url, timeout):
         domain, ticker = meta[0], meta[1]
         if not ticker:
             continue
-        out[str(ticker).upper()] = (asset_id, domain)
+        # precision (meta[3]) is the asset's on-chain denomination; default to 8
+        # and ignore out-of-range/non-integer values (registry validates 0..8).
+        precision = DEFAULT_PRECISION
+        if len(meta) >= 4 and isinstance(meta[3], int) and 0 <= meta[3] <= DEFAULT_PRECISION:
+            precision = meta[3]
+        out[str(ticker).upper()] = (asset_id, domain, precision)
     return out
 
 
@@ -283,11 +310,12 @@ class PriceServer:
         log.info("config updated via UI and persisted")
 
     # ---- admission ----
-    def _admit(self, ticker, asset_id, domain, m, state):
+    def _admit(self, ticker, asset_id, domain, m, state, precision=DEFAULT_PRECISION):
         """Decide whether an asset qualifies for the whitelist this round and, if
-        so, its scaled rate. m = {price, market_cap, volume_24h}. Returns
-        (rate|None, status_string). Rules: always_reject wins over always_admit;
-        else every configured threshold is combined by `require` (all|any)."""
+        so, its scaled rate (denominated for `precision`; see scaled_rate). m =
+        {price, market_cap, volume_24h}. Returns (rate|None, status_string).
+        Rules: always_reject wins over always_admit; else every configured
+        threshold is combined by `require` (all|any)."""
         t = self.thresholds()
         exc = self.exceptions()
         aid = asset_id
@@ -303,7 +331,7 @@ class PriceServer:
         if not price or price <= 0:
             return None, "skipped: no price"
         state.price_history.append(price)
-        new_rate = round(price * COIN)
+        new_rate = scaled_rate(price, precision)
         mcap, vol = m.get("market_cap"), m.get("volume_24h")
 
         forced = listed("always_admit")
@@ -441,7 +469,7 @@ class PriceServer:
         with self._lock:
             rejects = [str(x).upper() for x in self.exceptions().get("always_reject", [])]
             for ticker in sorted(reg_tickers):
-                asset_id, domain = registry[ticker]
+                asset_id, domain, precision = registry[ticker]
                 ticker_of_id[asset_id] = ticker
                 tk_u = ticker.upper()
                 feed_key = aliases.get(tk_u, tk_u)
@@ -453,7 +481,7 @@ class PriceServer:
                         if tk_u in rejects or asset_id.upper() in rejects:
                             status, rate = "rejected: always_reject", None
                         else:
-                            rate = round(mp * COIN)
+                            rate = scaled_rate(mp, precision)
                             if not (0 < rate <= MAX_RATE):
                                 status, rate = "skipped: manual rate out of range", None
                             else:
@@ -468,7 +496,7 @@ class PriceServer:
                                    "price": None, "rate": None, "status": why})
                     continue
                 state = self._states.setdefault(ticker, AssetState(vol_window))
-                rate, status = self._admit(ticker, asset_id, domain, m, state)
+                rate, status = self._admit(ticker, asset_id, domain, m, state, precision)
                 if rate is not None:
                     raw[asset_id] = rate
                 report.append({"ticker": ticker, "id": asset_id, "domain": domain,
