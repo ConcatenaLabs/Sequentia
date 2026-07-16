@@ -160,8 +160,13 @@ AssetsPage::AssetsPage(const PlatformStyle* platformStyle, QWidget* parent)
     issueOuter->addWidget(m_proof_explainer);
     m_proof_save_button = new QPushButton(tr("Save the proof file..."), issueGroup);
     m_proof_save_button->setVisible(false);
+    m_contract_save_button = new QPushButton(tr("Save the contract..."), issueGroup);
+    m_contract_save_button->setVisible(false);
+    m_contract_save_button->setToolTip(tr("The chain keeps only this contract's fingerprint. Lose it and the "
+                                          "asset can never be registered."));
     QHBoxLayout* proofRow = new QHBoxLayout();
     proofRow->addStretch();
+    proofRow->addWidget(m_contract_save_button);
     proofRow->addWidget(m_proof_save_button);
     issueOuter->addLayout(proofRow);
 
@@ -214,6 +219,7 @@ AssetsPage::AssetsPage(const PlatformStyle* platformStyle, QWidget* parent)
     connect(m_issue_button, &QPushButton::clicked, this, &AssetsPage::onIssue);
     connect(m_reissue_button, &QPushButton::clicked, this, &AssetsPage::onReissue);
     connect(m_proof_save_button, &QPushButton::clicked, this, &AssetsPage::onSaveProofFile);
+    connect(m_contract_save_button, &QPushButton::clicked, this, &AssetsPage::onSaveContract);
     connect(m_issue_domain_open, &QPushButton::clicked, this, &AssetsPage::onOpenDomain);
 }
 
@@ -447,6 +453,10 @@ void AssetsPage::onIssue()
     m_proof_asset = asset;
     m_proof_domain = domain;
     m_proof_line = r.exists("proof_line") ? QString::fromStdString(r["proof_line"].get_str()) : QString();
+    // The contract is the one thing here that cannot be reconstructed: the chain
+    // holds only its hash, and the issuer key came out of the wallet. Hold on to
+    // exactly what the node committed rather than rebuilding it from the form.
+    m_proof_contract = r.exists("contract") ? QString::fromStdString(r["contract"].write()) : QString();
     const QString proof_url = r.exists("proof_url") ? QString::fromStdString(r["proof_url"].get_str()) : QString();
     if (!m_proof_line.isEmpty()) {
         m_proof_explainer->setText(
@@ -459,15 +469,19 @@ void AssetsPage::onIssue()
                "<br><br>If the browser downloads the file instead of showing it, your web server is not "
                "calling it text; the guide has the two-line fix for that."
                "<br><br><b>2. Register the asset</b> with an asset registry, which will then read that file. "
-               "Keep the asset id above - and if you use the RPC, keep the contract it returned too: the "
-               "chain stores only its fingerprint, so nobody can reconstruct it for you."
+               "Registering needs the contract below, and <b>this is the only copy</b> - the chain kept just "
+               "its fingerprint, so if you lose it nobody can reconstruct it and the asset can never be "
+               "named. Save it now:"
+               "<br><br><tt>%4</tt>"
                "<br><br>You will know it worked when the Registry column below stops saying "
-               "<i>not registered yet</i>. <a href=\"%4\">The step-by-step guide</a> covers uploading on "
+               "<i>not registered yet</i>. <a href=\"%5\">The step-by-step guide</a> covers uploading on "
                "WordPress and what to do when it does not work.")
                 .arg(ticker.toHtmlEscaped(), domain.toHtmlEscaped(), proof_url.toHtmlEscaped(),
+                     m_proof_contract.toHtmlEscaped(),
                      "https://github.com/GracedEternalKingCabbageMan/Sequentia/blob/master/doc/sequentia/issuing-an-asset-guide.md"));
         m_proof_explainer->setVisible(true);
         m_proof_save_button->setVisible(true);
+        m_contract_save_button->setVisible(!m_proof_contract.isEmpty());
     }
     setStatus(tr("Issued %1. Save the asset id above; it is what identifies your asset.").arg(ticker), false);
     refresh();
@@ -496,6 +510,29 @@ void AssetsPage::onSaveProofFile()
         return;
     }
     setStatus(tr("Saved. Upload it to %1 so it is served at the address above, as plain text.").arg(m_proof_domain), false);
+}
+
+void AssetsPage::onSaveContract()
+{
+    if (m_proof_contract.isEmpty() || m_proof_asset.isEmpty()) return;
+
+    const QString suggested = QString("sequentia-asset-contract-%1.json").arg(m_proof_asset);
+    const QString path = QFileDialog::getSaveFileName(this, tr("Save the contract"), suggested, tr("JSON file (*.json)"));
+    if (path.isEmpty()) return;
+
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        setStatus(tr("Could not write %1: %2").arg(path, file.errorString()), true);
+        return;
+    }
+    const QByteArray body = m_proof_contract.toUtf8();
+    const bool written = file.write(body) == body.size();
+    file.close();
+    if (!written) {
+        setStatus(tr("Could not write %1: %2").arg(path, file.errorString()), true);
+        return;
+    }
+    setStatus(tr("Contract saved. Keep it: it is the only copy, and registering the asset needs it."), false);
 }
 
 void AssetsPage::onReissue()

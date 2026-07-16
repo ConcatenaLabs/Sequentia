@@ -47,6 +47,7 @@ private Q_SLOTS:
     void onIssue();
     void onReissue();
     void onSaveProofFile();
+    void onSaveContract();
     void onOpenDomain();
 
 private:
@@ -74,12 +75,18 @@ private:
 
     QLabel* m_status{nullptr};
 
-    //! The proof the last issuance needs published, kept so it can be saved to a
-    //! file. Empty until an asset is issued in this session.
+    //! What the last issuance needs published and registered, kept so it can be
+    //! saved. Empty until an asset is issued in this session.
+    //!
+    //! m_proof_contract matters most: the chain keeps only the contract's hash,
+    //! and the issuer key came from the wallet, so a contract that is not written
+    //! down here is gone -- and with it any chance of ever registering the asset.
     QString m_proof_domain;
     QString m_proof_asset;
     QString m_proof_line;
+    QString m_proof_contract;
     QPushButton* m_proof_save_button{nullptr};
+    QPushButton* m_contract_save_button{nullptr};
     QLabel* m_proof_explainer{nullptr};
 
     //! Run a wallet RPC; returns the result, sets ok=false and a message on error.
