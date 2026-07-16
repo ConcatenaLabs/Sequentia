@@ -49,6 +49,7 @@ private Q_SLOTS:
     void onSaveProofFile();
     void onSaveContract();
     void onOpenDomain();
+    void onRegister();
 
 private:
     WalletModel* m_wallet_model{nullptr};
@@ -88,6 +89,9 @@ private:
     QPushButton* m_proof_save_button{nullptr};
     QPushButton* m_contract_save_button{nullptr};
     QLabel* m_proof_explainer{nullptr};
+
+    QLineEdit* m_register_asset{nullptr};
+    QPushButton* m_register_button{nullptr};
 
     //! Run a wallet RPC; returns the result, sets ok=false and a message on error.
     UniValue callWalletRpc(const std::string& method, const UniValue& params, bool& ok, QString& error);

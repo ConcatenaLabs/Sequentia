@@ -225,9 +225,17 @@ Go through this list:
 Publishing the proof does not announce anything by itself. You still have to tell
 a registry your asset exists, and it will then go and read your file.
 
-There is no button for this yet. For now, ask whoever is helping you, or send the
-asset id and the `contract` object that Core showed you to the registry. Nothing
-here is secret.
+On the Assets page, put your asset id in **Register an asset with the registry**
+and press **Register**. Your wallet kept the contract from when you issued, and
+sends it along. There is no harm in pressing it too early: the registry checks
+your file itself, so if it is not up yet it just tells you so, and you try again.
+
+Nothing here is secret, and nothing needs anyone's approval — the registry decides
+on your file and the chain, not on who you are.
+
+It goes to whichever registry your node reads (`-assetregistryurl`, the public one
+by default). If you point your node at a different registry, Register follows it
+there.
 
 Once it accepts, wallets pick up the name within about five minutes. Core tells
 you when it has: the **Registry** column on the Assets page turns from *not

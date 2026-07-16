@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <assetcontract.h>
+#include <assetregistry.h>
 #include <assetsdir.h>
 #include <block_proof.h>
 #include <core_io.h>
@@ -1346,7 +1347,7 @@ RPCHelpMan unblindrawtransaction()
     };
 }
 
-static CTransactionRef SendGenerationTransaction(const CScript& asset_script, const CPubKey &asset_pubkey, const CScript& token_script, const CPubKey &token_pubkey, CAmount asset_amount, CAmount token_amount, IssuanceDetails* issuance_details, CCoinControl& coin_control, CWallet* pwallet)
+static CTransactionRef SendGenerationTransaction(const CScript& asset_script, const CPubKey &asset_pubkey, const CScript& token_script, const CPubKey &token_pubkey, CAmount asset_amount, CAmount token_amount, IssuanceDetails* issuance_details, CCoinControl& coin_control, CWallet* pwallet, const std::string& contract_json = "")
 {
     CAsset reissue_token = issuance_details->reissuance_token;
     CAmount curBalance = GetBalance(*pwallet).m_mine_trusted[reissue_token];
@@ -1386,6 +1387,14 @@ static CTransactionRef SendGenerationTransaction(const CScript& asset_script, co
     }
 
     mapValue_t map_value;
+    // SEQUENTIA: keep the contract with the transaction that committed it. Only
+    // its hash reaches the chain and the issuer key came from this wallet, so a
+    // contract not written down here cannot be reconstructed by anyone -- and
+    // without it the asset can never be registered, which is the only reason to
+    // have committed one. The wallet already persists mapValue, and this is the
+    // one place that is guaranteed to still exist when the issuer comes back to
+    // register, possibly days and one restart later.
+    if (!contract_json.empty()) map_value["assetcontract"] = contract_json;
     pwallet->CommitTransaction(tx_ref, std::move(map_value), {} /* orderForm */, &blind_details);
 
     return tx_ref;
@@ -1602,7 +1611,8 @@ RPCHelpMan issueasset()
         issuance_details.denomination = contract_precision;
     }
 
-    CTransactionRef tx_ref = SendGenerationTransaction(GetScriptForDestination(asset_dest), asset_dest_blindpub, GetScriptForDestination(token_dest), token_dest_blindpub, nAmount, nTokens, &issuance_details, coin_control, pwallet);
+    CTransactionRef tx_ref = SendGenerationTransaction(GetScriptForDestination(asset_dest), asset_dest_blindpub, GetScriptForDestination(token_dest), token_dest_blindpub, nAmount, nTokens, &issuance_details, coin_control, pwallet,
+                                                       contract.isNull() ? "" : AssetContract::CanonicalJson(contract));
 
     // Calculate asset type, assumes first vin is used for issuance
     CAsset asset;
@@ -1825,6 +1835,14 @@ RPCHelpMan listissuances()
             if (label != "") {
                 item.pushKV("assetlabel", label);
             }
+            // SEQUENTIA: the contract this wallet committed, when it issued the
+            // asset itself and kept it. The chain has only its hash, so this is
+            // the only copy, and registering the asset needs it.
+            const auto contract_it = pcoin->mapValue.find("assetcontract");
+            if (contract_it != pcoin->mapValue.end() && !contract_it->second.empty()) {
+                UniValue contract;
+                if (contract.read(contract_it->second)) item.pushKV("contract", contract);
+            }
             CAmount iaamount = pcoin->GetIssuanceAmount(*pwallet, vinIndex, false);
             item.pushKV("assetamount", (iaamount == -1 ) ? -1 : ValueFromAmount(iaamount));
             item.pushKV("denomination", issuance.nDenomination);
@@ -1836,6 +1854,138 @@ RPCHelpMan listissuances()
         }
     }
     return issuancelist;
+},
+    };
+}
+
+RPCHelpMan registerasset()
+{
+    return RPCHelpMan{"registerasset",
+                "\nAsk an asset registry to vouch for one of your assets, so wallets show its name\n"
+                "instead of its hex id.\n"
+                "\nThe registry submitted to is the one this node reads (-assetregistryurl): you register\n"
+                "where you have chosen to trust, and no registry is privileged by this software.\n"
+                "\nPublish the proof file on your issuer domain FIRST. The registry does not take this\n"
+                "node's word for anything: it re-checks the contract against the chain and fetches that\n"
+                "file itself, so calling this before the file is up simply fails, harmlessly. Once it\n"
+                "accepts, wallets pick the name up within one registry poll.\n",
+                {
+                    {"asset", RPCArg::Type::STR, RPCArg::Optional::NO, "The asset id to register."},
+                    {"contract", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "The contract the asset was issued with. Omit it when this wallet issued the asset: it kept the contract and will use that. Supply it (the JSON `issueasset` returned) when registering from another wallet.",
+                        {
+                            {"entity", RPCArg::Type::OBJ, RPCArg::Optional::NO, "Who issued the asset",
+                                {
+                                    {"domain", RPCArg::Type::STR, RPCArg::Optional::NO, "The issuer's domain, which must serve the proof line"},
+                                },
+                            },
+                            {"issuer_pubkey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The issuer's public key"},
+                            {"name", RPCArg::Type::STR, RPCArg::Optional::NO, "Display name"},
+                            {"precision", RPCArg::Type::NUM, RPCArg::Optional::NO, "Decimal places"},
+                            {"ticker", RPCArg::Type::STR, RPCArg::Optional::NO, "Short symbol"},
+                            {"version", RPCArg::Type::NUM, RPCArg::Optional::NO, "Contract format version, always 0"},
+                        },
+                    },
+                },
+                RPCResult{
+                    RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::BOOL, "verified", "Whether the registry now vouches for this asset"},
+                        {RPCResult::Type::STR, "registry", "The registry submitted to"},
+                        {RPCResult::Type::STR, "proof_url", /*optional=*/true, "The proof the registry read"},
+                        {RPCResult::Type::STR, "detail", /*optional=*/true, "The registry's own words, verbatim"},
+                    }
+                },
+                RPCExamples{
+                    HelpExampleCli("registerasset", "\"3a0f9192...\"")
+            + HelpExampleRpc("registerasset", "\"3a0f9192...\"")
+                },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    std::shared_ptr<CWallet> const wallet = GetWalletForJSONRPCRequest(request);
+    if (!wallet) return NullUniValue;
+    CWallet* const pwallet = wallet.get();
+
+    LOCK(pwallet->cs_wallet);
+
+    const std::string asset_hex = request.params[0].get_str();
+    if (!IsHex(asset_hex) || asset_hex.size() != 64) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "asset must be a 64-character hex asset id");
+    }
+
+    UniValue contract(UniValue::VNULL);
+    if (!request.params[1].isNull()) {
+        contract = request.params[1];
+    } else {
+        // Find the contract this wallet stored when it issued the asset.
+        const CAsset asset(uint256S(asset_hex));
+        for (const auto& [_txid, wtx] : pwallet->mapWallet) {
+            const auto it = wtx.mapValue.find("assetcontract");
+            if (it == wtx.mapValue.end() || it->second.empty()) continue;
+            for (size_t vin = 0; vin < wtx.tx->vin.size(); ++vin) {
+                const CAssetIssuance& issuance = wtx.tx->vin[vin].assetIssuance;
+                if (issuance.IsNull() || !issuance.assetBlindingNonce.IsNull()) continue;
+                uint256 entropy;
+                CAsset issued;
+                GenerateAssetEntropy(entropy, wtx.tx->vin[vin].prevout, issuance.assetEntropy);
+                CalculateAsset(issued, entropy);
+                if (issued != asset) continue;
+                UniValue parsed;
+                if (parsed.read(it->second)) contract = parsed;
+                break;
+            }
+            if (!contract.isNull()) break;
+        }
+        if (contract.isNull()) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                               "This wallet has no contract for that asset. Assets issued without one cannot be "
+                               "registered at all -- their id commits to nothing, and that cannot be repaired. If "
+                               "the asset was issued elsewhere with a contract, pass it as the second argument.");
+        }
+    }
+
+    const std::vector<std::string> problems = AssetContract::Validate(contract);
+    if (!problems.empty()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "That contract would be refused: " + Join(problems, "; "));
+    }
+
+    const std::string registry = AssetRegistryBaseUrl();
+    UniValue submission(UniValue::VOBJ);
+    submission.pushKV("asset_id", asset_hex);
+    submission.pushKV("contract", contract);
+
+    int status = 0;
+    std::string body, err;
+    if (!AssetRegistryPost(submission.write(), status, body, err)) {
+        throw JSONRPCError(RPC_MISC_ERROR, strprintf("Could not reach the asset registry at %s: %s", registry, err));
+    }
+
+    // Pass the registry's own reason through rather than inventing one: every
+    // rejection it makes is something the issuer can go and fix, and only it
+    // knows which.
+    UniValue reply;
+    const bool parsed = reply.read(body);
+    std::string detail;
+    if (parsed && reply.isObject() && reply.exists("error")) detail = reply["error"].getValStr();
+    else if (!parsed) detail = body.substr(0, 500);
+
+    if (status != 200) {
+        throw JSONRPCError(RPC_MISC_ERROR,
+                           strprintf("The registry at %s refused this asset: %s", registry,
+                                     detail.empty() ? strprintf("HTTP %d", status) : detail));
+    }
+
+    UniValue ret(UniValue::VOBJ);
+    const bool verified = parsed && reply.isObject() && reply.exists("verified") && reply["verified"].isBool()
+                              ? reply["verified"].get_bool() : false;
+    ret.pushKV("verified", verified);
+    ret.pushKV("registry", registry);
+    if (parsed && reply.isObject() && reply.exists("proof_url") && reply["proof_url"].isStr()) {
+        ret.pushKV("proof_url", reply["proof_url"].get_str());
+    }
+    if (!verified && parsed && reply.isObject()) {
+        ret.pushKV("detail", "The registry accepted the submission but does not vouch for the asset yet.");
+    }
+    return ret;
 },
     };
 }

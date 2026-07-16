@@ -185,6 +185,24 @@ AssetsPage::AssetsPage(const PlatformStyle* platformStyle, QWidget* parent)
     reissueForm->addRow(QString(), m_reissue_button);
     layout->addWidget(reissueGroup);
 
+    // --- Register ---
+    QGroupBox* regGroup = new QGroupBox(tr("Register an asset with the registry"), this);
+    QVBoxLayout* regLayout = new QVBoxLayout(regGroup);
+    QLabel* regIntro = new QLabel(
+        tr("Once your proof file is live on your domain, register the asset here and wallets will show "
+           "its name. The registry checks your file itself, so there is no harm in trying: if the file "
+           "is not up yet, it simply says so."), regGroup);
+    regIntro->setWordWrap(true);
+    regLayout->addWidget(regIntro);
+    QHBoxLayout* regRow = new QHBoxLayout();
+    m_register_asset = new QLineEdit(regGroup);
+    m_register_asset->setPlaceholderText(tr("asset id (hex) - the one you issued"));
+    m_register_button = new QPushButton(tr("Register"), regGroup);
+    regRow->addWidget(m_register_asset, 1);
+    regRow->addWidget(m_register_button);
+    regLayout->addLayout(regRow);
+    layout->addWidget(regGroup);
+
     // --- Issuances ---
     QGroupBox* issGroup = new QGroupBox(tr("Your issuances"), this);
     QVBoxLayout* issLayout = new QVBoxLayout(issGroup);
@@ -221,6 +239,7 @@ AssetsPage::AssetsPage(const PlatformStyle* platformStyle, QWidget* parent)
     connect(m_proof_save_button, &QPushButton::clicked, this, &AssetsPage::onSaveProofFile);
     connect(m_contract_save_button, &QPushButton::clicked, this, &AssetsPage::onSaveContract);
     connect(m_issue_domain_open, &QPushButton::clicked, this, &AssetsPage::onOpenDomain);
+    connect(m_register_button, &QPushButton::clicked, this, &AssetsPage::onRegister);
 }
 
 void AssetsPage::setModel(WalletModel* model)
@@ -468,10 +487,10 @@ void AssetsPage::onIssue()
                "<br><br><tt>%3</tt>"
                "<br><br>If the browser downloads the file instead of showing it, your web server is not "
                "calling it text; the guide has the two-line fix for that."
-               "<br><br><b>2. Register the asset</b> with an asset registry, which will then read that file. "
-               "Registering needs the contract below, and <b>this is the only copy</b> - the chain kept just "
-               "its fingerprint, so if you lose it nobody can reconstruct it and the asset can never be "
-               "named. Save it now:"
+               "<br><br><b>2. Press Register below</b> once the file is up. This wallet kept the contract "
+               "and will submit it for you; the registry then reads your file and decides. It is worth "
+               "saving the contract anyway - the chain kept only its fingerprint, so this wallet holds the "
+               "only copy:"
                "<br><br><tt>%4</tt>"
                "<br><br>You will know it worked when the Registry column below stops saying "
                "<i>not registered yet</i>. <a href=\"%5\">The step-by-step guide</a> covers uploading on "
@@ -482,6 +501,8 @@ void AssetsPage::onIssue()
         m_proof_explainer->setVisible(true);
         m_proof_save_button->setVisible(true);
         m_contract_save_button->setVisible(!m_proof_contract.isEmpty());
+        // Save the issuer retyping 64 hex characters into the very next field.
+        m_register_asset->setText(asset);
     }
     setStatus(tr("Issued %1. Save the asset id above; it is what identifies your asset.").arg(ticker), false);
     refresh();
@@ -510,6 +531,36 @@ void AssetsPage::onSaveProofFile()
         return;
     }
     setStatus(tr("Saved. Upload it to %1 so it is served at the address above, as plain text.").arg(m_proof_domain), false);
+}
+
+void AssetsPage::onRegister()
+{
+    if (!m_wallet_model) return;
+    const QString asset = m_register_asset->text().trimmed().toLower();
+    if (asset.isEmpty()) { setStatus(tr("Enter the asset id you want to register."), true); m_register_asset->setFocus(); return; }
+
+    UniValue params(UniValue::VARR);
+    params.push_back(asset.toStdString());
+
+    m_register_button->setEnabled(false);
+    setStatus(tr("Asking the registry to check your domain..."), false);
+    bool ok; QString err;
+    UniValue r = callWalletRpc("registerasset", params, ok, err);
+    m_register_button->setEnabled(true);
+
+    if (!ok) {
+        // The registry's own words: it knows why it refused, and every reason is
+        // something the issuer can go and fix.
+        setStatus(err, true);
+        return;
+    }
+    const bool verified = r.exists("verified") && r["verified"].isBool() && r["verified"].get_bool();
+    if (verified) {
+        setStatus(tr("Registered. %1 is verified - wallets will show its name within a few minutes.").arg(asset), false);
+    } else {
+        setStatus(tr("The registry accepted the submission but does not vouch for the asset yet."), true);
+    }
+    refresh();
 }
 
 void AssetsPage::onSaveContract()
