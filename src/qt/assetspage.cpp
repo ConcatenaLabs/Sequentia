@@ -130,18 +130,25 @@ AssetsPage::AssetsPage(const PlatformStyle* platformStyle, QWidget* parent)
     // cannot answer it (it speaks no HTTPS, so it cannot see a redirect). The
     // browser can, so hand the job to the browser rather than pretend.
     m_issue_domain_open = new QPushButton(tr("Open my site"), issueGroup);
-    m_issue_domain_open->setToolTip(tr("Opens the domain exactly as you typed it, so you can see where you end up."));
+    m_issue_domain_open->setToolTip(tr("Opens your site so you can copy its real address out of the address bar."));
     QHBoxLayout* domainRow = new QHBoxLayout();
     domainRow->addWidget(m_issue_domain, 1);
     domainRow->addWidget(m_issue_domain_open);
     issueForm->addRow(tr("Your domain:"), domainRow);
+    // The www question decides whether this asset can ever be verified, and it
+    // cannot be answered here: the node speaks no HTTPS, so it cannot see the
+    // redirect that settles it. Rather than ask the issuer to judge, ask them to
+    // copy -- the address bar already holds the right answer once the page loads.
     QLabel* domainHint = new QLabel(
-        tr("The website of whoever issues this asset - it is how wallets tell your asset apart from an "
-           "imitation, so you will have to put a small file on it afterwards to prove it is yours."
-           "<br><br><b>Get this exactly right: it cannot be changed later.</b> Many sites answer to two "
-           "names, <tt>example.com</tt> and <tt>www.example.com</tt>, and only one of them will work. "
-           "Open your site, let it finish loading, and use whatever the address bar says <i>then</i> - "
-           "if it moved you, the place it moved you to is the right one."),
+        tr("<b>This one cannot be changed later, so get it right now.</b> Many sites answer to two "
+           "names - <tt>example.com</tt> and <tt>www.example.com</tt> - and only the one your site "
+           "really uses will work. Do not guess:"
+           "<br><br><b>Press Open my site, let the page finish loading, then copy the address out of "
+           "your browser's address bar and paste it here.</b> Whatever it says once loaded is the right "
+           "answer, and pasting the whole thing is fine - the <tt>https://</tt> and anything after the "
+           "next slash get trimmed for you."
+           "<br><br>This is the issuer's identity: it is how wallets tell your asset from an imitation, "
+           "so you will need to put a small file on it afterwards to prove it is yours."),
         issueGroup);
     domainHint->setWordWrap(true);
     issueForm->addRow(QString(), domainHint);
@@ -393,12 +400,12 @@ bool AssetsPage::confirmIssuance(const QString& name, const QString& ticker, con
     box.setWindowTitle(tr("Issue this asset?"));
     box.setText(tr("Issue %1 (%2), from %3?").arg(name, ticker, domain));
     box.setInformativeText(
-        tr("These three become part of the asset's identity for good. They cannot be edited, "
-           "and no one can change them later - if the domain is wrong, the only way out is to "
-           "abandon this asset and issue another one.\n\n"
-           "After issuing you will need to put a small file on %1 to prove the domain is yours. "
+        tr("The name (%1), the ticker (%2) and the domain (%3) become part of this asset's identity "
+           "for good. They cannot be edited, and no one can change them later - if the domain is "
+           "wrong, the only way out is to abandon this asset and issue another one.\n\n"
+           "After issuing you will need to put a small file on %3 to prove the domain is yours. "
            "Until you do, wallets show this asset as a long string of digits instead of its name.")
-            .arg(domain));
+            .arg(name, ticker, domain));
     box.setStandardButtons(QMessageBox::Cancel | QMessageBox::Ok);
     if (QAbstractButton* ok_button = box.button(QMessageBox::Ok)) ok_button->setText(tr("Issue it"));
     box.setDefaultButton(QMessageBox::Cancel);
@@ -493,8 +500,8 @@ void AssetsPage::onIssue()
                "only copy:"
                "<br><br><tt>%4</tt>"
                "<br><br>You will know it worked when the Registry column below stops saying "
-               "<i>not registered yet</i>. <a href=\"%5\">The step-by-step guide</a> covers uploading on "
-               "WordPress and what to do when it does not work.")
+               "<i>not registered yet</i>. <a href=\"%5\">The step-by-step guide</a> covers putting the "
+               "file on the usual website platforms, and what to do when it does not work.")
                 .arg(ticker.toHtmlEscaped(), domain.toHtmlEscaped(), proof_url.toHtmlEscaped(),
                      m_proof_contract.toHtmlEscaped(),
                      "https://github.com/GracedEternalKingCabbageMan/Sequentia/blob/master/doc/sequentia/issuing-an-asset-guide.md"));

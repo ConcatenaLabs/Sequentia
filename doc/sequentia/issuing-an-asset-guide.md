@@ -137,6 +137,10 @@ https://www.albertodeluigi.com/.well-known/sequentia-asset-proof-<your asset id>
 The dot at the start of `.well-known` is intentional. It is a standard folder
 that many services use for exactly this kind of proof.
 
+Whatever runs your site, the job is the same: get a file into a folder. What
+changes is where you find the folder. Below is WordPress in full, then the short
+version for the other common platforms.
+
 ### On WordPress
 
 **Do not use the Media Library.** Files added there land in a different folder
@@ -166,6 +170,28 @@ fussy about.
 You do **not** need to worry about WordPress swallowing the address. WordPress
 only handles addresses that do not match a real file, so a real file in
 `.well-known` is served straight out.
+
+### On the other common platforms
+
+**Squarespace, Wix, Shopify** — you cannot upload a file to an arbitrary path on
+any of them. Their file handling is limited to media, and none will serve
+`/.well-known/…` for you. Your options are to use a subdomain you point at
+somewhere you do control, or to pick a different domain for the asset. Decide this
+**before** issuing, since the domain is permanent.
+
+**Netlify, Vercel, Cloudflare Pages, GitHub Pages** — easy. Put the file in a
+`.well-known/` folder inside the directory you publish (`public/`, `static/`, or
+the repo root for GitHub Pages) and deploy. GitHub Pages needs a `.nojekyll` file
+at the root, or it will skip dotfolders entirely. Netlify and Vercel both let you
+set the content type in their config file; on GitHub Pages you cannot, which may
+be a dead end for the `text/plain` requirement below.
+
+**A plain server you control (Apache, Nginx, cPanel)** — the WordPress
+instructions above are really just this: find the web root, make the folder,
+upload.
+
+**Your own Node/Python app** — serve the one route yourself and return
+`Content-Type: text/plain`. This is the easiest case; you are not fighting anyone.
 
 ### The bit that usually catches people out
 
