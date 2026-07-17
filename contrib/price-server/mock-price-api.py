@@ -24,6 +24,19 @@ def _yahoo(sym, timeout=8):
     with urllib.request.urlopen(req, timeout=timeout) as r: d = json.load(r)
     return float(d["chart"]["result"][0]["meta"]["regularMarketPrice"])
 
+MAXDEV = 5.0   # reject a live tick that jumps > MAXDEV x or < 1/MAXDEV x the last-good price
+
+def _sane(t, v):
+    """Guard a LIVE feed value before it reprices every maker: a bad-but-valid upstream tick
+    (0, negative, NaN/Inf, or a wild spike) must NOT replace a good price. Keep-last-good then
+    covers it. Returns True only for a finite, positive value within MAXDEV of the last good one."""
+    try: v = float(v)
+    except (TypeError, ValueError): return False
+    if not (v > 0.0) or v != v or v in (float("inf"), float("-inf")): return False
+    with _lock: last = _state.get(t, {}).get("price")
+    if last and last > 0 and (v > last * MAXDEV or v < last / MAXDEV): return False
+    return True
+
 def _set(t, price):
     with _lock:
         s = _state.setdefault(t, {"market_cap":0.0,"volume_24h":0.0})
@@ -32,7 +45,10 @@ def _set(t, price):
 def _refresh(tick):
     while True:
         for t,sym in REAL.items():
-            try: _set(t, _yahoo(sym))
+            try:
+                v = _yahoo(sym)
+                if _sane(t, v): _set(t, v)
+                else: print("feed: %s (%s) rejected out-of-band value %r (keeping last-good)"%(t,sym,v), flush=True)
             except Exception as e: print("feed: %s (%s) failed: %s"%(t,sym,e), flush=True)
         _set("USDX", 1.00)
         with _lock: cur = _state.get("SEQ",{}).get("price", SEQ_DAY1)
