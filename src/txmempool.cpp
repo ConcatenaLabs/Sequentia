@@ -1121,7 +1121,14 @@ void CTxMemPool::RecomputeFees()
             txiter it = mapTx.find(hash);
             if (it == mapTx.end()) continue; // already evicted as someone's descendant
             CValue newFeeValue = exchangeRateMap.ConvertAmountToValue(it->GetFee(), it->GetFeeAsset());
-            if (it->GetFeeAsset() != ::policyAsset && it->GetFee() > 0 && newFeeValue.GetValue() <= 0) {
+            // SEQUENTIA (no privileged coin): evict any tx whose fee asset was de-priced to a
+            // non-positive reference value, INCLUDING the policy asset. Exempting ::policyAsset here
+            // gave tSEQ a retention privilege — a producer that legitimately refuses SEQ (sets its
+            // rate to 0, which the open fee market permits) would keep worthless SEQ-fee txs while
+            // evicting every other de-priced asset's. Under normal operation SEQ defaults 1:1 so
+            // newFeeValue stays > 0 and this branch is never taken; the change only bites the
+            // deliberate-refusal case, where evicting is exactly equal treatment.
+            if (it->GetFee() > 0 && newFeeValue.GetValue() <= 0) {
                 to_evict.push_back(it->GetSharedTx());
                 continue;
             }
