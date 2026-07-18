@@ -144,6 +144,30 @@ extern arith_uint256 nMinimumChainWork;
 /** Best header we've seen so far (used for getheaders queries' starting points). */
 extern CBlockIndex *pindexBestHeader;
 
+// --- SEQUENTIA immediate finality: reconciliation hooks (anchor.cpp monitor) ---
+
+/** The current immediate-finality point (highest active-chain quorum-certified
+ *  block, maintained by UpdateTip). Returns false when none. */
+bool PosGetImmediateFinalPoint(int& height, uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+/** Steady-clock seconds at the last ADVANCE of the immediate-finality point
+ *  (0 = never advanced since startup). Lock-free; the reconciliation monitor
+ *  reads this as "when did my branch last receive a quorum-certified block". */
+int64_t PosGetFinalAdvanceSteadyTime();
+
+/** Stamp the finality-advance clock to now. UpdateTip calls this when the
+ *  finalized height rises; the reconciliation monitor also calls it once at
+ *  its first pass after startup so a freshly restarted (possibly pinned) node
+ *  still waits the full -posreconcilepatience before releasing. */
+void PosStampFinalAdvanceNow();
+
+/** Authorize the activation-time finality gate to cross the current finalized
+ *  point for (and only for) chains containing the given quorum-certified rival
+ *  block. Set by the reconciliation monitor once every release condition
+ *  holds; cleared by UpdateTip when the active chain adopts the released
+ *  branch (the finalized point then recomputes on the new chain). */
+void PosSetReconcileRelease(int height, const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
 /** Documentation for argument 'checklevel'. */
 extern const std::vector<std::string> CHECKLEVEL_DOC;
 
@@ -694,6 +718,15 @@ public:
      *  and consensus failures also set) can re-seed the recovery worklist on
      *  restart. The matching clear happens in ResetBlockFailureFlags. */
     void MarkAnchorInvalid(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+    /** SEQUENTIA finality reconciliation: re-scan the whole block index and
+     *  (re-)insert every connectable block into setBlockIndexCandidates. The
+     *  activation-time finality gate erases rival-branch candidates it skips
+     *  (mirroring the missing-data path), so when the reconciliation monitor
+     *  releases the finalized point the approved branch must be made a
+     *  candidate again before ActivateBestChain can adopt it. One O(index)
+     *  scan per release event. */
+    void ReaddBlockIndexCandidates() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /** Replay blocks that aren't fully applied to the database. */
     bool ReplayBlocks();

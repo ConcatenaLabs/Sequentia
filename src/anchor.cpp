@@ -16,6 +16,7 @@
 #include <validation.h>
 
 #include <atomic>
+#include <chrono>
 #include <map>
 #include <set>
 
@@ -76,6 +77,13 @@ std::set<std::pair<uint32_t, uint256>> g_anchor_stale_cache GUARDED_BY(g_anchor_
 std::set<uint256> g_anchor_invalidated GUARDED_BY(g_anchor_mutex);
 //! Last seen parent chain tip.
 uint256 g_last_mainchain_tip GUARDED_BY(g_anchor_mutex);
+//! Median-time-past of parent-chain blocks, keyed by block hash. A block's MTP
+//! is a pure function of the hash (its own and its ancestors' timestamps), so
+//! entries are immutable and the cache is never invalidated — only size-capped.
+std::map<uint256, int64_t> g_anchor_mtp_cache GUARDED_BY(g_anchor_mutex);
+constexpr size_t ANCHOR_MTP_CACHE_MAX = 65536;
+//! Reconciliation monitor snapshot for getanchorstatus (anchor.h).
+PosReconcileStatus g_reconcile_status GUARDED_BY(g_anchor_mutex);
 
 //! Query the parent chain daemon for its best block hash.
 bool GetMainchainBestBlockHash(uint256& hash)
@@ -132,6 +140,41 @@ bool GetMainchainBlockCount(int& count)
     }
 }
 
+//! Query (cache-first) the parent chain daemon for a block's median-time-past.
+//! MTP is immutable per hash, so a cached entry is served without RPC forever.
+//! Returns OK with mtp set, NOT_FOUND when the daemon does not know the hash,
+//! or NO_CONNECTION when the daemon is unreachable.
+AnchorCheckResult GetMainchainMedianTime(const uint256& hash, int64_t& mtp)
+{
+    {
+        LOCK(g_anchor_mutex);
+        auto it = g_anchor_mtp_cache.find(hash);
+        if (it != g_anchor_mtp_cache.end()) {
+            mtp = it->second;
+            return AnchorCheckResult::OK;
+        }
+    }
+    try {
+        UniValue params(UniValue::VARR);
+        params.push_back(hash.GetHex());
+        UniValue reply = CallMainChainRPC("getblockheader", params);
+        UniValue errval = find_value(reply, "error");
+        if (!errval.isNull()) return AnchorCheckResult::NOT_FOUND;
+        UniValue result = find_value(reply, "result");
+        if (!result.isObject()) return AnchorCheckResult::NOT_FOUND;
+        UniValue mediantime = find_value(result.get_obj(), "mediantime");
+        if (!mediantime.isNum()) return AnchorCheckResult::NOT_FOUND;
+        mtp = mediantime.get_int64();
+        LOCK(g_anchor_mutex);
+        if (g_anchor_mtp_cache.size() >= ANCHOR_MTP_CACHE_MAX) g_anchor_mtp_cache.clear();
+        g_anchor_mtp_cache.emplace(hash, mtp);
+        return AnchorCheckResult::OK;
+    } catch (const std::exception& e) {
+        LogPrint(BCLog::NET, "Could not reach mainchain daemon for mediantime of %s: %s\n", hash.ToString(), e.what());
+        return AnchorCheckResult::NO_CONNECTION;
+    }
+}
+
 //! Highest parent-chain height not contested by any live competing branch, via
 //! getchaintips (block-producer anchor policy, Fix A). Parses the tips (skipping
 //! our own active chain and daemon-rejected/invalid branches — neither is a
@@ -174,6 +217,39 @@ void ScanNewMainchainBlocks(ChainstateManager& chainman, const uint256& new_tip)
 void UpdatePosFinality(ChainstateManager& chainman, int btc_tip_height);
 
 } // namespace
+
+int64_t g_pos_escape_stall_mtp_gap = DEFAULT_POS_ESCAPE_STALL_MTP_GAP;
+bool g_pos_reconcile = true;
+int64_t g_pos_reconcile_patience = DEFAULT_POS_RECONCILE_PATIENCE;
+int g_pos_reconcile_min_depth = DEFAULT_POS_RECONCILE_MIN_DEPTH;
+
+EscapeStallTimeVerdict CheckEscapingStallMtpGap(const uint256& parent_anchor_hash,
+                                                const uint256& block_anchor_hash)
+{
+    if (g_pos_escape_stall_mtp_gap <= 0) return EscapeStallTimeVerdict::ALLOWED;
+    // -validateanchor=0 delegates anchor validation to the network (the R3
+    // skip); the MTP evidence rides on the same daemon, so it is delegated too.
+    if (!g_validate_anchor) return EscapeStallTimeVerdict::ALLOWED;
+    // Chain bring-up: no anchored parent to measure from.
+    if (parent_anchor_hash.IsNull() || block_anchor_hash.IsNull()) return EscapeStallTimeVerdict::ALLOWED;
+    int64_t mtp_parent = 0, mtp_block = 0;
+    switch (GetMainchainMedianTime(parent_anchor_hash, mtp_parent)) {
+    case AnchorCheckResult::OK: break;
+    default: return EscapeStallTimeVerdict::UNKNOWN;
+    }
+    switch (GetMainchainMedianTime(block_anchor_hash, mtp_block)) {
+    case AnchorCheckResult::OK: break;
+    default: return EscapeStallTimeVerdict::UNKNOWN;
+    }
+    return (mtp_block - mtp_parent >= g_pos_escape_stall_mtp_gap)
+        ? EscapeStallTimeVerdict::ALLOWED : EscapeStallTimeVerdict::TOO_SOON;
+}
+
+PosReconcileStatus GetPosReconcileStatus()
+{
+    LOCK(g_anchor_mutex);
+    return g_reconcile_status;
+}
 
 AnchorCheckResult CheckMainchainAnchor(uint32_t height, const uint256& hash)
 {
@@ -367,6 +443,128 @@ std::optional<uint256> AnchorCertifiedSiblingPending(ChainstateManager& chainman
     }
     if (best < quorum) return std::nullopt;
     return target->GetBlockHash();
+}
+
+//! Section 3 of the watcher: the PoS finality reconciliation monitor
+//! (anchor.h; design doc anchor-reorg-of-reorg-recovery-design.md Change 4b;
+//! incident 2026-07-17). Detects the "finality partition" state — the local
+//! finalized branch abandoned by the committee while a rival quorum-certified,
+//! anchor-settled branch grows — and releases the local finalized point for
+//! that rival branch, letting ordinary fork choice adopt it. Runs in the
+//! watcher thread: RPC verdicts are gathered outside cs_main, and the local
+//! blocks are never invalidated (they were valid; they merely lost — they
+//! become valid-but-inactive history).
+static void MaybeReconcileFinality(ChainstateManager& chainman)
+{
+    if (!g_con_pos || !g_pos_reconcile) return;
+
+    auto set_status = [](const char* state, int cert_h, const uint256& cert_hash, int64_t patience_left) {
+        LOCK(g_anchor_mutex);
+        g_reconcile_status.enabled = true;
+        g_reconcile_status.state = state;
+        g_reconcile_status.rival_cert_height = cert_h;
+        g_reconcile_status.rival_cert_hash = cert_hash;
+        g_reconcile_status.patience_remaining = patience_left;
+    };
+    const auto steady_now = []() {
+        return (int64_t)std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+
+    // First pass after startup: arm the patience clock, so a restarted
+    // (possibly already-pinned) node still waits the full patience.
+    if (PosGetFinalAdvanceSteadyTime() == 0) {
+        PosStampFinalAdvanceNow();
+        set_status("inactive", -1, uint256(), 0);
+        return;
+    }
+
+    int final_height = -1;
+    uint256 final_hash;
+    int cert_height = -1;
+    uint256 cert_hash;
+    uint32_t cert_anchor_height = 0;
+    uint256 cert_anchor_hash;
+    bool inactive = false;
+    {
+        LOCK(cs_main);
+        if (!PosGetImmediateFinalPoint(final_height, final_hash)) {
+            inactive = true; // no finality to release
+        } else {
+            const CBlockIndex* pf = chainman.m_blockman.LookupBlockIndex(final_hash);
+            if (!pf || (pf->nStatus & BLOCK_FAILED_MASK) || !chainman.ActiveChain().Contains(pf)) {
+                inactive = true; // the Bitcoin valve (sections 1-2) owns this case
+            } else {
+                const CBlockIndex* best = pindexBestHeader;
+                if (!best || best->nHeight <= final_height) {
+                    inactive = true;
+                } else {
+                    const CBlockIndex* anc = best->GetAncestor(final_height);
+                    if (anc && anc->GetBlockHash() == final_hash) {
+                        inactive = true; // best known header extends our own finalized chain
+                    } else {
+                        // Rival branch: its highest quorum-certified, non-failed
+                        // block strictly above our finalized height.
+                        const int quorum = PosSlotQuorum(StakeRegistry::GetInstance());
+                        for (const CBlockIndex* p = best; p && p->nHeight > final_height; p = p->pprev) {
+                            if ((p->nStatus & BLOCK_FAILED_MASK) || (int)p->m_pos_countersigs < quorum) continue;
+                            cert_height = p->nHeight;
+                            cert_hash = p->GetBlockHash();
+                            cert_anchor_height = p->m_anchor_height;
+                            cert_anchor_hash = p->m_anchor_hash;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (inactive || cert_height < final_height + g_pos_reconcile_min_depth) {
+        set_status("inactive", -1, uint256(), 0);
+        return;
+    }
+    // Condition 4: our branch is provably abandoned — no quorum-certified
+    // block has extended it for the whole patience window.
+    const int64_t elapsed = steady_now() - PosGetFinalAdvanceSteadyTime();
+    if (elapsed < g_pos_reconcile_patience) {
+        set_status("tracking", cert_height, cert_hash, g_pos_reconcile_patience - elapsed);
+        return;
+    }
+    // Condition 2, outside cs_main: the rival's certifying block must be
+    // anchored on OUR parent best chain, at/below the currently uncontested
+    // parent height — a release can never fire into a live parent-chain fork.
+    if (CheckMainchainAnchor(cert_anchor_height, cert_anchor_hash) != AnchorCheckResult::OK) {
+        set_status("tracking", cert_height, cert_hash, 0);
+        return;
+    }
+    int btc_height = 0;
+    if (!GetMainchainBlockCount(btc_height)) {
+        set_status("tracking", cert_height, cert_hash, 0);
+        return;
+    }
+    int uncontested = btc_height;
+    if (!GetMainchainUncontestedHeight(btc_height, uncontested)) {
+        set_status("tracking", cert_height, cert_hash, 0);
+        return;
+    }
+    if ((int)cert_anchor_height > uncontested) {
+        LogPrintf("PoS finality reconciliation: rival certified block %s (height %d) anchors at contested parent height %d (uncontested %d); waiting for the parent chain to settle\n",
+                  cert_hash.ToString(), cert_height, cert_anchor_height, uncontested);
+        set_status("tracking", cert_height, cert_hash, 0);
+        return;
+    }
+    LogPrintf("PoS finality reconciliation: local finalized branch (height %d, %s) received no quorum-certified extension for %d s while a rival quorum-certified branch reached height %d (%s) with settled anchors; releasing local finality for the rival branch\n",
+              final_height, final_hash.ToString(), (int)elapsed, cert_height, cert_hash.ToString());
+    {
+        LOCK(cs_main);
+        PosSetReconcileRelease(cert_height, cert_hash);
+        chainman.ActiveChainstate().ReaddBlockIndexCandidates();
+    }
+    set_status("released", cert_height, cert_hash, 0);
+    BlockValidationState state;
+    if (!chainman.ActiveChainstate().ActivateBestChain(state)) {
+        LogPrintf("WARNING: ActivateBestChain failed after finality reconciliation release: %s\n", state.ToString());
+    }
 }
 
 void AnchorWatchTask(ChainstateManager& chainman)
@@ -595,7 +793,7 @@ void AnchorWatchTask(ChainstateManager& chainman)
             if (res == AnchorCheckResult::NO_CONNECTION) break; // cannot judge deeper
             if (res != AnchorCheckResult::OK) lowest_bad = ref.block_hash;
         }
-        if (lowest_bad.IsNull()) return;
+        if (lowest_bad.IsNull()) break; // quiet tick: fall through to section 3
 
         LogPrintf("Parent chain reorganization detected: invalidating block %s (and descendants) whose anchor is no longer canonical\n",
                   lowest_bad.ToString());
@@ -631,6 +829,12 @@ void AnchorWatchTask(ChainstateManager& chainman)
         // Loop: the new tip may itself have a stale anchor (e.g. a competing
         // branch that anchored to the same reorganized-away parent block).
     }
+
+    // 3) Finality reconciliation monitor (anchor.h, Change 4b): detect a local
+    //    finalized branch abandoned by the committee and release it for the
+    //    network's certified branch. Reached on quiet ticks (sections 1-2 found
+    //    nothing to invalidate), which is exactly the partition's signature.
+    MaybeReconcileFinality(chainman);
 }
 
 // --- Bitcoin checkpoints against PoS long-range attacks (paper §11) ---

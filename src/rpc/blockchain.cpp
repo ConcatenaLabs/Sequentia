@@ -3199,6 +3199,14 @@ static RPCHelpMan getanchorstatus()
                         {RPCResult::Type::STR_HEX, "anchorhash", "parent chain block hash referenced by the tip"},
                         {RPCResult::Type::STR, "anchorstatus", "result of checking the tip anchor against the parent chain daemon: \"ok\", \"not_found\", \"stale\", \"height_mismatch\", \"no_connection\" or \"not_validated\""},
                         {RPCResult::Type::NUM_TIME, "lastposfinalreject", "unix time of the most recent rival branch rejected at the PoS finality gate (0 = none since startup); recent rejections while the tip stands still signal a contested parent-chain fork"},
+                        {RPCResult::Type::OBJ, "reconcile", /*optional=*/true, "state of the PoS finality reconciliation monitor (-posreconcile); only on PoS chains",
+                        {
+                            {RPCResult::Type::BOOL, "enabled", "whether the reconciliation monitor is on"},
+                            {RPCResult::Type::STR, "state", "\"inactive\" (no rival certified branch), \"tracking\" (rival certified above the local finality; patience or anchor settling pending) or \"released\" (local finality released for the rival branch)"},
+                            {RPCResult::Type::NUM, "rival_cert_height", /*optional=*/true, "height of the rival branch's highest quorum-certified block"},
+                            {RPCResult::Type::STR_HEX, "rival_cert_hash", /*optional=*/true, "hash of that block"},
+                            {RPCResult::Type::NUM, "patience_remaining", /*optional=*/true, "seconds of -posreconcilepatience still to elapse before a release can fire"},
+                        }},
                     }},
                 RPCExamples{
                     HelpExampleCli("getanchorstatus", "")
@@ -3237,6 +3245,18 @@ static RPCHelpMan getanchorstatus()
     }
     result.pushKV("anchorstatus", status);
     result.pushKV("lastposfinalreject", GetLastPosFinalForkRejectionTime());
+    if (g_con_pos) {
+        const PosReconcileStatus rec = GetPosReconcileStatus();
+        UniValue reconcile(UniValue::VOBJ);
+        reconcile.pushKV("enabled", g_pos_reconcile);
+        reconcile.pushKV("state", rec.enabled ? rec.state : std::string("inactive"));
+        if (rec.rival_cert_height >= 0) {
+            reconcile.pushKV("rival_cert_height", rec.rival_cert_height);
+            reconcile.pushKV("rival_cert_hash", rec.rival_cert_hash.GetHex());
+        }
+        if (rec.patience_remaining > 0) reconcile.pushKV("patience_remaining", rec.patience_remaining);
+        result.pushKV("reconcile", reconcile);
+    }
     return result;
 },
     };

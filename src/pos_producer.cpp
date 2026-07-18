@@ -1152,8 +1152,13 @@ int64_t PosProducer::DriveRound()
                 m_lock_hash != tip->GetBlockHash()) {
                 if (m_lock_grace_start_ms == 0) m_lock_grace_start_ms = now;
                 locked = m_lock_hash;
+                // The release is keyed on the same evidence consensus accepts
+                // for escaping a stall: parent-chain height gap AND real-time
+                // MTP gap (anchor.h, incident 2026-07-17) — a height race
+                // during a parent block-storm must not unlock the hold.
                 const bool gap_passed = g_con_bitcoin_anchor && tip->pprev &&
-                    PosEscapingStallAllowed(tip->pprev->m_anchor_height, backed->m_anchor_height);
+                    PosEscapingStallAllowed(tip->pprev->m_anchor_height, backed->m_anchor_height) &&
+                    CheckEscapingStallMtpGap(tip->pprev->m_anchor_hash, backed->m_anchor_hash) == EscapeStallTimeVerdict::ALLOWED;
                 const bool grace_passed = !g_con_bitcoin_anchor &&
                     (now - m_lock_grace_start_ms >= 2 * ROUND_MS);
                 ancestry_hold = !(gap_passed || grace_passed);
@@ -1273,10 +1278,21 @@ int64_t PosProducer::DriveRound()
         // (otherwise it would be stranded in the gossip path, unable to reach a
         // full quorum). In steady state Bitcoin is slower than the slot, so the
         // gap is never met and this stays a strict quorum.
-        const int min_members =
-            (g_con_bitcoin_anchor &&
-             PosEscapingStallAllowed(tip->m_anchor_height, backed->m_anchor_height))
-            ? 1 : PosSlotQuorum(StakeRegistry::GetInstance());
+        const int quorum = PosSlotQuorum(StakeRegistry::GetInstance());
+        bool escaping_stall = g_con_bitcoin_anchor &&
+            PosEscapingStallAllowed(tip->m_anchor_height, backed->m_anchor_height);
+        // Escaping-stall real-time evidence (anchor.h, incident 2026-07-17):
+        // consensus additionally requires a parent-chain MTP gap for sub-quorum
+        // blocks, so honor it here too or the produced block is rejected
+        // network-wide. Only consulted when the relaxation would actually be
+        // used (shares below quorum) — a rare, genuinely-stalled situation —
+        // and the MTP lookups are cached, so the parent-daemon RPC under the
+        // gossip lock is a one-shot.
+        if (escaping_stall && (int)m_collected.size() < quorum &&
+            CheckEscapingStallMtpGap(tip->m_anchor_hash, backed->m_anchor_hash) != EscapeStallTimeVerdict::ALLOWED) {
+            escaping_stall = false;
+        }
+        const int min_members = escaping_stall ? 1 : quorum;
         if (m_round_height == height && m_backed_hash == backed->GetHash() &&
             (int)m_collected.size() >= min_members) {
             CScript::const_iterator pc = backed->proof.solution.begin();
