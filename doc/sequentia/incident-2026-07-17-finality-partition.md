@@ -158,6 +158,34 @@ updating the dominant producers closes the window.
   yet (the incident's 25504 anchored a seconds-old tip), which is exactly why
   the MTP gate and the reconciliation exist as the next layers.
 
+## Live verification (2026-07-18, the partitioned node itself)
+
+The v23.3.6 binary was deployed on the live pinned node (finalized at 25558,
+network ~4800 blocks ahead). Observed:
+
+* **Rival storage works.** Headers of the network branch were accepted past
+  the local finalized point within seconds of startup (pre-fix they were
+  rejected at accept time, which is what made the partition permanent) and
+  bodies streamed in through the ordinary block-download path.
+* **The MTP gate works.** The node's producer kept proposing on the dead
+  branch but could no longer self-certify sub-quorum blocks (it had minted
+  eight overnight on the pre-fix binary; zero after the upgrade).
+* **The node healed.** Eleven minutes after startup it disconnected its dead
+  branch (84 blocks, left as valid-but-inactive history — no invalidation, as
+  designed), adopted the network's 25504′ and re-armed its finality on the
+  network branch (25504′ is quorum-certified, so `UpdateTip` re-established
+  the finalized point there immediately), then caught up to the network tip
+  with hashes identical to the explorer's.
+* **Honesty note:** the heal went through the *restart* path, not the
+  monitor's release. After a restart the finalized point is unarmed until the
+  first block connects (pre-existing behavior, unchanged by this fix), so
+  once the rival bodies out-worked the dead tip, ordinary fork choice adopted
+  them without needing a release — possible at all only because the fix now
+  stores the rival branch. The monitor (`tracking` → `released`) is the path
+  for a pinned node that keeps running without a restart; it is covered by
+  review and by the activation-gate/monitor logic sharing the same predicate,
+  but this live incident did not exercise its release step.
+
 ## Operator quick reference
 
 * Am I partitioned? `elements-cli getanchorstatus` → `anchorstatus: "ok"`
@@ -166,6 +194,8 @@ updating the dominant producers closes the window.
   against the explorer with `getblockhash <h>` vs `/api/block-height/<h>`,
   then `getblockheader <hash>` and compare `poscountersigs`/`posquorum` and
   the anchors of the first divergent blocks.
-* With v23.3.6+ the node heals itself ~10 minutes after the conditions are
-  met; the pre-fix manual recovery (`invalidateblock` on the local first
-  divergent block) is no longer needed.
+* With v23.3.6+ the node heals itself: a running pinned node via the
+  reconciliation monitor (~`-posreconcilepatience` after the rival evidence
+  is complete), a restarted one as soon as the rival bodies sync. The
+  pre-fix manual recovery (`invalidateblock` on the local first divergent
+  block) is no longer needed.
