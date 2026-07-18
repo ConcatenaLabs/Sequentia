@@ -70,6 +70,7 @@
 #include <dynafed.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <numeric>
 #include <optional>
