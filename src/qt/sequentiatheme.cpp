@@ -6,6 +6,7 @@
 
 #include <QApplication>
 #include <QFile>
+#include <QFont>
 #include <QPalette>
 #include <QStyleFactory>
 
@@ -17,6 +18,24 @@ void Apply(QApplication& app)
     // consistently across platforms; the native Windows style ignores most of
     // it, which is why the app used to look pale there.
     app.setStyle(QStyleFactory::create("Fusion"));
+
+    // Bump the base reading size ~15% above the platform default. The default
+    // (typically 9pt on Windows) is cramped for a wallet a non-technical user
+    // reads all day. Scaling the existing font rather than pinning an absolute
+    // size keeps it proportional to the machine's DPI and locale defaults, and
+    // every widget inherits it because this runs before any window is created.
+    // Point sizes bumped elsewhere relative to the current font (page titles,
+    // the balance headline) scale along with it, staying in proportion.
+    {
+        QFont f = app.font();
+        const qreal kFontScale = 1.15;
+        if (f.pointSizeF() > 0) {
+            f.setPointSizeF(f.pointSizeF() * kFontScale);
+        } else if (f.pixelSize() > 0) {
+            f.setPixelSize(qRound(f.pixelSize() * kFontScale));
+        }
+        app.setFont(f);
+    }
 
     QPalette pal;
     pal.setColor(QPalette::Window,          Bg());

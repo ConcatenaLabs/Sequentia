@@ -37,6 +37,7 @@
 #include <QLocale>
 #include <QPainter>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QShowEvent>
 #include <QStringList>
 #include <QTableWidget>
@@ -115,9 +116,23 @@ void BlockStripe::paintEvent(QPaintEvent*)
 StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
     : QWidget(parent), m_platform_style(platformStyle)
 {
-    QVBoxLayout* layout = new QVBoxLayout(this);
+    // The page is a tall stack of cards; host it in a scroll area so a larger
+    // font (or a shrunk window) can never clip the lower sections, and so this
+    // page imposes only a small minimum height on the main window instead of
+    // its full content height.
+    QVBoxLayout* outer = new QVBoxLayout(this);
+    outer->setContentsMargins(0, 0, 0, 0);
+    QScrollArea* scroll = new QScrollArea(this);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    outer->addWidget(scroll);
+    QWidget* content = new QWidget(scroll);
+    scroll->setWidget(content);
 
-    QLabel* title = new QLabel(tr("Staking"), this);
+    QVBoxLayout* layout = new QVBoxLayout(content);
+
+    QLabel* title = new QLabel(tr("Staking"), content);
     QFont tf = title->font();
     tf.setPointSizeF(tf.pointSizeF() * 1.4);
     tf.setBold(true);
