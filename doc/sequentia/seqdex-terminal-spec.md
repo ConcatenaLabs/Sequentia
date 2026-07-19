@@ -183,6 +183,26 @@ where the offer allows and is labeled as such. Never a silent "Pending."
 The user never selects a row here. They set pay + receive; the backend selects the row
 and inserts the LSP only where the counterparty disagrees.
 
+### The BTC leg: NATIVE BTC, and the silent SBTC peg for *resting* orders
+
+**Sequentia uses NATIVE Bitcoin, not a pegged BTC (unlike Liquid).** Native BTC is the
+distinct, privileged asset (the only asset shown at 0 in a fresh wallet, top of the
+send/receive dropdowns) and it stays that way — nothing here defaults to or replaces it
+with a pegged asset.
+
+There is exactly ONE narrow reason a pegged form is needed: **Bitcoin has no covenants,
+Elements does.** So an on-chain-BTC **LIMIT** order cannot rest on the DEX while the user
+is offline (there is nothing on Bitcoin to hold it). For that case only, the order is
+handled by a **SILENT peg**: the user's real BTC is pegged in to **SBTC** (via the
+existing Elements peg-in/out — not a new bridge, no third-party fronted inventory), the
+SBTC rests in a covenant (partial-fillable, offline-liftable), and on fill the SBTC is
+pegged out so the **counterparty receives real BTC**. It is transparent — the user places
+and receives native BTC; SBTC is an implementation detail of a resting order. A MARKET
+taker paying real BTC settles interactively (online) and needs no peg. SBTC is otherwise a
+normal, unprivileged Sequentia asset, and the same peg-in/out is exposed publicly (e.g.
+confidential-tx wrapping). This mechanism must be designed WITH the user and only after
+verifying the existing Elements peg operates on Sequentia's anchored-PoS chain.
+
 ---
 
 ## 6. The composer (control by control)
