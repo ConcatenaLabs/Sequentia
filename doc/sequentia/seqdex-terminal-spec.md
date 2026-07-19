@@ -193,15 +193,20 @@ with a pegged asset.
 There is exactly ONE narrow reason a pegged form is needed: **Bitcoin has no covenants,
 Elements does.** So an on-chain-BTC **LIMIT** order cannot rest on the DEX while the user
 is offline (there is nothing on Bitcoin to hold it). For that case only, the order is
-handled by a **SILENT peg**: the user's real BTC is pegged in to **SBTC** (via the
-existing Elements peg-in/out — not a new bridge, no third-party fronted inventory), the
-SBTC rests in a covenant (partial-fillable, offline-liftable), and on fill the SBTC is
-pegged out so the **counterparty receives real BTC**. It is transparent — the user places
-and receives native BTC; SBTC is an implementation detail of a resting order. A MARKET
-taker paying real BTC settles interactively (online) and needs no peg. SBTC is otherwise a
-normal, unprivileged Sequentia asset, and the same peg-in/out is exposed publicly (e.g.
-confidential-tx wrapping). This mechanism must be designed WITH the user and only after
-verifying the existing Elements peg operates on Sequentia's anchored-PoS chain.
+handled by a **SILENT peg**: the user's real BTC is pegged in to **SBTC**, the SBTC rests
+in a covenant (partial-fillable, offline-liftable), and on fill the SBTC is pegged out so
+the **counterparty receives real BTC**. It is transparent — the user places and receives
+native BTC; SBTC is an implementation detail of a resting order. A MARKET taker paying real
+BTC settles interactively (online) and needs no peg.
+
+SBTC is **NOT** Elements' native consensus peg (dormant here, federation-based, coupled to
+the policy asset). It is an **independent, application-level bridge** — a normal reissuable
+Sequentia asset whose reissuance token is held by a fixed N-of-M operator multisig that also
+custodies the reserve BTC on Bitcoin, no closer to consensus than any third-party bridge, so
+there is zero consensus change. It is a **trusted** bridge (no BTC peg can be trustless
+without Bitcoin covenants). SBTC is otherwise a normal, UNPRIVILEGED asset (native BTC stays
+privileged), and its wrap/unwrap is exposed publicly (e.g. confidential-tx use). Full design:
+`sbtc-peg-design.md`.
 
 ---
 
