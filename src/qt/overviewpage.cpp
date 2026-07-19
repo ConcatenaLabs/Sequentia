@@ -23,20 +23,26 @@
 
 #include <QAbstractItemDelegate>
 #include <QApplication>
+#include <QColor>
 #include <QDateTime>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QHeaderView>
 #include <QLabel>
 #include <QPainter>
 #include <QPointer>
 #include <QPushButton>
 #include <QStatusTipEvent>
+#include <QTableWidget>
+#include <QTableWidgetItem>
 #include <QTimer>
 #include <QVBoxLayout>
 
 #include <algorithm>
 #include <map>
+#include <set>
 #include <thread>
+#include <vector>
 
 #define DECORATION_SIZE 54
 #define NUM_ITEMS 5
@@ -147,6 +153,12 @@ private:
 
 #include <qt/overviewpage.moc>
 
+namespace {
+// Columns of the per-asset balances table. Pending/Immature are hidden when no asset has
+// any such amount, so the common case reads as a clean Asset | Available | Value table.
+enum AssetCol { COL_ASSET = 0, COL_AVAILABLE, COL_PENDING, COL_IMMATURE, COL_VALUE, COL_COUNT };
+} // namespace
+
 OverviewPage::OverviewPage(const PlatformStyle *platformStyle, QWidget *parent) :
     QWidget(parent),
     ui(new Ui::OverviewPage),
@@ -171,6 +183,13 @@ OverviewPage::OverviewPage(const PlatformStyle *platformStyle, QWidget *parent) 
     ui->listTransactions->setAttribute(Qt::WA_MacShowFocusRect, false);
 
     connect(ui->listTransactions, &TransactionOverviewWidget::clicked, this, &OverviewPage::handleTransactionClicked);
+
+    // Sequentia: the Overview no longer duplicates a "Recent transactions" list — the
+    // dedicated Transactions tab now carries the full, filterable history (with fees as
+    // sub-entries). Hide the whole panel so the Balances panel owns the page. The list
+    // machinery above is left wired (harmless, unshown) to keep the transactionClicked
+    // signal other views connect to intact.
+    ui->frame_2->setVisible(false);
 
     // start with displaying the "out of sync" warnings
     showOutOfSyncWarning(true);
@@ -224,6 +243,35 @@ OverviewPage::OverviewPage(const PlatformStyle *platformStyle, QWidget *parent) 
         m_total_value->setVisible(false);
         // Row 1 of the panel: under the "Balances" title, above the amounts.
         ui->verticalLayout_4->insertWidget(1, m_total_value);
+    }
+
+    // Sequentia: replace the old amount+id label grid (where a token quantity and a 64-hex
+    // asset id ran together with no headers — you could not tell which was which) with a
+    // proper labelled table: Asset | Available | Pending | Immature | Value. The scroll-area
+    // grid is retired; the table carries its own scrollbar when there are many assets.
+    {
+        ui->scrollArea->setVisible(false);
+
+        m_asset_table = new QTableWidget(0, COL_COUNT, ui->frame);
+        m_asset_table->setHorizontalHeaderLabels({tr("Asset"), tr("Available"), tr("Pending"), tr("Immature"), tr("Value")});
+        m_asset_table->horizontalHeader()->setSectionResizeMode(COL_ASSET, QHeaderView::Stretch);
+        m_asset_table->horizontalHeader()->setSectionResizeMode(COL_AVAILABLE, QHeaderView::ResizeToContents);
+        m_asset_table->horizontalHeader()->setSectionResizeMode(COL_PENDING, QHeaderView::ResizeToContents);
+        m_asset_table->horizontalHeader()->setSectionResizeMode(COL_IMMATURE, QHeaderView::ResizeToContents);
+        m_asset_table->horizontalHeader()->setSectionResizeMode(COL_VALUE, QHeaderView::ResizeToContents);
+        m_asset_table->horizontalHeader()->setHighlightSections(false);
+        m_asset_table->verticalHeader()->setVisible(false);
+        m_asset_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        m_asset_table->setSelectionBehavior(QAbstractItemView::SelectRows);
+        m_asset_table->setSelectionMode(QAbstractItemView::NoSelection);
+        m_asset_table->setFocusPolicy(Qt::NoFocus);
+        m_asset_table->setShowGrid(false);
+        m_asset_table->setWordWrap(false);
+        m_asset_table->setAlternatingRowColors(true);
+        m_asset_table->setMinimumHeight(120);
+        // Insert where the retired scroll area sat: under the total-value headline, above the
+        // tBTC separator/label that setBalance appends below the asset rows.
+        ui->verticalLayout_4->insertWidget(2, m_asset_table);
     }
 
     // Parent-chain (Bitcoin testnet4) balance, shown inside the Balances panel rather
@@ -281,26 +329,7 @@ void OverviewPage::setBalance(const interfaces::WalletBalances& balances)
     int unit = walletModel->getOptionsModel()->getDisplayUnit();
     m_balances = balances;
 
-    // SEQUENTIA: each asset line carries its own muted "≈ <value> <REF>" in the chosen
-    // reference currency. In privacy mode we fall back to the plain (value-less) format so
-    // the masked balance isn't leaked via the ≈.
     const QString refCur = walletModel->getOptionsModel()->getReferenceCurrency();
-    auto perAsset = [&](const CAmountMap& m) -> QString {
-        if (m_privacy)
-            return GUIUtil::formatMultiAssetAmount(m, unit, BitcoinUnits::SeparatorStyle::ALWAYS, "\n");
-        return GUIUtil::formatMultiAssetAmountWithValue(m, unit, BitcoinUnits::SeparatorStyle::ALWAYS, refCur, "\n");
-    };
-    // Total rows: per-asset values, plus a summed grand total — but only when 2+ assets are
-    // valued, otherwise the grand total just repeats the single asset's per-line value.
-    auto withTotalValue = [&](const CAmountMap& m) -> QString {
-        const QString s = perAsset(m);
-        if (m_privacy) return s;
-        int valued = 0;
-        for (const auto& it : m) if (it.second > 0) ++valued;
-        if (valued < 2) return s;
-        const QString r = GUIUtil::formatMultiAssetReferenceApprox(m, refCur);
-        return r.isEmpty() ? s : (s + "\n" + r);
-    };
 
     // The headline: everything spendable plus everything still confirming, valued
     // in one number. Hidden in privacy mode (it would unmask the masked rows).
@@ -333,41 +362,129 @@ void OverviewPage::setBalance(const interfaces::WalletBalances& balances)
         m_total_value->setVisible(!m_privacy && !text.isEmpty());
     }
 
-    if (walletModel->wallet().isLegacy()) {
-        if (walletModel->wallet().privateKeysDisabled()) {
-            ui->labelBalance->setText(perAsset(balances.watch_only_balance));
-            ui->labelUnconfirmed->setText(perAsset(balances.unconfirmed_watch_only_balance));
-            ui->labelImmature->setText(perAsset(balances.immature_watch_only_balance));
-            ui->labelTotal->setText(withTotalValue(balances.watch_only_balance + balances.unconfirmed_watch_only_balance + balances.immature_watch_only_balance));
-        } else {
-            ui->labelBalance->setText(perAsset(balances.balance));
-            ui->labelUnconfirmed->setText(perAsset(balances.unconfirmed_balance));
-            ui->labelImmature->setText(perAsset(balances.immature_balance));
-            ui->labelTotal->setText(withTotalValue(balances.balance + balances.unconfirmed_balance + balances.immature_balance));
-            ui->labelWatchAvailable->setText(perAsset(balances.watch_only_balance));
-            ui->labelWatchPending->setText(perAsset(balances.unconfirmed_watch_only_balance));
-            ui->labelWatchImmature->setText(perAsset(balances.immature_watch_only_balance));
-            ui->labelWatchTotal->setText(withTotalValue(balances.watch_only_balance + balances.unconfirmed_watch_only_balance + balances.immature_watch_only_balance));
-        }
+    populateAssetTable(balances, unit, refCur);
+}
+
+void OverviewPage::populateAssetTable(const interfaces::WalletBalances& balances, int unit, const QString& refCur)
+{
+    if (!m_asset_table) return;
+
+    QTableWidget* t = m_asset_table;
+    t->setRowCount(0);
+
+    bool anyPending = false;
+    bool anyImmature = false;
+
+    // Amount in map `m` for asset `a`, 0 if absent.
+    auto get = [](const CAmountMap& m, const CAsset& a) -> CAmount {
+        auto it = m.find(a);
+        return it != m.end() ? it->second : 0;
+    };
+    // A right-aligned amount cell, blank for zero, masked in privacy mode. The asset name is
+    // in the Asset column, so the number itself is rendered without any asset suffix.
+    auto amountCell = [&](const CAsset& asset, CAmount v) -> QTableWidgetItem* {
+        QString s;
+        if (m_privacy && v > 0) s = QString::fromUtf8("\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2"); // "••••"
+        else if (v > 0)         s = GUIUtil::formatAssetAmount(asset, v, unit, BitcoinUnits::SeparatorStyle::ALWAYS, false);
+        auto* item = new QTableWidgetItem(s);
+        item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        return item;
+    };
+    auto addRow = [&](const CAsset& asset, CAmount avail, CAmount pending, CAmount immature, const QString& suffix) {
+        const CAmount total = avail + pending + immature;
+        if (total <= 0) return;
+        const int row = t->rowCount();
+        t->insertRow(row);
+
+        // Asset: registry name when known, else the id elided in the middle with the full
+        // 64-hex id on hover. This is the disambiguation — the id can never be mistaken for
+        // the quantity, which lives in its own labelled, right-aligned column.
+        const bool named = GUIUtil::assetIsNamed(asset);
+        const QString fullId = QString::fromStdString(asset.GetHex());
+        const QString name = GUIUtil::assetDisplayName(asset);
+        auto* a0 = new QTableWidgetItem((named ? name : GUIUtil::ellipsizeMiddle(fullId)) + suffix);
+        a0->setToolTip(named ? (name + "\n" + fullId) : fullId);
+        t->setItem(row, COL_ASSET, a0);
+
+        t->setItem(row, COL_AVAILABLE, amountCell(asset, avail));
+        t->setItem(row, COL_PENDING, amountCell(asset, pending));
+        t->setItem(row, COL_IMMATURE, amountCell(asset, immature));
+        if (pending > 0) anyPending = true;
+        if (immature > 0) anyImmature = true;
+
+        // Value of everything held of this asset (available + pending + immature) in the
+        // chosen reference currency. Blank ("—", muted) when the asset has no published price
+        // or is itself the reference. Suppressed in privacy mode (it would unmask the amount).
+        QString val;
+        if (!m_privacy) val = GUIUtil::formatReferenceApprox(asset, total, refCur);
+        auto* v = new QTableWidgetItem(val.isEmpty() ? QString::fromUtf8("\xE2\x80\x94") : val); // "—"
+        v->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        if (val.isEmpty()) v->setForeground(QColor("#9b988e"));
+        t->setItem(row, COL_VALUE, v);
+    };
+    // Add one row per asset held across the three maps, native (tSEQ/SEQ) first, then the rest
+    // in id order. `suffix` marks watch-only rows.
+    auto addSection = [&](const CAmountMap& avail, const CAmountMap& pending, const CAmountMap& immature, const QString& suffix) {
+        std::vector<CAsset> order;
+        std::set<CAsset> seen;
+        auto consider = [&](const CAsset& a) { if (seen.insert(a).second) order.push_back(a); };
+        if (get(avail, ::policyAsset) + get(pending, ::policyAsset) + get(immature, ::policyAsset) > 0) consider(::policyAsset);
+        for (const auto& it : avail)    if (it.second > 0) consider(it.first);
+        for (const auto& it : pending)  if (it.second > 0) consider(it.first);
+        for (const auto& it : immature) if (it.second > 0) consider(it.first);
+        for (const CAsset& a : order) addRow(a, get(avail, a), get(pending, a), get(immature, a), suffix);
+    };
+
+    if (walletModel->wallet().privateKeysDisabled()) {
+        // Watch-only wallet: the "watch-only" maps are the only balances it has.
+        addSection(balances.watch_only_balance, balances.unconfirmed_watch_only_balance, balances.immature_watch_only_balance, QString());
     } else {
-        ui->labelBalance->setText(perAsset(balances.balance));
-        ui->labelUnconfirmed->setText(perAsset(balances.unconfirmed_balance));
-        ui->labelImmature->setText(perAsset(balances.immature_balance));
-        ui->labelTotal->setText(withTotalValue(balances.balance + balances.unconfirmed_balance + balances.immature_balance));
+        addSection(balances.balance, balances.unconfirmed_balance, balances.immature_balance, QString());
+        // Any watch-only holdings follow, tagged so they are not confused with spendable ones.
+        addSection(balances.watch_only_balance, balances.unconfirmed_watch_only_balance, balances.immature_watch_only_balance, tr(" (watch-only)"));
     }
-    // only show immature (newly mined) balance if it's non-zero, so as not to complicate things
-    // for the non-mining users
-    bool showImmature = !!balances.immature_balance;
-    bool showWatchOnlyImmature = !!balances.immature_watch_only_balance;
 
-    // for symmetry reasons also show immature label when the watch-only one is shown
-    ui->labelImmature->setVisible(showImmature || showWatchOnlyImmature);
-    ui->labelImmatureText->setVisible(showImmature || showWatchOnlyImmature);
-    ui->labelWatchImmature->setVisible(!walletModel->wallet().privateKeysDisabled() && showWatchOnlyImmature); // show watch-only immature balance
+    // Hide the Pending/Immature columns entirely when nothing needs them, so the everyday case
+    // reads as a clean Asset | Available | Value table.
+    t->setColumnHidden(COL_PENDING, !anyPending);
+    t->setColumnHidden(COL_IMMATURE, !anyImmature);
+    // With no holdings the "No assets yet" headline says it; an empty header-only grid would
+    // just be noise, so hide the table until there is at least one row.
+    t->setVisible(t->rowCount() > 0);
+    t->resizeRowsToContents();
 
-    // Resize the QScrollArea content widget
-    QSize grid_size = ui->gridLayout->sizeHint();
-    ui->scrollAreaWidgetContents->setMinimumSize(grid_size);
+    // Remember what we just drew, so the status-timer refresh can tell whether a later
+    // registry/price update would actually change anything before rebuilding.
+    m_asset_sig = assetTableSignature(balances, refCur);
+}
+
+QString OverviewPage::assetTableSignature(const interfaces::WalletBalances& balances, const QString& refCur) const
+{
+    auto get = [](const CAmountMap& m, const CAsset& a) -> CAmount {
+        auto it = m.find(a);
+        return it != m.end() ? it->second : 0;
+    };
+    QString sig = refCur + (m_privacy ? QStringLiteral("|P") : QStringLiteral("|."));
+    auto section = [&](const CAmountMap& av, const CAmountMap& pe, const CAmountMap& im) {
+        std::set<CAsset> seen;
+        auto one = [&](const CAsset& a) {
+            if (!seen.insert(a).second) return;
+            const CAmount tot = get(av, a) + get(pe, a) + get(im, a);
+            if (tot <= 0) return;
+            sig += QStringLiteral("|") + GUIUtil::assetDisplayName(a)
+                 + QStringLiteral("=") + GUIUtil::formatReferenceApprox(a, tot, refCur);
+        };
+        for (const auto& it : av) if (it.second > 0) one(it.first);
+        for (const auto& it : pe) if (it.second > 0) one(it.first);
+        for (const auto& it : im) if (it.second > 0) one(it.first);
+    };
+    if (walletModel->wallet().privateKeysDisabled()) {
+        section(balances.watch_only_balance, balances.unconfirmed_watch_only_balance, balances.immature_watch_only_balance);
+    } else {
+        section(balances.balance, balances.unconfirmed_balance, balances.immature_balance);
+        section(balances.watch_only_balance, balances.unconfirmed_watch_only_balance, balances.immature_watch_only_balance);
+    }
+    return sig;
 }
 
 // show/hide watch-only labels
@@ -444,6 +561,16 @@ void OverviewPage::updateSeqStatus()
 {
     if (!walletModel) return;
     interfaces::Node& node = walletModel->node();
+
+    // Asset names (registry) and reference prices arrive from the node's feeds a few seconds
+    // after startup, and prices refresh periodically thereafter. The balances table is otherwise
+    // only rebuilt on a wallet balanceChanged, so without this it would keep showing raw asset
+    // ids and blank values until the next wallet event. Rebuild only when the rendered content
+    // would actually change, so the steady state doesn't flicker every tick.
+    if (m_asset_table && m_balances.balance[::policyAsset] != -1) {
+        const QString refCur = walletModel->getOptionsModel()->getReferenceCurrency();
+        if (assetTableSignature(m_balances, refCur) != m_asset_sig) setBalance(m_balances);
+    }
 
     // Periodically re-scan the parent chain for the dual (tBTC) balance. The status
     // timer fires every 8s; refresh roughly once a minute so the slow scantxoutset
