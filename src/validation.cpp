@@ -70,6 +70,8 @@
 #include <dynafed.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <numeric>
 #include <optional>
 #include <string>
@@ -2319,6 +2321,21 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
         if ((int)named.size() < min_members) {
             return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-agg-quorum", "fewer named committee members than the certification quorum");
         }
+        // Escaping-stall real-time evidence (anchor.h, incident 2026-07-17): a
+        // sub-quorum block must also show a parent-chain MTP gap — an anchor
+        // HEIGHT gap alone is met within seconds during a difficulty-1
+        // block-storm, with the chain fully alive. Only evaluated when the
+        // relaxation is actually exercised (named set below quorum), so
+        // certified blocks never pay the (cached) parent-daemon lookup.
+        if (escaping_stall && (int)named.size() < quorum) {
+            switch (CheckEscapingStallMtpGap(pindexPrev->m_anchor_hash, block.m_anchor_hash)) {
+            case EscapeStallTimeVerdict::ALLOWED: break;
+            case EscapeStallTimeVerdict::TOO_SOON:
+                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-pos-escape-stall-too-soon", "sub-quorum block without the escaping-stall parent-chain time gap");
+            case EscapeStallTimeVerdict::UNKNOWN:
+                return state.Invalid(BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE, "pos-escape-stall-unverifiable", "cannot verify the escaping-stall parent-chain time gap");
+            }
+        }
         // Cap the named set before any VRF verification: a leader must not be
         // able to stuff the coinbase with bogus commitments that amplify into
         // unbounded EC work on every validator.
@@ -2382,6 +2399,17 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
             if (signers < min_members) {
                 return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-agg-quorum", "fewer BLS committee members than the certification quorum");
             }
+            // Escaping-stall real-time evidence (anchor.h, incident 2026-07-17):
+            // see the aggregate-MuSig2 path above for the rationale.
+            if (escaping_stall && signers < quorum) {
+                switch (CheckEscapingStallMtpGap(pindexPrev->m_anchor_hash, block.m_anchor_hash)) {
+                case EscapeStallTimeVerdict::ALLOWED: break;
+                case EscapeStallTimeVerdict::TOO_SOON:
+                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-pos-escape-stall-too-soon", "sub-quorum block without the escaping-stall parent-chain time gap");
+                case EscapeStallTimeVerdict::UNKNOWN:
+                    return state.Invalid(BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE, "pos-escape-stall-unverifiable", "cannot verify the escaping-stall parent-chain time gap");
+                }
+            }
         }
     } else if (parts->is_bls) {
         // The committee certificate lives in the proof solution. An unsigned
@@ -2408,6 +2436,17 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
             const int min_members = escaping_stall ? 1 : quorum;
             if ((int)named.size() < min_members) {
                 return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-agg-quorum", "fewer BLS committee members than the certification quorum");
+            }
+            // Escaping-stall real-time evidence (anchor.h, incident 2026-07-17):
+            // see the aggregate-MuSig2 path above for the rationale.
+            if (escaping_stall && (int)named.size() < quorum) {
+                switch (CheckEscapingStallMtpGap(pindexPrev->m_anchor_hash, block.m_anchor_hash)) {
+                case EscapeStallTimeVerdict::ALLOWED: break;
+                case EscapeStallTimeVerdict::TOO_SOON:
+                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-pos-escape-stall-too-soon", "sub-quorum block without the escaping-stall parent-chain time gap");
+                case EscapeStallTimeVerdict::UNKNOWN:
+                    return state.Invalid(BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE, "pos-escape-stall-unverifiable", "cannot verify the escaping-stall parent-chain time gap");
+                }
             }
             if ((int)named.size() > PosMaxCommitteeMembers()) {
                 return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-member-count", "more BLS committee members than the aggregate committee cap");
@@ -3314,6 +3353,41 @@ void ForceUntrimHeader(const CBlockIndex *pindex_) EXCLUSIVE_LOCKS_REQUIRED(::cs
 // height -1 when none. Maintained under cs_main.
 static int g_pos_immediate_final_height GUARDED_BY(::cs_main) = -1;
 static uint256 g_pos_immediate_final_hash GUARDED_BY(::cs_main);
+// SEQUENTIA finality reconciliation (anchor.h "Change 4b"): the release token.
+// When set, the activation-time finality gate may cross the finalized point
+// for chains that contain this quorum-certified rival block. -1 = no release.
+static int g_pos_reconcile_release_height GUARDED_BY(::cs_main) = -1;
+static uint256 g_pos_reconcile_release_hash GUARDED_BY(::cs_main);
+// Steady-clock seconds at the last advance of the finality point (0 = never).
+static std::atomic<int64_t> g_pos_final_advance_steady{0};
+
+bool PosGetImmediateFinalPoint(int& height, uint256& hash)
+{
+    AssertLockHeld(::cs_main);
+    if (g_pos_immediate_final_height < 0) return false;
+    height = g_pos_immediate_final_height;
+    hash = g_pos_immediate_final_hash;
+    return true;
+}
+
+int64_t PosGetFinalAdvanceSteadyTime()
+{
+    return g_pos_final_advance_steady.load(std::memory_order_relaxed);
+}
+
+void PosStampFinalAdvanceNow()
+{
+    const int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    g_pos_final_advance_steady.store(now, std::memory_order_relaxed);
+}
+
+void PosSetReconcileRelease(int height, const uint256& hash)
+{
+    AssertLockHeld(::cs_main);
+    g_pos_reconcile_release_height = height;
+    g_pos_reconcile_release_hash = hash;
+}
 
 void CChainState::UpdateTip(const CBlockIndex* pindexNew)
 {
@@ -3341,12 +3415,29 @@ void CChainState::UpdateTip(const CBlockIndex* pindexNew)
     // leave no immediate-final point until a quorum block is connected.
     if (g_con_pos) {
         const int quorum = PosSlotQuorum(StakeRegistry::GetInstance());
+        const int old_final_height = g_pos_immediate_final_height;
         g_pos_immediate_final_height = -1;
         for (const CBlockIndex* f = pindexNew; f && f->nHeight > 0; f = f->pprev) {
             if ((int)f->m_pos_countersigs >= quorum) {
                 g_pos_immediate_final_height = f->nHeight;
                 g_pos_immediate_final_hash = f->GetBlockHash();
                 break;
+            }
+        }
+        // Reconciliation (anchor.h): a RISING finalized point means a
+        // quorum-certified block extended this chain — our branch is alive, so
+        // restart the abandonment patience clock.
+        if (g_pos_immediate_final_height > old_final_height) {
+            PosStampFinalAdvanceNow();
+        }
+        // Release token consumed: once the active chain contains the released
+        // rival block the reorg has happened and the recomputed finalized point
+        // protects the adopted branch. Clear so the gate is airtight again.
+        if (g_pos_reconcile_release_height >= 0 && pindexNew->nHeight >= g_pos_reconcile_release_height) {
+            const CBlockIndex* anc = pindexNew->GetAncestor(g_pos_reconcile_release_height);
+            if (anc && anc->GetBlockHash() == g_pos_reconcile_release_hash) {
+                g_pos_reconcile_release_height = -1;
+                g_pos_reconcile_release_hash.SetNull();
             }
         }
     }
@@ -3631,6 +3722,44 @@ CBlockIndex* CChainState::FindMostWorkChain()
             if (it == setBlockIndexCandidates.rend())
                 return nullptr;
             pindexNew = *it;
+        }
+
+        // SEQUENTIA immediate finality, enforced at ACTIVATION (doc 04 §6 and
+        // anchor.h "finality reconciliation"): never activate a candidate that
+        // forks at/below the finalized point. The accept-time gate
+        // (ContextualCheckBlockHeader) already rejects such headers when
+        // reconciliation is off; this activation-time twin (a) closes the
+        // window where a rival was indexed BEFORE local finalization and could
+        // win purely on the comparator, and (b) is the enforcement point when
+        // reconciliation is on, where rival branches ARE stored so their
+        // quorum certificates can be examined — stored, but inactivatable
+        // until the reconciliation monitor issues a release for them. Skipped
+        // candidates are erased from the set (mirroring the missing-data
+        // path); newly arriving rival blocks re-add themselves, and a release
+        // re-adds the branch via ReaddBlockIndexCandidates.
+        if (g_con_pos && (!g_con_bitcoin_anchor || g_validate_anchor) &&
+            g_pos_immediate_final_height >= 0 && !m_chain.Contains(pindexNew)) {
+            const CBlockIndex* pf = m_blockman.LookupBlockIndex(g_pos_immediate_final_hash);
+            const bool final_standing = pf && !(pf->nStatus & BLOCK_FAILED_MASK);
+            if (final_standing) {
+                const CBlockIndex* anc = pindexNew->GetAncestor(g_pos_immediate_final_height);
+                const bool descends_from_final = pindexNew->nHeight > g_pos_immediate_final_height &&
+                    anc && anc->GetBlockHash() == g_pos_immediate_final_hash;
+                bool released = false;
+                if (!descends_from_final && g_pos_reconcile_release_height >= 0 &&
+                    pindexNew->nHeight >= g_pos_reconcile_release_height) {
+                    const CBlockIndex* rel = pindexNew->GetAncestor(g_pos_reconcile_release_height);
+                    released = rel && rel->GetBlockHash() == g_pos_reconcile_release_hash;
+                }
+                if (!descends_from_final && !released) {
+                    CBlockIndex* pindexGated = pindexNew;
+                    while (pindexGated && !m_chain.Contains(pindexGated)) {
+                        setBlockIndexCandidates.erase(pindexGated);
+                        pindexGated = pindexGated->pprev;
+                    }
+                    continue;
+                }
+            }
         }
 
         // Check whether all blocks on the path between the currently active chain and the candidate are valid.
@@ -4178,6 +4307,18 @@ void CChainState::MarkAnchorInvalid(CBlockIndex* pindex)
     m_blockman.m_dirty_blockindex.insert(pindex);
 }
 
+void CChainState::ReaddBlockIndexCandidates()
+{
+    AssertLockHeld(cs_main);
+    for (const std::pair<const uint256, CBlockIndex*>& item : m_blockman.m_block_index) {
+        CBlockIndex* pindex = item.second;
+        if (pindex->IsValid(BLOCK_VALID_TRANSACTIONS) && pindex->HaveTxsDownloaded() &&
+            (m_chain.Tip() == nullptr || setBlockIndexCandidates.value_comp()(m_chain.Tip(), pindex))) {
+            setBlockIndexCandidates.insert(pindex);
+        }
+    }
+}
+
 /** Mark a block as having its data received and checked (up to BLOCK_VALID_TRANSACTIONS). */
 void CChainState::ReceivedBlockTransactions(const CBlock& block, CBlockIndex* pindexNew, const FlatFilePos& pos)
 {
@@ -4535,7 +4676,15 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
         // chain has no Bitcoin to be modulo of, so the gate is absolute there.
         // See doc/sequentia/04-proof-of-stake.md §6.
         const bool anchor_can_release_finality = (!g_con_bitcoin_anchor || g_validate_anchor);
-        if (anchor_can_release_finality && g_pos_immediate_final_height >= 0) {
+        // With finality reconciliation on (-posreconcile, anchor.h), the gate
+        // moves to ACTIVATION time (FindMostWorkChain): rival headers are
+        // accepted into the index — otherwise their quorum certificates could
+        // never be examined and a finality partition (two rival certified
+        // branches with valid anchors, incident 2026-07-17) would pin this
+        // node forever — but remain inactivatable until the reconciliation
+        // monitor releases the finalized point for them. With reconciliation
+        // off the historical accept-time rejection stands.
+        if (anchor_can_release_finality && !g_pos_reconcile && g_pos_immediate_final_height >= 0) {
             // SEQUENTIA anchoring supremacy (paper §5 Anchoring theorem, §6 immediate
             // finality "unless a change in the status of the Bitcoin blockchain enforces a
             // chain reorganisation", §11 "the Anchoring theorem has priority over

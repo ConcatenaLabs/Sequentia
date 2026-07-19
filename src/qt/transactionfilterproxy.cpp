@@ -34,6 +34,12 @@ bool TransactionFilterProxy::filterAcceptsRow(int sourceRow, const QModelIndex &
     if (!(TYPE(type) & typeFilter))
         return false;
 
+    if (!m_asset_filter.isEmpty()) {
+        QString asset = index.data(TransactionTableModel::AssetRole).toString();
+        if (asset != m_asset_filter)
+            return false;
+    }
+
     bool involvesWatchAddress = index.data(TransactionTableModel::WatchonlyRole).toBool();
     if (involvesWatchAddress && watchOnlyFilter == WatchOnlyFilter_No)
         return false;
@@ -77,6 +83,13 @@ void TransactionFilterProxy::setSearchString(const QString &search_string)
 void TransactionFilterProxy::setTypeFilter(quint32 modes)
 {
     this->typeFilter = modes;
+    invalidateFilter();
+}
+
+void TransactionFilterProxy::setAssetFilter(const QString& assetName)
+{
+    if (m_asset_filter == assetName) return;
+    m_asset_filter = assetName;
     invalidateFilter();
 }
 

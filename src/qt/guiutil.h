@@ -221,6 +221,15 @@ namespace GUIUtil
        (its default pegged-asset name) in selectors and amount labels. */
     QString assetDisplayName(const CAsset& asset);
 
+    /* SEQUENTIA: whether an asset carries a human-readable registry label. False for assets the
+       node has never seen registered — their only identity is the 64-hex id, so the UI must show
+       (and elide) the id rather than a name. The policy asset (tSEQ/SEQ) is always named. */
+    bool assetIsNamed(const CAsset& asset);
+
+    /* Elide a long identifier in the middle for display: "aaaaaaaa…zzzzzzzz". Strings no longer
+       than head+tail+1 are returned unchanged. Put the full value in a tooltip. */
+    QString ellipsizeMiddle(const QString& text, int head = 8, int tail = 8);
+
     /* SEQUENTIA: the number of decimal places to display/parse for an asset — the
        on-chain denomination when known, else the registry precision, else 8. The
        policy asset (SEQ) is always 8. */

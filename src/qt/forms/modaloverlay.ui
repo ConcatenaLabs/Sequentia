@@ -34,46 +34,74 @@
      <property name="styleSheet">
       <string notr="true">#bgWidget { background: rgba(0,0,0,220); }</string>
      </property>
-     <layout class="QVBoxLayout" name="verticalLayoutMain" stretch="1">
+     <layout class="QVBoxLayout" name="verticalLayoutMain" stretch="1,0,1">
       <property name="leftMargin">
-       <number>60</number>
+       <number>26</number>
       </property>
       <property name="topMargin">
-       <number>60</number>
+       <number>26</number>
       </property>
       <property name="rightMargin">
-       <number>60</number>
+       <number>26</number>
       </property>
       <property name="bottomMargin">
-       <number>60</number>
+       <number>26</number>
       </property>
       <item>
-       <widget class="QWidget" name="contentWidget" native="true">
-        <property name="styleSheet">
-         <string notr="true">#contentWidget { background: rgba(255,255,255,240); border-radius: 6px; }
-
-QLabel { color: rgb(40,40,40);  }</string>
+       <spacer name="verticalSpacerTop">
+        <property name="orientation">
+         <enum>Qt::Vertical</enum>
         </property>
-        <layout class="QVBoxLayout" name="verticalLayoutSub" stretch="1,0,0,0">
+        <property name="sizeHint" stdset="0">
+         <size>
+          <width>20</width>
+          <height>10</height>
+         </size>
+        </property>
+       </spacer>
+      </item>
+      <item alignment="Qt::AlignHCenter">
+       <widget class="QWidget" name="contentWidget" native="true">
+        <property name="minimumSize">
+         <size>
+          <width>560</width>
+          <height>0</height>
+         </size>
+        </property>
+        <property name="maximumSize">
+         <size>
+          <width>560</width>
+          <height>16777215</height>
+         </size>
+        </property>
+        <property name="styleSheet">
+         <string notr="true">#contentWidget { background: #1b1b20; border: 1px solid #33333a; border-radius: 8px; }
+
+QLabel { color: #e8e6e0; background: transparent; }</string>
+        </property>
+        <layout class="QVBoxLayout" name="verticalLayoutSub" stretch="0,0,0,0">
          <property name="spacing">
-          <number>0</number>
+          <number>4</number>
          </property>
          <property name="leftMargin">
-          <number>10</number>
+          <number>18</number>
          </property>
          <property name="topMargin">
-          <number>10</number>
+          <number>16</number>
          </property>
          <property name="rightMargin">
-          <number>10</number>
+          <number>18</number>
          </property>
          <property name="bottomMargin">
-          <number>10</number>
+          <number>16</number>
          </property>
          <item>
           <layout class="QHBoxLayout" name="horizontalLayoutIconText" stretch="0,1">
+           <property name="spacing">
+            <number>16</number>
+           </property>
            <property name="topMargin">
-            <number>20</number>
+            <number>4</number>
            </property>
            <item>
             <layout class="QVBoxLayout" name="verticalLayoutIcon">
@@ -112,7 +140,7 @@ QLabel { color: rgb(40,40,40);  }</string>
                <property name="sizeHint" stdset="0">
                 <size>
                  <width>20</width>
-                 <height>40</height>
+                 <height>8</height>
                 </size>
                </property>
               </spacer>
@@ -167,7 +195,7 @@ QLabel { color: rgb(40,40,40);  }</string>
                <property name="sizeHint" stdset="0">
                 <size>
                  <width>20</width>
-                 <height>40</height>
+                 <height>8</height>
                 </size>
                </property>
               </spacer>
@@ -184,7 +212,7 @@ QLabel { color: rgb(40,40,40);  }</string>
            <property name="sizeHint" stdset="0">
             <size>
              <width>20</width>
-             <height>40</height>
+             <height>8</height>
             </size>
            </property>
           </spacer>
@@ -356,6 +384,19 @@ QLabel { color: rgb(40,40,40);  }</string>
          </item>
         </layout>
        </widget>
+      </item>
+      <item>
+       <spacer name="verticalSpacerBottom">
+        <property name="orientation">
+         <enum>Qt::Vertical</enum>
+        </property>
+        <property name="sizeHint" stdset="0">
+         <size>
+          <width>20</width>
+          <height>10</height>
+         </size>
+        </property>
+       </spacer>
       </item>
      </layout>
     </widget>

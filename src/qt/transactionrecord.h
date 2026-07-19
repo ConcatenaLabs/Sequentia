@@ -82,6 +82,7 @@ public:
         SendToSelf,
         Fee,
         IssuedAsset,
+        Staking,
     };
 
     /** Number of confirmation recommended for accepting a transaction */
@@ -124,6 +125,12 @@ public:
 
     /** Subtransaction index, for sort key */
     int idx;
+
+    /** SEQUENTIA: child records shown nested under this one in the tree view.
+     *  Used to hang the transaction's fee(s) under the payment they paid for,
+     *  instead of listing them as standalone top-level rows. Empty for most
+     *  records; the fee-payer record of a transaction carries its fee(s) here. */
+    QList<TransactionRecord> children;
 
     /** Status: can change with block chain update */
     TransactionStatus status;

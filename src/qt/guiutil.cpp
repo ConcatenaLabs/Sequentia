@@ -737,6 +737,24 @@ QString assetDisplayName(const CAsset& asset)
     return QString::fromStdString(gAssetsDir.GetIdentifier(asset));
 }
 
+bool assetIsNamed(const CAsset& asset)
+{
+    // The policy asset is always shown by its ticker (tSEQ/SEQ). Every other asset is
+    // "named" only if the registry carries a human-readable label for it; otherwise its
+    // sole identity is the 64-hex id and it must be shown (and elided) as such.
+    if (asset == ::policyAsset) return true;
+    return !gAssetsDir.GetLabel(asset).empty();
+}
+
+QString ellipsizeMiddle(const QString& text, int head, int tail)
+{
+    // "aaaaaaaa…zzzzzzzz" — keep both ends so the id is still recognisable/verifiable at a
+    // glance, and drop the confusable middle. The full value belongs in a tooltip. Strings
+    // that already fit are returned unchanged (no dangling ellipsis).
+    if (text.size() <= head + tail + 1) return text;
+    return text.left(head) + QString::fromUtf8("\xE2\x80\xA6") + text.right(tail); // "…"
+}
+
 // SEQUENTIA: an asset's decimal places for display/parsing. Non-policy assets
 // honour the denomination recorded in the asset directory (on-chain
 // nDenomination when known, else the registry's precision, else 8). The policy

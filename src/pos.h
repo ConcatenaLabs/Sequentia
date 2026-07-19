@@ -630,7 +630,15 @@ static const uint32_t POS_ESCAPING_STALL_ANCHOR_GAP = 3;
  *  at least POS_ESCAPING_STALL_ANCHOR_GAP blocks — a genuine stall, since a
  *  healthy chain re-anchors only gradually and cannot reference a Bitcoin
  *  block that does not yet exist. Computed purely from the SEQ-committed anchor
- *  heights, so every node agrees. See doc/sequentia/04-proof-of-stake.md. */
+ *  heights, so every node agrees. See doc/sequentia/04-proof-of-stake.md.
+ *
+ *  CAVEAT (incident 2026-07-17): a height gap is NOT a time gap. During a
+ *  testnet4 difficulty-1 block-storm the parent chain advances several heights
+ *  in seconds, so this test alone passes with the chain fully alive (a
+ *  leader-only block was minted 30 s after a quorum-certified parent, seeding
+ *  a finality partition). Consensus therefore ALSO requires the parent-chain
+ *  median-time-past gap between the two anchors (CheckEscapingStallMtpGap,
+ *  anchor.h) whenever the sub-quorum relaxation is actually exercised. */
 inline bool PosEscapingStallAllowed(uint32_t parent_anchor_height, uint32_t block_anchor_height)
 {
     // Subtraction (not addition) avoids any wraparound near UINT32_MAX.

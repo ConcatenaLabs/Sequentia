@@ -37,6 +37,7 @@
 #include <QLocale>
 #include <QPainter>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QShowEvent>
 #include <QStringList>
 #include <QTableWidget>
@@ -115,9 +116,23 @@ void BlockStripe::paintEvent(QPaintEvent*)
 StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
     : QWidget(parent), m_platform_style(platformStyle)
 {
-    QVBoxLayout* layout = new QVBoxLayout(this);
+    // The page is a tall stack of cards; host it in a scroll area so a larger
+    // font (or a shrunk window) can never clip the lower sections, and so this
+    // page imposes only a small minimum height on the main window instead of
+    // its full content height.
+    QVBoxLayout* outer = new QVBoxLayout(this);
+    outer->setContentsMargins(0, 0, 0, 0);
+    QScrollArea* scroll = new QScrollArea(this);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    outer->addWidget(scroll);
+    QWidget* content = new QWidget(scroll);
+    scroll->setWidget(content);
 
-    QLabel* title = new QLabel(tr("Staking"), this);
+    QVBoxLayout* layout = new QVBoxLayout(content);
+
+    QLabel* title = new QLabel(tr("Staking"), content);
     QFont tf = title->font();
     tf.setPointSizeF(tf.pointSizeF() * 1.4);
     tf.setBold(true);
@@ -269,6 +284,12 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
         m_xpub_copy = new QPushButton(tr("Copy"), wo);
         row->addWidget(m_xpub_copy);
         v->addLayout(row);
+        // Shown only when there is no key to show, to explain why rather than
+        // leave a blank field that looks broken.
+        m_xpub_hint = new QLabel(wo);
+        m_xpub_hint->setWordWrap(true);
+        m_xpub_hint->setVisible(false);
+        v->addWidget(m_xpub_hint);
         layout->addWidget(wo);
         connect(m_xpub_copy, &QPushButton::clicked, this, [this] {
             if (!m_xpub || m_xpub->text().isEmpty()) return;
@@ -584,18 +605,31 @@ void StakingPage::refreshWatchOnlyKey()
     if (!m_xpub || !m_xpub->text().isEmpty()) return; // fetched once; it does not change
     bool ok; QString err;
     UniValue descs = callRpc("listdescriptors", UniValue(UniValue::VARR), ok, err);
-    if (!ok || !descs.isObject() || !descs["descriptors"].isArray()) return;
-    // The receiving descriptor carries the wallet's master public key; hand the
-    // whole descriptor over, since that is what a watch-only wallet imports.
-    const UniValue& arr = descs["descriptors"];
-    for (size_t i = 0; i < arr.size(); ++i) {
-        const UniValue& d = arr[i];
-        if (d.exists("internal") && d["internal"].get_bool()) continue;
-        if (!d.exists("desc")) continue;
-        m_xpub->setText(QString::fromStdString(d["desc"].get_str()));
-        m_xpub->setCursorPosition(0);
-        return;
+    if (ok && descs.isObject() && descs["descriptors"].isArray()) {
+        // The receiving descriptor carries the wallet's master public key; hand the
+        // whole descriptor over, since that is what a watch-only wallet imports.
+        const UniValue& arr = descs["descriptors"];
+        for (size_t i = 0; i < arr.size(); ++i) {
+            const UniValue& d = arr[i];
+            if (d.exists("internal") && d["internal"].get_bool()) continue;
+            if (!d.exists("desc")) continue;
+            m_xpub->setText(QString::fromStdString(d["desc"].get_str()));
+            m_xpub->setCursorPosition(0);
+            if (m_xpub_hint) m_xpub_hint->setVisible(false);
+            return;
+        }
     }
+    // listdescriptors failed or returned nothing. The usual reason is a legacy
+    // (pre-descriptor) wallet, which has no single master public key to export;
+    // say so, and what to do about it, rather than leave a blank field that reads
+    // as a bug. A locked wallet reports the same, so mention that too.
+    if (!m_xpub_hint) return;
+    m_xpub->setPlaceholderText(tr("not available for this wallet"));
+    m_xpub_hint->setText(tr("This wallet is a legacy (non-descriptor) wallet, which has no single master "
+                            "public key to hand out. To follow it watch-only, create a new wallet with "
+                            "\"Descriptor wallet\" ticked and move your stake to it, or export individual "
+                            "addresses instead. (If the wallet is simply locked, unlock it and press Refresh.)"));
+    m_xpub_hint->setVisible(true);
 }
 
 void StakingPage::showEvent(QShowEvent* event)

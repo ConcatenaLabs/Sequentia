@@ -683,6 +683,10 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-posbyzantineinvalid", "SEQUENTIA TEST ONLY: make the autonomous producer propose a consensus-invalid block when elected, to test that lazy validation excludes the leader and the committee routes to the next valid one. Never set this on a real node.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-posdebugroundskewms", "SEQUENTIA TEST ONLY: add this many milliseconds of clock skew to the autonomous producer's gossip round scheduler, to measure how much inter-node synchrony loss the round anchor tolerates before rounds desync. Never set this on a real node.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-posanchorrecoverywait=<n>", "SEQUENTIA: seconds the autonomous producer refuses to treat a height as vacant while a quorum-certified block at that height awaits anchor-reorg recovery (committee-equivocation prevention: it neither proposes nor countersigns a rival there). The hold ends early when the block is restored or its anchor is confirmed off the parent chain's best chain; 0 disables the guard. (default: 30)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
+    argsman.AddArg("-posescapestallmtpgap=<n>", strprintf("SEQUENTIA: seconds of parent-chain (Bitcoin) median-time-past that must separate a sub-quorum (escaping-stall) block's anchor from its parent's anchor, in addition to the consensus anchor-height gap. Real-time stall evidence: during a parent-chain block-storm heights advance in seconds, so the height gap alone can be met with the chain fully alive (the 2026-07-17 finality partition). 0 disables. Skipped with -validateanchor=0. (default: %d)", (int)DEFAULT_POS_ESCAPE_STALL_MTP_GAP), ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
+    argsman.AddArg("-posreconcile", "SEQUENTIA: enable the finality reconciliation monitor. When this node's finalized branch has received no quorum-certified block for -posreconcilepatience seconds while a rival branch carries quorum certificates strictly above the local finalized height with anchors settled on the parent best chain, release the local finalized point and adopt the network's branch (heals a finality partition; the local blocks are not invalidated, they become inactive history). Requires -validateanchor. (default: true)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
+    argsman.AddArg("-posreconcilepatience=<n>", strprintf("SEQUENTIA: seconds without a quorum-certified extension of the local chain before the local finalized branch counts as abandoned by the committee (the reconciliation monitor's patience; local steady-clock, not consensus). (default: %d)", (int)DEFAULT_POS_RECONCILE_PATIENCE), ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
+    argsman.AddArg("-posreconcilemindepth=<n>", strprintf("SEQUENTIA: the rival branch's quorum-certified block must be at least this many heights above the local finalized height before reconciliation may release it. (default: %d)", DEFAULT_POS_RECONCILE_MIN_DEPTH), ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-poswindowms=<n>", "SEQUENTIA: gossip proposal-collection window in milliseconds, overriding the per-member formula (500 + 25/member). A LOCAL liveness timing, not a consensus rule: an operator on weak hardware or a slow link can lengthen it freely; a node tuned differently from its peers only risks contributing its own shares late. 0 = formula. (default: 0)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-posroundms=<n>", "SEQUENTIA: gossip round length in milliseconds (how long one leader gets to be certified before the committee moves to the next), overriding the per-member formula (700 + 35/member). A LOCAL liveness timing, like -poswindowms. 0 = formula. (default: 0)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-anchorpollinterval=<n>", strprintf("Seconds between polls of the mainchain daemon for new blocks and reorganizations. Only used when con_bitcoin_anchor is enabled. (default: %d)", DEFAULT_ANCHOR_POLL_INTERVAL), ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
@@ -2190,6 +2194,19 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     // producer thread is running would be an unsynchronized cross-thread write
     // (and a -validateanchor=0 producer could take a pointless first hold).
     g_validate_anchor = gArgs.GetBoolArg("-validateanchor", true);
+
+    // SEQUENTIA: escaping-stall real-time evidence and finality reconciliation
+    // (anchor.h; incident 2026-07-17). Resolved here for the same
+    // before-any-worker-thread reason as g_validate_anchor: the watcher thread
+    // (reconciliation monitor) and the producer (MTP compliance) both read
+    // these from their own threads.
+    g_pos_escape_stall_mtp_gap = std::clamp<int64_t>(
+        gArgs.GetIntArg("-posescapestallmtpgap", DEFAULT_POS_ESCAPE_STALL_MTP_GAP), 0, 7200);
+    g_pos_reconcile = gArgs.GetBoolArg("-posreconcile", true);
+    g_pos_reconcile_patience = std::clamp<int64_t>(
+        gArgs.GetIntArg("-posreconcilepatience", DEFAULT_POS_RECONCILE_PATIENCE), 60, 86400);
+    g_pos_reconcile_min_depth = (int)std::clamp<int64_t>(
+        gArgs.GetIntArg("-posreconcilemindepth", DEFAULT_POS_RECONCILE_MIN_DEPTH), 1, 1000);
 
     // SEQUENTIA PoS: start the autonomous block producer if configured. With
     // one or more staking keys it elects the best-ranked key each round, waits

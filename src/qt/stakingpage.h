@@ -110,6 +110,7 @@ private:
     // --- watch-only key ---
     QLineEdit* m_xpub{nullptr};
     QPushButton* m_xpub_copy{nullptr};
+    QLabel* m_xpub_hint{nullptr};
     // --- blocks produced by this node ---
     QLabel* m_blocks_summary{nullptr};
     QTableWidget* m_blocks{nullptr};

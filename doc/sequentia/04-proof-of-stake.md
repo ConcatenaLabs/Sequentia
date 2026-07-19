@@ -380,9 +380,33 @@ Sequentia finality is immediate *modulo* a Bitcoin reorg. Tested in
 `feature_pos_finality.py` (a higher-countersignature competitor does not reorg a
 finalized block) and `feature_pos_fork_choice.py`.
 
-Because the watcher is the gate's only release valve, the gate is enforced only
-by nodes that run it - `-validateanchor`, the default on a Bitcoin-anchored
-chain. A node configured `validateanchor=0` does not watch Bitcoin, so it could
+The watcher is not the only release valve anymore. Two rival branches can both
+end up quorum-certified with canonical anchors (a committee legitimately
+re-certifies a replacement branch after a transient parent-chain flap, then the
+parent converges so both branches' anchors are canonical — the 2026-07-17
+finality partition,
+[`incident-2026-07-17-finality-partition.md`](incident-2026-07-17-finality-partition.md)),
+a tie anchoring cannot break and that would pin the minority node forever.
+**Finality reconciliation** (`-posreconcile`, default on) is the second,
+node-local valve: rival branches are stored (the gate's rejection moves from
+accept time to activation time, `FindMostWorkChain`), and a monitor in the
+watcher thread releases the finalized point only for a rival that carries a
+full-quorum certificate strictly above the local finalized height (never a
+same-height comparison), anchored at/below the currently uncontested parent
+height, after the local branch has received no certified extension for
+`-posreconcilepatience`. The local blocks are not invalidated — they become
+valid-but-inactive history. Forging the release evidence requires a committee
+quorum (a stake majority), so no new attacker class; the majority side never
+releases, so convergence is one-way. Relatedly, the escaping-stall relaxation
+now also requires one parent-chain block interval of *median-time-past*
+between the sub-quorum block's anchor and its parent's
+(`-posescapestallmtpgap`): an anchor *height* gap alone is met within seconds
+during a difficulty-1 parent block-storm with the chain fully alive, which is
+how the incident's rival branch was seeded.
+
+Because the watcher is the gate's only *Bitcoin-side* release valve, the gate is
+enforced only by nodes that run it - `-validateanchor`, the default on a
+Bitcoin-anchored chain. A node configured `validateanchor=0` does not watch Bitcoin, so it could
 never lower its finalized point when Bitcoin reorgs a finalized block's anchor;
 enforcing the gate there would make it reject the canonical recovery chain
 forever and stall. Such a follower instead uses plain most-work fork choice and

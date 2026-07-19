@@ -140,6 +140,93 @@ void NotePosFinalForkRejection();
  *  startup). Lock-free; safe from any thread. */
 int64_t GetLastPosFinalForkRejectionTime();
 
+// --- Escaping-stall real-time evidence (incident 2026-07-17) ---
+//
+// The consensus escaping-stall relaxation (sub-quorum certification) requires
+// the parent-chain anchor to have advanced POS_ESCAPING_STALL_ANCHOR_GAP
+// heights past the parent block's anchor — sound while parent blocks take
+// ~10 minutes, but during a testnet4 difficulty-1 block-storm heights advance
+// in seconds, so the gap is met with the chain fully alive (block 25504 of the
+// 2026-07-17 finality partition was minted leader-only 30 seconds after a
+// quorum-certified parent). The parent chain carries a second, real-time
+// clock: block timestamps, aggregated as median-time-past (MTP) — a pure
+// function of the (immutable) block hash that every validator reads
+// identically from its parent-chain daemon. Sub-quorum certification
+// additionally requires the MTP of the block's anchor to be at least
+// -posescapestallmtpgap seconds past the MTP of the parent's anchor: genuine
+// stall evidence that a height race cannot fake without parent-chain hashrate.
+
+/** Verdict of the escaping-stall MTP-gap check. UNKNOWN (parent daemon
+ *  unreachable / header not yet known) must be treated as a soft, retriable
+ *  rejection — never a permanent one — exactly like the R3 anchor check. */
+enum class EscapeStallTimeVerdict { ALLOWED, TOO_SOON, UNKNOWN };
+
+/** Whether a sub-quorum (escaping-stall) block satisfies the parent-chain
+ *  real-time stall evidence: MTP(block anchor) - MTP(parent anchor) >=
+ *  g_pos_escape_stall_mtp_gap. ALLOWED when the gap is disabled (0), anchor
+ *  validation is off (-validateanchor=0 delegates to the network, mirroring
+ *  the R3 skip), or the parent anchor is null (chain bring-up). MTPs are
+ *  fetched from the parent daemon and cached forever (immutable per hash).
+ *  Called with validation locks held is fine on cache hits; a cache miss does
+ *  one parent-daemon RPC (only reached for actual sub-quorum blocks, which are
+ *  rare by construction). */
+EscapeStallTimeVerdict CheckEscapingStallMtpGap(const uint256& parent_anchor_hash,
+                                                const uint256& block_anchor_hash);
+
+/** Seconds of parent-chain MTP that must elapse between the parent block's
+ *  anchor and a sub-quorum block's anchor (0 disables the check). One Bitcoin
+ *  block interval by default. Set from -posescapestallmtpgap in init. */
+extern int64_t g_pos_escape_stall_mtp_gap;
+static const int64_t DEFAULT_POS_ESCAPE_STALL_MTP_GAP = 600;
+
+// --- PoS finality reconciliation (design doc Change 4b; incident 2026-07-17) ---
+//
+// Two rival branches can both end up quorum-certified with valid anchors (a
+// committee re-certifies from below its old finality after a transient parent
+// view flap, then the parent converges back so BOTH branches' anchors are
+// canonical — the 2026-07-17 "finality partition"). Anchoring genuinely cannot
+// break that tie, and each node's immediate-finality gate freezes it on the
+// side it finalized first. The reconciliation rule is the node-local release:
+// a node abandons its finalized point ONLY for a rival branch that
+//   (1) carries a full-quorum-certified block STRICTLY ABOVE the local
+//       finalized height (never a same-height certificate comparison, which
+//       would reopen the posterior-corruption channel),
+//   (2) is anchor-valid on the local parent best chain, with the certifying
+//       block anchored at/below the currently uncontested parent height (so a
+//       release can never fire into a live parent-chain fork),
+//   (3) forks no lower than the Bitcoin checkpoint floor (enforced at accept
+//       time by the checkpoint gates), and
+//   (4) has provably superseded the local branch: no quorum-certified block
+//       has extended the local chain for -posreconcilepatience seconds.
+// Forging that evidence requires a committee quorum (a stake majority), which
+// already controls the chain going forward — no new attack surface. The
+// majority side never releases (a minority branch cannot quorum-advance), so
+// convergence is one-way. This is fork-choice/release behavior, not block
+// validity: local clocks are fine and nodes may release at different moments.
+
+/** Master switch (-posreconcile, default on). */
+extern bool g_pos_reconcile;
+/** Seconds without a quorum-certified extension of the local chain before the
+ *  local finalized branch counts as abandoned (-posreconcilepatience). */
+extern int64_t g_pos_reconcile_patience;
+static const int64_t DEFAULT_POS_RECONCILE_PATIENCE = 600;
+/** The rival's certified block must be at least this many heights above the
+ *  local finalized height (-posreconcilemindepth). */
+extern int g_pos_reconcile_min_depth;
+static const int DEFAULT_POS_RECONCILE_MIN_DEPTH = 3;
+
+/** Snapshot of the reconciliation monitor for getanchorstatus. */
+struct PosReconcileStatus {
+    bool enabled{false};
+    //! "inactive" (no rival), "tracking" (rival certified above local finality
+    //! seen; patience running), "released" (finality released for the rival).
+    std::string state{"inactive"};
+    int rival_cert_height{-1};
+    uint256 rival_cert_hash;
+    int64_t patience_remaining{0};
+};
+PosReconcileStatus GetPosReconcileStatus();
+
 // --- Bitcoin checkpoints against PoS long-range attacks (paper §11) ---
 //
 // Anyone may commit a Sequentia block reference into the parent chain as a
