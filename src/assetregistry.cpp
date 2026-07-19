@@ -53,10 +53,16 @@ void http_error_cb(enum evhttp_request_error err, void* ctx)
 }
 #endif
 
-/** Minimal synchronous http:// GET. The registry is served as plain HTTP behind
- *  the explorer origin; HTTPS would need bufferevent_openssl and is out of scope. */
-bool HttpGet(const std::string& url, std::string& out_body, std::string& out_err)
+/** Minimal synchronous http:// request. The registry is served as plain HTTP
+ *  behind the explorer origin; HTTPS would need bufferevent_openssl and is out of
+ *  scope. `body` empty means GET, otherwise POST with that JSON body.
+ *
+ *  Reports the status rather than judging it, so callers can tell a registry that
+ *  refused (and said why) from one that never answered. */
+bool HttpRequest(const std::string& url, const std::string& body, int& out_status,
+                 std::string& out_body, std::string& out_err)
 {
+    out_status = 0;
     const std::string scheme = "http://";
     if (url.rfind(scheme, 0) != 0) { out_err = "only http:// registry URLs are supported"; return false; }
     const std::string rest = url.substr(scheme.size());
@@ -89,21 +95,67 @@ bool HttpGet(const std::string& url, std::string& out_body, std::string& out_err
     if (output_headers) {
         evhttp_add_header(output_headers, "Host", hostport.c_str());
         evhttp_add_header(output_headers, "Connection", "close");
+        if (!body.empty()) {
+            evhttp_add_header(output_headers, "Content-Type", "application/json");
+            evhttp_add_header(output_headers, "Content-Length", strprintf("%d", (int)body.size()).c_str());
+        }
+    }
+    if (!body.empty()) {
+        struct evbuffer* out = evhttp_request_get_output_buffer(req.get());
+        if (!out || evbuffer_add(out, body.data(), body.size()) != 0) {
+            out_err = "could not build the request body";
+            return false;
+        }
     }
 
-    const int r = evhttp_make_request(evcon.get(), req.get(), EVHTTP_REQ_GET, path.c_str());
+    const int r = evhttp_make_request(evcon.get(), req.get(),
+                                      body.empty() ? EVHTTP_REQ_GET : EVHTTP_REQ_POST, path.c_str());
     req.release(); // ownership moved to evcon in the call above
     if (r != 0) { out_err = "send http request failed"; return false; }
 
     event_base_dispatch(base.get());
 
     if (response.status == 0) { out_err = "could not connect to the registry"; return false; }
-    if (response.status != 200) { out_err = strprintf("registry returned HTTP %d", response.status); return false; }
+    out_status = response.status;
     out_body = response.body;
     return true;
 }
 
+bool HttpGet(const std::string& url, std::string& out_body, std::string& out_err)
+{
+    int status = 0;
+    if (!HttpRequest(url, /*body=*/"", status, out_body, out_err)) return false;
+    if (status != 200) { out_err = strprintf("registry returned HTTP %d", status); return false; }
+    return true;
+}
+
 } // namespace
+
+std::string AssetRegistryBaseUrl()
+{
+    const std::string url = gArgs.GetArg("-assetregistryurl", "");
+    if (url.empty()) return "";
+    // The configured URL names the index file; submissions go to the directory
+    // holding it (.../registry/index.minimal.json -> .../registry/). Only drop a
+    // last segment that looks like a filename, so a URL already naming a
+    // directory is left alone.
+    const size_t slash = url.rfind('/');
+    if (slash == std::string::npos) return url + "/";
+    if (url.find('.', slash) == std::string::npos) {
+        return slash + 1 == url.size() ? url : url + "/";
+    }
+    return url.substr(0, slash + 1);
+}
+
+bool AssetRegistryPost(const std::string& json_body, int& out_status, std::string& out_body, std::string& out_err)
+{
+    const std::string base = AssetRegistryBaseUrl();
+    if (base.empty()) {
+        out_err = "no asset registry is configured; set -assetregistryurl to the registry you want to use";
+        return false;
+    }
+    return HttpRequest(base, json_body, out_status, out_body, out_err);
+}
 
 int RefreshAssetRegistry()
 {

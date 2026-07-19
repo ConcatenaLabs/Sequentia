@@ -675,6 +675,7 @@ RPCHelpMan importmasterblindingkey();
 RPCHelpMan initpegoutwallet();
 RPCHelpMan issueasset();
 RPCHelpMan listissuances();
+RPCHelpMan registerasset();
 RPCHelpMan reissueasset();
 RPCHelpMan sendtomainchain();
 RPCHelpMan signblock();
@@ -773,6 +774,7 @@ static const CRPCCommand commands[] =
     { "wallet",             &signblock,                      },
     { "wallet",             &listissuances,                  },
     { "wallet",             &issueasset,                     },
+    { "wallet",             &registerasset,                  },
     { "wallet",             &reissueasset,                   },
     { "wallet",             &destroyamount,                  },
     { "hidden",             &generatepegoutproof,            },

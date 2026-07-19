@@ -954,8 +954,11 @@ std::string RPCArg::ToStringObj(const bool oneline) const
         return res + "...]";
     case Type::OBJ:
     case Type::OBJ_USER_KEYS:
-        // Currently unused, so avoid writing dead code
-        CHECK_NONFATAL(false);
+        // An object nested inside an object: ToString() already renders one in
+        // its brace-enclosed form, and a named field is that with a name in
+        // front. Documenting a nested object used to abort here instead, which
+        // only surfaced when someone asked for the help.
+        return res + ToString(oneline);
     } // no default case, so the compiler can warn about missing cases
     CHECK_NONFATAL(false);
 }

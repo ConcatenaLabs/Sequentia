@@ -178,28 +178,34 @@ TransactionView::TransactionView(const PlatformStyle *platformStyle, QWidget *pa
     contextMenu->addAction(tr("Copy full transaction &details"), this, &TransactionView::copyTxPlainText);
     contextMenu->addAction(tr("&Show transaction details"), this, &TransactionView::showDetails);
     contextMenu->addSeparator();
-    bumpFeeAction = contextMenu->addAction(tr("Increase transaction &fee"));
+    // Tooltips are wrapped in a fixed-width rich-text block: Qt word-wraps a
+    // tooltip only when it is rich text, so a plain string renders as one
+    // unreadable long line. The bracketed abbreviations (RBF, CPFP) are the
+    // Bitcoin terms an experienced user already knows this behaviour by.
+    auto boxTip = [](const QString& body) { return QStringLiteral("<qt><div style='width:260px'>%1</div></qt>").arg(body); };
+
+    bumpFeeAction = contextMenu->addAction(tr("Increase transaction &fee (RBF)"));
     GUIUtil::ExceptionSafeConnect(bumpFeeAction, &QAction::triggered, this, &TransactionView::bumpFee);
     bumpFeeAction->setObjectName("bumpFeeAction");
-    bumpFeeAction->setToolTip(tr("Send this payment again with a better fee, so a block producer picks it up sooner. "
-                                 "The recipient and amount stay the same; you can raise the fee and also pay it in a "
-                                 "different asset — the cure when producers don't value the original fee asset. "
-                                 "Works on payments you sent that are still unconfirmed."));
-    speedUpAction = contextMenu->addAction(tr("&Speed up (pay child fee)"));
+    bumpFeeAction->setToolTip(boxTip(tr("<b>Replace-by-fee.</b> Re-send this payment with a better fee so a block "
+                                 "producer picks it up sooner. Recipient and amount stay the same; you can also "
+                                 "switch the fee to a different asset — the cure when producers don't value the "
+                                 "original one. For payments you sent that are still unconfirmed.")));
+    speedUpAction = contextMenu->addAction(tr("&Speed up (pay child fee, CPFP)"));
     GUIUtil::ExceptionSafeConnect(speedUpAction, &QAction::triggered, this, &TransactionView::speedUp);
     speedUpAction->setObjectName("speedUpAction");
-    speedUpAction->setToolTip(tr("Create a small extra transaction with a generous fee that spends this one, "
-                                 "so a block producer takes both together. "
-                                 "Use it to hurry a payment you received that is stuck unconfirmed."));
-    replaceAction = contextMenu->addAction(tr("&Replace transaction…"));
+    speedUpAction->setToolTip(boxTip(tr("<b>Child pays for parent.</b> Make a small extra transaction with a generous "
+                                 "fee that spends this one, so a producer takes both together. Use it to hurry a "
+                                 "payment you received that is stuck unconfirmed.")));
+    replaceAction = contextMenu->addAction(tr("&Replace transaction… (RBF)"));
     GUIUtil::ExceptionSafeConnect(replaceAction, &QAction::triggered, this, &TransactionView::replace);
     replaceAction->setObjectName("replaceAction");
-    replaceAction->setToolTip(tr("Replace this unconfirmed payment with a different one — you can change the "
-                                 "recipient, the amount or the fee. Only possible while it is unconfirmed."));
+    replaceAction->setToolTip(boxTip(tr("<b>Replace-by-fee.</b> Replace this unconfirmed payment with a different one — "
+                                 "you can change the recipient, the amount or the fee. Only while it is unconfirmed.")));
     abandonAction = contextMenu->addAction(tr("A&bandon transaction"), this, &TransactionView::abandonTx);
-    abandonAction->setToolTip(tr("Give up on this unconfirmed payment and unlock the funds it was using, so you "
+    abandonAction->setToolTip(boxTip(tr("Give up on this unconfirmed payment and unlock the funds it was using, so you "
                                  "can spend them again. Use it when a payment has been stuck for a long time "
-                                 "and you no longer want it to go through."));
+                                 "and you no longer want it to go through.")));
     contextMenu->addAction(tr("&Edit address label"), this, &TransactionView::editLabel);
 
     connect(dateWidget, qOverload<int>(&QComboBox::activated), this, &TransactionView::chooseDate);

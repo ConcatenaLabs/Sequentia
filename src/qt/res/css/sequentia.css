@@ -9,7 +9,7 @@
  * card look of QGroupBox, and the accent on the primary controls.
  *
  * Palette reference (keep in sync with sequentiatheme.cpp):
- *   bg #0b0b0d   panel #141417   panel2 #191920   line #26262c
+ *   bg #0b0b0d   panel #17171d   panel2 #24242c   line #34343d
  *   text #f2f0ea  muted #9b988e  faint #6d6a62
  *   accent #f5b301  accent-ink #1a1400
  *   good #3ecf7a   warn #ffb84d   bad #ff6b6b
@@ -41,7 +41,7 @@ QLabel:disabled {
 
 QMenuBar {
     background-color: #0e0e11;
-    border-bottom: 1px solid #26262c;
+    border-bottom: 1px solid #34343d;
     padding: 1px 6px;
 }
 
@@ -59,7 +59,7 @@ QMenuBar::item:selected {
 
 QMenu {
     background-color: #1a1a20;
-    border: 1px solid #26262c;
+    border: 1px solid #34343d;
     padding: 5px 0;
 }
 
@@ -79,7 +79,7 @@ QMenu::item:disabled {
 
 QMenu::separator {
     height: 1px;
-    background-color: #26262c;
+    background-color: #34343d;
     margin: 5px 8px;
 }
 
@@ -88,15 +88,18 @@ QMenu::separator {
 QToolBar#appToolBar {
     background-color: #0e0e11;
     border: none;
-    border-right: 1px solid #26262c;
+    border-right: 1px solid #34343d;
     padding: 8px 6px;
     spacing: 2px;
     min-width: 176px;
 }
 
 /* The accent rail on the left edge marks the current tab; transparent elsewhere
-   keeps every label on the same x, so the list does not shift when it moves. */
-QToolBar#appToolBar QToolButton {
+   keeps every label on the same x, so the list does not shift when it moves.
+   The tabs are QPushButtons (see createToolBars): unlike QToolButton, a
+   QPushButton honours text-align:left here, so icon+label sit flush left rather
+   than centred as a group. */
+QToolBar#appToolBar QPushButton {
     background: transparent;
     border: none;
     border-left: 3px solid transparent;
@@ -107,19 +110,19 @@ QToolBar#appToolBar QToolButton {
     text-align: left;
 }
 
-QToolBar#appToolBar QToolButton:hover {
+QToolBar#appToolBar QPushButton:hover {
     background-color: rgba(255, 255, 255, 0.05);
     color: #f2f0ea;
 }
 
-QToolBar#appToolBar QToolButton:checked {
+QToolBar#appToolBar QPushButton:checked {
     background-color: rgba(245, 179, 1, 0.10);
     border-left-color: #f5b301;
     color: #f5b301;
     font-weight: bold;
 }
 
-QToolBar#appToolBar QToolButton:disabled {
+QToolBar#appToolBar QPushButton:disabled {
     color: #6d6a62;
 }
 
@@ -137,7 +140,7 @@ QToolBar#appToolBar QComboBox {
 QToolBar {
     background-color: #0e0e11;
     border: none;
-    border-bottom: 1px solid #26262c;
+    border-bottom: 1px solid #34343d;
     padding: 4px 8px;
     spacing: 2px;
 }
@@ -166,7 +169,7 @@ QToolBar QToolButton:checked {
 
 QStatusBar {
     background-color: #0e0e11;
-    border-top: 1px solid #26262c;
+    border-top: 1px solid #34343d;
     color: #9b988e;
 }
 
@@ -182,8 +185,8 @@ QStatusBar QLabel {
 /* ---------- cards (QGroupBox) ---------- */
 
 QGroupBox {
-    background-color: #141417;
-    border: 1px solid #26262c;
+    background-color: #17171d;
+    border: 1px solid #34343d;
     border-radius: 6px;
     margin-top: 16px;
     padding: 14px 14px 12px 14px;
@@ -201,16 +204,16 @@ QGroupBox::title {
 
 QFrame[frameShape="4"],  /* HLine */
 QFrame[frameShape="5"] { /* VLine */
-    color: #26262c;
-    background-color: #26262c;
+    color: #34343d;
+    background-color: #34343d;
     border: none;
 }
 
 /* ---------- buttons ---------- */
 
 QPushButton {
-    background-color: #191920;
-    border: 1px solid #26262c;
+    background-color: #24242c;
+    border: 1px solid #34343d;
     border-radius: 4px;
     color: #f2f0ea;
     font-weight: 600;
@@ -262,7 +265,7 @@ QToolButton {
 }
 
 QToolButton:hover {
-    border-color: #26262c;
+    border-color: #34343d;
 }
 
 /* ---------- text entry ---------- */
@@ -273,8 +276,8 @@ QTextEdit,
 QSpinBox,
 QDoubleSpinBox,
 QDateTimeEdit {
-    background-color: #191920;
-    border: 1px solid #26262c;
+    background-color: #24242c;
+    border: 1px solid #34343d;
     border-radius: 4px;
     color: #f2f0ea;
     padding: 6px 8px;
@@ -306,8 +309,8 @@ QLineEdit[readOnly="true"] {
 /* ---------- combo box ---------- */
 
 QComboBox {
-    background-color: #191920;
-    border: 1px solid #26262c;
+    background-color: #24242c;
+    border: 1px solid #34343d;
     border-radius: 4px;
     color: #f2f0ea;
     padding: 6px 8px;
@@ -326,7 +329,7 @@ QComboBox::drop-down {
 
 QComboBox QAbstractItemView {
     background-color: #1a1a20;
-    border: 1px solid #26262c;
+    border: 1px solid #34343d;
     color: #f2f0ea;
     selection-background-color: rgba(245, 179, 1, 0.18);
     selection-color: #f5b301;
@@ -351,7 +354,7 @@ QRadioButton::indicator {
     width: 15px;
     height: 15px;
     border: 1px solid #3a3a44;
-    background-color: #191920;
+    background-color: #24242c;
 }
 
 QCheckBox::indicator {
@@ -378,12 +381,12 @@ QRadioButton::indicator:checked {
 QTableView,
 QTreeView,
 QListView {
-    background-color: #141417;
+    background-color: #17171d;
     alternate-background-color: #17171b;
-    border: 1px solid #26262c;
+    border: 1px solid #34343d;
     border-radius: 4px;
     color: #f2f0ea;
-    gridline-color: #26262c;
+    gridline-color: #34343d;
     selection-background-color: rgba(245, 179, 1, 0.18);
     selection-color: #f5b301;
     outline: none;
@@ -404,16 +407,16 @@ QListView::item:selected {
 }
 
 QHeaderView {
-    background-color: #141417;
+    background-color: #17171d;
     border: none;
 }
 
 QHeaderView::section {
     /* Qt Style Sheets have no text-transform; uppercase headers, when wanted,
        are applied to the header labels in the model, not here. */
-    background-color: #141417;
+    background-color: #17171d;
     border: none;
-    border-bottom: 1px solid #26262c;
+    border-bottom: 1px solid #34343d;
     color: #6d6a62;
     font-weight: bold;
     padding: 7px 6px;
@@ -424,15 +427,15 @@ QHeaderView::section:hover {
 }
 
 QTableCornerButton::section {
-    background-color: #141417;
+    background-color: #17171d;
     border: none;
 }
 
 /* ---------- tabs ---------- */
 
 QTabWidget::pane {
-    background-color: #141417;
-    border: 1px solid #26262c;
+    background-color: #17171d;
+    border: 1px solid #34343d;
     border-radius: 4px;
     top: -1px;
 }
@@ -453,7 +456,9 @@ QTabBar::tab:hover {
 QTabBar::tab:selected {
     border-bottom-color: #f5b301;
     color: #f5b301;
-    font-weight: bold;
+    /* No bold on select: QTabBar sizes each tab to its non-bold text, so bolding
+       the selected tab makes its label wider than the tab and clips both ends
+       ("nformatio"). The amber colour and underline already mark the selection. */
 }
 
 /* ---------- scroll bars ---------- */
@@ -501,7 +506,7 @@ QScrollBar::sub-page {
 /* ---------- progress bar ---------- */
 
 QProgressBar {
-    background-color: #191920;
+    background-color: #24242c;
     border: none;
     border-radius: 4px;
     color: #f2f0ea;
@@ -526,7 +531,7 @@ QToolTip {
 /* ---------- misc ---------- */
 
 QSplitter::handle {
-    background-color: #26262c;
+    background-color: #34343d;
 }
 
 QDialogButtonBox QPushButton {

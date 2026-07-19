@@ -5,6 +5,8 @@
 #ifndef BITCOIN_ASSETREGISTRY_H
 #define BITCOIN_ASSETREGISTRY_H
 
+#include <string>
+
 class CScheduler;
 
 /**
@@ -36,5 +38,25 @@ int RefreshAssetRegistry();
 /** Schedule an initial fetch shortly after startup plus periodic refreshes every
  *  -assetregistrypoll seconds. No-op if -assetregistryurl is unset. */
 void StartAssetRegistry(CScheduler& scheduler);
+
+/** The registry this node reads, as a base URL to submit to: -assetregistryurl
+ *  with its index filename dropped. Empty when no registry is configured.
+ *
+ *  Deriving it rather than hardcoding one is deliberate: an issuer registers with
+ *  the registry their node was told to trust, so pointing the node elsewhere moves
+ *  registration there too, and no registry is privileged by the software. */
+std::string AssetRegistryBaseUrl();
+
+/** Submit `json_body` to the configured registry.
+ *
+ *  Returns false only when no answer was obtained (no URL, malformed URL,
+ *  connection failure); a registry that answers, including with a rejection,
+ *  returns true with out_status/out_body set, because its reason for refusing is
+ *  the useful part.
+ *
+ *  Registration travels in the clear like everything else here, which costs
+ *  nothing: the contract is public, and a tampered one cannot be registered
+ *  anyway since the registry checks it against the chain rather than against us. */
+bool AssetRegistryPost(const std::string& json_body, int& out_status, std::string& out_body, std::string& out_err);
 
 #endif // BITCOIN_ASSETREGISTRY_H

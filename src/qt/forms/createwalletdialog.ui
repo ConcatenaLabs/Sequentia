@@ -35,7 +35,7 @@
         </size>
        </property>
        <property name="placeholderText">
-        <string>Wallet</string>
+        <string>Choose a name for this wallet</string>
        </property>
       </widget>
      </item>

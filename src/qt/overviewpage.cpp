@@ -499,25 +499,29 @@ void OverviewPage::updateSeqStatus()
                 const int depth = r.exists("depth") ? r["depth"].get_int() : 0;
                 const size_t nconf = (r.exists("conflicts") && r["conflicts"].isArray()) ? r["conflicts"].size() : 0;
                 if (nconf > 0) {
+                    // A genuine alarm: two checkpoints disagree on Bitcoin.
                     m_finality_label->setText(tr("WARNING - CHECKPOINT CONFLICT: %1 conflicting checkpoint(s) on Bitcoin. "
                                                  "A long-range fork may be in progress; do not rely on finality.").arg((int)nconf));
                     m_finality_label->setStyleSheet("QLabel{padding:6px;border-radius:4px;background:rgba(255,90,90,0.12);color:#ff6b6b;font-weight:bold;}");
+                    m_finality_label->setVisible(true);
                 } else if (fin >= 0) {
-                    m_finality_label->setText(tr("Finality: finalized up to Sequentia height %1 (checkpoint buried %2 Bitcoin blocks deep). "
-                                                 "Below that height the chain still follows Bitcoin reorgs.").arg(fin).arg(depth));
+                    // Something positive to report: a checkpoint is buried and final.
+                    m_finality_label->setText(tr("Finalized up to Sequentia height %1 - a checkpoint is written on Bitcoin, buried %2 blocks deep.").arg(fin).arg(depth));
                     m_finality_label->setStyleSheet("color:#3ecf7a;");
+                    m_finality_label->setVisible(true);
                 } else {
-                    m_finality_label->setText(tr("Finality: no checkpoint finalized yet - the chain follows Bitcoin reorgs to any depth. "
-                                                 "A checkpoint finalizes once buried %1 Bitcoin blocks deep.").arg(depth));
-                    m_finality_label->setStyleSheet("color:#ffb84d;");
+                    // No checkpoint yet is the ordinary state of real-time anchoring,
+                    // not a problem, so say nothing rather than raise a yellow flag
+                    // that reads as "your blocks are not final".
+                    m_finality_label->setVisible(false);
                 }
             } else {
-                m_finality_label->setText(tr("Finality: unavailable"));
+                m_finality_label->setVisible(false);
             }
         } catch (const UniValue&) {
-            m_finality_label->setText(tr("Finality: unavailable"));
+            m_finality_label->setVisible(false);
         } catch (const std::exception&) {
-            m_finality_label->setText(tr("Finality: unavailable"));
+            m_finality_label->setVisible(false);
         }
     }
 }
