@@ -8,6 +8,7 @@
 #include <interfaces/wallet.h>
 #include <key_io.h>
 #include <policy/policy.h>
+#include <pos.h>
 #include <validation.h>
 #include <wallet/ismine.h>
 
@@ -113,6 +114,12 @@ QList<TransactionRecord> TransactionRecord::decomposeTransaction(const interface
                 continue;
             }
 
+            // SEQUENTIA: a proof-of-stake registration funds a canonical staking
+            // output (see registerstake / BuildStakeScript). Recognise it so the
+            // wallet shows a single "Staking" line for the amount locked, rather
+            // than a confusing send/receive pair to an unfamiliar script.
+            const bool is_stake = g_con_pos && ParseStakeScript(txout.scriptPubKey).has_value();
+
             if (fAllFromMe && assets_issued_to_me_only.count(asset) == 0) {
                 // Change is only really possible if we're the sender
                 // Otherwise, someone just sent bitcoins to a change address, which should be shown
@@ -130,7 +137,12 @@ QList<TransactionRecord> TransactionRecord::decomposeTransaction(const interface
                 sub.amount = -wtx.txout_amounts[i];
                 sub.asset = asset;
 
-                if (!std::get_if<CNoDestination>(&wtx.txout_address[i]))
+                if (is_stake)
+                {
+                    // Staked into a staking output (still yours; time-locked).
+                    sub.type = TransactionRecord::Staking;
+                }
+                else if (!std::get_if<CNoDestination>(&wtx.txout_address[i]))
                 {
                     // Sent to Bitcoin Address
                     sub.type = TransactionRecord::SendToAddress;
@@ -143,6 +155,13 @@ QList<TransactionRecord> TransactionRecord::decomposeTransaction(const interface
                     sub.address = mapValue["to"];
                 }
                 parts.append(sub);
+            }
+
+            // A staking output funded by us is already represented by the
+            // "Staking" debit above; don't also emit a credit for it (the
+            // output is ours but locked), which would net to a puzzling zero.
+            if (is_stake && fAllFromMe) {
+                continue;
             }
 
             isminetype mine = wtx.txout_is_mine[i];
@@ -185,6 +204,25 @@ QList<TransactionRecord> TransactionRecord::decomposeTransaction(const interface
         }
 
         if (fAllFromMe) {
+            // SEQUENTIA: a fee is what you pay to move a payment, so present it as
+            // a sub-entry of that payment rather than a standalone top-level row.
+            // Hang the fee(s) under the transaction's primary spend record — the
+            // first outgoing payment / stake / issuance, or failing that the first
+            // record of this transaction. Only when the transaction has no such
+            // record at all (e.g. a pure self-consolidation) does the fee stand on
+            // its own, as before.
+            int parent_idx = -1;
+            for (int p = 0; p < parts.size(); ++p) {
+                const TransactionRecord::Type t = parts[p].type;
+                if (t == TransactionRecord::SendToAddress || t == TransactionRecord::SendToOther ||
+                    t == TransactionRecord::SendToSelf || t == TransactionRecord::Staking ||
+                    t == TransactionRecord::IssuedAsset) {
+                    parent_idx = p;
+                    break;
+                }
+            }
+            if (parent_idx < 0 && !parts.isEmpty()) parent_idx = 0;
+
             for (const auto& tx_fee : GetFeeMap(*wtx.tx)) {
                 if (!tx_fee.second) continue;
 
@@ -192,7 +230,13 @@ QList<TransactionRecord> TransactionRecord::decomposeTransaction(const interface
                 sub.type = TransactionRecord::Fee;
                 sub.asset = tx_fee.first;
                 sub.amount = -tx_fee.second;
-                parts.append(sub);
+                sub.involvesWatchAddress = involvesWatchAddress;
+
+                if (parent_idx >= 0) {
+                    parts[parent_idx].children.append(sub);
+                } else {
+                    parts.append(sub);
+                }
             }
         }
     }
@@ -224,6 +268,7 @@ void TransactionRecord::updateStatus(const interfaces::WalletTxStatus& wtx, cons
     case SendToAddress:
     case SendToOther:
     case SendToSelf:
+    case Staking:
         typesort = 2;
         break;
     case RecvWithAddress:

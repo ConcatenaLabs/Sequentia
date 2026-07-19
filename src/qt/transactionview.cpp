@@ -35,8 +35,9 @@
 #include <QPoint>
 #include <QScrollBar>
 #include <QSettings>
-#include <QTableView>
+#include <QSignalBlocker>
 #include <QTimer>
+#include <QTreeView>
 #include <QUrl>
 #include <QVBoxLayout>
 
@@ -87,16 +88,29 @@ TransactionView::TransactionView(const PlatformStyle *platformStyle, QWidget *pa
     }
 
     typeWidget->addItem(tr("All"), TransactionFilterProxy::ALL_TYPES);
-    typeWidget->addItem(tr("Received with"), TransactionFilterProxy::TYPE(TransactionRecord::RecvWithAddress) |
+    typeWidget->addItem(tr("Received"), TransactionFilterProxy::TYPE(TransactionRecord::RecvWithAddress) |
                                         TransactionFilterProxy::TYPE(TransactionRecord::RecvFromOther));
-    typeWidget->addItem(tr("Sent to"), TransactionFilterProxy::TYPE(TransactionRecord::SendToAddress) |
+    typeWidget->addItem(tr("Sent"), TransactionFilterProxy::TYPE(TransactionRecord::SendToAddress) |
                                   TransactionFilterProxy::TYPE(TransactionRecord::SendToOther));
-    typeWidget->addItem(tr("Mined"), TransactionFilterProxy::TYPE(TransactionRecord::Generated));
+    typeWidget->addItem(tr("Staking"), TransactionFilterProxy::TYPE(TransactionRecord::Staking));
+    typeWidget->addItem(tr("Block reward"), TransactionFilterProxy::TYPE(TransactionRecord::Generated));
     typeWidget->addItem(tr("Fee"), TransactionFilterProxy::TYPE(TransactionRecord::Fee));
     typeWidget->addItem(tr("Issuance"), TransactionFilterProxy::TYPE(TransactionRecord::IssuedAsset));
     typeWidget->addItem(tr("Other"), TransactionFilterProxy::TYPE(TransactionRecord::Other));
 
     hlayout->addWidget(typeWidget);
+
+    // SEQUENTIA: filter by token/asset. Fees can be paid in any asset, so this
+    // combines with the type filter (e.g. token tSEQ + type Fee = tSEQ spent on
+    // fees). Populated from the wallet's transactions once a model is set.
+    assetWidget = new QComboBox(this);
+    if (platformStyle->getUseExtraSpacing()) {
+        assetWidget->setFixedWidth(121);
+    } else {
+        assetWidget->setFixedWidth(120);
+    }
+    assetWidget->addItem(tr("All tokens"), QString());
+    hlayout->addWidget(assetWidget);
 
     search_widget = new QLineEdit(this);
     search_widget->setPlaceholderText(tr("Enter address, transaction id, or label to search"));
@@ -131,7 +145,7 @@ TransactionView::TransactionView(const PlatformStyle *platformStyle, QWidget *pa
     vlayout->setContentsMargins(0,0,0,0);
     vlayout->setSpacing(0);
 
-    transactionView = new QTableView(this);
+    transactionView = new QTreeView(this);
     transactionView->setObjectName("transactionView");
     vlayout->addLayout(hlayout);
     vlayout->addWidget(createDateRangeWidget());
@@ -152,17 +166,22 @@ TransactionView::TransactionView(const PlatformStyle *platformStyle, QWidget *pa
     transactionView->setSelectionBehavior(QAbstractItemView::SelectRows);
     transactionView->setSelectionMode(QAbstractItemView::ExtendedSelection);
     transactionView->setSortingEnabled(true);
-    transactionView->verticalHeader()->hide();
+    // Fees hang as child rows under the payment they paid for: show the
+    // expand/collapse handle, and keep double-click for the details dialog
+    // rather than letting it toggle the branch.
+    transactionView->setRootIsDecorated(true);
+    transactionView->setExpandsOnDoubleClick(false);
+    transactionView->setUniformRowHeights(true);
 
     QSettings settings;
-    if (!transactionView->horizontalHeader()->restoreState(settings.value("TransactionViewHeaderState").toByteArray())) {
+    if (!transactionView->header()->restoreState(settings.value("TransactionViewHeaderState").toByteArray())) {
         transactionView->setColumnWidth(TransactionTableModel::Status, STATUS_COLUMN_WIDTH);
         transactionView->setColumnWidth(TransactionTableModel::Watchonly, WATCHONLY_COLUMN_WIDTH);
         transactionView->setColumnWidth(TransactionTableModel::Date, DATE_COLUMN_WIDTH);
         transactionView->setColumnWidth(TransactionTableModel::Type, TYPE_COLUMN_WIDTH);
         transactionView->setColumnWidth(TransactionTableModel::Amount, AMOUNT_MINIMUM_COLUMN_WIDTH);
-        transactionView->horizontalHeader()->setMinimumSectionSize(MINIMUM_COLUMN_WIDTH);
-        transactionView->horizontalHeader()->setStretchLastSection(true);
+        transactionView->header()->setMinimumSectionSize(MINIMUM_COLUMN_WIDTH);
+        transactionView->header()->setStretchLastSection(true);
     }
 
     contextMenu = new QMenu(this);
@@ -204,14 +223,15 @@ TransactionView::TransactionView(const PlatformStyle *platformStyle, QWidget *pa
 
     connect(dateWidget, qOverload<int>(&QComboBox::activated), this, &TransactionView::chooseDate);
     connect(typeWidget, qOverload<int>(&QComboBox::activated), this, &TransactionView::chooseType);
+    connect(assetWidget, qOverload<int>(&QComboBox::activated), this, &TransactionView::chooseAsset);
     connect(watchOnlyWidget, qOverload<int>(&QComboBox::activated), this, &TransactionView::chooseWatchonly);
     connect(amountWidget, &QLineEdit::textChanged, amount_typing_delay, qOverload<>(&QTimer::start));
     connect(amount_typing_delay, &QTimer::timeout, this, &TransactionView::changedAmount);
     connect(search_widget, &QLineEdit::textChanged, prefix_typing_delay, qOverload<>(&QTimer::start));
     connect(prefix_typing_delay, &QTimer::timeout, this, &TransactionView::changedSearch);
 
-    connect(transactionView, &QTableView::doubleClicked, this, &TransactionView::doubleClicked);
-    connect(transactionView, &QTableView::customContextMenuRequested, this, &TransactionView::contextualMenu);
+    connect(transactionView, &QTreeView::doubleClicked, this, &TransactionView::doubleClicked);
+    connect(transactionView, &QTreeView::customContextMenuRequested, this, &TransactionView::contextualMenu);
 
     // Double-clicking on a transaction on the transaction history page shows details
     connect(this, &TransactionView::doubleClicked, this, &TransactionView::showDetails);
@@ -224,7 +244,7 @@ TransactionView::TransactionView(const PlatformStyle *platformStyle, QWidget *pa
 TransactionView::~TransactionView()
 {
     QSettings settings;
-    settings.setValue("TransactionViewHeaderState", transactionView->horizontalHeader()->saveState());
+    settings.setValue("TransactionViewHeaderState", transactionView->header()->saveState());
 }
 
 void TransactionView::setModel(WalletModel *_model)
@@ -238,8 +258,34 @@ void TransactionView::setModel(WalletModel *_model)
         transactionProxyModel->setSortCaseSensitivity(Qt::CaseInsensitive);
         transactionProxyModel->setFilterCaseSensitivity(Qt::CaseInsensitive);
         transactionProxyModel->setSortRole(Qt::EditRole);
+        // Keep a fee child visible whenever it matches even if its parent payment
+        // doesn't (e.g. filtering type=Fee, or a token that only appears as a fee).
+        transactionProxyModel->setRecursiveFilteringEnabled(true);
         transactionView->setModel(transactionProxyModel);
         transactionView->sortByColumn(TransactionTableModel::Date, Qt::DescendingOrder);
+        // Show the nested fee sub-rows by default; the user can still collapse them.
+        transactionView->expandAll();
+
+        // Populate the token filter and keep it in sync as transactions arrive.
+        // Coalesce bursts (e.g. a rescan inserting many rows) behind a short timer
+        // so the O(n) rebuild runs once per batch, not once per inserted row.
+        updateAssetFilterChoices();
+        QTimer* asset_refresh = new QTimer(this);
+        asset_refresh->setSingleShot(true);
+        asset_refresh->setInterval(300);
+        connect(asset_refresh, &QTimer::timeout, this, &TransactionView::updateAssetFilterChoices);
+        connect(_model->getTransactionTableModel(), &QAbstractItemModel::rowsInserted,
+                asset_refresh, qOverload<>(&QTimer::start));
+        connect(_model->getTransactionTableModel(), &QAbstractItemModel::modelReset,
+                asset_refresh, qOverload<>(&QTimer::start));
+        // Newly inserted payments carry their fee child nested; keep it expanded.
+        connect(transactionProxyModel, &QAbstractItemModel::rowsInserted, this,
+                [this](const QModelIndex& parent, int first, int last) {
+                    if (parent.isValid()) return;
+                    for (int r = first; r <= last; ++r) {
+                        transactionView->expand(transactionProxyModel->index(r, 0, QModelIndex()));
+                    }
+                });
 
         if (_model->getOptionsModel())
         {
@@ -339,6 +385,38 @@ void TransactionView::chooseType(int idx)
         return;
     transactionProxyModel->setTypeFilter(
         typeWidget->itemData(idx).toInt());
+}
+
+void TransactionView::chooseAsset(int idx)
+{
+    if(!transactionProxyModel)
+        return;
+    transactionProxyModel->setAssetFilter(assetWidget->itemData(idx).toString());
+}
+
+void TransactionView::updateAssetFilterChoices()
+{
+    if (!model || !assetWidget)
+        return;
+
+    // Preserve the current selection across the rebuild.
+    const QString selected = assetWidget->currentData().toString();
+
+    const QStringList assets = model->getTransactionTableModel()->assetsPresent();
+
+    const QSignalBlocker blocker(assetWidget);
+    assetWidget->clear();
+    assetWidget->addItem(tr("All tokens"), QString());
+    for (const QString& a : assets) {
+        assetWidget->addItem(a, a);
+    }
+
+    int restore = assetWidget->findData(selected);
+    assetWidget->setCurrentIndex(restore >= 0 ? restore : 0);
+    // If the previously selected token vanished, fall back to showing all.
+    if (restore < 0 && !selected.isEmpty()) {
+        transactionProxyModel->setAssetFilter(QString());
+    }
 }
 
 void TransactionView::chooseWatchonly(int idx)

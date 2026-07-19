@@ -23,7 +23,7 @@ class QFrame;
 class QLineEdit;
 class QMenu;
 class QModelIndex;
-class QTableView;
+class QTreeView;
 QT_END_NAMESPACE
 
 /** Widget showing the transaction list for a wallet, including a filter row.
@@ -66,10 +66,11 @@ protected:
 private:
     WalletModel *model{nullptr};
     TransactionFilterProxy *transactionProxyModel{nullptr};
-    QTableView *transactionView{nullptr};
+    QTreeView *transactionView{nullptr};
 
     QComboBox *dateWidget;
     QComboBox *typeWidget;
+    QComboBox *assetWidget;
     QComboBox *watchOnlyWidget;
     QLineEdit *search_widget;
     QLineEdit *amountWidget;
@@ -87,6 +88,10 @@ private:
     QAction *copyLabelAction{nullptr};
 
     QWidget *createDateRangeWidget();
+
+    /** Rebuild the token filter drop-down from the assets present in the wallet,
+     *  preserving the current selection where possible. */
+    void updateAssetFilterChoices();
 
     bool eventFilter(QObject *obj, QEvent *event) override;
 
@@ -121,6 +126,7 @@ Q_SIGNALS:
 public Q_SLOTS:
     void chooseDate(int idx);
     void chooseType(int idx);
+    void chooseAsset(int idx);
     void chooseWatchonly(int idx);
     void changedAmount();
     void changedSearch();
