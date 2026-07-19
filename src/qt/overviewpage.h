@@ -25,6 +25,7 @@ class QModelIndex;
 class QTimer;
 class QLabel;
 class QPushButton;
+class QTableWidget;
 QT_END_NAMESPACE
 
 /** Overview ("home") page widget */
@@ -43,6 +44,17 @@ public:
 public Q_SLOTS:
     void setBalance(const interfaces::WalletBalances& balances);
     void setPrivacy(bool privacy);
+
+private:
+    // Fill the per-asset balances table from the current balances, in the chosen unit and
+    // reference currency. Handles native-first ordering, watch-only rows, empty/optional
+    // columns and privacy masking.
+    void populateAssetTable(const interfaces::WalletBalances& balances, int unit, const QString& refCur);
+
+    // A cheap fingerprint of what the table currently shows (per-asset display name + reference
+    // value + currency + privacy). Used to rebuild only when late-arriving registry labels or
+    // price updates would actually change the rendered content — avoids periodic flicker.
+    QString assetTableSignature(const interfaces::WalletBalances& balances, const QString& refCur) const;
 
 Q_SIGNALS:
     void transactionClicked(const QModelIndex &index);
@@ -63,6 +75,12 @@ private:
     // line, so the headline size is kept rather than re-derived from the font.
     QLabel *m_total_value{nullptr};
     qreal m_headline_point_size{0};
+    QString m_asset_sig; // last rendered table fingerprint (see assetTableSignature)
+
+    // Sequentia: the per-asset balances table (Asset | Available | Pending | Immature |
+    // Value), replacing the old ambiguous amount+id label grid. Built in the constructor,
+    // repopulated by setBalance/populateAssetTable. Pending/Immature columns hide when empty.
+    QTableWidget *m_asset_table{nullptr};
 
     // Sequentia network-status panel (Bitcoin anchor + staking / producer)
     QTimer *m_seq_status_timer{nullptr};
