@@ -31,6 +31,7 @@
 #include <QLatin1Char>
 #include <QLatin1String>
 #include <QList>
+#include <QSet>
 
 
 // Amount column is right-aligned it contains numbers
@@ -216,20 +217,54 @@ public:
         return cachedWallet.size();
     }
 
+    // Number of nested child records (e.g. fees) under top-level row `prow`.
+    int childCount(int prow)
+    {
+        if (prow >= 0 && prow < cachedWallet.size()) {
+            return cachedWallet[prow].children.size();
+        }
+        return 0;
+    }
+
+    // Refresh a record's cached status from the wallet if the chain moved on.
+    void refreshStatus(interfaces::Wallet& wallet, const uint256& cur_block_hash, TransactionRecord* rec)
+    {
+        if (!rec) return;
+        interfaces::WalletTxStatus wtx;
+        int numBlocks;
+        int64_t block_time;
+        if (!cur_block_hash.IsNull() && rec->statusUpdateNeeded(cur_block_hash) && wallet.tryGetTxStatus(rec->hash, wtx, numBlocks, block_time)) {
+            rec->updateStatus(wtx, cur_block_hash, numBlocks, block_time);
+        }
+    }
+
+    // Resolve a (tree) model index to its record, refreshing status. Top-level
+    // rows carry the sentinel internalId; child rows carry their parent's row.
+    TransactionRecord* recordForIndex(interfaces::Wallet& wallet, const uint256& cur_block_hash, const QModelIndex& index)
+    {
+        if (!index.isValid()) return nullptr;
+        TransactionRecord* rec = nullptr;
+        if (index.internalId() == quintptr(-1)) {
+            int row = index.row();
+            if (row >= 0 && row < cachedWallet.size()) rec = &cachedWallet[row];
+        } else {
+            int prow = static_cast<int>(index.internalId());
+            int crow = index.row();
+            if (prow >= 0 && prow < cachedWallet.size()) {
+                QList<TransactionRecord>& kids = cachedWallet[prow].children;
+                if (crow >= 0 && crow < kids.size()) rec = &kids[crow];
+            }
+        }
+        refreshStatus(wallet, cur_block_hash, rec);
+        return rec;
+    }
+
+    // Top-level row accessor (used by the incremental update path).
     TransactionRecord* index(interfaces::Wallet& wallet, const uint256& cur_block_hash, const int idx)
     {
         if (idx >= 0 && idx < cachedWallet.size()) {
             TransactionRecord *rec = &cachedWallet[idx];
-
-            // If a status update is needed (blocks came in since last check),
-            // try to update the status of this transaction from the wallet.
-            // Otherwise, simply re-use the cached status.
-            interfaces::WalletTxStatus wtx;
-            int numBlocks;
-            int64_t block_time;
-            if (!cur_block_hash.IsNull() && rec->statusUpdateNeeded(cur_block_hash) && wallet.tryGetTxStatus(rec->hash, wtx, numBlocks, block_time)) {
-                rec->updateStatus(wtx, cur_block_hash, numBlocks, block_time);
-            }
+            refreshStatus(wallet, cur_block_hash, rec);
             return rec;
         }
         return nullptr;
@@ -252,7 +287,7 @@ public:
 };
 
 TransactionTableModel::TransactionTableModel(const PlatformStyle *_platformStyle, WalletModel *parent):
-        QAbstractTableModel(parent),
+        QAbstractItemModel(parent),
         walletModel(parent),
         priv(new TransactionTablePriv(this)),
         fProcessingQueuedTransactions(false),
@@ -294,17 +329,20 @@ void TransactionTableModel::updateConfirmations()
 
 int TransactionTableModel::rowCount(const QModelIndex &parent) const
 {
-    if (parent.isValid()) {
+    if (!parent.isValid()) {
+        // Top level: one row per decomposed transaction record.
+        return priv->size();
+    }
+    if (parent.internalId() != quintptr(-1)) {
+        // Child rows (fees) are leaves; they have no children of their own.
         return 0;
     }
-    return priv->size();
+    return priv->childCount(parent.row());
 }
 
 int TransactionTableModel::columnCount(const QModelIndex &parent) const
 {
-    if (parent.isValid()) {
-        return 0;
-    }
+    Q_UNUSED(parent);
     return columns.length();
 }
 
@@ -381,11 +419,13 @@ QString TransactionTableModel::formatTxType(const TransactionRecord *wtx) const
     case TransactionRecord::SendToSelf:
         return tr("Payment to yourself");
     case TransactionRecord::Generated:
-        return tr("Mined");
+        return tr("Block reward");
     case TransactionRecord::Fee:
         return tr("Fee");
     case TransactionRecord::IssuedAsset:
         return tr("Issuance");
+    case TransactionRecord::Staking:
+        return tr("Staking");
     default:
         return QString();
     }
@@ -404,6 +444,7 @@ QVariant TransactionTableModel::txAddressDecoration(const TransactionRecord *wtx
     case TransactionRecord::SendToAddress:
     case TransactionRecord::SendToOther:
     case TransactionRecord::Fee:
+    case TransactionRecord::Staking:
         return QIcon(":/icons/tx_output");
     default:
         return QIcon(":/icons/tx_inout");
@@ -431,6 +472,10 @@ QString TransactionTableModel::formatTxToAddress(const TransactionRecord *wtx, b
         return QString::fromStdString(wtx->address) + watchAddress;
     case TransactionRecord::SendToSelf:
         return lookupAddress(wtx->address, tooltip) + watchAddress;
+    case TransactionRecord::Fee:
+        return tr("Network fee") + watchAddress;
+    case TransactionRecord::Staking:
+        return tr("Staking deposit") + watchAddress;
     default:
         return tr("(n/a)") + watchAddress;
     }
@@ -527,7 +572,9 @@ QVariant TransactionTableModel::data(const QModelIndex &index, int role) const
 {
     if(!index.isValid())
         return QVariant();
-    TransactionRecord *rec = static_cast<TransactionRecord*>(index.internalPointer());
+    TransactionRecord *rec = priv->recordForIndex(walletModel->wallet(), walletModel->getLastBlockProcessed(), index);
+    if (!rec)
+        return QVariant();
 
     const auto column = static_cast<ColumnIndex>(index.column());
     switch (role) {
@@ -664,6 +711,8 @@ QVariant TransactionTableModel::data(const QModelIndex &index, int role) const
         return formatTxAmount(rec, false, BitcoinUnits::SeparatorStyle::NEVER);
     case StatusRole:
         return rec->status.status;
+    case AssetRole:
+        return GUIUtil::assetDisplayName(rec->asset);
     }
     return QVariant();
 }
@@ -703,19 +752,54 @@ QVariant TransactionTableModel::headerData(int section, Qt::Orientation orientat
 
 QModelIndex TransactionTableModel::index(int row, int column, const QModelIndex &parent) const
 {
-    Q_UNUSED(parent);
-    TransactionRecord* data = priv->index(walletModel->wallet(), walletModel->getLastBlockProcessed(), row);
-    if(data)
-    {
-        return createIndex(row, column, data);
+    if (row < 0 || column < 0 || column >= columns.length()) {
+        return QModelIndex();
     }
-    return QModelIndex();
+    if (!parent.isValid()) {
+        // Top-level row: tag with the sentinel internalId.
+        if (row >= priv->size()) return QModelIndex();
+        return createIndex(row, column, quintptr(-1));
+    }
+    // Child row: only top-level rows have children, and children are leaves.
+    if (parent.internalId() != quintptr(-1)) return QModelIndex();
+    const int prow = parent.row();
+    if (prow < 0 || prow >= priv->size() || row >= priv->childCount(prow)) {
+        return QModelIndex();
+    }
+    return createIndex(row, column, quintptr(prow));
+}
+
+QModelIndex TransactionTableModel::parent(const QModelIndex &index) const
+{
+    if (!index.isValid() || index.internalId() == quintptr(-1)) {
+        // Root, or a top-level row whose parent is the root.
+        return QModelIndex();
+    }
+    const int prow = static_cast<int>(index.internalId());
+    if (prow < 0 || prow >= priv->size()) return QModelIndex();
+    return createIndex(prow, 0, quintptr(-1));
 }
 
 void TransactionTableModel::updateDisplayUnit()
 {
     // emit dataChanged to update Amount column with the current unit
     Q_EMIT dataChanged(index(0, Amount), index(priv->size()-1, Amount));
+}
+
+QStringList TransactionTableModel::assetsPresent() const
+{
+    // Collect the distinct asset tickers across every record — including nested
+    // fee children, whose asset can differ from the payment's (any-asset fees).
+    QSet<QString> seen;
+    for (const TransactionRecord& rec : priv->cachedWallet) {
+        seen.insert(GUIUtil::assetDisplayName(rec.asset));
+        for (const TransactionRecord& child : rec.children) {
+            seen.insert(GUIUtil::assetDisplayName(child.asset));
+        }
+    }
+    QStringList list(seen.values());
+    list.sort(Qt::CaseInsensitive);
+    return list;
 }
 
 void TransactionTablePriv::NotifyTransactionChanged(const uint256 &hash, ChangeType status)

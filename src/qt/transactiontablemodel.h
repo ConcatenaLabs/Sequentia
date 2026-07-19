@@ -7,7 +7,7 @@
 
 #include <qt/bitcoinunits.h>
 
-#include <QAbstractTableModel>
+#include <QAbstractItemModel>
 #include <QStringList>
 
 #include <memory>
@@ -23,7 +23,7 @@ class WalletModel;
 
 /** UI model for the transaction table of a wallet.
  */
-class TransactionTableModel : public QAbstractTableModel
+class TransactionTableModel : public QAbstractItemModel
 {
     Q_OBJECT
 
@@ -74,6 +74,8 @@ public:
         StatusRole,
         /** Unprocessed icon */
         RawDecorationRole,
+        /** Display name (ticker) of the record's asset, for the token filter */
+        AssetRole,
     };
 
     int rowCount(const QModelIndex &parent) const override;
@@ -81,7 +83,12 @@ public:
     QVariant data(const QModelIndex &index, int role) const override;
     QVariant headerData(int section, Qt::Orientation orientation, int role) const override;
     QModelIndex index(int row, int column, const QModelIndex & parent = QModelIndex()) const override;
+    QModelIndex parent(const QModelIndex & index) const override;
     bool processingQueuedTransactions() const { return fProcessingQueuedTransactions; }
+
+    /** SEQUENTIA: distinct asset display names (tickers) present across all
+     *  records, sorted, for populating the token filter drop-down. */
+    QStringList assetsPresent() const;
 
 private:
     WalletModel *walletModel;

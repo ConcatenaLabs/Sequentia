@@ -41,6 +41,8 @@ public:
     void setTypeFilter(quint32 modes);
     void setMinAmount(const CAmount& minimum);
     void setWatchOnlyFilter(WatchOnlyFilter filter);
+    /** Filter by asset ticker (display name). Empty string means all assets. */
+    void setAssetFilter(const QString& assetName);
 
     /** Set maximum number of rows returned, -1 if unlimited. */
     void setLimit(int limit);
@@ -57,6 +59,7 @@ private:
     std::optional<QDateTime> dateFrom;
     std::optional<QDateTime> dateTo;
     QString m_search_string;
+    QString m_asset_filter;
     quint32 typeFilter;
     WatchOnlyFilter watchOnlyFilter;
     CAmount minAmount;
