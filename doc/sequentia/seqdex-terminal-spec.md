@@ -164,6 +164,70 @@ trusted-custody window. The LSP is a counterparty of *last resort for rail conve
 not a custodian. (Submarine and sub-asset swaps are the existing atomic LN↔on-chain
 primitives this reuses.)
 
+### The LSP also *fronts liquidity* (JIT), so a Lightning leg is instant with no channel
+
+Bridging (above) is only half of what the LSP does. The other half — the part most easily
+forgotten, so it is pinned here in precise terms — is **liquidity**: when a user chose Lightning
+for a leg but holds no usable channel for that asset yet, the LSP provisions one **just-in-time**
+so the trade is instant. There is **no pre-trade "go open a channel" step and no minutes-long
+wait** — the channel is opened inline, **0-conf**, as the order is placed.
+
+Two distinct fronting motions, one per leg direction:
+
+- **Pay-over-LN leg (the user SENDS):** the user needs *spendable* Lightning capacity. A channel is
+  opened **funded from the user's own on-chain balance of that asset**, with the LSP as the channel
+  peer. The LSP fronts *bring-up*, not the user's money — the funds are the user's. 0-conf.
+- **Receive-over-LN leg (the user RECEIVES):** the user needs *inbound*. The LSP opens a channel
+  **toward** the user **funded from the LSP's OWN on-chain inventory of that asset**
+  (`provisionInbound`), 0-conf. This is the LSP genuinely fronting inbound liquidity so a
+  channel-less wallet can receive.
+
+On the counterparty-facing side of a *bridged* leg, the LSP additionally **delivers the leg now**
+from its own inventory (e.g. pays the BTC-LN leg immediately) and **carries the on-chain
+confirmation window on its own books**, priced in — the user's path is instant while the LSP
+absorbs the settlement lag.
+
+**JIT is 0-conf and near-instant — never gated on a Sequentia confirmation.** The only real latency
+is node/channel bring-up, which the design deliberately moves *off* the user by fronting. The wallet
+MUST therefore say "near-instant" (0-conf), never "a couple of minutes," and MUST word the two legs
+differently: a pay leg opens *your* capacity from *your* balance; a receive leg is *fronted by the
+service*, nothing for you to set up.
+
+**Front cap.** The LSP fronts up to a 0-conf ceiling per trade (`MIXED_MAX_0CONF`, currently 0.002
+BTC / 200 000 sat on the BTC leg). Above the cap the trade waits for one confirmation, labeled
+honestly (Finality, below) — not fronted instantly. The wallet's advertised "instant up to X" range
+MUST track this cap: do not hard-code a smaller default; ideally read it from the LSP status.
+
+**Liquidity requirement — the knowledge that was lost, now a rule.** JIT fronting on a leg can only
+succeed if the LSP's liquidity-provider node actually **holds inventory in that asset**: **on-chain
+inventory** to fund a JIT channel, and, for the BTC leg, **BTC-LN inventory** to deliver it.
+Therefore the LP MUST be provisioned with **baseline inventory in EVERY tradeable asset — including
+native BTC on-chain and BTC over Lightning — balanced** so it can front either side of any leg (be
+the peer for a pay leg, fund inbound for a receive leg, deliver BTC-LN for a bridged leg). "The LSP
+fronts JIT" and "the LP holds a baseline in every asset" are **not competing designs**: JIT is the
+*mechanism* at settlement time; the per-asset baseline is the *inventory that mechanism draws from*.
+Without inventory in an asset, that asset's Lightning rail **cannot** be fronted, and the wallet MUST
+fall back honestly (offer the on-chain rail, or state Lightning is unavailable for that asset) — it
+must **not** promise instant against inventory that isn't there.
+
+**Wallet-side readiness contract.** A leg's Lightning rail is *ready* when **either** the user holds
+their own usable channel for that asset **or** the LSP can front it (has the inventory above). The
+composer's readiness verdict MUST represent **LSP-frontable liquidity**, not only the user's own
+channels — a wallet with zero channels can still trade over Lightning precisely because the LSP
+fronts. (Today `ln-rail.js` counts only the wallet's own device-provisioned channels; extending the
+verdict to include LSP-frontable inventory is required for the copy above to be fully honest.)
+
+**Still non-custodial.** Fronting never makes the LSP a custodian: the delivered/bridged leg stays
+HTLC/hash-locked atomic end-to-end (previous subsection), so a fronted leg has the same
+no-trusted-window guarantee as a bridged one.
+
+*Implementation map (keep code ↔ spec linked):* JIT channel open = `lsp-server.mjs` `runChannelOpen`
+(0-conf deposit watch → `fundchannel` → poll to `CHANNELD_NORMAL`); inbound fronting =
+`provisionInbound` (LP opens toward the user, `mindepth=0`); mixed/submarine dispatch = `runMixed`;
+front cap = `MIXED_MAX_0CONF`. Wallet readiness = `ln-rail.js` `legOption`/`railAvailability`;
+composer copy = `renderRailNote` (`swap.js`). Design background: `seqln-dex-instant-swap-latency.md`
+(+ `-followup`), `seqln-tier2-hosted-channels-design.md`.
+
 ### Finality
 
 Bitcoin anchoring governs finality identically for every path (Principle 1). Each offer
