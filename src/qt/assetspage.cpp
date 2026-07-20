@@ -21,6 +21,7 @@
 #include <QAbstractButton>
 #include <QByteArray>
 #include <QCheckBox>
+#include <QDateTime>
 #include <QDesktopServices>
 #include <QDoubleValidator>
 #include <QFile>
@@ -35,6 +36,7 @@
 #include <QLineEdit>
 #include <QLocale>
 #include <QMessageBox>
+#include <QPointer>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QRegularExpressionValidator>
@@ -42,6 +44,7 @@
 #include <QShowEvent>
 #include <QSpinBox>
 #include <QTableWidget>
+#include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
 
@@ -407,12 +410,43 @@ void AssetsPage::refresh()
             m_issuances->setItem(row, 3, registry);
         }
     }
+
+    // Stamp the throttle state so scheduleRefresh() can skip a redundant re-run
+    // (same tip, refreshed a moment ago) next time the tab is shown.
+    if (m_wallet_model) {
+        m_last_refresh_blocks = m_wallet_model->node().getNumBlocks();
+        m_last_refresh_ms = QDateTime::currentMSecsSinceEpoch();
+    }
+}
+
+void AssetsPage::scheduleRefresh(bool force)
+{
+    if (!m_wallet_model) return;
+    if (!force && m_last_refresh_blocks >= 0) {
+        // Nothing new to show since the last refresh: same tip and it ran within
+        // the last couple of seconds. The tables already hold that result, so a
+        // re-run would only freeze the GUI thread for no visible change.
+        const int blocks = m_wallet_model->node().getNumBlocks();
+        const qint64 age = QDateTime::currentMSecsSinceEpoch() - m_last_refresh_ms;
+        if (blocks == m_last_refresh_blocks && age < 2000) return;
+    }
+    if (m_refresh_pending) return; // one deferred refresh is enough
+    m_refresh_pending = true;
+    QPointer<AssetsPage> self(this);
+    // Let the switch paint first, then do the wallet RPCs on the next turn.
+    QTimer::singleShot(0, this, [self] {
+        if (!self) return;
+        self->m_refresh_pending = false;
+        self->refresh();
+    });
 }
 
 void AssetsPage::showEvent(QShowEvent* event)
 {
     QWidget::showEvent(event);
-    if (m_wallet_model) refresh();
+    // Never refresh synchronously here: the wallet RPCs on the GUI thread would
+    // block the new tab from painting and make the switch feel like a stall.
+    scheduleRefresh(/*force=*/false);
 }
 
 QString AssetsPage::issuerDomain() const
