@@ -107,9 +107,9 @@ BitcoinGUI::BitcoinGUI(interfaces::Node& node, const PlatformStyle *_platformSty
     m_network_style(networkStyle)
 {
     QSettings settings;
-    if (!restoreGeometry(settings.value("MainWindowGeometry").toByteArray())) {
-        // Restore failed (perhaps missing setting), center the window
-        move(QGuiApplication::primaryScreen()->availableGeometry().center() - frameGeometry().center());
+    if (!GUIUtil::RestoreWindowGeometry(this, settings.value("MainWindowGeometry").toByteArray())) {
+        // Restore failed, was missing, or held an unusable geometry: center the window.
+        GUIUtil::MoveToScreenCenter(this);
     }
 
     setContextMenuPolicy(Qt::PreventContextMenu);

@@ -482,9 +482,9 @@ RPCConsole::RPCConsole(interfaces::Node& node, const PlatformStyle *_platformSty
 #ifdef ENABLE_WALLET
     if (WalletModel::isWalletEnabled()) {
         // RPCConsole widget is a window.
-        if (!restoreGeometry(settings.value("RPCConsoleWindowGeometry").toByteArray())) {
-            // Restore failed (perhaps missing setting), center the window
-            move(QGuiApplication::primaryScreen()->availableGeometry().center() - frameGeometry().center());
+        if (!GUIUtil::RestoreWindowGeometry(this, settings.value("RPCConsoleWindowGeometry").toByteArray())) {
+            // Restore failed, was missing, or held an unusable geometry: center the window.
+            GUIUtil::MoveToScreenCenter(this);
         }
         ui->splitter->restoreState(settings.value("RPCConsoleWindowPeersTabSplitterSizes").toByteArray());
     } else

@@ -141,6 +141,51 @@ void AddButtonShortcut(QAbstractButton* button, const QKeySequence& shortcut)
     QObject::connect(new QShortcut(shortcut, button), &QShortcut::activated, [button]() { button->animateClick(); });
 }
 
+// Combined available geometry across every attached screen. Empty if no screen
+// information is available.
+static QRect combinedAvailableGeometry()
+{
+    QRect area;
+    for (const QScreen* screen : QGuiApplication::screens()) {
+        area = area.united(screen->availableGeometry());
+    }
+    return area;
+}
+
+bool RestoreWindowGeometry(QWidget* window, const QByteArray& geometry)
+{
+    if (geometry.isEmpty()) return false;
+    // QWidget::restoreGeometry() already rejects data with a bad magic number or
+    // an incompatible serialization version (returns false without touching the
+    // widget). What it does NOT reject is a perfectly well-formed geometry that
+    // happens to be unusable on the current display.
+    if (!window->restoreGeometry(geometry)) return false;
+
+    const QRect frame = window->frameGeometry();
+
+    // Degenerate size: nothing sensible to show.
+    if (frame.width() <= 0 || frame.height() <= 0) return false;
+
+    const QRect available = combinedAvailableGeometry();
+    // No screen info at all — don't trust the stored geometry, play it safe.
+    if (available.isEmpty()) return false;
+
+    // Larger than the whole desktop area (a runaway size left behind by an
+    // accidental extreme resize), or placed entirely off every screen.
+    if (frame.width() > available.width() || frame.height() > available.height()) return false;
+    if (!available.intersects(frame)) return false;
+
+    return true;
+}
+
+void MoveToScreenCenter(QWidget* window)
+{
+    QScreen* screen = window->screen();
+    if (!screen) screen = QGuiApplication::primaryScreen();
+    if (!screen) return; // No screen available; leave default placement.
+    window->move(screen->availableGeometry().center() - window->frameGeometry().center());
+}
+
 bool parseBitcoinURI(const QUrl &uri, SendCoinsRecipient *out)
 {
     // return if URI is not valid or incorrect scheme

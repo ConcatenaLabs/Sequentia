@@ -79,6 +79,32 @@ namespace GUIUtil
      */
     void AddButtonShortcut(QAbstractButton* button, const QKeySequence& shortcut);
 
+    /**
+     * Robustly restore a top-level window's geometry from a persisted QSettings
+     * byte array (as produced by QWidget::saveGeometry()).
+     *
+     * Unlike a bare QWidget::restoreGeometry(), this also rejects geometries that
+     * are well-formed but unusable — degenerate (zero/negative size), larger than
+     * any available screen, or entirely off every screen. Such a value (e.g. left
+     * behind after a window was accidentally sized to extremes) would otherwise be
+     * applied verbatim and can crash on show() when an oversized backing store is
+     * created. When the stored value is missing, unreadable, or rejected this
+     * returns false and leaves the widget's default geometry untouched, so the
+     * caller can fall back to a sane placement (see MoveToScreenCenter()).
+     *
+     * @param[in] window    top-level widget to restore
+     * @param[in] geometry  bytes previously produced by window->saveGeometry()
+     * @return true if a valid geometry was restored, false otherwise
+     */
+    bool RestoreWindowGeometry(QWidget* window, const QByteArray& geometry);
+
+    /**
+     * Center a top-level window on the screen it currently belongs to (falling
+     * back to the primary screen). Null-safe: does nothing if no screen is
+     * available, avoiding a crash from dereferencing a null QScreen.
+     */
+    void MoveToScreenCenter(QWidget* window);
+
     // Parse "bitcoin:" URI into recipient object, return true on successful parsing
     bool parseBitcoinURI(const QUrl &uri, SendCoinsRecipient *out);
     bool parseBitcoinURI(QString uri, SendCoinsRecipient *out);
