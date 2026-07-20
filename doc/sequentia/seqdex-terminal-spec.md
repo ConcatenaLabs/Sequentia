@@ -201,6 +201,14 @@ and pegs out to real BTC for the counterparty on fill. OFF → a native-BTC HTLC
 time-bounded). **MARKET orders and any Lightning leg NEVER use SBTC** — they are pure native
 BTC. The public wrap/unwrap lives in **Compages**, not the wallet.
 
+**Book routing (do not blur SBTC into the BTC books):** a book is keyed by the asset the user
+SELECTED, not by what the covenant locks. A silently-pegged BTC limit order locks SBTC but was
+placed as **BTC**, so it rests in the **BTC/<quote>** book and never in the distinct
+**SBTC/<quote>** book (for users who explicitly chose SBTC). The order carries its book `pair`
+separately from its locked `asset_b` (the SBTC id) plus a `peg_out_on_fill` marker (true only for
+pegged-BTC orders → the taker receives real BTC on fill). BTC/SBTC is a real,
+redundant-but-allowed pair. Full detail: `doc/sequentia/sbtc-peg-design.md` §5.1.
+
 SBTC is **NOT** Elements' native consensus peg (dormant here, federation-based, coupled to
 the policy asset). It is an **independent, application-level bridge** — a normal reissuable
 Sequentia asset whose reissuance token is held by a fixed N-of-M operator multisig that also

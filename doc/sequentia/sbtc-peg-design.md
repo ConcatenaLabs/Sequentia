@@ -98,6 +98,30 @@ SBTC touches the DEX in exactly ONE narrow case, and even then optionally. **Pre
 The covenant / matcher / relay plumbing (partial fills, CrossRail, the settler) already
 exists; the wallet-side toggle + peg-in/out calls are the new wiring.
 
+### 5.1 Book routing — the SELECTED asset, NEVER the locked asset
+
+SBTC is also a normal asset, so genuine SBTC pairs exist (SBTC/EURX, BTC/SBTC, …) with their own
+books. The silent peg must NOT blur them into the native-BTC books. Two hard invariants:
+
+- **A book is chosen by the asset the user SELECTED, not by what the covenant locks.** A BTC
+  on-chain LIMIT order with the toggle ON locks SBTC in its covenant, but the user selected
+  **BTC** — so it rests in the **BTC/<quote>** book (e.g. `EURX/BTC`) and must **NEVER** appear
+  in the **SBTC/<quote>** book. The `SBTC/<quote>` book is for users who EXPLICITLY chose SBTC;
+  mixing a silently-pegged BTC order into it would mis-sell parent-chain BTC liquidity as SBTC,
+  and vice-versa. So an order carries its **book `pair`** (`EURX/BTC`) SEPARATELY from its locked
+  **`asset_b`** (the SBTC id). Matching, depth, and the pair bar all read `pair`; only the
+  covenant plumbing sees the SBTC id.
+- **A `peg_out_on_fill` marker rides with the order.** TRUE only for a silently-pegged BTC order:
+  on fill the settler pegs the covenant's SBTC back OUT to real BTC so the **TAKER receives
+  parent-chain BTC**. A genuine SBTC order (user selected SBTC) has it FALSE — its SBTC transfers
+  as SBTC, no peg. Both kinds lock SBTC in the covenant; they differ only in which book they rest
+  in and whether the peg reverses on fill.
+
+**BTC/SBTC is a real, if redundant, pair and is ALLOWED.** A BTC on-chain LIMIT maker there pegs
+BTC → SBTC to rest (in the `SBTC/BTC` book, `pair` quote = BTC, `peg_out_on_fill` = true), and on
+fill pegs SBTC → BTC to the taker while receiving the taker's SBTC — internally SBTC↔SBTC,
+user-facing BTC↔SBTC. Do not special-case-block it.
+
 ## 6. Build order (bundled; ONE build/verify at the very end)
 
 No consensus code. In order:
