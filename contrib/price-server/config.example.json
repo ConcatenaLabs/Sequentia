@@ -30,8 +30,9 @@
   },
 
   "feed_aliases": {
-    "_comment": "Map a registry ticker to the key the price feed uses for that asset, when they differ. The Sequence token's registry/display ticker is tSEQ (TSEQ) but the feed prices it under the chain-independent key SEQ (as the node GUI and explorer also do), so they refer to the same asset and merge into one row.",
-    "TSEQ": "SEQ"
+    "_comment": "Map a registry ticker to the key the price feed uses for that asset, when they differ. The Sequence token's registry/display ticker is tSEQ (TSEQ) but the feed prices it under the chain-independent key SEQ (as the node GUI and explorer also do), so they refer to the same asset and merge into one row. SBTC (bridge-pegged Bitcoin) is priced exactly as BTC, which the feed keys as tBTC.",
+    "TSEQ": "SEQ",
+    "SBTC": "tBTC"
   },
 
   "default_thresholds": {
