@@ -455,8 +455,10 @@ void StakingPage::refresh()
 
 void StakingPage::scheduleRefresh(bool force)
 {
-    if (!m_wallet_model) return;
-    if (!force && m_last_refresh_blocks >= 0) {
+    // A missing wallet model is not a reason to skip: refresh() still updates the
+    // block-production banner, which it reads from this node's own config. Only
+    // the throttle below needs the model, to ask the node for the tip.
+    if (!force && m_wallet_model && m_last_refresh_blocks >= 0) {
         // Nothing new to show since the last refresh: same tip and it ran within
         // the last couple of seconds. The cards/tables already hold that result,
         // so a re-run would only freeze the GUI thread for no visible change.
