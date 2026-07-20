@@ -63,43 +63,60 @@ minted only against a real BTC deposit and burned only when BTC is released.
   This is the security-critical component; keep it simple and auditable. Both flows are
   exposed publicly (SBTC is a usable asset).
 
-## 4. SBTC as a wallet asset
+## 4. SBTC as an asset, and the PUBLIC bridge (Compages)
 
 - Registry entry (ticker **SBTC**, subtitle "Pegged Bitcoin"), a normal **unprivileged**
-  asset — one row among equals. **Native BTC stays the privileged, distinct asset.**
-- A public "wrap / unwrap BTC" affordance (peg-in / peg-out) for direct use (confidential txs
-  etc.), separate from the silent DEX path below.
+  asset — one row among equals in the wallet. **Native BTC stays the privileged, distinct
+  asset.**
+- The **public wrap/unwrap BTC↔SBTC interface goes into Compages**, the cross-chain bridge
+  product (today Ethereum↔Sequentia; expanding to Solana and other networks — Bitcoin is a
+  natural addition), **NOT** a standalone wallet UI. Compages calls the sbtc-bridge
+  `/pegin` and `/pegout`. This is for direct/public use (e.g. confidential-tx wrapping),
+  separate from the DEX silent path below.
 
-## 5. The DEX silent peg — resting on-chain-BTC LIMIT orders
+## 5. The DEX silent peg — an OPT-OUT for resting on-chain-BTC LIMIT orders ONLY
 
-The one place the bridge is **silent** (transparent): a maker rests a BTC limit order
-bringing **real** parent-chain BTC AND the taker wants **real** parent-chain BTC.
+SBTC touches the DEX in exactly ONE narrow case, and even then optionally. **Precise scope
+(do not overreach):**
 
-1. Maker places a BTC limit bid. The wallet silently **pegs in** the maker's real BTC → SBTC
-   and rests the SBTC in a **covenant** (`CovenantTerms.asset_b = SBTC id`) on the
-   `<asset>/BTC` book pair. The order rests, partial-fillable, offline-liftable.
-2. A taker fills (fully or partially). The maker is credited the asset; the taker receives
-   the SBTC (the covenant FILL).
-3. The taker's SBTC is silently **pegged out** → real BTC to the taker's parent-chain
-   address. Neither party need notice SBTC was involved.
+- SBTC is used **only** when the user **pays with on-chain BTC AND** the order type is
+  **LIMIT** (resting). **Market** orders and **any Lightning** leg **never** use SBTC — they
+  are pure **native BTC** (interactive / LN).
+- For that one case the composer shows a **"Keep resting while offline"** toggle, **default
+  ON**, toggleable off, with the hint: *if on, your order rests as pegged BTC (SBTC) so it
+  stays live while you're offline; your funds return as regular BTC if it fills or is
+  cancelled.*
+  - **ON (default):** the wallet silently **pegs in** the maker's real BTC → SBTC and rests
+    the SBTC in a **covenant** (`CovenantTerms.asset_b = SBTC id`) on the `<asset>/BTC` book
+    pair — partial-fillable, offline-liftable. On fill the taker's SBTC silently **pegs out**
+    → real BTC. Transparent; the user places and receives native BTC.
+  - **OFF:** the order does **not** use SBTC. It rests as a native-BTC HTLC (trustless, but
+    time-bounded and needing the user online to refund) — the user trades the peg's
+    convenience for staying fully native. If even that isn't wanted, the limit order is simply
+    not offered as offline-resting.
 
-A **market** taker paying real BTC settles interactively (online) and needs no bridge. A
-maker who wants to hold SBTC directly simply skips the peg-out. The covenant / matcher /
-relay plumbing (partial fills, CrossRail, the settler) already exists.
+The covenant / matcher / relay plumbing (partial fills, CrossRail, the settler) already
+exists; the wallet-side toggle + peg-in/out calls are the new wiring.
 
 ## 6. Build order (bundled; ONE build/verify at the very end)
 
 No consensus code. In order:
 
 1. **SBTC asset + bridge service.** Issue the reissuable SBTC asset (reissuance token → the
-   N-of-M multisig); build the off-chain bridge service (watch testnet4 deposits → reissue
-   SBTC; watch Sequentia SBTC returns → release BTC). Register SBTC. (new service; registry)
-2. **SBTC in the wallets** as a normal unprivileged asset + a public wrap/unwrap affordance. (wallet)
-3. **Silent DEX integration** (peg-in on rest, peg-out on fill) into the covenant flow. (wallet, relay)
-4. **DEX terminal settlement rewrite** (rail-blind covenant book-walking; BTC via SBTC
-   covenants). The Tier A control surface is already committed on `terminal-rebuild`. (wallet)
-5. **Verify EVERYTHING once** (bridge, wallet builds web + Ambra, all combos incl. peg-in/out
-   + silent resting BTC limit + partial fill), then ship. Do not rebuild/deploy mid-way.
+   N-of-M multisig); the off-chain bridge service (built: `~/sbtc-bridge`). Register SBTC. (service; registry)
+2. **SBTC in the wallets** as a normal unprivileged asset (one row among equals; NO public
+   wrap/unwrap UI in the wallet). (wallet)
+3. **Public wrap/unwrap → COMPAGES** (the cross-chain bridge product), calling the sbtc-bridge
+   `/pegin` + `/pegout`, alongside its Ethereum (and coming Solana/others) bridges. (compages)
+4. **DEX composer toggle + silent peg (narrow):** show a default-ON "Keep resting while
+   offline" toggle ONLY for on-chain-BTC-pay + LIMIT orders; ON → peg-in on rest / peg-out on
+   fill (covenant). Market + LN never touch SBTC. (wallet, relay)
+5. **DEX terminal settlement rewrite** (rail-blind covenant book-walking; same-chain already
+   works; a BTC LIMIT order with the toggle ON rests via an SBTC covenant, everything else is
+   native BTC). Tier A control surface already committed on `terminal-rebuild`. (wallet)
+6. **Verify EVERYTHING once** (bridge, wallet builds web + Ambra, Compages, all combos incl.
+   peg-in/out + BTC market/LN native + BTC limit persist-on/off + partial fill), then ship.
+   Do not rebuild/deploy mid-way.
 
 ## 7. Open items to confirm during build
 - M and N for the operator multisig (testnet: e.g. 2-of-3 under our control).

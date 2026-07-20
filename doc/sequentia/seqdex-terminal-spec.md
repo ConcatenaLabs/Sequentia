@@ -191,13 +191,15 @@ send/receive dropdowns) and it stays that way — nothing here defaults to or re
 with a pegged asset.
 
 There is exactly ONE narrow reason a pegged form is needed: **Bitcoin has no covenants,
-Elements does.** So an on-chain-BTC **LIMIT** order cannot rest on the DEX while the user
-is offline (there is nothing on Bitcoin to hold it). For that case only, the order is
-handled by a **SILENT peg**: the user's real BTC is pegged in to **SBTC**, the SBTC rests
-in a covenant (partial-fillable, offline-liftable), and on fill the SBTC is pegged out so
-the **counterparty receives real BTC**. It is transparent — the user places and receives
-native BTC; SBTC is an implementation detail of a resting order. A MARKET taker paying real
-BTC settles interactively (online) and needs no peg.
+Elements does.** So an on-chain-BTC **LIMIT** order cannot rest on the DEX while the user is
+offline. SBTC is therefore used in the DEX **only** for **on-chain-BTC-pay + LIMIT** orders,
+and even then **optionally**: the composer shows a **default-ON "Keep resting while offline"**
+toggle (only when pay = on-chain BTC and the order is a limit), hinting that the order rests
+as pegged BTC and funds return as regular BTC if it fills or is cancelled. ON → the real BTC
+is silently pegged in to **SBTC**, rests in a covenant (partial-fillable, offline-liftable),
+and pegs out to real BTC for the counterparty on fill. OFF → a native-BTC HTLC (trustless,
+time-bounded). **MARKET orders and any Lightning leg NEVER use SBTC** — they are pure native
+BTC. The public wrap/unwrap lives in **Compages**, not the wallet.
 
 SBTC is **NOT** Elements' native consensus peg (dormant here, federation-based, coupled to
 the policy asset). It is an **independent, application-level bridge** — a normal reissuable
