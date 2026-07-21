@@ -156,7 +156,7 @@ private:
 namespace {
 // Columns of the per-asset balances table. Pending/Immature are hidden when no asset has
 // any such amount, so the common case reads as a clean Asset | Available | Value table.
-enum AssetCol { COL_ASSET = 0, COL_AVAILABLE, COL_PENDING, COL_IMMATURE, COL_VALUE, COL_COUNT };
+enum AssetCol { COL_ASSET = 0, COL_ID, COL_AVAILABLE, COL_PENDING, COL_IMMATURE, COL_VALUE, COL_COUNT };
 } // namespace
 
 OverviewPage::OverviewPage(const PlatformStyle *platformStyle, QWidget *parent) :
@@ -253,13 +253,18 @@ OverviewPage::OverviewPage(const PlatformStyle *platformStyle, QWidget *parent) 
         ui->scrollArea->setVisible(false);
 
         m_asset_table = new QTableWidget(0, COL_COUNT, ui->frame);
-        m_asset_table->setHorizontalHeaderLabels({tr("Asset"), tr("Available"), tr("Pending"), tr("Immature"), tr("Value")});
-        m_asset_table->horizontalHeader()->setSectionResizeMode(COL_ASSET, QHeaderView::Stretch);
+        m_asset_table->setHorizontalHeaderLabels({tr("Asset name"), tr("Asset id"), tr("Available"), tr("Pending"), tr("Immature"), tr("Value")});
+        // Name is short; the id gets the stretch and elides with "…" when narrowed
+        // (the full id is always on hover), so the two are never confused with the
+        // amount and each has its own resizable column.
+        m_asset_table->horizontalHeader()->setSectionResizeMode(COL_ASSET, QHeaderView::ResizeToContents);
+        m_asset_table->horizontalHeader()->setSectionResizeMode(COL_ID, QHeaderView::Stretch);
         m_asset_table->horizontalHeader()->setSectionResizeMode(COL_AVAILABLE, QHeaderView::ResizeToContents);
         m_asset_table->horizontalHeader()->setSectionResizeMode(COL_PENDING, QHeaderView::ResizeToContents);
         m_asset_table->horizontalHeader()->setSectionResizeMode(COL_IMMATURE, QHeaderView::ResizeToContents);
         m_asset_table->horizontalHeader()->setSectionResizeMode(COL_VALUE, QHeaderView::ResizeToContents);
         m_asset_table->horizontalHeader()->setHighlightSections(false);
+        m_asset_table->setTextElideMode(Qt::ElideRight);
         m_asset_table->verticalHeader()->setVisible(false);
         m_asset_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
         m_asset_table->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -396,15 +401,28 @@ void OverviewPage::populateAssetTable(const interfaces::WalletBalances& balances
         const int row = t->rowCount();
         t->insertRow(row);
 
-        // Asset: registry name when known, else the id elided in the middle with the full
-        // 64-hex id on hover. This is the disambiguation — the id can never be mistaken for
-        // the quantity, which lives in its own labelled, right-aligned column.
+        // Asset name (registry) and asset id (the 64-hex identity) now live in two
+        // separate columns. When the registry has not named the asset, the name cell
+        // says "N/A" and explains in a tooltip why; the id is always shown in full,
+        // eliding with "…" only when the column is dragged narrow.
         const bool named = GUIUtil::assetIsNamed(asset);
         const QString fullId = QString::fromStdString(asset.GetHex());
         const QString name = GUIUtil::assetDisplayName(asset);
-        auto* a0 = new QTableWidgetItem((named ? name : GUIUtil::ellipsizeMiddle(fullId)) + suffix);
-        a0->setToolTip(named ? (name + "\n" + fullId) : fullId);
+
+        auto* a0 = new QTableWidgetItem((named ? name : tr("N/A")) + suffix);
+        if (named) {
+            a0->setToolTip(name);
+        } else {
+            a0->setForeground(QColor("#9b988e"));
+            a0->setToolTip(tr("No registered name yet. An asset's name comes from the asset registry once "
+                              "its issuer publishes the proof file on their domain and registers it; until "
+                              "then wallets can only show its id."));
+        }
         t->setItem(row, COL_ASSET, a0);
+
+        auto* aid = new QTableWidgetItem(fullId);
+        aid->setToolTip(fullId);
+        t->setItem(row, COL_ID, aid);
 
         t->setItem(row, COL_AVAILABLE, amountCell(asset, avail));
         t->setItem(row, COL_PENDING, amountCell(asset, pending));

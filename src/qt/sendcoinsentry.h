@@ -72,6 +72,7 @@ private Q_SLOTS:
     void on_pasteButton_clicked();
     void updateDisplayUnit();
     void updateAssetTypes();
+    void refreshAssetNames();
 
 protected:
     void changeEvent(QEvent* e) override;

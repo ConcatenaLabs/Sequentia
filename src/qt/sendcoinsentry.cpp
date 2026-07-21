@@ -258,6 +258,11 @@ void SendCoinsEntry::updateAssetTypes()
     }
 }
 
+void SendCoinsEntry::refreshAssetNames()
+{
+    ui->payAmount->refreshAssetNames();
+}
+
 void SendCoinsEntry::updateDisplayUnit()
 {
     if(model && model->getOptionsModel())

@@ -55,8 +55,6 @@ private:
     WalletModel* m_wallet_model{nullptr};
     const PlatformStyle* m_platform_style;
 
-    QTableWidget* m_balances{nullptr};
-    QLabel* m_balances_empty{nullptr};
     QTableWidget* m_issuances{nullptr};
 
     QLineEdit* m_issue_name{nullptr};

@@ -40,6 +40,7 @@
 #include <QFontMetrics>
 #include <QScrollBar>
 #include <QSettings>
+#include <QShowEvent>
 #include <QTextDocument>
 
 using wallet::CCoinControl;
@@ -889,6 +890,25 @@ void SendCoinsDialog::useAvailableBalance(SendCoinsEntry* entry)
         recipient.asset_amount = 0;
     }
     entry->setValue(recipient);
+}
+
+void SendCoinsDialog::showEvent(QShowEvent* event)
+{
+    QDialog::showEvent(event);
+    // Re-label the per-recipient asset selectors from the registry: a name that
+    // resolved after the field was first built would otherwise stay a hex id.
+    for (int i = 0; i < ui->entries->count(); ++i) {
+        if (auto* entry = qobject_cast<SendCoinsEntry*>(ui->entries->itemAt(i)->widget())) {
+            entry->refreshAssetNames();
+        }
+    }
+    // The fee-asset selector holds the same assets by hex data; re-label those too.
+    if (g_con_any_asset_fees) {
+        for (int i = 0; i < ui->feeAssetSelector->count(); ++i) {
+            const CAsset a = GetAssetFromString(ui->feeAssetSelector->itemData(i).toString().toStdString());
+            if (!a.IsNull()) ui->feeAssetSelector->setItemText(i, GUIUtil::assetDisplayName(a));
+        }
+    }
 }
 
 void SendCoinsDialog::updateFeeSectionControls()

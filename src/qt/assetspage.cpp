@@ -82,30 +82,15 @@ AssetsPage::AssetsPage(const PlatformStyle* platformStyle, QWidget* parent)
     intro->setWordWrap(true);
     layout->addWidget(intro);
 
-    // --- Balances ---
-    QGroupBox* balGroup = new QGroupBox(tr("Your asset balances"), this);
-    QVBoxLayout* balLayout = new QVBoxLayout(balGroup);
-    m_balances = new QTableWidget(0, 3, balGroup);
-    m_balances->setHorizontalHeaderLabels({tr("Asset"), tr("Balance"), tr("Value")});
-    m_balances->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
-    m_balances->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
-    m_balances->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
-    m_balances->verticalHeader()->setVisible(false);
-    m_balances->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    m_balances->setSelectionBehavior(QAbstractItemView::SelectRows);
-    balLayout->addWidget(m_balances);
-    // Empty state: an empty wallet holds no assets at all — never a "0" row for any
-    // particular asset (no asset is privileged, so none deserves a phantom line).
-    m_balances_empty = new QLabel(tr("No assets yet. Receive any asset - or issue your own below - and it will show up here."), balGroup);
-    m_balances_empty->setWordWrap(true);
-    m_balances_empty->setVisible(false);
-    balLayout->addWidget(m_balances_empty);
-    QPushButton* refreshBtn = new QPushButton(tr("Refresh"), balGroup);
+    // The balances table used to live here too, but it duplicated the Overview
+    // page's balances table (which is the canonical one, with the reference-value
+    // column). Assets now focuses on what is unique to it: issuing and minting.
+    // A Refresh button remains for the issuances list below.
+    QPushButton* refreshBtn = new QPushButton(tr("Refresh"), this);
     QHBoxLayout* refreshRow = new QHBoxLayout();
     refreshRow->addStretch();
     refreshRow->addWidget(refreshBtn);
-    balLayout->addLayout(refreshRow);
-    layout->addWidget(balGroup);
+    layout->addLayout(refreshRow);
 
     // --- Issue ---
     QGroupBox* issueGroup = new QGroupBox(tr("Issue a new asset"), this);
@@ -320,42 +305,7 @@ void AssetsPage::refresh()
     if (!m_wallet_model) return;
     bool ok; QString err;
 
-    // Per-asset balances: getbalance "*"
-    UniValue bp(UniValue::VARR);
-    bp.push_back("*");
-    UniValue bal = callWalletRpc("getbalance", bp, ok, err);
-    if (ok && bal.isObject()) {
-        const std::vector<std::string>& keys = bal.getKeys();
-        m_balances->setRowCount(0);
-        const int display_unit = m_wallet_model->getOptionsModel() ? m_wallet_model->getOptionsModel()->getDisplayUnit() : BitcoinUnits::BTC;
-        for (size_t i = 0; i < keys.size(); ++i) {
-            // getbalance reports every amount 1e8-scaled (atoms/1e8), like all RPC
-            // output. Recover the exact atom count and render it at the asset's own
-            // precision, so an asset with a denomination other than 8 shows the
-            // right number of decimals here instead of always eight.
-            CAmount atoms = 0;
-            try { atoms = AmountFromValue(bal[i], /*check_range=*/false); } catch (...) { continue; }
-            // Zero balances are assets the wallet does not hold; listing them (the
-            // policy asset included) would just be noise. No asset is privileged.
-            if (atoms <= 0) continue;
-            const std::string& key = keys[i];
-            const CAsset asset = GetAssetFromString(key);
-            const QString label = QString::fromStdString(key);
-            const double wholeUnits = static_cast<double>(atoms) / std::pow(10.0, GUIUtil::assetPrecision(asset));
-
-            int row = m_balances->rowCount();
-            m_balances->insertRow(row);
-            m_balances->setItem(row, 0, new QTableWidgetItem(label));
-            m_balances->setItem(row, 1, new QTableWidgetItem(GUIUtil::formatAssetAmount(asset, atoms, display_unit, BitcoinUnits::SeparatorStyle::STANDARD, false)));
-            // SEQUENTIA: value the balance in the user's chosen reference currency (blank if unpriced).
-            m_balances->setItem(row, 2, new QTableWidgetItem(GUIUtil::formatReferenceApproxByLabel(label, wholeUnits, QString())));
-        }
-        const bool empty = m_balances->rowCount() == 0;
-        m_balances->setVisible(!empty);
-        if (m_balances_empty) m_balances_empty->setVisible(empty);
-    } else if (!ok) {
-        setStatus(tr("Could not load balances: %1").arg(err), true);
-    }
+    // (Balances now live only on the Overview page.)
 
     // Which assets does the registry vouch for? The node merges an entry only once
     // the registry marks it verified, so an asset having a label here is exactly

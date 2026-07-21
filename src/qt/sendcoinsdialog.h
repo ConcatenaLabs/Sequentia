@@ -50,6 +50,11 @@ public:
     void pasteEntry(const SendCoinsRecipient &rv);
     bool handlePaymentRequest(const SendCoinsRecipient &recipient);
 
+protected:
+    /** Registry asset names arrive after startup; re-label the asset selectors
+        each time the page is shown so a held asset never stays a raw hex id. */
+    void showEvent(QShowEvent* event) override;
+
 public Q_SLOTS:
     void clear();
     void reject() override;
