@@ -322,6 +322,14 @@ namespace GUIUtil
        or an empty string when none is configured. This is whose prices the wallet shows. */
     QString referencePriceFeedUrl();
 
+    /* SEQUENTIA: a Python interpreter that can actually run the price-server sidecar.
+       Prefers one bundled beside the script or the binary, then a real interpreter on
+       PATH. On Windows this deliberately skips the "python3" App Execution Alias under
+       WindowsApps: it is a Microsoft Store stub that exits with "Python was not found"
+       instead of running anything, which QProcess still reports as a successful start.
+       Empty when no usable interpreter exists. */
+    QString findPythonInterpreter(const QString& scriptDir);
+
     /* SEQUENTIA: whether the node's cached price feed carries a positive price for this asset.
        Fees paid in an unpriced asset are unlikely to ever be accepted by a block producer, so
        the send dialog uses this to pick a sane default fee asset and to warn about bad picks. */

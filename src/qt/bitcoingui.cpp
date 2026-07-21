@@ -1054,14 +1054,16 @@ void BitcoinGUI::launchPriceServer()
     }
     const QString sdir = QFileInfo(script).absolutePath();
 
-    // A Python interpreter: bundled next to the script (packaged build), else the system python3.
-    QString python;
-    const QStringList pyCands{ sdir + "/python/python3", sdir + "/python/python.exe",
-                              appDir + "/python/python3", appDir + "/python/python.exe" };
-    for (const QString& c : pyCands) {
-        if (QFileInfo::exists(c)) { python = QFileInfo(c).absoluteFilePath(); break; }
+    // A Python interpreter that can actually run the sidecar (see the helper: on
+    // Windows the bare name "python3" is usually a Store stub that runs nothing).
+    const QString python = GUIUtil::findPythonInterpreter(sdir);
+    if (python.isEmpty()) {
+        QMessageBox::warning(this, tr("Price server"),
+            tr("The price server needs Python, and no usable interpreter was found. Install Python 3 "
+               "and try again.\n\nNote: on Windows the \"python3\" shortcut that comes with the system "
+               "only opens the Microsoft Store and cannot run the server."));
+        return;
     }
-    if (python.isEmpty()) python = QStringLiteral("python3");
 
     // Per-user config in the app data dir; seed it from the bundled config.example.json on first run.
     // (Do NOT use gen-price-config.py — it writes a demo config to /root and prints only a summary.)
@@ -1153,9 +1155,21 @@ void BitcoinGUI::launchPriceServer()
         } else if (++(*attempts) >= 30) { // ~9s of 300ms polls
             pollTimer->stop();
             pollTimer->deleteLater();
+            QString detail;
+            if (m_price_server) {
+                // The sidecar's own last words explain far more than a generic
+                // "it did not come up" -- a missing module, a bad config key.
+                const QString err = QString::fromLocal8Bit(m_price_server->readAllStandardError()).trimmed();
+                const QString out = QString::fromLocal8Bit(m_price_server->readAllStandardOutput()).trimmed();
+                const QString tail = !err.isEmpty() ? err : out;
+                if (m_price_server->state() == QProcess::NotRunning) {
+                    detail = "\n\n" + tr("It exited with code %1.").arg(m_price_server->exitCode());
+                }
+                if (!tail.isEmpty()) detail += "\n\n" + tail.right(600);
+            }
             QMessageBox::warning(this, tr("Price server"),
-                tr("The price server did not come up at %1. It likely failed to start; check that "
-                   "Python and its dependencies are installed and that the price-server config is valid.").arg(url));
+                tr("The price server did not come up at %1. Check that Python and its dependencies "
+                   "are installed and that the price-server config is valid.").arg(url) + detail);
         }
     });
     pollTimer->start(300);

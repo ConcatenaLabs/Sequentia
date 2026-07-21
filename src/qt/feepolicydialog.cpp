@@ -268,14 +268,15 @@ void FeePolicyDialog::onLaunchPriceServer()
     }
     const QString sdir = QFileInfo(script).absolutePath();
 
-    // A Python interpreter: bundled next to the script (packaged build), else the system python3.
-    QString python;
-    const QStringList pyCands{ sdir + "/python/python3", sdir + "/python/python.exe",
-                              appDir + "/python/python3", appDir + "/python/python.exe" };
-    for (const QString& c : pyCands) {
-        if (QFileInfo::exists(c)) { python = QFileInfo(c).absoluteFilePath(); break; }
+    // A Python interpreter that can actually run the sidecar (on Windows the bare
+    // name "python3" is usually a Store stub that runs nothing).
+    const QString python = GUIUtil::findPythonInterpreter(sdir);
+    if (python.isEmpty()) {
+        setStatus(tr("The price server needs Python, and no usable interpreter was found. Install Python 3 "
+                     "and try again (on Windows the built-in \"python3\" shortcut only opens the Microsoft "
+                     "Store and cannot run the server)."), true);
+        return;
     }
-    if (python.isEmpty()) python = QStringLiteral("python3");
 
     // Per-user config in the app data dir; seed it from the bundled config.example.json on first run.
     const QString dataDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);

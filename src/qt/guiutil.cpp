@@ -183,7 +183,33 @@ void MoveToScreenCenter(QWidget* window)
     QScreen* screen = window->screen();
     if (!screen) screen = QGuiApplication::primaryScreen();
     if (!screen) return; // No screen available; leave default placement.
-    window->move(screen->availableGeometry().center() - window->frameGeometry().center());
+    const QRect available = screen->availableGeometry();
+    if (available.isEmpty()) return;
+
+    // This is the recovery path for a geometry we just rejected -- and
+    // QWidget::restoreGeometry() has already applied that geometry to the widget by
+    // the time we can judge it. So the frame here may still be the runaway one, and
+    // must be brought back inside the screen BEFORE centring: centring on a frame
+    // wider than the desktop yields a large negative origin, which parks the window
+    // completely off-screen. Nothing crashes, but the user sees no window at all --
+    // no better than the crash this guard exists to prevent.
+    QRect frame = window->frameGeometry();
+    if (frame.width() > available.width() || frame.height() > available.height() ||
+        frame.width() <= 0 || frame.height() <= 0) {
+        // Leave a margin so the window reads as a window, not a second desktop.
+        const QSize fitted(available.width() * 3 / 4, available.height() * 3 / 4);
+        // resize() sets the client area; the frame is what we measured, so re-read it.
+        window->resize(fitted);
+        frame = window->frameGeometry();
+    }
+
+    frame.moveCenter(available.center());
+    // Never leave the title bar above the work area or the window past an edge:
+    // a window that cannot be grabbed cannot be recovered by the user either.
+    QPoint topLeft = frame.topLeft();
+    topLeft.setX(qBound(available.left(), topLeft.x(), qMax(available.left(), available.right() - frame.width() + 1)));
+    topLeft.setY(qBound(available.top(), topLeft.y(), qMax(available.top(), available.bottom() - frame.height() + 1)));
+    window->move(topLeft);
 }
 
 bool parseBitcoinURI(const QUrl &uri, SendCoinsRecipient *out)
@@ -1011,6 +1037,45 @@ QString findPriceServerFile(const QString& file_name, QStringList* searched)
         if (!d.cdUp()) break;
     }
 
+    return QString();
+}
+
+QString findPythonInterpreter(const QString& scriptDir)
+{
+    const QString appDir = QCoreApplication::applicationDirPath();
+
+    // A Microsoft Store "App Execution Alias" is a zero-byte stub that prints
+    // "Python was not found" and exits 9009. QProcess starts it happily, so the
+    // sidecar would appear to launch and then never listen -- the failure this
+    // check exists to prevent.
+    auto usable = [](const QString& path) {
+        if (path.isEmpty() || !QFileInfo::exists(path)) return false;
+#ifdef WIN32
+        if (path.contains(QLatin1String("WindowsApps"), Qt::CaseInsensitive)) return false;
+#endif
+        return true;
+    };
+
+    // Bundled interpreters first: a packaged install ships its own, and it is the
+    // one guaranteed to have the sidecar's dependencies.
+    const QStringList bundled{
+        scriptDir + "/python/python.exe", scriptDir + "/python/python3",
+        appDir + "/python/python.exe",    appDir + "/python/python3"};
+    for (const QString& c : bundled) {
+        if (usable(c)) return QFileInfo(c).absoluteFilePath();
+    }
+
+    // Then a real interpreter on PATH. "python3" is checked last on Windows
+    // because that is exactly the name the Store alias squats on.
+#ifdef WIN32
+    const QStringList names{"python", "python3"};
+#else
+    const QStringList names{"python3", "python"};
+#endif
+    for (const QString& n : names) {
+        const QString found = QStandardPaths::findExecutable(n);
+        if (usable(found)) return found;
+    }
     return QString();
 }
 
