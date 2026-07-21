@@ -543,7 +543,10 @@ QVariant TransactionTableModel::txStatusDecoration(const TransactionRecord *wtx)
         return QIcon(QString(":/icons/transaction_%1").arg(part));
         }
     case TransactionStatus::NotAccepted:
-        return QIcon(":/icons/transaction_0");
+        // A definitive "no": the network refused this transaction (e.g. an
+        // orphaned block reward). The question-mark icon would suggest a state
+        // that might still resolve, which this never does.
+        return QIcon(":/icons/transaction_denied");
     default:
         return COLOR_BLACK;
     }
