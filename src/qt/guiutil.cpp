@@ -183,7 +183,33 @@ void MoveToScreenCenter(QWidget* window)
     QScreen* screen = window->screen();
     if (!screen) screen = QGuiApplication::primaryScreen();
     if (!screen) return; // No screen available; leave default placement.
-    window->move(screen->availableGeometry().center() - window->frameGeometry().center());
+    const QRect available = screen->availableGeometry();
+    if (available.isEmpty()) return;
+
+    // This is the recovery path for a geometry we just rejected -- and
+    // QWidget::restoreGeometry() has already applied that geometry to the widget by
+    // the time we can judge it. So the frame here may still be the runaway one, and
+    // must be brought back inside the screen BEFORE centring: centring on a frame
+    // wider than the desktop yields a large negative origin, which parks the window
+    // completely off-screen. Nothing crashes, but the user sees no window at all --
+    // no better than the crash this guard exists to prevent.
+    QRect frame = window->frameGeometry();
+    if (frame.width() > available.width() || frame.height() > available.height() ||
+        frame.width() <= 0 || frame.height() <= 0) {
+        // Leave a margin so the window reads as a window, not a second desktop.
+        const QSize fitted(available.width() * 3 / 4, available.height() * 3 / 4);
+        // resize() sets the client area; the frame is what we measured, so re-read it.
+        window->resize(fitted);
+        frame = window->frameGeometry();
+    }
+
+    frame.moveCenter(available.center());
+    // Never leave the title bar above the work area or the window past an edge:
+    // a window that cannot be grabbed cannot be recovered by the user either.
+    QPoint topLeft = frame.topLeft();
+    topLeft.setX(qBound(available.left(), topLeft.x(), qMax(available.left(), available.right() - frame.width() + 1)));
+    topLeft.setY(qBound(available.top(), topLeft.y(), qMax(available.top(), available.bottom() - frame.height() + 1)));
+    window->move(topLeft);
 }
 
 bool parseBitcoinURI(const QUrl &uri, SendCoinsRecipient *out)
@@ -944,6 +970,174 @@ QString formatReferenceApproxByLabel(const QString& assetLabel, double wholeUnit
     const double pr = RefBasePriceOf(prices, ref);
     if (!(pa > 0.0) || !(pr > 0.0)) return QString();
     return FormatRefValue(wholeUnits * pa / pr, ref);
+}
+
+QString referenceCurrency()
+{
+    return QSettings().value("strReferenceCurrency", "USD").toString();
+}
+
+QString referencePriceFeedUrl()
+{
+    return QString::fromStdString(gArgs.GetArg("-referencepricesurl", ""));
+}
+
+namespace {
+//! Where the sidecar sits relative to a directory: next to a packaged binary, or
+//! inside a source/build tree.
+QStringList PriceServerRelPaths(const QString& file_name)
+{
+    return {QStringLiteral("price-server/") + file_name,
+            QStringLiteral("contrib/price-server/") + file_name};
+}
+} // namespace
+
+QString findPriceServerFile(const QString& file_name, QStringList* searched)
+{
+    auto tryDir = [&](const QDir& d) -> QString {
+        for (const QString& rel : PriceServerRelPaths(file_name)) {
+            const QString c = d.absoluteFilePath(rel);
+            if (QFileInfo::exists(c)) return QFileInfo(c).absoluteFilePath();
+        }
+        if (searched) searched->append(d.absolutePath());
+        return QString();
+    };
+
+    // 1. A directory the user pointed at once already. Their answer outlives any
+    //    guess we could make, so it is tried first -- but never trusted blindly:
+    //    the tree may have moved since.
+    const QString remembered = QSettings().value("strPriceServerDir").toString();
+    if (!remembered.isEmpty()) {
+        const QString c = QDir(remembered).absoluteFilePath(file_name);
+        if (QFileInfo::exists(c)) return QFileInfo(c).absoluteFilePath();
+    }
+
+    // 2. Walk up from the binary.
+    const QString appDir = QCoreApplication::applicationDirPath();
+    QDir d(appDir);
+    for (int i = 0; i < 7; ++i) {
+        const QString hit = tryDir(d);
+        if (!hit.isEmpty()) return hit;
+        if (!d.cdUp()) break;
+    }
+
+    // 3. One level into each ancestor's subdirectories. This is what finds a
+    //    source checkout parked beside a folder holding nothing but the unpacked
+    //    binaries -- a normal way to run a test build, and previously a dead end.
+    d = QDir(appDir);
+    for (int i = 0; i < 7; ++i) {
+        const QStringList subs = d.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+        // Guard against sweeping a directory with thousands of entries.
+        if (subs.size() <= 200) {
+            for (const QString& sub : subs) {
+                const QString hit = tryDir(QDir(d.absoluteFilePath(sub)));
+                if (!hit.isEmpty()) return hit;
+            }
+        }
+        if (!d.cdUp()) break;
+    }
+
+    return QString();
+}
+
+QString findPythonInterpreter(const QString& scriptDir)
+{
+    const QString appDir = QCoreApplication::applicationDirPath();
+
+    // A Microsoft Store "App Execution Alias" is a zero-byte stub that prints
+    // "Python was not found" and exits 9009. QProcess starts it happily, so the
+    // sidecar would appear to launch and then never listen -- the failure this
+    // check exists to prevent.
+    auto usable = [](const QString& path) {
+        if (path.isEmpty() || !QFileInfo::exists(path)) return false;
+#ifdef WIN32
+        if (path.contains(QLatin1String("WindowsApps"), Qt::CaseInsensitive)) return false;
+#endif
+        return true;
+    };
+
+    // Bundled interpreters first: a packaged install ships its own, and it is the
+    // one guaranteed to have the sidecar's dependencies.
+    const QStringList bundled{
+        scriptDir + "/python/python.exe", scriptDir + "/python/python3",
+        appDir + "/python/python.exe",    appDir + "/python/python3"};
+    for (const QString& c : bundled) {
+        if (usable(c)) return QFileInfo(c).absoluteFilePath();
+    }
+
+    // Then a real interpreter on PATH. "python3" is checked last on Windows
+    // because that is exactly the name the Store alias squats on.
+#ifdef WIN32
+    const QStringList names{"python", "python3"};
+#else
+    const QStringList names{"python3", "python"};
+#endif
+    for (const QString& n : names) {
+        const QString found = QStandardPaths::findExecutable(n);
+        if (usable(found)) return found;
+    }
+    return QString();
+}
+
+QString promptForPriceServerScript(QWidget* parent)
+{
+    const QString path = QFileDialog::getOpenFileName(
+        parent, QObject::tr("Locate price_server.py"), QDir::homePath(),
+        QObject::tr("Price server script (price_server.py);;All files (*)"));
+    if (path.isEmpty()) return QString();
+    // Remember the directory, not the file: config.example.json is looked up the
+    // same way and lives beside it.
+    QSettings().setValue("strPriceServerDir", QFileInfo(path).absolutePath());
+    return QFileInfo(path).absoluteFilePath();
+}
+
+QString formatReferenceAmount(double value, const QString& refTicker)
+{
+    const QString ref = refTicker.isEmpty() ? referenceCurrency() : refTicker;
+    QString num = FormatRefValue(value, ref);
+    // FormatRefValue prefixes "≈ "; this variant is the bare number + ticker.
+    if (num.startsWith(QString::fromUtf8("\xE2\x89\x88 "))) num = num.mid(2);
+    return num;
+}
+
+bool referenceValueOf(const CAsset& asset, const CAmount& amount, const QString& refTicker, double& out)
+{
+    const std::map<std::string, double> prices = GetReferencePrices();
+    if (prices.empty()) return false;
+    const QString ref = refTicker.isEmpty() ? referenceCurrency() : refTicker;
+    const auto itA = prices.find(MarketTickerOf(asset).toStdString());
+    const double pa = itA != prices.end() ? itA->second : 0.0;
+    const double pr = RefBasePriceOf(prices, ref);
+    if (!(pa > 0.0) || !(pr > 0.0)) return false;
+    const double factor = static_cast<double>(AssetAtomFactor(assetPrecision(asset)));
+    out = (static_cast<double>(amount) / factor) * pa / pr;
+    return true;
+}
+
+double assetExchangeRate(const CAsset& from, const CAsset& to)
+{
+    const std::map<std::string, double> prices = GetReferencePrices();
+    if (prices.empty()) return 0.0;
+    const auto itF = prices.find(MarketTickerOf(from).toStdString());
+    const auto itT = prices.find(MarketTickerOf(to).toStdString());
+    const double pf = itF != prices.end() ? itF->second : 0.0;
+    const double pt = itT != prices.end() ? itT->second : 0.0;
+    if (!(pf > 0.0) || !(pt > 0.0)) return 0.0;
+    return pf / pt;
+}
+
+bool convertAssetAmount(const CAsset& from, const CAmount& amount, const CAsset& to, CAmount& out)
+{
+    const double rate = assetExchangeRate(from, to);
+    if (!(rate > 0.0)) return false;
+    const double whole = static_cast<double>(amount) / static_cast<double>(AssetAtomFactor(assetPrecision(from)));
+    out = static_cast<CAmount>(whole * rate * static_cast<double>(AssetAtomFactor(assetPrecision(to))) + 0.5);
+    return true;
+}
+
+bool unitReferenceValue(const CAsset& asset, const QString& refTicker, double& out)
+{
+    return referenceValueOf(asset, AssetAtomFactor(assetPrecision(asset)), refTicker, out);
 }
 
 QString formatMultiAssetAmount(const CAmountMap& amountmap, const int bitcoin_unit, BitcoinUnits::SeparatorStyle separators, QString line_separator)

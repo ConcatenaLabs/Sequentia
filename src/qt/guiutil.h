@@ -281,6 +281,55 @@ namespace GUIUtil
        like the assets page, where no CAsset/CAmount is available). Empty if unpriced. */
     QString formatReferenceApproxByLabel(const QString& assetLabel, double wholeUnits, const QString& refTicker);
 
+    /* SEQUENTIA: the value of (asset, amount) in the reference currency as a plain number.
+       Returns false when either side is unpriced, leaving `out` untouched. Unlike
+       formatReferenceApprox this does not suppress the case asset == reference: callers
+       that must always show a value (the fee headline) need the number regardless. */
+    bool referenceValueOf(const CAsset& asset, const CAmount& amount, const QString& refTicker, double& out);
+
+    /* SEQUENTIA: how many whole units of `to` one whole unit of `from` buys, at feed prices.
+       0.0 when either asset is unpriced. Display-only, like every price-feed helper here:
+       the node converts fees by its own feed at validation time. */
+    double assetExchangeRate(const CAsset& from, const CAsset& to);
+
+    /* SEQUENTIA: convert an atom amount of `from` into the equivalent atom amount of `to`
+       at feed prices, honouring each asset's own precision. False when either is unpriced. */
+    bool convertAssetAmount(const CAsset& from, const CAmount& amount, const CAsset& to, CAmount& out);
+
+    /* SEQUENTIA: one whole unit of `asset` valued in the reference currency. False if unpriced. */
+    bool unitReferenceValue(const CAsset& asset, const QString& refTicker, double& out);
+
+    /* SEQUENTIA: render a reference-currency value as a bare "<number> <REF>" (no "≈"),
+       with the decimal count that suits the reference (8 for BTC, else 2/6 by magnitude). */
+    QString formatReferenceAmount(double value, const QString& refTicker);
+
+    /* SEQUENTIA: the user's chosen reference currency ticker (QSettings), defaulting to USD. */
+    QString referenceCurrency();
+
+    /* SEQUENTIA: locate the price-server sidecar (price_server.py) or one of its siblings
+       (pass the file name, e.g. "config.example.json"). Search order: a location the user
+       pointed at previously, then a walk up from the binary, then one level into each
+       ancestor's subdirectories (which finds a source checkout sitting next to an unpacked
+       binary). `searched` collects the directories tried, so a failure can say where it
+       looked instead of just "not found". Empty when nothing matched. */
+    QString findPriceServerFile(const QString& file_name, QStringList* searched = nullptr);
+
+    /* SEQUENTIA: ask the user to point at price_server.py and remember its directory for
+       next time. Returns the chosen path, or empty if they cancelled. */
+    QString promptForPriceServerScript(QWidget* parent);
+
+    /* SEQUENTIA: the reference-price feed the node is actually reading (-referencepricesurl),
+       or an empty string when none is configured. This is whose prices the wallet shows. */
+    QString referencePriceFeedUrl();
+
+    /* SEQUENTIA: a Python interpreter that can actually run the price-server sidecar.
+       Prefers one bundled beside the script or the binary, then a real interpreter on
+       PATH. On Windows this deliberately skips the "python3" App Execution Alias under
+       WindowsApps: it is a Microsoft Store stub that exits with "Python was not found"
+       instead of running anything, which QProcess still reports as a successful start.
+       Empty when no usable interpreter exists. */
+    QString findPythonInterpreter(const QString& scriptDir);
+
     /* SEQUENTIA: whether the node's cached price feed carries a positive price for this asset.
        Fees paid in an unpriced asset are unlikely to ever be accepted by a block producer, so
        the send dialog uses this to pick a sane default fee asset and to warn about bad picks. */

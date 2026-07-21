@@ -29,7 +29,7 @@ RecentRequestsTableModel::RecentRequestsTableModel(WalletModel *parent) :
     }
 
     /* These columns must match the indices in the ColumnIndex enumeration */
-    columns << tr("Date") << tr("Label");
+    columns << tr("Date") << tr("Label") << tr("Address");
 
     connect(walletModel->getOptionsModel(), &OptionsModel::displayUnitChanged, this, &RecentRequestsTableModel::updateDisplayUnit);
 }
@@ -76,34 +76,30 @@ QVariant RecentRequestsTableModel::data(const QModelIndex &index, int role) cons
             {
                 return rec->recipient.label;
             }
-        case Message:
-            if(rec->recipient.message.isEmpty() && role == Qt::DisplayRole)
-            {
-                return tr("(no message)");
-            }
-            else
-            {
-                return rec->recipient.message;
-            }
-        case Amount:
-            if (rec->recipient.amount == 0 && role == Qt::DisplayRole)
-                return tr("(no amount requested)");
-            else if (role == Qt::EditRole)
-                return BitcoinUnits::format(walletModel->getOptionsModel()->getDisplayUnit(), rec->recipient.amount, false, BitcoinUnits::SeparatorStyle::NEVER);
-            else
-                return BitcoinUnits::format(walletModel->getOptionsModel()->getDisplayUnit(), rec->recipient.amount);
+        case Address:
+            return rec->recipient.address;
         }
-    }
-    else if (role == Qt::TextAlignmentRole)
-    {
-        if (index.column() == Amount)
-            return (int)(Qt::AlignRight|Qt::AlignVCenter);
     }
     return QVariant();
 }
 
 bool RecentRequestsTableModel::setData(const QModelIndex &index, const QVariant &value, int role)
 {
+    if (!index.isValid() || role != Qt::EditRole || index.column() != Label || index.row() >= list.length())
+        return false;
+    RecentRequestEntry& rec = list[index.row()];
+    const QString label = value.toString().trimmed();
+    if (rec.recipient.label == label) return true;
+    rec.recipient.label = label;
+    // The label lives in two places: the stored request (this table) and the
+    // wallet address book (what the transaction list and dialogs show). Keep
+    // them in step, or an edit here would seem to have no effect elsewhere.
+    CDataStream ss(SER_DISK, CLIENT_VERSION);
+    ss << rec;
+    const CTxDestination dest = DecodeDestination(rec.recipient.address.toStdString());
+    walletModel->wallet().setAddressReceiveRequest(dest, ToString(rec.id), ss.str());
+    walletModel->wallet().setAddressBook(dest, label.toStdString(), "receive");
+    Q_EMIT dataChanged(index, index);
     return true;
 }
 
@@ -165,7 +161,10 @@ bool RecentRequestsTableModel::removeRows(int row, int count, const QModelIndex 
 
 Qt::ItemFlags RecentRequestsTableModel::flags(const QModelIndex &index) const
 {
-    return Qt::ItemIsSelectable | Qt::ItemIsEnabled;
+    Qt::ItemFlags f = Qt::ItemIsSelectable | Qt::ItemIsEnabled;
+    // The label is the one user-owned field here: editable in place.
+    if (index.column() == Label) f |= Qt::ItemIsEditable;
+    return f;
 }
 
 // called when adding a request from the GUI
@@ -235,10 +234,8 @@ bool RecentRequestEntryLessThan::operator()(const RecentRequestEntry& left, cons
         return pLeft->date.toSecsSinceEpoch() < pRight->date.toSecsSinceEpoch();
     case RecentRequestsTableModel::Label:
         return pLeft->recipient.label < pRight->recipient.label;
-    case RecentRequestsTableModel::Message:
-        return pLeft->recipient.message < pRight->recipient.message;
-    case RecentRequestsTableModel::Amount:
-        return pLeft->recipient.amount < pRight->recipient.amount;
+    case RecentRequestsTableModel::Address:
+        return pLeft->recipient.address < pRight->recipient.address;
     default:
         return pLeft->id < pRight->id;
     }

@@ -103,6 +103,15 @@ private:
     bool domainResolves(const QString& domain) const;
     //! The domain as it will be committed: no scheme, no path, lower case.
     QString issuerDomain() const;
+
+    //! Kick a refresh onto the next event-loop turn so the tab switch paints
+    //! first, never blocking the switch on the wallet RPCs. When force is false
+    //! it also skips a re-run that would just redo the current result (same tip,
+    //! refreshed a moment ago), keeping rapid tab-flipping instant.
+    void scheduleRefresh(bool force);
+    bool m_refresh_pending{false};   //!< a deferred refresh is already queued
+    int m_last_refresh_blocks{-1};   //!< tip height at the last completed refresh
+    qint64 m_last_refresh_ms{0};     //!< wall-clock ms of the last completed refresh
 };
 
 #endif // BITCOIN_QT_ASSETSPAGE_H

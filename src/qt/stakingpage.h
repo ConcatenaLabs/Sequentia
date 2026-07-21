@@ -9,6 +9,7 @@
 
 #include <univalue.h>
 
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -117,6 +118,10 @@ private:
 
     //! Public keys of the stakes this wallet controls, for "is this block ours".
     std::set<std::string> m_my_pubkeys;
+    //! Cache of the costly per-staker ownership check (3 RPCs each): pubkey ->
+    //! does this wallet control it. Membership never changes for a given key, so
+    //! we only pay the derivation the first time we see a registered pubkey.
+    std::map<std::string, bool> m_ismine_cache;
 
     //! Refresh the cards fed by getposslot / getposrecentblocks. Split out of
     //! refresh() because they read the chain rather than the wallet.
@@ -134,6 +139,15 @@ private:
     //! Export WIFs for every registered stake this wallet controls (best-effort;
     //! legacy wallets only, like dumpprivkey).
     QStringList walletStakingWifs();
+
+    //! Kick a refresh onto the next event-loop turn so the tab switch paints
+    //! first, never blocking the switch on the registry/chain RPC cascade. When
+    //! force is false it also skips a re-run that would just redo the current
+    //! result (same tip, refreshed a moment ago).
+    void scheduleRefresh(bool force);
+    bool m_refresh_pending{false};   //!< a deferred refresh is already queued
+    int m_last_refresh_blocks{-1};   //!< tip height at the last completed refresh
+    qint64 m_last_refresh_ms{0};     //!< wall-clock ms of the last completed refresh
 };
 
 #endif // BITCOIN_QT_STAKINGPAGE_H

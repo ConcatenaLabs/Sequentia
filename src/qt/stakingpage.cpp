@@ -36,6 +36,7 @@
 #include <QLineEdit>
 #include <QLocale>
 #include <QPainter>
+#include <QPointer>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QShowEvent>
@@ -443,6 +444,37 @@ void StakingPage::refresh()
     refreshOwnStake(reg);
     refreshProducedBlocks();
     refreshWatchOnlyKey();
+
+    // Stamp the throttle state so scheduleRefresh() can skip a redundant re-run
+    // (same tip, refreshed a moment ago) next time the tab is shown.
+    if (m_wallet_model) {
+        m_last_refresh_blocks = m_wallet_model->node().getNumBlocks();
+        m_last_refresh_ms = QDateTime::currentMSecsSinceEpoch();
+    }
+}
+
+void StakingPage::scheduleRefresh(bool force)
+{
+    // A missing wallet model is not a reason to skip: refresh() still updates the
+    // block-production banner, which it reads from this node's own config. Only
+    // the throttle below needs the model, to ask the node for the tip.
+    if (!force && m_wallet_model && m_last_refresh_blocks >= 0) {
+        // Nothing new to show since the last refresh: same tip and it ran within
+        // the last couple of seconds. The cards/tables already hold that result,
+        // so a re-run would only freeze the GUI thread for no visible change.
+        const int blocks = m_wallet_model->node().getNumBlocks();
+        const qint64 age = QDateTime::currentMSecsSinceEpoch() - m_last_refresh_ms;
+        if (blocks == m_last_refresh_blocks && age < 2000) return;
+    }
+    if (m_refresh_pending) return; // one deferred refresh is enough
+    m_refresh_pending = true;
+    QPointer<StakingPage> self(this);
+    // Let the switch paint first, then run the registry/chain RPCs on the next turn.
+    QTimer::singleShot(0, this, [self] {
+        if (!self) return;
+        self->m_refresh_pending = false;
+        self->refresh();
+    });
 }
 
 void StakingPage::refreshOwnStake(const UniValue& registry)
@@ -455,17 +487,34 @@ void StakingPage::refreshOwnStake(const UniValue& registry)
         for (const std::string& pk : registry.getKeys()) {
             const uint64_t w = registry[pk].isNum() ? (uint64_t)registry[pk].get_int64() : 0;
             total += w;
-            // wpkh(<pubkey>) -> address -> does this wallet own it?
-            bool ok; QString err;
-            UniValue di(UniValue::VARR); di.push_back("wpkh(" + pk + ")");
-            UniValue info = callRpc("getdescriptorinfo", di, ok, err, /*wallet=*/false);
-            if (!ok || !info.exists("descriptor")) continue;
-            UniValue da(UniValue::VARR); da.push_back(info["descriptor"].get_str());
-            UniValue addrs = callRpc("deriveaddresses", da, ok, err, /*wallet=*/false);
-            if (!ok || !addrs.isArray() || addrs.empty()) continue;
-            UniValue ai(UniValue::VARR); ai.push_back(addrs[0].getValStr());
-            UniValue ainfo = callRpc("getaddressinfo", ai, ok, err);
-            if (!ok || !(ainfo.exists("ismine") && ainfo["ismine"].get_bool())) continue;
+            // Does this wallet control pk? The answer never changes for a given
+            // key, so derive it once (3 RPCs) and cache it — this loop is the
+            // heaviest part of a refresh, and re-deriving it on every tab visit
+            // is what made the Staking tab crawl.
+            auto cached = m_ismine_cache.find(pk);
+            bool ismine;
+            if (cached != m_ismine_cache.end()) {
+                ismine = cached->second;
+            } else {
+                ismine = false;
+                bool ok; QString err;
+                // wpkh(<pubkey>) -> address -> does this wallet own it?
+                UniValue di(UniValue::VARR); di.push_back("wpkh(" + pk + ")");
+                UniValue info = callRpc("getdescriptorinfo", di, ok, err, /*wallet=*/false);
+                if (ok && info.exists("descriptor")) {
+                    UniValue da(UniValue::VARR); da.push_back(info["descriptor"].get_str());
+                    UniValue addrs = callRpc("deriveaddresses", da, ok, err, /*wallet=*/false);
+                    if (ok && addrs.isArray() && !addrs.empty()) {
+                        UniValue ai(UniValue::VARR); ai.push_back(addrs[0].getValStr());
+                        UniValue ainfo = callRpc("getaddressinfo", ai, ok, err);
+                        ismine = ok && ainfo.exists("ismine") && ainfo["ismine"].get_bool();
+                        // Only cache a definitive answer: on an RPC error, leave it
+                        // uncached so a later refresh can still classify the key.
+                        if (ok) m_ismine_cache[pk] = ismine;
+                    }
+                }
+            }
+            if (!ismine) continue;
             m_my_pubkeys.insert(pk);
             mine += w;
         }
@@ -635,7 +684,10 @@ void StakingPage::refreshWatchOnlyKey()
 void StakingPage::showEvent(QShowEvent* event)
 {
     QWidget::showEvent(event);
-    refresh();
+    // Never refresh synchronously here: the registry/chain RPC cascade on the GUI
+    // thread would block the new tab from painting and make the switch feel like a
+    // stall. Defer it, and skip it entirely when nothing changed since last time.
+    scheduleRefresh(/*force=*/false);
 }
 
 void StakingPage::onRefreshClicked()
@@ -648,6 +700,9 @@ void StakingPage::onRefreshClicked()
     m_refresh_button->setEnabled(false);
     m_refresh_button->setText(tr("Refreshing…"));
     if (m_summary) m_summary->setText(tr("Refreshing the stake registry…"));
+    // An explicit refresh means "recompute everything from scratch": drop the
+    // per-staker ownership cache so ismine is re-derived for every registered key.
+    m_ismine_cache.clear();
     QTimer::singleShot(100, this, [this] {
         refresh();
         m_refresh_button->setText(tr("Refresh"));

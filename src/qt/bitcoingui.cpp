@@ -1030,37 +1030,40 @@ void BitcoinGUI::launchPriceServer()
     showNormalIfMinimized();
     const QString appDir = QCoreApplication::applicationDirPath();
 
-    // Locate the bundled sidecar by walking UP from the binary: it lives in price-server/ next to a
-    // packaged binary, or in contrib/price-server/ inside a (possibly out-of-tree) build tree.
-    auto findUp = [&](const QStringList& rels) -> QString {
-        QDir d(appDir);
-        for (int i = 0; i < 7; ++i) {
-            for (const QString& rel : rels) {
-                const QString c = d.absoluteFilePath(rel);
-                if (QFileInfo::exists(c)) return QFileInfo(c).absoluteFilePath();
-            }
-            if (!d.cdUp()) break;
-        }
-        return QString();
-    };
-
-    const QString script = findUp({QStringLiteral("price-server/price_server.py"),
-                                   QStringLiteral("contrib/price-server/price_server.py")});
+    // Locate the bundled sidecar (see GUIUtil::findPriceServerFile for the search order).
+    QStringList searched;
+    QString script = GUIUtil::findPriceServerFile(QStringLiteral("price_server.py"), &searched);
     if (script.isEmpty()) {
-        QMessageBox::warning(this, tr("Price server"),
-            tr("Could not find the price-server script (price_server.py). It ships bundled with the node."));
-        return;
+        // A dead end used to be the whole answer here. Say where we looked, name
+        // the feed the wallet is actually reading (the usual reason for opening
+        // this page is to check exactly that), and offer to be pointed at the file.
+        const QString feed = GUIUtil::referencePriceFeedUrl();
+        QString text = tr("Could not find the price-server script (price_server.py).");
+        text += "\n\n" + tr("It ships beside the node binary, or in contrib/price-server/ in the "
+                            "source tree. Looked in:") + "\n" + searched.join("\n");
+        text += "\n\n" + (feed.isEmpty()
+            ? tr("This node has no price feed configured (-referencepricesurl), so amounts show no reference value.")
+            : tr("Note: this node reads its prices from %1. Running the sidecar here is only needed to "
+                 "publish your own feed.").arg(feed));
+        QMessageBox box(QMessageBox::Warning, tr("Price server"), text, QMessageBox::Cancel, this);
+        QPushButton* locate = box.addButton(tr("Locate…"), QMessageBox::AcceptRole);
+        box.exec();
+        if (box.clickedButton() != locate) return;
+        script = GUIUtil::promptForPriceServerScript(this);
+        if (script.isEmpty()) return;
     }
     const QString sdir = QFileInfo(script).absolutePath();
 
-    // A Python interpreter: bundled next to the script (packaged build), else the system python3.
-    QString python;
-    const QStringList pyCands{ sdir + "/python/python3", sdir + "/python/python.exe",
-                              appDir + "/python/python3", appDir + "/python/python.exe" };
-    for (const QString& c : pyCands) {
-        if (QFileInfo::exists(c)) { python = QFileInfo(c).absoluteFilePath(); break; }
+    // A Python interpreter that can actually run the sidecar (see the helper: on
+    // Windows the bare name "python3" is usually a Store stub that runs nothing).
+    const QString python = GUIUtil::findPythonInterpreter(sdir);
+    if (python.isEmpty()) {
+        QMessageBox::warning(this, tr("Price server"),
+            tr("The price server needs Python, and no usable interpreter was found. Install Python 3 "
+               "and try again.\n\nNote: on Windows the \"python3\" shortcut that comes with the system "
+               "only opens the Microsoft Store and cannot run the server."));
+        return;
     }
-    if (python.isEmpty()) python = QStringLiteral("python3");
 
     // Per-user config in the app data dir; seed it from the bundled config.example.json on first run.
     // (Do NOT use gen-price-config.py — it writes a demo config to /root and prints only a summary.)
@@ -1068,8 +1071,12 @@ void BitcoinGUI::launchPriceServer()
     if (!dataDir.isEmpty()) QDir().mkpath(dataDir);
     const QString cfg = (dataDir.isEmpty() ? sdir : dataDir) + "/price-server.json";
     if (!QFileInfo::exists(cfg)) {
-        const QString example = findUp({QStringLiteral("price-server/config.example.json"),
-                                        QStringLiteral("contrib/price-server/config.example.json")});
+        QString example = GUIUtil::findPriceServerFile(QStringLiteral("config.example.json"));
+        // The script was just located, so its own directory is the best hint.
+        if (example.isEmpty()) {
+            const QString beside = sdir + QStringLiteral("/config.example.json");
+            if (QFileInfo::exists(beside)) example = beside;
+        }
         if (example.isEmpty() || !QFile::copy(example, cfg)) {
             QMessageBox::warning(this, tr("Price server"),
                 tr("Could not create a default price-server config at %1.").arg(cfg));
@@ -1148,9 +1155,21 @@ void BitcoinGUI::launchPriceServer()
         } else if (++(*attempts) >= 30) { // ~9s of 300ms polls
             pollTimer->stop();
             pollTimer->deleteLater();
+            QString detail;
+            if (m_price_server) {
+                // The sidecar's own last words explain far more than a generic
+                // "it did not come up" -- a missing module, a bad config key.
+                const QString err = QString::fromLocal8Bit(m_price_server->readAllStandardError()).trimmed();
+                const QString out = QString::fromLocal8Bit(m_price_server->readAllStandardOutput()).trimmed();
+                const QString tail = !err.isEmpty() ? err : out;
+                if (m_price_server->state() == QProcess::NotRunning) {
+                    detail = "\n\n" + tr("It exited with code %1.").arg(m_price_server->exitCode());
+                }
+                if (!tail.isEmpty()) detail += "\n\n" + tail.right(600);
+            }
             QMessageBox::warning(this, tr("Price server"),
-                tr("The price server did not come up at %1. It likely failed to start; check that "
-                   "Python and its dependencies are installed and that the price-server config is valid.").arg(url));
+                tr("The price server did not come up at %1. Check that Python and its dependencies "
+                   "are installed and that the price-server config is valid.").arg(url) + detail);
         }
     });
     pollTimer->start(300);
@@ -1452,7 +1471,7 @@ void BitcoinGUI::setNumBlocks(int count, const QDateTime& blockDate, double nVer
         if(walletFrame)
         {
             walletFrame->showOutOfSyncWarning(true);
-            modalOverlay->showHide();
+            showModalOverlayWhenUnblocked();
         }
 #endif // ENABLE_WALLET
 
@@ -1760,6 +1779,47 @@ void BitcoinGUI::detectShutdown()
             rpcConsole->hide();
         Q_EMIT quitRequested();
     }
+}
+
+bool BitcoinGUI::event(QEvent *e)
+{
+    // Qt reports modal popups blocking this window regardless of who created
+    // them. The sync overlay is a child widget, so it renders *underneath* such
+    // a popup: at startup that buried the "catching up with the network" screen
+    // under "Loading wallet…". Take the overlay down while a popup owns the
+    // screen and bring it back when the popup is gone.
+    switch (e->type()) {
+    case QEvent::WindowBlocked:
+        m_window_blocked = true;
+        if (modalOverlay && modalOverlay->isLayerVisible()) {
+            m_overlay_deferred = true;
+            modalOverlay->showHide(/*hide=*/true);
+        }
+        break;
+    case QEvent::WindowUnblocked:
+        m_window_blocked = false;
+        if (m_overlay_deferred) {
+            m_overlay_deferred = false;
+            showModalOverlayWhenUnblocked();
+        }
+        break;
+    default:
+        break;
+    }
+    return QMainWindow::event(e);
+}
+
+void BitcoinGUI::showModalOverlayWhenUnblocked()
+{
+    if (!modalOverlay) return;
+    if (m_window_blocked) {
+        // A popup owns the screen; queue the overlay for when it closes.
+        m_overlay_deferred = true;
+        return;
+    }
+    // Only worth showing while the node is actually behind — the status-bar
+    // progress bar is the live signal for that.
+    if (progressBar && progressBar->isVisible()) modalOverlay->showHide();
 }
 
 void BitcoinGUI::showProgress(const QString &title, int nProgress)

@@ -60,8 +60,7 @@ public:
     enum ColumnIndex {
         Date = 0,
         Label = 1,
-        Message = 2,
-        Amount = 3,
+        Address = 2,
         NUMBER_OF_COLUMNS
     };
 

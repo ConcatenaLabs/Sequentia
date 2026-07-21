@@ -8,6 +8,7 @@
 #include <qt/forms/ui_receivecoinsdialog.h>
 
 #include <qt/addresstablemodel.h>
+#include <qt/bitcoinunits.h>
 #include <qt/guiutil.h>
 #include <qt/optionsmodel.h>
 #include <qt/platformstyle.h>
@@ -18,6 +19,9 @@
 #include <QAction>
 #include <QCheckBox>
 #include <QCursor>
+#include <QFontMetrics>
+#include <QHeaderView>
+#include <QLineEdit>
 #include <QMessageBox>
 #include <QScrollBar>
 #include <QSettings>
@@ -61,6 +65,7 @@ ReceiveCoinsDialog::ReceiveCoinsDialog(const PlatformStyle *_platformStyle, QWid
     contextMenu = new QMenu(this);
     contextMenu->addAction(tr("&Copy address"), this, &ReceiveCoinsDialog::copyAddress);
     copyLabelAction = contextMenu->addAction(tr("Copy &label"), this, &ReceiveCoinsDialog::copyLabel);
+    contextMenu->addAction(tr("&Edit label"), this, &ReceiveCoinsDialog::editLabel);
     copyMessageAction = contextMenu->addAction(tr("Copy &message"), this, &ReceiveCoinsDialog::copyMessage);
     copyAmountAction = contextMenu->addAction(tr("Copy &amount"), this, &ReceiveCoinsDialog::copyAmount);
     connect(ui->recentRequestsView, &QWidget::customContextMenuRequested, this, &ReceiveCoinsDialog::showMenu);
@@ -72,6 +77,16 @@ ReceiveCoinsDialog::ReceiveCoinsDialog(const PlatformStyle *_platformStyle, QWid
     tableView->setAlternatingRowColors(true);
     tableView->setSelectionBehavior(QAbstractItemView::SelectRows);
     tableView->setSelectionMode(QAbstractItemView::ContiguousSelection);
+    // The address gets whatever width is left over.
+    tableView->horizontalHeader()->setStretchLastSection(true);
+    // Rows must fit the in-place label editor, not just the drawn text: a
+    // QLineEdit needs frame and margins on top of the font height, and with the
+    // enlarged base font the default row height clipped what was being typed.
+    {
+        const int text_height = QFontMetrics(tableView->font()).height();
+        const int editor_height = QLineEdit(tableView).sizeHint().height();
+        tableView->verticalHeader()->setDefaultSectionSize(qMax(text_height, editor_height) + 4);
+    }
 
     QSettings settings;
     if (!tableView->horizontalHeader()->restoreState(settings.value("RecentRequestsViewHeaderState").toByteArray())) {
@@ -208,6 +223,9 @@ void ReceiveCoinsDialog::on_receiveButton_clicked()
 
 void ReceiveCoinsDialog::on_recentRequestsView_doubleClicked(const QModelIndex &index)
 {
+    // A double click on the label edits it in place (the view opens the editor
+    // itself); opening the request popup on top of that would fight the editor.
+    if (index.column() == RecentRequestsTableModel::Label) return;
     const RecentRequestsTableModel *submodel = model->getRecentRequestsTableModel();
     ReceiveRequestDialog *dialog = new ReceiveRequestDialog(this);
     dialog->setModel(model);
@@ -309,11 +327,26 @@ void ReceiveCoinsDialog::copyLabel()
 // context menu action: copy message
 void ReceiveCoinsDialog::copyMessage()
 {
-    copyColumnToClipboard(RecentRequestsTableModel::Message);
+    const QModelIndex sel = selectedRow();
+    if (!sel.isValid()) return;
+    GUIUtil::setClipboard(model->getRecentRequestsTableModel()->entry(sel.row()).recipient.message);
 }
 
 // context menu action: copy amount
 void ReceiveCoinsDialog::copyAmount()
 {
-    copyColumnToClipboard(RecentRequestsTableModel::Amount);
+    const QModelIndex sel = selectedRow();
+    if (!sel.isValid()) return;
+    const CAmount amount = model->getRecentRequestsTableModel()->entry(sel.row()).recipient.amount;
+    GUIUtil::setClipboard(BitcoinUnits::format(model->getOptionsModel()->getDisplayUnit(), amount, false, BitcoinUnits::SeparatorStyle::NEVER));
+}
+
+// context menu action: edit the label in place
+void ReceiveCoinsDialog::editLabel()
+{
+    const QModelIndex sel = selectedRow();
+    if (!sel.isValid()) return;
+    const QModelIndex idx = model->getRecentRequestsTableModel()->index(sel.row(), RecentRequestsTableModel::Label);
+    ui->recentRequestsView->setCurrentIndex(idx);
+    ui->recentRequestsView->edit(idx);
 }
