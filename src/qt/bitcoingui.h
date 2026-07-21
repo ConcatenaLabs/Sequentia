@@ -108,6 +108,7 @@ public:
     bool isPrivacyModeActivated() const;
 
 protected:
+    bool event(QEvent *e) override;
     void changeEvent(QEvent *e) override;
     void closeEvent(QCloseEvent *event) override;
     void showEvent(QShowEvent *event) override;
@@ -131,13 +132,18 @@ private:
     QLabel* progressBarLabel = nullptr;
     GUIUtil::ClickableProgressBar* progressBar = nullptr;
     QProgressDialog* progressDialog = nullptr;
-    //! While a blocking progress dialog ("Loading wallet…", rescans) is up, the
-    //! sync overlay stays suppressed; it is shown afterwards if still syncing.
-    bool m_progress_dialog_open = false;
-    //! Hide the sync overlay for the lifetime of a blocking progress dialog.
-    void suppressModalOverlay();
-    //! Progress dialog closed: show the sync overlay again if still catching up.
-    void releaseModalOverlay();
+    //! True while a modal popup ("Loading wallet…", a rescan, a message box)
+    //! blocks this window. Qt reports this for every modal dialog, whoever
+    //! created it, which is why the sync overlay keys off it rather than off
+    //! the progress signals (WalletControllerActivity builds its own dialog and
+    //! emits none of them).
+    bool m_window_blocked = false;
+    //! The sync overlay wanted to appear while the window was blocked; show it
+    //! as soon as the popup goes away.
+    bool m_overlay_deferred = false;
+    //! Show the sync overlay unless a modal popup owns the screen, in which case
+    //! remember to show it once that popup closes.
+    void showModalOverlayWhenUnblocked();
 
     QMenuBar* appMenuBar = nullptr;
     QToolBar* appToolBar = nullptr;

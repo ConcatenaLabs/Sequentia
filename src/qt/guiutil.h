@@ -306,6 +306,22 @@ namespace GUIUtil
     /* SEQUENTIA: the user's chosen reference currency ticker (QSettings), defaulting to USD. */
     QString referenceCurrency();
 
+    /* SEQUENTIA: locate the price-server sidecar (price_server.py) or one of its siblings
+       (pass the file name, e.g. "config.example.json"). Search order: a location the user
+       pointed at previously, then a walk up from the binary, then one level into each
+       ancestor's subdirectories (which finds a source checkout sitting next to an unpacked
+       binary). `searched` collects the directories tried, so a failure can say where it
+       looked instead of just "not found". Empty when nothing matched. */
+    QString findPriceServerFile(const QString& file_name, QStringList* searched = nullptr);
+
+    /* SEQUENTIA: ask the user to point at price_server.py and remember its directory for
+       next time. Returns the chosen path, or empty if they cancelled. */
+    QString promptForPriceServerScript(QWidget* parent);
+
+    /* SEQUENTIA: the reference-price feed the node is actually reading (-referencepricesurl),
+       or an empty string when none is configured. This is whose prices the wallet shows. */
+    QString referencePriceFeedUrl();
+
     /* SEQUENTIA: whether the node's cached price feed carries a positive price for this asset.
        Fees paid in an unpriced asset are unlikely to ever be accepted by a block producer, so
        the send dialog uses this to pick a sane default fee asset and to warn about bad picks. */

@@ -951,6 +951,81 @@ QString referenceCurrency()
     return QSettings().value("strReferenceCurrency", "USD").toString();
 }
 
+QString referencePriceFeedUrl()
+{
+    return QString::fromStdString(gArgs.GetArg("-referencepricesurl", ""));
+}
+
+namespace {
+//! Where the sidecar sits relative to a directory: next to a packaged binary, or
+//! inside a source/build tree.
+QStringList PriceServerRelPaths(const QString& file_name)
+{
+    return {QStringLiteral("price-server/") + file_name,
+            QStringLiteral("contrib/price-server/") + file_name};
+}
+} // namespace
+
+QString findPriceServerFile(const QString& file_name, QStringList* searched)
+{
+    auto tryDir = [&](const QDir& d) -> QString {
+        for (const QString& rel : PriceServerRelPaths(file_name)) {
+            const QString c = d.absoluteFilePath(rel);
+            if (QFileInfo::exists(c)) return QFileInfo(c).absoluteFilePath();
+        }
+        if (searched) searched->append(d.absolutePath());
+        return QString();
+    };
+
+    // 1. A directory the user pointed at once already. Their answer outlives any
+    //    guess we could make, so it is tried first -- but never trusted blindly:
+    //    the tree may have moved since.
+    const QString remembered = QSettings().value("strPriceServerDir").toString();
+    if (!remembered.isEmpty()) {
+        const QString c = QDir(remembered).absoluteFilePath(file_name);
+        if (QFileInfo::exists(c)) return QFileInfo(c).absoluteFilePath();
+    }
+
+    // 2. Walk up from the binary.
+    const QString appDir = QCoreApplication::applicationDirPath();
+    QDir d(appDir);
+    for (int i = 0; i < 7; ++i) {
+        const QString hit = tryDir(d);
+        if (!hit.isEmpty()) return hit;
+        if (!d.cdUp()) break;
+    }
+
+    // 3. One level into each ancestor's subdirectories. This is what finds a
+    //    source checkout parked beside a folder holding nothing but the unpacked
+    //    binaries -- a normal way to run a test build, and previously a dead end.
+    d = QDir(appDir);
+    for (int i = 0; i < 7; ++i) {
+        const QStringList subs = d.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+        // Guard against sweeping a directory with thousands of entries.
+        if (subs.size() <= 200) {
+            for (const QString& sub : subs) {
+                const QString hit = tryDir(QDir(d.absoluteFilePath(sub)));
+                if (!hit.isEmpty()) return hit;
+            }
+        }
+        if (!d.cdUp()) break;
+    }
+
+    return QString();
+}
+
+QString promptForPriceServerScript(QWidget* parent)
+{
+    const QString path = QFileDialog::getOpenFileName(
+        parent, QObject::tr("Locate price_server.py"), QDir::homePath(),
+        QObject::tr("Price server script (price_server.py);;All files (*)"));
+    if (path.isEmpty()) return QString();
+    // Remember the directory, not the file: config.example.json is looked up the
+    // same way and lives beside it.
+    QSettings().setValue("strPriceServerDir", QFileInfo(path).absolutePath());
+    return QFileInfo(path).absoluteFilePath();
+}
+
 QString formatReferenceAmount(double value, const QString& refTicker)
 {
     const QString ref = refTicker.isEmpty() ? referenceCurrency() : refTicker;

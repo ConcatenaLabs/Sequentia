@@ -19,6 +19,9 @@
 #include <QAction>
 #include <QCheckBox>
 #include <QCursor>
+#include <QFontMetrics>
+#include <QHeaderView>
+#include <QLineEdit>
 #include <QMessageBox>
 #include <QScrollBar>
 #include <QSettings>
@@ -76,6 +79,14 @@ ReceiveCoinsDialog::ReceiveCoinsDialog(const PlatformStyle *_platformStyle, QWid
     tableView->setSelectionMode(QAbstractItemView::ContiguousSelection);
     // The address gets whatever width is left over.
     tableView->horizontalHeader()->setStretchLastSection(true);
+    // Rows must fit the in-place label editor, not just the drawn text: a
+    // QLineEdit needs frame and margins on top of the font height, and with the
+    // enlarged base font the default row height clipped what was being typed.
+    {
+        const int text_height = QFontMetrics(tableView->font()).height();
+        const int editor_height = QLineEdit(tableView).sizeHint().height();
+        tableView->verticalHeader()->setDefaultSectionSize(qMax(text_height, editor_height) + 4);
+    }
 
     QSettings settings;
     if (!tableView->horizontalHeader()->restoreState(settings.value("RecentRequestsViewHeaderState").toByteArray())) {

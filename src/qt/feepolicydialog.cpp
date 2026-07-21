@@ -27,6 +27,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QProcess>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QStandardPaths>
 #include <QStringList>
@@ -244,27 +245,26 @@ void FeePolicyDialog::onRemoveSelected()
 
 void FeePolicyDialog::onLaunchPriceServer()
 {
-    // Resolve the bundled sidecar the SAME way BitcoinGUI::launchPriceServer does: walk UP from
-    // the binary's directory looking for the price-server script. Never hardcode a /home/<user>
-    // path — that is dead on every shipped install.
+    // Resolve the bundled sidecar the SAME way BitcoinGUI::launchPriceServer does
+    // (GUIUtil::findPriceServerFile). Never hardcode a /home/<user> path — that is
+    // dead on every shipped install.
     const QString appDir = QCoreApplication::applicationDirPath();
-    auto findUp = [&](const QStringList& rels) -> QString {
-        QDir d(appDir);
-        for (int i = 0; i < 7; ++i) {
-            for (const QString& rel : rels) {
-                const QString c = d.absoluteFilePath(rel);
-                if (QFileInfo::exists(c)) return QFileInfo(c).absoluteFilePath();
-            }
-            if (!d.cdUp()) break;
-        }
-        return QString();
-    };
-
-    const QString script = findUp({QStringLiteral("price-server/price_server.py"),
-                                   QStringLiteral("contrib/price-server/price_server.py")});
+    QString script = GUIUtil::findPriceServerFile(QStringLiteral("price_server.py"));
     if (script.isEmpty()) {
-        setStatus(tr("Could not find the price-server script (price_server.py). It ships bundled with the node."), true);
-        return;
+        // Offer to be pointed at it rather than leaving a dead end; the choice is
+        // remembered, so this is asked once.
+        QMessageBox box(QMessageBox::Warning, tr("Price server"),
+                        tr("Could not find the price-server script (price_server.py). "
+                           "It ships beside the node binary, or in contrib/price-server/ in the source tree."),
+                        QMessageBox::Cancel, this);
+        QPushButton* locate = box.addButton(tr("Locate…"), QMessageBox::AcceptRole);
+        box.exec();
+        if (box.clickedButton() != locate) {
+            setStatus(tr("Could not find the price-server script (price_server.py)."), true);
+            return;
+        }
+        script = GUIUtil::promptForPriceServerScript(this);
+        if (script.isEmpty()) return;
     }
     const QString sdir = QFileInfo(script).absolutePath();
 
@@ -282,8 +282,11 @@ void FeePolicyDialog::onLaunchPriceServer()
     if (!dataDir.isEmpty()) QDir().mkpath(dataDir);
     const QString cfg = (dataDir.isEmpty() ? sdir : dataDir) + "/price-server.json";
     if (!QFileInfo::exists(cfg)) {
-        const QString example = findUp({QStringLiteral("price-server/config.example.json"),
-                                        QStringLiteral("contrib/price-server/config.example.json")});
+        QString example = GUIUtil::findPriceServerFile(QStringLiteral("config.example.json"));
+        if (example.isEmpty()) {
+            const QString beside = sdir + QStringLiteral("/config.example.json");
+            if (QFileInfo::exists(beside)) example = beside;
+        }
         if (example.isEmpty() || !QFile::copy(example, cfg)) {
             setStatus(tr("Could not create a default price-server config at %1.").arg(cfg), true);
             return;

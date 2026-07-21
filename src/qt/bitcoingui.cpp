@@ -783,16 +783,6 @@ void BitcoinGUI::addWallet(WalletModel* walletModel)
     }
 
     connect(wallet_view, &WalletView::outOfSyncWarningClicked, this, &BitcoinGUI::showModalOverlay);
-    // The wallet shows its own blocking progress dialogs (loading, rescan)
-    // through WalletView; track them here too so the sync overlay waits its
-    // turn instead of stacking under the popup.
-    connect(walletModel, &WalletModel::showProgress, this, [this](const QString&, int nProgress) {
-        if (nProgress == 0) {
-            suppressModalOverlay();
-        } else if (nProgress == 100) {
-            releaseModalOverlay();
-        }
-    });
     connect(wallet_view, &WalletView::transactionClicked, this, &BitcoinGUI::gotoHistoryPage);
     connect(wallet_view, &WalletView::coinsSent, this, &BitcoinGUI::gotoHistoryPage);
     connect(wallet_view, &WalletView::message, [this](const QString& title, const QString& message, unsigned int style) {
@@ -1040,26 +1030,27 @@ void BitcoinGUI::launchPriceServer()
     showNormalIfMinimized();
     const QString appDir = QCoreApplication::applicationDirPath();
 
-    // Locate the bundled sidecar by walking UP from the binary: it lives in price-server/ next to a
-    // packaged binary, or in contrib/price-server/ inside a (possibly out-of-tree) build tree.
-    auto findUp = [&](const QStringList& rels) -> QString {
-        QDir d(appDir);
-        for (int i = 0; i < 7; ++i) {
-            for (const QString& rel : rels) {
-                const QString c = d.absoluteFilePath(rel);
-                if (QFileInfo::exists(c)) return QFileInfo(c).absoluteFilePath();
-            }
-            if (!d.cdUp()) break;
-        }
-        return QString();
-    };
-
-    const QString script = findUp({QStringLiteral("price-server/price_server.py"),
-                                   QStringLiteral("contrib/price-server/price_server.py")});
+    // Locate the bundled sidecar (see GUIUtil::findPriceServerFile for the search order).
+    QStringList searched;
+    QString script = GUIUtil::findPriceServerFile(QStringLiteral("price_server.py"), &searched);
     if (script.isEmpty()) {
-        QMessageBox::warning(this, tr("Price server"),
-            tr("Could not find the price-server script (price_server.py). It ships bundled with the node."));
-        return;
+        // A dead end used to be the whole answer here. Say where we looked, name
+        // the feed the wallet is actually reading (the usual reason for opening
+        // this page is to check exactly that), and offer to be pointed at the file.
+        const QString feed = GUIUtil::referencePriceFeedUrl();
+        QString text = tr("Could not find the price-server script (price_server.py).");
+        text += "\n\n" + tr("It ships beside the node binary, or in contrib/price-server/ in the "
+                            "source tree. Looked in:") + "\n" + searched.join("\n");
+        text += "\n\n" + (feed.isEmpty()
+            ? tr("This node has no price feed configured (-referencepricesurl), so amounts show no reference value.")
+            : tr("Note: this node reads its prices from %1. Running the sidecar here is only needed to "
+                 "publish your own feed.").arg(feed));
+        QMessageBox box(QMessageBox::Warning, tr("Price server"), text, QMessageBox::Cancel, this);
+        QPushButton* locate = box.addButton(tr("Locate…"), QMessageBox::AcceptRole);
+        box.exec();
+        if (box.clickedButton() != locate) return;
+        script = GUIUtil::promptForPriceServerScript(this);
+        if (script.isEmpty()) return;
     }
     const QString sdir = QFileInfo(script).absolutePath();
 
@@ -1078,8 +1069,12 @@ void BitcoinGUI::launchPriceServer()
     if (!dataDir.isEmpty()) QDir().mkpath(dataDir);
     const QString cfg = (dataDir.isEmpty() ? sdir : dataDir) + "/price-server.json";
     if (!QFileInfo::exists(cfg)) {
-        const QString example = findUp({QStringLiteral("price-server/config.example.json"),
-                                        QStringLiteral("contrib/price-server/config.example.json")});
+        QString example = GUIUtil::findPriceServerFile(QStringLiteral("config.example.json"));
+        // The script was just located, so its own directory is the best hint.
+        if (example.isEmpty()) {
+            const QString beside = sdir + QStringLiteral("/config.example.json");
+            if (QFileInfo::exists(beside)) example = beside;
+        }
         if (example.isEmpty() || !QFile::copy(example, cfg)) {
             QMessageBox::warning(this, tr("Price server"),
                 tr("Could not create a default price-server config at %1.").arg(cfg));
@@ -1462,9 +1457,7 @@ void BitcoinGUI::setNumBlocks(int count, const QDateTime& blockDate, double nVer
         if(walletFrame)
         {
             walletFrame->showOutOfSyncWarning(true);
-            // Keep the overlay down while a blocking progress dialog (wallet
-            // loading, rescan) is up; showProgress() re-shows it at close.
-            if (!m_progress_dialog_open) modalOverlay->showHide();
+            showModalOverlayWhenUnblocked();
         }
 #endif // ENABLE_WALLET
 
@@ -1774,30 +1767,50 @@ void BitcoinGUI::detectShutdown()
     }
 }
 
-void BitcoinGUI::suppressModalOverlay()
+bool BitcoinGUI::event(QEvent *e)
 {
-    // One blocking popup at a time: while a progress dialog is up the sync
-    // overlay stays out of the way instead of stacking under it.
-    m_progress_dialog_open = true;
-    if (modalOverlay && modalOverlay->isLayerVisible()) {
-        modalOverlay->showHide(/*hide=*/true);
+    // Qt reports modal popups blocking this window regardless of who created
+    // them. The sync overlay is a child widget, so it renders *underneath* such
+    // a popup: at startup that buried the "catching up with the network" screen
+    // under "Loading wallet…". Take the overlay down while a popup owns the
+    // screen and bring it back when the popup is gone.
+    switch (e->type()) {
+    case QEvent::WindowBlocked:
+        m_window_blocked = true;
+        if (modalOverlay && modalOverlay->isLayerVisible()) {
+            m_overlay_deferred = true;
+            modalOverlay->showHide(/*hide=*/true);
+        }
+        break;
+    case QEvent::WindowUnblocked:
+        m_window_blocked = false;
+        if (m_overlay_deferred) {
+            m_overlay_deferred = false;
+            showModalOverlayWhenUnblocked();
+        }
+        break;
+    default:
+        break;
     }
+    return QMainWindow::event(e);
 }
 
-void BitcoinGUI::releaseModalOverlay()
+void BitcoinGUI::showModalOverlayWhenUnblocked()
 {
-    m_progress_dialog_open = false;
-    // The dialog is gone: if the node is still catching up (the status-bar
-    // progress bar is the live signal for that), show the sync overlay now.
-    if (modalOverlay && progressBar && progressBar->isVisible()) {
-        modalOverlay->showHide();
+    if (!modalOverlay) return;
+    if (m_window_blocked) {
+        // A popup owns the screen; queue the overlay for when it closes.
+        m_overlay_deferred = true;
+        return;
     }
+    // Only worth showing while the node is actually behind — the status-bar
+    // progress bar is the live signal for that.
+    if (progressBar && progressBar->isVisible()) modalOverlay->showHide();
 }
 
 void BitcoinGUI::showProgress(const QString &title, int nProgress)
 {
     if (nProgress == 0) {
-        suppressModalOverlay();
         progressDialog = new QProgressDialog(title, QString(), 0, 100);
         GUIUtil::PolishProgressDialog(progressDialog);
         progressDialog->setWindowModality(Qt::ApplicationModal);
@@ -1809,7 +1822,6 @@ void BitcoinGUI::showProgress(const QString &title, int nProgress)
             progressDialog->deleteLater();
             progressDialog = nullptr;
         }
-        releaseModalOverlay();
     } else if (progressDialog) {
         progressDialog->setValue(nProgress);
     }
