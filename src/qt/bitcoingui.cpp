@@ -783,6 +783,16 @@ void BitcoinGUI::addWallet(WalletModel* walletModel)
     }
 
     connect(wallet_view, &WalletView::outOfSyncWarningClicked, this, &BitcoinGUI::showModalOverlay);
+    // The wallet shows its own blocking progress dialogs (loading, rescan)
+    // through WalletView; track them here too so the sync overlay waits its
+    // turn instead of stacking under the popup.
+    connect(walletModel, &WalletModel::showProgress, this, [this](const QString&, int nProgress) {
+        if (nProgress == 0) {
+            suppressModalOverlay();
+        } else if (nProgress == 100) {
+            releaseModalOverlay();
+        }
+    });
     connect(wallet_view, &WalletView::transactionClicked, this, &BitcoinGUI::gotoHistoryPage);
     connect(wallet_view, &WalletView::coinsSent, this, &BitcoinGUI::gotoHistoryPage);
     connect(wallet_view, &WalletView::message, [this](const QString& title, const QString& message, unsigned int style) {
@@ -1452,7 +1462,9 @@ void BitcoinGUI::setNumBlocks(int count, const QDateTime& blockDate, double nVer
         if(walletFrame)
         {
             walletFrame->showOutOfSyncWarning(true);
-            modalOverlay->showHide();
+            // Keep the overlay down while a blocking progress dialog (wallet
+            // loading, rescan) is up; showProgress() re-shows it at close.
+            if (!m_progress_dialog_open) modalOverlay->showHide();
         }
 #endif // ENABLE_WALLET
 
@@ -1762,9 +1774,30 @@ void BitcoinGUI::detectShutdown()
     }
 }
 
+void BitcoinGUI::suppressModalOverlay()
+{
+    // One blocking popup at a time: while a progress dialog is up the sync
+    // overlay stays out of the way instead of stacking under it.
+    m_progress_dialog_open = true;
+    if (modalOverlay && modalOverlay->isLayerVisible()) {
+        modalOverlay->showHide(/*hide=*/true);
+    }
+}
+
+void BitcoinGUI::releaseModalOverlay()
+{
+    m_progress_dialog_open = false;
+    // The dialog is gone: if the node is still catching up (the status-bar
+    // progress bar is the live signal for that), show the sync overlay now.
+    if (modalOverlay && progressBar && progressBar->isVisible()) {
+        modalOverlay->showHide();
+    }
+}
+
 void BitcoinGUI::showProgress(const QString &title, int nProgress)
 {
     if (nProgress == 0) {
+        suppressModalOverlay();
         progressDialog = new QProgressDialog(title, QString(), 0, 100);
         GUIUtil::PolishProgressDialog(progressDialog);
         progressDialog->setWindowModality(Qt::ApplicationModal);
@@ -1776,6 +1809,7 @@ void BitcoinGUI::showProgress(const QString &title, int nProgress)
             progressDialog->deleteLater();
             progressDialog = nullptr;
         }
+        releaseModalOverlay();
     } else if (progressDialog) {
         progressDialog->setValue(nProgress);
     }

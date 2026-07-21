@@ -101,6 +101,13 @@ private:
     bool m_fee_asset_user_choice{false};
     void updateDefaultFeeAsset();
     void updateFeeAssetWarning();
+    /** The asset the fee will be paid in (the selector's pick, policy asset otherwise). */
+    CAsset selectedFeeAsset() const;
+    /** SEQUENTIA: render a fee rate the way a user reads money — in the reference
+        currency, plus the equivalent in the fee asset and the rate applied. The
+        wallet's own policy-asset atoms are never shown as if they were a default
+        currency. Returns rich text (a muted span for the rate). */
+    QString formatFeeRate(const CAmount& policy_atoms_per_kvb) const;
 
 private Q_SLOTS:
     void sendButtonClicked(bool checked);

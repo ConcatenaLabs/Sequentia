@@ -131,6 +131,13 @@ private:
     QLabel* progressBarLabel = nullptr;
     GUIUtil::ClickableProgressBar* progressBar = nullptr;
     QProgressDialog* progressDialog = nullptr;
+    //! While a blocking progress dialog ("Loading wallet…", rescans) is up, the
+    //! sync overlay stays suppressed; it is shown afterwards if still syncing.
+    bool m_progress_dialog_open = false;
+    //! Hide the sync overlay for the lifetime of a blocking progress dialog.
+    void suppressModalOverlay();
+    //! Progress dialog closed: show the sync overlay again if still catching up.
+    void releaseModalOverlay();
 
     QMenuBar* appMenuBar = nullptr;
     QToolBar* appToolBar = nullptr;

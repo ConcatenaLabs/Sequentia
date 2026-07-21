@@ -946,6 +946,60 @@ QString formatReferenceApproxByLabel(const QString& assetLabel, double wholeUnit
     return FormatRefValue(wholeUnits * pa / pr, ref);
 }
 
+QString referenceCurrency()
+{
+    return QSettings().value("strReferenceCurrency", "USD").toString();
+}
+
+QString formatReferenceAmount(double value, const QString& refTicker)
+{
+    const QString ref = refTicker.isEmpty() ? referenceCurrency() : refTicker;
+    QString num = FormatRefValue(value, ref);
+    // FormatRefValue prefixes "≈ "; this variant is the bare number + ticker.
+    if (num.startsWith(QString::fromUtf8("\xE2\x89\x88 "))) num = num.mid(2);
+    return num;
+}
+
+bool referenceValueOf(const CAsset& asset, const CAmount& amount, const QString& refTicker, double& out)
+{
+    const std::map<std::string, double> prices = GetReferencePrices();
+    if (prices.empty()) return false;
+    const QString ref = refTicker.isEmpty() ? referenceCurrency() : refTicker;
+    const auto itA = prices.find(MarketTickerOf(asset).toStdString());
+    const double pa = itA != prices.end() ? itA->second : 0.0;
+    const double pr = RefBasePriceOf(prices, ref);
+    if (!(pa > 0.0) || !(pr > 0.0)) return false;
+    const double factor = static_cast<double>(AssetAtomFactor(assetPrecision(asset)));
+    out = (static_cast<double>(amount) / factor) * pa / pr;
+    return true;
+}
+
+double assetExchangeRate(const CAsset& from, const CAsset& to)
+{
+    const std::map<std::string, double> prices = GetReferencePrices();
+    if (prices.empty()) return 0.0;
+    const auto itF = prices.find(MarketTickerOf(from).toStdString());
+    const auto itT = prices.find(MarketTickerOf(to).toStdString());
+    const double pf = itF != prices.end() ? itF->second : 0.0;
+    const double pt = itT != prices.end() ? itT->second : 0.0;
+    if (!(pf > 0.0) || !(pt > 0.0)) return 0.0;
+    return pf / pt;
+}
+
+bool convertAssetAmount(const CAsset& from, const CAmount& amount, const CAsset& to, CAmount& out)
+{
+    const double rate = assetExchangeRate(from, to);
+    if (!(rate > 0.0)) return false;
+    const double whole = static_cast<double>(amount) / static_cast<double>(AssetAtomFactor(assetPrecision(from)));
+    out = static_cast<CAmount>(whole * rate * static_cast<double>(AssetAtomFactor(assetPrecision(to))) + 0.5);
+    return true;
+}
+
+bool unitReferenceValue(const CAsset& asset, const QString& refTicker, double& out)
+{
+    return referenceValueOf(asset, AssetAtomFactor(assetPrecision(asset)), refTicker, out);
+}
+
 QString formatMultiAssetAmount(const CAmountMap& amountmap, const int bitcoin_unit, BitcoinUnits::SeparatorStyle separators, QString line_separator)
 {
     QStringList ret;

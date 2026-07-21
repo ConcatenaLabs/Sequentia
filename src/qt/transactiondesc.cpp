@@ -26,11 +26,48 @@
 #include <string>
 
 #include <QLatin1String>
+#include <QStringList>
 
 using wallet::ISMINE_ALL;
 using wallet::ISMINE_SPENDABLE;
 using wallet::ISMINE_WATCH_ONLY;
 using wallet::isminetype;
+
+namespace {
+//! Render every non-zero entry of a per-asset amount map, each at its own
+//! asset's precision and name. GUIUtil::formatMultiAssetAmount deliberately
+//! hides non-positive entries (right for balances); a transaction detail must
+//! keep them, or a movement of any non-policy asset renders as a meaningless
+//! policy-asset zero.
+QString formatAssetAmountMap(const CAmountMap& map, int unit, bool plussign = false)
+{
+    QStringList parts;
+    for (const auto& entry : map) {
+        if (entry.second == 0) continue;
+        QString s = GUIUtil::formatAssetAmount(entry.first, entry.second, unit, BitcoinUnits::SeparatorStyle::STANDARD, /*include_asset_name=*/true);
+        if (plussign && entry.second > 0) s = "+" + s;
+        parts << s.toHtmlEscaped();
+    }
+    // An all-zero map is just "0": naming any asset here would crown it a
+    // default currency, which no asset is.
+    if (parts.isEmpty()) return QStringLiteral("0");
+    return parts.join(QStringLiteral(", "));
+}
+
+bool hasNonZero(const CAmountMap& map)
+{
+    for (const auto& entry : map) {
+        if (entry.second != 0) return true;
+    }
+    return false;
+}
+
+CAmountMap negated(CAmountMap map)
+{
+    for (auto& entry : map) entry.second = -entry.second;
+    return map;
+}
+} // namespace
 
 QString TransactionDesc::FormatTxStatus(const interfaces::WalletTx& wtx, const interfaces::WalletTxStatus& status, bool inMempool, int numBlocks)
 {
@@ -91,9 +128,13 @@ QString TransactionDesc::toHTML(interfaces::Node& node, interfaces::Wallet& wall
     strHTML += "<html><font face='verdana, arial, helvetica, sans-serif'>";
 
     int64_t nTime = wtx.time;
-    CAmount nCredit = valueFor(wtx.credit, ::policyAsset);
-    CAmount nDebit = valueFor(wtx.debit, ::policyAsset);
-    CAmount nNet = nCredit - nDebit;
+    // Amounts are per-asset maps: a transaction can move any mix of assets, and
+    // none of them (the policy asset included) is a default to collapse onto.
+    const CAmountMap& mapCredit = wtx.credit;
+    const CAmountMap& mapDebit = wtx.debit;
+    const CAmountMap mapNet = mapCredit - mapDebit;
+    // A pure receive: nothing of ours went in, something of ours came out.
+    const bool fPureCredit = !hasNonZero(mapDebit) && hasNonZero(mapCredit);
 
     strHTML += "<b>" + tr("Status") + ":</b> " + FormatTxStatus(wtx, status, inMempool, numBlocks);
     strHTML += "<br>";
@@ -115,7 +156,7 @@ QString TransactionDesc::toHTML(interfaces::Node& node, interfaces::Wallet& wall
     else
     {
         // Offline transaction
-        if (nNet > 0)
+        if (fPureCredit)
         {
             // Credit
             CTxDestination address = DecodeDestination(rec->address);
@@ -157,27 +198,27 @@ QString TransactionDesc::toHTML(interfaces::Node& node, interfaces::Wallet& wall
     //
     // Amount
     //
-    if (wtx.is_coinbase && nCredit == 0)
+    if (wtx.is_coinbase && !hasNonZero(mapCredit))
     {
         //
         // Coinbase
         //
-        CAmount nUnmatured = 0;
+        CAmountMap mapUnmatured;
         for (size_t nOut = 0; nOut < wtx.tx->vout.size(); nOut++)
-            nUnmatured += valueFor(wallet.getCredit(*(wtx.tx), nOut, ISMINE_ALL), ::policyAsset);
+            mapUnmatured = mapUnmatured + wallet.getCredit(*(wtx.tx), nOut, ISMINE_ALL);
         strHTML += "<b>" + tr("Credit") + ":</b> ";
         if (status.is_in_main_chain)
-            strHTML += BitcoinUnits::formatHtmlWithUnit(unit, nUnmatured)+ " (" + tr("matures in %n more block(s)", "", status.blocks_to_maturity) + ")";
+            strHTML += formatAssetAmountMap(mapUnmatured, unit) + " (" + tr("matures in %n more block(s)", "", status.blocks_to_maturity) + ")";
         else
             strHTML += "(" + tr("not accepted") + ")";
         strHTML += "<br>";
     }
-    else if (nNet > 0)
+    else if (fPureCredit)
     {
         //
         // Credit
         //
-        strHTML += "<b>" + tr("Credit") + ":</b> " + BitcoinUnits::formatHtmlWithUnit(unit, nNet) + "<br>";
+        strHTML += "<b>" + tr("Credit") + ":</b> " + formatAssetAmountMap(mapNet, unit) + "<br>";
     }
     else
     {
@@ -209,6 +250,10 @@ QString TransactionDesc::toHTML(interfaces::Node& node, interfaces::Wallet& wall
                 isminetype toSelf = *(mine++);
                 if ((toSelf == ISMINE_SPENDABLE) && (fAllFromMe == ISMINE_SPENDABLE))
                     continue;
+                // The explicit fee output has its own "Transaction fee" row below;
+                // listing it here as a Debit would double-report it.
+                if (txout.IsFee())
+                    continue;
 
                 if (!wtx.value_map.count("to") || wtx.value_map["to"].empty())
                 {
@@ -230,18 +275,17 @@ QString TransactionDesc::toHTML(interfaces::Node& node, interfaces::Wallet& wall
                     }
                 }
 
-                strHTML += "<b>" + tr("Debit") + ":</b> " + BitcoinUnits::formatHtmlWithUnit(unit, -wtx.txout_amounts[i]) + "<br>";
+                strHTML += "<b>" + tr("Debit") + ":</b> " + GUIUtil::formatAssetAmount(wtx.txout_assets[i], -wtx.txout_amounts[i], unit, BitcoinUnits::SeparatorStyle::STANDARD, /*include_asset_name=*/true).toHtmlEscaped() + "<br>";
                 if(toSelf)
-                    strHTML += "<b>" + tr("Credit") + ":</b> " + BitcoinUnits::formatHtmlWithUnit(unit, wtx.txout_amounts[i]) + "<br>";
+                    strHTML += "<b>" + tr("Credit") + ":</b> " + GUIUtil::formatAssetAmount(wtx.txout_assets[i], wtx.txout_amounts[i], unit, BitcoinUnits::SeparatorStyle::STANDARD, /*include_asset_name=*/true).toHtmlEscaped() + "<br>";
             }
 
             if (fAllToMe)
             {
                 // Payment to self
-                CAmount nChange = valueFor(wtx.change, ::policyAsset);
-                CAmount nValue = nCredit - nChange;
-                strHTML += "<b>" + tr("Total debit") + ":</b> " + BitcoinUnits::formatHtmlWithUnit(unit, -nValue) + "<br>";
-                strHTML += "<b>" + tr("Total credit") + ":</b> " + BitcoinUnits::formatHtmlWithUnit(unit, nValue) + "<br>";
+                const CAmountMap mapValue = mapCredit - wtx.change;
+                strHTML += "<b>" + tr("Total debit") + ":</b> " + formatAssetAmountMap(negated(mapValue), unit) + "<br>";
+                strHTML += "<b>" + tr("Total credit") + ":</b> " + formatAssetAmountMap(mapValue, unit) + "<br>";
             }
 
             // Sequentia: the fee may be paid in a non-policy asset; read the tx's actual fee
@@ -268,19 +312,19 @@ QString TransactionDesc::toHTML(interfaces::Node& node, interfaces::Wallet& wall
             auto mine = wtx.txin_is_mine.begin();
             for (const CTxIn& txin : wtx.tx->vin) {
                 if (*(mine++)) {
-                    strHTML += "<b>" + tr("Debit") + ":</b> " + BitcoinUnits::formatHtmlWithUnit(unit, -valueFor(wallet.getDebit(txin, ISMINE_ALL), ::policyAsset)) + "<br>";
+                    strHTML += "<b>" + tr("Debit") + ":</b> " + formatAssetAmountMap(negated(wallet.getDebit(txin, ISMINE_ALL)), unit) + "<br>";
                 }
             }
             mine = wtx.txout_is_mine.begin();
             for (size_t nOut = 0; nOut < wtx.tx->vout.size(); nOut++) {
                 if (*(mine++)) {
-                    strHTML += "<b>" + tr("Credit") + ":</b> " + BitcoinUnits::formatHtmlWithUnit(unit, valueFor(wallet.getCredit(*(wtx.tx), nOut, ISMINE_ALL), ::policyAsset)) + "<br>";
+                    strHTML += "<b>" + tr("Credit") + ":</b> " + formatAssetAmountMap(wallet.getCredit(*(wtx.tx), nOut, ISMINE_ALL), unit) + "<br>";
                 }
             }
         }
     }
 
-    strHTML += "<b>" + tr("Net amount") + ":</b> " + BitcoinUnits::formatHtmlWithUnit(unit, nNet, true) + "<br>";
+    strHTML += "<b>" + tr("Net amount") + ":</b> " + formatAssetAmountMap(mapNet, unit, /*plussign=*/true) + "<br>";
 
     //
     // Message
