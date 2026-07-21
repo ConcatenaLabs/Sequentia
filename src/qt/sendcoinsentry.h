@@ -53,6 +53,9 @@ public:
 
     void setFocus();
 
+    /** Re-label the asset selector from the registry (names arrive after startup). */
+    void refreshAssetNames();
+
 public Q_SLOTS:
     void clear();
     void checkSubtractFeeFromAmount();
@@ -72,7 +75,6 @@ private Q_SLOTS:
     void on_pasteButton_clicked();
     void updateDisplayUnit();
     void updateAssetTypes();
-    void refreshAssetNames();
 
 protected:
     void changeEvent(QEvent* e) override;
