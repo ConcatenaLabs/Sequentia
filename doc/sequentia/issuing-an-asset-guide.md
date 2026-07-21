@@ -117,8 +117,19 @@ Afterwards you get an **asset id**: 64 characters of gibberish. That is your
 asset's real name as far as the network is concerned. Everything else is
 decoration that has to be proven.
 
-Core then shows a panel with a line of text and a **Save the proof file** button.
+Core then shows a panel with a line of text and two save buttons. Use both.
+
+**Save the proof file** gives you a file with a long name and no extension.
 Save it somewhere you can find. That file is Step 4.
+
+**Save the contract...** gives you a `.json` file named
+`sequentia-asset-contract-<your asset id>.json`. That is the contract: the little
+document holding your asset's name, ticker, decimals, domain and key. The chain
+kept only its fingerprint, so this file and your wallet hold the only copies in
+existence. You will not need it today — Step 6 uses the wallet's own copy — but a
+wallet restored from its seed, or any other wallet, can only register your asset
+by loading this file back in. Treat it like a backup: if the wallet's copy is
+ever gone and this file is too, the asset can never be registered.
 
 ---
 
@@ -253,8 +264,12 @@ a registry your asset exists, and it will then go and read your file.
 
 On the Assets page, put your asset id in **Register an asset with the registry**
 and press **Register**. Your wallet kept the contract from when you issued, and
-sends it along. There is no harm in pressing it too early: the registry checks
-your file itself, so if it is not up yet it just tells you so, and you try again.
+sends it along. If this wallet does not have it — the asset was issued from
+another wallet, or this one was restored from its seed — press
+**Load the contract...** and pick the `.json` contract file you saved in Step 3;
+Register then sends that instead. There is no harm in pressing it too early: the
+registry checks your file itself, so if it is not up yet it just tells you so,
+and you try again.
 
 Nothing here is secret, and nothing needs anyone's approval — the registry decides
 on your file and the chain, not on who you are.
@@ -318,7 +333,9 @@ Tickers are first come, first served. There is no arbitration. Choose another.
 **What is the `contract` thing Core printed?**
 The little document holding your asset's name, ticker, decimals, domain and key.
 Only its fingerprint goes on the chain, not the document itself — so if you lose
-it, nobody can reconstruct it, and you cannot register the asset. Keep a copy.
+it, nobody can reconstruct it, and you cannot register the asset. Keep a copy:
+that is the `.json` file from Step 3, and **Load the contract...** on the Assets
+page is where it goes back in.
 
 ---
 
