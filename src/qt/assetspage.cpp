@@ -78,7 +78,7 @@ AssetsPage::AssetsPage(const PlatformStyle* platformStyle, QWidget* parent)
     layout->addWidget(title);
 
     QLabel* intro = new QLabel(
-        tr("Issue your own assets, mint more of ones you control, and see what you hold. "
+        tr("Issue your own assets and mint more of ones you control. "
            "To send an asset, use the Send tab and pick the asset there."), this);
     intro->setWordWrap(true);
     layout->addWidget(intro);
