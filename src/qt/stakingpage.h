@@ -81,6 +81,7 @@ protected:
 
 private Q_SLOTS:
     void onStake();
+    void onUnstake();
     void onEnableProduction();
     void onRefreshClicked();
 
@@ -97,6 +98,12 @@ private:
     QPushButton* m_stake_button{nullptr};
     QLabel* m_result{nullptr};
     QLabel* m_status{nullptr};
+
+    // --- "Withdraw stake" (unstake) card ---
+    QLabel* m_unstake_info{nullptr};      //!< what is withdrawable now / still unbonding
+    QLineEdit* m_unstake_amount{nullptr};
+    QPushButton* m_unstake_button{nullptr};
+    QLabel* m_unstake_result{nullptr};
 
     // --- "Your stake" card ---
     QLabel* m_my_stake{nullptr};
@@ -128,6 +135,9 @@ private:
     void refreshOwnStake(const UniValue& registry);
     void refreshProducedBlocks();
     void refreshWatchOnlyKey();
+    //! Refresh the "Withdraw stake" card from liststakeutxos: how much is
+    //! withdrawable right now, how much is still unbonding and until when.
+    void refreshUnstakeInfo();
 
     //! Run an RPC (wallet=true uses the /wallet/<name> endpoint; false the node endpoint).
     UniValue callRpc(const std::string& method, const UniValue& params, bool& ok, QString& error, bool wallet = true);
