@@ -2120,6 +2120,12 @@ bool DescriptorScriptPubKeyMan::SignTransaction(CMutableTransaction& tx, const s
     return ::SignTransaction(tx, keys.get(), coins, sighash, Params().HashGenesisBlock(), input_errors);
 }
 
+bool DescriptorScriptPubKeyMan::GetStakingKey(const CPubKey& pubkey, CKey& key) const
+{
+    std::unique_ptr<FlatSigningProvider> provider = GetSigningProvider(pubkey);
+    return provider && provider->GetKey(pubkey.GetID(), key);
+}
+
 SigningResult DescriptorScriptPubKeyMan::SignMessage(const std::string& message, const PKHash& pkhash, std::string& str_sig) const
 {
     std::unique_ptr<FlatSigningProvider> keys = GetSigningProvider(GetScriptForDestination(pkhash), true);

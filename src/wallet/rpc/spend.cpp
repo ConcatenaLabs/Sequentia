@@ -255,8 +255,7 @@ bool GetStakerKey(const CWallet& wallet, const CPubKey& pubkey, CKey& key_out)
         if (auto* legacy = dynamic_cast<LegacyScriptPubKeyMan*>(spk_man)) {
             if (legacy->GetKey(keyid, key_out)) return true;
         } else if (auto* desc = dynamic_cast<DescriptorScriptPubKeyMan*>(spk_man)) {
-            std::unique_ptr<FlatSigningProvider> provider = desc->GetSigningProvider(pubkey);
-            if (provider && provider->GetKey(keyid, key_out)) return true;
+            if (desc->GetStakingKey(pubkey, key_out)) return true;
         }
     }
     return false;
