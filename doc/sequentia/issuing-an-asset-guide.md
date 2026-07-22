@@ -193,25 +193,27 @@ somewhere you do control, or to pick a different domain for the asset. Decide th
 **Netlify, Vercel, Cloudflare Pages, GitHub Pages** — easy. Put the file in a
 `.well-known/` folder inside the directory you publish (`public/`, `static/`, or
 the repo root for GitHub Pages) and deploy. GitHub Pages needs a `.nojekyll` file
-at the root, or it will skip dotfolders entirely. Netlify and Vercel both let you
-set the content type in their config file; on GitHub Pages you cannot, which may
-be a dead end for the `text/plain` requirement below.
+at the root, or it will skip dotfolders entirely.
 
 **A plain server you control (Apache, Nginx, cPanel)** — the WordPress
 instructions above are really just this: find the web root, make the folder,
 upload.
 
-**Your own Node/Python app** — serve the one route yourself and return
+**Your own Node/Python app** — serve the one route yourself, ideally with
 `Content-Type: text/plain`. This is the easiest case; you are not fighting anyone.
 
-### The bit that usually catches people out
+### The bit that sometimes catches people out
 
-The file must be delivered as **plain text**. Because it has no extension, most
-web servers will not say what it is, and the check then refuses it — not because
-the content is wrong, but because the server never said "this is text".
+The file must reach the registry **raw** — the bare line, not a page built
+around it. A server that simply does not say what the file is (the normal case
+for a file with no extension) is fine, and so is one calling it a generic
+download. What fails is a server that wraps or declares the file as HTML: your
+theme's header around the line, or an app framework "rendering" it.
 
-The fix is a small settings file next to it. In the same `.well-known` folder,
-create a file called `.htaccess` (dot first, no extension) containing exactly:
+If Step 5 below shows you your site's design around the line, or Register is
+refused with a *must be plain text* error, the fix is a small settings file next
+to the proof. In the same `.well-known` folder, create a file called `.htaccess`
+(dot first, no extension) containing exactly:
 
 ```apache
 <Files "sequentia-asset-proof-*">
@@ -220,15 +222,14 @@ create a file called `.htaccess` (dot first, no extension) containing exactly:
 ```
 
 That is Apache, which is what most WordPress hosting runs. If your host uses
-Nginx you cannot do it with a file and will have to ask them to add
-`default_type text/plain;` for the `/.well-known/` location — or just ask their
-support to "serve /.well-known/ files as text/plain", which they will understand.
+Nginx you cannot do it with a file and will have to ask their support to "serve
+/.well-known/ files as text/plain", which they will understand.
 
 If you use Cloudflare or any caching service, clear the cache afterwards, or it
 may keep serving the old "not found" for a while.
 
-This step is annoying but it is **not permanent**. Unlike the domain, you can get
-it wrong, fix it, and try again as many times as you like.
+None of this is permanent. Unlike the domain, you can get it wrong, fix it, and
+try again as many times as you like.
 
 ---
 
@@ -249,9 +250,10 @@ Go through this list:
 - **The address bar changed to a different domain.** Your domain is wrong. This is
   Step 1 again, and if you have already issued the asset it is unfortunately too
   late for that one.
-- **The browser downloads the file instead of showing it.** The content-type
-  problem above. The line is right, the server just is not calling it text. Fix
-  the `.htaccess`.
+- **The browser downloads the file instead of showing it.** That is fine. It
+  means the server is sending the file raw without calling it text, which the
+  registry accepts; just open the downloaded file and check it holds exactly the
+  line.
 - **You see your website's design around the line.** The file is being rendered as
   a page. It must be the raw line and nothing else — no theme, no header.
 
