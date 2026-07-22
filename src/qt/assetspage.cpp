@@ -26,6 +26,7 @@
 #include <QDoubleValidator>
 #include <QFile>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -218,8 +219,14 @@ AssetsPage::AssetsPage(const PlatformStyle* platformStyle, QWidget* parent)
     QHBoxLayout* regRow = new QHBoxLayout();
     m_register_asset = new QLineEdit(regGroup);
     m_register_asset->setPlaceholderText(tr("asset id (hex) - the one you issued"));
+    m_register_contract_button = new QPushButton(tr("Load the contract..."), regGroup);
+    m_register_contract_button->setToolTip(tr("Only needed when this wallet no longer holds the contract - it was "
+                                              "issued from another wallet, or this one was restored from its seed. "
+                                              "Pick the .json contract file you saved at issuance, named "
+                                              "sequentia-asset-contract-(asset id).json."));
     m_register_button = new QPushButton(tr("Register"), regGroup);
     regRow->addWidget(m_register_asset, 1);
+    regRow->addWidget(m_register_contract_button);
     regRow->addWidget(m_register_button);
     regLayout->addLayout(regRow);
     layout->addWidget(regGroup);
@@ -260,6 +267,7 @@ AssetsPage::AssetsPage(const PlatformStyle* platformStyle, QWidget* parent)
     connect(m_proof_save_button, &QPushButton::clicked, this, &AssetsPage::onSaveProofFile);
     connect(m_contract_save_button, &QPushButton::clicked, this, &AssetsPage::onSaveContract);
     connect(m_issue_domain_open, &QPushButton::clicked, this, &AssetsPage::onOpenDomain);
+    connect(m_register_contract_button, &QPushButton::clicked, this, &AssetsPage::onLoadContract);
     connect(m_register_button, &QPushButton::clicked, this, &AssetsPage::onRegister);
 }
 
@@ -522,12 +530,15 @@ void AssetsPage::onIssue()
                "site itself, not your media or uploads folder. Do not rename the file. When it is right, "
                "opening this in a browser shows one line of plain text and nothing else:"
                "<br><br><tt>%3</tt>"
-               "<br><br>If the browser downloads the file instead of showing it, your web server is not "
-               "calling it text; the guide has the two-line fix for that."
+               "<br><br>If the browser downloads the file instead of showing it, that is fine - the "
+               "registry reads it raw either way. What fails is the line shown inside your site's design; "
+               "the guide has the two-line fix for that."
                "<br><br><b>2. Press Register below</b> once the file is up. This wallet kept the contract "
-               "and will submit it for you; the registry then reads your file and decides. It is worth "
-               "saving the contract anyway - the chain kept only its fingerprint, so this wallet holds the "
-               "only copy:"
+               "and will submit it for you; the registry then reads your file and decides. Save the "
+               "contract too, with its button below - it is a <tt>.json</tt> file named after your asset. "
+               "The chain kept only its fingerprint, so this wallet holds the only copy; a wallet that no "
+               "longer has it (restored from seed, or a different one) can only register by loading that "
+               "<tt>.json</tt> file back with <i>Load the contract...</i>:"
                "<br><br><tt>%4</tt>"
                "<br><br>You will know it worked when the Registry column below stops saying "
                "<i>not registered yet</i>. <a href=\"%5\">The step-by-step guide</a> covers putting the "
@@ -570,6 +581,36 @@ void AssetsPage::onSaveProofFile()
     setStatus(tr("Saved. Upload it to %1 so it is served at the address above, as plain text.").arg(m_proof_domain), false);
 }
 
+void AssetsPage::onLoadContract()
+{
+    const QString path = QFileDialog::getOpenFileName(this, tr("Load the contract"), QString(), tr("JSON file (*.json)"));
+    if (path.isEmpty()) return;
+
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        setStatus(tr("Could not read %1: %2").arg(path, file.errorString()), true);
+        return;
+    }
+    const QByteArray body = file.readAll();
+    file.close();
+
+    UniValue parsed;
+    if (!parsed.read(std::string(body.constData(), size_t(body.size()))) || !parsed.isObject()) {
+        setStatus(tr("%1 does not contain a contract: it does not parse as a JSON object.").arg(path), true);
+        return;
+    }
+    m_register_contract = QString::fromUtf8(body);
+
+    // The save button named the file after its asset; give that id back to the
+    // field rather than making the user retype 64 characters.
+    static const QRegularExpression contract_file_re("sequentia-asset-contract-([0-9a-f]{64})\\.json$");
+    const auto match = contract_file_re.match(QFileInfo(path).fileName());
+    if (match.hasMatch() && m_register_asset->text().trimmed().isEmpty()) {
+        m_register_asset->setText(match.captured(1));
+    }
+    setStatus(tr("Contract loaded. It will be sent along when you press Register."), false);
+}
+
 void AssetsPage::onRegister()
 {
     if (!m_wallet_model) return;
@@ -578,6 +619,11 @@ void AssetsPage::onRegister()
 
     UniValue params(UniValue::VARR);
     params.push_back(asset.toStdString());
+    if (!m_register_contract.isEmpty()) {
+        UniValue contract;
+        contract.read(m_register_contract.toStdString());
+        params.push_back(contract);
+    }
 
     m_register_button->setEnabled(false);
     setStatus(tr("Asking the registry to check your domain..."), false);
@@ -588,11 +634,15 @@ void AssetsPage::onRegister()
     if (!ok) {
         // The registry's own words: it knows why it refused, and every reason is
         // something the issuer can go and fix.
+        if (m_register_contract.isEmpty() && err.contains(QStringLiteral("no contract"))) {
+            err += QLatin1Char(' ') + tr("If you saved the contract as a .json file at issuance, press \"Load the contract...\" and try again.");
+        }
         setStatus(err, true);
         return;
     }
     const bool verified = r.exists("verified") && r["verified"].isBool() && r["verified"].get_bool();
     if (verified) {
+        m_register_contract.clear();
         setStatus(tr("Registered. %1 is verified - wallets will show its name within a few minutes.").arg(asset), false);
     } else {
         setStatus(tr("The registry accepted the submission but does not vouch for the asset yet."), true);
@@ -620,7 +670,7 @@ void AssetsPage::onSaveContract()
         setStatus(tr("Could not write %1: %2").arg(path, file.errorString()), true);
         return;
     }
-    setStatus(tr("Contract saved. Keep it: it is the only copy, and registering the asset needs it."), false);
+    setStatus(tr("Contract saved. Keep that .json file: it is the only copy, and registering the asset needs it."), false);
 }
 
 void AssetsPage::onReissue()

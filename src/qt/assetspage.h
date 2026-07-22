@@ -48,6 +48,7 @@ private Q_SLOTS:
     void onReissue();
     void onSaveProofFile();
     void onSaveContract();
+    void onLoadContract();
     void onOpenDomain();
     void onRegister();
 
@@ -90,6 +91,14 @@ private:
 
     QLineEdit* m_register_asset{nullptr};
     QPushButton* m_register_button{nullptr};
+    QPushButton* m_register_contract_button{nullptr};
+    //! A contract loaded back from the file onSaveContract wrote, sent along
+    //! with the registration. Registering normally needs no contract - the
+    //! wallet kept it at issuance - but that record lives in the issuing
+    //! wallet's transaction store, so a wallet restored from seed, or a
+    //! different wallet altogether, no longer has it. Empty = let the wallet
+    //! use its own record.
+    QString m_register_contract;
 
     //! Run a wallet RPC; returns the result, sets ok=false and a message on error.
     UniValue callWalletRpc(const std::string& method, const UniValue& params, bool& ok, QString& error);
