@@ -41,7 +41,8 @@ static int column_alignments[] = {
         Qt::AlignLeft|Qt::AlignVCenter, /* date */
         Qt::AlignLeft|Qt::AlignVCenter, /* type */
         Qt::AlignLeft|Qt::AlignVCenter, /* address */
-        Qt::AlignRight|Qt::AlignVCenter /* amount */
+        Qt::AlignRight|Qt::AlignVCenter, /* amount */
+        Qt::AlignRight|Qt::AlignVCenter /* value */
     };
 
 // Comparison operator for sort/binary search of model tx list
@@ -295,7 +296,7 @@ TransactionTableModel::TransactionTableModel(const PlatformStyle *_platformStyle
 {
     subscribeToCoreSignals();
 
-    columns << QString() << QString() << tr("Date") << tr("Type") << tr("Label") << tr("Amount");
+    columns << QString() << QString() << tr("Date") << tr("Type") << tr("Label") << tr("Amount") << tr("Value");
     priv->refreshWallet(walletModel->wallet());
 
     connect(walletModel->getOptionsModel(), &OptionsModel::displayUnitChanged, this, &TransactionTableModel::updateDisplayUnit);
@@ -592,6 +593,7 @@ QVariant TransactionTableModel::data(const QModelIndex &index, int role) const
         case ToAddress:
             return txAddressDecoration(rec);
         case Amount: return {};
+        case Value: return {};
         } // no default case, so the compiler can warn about missing cases
         assert(false);
     case Qt::DecorationRole:
@@ -609,12 +611,17 @@ QVariant TransactionTableModel::data(const QModelIndex &index, int role) const
             return formatTxType(rec);
         case ToAddress:
             return formatTxToAddress(rec, false);
-        case Amount: {
-            // SEQUENTIA: append a muted "≈ <ref>" in the chosen reference currency (display only;
-            // FormattedAmountRole / plaintext copy paths below are left as the raw amount).
-            QString s = formatTxAmount(rec, true, BitcoinUnits::SeparatorStyle::ALWAYS);
+        case Amount:
+            // The amount in its own asset (e.g. "3 GOLD"); the reference value now
+            // lives in its own Value column instead of trailing the amount inline.
+            return formatTxAmount(rec, true, BitcoinUnits::SeparatorStyle::ALWAYS);
+        case Value: {
+            // SEQUENTIA: the amount valued in the user's chosen reference currency
+            // (default USD). Blank when the asset has no published price.
             const QString ref = GUIUtil::formatReferenceApprox(rec->asset, rec->amount, walletModel->getOptionsModel()->getReferenceCurrency());
-            return ref.isEmpty() ? s : (s + QStringLiteral("  ") + ref);
+            // formatReferenceApprox prefixes "≈ "; this is its own column, so show
+            // the value plainly.
+            return ref.startsWith(QString::fromUtf8("\xE2\x89\x88 ")) ? ref.mid(2) : ref;
         }
         } // no default case, so the compiler can warn about missing cases
         assert(false);
@@ -633,6 +640,12 @@ QVariant TransactionTableModel::data(const QModelIndex &index, int role) const
             return formatTxToAddress(rec, true);
         case Amount:
             return qint64(rec->amount);
+        case Value: {
+            // Sort by the numeric reference value; unpriced rows sort as 0.
+            double v = 0.0;
+            GUIUtil::referenceValueOf(rec->asset, rec->amount, walletModel->getOptionsModel()->getReferenceCurrency(), v);
+            return v;
+        }
         } // no default case, so the compiler can warn about missing cases
         assert(false);
     case Qt::ToolTipRole:
@@ -650,7 +663,7 @@ QVariant TransactionTableModel::data(const QModelIndex &index, int role) const
         {
             return COLOR_UNCONFIRMED;
         }
-        if (index.column() == Amount && rec->amount < 0)
+        if ((index.column() == Amount || index.column() == Value) && rec->amount < 0)
         {
             return COLOR_NEGATIVE;
         }
@@ -747,6 +760,8 @@ QVariant TransactionTableModel::headerData(int section, Qt::Orientation orientat
                 return tr("User-defined intent/purpose of the transaction.");
             case Amount:
                 return tr("Amount removed from or added to balance.");
+            case Value:
+                return tr("The amount valued in your reference currency, at current prices. Blank when the asset has no published price.");
             }
         }
     }

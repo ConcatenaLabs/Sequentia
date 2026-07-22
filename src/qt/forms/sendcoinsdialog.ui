@@ -901,25 +901,15 @@ Note:  Since the fee is calculated on a per-byte basis, a fee rate of "100 atoms
                <item>
                 <layout class="QHBoxLayout" name="horizontalLayoutFee8">
                  <item>
-                  <widget class="QCheckBox" name="checkBoxMinimumFee">
-                   <property name="toolTip">
-                    <string>Paying only the minimum fee is just fine as long as there is less transaction volume than space in the blocks. But be aware that this can end up in a never confirming transaction once there is more demand for transactions than the network can process.</string>
-                   </property>
-                   <property name="text">
-                    <string/>
-                   </property>
-                  </widget>
-                 </item>
-                 <item>
                   <widget class="QLabel" name="labelCustomFeeWarning">
                    <property name="enabled">
                     <bool>true</bool>
                    </property>
-                   <property name="toolTip">
-                    <string>Paying only the minimum fee is just fine as long as there is less transaction volume than space in the blocks. But be aware that this can end up in a never confirming transaction once there is more demand for transactions than the network can process.</string>
+                   <property name="wordWrap">
+                    <bool>true</bool>
                    </property>
                    <property name="text">
-                    <string>A too low fee might result in a never confirming transaction (read the tooltip)</string>
+                    <string>The lowest fee the network will relay. It confirms fine while blocks have room to spare, but once more payments compete for space than a block can hold, the cheapest ones wait — possibly forever. Raise it if your payment is time-sensitive.</string>
                    </property>
                   </widget>
                  </item>

@@ -40,6 +40,7 @@
 #include <QFontMetrics>
 #include <QScrollBar>
 #include <QSettings>
+#include <QShowEvent>
 #include <QTextDocument>
 
 using wallet::CCoinControl;
@@ -198,6 +199,9 @@ void SendCoinsDialog::setModel(WalletModel *_model)
         connect(ui->customFee, &BitcoinAmountField::valueChanged, this, &SendCoinsDialog::coinControlUpdateLabels);
         connect(ui->optInRBF, &QCheckBox::stateChanged, this, &SendCoinsDialog::updateSmartFeeLabel);
         connect(ui->optInRBF, &QCheckBox::stateChanged, this, &SendCoinsDialog::coinControlUpdateLabels);
+        // The unpriced-fee-asset warning tells the user to turn RBF on, so it has
+        // to stop saying that the moment they do.
+        connect(ui->optInRBF, &QCheckBox::stateChanged, this, [this](int) { updateFeeAssetWarning(); });
         CAmount requiredFee = model->wallet().getRequiredFee(1000);
         ui->customFee->SetMinValue(requiredFee);
         if (ui->customFee->value() < requiredFee) {
@@ -237,6 +241,10 @@ void SendCoinsDialog::setModel(WalletModel *_model)
                     this, &SendCoinsDialog::coinControlUpdateLabels);
             connect(ui->feeAssetSelector, qOverload<int>(&QComboBox::currentIndexChanged),
                     this, [this](int) { updateFeeAssetWarning(); });
+            // The fee headline quotes the rate in the selected asset, so it has to
+            // follow the selector, not just the confirmation target.
+            connect(ui->feeAssetSelector, qOverload<int>(&QComboBox::currentIndexChanged),
+                    this, &SendCoinsDialog::updateSmartFeeLabel);
             // activated() fires only on a real user pick (never programmatically): from
             // then on the user's choice is respected until the form is cleared.
             connect(ui->feeAssetSelector, qOverload<int>(&QComboBox::activated),
@@ -884,6 +892,25 @@ void SendCoinsDialog::useAvailableBalance(SendCoinsEntry* entry)
     entry->setValue(recipient);
 }
 
+void SendCoinsDialog::showEvent(QShowEvent* event)
+{
+    QDialog::showEvent(event);
+    // Re-label the per-recipient asset selectors from the registry: a name that
+    // resolved after the field was first built would otherwise stay a hex id.
+    for (int i = 0; i < ui->entries->count(); ++i) {
+        if (auto* entry = qobject_cast<SendCoinsEntry*>(ui->entries->itemAt(i)->widget())) {
+            entry->refreshAssetNames();
+        }
+    }
+    // The fee-asset selector holds the same assets by hex data; re-label those too.
+    if (g_con_any_asset_fees) {
+        for (int i = 0; i < ui->feeAssetSelector->count(); ++i) {
+            const CAsset a = GetAssetFromString(ui->feeAssetSelector->itemData(i).toString().toStdString());
+            if (!a.IsNull()) ui->feeAssetSelector->setItemText(i, GUIUtil::assetDisplayName(a));
+        }
+    }
+}
+
 void SendCoinsDialog::updateFeeSectionControls()
 {
     ui->confTargetSelector      ->setEnabled(ui->radioSmartFee->isChecked());
@@ -904,7 +931,7 @@ void SendCoinsDialog::updateFeeMinimizedLabel()
     if (ui->radioSmartFee->isChecked())
         ui->labelFeeMinimized->setText(ui->labelSmartFee->text());
     else {
-        ui->labelFeeMinimized->setText(BitcoinUnits::formatWithUnit(model->getOptionsModel()->getDisplayUnit(), ui->customFee->value()) + "/kvB");
+        ui->labelFeeMinimized->setText(formatFeeRate(ui->customFee->value()));
     }
 }
 
@@ -964,6 +991,51 @@ void SendCoinsDialog::updateDefaultFeeAsset()
     updateFeeAssetWarning();
 }
 
+CAsset SendCoinsDialog::selectedFeeAsset() const
+{
+    if (!g_con_any_asset_fees || ui->feeAssetSelector->count() == 0) return ::policyAsset;
+    const CAsset sel = GetAssetFromString(ui->feeAssetSelector->currentData().toString().toStdString());
+    return sel.IsNull() ? ::policyAsset : sel;
+}
+
+QString SendCoinsDialog::formatFeeRate(const CAmount& policy_atoms_per_kvb) const
+{
+    // The wallet quotes fee rates in policy-asset atoms, but the policy asset is
+    // not a currency the user thinks in and must never read as the default coin.
+    // Lead with the user's reference currency; then, when the fee is actually
+    // payable in a priced asset, show that amount and the rate it came from.
+    const QString ref = GUIUtil::referenceCurrency();
+    const CAsset feeAsset = selectedFeeAsset();
+
+    double refValue = 0.0;
+    const bool havePolicyPrice = GUIUtil::referenceValueOf(::policyAsset, policy_atoms_per_kvb, ref, refValue);
+
+    QStringList parts;
+    if (havePolicyPrice) {
+        parts << GUIUtil::formatReferenceAmount(refValue, ref) + QStringLiteral("/kvB");
+    }
+
+    // The equivalent in the asset that will actually pay, plus the rate applied.
+    CAmount feeAtoms = 0;
+    if (GUIUtil::convertAssetAmount(::policyAsset, policy_atoms_per_kvb, feeAsset, feeAtoms)) {
+        QString line = GUIUtil::formatAssetAmount(feeAsset, feeAtoms, BitcoinUnits::BTC, BitcoinUnits::SeparatorStyle::STANDARD, /*include_asset_name=*/true) + QStringLiteral("/kvB");
+        // The rate that produced it, so the number is checkable rather than magic.
+        double unitValue = 0.0;
+        if (GUIUtil::unitReferenceValue(feeAsset, ref, unitValue)) {
+            line += QStringLiteral(" <span style='color:#888'>(1 ") + GUIUtil::assetDisplayName(feeAsset)
+                  + QString::fromUtf8(" \xE2\x89\x88 ") + GUIUtil::formatReferenceAmount(unitValue, ref) + QStringLiteral(")</span>");
+        }
+        parts << line;
+    }
+
+    if (parts.isEmpty()) {
+        // No price for either side: quoting a bare policy-asset number here would
+        // present it as the default fee currency. Say what is actually wrong.
+        return tr("unavailable — no published price for this fee asset");
+    }
+    return parts.join(QStringLiteral(" = "));
+}
+
 void SendCoinsDialog::updateFeeAssetWarning()
 {
     if (!g_con_any_asset_fees || ui->feeAssetSelector->count() == 0) {
@@ -971,7 +1043,20 @@ void SendCoinsDialog::updateFeeAssetWarning()
         return;
     }
     const CAsset sel = GetAssetFromString(ui->feeAssetSelector->currentData().toString().toStdString());
-    ui->labelFeeAssetWarning->setVisible(!sel.IsNull() && !GUIUtil::assetHasMarketPrice(sel));
+    const bool unpriced = !sel.IsNull() && !GUIUtil::assetHasMarketPrice(sel);
+    ui->labelFeeAssetWarning->setVisible(unpriced);
+    // An unpriced fee asset is the one case where Replace-By-Fee is not just
+    // advisable but the only remedy: the fix is switching the fee asset later,
+    // which RBF is what allows.
+    if (unpriced && !ui->optInRBF->isChecked()) {
+        ui->labelFeeAssetWarning->setText(tr("This fee asset has no published price, so block producers cannot value it "
+                                             "and the payment may never confirm. Pick an asset with a price, or turn on "
+                                             "Replace-By-Fee below so you can switch the fee to a priced asset later."));
+    } else if (unpriced) {
+        ui->labelFeeAssetWarning->setText(tr("This fee asset has no published price, so block producers cannot value it "
+                                             "and the payment may never confirm. Pick an asset with a price, or use "
+                                             "\"Increase transaction fee\" later to switch the fee to a priced asset."));
+    }
 }
 
 void SendCoinsDialog::updateNumberOfBlocks(int count, const QDateTime& blockDate, double nVerificationProgress, bool headers, SynchronizationState sync_state) {
@@ -990,7 +1075,7 @@ void SendCoinsDialog::updateSmartFeeLabel()
     FeeReason reason;
     CFeeRate feeRate = CFeeRate(model->wallet().getMinimumFee(1000, *m_coin_control, &returned_target, &reason));
 
-    ui->labelSmartFee->setText(BitcoinUnits::formatWithUnit(model->getOptionsModel()->getDisplayUnit(), feeRate.GetFeePerK()) + "/kvB");
+    ui->labelSmartFee->setText(formatFeeRate(feeRate.GetFeePerK()));
 
     if (reason == FeeReason::FALLBACK) {
         ui->labelSmartFee2->show(); // (Smart fee not initialized yet. This usually takes a few blocks...)

@@ -59,6 +59,9 @@ public:
 
     void setAllowedAssets(const std::set<CAsset>& allowed_assets);
 
+    /** Re-label the asset choices from the registry (names arrive after startup). */
+    void refreshAssetNames();
+
     /** Change unit used to display amount. */
     void setDisplayUnit(const CAsset&);
     void setDisplayUnit(int unit);

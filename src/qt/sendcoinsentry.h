@@ -53,6 +53,9 @@ public:
 
     void setFocus();
 
+    /** Re-label the asset selector from the registry (names arrive after startup). */
+    void refreshAssetNames();
+
 public Q_SLOTS:
     void clear();
     void checkSubtractFeeFromAmount();

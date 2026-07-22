@@ -419,12 +419,24 @@ void BitcoinAmountField::addAssetChoice(const CAsset& asset)
 {
     // SEQUENTIA: this is an ASSET selector (whole units), not a precision/unit picker. The native
     // asset is listed once like any other asset (tSEQ) — no mtSEQ/µtSEQ/sat sub-denominations.
-    if (asset == Params().GetConsensus().pegged_asset) {
-        unit->addItem(BitcoinUnits::policyAssetTicker(), QVariant::fromValue(asset));
-    } else {
-        unit->addItem(QString::fromStdString(gAssetsDir.GetIdentifier(asset)), QVariant::fromValue(asset));
-    }
+    // Use the shared display-name resolver so an asset the registry has named shows that name
+    // (GOLD), and the policy asset shows tSEQ rather than its "bitcoin" default identifier.
+    unit->addItem(GUIUtil::assetDisplayName(asset), QVariant::fromValue(asset));
     unit->setVisible(unit->count() > 1);  // hide the selector when only one asset is available
+}
+
+void BitcoinAmountField::refreshAssetNames()
+{
+    // Asset names arrive from the registry a few seconds after startup, and the
+    // selector is otherwise only rebuilt when the SET of held assets changes -- not
+    // when a name lands for an asset already held. Without this, an asset added
+    // before its name resolved stays shown as a raw hex id here while every other
+    // screen shows its name. Re-label in place; the data (CAsset) is unchanged.
+    for (int i = 0; i < unit->count(); ++i) {
+        const QVariant data = unit->itemData(i, Qt::UserRole);
+        if (data.type() != QVariant::UserType) continue;
+        unit->setItemText(i, GUIUtil::assetDisplayName(data.value<CAsset>()));
+    }
 }
 
 void BitcoinAmountField::removeAssetChoice(const CAsset& asset)

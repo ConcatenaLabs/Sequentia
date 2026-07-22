@@ -173,13 +173,22 @@ TransactionView::TransactionView(const PlatformStyle *platformStyle, QWidget *pa
     transactionView->setExpandsOnDoubleClick(false);
     transactionView->setUniformRowHeights(true);
 
+    // Draw a divider between header sections so it is obvious where to click and
+    // drag to resize a column -- without it, adjacent headers blend together and
+    // the resize grip is invisible. The handle sits on that line.
+    transactionView->header()->setStyleSheet(
+        "QHeaderView::section { border-right: 1px solid palette(mid); padding: 2px 6px; }");
+    transactionView->header()->setSectionsClickable(true);
+
     QSettings settings;
     if (!transactionView->header()->restoreState(settings.value("TransactionViewHeaderState").toByteArray())) {
         transactionView->setColumnWidth(TransactionTableModel::Status, STATUS_COLUMN_WIDTH);
         transactionView->setColumnWidth(TransactionTableModel::Watchonly, WATCHONLY_COLUMN_WIDTH);
         transactionView->setColumnWidth(TransactionTableModel::Date, DATE_COLUMN_WIDTH);
         transactionView->setColumnWidth(TransactionTableModel::Type, TYPE_COLUMN_WIDTH);
+        transactionView->setColumnWidth(TransactionTableModel::ToAddress, ADDRESS_COLUMN_WIDTH);
         transactionView->setColumnWidth(TransactionTableModel::Amount, AMOUNT_MINIMUM_COLUMN_WIDTH);
+        transactionView->setColumnWidth(TransactionTableModel::Value, VALUE_COLUMN_WIDTH);
         transactionView->header()->setMinimumSectionSize(MINIMUM_COLUMN_WIDTH);
         transactionView->header()->setStretchLastSection(true);
     }
