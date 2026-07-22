@@ -380,11 +380,14 @@ Each item names its repo(s). Deploy pipeline as always: laptop commit -> push ->
    reads it; LSP env documented in sats; CLI `-max-0conf` unit aligned and tested.
 6. JIT pay-leg truly 0-conf (`mindepth=0` if the seqln zeroconf path allows; else honest
    copy).
-7. Matching ownership decision executed (see section 5 decision 3): guard ownerless
-   interactive crosses now (extend the sub-asset never-auto-cross guard to pure-LN and
-   submarine pairs); build the covenant-vs-LN settlement owner (either `seqob-bridge run`
-   subscribing to CrossRail matches, or the LSP leg-bridge consuming them) so the silent
-   bridge exists.
+7. Matching ownership per decision 3 (every match settles): the matcher emits a cross only
+   when a settlement owner exists for the combination — covenant-vs-covenant via the
+   settler (exists); covenant-vs-LN via the bridge owner (build: either `seqob-bridge run`
+   subscribing to CrossRail matches, or the LSP leg-bridge consuming them);
+   interactive-vs-interactive between two LIVE makers via engine-initiated lift sessions
+   (relay nominates a proposer and opens the normal session, orderbook-design section 4
+   v2 — build). Until a combination's owner lands, the matcher must NOT emit it
+   (settleability precondition), so no advisory matches ever ship.
 8. Relay session re-attach by session_id (authenticated by the session pubkeys) + server
    keepalive + WS delta sequence numbers with a re-snapshot signal.
 9. Interactive reorg-undo (seqdex): real reorg watcher wired (re-open offers, restore
@@ -418,29 +421,94 @@ Each item names its repo(s). Deploy pipeline as always: laptop commit -> push ->
    + renewal UX.
 4. Reference-rate staleness badge; shared constants served by LSP /status and read by both
    wallets.
-5. Spec amendments: fee decision (section 5 below), advertise_sell_as (P1.5), confidential
-   book durability wording, multi-device statement, the section-7 mobile exception if the
-   single-cross lock is deliberately kept anywhere.
-6. Retire legacy: the seqdexd RFQ surface (:9945) once Ambra's last dependency is gone
+5. Multi-device same-seed support (decision 5): chain/relay as source of truth for resting
+   orders + refundable states on both wallets (key-scan discovery of own covenants,
+   relay my-orders adoption, generalized scan-based refund adoption), timestamp-based
+   cancel nonces, single-device in-flight driving with cross-device visibility + refund.
+6. Spec amendments per the resolved decisions: remove the maker/taker fee schedule from
+   section 8 (no protocol fee, real costs only); document confidential-book
+   interactive-by-construction with the cryptographic rationale; document multi-device
+   support; advertise_sell_as with the SBTC binding (P1.5); state the reorg stance
+   (section 5b) in the spec's Finality section.
+7. Retire legacy: the seqdexd RFQ surface (:9945) once Ambra's last dependency is gone
    (consolidation doc phase 4); retire the web `terminal-rebuild` branch now (merged).
 
-## 5. Decisions needed (Andreas)
+## 5. Decisions (RESOLVED with Andreas, 2026-07-22)
 
-1. **DEX fee schedule.** Nothing exists (no maker/taker fee anywhere). Options: (a) declare
-   "no DEX trading fee; chain/LN fees only" and amend the spec (fastest, honest); (b)
-   design a fee schedule now (offer field, review display, enforcement, who collects).
-   Recommendation: (a) for testnet now; revisit before mainnet.
-2. **Confidential resting orders.** By construction the blinded book is online-only today.
-   Options: document online-only for v1 vs design a blinded-covenant tier later.
-   Recommendation: document online-only; revisit with the Simplicity tier.
-3. **Ownerless matches.** Guard pure-LN/submarine interactive pairs from auto-cross (like
-   sub-asset) until settlement owners exist, vs building the owners first.
-   Recommendation: guard now (small), build the covenant-vs-LN owner in P3.7, revisit
-   interactive-vs-interactive auto-cross only when a settler exists.
-4. **Locktime margin policy** for the leg-bridge (P1.1): confirm the proposed rule
-   (T_btc wall >= T_seq wall + hold life + 6 BTC blocks) or set different margins.
-5. **Multi-device same-seed**: declare unsupported for now (recommendation) or scope the
-   work (nonce coordination, shared stores).
+Governing principle set by Andreas: the testnet has no users and nobody is invited until
+the product is FINISHED, so there are no "v1" carve-outs, no "declare unsupported for now",
+no interim states that a later phase revisits. Every decision below is the FINAL design.
+
+1. **No protocol trading fee, ever.** The DEX has no maker/taker fee schedule and no
+   protocol fee of any kind, and this is coherent, not a deferral: the relay is
+   non-custodial and permissionless, so there is no privileged operator for a protocol fee
+   to pay. Users pay only real costs, each shown honestly where it occurs: the chain fee
+   (any-asset, open fee market), Lightning routing fees, and the LSP's bridge/JIT service
+   pricing (a price set by whoever runs an LSP, already "priced in" per terminal-spec
+   section 5). Amend terminal-spec section 8 to remove the maker/taker fee-schedule
+   sentence and state this.
+2. **Confidential resting orders are interactive-by-construction, as the final design.**
+   This is a consequence of the cryptography, not a phase: joint confidential blinding
+   requires both parties present at lift (orderbook-design section 2), and a covenant
+   cannot police blinded values (no unblind jet; the Simplicity/tapscript FILL leaf reads
+   explicit amounts only). Therefore a confidential order rests exactly while its maker's
+   wallet is online; the relay's eviction of interactive offers on disconnect is CORRECT
+   (no phantom unliftable depth), and the composer states it plainly ("a confidential
+   order rests while this wallet is open"). Document the rationale in the spec so nobody
+   "fixes" the eviction later. The transparent book keeps the durable covenant tier; the
+   two tiers and their tradeoff are the product, permanently.
+3. **Every match settles: no advisory/ownerless matches in the final product.** The
+   matcher may only emit a cross for which a settlement owner exists, and owners are built
+   for every combination: covenant-vs-covenant (the settler, exists), covenant-vs-LN (the
+   bridge owner, P3.7, build), and interactive-vs-interactive crosses between two LIVE
+   makers settle via engine-initiated lift sessions (orderbook-design section 4 v2: the
+   relay nominates one side as proposer and opens the normal lift session — build).
+   Settleability (owner exists + required maker liveness) is a matching precondition;
+   note this is NOT a rail filter — rails stay out of matching; an offline interactive
+   maker's offer is simply unliftable by anyone, which is liveness, not rail.
+4. **Locktime-ordering gate CONFIRMED** (P1.1): at handshake the LSP refuses maker terms
+   unless the maker's recoup-leg refund time, in wall-clock terms, comfortably exceeds the
+   last moment the preimage can be used against the LSP: T_btc(wall) >= T_seq(wall) +
+   remaining hold-invoice life + a claim margin of 6 Bitcoin blocks. This is a
+   terms-validation at handshake (milliseconds, zero happy-path latency, no added
+   confirmations) that closes a crafted-terms theft against the LSP's own fronted funds.
+   It is UNRELATED to reorg policy or finality preference: no user's finality choice is
+   involved, and it does not slow settlement. See section 5b below for the reorg stance.
+5. **Multi-device same-seed is SUPPORTED in the final product.** A user will restore one
+   seed in the web wallet and Ambra; the design must tolerate it. Final shape: the chain
+   and the relay are the source of truth for everything durable — resting covenant orders
+   are discoverable by key-scan (the order IS the coin) and via the relay's
+   my-orders-by-maker-pubkey; every refundable state is adoptable from chain scans (the
+   findFundingByAddress pattern, already used for crash resume, generalized). In-flight
+   interactive swap DRIVING stays single-device by design (an active HTLC/courier session
+   belongs to the device that opened it) — but any other device can always SEE and, after
+   timeout, REFUND the value, because refund material derives from the seed and the chain.
+   Cancel nonces move to a cross-device-safe scheme (timestamp-based monotonic nonce).
+   Folded into P4/P5 work items.
+
+### 5b. Reorg stance (Andreas, 2026-07-22): speed first, users own their finality
+
+The DEX does NOT try to prevent or protect trades from being reversed by Bitcoin reorgs.
+Sequentia reorg-follows Bitcoin in real time (Principle 1) and the DEX is built to be as
+fast as possible on top of that; USERS are responsible for how final they treat a
+settlement. Concretely, three distinct things, only one of which involves any waiting:
+
+- **Finality preference is the user's/maker's dial and defaults to fast:** 0-conf
+  tolerated wherever the offer allows, `min_anchor_depth` default 0, pure-LN final on
+  preimage instantly. Surfaces label finality honestly and never add waits beyond what an
+  offer's maker asked for. Nothing in this plan adds confirmation waits anywhere.
+- **The cross-chain anchor-ORDERING gate stays, and it is not a wait-for-depth:**
+  `VerifySeqLegSafe` requires the asset leg's anchor height >= the BTC leg's height before
+  the secret is revealed. That is an ordering condition, not a confirmation count: it makes
+  the two legs reorg TOGETHER (any Bitcoin reorg deep enough to un-confirm one leg
+  un-confirms both), which is exactly why real-time reorg-following makes cross-chain
+  atomic swaps safe (Principle 1's point). Dropping it would not make anything faster on
+  the happy path; it would only let one leg settle while the other reverses.
+- **Reorg-undo of the book/trade feed (P3.9) is bookkeeping honesty, not protection:**
+  when Bitcoin reorgs and a fill un-happens, the relay re-opens the offer, restores
+  active_amount, and retracts the phantom trade print. No speed cost; it is the difference
+  between a book that tells the truth after a reorg and one that lies. Users can only "be
+  responsible for their own finality" if the surfaces report what actually happened.
 
 ## 6. Execution notes
 
