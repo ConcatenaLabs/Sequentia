@@ -224,7 +224,9 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
         }
         const StakeRegistry& registry = StakeRegistry::GetInstance();
         const uint64_t total_weight = PosTotalWeight(registry);
-        vrf_slot = PosVrfSlot(vrf_output, registry.GetWeight(pubkey), total_weight);
+        vrf_slot = PosExpRaceActive(chainparams.GetConsensus(), tip->nHeight + 1)
+                       ? PosVrfSlotExp(vrf_output, registry.GetWeight(pubkey), total_weight)
+                       : PosVrfSlot(vrf_output, registry.GetWeight(pubkey), total_weight);
         vrf_commitments.push_back(BuildPosVrfCommitment(vrf_proof));
 
         if (g_pos_committee_size > 1) {
@@ -726,7 +728,9 @@ int64_t PosProducer::Step()
             if (!proof) continue;
             uint256 beta;
             if (!VrfVerify(pub, Span<const unsigned char>(seed.begin(), 32), *proof, beta)) continue;
-            slot = PosVrfSlot(beta, registry.GetWeight(pub), total_weight);
+            slot = PosExpRaceActive(m_chainparams.GetConsensus(), tip->nHeight + 1)
+                       ? PosVrfSlotExp(beta, registry.GetWeight(pub), total_weight)
+                       : PosVrfSlot(beta, registry.GetWeight(pub), total_weight);
             if (g_pos_public_committee ? public_committee.count(pub) > 0
                                        : PosVrfIsCommitteeMember(beta, registry.GetWeight(pub), total_weight)) {
                 local_committee_eligible++;
@@ -939,23 +943,40 @@ void PosProducer::RecordCandidate(const std::shared_ptr<const CBlock>& block, co
 std::shared_ptr<const CBlock> PosProducer::BackedForRound(int r) const
 {
     // m_gossip_mutex held. Candidates are ordered by (1) freshest Bitcoin anchor,
-    // then (2) lowest leader VRF; the round-r leader is the (r+1)-th in that order.
-    // The anchor-freshness preference (paper Principle 7, rule III) keeps the tip
-    // tracking Bitcoin's tip: a proposal referencing a more recent Bitcoin block
-    // is backed over a staler one, so producers are incentivised to anchor fresh.
-    // In the common case all proposals carry the same (freshest) anchor, so it
-    // reduces to pure lowest-VRF election; it only bites when a producer is stale.
+    // then (2) the leader's election key; the round-r leader is the (r+1)-th in
+    // that order. The anchor-freshness preference (paper Principle 7, rule III)
+    // keeps the tip tracking Bitcoin's tip: a proposal referencing a more recent
+    // Bitcoin block is backed over a staler one, so producers are incentivised to
+    // anchor fresh. In the common case all proposals carry the same (freshest)
+    // anchor, so it reduces to a pure election among equally-fresh proposals.
+    //
+    // The election key is the fork-gated sortition: from pos_exprace_height the
+    // exponential-race score (split-neutral, exactly stake-proportional); below
+    // it, the legacy raw leader VRF (beta). Every node gates on the same height
+    // (m_round_height, the block's own height) so all honest nodes converge on
+    // the identical leader — a divergence here would split the committee.
     if (r < 0 || (size_t)r >= m_candidates.size()) return nullptr;
-    std::vector<const RoundCandidate*> ordered;
+
+    const bool exprace = PosExpRaceActive(m_chainparams.GetConsensus(), m_round_height);
+    const StakeRegistry& registry = StakeRegistry::GetInstance();
+    const uint64_t total_weight = exprace ? PosTotalWeight(registry) : 0;
+
+    struct Entry { const RoundCandidate* cand; arith_uint256 score; };
+    std::vector<Entry> ordered;
     ordered.reserve(m_candidates.size());
-    for (const auto& [leader, cand] : m_candidates) ordered.push_back(&cand);
+    for (const auto& [leader, cand] : m_candidates) {
+        arith_uint256 score;
+        if (exprace) score = PosVrfScoreExp(cand.beta, registry.GetWeight(leader), total_weight);
+        ordered.push_back({&cand, score});
+    }
     std::sort(ordered.begin(), ordered.end(),
-              [](const RoundCandidate* a, const RoundCandidate* b) {
-                  if (a->block->m_anchor_height != b->block->m_anchor_height)
-                      return a->block->m_anchor_height > b->block->m_anchor_height; // fresher anchor first
-                  return a->beta < b->beta;                                          // then lowest VRF
+              [exprace](const Entry& a, const Entry& b) {
+                  if (a.cand->block->m_anchor_height != b.cand->block->m_anchor_height)
+                      return a.cand->block->m_anchor_height > b.cand->block->m_anchor_height; // fresher anchor first
+                  if (exprace) return a.score < b.score;   // exp-race: lowest weighted score
+                  return a.cand->beta < b.cand->beta;       // legacy: lowest raw VRF
               });
-    return ordered[r]->block;
+    return ordered[r].cand->block;
 }
 
 void PosProducer::ProposeGossip(const CKey& leader_key)

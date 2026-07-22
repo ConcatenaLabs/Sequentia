@@ -14,6 +14,7 @@
 #ifndef BITCOIN_POS_H
 #define BITCOIN_POS_H
 
+#include <arith_uint256.h>
 #include <pubkey.h>
 #include <script/script.h>
 #include <sync.h>
@@ -598,6 +599,27 @@ uint64_t PosTotalWeight(const StakeRegistry& registry);
  *  schedule's rank. The rank-r liveness gate becomes
  *  nTime >= parent.nTime + slot * g_pos_slot_interval. */
 uint64_t PosVrfSlot(const uint256& beta, uint64_t weight, uint64_t total_weight);
+
+/** Exponential-race (weighted-sampling) sortition: a Sybil-neutral alternative
+ *  to PosVrfSlot. score = -ln(beta / 2^256) / weight is Exponential(weight), so
+ *  electing the lowest score is exactly stake-proportional AND unchanged by
+ *  splitting a stake into many identities (min of exponentials is exponential
+ *  with the summed rate). Fixed-point and deterministic (no floating point).
+ *  PosVrfScoreExp returns the fine Q32 score used to ORDER candidates in the
+ *  election; PosVrfSlotExp returns floor(score) (capped at POS_VRF_MAX_SLOT)
+ *  for the time-gate nTime >= parent.nTime + slot * g_pos_slot_interval. */
+arith_uint256 PosVrfScoreExp(const uint256& beta, uint64_t weight, uint64_t total_weight);
+uint64_t PosVrfSlotExp(const uint256& beta, uint64_t weight, uint64_t total_weight);
+
+namespace Consensus { struct Params; }
+/** Whether the exponential-race sortition (PosVrfSlotExp / PosVrfScoreExp) is
+ *  the active leader-election rule for a block at height `height`. Gated by
+ *  consensus.pos_exprace_height: 0 keeps the legacy PosVrfSlot / raw-beta
+ *  election; a positive H switches the whole network to the exp-race from
+ *  height H onward (a coordinated hard fork). Every election site (time-gate in
+ *  validation/miner/producer and the BackedForRound ordering) MUST gate on this
+ *  single predicate so all nodes flip together at exactly the same height. */
+bool PosExpRaceActive(const Consensus::Params& params, int height);
 
 /** Build the tagged coinbase OP_RETURN output script carrying the leader's
  *  VRF proof: OP_RETURN PUSH("SEQVRF" || proof). */

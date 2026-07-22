@@ -157,6 +157,15 @@ struct Params {
     //! those historical blocks are grandfathered while the rule binds all blocks
     //! from H onward. See doc/sequentia/04-proof-of-stake.md.
     int pos_coinbase_leader_height{0};
+    //! SEQUENTIA PoS: block height from which leader election uses the
+    //! exponential-race (weighted-sampling) sortition (PosVrfSlotExp /
+    //! PosVrfScoreExp) instead of the legacy PosVrfSlot / raw-beta election.
+    //! The exp-race is exactly stake-proportional and split-neutral; switching
+    //! to it changes which block wins, so it is a HARD FORK gated by height.
+    //! 0 = disabled (keep the legacy election); a positive H activates it from
+    //! height H on every node at once. Set per chain; coordinate the value with
+    //! all operators before it is reached (see doc/sequentia/04-proof-of-stake.md).
+    int pos_exprace_height{0};
     CAmount genesis_subsidy;
     //! SEQUENTIA: per-chain maximum block weight (BIP141 weight units). 0 means
     //! "use the global MAX_BLOCK_WEIGHT". Sequentia sets this to 200,000 (a
