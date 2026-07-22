@@ -209,6 +209,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "generateposblock", 1, "committeekeys"},
     { "getstakescript", 1, "csv_blocks"},
     { "getstakescript", 2, "csv_seconds"},
+    { "withdrawstake", 1, "amount" },
     //
     // ELEMENTS:
     { "calcfastmerkleroot", 0, "leaves" },

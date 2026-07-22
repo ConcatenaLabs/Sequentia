@@ -6,6 +6,7 @@
 #include <consensus/validation.h>
 #include <core_io.h>
 #include <exchangerates.h>
+#include <interfaces/chain.h>
 #include <issuance.h>
 #include <key_io.h>
 #include <mainchainrpc.h>
@@ -13,14 +14,23 @@
 #include <pos.h>
 #include <rpc/rawtransaction_util.h>
 #include <rpc/util.h>
+#include <script/interpreter.h>
 #include <script/pegins.h>
+#include <script/script_error.h>
+#include <script/sign.h>
+#include <script/signingprovider.h>
+#include <script/standard.h>
 #include <util/fees.h>
+#include <util/moneystr.h>
+#include <util/time.h>
 #include <util/translation.h>
 #include <util/vector.h>
 #include <wallet/coincontrol.h>
 #include <wallet/feebumper.h>
+#include <wallet/fees.h>
 #include <wallet/receive.h>
 #include <wallet/rpc/util.h>
+#include <wallet/scriptpubkeyman.h>
 #include <wallet/spend.h>
 #include <wallet/wallet.h>
 
@@ -201,6 +211,506 @@ RPCHelpMan registerstake()
     result.pushKV("csv", (int64_t)csv);
     if (lock) result.pushKV("unbonding_seconds", (int64_t)*lock);
     if (liquid_locktime > 0) result.pushKV("liquid_locktime", liquid_locktime);
+    return result;
+},
+    };
+}
+
+// --- SEQUENTIA unstake: find, list and withdraw this wallet's staking outputs ---
+
+namespace {
+
+//! One of this wallet's staking UTXOs, with everything needed to judge its
+//! maturity and to spend it (withdrawstake), plus the numbers liststakeutxos
+//! reports.
+struct StakeUtxo {
+    COutPoint outpoint;
+    CTxOut txout;
+    ParsedStake parsed;          //!< staker pubkey, CSV, BLS registration, vesting lock
+    CAmount amount{0};           //!< explicit policy-asset amount (the stake weight)
+    int fund_height{-1};         //!< height the funding output confirmed at
+    bool csv_mature{false};      //!< unbonding (BIP68) served, judged against the tip
+    bool vesting_mature{false};  //!< liquid_locktime (BIP65) passed, or none carried
+    int spendable_height{-1};    //!< height-based CSV: first block that may contain the spend
+    int64_t spendable_time{0};   //!< time-based CSV: earliest spend MTP; 0 when height-based
+    bool Mature() const { return csv_mature && vesting_mature; }
+};
+
+//! Does this wallet hold the private key for `pubkey`? Judged through IsMine on
+//! the key's standard destinations, so it answers correctly even while the
+//! wallet is locked (the staking flow hands out staker keys via getnewaddress,
+//! so the key lives in the wallet as an ordinary address key).
+bool WalletControlsStakerKey(const CWallet& wallet, const CPubKey& pubkey) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+{
+    if (wallet.IsMine(GetScriptForDestination(WitnessV0KeyHash(pubkey))) & ISMINE_SPENDABLE) return true;
+    return (wallet.IsMine(GetScriptForDestination(PKHash(pubkey))) & ISMINE_SPENDABLE) != 0;
+}
+
+//! The staker private key for `pubkey`, from whichever ScriptPubKeyMan holds
+//! it. The wallet must be unlocked.
+bool GetStakerKey(const CWallet& wallet, const CPubKey& pubkey, CKey& key_out)
+{
+    const CKeyID keyid = pubkey.GetID();
+    for (ScriptPubKeyMan* spk_man : wallet.GetAllScriptPubKeyMans()) {
+        if (auto* legacy = dynamic_cast<LegacyScriptPubKeyMan*>(spk_man)) {
+            if (legacy->GetKey(keyid, key_out)) return true;
+        } else if (auto* desc = dynamic_cast<DescriptorScriptPubKeyMan*>(spk_man)) {
+            std::unique_ptr<FlatSigningProvider> provider = desc->GetSigningProvider(pubkey);
+            if (provider && provider->GetKey(keyid, key_out)) return true;
+        }
+    }
+    return false;
+}
+
+//! Find this wallet's unspent staking outputs: outputs of the wallet's own
+//! transactions paying the canonical staking script (BuildStakeScript) for a
+//! staker key this wallet controls, still present in the UTXO set.
+//! registerstake funds the output from this wallet, so the funding transaction
+//! is always a wallet transaction; a staking output funded by a *different*
+//! wallet toward one of our keys is out of scope (finding it would take a full
+//! UTXO-set scan). Maturity is judged against the current tip: the spend would
+//! land in block tip+1.
+std::vector<StakeUtxo> FindWalletStakeUtxos(CWallet& wallet, const std::optional<CPubKey>& only_pubkey) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+{
+    std::vector<StakeUtxo> found;
+    for (const auto& [wtxid, wtx] : wallet.mapWallet) {
+        for (uint32_t n = 0; n < wtx.tx->vout.size(); ++n) {
+            const CTxOut& out = wtx.tx->vout[n];
+            if (!StakeFromTxOut(out)) continue; // qualifying stake: explicit policy asset, lock >= chain minimum
+            auto parsed = ParseStakeScriptFull(out.scriptPubKey);
+            if (!parsed) continue;
+            if (only_pubkey && parsed->pubkey != *only_pubkey) continue;
+            if (!WalletControlsStakerKey(wallet, parsed->pubkey)) continue;
+            if (wallet.IsSpent(wtxid, n)) continue; // e.g. an earlier withdrawal still in the mempool
+            StakeUtxo s;
+            s.outpoint = COutPoint(wtxid, n);
+            s.txout = out;
+            s.parsed = *parsed;
+            s.amount = out.nValue.GetAmount();
+            found.push_back(std::move(s));
+        }
+    }
+    if (found.empty()) return found;
+
+    // Which candidates are still unspent, and at what height each was funded:
+    // both read from the UTXO set in one call.
+    std::map<COutPoint, Coin> coins;
+    for (const StakeUtxo& s : found) coins[s.outpoint];
+    wallet.chain().findCoins(coins);
+
+    const int tip_height = wallet.GetLastBlockHeight();
+    const uint256 tip_hash = wallet.GetLastBlockHash();
+    int64_t tip_mtp = 0;
+    wallet.chain().findBlock(tip_hash, interfaces::FoundBlock().mtpTime(tip_mtp));
+
+    std::vector<StakeUtxo> live;
+    for (StakeUtxo& s : found) {
+        const Coin& coin = coins[s.outpoint];
+        if (coin.out.IsNull()) continue; // spent, or not yet confirmed
+        s.fund_height = (int)coin.nHeight;
+
+        // Unbonding (BIP68 relative lock): height-based counts blocks from the
+        // funding height; time-based counts 512-second units from the median
+        // time of the funding block's parent.
+        const uint32_t csv_value = s.parsed.csv & CTxIn::SEQUENCE_LOCKTIME_MASK;
+        if (s.parsed.csv & CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG) {
+            const int64_t lock_secs = (int64_t)csv_value << CTxIn::SEQUENCE_LOCKTIME_GRANULARITY;
+            int64_t fund_parent_mtp = 0;
+            wallet.chain().findAncestorByHeight(tip_hash, s.fund_height > 0 ? s.fund_height - 1 : 0,
+                                                interfaces::FoundBlock().mtpTime(fund_parent_mtp));
+            s.spendable_time = fund_parent_mtp + lock_secs;
+            s.csv_mature = tip_mtp >= s.spendable_time;
+        } else {
+            s.spendable_height = s.fund_height + (int)csv_value;
+            s.csv_mature = tip_height + 1 >= s.spendable_height;
+        }
+
+        // Vesting (BIP65 absolute lock), when the output carries one.
+        if (s.parsed.liquid_locktime > 0) {
+            if (s.parsed.liquid_locktime < (int64_t)LOCKTIME_THRESHOLD) {
+                s.vesting_mature = tip_height >= s.parsed.liquid_locktime;
+            } else {
+                s.vesting_mature = tip_mtp > s.parsed.liquid_locktime;
+            }
+        } else {
+            s.vesting_mature = true;
+        }
+        live.push_back(std::move(s));
+    }
+    return live;
+}
+
+//! Rough wall-clock seconds per block, for translating a height wait into a
+//! calendar date (the slot interval itself is not exported by pos.h).
+int64_t ApproxSecondsPerBlock()
+{
+    return g_pos_unbonding_period > 0 ? PosRequiredUnbondingSeconds() / (int64_t)g_pos_unbonding_period : 30;
+}
+
+//! Why an immature staking output cannot be withdrawn yet, with when it can:
+//! "unbonding until block 45120 (around 2026-08-06T10:00:00Z)".
+std::string DescribeImmaturity(const StakeUtxo& s, int tip_height, int64_t tip_time)
+{
+    if (!s.csv_mature) {
+        if (s.spendable_height >= 0) {
+            const int64_t eta = tip_time + (int64_t)(s.spendable_height - (tip_height + 1)) * ApproxSecondsPerBlock();
+            return strprintf("unbonding until block %d (around %s)", s.spendable_height, FormatISO8601DateTime(eta));
+        }
+        return strprintf("unbonding until %s", FormatISO8601DateTime(s.spendable_time));
+    }
+    if (s.parsed.liquid_locktime >= (int64_t)LOCKTIME_THRESHOLD) {
+        return strprintf("vesting-locked until %s", FormatISO8601DateTime(s.parsed.liquid_locktime));
+    }
+    const int64_t eta = tip_time + (s.parsed.liquid_locktime - tip_height) * ApproxSecondsPerBlock();
+    return strprintf("vesting-locked until block %d (around %s)", (int)s.parsed.liquid_locktime, FormatISO8601DateTime(eta));
+}
+
+} // namespace
+
+RPCHelpMan liststakeutxos()
+{
+    return RPCHelpMan{"liststakeutxos",
+                "\nList this wallet's staking outputs (see registerstake): amount, staker key, and whether each\n"
+                "is withdrawable right now. The unbonding lock counts from the block that funded the stake, so\n"
+                "a stake older than the unbonding period can be withdrawn immediately with withdrawstake.\n",
+                {
+                    {"pubkey", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Only staking outputs registered to this staker public key (hex)."},
+                },
+                RPCResult{RPCResult::Type::ARR, "", "", {
+                    {RPCResult::Type::OBJ, "", "", {
+                        {RPCResult::Type::STR_HEX, "txid", "the funding transaction id"},
+                        {RPCResult::Type::NUM, "vout", "the funding output index"},
+                        {RPCResult::Type::STR_AMOUNT, "amount", "the staked amount"},
+                        {RPCResult::Type::STR_HEX, "pubkey", "the staker public key"},
+                        {RPCResult::Type::NUM, "funded_height", "height the stake confirmed at"},
+                        {RPCResult::Type::BOOL, "withdrawable", "whether the stake can be withdrawn right now"},
+                        {RPCResult::Type::NUM, "spendable_height", /*optional=*/true, "first block that could contain the withdrawal (height-locked stakes)"},
+                        {RPCResult::Type::NUM_TIME, "spendable_time", /*optional=*/true, "earliest withdrawal time (time-locked stakes)"},
+                        {RPCResult::Type::NUM, "liquid_locktime", /*optional=*/true, "the vesting lock (BIP65) the output carries, if any"},
+                        {RPCResult::Type::STR, "status", "human-readable maturity"},
+                    }},
+                }},
+                RPCExamples{HelpExampleCli("liststakeutxos", "")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!g_con_pos) throw JSONRPCError(RPC_MISC_ERROR, "Proof-of-Stake (con_pos) is not enabled on this chain");
+    std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
+    if (!pwallet) return NullUniValue;
+    pwallet->BlockUntilSyncedToCurrentChain();
+
+    std::optional<CPubKey> only;
+    if (!request.params[0].isNull()) {
+        CPubKey pk(ParseHexV(request.params[0], "pubkey"));
+        if (!pk.IsFullyValid()) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid public key");
+        only = pk;
+    }
+
+    LOCK(pwallet->cs_wallet);
+    const int tip_height = pwallet->GetLastBlockHeight();
+    int64_t tip_time = 0;
+    pwallet->chain().findBlock(pwallet->GetLastBlockHash(), interfaces::FoundBlock().time(tip_time));
+
+    UniValue result(UniValue::VARR);
+    for (const StakeUtxo& s : FindWalletStakeUtxos(*pwallet, only)) {
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("txid", s.outpoint.hash.GetHex());
+        o.pushKV("vout", (int64_t)s.outpoint.n);
+        o.pushKV("amount", ValueFromAmount(s.amount));
+        o.pushKV("pubkey", HexStr(s.parsed.pubkey));
+        o.pushKV("funded_height", s.fund_height);
+        o.pushKV("withdrawable", s.Mature());
+        if (s.spendable_height >= 0) o.pushKV("spendable_height", s.spendable_height);
+        if (s.spendable_time > 0) o.pushKV("spendable_time", s.spendable_time);
+        if (s.parsed.liquid_locktime > 0) o.pushKV("liquid_locktime", s.parsed.liquid_locktime);
+        o.pushKV("status", s.Mature() ? "withdrawable now" : DescribeImmaturity(s, tip_height, tip_time));
+        result.push_back(o);
+    }
+    return result;
+},
+    };
+}
+
+RPCHelpMan withdrawstake()
+{
+    return RPCHelpMan{"withdrawstake",
+                "\nWithdraw (unstake) Sequence (SEQ) this wallet registered with registerstake, by spending the\n"
+                "staking output(s) back to a fresh receiving address of this wallet. A staking output can be\n"
+                "withdrawn once its unbonding lock has been served, counted from the block that FUNDED it; the\n"
+                "withdrawal itself needs no further delay — the coins are spendable as soon as the withdrawal\n"
+                "confirms, and the key's registered stake weight drops at that same confirmation. See\n"
+                "liststakeutxos for what is withdrawable and when.\n"
+                "\nStaking outputs are whole coins. To withdraw part of one, the remainder is re-staked into a\n"
+                "fresh staking output for the same key — which restarts the remainder's unbonding clock.\n",
+                {
+                    {"pubkey", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Withdraw only stake registered to this staker public key (hex). Required for a partial withdrawal when the wallet stakes with more than one key."},
+                    {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "Amount of SEQ to remove from the stake (default: all withdrawable stake). The network fee is paid out of this amount."},
+                    {"address", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Destination address (default: a fresh address of this wallet). The withdrawal output is explicit (not confidential)."},
+                },
+                RPCResult{RPCResult::Type::OBJ, "", "", {
+                    {RPCResult::Type::STR_HEX, "txid", "the withdrawal transaction id"},
+                    {RPCResult::Type::STR_AMOUNT, "amount", "SEQ arriving at the destination (the withdrawn amount minus the fee)"},
+                    {RPCResult::Type::STR_AMOUNT, "fee", "the network fee, paid out of the withdrawn amount"},
+                    {RPCResult::Type::STR, "destination", "the receiving address"},
+                    {RPCResult::Type::STR_AMOUNT, "unstaked", "stake weight removed from the staker key (amount + fee)"},
+                    {RPCResult::Type::STR_AMOUNT, "restaked", /*optional=*/true, "remainder re-staked into a fresh output (its unbonding clock restarts)"},
+                    {RPCResult::Type::ARR, "withdrawn_outputs", "the staking outputs this withdrawal spends", {
+                        {RPCResult::Type::OBJ, "", "", {
+                            {RPCResult::Type::STR_HEX, "txid", "funding transaction id"},
+                            {RPCResult::Type::NUM, "vout", "funding output index"},
+                            {RPCResult::Type::STR_AMOUNT, "amount", "staked amount"},
+                            {RPCResult::Type::STR_HEX, "pubkey", "staker public key"},
+                        }},
+                    }},
+                    {RPCResult::Type::NUM, "stake_before", "this wallet's registered stake weight before the withdrawal (atoms)"},
+                    {RPCResult::Type::NUM, "stake_after", "this wallet's stake weight once the withdrawal confirms (atoms)"},
+                    {RPCResult::Type::NUM, "network_stake_before", "total registered stake on the network (atoms)"},
+                    {RPCResult::Type::NUM, "network_stake_after", "total stake once the withdrawal confirms (atoms)"},
+                    {RPCResult::Type::NUM, "share_before", /*optional=*/true, "this wallet's share of the network stake now (0..1)"},
+                    {RPCResult::Type::NUM, "share_after", /*optional=*/true, "this wallet's share once the withdrawal confirms (0..1)"},
+                }},
+                RPCExamples{HelpExampleCli("withdrawstake", "") + HelpExampleCli("withdrawstake", "\"02abc...\" 10000")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!g_con_pos) throw JSONRPCError(RPC_MISC_ERROR, "Proof-of-Stake (con_pos) is not enabled on this chain");
+    std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
+    if (!pwallet) return NullUniValue;
+    pwallet->BlockUntilSyncedToCurrentChain();
+
+    std::optional<CPubKey> only;
+    if (!request.params[0].isNull()) {
+        CPubKey pk(ParseHexV(request.params[0], "pubkey"));
+        if (!pk.IsFullyValid()) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid public key");
+        only = pk;
+    }
+    std::optional<CAmount> want;
+    if (!request.params[1].isNull()) {
+        want = AmountFromValue(request.params[1], true);
+        if (*want <= 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "amount must be positive");
+    }
+
+    LOCK(pwallet->cs_wallet);
+    EnsureWalletIsUnlocked(*pwallet);
+
+    const int tip_height = pwallet->GetLastBlockHeight();
+    int64_t tip_time = 0;
+    pwallet->chain().findBlock(pwallet->GetLastBlockHash(), interfaces::FoundBlock().time(tip_time));
+
+    // 1) The wallet's live staking outputs, split by maturity.
+    std::vector<StakeUtxo> stakes = FindWalletStakeUtxos(*pwallet, only);
+    if (stakes.empty()) {
+        throw JSONRPCError(RPC_WALLET_ERROR, only
+            ? strprintf("this wallet has no staking outputs for key %s", HexStr(*only))
+            : std::string("this wallet has no staking outputs (see registerstake)"));
+    }
+    std::vector<StakeUtxo> mature;
+    CAmount mature_total = 0, immature_total = 0;
+    const StakeUtxo* soonest = nullptr;
+    for (const StakeUtxo& s : stakes) {
+        if (s.Mature()) {
+            mature_total += s.amount;
+            mature.push_back(s);
+        } else {
+            immature_total += s.amount;
+            // The stake that unlocks first, for the "try again when" message.
+            if (!soonest || (s.spendable_height >= 0 && soonest->spendable_height >= 0
+                                 ? s.spendable_height < soonest->spendable_height
+                                 : s.spendable_time < soonest->spendable_time)) {
+                soonest = &s;
+            }
+        }
+    }
+    if (mature.empty()) {
+        throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
+            "none of the %s SEQ this wallet has staked is withdrawable yet; the soonest is %s",
+            FormatMoney(immature_total), DescribeImmaturity(*soonest, tip_height, tip_time)));
+    }
+
+    // 2) What to withdraw. The requested amount is the stake weight that stops
+    //    staking; the network fee is paid out of it.
+    const CAmount want_amt = want.value_or(mature_total);
+    if (want_amt > mature_total) {
+        throw JSONRPCError(RPC_WALLET_ERROR, immature_total > 0
+            ? strprintf("only %s of the staked %s SEQ is withdrawable right now — the rest is still unbonding (see liststakeutxos)",
+                        FormatMoney(mature_total), FormatMoney(mature_total + immature_total))
+            : strprintf("only %s SEQ is withdrawable", FormatMoney(mature_total)));
+    }
+    if (want && *want < mature_total && !only) {
+        std::set<CPubKey> keys;
+        for (const StakeUtxo& s : mature) keys.insert(s.parsed.pubkey);
+        if (keys.size() > 1) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                "this wallet stakes with more than one key; pass the staker pubkey to withdraw a specific amount");
+        }
+    }
+
+    // Spend as few staking outputs as possible: largest first until covered.
+    std::sort(mature.begin(), mature.end(),
+              [](const StakeUtxo& a, const StakeUtxo& b) { return a.amount > b.amount; });
+    std::vector<StakeUtxo> selected;
+    CAmount selected_total = 0;
+    for (const StakeUtxo& s : mature) {
+        if (selected_total >= want_amt) break;
+        selected.push_back(s);
+        selected_total += s.amount;
+    }
+    // Whatever the selection overshoots stays staked: it goes back into a fresh
+    // staking output for the same key (with a fresh unbonding clock — the only
+    // way to split a coin the chain knows only as a whole).
+    const CAmount restake_amt = selected_total - want_amt;
+    const CAmount stake_floor = (CAmount)std::max<uint64_t>(g_pos_min_stake, 1);
+    if (restake_amt > 0 && restake_amt < stake_floor) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
+            "withdrawing %s SEQ would leave %s SEQ re-staked, below the chain's minimum stake of %s SEQ; "
+            "withdraw the whole %s SEQ, or a smaller amount that leaves at least the minimum staked",
+            FormatMoney(want_amt), FormatMoney(restake_amt), FormatMoney(stake_floor), FormatMoney(selected_total)));
+    }
+
+    // 3) The destination: a fresh address of this wallet unless one was given.
+    CTxDestination dest;
+    if (!request.params[2].isNull()) {
+        dest = DecodeDestination(request.params[2].get_str());
+        if (!IsValidDestination(dest)) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid address");
+    } else {
+        bilingual_str dest_error;
+        if (!pwallet->GetNewDestination(pwallet->m_default_address_type, "", dest, dest_error)) {
+            throw JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT, dest_error.original);
+        }
+    }
+    // The withdrawal output is explicit, so report the unconfidential form of
+    // the address — that is what the chain will show.
+    std::visit(SetBlindingPubKeyVisitor(CPubKey()), dest);
+    const CScript dest_script = GetScriptForDestination(dest);
+    const std::string dest_str = EncodeDestination(dest);
+
+    // 4) Build the spend. nVersion 2 activates BIP68; each input's nSequence
+    //    must encode a relative lock at least as long as its script's CSV value
+    //    (the exact value is both necessary and, the coin being mature,
+    //    sufficient). nLockTime serves any vesting lock (BIP65) among the
+    //    selected outputs — height and time locks cannot share a transaction.
+    int64_t height_lock = 0, time_lock = 0;
+    for (const StakeUtxo& s : selected) {
+        if (s.parsed.liquid_locktime <= 0) continue;
+        if (s.parsed.liquid_locktime < (int64_t)LOCKTIME_THRESHOLD) {
+            height_lock = std::max(height_lock, s.parsed.liquid_locktime);
+        } else {
+            time_lock = std::max(time_lock, s.parsed.liquid_locktime);
+        }
+    }
+    if (height_lock > 0 && time_lock > 0) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+            "cannot mix height-vested and time-vested stakes in one withdrawal; withdraw them separately (pass pubkey and amount)");
+    }
+
+    CMutableTransaction mtx;
+    mtx.nVersion = 2;
+    mtx.nLockTime = time_lock > 0 ? (uint32_t)time_lock : (uint32_t)tip_height;
+    for (const StakeUtxo& s : selected) {
+        CTxIn in(s.outpoint);
+        in.nSequence = s.parsed.csv;
+        mtx.vin.push_back(in);
+    }
+    const CAsset& asset = Params().GetConsensus().pegged_asset;
+    mtx.vout.push_back(CTxOut(asset, want_amt, dest_script)); // fee patched out below
+    if (restake_amt > 0) {
+        const StakeUtxo& src = selected.back(); // the output whose split created the remainder
+        // Same key, same unbonding delay, same BLS registration (a consensus
+        // rule requires all of a staker's outputs to carry the same BLS key).
+        // No vesting lock: it was already served, or there was none.
+        mtx.vout.push_back(CTxOut(asset, restake_amt,
+            BuildStakeScript(src.parsed.pubkey, src.parsed.csv, src.parsed.bls_pubkey, src.parsed.bls_pop, 0)));
+    }
+    mtx.vout.push_back(CTxOut(asset, 0, CScript())); // the explicit fee output, patched below
+
+    // 5) The fee, from the final transaction's size with worst-case signatures
+    //    (a staking spend's scriptSig is a single ECDSA signature push).
+    CAmount fee = 0;
+    {
+        CMutableTransaction sizing = mtx;
+        for (CTxIn& in : sizing.vin) in.scriptSig = CScript() << std::vector<unsigned char>(73);
+        CCoinControl coin_control;
+        fee = GetMinimumFeeRate(*pwallet, coin_control, nullptr).GetFee(GetVirtualTransactionSize(CTransaction(sizing)));
+    }
+    if (want_amt <= fee) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
+            "the withdrawal (%s SEQ) would not cover its own network fee (%s SEQ)", FormatMoney(want_amt), FormatMoney(fee)));
+    }
+    mtx.vout.front().nValue = want_amt - fee;
+    mtx.vout.back().nValue = fee;
+
+    // 6) Sign each staking input with its staker key. The spend is a bare
+    //    (pre-segwit) script, so this is a legacy signature over the staking
+    //    script itself; the scriptSig is just the signature push.
+    for (size_t i = 0; i < selected.size(); ++i) {
+        const StakeUtxo& s = selected[i];
+        CKey key;
+        if (!GetStakerKey(*pwallet, s.parsed.pubkey, key)) {
+            throw JSONRPCError(RPC_WALLET_ERROR, strprintf("the private key for staker %s is not available in this wallet", HexStr(s.parsed.pubkey)));
+        }
+        FlatSigningProvider provider;
+        provider.keys[s.parsed.pubkey.GetID()] = key;
+        std::vector<unsigned char> sig;
+        MutableTransactionSignatureCreator creator(&mtx, i, s.txout.nValue, SIGHASH_ALL);
+        if (!creator.CreateSig(provider, sig, s.parsed.pubkey.GetID(), s.txout.scriptPubKey, SigVersion::BASE, /*flags=*/0)) {
+            throw JSONRPCError(RPC_WALLET_ERROR, "failed to sign the staking spend");
+        }
+        mtx.vin[i].scriptSig = CScript() << sig;
+    }
+
+    // 7) Self-check before anything leaves the wallet: every input must satisfy
+    //    its staking script (signature, CSV, vesting) exactly as a validating
+    //    node will judge it.
+    for (size_t i = 0; i < selected.size(); ++i) {
+        ScriptError serror = SCRIPT_ERR_OK;
+        MutableTransactionSignatureChecker checker(&mtx, i, selected[i].txout.nValue, MissingDataBehavior::FAIL);
+        if (!VerifyScript(mtx.vin[i].scriptSig, selected[i].txout.scriptPubKey, nullptr,
+                          SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY | SCRIPT_VERIFY_CHECKSEQUENCEVERIFY,
+                          checker, &serror)) {
+            throw JSONRPCError(RPC_WALLET_ERROR, strprintf("constructed an invalid staking spend (%s); nothing was sent", ScriptErrorString(serror)));
+        }
+    }
+
+    // The wallet's standing before/after, for the caller's confirmation UI.
+    // The registry moves only when the withdrawal confirms.
+    const StakeRegistry& registry = StakeRegistry::GetInstance();
+    const uint64_t total_before = PosTotalWeight(registry);
+    uint64_t mine_before = 0;
+    for (const auto& entry : registry.Weights()) {
+        if (WalletControlsStakerKey(*pwallet, entry.first)) mine_before += entry.second;
+    }
+    const CAmount unstaked = selected_total - restake_amt;
+    const uint64_t mine_after = mine_before > (uint64_t)unstaked ? mine_before - (uint64_t)unstaked : 0;
+    const uint64_t total_after = total_before > (uint64_t)unstaked ? total_before - (uint64_t)unstaked : 0;
+
+    // 8) Broadcast.
+    const CTransactionRef tx = MakeTransactionRef(std::move(mtx));
+    std::string err_string;
+    if (!pwallet->chain().broadcastTransaction(tx, pwallet->m_default_max_tx_fee, /*relay=*/true, err_string)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, strprintf("failed to broadcast the withdrawal: %s", err_string));
+    }
+
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("txid", tx->GetHash().GetHex());
+    result.pushKV("amount", ValueFromAmount(want_amt - fee));
+    result.pushKV("fee", ValueFromAmount(fee));
+    result.pushKV("destination", dest_str);
+    result.pushKV("unstaked", ValueFromAmount(unstaked));
+    if (restake_amt > 0) result.pushKV("restaked", ValueFromAmount(restake_amt));
+    UniValue ins(UniValue::VARR);
+    for (const StakeUtxo& s : selected) {
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("txid", s.outpoint.hash.GetHex());
+        o.pushKV("vout", (int64_t)s.outpoint.n);
+        o.pushKV("amount", ValueFromAmount(s.amount));
+        o.pushKV("pubkey", HexStr(s.parsed.pubkey));
+        ins.push_back(o);
+    }
+    result.pushKV("withdrawn_outputs", ins);
+    result.pushKV("stake_before", mine_before);
+    result.pushKV("stake_after", mine_after);
+    result.pushKV("network_stake_before", total_before);
+    result.pushKV("network_stake_after", total_after);
+    if (total_before > 0) result.pushKV("share_before", (double)mine_before / (double)total_before);
+    if (total_after > 0) result.pushKV("share_after", (double)mine_after / (double)total_after);
     return result;
 },
     };
