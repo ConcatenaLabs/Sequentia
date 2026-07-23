@@ -117,6 +117,17 @@ books. The silent peg must NOT blur them into the native-BTC books. Two hard inv
   as SBTC, no peg. Both kinds lock SBTC in the covenant; they differ only in which book they rest
   in and whether the peg reverses on fill.
 
+- **Implementation note (as built): `advertise_sell_as` + a MANDATORY SBTC binding.** The wallets
+  implement the "advertise the locked SBTC as BTC" mechanism via an `advertise_sell_as` field on
+  the covenant offer (the covenant's `asset_a` stays the SBTC id; the advertised pair side is BTC)
+  rather than a separate `peg_out_on_fill` wire flag; peggedness is inferred from "a covenant
+  resting in a BTC book". Because that inference is otherwise spoofable, a taker MUST verify the
+  covenant actually locks SBTC — `covenant.asset_a == the known SBTC asset id` — before treating a
+  BTC-advertised covenant as pegged BTC and promising the user real BTC on redeem; a BTC-advertised
+  covenant that locks any other asset MUST be refused (it is a mis-sell of a junk asset as BTC).
+  This binding check is REQUIRED in every taker (web + Ambra) and is the enforceable substitute for
+  a trusted `peg_out_on_fill` flag.
+
 **BTC/SBTC is a real, if redundant, pair and is ALLOWED.** A BTC on-chain LIMIT maker there pegs
 BTC → SBTC to rest (in the `SBTC/BTC` book, `pair` quote = BTC, `peg_out_on_fill` = true), and on
 fill pegs SBTC → BTC to the taker while receiving the taker's SBTC — internally SBTC↔SBTC,
