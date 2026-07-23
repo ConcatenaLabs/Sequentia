@@ -235,6 +235,26 @@ carries `min_anchor_depth` (default 0), surfaced **honestly** per rail: pure-LN 
 on preimage; on-chain/HTLC legs show anchor-bound confirmation; 0-conf is tolerated only
 where the offer allows and is labeled as such. Never a silent "Pending."
 
+**Reorg stance (decided): speed first, users own their finality.** The DEX does not try to
+prevent or protect trades from being reversed by a Bitcoin reorg — Sequentia reorg-follows
+Bitcoin in real time, and the terminal is built to be as fast as possible on top of that;
+the user decides how final to treat any settlement. Three distinct things, only one of which
+involves any waiting:
+- **Finality preference is the user's/maker's dial and defaults to fast** — 0-conf tolerated
+  where the offer allows, `min_anchor_depth` default 0, pure-LN instant on preimage. Nothing
+  adds a confirmation wait beyond what an offer's own maker asked for.
+- **The cross-chain anchor-ORDERING gate stays, and it is not a wait-for-depth.**
+  `VerifySeqLegSafe` requires the asset leg's anchor height ≥ the BTC leg's height before the
+  preimage is revealed. That is an ordering condition, not a confirmation count: it makes the
+  two legs reorg *together*, which is exactly why real-time reorg-following makes cross-chain
+  atomic swaps safe. Dropping it would not speed up the happy path; it would only let one leg
+  settle while the other reverses.
+- **Reorg-undo of the book/trade feed is bookkeeping honesty, not protection.** When a
+  Bitcoin reorg un-happens a fill, the relay re-opens the offer, restores its active amount,
+  and retracts the phantom trade print. No speed cost; it is the difference between a book
+  that tells the truth after a reorg and one that lies — which is what lets a user take
+  responsibility for their own finality.
+
 ### Rail → primitive map (reference)
 
 | Pay leg | Receive leg | Both sides agree | Bridged by LSP |
@@ -344,12 +364,29 @@ to reuse — never a blanket lock). On web, order entry should be keyboard-frien
 - **Reference-currency display and input everywhere** (BTC / USD / chosen). No privileged
   SEQ: SEQ is one asset row among equals; the balance headline is the **total across BTC +
   all assets** in the reference currency. A fresh wallet shows only a `0 BTC` row.
-- **Any-asset fee market.** The fee is payable in any accepted asset (default = the asset
-  being traded), shown **per-asset** and honestly. Maker vs taker fee is distinguished.
-  For a cross leg whose fee is set at lift, show "maker fee set at lift," never a fake "0
-  BTC." Never label a non-BTC fee in "sat/vB" (sat is Bitcoin-only).
+- **No protocol trading fee — ever** (decided). The DEX has no maker/taker fee schedule and
+  no protocol fee of any kind. This is coherent, not a deferral: the relay is non-custodial
+  and permissionless, so there is no privileged operator for a protocol fee to accrue to.
+  Users pay only real costs, each shown honestly where it occurs — the chain fee (any-asset,
+  open fee market; default = the asset being traded, shown per-asset), Lightning routing
+  fees, and the LSP's bridge/JIT service price (set by whoever runs an LSP, priced in per
+  §5). For a cross leg whose chain fee is set at lift, show "fee set at lift," never a fake
+  "0 BTC." Never label a non-BTC fee in "sat/vB" (sat is Bitcoin-only).
 - **Transparent by default, confidential opt-in.** The default unblinded address is
-  Bitcoin-format; the blinded book is a namespace the user chooses per §6.6.
+  Bitcoin-format; the blinded book is a namespace the user chooses per §6.6. Confidential
+  orders are **interactive-by-construction** (this is the final design, not a limitation to
+  fix later): joint confidential blinding needs both parties present at lift, and a covenant
+  cannot police blinded values, so a confidential order rests exactly while its maker's
+  wallet is online — the relay's eviction of it on disconnect is correct, and the composer
+  says so plainly ("rests while this wallet is open"). The durable, offline-liftable tier is
+  the transparent covenant CLOB; the two tiers and their tradeoff are the product.
+- **Multi-device, one seed** is supported (final design): the chain and the relay are the
+  source of truth for everything durable — resting covenant orders are discoverable by
+  key-scan and via the relay's my-orders-by-pubkey, and every refundable state is adoptable
+  from a chain scan. Only the *driving* of an in-flight interactive swap stays single-device
+  (an active HTLC/courier session belongs to the device that opened it); any other device
+  can still see the value and refund it after timeout. Cancel nonces are timestamp-based so
+  two devices can't race.
 
 ---
 
