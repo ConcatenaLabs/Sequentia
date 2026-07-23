@@ -12,6 +12,32 @@ verifier pass, and several initial findings were REFUTED and are not listed here
 
 ---
 
+## 0. Execution status (updated 2026-07-23)
+
+Autonomous execution pass in progress. Fund-safety was done to a high bar (multiple
+adversarial-verification rounds per change); every completed item is committed and, where
+noted, deployed and verified on the live box.
+
+- **P0 (stabilize + recover): DONE + DEPLOYED.** Relay back under systemd with the covenant
+  watcher + trade feed on; ln-asset nodes + sbtc-bridge made durable systemd units; rogue
+  processes/duplicate supervisor cleaned; health probe (5-min timer, GREEN) + the fork
+  runbook (`hard-fork-and-restart-runbook.md`) added. The one stranded HTLC was
+  unrecoverable (ephemeral harness key) but the harness now persists a recovery file.
+- **P1 (fund-safety): DONE + DEPLOYED** (3 adversarial rounds). Locktime-ordering gate,
+  seqlnSwap false-success misroute, SBTC mis-sell binding, sbtc-bridge crash-safety +
+  cannibalization, seqdex WS namespace filter + sub-asset SELL state-file, harness fix. LSP
+  now also runs the previously-staged Findings 3/4/5. **Residual → P3:** the bridged-take
+  front-ordering (W2) — deferred with the bridged-take wiring; the deployed code is strictly
+  fail-closed and that path is not wallet-reachable today.
+- **P2 (BTC pairs first-class): CODE DONE, partly deployed.** Deployed to the wallet:
+  reverse-quote orientation (SBTC taker loop), cross-market cancels remainder, sub-asset
+  slice, price field, ladder aggregation, limit-never-market-executes. Committed, box deploy
+  owed (a single atomic seqobd + maker-fleet cutover): trade-feed coverage (P2.8) and
+  **partial cross fills (P2.3)** — the buy-10-of-43 fix, forward-ceil/reverse-floor, min-slice
+  guard, adversarially fund-safe-verified. P2.9 (IOC/FOK/post-only) not yet done.
+- **P3 / P4 / P5: not started** — genuinely multi-session (need testnet settlement cycles,
+  an on-device Ambra pass the user runs, and product surfaces). See §4.
+
 ## 1. Verdict
 
 The web same-chain terminal is genuinely close to spec. The relay core is solid. The gap
