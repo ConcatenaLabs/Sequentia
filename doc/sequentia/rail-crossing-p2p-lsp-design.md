@@ -51,7 +51,61 @@ Timelocks (single chain, the ENTIRE coupling):
 - (P1) anchorDepth(assetHTLC) >= min_anchor_depth   [before pay]
 - (P2) seqTip + claimMargin < T_seq                  [before pay, re-checked]
 - (P3) pay -> learn P -> claim, all strictly before T_seq
-No T_btc, no hold expiry, no min-final-CLTV inequality — the BTC leg never touches chain.
+- (P4) HOLD-INVOICE min-final-CLTV vs T_seq gate     [before pay] — see below.
+
+CORRECTION (P4, the taker's hold gate). A bolt11 HOLD invoice is BYTE-IDENTICAL to a plain one, so the taker
+CANNOT assume the maker minted a cooperative plain invoice. A malicious interactive maker can mint a HOLD
+invoice whose `min_final_cltv` lets it keep the taker's payment HELD (settleable) PAST T_seq — then refund the
+asset at T_seq and settle the hold, capturing BTC-LN with NO asset for the taker. So the taker MUST gate on the
+invoice's min-final-CLTV: decode the `c` tagged field (default 18 if absent), take the LATEST the maker could
+still settle (reveal P) = a BTC height ~ `btcTip + min_final_cltv`, convert that BTC-block window to the
+Sequentia timeframe with the CONSERVATIVE **INVERSE** ratio (`SUB_REVERSE_CLTV_RATIO` = 60), and REQUIRE it
+leaves a claim margin before T_seq. The gate is evaluated at the POST-anchor-bury tip (`seqTip2`, see the
+coupling below): `settleDeadlineSeq = seqTip2 + ceil(fc * 60)`, gate passes iff
+`settleDeadlineSeq + claimMargin < T_seq`. NOTE the conservative direction FLIPS versus the forward leg-bridge
+sizing: the bridge's `HOLD_LIFE_DEFAULTS` (fastBtc 150 / slowSeq 90 ≈ 1.67) is right for SIZING a hold to
+COVER T_seq (assume BTC fast + SEQ slow); here we must UPPER-BOUND how many SEQ slots elapse before a
+masqueraded hold's `fc`-BTC-block HTLC finally expires. The SEQ slot is DETERMINISTIC (30 s, g_pos_slot_interval),
+so ALL the margin sits on the VARIABLE Bitcoin side: BTC nominal ~600 s, but a sustained hashrate-drop lull can
+average ~1500-1800 s/block over a short window, so we assume BTC as SLOW as ~1800 s and SEQ at its exact 30 s
+slot => 1 BTC block maps to 1800/30 = 60 SEQ slots. (This GENEROUS ratio covers a SUSTAINED lull, not just a
+modest ~900 s excursion which would need only ~30x.) Using the forward 1.67 here made the gate ~36x too
+permissive (a hold could stay settleable past T_seq undetected). The taker ALSO caps its OWN outgoing payment's
+max-cltv-delay to `fc` so a HELD payment fails back (refunds the taker) as early as possible. Fail closed (XcFail
+`BAD_HOLD_CLTV`, never pay) otherwise. (subswap.js `bolt11MinFinalCltv` + `holdCltvSafeVsTseq`, in
+`runTakerReverseSubmarine` before the pay.)
+
+HONEST-MAKER COUPLING (seqdex, so this corrected gate PASSES a legitimate offer). The reverse-submarine maker
+sizes its asset-leg T_seq (`SeqLocktimeDelta`) and the minted bolt11's `min_final_cltv` from ONE invariant, so
+they can never drift apart — and because the taker's gate runs only AFTER it has buried the fresh asset HTLC to
+`min_anchor_depth` BTC confs (during which the SEQ tip advances ~`min_anchor_depth*ratio` blocks), T_seq must
+ALSO absorb that bury advance: `SeqLocktimeDelta >= (fc + minAnchorDepth)*ratio + claimMargin + buffer`. The
+maker mints a BOUNDED-SMALL `fc` (viable over the short LSP-hub routes these swaps take) and derives T_seq from
+it. Chosen pair: **fc = 8, ratio = 60, minAnchorDepth = 3, claimMargin = 120, buffer = 40 => T_seq = (8+3)*60 +
+120 + 40 = 820 SEQ blocks (~6.8 h)** (`SubReverseInvoiceCLTV` / `SubReverseConservativeRatio` /
+`SubReverseMinAnchorDepth` / `SubReverseClaimMargin` / `SubReverseTseqBuffer` / `SubReverseSeqLocktimeDelta` in
+seqdex `xdriver_submarine_reverse.go`; `coupleSubReverse` raises a short delta — e.g. the cross-sized 240 default
+— to the coupled minimum). Arithmetic: at `seqTip2 = M + 3*60 = M+180`, `settleDeadlineSeq = M+180 + ceil(8*60)
+= M+660`, and `M+660 + 120 = M+780 < M+820 = T_seq` — clears with 40 blocks (= buffer) of slack. This is the
+single-chain submarine gate, UNRELATED to the cross W1/W2 `-seq-locktime-delta`. (Keeping `buffer` < `ratio`
+makes the honest `fc` exactly the largest CLTV the T_seq admits; the buffer is then pure tip-advance slack.)
+
+RESIDUAL RISK (P4, known + mitigated — not a logic bug, mirror of Path B). This is a FIXED SEQ window versus a
+VARIABLE, unbounded Bitcoin block time. The ratio is sized for a SUSTAINED ~1800 s/block lull; if the REAL
+Bitcoin average over the `fc`-block window EXCEEDS `ratio*30 s`, a hold-masquerade maker could reveal P PAST the
+claim window and capture the taker's BTC-LN with no asset. It is BOUNDED, never a permanent freeze: the taker
+caps its OWN outgoing max-cltv-delay at `fc`, so a HELD payment REFUNDS if the maker never settles — the taker's
+BTC is never left merely HELD unrecoverable, and the loss materialises ONLY if a maker actively settles late
+(borne then by the taker/LSP, never the maker). We MITIGATE, not eliminate: (a) the generous ratio (60, a 3x
+sustained slowdown); (b) the bounded maker `fc`; (c) the taker's own max-cltv cap failing a held payment back as
+early as `fc` allows. Chasing it to ZERO would need an UNBOUNDED window (itself a liveness / capital-lock
+failure), so it is sized generously and documented — the SAME known limitation every Lightning CLTV delta lives
+with (an LN forwarding node can likewise lose an HTLC it cannot timeout-claim before the incoming CLTV under
+sustained congestion). This gate is NOT an unconditional guarantee.
+
+No T_btc and no second on-chain HTLC — the BTC leg never touches chain. But there IS a min-final-CLTV-vs-T_seq
+inequality on the TAKER side (P4): the earlier "no min-final-CLTV inequality" claim held ONLY for a cooperative
+plain invoice; because a hold invoice is indistinguishable from a plain one, the taker must gate on it.
 
 ## PAYER shape — Path B (FALLBACK): LSP payer-direction leg-bridge
 
@@ -176,7 +230,10 @@ settles"; extend to admit `btcLeg.bridge && lnSide==='payer' && native asset leg
 **seqdex:** offer.proto add SettlementCapabilities + Offer field (regen offer.pb.go);
 validator.go validate caps vs ln_direction/trade_dir + covenant=>non-interactive; confirm
 xdriver_submarine{,_reverse}.go reachable from the wallet courier; confirm RunMakerForward
-accepts an LSP-funded BTC leg.
+accepts an LSP-funded BTC leg. xdriver_submarine_reverse.go: `coupleSubReverse` sizes T_seq +
+the invoice min_final_cltv from ONE invariant (fc 8 / ratio 60 / minAnchorDepth 3 / T_seq 820, evaluated at the
+post-anchor-bury tip) so an honest reverse offer clears the taker's corrected hold-CLTV gate;
+cmd/seqob-maker/submarine.go sets both.
 **LSP (sequentia-web-wallet/tooling/lsp):** unified-book.mjs classify ln_direction 0/1 +
 surface caps; settlement-router.mjs add chooseSettlementPath; bridge-driver.mjs
 crossingShapeSupported+describeCrossingSupport admit payer; bridge-maker.mjs add
