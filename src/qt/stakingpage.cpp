@@ -241,10 +241,24 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
         m_stake_amount->setValidator(v);
     }
     m_stake_button = new QPushButton(tr("Stake"), stakeGroup);
+    // Staking the whole balance can never work: the transaction still has to pay
+    // its own network fee, which comes out of the same coins. Max fills in the
+    // balance minus a little headroom for it, so the obvious action succeeds
+    // instead of failing with "insufficient funds".
+    m_stake_max = new QPushButton(tr("Max"), stakeGroup);
+    m_stake_max->setToolTip(tr("Stake as much as possible: your whole %1 balance, less a small amount left over to "
+                               "pay the transaction's network fee.").arg(BitcoinUnits::policyAssetTicker()));
     m_result = new QLabel(stakeGroup);
     m_result->setWordWrap(true);
     m_result->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    stakeForm->addRow(tr("Amount:"), m_stake_amount);
+    {
+        QWidget* row = new QWidget(stakeGroup);
+        QHBoxLayout* h = new QHBoxLayout(row);
+        h->setContentsMargins(0, 0, 0, 0);
+        h->addWidget(m_stake_amount);
+        h->addWidget(m_stake_max);
+        stakeForm->addRow(tr("Amount:"), row);
+    }
     stakeForm->addRow(QString(), m_stake_button);
     stakeForm->addRow(tr("Result:"), m_result);
     layout->addWidget(stakeGroup);
@@ -273,8 +287,17 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
     m_unstake_result = new QLabel(unstakeGroup);
     m_unstake_result->setWordWrap(true);
     m_unstake_result->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_unstake_max = new QPushButton(tr("Max"), unstakeGroup);
+    m_unstake_max->setToolTip(tr("Withdraw everything that is withdrawable right now."));
     unstakeForm->addRow(QString(), m_unstake_info);
-    unstakeForm->addRow(tr("Amount:"), m_unstake_amount);
+    {
+        QWidget* row = new QWidget(unstakeGroup);
+        QHBoxLayout* h = new QHBoxLayout(row);
+        h->setContentsMargins(0, 0, 0, 0);
+        h->addWidget(m_unstake_amount);
+        h->addWidget(m_unstake_max);
+        unstakeForm->addRow(tr("Amount:"), row);
+    }
     // The button is disabled while nothing is withdrawable, and Qt does not
     // deliver tooltip events to a disabled widget — so the "why is this grey"
     // explanation has to hang on an enabled container around it.
@@ -374,7 +397,9 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
     layout->addStretch();
 
     connect(m_stake_button, &QPushButton::clicked, this, &StakingPage::onStake);
+    connect(m_stake_max, &QPushButton::clicked, this, &StakingPage::onStakeMax);
     connect(m_unstake_button, &QPushButton::clicked, this, &StakingPage::onUnstake);
+    connect(m_unstake_max, &QPushButton::clicked, this, &StakingPage::onUnstakeMax);
     connect(m_refresh_button, &QPushButton::clicked, this, &StakingPage::onRefreshClicked);
 }
 
@@ -413,6 +438,18 @@ void StakingPage::setStatus(const QString& msg, bool error)
 {
     m_status->setStyleSheet(error ? "color:#ff6b6b;" : "color:#3ecf7a;");
     m_status->setText(msg);
+}
+
+void StakingPage::setCardResult(QLabel* result, const QString& msg, bool error)
+{
+    // The page-wide status line is at the very bottom, past every card: on a
+    // scrolled page an error shown only there is invisible, and the button
+    // looks broken. Put it in the card too, and colour a refusal red.
+    if (result) {
+        result->setStyleSheet(error ? "color:#ff6b6b;" : QString());
+        result->setText(msg);
+    }
+    setStatus(msg, error);
 }
 
 void StakingPage::refresh()
@@ -759,15 +796,15 @@ void StakingPage::onStake()
 {
     if (!m_wallet_model) return;
     const QString amount = m_stake_amount->text().trimmed();
-    if (amount.isEmpty()) { setStatus(tr("Enter an amount of %1 to stake.").arg(BitcoinUnits::policyAssetTicker()), true); return; }
+    if (amount.isEmpty()) { setCardResult(m_result, tr("Enter an amount of %1 to stake.").arg(BitcoinUnits::policyAssetTicker()), true); return; }
     bool amtok = false; const double amtval = amount.toDouble(&amtok);
-    if (!amtok || amtval <= 0) { setStatus(tr("Enter a positive %1 amount.").arg(BitcoinUnits::policyAssetTicker()), true); return; }
+    if (!amtok || amtval <= 0) { setCardResult(m_result, tr("Enter a positive %1 amount.").arg(BitcoinUnits::policyAssetTicker()), true); return; }
     // Reject sub-floor stakes up front: the consensus rule (and registerstake) drop
     // anything below the chain minimum, so it would never count toward production.
     if (g_pos_min_stake > 0) {
         const int64_t amt_sats = (int64_t)std::llround(amtval * 100000000.0);
         if (amt_sats < (int64_t)g_pos_min_stake) {
-            setStatus(tr("Minimum stake on this network is %1 %2 - a smaller stake would never count.")
+            setCardResult(m_result, tr("Minimum stake on this network is %1 %2 - a smaller stake would never count.")
                           .arg(QString::number((double)g_pos_min_stake / 100000000.0, 'f', 0), BitcoinUnits::policyAssetTicker()), true);
             return;
         }
@@ -776,13 +813,13 @@ void StakingPage::onStake()
 
     // 1) a fresh address whose key we'll stake with
     UniValue addrv = callRpc("getnewaddress", UniValue(UniValue::VARR), ok, err);
-    if (!ok) { setStatus(tr("Could not create a staking address: %1").arg(err), true); return; }
+    if (!ok) { setCardResult(m_result, tr("Could not create a staking address: %1").arg(err), true); return; }
     const QString addr = QString::fromStdString(addrv.getValStr());
 
     // 2) its public key
     UniValue aiparams(UniValue::VARR); aiparams.push_back(addr.toStdString());
     UniValue info = callRpc("getaddressinfo", aiparams, ok, err);
-    if (!ok || !info.exists("pubkey")) { setStatus(tr("Could not read the staking key: %1").arg(err), true); return; }
+    if (!ok || !info.exists("pubkey")) { setCardResult(m_result, tr("Could not read the staking key: %1").arg(err), true); return; }
     const QString pubkey = QString::fromStdString(info["pubkey"].get_str());
 
     // 3) register the stake (funds the staking output)
@@ -790,7 +827,7 @@ void StakingPage::onStake()
     rsparams.push_back(pubkey.toStdString());
     rsparams.push_back(UniValue(UniValue::VNUM, amount.toStdString()));
     UniValue res = callRpc("registerstake", rsparams, ok, err);
-    if (!ok) { setStatus(tr("Staking failed: %1").arg(err), true); return; }
+    if (!ok) { setCardResult(m_result, tr("Staking failed: %1").arg(err), true); return; }
     const QString txid = res.exists("txid") ? QString::fromStdString(res["txid"].getValStr()) : QString();
     const qint64 unbond = res.exists("unbonding_seconds") ? (qint64)res["unbonding_seconds"].get_int64() : 0;
 
@@ -913,6 +950,49 @@ void StakingPage::refreshUnstakeInfo()
     }
 }
 
+void StakingPage::onStakeMax()
+{
+    if (!m_wallet_model || !m_stake_amount) return;
+    bool ok; QString err;
+    UniValue bal = callRpc("getbalance", UniValue(UniValue::VARR), ok, err);
+    if (!ok) { setCardResult(m_result, tr("Could not read your balance: %1").arg(err), true); return; }
+    // getbalance returns a map keyed by asset; the stake is always the policy asset.
+    CAmount available = 0;
+    if (bal.isObject()) {
+        for (const std::string& k : bal.getKeys()) {
+            if (k == "bitcoin" || k == ::policyAsset.GetHex()) {
+                try { available = AmountFromValue(bal[k]); } catch (...) {}
+                break;
+            }
+        }
+    } else if (bal.isNum() || bal.isStr()) {
+        try { available = AmountFromValue(bal); } catch (...) {}
+    }
+    // Leave headroom for the funding transaction's own fee. The exact fee is not
+    // known until the wallet has picked the inputs, so keep a small, generous
+    // margin rather than offer an amount that then fails to fund.
+    const CAmount headroom = 10000; // 0.0001 SEQ
+    if (available <= headroom) {
+        setCardResult(m_result, tr("Your balance (%1 %2) is not enough to stake and still pay the transaction fee.")
+                                     .arg(FormatWeight((uint64_t)std::max<CAmount>(available, 0)),
+                                          BitcoinUnits::policyAssetTicker()), true);
+        return;
+    }
+    m_stake_amount->setText(FormatWeight((uint64_t)(available - headroom)));
+}
+
+void StakingPage::onUnstakeMax()
+{
+    // "Everything withdrawable" is what an empty field already means; clearing it
+    // keeps the two consistent and avoids a rounded number that no longer matches
+    // the exact mature total by the time the click lands.
+    if (m_unstake_amount) m_unstake_amount->clear();
+    if (m_unstake_info) {
+        setCardResult(m_unstake_result,
+                      tr("Set to withdraw everything available. Press Withdraw to continue."), false);
+    }
+}
+
 void StakingPage::onUnstake()
 {
     if (!m_wallet_model) return;
@@ -920,9 +1000,8 @@ void StakingPage::onUnstake()
 
     // What the wallet has staked, and how much of it is withdrawable right now.
     UniValue list = callRpc("liststakeutxos", UniValue(UniValue::VARR), ok, err);
-    if (!ok || !list.isArray()) { setStatus(tr("Could not read the staked coins: %1").arg(err), true); return; }
+    if (!ok || !list.isArray()) { setCardResult(m_unstake_result, tr("Could not read the staked coins: %1").arg(err), true); return; }
     CAmount mature_total = 0, immature_total = 0;
-    std::set<std::string> mature_keys;
     QString next_unlock;
     int64_t best_height = -1;
     for (size_t i = 0; i < list.size(); ++i) {
@@ -931,7 +1010,6 @@ void StakingPage::onUnstake()
         try { amt = AmountFromValue(o["amount"]); } catch (...) { continue; }
         if (o["withdrawable"].isBool() && o["withdrawable"].get_bool()) {
             mature_total += amt;
-            mature_keys.insert(o["pubkey"].getValStr());
             continue;
         }
         immature_total += amt;
@@ -944,11 +1022,11 @@ void StakingPage::onUnstake()
     }
     const QString ticker = BitcoinUnits::policyAssetTicker();
     if (mature_total == 0 && immature_total == 0) {
-        setStatus(tr("Nothing is staked from this wallet."), true);
+        setCardResult(m_unstake_result, tr("Nothing is staked from this wallet."), true);
         return;
     }
     if (mature_total == 0) {
-        setStatus(tr("Nothing can be withdrawn yet: %1.").arg(next_unlock), true);
+        setCardResult(m_unstake_result, tr("Nothing can be withdrawn yet: %1.").arg(next_unlock), true);
         return;
     }
 
@@ -960,22 +1038,17 @@ void StakingPage::onUnstake()
         bool amtok = false;
         const double amtval = amount_text.toDouble(&amtok);
         if (!amtok || amtval <= 0) {
-            setStatus(tr("Enter a positive %1 amount, or leave the field empty to withdraw everything available.").arg(ticker), true);
+            setCardResult(m_unstake_result, tr("Enter a positive %1 amount, or leave the field empty to withdraw everything available.").arg(ticker), true);
             return;
         }
         want = (CAmount)std::llround(amtval * 100000000.0);
         if (want > mature_total) {
-            setStatus(tr("Only %1 %2 can be withdrawn right now%3").arg(
+            setCardResult(m_unstake_result, tr("Only %1 %2 can be withdrawn right now%3").arg(
                           FormatWeight((uint64_t)mature_total), ticker,
                           immature_total > 0 ? tr(" — the rest is still unbonding.") : QString(".")), true);
             return;
         }
         partial = want < mature_total;
-    }
-    if (partial && mature_keys.size() > 1) {
-        setStatus(tr("This wallet stakes with more than one key, so a partial withdrawal is ambiguous here. "
-                     "Withdraw everything, or use the withdrawstake RPC to pick a key."), true);
-        return;
     }
 
     // Numbers for the confirmation: our registered stake and the network total.
@@ -1023,15 +1096,17 @@ void StakingPage::onUnstake()
     if (m_unstake_button) m_unstake_button->setEnabled(false);
     UniValue params(UniValue::VARR);
     if (partial) {
-        // A partial withdrawal names the (single) staker key and the exact
-        // amount, as typed — the RPC re-parses it, avoiding any double rounding.
-        params.push_back(*mature_keys.begin());
+        // Any staker key may contribute (null pubkey): the RPC takes whole
+        // outputs largest-first, so at most one is split and its remainder is
+        // re-staked to that same key. The amount goes as typed, so the RPC
+        // parses it once and no double rounding creeps in.
+        params.push_back(UniValue(UniValue::VNULL));
         params.push_back(UniValue(UniValue::VNUM, amount_text.toStdString()));
     }
     UniValue res = callRpc("withdrawstake", params, ok, err);
     if (m_unstake_button) m_unstake_button->setEnabled(true);
     if (!ok) {
-        setStatus(tr("The withdrawal failed: %1").arg(err), true);
+        setCardResult(m_unstake_result, tr("The withdrawal failed: %1").arg(err), true);
         return;
     }
 
@@ -1049,7 +1124,12 @@ void StakingPage::onUnstake()
                    .arg(QString::number(res["share_before"].get_real() * 100.0, 'f', 2),
                         QString::number(res["share_after"].get_real() * 100.0, 'f', 2));
     }
-    if (m_unstake_result) m_unstake_result->setText(out);
+    // The card already carries the detailed outcome above; keep the page-wide
+    // line for the one-sentence confirmation so it does not overwrite it.
+    if (m_unstake_result) {
+        m_unstake_result->setStyleSheet(QString());
+        m_unstake_result->setText(out);
+    }
     if (m_unstake_amount) m_unstake_amount->clear();
     setStatus(tr("Withdrawal sent. Your stake updates when the transaction confirms."), false);
     refresh();

@@ -565,14 +565,10 @@ RPCHelpMan withdrawstake()
                         FormatMoney(mature_total), FormatMoney(mature_total + immature_total))
             : strprintf("only %s SEQ is withdrawable", FormatMoney(mature_total)));
     }
-    if (want && *want < mature_total && !only) {
-        std::set<CPubKey> keys;
-        for (const StakeUtxo& s : mature) keys.insert(s.parsed.pubkey);
-        if (keys.size() > 1) {
-            throw JSONRPCError(RPC_INVALID_PARAMETER,
-                "this wallet stakes with more than one key; pass the staker pubkey to withdraw a specific amount");
-        }
-    }
+    // A partial withdrawal across several staker keys is well defined: the
+    // selection below takes whole outputs largest-first, so at most ONE output
+    // is split, and its remainder goes back to that same output's key. Pass
+    // `pubkey` to confine the withdrawal to one staker.
 
     // Spend as few staking outputs as possible: largest first until covered.
     std::sort(mature.begin(), mature.end(),

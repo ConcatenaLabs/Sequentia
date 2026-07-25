@@ -296,7 +296,10 @@ TransactionTableModel::TransactionTableModel(const PlatformStyle *_platformStyle
 {
     subscribeToCoreSignals();
 
-    columns << QString() << QString() << tr("Date") << tr("Type") << tr("Label") << tr("Amount") << tr("Value");
+    // The first column shows the confirmation state as an icon. Upstream leaves
+    // its header blank, which makes the column look like a stray gap; name it.
+    // (The watch-only column stays blank: it is empty for most wallets.)
+    columns << tr("Status") << QString() << tr("Date") << tr("Type") << tr("Label") << tr("Amount") << tr("Value");
     priv->refreshWallet(walletModel->wallet());
 
     connect(walletModel->getOptionsModel(), &OptionsModel::displayUnitChanged, this, &TransactionTableModel::updateDisplayUnit);

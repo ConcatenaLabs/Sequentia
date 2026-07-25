@@ -82,6 +82,9 @@ protected:
 private Q_SLOTS:
     void onStake();
     void onUnstake();
+    //! Put the largest usable amount into the respective Amount field.
+    void onStakeMax();
+    void onUnstakeMax();
     void onEnableProduction();
     void onRefreshClicked();
 
@@ -95,6 +98,7 @@ private:
     QTableWidget* m_stakers{nullptr};
     QPushButton* m_refresh_button{nullptr};
     QLineEdit* m_stake_amount{nullptr};
+    QPushButton* m_stake_max{nullptr};    //!< fill Amount with everything stakeable (balance minus fee headroom)
     QPushButton* m_stake_button{nullptr};
     QLabel* m_result{nullptr};
     QLabel* m_status{nullptr};
@@ -102,6 +106,7 @@ private:
     // --- "Withdraw stake" (unstake) card ---
     QLabel* m_unstake_info{nullptr};      //!< what is withdrawable now / still unbonding
     QLineEdit* m_unstake_amount{nullptr};
+    QPushButton* m_unstake_max{nullptr};  //!< fill Amount with everything withdrawable
     QPushButton* m_unstake_button{nullptr};
     //! Enabled wrapper around the Withdraw button: carries the tooltip that says
     //! why the button is greyed out (a disabled widget gets no tooltip events).
@@ -152,6 +157,11 @@ private:
     UniValue callRpc(const std::string& method, const UniValue& params, bool& ok, QString& error, bool wallet = true);
     std::string walletUri() const;
     void setStatus(const QString& msg, bool error = false);
+    //! Report the outcome of a card's action IN that card, next to the button
+    //! that caused it. The page-wide status line sits below every card, off the
+    //! bottom of a scrolled page, so a refusal shown only there reads as "the
+    //! button does nothing".
+    void setCardResult(QLabel* result, const QString& msg, bool error);
     //! Enable autonomous block production at runtime for the given staking WIF(s)
     //! (via startposproducer). No restart. Returns true if the node is now producing.
     bool enableProduction(const QStringList& wifs, QString& err);
