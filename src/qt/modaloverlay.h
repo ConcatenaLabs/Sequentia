@@ -5,6 +5,8 @@
 #ifndef BITCOIN_QT_MODALOVERLAY_H
 #define BITCOIN_QT_MODALOVERLAY_H
 
+#include <qt/guiutil.h>
+
 #include <QDateTime>
 #include <QPropertyAnimation>
 #include <QWidget>
@@ -46,12 +48,21 @@ protected:
 private:
     Ui::ModalOverlay *ui;
     int bestHeaderHeight; //best known height (based on the headers)
+    /** SEQUENTIA: header height when this session's header sync started, so the
+        header percentage runs 0→100% over the headers we actually have to
+        fetch instead of counting from genesis. -1 until the first update. */
+    int m_header_sync_start_height = -1;
+    /** SEQUENTIA: measures the chain's real block spacing so "headers left" is
+        not derived from the consensus constant (600s here vs ~34s actual). */
+    GUIUtil::HeaderSyncEstimator m_header_estimator;
     QDateTime bestHeaderDate;
     QVector<QPair<qint64, double> > blockProcessTime;
     bool layerIsVisible;
     bool userClosed;
     QPropertyAnimation m_animation;
     void UpdateHeaderSyncLabel();
+    /** Headers still missing, from the measured chain spacing. */
+    int EstimatedHeadersLeft() const;
 };
 
 #endif // BITCOIN_QT_MODALOVERLAY_H

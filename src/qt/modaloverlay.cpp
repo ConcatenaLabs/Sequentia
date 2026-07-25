@@ -83,6 +83,8 @@ void ModalOverlay::setKnownBestHeight(int count, const QDateTime& blockDate)
     if (count > bestHeaderHeight) {
         bestHeaderHeight = count;
         bestHeaderDate = blockDate;
+        // SEQUENTIA: feed the spacing estimator (see GUIUtil::HeaderSyncEstimator).
+        m_header_estimator.AddSample(count, blockDate.toSecsSinceEpoch());
         UpdateHeaderSyncLabel();
     }
 }
@@ -139,9 +141,9 @@ void ModalOverlay::tipUpdate(int count, const QDateTime& blockDate, double nVeri
         // not syncing
         return;
 
-    // estimate the number of headers left based on nPowTargetSpacing
+    // estimate the number of headers left from the chain's measured spacing
     // and check if the gui is not aware of the best header (happens rarely)
-    int estimateNumHeadersLeft = bestHeaderDate.secsTo(currentDate) / Params().GetConsensus().nPowTargetSpacing;
+    int estimateNumHeadersLeft = EstimatedHeadersLeft();
     bool hasBestHeader = bestHeaderHeight >= count;
 
     // show remaining number of blocks
@@ -153,9 +155,34 @@ void ModalOverlay::tipUpdate(int count, const QDateTime& blockDate, double nVeri
     }
 }
 
+int ModalOverlay::EstimatedHeadersLeft() const
+{
+    const int64_t now = QDateTime::currentSecsSinceEpoch();
+    const int measured = m_header_estimator.HeadersLeft(now, Params().GetConsensus().nPowTargetSpacing);
+    if (measured >= 0) return measured;
+    // Not calibrated yet: fall back to upstream's consensus-spacing estimate.
+    if (!bestHeaderDate.isValid()) return 0;
+    return bestHeaderDate.secsTo(QDateTime::currentDateTime()) / Params().GetConsensus().nPowTargetSpacing;
+}
+
 void ModalOverlay::UpdateHeaderSyncLabel() {
-    int est_headers_left = bestHeaderDate.secsTo(QDateTime::currentDateTime()) / Params().GetConsensus().nPowTargetSpacing;
-    ui->numberOfBlocksLeft->setText(tr("Unknown. Syncing Headers (%1, %2%)…").arg(bestHeaderHeight).arg(QString::number(100.0 / (bestHeaderHeight + est_headers_left) * bestHeaderHeight, 'f', 1)));
+    int est_headers_left = EstimatedHeadersLeft();
+
+    // SEQUENTIA: show how far this session's header sync has come, not how much
+    // of the chain since genesis we hold. Upstream's ratio counts from genesis,
+    // so a node restarting with most headers already on disk opens near 100%
+    // and the download that actually remains is invisible. Rebasing on the
+    // height we started from makes the run 0→100% over the headers still to
+    // fetch, matching the block phase that follows.
+    if (m_header_sync_start_height < 0) m_header_sync_start_height = bestHeaderHeight;
+    const int target = bestHeaderHeight + est_headers_left;
+    double pct = 0.0;
+    if (target > m_header_sync_start_height) {
+        pct = 100.0 * double(bestHeaderHeight - m_header_sync_start_height) /
+                      double(target - m_header_sync_start_height);
+        pct = qBound(0.0, pct, 100.0);
+    }
+    ui->numberOfBlocksLeft->setText(tr("Unknown. Syncing Headers (%1, %2%)…").arg(bestHeaderHeight).arg(QString::number(pct, 'f', 1)));
 }
 
 void ModalOverlay::toggleVisibility()

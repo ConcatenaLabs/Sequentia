@@ -1274,9 +1274,32 @@ void BitcoinGUI::updateHeadersSyncProgressLabel()
 {
     int64_t headersTipTime = clientModel->getHeaderTipTime();
     int headersTipHeight = clientModel->getHeaderTipHeight();
-    int estHeadersLeft = (GetTime() - headersTipTime) / Params().GetConsensus().nPowTargetSpacing;
-    if (estHeadersLeft > HEADER_HEIGHT_DELTA_SYNC)
-        progressBarLabel->setText(tr("Syncing Headers (%1%)…").arg(QString::number(100.0 / (headersTipHeight+estHeadersLeft)*headersTipHeight, 'f', 1)));
+    // SEQUENTIA: measure the chain's real block spacing instead of trusting the
+    // consensus constant, which is 600s here against ~34s actual (see
+    // GUIUtil::HeaderSyncEstimator).
+    m_header_estimator.AddSample(headersTipHeight, headersTipTime);
+    int estHeadersLeft = m_header_estimator.HeadersLeft(GetTime(), Params().GetConsensus().nPowTargetSpacing);
+    if (estHeadersLeft < 0) {
+        estHeadersLeft = (GetTime() - headersTipTime) / Params().GetConsensus().nPowTargetSpacing;
+    }
+    if (estHeadersLeft > HEADER_HEIGHT_DELTA_SYNC) {
+        // SEQUENTIA: rebase on the height this session started from, like the
+        // block phase in setNumBlocks — upstream's genesis-relative ratio opens
+        // near 100% on a restart and hides the download that remains.
+        if (m_header_sync_start_height < 0) m_header_sync_start_height = headersTipHeight;
+        const int target = headersTipHeight + estHeadersLeft;
+        double pct = 0.0;
+        if (target > m_header_sync_start_height) {
+            pct = 100.0 * double(headersTipHeight - m_header_sync_start_height) /
+                          double(target - m_header_sync_start_height);
+            pct = qBound(0.0, pct, 100.0);
+        }
+        progressBarLabel->setText(tr("Syncing Headers (%1, %2%)…").arg(headersTipHeight).arg(QString::number(pct, 'f', 1)));
+    } else {
+        // Header sync finished: let the next one rebase from where it starts.
+        m_header_sync_start_height = -1;
+        m_header_estimator.Reset();
+    }
 }
 
 // SEQUENTIA: when the chain pauses because of Bitcoin — the tip's anchor is
@@ -1356,12 +1379,39 @@ void BitcoinGUI::setNumBlocks(int count, const QDateTime& blockDate, double nVer
     }
 #endif
 
+    // SEQUENTIA: rebase the shown percentage on where this session started, in
+    // block heights. nVerificationProgress is absolute (fraction of genesis→tip
+    // work) so a nearly caught-up node opens at ~99% and barely moves; worse, it
+    // asymptotes below 1.0 near the tip (its denominator keeps a forward-looking
+    // tx-rate term), so remapping against 1.0 compresses the whole catch-up into
+    // a few percent. Heights are exact and linear instead: 0% at the last block
+    // we already had, 100% at the header tip — matching "how far from where I
+    // started to the chain tip". ETA follows from the linear progress.
+    double displayProgress = nVerificationProgress;
+    if (!header && clientModel) {
+        const qint64 tip_lag = blockDate.secsTo(QDateTime::currentDateTime());
+        if (tip_lag < MAX_BLOCK_TIME_GAP) {
+            // Caught up: forget the start point so the next catch-up rebases.
+            m_sync_start_height = -1;
+        } else {
+            if (m_sync_start_height < 0) m_sync_start_height = count;
+            const int header_tip = clientModel->getHeaderTipHeight();
+            if (header_tip > m_sync_start_height) {
+                displayProgress = double(count - m_sync_start_height) /
+                                  double(header_tip - m_sync_start_height);
+                displayProgress = qBound(0.0, displayProgress, 1.0);
+            }
+            // else: header tip not yet known to be ahead of our start height —
+            // keep the absolute progress until headers reveal the real target.
+        }
+    }
+
     if (modalOverlay)
     {
         if (header)
             modalOverlay->setKnownBestHeight(count, blockDate);
         else
-            modalOverlay->tipUpdate(count, blockDate, nVerificationProgress);
+            modalOverlay->tipUpdate(count, blockDate, displayProgress);
     }
     if (!clientModel)
         return;
@@ -1441,7 +1491,7 @@ void BitcoinGUI::setNumBlocks(int count, const QDateTime& blockDate, double nVer
         // "18 hours behind" sound alarming when the actual catch-up is minutes
         // of download and validation).
         const int header_height = clientModel->getHeaderTipHeight();
-        const QString percent_done = QString::number(nVerificationProgress * 100.0, 'f', 1);
+        const QString percent_done = QString::number(displayProgress * 100.0, 'f', 1);
         QString progressText;
         if (header_height > count) {
             progressText = tr("%n block(s) remaining (%1% done)", "", header_height - count).arg(percent_done);
@@ -1454,7 +1504,7 @@ void BitcoinGUI::setNumBlocks(int count, const QDateTime& blockDate, double nVer
         progressBarLabel->setVisible(true);
         progressBar->setFormat(progressText);
         progressBar->setMaximum(1000000000);
-        progressBar->setValue(nVerificationProgress * 1000000000.0 + 0.5);
+        progressBar->setValue(displayProgress * 1000000000.0 + 0.5);
         progressBar->setVisible(true);
 
         tooltip = tr("Catching up…") + QString("<br>") + tooltip;
