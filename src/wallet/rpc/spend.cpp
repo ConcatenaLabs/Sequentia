@@ -230,6 +230,7 @@ struct StakeUtxo {
     CAmount amount{0};           //!< explicit policy-asset amount (the stake weight)
     int fund_height{-1};         //!< height the funding output confirmed at (-1 while unconfirmed)
     bool unconfirmed{false};     //!< the funding transaction is still in the mempool
+    bool withdrawing{false};     //!< already spent by a withdrawal that has not confirmed yet
     bool csv_mature{false};      //!< unbonding (BIP68) served, judged against the tip
     bool vesting_mature{false};  //!< liquid_locktime (BIP65) passed, or none carried
     int spendable_height{-1};    //!< height-based CSV: first block that may contain the spend
@@ -272,6 +273,15 @@ bool GetStakerKey(const CWallet& wallet, const CPubKey& pubkey, CKey& key_out)
 //! land in block tip+1.
 std::vector<StakeUtxo> FindWalletStakeUtxos(CWallet& wallet, const std::optional<CPubKey>& only_pubkey) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
 {
+    // Who spends what, so a staking output that is already spent can be told
+    // apart: spent by a CONFIRMED transaction means the stake is gone, spent by
+    // one still waiting means a withdrawal is in flight — and the stake registry
+    // keeps crediting its weight until that transaction confirms.
+    std::map<COutPoint, const CWalletTx*> spenders;
+    for (const auto& [txid, wtx] : wallet.mapWallet) {
+        for (const CTxIn& in : wtx.tx->vin) spenders.emplace(in.prevout, &wtx);
+    }
+
     std::vector<StakeUtxo> found;
     for (const auto& [wtxid, wtx] : wallet.mapWallet) {
         for (uint32_t n = 0; n < wtx.tx->vout.size(); ++n) {
@@ -281,9 +291,18 @@ std::vector<StakeUtxo> FindWalletStakeUtxos(CWallet& wallet, const std::optional
             if (!parsed) continue;
             if (only_pubkey && parsed->pubkey != *only_pubkey) continue;
             if (!WalletControlsStakerKey(wallet, parsed->pubkey)) continue;
-            if (wallet.IsSpent(wtxid, n)) continue; // e.g. an earlier withdrawal still in the mempool
             StakeUtxo s;
             s.outpoint = COutPoint(wtxid, n);
+            if (wallet.IsSpent(wtxid, n)) {
+                // Report it only while the spend is still pending, so the caller
+                // can say "a withdrawal is on its way" instead of contradicting
+                // the stake weight the registry still shows.
+                auto sp = spenders.find(s.outpoint);
+                if (sp == spenders.end()) continue;
+                if (wallet.GetTxDepthInMainChain(*sp->second) > 0) continue; // confirmed: really gone
+                if (sp->second->isAbandoned()) continue;
+                s.withdrawing = true;
+            }
             s.txout = out;
             s.parsed = *parsed;
             s.amount = out.nValue.GetAmount();
@@ -305,6 +324,15 @@ std::vector<StakeUtxo> FindWalletStakeUtxos(CWallet& wallet, const std::optional
 
     std::vector<StakeUtxo> live;
     for (StakeUtxo& s : found) {
+        // A withdrawal already sent is no longer in the UTXO set, so there is no
+        // coin to read and no maturity left to judge: it is on its way out, and
+        // only worth reporting so the caller can explain the wait.
+        if (s.withdrawing) {
+            s.csv_mature = false;
+            s.vesting_mature = false;
+            live.push_back(std::move(s));
+            continue;
+        }
         const Coin& coin = coins[s.outpoint];
         if (coin.out.IsNull()) continue; // spent
 
@@ -367,6 +395,11 @@ int64_t ApproxSecondsPerBlock()
 //! "unbonding until block 45120 (around 2026-08-06T10:00:00Z)".
 std::string DescribeImmaturity(const StakeUtxo& s, int tip_height, int64_t tip_time)
 {
+    // Already withdrawn, just not yet confirmed — the stake registry still
+    // credits its weight until it is.
+    if (s.withdrawing) {
+        return "a withdrawal of this stake is waiting to confirm";
+    }
     // Nothing to date yet: the unbonding clock starts at the confirming block.
     if (s.unconfirmed) {
         return "waiting for the stake registration to confirm; the unbonding delay starts from that block";
@@ -404,6 +437,7 @@ RPCHelpMan liststakeutxos()
                         {RPCResult::Type::STR_HEX, "pubkey", "the staker public key"},
                         {RPCResult::Type::NUM, "funded_height", /*optional=*/true, "height the stake confirmed at (absent while unconfirmed)"},
                         {RPCResult::Type::BOOL, "confirmed", "whether the registration has confirmed; the unbonding delay only starts then"},
+                        {RPCResult::Type::BOOL, "withdrawing", "a withdrawal of this stake has been sent and is waiting to confirm; it still counts as stake until then"},
                         {RPCResult::Type::BOOL, "withdrawable", "whether the stake can be withdrawn right now"},
                         {RPCResult::Type::NUM, "spendable_height", /*optional=*/true, "first block that could contain the withdrawal (height-locked stakes)"},
                         {RPCResult::Type::NUM_TIME, "spendable_time", /*optional=*/true, "earliest withdrawal time (time-locked stakes)"},
@@ -440,6 +474,7 @@ RPCHelpMan liststakeutxos()
         o.pushKV("pubkey", HexStr(s.parsed.pubkey));
         if (s.fund_height >= 0) o.pushKV("funded_height", s.fund_height);
         o.pushKV("confirmed", !s.unconfirmed);
+        o.pushKV("withdrawing", s.withdrawing);
         o.pushKV("withdrawable", s.Mature());
         if (s.spendable_height >= 0) o.pushKV("spendable_height", s.spendable_height);
         if (s.spendable_time > 0) o.pushKV("spendable_time", s.spendable_time);
@@ -525,10 +560,14 @@ RPCHelpMan withdrawstake()
             : std::string("this wallet has no staking outputs (see registerstake)"));
     }
     std::vector<StakeUtxo> mature;
-    CAmount mature_total = 0, immature_total = 0;
+    CAmount mature_total = 0, immature_total = 0, withdrawing_total = 0;
     const StakeUtxo* soonest = nullptr;
     for (const StakeUtxo& s : stakes) {
-        if (s.Mature()) {
+        if (s.withdrawing) {
+            // Already on its way out: not withdrawable again, and not something
+            // the caller is waiting to unlock either.
+            withdrawing_total += s.amount;
+        } else if (s.Mature()) {
             mature_total += s.amount;
             mature.push_back(s);
         } else {
@@ -551,6 +590,12 @@ RPCHelpMan withdrawstake()
         }
     }
     if (mature.empty()) {
+        if (!soonest) {
+            // Everything this wallet had staked is already being withdrawn.
+            throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
+                "a withdrawal of %s SEQ has already been sent and is waiting to confirm; there is nothing "
+                "left to withdraw", FormatMoney(withdrawing_total)));
+        }
         throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
             "none of the %s SEQ this wallet has staked is withdrawable yet; the soonest is %s",
             FormatMoney(immature_total), DescribeImmaturity(*soonest, tip_height, tip_time)));

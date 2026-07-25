@@ -151,7 +151,9 @@ private:
     void refreshWatchOnlyKey();
     //! Refresh the "Withdraw stake" card from liststakeutxos: how much is
     //! withdrawable right now, how much is still unbonding and until when.
-    void refreshUnstakeInfo();
+    //! Pass an already-fetched list to render exactly those numbers, so an
+    //! action and the summary above it can never quote two different totals.
+    void refreshUnstakeInfo(const UniValue* prefetched = nullptr);
 
     //! Run an RPC (wallet=true uses the /wallet/<name> endpoint; false the node endpoint).
     UniValue callRpc(const std::string& method, const UniValue& params, bool& ok, QString& error, bool wallet = true);

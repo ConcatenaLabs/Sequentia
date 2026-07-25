@@ -859,17 +859,19 @@ void StakingPage::onStake()
         msg += tr("\n\nYour stake is registered. This wallet can't export the staking key automatically, so "
                   "click \"Start producing blocks\" once the stake confirms to begin producing.");
     }
+    // Clear any red left over from an earlier refusal: this is a success.
+    m_result->setStyleSheet(QString());
     m_result->setText(msg);
     setStatus(enabled ? tr("Staked. Block production is on. The stake counts once the transaction confirms.")
                       : tr("Stake registered. It will count once the transaction confirms."), false);
     refresh();
 }
 
-void StakingPage::refreshUnstakeInfo()
+void StakingPage::refreshUnstakeInfo(const UniValue* prefetched)
 {
     if (!m_unstake_info || !m_wallet_model) return;
-    bool ok; QString err;
-    UniValue list = callRpc("liststakeutxos", UniValue(UniValue::VARR), ok, err);
+    bool ok = true; QString err;
+    UniValue list = prefetched ? *prefetched : callRpc("liststakeutxos", UniValue(UniValue::VARR), ok, err);
     if (!ok || !list.isArray()) {
         m_unstake_info->setText(tr("Staked coins unavailable: %1").arg(err));
         if (m_unstake_button) m_unstake_button->setEnabled(false);
@@ -879,13 +881,17 @@ void StakingPage::refreshUnstakeInfo()
         }
         return;
     }
-    CAmount mature = 0, immature = 0;
+    CAmount mature = 0, immature = 0, withdrawing = 0;
     QString next_unlock;
     int64_t best_height = -1;
     for (size_t i = 0; i < list.size(); ++i) {
         const UniValue& o = list[i];
         CAmount amt = 0;
         try { amt = AmountFromValue(o["amount"]); } catch (...) { continue; }
+        if (o["withdrawing"].isBool() && o["withdrawing"].get_bool()) {
+            withdrawing += amt;
+            continue;
+        }
         if (o["withdrawable"].isBool() && o["withdrawable"].get_bool()) {
             mature += amt;
             continue;
@@ -901,15 +907,19 @@ void StakingPage::refreshUnstakeInfo()
     }
     const QString ticker = BitcoinUnits::policyAssetTicker();
     QString text;
-    if (mature == 0 && immature == 0 && m_registry_stake > 0) {
-        // The registry credits this wallet's keys with stake, yet the wallet
-        // holds no staking output to spend. Saying "nothing is staked" here
-        // would contradict the card above, which just showed that weight.
-        // Two things cause it, and neither is withdrawable from here.
-        text = tr("Your %1 %2 of registered stake cannot be withdrawn from here: this wallet does not have "
-                  "the transaction that created it. Either that stake was set up from a different wallet, "
-                  "or this node was started with a stake written into its settings — a test setup, with no "
-                  "coins behind it to withdraw.")
+    if (withdrawing > 0 && mature == 0 && immature == 0) {
+        // The commonest reason the numbers look wrong right after a withdrawal:
+        // the coins are already spent, but the stake registry keeps crediting
+        // their weight until the withdrawal confirms.
+        text = tr("A withdrawal of %1 %2 has been sent and is waiting to confirm. Until it does, that amount "
+                  "still counts as your stake.")
+                   .arg(FormatWeight((uint64_t)withdrawing), ticker);
+    } else if (mature == 0 && immature == 0 && m_registry_stake > 0) {
+        // The registry credits this wallet's keys with stake, yet the wallet has
+        // no staking output to spend. Saying "nothing is staked" here would
+        // contradict the card above, which just showed that weight.
+        text = tr("Your %1 %2 of registered stake cannot be withdrawn from this wallet, because it does not "
+                  "have the transaction that created it — that stake was set up elsewhere.")
                    .arg(FormatWeight(m_registry_stake), ticker);
     } else if (mature == 0 && immature == 0) {
         text = tr("Nothing is staked from this wallet yet.");
@@ -938,6 +948,9 @@ void StakingPage::refreshUnstakeInfo()
             tip = tr("Nothing can be withdrawn yet: your %1 %2 is still serving its unbonding wait (%3). "
                      "The stake keeps counting — and earning — the whole time.")
                       .arg(FormatWeight((uint64_t)immature), ticker, next_unlock);
+        } else if (withdrawing > 0) {
+            tip = tr("A withdrawal of %1 %2 is already on its way and waiting to confirm.")
+                      .arg(FormatWeight((uint64_t)withdrawing), ticker);
         } else if (m_registry_stake > 0) {
             tip = tr("This wallet does not have the transaction that created your %1 %2 of registered "
                      "stake, so it cannot withdraw it.")
@@ -978,7 +991,15 @@ void StakingPage::onStakeMax()
                                           BitcoinUnits::policyAssetTicker()), true);
         return;
     }
-    m_stake_amount->setText(FormatWeight((uint64_t)(available - headroom)));
+    const CAmount most = available - headroom;
+    m_stake_amount->setText(FormatWeight((uint64_t)most));
+    // Always say what Max decided. Silently filling a field leaves the user
+    // wondering whether the click registered, and the reserved fee headroom is
+    // exactly the thing that is not obvious.
+    setCardResult(m_result, tr("Ready to stake %1 %2 — your whole balance except %3 %2, kept aside to pay the "
+                              "transaction's network fee.")
+                                .arg(FormatWeight((uint64_t)most), BitcoinUnits::policyAssetTicker(),
+                                     FormatWeight((uint64_t)headroom)), false);
 }
 
 void StakingPage::onUnstakeMax()
@@ -1001,13 +1022,19 @@ void StakingPage::onUnstake()
     // What the wallet has staked, and how much of it is withdrawable right now.
     UniValue list = callRpc("liststakeutxos", UniValue(UniValue::VARR), ok, err);
     if (!ok || !list.isArray()) { setCardResult(m_unstake_result, tr("Could not read the staked coins: %1").arg(err), true); return; }
-    CAmount mature_total = 0, immature_total = 0;
+    CAmount mature_total = 0, immature_total = 0, withdrawing_total = 0;
     QString next_unlock;
     int64_t best_height = -1;
     for (size_t i = 0; i < list.size(); ++i) {
         const UniValue& o = list[i];
         CAmount amt = 0;
         try { amt = AmountFromValue(o["amount"]); } catch (...) { continue; }
+        // Already on its way out: neither withdrawable again nor something the
+        // user is waiting to unlock.
+        if (o["withdrawing"].isBool() && o["withdrawing"].get_bool()) {
+            withdrawing_total += amt;
+            continue;
+        }
         if (o["withdrawable"].isBool() && o["withdrawable"].get_bool()) {
             mature_total += amt;
             continue;
@@ -1021,8 +1048,15 @@ void StakingPage::onUnstake()
         }
     }
     const QString ticker = BitcoinUnits::policyAssetTicker();
+    // The card's summary line was rendered at the last refresh and the numbers
+    // move with every block; re-render it from the very list just fetched, so
+    // the card and any refusal below can never quote two different totals.
+    refreshUnstakeInfo(&list);
     if (mature_total == 0 && immature_total == 0) {
-        setCardResult(m_unstake_result, tr("Nothing is staked from this wallet."), true);
+        setCardResult(m_unstake_result, withdrawing_total > 0
+            ? tr("A withdrawal of %1 %2 is already on its way; wait for it to confirm.")
+                  .arg(FormatWeight((uint64_t)withdrawing_total), ticker)
+            : tr("Nothing is staked from this wallet."), true);
         return;
     }
     if (mature_total == 0) {
