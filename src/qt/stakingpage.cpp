@@ -563,6 +563,7 @@ void StakingPage::refreshOwnStake(const UniValue& registry)
             mine += w;
         }
     }
+    m_registry_stake = mine;
     const double share = total > 0 ? (double)mine / (double)total : 0.0;
     if (m_my_stake) {
         m_my_stake->setText(mine > 0
@@ -863,7 +864,17 @@ void StakingPage::refreshUnstakeInfo()
     }
     const QString ticker = BitcoinUnits::policyAssetTicker();
     QString text;
-    if (mature == 0 && immature == 0) {
+    if (mature == 0 && immature == 0 && m_registry_stake > 0) {
+        // The registry credits this wallet's keys with stake, yet the wallet
+        // holds no staking output to spend. Saying "nothing is staked" here
+        // would contradict the card above, which just showed that weight.
+        // Two things cause it, and neither is withdrawable from here.
+        text = tr("Your %1 %2 of registered stake has no staking output this wallet can spend, so there is "
+                  "nothing to withdraw. That happens when the stake was declared by this node's "
+                  "configuration rather than funded on-chain, or when the staking transaction was made by "
+                  "a different wallet — withdrawing needs that transaction in this wallet's history.")
+                   .arg(FormatWeight(m_registry_stake), ticker);
+    } else if (mature == 0 && immature == 0) {
         text = tr("Nothing is staked from this wallet yet.");
     } else if (immature == 0) {
         text = tr("Withdrawable now: %1 %2. The unbonding wait for these coins has already been served.")
@@ -890,6 +901,10 @@ void StakingPage::refreshUnstakeInfo()
             tip = tr("Nothing can be withdrawn yet: your %1 %2 is still serving its unbonding wait (%3). "
                      "The stake keeps counting — and earning — the whole time.")
                       .arg(FormatWeight((uint64_t)immature), ticker, next_unlock);
+        } else if (m_registry_stake > 0) {
+            tip = tr("Your registered stake of %1 %2 has no staking output this wallet can spend: it was "
+                     "declared by this node's configuration, or funded by a different wallet.")
+                      .arg(FormatWeight(m_registry_stake), ticker);
         } else {
             tip = tr("Nothing is staked from this wallet, so there is nothing to withdraw.");
         }
