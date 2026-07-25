@@ -128,6 +128,12 @@ private:
 
     //! Public keys of the stakes this wallet controls, for "is this block ours".
     std::set<std::string> m_my_pubkeys;
+    //! Stake weight the REGISTRY credits to this wallet's keys (atoms). Can be
+    //! non-zero while the wallet holds no withdrawable staking output — config
+    //! declared stake (-staker / genesis) has no UTXO at all, and an output
+    //! funded by another wallet is not in this one's history. The Withdraw card
+    //! needs it to explain that gap instead of claiming nothing is staked.
+    uint64_t m_registry_stake{0};
     //! Cache of the costly per-staker ownership check (3 RPCs each): pubkey ->
     //! does this wallet control it. Membership never changes for a given key, so
     //! we only pay the derivation the first time we see a registered pubkey.
