@@ -1004,14 +1004,34 @@ void StakingPage::onStakeMax()
 
 void StakingPage::onUnstakeMax()
 {
-    // "Everything withdrawable" is what an empty field already means; clearing it
-    // keeps the two consistent and avoids a rounded number that no longer matches
-    // the exact mature total by the time the click lands.
-    if (m_unstake_amount) m_unstake_amount->clear();
-    if (m_unstake_info) {
-        setCardResult(m_unstake_result,
-                      tr("Set to withdraw everything available. Press Withdraw to continue."), false);
+    if (!m_wallet_model || !m_unstake_amount) return;
+    // Show the number. Leaving the field empty already means "everything", but a
+    // Max button that clears the box looks like it did nothing at all — the user
+    // pressed it to SEE how much there is.
+    bool ok; QString err;
+    UniValue list = callRpc("liststakeutxos", UniValue(UniValue::VARR), ok, err);
+    if (!ok || !list.isArray()) {
+        setCardResult(m_unstake_result, tr("Could not read the staked coins: %1").arg(err), true);
+        return;
     }
+    CAmount mature = 0;
+    for (size_t i = 0; i < list.size(); ++i) {
+        const UniValue& o = list[i];
+        if (o["withdrawing"].isBool() && o["withdrawing"].get_bool()) continue;
+        if (!(o["withdrawable"].isBool() && o["withdrawable"].get_bool())) continue;
+        try { mature += AmountFromValue(o["amount"]); } catch (...) {}
+    }
+    // Keep the summary line consistent with the figure just filled in.
+    refreshUnstakeInfo(&list);
+    if (mature <= 0) {
+        setCardResult(m_unstake_result, tr("There is nothing to withdraw right now."), true);
+        return;
+    }
+    const QString ticker = BitcoinUnits::policyAssetTicker();
+    m_unstake_amount->setText(FormatWeight((uint64_t)mature));
+    setCardResult(m_unstake_result, tr("Ready to withdraw %1 %2 — everything currently available. The network "
+                                       "fee is taken out of this amount.")
+                                        .arg(FormatWeight((uint64_t)mature), ticker), false);
 }
 
 void StakingPage::onUnstake()
