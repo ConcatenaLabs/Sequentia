@@ -113,6 +113,9 @@ The rates as pushed to the nodes, plus the per-asset decisions:
 {
   "updated": 1784034446.66,
   "quote_currency": "USD",
+  "reference_unit": {"api_units_per_reference_unit": 1.0, "config_key": null,
+                     "quote_currency": "USD",
+                     "note": "rates are the value of one whole unit in reference units, scaled by 1e8; one reference unit = 1 USD"},
   "rates":     {"<asset-id-64-hex>": 5238188, "...": 100000000},
   "decisions": [{"ticker": "SEQ", "id": "<asset-id>", "domain": "sequentia.io",
                  "price": 0.0524, "price_unit": "USD",
@@ -123,11 +126,14 @@ The rates as pushed to the nodes, plus the per-asset decisions:
 A rate is the value of **one whole unit of the asset, in reference units, scaled
 by 1e8** (an asset with fewer than 8 decimals carries a further `10**(8 -
 decimals)`, so the node can value fees precision-blind), so `rate / 1e8` is the
-asset's price in reference units. Every `decisions` entry carries the rate that
-was actually published, so the two halves of the response never state different
-frames. With the default conversion factor of `1.0` the reference unit *is* the
-quote currency (usually USD) and a rate is simply the asset's USD price scaled by
-1e8; see [Reference unit](#reference-unit).
+asset's price in reference units. `reference_unit` states that frame: the
+conversion factor in force, the config key it came from (`null` when none is set,
+so the default `1.0` applies) and the quote currency it converts from. Without
+it, `quote_currency` alone would describe the rates only under the identity
+factor. Every `decisions` entry carries the rate that was actually published,
+so the two halves of the response never state different frames: the rates and the
+decisions are always from one and the same completed poll. See
+[Reference unit](#reference-unit).
 
 `price_unit` names the unit of that row's `price`, which is not the same for
 every row: a market price is quoted in `quote_currency`, while a manual price is
@@ -153,10 +159,6 @@ The rates pushed to the nodes are in **reference units**, which the next section
 defines. They coincide with the quote currency under the default conversion
 factor of `1.0`, so most operators can read the two words as one thing. They part
 company as soon as the factor is changed, or when an asset is priced by hand.
-
-(A legacy `reference_asset_label` config key denominates the rates against an
-on-chain asset instead of a factor; it is advanced, off by default, and not
-exposed in the UI. See `ORACLE-AND-REFERENCE-DESIGN.md`.)
 
 ## Market-source scope & manual prices
 
@@ -207,16 +209,30 @@ is anything at or below `5e-9`: such a factor cannot be applied to integer rates
 at all, and accepting it would leave the server describing a frame its rates do
 not carry.
 
-### Legacy: `reference_asset_label`
+### The reference unit is never a token
 
-Set instead of a factor, `reference_asset_label` makes **one on-chain token** the
-reference unit: that token is published at `1e8` and every market-priced asset is
-divided by it. A conversion factor, if one is configured, wins over the label.
-Manual prices are still published exactly as entered, in that token's units. The
-single exception is the labelled token *itself* being priced by hand: the label
-already declares it to be the reference unit, so the number the operator types
-for it can only be its price in the **quote currency**, which is exactly the
-divisor the market-priced assets need.
+There is no mode in which the reference unit *is* an on-chain asset. An earlier
+`reference_asset_label` key pinned a named token's rate to `1e8` and divided
+every other rate by it; it was **removed**.
+
+A reference unit that is a token stops being a denomination and becomes a
+privileged asset wearing one: every other asset's rate turns into a quote against
+that one token's fortunes, which is exactly the privileged-anchor concept the
+abstract factor exists to remove. In Sequentia the Sequence token (ticker `SEQ`)
+has equal standing with every issued asset, and that generalises: no asset is the
+unit of account.
+
+Want a unit that happens to equal one USDX today? Express it as a **factor**, not
+as a name: set `api_units_per_reference_unit` to that token's price in the
+market source's numeraire (`0.05` if the token is worth $0.05 and the source
+quotes USD). The ratios in the whitelist are the same ones the old mode produced,
+and the token lands on `1e8` by arithmetic rather than by privilege, floating
+again as soon as its price moves.
+
+A config that still sets `reference_asset_label` **refuses to start**, naming the
+key and the factor to replace it with. Ignoring the key would be worse than
+stopping: the whitelist would go out in a denomination the operator never chose,
+and a fee denomination is not something to change behind their back.
 
 ## Admission rule engine
 
@@ -272,7 +288,8 @@ keep it private.
     "assets": []                            // tickers/ids the mode refers to
   },
 
-  "manual_prices": {},                      // {"TICKER": price-in-quote} for assets without a market source
+  "api_units_per_reference_unit": 1.0,      // reference unit as a FACTOR: API-numeraire units per reference unit
+  "manual_prices": {},                      // {"TICKER": price-in-reference-units} for assets without a market source
   "feed_aliases": {"TSEQ": "SEQ"},          // registry ticker -> feed key, when they differ
 
   "default_thresholds": {"require": "all"}, // admission rules (see above)

@@ -16,13 +16,17 @@ What is pinned here:
   * a MANUAL price is entered in reference units and must NOT be translated by
     the reference-unit conversion factor, while an API-sourced price MUST be;
   * the identity factor (1.0, the default) changes nothing at all;
-  * the legacy config key still works, and so does the legacy pinned-token mode,
-    including when the pinned token is the one priced by hand;
+  * the legacy factor KEY still works (it names a factor, so it stays);
+  * the reference unit is ALWAYS an abstract factor: the pinned-token mode is
+    gone, and a config still asking for it is refused rather than run under a
+    silently different denomination;
   * the frame the server REPORTS is the frame it APPLIES: an unusable factor is
-    refused rather than silently ignored, the admin page names the mode actually
-    in force, and every decision row states the rate that was published.
+    refused rather than silently ignored, the admin page names the frame actually
+    in force, /api/whitelist discloses it, and every decision row states the rate
+    that was published.
 """
 
+import json
 import os
 import sys
 import unittest
@@ -262,64 +266,47 @@ class ReferenceFactorAccessor(unittest.TestCase):
         self.assertEqual(rates["USDX"], round(ps.COIN * ps.COIN / round(5.1e-9 * ps.COIN)))
 
 
-class LegacyReferenceAssetLabel(unittest.TestCase):
-    """The pinned-token mode is untouched, except that manual prices no longer
-    get dragged through it either."""
+class ThePinnedTokenModeIsGone(unittest.TestCase):
+    """The reference unit is always an abstract factor. A token pinned at 1e8
+    would be a privileged anchor every other rate quotes against, which is what
+    the factor exists to prevent, so the mode was removed and a config still
+    asking for it is REFUSED. Ignoring the key would publish a whitelist in a
+    denomination the operator never chose."""
 
-    def test_the_labelled_token_is_pinned_to_coin(self):
-        rates, _ = run_poll(base_cfg(reference_asset_label="USDX"), LIVE_PRICES)
-        self.assertEqual(rates["USDX"], ps.COIN)
-        self.assertEqual(rates["GOLD"], round(ps.scaled_rate(LIVE_PRICES["GOLD"], 8) * ps.COIN
-                                              / ps.scaled_rate(LIVE_PRICES["USDX"], 8)))
+    def test_a_config_that_still_pins_a_token_is_refused(self):
+        with self.assertRaises(ps.ConfigError) as caught:
+            ps.PriceServer(base_cfg(reference_asset_label="USDX"), dry_run=True)
+        msg = str(caught.exception)
+        self.assertIn("reference_asset_label", msg)
+        self.assertIn("api_units_per_reference_unit", msg)  # what to use instead
+        self.assertIn("abstract factor", msg)               # and why
 
-    def test_a_manual_price_is_published_as_entered(self):
-        cfg = base_cfg(reference_asset_label="GOLD", manual_prices={"MANU": 100.0})
-        cfg["source"] = dict(cfg["source"], mode="except", assets=["MANU"])
-        rates, _ = run_poll(cfg, dict(LIVE_PRICES, MANU=7.0))
-        self.assertEqual(rates["MANU"], 100 * ps.COIN)
+    def test_the_check_is_reusable_and_passes_a_clean_config(self):
+        self.assertIsNone(ps.check_config(base_cfg(api_units_per_reference_unit=0.88)))
+        with self.assertRaises(ps.ConfigError):
+            ps.check_config({"reference_asset_label": "SEQ"})
 
-    def anchored_on_a_manual_price(self):
-        """The anchor named by the label is the one asset the API does not price,
-        so the operator prices it by hand. This is the config the split broke."""
-        cfg = base_cfg(reference_asset_label="ANCHOR", manual_prices={"ANCHOR": 2.0})
-        cfg["source"] = dict(cfg["source"], mode="except", assets=["ANCHOR"])
-        return cfg
+    def test_a_pinning_config_never_reaches_a_poll(self):
+        # Refusal happens at construction, so there is no path on which a round
+        # is published under a denomination the server cannot produce.
+        with self.assertRaises(ps.ConfigError):
+            run_poll(base_cfg(reference_asset_label="USDX"), LIVE_PRICES)
 
-    def test_a_manually_priced_anchor_still_publishes(self):
-        # The regression: the anchor lived in the manual map, _denominate could
-        # not see it, and the server published NOTHING every poll.
-        rates, statuses = run_poll(self.anchored_on_a_manual_price(),
-                                   {"ANCHOR": 9.0, "USDX": 1.0, "GOLD": LIVE_PRICES["GOLD"]})
-        self.assertEqual(statuses["ANCHOR"], "admitted (manual price)")
-        self.assertEqual(len(rates), 3, rates)
-        # The label declares the anchor to BE the reference unit, so it is 1e8,
-        # and the hand-entered 2.0 is what the market-priced assets divide by.
-        self.assertEqual(rates["ANCHOR"], ps.COIN)
-        self.assertEqual(rates["USDX"], round(ps.scaled_rate(1.0, 8) * ps.COIN / ps.scaled_rate(2.0, 8)))
-        self.assertEqual(rates["GOLD"], round(ps.scaled_rate(LIVE_PRICES["GOLD"], 8) * ps.COIN
-                                              / ps.scaled_rate(2.0, 8)))
+    def test_the_key_is_not_a_factor_and_is_not_read_as_one(self):
+        self.assertNotIn("reference_asset_label", ps.REFERENCE_FACTOR_KEYS)
 
-    def test_an_api_priced_anchor_wins_over_a_manual_entry_for_it(self):
-        # Resolution order: api_rates first. A stale manual entry for an asset the
-        # feed does price is never consulted, exactly as when no label is set.
-        cfg = base_cfg(reference_asset_label="USDX", manual_prices={"USDX": 2.0})
-        rates, statuses = run_poll(cfg, LIVE_PRICES)
-        self.assertEqual(statuses["USDX"], "admitted")
-        self.assertEqual(rates["USDX"], ps.COIN)
-
-    def test_every_other_manual_price_keeps_meaning_anchor_units(self):
-        cfg = self.anchored_on_a_manual_price()
-        cfg["source"] = dict(cfg["source"], assets=["ANCHOR", "MANU"])
-        cfg["manual_prices"] = {"ANCHOR": 2.0, "MANU": 100.0}
-        rates, _ = run_poll(cfg, {"ANCHOR": 9.0, "USDX": 1.0, "MANU": 7.0})
-        self.assertEqual(rates["MANU"], 100 * ps.COIN)  # 100 anchor tokens, as typed
-        self.assertEqual(rates["ANCHOR"], ps.COIN)
-
-    def test_an_anchor_with_no_price_at_all_still_retains_last_good(self):
-        cfg = base_cfg(reference_asset_label="NOSUCH")
-        with self.assertLogs(ps.log, "WARNING"):
-            rates, _ = run_poll(cfg, LIVE_PRICES)
-        self.assertEqual(rates, {})
+    def test_the_equivalent_factor_reproduces_the_old_denomination(self):
+        # The migration the error message prescribes: the factor is the token's
+        # price in the API numeraire, so the ratios are the ones the label mode
+        # produced, and the named token lands on 1e8 by arithmetic rather than by
+        # being pinned there.
+        anchor = LIVE_PRICES["EURX"]  # 1.1375, so the frame really moves
+        rates, _ = run_poll(base_cfg(api_units_per_reference_unit=anchor), LIVE_PRICES)
+        self.assertEqual(rates["EURX"], ps.COIN)
+        for tk, price in LIVE_PRICES.items():
+            # exactly what the removed mode computed: divide by the anchor's rate
+            self.assertEqual(rates[tk], round(ps.scaled_rate(price, 8) * ps.COIN
+                                              / ps.scaled_rate(anchor, 8)), tk)
 
 
 class TheReportedFrameIsThePublishedFrame(unittest.TestCase):
@@ -349,6 +336,18 @@ class TheReportedFrameIsThePublishedFrame(unittest.TestCase):
         self.assertEqual(rows["USDX"]["price_unit"], "USD")
         self.assertEqual(rows["MANU"]["price_unit"], "reference units")
 
+    def test_the_report_and_the_rates_always_come_from_the_same_round(self):
+        # The removed pinned-token mode had a "reference asset unavailable this
+        # round" branch that stored THIS round's report beside the PREVIOUS
+        # round's rates: API rows pre-denomination, manual rows post, and none of
+        # them published. Nothing decides the frame from the data any more, so
+        # step 4 always yields a map and the two are always in step.
+        cfg = base_cfg(api_units_per_reference_unit=0.88, manual_prices={"MANU": 5.0})
+        cfg["source"] = dict(cfg["source"], mode="except", assets=["MANU"])
+        rates, rows = self.decisions(cfg, dict(LIVE_PRICES, MANU=7.0))
+        self.assertEqual({r["id"]: r["rate"] for r in rows.values() if r["rate"] is not None},
+                         {asset_id(tk): rate for tk, rate in rates.items()})
+
     def test_a_rate_lost_to_the_clamp_is_not_reported_as_admitted(self):
         # A factor small enough to inflate a rate past MAX_RATE drops it at the
         # clamp; the row must not keep claiming a rate that was never published.
@@ -377,22 +376,51 @@ class TheAdminPageNamesTheModeInForce(unittest.TestCase):
         self.assertIn("0.88 USD", note)
         self.assertIn("api_units_per_reference_unit", note)
 
-    def test_the_legacy_label_is_named_as_the_reference_unit(self):
-        # The bug: reference_factor() returns (1.0, None) here, so the note used
-        # to announce the USD identity while _denominate pinned the token.
-        note = self.note(reference_asset_label="TSEQ")
-        self.assertIn("one TSEQ token", note)
-        self.assertNotIn("the identity", note)
-
-    def test_a_configured_factor_outranks_the_label_in_the_note_too(self):
-        note = self.note(api_units_per_reference_unit=0.88, reference_asset_label="TSEQ")
-        self.assertIn("0.88 USD", note)
-        self.assertNotIn("TSEQ", note)
-
     def test_a_refused_factor_is_not_announced(self):
         with self.assertLogs(ps.log, "WARNING"):
             note = self.note(api_units_per_reference_unit=1e-9)
         self.assertIn("one USD, the market source's own quote currency", note)
+
+    def test_the_manual_price_hint_states_one_frame_for_every_row(self):
+        # There is no token to special-case any more, so the hint above the
+        # manual-price rows says "reference units" and means it for every row.
+        card = ps._scope_and_manual_cards(ps.PriceServer(base_cfg(api_units_per_reference_unit=0.88),
+                                                         dry_run=True))
+        self.assertIn("expressed in this server's <b>reference units</b>", card)
+        self.assertIn("never re-denominated", card)
+        self.assertNotIn("token", card)
+
+
+class TheWhitelistApiDisclosesTheFrame(unittest.TestCase):
+    """/api/whitelist is consumed by other operators' price servers, so it has to
+    say which unit its rates are in, not only which currency the source quotes."""
+
+    def payload(self, cfg, prices):
+        _rates, srv = poll_server(cfg, prices)
+        return ps._whitelist_payload(srv)
+
+    def test_the_factor_and_the_key_in_force_are_published(self):
+        p = self.payload(base_cfg(api_units_per_reference_unit=0.88), LIVE_PRICES)
+        self.assertEqual(p["reference_unit"]["api_units_per_reference_unit"], 0.88)
+        self.assertEqual(p["reference_unit"]["config_key"], "api_units_per_reference_unit")
+        self.assertEqual(p["reference_unit"]["quote_currency"], "USD")
+        self.assertEqual(p["quote_currency"], "USD")  # unchanged for older consumers
+
+    def test_the_default_identity_is_stated_explicitly(self):
+        p = self.payload(base_cfg(), LIVE_PRICES)
+        self.assertEqual(p["reference_unit"]["api_units_per_reference_unit"], 1.0)
+        self.assertIsNone(p["reference_unit"]["config_key"])  # nothing configured
+
+    def test_the_legacy_factor_key_is_named_as_the_one_in_force(self):
+        p = self.payload(base_cfg(reference_price_usd=0.375), LIVE_PRICES)
+        self.assertEqual(p["reference_unit"]["config_key"], "reference_price_usd")
+
+    def test_the_payload_is_json_serialisable_and_carries_the_published_rates(self):
+        p = self.payload(base_cfg(api_units_per_reference_unit=0.88), LIVE_PRICES)
+        round_tripped = json.loads(json.dumps(p))
+        self.assertEqual(len(round_tripped["rates"]), len(LIVE_RATES))
+        self.assertTrue(all(r["rate"] == round_tripped["rates"][r["id"]]
+                            for r in round_tripped["decisions"]), round_tripped["decisions"])
 
 
 if __name__ == "__main__":
