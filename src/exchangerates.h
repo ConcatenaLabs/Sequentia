@@ -42,19 +42,32 @@ private:
     //! (ConvertAmountToValue/ConvertValueToAmount).
     Mutex m_write_mutex;
 
-    ExchangeRateMap() {}
-    ExchangeRateMap(const CAmount& default_asset_rate) {
-        (*this)[::policyAsset] = default_asset_rate;
-    }
+    ExchangeRateMap() { ResetToBootstrapRates(); }
 
 public:
     static ExchangeRateMap& GetInstance() {
-        static ExchangeRateMap instance(exchange_rate_scale); // Guaranteed to be destroyed and instantiated only once
+        static ExchangeRateMap instance; // Guaranteed to be destroyed and instantiated only once
         return instance;
     }
 
     /**
+     * Seed the out-of-box whitelist: the policy asset alone, priced at
+     * exchange_rate_scale.
+     *
+     * SEQUENTIA: this SEED is the entire bootstrap mechanism. It is what lets a
+     * node that has never been configured accept fees at all, and it is why the
+     * converters need no special case for the policy asset: an unlisted asset is
+     * unlisted, whichever asset it is. The reference unit stays an abstract
+     * factor and is never itself a token; the seed merely states an opening
+     * price for one asset, which an operator or price-server sidecar is free to
+     * change, set to 0 (refuse), or drop entirely by replacing the whitelist.
+     */
+    void ResetToBootstrapRates();
+
+    /**
      * Convert an amount denominated in some asset to reference fee atoms.
+     * An asset absent from the whitelist is not accepted and values to 0, with
+     * no exception for the policy asset.
      * @param[in]   amount       Corresponds to CTxMemPoolEntry.nFee
      * @param[in]   asset        Corresponds to CTxMemPoolEntry.nFeeAsset
      * @return the value at the current exchange rate. Corresponds to CTxMemPoolEntry.nFeeValue
@@ -63,6 +76,8 @@ public:
 
     /**
      * Convert an amount denominated in reference fee atoms into some asset.
+     * An asset absent from the whitelist is not accepted and converts to 0, with
+     * no exception for the policy asset.
      * @param[in]   value        Corresponds to CTxMemPoolEntry.nFeeValue
      * @param[in]   asset        Corresponds to CTxMemPoolEntry.nFeeAsset
      * @return the amount at the current exchange rate. Corresponds to CTxMemPoolEntry.nFee
@@ -82,6 +97,7 @@ public:
     UniValue ToJSON();
 
     //! The whitelist as JSON with one nested object per asset ({ "rate": n }).
+    //! This is exactly the accept set: there is no implicit entry to materialise.
     UniValue AcceptancePolicyToJSON();
 
     //! Replace the whole whitelist from parsed JSON (asset label/hex -> rate).
@@ -91,7 +107,9 @@ public:
      *  sidecar — the node treats them identically. */
     void SetRates(const std::map<CAsset, CAmount>& rates);
 
-    /** Empty the whitelist (only the policy asset's 1:1 default remains). */
+    /** Empty the whitelist. Nothing survives: an empty whitelist accepts NO fee
+     *  asset, the policy asset included. Use ResetToBootstrapRates() to get back
+     *  to the out-of-box state instead. */
     void ClearRates();
 };
 

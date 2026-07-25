@@ -47,7 +47,10 @@ static RPCHelpMan setfeeexchangerates()
 {
     return RPCHelpMan{"setfeeexchangerates",
                 "\nSet the whitelist of assets and their exchange rates the mempool uses when valuating fee payments.\n"
-                "The given set replaces the whole whitelist (pass {} to clear it).\n"
+                "The given set replaces the whole whitelist. An asset left out of the set is not accepted, exactly\n"
+                "as if it were listed at rate 0, and that applies to every asset including the fee/policy asset:\n"
+                "the reference unit is an abstract factor, never a token, so no asset is valued by default. Passing\n"
+                "{} therefore leaves this node accepting NO fee asset at all, which will empty its mempool.\n"
                 "\nThere is a single whitelist; \"static\" versus \"dynamic\" is only how it is operated, not a\n"
                 "protocol distinction. By default the set persists to " + exchange_rates_config_file + " so a\n"
                 "hand-configured (static) whitelist survives a restart. A price server that drives the whitelist\n"
@@ -90,7 +93,9 @@ static RPCHelpMan setfeeexchangerates()
 static RPCHelpMan getfeeacceptancepolicy()
 {
     return RPCHelpMan{"getfeeacceptancepolicy",
-                "\nGet the fee-asset acceptance policy: every asset currently accepted for fee payment and its exchange rate.\n",
+                "\nGet the fee-asset acceptance policy: every asset currently accepted for fee payment and its exchange rate.\n"
+                "This is the complete accept set. There is no implied entry: an asset absent from the result is not\n"
+                "accepted, and an asset present with rate 0 is explicitly refused.\n",
                 {},
                 {
                     RPCResult{"policy", RPCResult::Type::OBJ, "", "",
