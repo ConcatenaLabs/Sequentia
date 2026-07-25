@@ -20,8 +20,8 @@ def creds(path):
 
 
 # The demo's live, spendable test assets (Batch B): re-issued after the reorg
-# storm orphaned the first batch, now buried/trusted in livetest. tSEQ is the
-# reference (see reference_asset_label below).
+# storm orphaned the first batch, now buried/trusted in livetest. No asset among
+# them is the reference: the reference unit is a factor (see below).
 ASSETS = [
     ("SEQ",   "c8eccacf0953e1931cd31e434d8319101cc36e6c38b0e2104d8687552fae3e40"),
     ("USDX",  "dc7f45fcfeb17c8ae74e284472d85543395f50e88f4a36cb652e8102703b7027"),
@@ -44,9 +44,15 @@ cfg = {
     "poll_interval_secs": 30,
     "source_timeout": 10,
     "source_name": "mock-price-api",
-    # SEQ is the native gas asset, so price the whole table in SEQ: SEQ -> 1e8,
-    # every other asset expressed in SEQ units (driven by SEQ's market price).
-    "reference_asset_label": "SEQ",
+    # The reference unit the rates are published in, as a CONVERSION FACTOR: how
+    # many of the feed's numeraire units (USD here) make one reference unit. 1.0
+    # is the identity, so the demo publishes the feed's own numeraire. It is
+    # never a token: pinning one asset at 1e8 would make every other rate a quote
+    # against that asset's fortunes, a privileged anchor, while in Sequentia the
+    # Sequence token (ticker SEQ) has equal standing with every issued asset and
+    # no asset is the unit of account. A unit that happens to equal one token
+    # today is expressed as that token's price in the feed's numeraire.
+    "api_units_per_reference_unit": 1.0,
     "node_rpcs": nodes,
     # Admission rule engine (see contrib/price-server/README.md). ALL criteria are
     # optional; combine them with "require": "all" (every configured criterion must

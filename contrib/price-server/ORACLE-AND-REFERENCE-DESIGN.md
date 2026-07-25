@@ -41,6 +41,17 @@ Notes carried forward:
 This is the key idea for the user's "pick any reference currency" feature. The
 reference denomination need NOT be a Sequentia asset — it can be USD, BTC, etc.
 
+**Settled since:** it must never BE one either. The shipped server states the
+reference unit as an abstract conversion factor
+(`api_units_per_reference_unit`), and the mode that named an on-chain token as
+the reference was removed. A reference unit that is a token stops being a
+denomination and becomes a privileged asset wearing one: every other rate turns
+into a quote against that token's fortunes. In Sequentia the Sequence token
+(ticker `SEQ`) has equal standing with every issued asset, so no asset is the
+unit of account. Read `nAsset: false` below as the only shape a future RFU may
+take; a unit that happens to equal one token today is expressed as that token's
+price in the feed's numeraire, which floats as soon as the price moves.
+
 - **RFU** — Reference Fee Unit: the chosen reference currency (e.g. 1 USD, 1 BTC).
 - **RFA** — Reference Fee Atom: the smallest unit fees are accounted in. `decimals`
   on the RFU sets how many RFA per RFU (e.g. RFU=USD with `decimals: 9` ⇒ 1 RFU = 1e9 RFA).

@@ -16,13 +16,22 @@ whitelist (see doc/sequentia/02-open-fee-market.md). Each round it:
      operator-supplied JSON paths.
   3. applies operator-defined ADMISSION RULES (thresholds + always-admit /
      always-reject exceptions) to decide which discovered assets to whitelist.
-  4. converts each admitted asset's price (in the API's quote currency, e.g.
-     USD) into the node's scaled rate. The node values a fee paid in an asset as
+  4. converts each admitted asset's price into the node's scaled rate, stated in
+     the operator's REFERENCE UNIT. An API-sourced price arrives in the API's
+     quote currency (e.g. USD) and is re-expressed in reference units by ONE
+     conversion factor, `api_units_per_reference_unit`: how many API-numeraire
+     units make one reference unit (default 1.0, the identity, which adopts the
+     API's numeraire as the reference unit). The reference unit is an abstract
+     factor, never a token, so no asset is a privileged 1:1 anchor; because every
+     API price is scaled by the same factor, the choice is economically inert.
+     A MANUALLY priced asset is the one exception: the operator enters that price
+     in reference units already, so it is published as given and never translated
+     a second time. The node values a fee paid in an asset as
      `atoms * rate / 1e8` and is precision-blind (it works purely in atoms), so
      the rate MUST carry the asset's denomination: for an asset with `precision`
      decimals the rate is `round(price * 1e8 * 10**(8 - precision))`. That is
      `round(price * 1e8)` for the common 8-decimal case (a no-op) and corrects
-     the valuation for any asset with a different denomination — otherwise a fee
+     the valuation for any asset with a different denomination, otherwise a fee
      paid in, say, a 2-decimal asset would be mis-valued by 1e6. Then it
   5. publishes the result via the node's `setfeeexchangerates` RPC with
      persist=false.
@@ -108,6 +117,48 @@ DEFAULT_QUOTE = "USD"
 # price.
 REFERENCE_FACTOR_KEYS = ("api_units_per_reference_unit", "reference_price_usd")
 DEFAULT_REFERENCE_FACTOR = 1.0
+
+# The reference unit is ALWAYS an abstract factor. A mode that made it a named
+# on-chain token (`reference_asset_label`, which pinned that token's rate to 1e8
+# and divided every other rate by it) was removed: a reference unit that IS a
+# token stops being a denomination and becomes a privileged asset wearing one.
+# Every other asset's rate then quotes against that token's fortunes, which is
+# the privileged-anchor concept the abstract factor exists to remove, and it
+# contradicts the Sequentia principle that the Sequence token (ticker SEQ) has
+# equal standing with every issued asset: no asset is the unit of account. An
+# operator who wants a unit that happens to equal one token today says so with a
+# FACTOR (that token's price in the API's numeraire), not with the token's name.
+# A config still setting the key is REFUSED rather than ignored, because
+# ignoring it would silently change the denomination the fees are quoted in.
+REMOVED_KEYS = {
+    "reference_asset_label": (
+        "the pinned-token reference mode was removed: the reference unit is always an "
+        "abstract factor, never a token, so that no asset is a privileged 1:1 anchor. "
+        "Express the same denomination as %s, the conversion factor giving that token's "
+        "price in the market source's numeraire (source.quote_currency): with the token "
+        "worth 0.05 USD and a USD-quoted source, set %s to 0.05. Then delete "
+        "reference_asset_label and start the server again."
+        % (REFERENCE_FACTOR_KEYS[0], REFERENCE_FACTOR_KEYS[0])),
+}
+
+
+class ConfigError(ValueError):
+    """A config the server refuses to run with."""
+
+
+def check_config(cfg):
+    """Raise ConfigError if the config uses a removed mode.
+
+    Refusing to start is deliberate. The alternative, warning and carrying on,
+    would publish a whitelist denominated differently from the one the operator
+    configured, and a fee denomination is not something to change behind their
+    back: every asset's rate would move at once, on a node that is live. An
+    unreadable config stops the server today (json.load throws); a config asking
+    for a denomination this server no longer knows how to produce is the same
+    class of problem, and the operator fixes it in one edit."""
+    for key, guidance in REMOVED_KEYS.items():
+        if key in cfg:
+            raise ConfigError("config key %r is no longer supported: %s" % (key, guidance))
 
 
 class NodeRPC:
@@ -257,6 +308,7 @@ class AssetState:
 
 class PriceServer:
     def __init__(self, config, dry_run=False, config_path=None):
+        check_config(config)  # every construction path, not just the CLI
         self.cfg = config
         self.dry_run = dry_run
         self.config_path = config_path
@@ -288,7 +340,7 @@ class PriceServer:
 
     def apply_config(self, *, source=None, thresholds=None, exceptions=None,
                      poll_interval=None, source_name=None, registry_url=None,
-                     reference=None, nodes=None, ui=None, manual_prices=None):
+                     nodes=None, ui=None, manual_prices=None):
         """Replace config sections from the UI and persist atomically."""
         with self._lock:
             if source is not None:
@@ -304,8 +356,6 @@ class PriceServer:
                 self.cfg["source_name"] = source_name
             if registry_url is not None:
                 self.cfg["registry_url"] = registry_url
-            if reference is not None:
-                self.cfg["reference_asset_label"] = reference
             if nodes is not None:
                 self.cfg["node_rpcs"] = nodes
                 self.cfg.pop("node_rpc", None)
@@ -436,62 +486,43 @@ class PriceServer:
         reference unit in the API's numeraire, scaled by COIN like every rate."""
         return {aid: max(1, round(r * COIN / ref_rate)) for aid, r in api_rates.items()}
 
-    def _denominate(self, api_rates, manual_rates, ticker_of_id):
+    def _denominate(self, api_rates, manual_rates):
         """Build the map to publish: the API-SOURCED rates re-expressed in the
         operator's reference unit, with the MANUAL rates merged in unchanged.
 
-        The reference unit is an arbitrary and economically INERT denomination.
-        Every price the API quotes is translated by the SAME factor, so every
-        relative value survives untouched: dollars, euros or an entirely invented
-        unit produce identical RATIOS in the whitelist, and ratios are all the fee
-        market acts on. Choosing the reference unit changes what this server
-        displays, and nothing about the economics. Relative values always come
-        from the API.
+        The reference unit is an arbitrary and economically INERT denomination,
+        set by ONE conversion factor (api_units_per_reference_unit, or its legacy
+        name reference_price_usd): how many API-numeraire units make one reference
+        unit. Every price the API quotes is translated by that SAME factor, so
+        every relative value survives untouched: dollars, euros or an entirely
+        invented unit produce identical RATIOS in the whitelist, and ratios are
+        all the fee market acts on. Choosing the reference unit changes what this
+        server displays, and nothing about the economics. Relative values always
+        come from the API. Nothing is a privileged 1:1 anchor: every asset
+        floats, the Sequence token exactly like any other.
 
-        It becomes load-bearing in exactly ONE place: an asset the API does not
-        price, which the operator therefore prices BY HAND. A hand-entered price
-        is ALREADY in reference units, so it is merged in as it stands and is
-        never translated a second time, while everything the API priced is
-        translated exactly once.
+        The factor becomes load-bearing in exactly ONE place: an asset the API
+        does not price, which the operator therefore prices BY HAND. A
+        hand-entered price is ALREADY in reference units, so it is merged in as
+        it stands and is never translated a second time, while everything the API
+        priced is translated exactly once.
 
-        Two modes:
-          - a conversion factor (api_units_per_reference_unit, or its legacy name
-            reference_price_usd): how many API-numeraire units make one reference
-            unit. Nothing is a privileged 1:1 anchor; every asset floats, the
-            Sequence token exactly like any other.
-          - reference_asset_label: pins a Sequentia TOKEN to COIN (legacy; that
-            token IS privileged as the 1:1 anchor).
-        With neither, rates are published in the API's numeraire directly, which
-        is the same thing as a factor of 1.0."""
-        factor, key = self.reference_factor()
-        if key is not None:
-            # reference_factor() only returns factors that round to a usable
-            # divisor, so this cannot be 0.
-            return {**self._rescale(api_rates, round(factor * COIN)), **manual_rates}
-        ref_label = self.cfg.get("reference_asset_label")
-        if not ref_label:
+        With no factor configured the default 1.0 applies, which publishes the
+        API's numeraire unchanged. Whatever the factor, this ALWAYS returns a map:
+        the frame is decided from config alone, so no asset's availability can
+        decide whether this round publishes at all."""
+        factor, _key = self.reference_factor()
+        # reference_factor() only returns factors that round to a usable divisor,
+        # so this cannot be 0.
+        divisor = round(factor * COIN)
+        if divisor == COIN:
+            # The identity: one reference unit IS one API-numeraire unit, so the
+            # API rates pass through as they are. Taken as a branch rather than
+            # left to _rescale because scaling by COIN and dividing by COIN is a
+            # no-op only in exact arithmetic: in floats it would round the low
+            # digits of a large rate for nothing.
             return {**api_rates, **manual_rates}
-        ref_id = next((aid for aid, tk in ticker_of_id.items() if tk.upper() == str(ref_label).upper()), None)
-        api_ref = api_rates.get(ref_id) if ref_id is not None else None
-        manual_ref = manual_rates.get(ref_id) if ref_id is not None else None
-        if api_ref:
-            return {**self._rescale(api_rates, api_ref), **manual_rates}
-        if manual_ref:
-            # The anchor has no API price this round because the operator priced
-            # it BY HAND. That one number is the only manual value this mode
-            # cannot read as a value in reference units: the label declares the
-            # anchor to BE the reference unit, and "one anchor token is worth N
-            # anchor tokens" states nothing. It is the anchor's price in the API's
-            # numeraire, which is precisely the divisor the API-sourced rates
-            # need, and the anchor then publishes at COIN, one reference unit, by
-            # definition of the mode rather than by translating it again. Every
-            # OTHER manual price is merged untouched, so it keeps meaning what the
-            # operator typed: N reference units, that is, N anchor tokens.
-            rates = {**self._rescale(api_rates, manual_ref), **manual_rates}
-            rates[ref_id] = COIN
-            return rates
-        log.warning("reference asset %r unavailable this round; retaining last-good", ref_label)
-        return None
+        return {**self._rescale(api_rates, divisor), **manual_rates}
 
     @staticmethod
     def _clamp(rates):
@@ -571,12 +602,11 @@ class PriceServer:
         # numeraire, a hand-entered one is in reference units. The table and
         # /api/whitelist read it rather than assuming a single frame.
         quote_unit = src.get("quote_currency", DEFAULT_QUOTE)
-        raw, manual_rates, report, ticker_of_id = {}, {}, [], {}
+        raw, manual_rates, report = {}, {}, []
         with self._lock:
             rejects = [str(x).upper() for x in self.exceptions().get("always_reject", [])]
             for ticker in sorted(reg_tickers):
                 asset_id, domain, precision = registry[ticker]
-                ticker_of_id[asset_id] = ticker
                 tk_u = ticker.upper()
                 feed_key = aliases.get(tk_u, tk_u)
                 covered = source_covers(tk_u, feed_key, asset_id)
@@ -590,9 +620,10 @@ class PriceServer:
                             # mp is already in REFERENCE units, so this rate is
                             # the one that gets published: the range check below
                             # runs in the very frame the operator typed, and no
-                            # re-denomination is applied to it afterwards
-                            # (_denominate documents the one legacy exception, an
-                            # asset that is itself the reference_asset_label).
+                            # re-denomination is ever applied to it afterwards.
+                            # EVERY manual row is in reference units, without
+                            # exception, because no asset can be the reference
+                            # unit any more.
                             rate = scaled_rate(mp, precision)
                             if not (0 < rate <= MAX_RATE):
                                 status, rate = "skipped: manual rate out of range", None
@@ -617,17 +648,19 @@ class PriceServer:
                                "price": m.get("price"), "price_unit": quote_unit,
                                "rate": rate, "status": status})
 
-        # 4) (optional) re-denominate the API-sourced rates into the reference
-        #    unit, and merge the manual ones in UNCHANGED (they were entered in
-        #    reference units already; translating them again would misprice them
-        #    against everything else). The two maps are disjoint by construction,
-        #    an asset takes the manual branch only when it has no API price, so
-        #    the merge order only matters as a guarantee: a manual price wins.
-        rates = self._denominate(raw, manual_rates, ticker_of_id)
-        if rates is None:
-            self.last_report = report
-            return self.last_rates
-        rates = self._clamp(rates)
+        # 4) re-denominate the API-sourced rates into the reference unit, and
+        #    merge the manual ones in UNCHANGED (they were entered in reference
+        #    units already; translating them again would misprice them against
+        #    everything else). The two maps are disjoint by construction, an asset
+        #    takes the manual branch only when it has no API price, so the merge
+        #    order only matters as a guarantee: a manual price wins.
+        #
+        #    This step always yields a map, so the report below is always restated
+        #    against the rates of THIS round. The earlier returns (registry or
+        #    price fetch failed) leave last_report untouched along with
+        #    last_rates, so the two stay from one and the same completed poll:
+        #    a stored report never describes rates that were not published.
+        rates = self._clamp(self._denominate(raw, manual_rates))
         # Restate every decision in the frame that was actually PUBLISHED. The
         # per-asset rates recorded in step 3 are pre-denomination for the
         # API-sourced ones and post-denomination for the manual ones, which would
@@ -733,6 +766,33 @@ def _src(srv):
         "price_path": s.get("price_path", "price"),
         "market_cap_path": s.get("market_cap_path", "market_cap"),
         "volume_24h_path": s.get("volume_24h_path", "volume_24h"),
+    }
+
+
+def _whitelist_payload(srv):
+    """The body of GET /api/whitelist: the published rates, the per-asset
+    decisions, and the FRAME both are stated in.
+
+    The rates are in reference units, which are only the same thing as the quote
+    currency under the identity factor. Naming the quote currency alone would
+    therefore disclose the wrong frame to anyone re-using this server as their
+    market source, so the reference unit is spelled out: the factor in force, the
+    config key it came from (null when none is set and the default applies), and
+    the quote currency it converts from."""
+    quote = _src(srv)["quote_currency"]
+    factor, factor_key = srv.reference_factor()
+    return {
+        "updated": srv.last_poll_ts,
+        "quote_currency": quote,
+        "reference_unit": {
+            "api_units_per_reference_unit": factor,
+            "config_key": factor_key,
+            "quote_currency": quote,
+            "note": ("rates are the value of one whole unit in reference units, scaled by 1e8; "
+                     "one reference unit = %g %s" % (factor, quote)),
+        },
+        "rates": srv.last_rates,
+        "decisions": srv.last_report,
     }
 
 
@@ -1052,18 +1112,13 @@ def _scope_and_manual_cards(srv):
     esc = html.escape
     s = dict(srv.source())
     quote = _src(srv)["quote_currency"]
-    # State the frame that is actually in force, in the same order of precedence
-    # _denominate applies it: a configured conversion factor wins over the legacy
-    # label, and with neither the reference unit is the quote currency itself.
-    # Claiming the quote-currency identity while the label mode is pinning a token
-    # would describe a frame the published rates do not carry.
+    # State the frame that is actually in force. The reference unit is always a
+    # conversion factor, so there are only two things to say: the identity (the
+    # quote currency itself), or the factor and the config key carrying it. A
+    # factor the server refused is not announced, because reference_factor()
+    # returns only what _denominate will apply.
     factor, factor_key = srv.reference_factor()
-    ref_label = srv.cfg.get("reference_asset_label")
-    if factor_key is None and ref_label:
-        ref_note = ("Reference unit: one " + esc(str(ref_label)) + " token, the anchor named by "
-                    "<code>reference_asset_label</code> in the config file (legacy mode). Rates are published "
-                    "relative to that token, not to " + esc(quote) + ".")
-    elif factor == 1.0:
+    if factor == 1.0:
         ref_note = ("Reference unit: one " + esc(quote) + ", the market source's own quote currency "
                     "(conversion factor 1.0, the identity).")
     else:
@@ -1485,11 +1540,8 @@ def start_config_ui(price_server, host, port):
                 self._send(200, json.dumps(data, indent=2), "application/json")
             elif path in ("/api/whitelist", "/status"):  # /status: legacy alias
                 if self._public_gate(ui_cfg().get("public_api")): return
-                self._send(200, json.dumps({
-                    "updated": srv.last_poll_ts,
-                    "quote_currency": _src(srv)["quote_currency"],
-                    "rates": srv.last_rates, "decisions": srv.last_report}, indent=2),
-                    "application/json")
+                self._send(200, json.dumps(_whitelist_payload(srv), indent=2),
+                           "application/json")
             elif path == "/":
                 if self._authed():
                     self._redirect("/admin")  # the desktop GUI opens the root URL
@@ -1624,6 +1676,14 @@ def main():
 
     with open(args.config) as f:
         config = json.load(f)
+
+    # Refuse a config asking for a denomination this server no longer produces,
+    # before anything reads a price or rewrites the file. See check_config().
+    try:
+        check_config(config)
+    except ConfigError as e:
+        log.error("%s: %s", args.config, e)
+        return 2
 
     if args.set_password:
         import getpass
