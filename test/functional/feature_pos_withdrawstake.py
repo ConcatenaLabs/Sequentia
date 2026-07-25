@@ -78,6 +78,20 @@ class PosWithdrawStakeTest(BitcoinTestFramework):
         addr = n0.getnewaddress()
         pub = n0.getaddressinfo(addr)["pubkey"]
         reg = n0.registerstake(pub, 100)
+
+        # Still in the mempool: the unbonding clock starts at the CONFIRMING
+        # block, so an unconfirmed stake is never withdrawable. Regression test —
+        # the mempool coin carries the MEMPOOL_HEIGHT sentinel as its height, and
+        # adding the CSV delay to it overflowed and reported "withdrawable now"
+        # for a stake registered seconds earlier.
+        pending = n0.liststakeutxos()
+        assert_equal(len(pending), 1)
+        assert_equal(pending[0]["confirmed"], False)
+        assert_equal(pending[0]["withdrawable"], False)
+        assert "funded_height" not in pending[0]
+        assert "waiting for the stake registration to confirm" in pending[0]["status"]
+        assert_raises_rpc_error(-4, "waiting for the stake registration to confirm", n0.withdrawstake)
+
         self.mine(1)
         fund_height = n0.getblockcount()
         assert_equal(n0.getstakerinfo()[pub], 100 * COIN)
@@ -86,6 +100,7 @@ class PosWithdrawStakeTest(BitcoinTestFramework):
         assert_equal(len(utxos), 1)
         assert_equal(utxos[0]["pubkey"], pub)
         assert_equal(utxos[0]["amount"], Decimal(100))
+        assert_equal(utxos[0]["confirmed"], True)
         assert_equal(utxos[0]["withdrawable"], False)
         assert_equal(utxos[0]["funded_height"], fund_height)
         assert_equal(utxos[0]["spendable_height"], fund_height + UNBONDING)
