@@ -103,6 +103,9 @@ private:
     QLabel* m_unstake_info{nullptr};      //!< what is withdrawable now / still unbonding
     QLineEdit* m_unstake_amount{nullptr};
     QPushButton* m_unstake_button{nullptr};
+    //! Enabled wrapper around the Withdraw button: carries the tooltip that says
+    //! why the button is greyed out (a disabled widget gets no tooltip events).
+    QWidget* m_unstake_button_holder{nullptr};
     QLabel* m_unstake_result{nullptr};
 
     // --- "Your stake" card ---

@@ -275,7 +275,17 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
     m_unstake_result->setTextInteractionFlags(Qt::TextSelectableByMouse);
     unstakeForm->addRow(QString(), m_unstake_info);
     unstakeForm->addRow(tr("Amount:"), m_unstake_amount);
-    unstakeForm->addRow(QString(), m_unstake_button);
+    // The button is disabled while nothing is withdrawable, and Qt does not
+    // deliver tooltip events to a disabled widget — so the "why is this grey"
+    // explanation has to hang on an enabled container around it.
+    m_unstake_button_holder = new QWidget(unstakeGroup);
+    {
+        QHBoxLayout* h = new QHBoxLayout(m_unstake_button_holder);
+        h->setContentsMargins(0, 0, 0, 0);
+        h->addWidget(m_unstake_button);
+        h->addStretch();
+    }
+    unstakeForm->addRow(QString(), m_unstake_button_holder);
     unstakeForm->addRow(tr("Result:"), m_unstake_result);
     layout->addWidget(unstakeGroup);
 
@@ -825,6 +835,10 @@ void StakingPage::refreshUnstakeInfo()
     if (!ok || !list.isArray()) {
         m_unstake_info->setText(tr("Staked coins unavailable: %1").arg(err));
         if (m_unstake_button) m_unstake_button->setEnabled(false);
+        if (m_unstake_button_holder) {
+            m_unstake_button_holder->setToolTip(
+                tr("Withdrawing is unavailable because the staked coins could not be read: %1").arg(err));
+        }
         return;
     }
     CAmount mature = 0, immature = 0;
@@ -864,6 +878,24 @@ void StakingPage::refreshUnstakeInfo()
     }
     m_unstake_info->setText(text);
     if (m_unstake_button) m_unstake_button->setEnabled(mature > 0);
+    // Say why the button is greyed out, right where the pointer already is: a
+    // disabled control with no explanation reads as a broken one. The tooltip
+    // goes on the enabled wrapper, since Qt sends no tooltip event to a
+    // disabled widget.
+    if (m_unstake_button_holder) {
+        QString tip;
+        if (mature > 0) {
+            tip = tr("Withdraw %1 %2 back to this wallet.").arg(FormatWeight((uint64_t)mature), ticker);
+        } else if (immature > 0) {
+            tip = tr("Nothing can be withdrawn yet: your %1 %2 is still serving its unbonding wait (%3). "
+                     "The stake keeps counting — and earning — the whole time.")
+                      .arg(FormatWeight((uint64_t)immature), ticker, next_unlock);
+        } else {
+            tip = tr("Nothing is staked from this wallet, so there is nothing to withdraw.");
+        }
+        m_unstake_button_holder->setToolTip(tip);
+        if (m_unstake_button) m_unstake_button->setToolTip(tip);
+    }
 }
 
 void StakingPage::onUnstake()
