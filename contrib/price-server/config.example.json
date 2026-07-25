@@ -22,11 +22,11 @@
     "format": "sequentia"
   },
 
-  "_reference_comment": "The numeraire the published rates are denominated in, as a price in the source's quote_currency. 1.0 = USD is the reference unit: a $1 stablecoin (USDX) gets rate 1e8, and the native token FLOATS against it. The node does NOT force the native/policy asset to be the 1:1 reference -- it is 1:1 only when UNLISTED, and the price server publishes it explicitly like any asset (ConvertAmountToValue in src/exchangerates.cpp), so the numeraire is free. Set this to the native token's own price to make IT the 1:1 reference instead. A local real-price feed is contrib/price-server/mock-price-api.py (Yahoo Finance; tBTC=BTC/USD, EURX/GOLD/SILVR/OILX real, tSEQ mocked at 0.375).",
-  "reference_price_usd": 1.0,
+  "_reference_comment": "The reference unit the published rates are denominated in, given as a CONVERSION FACTOR: how many of the API's numeraire units (source.quote_currency) make ONE reference unit. 1.0, the default, is the identity: the reference unit is the API's numeraire itself, so a $1 stablecoin (USDX) gets rate 1e8. The reference unit is economically INERT: translating every API price by the same factor preserves every relative value, so USD, EUR or an invented unit produce identical ratios in the whitelist. It changes what this server DISPLAYS, and nothing about the economics. No asset is a privileged 1:1 anchor: the node forces the policy asset to 1:1 only when it is UNLISTED, and this server publishes it explicitly like any other asset (ConvertAmountToValue in src/exchangerates.cpp). The factor matters in exactly one place: a manually priced asset, whose price is entered in reference units and is never translated. The previous key name reference_price_usd is still read, so older configs keep working. A local real-price feed is contrib/price-server/mock-price-api.py (Yahoo Finance; tBTC=BTC/USD, EURX/GOLD/SILVR/OILX real, tSEQ mocked).",
+  "api_units_per_reference_unit": 1.0,
 
   "manual_prices": {
-    "_comment": "Fixed prices (in the quote currency) for assets the market source does not cover: {\"TICKER\": 0.5} means 1 unit = 0.5 USD. Used only when an asset has no market price; such an asset is admitted at that rate (always_reject still wins)."
+    "_comment": "Fixed prices, IN REFERENCE UNITS, for assets the market source does not cover: {\"TICKER\": 0.5} means 1 unit is worth 0.5 reference units. They are published exactly as entered and are never re-denominated (api_units_per_reference_unit translates API-sourced prices only). Used only when an asset has no market price; such an asset is admitted at that rate (always_reject still wins)."
   },
 
   "feed_aliases": {
