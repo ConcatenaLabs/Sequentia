@@ -8,6 +8,7 @@
 #include <interfaces/chain.h>
 #include <interfaces/handler.h>
 #include <policy/fees.h>
+#include <pos.h>
 #include <primitives/transaction.h>
 #include <rpc/server.h>
 #include <script/standard.h>
@@ -64,6 +65,18 @@ WalletTx MakeWalletTx(CWallet& wallet, const CWalletTx& wtx)
         wtx.GetIssuanceAssets(i, &result.txin_issuance_asset[i], &result.txin_issuance_token[i]);
         result.txin_issuance_asset_amount.emplace_back(wtx.GetIssuanceAmount(wallet, i, false));
         result.txin_issuance_token_amount.emplace_back(wtx.GetIssuanceAmount(wallet, i, true));
+        // SEQUENTIA: is this input unbonding a stake? A staking output is a bare
+        // script that IsMine does not recognise, so the spend would otherwise
+        // read as a plain receive from nowhere. The funding transaction is a
+        // wallet transaction (registerstake spends this wallet's coins), so the
+        // spent output is reachable here.
+        if (g_con_pos && !result.spends_stake) {
+            const auto prev = wallet.mapWallet.find(txin.prevout.hash);
+            if (prev != wallet.mapWallet.end() && txin.prevout.n < prev->second.tx->vout.size() &&
+                ParseStakeScript(prev->second.tx->vout[txin.prevout.n].scriptPubKey)) {
+                result.spends_stake = true;
+            }
+        }
     }
     result.txout_is_mine.reserve(wtx.tx->vout.size());
     result.txout_address.reserve(wtx.tx->vout.size());
