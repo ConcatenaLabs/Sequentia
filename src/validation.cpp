@@ -2287,7 +2287,13 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
     if (!VrfVerify(parts->leader, seed, *proof, beta)) {
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-invalid", "invalid VRF sortition proof");
     }
-    uint64_t slot = PosVrfSlot(beta, weight, total_weight);
+    // Leader time-gate. From pos_exprace_height the slot comes from the
+    // exponential-race sortition (split-neutral, exactly proportional); below it,
+    // the legacy raw-beta slot. Both nodes on either side of the fork compute the
+    // same predicate off the block's height, so they never disagree on validity.
+    uint64_t slot = PosExpRaceActive(Params().GetConsensus(), pindexPrev->nHeight + 1)
+                        ? PosVrfSlotExp(beta, weight, total_weight)
+                        : PosVrfSlot(beta, weight, total_weight);
     if ((int64_t)block.GetBlockTime() < (int64_t)pindexPrev->nTime + (int64_t)slot * g_pos_slot_interval) {
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-early", "block produced before its VRF sortition slot opened");
     }

@@ -413,6 +413,10 @@ public:
         // SEQUENTIA PoS: enforce leader-paid coinbase fees from genesis. Mainnet
         // has no pre-rule history to grandfather (cf. CTestNetParams).
         consensus.pos_coinbase_leader_height = 0;
+        // Exponential-race leader election: disabled until mainnet launches and a
+        // coordinated activation height is set (hard fork; see params.h). Mainnet
+        // is not live yet, so this stays 0 for now.
+        consensus.pos_exprace_height = 0;
         consensus.nMaxBlockWeight = 200000;             // a twentieth of Bitcoin (doc 11 §4)
         consensus.connect_genesis_outputs = true;
         anyonecanspend_aremine = false;
@@ -655,6 +659,13 @@ public:
         // grandfathered while every block from here on binds fees to its leader.
         // The mainnet chain (CSequentiaParams) enforces from genesis (0).
         consensus.pos_coinbase_leader_height = 3500;
+        // Exponential-race leader election (hard fork; see params.h). Coordinated
+        // testnet activation height, agreed by the operators (Alberto + Andreas)
+        // on 2026-07-22 for ~36 hours out (testnet tip was ~39900, ~120 blk/h).
+        // Every node MUST run this binary before the chain reaches this height.
+        // The cadence floor guarantees >=30s/block, so the chain cannot reach it
+        // sooner than 36h; a Bitcoin-fork stall only delays it (never earlier).
+        consensus.pos_exprace_height = 44300;
         // SEQUENTIA: 200,000 weight units — a twentieth of Bitcoin's 4,000,000
         // — so that, at ~30-second blocks (20x Bitcoin's cadence), a saturated
         // chain grows at exactly the same total rate as a saturated Bitcoin
@@ -1388,6 +1399,11 @@ protected:
         if (g_pos_public_committee && !g_pos_bls) {
             throw std::runtime_error("-pospubliccommittee requires -posbls");
         }
+        // Exponential-race leader election activation height (hard fork; see
+        // params.h). Arg-readable only on this custom/regtest chain so tests can
+        // exercise the pre- and post-fork election and the transition; the real
+        // chains (CTestNetParams / CSequentiaParams) pin it in code. 0 = disabled.
+        consensus.pos_exprace_height = (int)args.GetIntArg("-posexpraceheight", 0);
         if (g_pos_public_committee &&
             (g_pos_committee_size < 1 || g_pos_committee_size > MAX_POS_PUBLIC_COMMITTEE_SIZE)) {
             throw std::runtime_error(strprintf("-poscommitteesize must be between 1 and %d under -pospubliccommittee", MAX_POS_PUBLIC_COMMITTEE_SIZE));

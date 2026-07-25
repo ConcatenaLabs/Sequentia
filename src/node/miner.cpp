@@ -304,7 +304,9 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
             if (!beta) {
                 throw std::runtime_error(strprintf("%s: malformed VRF proof", __func__));
             }
-            uint64_t slot = PosVrfSlot(*beta, registry.GetWeight(*pos_proposer), PosTotalWeight(registry));
+            uint64_t slot = PosExpRaceActive(Params().GetConsensus(), pindexPrev->nHeight + 1)
+                                ? PosVrfSlotExp(*beta, registry.GetWeight(*pos_proposer), PosTotalWeight(registry))
+                                : PosVrfSlot(*beta, registry.GetWeight(*pos_proposer), PosTotalWeight(registry));
             slot_open = (int64_t)pindexPrev->nTime + (int64_t)slot * g_pos_slot_interval;
         } else {
             std::optional<size_t> rank = PosRank(registry, seed, *pos_proposer);
