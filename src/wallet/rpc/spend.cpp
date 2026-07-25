@@ -228,7 +228,8 @@ struct StakeUtxo {
     CTxOut txout;
     ParsedStake parsed;          //!< staker pubkey, CSV, BLS registration, vesting lock
     CAmount amount{0};           //!< explicit policy-asset amount (the stake weight)
-    int fund_height{-1};         //!< height the funding output confirmed at
+    int fund_height{-1};         //!< height the funding output confirmed at (-1 while unconfirmed)
+    bool unconfirmed{false};     //!< the funding transaction is still in the mempool
     bool csv_mature{false};      //!< unbonding (BIP68) served, judged against the tip
     bool vesting_mature{false};  //!< liquid_locktime (BIP65) passed, or none carried
     int spendable_height{-1};    //!< height-based CSV: first block that may contain the spend
@@ -305,7 +306,23 @@ std::vector<StakeUtxo> FindWalletStakeUtxos(CWallet& wallet, const std::optional
     std::vector<StakeUtxo> live;
     for (StakeUtxo& s : found) {
         const Coin& coin = coins[s.outpoint];
-        if (coin.out.IsNull()) continue; // spent, or not yet confirmed
+        if (coin.out.IsNull()) continue; // spent
+
+        // findCoins reports mempool outputs too, with nHeight set to the
+        // MEMPOOL_HEIGHT sentinel (INT_MAX). An unconfirmed staking output has
+        // not started its unbonding clock at all — BIP68 counts from the block
+        // that CONFIRMS the funding — so it can never be withdrawable yet.
+        // Detect it by the height being beyond the tip, which also keeps the
+        // fund_height + csv arithmetic below from overflowing (that overflow
+        // wrapped negative and made an unconfirmed stake look mature).
+        if (coin.nHeight > (uint32_t)tip_height) {
+            s.fund_height = -1;
+            s.unconfirmed = true;
+            s.csv_mature = false;
+            s.vesting_mature = false;
+            live.push_back(std::move(s));
+            continue;
+        }
         s.fund_height = (int)coin.nHeight;
 
         // Unbonding (BIP68 relative lock): height-based counts blocks from the
@@ -350,6 +367,10 @@ int64_t ApproxSecondsPerBlock()
 //! "unbonding until block 45120 (around 2026-08-06T10:00:00Z)".
 std::string DescribeImmaturity(const StakeUtxo& s, int tip_height, int64_t tip_time)
 {
+    // Nothing to date yet: the unbonding clock starts at the confirming block.
+    if (s.unconfirmed) {
+        return "waiting for the stake registration to confirm; the unbonding delay starts from that block";
+    }
     if (!s.csv_mature) {
         if (s.spendable_height >= 0) {
             const int64_t eta = tip_time + (int64_t)(s.spendable_height - (tip_height + 1)) * ApproxSecondsPerBlock();
@@ -381,7 +402,8 @@ RPCHelpMan liststakeutxos()
                         {RPCResult::Type::NUM, "vout", "the funding output index"},
                         {RPCResult::Type::STR_AMOUNT, "amount", "the staked amount"},
                         {RPCResult::Type::STR_HEX, "pubkey", "the staker public key"},
-                        {RPCResult::Type::NUM, "funded_height", "height the stake confirmed at"},
+                        {RPCResult::Type::NUM, "funded_height", /*optional=*/true, "height the stake confirmed at (absent while unconfirmed)"},
+                        {RPCResult::Type::BOOL, "confirmed", "whether the registration has confirmed; the unbonding delay only starts then"},
                         {RPCResult::Type::BOOL, "withdrawable", "whether the stake can be withdrawn right now"},
                         {RPCResult::Type::NUM, "spendable_height", /*optional=*/true, "first block that could contain the withdrawal (height-locked stakes)"},
                         {RPCResult::Type::NUM_TIME, "spendable_time", /*optional=*/true, "earliest withdrawal time (time-locked stakes)"},
@@ -416,7 +438,8 @@ RPCHelpMan liststakeutxos()
         o.pushKV("vout", (int64_t)s.outpoint.n);
         o.pushKV("amount", ValueFromAmount(s.amount));
         o.pushKV("pubkey", HexStr(s.parsed.pubkey));
-        o.pushKV("funded_height", s.fund_height);
+        if (s.fund_height >= 0) o.pushKV("funded_height", s.fund_height);
+        o.pushKV("confirmed", !s.unconfirmed);
         o.pushKV("withdrawable", s.Mature());
         if (s.spendable_height >= 0) o.pushKV("spendable_height", s.spendable_height);
         if (s.spendable_time > 0) o.pushKV("spendable_time", s.spendable_time);
@@ -510,11 +533,20 @@ RPCHelpMan withdrawstake()
             mature.push_back(s);
         } else {
             immature_total += s.amount;
-            // The stake that unlocks first, for the "try again when" message.
-            if (!soonest || (s.spendable_height >= 0 && soonest->spendable_height >= 0
-                                 ? s.spendable_height < soonest->spendable_height
-                                 : s.spendable_time < soonest->spendable_time)) {
+            // The stake that unlocks first, for the "try again when" message. A
+            // still-unconfirmed stake is the worst candidate, not the best: its
+            // unbonding clock has not started, so it can only ever unlock after
+            // every confirmed one. Prefer a confirmed stake whenever there is one.
+            if (!soonest) {
                 soonest = &s;
+            } else if (soonest->unconfirmed != s.unconfirmed) {
+                if (soonest->unconfirmed) soonest = &s; // a confirmed one always wins
+            } else if (!s.unconfirmed) {
+                const bool by_height = s.spendable_height >= 0 && soonest->spendable_height >= 0;
+                if (by_height ? s.spendable_height < soonest->spendable_height
+                              : s.spendable_time < soonest->spendable_time) {
+                    soonest = &s;
+                }
             }
         }
     }
