@@ -18,6 +18,10 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <cmath>
+#include <limits>
+#include <vector>
+
 // These tests register small (weight 1..) stakes and assume permissive PoS
 // globals. BasicTestingSetup selects the MAIN chain, which now sets the real
 // Sequentia PoS parameters (g_pos_min_stake = 40,000 SEQ, committee 100, 30s
@@ -326,6 +330,91 @@ BOOST_AUTO_TEST_CASE(pos_vrf_slot_math)
         sum_small += PosVrfSlot(b, 1, 10);
     }
     BOOST_CHECK(sum_big * 3 < sum_small);
+}
+
+// Exponential-race sortition (PosVrfScoreExp / PosVrfSlotExp): the election is
+// exactly stake-proportional AND split-neutral -- splitting a stake into many
+// identities does not change its share of blocks, unlike raw-beta election.
+// This exercises the real fixed-point functions over a full-election simulation.
+BOOST_AUTO_TEST_CASE(pos_vrf_exprace)
+{
+    uint256 beta = uint256S("0x8000000000000000000000000000000000000000000000000000000000000000");
+    // Degenerate inputs match PosVrfSlot's contract; the function is deterministic.
+    BOOST_CHECK_EQUAL(PosVrfSlotExp(beta, 0, 10), POS_VRF_MAX_SLOT);
+    BOOST_CHECK_EQUAL(PosVrfSlotExp(beta, 1, 0), POS_VRF_MAX_SLOT);
+    BOOST_CHECK_EQUAL(PosVrfSlotExp(beta, 1, 10), PosVrfSlotExp(beta, 1, 10));
+    // More weight -> statistically earlier slot.
+    uint64_t sum_big = 0, sum_small = 0;
+    for (int i = 0; i < 500; ++i) {
+        uint256 b = ComputePosSeed(uint256(), i);
+        sum_big += PosVrfSlotExp(b, 9, 10);
+        sum_small += PosVrfSlotExp(b, 1, 10);
+    }
+    BOOST_CHECK(sum_big < sum_small);
+
+    // One election round: every staker draws a beta; the time-gate offer is
+    // max(slot,1)*interval; the field is the earliest-offering bucket; the
+    // winner is the lowest FINE score in that field (as BackedForRound would
+    // order it). Returns each staker's block count over `rounds` rounds.
+    auto elect = [](const std::vector<uint64_t>& w, int rounds, uint32_t salt) {
+        uint64_t total = 0; for (uint64_t x : w) total += x;
+        std::vector<long> wins(w.size(), 0);
+        uint32_t ctr = salt;
+        for (int r = 0; r < rounds; ++r) {
+            std::vector<arith_uint256> sc(w.size());
+            std::vector<uint64_t> off(w.size());
+            uint64_t first = std::numeric_limits<uint64_t>::max();
+            for (size_t i = 0; i < w.size(); ++i) {
+                uint256 b = ComputePosSeed(uint256(), ctr++);
+                sc[i] = PosVrfScoreExp(b, w[i], total);
+                arith_uint256 sl = sc[i] >> 32;
+                uint64_t slot = (sl > arith_uint256((uint64_t)POS_VRF_MAX_SLOT))
+                                    ? POS_VRF_MAX_SLOT : sl.GetLow64();
+                off[i] = std::max<uint64_t>(slot, 1) * 30;
+                first = std::min(first, off[i]);
+            }
+            int win = -1; arith_uint256 best;
+            for (size_t i = 0; i < w.size(); ++i) {
+                if (off[i] <= first + 6 && (win < 0 || sc[i] < best)) { best = sc[i]; win = (int)i; }
+            }
+            wins[win]++;
+        }
+        return wins;
+    };
+
+    const int rounds = 30000;
+
+    // Proportionality: a whale and four minnows each get ~their stake share.
+    {
+        std::vector<uint64_t> w{80, 5, 5, 5, 5};
+        auto wins = elect(w, rounds, 1000);
+        double whale = double(wins[0]) / rounds;
+        BOOST_TEST_MESSAGE("exp-race whale 80% -> " << (whale * 100) << "% of blocks");
+        BOOST_CHECK(whale > 0.74 && whale < 0.86);          // ~0.80, within 7.5%
+        for (int i = 1; i < 5; ++i) {
+            double s = double(wins[i]) / rounds;
+            BOOST_CHECK(s > 0.035 && s < 0.065);            // ~0.05
+        }
+    }
+
+    // Split-neutrality: 30% as ONE identity vs 30% split into 15 must win the
+    // same share of blocks (raw beta would jump from ~1.4x to ~1.5x here).
+    {
+        std::vector<uint64_t> whole{70, 30};
+        auto w1 = elect(whole, rounds, 2000);
+        double s1 = double(w1[1]) / rounds;
+
+        std::vector<uint64_t> split{70};
+        for (int i = 0; i < 15; ++i) split.push_back(2);    // 15 x 2% = 30%
+        auto w15 = elect(split, rounds, 2000);
+        long atk = 0; for (size_t i = 1; i < split.size(); ++i) atk += w15[i];
+        double s15 = double(atk) / rounds;
+
+        BOOST_TEST_MESSAGE("exp-race 30% as 1 -> " << (s1 * 100) << "%, as 15 -> " << (s15 * 100) << "%");
+        BOOST_CHECK(s1 > 0.27 && s1 < 0.33);                // proportional, not inflated
+        BOOST_CHECK(s15 > 0.27 && s15 < 0.33);
+        BOOST_CHECK(std::abs(s1 - s15) < 0.03);             // splitting does not pay
+    }
 }
 
 // The coinbase VRF commitment round-trips and rejects malformed payloads.
