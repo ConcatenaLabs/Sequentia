@@ -115,12 +115,23 @@ The rates as pushed to the nodes, plus the per-asset decisions:
   "quote_currency": "USD",
   "rates":     {"<asset-id-64-hex>": 5238188, "...": 100000000},
   "decisions": [{"ticker": "SEQ", "id": "<asset-id>", "domain": "sequentia.io",
-                 "price": 0.0524, "rate": 5238188, "status": "admitted"}]
+                 "price": 0.0524, "price_unit": "USD",
+                 "rate": 5238188, "status": "admitted"}]
 }
 ```
 
-A rate is the value of **one whole unit of the asset, in the quote currency,
-scaled by 1e8** — so `rate / 1e8` is simply the asset's price in (usually) USD.
+A rate is the value of **one whole unit of the asset, in reference units, scaled
+by 1e8** (an asset with fewer than 8 decimals carries a further `10**(8 -
+decimals)`, so the node can value fees precision-blind), so `rate / 1e8` is the
+asset's price in reference units. Every `decisions` entry carries the rate that
+was actually published, so the two halves of the response never state different
+frames. With the default conversion factor of `1.0` the reference unit *is* the
+quote currency (usually USD) and a rate is simply the asset's USD price scaled by
+1e8; see [Reference unit](#reference-unit).
+
+`price_unit` names the unit of that row's `price`, which is not the same for
+every row: a market price is quoted in `quote_currency`, while a manual price is
+entered in reference units.
 
 ### Rate limiting
 
@@ -131,15 +142,21 @@ never limited. The limiter protects the host (typically a small VPS), not the
 data — the data is public once you enable the toggles. Put a real reverse
 proxy in front if you expect serious traffic.
 
-## Quote currency (there is no "reference asset" to configure)
+## Quote currency
 
-Prices are expressed in whatever currency the market-data API quotes —
+The **quote currency** is whatever currency the market-data API prices in,
 normally plain **USD**. It does **not** need to exist as an on-chain asset. Set
-it once in the Market source tab; every price, market cap and volume shown,
-and every rate pushed to the nodes, is in that unit. (A legacy
-`reference_asset_label` config key can re-denominate rates against an on-chain
-asset; it is advanced, off by default, and not exposed in the UI — see
-`ORACLE-AND-REFERENCE-DESIGN.md`.)
+it once in the Market source tab; every market price, market cap and volume the
+server reads and displays is in that unit.
+
+The rates pushed to the nodes are in **reference units**, which the next section
+defines. They coincide with the quote currency under the default conversion
+factor of `1.0`, so most operators can read the two words as one thing. They part
+company as soon as the factor is changed, or when an asset is priced by hand.
+
+(A legacy `reference_asset_label` config key denominates the rates against an
+on-chain asset instead of a factor; it is advanced, off by default, and not
+exposed in the UI. See `ORACLE-AND-REFERENCE-DESIGN.md`.)
 
 ## Market-source scope & manual prices
 
@@ -155,11 +172,51 @@ Entries match by registry ticker, feed key (alias) or 64-hex asset id.
 
 An asset left **without a market price** — because it is out of scope, or the
 feed simply doesn't quote it — can carry a **manual price**: a fixed value per
-unit in the quote currency (e.g. `0.5` = 1 unit is worth 0.5 USD). A manually
-priced asset is admitted at that fixed rate, bypassing the market criteria —
-the operator setting a price by hand *is* the decision — but an
+unit **in reference units** (e.g. `0.5` = 1 unit is worth 0.5 reference units).
+A manually priced asset is admitted at that fixed rate, bypassing the market
+criteria (the operator setting a price by hand *is* the decision), but an
 **always-reject** exception still wins. Without a market price *and* without a
 manual price, the asset is skipped (not whitelisted).
+
+A manual price is published **exactly as entered**: the reference-unit
+conversion factor (below) translates prices coming from the **API** only, so a
+hand-entered value is never translated a second time.
+
+## Reference unit
+
+`api_units_per_reference_unit` (previously `reference_price_usd`, still read for
+older configs) is a **conversion factor**: how many of the API's numeraire units
+(`source.quote_currency`) make **one** reference unit. The default `1.0` is the
+identity, adopting the API's numeraire as the reference unit.
+
+The reference unit is **economically inert**. Every API price is translated by
+the same factor, so every relative value survives untouched, and relative values
+are the only thing the fee market acts on: dollars, euros or an entirely
+invented unit produce identical ratios in the whitelist. Choosing the reference
+unit changes what this server displays, not the economics. No asset is a
+privileged 1:1 anchor; every asset, the Sequence token included, simply floats.
+
+The one place the choice is load-bearing is a **manually priced** asset, whose
+value the API does not supply. That value is entered in reference units, so its
+relation to every other asset in the whitelist follows the translated frame
+rather than the API's numeraire.
+
+A factor is rejected (with a warning, falling back to `1.0`) if it is not a
+positive number, or if it is so small that `factor * 1e8` rounds to zero, which
+is anything at or below `5e-9`: such a factor cannot be applied to integer rates
+at all, and accepting it would leave the server describing a frame its rates do
+not carry.
+
+### Legacy: `reference_asset_label`
+
+Set instead of a factor, `reference_asset_label` makes **one on-chain token** the
+reference unit: that token is published at `1e8` and every market-priced asset is
+divided by it. A conversion factor, if one is configured, wins over the label.
+Manual prices are still published exactly as entered, in that token's units. The
+single exception is the labelled token *itself* being priced by hand: the label
+already declares it to be the reference unit, so the number the operator types
+for it can only be its price in the **quote currency**, which is exactly the
+divisor the market-priced assets need.
 
 ## Admission rule engine
 
