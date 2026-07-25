@@ -123,6 +123,20 @@ class PosWithdrawStakeTest(BitcoinTestFramework):
         assert_equal(len(res["withdrawn_outputs"]), 1)
         assert_equal(res["withdrawn_outputs"][0]["txid"], reg["txid"])
         assert_equal(res["stake_before"] - res["stake_after"], 100 * COIN)
+
+        # Before the withdrawal confirms it is a state of its own: the coins are
+        # spent, so nothing is withdrawable, yet the stake registry still credits
+        # their weight. Reporting it as "no staking output this wallet can spend"
+        # told the user their stake was unreachable right after a successful
+        # withdrawal, so the state is now named.
+        pending = n0.liststakeutxos()
+        assert_equal(len(pending), 1)
+        assert_equal(pending[0]["withdrawing"], True)
+        assert_equal(pending[0]["withdrawable"], False)
+        assert "waiting to confirm" in pending[0]["status"]
+        assert_equal(n0.getstakerinfo()[pub], 100 * COIN)  # still counts until it confirms
+        assert_raises_rpc_error(-4, "already been sent and is waiting to confirm", n0.withdrawstake)
+
         self.mine(1)
         assert pub not in n0.getstakerinfo()
         assert_equal(n0.liststakeutxos(), [])
