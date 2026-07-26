@@ -417,6 +417,63 @@ BOOST_AUTO_TEST_CASE(pos_vrf_exprace)
     }
 }
 
+// The exp-race winner's beta is near its MAXIMUM (winning needs -ln(U) small,
+// i.e. U -> 1), which the LEGACY PosVrfSlot reads as a slot of ~total/weight.
+// So PosVrfIsCommitteeMember -- hardcoded to the legacy formula, and unable to
+// be fork-gated because it takes no height -- rejects exactly those winners
+// holding less than 1/g_pos_committee_size of the stake.
+//
+// This is why the gossip proposal path must NOT apply a committee-membership
+// test to the leader (PosProducer::OnProposal): consensus does not require the
+// leader to be a sortitioned member, and a relay filter stricter than consensus
+// silently discarded every legitimate small-staker block after the pos_exprace
+// fork. The test pins the arithmetic so the trap cannot be reintroduced.
+BOOST_AUTO_TEST_CASE(pos_vrf_exprace_winner_fails_legacy_membership)
+{
+    const int old_size = g_pos_committee_size;
+    g_pos_committee_size = 250;
+
+    // Whale + a staker below 1/250, i.e. total/weight = 2000 > 250.
+    const uint64_t small = 1, whale = 1999, total = small + whale;
+    BOOST_CHECK(total / small > (uint64_t)g_pos_committee_size);
+
+    int small_wins = 0, rejected_by_legacy = 0;
+    for (uint32_t i = 0; i < 60000; ++i) {
+        uint256 bs = ComputePosSeed(uint256S("0x11"), i);
+        uint256 bw = ComputePosSeed(uint256S("0x22"), i);
+        // Exp-race election: lowest score wins.
+        if (PosVrfScoreExp(bs, small, total) < PosVrfScoreExp(bw, whale, total)) {
+            ++small_wins;
+            // ...and the legacy membership gate throws that very win away.
+            if (!PosVrfIsCommitteeMember(bs, small, total)) ++rejected_by_legacy;
+        }
+    }
+    BOOST_TEST_MESSAGE("small staker (1/" << (total / small) << " of stake) won "
+                       << small_wins << " elections, " << rejected_by_legacy
+                       << " rejected by the legacy membership gate");
+    // It does win its fair share (~1/2000 of 60000 = ~30 rounds).
+    BOOST_CHECK(small_wins > 5);
+    // And essentially every win is thrown away: the winner's beta is near max,
+    // so its legacy slot is ~2000, far above the 250 cap.
+    BOOST_CHECK_EQUAL(rejected_by_legacy, small_wins);
+
+    // Above the 1/committee threshold the legacy gate does NOT fire: the cliff
+    // sits exactly at total/weight == g_pos_committee_size.
+    const uint64_t okw = 20, okt = 1000;                    // 1/50, well above 1/250
+    int ok_wins = 0, ok_rejected = 0;
+    for (uint32_t i = 0; i < 60000; ++i) {
+        uint256 b = ComputePosSeed(uint256S("0x33"), i);
+        if (PosVrfScoreExp(b, okw, okt) < PosVrfScoreExp(ComputePosSeed(uint256S("0x44"), i), okt - okw, okt)) {
+            ++ok_wins;
+            if (!PosVrfIsCommitteeMember(b, okw, okt)) ++ok_rejected;
+        }
+    }
+    BOOST_CHECK(ok_wins > 100);
+    BOOST_CHECK_EQUAL(ok_rejected, 0);
+
+    g_pos_committee_size = old_size;
+}
+
 // The coinbase VRF commitment round-trips and rejects malformed payloads.
 BOOST_AUTO_TEST_CASE(pos_vrf_commitment_roundtrip)
 {

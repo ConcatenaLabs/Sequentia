@@ -1428,10 +1428,29 @@ PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& blo
     if (!tip) return PosGossipAction::Ignore;
     if (block->hashPrevBlock != tip->GetBlockHash()) return PosGossipAction::Ignore; // not on our tip (benign race)
     const int height = tip->nHeight + 1;
-    // The leader must prove sortition eligibility (objective: an honest relayer
-    // checked this, so a failure means the sender sent garbage). Reject a
-    // non-staker leader with the cheap registry lookup before the VRF verify, so
-    // forged proposals cost an attacker as little of our CPU as possible.
+    // The leader must be a registered staker and its VRF proof must verify
+    // (objective: an honest relayer checked this, so a failure means the sender
+    // sent garbage). Reject a non-staker leader with the cheap registry lookup
+    // before the VRF verify, so forged proposals cost an attacker as little of
+    // our CPU as possible.
+    //
+    // These are exactly the leader checks CONSENSUS makes (CheckPosStakeRules:
+    // registered stake, min-stake floor, VRF proof, time-gate). Deliberately
+    // absent: a committee-membership test on the leader. A relay filter must
+    // never be STRICTER than the consensus rule it pre-filters for, and consensus
+    // does not require the leader to be a sortitioned committee member.
+    //
+    // It used to call PosVrfIsCommitteeMember here, which broke the pos_exprace
+    // hard fork: that helper is hardcoded to the LEGACY PosVrfSlot (it takes no
+    // height, so it cannot be fork-gated). Winning the exp-race needs -ln(U)
+    // small, i.e. beta near its MAXIMUM -- which the legacy formula reads as a
+    // slot of ~total_weight/weight. So every leader holding less than
+    // 1/committee_size of the stake won its election legitimately and then had
+    // that very block dropped here, with the relaying peer marked misbehaving --
+    // annulling the split-neutral proportionality the fork exists to provide.
+    // Invisible on a testnet of equal-weight stakers (ratio 20 vs a 250 cap),
+    // fatal on any unevenly-staked network. It also cost nothing as a DoS filter:
+    // the expensive VrfVerify above already ran by the time it was reached.
     const StakeRegistry& reg = StakeRegistry::GetInstance();
     const uint64_t weight = reg.GetWeight(parts->leader);
     if (weight == 0) return PosGossipAction::Invalid;
@@ -1439,7 +1458,6 @@ PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& blo
     auto leader_proof = ExtractPosVrfProof(*block);
     uint256 lbeta;
     if (!leader_proof || !VrfVerify(parts->leader, Span<const unsigned char>(seed.begin(), 32), *leader_proof, lbeta)) return PosGossipAction::Invalid;
-    if (!PosVrfIsCommitteeMember(lbeta, weight, PosTotalWeight(reg))) return PosGossipAction::Invalid; // leader not sortitioned
     // The leader's authorising signature rides in the proposal's staging solution
     // (a single push). It must verify against the block hash so any node can later
     // assemble using it.
