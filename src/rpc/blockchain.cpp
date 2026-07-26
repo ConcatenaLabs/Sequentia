@@ -3476,7 +3476,14 @@ static RPCHelpMan getposslot()
                 auto proof = VrfProve(key, Span<const unsigned char>(seed.begin(), 32));
                 if (!proof) continue;
                 if (!VrfVerify(pub, Span<const unsigned char>(seed.begin(), 32), *proof, beta)) continue;
-                slot = PosVrfSlot(beta, weight, total_weight);
+                // Must match the rule actually in force at next_height, or the
+                // reported slot -- and the propose_at time derived from it below --
+                // describe a block this node will never produce. From
+                // pos_exprace_height the exp-race sortition is what gates the
+                // proposal (validation.cpp CheckPosStakeRules, PosProducer::Step).
+                slot = PosExpRaceActive(Params().GetConsensus(), next_height)
+                           ? PosVrfSlotExp(beta, weight, total_weight)
+                           : PosVrfSlot(beta, weight, total_weight);
                 committee = g_pos_public_committee ? public_committee.count(pub) > 0
                                                    : PosVrfIsCommitteeMember(beta, weight, total_weight);
             } else {
