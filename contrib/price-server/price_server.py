@@ -136,8 +136,17 @@ REMOVED_KEYS = {
         "abstract factor, never a token, so that no asset is a privileged 1:1 anchor. "
         "Express the same denomination as %s, the conversion factor giving that token's "
         "price in the market source's numeraire (source.quote_currency): with the token "
-        "worth 0.05 USD and a USD-quoted source, set %s to 0.05. Then delete "
-        "reference_asset_label and start the server again."
+        "worth 0.05 USD and a USD-quoted source, set %s to 0.05. That reproduces every "
+        "RATIO the pinned mode published, but NOT its absolute rates: the pinned mode "
+        "divided by the anchor's own scaled rate, which carries the anchor's "
+        "denomination, while a factor divides by round(factor * 1e8), which does not. "
+        "The whole map therefore comes out 10**(8 - p) times the pinned mode's, where p "
+        "is the anchor token's precision, and the anchor itself lands on "
+        "1e8 * 10**(8 - p), not on 1e8: identical for an 8-decimal anchor, but a "
+        "precision-2 anchor at 0.05 lands on 1e14 with every rate 1e6 times its old "
+        "value. The node values a fee as atoms * rate / 1e8, so a fee floor calibrated "
+        "against the pinned mode's rates has to be rescaled by that same 10**(8 - p). "
+        "Then delete reference_asset_label and start the server again."
         % (REFERENCE_FACTOR_KEYS[0], REFERENCE_FACTOR_KEYS[0])),
 }
 
@@ -674,6 +683,41 @@ class PriceServer:
                 r["rate"], r["status"] = None, "skipped: rate outside the publishable range in reference units"
             else:
                 r["rate"] = published
+        # A round that admitted NOTHING is not a policy, it is a failure. Publishing
+        # it would empty every fed node's whitelist, and since the node no longer
+        # falls back to the policy asset at 1:1 that halts relay just as surely as
+        # the shutdown clear did. One bad feed response, or a simultaneous trip of
+        # the market-cap / volume / change-factor floors, must not be able to do
+        # that. Keep the last good map and say so loudly.
+        if not rates:
+            if self.last_rates:
+                log.error("this poll admitted NO assets; REFUSING to publish an empty whitelist. "
+                          "Keeping the last good set of %d rate(s) in place; relay is unaffected. "
+                          "Investigate the feed or the admission thresholds.", len(self.last_rates))
+                self.last_report = report
+                self.last_prices = prices
+                self.last_poll_ts = time.time()
+                return self.last_rates
+            log.error("this poll admitted NO assets and there is no previous set to fall back on; "
+                      "publishing nothing. Fed nodes keep whatever they already had.")
+            self.last_report = report
+            self.last_prices = prices
+            self.last_poll_ts = time.time()
+            return {}
+
+        # A round that admitted FEWER assets than the last one is not necessarily
+        # wrong — an asset can legitimately fail its thresholds — but it silently
+        # removes a fee asset users may be holding for exactly that purpose, so it
+        # is named rather than left to be inferred from a count in a later line.
+        dropped = sorted(set(self.last_rates) - set(rates))
+        if dropped:
+            by_id = {r["id"]: r for r in report}
+            for asset_id in dropped:
+                r = by_id.get(asset_id, {})
+                log.warning("asset %s (%s) was in the last whitelist and is NOT in this one: %s. "
+                            "Nodes will stop accepting fees in it.",
+                            r.get("ticker", "?"), asset_id[:16], r.get("status", "no longer discovered"))
+
         self.last_rates = rates
         self.last_report = report
         self.last_prices = prices
@@ -713,13 +757,37 @@ class PriceServer:
             deadline = time.time() + self.cfg.get("poll_interval_secs", 60)
             while not self.stopping and time.time() < deadline:
                 time.sleep(0.5)
-        if not self.dry_run:
+        # ⚠ DO NOT CLEAR THE WHITELIST HERE.
+        #
+        # This used to push `setfeeexchangerates {}` to every node on SIGTERM. That
+        # was fail-safe for exactly one reason: the node fell back to accepting the
+        # policy asset 1:1 whenever the whitelist did not list it, so an empty map
+        # still left a working fee asset. That fallback is gone — no asset is the
+        # reference unit, and an asset absent from the whitelist is simply not
+        # accepted, the policy asset included.
+        #
+        # So clearing on shutdown now means: every fed node accepts NO fee asset,
+        # RecomputeFees evicts, the mempools empty and RELAY STOPS FLEET-WIDE.
+        # Stopping a monitoring sidecar must never take the network's fee policy
+        # down with it. The last-good rates stay in place instead; they were pushed
+        # with persist=False, so they are runtime state that a node restart clears
+        # by itself, and a node that never restarts keeps relaying on the last
+        # policy this server published rather than on none at all.
+        #
+        # An operator who genuinely wants the old behaviour can opt in, but it is
+        # off by default because the safe choice must not be the one you remember
+        # to configure.
+        if not self.dry_run and self.cfg.get("clear_whitelist_on_shutdown", False):
             for rpc in self.rpcs:
                 try:
                     rpc.call("setfeeexchangerates", {}, False)  # persist=False: clear without touching the static file
                 except Exception as e:
                     log.warning("could not clear the fee-asset whitelist on %s: %s", rpc.url, e)
-            log.info("cleared the fee-asset whitelist on shutdown")
+            log.warning("cleared the fee-asset whitelist on shutdown (clear_whitelist_on_shutdown=true): "
+                        "every fed node now accepts NO fee asset and will not relay until this server runs again")
+        else:
+            log.info("shutting down; leaving the last published fee-asset whitelist in place "
+                     "(%d rate(s)) so relay continues", len(self.last_rates))
 
     def _stop(self, _sig, _frame):
         self.stopping = True
@@ -788,7 +856,9 @@ def _whitelist_payload(srv):
             "api_units_per_reference_unit": factor,
             "config_key": factor_key,
             "quote_currency": quote,
-            "note": ("rates are the value of one whole unit in reference units, scaled by 1e8; "
+            "note": ("a rate is one whole unit's value in reference units, scaled by 1e8 and by "
+                     "a further 10**(8 - the asset's decimals) so the node can value fees "
+                     "precision-blind (1e8 alone for an 8-decimal asset); "
                      "one reference unit = %g %s" % (factor, quote)),
         },
         "rates": srv.last_rates,
@@ -1211,9 +1281,11 @@ def _render_admin(srv, csrf_token, saved=False, error=""):
         "<div class=card><h2>Market data source</h2><div class=frm>",
         "<div class=frow><label>API URL</label><input class=mono name=source_url value=\"", esc(s["url"]), "\"></div>",
         "<div class=frow><label>Quote currency</label><div><input name=quote_currency value=\"", esc(quote),
-        "\" style=\"max-width:120px\"><div class=hint>The currency the API reports prices in — usually plain USD "
-        "(it does not need to exist as an on-chain asset). Every price, market cap and volume on these pages, and the "
-        "rates pushed to your nodes, are expressed in it.</div></div></div>",
+        "\" style=\"max-width:120px\"><div class=hint>The currency the API reports prices in, usually plain USD "
+        "(it does not need to exist as an on-chain asset). Every price, market cap and volume on these pages is "
+        "expressed in it. The rates pushed to your nodes are in <b>reference units</b>, which are this currency "
+        "only while the conversion factor <code>api_units_per_reference_unit</code> is 1.0 (the default); set any "
+        "other factor and the rates are in that unit instead.</div></div></div>",
         "<div class=frow><label>API format</label><div>",
         '<label class=check style="display:inline-flex;margin-right:16px"><input type=radio name=format value=sequentia ',
         ck(not is_custom), "> Sequentia-format</label>",
