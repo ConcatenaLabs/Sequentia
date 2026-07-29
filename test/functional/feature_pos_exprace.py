@@ -15,6 +15,12 @@ should be in force at that height (recomputed here from the block's VRF output),
 and that the peer fully validates every block (so the producer time-gate and the
 consensus time-gate agree on both sides of the fork -- a mismatch would split
 the chain silently). See doc/sequentia/04-proof-of-stake.md.
+
+This drives a CUSTOM chain, where -posexpraceheight defaults to 0 and 0 means
+DISABLED. The bundled chains pin the height in src/chainparams.cpp instead:
+mainnet at 1 (the exp-race governs its first elected block and every one after),
+the public testnet at 44300. Those pinned values are asserted by the unit test
+pos_tests/pos_exprace_activation_heights.
 """
 
 from test_framework.test_framework import BitcoinTestFramework

@@ -413,20 +413,26 @@ public:
         // SEQUENTIA PoS: enforce leader-paid coinbase fees from genesis. Mainnet
         // has no pre-rule history to grandfather (cf. CTestNetParams).
         consensus.pos_coinbase_leader_height = 0;
-        // Exponential-race leader election: disabled until mainnet launches and a
-        // coordinated activation height is set (hard fork; see params.h). Mainnet
-        // is not live yet, so this stays 0 for now.
-        consensus.pos_exprace_height = 0;
-        // Escaping-stall parent-chain MTP gap: ENFORCED FROM GENESIS (0).
-        // Mainnet has not launched, so it starts life with this rule already in
-        // force and there is NOTHING TO COORDINATE OR REMEMBER LATER — no
-        // activation height to pick, no flag day, no legacy history to exempt.
-        // Note the convention is the opposite of pos_exprace_height above: for
-        // Mainnet is not live yet, so the rule is simply active from the first
-        // block: there is no pre-rule history to grandfather and nothing to
-        // coordinate at launch. 1, not 0 — 0 means "not gated" here exactly as
-        // it does for pos_exprace_height (CONTRIBUTING.md: a gate left at 0 is
-        // a bug, never a deliberate "always on").
+        // Exponential-race leader election: mainnet launches with the exp-race in
+        // force from its FIRST ELECTED BLOCK, so there is never a legacy-election
+        // era to fork away from later. The value is 1 and not 0 because 0 is the
+        // DISABLED sentinel for this parameter (PosExpRaceActive requires
+        // pos_exprace_height > 0), unlike pos_coinbase_leader_height directly
+        // above, where 0 means "enforce from genesis". Height 1 is the first block
+        // leader election governs: genesis (height 0) carries no leader, committee
+        // or VRF proof. Mainnet has no history, so this is a launch parameter, not
+        // a fork of live consensus. See params.h and
+        // doc/sequentia/06-tokenomics-and-launch.md.
+        consensus.pos_exprace_height = 1;
+        // Escaping-stall parent-chain MTP gap: in force from mainnet's first
+        // block. Mainnet has not launched, so it starts life with this rule
+        // already active and there is NOTHING TO COORDINATE OR REMEMBER LATER —
+        // no activation height to pick, no flag day, no legacy history to exempt.
+        // 1 and not 0 for the same reason as pos_exprace_height directly above:
+        // 0 is the "not gated" sentinel for this parameter too, unlike
+        // pos_coinbase_leader_height, where 0 means "enforce from genesis"
+        // (CONTRIBUTING.md: a gate left at 0 is a bug, never a deliberate
+        // "always on").
         consensus.pos_escape_stall_mtp_height = 1;
         g_pos_escape_stall_mtp_height = consensus.pos_escape_stall_mtp_height;
         consensus.nMaxBlockWeight = 200000;             // a twentieth of Bitcoin (doc 11 §4)
