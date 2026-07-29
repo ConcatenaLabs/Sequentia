@@ -97,7 +97,10 @@ public:
     UniValue ToJSON();
 
     //! The whitelist as JSON with one nested object per asset ({ "rate": n }).
-    //! This is exactly the accept set: there is no implicit entry to materialise.
+    //! This is exactly the MEMBERSHIP set, with no implicit entry to materialise.
+    //! Note it is not quite the ACCEPT set: an asset listed at rate 0 is reported
+    //! here and still refused when valued, since a 0 rate values every amount at
+    //! nothing. Membership is necessary, not sufficient.
     UniValue AcceptancePolicyToJSON();
 
     //! Replace the whole whitelist from parsed JSON (asset label/hex -> rate).
