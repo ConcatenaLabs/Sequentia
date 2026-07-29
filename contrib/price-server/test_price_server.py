@@ -26,14 +26,20 @@ What is pinned here:
     that was published.
 """
 
+import importlib.util
 import json
 import os
 import sys
+import tempfile
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
 
 import price_server as ps  # noqa: E402
+
+README = os.path.join(HERE, "README.md")
+GENERATOR = os.path.join(os.path.dirname(HERE), "sequentia", "gen-price-config.py")
 
 
 # The rates the live testnet box publishes today, keyed by ticker. The reference
@@ -298,8 +304,9 @@ class ThePinnedTokenModeIsGone(unittest.TestCase):
     def test_the_equivalent_factor_reproduces_the_old_denomination(self):
         # The migration the error message prescribes: the factor is the token's
         # price in the API numeraire, so the ratios are the ones the label mode
-        # produced, and the named token lands on 1e8 by arithmetic rather than by
-        # being pinned there.
+        # produced, and an 8-DECIMAL token lands on 1e8 by arithmetic rather than
+        # by being pinned there. Other precisions do not land on 1e8: see
+        # TheMigrationGuidanceCarriesThePrecisionTerm.
         anchor = LIVE_PRICES["EURX"]  # 1.1375, so the frame really moves
         rates, _ = run_poll(base_cfg(api_units_per_reference_unit=anchor), LIVE_PRICES)
         self.assertEqual(rates["EURX"], ps.COIN)
@@ -422,6 +429,310 @@ class TheWhitelistApiDisclosesTheFrame(unittest.TestCase):
         self.assertTrue(all(r["rate"] == round_tripped["rates"][r["id"]]
                             for r in round_tripped["decisions"]), round_tripped["decisions"])
 
+
+class TheMigrationGuidanceCarriesThePrecisionTerm(unittest.TestCase):
+    """Converting a pinned-token config to the equivalent factor reproduces the
+    RATIOS the pinned mode published, but not its absolute rates.
+
+    The pinned mode divided every rate by the anchor's own scaled rate, which
+    carries the anchor's 10**(8 - precision) term. A factor divides by
+    round(factor * 1e8), which carries no precision term. So the converted map is
+    10**(8 - precision) times the old one and the anchor lands on
+    1e8 * 10**(8 - precision). Guidance that says "1e8" flat is right only for an
+    8-decimal anchor, and an operator following it on a 2-decimal one gets a
+    whitelist 1e6 out."""
+
+    def pinned_map(self, prices, precisions, anchor):
+        """What the removed mode published: every rate over the anchor's rate."""
+        ref = ps.scaled_rate(prices[anchor], precisions.get(anchor, 8))
+        return {tk: max(1, round(ps.scaled_rate(p, precisions.get(tk, 8)) * ps.COIN / ref))
+                for tk, p in prices.items()}
+
+    def test_an_8_decimal_anchor_does_land_on_1e8(self):
+        anchor = "EURX"
+        rates, _ = run_poll(base_cfg(api_units_per_reference_unit=LIVE_PRICES[anchor]), LIVE_PRICES)
+        self.assertEqual(rates[anchor], ps.COIN)
+        self.assertEqual(rates, self.pinned_map(LIVE_PRICES, {}, anchor))
+
+    def test_a_precision_2_anchor_lands_on_1e14_not_1e8(self):
+        # The example the refusal message uses: a token worth 0.05, factor 0.05.
+        prices = {"CENTS": 0.05, "USDX": 1.0, "GOLD": LIVE_PRICES["GOLD"]}
+        precisions = {"CENTS": 2}
+        rates, _ = run_poll(base_cfg(api_units_per_reference_unit=0.05), prices,
+                            precisions=precisions)
+        self.assertEqual(rates["CENTS"], 10 ** 14)
+        self.assertNotEqual(rates["CENTS"], ps.COIN)
+
+    def test_a_precision_2_anchor_scales_the_WHOLE_map_by_1e6(self):
+        prices = {"CENTS": 0.05, "USDX": 1.0, "GOLD": LIVE_PRICES["GOLD"]}
+        precisions = {"CENTS": 2}
+        rates, _ = run_poll(base_cfg(api_units_per_reference_unit=0.05), prices,
+                            precisions=precisions)
+        pinned = self.pinned_map(prices, precisions, "CENTS")
+        for tk in prices:
+            # within the pinned map's own rounding, magnified by the same 1e6
+            self.assertLessEqual(abs(rates[tk] - pinned[tk] * 10 ** 6), 10 ** 6, tk)
+
+    def test_a_precision_0_anchor_lands_on_1e16(self):
+        prices = {"WHOLE": 0.05, "USDX": 1.0}
+        rates, _ = run_poll(base_cfg(api_units_per_reference_unit=0.05), prices,
+                            precisions={"WHOLE": 0})
+        self.assertEqual(rates["WHOLE"], 10 ** 16)
+
+    def test_the_ratios_survive_the_conversion_at_any_anchor_precision(self):
+        # What is economically inert is the RATIO, which is why the absolute
+        # rescale above is a fee-floor problem and never a repricing.
+        prices = {"CENTS": 0.05, "USDX": 1.0, "GOLD": LIVE_PRICES["GOLD"]}
+        precisions = {"CENTS": 2}
+        rates, _ = run_poll(base_cfg(api_units_per_reference_unit=0.05), prices,
+                            precisions=precisions)
+        pinned = self.pinned_map(prices, precisions, "CENTS")
+        self.assertAlmostEqual(rates["GOLD"] / rates["USDX"],
+                               pinned["GOLD"] / pinned["USDX"], delta=1e-3)
+
+    def test_the_refusal_message_states_the_precision_term(self):
+        with self.assertRaises(ps.ConfigError) as caught:
+            ps.PriceServer(base_cfg(reference_asset_label="CENTS"), dry_run=True)
+        msg = str(caught.exception)
+        self.assertIn("10**(8 - p)", msg)   # the term, not a bare 1e8
+        self.assertIn("1e14", msg)          # worked through on the 0.05 example
+        self.assertIn("atoms * rate / 1e8", msg)  # why the fee floor moves
+
+    def test_the_readme_does_not_promise_a_bare_1e8(self):
+        with open(README) as f:
+            readme = f.read()
+        self.assertIn("10**(8 - p)", readme)
+        self.assertNotIn("the token lands on `1e8` by arithmetic", readme)
+
+
+class TheWhitelistNoteStatesTheDenomination(unittest.TestCase):
+    """The /api/whitelist note is read by other operators' servers, so its rate
+    formula has to be the one the code applies, for every precision in the
+    registry (the live one holds precision-0 and precision-2 assets)."""
+
+    def note(self, cfg=None, prices=None, **kw):
+        _rates, srv = poll_server(cfg or base_cfg(), prices or LIVE_PRICES, **kw)
+        return ps._whitelist_payload(srv)["reference_unit"]["note"]
+
+    def test_the_note_carries_the_precision_term(self):
+        note = self.note()
+        self.assertIn("10**(8 - the asset's decimals)", note)
+        self.assertIn("one reference unit = 1 USD", note)
+
+    def test_the_formula_in_the_note_is_the_one_applied(self):
+        # Read the note literally and recompute: scaled by 1e8 and by a further
+        # 10**(8 - decimals). A 2-decimal asset at 1.0 publishes 1e14, not 1e8.
+        prices = {"CENTS": 1.0, "USDX": 1.0}
+        rates, _ = run_poll(base_cfg(), prices, precisions={"CENTS": 2})
+        self.assertEqual(rates["CENTS"], round(1.0 * ps.COIN * 10 ** (8 - 2)))
+        self.assertEqual(rates["CENTS"], 10 ** 14)
+        self.assertEqual(rates["USDX"], ps.COIN)  # 8-decimal: 1e8 alone
+
+    def test_the_note_still_states_the_factor_in_force(self):
+        note = self.note(base_cfg(api_units_per_reference_unit=0.88))
+        self.assertIn("one reference unit = 0.88 USD", note)
+
+    def test_the_readme_quotes_the_note_verbatim(self):
+        # The README prints a sample /api/whitelist body. If the note drifts from
+        # the code, the documented API is wrong for every consumer reading it.
+        with open(README) as f:
+            readme = f.read()
+        self.assertIn(self.note(), readme)
+
+
+class TheQuoteCurrencyHintNamesTheFrame(unittest.TestCase):
+    """The admin hint under "Quote currency" used to say the rates pushed to the
+    nodes were expressed in it. That is true only at factor 1.0."""
+
+    def hint(self, **cfg):
+        srv = ps.PriceServer(base_cfg(**cfg), dry_run=True)
+        page = ps._render_admin(srv, "csrf-token")
+        start = page.index("The currency the API reports prices in")
+        return page[start:page.index("</div>", start)]
+
+    def test_the_hint_no_longer_claims_the_node_rates_are_in_the_quote_currency(self):
+        self.assertNotIn("rates pushed to your nodes, are expressed in it", self.hint())
+
+    def test_the_hint_names_reference_units_and_the_factor_that_sets_them(self):
+        h = self.hint()
+        self.assertIn("reference units", h)
+        self.assertIn("api_units_per_reference_unit", h)
+
+    def test_the_hint_still_scopes_prices_and_volumes_to_the_quote_currency(self):
+        # Those really ARE in the quote currency; the fix must not blur that.
+        self.assertIn("Every price, market cap and volume on these pages", self.hint())
+
+
+class TheGeneratorEmitsTheCurrentSchema(unittest.TestCase):
+    """contrib/sequentia/gen-price-config.py used to emit the PRE-REGISTRY schema
+    (a hand-written `assets` list with per-asset `sources`, plus `min_sources`),
+    so running it over a live config replaced a working configuration with one
+    the current server does not read. It now seeds from config.example.json, the
+    schema the server ships, and refuses to clobber an existing config."""
+
+    def generator(self):
+        spec = importlib.util.spec_from_file_location("gen_price_config", GENERATOR)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # the __main__ guard keeps main() from running
+        return mod
+
+    def generate(self, out, *extra):
+        return self.generator().main(["--out", out, "--committee", "2", *extra])
+
+    def written(self, tmp, *extra):
+        out = os.path.join(tmp, "config.json")
+        self.assertEqual(self.generate(out, *extra), 0)
+        with open(out) as f:
+            return json.load(f)
+
+    def test_the_generated_config_is_one_the_server_accepts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.written(tmp)
+        srv = ps.PriceServer(cfg, dry_run=True)  # runs check_config
+        self.assertEqual(srv.reference_factor(), (1.0, "api_units_per_reference_unit"))
+        self.assertEqual(srv.source()["format"], "sequentia")
+
+    def test_it_emits_the_registry_era_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.written(tmp)
+        for key in ("source", "registry_url", "feed_aliases", "api_units_per_reference_unit"):
+            self.assertIn(key, cfg)
+        self.assertEqual(len(cfg["node_rpcs"]), 2)
+        self.assertNotIn("node_rpc", cfg)
+
+    def test_it_no_longer_emits_the_pre_registry_shape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.written(tmp)
+        self.assertNotIn("assets", cfg)               # assets are DISCOVERED
+        self.assertNotIn("min_sources", cfg["default_thresholds"])
+        self.assertNotIn("max_source_spread", cfg["default_thresholds"])
+        self.assertFalse(any("sources" in v for v in cfg.values() if isinstance(v, dict)))
+
+    def test_it_never_emits_a_removed_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.written(tmp)
+        for key in ps.REMOVED_KEYS:
+            self.assertNotIn(key, cfg)
+
+    def test_every_threshold_it_sets_is_one_the_server_reads(self):
+        # A key the server ignores is a rule the operator thinks is enforced.
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.written(tmp)
+        known = {"require", "min_market_cap", "min_volume_24h", "max_change_factor",
+                 "max_volatility", "volatility_window", "min_price", "max_price",
+                 "issuer_domains"}
+        self.assertLessEqual(set(cfg["default_thresholds"]), known)
+
+    def test_it_refuses_to_overwrite_an_existing_config(self):
+        # The config UI persists thresholds, manual prices and the admin password
+        # hash to this same path; a rerun must not silently drop them.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "config.json")
+            self.assertEqual(self.generate(out), 0)
+            with open(out) as f:
+                before = f.read()
+            edited = json.loads(before)
+            edited["ui"]["password_hash"] = "pbkdf2$1$aa$bb"
+            with open(out, "w") as f:
+                json.dump(edited, f)
+            with open(out) as f:
+                hand_edited = f.read()
+            self.assertEqual(self.generate(out), 1)  # refused
+            with open(out) as f:
+                self.assertEqual(f.read(), hand_edited)  # untouched
+            self.assertEqual(self.generate(out, "--force"), 0)
+            with open(out) as f:
+                self.assertNotEqual(f.read(), hand_edited)
+
+
+
+class AnEmptyRoundNeverEmptiesTheWhitelist(unittest.TestCase):
+    """A poll that admits nothing must not be published.
+
+    Before the node's 1:1 fallback was removed, publishing an empty map still left
+    a working fee asset, so an empty round was survivable. It is not any more: an
+    asset absent from the whitelist is not accepted, the policy asset included, so
+    an empty map means every fed node accepts NO fee asset, RecomputeFees evicts,
+    the mempools empty and relay stops.
+    """
+
+    def test_an_empty_round_keeps_the_last_good_rates(self):
+        # A first, healthy round establishes a whitelist.
+        cfg = base_cfg()
+        rates, srv = poll_server(cfg, LIVE_PRICES)
+        self.assertTrue(rates)
+        good = dict(srv.last_rates)
+
+        # The feed then returns nothing priceable at all.
+        real_registry, real_prices = ps.fetch_registry, ps.fetch_prices
+        ps.fetch_registry = lambda url, timeout: {
+            tk.upper(): (asset_id(tk), "example.test", 8) for tk in LIVE_PRICES}
+        ps.fetch_prices = lambda source, timeout: {
+            tk.upper(): {"price": None, "market_cap": None, "volume_24h": None}
+            for tk in LIVE_PRICES}
+        try:
+            out = srv.poll_once()
+        finally:
+            ps.fetch_registry, ps.fetch_prices = real_registry, real_prices
+
+        self.assertEqual(out, good, "the last good whitelist must be what stays in force")
+        self.assertEqual(srv.last_rates, good, "and it must not be overwritten by the empty round")
+
+    def test_the_report_still_reflects_the_failed_round(self):
+        """Refusing to publish must not hide WHY: the decisions table still updates."""
+        cfg = base_cfg()
+        _rates, srv = poll_server(cfg, LIVE_PRICES)
+        before = srv.last_poll_ts
+
+        real_registry, real_prices = ps.fetch_registry, ps.fetch_prices
+        ps.fetch_registry = lambda url, timeout: {
+            tk.upper(): (asset_id(tk), "example.test", 8) for tk in LIVE_PRICES}
+        ps.fetch_prices = lambda source, timeout: {
+            tk.upper(): {"price": None, "market_cap": None, "volume_24h": None}
+            for tk in LIVE_PRICES}
+        try:
+            srv.poll_once()
+        finally:
+            ps.fetch_registry, ps.fetch_prices = real_registry, real_prices
+
+        self.assertGreaterEqual(srv.last_poll_ts, before)
+        self.assertTrue(all(r["rate"] is None for r in srv.last_report),
+                        "every asset should be recorded as unpriced this round")
+
+
+class ShutdownLeavesTheWhitelistInPlace(unittest.TestCase):
+    """Stopping a monitoring sidecar must not take the network's fee policy down."""
+
+    class _RecordingRpc:
+        def __init__(self):
+            self.url = "http://stub-node"
+            self.calls = []
+
+        def call(self, method, *args):
+            self.calls.append((method, args))
+            return None
+
+    def _server_at_shutdown(self, **cfg_extra):
+        cfg = base_cfg(node_rpcs=[], **cfg_extra)
+        srv = ps.PriceServer(cfg, dry_run=False)
+        rpc = self._RecordingRpc()
+        srv.rpcs = [rpc]
+        srv.last_rates = {"aa" * 32: 100000000}
+        srv.stopping = True   # so run() skips straight to the shutdown tail
+        srv.run()
+        return rpc
+
+    def test_shutdown_does_not_clear_by_default(self):
+        rpc = self._server_at_shutdown()
+        self.assertEqual(rpc.calls, [],
+                         "clearing on shutdown would leave every fed node accepting no fee asset")
+
+    def test_an_operator_can_still_opt_in(self):
+        rpc = self._server_at_shutdown(clear_whitelist_on_shutdown=True)
+        self.assertEqual([m for m, _a in rpc.calls], ["setfeeexchangerates"])
+        method, args = rpc.calls[0]
+        self.assertEqual(args[0], {}, "the opt-in still clears")
+        self.assertIs(args[1], False, "and still without persisting, so a restart recovers")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

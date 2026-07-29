@@ -115,7 +115,7 @@ The rates as pushed to the nodes, plus the per-asset decisions:
   "quote_currency": "USD",
   "reference_unit": {"api_units_per_reference_unit": 1.0, "config_key": null,
                      "quote_currency": "USD",
-                     "note": "rates are the value of one whole unit in reference units, scaled by 1e8; one reference unit = 1 USD"},
+                     "note": "a rate is one whole unit's value in reference units, scaled by 1e8 and by a further 10**(8 - the asset's decimals) so the node can value fees precision-blind (1e8 alone for an 8-decimal asset); one reference unit = 1 USD"},
   "rates":     {"<asset-id-64-hex>": 5238188, "...": 100000000},
   "decisions": [{"ticker": "SEQ", "id": "<asset-id>", "domain": "sequentia.io",
                  "price": 0.0524, "price_unit": "USD",
@@ -225,9 +225,29 @@ unit of account.
 Want a unit that happens to equal one USDX today? Express it as a **factor**, not
 as a name: set `api_units_per_reference_unit` to that token's price in the
 market source's numeraire (`0.05` if the token is worth $0.05 and the source
-quotes USD). The ratios in the whitelist are the same ones the old mode produced,
-and the token lands on `1e8` by arithmetic rather than by privilege, floating
-again as soon as its price moves.
+quotes USD). Every **ratio** in the whitelist is then the one the old mode
+produced, and the token floats again as soon as its price moves rather than being
+pinned.
+
+The **absolute** rates are not the old mode's, though, and the difference is the
+asset denomination. The pinned mode divided every rate by the anchor's own scaled
+rate, which carries the anchor's `10**(8 - precision)` term; a factor divides by
+`round(factor * 1e8)`, which carries no precision term at all. So with an anchor
+of precision `p` the converted map is `10**(8 - p)` times the pinned mode's, and
+the anchor itself lands on `1e8 * 10**(8 - p)`:
+
+| anchor precision | anchor's rate under the factor | whole map, versus the pinned mode |
+|---|---|---|
+| 8 (the common case) | `1e8` | unchanged |
+| 2 (e.g. a cents-denominated token at 0.05) | `1e14` | `1e6` times larger |
+| 0 | `1e16` | `1e8` times larger |
+
+Only an 8-decimal anchor lands on `1e8`. The node values a fee as
+`atoms * rate / 1e8`, so a uniformly larger map buys the same fee with
+proportionally fewer atoms: after converting from a non-8-decimal anchor, rescale
+any fee floor calibrated against the old rates by the same `10**(8 - p)`. Ratios
+across assets are untouched either way, which is why this shifts the fee floor and
+never the relative price of one asset against another.
 
 A config that still sets `reference_asset_label` **refuses to start**, naming the
 key and the factor to replace it with. Ignoring the key would be worse than
