@@ -24,6 +24,16 @@ registered stake, the min-stake floor, a valid VRF proof and the time-gate --
 never committee membership for the leader), so the filter was strictly stricter
 than the rule it pre-filtered for.
 
+This runs under -pospubliccommittee=1, matching mainnet (chainparams.cpp pins
+g_pos_public_committee=true there): the original bug was NOT specific to
+private threshold sortition, since OnProposal's check on the leader was
+unconditional -- unlike the five other slot-formula call sites, none of which
+gate the public-committee case. Committee members must carry a registered BLS
+key (the bitfield certificate names signers by looking them up), derived via
+getblsregistration and folded into the extended -staker spec; see
+feature_pos_public_committee.py for the same two-phase idle-then-restart
+pattern this test follows.
+
 No node holds a quorum here (one key per host, quorum 2 of 2), so the chain can
 only advance if proposals actually survive the relay filter and get
 countersigned over gossip. Before the fix this test stalls; after it, the chain
@@ -50,7 +60,7 @@ class PosExpRaceRelayTest(BitcoinTestFramework):
         self.setup_clean_chain = True
 
         self.stakers = [make_staker() for _ in range(3)]
-        common = [
+        self.common = [
             "-con_pos=1",
             "-posvrf=1",
             "-posbls=1",
@@ -69,13 +79,10 @@ class PosExpRaceRelayTest(BitcoinTestFramework):
             "-anyonecanspendaremine=1",
             "-validatepegin=0",
         ]
-        common += ["-staker=%s:1" % pub for _, pub in self.stakers]
-        # One key per host: no node can certify alone, so every block has to come
-        # through the gossip proposal path that carries the bug.
-        self.extra_args = [
-            common + ["-posproducer", "-posproducerkey=%s" % self.stakers[i][0]]
-            for i in range(3)
-        ]
+        # Phase 1: idle nodes -- staker weights only, no BLS registration and no
+        # producer, so no committee can form while we derive registrations.
+        idle = self.common + ["-staker=%s:1" % pub for _, pub in self.stakers]
+        self.extra_args = [list(idle) for _ in range(3)]
 
     def setup_network(self):
         self.setup_nodes()
@@ -84,6 +91,25 @@ class PosExpRaceRelayTest(BitcoinTestFramework):
         self.connect_nodes(1, 2)
 
     def run_test(self):
+        # Derive each staker's BLS registration (pure key derivation, any idle
+        # node will do) and restart every node with the extended -staker spec
+        # plus its own producer key. One key per host: no node can certify
+        # alone, so every block has to come through the gossip proposal path
+        # that carries the bug.
+        self.log.info("Deriving BLS registrations and restarting with the full config")
+        specs = []
+        for wif, pub in self.stakers:
+            reg = self.nodes[0].getblsregistration(wif)["spec"]
+            specs.append("-staker=%s:1%s" % (pub, reg))
+
+        full = self.common + specs
+        for i in range(3):
+            self.restart_node(i, extra_args=full + ["-posproducer",
+                                                     "-posproducerkey=%s" % self.stakers[i][0]])
+        self.connect_nodes(0, 1)
+        self.connect_nodes(0, 2)
+        self.connect_nodes(1, 2)
+
         assert_equal(self.nodes[0].getposschedule()['total_weight'], 3)
 
         # The chain can only advance if proposals survive the relay filter and
