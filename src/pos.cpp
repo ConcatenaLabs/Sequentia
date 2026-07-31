@@ -499,6 +499,15 @@ bool PosExpRaceActive(const Consensus::Params& params, int height)
     return params.pos_exprace_height > 0 && height >= params.pos_exprace_height;
 }
 
+bool PosEscapeStallMtpActive(const Consensus::Params& params, int height)
+{
+    // 0 = enforced from genesis (see pos.h): the inverse of PosExpRaceActive's
+    // convention, because a chain launched WITH this rule must never exempt any
+    // of its history, while a chain that predates the rule must exempt exactly
+    // the blocks produced before the activation height.
+    return height >= params.pos_escape_stall_mtp_height;
+}
+
 CScript BuildPosVrfCommitment(const std::vector<unsigned char>& proof)
 {
     std::vector<unsigned char> data(POS_VRF_TAG, POS_VRF_TAG + sizeof(POS_VRF_TAG));

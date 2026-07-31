@@ -417,6 +417,16 @@ public:
         // coordinated activation height is set (hard fork; see params.h). Mainnet
         // is not live yet, so this stays 0 for now.
         consensus.pos_exprace_height = 0;
+        // Escaping-stall parent-chain MTP gap: ENFORCED FROM GENESIS (0).
+        // Mainnet has not launched, so it starts life with this rule already in
+        // force and there is NOTHING TO COORDINATE OR REMEMBER LATER — no
+        // activation height to pick, no flag day, no legacy history to exempt.
+        // Note the convention is the opposite of pos_exprace_height above: for
+        // THIS parameter 0 means "always enforced", not "disabled". Do not
+        // "fix" it to a positive value; a positive value would exempt early
+        // mainnet blocks from a rule that exists to prevent finality
+        // partitions. See consensus/params.h.
+        consensus.pos_escape_stall_mtp_height = 0;
         consensus.nMaxBlockWeight = 200000;             // a twentieth of Bitcoin (doc 11 §4)
         consensus.connect_genesis_outputs = true;
         anyonecanspend_aremine = false;
@@ -666,6 +676,22 @@ public:
         // The cadence floor guarantees >=30s/block, so the chain cannot reach it
         // sooner than 36h; a Bitcoin-fork stall only delays it (never earlier).
         consensus.pos_exprace_height = 44300;
+        // Escaping-stall parent-chain MTP gap: enforced only from this height.
+        //
+        // The rule was added after the 2026-07-17 finality partition, but this
+        // chain had already produced blocks that violate it — the earliest
+        // observed is height 1757, dated 2026-07-06. Enforcing it from genesis
+        // (the previous behaviour) made the chain UNSYNCABLE: a node starting
+        // from scratch stops at 1757 for ever, and the nodes that do work only
+        // do so because blocks already in their chainstate are never
+        // re-validated, so any -reindex or restore would brick them.
+        //
+        // The value must stay ABOVE the tip at release time, so no node can
+        // disagree about blocks that already exist. The tip was ~63,000 on
+        // 2026-07-31; 80,000 leaves several days of margin at the ~30 s
+        // cadence. Below it the rule is not applied, which is exactly what
+        // every already-synced node effectively does today.
+        consensus.pos_escape_stall_mtp_height = 80000;
         // SEQUENTIA: 200,000 weight units — a twentieth of Bitcoin's 4,000,000
         // — so that, at ~30-second blocks (20x Bitcoin's cadence), a saturated
         // chain grows at exactly the same total rate as a saturated Bitcoin
@@ -1404,6 +1430,12 @@ protected:
         // exercise the pre- and post-fork election and the transition; the real
         // chains (CTestNetParams / CSequentiaParams) pin it in code. 0 = disabled.
         consensus.pos_exprace_height = (int)args.GetIntArg("-posexpraceheight", 0);
+        // Escaping-stall MTP-gap activation height. Arg-readable only on this
+        // custom/regtest chain so tests can exercise both sides of the gate and
+        // the transition; the real chains pin it in code above. Default 0 =
+        // enforced from genesis, matching mainnet.
+        consensus.pos_escape_stall_mtp_height =
+            (int)args.GetIntArg("-posescapestallmtpheight", 0);
         if (g_pos_public_committee &&
             (g_pos_committee_size < 1 || g_pos_committee_size > MAX_POS_PUBLIC_COMMITTEE_SIZE)) {
             throw std::runtime_error(strprintf("-poscommitteesize must be between 1 and %d under -pospubliccommittee", MAX_POS_PUBLIC_COMMITTEE_SIZE));

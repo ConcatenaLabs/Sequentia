@@ -668,6 +668,20 @@ inline bool PosEscapingStallAllowed(uint32_t parent_anchor_height, uint32_t bloc
            block_anchor_height - parent_anchor_height >= POS_ESCAPING_STALL_ANCHOR_GAP;
 }
 
+/** Is the escaping-stall parent-chain MTP-gap requirement enforced at `height`?
+ *
+ *  The MTP gap was introduced after the testnet chain had already produced
+ *  blocks that violate it, which made that history unvalidatable and the chain
+ *  unsyncable from genesis (see Consensus::Params::pos_escape_stall_mtp_height
+ *  for the full rationale). Gating it by height is the standard soft-fork
+ *  treatment.
+ *
+ *  CONVENTION, deliberately the opposite of PosExpRaceActive: 0 means ENFORCED
+ *  FROM GENESIS — the right setting for a chain launched with the rule already
+ *  in place, so a new chain needs no future migration. A positive H enforces it
+ *  only from height H on. */
+bool PosEscapeStallMtpActive(const Consensus::Params& params, int height);
+
 /** A committee member's eligibility claim carried in the block: its key and
  *  its VRF proof over the slot seed. */
 struct PosVrfMember {
