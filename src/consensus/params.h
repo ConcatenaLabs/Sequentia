@@ -166,6 +166,30 @@ struct Params {
     //! height H on every node at once. Set per chain; coordinate the value with
     //! all operators before it is reached (see doc/sequentia/04-proof-of-stake.md).
     int pos_exprace_height{0};
+    //! SEQUENTIA PoS: block height from which the escaping-stall PARENT-CHAIN
+    //! MEDIAN-TIME-PAST gap (CheckEscapingStallMtpGap, anchor.h) is enforced.
+    //!
+    //! NOTE THE INVERTED CONVENTION vs pos_exprace_height above: there 0 means
+    //! "disabled"; HERE 0 MEANS "ENFORCED FROM GENESIS", which is the correct
+    //! setting for any chain launched with the rule already in place. A positive
+    //! H enforces it only from height H on, leaving earlier history exempt.
+    //!
+    //! Why this gate exists. The MTP-gap requirement was added in response to
+    //! the 2026-07-17 finality partition, i.e. AFTER the testnet chain had
+    //! already produced blocks that do not satisfy it (the earliest observed is
+    //! testnet height 1757, dated 2026-07-06). Because it was enforced from
+    //! genesis with no activation height, those blocks became unvalidatable:
+    //! a node syncing from scratch stops there for ever and can never join the
+    //! network, and an existing node survives only because blocks already in
+    //! its chainstate are never re-validated — so a -reindex, a restore from
+    //! backup or any resync would leave it unable to start. Gating the rule by
+    //! height is the standard soft-fork treatment and fixes both.
+    //!
+    //! Choosing the value: it must be ABOVE the chain tip at the time the
+    //! binary is released, so no node can disagree about already-existing
+    //! blocks. Below H the rule is simply not applied, which is exactly the
+    //! behaviour every already-synced node has today.
+    int pos_escape_stall_mtp_height{0};
     CAmount genesis_subsidy;
     //! SEQUENTIA: per-chain maximum block weight (BIP141 weight units). 0 means
     //! "use the global MAX_BLOCK_WEIGHT". Sequentia sets this to 200,000 (a
