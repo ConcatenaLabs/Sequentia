@@ -835,6 +835,31 @@ void AnchorWatchTask(ChainstateManager& chainman)
     //    network's certified branch. Reached on quiet ticks (sections 1-2 found
     //    nothing to invalidate), which is exactly the partition's signature.
     MaybeReconcileFinality(chainman);
+
+    // 4) Retry driver for parent-chain stalls (incident 2026-07-26). When
+    //    ConnectTip cannot verify a block against the parent chain (bitcoind
+    //    unreachable: pos-escape-stall-unverifiable), it deliberately makes no
+    //    progress and sets fStall instead of failing the block — the block stays a
+    //    clean, unmarked candidate so it can simply be retried once bitcoind
+    //    answers again (validation.cpp). But that stall needs something to RE-DRIVE
+    //    ActivateBestChain afterwards, and sections 1-3 above only call it when
+    //    they themselves changed something. Without this, recovery would wait for
+    //    the next block/header to arrive from a peer — which on a quiet or
+    //    temporarily isolated node may be a long time, and is exactly the state a
+    //    stalled staker is in (it is producing nothing and its peers are ahead).
+    //    Calling it here, every tick, bounds recovery latency to
+    //    -anchorpollinterval (default 5s) instead of leaving it to gossip timing.
+    //    Cheap when there is nothing to do: ActivateBestChain returns immediately
+    //    once pindexMostWork == m_chain.Tip(). Also safe against a hot loop: a
+    //    still-unverifiable block re-stalls (fStall breaks both activation loops)
+    //    rather than spinning, so the RPC load on a down/slow parent daemon is one
+    //    attempt per tick, not one per CPU cycle.
+    {
+        BlockValidationState state;
+        if (!chainman.ActiveChainstate().ActivateBestChain(state)) {
+            LogPrintf("WARNING: ActivateBestChain failed on anchor watcher retry tick: %s\n", state.ToString());
+        }
+    }
 }
 
 // --- Bitcoin checkpoints against PoS long-range attacks (paper §11) ---
