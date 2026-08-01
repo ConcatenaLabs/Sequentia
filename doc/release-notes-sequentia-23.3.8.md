@@ -97,6 +97,23 @@ silently on the user's behalf.
 - `CONTRIBUTING.md` now requires an activation height for every new consensus
   rule, recorded as a rule rather than as two one-off fixes.
 
+## Building
+
+Nothing about how this release is built has changed. Build it exactly the way
+you built the previous one — the notes below are the usual procedure for this
+codebase, written down because they are easy to get wrong, not because this
+release introduces a new requirement.
+
+- **Build through the `depends` system**, as release builds always have.
+  `depends` compiles Berkeley DB 4.8 from source, which is what lets a build
+  open legacy wallets. A plain `./configure --without-bdb` produces a binary
+  that cannot, and a node with a legacy wallet then stops at
+  "Verifying wallet(s)". That has been true of every version, not just this one.
+  The system BDB 5.3 is not a substitute: it can alter the format of existing
+  wallets.
+- **Re-run `configure` after checking out this tag**, or `make` will not pick up
+  the version change and the binary will keep reporting the previous version.
+
 ## Recommended configuration
 
 - **`mainchainrpctimeout=10`.** The parent-chain RPC is issued from
