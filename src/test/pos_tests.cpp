@@ -165,10 +165,21 @@ BOOST_AUTO_TEST_CASE(pos_escaping_stall_unverified_is_counted)
     BOOST_CHECK_EQUAL(after.count, before.count + 1);
     BOOST_CHECK_EQUAL(after.last_height, 4242);
 
-    // The producer weighing its own options passes no height; its probing must
-    // not read as something the node swallowed.
-    BOOST_CHECK(CheckEscapingStallMtpGap(parent_anchor, block_anchor) == EscapeStallTimeVerdict::ALLOWED);
+    // The producer weighing its own options passes record_unverified=false; its
+    // probing must not read as something the node swallowed. It still passes a
+    // real height, because the activation gate below needs one.
+    BOOST_CHECK(CheckEscapingStallMtpGap(parent_anchor, block_anchor, 4242,
+                                         /*record_unverified=*/false) == EscapeStallTimeVerdict::ALLOWED);
     BOOST_CHECK_EQUAL(GetUnverifiedEscapingStalls().count, after.count);
+
+    // Below the activation height the rule does not apply, so nothing is being
+    // taken on trust and nothing may be reported. The gate is checked BEFORE
+    // the -validateanchor branch precisely so this case cannot be miscounted:
+    // a node must not be charged with a delegation it never made. Height 0 is
+    // below every real gate (a chain launched with the rule uses 1).
+    BOOST_CHECK(CheckEscapingStallMtpGap(parent_anchor, block_anchor, 0) == EscapeStallTimeVerdict::ALLOWED);
+    BOOST_CHECK_EQUAL(GetUnverifiedEscapingStalls().count, after.count);
+    BOOST_CHECK_EQUAL(GetUnverifiedEscapingStalls().last_height, 4242);
 
     // With the gap disabled the evidence is not part of the rules at all, so
     // there is nothing being taken on trust to report.
