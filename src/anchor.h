@@ -17,6 +17,7 @@
 
 #include <uint256.h>
 
+#include <atomic>
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -46,6 +47,51 @@ static const int DEFAULT_ANCHOR_CONTEST_WINDOW = 2;
  *  (-validateanchor). When false, only the structural rules (presence and
  *  monotonicity) are enforced. */
 extern bool g_validate_anchor;
+
+/** SEQUENTIA: true when anchor validation is off because the user accepted the
+ *  startup prompt (the Bitcoin daemon was unreachable and they chose to start
+ *  anyway), as opposed to a deliberate -validateanchor=0 in the configuration.
+ *  The two are the same to consensus but not to the user interface: this one
+ *  was not planned, so the GUI keeps a reminder visible and offers to restart
+ *  once Bitcoin is back. Assigned once during init, before the threads that
+ *  read it start. */
+extern std::atomic<bool> g_anchor_unvalidated_by_prompt;
+
+/** SEQUENTIA: set by the retry watcher (started only when that prompt was
+ *  accepted) once the Bitcoin daemon answers again. Anchor validation is NOT
+ *  re-enabled in place — the blocks accepted meanwhile were never checked
+ *  against Bitcoin and are not revalidated retroactively, so flipping the flag
+ *  would claim a protection the node does not have. The GUI uses this to say
+ *  that a restart now restores it. */
+extern std::atomic<bool> g_anchor_parent_back_online;
+
+/** SEQUENTIA: what this node has accepted on trust because it was not watching
+ *  Bitcoin. A sub-quorum (escaping-stall) block is certified by as little as
+ *  ONE committee member, and the only evidence that the committee really was
+ *  stalled — the parent-chain time gap — lives on Bitcoin. With
+ *  -validateanchor=0 that evidence cannot be checked, so the block is taken on
+ *  the network's word. This is the one place where delegating to peers costs
+ *  something concrete and specific, so the node counts it and says so. */
+struct UnverifiedEscapingStalls {
+    //! Sub-quorum blocks accepted without checking the parent-chain evidence.
+    int count{0};
+    //! Height of the most recent one (-1 = none).
+    int last_height{-1};
+    //! Unix time of the most recent one (0 = none).
+    int64_t last_time{0};
+};
+
+/** Record a sub-quorum block accepted without the parent-chain time evidence. */
+void NoteUnverifiedEscapingStall(int height);
+
+/** SEQUENTIA: does the parent chain daemon answer right now? One RPC, no
+ *  retries, no locks — unlike MainchainRPCCheck it never waits out an RPC
+ *  warmup, so it is safe to poll from a thread that must join promptly at
+ *  shutdown. Used by the startup retry watcher. */
+bool MainchainReachable();
+
+/** Read the counter above. Lock-free; safe from any thread. */
+UnverifiedEscapingStalls GetUnverifiedEscapingStalls();
 
 /** Result of checking an anchor against the parent chain daemon. */
 enum class AnchorCheckResult {
@@ -169,15 +215,37 @@ enum class EscapeStallTimeVerdict { ALLOWED, TOO_SOON, UNKNOWN };
  *  fetched from the parent daemon and cached forever (immutable per hash).
  *  Called with validation locks held is fine on cache hits; a cache miss does
  *  one parent-daemon RPC (only reached for actual sub-quorum blocks, which are
- *  rare by construction). */
+ *  rare by construction).
+ *
+ *  `height` is the height of the block being judged. It serves two purposes:
+ *  it decides whether the rule applies at all (the activation gate,
+ *  PosEscapeStallMtpHeightActive — the rule postdates some chains' history, so below
+ *  the gate there is nothing to verify), and it is recorded when an unverified
+ *  acceptance is swallowed.
+ *
+ *  The gate lives HERE rather than at the call sites on purpose: a call site
+ *  that forgot it would re-apply the rule retroactively, which is the exact
+ *  failure this gate exists to prevent (see Consensus::Params).
+ *
+ *  `record_unverified` separates "am I validating an incoming block" from
+ *  "am I weighing my own options": the producer probes with false so its
+ *  probing never reads as something the node swallowed. */
 EscapeStallTimeVerdict CheckEscapingStallMtpGap(const uint256& parent_anchor_hash,
-                                                const uint256& block_anchor_hash);
+                                                const uint256& block_anchor_hash,
+                                                int height,
+                                                bool record_unverified = true);
 
 /** Seconds of parent-chain MTP that must elapse between the parent block's
  *  anchor and a sub-quorum block's anchor (0 disables the check). One Bitcoin
  *  block interval by default. Set from -posescapestallmtpgap in init. */
 extern int64_t g_pos_escape_stall_mtp_gap;
 static const int64_t DEFAULT_POS_ESCAPE_STALL_MTP_GAP = 600;
+
+/*  The activation height for the gap above lives in the COMMON layer
+ *  (pos.h: g_pos_escape_stall_mtp_height / PosEscapeStallMtpHeightActive),
+ *  because chainparams.cpp assigns it and elements-cli / elements-tx link
+ *  libbitcoin_common without libbitcoin_server. Same reason the operator
+ *  checkpoints live there. */
 
 // --- PoS finality reconciliation (design doc Change 4b; incident 2026-07-17) ---
 //

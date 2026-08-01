@@ -1733,6 +1733,14 @@ void CChainState::InvalidChainFound(CBlockIndex* pindexNew)
 void CChainState::InvalidBlockFound(CBlockIndex* pindex, const BlockValidationState& state)
 {
     AssertLockHeld(cs_main);
+    // NOTE (SEQUENTIA): do NOT add a "soft"/retriable exclusion here. Marking the
+    // block failed is also what guarantees TERMINATION of the ActivateBestChain
+    // retry loop: FindMostWorkChain only drops candidates carrying
+    // BLOCK_FAILED_MASK (or missing data), so an unmarked candidate is returned
+    // again on the very next iteration and ConnectTip is retried immediately, in a
+    // hot loop. Transient, parent-chain-dependent rejections are therefore handled
+    // in ConnectTip via the fStall mechanism (which breaks out of both activation
+    // loops) BEFORE this function is ever reached.
     if (state.GetResult() != BlockValidationResult::BLOCK_MUTATED) {
         pindex->nStatus |= BLOCK_FAILED_VALID;
         m_chainman.m_failed_blocks.insert(pindex);
@@ -2334,7 +2342,7 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
         // relaxation is actually exercised (named set below quorum), so
         // certified blocks never pay the (cached) parent-daemon lookup.
         if (escaping_stall && (int)named.size() < quorum) {
-            switch (CheckEscapingStallMtpGap(pindexPrev->m_anchor_hash, block.m_anchor_hash)) {
+            switch (CheckEscapingStallMtpGap(pindexPrev->m_anchor_hash, block.m_anchor_hash, pindexPrev->nHeight + 1)) {
             case EscapeStallTimeVerdict::ALLOWED: break;
             case EscapeStallTimeVerdict::TOO_SOON:
                 return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-pos-escape-stall-too-soon", "sub-quorum block without the escaping-stall parent-chain time gap");
@@ -2408,7 +2416,7 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
             // Escaping-stall real-time evidence (anchor.h, incident 2026-07-17):
             // see the aggregate-MuSig2 path above for the rationale.
             if (escaping_stall && signers < quorum) {
-                switch (CheckEscapingStallMtpGap(pindexPrev->m_anchor_hash, block.m_anchor_hash)) {
+                switch (CheckEscapingStallMtpGap(pindexPrev->m_anchor_hash, block.m_anchor_hash, pindexPrev->nHeight + 1)) {
                 case EscapeStallTimeVerdict::ALLOWED: break;
                 case EscapeStallTimeVerdict::TOO_SOON:
                     return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-pos-escape-stall-too-soon", "sub-quorum block without the escaping-stall parent-chain time gap");
@@ -2446,7 +2454,7 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
             // Escaping-stall real-time evidence (anchor.h, incident 2026-07-17):
             // see the aggregate-MuSig2 path above for the rationale.
             if (escaping_stall && (int)named.size() < quorum) {
-                switch (CheckEscapingStallMtpGap(pindexPrev->m_anchor_hash, block.m_anchor_hash)) {
+                switch (CheckEscapingStallMtpGap(pindexPrev->m_anchor_hash, block.m_anchor_hash, pindexPrev->nHeight + 1)) {
                 case EscapeStallTimeVerdict::ALLOWED: break;
                 case EscapeStallTimeVerdict::TOO_SOON:
                     return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-pos-escape-stall-too-soon", "sub-quorum block without the escaping-stall parent-chain time gap");
@@ -3660,6 +3668,45 @@ bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew
         bool rv = ConnectBlock(blockConnecting, state, pindexNew, view, &setPeginsSpent);
         GetMainSignals().BlockChecked(blockConnecting, state);
         if (!rv) {
+            // SEQUENTIA (incident 2026-07-26): BLOCK_RECENT_CONSENSUS_CHANGE means
+            // the rejection reflects this node's transient view of the parent chain
+            // daemon (unreachable / lagging / mid-reorg), NOT a deterministic
+            // consensus violation. CheckPosStakeRules returns it as
+            // "pos-escape-stall-unverifiable" when bitcoind cannot be reached to
+            // evaluate the escaping-stall MTP gap — the block is unverifiable *now*,
+            // and "unverifiable" is not "invalid".
+            //
+            // Falling through to InvalidBlockFound would set BLOCK_FAILED_VALID and
+            // persist it, caching that transient verdict FOREVER: the block is never
+            // retried once bitcoind recovers, and no existing recovery path picks it
+            // up (the anchor watcher only reconsiders blocks IT invalidated via
+            // MarkAnchorInvalid). Observed live: a bitcoind not yet answering RPC at
+            // elementsd startup wedged the node ~2300 blocks behind until an operator
+            // ran reconsiderblock by hand.
+            //
+            // Simply *not marking* it would be worse: FindMostWorkChain only drops
+            // candidates carrying BLOCK_FAILED_MASK, so an unmarked candidate is
+            // returned again immediately and ActivateBestChain spins in a hot loop,
+            // re-running full block validation (and hammering the already-struggling
+            // parent daemon with RPCs) under cs_main.
+            //
+            // So use the mechanism Elements already has for exactly this situation —
+            // the CheckPeginRipeness stall above: make no progress, mark nothing,
+            // and set fStall, which breaks out of BOTH activation loops
+            // (ActivateBestChainStep and ActivateBestChain). The block stays a clean
+            // candidate and is retried on the next activation trigger — a new
+            // block/header, or the anchor watcher's tick (-anchorpollinterval,
+            // default 5s), which bounds recovery latency without any hot loop. The
+            // partially-modified `view` is discarded unflushed exactly as on the
+            // error path below, so no chainstate change leaks out.
+            if (state.GetResult() == BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE) {
+                LogPrintf("STALLING further progress in ConnectTip: block %s (height %d) cannot be verified against the parent chain right now (%s). "
+                          "Chain will not grow until the parent chain daemon is reachable again; the block will be retried, NOT marked invalid.\n",
+                          pindexNew->GetBlockHash().ToString(), pindexNew->nHeight, state.GetRejectReason());
+                state = BlockValidationState();
+                fStall = true;
+                return true;
+            }
             if (state.IsInvalid()) {
                 InvalidBlockFound(pindexNew, state);
             }
@@ -5131,11 +5178,31 @@ bool CChainState::AcceptBlock(const std::shared_ptr<const CBlock>& pblock, Block
     // (whose parent state is the tip's, minus the tip's own stake — recreated by
     // a temporary, exact-inverse revert). A block invalid for its fixed parent
     // is invalid regardless of later reorgs, so the permanent BLOCK_FAILED mark
-    // is correct. Deeper/off-chain forks are deferred to connect time (they carry
-    // less work and have clamped keys, so they cannot churn the tip).
+    // is correct for a deterministic (BLOCK_CONSENSUS) rejection. Deeper/off-chain
+    // forks are deferred to connect time (they carry less work and have clamped
+    // keys, so they cannot churn the tip).
+    //
+    // BLOCK_RECENT_CONSENSUS_CHANGE is the one exception to "permanent mark is
+    // correct": CheckPosStakeRules can return it (pos-escape-stall-unverifiable)
+    // when the parent chain daemon cannot be reached to evaluate the
+    // escaping-stall MTP gap — a transient, local-view failure, not a fixed
+    // property of the parent state. Caching that as permanently failed wedges the
+    // node forever once the daemon recovers (incident 2026-07-26), so leave it
+    // unmarked and let the block be re-offered later.
+    //
+    // Unlike the connect-time path (which must use ConnectTip's fStall to avoid a
+    // hot retry loop), leaving it unmarked here cannot spin: this early return
+    // precedes both SaveBlockToDisk and ReceivedBlockTransactions, so the block
+    // never enters setBlockIndexCandidates and FindMostWorkChain cannot pick it up.
+    // The retry is driven by ordinary block download (net_processing re-requests a
+    // body we do not have), which is rate-limited by the in-flight/timeout logic.
+    // BLOCK_RECENT_CONSENSUS_CHANGE also carries no peer punishment
+    // (MaybePunishNodeForBlock treats it as a no-op), so re-offering is not
+    // self-harming.
     if (g_con_pos && pindex->pprev != nullptr) {
         if (!CheckPosStakeRulesAtAccept(block, state, pindex->pprev, m_chain.Tip(), m_params.GetConsensus())) {
-            if (state.IsInvalid() && state.GetResult() != BlockValidationResult::BLOCK_MUTATED) {
+            if (state.IsInvalid() && state.GetResult() != BlockValidationResult::BLOCK_MUTATED &&
+                state.GetResult() != BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE) {
                 pindex->nStatus |= BLOCK_FAILED_VALID;
                 m_blockman.m_dirty_blockindex.insert(pindex);
             }
