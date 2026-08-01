@@ -143,6 +143,62 @@ BOOST_AUTO_TEST_CASE(pos_escaping_stall_gap)
     BOOST_CHECK(PosEscapingStallAllowed(0, 3));
 }
 
+// A node that is not watching Bitcoin (-validateanchor=0) cannot check the
+// parent-chain time evidence behind a sub-quorum block, so it accepts it on the
+// network's word. That is the one concrete, nameable thing delegating to peers
+// costs, and it must never be silent: every such acceptance is counted.
+BOOST_AUTO_TEST_CASE(pos_escaping_stall_unverified_is_counted)
+{
+    const bool saved_validate = g_validate_anchor;
+    const int64_t saved_gap = g_pos_escape_stall_mtp_gap;
+    const int saved_height = g_pos_escape_stall_mtp_height;
+    g_pos_escape_stall_mtp_gap = 600;
+    // The rule is only part of the rules from its activation height, and the
+    // chain a unit test runs on does not set one. Turn it on from block 1, as
+    // a chain launched with the rule in place does, or the gate would return
+    // first and there would be nothing to count.
+    g_pos_escape_stall_mtp_height = 1;
+    g_validate_anchor = false;
+
+    // No parent daemon is reachable from a unit test — which is the point: on
+    // this path nothing is asked of one, so the anchor hashes are never used.
+    const uint256 parent_anchor = uint256S("11");
+    const uint256 block_anchor = uint256S("22");
+
+    const UnverifiedEscapingStalls before = GetUnverifiedEscapingStalls();
+    BOOST_CHECK(CheckEscapingStallMtpGap(parent_anchor, block_anchor, 4242) == EscapeStallTimeVerdict::ALLOWED);
+    const UnverifiedEscapingStalls after = GetUnverifiedEscapingStalls();
+    BOOST_CHECK_EQUAL(after.count, before.count + 1);
+    BOOST_CHECK_EQUAL(after.last_height, 4242);
+
+    // The producer weighing its own options passes record_unverified=false; its
+    // probing must not read as something the node swallowed. It still passes a
+    // real height, because the activation gate below needs one.
+    BOOST_CHECK(CheckEscapingStallMtpGap(parent_anchor, block_anchor, 4242,
+                                         /*record_unverified=*/false) == EscapeStallTimeVerdict::ALLOWED);
+    BOOST_CHECK_EQUAL(GetUnverifiedEscapingStalls().count, after.count);
+
+    // Below the activation height the rule does not apply, so nothing is being
+    // taken on trust and nothing may be reported. The gate is checked BEFORE
+    // the -validateanchor branch precisely so this case cannot be miscounted:
+    // a node must not be charged with a delegation it never made. Height 0 is
+    // below every real gate (a chain launched with the rule uses 1).
+    BOOST_CHECK(CheckEscapingStallMtpGap(parent_anchor, block_anchor, 0) == EscapeStallTimeVerdict::ALLOWED);
+    BOOST_CHECK_EQUAL(GetUnverifiedEscapingStalls().count, after.count);
+    BOOST_CHECK_EQUAL(GetUnverifiedEscapingStalls().last_height, 4242);
+
+    // With the gap disabled the evidence is not part of the rules at all, so
+    // there is nothing being taken on trust to report.
+    g_pos_escape_stall_mtp_gap = 0;
+    BOOST_CHECK(CheckEscapingStallMtpGap(parent_anchor, block_anchor, 4243) == EscapeStallTimeVerdict::ALLOWED);
+    BOOST_CHECK_EQUAL(GetUnverifiedEscapingStalls().count, after.count);
+    BOOST_CHECK_EQUAL(GetUnverifiedEscapingStalls().last_height, 4242);
+
+    g_validate_anchor = saved_validate;
+    g_pos_escape_stall_mtp_gap = saved_gap;
+    g_pos_escape_stall_mtp_height = saved_height;
+}
+
 // The minimum-stake floor (whitepaper §3.3) excludes sub-minimum stakers from
 // the schedule, the rank lookup, the eligible-total weight, and VRF committee
 // membership; with the floor at 0 (default) every registered staker is eligible.
