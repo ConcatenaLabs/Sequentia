@@ -604,9 +604,26 @@ void OverviewPage::updateSeqStatus()
                 const int anc = r.exists("anchorheight") ? r["anchorheight"].get_int() : -1;
                 const QString st = r.exists("anchorstatus") ? QString::fromStdString(r["anchorstatus"].get_str()) : tr("unknown");
                 const bool ok = (st == QLatin1String("ok"));
-                m_anchor_label->setText(tr("Bitcoin anchor: %1  -  Sequentia height %2, anchored to testnet4 block %3")
-                                        .arg(ok ? tr("OK") : st).arg(tip).arg(anc));
-                m_anchor_label->setStyleSheet(ok ? "color:#3ecf7a;" : "color:#ff6b6b;");
+                // Only the ANCHOR verdict carries a colour. The heights beside it
+                // are facts this node knows for certain from its own chain, and
+                // painting them red says they are suspect when they are not — the
+                // warning has to point at the one thing that is actually in doubt.
+                // "not_validated" is also not a fault to shout about: it is what a
+                // node that deliberately does not follow Bitcoin reports, so it
+                // gets its reason instead of a bare internal token.
+                const bool delegated = (st == QLatin1String("not_validated"));
+                const QString verdict = ok       ? tr("OK")
+                                      : delegated ? tr("not following Bitcoin - trusting peers")
+                                                  : st;
+                const QString colour = ok ? QStringLiteral("#3ecf7a") : QStringLiteral("#ff6b6b");
+                m_anchor_label->setText(
+                    QStringLiteral("<span style='color:%1;'>%2</span>%3")
+                        .arg(colour,
+                             tr("Bitcoin anchor: %1").arg(verdict).toHtmlEscaped(),
+                             tr("  -  Sequentia height %2, anchored to testnet4 block %3")
+                                 .arg(tip).arg(anc).toHtmlEscaped()));
+                m_anchor_label->setTextFormat(Qt::RichText);
+                m_anchor_label->setStyleSheet(QString());
             } else {
                 m_anchor_label->setText(tr("Bitcoin anchor: unavailable"));
             }

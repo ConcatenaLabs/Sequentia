@@ -2238,7 +2238,10 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         // This wait can last minutes before the check gives up, and until it
         // does the only feedback is this line - so it also has to say that a
         // choice is coming, or the splash reads as a freeze.
-        uiInterface.InitMessage(_("Connecting to Bitcoin Core... (if it is not running, you will be asked how to proceed)").translated);
+        // Kept short: the splash is narrow and elides anything longer, which is
+        // how the first attempt at this ended up reading "ting to Bitcoin Core...
+        // (if it is not running, you will be asked how to p".
+        uiInterface.InitMessage(_("Connecting to Bitcoin Core...").translated);
         if (!MainchainRPCCheck()) {
             // Ask, instead of deciding for the user. Running without the
             // Bitcoin connection is a legitimate choice for a wallet on a
