@@ -241,24 +241,11 @@ EscapeStallTimeVerdict CheckEscapingStallMtpGap(const uint256& parent_anchor_has
 extern int64_t g_pos_escape_stall_mtp_gap;
 static const int64_t DEFAULT_POS_ESCAPE_STALL_MTP_GAP = 600;
 
-/** Height from which the MTP gap above is part of the rules, mirrored from
- *  Consensus::Params::pos_escape_stall_mtp_height when the chain is selected.
- *
- *  Mirrored into a global, rather than read from Params() where it is used,
- *  for the same reason g_pos_escape_stall_mtp_gap is: this layer has no chain
- *  context of its own, and reaching for the active chainparams from here would
- *  make the verdict depend on global selection state that unit tests and any
- *  non-PoS chain do not set up — the rule would silently switch itself off.
- *
- *  0 = not gated (rule off), a positive H = enforced from height H, matching
- *  pos_exprace_height. A chain launched with the rule in place uses 1. */
-extern int g_pos_escape_stall_mtp_height;
-
-/** True when the escaping-stall MTP evidence is part of the rules at `height`. */
-inline bool PosEscapeStallMtpHeightActive(int height)
-{
-    return g_pos_escape_stall_mtp_height > 0 && height >= g_pos_escape_stall_mtp_height;
-}
+/*  The activation height for the gap above lives in the COMMON layer
+ *  (pos.h: g_pos_escape_stall_mtp_height / PosEscapeStallMtpHeightActive),
+ *  because chainparams.cpp assigns it and elements-cli / elements-tx link
+ *  libbitcoin_common without libbitcoin_server. Same reason the operator
+ *  checkpoints live there. */
 
 // --- PoS finality reconciliation (design doc Change 4b; incident 2026-07-17) ---
 //
