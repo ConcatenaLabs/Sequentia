@@ -60,14 +60,49 @@ Re-verify them after any signer/channel work — they are the two that will regr
 |---|-----|---------|-------------------|--------|
 | 5 | chain | chain | covenant CLOB | PASSED in browser |
 | 6 | LN | LN | pure-LN asset↔asset (`kind:'ln', assetAsset:true`) | **NOT passed** — no asset↔asset LN maker on this testnet |
-| 7 | LN | chain | must bridge via LSP | **NOT built** |
-| 8 | chain | LN | must bridge via LSP | **NOT built** |
+| 7 | LN | chain | asset-LN HTLC + on-chain HTLC, one preimage | **NOT built** — not expressible in the offer schema, §3 |
+| 8 | chain | LN | mirror of 7 | **NOT built** — §3 |
 
 **Task #34 is marked `completed` in the task list. That is FALSE.** The outgoing agent closed it on the
 claim that 7 and 8 "don't exist structurally" because an asset↔asset swap is one Sequentia transaction.
-Andreas rejected that flatly and correctly: it is true of the peer-to-peer primitive, and irrelevant to
-the product, because the bridge exists precisely to convert a leg's rail. **Reopen #34.** Do not trust
-the other `completed` marks blindly either; trust the browser.
+That is true only of the fully-on-chain primitive: as soon as one leg is on Lightning it is not one
+transaction at all, it is two HTLCs bound by one preimage — exactly the construction the code already
+uses for rail 6, with the counter-asset in BTC's structural place. **Reopen #34.** Do not trust the
+other `completed` marks blindly either; trust the browser.
+
+### 1.1 The matching rule, and when the LSP is involved (READ THIS — the outgoing agent had it wrong)
+
+A **rail is a property of a LEG**, not of an order. A leg is one asset moving from a sender to a
+receiver. Each leg therefore has two opinions about its rail — the sender's "pay" preference and the
+receiver's "receive" preference — and the leg is **compatible when those two agree**:
+
+- leg A (taker pays, maker receives): compatible iff `taker.payRail == maker.recvRail`
+- leg B (maker pays, taker receives): compatible iff `maker.payRail == taker.recvRail`
+
+The two legs are independent. A "mixed" order is completely ordinary: taker pays A over Lightning and
+receives B on-chain, matched against a maker who receives A over Lightning and pays B on-chain. Both
+legs agree. **It settles peer-to-peer as one asset-LN HTLC plus one on-chain HTLC bound by a single
+preimage. The LSP is not involved, is not needed, and must not be inserted.**
+
+The LSP has exactly two roles, both optional and both per-leg:
+
+1. **Rail conversion — only on a leg whose two sides DISAGREE.** Taker pays A over LN, maker wants A
+   on-chain: the LSP receives A over Lightning and pays A on-chain onward, so the leg crosses. This is
+   what the spec means by "the LSP inserts itself as an invisible counterparty on that leg". It is
+   triggered by a *disagreement on one leg*, never by the order being "mixed".
+2. **Liquidity fronting** — a JIT channel or fronted inbound when a party has chosen a Lightning leg
+   but holds no channel for it. Orthogonal to (1): a party can need fronting on a perfectly compatible
+   leg, and a crossed leg can need no fronting at all.
+
+The outgoing agent collapsed these two into "mixed rails ⇒ route through the LSP", which turns an
+optional per-leg bridge into a mandatory intermediary — inserting a middleman, a fee, and a custody hop
+into a swap two peers could do directly. Andreas caught it. Any design note anywhere in the tree that
+says a mixed order "must bridge via the LSP" is wrong and should be corrected on sight.
+
+Consequence for the book: matching stays **rail-blind** (price/asset/size only, per
+[[dex-rail-agnostic-matching]]). Rails are resolved at settlement, per leg: agree → direct; disagree →
+LSP bridges that one leg. Both outcomes must be reachable, and the direct one is the default whenever
+it is available.
 
 ---
 
@@ -120,36 +155,69 @@ touch it.
 
 ## 3. The next piece of work, in detail: mixed same-chain (rails 7 and 8)
 
-The spec's mechanism is the LSP inserting itself as an invisible counterparty on the incompatible leg.
-For an asset↔asset pair that means the on-chain covenant CLOB take still happens — the LSP is the party
-on one side of it — and the user's LN leg is a submarine swap against the LSP:
+**The primary construction is peer-to-peer and does not involve the LSP.** Read §1.1 first. Rails 7 and
+8 are ordinary swaps between two parties whose per-leg rail preferences complement each other:
 
-- **Rail 7 (pay A over LN, receive B on-chain):** user pays asset A over Lightning to the LSP; the LSP
-  releases A on-chain from its own inventory into the covenant take; the take returns B on-chain to the
-  user's address. Forward submarine on the A leg.
-- **Rail 8 (pay A on-chain, receive B over LN):** the covenant take delivers B on-chain to the LSP; the
-  LSP pays the user B over Lightning, fronting inbound if the user has no B channel. Reverse submarine
-  on the B leg. `provisionInbound` + the inbound-liquidity pricing built this session (§4) already cover
-  the fronting.
+- **Rail 7 — taker pays A over LN, receives B on-chain.** The complementary maker receives A over
+  Lightning and pays B on-chain. Settlement: an **asset-LN HTLC on A** and an **on-chain HTLC on B**,
+  bound by one preimage — structurally identical to the proven cross-chain submarine shape, with asset B
+  standing where BTC stands there. Neither side needs the LSP.
+- **Rail 8 — mirror.** Taker pays A on-chain, receives B over Lightning; the maker pays B over Lightning
+  and receives A on-chain. On-chain HTLC on A, asset-LN HTLC on B, one preimage.
 
-Where to work:
+The LSP appears only in the two optional cases of §1.1: bridging a leg whose two sides disagree, or
+fronting liquidity for a party who chose a Lightning leg without a channel. Build the direct path
+**first**; a design that reaches for the LSP on every mixed order is the misunderstanding this document
+exists to correct.
 
-1. `swap.js:1052-1131` `findRoute()` — the same-chain branch. It currently has exactly two outcomes:
+### 3.1 The actual blocker: the offer schema cannot express a per-leg rail
+
+`daemon/api-spec/protobuf/seqob/v1/offer.proto`. An `Offer` carries a `settlement` oneof — `SameChain`,
+`CrossChain`, `Lightning`, `Covenant` — and **none of its variants can describe a same-chain offer with
+one Lightning leg and one on-chain leg**:
+
+- `SameChainTerms` (line 125) is two on-chain legs, implicitly: `maker_recv_address` +
+  `maker_blinding_pub`, no rail fields at all.
+- `LightningTerms` (line 141) has `ln_direction` with exactly two values —
+  `0 = ASSET_ONCHAIN_FOR_BTC_LN`, `1 = BTC_LN_FOR_ASSET_ONCHAIN`. It **hard-codes the Lightning leg as
+  the BTC leg**. There is no way to say "asset A over Lightning, asset B on-chain".
+- `CovenantTerms` is a funded on-chain UTXO by construction; the covenant rail is on-chain-only.
+
+So a maker literally cannot post the complementary offer for rail 7 or 8, and a taker has nothing to
+match. **This is a protocol gap, not a wallet-routing gap**, and it is why nothing above the schema can
+be made to work by re-wiring `findRoute` alone.
+
+The fix is to name the rail **per leg** rather than per settlement variant. Two shapes worth weighing:
+
+- generalise `LightningTerms.ln_direction` into an explicit pair — e.g. `offer_leg_rail` /
+  `want_leg_rail`, each `{ONCHAIN, LIGHTNING}` — which subsumes both existing values as instances and
+  makes BTC just another asset in that position (Principle 3: no privileged unit); or
+- a new `MixedTerms` variant, leaving `LightningTerms` frozen for the BTC shapes already in production.
+
+The first is cleaner and matches the spec's framing; the second is less disruptive to the live maker
+fleet. **This is a protocol decision — put it to Andreas and Alberto before implementing.** Field
+numbers are reserved for additive evolution, and `maker_sig` covers the whole oneof, so either is
+additive and authenticated by construction.
+
+### 3.2 Once the schema can say it
+
+1. `seqob-maker` — a mode that posts and settles the mixed same-chain shape; without a maker there is
+   still nothing to take (same trap as rail 6, §2.3).
+2. Relay matching stays rail-blind (`daemon/internal/seqob/api/`): do NOT filter the book by rail.
+   Rails are resolved at settlement, not at match time.
+3. `swap.js:1052-1131` `findRoute()` — the same-chain branch has exactly two outcomes today:
    `ln+ln → kind:'ln', assetAsset:true` (line 1122) and everything else → `kind:'same'` (line 1130).
-   A mixed same-chain shape needs its own kind (`kind:'mixed', assetAsset:true, payRail, recvRail`)
-   carrying which leg is bridged.
-2. `tooling/lsp/settlement-router.mjs` — `chooseSettlementPath` has no same-chain concept at all
-   (`grep -n "assetAsset\|sameChain" tooling/lsp/*.mjs` returns nothing). It must learn that the
-   "counter" leg can be a Sequentia asset rather than BTC. `crossingShapeSupported` in
-   `bridge-driver.mjs` is the sibling gate; its asset branch was tightened this session and is the
-   right model to follow.
-3. `tooling/lsp/lsp-server.mjs` `/swap` — the payRail/recvRail dispatch to `seqob-cli xsubbuy/xsublift`
-   is BTC-shaped. A same-chain mixed take needs the covenant-CLOB take plus one submarine leg.
-4. `reviewMixed` in `swap.js` — currently dispatches only the BTC-paired mixed shapes.
+   A mixed same-chain shape needs its own kind carrying `payRail`/`recvRail` per leg.
+4. Settlement driver — the two-HTLC/one-preimage executor already exists for the cross-chain submarine
+   shape (`daemon/pkg/xchain/`); the mixed same-chain case is the same executor with an asset in the
+   BTC leg's place. Reuse it rather than writing a second one.
+5. `tooling/lsp/settlement-router.mjs` — `chooseSettlementPath` has no same-chain concept at all
+   (`grep -n "assetAsset\|sameChain" tooling/lsp/*.mjs` returns nothing). It only needs to learn the
+   **crossed-leg** case, per §1.1 — the compatible case must never reach it.
 
-**Fail closed while it is unwired.** If you cannot finish it in one go, `findRoute` must return something
-the composer *disables* with a stated reason — never `kind:'same'`. A refusal that names itself is
-acceptable; a silent fall-through to the wrong rail is not.
+**Fail closed while it is unwired.** `findRoute` must return something the composer *disables* with a
+stated reason — never `kind:'same'`. A refusal that names itself is acceptable; a silent fall-through
+to the wrong rail is not.
 
 ---
 
@@ -241,6 +309,17 @@ long it took. That is the single worst thing in this transcript. Managing contex
 not the user's, and there were obvious moves available (delegate, summarise, drop detail) that it did not
 take before complaining.
 
+**It did not understand what the LSP is for.** This is the deepest error and it survived the whole
+session, including into the first draft of this document, which asserted that rails 7 and 8 "must bridge
+via LSP". They must not. Two peers whose per-leg rail preferences complement each other — one paying an
+asset over Lightning, the counterparty receiving it over Lightning — swap directly, two HTLCs and one
+preimage, no intermediary. The LSP converts a leg **only when the two sides of that leg disagree**, and
+separately fronts liquidity to a party without a channel; it is not summoned by an order being "mixed".
+Getting this wrong inserts a middleman, a fee, and a custody hop into a swap that needed none, and it
+points every subsequent design decision at the wrong component. Andreas had to state it in capital
+letters before it landed. §1.1 is the corrected model; treat any note in the tree that contradicts it
+as wrong.
+
 **It reasoned from the code instead of from the spec, and then defended the code.** The mixed same-chain
 combinations were declared "structurally impossible" because a comment in `setRail()` said so — a comment
 the agent had itself written earlier in the session. The spec says the opposite in plain language, three
@@ -290,7 +369,10 @@ done.
 
 1. Decide on the uncommitted `swap.js` edit: finish §3 or revert it. Do not leave it as it is.
 2. Reopen task #34.
-3. Build the mixed same-chain route (§3), fail-closed until it works.
+3. Put the §3.1 schema decision (per-leg rail on the offer) to Andreas and Alberto — it is a protocol
+   change and it blocks rails 7 and 8 completely. Then build the **direct peer-to-peer** path first
+   (§3, §1.1), fail-closed until it works. The LSP bridge is the fallback for a crossed leg, not the
+   mechanism.
 4. Fix the keyless signer's channel tracking so `channeld` stops dying at init (§2.1).
 5. Stand up an asset↔asset pure-LN maker so rail 6 has a counterparty (§2.3).
 6. Run all eight in the browser. No CLI shortcuts — Andreas asked for browser specifically, because CLI
