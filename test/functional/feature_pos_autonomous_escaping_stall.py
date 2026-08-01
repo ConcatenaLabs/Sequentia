@@ -17,6 +17,14 @@ this guards against.
 Topology: node0 = parent ("Bitcoin"); node1 = the founder PoS node (the sole
 genesis staker, running -posproducer); node2 = a non-staking PoS peer that only
 provides gossip connectivity (the producer proposes only when it has peers).
+
+The gossip assembler honors the same real-time evidence consensus requires of a
+sub-quorum block since the 2026-07-17 finality partition: the two anchors must
+be at least -posescapestallmtpgap (600 s) apart in median-time-past, not merely
+POS_ESCAPING_STALL_ANCHOR_GAP blocks apart (pos_producer.cpp, src/anchor.h). The
+parent blocks are therefore mined at a realistic Bitcoin cadence via setmocktime
+— without it the producer silently declines to assemble and the founder never
+leaves height 0.
 """
 
 from test_framework.test_framework import BitcoinTestFramework
@@ -38,6 +46,8 @@ def make_key():
 SEED_STAKE = 1000000000      # atoms in the founder's genesis staking output
 STAKE_CSV = 15               # height-based CSV (>= posunbonding 10 * slot 1)
 COMMITTEE = 3                # quorum 2 -> the lone founder is sub-quorum
+PARENT_BLOCK_SECONDS = 600   # parent-chain block spacing (one Bitcoin interval)
+PARENT_BLOCKS_PER_ROUND = 4  # >= POS_ESCAPING_STALL_ANCHOR_GAP (3)
 
 
 class PosAutonomousEscapingStallTest(BitcoinTestFramework):
@@ -61,6 +71,7 @@ class PosAutonomousEscapingStallTest(BitcoinTestFramework):
         self.add_nodes(1, [parent_args], chain=[chain])
         self.start_node(0)
         self.parentgenesis = self.nodes[0].getblockhash(0)
+        self.parent_time = self.nodes[0].getblockheader(self.parentgenesis)['time']
         datadir = get_datadir_path(self.options.tmpdir, 0)
         rpc_u, rpc_p = get_auth_cookie(datadir, chain)
 
@@ -89,6 +100,21 @@ class PosAutonomousEscapingStallTest(BitcoinTestFramework):
         self.connect_nodes(1, 2)
         self.nodes[0].createwallet(wallet_name="w", descriptors=True)
 
+    def advance_parent(self, blocks):
+        """Mine `blocks` parent blocks, PARENT_BLOCK_SECONDS apart.
+
+        One block per call with the parent's mocktime stepped in between: a
+        single multi-block generate stamps them all with the same time, which
+        leaves median-time-past standing still and starves the escaping-stall
+        real-time evidence.
+        """
+        parent = self.nodes[0]
+        addr = parent.getnewaddress()
+        for _ in range(blocks):
+            self.parent_time += PARENT_BLOCK_SECONDS
+            parent.setmocktime(self.parent_time)
+            self.generatetoaddress(parent, 1, addr, sync_fun=self.no_op)
+
     def run_test(self):
         parent, founder, peer = self.nodes
 
@@ -101,9 +127,13 @@ class PosAutonomousEscapingStallTest(BitcoinTestFramework):
 
         # Advance the parent past the escaping-stall gap and let the AUTONOMOUS
         # producer (no generateposblock) certify the first blocks itself. Each
-        # sub-quorum block needs another gap, so we advance the parent per block.
+        # sub-quorum block needs another gap — in height AND in median-time-past
+        # — so we advance the parent per block. The parent's MTP window is still
+        # filling here (the chain starts at genesis), so the anchors' MTP gap is
+        # a couple of block spacings rather than the full four; at 600 s apart
+        # that clears the 600 s requirement either way.
         for target in (1, 2, 3):
-            self.generatetoaddress(parent, 4, parent.getnewaddress(), sync_fun=self.no_op)
+            self.advance_parent(PARENT_BLOCKS_PER_ROUND)
             self.wait_until(lambda: founder.getblockcount() >= target, timeout=90)
             assert_equal(founder.getblockcount(), target)
 
