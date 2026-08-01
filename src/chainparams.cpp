@@ -728,6 +728,15 @@ public:
         // doc/sequentia/06-tokenomics-and-launch.md.
         g_con_pos = true;
         MAX_MONEY = 400000000 * COIN;   // SEQUENTIA: per-chain money cap
+
+        // The consensus values of THIS network, named once so the places that
+        // apply them and the guard that refuses conflicting overrides (below)
+        // can never drift apart.
+        constexpr int      TESTNET_POS_COMMITTEE_SIZE   = 250;          // 126-of-250 quorum
+        constexpr int64_t  TESTNET_POS_SLOT_INTERVAL    = 30;           // 30 s nominal block time (doc 11 §4)
+        constexpr int64_t  TESTNET_POS_UNBONDING_PERIOD = 43200;        // x30 s = ~15 days (§3.11)
+        constexpr uint64_t TESTNET_POS_MIN_STAKE        = 4000000000000ULL; // 40,000 SEQ = 0.01% of 400M (§3.3)
+
         g_pos_vrf = true;
         g_pos_agg_committee = true;
         // Autonomous BLS gossip committee is the default. g_pos_bls is a
@@ -735,7 +744,7 @@ public:
         // the manual MuSig2 coordinator, and a node set differently from the rest
         // of the testnet forks off. Every node on a given testnet must agree.
         g_pos_bls = args.GetBoolArg("-posbls", true);
-        g_pos_min_stake = 4000000000000ULL;   // 40,000 SEQ = 0.01% of 400M (§3.3)
+        g_pos_min_stake = TESTNET_POS_MIN_STAKE;
         // Expected committee size. DEFAULT 250 to MATCH THE LIVE PUBLIC TESTNET
         // (126-of-250 quorum): these params are NETWORK-WIDE consensus rules, so a
         // chain=test node started from a bare/default config must reach the same
@@ -748,7 +757,7 @@ public:
         // -poscommitteesize=3, quorum 2). It is NOT part of the genesis commitment
         // (CommitToArguments hashes only network id, fedpeg and signblock scripts),
         // so the default value does not change the genesis.
-        g_pos_committee_size = args.GetIntArg("-poscommitteesize", 250);
+        g_pos_committee_size = args.GetIntArg("-poscommitteesize", TESTNET_POS_COMMITTEE_SIZE);
         // Public fixed-size committee (impl spec Option A). NETWORK-WIDE consensus
         // rule, like -posbls above; DEFAULT ON to match the live testnet (same
         // silent-fork reasoning as -poscommitteesize). Overridable for local test
@@ -756,6 +765,79 @@ public:
         // genesis stake output bakes the founder's BLS registration unconditionally
         // (see below), so flipping this default does NOT change the genesis hash.
         g_pos_public_committee = args.GetBoolArg("-pospubliccommittee", true);
+
+        // Refuse consensus flags that CONFLICT with this network's values.
+        //
+        // These are network-wide consensus rules on a shared public chain, not
+        // per-node preferences. Mainnet (CMainParams) refuses the flags outright;
+        // here we refuse only a conflicting VALUE, because existing testnet
+        // configurations legitimately pin some of these — they had to, before the
+        // defaults above matched the live network — and rejecting a value equal to
+        // the network's would break every current node on upgrade for no safety
+        // gain. Genuine parameter experiments belong on regtest or a custom chain,
+        // which stay freely configurable.
+        //
+        // Two distinct reasons to refuse, worth keeping straight:
+        //
+        //  * -posbls, -poscommitteesize and -pospubliccommittee are READ FROM ARGS
+        //    just above, and -poscheckpointdepth is read live from gArgs at the
+        //    point of use (anchor.cpp UpdatePosFinality) rather than being pinned
+        //    here at all. For these four a conflicting value really does take
+        //    effect: the node computes a different quorum, a different committee,
+        //    or a different checkpoint-finality floor — which feeds the
+        //    bad-fork-prior-to-pos-checkpoint rejection — so it rejects the
+        //    network's blocks and forks IN SILENCE (issue #3). Refusing these is
+        //    what prevents an actual fork.
+        //
+        //  * the rest (-posvrf, -posaggcommittee, -posslotinterval, -posunbonding,
+        //    -posminstake, -pospayoutnotice) are PINNED in code on this chain, so
+        //    a conflicting value is silently ignored today and cannot fork
+        //    anything. They are refused anyway, for the reason CMainParams gives:
+        //    an operator who sets one believes they are changing a consensus rule,
+        //    and quietly overriding them leaves that belief intact until it
+        //    matters somewhere it is not pinned.
+        //
+        // Runs BEFORE the dependency and range checks below so the operator gets
+        // this message rather than a downstream symptom (-pospubliccommittee=0
+        // otherwise surfaces as "-poscommitteesize must be between 1 and 100").
+        // Compares against the network values, never against the globals just
+        // assigned from the same args — that would compare a value with itself and
+        // never fire.
+        {
+            const auto refuse_bool = [&](const char* flag, bool network_value) {
+                if (args.IsArgSet(flag) && args.GetBoolArg(flag, network_value) != network_value) {
+                    throw std::runtime_error(strprintf(
+                        "%s is a consensus rule of the Sequentia testnet and must be %s on this "
+                        "network; a different value forks this node off in silence. Remove it from "
+                        "the configuration, or use -chain=regtest / a custom chain to experiment.",
+                        flag, network_value ? "1" : "0"));
+                }
+            };
+            const auto refuse_int = [&](const char* flag, int64_t network_value) {
+                if (args.IsArgSet(flag) && args.GetIntArg(flag, network_value) != network_value) {
+                    throw std::runtime_error(strprintf(
+                        "%s is a consensus rule of the Sequentia testnet and must be %d on this "
+                        "network; a different value forks this node off in silence. Remove it from "
+                        "the configuration, or use -chain=regtest / a custom chain to experiment.",
+                        flag, network_value));
+                }
+            };
+            // Read from args above: a conflicting value genuinely forks the node.
+            refuse_bool("-posbls", true);
+            refuse_bool("-pospubliccommittee", true);
+            refuse_int("-poscommitteesize", TESTNET_POS_COMMITTEE_SIZE);
+            // Pinned below: refused to correct the operator's belief, not to
+            // prevent a fork. Each expected value is the SAME expression used to
+            // pin it, so the two can never drift apart.
+            refuse_bool("-posvrf", true);
+            refuse_bool("-posaggcommittee", true);
+            refuse_int("-posslotinterval", TESTNET_POS_SLOT_INTERVAL);
+            refuse_int("-posunbonding", TESTNET_POS_UNBONDING_PERIOD);
+            refuse_int("-posminstake", (int64_t)TESTNET_POS_MIN_STAKE);
+            refuse_int("-pospayoutnotice", (int64_t)DEFAULT_POS_PAYOUT_NOTICE);
+            refuse_int("-poscheckpointdepth", (int64_t)DEFAULT_POS_CHECKPOINT_DEPTH);
+        }
+
         if (g_pos_public_committee && !g_pos_bls) {
             throw std::runtime_error("-pospubliccommittee requires -posbls");
         }
@@ -766,8 +848,8 @@ public:
                 throw std::runtime_error(strprintf("-poscommitteesize must be between 1 and %d", max_committee));
             }
         }
-        g_pos_slot_interval = 30;              // 30s nominal block time (doc 11 §4)
-        g_pos_unbonding_period = 43200;        // x30s = ~15 days > 2-week checkpoint window (§3.11)
+        g_pos_slot_interval = TESTNET_POS_SLOT_INTERVAL;
+        g_pos_unbonding_period = TESTNET_POS_UNBONDING_PERIOD;
         // Consensus-critical: pin the payout notice period so no node can change
         // when a producer's payout policy binds by passing -pospayoutnotice.
         g_pos_payout_notice = DEFAULT_POS_PAYOUT_NOTICE;   // 2880 x 30s = ~1 day
