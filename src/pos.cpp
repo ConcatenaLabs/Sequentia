@@ -499,18 +499,6 @@ bool PosExpRaceActive(const Consensus::Params& params, int height)
     return params.pos_exprace_height > 0 && height >= params.pos_exprace_height;
 }
 
-bool PosEscapeStallMtpActive(const Consensus::Params& params, int height)
-{
-    // Same convention as PosExpRaceActive, deliberately: 0 = not gated (rule
-    // off), a positive H = enforced from height H. A chain launched WITH the
-    // rule therefore sets 1, not 0 — "active from the first block" — so that
-    // "a gate left at 0 is a bug" holds uniformly across every gate in the
-    // codebase (CONTRIBUTING.md, "Every new consensus rule needs an activation
-    // height"). Two gates with opposite meanings for 0 would be a trap: a
-    // reviewer "fixing" a 0 would silently disable the rule instead.
-    return params.pos_escape_stall_mtp_height > 0 &&
-           height >= params.pos_escape_stall_mtp_height;
-}
 
 CScript BuildPosVrfCommitment(const std::vector<unsigned char>& proof)
 {
