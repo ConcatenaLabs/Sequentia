@@ -5,6 +5,7 @@
 #include <anchor.h>
 
 #include <chain.h>
+#include <chainparams.h>   // Params(), for the escaping-stall activation gate
 #include <logging.h>
 #include <mainchainrpc.h>
 #include <pos.h>
