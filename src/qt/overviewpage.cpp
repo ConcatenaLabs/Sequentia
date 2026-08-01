@@ -604,9 +604,26 @@ void OverviewPage::updateSeqStatus()
                 const int anc = r.exists("anchorheight") ? r["anchorheight"].get_int() : -1;
                 const QString st = r.exists("anchorstatus") ? QString::fromStdString(r["anchorstatus"].get_str()) : tr("unknown");
                 const bool ok = (st == QLatin1String("ok"));
-                m_anchor_label->setText(tr("Bitcoin anchor: %1  -  Sequentia height %2, anchored to testnet4 block %3")
-                                        .arg(ok ? tr("OK") : st).arg(tip).arg(anc));
-                m_anchor_label->setStyleSheet(ok ? "color:#3ecf7a;" : "color:#ff6b6b;");
+                // Only the ANCHOR verdict carries a colour. The heights beside it
+                // are facts this node knows for certain from its own chain, and
+                // painting them red says they are suspect when they are not — the
+                // warning has to point at the one thing that is actually in doubt.
+                // "not_validated" is also not a fault to shout about: it is what a
+                // node that deliberately does not follow Bitcoin reports, so it
+                // gets its reason instead of a bare internal token.
+                const bool delegated = (st == QLatin1String("not_validated"));
+                const QString verdict = ok       ? tr("OK")
+                                      : delegated ? tr("not following Bitcoin - trusting peers")
+                                                  : st;
+                const QString colour = ok ? QStringLiteral("#3ecf7a") : QStringLiteral("#ff6b6b");
+                m_anchor_label->setText(
+                    QStringLiteral("<span style='color:%1;'>%2</span>%3")
+                        .arg(colour,
+                             tr("Bitcoin anchor: %1").arg(verdict).toHtmlEscaped(),
+                             tr("  -  Sequentia height %2, anchored to testnet4 block %3")
+                                 .arg(tip).arg(anc).toHtmlEscaped()));
+                m_anchor_label->setTextFormat(Qt::RichText);
+                m_anchor_label->setStyleSheet(QString());
             } else {
                 m_anchor_label->setText(tr("Bitcoin anchor: unavailable"));
             }
@@ -671,6 +688,27 @@ void OverviewPage::updateSeqStatus()
     }
 }
 
+namespace {
+//! Does this parent-chain error mean "we are simply not talking to Bitcoin"?
+//! Those are states a user can be in ON PURPOSE - a node started without
+//! following Bitcoin, or Bitcoin Core not running yet - so they must not be
+//! surfaced as a fault with troubleshooting advice attached.
+bool ParentChainUnreachable(const std::string& err)
+{
+    static const char* kMarkers[] = {
+        "couldn't connect to server",
+        "parent chain unreachable",
+        "Connection refused",
+        "timeout reached",
+        "EOF reached",
+    };
+    for (const char* m : kMarkers) {
+        if (err.find(m) != std::string::npos) return true;
+    }
+    return false;
+}
+} // namespace
+
 void OverviewPage::refreshBtcBalance()
 {
     if (!walletModel || !m_btc_label) return;
@@ -692,7 +730,17 @@ void OverviewPage::refreshBtcBalance()
             if (r.isObject()) {
                 const std::string e = r.exists("error") ? r["error"].getValStr() : std::string();
                 if (!e.empty()) {
-                    text = QStringLiteral("Bitcoin (testnet4): ") + QString::fromStdString(e);
+                    // Not reaching Bitcoin is an ordinary, often DELIBERATE state
+                    // (a node started without following Bitcoin), not a fault to
+                    // report. Passing the raw exception through put a plumbing
+                    // error and its troubleshooting advice — "couldn't connect to
+                    // server: EOF reached (code 1) (make sure server is running
+                    // ...)" — in front of a user who had just chosen this on
+                    // purpose. Say what it means for the balance instead; the
+                    // technical detail stays in debug.log.
+                    text = ParentChainUnreachable(e)
+                        ? tr("Bitcoin (testnet4): balance unavailable — not connected to Bitcoin Core")
+                        : QStringLiteral("Bitcoin (testnet4): ") + QString::fromStdString(e);
                 } else {
                     const QString amt = r.exists("btc") ? QString::fromStdString(r["btc"].getValStr()) : QStringLiteral("0");
                     const int naddr = r.exists("addresses") ? r["addresses"].get_int() : 0;
