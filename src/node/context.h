@@ -66,6 +66,11 @@ struct NodeContext {
     //! (self-deadlock under load). Joined during shutdown before chainman is
     //! reset.
     std::thread anchor_watch_thread;
+    //! SEQUENTIA: started only when the user chose to start without a reachable
+    //! Bitcoin daemon. Polls until Bitcoin answers again, then stops; the GUI
+    //! turns that into "restart to get the checks back". Holds no references
+    //! into the node, so it may be joined at any point in shutdown.
+    std::thread anchor_retry_thread;
     //! SEQUENTIA: autonomous Proof-of-Stake block producer (-posproducer).
     std::unique_ptr<PosProducer> pos_producer;
     std::function<void()> rpc_interruption_point = [] {};
