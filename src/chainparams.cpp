@@ -428,6 +428,7 @@ public:
         // it does for pos_exprace_height (CONTRIBUTING.md: a gate left at 0 is
         // a bug, never a deliberate "always on").
         consensus.pos_escape_stall_mtp_height = 1;
+        g_pos_escape_stall_mtp_height = consensus.pos_escape_stall_mtp_height;
         consensus.nMaxBlockWeight = 200000;             // a twentieth of Bitcoin (doc 11 §4)
         consensus.connect_genesis_outputs = true;
         anyonecanspend_aremine = false;
@@ -693,6 +694,7 @@ public:
         // cadence. Below it the rule is not applied, which is exactly what
         // every already-synced node effectively does today.
         consensus.pos_escape_stall_mtp_height = 80000;
+        g_pos_escape_stall_mtp_height = consensus.pos_escape_stall_mtp_height;
         // SEQUENTIA: 200,000 weight units — a twentieth of Bitcoin's 4,000,000
         // — so that, at ~30-second blocks (20x Bitcoin's cadence), a saturated
         // chain grows at exactly the same total rate as a saturated Bitcoin
@@ -1520,6 +1522,7 @@ protected:
         // gated", i.e. the rule off entirely).
         consensus.pos_escape_stall_mtp_height =
             (int)args.GetIntArg("-posescapestallmtpheight", 1);
+        g_pos_escape_stall_mtp_height = consensus.pos_escape_stall_mtp_height;
         if (g_pos_public_committee &&
             (g_pos_committee_size < 1 || g_pos_committee_size > MAX_POS_PUBLIC_COMMITTEE_SIZE)) {
             throw std::runtime_error(strprintf("-poscommitteesize must be between 1 and %d under -pospubliccommittee", MAX_POS_PUBLIC_COMMITTEE_SIZE));

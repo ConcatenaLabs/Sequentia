@@ -120,20 +120,37 @@ BOOST_AUTO_TEST_CASE(testnet_pos_defaults_match_live_network)
     SelectParams(CBaseChainParams::REGTEST);
 }
 
-//! The chain=test defaults must stay OVERRIDABLE (unlike the pinned mainnet
-//! chain), so a single operator can still bootstrap a small local committee, or
-//! run VRF sortition instead of the public committee, on the same configurable
-//! testnet. Nodes that pass values explicitly are unaffected by the new default.
-BOOST_AUTO_TEST_CASE(testnet_pos_defaults_are_overridable)
+//! chain=test is a SHARED PUBLIC network, so its PoS parameters are consensus
+//! rules and a conflicting value must be refused rather than honoured: a node
+//! computing a different quorum rejects the network's blocks and forks in
+//! silence (issue #3). This used to assert the opposite — that the defaults were
+//! freely overridable, so an operator could bootstrap a small local committee on
+//! the same chain — which is exactly the footgun. Small local committees belong
+//! on regtest or a custom chain, which stay configurable (see the case below).
+BOOST_AUTO_TEST_CASE(testnet_pos_consensus_flags_are_refused_when_conflicting)
 {
     ArgsManager args;
     args.ForceSetArg("-pospubliccommittee", "0");
     args.ForceSetArg("-poscommitteesize", "3");
+    BOOST_CHECK_THROW(CreateChainParams(args, CBaseChainParams::TESTNET), std::runtime_error);
+
+    SelectParams(CBaseChainParams::REGTEST);
+}
+
+//! A value EQUAL to the network's is still accepted. Existing testnet configs
+//! legitimately pin these — they had to, before the defaults matched the live
+//! network — and refusing those too would break every current node's config on
+//! upgrade for no safety gain.
+BOOST_AUTO_TEST_CASE(testnet_pos_matching_values_are_accepted)
+{
+    ArgsManager args;
+    args.ForceSetArg("-pospubliccommittee", "1");
+    args.ForceSetArg("-poscommitteesize", "250");
     const auto params = CreateChainParams(args, CBaseChainParams::TESTNET);
     BOOST_CHECK_EQUAL(params->NetworkIDString(), CBaseChainParams::TESTNET);
 
-    BOOST_CHECK(!g_pos_public_committee);
-    BOOST_CHECK_EQUAL(g_pos_committee_size, 3);
+    BOOST_CHECK(g_pos_public_committee);
+    BOOST_CHECK_EQUAL(g_pos_committee_size, 250);
 
     SelectParams(CBaseChainParams::REGTEST);
 }

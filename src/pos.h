@@ -679,8 +679,6 @@ inline bool PosEscapingStallAllowed(uint32_t parent_anchor_height, uint32_t bloc
  *  CONVENTION, deliberately the opposite of PosExpRaceActive: 0 means ENFORCED
  *  FROM GENESIS — the right setting for a chain launched with the rule already
  *  in place, so a new chain needs no future migration. A positive H enforces it
- *  only from height H on. */
-bool PosEscapeStallMtpActive(const Consensus::Params& params, int height);
 
 /** A committee member's eligibility claim carried in the block: its key and
  *  its VRF proof over the slot seed. */

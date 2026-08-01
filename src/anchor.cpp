@@ -5,7 +5,6 @@
 #include <anchor.h>
 
 #include <chain.h>
-#include <chainparams.h>   // Params(), for the escaping-stall activation gate
 #include <logging.h>
 #include <mainchainrpc.h>
 #include <pos.h>
@@ -249,6 +248,7 @@ void UpdatePosFinality(ChainstateManager& chainman, int btc_tip_height);
 } // namespace
 
 int64_t g_pos_escape_stall_mtp_gap = DEFAULT_POS_ESCAPE_STALL_MTP_GAP;
+int g_pos_escape_stall_mtp_height = 0;
 bool g_pos_reconcile = true;
 int64_t g_pos_reconcile_patience = DEFAULT_POS_RECONCILE_PATIENCE;
 int g_pos_reconcile_min_depth = DEFAULT_POS_RECONCILE_MIN_DEPTH;
@@ -265,7 +265,7 @@ EscapeStallTimeVerdict CheckEscapingStallMtpGap(const uint256& parent_anchor_has
     // would count acceptances for a rule that does not apply yet. Enforced
     // here rather than at the call sites so a future caller cannot omit it
     // and silently re-apply the rule retroactively (anchor.h).
-    if (!PosEscapeStallMtpActive(Params().GetConsensus(), height)) {
+    if (!PosEscapeStallMtpHeightActive(height)) {
         return EscapeStallTimeVerdict::ALLOWED;
     }
     // -validateanchor=0 delegates anchor validation to the network (the R3
