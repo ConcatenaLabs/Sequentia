@@ -794,6 +794,22 @@ static const uint32_t DEFAULT_POS_UNBONDING_PERIOD = 10;
  *  default; the Sequentia chain sets it via -posminstake). */
 extern uint64_t g_pos_min_stake;
 
+/** Height from which the escaping-stall parent-chain MTP evidence is part of
+ *  the rules, mirrored from Consensus::Params::pos_escape_stall_mtp_height
+ *  when the chain is selected. Lives in the common layer because
+ *  chainparams.cpp assigns it and elements-cli / elements-tx link
+ *  libbitcoin_common without libbitcoin_server.
+ *
+ *  0 = not gated (rule off), positive H = enforced from height H, matching
+ *  pos_exprace_height. A chain launched with the rule in place uses 1. */
+extern int g_pos_escape_stall_mtp_height;
+
+/** True when that evidence is part of the rules at `height`. */
+inline bool PosEscapeStallMtpHeightActive(int height)
+{
+    return g_pos_escape_stall_mtp_height > 0 && height >= g_pos_escape_stall_mtp_height;
+}
+
 /** Whether `weight` clears the eligibility floor: registered (>=1) and at least
  *  the configured minimum. The single chokepoint for stake eligibility. */
 inline bool PosIsEligibleStake(uint64_t weight)

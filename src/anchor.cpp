@@ -248,7 +248,6 @@ void UpdatePosFinality(ChainstateManager& chainman, int btc_tip_height);
 } // namespace
 
 int64_t g_pos_escape_stall_mtp_gap = DEFAULT_POS_ESCAPE_STALL_MTP_GAP;
-int g_pos_escape_stall_mtp_height = 0;
 bool g_pos_reconcile = true;
 int64_t g_pos_reconcile_patience = DEFAULT_POS_RECONCILE_PATIENCE;
 int g_pos_reconcile_min_depth = DEFAULT_POS_RECONCILE_MIN_DEPTH;
