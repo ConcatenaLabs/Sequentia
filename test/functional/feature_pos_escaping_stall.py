@@ -15,6 +15,13 @@ self-limiting — a +3 anchor jump requires Bitcoin to genuinely have produced
 Topology mirrors feature_bitcoin_anchoring: node0 is the parent ("Bitcoin")
 chain; node1 is the anchored PoS chain (VRF + aggregate committee).
 
+A height gap alone is not enough: since the 2026-07-17 finality partition the
+escaping stall also demands real-time evidence on the parent chain — the anchors
+must be at least -posescapestallmtpgap (600 s) apart in median-time-past
+(CheckEscapingStallMtpGap, src/anchor.h). The parent blocks here are therefore
+mined at a realistic Bitcoin cadence via setmocktime, so the test exercises the
+rule the way production does instead of switching it off.
+
 Covers:
  - a full-quorum block is accepted normally
  - a sub-quorum (single-member) block is REJECTED when the anchor has not
@@ -32,6 +39,11 @@ from test_framework.key import ECKey
 from test_framework.address import byte_to_base58
 
 COMMITTEE_SIZE = 3   # quorum = 2
+PARENT_BLOCK_SECONDS = 600   # parent-chain block spacing (one Bitcoin interval)
+# Median-time-past is the median of the last 11 block times, so it only tracks
+# the spacing one-for-one once that window is full: pre-grow past it before
+# measuring any gap.
+PARENT_WARMUP_BLOCKS = 12
 
 
 def make_staker():
@@ -63,6 +75,7 @@ class PosEscapingStallTest(BitcoinTestFramework):
         self.add_nodes(1, [parent_args], chain=[parent_chain])
         self.start_node(0)
         self.parentgenesis = self.nodes[0].getblockhash(0)
+        self.parent_time = self.nodes[0].getblockheader(self.parentgenesis)['time']
 
         datadir = get_datadir_path(self.options.tmpdir, 0)
         rpc_u, rpc_p = get_auth_cookie(datadir, parent_chain)
@@ -83,14 +96,30 @@ class PosEscapingStallTest(BitcoinTestFramework):
         self.start_node(1)
         self.nodes[0].createwallet(wallet_name="w", descriptors=True)
 
+    def advance_parent(self, blocks):
+        """Mine `blocks` parent blocks, PARENT_BLOCK_SECONDS apart.
+
+        One block per call with the parent's mocktime stepped in between: a
+        single multi-block generate stamps them all with the same time, which
+        leaves median-time-past standing still and starves the escaping-stall
+        real-time evidence.
+        """
+        parent = self.nodes[0]
+        addr = parent.getnewaddress()
+        for _ in range(blocks):
+            self.parent_time += PARENT_BLOCK_SECONDS
+            parent.setmocktime(self.parent_time)
+            self.generatetoaddress(parent, 1, addr, sync_fun=self.no_op)
+
     def run_test(self):
         parent, node = self.nodes
         wifs = [w for w, _ in self.stakers]
         leader = wifs[0]
         committee = wifs[1:]  # the other members
 
-        # Grow the parent chain so the anchored node has something to anchor to.
-        self.generatetoaddress(parent, 6, parent.getnewaddress(), sync_fun=self.no_op)
+        # Grow the parent chain so the anchored node has something to anchor to,
+        # far enough to fill the median-time-past window (see above).
+        self.advance_parent(PARENT_WARMUP_BLOCKS)
 
         def anchor_of(blockhash):
             return node.getblockheader(blockhash)['anchorheight']
@@ -108,9 +137,11 @@ class PosEscapingStallTest(BitcoinTestFramework):
 
         # --- Advance the parent chain by the escaping-stall gap, then the same
         # single-member block IS accepted (the chain has stalled). Block
-        # assembly queries the parent height live, so no poll wait is needed. ---
-        self.generatetoaddress(parent, 3, parent.getnewaddress(), sync_fun=self.no_op)
-        assert_equal(parent.getblockcount(), 9)
+        # assembly queries the parent height live, so no poll wait is needed.
+        # Three blocks 600 s apart move both the anchor height (+3) and the
+        # anchors' median-time-past (+1800 s, past the 600 s requirement). ---
+        self.advance_parent(3)
+        assert_equal(parent.getblockcount(), PARENT_WARMUP_BLOCKS + 3)
 
         res2 = node.generateposblock(leader, [])
         assert_equal(res2['height'], 2)
