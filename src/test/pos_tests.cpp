@@ -151,7 +151,13 @@ BOOST_AUTO_TEST_CASE(pos_escaping_stall_unverified_is_counted)
 {
     const bool saved_validate = g_validate_anchor;
     const int64_t saved_gap = g_pos_escape_stall_mtp_gap;
+    const int saved_height = g_pos_escape_stall_mtp_height;
     g_pos_escape_stall_mtp_gap = 600;
+    // The rule is only part of the rules from its activation height, and the
+    // chain a unit test runs on does not set one. Turn it on from block 1, as
+    // a chain launched with the rule in place does, or the gate would return
+    // first and there would be nothing to count.
+    g_pos_escape_stall_mtp_height = 1;
     g_validate_anchor = false;
 
     // No parent daemon is reachable from a unit test — which is the point: on
@@ -190,6 +196,7 @@ BOOST_AUTO_TEST_CASE(pos_escaping_stall_unverified_is_counted)
 
     g_validate_anchor = saved_validate;
     g_pos_escape_stall_mtp_gap = saved_gap;
+    g_pos_escape_stall_mtp_height = saved_height;
 }
 
 // The minimum-stake floor (whitepaper §3.3) excludes sub-minimum stakers from
