@@ -21,6 +21,35 @@
 #include <set>
 
 bool g_validate_anchor = true;
+std::atomic<bool> g_anchor_unvalidated_by_prompt{false};
+std::atomic<bool> g_anchor_parent_back_online{false};
+
+//! Sub-quorum blocks accepted without the parent-chain time evidence
+//! (NoteUnverifiedEscapingStall). Atomic rather than GUARDED_BY(g_anchor_mutex):
+//! written from block validation with cs_main held, read by the GUI status
+//! poller and getanchorstatus — neither may take locks for this. The three
+//! fields are updated independently, so a concurrent reader can see a fresh
+//! count with a stale height for an instant; harmless for a status display.
+std::atomic<int> g_unverified_escape_stall_count{0};
+std::atomic<int> g_unverified_escape_stall_height{-1};
+std::atomic<int64_t> g_unverified_escape_stall_time{0};
+
+void NoteUnverifiedEscapingStall(int height)
+{
+    g_unverified_escape_stall_height.store(height, std::memory_order_relaxed);
+    g_unverified_escape_stall_time.store(GetTime(), std::memory_order_relaxed);
+    g_unverified_escape_stall_count.fetch_add(1, std::memory_order_relaxed);
+    LogPrintf("WARNING: accepted sub-quorum (escaping-stall) block at height %d without checking the parent-chain evidence: this node is not watching Bitcoin (-validateanchor=0), so it takes its peers' word that the committee really had stalled\n", height);
+}
+
+UnverifiedEscapingStalls GetUnverifiedEscapingStalls()
+{
+    UnverifiedEscapingStalls out;
+    out.count = g_unverified_escape_stall_count.load(std::memory_order_relaxed);
+    out.last_height = g_unverified_escape_stall_height.load(std::memory_order_relaxed);
+    out.last_time = g_unverified_escape_stall_time.load(std::memory_order_relaxed);
+    return out;
+}
 
 //! Wall-clock time of the last finality-gate rejection of a rival branch
 //! (NotePosFinalForkRejection). Atomic, not GUARDED_BY(g_anchor_mutex):
@@ -224,12 +253,28 @@ int64_t g_pos_reconcile_patience = DEFAULT_POS_RECONCILE_PATIENCE;
 int g_pos_reconcile_min_depth = DEFAULT_POS_RECONCILE_MIN_DEPTH;
 
 EscapeStallTimeVerdict CheckEscapingStallMtpGap(const uint256& parent_anchor_hash,
-                                                const uint256& block_anchor_hash)
+                                                const uint256& block_anchor_hash,
+                                                int height,
+                                                bool record_unverified)
 {
     if (g_pos_escape_stall_mtp_gap <= 0) return EscapeStallTimeVerdict::ALLOWED;
+    // Activation gate. The rule postdates part of some chains' history, so
+    // below the activation height there is nothing to verify and nothing is
+    // being delegated — return before the -validateanchor branch, or a node
+    // would count acceptances for a rule that does not apply yet. Enforced
+    // here rather than at the call sites so a future caller cannot omit it
+    // and silently re-apply the rule retroactively (anchor.h).
+    if (!PosEscapeStallMtpActive(Params().GetConsensus(), height)) {
+        return EscapeStallTimeVerdict::ALLOWED;
+    }
     // -validateanchor=0 delegates anchor validation to the network (the R3
     // skip); the MTP evidence rides on the same daemon, so it is delegated too.
-    if (!g_validate_anchor) return EscapeStallTimeVerdict::ALLOWED;
+    // Record it: this is a block certified by as little as one committee
+    // member, accepted purely on the network's word (see UnverifiedEscapingStalls).
+    if (!g_validate_anchor) {
+        if (record_unverified && height >= 0) NoteUnverifiedEscapingStall(height);
+        return EscapeStallTimeVerdict::ALLOWED;
+    }
     // Chain bring-up: no anchored parent to measure from.
     if (parent_anchor_hash.IsNull() || block_anchor_hash.IsNull()) return EscapeStallTimeVerdict::ALLOWED;
     int64_t mtp_parent = 0, mtp_block = 0;
@@ -243,6 +288,12 @@ EscapeStallTimeVerdict CheckEscapingStallMtpGap(const uint256& parent_anchor_has
     }
     return (mtp_block - mtp_parent >= g_pos_escape_stall_mtp_gap)
         ? EscapeStallTimeVerdict::ALLOWED : EscapeStallTimeVerdict::TOO_SOON;
+}
+
+bool MainchainReachable()
+{
+    int count{0};
+    return GetMainchainBlockCount(count);
 }
 
 PosReconcileStatus GetPosReconcileStatus()

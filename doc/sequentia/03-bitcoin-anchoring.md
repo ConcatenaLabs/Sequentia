@@ -164,12 +164,27 @@ It is not a supported way to work around a sync failure: it removes the node's
 ability to self-correct for as long as it stays set. Never set it on a node that
 produces blocks, or that other nodes sync from.
 
-Finally, a node can end up with `0` **without anyone choosing it**: if
-`con_bitcoin_anchor` is set and the Bitcoin daemon is unreachable at startup, a
-node running without `-server` (the typical GUI configuration) reports the error
-and then continues with `validateanchor` forced to `0` for the rest of the
-session — even if Bitcoin comes up moments later. A node started with `-server`
-refuses to start instead.
+Finally, reaching `0` is now always somebody's decision. When
+`con_bitcoin_anchor` is set and the Bitcoin daemon is unreachable at startup the
+node **asks**, through `uiInterface.ThreadSafeQuestion`:
+
+- an interactive frontend (`elements-qt`) offers two named choices — close and
+  start Bitcoin Core first, which is the default and what closing the window
+  does, or start without following Bitcoin;
+- every non-interactive frontend, `elementsd` included, answers no, so the node
+  refuses to start. That is the right default when there is nobody watching.
+
+A node that took the second option keeps a warning in the status bar for the
+whole session, because it otherwise looks perfectly healthy, and the same
+warning appears for a deliberately configured `validateanchor=0` node — the
+delegation is identical either way.
+
+This replaced an earlier behaviour worth knowing about if you are reading older
+logs or an older binary: the node used to decide by itself, and differently
+depending on `-server`. Without it (the typical GUI configuration) it started
+anyway with `validateanchor` silently forced to `0` for the rest of the session,
+even if Bitcoin came up moments later; with it, the node refused to start.
+Nobody chose either outcome, and `-server` tracked nothing a user cares about.
 
 ### The `getanchorstatus` RPC
 
@@ -186,6 +201,64 @@ the tip's anchor and the health of the Bitcoin connection:
 
 `not_validated` is reported when `validateanchor` is off or the tip carries no
 anchor; the other values mirror `CheckMainchainAnchor`'s result.
+
+Four more fields describe a node that is *not* watching Bitcoin:
+
+| Field | Meaning |
+|---|---|
+| `unvalidatedbyprompt` | Validation is off because Bitcoin was unreachable at startup and the user chose to continue, not because it was configured off. |
+| `parentbackonline` | Bitcoin has become reachable again since; validation resumes only on restart. |
+| `unverifiedescapingstalls` | Sub-quorum blocks accepted without checking the Bitcoin evidence behind them. |
+| `lastunverifiedescapingstall` | Height of the most recent one (`-1` = none). |
+
+### Starting without a Bitcoin node
+
+If `con_bitcoin_anchor` is set and the Bitcoin daemon cannot be reached at
+startup, the node asks — it does not decide. `AppInitMain` puts the question
+through `uiInterface.ThreadSafeQuestion`, so:
+
+- **elementsd** and every other non-interactive frontend answer "no" (there is
+  nobody to ask) and the node **does not start**. This is the pre-existing
+  behaviour, and it is the right default for a machine nobody is watching. Note
+  that the test is now "can this frontend ask a human", not `-server`: a GUI user
+  who had enabled the RPC server used to get the daemon's flat refusal, for no
+  good reason.
+- **elements-qt** shows a dialog with two named buttons — *Close and start
+  Bitcoin Core first* (the default, and what closing the window does) and *Start
+  without following Bitcoin*.
+
+Choosing to continue sets `validateanchor=0` for the session, exactly as before,
+but now as a decision rather than a side effect. Two things follow from it.
+
+**The GUI keeps saying so.** A warning icon stays in the status bar for the whole
+session, because a node in this state looks perfectly healthy otherwise: it syncs,
+it shows balances, and nothing would ever mention Bitcoin again. Clicking it
+repeats what is being delegated and how to undo it. The icon appears for *any*
+node running with `validateanchor=0` on an anchored chain, including one
+configured that way deliberately — the delegation is identical, and only the
+wording differs (a configured node is told to remove the setting; a prompted one
+is told to restart, and is notified when Bitcoin becomes reachable again).
+
+**The node reports what it actually had to take on trust.** Most of what
+`validateanchor=0` gives up is invisible in the moment — a Bitcoin reorg that is
+never noticed leaves no trace. One case is not: a *sub-quorum* (escaping-stall)
+block is certified by as little as one committee member, and the only evidence
+that the committee genuinely was stalled is the parent-chain time gap, which
+lives on Bitcoin. `CheckEscapingStallMtpGap` returns `ALLOWED` unconditionally
+when validation is off, so such a block is accepted purely on the network's word.
+Every time that happens the node counts it, logs it, and surfaces it in
+`getanchorstatus` and in the status-bar tooltip. It is not rejected — rejecting it
+would strand a follower that has legitimately delegated — but it is never silent.
+
+**Validation is not resumed in place.** A watcher thread polls Bitcoin every 30
+seconds and, when it answers again, tells the user that a restart restores the
+checks. It does not simply set the flag back: the blocks accepted meanwhile were
+never checked against Bitcoin and are not revalidated retroactively, so a node
+that flipped it would be claiming a protection it does not have for its own
+history, and the anchor watcher would begin following reorgs from a tip it never
+verified. A restart does not revalidate that history either — but it does put the
+node back under a live Bitcoin view from a point the user knowingly chose, which
+is the honest thing to offer.
 
 ## 4. Immediate finality and what "real-time" means
 

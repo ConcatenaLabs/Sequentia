@@ -3199,6 +3199,10 @@ static RPCHelpMan getanchorstatus()
                         {RPCResult::Type::STR_HEX, "anchorhash", "parent chain block hash referenced by the tip"},
                         {RPCResult::Type::STR, "anchorstatus", "result of checking the tip anchor against the parent chain daemon: \"ok\", \"not_found\", \"stale\", \"height_mismatch\", \"no_connection\" or \"not_validated\""},
                         {RPCResult::Type::NUM_TIME, "lastposfinalreject", "unix time of the most recent rival branch rejected at the PoS finality gate (0 = none since startup); recent rejections while the tip stands still signal a contested parent-chain fork"},
+                        {RPCResult::Type::BOOL, "unvalidatedbyprompt", "whether anchor validation is off because the parent chain daemon was unreachable at startup and the user chose to continue, rather than because it was configured off"},
+                        {RPCResult::Type::BOOL, "parentbackonline", "whether the parent chain daemon has become reachable again since that choice; validation resumes only on restart"},
+                        {RPCResult::Type::NUM, "unverifiedescapingstalls", "sub-quorum (escaping-stall) blocks accepted without checking the parent-chain evidence behind them, because this node is not watching the parent chain"},
+                        {RPCResult::Type::NUM, "lastunverifiedescapingstall", "height of the most recent such block (-1 = none)"},
                         {RPCResult::Type::OBJ, "reconcile", /*optional=*/true, "state of the PoS finality reconciliation monitor (-posreconcile); only on PoS chains",
                         {
                             {RPCResult::Type::BOOL, "enabled", "whether the reconciliation monitor is on"},
@@ -3245,6 +3249,11 @@ static RPCHelpMan getanchorstatus()
     }
     result.pushKV("anchorstatus", status);
     result.pushKV("lastposfinalreject", GetLastPosFinalForkRejectionTime());
+    result.pushKV("unvalidatedbyprompt", g_anchor_unvalidated_by_prompt.load());
+    result.pushKV("parentbackonline", g_anchor_parent_back_online.load());
+    const UnverifiedEscapingStalls unverified = GetUnverifiedEscapingStalls();
+    result.pushKV("unverifiedescapingstalls", unverified.count);
+    result.pushKV("lastunverifiedescapingstall", unverified.last_height);
     if (g_con_pos) {
         const PosReconcileStatus rec = GetPosReconcileStatus();
         UniValue reconcile(UniValue::VOBJ);

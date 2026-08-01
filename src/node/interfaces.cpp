@@ -260,12 +260,24 @@ public:
     }
     bool getNetworkActive() override { return m_context->connman && m_context->connman->GetNetworkActive(); }
     CFeeRate getDustRelayFee() override { return ::dustRelayFee; }
+    bool getAnchorNotWatchingBitcoin() override { return g_con_bitcoin_anchor && !g_validate_anchor; }
     interfaces::AnchorTipState getAnchorTipState() override
     {
         interfaces::AnchorTipState state;
         state.validated = g_con_bitcoin_anchor && g_validate_anchor;
         state.last_finality_fork_rejection = GetLastPosFinalForkRejectionTime();
-        if (!state.validated) return state;
+        if (!state.validated) {
+            // SEQUENTIA: not watching Bitcoin. Report whether that was chosen
+            // at the startup prompt and what has been taken on trust since,
+            // so the GUI can keep the trade-off visible (it is otherwise
+            // invisible: the node looks perfectly healthy).
+            state.unvalidated_by_prompt = g_anchor_unvalidated_by_prompt.load();
+            state.parent_back_online = g_anchor_parent_back_online.load();
+            const UnverifiedEscapingStalls unverified = GetUnverifiedEscapingStalls();
+            state.unverified_escaping_stalls = unverified.count;
+            state.last_unverified_escaping_stall_height = unverified.last_height;
+            return state;
+        }
         uint32_t anchor_height{0};
         uint256 anchor_hash;
         {

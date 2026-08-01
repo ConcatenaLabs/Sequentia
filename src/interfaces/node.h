@@ -70,6 +70,17 @@ struct AnchorTipState
     //! gate (0 = none since startup). Recent rejections while the tip stands
     //! still signal a contested Bitcoin fork.
     int64_t last_finality_fork_rejection{0};
+    //! SEQUENTIA: anchor validation is off because the user accepted the
+    //! startup prompt (Bitcoin was unreachable), not because they configured
+    //! it. Meaningful only when `validated` is false.
+    bool unvalidated_by_prompt{false};
+    //! Bitcoin has since become reachable; restarting restores the checks.
+    bool parent_back_online{false};
+    //! Sub-quorum (escaping-stall) blocks this node accepted without being
+    //! able to check the Bitcoin evidence behind them. See anchor.h.
+    int unverified_escaping_stalls{0};
+    //! Height of the most recent one (-1 = none).
+    int last_unverified_escaping_stall_height{-1};
 };
 
 //! External signer interface used by the GUI.
@@ -196,6 +207,16 @@ public:
     //! result is not cached; call it sparingly (the GUI polls it only while
     //! the tip is stalled).
     virtual AnchorTipState getAnchorTipState() = 0;
+
+    //! SEQUENTIA: whether this chain anchors to Bitcoin but this node is not
+    //! watching it (-validateanchor=0), however it ended up that way — chosen
+    //! at the startup prompt or set in the configuration. Both cases delegate
+    //! the same things to peers, so the GUI warns about both; AnchorTipState
+    //! says which one it was. Fixed for the session and free to call (no RPC),
+    //! unlike getAnchorTipState: the GUI asks once and, when it is true, may
+    //! then poll getAnchorTipState freely, because that call short-circuits
+    //! when anchors are not validated.
+    virtual bool getAnchorNotWatchingBitcoin() = 0;
 
     //! Execute rpc command.
     virtual UniValue executeRpc(const std::string& command, const UniValue& params, const std::string& uri) = 0;
