@@ -169,10 +169,13 @@ struct Params {
     //! SEQUENTIA PoS: block height from which the escaping-stall PARENT-CHAIN
     //! MEDIAN-TIME-PAST gap (CheckEscapingStallMtpGap, anchor.h) is enforced.
     //!
-    //! NOTE THE INVERTED CONVENTION vs pos_exprace_height above: there 0 means
-    //! "disabled"; HERE 0 MEANS "ENFORCED FROM GENESIS", which is the correct
-    //! setting for any chain launched with the rule already in place. A positive
-    //! H enforces it only from height H on, leaving earlier history exempt.
+    //! Same convention as pos_exprace_height above: 0 = not gated (rule off),
+    //! a positive H = enforced from height H on, leaving earlier history exempt.
+    //! A chain launched WITH the rule sets 1 ("active from the first block"),
+    //! never 0 — see CONTRIBUTING.md, "Every new consensus rule needs an
+    //! activation height". Keeping every gate on one convention matters: two
+    //! gates with opposite meanings for 0 would make a reviewer "fixing" a 0
+    //! silently disable a consensus rule.
     //!
     //! Why this gate exists. The MTP-gap requirement was added in response to
     //! the 2026-07-17 finality partition, i.e. AFTER the testnet chain had
