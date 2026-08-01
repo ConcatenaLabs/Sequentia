@@ -729,6 +729,58 @@ public:
         // genesis stake output bakes the founder's BLS registration unconditionally
         // (see below), so flipping this default does NOT change the genesis hash.
         g_pos_public_committee = args.GetBoolArg("-pospubliccommittee", true);
+
+        // These are NETWORK-WIDE consensus rules on the shared public testnet, not
+        // per-node preferences: a node running a different value computes a
+        // different quorum or a different committee, rejects the network's blocks,
+        // and forks IN SILENCE. That was the root cause of issue #3, and it is the
+        // same class of failure mainnet already guards against (see CMainParams).
+        //
+        // Mainnet refuses these flags outright; here we refuse only a CONFLICTING
+        // value. A value equal to the network's is harmless, and existing testnet
+        // configurations legitimately pin these (they had to, before the defaults
+        // above matched the live network) -- rejecting those too would break every
+        // current node's config on upgrade for no safety gain. A mismatch, on the
+        // other hand, is exactly the "operator believes they are changing a
+        // consensus rule" case worth catching. Genuine parameter experiments belong
+        // on regtest / a custom chain, which stay freely configurable.
+        //
+        // Runs BEFORE the dependency and range checks below so the operator gets
+        // this explicit message rather than a downstream symptom (e.g.
+        // -pospubliccommittee=0 otherwise surfaces as "-poscommitteesize must be
+        // between 1 and 100"). Compares against the network CONSTANTS, never
+        // against the globals just assigned from the same args -- that would
+        // compare a value with itself and never fire.
+        {
+            const auto refuse_bool = [&](const char* flag, bool network_value) {
+                if (args.IsArgSet(flag) && args.GetBoolArg(flag, network_value) != network_value) {
+                    throw std::runtime_error(strprintf(
+                        "%s is a consensus rule of the Sequentia testnet and must be %s on this "
+                        "network; a different value forks this node off in silence. Remove it from "
+                        "the configuration, or use -chain=regtest / a custom chain to experiment.",
+                        flag, network_value ? "1" : "0"));
+                }
+            };
+            const auto refuse_int = [&](const char* flag, int64_t network_value) {
+                if (args.IsArgSet(flag) && args.GetIntArg(flag, network_value) != network_value) {
+                    throw std::runtime_error(strprintf(
+                        "%s is a consensus rule of the Sequentia testnet and must be %d on this "
+                        "network; a different value forks this node off in silence. Remove it from "
+                        "the configuration, or use -chain=regtest / a custom chain to experiment.",
+                        flag, network_value));
+                }
+            };
+            refuse_bool("-posvrf", true);
+            refuse_bool("-posaggcommittee", true);
+            refuse_bool("-posbls", true);
+            refuse_bool("-pospubliccommittee", true);
+            refuse_int("-poscommitteesize", 250);
+            refuse_int("-posslotinterval", 30);
+            refuse_int("-posunbonding", 43200);
+            refuse_int("-pospayoutnotice", (int64_t)DEFAULT_POS_PAYOUT_NOTICE);
+            refuse_int("-posminstake", 4000000000000LL);
+        }
+
         if (g_pos_public_committee && !g_pos_bls) {
             throw std::runtime_error("-pospubliccommittee requires -posbls");
         }
@@ -744,6 +796,7 @@ public:
         // Consensus-critical: pin the payout notice period so no node can change
         // when a producer's payout policy binds by passing -pospayoutnotice.
         g_pos_payout_notice = DEFAULT_POS_PAYOUT_NOTICE;   // 2880 x 30s = ~1 day
+
         consensus.elements_mode = g_con_elementsmode;
         consensus.total_valid_epochs = 0;
         consensus.dynamic_epoch_length = 10;
