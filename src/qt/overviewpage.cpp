@@ -671,6 +671,27 @@ void OverviewPage::updateSeqStatus()
     }
 }
 
+namespace {
+//! Does this parent-chain error mean "we are simply not talking to Bitcoin"?
+//! Those are states a user can be in ON PURPOSE - a node started without
+//! following Bitcoin, or Bitcoin Core not running yet - so they must not be
+//! surfaced as a fault with troubleshooting advice attached.
+bool ParentChainUnreachable(const std::string& err)
+{
+    static const char* kMarkers[] = {
+        "couldn't connect to server",
+        "parent chain unreachable",
+        "Connection refused",
+        "timeout reached",
+        "EOF reached",
+    };
+    for (const char* m : kMarkers) {
+        if (err.find(m) != std::string::npos) return true;
+    }
+    return false;
+}
+} // namespace
+
 void OverviewPage::refreshBtcBalance()
 {
     if (!walletModel || !m_btc_label) return;
@@ -692,7 +713,17 @@ void OverviewPage::refreshBtcBalance()
             if (r.isObject()) {
                 const std::string e = r.exists("error") ? r["error"].getValStr() : std::string();
                 if (!e.empty()) {
-                    text = QStringLiteral("Bitcoin (testnet4): ") + QString::fromStdString(e);
+                    // Not reaching Bitcoin is an ordinary, often DELIBERATE state
+                    // (a node started without following Bitcoin), not a fault to
+                    // report. Passing the raw exception through put a plumbing
+                    // error and its troubleshooting advice — "couldn't connect to
+                    // server: EOF reached (code 1) (make sure server is running
+                    // ...)" — in front of a user who had just chosen this on
+                    // purpose. Say what it means for the balance instead; the
+                    // technical detail stays in debug.log.
+                    text = ParentChainUnreachable(e)
+                        ? tr("Bitcoin (testnet4): balance unavailable — not connected to Bitcoin Core")
+                        : QStringLiteral("Bitcoin (testnet4): ") + QString::fromStdString(e);
                 } else {
                     const QString amt = r.exists("btc") ? QString::fromStdString(r["btc"].getValStr()) : QStringLiteral("0");
                     const int naddr = r.exists("addresses") ? r["addresses"].get_int() : 0;
