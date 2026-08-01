@@ -116,6 +116,61 @@ as Bitcoin does not reorganize a referenced block, no Sequentia reorg is
 possible: committee certification gives immediate finality (see
 [`04-proof-of-stake.md`](04-proof-of-stake.md)).
 
+### `validateanchor=0` is a master switch, not a single check
+
+`-validateanchor` reads like one option ("validate anchors") but governs **four**
+mechanisms. Setting it to `0` turns off all of them:
+
+| # | Turned off | Where |
+|---|---|---|
+| 1 | Anchor validation of incoming blocks (rule R3 above) | `ContextualCheckBlockHeader` |
+| 2 | **The reorg-following watcher** | `AnchorWatchTask` returns immediately |
+| 3 | The escaping-stall parent-chain time gap | `CheckEscapingStallMtpGap` returns `ALLOWED` |
+| 4 | The PoS finality reconciliation monitor | requires `-validateanchor` |
+
+Item 2 is the consequential one. The watcher is what tells a node that Bitcoin
+orphaned one of its own anchors. Without it a node does not merely stop checking
+*other* people's blocks — it can no longer discover that **its own** chain is
+built on an orphaned anchor, so it never rolls back, and it keeps announcing that
+chain to every peer that syncs from it. The failure is silent and outward-facing:
+`getanchorstatus` reports `not_validated`, not a warning, and the node has no way
+to notice on its own.
+
+Worked example. Bitcoin is at height 101; a node produces Sequentia blocks 1..6,
+all anchored to Bitcoin block 101. Bitcoin then reorganizes: the old 101 is
+orphaned (`confirmations: -1`) and the chain continues to 106 on a different
+branch, so Sequentia blocks 1..6 are all invalid. With `validateanchor=1` the
+watcher notices within `anchorpollinterval` seconds, invalidates them, and the
+chain rebuilds on Bitcoin's new best chain. With `validateanchor=0` **nothing
+happens**: the node stays at height 6, believing it is healthy, and serves those
+six dead blocks to newcomers indefinitely.
+
+Note also that `0` does **not** stop block production. `GetAnchorForNewBlock`
+never consults the flag: a producer with a reachable Bitcoin daemon keeps
+selecting fresh anchors normally while ignoring every reorg — the worst
+combination, since it manufactures new blocks on a branch it cannot detect is
+dead.
+
+Legitimate uses are therefore narrow:
+
+- a **follower with no Bitcoin node available** that consciously delegates anchor
+  validation to its peers (see [`04-proof-of-stake.md`](04-proof-of-stake.md) §6:
+  *finality modulo Bitcoin requires watching Bitcoin*) — such a node must also
+  have the finality gate off, or it could never lower its finalized point after a
+  Bitcoin reorg and would stall forever;
+- **offline validation** of an already-anchored chain.
+
+It is not a supported way to work around a sync failure: it removes the node's
+ability to self-correct for as long as it stays set. Never set it on a node that
+produces blocks, or that other nodes sync from.
+
+Finally, a node can end up with `0` **without anyone choosing it**: if
+`con_bitcoin_anchor` is set and the Bitcoin daemon is unreachable at startup, a
+node running without `-server` (the typical GUI configuration) reports the error
+and then continues with `validateanchor` forced to `0` for the rest of the
+session — even if Bitcoin comes up moments later. A node started with `-server`
+refuses to start instead.
+
 ### The `getanchorstatus` RPC
 
 `getanchorstatus` (available only when `con_bitcoin_anchor` is enabled) reports
