@@ -2334,7 +2334,7 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
         // relaxation is actually exercised (named set below quorum), so
         // certified blocks never pay the (cached) parent-daemon lookup.
         if (escaping_stall && (int)named.size() < quorum) {
-            switch (CheckEscapingStallMtpGap(pindexPrev->m_anchor_hash, block.m_anchor_hash)) {
+            switch (CheckEscapingStallMtpGap(pindexPrev->m_anchor_hash, block.m_anchor_hash, pindexPrev->nHeight + 1)) {
             case EscapeStallTimeVerdict::ALLOWED: break;
             case EscapeStallTimeVerdict::TOO_SOON:
                 return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-pos-escape-stall-too-soon", "sub-quorum block without the escaping-stall parent-chain time gap");
@@ -2408,7 +2408,7 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
             // Escaping-stall real-time evidence (anchor.h, incident 2026-07-17):
             // see the aggregate-MuSig2 path above for the rationale.
             if (escaping_stall && signers < quorum) {
-                switch (CheckEscapingStallMtpGap(pindexPrev->m_anchor_hash, block.m_anchor_hash)) {
+                switch (CheckEscapingStallMtpGap(pindexPrev->m_anchor_hash, block.m_anchor_hash, pindexPrev->nHeight + 1)) {
                 case EscapeStallTimeVerdict::ALLOWED: break;
                 case EscapeStallTimeVerdict::TOO_SOON:
                     return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-pos-escape-stall-too-soon", "sub-quorum block without the escaping-stall parent-chain time gap");
@@ -2446,7 +2446,7 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
             // Escaping-stall real-time evidence (anchor.h, incident 2026-07-17):
             // see the aggregate-MuSig2 path above for the rationale.
             if (escaping_stall && (int)named.size() < quorum) {
-                switch (CheckEscapingStallMtpGap(pindexPrev->m_anchor_hash, block.m_anchor_hash)) {
+                switch (CheckEscapingStallMtpGap(pindexPrev->m_anchor_hash, block.m_anchor_hash, pindexPrev->nHeight + 1)) {
                 case EscapeStallTimeVerdict::ALLOWED: break;
                 case EscapeStallTimeVerdict::TOO_SOON:
                     return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-pos-escape-stall-too-soon", "sub-quorum block without the escaping-stall parent-chain time gap");

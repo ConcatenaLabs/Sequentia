@@ -258,6 +258,7 @@ void Shutdown(NodeContext& node)
     // before chainman is torn down below. ShutdownRequested() is already set by the
     // time we reach Shutdown(), so the watcher's poll loop exits promptly.
     if (node.anchor_watch_thread.joinable()) node.anchor_watch_thread.join();
+    if (node.anchor_retry_thread.joinable()) node.anchor_retry_thread.join();
     if (node.chainman && node.chainman->m_load_block.joinable()) node.chainman->m_load_block.join();
     if (node.scheduler) node.scheduler->stop();
     if (node.reverification_scheduler) node.reverification_scheduler->stop();
@@ -2234,21 +2235,87 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     if (g_con_bitcoin_anchor && g_validate_anchor) {
         uiInterface.InitMessage(_("Awaiting mainchain RPC warmup (anchoring)").translated);
         if (!MainchainRPCCheck()) {
-            const std::string err_msg =
+            // Ask, instead of deciding for the user. Running without the
+            // Bitcoin connection is a legitimate choice for a wallet on a
+            // personal computer and a bad one for a node others rely on, and
+            // only the person in front of the screen knows which this is.
+            //
+            // What the node gives up is one thing described two ways: it stops
+            // following Bitcoin itself and takes that part from its peers. Say
+            // exactly what rides on it rather than listing internal switches —
+            // the full account is in the linked document.
+            const bilingual_str ask = _(
+                "Sequentia could not reach Bitcoin Core.\n"
+                "\n"
+                "Sequentia can start anyway, but it will not be following the Bitcoin chain itself. "
+                "It will take that part on trust from the other Sequentia nodes it connects to, in particular:\n"
+                "\n"
+                "  \xe2\x80\xa2  whether Bitcoin has reorganised, and so whether the chain this node holds is still the right one;\n"
+                "  \xe2\x80\xa2  whether blocks produced without a full committee were entitled to be, since the evidence for that lives on Bitcoin.\n"
+                "\n"
+                "For a wallet on your own computer that is a reasonable trade. Do not do it on a node that produces blocks, "
+                "or that other people connect to: it would serve them a chain it can no longer tell is wrong.\n"
+                "\n"
+                "Sequentia will keep saying so in the status bar, and will warn you if it ever accepts a block it could not "
+                "check. The checks come back when you restart with Bitcoin Core running.\n"
+                "\n"
+                "https://github.com/GracedEternalKingCabbageMan/Sequentia/blob/master/doc/sequentia/03-bitcoin-anchoring.md");
+            // Logged by every frontend, and all an operator of a headless node
+            // ever sees, so it carries the troubleshooting. Deliberately states
+            // no verdict: the GUI logs this too, moments before the user may
+            // well choose to continue. The outcome is the LogPrintf below.
+            const std::string no_ask =
                 "Sequentia could not reach the Bitcoin node it anchors its blocks to.\n\n"
                 "Things to try, in order:\n"
                 "1. Open Bitcoin Core and wait until it has finished starting up, then restart Sequentia.\n"
                 "2. If Bitcoin Core is already running, make sure its RPC server is enabled (server=1 in bitcoin.conf).\n"
                 "3. Check the mainchainrpc* connection settings in your Sequentia configuration.\n\n"
-                "To validate offline without a Bitcoin node, set validateanchor=0 (producing blocks still requires the Bitcoin connection). Technical details are in debug.log.";
-            if (gArgs.GetBoolArg("-server", false)) {
-                InitError(Untranslated(err_msg));
+                "A node can run without the Bitcoin connection by setting validateanchor=0, which delegates to its peers "
+                "everything that depends on watching Bitcoin: whether a Bitcoin reorganisation has invalidated this chain, "
+                "and whether sub-quorum blocks were entitled to be produced. Never set it on a node that produces blocks, "
+                "or that others sync from. Technical details are in debug.log.";
+            // ThreadSafeQuestion returns false on every non-interactive
+            // frontend, so "yes" can only ever come from a human clicking it.
+            // That, not -server, is the right test for "is there someone to
+            // ask": elementsd soft-sets -server=1, but so does a GUI user who
+            // enabled the RPC server, and refusing to start was never the
+            // useful answer for them.
+            const bool start_anyway = uiInterface.ThreadSafeQuestion(
+                ask, no_ask, "Bitcoin Core unreachable",
+                CClientUIInterface::ICON_WARNING | CClientUIInterface::MODAL |
+                CClientUIInterface::SEQ_ANCHOR_PROMPT);
+            if (!start_anyway) {
+                LogPrintf("Startup aborted: the Bitcoin node is unreachable and anchor validation was not waived.\n");
                 return false;
-            } else {
-                InitError(Untranslated(err_msg));
-                gArgs.SoftSetArg("-validateanchor", "0");
-                g_validate_anchor = false;
             }
+            LogPrintf("WARNING: starting without the Bitcoin connection at the user's request; anchor validation is off for this session\n");
+            gArgs.SoftSetArg("-validateanchor", "0");
+            g_validate_anchor = false;
+            g_anchor_unvalidated_by_prompt = true;
+
+            // Watch for Bitcoin coming back. Validation is NOT re-enabled in
+            // place when it does: blocks accepted meanwhile were never checked
+            // against Bitcoin and are not revalidated retroactively, so a node
+            // that flipped the flag would claim a protection it does not have
+            // for its own history — and the anchor watcher would start from a
+            // tip it never verified. A restart revalidates nothing either, but
+            // it does hand the node a live Bitcoin view from that point on,
+            // which is the honest thing to offer. So: notice, and tell the user.
+            node.anchor_retry_thread = std::thread(&util::TraceThread, "anchorretry", [] {
+                constexpr int64_t RETRY_SECS = 30;
+                while (!ShutdownRequested()) {
+                    // Sleep first: the check that just failed was moments ago.
+                    for (int64_t i = 0; i < RETRY_SECS * 10 && !ShutdownRequested(); ++i) {
+                        UninterruptibleSleep(std::chrono::milliseconds{100});
+                    }
+                    if (ShutdownRequested()) break;
+                    if (MainchainReachable()) {
+                        LogPrintf("Bitcoin is reachable again. Anchor validation stays off until Sequentia is restarted.\n");
+                        g_anchor_parent_back_online = true;
+                        break;
+                    }
+                }
+            });
         } else {
             ChainstateManager* anchor_chainman = node.chainman.get();
             const int64_t anchor_poll = std::max<int64_t>(1, gArgs.GetIntArg("-anchorpollinterval", DEFAULT_ANCHOR_POLL_INTERVAL));

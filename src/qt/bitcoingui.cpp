@@ -188,6 +188,12 @@ BitcoinGUI::BitcoinGUI(interfaces::Node& node, const PlatformStyle *_platformSty
     labelProxyIcon = new GUIUtil::ClickableLabel(platformStyle);
     connectionsControl = new GUIUtil::ClickableLabel(platformStyle);
     labelBlocksIcon = new GUIUtil::ClickableLabel(platformStyle);
+    // SEQUENTIA: shown for the whole session when the node started without the
+    // Bitcoin connection (see updateAnchorWaitStatus). It is deliberately a
+    // permanent fixture rather than a one-off dialog: the node looks completely
+    // healthy in that state, and nothing else would ever mention it again.
+    m_anchor_unvalidated_icon = new GUIUtil::ClickableLabel(platformStyle);
+    m_anchor_unvalidated_icon->hide();
     if(enableWallet)
     {
         frameBlocksLayout->addStretch();
@@ -198,6 +204,8 @@ BitcoinGUI::BitcoinGUI(interfaces::Node& node, const PlatformStyle *_platformSty
         frameBlocksLayout->addWidget(labelWalletHDStatusIcon);
         labelWalletHDStatusIcon->hide();
     }
+    frameBlocksLayout->addWidget(m_anchor_unvalidated_icon);
+    frameBlocksLayout->addStretch();
     frameBlocksLayout->addWidget(labelProxyIcon);
     frameBlocksLayout->addStretch();
     frameBlocksLayout->addWidget(connectionsControl);
@@ -237,6 +245,8 @@ BitcoinGUI::BitcoinGUI(interfaces::Node& node, const PlatformStyle *_platformSty
     connect(labelProxyIcon, &GUIUtil::ClickableLabel::clicked, [this] {
         openOptionsDialogWithTab(OptionsDialog::TAB_NETWORK);
     });
+
+    connect(m_anchor_unvalidated_icon, &GUIUtil::ClickableLabel::clicked, this, &BitcoinGUI::showAnchorUnvalidatedDetails);
 
     connect(labelBlocksIcon, &GUIUtil::ClickableLabel::clicked, this, &BitcoinGUI::showModalOverlay);
     connect(progressBar, &GUIUtil::ClickableProgressBar::clicked, this, &BitcoinGUI::showModalOverlay);
@@ -694,7 +704,12 @@ void BitcoinGUI::setClientModel(ClientModel *_clientModel, interfaces::BlockAndH
             m_anchor_wait_timer->setInterval(15 * 1000);
             connect(m_anchor_wait_timer, &QTimer::timeout, this, &BitcoinGUI::updateAnchorWaitStatus);
         }
+        // Asked once: this cannot change while the node runs, and knowing it
+        // up front is what makes polling the fuller anchor state on every tick
+        // free (that call short-circuits when anchors are not validated).
+        m_anchor_not_watching_session = m_node.getAnchorNotWatchingBitcoin();
         m_anchor_wait_timer->start();
+        if (m_anchor_not_watching_session) updateAnchorWaitStatus();
 
         // Receive and report messages from client model
         connect(_clientModel, &ClientModel::message, [this](const QString &title, const QString &message, unsigned int style){
@@ -1300,6 +1315,47 @@ void BitcoinGUI::updateAnchorWaitStatus()
     const int64_t now = QDateTime::currentSecsSinceEpoch();
     QString text;
     QString explain;
+
+    // SEQUENTIA: this node is not following Bitcoin itself and takes that part
+    // from its peers — because the user accepted the startup prompt, or because
+    // the configuration says so. Keep an icon up for the whole session either
+    // way: a node in this state looks completely healthy, and the delegation is
+    // the same one in both cases. Let it grow more specific as things are
+    // actually taken on trust.
+    if (m_anchor_not_watching_session) {
+        const interfaces::AnchorTipState state = m_node.getAnchorTipState();
+        QString tip = tr("This node is not following the Bitcoin chain.") + QString("<br>") +
+                      tr("Bitcoin reorganisations, and the block checks that depend on them, are taken on trust from the other Sequentia nodes it connects to.");
+        if (state.unverified_escaping_stalls > 0) {
+            tip += QString("<br><br>") +
+                   tr("%n block(s) were accepted without being able to check the Bitcoin evidence behind them (most recently at height %1).",
+                      "", state.unverified_escaping_stalls)
+                       .arg(state.last_unverified_escaping_stall_height);
+        }
+        if (state.unvalidated_by_prompt && state.parent_back_online) {
+            tip += QString("<br><br>") + tr("Bitcoin Core can be reached again: restart Sequentia to check anchors again.");
+        }
+        tip += QString("<br><br>") + tr("Click for details.");
+        if (!GUIUtil::HasPixmap(m_anchor_unvalidated_icon)) {
+            m_anchor_unvalidated_icon->setThemedPixmap(QStringLiteral(":/icons/warning"), STATUSBAR_ICONSIZE, STATUSBAR_ICONSIZE);
+        }
+        m_anchor_unvalidated_icon->setToolTip(tip);
+        m_anchor_unvalidated_icon->show();
+
+        // Bitcoin came back after we had already started without it. Say so
+        // once, unprompted: that user accepted this state believing it was
+        // temporary, and this is the moment they can undo it. Not for a node
+        // configured this way on purpose — nothing changed for them.
+        if (state.unvalidated_by_prompt && state.parent_back_online && !m_anchor_back_online_notified) {
+            m_anchor_back_online_notified = true;
+            message(tr("Bitcoin Core can be reached again"),
+                    tr("Sequentia started without a Bitcoin connection, so it is still taking Bitcoin's state on trust from other nodes. "
+                       "It cannot resume the checks by itself — the blocks it accepted meanwhile were never checked against Bitcoin.") +
+                        QString("\n\n") + tr("Restart Sequentia to start checking again."),
+                    CClientUIInterface::MSG_INFORMATION | CClientUIInterface::MODAL);
+        }
+    }
+
     // Cheap wall-clock test first: outside a stall the node is not queried at
     // all (the anchor check may round-trip to the Bitcoin daemon).
     if (m_last_tip_advance > 0 && now - m_last_tip_advance >= STALL_SECS) {
@@ -1331,6 +1387,44 @@ void BitcoinGUI::updateAnchorWaitStatus()
         m_anchor_wait_active = false;
         progressBarLabel->setVisible(progressBar->isVisible());
     }
+}
+
+// SEQUENTIA: the long form behind the status-bar warning icon. Says what the
+// node is doing instead of watching Bitcoin, what that has cost so far, and
+// how to undo it. The technical account lives in the linked document.
+void BitcoinGUI::showAnchorUnvalidatedDetails()
+{
+    const interfaces::AnchorTipState state = m_node.getAnchorTipState();
+    QString text =
+        (state.unvalidated_by_prompt
+             ? tr("Bitcoin Core could not be reached when Sequentia started, and you chose to start anyway.")
+             : tr("This node is configured to run without a Bitcoin connection (validateanchor=0).")) +
+        QString("\n\n") +
+        tr("Sequentia is not following the Bitcoin chain itself. It takes that part on trust from the other Sequentia nodes it connects to: "
+           "whether Bitcoin has reorganised and so whether this chain is still the right one, and whether blocks produced without a full "
+           "committee were entitled to be.") + QString("\n\n") +
+        tr("This is a reasonable trade for a wallet on your own computer. Do not run a node this way if it produces blocks, or if other "
+           "people connect to it.") + QString("\n\n");
+    if (state.unverified_escaping_stalls > 0) {
+        text += tr("%n block(s) have been accepted without being able to check the Bitcoin evidence behind them, most recently at height %1. "
+                   "Those blocks needed only one committee member's signature, and what proves they were allowed to exist is on Bitcoin.",
+                   "", state.unverified_escaping_stalls)
+                    .arg(state.last_unverified_escaping_stall_height) +
+                QString("\n\n");
+    } else {
+        text += tr("So far nothing has had to be taken on trust beyond the usual: no block has arrived that this node could not check on its own.") +
+                QString("\n\n");
+    }
+    if (!state.unvalidated_by_prompt) {
+        text += tr("Remove validateanchor=0 from the configuration and restart with Bitcoin Core running to check anchors again.");
+    } else if (state.parent_back_online) {
+        text += tr("Bitcoin Core can be reached again. Restart Sequentia to check anchors again.");
+    } else {
+        text += tr("Restart Sequentia with Bitcoin Core running to check anchors again.");
+    }
+    text += QString("\n\n") + QStringLiteral("https://github.com/GracedEternalKingCabbageMan/Sequentia/blob/master/doc/sequentia/03-bitcoin-anchoring.md");
+    message(tr("Not following the Bitcoin chain"), text,
+            CClientUIInterface::MSG_WARNING | CClientUIInterface::MODAL);
 }
 
 void BitcoinGUI::openOptionsDialogWithTab(OptionsDialog::Tab tab)
@@ -1529,6 +1623,28 @@ void BitcoinGUI::message(const QString& title, QString message, unsigned int sty
     } else if (style & CClientUIInterface::ICON_WARNING) {
         nMBoxIcon = QMessageBox::Warning;
         nNotifyIcon = Notificator::Warning;
+    }
+
+    // SEQUENTIA: the "Bitcoin Core unreachable" startup question. A plain
+    // OK/Cancel pair is wrong for it — the two outcomes are not symmetric, and
+    // "OK" tells the user nothing about which one they are picking — so name
+    // the buttons after what they do and default to the safe one. Everything
+    // else about the box (text, logging, the fallback for other frontends)
+    // stays on the ordinary path.
+    if (style & CClientUIInterface::SEQ_ANCHOR_PROMPT) {
+        showNormalIfMinimized();
+        QMessageBox mBox(QMessageBox::Warning, strTitle, message, QMessageBox::NoButton, this);
+        mBox.setTextFormat(Qt::PlainText);
+        mBox.setDetailedText(detailed_message);
+        QPushButton* cancel_button = mBox.addButton(tr("Close and start Bitcoin Core first"), QMessageBox::RejectRole);
+        QPushButton* proceed_button = mBox.addButton(tr("Start without following Bitcoin"), QMessageBox::DestructiveRole);
+        mBox.setDefaultButton(cancel_button);
+        mBox.setEscapeButton(cancel_button);
+        mBox.exec();
+        // Anything other than an explicit click on "start anyway" — including
+        // closing the window — means do not start.
+        if (ret != nullptr) *ret = (mBox.clickedButton() == proceed_button);
+        return;
     }
 
     if (style & CClientUIInterface::MODAL) {
