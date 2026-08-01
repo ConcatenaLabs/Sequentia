@@ -422,11 +422,12 @@ public:
         // force and there is NOTHING TO COORDINATE OR REMEMBER LATER — no
         // activation height to pick, no flag day, no legacy history to exempt.
         // Note the convention is the opposite of pos_exprace_height above: for
-        // THIS parameter 0 means "always enforced", not "disabled". Do not
-        // "fix" it to a positive value; a positive value would exempt early
-        // mainnet blocks from a rule that exists to prevent finality
-        // partitions. See consensus/params.h.
-        consensus.pos_escape_stall_mtp_height = 0;
+        // Mainnet is not live yet, so the rule is simply active from the first
+        // block: there is no pre-rule history to grandfather and nothing to
+        // coordinate at launch. 1, not 0 — 0 means "not gated" here exactly as
+        // it does for pos_exprace_height (CONTRIBUTING.md: a gate left at 0 is
+        // a bug, never a deliberate "always on").
+        consensus.pos_escape_stall_mtp_height = 1;
         consensus.nMaxBlockWeight = 200000;             // a twentieth of Bitcoin (doc 11 §4)
         consensus.connect_genesis_outputs = true;
         anyonecanspend_aremine = false;
@@ -1432,10 +1433,11 @@ protected:
         consensus.pos_exprace_height = (int)args.GetIntArg("-posexpraceheight", 0);
         // Escaping-stall MTP-gap activation height. Arg-readable only on this
         // custom/regtest chain so tests can exercise both sides of the gate and
-        // the transition; the real chains pin it in code above. Default 0 =
-        // enforced from genesis, matching mainnet.
+        // the transition; the real chains pin it in code above. Default 1 =
+        // active from the first block, matching mainnet (0 would mean "not
+        // gated", i.e. the rule off entirely).
         consensus.pos_escape_stall_mtp_height =
-            (int)args.GetIntArg("-posescapestallmtpheight", 0);
+            (int)args.GetIntArg("-posescapestallmtpheight", 1);
         if (g_pos_public_committee &&
             (g_pos_committee_size < 1 || g_pos_committee_size > MAX_POS_PUBLIC_COMMITTEE_SIZE)) {
             throw std::runtime_error(strprintf("-poscommitteesize must be between 1 and %d under -pospubliccommittee", MAX_POS_PUBLIC_COMMITTEE_SIZE));
