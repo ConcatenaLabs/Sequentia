@@ -1177,17 +1177,17 @@ int64_t PosProducer::DriveRound()
                 // for escaping a stall: parent-chain height gap AND real-time
                 // MTP gap (anchor.h, incident 2026-07-17) — a height race
                 // during a parent block-storm must not unlock the hold.
-                // The MTP half of the evidence is only consensus-required from
-                // the activation height (pos.h PosEscapeStallMtpActive); below
-                // it the height gap alone is what consensus checks, so
-                // requiring more here would hold the lock for ever on a chain
-                // whose early history predates the rule.
-                const bool mtp_required = PosEscapeStallMtpActive(
-                    m_chainparams.GetConsensus(), tip->nHeight + 1);
+                // Below the activation height consensus does not check the MTP
+                // gap, so neither does this: CheckEscapingStallMtpGap applies
+                // the gate itself and returns ALLOWED there, which is why no
+                // separate height test is needed here. record_unverified=false:
+                // this is the producer weighing its own options, not a block
+                // being accepted.
                 const bool gap_passed = g_con_bitcoin_anchor && tip->pprev &&
                     PosEscapingStallAllowed(tip->pprev->m_anchor_height, backed->m_anchor_height) &&
-                    (!mtp_required ||
-                     CheckEscapingStallMtpGap(tip->pprev->m_anchor_hash, backed->m_anchor_hash) == EscapeStallTimeVerdict::ALLOWED);
+                    CheckEscapingStallMtpGap(tip->pprev->m_anchor_hash, backed->m_anchor_hash,
+                                             tip->nHeight + 1,
+                                             /*record_unverified=*/false) == EscapeStallTimeVerdict::ALLOWED;
                 const bool grace_passed = !g_con_bitcoin_anchor &&
                     (now - m_lock_grace_start_ms >= 2 * ROUND_MS);
                 ancestry_hold = !(gap_passed || grace_passed);
@@ -1317,12 +1317,14 @@ int64_t PosProducer::DriveRound()
         // used (shares below quorum) — a rare, genuinely-stalled situation —
         // and the MTP lookups are cached, so the parent-daemon RPC under the
         // gossip lock is a one-shot.
-        // Mirror the consensus activation gate (pos.h PosEscapeStallMtpActive):
-        // below the activation height consensus does not check the MTP gap, so
-        // demanding it here would refuse to produce blocks the network accepts.
+        // Below the activation height consensus does not check the MTP gap;
+        // CheckEscapingStallMtpGap applies that gate itself and returns ALLOWED
+        // there, so demanding it here would never refuse a block the network
+        // accepts. record_unverified=false: this is the producer weighing its
+        // own options, not a block being accepted.
         if (escaping_stall && (int)m_collected.size() < quorum &&
-            PosEscapeStallMtpActive(m_chainparams.GetConsensus(), height) &&
-            CheckEscapingStallMtpGap(tip->m_anchor_hash, backed->m_anchor_hash) != EscapeStallTimeVerdict::ALLOWED) {
+            CheckEscapingStallMtpGap(tip->m_anchor_hash, backed->m_anchor_hash, height,
+                                     /*record_unverified=*/false) != EscapeStallTimeVerdict::ALLOWED) {
             escaping_stall = false;
         }
         const int min_members = escaping_stall ? 1 : quorum;

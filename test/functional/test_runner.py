@@ -182,6 +182,7 @@ BASE_SCRIPTS = [
     'feature_recompute_fees_evict.py',
     'feature_max_block_weight.py',
     'feature_bitcoin_anchoring.py',
+    'feature_anchor_unreachable_parent.py',
     'feature_anchor_swap_consistency.py',
     'feature_proof_of_stake.py',
     'feature_pos_committee.py',
