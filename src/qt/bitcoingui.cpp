@@ -68,6 +68,8 @@
 #include <QListWidget>
 #include <QMenu>
 #include <QMenuBar>
+#include <QGridLayout>
+#include <QSpacerItem>
 #include <QMessageBox>
 #include <QMimeData>
 #include <QProgressDialog>
@@ -1640,6 +1642,27 @@ void BitcoinGUI::message(const QString& title, QString message, unsigned int sty
         QPushButton* proceed_button = mBox.addButton(tr("Start without following Bitcoin"), QMessageBox::DestructiveRole);
         mBox.setDefaultButton(cancel_button);
         mBox.setEscapeButton(cancel_button);
+
+        // QMessageBox sizes itself to the MESSAGE and ignores how wide the
+        // buttons need to be, so named buttons this long get elided to
+        // something like "rt without following Bitc" — leaving the user unable
+        // to read the two options they are being asked to choose between, in a
+        // dialog whose whole point is that the choice is not symmetric.
+        // Widen the box to fit them, via a spacer in its grid layout: setting
+        // a minimum width directly on a QMessageBox has no effect.
+        // Measured from the buttons rather than hardcoded, so it still holds
+        // for a translation or a font that makes the labels wider.
+        if (QGridLayout* box_layout = qobject_cast<QGridLayout*>(mBox.layout())) {
+            const int buttons_width = cancel_button->sizeHint().width() +
+                                      proceed_button->sizeHint().width();
+            const int margins = box_layout->contentsMargins().left() +
+                                box_layout->contentsMargins().right() +
+                                box_layout->horizontalSpacing() + 24;
+            box_layout->addItem(new QSpacerItem(buttons_width + margins, 0,
+                                                QSizePolicy::Minimum, QSizePolicy::Fixed),
+                                box_layout->rowCount(), 0, 1, box_layout->columnCount());
+        }
+
         mBox.exec();
         // Anything other than an explicit click on "start anyway" — including
         // closing the window — means do not start.
