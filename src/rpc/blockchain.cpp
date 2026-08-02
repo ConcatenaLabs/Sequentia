@@ -28,6 +28,7 @@
 #include <index/blockfilterindex.h>
 #include <index/coinstatsindex.h>
 #include <logging/timer.h>
+#include <mainchainrpc.h>
 #include <net.h>
 #include <net_processing.h>
 #include <node/blockstorage.h>
@@ -3271,6 +3272,45 @@ static RPCHelpMan getanchorstatus()
     };
 }
 
+// SEQUENTIA: how much traffic this node is putting on the parent chain daemon.
+static RPCHelpMan getmainchainrpcstats()
+{
+    return RPCHelpMan{"getmainchainrpcstats",
+                "\nReturns how many RPC calls this node has made to the parent chain (Bitcoin) daemon since startup, in total and per method.\n"
+                "\nEvery call opens a fresh TCP connection, so `calls` is also the number of connections opened. Sample it twice around a known interval to measure the standing load: the anchor watcher polls every -anchorpollinterval seconds and re-checks anchors whose parent-chain verdict is not cached, so a sudden jump across a parent-chain tip change means cached verdicts were discarded. Only available on chains with con_bitcoin_anchor enabled.\n",
+                {},
+                RPCResult{
+                    RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::NUM, "calls", "total parent chain RPC calls since startup (failed calls included: they cost a connection attempt too)"},
+                        {RPCResult::Type::OBJ_DYN, "bymethod", "call count per parent chain RPC method",
+                        {
+                            {RPCResult::Type::NUM, "methodname", "calls to this method"},
+                        }},
+                    }},
+                RPCExamples{
+                    HelpExampleCli("getmainchainrpcstats", "")
+            + HelpExampleRpc("getmainchainrpcstats", "")
+                },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!g_con_bitcoin_anchor) {
+        throw JSONRPCError(RPC_MISC_ERROR, "Bitcoin anchoring (con_bitcoin_anchor) is not enabled on this chain");
+    }
+    // Deliberately makes no parent chain call of its own, so sampling it does
+    // not perturb what it measures.
+    UniValue bymethod(UniValue::VOBJ);
+    for (const auto& [method, count] : GetMainchainRPCCallCountsByMethod()) {
+        bymethod.pushKV(method, (uint64_t)count);
+    }
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("calls", (uint64_t)GetMainchainRPCCallCount());
+    result.pushKV("bymethod", bymethod);
+    return result;
+},
+    };
+}
+
 // SEQUENTIA PoS: the leader schedule for the slot extending the current tip.
 static RPCHelpMan getposschedule()
 {
@@ -4194,6 +4234,7 @@ static const CRPCCommand commands[] =
 
     // SEQUENTIA:
     { "blockchain",         &getanchorstatus,                    },
+    { "blockchain",         &getmainchainrpcstats,               },
     { "blockchain",         &getposschedule,                     },
     { "blockchain",         &getposslot,                         },
     { "blockchain",         &getposrecentblocks,                 },

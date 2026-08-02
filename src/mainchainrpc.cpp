@@ -13,6 +13,29 @@
 #include <event2/buffer.h>
 #include <event2/keyvalq_struct.h>
 
+#include <atomic>
+#include <mutex>
+
+/** SEQUENTIA: parent-chain RPC call counters (mainchainrpc.h). Deliberately a
+ *  plain std::atomic / std::mutex pair rather than the annotated Mutex: this is
+ *  a leaf counter incremented from every caller of CallMainChainRPC, including
+ *  block validation with cs_main held, and it must never participate in the
+ *  node's lock-order graph. */
+static std::atomic<uint64_t> g_mainchain_rpc_calls{0};
+static std::mutex g_mainchain_rpc_bymethod_mutex;
+static std::map<std::string, uint64_t> g_mainchain_rpc_bymethod;
+
+uint64_t GetMainchainRPCCallCount()
+{
+    return g_mainchain_rpc_calls.load(std::memory_order_relaxed);
+}
+
+std::map<std::string, uint64_t> GetMainchainRPCCallCountsByMethod()
+{
+    std::lock_guard<std::mutex> lock(g_mainchain_rpc_bymethod_mutex);
+    return g_mainchain_rpc_bymethod;
+}
+
 /** Reply structure for request_done to fill in */
 struct HTTPReply
 {
@@ -80,6 +103,15 @@ static void http_error_cb(enum evhttp_request_error err, void *ctx)
 
 UniValue CallMainChainRPC(const std::string& strMethod, const UniValue& params)
 {
+    // Count at entry, before anything can throw: a call that fails still cost a
+    // connection attempt to the parent daemon, and the point of the counter is
+    // to measure the load this node puts on that daemon.
+    g_mainchain_rpc_calls.fetch_add(1, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(g_mainchain_rpc_bymethod_mutex);
+        ++g_mainchain_rpc_bymethod[strMethod];
+    }
+
     std::string host = gArgs.GetArg("-mainchainrpchost", DEFAULT_RPCCONNECT);
     int port = gArgs.GetIntArg("-mainchainrpcport", BaseParams().MainchainRPCPort());
 

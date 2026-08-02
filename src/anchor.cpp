@@ -90,17 +90,30 @@ std::vector<PosCheckpoint> g_pos_checkpoint_conflicts GUARDED_BY(g_anchor_mutex)
 // the common layer (pos.cpp) so chainparams.cpp / elements-tx can link them.
 
 const unsigned char POS_CKPT_TAG[7] = {'S', 'E', 'Q', 'C', 'K', 'P', 'T'};
-//! Anchors confirmed to be on the parent chain's best chain. Cleared whenever
-//! the parent chain tip changes, since a reorganization can make them stale.
+//! Anchors confirmed to be on the parent chain's best chain, keyed
+//! {parent height, parent hash} so the height orders the set (see
+//! DropAnchorCachesAbove).
 std::set<std::pair<uint32_t, uint256>> g_anchor_ok_cache GUARDED_BY(g_anchor_mutex);
 //! Anchors confirmed DEFINITIVELY off the parent chain's best chain
 //! (STALE/NOT_FOUND/HEIGHT_MISMATCH — never NO_CONNECTION, which is
-//! indeterminate). Like the OK cache it is cleared on every parent tip change,
-//! since only a parent move can turn a stale anchor canonical again. This lets
-//! the recovery loop run every tick without re-hitting bitcoind for the same
-//! permanently-orphaned anchors: it RPC-checks each anchor at most once per
-//! parent-tip epoch instead of every poll, avoiding a self-inflicted RPC storm.
+//! indeterminate). This lets the recovery loop run every tick without
+//! re-hitting bitcoind for the same permanently-orphaned anchors, avoiding a
+//! self-inflicted RPC storm.
+//!
+//! Both caches are invalidated by DropAnchorCachesAbove when the parent tip
+//! moves: only the part that the move could have changed, never the whole set
+//! (see MainchainUnchangedHeight for why that is sound, and for what it costs
+//! when it is not).
 std::set<std::pair<uint32_t, uint256>> g_anchor_stale_cache GUARDED_BY(g_anchor_mutex);
+//! Ceiling on the OK cache. It is no longer emptied every parent tip change, so
+//! it grows by roughly one entry per parent-chain block for the life of the
+//! chain (~52k/year against Bitcoin, a few MB). The cap only exists so the
+//! growth is bounded rather than unbounded; reaching it (two decades of Bitcoin
+//! blocks) does not break anything — the cache stops accepting new entries and
+//! the excess anchors go back to costing one RPC per walk, i.e. the behaviour
+//! this cache exists to avoid. If a chain ever gets there, the fix is to stop
+//! re-walking provably-unchanged history at all, not a bigger set.
+constexpr size_t ANCHOR_OK_CACHE_MAX = 1u << 20;
 //! Blocks invalidated by the anchor watcher, so they can be reconsidered if
 //! the parent chain reorganizes back.
 std::set<uint256> g_anchor_invalidated GUARDED_BY(g_anchor_mutex);
@@ -167,6 +180,135 @@ bool GetMainchainBlockCount(int& count)
     } catch (const std::exception& e) {
         return false;
     }
+}
+
+//! Bounds the backwards walk that locates the fork point after a parent-chain
+//! reorganization (MainchainUnchangedHeight). The walk costs one RPC per block
+//! of reorg depth, so this is the depth past which finding the fork point stops
+//! being cheaper than simply re-checking every anchor. Bitcoin reorganizations
+//! are one or two blocks deep; anything past this bound falls back to
+//! discarding both caches, which is always safe.
+constexpr int ANCHOR_FORK_WALK_MAX = 2016;
+
+//! One parent-chain header, read WITHOUT consulting the anchor caches.
+struct MainchainHeaderInfo {
+    int height{-1};
+    bool on_best_chain{false};
+    uint256 prev; //!< predecessor's hash; null at the genesis block
+};
+
+//! Fetch a parent-chain block header. Deliberately does NOT go through
+//! CheckMainchainAnchor: its whole job is to decide whether the cached anchor
+//! verdicts are still valid, and CheckMainchainAnchor would answer out of the
+//! very cache under judgement — a cached OK for the old tip would then "prove"
+//! that the old tip is still canonical no matter what the parent chain did.
+//! Returns false when the daemon is unreachable or does not know the hash: both
+//! are indeterminate, and neither may be read as "off the best chain".
+bool GetMainchainHeaderInfo(const uint256& hash, MainchainHeaderInfo& out)
+{
+    try {
+        UniValue params(UniValue::VARR);
+        params.push_back(hash.GetHex());
+        UniValue reply = CallMainChainRPC("getblockheader", params);
+        if (!find_value(reply, "error").isNull()) return false;
+        UniValue result = find_value(reply, "result");
+        if (!result.isObject()) return false;
+        UniValue height = find_value(result.get_obj(), "height");
+        if (!height.isNum()) return false;
+        UniValue confirmations = find_value(result.get_obj(), "confirmations");
+        if (!confirmations.isNum()) return false;
+        UniValue prev = find_value(result.get_obj(), "previousblockhash");
+        out.height = height.get_int();
+        out.on_best_chain = confirmations.get_int64() >= 1;
+        out.prev = prev.isStr() ? uint256S(prev.get_str()) : uint256();
+        return true;
+    } catch (const std::exception& e) {
+        LogPrint(BCLog::NET, "Could not reach mainchain daemon for header %s: %s\n", hash.ToString(), e.what());
+        return false;
+    }
+}
+
+//! The highest parent-chain height whose best-chain block is PROVABLY the same
+//! after the parent tip moved away from `old_tip` as it was before. Returns -1
+//! when that cannot be established, which the caller must read as "nothing is
+//! provably unchanged".
+//!
+//! Why this is the right question. A cached anchor verdict for (h, hash) says
+//! something about the parent chain's block at height h. It can only become
+//! wrong if the parent's best chain at height h changed. So: find how far up
+//! the parent chain is untouched, and keep exactly the verdicts below that.
+//!
+//! Why the answer is sound. Let Y be a block that was on the parent's best
+//! chain at height f before the move and is still on it at height f after. A
+//! block's ancestors are fixed by its own header chain, not by which chain it
+//! sits in, so for every h <= f the best-chain block at height h is Y's
+//! ancestor at height h both before and after — the same block. Hence every
+//! verdict at height <= f survives the move, positive and negative alike:
+//!   - an anchor cached OK at h <= f is still the best-chain block at h;
+//!   - an anchor cached STALE/NOT_FOUND/HEIGHT_MISMATCH at h <= f still is,
+//!     because the only thing that could rescue it is the best chain at h
+//!     becoming that block, and the best chain at h did not change.
+//! Nothing here weakens the walk in section 2: verdicts above f are dropped and
+//! re-fetched from the parent daemon, and the walk still descends to height 1
+//! every tick. This drops re-VERIFICATION of what cannot have changed; it never
+//! introduces a depth below which anchors stop being checked.
+//!
+//! Finding Y. If `old_tip` itself is still on the parent's best chain, the move
+//! was a plain extension — the common case, one Bitcoin block every ~10 minutes
+//! against a chain that produces a block every 30 seconds — and Y is the old
+//! tip, for the cost of ONE header RPC no matter how many blocks were appended.
+//! Otherwise the parent reorganized, and Y is the fork point: walk back from the
+//! old tip until a block that is on the best chain again, one RPC per block of
+//! reorg depth.
+int MainchainUnchangedHeight(const uint256& old_tip)
+{
+    // First tick after startup (or after a failed classification): there is no
+    // old tip to reason from. The caches are re-derived from the parent daemon,
+    // which is exactly right — nothing about Bitcoin should be believed across
+    // a restart on the strength of memory that did not survive it.
+    if (old_tip.IsNull()) return -1;
+
+    uint256 cursor = old_tip;
+    for (int depth = 0; depth <= ANCHOR_FORK_WALK_MAX; ++depth) {
+        MainchainHeaderInfo info;
+        if (!GetMainchainHeaderInfo(cursor, info)) {
+            // Unreachable daemon, or a hash it does not know (e.g. the node was
+            // re-pointed at a different parent daemon). Indeterminate: keep
+            // nothing.
+            LogPrint(BCLog::NET, "Anchor: could not classify the parent chain tip move at %s; re-checking every anchor\n", cursor.ToString());
+            return -1;
+        }
+        if (info.on_best_chain) {
+            if (depth > 0) {
+                LogPrintf("Anchor: parent chain reorganized %d block(s) deep, forking at height %d; anchor verdicts at or below that height are unaffected and are kept, everything above is re-checked\n",
+                          depth, info.height);
+            }
+            return info.height;
+        }
+        if (info.prev.IsNull()) return -1; // walked off the bottom of the chain
+        cursor = info.prev;
+    }
+    LogPrintf("Anchor: parent chain reorganized more than %d blocks deep; re-checking every anchor from scratch\n",
+              ANCHOR_FORK_WALK_MAX);
+    return -1;
+}
+
+//! Discard the anchor verdicts that the parent tip move could have changed:
+//! those strictly above `unchanged_height`. A negative value discards both
+//! caches entirely — the behaviour this file had for every tip change, now the
+//! fallback for the moves that could not be classified.
+void DropAnchorCachesAbove(int unchanged_height) EXCLUSIVE_LOCKS_REQUIRED(g_anchor_mutex)
+{
+    if (unchanged_height < 0) {
+        g_anchor_ok_cache.clear();
+        g_anchor_stale_cache.clear();
+        return;
+    }
+    // Both caches are sets of {parent height, parent hash}, ordered by height
+    // first, so the affected suffix is one contiguous range at the end.
+    const std::pair<uint32_t, uint256> first_affected{(uint32_t)unchanged_height + 1, uint256()};
+    g_anchor_ok_cache.erase(g_anchor_ok_cache.lower_bound(first_affected), g_anchor_ok_cache.end());
+    g_anchor_stale_cache.erase(g_anchor_stale_cache.lower_bound(first_affected), g_anchor_stale_cache.end());
 }
 
 //! Query (cache-first) the parent chain daemon for a block's median-time-past.
@@ -307,13 +449,15 @@ AnchorCheckResult CheckMainchainAnchor(uint32_t height, const uint256& hash)
     {
         LOCK(g_anchor_mutex);
         if (g_anchor_ok_cache.count({height, hash})) return AnchorCheckResult::OK;
-        // Negative cache: a definitively-off-best-chain anchor stays off until the
-        // parent tip moves (which clears this cache), so serve it without an RPC.
+        // Negative cache: a definitively-off-best-chain anchor stays off until a
+        // parent reorganization forking below it puts it back on the best chain,
+        // and such a reorganization drops this entry (DropAnchorCachesAbove), so
+        // while the entry is here it is still true and needs no RPC.
         if (g_anchor_stale_cache.count({height, hash})) return AnchorCheckResult::STALE;
     }
     // Memoize a DEFINITIVE off-best-chain verdict (not NO_CONNECTION) so the
-    // every-tick recovery loop does not re-RPC the same orphaned anchor until the
-    // parent tip moves (which clears the cache).
+    // every-tick recovery loop does not re-RPC the same orphaned anchor for as
+    // long as the parent chain leaves it orphaned.
     auto cache_stale = [&](AnchorCheckResult r) {
         LOCK(g_anchor_mutex);
         g_anchor_stale_cache.emplace(height, hash);
@@ -341,7 +485,16 @@ AnchorCheckResult CheckMainchainAnchor(uint32_t height, const uint256& hash)
             return cache_stale(AnchorCheckResult::HEIGHT_MISMATCH);
         }
         LOCK(g_anchor_mutex);
-        g_anchor_ok_cache.emplace(height, hash);
+        if (g_anchor_ok_cache.size() < ANCHOR_OK_CACHE_MAX) {
+            g_anchor_ok_cache.emplace(height, hash);
+        } else {
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                LogPrintf("WARNING: the canonical-anchor cache reached its %u-entry ceiling; anchors beyond it are re-checked against the parent chain daemon on every watcher tick, which is slow and noisy for that daemon (see ANCHOR_OK_CACHE_MAX in anchor.cpp)\n",
+                          (unsigned)ANCHOR_OK_CACHE_MAX);
+            }
+        }
         return AnchorCheckResult::OK;
     } catch (const CConnectionFailed&) {
         LogPrintf("WARNING: lost connection to mainchain daemon while checking anchor %s\n", hash.ToString());
@@ -446,8 +599,8 @@ std::optional<uint256> AnchorCertifiedSiblingPending(ChainstateManager& chainman
     // Roots: recovery-set entries that could still be restored at/below our
     // height. Skip manual/consensus invalidations (failed WITHOUT the
     // watcher's provenance marker: they stay invalid, a rival there is
-    // legitimate) and anchors confirmed off the parent's best chain this
-    // epoch (a genuine departure: the height is truly vacant and production
+    // legitimate) and anchors confirmed off the parent's best chain and still
+    // off it (a genuine departure: the height is truly vacant and production
     // must proceed). An un-failed root (verdict OK, reconnect still pending)
     // stays a root: the set holds entries until their branch actually
     // reconnects, so the whole un-fail -> reconnect window stays guarded.
@@ -624,18 +777,41 @@ void AnchorWatchTask(ChainstateManager& chainman)
 
     uint256 best;
     if (!GetMainchainBestBlockHash(best)) return;
+    uint256 old_tip;
     bool tip_changed;
     {
         LOCK(g_anchor_mutex);
-        tip_changed = best != g_last_mainchain_tip;
-        if (tip_changed) {
-            g_last_mainchain_tip = best;
-            // The parent chain moved: previously confirmed anchors may have been
-            // reorganized away (drop the OK cache) and previously-orphaned anchors
-            // may be canonical again (drop the negative cache), so re-check both.
-            g_anchor_ok_cache.clear();
-            g_anchor_stale_cache.clear();
-        }
+        old_tip = g_last_mainchain_tip;
+        tip_changed = best != old_tip;
+    }
+    if (tip_changed) {
+        // The parent chain moved, so some anchor verdicts may be stale: anchors
+        // confirmed canonical may have been reorganized away, and orphaned ones
+        // may be canonical again. Which ones, though, depends entirely on HOW
+        // the parent moved, and the two cases are not remotely alike:
+        //
+        //   - a plain extension (the parent appended blocks; the overwhelming
+        //     majority of moves, since Bitcoin produces a block every ~10
+        //     minutes and never reorganizes most of them) changes nothing about
+        //     the chain below the old tip, so every verdict already held is
+        //     still correct and NOTHING needs re-checking;
+        //   - a reorganization invalidates only what sits above the fork point.
+        //
+        // Discarding both caches wholesale on every move treated the first case
+        // as if it were the second, and made every distinct anchor on the chain
+        // cost a fresh RPC on the next tick — a per-parent-block cost growing
+        // linearly with the age of the chain, on a walk that deliberately has no
+        // depth floor. MainchainUnchangedHeight tells the two apart for one RPC
+        // and keeps the verdicts the move provably cannot have touched; see
+        // there for why that is sound, and note it drops re-verification only —
+        // section 2 below still descends to height 1 every tick.
+        //
+        // The RPC is issued with no lock held: this file never calls the parent
+        // daemon while holding g_anchor_mutex (or cs_main).
+        const int unchanged_height = MainchainUnchangedHeight(old_tip);
+        LOCK(g_anchor_mutex);
+        g_last_mainchain_tip = best;
+        DropAnchorCachesAbove(unchanged_height);
     }
 
     // PoS checkpoints (paper §11): scan new parent blocks for committed
@@ -724,7 +900,9 @@ void AnchorWatchTask(ChainstateManager& chainman)
             }
             if (res != AnchorCheckResult::OK) {
                 // Still orphaned. The negative cache serves this without an RPC
-                // until the parent tip moves, so the every-tick scan stays cheap.
+                // for as long as it stays orphaned, so the every-tick scan stays
+                // cheap; the reorganization that would rescue it is also the one
+                // that drops the entry.
                 continue;
             }
             LogPrintf("Anchor %s (height %d) of block %s is canonical again; reconsidering\n",
@@ -778,17 +956,34 @@ void AnchorWatchTask(ChainstateManager& chainman)
     //    parent, or a transiently-canonical anchor was cached OK and then went
     //    stale). Gating the walk on tip_changed left such a tip stuck forever.
     //
-    //    Cost: with no break-on-OK the walk examines every anchored block on the
-    //    active chain each tick. Canonical anchors are served from
-    //    g_anchor_ok_cache (a single in-memory set lookup, no RPC), so on a quiet
-    //    tick where nothing changed every entry is a cache hit and the walk is
-    //    cheap; only blocks whose anchor is not (yet) cached OK cost a bitcoind
-    //    RPC. Per the invariant the walk must reach ANY depth (doc 03 §intro/§3,
-    //    doc 04 §6) — there is deliberately NO depth floor or reorg horizon. For a
-    //    very long chain the per-tick RPC cost of re-checking not-yet-cached
-    //    entries could be bounded by re-checking only entries above the parent
-    //    reorg's fork height (instead of clearing the whole cache on tip_changed);
-    //    that is a future optimization and must not introduce a correctness floor.
+    //    Cost. Per the invariant the walk must reach ANY depth (doc 03 §intro/§3,
+    //    doc 04 §6): there is deliberately NO depth floor and no reorg horizon,
+    //    so it examines the whole active chain on every tick and always will.
+    //    What it must NOT do is pay the parent chain daemon for that. Two things
+    //    keep the price flat as the chain grows:
+    //
+    //      - runs of blocks sharing one anchor collapse below (~20 blocks per
+    //        anchor at a 30-second block against a 10-minute parent), so the
+    //        number of verdicts needed per tick is the number of DISTINCT
+    //        anchors, not the number of blocks;
+    //      - each distinct anchor's verdict is served from g_anchor_ok_cache,
+    //        and that cache now survives a parent-chain extension instead of
+    //        being emptied by it (see AnchorWatchTask's tip-change handling and
+    //        MainchainUnchangedHeight). Only verdicts a parent reorganization
+    //        could actually have changed are dropped and re-fetched.
+    //
+    //    So a steady-state tick costs no parent-chain RPC at all, and a tick on
+    //    which the parent appended a block costs one. What it used to cost was
+    //    one RPC per distinct anchor on the whole chain, every time the parent
+    //    moved — thousands, growing linearly with the age of the chain, all of
+    //    them re-asking about Bitcoin history that had not changed.
+    //
+    //    Two costs remain linear in chain length and are in-memory only: the
+    //    index walk in phase 1 and the set lookups in phase 2. Should a chain
+    //    ever grow long enough for those to matter, the way out is a watermark
+    //    of "verified below here against a parent prefix that is still intact",
+    //    invalidated exactly like the caches — again re-verification skipped,
+    //    never verification. A depth floor remains forbidden.
     uint256 lowest_bad;
     while (true) {
         lowest_bad.SetNull();
@@ -811,6 +1006,23 @@ void AnchorWatchTask(ChainstateManager& chainman)
             const CBlockIndex* pindex = chainman.ActiveChain().Tip();
             for (; pindex && pindex->nHeight > 0; pindex = pindex->pprev) {
                 if (pindex->m_anchor_hash.IsNull()) break; // pre-anchor blocks
+                // Collapse each run of blocks sharing one anchor down to the
+                // LOWEST block of the run. Anchor heights are monotone along the
+                // chain, so blocks with the same anchor are contiguous, and
+                // descending means the last one seen in a run is its lowest.
+                // Nothing is lost: the verdict is a property of the anchor, not
+                // of the block, and the block this walk wants when an anchor is
+                // bad is exactly the lowest one carrying it — invalidating that
+                // one disconnects it and every block above. This is what keeps
+                // the phase-2 verdict loop proportional to the number of
+                // distinct anchors (~1 per parent block) rather than to the
+                // number of Sequentia blocks (~20 per parent block).
+                if (!to_check.empty() &&
+                    to_check.back().anchor_height == pindex->m_anchor_height &&
+                    to_check.back().anchor_hash == pindex->m_anchor_hash) {
+                    to_check.back().block_hash = pindex->GetBlockHash();
+                    continue;
+                }
                 to_check.push_back({pindex->GetBlockHash(), pindex->m_anchor_height, pindex->m_anchor_hash});
             }
         }
@@ -819,16 +1031,22 @@ void AnchorWatchTask(ChainstateManager& chainman)
         // meanwhile; InvalidateBlock below re-looks-up by hash and the loop
         // re-evaluates, so the (pre-existing) snapshot→act gap is harmless.
         //
-        // to_check is top-down (tip first, height 1 last). Descend the WHOLE
-        // chain — do NOT break on OK (canonicality is not monotone, see above) —
-        // and remember the lowest (deepest) block whose anchor is definitively
-        // off Bitcoin's best chain (STALE/NOT_FOUND/HEIGHT_MISMATCH); since we
-        // overwrite lowest_bad as we descend, the last bad we record is the
-        // lowest one. g_anchor_ok_cache can only ever mark an anchor OK, never
-        // bad: a now-orphaned anchor is NOT in the OK cache (it is cleared on
-        // tip_changed, and an anchor that was cached OK but then went stale
-        // without a tip change returns STALE here on the live RPC), so the cache
-        // cannot hide a stale low block from this walk.
+        // to_check is top-down (tip first, height 1 last), one entry per run of
+        // blocks sharing an anchor. Descend the WHOLE chain — do NOT break on OK
+        // (canonicality is not monotone, see above) — and remember the lowest
+        // (deepest) block whose anchor is definitively off Bitcoin's best chain
+        // (STALE/NOT_FOUND/HEIGHT_MISMATCH); since we overwrite lowest_bad as we
+        // descend, the last bad we record is the lowest one.
+        //
+        // g_anchor_ok_cache can only ever mark an anchor OK, never bad, so the
+        // question is whether it can hide a now-orphaned anchor from this walk.
+        // It cannot. For an anchor at parent height h to stop being canonical,
+        // the parent's best chain AT height h must change, which is a parent
+        // reorganization forking strictly BELOW h — so the fork height computed
+        // on the tip change is < h and DropAnchorCachesAbove removes that entry,
+        // leaving the walk to re-ask the daemon. When the move cannot be
+        // classified at all the whole cache goes. In every case a stale low
+        // block reaches this loop as a live RPC.
         //
         // NO_CONNECTION partway is indeterminate, not a verdict, so we stop
         // descending (cannot judge the NO_CONNECTION block or anything below it).
