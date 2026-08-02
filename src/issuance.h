@@ -48,6 +48,27 @@ void CalculateAsset(CAsset& asset, const uint256& entropy);
  */
 void CalculateReissuanceToken(CAsset& reissuanceToken, const uint256& entropy, bool fConfidential);
 
+/**
+ * SEQUENTIA: the reissuance nonce to use when the reissuance token being spent
+ * sits on an UNBLINDED (explicit) output.
+ *
+ * Elements encodes "this input is a reissuance" as a non-null
+ * CAssetIssuance::assetBlindingNonce, and populates that nonce with the asset
+ * blinding factor of the token being spent. A token on an unblinded output has
+ * a blinding factor of zero, which would leave the nonce null and make
+ * consensus read the input as a brand new issuance instead -- historically
+ * producing a transaction that could never confirm. Sequentia is
+ * transparent-by-default, so reissuing from an explicit token is the common
+ * case, not an exotic one.
+ *
+ * When the token is explicit we therefore set this non-zero sentinel purely to
+ * select the reissuance branch. Consensus ignores the nonce's *value* whenever
+ * the spent token's asset is explicit and instead compares the asset to the
+ * derived reissuance token id directly (see confidential_validation.cpp), so
+ * any non-zero value would do; a fixed one keeps transactions deterministic.
+ */
+inline uint256 ReissuanceExplicitTokenNonce() { return uint256::ONE; }
+
 void AppendInitialIssuance(CBlock& genesis_block, const COutPoint& prevout, const uint256& contract, const int64_t asset_outputs, const int64_t asset_values, const int64_t reissuance_outputs, const int64_t reissuance_values, const CScript& issuance_destination);
 
 /**
