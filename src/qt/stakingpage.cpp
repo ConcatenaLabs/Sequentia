@@ -28,6 +28,8 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QDateTime>
+#include <QGuiApplication>
+#include <QScreen>
 #include <QDoubleValidator>
 #include <QFormLayout>
 #include <QGroupBox>
@@ -59,6 +61,43 @@ QString FormatWeight(uint64_t atoms)
     QString s = QString::number((double)atoms / 100000000.0, 'f', 8);
     if (s.contains('.')) { while (s.endsWith('0')) s.chop(1); if (s.endsWith('.')) s.chop(1); }
     return s;
+}
+
+//! Ask a yes/no question in a dialog placed over the window the user is working
+//! in. Qt leaves the placement to the window manager, and some of them (WSLg's
+//! among them) park it at the top-left corner BEHIND the main window: a
+//! confirmation the user never sees is a confirmation that did not happen, and
+//! here it guards moving real funds.
+int AskCentred(QWidget* parent, const QString& title, const QString& text)
+{
+    QWidget* top = parent ? parent->window() : nullptr;
+    QMessageBox box(QMessageBox::Question, title, text,
+                    QMessageBox::Yes | QMessageBox::Cancel, top);
+    box.setDefaultButton(QMessageBox::Cancel);
+    QPointer<QMessageBox> guard(&box);
+    // Only once exec() has laid the dialog out does it have a real size to
+    // centre, so do it on the next turn of the event loop.
+    QTimer::singleShot(0, &box, [guard, top] {
+        if (!guard) return;
+        if (top && top->isVisible()) {
+            QRect g = guard->frameGeometry();
+            g.moveCenter(top->frameGeometry().center());
+            // A parent straddling a screen edge must not push the dialog off it.
+            if (QScreen* screen = guard->screen() ? guard->screen() : QGuiApplication::primaryScreen()) {
+                const QRect avail = screen->availableGeometry();
+                if (!avail.isEmpty()) {
+                    QPoint tl = g.topLeft();
+                    tl.setX(qBound(avail.left(), tl.x(), qMax(avail.left(), avail.right() - g.width() + 1)));
+                    tl.setY(qBound(avail.top(), tl.y(), qMax(avail.top(), avail.bottom() - g.height() + 1)));
+                    g.moveTopLeft(tl);
+                }
+            }
+            guard->move(g.topLeft());
+        }
+        guard->raise();
+        guard->activateWindow();
+    });
+    return box.exec();
 }
 } // namespace
 
@@ -1142,8 +1181,7 @@ void StakingPage::onUnstake()
         msg += tr("The rest of your stake keeps staking. If a staked coin has to be split to withdraw this "
                   "exact amount, the remainder is re-staked automatically and its unbonding clock restarts.");
     }
-    if (QMessageBox::question(this, tr("Withdraw stake?"), msg,
-                              QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) {
+    if (AskCentred(this, tr("Withdraw stake?"), msg) != QMessageBox::Yes) {
         return;
     }
 
