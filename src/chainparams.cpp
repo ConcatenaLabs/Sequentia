@@ -982,7 +982,24 @@ public:
 
         // vFixedSeeds = std::vector<uint8_t>(std::begin(chainparams_seed_test), std::end(chainparams_seed_test));
 
-        fDefaultConsistencyChecks = true;
+        // This is the default for -checkblockindex, which turns on
+        // CChainState::CheckBlockIndex(): a full consistency walk of the ENTIRE
+        // block index, run after every headers message and every tip update. It
+        // is a development self-check and belongs to regtest, where chains are
+        // a few dozen blocks long and the walk is free.
+        //
+        // On a real chain the walk costs O(blocks known so far) per headers
+        // message, so syncing costs O(n^2) and gets worse every day the chain
+        // lives. Measured on this testnet at ~67k blocks: with the check on,
+        // header sync fell from 171/s at height 2.5k to 3/s at height 20k and
+        // never finished; with it off the same node took the whole header chain
+        // in under a minute and connected blocks at ~119/s — roughly 60x. It
+        // was also the reason a fresh node looked like it had hung.
+        //
+        // Upstream Bitcoin Core has this false for testnet and true only for
+        // regtest. Anyone who wants the self-check back passes -checkblockindex=1;
+        // nothing about consensus depends on it.
+        fDefaultConsistencyChecks = false;
         fRequireStandard = true;
         m_is_test_chain = true;
         m_is_mockable_chain = false;
