@@ -788,6 +788,160 @@ RPCHelpMan withdrawstake()
     };
 }
 
+RPCHelpMan bumpwithdrawstakefee()
+{
+    return RPCHelpMan{"bumpwithdrawstakefee",
+                "\nRe-send a pending stake withdrawal with a higher network fee (BIP125 replace-by-fee), for when\n"
+                "the original is taking too long to confirm.\n"
+                "\nThe wallet's own bumpfee cannot do this: it requires every input to be one the wallet\n"
+                "recognises as its own, and a staking output is a bare script that IsMine does not match — nor\n"
+                "could the generic signer re-sign it. This rebuilds the very same withdrawal — same staking\n"
+                "inputs, same destination, same re-staked remainder — and only moves value from the withdrawn\n"
+                "amount to the fee, so the replacement is the original transaction paying more.\n",
+                {
+                    {"fee_rate", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "Fee rate in " + CURRENCY_ATOM + "/vB for the replacement (default: the smallest increase the network will accept)."},
+                },
+                RPCResult{RPCResult::Type::OBJ, "", "", {
+                    {RPCResult::Type::STR_HEX, "txid", "the replacement transaction id"},
+                    {RPCResult::Type::STR_HEX, "replaced_txid", "the transaction it replaces"},
+                    {RPCResult::Type::STR_AMOUNT, "old_fee", "the fee the original paid"},
+                    {RPCResult::Type::STR_AMOUNT, "fee", "the fee the replacement pays"},
+                    {RPCResult::Type::STR_AMOUNT, "amount", "SEQ now arriving at the destination (the extra fee comes out of it)"},
+                    {RPCResult::Type::STR, "destination", "the receiving address (unchanged)"},
+                }},
+                RPCExamples{HelpExampleCli("bumpwithdrawstakefee", "") + HelpExampleCli("bumpwithdrawstakefee", "2")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!g_con_pos) throw JSONRPCError(RPC_MISC_ERROR, "Proof-of-Stake (con_pos) is not enabled on this chain");
+    std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
+    if (!pwallet) return NullUniValue;
+    pwallet->BlockUntilSyncedToCurrentChain();
+
+    LOCK(pwallet->cs_wallet);
+    EnsureWalletIsUnlocked(*pwallet);
+
+    // The pending withdrawal is the unconfirmed transaction spending this
+    // wallet's staking outputs — exactly what liststakeutxos flags "withdrawing".
+    std::vector<StakeUtxo> stakes = FindWalletStakeUtxos(*pwallet, std::nullopt);
+    std::vector<StakeUtxo> spent;
+    for (const StakeUtxo& s : stakes) {
+        if (s.withdrawing) spent.push_back(s);
+    }
+    if (spent.empty()) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "there is no pending stake withdrawal to re-send");
+    }
+    // Every input of one withdrawal shares its spending transaction.
+    std::set<uint256> spender_ids;
+    const CWalletTx* original = nullptr;
+    for (const StakeUtxo& s : spent) {
+        for (const auto& [txid, wtx] : pwallet->mapWallet) {
+            for (const CTxIn& in : wtx.tx->vin) {
+                if (in.prevout == s.outpoint) { spender_ids.insert(txid); original = &wtx; }
+            }
+        }
+    }
+    if (!original) throw JSONRPCError(RPC_WALLET_ERROR, "could not find the pending withdrawal transaction");
+    if (spender_ids.size() > 1) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "more than one pending stake withdrawal; wait for them to confirm");
+    }
+
+    // Rebuild it: same inputs, same outputs, only the split between the
+    // destination and the fee changes.
+    CMutableTransaction mtx(*original->tx);
+    int dest_idx = -1, fee_idx = -1;
+    for (size_t i = 0; i < mtx.vout.size(); ++i) {
+        if (mtx.vout[i].IsFee()) { fee_idx = (int)i; continue; }
+        // The re-staked remainder must not shrink — that would silently change
+        // how much stays staked. Only the payout to ourselves absorbs the fee.
+        if (ParseStakeScript(mtx.vout[i].scriptPubKey)) continue;
+        if (dest_idx < 0) dest_idx = (int)i;
+    }
+    if (dest_idx < 0 || fee_idx < 0) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "the pending withdrawal does not look like one this wallet built");
+    }
+    const CAmount old_fee = mtx.vout[fee_idx].nValue.GetAmount();
+
+    // What the replacement must pay: BIP125 wants the old fee rate plus one
+    // incremental relay fee over the new size, and the caller may ask for more.
+    const int64_t vsize = GetVirtualTransactionSize(CTransaction(mtx));
+    const CFeeRate incremental = std::max(pwallet->chain().relayIncrementalFee(), CFeeRate(WALLET_INCREMENTAL_RELAY_FEE));
+    CAmount new_fee = old_fee + incremental.GetFee(vsize);
+    if (!request.params[0].isNull()) {
+        const CFeeRate asked{AmountFromValue(request.params[0], /*is_policy_asset=*/true, /*decimals=*/3) * 1000};
+        const CAmount wanted = asked.GetFee(vsize);
+        if (wanted <= new_fee) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
+                "fee_rate is too low to replace the pending withdrawal: it would pay %s SEQ, and the network "
+                "requires at least %s SEQ (the original paid %s)",
+                FormatMoney(wanted), FormatMoney(new_fee), FormatMoney(old_fee)));
+        }
+        new_fee = wanted;
+    }
+    const CAmount extra = new_fee - old_fee;
+    if (mtx.vout[dest_idx].nValue.GetAmount() <= extra) {
+        throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
+            "the withdrawn amount (%s SEQ) cannot absorb a fee increase of %s SEQ",
+            FormatMoney(mtx.vout[dest_idx].nValue.GetAmount()), FormatMoney(extra)));
+    }
+    mtx.vout[dest_idx].nValue = mtx.vout[dest_idx].nValue.GetAmount() - extra;
+    mtx.vout[fee_idx].nValue = new_fee;
+    if (IsDust(mtx.vout[dest_idx], pwallet->chain().relayDustFee())) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "raising the fee that far would leave a dust output");
+    }
+
+    // Re-sign every staking input over the new amounts.
+    for (size_t i = 0; i < mtx.vin.size(); ++i) {
+        const StakeUtxo* s = nullptr;
+        for (const StakeUtxo& c : spent) {
+            if (c.outpoint == mtx.vin[i].prevout) { s = &c; break; }
+        }
+        if (!s) throw JSONRPCError(RPC_WALLET_ERROR, "the pending withdrawal spends an input this wallet cannot re-sign");
+        CKey key;
+        if (!GetStakerKey(*pwallet, s->parsed.pubkey, key)) {
+            throw JSONRPCError(RPC_WALLET_ERROR, strprintf("the private key for staker %s is not available in this wallet", HexStr(s->parsed.pubkey)));
+        }
+        FlatSigningProvider provider;
+        provider.keys[s->parsed.pubkey.GetID()] = key;
+        std::vector<unsigned char> sig;
+        MutableTransactionSignatureCreator creator(&mtx, i, s->txout.nValue, SIGHASH_ALL);
+        if (!creator.CreateSig(provider, sig, s->parsed.pubkey.GetID(), s->txout.scriptPubKey, SigVersion::BASE, /*flags=*/0)) {
+            throw JSONRPCError(RPC_WALLET_ERROR, "failed to re-sign the staking spend");
+        }
+        mtx.vin[i].scriptSig = CScript() << sig;
+    }
+    for (size_t i = 0; i < mtx.vin.size(); ++i) {
+        const StakeUtxo* s = nullptr;
+        for (const StakeUtxo& c : spent) if (c.outpoint == mtx.vin[i].prevout) { s = &c; break; }
+        ScriptError serror = SCRIPT_ERR_OK;
+        MutableTransactionSignatureChecker checker(&mtx, i, s->txout.nValue, MissingDataBehavior::FAIL);
+        if (!VerifyScript(mtx.vin[i].scriptSig, s->txout.scriptPubKey, nullptr,
+                          SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY | SCRIPT_VERIFY_CHECKSEQUENCEVERIFY,
+                          checker, &serror)) {
+            throw JSONRPCError(RPC_WALLET_ERROR, strprintf("constructed an invalid replacement (%s); nothing was sent", ScriptErrorString(serror)));
+        }
+    }
+
+    const CTransactionRef tx = MakeTransactionRef(std::move(mtx));
+    std::string err_string;
+    if (!pwallet->chain().broadcastTransaction(tx, pwallet->m_default_max_tx_fee, /*relay=*/true, err_string)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, strprintf("failed to broadcast the replacement: %s", err_string));
+    }
+
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("txid", tx->GetHash().GetHex());
+    result.pushKV("replaced_txid", original->GetHash().GetHex());
+    result.pushKV("old_fee", ValueFromAmount(old_fee));
+    result.pushKV("fee", ValueFromAmount(new_fee));
+    result.pushKV("amount", ValueFromAmount(tx->vout[dest_idx].nValue.GetAmount()));
+    CTxDestination dest;
+    if (ExtractDestination(tx->vout[dest_idx].scriptPubKey, dest)) {
+        result.pushKV("destination", EncodeDestination(dest));
+    }
+    return result;
+},
+    };
+}
+
 RPCHelpMan getbtcbalance()
 {
     return RPCHelpMan{"getbtcbalance",
