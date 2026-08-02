@@ -1,8 +1,9 @@
 # Sequentia Core 23.3.8
 
-This release makes a Sequentia node survive its Bitcoin node going away, and
-makes the chain syncable from genesis again. Upgrading is recommended for every
-node; it is required for any node that needs to be able to resync or reindex.
+This release makes a Sequentia node survive its Bitcoin node going away, makes
+the chain syncable from genesis again, and makes that sync take **nine minutes
+instead of never**. Upgrading is recommended for every node; it is required for
+any node that needs to be able to resync or reindex.
 
 ## The short version
 
@@ -15,9 +16,18 @@ than intended:
 - a consensus rule added in July was applied retroactively to blocks produced
   before it existed, so **no new node could sync the testnet from genesis**.
 
-Both are fixed. A third group of changes makes the case "Bitcoin Core is not
-running" an explicit, readable choice rather than something the software decided
-silently on the user's behalf.
+A third defect made the sync that did happen unusably slow: a development
+self-check meant for regtest was left on for the public testnet, and it costs
+more the longer the chain gets. Syncing from genesis went from four and a half
+hours reaching height 1,445 — and still slowing — to the whole chain in nine
+minutes.
+
+A fourth made every node re-ask Bitcoin about thousands of blocks of settled
+history every ten minutes, forever, and by default all at the same server.
+
+All four are fixed. A further group of changes makes the case "Bitcoin Core is
+not running" an explicit, readable choice rather than something the software
+decided silently on the user's behalf.
 
 ## Fixed
 
@@ -42,6 +52,52 @@ silently on the user's behalf.
   is never revalidated — which also meant their state was not reproducible: a
   `-reindex`, a restore from backup or a disk failure would have left them
   unable to start. That is no longer the case.
+
+- **Syncing is no longer quadratic.** `CTestNetParams` set
+  `fDefaultConsistencyChecks = true`, the default for `-checkblockindex`, which
+  runs `CheckBlockIndex()` — a full consistency walk of the **entire** block
+  index — after every headers message and every tip update. Upstream sets that
+  true only for regtest, where chains are a few dozen blocks long and the walk
+  is free. On a real chain it costs O(blocks known so far) per headers message,
+  so the sync is O(n²) and gets worse every day the chain lives.
+
+  It is invisible from outside: the node is not stalled, logs no error, and sits
+  at 100% CPU in the message-handler thread doing nothing a user would recognise
+  as work. Measured on testnet at ~67k blocks, same machine and peer, the flag
+  the only variable — with it on, 810 blocks and 16,384 headers in seven minutes
+  and still slowing (171 headers/s at height 2,560 down to 3/s at height
+  20,480); with it off, the whole header chain inside the first twenty seconds
+  and **67,457 blocks in 541 seconds**, flat at ~125 blocks/s start to finish.
+  The flat rate is the point: the per-batch O(n) term is gone, not merely
+  smaller.
+
+  Nothing about consensus or block validity depended on it. Every check on
+  incoming blocks is unchanged; what stops is a development self-audit of the
+  node's own index. The flag also governs the `-checkmempool` default, an
+  equivalent per-transaction self-check, now likewise off on testnet. Developers
+  who want either back pass `-checkblockindex=1` / `-checkmempool=1`; regtest
+  keeps both on, which is where they earn their keep.
+
+- **The anchor watcher no longer re-verifies Bitcoin history that cannot have
+  changed.** It emptied both anchor-verdict caches on *every* parent-chain tip
+  change, a plain extension included, and its walk — which deliberately has no
+  depth floor — then re-derived every verdict from scratch. Since ~20 Sequentia
+  blocks share one anchor, the number of distinct anchors grows with the number
+  of Bitcoin blocks the chain spans: ~3,000 RPC calls per Bitcoin block on the
+  current testnet, per node, growing every day, each a fresh TCP connection, and
+  by default all aimed at the one public gateway. Yet appending to Bitcoin
+  cannot alter its best chain below the old tip.
+
+  A single header call now settles whether the move was an extension or a
+  reorganization, and only the verdicts above a reorganization's fork point are
+  dropped. Steady-state cost per Bitcoin block: **one call instead of three
+  thousand**, and it no longer grows with the age of the chain. This drops
+  re-verification of what cannot have changed; the walk still descends to
+  height 1 on every tick and no depth floor is introduced.
+
+  `getmainchainrpcstats` reports the calls a node has made to its Bitcoin
+  daemon, in total and per method, and makes no call of its own so sampling does
+  not perturb what it measures.
 
 - **`-poscheckpointdepth` is covered by the testnet consensus-flag guard.**
   Unlike the other PoS parameters it is not pinned on testnet — it is read at
@@ -122,15 +178,29 @@ release introduces a new requirement.
   for up to fifteen minutes. This is long-standing behaviour, not new in this
   release, but the fixes above make it easier to encounter.
 
+## Build and continuous integration
+
+Neither of these affects `elementsd`, `elements-qt` or `elements-cli`, which
+have always built and run. They fix the ability to notice breakage.
+
+- **`bench_bitcoin` and `test_elements-qt` link `libblst` again.** Both link
+  `libbitcoin_node`, which calls into blst since the BLS committee work, but
+  neither listed `$(LIBBLST)`, so both failed with
+  `undefined reference to blst_p1_compress`. `bench_bitcoin` is in the CI
+  matrix, so `build_and_test` was red on *every* pull request regardless of its
+  contents — a one-line change failed it exactly like a seven-hundred-line one.
+  A permanently red check reports nothing.
+
+- **Three `util_tests` cases are green again.** `util_GetChainName`,
+  `util_ArgsMerge` and `util_ChainMerge` had been red since the fork. The cause
+  was one, not three: `CBaseChainParams::DEFAULT` is `test` here where Elements
+  has `liquidv1`, and that constant also decides which network inherits the
+  config file's unprefixed section. Rebuilding with the upstream default
+  reproduces the upstream hashes exactly, which established there was no parsing
+  regression hiding underneath before the expected values were touched.
+
 ## Known issues
 
-- Building with `--with-gui` fails when linking `test_elements-qt`: `libblst`
-  does not reach the link line. The daemon and the GUI both build; only the Qt
-  unit-test binary is affected. Present on earlier versions too.
-- Three `util_tests` cases (`util_GetChainName`, `util_ArgsMerge`,
-  `util_ChainMerge`) fail. They are inherited from upstream and were never
-  realigned after the Elements/Sequentia divergence; they fail identically on
-  earlier versions.
 - On testnet the block anchor can lag the Bitcoin tip by a couple of hours,
   because `-anchoravoidcontested` backs it away from heights a competing branch
   is contesting and Bitcoin testnet4 has competing tips almost permanently. The
@@ -141,3 +211,12 @@ release introduces a new requirement.
 A node built from this release, syncing from genesis with anchor validation
 enabled, reaches the network tip. The same test with the previous binary stops
 permanently at block 1757.
+
+A fresh node built from this release, with no `-checkblockindex` in its
+configuration so the new default is what is being measured, syncs the whole
+testnet — 67,457 blocks — in **541 seconds**, wall clock and monotonic clock
+agreeing to one second. The block rate is flat from start to finish.
+
+`feature_anchor_rpc_cost.py` measures the watcher's cost against the Bitcoin
+daemon at two chain sizes and asserts it does not grow with the number of
+distinct anchors. It was verified to fail on the previous behaviour.
