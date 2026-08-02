@@ -116,6 +116,51 @@ as Bitcoin does not reorganize a referenced block, no Sequentia reorg is
 possible: committee certification gives immediate finality (see
 [`04-proof-of-stake.md`](04-proof-of-stake.md)).
 
+### What the watcher costs the Bitcoin daemon
+
+The watcher re-examines the **whole** Sequentia chain on every tick, down to
+height 1, with no depth floor: a block is valid if and only if its anchor is on
+Bitcoin's best chain, at any depth, so there is no height below which checking
+can stop. That walk is in memory. What it must not do is turn into traffic.
+
+Two things keep the traffic flat as the chain grows.
+
+**Anchors are shared.** Sequentia produces a block every 30 seconds and Bitcoin
+one every ~10 minutes, so about twenty consecutive Sequentia blocks carry the
+same anchor. The walk collapses each such run and asks about *distinct anchors*,
+of which there is roughly one per Bitcoin block the chain spans.
+
+**Verdicts survive what cannot invalidate them.** Each distinct anchor's verdict
+— canonical, or definitively off the best chain — is cached, and a cached verdict
+is discarded exactly when Bitcoin does something that could have changed it.
+Extending Bitcoin cannot: appending blocks leaves the best chain below the old
+tip untouched, so every verdict already held is still correct. A reorganization
+can, but only above its fork point. So on each Bitcoin tip change the watcher
+spends one `getblockheader` asking whether its previous Bitcoin tip is still on
+the best chain: if it is, the move was an extension and nothing is re-checked; if
+it is not, it walks back to the fork point (one call per block of reorg depth)
+and drops only the verdicts above it.
+
+The result: a tick where Bitcoin stood still costs one `getbestblockhash`, and a
+tick where Bitcoin produced a block costs a small constant more — regardless of
+whether the chain is a day or a decade old.
+
+This matters more than it looks. Every call opens a **fresh TCP connection**
+(`mainchainrpc.cpp` sends `Connection: close`), and on testnet every node that
+has not configured `-mainchainrpchost` points at the same shared gateway. Before
+this was fixed the watcher discarded all its verdicts on every Bitcoin block,
+extension included, and re-asked about every distinct anchor on the chain: some
+three thousand calls per Bitcoin block on a chain a few weeks old, growing with
+every day the chain lived, from every node, forever.
+
+`getmainchainrpcstats` reports the calls this node has made to the Bitcoin
+daemon since startup, in total and per method. Sample it twice around a known
+interval to see the standing load; `getbestblockhash` is issued once per watcher
+tick and by nothing else, so its count is also the tick count and the difference
+between the two is everything the anchor walk actually cost.
+`feature_anchor_rpc_cost.py` asserts that difference does not grow with the
+number of distinct anchors on the chain.
+
 ### `validateanchor=0` is a master switch, not a single check
 
 `-validateanchor` reads like one option ("validate anchors") but governs **four**
@@ -210,6 +255,20 @@ Four more fields describe a node that is *not* watching Bitcoin:
 | `parentbackonline` | Bitcoin has become reachable again since; validation resumes only on restart. |
 | `unverifiedescapingstalls` | Sub-quorum blocks accepted without checking the Bitcoin evidence behind them. |
 | `lastunverifiedescapingstall` | Height of the most recent one (`-1` = none). |
+
+### The `getmainchainrpcstats` RPC
+
+`getmainchainrpcstats` (also only when `con_bitcoin_anchor` is enabled) reports
+how many RPC calls this node has made to the Bitcoin daemon since startup:
+
+| Field | Meaning |
+|---|---|
+| `calls` | Total calls, failures included — a failed call still cost a connection attempt. Every call is one fresh TCP connection, so this is also the number of connections opened. |
+| `bymethod` | The same total broken down by method name. |
+
+It makes no Bitcoin call of its own, so sampling it does not perturb what it
+measures. See *What the watcher costs the Bitcoin daemon* above for how to read
+the numbers.
 
 ### Starting without a Bitcoin node
 

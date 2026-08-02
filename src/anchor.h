@@ -103,8 +103,13 @@ enum class AnchorCheckResult {
 };
 
 /** Check that the parent-chain block (height, hash) is on the parent chain's
- *  best chain. Results of OK checks are cached until the parent chain tip
- *  changes (see AnchorWatchTask). */
+ *  best chain. Definitive verdicts (OK, and off-the-best-chain — never
+ *  NO_CONNECTION) are cached, and a cached verdict is discarded exactly when the
+ *  parent chain does something that could have changed it: a reorganization at
+ *  or below that height. A parent-chain extension changes no verdict and
+ *  discards none, which is what keeps the watcher's every-tick, no-depth-floor
+ *  walk from costing one RPC per anchor per parent block. See AnchorWatchTask
+ *  and MainchainUnchangedHeight in anchor.cpp. */
 AnchorCheckResult CheckMainchainAnchor(uint32_t height, const uint256& hash);
 
 /** Pure selection math for the anti-contested-anchor policy (Fix A), testable
@@ -155,7 +160,7 @@ void SeedAnchorInvalidated(const std::vector<uint256>& block_hashes);
 
 /** SEQUENTIA committee-equivocation prevention (Change 4a): if a child of
  *  `tip_hash` at `child_height` lies on a watcher-invalidated branch that is
- *  not confirmed off the parent chain's best chain this parent-tip epoch, and
+ *  not currently confirmed off the parent chain's best chain, and
  *  that branch carries a quorum certification at or above the child (the
  *  lowest orphaned block may itself be a sub-quorum escaping-stall block with
  *  a certified descendant), return that child's hash. Such a branch is either
