@@ -210,6 +210,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "getstakescript", 1, "csv_blocks"},
     { "getstakescript", 2, "csv_seconds"},
     { "withdrawstake", 1, "amount" },
+    { "bumpwithdrawstakefee", 0, "fee_rate" },
     //
     // ELEMENTS:
     { "calcfastmerkleroot", 0, "leaves" },
