@@ -184,6 +184,7 @@ BASE_SCRIPTS = [
     'feature_bitcoin_anchoring.py',
     'feature_anchor_unreachable_parent.py',
     'feature_anchor_swap_consistency.py',
+    'feature_anchor_rpc_cost.py',
     'feature_proof_of_stake.py',
     'feature_pos_committee.py',
     'feature_vrf.py',
