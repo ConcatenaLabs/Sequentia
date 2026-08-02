@@ -831,8 +831,11 @@ BOOST_AUTO_TEST_CASE(util_GetChainName)
     std::string error;
 
     BOOST_CHECK(test_args.ParseParameters(0, (char**)argv_testnet, error));
-    std::string default_chain = "liquidv1";
-    BOOST_CHECK_EQUAL(test_args.GetChainName(), default_chain);
+    // SEQUENTIA: with no chain argument GetChainName() falls back to
+    // CBaseChainParams::DEFAULT, which this project points at its own testnet
+    // instead of Elements' liquidv1. Compare against the constant so the test
+    // follows the project's default chain instead of hardcoding one.
+    BOOST_CHECK_EQUAL(test_args.GetChainName(), CBaseChainParams::DEFAULT);
 
     BOOST_CHECK(test_args.ParseParameters(2, (char**)argv_testnet, error));
     BOOST_CHECK_EQUAL(test_args.GetChainName(), "test");
@@ -1087,7 +1090,17 @@ BOOST_FIXTURE_TEST_CASE(util_ArgsMerge, ArgsMergeTestingSetup)
     // Results file is formatted like:
     //
     //   <input> || <IsArgSet/IsArgNegated/GetArg output> | <GetArgs output> | <GetUnsuitable output>
-    BOOST_CHECK_EQUAL(out_sha_hex, "f0a5a84ec85569ae13bf8c94f0dd5d5c6989c84041fb56bd4fb41e1a09818e40");
+    //
+    // SEQUENTIA: the expected value depends on CBaseChainParams::DEFAULT. The
+    // merge treats the DEFAULT network as the one that inherits the config
+    // file's default section, and in which network-only args are not "unsuitable"
+    // (ArgsManager::UseDefaultSection, ArgsManager::GetUnsuitableSectionOnlyArgs).
+    // Sequentia's default chain is "test", not Elements' "liquidv1", so the
+    // "net=test" cases now behave the way the "net=liquidv1" ones do upstream.
+    // That is the whole difference: rebuilding with DEFAULT = LIQUID1 reproduces
+    // the upstream hash f0a5a84ec85569ae13bf8c94f0dd5d5c6989c84041fb56bd4fb41e1a09818e40
+    // exactly. Regenerate with the dump above if the default chain ever changes.
+    BOOST_CHECK_EQUAL(out_sha_hex, "8e9d684c75c483e4498f8026fc19746f0c18bea34ada2af7293d4351b44ba3af");
 }
 
 // Similar test as above, but for ArgsManager::GetChainName function.
@@ -1190,7 +1203,15 @@ BOOST_FIXTURE_TEST_CASE(util_ChainMerge, ChainMergeTestingSetup)
     // Results file is formatted like:
     //
     //   <input> || <output>
-    BOOST_CHECK_EQUAL(out_sha_hex, "4b5aebc617224a00e19eeda5e11986506256c859b0e4068ddc338edb9ba341be");
+    //
+    // SEQUENTIA: as in util_ArgsMerge, the expected value depends on
+    // CBaseChainParams::DEFAULT, which is what GetChainName() returns when no
+    // -testnet/-regtest/-chain setting wins; it is "test" here and "liquidv1"
+    // upstream. Rebuilding with DEFAULT = LIQUID1 reproduces the upstream hash
+    // 4b5aebc617224a00e19eeda5e11986506256c859b0e4068ddc338edb9ba341be exactly,
+    // so nothing else about chain-name resolution changed. Regenerate with the
+    // dump above if the default chain ever changes.
+    BOOST_CHECK_EQUAL(out_sha_hex, "08431ccc8b054fa15f7e9d91f17d10268e10fba5b314d7697de7451e6934b49d");
 }
 
 BOOST_AUTO_TEST_CASE(util_ReadWriteSettings)
