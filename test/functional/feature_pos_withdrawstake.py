@@ -147,6 +147,33 @@ class PosWithdrawStakeTest(BitcoinTestFramework):
         n0.sendtoaddress(n0.getnewaddress(), 50)
         self.mine(1)
 
+        self.log.info("A stuck withdrawal can be replaced by fee (the wallet's own bumpfee cannot)")
+        addr_b = n0.getnewaddress()
+        pub_b = n0.getaddressinfo(addr_b)["pubkey"]
+        n0.registerstake(pub_b, 50)
+        self.mine(1)
+        fund_b = n0.getblockcount()
+        while n0.getblockcount() + 1 < fund_b + UNBONDING:
+            self.mine(1)
+        first = n0.withdrawstake(pub_b)
+        assert first["txid"] in n0.getrawmempool()
+        bumped = n0.bumpwithdrawstakefee()
+        assert_equal(bumped["replaced_txid"], first["txid"])
+        assert bumped["fee"] > first["fee"]
+        # The extra fee comes out of the withdrawn amount, and the destination is
+        # deliberately unchanged: this is the same withdrawal paying more.
+        assert_equal(bumped["destination"], first["destination"])
+        assert_equal(bumped["amount"], first["amount"] - (bumped["fee"] - first["fee"]))
+        # A real BIP125 replacement: the original leaves the mempool, and it is
+        # the replacement that confirms.
+        mempool = n0.getrawmempool()
+        assert first["txid"] not in mempool
+        assert bumped["txid"] in mempool
+        self.mine(1)
+        assert_equal(n0.gettransaction(bumped["txid"])["confirmations"], 1)
+        assert n0.gettransaction(first["txid"])["confirmations"] < 0
+        assert_raises_rpc_error(-4, "no pending stake withdrawal", n0.bumpwithdrawstakefee)
+
         self.log.info("Partial withdrawal: 60 of 200 leaves, 140 is re-staked with a fresh clock")
         addr2 = n0.getnewaddress()
         pub2 = n0.getaddressinfo(addr2)["pubkey"]

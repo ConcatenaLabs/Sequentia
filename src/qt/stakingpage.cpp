@@ -340,11 +340,17 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
     // The button is disabled while nothing is withdrawable, and Qt does not
     // deliver tooltip events to a disabled widget — so the "why is this grey"
     // explanation has to hang on an enabled container around it.
+    m_unstake_bump = new QPushButton(tr("Speed up (higher fee)"), unstakeGroup);
+    m_unstake_bump->setToolTip(tr("Re-send the withdrawal that is waiting to confirm, paying a higher network fee "
+                                  "so it is picked up sooner. It goes to the same address for the same amount, "
+                                  "less the extra fee."));
+    m_unstake_bump->setVisible(false);
     m_unstake_button_holder = new QWidget(unstakeGroup);
     {
         QHBoxLayout* h = new QHBoxLayout(m_unstake_button_holder);
         h->setContentsMargins(0, 0, 0, 0);
         h->addWidget(m_unstake_button);
+        h->addWidget(m_unstake_bump);
         h->addStretch();
     }
     unstakeForm->addRow(QString(), m_unstake_button_holder);
@@ -439,6 +445,7 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
     connect(m_stake_max, &QPushButton::clicked, this, &StakingPage::onStakeMax);
     connect(m_unstake_button, &QPushButton::clicked, this, &StakingPage::onUnstake);
     connect(m_unstake_max, &QPushButton::clicked, this, &StakingPage::onUnstakeMax);
+    connect(m_unstake_bump, &QPushButton::clicked, this, &StakingPage::onUnstakeBump);
     connect(m_refresh_button, &QPushButton::clicked, this, &StakingPage::onRefreshClicked);
 }
 
@@ -975,6 +982,8 @@ void StakingPage::refreshUnstakeInfo(const UniValue* prefetched)
     }
     m_unstake_info->setText(text);
     if (m_unstake_button) m_unstake_button->setEnabled(mature > 0);
+    // Offer the fee bump only while there is something to bump.
+    if (m_unstake_bump) m_unstake_bump->setVisible(withdrawing > 0);
     // Say why the button is greyed out, right where the pointer already is: a
     // disabled control with no explanation reads as a broken one. The tooltip
     // goes on the enabled wrapper, since Qt sends no tooltip event to a
@@ -1071,6 +1080,38 @@ void StakingPage::onUnstakeMax()
     setCardResult(m_unstake_result, tr("Ready to withdraw %1 %2 — everything currently available. The network "
                                        "fee is taken out of this amount.")
                                         .arg(FormatWeight((uint64_t)mature), ticker), false);
+}
+
+void StakingPage::onUnstakeBump()
+{
+    if (!m_wallet_model) return;
+    const QString ticker = BitcoinUnits::policyAssetTicker();
+    if (AskCentred(this, tr("Speed up the withdrawal?"),
+                   tr("The withdrawal waiting to confirm will be re-sent with a higher network fee, so it is "
+                      "picked up sooner.\n\nIt goes to the same address for the same amount, less the extra "
+                      "fee. The original is replaced, not repeated — only one of the two can ever confirm.")) != QMessageBox::Yes) {
+        return;
+    }
+    if (m_unstake_bump) m_unstake_bump->setEnabled(false);
+    bool ok; QString err;
+    UniValue res = callRpc("bumpwithdrawstakefee", UniValue(UniValue::VARR), ok, err);
+    if (m_unstake_bump) m_unstake_bump->setEnabled(true);
+    if (!ok) {
+        setCardResult(m_unstake_result, tr("Could not speed up the withdrawal: %1").arg(err), true);
+        return;
+    }
+    const QString txid = res.exists("txid") ? QString::fromStdString(res["txid"].getValStr()) : QString();
+    const QString oldf = res.exists("old_fee") ? QString::fromStdString(res["old_fee"].getValStr()) : QString();
+    const QString newf = res.exists("fee") ? QString::fromStdString(res["fee"].getValStr()) : QString();
+    const QString amt = res.exists("amount") ? QString::fromStdString(res["amount"].getValStr()) : QString();
+    if (m_unstake_result) {
+        m_unstake_result->setStyleSheet(QString());
+        m_unstake_result->setText(tr("Withdrawal re-sent with a higher fee: %1 %2 instead of %3 %2.\n"
+                                     "You now receive %4 %2.\nTransaction: %5")
+                                      .arg(newf, ticker, oldf, amt, txid));
+    }
+    setStatus(tr("Withdrawal re-sent with a higher fee."), false);
+    refresh();
 }
 
 void StakingPage::onUnstake()
