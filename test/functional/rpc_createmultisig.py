@@ -14,6 +14,7 @@ from test_framework.descriptors import descsum_create, drop_origins
 from test_framework.key import ECPubKey, ECKey
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
+    amount_of,
     assert_raises_rpc_error,
     assert_equal,
 )
@@ -125,9 +126,9 @@ class RpcCreateMultiSigTest(BitcoinTestFramework):
         node0, node1, node2 = self.nodes
         self.generate(node0, COINBASE_MATURITY)
 
-        bal0 = node0.getbalance()['bitcoin']
-        bal1 = node1.getbalance()['bitcoin']
-        bal2 = node2.getbalance()['bitcoin']
+        bal0 = amount_of(node0.getbalance())
+        bal1 = amount_of(node1.getbalance())
+        bal2 = amount_of(node2.getbalance())
 
         height = node0.getblockchaininfo()["blocks"]
         assert 150 < height < 350
