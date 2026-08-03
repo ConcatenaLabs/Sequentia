@@ -749,7 +749,9 @@ int64_t PosProducer::Step()
 
     const int quorum = PosSlotQuorum(registry);
 
-    // Slot timing: the leader's slot opens slot*interval after the parent, and
+    // Slot timing: the leader's slot opens PosSlotGateSeconds after the parent
+    // (slot whole intervals under the legacy rank election, slot seconds once
+    // the exp-race fine gate activates — see pos.h), and
     // we never produce faster than one interval since the parent — the paper's
     // soft lower-bound cadence floor (Principle 10; consensus only enforces the
     // slot gate). We propose as soon as that opens and do NOT add a sub-second
@@ -759,7 +761,8 @@ int64_t PosProducer::Step()
     // before higher-slot proposals arrive — splitting shares and stalling the
     // round at larger committee sizes. Anchoring to the current second keeps the
     // round starts of all nodes aligned during catch-up (past slot times).
-    const int64_t slot_open = (int64_t)tip->nTime + (int64_t)best_slot * g_pos_slot_interval;
+    const int64_t slot_open = (int64_t)tip->nTime +
+        PosSlotGateSeconds(m_chainparams.GetConsensus(), tip->nHeight + 1, best_slot);
     const int64_t cadence_floor = (int64_t)tip->nTime + g_pos_slot_interval;
     const int64_t earliest_sec = std::max(slot_open, cadence_floor);
     const int64_t now_ms = GetTimeMillis();

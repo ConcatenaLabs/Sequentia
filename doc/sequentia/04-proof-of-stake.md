@@ -205,10 +205,30 @@ A block records the leader's VRF proof in a coinbase `OP_RETURN` (tagged
 `SEQVRF`), covered by the merkle root and hence by the leader's signature. At
 connect time `CheckPosStakeRules` verifies the proof against the leader's
 challenge key over the slot seed, recomputes `slot`, and requires
-`block.nTime ≥ parent.nTime + slot · posslotinterval` (`bad-posvrf-early`). So
+`block.nTime ≥ parent.nTime + slot · gate_unit` (`bad-posvrf-early`). So
 the rank-0 leader may produce earliest; if it is absent, a higher-slot staker
 may step in after its slot opens. This is the whitepaper's local wall-clock
 round timeout with the lowest-VRF participant as proposer.
+
+`gate_unit` is `posslotinterval` under the legacy `PosVrfSlot` election and, from
+`pos_exprace_gate_height`, one second under the exponential race
+(`POS_EXPRACE_GATE_SECONDS`; the single definition is `PosSlotGateSeconds`,
+shared by consensus, the block assembler and the producer). The two elections
+need different units because they produce different quantities. `PosVrfSlot` is a
+RANK: uniform in `[0, W/w)`, so a staker of share `s` always draws below `1/s`
+and the best draw on the network is 0 or 1 — one interval per rank costs nothing.
+The exponential-race score is a RATE: `-ln(U)·W/w`, whose minimum over all
+stakers is `Exponential(1)` — mean 1, unbounded geometric tail. Scaling that by a
+whole interval leaves the network silent for `⌊min score⌋` whole slots before
+anyone may propose, so `P(at least one slot lost) = e⁻² ≈ 13.5%` and the mean
+interval is `≈1.21` intervals. Measured on the Sequentia testnet across
+`pos_exprace_height` = 44300: mean interval 30.00 s with 0.0% of intervals over
+one slot below the fork, 38.45 s with 15.2% above it, every late interval an
+exact multiple of the slot interval and the losses spread evenly over all twelve
+stakers. At one second per score unit the gate binds past the producer's cadence
+floor with probability `e^-posslotinterval` (~1e-13 at 30 s), while a candidate
+scoring `N` units worse still waits `N` further seconds — the fallback ordering
+the gate exists for is kept, only its scale is corrected.
 
 ## 4. Committee certification & aggregation
 

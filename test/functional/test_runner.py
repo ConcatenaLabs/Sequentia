@@ -207,6 +207,7 @@ BASE_SCRIPTS = [
     'feature_pos_payout.py',
     'feature_pos_bls_gossip.py',
     'feature_pos_exprace.py',
+    'feature_pos_exprace_gate.py',
     'feature_pos_exprace_relay.py',
     'feature_pos_gossip_dos.py',
     'feature_pos_gossip_failover.py',

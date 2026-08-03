@@ -621,6 +621,28 @@ namespace Consensus { struct Params; }
  *  single predicate so all nodes flip together at exactly the same height. */
 bool PosExpRaceActive(const Consensus::Params& params, int height);
 
+/** Seconds of leader time-gate per unit of exponential-race score, from
+ *  pos_exprace_gate_height (Consensus::Params). One second: the minimum score
+ *  over all stakers is Exponential(1), so a one-second unit leaves the winner
+ *  gated at ~1 s — the producer's cadence floor of one slot interval is what
+ *  actually spaces blocks, exactly as it did under the legacy rank election —
+ *  while the gate still binds a candidate scoring N units worse for N seconds.
+ *  The probability that the gate delays a block past the cadence floor is
+ *  e^-interval (~1e-13 at 30 s), against e^-2 (~13.5%) when the score is
+ *  multiplied by the whole interval. */
+static const int64_t POS_EXPRACE_GATE_SECONDS = 1;
+
+/** Whether the fine (score-second) exp-race time gate is the rule at `height`.
+ *  Requires the exp-race election itself: under the legacy election the slot is
+ *  a bounded rank and the whole-interval gate is correct. */
+bool PosExpRaceGateActive(const Consensus::Params& params, int height);
+
+/** Seconds after the parent block at which a leader holding sortition `slot`
+ *  may produce: the single definition of the leader time-gate, shared by
+ *  consensus (CheckPosStakeRules), the block assembler and the autonomous
+ *  producer, so the three can never disagree about when a slot opens. */
+int64_t PosSlotGateSeconds(const Consensus::Params& params, int height, uint64_t slot);
+
 /** Build the tagged coinbase OP_RETURN output script carrying the leader's
  *  VRF proof: OP_RETURN PUSH("SEQVRF" || proof). */
 CScript BuildPosVrfCommitment(const std::vector<unsigned char>& proof);

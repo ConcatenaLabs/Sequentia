@@ -3525,7 +3525,15 @@ static RPCHelpMan getposslot()
                 auto proof = VrfProve(key, Span<const unsigned char>(seed.begin(), 32));
                 if (!proof) continue;
                 if (!VrfVerify(pub, Span<const unsigned char>(seed.begin(), 32), *proof, beta)) continue;
-                slot = PosVrfSlot(beta, weight, total_weight);
+                // The election is fork-gated: report the slot the chain will
+                // actually gate on at this height, not the legacy one. Reporting
+                // PosVrfSlot unconditionally understated every draw on an
+                // exp-race chain (a large staker's legacy slot is always 0 or 1),
+                // which is exactly backwards for the operator diagnosing a
+                // producer that has not proposed yet.
+                slot = PosExpRaceActive(Params().GetConsensus(), next_height)
+                           ? PosVrfSlotExp(beta, weight, total_weight)
+                           : PosVrfSlot(beta, weight, total_weight);
                 committee = g_pos_public_committee ? public_committee.count(pub) > 0
                                                    : PosVrfIsCommitteeMember(beta, weight, total_weight);
             } else {
@@ -3538,7 +3546,8 @@ static RPCHelpMan getposslot()
             // The producer holds a cadence floor of one interval since the parent
             // (PosProducer::Step), so slots 0 and 1 both propose at the same time;
             // reporting the bare slot gate would promise a block that early.
-            const int64_t slot_opens = parent_time + (int64_t)slot * g_pos_slot_interval;
+            const int64_t slot_opens =
+                parent_time + PosSlotGateSeconds(Params().GetConsensus(), next_height, slot);
             const int64_t propose_at = std::max(slot_opens, parent_time + g_pos_slot_interval);
             UniValue entry(UniValue::VOBJ);
             entry.pushKV("pubkey", HexStr(pub));
@@ -3555,7 +3564,8 @@ static RPCHelpMan getposslot()
     }
     result.pushKV("best_slot", best_slot);
     result.pushKV("best_propose_at", best_slot < 0 ? 0
-        : std::max(parent_time + best_slot * g_pos_slot_interval, parent_time + g_pos_slot_interval));
+        : std::max(parent_time + PosSlotGateSeconds(Params().GetConsensus(), next_height, (uint64_t)best_slot),
+                   parent_time + g_pos_slot_interval));
     result.pushKV("keys", arr);
     return result;
 },

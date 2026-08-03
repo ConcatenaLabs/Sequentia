@@ -500,6 +500,26 @@ bool PosExpRaceActive(const Consensus::Params& params, int height)
     return params.pos_exprace_height > 0 && height >= params.pos_exprace_height;
 }
 
+bool PosExpRaceGateActive(const Consensus::Params& params, int height)
+{
+    return PosExpRaceActive(params, height) &&
+           params.pos_exprace_gate_height > 0 && height >= params.pos_exprace_gate_height;
+}
+
+int64_t PosSlotGateSeconds(const Consensus::Params& params, int height, uint64_t slot)
+{
+    // The exp-race score is a RATE, not a rank: the minimum over all stakers is
+    // Exponential(1), so scaling it by the whole slot interval leaves the chain
+    // silent for floor(min score) intervals — the throughput loss this gate
+    // height fixes. The legacy slot IS a rank (uniform in [0, W/w)) and keeps
+    // the whole-interval scale it was designed for.
+    const int64_t unit = PosExpRaceGateActive(params, height)
+                             ? POS_EXPRACE_GATE_SECONDS
+                             : (g_pos_slot_interval > 0 ? g_pos_slot_interval : 1);
+    // slot is capped at POS_VRF_MAX_SLOT (2^20), so this cannot overflow.
+    return (int64_t)std::min<uint64_t>(slot, POS_VRF_MAX_SLOT) * unit;
+}
+
 
 CScript BuildPosVrfCommitment(const std::vector<unsigned char>& proof)
 {
