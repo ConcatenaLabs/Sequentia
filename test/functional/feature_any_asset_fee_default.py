@@ -83,6 +83,8 @@ class AnyAssetFeeDefaultTest(BitcoinTestFramework):
         self.test_sendtoaddress()
         self.test_sendmany()
         self.test_fundrawtransaction()
+        self.test_subtract_fee_is_symmetric()
+        self.test_subtract_fee_impossible_combinations()
 
     def test_sendtoaddress(self):
         node = self.nodes[0]
@@ -144,6 +146,86 @@ class AnyAssetFeeDefaultTest(BitcoinTestFramework):
             node.sendmany, amounts={self.address: 1.0},
             output_assets={self.address: self.asset}, fee_asset=self.token)
 
+    def subtract_fee_case(self, asset):
+        """Send with the fee subtracted from the output, naming NO fee asset.
+
+        Returns what happened, so the issued-asset and policy-asset runs can be
+        compared against each other. `asset` doubles as the balance-map and
+        fee-map key: the policy asset is keyed by its label, an issued asset by
+        its hex, and both are accepted as an assetlabel.
+        """
+        node, recipient = self.nodes[0], self.nodes[1]
+        amount = Decimal("5.0")
+        before = recipient.getbalances()["mine"]["trusted"].get(asset, Decimal(0))
+
+        txid = self.send_and_confirm(lambda: node.sendtoaddress(
+            address=self.address, amount=amount, assetlabel=asset,
+            subtractfeefromamount=True))
+
+        tx = node.gettransaction(txid)
+        after = recipient.getbalances()["mine"]["trusted"].get(asset, Decimal(0))
+        fee = -tx["fee"][asset]  # gettransaction reports fees as negative
+        return {
+            "fee_assets": sorted(tx["fee"].keys()),
+            "fee_positive": fee > 0,
+            "received": after - before,
+            "received_is_amount_minus_fee": (after - before) == amount - fee,
+        }
+
+    def test_subtract_fee_is_symmetric(self):
+        # Subtracting the fee from an output means the fee comes OUT of that
+        # output, so it can only be paid in that output's asset -- arithmetic,
+        # not a preference the wallet guessed. No fee_asset_label is needed.
+        self.log.info("subtractfeefromamount: issued asset, no fee_asset_label")
+        issued = self.subtract_fee_case(self.asset)
+        assert_equal(issued["fee_assets"], [self.asset])
+        assert issued["fee_positive"]
+        assert issued["received_is_amount_minus_fee"]
+
+        # The same call against the policy asset. This always worked, but only
+        # because the fallback happened to coincide with the output's asset --
+        # a privilege the issued-asset case did not get.
+        self.log.info("subtractfeefromamount: policy asset, no fee_asset_label")
+        policy = self.subtract_fee_case("bitcoin")
+        assert_equal(policy["fee_assets"], ["bitcoin"])
+        assert policy["fee_positive"]
+        assert policy["received_is_amount_minus_fee"]
+
+        # The point of the whole change: identical behaviour, same code path, no
+        # asset special-cased. Every observation matches once the asset identity
+        # itself is set aside, including the fee actually charged.
+        self.log.info("subtractfeefromamount: the two are indistinguishable")
+        assert_equal({k: v for k, v in issued.items() if k != "fee_assets"},
+                     {k: v for k, v in policy.items() if k != "fee_assets"})
+
+    def test_subtract_fee_impossible_combinations(self):
+        node = self.nodes[0]
+
+        # Naming a fee asset that contradicts the subtract-from output is not a
+        # question about defaults, it is impossible. Refused in BOTH directions,
+        # so neither asset is the privileged one.
+        self.log.info("subtractfeefromamount: an explicit conflicting fee asset errors")
+        assert_raises_rpc_error(
+            -8, "necessarily paid in that output's asset",
+            node.sendtoaddress, address=self.address, amount=1.0,
+            assetlabel=self.asset, subtractfeefromamount=True,
+            fee_asset_label="bitcoin")
+        assert_raises_rpc_error(
+            -8, "necessarily paid in that output's asset",
+            node.sendtoaddress, address=self.address, amount=1.0,
+            assetlabel="bitcoin", subtractfeefromamount=True,
+            fee_asset_label=self.asset)
+
+        # A transaction pays its fee in exactly one asset, so it cannot be
+        # subtracted from outputs of two different ones.
+        self.log.info("subtractfeefromamount: spanning two assets errors")
+        other = self.nodes[1].getnewaddress()
+        assert_raises_rpc_error(
+            -8, "outputs of different assets",
+            node.sendmany, amounts={self.address: 1.0, other: 1.0},
+            output_assets={self.address: self.asset, other: "bitcoin"},
+            subtractfeefrom=[self.address, other])
+
     def test_fundrawtransaction(self):
         node = self.nodes[0]
 
@@ -163,6 +245,24 @@ class AnyAssetFeeDefaultTest(BitcoinTestFramework):
         raw = node.createrawtransaction(outputs=[{self.address: 1.0, "asset": self.asset}])
         funded = node.fundrawtransaction(raw, {"fee_asset": self.asset})
         assert_equal(funded["fee_asset"], self.asset)
+
+        # subtract_fee_from_outputs forces the fee asset here too, and does so
+        # for an issued asset exactly as it does for the policy asset.
+        self.log.info("fundrawtransaction: subtract_fee_from_outputs forces the output's asset")
+        raw = node.createrawtransaction(outputs=[{self.address: 1.0, "asset": self.asset}])
+        funded = node.fundrawtransaction(raw, {"subtract_fee_from_outputs": [0]})
+        assert_equal(funded["fee_asset"], self.asset)
+
+        raw = node.createrawtransaction(outputs=[{self.address: 1.0}])
+        funded = node.fundrawtransaction(raw, {"subtract_fee_from_outputs": [0]})
+        assert_equal(funded["fee_asset"], self.policy_asset)
+
+        self.log.info("fundrawtransaction: an explicit fee asset conflicting with it errors")
+        raw = node.createrawtransaction(outputs=[{self.address: 1.0, "asset": self.asset}])
+        assert_raises_rpc_error(
+            -8, "necessarily paid in that output's asset",
+            node.fundrawtransaction, raw,
+            {"subtract_fee_from_outputs": [0], "fee_asset": "bitcoin"})
 
 
 if __name__ == '__main__':

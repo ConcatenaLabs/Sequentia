@@ -1103,7 +1103,15 @@ class PSBTTest(BitcoinTestFramework):
         assert_equal(analysis['error'], 'PSBT is not valid. Input 0 spends unspendable output')
 
         self.log.info("PSBT with invalid values should have error message and Creator as next")
-        analysis = self.nodes[0].analyzepsbt("cHNldP8BAgQCAAAAAQMEAAAAAAEEAQEBBQEDAfsEAgAAAAABAUIBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAfQ42qBgAAAFgAUlQO3F/Y8ejrjUcQ4E4Ai8Uw1OvYBDiDwNNARYAJurafOkaMMB+gTCJkDS+c11HE0/e16Cxs9AQEPBAAAAAABEAT/////AAEDCAD5ApUAAAAAAQQWABQo3DTHwdFy0CCa+h6+bi7VJs3tcgf8BHBzZXQCICMPT11LfG+oRYBu5PZ3E0WeG2no5g/O4uSUDHoNXeGyAAEDCPztApUAAAAAAQQWABT3JOIBe4i+DS+MLX0QCoEG4IYk1Af8BHBzZXQCICMPT11LfG+oRYBu5PZ3E0WeG2no5g/O4uSUDHoNXeGyAAEDCBAnAAAAAAAAAQQAB/wEcHNldAIgIw9PXUt8b6hFgG7k9ncTRZ4baejmD87i5JQMeg1d4bIA")
+        # SEQUENTIA: MAX_MONEY is per-chain (see src/consensus/amount.h). The Sequentia
+        # chains -- including the elementsregtest params the functional tests run on --
+        # cap it at the 400,000,000 SEQ supply (4e16 atoms) rather than Bitcoin's
+        # 21,000,000 (2.1e15). Upstream's fixture carried a 22,000,000-coin input, which
+        # was out of range under the Bitcoin cap but is a perfectly ordinary amount under
+        # Sequentia's. The input's witness_utxo amount is therefore 0x7000000000000000
+        # atoms (~8.07e18): still a positive int64, but far above any chain's cap, so this
+        # keeps testing the out-of-range path instead of accidentally testing nothing.
+        analysis = self.nodes[0].analyzepsbt("cHNldP8BAgQCAAAAAQMEAAAAAAEEAQEBBQEDAfsEAgAAAAABAUIBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABcAAAAAAAAAAAFgAUlQO3F/Y8ejrjUcQ4E4Ai8Uw1OvYBDiDwNNARYAJurafOkaMMB+gTCJkDS+c11HE0/e16Cxs9AQEPBAAAAAABEAT/////AAEDCAD5ApUAAAAAAQQWABQo3DTHwdFy0CCa+h6+bi7VJs3tcgf8BHBzZXQCICMPT11LfG+oRYBu5PZ3E0WeG2no5g/O4uSUDHoNXeGyAAEDCPztApUAAAAAAQQWABT3JOIBe4i+DS+MLX0QCoEG4IYk1Af8BHBzZXQCICMPT11LfG+oRYBu5PZ3E0WeG2no5g/O4uSUDHoNXeGyAAEDCBAnAAAAAAAAAQQAB/wEcHNldAIgIw9PXUt8b6hFgG7k9ncTRZ4baejmD87i5JQMeg1d4bIA")
         assert_equal(analysis['next'], 'creator')
         assert_equal(analysis['error'], 'PSBT is not valid. Input 0 has invalid value')
 

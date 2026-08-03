@@ -186,16 +186,11 @@ class AnyAssetFeeTest(BitcoinTestFramework):
         node1_balance = self.nodes[1].getbalances()["mine"]
         assert len(node1_balance["trusted"]) == 2
 
-        # SEQUENTIA: the wallet back end never infers the fee asset from the
-        # transaction, so subtracting the fee from an asset output means naming
-        # that asset as the fee asset. Without it the send is refused (the fee
-        # would default to the policy asset and could not be subtracted).
         self.nodes[1].sendtoaddress(
             address=self.node0_address,
             amount=self.nodes[1].getbalance()[self.asset],
             assetlabel=self.asset,
-            subtractfeefromamount=True,
-            fee_asset_label=self.asset)
+            subtractfeefromamount=True)
 
         self.nodes[1].sendtoaddress(
             address=self.node0_address,

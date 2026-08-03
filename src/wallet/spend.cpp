@@ -998,15 +998,18 @@ static bool CreateTransactionInternal(
         map_recipients_sum[recipient.asset] += recipient.nAmount;
 
         if (recipient.fSubtractFeeFromAmount) {
-            // SEQUENTIA: subtracting the fee from an output only means anything
-            // when the fee is paid in that output's own asset. The check exists
-            // further down too, but by then the code has already indexed
-            // map_change_and_fee with .at(fee asset) and thrown a bare
-            // "map::at" -- an internal error where the caller needs to be told
-            // to name a fee asset. Refuse here, before any of that.
+            // SEQUENTIA: the fee comes OUT of this output, so it can only be
+            // paid in this output's asset. The RPC layer derives that
+            // constraint for callers (ResolveFeeAsset in rpc/spend.cpp), so
+            // reaching here means a caller built the CCoinControl itself and
+            // asked for a genuinely impossible combination -- or asked to
+            // subtract from outputs of two different assets. This guard is the
+            // backstop for those. Without it the code runs on to
+            // map_change_and_fee.at(fee asset) and surfaces a bare "map::at",
+            // an internal error where the caller needs to be told what is wrong.
             if (recipient.asset != coin_selection_params.m_fee_asset) {
-                error = strprintf(_("Cannot subtract the fee from an output of a different asset than the fee asset (fee asset: %s, output asset: %s). Choose that asset as the fee asset."),
-                                  coin_selection_params.m_fee_asset.GetHex(), recipient.asset.GetHex());
+                error = strprintf(_("Cannot subtract the fee from an output of asset %s while paying the fee in %s: the fee is taken out of that output, so it is necessarily paid in that output's asset."),
+                                  recipient.asset.GetHex(), coin_selection_params.m_fee_asset.GetHex());
                 return false;
             }
             outputs_to_subtract_fee_from++;

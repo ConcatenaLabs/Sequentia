@@ -56,9 +56,7 @@ class AnyAssetFeeScenariosTest(BitcoinTestFramework):
         self.nodes[1].setfeeexchangerates(new_rates)
         assert self.nodes[1].getfeeexchangerates() == new_rates
 
-        # SEQUENTIA: subtracting the fee from an asset output requires naming that
-        # asset as the fee asset -- the back end infers nothing from the tx.
-        self.nodes[0].sendtoaddress(address=self.node0_address, amount=100.0, assetlabel=self.asset1, subtractfeefromamount=True, fee_asset_label=self.asset1)
+        self.nodes[0].sendtoaddress(address=self.node0_address, amount=100.0, assetlabel=self.asset1, subtractfeefromamount=True)
 
         self.nodes[0].generatetoaddress(1, self.node0_address, invalid_call=False)  # confirm the tx
 
@@ -89,8 +87,8 @@ class AnyAssetFeeScenariosTest(BitcoinTestFramework):
         assert self.nodes[1].getfeeexchangerates() != new_rates
 
         asset1amount = self.nodes[0].getbalance()[self.asset1]
-        self.nodes[0].sendtoaddress(address=self.node0_address, amount=asset1amount, assetlabel=self.asset1, subtractfeefromamount=True, fee_asset_label=self.asset1)
-        self.nodes[0].sendtoaddress(address=self.node0_address, amount=10.0, assetlabel=self.asset2, subtractfeefromamount=True, fee_asset_label=self.asset2)
+        self.nodes[0].sendtoaddress(address=self.node0_address, amount=asset1amount, assetlabel=self.asset1, subtractfeefromamount=True)
+        self.nodes[0].sendtoaddress(address=self.node0_address, amount=10.0, assetlabel=self.asset2, subtractfeefromamount=True)
 
         self.nodes[0].generatetoaddress(1, self.node0_address, invalid_call=False)
 
