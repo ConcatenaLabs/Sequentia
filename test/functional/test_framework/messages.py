@@ -51,7 +51,13 @@ BIP125_SEQUENCE_NUMBER = 0xfffffffd  # Sequence number that is rbf-opt-in (BIP 1
 SEQUENCE_FINAL = 0xffffffff  # Sequence number that disables nLockTime if set for every input of a tx
 
 MAX_PROTOCOL_MESSAGE_LENGTH = 16 * 1000 * 1000  # Maximum length of incoming protocol messages
-MAX_HEADERS_RESULTS = 2000  # Number of headers sent in one getheaders result
+# SEQUENTIA: mirrors MAX_HEADERS_RESULTS in src/net_processing.cpp, which this
+# network caps at 512 rather than Bitcoin's 2000 so that a batch of PoS headers --
+# each carrying its committee signatures, and so far larger than a Bitcoin header --
+# still fits the 16MB wire limit. A peer that sends more is Misbehaving, and the
+# node stops responding to it: left at 2000, the framework oversized its own headers
+# messages and the test then waited out its timeout for a sync that could not happen.
+MAX_HEADERS_RESULTS = 512  # Number of headers sent in one getheaders result
 MAX_INV_SIZE = 50000  # Maximum number of entries in an 'inv' protocol message
 
 NODE_NETWORK = (1 << 0)
