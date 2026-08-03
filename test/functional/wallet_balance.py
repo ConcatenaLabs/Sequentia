@@ -11,6 +11,7 @@ from test_framework.blocktools import COINBASE_MATURITY
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     amount_of,
+    assert_amounts,
     assert_equal,
     assert_raises_rpc_error,
     BITCOIN_ASSET,
@@ -158,10 +159,12 @@ class WalletTest(BitcoinTestFramework):
 
         def test_balances(*, fee_node_1=0):
             # getbalances
-            # SEQUENTIA: a zero balance is reported as an empty map rather than a
-            # zero-amount policy-asset row (see amount_of() in test_framework.util),
-            # so the categories that hold nothing are {}. These still assert the
-            # balance exactly: {} says "holds nothing", the same claim as 0E-8 did.
+            # SEQUENTIA: whether a category that holds nothing reports {} or a
+            # zero-amount policy-asset row depends on the chain's fee market
+            # (AmountMapToUniv, src/rpc/util.cpp), which is not what this test is
+            # about. assert_amounts() compares the AMOUNTS, so every balance below
+            # is still pinned exactly and no row is demanded that a wallet holding
+            # nothing has no reason to report.
             expected_balances_0 = {'mine':      {'immature':          {},
                                                  'trusted':           {'bitcoin': Decimal('9.99')},  # change from node 0's send
                                                  'untrusted_pending': {'bitcoin': Decimal('60.0')}},
@@ -173,8 +176,8 @@ class WalletTest(BitcoinTestFramework):
                                                  'untrusted_pending': {'bitcoin': Decimal('30.0') - fee_node_1}}}  # Doesn't include output of node 0's send since it was spent
             if self.options.descriptors:
                 del expected_balances_0["watchonly"]
-            assert_equal(self.nodes[0].getbalances(), expected_balances_0)
-            assert_equal(self.nodes[1].getbalances(), expected_balances_1)
+            assert_amounts(self.nodes[0].getbalances(), expected_balances_0)
+            assert_amounts(self.nodes[1].getbalances(), expected_balances_1)
             # getbalance without any arguments includes unconfirmed transactions, but not untrusted transactions
             assert_equal(amount_of(self.nodes[0].getbalance()), Decimal('9.99'))  # change from node 0's send
             assert_equal(amount_of(self.nodes[1].getbalance()), Decimal('0'))  # node 1's send had an unsafe input

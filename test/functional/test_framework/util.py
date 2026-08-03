@@ -118,6 +118,34 @@ def assert_holds_nothing(balance_map):
         raise AssertionError("expected no holdings of any asset, got %s" % str(held))
 
 
+def assert_amounts(actual, expected):
+    """Compare balance maps by AMOUNT rather than by which rows are present.
+
+    The nested-structure form of amount_of(): `actual` and `expected` may each be
+    a balance map ({asset: amount}) or a map of category names to balance maps,
+    as getbalances() returns. Categories must match exactly; within a balance map
+    every asset named on either side must hold the same amount, and an asset with
+    no row holds zero. So {} and {"bitcoin": 0} compare equal, which is the point:
+    whether the policy asset gets a synthesised zero row depends on whether the
+    open fee market is on for the chain (AmountMapToUniv, src/rpc/util.cpp), and
+    that is not what these tests are about. The amounts themselves are still
+    pinned exactly.
+    """
+    def is_nested(m):
+        return bool(m) and all(isinstance(v, dict) for v in m.values())
+
+    if is_nested(actual) or is_nested(expected):
+        assert_equal(sorted(actual.keys()), sorted(expected.keys()))
+        for category in expected:
+            assert_amounts(actual[category], expected[category])
+        return
+    for asset in set(actual) | set(expected):
+        if amount_of(actual, asset) != amount_of(expected, asset):
+            raise AssertionError("balance of %s: not(%s == %s) in %s vs %s" % (
+                asset, amount_of(actual, asset), amount_of(expected, asset),
+                str(actual), str(expected)))
+
+
 def assert_greater_than(thing1, thing2):
     if thing1 <= thing2:
         raise AssertionError("%s <= %s" % (str(thing1), str(thing2)))

@@ -239,6 +239,12 @@ public:
         g_signed_blocks = false;
         g_con_elementsmode = false;
         g_con_blockheightinheader = false;
+        // SEQUENTIA: the open fee market (fees payable in ANY accepted asset) is
+        // a Sequentia-chain consensus rule. Every chain must state its OWN value
+        // here (as MAX_MONEY does): the params constructors run for help-text
+        // generation too, so a chain that stays silent inherits whatever the last
+        // constructed chain left in the global.
+        g_con_any_asset_fees = false;
         g_con_bitcoin_anchor = false;
         g_con_pos = false;
         MAX_MONEY = 21000000 * COIN;   // SEQUENTIA: per-chain money cap
@@ -1127,6 +1133,12 @@ public:
         g_signed_blocks = false; // lol
         g_con_elementsmode = false;
         g_con_blockheightinheader = false;
+        // SEQUENTIA: the open fee market (fees payable in ANY accepted asset) is
+        // a Sequentia-chain consensus rule. Every chain must state its OWN value
+        // here (as MAX_MONEY does): the params constructors run for help-text
+        // generation too, so a chain that stays silent inherits whatever the last
+        // constructed chain left in the global.
+        g_con_any_asset_fees = false;
         g_con_bitcoin_anchor = false;
         g_con_pos = false;
         MAX_MONEY = 21000000 * COIN;   // SEQUENTIA: per-chain money cap
@@ -1247,6 +1259,12 @@ public:
         g_con_elementsmode = false;
         consensus.elements_mode = g_con_elementsmode;
         g_con_blockheightinheader = false;
+        // SEQUENTIA: the open fee market (fees payable in ANY accepted asset) is
+        // a Sequentia-chain consensus rule. Every chain must state its OWN value
+        // here (as MAX_MONEY does): the params constructors run for help-text
+        // generation too, so a chain that stays silent inherits whatever the last
+        // constructed chain left in the global.
+        g_con_any_asset_fees = false;
         g_con_bitcoin_anchor = false;
         g_con_pos = false;
         MAX_MONEY = 21000000 * COIN;   // SEQUENTIA: per-chain money cap
@@ -1649,6 +1667,10 @@ protected:
         g_con_blockheightinheader = args.GetBoolArg("-con_blockheightinheader", true);
         // SEQUENTIA: opt-in Bitcoin anchoring for custom chains
         g_con_bitcoin_anchor = args.GetBoolArg("-con_bitcoin_anchor", false);
+        // SEQUENTIA: opt-in open fee market for custom chains. The Sequentia
+        // chains bake it on; a custom chain gets the documented default (off)
+        // unless the operator asks for it.
+        g_con_any_asset_fees = args.GetBoolArg("-con_any_asset_fees", false);
         // SEQUENTIA: whether wallets give blinded addresses by default
         // (true = the historical Liquid/Elements opt-out CT behavior;
         // Sequentia chains use false, making CT opt-in).
@@ -1931,6 +1953,12 @@ public:
         g_signed_blocks = true;
 
         g_con_blockheightinheader = true;
+        // SEQUENTIA: the open fee market (fees payable in ANY accepted asset) is
+        // a Sequentia-chain consensus rule. Every chain must state its OWN value
+        // here (as MAX_MONEY does): the params constructors run for help-text
+        // generation too, so a chain that stays silent inherits whatever the last
+        // constructed chain left in the global.
+        g_con_any_asset_fees = false;
         g_con_bitcoin_anchor = false;
         g_con_pos = false;
         MAX_MONEY = 21000000 * COIN;   // SEQUENTIA: per-chain money cap

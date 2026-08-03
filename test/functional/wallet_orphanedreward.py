@@ -7,6 +7,7 @@
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     amount_of,
+    assert_amounts,
     assert_equal,
 )
 
@@ -42,7 +43,11 @@ class OrphanedBlockRewardTest(BitcoinTestFramework):
         self.generate(self.nodes[0], 152)
         # Without the following abandontransaction call, the coins are
         # not considered available yet.
-        assert_equal(self.nodes[1].getbalances()["mine"], {
+        # Compared by AMOUNT (assert_amounts): whether a category holding nothing
+        # renders as {} or as a zero-amount policy-asset row depends on the chain's
+        # fee market (AmountMapToUniv), not on anything this test is about. The
+        # claim -- node 1 can see none of its coins yet -- is unchanged.
+        assert_amounts(self.nodes[1].getbalances()["mine"], {
           "trusted": {},
           "untrusted_pending": {},
           "immature": {},
@@ -51,7 +56,7 @@ class OrphanedBlockRewardTest(BitcoinTestFramework):
         # lines succeed, and probably should not be needed; see
         # https://github.com/bitcoin/bitcoin/issues/14148.
         self.nodes[1].abandontransaction(txid)
-        assert_equal(self.nodes[1].getbalances()["mine"], {
+        assert_amounts(self.nodes[1].getbalances()["mine"], {
           "trusted": { 'bitcoin' : 10 },
           "untrusted_pending": {},
           "immature": {},

@@ -9,8 +9,8 @@ from test_framework.blocktools import COINBASE_MATURITY
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     amount_of,
-    assert_holds_nothing,
     assert_array_result,
+    assert_holds_nothing,
     assert_equal,
     assert_raises_rpc_error,
 )
@@ -62,7 +62,16 @@ class ReceivedByTest(BitcoinTestFramework):
         empty_addr = self.nodes[1].getnewaddress()
         assert_array_result(self.nodes[1].listreceivedbyaddress(0, True),
                             {"address": empty_addr},
-                            {"address": empty_addr, "label": "", "amount": {}, "confirmations": 0, "txids": []})
+                            {"address": empty_addr, "label": "", "confirmations": 0, "txids": []})
+        # The amount is checked separately, by amount rather than by row presence:
+        # whether "received nothing" renders as {} or as a zero-amount policy-asset
+        # row depends on the chain's fee market (AmountMapToUniv), which is not what
+        # this test is about. assert_holds_nothing() still asserts it received
+        # nothing at all, in any asset.
+        empty_entries = [e for e in self.nodes[1].listreceivedbyaddress(0, True)
+                         if e["address"] == empty_addr]
+        assert_equal(len(empty_entries), 1)
+        assert_holds_nothing(empty_entries[0]["amount"])
 
         # Test Address filtering
         # Only on addr
