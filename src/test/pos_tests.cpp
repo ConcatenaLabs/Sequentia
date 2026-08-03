@@ -18,7 +18,10 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <consensus/params.h>
+
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <vector>
 
@@ -1434,6 +1437,387 @@ BOOST_AUTO_TEST_CASE(anchor_uncontested_height)
 
     // Negative window is clamped to 0 (never widens acceptance oddly).
     BOOST_CHECK_EQUAL(AnchorUncontestedHeight(1000, -5, Br{{1000, 4}}), 996);
+}
+
+// --- Does the score-second time gate preserve stake proportionality? ----------
+//
+// The exp-race SCORE is stake-proportional by construction (min of exponentials).
+// The time GATE decides who is allowed to have a proposal on the table when the
+// round is decided, and PosProducer::BackedForRound (src/pos_producer.cpp:975-981)
+// then orders that field by (1) FRESHEST ANCHOR, (2) LOWEST SCORE. So the gate
+// scale changes the SIZE of the field the anchor-first key is applied to:
+//
+//   whole-interval gate: a staker proposes at max(floor(score)*interval, interval)
+//                        seconds after the parent, so only scores below 2 share
+//                        the earliest moment -- P(score_i < 2) = 1 - e^(-2 w/W).
+//   score-second gate:   a staker proposes at max(floor(score), interval), so
+//                        every score below `interval` shares it -- P = 1 - e^(-30 w/W).
+//
+// These tests run the REAL fixed-point score, slot and gate functions over
+// 200,000 elections and measure each staker's realised share against its stake
+// share with a chi-square goodness-of-fit test, under both gate scales and under
+// three anchor-agreement regimes.
+namespace {
+
+//! Regularized upper incomplete gamma Q(a,x): series below the crossover,
+//! continued fraction above (Numerical Recipes 6.2). Only used to turn a
+//! chi-square statistic into a p-value.
+double PosTestGammaQ(double a, double x)
+{
+    if (x <= 0.0) return 1.0;
+    const double gln = std::lgamma(a);
+    if (x < a + 1.0) {
+        double ap = a, sum = 1.0 / a, del = sum;
+        for (int n = 0; n < 1000; ++n) {
+            ap += 1.0;
+            del *= x / ap;
+            sum += del;
+            if (std::fabs(del) < std::fabs(sum) * 1e-15) break;
+        }
+        return 1.0 - sum * std::exp(-x + a * std::log(x) - gln);
+    }
+    const double FPMIN = 1e-300;
+    double b = x + 1.0 - a, c = 1.0 / FPMIN, d = 1.0 / b, h = d;
+    for (int i = 1; i <= 1000; ++i) {
+        const double an = -i * (i - a);
+        b += 2.0;
+        d = an * d + b; if (std::fabs(d) < FPMIN) d = FPMIN;
+        c = b + an / c;  if (std::fabs(c) < FPMIN) c = FPMIN;
+        d = 1.0 / d;
+        const double del = d * c;
+        h *= del;
+        if (std::fabs(del - 1.0) < 1e-15) break;
+    }
+    return std::exp(-x + a * std::log(x) - gln) * h;
+}
+
+//! P(chi-square with `df` degrees of freedom > chi2).
+double PosTestChiSqP(double chi2, int df) { return PosTestGammaQ(df / 2.0, chi2 / 2.0); }
+
+struct PosRaceStats {
+    std::vector<long> wins;
+    long rounds{0};
+    long late{0};           //!< rounds whose earliest proposal is past the cadence floor
+    long anchor_flips{0};   //!< rounds won by a candidate that was NOT the lowest score
+    double mean_field{0.0}; //!< mean number of candidates sharing the deciding moment
+};
+
+//! One exponential race per round, modelling PosProducer::Step's proposal time
+//! (max(parent + PosSlotGateSeconds, parent + cadence floor)) and
+//! BackedForRound's ordering key (anchor height desc, then fine score asc).
+//! `set_anchors(round, anchors)` writes each staker's parent-chain anchor height
+//! for that round; equal values mean the committee agrees on Bitcoin's tip.
+PosRaceStats PosRunExpRace(const std::vector<uint64_t>& w,
+                           bool fine_gate,
+                           int64_t interval,
+                           int64_t window_s,
+                           const std::vector<bool>& offline,
+                           const std::function<void(int, std::vector<int>&)>& set_anchors,
+                           int rounds, uint32_t salt)
+{
+    Consensus::Params params{};
+    params.pos_exprace_height = 1;                       // exp-race election throughout
+    params.pos_exprace_gate_height = fine_gate ? 1 : 0;  // 0 == the pre-fix whole-interval gate
+    const int64_t saved_interval = g_pos_slot_interval;
+    g_pos_slot_interval = interval;
+
+    uint64_t total = 0;
+    for (uint64_t x : w) total += x;
+    PosRaceStats st;
+    st.wins.assign(w.size(), 0);
+    st.rounds = rounds;
+    std::vector<int> anchors(w.size(), 0);
+    std::vector<arith_uint256> sc(w.size());
+    std::vector<int64_t> ready(w.size());
+    uint32_t ctr = salt;
+    long field_total = 0;
+
+    for (int r = 0; r < rounds; ++r) {
+        int64_t first = std::numeric_limits<int64_t>::max();
+        for (size_t i = 0; i < w.size(); ++i) {
+            const uint256 beta = ComputePosSeed(uint256(), ctr++);
+            sc[i] = PosVrfScoreExp(beta, w[i], total);
+            const uint64_t slot = PosVrfSlotExp(beta, w[i], total);
+            ready[i] = std::max<int64_t>(PosSlotGateSeconds(params, 1, slot), interval);
+            if (!offline[i]) first = std::min(first, ready[i]);
+        }
+        std::fill(anchors.begin(), anchors.end(), 0);
+        if (set_anchors) set_anchors(r, anchors);
+        if (first > interval) st.late++;
+
+        int win = -1, low_score = -1, field = 0;
+        for (size_t i = 0; i < w.size(); ++i) {
+            if (offline[i]) continue;
+            if (ready[i] > first + window_s) continue;   // proposal arrives after the round is decided
+            field++;
+            if (low_score < 0 || sc[i] < sc[low_score]) low_score = (int)i;
+            if (win < 0 || anchors[i] > anchors[win] ||
+                (anchors[i] == anchors[win] && sc[i] < sc[win])) win = (int)i;
+        }
+        field_total += field;
+        st.wins[win]++;
+        if (win != low_score) st.anchor_flips++;
+    }
+    st.mean_field = double(field_total) / double(rounds);
+    g_pos_slot_interval = saved_interval;
+    return st;
+}
+
+//! Chi-square goodness of fit of realised wins against stake shares.
+double PosRaceChiSq(const PosRaceStats& st, const std::vector<uint64_t>& w)
+{
+    uint64_t total = 0;
+    for (uint64_t x : w) total += x;
+    double chi2 = 0.0;
+    for (size_t i = 0; i < w.size(); ++i) {
+        const double e = double(st.rounds) * double(w[i]) / double(total);
+        const double d = double(st.wins[i]) - e;
+        chi2 += d * d / e;
+    }
+    return chi2;
+}
+
+std::string PosRaceShares(const PosRaceStats& st)
+{
+    std::string s;
+    for (size_t i = 0; i < st.wins.size(); ++i) {
+        s += strprintf("%s%.3f%%", i ? " / " : "", 100.0 * double(st.wins[i]) / double(st.rounds));
+    }
+    return s;
+}
+
+} // namespace
+
+// The gate scale is a pure time shift: it never reorders candidates, and a
+// candidate scoring N units worse still waits N more seconds (the property the
+// round-robin fallback needs when the best producer is absent).
+BOOST_AUTO_TEST_CASE(pos_exprace_gate_is_monotone_in_score)
+{
+    Consensus::Params fine{};
+    fine.pos_exprace_height = 1;
+    fine.pos_exprace_gate_height = 1;
+    Consensus::Params whole{};
+    whole.pos_exprace_height = 1;
+    whole.pos_exprace_gate_height = 0;
+
+    const int64_t saved = g_pos_slot_interval;
+    g_pos_slot_interval = 30;
+    for (uint64_t slot = 0; slot < 100; ++slot) {
+        BOOST_CHECK_EQUAL(PosSlotGateSeconds(fine, 1, slot), (int64_t)slot);
+        BOOST_CHECK_EQUAL(PosSlotGateSeconds(whole, 1, slot), (int64_t)slot * 30);
+        // Strictly increasing in the slot: ordering by gate == ordering by slot.
+        if (slot > 0) {
+            BOOST_CHECK(PosSlotGateSeconds(fine, 1, slot) > PosSlotGateSeconds(fine, 1, slot - 1));
+            BOOST_CHECK(PosSlotGateSeconds(whole, 1, slot) > PosSlotGateSeconds(whole, 1, slot - 1));
+        }
+        // N units worse == N more seconds under the fine gate.
+        BOOST_CHECK_EQUAL(PosSlotGateSeconds(fine, 1, slot + 7) - PosSlotGateSeconds(fine, 1, slot), 7);
+    }
+    // The cap still binds, so the gate cannot overflow.
+    BOOST_CHECK_EQUAL(PosSlotGateSeconds(fine, 1, POS_VRF_MAX_SLOT + 12345), (int64_t)POS_VRF_MAX_SLOT);
+    // Below the gate height nothing changes for the LEGACY election either.
+    Consensus::Params legacy{};
+    legacy.pos_exprace_height = 0;
+    legacy.pos_exprace_gate_height = 1;   // meaningless without the exp-race election
+    BOOST_CHECK_EQUAL(PosSlotGateSeconds(legacy, 1, 3), 90);
+    g_pos_slot_interval = saved;
+}
+
+// Stake proportionality under both gate scales, with the committee agreeing on
+// Bitcoin's tip (the common case: every honest node anchors to the same parent
+// chain block, so BackedForRound falls through to the lowest score).
+BOOST_AUTO_TEST_CASE(pos_exprace_gate_preserves_proportionality)
+{
+    const std::vector<uint64_t> w{50, 30, 15, 5};   // 50% / 30% / 15% / 5%
+    const std::vector<bool> up(w.size(), false);
+    const int N = 200000;
+
+    // n = 200,000: the 5% staker's expected count is 10,000 with sd 97.5, so a
+    // relative skew above ~3% in the smallest staker would be caught at p<0.001.
+    PosRaceStats fine  = PosRunExpRace(w, /*fine_gate=*/true,  30, 0, up, nullptr, N, 90001);
+    PosRaceStats whole = PosRunExpRace(w, /*fine_gate=*/false, 30, 0, up, nullptr, N, 90001);
+
+    const double p_fine  = PosTestChiSqP(PosRaceChiSq(fine, w),  (int)w.size() - 1);
+    const double p_whole = PosTestChiSqP(PosRaceChiSq(whole, w), (int)w.size() - 1);
+    BOOST_TEST_MESSAGE("exp-race gate, agreed anchors, n=" << N);
+    BOOST_TEST_MESSAGE("  score-second gate (the fix): " << PosRaceShares(fine)
+                       << "  chi2=" << PosRaceChiSq(fine, w) << " p=" << p_fine
+                       << "  mean field " << fine.mean_field << "/4");
+    BOOST_TEST_MESSAGE("  whole-interval gate (pre-fix): " << PosRaceShares(whole)
+                       << "  chi2=" << PosRaceChiSq(whole, w) << " p=" << p_whole
+                       << "  mean field " << whole.mean_field << "/4");
+
+    // Both scales are stake-proportional, and identically so. The reason is
+    // structural, not statistical: the slot is floor(score), so the globally
+    // lowest-scoring staker also holds the lowest slot, hence the earliest
+    // proposal time under ANY gate monotone in the slot. It is therefore always
+    // inside the deciding field, and the field's lowest score is always it.
+    // The gate scale changes WHEN the winner may publish, never WHO it is.
+    BOOST_CHECK(p_fine > 0.001);
+    BOOST_CHECK(p_whole > 0.001);
+    // With agreed anchors the anchor-first key never fires, under either scale.
+    BOOST_CHECK_EQUAL(fine.anchor_flips, 0);
+    BOOST_CHECK_EQUAL(whole.anchor_flips, 0);
+    // ... but the fix does widen the field the anchor key would be applied to.
+    BOOST_CHECK(fine.mean_field > whole.mean_field + 0.5);
+
+    // Throughput, the defect the fix targets. The gate binds past the cadence
+    // floor when the NETWORK MINIMUM score, which is Exponential(1), exceeds
+    // what one interval buys. The slot is floor(score), so the exact laws are:
+    //   whole-interval gate: floor(score)*30 > 30  <=>  score >= 2  ->  e^-2
+    //   score-second gate:   floor(score)*1  > 30  <=>  score >= 31 ->  e^-31
+    // (the fix is quoted as ~e^-interval; the floor makes it e^-(interval+1),
+    // an immaterial difference at 30 s: 3.4e-14 against 9.4e-14.)
+    const double late_whole = double(whole.late) / N;
+    BOOST_TEST_MESSAGE("  blocks past the cadence floor: whole-interval "
+                       << (100 * late_whole) << "% (e^-2 = " << (100 * std::exp(-2.0))
+                       << "%), score-second " << fine.late << "/" << N
+                       << " (e^-31 = " << std::exp(-31.0) << ")");
+    BOOST_CHECK(std::fabs(late_whole - std::exp(-2.0)) < 0.005);
+    BOOST_CHECK_EQUAL(fine.late, 0);          // e^-31 ~ 3e-14: never in 2e5 rounds
+
+    // The e^-(interval+1) law itself, verified where it is measurable: at a 5 s
+    // interval the score-second gate binds with probability e^-6.
+    PosRaceStats fine5 = PosRunExpRace(w, /*fine_gate=*/true, 5, 0, up, nullptr, N, 90001);
+    const double late5 = double(fine5.late) / N;
+    BOOST_TEST_MESSAGE("  score-second gate at a 5 s interval: " << (100 * late5)
+                       << "% late (e^-6 = " << (100 * std::exp(-6.0)) << "%)");
+    BOOST_CHECK(std::fabs(late5 - std::exp(-6.0)) < 0.002);
+
+    // Fallback ordering when the best producer is absent: with the 50% staker
+    // offline the remaining three share blocks in their renormalised stake
+    // ratio (30/15/5 -> 60% / 30% / 10%) under BOTH gates.
+    std::vector<bool> down{true, false, false, false};
+    PosRaceStats fine_off  = PosRunExpRace(w, true,  30, 0, down, nullptr, N, 55001);
+    PosRaceStats whole_off = PosRunExpRace(w, false, 30, 0, down, nullptr, N, 55001);
+    const std::vector<uint64_t> w_off{30, 15, 5};
+    for (const auto& [name, st] : {std::pair<const char*, const PosRaceStats*>{"score-second", &fine_off},
+                                   std::pair<const char*, const PosRaceStats*>{"whole-interval", &whole_off}}) {
+        BOOST_CHECK_EQUAL(st->wins[0], 0);      // the offline staker never produces
+        PosRaceStats sub;
+        sub.rounds = st->rounds;
+        sub.wins.assign(st->wins.begin() + 1, st->wins.end());
+        const double p = PosTestChiSqP(PosRaceChiSq(sub, w_off), (int)w_off.size() - 1);
+        BOOST_TEST_MESSAGE("  best staker offline, " << name << " gate: "
+                           << PosRaceShares(sub) << " p=" << p);
+        BOOST_CHECK(p > 0.001);
+    }
+}
+
+// Concern (b): the anchor-first ordering key. BackedForRound prefers a FRESHER
+// Bitcoin anchor over a lower score, so when the committee's views of Bitcoin's
+// tip differ, a worse-scoring node can win. The score-second gate puts far more
+// candidates in the deciding field, so it exposes that key far more often. This
+// measures how much.
+BOOST_AUTO_TEST_CASE(pos_exprace_gate_anchor_divergence_skew)
+{
+    const std::vector<uint64_t> w{50, 30, 15, 5};
+    const std::vector<bool> up(w.size(), false);
+    const int N = 200000;
+
+    // (i) One node is PERSISTENTLY the freshest -- the pathological case: its
+    // parent-chain daemon is better connected (or it withholds until it has the
+    // newest Bitcoin header). Give it to the SMALLEST staker, 5%.
+    auto persistent = [](int, std::vector<int>& a) { a[3] = 1; };
+    PosRaceStats fine_p  = PosRunExpRace(w, true,  30, 0, up, persistent, N, 77001);
+    PosRaceStats whole_p = PosRunExpRace(w, false, 30, 0, up, persistent, N, 77001);
+    const double s_fine_p  = double(fine_p.wins[3]) / N;
+    const double s_whole_p = double(whole_p.wins[3]) / N;
+    BOOST_TEST_MESSAGE("anchor divergence, n=" << N);
+    BOOST_TEST_MESSAGE("  PERSISTENTLY freshest 5% staker: score-second gate takes "
+                       << (100 * s_fine_p) << "% of blocks (stake 5%), whole-interval gate "
+                       << (100 * s_whole_p) << "%");
+    BOOST_TEST_MESSAGE("    full shares, score-second: " << PosRaceShares(fine_p));
+    BOOST_TEST_MESSAGE("    full shares, whole-interval: " << PosRaceShares(whole_p));
+
+    // The theory: a persistently-freshest staker wins every round it gets a
+    // proposal into, i.e. P(its slot is inside the deciding field).
+    //   score-second gate:   P(floor(score) <= 30) = 1 - e^(-31*0.05) = 78.8%
+    //   whole-interval gate: P(floor(score) <= 1)  = 1 - e^(-2*0.05)  =  9.5%
+    //     (plus the rounds where EVERY score is >= 2 and it ties the minimum
+    //      slot, which is why the measured value runs ~1 point above 9.5%)
+    BOOST_CHECK(std::fabs(s_fine_p - (1.0 - std::exp(-31.0 * 0.05))) < 0.005);
+    BOOST_CHECK(s_whole_p > 0.09 && s_whole_p < 0.12);
+    // So the fix multiplies a persistent anchor-freshness advantage by ~7x: an
+    // upper bound, not a prediction -- see the transient cases below for what a
+    // real committee would experience.
+    BOOST_CHECK(s_fine_p > 6.0 * s_whole_p);
+
+    // (ii) TRANSIENT divergence -- what a real committee actually sees. Bitcoin
+    // blocks arrive every ~600 s against a 30 s cadence, and a header propagates
+    // in a second or two, so only the rounds whose proposal moment falls inside
+    // that propagation window see the committee disagree about Bitcoin's tip.
+    // Model: with probability `rate` a UNIFORMLY RANDOM staker is one anchor
+    // ahead of the rest. Uniform-at-random means no staker is favoured a priori
+    // -- yet the shares still move, because the bonus is per IDENTITY, not per
+    // stake: whoever holds the fresh anchor wins outright whatever its score.
+    auto transient_at = [](unsigned rate_inv) {
+        return [rate_inv](int r, std::vector<int>& a) {
+            const uint256 h = ComputePosSeed(uint256(), 0x40000000u + (uint32_t)r);
+            const uint32_t u = ((uint32_t)h.data()[0] << 8) | (uint32_t)h.data()[1];
+            if ((u % rate_inv) == 0) a[h.data()[2] % a.size()] = 1;
+        };
+    };
+    struct Case { const char* name; unsigned rate_inv; };
+    for (const Case& c : {Case{"1 round in 20 (pessimistic)", 20u},
+                          Case{"1 round in 300 (~2 s of Bitcoin propagation per 600 s block)", 300u}}) {
+        PosRaceStats ft = PosRunExpRace(w, true,  30, 0, up, transient_at(c.rate_inv), N, 33001);
+        PosRaceStats wt = PosRunExpRace(w, false, 30, 0, up, transient_at(c.rate_inv), N, 33001);
+        const double p_ft = PosTestChiSqP(PosRaceChiSq(ft, w), (int)w.size() - 1);
+        const double p_wt = PosTestChiSqP(PosRaceChiSq(wt, w), (int)w.size() - 1);
+        BOOST_TEST_MESSAGE("  TRANSIENT divergence, " << c.name << ":");
+        BOOST_TEST_MESSAGE("    score-second:   " << PosRaceShares(ft) << " p=" << p_ft
+                           << ", anchor overrode the score in "
+                           << (100.0 * ft.anchor_flips / N) << "% of rounds");
+        BOOST_TEST_MESSAGE("    whole-interval: " << PosRaceShares(wt) << " p=" << p_wt
+                           << ", anchor overrode the score in "
+                           << (100.0 * wt.anchor_flips / N) << "% of rounds");
+        // The anchor key fires several times more often under the fix, because
+        // the deciding field is ~3.8 candidates instead of ~1.6.
+        BOOST_CHECK(ft.anchor_flips > 3 * wt.anchor_flips);
+        // Direction of the skew: the flat per-identity bonus costs the largest
+        // staker and pays the smallest one.
+        const double d_big   = double(ft.wins[0]) / N - 0.50;
+        const double d_small = double(ft.wins[3]) / N - 0.05;
+        BOOST_TEST_MESSAGE("    score-second deviation from stake: largest staker "
+                           << (100 * d_big) << " pt, smallest staker " << (100 * d_small)
+                           << " pt (" << (100 * d_small / 0.05) << "% relative)");
+        BOOST_CHECK(d_big <= 0.0005);       // the whale never gains from it
+    }
+
+    // (iii) The security-relevant consequence: the anchor bonus is per IDENTITY,
+    // so under transient divergence SPLITTING A STAKE PAYS -- exactly the
+    // Sybil-neutrality the exponential race exists to provide. Compare 30% held
+    // as one staker against the same 30% split into 15 identities, both against
+    // a 70% whale, under the pessimistic 1-in-20 divergence rate.
+    auto split_share = [&](const std::vector<uint64_t>& ws, bool fine, unsigned rate_inv) {
+        std::vector<bool> live(ws.size(), false);
+        PosRaceStats st = PosRunExpRace(ws, fine, 30, 0, live, transient_at(rate_inv), N, 61001);
+        long attacker = 0;
+        for (size_t i = 1; i < ws.size(); ++i) attacker += st.wins[i];
+        return double(attacker) / N;
+    };
+    std::vector<uint64_t> whole_stake{70, 30};
+    std::vector<uint64_t> split_stake{70};
+    for (int i = 0; i < 15; ++i) split_stake.push_back(2);      // 15 x 2% = 30%
+
+    for (unsigned rate_inv : {20u, 300u}) {
+        const double one_fine   = split_share(whole_stake, true,  rate_inv);
+        const double many_fine  = split_share(split_stake, true,  rate_inv);
+        const double one_whole  = split_share(whole_stake, false, rate_inv);
+        const double many_whole = split_share(split_stake, false, rate_inv);
+        BOOST_TEST_MESSAGE("  split-neutrality under transient divergence (1 in " << rate_inv << "):");
+        BOOST_TEST_MESSAGE("    score-second:   30% as 1 -> " << (100 * one_fine)
+                           << "%, as 15 -> " << (100 * many_fine)
+                           << "% (splitting gains " << (100 * (many_fine - one_fine)) << " pt)");
+        BOOST_TEST_MESSAGE("    whole-interval: 30% as 1 -> " << (100 * one_whole)
+                           << "%, as 15 -> " << (100 * many_whole)
+                           << "% (splitting gains " << (100 * (many_whole - one_whole)) << " pt)");
+        // Splitting must never pay more than a fraction of a point. This is the
+        // assertion to watch: if anchor divergence is ever common, the exp-race
+        // stops being split-neutral no matter how exact its score is.
+        BOOST_CHECK(many_fine - one_fine < 0.05);
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()
