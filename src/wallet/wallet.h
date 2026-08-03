@@ -526,6 +526,15 @@ public:
 
     bool IsSpent(const uint256& hash, unsigned int n) const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
 
+    /** SEQUENTIA: every reissuance token this wallet has seen issued.
+     *
+     * A reissuance token is an asset whose whole purpose is to authorise future
+     * issuance of another asset; it is not a balance to spend. The UI needs to
+     * know them so it never offers one as a fee asset -- paying a fee out of a
+     * token would spend reissuance authority to move an unrelated asset, and
+     * producers do not price tokens anyway. */
+    std::set<CAsset> GetReissuanceTokens() const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+
     // Whether this or any known UTXO with the same single key has been spent.
     bool IsSpentKey(const uint256& hash, unsigned int n) const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
     void SetSpentKeyState(WalletBatch& batch, const uint256& hash, unsigned int n, bool used, std::set<CTxDestination>& tx_destinations) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);

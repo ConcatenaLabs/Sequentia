@@ -140,6 +140,23 @@ std::optional<SelectionResult> SelectCoins(const CWallet& wallet, const std::vec
                  const CoinSelectionParams& coin_selection_params);
 
 /**
+ * SEQUENTIA: does this node accept fees paid in `asset`?
+ *
+ * True iff the asset has a positive exchange rate here (the policy asset
+ * defaults to 1:1 when unlisted, but a producer may re-price or refuse it like
+ * any other asset -- see ExchangeRateMap::ConvertAmountToValue). Issued assets
+ * generally ARE priced; a REISSUANCE TOKEN generally is not, which is why a
+ * token spend is the case that used to fail.
+ *
+ * This is the single definition of fee acceptability. CreateTransactionInternal
+ * uses it to refuse an unusable explicit choice, and the GUI uses it to decide
+ * what it may preselect -- so the two cannot drift apart. Note that the wallet
+ * back end never CHOOSES a fee asset from it: absent an explicit caller choice
+ * the fee asset is the policy asset, full stop.
+ */
+bool IsFeeAssetAccepted(const CAsset& asset);
+
+/**
  * Create a new transaction paying the recipients with a set of coins
  * selected by SelectCoins(); Also create the change output, when needed
  * @note passing nChangePosInOut as -1 will result in setting a random position

@@ -354,7 +354,7 @@ RPCHelpMan sendtoaddress()
                     {"assetlabel", RPCArg::Type::STR, RPCArg::Optional::OMITTED_NAMED_ARG, "Hex asset id or asset label for balance."},
                     {"ignoreblindfail", RPCArg::Type::BOOL, RPCArg::Default{true}, "Return a transaction even when a blinding attempt fails due to number of blinded inputs/outputs."},
                     {"fee_rate", RPCArg::Type::AMOUNT, RPCArg::DefaultHint{"not set, fall back to wallet fee estimation"}, "Specify a fee rate in " + CURRENCY_ATOM + "/vB."},
-                    {"fee_asset_label", RPCArg::Type::STR, RPCArg::Optional::OMITTED_NAMED_ARG, "Hex asset id or asset label for fee payment."},
+                    {"fee_asset_label", RPCArg::Type::STR, RPCArg::DefaultHint{"not set, the policy asset is used"}, "Hex asset id or asset label for fee payment."},
                     {"verbose", RPCArg::Type::BOOL, RPCArg::Default{false}, "If true, return extra information about the transaction."},
                 },
                 {
@@ -431,8 +431,15 @@ RPCHelpMan sendtoaddress()
     SetFeeEstimateMode(*pwallet, coin_control, /* conf_target */ request.params[6], /* estimate_mode */ request.params[7], /* fee_rate */ request.params[11], /* override_min_fee */ false);
 
     if (g_con_any_asset_fees) {
-        // Default to using the same asset being sent in the transaction
-        CAsset feeAsset = asset;
+        // SEQUENTIA: the fee asset is the CALLER's decision and is never inferred
+        // from the transaction's contents. This used to default to the asset being
+        // sent, which silently made the send impossible whenever that asset had no
+        // exchange rate here -- a reissuance token above all, since tokens are not
+        // priced -- and buried a policy choice in the RPC layer where the caller
+        // could not see it. Absent an explicit fee_asset_label the wallet uses the
+        // policy asset; an explicit choice is honoured verbatim and still errors
+        // if this node cannot accept it.
+        CAsset feeAsset = ::policyAsset;
         if (request.params.size() > 12 && request.params[12].isStr() && !request.params[12].get_str().empty()) {
             std::string strFeeAsset = request.params[12].get_str();
             feeAsset = GetAssetFromString(strFeeAsset);
@@ -497,7 +504,7 @@ RPCHelpMan sendmany()
                     },
                     {"ignoreblindfail", RPCArg::Type::BOOL, RPCArg::Default{true}, "Return a transaction even when a blinding attempt fails due to number of blinded inputs/outputs."},
                     {"fee_rate", RPCArg::Type::AMOUNT, RPCArg::DefaultHint{"not set, fall back to wallet fee estimation"}, "Specify a fee rate in " + CURRENCY_ATOM + "/vB."},
-                    {"fee_asset", RPCArg::Type::STR_HEX, RPCArg::DefaultHint{"not set, fall back to asset being sent"}, "label or hex ID of asset used for fees"},                    
+                    {"fee_asset", RPCArg::Type::STR_HEX, RPCArg::DefaultHint{"not set, the policy asset is used"}, "label or hex ID of asset used for fees"},
                     {"verbose", RPCArg::Type::BOOL, RPCArg::Default{false}, "If true, return extra information about the transaction."},
                 },
                 {
@@ -571,8 +578,10 @@ RPCHelpMan sendmany()
     std::vector<CRecipient> recipients;
     ParseRecipients(sendTo, assets, subtractFeeFromAmount, recipients);
     if (g_con_any_asset_fees && !recipients.empty()) {
-        CAsset feeAsset = recipients[0].asset;
-        if (request.params.size() > 11) {
+        // The fee asset is never inferred from the recipients (see sendtoaddress).
+        // Absent an explicit fee_asset the wallet uses the policy asset.
+        CAsset feeAsset = ::policyAsset;
+        if (request.params.size() > 11 && request.params[11].isStr() && !request.params[11].get_str().empty()) {
             std::string strFeeAsset = request.params[11].get_str();
             feeAsset = GetAssetFromString(strFeeAsset);
             if (feeAsset.IsNull()) {
@@ -668,9 +677,12 @@ void FundTransaction(CWallet& wallet, CMutableTransaction& tx, CAmount& fee_out,
     bool lockUnspents = false;
     UniValue subtractFeeFromOutputs;
     std::set<int> setSubtractFeeFromOutputs;
-    if (g_con_any_asset_fees && !tx.vout.empty()) {
-        coinControl.m_fee_asset = tx.vout[0].nAsset.GetAsset();
-    }
+    // SEQUENTIA: no fee asset is inferred from the transaction. This used to be
+    // `coinControl.m_fee_asset = tx.vout[0].nAsset.GetAsset()`, which made funding
+    // fail outright whenever the first output's asset had no exchange rate here.
+    // Leaving m_fee_asset unset means the policy asset (CCoinControl consumers all
+    // read it as `value_or(::policyAsset)`); options.fee_asset below still sets it
+    // explicitly and is honoured verbatim.
 
     if (!options.isNull()) {
       if (options.type() == UniValue::VBOOL) {

@@ -85,6 +85,11 @@ public:
     RecentRequestsTableModel *getRecentRequestsTableModel();
 
     std::set<CAsset> getAssetTypes() const;
+
+    /** SEQUENTIA: is this asset a reissuance token this wallet has seen issued?
+     *  Tokens carry reissuance authority, not spendable value, so the UI must
+     *  never preselect one to pay a fee with. */
+    bool isReissuanceToken(const CAsset& asset) const;
     EncryptionStatus getEncryptionStatus() const;
 
     // Check address for validity
@@ -195,6 +200,7 @@ private:
     // Cache some values to be able to detect changes
     interfaces::WalletBalances m_cached_balances;
     std::set<CAsset> cached_asset_types;
+    std::set<CAsset> cached_reissuance_tokens;
     EncryptionStatus cachedEncryptionStatus;
     QTimer* timer;
 

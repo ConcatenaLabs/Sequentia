@@ -406,6 +406,11 @@ public:
     {
         return GetAvailableBalance(*m_wallet, &coin_control);
     }
+    std::set<CAsset> getReissuanceTokens() override
+    {
+        LOCK(m_wallet->cs_wallet);
+        return m_wallet->GetReissuanceTokens();
+    }
     isminetype txinIsMine(const CTxIn& txin) override
     {
         LOCK(m_wallet->cs_wallet);

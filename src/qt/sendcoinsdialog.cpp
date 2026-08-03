@@ -30,6 +30,7 @@
 #include <validation.h>
 #include <wallet/coincontrol.h>
 #include <wallet/fees.h>
+#include <wallet/spend.h>
 #include <wallet/wallet.h>
 
 #include <array>
@@ -215,9 +216,11 @@ void SendCoinsDialog::setModel(WalletModel *_model)
         ui->optInRBF->setCheckState(Qt::Checked);
 
         // Sequentia any-asset fees: let the user pay the fee in any asset they hold. The fee
-        // asset is a free choice — no asset is privileged. The default follows the asset being
-        // sent while it has a published price (see updateDefaultFeeAsset); producers are
-        // unlikely to ever accept a fee they cannot value, so unpriced picks get a warning.
+        // asset is a free choice — no asset is privileged. The form preselects the asset being
+        // sent when this node accepts fees in it and it is not a reissuance token, else the
+        // policy asset (see updateDefaultFeeAsset). That convenience lives only here: the wallet
+        // back end never infers a fee asset from the transaction. Producers are unlikely to ever
+        // accept a fee they cannot value, so unpriced picks get a warning.
         ui->feeAssetSelector->setVisible(g_con_any_asset_fees);
         ui->labelFeeAssetWarning->setVisible(false);
         if (g_con_any_asset_fees) {
@@ -967,6 +970,9 @@ void SendCoinsDialog::updateDefaultFeeAsset()
 
     // The asset of the first recipient is the transaction's subject; paying the fee
     // in it is the least surprising default and needs no extra asset in the wallet.
+    // This convenience lives HERE and nowhere else: it is a visible, overridable
+    // preselection in the form, never a rule hidden in the wallet back end (the RPC
+    // paths always use the policy asset unless the caller names a fee asset).
     CAsset sent = ::policyAsset;
     if (ui->entries->count() > 0) {
         if (auto* entry = qobject_cast<SendCoinsEntry*>(ui->entries->itemAt(0)->widget())) {
@@ -974,14 +980,24 @@ void SendCoinsDialog::updateDefaultFeeAsset()
         }
     }
 
-    // Only a priced asset makes a sane default; otherwise fall back to the first
-    // selector entry with a published price. If nothing is priced (price feed down,
-    // exotic wallet) leave the selection alone — the warning label takes over.
+    // Two things disqualify the sent asset from being preselected:
+    //   - this node does not accept fees in it (no positive exchange rate), so the
+    //     send would simply be refused; and
+    //   - it is a REISSUANCE TOKEN. A token is issuance authority, not spending
+    //     money; funding a fee from it would spend that authority to move an
+    //     unrelated asset. Never preselect one even if a producer priced it.
+    // Otherwise fall back to the first selector entry that qualifies and has a
+    // published price. If nothing qualifies (price feed down, exotic wallet) leave
+    // the selection alone — the warning label takes over.
+    const auto usableDefault = [this](const CAsset& a) {
+        return !a.IsNull() && wallet::IsFeeAssetAccepted(a) && !model->isReissuanceToken(a);
+    };
     CAsset pick = sent;
-    if (!GUIUtil::assetHasMarketPrice(pick)) {
+    if (!usableDefault(pick) || !GUIUtil::assetHasMarketPrice(pick)) {
+        pick = ::policyAsset;
         for (int i = 0; i < ui->feeAssetSelector->count(); ++i) {
             const CAsset candidate = GetAssetFromString(ui->feeAssetSelector->itemData(i).toString().toStdString());
-            if (!candidate.IsNull() && GUIUtil::assetHasMarketPrice(candidate)) { pick = candidate; break; }
+            if (usableDefault(candidate) && GUIUtil::assetHasMarketPrice(candidate)) { pick = candidate; break; }
         }
     }
     const int idx = ui->feeAssetSelector->findData(QString::fromStdString(pick.GetHex()));

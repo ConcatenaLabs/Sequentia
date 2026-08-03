@@ -222,6 +222,10 @@ public:
     //! Get available balance.
     virtual CAmountMap getAvailableBalance(const wallet::CCoinControl& coin_control) = 0;
 
+    //! SEQUENTIA: every reissuance token this wallet has seen issued. The UI uses
+    //! this to keep reissuance authority out of fee-asset selection.
+    virtual std::set<CAsset> getReissuanceTokens() = 0;
+
     //! Return whether transaction input belongs to wallet.
     virtual wallet::isminetype txinIsMine(const CTxIn& txin) = 0;
 

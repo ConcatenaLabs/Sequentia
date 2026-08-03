@@ -262,8 +262,17 @@ class IssuanceTest(BitcoinTestFramework):
         blind_addr = self.nodes[0].getnewaddress()
         nonblind_addr = self.nodes[0].validateaddress(blind_addr)['unconfidential']
 
-        # Fail making non-witness issuance sourcing a single unblinded output.
-        # See: https://github.com/ElementsProject/elements/issues/473
+        # A non-witness issuance sourcing a single unblinded output. Upstream
+        # Elements rejects this (ElementsProject/elements#473): an issuance with
+        # explicit amounts, explicit outputs and no input signature carries no
+        # witness data at all, and VerifyAmounts demanded a witness slot.
+        #
+        # SEQUENTIA accepts it. Confidentiality is opt-in here, so unblinded
+        # issuance has to work on the DEFAULT path; commit 86d5f7528 relaxed
+        # VerifyAmounts to fall back to an empty rangeproof when the witness slot
+        # is absent (VerifyIssuanceAmount still requires the rangeproof empty for
+        # explicit amounts and non-empty for blinded ones, so blinded issuance is
+        # untouched). Assert the relaxation, not the inherited rejection.
         total_amount = self.nodes[0].getbalance()['bitcoin']
         self.nodes[0].sendtoaddress(nonblind_addr, total_amount, "", "", True)
         self.generate(self.nodes[1], 1)
@@ -272,7 +281,9 @@ class IssuanceTest(BitcoinTestFramework):
         issued_tx = self.nodes[2].rawissueasset(funded_tx, [{"asset_amount":1, "asset_address":nonblind_addr, "blind":False}])[0]["hex"]
         blind_tx = self.nodes[0].blindrawtransaction(issued_tx) # This is a no-op
         signed_tx = self.nodes[0].signrawtransactionwithwallet(blind_tx)
-        assert_raises_rpc_error(-26, "", self.nodes[0].sendrawtransaction, signed_tx['hex'])
+        witnessless_txid = self.nodes[0].sendrawtransaction(signed_tx['hex'])
+        self.generate(self.nodes[0], 1)
+        assert_equal(self.nodes[0].gettransaction(witnessless_txid)['confirmations'], 1)
 
         # Make single blinded output to ensure we work around above issue
         total_amount = self.nodes[0].getbalance()['bitcoin']

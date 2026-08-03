@@ -917,6 +917,14 @@ static bool fillBlindDetails(BlindDetails* det, CWallet* wallet, CMutableTransac
     return true;
 }
 
+bool IsFeeAssetAccepted(const CAsset& asset)
+{
+    // A rate is "atoms of the asset per reference unit", so probing with one
+    // whole reference unit (exchange_rate_scale) yields the asset's value in
+    // reference units: > 0 means this node prices, and therefore accepts, it.
+    return ExchangeRateMap::GetInstance().ConvertAmountToValue(exchange_rate_scale, asset).GetValue() > 0;
+}
+
 static bool CreateTransactionInternal(
         CWallet& wallet,
         const std::vector<CRecipient>& vecSend,
@@ -957,12 +965,9 @@ static bool CreateTransactionInternal(
     // rate is only a default), so a producer that refuses it (rate 0) must also
     // refuse fees paid in it. ConvertAmountToValue already returns the policy
     // asset's configured rate, falling back to 1:1 only when unset.
-    if (g_con_any_asset_fees) {
-        CAmount probe = ExchangeRateMap::GetInstance().ConvertAmountToValue(exchange_rate_scale, coin_selection_params.m_fee_asset).GetValue();
-        if (probe <= 0) {
-            error = _("The chosen fee asset is not accepted (no exchange rate on this node); choose a different fee asset");
-            return false;
-        }
+    if (g_con_any_asset_fees && !IsFeeAssetAccepted(coin_selection_params.m_fee_asset)) {
+        error = _("The chosen fee asset is not accepted (no exchange rate on this node); choose a different fee asset");
+        return false;
     }
 
     CScript dummy_script = CScript() << 0x00;
@@ -993,6 +998,17 @@ static bool CreateTransactionInternal(
         map_recipients_sum[recipient.asset] += recipient.nAmount;
 
         if (recipient.fSubtractFeeFromAmount) {
+            // SEQUENTIA: subtracting the fee from an output only means anything
+            // when the fee is paid in that output's own asset. The check exists
+            // further down too, but by then the code has already indexed
+            // map_change_and_fee with .at(fee asset) and thrown a bare
+            // "map::at" -- an internal error where the caller needs to be told
+            // to name a fee asset. Refuse here, before any of that.
+            if (recipient.asset != coin_selection_params.m_fee_asset) {
+                error = strprintf(_("Cannot subtract the fee from an output of a different asset than the fee asset (fee asset: %s, output asset: %s). Choose that asset as the fee asset."),
+                                  coin_selection_params.m_fee_asset.GetHex(), recipient.asset.GetHex());
+                return false;
+            }
             outputs_to_subtract_fee_from++;
             coin_selection_params.m_subtract_fee_outputs = true;
         }

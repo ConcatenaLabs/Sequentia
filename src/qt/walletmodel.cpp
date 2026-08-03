@@ -93,6 +93,11 @@ std::set<CAsset> WalletModel::getAssetTypes() const
     return cached_asset_types;
 }
 
+bool WalletModel::isReissuanceToken(const CAsset& asset) const
+{
+    return cached_reissuance_tokens.count(asset) > 0;
+}
+
 void WalletModel::startPollBalance()
 {
     // This timer will be fired repeatedly to update the balance
@@ -159,6 +164,9 @@ void WalletModel::checkBalanceChanged(const interfaces::WalletBalances& new_bala
         }
         if (new_asset_types != cached_asset_types) {
             cached_asset_types = new_asset_types;
+            // Refresh alongside the asset list: a token only appears once its
+            // issuance lands, which is exactly when the balance map changes.
+            cached_reissuance_tokens = m_wallet->getReissuanceTokens();
             Q_EMIT assetTypesChanged();
         }
     }

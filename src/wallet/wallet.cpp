@@ -650,6 +650,23 @@ bool CWallet::IsSpent(const uint256& hash, unsigned int n) const
     return false;
 }
 
+std::set<CAsset> CWallet::GetReissuanceTokens() const
+{
+    AssertLockHeld(cs_wallet);
+    std::set<CAsset> tokens;
+    if (!g_con_elementsmode) return tokens;
+    for (const auto& entry : mapWallet) {
+        const CWalletTx& wtx = entry.second;
+        for (unsigned int i = 0; i < wtx.tx->vin.size(); ++i) {
+            if (wtx.tx->vin[i].assetIssuance.IsNull()) continue;
+            CAsset token;
+            wtx.GetIssuanceAssets(i, nullptr, &token);
+            if (!token.IsNull()) tokens.insert(token);
+        }
+    }
+    return tokens;
+}
+
 void CWallet::AddToSpends(const COutPoint& outpoint, const uint256& wtxid, WalletBatch* batch)
 {
     mapTxSpends.insert(std::make_pair(outpoint, wtxid));

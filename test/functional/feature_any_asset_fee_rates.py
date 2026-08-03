@@ -121,6 +121,10 @@ class AnyAssetFeeRatesTest(BitcoinTestFramework):
         raw_tx = node.createrawtransaction(outputs=[
             {self.nodes[0].address: amount, 'asset': asset},
             {'fee': 0,'fee_asset': asset}])
+        # SEQUENTIA: fundrawtransaction never infers the fee asset from the
+        # transaction -- not from the first output, not from an existing fee
+        # output. Name it in the options.
+        options = dict(options or {}, fee_asset=asset)
         funded_tx = node.fundrawtransaction(hexstring=raw_tx, options=options)['hex']
         tx = node.decoderawtransaction(funded_tx)
         assert_equal(tx['fee'], {asset: expected_fee})
@@ -129,6 +133,7 @@ class AnyAssetFeeRatesTest(BitcoinTestFramework):
         raw_tx = node.createrawtransaction(outputs=[
             {self.nodes[0].address: amount, 'asset': asset},
             {'fee': 0,'fee_asset': asset}])
+        options = dict(options or {}, fee_asset=asset)
         funded_tx = node.fundrawtransaction(hexstring=raw_tx, options=options)['hex']
         tx = node.decoderawtransaction(funded_tx)
         assert_equal(tx['fee'], {asset: expected_fee})

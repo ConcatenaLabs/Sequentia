@@ -52,7 +52,12 @@ class WalletCtTest(BitcoinTestFramework):
 
         for i in range(self.num_nodes):
             self.log.info(f"Finished with node {i} balance: {self.nodes[i].getbalance()}")
-        assert_equal(self.nodes[from_idx].getbalance(), { "bitcoin": Decimal(0) })
+        # SEQUENTIA: with any-asset fees on, the balance map does NOT force the
+        # policy asset in at zero (AmountMapToUniv only does that when
+        # g_con_any_asset_fees is off). No asset is privileged, so an asset the
+        # wallet holds none of simply is not listed, and a fully spent wallet
+        # reports {}. Assert on the amount, not on the row being present.
+        assert_equal(self.nodes[from_idx].getbalance().get("bitcoin", Decimal(0)), Decimal(0))
         assert_equal(self.nodes[to_idx].getbalance(), { "bitcoin": amt })
 
     def run_test(self):
