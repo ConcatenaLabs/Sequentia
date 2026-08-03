@@ -10,6 +10,7 @@ import time
 from test_framework.blocktools import COINBASE_MATURITY
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
+    amount_of,
     assert_equal,
     set_node_times,
 )
@@ -99,7 +100,7 @@ class TransactionTimeRescanTest(BitcoinTestFramework):
         assert_equal(minernode.getblockcount(), initial_mine + 500)
 
         self.log.info('Check user\'s final balance and transaction count')
-        assert_equal(wo_wallet.getbalance()['bitcoin'], 16)
+        assert_equal(amount_of(wo_wallet.getbalance()), 16)
         assert_equal(len(wo_wallet.listtransactions()), 3)
 
         self.log.info('Check transaction times')
@@ -132,7 +133,7 @@ class TransactionTimeRescanTest(BitcoinTestFramework):
         restorewo_wallet.importaddress(wo3, rescan=False)
 
         # check user has 0 balance and no transactions
-        assert_equal(restorewo_wallet.getbalance()['bitcoin'], 0)
+        assert_equal(amount_of(restorewo_wallet.getbalance()), 0)
         assert_equal(len(restorewo_wallet.listtransactions()), 0)
 
         # proceed to rescan, first with an incomplete one, then with a full rescan
@@ -142,7 +143,7 @@ class TransactionTimeRescanTest(BitcoinTestFramework):
         restorewo_wallet.rescanblockchain()
 
         self.log.info('Check user\'s final balance and transaction count after restoration')
-        assert_equal(restorewo_wallet.getbalance()['bitcoin'], 16)
+        assert_equal(amount_of(restorewo_wallet.getbalance()), 16)
         assert_equal(len(restorewo_wallet.listtransactions()), 3)
 
         self.log.info('Check transaction times after restoration')

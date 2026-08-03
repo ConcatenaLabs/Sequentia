@@ -60,6 +60,7 @@ from test_framework.descriptors import (
     descsum_check,
 )
 from test_framework.util import (
+    amount_of,
     assert_equal,
     assert_greater_than,
     assert_raises_rpc_error,
@@ -95,7 +96,7 @@ class AddressTypeTest(BitcoinTestFramework):
 
     def get_balances(self, key='trusted'):
         """Return a list of balances."""
-        return [self.nodes[i].getbalances()['mine'][key]['bitcoin'] for i in range(4)]
+        return [amount_of(self.nodes[i].getbalances()['mine'][key]) for i in range(4)]
 
     def test_address(self, node, address, multisig, typ):
         """Run sanity checks on an address."""
@@ -345,7 +346,7 @@ class AddressTypeTest(BitcoinTestFramework):
         # Fund node 4:
         self.nodes[5].sendtoaddress(self.nodes[4].getnewaddress(), Decimal("1"))
         self.generate(self.nodes[5], 1)
-        assert_equal(self.nodes[4].getbalance()['bitcoin'], 1)
+        assert_equal(amount_of(self.nodes[4].getbalance()), 1)
 
         self.log.info("Nodes with addresstype=legacy never use a P2WPKH change output (unless changetype is set otherwise):")
         self.test_change_output_type(0, [to_address_bech32_1], 'legacy')

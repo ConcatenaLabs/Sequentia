@@ -17,6 +17,14 @@ class WalletTest(BitcoinTestFramework):
             "-minrelaytxfee=0",
             "-blockmintxfee=0",
             "-mintxfee=0",
+            # SEQUENTIA: a fee-output-less transaction is only a meaningful shape when
+            # the open fee market is off. With it on, the mempool requires exactly one
+            # fee output so it knows which asset the fee is denominated in, and rejects
+            # a transaction carrying none as bad-txns-no-fee (src/validation.cpp, the
+            # M5 audit check) -- a deliberate standardness rule, not a bug. This test is
+            # specifically about the omit-the-output form, so it states the mode it
+            # needs rather than depending on whatever the chain happens to default to.
+            "-con_any_asset_fees=0",
         ]] * self.num_nodes
 
     def skip_test_if_missing_module(self):

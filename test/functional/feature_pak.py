@@ -3,7 +3,13 @@
 # Distributed under the MIT/X11 software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 from test_framework.test_framework import BitcoinTestFramework
-from test_framework.util import assert_equal, assert_raises_rpc_error, Decimal, assert_greater_than
+from test_framework.util import (
+    amount_of,
+    assert_equal,
+    assert_raises_rpc_error,
+    Decimal,
+    assert_greater_than,
+)
 
 '''
     This test focuses on enforcement of PAK, not on transitioning lists
@@ -274,8 +280,8 @@ class PAKTest (BitcoinTestFramework):
 
         # Test that subtracting fee from output works
         self.generatetoaddress(self.nodes[1], 101, self.nodes[1].getnewaddress(), sync_fun=self.no_op)
-        self.nodes[1].sendtomainchain("", self.nodes[1].getbalance()["bitcoin"], True)
-        assert_equal(self.nodes[1].getbalance()["bitcoin"], 0)
+        self.nodes[1].sendtomainchain("", amount_of(self.nodes[1].getbalance()), True)
+        assert_equal(amount_of(self.nodes[1].getbalance()), 0)
 
         # TODO: create rawsendtomainchain to do transaction surgery for testing
 
