@@ -85,6 +85,8 @@ private Q_SLOTS:
     //! Put the largest usable amount into the respective Amount field.
     void onStakeMax();
     void onUnstakeMax();
+    //! Re-send the pending withdrawal with a higher network fee.
+    void onUnstakeBump();
     void onEnableProduction();
     void onRefreshClicked();
 
@@ -108,6 +110,9 @@ private:
     QLineEdit* m_unstake_amount{nullptr};
     QPushButton* m_unstake_max{nullptr};  //!< fill Amount with everything withdrawable
     QPushButton* m_unstake_button{nullptr};
+    //! Shown only while a withdrawal is waiting to confirm: re-sends it with a
+    //! higher fee. The wallet's own RBF cannot touch these transactions.
+    QPushButton* m_unstake_bump{nullptr};
     //! Enabled wrapper around the Withdraw button: carries the tooltip that says
     //! why the button is greyed out (a disabled widget gets no tooltip events).
     QWidget* m_unstake_button_holder{nullptr};
