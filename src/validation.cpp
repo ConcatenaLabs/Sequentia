@@ -3371,6 +3371,11 @@ static uint256 g_pos_immediate_final_hash GUARDED_BY(::cs_main);
 // When set, the activation-time finality gate may cross the finalized point
 // for chains that contain this quorum-certified rival block. -1 = no release.
 static int g_pos_reconcile_release_height GUARDED_BY(::cs_main) = -1;
+// SEQUENTIA: the last candidate the activation-time finality gate refused, so
+// the refusal is reported once per candidate instead of on every pass of the
+// activation loop. A refusal must never be silent -- an operator has to be able
+// to see WHY a fork was not adopted -- but it must not flood the log either.
+static uint256 g_pos_final_gate_logged GUARDED_BY(::cs_main);
 static uint256 g_pos_reconcile_release_hash GUARDED_BY(::cs_main);
 // Steady-clock seconds at the last advance of the finality point (0 = never).
 static std::atomic<int64_t> g_pos_final_advance_steady{0};
@@ -3805,6 +3810,20 @@ CBlockIndex* CChainState::FindMostWorkChain()
                     released = rel && rel->GetBlockHash() == g_pos_reconcile_release_hash;
                 }
                 if (!descends_from_final && !released) {
+                    // This is the SAME refusal ContextualCheckBlockHeader
+                    // reports as "bad-fork-prior-to-pos-final", taken at
+                    // activation time instead of accept time. There is no
+                    // BlockValidationState to carry a reject reason here, so
+                    // the reason is logged under that same canonical name --
+                    // otherwise the node silently declines to reorg and an
+                    // operator has nothing to go on. One line per candidate.
+                    if (g_pos_final_gate_logged != pindexNew->GetBlockHash()) {
+                        g_pos_final_gate_logged = pindexNew->GetBlockHash();
+                        LogPrintf("ERROR: %s: bad-fork-prior-to-pos-final: not activating candidate %s (height %d); it forks at/below the immediately-finalized block %s (height %d)\n",
+                                  __func__, pindexNew->GetBlockHash().ToString(), pindexNew->nHeight,
+                                  g_pos_immediate_final_hash.ToString(), g_pos_immediate_final_height);
+                        NotePosFinalForkRejection();
+                    }
                     CBlockIndex* pindexGated = pindexNew;
                     while (pindexGated && !m_chain.Contains(pindexGated)) {
                         setBlockIndexCandidates.erase(pindexGated);
