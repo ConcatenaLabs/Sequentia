@@ -70,6 +70,18 @@ class UtxoRecoveryTest(BitcoinTestFramework):
 
     # -- helpers ------------------------------------------------------------
 
+    def mine(self, blocks):
+        """Mine on node 0 and wait for its wallet to catch up.
+
+        Node 1 is deliberately unconnected for most of this test, so the usual
+        sync_all() cannot be the wait -- and without any wait, the wallet's view
+        of the chain lags the RPC that returned the blocks, which shows up as a
+        spurious "Insufficient funds" from the next call that spends.
+        """
+        hashes = self.generate(self.nodes[0], blocks, sync_fun=self.no_op)
+        self.nodes[0].syncwithvalidationinterfacequeue()
+        return hashes
+
     def utxo_set_hash(self, node):
         return node.gettxoutsetinfo("hash_serialized_2")["hash_serialized_2"]
 
@@ -103,13 +115,13 @@ class UtxoRecoveryTest(BitcoinTestFramework):
 
     def run_test(self):
         node = self.nodes[0]
-        self.generate(node, 101, sync_fun=self.no_op)
+        self.mine(101)
         policy = node.dumpassetlabels()["bitcoin"]
 
         # An issued asset gives us a reissuance token to strand and recreate, so
         # the test covers a non-policy asset as well as the policy one.
         issued = node.issueasset(100, 1)
-        self.generate(node, 1, sync_fun=self.no_op)
+        self.mine(1)
         token = issued["token"]
 
         # The two outputs the "accident" strands. Ordinary outputs: what makes
@@ -139,7 +151,7 @@ class UtxoRecoveryTest(BitcoinTestFramework):
         self.restart_node(0, extra_args=recovery_args)
 
         # -- 1. one block early, nothing has happened -----------------------
-        self.generate(node, activation - 1 - node.getblockcount(), sync_fun=self.no_op)
+        self.mine(activation - 1 - node.getblockcount())
         assert_equal(node.getblockcount(), activation - 1)
         for outpoint in retire:
             self.assert_present(node, outpoint, True, "one block before activation")
@@ -147,7 +159,7 @@ class UtxoRecoveryTest(BitcoinTestFramework):
         before = self.utxo_set_hash(node)
 
         # -- 2. the activation block rewrites the UTXO set -------------------
-        activation_hash = self.generate(node, 1, sync_fun=self.no_op)[0]
+        activation_hash = self.mine(1)[0]
         assert_equal(node.getblockcount(), activation)
 
         for outpoint in retire:
@@ -195,7 +207,7 @@ class UtxoRecoveryTest(BitcoinTestFramework):
         assert_equal(self.utxo_set_hash(node), after)
 
         # Blocks after the activation block behave normally.
-        self.generate(node, 3, sync_fun=self.no_op)
+        self.mine(3)
         settled_height = node.getblockcount()
         settled = self.utxo_set_hash(node)
 
@@ -203,7 +215,10 @@ class UtxoRecoveryTest(BitcoinTestFramework):
         # A plain restart reads the chainstate back out of leveldb rather than
         # replaying anything, so this is the one check that the rewritten coins
         # were really written down and not just held in the in-memory cache.
-        self.restart_node(0, extra_args=recovery_args)
+        # -checklevel=4 makes startup verification disconnect and RECONNECT every
+        # block on the way, which is a second, independent trip through both
+        # halves of the rewrite -- through VerifyDB rather than through a reorg.
+        self.restart_node(0, extra_args=recovery_args + ["-checkblocks=0", "-checklevel=4"])
         assert_equal(self.utxo_set_hash(node), settled)
         assert_equal(len(self.created_outputs(node)), 2)
 
@@ -241,7 +256,11 @@ class UtxoRecoveryTest(BitcoinTestFramework):
         self.restart_node(0, extra_args=recovery_args + ["-reindex"])
         fresh = self.nodes[1]
         assert_equal(fresh.getblockcount(), 0)
-        self.restart_node(1, extra_args=recovery_args)
+        # -coinstatsindex rebuilds the UTXO set from block and undo data instead
+        # of reading the chainstate, so a change made by the block-connect path
+        # and present in no transaction is one it could easily miss. Building it
+        # during the sync is how that gets caught.
+        self.restart_node(1, extra_args=recovery_args + ["-coinstatsindex"])
         self.connect_nodes(0, 1)
         self.sync_blocks(self.nodes)
         assert_equal(fresh.getblockcount(), settled_height)
@@ -251,6 +270,27 @@ class UtxoRecoveryTest(BitcoinTestFramework):
         for vout in (0, 1):
             self.assert_present(fresh, (recovery_txid, vout), True, "on a node synced from scratch")
         self.disconnect_nodes(0, 1)
+
+        # The index's answer must be the chainstate's answer. Comparing muhash
+        # both ways is the sharp version of that: it is a commitment to the whole
+        # set, so it only agrees if the index applied the rewrite identically.
+        self.wait_until(lambda: fresh.gettxoutsetinfo("muhash")["height"] == settled_height)
+        indexed = fresh.gettxoutsetinfo("muhash")["muhash"]
+        assert_equal(fresh.gettxoutsetinfo("muhash", None, False)["muhash"], indexed)
+
+        # And rolling the index back across the activation height has to undo the
+        # rewrite too. This is not cosmetic: the index re-checks every running
+        # total against the value it stored for the previous height and aborts
+        # the node on a mismatch, so an unhandled rewrite would crash here rather
+        # than merely report the wrong number.
+        fresh.invalidateblock(activation_hash)
+        assert_equal(fresh.getblockcount(), activation - 1)
+        self.wait_until(lambda: fresh.gettxoutsetinfo("muhash")["height"] == activation - 1)
+        assert_equal(fresh.gettxoutsetinfo("muhash", None, False)["muhash"],
+                     fresh.gettxoutsetinfo("muhash")["muhash"])
+        fresh.reconsiderblock(activation_hash)
+        self.wait_until(lambda: fresh.gettxoutsetinfo("muhash")["height"] == settled_height)
+        assert_equal(fresh.gettxoutsetinfo("muhash")["muhash"], indexed)
 
         # -- 6. a recovered output spends with an ordinary signature ----------
         assert_equal(self.utxo_set_hash(node), settled)
@@ -267,7 +307,7 @@ class UtxoRecoveryTest(BitcoinTestFramework):
         signed = node.signrawtransactionwithwallet(raw)
         assert_equal(signed["complete"], True)
         spend_txid = node.sendrawtransaction(signed["hex"])
-        self.generate(node, 1, sync_fun=self.no_op)
+        self.mine(1)
         assert_equal(node.gettransaction(spend_txid)["confirmations"], 1)
 
         self.assert_present(node, (recovery_txid, 0), False, "after being spent")

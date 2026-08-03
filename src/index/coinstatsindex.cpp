@@ -109,6 +109,81 @@ CoinStatsIndex::CoinStatsIndex(size_t n_cache_size, bool f_memory, bool f_wipe)
     m_db = std::make_unique<CoinStatsIndex::DB>(path / "db", n_cache_size, f_memory, f_wipe);
 }
 
+/**
+ * SEQUENTIA: the one-time UTXO-set rewrite (Consensus::UtxoRecovery) as this
+ * index sees it.
+ *
+ * The index reconstructs the UTXO set from block data and undo data rather than
+ * reading the chainstate, so a change made by the block-connect path that is in
+ * no transaction is invisible to it -- and this one is exactly that. Left
+ * unhandled it would not merely under-report: ReverseBlock() Assert()s every
+ * running counter against the value stored for the previous height, so rolling
+ * back across the activation height would ABORT a node running -coinstatsindex.
+ *
+ * So the index applies the same rewrite from the same inputs: the extra CTxUndo
+ * that ConnectBlock appended for the retired coins, and the synthetic
+ * transaction the created coins come from. `forward` runs it in the connect
+ * direction, `!forward` in the disconnect direction, and the two are exact
+ * inverses, which is what those Asserts check.
+ *
+ * The value is booked to prevout_spent / new_outputs_ex_coinbase, the categories
+ * for "left the UTXO set in this block" and "entered it in this block". The
+ * rewrite is not a transaction and neither name fits it perfectly, but the
+ * alternative -- leaving them alone -- would make that block's reported deltas
+ * not add up to the change in total_amount, which is worse.
+ */
+void CoinStatsIndex::ApplyUtxoRecoveryToStats(const CBlockUndo& block_undo, const CBlockIndex* pindex, bool forward)
+{
+    const Consensus::Params& consensus{Params().GetConsensus()};
+    if (!consensus.UtxoRecoveryAppliesAt(pindex->nHeight)) return;
+    if (block_undo.vtxundo.empty()) return;
+
+    const Consensus::UtxoRecovery& recovery{consensus.utxo_recovery};
+    const CTxUndo& recovery_undo{block_undo.vtxundo.back()};
+    // Empty means the rewrite did not apply, exactly as in ConnectBlock.
+    if (recovery_undo.vprevout.size() != recovery.retire.size()) return;
+
+    const int sign{forward ? 1 : -1};
+
+    // The retired coins leave the UTXO set.
+    for (size_t j = 0; j < recovery_undo.vprevout.size(); ++j) {
+        const Coin& coin{recovery_undo.vprevout[j]};
+        const COutPoint outpoint{recovery.retire[j].first, recovery.retire[j].second};
+        const auto ser{TxOutSer(outpoint, coin)};
+        if (forward) {
+            m_muhash.Remove(MakeUCharSpan(ser));
+        } else {
+            m_muhash.Insert(MakeUCharSpan(ser));
+        }
+        if (coin.out.nValue.IsExplicit()) {
+            m_total_prevout_spent_amount += sign * coin.out.nValue.GetAmount();
+            m_total_amount -= sign * coin.out.nValue.GetAmount();
+        }
+        m_transaction_output_count -= sign;
+        m_bogo_size -= sign * GetBogoSize(coin.out.scriptPubKey);
+    }
+
+    // The created coins enter it.
+    const CTransactionRef tx{BuildUtxoRecoveryTransaction(recovery)};
+    for (size_t j = 0; j < tx->vout.size(); ++j) {
+        const CTxOut& out{tx->vout[j]};
+        if (out.scriptPubKey.IsUnspendable()) continue; // never added to the UTXO set
+        const Coin coin{out, pindex->nHeight, /*fCoinBaseIn=*/false};
+        const auto ser{TxOutSer(COutPoint{tx->GetHash(), (uint32_t)j}, coin)};
+        if (forward) {
+            m_muhash.Insert(MakeUCharSpan(ser));
+        } else {
+            m_muhash.Remove(MakeUCharSpan(ser));
+        }
+        if (out.nValue.IsExplicit()) {
+            m_total_new_outputs_ex_coinbase_amount += sign * out.nValue.GetAmount();
+            m_total_amount += sign * out.nValue.GetAmount();
+        }
+        m_transaction_output_count += sign;
+        m_bogo_size += sign * GetBogoSize(out.scriptPubKey);
+    }
+}
+
 bool CoinStatsIndex::WriteBlock(const CBlock& block, const CBlockIndex* pindex)
 {
     CBlockUndo block_undo;
@@ -209,6 +284,10 @@ bool CoinStatsIndex::WriteBlock(const CBlock& block, const CBlockIndex* pindex)
                 }
             }
         }
+
+        // SEQUENTIA: and the one-time UTXO rewrite, applied after this block's
+        // transactions exactly as ConnectBlock applies it.
+        ApplyUtxoRecoveryToStats(block_undo, pindex, /*forward=*/true);
     } else {
         // genesis block
         m_total_unspendable_amount += block_subsidy;
@@ -434,6 +513,9 @@ bool CoinStatsIndex::ReverseBlock(const CBlock& block, const CBlockIndex* pindex
             }
         }
     }
+
+    // SEQUENTIA: undo the one-time UTXO rewrite first, since it was applied last.
+    ApplyUtxoRecoveryToStats(block_undo, pindex, /*forward=*/false);
 
     // Remove the new UTXOs that were created from the block
     for (size_t i = 0; i < block.vtx.size(); ++i) {
