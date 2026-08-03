@@ -110,6 +110,8 @@ BASE_SCRIPTS = [
     'feature_initial_reissuance_token.py --legacy-wallet',
     'feature_unblinded_reissuance.py --legacy-wallet',
     'feature_unblinded_reissuance.py --descriptors',
+    'feature_utxo_recovery.py --legacy-wallet',
+    'feature_utxo_recovery.py --descriptors',
     'feature_progress.py',
     'rpc_getnewblockhex.py',
     'wallet_elements_regression_1172.py --legacy-wallet',

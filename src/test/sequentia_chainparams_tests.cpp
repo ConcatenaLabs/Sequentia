@@ -6,7 +6,9 @@
 #include <pos.h>
 #include <chainparamsbase.h>
 #include <consensus/params.h>
+#include <util/strencodings.h>
 #include <util/system.h>
+#include <validation.h>
 
 #include <test/util/setup_common.h>
 
@@ -152,6 +154,92 @@ BOOST_AUTO_TEST_CASE(testnet_pos_matching_values_are_accepted)
     BOOST_CHECK(g_pos_public_committee);
     BOOST_CHECK_EQUAL(g_pos_committee_size, 250);
 
+    SelectParams(CBaseChainParams::REGTEST);
+}
+
+//! The one-time treasury UTXO recovery is pinned to ONE chain and ONE height.
+//!
+//! Everything about this rewrite is a constant in CTestNetParams, and a
+//! transcription slip in any of them would give every node a different UTXO set
+//! rather than an error. So the constants are asserted here against the values
+//! the owner authorised, not merely against themselves.
+BOOST_AUTO_TEST_CASE(testnet_treasury_utxo_recovery_is_pinned)
+{
+    ArgsManager empty;
+    const auto params = CreateChainParams(empty, CBaseChainParams::TESTNET);
+    const Consensus::Params& consensus = params->GetConsensus();
+    const Consensus::UtxoRecovery& rec = consensus.utxo_recovery;
+
+    BOOST_CHECK_EQUAL(rec.height, 73200);
+    // Bound to THIS chain: the re-genesis testnet genesis, and no other.
+    BOOST_CHECK_EQUAL(rec.chain_genesis.GetHex(),
+                      "ddd11d54c87a2bd94400fd31ce05d8e1110bb4b78e7103f738342086fc4ea92e");
+    BOOST_CHECK_EQUAL(rec.chain_genesis.GetHex(), consensus.hashGenesisBlock.GetHex());
+
+    // Retired: the two outputs whose keys and blinding key were destroyed.
+    BOOST_CHECK_EQUAL(rec.retire.size(), 2U);
+    BOOST_CHECK_EQUAL(rec.retire[0].first.GetHex(),
+                      "910fcd65f2096051ea2fd823b21838b73a538d54e3c42c4c0474e140fed11953");
+    BOOST_CHECK_EQUAL(rec.retire[0].second, 0U);
+    BOOST_CHECK_EQUAL(rec.retire[1].first.GetHex(),
+                      "6d7b68f5ea109eba1a03c688698e4a92debe3e7208c43fdc34e5ef052977dc7d");
+    BOOST_CHECK_EQUAL(rec.retire[1].second, 1U);
+
+    // Created: both to the replacement treasury wallet's P2WPKH, both EXPLICIT.
+    const std::string treasury2026 = "0014d2c45b413aac4cebfd80fd662199c0c143467665";
+    BOOST_CHECK_EQUAL(rec.create.size(), 2U);
+    BOOST_CHECK_EQUAL(rec.create[0].asset.GetHex(),
+                      "c8eccacf0953e1931cd31e434d8319101cc36e6c38b0e2104d8687552fae3e40");
+    BOOST_CHECK_EQUAL(rec.create[0].amount, 39800000000000000LL); // 398,000,000 tSEQ
+    BOOST_CHECK_EQUAL(HexStr(rec.create[0].scriptPubKey), treasury2026);
+    BOOST_CHECK_EQUAL(rec.create[1].asset.GetHex(),
+                      "2afc53ebcd3f3179c60f97e4e7f23755ff2519b308914d3b51ee97fb1c8557e5");
+    BOOST_CHECK_EQUAL(rec.create[1].amount, 100000000LL); // 1.0 USDX reissuance token
+    BOOST_CHECK_EQUAL(HexStr(rec.create[1].scriptPubKey), treasury2026);
+
+    // The policy-asset row really is this chain's policy asset, and the amount
+    // recreated is under the chain's cap. (Also asserted at construction, so a
+    // wrong byte order cannot even start a node -- pinned here so a reader can
+    // see the claim being checked rather than take it on trust.)
+    BOOST_CHECK(rec.create[0].asset == consensus.subsidy_asset);
+    BOOST_CHECK(rec.create[0].amount <= MAX_MONEY);
+
+    // The height gate is exact: the rewrite belongs to one block, not a range.
+    BOOST_CHECK(consensus.UtxoRecoveryAppliesAt(73200));
+    BOOST_CHECK(!consensus.UtxoRecoveryAppliesAt(73199));
+    BOOST_CHECK(!consensus.UtxoRecoveryAppliesAt(73201));
+
+    // The created coins' outpoints are a pure function of the table, so this
+    // txid is recomputable by anyone and must not drift: a change here silently
+    // moves the recovered funds to different outpoints. It is not a real
+    // transaction and will never be found by getrawtransaction; the coins are
+    // reachable via gettxout / scantxoutset.
+    const CTransactionRef tx = BuildUtxoRecoveryTransaction(rec);
+    BOOST_CHECK_EQUAL(tx->vin.size(), 2U);
+    BOOST_CHECK_EQUAL(tx->vout.size(), 2U);
+    BOOST_CHECK(tx->vout[0].nAsset.IsExplicit());
+    BOOST_CHECK(tx->vout[0].nValue.IsExplicit());
+    BOOST_CHECK_EQUAL(tx->vout[0].nValue.GetAmount(), 39800000000000000LL);
+    BOOST_CHECK_EQUAL(tx->GetHash().GetHex(),
+                      "618981449a50c460c1dcd7c0dae693674294a2c58e930e128d6ef56e82eecae7");
+
+    SelectParams(CBaseChainParams::REGTEST);
+}
+
+//! A fresh chain must never carry someone else's accident. Mainnet, regtest and
+//! Bitcoin main have no recovery table at all, and no height can make one fire.
+BOOST_AUTO_TEST_CASE(fresh_chains_have_no_utxo_recovery)
+{
+    for (const std::string& chain : {std::string(CBaseChainParams::SEQUENTIA),
+                                     std::string(CBaseChainParams::REGTEST),
+                                     std::string(CBaseChainParams::MAIN)}) {
+        ArgsManager empty;
+        const auto params = CreateChainParams(empty, chain);
+        const Consensus::Params& consensus = params->GetConsensus();
+        BOOST_CHECK_MESSAGE(consensus.utxo_recovery.IsNull(), chain << " has a UTXO recovery table");
+        BOOST_CHECK(!consensus.UtxoRecoveryAppliesAt(0));
+        BOOST_CHECK(!consensus.UtxoRecoveryAppliesAt(73200));
+    }
     SelectParams(CBaseChainParams::REGTEST);
 }
 

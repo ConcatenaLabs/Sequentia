@@ -404,6 +404,15 @@ public:
         int nCheckDepth) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 };
 
+/**
+ * SEQUENTIA: the synthetic transaction a one-time UTXO recovery derives its
+ * created outputs from. Never relayed, never in a block, never stored -- it
+ * exists so those outputs sit at outpoints that are a pure function of the
+ * recovery table in chainparams, and so anyone (including a test) can recompute
+ * the txid rather than being told it. See validation.cpp for the full account.
+ */
+CTransactionRef BuildUtxoRecoveryTransaction(const Consensus::UtxoRecovery& recovery);
+
 enum DisconnectResult
 {
     DISCONNECT_OK,      // All good.
