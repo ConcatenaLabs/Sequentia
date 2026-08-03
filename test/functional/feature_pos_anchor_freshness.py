@@ -112,16 +112,37 @@ class PosAnchorFreshnessTest(BitcoinTestFramework):
         assert_greater_than(anchor_new, anchor_old)   # B_new references a fresher BTC block
         assert_equal(node.getblockheader(b_new)['previousblockhash'], h1)
 
-        # Anchor freshness is NOT a fork-choice rule (doc 10 §7). In an
-        # immediate-finality system a fork-choice key on the Bitcoin anchor could
-        # let a fresher-anchored competitor overwrite an already-accepted,
-        # equally-certified block — exactly what must never happen. So
-        # reconsidering the earlier-seen B_old returns the chain to B_old; the
-        # fresher anchor of B_new does NOT override it (the VRF result / first-seen
-        # is the truth, not the anchor).
+        # Put B_old back in its rightful place as the accepted, quorum-certified
+        # tip. B_new has to be buried first: it is itself 3-of-3 certified, so
+        # while it is the tip it IS the immediately-finalized block, and nothing
+        # Sequentia-internal (B_old included) may reorg it. Burying it lowers the
+        # finalized point back to h1, and B_old — which descends from h1 — is then
+        # free to be reconsidered and become the tip and the finalized block.
+        node.invalidateblock(b_new)
+        assert_equal(node.getbestblockhash(), h1)
         node.reconsiderblock(b_old)
         assert_equal(node.getbestblockhash(), b_old)
         assert_equal(node.getblockcount(), 2)
+        assert_equal(node.getblockheader(b_old)['poscertified'], True)
+
+        # Anchor freshness is NOT a fork-choice rule (doc 10 §7). In an
+        # immediate-finality system a fork-choice key on the Bitcoin anchor could
+        # let a fresher-anchored competitor overwrite an already-accepted,
+        # equally-certified block — exactly what must never happen. So exposing
+        # the fresher-anchored B_new against the accepted B_old leaves the chain
+        # on B_old: the fresher anchor does NOT override it (the VRF result /
+        # first-seen is the truth, not the anchor), and the refusal is reported
+        # under the canonical reject reason.
+        node.reconsiderblock(b_new)
+        assert_equal(node.getbestblockhash(), b_old)
+        assert_equal(node.getblockcount(), 2)
+
+        # B_new is not merely unknown or invalid to the node: it is a fully
+        # validated, equally-certified height-2 branch sitting beside the tip
+        # with a fresher Bitcoin anchor, and it still does not win.
+        tips = {t['hash']: t for t in node.getchaintips()}
+        assert_equal(tips[b_old]['status'], 'active')
+        assert_equal(tips[b_new]['status'], 'valid-fork')
 
         # Cross-chain-swap freshness is instead delivered by block PRODUCTION:
         # leaders anchor each new block to the freshest Bitcoin block, so the
