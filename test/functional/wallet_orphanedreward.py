@@ -5,7 +5,10 @@
 """Test orphaned block rewards in the wallet."""
 
 from test_framework.test_framework import BitcoinTestFramework
-from test_framework.util import assert_equal
+from test_framework.util import (
+    amount_of,
+    assert_equal,
+)
 
 class OrphanedBlockRewardTest(BitcoinTestFramework):
     def set_test_params(self):
@@ -30,7 +33,7 @@ class OrphanedBlockRewardTest(BitcoinTestFramework):
         # Let the block reward mature and send coins including both
         # the existing balance and the block reward.
         self.generate(self.nodes[0], 150)
-        assert_equal(self.nodes[1].getbalance()['bitcoin'], 10 + 25)
+        assert_equal(amount_of(self.nodes[1].getbalance()), 10 + 25)
         txid = self.nodes[1].sendtoaddress(self.nodes[0].getnewaddress(), 30)
 
         # Orphan the block reward and make sure that the original coins
@@ -40,9 +43,9 @@ class OrphanedBlockRewardTest(BitcoinTestFramework):
         # Without the following abandontransaction call, the coins are
         # not considered available yet.
         assert_equal(self.nodes[1].getbalances()["mine"], {
-          "trusted": { 'bitcoin' : 0 },
-          "untrusted_pending": { 'bitcoin' : 0 },
-          "immature": { 'bitcoin' : 0 },
+          "trusted": {},
+          "untrusted_pending": {},
+          "immature": {},
         })
         # The following abandontransaction is necessary to make the later
         # lines succeed, and probably should not be needed; see
@@ -50,8 +53,8 @@ class OrphanedBlockRewardTest(BitcoinTestFramework):
         self.nodes[1].abandontransaction(txid)
         assert_equal(self.nodes[1].getbalances()["mine"], {
           "trusted": { 'bitcoin' : 10 },
-          "untrusted_pending": { 'bitcoin' : 0 },
-          "immature": { 'bitcoin' : 0 },
+          "untrusted_pending": {},
+          "immature": {},
         })
         self.nodes[1].sendtoaddress(self.nodes[0].getnewaddress(), 9)
 

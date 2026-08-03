@@ -16,6 +16,7 @@ from test_framework.messages import (
 )
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
+    amount_of,
     assert_equal,
 #    assert_fee_amount,
     assert_greater_than,
@@ -45,14 +46,14 @@ class WalletSendTest(BitcoinTestFramework):
                   expect_error=None, solving_data=None):
         assert (amount is None) != (data is None)
 
-        from_balance_before = from_wallet.getbalances()["mine"]["trusted"]['bitcoin']
+        from_balance_before = amount_of(from_wallet.getbalances()["mine"]["trusted"])
         if include_unsafe:
-            from_balance_before += from_wallet.getbalances()["mine"]["untrusted_pending"]['bitcoin']
+            from_balance_before += amount_of(from_wallet.getbalances()["mine"]["untrusted_pending"])
 
         if to_wallet is None:
             assert amount is None
         else:
-            to_untrusted_pending_before = to_wallet.getbalances()["mine"]["untrusted_pending"]['bitcoin']
+            to_untrusted_pending_before = amount_of(to_wallet.getbalances()["mine"]["untrusted_pending"])
 
         if amount:
             dest = to_wallet.getnewaddress()
@@ -147,9 +148,9 @@ class WalletSendTest(BitcoinTestFramework):
             assert not "txid" in res
             assert "psbt" in res
 
-        from_balance = from_wallet.getbalances()["mine"]["trusted"]['bitcoin']
+        from_balance = amount_of(from_wallet.getbalances()["mine"]["trusted"])
         if include_unsafe:
-            from_balance += from_wallet.getbalances()["mine"]["untrusted_pending"]['bitcoin']
+            from_balance += amount_of(from_wallet.getbalances()["mine"]["untrusted_pending"])
 
         if add_to_wallet and not include_watching:
             # Ensure transaction exists in the wallet:
@@ -173,9 +174,9 @@ class WalletSendTest(BitcoinTestFramework):
             self.sync_mempools()
             if add_to_wallet:
                 if not subtract_fee_from_outputs:
-                    assert_equal(to_wallet.getbalances()["mine"]["untrusted_pending"]['bitcoin'], to_untrusted_pending_before + Decimal(amount if amount else 0))
+                    assert_equal(amount_of(to_wallet.getbalances()["mine"]["untrusted_pending"]), to_untrusted_pending_before + Decimal(amount if amount else 0))
             else:
-                assert_equal(to_wallet.getbalances()["mine"]["untrusted_pending"]['bitcoin'], to_untrusted_pending_before)
+                assert_equal(amount_of(to_wallet.getbalances()["mine"]["untrusted_pending"]), to_untrusted_pending_before)
 
         return res
 

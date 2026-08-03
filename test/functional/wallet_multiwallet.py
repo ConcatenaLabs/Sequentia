@@ -19,6 +19,7 @@ from test_framework.blocktools import COINBASE_MATURITY
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.test_node import ErrorMatch
 from test_framework.util import (
+    amount_of,
     assert_equal,
     assert_raises_rpc_error,
     get_rpc_proxy,
@@ -221,7 +222,7 @@ class MultiWalletTest(BitcoinTestFramework):
         self.generatetoaddress(node, nblocks=1, address=wallets[0].getnewaddress(), sync_fun=self.no_op)
         for wallet_name, wallet in zip(wallet_names, wallets):
             info = wallet.getwalletinfo()
-            assert_equal(info['immature_balance']['bitcoin'], 50 if wallet is wallets[0] else 0)
+            assert_equal(amount_of(info['immature_balance']), 50 if wallet is wallets[0] else 0)
             assert_equal(info['walletname'], wallet_name)
 
         # accessing invalid wallet fails
@@ -232,18 +233,18 @@ class MultiWalletTest(BitcoinTestFramework):
 
         w1, w2, w3, w4, *_ = wallets
         self.generatetoaddress(node, nblocks=COINBASE_MATURITY + 1, address=w1.getnewaddress(), sync_fun=self.no_op)
-        assert_equal(w1.getbalance()['bitcoin'], 100)
-        assert_equal(w2.getbalance()['bitcoin'], 0)
-        assert_equal(w3.getbalance()['bitcoin'], 0)
-        assert_equal(w4.getbalance()['bitcoin'], 0)
+        assert_equal(amount_of(w1.getbalance()), 100)
+        assert_equal(amount_of(w2.getbalance()), 0)
+        assert_equal(amount_of(w3.getbalance()), 0)
+        assert_equal(amount_of(w4.getbalance()), 0)
 
         w1.sendtoaddress(w2.getnewaddress(), 1)
         w1.sendtoaddress(w3.getnewaddress(), 2)
         w1.sendtoaddress(w4.getnewaddress(), 3)
         self.generatetoaddress(node, nblocks=1, address=w1.getnewaddress(), sync_fun=self.no_op)
-        assert_equal(w2.getbalance()['bitcoin'], 1)
-        assert_equal(w3.getbalance()['bitcoin'], 2)
-        assert_equal(w4.getbalance()['bitcoin'], 3)
+        assert_equal(amount_of(w2.getbalance()), 1)
+        assert_equal(amount_of(w3.getbalance()), 2)
+        assert_equal(amount_of(w4.getbalance()), 3)
 
         batch = w1.batch([w1.getblockchaininfo.get_request(), w1.getwalletinfo.get_request()])
         assert_equal(batch[0]["result"]["chain"], self.chain)

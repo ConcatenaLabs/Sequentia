@@ -8,6 +8,7 @@
 from test_framework.blocktools import COINBASE_MATURITY
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
+    amount_of,
     assert_equal,
     assert_raises_rpc_error
 )
@@ -46,9 +47,9 @@ class CreateWalletWatchonlyTest(BitcoinTestFramework):
         # getbalance
         self.log.info('include_watchonly should default to true for watch-only wallets')
         self.log.info('Testing getbalance watch-only defaults')
-        assert_equal(wo_wallet.getbalance()['bitcoin'], 1)
+        assert_equal(amount_of(wo_wallet.getbalance()), 1)
         assert_equal(len(wo_wallet.listtransactions()), 1)
-        assert_equal(wo_wallet.getbalance(include_watchonly=False)['bitcoin'], 0)
+        assert_equal(amount_of(wo_wallet.getbalance(include_watchonly=False)), 0)
 
         self.log.info('Test sending from a watch-only wallet raises RPC error')
         msg = "Error: Private keys are disabled for this wallet"

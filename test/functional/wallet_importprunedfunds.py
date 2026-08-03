@@ -11,6 +11,7 @@ from test_framework.key import ECKey
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.script import hash160
 from test_framework.util import (
+    amount_of,
     assert_equal,
     assert_raises_rpc_error,
 )
@@ -89,7 +90,7 @@ class ImportPrunedFundsTest(BitcoinTestFramework):
         # Import with no affiliated address
         assert_raises_rpc_error(-5, "No addresses", self.nodes[1].importprunedfunds, rawtxn1, proof1)
 
-        balance1 = self.nodes[1].getbalance()['bitcoin']
+        balance1 = amount_of(self.nodes[1].getbalance())
         assert_equal(balance1, Decimal(0))
 
         # Import with affiliated address with no rescan
@@ -107,7 +108,7 @@ class ImportPrunedFundsTest(BitcoinTestFramework):
         w1.importprunedfunds(rawtxn3, proof3)
         assert [tx for tx in w1.listtransactions() if tx['txid'] == txnid3]
         balance3 = w1.getbalance()
-        assert_equal(balance3['bitcoin'], Decimal('0.025'))
+        assert_equal(amount_of(balance3), Decimal('0.025'))
 
         # Addresses Test - after import
         address_info = w1.getaddressinfo(address1)
