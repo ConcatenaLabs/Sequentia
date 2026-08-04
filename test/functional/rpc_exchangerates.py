@@ -42,7 +42,9 @@ class ExchangeRatesTest(BitcoinTestFramework):
 
         # Add issued asset
         self.issue_amount = Decimal('100')
-        self.issuance = node.issueasset(self.issue_amount, 1)
+        # SEQUENTIA: no default fee asset on an open-fee-market chain.
+        self.issuance = node.issueasset(
+            assetamount=self.issue_amount, tokenamount=1, fee_asset='gasset')
         self.asset = self.issuance['asset']
         self.test_exchange_rates_update(node, initial_rates | { self.asset: 100000000 })
 

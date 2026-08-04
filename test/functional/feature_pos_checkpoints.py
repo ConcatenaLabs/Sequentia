@@ -129,7 +129,8 @@ class PosCheckpointsTest(BitcoinTestFramework):
 
         # Commit the payload in a parent-chain transaction (a `data` output)
         raw = parent.createrawtransaction([], [{"data": ckpt['payload']}])
-        funded = parent.fundrawtransaction(raw)['hex']
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        funded = parent.fundrawtransaction(raw, {'fee_asset': 'bitcoin'})['hex']
         signed = parent.signrawtransactionwithwallet(funded)['hex']
         parent.sendrawtransaction(signed)
         # Bury it CHECKPOINT_DEPTH deep

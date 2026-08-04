@@ -268,7 +268,9 @@ class OpenAmpM0Test(BitcoinTestFramework):
         node = self.nodes[0]
         self.generate(node, 101)
         # Spend the initialfreecoins output so the wallet has ordinary utxos.
-        node.sendtoaddress(node.getnewaddress(), 50)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        node.sendtoaddress(address=node.getnewaddress(), amount=50,
+                           fee_asset_label='bitcoin')
         self.generate(node, 1)
         genesis_hash = uint256_from_str(bytes.fromhex(node.getblockhash(0))[::-1])
 

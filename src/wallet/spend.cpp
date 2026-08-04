@@ -946,6 +946,12 @@ static bool CreateTransactionInternal(
 
     CoinSelectionParams coin_selection_params; // Parameters for coin selection, init with dummy
     coin_selection_params.m_avoid_partial_spends = coin_control.m_avoid_partial_spends;
+    // SEQUENTIA: internal plumbing for callers that build a CCoinControl directly
+    // (the GUI, feebumper) and may legitimately leave the fee asset unset. It is
+    // NOT the RPC default: every RPC that builds a transaction settles the fee
+    // asset itself and refuses to proceed when the caller named none (see
+    // ResolveFeeAsset in wallet/rpc/util.h). Reaching this value_or from an RPC
+    // path would mean that refusal was bypassed.
     coin_selection_params.m_fee_asset = coin_control.m_fee_asset.value_or(::policyAsset);
 
     // SEQUENTIA: a fee must be payable in an asset that has a (positive)
@@ -993,6 +999,21 @@ static bool CreateTransactionInternal(
         map_recipients_sum[recipient.asset] += recipient.nAmount;
 
         if (recipient.fSubtractFeeFromAmount) {
+            // SEQUENTIA: the fee comes OUT of this output, so it can only be paid
+            // in this output's asset. The RPC layer settles that constraint for
+            // its callers (ResolveFeeAsset in wallet/rpc/util.cpp), so reaching
+            // here means a caller built the CCoinControl itself -- the GUI, or
+            // feebumper -- and asked for a genuinely impossible combination, or
+            // asked to subtract from outputs of two different assets. This is the
+            // backstop for those. Without it the code runs on to
+            // map_change_and_fee.at(fee asset) and surfaces a bare "map::at": an
+            // internal error where the caller needs to be told what is wrong.
+            // Applied to every asset alike; there is no policy-asset exemption.
+            if (recipient.asset != coin_selection_params.m_fee_asset) {
+                error = strprintf(_("Cannot subtract the fee from an output of asset %s while paying the fee in %s: the fee is taken out of that output, so it is necessarily paid in that output's asset."),
+                                  recipient.asset.GetHex(), coin_selection_params.m_fee_asset.GetHex());
+                return false;
+            }
             outputs_to_subtract_fee_from++;
             coin_selection_params.m_subtract_fee_outputs = true;
         }

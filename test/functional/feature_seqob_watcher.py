@@ -252,7 +252,9 @@ class SeqObWatcherTest(BitcoinTestFramework):
         bech = node.getnewaddress("", "bech32")
         unconf = node.getaddressinfo(bech)["unconfidential"]
         if asset_display is None:
-            node.sendtoaddress(unconf, amount)
+            # SEQUENTIA: an open-fee-market chain has no default fee asset.
+            node.sendtoaddress(address=unconf, amount=amount,
+                               fee_asset_label=BITCOIN_ASSET)
             target = BITCOIN_ASSET
         else:
             node.sendtoaddress(address=unconf, amount=amount, assetlabel=asset_display,
@@ -355,11 +357,14 @@ class SeqObWatcherTest(BitcoinTestFramework):
 
     def _setup_assets(self, node):
         self.generate(node, 101)
-        node.sendtoaddress(node.getnewaddress(), 1000000)
+        node.sendtoaddress(address=node.getnewaddress(), amount=1000000,
+                           fee_asset_label=BITCOIN_ASSET)
         self.generate(node, 1)
-        self.A_display = node.issueasset(100000, 0, False)["asset"]
+        self.A_display = node.issueasset(assetamount=100000, tokenamount=0,
+                                          blind=False, fee_asset=BITCOIN_ASSET)["asset"]
         self.generate(node, 1)
-        self.B_display = node.issueasset(100000, 0, False)["asset"]
+        self.B_display = node.issueasset(assetamount=100000, tokenamount=0,
+                                          blind=False, fee_asset=BITCOIN_ASSET)["asset"]
         self.generate(node, 1)
         self.A_OUT = self.asset_out(self.A_display)
         self.B_OUT = self.asset_out(self.B_display)

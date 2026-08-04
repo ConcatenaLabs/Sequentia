@@ -53,7 +53,9 @@ class RecomputeFeesEvictTest(BitcoinTestFramework):
         gasset = node.dumpassetlabels()['gasset']
 
         # Issue a test asset and confirm it.
-        issuance = node.issueasset(Decimal('1000'), 1, False)
+        # SEQUENTIA: no default fee asset on an open-fee-market chain.
+        issuance = node.issueasset(
+            assetamount=Decimal('1000'), tokenamount=1, blind=False, fee_asset='gasset')
         asset = issuance['asset']
         self.generate(node, 1)
 
