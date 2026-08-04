@@ -950,6 +950,105 @@ public:
         assert(consensus.hashGenesisBlock == expected_genesis);
         assert(genesis.hashMerkleRoot == uint256S("0x94ccd459b890e0eed4f26e0a500b7c2adafef231742ac88531c204597502fbf2"));
 
+        // SEQUENTIA: ONE-TIME treasury UTXO recovery. Read this before touching it.
+        //
+        // WHAT HAPPENED. On 2026-07-29 a watchdog process deleted the founder
+        // treasury wallet. Two of its outputs became provably unspendable, for
+        // ever: the private keys AND the wallet's master blinding key were
+        // destroyed, and an exhaustive search for a copy found none. Nothing in
+        // the protocol can recover them, because there is nothing left to sign
+        // with. Roughly 398.07 million tSEQ -- most of the chain's supply -- and
+        // the USDX reissuance token, the authority to ever issue more USDX, were
+        // stranded on a testnet whose whole purpose is to be used.
+        //
+        // WHAT THIS DOES. At height 73200 the block-connect path removes those two
+        // outpoints from the UTXO set and adds two ordinary outputs paying the
+        // replacement treasury wallet (`treasury2026`, backed up on and off the
+        // box). Not a transaction, not a script: a rewrite of the UTXO set that
+        // every node performs identically, from the constants below, including on
+        // a fresh sync or a -reindex from genesis.
+        //
+        // WHY IT IS ACCEPTABLE HERE, AND ONLY HERE.
+        //  - The chain is a testnet with no real value on it, and every operator
+        //    is one of two people who both agreed to this.
+        //  - It moves no coin that anybody can spend. The retired outputs are
+        //    unspendable by everyone, for ever, including their owner.
+        //  - It is auditable: the constants are here in the source, the created
+        //    outputs land at the outpoints of a synthetic transaction derived
+        //    deterministically from them, and anyone can recompute the result.
+        //
+        // WHAT IT COSTS, STATED PLAINLY. Retired output (a) is CONFIDENTIAL: its
+        // value and asset are commitments, so consensus cannot know what it held
+        // and cannot check the replacement against it. The amount recreated is a
+        // number the owner chose, not a number the chain verified. It is set
+        // deliberately BELOW the ~398.07M believed lost -- a round 398,000,000 --
+        // so the rewrite cannot mint more than was destroyed even if the estimate
+        // is somewhat off. Output (b) is explicit, so its replacement is exact.
+        //
+        // AND IT IS NOT A MECHANISM. Do not add entries here. A second accident is
+        // a reason to fix the process that caused it, not to run this again: every
+        // use spends the credibility that the first one borrowed.
+        //
+        // Height 73200 was ~48 hours ahead of the tip (~68,417) at 30 s slots, so
+        // every node had time to upgrade. Below it nothing happens; at it the
+        // rewrite applies once; above it the created coins are ordinary coins.
+        // Note that transactions IN block 73200 cannot spend them -- the rewrite
+        // runs after that block's transactions -- so they are first spendable at
+        // height 73201.
+        //
+        // WHERE THE MONEY LANDS. The created outputs sit at the outpoints of the
+        // synthetic transaction derived from this table
+        // (BuildUtxoRecoveryTransaction, validation.cpp), which for these exact
+        // constants is
+        //   618981449a50c460c1dcd7c0dae693674294a2c58e930e128d6ef56e82eecae7:0
+        //     -- 398,000,000.00000000 tSEQ
+        //   618981449a50c460c1dcd7c0dae693674294a2c58e930e128d6ef56e82eecae7:1
+        //     -- 1.0 of the USDX reissuance token
+        // (pinned by sequentia_chainparams_tests; change any constant here and
+        // that txid moves). That transaction is never relayed and never in a
+        // block, so no wallet rescan will ever find it: `getrawtransaction` will
+        // not know it, and the coins will NOT appear in listunspent. They are
+        // ordinary coins to consensus -- `gettxout` and `scantxoutset` see them,
+        // and signrawtransactionwithwallet finds their prevouts in the UTXO set
+        // and signs normally. So the treasury reclaims them with one manual sweep
+        // (createrawtransaction from the outpoints above, sign, send), after
+        // which the resulting outputs are ordinary wallet outputs like any other.
+        consensus.utxo_recovery.height = 73200;
+        consensus.utxo_recovery.chain_genesis = expected_genesis;
+        consensus.utxo_recovery.retire = {
+            // Confidential (value and asset committed); true contents unknowable.
+            // spk 00149e6da228097ae9fb10fdf4a42438354b6e34cc50
+            {uint256S("0x910fcd65f2096051ea2fd823b21838b73a538d54e3c42c4c0474e140fed11953"), 0},
+            // Explicit: 1.0 of the USDX reissuance token.
+            // spk 00143e8b4a840f679e5594dd44297162f54fe4fd3185
+            {uint256S("0x6d7b68f5ea109eba1a03c688698e4a92debe3e7208c43fdc34e5ef052977dc7d"), 1},
+        };
+        {
+            // tb1q6tz9ksf643xwhlvql4nzrxwqc9p5van9ecr08l (P2WPKH), wallet treasury2026.
+            const CScript treasury2026 = CScript() << OP_0 << ParseHex("d2c45b413aac4cebfd80fd662199c0c143467665");
+            consensus.utxo_recovery.create = {
+                // 398,000,000.00000000 tSEQ, EXPLICIT.
+                {CAsset(uint256S("0xc8eccacf0953e1931cd31e434d8319101cc36e6c38b0e2104d8687552fae3e40")), 39800000000000000, treasury2026},
+                // 1.0 of the USDX reissuance token, EXPLICIT.
+                {CAsset(uint256S("0x2afc53ebcd3f3179c60f97e4e7f23755ff2519b308914d3b51ee97fb1c8557e5")), 100000000, treasury2026},
+            };
+            // Self-checks on the constants above, so a transcription slip is a
+            // startup failure rather than a divergent UTXO set. The recreated
+            // policy-asset output must be the policy asset this chain actually
+            // computed at genesis, and the recreated amount must be spendable
+            // under this chain's money cap.
+            assert(consensus.utxo_recovery.create[0].asset == consensus.subsidy_asset);
+            assert(consensus.utxo_recovery.create[0].amount <= MAX_MONEY);
+        }
+        // A re-genesised testnet is a DIFFERENT chain and must not carry this.
+        // The assert above pins the genesis hash today, so this branch is dead
+        // code -- until someone re-genesises, at which point it is the whole
+        // point: the recovery silently disables itself instead of rewriting the
+        // UTXO set of a chain that never lost anything.
+        if (consensus.utxo_recovery.chain_genesis != consensus.hashGenesisBlock) {
+            consensus.utxo_recovery = Consensus::UtxoRecovery{};
+        }
+
         vFixedSeeds.clear();
         vSeeds.clear();
         // SEQUENTIA: peers come from the built-in seed nodes (gateway +
@@ -1409,6 +1508,17 @@ protected:
     std::string default_magic_str = "5319F20E";
     std::string default_signblockscript = "51";
     bool use_invalid_seeds = true;
+    //! A custom chain's genesis hash is only known once SetGenesisBlock() has
+    //! run, so the opt-in UTXO-recovery table (see UpdateFromArgs) can only be
+    //! bound to its chain afterwards. Call this after every point where
+    //! consensus.hashGenesisBlock is (re)computed, or the table's genesis gate
+    //! never matches and the rewrite silently never fires.
+    void BindUtxoRecoveryToGenesis()
+    {
+        if (!consensus.utxo_recovery.IsNull()) {
+            consensus.utxo_recovery.chain_genesis = consensus.hashGenesisBlock;
+        }
+    }
     void UpdateFromArgs(const ArgsManager& args)
     {
         UpdateActivationParametersFromArgs(args);
@@ -1662,6 +1772,46 @@ protected:
             }
             consensus.nMaxBlockWeight = (uint32_t)mbw;
         }
+        // SEQUENTIA: opt-in one-time UTXO-set rewrite for custom chains.
+        //
+        // The Sequentia testnet's own rewrite is hard-coded in CTestNetParams and
+        // cannot be reached from here. This exists so the MECHANISM -- the
+        // block-connect hook, its undo path, and its behaviour across a reindex --
+        // can be driven end to end on a chain a test can actually build, using the
+        // same code path the real one uses. Off unless asked for, which is why a
+        // default regtest/elementsregtest chain never rewrites anything.
+        //
+        // -con_utxo_recovery_height=<n>            0 (default) = no rewrite
+        // -con_utxo_recovery_retire=<txid>:<vout>  repeatable
+        // -con_utxo_recovery_create=<assethex>:<atoms>:<spkhex>  repeatable
+        consensus.utxo_recovery = Consensus::UtxoRecovery{};
+        consensus.utxo_recovery.height = args.GetIntArg("-con_utxo_recovery_height", 0);
+        for (const std::string& entry : args.GetArgs("-con_utxo_recovery_retire")) {
+            const size_t colon = entry.rfind(':');
+            if (colon == std::string::npos) {
+                throw std::runtime_error("-con_utxo_recovery_retire must be <txid>:<vout>");
+            }
+            const std::string txid = entry.substr(0, colon);
+            uint32_t vout;
+            if (!IsHex(txid) || txid.size() != 64 || !ParseUInt32(entry.substr(colon + 1), &vout)) {
+                throw std::runtime_error("-con_utxo_recovery_retire must be <64-hex-char txid>:<vout>");
+            }
+            consensus.utxo_recovery.retire.emplace_back(uint256S(txid), vout);
+        }
+        for (const std::string& entry : args.GetArgs("-con_utxo_recovery_create")) {
+            std::vector<std::string> parts;
+            boost::split(parts, entry, boost::is_any_of(":"));
+            int64_t amount;
+            if (parts.size() != 3 || !IsHex(parts[0]) || parts[0].size() != 64 ||
+                !ParseInt64(parts[1], &amount) || !IsHex(parts[2])) {
+                throw std::runtime_error("-con_utxo_recovery_create must be <64-hex-char asset>:<atoms>:<spkhex>");
+            }
+            const std::vector<unsigned char> spk = ParseHex(parts[2]);
+            consensus.utxo_recovery.create.push_back(Consensus::UtxoRecoveryOutput{
+                CAsset(uint256S(parts[0])), (CAmount)amount,
+                CScript(spk.begin(), spk.end())});
+        }
+
         g_con_elementsmode = args.GetBoolArg("-con_elementsmode", true);
         consensus.elements_mode = g_con_elementsmode;
 
@@ -1795,6 +1945,7 @@ public:
         UpdateFromArgs(args);
         SetGenesisBlock();
         consensus.hashGenesisBlock = genesis.GetHash();
+        BindUtxoRecoveryToGenesis();
     }
 };
 
@@ -1846,6 +1997,7 @@ public:
         multi_data_permitted = true;
         SetGenesisBlock();
         consensus.hashGenesisBlock = genesis.GetHash();
+        BindUtxoRecoveryToGenesis();
         if (!args.IsArgSet("-seednode")) {
             vSeeds.emplace_back("seed.liquid-testnet.blockstream.com");
             vSeeds.emplace_back("seed.liquidtestnet.com");
