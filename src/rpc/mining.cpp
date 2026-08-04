@@ -2013,7 +2013,18 @@ static RPCHelpMan getposblocktemplate()
     }
 
     CScript feeDestinationScript = chainparams.GetConsensus().mandatory_coinbase_destination;
-    if (feeDestinationScript == CScript()) feeDestinationScript = CScript() << OP_TRUE;
+    // SEQUENTIA PoS: the coinbase must pay the elected leader's own payout
+    // script -- consensus binds every fee-bearing coinbase output to it from
+    // pos_coinbase_leader_height (ConnectBlock, "bad-coinbase-not-leader").
+    // Paying OP_TRUE here made every template the distributed-committee flow
+    // asked for unconnectable, so the RPC failed inside CreateNewBlock's own
+    // TestBlockValidity and no distributed committee could produce a block at
+    // all. Same call, same arguments, as the single-host producer
+    // (ProducePosBlock, src/pos_producer.cpp), so the two paths cannot
+    // disagree about who gets paid.
+    if (feeDestinationScript == CScript()) {
+        feeDestinationScript = PosRequiredCoinbaseScript(pubkey, tip->nHeight + 1, seed);
+    }
 
     std::unique_ptr<CBlockTemplate> pblocktemplate(
         BlockAssembler(chainman.ActiveChainstate(), *node.mempool, chainparams)
