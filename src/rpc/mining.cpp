@@ -1538,7 +1538,7 @@ static RPCHelpMan vrfprove()
                 "(see doc/sequentia/04-proof-of-stake.md).\n",
                 {
                     {"privkey", RPCArg::Type::STR, RPCArg::Optional::NO, "WIF private key."},
-                    {"input", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Hex-encoded input (alpha)."},
+                    {"alpha", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Hex-encoded VRF input (alpha)."},
                 },
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
@@ -1554,7 +1554,7 @@ static RPCHelpMan vrfprove()
     if (!key.IsValid()) {
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid private key");
     }
-    std::vector<unsigned char> alpha = ParseHexV(request.params[1], "input");
+    std::vector<unsigned char> alpha = ParseHexV(request.params[1], "alpha");
     auto proof = VrfProve(key, alpha);
     if (!proof) {
         throw JSONRPCError(RPC_MISC_ERROR, "VRF proof generation failed");
@@ -1622,7 +1622,7 @@ static RPCHelpMan vrfverify()
                 "if so, its output (beta). See doc/sequentia/04-proof-of-stake.md.\n",
                 {
                     {"pubkey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Hex-encoded public key."},
-                    {"input", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Hex-encoded input (alpha)."},
+                    {"alpha", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Hex-encoded VRF input (alpha)."},
                     {"proof", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Hex-encoded VRF proof (pi)."},
                 },
                 RPCResult{
@@ -1636,7 +1636,7 @@ static RPCHelpMan vrfverify()
 {
     std::vector<unsigned char> pubkey_bytes = ParseHexV(request.params[0], "pubkey");
     CPubKey pubkey(pubkey_bytes);
-    std::vector<unsigned char> alpha = ParseHexV(request.params[1], "input");
+    std::vector<unsigned char> alpha = ParseHexV(request.params[1], "alpha");
     std::vector<unsigned char> proof = ParseHexV(request.params[2], "proof");
     uint256 output;
     bool ok = pubkey.IsFullyValid() && VrfVerify(pubkey, alpha, proof, output);
