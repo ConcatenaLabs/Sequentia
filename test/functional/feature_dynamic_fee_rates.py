@@ -44,7 +44,9 @@ class FeeExchangeRatesTest(BitcoinTestFramework):
         assert_equal(node.getfeeexchangerates(), {'gasset': 100000000})
 
         # Issue a test asset.
-        self.asset = node.issueasset(Decimal('100'), 1, False)['asset']
+        # SEQUENTIA: no default fee asset on an open-fee-market chain.
+        self.asset = node.issueasset(
+            assetamount=Decimal('100'), tokenamount=1, blind=False, fee_asset='gasset')['asset']
         self.generate(node, 1)
 
         # It is not on the whitelist yet.
@@ -90,7 +92,8 @@ class FeeExchangeRatesTest(BitcoinTestFramework):
         # A transaction offering a fee in a non-whitelisted asset is rejected:
         # its value is 0 rfa, so it cannot pay a meaningful fee. Use a freshly
         # issued asset that never receives a rate.
-        other = node.issueasset(10, 0, False)['asset']
+        other = node.issueasset(
+            assetamount=10, tokenamount=0, blind=False, fee_asset='gasset')['asset']
         self.generate(node, 1)
         assert other not in node.getfeeexchangerates()
         # Re-admit self.asset (in memory) so the wallet can spend it.

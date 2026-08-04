@@ -1416,7 +1416,7 @@ RPCHelpMan issueasset()
                     {"tokenamount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "Amount of reissuance tokens to generate. Note that the amount is BTC-like, with 8 decimal places. These will allow you to reissue the asset if in wallet using `reissueasset`. These tokens are not consumed during reissuance."},
                     {"blind", RPCArg::Type::BOOL, RPCArg::Default{false}, "Whether to blind the issuances."},
                     {"contract_hash", RPCArg::Type::STR_HEX, RPCArg::Default{"0000...0000"}, "Raw contract hash to commit, as 32 bytes of hex. Prefer `contract`, which builds and hashes the contract for you. Note this argument is read big-endian, like a txid, so it is NOT the SHA256 digest of a contract as printed by sha256sum; passing one here commits the reversed bytes and yields an asset no registry can verify. Cannot be combined with `contract`."},
-                    {"fee_asset", RPCArg::Type::STR, RPCArg::DefaultHint{"not set, fall back to fee asset in existing transaction"}, "Asset to use to pay the fees"},
+                    {"fee_asset", RPCArg::Type::STR, RPCArg::Optional::OMITTED_NAMED_ARG, "Label or hex ID of the asset used to pay the fee. Required on a chain with the open fee market (con_any_asset_fees): nothing is defaulted or inferred, and an issuance has no output for the fee to come out of."},
                     {"denomination", RPCArg::Type::NUM, RPCArg::Default{8}, "Number of decimals to denominate the asset - default: 8. When `contract` is given, its precision sets this and the two must agree.\n"},
                     {"contract", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "The asset's public identity, committed into the asset id.",
                         {
@@ -1585,15 +1585,11 @@ RPCHelpMan issueasset()
     issuance_details.contract_hash = contract_hash;
     CCoinControl coin_control;
     if (g_con_any_asset_fees) {
-        if (!request.params[4].isNull()) {
-            CAsset fee_asset = ::policyAsset;
-            std::string feeAssetString = request.params[4].get_str();
-            fee_asset = GetAssetFromString(feeAssetString);
-            if (fee_asset.IsNull()) {
-                throw JSONRPCError(RPC_WALLET_ERROR, strprintf("Unknown label and invalid asset hex for fee: %s", feeAssetString));
-            }
-            coin_control.m_fee_asset = fee_asset;
-        }
+        // SEQUENTIA: no default fee asset. An issuance pays a fee like any other
+        // transaction, and leaving fee_asset out used to settle silently on the
+        // policy asset -- the privilege the open fee market abolishes. Nothing is
+        // being subtracted from an output here, so the caller has to choose.
+        coin_control.m_fee_asset = ResolveFeeAsset(ParseFeeAssetArg(request.params[4]), std::nullopt, "fee_asset");
         if (!request.params[5].isNull()) {
             const int d = request.params[5].get_int();
             if (d < 0 || d > MAX_ASSET_PRECISION) {
@@ -1655,7 +1651,7 @@ RPCHelpMan reissueasset()
                 {
                     {"asset", RPCArg::Type::STR, RPCArg::Optional::NO, "The asset you want to re-issue. The corresponding token must be in your wallet."},
                     {"assetamount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "Amount of additional asset to generate. Note that the amount is BTC-like, with 8 decimal places."},
-                    {"fee_asset", RPCArg::Type::STR, RPCArg::DefaultHint{"not set, fall back to fee asset in existing transaction"}, "Asset to use to pay fees\n"},
+                    {"fee_asset", RPCArg::Type::STR, RPCArg::Optional::OMITTED_NAMED_ARG, "Label or hex ID of the asset used to pay the fee. Required on a chain with the open fee market (con_any_asset_fees): nothing is defaulted or inferred, and an issuance has no output for the fee to come out of."},
                 },
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
@@ -1731,14 +1727,12 @@ RPCHelpMan reissueasset()
     if (blind_issued_outputs) token_dest_blindpub = pwallet->GetBlindingPubKey(GetScriptForDestination(token_dest));
 
     CCoinControl coin_control;
-    if (g_con_any_asset_fees && request.params.size() > 2) {
-        CAsset fee_asset = ::policyAsset;
-        std::string feeAssetString = request.params[2].get_str();
-        fee_asset = GetAssetFromString(feeAssetString);
-        if (fee_asset.IsNull()) {
-            throw JSONRPCError(RPC_WALLET_ERROR, strprintf("Unknown label and invalid asset hex for fee: %s", feeAssetString));
-        }
-        coin_control.m_fee_asset = fee_asset;
+    if (g_con_any_asset_fees) {
+        // No default fee asset (see issueasset). Note the reissuance TOKEN is not
+        // a candidate the wallet would pick for the caller anyway: it carries
+        // issuance authority, not spendable value, and is not priced.
+        coin_control.m_fee_asset = ResolveFeeAsset(
+            request.params.size() > 2 ? ParseFeeAssetArg(request.params[2]) : std::nullopt, std::nullopt, "fee_asset");
     }
     // Attempt a send.
     CTransactionRef tx_ref = SendGenerationTransaction(GetScriptForDestination(asset_dest), asset_dest_blindpub, GetScriptForDestination(token_dest), token_dest_blindpub, nAmount, -1, &issuance_details, coin_control, pwallet);

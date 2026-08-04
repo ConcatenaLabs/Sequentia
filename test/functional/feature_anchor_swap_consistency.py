@@ -162,7 +162,9 @@ class AnchorSwapConsistencyTest(BitcoinTestFramework):
 
         # --- Step 1: the BTC leg. Alice pays Bob on the parent chain. ---
         bob_parent = parent.getnewaddress()
-        btc_leg = parent.sendtoaddress(address=bob_parent, amount=10.0, replaceable=True)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        btc_leg = parent.sendtoaddress(address=bob_parent, amount=10.0, replaceable=True,
+                                       fee_asset_label='bitcoin')
         self.generatetoaddress(parent, 1, parent_mine, sync_fun=self.no_op)
         block_p_height = parent.getblockcount()
         assert_equal(parent.gettransaction(btc_leg)['confirmations'], 1)
@@ -171,7 +173,8 @@ class AnchorSwapConsistencyTest(BitcoinTestFramework):
         # on-chain (paper principle 7), so the Sequentia block containing it
         # anchors at a height >= P's. ---
         alice_seq = seq.getnewaddress()
-        seq_leg = seq.sendtoaddress(address=alice_seq, amount=10.0)
+        seq_leg = seq.sendtoaddress(address=alice_seq, amount=10.0,
+                                    fee_asset_label='bitcoin')
         self.generatetoaddress(seq, 1, seq_mine, sync_fun=self.no_op)
         block_s = seq.getbestblockhash()
         header_s = seq.getblockheader(block_s)
