@@ -243,6 +243,20 @@ bool VerifyAmounts(const std::vector<CTxOut>& inputs, const CTransaction& tx, st
             // a core asset operation -- reissuing an asset -- would work only on the
             // opt-in confidential path, which is backwards for this chain.
             //
+            // NO ACTIVATION HEIGHT, DELIBERATELY. CONTRIBUTING.md requires a
+            // height gate on every new consensus rule, and the reason is
+            // retroactive REJECTION: a rule that can reject a block must not
+            // apply to history produced before it existed, or a fresh sync stops
+            // dead where an old block breaks it. This change only ever ACCEPTS
+            // more -- transactions every node rejects today become valid, and
+            // nothing valid becomes invalid -- so no block that was ever accepted
+            // can fail under it, and there is nothing to grandfather. Gating it
+            // would only mean a fresh regtest or a future mainnet behaved
+            // differently from the live testnet, which is the thing to avoid. It
+            // is still a HARD FORK for the running network (old nodes reject the
+            // newly valid blocks) and still needs an all-at-once cutover; that is
+            // a deployment question, not an activation-height one.
+            //
             // So: a null nonce still means "new issuance" (that rule is untouched),
             // but within the reissuance branch the spent token input is now allowed
             // to be EXPLICIT, in which case its asset must equal assetTokenID
