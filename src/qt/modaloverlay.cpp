@@ -21,6 +21,16 @@ layerIsVisible(false),
 userClosed(false)
 {
     ui->setupUi(this);
+    // A wrapping QLabel knows how tall it must be at a given width, but the
+    // layout only asks when the size policy says to — otherwise it allocates
+    // the plain size hint and the last line is cut off mid-stroke. Fixing the
+    // panel width (see modaloverlay.ui) was not enough on its own.
+    for (QLabel* l : {ui->infoText, ui->infoTextStrong}) {
+        QSizePolicy sp = l->sizePolicy();
+        sp.setHeightForWidth(true);
+        sp.setVerticalPolicy(QSizePolicy::MinimumExpanding);
+        l->setSizePolicy(sp);
+    }
     connect(ui->closeButton, &QPushButton::clicked, this, &ModalOverlay::closeClicked);
     if (parent) {
         parent->installEventFilter(this);
@@ -115,9 +125,6 @@ void ModalOverlay::tipUpdate(int count, const QDateTime& blockDate, double nVeri
                 break;
             }
         }
-        // show progress increase per hour
-        ui->progressIncreasePerH->setText(QString::number(progressPerHour * 100, 'f', 2)+"%");
-
         // show expected remaining time
         if(remainingMSecs >= 0) {
             ui->expectedTimeLeft->setText(GUIUtil::formatNiceTimeOffset(remainingMSecs / 1000.0));
