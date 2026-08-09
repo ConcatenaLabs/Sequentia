@@ -59,6 +59,17 @@ public:
         /** Force blocking, modal message box dialog (not just OS notification) */
         MODAL               = 0x10000000U,
 
+        /**
+         * SEQUENTIA: this question is the "Bitcoin node unreachable at startup"
+         * prompt. A frontend that can render it properly (the Qt GUI) gives the
+         * two outcomes named buttons instead of a bare OK/Cancel pair: the
+         * choice is consequential and asymmetric, and "OK" says nothing about
+         * which way is which. Frontends that ignore the bit fall through to the
+         * non-interactive path, which answers "no" — the node refuses to start,
+         * which is the right default with nobody there to ask.
+         */
+        SEQ_ANCHOR_PROMPT   = 0x20000000U,
+
         /** Do not print contents of message to debug log */
         SECURE              = 0x40000000U,
 

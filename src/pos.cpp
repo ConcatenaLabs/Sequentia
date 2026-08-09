@@ -31,6 +31,7 @@ bool g_pos_agg_committee = false;
 bool g_pos_bls = false;
 bool g_pos_public_committee = false;
 uint64_t g_pos_min_stake = 0;
+int g_pos_escape_stall_mtp_height = 0;
 
 bool StakeRegistry::AddFromSpec(const std::string& spec, std::string& error)
 {
@@ -498,6 +499,7 @@ bool PosExpRaceActive(const Consensus::Params& params, int height)
 {
     return params.pos_exprace_height > 0 && height >= params.pos_exprace_height;
 }
+
 
 CScript BuildPosVrfCommitment(const std::vector<unsigned char>& proof)
 {

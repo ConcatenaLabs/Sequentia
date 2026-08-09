@@ -116,6 +116,121 @@ as Bitcoin does not reorganize a referenced block, no Sequentia reorg is
 possible: committee certification gives immediate finality (see
 [`04-proof-of-stake.md`](04-proof-of-stake.md)).
 
+### What the watcher costs the Bitcoin daemon
+
+The watcher re-examines the **whole** Sequentia chain on every tick, down to
+height 1, with no depth floor: a block is valid if and only if its anchor is on
+Bitcoin's best chain, at any depth, so there is no height below which checking
+can stop. That walk is in memory. What it must not do is turn into traffic.
+
+Two things keep the traffic flat as the chain grows.
+
+**Anchors are shared.** Sequentia produces a block every 30 seconds and Bitcoin
+one every ~10 minutes, so about twenty consecutive Sequentia blocks carry the
+same anchor. The walk collapses each such run and asks about *distinct anchors*,
+of which there is roughly one per Bitcoin block the chain spans.
+
+**Verdicts survive what cannot invalidate them.** Each distinct anchor's verdict
+— canonical, or definitively off the best chain — is cached, and a cached verdict
+is discarded exactly when Bitcoin does something that could have changed it.
+Extending Bitcoin cannot: appending blocks leaves the best chain below the old
+tip untouched, so every verdict already held is still correct. A reorganization
+can, but only above its fork point. So on each Bitcoin tip change the watcher
+spends one `getblockheader` asking whether its previous Bitcoin tip is still on
+the best chain: if it is, the move was an extension and nothing is re-checked; if
+it is not, it walks back to the fork point (one call per block of reorg depth)
+and drops only the verdicts above it.
+
+The result: a tick where Bitcoin stood still costs one `getbestblockhash`, and a
+tick where Bitcoin produced a block costs a small constant more — regardless of
+whether the chain is a day or a decade old.
+
+This matters more than it looks. Every call opens a **fresh TCP connection**
+(`mainchainrpc.cpp` sends `Connection: close`), and on testnet every node that
+has not configured `-mainchainrpchost` points at the same shared gateway. Before
+this was fixed the watcher discarded all its verdicts on every Bitcoin block,
+extension included, and re-asked about every distinct anchor on the chain: some
+three thousand calls per Bitcoin block on a chain a few weeks old, growing with
+every day the chain lived, from every node, forever.
+
+`getmainchainrpcstats` reports the calls this node has made to the Bitcoin
+daemon since startup, in total and per method. Sample it twice around a known
+interval to see the standing load; `getbestblockhash` is issued once per watcher
+tick and by nothing else, so its count is also the tick count and the difference
+between the two is everything the anchor walk actually cost.
+`feature_anchor_rpc_cost.py` asserts that difference does not grow with the
+number of distinct anchors on the chain.
+
+### `validateanchor=0` is a master switch, not a single check
+
+`-validateanchor` reads like one option ("validate anchors") but governs **four**
+mechanisms. Setting it to `0` turns off all of them:
+
+| # | Turned off | Where |
+|---|---|---|
+| 1 | Anchor validation of incoming blocks (rule R3 above) | `ContextualCheckBlockHeader` |
+| 2 | **The reorg-following watcher** | `AnchorWatchTask` returns immediately |
+| 3 | The escaping-stall parent-chain time gap | `CheckEscapingStallMtpGap` returns `ALLOWED` |
+| 4 | The PoS finality reconciliation monitor | requires `-validateanchor` |
+
+Item 2 is the consequential one. The watcher is what tells a node that Bitcoin
+orphaned one of its own anchors. Without it a node does not merely stop checking
+*other* people's blocks — it can no longer discover that **its own** chain is
+built on an orphaned anchor, so it never rolls back, and it keeps announcing that
+chain to every peer that syncs from it. The failure is silent and outward-facing:
+`getanchorstatus` reports `not_validated`, not a warning, and the node has no way
+to notice on its own.
+
+Worked example. Bitcoin is at height 101; a node produces Sequentia blocks 1..6,
+all anchored to Bitcoin block 101. Bitcoin then reorganizes: the old 101 is
+orphaned (`confirmations: -1`) and the chain continues to 106 on a different
+branch, so Sequentia blocks 1..6 are all invalid. With `validateanchor=1` the
+watcher notices within `anchorpollinterval` seconds, invalidates them, and the
+chain rebuilds on Bitcoin's new best chain. With `validateanchor=0` **nothing
+happens**: the node stays at height 6, believing it is healthy, and serves those
+six dead blocks to newcomers indefinitely.
+
+Note also that `0` does **not** stop block production. `GetAnchorForNewBlock`
+never consults the flag: a producer with a reachable Bitcoin daemon keeps
+selecting fresh anchors normally while ignoring every reorg — the worst
+combination, since it manufactures new blocks on a branch it cannot detect is
+dead.
+
+Legitimate uses are therefore narrow:
+
+- a **follower with no Bitcoin node available** that consciously delegates anchor
+  validation to its peers (see [`04-proof-of-stake.md`](04-proof-of-stake.md) §6:
+  *finality modulo Bitcoin requires watching Bitcoin*) — such a node must also
+  have the finality gate off, or it could never lower its finalized point after a
+  Bitcoin reorg and would stall forever;
+- **offline validation** of an already-anchored chain.
+
+It is not a supported way to work around a sync failure: it removes the node's
+ability to self-correct for as long as it stays set. Never set it on a node that
+produces blocks, or that other nodes sync from.
+
+Finally, reaching `0` is now always somebody's decision. When
+`con_bitcoin_anchor` is set and the Bitcoin daemon is unreachable at startup the
+node **asks**, through `uiInterface.ThreadSafeQuestion`:
+
+- an interactive frontend (`elements-qt`) offers two named choices — close and
+  start Bitcoin Core first, which is the default and what closing the window
+  does, or start without following Bitcoin;
+- every non-interactive frontend, `elementsd` included, answers no, so the node
+  refuses to start. That is the right default when there is nobody watching.
+
+A node that took the second option keeps a warning in the status bar for the
+whole session, because it otherwise looks perfectly healthy, and the same
+warning appears for a deliberately configured `validateanchor=0` node — the
+delegation is identical either way.
+
+This replaced an earlier behaviour worth knowing about if you are reading older
+logs or an older binary: the node used to decide by itself, and differently
+depending on `-server`. Without it (the typical GUI configuration) it started
+anyway with `validateanchor` silently forced to `0` for the rest of the session,
+even if Bitcoin came up moments later; with it, the node refused to start.
+Nobody chose either outcome, and `-server` tracked nothing a user cares about.
+
 ### The `getanchorstatus` RPC
 
 `getanchorstatus` (available only when `con_bitcoin_anchor` is enabled) reports
@@ -131,6 +246,78 @@ the tip's anchor and the health of the Bitcoin connection:
 
 `not_validated` is reported when `validateanchor` is off or the tip carries no
 anchor; the other values mirror `CheckMainchainAnchor`'s result.
+
+Four more fields describe a node that is *not* watching Bitcoin:
+
+| Field | Meaning |
+|---|---|
+| `unvalidatedbyprompt` | Validation is off because Bitcoin was unreachable at startup and the user chose to continue, not because it was configured off. |
+| `parentbackonline` | Bitcoin has become reachable again since; validation resumes only on restart. |
+| `unverifiedescapingstalls` | Sub-quorum blocks accepted without checking the Bitcoin evidence behind them. |
+| `lastunverifiedescapingstall` | Height of the most recent one (`-1` = none). |
+
+### The `getmainchainrpcstats` RPC
+
+`getmainchainrpcstats` (also only when `con_bitcoin_anchor` is enabled) reports
+how many RPC calls this node has made to the Bitcoin daemon since startup:
+
+| Field | Meaning |
+|---|---|
+| `calls` | Total calls, failures included — a failed call still cost a connection attempt. Every call is one fresh TCP connection, so this is also the number of connections opened. |
+| `bymethod` | The same total broken down by method name. |
+
+It makes no Bitcoin call of its own, so sampling it does not perturb what it
+measures. See *What the watcher costs the Bitcoin daemon* above for how to read
+the numbers.
+
+### Starting without a Bitcoin node
+
+If `con_bitcoin_anchor` is set and the Bitcoin daemon cannot be reached at
+startup, the node asks — it does not decide. `AppInitMain` puts the question
+through `uiInterface.ThreadSafeQuestion`, so:
+
+- **elementsd** and every other non-interactive frontend answer "no" (there is
+  nobody to ask) and the node **does not start**. This is the pre-existing
+  behaviour, and it is the right default for a machine nobody is watching. Note
+  that the test is now "can this frontend ask a human", not `-server`: a GUI user
+  who had enabled the RPC server used to get the daemon's flat refusal, for no
+  good reason.
+- **elements-qt** shows a dialog with two named buttons — *Close and start
+  Bitcoin Core first* (the default, and what closing the window does) and *Start
+  without following Bitcoin*.
+
+Choosing to continue sets `validateanchor=0` for the session, exactly as before,
+but now as a decision rather than a side effect. Two things follow from it.
+
+**The GUI keeps saying so.** A warning icon stays in the status bar for the whole
+session, because a node in this state looks perfectly healthy otherwise: it syncs,
+it shows balances, and nothing would ever mention Bitcoin again. Clicking it
+repeats what is being delegated and how to undo it. The icon appears for *any*
+node running with `validateanchor=0` on an anchored chain, including one
+configured that way deliberately — the delegation is identical, and only the
+wording differs (a configured node is told to remove the setting; a prompted one
+is told to restart, and is notified when Bitcoin becomes reachable again).
+
+**The node reports what it actually had to take on trust.** Most of what
+`validateanchor=0` gives up is invisible in the moment — a Bitcoin reorg that is
+never noticed leaves no trace. One case is not: a *sub-quorum* (escaping-stall)
+block is certified by as little as one committee member, and the only evidence
+that the committee genuinely was stalled is the parent-chain time gap, which
+lives on Bitcoin. `CheckEscapingStallMtpGap` returns `ALLOWED` unconditionally
+when validation is off, so such a block is accepted purely on the network's word.
+Every time that happens the node counts it, logs it, and surfaces it in
+`getanchorstatus` and in the status-bar tooltip. It is not rejected — rejecting it
+would strand a follower that has legitimately delegated — but it is never silent.
+
+**Validation is not resumed in place.** A watcher thread polls Bitcoin every 30
+seconds and, when it answers again, tells the user that a restart restores the
+checks. It does not simply set the flag back: the blocks accepted meanwhile were
+never checked against Bitcoin and are not revalidated retroactively, so a node
+that flipped it would be claiming a protection it does not have for its own
+history, and the anchor watcher would begin following reorgs from a tip it never
+verified. A restart does not revalidate that history either — but it does put the
+node back under a live Bitcoin view from a point the user knowingly chose, which
+is the honest thing to offer.
 
 ## 4. Immediate finality and what "real-time" means
 

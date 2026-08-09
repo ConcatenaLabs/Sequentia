@@ -668,6 +668,18 @@ inline bool PosEscapingStallAllowed(uint32_t parent_anchor_height, uint32_t bloc
            block_anchor_height - parent_anchor_height >= POS_ESCAPING_STALL_ANCHOR_GAP;
 }
 
+/** Is the escaping-stall parent-chain MTP-gap requirement enforced at `height`?
+ *
+ *  The MTP gap was introduced after the testnet chain had already produced
+ *  blocks that violate it, which made that history unvalidatable and the chain
+ *  unsyncable from genesis (see Consensus::Params::pos_escape_stall_mtp_height
+ *  for the full rationale). Gating it by height is the standard soft-fork
+ *  treatment.
+ *
+ *  CONVENTION, deliberately the opposite of PosExpRaceActive: 0 means ENFORCED
+ *  FROM GENESIS — the right setting for a chain launched with the rule already
+ *  in place, so a new chain needs no future migration. A positive H enforces it
+
 /** A committee member's eligibility claim carried in the block: its key and
  *  its VRF proof over the slot seed. */
 struct PosVrfMember {
@@ -781,6 +793,22 @@ static const uint32_t DEFAULT_POS_UNBONDING_PERIOD = 10;
  *  sortition, and the eligible-total denominator. 0 disables the floor (the
  *  default; the Sequentia chain sets it via -posminstake). */
 extern uint64_t g_pos_min_stake;
+
+/** Height from which the escaping-stall parent-chain MTP evidence is part of
+ *  the rules, mirrored from Consensus::Params::pos_escape_stall_mtp_height
+ *  when the chain is selected. Lives in the common layer because
+ *  chainparams.cpp assigns it and elements-cli / elements-tx link
+ *  libbitcoin_common without libbitcoin_server.
+ *
+ *  0 = not gated (rule off), positive H = enforced from height H, matching
+ *  pos_exprace_height. A chain launched with the rule in place uses 1. */
+extern int g_pos_escape_stall_mtp_height;
+
+/** True when that evidence is part of the rules at `height`. */
+inline bool PosEscapeStallMtpHeightActive(int height)
+{
+    return g_pos_escape_stall_mtp_height > 0 && height >= g_pos_escape_stall_mtp_height;
+}
 
 /** Whether `weight` clears the eligibility floor: registered (>=1) and at least
  *  the configured minimum. The single chokepoint for stake eligibility. */

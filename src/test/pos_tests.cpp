@@ -143,6 +143,62 @@ BOOST_AUTO_TEST_CASE(pos_escaping_stall_gap)
     BOOST_CHECK(PosEscapingStallAllowed(0, 3));
 }
 
+// A node that is not watching Bitcoin (-validateanchor=0) cannot check the
+// parent-chain time evidence behind a sub-quorum block, so it accepts it on the
+// network's word. That is the one concrete, nameable thing delegating to peers
+// costs, and it must never be silent: every such acceptance is counted.
+BOOST_AUTO_TEST_CASE(pos_escaping_stall_unverified_is_counted)
+{
+    const bool saved_validate = g_validate_anchor;
+    const int64_t saved_gap = g_pos_escape_stall_mtp_gap;
+    const int saved_height = g_pos_escape_stall_mtp_height;
+    g_pos_escape_stall_mtp_gap = 600;
+    // The rule is only part of the rules from its activation height, and the
+    // chain a unit test runs on does not set one. Turn it on from block 1, as
+    // a chain launched with the rule in place does, or the gate would return
+    // first and there would be nothing to count.
+    g_pos_escape_stall_mtp_height = 1;
+    g_validate_anchor = false;
+
+    // No parent daemon is reachable from a unit test — which is the point: on
+    // this path nothing is asked of one, so the anchor hashes are never used.
+    const uint256 parent_anchor = uint256S("11");
+    const uint256 block_anchor = uint256S("22");
+
+    const UnverifiedEscapingStalls before = GetUnverifiedEscapingStalls();
+    BOOST_CHECK(CheckEscapingStallMtpGap(parent_anchor, block_anchor, 4242) == EscapeStallTimeVerdict::ALLOWED);
+    const UnverifiedEscapingStalls after = GetUnverifiedEscapingStalls();
+    BOOST_CHECK_EQUAL(after.count, before.count + 1);
+    BOOST_CHECK_EQUAL(after.last_height, 4242);
+
+    // The producer weighing its own options passes record_unverified=false; its
+    // probing must not read as something the node swallowed. It still passes a
+    // real height, because the activation gate below needs one.
+    BOOST_CHECK(CheckEscapingStallMtpGap(parent_anchor, block_anchor, 4242,
+                                         /*record_unverified=*/false) == EscapeStallTimeVerdict::ALLOWED);
+    BOOST_CHECK_EQUAL(GetUnverifiedEscapingStalls().count, after.count);
+
+    // Below the activation height the rule does not apply, so nothing is being
+    // taken on trust and nothing may be reported. The gate is checked BEFORE
+    // the -validateanchor branch precisely so this case cannot be miscounted:
+    // a node must not be charged with a delegation it never made. Height 0 is
+    // below every real gate (a chain launched with the rule uses 1).
+    BOOST_CHECK(CheckEscapingStallMtpGap(parent_anchor, block_anchor, 0) == EscapeStallTimeVerdict::ALLOWED);
+    BOOST_CHECK_EQUAL(GetUnverifiedEscapingStalls().count, after.count);
+    BOOST_CHECK_EQUAL(GetUnverifiedEscapingStalls().last_height, 4242);
+
+    // With the gap disabled the evidence is not part of the rules at all, so
+    // there is nothing being taken on trust to report.
+    g_pos_escape_stall_mtp_gap = 0;
+    BOOST_CHECK(CheckEscapingStallMtpGap(parent_anchor, block_anchor, 4243) == EscapeStallTimeVerdict::ALLOWED);
+    BOOST_CHECK_EQUAL(GetUnverifiedEscapingStalls().count, after.count);
+    BOOST_CHECK_EQUAL(GetUnverifiedEscapingStalls().last_height, 4242);
+
+    g_validate_anchor = saved_validate;
+    g_pos_escape_stall_mtp_gap = saved_gap;
+    g_pos_escape_stall_mtp_height = saved_height;
+}
+
 // The minimum-stake floor (whitepaper §3.3) excludes sub-minimum stakers from
 // the schedule, the rank lookup, the eligible-total weight, and VRF committee
 // membership; with the floor at 0 (default) every registered staker is eligible.
@@ -415,6 +471,63 @@ BOOST_AUTO_TEST_CASE(pos_vrf_exprace)
         BOOST_CHECK(s15 > 0.27 && s15 < 0.33);
         BOOST_CHECK(std::abs(s1 - s15) < 0.03);             // splitting does not pay
     }
+}
+
+// The exp-race winner's beta is near its MAXIMUM (winning needs -ln(U) small,
+// i.e. U -> 1), which the LEGACY PosVrfSlot reads as a slot of ~total/weight.
+// So PosVrfIsCommitteeMember -- hardcoded to the legacy formula, and unable to
+// be fork-gated because it takes no height -- rejects exactly those winners
+// holding less than 1/g_pos_committee_size of the stake.
+//
+// This is why the gossip proposal path must NOT apply a committee-membership
+// test to the leader (PosProducer::OnProposal): consensus does not require the
+// leader to be a sortitioned member, and a relay filter stricter than consensus
+// silently discarded every legitimate small-staker block after the pos_exprace
+// fork. The test pins the arithmetic so the trap cannot be reintroduced.
+BOOST_AUTO_TEST_CASE(pos_vrf_exprace_winner_fails_legacy_membership)
+{
+    const int old_size = g_pos_committee_size;
+    g_pos_committee_size = 250;
+
+    // Whale + a staker below 1/250, i.e. total/weight = 2000 > 250.
+    const uint64_t small = 1, whale = 1999, total = small + whale;
+    BOOST_CHECK(total / small > (uint64_t)g_pos_committee_size);
+
+    int small_wins = 0, rejected_by_legacy = 0;
+    for (uint32_t i = 0; i < 60000; ++i) {
+        uint256 bs = ComputePosSeed(uint256S("0x11"), i);
+        uint256 bw = ComputePosSeed(uint256S("0x22"), i);
+        // Exp-race election: lowest score wins.
+        if (PosVrfScoreExp(bs, small, total) < PosVrfScoreExp(bw, whale, total)) {
+            ++small_wins;
+            // ...and the legacy membership gate throws that very win away.
+            if (!PosVrfIsCommitteeMember(bs, small, total)) ++rejected_by_legacy;
+        }
+    }
+    BOOST_TEST_MESSAGE("small staker (1/" << (total / small) << " of stake) won "
+                       << small_wins << " elections, " << rejected_by_legacy
+                       << " rejected by the legacy membership gate");
+    // It does win its fair share (~1/2000 of 60000 = ~30 rounds).
+    BOOST_CHECK(small_wins > 5);
+    // And essentially every win is thrown away: the winner's beta is near max,
+    // so its legacy slot is ~2000, far above the 250 cap.
+    BOOST_CHECK_EQUAL(rejected_by_legacy, small_wins);
+
+    // Above the 1/committee threshold the legacy gate does NOT fire: the cliff
+    // sits exactly at total/weight == g_pos_committee_size.
+    const uint64_t okw = 20, okt = 1000;                    // 1/50, well above 1/250
+    int ok_wins = 0, ok_rejected = 0;
+    for (uint32_t i = 0; i < 60000; ++i) {
+        uint256 b = ComputePosSeed(uint256S("0x33"), i);
+        if (PosVrfScoreExp(b, okw, okt) < PosVrfScoreExp(ComputePosSeed(uint256S("0x44"), i), okt - okw, okt)) {
+            ++ok_wins;
+            if (!PosVrfIsCommitteeMember(b, okw, okt)) ++ok_rejected;
+        }
+    }
+    BOOST_CHECK(ok_wins > 100);
+    BOOST_CHECK_EQUAL(ok_rejected, 0);
+
+    g_pos_committee_size = old_size;
 }
 
 // The coinbase VRF commitment round-trips and rejects malformed payloads.

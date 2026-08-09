@@ -10,6 +10,8 @@
 #include <rpc/protocol.h>
 #include <uint256.h>
 
+#include <cstdint>
+#include <map>
 #include <string>
 #include <stdexcept>
 
@@ -34,6 +36,23 @@ public:
 };
 
 UniValue CallMainChainRPC(const std::string& strMethod, const UniValue& params);
+
+/** SEQUENTIA: how many times this node has called the parent chain daemon.
+ *
+ *  Every call is one fresh TCP connection (the client sends `Connection:
+ *  close`), so this is also the number of connections opened towards the
+ *  parent daemon. It exists because the anchor watcher's cost is not visible
+ *  any other way from inside the node: the count per watcher tick is the
+ *  number this chain's O(chain length) anchor walk is judged by, both when
+ *  measuring a live node and in feature_anchor_rpc_cost.py, which asserts the
+ *  per-tick cost does not grow with the number of distinct anchors. Counted
+ *  at call entry, so a call that throws still counts — it cost a connection
+ *  attempt either way. Lock-free; safe from any thread. */
+uint64_t GetMainchainRPCCallCount();
+
+/** The same total, broken down by RPC method name. Takes a small internal
+ *  mutex; call it from diagnostics, not from a hot path. */
+std::map<std::string, uint64_t> GetMainchainRPCCallCountsByMethod();
 
 // Verify if the block with given hash has at least the specified minimum number
 // of confirmations.

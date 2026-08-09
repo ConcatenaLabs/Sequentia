@@ -224,6 +224,15 @@ private:
     int64_t m_last_tip_advance = 0;
     bool m_anchor_wait_active = false;
 
+    /** SEQUENTIA: this chain anchors to Bitcoin but the node is not watching it
+        (-validateanchor=0), whether the user chose that at the startup prompt or
+        configured it. Fixed for the session (read once from the node); while it
+        is set the status bar keeps a warning icon, and the "Bitcoin is back"
+        notice fires at most once. */
+    GUIUtil::ClickableLabel* m_anchor_unvalidated_icon = nullptr;
+    bool m_anchor_not_watching_session = false;
+    bool m_anchor_back_online_notified = false;
+
     const PlatformStyle *platformStyle;
     const NetworkStyle* const m_network_style;
 
@@ -253,6 +262,10 @@ private:
         paused because of Bitcoin — fork being settled, or Bitcoin daemon
         unreachable. Runs on m_anchor_wait_timer. */
     void updateAnchorWaitStatus();
+
+    /** SEQUENTIA: explain, at length, that this node is not following Bitcoin
+        and what it has taken on trust. Opened from the status-bar icon. */
+    void showAnchorUnvalidatedDetails();
 
     /** Open the OptionsDialog on the specified tab index */
     void openOptionsDialogWithTab(OptionsDialog::Tab tab);
