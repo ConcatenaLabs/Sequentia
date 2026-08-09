@@ -102,39 +102,41 @@ void ModalOverlay::setKnownBestHeight(int count, const QDateTime& blockDate)
 void ModalOverlay::tipUpdate(int count, const QDateTime& blockDate, double nVerificationProgress)
 {
     QDateTime currentDate = QDateTime::currentDateTime();
+    const qint64 now = currentDate.toMSecsSinceEpoch();
 
-    // keep a vector of samples of verification progress at height
-    blockProcessTime.push_front(qMakePair(currentDate.toMSecsSinceEpoch(), nVerificationProgress));
+    // Time the sync by the blocks it takes on, not by the progress percentage.
+    // Percentage is dominated by the transaction weight of each block, so it
+    // crawls through the middle of a sync and lurches near the end: an estimate
+    // drawn from it says "unknown" for most of the wait, which is exactly when
+    // the wait is worth estimating. Heights are integers and always advance.
+    blockProcessTime.push_front(qMakePair(now, count));
+    static const int MAX_SAMPLES = 5000;
+    if (blockProcessTime.count() > MAX_SAMPLES) {
+        blockProcessTime.remove(MAX_SAMPLES, blockProcessTime.count() - MAX_SAMPLES);
+    }
 
-    // show progress speed if we have more than one sample
-    if (blockProcessTime.size() >= 2) {
-        double progressDelta = 0;
-        double progressPerHour = 0;
-        qint64 timeDelta = 0;
-        qint64 remainingMSecs = 0;
-        double remainingProgress = 1.0 - nVerificationProgress;
+    if (blockProcessTime.size() >= 2 && bestHeaderHeight > count) {
+        // Average over a window long enough that one fast or slow batch does not
+        // swing the answer, falling back to the whole (shorter) history while
+        // the sync has only just started — so a figure appears within seconds.
+        static const qint64 WINDOW_MSECS = 60 * 1000;
+        qint64 remainingMSecs = -1;
         for (int i = 1; i < blockProcessTime.size(); i++) {
-            QPair<qint64, double> sample = blockProcessTime[i];
-
-            // take first sample after 500 seconds or last available one
-            if (sample.first < (currentDate.toMSecsSinceEpoch() - 500 * 1000) || i == blockProcessTime.size() - 1) {
-                progressDelta = blockProcessTime[0].second - sample.second;
-                timeDelta = blockProcessTime[0].first - sample.first;
-                progressPerHour = (progressDelta > 0) ? progressDelta / (double)timeDelta * 1000 * 3600 : 0;
-                remainingMSecs = (progressDelta > 0) ? remainingProgress / progressDelta * timeDelta : -1;
+            const QPair<qint64, int>& sample = blockProcessTime[i];
+            if (sample.first < now - WINDOW_MSECS || i == blockProcessTime.size() - 1) {
+                const int blocks_done = count - sample.second;
+                const qint64 elapsed = now - sample.first;
+                if (blocks_done > 0 && elapsed > 0) {
+                    remainingMSecs = (qint64)((double)(bestHeaderHeight - count) * (double)elapsed / (double)blocks_done);
+                }
                 break;
             }
         }
-        // show expected remaining time
-        if(remainingMSecs >= 0) {
+        if (remainingMSecs >= 0) {
             ui->expectedTimeLeft->setText(GUIUtil::formatNiceTimeOffset(remainingMSecs / 1000.0));
         } else {
+            // No block taken on within the window yet: say so rather than guess.
             ui->expectedTimeLeft->setText(QObject::tr("unknown"));
-        }
-
-        static const int MAX_SAMPLES = 5000;
-        if (blockProcessTime.count() > MAX_SAMPLES) {
-            blockProcessTime.remove(MAX_SAMPLES, blockProcessTime.count() - MAX_SAMPLES);
         }
     }
 
