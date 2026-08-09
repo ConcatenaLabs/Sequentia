@@ -1177,9 +1177,17 @@ int64_t PosProducer::DriveRound()
                 // for escaping a stall: parent-chain height gap AND real-time
                 // MTP gap (anchor.h, incident 2026-07-17) — a height race
                 // during a parent block-storm must not unlock the hold.
+                // Below the activation height consensus does not check the MTP
+                // gap, so neither does this: CheckEscapingStallMtpGap applies
+                // the gate itself and returns ALLOWED there, which is why no
+                // separate height test is needed here. record_unverified=false:
+                // this is the producer weighing its own options, not a block
+                // being accepted.
                 const bool gap_passed = g_con_bitcoin_anchor && tip->pprev &&
                     PosEscapingStallAllowed(tip->pprev->m_anchor_height, backed->m_anchor_height) &&
-                    CheckEscapingStallMtpGap(tip->pprev->m_anchor_hash, backed->m_anchor_hash) == EscapeStallTimeVerdict::ALLOWED;
+                    CheckEscapingStallMtpGap(tip->pprev->m_anchor_hash, backed->m_anchor_hash,
+                                             tip->nHeight + 1,
+                                             /*record_unverified=*/false) == EscapeStallTimeVerdict::ALLOWED;
                 const bool grace_passed = !g_con_bitcoin_anchor &&
                     (now - m_lock_grace_start_ms >= 2 * ROUND_MS);
                 ancestry_hold = !(gap_passed || grace_passed);
@@ -1309,8 +1317,14 @@ int64_t PosProducer::DriveRound()
         // used (shares below quorum) — a rare, genuinely-stalled situation —
         // and the MTP lookups are cached, so the parent-daemon RPC under the
         // gossip lock is a one-shot.
+        // Below the activation height consensus does not check the MTP gap;
+        // CheckEscapingStallMtpGap applies that gate itself and returns ALLOWED
+        // there, so demanding it here would never refuse a block the network
+        // accepts. record_unverified=false: this is the producer weighing its
+        // own options, not a block being accepted.
         if (escaping_stall && (int)m_collected.size() < quorum &&
-            CheckEscapingStallMtpGap(tip->m_anchor_hash, backed->m_anchor_hash) != EscapeStallTimeVerdict::ALLOWED) {
+            CheckEscapingStallMtpGap(tip->m_anchor_hash, backed->m_anchor_hash, height,
+                                     /*record_unverified=*/false) != EscapeStallTimeVerdict::ALLOWED) {
             escaping_stall = false;
         }
         const int min_members = escaping_stall ? 1 : quorum;
@@ -1428,10 +1442,29 @@ PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& blo
     if (!tip) return PosGossipAction::Ignore;
     if (block->hashPrevBlock != tip->GetBlockHash()) return PosGossipAction::Ignore; // not on our tip (benign race)
     const int height = tip->nHeight + 1;
-    // The leader must prove sortition eligibility (objective: an honest relayer
-    // checked this, so a failure means the sender sent garbage). Reject a
-    // non-staker leader with the cheap registry lookup before the VRF verify, so
-    // forged proposals cost an attacker as little of our CPU as possible.
+    // The leader must be a registered staker and its VRF proof must verify
+    // (objective: an honest relayer checked this, so a failure means the sender
+    // sent garbage). Reject a non-staker leader with the cheap registry lookup
+    // before the VRF verify, so forged proposals cost an attacker as little of
+    // our CPU as possible.
+    //
+    // These are exactly the leader checks CONSENSUS makes (CheckPosStakeRules:
+    // registered stake, min-stake floor, VRF proof, time-gate). Deliberately
+    // absent: a committee-membership test on the leader. A relay filter must
+    // never be STRICTER than the consensus rule it pre-filters for, and consensus
+    // does not require the leader to be a sortitioned committee member.
+    //
+    // It used to call PosVrfIsCommitteeMember here, which broke the pos_exprace
+    // hard fork: that helper is hardcoded to the LEGACY PosVrfSlot (it takes no
+    // height, so it cannot be fork-gated). Winning the exp-race needs -ln(U)
+    // small, i.e. beta near its MAXIMUM -- which the legacy formula reads as a
+    // slot of ~total_weight/weight. So every leader holding less than
+    // 1/committee_size of the stake won its election legitimately and then had
+    // that very block dropped here, with the relaying peer marked misbehaving --
+    // annulling the split-neutral proportionality the fork exists to provide.
+    // Invisible on a testnet of equal-weight stakers (ratio 20 vs a 250 cap),
+    // fatal on any unevenly-staked network. It also cost nothing as a DoS filter:
+    // the expensive VrfVerify above already ran by the time it was reached.
     const StakeRegistry& reg = StakeRegistry::GetInstance();
     const uint64_t weight = reg.GetWeight(parts->leader);
     if (weight == 0) return PosGossipAction::Invalid;
@@ -1439,7 +1472,6 @@ PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& blo
     auto leader_proof = ExtractPosVrfProof(*block);
     uint256 lbeta;
     if (!leader_proof || !VrfVerify(parts->leader, Span<const unsigned char>(seed.begin(), 32), *leader_proof, lbeta)) return PosGossipAction::Invalid;
-    if (!PosVrfIsCommitteeMember(lbeta, weight, PosTotalWeight(reg))) return PosGossipAction::Invalid; // leader not sortitioned
     // The leader's authorising signature rides in the proposal's staging solution
     // (a single push). It must verify against the block hash so any node can later
     // assemble using it.

@@ -417,6 +417,18 @@ public:
         // coordinated activation height is set (hard fork; see params.h). Mainnet
         // is not live yet, so this stays 0 for now.
         consensus.pos_exprace_height = 0;
+        // Escaping-stall parent-chain MTP gap: ENFORCED FROM GENESIS (0).
+        // Mainnet has not launched, so it starts life with this rule already in
+        // force and there is NOTHING TO COORDINATE OR REMEMBER LATER — no
+        // activation height to pick, no flag day, no legacy history to exempt.
+        // Note the convention is the opposite of pos_exprace_height above: for
+        // Mainnet is not live yet, so the rule is simply active from the first
+        // block: there is no pre-rule history to grandfather and nothing to
+        // coordinate at launch. 1, not 0 — 0 means "not gated" here exactly as
+        // it does for pos_exprace_height (CONTRIBUTING.md: a gate left at 0 is
+        // a bug, never a deliberate "always on").
+        consensus.pos_escape_stall_mtp_height = 1;
+        g_pos_escape_stall_mtp_height = consensus.pos_escape_stall_mtp_height;
         consensus.nMaxBlockWeight = 200000;             // a twentieth of Bitcoin (doc 11 §4)
         consensus.connect_genesis_outputs = true;
         anyonecanspend_aremine = false;
@@ -666,6 +678,23 @@ public:
         // The cadence floor guarantees >=30s/block, so the chain cannot reach it
         // sooner than 36h; a Bitcoin-fork stall only delays it (never earlier).
         consensus.pos_exprace_height = 44300;
+        // Escaping-stall parent-chain MTP gap: enforced only from this height.
+        //
+        // The rule was added after the 2026-07-17 finality partition, but this
+        // chain had already produced blocks that violate it — the earliest
+        // observed is height 1757, dated 2026-07-06. Enforcing it from genesis
+        // (the previous behaviour) made the chain UNSYNCABLE: a node starting
+        // from scratch stops at 1757 for ever, and the nodes that do work only
+        // do so because blocks already in their chainstate are never
+        // re-validated, so any -reindex or restore would brick them.
+        //
+        // The value must stay ABOVE the tip at release time, so no node can
+        // disagree about blocks that already exist. The tip was ~63,000 on
+        // 2026-07-31; 80,000 leaves several days of margin at the ~30 s
+        // cadence. Below it the rule is not applied, which is exactly what
+        // every already-synced node effectively does today.
+        consensus.pos_escape_stall_mtp_height = 80000;
+        g_pos_escape_stall_mtp_height = consensus.pos_escape_stall_mtp_height;
         // SEQUENTIA: 200,000 weight units — a twentieth of Bitcoin's 4,000,000
         // — so that, at ~30-second blocks (20x Bitcoin's cadence), a saturated
         // chain grows at exactly the same total rate as a saturated Bitcoin
@@ -701,6 +730,15 @@ public:
         // doc/sequentia/06-tokenomics-and-launch.md.
         g_con_pos = true;
         MAX_MONEY = 400000000 * COIN;   // SEQUENTIA: per-chain money cap
+
+        // The consensus values of THIS network, named once so the places that
+        // apply them and the guard that refuses conflicting overrides (below)
+        // can never drift apart.
+        constexpr int      TESTNET_POS_COMMITTEE_SIZE   = 250;          // 126-of-250 quorum
+        constexpr int64_t  TESTNET_POS_SLOT_INTERVAL    = 30;           // 30 s nominal block time (doc 11 §4)
+        constexpr int64_t  TESTNET_POS_UNBONDING_PERIOD = 43200;        // x30 s = ~15 days (§3.11)
+        constexpr uint64_t TESTNET_POS_MIN_STAKE        = 4000000000000ULL; // 40,000 SEQ = 0.01% of 400M (§3.3)
+
         g_pos_vrf = true;
         g_pos_agg_committee = true;
         // Autonomous BLS gossip committee is the default. g_pos_bls is a
@@ -708,7 +746,7 @@ public:
         // the manual MuSig2 coordinator, and a node set differently from the rest
         // of the testnet forks off. Every node on a given testnet must agree.
         g_pos_bls = args.GetBoolArg("-posbls", true);
-        g_pos_min_stake = 4000000000000ULL;   // 40,000 SEQ = 0.01% of 400M (§3.3)
+        g_pos_min_stake = TESTNET_POS_MIN_STAKE;
         // Expected committee size. DEFAULT 250 to MATCH THE LIVE PUBLIC TESTNET
         // (126-of-250 quorum): these params are NETWORK-WIDE consensus rules, so a
         // chain=test node started from a bare/default config must reach the same
@@ -721,7 +759,7 @@ public:
         // -poscommitteesize=3, quorum 2). It is NOT part of the genesis commitment
         // (CommitToArguments hashes only network id, fedpeg and signblock scripts),
         // so the default value does not change the genesis.
-        g_pos_committee_size = args.GetIntArg("-poscommitteesize", 250);
+        g_pos_committee_size = args.GetIntArg("-poscommitteesize", TESTNET_POS_COMMITTEE_SIZE);
         // Public fixed-size committee (impl spec Option A). NETWORK-WIDE consensus
         // rule, like -posbls above; DEFAULT ON to match the live testnet (same
         // silent-fork reasoning as -poscommitteesize). Overridable for local test
@@ -729,6 +767,79 @@ public:
         // genesis stake output bakes the founder's BLS registration unconditionally
         // (see below), so flipping this default does NOT change the genesis hash.
         g_pos_public_committee = args.GetBoolArg("-pospubliccommittee", true);
+
+        // Refuse consensus flags that CONFLICT with this network's values.
+        //
+        // These are network-wide consensus rules on a shared public chain, not
+        // per-node preferences. Mainnet (CMainParams) refuses the flags outright;
+        // here we refuse only a conflicting VALUE, because existing testnet
+        // configurations legitimately pin some of these — they had to, before the
+        // defaults above matched the live network — and rejecting a value equal to
+        // the network's would break every current node on upgrade for no safety
+        // gain. Genuine parameter experiments belong on regtest or a custom chain,
+        // which stay freely configurable.
+        //
+        // Two distinct reasons to refuse, worth keeping straight:
+        //
+        //  * -posbls, -poscommitteesize and -pospubliccommittee are READ FROM ARGS
+        //    just above, and -poscheckpointdepth is read live from gArgs at the
+        //    point of use (anchor.cpp UpdatePosFinality) rather than being pinned
+        //    here at all. For these four a conflicting value really does take
+        //    effect: the node computes a different quorum, a different committee,
+        //    or a different checkpoint-finality floor — which feeds the
+        //    bad-fork-prior-to-pos-checkpoint rejection — so it rejects the
+        //    network's blocks and forks IN SILENCE (issue #3). Refusing these is
+        //    what prevents an actual fork.
+        //
+        //  * the rest (-posvrf, -posaggcommittee, -posslotinterval, -posunbonding,
+        //    -posminstake, -pospayoutnotice) are PINNED in code on this chain, so
+        //    a conflicting value is silently ignored today and cannot fork
+        //    anything. They are refused anyway, for the reason CMainParams gives:
+        //    an operator who sets one believes they are changing a consensus rule,
+        //    and quietly overriding them leaves that belief intact until it
+        //    matters somewhere it is not pinned.
+        //
+        // Runs BEFORE the dependency and range checks below so the operator gets
+        // this message rather than a downstream symptom (-pospubliccommittee=0
+        // otherwise surfaces as "-poscommitteesize must be between 1 and 100").
+        // Compares against the network values, never against the globals just
+        // assigned from the same args — that would compare a value with itself and
+        // never fire.
+        {
+            const auto refuse_bool = [&](const char* flag, bool network_value) {
+                if (args.IsArgSet(flag) && args.GetBoolArg(flag, network_value) != network_value) {
+                    throw std::runtime_error(strprintf(
+                        "%s is a consensus rule of the Sequentia testnet and must be %s on this "
+                        "network; a different value forks this node off in silence. Remove it from "
+                        "the configuration, or use -chain=regtest / a custom chain to experiment.",
+                        flag, network_value ? "1" : "0"));
+                }
+            };
+            const auto refuse_int = [&](const char* flag, int64_t network_value) {
+                if (args.IsArgSet(flag) && args.GetIntArg(flag, network_value) != network_value) {
+                    throw std::runtime_error(strprintf(
+                        "%s is a consensus rule of the Sequentia testnet and must be %d on this "
+                        "network; a different value forks this node off in silence. Remove it from "
+                        "the configuration, or use -chain=regtest / a custom chain to experiment.",
+                        flag, network_value));
+                }
+            };
+            // Read from args above: a conflicting value genuinely forks the node.
+            refuse_bool("-posbls", true);
+            refuse_bool("-pospubliccommittee", true);
+            refuse_int("-poscommitteesize", TESTNET_POS_COMMITTEE_SIZE);
+            // Pinned below: refused to correct the operator's belief, not to
+            // prevent a fork. Each expected value is the SAME expression used to
+            // pin it, so the two can never drift apart.
+            refuse_bool("-posvrf", true);
+            refuse_bool("-posaggcommittee", true);
+            refuse_int("-posslotinterval", TESTNET_POS_SLOT_INTERVAL);
+            refuse_int("-posunbonding", TESTNET_POS_UNBONDING_PERIOD);
+            refuse_int("-posminstake", (int64_t)TESTNET_POS_MIN_STAKE);
+            refuse_int("-pospayoutnotice", (int64_t)DEFAULT_POS_PAYOUT_NOTICE);
+            refuse_int("-poscheckpointdepth", (int64_t)DEFAULT_POS_CHECKPOINT_DEPTH);
+        }
+
         if (g_pos_public_committee && !g_pos_bls) {
             throw std::runtime_error("-pospubliccommittee requires -posbls");
         }
@@ -739,8 +850,8 @@ public:
                 throw std::runtime_error(strprintf("-poscommitteesize must be between 1 and %d", max_committee));
             }
         }
-        g_pos_slot_interval = 30;              // 30s nominal block time (doc 11 §4)
-        g_pos_unbonding_period = 43200;        // x30s = ~15 days > 2-week checkpoint window (§3.11)
+        g_pos_slot_interval = TESTNET_POS_SLOT_INTERVAL;
+        g_pos_unbonding_period = TESTNET_POS_UNBONDING_PERIOD;
         // Consensus-critical: pin the payout notice period so no node can change
         // when a producer's payout policy binds by passing -pospayoutnotice.
         g_pos_payout_notice = DEFAULT_POS_PAYOUT_NOTICE;   // 2880 x 30s = ~1 day
@@ -871,7 +982,24 @@ public:
 
         // vFixedSeeds = std::vector<uint8_t>(std::begin(chainparams_seed_test), std::end(chainparams_seed_test));
 
-        fDefaultConsistencyChecks = true;
+        // This is the default for -checkblockindex, which turns on
+        // CChainState::CheckBlockIndex(): a full consistency walk of the ENTIRE
+        // block index, run after every headers message and every tip update. It
+        // is a development self-check and belongs to regtest, where chains are
+        // a few dozen blocks long and the walk is free.
+        //
+        // On a real chain the walk costs O(blocks known so far) per headers
+        // message, so syncing costs O(n^2) and gets worse every day the chain
+        // lives. Measured on this testnet at ~67k blocks: with the check on,
+        // header sync fell from 171/s at height 2.5k to 3/s at height 20k and
+        // never finished; with it off the same node took the whole header chain
+        // in under a minute and connected blocks at ~119/s — roughly 60x. It
+        // was also the reason a fresh node looked like it had hung.
+        //
+        // Upstream Bitcoin Core has this false for testnet and true only for
+        // regtest. Anyone who wants the self-check back passes -checkblockindex=1;
+        // nothing about consensus depends on it.
+        fDefaultConsistencyChecks = false;
         fRequireStandard = true;
         m_is_test_chain = true;
         m_is_mockable_chain = false;
@@ -1404,6 +1532,14 @@ protected:
         // exercise the pre- and post-fork election and the transition; the real
         // chains (CTestNetParams / CSequentiaParams) pin it in code. 0 = disabled.
         consensus.pos_exprace_height = (int)args.GetIntArg("-posexpraceheight", 0);
+        // Escaping-stall MTP-gap activation height. Arg-readable only on this
+        // custom/regtest chain so tests can exercise both sides of the gate and
+        // the transition; the real chains pin it in code above. Default 1 =
+        // active from the first block, matching mainnet (0 would mean "not
+        // gated", i.e. the rule off entirely).
+        consensus.pos_escape_stall_mtp_height =
+            (int)args.GetIntArg("-posescapestallmtpheight", 1);
+        g_pos_escape_stall_mtp_height = consensus.pos_escape_stall_mtp_height;
         if (g_pos_public_committee &&
             (g_pos_committee_size < 1 || g_pos_committee_size > MAX_POS_PUBLIC_COMMITTEE_SIZE)) {
             throw std::runtime_error(strprintf("-poscommitteesize must be between 1 and %d under -pospubliccommittee", MAX_POS_PUBLIC_COMMITTEE_SIZE));

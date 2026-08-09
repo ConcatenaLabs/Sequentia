@@ -18,6 +18,51 @@ For this repository:
   `feature_any_asset_fee*`, `feature_bitcoin_anchoring*`, ...) before
   submitting consensus-adjacent changes.
 
+### Every new consensus rule needs an activation height
+
+**A rule that can reject a block must never be introduced without a height gate.**
+This is not a style preference; it is a hard requirement, and it has already been
+learned twice the expensive way.
+
+A rule added without a gate applies *retroactively*, to history that was produced
+when the rule did not exist. Nodes already running are unaffected — a block
+already in the chainstate is never revalidated — so the damage is invisible to
+the people who would notice it. It surfaces only when someone validates that
+history again: a new node joining, or an existing node after `-reindex`, a
+restore from backup, or a disk failure. The chain keeps working while quietly
+becoming impossible to reproduce.
+
+Two live incidents came from exactly this:
+
+- the escaping-stall parent-chain time gap, introduced after the 2026-07-17
+  finality partition, applied backwards to blocks from 2026-07-06 — every fresh
+  sync stopped dead at block 1757;
+- the anchor best-chain check (rule R3, `03-bitcoin-anchoring.md`), whose verdict
+  depends on the Bitcoin daemon's view *at the moment of validation* rather than
+  on the chain itself, so the same block is valid at 10:00 and invalid at 10:05.
+
+Rules whose verdict depends on **live external state** (anything that queries the
+mainchain daemon) deserve particular suspicion: their result is not a function of
+the block and its ancestors, but of when the question is asked. Those cannot be
+correct retroactively even in principle.
+
+The pattern to follow already exists in this codebase — a height in
+`Consensus::Params` plus a predicate, as with `pos_exprace_height` and
+`PosExpRaceActive(params, height)`:
+
+```cpp
+if (PosExpRaceActive(params, height)) {
+    // the new rule
+}
+```
+
+**For mainnet, set the gate and forget it.** Mainnet is not live yet, so every
+gate can simply be set to an activation height that makes the rule active from
+block 1. Doing that at the time the rule is written costs nothing, matches the
+behaviour everyone expects, and means the retroactivity question never has to be
+revisited for that chain. Do not leave gates at `0` intending to "fill them in at
+launch": that is how a rule ends up ungated.
+
 The original Bitcoin Core document follows.
 
 ---
