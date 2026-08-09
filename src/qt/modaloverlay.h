@@ -56,7 +56,10 @@ private:
         not derived from the consensus constant (600s here vs ~34s actual). */
     GUIUtil::HeaderSyncEstimator m_header_estimator;
     QDateTime bestHeaderDate;
-    QVector<QPair<qint64, double> > blockProcessTime;
+    //! (wall-clock ms, block height) samples, newest first: the sync rate is
+    //! measured in blocks, which always advance, rather than in the progress
+    //! percentage, which can sit still for most of a sync.
+    QVector<QPair<qint64, int> > blockProcessTime;
     bool layerIsVisible;
     bool userClosed;
     QPropertyAnimation m_animation;
