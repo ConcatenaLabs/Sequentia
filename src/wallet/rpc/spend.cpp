@@ -277,10 +277,27 @@ std::vector<StakeUtxo> FindWalletStakeUtxos(CWallet& wallet, const std::optional
     // apart: spent by a CONFIRMED transaction means the stake is gone, spent by
     // one still waiting means a withdrawal is in flight — and the stake registry
     // keeps crediting its weight until that transaction confirms.
-    std::map<COutPoint, const CWalletTx*> spenders;
+    // An outpoint can have SEVERAL spenders in the wallet once a withdrawal has
+    // been replaced by fee: the replacement and the transaction it replaced both
+    // sit here, the latter conflicted (negative depth). Only the live one says
+    // anything about the stake, so collect them all and pick it deliberately —
+    // taking whichever came first would depend on map order and answer
+    // differently from one run to the next.
+    std::multimap<COutPoint, const CWalletTx*> spenders;
     for (const auto& [txid, wtx] : wallet.mapWallet) {
         for (const CTxIn& in : wtx.tx->vin) spenders.emplace(in.prevout, &wtx);
     }
+    // The spender that still counts: confirmed, or waiting in the mempool.
+    // Conflicted and abandoned ones are dead and must not be reported at all.
+    const auto live_spender = [&](const COutPoint& op) -> const CWalletTx* {
+        const auto range = spenders.equal_range(op);
+        for (auto it = range.first; it != range.second; ++it) {
+            if (it->second->isAbandoned()) continue;
+            if (wallet.GetTxDepthInMainChain(*it->second) < 0) continue; // replaced
+            return it->second;
+        }
+        return nullptr;
+    };
 
     std::vector<StakeUtxo> found;
     for (const auto& [wtxid, wtx] : wallet.mapWallet) {
@@ -297,10 +314,9 @@ std::vector<StakeUtxo> FindWalletStakeUtxos(CWallet& wallet, const std::optional
                 // Report it only while the spend is still pending, so the caller
                 // can say "a withdrawal is on its way" instead of contradicting
                 // the stake weight the registry still shows.
-                auto sp = spenders.find(s.outpoint);
-                if (sp == spenders.end()) continue;
-                if (wallet.GetTxDepthInMainChain(*sp->second) > 0) continue; // confirmed: really gone
-                if (sp->second->isAbandoned()) continue;
+                const CWalletTx* sp = live_spender(s.outpoint);
+                if (!sp) continue;
+                if (wallet.GetTxDepthInMainChain(*sp) > 0) continue; // confirmed: really gone
                 s.withdrawing = true;
             }
             s.txout = out;
@@ -830,11 +846,15 @@ RPCHelpMan bumpwithdrawstakefee()
     if (spent.empty()) {
         throw JSONRPCError(RPC_WALLET_ERROR, "there is no pending stake withdrawal to re-send");
     }
-    // Every input of one withdrawal shares its spending transaction.
+    // Every input of one withdrawal shares its spending transaction. Skip the
+    // dead ones: after an earlier bump the transaction that was replaced is
+    // still in the wallet, conflicted, and picking it would try to replace a
+    // transaction that no longer exists anywhere.
     std::set<uint256> spender_ids;
     const CWalletTx* original = nullptr;
     for (const StakeUtxo& s : spent) {
         for (const auto& [txid, wtx] : pwallet->mapWallet) {
+            if (wtx.isAbandoned() || pwallet->GetTxDepthInMainChain(wtx) != 0) continue;
             for (const CTxIn& in : wtx.tx->vin) {
                 if (in.prevout == s.outpoint) { spender_ids.insert(txid); original = &wtx; }
             }
