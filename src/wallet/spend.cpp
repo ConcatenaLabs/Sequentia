@@ -1447,7 +1447,19 @@ static bool CreateTransactionInternal(
 
             // Fill in issuance
             // Blinding revealing underlying asset
-            txNew.vin[reissuance_index].assetIssuance.assetBlindingNonce = token_blinding;
+            //
+            // SEQUENTIA: the nonce normally carries the spent token's asset blinding
+            // factor, which both reveals the underlying asset and -- by being
+            // non-null -- flags this input as a reissuance rather than a brand new
+            // issuance. A token held on an UNBLINDED output has a zero blinding
+            // factor, so that scheme would leave the nonce null and consensus would
+            // read a new issuance: the wallet used to emit a transaction that could
+            // never confirm while still marking the token spent (a phantom).
+            // Sequentia is transparent-by-default, so this is the common case, not an
+            // exotic one. Use the explicit sentinel instead; consensus ignores the
+            // nonce's value when the spent token's asset is explicit.
+            txNew.vin[reissuance_index].assetIssuance.assetBlindingNonce =
+                token_blinding.IsNull() ? ReissuanceExplicitTokenNonce() : token_blinding;
             txNew.vin[reissuance_index].assetIssuance.assetEntropy = issuance_details->entropy;
             txNew.vin[reissuance_index].assetIssuance.nAmount = txNew.vout[asset_index].nValue;
 
@@ -1690,6 +1702,28 @@ static bool CreateTransactionInternal(
                 error = _("Unable to blind the transaction properly. This should not happen.");
                 return false;
             }
+        }
+    }
+
+    // SEQUENTIA: never emit a phantom reissuance.
+    //
+    // The reissuance token id commits to whether the issuance amount is blinded
+    // (CalculateReissuanceToken's fConfidential argument), so consensus re-derives
+    // the token id from the FINAL issuance amount and requires it to match the
+    // token actually being spent. If blinding did not end up matching the token
+    // variant we hold, the transaction is unrelayable -- but the wallet would still
+    // record the token input as spent, stranding the reissuance authority. That
+    // silent failure is exactly what made reissuance-from-an-unblinded-token look
+    // like data loss. Check it here and fail loudly instead.
+    if (sign && issuance_details && reissuance_index != -1 && !issuance_details->reissuance_token.IsNull()) {
+        CAsset expected_token;
+        CalculateReissuanceToken(expected_token, issuance_details->entropy,
+                                 txNew.vin[reissuance_index].assetIssuance.nAmount.IsCommitment());
+        if (expected_token != issuance_details->reissuance_token) {
+            wallet.WalletLogPrintf("ERROR: reissuance would derive token %s but the token being spent is %s\n",
+                                   expected_token.GetHex(), issuance_details->reissuance_token.GetHex());
+            error = _("Cannot build this reissuance: the issuance amount's blinding does not match the reissuance token that was issued. A token issued blinded requires a blinded reissuance amount, and one issued explicitly requires an explicit amount.");
+            return false;
         }
     }
 

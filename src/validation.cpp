@@ -1913,6 +1913,136 @@ bool AbortNode(BlockValidationState& state, const std::string& strMessage, const
     return state.Error(strMessage);
 }
 
+// SEQUENTIA: the one-time UTXO-set rewrite (Consensus::UtxoRecovery). Read the
+// comment on that struct in consensus/params.h, and the one on
+// CTestNetParams::consensus.utxo_recovery in chainparams.cpp, before touching
+// any of this. The short version: a watchdog destroyed the keys to two testnet
+// treasury outputs, so at one agreed height every node removes those two
+// outpoints from its UTXO set and adds two replacements. It is not a mechanism
+// to reuse.
+//
+// The three functions below are the whole implementation, and they are written
+// so that connect and disconnect are exact inverses:
+//
+//  - BuildUtxoRecoveryTransaction() turns the table into a synthetic
+//    transaction. Nothing ever relays or stores it; it exists so the created
+//    coins have outpoints that are a pure function of the table (its txid is its
+//    own hash), auditable by anyone who can read chainparams.cpp, and beyond
+//    anybody's power to collide with a real transaction.
+//  - ApplyUtxoRecovery() runs from ConnectBlock, after that block's
+//    transactions, and records the coins it removed into an extra CTxUndo
+//    appended to the block's undo data. Recording rather than hardcoding matters:
+//    one of the retired outputs is CONFIDENTIAL, so its exact bytes are not
+//    knowable from the source, and only the undo record can restore it verbatim.
+//  - UndoUtxoRecovery() runs from DisconnectBlock, before that block's
+//    transactions are undone, reversing the order in which the two were applied.
+//
+// Exactly-once follows from where it sits rather than from any flag: it is part
+// of connecting one block, inside the same CCoinsViewCache the block's
+// transactions use, so it commits or rolls back with that block. A reorg that
+// disconnects the block undoes it; a reconnect re-applies it; a reindex from
+// genesis replays it at the same height and reaches the same UTXO set.
+//
+// It is ALL-OR-NOTHING and never fails a block. If a retired outpoint is absent
+// the rewrite does not happen at all and the block still connects, which is what
+// keeps a node that somehow disagrees from stalling or splitting the network.
+// An empty undo record is exactly the marker that says "did not apply".
+
+CTransactionRef BuildUtxoRecoveryTransaction(const Consensus::UtxoRecovery& recovery)
+{
+    CMutableTransaction tx;
+    tx.nVersion = 2;
+    tx.nLockTime = 0;
+    for (const auto& [txid, n] : recovery.retire) {
+        // Empty scriptSig and the default final nSequence: nothing signs this and
+        // nothing relays it, and both fields are part of the txid, so they are
+        // pinned to their defaults rather than left to a caller's choice.
+        tx.vin.emplace_back(COutPoint(txid, n));
+    }
+    for (const Consensus::UtxoRecoveryOutput& out : recovery.create) {
+        tx.vout.emplace_back(CConfidentialAsset(out.asset), CConfidentialValue(out.amount), out.scriptPubKey);
+    }
+    return MakeTransactionRef(std::move(tx));
+}
+
+/** Apply the rewrite to `view`, recording what it removed in `undo`. */
+static void ApplyUtxoRecovery(const Consensus::UtxoRecovery& recovery, CCoinsViewCache& view, int nHeight, CTxUndo& undo)
+{
+    // All-or-nothing. Check every retired outpoint before removing any, so a
+    // missing one leaves the UTXO set exactly as it was.
+    for (const auto& [txid, n] : recovery.retire) {
+        if (!view.HaveCoin(COutPoint(txid, n))) {
+            LogPrintf("UTXO recovery at height %d SKIPPED: %s:%u is not an unspent output\n",
+                      nHeight, txid.GetHex(), n);
+            return;
+        }
+    }
+
+    undo.vprevout.reserve(recovery.retire.size());
+    for (const auto& [txid, n] : recovery.retire) {
+        undo.vprevout.emplace_back();
+        const bool is_spent = view.SpendCoin(COutPoint(txid, n), &undo.vprevout.back());
+        assert(is_spent); // HaveCoin() said so, one loop ago, on the same view
+        LogPrintf("UTXO recovery at height %d: retired %s:%u\n", nHeight, txid.GetHex(), n);
+    }
+
+    const CTransactionRef tx = BuildUtxoRecoveryTransaction(recovery);
+    AddCoins(view, *tx, nHeight);
+    for (size_t o = 0; o < tx->vout.size(); ++o) {
+        LogPrintf("UTXO recovery at height %d: created %s:%u = %d of asset %s to %s\n",
+                  nHeight, tx->GetHash().GetHex(), (unsigned)o,
+                  recovery.create[o].amount, recovery.create[o].asset.GetHex(),
+                  HexStr(recovery.create[o].scriptPubKey));
+    }
+}
+
+/** Reverse ApplyUtxoRecovery(), using the undo record it wrote. */
+static DisconnectResult UndoUtxoRecovery(const Consensus::UtxoRecovery& recovery, CCoinsViewCache& view, CTxUndo& undo)
+{
+    // An empty record means the rewrite did not apply, so there is nothing to
+    // reverse -- not that the undo data is damaged.
+    if (undo.vprevout.empty()) return DISCONNECT_OK;
+    if (undo.vprevout.size() != recovery.retire.size()) {
+        error("%s: UTXO recovery undo record has %u coins, expected %u", __func__,
+              (unsigned)undo.vprevout.size(), (unsigned)recovery.retire.size());
+        return DISCONNECT_FAILED;
+    }
+
+    bool fClean = true;
+
+    // Remove the created coins. Mirrors DisconnectBlock's treatment of a
+    // transaction's outputs, including skipping provably unspendable ones, which
+    // AddCoins never added in the first place.
+    const CTransactionRef tx = BuildUtxoRecoveryTransaction(recovery);
+    const uint256 tx_hash = tx->GetHash();
+    for (size_t o = 0; o < tx->vout.size(); ++o) {
+        if (tx->vout[o].scriptPubKey.IsUnspendable()) continue;
+        Coin coin;
+        if (!view.SpendCoin(COutPoint(tx_hash, o), &coin)) {
+            fClean = false; // already spent, or never created
+        }
+    }
+
+    // Restore the retired coins, in reverse order for symmetry with the removal.
+    for (size_t j = undo.vprevout.size(); j > 0;) {
+        --j;
+        const COutPoint out(recovery.retire[j].first, recovery.retire[j].second);
+        if (undo.vprevout[j].IsSpent()) {
+            fClean = false;
+            continue;
+        }
+        // As in ApplyTxInUndo: an unspent coin already sitting at this outpoint
+        // is an overwrite, and AddCoin has to be told so explicitly. Judge that
+        // per coin, not from the running fClean, which may already be false for
+        // an unrelated reason above.
+        const bool overwrite = view.HaveCoin(out);
+        if (overwrite) fClean = false;
+        view.AddCoin(out, std::move(undo.vprevout[j]), overwrite);
+    }
+
+    return fClean ? DISCONNECT_OK : DISCONNECT_UNCLEAN;
+}
+
 /**
  * Restore the UTXO in a Coin at a given COutPoint
  * @param undo The Coin to be restored.
@@ -1991,9 +2121,25 @@ DisconnectResult CChainState::DisconnectBlock(const CBlock& block, const CBlockI
         return DISCONNECT_FAILED;
     }
 
-    if (blockUndo.vtxundo.size() + 1 != block.vtx.size()) {
+    // SEQUENTIA: the one-time UTXO rewrite, if this is the block that carries it.
+    // ConnectBlock appended one extra CTxUndo past the per-transaction ones, so
+    // the expected undo size differs by one at exactly this height, and the same
+    // predicate decides it on both sides. Undone FIRST, because it was applied
+    // LAST -- and popped afterwards so the per-transaction loop below keeps
+    // indexing vtxundo exactly as it always has.
+    const Consensus::Params& consensus = m_params.GetConsensus();
+    const bool utxo_recovery_here = consensus.UtxoRecoveryAppliesAt(pindex->nHeight);
+
+    if (blockUndo.vtxundo.size() + 1 != block.vtx.size() + (utxo_recovery_here ? 1 : 0)) {
         error("DisconnectBlock(): block and undo data inconsistent");
         return DISCONNECT_FAILED;
+    }
+
+    if (utxo_recovery_here) {
+        const DisconnectResult res = UndoUtxoRecovery(consensus.utxo_recovery, view, blockUndo.vtxundo.back());
+        if (res == DISCONNECT_FAILED) return DISCONNECT_FAILED;
+        fClean = fClean && res != DISCONNECT_UNCLEAN;
+        blockUndo.vtxundo.pop_back();
     }
 
     // undo transactions in reverse order
@@ -3039,6 +3185,28 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
                 }
             }
         }
+    }
+
+    // SEQUENTIA: the one-time treasury UTXO rewrite, applied by connecting this
+    // one block on this one chain. See ApplyUtxoRecovery() above and the comment
+    // on CTestNetParams::consensus.utxo_recovery in chainparams.cpp.
+    //
+    // Placed here, after every transaction in the block has been applied to the
+    // view and after the PoS registry scans above have read blockundo: the
+    // created coins therefore do not exist while this block's transactions are
+    // validated, and are first spendable in the NEXT block. That is deliberate --
+    // it means the rewrite cannot change whether any transaction in this block is
+    // valid, so a node's verdict on the block is identical with or without it.
+    // Which is also why fJustCheck skips it: block validity does not depend on
+    // it, and TestBlockValidity's throwaway view has no business carrying a UTXO
+    // rewrite. Standing after the delegation and payout scans likewise keeps the
+    // extra undo entry out of vectors those scans walk.
+    //
+    // The extra CTxUndo goes at the END of vtxundo, past the per-transaction
+    // ones, so it changes nothing about how they are indexed on the way back out.
+    if (!fJustCheck && consensusParams.UtxoRecoveryAppliesAt(pindex->nHeight)) {
+        blockundo.vtxundo.emplace_back();
+        ApplyUtxoRecovery(consensusParams.utxo_recovery, view, pindex->nHeight, blockundo.vtxundo.back());
     }
 
     CAmountMap block_reward = fee_map;

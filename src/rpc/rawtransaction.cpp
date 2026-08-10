@@ -2997,7 +2997,14 @@ void reissueasset_base(CMutableTransaction& mtx, size_t issuance_input_index, co
     CalculateAsset(asset, entropy);
 
     mtx.vin[issuance_input_index].assetIssuance.assetEntropy = entropy;
-    mtx.vin[issuance_input_index].assetIssuance.assetBlindingNonce = asset_blinder;
+    // SEQUENTIA: a reissuance token held on an UNBLINDED output has a zero asset
+    // blinding factor. Writing that straight into the nonce would leave it null,
+    // which consensus reads as a brand new issuance rather than a reissuance,
+    // silently producing an unrelayable transaction. Substitute the explicit
+    // sentinel so the reissuance branch is selected; consensus ignores the nonce's
+    // value when the spent token's asset is explicit.
+    mtx.vin[issuance_input_index].assetIssuance.assetBlindingNonce =
+        asset_blinder.IsNull() ? ReissuanceExplicitTokenNonce() : asset_blinder;
     mtx.vin[issuance_input_index].assetIssuance.nAmount = asset_amount;
 
     // Place assets into randomly placed output slots, before change output, inserted in place
@@ -3181,7 +3188,7 @@ static RPCHelpMan rawreissueasset()
                                     {"asset_amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "Amount of asset to generate, if any."},
                                     {"asset_address", RPCArg::Type::STR, RPCArg::Optional::NO, "Destination address of generated asset. Required if `asset_amount` given."},
                                     {"input_index", RPCArg::Type::NUM, RPCArg::Optional::NO, "The input position of the reissuance in the transaction."},
-                                    {"asset_blinder", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The blinding factor of the reissuance token output being spent."},
+                                    {"asset_blinder", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The blinding factor of the reissuance token output being spent. Use all zeros when the token is held on an unblinded (explicit) output."},
                                     {"entropy", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The `entropy` returned during initial issuance for the asset being reissued."},
                                 }
                             }
