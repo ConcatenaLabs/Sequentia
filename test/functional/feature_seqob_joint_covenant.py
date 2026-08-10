@@ -40,7 +40,7 @@ import os
 import subprocess
 from decimal import Decimal
 
-from test_framework.test_framework import BitcoinTestFramework
+from test_framework.test_framework import BitcoinTestFramework, SkipTest
 from test_framework.util import assert_equal, assert_raises_rpc_error, satoshi_round, BITCOIN_ASSET
 from test_framework.key import compute_xonly_pubkey, generate_privkey
 from test_framework.messages import (
@@ -86,6 +86,15 @@ class SeqObJointCovenantTest(BitcoinTestFramework):
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
+        # The Go daemons under test live in the seqdex repo, which a bare
+        # checkout (CI included) does not have. Skip, rather than fail, when
+        # the toolchain or the repo is absent: their absence says nothing
+        # about the node.
+        if not os.path.exists(go_bin()):
+            raise SkipTest("Go toolchain not found at %s (set GO_BIN)" % go_bin())
+        if not os.path.isdir(os.path.join(seqdex_dir(), "daemon")):
+            raise SkipTest("seqdex daemon dir not found at %s (set SEQDEX_DIR)"
+                           % os.path.join(seqdex_dir(), "daemon"))
 
     def setup_network(self, split=False):
         self.setup_nodes()
@@ -176,7 +185,8 @@ class SeqObJointCovenantTest(BitcoinTestFramework):
         btc = self.fresh_segwit_utxo(1)
         btc_in = int(satoshi_round(btc["amount"]) * COIN)
 
-        tx = CTransaction(); tx.nVersion = 2
+        tx = CTransaction()
+        tx.nVersion = 2
         tx.vin.append(CTxIn(COutPoint(int(a_utxo["txid"], 16), a_utxo["vout"])))
         tx.vin.append(CTxIn(COutPoint(int(btc["txid"], 16), btc["vout"])))
         order_spk = bytes(order_tap.scriptPubKey)
@@ -196,7 +206,8 @@ class SeqObJointCovenantTest(BitcoinTestFramework):
         covenant-read output slots (slot_outs[0..3]), then bitcoin change + fee.
         Neither maker key is used. Returns the signed CTransaction."""
         node = self.nodes[0]
-        tx = CTransaction(); tx.nVersion = 2
+        tx = CTransaction()
+        tx.nVersion = 2
         tx.vin.append(CTxIn(COutPoint(int(in0[0], 16), in0[1])))          # covenant 0
         tx.vin.append(CTxIn(COutPoint(int(in1[0], 16), in1[1])))          # covenant 1
         tx.vin.append(CTxIn(COutPoint(int(settler_btc["txid"], 16), settler_btc["vout"])))
@@ -263,8 +274,10 @@ class SeqObJointCovenantTest(BitcoinTestFramework):
 
         # Two independent makers (distinct keys); each key is both its payout
         # program and its REFUND key. After funding they are OFFLINE.
-        maker0_sec = generate_privkey(); self.maker0_x = compute_xonly_pubkey(maker0_sec)[0]
-        maker1_sec = generate_privkey(); self.maker1_x = compute_xonly_pubkey(maker1_sec)[0]
+        maker0_sec = generate_privkey()
+        self.maker0_x = compute_xonly_pubkey(maker0_sec)[0]
+        maker1_sec = generate_privkey()
+        self.maker1_x = compute_xonly_pubkey(maker1_sec)[0]
         self.maker0_spk = bytes(CScript([OP_1, self.maker0_x]))
         self.maker1_spk = bytes(CScript([OP_1, self.maker1_x]))
         self.expiry = node.getblockcount() + 300
@@ -370,10 +383,13 @@ class SeqObJointCovenantTest(BitcoinTestFramework):
         req2 = (f2 * NUM1 + DEN1 - 1) // DEN1
         rem_atoms = locked1 - fill1
         leg1_witness = [bytes(self.fill1), cov.control_block(self.tap1, "fill")]
-        x_in = self.fresh_segwit_utxo(100, self.X_display); x_amt = int(satoshi_round(x_in["amount"]) * COIN)
-        btc = self.fresh_segwit_utxo(1); btc_amt = int(satoshi_round(btc["amount"]) * COIN)
+        x_in = self.fresh_segwit_utxo(100, self.X_display)
+        x_amt = int(satoshi_round(x_in["amount"]) * COIN)
+        btc = self.fresh_segwit_utxo(1)
+        btc_amt = int(satoshi_round(btc["amount"]) * COIN)
         node2 = self.nodes[0]
-        t = CTransaction(); t.nVersion = 2
+        t = CTransaction()
+        t.nVersion = 2
         t.vin.append(CTxIn(COutPoint(int(txid, 16), 3)))                    # the remainder covenant
         t.vin.append(CTxIn(COutPoint(int(x_in["txid"], 16), x_in["vout"]))) # taker pays X
         t.vin.append(CTxIn(COutPoint(int(btc["txid"], 16), btc["vout"])))

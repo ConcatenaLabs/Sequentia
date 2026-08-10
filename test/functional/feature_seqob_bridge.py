@@ -45,7 +45,7 @@ import os
 import subprocess
 from decimal import Decimal
 
-from test_framework.test_framework import BitcoinTestFramework
+from test_framework.test_framework import BitcoinTestFramework, SkipTest
 from test_framework.util import assert_equal, assert_raises_rpc_error, satoshi_round, BITCOIN_ASSET
 from test_framework.key import compute_xonly_pubkey, generate_privkey
 from test_framework.messages import (
@@ -89,6 +89,15 @@ class SeqObBridgeTest(BitcoinTestFramework):
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
+        # The Go daemons under test live in the seqdex repo, which a bare
+        # checkout (CI included) does not have. Skip, rather than fail, when
+        # the toolchain or the repo is absent: their absence says nothing
+        # about the node.
+        if not os.path.exists(go_bin()):
+            raise SkipTest("Go toolchain not found at %s (set GO_BIN)" % go_bin())
+        if not os.path.isdir(os.path.join(seqdex_dir(), "daemon")):
+            raise SkipTest("seqdex daemon dir not found at %s (set SEQDEX_DIR)"
+                           % os.path.join(seqdex_dir(), "daemon"))
 
     def setup_network(self, split=False):
         self.setup_nodes()
@@ -171,7 +180,8 @@ class SeqObBridgeTest(BitcoinTestFramework):
         btc = self.fresh_segwit_utxo(1)
         btc_in = int(satoshi_round(btc["amount"]) * COIN)
 
-        tx = CTransaction(); tx.nVersion = 2
+        tx = CTransaction()
+        tx.nVersion = 2
         tx.vin.append(CTxIn(COutPoint(int(a_utxo["txid"], 16), a_utxo["vout"])))
         tx.vin.append(CTxIn(COutPoint(int(btc["txid"], 16), btc["vout"])))
         order_spk = bytes(self.order_tap.scriptPubKey)
@@ -198,7 +208,8 @@ class SeqObBridgeTest(BitcoinTestFramework):
         btc = self.fresh_segwit_utxo(1)
         btc_amt = int(satoshi_round(btc["amount"]) * COIN)
 
-        tx = CTransaction(); tx.nVersion = 2
+        tx = CTransaction()
+        tx.nVersion = 2
         tx.vin.append(CTxIn(COutPoint(int(cov_in[0], 16), cov_in[1])))       # covenant (X)
         tx.vin.append(CTxIn(COutPoint(int(y_in["txid"], 16), y_in["vout"]))) # bridge pays Y
         tx.vin.append(CTxIn(COutPoint(int(btc["txid"], 16), btc["vout"])))
