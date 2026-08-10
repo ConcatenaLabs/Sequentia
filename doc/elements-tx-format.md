@@ -72,7 +72,7 @@ Refer to the examples section below for more concrete examples of serialized vec
 
 Notable differences from Bitcoin:
 - In Elements, the *Output Index* field uses the two most significant bits to flag if the transaction is a peg-in transaction (1 << 30) or if it is an issuance (1 << 31). If these flags are present, they must be removed to refer to the output's index.
-- Inputs can allow for the issuance of new assets or for reissuances of these assets. To create a new asset, any input being spent can be used and a 0 value must be used in the issuance's blinding nonce field. To reissue an asset, the asset blinding factor is used in the issuance's blinding nonce field, and the asset being spent must be of the reissuance token's asset type.
+- Inputs can allow for the issuance of new assets or for reissuances of these assets. To create a new asset, any input being spent can be used and a 0 value must be used in the issuance's blinding nonce field. To reissue an asset, the asset blinding factor is used in the issuance's blinding nonce field, and the asset being spent must be of the reissuance token's asset type. On Sequentia, a reissuance from a token held on an *unblinded* output uses the fixed sentinel nonce `uint256::ONE` instead of the (zero) blinding factor; see the AssetIssuance section below.
 
 #### TxOut
 
@@ -140,10 +140,30 @@ More details:
 
 | Field | Required | Size | Data Type | Encoding | Notes |
 | ----- | -------- | ---- | --------- | -------- | ----- |
-| Asset Blinding Nonce | Yes | 32 bytes | `hex` | | Zero for a new asset issuance; otherwise a blinding factor for the input. |
+| Asset Blinding Nonce | Yes | 32 bytes | `hex` | | Zero for a new asset issuance; otherwise a blinding factor for the input (but see the Sequentia explicit-token sentinel below). |
 | Asset Entropy | Yes | 32 bytes | `hex` | | **New issuances:** Freeform entropy field, no consensus-defined meaning, but is used as additional entropy to the asset tag calculation.<br><br>**Reissuances:** Required to be the asset's entropy value (from its initial issuance). |
 | Amount | Yes | 1 or 9 or 33 bytes | `ConfidentialAmount` | | Amount of the asset to issue. Both explicit and blinded amounts are supported.<br><br>**Note**: cannot be explicitly set to 0 (should be null instead). |
 | Num Inflation Keys | Yes | 1 or 9 or 33 bytes | `ConfidentialAmount` | | Number of inflation keys to issue. Both explicit and blinded amounts are supported.<br><br>**Notes:**<br>  - Cannot be explicitly set to 0 (should be null instead).<br>  - Inflation keys cannot be reissued. |
+
+**Sequentia: the explicit-token reissuance sentinel.** A null (all-zero) Asset
+Blinding Nonce means "new issuance". Elements flags a reissuance by putting the
+spent reissuance token's asset *blinding factor* in this field, but a token held
+on an unblinded (explicit) output has a blinding factor of zero, which would
+read back as a new issuance. Sequentia wallets therefore set the fixed sentinel
+`uint256::ONE` (`ReissuanceExplicitTokenNonce()`, `src/issuance.h`) -- serialized
+as byte `0x01` followed by 31 zero bytes, displayed as `0x00..01` -- whenever the
+token being spent is explicit. Consensus ignores the nonce's *value* in that
+case (any non-null value selects the reissuance branch; the spent output's
+explicit asset is compared to the derived reissuance token id directly), but the
+sentinel is what wallets emit and what appears on the wire.
+
+This value is **script- and Simplicity-visible**: the issuance introspection
+opcodes push the raw 32-byte nonce onto the script stack
+(`src/script/interpreter.cpp`, `OP_INSPECTINPUTISSUANCE`), and the Simplicity
+environment receives it as the input's `issuance.blindingNonce`. A covenant that
+introspects this field must therefore expect `0x00..01` where an
+explicit-token reissuance previously (invalidly) carried zeros; only a null
+nonce means "no reissuance semantics" (i.e. a new issuance).
 
 #### ConfidentialAsset
 
