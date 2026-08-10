@@ -170,7 +170,7 @@ BOOST_AUTO_TEST_CASE(testnet_treasury_utxo_recovery_is_pinned)
     const Consensus::Params& consensus = params->GetConsensus();
     const Consensus::UtxoRecovery& rec = consensus.utxo_recovery;
 
-    BOOST_CHECK_EQUAL(rec.height, 73200);
+    BOOST_CHECK_EQUAL(rec.height, 89500);
     // Bound to THIS chain: the re-genesis testnet genesis, and no other.
     BOOST_CHECK_EQUAL(rec.chain_genesis.GetHex(),
                       "ddd11d54c87a2bd94400fd31ce05d8e1110bb4b78e7103f738342086fc4ea92e");
@@ -205,9 +205,9 @@ BOOST_AUTO_TEST_CASE(testnet_treasury_utxo_recovery_is_pinned)
     BOOST_CHECK(rec.create[0].amount <= MAX_MONEY);
 
     // The height gate is exact: the rewrite belongs to one block, not a range.
-    BOOST_CHECK(consensus.UtxoRecoveryAppliesAt(73200));
-    BOOST_CHECK(!consensus.UtxoRecoveryAppliesAt(73199));
-    BOOST_CHECK(!consensus.UtxoRecoveryAppliesAt(73201));
+    BOOST_CHECK(consensus.UtxoRecoveryAppliesAt(89500));
+    BOOST_CHECK(!consensus.UtxoRecoveryAppliesAt(89499));
+    BOOST_CHECK(!consensus.UtxoRecoveryAppliesAt(89501));
 
     // The created coins' outpoints are a pure function of the table, so this
     // txid is recomputable by anyone and must not drift: a change here silently
@@ -238,7 +238,7 @@ BOOST_AUTO_TEST_CASE(fresh_chains_have_no_utxo_recovery)
         const Consensus::Params& consensus = params->GetConsensus();
         BOOST_CHECK_MESSAGE(consensus.utxo_recovery.IsNull(), chain << " has a UTXO recovery table");
         BOOST_CHECK(!consensus.UtxoRecoveryAppliesAt(0));
-        BOOST_CHECK(!consensus.UtxoRecoveryAppliesAt(73200));
+        BOOST_CHECK(!consensus.UtxoRecoveryAppliesAt(89500));
     }
     SelectParams(CBaseChainParams::REGTEST);
 }
