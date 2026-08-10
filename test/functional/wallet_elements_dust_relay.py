@@ -43,24 +43,25 @@ class WalletTest(BitcoinTestFramework):
         # test dust threshold for upstream dustrelayfee=3sat/vb
         # 495 sats should succeed for blinded output value
         amt = "0.00000495"
-        self.nodes[1].sendtoaddress(address=addr, amount=amt)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        self.nodes[1].sendtoaddress(address=addr, amount=amt, fee_asset_label='bitcoin')
         self.generate(self.nodes[1], 1, sync_fun=self.no_op)
 
         # 494 sats should fail for blinded output value
         amt = "0.00000494"
-        assert_raises_rpc_error(-6, "Transaction amount too small", self.nodes[1].sendtoaddress, address=addr, amount=amt)
+        assert_raises_rpc_error(-6, "Transaction amount too small", self.nodes[1].sendtoaddress, address=addr, amount=amt, fee_asset_label='bitcoin')
 
         addr = self.nodes[1].getnewaddress()
 
         # test dust threshold for elements default dustrelayfee=0.1sat/vb
         # 17 sats should succeed for blinded output value
         amt = "0.00000017"
-        self.nodes[0].sendtoaddress(address=addr, amount=amt)
+        self.nodes[0].sendtoaddress(address=addr, amount=amt, fee_asset_label='bitcoin')
         self.generate(self.nodes[0], 1, sync_fun=self.no_op)
 
         # 16 sats should fail for blinded output value
         amt = "0.00000016"
-        assert_raises_rpc_error(-6, "Transaction amount too small", self.nodes[0].sendtoaddress, address=addr, amount=amt)
+        assert_raises_rpc_error(-6, "Transaction amount too small", self.nodes[0].sendtoaddress, address=addr, amount=amt, fee_asset_label='bitcoin')
 
         # a blinded transaction created manually can have an output value as low as 1 sat
         addr = self.nodes[1].getnewaddress()

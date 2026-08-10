@@ -72,7 +72,8 @@ class WalletBackupTest(BitcoinTestFramework):
     def one_send(self, from_node, to_address):
         if (randint(1,2) == 1):
             amount = Decimal(randint(1,10)) / Decimal(10)
-            self.nodes[from_node].sendtoaddress(to_address, amount)
+            # SEQUENTIA: an open-fee-market chain has no default fee asset.
+            self.nodes[from_node].sendtoaddress(address=to_address, amount=amount, fee_asset_label='bitcoin')
 
     def do_one_round(self):
         a0 = self.nodes[0].getnewaddress()

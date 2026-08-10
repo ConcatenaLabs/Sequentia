@@ -266,7 +266,8 @@ class AnchorSwapConsistencyTest(BitcoinTestFramework):
         # 1. The asset leg confirms in a Sequentia block anchored at the CURRENT
         #    parent height X (at most: the anchor may legitimately lag).
         x = parent.getblockcount()
-        leg_txid = seq.sendtoaddress(address=seq.getnewaddress(), amount=1.0)
+        leg_txid = seq.sendtoaddress(address=seq.getnewaddress(), amount=1.0,
+                                     fee_asset_label='bitcoin')
         self.generatetoaddress(seq, 1, seq_mine, sync_fun=self.no_op)
         block_leg = seq.getbestblockhash()
         leg_anchor = seq.getblockheader(block_leg)['anchorheight']
@@ -276,7 +277,8 @@ class AnchorSwapConsistencyTest(BitcoinTestFramework):
         # 2. The BTC leg confirms TWO parent blocks later, so the asset leg's
         #    block is anchored strictly BELOW it: the gate must refuse this leg.
         self.generatetoaddress(parent, 1, parent_mine, sync_fun=self.no_op)      # X+1
-        btc_leg = parent.sendtoaddress(address=parent.getnewaddress(), amount=10.0, replaceable=True)
+        btc_leg = parent.sendtoaddress(address=parent.getnewaddress(), amount=10.0,
+                                       replaceable=True, fee_asset_label='bitcoin')
         self.generatetoaddress(parent, 1, parent_mine, sync_fun=self.no_op)      # X+2 confirms it
         h_btc = parent.getblockcount()
         assert_equal(h_btc, x + 2)

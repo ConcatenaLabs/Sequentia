@@ -32,7 +32,8 @@ class ListTransactionsTest(BitcoinTestFramework):
 
     def run_test(self):
         self.log.info("Test simple send from node0 to node1")
-        txid = self.nodes[0].sendtoaddress(self.nodes[1].getnewaddress(), 0.1)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        txid = self.nodes[0].sendtoaddress(address=self.nodes[1].getnewaddress(), amount=0.1, fee_asset_label='bitcoin')
         self.sync_all()
         assert_array_result(self.nodes[0].listtransactions(),
                             {"txid": txid},
@@ -51,7 +52,7 @@ class ListTransactionsTest(BitcoinTestFramework):
                             {"category": "receive", "amount": Decimal("0.1"), "confirmations": 1, "blockhash": blockhash, "blockheight": blockheight})
 
         self.log.info("Test send-to-self on node0")
-        txid = self.nodes[0].sendtoaddress(self.nodes[0].getnewaddress(), 0.2)
+        txid = self.nodes[0].sendtoaddress(address=self.nodes[0].getnewaddress(), amount=0.2, fee_asset_label='bitcoin')
         assert_array_result(self.nodes[0].listtransactions(),
                             {"txid": txid, "category": "send"},
                             {"amount": Decimal("-0.2")})
@@ -64,7 +65,7 @@ class ListTransactionsTest(BitcoinTestFramework):
                    self.nodes[1].getnewaddress(): 0.22,
                    self.nodes[0].getnewaddress(): 0.33,
                    self.nodes[1].getnewaddress(): 0.44}
-        txid = self.nodes[1].sendmany("", send_to)
+        txid = self.nodes[1].sendmany(dummy="", amounts=send_to, fee_asset='bitcoin')
         self.sync_all()
         assert_array_result(self.nodes[1].listtransactions(),
                             {"category": "send", "amount": Decimal("-0.11")},
@@ -97,7 +98,7 @@ class ListTransactionsTest(BitcoinTestFramework):
             pubkey = self.nodes[1].getaddressinfo(self.nodes[1].getnewaddress())['pubkey']
             multisig = self.nodes[1].createmultisig(1, [pubkey])
             self.nodes[0].importaddress(multisig["redeemScript"], "watchonly", False, True)
-            txid = self.nodes[1].sendtoaddress(multisig["address"], 0.1)
+            txid = self.nodes[1].sendtoaddress(address=multisig["address"], amount=0.1, fee_asset_label='bitcoin')
             self.generate(self.nodes[1], 1)
             assert_equal(len(self.nodes[0].listtransactions(label="watchonly", include_watchonly=True)), 1)
             assert_equal(len(self.nodes[0].listtransactions(dummy="watchonly", include_watchonly=True)), 1)
@@ -131,7 +132,7 @@ class ListTransactionsTest(BitcoinTestFramework):
 
         self.log.info("Test txs w/o opt-in RBF (bip125-replaceable=no)")
         # Chain a few transactions that don't opt in.
-        txid_1 = self.nodes[0].sendtoaddress(self.nodes[1].getnewaddress(), 1)
+        txid_1 = self.nodes[0].sendtoaddress(address=self.nodes[1].getnewaddress(), amount=1, fee_asset_label='bitcoin')
         assert not is_opt_in(self.nodes[0], txid_1)
         assert_array_result(self.nodes[0].listtransactions(), {"txid": txid_1}, {"bip125-replaceable": "no"})
         self.sync_mempools()
@@ -246,15 +247,15 @@ class ListTransactionsTest(BitcoinTestFramework):
 
         self.log.info("Send to externally generated addresses")
         # send to an address beyond the next to be generated to test the keypool gap
-        self.nodes[1].sendtoaddress(addr3, "0.001")
+        self.nodes[1].sendtoaddress(address=addr3, amount="0.001", fee_asset_label='bitcoin')
         self.generate(self.nodes[1], 1)
 
         # send to an address that is already marked as used due to the keypool gap mechanics
-        self.nodes[1].sendtoaddress(addr2, "0.001")
+        self.nodes[1].sendtoaddress(address=addr2, amount="0.001", fee_asset_label='bitcoin')
         self.generate(self.nodes[1], 1)
 
         # send to self transaction
-        self.nodes[0].sendtoaddress(addr1, "0.001")
+        self.nodes[0].sendtoaddress(address=addr1, amount="0.001", fee_asset_label='bitcoin')
         self.generate(self.nodes[0], 1)
 
         self.log.info("Verify listtransactions is the same regardless of where the address was generated")

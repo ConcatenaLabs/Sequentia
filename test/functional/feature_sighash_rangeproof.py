@@ -71,7 +71,7 @@ class SighashRangeproofTest(BitcoinTestFramework):
 
         addr = self.nodes[1].getnewaddress("", address_type)
         assert len(self.nodes[1].getaddressinfo(addr)["confidential_key"]) > 0
-        self.nodes[0].sendtoaddress(addr, 1.0)
+        self.nodes[0].sendtoaddress(address=addr, amount=1.0, fee_asset_label='bitcoin')
         self.generate(self.nodes[0], 1)
         self.sync_all()
         utxo = self.nodes[1].listunspent(1, 1, [addr])[0]

@@ -210,7 +210,8 @@ class AddressTypeTest(BitcoinTestFramework):
             assert False
 
     def test_change_output_type(self, node_sender, destinations, expected_type):
-        txid = self.nodes[node_sender].sendmany(dummy="", amounts=dict.fromkeys(destinations, 0.001))
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        txid = self.nodes[node_sender].sendmany(dummy="", amounts=dict.fromkeys(destinations, 0.001), fee_asset='bitcoin')
         tx = self.nodes[node_sender].gettransaction(txid=txid, verbose=True)['decoded']
 
         # Make sure the transaction has change:
@@ -301,7 +302,7 @@ class AddressTypeTest(BitcoinTestFramework):
                 addresses[to_node] = (address, typ)
 
             self.log.debug("Sending: {}".format(sends))
-            self.nodes[from_node].sendmany("", sends)
+            self.nodes[from_node].sendmany(dummy="", amounts=sends, fee_asset='bitcoin')
             self.sync_mempools()
 
             unconf_balances = self.get_balances('untrusted_pending')
@@ -344,7 +345,7 @@ class AddressTypeTest(BitcoinTestFramework):
         to_address_bech32_2 = self.nodes[3].getnewaddress()
 
         # Fund node 4:
-        self.nodes[5].sendtoaddress(self.nodes[4].getnewaddress(), Decimal("1"))
+        self.nodes[5].sendtoaddress(address=self.nodes[4].getnewaddress(), amount=Decimal("1"), fee_asset_label='bitcoin')
         self.generate(self.nodes[5], 1)
         assert_equal(amount_of(self.nodes[4].getbalance()), 1)
 

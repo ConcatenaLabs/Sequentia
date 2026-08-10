@@ -2,6 +2,22 @@
 # Copyright (c) 2017-2020 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
+"""A zero fee rate builds a transaction with no fee output, and this chain refuses it.
+
+SEQUENTIA: upstream this test asserted that a zero fee_rate send confirms and moves
+the balances, because a transaction carrying no fee output was an ordinary shape. On
+a chain with the open fee market it is not. The fee output is what NAMES the asset a
+fee is denominated in, so a transaction carrying none names no fee asset at all, and
+the mempool -- which has to account for fees per asset -- rejects it as
+bad-txns-no-fee (the M5 audit check, src/validation.cpp).
+
+The test is aimed at what is true on this chain rather than at a configuration no
+Sequentia chain runs, so it does not reach for -con_any_asset_fees=0 to keep the old
+assertion alive. It still pins the wallet's behaviour exactly -- a zero fee rate does
+build a two-output transaction with no fee output and an empty fee map -- and then
+asserts the consequence: the network refuses that transaction, so it never confirms
+and the recipient never receives.
+"""
 from decimal import Decimal
 
 from test_framework.test_framework import BitcoinTestFramework
@@ -17,14 +33,6 @@ class WalletTest(BitcoinTestFramework):
             "-minrelaytxfee=0",
             "-blockmintxfee=0",
             "-mintxfee=0",
-            # SEQUENTIA: a fee-output-less transaction is only a meaningful shape when
-            # the open fee market is off. With it on, the mempool requires exactly one
-            # fee output so it knows which asset the fee is denominated in, and rejects
-            # a transaction carrying none as bad-txns-no-fee (src/validation.cpp, the
-            # M5 audit check) -- a deliberate standardness rule, not a bug. This test is
-            # specifically about the omit-the-output form, so it states the mode it
-            # needs rather than depending on whatever the chain happens to default to.
-            "-con_any_asset_fees=0",
         ]] * self.num_nodes
 
     def skip_test_if_missing_module(self):
@@ -37,31 +45,49 @@ class WalletTest(BitcoinTestFramework):
         assert_equal(self.nodes[2].getbalance(), {'bitcoin': Decimal('1250')})
         assert_equal(self.nodes[0].getblockchaininfo()["blocks"], 200)
 
-        self.nodes[0].sendtoaddress(self.nodes[1].getnewaddress(), 10)
-        self.nodes[0].sendtoaddress(self.nodes[2].getnewaddress(), 20)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        self.nodes[0].sendtoaddress(address=self.nodes[1].getnewaddress(), amount=10,
+                                    fee_asset_label='bitcoin')
+        self.nodes[0].sendtoaddress(address=self.nodes[2].getnewaddress(), amount=20,
+                                    fee_asset_label='bitcoin')
         self.generate(self.nodes[0], 1)
         assert_equal(self.nodes[0].getblockchaininfo()["blocks"], 201)
         assert_equal(self.nodes[0].getbalance(), {'bitcoin': Decimal('1269.99897200')})
         assert_equal(self.nodes[1].getbalance(), {'bitcoin': Decimal('1260')})
         assert_equal(self.nodes[2].getbalance(), {'bitcoin': Decimal('1270')})
 
-        # send a zero fee_rate transaction, which should not add a fee output
+        # A zero fee_rate still builds a transaction that pays no fee, and so adds no
+        # fee output. The wallet's side of this is unchanged.
         addr = self.nodes[1].getnewaddress()
-        txid = self.nodes[0].sendtoaddress(address=addr, amount=1, fee_rate=0)
-        tx = self.nodes[0].getrawtransaction(txid, 2)
+        txid = self.nodes[0].sendtoaddress(address=addr, amount=1, fee_rate=0,
+                                           fee_asset_label='bitcoin')
+        wtx = self.nodes[0].gettransaction(txid, True, True)
         # there should be no fees
-        assert "bitcoin" not in tx["fee"]
-        assert_equal(tx["fee"], {})
+        assert "bitcoin" not in wtx["fee"]
+        assert_equal(wtx["fee"], {})
         # and no fee output
-        assert_equal(len(tx["vout"]),2)
-        for output in tx["vout"]:
+        decoded = wtx["decoded"]
+        assert_equal(len(decoded["vout"]), 2)
+        for output in decoded["vout"]:
             assert output["scriptPubKey"]["type"] != "fee"
 
+        # ... and this chain refuses it, because a transaction with no fee output names
+        # no asset for its fee to be denominated in. It never reaches the mempool.
+        assert_equal(self.nodes[0].getrawmempool(), [])
+        assert_equal(self.nodes[0].testmempoolaccept([wtx["hex"]])[0]["reject-reason"],
+                     "bad-txns-no-fee")
+
+        # So it cannot be mined either: a block later it is still unconfirmed, and the
+        # recipient's balance has not moved.
         self.generate(self.nodes[0], 1)
         assert_equal(self.nodes[0].getblockchaininfo()["blocks"], 202)
+        assert_equal(self.nodes[0].gettransaction(txid)["confirmations"], 0)
 
-        assert_equal(self.nodes[0].getbalance(), {'bitcoin': Decimal('1318.99897200')})
-        assert_equal(self.nodes[1].getbalance(), {'bitcoin': Decimal('1261')})
+        # Node 0's spendable balance is unchanged in total, but not for a trivial
+        # reason: the refused transaction still ties up the 50 it spends, and exactly
+        # 50 matured in the block just generated.
+        assert_equal(self.nodes[0].getbalance(), {'bitcoin': Decimal('1269.99897200')})
+        assert_equal(self.nodes[1].getbalance(), {'bitcoin': Decimal('1260')})
         assert_equal(self.nodes[2].getbalance(), {'bitcoin': Decimal('1270')})
 
 if __name__ == '__main__':

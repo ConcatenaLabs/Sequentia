@@ -48,7 +48,7 @@ class MempoolPackagesTest(BitcoinTestFramework):
     def run_test(self):
 
         # Create transaction with 3-second block delay, should fail to enter the template
-        txid = self.nodes[0].sendtoaddress(self.nodes[0].getnewaddress(), 1)
+        txid = self.nodes[0].sendtoaddress(address=self.nodes[0].getnewaddress(), amount=1, fee_asset_label='bitcoin')
         block = self.nodes[0].getnewblockhex(min_tx_age=3)
         self.nodes[0].submitblock(block)
         assert txid in self.nodes[0].getrawmempool()
@@ -57,7 +57,7 @@ class MempoolPackagesTest(BitcoinTestFramework):
         self.nodes[0].submitblock(block)
         assert txid not in self.nodes[0].getrawmempool()
         # Once more with no delay (default is 0, just testing default arg)
-        txid = self.nodes[0].sendtoaddress(self.nodes[0].getnewaddress(), 1)
+        txid = self.nodes[0].sendtoaddress(address=self.nodes[0].getnewaddress(), amount=1, fee_asset_label='bitcoin')
         block = self.nodes[0].getnewblockhex(min_tx_age=0)
         self.nodes[0].submitblock(block)
         assert txid not in self.nodes[0].getrawmempool()

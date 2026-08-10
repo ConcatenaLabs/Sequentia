@@ -71,7 +71,8 @@ class TransactionTimeRescanTest(BitcoinTestFramework):
         set_node_times(self.nodes, cur_time + ten_days)
         # send 10 btc to user's first watch-only address
         self.log.info('Send 10 btc to user')
-        miner_wallet.sendtoaddress(wo1, 10)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        miner_wallet.sendtoaddress(address=wo1, amount=10, fee_asset_label='bitcoin')
 
         # generate blocks and check blockcount
         self.generatetoaddress(minernode, COINBASE_MATURITY, m1)
@@ -82,7 +83,7 @@ class TransactionTimeRescanTest(BitcoinTestFramework):
         set_node_times(self.nodes, cur_time + ten_days + ten_days)
         # send 5 btc to our second watch-only address
         self.log.info('Send 5 btc to user')
-        miner_wallet.sendtoaddress(wo2, 5)
+        miner_wallet.sendtoaddress(address=wo2, amount=5, fee_asset_label='bitcoin')
 
         # generate blocks and check blockcount
         self.generatetoaddress(minernode, COINBASE_MATURITY, m1)
@@ -93,7 +94,7 @@ class TransactionTimeRescanTest(BitcoinTestFramework):
         set_node_times(self.nodes, cur_time + ten_days + ten_days + ten_days)
         # send 1 btc to our third watch-only address
         self.log.info('Send 1 btc to user')
-        miner_wallet.sendtoaddress(wo3, 1)
+        miner_wallet.sendtoaddress(address=wo3, amount=1, fee_asset_label='bitcoin')
 
         # generate more blocks and check blockcount
         self.generatetoaddress(minernode, COINBASE_MATURITY, m1)

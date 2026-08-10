@@ -89,7 +89,8 @@ class WalletLabelsTest(BitcoinTestFramework):
 
         # Send a transaction to each label.
         for label in labels:
-            node.sendtoaddress(label.addresses[0], amount_to_send)
+            # SEQUENTIA: an open-fee-market chain has no default fee asset.
+            node.sendtoaddress(address=label.addresses[0], amount=amount_to_send, fee_asset_label='bitcoin')
             label.verify(node)
 
         # Check the amounts received.
@@ -104,7 +105,7 @@ class WalletLabelsTest(BitcoinTestFramework):
 
         for i, label in enumerate(labels):
             to_label = labels[(i + 1) % len(labels)]
-            node.sendtoaddress(to_label.addresses[0], amount_to_send)
+            node.sendtoaddress(address=to_label.addresses[0], amount=amount_to_send, fee_asset_label='bitcoin')
         self.generate(node, 1)
         for label in labels:
             address = node.getnewaddress(label.name)

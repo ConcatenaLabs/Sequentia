@@ -41,7 +41,8 @@ class CreateWalletWatchonlyTest(BitcoinTestFramework):
         self.generatetoaddress(node, COINBASE_MATURITY + 1, a1)
 
         # send 1 btc to our watch-only address
-        txid = def_wallet.sendtoaddress(wo_addr, 1)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        txid = def_wallet.sendtoaddress(address=wo_addr, amount=1, fee_asset_label='bitcoin')
         self.generate(self.nodes[0], 1)
 
         # getbalance
@@ -53,8 +54,10 @@ class CreateWalletWatchonlyTest(BitcoinTestFramework):
 
         self.log.info('Test sending from a watch-only wallet raises RPC error')
         msg = "Error: Private keys are disabled for this wallet"
-        assert_raises_rpc_error(-4, msg, wo_wallet.sendtoaddress, a1, 0.1)
-        assert_raises_rpc_error(-4, msg, wo_wallet.sendmany, amounts={a1: 0.1})
+        # The fee asset is named so that the disabled-private-keys error is what
+        # actually gets tested, rather than an earlier complaint about the fee asset.
+        assert_raises_rpc_error(-4, msg, wo_wallet.sendtoaddress, address=a1, amount=0.1, fee_asset_label='bitcoin')
+        assert_raises_rpc_error(-4, msg, wo_wallet.sendmany, amounts={a1: 0.1}, fee_asset='bitcoin')
 
         self.log.info('Testing listreceivedbyaddress watch-only defaults')
         result = wo_wallet.listreceivedbyaddress()
@@ -93,8 +96,8 @@ class CreateWalletWatchonlyTest(BitcoinTestFramework):
         self.log.info('Testing walletcreatefundedpsbt watch-only defaults')
         inputs = []
         outputs = [{a1: 0.5}]
-        options = {'changeAddress': wo_change}
-        no_wo_options = {'changeAddress': wo_change, 'includeWatching': False}
+        options = {'changeAddress': wo_change, 'fee_asset': 'bitcoin'}
+        no_wo_options = {'changeAddress': wo_change, 'includeWatching': False, 'fee_asset': 'bitcoin'}
 
         result = wo_wallet.walletcreatefundedpsbt(inputs=inputs, outputs=outputs, options=options)
         assert_equal("psbt" in result, True)

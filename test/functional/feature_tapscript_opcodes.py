@@ -83,7 +83,8 @@ class TapHashPeginTest(BitcoinTestFramework):
         tx.vout[0].nValue = CTxOutValue(12*10**7)
         raw_hex = tx.serialize().hex()
 
-        fund_tx = self.nodes[0].fundrawtransaction(raw_hex, False, )["hex"]
+        # SEQUENTIA: no default fee asset on an open-fee-market chain -- name it.
+        fund_tx = self.nodes[0].fundrawtransaction(raw_hex, {"includeWatching": False, "fee_asset": "bitcoin"})["hex"]
         fund_tx = tx_from_hex(fund_tx)
 
         # Createrawtransaction might rearrage txouts
@@ -116,7 +117,7 @@ class TapHashPeginTest(BitcoinTestFramework):
 
         if add_pegin:
             fund_info = self.nodes[0].getpeginaddress()
-            peg_id = self.nodes[0].sendtoaddress(fund_info["mainchain_address"], 1)
+            peg_id = self.nodes[0].sendtoaddress(address=fund_info["mainchain_address"], amount=1, fee_asset_label='bitcoin')
             raw_peg_tx = self.nodes[0].gettransaction(peg_id)["hex"]
             peg_txid = self.nodes[0].sendrawtransaction(raw_peg_tx)
             self.generate(self.nodes[0], 101)
@@ -141,7 +142,7 @@ class TapHashPeginTest(BitcoinTestFramework):
             key.generate()
             tx.vout.append(CTxOut(nValue = CTxOutValue(10000), scriptPubKey = spk, nNonce=CTxOutNonce(key.get_pubkey().get_bytes())))
 
-            tx_hex = self.nodes[0].fundrawtransaction(tx.serialize().hex())
+            tx_hex = self.nodes[0].fundrawtransaction(tx.serialize().hex(), {"fee_asset": "bitcoin"})
             tx = tx_from_hex(tx_hex['hex'])
 
         tx.vin.append(CTxIn(COutPoint(prev_tx.sha256, prev_vout), nSequence=seq))
@@ -260,7 +261,7 @@ class TapHashPeginTest(BitcoinTestFramework):
         self.generate(self.nodes[0], 101)
         self.wait_until(lambda: self.nodes[0].getblockcount() == 101, timeout=5)
         # ELEMENTS: spend the initialfreecoins to node0, to fix bad-txns-inputs-missingorspent error when creating the first taproot utxo
-        self.nodes[0].sendtoaddress(self.nodes[0].getnewaddress(), 50)
+        self.nodes[0].sendtoaddress(address=self.nodes[0].getnewaddress(), amount=50, fee_asset_label='bitcoin')
         self.generate(self.nodes[0], 1)
 
         # Test whether the above test framework is working

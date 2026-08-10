@@ -33,10 +33,14 @@ class AssetdirTests(BitcoinTestFramework):
         self.nodes[0].syncwithvalidationinterfacequeue()
 
         #Issue two assets that we will later label using the assetdir parameter
-        issuance1 = self.nodes[0].issueasset(100, 1, False)
+        # An issuance has no output the fee can come out of, so it names the fee
+        # asset; the only asset this wallet holds here is the policy asset.
+        issuance1 = self.nodes[0].issueasset(
+            assetamount=100, tokenamount=1, blind=False, fee_asset='bitcoin')
         asset1hex = issuance1["asset"]
 
-        issuance2 = self.nodes[0].issueasset(100, 1, False)
+        issuance2 = self.nodes[0].issueasset(
+            assetamount=100, tokenamount=1, blind=False, fee_asset='bitcoin')
         asset2hex = issuance2["asset"]
 
         #Stop and restart the nodes, providing the assetdir parameter to locally label the assets

@@ -33,13 +33,14 @@ class CreateTxWalletTest(BitcoinTestFramework):
     def test_anti_fee_sniping(self):
         self.log.info('Check that we have some (old) blocks and that anti-fee-sniping is disabled')
         assert_equal(self.nodes[0].getblockchaininfo()['blocks'], 200)
-        txid = self.nodes[0].sendtoaddress(self.nodes[0].getnewaddress(), 1)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        txid = self.nodes[0].sendtoaddress(address=self.nodes[0].getnewaddress(), amount=1, fee_asset_label='bitcoin')
         tx = self.nodes[0].gettransaction(txid=txid, verbose=True)['decoded']
         assert_equal(tx['locktime'], 0)
 
         self.log.info('Check that anti-fee-sniping is enabled when we mine a recent block')
         self.generate(self.nodes[0], 1)
-        txid = self.nodes[0].sendtoaddress(self.nodes[0].getnewaddress(), 1)
+        txid = self.nodes[0].sendtoaddress(address=self.nodes[0].getnewaddress(), amount=1, fee_asset_label='bitcoin')
         tx = self.nodes[0].gettransaction(txid=txid, verbose=True)['decoded']
         assert 0 < tx['locktime'] <= 201
 
@@ -54,15 +55,16 @@ class CreateTxWalletTest(BitcoinTestFramework):
         for fee_setting in ['-minrelaytxfee=0.01', '-mintxfee=0.01', '-paytxfee=0.01']:
             self.log.info('Check maxtxfee in combination with {}'.format(fee_setting))
             self.restart_node(0, extra_args=[fee_setting])
+            # SEQUENTIA: an open-fee-market chain has no default fee asset.
             assert_raises_rpc_error(
                 -6,
                 "Fee exceeds maximum configured by user (e.g. -maxtxfee, maxfeerate)",
-                lambda: self.nodes[0].sendmany(dummy="", amounts=output_dict),
+                lambda: self.nodes[0].sendmany(dummy="", amounts=output_dict, fee_asset='bitcoin'),
             )
             assert_raises_rpc_error(
                 -4,
                 "Fee exceeds maximum configured by user (e.g. -maxtxfee, maxfeerate)",
-                lambda: self.nodes[0].fundrawtransaction(hexstring=raw_tx),
+                lambda: self.nodes[0].fundrawtransaction(hexstring=raw_tx, options={"fee_asset": "bitcoin"}),
             )
 
         self.log.info('Check maxtxfee in combination with settxfee')
@@ -71,12 +73,12 @@ class CreateTxWalletTest(BitcoinTestFramework):
         assert_raises_rpc_error(
             -6,
             "Fee exceeds maximum configured by user (e.g. -maxtxfee, maxfeerate)",
-            lambda: self.nodes[0].sendmany(dummy="", amounts=output_dict),
+            lambda: self.nodes[0].sendmany(dummy="", amounts=output_dict, fee_asset='bitcoin'),
         )
         assert_raises_rpc_error(
             -4,
             "Fee exceeds maximum configured by user (e.g. -maxtxfee, maxfeerate)",
-            lambda: self.nodes[0].fundrawtransaction(hexstring=raw_tx),
+            lambda: self.nodes[0].fundrawtransaction(hexstring=raw_tx, options={"fee_asset": "bitcoin"}),
         )
         self.nodes[0].settxfee(0)
 
