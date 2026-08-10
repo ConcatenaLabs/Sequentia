@@ -446,7 +446,8 @@ public:
         consensus.has_parent_chain = false;
         g_con_elementsmode = true;
         g_con_blockheightinheader = true;
-        g_con_any_asset_fees = true;
+        // The open fee market follows elements mode; SelectParams() settles
+        // g_con_any_asset_fees for the selected chain.
         g_con_bitcoin_anchor = true;
         g_con_pos = true;
         MAX_MONEY = 400000000 * COIN;   // SEQUENTIA: per-chain money cap
@@ -723,7 +724,8 @@ public:
         consensus.has_parent_chain = false;
         g_con_elementsmode = true;
         g_con_blockheightinheader = true;
-        g_con_any_asset_fees = true;
+        // The open fee market follows elements mode; SelectParams() settles
+        // g_con_any_asset_fees for the selected chain.
         // SEQUENTIA: every block anchors to a Bitcoin block (see doc/sequentia/03-bitcoin-anchoring.md)
         g_con_bitcoin_anchor = true;
         // SEQUENTIA: the bundled chain IS the Proof-of-Stake network (the paper's
@@ -2602,4 +2604,31 @@ void SelectParams(const std::string& network)
 {
     SelectBaseParams(network);
     globalChainParams = CreateChainParams(gArgs, network);
+
+    // SEQUENTIA: the open fee market FOLLOWS elements mode, and is settled HERE,
+    // deliberately, for the chain actually selected.
+    //
+    // Why it follows elements mode rather than being listed per chain: paying a
+    // fee in "any asset" presupposes that there IS more than one asset. An
+    // elements-mode chain (sequentia, test, the custom chains including
+    // elementsregtest, liquid) has issuance, so a fee payer has a real choice and
+    // the open fee market is the whole point -- no asset, the policy asset
+    // included, is privileged for fees. A chain running with elements mode OFF
+    // (main, signet, regtest) has exactly ONE asset and no issuance, so there is
+    // nothing to choose between: an open fee market there is not merely unwanted,
+    // it is meaningless. Deriving the flag from elements mode keeps that true for
+    // any chain added later, which a hand-maintained list of chain names would
+    // not.
+    //
+    // Why here and not in the CChainParams constructors: SetupServerArgs()
+    // constructs several CChainParams purely to render help strings, so a global
+    // assigned in a constructor ends up holding whatever the LAST such
+    // construction happened to set -- a value that was right only by accident and
+    // silently wrong the moment that list is reordered. That is exactly how the
+    // fee market came to be switched on for main/signet/regtest, where a null
+    // policy asset then made the node write an exchangerates.json it could not
+    // read back on the next start. Reading it off the selected chain's consensus
+    // params makes the value a consequence of the chain, not of argument-parsing
+    // order.
+    g_con_any_asset_fees = globalChainParams->GetConsensus().elements_mode;
 }
