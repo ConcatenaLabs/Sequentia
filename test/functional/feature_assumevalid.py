@@ -37,6 +37,7 @@ from test_framework.blocktools import (
 )
 from test_framework.key import ECKey
 from test_framework.messages import (
+    MAX_HEADERS_RESULTS,
     CBlockHeader,
     COutPoint,
     CTransaction,
@@ -53,9 +54,17 @@ from test_framework.util import assert_equal
 
 class BaseNode(P2PInterface):
     def send_header_for_blocks(self, new_blocks):
-        headers_message = msg_headers()
-        headers_message.headers = [CBlockHeader(b) for b in new_blocks]
-        self.send_message(headers_message)
+        # SEQUENTIA: split into messages of at most MAX_HEADERS_RESULTS headers. This
+        # network caps a headers message at 512 (src/net_processing.cpp) so a batch of
+        # PoS headers fits the wire limit; a longer one is Misbehaving and is dropped.
+        # Sent whole, the node ignored the announcement, its best header never advanced
+        # past genesis, and -assumevalid could not apply -- so node1 ran the script
+        # checks this test exists to see skipped, rejected block 102 and disconnected.
+        headers = [CBlockHeader(b) for b in new_blocks]
+        for i in range(0, len(headers), MAX_HEADERS_RESULTS):
+            headers_message = msg_headers()
+            headers_message.headers = headers[i:i + MAX_HEADERS_RESULTS]
+            self.send_message(headers_message)
 
 
 class AssumeValidTest(BitcoinTestFramework):
