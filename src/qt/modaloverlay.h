@@ -42,10 +42,17 @@ Q_SIGNALS:
     void triggered(bool hidden);
 
 protected:
+    void showEvent(QShowEvent* ev) override;
+    void resizeEvent(QResizeEvent* ev) override;
+
     bool eventFilter(QObject * obj, QEvent * ev) override;
     bool event(QEvent* ev) override;
 
 private:
+    //! Give the wrapping warning paragraphs the height their text needs at the
+    //! width they were given, so the last line is not cut off.
+    void FitInfoText();
+
     Ui::ModalOverlay *ui;
     int bestHeaderHeight; //best known height (based on the headers)
     /** SEQUENTIA: header height when this session's header sync started, so the
