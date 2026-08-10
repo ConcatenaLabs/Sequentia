@@ -172,7 +172,8 @@ class KeyPoolTest(BitcoinTestFramework):
         # ELEMENTS: the cost of change at a 10sat/b feerate is ~15000 sat,
         #  so we need to start with a bigger utxo to trigger change creation.
         #  all the below numbers are increased by 15000.
-        res = w1.sendtoaddress(address=address, amount=0.00025000)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        res = w1.sendtoaddress(address=address, amount=0.00025000, fee_asset_label='bitcoin')
         self.generate(nodes[0], 1)
         destination = addr.pop()
 
@@ -188,11 +189,12 @@ class KeyPoolTest(BitcoinTestFramework):
         res = w2.walletcreatefundedpsbt(inputs=[], outputs=[{destination: 0.00025000}], options={"subtractFeeFromOutputs": [0], "feeRate": 0.00010})
         assert_equal("psbt" in res, True)
         # should work without subtractFeeFromOutputs if the exact fee is subtracted from the amount
-        res = w2.walletcreatefundedpsbt(inputs=[], outputs=[{destination: 0.00008570}], options={"feeRate": 0.00010})
+        # (nothing else determines the fee asset once subtractFeeFromOutputs is gone, so name it)
+        res = w2.walletcreatefundedpsbt(inputs=[], outputs=[{destination: 0.00008570}], options={"feeRate": 0.00010, "fee_asset": "bitcoin"})
         assert_equal("psbt" in res, True)
 
         # dust change should be removed
-        res = w2.walletcreatefundedpsbt(inputs=[], outputs=[{destination: 0.00008200}], options={"feeRate": 0.00010})
+        res = w2.walletcreatefundedpsbt(inputs=[], outputs=[{destination: 0.00008200}], options={"feeRate": 0.00010, "fee_asset": "bitcoin"})
         assert_equal("psbt" in res, True)
 
         # create a transaction without change at the maximum fee rate, such that the output is still spendable:

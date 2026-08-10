@@ -131,7 +131,7 @@ class SegWitTest(BitcoinTestFramework):
         self.generate(self.nodes[0], 161)  # block 161
 
         self.log.info("Verify sigops are counted in GBT with pre-BIP141 rules before the fork")
-        txid = self.nodes[0].sendtoaddress(self.nodes[0].getnewaddress(), 1)
+        txid = self.nodes[0].sendtoaddress(address=self.nodes[0].getnewaddress(), amount=1, fee_asset_label='bitcoin')
         tmpl = self.nodes[0].getblocktemplate({'rules': ['segwit']})
         assert_equal(tmpl['sizelimit'], 1000000)
         assert 'weightlimit' not in tmpl
@@ -262,7 +262,7 @@ class SegWitTest(BitcoinTestFramework):
         self.success_mine(self.nodes[0], p2sh_ids[NODE_0][P2WSH][0], True)  # block 435
 
         self.log.info("Verify sigops are counted in GBT with BIP141 rules after the fork")
-        txid = self.nodes[0].sendtoaddress(self.nodes[0].getnewaddress(), 1)
+        txid = self.nodes[0].sendtoaddress(address=self.nodes[0].getnewaddress(), amount=1, fee_asset_label='bitcoin')
         raw_tx = self.nodes[0].getrawtransaction(txid, True)
         tmpl = self.nodes[0].getblocktemplate({'rules': ['segwit']})
         assert_greater_than_or_equal(tmpl['sizelimit'], 3999577)  # actual maximum size is lower due to minimum mandatory non-witness data
@@ -612,7 +612,7 @@ class SegWitTest(BitcoinTestFramework):
                     transaction = "0100000000000101230f4f5d4b7c6fa845806ee4f67713459e1b69e8e60fcee2e4940c7a0d5de1b2010000000005f5e1000017a9142f8c469c2f0084c48e11f998ffbe7efa7549f26d8700000000"
 
                 self.nodes[1].importaddress(scriptPubKey, "", False)
-                rawtxfund = self.nodes[1].fundrawtransaction(transaction)['hex']
+                rawtxfund = self.nodes[1].fundrawtransaction(transaction, {'fee_asset': 'bitcoin'})['hex']
                 rawtxfund = self.nodes[1].signrawtransactionwithwallet(rawtxfund)["hex"]
                 txid = self.nodes[1].sendrawtransaction(rawtxfund)
 

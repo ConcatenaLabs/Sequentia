@@ -41,8 +41,10 @@ class NamedDefaultAssetTest(BitcoinTestFramework):
         walletinfo1 = self.nodes[0].getwalletinfo()
         assert_equal(walletinfo1["balance"]["testasset"], 21000000)
 
-        #Send some of the default asset to the second node
-        self.nodes[0].sendtoaddress(self.nodes[1].getnewaddress(), 1, "", "", False)
+        #Send some of the default asset to the second node, paying the fee in that same asset
+        self.nodes[0].sendtoaddress(
+            address=self.nodes[1].getnewaddress(), amount=1, comment="", comment_to="",
+            subtractfeefromamount=False, fee_asset_label="testasset")
         self.generate(self.nodes[0], 101)
         self.sync_all()
 
@@ -55,7 +57,7 @@ class NamedDefaultAssetTest(BitcoinTestFramework):
 
         #Check we send the default 'testasset' when calling 'sendmany' without needing to provide the relevant asset label
         outputs = {self.nodes[1].getnewaddress(): 1.0, self.nodes[1].getnewaddress(): 3.0}
-        self.nodes[0].sendmany("", outputs)
+        self.nodes[0].sendmany(dummy="", amounts=outputs, fee_asset="testasset")
         self.generate(self.nodes[0], 101)
         self.sync_all()
 

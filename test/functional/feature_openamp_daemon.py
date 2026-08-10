@@ -101,7 +101,9 @@ class OpenAmpDaemonTest(BitcoinTestFramework):
     def run_test(self):
         node = self.nodes[0]
         self.generate(node, 101)
-        node.sendtoaddress(node.getnewaddress(), 100)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        node.sendtoaddress(address=node.getnewaddress(), amount=100,
+                           fee_asset_label='bitcoin')
         self.generate(node, 1)
 
         # Launch openampd against this node.

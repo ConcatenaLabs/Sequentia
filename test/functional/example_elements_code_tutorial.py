@@ -33,7 +33,8 @@ class WalletTest(BitcoinTestFramework):
 
         assert self.nodes[0].dumpassetlabels() == {'bitcoin': 'b2e15d0d7a0c94e4e2ce0fe6e8691b9e451377f6e46e8045a86f7c4b5d4f0f23'}
 
-        issuance = self.nodes[0].issueasset(100, 1)
+        issuance = self.nodes[0].issueasset(
+            assetamount=100, tokenamount=1, fee_asset='bitcoin')
         asset = issuance['asset']
         #token = issuance['token']
         issuance_txid = issuance['txid']
@@ -52,10 +53,12 @@ class WalletTest(BitcoinTestFramework):
         assert (issuances[0]['tokenamount'] == 1 and issuances[0]['assetamount'] == 100) \
             or (issuances[1]['tokenamount'] == 1 and issuances[1]['assetamount'] == 100)
 
-        self.nodes[0].sendtoaddress(self.nodes[0].getnewaddress(), 1)
+        self.nodes[0].sendtoaddress(
+            address=self.nodes[0].getnewaddress(), amount=1, fee_asset_label='bitcoin')
         self.generate(self.nodes[0], 10)
 
-        reissuance_tx = self.nodes[0].reissueasset(asset, 99)
+        reissuance_tx = self.nodes[0].reissueasset(
+            asset=asset, assetamount=99, fee_asset='bitcoin')
         reissuance_txid = reissuance_tx['txid']
         issuances = self.nodes[0].listissuances(asset)
         assert len(issuances) == 2

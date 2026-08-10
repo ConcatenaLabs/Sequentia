@@ -224,7 +224,8 @@ class PosDeepAnchorReorgTest(BitcoinTestFramework):
         # it to the mempool, a higher-fee double-spend can evict it — letting us
         # model a commitment that is genuinely orphaned, not re-mined.
         raw = parent.createrawtransaction([], [{"data": payload}])
-        funded = parent.fundrawtransaction(raw, {"replaceable": True})['hex']
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        funded = parent.fundrawtransaction(raw, {"replaceable": True, "fee_asset": "bitcoin"})['hex']
         signed = parent.signrawtransactionwithwallet(funded)['hex']
         return parent.sendrawtransaction(signed)
 

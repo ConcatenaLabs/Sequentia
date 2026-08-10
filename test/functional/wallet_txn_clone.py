@@ -37,7 +37,9 @@ class TxnMallTest(BitcoinTestFramework):
     def spend_txid(self, txid, vout, outputs):
         inputs = [{"txid": txid, "vout": vout}]
         tx = self.nodes[0].createrawtransaction(inputs, outputs)
-        tx = self.nodes[0].fundrawtransaction(tx)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset, and this
+        # raw transaction carries neither a fee output nor a subtract-fee output.
+        tx = self.nodes[0].fundrawtransaction(tx, {"fee_asset": "bitcoin"})
         tx = self.nodes[0].signrawtransactionwithwallet(tx['hex'])
         return self.nodes[0].sendrawtransaction(tx['hex'])
 
@@ -55,12 +57,12 @@ class TxnMallTest(BitcoinTestFramework):
         self.nodes[0].settxfee(.001)
 
         node0_address1 = self.nodes[0].getnewaddress(address_type=output_type)
-        node0_txid1 = self.nodes[0].sendtoaddress(node0_address1, 1219)
+        node0_txid1 = self.nodes[0].sendtoaddress(address=node0_address1, amount=1219, fee_asset_label='bitcoin')
         node0_tx1 = self.nodes[0].gettransaction(node0_txid1)
         self.nodes[0].lockunspent(False, [{"txid":node0_txid1, "vout": find_vout_for_address(self.nodes[0], node0_txid1, node0_address1)}])
 
         node0_address2 = self.nodes[0].getnewaddress(address_type=output_type)
-        node0_txid2 = self.nodes[0].sendtoaddress(node0_address2, 29)
+        node0_txid2 = self.nodes[0].sendtoaddress(address=node0_address2, amount=29, fee_asset_label='bitcoin')
         node0_tx2 = self.nodes[0].gettransaction(node0_txid2)
 
         assert_equal(self.nodes[0].getbalance()['bitcoin'],

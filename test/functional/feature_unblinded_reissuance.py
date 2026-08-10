@@ -76,7 +76,10 @@ class UnblindedReissuanceTest(BitcoinTestFramework):
         self.log.info("Reissuing from an UNBLINDED reissuance token")
         node = self.nodes[0]
 
-        issued = node.issueasset(10, 1, False)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset, and an
+        # issuance has no output for the fee to come out of.
+        issued = node.issueasset(assetamount=10, tokenamount=1, blind=False,
+                                 fee_asset='bitcoin')
         asset, token = issued["asset"], issued["token"]
         self.generate(node, 1)
         self.sync_all()
@@ -91,7 +94,7 @@ class UnblindedReissuanceTest(BitcoinTestFramework):
         assert_equal(token_utxo["assetblinder"], NULL_BLINDER)
         assert_equal(token_utxo["amountblinder"], NULL_BLINDER)
 
-        reissue = node.reissueasset(asset, 5)
+        reissue = node.reissueasset(asset, 5, 'bitcoin')
         # Before the fix the transaction was built with a null nonce, was read by
         # consensus as a new issuance, and never entered a block. Requiring a
         # confirmation is what makes this test meaningful.
@@ -112,7 +115,7 @@ class UnblindedReissuanceTest(BitcoinTestFramework):
         assert_equal(Decimal(str(issuance["assetamount"])), Decimal(5))
 
         # And the token is still spendable, so the authority to reissue survived.
-        second = node.reissueasset(asset, 2)
+        second = node.reissueasset(asset, 2, 'bitcoin')
         self.generate(node, 1)
         self.sync_all()
         self.assert_confirmed(node, second["txid"])
@@ -126,7 +129,8 @@ class UnblindedReissuanceTest(BitcoinTestFramework):
         self.log.info("Reissuing from a BLINDED reissuance token (no regression)")
         node = self.nodes[1]
 
-        issued = node.issueasset(10, 1, True)
+        issued = node.issueasset(assetamount=10, tokenamount=1, blind=True,
+                                 fee_asset='bitcoin')
         asset, token = issued["asset"], issued["token"]
         self.generate(node, 1)
         self.sync_all()
@@ -136,7 +140,7 @@ class UnblindedReissuanceTest(BitcoinTestFramework):
         token_utxo = self.find_token_utxo(node, token)
         assert token_utxo["assetblinder"] != NULL_BLINDER
 
-        reissue = node.reissueasset(asset, 5)
+        reissue = node.reissueasset(asset, 5, 'bitcoin')
         self.generate(node, 1)
         self.sync_all()
         self.assert_confirmed(node, reissue["txid"])
@@ -162,7 +166,8 @@ class UnblindedReissuanceTest(BitcoinTestFramework):
         # finds it does not equal the input's explicit asset.
         addr = node.getnewaddress()
         raw = node.createrawtransaction([], [{addr: Decimal("1.0")}])
-        funded = node.fundrawtransaction(raw, {"feeRate": Decimal("0.00050000")})["hex"]
+        funded = node.fundrawtransaction(
+            raw, {"feeRate": Decimal("0.00050000"), "fee_asset": "bitcoin"})["hex"]
 
         decoded = node.decoderawtransaction(funded)
         assert_greater_than(len(decoded["vin"]), 0)

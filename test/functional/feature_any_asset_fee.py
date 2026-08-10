@@ -40,10 +40,13 @@ class AnyAssetFeeTest(BitcoinTestFramework):
         self.node1_address = self.nodes[1].getnewaddress()
 
         self.issue_amount = Decimal('100')
+        # SEQUENTIA: this chain has an open fee market, so there is no default
+        # fee asset -- every transaction, an issuance included, names its own.
         self.issuance = self.nodes[0].issueasset(
             assetamount = self.issue_amount,
             tokenamount = 1,
             blind = False,
+            fee_asset = "gasset",
             denomination = 2)
         self.asset = self.issuance['asset']
         #token = issuance['token']
@@ -208,7 +211,9 @@ class AnyAssetFeeTest(BitcoinTestFramework):
         node1 = self.nodes[1]
 
         raw_tx = node0.createrawtransaction(outputs=[{self.node1_address: 1.0, 'asset': self.asset }])
-        funded_tx = node0.fundrawtransaction(raw_tx)['hex']
+        # SEQUENTIA: the fee asset is never taken from the first output (or from
+        # any other part of the transaction); name it.
+        funded_tx = node0.fundrawtransaction(raw_tx, {'fee_asset': self.asset})['hex']
         assert node0.decoderawtransaction(funded_tx)['fee'] == { self.asset: Decimal('0.00049820')}
         blinded_tx = node0.blindrawtransaction(funded_tx)
         signed_tx = node0.signrawtransactionwithwallet(blinded_tx)['hex']

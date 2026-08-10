@@ -40,7 +40,7 @@ class MempoolUnbroadcastTest(BitcoinTestFramework):
 
         # generate a wallet txn
         addr = node.getnewaddress()
-        wallet_tx_hsh = node.sendtoaddress(addr, 0.0001)
+        wallet_tx_hsh = node.sendtoaddress(address=addr, amount=0.0001, fee_asset_label='bitcoin')
         wallet_tx = node.gettransaction(wallet_tx_hsh,True,True)
 
         # remove UTXO spent
@@ -52,7 +52,7 @@ class MempoolUnbroadcastTest(BitcoinTestFramework):
         outputs = [{addr: 0.0001}]
         tx = node.createrawtransaction(inputs, outputs)
         node.settxfee(min_relay_fee)
-        txF = node.fundrawtransaction(tx)
+        txF = node.fundrawtransaction(tx, {'fee_asset': 'bitcoin'})
         txFS = node.signrawtransactionwithwallet(txF["hex"])
         rpc_tx_hsh = node.sendrawtransaction(txFS["hex"])
 
@@ -107,7 +107,7 @@ class MempoolUnbroadcastTest(BitcoinTestFramework):
         # since the node doesn't have any connections, it will not receive
         # any GETDATAs & thus the transaction will remain in the unbroadcast set.
         addr = node.getnewaddress()
-        txhsh = node.sendtoaddress(addr, 0.0001)
+        txhsh = node.sendtoaddress(address=addr, amount=0.0001, fee_asset_label='bitcoin')
 
         # check transaction was removed from unbroadcast set due to presence in
         # a block

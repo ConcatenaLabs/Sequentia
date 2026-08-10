@@ -89,7 +89,8 @@ class WalletDescriptorTest(BitcoinTestFramework):
         # Make transactions
         self.log.info("Test sending and receiving")
         addr = recv_wrpc.getnewaddress()
-        send_wrpc.sendtoaddress(addr, 10)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        send_wrpc.sendtoaddress(address=addr, amount=10, fee_asset_label='bitcoin')
 
         # Make sure things are disabled
         self.log.info("Test disabled RPCs")

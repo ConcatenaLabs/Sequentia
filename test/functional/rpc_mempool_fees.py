@@ -30,7 +30,9 @@ class MempoolFeesTest(BitcoinTestFramework):
         assert node.getfeeexchangerates() == initial_rates
 
         self.issue_amount = Decimal('100')
-        self.issuance = node.issueasset(self.issue_amount, 1)
+        # SEQUENTIA: no default fee asset on an open-fee-market chain.
+        self.issuance = node.issueasset(
+            assetamount=self.issue_amount, tokenamount=1, fee_asset='gasset')
         self.asset = self.issuance['asset']
         txid = self.issuance['txid']
 

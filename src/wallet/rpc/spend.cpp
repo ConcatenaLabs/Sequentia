@@ -68,6 +68,16 @@ static void ParseRecipients(const UniValue& address_amounts, const UniValue& add
     }
 }
 
+/** SEQUENTIA: the assets of the recipients the fee is being subtracted from. */
+static std::vector<CAsset> SubtractFeeFromAssets(const std::vector<CRecipient>& recipients)
+{
+    std::vector<CAsset> assets;
+    for (const CRecipient& recipient : recipients) {
+        if (recipient.fSubtractFeeFromAmount) assets.push_back(recipient.asset);
+    }
+    return assets;
+}
+
 UniValue SendMoney(CWallet& wallet, const CCoinControl &coin_control, std::vector<CRecipient> &recipients, mapValue_t map_value, bool verbose, bool ignore_blind_fail)
 {
     EnsureWalletIsUnlocked(wallet);
@@ -354,7 +364,7 @@ RPCHelpMan sendtoaddress()
                     {"assetlabel", RPCArg::Type::STR, RPCArg::Optional::OMITTED_NAMED_ARG, "Hex asset id or asset label for balance."},
                     {"ignoreblindfail", RPCArg::Type::BOOL, RPCArg::Default{true}, "Return a transaction even when a blinding attempt fails due to number of blinded inputs/outputs."},
                     {"fee_rate", RPCArg::Type::AMOUNT, RPCArg::DefaultHint{"not set, fall back to wallet fee estimation"}, "Specify a fee rate in " + CURRENCY_ATOM + "/vB."},
-                    {"fee_asset_label", RPCArg::Type::STR, RPCArg::Optional::OMITTED_NAMED_ARG, "Hex asset id or asset label for fee payment."},
+                    {"fee_asset_label", RPCArg::Type::STR, RPCArg::Optional::OMITTED_NAMED_ARG, "Hex asset id or asset label for fee payment. On a chain with the open fee market (con_any_asset_fees) the fee asset must be named, because nothing is defaulted or inferred -- unless subtractfeefromamount is set, which takes the fee out of that output and so already determines it, in which case this must be omitted."},
                     {"verbose", RPCArg::Type::BOOL, RPCArg::Default{false}, "If true, return extra information about the transaction."},
                 },
                 {
@@ -430,18 +440,13 @@ RPCHelpMan sendtoaddress()
 
     SetFeeEstimateMode(*pwallet, coin_control, /* conf_target */ request.params[6], /* estimate_mode */ request.params[7], /* fee_rate */ request.params[11], /* override_min_fee */ false);
 
-    if (g_con_any_asset_fees) {
-        // Default to using the same asset being sent in the transaction
-        CAsset feeAsset = asset;
-        if (request.params.size() > 12 && request.params[12].isStr() && !request.params[12].get_str().empty()) {
-            std::string strFeeAsset = request.params[12].get_str();
-            feeAsset = GetAssetFromString(strFeeAsset);
-            if (feeAsset.IsNull()) {
-                throw JSONRPCError(RPC_WALLET_ERROR, strprintf("Unknown label and invalid asset hex for fee: %s", feeAsset.GetHex()));
-            }
-        }
-        coin_control.m_fee_asset = feeAsset;
-    }
+    // SEQUENTIA: the fee asset is the caller's choice and is never inferred from
+    // what the transaction happens to send. This used to default to `asset`, the
+    // asset being sent; a silent default is a policy decision made out of the
+    // caller's sight, and any default at all makes some asset the privileged fee
+    // currency. See ResolveFeeAsset (wallet/rpc/util.h) for the settled rule.
+    const std::optional<CAsset> explicit_fee_asset =
+        g_con_any_asset_fees && request.params.size() > 12 ? ParseFeeAssetArg(request.params[12]) : std::nullopt;
 
     EnsureWalletIsUnlocked(*pwallet);
 
@@ -457,6 +462,9 @@ RPCHelpMan sendtoaddress()
 
     std::vector<CRecipient> recipients;
     ParseRecipients(address_amounts, address_assets, subtractFeeFromAmount, recipients);
+    if (g_con_any_asset_fees) {
+        coin_control.m_fee_asset = ResolveFeeAsset(explicit_fee_asset, DeterminedBySubtractFee(SubtractFeeFromAssets(recipients)), "fee_asset_label");
+    }
     bool verbose = request.params[13].isNull() ? false: request.params[13].get_bool();
 
     return SendMoney(*pwallet, coin_control, recipients, mapValue, verbose, ignore_blind_fail);
@@ -497,7 +505,7 @@ RPCHelpMan sendmany()
                     },
                     {"ignoreblindfail", RPCArg::Type::BOOL, RPCArg::Default{true}, "Return a transaction even when a blinding attempt fails due to number of blinded inputs/outputs."},
                     {"fee_rate", RPCArg::Type::AMOUNT, RPCArg::DefaultHint{"not set, fall back to wallet fee estimation"}, "Specify a fee rate in " + CURRENCY_ATOM + "/vB."},
-                    {"fee_asset", RPCArg::Type::STR_HEX, RPCArg::DefaultHint{"not set, fall back to asset being sent"}, "label or hex ID of asset used for fees"},                    
+                    {"fee_asset", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED_NAMED_ARG, "Label or hex ID of the asset used for fees. On a chain with the open fee market (con_any_asset_fees) the fee asset must be named, because nothing is defaulted or inferred -- unless subtractfeefrom is used, which takes the fee out of those outputs and so already determines it, in which case this must be omitted."},
                     {"verbose", RPCArg::Type::BOOL, RPCArg::Default{false}, "If true, return extra information about the transaction."},
                 },
                 {
@@ -570,16 +578,14 @@ RPCHelpMan sendmany()
 
     std::vector<CRecipient> recipients;
     ParseRecipients(sendTo, assets, subtractFeeFromAmount, recipients);
-    if (g_con_any_asset_fees && !recipients.empty()) {
-        CAsset feeAsset = recipients[0].asset;
-        if (request.params.size() > 11) {
-            std::string strFeeAsset = request.params[11].get_str();
-            feeAsset = GetAssetFromString(strFeeAsset);
-            if (feeAsset.IsNull()) {
-                throw JSONRPCError(RPC_WALLET_ERROR, strprintf("Unknown label and invalid asset hex for fee: %s", feeAsset.GetHex()));
-            }
-        }
-        coin_control.m_fee_asset = feeAsset;
+    if (g_con_any_asset_fees) {
+        // Never inferred from the recipients (see sendtoaddress). The one thing
+        // derived is the subtract-fee constraint, and only because the fee comes
+        // out of those outputs. (This used to skip an empty recipient list, which
+        // left the fee asset unset and so silently on the policy asset.)
+        const std::optional<CAsset> explicit_fee_asset =
+            request.params.size() > 11 ? ParseFeeAssetArg(request.params[11]) : std::nullopt;
+        coin_control.m_fee_asset = ResolveFeeAsset(explicit_fee_asset, DeterminedBySubtractFee(SubtractFeeFromAssets(recipients)), "fee_asset");
     }
     bool verbose = request.params[12].isNull() ? false : request.params[12].get_bool();
 
@@ -668,9 +674,19 @@ void FundTransaction(CWallet& wallet, CMutableTransaction& tx, CAmount& fee_out,
     bool lockUnspents = false;
     UniValue subtractFeeFromOutputs;
     std::set<int> setSubtractFeeFromOutputs;
-    if (g_con_any_asset_fees && !tx.vout.empty()) {
-        coinControl.m_fee_asset = tx.vout[0].nAsset.GetAsset();
-    }
+    // SEQUENTIA: no fee asset is inferred from the transaction. This used to be
+    // `coinControl.m_fee_asset = tx.vout[0].nAsset.GetAsset()` -- the FIRST
+    // output's asset, which has nothing to do with which asset can pay a fee, and
+    // made funding fail outright whenever that asset had no exchange rate here.
+    // What the transaction does state is read below: an explicit fee output, and
+    // the subtract_fee_from_outputs positions. The caller's options.fee_asset goes
+    // into `explicit_fee_asset`; ResolveFeeAsset settles them, or refuses when
+    // nothing says anything. Nothing here treats the policy asset differently.
+    std::optional<CAsset> explicit_fee_asset;
+    // A single change address names one destination for the FEE asset, which is
+    // only settled below; hold it until then rather than reading a half-settled
+    // m_fee_asset.
+    std::optional<CTxDestination> fee_asset_change_dest;
 
     if (!options.isNull()) {
       if (options.type() == UniValue::VBOOL) {
@@ -715,15 +731,8 @@ void FundTransaction(CWallet& wallet, CMutableTransaction& tx, CAmount& fee_out,
             coinControl.m_add_inputs = options["add_inputs"].get_bool();
         }
 
-        if (g_con_any_asset_fees) {
-            if (options.exists("fee_asset")) {
-                std::string strFeeAsset = options["fee_asset"].get_str();
-                CAsset feeAsset = GetAssetFromString(strFeeAsset);
-                if (feeAsset.IsNull()) {
-                    throw JSONRPCError(RPC_WALLET_ERROR, strprintf("Unknown label and invalid asset hex for fee: %s", feeAsset.GetHex()));
-                }
-                coinControl.m_fee_asset = feeAsset;
-            }
+        if (g_con_any_asset_fees && options.exists("fee_asset")) {
+            explicit_fee_asset = ParseFeeAssetArg(options["fee_asset"]);
         }
 
         if (options.exists("changeAddress") || options.exists("change_address")) {
@@ -736,7 +745,7 @@ void FundTransaction(CWallet& wallet, CMutableTransaction& tx, CAmount& fee_out,
                 if (!IsValidDestination(dest)) {
                     throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Change address must be a valid address");
                 }
-                destinations[coinControl.m_fee_asset.value_or(::policyAsset)] = dest;
+                fee_asset_change_dest = dest;
             } else if (change_address.isObject()) {
                 // Map of assets to destinations.
                 std::map<std::string, UniValue> kvMap;
@@ -914,6 +923,38 @@ void FundTransaction(CWallet& wallet, CMutableTransaction& tx, CAmount& fee_out,
         setSubtractFeeFromOutputs.insert(pos);
     }
 
+    // SEQUENTIA: settle the fee asset now that the caller's choice, the
+    // transaction's own fee outputs and the subtract-fee positions are all known.
+    // The transaction states the answer in two ways -- a fee output names the
+    // asset the fee is paid in, and subtracting the fee from an output means it
+    // comes out of that output's amount -- and where it does, there is nothing
+    // for the caller to choose. Uniform across every asset, with no policy-asset
+    // branch: subtracting the fee from an output previously only happened to work
+    // when that output was the policy asset, because the silent fallback
+    // coincided with it.
+    if (g_con_any_asset_fees) {
+        std::vector<CAsset> fee_output_assets;
+        for (const CTxOut& out : tx.vout) {
+            if (out.IsFee()) fee_output_assets.push_back(out.nAsset.GetAsset());
+        }
+        std::vector<CAsset> subtract_from_assets;
+        for (const int pos : setSubtractFeeFromOutputs) {
+            if (!tx.vout[pos].nAsset.IsExplicit()) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
+                    "Cannot subtract the fee from output %d: its asset is blinded, so the asset the fee would come out of is not known here.", pos));
+            }
+            subtract_from_assets.push_back(tx.vout[pos].nAsset.GetAsset());
+        }
+        coinControl.m_fee_asset = ResolveFeeAsset(
+            explicit_fee_asset,
+            CombineFeeAssetDeterminations(DeterminedByFeeOutputs(fee_output_assets),
+                                          DeterminedBySubtractFee(subtract_from_assets)),
+            "options.fee_asset");
+    }
+    if (fee_asset_change_dest) {
+        coinControl.destChange[coinControl.m_fee_asset.value_or(::policyAsset)] = *fee_asset_change_dest;
+    }
+
     // Check any existing inputs for peg-in data and add to external txouts if so
     // Fetch specified UTXOs from the UTXO set to get the scriptPubKeys and values of the outputs being selected
     // and to match with the given solving_data. Only used for non-wallet outputs.
@@ -996,7 +1037,7 @@ RPCHelpMan fundrawtransaction()
                             {"lockUnspents", RPCArg::Type::BOOL, RPCArg::Default{false}, "Lock selected unspent outputs"},
                             {"fee_rate", RPCArg::Type::AMOUNT, RPCArg::DefaultHint{"not set, fall back to wallet fee estimation"}, "Specify a fee rate in " + CURRENCY_ATOM + "/vB."},
                             {"feeRate", RPCArg::Type::AMOUNT, RPCArg::DefaultHint{"not set, fall back to wallet fee estimation"}, "Specify a fee rate in " + CURRENCY_UNIT + "/kvB."},
-                            {"fee_asset", RPCArg::Type::STR, RPCArg::Optional::OMITTED_NAMED_ARG, "The hex id or label of asset used for fee payment."},
+                            {"fee_asset", RPCArg::Type::STR, RPCArg::Optional::OMITTED_NAMED_ARG, "Label or hex ID of the asset used to pay the fee. On a chain with the open fee market (con_any_asset_fees) the fee asset must be named, because nothing is defaulted or inferred -- unless the transaction already determines it, which it does when it carries an explicit fee output (that output names the asset) or when subtract_fee_from_outputs is used (the fee comes out of those outputs, so it is denominated in theirs). Where it is determined, this must be omitted."},
                             {"subtractFeeFromOutputs", RPCArg::Type::ARR, RPCArg::Default{UniValue::VARR}, "The integers.\n"
                                                           "The fee will be equally deducted from the amount of each specified output.\n"
                                                           "Those recipients will receive less coins than you enter in their corresponding amount field.\n"
@@ -1328,6 +1369,15 @@ static RPCHelpMan bumpfee_helper(std::string method_name)
         }
     }
 
+    // SEQUENTIA: report the asset the bump ACTUALLY pays in. Absent an explicit
+    // options.fee_asset, feebumper inherits the replaced transaction's fee asset
+    // (a derivation from the tx being replaced, not a default), so reporting
+    // ::policyAsset here claimed the bump was paid in SEQ whenever the original
+    // was not. Read it off the built transaction, before mtx is moved away.
+    if (g_con_any_asset_fees) {
+        fee_asset = CTransaction(mtx).GetFeeAsset(::policyAsset);
+    }
+
     UniValue result(UniValue::VOBJ);
 
     // For bumpfee, return the new transaction id.
@@ -1409,6 +1459,7 @@ RPCHelpMan send()
                     {"change_position", RPCArg::Type::NUM, RPCArg::DefaultHint{"random"}, "The index of the change output"},
                     {"change_type", RPCArg::Type::STR, RPCArg::DefaultHint{"set by -changetype"}, "The output type to use. Only valid if change_address is not specified. Options are \"legacy\", \"p2sh-segwit\", and \"bech32\"."},
                     {"fee_rate", RPCArg::Type::AMOUNT, RPCArg::DefaultHint{"not set, fall back to wallet fee estimation"}, "Specify a fee rate in " + CURRENCY_ATOM + "/vB."},
+                    {"fee_asset", RPCArg::Type::STR, RPCArg::Optional::OMITTED_NAMED_ARG, "Label or hex ID of the asset used to pay the fee. On a chain with the open fee market (con_any_asset_fees) the fee asset must be named, because nothing is defaulted or inferred -- unless the transaction already determines it, which it does when it carries an explicit fee output (that output names the asset) or when subtract_fee_from_outputs is used (the fee comes out of those outputs, so it is denominated in theirs). Where it is determined, this must be omitted."},
                     {"include_watching", RPCArg::Type::BOOL, RPCArg::DefaultHint{"true for watch-only wallets, otherwise false"}, "Also select inputs which are watch only.\n"
                                           "Only solvable inputs can be used. Watch-only destinations are solvable if the public key and/or output script was imported,\n"
                                           "e.g. with 'importpubkey' or 'importmulti' with the 'pubkeys' or 'desc' field."},
@@ -1746,6 +1797,7 @@ RPCHelpMan walletcreatefundedpsbt()
                             {"lockUnspents", RPCArg::Type::BOOL, RPCArg::Default{false}, "Lock selected unspent outputs"},
                             {"fee_rate", RPCArg::Type::AMOUNT, RPCArg::DefaultHint{"not set, fall back to wallet fee estimation"}, "Specify a fee rate in " + CURRENCY_ATOM + "/vB."},
                             {"feeRate", RPCArg::Type::AMOUNT, RPCArg::DefaultHint{"not set, fall back to wallet fee estimation"}, "Specify a fee rate in " + CURRENCY_UNIT + "/kvB."},
+                            {"fee_asset", RPCArg::Type::STR, RPCArg::Optional::OMITTED_NAMED_ARG, "Label or hex ID of the asset used to pay the fee. On a chain with the open fee market (con_any_asset_fees) the fee asset must be named, because nothing is defaulted or inferred -- unless the transaction already determines it, which it does when it carries an explicit fee output (that output names the asset) or when subtract_fee_from_outputs is used (the fee comes out of those outputs, so it is denominated in theirs). Where it is determined, this must be omitted."},
                             {"subtractFeeFromOutputs", RPCArg::Type::ARR, RPCArg::Default{UniValue::VARR}, "The outputs to subtract the fee from.\n"
                                                           "The fee will be equally deducted from the amount of each specified output.\n"
                                                           "Those recipients will receive less coins than you enter in their corresponding amount field.\n"

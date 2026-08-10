@@ -37,7 +37,8 @@ class MaxBlockWeightTest(BitcoinTestFramework):
         # Queue many transactions — more than fit in one MAX_WEIGHT block.
         addr = node.getnewaddress()
         for _ in range(120):
-            node.sendtoaddress(addr, 1.0)
+            # SEQUENTIA: an open-fee-market chain has no default fee asset.
+            node.sendtoaddress(address=addr, amount=1.0, fee_asset_label='bitcoin')
         mempool_before = len(node.getrawmempool())
         assert_greater_than(mempool_before, 80)
 

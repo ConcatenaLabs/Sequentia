@@ -339,7 +339,7 @@ class DynaFedTest(BitcoinTestFramework):
         # hack: since we're not validating peg-ins in parent chain, just make
         # both the funding and claim tx on same chain (printing money)
         fund_info = self.nodes[0].getpeginaddress()
-        peg_id = self.nodes[0].sendtoaddress(fund_info["mainchain_address"], 1)
+        peg_id = self.nodes[0].sendtoaddress(address=fund_info["mainchain_address"], amount=1, fee_asset_label='bitcoin')
         peg_tx = self.nodes[0].gettransaction(peg_id)["hex"]
         self.nodes[0].testmempoolaccept([peg_tx])
         # only one confirm needed in this setup, we do 10 to sync with epoch_length
@@ -494,7 +494,7 @@ class DynaFedTest(BitcoinTestFramework):
         # hack: since we're not validating peg-ins in parent chain, just make
         # both the funding and claim tx on same chain (printing money)
         fund_info = self.nodes[0].getpeginaddress()
-        peg_id = self.nodes[0].sendtoaddress(fund_info["mainchain_address"], 1)
+        peg_id = self.nodes[0].sendtoaddress(address=fund_info["mainchain_address"], amount=1, fee_asset_label='bitcoin')
         peg_tx = self.nodes[0].gettransaction(peg_id)["hex"]
         # we need the confirmation of the peg tx, so we can't easily assert
         # that the pegin tx would be accepted at this very point
