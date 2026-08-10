@@ -15,6 +15,16 @@
 void CAssetsDir::Set(const CAsset& asset, const AssetMetadata& metadata)
 {
     LOCK(cs);
+    // SEQUENTIA: a label must name an actual asset. The null asset is not one --
+    // it is the "no asset" sentinel that CAsset() and a failed lookup both
+    // produce -- so binding a label to it creates an entry that resolves to
+    // nothing while still occupying the name. GetAssetFromString() then returns a
+    // null CAsset for a label it did find, which every caller reads as "unknown",
+    // and the resulting diagnostics blame the caller's spelling for a defect in
+    // the chain's configuration. Refuse the binding at the source instead.
+    if (asset.IsNull())
+        throw std::runtime_error(strprintf("label '%s' cannot be assigned to the null asset", metadata.GetLabel()));
+
     // No asset or label repetition
     if (GetLabel(asset) != "")
         throw std::runtime_error(strprintf("duplicated asset '%s'", asset.GetHex()));
@@ -51,8 +61,20 @@ void CAssetsDir::InitFromStrings(const std::vector<std::string>& assetsToInit, c
         }
         SetHex(vAssets[0], vAssets[1]);
     }
-    // Set "bitcoin" to the pegged asset for tests
-    Set(Params().GetConsensus().pegged_asset, AssetMetadata(pegged_asset_name));
+    // Set "bitcoin" to the pegged asset for tests.
+    //
+    // SEQUENTIA: only where the chain HAS a pegged asset. A chain running with
+    // elements mode off (main, signet, regtest) declares none, leaving
+    // consensus.pegged_asset default-constructed, i.e. null. Registering the name
+    // anyway produced a label that resolved to nothing, and the node then wrote an
+    // exchangerates.json naming that label which it could not read back on the
+    // next start. On such a chain the honest state is that the name is simply
+    // absent: there is one implicit asset and nothing to disambiguate, so nothing
+    // needs a label.
+    const CAsset& pegged_asset = Params().GetConsensus().pegged_asset;
+    if (!pegged_asset.IsNull()) {
+        Set(pegged_asset, AssetMetadata(pegged_asset_name));
+    }
 
     // SEQUENTIA: asset tickers/names (demo and user-issued) come from the Asset
     // Registry at runtime — see assetregistry.cpp and -assetregistryurl — which only
@@ -72,6 +94,11 @@ int CAssetsDir::Merge(const std::vector<AssetRegistryEntry>& entries)
         const std::string& assetHex = entry.id_hex;
         const std::string& label = entry.label;
         if (!IsHex(assetHex) || assetHex.size() != 64) continue;
+        // SEQUENTIA: an all-zero id is valid hex of the right length but is the
+        // null asset, i.e. no asset at all. Merge() writes mapAssets directly and
+        // so does not pass through Set()'s guard; drop such an entry here, or the
+        // registry could claim a label that resolves to nothing.
+        if (uint256S(assetHex).IsNull()) continue;
         bool prot = false;
         for (const auto& p : protectedLabels) if (label == p) { prot = true; break; }
         if (prot) continue;
@@ -120,6 +147,12 @@ CAsset CAssetsDir::GetAsset(const std::string& label) const
     if (it != mapAssets.end())
         return it->second;
     return CAsset();
+}
+
+bool CAssetsDir::HasLabel(const std::string& label) const
+{
+    LOCK(cs);
+    return mapAssets.count(label) > 0;
 }
 
 AssetMetadata CAssetsDir::GetMetadata(const CAsset& asset) const
