@@ -20,9 +20,10 @@ anchored to Bitcoin testnet4); there is no Sequentia mainnet yet.
    exchange-rate whitelist, kept fresh by hand or by a price-server sidecar,
    and build the most valuable block they can from the transactions paying in
    assets they accept. The Sequence token (SEQ), the staking asset, holds **no
-   privileged fee status**: it is accepted 1:1 only as the default an
-   unconfigured producer uses, and a producer may re-price it, refuse it, or make
-   another asset the reference. See [`02-open-fee-market.md`](02-open-fee-market.md).
+   privileged fee status**: an unconfigured node ships with a bootstrap whitelist
+   that lists it explicitly, and a producer may re-price it, refuse it, or make
+   another asset the reference. Unlisted means unaccepted, for SEQ as for
+   anything else. See [`02-open-fee-market.md`](02-open-fee-market.md).
 
 2. **Bitcoin anchoring.** Every Sequentia block references a Bitcoin block whose
    height is non-decreasing along the chain. A Sequentia node therefore maintains

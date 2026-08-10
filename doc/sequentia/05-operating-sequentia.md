@@ -144,6 +144,8 @@ rpcpassword=CHANGE_ME_TO_A_LONG_RANDOM_STRING
 # Parent Bitcoin node, for anchoring (§6).
 validateanchor=1
 anchorminconf=1
+anchoravoidcontested=1       # default; producer-side, see §6
+anchorcontestwindow=2        # default; producer-side, see §6
 mainchainrpchost=127.0.0.1
 mainchainrpcport=8332
 mainchainrpccookiefile=/home/YOU/.bitcoin/.cookie   # or mainchainrpcuser/password
@@ -176,9 +178,10 @@ The rate is an **integer**: a fee output's reference value is
 `value * rate / 1e8`. So `100000000` is 1:1. A **higher** rate values the asset
 **more** per unit; a **lower** rate values it less - `50000000` values the asset
 at half the reference unit, `200000000` at twice it. A rate of `0` refuses the
-asset. An asset that is **not listed is not accepted**, with one exception: SEQ
-defaults to 1:1 for an unconfigured producer (it holds no privileged status - a
-producer may re-price it, refuse it, or make another asset the reference).
+asset. An asset that is **not listed is not accepted** - the policy asset
+included. There is no exception and no implicit entry: a node ships with a
+bootstrap whitelist that lists the policy asset explicitly, and once an operator
+replaces the table, the table is the whole truth.
 
 `getfeeacceptancepolicy` returns the current acceptance set - what the node
 actually uses when valuing mempool transactions and building blocks.
@@ -214,13 +217,17 @@ whitelist). Two consequences to know:
 - The node holds the last-set rates **indefinitely** - there is no built-in
   staleness or expiry. Keeping rates fresh, and refusing assets when a feed
   dies (by writing `0` or omitting them), is the sidecar's job. On clean
-  shutdown the sidecar clears the whitelist (`setfeeexchangerates '{}' false`),
-  leaving only the policy asset's 1:1 default.
+  shutdown the sidecar **leaves the last published rates in place**: clearing
+  them would leave every fed node accepting no fee asset at all, which stops
+  relay. (`clear_whitelist_on_shutdown` opts back into clearing; it is off by
+  default for that reason.)
 - Writes are last-writer-wins on the whole table: a manual
   `setfeeexchangerates` is simply overwritten at the sidecar's next poll.
 
 Manual kill-switch: `elements-cli setfeeexchangerates '{}'` (empties the
-whitelist).
+whitelist). ⚠ This now means the node accepts **no fee asset at all** and will
+relay nothing, rather than falling back to the policy asset. Restore a working
+table before leaving the node unattended.
 
 ## 4. Paying fees in an arbitrary asset
 
@@ -298,6 +305,11 @@ con_bitcoin_anchor=1
 validateanchor=1
 anchorminconf=1              # anchor to the parent tip; raise to require burial
 anchorpollinterval=<secs>    # how often to poll the parent for its tip
+anchoravoidcontested=1       # default 1: keep this node's own blocks off a
+                             # contested parent-chain height
+anchorcontestwindow=2        # default 2: a rival parent branch counts as a live
+                             # contest unless its tip is more than N blocks below
+                             # the parent tip
 mainchainrpchost=127.0.0.1
 mainchainrpcport=8332
 mainchainrpccookiefile=/home/YOU/.bitcoin/.cookie   # or mainchainrpcuser/password
@@ -307,6 +319,25 @@ Every block then references a parent block at a non-decreasing height, and the
 node reorganizes **if and only if** the parent reorganizes away a referenced
 block. Monitor with `getanchorstatus`, which reports the current anchor and
 parent-connection health.
+
+`-anchoravoidcontested` and `-anchorcontestwindow` are **producer-side policy**:
+while the parent chain has a live fork at or near its tip, the blocks this node
+produces anchor to the last height every live branch still agrees on, rather
+than to a tip that may be reorganized away. They never change which blocks the
+node accepts, so operators may set them differently without splitting the
+network. What the back-off costs, what makes the anchor advance again, and why
+the trade is worth making are in
+[`03-bitcoin-anchoring.md`](03-bitcoin-anchoring.md) §5.
+
+`-anchorcontestwindow` has one effect beyond block production, though still a
+node-local one: finality reconciliation consults the same window before this
+node releases its finalized point for a rival branch, and refuses to release
+while the rival's certifying block anchors above the currently uncontested
+parent height ([`04-proof-of-stake.md`](04-proof-of-stake.md) §6). Raising it
+counts more branches as live contests, so this node both advances its own anchor
+and clears a finality partition more slowly; lowering it speeds both up and lets
+a release fire while the parent chain is less settled. Validity is unaffected in
+either direction, so this is a convergence-speed knob, not a fork risk.
 
 On the public testnet (`-chain=test`) these settings default to a shared
 Bitcoin **testnet4** endpoint (`src/init.cpp`, `InitParameterInteraction`), so
