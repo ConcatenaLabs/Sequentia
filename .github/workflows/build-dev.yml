@@ -15,8 +15,10 @@ jobs:
   build_and_test:
     runs-on: ubuntu-22.04
 
-    continue-on-error: true
+    # No continue-on-error: a build that does not build must fail the workflow,
+    # otherwise this job reports green while every target is broken.
     strategy:
+      fail-fast: false
       matrix:
         target: [x86_64-pc-linux-gnu, x86_64-w64-mingw32, x86_64-apple-darwin]
     env:
@@ -64,12 +66,19 @@ jobs:
           path: ${{ github.workspace }}/depends/SDKs
           key: ${{ env.TARGET }}-osx-sdk
 
+      # The SDK version/build id must match depends/hosts/darwin.mk (OSX_SDK).
+      # bitcoincore.org hosts the extracted SDK that depends expects; the tarball
+      # unpacks straight into depends/SDKs/Xcode-<ver>-<build>-extracted-SDK-with-libcxx-headers.
       - name: Extract XCode SDK
         if: ${{ env.TARGET == 'x86_64-apple-darwin' && steps.osx-sdk-cache.outputs.cache-hit != 'true' }}
         run: |
-          cd depends && mkdir SDKs && cd SDKs
-          wget http://mixakuca.ddns.net:8000/Xcode-12.2.tar.gz
-          tar -xzf Xcode-12.2.tar.gz
+          XCODE_SDK=Xcode-12.2-12B45b-extracted-SDK-with-libcxx-headers
+          mkdir -p depends/SDKs
+          cd depends/SDKs
+          wget -q "https://bitcoincore.org/depends-sources/sdks/${XCODE_SDK}.tar.gz"
+          tar -xzf "${XCODE_SDK}.tar.gz"
+          rm -f "${XCODE_SDK}.tar.gz"
+          test -d "${XCODE_SDK}"
 
       - name: Build depends
         if: ${{ steps.deps-cache.outputs.cache-hit != 'true' }}
@@ -85,9 +94,14 @@ jobs:
           make clean
           make -j$(nproc)
 
+      # ADVISORY, not a gate (yet): the functional suite has never been observed
+      # green on a GitHub runner, so gating on it now would block every merge for
+      # reasons unrelated to the change under review. The build above IS a gate.
+      # Flip continue-on-error off once a full run is seen green here.
       - name: Run tests
         id: tests
         if: ${{ env.TARGET == 'x86_64-pc-linux-gnu' }}
+        continue-on-error: true
         run: |
           echo "Running tests"
           ./test/functional/test_runner.py
