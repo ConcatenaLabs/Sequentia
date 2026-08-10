@@ -961,7 +961,7 @@ public:
         // the USDX reissuance token, the authority to ever issue more USDX, were
         // stranded on a testnet whose whole purpose is to be used.
         //
-        // WHAT THIS DOES. At height 73200 the block-connect path removes those two
+        // WHAT THIS DOES. At height 89500 the block-connect path removes those two
         // outpoints from the UTXO set and adds two ordinary outputs paying the
         // replacement treasury wallet (`treasury2026`, backed up on and off the
         // box). Not a transaction, not a script: a rewrite of the UTXO set that
@@ -989,12 +989,16 @@ public:
         // a reason to fix the process that caused it, not to run this again: every
         // use spends the credibility that the first one borrowed.
         //
-        // Height 73200 was ~48 hours ahead of the tip (~68,417) at 30 s slots, so
-        // every node had time to upgrade. Below it nothing happens; at it the
-        // rewrite applies once; above it the created coins are ordinary coins.
-        // Note that transactions IN block 73200 cannot spend them -- the rewrite
+        // Height 89500 is ~3,684 blocks ahead of the tip (~85,816) at the time it
+        // was chosen. Slots are 30 s, but roughly one slot in six goes unfilled,
+        // so the measured wall-clock cadence is ~36 s per block (36.1 s over the
+        // last 500 blocks, 37.4 s over the last 8,000). That puts the fork
+        // roughly 36 to 37 hours out, which is time enough for every node to
+        // upgrade. Below it nothing happens; at it the rewrite applies once;
+        // above it the created coins are ordinary coins.
+        // Note that transactions IN block 89500 cannot spend them -- the rewrite
         // runs after that block's transactions -- so they are first spendable at
-        // height 73201.
+        // height 89501.
         //
         // WHERE THE MONEY LANDS. The created outputs sit at the outpoints of the
         // synthetic transaction derived from this table
@@ -1013,7 +1017,7 @@ public:
         // and signs normally. So the treasury reclaims them with one manual sweep
         // (createrawtransaction from the outpoints above, sign, send), after
         // which the resulting outputs are ordinary wallet outputs like any other.
-        consensus.utxo_recovery.height = 73200;
+        consensus.utxo_recovery.height = 89500;
         consensus.utxo_recovery.chain_genesis = expected_genesis;
         consensus.utxo_recovery.retire = {
             // Confidential (value and asset committed); true contents unknowable.
