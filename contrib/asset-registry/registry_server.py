@@ -275,16 +275,21 @@ def _verify_domain_proof(domain, asset_id, timeout):
     req = urllib.request.Request(url, headers={"User-Agent": "sequentia-asset-registry/0.1"})
     try:
         with opener.open(req, timeout=timeout) as resp:
-            ctype = resp.headers.get_content_type()
+            raw_ctype = resp.headers.get("Content-Type")
             body = resp.read(1_000_000).decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
         raise ApiError(400, "domain proof not found at %s (HTTP %d)" % (url, e.code))
     except Exception as e:
         raise ApiError(400, "domain proof fetch failed: %s" % e)
-    # text/plain is required so nobody can smuggle the line inside an HTML page
-    # (a user-content page, say) they do not actually control.
-    if ctype != "text/plain":
-        raise ApiError(400, "domain proof at %s must be served as text/plain (got '%s')" % (url, ctype or "none"))
+    # The body comparison below is the real proof of control: the response must
+    # BE the line, so a line smuggled into a page the claimant does not actually
+    # control can never match. The content type therefore only needs to keep out
+    # responses that declare themselves to be something else entirely (an HTML
+    # page, say). Extensionless files are routinely served with no declared type
+    # at all, or as application/octet-stream -- both accepted, the body decides.
+    ctype = raw_ctype.split(";")[0].strip().lower() if raw_ctype else ""
+    if ctype not in ("", "text/plain", "application/octet-stream"):
+        raise ApiError(400, "domain proof at %s must be plain text, not '%s'" % (url, ctype))
     # The whole body must BE the line, not merely contain it: a substring match
     # would let attacker-influenced content pass.
     if body.strip() != _proof_text(domain, asset_id):
