@@ -718,7 +718,17 @@ class P2PDataStore(P2PInterface):
                 for b in blocks:
                     self.send_message(msg_block(block=b))
             else:
-                self.send_message(msg_headers([CBlockHeader(block) for block in blocks]))
+                # SEQUENTIA: announce in batches of at most MAX_HEADERS_RESULTS. This
+                # network caps a headers message at 512 (src/net_processing.cpp) so a
+                # batch of PoS headers fits the wire limit; a longer message is
+                # Misbehaving and is dropped without a reply. The batches are
+                # consecutive, so the node connects them in order exactly as it would a
+                # single message. Sent whole, an announcement of more than 512 blocks
+                # was silently discarded and the caller waited out its timeout for a
+                # getdata that was never coming (feature_block's 1088-block reorg).
+                headers = [CBlockHeader(block) for block in blocks]
+                for i in range(0, len(headers), MAX_HEADERS_RESULTS):
+                    self.send_message(msg_headers(headers[i:i + MAX_HEADERS_RESULTS]))
                 self.wait_until(
                     lambda: blocks[-1].sha256 in self.getdata_requests,
                     timeout=timeout,
