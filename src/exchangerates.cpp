@@ -3,6 +3,7 @@
 #include <policy/policy.h>
 #include <policy/value.h>
 #include <util/settings.h>
+#include <util/strencodings.h> // IsHex
 #include <util/system.h>
 #include <util/time.h>
 #include <univalue.h>
@@ -151,7 +152,22 @@ bool ExchangeRateMap::LoadFromJSON(std::map<std::string, UniValue> json, std::ve
     for (auto rate : json) {
         CAsset asset = GetAssetFromString(rate.first);
         if (asset.IsNull()) {
-            errors.push_back(strprintf("Unknown label and invalid asset hex: %s", rate.first));
+            // SEQUENTIA: GetAssetFromString() collapses several different
+            // failures into one null return, and reporting them all as "unknown
+            // label and invalid hex" sends the reader looking for a typo that is
+            // not there. Say which of them actually happened.
+            if (gAssetsDir.HasLabel(rate.first)) {
+                // The directory knows the name but it resolves to the null asset.
+                // Set() and Merge() both refuse to create such a binding now, so
+                // this should not arise; it is reported distinctly anyway because
+                // blaming the operator's spelling for a directory defect is
+                // exactly the wrong answer that cost time here.
+                errors.push_back(strprintf("Label %s is registered but names the null asset, so no rate can be set for it", rate.first));
+            } else if (rate.first.size() == 64 && IsHex(rate.first)) {
+                errors.push_back(strprintf("Asset id %s is the null asset, which no rate can be set for", rate.first));
+            } else {
+                errors.push_back(strprintf("Unknown label and invalid asset hex: %s", rate.first));
+            }
             hasError = true;
         } else if (!rate.second.isNum()) {
             errors.push_back(strprintf("Rate for %s is not an integer", rate.first));
