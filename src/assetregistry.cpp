@@ -10,6 +10,7 @@
 #include <support/events.h>
 #include <tinyformat.h>
 #include <univalue.h>
+#include <util/strencodings.h>
 #include <util/system.h>
 
 #include <event2/buffer.h>
@@ -76,7 +77,7 @@ bool HttpRequest(const std::string& url, const std::string& body, int& out_statu
     const size_t colon = hostport.find(':');
     if (colon != std::string::npos) {
         host = hostport.substr(0, colon);
-        port = std::atoi(hostport.substr(colon + 1).c_str());
+        port = LocaleIndependentAtoi<int>(hostport.substr(colon + 1));
     }
     if (host.empty() || port <= 0 || port > 65535) { out_err = "malformed registry URL"; return false; }
 

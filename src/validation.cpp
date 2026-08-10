@@ -3868,7 +3868,7 @@ bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew
             // partially-modified `view` is discarded unflushed exactly as on the
             // error path below, so no chainstate change leaks out.
             if (state.GetResult() == BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE) {
-                LogPrintf("STALLING further progress in ConnectTip: block %s (height %d) cannot be verified against the parent chain right now (%s). "
+                LogPrintf("STALLING further progress in ConnectTip: block %s (height %d) cannot be verified against the parent chain right now (%s). " /* Continued */
                           "Chain will not grow until the parent chain daemon is reachable again; the block will be retried, NOT marked invalid.\n",
                           pindexNew->GetBlockHash().ToString(), pindexNew->nHeight, state.GetRejectReason());
                 state = BlockValidationState();

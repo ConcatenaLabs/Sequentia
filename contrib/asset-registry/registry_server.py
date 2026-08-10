@@ -70,7 +70,7 @@ def http_get_json(url, timeout):
 
 def _atomic_write(path, obj):
     tmp = path + ".tmp"
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf8") as f:
         json.dump(obj, f, indent=2)
     os.replace(tmp, path)
 
@@ -242,7 +242,9 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
     them, so a domain that answers the proof with a 301 (to www, say) fails
     there. Following them here would accept assets that registry rejects.
     """
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
+    # Signature is fixed by urllib.request.HTTPRedirectHandler, which calls this
+    # positionally; the target URL is deliberately unused because we never follow.
+    def redirect_request(self, req, fp, code, msg, headers, _newurl):
         return None
 
 
@@ -696,9 +698,12 @@ def _fmt_age(ts):
     if not ts:
         return "never"
     d = int(time.time() - ts)
-    if d < 90: return "%d s ago" % d
-    if d < 5400: return "%d min ago" % (d // 60)
-    if d < 172800: return "%d h ago" % (d // 3600)
+    if d < 90:
+        return "%d s ago" % d
+    if d < 5400:
+        return "%d min ago" % (d // 60)
+    if d < 172800:
+        return "%d h ago" % (d // 3600)
     return "%d d ago" % (d // 86400)
 
 
@@ -960,16 +965,19 @@ def serve(reg, host, port):
         def do_GET(self):
             path = urllib.parse.urlsplit(self.path).path
             if path in ("/registry/index.minimal.json", "/index.minimal.json"):
-                if self._public_gate(reg.ui().get("public_index", True)): return
+                if self._public_gate(reg.ui().get("public_index", True)):
+                    return
                 self._send(200, json.dumps(reg.merged(), indent=2, sort_keys=True), "application/json")
             elif path == "/":
                 if self._authed():
                     self._redirect("/admin")
                     return
-                if self._public_gate(reg.ui().get("public_page", True)): return
+                if self._public_gate(reg.ui().get("public_page", True)):
+                    return
                 self._send(200, _render_public(reg))
             elif path == "/public":
-                if self._public_gate(reg.ui().get("public_page", True)): return
+                if self._public_gate(reg.ui().get("public_page", True)):
+                    return
                 self._send(200, _render_public(reg))
             elif path == "/admin":
                 if self._authed():
@@ -978,7 +986,8 @@ def serve(reg, host, port):
                     self._send(200, _render_login(reg))
             elif path == "/admin/export.json":
                 if not self._authed():
-                    self._redirect("/admin"); return
+                    self._redirect("/admin")
+                    return
                 self._send(200, json.dumps({"merged": reg.merged(), "overrides": reg.overrides,
                                             "upstream_fetched_at": reg.upstream_ts}, indent=2),
                            "application/json",
@@ -995,7 +1004,8 @@ def serve(reg, host, port):
             path = urllib.parse.urlsplit(self.path).path
             n = int(self.headers.get("Content-Length", 0) or 0)
             if n > 1_000_000:
-                self._send(413, "request too large"); return
+                self._send(413, "request too large")
+                return
             raw = self.rfile.read(n)
 
             # Registration API: public, unauthenticated, JSON. Anyone may submit
@@ -1003,7 +1013,8 @@ def serve(reg, host, port):
             # not this operator's opinion, so there is nothing here to gate on.
             if path in ("/", "/registry/") and \
                     self.headers.get("Content-Type", "").split(";")[0].strip() == "application/json":
-                if self._public_gate(reg.ui().get("public_registration", True)): return
+                if self._public_gate(reg.ui().get("public_registration", True)):
+                    return
                 try:
                     body = json.loads(raw.decode() or "{}")
                     result = register_asset(reg, body.get("asset_id"), body.get("contract"))
@@ -1023,7 +1034,8 @@ def serve(reg, host, port):
             if path == "/login":
                 pw_hash = reg.ui().get("password_hash")
                 if not pw_hash:
-                    self._redirect("/admin"); return
+                    self._redirect("/admin")
+                    return
                 time.sleep(0.3)
                 if _check_password(pw_hash, g("password")):
                     tok = secrets.token_urlsafe(32)
@@ -1036,23 +1048,28 @@ def serve(reg, host, port):
                 return
 
             if not self._authed():
-                self._send(403, "forbidden: not logged in"); return
+                self._send(403, "forbidden: not logged in")
+                return
             if not _same_origin(self):
-                self._send(403, "forbidden: cross-origin request"); return
+                self._send(403, "forbidden: cross-origin request")
+                return
             if not hmac.compare_digest(g("csrf_token"), csrf_token):
-                self._send(403, "forbidden: invalid CSRF token"); return
+                self._send(403, "forbidden: invalid CSRF token")
+                return
 
             try:
                 if path == "/save-entry":
                     aid = g("asset_id").strip().lower()
                     if not HEX64.match(aid):
                         self._send(200, _render_admin(reg, csrf_token,
-                                                      error="Asset id must be exactly 64 hex characters.")); return
+                                                      error="Asset id must be exactly 64 hex characters."))
+                        return
                     ticker = g("ticker").strip()
                     name = g("name").strip()
                     if not ticker or not name:
                         self._send(200, _render_admin(reg, csrf_token,
-                                                      error="Ticker and name are required.")); return
+                                                      error="Ticker and name are required."))
+                        return
                     try:
                         precision = max(0, min(8, int(g("precision", "8"))))
                     except ValueError:
@@ -1089,19 +1106,24 @@ def serve(reg, host, port):
                     if new_pw:
                         cur_hash = reg.ui().get("password_hash")
                         if cur_hash and not _check_password(cur_hash, g("cur_password")):
-                            self._send(200, _render_admin(reg, csrf_token, error="Current password is wrong.")); return
+                            self._send(200, _render_admin(reg, csrf_token, error="Current password is wrong."))
+                            return
                         if new_pw != g("new_password2"):
-                            self._send(200, _render_admin(reg, csrf_token, error="The new passwords don't match.")); return
+                            self._send(200, _render_admin(reg, csrf_token, error="The new passwords don't match."))
+                            return
                         if len(new_pw) < 8:
                             self._send(200, _render_admin(reg, csrf_token,
-                                                          error="Password too short — use at least 8 characters.")); return
+                                                          error="Password too short — use at least 8 characters."))
+                            return
                         ui["password_hash"] = _hash_password(new_pw)
                     reg.cfg["ui"] = ui
                     reg.save_config()
                 else:
-                    self._send(404, "not found"); return
+                    self._send(404, "not found")
+                    return
             except Exception as e:
-                self._send(400, "error: " + html.escape(str(e))); return
+                self._send(400, "error: " + html.escape(str(e)))
+                return
             self._redirect("/admin?saved=1")
 
         def log_message(self, *a):
@@ -1130,7 +1152,7 @@ def main():
                         format="%(asctime)s %(levelname)s %(message)s")
 
     if os.path.exists(args.config):
-        with open(args.config) as f:
+        with open(args.config, encoding="utf8") as f:
             config = json.load(f)
     else:
         config = {"upstream_url": DEFAULT_UPSTREAM, "sync_interval_secs": 300,

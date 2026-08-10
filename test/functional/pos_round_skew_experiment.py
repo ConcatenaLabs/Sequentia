@@ -35,8 +35,8 @@ STEP = int(os.environ.get("POS_SKEW_STEP_MS", "0"))
 N = int(os.environ.get("POS_SKEW_NODES", "12"))
 SECONDS = int(os.environ.get("POS_SKEW_SECONDS", "35"))
 
-import test_framework.util as _util
-import test_framework.test_framework as _tf
+import test_framework.util as _util  # noqa: E402  (N, computed above, sizes the cap)
+import test_framework.test_framework as _tf  # noqa: E402
 _util.MAX_NODES = max(_util.MAX_NODES, N + 1)
 _tf.MAX_NODES = _util.MAX_NODES
 

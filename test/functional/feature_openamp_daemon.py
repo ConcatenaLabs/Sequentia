@@ -230,7 +230,7 @@ class OpenAmpDaemonTest(BitcoinTestFramework):
             bytes.fromhex(entry["policy_sig"]), bob_sig,
             bytes.fromhex(entry["leaf"]), bytes.fromhex(entry["control"]),
         ]
-        txid = node.sendrawtransaction(tx.serialize().hex())
+        node.sendrawtransaction(tx.serialize().hex())
         self.generate(node, 1)
         self.wait_daemon_height(node.getblockcount())
 

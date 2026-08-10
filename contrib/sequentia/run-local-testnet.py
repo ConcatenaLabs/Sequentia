@@ -42,7 +42,6 @@ Stop a running network with:  run-local-testnet.py --stop --basedir <dir>
 import argparse
 import json
 import os
-import shutil
 import signal
 import subprocess
 import sys
@@ -100,7 +99,7 @@ def wait_rpc(cli_bin, datadir, port, label, deadline_s=300):
 
 
 def write_conf(path, lines):
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf8") as f:
         f.write("\n".join(lines) + "\n")
 
 
@@ -180,7 +179,7 @@ def main():
     parent_miner = None
     if args.no_anchor:
         anchor_lines, parent_genesis = [], ""
-        p_host = p_port = p_user = p_pw = None
+        p_port = p_user = p_pw = None
         print("Anchoring DISABLED (--no-anchor).")
     elif args.local_parent:
         pdir = os.path.join(base, "parent")
@@ -205,9 +204,9 @@ def main():
         addr, _ = cli(elementscli, pdir, p_rpc, ["getnewaddress"], args.rpcuser, args.rpcpassword)
         cli(elementscli, pdir, p_rpc, ["generatetoaddress", "20", addr], args.rpcuser, args.rpcpassword, timeout=120)
         parent_genesis, _ = cli(elementscli, pdir, p_rpc, ["getblockhash", "0"], args.rpcuser, args.rpcpassword)
-        p_host, p_port_rpc, p_user, p_pw = "127.0.0.1", p_rpc, args.rpcuser, args.rpcpassword
         pids["parent"] = {"datadir": pdir, "rpcport": p_rpc, "pid": _read_pid(pdir)}
         parent_miner = (pdir, p_rpc, addr)
+        p_port_rpc, p_user, p_pw = p_rpc, args.rpcuser, args.rpcpassword
         anchor_lines = [
             "con_bitcoin_anchor=1", "validateanchor=1", "anchorminconf=1",
             "anchorpollinterval=%d" % (args.anchorpoll or max(2, args.slot // 2)),
@@ -235,7 +234,7 @@ def main():
     # ---- Committee keys + shared consensus block -----------------------------
     stakers = [make_staker() for _ in range(N)]
     json.dump([{"wif": w, "pub": p} for w, p in stakers],
-              open(os.path.join(base, "committee_keys.json"), "w"), indent=2)
+              open(os.path.join(base, "committee_keys.json"), "w", encoding="utf8"), indent=2)
     consensus = [
         "con_pos=1", "posvrf=1", "posbls=1",
         "poscommitteesize=%d" % N, "posslotinterval=%d" % args.slot,
@@ -278,7 +277,7 @@ def main():
         pids["node%03d" % i] = {"datadir": d, "rpcport": args.rpc_base + i, "pid": _read_pid(d)}
         if (i + 1) % 10 == 0:
             print("  started %d/%d" % (i + 1, N))
-    json.dump(pids, open(os.path.join(base, "pids.json"), "w"))
+    json.dump(pids, open(os.path.join(base, "pids.json"), "w", encoding="utf8"))
 
     # ---- Wait for RPC + genesis agreement ------------------------------------
     print("Waiting for all %d nodes' RPC..." % N)
@@ -326,7 +325,8 @@ def main():
                         try:
                             j = json.loads(a)
                             ahint = " anchor=%s@btc%s" % (j.get("anchorstatus"), j.get("anchorheight"))
-                        except Exception: ahint = ""
+                        except Exception:
+                            ahint = ""
                 print("  height min=%d max=%d  (fork=%s)%s" %
                       (lo, hi, "YES" if len({h for h in hs if h >= 0}) > 1 and lo >= 1 and _forked(elementscli, pids, args, hs) else "no", ahint))
                 last = hi

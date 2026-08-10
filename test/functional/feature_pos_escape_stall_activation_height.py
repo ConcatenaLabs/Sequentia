@@ -117,8 +117,10 @@ class PosEscapeStallActivationHeightTest(BitcoinTestFramework):
                                "-posproducer=1", "-posproducerkey=%s" % self.founder_wif]
         peer = consensus + ["-port=%d" % p2p_port(2), "-rpcport=%d" % rpc_port(2),
                             "-posproducer=1", "-posproducerkey=%s" % self.peer_wif]
-        self.add_nodes(1, [founder], chain=[chain]); self.start_node(1)
-        self.add_nodes(1, [peer], chain=[chain]); self.start_node(2)
+        self.add_nodes(1, [founder], chain=[chain])
+        self.start_node(1)
+        self.add_nodes(1, [peer], chain=[chain])
+        self.start_node(2)
         self.connect_nodes(1, 2)
         self.nodes[0].createwallet(wallet_name="w", descriptors=True)
 
