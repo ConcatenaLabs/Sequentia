@@ -126,9 +126,19 @@ with "Boost is not available!". Point it at an existing checkout's prebuilt
 dependencies:
 
     CONFIG_SITE=<checkout>/depends/x86_64-pc-linux-gnu/share/config.site \
-      ./configure --with-gui=no --disable-bench --disable-fuzz-binary
+      ./configure --enable-any-asset-fees --with-gui=no --disable-bench \
+      --disable-fuzz-binary
 
 (Run `./autogen.sh` first in a fresh worktree.)
+
+`--enable-any-asset-fees` is not optional. It is a compile-time flag, distinct
+from the runtime `-con_any_asset_fees` chain parameter, and it is the only thing
+that defines `ANY_ASSET_FEES`. Under that define `CURRENCY_UNIT` and
+`CURRENCY_ATOM` in `src/policy/feerate.h` are `RFU` and `rfa` rather than `BTC`
+and `sat`, which is the whole of its effect, and every RPC string quoting a fee
+unit follows from it. A binary built without it fails `wallet_basic`,
+`wallet_send`, `rpc_psbt`, `rpc_fundrawtransaction` and `interface_bitcoin_cli`
+on the unit spelling alone. Those failures look real and are not.
 
 The unit test binary is `src/test/test_bitcoin` (there is no `test_elements`
 target); build it with `make -C src test/test_bitcoin`.
