@@ -195,7 +195,8 @@ class SignRawTransactionsTest(BitcoinTestFramework):
         self.nodes[0].walletpassphrase("password", 9999)
         self.generate(self.nodes[0], COINBASE_MATURITY + 1, sync_fun=self.no_op)
         rawtx = self.nodes[0].createrawtransaction([], [{self.nodes[0].getnewaddress(): 10}])
-        fundedtx = self.nodes[0].fundrawtransaction(rawtx)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        fundedtx = self.nodes[0].fundrawtransaction(rawtx, {"fee_asset": "bitcoin"})
         signedtx = self.nodes[0].signrawtransactionwithwallet(fundedtx["hex"])
         assert_equal(signedtx["complete"], True)
         signedtx2 = self.nodes[0].signrawtransactionwithwallet(signedtx["hex"])
@@ -213,7 +214,8 @@ class SignRawTransactionsTest(BitcoinTestFramework):
         p2sh_p2wsh_address = self.nodes[1].createmultisig(1, [embedded_pubkey], "p2sh-segwit")
         # send transaction to P2SH-P2WSH 1-of-1 multisig address
         self.generate(self.nodes[0], COINBASE_MATURITY + 1, sync_fun=self.no_op)
-        self.nodes[0].sendtoaddress(p2sh_p2wsh_address["address"], 49.999)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        self.nodes[0].sendtoaddress(address=p2sh_p2wsh_address["address"], amount=49.999, fee_asset_label='bitcoin')
         self.generate(self.nodes[0], 1, sync_fun=self.no_op)
         # ElEMENTS: allow time for block sync
         time.sleep(1)
@@ -248,7 +250,8 @@ class SignRawTransactionsTest(BitcoinTestFramework):
         addr = script_to_p2sh(redeem_script, prefix=196)
         script_pub_key = self.nodes[1].validateaddress(addr)['scriptPubKey']
         # Fund that address
-        txid = self.nodes[0].sendtoaddress(addr, 10)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        txid = self.nodes[0].sendtoaddress(address=addr, amount=10, fee_asset_label='bitcoin')
         vout = find_vout_for_address(self.nodes[0], txid, addr)
         self.generate(self.nodes[0], 1, sync_fun=self.no_op)
         # Now create and sign a transaction spending that output on node[0], which doesn't know the scripts or keys
@@ -293,7 +296,8 @@ class SignRawTransactionsTest(BitcoinTestFramework):
         address = script_to_p2wsh(script)
 
         # Fund that address and make the spend
-        txid = self.nodes[0].sendtoaddress(address, 1)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        txid = self.nodes[0].sendtoaddress(address=address, amount=1, fee_asset_label='bitcoin')
         vout = find_vout_for_address(self.nodes[0], txid, address)
         self.generate(self.nodes[0], 1, sync_fun=self.no_op)
         utxo = self.nodes[0].listunspent()[0]
@@ -328,7 +332,8 @@ class SignRawTransactionsTest(BitcoinTestFramework):
         address = script_to_p2wsh(script)
 
         # Fund that address and make the spend
-        txid = self.nodes[0].sendtoaddress(address, 1)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        txid = self.nodes[0].sendtoaddress(address=address, amount=1, fee_asset_label='bitcoin')
         vout = find_vout_for_address(self.nodes[0], txid, address)
         self.generate(self.nodes[0], 1, sync_fun=self.no_op)
         utxo = self.nodes[0].listunspent()[0]
@@ -375,7 +380,8 @@ class SignRawTransactionsTest(BitcoinTestFramework):
         utxo_address_privkey = self.nodes[2].dumpprivkey(uc_addr)
         utxo_script_pk = utxo_address_info['scriptPubKey']
         utxo_amount = 0.1
-        utxo_txid = self.nodes[2].sendtoaddress(utxo_address, utxo_amount)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        utxo_txid = self.nodes[2].sendtoaddress(address=utxo_address, amount=utxo_amount, fee_asset_label='bitcoin')
         self.generate(self.nodes[2], 1, sync_fun=self.no_op)
 
         tx = self.nodes[2].getrawtransaction(utxo_txid, True)

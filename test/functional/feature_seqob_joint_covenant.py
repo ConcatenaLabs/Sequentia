@@ -142,7 +142,9 @@ class SeqObJointCovenantTest(BitcoinTestFramework):
         bech = node.getnewaddress("", "bech32")
         unconf = node.getaddressinfo(bech)["unconfidential"]
         if asset_display is None:
-            node.sendtoaddress(unconf, amount)
+            # SEQUENTIA: an open-fee-market chain has no default fee asset.
+            node.sendtoaddress(address=unconf, amount=amount,
+                               fee_asset_label=BITCOIN_ASSET)
             target = BITCOIN_ASSET
         else:
             node.sendtoaddress(address=unconf, amount=amount, assetlabel=asset_display,
@@ -241,14 +243,17 @@ class SeqObJointCovenantTest(BitcoinTestFramework):
         self.settler = self.build_settler()
 
         self.generate(node, 101)
-        node.sendtoaddress(node.getnewaddress(), 1000000)
+        node.sendtoaddress(address=node.getnewaddress(), amount=1000000,
+                           fee_asset_label=BITCOIN_ASSET)
         self.generate(node, 1)
         self.genesis_hash = node.getblockhash(0)
 
         # X rests in maker-0's covenant; Y rests in maker-1's covenant.
-        self.X_display = node.issueasset(100000, 0, False)["asset"]
+        self.X_display = node.issueasset(assetamount=100000, tokenamount=0,
+                                          blind=False, fee_asset=BITCOIN_ASSET)["asset"]
         self.generate(node, 1)
-        self.Y_display = node.issueasset(100000, 0, False)["asset"]
+        self.Y_display = node.issueasset(assetamount=100000, tokenamount=0,
+                                          blind=False, fee_asset=BITCOIN_ASSET)["asset"]
         self.generate(node, 1)
         self.X_OUT = self.asset_out(self.X_display)
         self.Y_OUT = self.asset_out(self.Y_display)

@@ -41,7 +41,9 @@ class AnyAssetFeeScenariosTest(BitcoinTestFramework):
         self.node1_address = self.nodes[1].getnewaddress()
 
         self.issue_amount1 = Decimal('100')
-        self.issuance1 = self.nodes[0].issueasset(self.issue_amount1, 1, False)
+        # SEQUENTIA: no default fee asset on an open-fee-market chain.
+        self.issuance1 = self.nodes[0].issueasset(
+            assetamount=self.issue_amount1, tokenamount=1, blind=False, fee_asset='gasset')
         self.asset1 = self.issuance1['asset']
         self.issuance_txid1 = self.issuance1['txid']
         self.issuance_vin1 = self.issuance1['vin']

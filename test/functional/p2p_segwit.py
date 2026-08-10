@@ -91,6 +91,7 @@ from test_framework.util import (
     assert_equal,
     softfork_active,
     assert_raises_rpc_error,
+    strip_checked_fee_asset,
 )
 from test_framework import util
 
@@ -634,7 +635,7 @@ class SegWitTest(BitcoinTestFramework):
             # Just check mempool acceptance, but don't add the transaction to the mempool, since witness is disallowed
             # in blocks and the tx is impossible to mine right now.
             assert_equal(
-                self.nodes[0].testmempoolaccept([tx3.serialize_with_witness().hex()]),
+                strip_checked_fee_asset(self.nodes[0].testmempoolaccept([tx3.serialize_with_witness().hex()])),
                 [{
                     'txid': tx3.hash,
                     'wtxid': tx3.getwtxid(),
@@ -652,7 +653,7 @@ class SegWitTest(BitcoinTestFramework):
             tx3.vout.append(CTxOut(p2sh_tx.vout[0].nValue.getAmount() - tx3.vout[0].nValue.getAmount())) # fee
             tx3.rehash()
             assert_equal(
-                self.nodes[0].testmempoolaccept([tx3.serialize_with_witness().hex()]),
+                strip_checked_fee_asset(self.nodes[0].testmempoolaccept([tx3.serialize_with_witness().hex()])),
                 [{
                     'txid': tx3.hash,
                     'wtxid': tx3.getwtxid(),
@@ -2085,7 +2086,7 @@ class SegWitTest(BitcoinTestFramework):
             def serialize(self):
                 return serialize_with_bogus_witness(self.tx)
 
-        self.nodes[0].sendtoaddress(self.nodes[0].getnewaddress(address_type='bech32'), 5)
+        self.nodes[0].sendtoaddress(address=self.nodes[0].getnewaddress(address_type='bech32'), amount=5, fee_asset_label='bitcoin')
         self.generate(self.nodes[0], 1)
         unspent = next(u for u in self.nodes[0].listunspent() if u['spendable'] and u['address'].startswith('ert'))
 

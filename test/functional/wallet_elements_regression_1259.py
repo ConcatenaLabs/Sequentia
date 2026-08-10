@@ -39,11 +39,12 @@ class WalletTest(BitcoinTestFramework):
         self.sync_all()
 
         self.log.info(f"Send some policy asset to node 1")
-        self.nodes[0].sendtoaddress(self.nodes[1].getnewaddress(), 10)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        self.nodes[0].sendtoaddress(address=self.nodes[1].getnewaddress(), amount=10, fee_asset_label='bitcoin')
         self.generate(self.nodes[0], 1)
 
         self.log.info(f"Issuing an asset from node 0")
-        issuance = self.nodes[0].issueasset(1000, 1, True)
+        issuance = self.nodes[0].issueasset(assetamount=1000, tokenamount=1, blind=True, fee_asset='bitcoin')
         self.generate(self.nodes[0], 1)
         asset = issuance["asset"]
         self.log.info(f"Asset ID is {asset}")
@@ -54,7 +55,12 @@ class WalletTest(BitcoinTestFramework):
         fee_rate = 10
         self.log.info(f"Sending {num_utxos} utxos of asset to node 1")
         for i in range(num_utxos):
-            self.nodes[0].sendtoaddress(self.nodes[1].getnewaddress(), value, "", "", False, False, None, None, None, asset, False, fee_rate, True)
+            # The issued asset is what is sent; the fee is paid in the policy asset,
+            # which is what the fee-output assertion below expects.
+            self.nodes[0].sendtoaddress(address=self.nodes[1].getnewaddress(), amount=value,
+                                        subtractfeefromamount=False, replaceable=False,
+                                        assetlabel=asset, ignoreblindfail=False,
+                                        fee_rate=fee_rate, fee_asset_label='bitcoin')
             self.generate(self.nodes[0], 1)
         self.sync_all()
 
@@ -64,7 +70,7 @@ class WalletTest(BitcoinTestFramework):
 
         # fund the raw tx
         self.log.info(f"Fund the raw transaction")
-        raw_tx = self.nodes[1].fundrawtransaction(hex, True)
+        raw_tx = self.nodes[1].fundrawtransaction(hex, {"includeWatching": True, "fee_asset": "bitcoin"})
 
         # blind and sign the tx
         self.log.info(f"Blind and sign the raw transaction")

@@ -38,7 +38,9 @@ class AnyAssetFeeTest(BitcoinTestFramework):
 
         self.gasset = self.nodes[0].dumpassetlabels()['gasset']
         self.issue_amount = Decimal('100')
-        self.issuance = self.nodes[0].issueasset(self.issue_amount, 1, False)
+        # SEQUENTIA: no default fee asset on an open-fee-market chain.
+        self.issuance = self.nodes[0].issueasset(
+            assetamount=self.issue_amount, tokenamount=1, blind=False, fee_asset='gasset')
         self.asset = self.issuance['asset']
         #token = issuance['token']
         self.issuance_txid = self.issuance['txid']

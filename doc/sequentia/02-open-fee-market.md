@@ -83,6 +83,49 @@ commands are in [`05-operating-sequentia.md`](05-operating-sequentia.md) §4. On
 stake-registration transactions and ordinary asset transfers both relay under
 default policy.
 
+### Naming the fee asset
+
+**The fee asset must be named explicitly unless the transaction already
+determines it.** The wallet RPCs that build a transaction - `sendtoaddress`,
+`sendmany`, `send`, `fundrawtransaction`, `walletcreatefundedpsbt`, `issueasset`,
+`reissueasset` - apply exactly that rule and nothing else. They do not fall back
+to the policy asset, and they do not infer an asset from what the transaction
+happens to send.
+
+There is no default because a default would be a privilege. Outside staking
+eligibility SEQ has exactly the standing of every issued asset; a wallet that
+settled on SEQ whenever the caller stayed silent would make it the network's fee
+currency by default and reintroduce the coin the design does away with. Inferring
+the asset being sent is no better: it is a policy decision taken out of the
+caller's sight, from data that says nothing about which asset can pay a fee, and
+it breaks outright on an asset the node cannot price (a reissuance token above
+all).
+
+A transaction determines its fee asset when the value is already implied by what
+the caller handed in, in either of two ways:
+
+- it carries an explicit **fee output**, which names the asset the fee is paid in;
+- the fee is **subtracted from** an output, so it is taken out of that output's
+  amount and can only be denominated in that output's asset - `output_amount -=
+  fee`, and a GOLD output cannot be reduced by an amount denominated in USDX.
+
+Where the transaction states the answer, passing `fee_asset_label` /
+`options.fee_asset` alongside it is **refused, whether or not it agrees**: it
+would be a parameter that looks like a selection and is not one, since changing
+the transaction would silently change the "chosen" fee asset. Where it states the
+answer twice, the two must agree - a raw transaction with a GOLD fee output whose
+fee is subtracted from a GOLD output is fine; one that names GOLD and USDX is
+impossible and is refused, naming both. Fee outputs of two different assets, or
+subtract-from outputs spanning two assets, are refused for the same reason: a
+transaction pays its fee in exactly one. All of this holds identically for the
+policy asset and for every issued asset.
+
+`bumpfee` reads the fee asset off the transaction it replaces when no
+`fee_asset` is given. That too is determined rather than chosen.
+
+The GUI preselects a fee asset in the Send form. That is a visible, overridable
+affordance in front of the user, not a rule hidden in the back end.
+
 ## 4. Fee floors and replacement, in reference units
 
 Every configured fee floor is denominated in the reference unit, so the mempool

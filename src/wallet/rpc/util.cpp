@@ -4,6 +4,7 @@
 
 #include <wallet/rpc/util.h>
 
+#include <assetsdir.h>
 #include <rpc/util.h>
 #include <util/translation.h>
 #include <util/url.h>
@@ -148,5 +149,100 @@ void HandleWalletError(const std::shared_ptr<CWallet> wallet, DatabaseStatus& st
         }
         throw JSONRPCError(code, error.original);
     }
+}
+
+/**
+ * SEQUENTIA -- the fee asset of an RPC-built transaction. See wallet/rpc/util.h
+ * for the rule; these three functions are its only implementation, so no RPC can
+ * quietly adopt a different one.
+ */
+std::optional<CAsset> ParseFeeAssetArg(const UniValue& arg)
+{
+    if (arg.isNull() || !arg.isStr() || arg.get_str().empty()) return std::nullopt;
+    const std::string str = arg.get_str();
+    const CAsset asset = GetAssetFromString(str);
+    if (asset.IsNull()) {
+        throw JSONRPCError(RPC_WALLET_ERROR, strprintf("Unknown label and invalid asset hex for fee: %s", str));
+    }
+    return asset;
+}
+
+/** The single asset a set of fee-asset statements agrees on, or nothing. */
+static std::optional<CAsset> AgreedAsset(const std::vector<CAsset>& assets, const std::string& disagreement)
+{
+    std::optional<CAsset> agreed;
+    for (const CAsset& asset : assets) {
+        if (agreed && *agreed != asset) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
+                "%s (%s and %s): a transaction pays its fee in exactly one asset.",
+                disagreement, agreed->GetHex(), asset.GetHex()));
+        }
+        agreed = asset;
+    }
+    return agreed;
+}
+
+std::optional<FeeAssetDetermination> DeterminedByFeeOutputs(const std::vector<CAsset>& fee_output_assets)
+{
+    const std::optional<CAsset> asset = AgreedAsset(
+        fee_output_assets, "The transaction carries fee outputs of different assets");
+    if (!asset) return std::nullopt;
+    return FeeAssetDetermination{*asset, strprintf(
+        "the transaction carries a fee output denominated in %s, which names the asset the fee is paid in",
+        asset->GetHex())};
+}
+
+std::optional<FeeAssetDetermination> DeterminedBySubtractFee(const std::vector<CAsset>& subtract_from_assets)
+{
+    const std::optional<CAsset> asset = AgreedAsset(
+        subtract_from_assets, "Cannot subtract the fee from outputs of different assets");
+    if (!asset) return std::nullopt;
+    return FeeAssetDetermination{*asset, strprintf(
+        "the fee is subtracted from an output of asset %s, so it comes out of that output's amount and can only be denominated in it",
+        asset->GetHex())};
+}
+
+std::optional<FeeAssetDetermination> CombineFeeAssetDeterminations(const std::optional<FeeAssetDetermination>& a,
+                                                                   const std::optional<FeeAssetDetermination>& b)
+{
+    if (!a) return b;
+    if (!b) return a;
+    // Both hold, which is fine when they agree -- a raw transaction whose fee
+    // output is GOLD and whose fee is subtracted from a GOLD output states the
+    // same thing twice. When they disagree neither can be satisfied.
+    if (a->asset != b->asset) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
+            "The transaction determines the fee asset in two ways that disagree: %s; and %s. Both cannot hold.",
+            a->because, b->because));
+    }
+    return a;
+}
+
+CAsset ResolveFeeAsset(const std::optional<CAsset>& explicit_fee_asset,
+                       const std::optional<FeeAssetDetermination>& determined,
+                       const std::string& parameter_name)
+{
+    if (determined) {
+        // The transaction already states the fee asset, so there is nothing left
+        // to name. An explicit fee asset here would look like a choice and would
+        // not be one: change the transaction and the "chosen" fee asset changes
+        // with it. Refused whether or not it agrees, and identically for every
+        // asset, so no asset is privileged by which side would win.
+        if (explicit_fee_asset) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
+                "The transaction already determines the fee asset (%s): %s. That is not a choice, so %s must be omitted.",
+                determined->asset.GetHex(), determined->because, parameter_name));
+        }
+        return determined->asset;
+    }
+    if (explicit_fee_asset) return *explicit_fee_asset;
+
+    // Nothing in this transaction determines the fee asset, so it has to be
+    // named. Falling back to ::policyAsset here would answer "SEQ" every time a
+    // caller stays silent, which is precisely the privilege the open fee market
+    // exists to abolish.
+    throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
+        "Nothing in this transaction determines the fee asset, so it must be named: pass %s. This chain has an open fee market -- a fee may be paid in any asset this node accepts, and no asset, the policy asset included, is the default (getfeeexchangerates lists what this node accepts).",
+        parameter_name));
 }
 } // namespace wallet

@@ -16,6 +16,7 @@ from test_framework.messages import (
 )
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
+    amount_of,
     assert_equal,
 #    assert_fee_amount,
     assert_greater_than,
@@ -42,17 +43,17 @@ class WalletSendTest(BitcoinTestFramework):
                   conf_target=None, estimate_mode=None, fee_rate=None, add_to_wallet=None, psbt=None,
                   inputs=None, add_inputs=None, include_unsafe=None, change_address=None, change_position=None, change_type=None,
                   include_watching=None, locktime=None, lock_unspents=None, replaceable=None, subtract_fee_from_outputs=None,
-                  expect_error=None, solving_data=None):
+                  expect_error=None, solving_data=None, fee_asset='bitcoin'):
         assert (amount is None) != (data is None)
 
-        from_balance_before = from_wallet.getbalances()["mine"]["trusted"]['bitcoin']
+        from_balance_before = amount_of(from_wallet.getbalances()["mine"]["trusted"])
         if include_unsafe:
-            from_balance_before += from_wallet.getbalances()["mine"]["untrusted_pending"]['bitcoin']
+            from_balance_before += amount_of(from_wallet.getbalances()["mine"]["untrusted_pending"])
 
         if to_wallet is None:
             assert amount is None
         else:
-            to_untrusted_pending_before = to_wallet.getbalances()["mine"]["untrusted_pending"]['bitcoin']
+            to_untrusted_pending_before = amount_of(to_wallet.getbalances()["mine"]["untrusted_pending"])
 
         if amount:
             dest = to_wallet.getnewaddress()
@@ -101,6 +102,11 @@ class WalletSendTest(BitcoinTestFramework):
             options["replaceable"] = replaceable
         if subtract_fee_from_outputs is not None:
             options["subtract_fee_from_outputs"] = subtract_fee_from_outputs
+        # SEQUENTIA: an open-fee-market chain has no default fee asset, so name it --
+        # except when subtract_fee_from_outputs already determines it, where naming
+        # it is an error.
+        if fee_asset is not None and not subtract_fee_from_outputs:
+            options["fee_asset"] = fee_asset
         if solving_data is not None:
             options["solving_data"] = solving_data
 
@@ -147,9 +153,9 @@ class WalletSendTest(BitcoinTestFramework):
             assert not "txid" in res
             assert "psbt" in res
 
-        from_balance = from_wallet.getbalances()["mine"]["trusted"]['bitcoin']
+        from_balance = amount_of(from_wallet.getbalances()["mine"]["trusted"])
         if include_unsafe:
-            from_balance += from_wallet.getbalances()["mine"]["untrusted_pending"]['bitcoin']
+            from_balance += amount_of(from_wallet.getbalances()["mine"]["untrusted_pending"])
 
         if add_to_wallet and not include_watching:
             # Ensure transaction exists in the wallet:
@@ -173,9 +179,9 @@ class WalletSendTest(BitcoinTestFramework):
             self.sync_mempools()
             if add_to_wallet:
                 if not subtract_fee_from_outputs:
-                    assert_equal(to_wallet.getbalances()["mine"]["untrusted_pending"]['bitcoin'], to_untrusted_pending_before + Decimal(amount if amount else 0))
+                    assert_equal(amount_of(to_wallet.getbalances()["mine"]["untrusted_pending"]), to_untrusted_pending_before + Decimal(amount if amount else 0))
             else:
-                assert_equal(to_wallet.getbalances()["mine"]["untrusted_pending"]['bitcoin'], to_untrusted_pending_before)
+                assert_equal(amount_of(to_wallet.getbalances()["mine"]["untrusted_pending"]), to_untrusted_pending_before)
 
         return res
 
@@ -249,7 +255,8 @@ class WalletSendTest(BitcoinTestFramework):
                 }])
                 assert_equal(res, [{"success": True}, {"success": True}])
 
-        w0.sendtoaddress(a2_receive, 10) # fund w3
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        w0.sendtoaddress(address=a2_receive, amount=10, fee_asset_label='bitcoin') # fund w3
         self.generate(self.nodes[0], 1)
 
         if not self.options.descriptors:
@@ -267,7 +274,7 @@ class WalletSendTest(BitcoinTestFramework):
                 }])
                 assert_equal(res, [{"success": True}])
 
-            w0.sendtoaddress(a2_receive, 10) # fund w4
+            w0.sendtoaddress(address=a2_receive, amount=10, fee_asset_label='bitcoin') # fund w4
             self.generate(self.nodes[0], 1)
 
         self.log.info("Send to address...")
@@ -507,8 +514,8 @@ class WalletSendTest(BitcoinTestFramework):
         addr = self.nodes[0].deriveaddresses(desc)[0]
         addr_info = ext_fund.getaddressinfo(addr)
 
-        self.nodes[0].sendtoaddress(addr, 10)
-        self.nodes[0].sendtoaddress(ext_wallet.getnewaddress(), 10)
+        self.nodes[0].sendtoaddress(address=addr, amount=10, fee_asset_label='bitcoin')
+        self.nodes[0].sendtoaddress(address=ext_wallet.getnewaddress(), amount=10, fee_asset_label='bitcoin')
         self.generate(self.nodes[0], 6)
         ext_utxo = ext_fund.listunspent(addresses=[addr])[0]
 

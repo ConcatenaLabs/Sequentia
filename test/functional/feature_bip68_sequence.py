@@ -89,7 +89,8 @@ class BIP68Test(BitcoinTestFramework):
     def test_disable_flag(self):
         # Create some unconfirmed inputs
         new_addr = self.nodes[0].getnewaddress()
-        self.nodes[0].sendtoaddress(new_addr, 2) # send 2 BTC
+        # SEQUENTIA: no default fee asset on an open-fee-market chain -- name it.
+        self.nodes[0].sendtoaddress(address=new_addr, amount=2, fee_asset_label='bitcoin') # send 2 BTC
 
         utxos = self.nodes[0].listunspent(0, 0)
         assert len(utxos) > 0
@@ -150,7 +151,7 @@ class BIP68Test(BitcoinTestFramework):
             outputs = {}
             for i in range(num_outputs):
                 outputs[addresses[i]] = random.randint(1, 20)*0.01
-            self.nodes[0].sendmany("", outputs)
+            self.nodes[0].sendmany(dummy="", amounts=outputs, fee_asset='bitcoin')
             self.generate(self.nodes[0], 1)
 
         utxos = self.nodes[0].listunspent()
@@ -236,7 +237,7 @@ class BIP68Test(BitcoinTestFramework):
         cur_height = self.nodes[0].getblockcount()
 
         # Create a mempool tx.
-        txid = self.nodes[0].sendtoaddress(self.nodes[0].getnewaddress(), 2)
+        txid = self.nodes[0].sendtoaddress(address=self.nodes[0].getnewaddress(), amount=2, fee_asset_label='bitcoin')
         tx1 = tx_from_hex(self.nodes[0].getrawtransaction(txid))
         tx1.rehash()
 
@@ -369,7 +370,7 @@ class BIP68Test(BitcoinTestFramework):
     # this test should be moved to run earlier, or deleted.
     def test_bip68_not_consensus(self):
         assert not softfork_active(self.nodes[0], 'csv')
-        txid = self.nodes[0].sendtoaddress(self.nodes[0].getnewaddress(), 2)
+        txid = self.nodes[0].sendtoaddress(address=self.nodes[0].getnewaddress(), amount=2, fee_asset_label='bitcoin')
 
         tx1 = tx_from_hex(self.nodes[0].getrawtransaction(txid))
         tx1.rehash()
@@ -425,7 +426,7 @@ class BIP68Test(BitcoinTestFramework):
         inputs = [ ]
         outputs = [{ self.nodes[1].getnewaddress() : 1.0 }]
         rawtx = self.nodes[1].createrawtransaction(inputs, outputs)
-        rawtxfund = self.nodes[1].fundrawtransaction(rawtx)['hex']
+        rawtxfund = self.nodes[1].fundrawtransaction(rawtx, {'fee_asset': 'bitcoin'})['hex']
         tx = tx_from_hex(rawtxfund)
         tx.nVersion = 2
         tx_signed = self.nodes[1].signrawtransactionwithwallet(tx.serialize().hex())["hex"]

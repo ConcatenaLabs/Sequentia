@@ -90,11 +90,13 @@ class SeqObCovenantFillTest(BitcoinTestFramework):
         bech = node.getnewaddress("", "bech32")
         unconf = node.getaddressinfo(bech)["unconfidential"]
         if asset_display is None:
-            node.sendtoaddress(unconf, amount)
+            # SEQUENTIA: an open-fee-market chain has no default fee asset.
+            node.sendtoaddress(address=unconf, amount=amount,
+                               fee_asset_label=BITCOIN_ASSET)
             target = BITCOIN_ASSET
         else:
-            # con_any_asset_fees defaults the fee asset to the asset being sent;
-            # force bitcoin (the policy asset) which is always fee-acceptable.
+            # No fee asset is inferred from the asset being sent; name bitcoin
+            # (the policy asset), which this node prices.
             node.sendtoaddress(address=unconf, amount=amount, assetlabel=asset_display,
                                fee_asset_label=BITCOIN_ASSET)
             target = asset_display
@@ -185,14 +187,17 @@ class SeqObCovenantFillTest(BitcoinTestFramework):
         # Move the initialfreecoins anyone-can-spend output into ordinary wallet
         # utxos (there is no coinbase subsidy on Sequentia; this is the only
         # bitcoin) so multi-asset coin selection has plain inputs to work with.
-        node.sendtoaddress(node.getnewaddress(), 1000000)
+        node.sendtoaddress(address=node.getnewaddress(), amount=1000000,
+                           fee_asset_label=BITCOIN_ASSET)
         self.generate(node, 1)
         self.genesis = uint256_from_str(bytes.fromhex(node.getblockhash(0))[::-1])
 
         # Two ordinary explicit assets: A rests in orders, B pays for them.
-        self.A_display = node.issueasset(100000, 0, False)["asset"]
+        self.A_display = node.issueasset(assetamount=100000, tokenamount=0,
+                                          blind=False, fee_asset=BITCOIN_ASSET)["asset"]
         self.generate(node, 1)
-        self.B_display = node.issueasset(100000, 0, False)["asset"]
+        self.B_display = node.issueasset(assetamount=100000, tokenamount=0,
+                                          blind=False, fee_asset=BITCOIN_ASSET)["asset"]
         self.generate(node, 1)
         self.A_OUT = self.asset_out(self.A_display)
         self.B_OUT = self.asset_out(self.B_display)

@@ -43,7 +43,9 @@ class AnyAssetFeeRatesTest(BitcoinTestFramework):
         self.gasset = 'b2e15d0d7a0c94e4e2ce0fe6e8691b9e451377f6e46e8045a86f7c4b5d4f0f23'
 
         self.issue_amount = Decimal('100')
-        self.issuance = self.nodes[0].issueasset(self.issue_amount, 1, False)
+        # SEQUENTIA: no default fee asset on an open-fee-market chain.
+        self.issuance = self.nodes[0].issueasset(
+            assetamount=self.issue_amount, tokenamount=1, blind=False, fee_asset='gasset')
         self.asset = self.issuance['asset']
         self.issuance_txid = self.issuance['txid']
         self.issuance_vin = self.issuance['vin']
@@ -121,6 +123,10 @@ class AnyAssetFeeRatesTest(BitcoinTestFramework):
         raw_tx = node.createrawtransaction(outputs=[
             {self.nodes[0].address: amount, 'asset': asset},
             {'fee': 0,'fee_asset': asset}])
+        # SEQUENTIA: a ZERO-value fee output is dropped by createrawtransaction, so
+        # this transaction carries no fee output and states nothing about the fee
+        # asset. Nothing else determines it either, so it is named in the options.
+        options = dict(options or {}, fee_asset=asset)
         funded_tx = node.fundrawtransaction(hexstring=raw_tx, options=options)['hex']
         tx = node.decoderawtransaction(funded_tx)
         assert_equal(tx['fee'], {asset: expected_fee})
@@ -129,6 +135,7 @@ class AnyAssetFeeRatesTest(BitcoinTestFramework):
         raw_tx = node.createrawtransaction(outputs=[
             {self.nodes[0].address: amount, 'asset': asset},
             {'fee': 0,'fee_asset': asset}])
+        options = dict(options or {}, fee_asset=asset)
         funded_tx = node.fundrawtransaction(hexstring=raw_tx, options=options)['hex']
         tx = node.decoderawtransaction(funded_tx)
         assert_equal(tx['fee'], {asset: expected_fee})
@@ -137,14 +144,17 @@ class AnyAssetFeeRatesTest(BitcoinTestFramework):
         node.sendrawtransaction(signed_tx)
 
     def fund_node(self, node):
+        # SEQUENTIA: no default fee asset -- each send names the asset it pays in.
         self.nodes[0].sendtoaddress(
             address=node.address,
             amount=5.0,
-            assetlabel=self.gasset)
+            assetlabel=self.gasset,
+            fee_asset_label=self.gasset)
         self.nodes[0].sendtoaddress(
             address=node.address,
             amount=5.0,
-            assetlabel=self.asset)
+            assetlabel=self.asset,
+            fee_asset_label=self.gasset)
         self.generatetoaddress(self.nodes[0], 1, self.nodes[0].address)
         self.sync_all()
 
