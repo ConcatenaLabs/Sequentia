@@ -17,6 +17,13 @@ For this repository:
 - Run the Sequentia functional tests (`test/functional/feature_pos_*`,
   `feature_any_asset_fee*`, `feature_bitcoin_anchoring*`, ...) before
   submitting consensus-adjacent changes.
+- There is no review gate here. Open a pull request so the change and its
+  reasoning are recorded, then merge it yourself — the Bitcoin Core peer review
+  and "decision making" process described in the second half of this document
+  is upstream's, not this project's.
+- [CLAUDE.md](CLAUDE.md) collects the remaining conventions that are not
+  visible in the code: deployment, testnet operation, and the design rules that
+  are easy to break by accident.
 
 ### Every new consensus rule needs an activation height
 
