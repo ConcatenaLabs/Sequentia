@@ -13,7 +13,12 @@ on:
 
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: ci/lint/04_install.sh pins its tools
+    # (flake8 3.8.3, mypy 0.910, pyzmq 22.3.0, codespell 2.0.0), and those pins
+    # only have wheels/support up to Python 3.10, which is what 22.04 ships.
+    # On ubuntu-latest (24.04 / Python 3.12) pyzmq 22.3.0 falls back to a source
+    # build of its bundled libzmq, which does not compile with GCC 13.
+    runs-on: ubuntu-22.04
 
     steps:
       - uses: actions/checkout@v4
