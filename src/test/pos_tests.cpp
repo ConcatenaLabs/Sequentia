@@ -5,13 +5,17 @@
 #include <pos.h>
 #include <anchor.h>
 
+#include <chainparams.h>
+#include <chainparamsbase.h>
 #include <coins.h>
+#include <consensus/params.h>
 #include <key.h>
 #include <musig.h>
 #include <policy/policy.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <undo.h>
+#include <util/system.h>
 #include <vrf.h>
 #include <test/util/setup_common.h>
 #include <tinyformat.h>
@@ -528,6 +532,63 @@ BOOST_AUTO_TEST_CASE(pos_vrf_exprace_winner_fails_legacy_membership)
     BOOST_CHECK_EQUAL(ok_rejected, 0);
 
     g_pos_committee_size = old_size;
+}
+
+// REGRESSION GUARD on the activation heights the bundled chains pin in code.
+// PosExpRaceActive tests `pos_exprace_height > 0`, so 0 DISABLES the exp-race
+// for this parameter, while 0 in the neighbouring pos_coinbase_leader_height
+// means "active from genesis". Two adjacent parameters, opposite meanings of 0:
+// a mainnet value of 0 reads as configured but silently launches the chain on
+// the legacy raw-beta election. This pins all three bundled answers so that
+// cannot happen unnoticed.
+BOOST_AUTO_TEST_CASE(pos_exprace_activation_heights)
+{
+    ArgsManager empty;
+
+    // Mainnet launches WITH the exponential race, from its first elected block.
+    // Height 1, not 0: genesis carries no leader, committee or VRF proof, and 0
+    // is this parameter's disabled sentinel. Mainnet is not live, so this is a
+    // launch parameter, not a fork of live consensus.
+    {
+        const auto params = CreateChainParams(empty, CBaseChainParams::SEQUENTIA);
+        const Consensus::Params& c = params->GetConsensus();
+        BOOST_CHECK_EQUAL(c.pos_exprace_height, 1);
+        BOOST_CHECK(!PosExpRaceActive(c, 0));            // genesis is not elected
+        BOOST_CHECK(PosExpRaceActive(c, 1));             // first elected block
+        for (int h : {2, 3, 100, 44300, 1000000}) {
+            BOOST_CHECK(PosExpRaceActive(c, h));
+        }
+    }
+
+    // Public testnet activated at exactly 44300 (agreed 2026-07-22, release
+    // 23.3.7). The block BELOW it is still elected by the legacy rule.
+    {
+        const auto params = CreateChainParams(empty, CBaseChainParams::TESTNET);
+        const Consensus::Params& c = params->GetConsensus();
+        BOOST_CHECK_EQUAL(c.pos_exprace_height, 44300);
+        BOOST_CHECK(!PosExpRaceActive(c, 44299));
+        BOOST_CHECK(PosExpRaceActive(c, 44300));
+        BOOST_CHECK(PosExpRaceActive(c, 44301));
+    }
+
+    // Regtest with no -posexpraceheight stays on the legacy election at EVERY
+    // height. The "> 0" guard in PosExpRaceActive is what keeps this consensus
+    // rule change off by default on regtest and custom chains; dropping the
+    // guard to make mainnet's 0 mean "from genesis" would activate the fork on
+    // every such chain at once.
+    {
+        const auto params = CreateChainParams(empty, CBaseChainParams::REGTEST);
+        const Consensus::Params& c = params->GetConsensus();
+        BOOST_CHECK_EQUAL(c.pos_exprace_height, 0);
+        for (int h : {0, 1, 2, 44300, 1000000, std::numeric_limits<int>::max()}) {
+            BOOST_CHECK(!PosExpRaceActive(c, h));
+        }
+    }
+
+    // The chain-params constructors mutate process globals (MAX_MONEY, the
+    // g_pos_* consensus values). Restore the fixture's chain so Sequentia's
+    // caps do not leak into whichever test runs next.
+    SelectParams(CBaseChainParams::MAIN);
 }
 
 // The coinbase VRF commitment round-trips and rejects malformed payloads.

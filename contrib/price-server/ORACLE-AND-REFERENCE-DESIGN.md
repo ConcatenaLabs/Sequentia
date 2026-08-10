@@ -31,8 +31,8 @@ Notes carried forward:
   queries to that provider) + an on-disk cache of last-query-time/last-value, so a
   restart doesn't blow the free-tier budget.
 - **Aggregation = median** across the oracles configured for an asset (robust to a
-  single bad/locked feed). Pairs nicely with the Python server's existing
-  `min_sources` / `max_source_spread`.
+  single bad/locked feed). `min_sources` / `max_source_spread` would land with it;
+  neither exists in the Python server yet, which reads a single source.
 - The provider list shows the market spans **crypto, fiat, and equities** — the
   reference-currency/asset model below must stay that general.
 
@@ -41,6 +41,33 @@ Notes carried forward:
 This is the key idea for the user's "pick any reference currency" feature. The
 reference denomination need NOT be a Sequentia asset — it can be USD, BTC, etc.
 
+**Settled since:** it must never BE one either. The shipped server states the
+reference unit as an abstract conversion factor
+(`api_units_per_reference_unit`), and the mode that named an on-chain token as
+the reference was removed. A reference unit that is a token stops being a
+denomination and becomes a privileged asset wearing one: every other rate turns
+into a quote against that token's fortunes. In Sequentia the Sequence token
+(ticker `SEQ`) has equal standing with every issued asset, so no asset is the
+unit of account. Read `nAsset: false` below as the only shape a future RFU may
+take; a unit that happens to equal one token today is expressed as that token's
+price in the feed's numeraire, which floats as soon as the price moves.
+
+Two things the prototype ran together have to be kept apart when reading the rest
+of this section, because the template below shows only the second:
+
+1. **The RFU row** is a pure unit: `nAsset: false`, a `decimals` setting, and a
+   constant. It names no asset and nothing on chain is pinned by it.
+2. **A constant-priced token** is an ordinary asset that happens to have a fixed
+   quote. It keeps its `nAsset`, and it is *not* the reference unit. The
+   prototype's USD row is this, not the RFU: an on-chain, cents-denominated USD
+   token whose oracle is `constant`, which is why it still carries an `nAsset`.
+
+The prototype blurred them by saying the `constant` oracle "pegs the RFU". It
+does not: it prices an asset. Only shape 1 defines the unit. In the shipped
+server shape 1 is `api_units_per_reference_unit` and shape 2 is a manual price
+(entered in reference units, conferring no privilege), and there is no key that
+names a token as the unit.
+
 - **RFU** — Reference Fee Unit: the chosen reference currency (e.g. 1 USD, 1 BTC).
 - **RFA** — Reference Fee Atom: the smallest unit fees are accounted in. `decimals`
   on the RFU sets how many RFA per RFU (e.g. RFU=USD with `decimals: 9` ⇒ 1 RFU = 1e9 RFA).
@@ -48,7 +75,9 @@ reference denomination need NOT be a Sequentia asset — it can be USD, BTC, etc
   the RFU itself), `decimals` (the asset's on-chain atoms per whole unit, default 8
   like 1 BTC = 1e8 sat), `fudge_factor` (default 1), and `oracles` (a map of
   provider → that provider's symbol for this asset; the special `constant` oracle
-  reports a fixed number, used to peg the RFU, e.g. USD = 1).
+  reports a fixed number). A `constant` oracle on a row with an `nAsset` prices
+  that token and nothing else; the RFU is the `nAsset: false` row, per the two
+  shapes above.
 
 `fudge_factor` is a per-asset fee-pricing lever:
 - `1.03` makes the asset ~3% **cheaper** to use for fees (node overvalues it →
@@ -71,6 +100,7 @@ Worked example from the prototype (RFU = USD, `decimals: 9`; USD token uses cent
 
 ```json
 {
+  "_RFU": { "nAsset": false, "decimals": 9, "oracles": { "constant": 1 } },
   "USD": { "nAsset": "00..0099", "decimals": 2, "fudge_factor": 1.03,
            "oracles": { "constant": 1 } },
   "BTC": { "nAsset": "00..0001", "decimals": 8,
@@ -80,11 +110,25 @@ Worked example from the prototype (RFU = USD, `decimals: 9`; USD token uses cent
 }
 ```
 
+The first row is the RFU (shape 1): `nAsset: false`, so it is a unit and not an
+asset. The `USD` row is shape 2, an on-chain USD token quoted at a constant; its
+`nAsset` is correct and does not make it the reference unit. The two coincide at
+1:1 here only because the prototype chose that constant, and the coincidence
+confers nothing: the row is scaled, `fudge_factor`-ed and admitted exactly like
+`BTC` or `AAPL`.
+
+Also stale in the prototype's favour: `min_sources` and `max_source_spread` are
+named elsewhere in this file as things the Python server already has. It does not
+have them. It reads ONE market source, so multi-source aggregation, the median,
+and the spread check are all still unbuilt, and a config setting either key is
+ignored rather than honoured.
+
 ## How this maps to our stack
 - The Python price server already has the admission thresholds the Gerbil one
-  lacked (`min_market_cap`, `min_volume_24h`, `max_source_spread`,
-  `max_change_factor`); fold in the **median aggregation**, **per-source refractory
-  caching**, and this **oracle registry** when wiring real feeds.
+  lacked (`min_market_cap`, `min_volume_24h`, `max_change_factor`,
+  `max_volatility`); fold in the **median aggregation**, **per-source refractory
+  caching**, `max_source_spread`, and this **oracle registry** when wiring real
+  feeds (it reads one source today, so the spread check has nothing to compare).
 - The **RFU/fudge/decimals** model is the basis for the user-chosen reference
   currency across the node GUI / explorer / SWK (value anything in the user's RFU
   via `getrates`-style data), and for per-asset fee incentives via `fudge_factor`.

@@ -222,6 +222,12 @@ struct Params {
     //! 0 = disabled (keep the legacy election); a positive H activates it from
     //! height H on every node at once. Set per chain; coordinate the value with
     //! all operators before it is reached (see doc/sequentia/04-proof-of-stake.md).
+    //! SENTINEL ASYMMETRY, mind the neighbour above: here 0 DISABLES the rule
+    //! (PosExpRaceActive tests pos_exprace_height > 0), whereas 0 in
+    //! pos_coinbase_leader_height means ACTIVE FROM GENESIS. A chain that wants
+    //! the exp-race from its first elected block therefore sets 1, not 0, which
+    //! is what the Sequentia mainnet chain does; the guard is also what keeps the
+    //! fork off by default on regtest and custom chains, so do not weaken it.
     int pos_exprace_height{0};
     //! SEQUENTIA PoS: block height from which the escaping-stall PARENT-CHAIN
     //! MEDIAN-TIME-PAST gap (CheckEscapingStallMtpGap, anchor.h) is enforced.

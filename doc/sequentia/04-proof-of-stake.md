@@ -199,16 +199,210 @@ identity grinding. (Without `-posvrf` the base layer falls back to a *public*
 deterministic ranking `H(seed‖pubkey)/weight`; the bundled chains run private
 VRF.)
 
+### Exponential-race sortition (the `pos_exprace_height` hard fork)
+
+Legacy leader election was neither exactly stake-proportional nor split-proof.
+The Sybil incentive did not come from the weighted slot arithmetic being
+slightly off: ranking by the weighted quantity `U · W / w` itself is not
+proportional either, but it *punishes* splitting rather than rewarding it. The
+incentive came from the election being decided by two *different* keys.
+
+**Which stakers reach the field was stake-weighted; which of them won was not.**
+With `U = beta / 2^256`, the legacy slot is `⌊ U · W / w ⌋`, so a staker reaches
+slot 0 only when `U < w/W`, and slot 1 only when `U < 2w/W`: the smaller the
+stake, the lower the `beta` it must draw before it may offer a block early at
+all. The producer's cadence floor then holds every block to at least one slot
+interval after its parent (`max(slot · interval, interval)`,
+`src/pos_producer.cpp`; consensus enforces only the slot gate itself), which
+collapses slots 0 and 1 into a single offering time, so the proposals a
+committee collects in one gossip window routinely include several candidates.
+Among them `BackedForRound` ranked by the **raw, unweighted** `beta`. Entry was
+priced in stake; the win was not.
+
+Conditional on reaching that field at all, a small identity's `beta` is
+therefore drawn from a lower band than a large one's, so it usually takes the
+unweighted tiebreak, and the smaller the identity the more decisively.
+Splitting sharpens exactly that. Take a 70% staker, whose slot is at most 1 on
+every draw, so it is always in the field. A 30% staker held as one identity
+reaches the field on 60% of rounds and beats the 70% staker on 70% of those:
+about **42% of blocks, 1.4x its stake share**. Split into 15 identities of 2%
+each, the group reaches the field *less* often, and by a wide margin: 15 draws
+against a threshold 15 times smaller give entry `1 - (1 - 0.04)^15`, about 46%
+of rounds against 60%, a 14-point loss. It buys that loss back and more on the
+win rate. Each candidate it does field carries a `beta` from a band 15 times
+narrower, so it beats the 70% staker on 98% of those rounds rather than 70%:
+about **45% of blocks, 1.5x**. In a field of one 80% staker and four 5%
+stakers, each 5% staker took about **8% of blocks, 1.6x**.
+
+Netted out, the *split* delta is about three percentage points of block share:
+14 points of field entry traded for a near-certain win whenever the group does
+appear. The deviation from proportionality underneath it is larger still, four
+times that delta, and both are defects. A stake-weighted election must not
+reward fragmenting stake at all, because the whole point of weighting by stake
+is that identities are free and weight is not; and 1.4x is not "approximately
+proportional". (The in-tree evidence for the size of that edge is
+`pos_vrf_exprace`'s own comment at `src/test/pos_tests.cpp:405`, which records
+the jump for a raw `beta`
+ordering key. The precise share figures above came from re-running that model
+with *both* halves taken from the legacy rule, which is not a configuration the
+tree carries, so read them as the scale of the effect rather than as measured
+constants.)
+
+The **exponential race** removes the edge exactly. With `U = beta / 2^256`
+uniform in `(0,1)`, a candidate is scored
+
+```
+score = -ln(U) · W / w      # PosVrfScoreExp, Q32 fixed-point; lowest wins
+slot  = ⌊ score ⌋           # PosVrfSlotExp, capped at POS_VRF_MAX_SLOT
+```
+
+`-ln(U)` is Exponential(1), so `-ln(U)/w` is exponentially distributed with rate
+`w`; the `W` factor only rescales every staker's score by the same constant,
+into the slot units the time-gate already uses, and cannot change who is lowest.
+Two standard facts about exponential races then do all the work:
+
+- the minimum of independent exponentials is itself exponential with the
+  **summed** rate, and the probability that staker `i` attains that minimum is
+  exactly `w_i / W`; and
+- `min(Exp(w/2), Exp(w/2))` is distributed *identically* to `Exp(w)`.
+
+The first makes the election exactly stake-proportional: a staker holding 8% of
+eligible weight produces the winning candidate 8% of the time, not approximately.
+The second makes it **split-proof**: a stake broken into any number of
+identities yields a best-of-N draw with exactly the same distribution as the
+undivided stake's single draw, so splitting is neither rewarded nor punished.
+Both statements are exact in real arithmetic. That exactness is a property of
+the distribution, not of the code: the Q32 fixed-point evaluation the node
+actually runs approximates `-ln(U)`, and an approximation can only be checked
+statistically, never shown exact by simulation. The in-tree check is
+`pos_vrf_exprace` (`src/test/pos_tests.cpp`), 30,000 election rounds driven
+through the real fixed-point functions: block shares track stake shares, and a
+30% stake wins the same share whole as it does split into 15 identities. What it
+actually asserts is looser than that summary, and worth reading before leaning
+on it: an 80% staker between 74% and 86%, a 5% staker between 3.5% and 6.5%, the
+30% stake between 27% and 33% both whole and split, and those last two within 3
+points of each other. So the run establishes that the fixed-point evaluation
+does not move the outcome by more than those margins, not that it tracks the
+ideal any more closely. `pos_vrf_exprace` is the evidence that runs on every
+build, and the only evidence this chapter rests on.
+
+The fork also closes the two-key gap that produced the legacy edge. Among
+candidates carrying the same Bitcoin anchor height - the committee's primary
+ordering key, untouched by the fork and covered in §7 - the candidate ordering
+key is now `PosVrfScoreExp`, and the time-gate slot is `⌊ PosVrfScoreExp ⌋`, so
+entering the field and winning it are decided by the *same* weighted quantity:
+the globally lowest-scoring candidate necessarily holds the lowest slot, so it
+offers earliest and wins the field it is in. The cadence floor may still merge
+two offering times, and it no longer matters - among equally-anchored
+candidates, merging cannot admit one that outranks the lowest score.
+
+In plain terms: give every staker a timer that runs at a speed proportional to
+its stake and fires at a random moment, and let the first to fire produce the
+block. Splitting a stake buys two timers that each run at half speed, and
+because an exponential race is memoryless, the earlier of two half-speed timers
+is distributed exactly like one full-speed timer. Two half-speed timers are
+worth exactly one full-speed timer, no more and no less, and since the timer
+that fires first is also the one the committee backs, a splitter has nothing
+left to harvest.
+
+The score is computed in **Q32 fixed point with no floating point**, so every
+node derives bit-identical values: `-ln(U)` is evaluated as
+`(256 - log2 beta) · ln2`, with the fractional part of `log2 beta` obtained by
+the classic bit-by-bit squaring of the mantissa (`src/pos.cpp`). Candidate
+ordering uses the fine Q32 score, not the truncated integer slot, so two
+candidates that share a slot still resolve deterministically. A zero `beta` or
+zero weight yields the sentinel `PosExpScoreInf`, `(POS_VRF_MAX_SLOT + 1) << 32`
+or 1,048,577 in slot units. That is above any score a staker of consequential
+size can draw, but it is not above every representable one: `-ln(U)` is at most
+`256 · ln 2 ≈ 177.4`, so a real score can exceed the sentinel only for a staker
+holding less than roughly 1/5,900 of eligible weight, and then only on a `beta`
+small enough that the draw never occurs in practice.
+
+**Cadence is unchanged.** The leader is still the lowest-scoring staker, still
+gated by `nTime ≥ parent.nTime + slot · posslotinterval`, and the slot interval
+is still 30 seconds. The two rules even agree closely on how often some staker
+draws slot 0, the case consensus lets produce with no wait at all beyond its
+parent: `1 - (1 - 1/n)^n` under the legacy rule against `1 - e^{-1}` under the
+exponential race. The two agree to within a percentage point for any committee
+of a realistic size and converge as `n` grows. The producer's cadence floor holds
+either winner to one slot interval after its parent in any case. What the fork
+changes is *which* staker wins, not how fast blocks arrive.
+
+**It is a height-gated, coordinated hard fork.** Because the two rules elect
+different blocks from the same draws, they cannot be mixed on one network: a node
+still on the legacy rule backs a different candidate, and rejects as premature
+(`bad-posvrf-early`) any certified block whose exponential-race slot opened
+earlier than the legacy slot would have. The switch is therefore gated on a single
+predicate, `PosExpRaceActive(params, height)`, true when
+`consensus.pos_exprace_height` is greater than zero and the block's own height
+is at or above it. Every election site consults that one predicate (the connect-time
+time-gate in `CheckPosStakeRules`, the producer's own slot computation, the
+block-template path, and the committee's candidate ordering), so a node flips all
+of them at exactly the same height and no node can be half-forked.
+
+A height of `0` means **disabled**, not active from genesis: `PosExpRaceActive`
+requires `pos_exprace_height > 0` before it compares heights (`src/pos.cpp`), so
+a chain configured with `0` runs the legacy rule at every height. Mind the
+asymmetry with the neighbouring `pos_coinbase_leader_height`, where `0` means
+*from genesis*. Custom chains read the height from `-posexpraceheight` and
+default to `0`, which is what keeps the fork off by default there; the bundled
+Sequentia chains pin it in `src/chainparams.cpp`. Custom is the case that
+matters for testing, because `elementsregtest` - the chain the functional test
+framework runs by default - is one, which is why `feature_pos_exprace.py` can
+drive the activation boundary at all. Plain `-chain=regtest` is **not**:
+`CreateChainParams` maps it to `CRegTestParams`, which never reads the flag, so
+`-chain=regtest -posexpraceheight=10` is silently ignored. There is nothing for
+it to fork in any case, because that chain runs no PoS election at all:
+`CRegTestParams` sets `g_con_pos = false` (`src/chainparams.cpp`).
+
+The **public testnet** activated at height **44300**, agreed between the
+operators on 2026-07-22 and shipped in release 23.3.7; testnet nodes had to be
+running that binary before the chain reached it. It is the one chain where this
+is a fork of *live* consensus: the testnet carries a legacy-election history
+behind the activation height, and block 44299 is still elected by the legacy
+rule. **Mainnet is set to `1`, so the exponential race governs every elected
+block from the first one on** (height 0 is genesis, which no election governs).
+It is `1` and not `0` precisely because `0` disables the rule here; mainnet is
+not live, so this is a launch parameter rather than a fork of live consensus,
+and the chain never has a legacy-election era to leave behind - it is carried as
+a launch-governance decision in
+[`06-tokenomics-and-launch.md`](06-tokenomics-and-launch.md). All three answers
+the code pins (mainnet 1, testnet 44300, regtest 0) are guarded by the
+`pos_exprace_activation_heights` regression test.
+
+Committee *membership* under the threshold-VRF regime still thresholds on the
+legacy slot
+(`PosVrfIsCommitteeMember`): this is a leader-election change, and the public
+fixed-size committee the testnet runs derives membership from the public schedule
+in any case (§4). Covered by `pos_vrf_exprace` (unit: a 30,000-round election
+simulation asserting both proportionality and split-neutrality against the real
+fixed-point functions) and `feature_pos_exprace.py` (functional: the activation
+boundary itself, with a peer validating every block across it).
+
+**Candidate ranking still prefers the freshest anchor.** The fork replaced only
+the *secondary* key of the committee's candidate ordering. `BackedForRound`
+still ranks proposals by Bitcoin anchor height first, freshest winning, and the
+exponential-race score decides only among candidates carrying the *identical*
+anchor height, where the legacy rule used the raw, unweighted `beta` (§7) - the
+second of the two keys that produced the Sybil edge above. No anchoring code
+is touched. The same-height fork-choice tiebreak of §6 is also unchanged and
+remains the top 64 bits of the leader's raw `beta`: that key must be computable
+from the block body without consulting the stake registry, so it deliberately
+does not use the weighted score.
+
 ### Time-gating
 
 A block records the leader's VRF proof in a coinbase `OP_RETURN` (tagged
 `SEQVRF`), covered by the merkle root and hence by the leader's signature. At
 connect time `CheckPosStakeRules` verifies the proof against the leader's
-challenge key over the slot seed, recomputes `slot`, and requires
+challenge key over the slot seed, recomputes `slot` under the sortition rule in
+force at the block's own height, and requires
 `block.nTime ≥ parent.nTime + slot · posslotinterval` (`bad-posvrf-early`). So
 the rank-0 leader may produce earliest; if it is absent, a higher-slot staker
 may step in after its slot opens. This is the whitepaper's local wall-clock
-round timeout with the lowest-VRF participant as proposer.
+round timeout with the lowest-ranked participant as proposer - lowest
+exponential-race score from `pos_exprace_height` onward, lowest legacy slot
+below it.
 
 ## 4. Committee certification & aggregation
 
@@ -383,7 +577,7 @@ finalized block) and `feature_pos_fork_choice.py`.
 The watcher is not the only release valve anymore. Two rival branches can both
 end up quorum-certified with canonical anchors (a committee legitimately
 re-certifies a replacement branch after a transient parent-chain flap, then the
-parent converges so both branches' anchors are canonical — the 2026-07-17
+parent converges so both branches' anchors are canonical - the 2026-07-17
 finality partition,
 [`incident-2026-07-17-finality-partition.md`](incident-2026-07-17-finality-partition.md)),
 a tie anchoring cannot break and that would pin the minority node forever.
@@ -394,7 +588,7 @@ watcher thread releases the finalized point only for a rival that carries a
 full-quorum certificate strictly above the local finalized height (never a
 same-height comparison), anchored at/below the currently uncontested parent
 height, after the local branch has received no certified extension for
-`-posreconcilepatience`. The local blocks are not invalidated — they become
+`-posreconcilepatience`. The local blocks are not invalidated - they become
 valid-but-inactive history. Forging the release evidence requires a committee
 quorum (a stake majority), so no new attacker class; the majority side never
 releases, so convergence is one-way. Relatedly, the escaping-stall relaxation
@@ -432,16 +626,21 @@ Freshness is delivered at two safe layers:
 1. **Leaders build on the freshest anchor.** `GetAnchorForNewBlock` anchors
    every new block to the freshest Bitcoin block, so the canonical tip tracks
    Bitcoin's tip within one block - by *extending* the chain, never reorging it.
+   The one exception, a producer-side back-off while the parent chain has live
+   competing branches at its tip, is in
+   [`03-bitcoin-anchoring.md`](03-bitcoin-anchoring.md) §5.
 
 2. **A committee signing preference.** When members face competing proposals at
    the same height, the autonomous gossip committee backs the one referencing the
-   **freshest Bitcoin anchor**, falling back to the lowest leader VRF among
-   equally-fresh proposals (`BackedForRound` orders candidates by anchor height
-   then VRF; `src/pos_producer.cpp`). This realises the paper's Principle 7
-   rule III (a weighting that favours the newest Bitcoin block) as a strict
-   ordering: a staler proposal can never out-rank a fresher one, so producers are
-   incentivised to anchor fresh - and in the common case where all proposals
-   already carry the freshest anchor it reduces to pure lowest-VRF election. It is
+   **freshest Bitcoin anchor**, falling back to the lowest leader election score
+   among equally-fresh proposals (`BackedForRound` orders candidates by anchor
+   height, then by the exponential-race score from `pos_exprace_height` onward
+   and the raw leader VRF below it; `src/pos_producer.cpp`). This realises the
+   paper's Principle 7 rule III (a weighting that favours the newest Bitcoin
+   block) as a strict ordering: a staler proposal can never out-rank a fresher
+   one, so producers are incentivised to anchor fresh - and in the common case
+   where all proposals already carry the freshest anchor it reduces to the pure
+   lowest-score election of §3. It is
    a **pre-certification** preference only: it selects which proposal the committee
    converges on, never reorders an already-certified block (the immediate-finality
    gate forbids that; §6), and it never lowers the 51-genuine-signature finality
@@ -522,7 +721,9 @@ Three paths lead to a live network:
 - **An autonomous gossip-and-sign committee** (`-posbls` + `-posproducer`): the
   full decentralization, fully implemented and the default on the bundled chains.
   Each node detects its own eligibility; the elected leader floods its unsigned
-  block, every node signs the lowest-VRF proposal and floods a non-interactive
+  block, every node signs the best-ranked proposal it has collected
+  (`BackedForRound`: freshest anchor, then lowest election score) and floods a
+  non-interactive
   BLS share, and the leader aggregates a quorum into the certificate - assembling
   a committee-certified block across separate hosts with no coordinator. This
   rests on BLS aggregation and the member-independent block hash (the certificate
