@@ -161,9 +161,12 @@ class PosParentOutageConnectTimeStallTest(BitcoinTestFramework):
         peer_args = self.consensus_args + [
             "-port=%d" % p2p_port(2), "-rpcport=%d" % rpc_port(2),
             "-posproducer=1", "-posproducerkey=%s" % self.peer_wif]
-        self.add_nodes(1, [founder_args], chain=[chain]); self.start_node(1)
-        self.add_nodes(1, [peer_args], chain=[chain]); self.start_node(2)
-        self.add_nodes(1, [self.victim_args(rpc_u, rpc_p)], chain=[chain]); self.start_node(3)
+        self.add_nodes(1, [founder_args], chain=[chain])
+        self.start_node(1)
+        self.add_nodes(1, [peer_args], chain=[chain])
+        self.start_node(2)
+        self.add_nodes(1, [self.victim_args(rpc_u, rpc_p)], chain=[chain])
+        self.start_node(3)
         # node2 stays connected to node1 all run: the producer only proposes
         # while it has peers, so isolating the victim must not isolate the founder.
         self.connect_nodes(1, 2)

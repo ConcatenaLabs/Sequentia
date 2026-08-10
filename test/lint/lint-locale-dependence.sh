@@ -46,6 +46,9 @@ KNOWN_VIOLATIONS=(
     "src/test/fuzz/locale.cpp"
     "src/test/fuzz/string.cpp"
     "src/test/util_tests.cpp"
+    # SEQUENTIA: a standalone micro-benchmark kept next to the notes it backs.
+    # It is not part of the build; it is compiled by hand per its header comment.
+    "doc/sequentia/bls-share-verify-bench.cpp"
 )
 
 REGEXP_IGNORE_EXTERNAL_DEPENDENCIES="^src/(crypto/ctaes/|leveldb/|secp256k1/|simplicity/|minisketch/|tinyformat.h|univalue/)"

@@ -176,7 +176,7 @@ class NodeRPC:
     def __init__(self, cfg):
         self.url = "http://%s:%d/" % (cfg.get("host", "127.0.0.1"), cfg["port"])
         if "cookie" in cfg:
-            with open(cfg["cookie"]) as f:
+            with open(cfg["cookie"], encoding="utf8") as f:
                 auth = f.read().strip()
         else:
             auth = "%s:%s" % (cfg["user"], cfg["password"])
@@ -378,7 +378,7 @@ class PriceServer:
                 self.cfg["ui"] = merged
             if self.config_path:
                 tmp = self.config_path + ".tmp"
-                with open(tmp, "w") as f:
+                with open(tmp, "w", encoding="utf8") as f:
                     json.dump(self.cfg, f, indent=2)
                 os.replace(tmp, self.config_path)
         log.info("config updated via UI and persisted")
@@ -591,12 +591,15 @@ class PriceServer:
         #    merged in afterwards exactly as the operator set them.
         smode = src.get("mode", "all")
         sassets = {str(x).upper() for x in src.get("assets", [])}
+
         def source_covers(tk, feed_key, asset_id):
             # An entry matches by registry ticker, feed key (alias) or asset id,
             # so "SEQ" covers the native whether the registry calls it TSEQ or SEQ.
             hit = tk in sassets or feed_key in sassets or asset_id.upper() in sassets
-            if smode == "only": return hit
-            if smode == "except": return not hit
+            if smode == "only":
+                return hit
+            if smode == "except":
+                return not hit
             return True
         manual = {}
         for k, v in self.cfg.get("manual_prices", {}).items():
@@ -1077,8 +1080,10 @@ def _fmt_age(ts):
     if not ts:
         return "never"
     d = int(time.time() - ts)
-    if d < 90: return "%d s ago" % d
-    if d < 5400: return "%d min ago" % (d // 60)
+    if d < 90:
+        return "%d s ago" % d
+    if d < 5400:
+        return "%d min ago" % (d // 60)
     return "%d h ago" % (d // 3600)
 
 
@@ -1342,6 +1347,7 @@ def _render_admin(srv, csrf_token, saved=False, error=""):
 
     # -- nodes tab (its own form) --
     nodes = _nodes_current(srv)
+
     def node_row(n):
         return "".join([
             "<tr><td><input name=node_name value=\"", esc(str(n.get("name", ""))), "\" placeholder=\"my node\"></td>",
@@ -1604,24 +1610,28 @@ def start_config_ui(price_server, host, port):
         def do_GET(self):
             path = urllib.parse.urlsplit(self.path).path
             if path == "/api/prices":
-                if self._public_gate(ui_cfg().get("public_api")): return
+                if self._public_gate(ui_cfg().get("public_api")):
+                    return
                 data = dict(srv.last_prices)
                 data["_meta"] = {"quote_currency": _src(srv)["quote_currency"],
                                  "updated": srv.last_poll_ts, "publisher": srv.source_name,
                                  "format": "sequentia"}
                 self._send(200, json.dumps(data, indent=2), "application/json")
             elif path in ("/api/whitelist", "/status"):  # /status: legacy alias
-                if self._public_gate(ui_cfg().get("public_api")): return
+                if self._public_gate(ui_cfg().get("public_api")):
+                    return
                 self._send(200, json.dumps(_whitelist_payload(srv), indent=2),
                            "application/json")
             elif path == "/":
                 if self._authed():
                     self._redirect("/admin")  # the desktop GUI opens the root URL
                     return
-                if self._public_gate(ui_cfg().get("public_status")): return
+                if self._public_gate(ui_cfg().get("public_status")):
+                    return
                 self._send(200, _render_public(srv))
             elif path == "/public":
-                if self._public_gate(ui_cfg().get("public_status")): return
+                if self._public_gate(ui_cfg().get("public_status")):
+                    return
                 self._send(200, _render_public(srv))
             elif path == "/admin":
                 if self._authed():
@@ -1631,7 +1641,8 @@ def start_config_ui(price_server, host, port):
                     self._send(200, _render_login())
             elif path == "/admin/config.json":
                 if not self._authed():
-                    self._redirect("/admin"); return
+                    self._redirect("/admin")
+                    return
                 self._send(200, json.dumps(srv.cfg, indent=2), "application/json",
                            headers={"Content-Disposition": "attachment; filename=price-server-config.json"})
             elif path == "/logout":
@@ -1647,14 +1658,16 @@ def start_config_ui(price_server, host, port):
             path = urllib.parse.urlsplit(self.path).path
             n = int(self.headers.get("Content-Length", 0) or 0)
             if n > 1_000_000:
-                self._send(413, "request too large"); return
+                self._send(413, "request too large")
+                return
             form = urllib.parse.parse_qs(self.rfile.read(n).decode())
             g = lambda k, d="": form.get(k, [d])[0]
 
             if path == "/login":
                 pw_hash = ui_cfg().get("password_hash")
                 if not pw_hash:
-                    self._redirect("/admin"); return
+                    self._redirect("/admin")
+                    return
                 time.sleep(0.3)  # flat cost per attempt; blunts online guessing
                 if _check_password(pw_hash, g("password")):
                     tok = secrets.token_urlsafe(32)
@@ -1668,13 +1681,16 @@ def start_config_ui(price_server, host, port):
 
             # Everything below changes the config: admin + same-origin + CSRF.
             if not self._authed():
-                self._send(403, "forbidden: not logged in"); return
+                self._send(403, "forbidden: not logged in")
+                return
             if not _same_origin(self):
                 log.warning("rejected %s: cross-origin or missing Origin/Referer", path)
-                self._send(403, "forbidden: cross-origin request"); return
+                self._send(403, "forbidden: cross-origin request")
+                return
             if not hmac.compare_digest(g("csrf_token"), csrf_token):
                 log.warning("rejected %s: bad or missing CSRF token", path)
-                self._send(403, "forbidden: invalid CSRF token"); return
+                self._send(403, "forbidden: invalid CSRF token")
+                return
 
             try:
                 if path == "/save":
@@ -1683,7 +1699,8 @@ def start_config_ui(price_server, host, port):
                     nodes = _nodes_parse(form)
                     if not nodes:
                         self._send(200, _render_admin(srv, csrf_token,
-                                                      error="No valid node rows (each needs host + port).")); return
+                                                      error="No valid node rows (each needs host + port)."))
+                        return
                     srv.apply_config(nodes=nodes)
                 elif path == "/access":
                     ui = {"public_status": bool(g("public_status")),
@@ -1701,19 +1718,24 @@ def start_config_ui(price_server, host, port):
                         cur_hash = ui_cfg().get("password_hash")
                         if cur_hash and not _check_password(cur_hash, g("cur_password")):
                             self._send(200, _render_admin(srv, csrf_token,
-                                                          error="Current password is wrong.")); return
+                                                          error="Current password is wrong."))
+                            return
                         if new_pw != g("new_password2"):
                             self._send(200, _render_admin(srv, csrf_token,
-                                                          error="The new passwords don't match.")); return
+                                                          error="The new passwords don't match."))
+                            return
                         if len(new_pw) < 8:
                             self._send(200, _render_admin(srv, csrf_token,
-                                                          error="Password too short — use at least 8 characters.")); return
+                                                          error="Password too short — use at least 8 characters."))
+                            return
                         ui["password_hash"] = _hash_password(new_pw)
                     srv.apply_config(ui=ui)
                 else:
-                    self._send(404, "not found"); return
+                    self._send(404, "not found")
+                    return
             except Exception as e:
-                self._send(400, "error: " + html.escape(str(e))); return
+                self._send(400, "error: " + html.escape(str(e)))
+                return
             self._redirect("/admin?saved=1")
 
         def log_message(self, *a):
@@ -1746,7 +1768,7 @@ def main():
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
 
-    with open(args.config) as f:
+    with open(args.config, encoding="utf8") as f:
         config = json.load(f)
 
     # Refuse a config asking for a denomination this server no longer produces,
@@ -1766,7 +1788,7 @@ def main():
             parser.error("the passwords don't match")
         config.setdefault("ui", {})["password_hash"] = _hash_password(pw)
         tmp = args.config + ".tmp"
-        with open(tmp, "w") as f:
+        with open(tmp, "w", encoding="utf8") as f:
             json.dump(config, f, indent=2)
         os.replace(tmp, args.config)
         print("Admin password set. Restart the price server to pick it up.")

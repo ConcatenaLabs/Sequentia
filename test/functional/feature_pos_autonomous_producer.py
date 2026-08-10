@@ -14,7 +14,7 @@ relayed and validated like any other.
 """
 
 from test_framework.test_framework import BitcoinTestFramework
-from test_framework.util import assert_equal, assert_greater_than
+from test_framework.util import assert_equal
 from test_framework.key import ECKey
 from test_framework.address import byte_to_base58
 

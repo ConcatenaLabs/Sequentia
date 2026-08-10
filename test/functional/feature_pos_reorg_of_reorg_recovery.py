@@ -96,8 +96,10 @@ class PosReorgOfReorgRecoveryTest(BitcoinTestFramework):
         self.validator_args = consensus + ["-port=%d" % p2p_port(2), "-rpcport=%d" % rpc_port(2)]
         founder_args = consensus + ["-port=%d" % p2p_port(1), "-rpcport=%d" % rpc_port(1),
                                     "-posproducer=1", "-posproducerkey=%s" % self.founder_wif]
-        self.add_nodes(1, [founder_args], chain=[chain]); self.start_node(1)
-        self.add_nodes(1, [self.validator_args], chain=[chain]); self.start_node(2)
+        self.add_nodes(1, [founder_args], chain=[chain])
+        self.start_node(1)
+        self.add_nodes(1, [self.validator_args], chain=[chain])
+        self.start_node(2)
         self.connect_nodes(1, 2)
         self.nodes[0].createwallet(wallet_name="w", descriptors=True)
 

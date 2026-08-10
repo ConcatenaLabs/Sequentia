@@ -55,9 +55,10 @@ from decimal import Decimal
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, os.path.join(REPO_ROOT, "test", "functional"))
-import importlib.util
+import importlib.util  # noqa: E402  (must follow the sys.path insert above)
 _spec = importlib.util.spec_from_file_location("rlt", os.path.join(HERE, "run-local-testnet.py"))
-rlt = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(rlt)
+rlt = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(rlt)
 from test_framework.messages import COutPoint, CTransaction, CTxIn, CTxOut, CTxOutAsset  # noqa: E402
 from test_framework.script import CScript                                                # noqa: E402
 
@@ -102,8 +103,10 @@ def to_atoms(v):
 def asset_bytes_for(ec, d, port, asset_hex):
     """Policy-asset serialization byte order, via a decode round-trip."""
     for cand in (bytes.fromhex(asset_hex), bytes.fromhex(asset_hex)[::-1]):
-        a = CTxOutAsset(); a.setToAsset(cand)
-        tx = CTransaction(); tx.nVersion = 2
+        a = CTxOutAsset()
+        a.setToAsset(cand)
+        tx = CTransaction()
+        tx.nVersion = 2
         tx.vout = [CTxOut(COIN, CScript([0x51]), nAsset=a)]
         dec, _ = jcli(ec, d, port, ["decoderawtransaction", tx.serialize().hex()])
         if dec and dec["vout"][0].get("asset") == asset_hex:
@@ -195,7 +198,8 @@ def main():
         if not os.path.exists(b):
             sys.exit("missing binary: %s" % b)
     if args.stop:
-        stop_all(args.basedir, elementsd); return
+        stop_all(args.basedir, elementsd)
+        return
 
     chain = args.chain
     is_test = (chain == "test")
@@ -229,6 +233,7 @@ def main():
 
     # ---- Parent ("Bitcoin") --------------------------------------------------
     parent_miner = None     # (datadir, rpcport, addr) for local; None for external
+
     def advance_parent(blocks):
         if parent_miner:
             pdir, prpc, addr = parent_miner
@@ -252,7 +257,8 @@ def main():
             "fallbackfee=0.0001",
         ])
         print("Starting local parent (throwaway Bitcoin stand-in)...")
-        start_daemon(elementsd, pdir); wait_rpc(ec, pdir, p_rpc, "parent")
+        start_daemon(elementsd, pdir)
+        wait_rpc(ec, pdir, p_rpc, "parent")
         cli(ec, pdir, p_rpc, ["-named", "createwallet", "wallet_name=w", "descriptors=true"], args.rpcuser, args.rpcpassword)
         addr, _ = cli(ec, pdir, p_rpc, ["getnewaddress"], args.rpcuser, args.rpcpassword)
         cli(ec, pdir, p_rpc, ["generatetoaddress", "25", addr], args.rpcuser, args.rpcpassword, timeout=120)
@@ -284,7 +290,7 @@ def main():
     members = [make_staker() for _ in range(N - 1)]
     json.dump({"chain": chain, "founder": {"wif": founder_wif, "pub": founder_pub},
                "members": [{"wif": w, "pub": p} for w, p in members]},
-              open(os.path.join(base, "committee_keys.json"), "w"), indent=2)
+              open(os.path.join(base, "committee_keys.json"), "w", encoding="utf8"), indent=2)
 
     # Member staking-output CSV must clear the unbonding minimum (unbonding*slot s).
     min_csv = max(1, unbonding * slot)
@@ -325,11 +331,15 @@ def main():
 
     def p2p(i): return pb + i
     hubs = list(range(min(4, N)))
+
     def peers_for(i):
         s = set()
-        if N > 1: s.add((i + 1) % N); s.add((i - 1) % N)
+        if N > 1:
+            s.add((i + 1) % N)
+            s.add((i - 1) % N)
         s.update(h for h in hubs if h != i)
-        if i not in hubs and hubs: s.add(hubs[i % len(hubs)])
+        if i not in hubs and hubs:
+            s.add(hubs[i % len(hubs)])
         return sorted(s)
 
     def node_conf(i, wif):
@@ -348,9 +358,10 @@ def main():
     # ---- Phase 1: start the founder ALONE ------------------------------------
     print("=== Phase 1: founder genesis (node000), chain=%s ===" % chain)
     fdir = node_conf(0, founder_wif)
-    start_daemon(elementsd, fdir); wait_rpc(ec, fdir, rb, "founder")
+    start_daemon(elementsd, fdir)
+    wait_rpc(ec, fdir, rb, "founder")
     pids["node000"] = {"datadir": fdir, "rpcport": rb, "pid": read_pid(fdir, subdir)}
-    json.dump(pids, open(os.path.join(base, "pids.json"), "w"))
+    json.dump(pids, open(os.path.join(base, "pids.json"), "w", encoding="utf8"))
     reg, _ = jcli(ec, fdir, rb, ["getstakerinfo"])
     print("  founder registered from genesis stake: %s" % (founder_pub in (reg or {})))
     print("  committee size N=%d, quorum=%d, slot=%ds, stake=%s SEQ" % (N, N // 2 + 1, slot, stake_seq))
@@ -362,12 +373,15 @@ def main():
     else:
         fund = find_optrue_output(ec, fdir, rb)            # OP_TRUE initialfreecoins, no signing
     asset_raw = asset_bytes_for(ec, fdir, rb, fund["asset"])
-    asset = CTxOutAsset(); asset.setToAsset(asset_raw)
-    in_atoms = to_atoms(fund["value"]); fee_atoms = to_atoms("0.001")
+    asset = CTxOutAsset()
+    asset.setToAsset(asset_raw)
+    in_atoms = to_atoms(fund["value"])
+    fee_atoms = to_atoms("0.001")
     change = in_atoms - (N - 1) * stake_atoms - fee_atoms
     if change < 0:
         stop_all(base, elementsd)
         sys.exit("founder funding output (%s SEQ) too small for %d x %s SEQ" % (fund["value"], N - 1, stake_seq))
+
     def bls_args(wif):
         # Committee BLS registration for a public-committee re-genesis: the
         # staker's BLS pubkey + PoP (deterministic from its key), so its staking
@@ -376,7 +390,8 @@ def main():
             return []
         reg, _ = jcli(ec, fdir, rb, ["getblsregistration", wif])
         return [reg["blspubkey"], reg["pop"]]
-    tx = CTransaction(); tx.nVersion = 2
+    tx = CTransaction()
+    tx.nVersion = 2
     tx.vin = [CTxIn(COutPoint(int(fund["txid"], 16), fund["vout"]))]
     for wif, pub in members:
         ss, _ = jcli(ec, fdir, rb, ["getstakescript", pub, "null", str(args.csv_seconds)] + bls_args(wif))
@@ -418,16 +433,19 @@ def main():
     while time.time() < deadline:
         out, rc = cli(ec, fdir, rb, ["generateposblock", founder_wif, "[]"], check=False, timeout=60)
         if rc == 0:
-            b1 = json.loads(out); break
+            b1 = json.loads(out)
+            break
         time.sleep(5 if parent_miner else 20)
     if not b1:
-        stop_all(base, elementsd); sys.exit("could not produce the escaping-stall block (parent reachable / advanced?)")
+        stop_all(base, elementsd)
+        sys.exit("could not produce the escaping-stall block (parent reachable / advanced?)")
     print("  block 1: height=%d countersignatures=%d (sub-quorum, founder only)" %
           (b1["height"], b1["countersignatures"]))
     reg, _ = jcli(ec, fdir, rb, ["getstakerinfo"])
     missing = [p for _, p in members if p not in (reg or {})]
     if missing:
-        stop_all(base, elementsd); sys.exit("stakers not registered after block 1: %d missing" % len(missing))
+        stop_all(base, elementsd)
+        sys.exit("stakers not registered after block 1: %d missing" % len(missing))
     print("  registry now holds %d stakers (founder + %d). Quorum is reachable." % (len(reg), N - 1))
 
     # ---- Phase 4: bring the committee online -> autonomous full blocks -------
@@ -436,9 +454,10 @@ def main():
         d = node_conf(i, members[i - 1][0])
         start_daemon(elementsd, d)
         pids["node%03d" % i] = {"datadir": d, "rpcport": rb + i, "pid": read_pid(d, subdir)}
-        if i % 10 == 0: print("  started %d/%d" % (i, N - 1))
+        if i % 10 == 0:
+            print("  started %d/%d" % (i, N - 1))
         time.sleep(0.25)   # stagger init so ~100 daemons don't spike memory/CPU at once
-    json.dump(pids, open(os.path.join(base, "pids.json"), "w"))
+    json.dump(pids, open(os.path.join(base, "pids.json"), "w", encoding="utf8"))
     for i in range(1, N):
         wait_rpc(ec, pids["node%03d" % i]["datadir"], rb + i, "node%d" % i)
     print("  all %d nodes online; watching for full-committee certification (height >= 2)\n" % N)
@@ -447,7 +466,8 @@ def main():
     try:
         last = -1
         while True:
-            if parent_miner: advance_parent(1)
+            if parent_miner:
+                advance_parent(1)
             time.sleep(max(3, slot))
             hs = []
             for i in range(N):
@@ -462,7 +482,8 @@ def main():
                        (a or {}).get("anchorstatus"), (a or {}).get("anchorheight")))
                 last = hi
             if stop_at and time.time() >= stop_at:
-                print("\n--run-seconds elapsed; stopping."); break
+                print("\n--run-seconds elapsed; stopping.")
+                break
     except KeyboardInterrupt:
         print("\nCtrl-C — stopping...")
     finally:
@@ -470,13 +491,17 @@ def main():
 
 
 def _hash_fork(ec, pids, N, rb, common):
-    if common < 1: return False
+    if common < 1:
+        return False
     ref = None
     for i in range(N):
         out, rc = cli(ec, pids["node%03d" % i]["datadir"], rb + i, ["getblockhash", str(common)], check=False, timeout=15)
-        if rc != 0: continue
-        if ref is None: ref = out
-        elif out != ref: return True
+        if rc != 0:
+            continue
+        if ref is None:
+            ref = out
+        elif out != ref:
+            return True
     return False
 
 

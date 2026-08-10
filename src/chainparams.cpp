@@ -19,6 +19,8 @@
 
 #include <assert.h>
 
+#include <iostream>
+
 #include <boost/algorithm/string/classification.hpp>
 #include <boost/algorithm/string/split.hpp>
 static CScript StrHexToScriptWithDefault(std::string strScript, const CScript defaultScript)
@@ -559,8 +561,8 @@ public:
         // SEQUENTIA genesis (PLACEHOLDER founder; recomputed at launch).
         const uint256 expected_genesis = uint256S("0x35770fd00f7a4ce6cc550b3682ca9cd5b07e2cff4f0478ac0ecaf29de5638660");
         if (consensus.hashGenesisBlock != expected_genesis) {
-            fprintf(stderr, "sequentia genesis hash mismatch: computed %s, expected %s\n",
-                    consensus.hashGenesisBlock.GetHex().c_str(), expected_genesis.GetHex().c_str());
+            tfm::format(std::cerr, "sequentia genesis hash mismatch: computed %s, expected %s\n",
+                        consensus.hashGenesisBlock.GetHex(), expected_genesis.GetHex());
         }
         assert(consensus.hashGenesisBlock == expected_genesis);
         assert(genesis.hashMerkleRoot == uint256S("0xf59bd2bf622fe907c93742913999bd7da121373bfcd8d5c8d354f7bebd15d91c"));
@@ -952,8 +954,8 @@ public:
         // will not join the old chain.
         const uint256 expected_genesis = uint256S("0xddd11d54c87a2bd94400fd31ce05d8e1110bb4b78e7103f738342086fc4ea92e");
         if (consensus.hashGenesisBlock != expected_genesis) {
-            fprintf(stderr, "testnet genesis hash mismatch: computed %s, expected %s\n",
-                    consensus.hashGenesisBlock.GetHex().c_str(), expected_genesis.GetHex().c_str());
+            tfm::format(std::cerr, "testnet genesis hash mismatch: computed %s, expected %s\n",
+                        consensus.hashGenesisBlock.GetHex(), expected_genesis.GetHex());
         }
         assert(consensus.hashGenesisBlock == expected_genesis);
         assert(genesis.hashMerkleRoot == uint256S("0x94ccd459b890e0eed4f26e0a500b7c2adafef231742ac88531c204597502fbf2"));

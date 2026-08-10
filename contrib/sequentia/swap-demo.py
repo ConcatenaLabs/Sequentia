@@ -77,11 +77,14 @@ def w(base, name):
 
 
 def asset_out(asset_hex):
-    a = CTxOutAsset(); a.setToAsset(bytes.fromhex(asset_hex)[::-1]); return a
+    a = CTxOutAsset()
+    a.setToAsset(bytes.fromhex(asset_hex)[::-1])
+    return a
 
 
 def newkey():
-    k = ECKey(); k.generate(compressed=True)
+    k = ECKey()
+    k.generate(compressed=True)
     return k, k.get_pubkey().get_bytes()
 
 
@@ -112,7 +115,8 @@ def spend_htlc(script, txid, vout, in_atoms, asset_hex, dest_spk, fee_atoms,
                key, secret=None, locktime=None):
     """Build+sign a spend of the HTLC. Redeem path if `secret` given, else refund
     path (needs locktime, sets nLockTime + a non-final sequence)."""
-    tx = CTransaction(); tx.nVersion = 2
+    tx = CTransaction()
+    tx.nVersion = 2
     seq = 0xffffffff if secret is not None else 0xfffffffe
     tx.vin = [CTxIn(COutPoint(int(txid, 16), vout), nSequence=seq)]
     if secret is None:
@@ -134,7 +138,8 @@ def main():
     tmp = "/tmp/seq-swap-demo"
     subprocess.run(["rm", "-rf", tmp])
     btc_dir, seq_dir = os.path.join(tmp, "btc"), os.path.join(tmp, "seq")
-    os.makedirs(btc_dir); os.makedirs(seq_dir)
+    os.makedirs(btc_dir)
+    os.makedirs(seq_dir)
     BTC = cli_base("btcdemo", btc_dir, 19990)
     SEQ = cli_base("seqdemo", seq_dir, 19991)
     procs = []
@@ -149,7 +154,8 @@ def main():
         for base, label in ((BTC, "BTC"), (SEQ, "SEQ")):
             for _ in range(60):
                 try:
-                    cli(base, "getblockcount"); break
+                    cli(base, "getblockcount")
+                    break
                 except RuntimeError:
                     time.sleep(1)
             cli(base, "-named", "createwallet", "wallet_name=w", "descriptors=true")
@@ -184,7 +190,8 @@ def main():
         # --- Execute ---
         alice_dest = bytes.fromhex(cli(SEQ, "validateaddress", cli(w(SEQ, "w"), "getnewaddress"))["scriptPubKey"])
         seq_redeem = spend_htlc(seq_s, st, sv, samt, sas, alice_dest, 100000, alice_k, secret=secret)
-        rt = cli(SEQ, "sendrawtransaction", seq_redeem); mine(SEQ)
+        rt = cli(SEQ, "sendrawtransaction", seq_redeem)
+        mine(SEQ)
         print("3. Alice REDEEMS the asset by revealing the secret  (tx %s)." % rt[:12])
 
         asm = cli(SEQ, "getrawtransaction", rt, True)["vin"][0]["scriptSig"]["asm"]
@@ -193,7 +200,8 @@ def main():
 
         bob_dest = bytes.fromhex(cli(BTC, "validateaddress", cli(w(BTC, "w"), "getnewaddress"))["scriptPubKey"])
         btc_redeem = spend_htlc(btc_s, bt, bv, bamt, btc_asset, bob_dest, 100000, bob_k, secret=secret)
-        rt2 = cli(BTC, "sendrawtransaction", btc_redeem); mine(BTC)
+        rt2 = cli(BTC, "sendrawtransaction", btc_redeem)
+        mine(BTC)
         print("5. Bob REDEEMS the 10 BTC with that secret  (tx %s).\n" % rt2[:12])
         print("   => SWAP COMPLETE, atomically: Alice has the asset, Bob has the BTC.\n")
 
@@ -202,16 +210,19 @@ def main():
         rk, rpub = newkey()
         lt = cli(SEQ, "getblockcount") + 5
         rs = htlc_script(hashlib.sha256(b"unused").digest(), rpub, lt, rpub)
-        ft, fv, famt, fas = lock_htlc(SEQ, "w", rs, "500", assetlabel=asset); mine(SEQ)
+        ft, fv, famt, fas = lock_htlc(SEQ, "w", rs, "500", assetlabel=asset)
+        mine(SEQ)
         dest = bytes.fromhex(cli(SEQ, "validateaddress", cli(w(SEQ, "w"), "getnewaddress"))["scriptPubKey"])
         early = spend_htlc(rs, ft, fv, famt, fas, dest, 100000, rk, locktime=lt)
         try:
-            cli(SEQ, "sendrawtransaction", early); print("   ! early refund accepted (unexpected)")
+            cli(SEQ, "sendrawtransaction", early)
+            print("   ! early refund accepted (unexpected)")
         except RuntimeError as e:
             print("   - refund BEFORE timeout correctly rejected (%s)." % str(e).split(":")[-1].strip()[:32])
         mine(SEQ, 6)
         late = spend_htlc(rs, ft, fv, famt, fas, dest, 100000, rk, locktime=cli(SEQ, "getblockcount"))
-        cli(SEQ, "sendrawtransaction", late); mine(SEQ)
+        cli(SEQ, "sendrawtransaction", late)
+        mine(SEQ)
         print("   - refund AFTER timeout accepted: the locker reclaims their funds.\n")
         print("Done. (For the 'real-time' anchoring property -- BTC reorg reverts the")
         print("SEQ leg with it -- run: test/functional/feature_anchor_swap_consistency.py)")

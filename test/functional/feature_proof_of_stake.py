@@ -82,7 +82,6 @@ class ProofOfStakeTest(BitcoinTestFramework):
         # --- Produce a block as whichever staker is the elected rank-0 leader ---
         leader_pub = sched0['schedule'][0]['pubkey']
         leader_wif = self.big_wif if leader_pub == self.big_pub else self.small_wif
-        non_leader_wif = self.small_wif if leader_pub == self.big_pub else self.big_wif
 
         res = n0.generateposblock(leader_wif)
         assert_equal(res['rank'], 0)

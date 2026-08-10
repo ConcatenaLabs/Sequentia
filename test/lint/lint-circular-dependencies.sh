@@ -56,6 +56,24 @@ EXPECTED_CIRCULAR_DEPENDENCIES=(
     # being denominated in different assets when g_con_any_asset_fees is
     # enabled  
     "exchangerates -> policy/policy -> policy/feerate -> exchangerates"
+    # SEQUENTIA: the Bitcoin anchor and the proof-of-stake round machinery are
+    # consensus state, so validation/chainparams read them and they read back.
+    "anchor -> validation -> anchor"
+    "anchor -> validation -> chainparams -> anchor"
+    "policy/policy -> pos -> policy/policy"
+    "chain -> validation -> pos -> chain"
+    "chainparams -> pos -> script/standard -> chainparams"
+    "anchor -> chain -> node/context -> net_processing -> node/blockstorage -> anchor"
+    # SEQUENTIA: the block producer lives in NodeContext, which every one of
+    # these already reaches through chain.
+    "anchor -> chain -> node/context -> pos_producer -> anchor"
+    "block_proof -> chain -> node/context -> pos_producer -> block_proof"
+    "chain -> node/context -> pos_producer -> node/miner -> chain"
+    "dynafed -> node/context -> pos_producer -> node/miner -> dynafed"
+    "anchor -> chain -> node/context -> pos_producer -> node/miner -> anchor"
+    "chain -> node/context -> pos_producer -> script/sign -> pegins -> chain"
+    "dynafed -> node/context -> pos_producer -> script/sign -> pegins -> dynafed"
+    "block_proof -> chain -> node/context -> pos_producer -> script/sign -> pegins -> block_proof"
 )
 
 EXIT_CODE=0

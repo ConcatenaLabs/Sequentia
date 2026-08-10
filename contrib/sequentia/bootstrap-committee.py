@@ -192,7 +192,8 @@ def main():
     # nothing depends on a rescan finding the genesis output.
     fund = find_funding_output(cli)
     asset_raw = asset_bytes_for(cli, fund["asset"], CScript([0x51]))
-    asset = CTxOutAsset(); asset.setToAsset(asset_raw)
+    asset = CTxOutAsset()
+    asset.setToAsset(asset_raw)
 
     in_atoms = to_atoms(fund["value"])
     fee_atoms = to_atoms(args.fee)

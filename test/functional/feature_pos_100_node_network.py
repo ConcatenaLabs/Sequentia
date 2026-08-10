@@ -45,8 +45,8 @@ assert 1 <= HOSTS <= COMMITTEE
 # runs in its own process, so this only affects this run; the port math stays
 # inside the reserved range (p2p 11000-16000, rpc 16000-21000) for counts well
 # under 5000.
-import test_framework.util as _util
-import test_framework.test_framework as _tf
+import test_framework.util as _util  # noqa: E402  (HOSTS, computed above, sizes the cap)
+import test_framework.test_framework as _tf  # noqa: E402
 _util.MAX_NODES = max(_util.MAX_NODES, HOSTS + 1)
 _tf.MAX_NODES = _util.MAX_NODES
 

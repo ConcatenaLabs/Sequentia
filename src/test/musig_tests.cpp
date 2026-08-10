@@ -6,6 +6,7 @@
 
 #include <key.h>
 #include <test/util/setup_common.h>
+#include <util/string.h>
 
 #include <boost/test/unit_test.hpp>
 
@@ -143,7 +144,7 @@ BOOST_AUTO_TEST_CASE(musig_distributed_rounds)
     std::vector<std::string> ids;
     std::vector<std::vector<unsigned char>> pubnonces;
     for (size_t i = 0; i < n; ++i) {
-        std::string id = "sess-" + std::to_string(i);
+        std::string id = "sess-" + ToString(i);
         std::string err;
         auto pn = MuSigSessionNonce(id, keys[i], pubs, msg, err);
         BOOST_REQUIRE_MESSAGE(pn.has_value(), err);
@@ -186,7 +187,7 @@ BOOST_AUTO_TEST_CASE(musig_session_safety)
     // Round 1 for all members.
     std::vector<std::vector<unsigned char>> pubnonces;
     for (size_t i = 0; i < 3; ++i) {
-        auto pn = MuSigSessionNonce("s" + std::to_string(i), keys[i], pubs, msg, err);
+        auto pn = MuSigSessionNonce("s" + ToString(i), keys[i], pubs, msg, err);
         BOOST_REQUIRE(pn.has_value());
         pubnonces.push_back(*pn);
     }
@@ -235,7 +236,7 @@ BOOST_AUTO_TEST_CASE(musig_rejects_malformed_inputs)
     // Run a proper round 1 for everyone.
     std::vector<std::vector<unsigned char>> pubnonces;
     for (size_t i = 0; i < 3; ++i) {
-        auto pn = MuSigSessionNonce("m" + std::to_string(i), keys[i], pubs, msg, err);
+        auto pn = MuSigSessionNonce("m" + ToString(i), keys[i], pubs, msg, err);
         BOOST_REQUIRE(pn.has_value());
         pubnonces.push_back(*pn);
     }
@@ -250,7 +251,7 @@ BOOST_AUTO_TEST_CASE(musig_rejects_malformed_inputs)
 
     std::vector<std::vector<unsigned char>> partials;
     for (size_t i = 0; i < 3; ++i) {
-        auto ps = MuSigSessionPartialSign("m" + std::to_string(i), keys[i], pubs, pubnonces, msg, err);
+        auto ps = MuSigSessionPartialSign("m" + ToString(i), keys[i], pubs, pubnonces, msg, err);
         BOOST_REQUIRE_MESSAGE(ps.has_value(), err);
         partials.push_back(*ps);
     }
