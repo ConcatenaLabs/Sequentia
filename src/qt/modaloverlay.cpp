@@ -11,6 +11,8 @@
 #include <QEasingCurve>
 #include <QPropertyAnimation>
 #include <QResizeEvent>
+#include <QShowEvent>
+#include <QTimer>
 
 ModalOverlay::ModalOverlay(bool enable_wallet, QWidget *parent) :
 QWidget(parent),
@@ -21,16 +23,23 @@ layerIsVisible(false),
 userClosed(false)
 {
     ui->setupUi(this);
-    // A wrapping QLabel knows how tall it must be at a given width, but the
-    // layout only asks when the size policy says to — otherwise it allocates
-    // the plain size hint and the last line is cut off mid-stroke. Fixing the
-    // panel width (see modaloverlay.ui) was not enough on its own.
+    // A wrapping QLabel is given the height of its plain size hint, which is
+    // not the height its text actually occupies once wrapped — so the last line
+    // was cut off mid-stroke. Asking the layout to honour heightForWidth is not
+    // enough here (tried, still clipped), so once the real width is known the
+    // height the text needs is set as a floor. See FitInfoText().
     for (QLabel* l : {ui->infoText, ui->infoTextStrong}) {
         QSizePolicy sp = l->sizePolicy();
         sp.setHeightForWidth(true);
-        sp.setVerticalPolicy(QSizePolicy::MinimumExpanding);
+        // Exactly the height the text needs — not more. An expanding policy here
+        // makes the paragraphs swallow the spare space and leaves the panel full
+        // of gaps.
+        sp.setVerticalPolicy(QSizePolicy::Minimum);
         l->setSizePolicy(sp);
     }
+    // "Number of blocks left" carries a sentence while headers are still coming
+    // in ("Unknown. Syncing headers…"), which ran off the panel's fixed width.
+    ui->numberOfBlocksLeft->setWordWrap(true);
     connect(ui->closeButton, &QPushButton::clicked, this, &ModalOverlay::closeClicked);
     if (parent) {
         parent->installEventFilter(this);
@@ -222,4 +231,38 @@ void ModalOverlay::closeClicked()
 {
     showHide(true);
     userClosed = true;
+}
+
+void ModalOverlay::FitInfoText()
+{
+    // Give each warning paragraph a floor equal to the height its own text
+    // occupies at the width it was actually given. Without this the paragraphs
+    // render clipped: the words wrap, but the space allotted is one line short.
+    // Measure only once the label holds its real share of the panel. Called
+    // while the layout is still settling it reports a width of ~100px, where the
+    // text of course needs a great deal of height — and because these are rich
+    // text, the document keeps that stale layout, so every later measurement
+    // repeats the wrong answer and the panel stays stretched.
+    const int panel = ui->contentWidget->width();
+    for (QLabel* l : {ui->infoText, ui->infoTextStrong}) {
+        if (l->isHidden()) continue;
+        const int w = l->width();
+        if (w <= 0 || (panel > 0 && w * 2 < panel)) continue;
+        const int needed = l->heightForWidth(w);
+        if (needed > 0 && needed != l->minimumHeight()) l->setMinimumHeight(needed);
+    }
+}
+
+void ModalOverlay::showEvent(QShowEvent* ev)
+{
+    QWidget::showEvent(ev);
+    // The widths are only real once the panel has been laid out, so measure on
+    // the next turn of the event loop rather than now.
+    QTimer::singleShot(0, this, [this] { FitInfoText(); });
+}
+
+void ModalOverlay::resizeEvent(QResizeEvent* ev)
+{
+    QWidget::resizeEvent(ev);
+    FitInfoText();
 }
