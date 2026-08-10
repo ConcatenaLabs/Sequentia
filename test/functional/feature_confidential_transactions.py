@@ -110,7 +110,7 @@ class CTTest (BitcoinTestFramework):
         self.generate(self.nodes[0], 1)
 
         tx_hex = self.nodes[0].createrawtransaction([], [{self.nodes[1].getnewaddress(): 1000}])
-        tx_hex = self.nodes[0].fundrawtransaction(tx_hex)['hex']
+        tx_hex = self.nodes[0].fundrawtransaction(tx_hex, {"fee_asset": "bitcoin"})['hex']
         tx_hex = self.nodes[0].blindrawtransaction(tx_hex)
         # coming from initial free coins: no need to sign
         assert_equal(self.nodes[0].testmempoolaccept([tx_hex])[0]['allowed'], True) # tx is ok
@@ -129,7 +129,7 @@ class CTTest (BitcoinTestFramework):
         self.generate(self.nodes[0], 1)
 
         tx_hex = self.nodes[0].createrawtransaction([], [{self.nodes[1].getnewaddress(): 1000}])
-        tx_hex = self.nodes[0].fundrawtransaction(tx_hex)['hex']
+        tx_hex = self.nodes[0].fundrawtransaction(tx_hex, {"fee_asset": "bitcoin"})['hex']
         tx_hex = self.nodes[0].blindrawtransaction(tx_hex)
         # coming from initial free coins: no need to sign
         assert_equal(self.nodes[0].testmempoolaccept([tx_hex])[0]['allowed'], True) # tx is ok
@@ -150,7 +150,7 @@ class CTTest (BitcoinTestFramework):
         # 1. Produce a transaction. This is coming out of initialfreecoins so
         #    no signatures are needed, which slightly simplifies the test
         unfunded_tx = self.nodes[0].createrawtransaction([], [{self.nodes[1].getnewaddress(): 1000}])
-        unblinded_tx = self.nodes[0].fundrawtransaction(unfunded_tx)['hex']
+        unblinded_tx = self.nodes[0].fundrawtransaction(unfunded_tx, {"fee_asset": "bitcoin"})['hex']
         unsigned_tx = self.nodes[0].blindrawtransaction(unblinded_tx)
         assert_equal(self.nodes[0].testmempoolaccept([unsigned_tx])[0]['allowed'], True) # tx is ok before we malleate it
         tx = tx_from_hex(unsigned_tx)
@@ -245,7 +245,8 @@ class CTTest (BitcoinTestFramework):
         address = self.nodes[2].getnewaddress()
         unconfidential_address = self.nodes[2].validateaddress(address)["unconfidential"]
         value0 = 3
-        self.nodes[0].sendtoaddress(unconfidential_address, value0)
+        self.nodes[0].sendtoaddress(
+            address=unconfidential_address, amount=value0, fee_asset_label="bitcoin")
         self.generate(self.nodes[0], 101)
         self.sync_all()
 
@@ -260,7 +261,8 @@ class CTTest (BitcoinTestFramework):
         address2 = self.nodes[2].getnewaddress()
         unconfidential_address2 = self.nodes[2].validateaddress(address2)["unconfidential"]
         value1 = 5
-        confidential_tx_id = self.nodes[0].sendtoaddress(address2, value1)
+        confidential_tx_id = self.nodes[0].sendtoaddress(
+            address=address2, amount=value1, fee_asset_label="bitcoin")
         self.generate(self.nodes[0], 101)
         self.sync_all()
 
@@ -401,8 +403,9 @@ class CTTest (BitcoinTestFramework):
         # We add two to-blind outputs, fundraw adds an already-blinded change output
         # If we only add one, the newly blinded will be 0-blinded because input = -output
         raw = self.nodes[0].createrawtransaction([], [{addr:Decimal('1.1')}, {addr2:1}])
-        funded = self.nodes[0].fundrawtransaction(raw)
-        # fund again to make sure no blinded outputs were created (would fail)
+        funded = self.nodes[0].fundrawtransaction(raw, {"fee_asset": "bitcoin"})
+        # fund again to make sure no blinded outputs were created (would fail). This tx
+        # already carries a fee output, which names the fee asset, so none is passed here.
         funded = self.nodes[0].fundrawtransaction(funded["hex"])
         blinded = self.nodes[0].blindrawtransaction(funded["hex"])
         # blind again to make sure we know output blinders
@@ -444,7 +447,7 @@ class CTTest (BitcoinTestFramework):
         # If a blinding key is over-ridden by a newly imported one, funds may be unaccounted for
         new_addr = self.nodes[0].getnewaddress()
         new_validated = self.nodes[0].validateaddress(new_addr)
-        self.nodes[2].sendtoaddress(new_addr, 1)
+        self.nodes[2].sendtoaddress(address=new_addr, amount=1, fee_asset_label="bitcoin")
         self.sync_all()
         diff_blind = self.nodes[1].createblindedaddress(new_validated["unconfidential"], blinding_pubkey)
         assert_equal(len(self.nodes[0].listunspent(0, 0, [new_validated["unconfidential"]])), 1)
@@ -462,8 +465,11 @@ class CTTest (BitcoinTestFramework):
         assert_equal(len(self.nodes[0].listissuances()), 1)
 
         # Unblinded issuance of asset
-        issued = self.nodes[0].issueasset(1, 1, False)
-        self.nodes[0].reissueasset(issued["asset"], 1)
+        # An issuance has no output for the fee to come out of, so it names the fee
+        # asset; the policy asset is what these wallets are funded in.
+        issued = self.nodes[0].issueasset(
+            assetamount=1, tokenamount=1, blind=False, fee_asset="bitcoin")
+        self.nodes[0].reissueasset(asset=issued["asset"], assetamount=1, fee_asset="bitcoin")
 
         # Compare resulting fields with getrawtransaction
         raw_details = self.nodes[0].getrawtransaction(issued["txid"], 1)
@@ -474,7 +480,7 @@ class CTTest (BitcoinTestFramework):
         self.generate(self.nodes[0], 1)
         self.sync_all()
 
-        issued2 = self.nodes[0].issueasset(2, 1)
+        issued2 = self.nodes[0].issueasset(assetamount=2, tokenamount=1, fee_asset="bitcoin")
         test_asset = issued2["asset"]
         assert_equal(self.nodes[0].getwalletinfo()['balance'][test_asset], Decimal(2))
         assert test_asset not in self.nodes[1].getwalletinfo()['balance']
@@ -487,10 +493,13 @@ class CTTest (BitcoinTestFramework):
 
         # Send some bitcoin and other assets over as well to fund wallet
         addr = self.nodes[2].getnewaddress()
-        txid = self.nodes[0].sendtoaddress(addr, 5)
+        txid = self.nodes[0].sendtoaddress(address=addr, amount=5, fee_asset_label="bitcoin")
         # Make sure we're doing 52 bits of hiding which covers 21M BTC worth
         assert_equal(self.nodes[0].getrawtransaction(txid, 1)["vout"][0]["ct-bits"], 52)
-        self.nodes[0].sendmany("", {addr: 1, self.nodes[2].getnewaddress(): 13}, 0, "", [], False, 1, "UNSET", {addr: test_asset})
+        self.nodes[0].sendmany(
+            dummy="", amounts={addr: 1, self.nodes[2].getnewaddress(): 13}, minconf=0, comment="",
+            subtractfeefrom=[], replaceable=False, conf_target=1, estimate_mode="UNSET",
+            output_assets={addr: test_asset}, fee_asset="bitcoin")
 
         self.sync_all()
 
@@ -531,18 +540,26 @@ class CTTest (BitcoinTestFramework):
         self.generate(self.nodes[2], 101)
         self.sync_all()
 
-        issuancedata = self.nodes[2].issueasset(0, Decimal('0.00000006')) #0 of asset, 6 reissuance token
+        issuancedata = self.nodes[2].issueasset(
+            assetamount=0, tokenamount=Decimal('0.00000006'),
+            fee_asset="bitcoin") #0 of asset, 6 reissuance token
 
         # Node 2 will send node 1 a reissuance token, both will generate assets
-        self.nodes[2].sendtoaddress(self.nodes[1].getnewaddress(), Decimal('0.00000001'), "", "", False, False, 1, "UNSET", False, issuancedata["token"])
+        self.nodes[2].sendtoaddress(
+            address=self.nodes[1].getnewaddress(), amount=Decimal('0.00000001'), comment="",
+            comment_to="", subtractfeefromamount=False, replaceable=False, conf_target=1,
+            estimate_mode="UNSET", avoid_reuse=False, assetlabel=issuancedata["token"],
+            fee_asset_label="bitcoin")
         # node 1 needs to know about a (re)issuance to reissue itself
         self.nodes[1].importaddress(self.nodes[2].gettransaction(issuancedata["txid"])["details"][0]["address"])
         # also send some bitcoin
         self.generate(self.nodes[2], 1)
         self.sync_all()
 
-        self.nodes[1].reissueasset(issuancedata["asset"], Decimal('0.05'))
-        self.nodes[2].reissueasset(issuancedata["asset"], Decimal('0.025'))
+        self.nodes[1].reissueasset(
+            asset=issuancedata["asset"], assetamount=Decimal('0.05'), fee_asset="bitcoin")
+        self.nodes[2].reissueasset(
+            asset=issuancedata["asset"], assetamount=Decimal('0.025'), fee_asset="bitcoin")
         self.generate(self.nodes[1], 1)
         self.sync_all()
 
@@ -550,7 +567,8 @@ class CTTest (BitcoinTestFramework):
         # HACK: Self-send to sweep up bitcoin inputs into blinded output.
         # We were hitting https://github.com/ElementsProject/elements/issues/473 for the following issuance
         self.nodes[0].sendtoaddress(self.nodes[0].getnewaddress(), self.nodes[0].getwalletinfo()["balance"]["bitcoin"], "", "", True)
-        issued = self.nodes[0].issueasset(0, 1, False)
+        issued = self.nodes[0].issueasset(
+            assetamount=0, tokenamount=1, blind=False, fee_asset="bitcoin")
         walletinfo = self.nodes[0].getwalletinfo()
         assert issued["asset"] not in walletinfo["balance"]
         assert_equal(walletinfo["balance"][issued["token"]], Decimal(1))
@@ -558,8 +576,16 @@ class CTTest (BitcoinTestFramework):
         assert issued["token"] not in walletinfo["unconfirmed_balance"]
 
         # Check for value when receiving different assets by same address.
-        self.nodes[0].sendtoaddress(unconfidential_address2, Decimal('0.00000001'), "", "", False, False, 1, "UNSET", False, test_asset)
-        self.nodes[0].sendtoaddress(unconfidential_address2, Decimal('0.00000002'), "", "", False, False, 1, "UNSET", False, test_asset)
+        self.nodes[0].sendtoaddress(
+            address=unconfidential_address2, amount=Decimal('0.00000001'), comment="",
+            comment_to="", subtractfeefromamount=False, replaceable=False, conf_target=1,
+            estimate_mode="UNSET", avoid_reuse=False, assetlabel=test_asset,
+            fee_asset_label="bitcoin")
+        self.nodes[0].sendtoaddress(
+            address=unconfidential_address2, amount=Decimal('0.00000002'), comment="",
+            comment_to="", subtractfeefromamount=False, replaceable=False, conf_target=1,
+            estimate_mode="UNSET", avoid_reuse=False, assetlabel=test_asset,
+            fee_asset_label="bitcoin")
         self.generate(self.nodes[0], 1)
         self.sync_all()
         received_by_address = self.nodes[1].listreceivedbyaddress(0, False, True)
@@ -589,7 +615,7 @@ class CTTest (BitcoinTestFramework):
 
         # Issue new asset, to use different assets in one transaction when doing
         # partial blinding. Just to make these tests a bit more elaborate :-)
-        issued3 = self.nodes[2].issueasset(1, 0)
+        issued3 = self.nodes[2].issueasset(assetamount=1, tokenamount=0, fee_asset="bitcoin")
         self.generate(self.nodes[2], 1)
         self.sync_all()
         node2_balance = self.nodes[2].getbalance()
@@ -597,7 +623,9 @@ class CTTest (BitcoinTestFramework):
         assert_equal(node2_balance[issued3['asset']], Decimal(1))
 
         # Send asset to blinded multisig address and check that it was received
-        self.nodes[2].sendtoaddress(address=blinded_multisig_addr, amount=1, assetlabel=issued3['asset'])
+        self.nodes[2].sendtoaddress(
+            address=blinded_multisig_addr, amount=1, assetlabel=issued3['asset'],
+            fee_asset_label="bitcoin")
         self.sync_all()
         # We will use this multisig UTXO in our partially-blinded transaction,
         # and will also check that multisig UTXO can be successfully spent
@@ -609,14 +637,14 @@ class CTTest (BitcoinTestFramework):
         # Create new UTXO on node0 to be used in our partially-blinded transaction
         blinded_addr = self.nodes[0].getnewaddress()
         addr = self.nodes[0].validateaddress(blinded_addr)["unconfidential"]
-        self.nodes[0].sendtoaddress(blinded_addr, 0.1)
+        self.nodes[0].sendtoaddress(address=blinded_addr, amount=0.1, fee_asset_label="bitcoin")
         unspent = self.nodes[0].listunspent(0, 0, [addr])
         assert_equal(len(unspent), 1)
 
         # Create new UTXO on node1 to be used in our partially-blinded transaction
         blinded_addr2 = self.nodes[1].getnewaddress()
         addr2 = self.nodes[1].validateaddress(blinded_addr2)["unconfidential"]
-        self.nodes[1].sendtoaddress(blinded_addr2, 0.11)
+        self.nodes[1].sendtoaddress(address=blinded_addr2, amount=0.11, fee_asset_label="bitcoin")
         unspent2 = self.nodes[1].listunspent(0, 0, [addr2])
         assert_equal(len(unspent2), 1)
 
@@ -728,8 +756,8 @@ class CTTest (BitcoinTestFramework):
         # Basic checks of rawblindrawtransaction functionality
         blinded_addr = self.nodes[0].getnewaddress()
         addr = self.nodes[0].validateaddress(blinded_addr)["unconfidential"]
-        self.nodes[0].sendtoaddress(blinded_addr, 1)
-        self.nodes[0].sendtoaddress(blinded_addr, 3)
+        self.nodes[0].sendtoaddress(address=blinded_addr, amount=1, fee_asset_label="bitcoin")
+        self.nodes[0].sendtoaddress(address=blinded_addr, amount=3, fee_asset_label="bitcoin")
         unspent = self.nodes[0].listunspent(0, 0)
         rawtx = self.nodes[0].createrawtransaction(
                 [
@@ -779,17 +807,17 @@ class CTTest (BitcoinTestFramework):
                 raise AssertionError("An unblinded output exists")
 
         # Test fundrawtransaction with multiple assets
-        issue = self.nodes[0].issueasset(1, 0)
+        issue = self.nodes[0].issueasset(assetamount=1, tokenamount=0, fee_asset="bitcoin")
         assetaddr = self.nodes[0].getnewaddress()
         rawtx = self.nodes[0].createrawtransaction([], [{assetaddr:1, "asset": issue["asset"]}, {self.nodes[0].getnewaddress():2}], 0, False)
-        funded = self.nodes[0].fundrawtransaction(rawtx)
+        funded = self.nodes[0].fundrawtransaction(rawtx, {"fee_asset": "bitcoin"})
         blinded = self.nodes[0].blindrawtransaction(funded["hex"])
         signed = self.nodes[0].signrawtransactionwithwallet(blinded)
         txid = self.nodes[0].sendrawtransaction(signed["hex"])
 
         # Test fundrawtransaction with multiple inputs, creating > vout.size change
         rawtx = self.nodes[0].createrawtransaction([{"txid":txid, "vout":0}, {"txid":txid, "vout":1}], [{self.nodes[0].getnewaddress():5}])
-        funded = self.nodes[0].fundrawtransaction(rawtx)
+        funded = self.nodes[0].fundrawtransaction(rawtx, {"fee_asset": "bitcoin"})
         blinded = self.nodes[0].blindrawtransaction(funded["hex"])
         signed = self.nodes[0].signrawtransactionwithwallet(blinded)
         txid = self.nodes[0].sendrawtransaction(signed["hex"])
@@ -800,7 +828,9 @@ class CTTest (BitcoinTestFramework):
         unblinded = self.nodes[0].validateaddress(self.nodes[0].getnewaddress())["unconfidential"]
         self.nodes[0].sendtoaddress(unblinded, self.nodes[0].getbalance()["bitcoin"], "", "", True)
         # Make tx with blinded destination and change outputs only
-        self.nodes[0].sendtoaddress(self.nodes[0].getnewaddress(), self.nodes[0].getbalance()["bitcoin"]/2)
+        self.nodes[0].sendtoaddress(
+            address=self.nodes[0].getnewaddress(), amount=self.nodes[0].getbalance()["bitcoin"]/2,
+            fee_asset_label="bitcoin")
         # Send back again, this transaction should have 3 outputs, all unblinded
         txid = self.nodes[0].sendtoaddress(unblinded, self.nodes[0].getbalance()["bitcoin"], "", "", True)
         outputs = self.nodes[0].getrawtransaction(txid, 1)["vout"]

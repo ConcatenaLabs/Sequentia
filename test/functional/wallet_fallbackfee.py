@@ -21,13 +21,14 @@ class WalletRBFTest(BitcoinTestFramework):
         self.generate(self.nodes[0], COINBASE_MATURITY + 1, sync_fun=self.no_op)
 
         # sending a transaction without fee estimations must be possible by default on regtest
-        self.nodes[0].sendtoaddress(self.nodes[0].getnewaddress(), 1)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        self.nodes[0].sendtoaddress(address=self.nodes[0].getnewaddress(), amount=1, fee_asset_label='bitcoin')
 
         # test sending a tx with disabled fallback fee (must fail)
         self.restart_node(0, extra_args=["-fallbackfee=0"])
-        assert_raises_rpc_error(-6, "Fee estimation failed", lambda: self.nodes[0].sendtoaddress(self.nodes[0].getnewaddress(), 1))
-        assert_raises_rpc_error(-4, "Fee estimation failed", lambda: self.nodes[0].fundrawtransaction(self.nodes[0].createrawtransaction([], [{self.nodes[0].getnewaddress(): 1}])))
-        assert_raises_rpc_error(-6, "Fee estimation failed", lambda: self.nodes[0].sendmany("", {self.nodes[0].getnewaddress(): 1}))
+        assert_raises_rpc_error(-6, "Fee estimation failed", lambda: self.nodes[0].sendtoaddress(address=self.nodes[0].getnewaddress(), amount=1, fee_asset_label='bitcoin'))
+        assert_raises_rpc_error(-4, "Fee estimation failed", lambda: self.nodes[0].fundrawtransaction(self.nodes[0].createrawtransaction([], [{self.nodes[0].getnewaddress(): 1}]), {"fee_asset": "bitcoin"}))
+        assert_raises_rpc_error(-6, "Fee estimation failed", lambda: self.nodes[0].sendmany(dummy="", amounts={self.nodes[0].getnewaddress(): 1}, fee_asset='bitcoin'))
 
         # ELEMENTS: test claimpegin with fallback fee set to zero
         # getpeginaddress does not work with descriptor wallets yet
@@ -44,7 +45,7 @@ class WalletRBFTest(BitcoinTestFramework):
             self.restart_node(1, extra_args)
 
             addrs = self.nodes[1].getpeginaddress()
-            txid = self.nodes[0].sendtoaddress(addrs["mainchain_address"], 5)
+            txid = self.nodes[0].sendtoaddress(address=addrs["mainchain_address"], amount=5, fee_asset_label='bitcoin')
             raw = self.nodes[0].getrawtransaction(txid)
             self.generate(self.nodes[0], 12, sync_fun=self.no_op)
             proof = self.nodes[0].gettxoutproof([txid])

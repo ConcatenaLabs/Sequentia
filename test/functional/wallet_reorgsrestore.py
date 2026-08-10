@@ -31,7 +31,8 @@ class ReorgsRestoreTest(BitcoinTestFramework):
 
     def run_test(self):
         # Send a tx from which to conflict outputs later
-        txid_conflict_from = self.nodes[0].sendtoaddress(self.nodes[0].getnewaddress(), Decimal("10"))
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        txid_conflict_from = self.nodes[0].sendtoaddress(address=self.nodes[0].getnewaddress(), amount=Decimal("10"), fee_asset_label='bitcoin')
         self.generate(self.nodes[0], 1)
 
         # Disconnect node1 from others to reorg its chain later
@@ -40,7 +41,7 @@ class ReorgsRestoreTest(BitcoinTestFramework):
         self.connect_nodes(0, 2)
 
         # Send a tx to be unconfirmed later
-        txid = self.nodes[0].sendtoaddress(self.nodes[0].getnewaddress(), Decimal("10"))
+        txid = self.nodes[0].sendtoaddress(address=self.nodes[0].getnewaddress(), amount=Decimal("10"), fee_asset_label='bitcoin')
         tx = self.nodes[0].gettransaction(txid)
         self.generate(self.nodes[0], 4, sync_fun=self.no_op)
         tx_before_reorg = self.nodes[0].gettransaction(txid)

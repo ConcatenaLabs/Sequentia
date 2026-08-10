@@ -37,9 +37,10 @@ class AbandonConflictTest(BitcoinTestFramework):
 
         self.generate(self.nodes[1], COINBASE_MATURITY)
         balance = amount_of(alice.getbalance())
-        txA = alice.sendtoaddress(alice.getnewaddress(), Decimal("10"))
-        txB = alice.sendtoaddress(alice.getnewaddress(), Decimal("10"))
-        txC = alice.sendtoaddress(alice.getnewaddress(), Decimal("10"))
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        txA = alice.sendtoaddress(address=alice.getnewaddress(), amount=Decimal("10"), fee_asset_label='bitcoin')
+        txB = alice.sendtoaddress(address=alice.getnewaddress(), amount=Decimal("10"), fee_asset_label='bitcoin')
+        txC = alice.sendtoaddress(address=alice.getnewaddress(), amount=Decimal("10"), fee_asset_label='bitcoin')
         self.sync_mempools()
         self.generate(self.nodes[1], 1)
 

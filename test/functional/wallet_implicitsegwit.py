@@ -26,7 +26,8 @@ def send_a_to_b(receive_node, send_node):
         keys[a] = pubkey
         for b in address_types:
             b_address = key_to_address(pubkey, b)
-            send_node.sendtoaddress(address=b_address, amount=1)
+            # SEQUENTIA: an open-fee-market chain has no default fee asset.
+            send_node.sendtoaddress(address=b_address, amount=1, fee_asset_label='bitcoin')
     return keys
 
 def check_implicit_transactions(implicit_keys, implicit_node):

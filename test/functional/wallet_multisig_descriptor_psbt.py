@@ -111,7 +111,8 @@ class WalletMultisigDescriptorPSBTTest(BitcoinTestFramework):
         deposit_amount = 6.15
         multisig_receiving_address = participants["multisigs"][0].getnewaddress()
         self.log.info("Send funds to the resulting multisig receiving address...")
-        coordinator_wallet.sendtoaddress(multisig_receiving_address, deposit_amount)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        coordinator_wallet.sendtoaddress(address=multisig_receiving_address, amount=deposit_amount, fee_asset_label='bitcoin')
         self.generate(self.nodes[0], 1)
         for participant in participants["multisigs"]:
             assert_approx(participant.getbalance()['bitcoin'], deposit_amount, vspan=0.001)
@@ -120,7 +121,7 @@ class WalletMultisigDescriptorPSBTTest(BitcoinTestFramework):
         to = participants["signers"][self.N - 1].getnewaddress()
         value = 1
         self.log.info("First, make a sending transaction, created using `walletcreatefundedpsbt` (anyone can initiate this)...")
-        psbt = participants["multisigs"][0].walletcreatefundedpsbt(inputs=[], outputs=[{to: value}], options={"feeRate": 0.00010})
+        psbt = participants["multisigs"][0].walletcreatefundedpsbt(inputs=[], outputs=[{to: value}], options={"feeRate": 0.00010, "fee_asset": "bitcoin"})
 
         psbts = []
         self.log.info("Now at least M users check the psbt with decodepsbt and (if OK) signs it with walletprocesspsbt...")
@@ -142,7 +143,7 @@ class WalletMultisigDescriptorPSBTTest(BitcoinTestFramework):
         assert_equal(participants["signers"][self.N - 1].getbalance()['bitcoin'], value)
 
         self.log.info("Send another transaction from the multisig, this time with a daisy chained signing flow (one after another in series)!")
-        psbt = participants["multisigs"][0].walletcreatefundedpsbt(inputs=[], outputs=[{to: value}], options={"feeRate": 0.00010})
+        psbt = participants["multisigs"][0].walletcreatefundedpsbt(inputs=[], outputs=[{to: value}], options={"feeRate": 0.00010, "fee_asset": "bitcoin"})
         for m in range(self.M):
             signers_multisig = participants["multisigs"][m]
             self._check_psbt(psbt["psbt"], to, value, signers_multisig)

@@ -74,14 +74,14 @@ class CtOptInTest(BitcoinTestFramework):
         self.generatetoaddress(n0, 101, n0.getnewaddress(), sync_fun=self.no_op)
 
         # Payment to a plain address: explicit (public) value on the output
-        plain_txid = n0.sendtoaddress(n0.getnewaddress(), 1.0)
+        plain_txid = n0.sendtoaddress(address=n0.getnewaddress(), amount=1.0, fee_asset_label='bitcoin')
         plain = n0.getrawtransaction(plain_txid, True)
         plain_outs = [o for o in plain['vout'] if o.get('value') == Decimal('1.00000000')]
         assert_equal(len(plain_outs), 1)
         assert 'valuecommitment' not in plain_outs[0]
 
         # Payment to the opt-in confidential address: blinded output
-        ct_txid = n0.sendtoaddress(blinded, 1.0)
+        ct_txid = n0.sendtoaddress(address=blinded, amount=1.0, fee_asset_label='bitcoin')
         ct = n0.getrawtransaction(ct_txid, True)
         blinded_outs = [o for o in ct['vout'] if 'valuecommitment' in o]
         assert len(blinded_outs) >= 1

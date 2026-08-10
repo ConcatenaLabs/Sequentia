@@ -238,9 +238,10 @@ class MultiWalletTest(BitcoinTestFramework):
         assert_equal(amount_of(w3.getbalance()), 0)
         assert_equal(amount_of(w4.getbalance()), 0)
 
-        w1.sendtoaddress(w2.getnewaddress(), 1)
-        w1.sendtoaddress(w3.getnewaddress(), 2)
-        w1.sendtoaddress(w4.getnewaddress(), 3)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        w1.sendtoaddress(address=w2.getnewaddress(), amount=1, fee_asset_label='bitcoin')
+        w1.sendtoaddress(address=w3.getnewaddress(), amount=2, fee_asset_label='bitcoin')
+        w1.sendtoaddress(address=w4.getnewaddress(), amount=3, fee_asset_label='bitcoin')
         self.generatetoaddress(node, nblocks=1, address=w1.getnewaddress(), sync_fun=self.no_op)
         assert_equal(amount_of(w2.getbalance()), 1)
         assert_equal(amount_of(w3.getbalance()), 2)

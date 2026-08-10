@@ -230,7 +230,8 @@ class WalletTest(BitcoinTestFramework):
         before = amount_of(self.nodes[1].getbalances()['mine']['untrusted_pending'])
         dst = self.nodes[1].getnewaddress()
         self.nodes[1].unloadwallet(self.default_wallet_name)
-        self.nodes[0].sendtoaddress(dst, 0.1)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        self.nodes[0].sendtoaddress(address=dst, amount=0.1, fee_asset_label='bitcoin')
         self.sync_all()
         self.nodes[1].loadwallet(self.default_wallet_name)
         after = amount_of(self.nodes[1].getbalances()['mine']['untrusted_pending'])
@@ -240,7 +241,7 @@ class WalletTest(BitcoinTestFramework):
         # mempool because it is the third descendant of the tx above
         for _ in range(3):
             # Set amount high enough such that all coins are spent by each tx
-            txid = self.nodes[0].sendtoaddress(self.nodes[0].getnewaddress(), 99)
+            txid = self.nodes[0].sendtoaddress(address=self.nodes[0].getnewaddress(), amount=99, fee_asset_label='bitcoin')
 
         self.log.info('Check that wallet txs not in the mempool are untrusted')
         assert txid not in self.nodes[0].getrawmempool()
@@ -288,7 +289,7 @@ class WalletTest(BitcoinTestFramework):
         # Balances of assets
         for blind in [True, False]:
             self.log.info("Testing {} issued asset balances".format("blinded" if blind else "unblinded"))
-            asset = self.nodes[0].issueasset(100, 0, blind)["asset"]
+            asset = self.nodes[0].issueasset(assetamount=100, tokenamount=0, blind=blind, fee_asset='bitcoin')["asset"]
 
             # Balances with unconfirmed issuance.
             # They are indicated as confirmed because they are sent by the RPC and thus "trusted".
@@ -303,7 +304,7 @@ class WalletTest(BitcoinTestFramework):
             assert_equal(walletinfo["unconfirmed_balance"].get(asset, 0), Decimal('0'))
 
             # Sending coins to other wallet.
-            self.nodes[0].sendtoaddress(address=self.nodes[1].getnewaddress(), amount="50", assetlabel=asset)
+            self.nodes[0].sendtoaddress(address=self.nodes[1].getnewaddress(), amount="50", assetlabel=asset, fee_asset_label='bitcoin')
             self.sync_all()
 
             # Balances with unconfirmed receive

@@ -177,7 +177,8 @@ class RpcCreateMultiSigTest(BitcoinTestFramework):
         assert maddw == madd
         assert mredeemw == mredeem
 
-        txid = node0.sendtoaddress(madd, 40)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        txid = node0.sendtoaddress(address=madd, amount=40, fee_asset_label='bitcoin')
 
         tx = node0.getrawtransaction(txid, True)
         vout = [v["n"] for v in tx["vout"] if madd == v["scriptPubKey"].get("address")]

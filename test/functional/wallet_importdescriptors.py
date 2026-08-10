@@ -404,7 +404,8 @@ class ImportDescriptorsTest(BitcoinTestFramework):
                      address,
                      solvable=True,
                      ismine=True)
-        txid = w0.sendtoaddress(address, 49.99965520)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        txid = w0.sendtoaddress(address=address, amount=49.99965520, fee_asset_label='bitcoin')
         self.generatetoaddress(self.nodes[0], 6, w0.getnewaddress())
         tx = wpriv.createrawtransaction([{"txid": txid, "vout": 0}], [{w0.getnewaddress(): 49.999}, {"fee": 0.00065520}])
         signed_tx = wpriv.signrawtransactionwithwallet(tx)
@@ -449,9 +450,9 @@ class ImportDescriptorsTest(BitcoinTestFramework):
         change_addr = wmulti_priv.getrawchangeaddress('bech32')
         assert_equal(change_addr, 'ert1qt9uhe3a9hnq7vajl7a094z4s3crm9ttf8zw3f5v9gr2nyd7e3lns4xadwa')
         assert_equal(wmulti_priv.getwalletinfo()['keypoolsize'], 1000)
-        txid = w0.sendtoaddress(addr, 10)
+        txid = w0.sendtoaddress(address=addr, amount=10, fee_asset_label='bitcoin')
         self.generate(self.nodes[0], 6)
-        send_txid = wmulti_priv.sendtoaddress(w0.getnewaddress(), 8)
+        send_txid = wmulti_priv.sendtoaddress(address=w0.getnewaddress(), amount=8, fee_asset_label='bitcoin')
         decoded = wmulti_priv.gettransaction(txid=send_txid, verbose=True)['decoded']
         assert_equal(len(decoded['vin'][0]['txinwitness']), 4)
         self.generate(self.nodes[0], 6)
@@ -484,11 +485,11 @@ class ImportDescriptorsTest(BitcoinTestFramework):
         assert_equal(wmulti_pub.getwalletinfo()['keypoolsize'], 999)
 
         # generate some utxos for next tests
-        txid = w0.sendtoaddress(addr, 10)
+        txid = w0.sendtoaddress(address=addr, amount=10, fee_asset_label='bitcoin')
         vout = find_vout_for_address(self.nodes[0], txid, addr)
 
         addr2 = wmulti_pub.getnewaddress('', 'bech32')
-        txid2 = w0.sendtoaddress(addr2, 10)
+        txid2 = w0.sendtoaddress(address=addr2, amount=10, fee_asset_label='bitcoin')
         vout2 = find_vout_for_address(self.nodes[0], txid2, addr2)
 
         self.generate(self.nodes[0], 6)
@@ -577,10 +578,10 @@ class ImportDescriptorsTest(BitcoinTestFramework):
         assert_equal(res[1]['success'], True)
 
         addr = wmulti_priv_big.getnewaddress()
-        w0.sendtoaddress(addr, 10)
+        w0.sendtoaddress(address=addr, amount=10, fee_asset_label='bitcoin')
         self.generate(self.nodes[0], 1)
         # It is standard and would relay.
-        txid = wmulti_priv_big.sendtoaddress(w0.getnewaddress(), 9.999)
+        txid = wmulti_priv_big.sendtoaddress(address=w0.getnewaddress(), amount=9.999, fee_asset_label='bitcoin')
         decoded = wmulti_priv_big.gettransaction(txid=txid, verbose=True)['decoded']
         # 20 sigs + dummy + witness script
         assert_equal(len(decoded['vin'][0]['txinwitness']), 22)
@@ -611,10 +612,11 @@ class ImportDescriptorsTest(BitcoinTestFramework):
         assert_equal(res[1]['success'], True)
 
         addr = multi_priv_big.getnewaddress("", "legacy")
-        w0.sendtoaddress(addr, 10)
+        w0.sendtoaddress(address=addr, amount=10, fee_asset_label='bitcoin')
         self.generate(self.nodes[0], 6)
         # It is standard and would relay.
-        txid = multi_priv_big.sendtoaddress(w0.getnewaddress(), 10, "", "", True)
+        # No fee asset is named here: subtractfeefromamount already determines it.
+        txid = multi_priv_big.sendtoaddress(address=w0.getnewaddress(), amount=10, subtractfeefromamount=True)
         decoded = multi_priv_big.gettransaction(txid=txid, verbose=True)['decoded']
 
         self.log.info("Amending multisig with new private keys")

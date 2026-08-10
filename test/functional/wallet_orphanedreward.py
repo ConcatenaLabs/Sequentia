@@ -22,7 +22,8 @@ class OrphanedBlockRewardTest(BitcoinTestFramework):
         # Generate some blocks and obtain some coins on node 0.  We send
         # some balance to node 1, which will hold it as a single coin.
         self.generate(self.nodes[0], 150)
-        self.nodes[0].sendtoaddress(self.nodes[1].getnewaddress(), 10)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        self.nodes[0].sendtoaddress(address=self.nodes[1].getnewaddress(), amount=10, fee_asset_label='bitcoin')
         self.generate(self.nodes[0], 1)
 
         # Get a block reward with node 1 and remember the block so we can orphan
@@ -34,7 +35,7 @@ class OrphanedBlockRewardTest(BitcoinTestFramework):
         # the existing balance and the block reward.
         self.generate(self.nodes[0], 150)
         assert_equal(amount_of(self.nodes[1].getbalance()), 10 + 25)
-        txid = self.nodes[1].sendtoaddress(self.nodes[0].getnewaddress(), 30)
+        txid = self.nodes[1].sendtoaddress(address=self.nodes[0].getnewaddress(), amount=30, fee_asset_label='bitcoin')
 
         # Orphan the block reward and make sure that the original coins
         # from the wallet can still be spent.
@@ -56,7 +57,7 @@ class OrphanedBlockRewardTest(BitcoinTestFramework):
           "untrusted_pending": {},
           "immature": {},
         })
-        self.nodes[1].sendtoaddress(self.nodes[0].getnewaddress(), 9)
+        self.nodes[1].sendtoaddress(address=self.nodes[0].getnewaddress(), amount=9, fee_asset_label='bitcoin')
 
 if __name__ == '__main__':
     OrphanedBlockRewardTest().main()

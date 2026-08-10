@@ -120,7 +120,9 @@ class UtxoRecoveryTest(BitcoinTestFramework):
 
         # An issued asset gives us a reissuance token to strand and recreate, so
         # the test covers a non-policy asset as well as the policy one.
-        issued = node.issueasset(100, 1)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset, and an
+        # issuance has no output for the fee to come out of.
+        issued = node.issueasset(assetamount=100, tokenamount=1, fee_asset=policy)
         self.mine(1)
         token = issued["token"]
 

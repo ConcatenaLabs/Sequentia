@@ -70,17 +70,18 @@ class ImportPrunedFundsTest(BitcoinTestFramework):
         assert_equal(address_info['ismine'], False)
 
         # Send funds to self
-        txnid1 = self.nodes[0].sendtoaddress(address1, 0.1)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        txnid1 = self.nodes[0].sendtoaddress(address=address1, amount=0.1, fee_asset_label='bitcoin')
         self.generate(self.nodes[0], 1)
         rawtxn1 = self.nodes[0].gettransaction(txnid1)['hex']
         proof1 = self.nodes[0].gettxoutproof([txnid1])
 
-        txnid2 = self.nodes[0].sendtoaddress(address2, 0.05)
+        txnid2 = self.nodes[0].sendtoaddress(address=address2, amount=0.05, fee_asset_label='bitcoin')
         self.generate(self.nodes[0], 1)
         rawtxn2 = self.nodes[0].gettransaction(txnid2)['hex']
         proof2 = self.nodes[0].gettxoutproof([txnid2])
 
-        txnid3 = self.nodes[0].sendtoaddress(address3, 0.025)
+        txnid3 = self.nodes[0].sendtoaddress(address=address3, amount=0.025, fee_asset_label='bitcoin')
         self.generate(self.nodes[0], 1)
         rawtxn3 = self.nodes[0].gettransaction(txnid3)['hex']
         proof3 = self.nodes[0].gettxoutproof([txnid3])
