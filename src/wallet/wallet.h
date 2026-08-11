@@ -20,6 +20,7 @@
 #include <util/strencodings.h>
 #include <util/string.h>
 #include <util/system.h>
+#include <util/translation.h>
 #include <util/ui_change_type.h>
 #include <validationinterface.h>
 #include <wallet/coinselection.h>
@@ -134,6 +135,25 @@ class WalletRescanReserver;
 
 struct BlindDetails {
     bool ignore_blind_failure = true; // Certain corner-cases are hard to avoid
+
+    // SEQUENTIA: whether the caller actually asked for confidential change on this
+    // transaction. Elements attaches a blinding pubkey to every change output
+    // unconditionally, so "this change output carries a blinding key" says nothing about
+    // intent. Sequentia is transparent by default and confidentiality is opt-in, so the
+    // wallet only goes out of its way (see the dummy output below) to deliver blinded
+    // change when the request is unambiguous: the caller named a confidential change
+    // address for this transaction.
+    bool blind_change_requested = false;
+
+    // SEQUENTIA: index in the transaction of a zero-value blinded OP_RETURN output that was
+    // appended for no reason other than to give BlindTransaction a second output to blind,
+    // so that a lone blinded change output can be honoured; -1 when there is none. Tracked
+    // because the dummy must go away again if the change output it was paired with does.
+    int change_blinding_dummy_pos = -1;
+
+    // SEQUENTIA: privacy the wallet was asked for and could not deliver. Surfaced to RPC
+    // callers so that a silently-unblinded output is no longer silent.
+    std::vector<bilingual_str> warnings;
 
     // Temporary tx-specific details.
     std::vector<uint256> i_amount_blinds;

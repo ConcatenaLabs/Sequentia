@@ -149,8 +149,14 @@ bool CreateTransaction(CWallet& wallet, const std::vector<CRecipient>& vecSend, 
 /**
  * Insert additional inputs into the transaction by
  * calling CreateTransaction();
+ *
+ * ELEMENTS/SEQUENTIA: `ignore_blind_fail` is the funding-side equivalent of the
+ * `ignoreblindfail` argument sendtoaddress and sendmany already take: when false, a
+ * transaction whose blinding cannot be honoured is an error rather than an explicit
+ * output. `warnings`, when given, collects the privacy the wallet was asked for and could
+ * not deliver.
  */
-bool FundTransaction(CWallet& wallet, CMutableTransaction& tx, CAmount& nFeeRet, int& nChangePosInOut, bilingual_str& error, bool lockUnspents, const std::set<int>& setSubtractFeeFromOutputs, CCoinControl);
+bool FundTransaction(CWallet& wallet, CMutableTransaction& tx, CAmount& nFeeRet, int& nChangePosInOut, bilingual_str& error, bool lockUnspents, const std::set<int>& setSubtractFeeFromOutputs, CCoinControl, bool ignore_blind_fail = true, std::vector<bilingual_str>* warnings = nullptr);
 } // namespace wallet
 
 #endif // BITCOIN_WALLET_SPEND_H
