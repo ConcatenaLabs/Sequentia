@@ -661,10 +661,31 @@ static std::vector<RPCArg> FundTxDoc()
                  {"descriptor", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "A descriptor"},
              }},
          }},
+        {"ignoreblindfail", RPCArg::Type::BOOL, RPCArg::Default{true}, "Return a transaction even when a blinding attempt fails due to number of blinded inputs/outputs.\n"
+            "When false, such a transaction is an error instead of one with an output silently left explicit."},
     };
 }
 
-void FundTransaction(CWallet& wallet, CMutableTransaction& tx, CAmount& fee_out, int& change_position, const UniValue& options, CCoinControl& coinControl, bool override_min_fee)
+/** SEQUENTIA: the privacy the wallet was asked for and could not deliver, as an RPC field. */
+static RPCResult FundTxWarningsDoc()
+{
+    return {RPCResult::Type::ARR, "warnings", /*optional=*/true, "Warnings about the funded transaction, e.g. an output that had to be left explicit",
+        {
+            {RPCResult::Type::STR, "", ""},
+        }};
+}
+
+static void PushFundTxWarnings(UniValue& result, const std::vector<bilingual_str>& warnings)
+{
+    if (warnings.empty()) return;
+    UniValue arr(UniValue::VARR);
+    for (const bilingual_str& warning : warnings) {
+        arr.push_back(warning.original);
+    }
+    result.pushKV("warnings", arr);
+}
+
+void FundTransaction(CWallet& wallet, CMutableTransaction& tx, CAmount& fee_out, int& change_position, const UniValue& options, CCoinControl& coinControl, bool override_min_fee, std::vector<bilingual_str>* warnings = nullptr)
 {
     // Make sure the results are valid at least up to the most recent block
     // the user could have gotten from another RPC command prior to now
@@ -672,6 +693,8 @@ void FundTransaction(CWallet& wallet, CMutableTransaction& tx, CAmount& fee_out,
 
     change_position = -1;
     bool lockUnspents = false;
+    // ELEMENTS/SEQUENTIA: same meaning and same default as sendtoaddress/sendmany.
+    bool ignore_blind_fail = true;
     UniValue subtractFeeFromOutputs;
     std::set<int> setSubtractFeeFromOutputs;
     // SEQUENTIA: no fee asset is inferred from the transaction. This used to be
@@ -724,11 +747,16 @@ void FundTransaction(CWallet& wallet, CMutableTransaction& tx, CAmount& fee_out,
                 {"estimate_mode", UniValueType(UniValue::VSTR)},
                 {"include_explicit", UniValueType(UniValue::VBOOL)},
                 {"input_weights", UniValueType(UniValue::VARR)},
+                {"ignoreblindfail", UniValueType(UniValue::VBOOL)},
             },
             true, true);
 
         if (options.exists("add_inputs") ) {
             coinControl.m_add_inputs = options["add_inputs"].get_bool();
+        }
+
+        if (options.exists("ignoreblindfail")) {
+            ignore_blind_fail = options["ignoreblindfail"].get_bool();
         }
 
         if (g_con_any_asset_fees && options.exists("fee_asset")) {
@@ -982,7 +1010,7 @@ void FundTransaction(CWallet& wallet, CMutableTransaction& tx, CAmount& fee_out,
 
     bilingual_str error;
 
-    if (!FundTransaction(wallet, tx, fee_out, change_position, error, lockUnspents, setSubtractFeeFromOutputs, coinControl)) {
+    if (!FundTransaction(wallet, tx, fee_out, change_position, error, lockUnspents, setSubtractFeeFromOutputs, coinControl, ignore_blind_fail, warnings)) {
         throw JSONRPCError(RPC_WALLET_ERROR, error.original);
     }
 }
@@ -1074,6 +1102,7 @@ RPCHelpMan fundrawtransaction()
                         {RPCResult::Type::STR_HEX, "hex", "The resulting raw transaction (hex-encoded string)"},
                         {RPCResult::Type::STR_AMOUNT, "fee", "Fee in " + CURRENCY_UNIT + " the resulting transaction pays"},
                         {RPCResult::Type::NUM, "changepos", "The position of the added change output, or -1"},
+                        FundTxWarningsDoc(),
                     }
                                 },
                                 RPCExamples{
@@ -1106,7 +1135,8 @@ RPCHelpMan fundrawtransaction()
     CCoinControl coin_control;
     // Automatically select (additional) coins. Can be overridden by options.add_inputs.
     coin_control.m_add_inputs = true;
-    FundTransaction(*pwallet, tx, fee, change_position, request.params[1], coin_control, /* override_min_fee */ true);
+    std::vector<bilingual_str> warnings;
+    FundTransaction(*pwallet, tx, fee, change_position, request.params[1], coin_control, /* override_min_fee */ true, &warnings);
 
     UniValue result(UniValue::VOBJ);
     result.pushKV("hex", EncodeHexTx(CTransaction(tx)));
@@ -1115,6 +1145,7 @@ RPCHelpMan fundrawtransaction()
         result.pushKV("fee_asset", coin_control.m_fee_asset.value_or(::policyAsset).GetHex());
     }
     result.pushKV("changepos", change_position);
+    PushFundTxWarnings(result, warnings);
 
     return result;
 },
@@ -1496,7 +1527,8 @@ RPCHelpMan send()
                     {RPCResult::Type::BOOL, "complete", "If the transaction has a complete set of signatures"},
                     {RPCResult::Type::STR_HEX, "txid", /*optional=*/true, "The transaction id for the send. Only 1 transaction is created regardless of the number of addresses."},
                     {RPCResult::Type::STR_HEX, "hex", /*optional=*/true, "If add_to_wallet is false, the hex-encoded raw transaction with signature(s)"},
-                    {RPCResult::Type::STR, "psbt", /*optional=*/true, "If more signatures are needed, or if add_to_wallet is false, the base64-encoded (partially) signed transaction"}
+                    {RPCResult::Type::STR, "psbt", /*optional=*/true, "If more signatures are needed, or if add_to_wallet is false, the base64-encoded (partially) signed transaction"},
+                    FundTxWarningsDoc()
                 }
         },
         RPCExamples{""
@@ -1577,7 +1609,8 @@ RPCHelpMan send()
             // be overridden by options.add_inputs.
             coin_control.m_add_inputs = rawTx.vin.size() == 0;
             SetOptionsInputWeights(options["inputs"], options);
-            FundTransaction(*pwallet, rawTx, fee, change_position, options, coin_control, /* override_min_fee */ false);
+            std::vector<bilingual_str> warnings;
+            FundTransaction(*pwallet, rawTx, fee, change_position, options, coin_control, /* override_min_fee */ false, &warnings);
 
             bool add_to_wallet = true;
             if (options.exists("add_to_wallet")) {
@@ -1620,6 +1653,7 @@ RPCHelpMan send()
                 }
             }
             result.pushKV("complete", complete);
+            PushFundTxWarnings(result, warnings);
 
             return result;
         }
@@ -1820,6 +1854,7 @@ RPCHelpMan walletcreatefundedpsbt()
                         {RPCResult::Type::STR_AMOUNT, "fee_asset", /* optional */ g_con_any_asset_fees, "Asset that the fee is paid with"},
                         {RPCResult::Type::STR_AMOUNT, "fee_value", /* optional */ g_con_any_asset_fees, "Fee that the resulting transaction pays, denominated in " + CURRENCY_UNIT},
                         {RPCResult::Type::NUM, "changepos", "The position of the added change output, or -1"},
+                        FundTxWarningsDoc(),
                     }
                                 },
                                 RPCExamples{
@@ -1917,7 +1952,8 @@ RPCHelpMan walletcreatefundedpsbt()
         }
     }
     SetOptionsInputWeights(request.params[0], options);
-    FundTransaction(wallet, rawTx, fee, change_position, options, coin_control, /* override_min_fee */ true);
+    std::vector<bilingual_str> warnings;
+    FundTransaction(wallet, rawTx, fee, change_position, options, coin_control, /* override_min_fee */ true, &warnings);
     // Find an input that is ours
     unsigned int blinder_index = 0;
     {
@@ -1997,6 +2033,7 @@ RPCHelpMan walletcreatefundedpsbt()
         result.pushKV("fee_value", ValueFromAmount(fee_value.GetValue()));
     }
     result.pushKV("changepos", change_position);
+    PushFundTxWarnings(result, warnings);
     return result;
 },
     };
