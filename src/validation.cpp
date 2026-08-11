@@ -3540,6 +3540,11 @@ static uint256 g_pos_immediate_final_hash GUARDED_BY(::cs_main);
 // for chains that contain this quorum-certified rival block. -1 = no release.
 static int g_pos_reconcile_release_height GUARDED_BY(::cs_main) = -1;
 static uint256 g_pos_reconcile_release_hash GUARDED_BY(::cs_main);
+// SEQUENTIA: the last candidate the activation-time finality gate refused, so
+// the refusal is reported once per candidate instead of on every pass of the
+// activation loop. A refusal must never be silent -- an operator has to be able
+// to see WHY a fork was not adopted -- but it must not flood the log either.
+static uint256 g_pos_final_gate_logged GUARDED_BY(::cs_main);
 // Steady-clock seconds at the last advance of the finality point (0 = never).
 static std::atomic<int64_t> g_pos_final_advance_steady{0};
 
@@ -3931,6 +3936,34 @@ bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew
  * Return the tip of the chain with the most work in it, that isn't
  * known to be invalid (it's however far from certain to be valid).
  */
+bool CChainState::PosFinalityGateRefuses(const CBlockIndex* pindex) const
+{
+    AssertLockHeld(::cs_main);
+    if (!g_con_pos) return false;
+    // Finality is finality MODULO BITCOIN, so it may only be imposed by a node
+    // that actually watches Bitcoin. A -validateanchor=0 follower delegates
+    // anchor validation to the network and must use plain most-work fork
+    // choice, or a Bitcoin reorg pins it forever (see ContextualCheckBlockHeader).
+    if (g_con_bitcoin_anchor && !g_validate_anchor) return false;
+    if (g_pos_immediate_final_height < 0) return false;
+    // Blocks already on the active chain are never gated.
+    if (m_chain.Contains(pindex)) return false;
+    // Anchoring supremacy: if the finalized block has itself been invalidated
+    // because its Bitcoin anchor was orphaned, finality no longer protects it.
+    const CBlockIndex* pf = m_blockman.LookupBlockIndex(g_pos_immediate_final_hash);
+    if (pf == nullptr || (pf->nStatus & BLOCK_FAILED_MASK)) return false;
+    const CBlockIndex* anc = pindex->GetAncestor(g_pos_immediate_final_height);
+    const bool descends_from_final = pindex->nHeight > g_pos_immediate_final_height &&
+        anc && anc->GetBlockHash() == g_pos_immediate_final_hash;
+    if (descends_from_final) return false;
+    // Finality reconciliation may have released the point for this branch.
+    if (g_pos_reconcile_release_height >= 0 && pindex->nHeight >= g_pos_reconcile_release_height) {
+        const CBlockIndex* rel = pindex->GetAncestor(g_pos_reconcile_release_height);
+        if (rel && rel->GetBlockHash() == g_pos_reconcile_release_hash) return false;
+    }
+    return true;
+}
+
 CBlockIndex* CChainState::FindMostWorkChain()
 {
     AssertLockHeld(::cs_main);
@@ -3958,29 +3991,26 @@ CBlockIndex* CChainState::FindMostWorkChain()
         // candidates are erased from the set (mirroring the missing-data
         // path); newly arriving rival blocks re-add themselves, and a release
         // re-adds the branch via ReaddBlockIndexCandidates.
-        if (g_con_pos && (!g_con_bitcoin_anchor || g_validate_anchor) &&
-            g_pos_immediate_final_height >= 0 && !m_chain.Contains(pindexNew)) {
-            const CBlockIndex* pf = m_blockman.LookupBlockIndex(g_pos_immediate_final_hash);
-            const bool final_standing = pf && !(pf->nStatus & BLOCK_FAILED_MASK);
-            if (final_standing) {
-                const CBlockIndex* anc = pindexNew->GetAncestor(g_pos_immediate_final_height);
-                const bool descends_from_final = pindexNew->nHeight > g_pos_immediate_final_height &&
-                    anc && anc->GetBlockHash() == g_pos_immediate_final_hash;
-                bool released = false;
-                if (!descends_from_final && g_pos_reconcile_release_height >= 0 &&
-                    pindexNew->nHeight >= g_pos_reconcile_release_height) {
-                    const CBlockIndex* rel = pindexNew->GetAncestor(g_pos_reconcile_release_height);
-                    released = rel && rel->GetBlockHash() == g_pos_reconcile_release_hash;
-                }
-                if (!descends_from_final && !released) {
-                    CBlockIndex* pindexGated = pindexNew;
-                    while (pindexGated && !m_chain.Contains(pindexGated)) {
-                        setBlockIndexCandidates.erase(pindexGated);
-                        pindexGated = pindexGated->pprev;
-                    }
-                    continue;
-                }
+        if (PosFinalityGateRefuses(pindexNew)) {
+            // This is the SAME refusal ContextualCheckBlockHeader reports as
+            // "bad-fork-prior-to-pos-final", taken at activation time instead
+            // of accept time. There is no BlockValidationState to carry a
+            // reject reason here, so the reason is logged under that same
+            // canonical name -- otherwise the node silently declines to reorg
+            // and an operator has nothing to go on. One line per candidate.
+            if (g_pos_final_gate_logged != pindexNew->GetBlockHash()) {
+                g_pos_final_gate_logged = pindexNew->GetBlockHash();
+                LogPrintf("ERROR: %s: bad-fork-prior-to-pos-final: not activating candidate %s (height %d); it forks at/below the immediately-finalized block %s (height %d)\n",
+                          __func__, pindexNew->GetBlockHash().ToString(), pindexNew->nHeight,
+                          g_pos_immediate_final_hash.ToString(), g_pos_immediate_final_height);
+                NotePosFinalForkRejection();
             }
+            CBlockIndex* pindexGated = pindexNew;
+            while (pindexGated && !m_chain.Contains(pindexGated)) {
+                setBlockIndexCandidates.erase(pindexGated);
+                pindexGated = pindexGated->pprev;
+            }
+            continue;
         }
 
         // Check whether all blocks on the path between the currently active chain and the candidate are valid.
@@ -6093,8 +6123,24 @@ void CChainState::CheckBlockIndex()
                 // Don't perform this check for the background chainstate since
                 // its setBlockIndexCandidates shouldn't have some entries (i.e. those past the
                 // snapshot block) which do exist in the block index for the active chainstate.
+                //
+                // SEQUENTIA: unless the immediate-finality gate refuses it.
+                // FindMostWorkChain deliberately ERASES a candidate that forks
+                // at/below the finalized block, along with its ancestors back
+                // to the fork point -- otherwise it would be re-picked as the
+                // best candidate on every pass and the loop would never
+                // terminate. Such a block is valid, has all its data and sorts
+                // above the tip (that is exactly why it had to be refused), so
+                // without this exception the invariant fires and the node
+                // aborts here: `elementsd: validation.cpp: CheckBlockIndex():
+                // Assertion setBlockIndexCandidates.count(pindex) failed`,
+                // reproducible whenever a better-certified sibling of a
+                // finalized block turns up -- over the network from a peer
+                // (-posreconcile defaults on, so rival branches ARE stored) or
+                // via reconsiderblock -- on any chain running -checkblockindex
+                // (the regtest default).
                 if (is_active && (pindexFirstMissing == nullptr || pindex == m_chain.Tip())) {
-                    assert(setBlockIndexCandidates.count(pindex));
+                    assert(setBlockIndexCandidates.count(pindex) || PosFinalityGateRefuses(pindex));
                 }
                 // If some parent is missing, then it could be that this block was in
                 // setBlockIndexCandidates but had to be removed because of the missing data.
