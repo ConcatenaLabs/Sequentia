@@ -92,8 +92,10 @@ class PosFinalizedAnchorReorgTest(BitcoinTestFramework):
         # node2: a pure VALIDATOR (no -posproducer) that watches the anchor — the live
         # freeze hit exactly such follower nodes (explorer/gateway).
         validator_args = consensus + ["-port=%d" % p2p_port(2), "-rpcport=%d" % rpc_port(2)]
-        self.add_nodes(1, [founder_args], chain=[chain]); self.start_node(1)
-        self.add_nodes(1, [validator_args], chain=[chain]); self.start_node(2)
+        self.add_nodes(1, [founder_args], chain=[chain])
+        self.start_node(1)
+        self.add_nodes(1, [validator_args], chain=[chain])
+        self.start_node(2)
         self.connect_nodes(1, 2)
         self.nodes[0].createwallet(wallet_name="w", descriptors=True)
 

@@ -171,9 +171,12 @@ class PosParentOutageNoPermanentInvalidTest(BitcoinTestFramework):
                                  "-posproducer=1", "-posproducerkey=%s" % self.peer_wif]
         victim_args = consensus + ["-port=%d" % p2p_port(3), "-rpcport=%d" % rpc_port(3),
                                    "-posproducer=0", "-posproducerkey=%s" % self.victim_wif]
-        self.add_nodes(1, [founder_args], chain=[chain]); self.start_node(1)
-        self.add_nodes(1, [peer_args], chain=[chain]); self.start_node(2)
-        self.add_nodes(1, [victim_args], chain=[chain]); self.start_node(3)
+        self.add_nodes(1, [founder_args], chain=[chain])
+        self.start_node(1)
+        self.add_nodes(1, [peer_args], chain=[chain])
+        self.start_node(2)
+        self.add_nodes(1, [victim_args], chain=[chain])
+        self.start_node(3)
         # node2 stays connected to node1 for the whole run: the producer only
         # proposes while it has peers, so isolating the victim must not isolate
         # the founder. The victim is only ever linked to node1, never to node2.

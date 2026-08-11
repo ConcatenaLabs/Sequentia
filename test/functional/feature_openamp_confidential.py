@@ -110,7 +110,8 @@ class OpenAmpConfidentialTest(BitcoinTestFramework):
     def run_with_daemon(self, node):
         for _ in range(100):
             try:
-                self.api("GET", "/v1/assets"); break
+                self.api("GET", "/v1/assets")
+                break
             except (ConnectionRefusedError, OSError):
                 time.sleep(0.1)
 
