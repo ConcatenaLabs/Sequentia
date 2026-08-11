@@ -520,7 +520,20 @@ public:
         g_pos_unbonding_period = 43200;                  // x30s = ~15 days (§3.11)
         // Consensus-critical: pin the payout notice period so no node can change
         // when a producer's payout policy binds by passing -pospayoutnotice.
-        g_pos_payout_notice = DEFAULT_POS_PAYOUT_NOTICE;   // 2880 x 30s = ~1 day
+        //
+        // Counted in BLOCKS, not seconds: ConnectBlock compares
+        // policy.activation against pindex->nHeight + this (validation.cpp,
+        // "bad-payout-notice"). So it does NOT survive a cadence change on its
+        // own -- at the 60-second spacing the inherited 2,880 would quietly
+        // mean ~2 days instead of the ~1 day it is meant to be. Halved to keep
+        // the wall-clock intent.
+        //
+        // Contrast g_pos_unbonding_period just above, which is NOT halved: that
+        // one is normalised to seconds by PosRequiredUnbondingSeconds()
+        // (period x g_pos_slot_interval), and g_pos_slot_interval stays 30, so
+        // its ~15 days are unaffected by the cadence. Halving it would have cut
+        // a security parameter in half rather than preserved it.
+        g_pos_payout_notice = 1440;                        // 1440 x 60s = ~1 day
         consensus.total_valid_epochs = 0;
         consensus.dynamic_epoch_length = 10;
         consensus.elements_mode = g_con_elementsmode;
@@ -937,7 +950,20 @@ public:
         g_pos_unbonding_period = TESTNET_POS_UNBONDING_PERIOD;
         // Consensus-critical: pin the payout notice period so no node can change
         // when a producer's payout policy binds by passing -pospayoutnotice.
-        g_pos_payout_notice = DEFAULT_POS_PAYOUT_NOTICE;   // 2880 x 30s = ~1 day
+        //
+        // Counted in BLOCKS, not seconds: ConnectBlock compares
+        // policy.activation against pindex->nHeight + this (validation.cpp,
+        // "bad-payout-notice"). So it does NOT survive a cadence change on its
+        // own -- at the 60-second spacing the inherited 2,880 would quietly
+        // mean ~2 days instead of the ~1 day it is meant to be. Halved to keep
+        // the wall-clock intent.
+        //
+        // Contrast g_pos_unbonding_period just above, which is NOT halved: that
+        // one is normalised to seconds by PosRequiredUnbondingSeconds()
+        // (period x g_pos_slot_interval), and g_pos_slot_interval stays 30, so
+        // its ~15 days are unaffected by the cadence. Halving it would have cut
+        // a security parameter in half rather than preserved it.
+        g_pos_payout_notice = 1440;                        // 1440 x 60s = ~1 day
         consensus.elements_mode = g_con_elementsmode;
         consensus.total_valid_epochs = 0;
         consensus.dynamic_epoch_length = 10;
