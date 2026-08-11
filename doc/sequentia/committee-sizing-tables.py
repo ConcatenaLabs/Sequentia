@@ -60,13 +60,17 @@ def hyper_tail_ge(kmin, N, S, n):
 
 # ---------- exact binomial tails ----------
 def binom_pmf(k, n, p):
-    if p <= 0.0: return 1.0 if k == 0 else 0.0
-    if p >= 1.0: return 1.0 if k == n else 0.0
+    if p <= 0.0:
+        return 1.0 if k == 0 else 0.0
+    if p >= 1.0:
+        return 1.0 if k == n else 0.0
     return math.exp(logcomb(n, k) + k * math.log(p) + (n - k) * math.log(1 - p))
 
 def binom_tail_ge(kmin, n, p):
-    mean = n * p; sd = math.sqrt(max(n * p * (1 - p), 1.0))
-    lo = max(kmin, 0); hi = min(n, int(mean + 20 * sd) + 2)
+    mean = n * p
+    sd = math.sqrt(max(n * p * (1 - p), 1.0))
+    lo = max(kmin, 0)
+    hi = min(n, int(mean + 20 * sd) + 2)
     s = 0.0
     for k in range(lo, hi + 1):
         s += binom_pmf(k, n, p)
@@ -74,9 +78,12 @@ def binom_tail_ge(kmin, n, p):
     return s
 
 def binom_tail_le(kmax, n, p):
-    mean = n * p; sd = math.sqrt(max(n * p * (1 - p), 1.0))
-    lo = max(0, int(mean - 20 * sd) - 2); hi = min(kmax, n)
-    if hi < lo: return 0.0
+    mean = n * p
+    sd = math.sqrt(max(n * p * (1 - p), 1.0))
+    lo = max(0, int(mean - 20 * sd) - 2)
+    hi = min(kmax, n)
+    if hi < lo:
+        return 0.0
     s = 0.0
     for k in range(lo, hi + 1):
         s += binom_pmf(k, n, p)
@@ -84,43 +91,58 @@ def binom_tail_le(kmax, n, p):
 
 # ---------- (1) representativeness ----------
 def sd_share_pp(n, N, p=1.0 / 3.0):
-    if n > N: return None
-    if n == N: return 0.0
+    if n > N:
+        return None
+    if n == N:
+        return 0.0
     fpc = (N - n) / (N - 1)
     return math.sqrt(p * (1 - p) / n * fpc) * 100.0
 
 # ---------- (2) sleepy stall ----------
 def stall_prob(n, N, s):
-    if n > N: return None
+    if n > N:
+        return None
     return hyper_tail_ge(n - quorum(n) + 1, N, round(s * N), n)
 
 # ---------- (3) malicious capture ----------
 def capture_prob(n, N, m):
-    if n > N: return None
+    if n > N:
+        return None
     return hyper_tail_ge(quorum(n), N, round(m * N), n)
 
 def fmt_p(p):
-    if p is None:      return "  n/a"
-    if p == 0.0:       return "    0"
-    if p >= 0.0995:    return f"{p*100:5.1f}%"
-    if p >= 0.001:     return f"{p*100:5.2f}%"
-    if p >= 1e-6:      return f"{p*100:.1e}%".replace('e-0', 'e-')
+    if p is None:
+        return "  n/a"
+    if p == 0.0:
+        return "    0"
+    if p >= 0.0995:
+        return f"{p*100:5.1f}%"
+    if p >= 0.001:
+        return f"{p*100:5.2f}%"
+    if p >= 1e-6:
+        return f"{p*100:.1e}%".replace('e-0', 'e-')
     return f"{p:.0e}"
 
 def fmt_time(p):
     """expected time to first event at BLOCKS_PER_DAY heights/day"""
-    if p is None or p <= 0: return "never"
+    if p is None or p <= 0:
+        return "never"
     days = 1.0 / (p * BLOCKS_PER_DAY)
-    if days < 1/24/60: return "minutes"
-    if days < 1:   return f"{days*24:.1f} h"
-    if days < 365: return f"{days:.1f} d"
-    if days < 365000: return f"{days/365.25:.1f} yr"
+    if days < 1/24/60:
+        return "minutes"
+    if days < 1:
+        return f"{days*24:.1f} h"
+    if days < 365:
+        return f"{days:.1f} d"
+    if days < 365000:
+        return f"{days/365.25:.1f} yr"
     return f"{days/365.25:.0e} yr"
 
 def print_table(title, cellfn, cellfmt, cols=POPS, colhdr=None):
     print(f"\n### {title}")
     hdr = "committee\\ |" + "".join(f"{(colhdr[i] if colhdr else c):>10}" for i, c in enumerate(cols))
-    print(hdr); print("-" * len(hdr))
+    print(hdr)
+    print("-" * len(hdr))
     for n in SAMPLES:
         print(f"{n:>10} |" + "".join(f"{cellfmt(cellfn(n, c)):>10}" for c in cols))
 
@@ -163,7 +185,8 @@ print("harder for the attacker). Capture = the coalition alone certifies, and ca
 print("certify TWO blocks at that height (malicious members equivocate freely).")
 print(f"\n### P(capture); columns = coalition stake share")
 hdr = "committee\\ |" + "".join(f"{f'{m*100:.0f}%':>10}" for m in MS)
-print(hdr); print("-" * len(hdr))
+print(hdr)
+print("-" * len(hdr))
 for n in sorted(SAMPLES + [150, 200]):
     print(f"{n:>10} |" + "".join(f"{fmt_p(capture_prob(n, 50000, m)):>10}" for m in MS))
 
@@ -183,7 +206,8 @@ for n in [100, 128, 150, 200, 250, 500]:
         m, best = 0.01, 0.0
         while m < 0.50:
             p = capture_prob(n, 50000, m)
-            if p is not None and p > per_slot: break
+            if p is not None and p > per_slot:
+                break
             best = m
             m += 0.0025
         tol[label] = best

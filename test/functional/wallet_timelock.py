@@ -24,9 +24,10 @@ class WalletLocktimeTest(BitcoinTestFramework):
         address = node.getnewaddress(label=label)
 
         self.log.info("Send to new address with locktime")
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
         node.send(
             outputs=[{address: 5}],
-            options={"locktime": mtp_tip - 1},
+            options={"locktime": mtp_tip - 1, "fee_asset": "bitcoin"},
         )
         self.generate(node, 1)
 

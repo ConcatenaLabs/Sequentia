@@ -16,13 +16,22 @@ whitelist (see doc/sequentia/02-open-fee-market.md). Each round it:
      operator-supplied JSON paths.
   3. applies operator-defined ADMISSION RULES (thresholds + always-admit /
      always-reject exceptions) to decide which discovered assets to whitelist.
-  4. converts each admitted asset's price (in the API's quote currency, e.g.
-     USD) into the node's scaled rate. The node values a fee paid in an asset as
+  4. converts each admitted asset's price into the node's scaled rate, stated in
+     the operator's REFERENCE UNIT. An API-sourced price arrives in the API's
+     quote currency (e.g. USD) and is re-expressed in reference units by ONE
+     conversion factor, `api_units_per_reference_unit`: how many API-numeraire
+     units make one reference unit (default 1.0, the identity, which adopts the
+     API's numeraire as the reference unit). The reference unit is an abstract
+     factor, never a token, so no asset is a privileged 1:1 anchor; because every
+     API price is scaled by the same factor, the choice is economically inert.
+     A MANUALLY priced asset is the one exception: the operator enters that price
+     in reference units already, so it is published as given and never translated
+     a second time. The node values a fee paid in an asset as
      `atoms * rate / 1e8` and is precision-blind (it works purely in atoms), so
      the rate MUST carry the asset's denomination: for an asset with `precision`
      decimals the rate is `round(price * 1e8 * 10**(8 - precision))`. That is
      `round(price * 1e8)` for the common 8-decimal case (a no-op) and corrects
-     the valuation for any asset with a different denomination — otherwise a fee
+     the valuation for any asset with a different denomination, otherwise a fee
      paid in, say, a 2-decimal asset would be mis-valued by 1e6. Then it
   5. publishes the result via the node's `setfeeexchangerates` RPC with
      persist=false.
@@ -68,12 +77,15 @@ DEFAULT_PRECISION = 8  # asset decimals when the registry omits them; also the r
 
 
 def scaled_rate(price, precision):
-    """The node's fee rate for `price` (in the quote currency, per whole unit) of
-    an asset with `precision` decimals: atoms of the asset worth one reference
-    unit. The node values fees precision-blind (atoms * rate / 1e8), so the
-    denomination is carried here — 10**(8 - precision) is 1 for 8-decimal assets
-    (unchanged) and rescales the rest so a fee in a non-8-decimal asset is valued
-    correctly rather than off by 10**(8 - precision)."""
+    """The node's fee rate for `price` (the value of one whole unit) of an asset
+    with `precision` decimals. The caller decides which unit `price` is in: an
+    API-sourced price arrives in the API's numeraire and is translated to the
+    reference unit afterwards (see _denominate), while an operator's manual price
+    is already in reference units and is published as given. The node values fees
+    precision-blind (atoms * rate / 1e8), so the denomination is carried here:
+    10**(8 - precision) is 1 for 8-decimal assets (unchanged) and rescales the
+    rest so a fee in a non-8-decimal asset is valued correctly rather than off by
+    10**(8 - precision)."""
     return round(price * COIN * (10 ** (DEFAULT_PRECISION - precision)))
 
 
@@ -94,6 +106,69 @@ DEFAULT_SOURCE_URL = "http://159.195.15.140/prices"
 DEFAULT_REGISTRY_URL = "http://159.195.15.140/registry/index.minimal.json"
 DEFAULT_QUOTE = "USD"
 
+# The config keys that name the reference-unit CONVERSION FACTOR, in priority
+# order. They all mean the same thing: how many of the API's numeraire units
+# (whatever the market source quotes in) make ONE reference unit. 1.0, the
+# default, is the identity: the reference unit IS the API's numeraire, which is
+# both the sane default and what most operators want.
+# `reference_price_usd` is the previous name, still read so existing configs keep
+# working unchanged. It was renamed because it presumed USD inside a layer that
+# is deliberately unit-agnostic, and because it called a conversion factor a
+# price.
+REFERENCE_FACTOR_KEYS = ("api_units_per_reference_unit", "reference_price_usd")
+DEFAULT_REFERENCE_FACTOR = 1.0
+
+# The reference unit is ALWAYS an abstract factor. A mode that made it a named
+# on-chain token (`reference_asset_label`, which pinned that token's rate to 1e8
+# and divided every other rate by it) was removed: a reference unit that IS a
+# token stops being a denomination and becomes a privileged asset wearing one.
+# Every other asset's rate then quotes against that token's fortunes, which is
+# the privileged-anchor concept the abstract factor exists to remove, and it
+# contradicts the Sequentia principle that the Sequence token (ticker SEQ) has
+# equal standing with every issued asset: no asset is the unit of account. An
+# operator who wants a unit that happens to equal one token today says so with a
+# FACTOR (that token's price in the API's numeraire), not with the token's name.
+# A config still setting the key is REFUSED rather than ignored, because
+# ignoring it would silently change the denomination the fees are quoted in.
+REMOVED_KEYS = {
+    "reference_asset_label": (
+        "the pinned-token reference mode was removed: the reference unit is always an "
+        "abstract factor, never a token, so that no asset is a privileged 1:1 anchor. "
+        "Express the same denomination as %s, the conversion factor giving that token's "
+        "price in the market source's numeraire (source.quote_currency): with the token "
+        "worth 0.05 USD and a USD-quoted source, set %s to 0.05. That reproduces every "
+        "RATIO the pinned mode published, but NOT its absolute rates: the pinned mode "
+        "divided by the anchor's own scaled rate, which carries the anchor's "
+        "denomination, while a factor divides by round(factor * 1e8), which does not. "
+        "The whole map therefore comes out 10**(8 - p) times the pinned mode's, where p "
+        "is the anchor token's precision, and the anchor itself lands on "
+        "1e8 * 10**(8 - p), not on 1e8: identical for an 8-decimal anchor, but a "
+        "precision-2 anchor at 0.05 lands on 1e14 with every rate 1e6 times its old "
+        "value. The node values a fee as atoms * rate / 1e8, so a fee floor calibrated "
+        "against the pinned mode's rates has to be rescaled by that same 10**(8 - p). "
+        "Then delete reference_asset_label and start the server again."
+        % (REFERENCE_FACTOR_KEYS[0], REFERENCE_FACTOR_KEYS[0])),
+}
+
+
+class ConfigError(ValueError):
+    """A config the server refuses to run with."""
+
+
+def check_config(cfg):
+    """Raise ConfigError if the config uses a removed mode.
+
+    Refusing to start is deliberate. The alternative, warning and carrying on,
+    would publish a whitelist denominated differently from the one the operator
+    configured, and a fee denomination is not something to change behind their
+    back: every asset's rate would move at once, on a node that is live. An
+    unreadable config stops the server today (json.load throws); a config asking
+    for a denomination this server no longer knows how to produce is the same
+    class of problem, and the operator fixes it in one edit."""
+    for key, guidance in REMOVED_KEYS.items():
+        if key in cfg:
+            raise ConfigError("config key %r is no longer supported: %s" % (key, guidance))
+
 
 class NodeRPC:
     """Minimal JSON-RPC client for the Sequentia node."""
@@ -101,7 +176,7 @@ class NodeRPC:
     def __init__(self, cfg):
         self.url = "http://%s:%d/" % (cfg.get("host", "127.0.0.1"), cfg["port"])
         if "cookie" in cfg:
-            with open(cfg["cookie"]) as f:
+            with open(cfg["cookie"], encoding="utf8") as f:
                 auth = f.read().strip()
         else:
             auth = "%s:%s" % (cfg["user"], cfg["password"])
@@ -242,13 +317,14 @@ class AssetState:
 
 class PriceServer:
     def __init__(self, config, dry_run=False, config_path=None):
+        check_config(config)  # every construction path, not just the CLI
         self.cfg = config
         self.dry_run = dry_run
         self.config_path = config_path
         self._lock = threading.Lock()
         self._states = {}            # TICKER -> AssetState
         self.last_rates = {}         # asset_id -> rate (last published)
-        self.last_report = []        # [{ticker, id, domain, price, rate, status}] for the UI
+        self.last_report = []        # [{ticker, id, domain, price, price_unit, rate, status}] for the UI
         self.last_prices = {}        # TICKER -> {price, market_cap, volume_24h} (for the public API)
         self.last_poll_ts = None     # unix time of the last completed poll
         self.node_status = []        # [{url, ok, error, ts}] result of the last publish per node
@@ -273,7 +349,7 @@ class PriceServer:
 
     def apply_config(self, *, source=None, thresholds=None, exceptions=None,
                      poll_interval=None, source_name=None, registry_url=None,
-                     reference=None, nodes=None, ui=None, manual_prices=None):
+                     nodes=None, ui=None, manual_prices=None):
         """Replace config sections from the UI and persist atomically."""
         with self._lock:
             if source is not None:
@@ -289,8 +365,6 @@ class PriceServer:
                 self.cfg["source_name"] = source_name
             if registry_url is not None:
                 self.cfg["registry_url"] = registry_url
-            if reference is not None:
-                self.cfg["reference_asset_label"] = reference
             if nodes is not None:
                 self.cfg["node_rpcs"] = nodes
                 self.cfg.pop("node_rpc", None)
@@ -304,7 +378,7 @@ class PriceServer:
                 self.cfg["ui"] = merged
             if self.config_path:
                 tmp = self.config_path + ".tmp"
-                with open(tmp, "w") as f:
+                with open(tmp, "w", encoding="utf8") as f:
                     json.dump(self.cfg, f, indent=2)
                 os.replace(tmp, self.config_path)
         log.info("config updated via UI and persisted")
@@ -381,32 +455,83 @@ class PriceServer:
         state.pending_rate = None
         return new_rate, ("admitted (forced)" if forced else "admitted")
 
-    def _denominate(self, raw, ticker_of_id):
-        """Optionally re-express rates relative to a reference. Two modes:
-          - reference_price_usd: a FIXED ABSTRACT numeraire (a value in the API's
-            quote currency that matches NO token). Every asset — including the
-            policy asset — floats against it; nothing is a privileged 1:1 anchor.
-            This is the no-privileged-coin model (first principle #3/#4): set it to
-            the policy asset's price at config time to keep current fee valuations,
-            and the policy asset then floats like any other asset as prices move.
-          - reference_asset_label: pins a Sequentia TOKEN to COIN (legacy; that
-            token IS privileged as the 1:1 anchor).
-        With neither, rates are published in the API's quote currency directly."""
-        ref_price = self.cfg.get("reference_price_usd")
-        if ref_price:
-            ref_rate = round(float(ref_price) * COIN)
-            if ref_rate <= 0:
-                return dict(raw)
-            return {aid: max(1, round(r * COIN / ref_rate)) for aid, r in raw.items()}
-        ref_label = self.cfg.get("reference_asset_label")
-        if not ref_label:
-            return dict(raw)
-        ref_id = next((aid for aid, tk in ticker_of_id.items() if tk.upper() == str(ref_label).upper()), None)
-        if ref_id is None or not raw.get(ref_id):
-            log.warning("reference asset %r unavailable this round; retaining last-good", ref_label)
-            return None
-        ref_rate = raw[ref_id]
-        return {aid: max(1, round(r * COIN / ref_rate)) for aid, r in raw.items()}
+    def reference_factor(self):
+        """The reference-unit conversion factor: how many of the API's numeraire
+        units (the market source's quote currency) make ONE reference unit.
+
+        Returns (factor, key), where key is the config key it came from, or
+        (DEFAULT_REFERENCE_FACTOR, None) when the operator configured none. 1.0
+        is the identity: the reference unit is the API's numeraire as-is.
+
+        A factor this accepts is one _denominate can actually APPLY, so the frame
+        reported here and the frame the published rates carry are always the same
+        frame. Anything else falls back to the identity, loudly."""
+        for key in REFERENCE_FACTOR_KEYS:
+            if key not in self.cfg:
+                continue
+            try:
+                f = float(self.cfg[key])
+            except (TypeError, ValueError):
+                log.warning("%s is not a number; ignoring it", key)
+                continue
+            if f <= 0:
+                log.warning("%s must be greater than 0 (got %r); ignoring it", key, self.cfg[key])
+                continue
+            if round(f * COIN) <= 0:
+                # Rates are integers scaled by COIN, so a factor that does not
+                # round to at least one unit in the last place has no divisor to
+                # be applied with: _denominate used to answer that by quietly
+                # publishing UNTRANSLATED API rates while the UI announced the
+                # frame. Refuse it here instead, once, where the frame is decided.
+                log.warning("%s is too small to apply (got %r; the factor must exceed %g); ignoring it",
+                            key, self.cfg[key], 0.5 / COIN)
+                continue
+            return f, key
+        return DEFAULT_REFERENCE_FACTOR, None
+
+    @staticmethod
+    def _rescale(api_rates, ref_rate):
+        """Re-express API-sourced rates against `ref_rate`: the value of ONE
+        reference unit in the API's numeraire, scaled by COIN like every rate."""
+        return {aid: max(1, round(r * COIN / ref_rate)) for aid, r in api_rates.items()}
+
+    def _denominate(self, api_rates, manual_rates):
+        """Build the map to publish: the API-SOURCED rates re-expressed in the
+        operator's reference unit, with the MANUAL rates merged in unchanged.
+
+        The reference unit is an arbitrary and economically INERT denomination,
+        set by ONE conversion factor (api_units_per_reference_unit, or its legacy
+        name reference_price_usd): how many API-numeraire units make one reference
+        unit. Every price the API quotes is translated by that SAME factor, so
+        every relative value survives untouched: dollars, euros or an entirely
+        invented unit produce identical RATIOS in the whitelist, and ratios are
+        all the fee market acts on. Choosing the reference unit changes what this
+        server displays, and nothing about the economics. Relative values always
+        come from the API. Nothing is a privileged 1:1 anchor: every asset
+        floats, the Sequence token exactly like any other.
+
+        The factor becomes load-bearing in exactly ONE place: an asset the API
+        does not price, which the operator therefore prices BY HAND. A
+        hand-entered price is ALREADY in reference units, so it is merged in as
+        it stands and is never translated a second time, while everything the API
+        priced is translated exactly once.
+
+        With no factor configured the default 1.0 applies, which publishes the
+        API's numeraire unchanged. Whatever the factor, this ALWAYS returns a map:
+        the frame is decided from config alone, so no asset's availability can
+        decide whether this round publishes at all."""
+        factor, _key = self.reference_factor()
+        # reference_factor() only returns factors that round to a usable divisor,
+        # so this cannot be 0.
+        divisor = round(factor * COIN)
+        if divisor == COIN:
+            # The identity: one reference unit IS one API-numeraire unit, so the
+            # API rates pass through as they are. Taken as a branch rather than
+            # left to _rescale because scaling by COIN and dividing by COIN is a
+            # no-op only in exact arithmetic: in floats it would round the low
+            # digits of a large rate for nothing.
+            return {**api_rates, **manual_rates}
+        return {**self._rescale(api_rates, divisor), **manual_rates}
 
     @staticmethod
     def _clamp(rates):
@@ -456,19 +581,25 @@ class PriceServer:
         #    only thing special about SEQ is staking, never the fee market).
         #
         #    The market source can be scoped (source.mode = all | except | only, with
-        #    source.assets). An asset with no market price — out of scope, or simply
-        #    missing from the feed — can carry an operator-set MANUAL price (in the
-        #    quote currency): it is admitted at that fixed rate, bypassing the market
-        #    criteria (the operator setting a price by hand IS the decision), but
-        #    always_reject still wins.
+        #    source.assets). An asset with no market price (out of scope, or simply
+        #    missing from the feed) can carry an operator-set MANUAL price: it is
+        #    admitted at that fixed rate, bypassing the market criteria (the operator
+        #    setting a price by hand IS the decision), but always_reject still wins.
+        #    A manual price is entered in the server's REFERENCE units, so it is kept
+        #    in a SEPARATE map from the API-sourced rates: only the API-sourced ones
+        #    are translated into reference units (step 4), and the manual ones are
+        #    merged in afterwards exactly as the operator set them.
         smode = src.get("mode", "all")
         sassets = {str(x).upper() for x in src.get("assets", [])}
+
         def source_covers(tk, feed_key, asset_id):
             # An entry matches by registry ticker, feed key (alias) or asset id,
             # so "SEQ" covers the native whether the registry calls it TSEQ or SEQ.
             hit = tk in sassets or feed_key in sassets or asset_id.upper() in sassets
-            if smode == "only": return hit
-            if smode == "except": return not hit
+            if smode == "only":
+                return hit
+            if smode == "except":
+                return not hit
             return True
         manual = {}
         for k, v in self.cfg.get("manual_prices", {}).items():
@@ -478,12 +609,16 @@ class PriceServer:
                 manual[str(k).upper()] = float(v)
             except (TypeError, ValueError):
                 pass
-        raw, report, ticker_of_id = {}, [], {}
+        # Each decision row records the unit its `price` is stated in, because the
+        # two branches below do not share one: a market price is in the API's
+        # numeraire, a hand-entered one is in reference units. The table and
+        # /api/whitelist read it rather than assuming a single frame.
+        quote_unit = src.get("quote_currency", DEFAULT_QUOTE)
+        raw, manual_rates, report = {}, {}, []
         with self._lock:
             rejects = [str(x).upper() for x in self.exceptions().get("always_reject", [])]
             for ticker in sorted(reg_tickers):
                 asset_id, domain, precision = registry[ticker]
-                ticker_of_id[asset_id] = ticker
                 tk_u = ticker.upper()
                 feed_key = aliases.get(tk_u, tk_u)
                 covered = source_covers(tk_u, feed_key, asset_id)
@@ -494,33 +629,98 @@ class PriceServer:
                         if tk_u in rejects or asset_id.upper() in rejects:
                             status, rate = "rejected: always_reject", None
                         else:
+                            # mp is already in REFERENCE units, so this rate is
+                            # the one that gets published: the range check below
+                            # runs in the very frame the operator typed, and no
+                            # re-denomination is ever applied to it afterwards.
+                            # EVERY manual row is in reference units, without
+                            # exception, because no asset can be the reference
+                            # unit any more.
                             rate = scaled_rate(mp, precision)
                             if not (0 < rate <= MAX_RATE):
                                 status, rate = "skipped: manual rate out of range", None
                             else:
                                 status = "admitted (manual price)"
-                                raw[asset_id] = rate
+                                manual_rates[asset_id] = rate
                         report.append({"ticker": ticker, "id": asset_id, "domain": domain,
-                                       "price": mp, "rate": rate, "status": status})
+                                       "price": mp, "price_unit": "reference units",
+                                       "rate": rate, "status": status})
                         continue
                     why = ("skipped: outside the market-source scope, no manual price"
                            if not covered else "skipped: no price from API")
                     report.append({"ticker": ticker, "id": asset_id, "domain": domain,
-                                   "price": None, "rate": None, "status": why})
+                                   "price": None, "price_unit": quote_unit,
+                                   "rate": None, "status": why})
                     continue
                 state = self._states.setdefault(ticker, AssetState(vol_window))
                 rate, status = self._admit(ticker, asset_id, domain, m, state, precision)
                 if rate is not None:
                     raw[asset_id] = rate
                 report.append({"ticker": ticker, "id": asset_id, "domain": domain,
-                               "price": m.get("price"), "rate": rate, "status": status})
+                               "price": m.get("price"), "price_unit": quote_unit,
+                               "rate": rate, "status": status})
 
-        # 4) (optional) re-denominate, clamp, publish
-        rates = self._denominate(raw, ticker_of_id)
-        if rates is None:
+        # 4) re-denominate the API-sourced rates into the reference unit, and
+        #    merge the manual ones in UNCHANGED (they were entered in reference
+        #    units already; translating them again would misprice them against
+        #    everything else). The two maps are disjoint by construction, an asset
+        #    takes the manual branch only when it has no API price, so the merge
+        #    order only matters as a guarantee: a manual price wins.
+        #
+        #    This step always yields a map, so the report below is always restated
+        #    against the rates of THIS round. The earlier returns (registry or
+        #    price fetch failed) leave last_report untouched along with
+        #    last_rates, so the two stay from one and the same completed poll:
+        #    a stored report never describes rates that were not published.
+        rates = self._clamp(self._denominate(raw, manual_rates))
+        # Restate every decision in the frame that was actually PUBLISHED. The
+        # per-asset rates recorded in step 3 are pre-denomination for the
+        # API-sourced ones and post-denomination for the manual ones, which would
+        # put two frames in one column of the decisions table and of
+        # /api/whitelist. A row whose rate did not survive the clamp says so.
+        for r in report:
+            if r["rate"] is None:
+                continue
+            published = rates.get(r["id"])
+            if published is None:
+                r["rate"], r["status"] = None, "skipped: rate outside the publishable range in reference units"
+            else:
+                r["rate"] = published
+        # A round that admitted NOTHING is not a policy, it is a failure. Publishing
+        # it would empty every fed node's whitelist, and since the node no longer
+        # falls back to the policy asset at 1:1 that halts relay just as surely as
+        # the shutdown clear did. One bad feed response, or a simultaneous trip of
+        # the market-cap / volume / change-factor floors, must not be able to do
+        # that. Keep the last good map and say so loudly.
+        if not rates:
+            if self.last_rates:
+                log.error("this poll admitted NO assets; REFUSING to publish an empty whitelist. "
+                          "Keeping the last good set of %d rate(s) in place; relay is unaffected. "
+                          "Investigate the feed or the admission thresholds.", len(self.last_rates))
+                self.last_report = report
+                self.last_prices = prices
+                self.last_poll_ts = time.time()
+                return self.last_rates
+            log.error("this poll admitted NO assets and there is no previous set to fall back on; "
+                      "publishing nothing. Fed nodes keep whatever they already had.")
             self.last_report = report
-            return self.last_rates
-        rates = self._clamp(rates)
+            self.last_prices = prices
+            self.last_poll_ts = time.time()
+            return {}
+
+        # A round that admitted FEWER assets than the last one is not necessarily
+        # wrong — an asset can legitimately fail its thresholds — but it silently
+        # removes a fee asset users may be holding for exactly that purpose, so it
+        # is named rather than left to be inferred from a count in a later line.
+        dropped = sorted(set(self.last_rates) - set(rates))
+        if dropped:
+            by_id = {r["id"]: r for r in report}
+            for asset_id in dropped:
+                r = by_id.get(asset_id, {})
+                log.warning("asset %s (%s) was in the last whitelist and is NOT in this one: %s. "
+                            "Nodes will stop accepting fees in it.",
+                            r.get("ticker", "?"), asset_id[:16], r.get("status", "no longer discovered"))
+
         self.last_rates = rates
         self.last_report = report
         self.last_prices = prices
@@ -560,13 +760,37 @@ class PriceServer:
             deadline = time.time() + self.cfg.get("poll_interval_secs", 60)
             while not self.stopping and time.time() < deadline:
                 time.sleep(0.5)
-        if not self.dry_run:
+        # ⚠ DO NOT CLEAR THE WHITELIST HERE.
+        #
+        # This used to push `setfeeexchangerates {}` to every node on SIGTERM. That
+        # was fail-safe for exactly one reason: the node fell back to accepting the
+        # policy asset 1:1 whenever the whitelist did not list it, so an empty map
+        # still left a working fee asset. That fallback is gone — no asset is the
+        # reference unit, and an asset absent from the whitelist is simply not
+        # accepted, the policy asset included.
+        #
+        # So clearing on shutdown now means: every fed node accepts NO fee asset,
+        # RecomputeFees evicts, the mempools empty and RELAY STOPS FLEET-WIDE.
+        # Stopping a monitoring sidecar must never take the network's fee policy
+        # down with it. The last-good rates stay in place instead; they were pushed
+        # with persist=False, so they are runtime state that a node restart clears
+        # by itself, and a node that never restarts keeps relaying on the last
+        # policy this server published rather than on none at all.
+        #
+        # An operator who genuinely wants the old behaviour can opt in, but it is
+        # off by default because the safe choice must not be the one you remember
+        # to configure.
+        if not self.dry_run and self.cfg.get("clear_whitelist_on_shutdown", False):
             for rpc in self.rpcs:
                 try:
                     rpc.call("setfeeexchangerates", {}, False)  # persist=False: clear without touching the static file
                 except Exception as e:
                     log.warning("could not clear the fee-asset whitelist on %s: %s", rpc.url, e)
-            log.info("cleared the fee-asset whitelist on shutdown")
+            log.warning("cleared the fee-asset whitelist on shutdown (clear_whitelist_on_shutdown=true): "
+                        "every fed node now accepts NO fee asset and will not relay until this server runs again")
+        else:
+            log.info("shutting down; leaving the last published fee-asset whitelist in place "
+                     "(%d rate(s)) so relay continues", len(self.last_rates))
 
     def _stop(self, _sig, _frame):
         self.stopping = True
@@ -613,6 +837,35 @@ def _src(srv):
         "price_path": s.get("price_path", "price"),
         "market_cap_path": s.get("market_cap_path", "market_cap"),
         "volume_24h_path": s.get("volume_24h_path", "volume_24h"),
+    }
+
+
+def _whitelist_payload(srv):
+    """The body of GET /api/whitelist: the published rates, the per-asset
+    decisions, and the FRAME both are stated in.
+
+    The rates are in reference units, which are only the same thing as the quote
+    currency under the identity factor. Naming the quote currency alone would
+    therefore disclose the wrong frame to anyone re-using this server as their
+    market source, so the reference unit is spelled out: the factor in force, the
+    config key it came from (null when none is set and the default applies), and
+    the quote currency it converts from."""
+    quote = _src(srv)["quote_currency"]
+    factor, factor_key = srv.reference_factor()
+    return {
+        "updated": srv.last_poll_ts,
+        "quote_currency": quote,
+        "reference_unit": {
+            "api_units_per_reference_unit": factor,
+            "config_key": factor_key,
+            "quote_currency": quote,
+            "note": ("a rate is one whole unit's value in reference units, scaled by 1e8 and by "
+                     "a further 10**(8 - the asset's decimals) so the node can value fees "
+                     "precision-blind (1e8 alone for an 8-decimal asset); "
+                     "one reference unit = %g %s" % (factor, quote)),
+        },
+        "rates": srv.last_rates,
+        "decisions": srv.last_report,
     }
 
 
@@ -755,7 +1008,7 @@ document.getElementById('nodelist').appendChild(c);}
 function rmNode(b){b.closest('tr').remove();}
 function addManual(){var l=document.getElementById('list_manual');var d=document.createElement('div');d.className='excrow';
 d.innerHTML='<input name=manual_ticker placeholder="TICKER or 64-hex id" style="flex:2">'+
-'<input name=manual_price placeholder="price in the quote currency" style="flex:1">'+
+'<input name=manual_price placeholder="price in reference units" style="flex:1">'+
 '<button type=button class=rm onclick="this.parentNode.remove()">\\u00d7</button>';
 l.appendChild(d);d.querySelector('input').focus();}
 function cellVal(tr,i){var td=tr.cells[i];if(!td)return'';var v=td.getAttribute('data-v');
@@ -827,8 +1080,10 @@ def _fmt_age(ts):
     if not ts:
         return "never"
     d = int(time.time() - ts)
-    if d < 90: return "%d s ago" % d
-    if d < 5400: return "%d min ago" % (d // 60)
+    if d < 90:
+        return "%d s ago" % d
+    if d < 5400:
+        return "%d min ago" % (d // 60)
     return "%d h ago" % (d // 3600)
 
 
@@ -855,12 +1110,17 @@ def _decisions_table(srv):
             '<span class="pill bad">REJECTED</span>' if str(r["status"]).startswith("rejected")
             else '<span class="pill warn">SKIPPED</span>')
         price = r.get("price")
+        # Each row states its own price unit: a market price is in the quote
+        # currency, a hand-entered one is in reference units, and a single column
+        # heading cannot be true of both.
+        price_unit = r.get("price_unit") or quote
         mcap, vol = m.get("market_cap"), m.get("volume_24h")
         rows.append("".join([
             '<tr><td data-v="', esc(r["ticker"]), '"><b>', esc(r["ticker"]), "</b><div class='mut mono'>",
             esc((r["id"] or "")[:8]), "…</div></td>",
             '<td class="num r" data-v="', "%.10g" % price if price else "-1", '">',
-            esc("%.6g" % price) if price else "—", "</td>",
+            (esc("%.6g" % price) + ' <span class=mut>' + esc(price_unit) + "</span>") if price else "&mdash;",
+            "</td>",
             '<td class="num r" data-v="', "%.10g" % mcap if mcap is not None else "-1", '">', _fmt_qty(mcap), "</td>",
             '<td class="num r" data-v="', "%.10g" % vol if vol is not None else "-1", '">', _fmt_qty(vol), "</td>",
             '<td data-v="', ("0" if ok else "1"), '">', pill, "</td>",
@@ -875,7 +1135,7 @@ def _decisions_table(srv):
         '<select id=pgs_dec onchange=applyView(dec)>', opts,
         '<option value=0', " selected" if not page else "", ">all</option></select>",
         '<span id=cnt_dec class=mut></span></div>',
-        '<table class=sortable id=dec><thead><tr><th>Asset</th><th class=r>Price (', esc(quote), ")</th>",
+        '<table class=sortable id=dec><thead><tr><th>Asset</th><th class=r>Price</th>',
         "<th class=r>Market cap</th><th class=r>24h volume</th><th>Decision</th><th>Why</th></tr></thead>",
         "<tbody>", "".join(rows), "</tbody></table>",
     ])
@@ -894,7 +1154,7 @@ def _render_public(srv):
         '<div class=kpi><div class=l>Last update</div><div class=v>', _fmt_age(srv.last_poll_ts),
         "</div><div class=s>polls every ", esc(str(srv.cfg.get("poll_interval_secs", 60))), " s</div></div>",
         '<div class=kpi><div class=l>Quote currency</div><div class=v>', esc(quote),
-        "</div><div class=s>all prices and caps in this unit</div></div>",
+        "</div><div class=s>market prices and caps in this unit</div></div>",
         '<div class=kpi><div class=l>Publisher</div><div class=v style="font-size:.95rem">', esc(srv.source_name),
         "</div><div class=s>read-only public view</div></div>",
         "</div>",
@@ -927,6 +1187,19 @@ def _scope_and_manual_cards(srv):
     esc = html.escape
     s = dict(srv.source())
     quote = _src(srv)["quote_currency"]
+    # State the frame that is actually in force. The reference unit is always a
+    # conversion factor, so there are only two things to say: the identity (the
+    # quote currency itself), or the factor and the config key carrying it. A
+    # factor the server refused is not announced, because reference_factor()
+    # returns only what _denominate will apply.
+    factor, factor_key = srv.reference_factor()
+    if factor == 1.0:
+        ref_note = ("Reference unit: one " + esc(quote) + ", the market source's own quote currency "
+                    "(conversion factor 1.0, the identity).")
+    else:
+        ref_note = ("Reference unit: one reference unit = " + esc("%g" % factor) + " " + esc(quote) +
+                    " (conversion factor <code>" + esc(factor_key or REFERENCE_FACTOR_KEYS[0]) +
+                    "</code>, set in the config file).")
     smode = s.get("mode", "all")
     ck = lambda v: "checked" if v else ""
     assets_rows = "".join(
@@ -952,10 +1225,12 @@ def _scope_and_manual_cards(srv):
         "<div id=list_source_assets>", assets_rows, "</div>",
         "<div><button type=button class=ghost onclick=\"addExc('source_assets')\">+ Add asset</button></div>",
         "</div></div>",
-        "<div class=card><h2>Manual prices <span class=right>in ", esc(quote), ", for assets without a market source</span></h2><div class=frm>",
-        "<div class=hint>A fixed price per unit, in the quote currency — e.g. 0.5 means 1 unit = 0.5 ", esc(quote),
-        ". Used only when the asset has no market price (out of scope above, or missing from the feed). A manually "
-        "priced asset is admitted at that rate — setting it by hand IS the decision — but an always-reject exception still wins.</div>",
+        "<div class=card><h2>Manual prices <span class=right>in reference units, for assets without a market source</span></h2><div class=frm>",
+        "<div class=hint>A fixed price per unit, expressed in this server's <b>reference units</b> (not in the market "
+        "source's quote currency): 0.5 means 1 unit is worth 0.5 reference units. It is published exactly as entered "
+        "and never re-denominated, because the conversion factor applies only to prices coming from the API. ", ref_note,
+        " Used only when the asset has no market price (out of scope above, or missing from the feed). A manually "
+        "priced asset is admitted at that rate, setting it by hand IS the decision, but an always-reject exception still wins.</div>",
         "<div id=list_manual>", manual_rows, "</div>",
         "<div><button type=button class=ghost onclick=addManual()>+ Add manual price</button></div>",
         "</div></div>",
@@ -1011,9 +1286,11 @@ def _render_admin(srv, csrf_token, saved=False, error=""):
         "<div class=card><h2>Market data source</h2><div class=frm>",
         "<div class=frow><label>API URL</label><input class=mono name=source_url value=\"", esc(s["url"]), "\"></div>",
         "<div class=frow><label>Quote currency</label><div><input name=quote_currency value=\"", esc(quote),
-        "\" style=\"max-width:120px\"><div class=hint>The currency the API reports prices in — usually plain USD "
-        "(it does not need to exist as an on-chain asset). Every price, market cap and volume on these pages, and the "
-        "rates pushed to your nodes, are expressed in it.</div></div></div>",
+        "\" style=\"max-width:120px\"><div class=hint>The currency the API reports prices in, usually plain USD "
+        "(it does not need to exist as an on-chain asset). Every price, market cap and volume on these pages is "
+        "expressed in it. The rates pushed to your nodes are in <b>reference units</b>, which are this currency "
+        "only while the conversion factor <code>api_units_per_reference_unit</code> is 1.0 (the default); set any "
+        "other factor and the rates are in that unit instead.</div></div></div>",
         "<div class=frow><label>API format</label><div>",
         '<label class=check style="display:inline-flex;margin-right:16px"><input type=radio name=format value=sequentia ',
         ck(not is_custom), "> Sequentia-format</label>",
@@ -1070,6 +1347,7 @@ def _render_admin(srv, csrf_token, saved=False, error=""):
 
     # -- nodes tab (its own form) --
     nodes = _nodes_current(srv)
+
     def node_row(n):
         return "".join([
             "<tr><td><input name=node_name value=\"", esc(str(n.get("name", ""))), "\" placeholder=\"my node\"></td>",
@@ -1332,27 +1610,28 @@ def start_config_ui(price_server, host, port):
         def do_GET(self):
             path = urllib.parse.urlsplit(self.path).path
             if path == "/api/prices":
-                if self._public_gate(ui_cfg().get("public_api")): return
+                if self._public_gate(ui_cfg().get("public_api")):
+                    return
                 data = dict(srv.last_prices)
                 data["_meta"] = {"quote_currency": _src(srv)["quote_currency"],
                                  "updated": srv.last_poll_ts, "publisher": srv.source_name,
                                  "format": "sequentia"}
                 self._send(200, json.dumps(data, indent=2), "application/json")
             elif path in ("/api/whitelist", "/status"):  # /status: legacy alias
-                if self._public_gate(ui_cfg().get("public_api")): return
-                self._send(200, json.dumps({
-                    "updated": srv.last_poll_ts,
-                    "quote_currency": _src(srv)["quote_currency"],
-                    "rates": srv.last_rates, "decisions": srv.last_report}, indent=2),
-                    "application/json")
+                if self._public_gate(ui_cfg().get("public_api")):
+                    return
+                self._send(200, json.dumps(_whitelist_payload(srv), indent=2),
+                           "application/json")
             elif path == "/":
                 if self._authed():
                     self._redirect("/admin")  # the desktop GUI opens the root URL
                     return
-                if self._public_gate(ui_cfg().get("public_status")): return
+                if self._public_gate(ui_cfg().get("public_status")):
+                    return
                 self._send(200, _render_public(srv))
             elif path == "/public":
-                if self._public_gate(ui_cfg().get("public_status")): return
+                if self._public_gate(ui_cfg().get("public_status")):
+                    return
                 self._send(200, _render_public(srv))
             elif path == "/admin":
                 if self._authed():
@@ -1362,7 +1641,8 @@ def start_config_ui(price_server, host, port):
                     self._send(200, _render_login())
             elif path == "/admin/config.json":
                 if not self._authed():
-                    self._redirect("/admin"); return
+                    self._redirect("/admin")
+                    return
                 self._send(200, json.dumps(srv.cfg, indent=2), "application/json",
                            headers={"Content-Disposition": "attachment; filename=price-server-config.json"})
             elif path == "/logout":
@@ -1378,14 +1658,16 @@ def start_config_ui(price_server, host, port):
             path = urllib.parse.urlsplit(self.path).path
             n = int(self.headers.get("Content-Length", 0) or 0)
             if n > 1_000_000:
-                self._send(413, "request too large"); return
+                self._send(413, "request too large")
+                return
             form = urllib.parse.parse_qs(self.rfile.read(n).decode())
             g = lambda k, d="": form.get(k, [d])[0]
 
             if path == "/login":
                 pw_hash = ui_cfg().get("password_hash")
                 if not pw_hash:
-                    self._redirect("/admin"); return
+                    self._redirect("/admin")
+                    return
                 time.sleep(0.3)  # flat cost per attempt; blunts online guessing
                 if _check_password(pw_hash, g("password")):
                     tok = secrets.token_urlsafe(32)
@@ -1399,13 +1681,16 @@ def start_config_ui(price_server, host, port):
 
             # Everything below changes the config: admin + same-origin + CSRF.
             if not self._authed():
-                self._send(403, "forbidden: not logged in"); return
+                self._send(403, "forbidden: not logged in")
+                return
             if not _same_origin(self):
                 log.warning("rejected %s: cross-origin or missing Origin/Referer", path)
-                self._send(403, "forbidden: cross-origin request"); return
+                self._send(403, "forbidden: cross-origin request")
+                return
             if not hmac.compare_digest(g("csrf_token"), csrf_token):
                 log.warning("rejected %s: bad or missing CSRF token", path)
-                self._send(403, "forbidden: invalid CSRF token"); return
+                self._send(403, "forbidden: invalid CSRF token")
+                return
 
             try:
                 if path == "/save":
@@ -1414,7 +1699,8 @@ def start_config_ui(price_server, host, port):
                     nodes = _nodes_parse(form)
                     if not nodes:
                         self._send(200, _render_admin(srv, csrf_token,
-                                                      error="No valid node rows (each needs host + port).")); return
+                                                      error="No valid node rows (each needs host + port)."))
+                        return
                     srv.apply_config(nodes=nodes)
                 elif path == "/access":
                     ui = {"public_status": bool(g("public_status")),
@@ -1432,19 +1718,24 @@ def start_config_ui(price_server, host, port):
                         cur_hash = ui_cfg().get("password_hash")
                         if cur_hash and not _check_password(cur_hash, g("cur_password")):
                             self._send(200, _render_admin(srv, csrf_token,
-                                                          error="Current password is wrong.")); return
+                                                          error="Current password is wrong."))
+                            return
                         if new_pw != g("new_password2"):
                             self._send(200, _render_admin(srv, csrf_token,
-                                                          error="The new passwords don't match.")); return
+                                                          error="The new passwords don't match."))
+                            return
                         if len(new_pw) < 8:
                             self._send(200, _render_admin(srv, csrf_token,
-                                                          error="Password too short — use at least 8 characters.")); return
+                                                          error="Password too short — use at least 8 characters."))
+                            return
                         ui["password_hash"] = _hash_password(new_pw)
                     srv.apply_config(ui=ui)
                 else:
-                    self._send(404, "not found"); return
+                    self._send(404, "not found")
+                    return
             except Exception as e:
-                self._send(400, "error: " + html.escape(str(e))); return
+                self._send(400, "error: " + html.escape(str(e)))
+                return
             self._redirect("/admin?saved=1")
 
         def log_message(self, *a):
@@ -1477,8 +1768,16 @@ def main():
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
 
-    with open(args.config) as f:
+    with open(args.config, encoding="utf8") as f:
         config = json.load(f)
+
+    # Refuse a config asking for a denomination this server no longer produces,
+    # before anything reads a price or rewrites the file. See check_config().
+    try:
+        check_config(config)
+    except ConfigError as e:
+        log.error("%s: %s", args.config, e)
+        return 2
 
     if args.set_password:
         import getpass
@@ -1489,7 +1788,7 @@ def main():
             parser.error("the passwords don't match")
         config.setdefault("ui", {})["password_hash"] = _hash_password(pw)
         tmp = args.config + ".tmp"
-        with open(tmp, "w") as f:
+        with open(tmp, "w", encoding="utf8") as f:
             json.dump(config, f, indent=2)
         os.replace(tmp, args.config)
         print("Admin password set. Restart the price server to pick it up.")

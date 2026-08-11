@@ -178,7 +178,8 @@ class ImportRescanTest(BitcoinTestFramework):
             ))
             variant.key = self.nodes[1].dumpprivkey(variant.address["address"])
             variant.initial_amount = get_rand_amount()
-            variant.initial_txid = self.nodes[0].sendtoaddress(variant.address["address"], variant.initial_amount)
+            # SEQUENTIA: an open-fee-market chain has no default fee asset.
+            variant.initial_txid = self.nodes[0].sendtoaddress(address=variant.address["address"], amount=variant.initial_amount, fee_asset_label='bitcoin')
             self.generate(self.nodes[0], 1)  # Generate one block for each send
             variant.confirmation_height = self.nodes[0].getblockcount()
             variant.timestamp = self.nodes[0].getblockheader(self.nodes[0].getbestblockhash())["time"]
@@ -210,7 +211,7 @@ class ImportRescanTest(BitcoinTestFramework):
         # Create new transactions sending to each address.
         for i, variant in enumerate(IMPORT_VARIANTS):
             variant.sent_amount = get_rand_amount()
-            variant.sent_txid = self.nodes[0].sendtoaddress(variant.address["address"], variant.sent_amount)
+            variant.sent_txid = self.nodes[0].sendtoaddress(address=variant.address["address"], amount=variant.sent_amount, fee_asset_label='bitcoin')
             self.generate(self.nodes[0], 1)  # Generate one block for each send
             variant.confirmation_height = self.nodes[0].getblockcount()
 

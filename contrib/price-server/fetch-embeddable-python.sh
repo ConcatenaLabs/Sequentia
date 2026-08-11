@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Fetch the official Windows "embeddable" CPython into ./python/ so the Windows
 # installer can bundle a self-contained interpreter for the price-server sidecar
 # (the node GUI's Settings -> Price server launcher runs price_server.py with it).
@@ -9,6 +9,7 @@
 #
 # Run this once before building the Windows installer (make deploy). It is
 # idempotent: it re-downloads only if ./python/python.exe is missing.
+export LC_ALL=C
 set -euo pipefail
 
 # Pinned release: verify the archive hash before trusting it (same trust model

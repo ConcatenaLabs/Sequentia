@@ -226,23 +226,75 @@ bool VerifyAmounts(const std::vector<CTxOut>& inputs, const CTransaction& tx, st
             CalculateAsset(assetID, issuance.assetEntropy);
             CalculateReissuanceToken(assetTokenID, issuance.assetEntropy, issuance.nAmount.IsCommitment());
 
-            // Must check that prevout is the blinded issuance token
-            // prevout's asset tag = assetTokenID + assetBlindingNonce
-            if (secp256k1_generator_generate_blinded(secp256k1_ctx_verify_amounts, &gen, assetTokenID.begin(), issuance.assetBlindingNonce.begin()) != 1) {
-                return false;
-            }
-            // Serialize the generator for direct comparison
-            unsigned char derived_generator[33];
-            secp256k1_generator_serialize(secp256k1_ctx_verify_amounts, derived_generator, &gen);
+            // SEQUENTIA: the reissuance token may be held on an UNBLINDED output.
+            //
+            // Elements assumes it never is. It encodes "this input is a reissuance"
+            // as "assetBlindingNonce is non-null", and populates that nonce with the
+            // asset BLINDING FACTOR of the token being spent. It then proves the
+            // spent output really carries the reissuance token by re-deriving the
+            // token's *blinded* asset tag from (assetTokenID, assetBlindingNonce)
+            // and comparing it against the output's asset commitment. A token held
+            // on an unblinded output has a blinding factor of zero, so the nonce is
+            // null, so consensus reads the input as a NEW issuance instead. On
+            // Elements that is harmless because addresses are confidential by
+            // default. Sequentia deliberately flipped that default
+            // (m_default_blinded_addresses=false): addresses are explicit bech32 and
+            // confidentiality is strictly opt-in. Under the inherited Elements rule
+            // a core asset operation -- reissuing an asset -- would work only on the
+            // opt-in confidential path, which is backwards for this chain.
+            //
+            // NO ACTIVATION HEIGHT, DELIBERATELY. CONTRIBUTING.md requires a
+            // height gate on every new consensus rule, and the reason is
+            // retroactive REJECTION: a rule that can reject a block must not
+            // apply to history produced before it existed, or a fresh sync stops
+            // dead where an old block breaks it. This change only ever ACCEPTS
+            // more -- transactions every node rejects today become valid, and
+            // nothing valid becomes invalid -- so no block that was ever accepted
+            // can fail under it, and there is nothing to grandfather. Gating it
+            // would only mean a fresh regtest or a future mainnet behaved
+            // differently from the live testnet, which is the thing to avoid. It
+            // is still a HARD FORK for the running network (old nodes reject the
+            // newly valid blocks) and still needs an all-at-once cutover; that is
+            // a deployment question, not an activation-height one.
+            //
+            // So: a null nonce still means "new issuance" (that rule is untouched),
+            // but within the reissuance branch the spent token input is now allowed
+            // to be EXPLICIT, in which case its asset must equal assetTokenID
+            // exactly and the nonce is ignored -- it serves only as the flag that
+            // selected this branch.
+            //
+            // This is exactly as sound as the blinded path. The generator comparison
+            // is not an authorization check: it only establishes that the output
+            // being spent really carries assetTokenID, which for an explicit asset
+            // is simply read off the output rather than reconstructed. Authority to
+            // reissue comes from SPENDING the token UTXO, which still requires
+            // satisfying that output's scriptPubKey, and that is unchanged. For an
+            // explicit token the nonce proves nothing to begin with, since a
+            // zero blinding factor is public.
+            if (asset.IsExplicit()) {
+                if (asset.GetAsset() != assetTokenID) {
+                    return false;
+                }
+            } else {
+                // Blinded token: the inherited Elements rule, unchanged.
+                // Must check that prevout is the blinded issuance token
+                // prevout's asset tag = assetTokenID + assetBlindingNonce
+                if (secp256k1_generator_generate_blinded(secp256k1_ctx_verify_amounts, &gen, assetTokenID.begin(), issuance.assetBlindingNonce.begin()) != 1) {
+                    return false;
+                }
+                // Serialize the generator for direct comparison
+                unsigned char derived_generator[33];
+                secp256k1_generator_serialize(secp256k1_ctx_verify_amounts, derived_generator, &gen);
 
-            // Belt-and-suspenders: Check that asset commitment from issuance input is correct size
-            if (asset.vchCommitment.size() != sizeof(derived_generator)) {
-                return false;
-            }
+                // Belt-and-suspenders: Check that asset commitment from issuance input is correct size
+                if (asset.vchCommitment.size() != sizeof(derived_generator)) {
+                    return false;
+                }
 
-            // We have already checked the outputs' generator commitment for general validity, so directly compare serialized bytes
-            if (memcmp(asset.vchCommitment.data(), derived_generator, sizeof(derived_generator))) {
-                return false;
+                // We have already checked the outputs' generator commitment for general validity, so directly compare serialized bytes
+                if (memcmp(asset.vchCommitment.data(), derived_generator, sizeof(derived_generator))) {
+                    return false;
+                }
             }
         }
 

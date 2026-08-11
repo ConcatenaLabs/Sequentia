@@ -1913,6 +1913,136 @@ bool AbortNode(BlockValidationState& state, const std::string& strMessage, const
     return state.Error(strMessage);
 }
 
+// SEQUENTIA: the one-time UTXO-set rewrite (Consensus::UtxoRecovery). Read the
+// comment on that struct in consensus/params.h, and the one on
+// CTestNetParams::consensus.utxo_recovery in chainparams.cpp, before touching
+// any of this. The short version: a watchdog destroyed the keys to two testnet
+// treasury outputs, so at one agreed height every node removes those two
+// outpoints from its UTXO set and adds two replacements. It is not a mechanism
+// to reuse.
+//
+// The three functions below are the whole implementation, and they are written
+// so that connect and disconnect are exact inverses:
+//
+//  - BuildUtxoRecoveryTransaction() turns the table into a synthetic
+//    transaction. Nothing ever relays or stores it; it exists so the created
+//    coins have outpoints that are a pure function of the table (its txid is its
+//    own hash), auditable by anyone who can read chainparams.cpp, and beyond
+//    anybody's power to collide with a real transaction.
+//  - ApplyUtxoRecovery() runs from ConnectBlock, after that block's
+//    transactions, and records the coins it removed into an extra CTxUndo
+//    appended to the block's undo data. Recording rather than hardcoding matters:
+//    one of the retired outputs is CONFIDENTIAL, so its exact bytes are not
+//    knowable from the source, and only the undo record can restore it verbatim.
+//  - UndoUtxoRecovery() runs from DisconnectBlock, before that block's
+//    transactions are undone, reversing the order in which the two were applied.
+//
+// Exactly-once follows from where it sits rather than from any flag: it is part
+// of connecting one block, inside the same CCoinsViewCache the block's
+// transactions use, so it commits or rolls back with that block. A reorg that
+// disconnects the block undoes it; a reconnect re-applies it; a reindex from
+// genesis replays it at the same height and reaches the same UTXO set.
+//
+// It is ALL-OR-NOTHING and never fails a block. If a retired outpoint is absent
+// the rewrite does not happen at all and the block still connects, which is what
+// keeps a node that somehow disagrees from stalling or splitting the network.
+// An empty undo record is exactly the marker that says "did not apply".
+
+CTransactionRef BuildUtxoRecoveryTransaction(const Consensus::UtxoRecovery& recovery)
+{
+    CMutableTransaction tx;
+    tx.nVersion = 2;
+    tx.nLockTime = 0;
+    for (const auto& [txid, n] : recovery.retire) {
+        // Empty scriptSig and the default final nSequence: nothing signs this and
+        // nothing relays it, and both fields are part of the txid, so they are
+        // pinned to their defaults rather than left to a caller's choice.
+        tx.vin.emplace_back(COutPoint(txid, n));
+    }
+    for (const Consensus::UtxoRecoveryOutput& out : recovery.create) {
+        tx.vout.emplace_back(CConfidentialAsset(out.asset), CConfidentialValue(out.amount), out.scriptPubKey);
+    }
+    return MakeTransactionRef(std::move(tx));
+}
+
+/** Apply the rewrite to `view`, recording what it removed in `undo`. */
+static void ApplyUtxoRecovery(const Consensus::UtxoRecovery& recovery, CCoinsViewCache& view, int nHeight, CTxUndo& undo)
+{
+    // All-or-nothing. Check every retired outpoint before removing any, so a
+    // missing one leaves the UTXO set exactly as it was.
+    for (const auto& [txid, n] : recovery.retire) {
+        if (!view.HaveCoin(COutPoint(txid, n))) {
+            LogPrintf("UTXO recovery at height %d SKIPPED: %s:%u is not an unspent output\n",
+                      nHeight, txid.GetHex(), n);
+            return;
+        }
+    }
+
+    undo.vprevout.reserve(recovery.retire.size());
+    for (const auto& [txid, n] : recovery.retire) {
+        undo.vprevout.emplace_back();
+        const bool is_spent = view.SpendCoin(COutPoint(txid, n), &undo.vprevout.back());
+        assert(is_spent); // HaveCoin() said so, one loop ago, on the same view
+        LogPrintf("UTXO recovery at height %d: retired %s:%u\n", nHeight, txid.GetHex(), n);
+    }
+
+    const CTransactionRef tx = BuildUtxoRecoveryTransaction(recovery);
+    AddCoins(view, *tx, nHeight);
+    for (size_t o = 0; o < tx->vout.size(); ++o) {
+        LogPrintf("UTXO recovery at height %d: created %s:%u = %d of asset %s to %s\n",
+                  nHeight, tx->GetHash().GetHex(), (unsigned)o,
+                  recovery.create[o].amount, recovery.create[o].asset.GetHex(),
+                  HexStr(recovery.create[o].scriptPubKey));
+    }
+}
+
+/** Reverse ApplyUtxoRecovery(), using the undo record it wrote. */
+static DisconnectResult UndoUtxoRecovery(const Consensus::UtxoRecovery& recovery, CCoinsViewCache& view, CTxUndo& undo)
+{
+    // An empty record means the rewrite did not apply, so there is nothing to
+    // reverse -- not that the undo data is damaged.
+    if (undo.vprevout.empty()) return DISCONNECT_OK;
+    if (undo.vprevout.size() != recovery.retire.size()) {
+        error("%s: UTXO recovery undo record has %u coins, expected %u", __func__,
+              (unsigned)undo.vprevout.size(), (unsigned)recovery.retire.size());
+        return DISCONNECT_FAILED;
+    }
+
+    bool fClean = true;
+
+    // Remove the created coins. Mirrors DisconnectBlock's treatment of a
+    // transaction's outputs, including skipping provably unspendable ones, which
+    // AddCoins never added in the first place.
+    const CTransactionRef tx = BuildUtxoRecoveryTransaction(recovery);
+    const uint256 tx_hash = tx->GetHash();
+    for (size_t o = 0; o < tx->vout.size(); ++o) {
+        if (tx->vout[o].scriptPubKey.IsUnspendable()) continue;
+        Coin coin;
+        if (!view.SpendCoin(COutPoint(tx_hash, o), &coin)) {
+            fClean = false; // already spent, or never created
+        }
+    }
+
+    // Restore the retired coins, in reverse order for symmetry with the removal.
+    for (size_t j = undo.vprevout.size(); j > 0;) {
+        --j;
+        const COutPoint out(recovery.retire[j].first, recovery.retire[j].second);
+        if (undo.vprevout[j].IsSpent()) {
+            fClean = false;
+            continue;
+        }
+        // As in ApplyTxInUndo: an unspent coin already sitting at this outpoint
+        // is an overwrite, and AddCoin has to be told so explicitly. Judge that
+        // per coin, not from the running fClean, which may already be false for
+        // an unrelated reason above.
+        const bool overwrite = view.HaveCoin(out);
+        if (overwrite) fClean = false;
+        view.AddCoin(out, std::move(undo.vprevout[j]), overwrite);
+    }
+
+    return fClean ? DISCONNECT_OK : DISCONNECT_UNCLEAN;
+}
+
 /**
  * Restore the UTXO in a Coin at a given COutPoint
  * @param undo The Coin to be restored.
@@ -1991,9 +2121,25 @@ DisconnectResult CChainState::DisconnectBlock(const CBlock& block, const CBlockI
         return DISCONNECT_FAILED;
     }
 
-    if (blockUndo.vtxundo.size() + 1 != block.vtx.size()) {
+    // SEQUENTIA: the one-time UTXO rewrite, if this is the block that carries it.
+    // ConnectBlock appended one extra CTxUndo past the per-transaction ones, so
+    // the expected undo size differs by one at exactly this height, and the same
+    // predicate decides it on both sides. Undone FIRST, because it was applied
+    // LAST -- and popped afterwards so the per-transaction loop below keeps
+    // indexing vtxundo exactly as it always has.
+    const Consensus::Params& consensus = m_params.GetConsensus();
+    const bool utxo_recovery_here = consensus.UtxoRecoveryAppliesAt(pindex->nHeight);
+
+    if (blockUndo.vtxundo.size() + 1 != block.vtx.size() + (utxo_recovery_here ? 1 : 0)) {
         error("DisconnectBlock(): block and undo data inconsistent");
         return DISCONNECT_FAILED;
+    }
+
+    if (utxo_recovery_here) {
+        const DisconnectResult res = UndoUtxoRecovery(consensus.utxo_recovery, view, blockUndo.vtxundo.back());
+        if (res == DISCONNECT_FAILED) return DISCONNECT_FAILED;
+        fClean = fClean && res != DISCONNECT_UNCLEAN;
+        blockUndo.vtxundo.pop_back();
     }
 
     // undo transactions in reverse order
@@ -3041,6 +3187,28 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
         }
     }
 
+    // SEQUENTIA: the one-time treasury UTXO rewrite, applied by connecting this
+    // one block on this one chain. See ApplyUtxoRecovery() above and the comment
+    // on CTestNetParams::consensus.utxo_recovery in chainparams.cpp.
+    //
+    // Placed here, after every transaction in the block has been applied to the
+    // view and after the PoS registry scans above have read blockundo: the
+    // created coins therefore do not exist while this block's transactions are
+    // validated, and are first spendable in the NEXT block. That is deliberate --
+    // it means the rewrite cannot change whether any transaction in this block is
+    // valid, so a node's verdict on the block is identical with or without it.
+    // Which is also why fJustCheck skips it: block validity does not depend on
+    // it, and TestBlockValidity's throwaway view has no business carrying a UTXO
+    // rewrite. Standing after the delegation and payout scans likewise keeps the
+    // extra undo entry out of vectors those scans walk.
+    //
+    // The extra CTxUndo goes at the END of vtxundo, past the per-transaction
+    // ones, so it changes nothing about how they are indexed on the way back out.
+    if (!fJustCheck && consensusParams.UtxoRecoveryAppliesAt(pindex->nHeight)) {
+        blockundo.vtxundo.emplace_back();
+        ApplyUtxoRecovery(consensusParams.utxo_recovery, view, pindex->nHeight, blockundo.vtxundo.back());
+    }
+
     CAmountMap block_reward = fee_map;
     block_reward[consensusParams.subsidy_asset] += GetBlockSubsidy(pindex->nHeight, consensusParams);
     if (!MoneyRange(block_reward)) {
@@ -3371,6 +3539,11 @@ static uint256 g_pos_immediate_final_hash GUARDED_BY(::cs_main);
 // When set, the activation-time finality gate may cross the finalized point
 // for chains that contain this quorum-certified rival block. -1 = no release.
 static int g_pos_reconcile_release_height GUARDED_BY(::cs_main) = -1;
+// SEQUENTIA: the last candidate the activation-time finality gate refused, so
+// the refusal is reported once per candidate instead of on every pass of the
+// activation loop. A refusal must never be silent — an operator has to be able
+// to see WHY a fork was not adopted — but it must not flood the log either.
+static uint256 g_pos_final_gate_logged GUARDED_BY(::cs_main);
 static uint256 g_pos_reconcile_release_hash GUARDED_BY(::cs_main);
 // Steady-clock seconds at the last advance of the finality point (0 = never).
 static std::atomic<int64_t> g_pos_final_advance_steady{0};
@@ -3700,7 +3873,7 @@ bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew
             // partially-modified `view` is discarded unflushed exactly as on the
             // error path below, so no chainstate change leaks out.
             if (state.GetResult() == BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE) {
-                LogPrintf("STALLING further progress in ConnectTip: block %s (height %d) cannot be verified against the parent chain right now (%s). "
+                LogPrintf("STALLING further progress in ConnectTip: block %s (height %d) cannot be verified against the parent chain right now (%s). " /* Continued */
                           "Chain will not grow until the parent chain daemon is reachable again; the block will be retried, NOT marked invalid.\n",
                           pindexNew->GetBlockHash().ToString(), pindexNew->nHeight, state.GetRejectReason());
                 state = BlockValidationState();
@@ -3759,6 +3932,34 @@ bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew
     return true;
 }
 
+bool CChainState::PosFinalityGateRefuses(const CBlockIndex* pindex) const
+{
+    AssertLockHeld(::cs_main);
+    if (!g_con_pos) return false;
+    // Finality is finality MODULO BITCOIN, so it may only be imposed by a node
+    // that actually watches Bitcoin. A -validateanchor=0 follower delegates
+    // anchor validation to the network and must use plain most-work fork
+    // choice, or a Bitcoin reorg pins it forever (see ContextualCheckBlockHeader).
+    if (g_con_bitcoin_anchor && !g_validate_anchor) return false;
+    if (g_pos_immediate_final_height < 0) return false;
+    // Blocks already on the active chain are never gated.
+    if (m_chain.Contains(pindex)) return false;
+    // Anchoring supremacy: if the finalized block has itself been invalidated
+    // because its Bitcoin anchor was orphaned, finality no longer protects it.
+    const CBlockIndex* pf = m_blockman.LookupBlockIndex(g_pos_immediate_final_hash);
+    if (pf == nullptr || (pf->nStatus & BLOCK_FAILED_MASK)) return false;
+    const CBlockIndex* anc = pindex->GetAncestor(g_pos_immediate_final_height);
+    const bool descends_from_final = pindex->nHeight > g_pos_immediate_final_height &&
+        anc && anc->GetBlockHash() == g_pos_immediate_final_hash;
+    if (descends_from_final) return false;
+    // Finality reconciliation may have released the point for this branch.
+    if (g_pos_reconcile_release_height >= 0 && pindex->nHeight >= g_pos_reconcile_release_height) {
+        const CBlockIndex* rel = pindex->GetAncestor(g_pos_reconcile_release_height);
+        if (rel && rel->GetBlockHash() == g_pos_reconcile_release_hash) return false;
+    }
+    return true;
+}
+
 /**
  * Return the tip of the chain with the most work in it, that isn't
  * known to be invalid (it's however far from certain to be valid).
@@ -3790,29 +3991,26 @@ CBlockIndex* CChainState::FindMostWorkChain()
         // candidates are erased from the set (mirroring the missing-data
         // path); newly arriving rival blocks re-add themselves, and a release
         // re-adds the branch via ReaddBlockIndexCandidates.
-        if (g_con_pos && (!g_con_bitcoin_anchor || g_validate_anchor) &&
-            g_pos_immediate_final_height >= 0 && !m_chain.Contains(pindexNew)) {
-            const CBlockIndex* pf = m_blockman.LookupBlockIndex(g_pos_immediate_final_hash);
-            const bool final_standing = pf && !(pf->nStatus & BLOCK_FAILED_MASK);
-            if (final_standing) {
-                const CBlockIndex* anc = pindexNew->GetAncestor(g_pos_immediate_final_height);
-                const bool descends_from_final = pindexNew->nHeight > g_pos_immediate_final_height &&
-                    anc && anc->GetBlockHash() == g_pos_immediate_final_hash;
-                bool released = false;
-                if (!descends_from_final && g_pos_reconcile_release_height >= 0 &&
-                    pindexNew->nHeight >= g_pos_reconcile_release_height) {
-                    const CBlockIndex* rel = pindexNew->GetAncestor(g_pos_reconcile_release_height);
-                    released = rel && rel->GetBlockHash() == g_pos_reconcile_release_hash;
-                }
-                if (!descends_from_final && !released) {
-                    CBlockIndex* pindexGated = pindexNew;
-                    while (pindexGated && !m_chain.Contains(pindexGated)) {
-                        setBlockIndexCandidates.erase(pindexGated);
-                        pindexGated = pindexGated->pprev;
-                    }
-                    continue;
-                }
+        if (PosFinalityGateRefuses(pindexNew)) {
+            // This is the SAME refusal ContextualCheckBlockHeader reports as
+            // "bad-fork-prior-to-pos-final", taken at activation time instead
+            // of accept time. There is no BlockValidationState to carry a
+            // reject reason here, so the reason is logged under that same
+            // canonical name — otherwise the node silently declines to reorg
+            // and an operator has nothing to go on. One line per candidate.
+            if (g_pos_final_gate_logged != pindexNew->GetBlockHash()) {
+                g_pos_final_gate_logged = pindexNew->GetBlockHash();
+                LogPrintf("ERROR: %s: bad-fork-prior-to-pos-final: not activating candidate %s (height %d); it forks at/below the immediately-finalized block %s (height %d)\n",
+                          __func__, pindexNew->GetBlockHash().ToString(), pindexNew->nHeight,
+                          g_pos_immediate_final_hash.ToString(), g_pos_immediate_final_height);
+                NotePosFinalForkRejection();
             }
+            CBlockIndex* pindexGated = pindexNew;
+            while (pindexGated && !m_chain.Contains(pindexGated)) {
+                setBlockIndexCandidates.erase(pindexGated);
+                pindexGated = pindexGated->pprev;
+            }
+            continue;
         }
 
         // Check whether all blocks on the path between the currently active chain and the candidate are valid.
@@ -5925,8 +6123,26 @@ void CChainState::CheckBlockIndex()
                 // Don't perform this check for the background chainstate since
                 // its setBlockIndexCandidates shouldn't have some entries (i.e. those past the
                 // snapshot block) which do exist in the block index for the active chainstate.
+                //
+                // SEQUENTIA: unless the immediate-finality gate refuses it.
+                // FindMostWorkChain deliberately ERASES a candidate that forks
+                // at/below the finalized block, along with its ancestors back
+                // to the fork point — otherwise it would be re-picked as the
+                // best candidate on every pass and the loop would never
+                // terminate. Such a block is valid, has all its data and sorts
+                // above the tip (that is exactly why it had to be refused), so
+                // without this exception the invariant fires and the node
+                // aborts here: `elementsd: validation.cpp: CheckBlockIndex():
+                // Assertion setBlockIndexCandidates.count(pindex) failed`. It
+                // needs no operator action to reach: a certified sibling of a
+                // finalized block arriving from a peer is enough, because with
+                // finality reconciliation on (-posreconcile, the default) such
+                // rivals are accepted into the index by design. Any chain
+                // running -checkblockindex is exposed, which is the regtest and
+                // elementsregtest default (fDefaultConsistencyChecks), so the
+                // functional suite hits it while production nodes do not.
                 if (is_active && (pindexFirstMissing == nullptr || pindex == m_chain.Tip())) {
-                    assert(setBlockIndexCandidates.count(pindex));
+                    assert(setBlockIndexCandidates.count(pindex) || PosFinalityGateRefuses(pindex));
                 }
                 // If some parent is missing, then it could be that this block was in
                 // setBlockIndexCandidates but had to be removed because of the missing data.

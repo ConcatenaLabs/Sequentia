@@ -58,6 +58,7 @@ SEED_STAKE = 1000000000
 STAKE_CSV = 15
 COMMITTEE = 3          # quorum 2 -> the lone founder is always sub-quorum
 MTP_GAP = 600          # -posescapestallmtpgap, the rule under test
+PARENT_BLOCK_SECONDS = 600   # parent-chain block spacing (one Bitcoin interval)
 
 # The founder alone can only ever produce escaping-stall blocks, so every block
 # it makes is a probe of the rule. Activating at height 3 leaves blocks 1-2
@@ -116,8 +117,10 @@ class PosEscapeStallActivationHeightTest(BitcoinTestFramework):
                                "-posproducer=1", "-posproducerkey=%s" % self.founder_wif]
         peer = consensus + ["-port=%d" % p2p_port(2), "-rpcport=%d" % rpc_port(2),
                             "-posproducer=1", "-posproducerkey=%s" % self.peer_wif]
-        self.add_nodes(1, [founder], chain=[chain]); self.start_node(1)
-        self.add_nodes(1, [peer], chain=[chain]); self.start_node(2)
+        self.add_nodes(1, [founder], chain=[chain])
+        self.start_node(1)
+        self.add_nodes(1, [peer], chain=[chain])
+        self.start_node(2)
         self.connect_nodes(1, 2)
         self.nodes[0].createwallet(wallet_name="w", descriptors=True)
 
@@ -135,8 +138,16 @@ class PosEscapeStallActivationHeightTest(BitcoinTestFramework):
         parent.setmocktime(self.mocktime)
         self.generatetoaddress(parent, nblocks, parent.getnewaddress(), sync_fun=self.no_op)
 
-    def bump_parent_with_time(self, nblocks=12, step=75):
-        """Advance the parent so its MTP really moves (satisfies the rule)."""
+    def bump_parent_with_time(self, nblocks=12, step=PARENT_BLOCK_SECONDS):
+        """Advance the parent so its MTP really moves (satisfies the rule).
+
+        Median-time-past is the MEDIAN of the last 11 block times, so it tracks
+        the tip five blocks back: `nblocks` blocks `step` seconds apart move it
+        by only (nblocks - 5) * step, and the producer anchors a block or two
+        behind the tip on top of that. A step smaller than MTP_GAP therefore
+        buys far less evidence than it looks like it does — mine at a real
+        Bitcoin interval, as the other escaping-stall tests do.
+        """
         parent = self.nodes[0]
         addr = parent.getnewaddress()
         for _ in range(nblocks):
@@ -193,6 +204,17 @@ class PosEscapeStallActivationHeightTest(BitcoinTestFramework):
         # advances. This separates "the gate is on" from "the chain is simply
         # stuck", which the check above cannot distinguish on its own.
         self.bump_parent_with_time()
+        # The evidence really is there now: the parent's MTP has moved at least
+        # a full MTP_GAP past the MTP of the anchor block 2 is measured from.
+        # Asserted rather than assumed, so a step too small for the median
+        # window shows up as "the test did not supply evidence" instead of
+        # masquerading as "the rule refuses a block it should accept".
+        anchor2 = founder.getblockheader(founder.getblockhash(2))['anchorhash']
+        mtp_from = parent.getblockheader(anchor2)['mediantime']
+        mtp_now = parent.getblockheader(parent.getbestblockhash())['mediantime']
+        assert mtp_now - mtp_from >= MTP_GAP, (
+            "the test supplied only %d s of parent median-time-past movement, "
+            "less than the %d s the rule requires" % (mtp_now - mtp_from, MTP_GAP))
         self.wait_until(lambda: founder.getblockcount() >= 3, timeout=180)
         self.log.info("at the gate: height 3 accepted once the time gap is real")
 

@@ -42,7 +42,8 @@ class ListSinceBlockTest(BitcoinTestFramework):
 
     def test_no_blockhash(self):
         self.log.info("Test no blockhash")
-        txid = self.nodes[2].sendtoaddress(self.nodes[0].getnewaddress(), 1)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        txid = self.nodes[2].sendtoaddress(address=self.nodes[0].getnewaddress(), amount=1, fee_asset_label='bitcoin')
         self.sync_all()
         assert_array_result(self.nodes[0].listtransactions(), {"txid": txid}, {
             "category": "receive",
@@ -141,7 +142,7 @@ class ListSinceBlockTest(BitcoinTestFramework):
         self.split_network()
 
         # send to nodes[0] from nodes[2]
-        senttx = self.nodes[2].sendtoaddress(self.nodes[0].getnewaddress(), 1)
+        senttx = self.nodes[2].sendtoaddress(address=self.nodes[0].getnewaddress(), amount=1, fee_asset_label='bitcoin')
 
         # generate on both sides
         nodes1_last_blockhash = self.generate(self.nodes[1], 6, sync_fun=lambda: self.sync_all(self.nodes[:2]))[-1]
@@ -195,7 +196,7 @@ class ListSinceBlockTest(BitcoinTestFramework):
         eckey.generate()
         privkey = bytes_to_wif(eckey.get_bytes())
         address = key_to_p2wpkh(eckey.get_pubkey().get_bytes())
-        self.nodes[2].sendtoaddress(address, 10)
+        self.nodes[2].sendtoaddress(address=address, amount=10, fee_asset_label='bitcoin')
         self.generate(self.nodes[2], 6)
         self.nodes[2].importprivkey(privkey)
         utxos = self.nodes[2].listunspent()

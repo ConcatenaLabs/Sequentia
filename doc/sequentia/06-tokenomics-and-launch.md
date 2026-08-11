@@ -23,10 +23,11 @@ governance versus per-node engineering.
 - SEQ's only privileged role is **staking**: it is the asset stake weight is
   denominated in (staking outputs are policy-asset outputs; see
   [`04-proof-of-stake.md`](04-proof-of-stake.md)). For **fees** SEQ is just
-  another asset: it is accepted 1:1 only as the default an unconfigured producer
-  uses, and a producer may re-price it (any rate), refuse it (rate 0), or peg a
-  different asset as the 1:1 reference (e.g. USDT). See
-  [`02-open-fee-market.md`](02-open-fee-market.md).
+  another asset: an unconfigured producer starts with SEQ seeded at 1:1, and a
+  producer may re-price it (any rate), refuse it (rate 0) or drop it from the
+  whitelist entirely, at which point it is not accepted like any other unlisted
+  asset. The reference unit is an abstract factor and is never itself a token.
+  See [`02-open-fee-market.md`](02-open-fee-market.md).
 
 ## Minimum stake
 
@@ -184,6 +185,7 @@ between honest operators without forking the chain (see
 | Committee regime & size (public fixed-size, cap 250 with quorum 126 on the testnet; threshold sortition caps at 100) | Launch governance | Consensus config (`pospubliccommittee`, `poscommitteesize`) |
 | Unbonding period (~15 days) | Launch governance | Staking-output CSV requirement |
 | Slot interval (~30s) | Launch governance | Hardcoded `g_pos_slot_interval = 30` in `CSequentiaParams`; `-posslotinterval` on custom chains |
+| Leader-election rule (exponential race, in force from the first elected block) | Launch governance | `consensus.pos_exprace_height = 1` in `CSequentiaParams`; `-posexpraceheight` on custom chains. `1` and not `0`: for this parameter `0` means DISABLED, unlike `pos_coinbase_leader_height` where `0` means from genesis. See [`04-proof-of-stake.md`](04-proof-of-stake.md) |
 | Published Bitcoin checkpoints | Launch governance | Consensus config; see [`04-proof-of-stake.md`](04-proof-of-stake.md) |
 | Which parent chain to anchor to | Launch governance | Consensus config; see [`03-bitcoin-anchoring.md`](03-bitcoin-anchoring.md) |
 | Bitcoin-RPC endpoint & credentials | Per operator | Node config |

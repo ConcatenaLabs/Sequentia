@@ -37,13 +37,27 @@ MAX_BLOOM_FILTER_SIZE = 36000
 MAX_BLOOM_HASH_FUNCS = 50
 
 COIN = 100000000  # 1 btc in satoshis
-MAX_MONEY = 21000000 * COIN
+# SEQUENTIA: MAX_MONEY is per-chain (src/consensus/amount.h) -- each CChainParams
+# constructor sets it before any consensus check runs. The Sequentia chains, and
+# the elementsregtest params every functional test runs against (CCustomParams,
+# src/chainparams.cpp), cap it at the 400,000,000 SEQ supply rather than Bitcoin's
+# 21,000,000. This mirror must track the chain under test: left at 21,000,000 the
+# "too large" transactions built from it are simply valid amounts, so the
+# out-of-range consensus checks they are meant to trip never fire and the tests
+# pass vacuously (they instead failed here, on the wrong reject reason).
+MAX_MONEY = 400000000 * COIN
 
 BIP125_SEQUENCE_NUMBER = 0xfffffffd  # Sequence number that is rbf-opt-in (BIP 125) and csv-opt-out (BIP 68)
 SEQUENCE_FINAL = 0xffffffff  # Sequence number that disables nLockTime if set for every input of a tx
 
 MAX_PROTOCOL_MESSAGE_LENGTH = 16 * 1000 * 1000  # Maximum length of incoming protocol messages
-MAX_HEADERS_RESULTS = 2000  # Number of headers sent in one getheaders result
+# SEQUENTIA: mirrors MAX_HEADERS_RESULTS in src/net_processing.cpp, which this
+# network caps at 512 rather than Bitcoin's 2000 so that a batch of PoS headers --
+# each carrying its committee signatures, and so far larger than a Bitcoin header --
+# still fits the 16MB wire limit. A peer that sends more is Misbehaving, and the
+# node stops responding to it: left at 2000, the framework oversized its own headers
+# messages and the test then waited out its timeout for a sync that could not happen.
+MAX_HEADERS_RESULTS = 512  # Number of headers sent in one getheaders result
 MAX_INV_SIZE = 50000  # Maximum number of entries in an 'inv' protocol message
 
 NODE_NETWORK = (1 << 0)

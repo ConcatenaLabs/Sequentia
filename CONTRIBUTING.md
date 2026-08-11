@@ -17,6 +17,13 @@ For this repository:
 - Run the Sequentia functional tests (`test/functional/feature_pos_*`,
   `feature_any_asset_fee*`, `feature_bitcoin_anchoring*`, ...) before
   submitting consensus-adjacent changes.
+- There is no review gate here. Open a pull request so the change and its
+  reasoning are recorded, then merge it yourself — the Bitcoin Core peer review
+  and "decision making" process described in the second half of this document
+  is upstream's, not this project's.
+- [CLAUDE.md](CLAUDE.md) collects the remaining conventions that are not
+  visible in the code: deployment, testnet operation, and the design rules that
+  are easy to break by accident.
 
 ### Every new consensus rule needs an activation height
 
@@ -62,6 +69,42 @@ block 1. Doing that at the time the rule is written costs nothing, matches the
 behaviour everyone expects, and means the retroactivity question never has to be
 revisited for that chain. Do not leave gates at `0` intending to "fill them in at
 launch": that is how a rule ends up ungated.
+
+**A rule that only ACCEPTS more does not need a gate, and should not have one.**
+The hazard above is retroactive *rejection*: history that was valid when it was
+produced becoming invalid on revalidation. A change that relaxes a rule cannot do
+that — every block that was valid before is still valid — so gating it buys
+nothing and costs the thing that matters most, which is that a fresh chain
+behaves the same as the live one. The unblinded-reissuance rule
+(`confidential_validation.cpp`) is exactly this shape: transactions every node
+rejected today become valid, none the other way, so it is active from height 0 on
+every chain including regtest and mainnet. It is still a HARD FORK for the live
+network — old nodes reject blocks containing the newly valid transactions — and
+so still needs an all-at-once cutover; that is a deployment question, not an
+activation-height one. Say which shape a change is in its commit message.
+
+**Whatever the shape, a fresh chain gets it from genesis.** Regtest, a future
+testnet and mainnet must never have to be told about a rule the live testnet
+already has. That is what makes a new chain reproducible from this source tree
+rather than from the live network's history.
+
+### A one-time intervention is chain-scoped, not just height-scoped
+
+`Consensus::UtxoRecovery` (`consensus/params.h`) is the one exception in the tree
+to "consensus is a function of the block": a deterministic UTXO-set rewrite,
+applied at one height on one chain, because a watchdog destroyed the keys to two
+testnet treasury outputs and the owner authorised recovering them. Read the
+comment on `CTestNetParams::consensus.utxo_recovery` before going anywhere near
+it.
+
+It is written down here for one reason: **a one-time intervention must be gated
+on the chain's GENESIS HASH, not only on a height.** A height gate alone means a
+fresh chain inherits somebody else's accident the moment it reaches the same
+block number. So the table names the genesis it belongs to, empties itself if it
+is ever carried onto another chain, and is empty by default everywhere else.
+
+Do not add entries to it. A second accident is a reason to fix the process that
+caused the first, not to run this again.
 
 The original Bitcoin Core document follows.
 

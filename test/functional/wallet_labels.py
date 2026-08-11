@@ -13,7 +13,11 @@ from collections import defaultdict
 
 from test_framework.blocktools import COINBASE_MATURITY
 from test_framework.test_framework import BitcoinTestFramework
-from test_framework.util import assert_equal, assert_raises_rpc_error
+from test_framework.util import (
+    amount_of,
+    assert_equal,
+    assert_raises_rpc_error,
+)
 from test_framework.wallet_util import test_address
 
 
@@ -34,7 +38,7 @@ class WalletLabelsTest(BitcoinTestFramework):
         # the same address, so we call twice to get two addresses w/50 each
         self.generatetoaddress(node, nblocks=1, address=node.getnewaddress(label='coinbase'))
         self.generatetoaddress(node, nblocks=COINBASE_MATURITY + 1, address=node.getnewaddress(label='coinbase'))
-        assert_equal(node.getbalance()['bitcoin'], 100)
+        assert_equal(amount_of(node.getbalance()), 100)
 
         # there should be 2 address groups
         # each with 1 address with a balance of 50 Bitcoins
@@ -85,28 +89,29 @@ class WalletLabelsTest(BitcoinTestFramework):
 
         # Send a transaction to each label.
         for label in labels:
-            node.sendtoaddress(label.addresses[0], amount_to_send)
+            # SEQUENTIA: an open-fee-market chain has no default fee asset.
+            node.sendtoaddress(address=label.addresses[0], amount=amount_to_send, fee_asset_label='bitcoin')
             label.verify(node)
 
         # Check the amounts received.
         self.generate(node, 1)
         for label in labels:
             assert_equal(
-                node.getreceivedbyaddress(label.addresses[0])['bitcoin'], amount_to_send)
+                amount_of(node.getreceivedbyaddress(label.addresses[0])), amount_to_send)
             assert_equal(
                 node.getreceivedbyaddress(label.addresses[0], 1, "bitcoin"), amount_to_send)
-            assert_equal(node.getreceivedbylabel(label.name)['bitcoin'], amount_to_send)
+            assert_equal(amount_of(node.getreceivedbylabel(label.name)), amount_to_send)
             assert_equal(node.getreceivedbylabel(label.name, 1, "bitcoin"), amount_to_send)
 
         for i, label in enumerate(labels):
             to_label = labels[(i + 1) % len(labels)]
-            node.sendtoaddress(to_label.addresses[0], amount_to_send)
+            node.sendtoaddress(address=to_label.addresses[0], amount=amount_to_send, fee_asset_label='bitcoin')
         self.generate(node, 1)
         for label in labels:
             address = node.getnewaddress(label.name)
             label.add_receive_address(address)
             label.verify(node)
-            assert_equal(node.getreceivedbylabel(label.name)['bitcoin'], 2)
+            assert_equal(amount_of(node.getreceivedbylabel(label.name)), 2)
             label.verify(node)
         self.generate(node, COINBASE_MATURITY + 1)
 
@@ -157,7 +162,7 @@ class WalletLabelsTest(BitcoinTestFramework):
                 wallet_watch_only.importaddress(label=l, rescan=False, address=ad)
                 self.generatetoaddress(node, 1, ad)
                 assert_equal(wallet_watch_only.getaddressesbylabel(label=l), {ad: {'purpose': 'receive'}})
-                assert_equal(wallet_watch_only.getreceivedbylabel(label=l)['bitcoin'], 0)
+                assert_equal(amount_of(wallet_watch_only.getreceivedbylabel(label=l)), 0)
             for l in BECH32_INVALID:
                 ad = BECH32_INVALID[l]
                 assert_raises_rpc_error(

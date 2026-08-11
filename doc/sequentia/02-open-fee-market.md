@@ -10,11 +10,13 @@ from the transactions paying in those assets.
 **SEQ holds no privileged fee status.** It is special only as the asset that
 unlocks block-production eligibility - staking (see
 [`04-proof-of-stake.md`](04-proof-of-stake.md)). For fees it is just another
-asset: accepted 1:1 only as the *default* an unconfigured producer uses. A
-producer may re-price SEQ at any rate, refuse it, or designate a different asset
-(for example a USD stablecoin) as the reference. The fee market is the design's
-lowest-risk property because it is entirely node-local policy and requires **no
-consensus change** ([§6](#6-why-no-consensus-change)).
+asset: an unconfigured producer starts with SEQ seeded at 1:1, and from there a
+producer may re-price SEQ at any rate, refuse it, or drop it and price other
+assets instead. The reference unit stays an abstract factor throughout: no asset
+is ever *defined* to be the reference, and none is valued without being listed.
+The fee market is the design's lowest-risk property because it is entirely
+node-local policy and requires **no consensus change**
+([§6](#6-why-no-consensus-change)).
 
 ## 1. Reference-unit valuation
 
@@ -39,9 +41,12 @@ The rate is an integer scaled by `COIN` (1e8):
 | `0` | the asset is **explicitly refused** |
 
 An asset **absent** from the map values to `0` rfa - i.e. not accepted - so the
-table *is* the producer's acceptance set. The one exception is the policy asset,
-SEQ, which is valued 1:1 when unlisted; that default is overridable by listing it
-with any rate (including `0` to refuse it).
+table *is* the producer's acceptance set, with **no exceptions**: the policy
+asset, SEQ, is unlisted-means-refused like everything else. What a never
+configured node accepts comes from a **seed**, not from a special case: the map
+is constructed holding SEQ at `1e8` (`ExchangeRateMap::ResetToBootstrapRates`),
+so fees work out of the box, and any write that replaces the table replaces the
+seed along with it.
 
 A rate of `0` reads as "refuse this asset": it is a valid stored value that flows
 through to the conversion as "not accepted". Setting a rate accepts any
@@ -78,13 +83,56 @@ commands are in [`05-operating-sequentia.md`](05-operating-sequentia.md) §4. On
 stake-registration transactions and ordinary asset transfers both relay under
 default policy.
 
+### Naming the fee asset
+
+**The fee asset must be named explicitly unless the transaction already
+determines it.** The wallet RPCs that build a transaction - `sendtoaddress`,
+`sendmany`, `send`, `fundrawtransaction`, `walletcreatefundedpsbt`, `issueasset`,
+`reissueasset` - apply exactly that rule and nothing else. They do not fall back
+to the policy asset, and they do not infer an asset from what the transaction
+happens to send.
+
+There is no default because a default would be a privilege. Outside staking
+eligibility SEQ has exactly the standing of every issued asset; a wallet that
+settled on SEQ whenever the caller stayed silent would make it the network's fee
+currency by default and reintroduce the coin the design does away with. Inferring
+the asset being sent is no better: it is a policy decision taken out of the
+caller's sight, from data that says nothing about which asset can pay a fee, and
+it breaks outright on an asset the node cannot price (a reissuance token above
+all).
+
+A transaction determines its fee asset when the value is already implied by what
+the caller handed in, in either of two ways:
+
+- it carries an explicit **fee output**, which names the asset the fee is paid in;
+- the fee is **subtracted from** an output, so it is taken out of that output's
+  amount and can only be denominated in that output's asset - `output_amount -=
+  fee`, and a GOLD output cannot be reduced by an amount denominated in USDX.
+
+Where the transaction states the answer, passing `fee_asset_label` /
+`options.fee_asset` alongside it is **refused, whether or not it agrees**: it
+would be a parameter that looks like a selection and is not one, since changing
+the transaction would silently change the "chosen" fee asset. Where it states the
+answer twice, the two must agree - a raw transaction with a GOLD fee output whose
+fee is subtracted from a GOLD output is fine; one that names GOLD and USDX is
+impossible and is refused, naming both. Fee outputs of two different assets, or
+subtract-from outputs spanning two assets, are refused for the same reason: a
+transaction pays its fee in exactly one. All of this holds identically for the
+policy asset and for every issued asset.
+
+`bumpfee` reads the fee asset off the transaction it replaces when no
+`fee_asset` is given. That too is determined rather than chosen.
+
+The GUI preselects a fee asset in the Send form. That is a visible, overridable
+affordance in front of the user, not a rule hidden in the back end.
+
 ## 4. Fee floors and replacement, in reference units
 
 Every configured fee floor is denominated in the reference unit, so the mempool
-and miner treat all assets uniformly. Because SEQ defaults to 1:1 with rfa, a
-SEQ-atom floor equals an rfa floor out of the box; a producer that re-prices SEQ
-or pegs a different asset to the reference changes that equivalence while the
-floors stay rfa-denominated.
+and miner treat all assets uniformly. Because the seed prices SEQ at 1:1 with
+rfa, a SEQ-atom floor equals an rfa floor out of the box; a producer that
+re-prices SEQ, or drops it in favour of other assets, changes that equivalence
+while the floors stay rfa-denominated.
 
 - **Mempool acceptance** (`MemPoolAccept::CheckFeeRate`) compares the
   rfa-converted modified fee against the rolling mempool minimum (itself an rfa
@@ -131,7 +179,7 @@ resulting `{asset → rate}` table into the node's single whitelist through
 
 | RPC | Purpose |
 |---|---|
-| `setfeeexchangerates {asset: rate, …} [persist=true]` | Replace the whole whitelist and `RecomputeFees()`. With `persist=true` (the default) it also writes `exchangerates.json` so the table survives a restart; with `persist=false` it updates only the in-memory whitelist. Pass `{}` to clear it. |
+| `setfeeexchangerates {asset: rate, …} [persist=true]` | Replace the whole whitelist and `RecomputeFees()`. With `persist=true` (the default) it also writes `exchangerates.json` so the table survives a restart; with `persist=false` it updates only the in-memory whitelist. Pass `{}` to clear it, which leaves the node accepting **no** fee asset at all, SEQ included, and empties its mempool. |
 | `getfeeexchangerates` | Return the current whitelist as `{asset: rate}`. |
 | `getfeeacceptancepolicy` | Return the current acceptance set. |
 

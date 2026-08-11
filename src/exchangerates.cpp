@@ -3,6 +3,7 @@
 #include <policy/policy.h>
 #include <policy/value.h>
 #include <util/settings.h>
+#include <util/strencodings.h> // IsHex
 #include <util/system.h>
 #include <util/time.h>
 #include <univalue.h>
@@ -14,17 +15,19 @@ CValue ExchangeRateMap::ConvertAmountToValue(const CAmount& amount, const CAsset
     LOCK(m_write_mutex); // serialize against SetRates's clear()/insert
     auto it = this->find(asset);
     if (it == this->end()) {
-        // No explicit rate set by this producer. The policy asset (SEQ) defaults
-        // to 1:1 — the convenient out-of-box reference — but this is only a
-        // DEFAULT: a producer may set an explicit rate for SEQ (the branch below),
-        // which OVERRIDES this, may refuse SEQ (rate 0), or may make a different
-        // asset the 1:1 reference (e.g. USDT). SEQ is privileged ONLY for staking
-        // eligibility, never for fee acceptance — for fees it is just another
-        // asset, valued and accepted at each producer's discretion. Any other
-        // unlisted asset is not accepted (value 0).
-        if (asset == ::policyAsset) {
-            return CValue(amount);
-        }
+        // No rate set by this producer, so the asset is not accepted (value 0).
+        // This holds for EVERY asset, the policy asset (SEQ) included: the
+        // reference unit is an abstract factor and is never itself a token, so
+        // there is no asset the node values 1:1 by fiat. SEQ is privileged ONLY
+        // for staking eligibility, never for fee acceptance.
+        //
+        // Nothing is lost by having no special case here: a fresh node still
+        // accepts policy-asset fees out of the box because the whitelist is
+        // SEEDED with the policy asset at exchange_rate_scale on construction
+        // (ResetToBootstrapRates). Reaching this branch for the policy asset
+        // means the seed was replaced by a whitelist that leaves it out, which
+        // is an operator policy that omits it, and refusing is the honest
+        // reading of it (the same policy stated as an explicit rate of 0).
         return CValue(0);
     }
     auto scaled_value = it->second.m_scaled_value;
@@ -48,11 +51,11 @@ CAmount ExchangeRateMap::ConvertValueToAmount(const CValue& value, const CAsset&
     LOCK(m_write_mutex); // serialize against SetRates's clear()/insert
     auto it = this->find(asset);
     if (it == this->end()) {
-        // Policy asset (SEQ) defaults to 1:1 when unlisted; overridable per
-        // producer (see ConvertAmountToValue). Other unlisted assets: not accepted.
-        if (asset == ::policyAsset) {
-            return value.GetValue();
-        }
+        // Unlisted means not accepted, whichever asset it is (see
+        // ConvertAmountToValue). Keeping this in step with that function matters:
+        // if one direction refused an unlisted asset while the other still quoted
+        // an amount for it, the wallet would compute a fee the mempool then
+        // valued at 0 and rejected.
         return 0;
     }
     auto scaled_value = it->second.m_scaled_value;
@@ -65,6 +68,12 @@ CAmount ExchangeRateMap::ConvertValueToAmount(const CValue& value, const CAsset&
     } else {
         return (int64_t) result;
     }
+}
+
+void ExchangeRateMap::ResetToBootstrapRates() {
+    LOCK(m_write_mutex);
+    this->clear();
+    (*this)[::policyAsset] = CAssetExchangeRate(exchange_rate_scale);
 }
 
 void ExchangeRateMap::SetRates(const std::map<CAsset, CAmount>& rates) {
@@ -143,7 +152,22 @@ bool ExchangeRateMap::LoadFromJSON(std::map<std::string, UniValue> json, std::ve
     for (auto rate : json) {
         CAsset asset = GetAssetFromString(rate.first);
         if (asset.IsNull()) {
-            errors.push_back(strprintf("Unknown label and invalid asset hex: %s", rate.first));
+            // SEQUENTIA: GetAssetFromString() collapses several different
+            // failures into one null return, and reporting them all as "unknown
+            // label and invalid hex" sends the reader looking for a typo that is
+            // not there. Say which of them actually happened.
+            if (gAssetsDir.HasLabel(rate.first)) {
+                // The directory knows the name but it resolves to the null asset.
+                // Set() and Merge() both refuse to create such a binding now, so
+                // this should not arise; it is reported distinctly anyway because
+                // blaming the operator's spelling for a directory defect is
+                // exactly the wrong answer that cost time here.
+                errors.push_back(strprintf("Label %s is registered but names the null asset, so no rate can be set for it", rate.first));
+            } else if (rate.first.size() == 64 && IsHex(rate.first)) {
+                errors.push_back(strprintf("Asset id %s is the null asset, which no rate can be set for", rate.first));
+            } else {
+                errors.push_back(strprintf("Unknown label and invalid asset hex: %s", rate.first));
+            }
             hasError = true;
         } else if (!rate.second.isNum()) {
             errors.push_back(strprintf("Rate for %s is not an integer", rate.first));
@@ -153,11 +177,11 @@ bool ExchangeRateMap::LoadFromJSON(std::map<std::string, UniValue> json, std::ve
             // Rates are integers: atoms of the asset equal to one reference
             // unit (exchange_rate_scale). A rate of exactly 0 means "explicitly
             // refuse this asset" (Convert treats scaled_value <= 0 as
-            // not-accepted, with no divide-by-zero). This is how a producer
-            // declines an asset it would otherwise accept by default — notably
-            // the policy asset SEQ, which is accepted 1:1 only as an unlisted
-            // default and can be re-priced (any rate) or refused (0) here, like
-            // any other asset; SEQ is privileged solely for staking. Negative
+            // not-accepted, with no divide-by-zero), which is the same outcome
+            // as leaving the asset out of the set entirely; listing it at 0 just
+            // says so on the record. The policy asset SEQ is no different: it
+            // can be re-priced (any rate), refused (0) or omitted here like any
+            // other asset, and it is privileged solely for staking. Negative
             // rates are invalid (they would saturate to a bogus huge valuation
             // that bypasses fee checks).
             if (newRateValue < 0) {

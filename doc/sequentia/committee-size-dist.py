@@ -1,10 +1,12 @@
-import random, statistics
+import random
+import statistics
 MASK64 = (1<<64)-1
 POS_VRF_MAX_SLOT = 1<<20
 
 # Exact transcription of PosVrfSlot (pos.cpp:324-335): all exact integer ops.
 def pos_vrf_slot(beta, weight, total_weight):
-    if weight == 0 or total_weight == 0: return POS_VRF_MAX_SLOT
+    if weight == 0 or total_weight == 0:
+        return POS_VRF_MAX_SLOT
     q = beta // weight                       # arith_uint256 /=
     slot_a = (q >> 192) * total_weight       # (q>>192) * total
     slot_a >>= 64                            # >>= 64
@@ -50,12 +52,14 @@ def report(r):
     print(f"P(size <= {r['twoQ']-1}) SAFE (2Q > size, quorums must intersect) = {r['p_safe']:.4f}")
     print(f"P(size >= {r['twoQ']}) DOUBLE-CERT WINDOW OPEN (two disjoint {r['quorum']}-quorums fit) = {r['p_window']:.4f}")
     print(f"P(size >= {r['twoQ']+1}) = {r['p_ge_twoQ1']:.4f}")
-    lo=min(r['hist']); hi=max(r['hist'])
+    lo=min(r['hist'])
+    hi=max(r['hist'])
     print("histogram (size: pct):")
     line=[]
     for s in range(lo, hi+1):
         pct = 100*r['hist'].get(s,0)/r['slots']
-        if pct>=0.05: line.append(f"{s}:{pct:4.1f}")
+        if pct>=0.05:
+            line.append(f"{s}:{pct:4.1f}")
     print("  "+"  ".join(line))
 
 print("Empirical committee-size distribution from the EXACT PosVrfSlot (pos.cpp:324-335).")

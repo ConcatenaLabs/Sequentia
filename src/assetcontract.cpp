@@ -7,9 +7,9 @@
 #include <crypto/sha256.h>
 #include <tinyformat.h>
 #include <univalue.h>
+#include <util/strencodings.h>
 
 #include <algorithm>
-#include <cctype>
 #include <set>
 #include <string>
 #include <vector>
@@ -154,7 +154,9 @@ bool IsValidDomain(const std::string& d)
     const std::string& tld = labels.back();
     if (tld.size() < 2) return false;
     for (const char c : tld) {
-        if (!std::isalpha(static_cast<unsigned char>(c))) return false;
+        // ASCII-only on purpose: std::isalpha is locale dependent, and a TLD in
+        // a contract commitment must mean the same thing on every node.
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) return false;
     }
     return true;
 }
@@ -197,12 +199,10 @@ UniValue Build(const std::string& name,
     // pubkey against a lower-case-only pattern, and hostnames are
     // case-insensitive anyway, so folding here saves an issuer from committing a
     // contract that only fails once it is too late to change.
-    std::string lower_domain = domain;
-    std::transform(lower_domain.begin(), lower_domain.end(), lower_domain.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
-    std::string lower_pubkey = issuer_pubkey;
-    std::transform(lower_pubkey.begin(), lower_pubkey.end(), lower_pubkey.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
+    // ToLower is the ASCII-only, locale-independent fold: std::tolower would
+    // make the committed contract depend on the issuing node's locale.
+    const std::string lower_domain = ToLower(domain);
+    const std::string lower_pubkey = ToLower(issuer_pubkey);
 
     UniValue entity(UniValue::VOBJ);
     entity.pushKV("domain", lower_domain);

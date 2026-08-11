@@ -108,8 +108,14 @@ BASE_SCRIPTS = [
     'feature_default_asset_name.py --legacy-wallet',
     'feature_assetsdir.py',
     'feature_initial_reissuance_token.py --legacy-wallet',
+    'feature_unblinded_reissuance.py --legacy-wallet',
+    'feature_unblinded_reissuance.py --descriptors',
+    'feature_utxo_recovery.py --legacy-wallet',
+    'feature_utxo_recovery.py --descriptors',
     'feature_progress.py',
     'rpc_getnewblockhex.py',
+    'wallet_blinded_change.py --legacy-wallet',
+    'wallet_blinded_change.py --descriptors',
     'wallet_elements_regression_1172.py --legacy-wallet',
     'wallet_elements_regression_1259.py --legacy-wallet',
     'wallet_elements_21million.py',
@@ -175,6 +181,7 @@ BASE_SCRIPTS = [
     # vv Tests less than 30s vv
     # Sequentia tests
     'feature_any_asset_fee.py',
+    'feature_any_asset_fee_no_default.py',
     'feature_any_asset_fee_rates.py',
     "feature_any_asset_fee_rbf.py",
     "feature_any_asset_fee_scenarios.py",

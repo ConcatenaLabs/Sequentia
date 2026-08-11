@@ -19,6 +19,8 @@
 
 #include <assert.h>
 
+#include <iostream>
+
 #include <boost/algorithm/string/classification.hpp>
 #include <boost/algorithm/string/split.hpp>
 static CScript StrHexToScriptWithDefault(std::string strScript, const CScript defaultScript)
@@ -413,20 +415,26 @@ public:
         // SEQUENTIA PoS: enforce leader-paid coinbase fees from genesis. Mainnet
         // has no pre-rule history to grandfather (cf. CTestNetParams).
         consensus.pos_coinbase_leader_height = 0;
-        // Exponential-race leader election: disabled until mainnet launches and a
-        // coordinated activation height is set (hard fork; see params.h). Mainnet
-        // is not live yet, so this stays 0 for now.
-        consensus.pos_exprace_height = 0;
-        // Escaping-stall parent-chain MTP gap: ENFORCED FROM GENESIS (0).
-        // Mainnet has not launched, so it starts life with this rule already in
-        // force and there is NOTHING TO COORDINATE OR REMEMBER LATER — no
-        // activation height to pick, no flag day, no legacy history to exempt.
-        // Note the convention is the opposite of pos_exprace_height above: for
-        // Mainnet is not live yet, so the rule is simply active from the first
-        // block: there is no pre-rule history to grandfather and nothing to
-        // coordinate at launch. 1, not 0 — 0 means "not gated" here exactly as
-        // it does for pos_exprace_height (CONTRIBUTING.md: a gate left at 0 is
-        // a bug, never a deliberate "always on").
+        // Exponential-race leader election: mainnet launches with the exp-race in
+        // force from its FIRST ELECTED BLOCK, so there is never a legacy-election
+        // era to fork away from later. The value is 1 and not 0 because 0 is the
+        // DISABLED sentinel for this parameter (PosExpRaceActive requires
+        // pos_exprace_height > 0), unlike pos_coinbase_leader_height directly
+        // above, where 0 means "enforce from genesis". Height 1 is the first block
+        // leader election governs: genesis (height 0) carries no leader, committee
+        // or VRF proof. Mainnet has no history, so this is a launch parameter, not
+        // a fork of live consensus. See params.h and
+        // doc/sequentia/06-tokenomics-and-launch.md.
+        consensus.pos_exprace_height = 1;
+        // Escaping-stall parent-chain MTP gap: in force from mainnet's first
+        // block. Mainnet has not launched, so it starts life with this rule
+        // already active and there is NOTHING TO COORDINATE OR REMEMBER LATER —
+        // no activation height to pick, no flag day, no legacy history to exempt.
+        // 1 and not 0 for the same reason as pos_exprace_height directly above:
+        // 0 is the "not gated" sentinel for this parameter too, unlike
+        // pos_coinbase_leader_height, where 0 means "enforce from genesis"
+        // (CONTRIBUTING.md: a gate left at 0 is a bug, never a deliberate
+        // "always on").
         consensus.pos_escape_stall_mtp_height = 1;
         g_pos_escape_stall_mtp_height = consensus.pos_escape_stall_mtp_height;
         consensus.nMaxBlockWeight = 200000;             // a twentieth of Bitcoin (doc 11 §4)
@@ -440,7 +448,8 @@ public:
         consensus.has_parent_chain = false;
         g_con_elementsmode = true;
         g_con_blockheightinheader = true;
-        g_con_any_asset_fees = true;
+        // The open fee market follows elements mode; SelectParams() settles
+        // g_con_any_asset_fees for the selected chain.
         g_con_bitcoin_anchor = true;
         g_con_pos = true;
         MAX_MONEY = 400000000 * COIN;   // SEQUENTIA: per-chain money cap
@@ -552,8 +561,8 @@ public:
         // SEQUENTIA genesis (PLACEHOLDER founder; recomputed at launch).
         const uint256 expected_genesis = uint256S("0x35770fd00f7a4ce6cc550b3682ca9cd5b07e2cff4f0478ac0ecaf29de5638660");
         if (consensus.hashGenesisBlock != expected_genesis) {
-            fprintf(stderr, "sequentia genesis hash mismatch: computed %s, expected %s\n",
-                    consensus.hashGenesisBlock.GetHex().c_str(), expected_genesis.GetHex().c_str());
+            tfm::format(std::cerr, "sequentia genesis hash mismatch: computed %s, expected %s\n",
+                        consensus.hashGenesisBlock.GetHex(), expected_genesis.GetHex());
         }
         assert(consensus.hashGenesisBlock == expected_genesis);
         assert(genesis.hashMerkleRoot == uint256S("0xf59bd2bf622fe907c93742913999bd7da121373bfcd8d5c8d354f7bebd15d91c"));
@@ -717,7 +726,8 @@ public:
         consensus.has_parent_chain = false;
         g_con_elementsmode = true;
         g_con_blockheightinheader = true;
-        g_con_any_asset_fees = true;
+        // The open fee market follows elements mode; SelectParams() settles
+        // g_con_any_asset_fees for the selected chain.
         // SEQUENTIA: every block anchors to a Bitcoin block (see doc/sequentia/03-bitcoin-anchoring.md)
         g_con_bitcoin_anchor = true;
         // SEQUENTIA: the bundled chain IS the Proof-of-Stake network (the paper's
@@ -944,11 +954,114 @@ public:
         // will not join the old chain.
         const uint256 expected_genesis = uint256S("0xddd11d54c87a2bd94400fd31ce05d8e1110bb4b78e7103f738342086fc4ea92e");
         if (consensus.hashGenesisBlock != expected_genesis) {
-            fprintf(stderr, "testnet genesis hash mismatch: computed %s, expected %s\n",
-                    consensus.hashGenesisBlock.GetHex().c_str(), expected_genesis.GetHex().c_str());
+            tfm::format(std::cerr, "testnet genesis hash mismatch: computed %s, expected %s\n",
+                        consensus.hashGenesisBlock.GetHex(), expected_genesis.GetHex());
         }
         assert(consensus.hashGenesisBlock == expected_genesis);
         assert(genesis.hashMerkleRoot == uint256S("0x94ccd459b890e0eed4f26e0a500b7c2adafef231742ac88531c204597502fbf2"));
+
+        // SEQUENTIA: ONE-TIME treasury UTXO recovery. Read this before touching it.
+        //
+        // WHAT HAPPENED. On 2026-07-29 a watchdog process deleted the founder
+        // treasury wallet. Two of its outputs became provably unspendable, for
+        // ever: the private keys AND the wallet's master blinding key were
+        // destroyed, and an exhaustive search for a copy found none. Nothing in
+        // the protocol can recover them, because there is nothing left to sign
+        // with. Roughly 398.07 million tSEQ -- most of the chain's supply -- and
+        // the USDX reissuance token, the authority to ever issue more USDX, were
+        // stranded on a testnet whose whole purpose is to be used.
+        //
+        // WHAT THIS DOES. At height 89500 the block-connect path removes those two
+        // outpoints from the UTXO set and adds two ordinary outputs paying the
+        // replacement treasury wallet (`treasury2026`, backed up on and off the
+        // box). Not a transaction, not a script: a rewrite of the UTXO set that
+        // every node performs identically, from the constants below, including on
+        // a fresh sync or a -reindex from genesis.
+        //
+        // WHY IT IS ACCEPTABLE HERE, AND ONLY HERE.
+        //  - The chain is a testnet with no real value on it, and every operator
+        //    is one of two people who both agreed to this.
+        //  - It moves no coin that anybody can spend. The retired outputs are
+        //    unspendable by everyone, for ever, including their owner.
+        //  - It is auditable: the constants are here in the source, the created
+        //    outputs land at the outpoints of a synthetic transaction derived
+        //    deterministically from them, and anyone can recompute the result.
+        //
+        // WHAT IT COSTS, STATED PLAINLY. Retired output (a) is CONFIDENTIAL: its
+        // value and asset are commitments, so consensus cannot know what it held
+        // and cannot check the replacement against it. The amount recreated is a
+        // number the owner chose, not a number the chain verified. It is set
+        // deliberately BELOW the ~398.07M believed lost -- a round 398,000,000 --
+        // so the rewrite cannot mint more than was destroyed even if the estimate
+        // is somewhat off. Output (b) is explicit, so its replacement is exact.
+        //
+        // AND IT IS NOT A MECHANISM. Do not add entries here. A second accident is
+        // a reason to fix the process that caused it, not to run this again: every
+        // use spends the credibility that the first one borrowed.
+        //
+        // Height 89500 is ~3,684 blocks ahead of the tip (~85,816) at the time it
+        // was chosen. Slots are 30 s, but roughly one slot in six goes unfilled,
+        // so the measured wall-clock cadence is ~36 s per block (36.1 s over the
+        // last 500 blocks, 37.4 s over the last 8,000). That puts the fork
+        // roughly 36 to 37 hours out, which is time enough for every node to
+        // upgrade. Below it nothing happens; at it the rewrite applies once;
+        // above it the created coins are ordinary coins.
+        // Note that transactions IN block 89500 cannot spend them -- the rewrite
+        // runs after that block's transactions -- so they are first spendable at
+        // height 89501.
+        //
+        // WHERE THE MONEY LANDS. The created outputs sit at the outpoints of the
+        // synthetic transaction derived from this table
+        // (BuildUtxoRecoveryTransaction, validation.cpp), which for these exact
+        // constants is
+        //   618981449a50c460c1dcd7c0dae693674294a2c58e930e128d6ef56e82eecae7:0
+        //     -- 398,000,000.00000000 tSEQ
+        //   618981449a50c460c1dcd7c0dae693674294a2c58e930e128d6ef56e82eecae7:1
+        //     -- 1.0 of the USDX reissuance token
+        // (pinned by sequentia_chainparams_tests; change any constant here and
+        // that txid moves). That transaction is never relayed and never in a
+        // block, so no wallet rescan will ever find it: `getrawtransaction` will
+        // not know it, and the coins will NOT appear in listunspent. They are
+        // ordinary coins to consensus -- `gettxout` and `scantxoutset` see them,
+        // and signrawtransactionwithwallet finds their prevouts in the UTXO set
+        // and signs normally. So the treasury reclaims them with one manual sweep
+        // (createrawtransaction from the outpoints above, sign, send), after
+        // which the resulting outputs are ordinary wallet outputs like any other.
+        consensus.utxo_recovery.height = 89500;
+        consensus.utxo_recovery.chain_genesis = expected_genesis;
+        consensus.utxo_recovery.retire = {
+            // Confidential (value and asset committed); true contents unknowable.
+            // spk 00149e6da228097ae9fb10fdf4a42438354b6e34cc50
+            {uint256S("0x910fcd65f2096051ea2fd823b21838b73a538d54e3c42c4c0474e140fed11953"), 0},
+            // Explicit: 1.0 of the USDX reissuance token.
+            // spk 00143e8b4a840f679e5594dd44297162f54fe4fd3185
+            {uint256S("0x6d7b68f5ea109eba1a03c688698e4a92debe3e7208c43fdc34e5ef052977dc7d"), 1},
+        };
+        {
+            // tb1q6tz9ksf643xwhlvql4nzrxwqc9p5van9ecr08l (P2WPKH), wallet treasury2026.
+            const CScript treasury2026 = CScript() << OP_0 << ParseHex("d2c45b413aac4cebfd80fd662199c0c143467665");
+            consensus.utxo_recovery.create = {
+                // 398,000,000.00000000 tSEQ, EXPLICIT.
+                {CAsset(uint256S("0xc8eccacf0953e1931cd31e434d8319101cc36e6c38b0e2104d8687552fae3e40")), 39800000000000000, treasury2026},
+                // 1.0 of the USDX reissuance token, EXPLICIT.
+                {CAsset(uint256S("0x2afc53ebcd3f3179c60f97e4e7f23755ff2519b308914d3b51ee97fb1c8557e5")), 100000000, treasury2026},
+            };
+            // Self-checks on the constants above, so a transcription slip is a
+            // startup failure rather than a divergent UTXO set. The recreated
+            // policy-asset output must be the policy asset this chain actually
+            // computed at genesis, and the recreated amount must be spendable
+            // under this chain's money cap.
+            assert(consensus.utxo_recovery.create[0].asset == consensus.subsidy_asset);
+            assert(consensus.utxo_recovery.create[0].amount <= MAX_MONEY);
+        }
+        // A re-genesised testnet is a DIFFERENT chain and must not carry this.
+        // The assert above pins the genesis hash today, so this branch is dead
+        // code -- until someone re-genesises, at which point it is the whole
+        // point: the recovery silently disables itself instead of rewriting the
+        // UTXO set of a chain that never lost anything.
+        if (consensus.utxo_recovery.chain_genesis != consensus.hashGenesisBlock) {
+            consensus.utxo_recovery = Consensus::UtxoRecovery{};
+        }
 
         vFixedSeeds.clear();
         vSeeds.clear();
@@ -1409,6 +1522,17 @@ protected:
     std::string default_magic_str = "5319F20E";
     std::string default_signblockscript = "51";
     bool use_invalid_seeds = true;
+    //! A custom chain's genesis hash is only known once SetGenesisBlock() has
+    //! run, so the opt-in UTXO-recovery table (see UpdateFromArgs) can only be
+    //! bound to its chain afterwards. Call this after every point where
+    //! consensus.hashGenesisBlock is (re)computed, or the table's genesis gate
+    //! never matches and the rewrite silently never fires.
+    void BindUtxoRecoveryToGenesis()
+    {
+        if (!consensus.utxo_recovery.IsNull()) {
+            consensus.utxo_recovery.chain_genesis = consensus.hashGenesisBlock;
+        }
+    }
     void UpdateFromArgs(const ArgsManager& args)
     {
         UpdateActivationParametersFromArgs(args);
@@ -1662,6 +1786,46 @@ protected:
             }
             consensus.nMaxBlockWeight = (uint32_t)mbw;
         }
+        // SEQUENTIA: opt-in one-time UTXO-set rewrite for custom chains.
+        //
+        // The Sequentia testnet's own rewrite is hard-coded in CTestNetParams and
+        // cannot be reached from here. This exists so the MECHANISM -- the
+        // block-connect hook, its undo path, and its behaviour across a reindex --
+        // can be driven end to end on a chain a test can actually build, using the
+        // same code path the real one uses. Off unless asked for, which is why a
+        // default regtest/elementsregtest chain never rewrites anything.
+        //
+        // -con_utxo_recovery_height=<n>            0 (default) = no rewrite
+        // -con_utxo_recovery_retire=<txid>:<vout>  repeatable
+        // -con_utxo_recovery_create=<assethex>:<atoms>:<spkhex>  repeatable
+        consensus.utxo_recovery = Consensus::UtxoRecovery{};
+        consensus.utxo_recovery.height = args.GetIntArg("-con_utxo_recovery_height", 0);
+        for (const std::string& entry : args.GetArgs("-con_utxo_recovery_retire")) {
+            const size_t colon = entry.rfind(':');
+            if (colon == std::string::npos) {
+                throw std::runtime_error("-con_utxo_recovery_retire must be <txid>:<vout>");
+            }
+            const std::string txid = entry.substr(0, colon);
+            uint32_t vout;
+            if (!IsHex(txid) || txid.size() != 64 || !ParseUInt32(entry.substr(colon + 1), &vout)) {
+                throw std::runtime_error("-con_utxo_recovery_retire must be <64-hex-char txid>:<vout>");
+            }
+            consensus.utxo_recovery.retire.emplace_back(uint256S(txid), vout);
+        }
+        for (const std::string& entry : args.GetArgs("-con_utxo_recovery_create")) {
+            std::vector<std::string> parts;
+            boost::split(parts, entry, boost::is_any_of(":"));
+            int64_t amount;
+            if (parts.size() != 3 || !IsHex(parts[0]) || parts[0].size() != 64 ||
+                !ParseInt64(parts[1], &amount) || !IsHex(parts[2])) {
+                throw std::runtime_error("-con_utxo_recovery_create must be <64-hex-char asset>:<atoms>:<spkhex>");
+            }
+            const std::vector<unsigned char> spk = ParseHex(parts[2]);
+            consensus.utxo_recovery.create.push_back(Consensus::UtxoRecoveryOutput{
+                CAsset(uint256S(parts[0])), (CAmount)amount,
+                CScript(spk.begin(), spk.end())});
+        }
+
         g_con_elementsmode = args.GetBoolArg("-con_elementsmode", true);
         consensus.elements_mode = g_con_elementsmode;
 
@@ -1795,6 +1959,7 @@ public:
         UpdateFromArgs(args);
         SetGenesisBlock();
         consensus.hashGenesisBlock = genesis.GetHash();
+        BindUtxoRecoveryToGenesis();
     }
 };
 
@@ -1846,6 +2011,7 @@ public:
         multi_data_permitted = true;
         SetGenesisBlock();
         consensus.hashGenesisBlock = genesis.GetHash();
+        BindUtxoRecoveryToGenesis();
         if (!args.IsArgSet("-seednode")) {
             vSeeds.emplace_back("seed.liquid-testnet.blockstream.com");
             vSeeds.emplace_back("seed.liquidtestnet.com");
@@ -2440,4 +2606,31 @@ void SelectParams(const std::string& network)
 {
     SelectBaseParams(network);
     globalChainParams = CreateChainParams(gArgs, network);
+
+    // SEQUENTIA: the open fee market FOLLOWS elements mode, and is settled HERE,
+    // deliberately, for the chain actually selected.
+    //
+    // Why it follows elements mode rather than being listed per chain: paying a
+    // fee in "any asset" presupposes that there IS more than one asset. An
+    // elements-mode chain (sequentia, test, the custom chains including
+    // elementsregtest, liquid) has issuance, so a fee payer has a real choice and
+    // the open fee market is the whole point -- no asset, the policy asset
+    // included, is privileged for fees. A chain running with elements mode OFF
+    // (main, signet, regtest) has exactly ONE asset and no issuance, so there is
+    // nothing to choose between: an open fee market there is not merely unwanted,
+    // it is meaningless. Deriving the flag from elements mode keeps that true for
+    // any chain added later, which a hand-maintained list of chain names would
+    // not.
+    //
+    // Why here and not in the CChainParams constructors: SetupServerArgs()
+    // constructs several CChainParams purely to render help strings, so a global
+    // assigned in a constructor ends up holding whatever the LAST such
+    // construction happened to set -- a value that was right only by accident and
+    // silently wrong the moment that list is reordered. That is exactly how the
+    // fee market came to be switched on for main/signet/regtest, where a null
+    // policy asset then made the node write an exchangerates.json it could not
+    // read back on the next start. Reading it off the selected chain's consensus
+    // params makes the value a consequence of the chain, not of argument-parsing
+    // order.
+    g_con_any_asset_fees = globalChainParams->GetConsensus().elements_mode;
 }

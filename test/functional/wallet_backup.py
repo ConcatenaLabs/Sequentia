@@ -38,6 +38,7 @@ import shutil
 from test_framework.blocktools import COINBASE_MATURITY
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
+    amount_of,
     assert_equal,
     assert_raises_rpc_error,
 )
@@ -71,7 +72,8 @@ class WalletBackupTest(BitcoinTestFramework):
     def one_send(self, from_node, to_address):
         if (randint(1,2) == 1):
             amount = Decimal(randint(1,10)) / Decimal(10)
-            self.nodes[from_node].sendtoaddress(to_address, amount)
+            # SEQUENTIA: an open-fee-market chain has no default fee asset.
+            self.nodes[from_node].sendtoaddress(address=to_address, amount=amount, fee_asset_label='bitcoin')
 
     def do_one_round(self):
         a0 = self.nodes[0].getnewaddress()
@@ -149,10 +151,10 @@ class WalletBackupTest(BitcoinTestFramework):
         self.generate(self.nodes[2], 1)
         self.generate(self.nodes[3], COINBASE_MATURITY)
 
-        assert_equal(self.nodes[0].getbalance()['bitcoin'], 50)
-        assert_equal(self.nodes[1].getbalance()['bitcoin'], 50)
-        assert_equal(self.nodes[2].getbalance()['bitcoin'], 50)
-        assert_equal(self.nodes[3].getbalance()['bitcoin'], 0)
+        assert_equal(amount_of(self.nodes[0].getbalance()), 50)
+        assert_equal(amount_of(self.nodes[1].getbalance()), 50)
+        assert_equal(amount_of(self.nodes[2].getbalance()), 50)
+        assert_equal(amount_of(self.nodes[3].getbalance()), 0)
 
         self.log.info("Creating transactions")
         # Five rounds of sending each other transactions.
@@ -177,10 +179,10 @@ class WalletBackupTest(BitcoinTestFramework):
         # Generate 101 more blocks, so any fees paid mature
         self.generate(self.nodes[3], COINBASE_MATURITY + 1)
 
-        balance0 = self.nodes[0].getbalance()['bitcoin']
-        balance1 = self.nodes[1].getbalance()['bitcoin']
-        balance2 = self.nodes[2].getbalance()['bitcoin']
-        balance3 = self.nodes[3].getbalance()['bitcoin']
+        balance0 = amount_of(self.nodes[0].getbalance())
+        balance1 = amount_of(self.nodes[1].getbalance())
+        balance2 = amount_of(self.nodes[2].getbalance())
+        balance3 = amount_of(self.nodes[3].getbalance())
         total = balance0 + balance1 + balance2 + balance3
 
         # At this point, there are 214 blocks (103 for setup, then 10 rounds, then 101.)
@@ -211,9 +213,9 @@ class WalletBackupTest(BitcoinTestFramework):
         res1_rpc = self.nodes[3].get_wallet_rpc("res1")
         res2_rpc = self.nodes[3].get_wallet_rpc("res2")
 
-        assert_equal(res0_rpc.getbalance()['bitcoin'], balance0)
-        assert_equal(res1_rpc.getbalance()['bitcoin'], balance1)
-        assert_equal(res2_rpc.getbalance()['bitcoin'], balance2)
+        assert_equal(amount_of(res0_rpc.getbalance()), balance0)
+        assert_equal(amount_of(res1_rpc.getbalance()), balance1)
+        assert_equal(amount_of(res2_rpc.getbalance()), balance2)
 
         self.restore_wallet_existent_name()
 
@@ -229,9 +231,9 @@ class WalletBackupTest(BitcoinTestFramework):
             self.start_three(["-nowallet"])
             self.init_three()
 
-            assert_equal(self.nodes[0].getbalance()['bitcoin'], 0)
-            assert_equal(self.nodes[1].getbalance()['bitcoin'], 0)
-            assert_equal(self.nodes[2].getbalance()['bitcoin'], 0)
+            assert_equal(amount_of(self.nodes[0].getbalance()), 0)
+            assert_equal(amount_of(self.nodes[1].getbalance()), 0)
+            assert_equal(amount_of(self.nodes[2].getbalance()), 0)
 
             self.nodes[0].importwallet(os.path.join(self.nodes[0].datadir, 'wallet.dump'))
             self.nodes[1].importwallet(os.path.join(self.nodes[1].datadir, 'wallet.dump'))
@@ -239,9 +241,9 @@ class WalletBackupTest(BitcoinTestFramework):
 
             self.sync_blocks()
 
-            assert_equal(self.nodes[0].getbalance()['bitcoin'], balance0)
-            assert_equal(self.nodes[1].getbalance()['bitcoin'], balance1)
-            assert_equal(self.nodes[2].getbalance()['bitcoin'], balance2)
+            assert_equal(amount_of(self.nodes[0].getbalance()), balance0)
+            assert_equal(amount_of(self.nodes[1].getbalance()), balance1)
+            assert_equal(amount_of(self.nodes[2].getbalance()), balance2)
 
         # Backup to source wallet file must fail
         sourcePaths = [

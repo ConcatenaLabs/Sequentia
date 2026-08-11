@@ -1538,7 +1538,7 @@ static RPCHelpMan vrfprove()
                 "(see doc/sequentia/04-proof-of-stake.md).\n",
                 {
                     {"privkey", RPCArg::Type::STR, RPCArg::Optional::NO, "WIF private key."},
-                    {"input", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Hex-encoded input (alpha)."},
+                    {"alpha", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Hex-encoded VRF input (alpha)."},
                 },
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
@@ -1554,7 +1554,7 @@ static RPCHelpMan vrfprove()
     if (!key.IsValid()) {
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid private key");
     }
-    std::vector<unsigned char> alpha = ParseHexV(request.params[1], "input");
+    std::vector<unsigned char> alpha = ParseHexV(request.params[1], "alpha");
     auto proof = VrfProve(key, alpha);
     if (!proof) {
         throw JSONRPCError(RPC_MISC_ERROR, "VRF proof generation failed");
@@ -1622,7 +1622,7 @@ static RPCHelpMan vrfverify()
                 "if so, its output (beta). See doc/sequentia/04-proof-of-stake.md.\n",
                 {
                     {"pubkey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Hex-encoded public key."},
-                    {"input", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Hex-encoded input (alpha)."},
+                    {"alpha", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Hex-encoded VRF input (alpha)."},
                     {"proof", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Hex-encoded VRF proof (pi)."},
                 },
                 RPCResult{
@@ -1636,7 +1636,7 @@ static RPCHelpMan vrfverify()
 {
     std::vector<unsigned char> pubkey_bytes = ParseHexV(request.params[0], "pubkey");
     CPubKey pubkey(pubkey_bytes);
-    std::vector<unsigned char> alpha = ParseHexV(request.params[1], "input");
+    std::vector<unsigned char> alpha = ParseHexV(request.params[1], "alpha");
     std::vector<unsigned char> proof = ParseHexV(request.params[2], "proof");
     uint256 output;
     bool ok = pubkey.IsFullyValid() && VrfVerify(pubkey, alpha, proof, output);
@@ -2013,7 +2013,18 @@ static RPCHelpMan getposblocktemplate()
     }
 
     CScript feeDestinationScript = chainparams.GetConsensus().mandatory_coinbase_destination;
-    if (feeDestinationScript == CScript()) feeDestinationScript = CScript() << OP_TRUE;
+    // SEQUENTIA PoS: the coinbase must pay the elected leader's own payout
+    // script -- consensus binds every fee-bearing coinbase output to it from
+    // pos_coinbase_leader_height (ConnectBlock, "bad-coinbase-not-leader").
+    // Paying OP_TRUE here made every template the distributed-committee flow
+    // asked for unconnectable, so the RPC failed inside CreateNewBlock's own
+    // TestBlockValidity and no distributed committee could produce a block at
+    // all. Same call, same arguments, as the single-host producer
+    // (ProducePosBlock, src/pos_producer.cpp), so the two paths cannot
+    // disagree about who gets paid.
+    if (feeDestinationScript == CScript()) {
+        feeDestinationScript = PosRequiredCoinbaseScript(pubkey, tip->nHeight + 1, seed);
+    }
 
     std::unique_ptr<CBlockTemplate> pblocktemplate(
         BlockAssembler(chainman.ActiveChainstate(), *node.mempool, chainparams)

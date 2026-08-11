@@ -66,13 +66,15 @@ class CTTest(BitcoinTestFramework):
             info = node2.getaddressinfo(addr)
             many[info['unconfidential']] = 1
 
-        txid = node0.sendmany("", many)
+        # SEQUENTIA: no default fee asset on an open-fee-market chain, so every send
+        # below names the asset it pays its fee in -- here the policy asset.
+        txid = node0.sendmany(dummy="", amounts=many, fee_asset='bitcoin')
         self.generate(node0, 1)
 
         self.log.info("Send explicit tx to node 0")
         addr = node0.getnewaddress()
         info = node0.getaddressinfo(addr)
-        txid = node0.sendtoaddress(info['unconfidential'], 1.0, "", "", False, None, None, None, None, None, None, feerate)
+        txid = node0.sendtoaddress(address=info['unconfidential'], amount=1.0, fee_rate=feerate, fee_asset_label='bitcoin')
         tx = node0.gettransaction(txid, True, True)
         decoded = tx['decoded']
         vin = decoded['vin']
@@ -92,7 +94,7 @@ class CTTest(BitcoinTestFramework):
         self.log.info("Send confidential tx to node 0")
         addr = node0.getnewaddress()
         info = node0.getaddressinfo(addr)
-        txid = node0.sendtoaddress(info['confidential'], 1.0, "", "", False, None, None, None, None, None, None, feerate)
+        txid = node0.sendtoaddress(address=info['confidential'], amount=1.0, fee_rate=feerate, fee_asset_label='bitcoin')
         tx = node0.gettransaction(txid, True, True)
         decoded = tx['decoded']
         vin = decoded['vin']
@@ -112,7 +114,7 @@ class CTTest(BitcoinTestFramework):
         self.log.info("Send explicit tx to node 1")
         addr = node1.getnewaddress()
         info = node1.getaddressinfo(addr)
-        txid = node0.sendtoaddress(info['unconfidential'], 1.0, "", "", False, None, None, None, None, None, None, feerate)
+        txid = node0.sendtoaddress(address=info['unconfidential'], amount=1.0, fee_rate=feerate, fee_asset_label='bitcoin')
         tx = node0.gettransaction(txid, True, True)
         decoded = tx['decoded']
         vin = decoded['vin']
@@ -132,7 +134,7 @@ class CTTest(BitcoinTestFramework):
         self.log.info("Send confidential (undiscounted) tx to node 1")
         addr = node1.getnewaddress()
         info = node1.getaddressinfo(addr)
-        txid = node0.sendtoaddress(info['confidential'], 1.0, "", "", False, None, None, None, None, None, None, feerate)
+        txid = node0.sendtoaddress(address=info['confidential'], amount=1.0, fee_rate=feerate, fee_asset_label='bitcoin')
         tx = node0.gettransaction(txid, True, True)
         decoded = tx['decoded']
         vin = decoded['vin']
@@ -153,7 +155,7 @@ class CTTest(BitcoinTestFramework):
         bitcoin = 'b2e15d0d7a0c94e4e2ce0fe6e8691b9e451377f6e46e8045a86f7c4b5d4f0f23'
         addr = node1.getnewaddress()
         info = node1.getaddressinfo(addr)
-        txid = node2.sendtoaddress(info['confidential'], 1.0, "", "", False, None, None, None, None, None, None, feerate)
+        txid = node2.sendtoaddress(address=info['confidential'], amount=1.0, fee_rate=feerate, fee_asset_label='bitcoin')
         # node0 won't accept or relay the tx
         self.sync_mempools([node1, node2])
         assert_equal(node0.getrawmempool(), [])
@@ -185,7 +187,7 @@ class CTTest(BitcoinTestFramework):
         self.log.info(f"Send confidential (discounted) tx to node 1 at {feerate} sats/vb")
         addr = node1.getnewaddress()
         info = node1.getaddressinfo(addr)
-        txid = node2.sendtoaddress(info['confidential'], 1.0, "", "", False, None, None, None, None, None, None, feerate)
+        txid = node2.sendtoaddress(address=info['confidential'], amount=1.0, fee_rate=feerate, fee_asset_label='bitcoin')
         self.sync_mempools([node1, node2])
         assert_equal(node0.getrawmempool(), [])
         self.generate(node2, 1, sync_fun=self.sync_blocks)

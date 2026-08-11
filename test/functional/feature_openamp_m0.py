@@ -41,6 +41,7 @@ from test_framework.messages import (
     CTxOut,
     CTxOutAsset,
     CTxOutValue,
+    CTxOutWitness,
     sha256,
     hash256,
     tx_from_hex,
@@ -146,6 +147,24 @@ def enclave_witness(tap, leaf_name, sig_policy, sig_other):
     leaf = tap.leaves[leaf_name]
     control = bytes([leaf.version + tap.negflag]) + tap.internal_pubkey + leaf.merklebranch
     return [sig_policy, sig_other, bytes(leaf.script), control]
+
+
+def size_witness(tx):
+    """Give the transaction one witness slot per input and per output.
+
+    Elements' taproot sighash commits to every output witness
+    (m_output_witnesses_single_hash in SignatureHashSchnorr) and to every input
+    issuance rangeproof, one entry per vout/vin, and CTransaction.serialize()
+    silently pads both vectors on its way out. A transaction re-parsed from a
+    witness-less serialization -- which is what signrawtransactionwithwallet
+    returns when the only input it can sign is a legacy, non-segwit one -- comes
+    back with both vectors empty, so signing it before padding signs a message
+    the node will never reproduce. Size them first, then sign."""
+    while len(tx.wit.vtxinwit) < len(tx.vin):
+        tx.wit.vtxinwit.append(CTxInWitness())
+    while len(tx.wit.vtxoutwit) < len(tx.vout):
+        tx.wit.vtxoutwit.append(CTxOutWitness())
+    return tx
 
 
 class PolicyRefusal(Exception):
@@ -268,7 +287,9 @@ class OpenAmpM0Test(BitcoinTestFramework):
         node = self.nodes[0]
         self.generate(node, 101)
         # Spend the initialfreecoins output so the wallet has ordinary utxos.
-        node.sendtoaddress(node.getnewaddress(), 50)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        node.sendtoaddress(address=node.getnewaddress(), amount=50,
+                           fee_asset_label='bitcoin')
         self.generate(node, 1)
         genesis_hash = uint256_from_str(bytes.fromhex(node.getblockhash(0))[::-1])
 
@@ -363,9 +384,7 @@ class OpenAmpM0Test(BitcoinTestFramework):
                  self.utxo_to_ctxout(fee_utxo)]
         # Wallet signs its fee input (sighash ALL covers the final outputs).
         partial = node.signrawtransactionwithwallet(tx.serialize().hex())
-        tx = tx_from_hex(partial["hex"])
-        while len(tx.wit.vtxinwit) < len(tx.vin):
-            tx.wit.vtxinwit.append(CTxInWitness())
+        tx = size_witness(tx_from_hex(partial["hex"]))
         sig_policy = server.cosign(tx, 0, spent, alice_x)
         msg = TaprootSignatureHash(tx, spent, SIGHASH_DEFAULT, genesis_hash, 0,
                                    scriptpath=True, script=alice_tap.leaves["transfer"].script)
@@ -406,9 +425,7 @@ class OpenAmpM0Test(BitcoinTestFramework):
         tx.vout.append(CTxOut(CTxOutValue(FEE_SATS)))
         spent_forged = [spent_bob[0], self.utxo_to_ctxout(fee_utxo)]
         partial = node.signrawtransactionwithwallet(tx.serialize().hex())
-        tx = tx_from_hex(partial["hex"])
-        while len(tx.wit.vtxinwit) < len(tx.vin):
-            tx.wit.vtxinwit.append(CTxInWitness())
+        tx = size_witness(tx_from_hex(partial["hex"]))
         msg = TaprootSignatureHash(tx, spent_forged, SIGHASH_DEFAULT, genesis_hash, 0,
                                    scriptpath=True, script=bob_tap.leaves["transfer"].script)
         sig_bob = sign_schnorr(bob_sec, msg)
@@ -443,7 +460,7 @@ class OpenAmpM0Test(BitcoinTestFramework):
             assert_equal(str(e), "restricted asset in a fee output")
         # Layer 3 of Rule 1: even a rogue co-signer cannot get this mined; the
         # node itself refuses a fee in an asset it does not accept.
-        tx.wit.vtxinwit.append(CTxInWitness())
+        size_witness(tx)
         msg = TaprootSignatureHash(tx, spent_alice, SIGHASH_DEFAULT, genesis_hash, 0,
                                    scriptpath=True, script=alice_tap.leaves["transfer"].script)
         rogue_policy_sig = sign_schnorr(policy_sec, msg)
@@ -472,9 +489,7 @@ class OpenAmpM0Test(BitcoinTestFramework):
                                       "asset": asset_display}),
                  self.utxo_to_ctxout(fee_utxo)]
         partial = node.signrawtransactionwithwallet(tx.serialize().hex())
-        tx = tx_from_hex(partial["hex"])
-        while len(tx.wit.vtxinwit) < len(tx.vin):
-            tx.wit.vtxinwit.append(CTxInWitness())
+        tx = size_witness(tx_from_hex(partial["hex"]))
         sig_policy = server.cosign(tx, 0, spent, bob_x)
         msg = TaprootSignatureHash(tx, spent, SIGHASH_DEFAULT, genesis_hash, 0,
                                    scriptpath=True, script=bob_tap.leaves["transfer"].script)
@@ -500,9 +515,7 @@ class OpenAmpM0Test(BitcoinTestFramework):
                                       "asset": asset_display}),
                  self.utxo_to_ctxout(fee_utxo)]
         partial = node.signrawtransactionwithwallet(tx.serialize().hex())
-        tx = tx_from_hex(partial["hex"])
-        while len(tx.wit.vtxinwit) < len(tx.vin):
-            tx.wit.vtxinwit.append(CTxInWitness())
+        tx = size_witness(tx_from_hex(partial["hex"]))
         sig_policy = server.sign_clawback(tx, 0, spent, bob_x)
         msg = TaprootSignatureHash(tx, spent, SIGHASH_DEFAULT, genesis_hash, 0,
                                    scriptpath=True, script=bob_tap.leaves["claw"].script)

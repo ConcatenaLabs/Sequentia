@@ -62,9 +62,10 @@ class KeypoolRestoreTest(BitcoinTestFramework):
 
 
             self.log.info("Send funds to wallet")
-            self.nodes[0].sendtoaddress(addr_oldpool, 10)
+            # SEQUENTIA: an open-fee-market chain has no default fee asset.
+            self.nodes[0].sendtoaddress(address=addr_oldpool, amount=10, fee_asset_label='bitcoin')
             self.generate(self.nodes[0], 1)
-            self.nodes[0].sendtoaddress(addr_extpool, 5)
+            self.nodes[0].sendtoaddress(address=addr_extpool, amount=5, fee_asset_label='bitcoin')
             self.generate(self.nodes[0], 1)
 
             self.log.info("Restart node with wallet backup")

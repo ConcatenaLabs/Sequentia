@@ -81,25 +81,30 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         with _lock:
             if self.path == "/prices":
-                self._json(_state); return
+                self._json(_state)
+                return
             if self.path == "/healthz":
-                self._json({"ok": True, "assets": sorted(_state)}); return
+                self._json({"ok": True, "assets": sorted(_state)})
+                return
             if self.path.startswith("/price/"):
                 t = self.path.split("/price/", 1)[1].strip("/").upper()
                 if t in _state:
-                    self._json(_state[t]); return
+                    self._json(_state[t])
+                    return
         self._json({"error": "not found"}, 404)
 
     def do_POST(self):
         if self.path != "/seed":
-            self._json({"error": "not found"}, 404); return
+            self._json({"error": "not found"}, 404)
+            return
         try:
             n = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(n) or b"{}")
             t = str(body["ticker"]).upper()
             price = float(body["price"])
         except (ValueError, KeyError, TypeError):
-            self._json({"error": "expected {ticker, price, quote?, kind?}"}, 400); return
+            self._json({"error": "expected {ticker, price, quote?, kind?}"}, 400)
+            return
         with _lock:
             _state[t] = {"price": max(1e-6, price),
                          "market_cap": 0.0, "volume_24h": 0.0,

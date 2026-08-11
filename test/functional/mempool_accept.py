@@ -35,6 +35,7 @@ from test_framework.script_util import (
 from test_framework.util import (
     assert_equal,
     assert_raises_rpc_error,
+    strip_checked_fee_asset,
 )
 from test_framework.wallet import MiniWallet
 
@@ -55,6 +56,7 @@ class MempoolAcceptanceTest(BitcoinTestFramework):
         result_test = self.nodes[0].testmempoolaccept(*args, **kwargs)
         for r in result_test:
             r.pop('wtxid')  # Skip check for now
+        strip_checked_fee_asset(result_test)
         assert_equal(result_expected, result_test)
         assert_equal(self.nodes[0].getmempoolinfo()['size'], self.mempool_size)  # Must not change mempool state
 
@@ -323,9 +325,18 @@ class MempoolAcceptanceTest(BitcoinTestFramework):
             rawtxs=[tx.serialize().hex()],
         )
         # Elements: We allow multi op_return outputs by default. This still fails because relay fee isn't met
+        # SEQUENTIA: the explicit fee output has to survive, or the transaction is
+        # rejected as bad-txns-no-fee before the fee rate is ever weighed -- which
+        # would prove nothing about multiple OP_RETURNs being permitted. So the fee
+        # output is kept and set to 2 atoms: present, but far under the relay minimum
+        # for a transaction this size, which is the rejection this case is about.
         tx = tx_from_hex(raw_tx_reference)
-        tx.vout[0].scriptPubKey = CScript([OP_RETURN, b'\xff'])
-        tx.vout = [tx.vout[0]] * 2
+        op_return_out = tx.vout[0]
+        op_return_out.scriptPubKey = CScript([OP_RETURN, b'\xff'])
+        op_return_out.nValue.setToAmount(4999999)
+        fee_out = tx.vout[1]
+        fee_out.nValue.setToAmount(2)
+        tx.vout = [op_return_out] * 2 + [fee_out]  # 4999999 * 2 + 2 == the 0.1 input
         self.check_mempool_result(
             result_expected=[{'txid': tx.rehash(), 'allowed': False, 'reject-reason': 'min relay fee not met'}],
             rawtxs=[tx.serialize().hex()],

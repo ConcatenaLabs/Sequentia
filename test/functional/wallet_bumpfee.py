@@ -76,7 +76,10 @@ class BumpFeeTest(BitcoinTestFramework):
         self.log.info("Mining blocks...")
         self.generate(peer_node, 110)
         for _ in range(25):
-            peer_node.sendtoaddress(rbf_node_address, 0.001)
+            # SEQUENTIA: an open-fee-market chain has no default fee asset. The
+            # bumpfee calls below need none: they inherit the fee asset of the
+            # transaction they replace.
+            peer_node.sendtoaddress(address=rbf_node_address, amount=0.001, fee_asset_label='bitcoin')
         self.sync_all()
         self.generate(peer_node, 1)
         assert_equal(rbf_node.getbalance()['bitcoin'], Decimal("0.025"))
@@ -230,7 +233,7 @@ def test_segwit_bumpfee_succeeds(self, rbf_node, dest_address):
 
 def test_nonrbf_bumpfee_fails(self, peer_node, dest_address):
     self.log.info('Test that we cannot replace a non RBF transaction')
-    not_rbfid = peer_node.sendtoaddress(dest_address, Decimal("0.00090000"))
+    not_rbfid = peer_node.sendtoaddress(address=dest_address, amount=Decimal("0.00090000"), fee_asset_label='bitcoin')
     assert_raises_rpc_error(-4, "not BIP 125 replaceable", peer_node.bumpfee, not_rbfid)
     self.clear_mempool()
 
@@ -446,11 +449,11 @@ def test_watchonly_psbt(self, peer_node, rbf_node, dest_address):
     funding_address1 = watcher.getnewaddress(address_type='bech32')
     funding_address2 = watcher.getnewaddress(address_type='bech32')
     # ELEMENTS: start with 50% more funds since our transaction will be 688 bytes vs 444 in Bitcoin
-    peer_node.sendmany("", {funding_address1: 0.0015, funding_address2: 0.0015})
+    peer_node.sendmany(dummy="", amounts={funding_address1: 0.0015, funding_address2: 0.0015}, fee_asset='bitcoin')
     self.generate(peer_node, 1)
 
     # Create single-input PSBT for transaction to be bumped
-    psbt = watcher.walletcreatefundedpsbt([], [{dest_address: 0.0005}], 0, {"fee_rate": 1}, True)['psbt']
+    psbt = watcher.walletcreatefundedpsbt([], [{dest_address: 0.0005}], 0, {"fee_rate": 1, "fee_asset": "bitcoin"}, True)['psbt']
     psbt_signed = signer.walletprocesspsbt(psbt=psbt, sign=True, sighashtype="ALL", bip32derivs=True)
     psbt_final = watcher.finalizepsbt(psbt_signed["psbt"])
     original_txid = watcher.sendrawtransaction(psbt_final["hex"])
@@ -544,7 +547,7 @@ def test_bumpfee_metadata(self, rbf_node, dest_address):
     self.log.info('Test that bumped txn metadata persists to new txn record')
     assert(rbf_node.getbalance()["bitcoin"] < 49)
     self.generatetoaddress(rbf_node, 101, rbf_node.getnewaddress())
-    rbfid = rbf_node.sendtoaddress(dest_address, 49, "comment value", "to value")
+    rbfid = rbf_node.sendtoaddress(address=dest_address, amount=49, comment="comment value", comment_to="to value", fee_asset_label='bitcoin')
     bumped_tx = rbf_node.bumpfee(rbfid)
     bumped_wtx = rbf_node.gettransaction(bumped_tx["txid"])
     assert_equal(bumped_wtx["comment"], "comment value")
@@ -612,7 +615,8 @@ def test_no_more_inputs_fails(self, rbf_node, dest_address):
     # feerate rbf requires confirmed outputs when change output doesn't exist or is insufficient
     self.generatetoaddress(rbf_node, 1, dest_address)
     # spend all funds, no change output
-    rbfid = rbf_node.sendtoaddress(rbf_node.getnewaddress(), rbf_node.getbalance()['bitcoin'], "", "", True)
+    # No fee asset is named here: subtractfeefromamount already determines it.
+    rbfid = rbf_node.sendtoaddress(address=rbf_node.getnewaddress(), amount=rbf_node.getbalance()['bitcoin'], subtractfeefromamount=True)
     assert_raises_rpc_error(-4, "Unable to create transaction. Insufficient funds", rbf_node.bumpfee, rbfid)
     self.clear_mempool()
 

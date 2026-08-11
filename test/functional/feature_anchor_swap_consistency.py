@@ -104,6 +104,52 @@ class AnchorSwapConsistencyTest(BitcoinTestFramework):
             time.sleep(0.25)
         raise AssertionError("chain did not reorganize within %ds" % timeout)
 
+    def mine_anchored_at_least(self, node, addr, height, timeout=30):
+        """Mine blocks on the anchored chain until one anchors at/above `height`.
+
+        The committee's chosen anchor can lag the parent tip (on a live network
+        -anchoravoidcontested deliberately backs it down to the last uncontested
+        parent height), so a caller that needs a block anchored at a given height
+        must WAIT for it rather than assume the next block will carry it.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            self.generatetoaddress(node, 1, addr, sync_fun=self.no_op)
+            block = node.getbestblockhash()
+            if node.getblockheader(block)['anchorheight'] >= height:
+                return block
+            time.sleep(0.25)
+        raise AssertionError("no block anchored at/above parent height %d within %ds" % (height, timeout))
+
+    def double_spend_away(self, parent, txid, fork_height, extend=3):
+        """Reorg the parent chain from `fork_height`, double-spending `txid` away.
+
+        Replaces the branch from fork_height upward with a longer one in which
+        txid's inputs are spent elsewhere, so txid can never re-confirm.
+        """
+        parent.invalidateblock(parent.getblockhash(fork_height))
+        assert parent.gettransaction(txid)['confirmations'] <= 0
+        leg_dec = parent.decoderawtransaction(parent.getrawtransaction(txid))
+        inputs = []
+        in_total = 0
+        for vin in leg_dec['vin']:
+            prev = parent.decoderawtransaction(parent.getrawtransaction(vin['txid']))
+            in_total += prev['vout'][vin['vout']]['value']
+            inputs.append({"txid": vin['txid'], "vout": vin['vout']})
+        fee = 0.001  # comfortably above the BIP125 replacement fee floor
+        raw = parent.createrawtransaction(inputs, [
+            {parent.getnewaddress(): round(float(in_total) - fee, 8)},
+            {"fee": fee},
+        ])
+        signed = parent.signrawtransactionwithwallet(raw)
+        assert signed['complete']
+        double_spend = parent.sendrawtransaction(signed['hex'])
+        assert txid not in parent.getrawmempool()
+        self.generatetoaddress(parent, extend, parent.getnewaddress(), sync_fun=self.no_op)
+        assert parent.gettransaction(txid)['confirmations'] <= 0
+        assert parent.gettransaction(double_spend)['confirmations'] >= 1
+        return double_spend
+
     def run_test(self):
         parent = self.nodes[0]   # stands in for Bitcoin
         seq = self.nodes[1]      # the anchored (Sequentia) chain
@@ -116,7 +162,9 @@ class AnchorSwapConsistencyTest(BitcoinTestFramework):
 
         # --- Step 1: the BTC leg. Alice pays Bob on the parent chain. ---
         bob_parent = parent.getnewaddress()
-        btc_leg = parent.sendtoaddress(address=bob_parent, amount=10.0, replaceable=True)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        btc_leg = parent.sendtoaddress(address=bob_parent, amount=10.0, replaceable=True,
+                                       fee_asset_label='bitcoin')
         self.generatetoaddress(parent, 1, parent_mine, sync_fun=self.no_op)
         block_p_height = parent.getblockcount()
         assert_equal(parent.gettransaction(btc_leg)['confirmations'], 1)
@@ -125,7 +173,8 @@ class AnchorSwapConsistencyTest(BitcoinTestFramework):
         # on-chain (paper principle 7), so the Sequentia block containing it
         # anchors at a height >= P's. ---
         alice_seq = seq.getnewaddress()
-        seq_leg = seq.sendtoaddress(address=alice_seq, amount=10.0)
+        seq_leg = seq.sendtoaddress(address=alice_seq, amount=10.0,
+                                    fee_asset_label='bitcoin')
         self.generatetoaddress(seq, 1, seq_mine, sync_fun=self.no_op)
         block_s = seq.getbestblockhash()
         header_s = seq.getblockheader(block_s)
@@ -183,6 +232,85 @@ class AnchorSwapConsistencyTest(BitcoinTestFramework):
         new_tip = seq.getblockheader(seq.getbestblockhash())
         assert new_tip['anchorheight'] >= parent.getblockcount() - 1
         assert_equal(seq.getanchorstatus()['anchorstatus'], 'ok')
+
+        self.test_burying_block_does_not_rescue(parent, seq, parent_mine, seq_mine)
+
+    def test_burying_block_does_not_rescue(self, parent, seq, parent_mine, seq_mine):
+        """A well-anchored block BURYING a leg does not make that leg safe.
+
+        This is the counterexample to the tempting relaxation of the cross-chain
+        claim gate. When the block holding the Sequentia leg anchors BELOW the
+        BTC-leg height, the gate refuses and no amount of waiting changes it
+        (anchorheight is a committed header field). The apparent shortcut is to
+        gate on a LATER block instead — one that buries the leg and anchors high
+        enough — since that value does advance, typically within a block or two.
+
+        It is not a shortcut, it is the removal of the protection. Invalidation
+        propagates to a block's DESCENDANTS, never to its ANCESTORS: orphaning the
+        burying block's anchor discards the burying block and everything above it
+        while the leg's own block stays CONNECTED and its output stays spendable.
+        Meanwhile the counterparty's BTC leg, confirmed above the fork point, is
+        gone and can be double-spent. The party that gave the asset loses both
+        legs.
+
+        The scenario below is the one measured live on 2026-07-25 (leg anchored
+        145607, BTC leg at 145609, buried 90s later by a block anchored 145609):
+
+          leg block   anchored at X            <- must SURVIVE the reorg
+          BTC leg     confirmed at X+2         <- must DIE in the reorg
+          bury block  anchored at X+2          <- must DIE with it
+          reorg fork point P = X+1, i.e. X < P <= X+2
+        """
+        self.log.info("burying-block counterexample: a later well-anchored block must NOT rescue an under-anchored leg")
+
+        # 1. The asset leg confirms in a Sequentia block anchored at the CURRENT
+        #    parent height X (at most: the anchor may legitimately lag).
+        x = parent.getblockcount()
+        leg_txid = seq.sendtoaddress(address=seq.getnewaddress(), amount=1.0,
+                                     fee_asset_label='bitcoin')
+        self.generatetoaddress(seq, 1, seq_mine, sync_fun=self.no_op)
+        block_leg = seq.getbestblockhash()
+        leg_anchor = seq.getblockheader(block_leg)['anchorheight']
+        assert leg_anchor <= x
+        assert_equal(seq.gettransaction(leg_txid)['confirmations'], 1)
+
+        # 2. The BTC leg confirms TWO parent blocks later, so the asset leg's
+        #    block is anchored strictly BELOW it: the gate must refuse this leg.
+        self.generatetoaddress(parent, 1, parent_mine, sync_fun=self.no_op)      # X+1
+        btc_leg = parent.sendtoaddress(address=parent.getnewaddress(), amount=10.0,
+                                       replaceable=True, fee_asset_label='bitcoin')
+        self.generatetoaddress(parent, 1, parent_mine, sync_fun=self.no_op)      # X+2 confirms it
+        h_btc = parent.getblockcount()
+        assert_equal(h_btc, x + 2)
+        assert_equal(parent.gettransaction(btc_leg)['confirmations'], 1)
+        assert leg_anchor < h_btc, "the leg must be UNDER-anchored for this test to mean anything"
+
+        # 3. A later Sequentia block buries the leg and anchors at/above the
+        #    BTC-leg height. A gate that consulted THIS block would pass.
+        block_bury = self.mine_anchored_at_least(seq, seq_mine, h_btc)
+        assert block_bury != block_leg
+        assert seq.getblockheader(block_bury)['anchorheight'] >= h_btc
+        assert seq.getblockheader(block_leg)['confirmations'] >= 2   # the leg is buried
+
+        # 4. Bitcoin reorgs from P = X+1: strictly above the leg block's anchor
+        #    and at/below the BTC leg's height. Routine — a 1-2 block reorg.
+        self.double_spend_away(parent, btc_leg, fork_height=x + 1)
+
+        # 5. THE POINT. The burying block dies with its orphaned anchor; the leg's
+        #    OWN block survives, because its anchor is still canonical — and so
+        #    does the funded output a claimant would spend. The BTC leg is gone.
+        self.wait_for_tip_change(seq, block_bury)
+        assert_equal(seq.getblockheader(block_bury)['confirmations'], -1)
+        assert seq.getblockheader(block_leg)['confirmations'] >= 1, \
+            "the leg's block must SURVIVE: invalidation never propagates to ancestors"
+        assert_equal(seq.gettransaction(leg_txid)['confirmations'] >= 1, True)
+        assert parent.gettransaction(btc_leg)['confirmations'] <= 0
+
+        self.log.info("  leg block %s (anchor %d) SURVIVED; burying block %s (anchor >= %d) was invalidated",
+                      block_leg[:16], leg_anchor, block_bury[:16], h_btc)
+        self.log.info("  => had the claim gate consulted the burying block, the claimant would have taken the")
+        self.log.info("     asset from a still-confirmed output while its own BTC leg was reorged away and")
+        self.log.info("     double-spent. The gate MUST read the block that confirmed the leg.")
 
 
 if __name__ == '__main__':

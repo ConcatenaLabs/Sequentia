@@ -20,6 +20,7 @@ from test_framework.blocktools import COINBASE_MATURITY
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal,
+    assert_holds_nothing,
     satoshi_round,
 )
 
@@ -45,14 +46,15 @@ class WalletCtTest(BitcoinTestFramework):
         address = self.nodes[to_idx].getnewaddress()
         if not confidential:
             address = self.nodes[to_idx].getaddressinfo(address)['unconfidential']
-        txid = self.nodes[from_idx].sendtoaddress(address, amt)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        txid = self.nodes[from_idx].sendtoaddress(address=address, amount=amt, fee_asset_label='bitcoin')
         self.log.info(f"Sent {amt} LBTC to node {to_idx} in {txid}")
         self.generate(self.nodes[from_idx], 2)
         self.sync_all()
 
         for i in range(self.num_nodes):
             self.log.info(f"Finished with node {i} balance: {self.nodes[i].getbalance()}")
-        assert_equal(self.nodes[from_idx].getbalance(), { "bitcoin": Decimal(0) })
+        assert_holds_nothing(self.nodes[from_idx].getbalance())
         assert_equal(self.nodes[to_idx].getbalance(), { "bitcoin": amt })
 
     def run_test(self):
@@ -65,7 +67,7 @@ class WalletCtTest(BitcoinTestFramework):
             self.log.info(f"Starting with node {i} balance: {self.nodes[i].getbalance()}")
 
         # Send 1 coin to a new wallet
-        txid = self.nodes[0].sendtoaddress(self.nodes[1].getnewaddress(), 1)
+        txid = self.nodes[0].sendtoaddress(address=self.nodes[1].getnewaddress(), amount=1, fee_asset_label='bitcoin')
         self.log.info(f"Sent one coin to node 1 in {txid}")
         self.generate(self.nodes[0], 2)
         self.sync_all()
@@ -93,7 +95,7 @@ class WalletCtTest(BitcoinTestFramework):
 
         addresses = [ self.nodes[1].getnewaddress() for i in range(15) ] \
             + [ self.nodes[2].getnewaddress() for i in range(15) ]
-        txid = self.nodes[2].sendmany(amounts={address: satoshi_round(Decimal(0.00025)) for address in addresses})
+        txid = self.nodes[2].sendmany(amounts={address: satoshi_round(Decimal(0.00025)) for address in addresses}, fee_asset='bitcoin')
         self.log.info(f"Sent many small UTXOs to nodes 1 and 2 in {txid}")
         self.generate(self.nodes[2], 2)
         self.sync_all()
@@ -101,14 +103,15 @@ class WalletCtTest(BitcoinTestFramework):
         self.log.info(f"Issuing some assets from node 1")
         # Try issuing assets
         amt = satoshi_round(Decimal(1))
-        res1 = self.nodes[1].issueasset(amt, amt, True)
-        res2 = self.nodes[1].issueasset(amt, amt, False)
+        res1 = self.nodes[1].issueasset(assetamount=amt, tokenamount=amt, blind=True, fee_asset='bitcoin')
+        res2 = self.nodes[1].issueasset(assetamount=amt, tokenamount=amt, blind=False, fee_asset='bitcoin')
 
         assets = [ res1["asset"], res1["token"], res2["asset"], res2["token"] ]
         addresses = [ self.nodes[2].getnewaddress() for i in range(len(assets)) ]
         txid = self.nodes[1].sendmany(
             amounts={address: amt for address in addresses},
             output_assets={addresses[i]: assets[i] for i in range(len(assets))},
+            fee_asset='bitcoin',
         )
         self.log.info(f"Sent them to node 2 in {txid}")
         self.generate(self.nodes[1], 2)
@@ -118,6 +121,7 @@ class WalletCtTest(BitcoinTestFramework):
         txid = self.nodes[2].sendmany(
             amounts={address: amt for address in addresses},
             output_assets={addresses[i]: assets[i] for i in range(len(assets))},
+            fee_asset='bitcoin',
         )
         self.log.info(f"Sent them back to node 1 in {txid}")
 

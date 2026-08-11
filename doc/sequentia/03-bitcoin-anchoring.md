@@ -58,8 +58,41 @@ Bitcoin node is unreachable, or temporarily reports a tip below the parent's
 anchor (for instance while it is still syncing), the producer falls back to
 reusing the parent's anchor, which is monotone by construction and already
 validated. Anchoring to the freshest available Bitcoin block is what keeps the
-Sequentia tip synchronized with Bitcoin's tip within a bounded ~1-block lag
-(§4).
+Sequentia tip synchronized with Bitcoin's tip within a ~1-block lag (§4).
+
+**Backing off a contested parent height.** One condition lowers that target.
+When Bitcoin has live competing branches at or near its own tip, the tip block
+may be the one that loses, and a Sequentia block anchored to it has to be
+reorganized out when it does. With `-anchoravoidcontested` (on by default) the
+producer therefore asks the Bitcoin node for its chain tips and backs the target
+down to the last height every live contender still agrees on: the lowest fork
+point (`tip height - branchlen`) among competing branches whose tip is no more
+than `-anchorcontestwindow` blocks (default 2) *below* the active tip. The test
+is one-sided: a branch standing at or above the active tip always counts,
+however far ahead it runs, and only a branch that has fallen further than the
+window behind is treated as losing the race and ignored. So an old resolved fork
+never drags the anchor down, and with no live fork the uncontested height *is*
+the tip and the target is unchanged. The back-off only ever lowers the target,
+and never below the parent block's anchor: if the uncontested height falls below
+it, the producer reuses the parent's anchor instead, so monotonicity is never at
+risk. The selection arithmetic is the pure function `AnchorUncontestedHeight`,
+unit-tested without a Bitcoin daemon. This is block-producer policy and not a
+consensus rule; §5 covers what it costs and why it is worth paying.
+
+**Whether the anchor keeps moving during a contest depends on the rivals**, and
+both regimes occur. `AnchorUncontestedHeight` takes the lowest fork point among
+the rival branches currently inside the window, and a branch's fork point is
+where it diverged from the active chain: extending that branch raises its tip
+height and its `branchlen` together, so the fork point it pins does not move. A
+single rival that persists inside the window therefore holds the target at one
+fixed height, and the anchor sits there while Bitcoin's tip advances past it,
+the trail growing by one for every parent block. The window is what ends that: a
+rival stops counting once the active tip runs more than `-anchorcontestwindow`
+blocks beyond the rival's own tip, after which the uncontested height is set by
+whichever rivals remain, or is the tip itself when none do, and the anchor steps
+forward. In the ordinary case rivals appear near the tip and expire behind it,
+so the anchor advances in steps rather than block for block, and once no rival
+is live it is back at the tip.
 
 Anchoring is governed by these settings:
 
@@ -68,6 +101,9 @@ con_bitcoin_anchor=1     # enable anchoring (a chain-parameter property)
 validateanchor=1         # validate each anchor against the Bitcoin daemon
 anchorminconf=1          # confirmations required of the anchored Bitcoin block
 anchorpollinterval=5     # seconds between Bitcoin tip/reorg polls
+anchoravoidcontested=1   # hold the anchor off a contested parent-chain height
+anchorcontestwindow=2    # a rival stops counting once the active tip runs
+                         # more than N blocks beyond it
 ```
 
 The Bitcoin connection becomes mandatory when `con_bitcoin_anchor` is set,
@@ -82,13 +118,13 @@ Bitcoin daemon is unreachable. Operational detail and tuning are in
 
 A block's anchor is checked against its parent and against the Bitcoin daemon:
 
-- **Well-formedness.** The fields are present exactly when `g_con_bitcoin_anchor`
-  is set; `m_anchor_hash` is non-null on anchored blocks.
-- **Monotonicity.** `m_anchor_height` is not less than the parent's. If the
+- **Well-formedness (R1).** The fields are present exactly when
+  `g_con_bitcoin_anchor` is set; `m_anchor_hash` is non-null on anchored blocks.
+- **Monotonicity (R2).** `m_anchor_height` is not less than the parent's. If the
   height is unchanged from the parent, the hash must be unchanged too - a
   producer cannot silently swap which Bitcoin block a height refers to.
-- **Bitcoin existence and best-chain membership.** When `g_validate_anchor` is
-  set and the anchor differs from the parent's, the node calls
+- **Bitcoin existence and best-chain membership (R3).** When `g_validate_anchor`
+  is set and the anchor differs from the parent's, the node calls
   `CheckMainchainAnchor`, which queries the connected Bitcoin daemon: the header
   must exist, its height must equal `m_anchor_height`, and it must be on the
   daemon's active chain. The check distinguishes `OK`, `NOT_FOUND`, `STALE`
@@ -340,11 +376,12 @@ schedule, and no buffer is needed to absorb it.
 
 **"Real-time" therefore denotes: no extra reorg-protection timelock beyond
 Bitcoin's own confirmation wait**, with the two chains kept *synchronized* - the
-Sequentia tip references a current Bitcoin block - to within a bounded ~1-block
-lag, since each new block anchors to Bitcoin's tip (§2). That lag is small
-relative to the Bitcoin-paced swap clock. A claimant still waits for the leg's
-anchor to reach their desired Bitcoin **confirmation depth** - a fresher anchor
-is a *shallower* one - but pays no cross-chain buffer on top of that wait.
+Sequentia tip references a current Bitcoin block - to within a ~1-block lag,
+since each new block anchors to Bitcoin's tip (§2; §5 covers the one exception,
+a contested parent tip). That lag is small relative to the Bitcoin-paced swap
+clock. A claimant still waits for the leg's anchor to reach their desired
+Bitcoin **confirmation depth** - a fresher anchor is a *shallower* one - but
+pays no cross-chain buffer on top of that wait.
 
 ## 5. Anchor freshness for real-time swaps
 
@@ -359,14 +396,119 @@ This freshness is delivered by **production**, not by a fork-choice rule.
 (tip minus `anchorminconf-1`), so the tip tracks Bitcoin's tip within one
 Sequentia block - by *extending* the chain, never by reorganizing it. Among
 competing proposals for the same height, the committee backs the freshest-anchored
-one (then the lowest leader VRF among equally-fresh proposals), so that is the
-block that gets certified - the paper's Principle 7 freshness preference,
-implemented in the gossip committee's candidate ordering. This is a
-*pre-certification* signing preference, not a fork-choice vote, and the anchor is
-deliberately not a key in fork choice: in an immediate-finality system, keying
-fork choice on the anchor could let a new Bitcoin block reorder or overwrite
-already-certified blocks, which must never happen. The fork-choice and finality details are in
-[`04-proof-of-stake.md`](04-proof-of-stake.md).
+one (then, among equally-fresh proposals, the lowest exponential-race election
+score from `pos_exprace_height` onward, and the lowest raw leader `beta` below
+it), so that is the block that gets certified - the paper's Principle 7
+freshness preference, implemented in the gossip committee's candidate ordering.
+This is a *pre-certification* signing preference, not a fork-choice vote, and
+the anchor is deliberately not a key in fork choice: in an immediate-finality
+system, keying fork choice on the anchor could let a new Bitcoin block reorder
+or overwrite already-certified blocks, which must never happen. The fork-choice
+and finality details are in [`04-proof-of-stake.md`](04-proof-of-stake.md).
+
+### The exception: a contested parent chain
+
+Tracking Bitcoin's tip within one Sequentia block is the ideal, and it is what
+the chain does whenever its parent chain has a single undisputed tip - the
+normal condition on Bitcoin mainnet, which sees far fewer contested blocks than
+testnet4. The exception is a **contested parent tip**. While rival branches are
+live at or near Bitcoin's tip, the producer holds the anchor at the last
+parent-chain height every contender agrees on instead of advancing onto ground
+that may be reorganized away (§2). The trade is deliberate: a Sequentia block
+anchored to a losing parent block must be unwound when the parent fork resolves,
+and unwinding certified Sequentia history is far more disruptive than carrying a
+slightly older anchor for a few blocks. The policy was adopted after the
+2026-07-11 testnet4 anchor-split incident, to reduce exactly that unwind; the
+related finality work is in
+[`incident-2026-07-17-finality-partition.md`](incident-2026-07-17-finality-partition.md).
+
+**The back-off is producer policy, not a consensus rule.** `-anchoravoidcontested`
+and `-anchorcontestwindow` (with `-anchorminconf` setting the baseline target)
+change only which anchor a node picks for the blocks *it* produces, never which
+blocks it accepts, so operators may set them differently without splitting the
+network. `-anchorcontestwindow` does have one further node-local effect, and it
+is worth knowing before changing it: finality reconciliation reads the same
+window. Before releasing its own finalized point for a rival branch, a node
+recomputes the uncontested parent height through the same
+`GetMainchainUncontestedHeight` and refuses to release while the rival's
+certifying block anchors above it (`src/anchor.cpp`), so a release can never
+fire into a live parent-chain fork
+([`04-proof-of-stake.md`](04-proof-of-stake.md) §6). Widening the window counts
+more branches as live contests and so lowers the uncontested height, making the
+node both slower to advance its own anchor and slower to release finality;
+narrowing it does the reverse, and lets a release fire while the parent chain is
+less settled. Either way the node's *validity* rules are untouched: what changes
+is what it produces and how fast it converges.
+
+*Anchor* validity is exactly the three rules of §3: the anchor is present (R1);
+anchor heights are monotonically non-decreasing along the chain, with an
+unchanged height forcing an unchanged hash (R2); and the anchor is on the
+Bitcoin best chain at the claimed height (R3). R1 and R2 are settled from the
+block and its parent alone; R3 is the one that needs a live Bitcoin daemon, and
+it is skipped when the block's anchor is unchanged from its parent's
+already-validated one. It is also skipped entirely under `-validateanchor=0`, a
+setting that leaves only R1 and R2 enforced and therefore abandons the rule
+every other guarantee in this chapter rests on: a node run that way no longer
+checks that the Bitcoin block its chain commits to is real and canonical.
+Otherwise, anchoring to the naked Bitcoin tip stays fully valid, and repeating
+the previous anchor is valid indefinitely. There is no minimum-depth rule and no
+maximum-advance rule on the anchor, so nothing in consensus bounds how far an
+anchor may trail, and no node rejects a block *on its anchor* for trailing
+further back than it would have chosen itself.
+
+**One consensus rule elsewhere does read the anchor height**, and it runs the
+other way: the escaping-stall relaxation that lets a block be certified below
+the committee quorum. Such a block must additionally anchor at least
+`POS_ESCAPING_STALL_ANCHOR_GAP` (3) parent heights past its parent's anchor, and
+must show `-posescapestallmtpgap` seconds of parent-chain median-time-past
+between the two anchors (default 600, one Bitcoin block interval). The time gap
+is there because the height gap alone is not evidence of a stall: a parent-chain
+block storm can supply three heights in seconds with the chain fully alive
+(`src/pos.h`), and requiring parent-chain time to have passed as well is what
+stops that from being enough. A block failing either gap is rejected. Both
+bundled Sequentia chains run the BLS committee by default
+(`src/chainparams.cpp`), so the code they actually emit for
+a sub-quorum block without the height gap is `bad-posbls-agg-quorum`;
+`bad-posvrf-agg-quorum` is the same rejection on the legacy MuSig2-aggregate
+path. Either way, a block that clears the height gap but not the time gap is
+rejected as `bad-pos-escape-stall-too-soon`, which is common to both paths. A
+block carrying a full quorum is never subject to either test. The rule is in
+[`04-proof-of-stake.md`](04-proof-of-stake.md) §5.
+
+**Only the height half of that rule survives `-validateanchor=0`.** The anchor
+heights are read straight from the block and its parent, but the
+median-time-past evidence has to come from the parent chain, so
+`CheckEscapingStallMtpGap` returns *allowed* outright once anchor validation is
+off (`src/anchor.cpp`) - the same reasoning as the R3 skip, since the time
+evidence rides on the very daemon such a node has stopped consulting. A node run
+that way therefore enforces only the 3-height gap, and is blind to exactly the
+case the time gap was added for: a parent-chain block storm supplying three
+heights in seconds while the chain is fully alive.
+
+**The practical consequence is a longer wait, never a weaker guarantee.** While
+a contest is live, the tip's anchor can trail Bitcoin's tip by more than one
+Bitcoin block. An application that needs a Sequentia block anchored at or
+above a specific parent height - most concretely a purely on-chain cross-chain
+swap, whose Sequentia leg must reference the Bitcoin block its BTC leg confirmed
+in - waits for the contest to clear before that anchor appears. Nothing about
+the swap becomes unsafe: reorg-following still binds the two legs to a single
+fate (§6), and the reorg-protection buffer is still zero. It simply takes longer,
+rarely on mainnet, routinely on testnet4.
+
+How much longer is not something this chapter quantifies. The trail is set by
+how long rival branches persist near the parent tip (§2), which is a property of
+the parent chain on the day and not of any rule here, and no measurement harness
+for it is carried in the tree.
+
+The wait has a second, less obvious form. Because the escaping-stall relaxation
+is keyed on the anchor advancing 3 parent heights past the parent block's
+anchor, holding the anchor at the uncontested height also delays reaching that
+gap: a committee that has fallen under quorum takes longer to certify its way
+out of a stall precisely while the parent chain is contested. That is the same
+direction the 2026-07-17 fix pushed when it added the parent-chain
+median-time-past requirement to the same relaxation, and it is the intended
+trade in both cases - a sub-quorum block should be hard to mint - but it is a
+liveness cost, and it lands exactly when the parent chain is least settled.
 
 ## 6. Cross-chain atomic swaps
 

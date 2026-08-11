@@ -82,9 +82,14 @@ reissuance tokens. Verify mints hit the mempool.
 
 - **Mock price API** (`/root/price-demo/mock-price-api.py`): 5 assets, DROP WBTC,
   but KEEP a `BTC` price (~64000) for "real" testnet4 BTC (user directive).
-- **Price server** (`/root/price-demo/gen-price-config.py`): node_rpcs + asset
-  list, drop WBTC; regenerate config.json; restart `seq-mock-price-api` +
-  `seq-price-server`; confirm dexnode `getfeeexchangerates` matches node000.
+- **Price server** (`contrib/sequentia/gen-price-config.py`): there is no asset
+  list to edit any more, the universe is DISCOVERED from the registry, so only
+  node_rpcs matter. Regenerate with
+  `gen-price-config.py --out /root/price-demo/config.json --force` (it refuses to
+  overwrite without `--force`, because the config UI persists the admin password
+  hash and the tuned thresholds to that same file: copy those back afterwards).
+  Restart `seq-mock-price-api` + `seq-price-server`; confirm dexnode
+  `getfeeexchangerates` matches node000.
 - **Asset registry** (served at `159.195.15.140/registry`): new ids + metadata.
 - **Faucet** (`sequentia-explorer/serve-public.js`, FAUCET_WALLET): new native/asset refs.
 - **DEX** (`~/seqdex`): daemon asset refs, SEQDEX_NODE_RPC, dexnode fee whitelist,
