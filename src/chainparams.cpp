@@ -437,6 +437,20 @@ public:
         // "always on").
         consensus.pos_escape_stall_mtp_height = 1;
         g_pos_escape_stall_mtp_height = consensus.pos_escape_stall_mtp_height;
+        // Minimum block spacing: the 30-second cadence as a CONSENSUS RULE, in
+        // force from mainnet's first block. Mainnet has not launched, so there
+        // is no history to exempt and nothing to coordinate later.
+        //
+        // The producers collect the fees, so their incentive is to shorten the
+        // cadence, and until this rule existed nothing stopped them: the floor
+        // in PosProducer::Step is producer-side and unverified. Deliberately a
+        // separate number from the slot-gate unit (-posslotinterval): raising
+        // the spacing must not stretch the leader time-gate too.
+        //
+        // 1 and not 0 for the same reason as the two gates above: 0 is this
+        // parameter's "not gated" sentinel.
+        consensus.pos_block_spacing = 30;
+        consensus.pos_block_spacing_height = 1;
         consensus.nMaxBlockWeight = 200000;             // a twentieth of Bitcoin (doc 11 §4)
         consensus.connect_genesis_outputs = true;
         anyonecanspend_aremine = false;
@@ -704,6 +718,28 @@ public:
         // every already-synced node effectively does today.
         consensus.pos_escape_stall_mtp_height = 80000;
         g_pos_escape_stall_mtp_height = consensus.pos_escape_stall_mtp_height;
+        // Minimum block spacing (hard fork; see params.h). The VALUE is live
+        // from this binary — node::PosEarliestBlockTime reads it directly, so
+        // producers stop emitting too-close blocks immediately — while the
+        // consensus RULE waits for the height below.
+        //
+        // That split is not a style choice. A scan of all 86,357 blocks on
+        // 2026-08-10 found 2,186 of them closer than 30 s to their parent:
+        // 2,183 at exactly 29 s, plus 23 s once and 9 s twice. The 29-second
+        // ones are not cheating, they are a one-second clock skew between
+        // producers (the producer waits correctly, then the assembler stamped
+        // GetAdjustedTime()), and they were STILL OCCURRING at the tip, the
+        // most recent at height 86,318. Activating the rule without shipping
+        // the clamp first would invalidate blocks honest producers are emitting
+        // right now, over and over.
+        //
+        // So: release this binary, confirm no node still emits a block closer
+        // than 30 s to its parent, and only then set the height below. It must
+        // in any case stay ABOVE the tip at release time — the tip was ~86,400
+        // on 2026-08-10 and the chain runs at ~2,350 blocks/day, so 95,000
+        // leaves roughly three and a half days of upgrade window.
+        consensus.pos_block_spacing = 30;
+        consensus.pos_block_spacing_height = 95000;
         // SEQUENTIA: 200,000 weight units — a twentieth of Bitcoin's 4,000,000
         // — so that, at ~30-second blocks (20x Bitcoin's cadence), a saturated
         // chain grows at exactly the same total rate as a saturated Bitcoin
@@ -1664,6 +1700,22 @@ protected:
         consensus.pos_escape_stall_mtp_height =
             (int)args.GetIntArg("-posescapestallmtpheight", 1);
         g_pos_escape_stall_mtp_height = consensus.pos_escape_stall_mtp_height;
+        // Minimum block spacing. Arg-readable only on this custom/regtest chain
+        // so tests can exercise the rule and both sides of its activation; the
+        // real chains pin it in code above.
+        //
+        // Default 0 = OFF, which is the one place this parameter departs from
+        // the "active from genesis on every fresh chain" convention, and it is
+        // deliberate: dozens of functional tests generate blocks back to back
+        // to go fast, and a 30-second consensus floor would wedge every one of
+        // them. A test that wants the rule asks for it. The height defaults to
+        // 1 so that asking for the spacing alone is enough to get the rule.
+        consensus.pos_block_spacing = args.GetIntArg("-posblockspacing", 0);
+        consensus.pos_block_spacing_height =
+            (int)args.GetIntArg("-posblockspacingheight", 1);
+        if (consensus.pos_block_spacing < 0 || consensus.pos_block_spacing > 86400) {
+            throw std::runtime_error("-posblockspacing must be between 0 and 86400");
+        }
         if (g_pos_public_committee &&
             (g_pos_committee_size < 1 || g_pos_committee_size > MAX_POS_PUBLIC_COMMITTEE_SIZE)) {
             throw std::runtime_error(strprintf("-poscommitteesize must be between 1 and %d under -pospubliccommittee", MAX_POS_PUBLIC_COMMITTEE_SIZE));
