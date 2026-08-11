@@ -574,7 +574,12 @@ def create_confirmed_utxos(test_framework, fee, node, count, **kwargs):
         inputs = []
         inputs.append({"txid": t["txid"], "vout": t["vout"]})
         send_value = t['amount'] - fee
-        outputs = [{addr1: satoshi_round(send_value / 2)}, {addr2: satoshi_round(send_value / 2)}, {"fee": fee}]
+        # Halving an odd number of satoshis and rounding BOTH halves down loses
+        # the odd satoshi, and an Elements transaction must balance exactly: the
+        # node refuses the result as bad-txns-in-ne-out. Give the remainder to
+        # the second output so in == out for any input amount.
+        half = satoshi_round(send_value / 2)
+        outputs = [{addr1: half}, {addr2: send_value - half}, {"fee": fee}]
         raw_tx = node.createrawtransaction(inputs, outputs)
         signed_tx = node.signrawtransactionwithwallet(raw_tx)["hex"]
         node.sendrawtransaction(signed_tx)
