@@ -759,11 +759,30 @@ public:
         // the clamp first would invalidate blocks honest producers are emitting
         // right now, over and over.
         //
-        // So: release this binary, confirm no node still emits a block closer
-        // than the spacing to its parent, and only then set the height below.
-        // It must in any case stay ABOVE the tip at release time — the tip was
-        // ~86,400 on 2026-08-10; at the NEW 60-second cadence that is ~1,440
-        // blocks/day, so 95,000 leaves roughly six days of upgrade window.
+        // The clamp is covered by feature_pos_block_spacing.py, which drives a
+        // node whose clock advances one second per block against a floor that
+        // demands ten and checks every gap -- the 29-second case exactly -- and
+        // every path that stamps a block time funnels through
+        // BlockAssembler::CreateNewBlock, where the clamp sits. The two later
+        // adjustments (the slot-open bump below in miner.cpp, and the regtest
+        // equivocation fault injection) only ever raise nTime, so neither can
+        // undo it. No observation window is needed to establish that.
+        //
+        // WHAT THIS HEIGHT MUST SATISFY, and it is not what it looks like: it
+        // has to sit ABOVE THE TIP AT CUTOVER, not merely above the tip today.
+        // Blocks produced between this height and the moment the last node is
+        // upgraded come from binaries WITHOUT the clamp, so they may be closer
+        // than 60 s to their parent -- and from the cutover on they are
+        // permanently invalid to anyone syncing from scratch. That is exactly
+        // how pos_escape_stall_mtp_height above came to exist. Setting it too
+        // HIGH costs nothing (the rule simply binds later); setting it too low
+        // makes the chain unsyncable. Err high.
+        //
+        // Chosen for a cutover on the evening of 2026-08-12: the tip was 88,675
+        // at 22:28 UTC on 2026-08-11 running at ~37.6 s, so the tip at cutover
+        // is ~90,970 and 93,800 leaves ~2,800 blocks of margin, reached late on
+        // 2026-08-14 at the new 60 s cadence. If the cutover slips past midday
+        // on the 13th, RAISE THIS before deploying: check the tip first.
         //
         // 60 and not 30: the cadence is being halved deliberately (see
         // nMaxBlockWeight below). The producer follows the VALUE immediately,
@@ -781,7 +800,7 @@ public:
         // whereas raising it to 60 keeps the loss at 17.7% and doubles the cost
         // of every lost slot (mean interval 72.9 s on a 60-second chain).
         consensus.pos_block_spacing = 60;
-        consensus.pos_block_spacing_height = 95000;
+        consensus.pos_block_spacing_height = 93800;
         // SEQUENTIA: 400,000 weight units — a TENTH of Bitcoin's 4,000,000 —
         // so that, at 60-second blocks (10x Bitcoin's cadence), a saturated
         // chain grows at exactly the same total rate as a saturated Bitcoin

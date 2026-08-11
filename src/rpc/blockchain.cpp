@@ -3371,6 +3371,10 @@ static RPCHelpMan getposschedule()
     result.pushKV("height", next_height);
     result.pushKV("seed", seed.GetHex());
     result.pushKV("slot_interval", g_pos_slot_interval);
+    // The cadence and the gate unit are different numbers. Reporting only
+    // the slot interval let an operator read it as "a block every N s",
+    // which it is not: pos_block_spacing is what paces the chain.
+    result.pushKV("block_spacing", Params().GetConsensus().pos_block_spacing);
     if (g_pos_vrf) {
         // Private sortition: slots depend on each staker's secret key, so no
         // public ordering exists. The "schedule" below is the legacy public
@@ -3501,6 +3505,10 @@ static RPCHelpMan getposslot()
     result.pushKV("sortition", g_pos_vrf ? "vrf" : "schedule");
     result.pushKV("seed", seed.GetHex());
     result.pushKV("slot_interval", g_pos_slot_interval);
+    // The cadence and the gate unit are different numbers. Reporting only
+    // the slot interval let an operator read it as "a block every N s",
+    // which it is not: pos_block_spacing is what paces the chain.
+    result.pushKV("block_spacing", Params().GetConsensus().pos_block_spacing);
     result.pushKV("total_weight", total_weight);
     result.pushKV("stakers", (int)registry.Weights().size());
 
