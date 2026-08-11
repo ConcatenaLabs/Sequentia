@@ -43,10 +43,32 @@ void ResetProof(CBlockHeader& block)
     block.proof.solution.clear();
 }
 
+int64_t PosEarliestBlockTime(const Consensus::Params& consensusParams, const CBlockIndex* pindexPrev)
+{
+    // SEQUENTIA: the earliest timestamp the minimum-spacing rule permits for a
+    // child of `pindexPrev` (see Consensus::Params::pos_block_spacing).
+    //
+    // Read the spacing VALUE, deliberately not PosBlockSpacingActiveAt(): the
+    // producer must stop emitting too-close blocks BEFORE the consensus rule
+    // starts rejecting them, so on a running chain this clamp is live from the
+    // release that introduces it while the rule itself waits for its height.
+    // Clamping early is free — it only ever moves a stamp forward to the
+    // cadence the producer was already waiting for.
+    //
+    // This is what fixes the 29-second blocks. The producer waits correctly
+    // (PosProducer::Step), but the assembler then stamps GetAdjustedTime(), so
+    // a node whose clock trails the previous producer's by a second writes
+    // parent+29 having genuinely waited parent+30. Harmless while nothing
+    // checks; fatal once something does.
+    if (consensusParams.pos_block_spacing <= 0 || pindexPrev == nullptr) return 0;
+    return (int64_t)pindexPrev->nTime + consensusParams.pos_block_spacing;
+}
+
 int64_t UpdateTime(CBlockHeader* pblock, const Consensus::Params& consensusParams, const CBlockIndex* pindexPrev)
 {
     int64_t nOldTime = pblock->nTime;
-    int64_t nNewTime = std::max(pindexPrev->GetMedianTimePast() + 1, GetAdjustedTime());
+    int64_t nNewTime = std::max({pindexPrev->GetMedianTimePast() + 1, GetAdjustedTime(),
+                                 PosEarliestBlockTime(consensusParams, pindexPrev)});
 
     if (nOldTime < nNewTime) {
         pblock->nTime = nNewTime;
@@ -154,7 +176,13 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
         pblock->nVersion = gArgs.GetIntArg("-blockversion", pblock->nVersion);
     }
 
-    pblock->nTime = GetAdjustedTime();
+    // SEQUENTIA: never stamp a block closer to its parent than the minimum
+    // spacing, whatever this node's clock says. Writing a timestamp slightly
+    // ahead of the local clock is legal (MAX_FUTURE_BLOCK_TIME allows two
+    // hours of it) and it is the only way a producer whose clock trails the
+    // network by a second can stay inside the rule. See PosEarliestBlockTime.
+    pblock->nTime = std::max(GetAdjustedTime(),
+                             PosEarliestBlockTime(chainparams.GetConsensus(), pindexPrev));
     m_lock_time_cutoff = pindexPrev->GetMedianTimePast();
 
     // Decide whether to include witness transactions

@@ -4983,6 +4983,33 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
     if (block.GetBlockTime() <= pindexPrev->GetMedianTimePast())
         return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "time-too-old", "block's timestamp is too early");
 
+    // SEQUENTIA: the chain's cadence, as a consensus rule rather than a habit
+    // of the producer software. See Consensus::Params::pos_block_spacing for
+    // why it exists; the short version is that PosProducer::Step's 30-second
+    // floor is producer-side and unverified, so a modified producer ignores it
+    // and every node accepts the result.
+    //
+    // Note what this compares: two timestamps WRITTEN IN BLOCKS. The validating
+    // node's own clock is deliberately absent, so the verdict is identical on
+    // every node regardless of when either block arrived, or of how far any
+    // local clock has drifted. A rule that consulted the local clock could not
+    // be a consensus rule at all. The only clock-dependent timestamp rule is
+    // time-too-new below, which is inherited, and which stays soft (a node
+    // retries once its clock catches up) precisely because it is clock-dependent.
+    //
+    // MedianTimePast above is not a substitute: the median of eleven blocks
+    // lags by ~5 of them, so on its own it permits several blocks per second.
+    // This binds against the parent directly, which is also the basis the slot
+    // gate uses, so the two compose as a plain maximum.
+    if (consensusParams.PosBlockSpacingActiveAt(nHeight) &&
+        block.GetBlockTime() < pindexPrev->nTime + consensusParams.pos_block_spacing) {
+        LogPrintf("ERROR: %s: bad-pos-spacing: block at height %d is stamped %d s after its parent, minimum is %d s\n",
+                  __func__, nHeight, (int64_t)block.GetBlockTime() - (int64_t)pindexPrev->nTime,
+                  consensusParams.pos_block_spacing);
+        return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-pos-spacing",
+                             "block is closer to its parent than the minimum block spacing");
+    }
+
     // Check height in header against prev
     if (g_con_blockheightinheader && (uint32_t)nHeight != block.block_height) {
         LogPrintf("ERROR: %s: block height in header is incorrect (got %d, expected %d)\n", __func__, block.block_height, nHeight);

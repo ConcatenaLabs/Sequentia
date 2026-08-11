@@ -219,6 +219,7 @@ BASE_SCRIPTS = [
     'feature_pos_min_stake.py',
     'feature_pos_escaping_stall.py',
     'feature_pos_escape_stall_activation_height.py',
+    'feature_pos_block_spacing.py',
     'feature_pos_parent_outage_no_permanent_invalid.py',
     'feature_pos_parent_outage_connect_time_stall.py',
     'feature_pos_autonomous_escaping_stall.py',
