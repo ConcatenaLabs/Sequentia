@@ -114,6 +114,8 @@ BASE_SCRIPTS = [
     'feature_utxo_recovery.py --descriptors',
     'feature_progress.py',
     'rpc_getnewblockhex.py',
+    'wallet_blinded_change.py --legacy-wallet',
+    'wallet_blinded_change.py --descriptors',
     'wallet_elements_regression_1172.py --legacy-wallet',
     'wallet_elements_regression_1259.py --legacy-wallet',
     'wallet_elements_21million.py',
