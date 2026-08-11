@@ -392,16 +392,20 @@ class PSBTTest(BitcoinTestFramework):
         # check that the blinded change address led to blinded change (and below,
         # when we call `walletprocesspsbt` with nodes[2], it will make sure that
         # node 2 is able to unblind this change, even though wmulti created it).
-        # Notice that if `confidential` is False, the change is not blinded. This
-        # is a quirk of the wallet.cpp blinding logic and will go away when we
-        # overhaul this.
+        # This used to hold only when `confidential` was True: with an explicit
+        # recipient the change was the lone blinded output, which cannot be blinded,
+        # and the wallet silently unblinded it. It now reaches a blindable shape
+        # instead, by adding a zero-value blinded OP_RETURN output to pair with.
+        expected_outputs = {
+            (unconf_addr, confidential, False),
+            (unconf_change_addr, True, False),
+            (None, False, False), # fee
+        }
+        if not confidential:
+            expected_outputs.add((None, True, True)) # the added blinding dummy
         assert_equal(
             outputs_info(self.nodes[1].decodepsbt(psbtx)["outputs"]),
-            {
-                (unconf_addr, confidential, False),
-                (unconf_change_addr, confidential, False),
-                (None, False, False), # fee
-            },
+            expected_outputs,
         )
 
         # Unload wmulti, we don't need it anymore
