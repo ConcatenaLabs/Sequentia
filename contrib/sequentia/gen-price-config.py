@@ -56,7 +56,7 @@ EXTRA_NODES = (("/root/seq-testnet/node-gw/elements.conf", 18443),
 def creds(path):
     u = p = None
     try:
-        for line in open(path):
+        for line in open(path, encoding="utf8"):
             line = line.strip()
             if line.startswith("rpcuser="):
                 u = line.split("=", 1)[1]
@@ -205,13 +205,13 @@ def main(argv=None):
         return 1
 
     example = find_example(args.example)
-    with open(example) as f:
+    with open(example, encoding="utf8") as f:
         cfg = build_config(json.load(f), source_url=args.source_url,
                            registry_url=args.registry_url, committee=args.committee)
     out_dir = os.path.dirname(os.path.abspath(args.out))
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
-    with open(args.out, "w") as f:
+    with open(args.out, "w", encoding="utf8") as f:
         f.write(json.dumps(cfg, indent=2) + "\n")
     print("wrote %s from %s: %d nodes, assets discovered from %s"
           % (args.out, example, len(cfg["node_rpcs"]), cfg["registry_url"]))

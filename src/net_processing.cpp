@@ -5276,7 +5276,7 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             while (recover != nullptr && (recover->nStatus & BLOCK_FAILED_MASK)) {
                 recover = recover->pprev;
             }
-            LogPrintf("Anchor-reorg recovery: peer=%d best known block %s is in an "
+            LogPrintf("Anchor-reorg recovery: peer=%d best known block %s is in an " /* Continued */
                       "invalidated (orphaned-anchor) subtree; demoting to %s and "
                       "re-requesting headers\n",
                       pto->GetId(),

@@ -594,7 +594,7 @@ int64_t PosProducer::Step()
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
         if (tip_hash != m_last_tip) {
             if (m_round_height >= next_height || m_proposed_height >= next_height) {
-                LogPrintf("PoS producer: tip moved to %s (height %d) at/below tracked round height "
+                LogPrintf("PoS producer: tip moved to %s (height %d) at/below tracked round height " /* Continued */
                           "%d/%d; resetting round state (parent-chain reorg recovery)\n",
                           tip_hash.ToString(), tip->nHeight, m_round_height, m_proposed_height);
                 m_round_height = 0;

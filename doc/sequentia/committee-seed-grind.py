@@ -21,7 +21,8 @@ import math
 BLOCKS_PER_DAY = 2880
 
 def logcomb(n, k):
-    if k < 0 or k > n: return float('-inf')
+    if k < 0 or k > n:
+        return float('-inf')
     return math.lgamma(n+1) - math.lgamma(k+1) - math.lgamma(n-k+1)
 
 def quorum(K):  # public-committee quorum (odd-K bump), as shipped (PosPublicQuorum)
@@ -29,7 +30,8 @@ def quorum(K):  # public-committee quorum (odd-K bump), as shipped (PosPublicQuo
 
 def base_capture(N, K, m):
     """q = P(coalition >= quorum in ONE committee) = hypergeometric upper tail."""
-    S = round(m * N); Q = quorum(K)
+    S = round(m * N)
+    Q = quorum(K)
     return sum(math.exp(logcomb(S, k) + logcomb(N-S, K-k) - logcomb(N, K))
                for k in range(Q, min(K, S) + 1))
 
@@ -41,11 +43,15 @@ def per_height_capture(N, K, m, k):
     return m * grind + (1.0 - m) * q
 
 def when(p):
-    if p <= 0: return "never"
+    if p <= 0:
+        return "never"
     yrs = 1.0 / (p * BLOCKS_PER_DAY * 365.25)
-    if yrs < 1/365.25: return f"{yrs*365.25*24:.1f} h"
-    if yrs < 1: return f"{yrs*365.25:.0f} d"
-    if yrs < 1e6: return f"{yrs:,.0f} yr"
+    if yrs < 1/365.25:
+        return f"{yrs*365.25*24:.1f} h"
+    if yrs < 1:
+        return f"{yrs*365.25:.0f} d"
+    if yrs < 1e6:
+        return f"{yrs:,.0f} yr"
     return f"{yrs:.0e} yr"
 
 N = 50000

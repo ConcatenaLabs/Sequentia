@@ -499,7 +499,7 @@ class TheMigrationGuidanceCarriesThePrecisionTerm(unittest.TestCase):
         self.assertIn("atoms * rate / 1e8", msg)  # why the fee floor moves
 
     def test_the_readme_does_not_promise_a_bare_1e8(self):
-        with open(README) as f:
+        with open(README, encoding="utf8") as f:
             readme = f.read()
         self.assertIn("10**(8 - p)", readme)
         self.assertNotIn("the token lands on `1e8` by arithmetic", readme)
@@ -535,7 +535,7 @@ class TheWhitelistNoteStatesTheDenomination(unittest.TestCase):
     def test_the_readme_quotes_the_note_verbatim(self):
         # The README prints a sample /api/whitelist body. If the note drifts from
         # the code, the documented API is wrong for every consumer reading it.
-        with open(README) as f:
+        with open(README, encoding="utf8") as f:
             readme = f.read()
         self.assertIn(self.note(), readme)
 
@@ -582,7 +582,7 @@ class TheGeneratorEmitsTheCurrentSchema(unittest.TestCase):
     def written(self, tmp, *extra):
         out = os.path.join(tmp, "config.json")
         self.assertEqual(self.generate(out, *extra), 0)
-        with open(out) as f:
+        with open(out, encoding="utf8") as f:
             return json.load(f)
 
     def test_the_generated_config_is_one_the_server_accepts(self):
@@ -629,19 +629,19 @@ class TheGeneratorEmitsTheCurrentSchema(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out = os.path.join(tmp, "config.json")
             self.assertEqual(self.generate(out), 0)
-            with open(out) as f:
+            with open(out, encoding="utf8") as f:
                 before = f.read()
             edited = json.loads(before)
             edited["ui"]["password_hash"] = "pbkdf2$1$aa$bb"
-            with open(out, "w") as f:
+            with open(out, "w", encoding="utf8") as f:
                 json.dump(edited, f)
-            with open(out) as f:
+            with open(out, encoding="utf8") as f:
                 hand_edited = f.read()
             self.assertEqual(self.generate(out), 1)  # refused
-            with open(out) as f:
+            with open(out, encoding="utf8") as f:
                 self.assertEqual(f.read(), hand_edited)  # untouched
             self.assertEqual(self.generate(out, "--force"), 0)
-            with open(out) as f:
+            with open(out, encoding="utf8") as f:
                 self.assertNotEqual(f.read(), hand_edited)
 
 
