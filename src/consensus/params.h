@@ -317,6 +317,27 @@ struct Params {
     //! Changing when a block is valid is a HARD FORK: coordinate H with every
     //! operator (see doc/sequentia/04-proof-of-stake.md).
     int pos_block_spacing_height{0};
+    //! SEQUENTIA: coinbase maturity in blocks, and the height it binds from.
+    //! 0 = use the inherited COINBASE_MATURITY (consensus.h).
+    //!
+    //! COINBASE_MATURITY is a number of BLOCKS, so what it actually protects
+    //! shrinks as a chain's cadence shortens: Bitcoin's 100 blocks at 600 s is
+    //! 16 h 40 min, while the same 100 blocks at 60 s is 100 minutes. Sequentia
+    //! holds the WALL-CLOCK figure equal to Bitcoin's rather than the block
+    //! count, so the number here must satisfy
+    //!
+    //!     coinbase_maturity * pos_block_spacing == 100 * 600
+    //!
+    //! and has to be revisited whenever the cadence is. It matters more here
+    //! than upstream: there is no block subsidy (§3.9), so a coinbase carries
+    //! the producer's fee income rather than new issuance, and the maturity is
+    //! the delay before a producer can spend what it earned.
+    //!
+    //! Raising it REJECTS MORE, hence the height: the running testnet has
+    //! coinbases already spent at depths between 100 and 1,000, and applying
+    //! the new figure to them would make the chain unsyncable.
+    int coinbase_maturity{0};
+    int coinbase_maturity_height{0};
     //! Whether the minimum-spacing rule binds a block at `height`.
     //! Consulted by ContextualCheckBlockHeader and by the producer, so the two
     //! can never disagree about how early a block may be stamped.

@@ -255,6 +255,8 @@ public:
         g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
         g_pos_slot_interval = DEFAULT_POS_SLOT_INTERVAL;
         g_pos_unbonding_period = DEFAULT_POS_UNBONDING_PERIOD;
+        g_coinbase_maturity = 0;                 // inherited COINBASE_MATURITY
+        g_coinbase_maturity_height = 0;
         g_pos_payout_notice = DEFAULT_POS_PAYOUT_NOTICE;
         consensus.total_valid_epochs = 0;
         consensus.elements_mode = g_con_elementsmode;
@@ -451,6 +453,14 @@ public:
         // parameter's "not gated" sentinel.
         consensus.pos_block_spacing = 60;
         consensus.pos_block_spacing_height = 1;
+        // Coinbase maturity held equal to Bitcoin in WALL-CLOCK terms rather
+        // than in blocks: 1000 x 60 s == 100 x 600 s == 16 h 40 min. Keep the
+        // two in step -- the invariant is the time, not the block count.
+        // Active from the first block; mainnet has no spends to grandfather.
+        consensus.coinbase_maturity = 1000;
+        consensus.coinbase_maturity_height = 1;
+        g_coinbase_maturity = consensus.coinbase_maturity;
+        g_coinbase_maturity_height = consensus.coinbase_maturity_height;
         // 400,000 weight units — a TENTH of Bitcoin's 4,000,000 — so that, at
         // 60-second blocks (10x Bitcoin's cadence), a saturated chain grows at
         // exactly the same total rate as a saturated Bitcoin chain (whitepaper
@@ -801,6 +811,15 @@ public:
         // of every lost slot (mean interval 72.9 s on a 60-second chain).
         consensus.pos_block_spacing = 60;
         consensus.pos_block_spacing_height = 93800;
+        // Coinbase maturity: same invariant as mainnet (1000 x 60 s == 100 x
+        // 600 s), and the same height as the spacing above so the cadence and
+        // the maturity that depends on it change in one cutover rather than two.
+        // Raising it rejects more, so it cannot reach back: this chain has
+        // coinbases spent at depths between 100 and 1000 already.
+        consensus.coinbase_maturity = 1000;
+        consensus.coinbase_maturity_height = 93800;
+        g_coinbase_maturity = consensus.coinbase_maturity;
+        g_coinbase_maturity_height = consensus.coinbase_maturity_height;
         // SEQUENTIA: 400,000 weight units — a TENTH of Bitcoin's 4,000,000 —
         // so that, at 60-second blocks (10x Bitcoin's cadence), a saturated
         // chain grows at exactly the same total rate as a saturated Bitcoin
@@ -1372,6 +1391,8 @@ public:
         g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
         g_pos_slot_interval = DEFAULT_POS_SLOT_INTERVAL;
         g_pos_unbonding_period = DEFAULT_POS_UNBONDING_PERIOD;
+        g_coinbase_maturity = 0;                 // inherited COINBASE_MATURITY
+        g_coinbase_maturity_height = 0;
         g_pos_payout_notice = DEFAULT_POS_PAYOUT_NOTICE;
         consensus.total_valid_epochs = 0;
         consensus.elements_mode = g_con_elementsmode;
@@ -1492,6 +1513,8 @@ public:
         g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
         g_pos_slot_interval = DEFAULT_POS_SLOT_INTERVAL;
         g_pos_unbonding_period = DEFAULT_POS_UNBONDING_PERIOD;
+        g_coinbase_maturity = 0;                 // inherited COINBASE_MATURITY
+        g_coinbase_maturity_height = 0;
         g_pos_payout_notice = DEFAULT_POS_PAYOUT_NOTICE;
         consensus.total_valid_epochs = 0;
 
@@ -2245,6 +2268,8 @@ public:
         g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
         g_pos_slot_interval = DEFAULT_POS_SLOT_INTERVAL;
         g_pos_unbonding_period = DEFAULT_POS_UNBONDING_PERIOD;
+        g_coinbase_maturity = 0;                 // inherited COINBASE_MATURITY
+        g_coinbase_maturity_height = 0;
         g_pos_payout_notice = DEFAULT_POS_PAYOUT_NOTICE;
         g_con_elementsmode = true;
         consensus.elements_mode = g_con_elementsmode;

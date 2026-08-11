@@ -32,6 +32,13 @@ bool g_pos_bls = false;
 bool g_pos_public_committee = false;
 uint64_t g_pos_min_stake = 0;
 int g_pos_escape_stall_mtp_height = 0;
+// SEQUENTIA: the coinbase maturity in force, mirrored out of
+// Consensus::Params by chainparams.cpp. It lives HERE, in the common
+// layer, for the same reason as the line above: chainparams.cpp assigns
+// it and elements-tx / elements-util link libbitcoin_common WITHOUT
+// libbitcoin_node, where consensus/tx_verify.cpp (the reader) is built.
+int g_coinbase_maturity = 0;
+int g_coinbase_maturity_height = 0;
 
 bool StakeRegistry::AddFromSpec(const std::string& spec, std::string& error)
 {
