@@ -785,6 +785,16 @@ bool ActivateBestChainStep(BlockValidationState& state, CBlockIndex* pindexMostW
 
     void InvalidBlockFound(CBlockIndex* pindex, const BlockValidationState& state) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     CBlockIndex* FindMostWorkChain() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+    /** SEQUENTIA: does the immediate-finality gate refuse to ACTIVATE this
+     *  candidate — i.e. does it fork at or below the immediately-finalized
+     *  block, with no reconciliation release covering it?
+     *
+     *  Asked in two places, which is why it is a function: FindMostWorkChain
+     *  skips (and erases) such candidates, and CheckBlockIndex has to know that
+     *  their absence from setBlockIndexCandidates is deliberate rather than
+     *  corruption. The two must never drift apart. */
+    bool PosFinalityGateRefuses(const CBlockIndex* pindex) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     void ReceivedBlockTransactions(const CBlock& block, CBlockIndex* pindexNew, const FlatFilePos& pos) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     bool RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& inputs) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
