@@ -23,7 +23,7 @@ def process_raw_issuance(test, node, issuance_list):
     raw_tx = node.createrawtransaction([], next_destinations)
     # We "over-fund" these transactions to 50 sat/vbyte since issuances aren't baked in yet
     # Otherwise huge multi-issuances may fail min-relay
-    funded_tx = node.fundrawtransaction(raw_tx, {"feeRate":Decimal('0.00050000')})['hex']
+    funded_tx = node.fundrawtransaction(raw_tx, {"feeRate":Decimal('0.00050000'), "fee_asset":"bitcoin"})['hex']
     issued_call_details = node.rawissueasset(funded_tx, issuance_list)
     issued_tx = issued_call_details[-1]["hex"] # Get hex from end
     # don't accept blinding fail, and blind all issuances or none at all
@@ -114,18 +114,22 @@ class IssuanceTest(BitcoinTestFramework):
 
         # Unblinded issuance of asset
         contract_hash = "deadbeef"*8
-        issued = self.nodes[0].issueasset(1, 1, False, contract_hash)
+        # Issuances have no output for the fee to come out of, so every one of them
+        # names the fee asset. These wallets are funded in the policy asset only.
+        issued = self.nodes[0].issueasset(
+            assetamount=1, tokenamount=1, blind=False, contract_hash=contract_hash, fee_asset='bitcoin')
         balance = self.nodes[0].getwalletinfo()["balance"]
         assert_equal(balance[issued["asset"]], 1)
         assert_equal(balance[issued["token"]], 1)
         # Quick unblinded reissuance check, making 2*COIN total
-        self.nodes[0].reissueasset(issued["asset"], 1)
+        self.nodes[0].reissueasset(asset=issued["asset"], assetamount=1, fee_asset='bitcoin')
 
         self.generate(self.nodes[0], 1)
         self.sync_all()
 
         contract_hash = "deadbeee"*8
-        issued2 = self.nodes[0].issueasset(2, 1, True, contract_hash)
+        issued2 = self.nodes[0].issueasset(
+            assetamount=2, tokenamount=1, blind=True, contract_hash=contract_hash, fee_asset='bitcoin')
         test_asset = issued2["asset"]
         assert_equal(self.nodes[0].getwalletinfo()['balance'][test_asset], Decimal(2))
         node1balance = self.nodes[1].getwalletinfo()['balance']
@@ -134,10 +138,15 @@ class IssuanceTest(BitcoinTestFramework):
 
         # Send bitcoin to node 1 and then from 1 to 2 to force node 1 to
         # spend confidential money.
-        self.nodes[0].sendtoaddress(self.nodes[1].getnewaddress(), 4)
+        self.nodes[0].sendtoaddress(
+            address=self.nodes[1].getnewaddress(), amount=4, fee_asset_label='bitcoin')
         self.generate(self.nodes[0], 1)
         self.sync_all()
-        self.nodes[1].sendtoaddress(self.nodes[2].getnewaddress(), 3, "", "", False, False, 1, "UNSET", False, "", False)
+        self.nodes[1].sendtoaddress(
+            address=self.nodes[2].getnewaddress(), amount=3, comment="", comment_to="",
+            subtractfeefromamount=False, replaceable=False, conf_target=1,
+            estimate_mode="UNSET", avoid_reuse=False, assetlabel="", ignoreblindfail=False,
+            fee_asset_label='bitcoin')
         self.sync_all()
         self.generate(self.nodes[0], 1)
         self.sync_all()
@@ -159,34 +168,48 @@ class IssuanceTest(BitcoinTestFramework):
 
         # Test various issuance and auditing paths
 
-        issuancedata = self.nodes[0].issueasset(Decimal('0.00000002'), Decimal('0.00000001'), True) #2 of asset, 1 reissuance token
+        issuancedata = self.nodes[0].issueasset(
+            assetamount=Decimal('0.00000002'), tokenamount=Decimal('0.00000001'), blind=True,
+            fee_asset='bitcoin') #2 of asset, 1 reissuance token
         self.generate(self.nodes[1], 1)
         self.sync_all()
         assert_equal(self.nodes[0].getwalletinfo()["balance"][issuancedata["asset"]], Decimal('0.00000002'))
         assert_equal(self.nodes[0].getwalletinfo()["balance"][issuancedata["token"]], Decimal('0.00000001'))
-        self.nodes[0].reissueasset(issuancedata["asset"], Decimal('0.00000001'))
+        self.nodes[0].reissueasset(
+            asset=issuancedata["asset"], assetamount=Decimal('0.00000001'), fee_asset='bitcoin')
         self.sync_all()
         assert_equal(self.nodes[0].getwalletinfo()["balance"][issuancedata["asset"]], Decimal('0.00000003'))
-        # Can't reissue an issuance token (yet)
+        # Can't reissue an issuance token (yet). The fee asset is named so that the
+        # call can only fail for that reason.
         try:
-            self.nodes[0].reissueasset(issuancedata["token"], Decimal('0.00000001'))
+            self.nodes[0].reissueasset(
+                asset=issuancedata["token"], assetamount=Decimal('0.00000001'), fee_asset='bitcoin')
             raise AssertionError("You shouldn't be able to reissue a token yet")
         except JSONRPCException:
             pass
 
 
-        issuancedata = self.nodes[2].issueasset(Decimal('0.00000005'), 0, True) #5 of asset, 0 reissuance token
+        issuancedata = self.nodes[2].issueasset(
+            assetamount=Decimal('0.00000005'), tokenamount=0, blind=True,
+            fee_asset='bitcoin') #5 of asset, 0 reissuance token
         # No reissuance tokens
         try:
-            self.nodes[2].reissueasset(issuancedata["token"], 5)
+            self.nodes[2].reissueasset(
+                asset=issuancedata["token"], assetamount=5, fee_asset='bitcoin')
             raise AssertionError("You shouldn't be able to reissue without a token")
         except JSONRPCException:
             pass
 
-        issuancedata = self.nodes[2].issueasset(0, Decimal('0.00000006'), True) #0 of asset, 6 reissuance token
+        issuancedata = self.nodes[2].issueasset(
+            assetamount=0, tokenamount=Decimal('0.00000006'), blind=True,
+            fee_asset='bitcoin') #0 of asset, 6 reissuance token
 
         # Node 2 will send node 1 a reissuance token, both will generate assets
-        self.nodes[2].sendtoaddress(self.nodes[1].getnewaddress(), Decimal('0.00000001'), "", "", False, False, 1, "UNSET", False, issuancedata["token"])
+        self.nodes[2].sendtoaddress(
+            address=self.nodes[1].getnewaddress(), amount=Decimal('0.00000001'), comment="",
+            comment_to="", subtractfeefromamount=False, replaceable=False, conf_target=1,
+            estimate_mode="UNSET", avoid_reuse=False, assetlabel=issuancedata["token"],
+            fee_asset_label='bitcoin')
         # node 1 needs to know about a (re)issuance to reissue itself
         self.nodes[1].importaddress(self.nodes[2].gettransaction(issuancedata["txid"])["details"][0]["address"])
         # also send some bitcoin
@@ -195,8 +218,10 @@ class IssuanceTest(BitcoinTestFramework):
 
         assert_equal(self.nodes[2].getwalletinfo()["balance"][issuancedata["token"]], Decimal('0.00000005'))
         assert_equal(self.nodes[1].getwalletinfo()["balance"][issuancedata["token"]], Decimal('0.00000001'))
-        redata1 = self.nodes[1].reissueasset(issuancedata["asset"], Decimal('0.05'))
-        redata2 = self.nodes[2].reissueasset(issuancedata["asset"], Decimal('0.025'))
+        redata1 = self.nodes[1].reissueasset(
+            asset=issuancedata["asset"], assetamount=Decimal('0.05'), fee_asset='bitcoin')
+        redata2 = self.nodes[2].reissueasset(
+            asset=issuancedata["asset"], assetamount=Decimal('0.025'), fee_asset='bitcoin')
 
         self.sync_all()
         # Watch-only issuances won't show up in wallet until confirmed
@@ -252,7 +277,8 @@ class IssuanceTest(BitcoinTestFramework):
                 assert_equal(issue['tokenamount'], Decimal('0.00000006'))
 
         # Check for value accounting when asset issuance is null but token not, ie unblinded
-        issued = self.nodes[0].issueasset(0, 1, False)
+        issued = self.nodes[0].issueasset(
+            assetamount=0, tokenamount=1, blind=False, fee_asset='bitcoin')
         assert issued["asset"] not in self.nodes[0].getwalletinfo()["balance"]
         assert_equal(self.nodes[0].getwalletinfo()["balance"][issued["token"]], 1)
 
@@ -262,19 +288,62 @@ class IssuanceTest(BitcoinTestFramework):
         blind_addr = self.nodes[0].getnewaddress()
         nonblind_addr = self.nodes[0].validateaddress(blind_addr)['unconfidential']
 
-        # Fail making non-witness issuance sourcing a single unblinded output.
-        # See: https://github.com/ElementsProject/elements/issues/473
+        # SEQUENTIA: a witness-LESS issuance is ACCEPTED, where upstream Elements
+        # rejects it. See https://github.com/ElementsProject/elements/issues/473
+        # and commit 86d5f7528. Upstream's VerifyAmounts refused any issuance
+        # whose input had no witness slot at all; Sequentia falls back to an
+        # EMPTY rangeproof instead, because an explicit (unblinded) issuance
+        # carries no rangeproof and a fully transparent transaction whose inputs
+        # need no witness legitimately has no witness data whatsoever. Sequentia
+        # is transparent by default with confidentiality opt-in, so that is the
+        # ORDINARY shape here rather than a corner case, and it has to work.
+        # No consensus check is weakened: VerifyIssuanceAmount still requires the
+        # rangeproof to be empty for an explicit amount and NON-empty for a
+        # blinded one, so a genuinely blinded issuance carrying no witness is
+        # still rejected.
+        #
+        # Sweep to a P2PKH address so the funding input is witness-less by
+        # construction rather than by accident of the wallet's address type:
+        # that is what makes this the #473 shape and not merely an unblinded one.
+        legacy_addr = self.nodes[0].validateaddress(
+            self.nodes[0].getnewaddress("", "legacy"))['unconfidential']
         total_amount = self.nodes[0].getbalance()['bitcoin']
-        self.nodes[0].sendtoaddress(nonblind_addr, total_amount, "", "", True)
+        self.nodes[0].sendtoaddress(legacy_addr, total_amount, "", "", True)
         self.generate(self.nodes[1], 1)
         raw_tx = self.nodes[0].createrawtransaction([], [{nonblind_addr: 1}])
-        funded_tx = self.nodes[0].fundrawtransaction(raw_tx)['hex']
-        issued_tx = self.nodes[2].rawissueasset(funded_tx, [{"asset_amount":1, "asset_address":nonblind_addr, "blind":False}])[0]["hex"]
-        blind_tx = self.nodes[0].blindrawtransaction(issued_tx) # This is a no-op
+        funded_tx = self.nodes[0].fundrawtransaction(raw_tx, {"fee_asset": "bitcoin"})['hex']
+        issuance = self.nodes[2].rawissueasset(
+            funded_tx, [{"asset_amount": 1, "asset_address": nonblind_addr, "blind": False}])[0]
+        blind_tx = self.nodes[0].blindrawtransaction(issuance["hex"]) # This is a no-op
         signed_tx = self.nodes[0].signrawtransactionwithwallet(blind_tx)
-        assert_raises_rpc_error(-26, "", self.nodes[0].sendrawtransaction, signed_tx['hex'])
+        assert_equal(signed_tx['complete'], True)
 
-        # Make single blinded output to ensure we work around above issue
+        # The transaction really does carry no witness data at all: no input has
+        # a script witness, so no input has a witness slot to hold an issuance
+        # rangeproof either. This is the precondition of the whole case — assert
+        # it, or a wallet change that quietly reintroduced a witness would leave
+        # the assertions below passing while testing nothing.
+        decoded = self.nodes[0].decoderawtransaction(signed_tx['hex'])
+        assert_equal([vin for vin in decoded['vin'] if 'txinwitness' in vin], [])
+        assert any(vin.get('issuance') for vin in decoded['vin'])
+
+        # Accepted into the mempool...
+        witnessless_txid = self.nodes[0].sendrawtransaction(signed_tx['hex'])
+        assert witnessless_txid in self.nodes[0].getrawmempool()
+
+        # ...and it CONNECTS: the issuance confirms and the issued asset is
+        # credited. Relay alone would not prove the consensus rule accepts it —
+        # mempool acceptance and block validity are separate gates, and
+        # VerifyAmounts is what the second one runs. Mined by node0, which is
+        # the node holding the transaction, so the block contains it without
+        # waiting on relay.
+        block_hash = self.generate(self.nodes[0], 1)[0]
+        assert witnessless_txid in self.nodes[0].getblock(block_hash)['tx']
+        assert_equal(self.nodes[0].gettransaction(witnessless_txid)['confirmations'], 1)
+        assert_equal(self.nodes[0].getwalletinfo()["balance"][issuance["asset"]], 1)
+
+        # Make single blinded output, the shape upstream needs to work around the
+        # issue above; it must of course keep working here too.
         total_amount = self.nodes[0].getbalance()['bitcoin']
         self.nodes[0].sendtoaddress(blind_addr, total_amount, "", "", True)
         self.generate(self.nodes[1], 1)
@@ -309,7 +378,7 @@ class IssuanceTest(BitcoinTestFramework):
         # Make sure that invalid addresses are rejected.
         valid_addr = self.nodes[0].getnewaddress()
         raw_tx = self.nodes[0].createrawtransaction([], [{valid_addr: Decimal("1")}])
-        funded_tx = self.nodes[0].fundrawtransaction(raw_tx, {"feeRate": Decimal('0.00050000')})['hex']
+        funded_tx = self.nodes[0].fundrawtransaction(raw_tx, {"feeRate": Decimal('0.00050000'), "fee_asset": "bitcoin"})['hex']
         assert_raises_rpc_error(-8, "Invalid asset address provided: foobar",
                 self.nodes[0].rawissueasset, funded_tx, [{"asset_amount": 1, "asset_address": "foobar"}])
         assert_raises_rpc_error(-8, "Invalid token address provided: foobar",
@@ -322,7 +391,7 @@ class IssuanceTest(BitcoinTestFramework):
 
         # Make sure contract hash is being interpreted as expected, resulting in different asset ids
         raw_tx = self.nodes[0].createrawtransaction([], [{nonblind_addr:self.nodes[0].getbalance()['bitcoin']-1}])
-        funded_tx = self.nodes[0].fundrawtransaction(raw_tx)['hex']
+        funded_tx = self.nodes[0].fundrawtransaction(raw_tx, {"fee_asset": "bitcoin"})['hex']
         id_set = set()
 
         # First issue an asset with no argument
@@ -374,7 +443,8 @@ class IssuanceTest(BitcoinTestFramework):
         assert_equal(len(id_set), 4)
 
         print("Raw reissuance tests")
-        issued_asset = self.nodes[0].issueasset(0, 1, True)
+        issued_asset = self.nodes[0].issueasset(
+            assetamount=0, tokenamount=1, blind=True, fee_asset='bitcoin')
         self.generate(self.nodes[0], 1)
         utxo_info = None
         # Find info about the token output using wallet
@@ -387,7 +457,7 @@ class IssuanceTest(BitcoinTestFramework):
         issued_address = self.nodes[0].getnewaddress()
         # Create transaction spending the reissuance token
         raw_tx = self.nodes[0].createrawtransaction([], [{issued_address:Decimal('0.00000001'), "asset": issued_asset["token"]}], 0, False)
-        funded_tx = self.nodes[0].fundrawtransaction(raw_tx)['hex']
+        funded_tx = self.nodes[0].fundrawtransaction(raw_tx, {"fee_asset": "bitcoin"})['hex']
         # Find the reissuance input
         reissuance_index = -1
         for i, tx_input in enumerate(self.nodes[0].decoderawtransaction(funded_tx)["vin"]):
@@ -416,7 +486,11 @@ class IssuanceTest(BitcoinTestFramework):
         # Import blinding key to be able to decrypt values sent to it
         self.nodes[0].importblindingkey(blinded_multisig, blinding_privkey)
         # Sending to this address must achieve blinding to reissue from this address
-        self.nodes[0].sendtoaddress(blinded_multisig, self.nodes[0].getbalance()[issued_asset["token"]], "", "", False, False, 1, "UNSET", False, issued_asset["token"], False)
+        self.nodes[0].sendtoaddress(
+            address=blinded_multisig, amount=self.nodes[0].getbalance()[issued_asset["token"]],
+            comment="", comment_to="", subtractfeefromamount=False, replaceable=False,
+            conf_target=1, estimate_mode="UNSET", avoid_reuse=False,
+            assetlabel=issued_asset["token"], ignoreblindfail=False, fee_asset_label='bitcoin')
         self.generate(self.nodes[0], 1)
 
         # Get that multisig output
@@ -432,7 +506,7 @@ class IssuanceTest(BitcoinTestFramework):
 
         # Now make transaction spending that input
         raw_tx = self.nodes[0].createrawtransaction([], [{issued_address:1, "asset": issued_asset["token"]}], 0, False)
-        funded_tx = self.nodes[0].fundrawtransaction(raw_tx)["hex"]
+        funded_tx = self.nodes[0].fundrawtransaction(raw_tx, {"fee_asset": "bitcoin"})["hex"]
         # Find the reissuance input
         reissuance_index = -1
         for i, tx_input in enumerate(self.nodes[0].decoderawtransaction(funded_tx)["vin"]):
@@ -451,7 +525,7 @@ class IssuanceTest(BitcoinTestFramework):
         # Now make transaction spending a token that had non-null contract_hash
         contract_hash = "deadbeee"*8
         raw_tx = self.nodes[0].createrawtransaction([], [{self.nodes[0].getnewaddress():1}])
-        funded_tx = self.nodes[0].fundrawtransaction(raw_tx)["hex"]
+        funded_tx = self.nodes[0].fundrawtransaction(raw_tx, {"fee_asset": "bitcoin"})["hex"]
         issued_tx = self.nodes[0].rawissueasset(funded_tx, [{"token_amount":1, "token_address":self.nodes[0].getnewaddress(), "contract_hash":contract_hash, "blind":True}])[0]
         blinded_tx = self.nodes[0].blindrawtransaction(issued_tx["hex"])
         signed_tx = self.nodes[0].signrawtransactionwithwallet(blinded_tx)
@@ -469,7 +543,7 @@ class IssuanceTest(BitcoinTestFramework):
 
         # Now spend the token, and create reissuance
         raw_tx = self.nodes[0].createrawtransaction([], [{issued_address:1, "asset": issued_tx["token"]}], 0, False)
-        funded_tx = self.nodes[0].fundrawtransaction(raw_tx)["hex"]
+        funded_tx = self.nodes[0].fundrawtransaction(raw_tx, {"fee_asset": "bitcoin"})["hex"]
         # Find the reissuance input
         reissuance_index = -1
         for i, tx_input in enumerate(self.nodes[0].decoderawtransaction(funded_tx)["vin"]):
@@ -490,7 +564,8 @@ class IssuanceTest(BitcoinTestFramework):
         self.nodes[1].sendtoaddress(self.nodes[0].getnewaddress(), self.nodes[1].getbalance()['bitcoin'], "", "", True)
         blind_addr = self.nodes[1].getnewaddress()
         nonblind_addr = self.nodes[1].validateaddress(blind_addr)['unconfidential']
-        self.nodes[0].sendtoaddress(nonblind_addr, 0.0005)
+        self.nodes[0].sendtoaddress(
+            address=nonblind_addr, amount=0.0005, fee_asset_label='bitcoin')
         self.sync_all()
         self.generate(self.nodes[0], 2)
         self.sync_all()
@@ -500,14 +575,17 @@ class IssuanceTest(BitcoinTestFramework):
         #    in the 3-output case. As the bug causes us to do coin selection for
         #    the former while attempting to produce the latter, we will trigger
         #    an "impossible" case and a confusing/generic error message.
-        self.nodes[1].issueasset(0, 1, False)["txid"]
+        self.nodes[1].issueasset(
+            assetamount=0, tokenamount=1, blind=False, fee_asset='bitcoin')["txid"]
 
         # Send different assets to the same address in a transaction with createrawtransaction
         # Unblinded issuance of asset
         contract_hash_1 = "deadbee1"*8
         contract_hash_2 = "deadbee2"*8
-        issued_1 = self.nodes[0].issueasset(1, 1, False, contract_hash_1)
-        issued_2 = self.nodes[0].issueasset(1, 1, False, contract_hash_2)
+        issued_1 = self.nodes[0].issueasset(
+            assetamount=1, tokenamount=1, blind=False, contract_hash=contract_hash_1, fee_asset='bitcoin')
+        issued_2 = self.nodes[0].issueasset(
+            assetamount=1, tokenamount=1, blind=False, contract_hash=contract_hash_2, fee_asset='bitcoin')
         self.generate(self.nodes[0], 1)
         self.sync_all()
         balance = self.nodes[0].getwalletinfo()["balance"]
@@ -521,7 +599,7 @@ class IssuanceTest(BitcoinTestFramework):
 
         # repeated address with different asset accepted
         raw_tx = self.nodes[0].createrawtransaction([], [{send_address: 1, "asset": issued_1["asset"]}, {send_address: 1, "asset": issued_2["asset"]}], 0, False)
-        funded_tx = self.nodes[0].fundrawtransaction(raw_tx)["hex"]
+        funded_tx = self.nodes[0].fundrawtransaction(raw_tx, {"fee_asset": "bitcoin"})["hex"]
         blind_tx = self.nodes[0].blindrawtransaction(funded_tx)
         signed_tx = self.nodes[0].signrawtransactionwithwallet(blind_tx)
         self.nodes[0].sendrawtransaction(signed_tx["hex"])

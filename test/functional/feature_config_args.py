@@ -46,11 +46,17 @@ class ConfArgsTest(BitcoinTestFramework):
             self.nodes[0].assert_start_raises_init_error(expected_msg=f'Error: Config setting for -wallet only applied on {self.chain} network when in [{self.chain}] section.')
 
         main_conf_file_path = os.path.join(self.options.tmpdir, 'node0', 'bitcoin_main.conf')
-        util.write_config(main_conf_file_path, n=0, chain='', extra_config=f'includeconf={inc_conf_file_path}\n')
+        # ELEMENTS: changed main to liquidv1
+        # SEQUENTIA: and now named explicitly. -acceptnonstdtxn is refused only on a
+        # non-test chain, and the chain an empty `chain=` selects is the DEFAULT one,
+        # which is no longer Elements' liquidv1 but Sequentia's testnet
+        # (CBaseChainParams::DEFAULT = TESTNET) -- a test chain, where the option is
+        # allowed and the node starts fine. Left implicit, this asserted nothing at
+        # all; it now names sequentia, the network's real non-test chain.
+        util.write_config(main_conf_file_path, n=0, chain='sequentia', extra_config=f'includeconf={inc_conf_file_path}\n')
         with open(inc_conf_file_path, 'w', encoding='utf-8') as conf:
             conf.write('acceptnonstdtxn=1\n')
-        # ELEMENTS: changed main to liquidv1
-        self.nodes[0].assert_start_raises_init_error(extra_args=[f"-conf={main_conf_file_path}"], expected_msg='Error: acceptnonstdtxn is not currently supported for liquidv1 chain')
+        self.nodes[0].assert_start_raises_init_error(extra_args=[f"-conf={main_conf_file_path}"], expected_msg='Error: acceptnonstdtxn is not currently supported for sequentia chain')
 
         with open(inc_conf_file_path, 'w', encoding='utf-8') as conf:
             conf.write('nono\n')

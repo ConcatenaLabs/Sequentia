@@ -11,12 +11,14 @@ creator insisted on ("no reorg even if the same committee later signs another
 block at the same height with 70/100"), and it is what makes the immediate-
 finality model safe without a longest-chain fallback.
 
-Contrast with feature_pos_fork_choice: there a higher-countersignature block,
-exposed via the *manual* reconsiderblock operator override, reorganizes a
-lower-countersignature tip (the comparator prefers more certification). Here the
-higher-countersignature block instead arrives over the *network* (submitblock) as
-a competitor to an already-finalized block — and must be REJECTED
-(bad-fork-prior-to-pos-final), leaving the finalized tip untouched.
+Contrast with feature_pos_fork_choice: there NEITHER sibling is final (both are
+sub-quorum, which the escaping stall permits), so nothing is being protected and
+the comparator has the last word — more countersignatures wins. Here the
+higher-countersignature block is a competitor to an already-FINALIZED one, so
+the comparator never gets to speak: the finality gate refuses it, logging
+bad-fork-prior-to-pos-final, and the finalized tip stands. Those are the only
+two regimes; which one applies is decided by whether the incumbent is final,
+never by how the rival arrived.
 """
 
 from test_framework.test_framework import BitcoinTestFramework

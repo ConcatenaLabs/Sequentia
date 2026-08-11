@@ -6,12 +6,28 @@
 
 export LC_ALL=C
 
+# Nearly every check below shells out to git. Under CI this script runs as root
+# in a tree checked out by an unprivileged user, and git refuses to touch a
+# repository it does not own. Only reach for the escape hatch if git has in fact
+# refused, so a developer running lint by hand keeps their config untouched.
+if ! git rev-parse HEAD > /dev/null 2>&1; then
+  git config --global --add safe.directory "$(pwd)"
+fi
+
 GIT_HEAD=$(git rev-parse HEAD)
 if [ -n "$CIRRUS_PR" ]; then
   COMMIT_RANGE="${CIRRUS_BASE_SHA}..$GIT_HEAD"
   test/lint/commit-script-check.sh "$COMMIT_RANGE"
 fi
 export COMMIT_RANGE
+
+# The subtree checks below walk history looking for each subtree's squash
+# commit, so they cannot work on a shallow clone — and actions/checkout hands us
+# one by default (fetch-depth: 1). Deepen once, here, rather than depending on
+# every caller to have asked for full history.
+if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+  git fetch --unshallow
+fi
 
 # This only checks that the trees are pure subtrees, it is not doing a full
 # check with -r to not have to fetch all the remotes.

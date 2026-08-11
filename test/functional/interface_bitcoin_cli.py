@@ -170,8 +170,11 @@ class TestBitcoinCli(BitcoinTestFramework):
             rpcwallet3 = f'-rpcwallet={wallets[2]}'
             w1.walletpassphrase(password, self.rpc_timeout)
             w2.encryptwallet(password)
-            w1.sendtoaddress(w2.getnewaddress(), amounts[1])
-            w1.sendtoaddress(w3.getnewaddress(), amounts[2])
+            # SEQUENTIA: an open-fee-market chain has no default fee asset.
+            w1.sendtoaddress(address=w2.getnewaddress(), amount=amounts[1],
+                             fee_asset_label='bitcoin')
+            w1.sendtoaddress(address=w3.getnewaddress(), amount=amounts[2],
+                             fee_asset_label='bitcoin')
 
             # Mine a block to confirm; adds a block reward (50 BTC) to the default wallet.
             self.generate(self.nodes[0], 1)

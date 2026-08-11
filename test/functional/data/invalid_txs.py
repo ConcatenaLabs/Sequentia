@@ -226,10 +226,16 @@ class TooManySigops(BadTxTemplate):
 
     def get_tx(self):
         lotsa_checksigs = CScript([OP_CHECKSIG] * (MAX_BLOCK_SIGOPS))
+        # SEQUENTIA: leave an explicit fee output. Without one the transaction is
+        # rejected as bad-txns-no-fee by CheckTransaction, which runs before the
+        # sigop count is ever looked at (src/validation.cpp), so the template would
+        # be rejected for the wrong reason and prove nothing about sigops. The fee
+        # comfortably clears the relay minimum for a script this large.
+        fee = 100000
         return create_tx_with_script(
             self.spend_tx, 0,
             script_pub_key=lotsa_checksigs,
-            amount=self.spend_avail)
+            amount=self.spend_avail - fee, fee=fee)
 
 def getDisabledOpcodeTemplate(opcode):
     """ Creates disabled opcode tx template class"""

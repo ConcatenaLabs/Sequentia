@@ -90,11 +90,13 @@ class SeqObCovenantFillTest(BitcoinTestFramework):
         bech = node.getnewaddress("", "bech32")
         unconf = node.getaddressinfo(bech)["unconfidential"]
         if asset_display is None:
-            node.sendtoaddress(unconf, amount)
+            # SEQUENTIA: an open-fee-market chain has no default fee asset.
+            node.sendtoaddress(address=unconf, amount=amount,
+                               fee_asset_label=BITCOIN_ASSET)
             target = BITCOIN_ASSET
         else:
-            # con_any_asset_fees defaults the fee asset to the asset being sent;
-            # force bitcoin (the policy asset) which is always fee-acceptable.
+            # No fee asset is inferred from the asset being sent; name bitcoin
+            # (the policy asset), which this node prices.
             node.sendtoaddress(address=unconf, amount=amount, assetlabel=asset_display,
                                fee_asset_label=BITCOIN_ASSET)
             target = asset_display
@@ -126,7 +128,8 @@ class SeqObCovenantFillTest(BitcoinTestFramework):
         btc = self.fresh_segwit_utxo(1)
         btc_in = int(satoshi_round(btc["amount"]) * COIN)
 
-        tx = CTransaction(); tx.nVersion = 2
+        tx = CTransaction()
+        tx.nVersion = 2
         tx.vin.append(CTxIn(COutPoint(int(a_utxo["txid"], 16), a_utxo["vout"])))
         tx.vin.append(CTxIn(COutPoint(int(btc["txid"], 16), btc["vout"])))
         order_spk = bytes(self.order_tap.scriptPubKey)
@@ -158,8 +161,8 @@ class SeqObCovenantFillTest(BitcoinTestFramework):
         The wallet inputs are signed by the wallet; every covenant input gets the
         introspection-only FILL witness. Returns the signed CTransaction."""
         node = self.nodes[0]
-        tx = CTransaction(); tx.nVersion = 2
-        order_spk = bytes(self.order_tap.scriptPubKey)
+        tx = CTransaction()
+        tx.nVersion = 2
         for (txid, vout, _amt) in cov_ins:
             tx.vin.append(CTxIn(COutPoint(int(txid, 16), vout)))
         for u in wallet_ins:
@@ -185,14 +188,17 @@ class SeqObCovenantFillTest(BitcoinTestFramework):
         # Move the initialfreecoins anyone-can-spend output into ordinary wallet
         # utxos (there is no coinbase subsidy on Sequentia; this is the only
         # bitcoin) so multi-asset coin selection has plain inputs to work with.
-        node.sendtoaddress(node.getnewaddress(), 1000000)
+        node.sendtoaddress(address=node.getnewaddress(), amount=1000000,
+                           fee_asset_label=BITCOIN_ASSET)
         self.generate(node, 1)
         self.genesis = uint256_from_str(bytes.fromhex(node.getblockhash(0))[::-1])
 
         # Two ordinary explicit assets: A rests in orders, B pays for them.
-        self.A_display = node.issueasset(100000, 0, False)["asset"]
+        self.A_display = node.issueasset(assetamount=100000, tokenamount=0,
+                                          blind=False, fee_asset=BITCOIN_ASSET)["asset"]
         self.generate(node, 1)
-        self.B_display = node.issueasset(100000, 0, False)["asset"]
+        self.B_display = node.issueasset(assetamount=100000, tokenamount=0,
+                                          blind=False, fee_asset=BITCOIN_ASSET)["asset"]
         self.generate(node, 1)
         self.A_OUT = self.asset_out(self.A_display)
         self.B_OUT = self.asset_out(self.B_display)
@@ -220,8 +226,10 @@ class SeqObCovenantFillTest(BitcoinTestFramework):
 
         # -- PASS: unilateral FULL fill -------------------------------------
         self.log.info("PASS: unilateral full fill")
-        b_in = self.fresh_segwit_utxo(100, self.B_display); b_amt = int(satoshi_round(b_in["amount"]) * COIN)
-        btc = self.fresh_segwit_utxo(1); btc_amt = int(satoshi_round(btc["amount"]) * COIN)
+        b_in = self.fresh_segwit_utxo(100, self.B_display)
+        b_amt = int(satoshi_round(b_in["amount"]) * COIN)
+        btc = self.fresh_segwit_utxo(1)
+        btc_amt = int(satoshi_round(btc["amount"]) * COIN)
         tx = self.assemble_fill([ff], [b_in, btc], [
             (req_full, maker_spk, self.B_OUT),                 # vout0 credit (B) -> maker
             (b_amt - req_full, self.wallet_spk(), self.B_OUT), # vout1 taker B change (not A)
@@ -236,10 +244,14 @@ class SeqObCovenantFillTest(BitcoinTestFramework):
 
         # -- PASS: partial fill (ceil price exercised) ----------------------
         self.log.info("PASS: partial fill, remainder re-paid to the covenant")
-        f1 = 10 * COIN; req1 = ceil_price(f1); rem1 = N - f1
+        f1 = 10 * COIN
+        req1 = ceil_price(f1)
+        rem1 = N - f1
         assert req1 * RATE_DEN != f1 * RATE_NUM  # this fill genuinely rounds up
-        b_in = self.fresh_segwit_utxo(100, self.B_display); b_amt = int(satoshi_round(b_in["amount"]) * COIN)
-        btc = self.fresh_segwit_utxo(1); btc_amt = int(satoshi_round(btc["amount"]) * COIN)
+        b_in = self.fresh_segwit_utxo(100, self.B_display)
+        b_amt = int(satoshi_round(b_in["amount"]) * COIN)
+        btc = self.fresh_segwit_utxo(1)
+        btc_amt = int(satoshi_round(btc["amount"]) * COIN)
         order_spk = bytes(self.order_tap.scriptPubKey)
         tx = self.assemble_fill([pf], [b_in, btc], [
             (req1, maker_spk, self.B_OUT),                     # vout0 credit
@@ -256,9 +268,13 @@ class SeqObCovenantFillTest(BitcoinTestFramework):
 
         # -- PASS: second partial fill of the remainder ---------------------
         self.log.info("PASS: second partial fill of the resting remainder")
-        f2 = 20 * COIN; req2 = ceil_price(f2); rem2 = rem1 - f2
-        b_in = self.fresh_segwit_utxo(100, self.B_display); b_amt = int(satoshi_round(b_in["amount"]) * COIN)
-        btc = self.fresh_segwit_utxo(1); btc_amt = int(satoshi_round(btc["amount"]) * COIN)
+        f2 = 20 * COIN
+        req2 = ceil_price(f2)
+        rem2 = rem1 - f2
+        b_in = self.fresh_segwit_utxo(100, self.B_display)
+        b_amt = int(satoshi_round(b_in["amount"]) * COIN)
+        btc = self.fresh_segwit_utxo(1)
+        btc_amt = int(satoshi_round(btc["amount"]) * COIN)
         tx = self.assemble_fill([(ptxid, 1, rem1)], [b_in, btc], [
             (req2, maker_spk, self.B_OUT),
             (rem2, order_spk, self.A_OUT),
@@ -273,7 +289,8 @@ class SeqObCovenantFillTest(BitcoinTestFramework):
 
         # -- REJECT: wrong payment asset (credit paid in bitcoin, not B) ----
         self.log.info("REJECT: wrong payment asset")
-        btc = self.fresh_segwit_utxo(40); btc_amt = int(satoshi_round(btc["amount"]) * COIN)
+        btc = self.fresh_segwit_utxo(40)
+        btc_amt = int(satoshi_round(btc["amount"]) * COIN)
         tx = self.assemble_fill([wa], [btc], [
             (req_full, maker_spk, self.BTC_OUT),               # credit in BITCOIN, not B
             (btc_amt - req_full - FEE, self.wallet_spk(), self.BTC_OUT),
@@ -284,8 +301,10 @@ class SeqObCovenantFillTest(BitcoinTestFramework):
 
         # -- REJECT: underpayment (one atom below the ceil price) -----------
         self.log.info("REJECT: underpayment")
-        b_in = self.fresh_segwit_utxo(100, self.B_display); b_amt = int(satoshi_round(b_in["amount"]) * COIN)
-        btc = self.fresh_segwit_utxo(1); btc_amt = int(satoshi_round(btc["amount"]) * COIN)
+        b_in = self.fresh_segwit_utxo(100, self.B_display)
+        b_amt = int(satoshi_round(b_in["amount"]) * COIN)
+        btc = self.fresh_segwit_utxo(1)
+        btc_amt = int(satoshi_round(btc["amount"]) * COIN)
         tx = self.assemble_fill([up], [b_in, btc], [
             (req_full - 1, maker_spk, self.B_OUT),             # one atom short
             (b_amt - (req_full - 1), self.wallet_spk(), self.B_OUT),
@@ -297,8 +316,10 @@ class SeqObCovenantFillTest(BitcoinTestFramework):
 
         # -- REJECT: output-aliasing (two covenant inputs, one shared credit) --
         self.log.info("REJECT: output-aliasing across two covenant inputs")
-        b_in = self.fresh_segwit_utxo(100, self.B_display); b_amt = int(satoshi_round(b_in["amount"]) * COIN)
-        btc = self.fresh_segwit_utxo(1); btc_amt = int(satoshi_round(btc["amount"]) * COIN)
+        b_in = self.fresh_segwit_utxo(100, self.B_display)
+        b_amt = int(satoshi_round(b_in["amount"]) * COIN)
+        btc = self.fresh_segwit_utxo(1)
+        btc_amt = int(satoshi_round(btc["amount"]) * COIN)
         # input0 (k=0) credit at vout0, remainder slot vout1; input1 (k=1) credit
         # at vout2, remainder slot vout3. The attacker pays the maker ONCE (vout0)
         # and grabs both inputs' A at vout2. Input1's 2k map forces it to demand
@@ -314,8 +335,10 @@ class SeqObCovenantFillTest(BitcoinTestFramework):
 
         # -- REJECT: remainder paid to a DIFFERENT script -------------------
         self.log.info("REJECT: remainder not self-replicated to the covenant")
-        b_in = self.fresh_segwit_utxo(100, self.B_display); b_amt = int(satoshi_round(b_in["amount"]) * COIN)
-        btc = self.fresh_segwit_utxo(1); btc_amt = int(satoshi_round(btc["amount"]) * COIN)
+        b_in = self.fresh_segwit_utxo(100, self.B_display)
+        b_amt = int(satoshi_round(b_in["amount"]) * COIN)
+        btc = self.fresh_segwit_utxo(1)
+        btc_amt = int(satoshi_round(btc["amount"]) * COIN)
         tx = self.assemble_fill([rws], [b_in, btc], [
             (req1, maker_spk, self.B_OUT),
             (rem1, self.wallet_spk(), self.A_OUT),             # remainder to WALLET, not order_spk
@@ -328,9 +351,13 @@ class SeqObCovenantFillTest(BitcoinTestFramework):
 
         # -- REJECT: below-min_lot fill -------------------------------------
         self.log.info("REJECT: below-min_lot fill")
-        fsmall = 2 * COIN; reqs = ceil_price(fsmall); rems = N - fsmall
-        b_in = self.fresh_segwit_utxo(100, self.B_display); b_amt = int(satoshi_round(b_in["amount"]) * COIN)
-        btc = self.fresh_segwit_utxo(1); btc_amt = int(satoshi_round(btc["amount"]) * COIN)
+        fsmall = 2 * COIN
+        reqs = ceil_price(fsmall)
+        rems = N - fsmall
+        b_in = self.fresh_segwit_utxo(100, self.B_display)
+        b_amt = int(satoshi_round(b_in["amount"]) * COIN)
+        btc = self.fresh_segwit_utxo(1)
+        btc_amt = int(satoshi_round(btc["amount"]) * COIN)
         tx = self.assemble_fill([bml], [b_in, btc], [
             (reqs, maker_spk, self.B_OUT),
             (rems, order_spk, self.A_OUT),                     # remainder ok (>= min_lot)
@@ -352,8 +379,11 @@ class SeqObCovenantFillTest(BitcoinTestFramework):
 
     def build_refund(self, rf, maker_sec, locktime, refund_spk):
         node = self.nodes[0]
-        btc = self.fresh_segwit_utxo(1); btc_amt = int(satoshi_round(btc["amount"]) * COIN)
-        tx = CTransaction(); tx.nVersion = 2; tx.nLockTime = locktime
+        btc = self.fresh_segwit_utxo(1)
+        btc_amt = int(satoshi_round(btc["amount"]) * COIN)
+        tx = CTransaction()
+        tx.nVersion = 2
+        tx.nLockTime = locktime
         tx.vin.append(CTxIn(COutPoint(int(rf[0], 16), rf[1]), nSequence=0xfffffffe))
         tx.vin.append(CTxIn(COutPoint(int(btc["txid"], 16), btc["vout"]), nSequence=0xfffffffe))
         tx.vout.append(self.ctxout(N, refund_spk, self.A_OUT))          # A back to the maker
@@ -395,8 +425,10 @@ class SeqObCovenantFillTest(BitcoinTestFramework):
         script interpreter that refuses it."""
         node = self.nodes[0]
         self.log.info("REJECT: confidential/blinded credit output")
-        b_in = self.fresh_segwit_utxo(100, self.B_display); b_amt = int(satoshi_round(b_in["amount"]) * COIN)
-        btc = self.fresh_segwit_utxo(1); btc_amt = int(satoshi_round(btc["amount"]) * COIN)
+        b_in = self.fresh_segwit_utxo(100, self.B_display)
+        b_amt = int(satoshi_round(b_in["amount"]) * COIN)
+        btc = self.fresh_segwit_utxo(1)
+        btc_amt = int(satoshi_round(btc["amount"]) * COIN)
         req_full = ceil_price(N)
         # Confidential destinations for the B-leg (credit + change). Blinding two
         # outputs against all-explicit inputs balances (last blinder is forced).
@@ -405,7 +437,8 @@ class SeqObCovenantFillTest(BitcoinTestFramework):
         maker_ck = bytes.fromhex(node.getaddressinfo(maker_conf)["confidential_key"])
         change_ck = bytes.fromhex(node.getaddressinfo(change_conf)["confidential_key"])
 
-        tx = CTransaction(); tx.nVersion = 2
+        tx = CTransaction()
+        tx.nVersion = 2
         tx.vin.append(CTxIn(COutPoint(int(ff2[0], 16), ff2[1])))         # covenant (A, explicit)
         tx.vin.append(CTxIn(COutPoint(int(b_in["txid"], 16), b_in["vout"])))
         tx.vin.append(CTxIn(COutPoint(int(btc["txid"], 16), btc["vout"])))

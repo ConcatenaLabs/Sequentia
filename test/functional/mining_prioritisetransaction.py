@@ -5,6 +5,7 @@
 """Test the prioritisetransaction mining RPC."""
 
 import time
+from decimal import Decimal
 
 from test_framework.messages import COIN, MAX_BLOCK_WEIGHT
 from test_framework.test_framework import BitcoinTestFramework
@@ -121,10 +122,19 @@ class PrioritiseTransactionTest(BitcoinTestFramework):
         assert len(utxo_list) > 0
         utxo = utxo_list[0]
 
+        # SEQUENTIA: "free" here means "pays less than the minimum relay fee", not
+        # "pays no fee at all". Every Elements/Sequentia transaction must carry an
+        # explicit fee output; one without it is rejected as bad-txns-no-fee, which
+        # prioritisetransaction cannot rescue because it raises the mining score
+        # rather than supplying the missing output. So the transaction pays one
+        # atom -- far under the relay minimum for its size, which is what this test
+        # needs -- and prioritisation then has something to lift over the threshold.
+        underpaying_fee = Decimal("0.00000001")
         inputs = []
         outputs = []
         inputs.append({"txid" : utxo["txid"], "vout" : utxo["vout"]})
-        outputs.append({self.nodes[0].getnewaddress(): utxo["amount"]})
+        outputs.append({self.nodes[0].getnewaddress(): utxo["amount"] - underpaying_fee})
+        outputs.append({"fee": underpaying_fee})
         raw_tx = self.nodes[0].createrawtransaction(inputs, outputs)
         tx_hex = self.nodes[0].signrawtransactionwithwallet(raw_tx)["hex"]
         tx_id = self.nodes[0].decoderawtransaction(tx_hex)["txid"]

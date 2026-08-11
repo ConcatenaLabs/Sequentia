@@ -47,7 +47,13 @@ class InitialReissuanceTokenTest(BitcoinTestFramework):
 
         # Claim all anyone-can-spend reissuance tokens, which also blinds the token output
         # which is required for re-issuance: https://github.com/ElementsProject/elements/issues/259
-        self.nodes[0].sendtoaddress(self.nodes[0].getnewaddress(), 2, "", "", False, False, 6, "UNSET", False, token)
+        # The token output cannot pay the fee (nothing is subtracted from it), so
+        # the fee asset is named: this wallet's other holding, the default asset.
+        self.nodes[0].sendtoaddress(
+            address=self.nodes[0].getnewaddress(), amount=2, comment="", comment_to="",
+            subtractfeefromamount=False, replaceable=False, conf_target=6,
+            estimate_mode="UNSET", avoid_reuse=False, assetlabel=token,
+            fee_asset_label="bitcoin")
         self.generate(self.nodes[0], 101)
         self.sync_all()
 
@@ -57,7 +63,7 @@ class InitialReissuanceTokenTest(BitcoinTestFramework):
         assert_equal(walletinfo1["balance"][token], 2)
 
         #Reissue some of the default asset
-        self.nodes[0].reissueasset("bitcoin", 1234)
+        self.nodes[0].reissueasset(asset="bitcoin", assetamount=1234, fee_asset="bitcoin")
         self.generate(self.nodes[0], 101)
         self.sync_all()
 
@@ -66,15 +72,21 @@ class InitialReissuanceTokenTest(BitcoinTestFramework):
         assert_equal(walletinfo1["balance"]["bitcoin"], 20001234)
 
         #Send some 'bitcoin' to node 2 so they can fund a reissuance transaction
-        self.nodes[0].sendtoaddress(self.nodes[1].getnewaddress(), 1, "", "", False)
+        self.nodes[0].sendtoaddress(
+            address=self.nodes[1].getnewaddress(), amount=1, comment="", comment_to="",
+            subtractfeefromamount=False, fee_asset_label="bitcoin")
 
         #Send a reissuance token to node 2 so they can reissue the default asset
-        self.nodes[0].sendtoaddress(self.nodes[1].getnewaddress(), 1, "", "", False, False, 6, "UNSET", False, token)
+        self.nodes[0].sendtoaddress(
+            address=self.nodes[1].getnewaddress(), amount=1, comment="", comment_to="",
+            subtractfeefromamount=False, replaceable=False, conf_target=6,
+            estimate_mode="UNSET", avoid_reuse=False, assetlabel=token,
+            fee_asset_label="bitcoin")
         self.generate(self.nodes[0], 101)
         self.sync_all()
 
         #Reissue some of the default asset
-        self.nodes[1].reissueasset("bitcoin", 1000)
+        self.nodes[1].reissueasset(asset="bitcoin", assetamount=1000, fee_asset="bitcoin")
         self.generate(self.nodes[1], 101)
         self.sync_all()
 

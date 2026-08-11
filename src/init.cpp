@@ -647,7 +647,7 @@ void SetupServerArgs(ArgsManager& argsman)
     // Elements-specific arguments.
     //
 
-    std::vector<std::string> elements_hidden_args = {"-con_fpowallowmindifficultyblocks", "-con_fpownoretargeting", "-con_nsubsidyhalvinginterval", "-con_bip16exception", "-con_bip34height", "-con_bip65height", "-con_bip66height", "-con_npowtargettimespan", "-con_npowtargetspacing", "-con_nrulechangeactivationthreshold", "-con_nminerconfirmationwindow", "-con_powlimit", "-con_bip34hash", "-con_nminimumchainwork", "-con_defaultassumevalid", "-npruneafterheight", "-fdefaultconsistencychecks", "-fmineblocksondemand", "-fallback_fee_enabled", "-pchmessagestart"};
+    std::vector<std::string> elements_hidden_args = {"-con_fpowallowmindifficultyblocks", "-con_fpownoretargeting", "-con_nsubsidyhalvinginterval", "-con_bip16exception", "-con_bip34height", "-con_bip65height", "-con_bip66height", "-con_npowtargettimespan", "-con_npowtargetspacing", "-con_nrulechangeactivationthreshold", "-con_nminerconfirmationwindow", "-con_powlimit", "-con_bip34hash", "-con_nminimumchainwork", "-con_defaultassumevalid", "-npruneafterheight", "-fdefaultconsistencychecks", "-fmineblocksondemand", "-fallback_fee_enabled", "-pchmessagestart", "-con_utxo_recovery_height", "-con_utxo_recovery_retire", "-con_utxo_recovery_create"};
 
     argsman.AddArg("-initialfreecoins", strprintf("The amount of OP_TRUE coins created in the genesis block. Primarily for testing. (default: %d)", 0), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-validatepegin", "Validate peg-in claims. An RPC connection will be attempted to the trusted mainchain daemon using the `mainchain*` settings below. All functionaries must run this enabled. (default: 1 if chain has federated peg)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
@@ -668,7 +668,7 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-initialreissuancetokens=<n>", "The amount of reissuance tokens created in the genesis block. (default: 0)", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-ct_bits", strprintf("The default number of hiding bits in a rangeproof. Will be exceeded to cover amounts exceeding the maximum hiding value. (default: %d)", 52), ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-ct_exponent", strprintf("The hiding exponent. (default: %s)", 0), ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
-    argsman.AddArg("-con_any_asset_fees", "Enable transaction fees to be paid with any asset (default: false)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
+    argsman.AddArg("-con_any_asset_fees", "Enable transaction fees to be paid with any asset (default: on for chains running in elements mode, which are the chains that have more than one asset; off otherwise)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-initialexchangeratesjsonfile=<file>", strprintf("Specify path to read-only configuration file with asset valuations. Only used when con_any_asset_fees is enabled. Relative paths will be prefixed by datadir location. (default: %s)", "exchangerates.json"), ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-con_bitcoin_anchor", "Require every block header to anchor to a Bitcoin (parent chain) block at a monotonically non-decreasing height. Requires a mainchain daemon connection (see -mainchainrpc* options) for full validation and block production. (default: false)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-validateanchor", "SEQUENTIA: watch the mainchain daemon and enforce every Bitcoin-dependent rule. This is a MASTER SWITCH, not a single check: setting it to 0 turns off FOUR things at once - (1) anchor validation of incoming blocks (rule R3), (2) the reorg-following watcher, so this node can no longer notice that Bitcoin orphaned an anchor and will NOT roll its own chain back, (3) the escaping-stall parent-chain time gap, and (4) the PoS finality reconciliation monitor. A node with 0 delegates all of this to its peers and cannot detect on its own that it is building on, or serving, an orphaned-anchor chain - so it keeps relaying that chain to everyone who syncs from it. Set 0 only for a follower with no Bitcoin node available, or to validate an already-anchored chain offline; never on a node that produces blocks or that others sync from. Note that block production is NOT disabled by 0: a producer with a reachable Bitcoin node keeps choosing anchors normally while silently ignoring every reorg. Only used when con_bitcoin_anchor is enabled. (default: true)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
@@ -1459,11 +1459,11 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     // ELEMENTS:
     policyAsset = CAsset(uint256S(gArgs.GetArg("-feeasset", chainparams.GetConsensus().pegged_asset.GetHex())));
 
-    // SEQUENTIA: default to the value the chain's params already set (the
-    // bundled PoS chains -- sequentia/test -- bake this on; custom chains leave
-    // it at the false default). Using a hard-coded false default here would
-    // clobber the chain's setting unless every operator also passed
-    // -con_any_asset_fees=1, silently disabling the open fee market on mainnet.
+    // SEQUENTIA: default to what SelectParams() settled for the selected chain --
+    // the open fee market follows elements mode, so it is on wherever there is
+    // more than one asset to pay a fee in. A hard-coded default here would
+    // clobber that unless every operator also passed -con_any_asset_fees=1,
+    // silently disabling the open fee market on the real network.
     g_con_any_asset_fees = gArgs.GetBoolArg("-con_any_asset_fees", g_con_any_asset_fees);
     if (g_con_any_asset_fees) {
         // If fees can be paid in any asset, node operators need to be able to specify asset exchange

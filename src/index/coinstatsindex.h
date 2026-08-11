@@ -11,6 +11,8 @@
 #include <index/base.h>
 #include <node/coinstats.h>
 
+class CBlockUndo;
+
 /**
  * CoinStatsIndex maintains statistics on the UTXO set.
  */
@@ -35,6 +37,12 @@ private:
     CAmount m_total_unspendables_unclaimed_rewards{0};
 
     bool ReverseBlock(const CBlock& block, const CBlockIndex* pindex);
+
+    //! SEQUENTIA: fold the one-time UTXO-set rewrite into the running stats.
+    //! It is in no transaction, so nothing else here would see it. See the
+    //! definition in coinstatsindex.cpp for why omitting it would abort a node
+    //! on a reorg rather than merely under-report.
+    void ApplyUtxoRecoveryToStats(const CBlockUndo& block_undo, const CBlockIndex* pindex, bool forward);
 
 protected:
     bool Init() override;

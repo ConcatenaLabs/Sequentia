@@ -37,7 +37,7 @@ import subprocess
 import time
 from decimal import Decimal
 
-from test_framework.test_framework import BitcoinTestFramework
+from test_framework.test_framework import BitcoinTestFramework, SkipTest
 from test_framework.util import assert_equal, satoshi_round, BITCOIN_ASSET
 from test_framework.key import compute_xonly_pubkey, generate_privkey
 from test_framework.messages import (
@@ -92,6 +92,15 @@ class SeqObMatcherCovenantTest(BitcoinTestFramework):
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
+        # The Go daemons under test live in the seqdex repo, which a bare
+        # checkout (CI included) does not have. Skip, rather than fail, when
+        # the toolchain or the repo is absent: their absence says nothing
+        # about the node.
+        if not os.path.exists(go_bin()):
+            raise SkipTest("Go toolchain not found at %s (set GO_BIN)" % go_bin())
+        if not os.path.isdir(os.path.join(seqdex_dir(), "daemon")):
+            raise SkipTest("seqdex daemon dir not found at %s (set SEQDEX_DIR)"
+                           % os.path.join(seqdex_dir(), "daemon"))
 
     def setup_network(self, split=False):
         self.setup_nodes()
@@ -255,7 +264,9 @@ class SeqObMatcherCovenantTest(BitcoinTestFramework):
         bech = node.getnewaddress("", "bech32")
         unconf = node.getaddressinfo(bech)["unconfidential"]
         if asset_display is None:
-            node.sendtoaddress(unconf, amount)
+            # SEQUENTIA: an open-fee-market chain has no default fee asset.
+            node.sendtoaddress(address=unconf, amount=amount,
+                               fee_asset_label=BITCOIN_ASSET)
             target = BITCOIN_ASSET
         else:
             node.sendtoaddress(address=unconf, amount=amount, assetlabel=asset_display,
@@ -283,7 +294,8 @@ class SeqObMatcherCovenantTest(BitcoinTestFramework):
         btc = self.fresh_segwit_utxo(1)
         btc_in = int(satoshi_round(btc["amount"]) * COIN)
 
-        tx = CTransaction(); tx.nVersion = 2
+        tx = CTransaction()
+        tx.nVersion = 2
         tx.vin.append(CTxIn(COutPoint(int(a_utxo["txid"], 16), a_utxo["vout"])))
         tx.vin.append(CTxIn(COutPoint(int(btc["txid"], 16), btc["vout"])))
         order_spk = bytes(self.order_tap.scriptPubKey)
@@ -302,7 +314,8 @@ class SeqObMatcherCovenantTest(BitcoinTestFramework):
         [(amount, spk, asset_out or None-for-fee)]; witness = [leaf, control] the
         Go builder emitted (proving production == the proven artifact)."""
         node = self.nodes[0]
-        tx = CTransaction(); tx.nVersion = 2
+        tx = CTransaction()
+        tx.nVersion = 2
         tx.vin.append(CTxIn(COutPoint(int(cov_in[0], 16), cov_in[1])))
         for u in wallet_ins:
             tx.vin.append(CTxIn(COutPoint(int(u["txid"], 16), u["vout"])))
@@ -331,13 +344,16 @@ class SeqObMatcherCovenantTest(BitcoinTestFramework):
 
     def _run(self, node):
         self.generate(node, 101)
-        node.sendtoaddress(node.getnewaddress(), 1000000)
+        node.sendtoaddress(address=node.getnewaddress(), amount=1000000,
+                           fee_asset_label=BITCOIN_ASSET)
         self.generate(node, 1)
 
         # Two ordinary explicit assets: A rests in covenant orders, B pays.
-        self.A_display = node.issueasset(100000, 0, False)["asset"]
+        self.A_display = node.issueasset(assetamount=100000, tokenamount=0,
+                                          blind=False, fee_asset=BITCOIN_ASSET)["asset"]
         self.generate(node, 1)
-        self.B_display = node.issueasset(100000, 0, False)["asset"]
+        self.B_display = node.issueasset(assetamount=100000, tokenamount=0,
+                                          blind=False, fee_asset=BITCOIN_ASSET)["asset"]
         self.generate(node, 1)
         self.A_OUT = self.asset_out(self.A_display)
         self.B_OUT = self.asset_out(self.B_display)
@@ -403,8 +419,10 @@ class SeqObMatcherCovenantTest(BitcoinTestFramework):
         assert_equal(int(plan["credit_index"]), 0)
         witness = [bytes.fromhex(plan["fill_leaf"]), bytes.fromhex(plan["control_block"])]
 
-        b_in = self.fresh_segwit_utxo(100, self.B_display); b_amt = int(satoshi_round(b_in["amount"]) * COIN)
-        btc = self.fresh_segwit_utxo(1); btc_amt = int(satoshi_round(btc["amount"]) * COIN)
+        b_in = self.fresh_segwit_utxo(100, self.B_display)
+        b_amt = int(satoshi_round(b_in["amount"]) * COIN)
+        btc = self.fresh_segwit_utxo(1)
+        btc_amt = int(satoshi_round(btc["amount"]) * COIN)
         taker_a_spk = self.wallet_spk()
         tx = self.assemble_fill((txid, vout), [b_in, btc], [
             (req_full, maker_spk, self.B_OUT),                  # 0 credit -> maker (offline)
@@ -441,14 +459,17 @@ class SeqObMatcherCovenantTest(BitcoinTestFramework):
         plan1 = self.cov_fill(locked=N, filled=f1, k=0)
         assert_equal(plan1["partial"], True)
         assert_equal(int(plan1["remainder_index"]), 1)
-        req1 = ceil_price(f1); rem1 = N - f1
+        req1 = ceil_price(f1)
+        rem1 = N - f1
         assert_equal(int(plan1["required_b"]), req1)
         assert_equal(int(plan1["remainder"]), rem1)
         wit1 = [bytes.fromhex(plan1["fill_leaf"]), bytes.fromhex(plan1["control_block"])]
         order_spk = bytes(self.order_tap.scriptPubKey)
 
-        b_in = self.fresh_segwit_utxo(100, self.B_display); b_amt = int(satoshi_round(b_in["amount"]) * COIN)
-        btc = self.fresh_segwit_utxo(1); btc_amt = int(satoshi_round(btc["amount"]) * COIN)
+        b_in = self.fresh_segwit_utxo(100, self.B_display)
+        b_amt = int(satoshi_round(b_in["amount"]) * COIN)
+        btc = self.fresh_segwit_utxo(1)
+        btc_amt = int(satoshi_round(btc["amount"]) * COIN)
         tx = self.assemble_fill((txid2, vout2), [b_in, btc], [
             (req1, maker_spk, self.B_OUT),                     # 0 credit
             (rem1, order_spk, self.A_OUT),                     # 1 remainder -> SAME covenant
@@ -466,13 +487,17 @@ class SeqObMatcherCovenantTest(BitcoinTestFramework):
 
         # The remainder is a fresh covenant UTXO: fill it again (proves re-rest).
         self.log.info("  re-filling the %d-unit remainder proves it is a valid covenant order", rem1 // COIN)
-        f2 = 20 * COIN; req2 = ceil_price(f2); rem2 = rem1 - f2
+        f2 = 20 * COIN
+        req2 = ceil_price(f2)
+        rem2 = rem1 - f2
         plan2 = self.cov_fill(locked=rem1, filled=f2, k=0)
         assert_equal(int(plan2["required_b"]), req2)
         assert_equal(int(plan2["remainder"]), rem2)
         wit2 = [bytes.fromhex(plan2["fill_leaf"]), bytes.fromhex(plan2["control_block"])]
-        b_in = self.fresh_segwit_utxo(100, self.B_display); b_amt = int(satoshi_round(b_in["amount"]) * COIN)
-        btc = self.fresh_segwit_utxo(1); btc_amt = int(satoshi_round(btc["amount"]) * COIN)
+        b_in = self.fresh_segwit_utxo(100, self.B_display)
+        b_amt = int(satoshi_round(b_in["amount"]) * COIN)
+        btc = self.fresh_segwit_utxo(1)
+        btc_amt = int(satoshi_round(btc["amount"]) * COIN)
         tx = self.assemble_fill((ptxid, 1), [b_in, btc], [
             (req2, maker_spk, self.B_OUT),
             (rem2, order_spk, self.A_OUT),

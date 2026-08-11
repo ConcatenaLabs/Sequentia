@@ -44,6 +44,8 @@ def make_key():
 SEED_STAKE = 1000000000      # atoms in the founder's genesis staking output
 STAKE_CSV = 15               # height-based CSV (>= posunbonding 10 * slot 1)
 COMMITTEE = 3                # quorum 2 -> the lone founder is sub-quorum (escaping stall)
+PARENT_BLOCK_SECONDS = 600   # parent-chain block spacing (one Bitcoin interval)
+PARENT_BLOCKS_PER_ROUND = 4  # >= POS_ESCAPING_STALL_ANCHOR_GAP (3)
 
 
 class PosParentReorgRecoveryTest(BitcoinTestFramework):
@@ -67,6 +69,7 @@ class PosParentReorgRecoveryTest(BitcoinTestFramework):
         self.add_nodes(1, [parent_args], chain=[chain])
         self.start_node(0)
         self.parentgenesis = self.nodes[0].getblockhash(0)
+        self.parent_time = self.nodes[0].getblockheader(self.parentgenesis)['time']
         datadir = get_datadir_path(self.options.tmpdir, 0)
         rpc_u, rpc_p = get_auth_cookie(datadir, chain)
 
@@ -87,10 +90,28 @@ class PosParentReorgRecoveryTest(BitcoinTestFramework):
                                     "-posproducer=1", "-posproducerkey=%s" % self.founder_wif]
         peer_args = consensus + ["-port=%d" % p2p_port(2), "-rpcport=%d" % rpc_port(2),
                                  "-posproducer=1", "-posproducerkey=%s" % self.peer_wif]
-        self.add_nodes(1, [founder_args], chain=[chain]); self.start_node(1)
-        self.add_nodes(1, [peer_args], chain=[chain]); self.start_node(2)
+        self.add_nodes(1, [founder_args], chain=[chain])
+        self.start_node(1)
+        self.add_nodes(1, [peer_args], chain=[chain])
+        self.start_node(2)
         self.connect_nodes(1, 2)
         self.nodes[0].createwallet(wallet_name="w", descriptors=True)
+
+    def advance_parent(self, blocks):
+        """Mine `blocks` parent blocks, PARENT_BLOCK_SECONDS apart.
+
+        One block per call with the parent's mocktime stepped in between: a
+        single multi-block generate stamps them all with the same time, which
+        leaves median-time-past standing still and starves the escaping-stall
+        real-time evidence (-posescapestallmtpgap, 600 s), so the sub-quorum
+        founder could never produce past its first block.
+        """
+        parent = self.nodes[0]
+        addr = parent.getnewaddress()
+        for _ in range(blocks):
+            self.parent_time += PARENT_BLOCK_SECONDS
+            parent.setmocktime(self.parent_time)
+            self.generatetoaddress(parent, 1, addr, sync_fun=self.no_op)
 
     def run_test(self):
         parent, founder, peer = self.nodes
@@ -103,7 +124,7 @@ class PosParentReorgRecoveryTest(BitcoinTestFramework):
         # the parent anchor to advance >= the escaping-stall gap, so we advance the
         # parent per block. block1 anchors to parent ~4, block2 ~8, block3 ~12.
         for target in (1, 2, 3):
-            self.generatetoaddress(parent, 4, parent.getnewaddress(), sync_fun=self.no_op)
+            self.advance_parent(PARENT_BLOCKS_PER_ROUND)
             self.wait_until(lambda: founder.getblockcount() >= target, timeout=90)
             assert_equal(founder.getblockcount(), target)
 
@@ -120,8 +141,9 @@ class PosParentReorgRecoveryTest(BitcoinTestFramework):
         bad = parent.getblockhash(fork_at)
         parent.invalidateblock(bad)
         assert_equal(parent.getblockcount(), fork_at - 1)
-        # Mine a competing branch taller than the old one (old tip was parent_h).
-        self.generatetoaddress(parent, (parent_h - fork_at) + 6, parent.getnewaddress(), sync_fun=self.no_op)
+        # Mine a competing branch taller than the old one (old tip was parent_h),
+        # at the same Bitcoin cadence so its median-time-past keeps advancing.
+        self.advance_parent((parent_h - fork_at) + 6)
         assert parent.getblockcount() > parent_h
         self.log.info("parent reorged: new best height %d, old block-3 anchor orphaned" % parent.getblockcount())
 

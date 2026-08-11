@@ -214,7 +214,8 @@ class WalletDumpTest(BitcoinTestFramework):
         self.nodes[0].createwallet("w3")
         w3 = self.nodes[0].get_wallet_rpc("w3")
         w3.importprivkey(privkey=self.nodes[0].get_deterministic_priv_key().key, label="coinbase_import")
-        w3.sendtoaddress(w3.getnewaddress(), 10)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        w3.sendtoaddress(address=w3.getnewaddress(), amount=10, fee_asset_label='bitcoin')
         w3.unloadwallet()
         self.nodes[0].loadwallet("w3")
         w3.dumpwallet(os.path.join(self.nodes[0].datadir, "w3.dump"))

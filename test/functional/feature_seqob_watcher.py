@@ -40,7 +40,7 @@ import time
 import urllib.request
 from decimal import Decimal
 
-from test_framework.test_framework import BitcoinTestFramework
+from test_framework.test_framework import BitcoinTestFramework, SkipTest
 from test_framework.util import (
     assert_equal, satoshi_round, BITCOIN_ASSET, get_auth_cookie, rpc_port,
 )
@@ -98,6 +98,15 @@ class SeqObWatcherTest(BitcoinTestFramework):
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
+        # The Go daemons under test live in the seqdex repo, which a bare
+        # checkout (CI included) does not have. Skip, rather than fail, when
+        # the toolchain or the repo is absent: their absence says nothing
+        # about the node.
+        if not os.path.exists(go_bin()):
+            raise SkipTest("Go toolchain not found at %s (set GO_BIN)" % go_bin())
+        if not os.path.isdir(os.path.join(seqdex_dir(), "daemon")):
+            raise SkipTest("seqdex daemon dir not found at %s (set SEQDEX_DIR)"
+                           % os.path.join(seqdex_dir(), "daemon"))
 
     def setup_network(self, split=False):
         self.setup_nodes()
@@ -252,7 +261,9 @@ class SeqObWatcherTest(BitcoinTestFramework):
         bech = node.getnewaddress("", "bech32")
         unconf = node.getaddressinfo(bech)["unconfidential"]
         if asset_display is None:
-            node.sendtoaddress(unconf, amount)
+            # SEQUENTIA: an open-fee-market chain has no default fee asset.
+            node.sendtoaddress(address=unconf, amount=amount,
+                               fee_asset_label=BITCOIN_ASSET)
             target = BITCOIN_ASSET
         else:
             node.sendtoaddress(address=unconf, amount=amount, assetlabel=asset_display,
@@ -292,7 +303,8 @@ class SeqObWatcherTest(BitcoinTestFramework):
         btc_in = int(satoshi_round(btc["amount"]) * COIN)
 
         seq = RBF_SEQ if rbf else 0xffffffff
-        tx = CTransaction(); tx.nVersion = 2
+        tx = CTransaction()
+        tx.nVersion = 2
         tx.vin.append(CTxIn(COutPoint(int(a_utxo["txid"], 16), a_utxo["vout"]), nSequence=seq))
         tx.vin.append(CTxIn(COutPoint(int(btc["txid"], 16), btc["vout"]), nSequence=seq))
         order_spk = bytes(self.order_tap.scriptPubKey)
@@ -308,7 +320,8 @@ class SeqObWatcherTest(BitcoinTestFramework):
 
     def assemble_fill(self, cov_in, wallet_ins, outs, witness):
         node = self.nodes[0]
-        tx = CTransaction(); tx.nVersion = 2
+        tx = CTransaction()
+        tx.nVersion = 2
         tx.vin.append(CTxIn(COutPoint(int(cov_in[0], 16), cov_in[1])))
         for u in wallet_ins:
             tx.vin.append(CTxIn(COutPoint(int(u["txid"], 16), u["vout"])))
@@ -326,13 +339,14 @@ class SeqObWatcherTest(BitcoinTestFramework):
 
     def build_full_fill(self, cov_txid, cov_vout, locked):
         """Build (but do not broadcast) a FULL fill spend of a covenant."""
-        node = self.nodes[0]
         maker_spk = bytes(CScript([OP_1, self.maker_x]))
         plan = self.cov_fill(locked=locked, filled=locked, k=0)
         req = ceil_price(locked)
         witness = [bytes.fromhex(plan["fill_leaf"]), bytes.fromhex(plan["control_block"])]
-        b_in = self.fresh_segwit_utxo(100, self.B_display); b_amt = int(satoshi_round(b_in["amount"]) * COIN)
-        btc = self.fresh_segwit_utxo(1); btc_amt = int(satoshi_round(btc["amount"]) * COIN)
+        b_in = self.fresh_segwit_utxo(100, self.B_display)
+        b_amt = int(satoshi_round(b_in["amount"]) * COIN)
+        btc = self.fresh_segwit_utxo(1)
+        btc_amt = int(satoshi_round(btc["amount"]) * COIN)
         tx = self.assemble_fill((cov_txid, cov_vout), [b_in, btc], [
             (req, maker_spk, self.B_OUT),
             (b_amt - req, self.wallet_spk(), self.B_OUT),
@@ -355,11 +369,14 @@ class SeqObWatcherTest(BitcoinTestFramework):
 
     def _setup_assets(self, node):
         self.generate(node, 101)
-        node.sendtoaddress(node.getnewaddress(), 1000000)
+        node.sendtoaddress(address=node.getnewaddress(), amount=1000000,
+                           fee_asset_label=BITCOIN_ASSET)
         self.generate(node, 1)
-        self.A_display = node.issueasset(100000, 0, False)["asset"]
+        self.A_display = node.issueasset(assetamount=100000, tokenamount=0,
+                                          blind=False, fee_asset=BITCOIN_ASSET)["asset"]
         self.generate(node, 1)
-        self.B_display = node.issueasset(100000, 0, False)["asset"]
+        self.B_display = node.issueasset(assetamount=100000, tokenamount=0,
+                                          blind=False, fee_asset=BITCOIN_ASSET)["asset"]
         self.generate(node, 1)
         self.A_OUT = self.asset_out(self.A_display)
         self.B_OUT = self.asset_out(self.B_display)
@@ -407,8 +424,10 @@ class SeqObWatcherTest(BitcoinTestFramework):
         req1, rem1 = ceil_price(f1), N - f1
         wit1 = [bytes.fromhex(plan1["fill_leaf"]), bytes.fromhex(plan1["control_block"])]
         order_spk = bytes(self.order_tap.scriptPubKey)
-        b_in = self.fresh_segwit_utxo(100, self.B_display); b_amt = int(satoshi_round(b_in["amount"]) * COIN)
-        btc = self.fresh_segwit_utxo(1); btc_amt = int(satoshi_round(btc["amount"]) * COIN)
+        b_in = self.fresh_segwit_utxo(100, self.B_display)
+        b_amt = int(satoshi_round(b_in["amount"]) * COIN)
+        btc = self.fresh_segwit_utxo(1)
+        btc_amt = int(satoshi_round(btc["amount"]) * COIN)
         tx = self.assemble_fill((txid2, vout2), [b_in, btc], [
             (req1, maker_spk, self.B_OUT),
             (rem1, order_spk, self.A_OUT),                     # 1: remainder -> SAME covenant
@@ -421,7 +440,7 @@ class SeqObWatcherTest(BitcoinTestFramework):
         self.generate(node, 1)
         assert_equal(satoshi_round(node.gettxout(ptxid, 1)["value"]) * COIN, Decimal(rem1))
         # Watcher must re-rest 'part' pointing at the NEW remainder outpoint.
-        book = self.wait_book(
+        self.wait_book(
             lambda b: any(o["offer_id"] == "part" and o.get("covenant", {}).get("covenant_txid") == ptxid
                           and int(o.get("covenant", {}).get("covenant_vout", 0)) == 1
                           for o in b.get("offers", [])),
@@ -433,8 +452,10 @@ class SeqObWatcherTest(BitcoinTestFramework):
         plan2 = self.cov_fill(locked=rem1, filled=f2, k=0)
         req2 = ceil_price(f2)
         wit2 = [bytes.fromhex(plan2["fill_leaf"]), bytes.fromhex(plan2["control_block"])]
-        b_in = self.fresh_segwit_utxo(100, self.B_display); b_amt = int(satoshi_round(b_in["amount"]) * COIN)
-        btc = self.fresh_segwit_utxo(1); btc_amt = int(satoshi_round(btc["amount"]) * COIN)
+        b_in = self.fresh_segwit_utxo(100, self.B_display)
+        b_amt = int(satoshi_round(b_in["amount"]) * COIN)
+        btc = self.fresh_segwit_utxo(1)
+        btc_amt = int(satoshi_round(btc["amount"]) * COIN)
         tx = self.assemble_fill((ptxid, 1), [b_in, btc], [
             (req2, maker_spk, self.B_OUT),
             (b_amt - req2, self.wallet_spk(), self.B_OUT),
@@ -490,7 +511,8 @@ class SeqObWatcherTest(BitcoinTestFramework):
         btc_ds = self.find_btc_utxo(1, exclude={(a_utxo["txid"], a_utxo["vout"]),
                                                 (btc_utxo["txid"], btc_utxo["vout"])})
         btc_ds_amt = int(satoshi_round(btc_ds["amount"]) * COIN)
-        ds = CTransaction(); ds.nVersion = 2
+        ds = CTransaction()
+        ds.nVersion = 2
         ds.vin.append(CTxIn(COutPoint(int(a_utxo["txid"], 16), a_utxo["vout"]), nSequence=0xffffffff))
         ds.vin.append(CTxIn(COutPoint(int(btc_ds["txid"], 16), btc_ds["vout"])))
         ds.vout.append(self.ctxout(a_in, self.wallet_spk(), self.A_OUT))    # send A back to wallet

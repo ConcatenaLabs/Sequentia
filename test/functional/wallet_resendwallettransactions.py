@@ -27,7 +27,8 @@ class ResendWalletTransactionsTest(BitcoinTestFramework):
         peer_first = node.add_p2p_connection(P2PTxInvStore())
 
         self.log.info("Create a new transaction and wait until it's broadcast")
-        txid = node.sendtoaddress(node.getnewaddress(), 1)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        txid = node.sendtoaddress(address=node.getnewaddress(), amount=1, fee_asset_label='bitcoin')
 
         # Wallet rebroadcast is first scheduled 1 sec after startup (see
         # nNextResend in ResendWalletTransactions()). Tell scheduler to call

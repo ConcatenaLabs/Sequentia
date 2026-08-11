@@ -74,7 +74,7 @@ bool HttpGet(const std::string& url, std::string& out_body, std::string& out_err
     const size_t colon = hostport.find(':');
     if (colon != std::string::npos) {
         host = hostport.substr(0, colon);
-        port = std::atoi(hostport.substr(colon + 1).c_str());
+        port = LocaleIndependentAtoi<int>(hostport.substr(colon + 1));
     }
     if (host.empty() || port <= 0 || port > 65535) { out_err = "malformed price-feed URL"; return false; }
 

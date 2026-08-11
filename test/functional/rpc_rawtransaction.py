@@ -76,7 +76,8 @@ class RawTransactionsTest(BitcoinTestFramework):
         self.generate(self.nodes[2], 1)
         self.generate(self.nodes[0], COINBASE_MATURITY + 1)
         for amount in [1.5, 1.0, 5.0]:
-            self.nodes[0].sendtoaddress(self.nodes[2].getnewaddress(), amount)
+            # SEQUENTIA: an open-fee-market chain has no default fee asset.
+            self.nodes[0].sendtoaddress(address=self.nodes[2].getnewaddress(), amount=amount, fee_asset_label='bitcoin')
         self.sync_all()
         self.generate(self.nodes[0], 5)
 
@@ -92,7 +93,8 @@ class RawTransactionsTest(BitcoinTestFramework):
 
     def getrawtransaction_tests(self):
         addr = self.nodes[1].getnewaddress()
-        txid = self.nodes[0].sendtoaddress(addr, 10)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        txid = self.nodes[0].sendtoaddress(address=addr, amount=10, fee_asset_label='bitcoin')
         self.generate(self.nodes[0], 1)
         vout = find_vout_for_address(self.nodes[1], txid, addr)
         rawTx = self.nodes[1].createrawtransaction([{'txid': txid, 'vout': vout}], [{self.nodes[1].getnewaddress(): 9.999}, {"fee": 0.001}])
@@ -140,7 +142,8 @@ class RawTransactionsTest(BitcoinTestFramework):
             assert_raises_rpc_error(-1, "not a boolean", self.nodes[n].getrawtransaction, txId, {})
 
         # Make a tx by sending, then generate 2 blocks; block1 has the tx in it
-        tx = self.nodes[2].sendtoaddress(self.nodes[1].getnewaddress(), 1)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        tx = self.nodes[2].sendtoaddress(address=self.nodes[1].getnewaddress(), amount=1, fee_asset_label='bitcoin')
         block1, block2 = self.generate(self.nodes[2], 2)
         for n in [0, 3]:
             self.log.info(f"Test getrawtransaction {'with' if n == 0 else 'without'} -txindex, with blockhash")
@@ -319,7 +322,8 @@ class RawTransactionsTest(BitcoinTestFramework):
         fee_exceeds_max = "Fee exceeds maximum configured by user (e.g. -maxtxfee, maxfeerate)"
 
         # Test a transaction with a small fee.
-        txId = self.nodes[0].sendtoaddress(self.nodes[2].getnewaddress(), 1.0)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        txId = self.nodes[0].sendtoaddress(address=self.nodes[2].getnewaddress(), amount=1.0, fee_asset_label='bitcoin')
         rawTx = self.nodes[0].getrawtransaction(txId, True)
         vout = next(o for o in rawTx['vout'] if o['value'] == Decimal('1.00000000'))
 
@@ -343,7 +347,8 @@ class RawTransactionsTest(BitcoinTestFramework):
         self.nodes[2].sendrawtransaction(hexstring=rawTxSigned['hex'])
 
         # Test a transaction with a large fee.
-        txId = self.nodes[0].sendtoaddress(self.nodes[2].getnewaddress(), 1.0)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        txId = self.nodes[0].sendtoaddress(address=self.nodes[2].getnewaddress(), amount=1.0, fee_asset_label='bitcoin')
         rawTx = self.nodes[0].getrawtransaction(txId, True)
         vout = next(o for o in rawTx['vout'] if o['value'] == Decimal('1.00000000'))
 
@@ -426,7 +431,8 @@ class RawTransactionsTest(BitcoinTestFramework):
         bal = self.nodes[2].getbalance()
 
         # send 1.2 BTC to msig adr
-        txId = self.nodes[0].sendtoaddress(mSigObj, 1.2)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        txId = self.nodes[0].sendtoaddress(address=mSigObj, amount=1.2, fee_asset_label='bitcoin')
         self.sync_all()
         self.generate(self.nodes[0], 1)
         # node2 has both keys of the 2of2 ms addr, tx should affect the balance
@@ -445,7 +451,8 @@ class RawTransactionsTest(BitcoinTestFramework):
 
         mSigObj = self.nodes[2].addmultisigaddress(2, [addr1Obj['pubkey'], addr2Obj['pubkey'], addr3Obj['pubkey']])['address']
 
-        txId = self.nodes[0].sendtoaddress(mSigObj, 2.2)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        txId = self.nodes[0].sendtoaddress(address=mSigObj, amount=2.2, fee_asset_label='bitcoin')
         decTx = self.nodes[0].gettransaction(txId)
         rawTx = self.nodes[0].decoderawtransaction(decTx['hex'])
         self.sync_all()
@@ -486,7 +493,8 @@ class RawTransactionsTest(BitcoinTestFramework):
         mSigObj = self.nodes[2].addmultisigaddress(2, [addr1Obj['pubkey'], addr2Obj['pubkey']])['address']
         mSigObjValid = self.nodes[2].getaddressinfo(mSigObj)
 
-        txId = self.nodes[0].sendtoaddress(mSigObj, 2.2)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        txId = self.nodes[0].sendtoaddress(address=mSigObj, amount=2.2, fee_asset_label='bitcoin')
         decTx = self.nodes[0].gettransaction(txId)
         rawTx2 = self.nodes[0].decoderawtransaction(decTx['hex'])
         self.sync_all()

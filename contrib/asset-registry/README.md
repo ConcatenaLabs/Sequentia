@@ -192,8 +192,11 @@ Three things are checked, in this order, and all must hold:
    `(issuance prevout, contract_hash)`, so a wrong or hostile explorer answer
    cannot decouple the id from the contract just checked.
 3. **The domain vouches for the asset.** `https://<domain>/.well-known/sequentia-asset-proof-<assetid>`
-   must return `200`, `Content-Type: text/plain`, and a body that *is* the
-   authorization line once trimmed.
+   must return `200` and a body that *is* the authorization line once trimmed.
+   The declared content type may be `text/plain`, `application/octet-stream`, or
+   absent — what extensionless files typically get — but nothing else: a response
+   declaring itself HTML is refused without reading it. The exact-body match is
+   what carries the security; the type check only rejects obvious wrappers.
 
 On success the entry is stored as a local override with `verified: 1` and the
 response reports `verified_by: "issuer"` — as against `"operator"`, which is what
@@ -206,7 +209,7 @@ Rejections are specific, because each one is something the issuer can go and fix
 | `400 invalid contract: ...` | A field breaks the rules (see the table above). |
 | `400 contract does not match on-chain commitment` | This is not the contract the asset was issued with. If the asset was issued with `contract_hash = 0` it commits to nothing and can never pass. |
 | `400 domain proof not found ... (HTTP 301)` | The domain redirected. The proof must be served **directly** by the domain in the contract: `example.com` and `www.example.com` are different domains here. |
-| `400 ... must be served as text/plain` | The file is there but the web server does not declare it as text. |
+| `400 ... must be plain text, not '...'` | The file is there but the web server declares it as something else entirely, usually HTML — the line is being rendered inside a page instead of served raw. |
 | `409 ticker ... already registered` | Tickers are first-come, case-insensitive. |
 | `503 no explorer configured` | Set `explorer_url`; without a chain source this server cannot verify anything. |
 

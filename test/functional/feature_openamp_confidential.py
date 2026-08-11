@@ -82,7 +82,9 @@ class OpenAmpConfidentialTest(BitcoinTestFramework):
     def run_test(self):
         node = self.nodes[0]
         self.generate(node, 101)
-        node.sendtoaddress(node.getnewaddress(), 1000)  # a clean spendable utxo
+        # a clean spendable utxo; an open-fee-market chain has no default fee asset
+        node.sendtoaddress(address=node.getnewaddress(), amount=1000,
+                           fee_asset_label='bitcoin')
         self.generate(node, 1)
         self.mineaddr = node.getnewaddress()
 
@@ -108,7 +110,8 @@ class OpenAmpConfidentialTest(BitcoinTestFramework):
     def run_with_daemon(self, node):
         for _ in range(100):
             try:
-                self.api("GET", "/v1/assets"); break
+                self.api("GET", "/v1/assets")
+                break
             except (ConnectionRefusedError, OSError):
                 time.sleep(0.1)
 

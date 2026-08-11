@@ -22,6 +22,7 @@ from test_framework.script import (
 )
 from test_framework.util import (
     assert_equal,
+    strip_checked_fee_asset,
 )
 from test_framework.wallet import (
     create_child_with_parents,
@@ -274,7 +275,7 @@ class RPCPackagesTest(BitcoinTestFramework):
         output = [{node.get_deterministic_priv_key().address: 50 - fee}, {"fee" : fee}]
         raw_replaceable_tx = node.createrawtransaction(inputs, output)
         signed_replaceable_tx = node.signrawtransactionwithkey(hexstring=raw_replaceable_tx, privkeys=self.privkeys)
-        testres_replaceable = node.testmempoolaccept([signed_replaceable_tx["hex"]])
+        testres_replaceable = strip_checked_fee_asset(node.testmempoolaccept([signed_replaceable_tx["hex"]]))
         replaceable_tx = tx_from_hex(signed_replaceable_tx["hex"])
         assert_equal(testres_replaceable, [
             {"txid": replaceable_tx.rehash(), "wtxid": replaceable_tx.getwtxid(),

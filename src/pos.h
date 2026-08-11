@@ -618,7 +618,13 @@ namespace Consensus { struct Params; }
  *  election; a positive H switches the whole network to the exp-race from
  *  height H onward (a coordinated hard fork). Every election site (time-gate in
  *  validation/miner/producer and the BackedForRound ordering) MUST gate on this
- *  single predicate so all nodes flip together at exactly the same height. */
+ *  single predicate so all nodes flip together at exactly the same height.
+ *
+ *  SENTINEL ASYMMETRY: for THIS parameter 0 means DISABLED (the "> 0" test
+ *  below), unlike consensus.pos_coinbase_leader_height where 0 means ACTIVE FROM
+ *  GENESIS. A chain wanting the exp-race from its first elected block sets 1,
+ *  not 0 (Sequentia mainnet does). Keep the "> 0" guard: it is what leaves the
+ *  fork off by default on regtest and custom chains (-posexpraceheight). */
 bool PosExpRaceActive(const Consensus::Params& params, int height);
 
 /** Build the tagged coinbase OP_RETURN output script carrying the leader's

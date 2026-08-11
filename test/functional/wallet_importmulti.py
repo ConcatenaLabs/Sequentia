@@ -276,7 +276,8 @@ class ImportMultiTest(BitcoinTestFramework):
         # P2SH address
         multisig = get_multisig(self.nodes[0])
         self.generate(self.nodes[1], COINBASE_MATURITY, sync_fun=self.no_op)
-        self.nodes[1].sendtoaddress(multisig.p2sh_addr, 10.00)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        self.nodes[1].sendtoaddress(address=multisig.p2sh_addr, amount=10.00, fee_asset_label='bitcoin')
         self.generate(self.nodes[1], 1, sync_fun=self.no_op)
         timestamp = self.nodes[1].getblock(self.nodes[1].getbestblockhash())['mediantime']
 
@@ -296,7 +297,7 @@ class ImportMultiTest(BitcoinTestFramework):
         # P2SH + Redeem script
         multisig = get_multisig(self.nodes[0])
         self.generate(self.nodes[1], COINBASE_MATURITY, sync_fun=self.no_op)
-        self.nodes[1].sendtoaddress(multisig.p2sh_addr, 10.00)
+        self.nodes[1].sendtoaddress(address=multisig.p2sh_addr, amount=10.00, fee_asset_label='bitcoin')
         self.generate(self.nodes[1], 1, sync_fun=self.no_op)
         timestamp = self.nodes[1].getblock(self.nodes[1].getbestblockhash())['mediantime']
 
@@ -316,7 +317,7 @@ class ImportMultiTest(BitcoinTestFramework):
         # P2SH + Redeem script + Private Keys + !Watchonly
         multisig = get_multisig(self.nodes[0])
         self.generate(self.nodes[1], COINBASE_MATURITY, sync_fun=self.no_op)
-        self.nodes[1].sendtoaddress(multisig.p2sh_addr, 10.00)
+        self.nodes[1].sendtoaddress(address=multisig.p2sh_addr, amount=10.00, fee_asset_label='bitcoin')
         self.generate(self.nodes[1], 1, sync_fun=self.no_op)
         timestamp = self.nodes[1].getblock(self.nodes[1].getbestblockhash())['mediantime']
 
@@ -341,7 +342,7 @@ class ImportMultiTest(BitcoinTestFramework):
         # P2SH + Redeem script + Private Keys + Watchonly
         multisig = get_multisig(self.nodes[0])
         self.generate(self.nodes[1], COINBASE_MATURITY, sync_fun=self.no_op)
-        self.nodes[1].sendtoaddress(multisig.p2sh_addr, 10.00)
+        self.nodes[1].sendtoaddress(address=multisig.p2sh_addr, amount=10.00, fee_asset_label='bitcoin')
         self.generate(self.nodes[1], 1, sync_fun=self.no_op)
         timestamp = self.nodes[1].getblock(self.nodes[1].getbestblockhash())['mediantime']
 

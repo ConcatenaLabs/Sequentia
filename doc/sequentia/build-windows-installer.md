@@ -77,7 +77,7 @@ make -C depends HOST=x86_64-w64-mingw32 SOURCES_PATH=$HOME/depends-sources-cache
 # 2. Configure the main build against those depends.
 ./autogen.sh
 CONFIG_SITE=$PWD/depends/x86_64-w64-mingw32/share/config.site \
-    ./configure --prefix=/ --disable-tests --disable-bench
+    ./configure --prefix=/ --enable-any-asset-fees --disable-tests --disable-bench
 
 # 3. Fetch the embeddable Python runtime for the bundled price server.
 #    REQUIRED before `make deploy`: without it the installer ships the
@@ -93,6 +93,12 @@ make deploy
 
 ls -lh ./*.exe   # -> elements-X.Y.Z-win64-setup.exe (~37 MB)
 ```
+
+`--enable-any-asset-fees` is a compile-time flag and the only thing that
+defines `ANY_ASSET_FEES`, under which `CURRENCY_UNIT` and `CURRENCY_ATOM` in
+`src/policy/feerate.h` are `RFU` and `rfa`. Omit it and the shipped Windows
+binary reports `BTC` and `sat` in RPC help and fee error strings while the
+network and the Linux release builds use `RFU` and `rfa`.
 
 ## 4. Things that will bite you
 

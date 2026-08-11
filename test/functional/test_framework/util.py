@@ -63,6 +63,61 @@ def assert_equal(thing1, thing2, *args):
         raise AssertionError("not(%s)" % " == ".join(str(arg) for arg in (thing1, thing2) + args))
 
 
+def amount_of(balance_map, asset='bitcoin'):
+    """The amount of `asset` recorded in an Elements/Sequentia balance map.
+
+    SEQUENTIA: no asset is privileged outside staking eligibility, so when the
+    open fee market is on, AmountMapToUniv (src/rpc/util.cpp) does not synthesise
+    a zero-amount row for the policy asset the way upstream Elements does. A
+    wallet that holds none of an asset simply has no row for it, and the balance
+    map of an empty wallet is {}, not {"bitcoin": 0}.
+
+    Tests must therefore assert on the AMOUNT, not on the row's presence: a
+    missing row and a present zero row both mean "holds none of it". Using this
+    helper keeps the assertion exact -- it still pins the balance to a specific
+    number -- while staying correct whichever way the fee market is configured.
+    """
+    return balance_map.get(asset, 0)
+
+
+def strip_checked_fee_asset(results, expected_asset=BITCOIN_ASSET):
+    """Check, then remove, the Sequentia fee-asset fields of testmempoolaccept results.
+
+    SEQUENTIA: with the open fee market on, testmempoolaccept reports which asset a
+    fee is denominated in ("asset") and what that fee is worth in the reference fee
+    unit ("value"), alongside the raw "base" amount (src/rpc/rawtransaction.cpp).
+    Upstream's expected dicts predate both fields, so comparing them verbatim fails.
+
+    Dropping the fields would throw away a real assertion, so they are checked here
+    instead: the fee must be denominated in `expected_asset`, and a fee paid in the
+    policy asset converts one-for-one, so its reference value must equal the base
+    amount. The fields are then stripped so the caller can compare the rest exactly
+    as before. Mutates and returns `results`.
+    """
+    for result in results:
+        fees = result.get('fees')
+        if fees is None or 'asset' not in fees:
+            continue
+        assert_equal(fees.pop('asset'), expected_asset)
+        value = fees.pop('value')
+        if expected_asset == BITCOIN_ASSET:
+            assert_equal(value, fees['base'])
+    return results
+
+
+def assert_holds_nothing(balance_map):
+    """Assert a balance map records a zero balance of every asset it mentions.
+
+    The meaning-preserving replacement for `assert_equal(balances, {'bitcoin': 0})`:
+    it still asserts the wallet holds nothing at all, rather than merely that the
+    policy-asset row reads zero, but it does not demand a row that a wallet with
+    no holdings has no reason to report. See amount_of() above.
+    """
+    held = {asset: amount for asset, amount in balance_map.items() if amount != 0}
+    if held:
+        raise AssertionError("expected no holdings of any asset, got %s" % str(held))
+
+
 def assert_greater_than(thing1, thing2):
     if thing1 <= thing2:
         raise AssertionError("%s <= %s" % (str(thing1), str(thing2)))
@@ -519,7 +574,12 @@ def create_confirmed_utxos(test_framework, fee, node, count, **kwargs):
         inputs = []
         inputs.append({"txid": t["txid"], "vout": t["vout"]})
         send_value = t['amount'] - fee
-        outputs = [{addr1: satoshi_round(send_value / 2)}, {addr2: satoshi_round(send_value / 2)}, {"fee": fee}]
+        # Halving an odd number of satoshis and rounding BOTH halves down loses
+        # the odd satoshi, and an Elements transaction must balance exactly: the
+        # node refuses the result as bad-txns-in-ne-out. Give the remainder to
+        # the second output so in == out for any input amount.
+        half = satoshi_round(send_value / 2)
+        outputs = [{addr1: half}, {addr2: send_value - half}, {"fee": fee}]
         raw_tx = node.createrawtransaction(inputs, outputs)
         signed_tx = node.signrawtransactionwithwallet(raw_tx)["hex"]
         node.sendrawtransaction(signed_tx)

@@ -15,6 +15,7 @@ from decimal import Decimal
 from test_framework.blocktools import COINBASE_MATURITY
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
+    amount_of,
     assert_equal,
     assert_raises_rpc_error,
 )
@@ -35,10 +36,11 @@ class AbandonConflictTest(BitcoinTestFramework):
         bob = self.nodes[0].get_wallet_rpc("bob")
 
         self.generate(self.nodes[1], COINBASE_MATURITY)
-        balance = alice.getbalance()['bitcoin']
-        txA = alice.sendtoaddress(alice.getnewaddress(), Decimal("10"))
-        txB = alice.sendtoaddress(alice.getnewaddress(), Decimal("10"))
-        txC = alice.sendtoaddress(alice.getnewaddress(), Decimal("10"))
+        balance = amount_of(alice.getbalance())
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        txA = alice.sendtoaddress(address=alice.getnewaddress(), amount=Decimal("10"), fee_asset_label='bitcoin')
+        txB = alice.sendtoaddress(address=alice.getnewaddress(), amount=Decimal("10"), fee_asset_label='bitcoin')
+        txC = alice.sendtoaddress(address=alice.getnewaddress(), amount=Decimal("10"), fee_asset_label='bitcoin')
         self.sync_mempools()
         self.generate(self.nodes[1], 1)
 
@@ -48,7 +50,7 @@ class AbandonConflictTest(BitcoinTestFramework):
         assert_raises_rpc_error(-5, 'Transaction not eligible for abandonment', lambda: alice.abandontransaction(txid=txA))
 
         self.sync_blocks()
-        newbalance = alice.getbalance()['bitcoin']
+        newbalance = amount_of(alice.getbalance())
         assert balance - newbalance < Decimal("0.001")  #no more than fees lost
         balance = newbalance
 
@@ -96,7 +98,7 @@ class AbandonConflictTest(BitcoinTestFramework):
         self.nodes[0].sendrawtransaction(signed3["hex"])
 
         # In mempool txs from self should increase balance from change
-        newbalance = alice.getbalance()['bitcoin']
+        newbalance = amount_of(alice.getbalance())
         assert_equal(newbalance, balance - Decimal("30") + signed3_change)
         balance = newbalance
 
@@ -112,12 +114,12 @@ class AbandonConflictTest(BitcoinTestFramework):
 
         # Not in mempool txs from self should only reduce balance
         # inputs are still spent, but change not received
-        newbalance = alice.getbalance()['bitcoin']
+        newbalance = amount_of(alice.getbalance())
         assert_equal(newbalance, balance - signed3_change)
         # Unconfirmed received funds that are not in mempool, also shouldn't show
         # up in unconfirmed balance
         balances = alice.getbalances()['mine']
-        assert_equal(balances['untrusted_pending']['bitcoin'] + balances['trusted']['bitcoin'], newbalance)
+        assert_equal(amount_of(balances['untrusted_pending']) + amount_of(balances['trusted']), newbalance)
         # Also shouldn't show up in listunspent
         assert not txABC2 in [utxo["txid"] for utxo in alice.listunspent(0)]
         balance = newbalance
@@ -125,7 +127,7 @@ class AbandonConflictTest(BitcoinTestFramework):
         # Abandon original transaction and verify inputs are available again
         # including that the child tx was also abandoned
         alice.abandontransaction(txAB1)
-        newbalance = alice.getbalance()['bitcoin']
+        newbalance = amount_of(alice.getbalance())
         assert_equal(newbalance, balance + Decimal("30"))
         balance = newbalance
 
@@ -143,19 +145,19 @@ class AbandonConflictTest(BitcoinTestFramework):
         assert self.nodes[0].getmempoolinfo()['loaded']
 
         assert_equal(len(self.nodes[0].getrawmempool()), 0)
-        assert_equal(alice.getbalance()['bitcoin'], balance)
+        assert_equal(amount_of(alice.getbalance()), balance)
 
         # But if it is received again then it is unabandoned
         # And since now in mempool, the change is available
         # But its child tx remains abandoned
         alice.sendrawtransaction(signed["hex"])
-        newbalance = alice.getbalance()['bitcoin']
+        newbalance = amount_of(alice.getbalance())
         assert_equal(newbalance, balance - Decimal("20") + Decimal("14.99998"))
         balance = newbalance
 
         # Send child tx again so it is unabandoned
         alice.sendrawtransaction(signed2["hex"])
-        newbalance = alice.getbalance()['bitcoin']
+        newbalance = amount_of(alice.getbalance())
         assert_equal(newbalance, balance - Decimal("10") - Decimal("14.99998") + Decimal("24.9996"))
         balance = newbalance
 
@@ -164,7 +166,7 @@ class AbandonConflictTest(BitcoinTestFramework):
         alice = self.nodes[0].get_wallet_rpc(self.default_wallet_name)
         assert self.nodes[0].getmempoolinfo()['loaded']
         assert_equal(len(self.nodes[0].getrawmempool()), 0)
-        newbalance = alice.getbalance()['bitcoin']
+        newbalance = amount_of(alice.getbalance())
         assert_equal(newbalance, balance - Decimal("24.9996"))
         balance = newbalance
 
@@ -228,7 +230,7 @@ class AbandonConflictTest(BitcoinTestFramework):
         assert_equal(double_spend["walletconflicts"], [txAB1])
 
         # Verify that B and C's 10 BTC outputs are available for spending again because AB1 is now conflicted
-        newbalance = alice.getbalance()['bitcoin']
+        newbalance = amount_of(alice.getbalance())
         assert_equal(newbalance, balance + Decimal("20"))
         balance = newbalance
 
@@ -236,7 +238,7 @@ class AbandonConflictTest(BitcoinTestFramework):
         # Invalidate the block with the double spend and B's 10 BTC output should no longer be available
         # Don't think C's should either
         self.nodes[0].invalidateblock(self.nodes[0].getbestblockhash())
-        newbalance = alice.getbalance()['bitcoin']
+        newbalance = amount_of(alice.getbalance())
         #assert_equal(newbalance, balance - Decimal("10"))
         self.log.info("If balance has not declined after invalidateblock then out of mempool wallet tx which is no longer")
         self.log.info("conflicted has not resumed causing its inputs to be seen as spent.  See Issue #7315")

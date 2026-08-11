@@ -60,9 +60,10 @@ class WalletHDTest(BitcoinTestFramework):
             else:
                 assert_equal(hd_info["hdkeypath"], "m/0'/0'/" + str(i) + "'")
             assert_equal(hd_info["hdmasterfingerprint"], hd_fingerprint)
-            self.nodes[0].sendtoaddress(hd_add, 1)
+            # SEQUENTIA: an open-fee-market chain has no default fee asset.
+            self.nodes[0].sendtoaddress(address=hd_add, amount=1, fee_asset_label='bitcoin')
             self.generate(self.nodes[0], 1)
-        self.nodes[0].sendtoaddress(non_hd_add, 1)
+        self.nodes[0].sendtoaddress(address=non_hd_add, amount=1, fee_asset_label='bitcoin')
         self.generate(self.nodes[0], 1)
 
         # create an internal key (again)
@@ -128,7 +129,7 @@ class WalletHDTest(BitcoinTestFramework):
         assert_equal(self.nodes[1].getbalance()['bitcoin'], NUM_HD_ADDS + 1)
 
         # send a tx and make sure its using the internal chain for the changeoutput
-        txid = self.nodes[1].sendtoaddress(self.nodes[0].getnewaddress(), 1)
+        txid = self.nodes[1].sendtoaddress(address=self.nodes[0].getnewaddress(), amount=1, fee_asset_label='bitcoin')
         outs = self.nodes[1].gettransaction(txid=txid, verbose=True)['decoded']['vout']
         keypath = ""
         for out in outs:
@@ -228,7 +229,7 @@ class WalletHDTest(BitcoinTestFramework):
 
             # Send a transaction to addr, which is out of the initial keypool.
             # The wallet that has set a new seed (restore_rpc) should not detect this transaction.
-            txid = self.nodes[0].sendtoaddress(addr, 1)
+            txid = self.nodes[0].sendtoaddress(address=addr, amount=1, fee_asset_label='bitcoin')
             origin_rpc.sendrawtransaction(self.nodes[0].gettransaction(txid)['hex'])
             self.generate(self.nodes[0], 1)
             origin_rpc.gettransaction(txid)
@@ -238,7 +239,7 @@ class WalletHDTest(BitcoinTestFramework):
             # Send a transaction to last_addr, which is in the initial keypool.
             # The wallet that has set a new seed (restore_rpc) should detect this transaction and generate 3 new keys from the initial seed.
             # The previous transaction (out_of_kp_txid) should still not be detected as a rescan is required.
-            txid = self.nodes[0].sendtoaddress(last_addr, 1)
+            txid = self.nodes[0].sendtoaddress(address=last_addr, amount=1, fee_asset_label='bitcoin')
             origin_rpc.sendrawtransaction(self.nodes[0].gettransaction(txid)['hex'])
             self.generate(self.nodes[0], 1)
             origin_rpc.gettransaction(txid)

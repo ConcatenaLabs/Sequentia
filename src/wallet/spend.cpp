@@ -835,7 +835,38 @@ static void resetBlindDetails(BlindDetails* det, bool preserve_output_data = fal
         det->change_to_blind = 0;
         det->only_recipient_blind_index = -1;
         det->only_change_pos = -1;
+        // SEQUENTIA: both are re-derived from the outputs of the attempt being started.
+        det->blind_change_requested = false;
+        det->change_blinding_dummy_pos = -1;
+        det->warnings.clear();
     }
+}
+
+// ELEMENTS: Append a zero-value blinded OP_RETURN output whose only purpose is to give
+// `BlindTransaction` another output to blind.
+//
+// `BlindTransaction` refuses to blind a lone output when no input is blinded (blind.cpp),
+// and it is right to: with a single output to blind the final blinding factor is forced to
+// -vr, which opens the commitment to anyone. That is a constraint on the *number* of
+// blinded outputs, not on what the caller wanted, so it is escapable -- give it a second
+// blindable output and the configuration is legal again. The asset must be one the
+// transaction can build a surjection proof for, i.e. one that appears among the inputs.
+//
+// Returns the index of the appended output.
+static size_t AppendBlindingDummyOutput(BlindDetails* det, CWallet* wallet, CMutableTransaction& txNew, const CAsset& asset)
+{
+    CTxOut newTxOut(asset, 0, CScript() << OP_RETURN);
+    //TODO Have blinding do some extremely minimal rangeproof
+    const CPubKey blind_pub = wallet->GetBlindingPubKey(newTxOut.scriptPubKey); // irrelevant, just needs to be non-null
+    newTxOut.nNonce.vchCommitment = std::vector<unsigned char>(blind_pub.begin(), blind_pub.end());
+    txNew.vout.push_back(newTxOut);
+    det->o_pubkeys.push_back(blind_pub);
+    det->o_amount_blinds.push_back(uint256());
+    det->o_asset_blinds.push_back(uint256());
+    det->o_amounts.push_back(0);
+    det->o_assets.push_back(asset);
+    det->num_to_blind++;
+    return txNew.vout.size() - 1;
 }
 
 static bool fillBlindDetails(BlindDetails* det, CWallet* wallet, CMutableTransaction& txNew, std::vector<CInputCoin>& selected_coins, bilingual_str& error) {
@@ -866,25 +897,30 @@ static bool fillBlindDetails(BlindDetails* det, CWallet* wallet, CMutableTransac
     // We need this to go through, even though no privacy is gained.
     if (num_inputs_blinded > 0 &&  det->num_to_blind == 0) {
         // We need to make sure to dupe an asset that is in input set
-        //TODO Have blinding do some extremely minimal rangeproof
-        CTxOut newTxOut(det->o_assets.back(), 0, CScript() << OP_RETURN);
-        CPubKey blind_pub = wallet->GetBlindingPubKey(newTxOut.scriptPubKey); // irrelevant, just needs to be non-null
-        newTxOut.nNonce.vchCommitment = std::vector<unsigned char>(blind_pub.begin(), blind_pub.end());
-        txNew.vout.push_back(newTxOut);
-        det->o_pubkeys.push_back(wallet->GetBlindingPubKey(newTxOut.scriptPubKey));
-        det->o_amount_blinds.push_back(uint256());
-        det->o_asset_blinds.push_back(uint256());
-        det->o_amounts.push_back(0);
-        det->o_assets.push_back(det->o_assets.back());
-        det->num_to_blind++;
+        AppendBlindingDummyOutput(det, wallet, txNew, det->o_assets.back());
         wallet->WalletLogPrintf("Adding OP_RETURN output to complete blinding since there are %d blinded inputs and no blinded outputs\n", num_inputs_blinded);
 
         // No blinded inputs, but 1 blinded output
     } else if (num_inputs_blinded == 0 && det->num_to_blind == 1) {
         if (det->change_to_blind == 1) {
-            // Only 1 blinded change, unblind the change
-            //TODO Split up change instead if possible
-            if (det->ignore_blind_failure) {
+            // SEQUENTIA: only 1 blinded change and nothing else to blind.
+            //
+            // The mirror of this case, twelve lines up, is not solved by giving up: it is
+            // solved by manufacturing a second blindable output. Do the same here when the
+            // caller actually asked for confidential change, instead of silently handing
+            // back an explicit change output -- which, once it re-enters the wallet as an
+            // explicit UTXO, keeps the next spend in exactly this position and demotes its
+            // change too.
+            //
+            // Not done unconditionally: on Sequentia confidentiality is opt-in, and
+            // Elements attaches a blinding pubkey to every change output whether or not
+            // anyone asked. Blinding regardless would make every transparent send pay for
+            // a rangeproof and a dummy output it never wanted. See
+            // BlindDetails::blind_change_requested.
+            if (det->blind_change_requested) {
+                det->change_blinding_dummy_pos = AppendBlindingDummyOutput(det, wallet, txNew, det->o_assets[det->only_change_pos]);
+                wallet->WalletLogPrintf("Adding OP_RETURN output so the requested blinded change at index %d can be blinded despite there being no blinded inputs.\n", det->only_change_pos);
+            } else if (det->ignore_blind_failure) {
                 det->num_to_blind--;
                 det->change_to_blind--;
                 txNew.vout[det->only_change_pos].nNonce.SetNull();
@@ -892,6 +928,7 @@ static bool fillBlindDetails(BlindDetails* det, CWallet* wallet, CMutableTransac
                 det->o_amount_blinds[det->only_change_pos] = uint256();
                 det->o_asset_blinds[det->only_change_pos] = uint256();
                 wallet->WalletLogPrintf("Unblinding change at index %d due to lack of inputs and other outputs being blinded.\n", det->only_change_pos);
+                det->warnings.push_back(strprintf(_("The change output at index %d was left unblinded: there are no blinded inputs and no other blinded output, and a lone blinded output cannot be blinded. Spend a confidential input, or send to a confidential address, to get confidential change."), det->only_change_pos));
             } else {
                 error = _("Change output could not be blinded as there are no blinded inputs and no other blinded outputs.");
                 return false;
@@ -907,6 +944,7 @@ static bool fillBlindDetails(BlindDetails* det, CWallet* wallet, CMutableTransac
                 det->o_amount_blinds[det->only_recipient_blind_index] = uint256();
                 det->o_asset_blinds[det->only_recipient_blind_index] = uint256();
                 wallet->WalletLogPrintf("Unblinding single blinded output at index %d due to lack of inputs and other outputs being blinded.\n", det->only_recipient_blind_index);
+                det->warnings.push_back(strprintf(_("The output at index %d was sent to a confidential address but was left unblinded: there are no blinded inputs and no other blinded output, and a lone blinded output cannot be blinded."), det->only_recipient_blind_index));
             } else {
                 error = _("Transaction output could not be blinded as there are no blinded inputs and no other blinded outputs.");
                 return false;
@@ -946,6 +984,12 @@ static bool CreateTransactionInternal(
 
     CoinSelectionParams coin_selection_params; // Parameters for coin selection, init with dummy
     coin_selection_params.m_avoid_partial_spends = coin_control.m_avoid_partial_spends;
+    // SEQUENTIA: internal plumbing for callers that build a CCoinControl directly
+    // (the GUI, feebumper) and may legitimately leave the fee asset unset. It is
+    // NOT the RPC default: every RPC that builds a transaction settles the fee
+    // asset itself and refuses to proceed when the caller named none (see
+    // ResolveFeeAsset in wallet/rpc/util.h). Reaching this value_or from an RPC
+    // path would mean that refusal was bypassed.
     coin_selection_params.m_fee_asset = coin_control.m_fee_asset.value_or(::policyAsset);
 
     // SEQUENTIA: a fee must be payable in an asset that has a (positive)
@@ -953,10 +997,10 @@ static bool CreateTransactionInternal(
     // paying no fee, and the wallet would otherwise compute a 0 fee requirement
     // (ConvertValueToAmount returns 0 for an unpriced asset) and build an
     // unbroadcastable transaction. Refuse up front with a clear error. This
-    // applies to the policy asset too: SEQ is not privileged for fees (its 1:1
-    // rate is only a default), so a producer that refuses it (rate 0) must also
-    // refuse fees paid in it. ConvertAmountToValue already returns the policy
-    // asset's configured rate, falling back to 1:1 only when unset.
+    // applies to the policy asset too: SEQ is not privileged for fees, so a
+    // producer that refuses it (rate 0, or simply omits it from the whitelist)
+    // must also refuse fees paid in it. ConvertAmountToValue has no special case
+    // for the policy asset; it reports whatever rate the whitelist holds.
     if (g_con_any_asset_fees) {
         CAmount probe = ExchangeRateMap::GetInstance().ConvertAmountToValue(exchange_rate_scale, coin_selection_params.m_fee_asset).GetValue();
         if (probe <= 0) {
@@ -993,6 +1037,21 @@ static bool CreateTransactionInternal(
         map_recipients_sum[recipient.asset] += recipient.nAmount;
 
         if (recipient.fSubtractFeeFromAmount) {
+            // SEQUENTIA: the fee comes OUT of this output, so it can only be paid
+            // in this output's asset. The RPC layer settles that constraint for
+            // its callers (ResolveFeeAsset in wallet/rpc/util.cpp), so reaching
+            // here means a caller built the CCoinControl itself -- the GUI, or
+            // feebumper -- and asked for a genuinely impossible combination, or
+            // asked to subtract from outputs of two different assets. This is the
+            // backstop for those. Without it the code runs on to
+            // map_change_and_fee.at(fee asset) and surfaces a bare "map::at": an
+            // internal error where the caller needs to be told what is wrong.
+            // Applied to every asset alike; there is no policy-asset exemption.
+            if (recipient.asset != coin_selection_params.m_fee_asset) {
+                error = strprintf(_("Cannot subtract the fee from an output of asset %s while paying the fee in %s: the fee is taken out of that output, so it is necessarily paid in that output's asset."),
+                                  recipient.asset.GetHex(), coin_selection_params.m_fee_asset.GetHex());
+                return false;
+            }
             outputs_to_subtract_fee_from++;
             coin_selection_params.m_subtract_fee_outputs = true;
         }
@@ -1313,10 +1372,24 @@ static bool CreateTransactionInternal(
                     // If the change output was specified, use the blinding key that
                     // came with the specified address (if any)
                     blind_pub = itBlindingKey->second;
+                    // SEQUENTIA: the caller named a confidential change address. That is an
+                    // explicit request for confidential change, and it is to be honoured
+                    // rather than quietly downgraded (see fillBlindDetails).
+                    if (blind_pub) blind_details->blind_change_requested = true;
                 } else {
                     // Otherwise, we generated it from our own wallet, so get the
                     // blinding key from our own wallet.
                     blind_pub = wallet.GetBlindingPubKey(itScript->second.second);
+                    // SEQUENTIA: no address was named, so nobody asked for anything. Note
+                    // that a blinding pubkey is attached anyway, because it costs nothing
+                    // when the transaction has something else to blind. It is only the
+                    // going-out-of-our-way in fillBlindDetails that is withheld.
+                    //
+                    // Deliberately NOT treating -blindedaddresses=1 as a request here. It
+                    // is tempting (it is the lever getnewaddress and issuance use) but it
+                    // would make a fully explicit send impossible from such a wallet and
+                    // cost every one of its transactions ~1160 vbytes for the extra
+                    // blinded output, which is a default worth deciding on purpose.
                 }
             } else {
                 assert(asset == coin_selection_params.m_fee_asset);
@@ -1447,7 +1520,19 @@ static bool CreateTransactionInternal(
 
             // Fill in issuance
             // Blinding revealing underlying asset
-            txNew.vin[reissuance_index].assetIssuance.assetBlindingNonce = token_blinding;
+            //
+            // SEQUENTIA: the nonce normally carries the spent token's asset blinding
+            // factor, which both reveals the underlying asset and -- by being
+            // non-null -- flags this input as a reissuance rather than a brand new
+            // issuance. A token held on an UNBLINDED output has a zero blinding
+            // factor, so that scheme would leave the nonce null and consensus would
+            // read a new issuance: the wallet used to emit a transaction that could
+            // never confirm while still marking the token spent (a phantom).
+            // Sequentia is transparent-by-default, so this is the common case, not an
+            // exotic one. Use the explicit sentinel instead; consensus ignores the
+            // nonce's value when the spent token's asset is explicit.
+            txNew.vin[reissuance_index].assetIssuance.assetBlindingNonce =
+                token_blinding.IsNull() ? ReissuanceExplicitTokenNonce() : token_blinding;
             txNew.vin[reissuance_index].assetIssuance.assetEntropy = issuance_details->entropy;
             txNew.vin[reissuance_index].assetIssuance.nAmount = txNew.vout[asset_index].nValue;
 
@@ -1516,6 +1601,33 @@ static bool CreateTransactionInternal(
             change_position->scriptPubKey = CScript() << OP_RETURN;
             change_position->nValue = 0;
         } else {
+            // SEQUENTIA: if a dummy output was appended for no reason other than to make
+            // this change output blindable, and the change is now going to fees, the dummy
+            // has nothing left to pair with -- and leaving it behind as the only blinded
+            // output with no blinded inputs is precisely the configuration BlindTransaction
+            // refuses. Retire it along with the change. It sits after the change output, so
+            // removing it first leaves the change index alone.
+            if (blind_details && blind_details->change_blinding_dummy_pos != -1) {
+                const size_t dummy_pos = blind_details->change_blinding_dummy_pos;
+                assert(dummy_pos > (size_t) nChangePosInOut);
+                assert(dummy_pos < txNew.vout.size());
+                txNew.vout.erase(txNew.vout.begin() + dummy_pos);
+                if (tx_blinded.vout.size() > dummy_pos) {
+                    tx_blinded.vout.erase(tx_blinded.vout.begin() + dummy_pos);
+                }
+                if (tx_blinded.witness.vtxoutwit.size() > dummy_pos) {
+                    tx_blinded.witness.vtxoutwit.erase(tx_blinded.witness.vtxoutwit.begin() + dummy_pos);
+                }
+                blind_details->o_amounts.erase(blind_details->o_amounts.begin() + dummy_pos);
+                blind_details->o_assets.erase(blind_details->o_assets.begin() + dummy_pos);
+                blind_details->o_pubkeys.erase(blind_details->o_pubkeys.begin() + dummy_pos);
+                blind_details->num_to_blind--;
+                blind_details->change_blinding_dummy_pos = -1;
+                // The erase invalidated the change iterator.
+                change_position = txNew.vout.begin() + nChangePosInOut;
+                wallet.WalletLogPrintf("Dropping the blinding dummy output at index %d along with the change it was added for.\n", (int) dummy_pos);
+            }
+
             txNew.vout.erase(change_position);
 
             change_pos[nChangePosInOut] = std::nullopt;
@@ -1693,6 +1805,28 @@ static bool CreateTransactionInternal(
         }
     }
 
+    // SEQUENTIA: never emit a phantom reissuance.
+    //
+    // The reissuance token id commits to whether the issuance amount is blinded
+    // (CalculateReissuanceToken's fConfidential argument), so consensus re-derives
+    // the token id from the FINAL issuance amount and requires it to match the
+    // token actually being spent. If blinding did not end up matching the token
+    // variant we hold, the transaction is unrelayable -- but the wallet would still
+    // record the token input as spent, stranding the reissuance authority. That
+    // silent failure is exactly what made reissuance-from-an-unblinded-token look
+    // like data loss. Check it here and fail loudly instead.
+    if (sign && issuance_details && reissuance_index != -1 && !issuance_details->reissuance_token.IsNull()) {
+        CAsset expected_token;
+        CalculateReissuanceToken(expected_token, issuance_details->entropy,
+                                 txNew.vin[reissuance_index].assetIssuance.nAmount.IsCommitment());
+        if (expected_token != issuance_details->reissuance_token) {
+            wallet.WalletLogPrintf("ERROR: reissuance would derive token %s but the token being spent is %s\n",
+                                   expected_token.GetHex(), issuance_details->reissuance_token.GetHex());
+            error = _("Cannot build this reissuance: the issuance amount's blinding does not match the reissuance token that was issued. A token issued blinded requires a blinded reissuance amount, and one issued explicitly requires an explicit amount.");
+            return false;
+        }
+    }
+
     // Release any change keys that we didn't use.
     for (const auto& it : mapScriptChange) {
         int index = it.second.first;
@@ -1815,7 +1949,11 @@ bool CreateTransaction(
         CTransactionRef tx2;
         int nChangePosInOut2 = nChangePosIn;
         bilingual_str error2; // fired and forgotten; if an error occurs, we discard the results
-        BlindDetails blind_details2;
+        // SEQUENTIA: carry the caller's blinding policy (notably ignore_blind_failure) into
+        // the grouped attempt. The per-transaction fields are wiped by resetBlindDetails at
+        // the top of CreateTransactionInternal; a default-constructed copy here would have
+        // silently run the retry under the opposite policy.
+        BlindDetails blind_details2 = blind_details ? *blind_details : BlindDetails();
         BlindDetails *blind_details2_ptr = blind_details ? &blind_details2 : nullptr;
         if (CreateTransactionInternal(wallet, vecSend, tx2, nFeeRet2, nChangePosInOut2, error2, tmp_cc, fee_calc_out, sign, blind_details2_ptr, issuance_details)) {
             // if fee of this alternative one is within the range of the max fee, we use this one
@@ -1834,7 +1972,7 @@ bool CreateTransaction(
     return res;
 }
 
-bool FundTransaction(CWallet& wallet, CMutableTransaction& tx, CAmount& nFeeRet, int& nChangePosInOut, bilingual_str& error, bool lockUnspents, const std::set<int>& setSubtractFeeFromOutputs, CCoinControl coinControl)
+bool FundTransaction(CWallet& wallet, CMutableTransaction& tx, CAmount& nFeeRet, int& nChangePosInOut, bilingual_str& error, bool lockUnspents, const std::set<int>& setSubtractFeeFromOutputs, CCoinControl coinControl, bool ignore_blind_fail, std::vector<bilingual_str>* warnings)
 {
     std::vector<CRecipient> vecSend;
 
@@ -1870,8 +2008,12 @@ bool FundTransaction(CWallet& wallet, CMutableTransaction& tx, CAmount& nFeeRet,
     CTransactionRef tx_new;
     FeeCalculation fee_calc_out;
     auto blind_details = g_con_elementsmode ? std::make_unique<BlindDetails>() : nullptr;
+    if (blind_details) blind_details->ignore_blind_failure = ignore_blind_fail;
     if (!CreateTransaction(wallet, vecSend, tx_new, nFeeRet, nChangePosInOut, error, coinControl, fee_calc_out, false, blind_details.get())) {
         return false;
+    }
+    if (warnings && blind_details) {
+        warnings->insert(warnings->end(), blind_details->warnings.begin(), blind_details->warnings.end());
     }
 
     // Wipe outputs and output witness and re-add one by one

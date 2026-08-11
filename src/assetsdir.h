@@ -116,6 +116,12 @@ public:
      */
     CAsset GetAsset(const std::string& label) const;
 
+    /** SEQUENTIA: whether the directory knows this label at all. GetAsset()
+     *  returns the null asset for a label it does not know, which on its own
+     *  cannot be told apart from any other lookup miss; this lets a caller report
+     *  "no such label" as distinct from "that is not a valid asset id". */
+    bool HasLabel(const std::string& label) const;
+
     AssetMetadata GetMetadata(const CAsset& asset) const;
 
     /** @return the number of decimal places to display for the asset. Defaults

@@ -10,6 +10,7 @@ from test_framework.address import ADDRESS_BCRT1_UNSPENDABLE as ADDRESS_WATCHONL
 from test_framework.blocktools import COINBASE_MATURITY
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
+    amount_of,
     assert_equal,
     assert_raises_rpc_error,
     BITCOIN_ASSET,
@@ -79,27 +80,27 @@ class WalletTest(BitcoinTestFramework):
 
         if not self.options.descriptors:
             # Tests legacy watchonly behavior which is not present (and does not need to be tested) in descriptor wallets
-            assert_equal(self.nodes[0].getbalances()['mine']['trusted']['bitcoin'], 50)
-            assert_equal(self.nodes[0].getwalletinfo()['balance']['bitcoin'], 50)
-            assert_equal(self.nodes[1].getbalances()['mine']['trusted']['bitcoin'], 50)
+            assert_equal(amount_of(self.nodes[0].getbalances()['mine']['trusted']), 50)
+            assert_equal(amount_of(self.nodes[0].getwalletinfo()['balance']), 50)
+            assert_equal(amount_of(self.nodes[1].getbalances()['mine']['trusted']), 50)
 
-            assert_equal(self.nodes[0].getbalances()['watchonly']['immature']['bitcoin'], 5000)
+            assert_equal(amount_of(self.nodes[0].getbalances()['watchonly']['immature']), 5000)
             assert 'watchonly' not in self.nodes[1].getbalances()
 
-            assert_equal(self.nodes[0].getbalance()['bitcoin'], 50)
-            assert_equal(self.nodes[1].getbalance()['bitcoin'], 50)
+            assert_equal(amount_of(self.nodes[0].getbalance()), 50)
+            assert_equal(amount_of(self.nodes[1].getbalance()), 50)
 
         self.log.info("Test getbalance with different arguments")
-        assert_equal(self.nodes[0].getbalance("*")['bitcoin'], 50)
-        assert_equal(self.nodes[0].getbalance("*", 1)['bitcoin'], 50)
-        assert_equal(self.nodes[0].getbalance(minconf=1)['bitcoin'], 50)
+        assert_equal(amount_of(self.nodes[0].getbalance("*")), 50)
+        assert_equal(amount_of(self.nodes[0].getbalance("*", 1)), 50)
+        assert_equal(amount_of(self.nodes[0].getbalance(minconf=1)), 50)
         if not self.options.descriptors:
-            assert_equal(self.nodes[0].getbalance(minconf=0, include_watchonly=True)['bitcoin'], 100)
-            assert_equal(self.nodes[0].getbalance("*", 1, True)['bitcoin'], 100)
+            assert_equal(amount_of(self.nodes[0].getbalance(minconf=0, include_watchonly=True)), 100)
+            assert_equal(amount_of(self.nodes[0].getbalance("*", 1, True)), 100)
         else:
-            assert_equal(self.nodes[0].getbalance(minconf=0, include_watchonly=True)['bitcoin'], 50)
-            assert_equal(self.nodes[0].getbalance("*", 1, True)['bitcoin'], 50)
-        assert_equal(self.nodes[1].getbalance(minconf=0, include_watchonly=True)['bitcoin'], 50)
+            assert_equal(amount_of(self.nodes[0].getbalance(minconf=0, include_watchonly=True)), 50)
+            assert_equal(amount_of(self.nodes[0].getbalance("*", 1, True)), 50)
+        assert_equal(amount_of(self.nodes[1].getbalance(minconf=0, include_watchonly=True)), 50)
 
         # Send 40 BTC from 0 to 1 and 60 BTC from 1 to 0.
         txs = create_transactions(self.nodes[0], self.nodes[1].getnewaddress(), 40, [Decimal('0.01')])
@@ -157,35 +158,39 @@ class WalletTest(BitcoinTestFramework):
 
         def test_balances(*, fee_node_1=0):
             # getbalances
-            expected_balances_0 = {'mine':      {'immature':          {'bitcoin': Decimal('0E-8')},
+            # SEQUENTIA: a zero balance is reported as an empty map rather than a
+            # zero-amount policy-asset row (see amount_of() in test_framework.util),
+            # so the categories that hold nothing are {}. These still assert the
+            # balance exactly: {} says "holds nothing", the same claim as 0E-8 did.
+            expected_balances_0 = {'mine':      {'immature':          {},
                                                  'trusted':           {'bitcoin': Decimal('9.99')},  # change from node 0's send
                                                  'untrusted_pending': {'bitcoin': Decimal('60.0')}},
                                    'watchonly': {'immature':          {'bitcoin': Decimal('5000')},
                                                  'trusted':           {'bitcoin': Decimal('50.0')},
-                                                 'untrusted_pending': {'bitcoin': Decimal('0E-8')}}}
-            expected_balances_1 = {'mine':      {'immature':          {'bitcoin': Decimal('0E-8')},
-                                                 'trusted':           {'bitcoin': Decimal('0E-8')},  # node 1's send had an unsafe input
+                                                 'untrusted_pending': {}}}
+            expected_balances_1 = {'mine':      {'immature':          {},
+                                                 'trusted':           {},  # node 1's send had an unsafe input
                                                  'untrusted_pending': {'bitcoin': Decimal('30.0') - fee_node_1}}}  # Doesn't include output of node 0's send since it was spent
             if self.options.descriptors:
                 del expected_balances_0["watchonly"]
             assert_equal(self.nodes[0].getbalances(), expected_balances_0)
             assert_equal(self.nodes[1].getbalances(), expected_balances_1)
             # getbalance without any arguments includes unconfirmed transactions, but not untrusted transactions
-            assert_equal(self.nodes[0].getbalance()['bitcoin'], Decimal('9.99'))  # change from node 0's send
-            assert_equal(self.nodes[1].getbalance()['bitcoin'], Decimal('0'))  # node 1's send had an unsafe input
+            assert_equal(amount_of(self.nodes[0].getbalance()), Decimal('9.99'))  # change from node 0's send
+            assert_equal(amount_of(self.nodes[1].getbalance()), Decimal('0'))  # node 1's send had an unsafe input
             # Same with minconf=0
-            assert_equal(self.nodes[0].getbalance(minconf=0)['bitcoin'], Decimal('9.99'))
-            assert_equal(self.nodes[1].getbalance(minconf=0)['bitcoin'], Decimal('0'))
+            assert_equal(amount_of(self.nodes[0].getbalance(minconf=0)), Decimal('9.99'))
+            assert_equal(amount_of(self.nodes[1].getbalance(minconf=0)), Decimal('0'))
             # getbalance with a minconf incorrectly excludes coins that have been spent more recently than the minconf blocks ago
             # TODO: fix getbalance tracking of coin spentness depth
-            assert_equal(self.nodes[0].getbalance(minconf=1)['bitcoin'], Decimal('0'))
-            assert_equal(self.nodes[1].getbalance(minconf=1)['bitcoin'], Decimal('0'))
+            assert_equal(amount_of(self.nodes[0].getbalance(minconf=1)), Decimal('0'))
+            assert_equal(amount_of(self.nodes[1].getbalance(minconf=1)), Decimal('0'))
             # getunconfirmedbalance
-            assert_equal(self.nodes[0].getunconfirmedbalance()['bitcoin'], Decimal('60'))  # output of node 1's spend
-            assert_equal(self.nodes[1].getunconfirmedbalance()['bitcoin'], Decimal('30') - fee_node_1)  # Doesn't include output of node 0's send since it was spent
+            assert_equal(amount_of(self.nodes[0].getunconfirmedbalance()), Decimal('60'))  # output of node 1's spend
+            assert_equal(amount_of(self.nodes[1].getunconfirmedbalance()), Decimal('30') - fee_node_1)  # Doesn't include output of node 0's send since it was spent
             # getwalletinfo.unconfirmed_balance
-            assert_equal(self.nodes[0].getwalletinfo()["unconfirmed_balance"]['bitcoin'], Decimal('60'))
-            assert_equal(self.nodes[1].getwalletinfo()["unconfirmed_balance"]['bitcoin'], Decimal('30') - fee_node_1)
+            assert_equal(amount_of(self.nodes[0].getwalletinfo()["unconfirmed_balance"]), Decimal('60'))
+            assert_equal(amount_of(self.nodes[1].getwalletinfo()["unconfirmed_balance"]), Decimal('30') - fee_node_1)
 
         test_balances(fee_node_1=Decimal('0.01'))
 
@@ -202,10 +207,10 @@ class WalletTest(BitcoinTestFramework):
         # balances are correct after the transactions are confirmed
         balance_node0 = Decimal('69.99')  # node 1's send plus change from node 0's send
         balance_node1 = Decimal('29.98')  # change from node 0's send
-        assert_equal(self.nodes[0].getbalances()['mine']['trusted']['bitcoin'], balance_node0)
-        assert_equal(self.nodes[1].getbalances()['mine']['trusted']['bitcoin'], balance_node1)
-        assert_equal(self.nodes[0].getbalance()['bitcoin'], balance_node0)
-        assert_equal(self.nodes[1].getbalance()['bitcoin'], balance_node1)
+        assert_equal(amount_of(self.nodes[0].getbalances()['mine']['trusted']), balance_node0)
+        assert_equal(amount_of(self.nodes[1].getbalances()['mine']['trusted']), balance_node1)
+        assert_equal(amount_of(self.nodes[0].getbalance()), balance_node0)
+        assert_equal(amount_of(self.nodes[1].getbalance()), balance_node1)
 
         # Send total balance away from node 1
         txs = create_transactions(self.nodes[1], self.nodes[0].getnewaddress(), Decimal('29.97'), [Decimal('0.01')])
@@ -215,32 +220,33 @@ class WalletTest(BitcoinTestFramework):
         # getbalance with a minconf incorrectly excludes coins that have been spent more recently than the minconf blocks ago
         # TODO: fix getbalance tracking of coin spentness depth
         # getbalance with minconf=3 should still show the old balance
-        assert_equal(self.nodes[1].getbalance(minconf=3)['bitcoin'], Decimal('0'))
+        assert_equal(amount_of(self.nodes[1].getbalance(minconf=3)), Decimal('0'))
 
         # getbalance with minconf=2 will show the new balance.
-        assert_equal(self.nodes[1].getbalance(minconf=2)['bitcoin'], Decimal('0'))
+        assert_equal(amount_of(self.nodes[1].getbalance(minconf=2)), Decimal('0'))
 
         # check mempool transactions count for wallet unconfirmed balance after
         # dynamically loading the wallet.
-        before = self.nodes[1].getbalances()['mine']['untrusted_pending']['bitcoin']
+        before = amount_of(self.nodes[1].getbalances()['mine']['untrusted_pending'])
         dst = self.nodes[1].getnewaddress()
         self.nodes[1].unloadwallet(self.default_wallet_name)
-        self.nodes[0].sendtoaddress(dst, 0.1)
+        # SEQUENTIA: an open-fee-market chain has no default fee asset.
+        self.nodes[0].sendtoaddress(address=dst, amount=0.1, fee_asset_label='bitcoin')
         self.sync_all()
         self.nodes[1].loadwallet(self.default_wallet_name)
-        after = self.nodes[1].getbalances()['mine']['untrusted_pending']['bitcoin']
+        after = amount_of(self.nodes[1].getbalances()['mine']['untrusted_pending'])
         assert_equal(before + Decimal('0.1'), after)
 
         # Create 3 more wallet txs, where the last is not accepted to the
         # mempool because it is the third descendant of the tx above
         for _ in range(3):
             # Set amount high enough such that all coins are spent by each tx
-            txid = self.nodes[0].sendtoaddress(self.nodes[0].getnewaddress(), 99)
+            txid = self.nodes[0].sendtoaddress(address=self.nodes[0].getnewaddress(), amount=99, fee_asset_label='bitcoin')
 
         self.log.info('Check that wallet txs not in the mempool are untrusted')
         assert txid not in self.nodes[0].getrawmempool()
         assert_equal(self.nodes[0].gettransaction(txid)['trusted'], False)
-        assert_equal(self.nodes[0].getbalance(minconf=0)['bitcoin'], 0)
+        assert_equal(amount_of(self.nodes[0].getbalance(minconf=0)), 0)
 
         self.log.info("Test replacement and reorg of non-mempool tx")
         tx_orig = self.nodes[0].gettransaction(txid)['hex']
@@ -262,14 +268,14 @@ class WalletTest(BitcoinTestFramework):
 
         # Now confirm tx_replace
         block_reorg = self.generatetoaddress(self.nodes[1], 1, ADDRESS_WATCHONLY)[0]
-        assert_equal(self.nodes[0].getbalance(minconf=0)['bitcoin'], total_amount)
+        assert_equal(amount_of(self.nodes[0].getbalance(minconf=0)), total_amount)
 
         self.log.info('Put txs back into mempool of node 1 (not node 0)')
         self.nodes[0].invalidateblock(block_reorg)
         self.nodes[1].invalidateblock(block_reorg)
-        assert_equal(self.nodes[0].getbalance(minconf=0)['bitcoin'], 0)  # wallet txs not in the mempool are untrusted
+        assert_equal(amount_of(self.nodes[0].getbalance(minconf=0)), 0)  # wallet txs not in the mempool are untrusted
         self.generatetoaddress(self.nodes[0], 1, ADDRESS_WATCHONLY, sync_fun=self.no_op)
-        assert_equal(self.nodes[0].getbalance(minconf=0)['bitcoin'], 0)  # wallet txs not in the mempool are untrusted
+        assert_equal(amount_of(self.nodes[0].getbalance(minconf=0)), 0)  # wallet txs not in the mempool are untrusted
 
         # Now confirm tx_orig
         self.restart_node(1, ['-persistmempool=0'])
@@ -277,13 +283,13 @@ class WalletTest(BitcoinTestFramework):
         self.sync_blocks()
         self.nodes[1].sendrawtransaction(tx_orig)
         self.generatetoaddress(self.nodes[1], 1, ADDRESS_WATCHONLY)
-        assert_equal(self.nodes[0].getbalance(minconf=0)['bitcoin'], total_amount + 1)  # The reorg recovered our fee of 1 coin
+        assert_equal(amount_of(self.nodes[0].getbalance(minconf=0)), total_amount + 1)  # The reorg recovered our fee of 1 coin
 
 
         # Balances of assets
         for blind in [True, False]:
             self.log.info("Testing {} issued asset balances".format("blinded" if blind else "unblinded"))
-            asset = self.nodes[0].issueasset(100, 0, blind)["asset"]
+            asset = self.nodes[0].issueasset(assetamount=100, tokenamount=0, blind=blind, fee_asset='bitcoin')["asset"]
 
             # Balances with unconfirmed issuance.
             # They are indicated as confirmed because they are sent by the RPC and thus "trusted".
@@ -298,7 +304,7 @@ class WalletTest(BitcoinTestFramework):
             assert_equal(walletinfo["unconfirmed_balance"].get(asset, 0), Decimal('0'))
 
             # Sending coins to other wallet.
-            self.nodes[0].sendtoaddress(address=self.nodes[1].getnewaddress(), amount="50", assetlabel=asset)
+            self.nodes[0].sendtoaddress(address=self.nodes[1].getnewaddress(), amount="50", assetlabel=asset, fee_asset_label='bitcoin')
             self.sync_all()
 
             # Balances with unconfirmed receive

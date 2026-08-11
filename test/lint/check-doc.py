@@ -27,6 +27,10 @@ SET_DOC_OPTIONAL = set(['-h', '-help', '-dbcrashratio', '-forcecompactdb', '-zap
 
 SET_DOC_OPTIONAL.update(['-con_fpowallowmindifficultyblocks', '-con_fpownoretargeting', '-con_nsubsidyhalvinginterval', '-con_bip16exception', '-con_bip34height', '-con_bip65height', '-con_bip66height', '-con_npowtargettimespan', '-con_npowtargetspacing', '-con_nrulechangeactivationthreshold', '-con_nminerconfirmationwindow', '-con_powlimit', '-con_bip34hash', '-con_nminimumchainwork', '-con_defaultassumevalid', '-npruneafterheight', '-fdefaultconsistencychecks', '-fmineblocksondemand', '-bech32_hrp', '-fallback_fee_enabled', '-pubkeyprefix', '-scriptprefix', '-secretprefix', '-extpubkeyprefix', '-extprvkeyprefix', '-pchmessagestart'])
 
+# SEQUENTIA: hidden chain parameters, registered via AddHiddenArgs in init.cpp
+# alongside the -con_* arguments above, so they carry no AddArg documentation.
+SET_DOC_OPTIONAL.update(['-con_utxo_recovery_retire', '-con_utxo_recovery_create'])
+
 
 def lint_missing_argument_documentation():
     used = check_output(CMD_GREP_ARGS, shell=True).decode('utf8').strip()
