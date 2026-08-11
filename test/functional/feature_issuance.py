@@ -288,19 +288,62 @@ class IssuanceTest(BitcoinTestFramework):
         blind_addr = self.nodes[0].getnewaddress()
         nonblind_addr = self.nodes[0].validateaddress(blind_addr)['unconfidential']
 
-        # Fail making non-witness issuance sourcing a single unblinded output.
-        # See: https://github.com/ElementsProject/elements/issues/473
+        # SEQUENTIA: a witness-LESS issuance is ACCEPTED, where upstream Elements
+        # rejects it. See https://github.com/ElementsProject/elements/issues/473
+        # and commit 86d5f7528. Upstream's VerifyAmounts refused any issuance
+        # whose input had no witness slot at all; Sequentia falls back to an
+        # EMPTY rangeproof instead, because an explicit (unblinded) issuance
+        # carries no rangeproof and a fully transparent transaction whose inputs
+        # need no witness legitimately has no witness data whatsoever. Sequentia
+        # is transparent by default with confidentiality opt-in, so that is the
+        # ORDINARY shape here rather than a corner case, and it has to work.
+        # No consensus check is weakened: VerifyIssuanceAmount still requires the
+        # rangeproof to be empty for an explicit amount and NON-empty for a
+        # blinded one, so a genuinely blinded issuance carrying no witness is
+        # still rejected.
+        #
+        # Sweep to a P2PKH address so the funding input is witness-less by
+        # construction rather than by accident of the wallet's address type:
+        # that is what makes this the #473 shape and not merely an unblinded one.
+        legacy_addr = self.nodes[0].validateaddress(
+            self.nodes[0].getnewaddress("", "legacy"))['unconfidential']
         total_amount = self.nodes[0].getbalance()['bitcoin']
-        self.nodes[0].sendtoaddress(nonblind_addr, total_amount, "", "", True)
+        self.nodes[0].sendtoaddress(legacy_addr, total_amount, "", "", True)
         self.generate(self.nodes[1], 1)
         raw_tx = self.nodes[0].createrawtransaction([], [{nonblind_addr: 1}])
         funded_tx = self.nodes[0].fundrawtransaction(raw_tx, {"fee_asset": "bitcoin"})['hex']
-        issued_tx = self.nodes[2].rawissueasset(funded_tx, [{"asset_amount":1, "asset_address":nonblind_addr, "blind":False}])[0]["hex"]
-        blind_tx = self.nodes[0].blindrawtransaction(issued_tx) # This is a no-op
+        issuance = self.nodes[2].rawissueasset(
+            funded_tx, [{"asset_amount": 1, "asset_address": nonblind_addr, "blind": False}])[0]
+        blind_tx = self.nodes[0].blindrawtransaction(issuance["hex"]) # This is a no-op
         signed_tx = self.nodes[0].signrawtransactionwithwallet(blind_tx)
-        assert_raises_rpc_error(-26, "", self.nodes[0].sendrawtransaction, signed_tx['hex'])
+        assert_equal(signed_tx['complete'], True)
 
-        # Make single blinded output to ensure we work around above issue
+        # The transaction really does carry no witness data at all: no input has
+        # a script witness, so no input has a witness slot to hold an issuance
+        # rangeproof either. This is the precondition of the whole case — assert
+        # it, or a wallet change that quietly reintroduced a witness would leave
+        # the assertions below passing while testing nothing.
+        decoded = self.nodes[0].decoderawtransaction(signed_tx['hex'])
+        assert_equal([vin for vin in decoded['vin'] if 'txinwitness' in vin], [])
+        assert any(vin.get('issuance') for vin in decoded['vin'])
+
+        # Accepted into the mempool...
+        witnessless_txid = self.nodes[0].sendrawtransaction(signed_tx['hex'])
+        assert witnessless_txid in self.nodes[0].getrawmempool()
+
+        # ...and it CONNECTS: the issuance confirms and the issued asset is
+        # credited. Relay alone would not prove the consensus rule accepts it —
+        # mempool acceptance and block validity are separate gates, and
+        # VerifyAmounts is what the second one runs. Mined by node0, which is
+        # the node holding the transaction, so the block contains it without
+        # waiting on relay.
+        block_hash = self.generate(self.nodes[0], 1)[0]
+        assert witnessless_txid in self.nodes[0].getblock(block_hash)['tx']
+        assert_equal(self.nodes[0].gettransaction(witnessless_txid)['confirmations'], 1)
+        assert_equal(self.nodes[0].getwalletinfo()["balance"][issuance["asset"]], 1)
+
+        # Make single blinded output, the shape upstream needs to work around the
+        # issue above; it must of course keep working here too.
         total_amount = self.nodes[0].getbalance()['bitcoin']
         self.nodes[0].sendtoaddress(blind_addr, total_amount, "", "", True)
         self.generate(self.nodes[1], 1)
