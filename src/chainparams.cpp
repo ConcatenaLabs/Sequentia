@@ -449,9 +449,22 @@ public:
         //
         // 1 and not 0 for the same reason as the two gates above: 0 is this
         // parameter's "not gated" sentinel.
-        consensus.pos_block_spacing = 30;
+        consensus.pos_block_spacing = 60;
         consensus.pos_block_spacing_height = 1;
-        consensus.nMaxBlockWeight = 200000;             // a twentieth of Bitcoin (doc 11 §4)
+        // 400,000 weight units — a TENTH of Bitcoin's 4,000,000 — so that, at
+        // 60-second blocks (10x Bitcoin's cadence), a saturated chain grows at
+        // exactly the same total rate as a saturated Bitcoin chain (whitepaper
+        // §3.10): 400,000 / 60 s == 4,000,000 / 600 s. The cap counts the full
+        // serialized weight (coinbase, VRF proof, committee signature, anchor
+        // datum), so "total disk" — not just user data — is what is held equal
+        // to Bitcoin. Keep this in step with pos_block_spacing above: the
+        // invariant is weight-per-second, not weight-per-block.
+        //
+        // Halving the cadence and doubling the cap is not a wash, it is a small
+        // gain: the ~2,100 WU of fixed per-block overhead is paid once per
+        // block, so it falls from 1.04% of the cap to 0.52%, leaving slightly
+        // more of the same total disk for actual payload.
+        consensus.nMaxBlockWeight = 400000;
         consensus.connect_genesis_outputs = true;
         anyonecanspend_aremine = false;
         accept_unlimited_issuances = false;
@@ -734,20 +747,44 @@ public:
         // right now, over and over.
         //
         // So: release this binary, confirm no node still emits a block closer
-        // than 30 s to its parent, and only then set the height below. It must
-        // in any case stay ABOVE the tip at release time — the tip was ~86,400
-        // on 2026-08-10 and the chain runs at ~2,350 blocks/day, so 95,000
-        // leaves roughly three and a half days of upgrade window.
-        consensus.pos_block_spacing = 30;
+        // than the spacing to its parent, and only then set the height below.
+        // It must in any case stay ABOVE the tip at release time — the tip was
+        // ~86,400 on 2026-08-10; at the NEW 60-second cadence that is ~1,440
+        // blocks/day, so 95,000 leaves roughly six days of upgrade window.
+        //
+        // 60 and not 30: the cadence is being halved deliberately (see
+        // nMaxBlockWeight below). The producer follows the VALUE immediately,
+        // so upgraded nodes start spacing at 60 s from this release while
+        // un-upgraded ones still offer blocks at 30 s. That is safe — both are
+        // valid until the height above — and it makes the transition gradual:
+        // the chain drifts toward 60 s as the fleet upgrades, rather than
+        // stepping there on a flag day.
+        //
+        // DO NOT also raise -posslotinterval to 60 to "match". It is the
+        // leader time-gate unit, not the cadence, and leaving it at 30 is what
+        // lets the 60-second floor absorb sortition slots 0, 1 AND 2 instead of
+        // just 0 and 1: measured over 400,000 simulated rounds that alone cuts
+        // the exponential-race gate's throughput loss from 17.7% to 3.8%,
+        // whereas raising it to 60 keeps the loss at 17.7% and doubles the cost
+        // of every lost slot (mean interval 72.9 s on a 60-second chain).
+        consensus.pos_block_spacing = 60;
         consensus.pos_block_spacing_height = 95000;
-        // SEQUENTIA: 200,000 weight units — a twentieth of Bitcoin's 4,000,000
-        // — so that, at ~30-second blocks (20x Bitcoin's cadence), a saturated
+        // SEQUENTIA: 400,000 weight units — a TENTH of Bitcoin's 4,000,000 —
+        // so that, at 60-second blocks (10x Bitcoin's cadence), a saturated
         // chain grows at exactly the same total rate as a saturated Bitcoin
-        // chain (whitepaper §3.10): 200,000 / 30 s == 4,000,000 / 600 s. The cap
+        // chain (whitepaper §3.10): 400,000 / 60 s == 4,000,000 / 600 s. The cap
         // counts the full serialized weight (coinbase, VRF proof, committee
         // signature, anchor datum), so "total disk" — not just user data — is
-        // what is held equal to Bitcoin. Cadence is the -posslotinterval (30 s).
-        consensus.nMaxBlockWeight = 200000;
+        // what is held equal to Bitcoin. Cadence is pos_block_spacing above,
+        // NOT -posslotinterval; keep the two in step, since the invariant is
+        // weight-per-second and not weight-per-block.
+        //
+        // Raising the cap only ever ACCEPTS more, so it cannot invalidate a
+        // block already in the chain and needs no height of its own. It is
+        // still a hard fork for the running network — an un-upgraded node
+        // rejects the first over-200,000 block it sees — so it rides the same
+        // coordinated cutover as everything else here.
+        consensus.nMaxBlockWeight = 400000;
         consensus.connect_genesis_outputs = true;
         // SEQUENTIA: match mainnet (CSequentiaParams) — anyone-can-spend (OP_TRUE)
         // outputs are NOT the wallet's own. Block fees now pay to the elected
