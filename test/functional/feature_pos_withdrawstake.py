@@ -147,7 +147,7 @@ class PosWithdrawStakeTest(BitcoinTestFramework):
         # This chain has an open fee market and no default fee asset, so a
         # send has to name one (see CONTRIBUTING.md: no privileged asset
         # outside staking). Spending the returned stake is the point here.
-        n0.sendtoaddress(n0.getnewaddress(), 50, fee_asset_label='bitcoin')
+        n0.sendtoaddress(address=n0.getnewaddress(), amount=50, fee_asset_label='bitcoin')
         self.mine(1)
 
         self.log.info("A stuck withdrawal can be replaced by fee (the wallet's own bumpfee cannot)")
