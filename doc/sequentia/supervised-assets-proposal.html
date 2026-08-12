@@ -21,120 +21,121 @@
 </head><body>
 
 <h1>Supervised assets</h1>
-<p class="sub">A proposal for issuer-freezable assets on Sequentia, shaped by what the analysis ruled out. 2026-08-12, for Andreas and Alberto.</p>
+<p class="sub">Issuer-freezable assets on Sequentia: what consensus can enforce, what it cannot, and who covers the difference. 2026-08-12, for Andreas and Alberto.</p>
 
 <div class="box">
-<p><strong>Proposal: add a declared asset class, <em>supervised</em>, whose issuer can freeze holders by consensus rule.</strong> Freezability is committed into the asset id at issuance, so it is permanent, visible before anyone acquires the asset, and impossible to add later. An asset not born supervised can never become supervised, and nothing about ordinary assets changes.</p>
-<p>The design's one unusual move is what makes it safe: <strong>a supervised asset may only live in single-owner outputs, and may never be blinded.</strong> Both restrictions are enforced by consensus at output creation. That is what removes every way a freeze could strand a third party or destroy a timelocked remedy, which is what sank the obvious version of this feature.</p>
-<p>The trade is explicit and belongs to the issuer, not to us: a supervised asset cannot enter Lightning channels, the covenant order book, or HTLC swaps. It is an ordinary transferable asset in every other respect, including paying its own fees. <strong>Circle would choose, per asset, between composable-and-unfreezable and supervised-and-freezable.</strong> For USDC that choice is still open, because the asset has zero supply and no deposits.</p>
+<p><strong>Proposal: add a declared asset class, <em>supervised</em>, whose issuer can freeze holders by consensus rule, and pair it with freeze-awareness in the Lightning and DEX implementations.</strong> Freezability is committed into the asset id at issuance, so it is permanent, visible before acquisition, and cannot be added to an existing asset.</p>
+<p><strong>The split is not a compromise, it is a boundary.</strong> Consensus can freeze what it can see and attribute: ordinary on-chain holdings, and resting covenant orders. It cannot freeze a Lightning balance, and no version of this rule ever will, because a channel's value lives in a shared output and in off-chain state that consensus cannot attribute to either party. That half must be enforced by the Lightning implementation as policy, which is exactly the division Andreas described.</p>
+<p>This matches how the same problem is handled elsewhere: blacklisting an Ethereum address does not reach the holder's balance on a rollup or at an exchange either, and Circle covers those by working with the operator rather than with the chain.</p>
 </div>
 
-<h2>1. What this is for</h2>
+<h2>1. The requirement, and the one part of it that cannot be met</h2>
 
-<p>Sequentia cannot today offer a fiat issuer the two controls its own token contract has everywhere else: a transfer-level freeze and a transfer-level pause. Co-signed custody provides them but taxes every single transfer with an online policy server, which is why it is right for securities and wrong for a dollar. Everything else on the chain, covenants included, can only bind outputs it created, so nothing reaches a holder who already holds the asset.</p>
+<p>The requirement is that Circle can freeze USDC balances, while USDC otherwise behaves normally on the DEX and on Lightning; that a blacklisted holder's channels stop working and their resting orders never complete; and that breakage is clean, harming no one else.</p>
 
-<p>Only a consensus rule can reach an existing holder. The question this proposal answers is what that rule must look like to be worth having, given that a first sketch of it broke Lightning, the DEX, atomic swaps and block production.</p>
+<p>Everything in that is achievable except one thing, and it is worth stating before the design so the design is read correctly.</p>
 
-<h2>2. The proposal</h2>
+<div class="q">
+<p><strong>A consensus rule cannot freeze a Lightning balance.</strong> A channel's funds sit in a single 2-of-2 output that holds <em>both</em> parties' claims, and the split between them exists only in off-chain state. Consensus sees one output and cannot tell whose money is inside. That leaves exactly two options and no third:</p>
+<ul>
+<li><strong>Do not freeze the funding output.</strong> Then a frozen holder with a channel is not frozen at all: they can move their whole balance off-chain, where no consensus spend occurs, or co-sign a close paying everything to a fresh script.</li>
+<li><strong>Freeze the funding output.</strong> Then the innocent peer's entire balance is trapped permanently, with no unilateral escape, because every exit from a channel spends that one output.</li>
+</ul>
+<p>Related, and equally unfixable at the consensus layer: an issuer cannot tell from chain data whether freezing a holder's <code>to_local</code> output is legitimate or is destroying the peer's penalty claim against a cheat, because the two are byte-identical and the difference is private off-chain data. And because Lightning's remedies are races against absolute deadlines, a <em>temporary</em> freeze on a shared script does not delay anyone; it silently hands the disputed value to the frozen party.</p>
+</div>
+
+<p>So Lightning is not a gap in this proposal to be closed later. It is the boundary of what consensus can do, and the proposal is built around it rather than pretending otherwise.</p>
+
+<h2>2. What consensus does</h2>
 
 <h3>2.1 A supervised asset is declared at birth</h3>
 
-<p>The issuance commits an <strong>issuer freeze key</strong> into the asset id, alongside the contract hash that already binds the asset's name and ticker. Consequences follow from the commitment rather than from policy:</p>
+<p>The issuance commits an <strong>issuer freeze key</strong> into the asset id. Freezability therefore cannot be added to an existing asset or removed from a supervised one, and a freeze record is valid only if signed by that key. Ordinary assets are untouched by every rule below.</p>
+
+<h3>2.2 Enforcement is on spending, and only for single-owner outputs</h3>
+
+<p>Consensus rejects a transaction that <em>spends</em> a supervised-asset output when two things hold: the output's script is frozen, and the spend reveals a <strong>single-owner</strong> script (a key-path or single-signature spend). Creating outputs that pay a frozen script stays legal.</p>
+
+<p>Both halves matter, and each removes a specific way the naive rule destroyed third-party funds:</p>
 
 <ul>
-<li>Freezability is <strong>immutable</strong>. It cannot be added to an existing asset, because the id is a hash of the thing that declares it, and it cannot be removed.</li>
-<li>Freezability is <strong>identifiable</strong> before acquisition, provided the property is exposed where holders look. That is deliberately part of the feature, not a follow-up: see 4.2.</li>
-<li>Authority is <strong>unambiguous</strong>. A freeze record is valid only if signed by that key. This is what the derivation-tag idea got wrong, since the entropy it relied on is public and would have let anyone freeze anyone.</li>
+<li><strong>Spend-only</strong> means an innocent party can always be <em>paid</em>. Nobody's incoming funds can be blocked because their counterparty is frozen.</li>
+<li><strong>Single-owner-only</strong> means a freeze can never bite on a script that holds someone else's claim. A 2-of-2, an HTLC, a covenant with a refund branch: the spend reveals the script, consensus sees it is not single-owner, and the freeze does not apply. This is decidable at spend time even though it is undecidable at freeze time, because the witness reveals the script that the address only committed to as a hash.</li>
 </ul>
 
-<h3>2.2 A supervised asset may only occupy single-owner outputs</h3>
+<p>The cost of that second rule is explicit: a holder who moves supervised funds into a shared script before being frozen has escaped the consensus rule. That is the same escape as moving funds to an exchange or a rollup on Ethereum, and it is why section 3 exists.</p>
 
-<p>Consensus rejects any transaction creating a supervised-asset output whose scriptPubKey is not a single-key form (P2WPKH, or P2TR spent by key path). No multisig, no script path, no timelocked script, no covenant.</p>
+<h3>2.3 Resting DEX orders are covered, and cleanly</h3>
 
-<p>This is the load-bearing restriction, and every one of the blockers below dissolves because of it rather than being mitigated after the fact:</p>
+<p>A covenant order is the good case, and it is worth separating from Lightning because the difference is instructive: a resting covenant output holds <strong>only the maker's own asset</strong>, so freezing it traps nobody else. The order's script is publicly derivable from the order parameters, so an issuer can freeze it. A taker who tries to fill afterwards has their transaction rejected and loses nothing but the attempt.</p>
 
-<table width="100%">
-<tr><th align="left">What broke in the naive design</th><th align="left">Why it cannot happen here</th></tr>
-<tr><td align="left">Freezing a Lightning funding output strands the innocent peer: no cooperative close, no force close, no HTLC resolution</td><td align="left">A supervised asset can never be in a channel, because a funding output is a 2-of-2</td></tr>
-<tr><td align="left">A freeze outliving a timelock destroys the remedy instead of delaying it, handing a cheating peer a theft primitive</td><td align="left">No supervised output can carry a timelock, so there is no deadline for a freeze to outlive</td></tr>
-<tr><td align="left">Freezing a resting covenant order kills the taker's fill and the maker's refund</td><td align="left">A supervised asset cannot rest in a covenant output</td></tr>
-<tr><td align="left">A mid-flight freeze strands a swap counterparty who has already paid</td><td align="left">A supervised asset cannot be locked in an HTLC</td></tr>
-<tr><td align="left">A blinded input hides its asset, so enforcement is either evaded or must guess</td><td align="left">Supervised outputs are explicit by rule, so the asset is always visible to consensus</td></tr>
-</table>
+<p>For this to be clean rather than merely safe, the DEX must reap frozen orders from the book, which needs a signal it does not have today (4.2).</p>
 
-<p>What survives is the ordinary case, which is the case that matters for a dollar: person to person, person to merchant, deposits and withdrawals at an exchange, and same-chain DEX trades, where both sides' inputs are single-owner outputs and each party can check the other's freeze status before signing.</p>
+<h3>2.4 Supervised assets are explicit</h3>
 
-<h3>2.3 Freezing, and unfreezing</h3>
+<p>Consensus cannot see which asset a blinded output holds, so a supervised asset must never be blinded. This is not free, and the cost is in a place worth naming precisely: <strong>the node wallet currently blinds change automatically</strong> whenever a transaction has two or more change outputs, which under any-asset fees is the ordinary case for sending an issued asset. Shipping the rule without fixing that would break ordinary sends. Both the node wallet and the DEX's own wallet daemon need the change to keep supervised change explicit.</p>
 
-<p>A freeze record is an output carrying the asset id, the target scriptPubKey, and a signature by the issuer's freeze key. The set of frozen targets is derived from unspent records, exactly as the staking and delegation registries already derive consensus-relevant state from the UTXO set, so a reorg inverts it with the same apply-and-revert discipline rather than bespoke rollback code. The issuer unfreezes by spending its own record, which means an unfreeze is as auditable as a freeze and cannot be done quietly.</p>
+<h2>3. What the Lightning and DEX implementations must do</h2>
 
-<p>A pause is the same mechanism at asset scope: one record freezing the asset rather than a target.</p>
+<p>This is the other half of the design, not an afterthought, and it is where a blacklisted holder's channels actually stop working.</p>
 
-<h3>2.4 Explicit-only is a feature, not only a cost</h3>
+<ul>
+<li><strong>Refuse to open</strong> a supervised-asset channel with a blacklisted peer.</li>
+<li><strong>Refuse to forward or route</strong> supervised-asset payments for a blacklisted peer, which is what makes the channel stop working in practice.</li>
+<li><strong>Close on blacklist.</strong> On learning a peer is frozen, initiate a close. The commitment pays the frozen party's own script, so the balance lands on-chain where consensus can hold it, and the innocent peer is paid out normally and can spend immediately.</li>
+<li><strong>Never freeze the funding script</strong>, as an operational rule for the issuer. Consensus already declines to apply a freeze to a shared script under 2.2, so this is defence in depth rather than the only line.</li>
+<li><strong>DEX: reap frozen orders</strong> from the book so takers never attempt a fill that consensus will reject.</li>
+</ul>
 
-<p>Supervised assets give up confidentiality. That is required for enforcement, since consensus cannot see which asset a blinded output holds. It is worth noting what it buys: a supervised asset's entire flow is publicly traceable, which is precisely what makes an issuer's compliance obligations tractable, and it means the supply auditor already built for the bridged standard reports exact figures for it forever.</p>
+<p>The honest consequence: between a holder being blacklisted and their channels closing, they can still move value inside Lightning. That window is a policy matter for the Lightning implementation, not something consensus can shorten.</p>
 
-<h2>3. What this does not do, stated plainly</h2>
-
-<p>Two limits an issuer must be told before adopting this, because discovering either one later would be worse than not shipping it.</p>
-
-<p><strong>It freezes coins at a script, not a person.</strong> A holder with funds spread across twenty addresses must be frozen twenty times, and the freezing transaction is public before it confirms, so an attentive target can move first. This is closer to the EVM situation than it first appears, since blacklisting an Ethereum address also leaves the holder free to use another, and enforcement there likewise depends on identifying addresses. The honest difference is aggregation: EVM holders tend to sit on one address, while a UTXO wallet rotates by default. Against a custodian, an exchange deposit address, or a wallet identified by analysis, the rule works. Against an evading self-custody holder, it is a race and sometimes the holder wins.</p>
-
-<p><strong>It is not retroactive to history.</strong> The rule takes effect at an activation height and only rejects spends after it. That is mandatory, not conservative: a rule that rejects spends must never apply to blocks produced before it existed, or a fresh sync stops dead at the first such block.</p>
-
-<h2>4. What must ship with it</h2>
-
-<p>These are not refinements. Each one is something whose absence would either break the chain or make the feature dishonest.</p>
+<h2>4. What must ship with the rule</h2>
 
 <h3>4.1 Mempool eviction</h3>
 
-<p>A spend that was valid on entry becomes invalid the moment a freeze confirms, and nothing currently removes it: the mempool drops only transactions included in a block or directly conflicting, and a freeze record conflicts with nothing. The stale transaction is then re-selected into every block template, template construction fails, and producers skip slots. The node also asserts that this cannot happen: <code>CTxMemPool::check</code> re-runs <code>CheckTxInputs</code> inside a bare <code>assert</code> commented &quot;should always pass&quot; (<code>src/txmempool.cpp:920</code>), so a freeze would abort nodes outright. Eviction on freeze, re-admission on unfreeze, and a reconsidered assert are part of the feature.</p>
+<p>A spend that was valid on entry becomes invalid the moment a freeze confirms, and nothing removes it today: the mempool drops only transactions included in a block or directly conflicting, and a freeze record conflicts with nothing. The stale transaction is re-selected into every block template, template construction fails, and producers skip slots — a chain halt, not an inconvenience. The node also asserts this cannot happen: <code>CTxMemPool::check</code> re-runs <code>CheckTxInputs</code> inside a bare <code>assert</code> commented &quot;should always pass&quot; (<code>src/txmempool.cpp:920</code>), so a freeze would abort nodes. Eviction on freeze, re-admission on unfreeze, and a reconsidered assert are part of the feature, not follow-up work.</p>
 
-<h3>4.2 Discoverability</h3>
+<h3>4.2 A freeze signal tools can read</h3>
 
-<p>A holder must be able to answer &quot;is this asset supervised, and is my address frozen?&quot; before acquiring it. That means an RPC keyed by asset id, and the wallet, explorer, registry and DEX all showing it. Without this the constraint that freezability be identifiable is satisfied on paper and not in practice.</p>
+<p>An RPC answering &quot;is this asset supervised&quot; and &quot;is this script frozen&quot;, plus a distinct machine-readable rejection reason. Without it the DEX cannot reap orders, wallets cannot explain a failure, and the Lightning implementation cannot act on a blacklist at all. Section 3 is unimplementable without this.</p>
 
-<h3>4.3 A rejection reason that tools can act on</h3>
+<h3>4.3 Wallet change handling</h3>
 
-<p>A frozen spend must fail with a distinct, machine-readable reason, so a wallet can tell its user &quot;the issuer has frozen this&quot; rather than showing a generic consensus error, and so the DEX can reap orders it can no longer fill.</p>
+<p>Per 2.4: keep supervised-asset change explicit in the node wallet and in the DEX's wallet daemon. This is the item most likely to be discovered late and to look like an unrelated bug.</p>
 
 <h3>4.4 Activation and cutover</h3>
 
-<p>Height-gated, chosen above the tip at release, and rolled out with the same all-nodes-at-once discipline as the Simplicity activation and the 60-second-block fork. An un-upgraded node diverges at the gate.</p>
+<p>Height-gated above the tip at release, with the same all-nodes-at-once discipline as the Simplicity activation and the 60-second-block fork, because an un-upgraded node diverges at the gate.</p>
 
-<h2>5. What it means for USDC</h2>
+<h2>5. Limits, stated so nobody discovers them later</h2>
 
-<p>This is the decision that makes the proposal urgent rather than theoretical. <code>USDC.e</code> exists, is registered, and has <strong>zero supply and zero deposits</strong>. Supervision can only be conferred at issuance, so the asset can still be re-issued as supervised today at no cost. Once real USDC is bridged, the door closes permanently.</p>
+<ul>
+<li><strong>It freezes coins at a script, not a person.</strong> A holder spread across twenty addresses must be frozen twenty times, and the freezing transaction is public before it confirms, so an attentive target can move first. Against a custodian, an exchange deposit address or a wallet identified by analysis it works; against an evading self-custody holder it is a race.</li>
+<li><strong>Shared scripts are outside its reach</strong>, by design, because the alternative is trapping innocent counterparties.</li>
+<li><strong>Off-chain balances are outside its reach</strong>, permanently. Lightning, and any future venue holding pooled balances, must enforce at their own layer.</li>
+<li><strong>It is not retroactive</strong>, and must not be: a rule that rejects spends cannot apply to history produced before it existed.</li>
+</ul>
 
-<p>The choice is genuinely open and it is Circle's to influence:</p>
+<h2>6. What this means for USDC</h2>
 
-<table width="100%">
-<tr><th align="left">If USDC stays an ordinary asset</th><th align="left">If USDC is re-issued supervised</th></tr>
-<tr><td align="left">Works in Lightning, the covenant order book and HTLC swaps; fully composable; optional confidentiality</td><td align="left">Issuer can freeze and pause, matching what FiatToken does everywhere else</td></tr>
-<tr><td align="left">No freeze, ever, for anyone</td><td align="left">No Lightning, no covenant orders, no HTLC swaps; permanently transparent</td></tr>
-<tr><td align="left">Matches Tether on Liquid, which operates with no freeze at all</td><td align="left">Matches Circle's posture on every chain it issues natively on</td></tr>
-</table>
+<p><code>USDC.e</code> has zero supply and zero deposits, and supervision can only be conferred at issuance, so the choice is open now and closes the moment real USDC is bridged.</p>
 
-<p>My recommendation is to <strong>build the capability and leave USDC ordinary until Circle asks otherwise</strong>. The capability is what makes the conversation possible; committing USDC to it before Circle has expressed a requirement would pay the composability cost for a benefit nobody has yet asked for, and the bridged phase is exactly when composability earns the adoption that makes an upgrade worth their while.</p>
+<p>My recommendation: <strong>build the capability, and decide USDC's status with Circle rather than ahead of them.</strong> A supervised USDC gets Circle the freeze it has everywhere else, keeps working on the DEX, and keeps working on Lightning while unfrozen, with the caveat that a blacklisted holder's Lightning balance is reached by the Lightning implementation rather than by consensus. That is a defensible answer to give them, and it is materially better than the one we have today, which is no freeze at all.</p>
 
-<h2>6. Scope, and what I would want from Alberto</h2>
-
-<p>Implementation is a release of its own: issuance derivation and validation, an output-type rule, a freeze registry with apply and revert, enforcement in <code>CheckTxInputs</code>, mempool eviction, RPCs, functional tests covering reorg and eviction, and display work across the wallet, explorer, registry and DEX.</p>
-
-<p>Four questions I would rather settle with Alberto before any code:</p>
+<h2>7. For Alberto</h2>
 
 <ol>
-<li><strong>Output-type whitelist.</strong> Is P2WPKH plus P2TR key-path the right set? Allowing P2TR script-path would restore covenant and Lightning use and reintroduce every stranding problem, so I propose excluding it, but the call affects what supervised assets can ever do.</li>
-<li><strong>Where the freeze key is committed.</strong> Folding it into the existing contract hash is the smaller change; a distinct derivation constant makes the asset class visible from the id itself. The first is simpler, the second is more honestly &quot;identifiable&quot;.</li>
-<li><strong>Whether a pause needs its own record type</strong> or is simply a freeze naming the asset rather than a script.</li>
-<li><strong>Whether supervised assets may pay fees.</strong> They can technically, but a frozen holder's fee output interacts with the producer's fee handling and deserves a deliberate answer.</li>
+<li><strong>Single-owner detection at spend time.</strong> The rule turns on classifying a revealed script as single-owner. P2WPKH and P2TR key-path are clear. Is a bare P2PK or a 1-of-1 multisig worth including, and where should the classifier live so that mempool and block validation cannot disagree?</li>
+<li><strong>Where the freeze key is committed.</strong> Folding it into the existing contract hash is the smaller change; a distinct derivation constant makes the class visible from the id alone. The second is more honestly &quot;identifiable&quot;.</li>
+<li><strong>Mempool eviction design.</strong> This is the piece most likely to go wrong, and it touches code we both rely on. I would want your review of the eviction and re-admission paths specifically.</li>
+<li><strong>Whether supervised assets may pay fees</strong>, given a frozen holder's fee output interacts with producer fee handling.</li>
 </ol>
 
-<h2>7. Provenance</h2>
+<h2>8. Provenance</h2>
 
-<p>This design is what remained after six independent analyses were run against the real trees and their blocker-rated findings were attacked by separate reviewers. The earlier sketch, freezing arbitrary scripts of any type, failed on five counts: whole-transaction rejection stranding innocent counterparties, timelock destruction, confidential evasion, mempool wedging, and an authorisation hole. Each is addressed above by construction rather than by mitigation, which is the difference between this proposal and that one.</p>
+<p>This design is what survived ten independent analyses run against the real trees, whose blocker-rated findings were then attacked by separate reviewers. Two earlier shapes were discarded by that process: freezing arbitrary scripts of any type, which strands innocent counterparties and converts Lightning's timelock races into thefts; and restricting supervised assets to single-owner outputs entirely, which would have banned them from the DEX and Lightning outright and cost more than it bought.</p>
 
-<p>Two claims were re-verified by hand rather than taken on an analyst's word: the mempool assert, and that <code>CheckTxInputs</code> rejects whole transactions rather than individual inputs. One reported finding was discarded as an artifact of a stale checkout: <code>~/Sequentia</code> sits on <code>pos-exprace</code> and still shows Simplicity inactive, while master has it active and testnet proved it in block 89860. That checkout should be brought up to date, since other sessions read it as ground truth.</p>
+<p>Claims about the mempool assert and about whole-transaction rejection were re-verified by hand. One reported finding was discarded as an artifact of the shared <code>~/Sequentia</code> checkout, which sits on <code>pos-exprace</code> and still shows Simplicity inactive while master has it active and testnet proved it in block 89860; that checkout should be brought up to date, since other sessions read it as ground truth.</p>
 
 <p class="small">Prepared by Saba. No consensus code has been written; a sketch produced during analysis was reverted unbuilt.</p>
 
