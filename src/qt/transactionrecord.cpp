@@ -177,8 +177,13 @@ QList<TransactionRecord> TransactionRecord::decomposeTransaction(const interface
                 sub.involvesWatchAddress = mine & ISMINE_WATCH_ONLY;
                 if (wtx.txout_address_is_mine[i])
                 {
-                    // Received by Bitcoin Address
-                    sub.type = TransactionRecord::RecvWithAddress;
+                    // SEQUENTIA: a stake withdrawal (withdrawstake) spends a
+                    // staking output back to this wallet. The staking script is
+                    // bare, so the wallet does not see the input as its own and
+                    // the whole thing would read as an unexplained "Received
+                    // with" — name it for what it is instead.
+                    sub.type = wtx.spends_stake ? TransactionRecord::Unstake
+                                                : TransactionRecord::RecvWithAddress;
                     sub.address = EncodeDestination(wtx.txout_address[i]);
                     sub.asset = asset;
                 }
@@ -273,6 +278,7 @@ void TransactionRecord::updateStatus(const interfaces::WalletTxStatus& wtx, cons
         break;
     case RecvWithAddress:
     case RecvFromOther:
+    case Unstake:
         typesort = 3;
         break;
     default:

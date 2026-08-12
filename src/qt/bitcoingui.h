@@ -201,6 +201,21 @@ private:
     int prevBlocks = 0;
     int spinnerFrame = 0;
 
+    /** SEQUENTIA: validated block height captured when the current catch-up
+        began, so the displayed percentage runs 0→100% over the blocks this
+        session actually has to sync (start height → header tip) instead of
+        sitting at ~99% (the absolute progress from genesis). -1 means "no
+        catch-up in progress"; it is re-captured on the first non-synced tip
+        update and cleared once the tip is reached. */
+    int m_sync_start_height = -1;
+
+    /** SEQUENTIA: same idea for the header phase that precedes block download
+        (see updateHeadersSyncProgressLabel). -1 means "no header sync in
+        progress"; captured on the first header update and cleared when the
+        header tip is reached. */
+    int m_header_sync_start_height = -1;
+    GUIUtil::HeaderSyncEstimator m_header_estimator;
+
     /** SEQUENTIA "waiting for the Bitcoin network" stall notice (incident
         2026-07-11 §8.3). The timer only queries the node while the tip is
         stalled; m_last_tip_advance is when the tip last moved (wall clock,

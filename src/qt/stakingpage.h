@@ -81,6 +81,12 @@ protected:
 
 private Q_SLOTS:
     void onStake();
+    void onUnstake();
+    //! Put the largest usable amount into the respective Amount field.
+    void onStakeMax();
+    void onUnstakeMax();
+    //! Re-send the pending withdrawal with a higher network fee.
+    void onUnstakeBump();
     void onEnableProduction();
     void onRefreshClicked();
 
@@ -94,9 +100,23 @@ private:
     QTableWidget* m_stakers{nullptr};
     QPushButton* m_refresh_button{nullptr};
     QLineEdit* m_stake_amount{nullptr};
+    QPushButton* m_stake_max{nullptr};    //!< fill Amount with everything stakeable (balance minus fee headroom)
     QPushButton* m_stake_button{nullptr};
     QLabel* m_result{nullptr};
     QLabel* m_status{nullptr};
+
+    // --- "Withdraw stake" (unstake) card ---
+    QLabel* m_unstake_info{nullptr};      //!< what is withdrawable now / still unbonding
+    QLineEdit* m_unstake_amount{nullptr};
+    QPushButton* m_unstake_max{nullptr};  //!< fill Amount with everything withdrawable
+    QPushButton* m_unstake_button{nullptr};
+    //! Shown only while a withdrawal is waiting to confirm: re-sends it with a
+    //! higher fee. The wallet's own RBF cannot touch these transactions.
+    QPushButton* m_unstake_bump{nullptr};
+    //! Enabled wrapper around the Withdraw button: carries the tooltip that says
+    //! why the button is greyed out (a disabled widget gets no tooltip events).
+    QWidget* m_unstake_button_holder{nullptr};
+    QLabel* m_unstake_result{nullptr};
 
     // --- "Your stake" card ---
     QLabel* m_my_stake{nullptr};
@@ -118,6 +138,12 @@ private:
 
     //! Public keys of the stakes this wallet controls, for "is this block ours".
     std::set<std::string> m_my_pubkeys;
+    //! Stake weight the REGISTRY credits to this wallet's keys (atoms). Can be
+    //! non-zero while the wallet holds no withdrawable staking output — config
+    //! declared stake (-staker / genesis) has no UTXO at all, and an output
+    //! funded by another wallet is not in this one's history. The Withdraw card
+    //! needs it to explain that gap instead of claiming nothing is staked.
+    uint64_t m_registry_stake{0};
     //! Cache of the costly per-staker ownership check (3 RPCs each): pubkey ->
     //! does this wallet control it. Membership never changes for a given key, so
     //! we only pay the derivation the first time we see a registered pubkey.
@@ -128,11 +154,21 @@ private:
     void refreshOwnStake(const UniValue& registry);
     void refreshProducedBlocks();
     void refreshWatchOnlyKey();
+    //! Refresh the "Withdraw stake" card from liststakeutxos: how much is
+    //! withdrawable right now, how much is still unbonding and until when.
+    //! Pass an already-fetched list to render exactly those numbers, so an
+    //! action and the summary above it can never quote two different totals.
+    void refreshUnstakeInfo(const UniValue* prefetched = nullptr);
 
     //! Run an RPC (wallet=true uses the /wallet/<name> endpoint; false the node endpoint).
     UniValue callRpc(const std::string& method, const UniValue& params, bool& ok, QString& error, bool wallet = true);
     std::string walletUri() const;
     void setStatus(const QString& msg, bool error = false);
+    //! Report the outcome of a card's action IN that card, next to the button
+    //! that caused it. The page-wide status line sits below every card, off the
+    //! bottom of a scrolled page, so a refusal shown only there reads as "the
+    //! button does nothing".
+    void setCardResult(QLabel* result, const QString& msg, bool error);
     //! Enable autonomous block production at runtime for the given staking WIF(s)
     //! (via startposproducer). No restart. Returns true if the node is now producing.
     bool enableProduction(const QStringList& wifs, QString& err);

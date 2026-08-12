@@ -616,6 +616,11 @@ public:
     bool CanProvide(const CScript& script, SignatureData& sigdata) override;
 
     bool SignTransaction(CMutableTransaction& tx, const std::map<COutPoint, Coin>& coins, int sighash, std::map<int, bilingual_str>& input_errors) const override;
+    //! SEQUENTIA: the private key for one of this wallet's pubkeys, for signing
+    //! a script the generic signer has no template for (the bare staking
+    //! script — see withdrawstake). False when the key is not here or the
+    //! wallet is locked.
+    bool GetStakingKey(const CPubKey& pubkey, CKey& key) const;
     SigningResult SignMessage(const std::string& message, const PKHash& pkhash, std::string& str_sig) const override;
     TransactionError FillPSBT(PartiallySignedTransaction& psbt, const PrecomputedTransactionData& txdata, int sighash_type = SIGHASH_DEFAULT, bool sign = true, bool bip32derivs = false, int* n_signed = nullptr, bool finalize = true) const override;
 
