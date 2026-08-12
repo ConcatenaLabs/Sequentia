@@ -605,33 +605,51 @@ Circle's requirements (quoted from the Bridged USDC Standard) against this spec:
 | 12 | (Implied by FiatToken) allowances, permit, EIP-3009 gasless flows | Not applicable to UTXO; the practical need (users transact holding only USDC) is met natively by any-asset fees | Not applicable, with a native analogue |
 | 13 | Backing is native USDC locked on the origin chain | Backing is exclusively Circle-issued native USDC on Ethereum and Solana; other wrappers are forbidden as backing; the standard names Ethereum as the common case without requiring a single origin | Met, multi-origin documented |
 
-## 9. Work items
+## 9. Work items and what is built
 
-Ordered; each is a prerequisite for opening USDC deposits except W6 and W7.
+Built and live on testnet as of 2026-08-12:
 
-- **W1. Issuance ceremony.** Operator tooling in `compagesd` for pre-issuing a unified
-  asset per 5.1: pinned issuer key in config, precision from the canonical table, zero
-  initial amount, registration, token custody checks. Includes refusing to start USDC
-  deposit processing until the ceremony record exists.
-- **W2. Unified mapping.** The `unified` state table, canonical token table in config,
-  deposit routing, exact assetId index, redemption `targetChain`, per-escrow solvency
-  with `awaiting_liquidity`, and removal of the wrong-network parking for unified
-  assets. Extend the e2e driver: deposit from mock Ethereum and mock Solana into the
-  same asset, cross-chain redemption, invariant checks.
-- **W3. Vault v2 (Ethereum).** `burnLockedUSDC()` with `circleBurner`, explicit pause
-  for deposits and releases, `rebalanceOut` with events. Deploy on Sepolia for the USDC
-  escrow before the first USDC deposit.
-- **W4. Solana SPL leg.** SPL Token support in the Solana adapter (escrow token
-  account, transfer-checked with 6 decimals, recipient ATA handling), the
-  escrow-handover instruction, pause, rebalance. Builds on the native-SOL leg currently
-  in development; do not start until that lands to avoid colliding with in-flight work.
-- **W5. Supply auditor and proof of reserves.** `contrib/asset-supply-audit/` walking
-  the chain over RPC; `/api/por` in the daemon; explorer page.
-- **W6. Registry successor records.** Dual-authorized metadata succession per 5.6, and
-  the node-side re-label fix.
-- **W7. Node per-asset supply index (optional).** `getassetsupply` RPC.
-- **W8. Consensus asset policy (deferred, decision D2).** Specification exists in 5.5;
-  build only on an explicit decision.
+- **W1. Issuance ceremony. DONE.** `compagesd` pre-issues each configured unified asset
+  before accepting any deposit (pinned `unifiedIssuerPubkey`, zero amount, one
+  reissuance token, explicit, precision from the config), registers it, and routes its
+  sources. Live asset:
+  `2c826bdb94bfbec47c68a56f3ebba5e401bfda78625135f1417cc79fba755088`, ticker `USDC.e`,
+  precision 6, registered under `bridge.sequentia.io`.
+- **W2. Unified mapping. DONE.** One mapping per unified asset, `tokenRoutes` pointing
+  each source token key at it, per-source escrow ledger, source-blind redemption with
+  the release target taken from the routed source, per-escrow solvency gating into
+  `awaiting_liquidity`, and a wrong-network guard that asks whether the asset is backed
+  on the release chain rather than where it came from.
+- **W3. Vault v2 (Ethereum). DONE.** `burnLockedUSDC()` with an owner-named burner and a
+  supply-lock precondition, separate deposit and release pauses, `rebalanceOut` with its
+  own event. Deployed to Sepolia at
+  `0x15B3c97eD82C62b7828A775456Bd75e67A8eC42C` and holding the USDC escrow; the older
+  vault keeps the assets already bridged, since the daemon now watches several vaults
+  and each source names its own.
+- **W4. Solana SPL leg. DONE** (landed separately): any SPL token, including USDC,
+  bridges like any ERC-20, with transfer-checked moves and recipient token-account
+  creation.
+- **W5. Supply auditor and proof of reserves. DONE.**
+  `contrib/asset-supply-audit/audit.py` in the node repo reconstructs supply from block
+  data; `/api/por` publishes per-chain escrow beside supply read from the chain, and
+  reports "unknown" rather than a verdict for assets whose escrow it never tracked.
+- **W6. Registry successor records. DONE.** `POST /succeed` in `sequentia-registry`,
+  dual-authorized by the current issuer's signature and the successor's domain proof,
+  preserving the original contract and its chain hash.
+
+Remaining:
+
+- **W7. Node per-asset supply index (optional).** A `getassetsupply` RPC would make the
+  auditor a single call. Not required: the auditor already answers the question.
+- **W8. Consensus asset policy (needs a decision, D2).** Specified in 5.5; not built.
+  This is a consensus change with ecosystem-wide implications and no bridged-phase need,
+  so it waits for an explicit decision rather than being built speculatively.
+- **Explorer proof-of-reserves page.** `/api/por` is served; a public page rendering it
+  is not yet built.
+- **First live USDC deposit.** The plumbing is proven end to end against real contracts
+  in the e2e suite, and the live asset and vault are in place, but an actual testnet
+  deposit needs Sepolia or Solana devnet USDC from Circle's faucet, which is
+  human-gated. Nothing in the code is waiting on it.
 
 ## 10. Risks and open decisions
 
@@ -657,20 +675,29 @@ Ordered; each is a prerequisite for opening USDC deposits except W6 and W7.
   concern that the successor-record work should not worsen. Registry transport hardening
   is worth doing independently of this spec.
 
-**Open decisions (for Andreas):**
+**Decisions taken, and the one still open:**
 
-- **D1.** Precision 6 with atom-per-micro-USDC identity mapping for unified assets,
-  departing from the bridge's precision-8 convention. Recommended: yes (exactness
-  everywhere; Circle parity; eliminates the redeem-floor dust class).
-- **D2.** Build the consensus asset-policy feature now, or keep it specified and offer
-  it during Circle due diligence. Recommended: keep it specified; build on demand. It is
-  a large consensus feature with ecosystem-wide implications and no bridged-phase need.
-- **D3.** Admit `USDC.e` to the fee whitelist at issuance. Recommended: yes; it is the
-  strongest everyday demonstration of the open fee market, and it survives the upgrade.
-- **D4.** Timing: whether W1 and W2 wait for the in-flight Solana native-SOL leg to
-  land, or proceed on the Ethereum side immediately with the Solana source added when W4
-  completes. Recommended: proceed immediately; the unified model is source-count-
-  agnostic and Sepolia USDC deposits can open with one source live.
+- **D1. Precision 6, taken.** Unified assets map one atom to one source base unit rather
+  than following the bridge's precision-8 convention. Three things settled it, all
+  checked against the node rather than assumed: at precision 8 a redemption floors its
+  payout while burning the full amount, leaving escrow dust that breaks the exact
+  equality the supply lock needs; `nDenomination` is read from the initial issuance and
+  can never be changed, so an asset Circle might adopt has to carry USDC's canonical 6
+  decimals from birth; and fees stay correct because the price server publishes rates
+  scaled by `10**(8 - precision)` while the node values a fee as `atoms * rate / 1e8`,
+  so the two cancel exactly.
+- **D3. Fee whitelist, taken in principle, not yet applied.** `USDC.e` should be
+  admitted, since it is the strongest everyday demonstration of the open fee market and
+  survives the upgrade. It is a one-line operator change to the fee-rate set and is
+  worth doing once the asset actually circulates; nothing depends on it before then.
+- **D4. Timing, taken.** Both sources went live together: the Solana SPL leg had already
+  landed, so there was no reason to stage them.
+- **D2. Still open, and deliberately so.** Whether to build the consensus asset-policy
+  feature (freeze, pause, explicit-only) now, or keep it specified and offer it during
+  due diligence. Recommendation unchanged: keep it specified, build on demand. It is a
+  large consensus change that would give issuers powers Sequentia's bearer-asset model
+  does not otherwise grant, so it should not be built speculatively or without an
+  explicit decision.
 
 ## Appendix A. Relation to the third-party draft spec
 
