@@ -99,12 +99,19 @@ retrofit hole. Two consequences:
    the token outputs is a complete, on-chain-auditable transfer of that power. This is
    the UTXO-native equivalent of `transferUSDCRoles`.
 
-A consensus quirk matters operationally: the reissuance branch of `VerifyAmounts` requires
-the spent token input to carry a commitment (blinded) asset tag, so a reissuance built
-from a token sitting on a transparent output is invalid. The token must be held on a
-confidential (blech32) address to be usable. Compages already automates this
-(`ensureBlindedReissuanceToken` in `daemon/lib/bridge.js`); the same requirement binds
-whoever custodies the token after handover.
+The reissuance token can be held and spent transparently. Upstream Elements encodes
+"this input is a reissuance" as a non-null `assetBlindingNonce` carrying the token's
+blinding factor, and consensus re-derives the token's blinded asset tag from it; a token
+on a transparent output has a zero blinding factor, so upstream read such a reissuance as
+a fresh issuance and the transaction could never confirm (a phantom: the wallet marked
+the token spent, nothing said why). Sequentia, being transparent by default, hit this on
+every asset, and fixed it at consensus: the hard fork "reissue an asset from an unblinded
+reissuance token" (in the current node binary, active on the testnet after the same
+cutover as the rest of this revision, and genesis-active on mainnet) makes an explicit
+reissuance-token spend valid. Compages carried a workaround that kept the token on a
+confidential address and re-blinded it after every reissue; that workaround is now
+unnecessary and is being removed. Custody of the token is therefore an ordinary
+transparent-UTXO custody problem, which simplifies the handover (section 6).
 
 **Burns are native and explicit.** The `destroyamount` RPC (and the raw `burn` output
 type) removes an explicit amount of an asset from circulation as an unblinded OP_RETURN
@@ -203,13 +210,29 @@ Rationale for each parameter:
   outputs for operational redundancy; the audit condition is unchanged.
 - `blind false`: the issuance is explicit. This fixes the reissuance token id to the
   explicit derivation (`CalculateReissuanceToken` with the explicit tag) and starts the
-  auditable supply record. Note that the token, though issued explicit, MUST then be held
-  on confidential outputs to be spendable for reissuance (section 3).
+  auditable supply record. The token stays transparent for its whole life; the unblinded-
+  reissuance hard fork (section 3) makes an explicit token spend valid, so no re-blinding
+  step is needed.
 - `denomination 6` and `precision 6`: one atom is one micro-USDC. USDC has 6 decimals on
   Ethereum and on Solana, so both bridge directions become exact identity maps on base
-  units. No flooring, no dust remainder, no over-burn is possible anywhere in the bridge.
-  This deliberately departs from the Compages default of precision 8 for bridged assets;
-  the departure is confined to unified assets (section 5.2).
+  units. This deliberately departs from the Compages default of precision 8 for bridged
+  assets; the departure is confined to unified assets (section 5.2). Three consequences,
+  all verified rather than assumed:
+  1. Exactness. Under precision 8 a redemption of an atom count not divisible by 100
+     floors the payout while burning the full amount, leaving sub-micro-USDC dust in
+     escrow forever and breaking the exact equality that phase 2 of the upgrade requires.
+     At precision 6 the atom is the smallest expressible unit, so no such remainder can
+     exist and `escrow == circulating` holds exactly, always.
+  2. Irreversibility. `nDenomination` is read authoritatively from the initial issuance
+     and can never be changed afterward, so an asset Circle may adopt must carry USDC's
+     canonical 6 decimals from birth.
+  3. Fees still work. The node values a fee as `atoms * rate / 1e8` and is
+     precision-blind, but the price server already carries the denomination in the rate
+     (`scaled_rate` publishes `price * 1e8 * 10**(8 - precision)`), so a 6-decimal asset
+     is charged exactly the same real fee as an 8-decimal one. Note the node's own RPCs
+     express every amount as atoms divided by 1e8 regardless of precision (the stored
+     precision is advisory metadata that node amount handling never applies), so
+     tooling MUST work in atoms and only apply precision for display.
 - Naming follows Circle's stated convention for bridged deployments exactly: token name
   "Bridged USDC (Third-Party Team)" and symbol "USDC.e". The `.e` suffix here is Circle's
   bridged-asset marker, not an "Ethereum" marker; the unified asset carries it regardless
@@ -224,11 +247,10 @@ authorizes the registry metadata succession at upgrade time (section 5.6), so lo
 weakens the upgrade story.
 
 **Reissuance token custody.** The token is the asset's entire control plane and MUST be
-custodied accordingly: held by the bridge wallet on confidential outputs, backed up, and
-never commingled with user funds. Every reissuance MUST verify the minted transaction
-actually entered the mempool and confirmed (the phantom-transaction failure mode of
-unblinded token inputs is known and already guarded in `compagesd`). All reissuances
-MUST use explicit amounts.
+custodied accordingly: held by the bridge wallet, backed up, and never commingled with
+user funds. Every reissuance MUST verify the minted transaction actually entered the
+mempool and confirmed (`compagesd` already checks mempool visibility on every mint). All
+reissuances MUST use explicit amounts.
 
 **Registration.** Immediately after issuance the operator MUST register the contract with
 the Sequentia asset registry and publish the domain proof, so the asset displays as
@@ -516,9 +538,11 @@ empty and the invariant holds with equality: every escrow's balance equals its s
 circulating supply exactly. Both sides re-run the audit and sign off on the numbers.
 
 **Phase 3, control transfer.** The operator sends 100% of the reissuance token supply
-(fixed at 1.00000000 since issuance) to a Circle-designated Sequentia address, which
-MUST be a confidential (blech32) address so the token remains spendable for reissuance
-(section 3). Circle verifies on-chain that its outputs hold the entire token supply,
+(fixed at 1.00000000 since issuance) to a Circle-designated Sequentia address. A
+transparent address is fine (the unblinded-reissuance fix of section 3 lets Circle spend
+the token from a plain output), and is in fact preferable here because it lets Circle,
+and any auditor, see the token sitting at the destination without needing the blinding
+key. Circle verifies on-chain that its outputs hold the entire token supply,
 which is the complete and exclusive minting power for the asset: there are no other
 roles, keys or backdoors to enumerate. This single transaction is the UTXO equivalent of
 `transferUSDCRoles`, with the "partner removes all configured minters" requirement
@@ -676,8 +700,7 @@ phases with the reconciliation and metadata steps it omitted.
   corresponding mechanism on this chain.
 
 **Absent from it entirely:** the multi-source unification problem (the reason this spec
-exists), naming and registry identity, precision and unit mapping, the consensus
-requirement that reissuance tokens be spent from confidential outputs, source-chain burn
+exists), naming and registry identity, precision and unit mapping, source-chain burn
 hooks (`burnLockedUSDC`), pause and reconciliation mechanics, and every operational
 detail of the handover.
 
@@ -699,9 +722,9 @@ detail of the handover.
 3. Record `asset`, `token`, `entropy`, `txid`, the returned `contract` and
    `contract_hash` in the unified state table. Verify the asset id re-derives from the
    issuance prevout and contract hash (`calculateasset`).
-4. Move the reissuance token to a confidential address
-   (`getnewaddress "" blech32`) and verify with `listunspent` that its
-   `assetblinder` is nonzero.
+4. Confirm the reissuance token landed in the bridge wallet
+   (`listunspent` filtered to the token asset id). It may stay on a transparent output;
+   the unblinded-reissuance fix makes it spendable there. Back up the wallet.
 5. Register the contract with the registry; serve the domain proof; confirm the asset
    appears verified with ticker `USDC.e` and precision 6.
 6. Run the supply auditor: expected supply 0. Publish the first `/api/por` snapshot.
