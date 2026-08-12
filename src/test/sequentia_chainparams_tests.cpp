@@ -50,6 +50,45 @@ BOOST_AUTO_TEST_CASE(taproot_always_active_on_sequentia_networks)
     SelectParams(CBaseChainParams::REGTEST);
 }
 
+//! Simplicity must be reachable on every Sequentia network: ALWAYS_ACTIVE on
+//! the fresh mainnet chain (no history to grandfather), and a live
+//! height-based BIP9 signalling deployment on the running testnet. It sat at
+//! NEVER_ACTIVE until 2026-08 while the covenant designs (the SeqOB covenant
+//! offers, the DEX order-book CovenantTerms) assumed the 0xbe tapleaf
+//! enforces Simplicity; while the deployment is inactive that leaf is an
+//! anyone-can-spend path instead. This pin keeps the activation from
+//! regressing silently.
+BOOST_AUTO_TEST_CASE(simplicity_activation_is_pinned)
+{
+    ArgsManager empty;
+    {
+        const auto params = CreateChainParams(empty, CBaseChainParams::SEQUENTIA);
+        const auto& dep = params->GetConsensus().vDeployments[Consensus::DEPLOYMENT_SIMPLICITY];
+        BOOST_CHECK_EQUAL(dep.nStartTime, Consensus::BIP9Deployment::ALWAYS_ACTIVE);
+        BOOST_CHECK_EQUAL(dep.bit, 21);
+    }
+    {
+        const auto params = CreateChainParams(empty, CBaseChainParams::TESTNET);
+        const auto& dep = params->GetConsensus().vDeployments[Consensus::DEPLOYMENT_SIMPLICITY];
+        // Heights, not times, under elements_mode. Start 0 puts the state
+        // machine in STARTED from the first period boundary (height 144);
+        // lock-in needs 108 signalling blocks of a full 144-block window,
+        // which only activation-aware producer binaries emit. bit and
+        // min_activation_height are pinned too: changing the bit would
+        // orphan the signal, and a nonzero min_activation_height would
+        // silently defer activation past lock-in.
+        BOOST_CHECK_EQUAL(dep.nStartTime, 0);
+        BOOST_CHECK_EQUAL(dep.nTimeout, Consensus::BIP9Deployment::NO_TIMEOUT);
+        BOOST_CHECK_EQUAL(dep.bit, 21);
+        BOOST_CHECK_EQUAL(dep.min_activation_height, 0);
+        BOOST_REQUIRE(dep.nPeriod.has_value());
+        BOOST_CHECK_EQUAL(*dep.nPeriod, 144U);
+        BOOST_REQUIRE(dep.nThreshold.has_value());
+        BOOST_CHECK_EQUAL(*dep.nThreshold, 108U);
+    }
+    SelectParams(CBaseChainParams::REGTEST);
+}
+
 //! The Bitcoin soft forks Sequentia depends on are buried-active on the mainnet
 //! chain. CSV in particular: without BIP112 the staking output's unbonding lock
 //! is unenforceable (nothing-at-stake), and CLTV backs any absolute-timelock

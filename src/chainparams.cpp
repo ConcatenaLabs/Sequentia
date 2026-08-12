@@ -396,9 +396,13 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 0; // No activation delay
 
-        // Simplicity
+        // Simplicity: active from genesis. The Sequentia mainnet launches with
+        // the full covenant stack available from block 1 (tapscript
+        // introspection under leaf 0xc4 and Simplicity under leaf 0xbe); a
+        // fresh chain has no history to grandfather, so ALWAYS_ACTIVE is
+        // exact, mirroring Taproot above.
         consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].bit = 21;
-        consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
+        consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].nStartTime = Consensus::BIP9Deployment::ALWAYS_ACTIVE;
         consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
         consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].min_activation_height = 0; // No activation delay
 
@@ -658,12 +662,29 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nPeriod = 10080; // one week...
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nThreshold = 10080; // ...of 100% signalling
 
-        // Simplicity: never active on the Sequentia chain (set to avoid use
-        // of uninitialized memory, as for the other deployments)
+        // Simplicity: activate on the running testnet via stock BIP9. In
+        // elements_mode nStartTime/nTimeout are BLOCK HEIGHTS (GetBIP9Time,
+        // versionbits.cpp; see the Taproot postmortem note in
+        // CSequentiaParams), so start 0 puts the deployment in STARTED from
+        // the first period boundary (height 144), and every activation-aware
+        // producer signals bit 21 automatically (miner.cpp
+        // ComputeBlockVersion). Binaries that predate this deployment never
+        // signalled the bit (verified against all 89k blocks of live
+        // history), so lock-in can only follow the committee cutover: the
+        // first full 144-block window containing 108 signalling blocks locks
+        // in, and the next period boundary activates. NO_TIMEOUT means a
+        // delayed cutover delays activation rather than failing it. Caveats,
+        // both verified: binaries with the old NEVER_ACTIVE params are
+        // terminally FAILED and never enforce, so every follower node needs
+        // the cutover too, not just producers; and -blockversion overrides
+        // the signal on this chain (MineBlocksOnDemand is true under
+        // fPowNoRetargeting), so producer confs must never set it.
         consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].bit = 21;
-        consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
+        consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].nStartTime = 0; // a height; STARTED from the first boundary
         consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
         consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].min_activation_height = 0; // No activation delay
+        consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].nPeriod = 144;
+        consensus.vDeployments[Consensus::DEPLOYMENT_SIMPLICITY].nThreshold = 108; // 75%, the testnet default ratio
 
         consensus.nMinimumChainWork = uint256();
         consensus.defaultAssumeValid = uint256();
