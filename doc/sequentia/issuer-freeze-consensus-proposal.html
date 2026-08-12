@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<title>Sequentia: issuer freeze as a consensus rule (2026-08-12)</title>
+<style>
+  body { font-family: "Liberation Sans", Arial, sans-serif; font-size: 11pt; line-height: 1.45; color: #1a1a1a; margin: 2.2cm 2.4cm; }
+  h1 { font-size: 18pt; margin: 0 0 2pt 0; color: #b8860b; }
+  .sub { color: #555; font-size: 10pt; margin: 0 0 16pt 0; }
+  h2 { font-size: 13pt; margin: 18pt 0 4pt 0; border-bottom: 1.5px solid #b8860b; padding-bottom: 2pt; }
+  h3 { font-size: 11.5pt; margin: 12pt 0 3pt 0; color: #222; }
+  p { margin: 5pt 0; }
+  code, .mono { font-family: "Liberation Mono", "Courier New", monospace; font-size: 9.5pt; background: #f3f1ea; padding: 0 2px; }
+  ul, ol { margin: 4pt 0 6pt 0; }
+  li { margin: 2.5pt 0; }
+  .box { background: #fbf7e9; padding: 8pt 12pt; margin: 10pt 0; }
+  .q { background: #fdeee9; padding: 8pt 12pt; margin: 8pt 0; }
+  .small { font-size: 9.5pt; color: #555; }
+  table { font-size: 8.5pt; border-collapse: collapse; margin: 8pt 0; }
+  th { text-align: left; border-bottom: 1px solid #b8860b; padding: 3px 6px; }
+  td { border-bottom: 1px solid #ddd; padding: 3px 6px; vertical-align: top; }
+  .tag { display: inline-block; font-size: 8.5pt; font-weight: bold; padding: 1px 6px; border-radius: 3px; color: #fff; }
+  .no { background: #c0392b; }
+  .yes { background: #2e7d32; }
+</style>
+</head><body>
+
+<h1>Issuer freeze as a consensus rule</h1>
+<p class="sub">A proposal, and the analysis that changed its recommendation. Sequentia, 2026-08-12. For Andreas and Alberto.</p>
+
+<div class="box">
+<p><strong>Recommendation: do not build the rule as posed.</strong> Not because issuer control offends any principle of this network, and not because the change is hard to write. The analysis found six independent reasons it fails, and the first one is fatal on its own: <strong>the rule does not deliver what was asked for.</strong> A UTXO chain has no accounts to blacklist, and freezing a <em>script</em> is something a self-custody holder escapes by doing what their wallet already does automatically on every payment.</p>
+<p>What a consensus freeze <em>can</em> do well is immobilise coins sitting at a <strong>known, static address</strong>: an exchange deposit address, a custodian, a bridge escrow. If that is the enforcement target, the rule is worth designing properly. If the target is an arbitrary self-custody holder, no UTXO-native design delivers it and the requirement needs renegotiating rather than implementing.</p>
+</div>
+
+<h2>1. What was asked, and the constraint</h2>
+
+<p>The question was whether Sequentia should be able to do what an EVM blacklist upgrade does: bind holders who <em>already</em> hold an asset, at the issuer's instruction, without those holders having agreed to co-signed custody and without breaking Lightning for anyone else.</p>
+
+<p>The owner's constraint on any such rule: freezability must be an <strong>identifiable asset type</strong>, fixed and visible at the asset's issuance, never a power every issuer silently holds over every asset. An asset not born freezable must never become freezable. That constraint is right, and it is assumed throughout what follows.</p>
+
+<p>For completeness, what prompted it: the bridged USDC standard has two real gaps against Circle's FiatToken, a transfer-level pause and a transfer-level blacklist, and nothing on this chain closes them for a plain bearer asset. Co-signed custody (OpenAMP) closes them only for assets born into that model and is ruled out for USDC. So the question is whether consensus should.</p>
+
+<h2>2. Method</h2>
+
+<p>Six independent analyses were run against the actual trees, not against recollection: what the rule would break in the DEX, Lightning and atomic swaps; what it would break inside the node; whether either candidate design for &quot;identifiable type&quot; survives contact with the code; the abuse, denial-of-service and privacy surface; how other chains really implement issuer freeze; and an adversarial re-test of whether consensus is genuinely the only route. Findings rated blocker or serious were then attacked by separate reviewers instructed to refute them.</p>
+
+<p>Two corrections to the record, since both bear on trust in the rest. First, an analyst reported that Simplicity is inactive on every Sequentia chain. That is an artifact of reading the shared checkout <code>~/Sequentia</code>, which is stale on branch <code>pos-exprace</code>; master has it active, and it is live on testnet since height 89856, proven by a confirmed spend of a real Simplicity covenant in block 89860. <strong>The shared checkout being stale is itself worth fixing</strong>, because other sessions and agents read it. Second, an earlier draft of the bridged-USDC standard asserted a &quot;bearer-asset model&quot; principle as a reason not to pursue this. No such principle exists; that claim was mine and it was wrong.</p>
+
+<h2>3. The finding that decides it: a script is not an account</h2>
+
+<p>An EVM blacklist binds an <strong>account</strong>: a persistent identity that all of a holder's balance lives under, including everything they receive afterwards. The holder cannot rotate out of it. That property is what makes the mechanism worth having, and it is a property of the account model, not of blacklisting.</p>
+
+<p>A UTXO chain has no accounts. The only thing a freeze can name is a <strong>scriptPubKey</strong>, and a scriptPubKey is rotated by definition on every spend: an ordinary HD wallet sends change to a fresh script automatically, without the user knowing. Worse, the freezing transaction is public in the mempool before it confirms, so the target sees it coming. The sequence is:</p>
+
+<ol>
+<li>Issuer broadcasts a freeze naming script S.</li>
+<li>Target, watching the mempool, spends from S to a fresh script S' in the same block or earlier.</li>
+<li>The freeze confirms against an empty script. The coins are free, and the issuer must start again against a script it does not yet know.</li>
+</ol>
+
+<p>So against a cooperative-but-sanctioned custodian who will not move funds, or a static deposit address, the rule works and works well. Against a self-custody holder who is actively evading, it is a race the holder wins by default. That is not a tuning problem; it is the difference between the two models.</p>
+
+<div class="q">
+<p><strong>Consequence for the ask.</strong> &quot;Bind every existing holder, like an EVM blacklist&quot; is not achievable on a UTXO chain by freezing scripts. It is achievable only by tracking taint forward through the transaction graph, which destroys fungibility and is a far larger change than the one proposed. The achievable semantics are: <em>immobilise the coins currently resting on a named script, and any coins later sent to it.</em> That sentence should be what any decision is taken against.</p>
+</div>
+
+<h2>4. What it would break</h2>
+
+<h3>4.1 Every multi-party transaction on this stack</h3>
+
+<p>Enforcement belongs in <code>Consensus::CheckTxInputs</code>, the one place both mempool acceptance and block validation pass through. That function has no per-input granularity: it walks every spent output and any rejection returns <code>state.Invalid()</code> for the <strong>entire transaction</strong>. Every value-carrying primitive this project has built deliberately packs several parties into one transaction:</p>
+
+<table width="100%">
+<tr><th align="left">Primitive</th><th align="left">What one frozen input does to it</th></tr>
+<tr><td align="left" nowrap>Lightning channel</td><td align="left">The funding output is a 2-of-2 belonging to <em>neither</em> party alone. Freezing the frozen party's own script does nothing to an open channel; freezing the funding script strands the innocent peer completely, with no cooperative close, no force close and no HTLC resolution.</td></tr>
+<tr><td align="left" nowrap>Same-chain DEX swap</td><td align="left">One PSET carries both parties' inputs, so a freeze on either voids the whole swap, including the innocent side's inputs and outputs.</td></tr>
+<tr><td align="left" nowrap>Covenant order book</td><td align="left">A resting offer is one UTXO whose script is derivable from public order parameters. An issuer can compute and freeze it. The taker's fill is then rejected through no fault of their own, and the maker's timelocked refund dies with it.</td></tr>
+<tr><td align="left" nowrap>Submarine swap</td><td align="left">The LSP pays a Lightning invoice irreversibly, then claims an on-chain asset HTLC. A freeze landing between those two steps strands a third party who has already paid and has no recovery.</td></tr>
+</table>
+
+<p>None of this is incidental. It is the direct consequence of freezing <em>scripts</em> in a system whose contracts deliberately hold value in scripts that belong to no single person.</p>
+
+<h3>4.2 Timelocks: a freeze that outlives a deadline is theft, not delay</h3>
+
+<p>This is the most serious finding after the semantics one. Lightning's safety rests on getting a transaction <em>confirmed</em> inside a bounded window: a revoked output must be swept within the peer's <code>to_self_delay</code>, and an HTLC must be timed out at its <code>cltv_expiry</code>. The covenant order book's refund and the cross-chain swap refunds are absolute <code>CLTV</code> branches.</p>
+
+<p>An unbounded freeze over any of those scripts does not delay the remedy, it <strong>destroys</strong> it, and the loss lands on the counterparty rather than on the frozen party. Bounding freezes by a consensus-enforced maximum duration does not rescue this: the bound would have to be shorter than the shortest safety window of every protocol that will ever run on the chain, which is unknowable when the rule is written and short enough to make the freeze useless if guessed conservatively.</p>
+
+<h3>4.3 Confidentiality: the rule either leaks or is surrendered</h3>
+
+<p>A spent output's asset is a <code>CConfidentialAsset</code>. When the output is blinded it is a 33-byte commitment, and the asset id is simply not knowable to consensus. So a frozen holder's escape is trivial: hold the asset confidentially before the freeze lands, and enforcement can never see which asset the input carries.</p>
+
+<p>Closing that hole means a consensus invariant that a freezable asset may <strong>never</strong> appear in a blinded output, enforced at issuance and at every output, forever. That is coherent and probably correct for a stablecoin, but it must be stated as what it is: a freezable asset permanently gives up opt-in confidentiality, and so, in any transaction that touches it, do its counterparties.</p>
+
+<h3>4.4 Node liveness: the rule as sketched would wedge block production</h3>
+
+<p>A spend that was valid when it entered the mempool becomes invalid the moment a freeze record confirms. Nothing evicts it: the mempool removes only transactions included in the block or directly conflicting with it, and a freeze record conflicts with nothing. The stale transaction is therefore re-selected into every block template, and template construction fails its final validity check, so producers skip slots. On a chain whose liveness depends on producers filling slots, that is a chain-wide outage triggered by one issuer's routine action.</p>
+
+<p>Worse, and verified directly in this tree: <code>CTxMemPool::check()</code> re-runs <code>Consensus::CheckTxInputs</code> over every mempool entry inside a bare <code>assert</code>, carrying the comment &quot;CheckTxInputs() should always pass&quot; (<code>src/txmempool.cpp:920</code>). A rule whose verdict depends on state outside the transaction and its inputs breaks that documented invariant, and the node aborts.</p>
+
+<p>Both are fixable, and neither is optional. Any freeze rule must ship with mempool eviction driven from block connection, re-admission on disconnect, and a reconsidered mempool sanity check. The sketch omitted all of it.</p>
+
+<h3>4.5 Neither candidate design for &quot;identifiable type&quot; survives as sketched</h3>
+
+<p><strong>Option A, a derivation tag</strong> (freezable assets derive their id under a distinct constant, and a freeze record carries the entropy so consensus can re-derive). Cryptographically sound: forging it would be a second-preimage. But it fails twice. It carries <em>no authorisation whatsoever</em>, because the entropy is public on chain in the issuance transaction, so anyone could freeze anyone. And freezability becomes decidable only by someone holding the issuance transaction: the node has no asset-id-to-issuance index at all, so a holder with an asset id cannot answer &quot;is this freezable?&quot;. Identifiable in theory, invisible in practice, which is exactly what the owner's constraint forbids.</p>
+
+<p><strong>Option B, a persisted registry</strong> of asset ids declared freezable at issuance. Its persistence cost is <em>lower</em> than assumed: the spent-pegin set is an exact precedent, living in the chainstate database and reverting on disconnect. Its real cost is different: the set is monotone and unprunable, since freezability must outlive the declaring output, and it is priced at one issuance input. That is permanent, unbounded state growth for a trivial fee.</p>
+
+<p>If the rule proceeds, the workable shape is a hybrid neither option describes: commit the issuer's <strong>freeze pubkey</strong> into the asset id at issuance (giving type and authority in one move), and require a freeze record to be authorised by that key or by a reissuance-token spend in the same transaction.</p>
+
+<h3>4.6 Freezes inherit Bitcoin's reorg depth</h3>
+
+<p>Anchoring is supreme, so Sequentia reorganises whenever Bitcoin does. A freeze set derived from chain state must invert exactly on disconnect, and a deep enough anchor-driven reorg genuinely un-applies a freeze and re-enables a spend consensus had been rejecting. This is correct behaviour rather than a defect, but it means a freeze has no finality stronger than the parent chain, and an issuer must not be told otherwise.</p>
+
+<h2>5. What the alternatives actually deliver</h2>
+
+<table width="100%">
+<tr><th align="left">Approach</th><th align="left">Binds existing plain holders?</th><th align="left">Cost</th></tr>
+<tr><td align="left" nowrap>Covenant or Simplicity</td><td align="left">No, and never can</td><td align="left">Script validation has no chain-state oracle and an output's spend rule is fixed when it is created. Covenants bind only their own descendants.</td></tr>
+<tr><td align="left" nowrap>Co-signed custody</td><td align="left">Only coins already in enclaves</td><td align="left">Every transfer needs the issuer online; ruled out for USDC by decision.</td></tr>
+<tr><td align="left" nowrap>Relay policy only</td><td align="left">No</td><td align="left">The spend stays valid; any producer can include it in a block, and every node then accepts that block.</td></tr>
+<tr><td align="left" nowrap>Bridge-side screening</td><td align="left">No</td><td align="left">Controls entry and exit, not circulation. Already implemented.</td></tr>
+<tr><td align="left" nowrap>Consensus freeze</td><td align="left">Coins at a named script, yes; a rotating holder, no</td><td align="left">Everything in section 4.</td></tr>
+</table>
+
+<p>So the tautology holds: consensus is the only layer that can touch an already-created plain output. The honest qualifier is that even at that layer, what it touches is a script rather than a person.</p>
+
+<h2>6. If it proceeds anyway: the minimum honest design</h2>
+
+<p>Stated so the cost is visible, not as a recommendation.</p>
+
+<ol>
+<li><strong>Type and authority committed together at issuance.</strong> The asset id commits to a freeze pubkey. No key, not freezable, ever. This fixes both the authorisation hole and the type constraint.</li>
+<li><strong>Discoverability is part of the feature, not a follow-up.</strong> An asset-id-keyed way to answer &quot;is this freezable&quot;, and the wallet, explorer, registry and DEX all showing it before a user can acquire the asset. Without this the property is invisible and the constraint is not met.</li>
+<li><strong>Freezable implies never blinded</strong>, enforced inductively from issuance. Write down that such an asset has no confidentiality, for its holders or their counterparties.</li>
+<li><strong>Mempool eviction on freeze, re-admission on unfreeze,</strong> and a mempool sanity check that tolerates the new invalidity class. Non-negotiable; without it the chain stops making blocks.</li>
+<li><strong>A stated policy for shared scripts.</strong> Either refuse to freeze script types that cannot correspond to one holder, accepting the evasion that creates, or accept that freezes strand third parties in channels, swaps and resting orders. There is no third answer, and the choice belongs to the owner, not to the implementer.</li>
+<li><strong>Height gate and coordinated cutover</strong>, per CONTRIBUTING.md, because the rule rejects spends and must not apply to history that predates it.</li>
+</ol>
+
+<p>Scope estimate: a new consensus module, changes to issuance derivation and validation, mempool surgery, a startup rebuild path, RPCs, functional tests covering reorg and eviction, plus ecosystem display work across four repositories. This is a release of its own, not a patch, and it permanently enlarges the consensus surface, which is the scarcest thing the project has.</p>
+
+<h2>7. Options</h2>
+
+<ol>
+<li><strong>Do nothing.</strong> USDC keeps the two documented deltas against FiatToken. The bridged standard already states them plainly, and Tether on Liquid operates this way today. <strong>[Recommended for now.]</strong></li>
+<li><strong>Scope the rule to static addresses and say so.</strong> Design it honestly as &quot;immobilise coins at a named script&quot;, target custodians, exchanges and escrows, and drop the claim that it binds arbitrary holders. Smaller, defensible, and still carries every section 4 cost except the semantic one.</li>
+<li><strong>Build the full rule.</strong> Only with sections 6.1 through 6.6 funded, and with the shared-script policy decided in advance.</li>
+<li><strong>Test the requirement first.</strong> Before any of the above, establish what an issuer actually requires. Every non-EVM chain Circle issues on has a freeze primitive, so it is plainly material to them, but nobody has yet asked them whether script-scoped freezing satisfies it. That answer determines whether option 2 is sufficient or option 3 is necessary. <strong>[Cheapest next step, and it should come first.]</strong></li>
+</ol>
+
+<h2>8. Verification notes</h2>
+
+<p>Claims here were checked against the trees rather than recalled, and the two most load-bearing were re-checked by hand: the mempool assert at <code>src/txmempool.cpp:920</code>, and the whole-transaction rejection behaviour of <code>Consensus::CheckTxInputs</code>. The Lightning, DEX and swap findings cite the seqln, seqdex and covenant sources directly.</p>
+
+<p>One analysis lens (issuer-freeze precedent on other chains) failed on a connection error and its conclusions are not relied upon here; the comparative claims retained are limited to ones sourced earlier and independently.</p>
+
+<p class="small">Prepared by Saba. Nothing in this proposal has been implemented. A working sketch of the rule was written during analysis and reverted unbuilt; no consensus code exists in any branch.</p>
+
+</body></html>
