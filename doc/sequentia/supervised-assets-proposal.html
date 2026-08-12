@@ -26,7 +26,7 @@
 <div class="box">
 <p><strong>Proposal: add a declared asset class, <em>supervised</em>, whose issuer can freeze holders by consensus rule, and pair it with freeze-awareness in the Lightning and DEX implementations.</strong> Freezability is committed into the asset id at issuance, so it is permanent, visible before acquisition, and cannot be added to an existing asset.</p>
 <p><strong>The split is not a compromise, it is a boundary.</strong> Consensus can freeze what it can see and attribute: ordinary on-chain holdings, and resting covenant orders. It cannot freeze a Lightning balance, and no version of this rule ever will, because a channel's value lives in a shared output and in off-chain state that consensus cannot attribute to either party. That half must be enforced by the Lightning implementation as policy, which is exactly the division Andreas described.</p>
-<p>This matches how the same problem is handled elsewhere: blacklisting an Ethereum address does not reach the holder's balance on a rollup or at an exchange either, and Circle covers those by working with the operator rather than with the chain.</p>
+<p><strong>The bar is parity with Ethereum, not improvement on it.</strong> That is what makes the Lightning boundary acceptable rather than a shortfall: whenever USDC sits inside a shared-state contract on Ethereum, blacklisting the holder's own address does not reach it either, because the contract holds the tokens while the holder's claim on them moves separately, without USDC ever being transferred. Circle's only lever there is to blacklist the <em>contract</em>, freezing everyone inside it, which it did in February 2026 (5.1). A Lightning channel is that same shape. So a supervised asset reaches a holder's own balance exactly as an EVM blacklist does, and stops exactly where an EVM blacklist stops.</p>
 </div>
 
 <h2>1. The requirement, and the one part of it that cannot be met</h2>
@@ -63,7 +63,7 @@
 <li><strong>Single-owner-only</strong> means a freeze can never bite on a script that holds someone else's claim. A 2-of-2, an HTLC, a covenant with a refund branch: the spend reveals the script, consensus sees it is not single-owner, and the freeze does not apply. This is decidable at spend time even though it is undecidable at freeze time, because the witness reveals the script that the address only committed to as a hash.</li>
 </ul>
 
-<p>The cost of that second rule is explicit: a holder who moves supervised funds into a shared script before being frozen has escaped the consensus rule. That is the same escape as moving funds to an exchange or a rollup on Ethereum, and it is why section 3 exists.</p>
+<p>The cost of that second rule is explicit: a holder who moves supervised funds into a shared script before being frozen has escaped the consensus rule. That is the same escape a holder gets on Ethereum by moving USDC into a pooled contract, where their claim becomes a separate token that changes hands without USDC ever being transferred. It is why section 3 exists.</p>
 
 <h3>2.3 Resting DEX orders are covered, and cleanly</h3>
 
@@ -107,7 +107,24 @@
 
 <p>Height-gated above the tip at release, with the same all-nodes-at-once discipline as the Simplicity activation and the 60-second-block fork, because an un-upgraded node diverges at the gate.</p>
 
-<h2>5. Limits, stated so nobody discovers them later</h2>
+<h2>5. Precedent and limits</h2>
+
+<h3>5.1 The case study: Circle and Zama, February 2026</h3>
+
+<p>The dilemma in section 1 is not a quirk of Lightning or of the UTXO model. It is what happens whenever a shared construct holds several parties' value, and Ethereum met it in the most direct way possible earlier this year.</p>
+
+<p>Zama's confidential USDC wrapper is a contract that pools USDC on behalf of many holders. A US federal court order, arising from litigation against a single individual who was not the protocol, required Circle to act. Circle's only available lever was the address that actually held the tokens, so it blacklisted <strong>the contract</strong>. Roughly <strong>$12.6 million</strong> of USDC was frozen inside, belonging to holders who were not parties to the case and had done nothing. Liquidity providers could not withdraw and the pool was effectively dead, since a blacklisted address can neither send nor receive.</p>
+
+<p>Read that against section 1 and the shapes are identical. The target's value was inside a shared construct; blacklisting the target's own address would not have reached it; blacklisting the construct reached everybody. Circle faced exactly the two options this proposal faces with a channel funding output, and took the second one.</p>
+
+<div class="q">
+<p><strong>Why this matters for the design rather than merely as background.</strong> The single-owner-only rule in 2.2 makes a Zama-style outcome <em>impossible on Sequentia by construction</em>. An issuer here cannot freeze a shared script even if it wants to, because consensus declines to apply the freeze once the spend reveals a script that is not single-owner.</p>
+<p>That is the one place this design deliberately gives an issuer <em>less</em> than Ethereum does, and it should be raised with Circle rather than glossed. The power being declined is the one that produced $12.6 million of collateral damage and a public backlash, and declining it structurally means nobody can ever be ordered to inflict that here. If Circle regards a contract-level freeze as a requirement rather than a last resort, that is a conversation to have before any of this is built, not after.</p>
+</div>
+
+<p>It also disposes of a weaker comparison I made earlier. Balances at an exchange are not a good analogy, because an exchange is a legal person a court can order to freeze an account. A pooled contract is not, and neither is a Lightning channel. Shared constructs, not custodians, are the real limit of what any blacklist reaches.</p>
+
+<h3>5.2 Limits, stated so nobody discovers them later</h3>
 
 <ul>
 <li><strong>It freezes coins at a script, not a person.</strong> A holder spread across twenty addresses must be frozen twenty times, and the freezing transaction is public before it confirms, so an attentive target can move first. Against a custodian, an exchange deposit address or a wallet identified by analysis it works; against an evading self-custody holder it is a race.</li>
@@ -120,7 +137,8 @@
 
 <p><code>USDC.e</code> has zero supply and zero deposits, and supervision can only be conferred at issuance, so the choice is open now and closes the moment real USDC is bridged.</p>
 
-<p>My recommendation: <strong>build the capability, and decide USDC's status with Circle rather than ahead of them.</strong> A supervised USDC gets Circle the freeze it has everywhere else, keeps working on the DEX, and keeps working on Lightning while unfrozen, with the caveat that a blacklisted holder's Lightning balance is reached by the Lightning implementation rather than by consensus. That is a defensible answer to give them, and it is materially better than the one we have today, which is no freeze at all.</p>
+<p>My recommendation: <strong>build the capability, and decide USDC's status with Circle rather than ahead of them.</strong> A supervised USDC gets Circle the freeze it has everywhere else, keeps working on the DEX, and keeps working on Lightning while unfrozen, with a blacklisted holder's Lightning balance reached by the Lightning implementation rather than by consensus.</p>
+<p>Measured against the right bar, that is sufficient. The aim is parity with what Circle already relies on elsewhere, not a better instrument than it has anywhere: a supervised asset reaches a holder's own balance, and stops at shared constructs, which is precisely where an EVM blacklist reaches and stops. Today's answer, by contrast, is no freeze at all, which is not parity with anything.</p>
 
 <h2>7. For Alberto</h2>
 
