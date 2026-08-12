@@ -73,10 +73,43 @@ Two candidate encodings; **decision needed** (see §8, Q2).
   second-preimage on the fast-merkle node, so authority is cryptographic rather than
   asserted.
 
-(b) is preferred. Note the failure mode of (b) alone, found in analysis: entropy is
-public (it is in the issuance transaction and the node prints it), so the record must
-*also* carry a signature by the committed freeze key, or anyone could publish freeze
-records for anyone's supervised asset.
+Note the failure mode of (b) alone, found in analysis: entropy is public (it is in the
+issuance transaction and the node prints it), so the record must *also* carry a signature
+by the committed freeze key, or anyone could publish freeze records for anyone's
+supervised asset.
+
+**(b) also cannot be issued before activation, and that is decisive.** Consensus does not
+read an asset id from the transaction, it *derives* it:
+
+```cpp
+GenerateAssetEntropy(entropy, tx.vin[i].prevout, issuance.assetEntropy);
+CalculateAsset(assetID, entropy);   // src/confidential_validation.cpp:218-219
+```
+
+Change the constant and a node without the rule derives a different id for the same
+issuance, so the outputs' asset commitments validate on one side of the upgrade and not
+the other. That is a chain split, not a compatibility wrinkle. Under (b), no supervised
+asset may exist until every node has the new binary, which means USDC deposits must stay
+closed until the fork activates.
+
+### 3.1a A third encoding, and the one I would choose
+
+**(c) Declaration output.** The issuance transaction carries an additional marker output
+declaring `(freeze_pubkey)`. Consensus already computes the asset id while validating that
+issuance, so it can bind the two without touching derivation.
+
+- Asset id derivation is unchanged, so every node agrees on it and there is no split.
+- A supervised asset can therefore be issued **before** the rule activates. The
+  declaration sits inert; enforcement begins at the activation height.
+- The startup rebuild scans history for declarations, so a node that synced before
+  activation still learns them. Recording a declaration is not a rejection, so doing it
+  for pre-activation history does not violate the no-retroactive-rejection rule.
+
+This decouples the asset decision from the fork schedule, which is worth a great deal
+operationally: `USDC.e` can be re-issued supervised today while its supply is zero, rather
+than holding the bridge closed until a consensus fork lands. The cost is that
+supervision is no longer visible from the id alone and must be surfaced by an RPC and by
+the registry (§4.2), which is required anyway.
 
 ### 3.2 Freeze record
 
@@ -234,8 +267,11 @@ activation and the 60-second-block fork.
 1. **Single-owner classification.** Is P2WPKH + P2TR key-path the right set? Include bare
    P2PK or 1-of-1 multisig? Where does the classifier live so mempool and block validation
    cannot diverge?
-2. **Where the freeze key is committed** (§3.1): contract field or distinct derivation
-   constant. Affects whether the asset class is visible from the id alone.
+2. **Where the freeze key is committed** (§3.1, §3.1a). This is a scheduling decision,
+   not a stylistic one: a distinct derivation constant cannot be issued before activation
+   without splitting the chain, so it forces USDC deposits to stay closed until the fork
+   lands. A declaration output can be issued today, inert until activation. I recommend
+   the declaration output unless it fails review for another reason.
 3. **Mempool eviction design** (§5). The piece most likely to go wrong and the one I most
    want reviewed.
 4. **Fees.** May a supervised asset pay fees? It can technically; a frozen holder's fee

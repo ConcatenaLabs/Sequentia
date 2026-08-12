@@ -154,11 +154,20 @@
 
 <p>The sequencing matters and is cheap. Re-issuing costs one transaction while supply is zero, and the registry entry and bridge configuration are a few lines. The alternative is discovering in a due-diligence conversation a year from now that the asset cannot be adopted and cannot be fixed.</p>
 
+<div class="q">
+<p><strong>But this is a consensus change, so when the asset can be issued depends on an answer we have not settled.</strong> The rule needs an activation height (4.4). Whether <code>USDC.e</code> can be re-issued supervised <em>before</em> that height turns on how the freeze key is committed, which 7.2 asks Alberto and which is therefore a scheduling decision rather than a matter of taste.</p>
+<ul>
+<li><strong>A distinct derivation constant</strong> changes how the asset id is computed, and consensus computes that id rather than reading it from the transaction (<code>CalculateAsset</code>, <code>src/confidential_validation.cpp:219</code>). A node without the rule would derive a different id for the same issuance, so the issuance is a chain split until every node has the new binary. Under this encoding the asset cannot be issued until after activation, and <strong>USDC deposits must stay closed until then</strong>, since any USDC bridged in the meantime lands in an asset that can never be supervised.</li>
+<li><strong>A declaration output in the issuance transaction</strong> leaves derivation untouched, so every node computes the same asset id and there is no split. The asset can be issued supervised today; the declaration sits inert, and enforcement simply begins at the activation height. This decouples the asset decision from the fork schedule entirely.</li>
+</ul>
+<p>The second is strictly better for sequencing and is what I would choose unless it fails review on other grounds. It is the difference between shipping USDC on our own timetable and holding the bridge closed until a consensus fork lands.</p>
+</div>
+
 <h2>7. For Alberto</h2>
 
 <ol>
 <li><strong>Single-owner detection at spend time.</strong> The rule turns on classifying a revealed script as single-owner. P2WPKH and P2TR key-path are clear. Is a bare P2PK or a 1-of-1 multisig worth including, and where should the classifier live so that mempool and block validation cannot disagree?</li>
-<li><strong>Where the freeze key is committed.</strong> Folding it into the existing contract hash is the smaller change; a distinct derivation constant makes the class visible from the id alone. The second is more honestly &quot;identifiable&quot;.</li>
+<li><strong>Where the freeze key is committed, which is really a scheduling question.</strong> A distinct derivation constant makes the class visible from the id alone but cannot be issued before the fork activates without splitting the chain; a declaration output in the issuance transaction leaves derivation untouched and can therefore be issued today, inert until activation. See the box in section 6: this decides whether USDC deposits can open before the fork or must wait for it.</li>
 <li><strong>Mempool eviction design.</strong> This is the piece most likely to go wrong, and it touches code we both rely on. I would want your review of the eviction and re-admission paths specifically.</li>
 <li><strong>Whether supervised assets may pay fees</strong>, given a frozen holder's fee output interacts with producer fee handling.</li>
 </ol>
