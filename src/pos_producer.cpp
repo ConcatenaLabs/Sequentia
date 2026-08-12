@@ -759,8 +759,18 @@ int64_t PosProducer::Step()
     // before higher-slot proposals arrive — splitting shares and stalling the
     // round at larger committee sizes. Anchoring to the current second keeps the
     // round starts of all nodes aligned during catch-up (past slot times).
-    const int64_t slot_open = (int64_t)tip->nTime + (int64_t)best_slot * g_pos_slot_interval;
-    const int64_t cadence_floor = (int64_t)tip->nTime + g_pos_slot_interval;
+    const int64_t slot_open = (int64_t)tip->nTime +
+        PosSlotGateSeconds(m_chainparams.GetConsensus(), tip->nHeight + 1, (uint64_t)best_slot);
+    // SEQUENTIA: the cadence floor is the consensus minimum spacing where the
+    // chain sets one (node::PosEarliestBlockTime), falling back to the historic
+    // producer-side interval otherwise. Taking it from consensus rather than
+    // from g_pos_slot_interval is the point: the interval is a global set from
+    // -posslotinterval, so two operators who configured it differently would
+    // wait for different moments -- and, once the spacing rule is active, one
+    // of them would be building blocks the other rejects as bad-pos-spacing.
+    const int64_t consensus_floor = node::PosEarliestBlockTime(m_chainparams.GetConsensus(), tip);
+    const int64_t cadence_floor = consensus_floor > 0 ? consensus_floor
+                                                      : (int64_t)tip->nTime + g_pos_slot_interval;
     const int64_t earliest_sec = std::max(slot_open, cadence_floor);
     const int64_t now_ms = GetTimeMillis();
     const int64_t target_ms = std::max(earliest_sec * 1000, (now_ms / 1000) * 1000);
