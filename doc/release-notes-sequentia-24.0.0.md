@@ -69,6 +69,46 @@ per block, so they fall from 1.04% of the cap to 0.52%, leaving marginally more
 of the same disk for payload. Everything else that scales per block — index
 entries, disk writes, signature verifications during a sync — simply halves.
 
+## The leader time-gate: ten seconds per unit, not thirty
+
+A second change rides the same cutover, and it is the one that pays for itself.
+
+The sortition draw does two jobs: it decides who wins, and it decides how early
+each staker may offer a block — `floor(draw) x unit` seconds after the parent.
+The exponential race made the draw a RATE rather than a rank, so its minimum
+over all stakers is Exponential(1), with an unbounded tail. Multiplying that
+tail by a whole 30-second interval silences the chain whenever the draw runs
+long.
+
+The cadence change alone improves this a great deal, because a 60-second floor
+absorbs one more slot than a 30-second one did: the loss falls from the 18.4%
+measured on the live chain to 3.8%. Ten seconds per unit takes almost all of
+what is left. Measured over 2,000,000 simulated rounds with twelve equal
+stakers at the new cadence:
+
+| unit | blocks late | throughput lost | simultaneous field |
+|---|---|---|---|
+| 30 s | 1 in 20 | 3.78% | 2.7 of 12 |
+| **10 s** | **1 in 1,097** | **0.024%** | **5.3 of 12** |
+| 1 s | never | 0.000% | 11.9 of 12 |
+
+Ten takes 99.4% of the available gain. Below it the throughput is already
+recovered and only the field keeps widening, which buys nothing and gives the
+anchor-freshness key — which orders before the score — more material to
+reorder.
+
+**It does not change who wins.** Run over 900,000 rounds on three stake
+distributions, with every unit from 30 down to 1 driven off the same draws, the
+winner differed in **zero** rounds and the realised shares are identical digit
+for digit. The lowest score holds the lowest gate under any unit, so it is
+always in the field and always that field's lowest score.
+
+**It is a new parameter, not a lower `-posslotinterval`.** That setting is also
+the axis the unbonding requirement is measured on
+(`PosRequiredUnbondingSeconds() = period x slot interval`), so lowering it to
+10 would have cut the nothing-at-stake lock from ~15 days to ~5 with nothing
+saying so. It stays at 30.
+
 ## The parameters that had to move with it
 
 Three settings are counted in blocks, so what they mean in real time depends on
@@ -79,6 +119,7 @@ the cadence. They were audited one by one; two needed changing and one did not.
 | Payout notice | 2,880 blocks | **1,440 blocks** | Compared in block heights, so it had silently become ~2 days instead of ~1 |
 | Coinbase maturity | 100 blocks | **1,000 blocks** | Held equal to Bitcoin in wall-clock time (16 h 40 min), not in block count |
 | Unbonding period | 43,200 blocks | **unchanged** | Normalised to seconds already, so ~15 days before and after |
+| Leader time-gate unit | 30 s | **10 s** | Its own parameter now; see above |
 
 The unbonding period is the one that looks like it should have moved and must
 not. It is compared in *seconds* — `period × slot interval` — and the slot
