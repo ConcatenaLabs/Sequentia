@@ -517,16 +517,26 @@ exercise it chooses its terms. Circle runs its own quorum, in its own jurisdicti
 under its own key management, and it must choose the clawback terms it is willing to
 stand behind.
 
-**What Circle can do the day it adopts the asset.** It holds the reissuance token, so it
-holds the mint, and OpenAMP needs no permission from us: Circle provisions a policy key
-under its own FROST quorum, publishes the binding (the registry succession of 5.6 carries
-it, dual-authorized by the issuer's signature and its domain proof), and issues governed
-supply into enclaves. The honest limitation, inherent to UTXO rather than to this design:
-coins already circulating in ordinary outputs stay unencumbered, because nothing can
-retroactively encumber a bearer output that already exists. That argues for making the
-decision at adoption, while supply is still whatever the bridged phase accumulated,
-rather than years later, and it is the one place where an EVM proxy genuinely does
-something a UTXO chain cannot.
+**USDC is not an OpenAMP asset, and will not become one** (owner's decision, 2026-08-12),
+before or after Circle adopts it. The reason is the one this section already gives from
+the other direction: OpenAMP governs an asset by requiring every unit of it to sit in a
+co-signed enclave output, which is exactly the composability the bridged phase depends
+on and exactly what a general-purpose dollar must not lose. OpenAMP remains the right
+answer for restricted instruments; it is not the answer for this one. Everything above
+describes what the network can do, not what this asset does.
+
+**So what remains available to an issuer that wants transfer controls on USDC?** Nothing
+today. Enclave custody is ruled out by the decision above; a covenant binds only outputs
+created under it; and the reissuance token mints but cannot freeze. A freeze that reaches
+holders who already hold the asset is a consensus rule, and the network does not have
+one. Whether to add one, and on what terms, is an open question for the protocol owners
+rather than something this standard can assume: see the note below.
+
+**The honest limitation this leaves.** Coins circulating in ordinary outputs stay
+unencumbered, because nothing on this chain today can retroactively encumber a bearer
+output that already exists. That is the one place where an EVM proxy genuinely does
+something this chain cannot: a blacklist added to a FiatToken proxy binds every existing
+holder the moment it ships.
 
 **What Simplicity changes, now that it is active.** OpenAMP was designed while Simplicity
 was switched off, so it is worth asking whether activation reopens anything. It changes
