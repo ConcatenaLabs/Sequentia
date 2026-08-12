@@ -414,7 +414,16 @@ std::vector<StakeUtxo> FindWalletStakeUtxos(CWallet& wallet, const std::optional
 //! calendar date (the slot interval itself is not exported by pos.h).
 int64_t ApproxSecondsPerBlock()
 {
-    return g_pos_unbonding_period > 0 ? PosRequiredUnbondingSeconds() / (int64_t)g_pos_unbonding_period : 30;
+    // The CADENCE, which is pos_block_spacing -- not the slot interval, and not
+    // PosRequiredUnbondingSeconds()/g_pos_unbonding_period, which reduces to the
+    // slot interval. Those are two different numbers now: the slot interval
+    // scales the leader time-gate (30 s), while the chain actually produces a
+    // block every pos_block_spacing (60 s). Using the gate unit here halved
+    // every date this function produces -- it would have promised a stake locked
+    // for 43,200 blocks that it unlocks in 15 days when it really takes 30.
+    const int64_t spacing = Params().GetConsensus().pos_block_spacing;
+    if (spacing > 0) return spacing;
+    return g_pos_slot_interval > 0 ? g_pos_slot_interval : 30;
 }
 
 //! Why an immature staking output cannot be withdrawn yet, with when it can:

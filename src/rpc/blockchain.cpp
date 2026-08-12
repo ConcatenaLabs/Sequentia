@@ -3371,6 +3371,10 @@ static RPCHelpMan getposschedule()
     result.pushKV("height", next_height);
     result.pushKV("seed", seed.GetHex());
     result.pushKV("slot_interval", g_pos_slot_interval);
+    // The cadence and the gate unit are different numbers. Reporting only
+    // the slot interval let an operator read it as "a block every N s",
+    // which it is not: pos_block_spacing is what paces the chain.
+    result.pushKV("block_spacing", Params().GetConsensus().pos_block_spacing);
     if (g_pos_vrf) {
         // Private sortition: slots depend on each staker's secret key, so no
         // public ordering exists. The "schedule" below is the legacy public
@@ -3501,6 +3505,10 @@ static RPCHelpMan getposslot()
     result.pushKV("sortition", g_pos_vrf ? "vrf" : "schedule");
     result.pushKV("seed", seed.GetHex());
     result.pushKV("slot_interval", g_pos_slot_interval);
+    // The cadence and the gate unit are different numbers. Reporting only
+    // the slot interval let an operator read it as "a block every N s",
+    // which it is not: pos_block_spacing is what paces the chain.
+    result.pushKV("block_spacing", Params().GetConsensus().pos_block_spacing);
     result.pushKV("total_weight", total_weight);
     result.pushKV("stakers", (int)registry.Weights().size());
 
@@ -3545,7 +3553,8 @@ static RPCHelpMan getposslot()
             // The producer holds a cadence floor of one interval since the parent
             // (PosProducer::Step), so slots 0 and 1 both propose at the same time;
             // reporting the bare slot gate would promise a block that early.
-            const int64_t slot_opens = parent_time + (int64_t)slot * g_pos_slot_interval;
+            const int64_t slot_opens =
+                parent_time + PosSlotGateSeconds(Params().GetConsensus(), next_height, slot);
             const int64_t propose_at = std::max(slot_opens, parent_time + g_pos_slot_interval);
             UniValue entry(UniValue::VOBJ);
             entry.pushKV("pubkey", HexStr(pub));
@@ -3562,7 +3571,8 @@ static RPCHelpMan getposslot()
     }
     result.pushKV("best_slot", best_slot);
     result.pushKV("best_propose_at", best_slot < 0 ? 0
-        : std::max(parent_time + best_slot * g_pos_slot_interval, parent_time + g_pos_slot_interval));
+        : std::max(parent_time + PosSlotGateSeconds(Params().GetConsensus(), next_height, (uint64_t)best_slot),
+                   parent_time + g_pos_slot_interval));
     result.pushKV("keys", arr);
     return result;
 },

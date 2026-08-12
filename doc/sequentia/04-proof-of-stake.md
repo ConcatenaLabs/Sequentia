@@ -41,6 +41,7 @@ headers and blocks may be accepted far ahead of it or on another branch:
 | Stage | When | What it checks |
 |---|---|---|
 | `CheckChallenge` | header time | the challenge's *form* only - a recognized PoS leader/committee challenge |
+| `ContextualCheckBlockHeader` | header time | the **minimum block spacing** - registry-independent, so it binds a header before its block is fetched |
 | `CheckPosStakeRules` | `ConnectBlock` (registry = parent state) | the election: leader is a registered staker, the VRF proof and slot, the committee, and the quorum |
 | `CheckProof` | block-connect | the block signature satisfies the challenge - the block really is signed by the leader (and the aggregate by the committee) |
 
@@ -211,9 +212,10 @@ incentive came from the election being decided by two *different* keys.
 With `U = beta / 2^256`, the legacy slot is `⌊ U · W / w ⌋`, so a staker reaches
 slot 0 only when `U < w/W`, and slot 1 only when `U < 2w/W`: the smaller the
 stake, the lower the `beta` it must draw before it may offer a block early at
-all. The producer's cadence floor then holds every block to at least one slot
-interval after its parent (`max(slot · interval, interval)`,
-`src/pos_producer.cpp`; consensus enforces only the slot gate itself), which
+all. The producer's cadence floor then holds every block to at least
+`pos_block_spacing` after its parent (`max(slot · interval, spacing)`,
+`src/pos_producer.cpp`; consensus enforces the floor and the slot gate
+independently - see *Minimum block spacing* below), which
 collapses slots 0 and 1 into a single offering time, so the proposals a
 committee collects in one gossip window routinely include several candidates.
 Among them `BackedForRound` ranked by the **raw, unweighted** `beta`. Entry was
@@ -509,6 +511,67 @@ form) when `-posbls` is enabled.
 `<leader> OP_CHECKSIGVERIFY <q> <c_1..c_n> <n> OP_CHECKMULTISIG`, capped at 16
 members because each member is a separate pubkey and signature push. The
 aggregate forms above are the paper-scale path.)
+
+## 4b. Minimum block spacing
+
+The chain's cadence is a **consensus rule**, not a convention of the producer
+software:
+
+```
+block.nTime >= parent.nTime + pos_block_spacing        # bad-pos-spacing
+```
+
+`Consensus::Params::pos_block_spacing` is 60 seconds on both real chains, bound
+by `pos_block_spacing_height`, and checked in `ContextualCheckBlockHeader`
+beside `time-too-old`.
+
+**Why it is not the slot gate.** The gate delays a leader by
+`slot · interval`, and `slot` scales with the reciprocal of the staker's weight,
+so it can never be a uniform speed limit: the winning draw floors to 0 in
+`1 - e^-1 ≈ 63%` of rounds, which is exactly when a brake would be needed. Left
+to the gate alone, a set holding all the stake can drive the chain to a 17.5 s
+cadence, and to 0.6 s if the gate is rescaled to one second per score unit.
+Producers are paid in the fees of the blocks they lead and in nothing else -
+there is no block subsidy (§3.9) - so the incentive to shorten the cadence is
+permanent and grows with congestion, and more blocks in the same time is more
+disk, more bandwidth and more validation for every node for ever.
+
+The two parameters therefore stay separate: `pos_block_spacing` answers *how
+fast may the chain run*, `-posslotinterval` answers *in what order may leaders
+propose*. Folding them into one number is what makes every value of that number
+a bad trade.
+
+**Why a rule about timestamps is enough.** A validator cannot observe when a
+block really appeared, only the time written in it, so written times are the
+only thing a consensus rule can bind - and binding them suffices. Producing `N`
+blocks costs `N · spacing` seconds of timestamp, and `MAX_FUTURE_BLOCK_TIME`
+caps how far ahead of real time timestamps may run, so the long-run rate is
+exactly one block per `spacing`, after a one-off burst of at most
+`MAX_FUTURE_BLOCK_TIME / spacing` (120 blocks at the current values) that buys
+nothing, because the chain then produces nothing until real time catches up.
+
+Note what the check compares: two timestamps **written in blocks**. The
+validating node's own clock is deliberately absent, so the verdict is identical
+on every node regardless of when either block arrived or how far any local clock
+has drifted. The only clock-dependent timestamp rule is the inherited
+`time-too-new`, which stays soft - a node retries once its clock catches up -
+precisely because it is clock-dependent.
+
+**The producer-side clamp.** `node::PosEarliestBlockTime` holds every stamp to
+`parent.nTime + spacing`, whatever the local clock says, and it follows the
+spacing **value** rather than its activation height, so a release stops emitting
+too-close blocks *before* the rule starts rejecting them. That ordering is not
+optional on a running chain. A scan of the first 86,357 testnet blocks found
+2,186 closer than 30 s to their parent - 2,183 at exactly 29 s, still occurring
+at the tip. They are not cheating: the producer waits correctly and then the
+assembler stamps `GetAdjustedTime()`, so a node whose clock trails the previous
+producer's by a second writes `parent+29` having genuinely waited `parent+30`.
+Activating the rule without the clamp would invalidate blocks honest producers
+emit right now, over and over.
+
+**Block weight follows the cadence.** The cap encodes weight *per second*, held
+equal to a saturated Bitcoin: `400,000 / 60 s == 4,000,000 / 600 s` (§3.10).
+Changing one without the other silently changes how fast the chain grows.
 
 ## 5. Liveness - escaping-stall
 

@@ -121,8 +121,33 @@ BOOST_AUTO_TEST_CASE(sequentia_pos_consensus_rules_are_pinned)
     BOOST_CHECK_EQUAL(PosPublicQuorum(250), 126);
     BOOST_CHECK_EQUAL(g_pos_min_stake, 4000000000000ULL);
     BOOST_CHECK_EQUAL(g_pos_slot_interval, 30);
+    // The cadence is pos_block_spacing (60 s), NOT the slot interval above,
+    // which is the leader time-gate unit and stays at 30.
+    BOOST_CHECK_EQUAL(params->GetConsensus().pos_block_spacing, 60);
+    // Held equal to a saturated Bitcoin, per second: 400000/60 == 4000000/600.
+    BOOST_CHECK_EQUAL(params->GetConsensus().nMaxBlockWeight, 400000U);
+
+    // These two look alike and are not. The unbonding period is normalised to
+    // SECONDS (PosRequiredUnbondingSeconds = period x slot interval), so the
+    // cadence does not move it: 43200 x 30 = 1,296,000 s, the ~15 days of
+    // §3.11. The payout notice is compared in BLOCKS against a height
+    // (ConnectBlock, bad-payout-notice), so it had to be halved with the
+    // cadence to stay ~1 day. Pinned to the literal rather than
+    // DEFAULT_POS_PAYOUT_NOTICE precisely because it now differs from it.
     BOOST_CHECK_EQUAL(g_pos_unbonding_period, 43200U);
-    BOOST_CHECK_EQUAL(g_pos_payout_notice, DEFAULT_POS_PAYOUT_NOTICE);
+    BOOST_CHECK_EQUAL(PosRequiredUnbondingSeconds(), 1296000);   // ~15 days
+    BOOST_CHECK_EQUAL(g_pos_payout_notice, 1440U);
+    // The leader time-gate unit is its own number and must NOT track
+    // g_pos_slot_interval: that global also scales PosRequiredUnbondingSeconds,
+    // so folding them back together would cut the unbonding lock to a third.
+    BOOST_CHECK_EQUAL(params->GetConsensus().pos_slot_gate_seconds, 10);
+    BOOST_CHECK_EQUAL(g_pos_slot_interval, 30);
+    // A draw of 3 costs 30 s under the new unit and would have cost 90 s under
+    // the old one -- the difference the cadence now absorbs.
+    BOOST_CHECK_EQUAL(PosSlotGateSeconds(params->GetConsensus(), 1, 3), 30);
+    BOOST_CHECK_EQUAL(PosSlotGateSeconds(params->GetConsensus(), 1, 6), 60);
+    BOOST_CHECK_EQUAL((int64_t)g_pos_payout_notice *
+                      params->GetConsensus().pos_block_spacing, 86400);  // ~1 day
 
     // Any two quorums of the committee overlap in at least two members, so no
     // two blocks at a height can be certified without two signers on both.

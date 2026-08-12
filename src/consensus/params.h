@@ -256,6 +256,135 @@ struct Params {
     //! blocks. Below H the rule is simply not applied, which is exactly the
     //! behaviour every already-synced node has today.
     int pos_escape_stall_mtp_height{0};
+    //! SEQUENTIA PoS: the MINIMUM SECONDS between a block and its parent,
+    //! enforced by consensus. 0 = no minimum (the rule is off).
+    //!
+    //! Why this exists. The chain's 30-second cadence lives in
+    //! PosProducer::Step as a *producer-side* floor, and no validator checks
+    //! it: a modified producer ignores it and every node accepts the result.
+    //! The slot gate is no substitute — it scales with the reciprocal of a
+    //! staker's weight, so it can never be a uniform speed limit, and the
+    //! winning draw floors to 0 in ~63% of rounds, which is exactly when it
+    //! would need to bind. Measured: a hostile set holding all the stake can
+    //! drive the chain to a 17.5 s cadence today, and would reach 0.6 s if the
+    //! gate were rescaled to one second per score unit.
+    //!
+    //! Producers collect the fees and nothing else -- Sequentia has no block
+    //! subsidy at all (genesis_subsidy is 0 on both real chains; whitepaper
+    //! §3.9, no inflation) -- so accelerating buys them fee-bearing blocks,
+    //! and the incentive is permanent and grows with congestion. More blocks
+    //! in the same time is more disk, more bandwidth and more validation for
+    //! every node forever, which is the opposite of what this chain is for.
+    //! Note that emission is NOT at stake here, precisely because there is
+    //! none: this is a resource-consumption rule, not a monetary one.
+    //!
+    //! Why a timestamp rule is enough. A validator cannot observe when a block
+    //! really appeared, only the time WRITTEN in it, so the written times are
+    //! the only thing a consensus rule can bind — and binding them suffices:
+    //! producing N blocks costs N * spacing seconds of timestamp, and
+    //! MAX_FUTURE_BLOCK_TIME caps how far ahead of real time those timestamps
+    //! may run. The two together bound the long-run rate at exactly one block
+    //! per `pos_block_spacing` seconds, after a one-off burst of at most
+    //! MAX_FUTURE_BLOCK_TIME / pos_block_spacing blocks that buys nothing
+    //! because the chain then stalls until real time catches up.
+    //!
+    //! Deliberately SEPARATE from the slot-gate unit (g_pos_slot_interval).
+    //! They answer different questions — "how fast may the chain run" versus
+    //! "in what order may leaders propose" — and folding them into one number
+    //! is what made every choice of that number a bad trade. Raising the
+    //! spacing must not silently stretch the slot gate too.
+    //!
+    //! This is a consensus parameter and NOT a global read from an argument,
+    //! unlike g_pos_slot_interval: two operators starting with different
+    //! -posslotinterval values disagree about which blocks are valid, which is
+    //! a chain split waiting for a trigger rather than a configuration choice.
+    int64_t pos_block_spacing{0};
+    //! SEQUENTIA PoS: block height from which pos_block_spacing binds.
+    //!
+    //! Same convention as pos_escape_stall_mtp_height above: a chain launched
+    //! WITH the rule sets 1, never 0. On the running testnet the value must be
+    //! ABOVE the tip at release time: 2,186 of its first 86,357 blocks sit
+    //! closer than 30 s to their parent (2,183 of them at exactly 29 s, a
+    //! one-second clock skew between producers, still occurring at the tip), so
+    //! a rule applied retroactively would make the chain unsyncable.
+    //!
+    //! Before activating this on a running chain, ship the producer-side clamp
+    //! FIRST and confirm that no node still emits a block closer than the
+    //! spacing to its parent. The clamp is what turns those 29-second blocks
+    //! into 30-second ones; without it this rule invalidates blocks that honest
+    //! producers are emitting right now.
+    //!
+    //! Changing when a block is valid is a HARD FORK: coordinate H with every
+    //! operator (see doc/sequentia/04-proof-of-stake.md).
+    int pos_block_spacing_height{0};
+    //! SEQUENTIA PoS: seconds of leader time-gate per unit of sortition score,
+    //! and the height it binds from. 0 = keep the historic unit, which is the
+    //! runtime global g_pos_slot_interval.
+    //!
+    //! The gate delays a leader by `floor(score) x unit` after the parent, and
+    //! the producer will not propose before pos_block_spacing in any case, so
+    //! every draw whose gate lands under the cadence proposes at the same
+    //! moment. The unit therefore decides how much of the draw distribution the
+    //! cadence absorbs -- and with the exponential race the tail is what costs
+    //! throughput. Measured over 2,000,000 simulated rounds at a 60 s cadence
+    //! with twelve equal stakers:
+    //!
+    //!     unit 30 s -> 4.97% of blocks late, 3.78% throughput lost, field 2.7
+    //!     unit 10 s -> 0.09% of blocks late, 0.02% throughput lost, field 5.3
+    //!
+    //! Ten seconds takes 99.4% of the available gain. Below it the throughput
+    //! is already recovered and only the field keeps widening, which buys
+    //! nothing and gives the anchor-freshness key more material to reorder.
+    //!
+    //! DELIBERATELY NOT g_pos_slot_interval, which stays at 30. That global is
+    //! also the axis PosRequiredUnbondingSeconds() and PosStakeLockSeconds()
+    //! use to put height- and time-based stake locks on one scale, so lowering
+    //! it to 10 would silently cut the unbonding requirement from ~15 days to
+    //! ~5. Two jobs, two numbers.
+    //!
+    //! Only meaningful under the exponential-race election: the legacy slot is
+    //! a bounded RANK (uniform in [0, W/w)), for which the whole-interval scale
+    //! is the whitepaper's rank-r liveness gate and costs nothing.
+    //!
+    //! Changing when a leader may produce is a HARD FORK: coordinate H with
+    //! every operator.
+    int64_t pos_slot_gate_seconds{0};
+    int pos_slot_gate_height{0};
+    //! Whether the fine leader time-gate is the rule at `height`.
+    bool PosSlotGateActiveAt(int height) const
+    {
+        return pos_slot_gate_seconds > 0 && pos_slot_gate_height > 0 &&
+               height >= pos_slot_gate_height;
+    }
+    //! SEQUENTIA: coinbase maturity in blocks, and the height it binds from.
+    //! 0 = use the inherited COINBASE_MATURITY (consensus.h).
+    //!
+    //! COINBASE_MATURITY is a number of BLOCKS, so what it actually protects
+    //! shrinks as a chain's cadence shortens: Bitcoin's 100 blocks at 600 s is
+    //! 16 h 40 min, while the same 100 blocks at 60 s is 100 minutes. Sequentia
+    //! holds the WALL-CLOCK figure equal to Bitcoin's rather than the block
+    //! count, so the number here must satisfy
+    //!
+    //!     coinbase_maturity * pos_block_spacing == 100 * 600
+    //!
+    //! and has to be revisited whenever the cadence is. It matters more here
+    //! than upstream: there is no block subsidy (§3.9), so a coinbase carries
+    //! the producer's fee income rather than new issuance, and the maturity is
+    //! the delay before a producer can spend what it earned.
+    //!
+    //! Raising it REJECTS MORE, hence the height: the running testnet has
+    //! coinbases already spent at depths between 100 and 1,000, and applying
+    //! the new figure to them would make the chain unsyncable.
+    int coinbase_maturity{0};
+    int coinbase_maturity_height{0};
+    //! Whether the minimum-spacing rule binds a block at `height`.
+    //! Consulted by ContextualCheckBlockHeader and by the producer, so the two
+    //! can never disagree about how early a block may be stamped.
+    bool PosBlockSpacingActiveAt(int height) const
+    {
+        return pos_block_spacing > 0 && pos_block_spacing_height > 0 &&
+               height >= pos_block_spacing_height;
+    }
     //! SEQUENTIA: the one-time UTXO-set rewrite this chain applies, if any.
     //! Empty (height 0) on every chain but the one it was written for -- see the
     //! UtxoRecovery comment above and CTestNetParams in chainparams.cpp.

@@ -222,6 +222,15 @@ private:
 void IncrementExtraNonce(CBlock* pblock, const CBlockIndex* pindexPrev, unsigned int& nExtraNonce);
 int64_t UpdateTime(CBlockHeader* pblock, const Consensus::Params& consensusParams, const CBlockIndex* pindexPrev);
 
+/** SEQUENTIA: the earliest timestamp a child of `pindexPrev` may carry under
+ *  the minimum-spacing rule (Consensus::Params::pos_block_spacing), or 0 when
+ *  this chain sets no spacing. The single definition, shared by the block
+ *  assembler and the autonomous producer so the two can never disagree about
+ *  how early a block may be stamped. Depends on the spacing VALUE and not on
+ *  its activation height, so a producer stops emitting too-close blocks in the
+ *  release BEFORE the consensus rule starts rejecting them. */
+int64_t PosEarliestBlockTime(const Consensus::Params& consensusParams, const CBlockIndex* pindexPrev);
+
 /** Update an old GenerateCoinbaseCommitment from CreateNewBlock after the block txs have changed */
 void RegenerateCommitments(CBlock& block, ChainstateManager& chainman);
 } // namespace node

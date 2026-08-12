@@ -32,6 +32,13 @@ bool g_pos_bls = false;
 bool g_pos_public_committee = false;
 uint64_t g_pos_min_stake = 0;
 int g_pos_escape_stall_mtp_height = 0;
+// SEQUENTIA: the coinbase maturity in force, mirrored out of
+// Consensus::Params by chainparams.cpp. It lives HERE, in the common
+// layer, for the same reason as the line above: chainparams.cpp assigns
+// it and elements-tx / elements-util link libbitcoin_common WITHOUT
+// libbitcoin_node, where consensus/tx_verify.cpp (the reader) is built.
+int g_coinbase_maturity = 0;
+int g_coinbase_maturity_height = 0;
 
 bool StakeRegistry::AddFromSpec(const std::string& spec, std::string& error)
 {
@@ -498,7 +505,24 @@ uint64_t PosVrfSlotExp(const uint256& beta, uint64_t weight, uint64_t total_weig
 bool PosExpRaceActive(const Consensus::Params& params, int height)
 {
     return params.pos_exprace_height > 0 && height >= params.pos_exprace_height;
+}
+int64_t PosSlotGateSeconds(const Consensus::Params& params, int height, uint64_t slot)
+{
+    // The exp-race score is a RATE, not a rank: its minimum over all stakers is
+    // Exponential(1), with an unbounded tail. Scaling that by a whole slot
+    // interval silences the chain for floor(min score) intervals whenever the
+    // draw runs long -- 4.97% of rounds at a 60 s cadence, 3.78% of throughput.
+    // A smaller unit lets the cadence absorb more of the tail. The legacy slot
+    // IS a bounded rank and keeps the whole-interval scale it was designed for.
+    const int64_t unit = (PosExpRaceActive(params, height) &&
+                          params.PosSlotGateActiveAt(height))
+                             ? params.pos_slot_gate_seconds
+                             : (g_pos_slot_interval > 0 ? g_pos_slot_interval : 1);
+    // Both slot functions already cap at POS_VRF_MAX_SLOT; clamping again keeps
+    // the multiplication in range for any caller that computes a slot itself.
+    return (int64_t)std::min<uint64_t>(slot, POS_VRF_MAX_SLOT) * unit;
 }
+
 
 
 CScript BuildPosVrfCommitment(const std::vector<unsigned char>& proof)
