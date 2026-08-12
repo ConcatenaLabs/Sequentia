@@ -2448,7 +2448,8 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
     uint64_t slot = PosExpRaceActive(Params().GetConsensus(), pindexPrev->nHeight + 1)
                         ? PosVrfSlotExp(beta, weight, total_weight)
                         : PosVrfSlot(beta, weight, total_weight);
-    if ((int64_t)block.GetBlockTime() < (int64_t)pindexPrev->nTime + (int64_t)slot * g_pos_slot_interval) {
+    if ((int64_t)block.GetBlockTime() <
+        (int64_t)pindexPrev->nTime + PosSlotGateSeconds(Params().GetConsensus(), pindexPrev->nHeight + 1, slot)) {
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posvrf-early", "block produced before its VRF sortition slot opened");
     }
     // Aggregate committee certification (doc 07 §6): the signer set is

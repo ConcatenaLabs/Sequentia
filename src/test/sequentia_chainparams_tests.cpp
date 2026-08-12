@@ -98,6 +98,15 @@ BOOST_AUTO_TEST_CASE(sequentia_pos_consensus_rules_are_pinned)
     BOOST_CHECK_EQUAL(g_pos_unbonding_period, 43200U);
     BOOST_CHECK_EQUAL(PosRequiredUnbondingSeconds(), 1296000);   // ~15 days
     BOOST_CHECK_EQUAL(g_pos_payout_notice, 1440U);
+    // The leader time-gate unit is its own number and must NOT track
+    // g_pos_slot_interval: that global also scales PosRequiredUnbondingSeconds,
+    // so folding them back together would cut the unbonding lock to a third.
+    BOOST_CHECK_EQUAL(params->GetConsensus().pos_slot_gate_seconds, 10);
+    BOOST_CHECK_EQUAL(g_pos_slot_interval, 30);
+    // A draw of 3 costs 30 s under the new unit and would have cost 90 s under
+    // the old one -- the difference the cadence now absorbs.
+    BOOST_CHECK_EQUAL(PosSlotGateSeconds(params->GetConsensus(), 1, 3), 30);
+    BOOST_CHECK_EQUAL(PosSlotGateSeconds(params->GetConsensus(), 1, 6), 60);
     BOOST_CHECK_EQUAL((int64_t)g_pos_payout_notice *
                       params->GetConsensus().pos_block_spacing, 86400);  // ~1 day
 

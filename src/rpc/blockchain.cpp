@@ -3553,7 +3553,8 @@ static RPCHelpMan getposslot()
             // The producer holds a cadence floor of one interval since the parent
             // (PosProducer::Step), so slots 0 and 1 both propose at the same time;
             // reporting the bare slot gate would promise a block that early.
-            const int64_t slot_opens = parent_time + (int64_t)slot * g_pos_slot_interval;
+            const int64_t slot_opens =
+                parent_time + PosSlotGateSeconds(Params().GetConsensus(), next_height, slot);
             const int64_t propose_at = std::max(slot_opens, parent_time + g_pos_slot_interval);
             UniValue entry(UniValue::VOBJ);
             entry.pushKV("pubkey", HexStr(pub));
@@ -3570,7 +3571,8 @@ static RPCHelpMan getposslot()
     }
     result.pushKV("best_slot", best_slot);
     result.pushKV("best_propose_at", best_slot < 0 ? 0
-        : std::max(parent_time + best_slot * g_pos_slot_interval, parent_time + g_pos_slot_interval));
+        : std::max(parent_time + PosSlotGateSeconds(Params().GetConsensus(), next_height, (uint64_t)best_slot),
+                   parent_time + g_pos_slot_interval));
     result.pushKV("keys", arr);
     return result;
 },

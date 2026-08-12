@@ -459,6 +459,13 @@ public:
         // Active from the first block; mainnet has no spends to grandfather.
         consensus.coinbase_maturity = 1000;
         consensus.coinbase_maturity_height = 1;
+        // Leader time-gate: ten seconds per unit of sortition score, from the
+        // first block. Mainnet has no legacy-scale history, so it never spends
+        // a block on the whole-interval scale that costs the testnet ~3.8% of
+        // its throughput. NOT g_pos_slot_interval, which stays 30 -- see
+        // params.h: that global also scales the unbonding requirement.
+        consensus.pos_slot_gate_seconds = 10;
+        consensus.pos_slot_gate_height = 1;
         g_coinbase_maturity = consensus.coinbase_maturity;
         g_coinbase_maturity_height = consensus.coinbase_maturity_height;
         // 400,000 weight units — a TENTH of Bitcoin's 4,000,000 — so that, at
@@ -818,6 +825,16 @@ public:
         // coinbases spent at depths between 100 and 1000 already.
         consensus.coinbase_maturity = 1000;
         consensus.coinbase_maturity_height = 93800;
+        // Leader time-gate (hard fork; see params.h). Same height as the
+        // spacing and the maturity, so the cadence and everything scaled
+        // against it move in one cutover. Ten seconds and not one: at a 60 s
+        // cadence ten already recovers 99.4% of the lost throughput (0.024%
+        // remaining against 3.78% today), while a smaller unit only keeps
+        // widening the simultaneous field -- 5.3 candidates of twelve at ten
+        // seconds against 11.9 at one -- which buys no throughput and gives
+        // the anchor-freshness key more material to reorder.
+        consensus.pos_slot_gate_seconds = 10;
+        consensus.pos_slot_gate_height = 93800;
         g_coinbase_maturity = consensus.coinbase_maturity;
         g_coinbase_maturity_height = consensus.coinbase_maturity_height;
         // SEQUENTIA: 400,000 weight units — a TENTH of Bitcoin's 4,000,000 —
@@ -1816,6 +1833,11 @@ protected:
         // them. A test that wants the rule asks for it. The height defaults to
         // 1 so that asking for the spacing alone is enough to get the rule.
         consensus.pos_block_spacing = args.GetIntArg("-posblockspacing", 0);
+        // Leader time-gate unit. Arg-readable only here so tests can drive both
+        // scales and the transition; the real chains pin it in code. 0 = keep
+        // the historic whole-interval unit.
+        consensus.pos_slot_gate_seconds = args.GetIntArg("-posslotgateseconds", 0);
+        consensus.pos_slot_gate_height = (int)args.GetIntArg("-posslotgateheight", 1);
         consensus.pos_block_spacing_height =
             (int)args.GetIntArg("-posblockspacingheight", 1);
         if (consensus.pos_block_spacing < 0 || consensus.pos_block_spacing > 86400) {

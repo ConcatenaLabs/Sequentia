@@ -627,6 +627,18 @@ namespace Consensus { struct Params; }
  *  fork off by default on regtest and custom chains (-posexpraceheight). */
 bool PosExpRaceActive(const Consensus::Params& params, int height);
 
+/** SEQUENTIA: seconds after the parent at which a leader holding sortition
+ *  `slot` may produce. THE single definition of the leader time-gate, shared by
+ *  consensus (CheckPosStakeRules), the block assembler, the autonomous producer
+ *  and the RPCs that report it, so the four can never disagree about when a
+ *  slot opens -- a disagreement there means a producer building blocks its own
+ *  peers reject as bad-posvrf-early.
+ *
+ *  From pos_slot_gate_height a score unit buys pos_slot_gate_seconds; before
+ *  it, and under the legacy rank election at any height, it buys one whole
+ *  g_pos_slot_interval, which is the scale that rank was designed for. */
+int64_t PosSlotGateSeconds(const Consensus::Params& params, int height, uint64_t slot);
+
 /** Build the tagged coinbase OP_RETURN output script carrying the leader's
  *  VRF proof: OP_RETURN PUSH("SEQVRF" || proof). */
 CScript BuildPosVrfCommitment(const std::vector<unsigned char>& proof);
