@@ -622,9 +622,10 @@ any chain.
 
 **Phase 5, identity succession.** The successor registry record renames the asset to
 "USD Coin" / "USDC" under `circle.com` (5.6). Wallets, the explorer and the price server
-pick it up on their next registry poll; nodes on restart. If Circle elects to operate
-under the consensus asset-policy feature (5.5 option 4), the policy authority declaration
-is published now, from the reissuance token it holds.
+pick it up on their next registry poll; nodes on restart. If Circle elects to govern the
+asset under OpenAMP (5.5), this is also where it publishes the policy key it provisioned,
+carried by the same succession record and authorized by the same two factors, and it
+begins issuing governed supply with the reissuance token it now holds.
 
 **Continuity (I7), verified.** The asset id never changed, so: all balances are
 untouched; all DEX orders, covenant order-book entries and Lightning channels
@@ -730,8 +731,9 @@ Remaining:
   mechanism doubles as a consolidation mechanism: the operator can drain one escrow into
   the other via CCTP before phase 2, reducing to the single-origin case Circle knows.
 - Holders can blind transfer outputs; supply stays exact but distribution analytics
-  degrade. If Circle requires full transparency, the explicit-only flag in the
-  asset-policy feature is the enforcement mechanism; until then it is a documented
+  degrade. If Circle requires the issuer to see every holding, that is what OpenAMP is
+  for: the policy server derives every enclave address and so reports ownership exactly,
+  which is the same posture AMP2 takes on Liquid. Until then this is a documented
   property, matching the Liquid precedent Circle's largest competitor already accepts.
 - The registry label layer is advisory and HTTP-served; nothing about supply or
   ownership depends on it, but display spoofing is a real (existing, chain-wide)
@@ -785,9 +787,10 @@ phases with the reconciliation and metadata steps it omitted.
   alongside this spec's revision), and on a chain where the deployment is not yet active
   a Tapsimplicity leaf is an anyone-can-spend path, so the proposed wrapper, deployed
   there, would not merely fail to enforce compliance, it would hand the wrapped funds to
-  the first taker. Even re-based onto the
-  introspection opcodes that ARE active, the wrapper is rejected on the merits
-  (section 5.5, option 2).
+  the first taker. The deeper problem is that it reinvents, worse, a mechanism this
+  network already had: OpenAMP governs assets through issuer co-signing that ordinary
+  script validation enforces, without a bespoke oracle in the path of every transfer
+  (section 5.5).
 - Its claim that the issuer "simply parses the blockchain state" to audit supply. There
   is no per-asset supply accounting in the node; auditability must be constructed via
   the explicit-amount rule and the auditor tool (section 5.4).
