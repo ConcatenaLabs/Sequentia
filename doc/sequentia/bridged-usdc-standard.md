@@ -460,17 +460,29 @@ asset without the issuer, and the issuer cannot move it without the holder. An o
 clawback leaf `<K_issuer> CHECKSIGVERIFY <K_policy> CHECKSIG` covers seizure and
 lost-key recovery. The asset id commits to the policy key through the issuance contract
 hash, so the binding between an asset and who governs it is cryptographic rather than a
-database row, and the policy key is a FROST threshold, so no single compromised machine
-can sign an asset out of its enclave. None of this requires a consensus change, which is
-the explicit design goal: full nodes remain oblivious.
+database row. None of this requires a consensus change, which is the explicit design
+goal: full nodes remain oblivious.
+
+**What is built versus what is designed**, because the difference is material to anyone
+evaluating this. The enclave, the co-signing, freeze, clawback, velocity limits, holder
+caps, ownership reports and the transparency log are implemented and live on the
+testnet. The policy key is *designed* to be a FROST threshold, so that no single
+compromised machine can sign an asset out of its enclave, and the signing engine sits
+behind an interface built for exactly that substitution, with the group key's invariance
+under resharing meaning the signer set can change without touching any issued asset. But
+the threshold backend itself is not written yet: today's implementation is a single
+software key per asset behind that interface. For a testnet demonstration that is fine;
+for a fiat issuer it is the gap that has to close before the policy server is worth
+trusting with a real instrument, and it is a self-contained piece of work rather than a
+design question.
 
 Against FiatToken, that is not a gap but a superset:
 
 | FiatToken role | OpenAMP equivalent |
 |---|---|
-| Blacklister | Freeze by refusal: the policy server declines to co-sign for a sanctioned holder. Proven in `feature_openamp_m0.py`. |
-| Pauser | The same refusal applied asset-wide. |
-| Rescuer | The clawback leaf, which recovers from any holder, not merely tokens stranded at the contract address. |
+| Blacklister | Freeze by refusal: the policy server declines to co-sign for a sanctioned holder, across every asset on that instance. Proven in `feature_openamp_m0.py`. |
+| Pauser | An asset-wide lock-in height in the policy rules, and refusal applied asset-wide. |
+| Rescuer | The clawback leaf, which recovers a holder's whole balance rather than only tokens stranded at the contract address. It must be enabled at issuance and cannot be added later. |
 | MasterMinter | The reissuance token, as in section 3. |
 | (no equivalent) | Velocity limits, holder caps, vesting, KYC categories, ownership reports at a block height, and a hash-chained transparency log of every policy decision, anchored on chain. |
 
