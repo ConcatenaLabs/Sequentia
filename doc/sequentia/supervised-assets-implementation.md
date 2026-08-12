@@ -11,8 +11,9 @@ unbuilt. File references are against `master` at the time of writing.
 
 ## 1. The rule in one paragraph
 
-An asset may be issued **supervised**, which commits an issuer freeze key into its asset
-id and cannot be added or removed afterwards. The issuer publishes **freeze records**
+An asset may be issued **supervised**, which binds an issuer freeze key to it at issuance
+and cannot be added or removed afterwards (§3.1 and §3.1a cover how that binding is
+encoded, which is a scheduling decision). The issuer publishes **freeze records**
 naming a scriptPubKey. Consensus rejects a transaction that *spends* a supervised-asset
 output when the output's script is frozen **and** the spend reveals a single-owner
 script. Creating outputs that pay a frozen script stays legal. Supervised assets may

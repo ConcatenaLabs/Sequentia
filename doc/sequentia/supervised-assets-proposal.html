@@ -24,7 +24,7 @@
 <p class="sub">Issuer-freezable assets on Sequentia: what consensus can enforce, what it cannot, and who covers the difference. 2026-08-12, for Andreas and Alberto.</p>
 
 <div class="box">
-<p><strong>Proposal: add a declared asset class, <em>supervised</em>, whose issuer can freeze holders by consensus rule, and pair it with freeze-awareness in the Lightning and DEX implementations.</strong> Freezability is committed into the asset id at issuance, so it is permanent, visible before acquisition, and cannot be added to an existing asset.</p>
+<p><strong>Proposal: add a declared asset class, <em>supervised</em>, whose issuer can freeze holders by consensus rule, and pair it with freeze-awareness in the Lightning and DEX implementations.</strong> Freezability is fixed at issuance, so it is permanent, visible before acquisition, and can never be added to an asset that was not born with it. Exactly how it is bound to the asset is the one open question with a schedule attached, and section 6 explains why.</p>
 <p><strong>The split is not a compromise, it is a boundary.</strong> Consensus can freeze what it can see and attribute: ordinary on-chain holdings, and resting covenant orders. It cannot freeze a Lightning balance, and no version of this rule ever will, because a channel's value lives in a shared output and in off-chain state that consensus cannot attribute to either party. That half must be enforced by the Lightning implementation as policy, which is exactly the division Andreas described.</p>
 <p><strong>The bar is parity with Ethereum, not improvement on it.</strong> That is what makes the Lightning boundary acceptable rather than a shortfall: whenever USDC sits inside a shared-state contract on Ethereum, blacklisting the holder's own address does not reach it either, because the contract holds the tokens while the holder's claim on them moves separately, without USDC ever being transferred. Circle's only lever there is to blacklist the <em>contract</em>, freezing everyone inside it, which it did in February 2026 (5.1). A Lightning channel is that same shape. So a supervised asset reaches a holder's own balance exactly as an EVM blacklist does, and stops exactly where an EVM blacklist stops.</p>
 </div>
@@ -50,7 +50,9 @@
 
 <h3>2.1 A supervised asset is declared at birth</h3>
 
-<p>The issuance commits an <strong>issuer freeze key</strong> into the asset id. Freezability therefore cannot be added to an existing asset or removed from a supervised one, and a freeze record is valid only if signed by that key. Ordinary assets are untouched by every rule below.</p>
+<p>The issuance binds an <strong>issuer freeze key</strong> to the asset, and only the issuance can: freezability cannot be added to an existing asset or removed from a supervised one, and a freeze record is valid only if signed by that key. Ordinary assets are untouched by every rule below.</p>
+
+<p>Two ways to make that binding are on the table, and the choice between them is a scheduling decision rather than a stylistic one, so it is put to Alberto in 7.2 and its consequence is spelled out in section 6. In short: committing the key into the asset id makes supervision visible from the id alone but cannot be done before the fork activates without splitting the chain, while declaring it in an output of the issuance transaction leaves the id untouched and can therefore be done today.</p>
 
 <h3>2.2 Enforcement is on spending, and only for single-owner outputs</h3>
 
