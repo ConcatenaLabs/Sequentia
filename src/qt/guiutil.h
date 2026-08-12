@@ -360,6 +360,40 @@ namespace GUIUtil
 
     QString formatBytes(uint64_t bytes);
 
+    /** SEQUENTIA: estimates how many headers are still missing during header
+     *  sync.
+     *
+     *  Upstream divides how stale our best header is by the *consensus* target
+     *  spacing. On Sequentia testnet that constant is 600s while blocks really
+     *  arrive every ~34s, so the estimate comes out ~17x too small (392 headers
+     *  left when 6810 remained) and any percentage built on it pins near 100%.
+     *
+     *  Instead we measure the chain's real spacing from the header tips the GUI
+     *  already receives: each update carries a height and that header's own
+     *  timestamp, so Δtime/Δheight is the chain's actual block interval — a
+     *  property of the chain, independent of how fast we download. Until enough
+     *  headers have been seen to measure it, the consensus spacing is used. */
+    class HeaderSyncEstimator
+    {
+    public:
+        /** Feed an observed header tip (height + that header's timestamp). */
+        void AddSample(int height, int64_t time);
+        /** Headers still missing, or -1 if not enough samples yet.
+         *  @param fallback_spacing consensus spacing, used before calibration. */
+        int HeadersLeft(int64_t now, int64_t fallback_spacing) const;
+        /** Height this estimator first saw — the session's starting point. */
+        int StartHeight() const { return m_first_height; }
+        void Reset();
+
+    private:
+        //! Minimum height span before the measured spacing is trusted.
+        static constexpr int MIN_SPAN = 100;
+        int m_first_height{-1};
+        int64_t m_first_time{0};
+        int m_last_height{-1};
+        int64_t m_last_time{0};
+    };
+
     qreal calculateIdealFontSize(int width, const QString& text, QFont font, qreal minPointSize = 4, qreal startPointSize = 14);
 
     class ThemedLabel : public QLabel

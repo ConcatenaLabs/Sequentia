@@ -406,6 +406,12 @@ struct WalletTx
     int64_t time;
     std::map<std::string, std::string> value_map;
     bool is_coinbase;
+    //! SEQUENTIA: true when an input spends a canonical staking output (see
+    //! withdrawstake), i.e. this transaction is a stake withdrawal. The wallet
+    //! cannot tell from IsMine — a staking script is a bare script the wallet
+    //! does not recognise as its own — so the flag is computed where the
+    //! spent transaction is still reachable.
+    bool spends_stake{false};
 };
 
 //! Updated transaction status.

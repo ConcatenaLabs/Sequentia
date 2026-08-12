@@ -214,6 +214,8 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "registerstake", 2, "csv_blocks"},
     { "registerstake", 3, "csv_seconds"},
     { "registerstake", 6, "liquid_locktime"},
+    { "withdrawstake", 1, "amount" },
+    { "bumpwithdrawstakefee", 0, "fee_rate" },
     { "registerasset", 1, "contract"},
     { "getstakerinfo", 0, "verbose"},
     { "getpayoutscript", 1, "activation"},

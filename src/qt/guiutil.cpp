@@ -1311,6 +1311,51 @@ QString formatBytes(uint64_t bytes)
     return QObject::tr("%1 GB").arg(bytes / 1'000'000'000);
 }
 
+void HeaderSyncEstimator::Reset()
+{
+    m_first_height = -1;
+    m_first_time = 0;
+    m_last_height = -1;
+    m_last_time = 0;
+}
+
+void HeaderSyncEstimator::AddSample(int height, int64_t time)
+{
+    if (height < 0 || time <= 0) return;
+    if (m_first_height < 0) {
+        m_first_height = height;
+        m_first_time = time;
+    }
+    // Headers can arrive out of order across branches; only advance forwards so
+    // the measured span stays monotonic.
+    if (height > m_last_height) {
+        m_last_height = height;
+        m_last_time = time;
+    }
+}
+
+int HeaderSyncEstimator::HeadersLeft(int64_t now, int64_t fallback_spacing) const
+{
+    if (m_last_height < 0 || m_last_time <= 0) return -1;
+
+    const int64_t lag = now - m_last_time;
+    if (lag <= 0) return 0;
+
+    // Measured spacing: how much chain time passed per header across the span
+    // we have observed. Falls back to the consensus value until the span is
+    // wide enough for the ratio to be meaningful.
+    int64_t spacing = fallback_spacing;
+    const int span = m_last_height - m_first_height;
+    const int64_t elapsed = m_last_time - m_first_time;
+    if (span >= MIN_SPAN && elapsed > 0) {
+        spacing = elapsed / span;
+    }
+    if (spacing <= 0) spacing = fallback_spacing;
+    if (spacing <= 0) return -1;
+
+    return static_cast<int>(lag / spacing);
+}
+
 qreal calculateIdealFontSize(int width, const QString& text, QFont font, qreal minPointSize, qreal font_size) {
     while(font_size >= minPointSize) {
         font.setPointSizeF(font_size);

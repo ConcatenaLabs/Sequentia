@@ -52,7 +52,8 @@ public:
     };
 
     enum ColumnWidths {
-        STATUS_COLUMN_WIDTH = 30,
+        //! Wide enough for the "Status" header text, not just the state icon.
+        STATUS_COLUMN_WIDTH = 60,
         WATCHONLY_COLUMN_WIDTH = 23,
         DATE_COLUMN_WIDTH = 120,
         TYPE_COLUMN_WIDTH = 113,

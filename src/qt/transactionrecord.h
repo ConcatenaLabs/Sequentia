@@ -83,6 +83,7 @@ public:
         Fee,
         IssuedAsset,
         Staking,
+        Unstake,
     };
 
     /** Number of confirmation recommended for accepting a transaction */

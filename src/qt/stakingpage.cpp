@@ -23,10 +23,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 #include <QApplication>
 #include <QClipboard>
 #include <QDateTime>
+#include <QGuiApplication>
+#include <QScreen>
 #include <QDoubleValidator>
 #include <QFormLayout>
 #include <QGroupBox>
@@ -35,6 +38,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QLocale>
+#include <QMessageBox>
 #include <QPainter>
 #include <QPointer>
 #include <QPushButton>
@@ -57,6 +61,43 @@ QString FormatWeight(uint64_t atoms)
     QString s = QString::number((double)atoms / 100000000.0, 'f', 8);
     if (s.contains('.')) { while (s.endsWith('0')) s.chop(1); if (s.endsWith('.')) s.chop(1); }
     return s;
+}
+
+//! Ask a yes/no question in a dialog placed over the window the user is working
+//! in. Qt leaves the placement to the window manager, and some of them (WSLg's
+//! among them) park it at the top-left corner BEHIND the main window: a
+//! confirmation the user never sees is a confirmation that did not happen, and
+//! here it guards moving real funds.
+int AskCentred(QWidget* parent, const QString& title, const QString& text)
+{
+    QWidget* top = parent ? parent->window() : nullptr;
+    QMessageBox box(QMessageBox::Question, title, text,
+                    QMessageBox::Yes | QMessageBox::Cancel, top);
+    box.setDefaultButton(QMessageBox::Cancel);
+    QPointer<QMessageBox> guard(&box);
+    // Only once exec() has laid the dialog out does it have a real size to
+    // centre, so do it on the next turn of the event loop.
+    QTimer::singleShot(0, &box, [guard, top] {
+        if (!guard) return;
+        if (top && top->isVisible()) {
+            QRect g = guard->frameGeometry();
+            g.moveCenter(top->frameGeometry().center());
+            // A parent straddling a screen edge must not push the dialog off it.
+            if (QScreen* screen = guard->screen() ? guard->screen() : QGuiApplication::primaryScreen()) {
+                const QRect avail = screen->availableGeometry();
+                if (!avail.isEmpty()) {
+                    QPoint tl = g.topLeft();
+                    tl.setX(qBound(avail.left(), tl.x(), qMax(avail.left(), avail.right() - g.width() + 1)));
+                    tl.setY(qBound(avail.top(), tl.y(), qMax(avail.top(), avail.bottom() - g.height() + 1)));
+                    g.moveTopLeft(tl);
+                }
+            }
+            guard->move(g.topLeft());
+        }
+        guard->raise();
+        guard->activateWindow();
+    });
+    return box.exec();
 }
 } // namespace
 
@@ -239,13 +280,82 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
         m_stake_amount->setValidator(v);
     }
     m_stake_button = new QPushButton(tr("Stake"), stakeGroup);
+    // Staking the whole balance can never work: the transaction still has to pay
+    // its own network fee, which comes out of the same coins. Max fills in the
+    // balance minus a little headroom for it, so the obvious action succeeds
+    // instead of failing with "insufficient funds".
+    m_stake_max = new QPushButton(tr("Max"), stakeGroup);
+    m_stake_max->setToolTip(tr("Stake as much as possible: your whole %1 balance, less a small amount left over to "
+                               "pay the transaction's network fee.").arg(BitcoinUnits::policyAssetTicker()));
     m_result = new QLabel(stakeGroup);
     m_result->setWordWrap(true);
     m_result->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    stakeForm->addRow(tr("Amount:"), m_stake_amount);
+    {
+        QWidget* row = new QWidget(stakeGroup);
+        QHBoxLayout* h = new QHBoxLayout(row);
+        h->setContentsMargins(0, 0, 0, 0);
+        h->addWidget(m_stake_amount);
+        h->addWidget(m_stake_max);
+        stakeForm->addRow(tr("Amount:"), row);
+    }
     stakeForm->addRow(QString(), m_stake_button);
     stakeForm->addRow(tr("Result:"), m_result);
     layout->addWidget(stakeGroup);
+
+    // --- Unstake action ---
+    QGroupBox* unstakeGroup = new QGroupBox(tr("Withdraw stake"), this);
+    QFormLayout* unstakeForm = new QFormLayout(unstakeGroup);
+    m_unstake_info = new QLabel(tr("…"), unstakeGroup);
+    m_unstake_info->setWordWrap(true);
+    m_unstake_info->setToolTip(tr("The unbonding wait counts from the moment you staked, not from when you click "
+                                  "Withdraw: a stake older than the unbonding period can be withdrawn right away, "
+                                  "a younger one tells you here when it unlocks."));
+    m_unstake_amount = new QLineEdit(unstakeGroup);
+    m_unstake_amount->setPlaceholderText(tr("amount of %1 (leave empty to withdraw everything available)").arg(BitcoinUnits::policyAssetTicker()));
+    m_unstake_amount->setToolTip(tr("What happens when you withdraw: the %1 comes back to this wallet as a normal "
+                                    "incoming payment, spendable as soon as the withdrawal confirms, and your stake "
+                                    "(and share of the fees) shrinks by the withdrawn amount. The network fee is "
+                                    "paid out of the withdrawn amount.").arg(BitcoinUnits::policyAssetTicker()));
+    {
+        QLocale lc(QLocale::C); lc.setNumberOptions(QLocale::RejectGroupSeparator);
+        auto* v = new QDoubleValidator(0, 1e15, 8, m_unstake_amount);
+        v->setLocale(lc);
+        m_unstake_amount->setValidator(v);
+    }
+    m_unstake_button = new QPushButton(tr("Withdraw"), unstakeGroup);
+    m_unstake_result = new QLabel(unstakeGroup);
+    m_unstake_result->setWordWrap(true);
+    m_unstake_result->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_unstake_max = new QPushButton(tr("Max"), unstakeGroup);
+    m_unstake_max->setToolTip(tr("Withdraw everything that is withdrawable right now."));
+    unstakeForm->addRow(QString(), m_unstake_info);
+    {
+        QWidget* row = new QWidget(unstakeGroup);
+        QHBoxLayout* h = new QHBoxLayout(row);
+        h->setContentsMargins(0, 0, 0, 0);
+        h->addWidget(m_unstake_amount);
+        h->addWidget(m_unstake_max);
+        unstakeForm->addRow(tr("Amount:"), row);
+    }
+    // The button is disabled while nothing is withdrawable, and Qt does not
+    // deliver tooltip events to a disabled widget — so the "why is this grey"
+    // explanation has to hang on an enabled container around it.
+    m_unstake_bump = new QPushButton(tr("Speed up (higher fee)"), unstakeGroup);
+    m_unstake_bump->setToolTip(tr("Re-send the withdrawal that is waiting to confirm, paying a higher network fee "
+                                  "so it is picked up sooner. It goes to the same address for the same amount, "
+                                  "less the extra fee."));
+    m_unstake_bump->setVisible(false);
+    m_unstake_button_holder = new QWidget(unstakeGroup);
+    {
+        QHBoxLayout* h = new QHBoxLayout(m_unstake_button_holder);
+        h->setContentsMargins(0, 0, 0, 0);
+        h->addWidget(m_unstake_button);
+        h->addWidget(m_unstake_bump);
+        h->addStretch();
+    }
+    unstakeForm->addRow(QString(), m_unstake_button_holder);
+    unstakeForm->addRow(tr("Result:"), m_unstake_result);
+    layout->addWidget(unstakeGroup);
 
     // --- Committee / registry status ---
     QGroupBox* statusGroup = new QGroupBox(tr("Stake registry"), this);
@@ -332,6 +442,10 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
     layout->addStretch();
 
     connect(m_stake_button, &QPushButton::clicked, this, &StakingPage::onStake);
+    connect(m_stake_max, &QPushButton::clicked, this, &StakingPage::onStakeMax);
+    connect(m_unstake_button, &QPushButton::clicked, this, &StakingPage::onUnstake);
+    connect(m_unstake_max, &QPushButton::clicked, this, &StakingPage::onUnstakeMax);
+    connect(m_unstake_bump, &QPushButton::clicked, this, &StakingPage::onUnstakeBump);
     connect(m_refresh_button, &QPushButton::clicked, this, &StakingPage::onRefreshClicked);
 }
 
@@ -370,6 +484,18 @@ void StakingPage::setStatus(const QString& msg, bool error)
 {
     m_status->setStyleSheet(error ? "color:#ff6b6b;" : "color:#3ecf7a;");
     m_status->setText(msg);
+}
+
+void StakingPage::setCardResult(QLabel* result, const QString& msg, bool error)
+{
+    // The page-wide status line is at the very bottom, past every card: on a
+    // scrolled page an error shown only there is invisible, and the button
+    // looks broken. Put it in the card too, and colour a refusal red.
+    if (result) {
+        result->setStyleSheet(error ? "color:#ff6b6b;" : QString());
+        result->setText(msg);
+    }
+    setStatus(msg, error);
 }
 
 void StakingPage::refresh()
@@ -444,6 +570,7 @@ void StakingPage::refresh()
     refreshOwnStake(reg);
     refreshProducedBlocks();
     refreshWatchOnlyKey();
+    refreshUnstakeInfo();
 
     // Stamp the throttle state so scheduleRefresh() can skip a redundant re-run
     // (same tip, refreshed a moment ago) next time the tab is shown.
@@ -519,6 +646,7 @@ void StakingPage::refreshOwnStake(const UniValue& registry)
             mine += w;
         }
     }
+    m_registry_stake = mine;
     const double share = total > 0 ? (double)mine / (double)total : 0.0;
     if (m_my_stake) {
         m_my_stake->setText(mine > 0
@@ -714,15 +842,15 @@ void StakingPage::onStake()
 {
     if (!m_wallet_model) return;
     const QString amount = m_stake_amount->text().trimmed();
-    if (amount.isEmpty()) { setStatus(tr("Enter an amount of %1 to stake.").arg(BitcoinUnits::policyAssetTicker()), true); return; }
+    if (amount.isEmpty()) { setCardResult(m_result, tr("Enter an amount of %1 to stake.").arg(BitcoinUnits::policyAssetTicker()), true); return; }
     bool amtok = false; const double amtval = amount.toDouble(&amtok);
-    if (!amtok || amtval <= 0) { setStatus(tr("Enter a positive %1 amount.").arg(BitcoinUnits::policyAssetTicker()), true); return; }
+    if (!amtok || amtval <= 0) { setCardResult(m_result, tr("Enter a positive %1 amount.").arg(BitcoinUnits::policyAssetTicker()), true); return; }
     // Reject sub-floor stakes up front: the consensus rule (and registerstake) drop
     // anything below the chain minimum, so it would never count toward production.
     if (g_pos_min_stake > 0) {
         const int64_t amt_sats = (int64_t)std::llround(amtval * 100000000.0);
         if (amt_sats < (int64_t)g_pos_min_stake) {
-            setStatus(tr("Minimum stake on this network is %1 %2 - a smaller stake would never count.")
+            setCardResult(m_result, tr("Minimum stake on this network is %1 %2 - a smaller stake would never count.")
                           .arg(QString::number((double)g_pos_min_stake / 100000000.0, 'f', 0), BitcoinUnits::policyAssetTicker()), true);
             return;
         }
@@ -731,13 +859,13 @@ void StakingPage::onStake()
 
     // 1) a fresh address whose key we'll stake with
     UniValue addrv = callRpc("getnewaddress", UniValue(UniValue::VARR), ok, err);
-    if (!ok) { setStatus(tr("Could not create a staking address: %1").arg(err), true); return; }
+    if (!ok) { setCardResult(m_result, tr("Could not create a staking address: %1").arg(err), true); return; }
     const QString addr = QString::fromStdString(addrv.getValStr());
 
     // 2) its public key
     UniValue aiparams(UniValue::VARR); aiparams.push_back(addr.toStdString());
     UniValue info = callRpc("getaddressinfo", aiparams, ok, err);
-    if (!ok || !info.exists("pubkey")) { setStatus(tr("Could not read the staking key: %1").arg(err), true); return; }
+    if (!ok || !info.exists("pubkey")) { setCardResult(m_result, tr("Could not read the staking key: %1").arg(err), true); return; }
     const QString pubkey = QString::fromStdString(info["pubkey"].get_str());
 
     // 3) register the stake (funds the staking output)
@@ -745,7 +873,7 @@ void StakingPage::onStake()
     rsparams.push_back(pubkey.toStdString());
     rsparams.push_back(UniValue(UniValue::VNUM, amount.toStdString()));
     UniValue res = callRpc("registerstake", rsparams, ok, err);
-    if (!ok) { setStatus(tr("Staking failed: %1").arg(err), true); return; }
+    if (!ok) { setCardResult(m_result, tr("Staking failed: %1").arg(err), true); return; }
     const QString txid = res.exists("txid") ? QString::fromStdString(res["txid"].getValStr()) : QString();
     const qint64 unbond = res.exists("unbonding_seconds") ? (qint64)res["unbonding_seconds"].get_int64() : 0;
 
@@ -777,9 +905,366 @@ void StakingPage::onStake()
         msg += tr("\n\nYour stake is registered. This wallet can't export the staking key automatically, so "
                   "click \"Start producing blocks\" once the stake confirms to begin producing.");
     }
+    // Clear any red left over from an earlier refusal: this is a success.
+    m_result->setStyleSheet(QString());
     m_result->setText(msg);
     setStatus(enabled ? tr("Staked. Block production is on. The stake counts once the transaction confirms.")
                       : tr("Stake registered. It will count once the transaction confirms."), false);
+    refresh();
+}
+
+void StakingPage::refreshUnstakeInfo(const UniValue* prefetched)
+{
+    if (!m_unstake_info || !m_wallet_model) return;
+    bool ok = true; QString err;
+    UniValue list = prefetched ? *prefetched : callRpc("liststakeutxos", UniValue(UniValue::VARR), ok, err);
+    if (!ok || !list.isArray()) {
+        m_unstake_info->setText(tr("Staked coins unavailable: %1").arg(err));
+        if (m_unstake_button) m_unstake_button->setEnabled(false);
+        if (m_unstake_button_holder) {
+            m_unstake_button_holder->setToolTip(
+                tr("Withdrawing is unavailable because the staked coins could not be read: %1").arg(err));
+        }
+        return;
+    }
+    CAmount mature = 0, immature = 0, withdrawing = 0;
+    QString next_unlock;
+    int64_t best_height = -1;
+    for (size_t i = 0; i < list.size(); ++i) {
+        const UniValue& o = list[i];
+        CAmount amt = 0;
+        try { amt = AmountFromValue(o["amount"]); } catch (...) { continue; }
+        if (o["withdrawing"].isBool() && o["withdrawing"].get_bool()) {
+            withdrawing += amt;
+            continue;
+        }
+        if (o["withdrawable"].isBool() && o["withdrawable"].get_bool()) {
+            mature += amt;
+            continue;
+        }
+        immature += amt;
+        // Remember the stake that unlocks first; its status says when.
+        const int64_t h = o["spendable_height"].isNum() ? o["spendable_height"].get_int64()
+                                                        : std::numeric_limits<int64_t>::max();
+        if (best_height < 0 || h < best_height) {
+            best_height = h;
+            next_unlock = QString::fromStdString(o["status"].getValStr());
+        }
+    }
+    const QString ticker = BitcoinUnits::policyAssetTicker();
+    QString text;
+    if (withdrawing > 0 && mature == 0 && immature == 0) {
+        // The commonest reason the numbers look wrong right after a withdrawal:
+        // the coins are already spent, but the stake registry keeps crediting
+        // their weight until the withdrawal confirms.
+        text = tr("A withdrawal of %1 %2 has been sent and is waiting to confirm. Until it does, that amount "
+                  "still counts as your stake.")
+                   .arg(FormatWeight((uint64_t)withdrawing), ticker);
+    } else if (mature == 0 && immature == 0 && m_registry_stake > 0) {
+        // The registry credits this wallet's keys with stake, yet the wallet has
+        // no staking output to spend. Saying "nothing is staked" here would
+        // contradict the card above, which just showed that weight.
+        text = tr("Your %1 %2 of registered stake cannot be withdrawn from this wallet, because it does not "
+                  "have the transaction that created it — that stake was set up elsewhere.")
+                   .arg(FormatWeight(m_registry_stake), ticker);
+    } else if (mature == 0 && immature == 0) {
+        text = tr("Nothing is staked from this wallet yet.");
+    } else if (immature == 0) {
+        text = tr("Withdrawable now: %1 %2. The unbonding wait for these coins has already been served.")
+                   .arg(FormatWeight((uint64_t)mature), ticker);
+    } else if (mature == 0) {
+        text = tr("Still unbonding: %1 %2 — %3. Nothing can be withdrawn before then; the stake keeps "
+                  "counting (and earning) the whole time.")
+                   .arg(FormatWeight((uint64_t)immature), ticker, next_unlock);
+    } else {
+        text = tr("Withdrawable now: %1 %3. Still unbonding: %2 %3 (%4).")
+                   .arg(FormatWeight((uint64_t)mature), FormatWeight((uint64_t)immature), ticker, next_unlock);
+    }
+    m_unstake_info->setText(text);
+    if (m_unstake_button) m_unstake_button->setEnabled(mature > 0);
+    // Offer the fee bump only while there is something to bump.
+    if (m_unstake_bump) m_unstake_bump->setVisible(withdrawing > 0);
+    // Say why the button is greyed out, right where the pointer already is: a
+    // disabled control with no explanation reads as a broken one. The tooltip
+    // goes on the enabled wrapper, since Qt sends no tooltip event to a
+    // disabled widget.
+    if (m_unstake_button_holder) {
+        QString tip;
+        if (mature > 0) {
+            tip = tr("Withdraw %1 %2 back to this wallet.").arg(FormatWeight((uint64_t)mature), ticker);
+        } else if (immature > 0) {
+            tip = tr("Nothing can be withdrawn yet: your %1 %2 is still serving its unbonding wait (%3). "
+                     "The stake keeps counting — and earning — the whole time.")
+                      .arg(FormatWeight((uint64_t)immature), ticker, next_unlock);
+        } else if (withdrawing > 0) {
+            tip = tr("A withdrawal of %1 %2 is already on its way and waiting to confirm.")
+                      .arg(FormatWeight((uint64_t)withdrawing), ticker);
+        } else if (m_registry_stake > 0) {
+            tip = tr("This wallet does not have the transaction that created your %1 %2 of registered "
+                     "stake, so it cannot withdraw it.")
+                      .arg(FormatWeight(m_registry_stake), ticker);
+        } else {
+            tip = tr("Nothing is staked from this wallet, so there is nothing to withdraw.");
+        }
+        m_unstake_button_holder->setToolTip(tip);
+        if (m_unstake_button) m_unstake_button->setToolTip(tip);
+    }
+}
+
+void StakingPage::onStakeMax()
+{
+    if (!m_wallet_model || !m_stake_amount) return;
+    bool ok; QString err;
+    UniValue bal = callRpc("getbalance", UniValue(UniValue::VARR), ok, err);
+    if (!ok) { setCardResult(m_result, tr("Could not read your balance: %1").arg(err), true); return; }
+    // getbalance returns a map keyed by asset; the stake is always the policy asset.
+    CAmount available = 0;
+    if (bal.isObject()) {
+        for (const std::string& k : bal.getKeys()) {
+            if (k == "bitcoin" || k == ::policyAsset.GetHex()) {
+                try { available = AmountFromValue(bal[k]); } catch (...) {}
+                break;
+            }
+        }
+    } else if (bal.isNum() || bal.isStr()) {
+        try { available = AmountFromValue(bal); } catch (...) {}
+    }
+    // Leave headroom for the funding transaction's own fee. The exact fee is not
+    // known until the wallet has picked the inputs, so keep a small, generous
+    // margin rather than offer an amount that then fails to fund.
+    const CAmount headroom = 10000; // 0.0001 SEQ
+    if (available <= headroom) {
+        setCardResult(m_result, tr("Your balance (%1 %2) is not enough to stake and still pay the transaction fee.")
+                                     .arg(FormatWeight((uint64_t)std::max<CAmount>(available, 0)),
+                                          BitcoinUnits::policyAssetTicker()), true);
+        return;
+    }
+    const CAmount most = available - headroom;
+    m_stake_amount->setText(FormatWeight((uint64_t)most));
+    // Always say what Max decided. Silently filling a field leaves the user
+    // wondering whether the click registered, and the reserved fee headroom is
+    // exactly the thing that is not obvious.
+    setCardResult(m_result, tr("Ready to stake %1 %2 — your whole balance except %3 %2, kept aside to pay the "
+                              "transaction's network fee.")
+                                .arg(FormatWeight((uint64_t)most), BitcoinUnits::policyAssetTicker(),
+                                     FormatWeight((uint64_t)headroom)), false);
+}
+
+void StakingPage::onUnstakeMax()
+{
+    if (!m_wallet_model || !m_unstake_amount) return;
+    // Show the number. Leaving the field empty already means "everything", but a
+    // Max button that clears the box looks like it did nothing at all — the user
+    // pressed it to SEE how much there is.
+    bool ok; QString err;
+    UniValue list = callRpc("liststakeutxos", UniValue(UniValue::VARR), ok, err);
+    if (!ok || !list.isArray()) {
+        setCardResult(m_unstake_result, tr("Could not read the staked coins: %1").arg(err), true);
+        return;
+    }
+    CAmount mature = 0;
+    for (size_t i = 0; i < list.size(); ++i) {
+        const UniValue& o = list[i];
+        if (o["withdrawing"].isBool() && o["withdrawing"].get_bool()) continue;
+        if (!(o["withdrawable"].isBool() && o["withdrawable"].get_bool())) continue;
+        try { mature += AmountFromValue(o["amount"]); } catch (...) {}
+    }
+    // Keep the summary line consistent with the figure just filled in.
+    refreshUnstakeInfo(&list);
+    if (mature <= 0) {
+        setCardResult(m_unstake_result, tr("There is nothing to withdraw right now."), true);
+        return;
+    }
+    const QString ticker = BitcoinUnits::policyAssetTicker();
+    m_unstake_amount->setText(FormatWeight((uint64_t)mature));
+    setCardResult(m_unstake_result, tr("Ready to withdraw %1 %2 — everything currently available. The network "
+                                       "fee is taken out of this amount.")
+                                        .arg(FormatWeight((uint64_t)mature), ticker), false);
+}
+
+void StakingPage::onUnstakeBump()
+{
+    if (!m_wallet_model) return;
+    const QString ticker = BitcoinUnits::policyAssetTicker();
+    if (AskCentred(this, tr("Speed up the withdrawal?"),
+                   tr("The withdrawal waiting to confirm will be re-sent with a higher network fee, so it is "
+                      "picked up sooner.\n\nIt goes to the same address for the same amount, less the extra "
+                      "fee. The original is replaced, not repeated — only one of the two can ever confirm.")) != QMessageBox::Yes) {
+        return;
+    }
+    if (m_unstake_bump) m_unstake_bump->setEnabled(false);
+    bool ok; QString err;
+    UniValue res = callRpc("bumpwithdrawstakefee", UniValue(UniValue::VARR), ok, err);
+    if (m_unstake_bump) m_unstake_bump->setEnabled(true);
+    if (!ok) {
+        setCardResult(m_unstake_result, tr("Could not speed up the withdrawal: %1").arg(err), true);
+        return;
+    }
+    const QString txid = res.exists("txid") ? QString::fromStdString(res["txid"].getValStr()) : QString();
+    const QString oldf = res.exists("old_fee") ? QString::fromStdString(res["old_fee"].getValStr()) : QString();
+    const QString newf = res.exists("fee") ? QString::fromStdString(res["fee"].getValStr()) : QString();
+    const QString amt = res.exists("amount") ? QString::fromStdString(res["amount"].getValStr()) : QString();
+    if (m_unstake_result) {
+        m_unstake_result->setStyleSheet(QString());
+        m_unstake_result->setText(tr("Withdrawal re-sent with a higher fee: %1 %2 instead of %3 %2.\n"
+                                     "You now receive %4 %2.\nTransaction: %5")
+                                      .arg(newf, ticker, oldf, amt, txid));
+    }
+    setStatus(tr("Withdrawal re-sent with a higher fee."), false);
+    refresh();
+}
+
+void StakingPage::onUnstake()
+{
+    if (!m_wallet_model) return;
+    bool ok; QString err;
+
+    // What the wallet has staked, and how much of it is withdrawable right now.
+    UniValue list = callRpc("liststakeutxos", UniValue(UniValue::VARR), ok, err);
+    if (!ok || !list.isArray()) { setCardResult(m_unstake_result, tr("Could not read the staked coins: %1").arg(err), true); return; }
+    CAmount mature_total = 0, immature_total = 0, withdrawing_total = 0;
+    QString next_unlock;
+    int64_t best_height = -1;
+    for (size_t i = 0; i < list.size(); ++i) {
+        const UniValue& o = list[i];
+        CAmount amt = 0;
+        try { amt = AmountFromValue(o["amount"]); } catch (...) { continue; }
+        // Already on its way out: neither withdrawable again nor something the
+        // user is waiting to unlock.
+        if (o["withdrawing"].isBool() && o["withdrawing"].get_bool()) {
+            withdrawing_total += amt;
+            continue;
+        }
+        if (o["withdrawable"].isBool() && o["withdrawable"].get_bool()) {
+            mature_total += amt;
+            continue;
+        }
+        immature_total += amt;
+        const int64_t h = o["spendable_height"].isNum() ? o["spendable_height"].get_int64()
+                                                        : std::numeric_limits<int64_t>::max();
+        if (best_height < 0 || h < best_height) {
+            best_height = h;
+            next_unlock = QString::fromStdString(o["status"].getValStr());
+        }
+    }
+    const QString ticker = BitcoinUnits::policyAssetTicker();
+    // The card's summary line was rendered at the last refresh and the numbers
+    // move with every block; re-render it from the very list just fetched, so
+    // the card and any refusal below can never quote two different totals.
+    refreshUnstakeInfo(&list);
+    if (mature_total == 0 && immature_total == 0) {
+        setCardResult(m_unstake_result, withdrawing_total > 0
+            ? tr("A withdrawal of %1 %2 is already on its way; wait for it to confirm.")
+                  .arg(FormatWeight((uint64_t)withdrawing_total), ticker)
+            : tr("Nothing is staked from this wallet."), true);
+        return;
+    }
+    if (mature_total == 0) {
+        setCardResult(m_unstake_result, tr("Nothing can be withdrawn yet: %1.").arg(next_unlock), true);
+        return;
+    }
+
+    // The amount. Empty means everything that is withdrawable.
+    const QString amount_text = m_unstake_amount ? m_unstake_amount->text().trimmed() : QString();
+    CAmount want = mature_total;
+    bool partial = false;
+    if (!amount_text.isEmpty()) {
+        bool amtok = false;
+        const double amtval = amount_text.toDouble(&amtok);
+        if (!amtok || amtval <= 0) {
+            setCardResult(m_unstake_result, tr("Enter a positive %1 amount, or leave the field empty to withdraw everything available.").arg(ticker), true);
+            return;
+        }
+        want = (CAmount)std::llround(amtval * 100000000.0);
+        if (want > mature_total) {
+            setCardResult(m_unstake_result, tr("Only %1 %2 can be withdrawn right now%3").arg(
+                          FormatWeight((uint64_t)mature_total), ticker,
+                          immature_total > 0 ? tr(" — the rest is still unbonding.") : QString(".")), true);
+            return;
+        }
+        partial = want < mature_total;
+    }
+
+    // Numbers for the confirmation: our registered stake and the network total.
+    // Weights and coin amounts share the same unit (1e-8), so they compare directly.
+    const CAmount my_total = mature_total + immature_total;
+    double net_total = 0;
+    UniValue reg = callRpc("getstakerinfo", UniValue(UniValue::VARR), ok, err, /*wallet=*/false);
+    if (ok && reg.isObject()) {
+        for (const std::string& pk : reg.getKeys()) {
+            if (reg[pk].isNum()) net_total += (double)reg[pk].get_int64();
+        }
+    }
+    const double before = net_total > 0 ? (double)my_total / net_total : 0.0;
+    const double after_den = net_total - (double)want;
+    const double after = after_den > 0 ? (double)(my_total - want) / after_den : 0.0;
+
+    QString msg = tr("You are about to withdraw %1 %2 from your stake.")
+                      .arg(FormatWeight((uint64_t)want), ticker);
+    msg += "\n\n";
+    msg += tr("The %1 returns to this wallet at a fresh receiving address, as a normal incoming payment, "
+              "minus the network fee. It is spendable as soon as the withdrawal confirms: the unbonding "
+              "wait started when you staked these coins, and it has already been served.")
+               .arg(ticker);
+    msg += "\n\n";
+    msg += tr("When the withdrawal confirms, your registered stake drops from %1 to %2 %3")
+               .arg(FormatWeight((uint64_t)my_total), FormatWeight((uint64_t)(my_total - want)), ticker);
+    if (net_total > 0) {
+        msg += tr(", and your share of the network stake goes from %1% to about %2%. You will be elected "
+                  "to produce blocks (and collect their fees) correspondingly less often.")
+                   .arg(QString::number(before * 100.0, 'f', before < 0.01 ? 3 : 1),
+                        QString::number(after * 100.0, 'f', after < 0.01 ? 3 : 1));
+    } else {
+        msg += tr(".");
+    }
+    if (partial) {
+        msg += "\n\n";
+        msg += tr("The rest of your stake keeps staking. If a staked coin has to be split to withdraw this "
+                  "exact amount, the remainder is re-staked automatically and its unbonding clock restarts.");
+    }
+    if (AskCentred(this, tr("Withdraw stake?"), msg) != QMessageBox::Yes) {
+        return;
+    }
+
+    if (m_unstake_button) m_unstake_button->setEnabled(false);
+    UniValue params(UniValue::VARR);
+    if (partial) {
+        // Any staker key may contribute (null pubkey): the RPC takes whole
+        // outputs largest-first, so at most one is split and its remainder is
+        // re-staked to that same key. The amount goes as typed, so the RPC
+        // parses it once and no double rounding creeps in.
+        params.push_back(UniValue(UniValue::VNULL));
+        params.push_back(UniValue(UniValue::VNUM, amount_text.toStdString()));
+    }
+    UniValue res = callRpc("withdrawstake", params, ok, err);
+    if (m_unstake_button) m_unstake_button->setEnabled(true);
+    if (!ok) {
+        setCardResult(m_unstake_result, tr("The withdrawal failed: %1").arg(err), true);
+        return;
+    }
+
+    const QString txid = res.exists("txid") ? QString::fromStdString(res["txid"].getValStr()) : QString();
+    const QString dest = res.exists("destination") ? QString::fromStdString(res["destination"].getValStr()) : QString();
+    const QString amt = res.exists("amount") ? QString::fromStdString(res["amount"].getValStr()) : QString();
+    const QString fee = res.exists("fee") ? QString::fromStdString(res["fee"].getValStr()) : QString();
+    QString out = tr("Withdrew %1 %2 to %3 (network fee %4 %2).\nTransaction: %5").arg(amt, ticker, dest, fee, txid);
+    if (res.exists("restaked")) {
+        out += tr("\nRe-staked remainder: %1 %2 (its unbonding clock restarted).")
+                   .arg(QString::fromStdString(res["restaked"].getValStr()), ticker);
+    }
+    if (res.exists("share_before") && res.exists("share_after")) {
+        out += tr("\nShare of the network stake once it confirms: %1% → %2%.")
+                   .arg(QString::number(res["share_before"].get_real() * 100.0, 'f', 2),
+                        QString::number(res["share_after"].get_real() * 100.0, 'f', 2));
+    }
+    // The card already carries the detailed outcome above; keep the page-wide
+    // line for the one-sentence confirmation so it does not overwrite it.
+    if (m_unstake_result) {
+        m_unstake_result->setStyleSheet(QString());
+        m_unstake_result->setText(out);
+    }
+    if (m_unstake_amount) m_unstake_amount->clear();
+    setStatus(tr("Withdrawal sent. Your stake updates when the transaction confirms."), false);
     refresh();
 }
 
