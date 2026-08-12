@@ -422,21 +422,37 @@ The node offers no per-asset supply accounting (section 3), so the standard supp
 
 ### 5.5 Compliance capabilities
 
-FiatToken, the contract Circle upgrades bridged deployments into, carries roles that the
-bridged asset deliberately does not exercise. Those roles are available on this network
-and then some; the bridged asset simply does not use them yet, for the reasons below.
-First, what the bridged asset itself provides:
+FiatToken, the contract Circle upgrades bridged deployments into, carries transfer-level
+controls that this asset does not have. The mapping:
 
 | FiatToken role | Sequentia equivalent under this spec | Status |
 |---|---|---|
-| Owner / ProxyAdmin | Reissuance token custody | Equivalent (stronger: consensus-enforced, not code-enforced) |
+| Owner / ProxyAdmin | Reissuance token custody | Equivalent, and stronger: consensus-enforced rather than code-enforced |
 | MasterMinter, minters, allowances | Operator mints only against finalized deposits; no on-chain allowance cap | Operational analogue; on-chain power is unbounded for the token holder |
-| Pauser | Bridge endpoint pause (5.3). Transfer-level pause is available via OpenAMP but deliberately unused in the bridged phase | Phase choice, not a gap |
-| Blacklister | Deposit and redemption screening at the bridge endpoints. Transfer-level freeze is available via OpenAMP but deliberately unused in the bridged phase | Phase choice, not a gap |
+| Pauser | Bridge endpoint pause (5.3); no transfer-level pause | Delta |
+| Blacklister | Deposit and redemption screening at the bridge endpoints; no transfer-level freeze | Delta |
 | Rescuer | Not applicable to UTXO outputs | Not applicable |
 
-The two deltas are real and this spec does not pretend otherwise. Context for the
-due-diligence conversation:
+**The two deltas are real, and there is no mechanism on this chain today that closes
+them for an asset like this one.** A covenant, in Tapscript or Simplicity, binds only
+outputs created under it, so it cannot reach a holder who already holds the asset. The
+reissuance token mints but cannot freeze. Issuer-governed assets do exist on this network
+(OpenAMP, which governs an asset by requiring every unit to sit in a co-signed output),
+but that model is decided at issuance and costs exactly the composability a
+general-purpose dollar depends on, so it is not what this asset is or will become
+(owner's decision, 2026-08-12).
+
+What would close the deltas is a consensus rule: a freeze that binds holders who already
+hold the asset, the way a blacklist added to a FiatToken proxy binds every existing
+holder the moment it ships. The network does not have one. Whether to add one, and on
+what terms, belongs to the protocol owners rather than to this standard, and the
+constraint already stated is that freezability would have to be an identifiable property
+of an asset, fixed at issuance, not a power every issuer silently holds over every
+asset. One consequence is immediate and time-bound: such a property could only ever be
+conferred at issuance, so if this asset should carry it, that has to be settled before
+the first deposit rather than after.
+
+Context for the due-diligence conversation:
 
 - Every non-EVM chain where Circle issues native USDC (Solana, Stellar, Sui, Aptos,
   Algorand, NEAR, Hedera) has an account-freeze primitive at the token layer. Circle has
@@ -445,136 +461,6 @@ due-diligence conversation:
   freeze capability at all; the issuer's control points are issuance and redemption.
   The bridged phase of this spec matches that precedent exactly.
 
-**The capability exists today: OpenAMP.** Sequentia already runs issuer-governed assets,
-open source, live on the testnet, targeting parity with Blockstream's AMP2, the system
-that manages regulated assets on Liquid. That matters for this conversation because AMP
-is the closest existing precedent to what a fiat issuer would evaluate on a UTXO chain,
-and OpenAMP is its self-hostable equivalent here. Full design:
-`doc/sequentia/openamp-design.md`.
-
-How it works, in one paragraph. A governed asset lives only in taproot outputs whose
-internal key is a nothing-up-my-sleeve point, so there is no key-path escape, and whose
-script tree carries a per-holder leaf `<K_user> CHECKSIGVERIFY <K_policy> CHECKSIG`: a
-2-of-2 between the holder and the issuer's policy server. The holder cannot move the
-asset without the issuer, and the issuer cannot move it without the holder. An optional
-clawback leaf `<K_issuer> CHECKSIGVERIFY <K_policy> CHECKSIG` covers seizure and
-lost-key recovery. The asset id commits to the policy key through the issuance contract
-hash, so the binding between an asset and who governs it is cryptographic rather than a
-database row. None of this requires a consensus change, which is the explicit design
-goal: full nodes remain oblivious.
-
-**What is built versus what is designed**, because the difference is material to anyone
-evaluating this. The enclave, the co-signing, freeze, clawback, velocity limits, holder
-caps, ownership reports and the transparency log are implemented and live on the
-testnet. The policy key is *designed* to be a FROST threshold, so that no single
-compromised machine can sign an asset out of its enclave, and the signing engine sits
-behind an interface built for exactly that substitution, with the group key's invariance
-under resharing meaning the signer set can change without touching any issued asset. But
-the threshold backend itself is not written yet: today's implementation is a single
-software key per asset behind that interface. For a testnet demonstration that is fine;
-for a fiat issuer it is the gap that has to close before the policy server is worth
-trusting with a real instrument, and it is a self-contained piece of work rather than a
-design question.
-
-Against FiatToken, that is not a gap but a superset:
-
-| FiatToken role | OpenAMP equivalent |
-|---|---|
-| Blacklister | Freeze by refusal: the policy server declines to co-sign for a sanctioned holder, across every asset on that instance. Proven in `feature_openamp_m0.py`. |
-| Pauser | An asset-wide lock-in height in the policy rules, and refusal applied asset-wide. |
-| Rescuer | The clawback leaf, which recovers a holder's whole balance rather than only tokens stranded at the contract address. It must be enabled at issuance and cannot be added later. |
-| MasterMinter | The reissuance token, as in section 3. |
-| (no equivalent) | Velocity limits, holder caps, vesting, KYC categories, ownership reports at a block height, and a hash-chained transparency log of every policy decision, anchored on chain. |
-
-**The position taken for USDC, and why.** The bridged asset stays a plain, unencumbered
-Elements asset. This is a decision about *phase*, not about capability:
-
-- Circle's own standard does not ask for transfer controls during the bridged phase. It
-  asks for a supply lock, a burnable escrow, and transferable ownership, all of which
-  section 5.3 and section 6 provide. Transfer controls belong to FiatToken, which is
-  what the asset becomes *after* Circle adopts it.
-- What the bridged phase needs is adoption, and adoption needs composability: the asset
-  has to work in every wallet, in Lightning channels, in the DEX order book, and as a
-  fee asset. Circle upgrades assets that won adoption, so encumbering the asset before
-  it has any would defeat the purpose.
-- Tether on Liquid, the largest stablecoin on any Elements chain, operates exactly this
-  way: no transfer-level freeze, control at issuance and redemption.
-
-**Why the bridged asset does not pre-commit a policy key.** OpenAMP binds an asset to its
-governing key cryptographically: the asset id commits to `policy_pubkey`, and to whether
-a clawback leaf exists, through the issuance contract hash. That binding is the design's
-best property and also its sharpest constraint, because it is fixed at issuance and can
-never be added, changed or removed afterwards. It is therefore tempting to reserve the
-option now, while `USDC.e` still has zero supply, in the same spirit as Circle's rule
-that the upgrade path must be built in at deployment.
-
-We deliberately do not, and the reason is the constraint itself: any key committed today
-would be **ours**, not the issuer's. An asset permanently bound to a policy key operated
-by the bridge is strictly worse for Circle than one bound to nothing, because Circle
-could not replace it without abandoning the asset, which is the exact continuity the
-whole standard exists to protect. Reserving an option only helps if the party who will
-exercise it chooses its terms. Circle runs its own quorum, in its own jurisdictions,
-under its own key management, and it must choose the clawback terms it is willing to
-stand behind.
-
-**USDC is not an OpenAMP asset, and will not become one** (owner's decision, 2026-08-12),
-before or after Circle adopts it. The reason is the one this section already gives from
-the other direction: OpenAMP governs an asset by requiring every unit of it to sit in a
-co-signed enclave output, which is exactly the composability the bridged phase depends
-on and exactly what a general-purpose dollar must not lose. OpenAMP remains the right
-answer for restricted instruments; it is not the answer for this one. Everything above
-describes what the network can do, not what this asset does.
-
-**So what remains available to an issuer that wants transfer controls on USDC?** Nothing
-today. Enclave custody is ruled out by the decision above; a covenant binds only outputs
-created under it; and the reissuance token mints but cannot freeze. A freeze that reaches
-holders who already hold the asset is a consensus rule, and the network does not have
-one. Whether to add one, and on what terms, is an open question for the protocol owners
-rather than something this standard can assume: see the note below.
-
-**The honest limitation this leaves.** Coins circulating in ordinary outputs stay
-unencumbered, because nothing on this chain today can retroactively encumber a bearer
-output that already exists. That is the one place where an EVM proxy genuinely does
-something this chain cannot: a blacklist added to a FiatToken proxy binds every existing
-holder the moment it ships.
-
-**What Simplicity changes, now that it is active.** OpenAMP was designed while Simplicity
-was switched off, so it is worth asking whether activation reopens anything. It changes
-the ergonomics, not the tradeoff:
-
-- It does **not** let a covenant police a confidential holding. A Simplicity program
-  receives an output's asset as either an explicit id or, when the output is blinded,
-  only the x-coordinate of the curve point committing to it, with no jet that unblinds
-  (`src/simplicity/elements/txEnv.h`, the `confidential` type and its `confPrefix`).
-  That is exactly the limit Tapscript had, so the reason trustless containment was
-  rejected for confidential assets stands unchanged.
-- It does **not** unlock containment for transparent assets either, because that already
-  worked: OpenAMP's containment covenant was built and proven under Tapscript
-  (leaf version 0xc4) before being scrapped on the confidentiality argument.
-- What it does add is tractability. The proven Tapscript containment leaf ran to
-  1,933 bytes of hand-unrolled stack manipulation whose alignment bugs were the
-  expensive part of building it. The same rule in Simplicity is expressible and
-  statically analyzable, which turns trustless containment from a fragile artifact into
-  something maintainable and auditable.
-
-The practical consequence for a stablecoin: because USDC.e is transparent by design, and
-this standard already requires its supply events to be explicit (5.4), the
-confidentiality objection that killed containment does not apply to it. So an issuer who
-wanted containment that survives even a fully compromised policy server could have it
-here, on top of the co-signing model rather than instead of it. That remains a decision
-for whoever governs the asset, and it does not change the bridged-phase position above,
-because the composability objection is independent of how the covenant is written.
-
-**Why not a consensus feature.** Earlier drafts of this document proposed one. It was
-already rejected on this network, on the record
-(`doc/sequentia/openamp-design.md` §8), for reasons that still hold: it breaks stateless
-UTXO validation by making every node carry an indexed per-asset policy database; it adds
-reorg-relevant code paths to the scarcest surface we have; and on Sequentia specifically
-`bad-coinbase-not-leader` pins every value-bearing coinbase output to the leader's fee
-script, so issuer-co-signed coinbase outputs would be consensus-invalid. A
-consensus-enforced containment covenant was separately rejected because reading an
-output's asset tag in script forces every holding to be public, which is the opposite of
-what a regulated instrument requires.
 
 ### 5.6 Registry metadata and the rename
 
@@ -644,10 +530,7 @@ any chain.
 
 **Phase 5, identity succession.** The successor registry record renames the asset to
 "USD Coin" / "USDC" under `circle.com` (5.6). Wallets, the explorer and the price server
-pick it up on their next registry poll; nodes on restart. If Circle elects to govern the
-asset under OpenAMP (5.5), this is also where it publishes the policy key it provisioned,
-carried by the same succession record and authorized by the same two factors, and it
-begins issuing governed supply with the reissuance token it now holds.
+pick it up on their next registry poll; nodes on restart.
 
 **Continuity (I7), verified.** The asset id never changed, so: all balances are
 untouched; all DEX orders, covenant order-book entries and Lightning channels
@@ -688,7 +571,7 @@ Circle's requirements (quoted from the Bridged USDC Standard) against this spec:
 | 8 | `burnLockedUSDC()` callable only by a Circle-specified address, burning exactly the circulating supply | Implemented verbatim on Ethereum; escrow-handover equivalent on Solana; multi-escrow sum equals circulating supply after the phase 2 reconciliation | Met (with the multi-source generalization documented) |
 | 9 | Pause bridging, reconcile in-flight, harmonize locked vs circulating supply | Phase 2, with exact (not statistical) verification via the explicit-amount rule and the auditor | Met |
 | 10 | In-place upgrade retaining supply, holders, integrations | Asset id is immutable; only display metadata succeeds to Circle | Met |
-| 11 | (Implied by FiatToken) blacklist and pause capability post-upgrade | Available today via OpenAMP, which targets AMP2 parity and exceeds FiatToken's role set; the bridged asset deliberately does not use it, because the bridged phase needs composability and Circle's standard does not ask for transfer controls until adoption (5.5) | Met, exercised at Circle's choice |
+| 11 | (Implied by FiatToken) blacklist and pause capability post-upgrade | Not available for this asset. Closing it needs a consensus rule the network does not have, and which would have to make freezability an identifiable property fixed at issuance (5.5) | Delta, stated plainly |
 | 12 | (Implied by FiatToken) allowances, permit, EIP-3009 gasless flows | Not applicable to UTXO; the practical need (users transact holding only USDC) is met natively by any-asset fees | Not applicable, with a native analogue |
 | 13 | Backing is native USDC locked on the origin chain | Backing is exclusively Circle-issued native USDC on Ethereum and Solana; other wrappers are forbidden as backing; the standard names Ethereum as the common case without requiring a single origin | Met, multi-origin documented |
 
@@ -728,10 +611,10 @@ Remaining:
 
 - **W7. Node per-asset supply index (optional).** A `getassetsupply` RPC would make the
   auditor a single call. Not required: the auditor already answers the question.
-- **W8. Consensus asset policy. WITHDRAWN, not deferred.** Earlier drafts listed this as
-  future work. It should never have been: the capability it was meant to provide already
-  exists in OpenAMP without touching consensus, and a consensus version was rejected on
-  this network before this document was written (5.5).
+- **W8. Consensus asset policy. WITHDRAWN as posed.** Earlier drafts listed a general
+  per-asset policy feature as future work for this standard to schedule. It is not this
+  standard's to schedule. What remains is a protocol question, stated in 5.5, on terms
+  the protocol owners set.
 - **First live USDC deposit.** The plumbing is proven end to end against real contracts
   in the e2e suite, and the live asset and vault are in place, but an actual testnet
   deposit needs Sepolia or Solana devnet USDC from Circle's faucet, which is
@@ -753,10 +636,8 @@ Remaining:
   mechanism doubles as a consolidation mechanism: the operator can drain one escrow into
   the other via CCTP before phase 2, reducing to the single-origin case Circle knows.
 - Holders can blind transfer outputs; supply stays exact but distribution analytics
-  degrade. If Circle requires the issuer to see every holding, that is what OpenAMP is
-  for: the policy server derives every enclave address and so reports ownership exactly,
-  which is the same posture AMP2 takes on Liquid. Until then this is a documented
-  property, matching the Liquid precedent Circle's largest competitor already accepts.
+  degrade. This is a documented property, matching the Liquid precedent Circle's largest
+  competitor already accepts.
 - The registry label layer is advisory and HTTP-served; nothing about supply or
   ownership depends on it, but display spoofing is a real (existing, chain-wide)
   concern that the successor-record work should not worsen. Registry transport hardening
@@ -779,17 +660,14 @@ Remaining:
   worth doing once the asset actually circulates; nothing depends on it before then.
 - **D4. Timing, taken.** Both sources went live together: the Solana SPL leg had already
   landed, so there was no reason to stage them.
-- **D2. Closed: there is nothing to decide, because the mechanism already exists.**
-  Earlier revisions of this document proposed a consensus asset-policy feature and left
-  it open. That was wrong twice over. Issuer-governed assets are not a departure from
-  anything on this network: OpenAMP is built, live, and delivers AMP2 parity (freeze,
-  clawback, velocity limits, holder caps, whitelists) with **no consensus change at
-  all**, which is the stated point of its design. And a consensus asset-policy feature
-  was not merely unnecessary but already rejected here on the record
-  (`doc/sequentia/openamp-design.md` §8), including a Sequentia-specific
-  incompatibility: `bad-coinbase-not-leader` pins every value-bearing coinbase output to
-  the leader's fee script, so compliant issuer-co-signed coinbase outputs would be
-  consensus-invalid. Section 5.5 now specifies the OpenAMP path instead.
+- **D2. Withdrawn as posed, and replaced by a narrower question for the protocol
+  owners.** Earlier revisions proposed a general consensus asset-policy feature, and
+  justified deferring it with a "bearer-asset model" principle this network does not
+  have. Both were wrong. The narrower question that survives is stated in 5.5: whether
+  the network should gain a freeze that binds existing holders, on the condition that
+  freezability is an identifiable property fixed at an asset's issuance rather than a
+  power every issuer silently holds over every asset. That is a protocol decision, not
+  one this standard can make or assume.
 
 ## Appendix A. Relation to the third-party draft spec
 
@@ -810,9 +688,8 @@ phases with the reconciliation and metadata steps it omitted.
   a Tapsimplicity leaf is an anyone-can-spend path, so the proposed wrapper, deployed
   there, would not merely fail to enforce compliance, it would hand the wrapped funds to
   the first taker. The deeper problem is that it reinvents, worse, a mechanism this
-  network already had: OpenAMP governs assets through issuer co-signing that ordinary
-  script validation enforces, without a bespoke oracle in the path of every transfer
-  (section 5.5).
+  network already had, since issuer co-signing enforced by ordinary script validation
+  needs no bespoke oracle in the path of every transfer (section 5.5).
 - Its claim that the issuer "simply parses the blockchain state" to audit supply. There
   is no per-asset supply accounting in the node; auditability must be constructed via
   the explicit-amount rule and the auditor tool (section 5.4).
