@@ -131,20 +131,18 @@ into tooling.
 **There is no freeze, pause, denylist or clawback primitive at any layer.** The issuer's
 only on-chain power is minting via the reissuance token. Section 5.5 addresses the gap.
 
-**Simplicity is not active on Sequentia today; nothing here may depend on it until it
-is.** The Simplicity library is vendored in the tree and fully wired into consensus, but
-the deployment is currently `NEVER_ACTIVE` on the Sequentia chains
-(`src/chainparams.cpp`), and the live testnet reports no Simplicity deployment
-(`getdeploymentinfo`, verified at height 89367 at the time of writing). Activation is an
-assessed and deliberately deferred one-flag consensus change (see
-`doc/sequentia/seqdex-simplicity-assessment.md` and
-`doc/sequentia/simplicity-dex-covenant-offers-design.md`), so this status is expected to
-change on the team's timeline; nothing in this standard depends on it either way. Until
-activation, a Tapsimplicity leaf (version 0xbe) is treated as an anyone-can-spend success
-path, so a design that locks funds behind Simplicity covenants before activation is not a
-compliance feature but a fund-loss bug. The full Elements tapscript introspection opcode
-set (leaf version 0xc4) is active from block 1, so covenants are already possible without
-Simplicity; section 5.5 explains why this spec deliberately uses neither for USDC.
+**Simplicity is activating on Sequentia; nothing in this standard depends on it.** The
+Simplicity library is vendored and wired into consensus, and as of this revision the
+activation is shipped: the Sequentia mainnet parameters carry the deployment
+ALWAYS_ACTIVE from genesis, and the running testnet carries a height-based BIP9
+deployment (bit 21, 144-block windows, 108-block threshold) that locks in once the
+block-producing committee runs activation-aware binaries (`src/chainparams.cpp`, pinned
+by `sequentia_chainparams_tests`). On any chain where the deployment does not yet report
+active in `getdeploymentinfo`, a Tapsimplicity leaf (version 0xbe) is an anyone-can-spend
+success path, so nothing may lock funds behind Simplicity there until it reports active.
+The full Elements tapscript introspection opcode set (leaf version 0xc4) is active from
+block 1, so covenants are possible with or without Simplicity; section 5.5 explains why
+this spec deliberately uses neither for USDC.
 
 **Fees are payable in any whitelisted asset.** `g_con_any_asset_fees` is on for
 Sequentia. Once admitted to the fee whitelist, bridged USDC can pay its own transaction
@@ -435,8 +433,8 @@ due-diligence conversation:
 2. **Covenant compliance wrapper (REJECTED).** Lock every USDC.e output in an
    introspection-opcode covenant that requires a compliance oracle co-signature and
    forces every output carrying the asset back into the same covenant. Technically
-   feasible on Sequentia today with the active introspection opcodes, and expressible in
-   Simplicity if that deployment is activated later; the objections here are independent
+   feasible on Sequentia with the active introspection opcodes, and expressible in
+   Simplicity once its deployment reports active; the objections here are independent
    of the covenant language. Rejected because: it makes an
    off-path oracle a liveness dependency for every transfer (oracle down means every
    holder's funds are frozen); it breaks Lightning, the DEX, fee payment in the asset,
@@ -663,12 +661,12 @@ phases with the reconciliation and metadata steps it omitted.
 **Rejected:**
 
 - Its central mechanism, a mandatory "Compliance Wrapper" of recursive Simplicity
-  covenants with a compliance-oracle co-signature on every transfer. Simplicity is not
-  active on any Sequentia chain today (activation is assessed and deferred; verified
-  against the tree, every branch, and the live testnet node), and a Tapsimplicity leaf is
-  currently an anyone-can-spend path here, so the proposed wrapper, deployed today, would
-  not merely fail to enforce compliance, it would hand the wrapped funds to the first
-  taker. Even re-based onto the
+  covenants with a compliance-oracle co-signature on every transfer. When the draft was
+  reviewed, Simplicity was not active on any Sequentia chain (its activation shipped
+  alongside this spec's revision), and on a chain where the deployment is not yet active
+  a Tapsimplicity leaf is an anyone-can-spend path, so the proposed wrapper, deployed
+  there, would not merely fail to enforce compliance, it would hand the wrapped funds to
+  the first taker. Even re-based onto the
   introspection opcodes that ARE active, the wrapper is rejected on the merits
   (section 5.5, option 2).
 - Its claim that the issuer "simply parses the blockchain state" to audit supply. There
