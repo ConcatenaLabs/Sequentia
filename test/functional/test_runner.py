@@ -81,7 +81,12 @@ EXTENDED_SCRIPTS = [
     # These tests are not run by default.
     # Longest test should go first, to favor running tests in parallel
 #    'feature_pruning.py', ELEMENTS: this is broken
-    'feature_dbcrash.py',
+#    'feature_dbcrash.py', ELEMENTS: this is broken -- generate_small_transactions
+#    builds two inputs against three outputs summing to (input - FEE) and no fee
+#    output at all. That is Bitcoin's implicit fee; here the fee is an explicit
+#    output, so the transaction cannot balance and the node answers
+#    bad-txns-in-ne-out. Never adapted, and it does not run by default, so nobody
+#    had noticed. It takes ~55 minutes to reach the failure.
     'feature_fee_estimation.py',
 ]
 
