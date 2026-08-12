@@ -317,6 +317,45 @@ struct Params {
     //! Changing when a block is valid is a HARD FORK: coordinate H with every
     //! operator (see doc/sequentia/04-proof-of-stake.md).
     int pos_block_spacing_height{0};
+    //! SEQUENTIA PoS: seconds of leader time-gate per unit of sortition score,
+    //! and the height it binds from. 0 = keep the historic unit, which is the
+    //! runtime global g_pos_slot_interval.
+    //!
+    //! The gate delays a leader by `floor(score) x unit` after the parent, and
+    //! the producer will not propose before pos_block_spacing in any case, so
+    //! every draw whose gate lands under the cadence proposes at the same
+    //! moment. The unit therefore decides how much of the draw distribution the
+    //! cadence absorbs -- and with the exponential race the tail is what costs
+    //! throughput. Measured over 2,000,000 simulated rounds at a 60 s cadence
+    //! with twelve equal stakers:
+    //!
+    //!     unit 30 s -> 4.97% of blocks late, 3.78% throughput lost, field 2.7
+    //!     unit 10 s -> 0.09% of blocks late, 0.02% throughput lost, field 5.3
+    //!
+    //! Ten seconds takes 99.4% of the available gain. Below it the throughput
+    //! is already recovered and only the field keeps widening, which buys
+    //! nothing and gives the anchor-freshness key more material to reorder.
+    //!
+    //! DELIBERATELY NOT g_pos_slot_interval, which stays at 30. That global is
+    //! also the axis PosRequiredUnbondingSeconds() and PosStakeLockSeconds()
+    //! use to put height- and time-based stake locks on one scale, so lowering
+    //! it to 10 would silently cut the unbonding requirement from ~15 days to
+    //! ~5. Two jobs, two numbers.
+    //!
+    //! Only meaningful under the exponential-race election: the legacy slot is
+    //! a bounded RANK (uniform in [0, W/w)), for which the whole-interval scale
+    //! is the whitepaper's rank-r liveness gate and costs nothing.
+    //!
+    //! Changing when a leader may produce is a HARD FORK: coordinate H with
+    //! every operator.
+    int64_t pos_slot_gate_seconds{0};
+    int pos_slot_gate_height{0};
+    //! Whether the fine leader time-gate is the rule at `height`.
+    bool PosSlotGateActiveAt(int height) const
+    {
+        return pos_slot_gate_seconds > 0 && pos_slot_gate_height > 0 &&
+               height >= pos_slot_gate_height;
+    }
     //! SEQUENTIA: coinbase maturity in blocks, and the height it binds from.
     //! 0 = use the inherited COINBASE_MATURITY (consensus.h).
     //!
