@@ -133,12 +133,26 @@
 <li><strong>It is not retroactive</strong>, and must not be: a rule that rejects spends cannot apply to history produced before it existed.</li>
 </ul>
 
-<h2>6. What this means for USDC</h2>
+<h2>6. What this means for USDC: issue it supervised</h2>
 
-<p><code>USDC.e</code> has zero supply and zero deposits, and supervision can only be conferred at issuance, so the choice is open now and closes the moment real USDC is bridged.</p>
+<p><code>USDC.e</code> has zero supply and zero deposits. Supervision can only be conferred at issuance, so the choice is live now and closes permanently the moment real USDC is bridged.</p>
 
-<p>My recommendation: <strong>build the capability, and decide USDC's status with Circle rather than ahead of them.</strong> A supervised USDC gets Circle the freeze it has everywhere else, keeps working on the DEX, and keeps working on Lightning while unfrozen, with a blacklisted holder's Lightning balance reached by the Lightning implementation rather than by consensus.</p>
-<p>Measured against the right bar, that is sufficient. The aim is parity with what Circle already relies on elsewhere, not a better instrument than it has anywhere: a supervised asset reaches a holder's own balance, and stops at shared constructs, which is precisely where an EVM blacklist reaches and stops. Today's answer, by contrast, is no freeze at all, which is not parity with anything.</p>
+<p><strong>Recommendation: re-issue <code>USDC.e</code> as a supervised asset, now, without waiting to be asked.</strong> Circle publishes the Bridged USDC Standard precisely so that a third party can conform to it unilaterally and present a finished, conforming asset; the standard's central instruction is that the upgrade path must be built in at deployment because it cannot be applied retroactively. Supervision is exactly such a property. An asset issued without it can never gain it, so deferring the decision is not neutral, it is choosing the unfreezable option permanently and hoping that never matters.</p>
+
+<p>The case for choosing it is short. Native USDC is freezable on every chain Circle issues on, without exception. An asset that cannot be frozen is not a candidate for in-place adoption by an issuer whose token has that property everywhere else, whatever else it gets right. Parity is the bar, and supervision is what parity requires.</p>
+
+<p>The case against is thinner than it first looks, because the design no longer trades composability for control. A supervised asset still works in Lightning channels, still rests on the covenant order book, still settles same-chain swaps, and still pays its own fees. The single cost is confidentiality: supervised assets are always explicit. This standard already requires <code>USDC.e</code>'s supply events to be explicit so that backing is externally auditable, and a dollar whose issuer must answer for its flows is a poor candidate for blinding in any case. So the practical loss is close to zero.</p>
+
+<table width="100%">
+<tr><th align="left">Property</th><th align="left">Ordinary USDC.e (today)</th><th align="left">Supervised USDC.e (proposed)</th></tr>
+<tr><td align="left" nowrap>Issuer freeze</td><td align="left">Never, for anyone, permanently</td><td align="left">Holder's own on-chain balance and resting orders</td></tr>
+<tr><td align="left" nowrap>Lightning</td><td align="left">Works</td><td align="left">Works</td></tr>
+<tr><td align="left" nowrap>Covenant order book</td><td align="left">Works</td><td align="left">Works</td></tr>
+<tr><td align="left" nowrap>Confidentiality</td><td align="left">Available, opt-in</td><td align="left">Never</td></tr>
+<tr><td align="left" nowrap>Adoptable in place by Circle</td><td align="left">Only if Circle accepts no freeze</td><td align="left">Yes, at parity with its other chains</td></tr>
+</table>
+
+<p>The sequencing matters and is cheap. Re-issuing costs one transaction while supply is zero, and the registry entry and bridge configuration are a few lines. The alternative is discovering in a due-diligence conversation a year from now that the asset cannot be adopted and cannot be fixed.</p>
 
 <h2>7. For Alberto</h2>
 
