@@ -23,7 +23,7 @@ import argparse
 
 # Parse arguments
 parser = argparse.ArgumentParser()
-parser.add_argument("--elementsd-dir", type=str, default="./src")
+parser.add_argument("--sequentiad-dir", type=str, default="./src")
 parser.add_argument("--no-cleanup", default=False, action="store_true")
 
 args = parser.parse_args()
@@ -32,7 +32,7 @@ args = parser.parse_args()
 alice = Daemon(
     "Alice",
     "elements",
-    args.elementsd_dir + "/elementsd",
+    args.sequentiad_dir + "/sequentiad",
     "contrib/assets_tutorial/elements1.conf",
     not args.no_cleanup,
 )
@@ -40,7 +40,7 @@ alice = Daemon(
 carol = Daemon(
     "Carol",
     "elements",
-    args.elementsd_dir + "/elementsd",
+    args.sequentiad_dir + "/sequentiad",
     "contrib/assets_tutorial/elements2.conf",
     not args.no_cleanup,
 )

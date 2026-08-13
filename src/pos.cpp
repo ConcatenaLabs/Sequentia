@@ -35,7 +35,7 @@ int g_pos_escape_stall_mtp_height = 0;
 // SEQUENTIA: the coinbase maturity in force, mirrored out of
 // Consensus::Params by chainparams.cpp. It lives HERE, in the common
 // layer, for the same reason as the line above: chainparams.cpp assigns
-// it and elements-tx / elements-util link libbitcoin_common WITHOUT
+// it and sequentia-tx / sequentia-util link libbitcoin_common WITHOUT
 // libbitcoin_node, where consensus/tx_verify.cpp (the reader) is built.
 int g_coinbase_maturity = 0;
 int g_coinbase_maturity_height = 0;
@@ -686,7 +686,7 @@ std::optional<PosBlsBitfieldCert> ParsePosBlsBitfieldSolution(const CScript& sol
 
 // PosVerifyBitfieldCertificate is defined in validation.cpp (the node library,
 // which links blst) rather than here in libbitcoin_common, so that lightweight
-// tools linking pos.o (elements-tx/util) do not pull in the BLS aggregate
+// tools linking pos.o (sequentia-tx/util) do not pull in the BLS aggregate
 // verification and its blst dependency. It is declared in pos.h.
 
 // --- On-chain stake registration (locked staking outputs) ---
@@ -1222,7 +1222,7 @@ void SeedGenesisStake(const CBlock& genesis)
 
 // --- Operator-configured static checkpoints (-poscheckpoint=height:hash) ---
 // In the common layer (not the node-layer anchor module) so chainparams.cpp and
-// tools such as elements-tx — which link libbitcoin_common but not the node
+// tools such as sequentia-tx — which link libbitcoin_common but not the node
 // library — can configure and link them. Reject-only; enforced in
 // ContextualCheckBlockHeader. Guarded by their own mutex.
 namespace {

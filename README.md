@@ -2,7 +2,7 @@
 
 Sequentia is a Bitcoin sidechain for asset tokenization and decentralized
 exchange, built as a fork of [Blockstream Elements](https://github.com/ElementsProject/elements) 23.3.3.
-This repository is the Sequentia node (`elementsd`): consensus, Bitcoin
+This repository is the Sequentia node (`sequentiad`): consensus, Bitcoin
 anchoring, proof of stake, the open fee market, and the canonical protocol
 documentation in [`doc/sequentia/`](doc/sequentia/README.md).
 
@@ -94,11 +94,11 @@ poscommitteesize=250     # committee cap 250, quorum 126
 Then:
 
 ```bash
-elementsd -daemon
-elements-cli getblockhash 0      # ddd11d54c87a2bd94400fd31ce05d8e1110bb4b78e7103f738342086fc4ea92e
-elements-cli getblockchaininfo   # watch it sync
-elements-cli getanchorstatus     # "ok" once the testnet4 anchor RPC is reachable
-elements-cli getposschedule      # the live committee and next-slot schedule
+sequentiad -daemon
+sequentia-cli getblockhash 0      # ddd11d54c87a2bd94400fd31ce05d8e1110bb4b78e7103f738342086fc4ea92e
+sequentia-cli getblockchaininfo   # watch it sync
+sequentia-cli getanchorstatus     # "ok" once the testnet4 anchor RPC is reachable
+sequentia-cli getposschedule      # the live committee and next-slot schedule
 ```
 
 Prebuilt binaries for the current chain (rebuilt 2026-07-09 from this branch,
@@ -216,7 +216,7 @@ All repos live at https://github.com/GracedEternalKingCabbageMan/ and are public
 
 | Repo | One-liner |
 |---|---|
-| `Sequentia` | The Sequentia node (`elementsd` fork of Elements 23.3.3): consensus, anchoring, proof of stake, open fee market, plus the canonical protocol documentation in `doc/sequentia/`. (This repository.) |
+| `Sequentia` | The Sequentia node (`sequentiad` fork of Elements 23.3.3): consensus, anchoring, proof of stake, open fee market, plus the canonical protocol documentation in `doc/sequentia/`. (This repository.) |
 | `SWK` | Sequentia Wallet Kit: a fork of Blockstream LWK, with Rust wallet library, CLI, and WASM bindings for building Sequentia (and Bitcoin testnet4) wallets. |
 | `sequentia-web-wallet` | Proof-of-concept browser wallet built on SWK, live at https://sequentiatestnet.com/wallet. |
 | `ambra` | Ambra: non-custodial dual-chain (Bitcoin testnet4 + Sequentia) mobile wallet, a Flutter UI over a Rust core built on SWK. |

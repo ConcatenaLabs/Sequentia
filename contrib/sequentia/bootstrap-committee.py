@@ -34,7 +34,7 @@ Requirements:
     -poscommitteesize=<members+1> (e.g. 3 for the default 2 members).
 
 Example:
-  ./src/elementsd -chain=test -daemon            # with -poscommitteesize=3 in conf
+  ./src/sequentiad -chain=test -daemon            # with -poscommitteesize=3 in conf
   python3 contrib/sequentia/bootstrap-committee.py \
       --founder-wif cURsyjY6KwZM9pBk7rfWwdDzYS1R4w85M2pPzh5RySfGpA8n9LB4
 """
@@ -68,7 +68,7 @@ class CliError(Exception):
 
 
 class Cli:
-    """Minimal JSON-RPC client that shells out to elements-cli."""
+    """Minimal JSON-RPC client that shells out to sequentia-cli."""
 
     def __init__(self, cli_cmd):
         self.base = cli_cmd.split()
@@ -137,8 +137,8 @@ def asset_bytes_for(cli, asset_hex, sample_script):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--cli", default="./src/elements-cli -chain=test",
-                    help="elements-cli invocation (default: %(default)s)")
+    ap.add_argument("--cli", default="./src/sequentia-cli -chain=test",
+                    help="sequentia-cli invocation (default: %(default)s)")
     ap.add_argument("--founder-wif", required=True, help="genesis founder WIF")
     ap.add_argument("--members", type=int, default=2,
                     help="number of NEW stakers to create (default: 2)")

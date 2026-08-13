@@ -6,7 +6,7 @@
  * glibc's __readlink_chk() aborts with "*** buffer overflow detected ***".
  *
  * Defining __readlink_chk / __readlinkat_chk here (a direct object in the
- * elements-qt link) interposes glibc's versions for the whole binary. We clamp
+ * sequentia-qt link) interposes glibc's versions for the whole binary. We clamp
  * the requested length to the real buffer size before calling the underlying
  * syscall: this can never overflow the buffer and avoids the spurious abort.
  *

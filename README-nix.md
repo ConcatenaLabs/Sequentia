@@ -41,7 +41,7 @@ This will create a package under your `/nix/store/` and a symlink to it as `./re
 
 After building the software as above, you can invoke the binaries directly with commands such as:
 ```
-./result/bin/elements-cli
+./result/bin/sequentia-cli
 ```
 
 You can also install the package in your nix profile with either
@@ -77,5 +77,5 @@ checkPhase
 The `./src/` directory will have been added to your `PATH`
 so you can run commands simply with:
 ```bash
-elements-cli -?
+sequentia-cli -?
 ```

@@ -110,7 +110,7 @@ jobs:
         if: ${{ env.TARGET == 'x86_64-pc-linux-gnu' && ( success() || ( failure() && steps.tests.conclusion == 'failure' ) ) }}
         run: |
           mkdir -p sequentia-dev-linux/bin sequentia-dev-linux/lib
-          cp src/elementsd src/elements-cli* src/elements-tx* src/elements-util* src/elements-wallet* sequentia-dev-linux/bin/
+          cp src/sequentiad src/sequentia-cli* src/sequentia-tx* src/sequentia-util* src/sequentia-wallet* sequentia-dev-linux/bin/
           cp src/.libs/libelementsconsensus.so* sequentia-dev-linux/lib/
           tar -cvf sequentia-dev-linux.tar --owner=0 --group=0 --numeric-owner sequentia-dev-linux
       
@@ -118,7 +118,7 @@ jobs:
         if: ${{ env.TARGET == 'x86_64-w64-mingw32' }}
         run: |
           mkdir -p sequentia-dev-win64/bin sequentia-dev-win64/lib
-          cp src/elementsd.exe src/elements-cli* src/elements-tx* src/elements-util* src/elements-wallet* sequentia-dev-win64/bin/
+          cp src/sequentiad.exe src/sequentia-cli* src/sequentia-tx* src/sequentia-util* src/sequentia-wallet* sequentia-dev-win64/bin/
           cp src/.libs/libelementsconsensus-0.dll sequentia-dev-win64/lib/
           zip -r sequentia-dev-win64.zip sequentia-dev-win64
       
@@ -126,7 +126,7 @@ jobs:
         if: ${{ env.TARGET == 'x86_64-apple-darwin' }}
         run: |
           mkdir -p sequentia-dev-osx/bin sequentia-dev-osx/lib
-          cp src/elementsd src/elements-cli src/elements-tx src/elements-util src/elements-wallet sequentia-dev-osx/bin/
+          cp src/sequentiad src/sequentia-cli src/sequentia-tx src/sequentia-util src/sequentia-wallet sequentia-dev-osx/bin/
           cp src/.libs/*.dylib sequentia-dev-osx/lib/
           tar -cvf sequentia-dev-osx.tar --owner=0 --group=0 --numeric-owner sequentia-dev-osx
 

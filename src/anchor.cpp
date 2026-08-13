@@ -87,7 +87,7 @@ int g_last_btc_tip_height GUARDED_BY(g_anchor_mutex) = -1;
 //! checkpoint; the node cannot tell alone, which is exactly why it must warn).
 std::vector<PosCheckpoint> g_pos_checkpoint_conflicts GUARDED_BY(g_anchor_mutex);
 // Operator-configured static checkpoints (-poscheckpoint=height:hash) live in
-// the common layer (pos.cpp) so chainparams.cpp / elements-tx can link them.
+// the common layer (pos.cpp) so chainparams.cpp / sequentia-tx can link them.
 
 const unsigned char POS_CKPT_TAG[7] = {'S', 'E', 'Q', 'C', 'K', 'P', 'T'};
 //! Anchors confirmed to be on the parent chain's best chain, keyed

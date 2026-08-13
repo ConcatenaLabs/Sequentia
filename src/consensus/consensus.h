@@ -21,7 +21,7 @@ static const int COINBASE_MATURITY = 100;
 /** SEQUENTIA: the coinbase maturity actually in force, and the height it binds
  *  from. Both are mirrored out of Consensus::Params when the chain is selected
  *  (chainparams.cpp), because Consensus::CheckTxInputs takes no params argument
- *  and elements-cli / elements-tx link libbitcoin_common without the node
+ *  and sequentia-cli / sequentia-tx link libbitcoin_common without the node
  *  library -- the same reason g_pos_escape_stall_mtp_height exists.
  *
  *  Why a chain would change it: COINBASE_MATURITY is a number of BLOCKS, so

@@ -3855,7 +3855,7 @@ bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew
             // retried once bitcoind recovers, and no existing recovery path picks it
             // up (the anchor watcher only reconsiders blocks IT invalidated via
             // MarkAnchorInvalid). Observed live: a bitcoind not yet answering RPC at
-            // elementsd startup wedged the node ~2300 blocks behind until an operator
+            // sequentiad startup wedged the node ~2300 blocks behind until an operator
             // ran reconsiderblock by hand.
             //
             // Simply *not marking* it would be worse: FindMostWorkChain only drops
@@ -6160,7 +6160,7 @@ void CChainState::CheckBlockIndex()
                 // terminate. Such a block is valid, has all its data and sorts
                 // above the tip (that is exactly why it had to be refused), so
                 // without this exception the invariant fires and the node
-                // aborts here: `elementsd: validation.cpp: CheckBlockIndex():
+                // aborts here: `sequentiad: validation.cpp: CheckBlockIndex():
                 // Assertion setBlockIndexCandidates.count(pindex) failed`. It
                 // needs no operator action to reach: a certified sibling of a
                 // finalized block arriving from a peer is enough, because with

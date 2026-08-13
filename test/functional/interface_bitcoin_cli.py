@@ -83,7 +83,7 @@ class TestBitcoinCli(BitcoinTestFramework):
         """Main test logic"""
         self.generate(self.nodes[0], BLOCKS)
 
-        self.log.info("Compare responses from getblockchaininfo RPC and `elements-cli getblockchaininfo`")
+        self.log.info("Compare responses from getblockchaininfo RPC and `sequentia-cli getblockchaininfo`")
         cli_response = self.nodes[0].cli.getblockchaininfo()
         rpc_response = self.nodes[0].getblockchaininfo()
         assert_equal(cli_response, rpc_response)
@@ -145,7 +145,7 @@ class TestBitcoinCli(BitcoinTestFramework):
         assert_equal(cli_get_info["Proxies"], "127.0.0.1:9050 (ipv4, ipv6, onion, cjdns), 127.0.0.1:7656 (i2p)")
 
         if self.is_specified_wallet_compiled():
-            self.log.info("Test -getinfo and elements-cli getwalletinfo return expected wallet info")
+            self.log.info("Test -getinfo and sequentia-cli getwalletinfo return expected wallet info")
             # Explicitly set the output type in order to have consistent tx vsize / fees
             # for both legacy and descriptor wallets (disables the change address type detection algorithm)
             self.restart_node(0, extra_args=["-addresstype=bech32", "-changetype=bech32"])

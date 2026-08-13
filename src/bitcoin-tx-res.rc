@@ -14,14 +14,14 @@ BEGIN
     BEGIN
         BLOCK "040904E4" // U.S. English - multilingual (hex)
         BEGIN
-            VALUE "CompanyName",        "Elements Project"
-            VALUE "FileDescription",    "bitcoin-tx (CLI Elements transaction editor utility)"
+            VALUE "CompanyName",        "Sequentia"
+            VALUE "FileDescription",    "sequentia-tx (CLI Sequentia transaction editor utility)"
             VALUE "FileVersion",        PACKAGE_VERSION
-            VALUE "InternalName",       "bitcoin-tx"
+            VALUE "InternalName",       "sequentia-tx"
             VALUE "LegalCopyright",     COPYRIGHT_STR
             VALUE "LegalTrademarks1",   "Distributed under the MIT software license, see the accompanying file COPYING or http://www.opensource.org/licenses/mit-license.php."
-            VALUE "OriginalFilename",   "bitcoin-tx.exe"
-            VALUE "ProductName",        "bitcoin-tx"
+            VALUE "OriginalFilename",   "sequentia-tx.exe"
+            VALUE "ProductName",        "sequentia-tx"
             VALUE "ProductVersion",     PACKAGE_VERSION
         END
     END
