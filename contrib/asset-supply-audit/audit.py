@@ -99,7 +99,7 @@ def resolve_credentials(args):
                 cookie = cand
                 break
     if cookie and os.path.exists(cookie):
-        user, _, password = open(cookie).read().strip().partition(":")
+        user, _, password = open(cookie, encoding="utf8").read().strip().partition(":")
         return url, user, password
     sys.exit("no RPC credentials: pass --rpc-user/--rpc-password, --cookie, or "
              "--datadir pointing at a node whose .cookie is readable")
@@ -218,14 +218,16 @@ def main():
 
     # Resume from a checkpoint if one exists and matches the requested filter.
     if args.checkpoint and os.path.exists(args.checkpoint):
-        saved = json.load(open(args.checkpoint), parse_float=Decimal)
+        saved = json.load(open(args.checkpoint, encoding="utf8"), parse_float=Decimal)
         if saved.get("want") == (sorted(want) if want else None):
             start = saved["next_height"]
             for aid, d in saved["accs"].items():
                 a = Acc()
-                a.issued = int(d["issued_atoms"]); a.reissued = int(d["reissued_atoms"])
+                a.issued = int(d["issued_atoms"])
+                a.reissued = int(d["reissued_atoms"])
                 a.burned = int(d["burned_atoms"])
-                a.blinded_issue = d["blinded_issuances"]; a.blinded_reissue = d["blinded_reissuances"]
+                a.blinded_issue = d["blinded_issuances"]
+                a.blinded_reissue = d["blinded_reissuances"]
                 a.blinded_burn = d["blinded_burns"]
                 accs[aid] = a
             sys.stderr.write("resumed from %s at height %d\n" % (args.checkpoint, start))
@@ -278,7 +280,7 @@ def main():
 
 def _save_checkpoint(path, want, next_height, accs):
     tmp = path + ".tmp"
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf8") as f:
         json.dump({
             "want": sorted(want) if want else None,
             "next_height": next_height,
