@@ -14,6 +14,7 @@
 #include <span.h>
 #include <chainparams.h> // Peg-out enforcement
 #include <pos.h> // SEQUENTIA: PoS staking-output standardness
+#include <supervision.h> // SEQUENTIA: supervision declaration standardness
 
 // ELEMENTS:
 CAsset policyAsset;
@@ -95,6 +96,20 @@ bool IsStandard(const CScript& scriptPubKey, TxoutType& whichType)
         // ...and the bare payout-record script, by which a pool operator commits
         // to how it will pay its delegators. It must relay under default policy.
         if (g_con_pos && ParsePayoutScript(scriptPubKey)) {
+            return true;
+        }
+        // SEQUENTIA: and the bare supervision declaration, which is how an
+        // issuance says the asset it creates is freezable (src/supervision.h).
+        // Bare because the output has to survive in the UTXO set, which a
+        // leading OP_RETURN would prevent.
+        //
+        // Only on a chain that schedules supervision at all: elsewhere a
+        // declaration means nothing and relaying it would just be UTXO bloat.
+        // Whether the chain has actually REACHED the height is checked where
+        // the height is known, in MemPoolAccept (validation.cpp), because a
+        // declaration accepted below it derives a plain asset id and would turn
+        // invalid under the node's feet at the boundary.
+        if (g_supervision_height > 0 && ParseSupervisionScript(scriptPubKey)) {
             return true;
         }
         return false;

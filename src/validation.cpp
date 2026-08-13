@@ -47,6 +47,7 @@
 #include <script/script.h>
 #include <script/sigcache.h>
 #include <shutdown.h>
+#include <supervision.h>
 #include <signet.h>
 #include <timedata.h>
 #include <tinyformat.h>
@@ -769,6 +770,29 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     std::string reason;
     if (fRequireStandard && !IsStandardTx(tx, reason))
         return state.Invalid(TxValidationResult::TX_NOT_STANDARD, reason);
+
+    // SEQUENTIA: keep a supervision declaration out of the mempool until the
+    // chain has reached the height that gives it meaning (src/supervision.h).
+    //
+    // Policy, not consensus, and the distinction is the point. Below the
+    // activation height such a transaction is perfectly valid -- consensus
+    // treats the declaration as inert and derives a plain asset id -- so
+    // rejecting it in CheckTxInputs would make history unvalidatable on resync.
+    // But it is valid only until the chain crosses the height, after which the
+    // same transaction derives a different asset and fails. An entry that turns
+    // invalid with none of its inputs spent is the failure that stops block
+    // production: every template that selects it fails TestBlockValidity, so
+    // every producer skips its slot. Simplest to never admit it.
+    {
+        bool malformed = false;
+        const int next_height = m_active_chainstate.m_chain.Height() + 1;
+        if (SupervisionFromTx(tx, malformed) || malformed) {
+            if (!SupervisionActive(next_height)) {
+                return state.Invalid(TxValidationResult::TX_NOT_STANDARD, "supervision-not-active",
+                    strprintf("supervised assets activate at height %d", g_supervision_height));
+            }
+        }
+    }
 
     // And now do PAK checks. Filtered by next blocks' enforced list
     if (chainparams.GetEnforcePak()) {

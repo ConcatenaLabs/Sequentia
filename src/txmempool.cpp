@@ -20,6 +20,7 @@
 #include <policy/settings.h>
 #include <policy/value.h>
 #include <reverse_iterator.h>
+#include <supervision.h>
 #include <util/check.h>
 #include <util/moneystr.h>
 #include <util/overflow.h>
@@ -693,6 +694,19 @@ void CTxMemPool::removeForReorg(CChain& chain, std::function<bool(txiter)> check
         // by sending in empty(reject) list.
         const CTransaction& tx = it->GetTx();
         if (!IsPAKValidTx(tx, CPAKList(), Params().ParentGenesisBlockHash(), Params().GetConsensus().pegged_asset)) {
+            txToRemove.insert(it);
+            continue;
+        }
+
+        // SEQUENTIA: and, on the same reasoning, every supervision declaration
+        // (src/supervision.h). A reorg can move a transaction to a height on the
+        // other side of the supervision activation, and the asset id it derives
+        // differs across that boundary, so an entry admitted on one side is
+        // invalid on the other with none of its inputs spent -- the state that
+        // stalls block production. Declarations are rare enough that dropping
+        // them all and letting them be resubmitted costs nothing.
+        bool malformed = false;
+        if (SupervisionFromTx(tx, malformed) || malformed) {
             txToRemove.insert(it);
             continue;
         }

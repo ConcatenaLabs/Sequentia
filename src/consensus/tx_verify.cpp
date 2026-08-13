@@ -13,6 +13,7 @@
 #include <primitives/transaction.h>
 #include <script/interpreter.h>
 #include <script/pegins.h>
+#include <supervision.h>
 #include <util/moneystr.h>
 
 bool IsFinalTx(const CTransaction &tx, int nBlockHeight, int64_t nBlockTime)
@@ -249,8 +250,36 @@ bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, 
             return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-fee-outofrange");
         }
 
+        // SEQUENTIA: supervised assets (src/supervision.h).
+        //
+        // Here, and not in VerifyAmounts, because this is the one function both
+        // mempool acceptance (validation.cpp AcceptToMemoryPool) and ConnectBlock
+        // pass through, and because the gate needs nSpendHeight, which is the
+        // height of the block the transaction confirms in on both paths.
+        //
+        // Below the activation height a declaration is inert: the issuance
+        // derives plainly, which is exactly what a node without this code does,
+        // so old and new nodes agree about every block that already exists.
+        const SupervisionDescriptor* supervision = nullptr;
+        std::optional<SupervisionDeclaration> declaration;
+        if (SupervisionActive(nSpendHeight)) {
+            bool malformed = false;
+            declaration = SupervisionFromTx(tx, malformed);
+            if (malformed) {
+                return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-supervision-multiple-declarations");
+            }
+            if (declaration) {
+                uint256 entropy;
+                std::string err;
+                if (!CheckSupervisedIssuance(tx, *declaration, entropy, err)) {
+                    return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-supervision-declaration", err);
+                }
+                supervision = &declaration->descriptor;
+            }
+        }
+
         // Verify that amounts add up.
-        if (fScriptChecks && !VerifyAmounts(spent_inputs, tx, pvChecks, cacheStore)) {
+        if (fScriptChecks && !VerifyAmounts(spent_inputs, tx, supervision, pvChecks, cacheStore)) {
             return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-in-ne-out", "value in != value out");
         }
         fee_map += GetFeeMap(tx);
