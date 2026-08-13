@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <set>
 
 #include <QColor>
 #include <QDateTime>
@@ -31,7 +32,6 @@
 #include <QLatin1Char>
 #include <QLatin1String>
 #include <QList>
-#include <QSet>
 
 
 // Amount column is right-aligned it contains numbers
@@ -738,6 +738,8 @@ QVariant TransactionTableModel::data(const QModelIndex &index, int role) const
         return rec->status.status;
     case AssetRole:
         return GUIUtil::assetDisplayName(rec->asset);
+    case AssetIdRole:
+        return QString::fromStdString(rec->asset.GetHex());
     }
     return QVariant();
 }
@@ -813,20 +815,26 @@ void TransactionTableModel::updateDisplayUnit()
     Q_EMIT dataChanged(index(0, Amount), index(priv->size()-1, Amount));
 }
 
-QStringList TransactionTableModel::assetsPresent() const
+std::vector<CAsset> TransactionTableModel::assetsPresent() const
 {
-    // Collect the distinct asset tickers across every record — including nested
-    // fee children, whose asset can differ from the payment's (any-asset fees).
-    QSet<QString> seen;
+    // Collect the distinct assets across every record — including nested fee
+    // children, whose asset can differ from the payment's (any-asset fees).
+    // Deduplicate on the asset id and not on its display name: the registry can
+    // put a ticker on an asset at any point after startup, and a name-keyed set
+    // would then hold the same asset under two spellings.
+    std::set<CAsset> seen;
     for (const TransactionRecord& rec : priv->cachedWallet) {
-        seen.insert(GUIUtil::assetDisplayName(rec.asset));
+        seen.insert(rec.asset);
         for (const TransactionRecord& child : rec.children) {
-            seen.insert(GUIUtil::assetDisplayName(child.asset));
+            seen.insert(child.asset);
         }
     }
-    QStringList list(seen.values());
-    list.sort(Qt::CaseInsensitive);
-    return list;
+    std::vector<CAsset> assets(seen.begin(), seen.end());
+    // Sorted by what the user reads, so the drop-down stays alphabetical.
+    std::sort(assets.begin(), assets.end(), [](const CAsset& a, const CAsset& b) {
+        return GUIUtil::assetDisplayName(a).compare(GUIUtil::assetDisplayName(b), Qt::CaseInsensitive) < 0;
+    });
+    return assets;
 }
 
 void TransactionTablePriv::NotifyTransactionChanged(const uint256 &hash, ChangeType status)
