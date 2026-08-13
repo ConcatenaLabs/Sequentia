@@ -2165,7 +2165,13 @@ TransactionError CWallet::SignPSBT(PartiallySignedTransaction& psbtx, bool& comp
         }
 
         CTransaction tx_tmp(tx);
-        if (!VerifyAmounts(inputs_utxos, tx_tmp, nullptr, false)) {
+        // SEQUENTIA: nullptr for supervision. This is a usability check on a
+        // PSBT the caller is about to sign, not consensus, and a supervised
+        // issuance is built by the issuance RPC with the asset id already
+        // fixed. Passing nullptr means an unsigned supervised issuance would
+        // look unbalanced here rather than balanced, which is the safe way
+        // round for a warning.
+        if (!VerifyAmounts(inputs_utxos, tx_tmp, nullptr, nullptr, false)) {
             return TransactionError::VALUE_IMBALANCE;
         }
     }

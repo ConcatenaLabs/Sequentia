@@ -2,6 +2,7 @@
 #include <chainparams.h>
 #include <confidential_validation.h>
 #include <issuance.h>
+#include <supervision.h>
 #include <pegins.h>
 #include <script/sigcache.h>
 #include <blind.h>
@@ -132,7 +133,7 @@ static bool VerifyIssuanceAmount(secp256k1_pedersen_commitment& value_commit, se
     return true;
 }
 
-bool VerifyAmounts(const std::vector<CTxOut>& inputs, const CTransaction& tx, std::vector<CCheck*>* checks, const bool store_result) {
+bool VerifyAmounts(const std::vector<CTxOut>& inputs, const CTransaction& tx, const SupervisionDescriptor* supervision, std::vector<CCheck*>* checks, const bool store_result) {
     assert(!tx.IsCoinBase());
     assert(inputs.size() == tx.vin.size());
 
@@ -216,7 +217,17 @@ bool VerifyAmounts(const std::vector<CTxOut>& inputs, const CTransaction& tx, st
         // New issuance, compute the asset ids
         if (issuance.assetBlindingNonce.IsNull()) {
             uint256 entropy;
-            GenerateAssetEntropy(entropy, tx.vin[i].prevout, issuance.assetEntropy);
+            // SEQUENTIA: a supervised issuance derives over its declaration as
+            // well, which is what binds the freeze terms to the asset itself
+            // (src/supervision.h). The caller decides whether supervision is in
+            // force -- this function has no height and must not guess, because a
+            // node deriving supervised where its peers derive plainly is on a
+            // different chain.
+            if (supervision) {
+                GenerateSupervisedAssetEntropy(entropy, tx.vin[i].prevout, issuance.assetEntropy, *supervision);
+            } else {
+                GenerateAssetEntropy(entropy, tx.vin[i].prevout, issuance.assetEntropy);
+            }
             CalculateAsset(assetID, entropy);
             // Null nAmount is considered explicit 0, so just check for commitment
             CalculateReissuanceToken(assetTokenID, entropy, issuance.nAmount.IsCommitment());
