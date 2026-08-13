@@ -103,8 +103,16 @@ cannot be halved, like tickets or shares. If unsure, leave `8`.
 
 **Amount of units** — how many you create now.
 
-**Reissuance tokens** — leave `1` to keep the ability to make more later. `0`
-means the supply is fixed forever.
+**Allow making more of this asset later** — ticked, your wallet also receives a
+**reissuance token**: the inflation key for this asset. Whoever holds any amount
+of it can mint more units at any time, without limit — it is a key, not a
+counter, and reissuing never uses it up. It moves like any other asset: it can
+be sent, and even split into decimal fractions, and every fraction carries the
+whole power. Sending someone a piece of it does not share the power, it copies
+it.
+
+Untick the box and the amount above is all there will ever be. A closed supply
+can never be reopened.
 
 ---
 
