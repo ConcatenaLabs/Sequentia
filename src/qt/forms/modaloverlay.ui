@@ -220,7 +220,7 @@ QLabel { color: #e8e6e0; background: transparent; }</string>
          <item>
           <layout class="QFormLayout" name="formLayout">
            <property name="fieldGrowthPolicy">
-            <enum>QFormLayout::FieldsStayAtSizeHint</enum>
+            <enum>QFormLayout::AllNonFixedFieldsGrow</enum>
            </property>
            <property name="horizontalSpacing">
             <number>6</number>
