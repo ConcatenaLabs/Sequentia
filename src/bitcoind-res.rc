@@ -14,14 +14,14 @@ BEGIN
     BEGIN
         BLOCK "040904E4" // U.S. English - multilingual (hex)
         BEGIN
-            VALUE "CompanyName",        "Elements Project"
-            VALUE "FileDescription",    "elementsd (Elements node with a JSON-RPC server)"
+            VALUE "CompanyName",        "Sequentia"
+            VALUE "FileDescription",    "sequentiad (Sequentia node with a JSON-RPC server)"
             VALUE "FileVersion",        PACKAGE_VERSION
-            VALUE "InternalName",       "elementsd"
+            VALUE "InternalName",       "sequentiad"
             VALUE "LegalCopyright",     COPYRIGHT_STR
             VALUE "LegalTrademarks1",   "Distributed under the MIT software license, see the accompanying file COPYING or http://www.opensource.org/licenses/mit-license.php."
-            VALUE "OriginalFilename",   "elementsd.exe"
-            VALUE "ProductName",        "elementsd"
+            VALUE "OriginalFilename",   "sequentiad.exe"
+            VALUE "ProductName",        "sequentiad"
             VALUE "ProductVersion",     PACKAGE_VERSION
         END
     END

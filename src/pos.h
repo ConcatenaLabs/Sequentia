@@ -815,7 +815,7 @@ extern uint64_t g_pos_min_stake;
 /** Height from which the escaping-stall parent-chain MTP evidence is part of
  *  the rules, mirrored from Consensus::Params::pos_escape_stall_mtp_height
  *  when the chain is selected. Lives in the common layer because
- *  chainparams.cpp assigns it and elements-cli / elements-tx link
+ *  chainparams.cpp assigns it and sequentia-cli / sequentia-tx link
  *  libbitcoin_common without libbitcoin_server.
  *
  *  0 = not gated (rule off), positive H = enforced from height H, matching
@@ -999,7 +999,7 @@ void SeedGenesisStake(const CBlock& genesis);
 // never make a node seek or download a particular branch. These live in the
 // common layer (here) rather than the node-layer anchor module because
 // chainparams.cpp configures them and must link them into libbitcoin_common
-// (and tools such as elements-tx), which does not link the node module.
+// (and tools such as sequentia-tx), which does not link the node module.
 
 /** Drop all configured checkpoints (chain-parameter (re)load). */
 void ClearConfiguredPosCheckpoints();

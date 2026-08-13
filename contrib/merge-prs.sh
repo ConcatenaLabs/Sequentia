@@ -243,7 +243,7 @@ do
 
     if [[ "$DO_TEST" == "1" ]]; then
         echo "Testing"
-        quietly ./src/qt/test/test_elements-qt || notify "fail test qt" 1
+        quietly ./src/qt/test/test_sequentia-qt || notify "fail test qt" 1
         quietly ./src/test/test_bitcoin || notify "fail test bitcoin" 1
         quietly ./src/bench/bench_bitcoin || notify "fail test bench" 1
         quietly ./test/util/test_runner.py || notify "fail test util" 1

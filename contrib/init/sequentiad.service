@@ -1,7 +1,7 @@
 # It is not recommended to modify this file in-place, because it will
 # be overwritten during package upgrades. If you want to add further
 # options or overwrite existing ones then use
-# $ systemctl edit elementsd.service
+# $ systemctl edit sequentiad.service
 # See "man systemd.service" for details.
 
 # Note that almost all daemon options could be specified in
@@ -10,18 +10,18 @@
 # config file.
 
 [Unit]
-Description=Elements daemon
-Documentation=https://github.com/ElementsProject/elements/blob/master/doc/init.md
+Description=Sequentia daemon
+Documentation=https://github.com/GracedEternalKingCabbageMan/Sequentia/blob/master/doc/init.md
 
 # https://www.freedesktop.org/wiki/Software/systemd/NetworkTarget/
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/bin/elementsd -daemonwait \
-                            -pid=/run/elementsd/elementsd.pid \
+ExecStart=/usr/bin/sequentiad -daemonwait \
+                            -pid=/run/sequentiad/sequentiad.pid \
                             -conf=/etc/elements/elements.conf \
-                            -datadir=/var/lib/elementsd
+                            -datadir=/var/lib/sequentiad
 
 # Make sure the config directory is readable by the service user
 PermissionsStartOnly=true
@@ -35,7 +35,7 @@ ExecStartPre=/bin/chgrp bitcoin /etc/bitcoin
 ####################
 
 Type=forking
-PIDFile=/run/elementsd/elementsd.pid
+PIDFile=/run/sequentiad/sequentiad.pid
 Restart=on-failure
 TimeoutStartSec=infinity
 TimeoutStopSec=600
@@ -47,16 +47,16 @@ TimeoutStopSec=600
 User=elements
 Group=elements
 
-# /run/elementsd
-RuntimeDirectory=elementsd
+# /run/sequentiad
+RuntimeDirectory=sequentiad
 RuntimeDirectoryMode=0710
 
 # /etc/elements
 ConfigurationDirectory=elements
 ConfigurationDirectoryMode=0710
 
-# /var/lib/elementsd
-StateDirectory=elementsd
+# /var/lib/sequentiad
+StateDirectory=sequentiad
 StateDirectoryMode=0710
 
 # Hardening measures

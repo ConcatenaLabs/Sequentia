@@ -130,7 +130,7 @@ _bitcoin_cli() {
             ;;
     esac
 } &&
-complete -F _bitcoin_cli elements-cli
+complete -F _bitcoin_cli sequentia-cli
 
 # Local variables:
 # mode: shell-script

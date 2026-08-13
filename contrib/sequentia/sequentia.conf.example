@@ -96,7 +96,7 @@ poscheckpointdepth=2016    # parent-chain (Bitcoin) confirmations before a
 # NODE-LOCAL (per operator — do NOT share)
 # ============================================================================
 
-# RPC server for elements-cli / your tooling.
+# RPC server for sequentia-cli / your tooling.
 server=1
 rpcuser=CHANGE_ME
 rpcpassword=CHANGE_ME_TO_A_LONG_RANDOM_STRING
