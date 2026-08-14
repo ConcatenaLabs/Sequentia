@@ -126,7 +126,7 @@ REMAINING — the wallet-coupled OPEN linchpin (traced; e2e-only-verifiable, nee
 
 ## Regtest loop — LIVE, policy path RUNTIME-verified, GOLD blocker pinned (2026-07-03)
 
-Stood up a 2-node Sequentia lightning regtest (elementsd `-chain=liquid-regtest`, whose policy asset matches
+Stood up a 2-node Sequentia lightning regtest (sequentiad `-chain=liquid-regtest`, whose policy asset matches
 CLN's `liquid_regtest_fee_asset`; two lightningd built from `sequentia-stable` with these changes; port 17300 /
 lightning-dirs `$JOB/tmp/ln{1,2}`; `--force-feerates=5000` since regtest has no fee estimate).
 - **Runtime bug caught + fixed** (commit `3e50f69`): a chain-PARSED / CLONED bitcoin_tx skipped `bitcoin_tx()`'s

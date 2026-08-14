@@ -50,7 +50,7 @@ attempt is mid-flight), clear it first:
 pkill -f bootstrap-autonomous-testnet.py 2>/dev/null
 python3 ~/Sequentia/contrib/sequentia/bootstrap-autonomous-testnet.py \
   --stop --basedir ~/seq-bootstrap100 2>/dev/null
-pkill -9 elementsd 2>/dev/null
+pkill -9 sequentiad 2>/dev/null
 rm -rf ~/seq-bootstrap100
 ```
 
@@ -63,7 +63,7 @@ cd ~/Sequentia
 sudo chown -R $USER:$USER ~/Sequentia   # undo any earlier `sudo make`
 git pull origin master
 make -j$(nproc)                                  # NO sudo
-strings src/elementsd | grep posdebugroundskewms # must print the knob
+strings src/sequentiad | grep posdebugroundskewms # must print the knob
 ls contrib/sequentia/bootstrap-autonomous-testnet.py
 ```
 
@@ -174,8 +174,8 @@ Notes:
 
 ```bash
 ND=$HOME/seq-bootstrap100/node000
-CLI="$HOME/Sequentia/src/elements-cli -datadir=$ND -chain=elementsregtest -rpcport=18200 -rpcuser=seq -rpcpassword=seq"
-watch -n 3 "pgrep -c elementsd; echo '--- stakers registered:'; $CLI getstakerinfo | grep -c ':'; echo '--- anchor:'; $CLI getanchorstatus"
+CLI="$HOME/Sequentia/src/sequentia-cli -datadir=$ND -chain=elementsregtest -rpcport=18200 -rpcuser=seq -rpcpassword=seq"
+watch -n 3 "pgrep -c sequentiad; echo '--- stakers registered:'; $CLI getstakerinfo | grep -c ':'; echo '--- anchor:'; $CLI getanchorstatus"
 ```
 `getstakerinfo` shows **1** during Phase 3 (founder only), then **100** after block 1;
 `getanchorstatus` reads `anchorstatus: ok` once block 1 lands.

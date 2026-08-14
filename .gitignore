@@ -8,16 +8,16 @@
 *.exe
 *.pdb
 src/elements
-src/elementsd
-src/elements-cli
-src/elements-gui
-src/elements-node
-src/elements-tx
-src/elements-util
-src/elements-wallet
+src/sequentiad
+src/sequentia-cli
+src/sequentia-gui
+src/sequentia-node
+src/sequentia-tx
+src/sequentia-util
+src/sequentia-wallet
 src/test/fuzz/fuzz
 src/test/test_bitcoin
-src/qt/test/test_elements-qt
+src/qt/test/test_sequentia-qt
 
 # autoreconf
 Makefile.in
@@ -100,7 +100,7 @@ src/qt/bitcoin-qt.includes
 *.qm
 Makefile
 !depends/Makefile
-src/qt/elements-qt
+src/qt/sequentia-qt
 Elements-Qt.app
 
 # Qt Creator

@@ -93,29 +93,29 @@ TESTS =
 BENCHMARKS =
 
 if BUILD_BITCOIND
-  bin_PROGRAMS += elementsd
+  bin_PROGRAMS += sequentiad
 endif
 
 if BUILD_BITCOIN_NODE
-  bin_PROGRAMS += elements-node
+  bin_PROGRAMS += sequentia-node
 endif
 
 if BUILD_BITCOIN_CLI
-  bin_PROGRAMS += elements-cli
+  bin_PROGRAMS += sequentia-cli
 endif
 
 if BUILD_BITCOIN_TX
-  bin_PROGRAMS += elements-tx
+  bin_PROGRAMS += sequentia-tx
 endif
 
 if ENABLE_WALLET
 if BUILD_BITCOIN_WALLET
-  bin_PROGRAMS += elements-wallet
+  bin_PROGRAMS += sequentia-wallet
 endif
 endif
 
 if BUILD_BITCOIN_UTIL
-  bin_PROGRAMS += elements-util
+  bin_PROGRAMS += sequentia-util
 endif
 
 .PHONY: FORCE check-symbols check-security
@@ -757,48 +757,48 @@ elements_bin_ldadd = \
 
 elements_bin_ldadd += $(BDB_LIBS) $(MINIUPNPC_LIBS) $(NATPMP_LIBS) $(EVENT_PTHREADS_LIBS) $(EVENT_LIBS) $(ZMQ_LIBS) $(SQLITE_LIBS)
 
-elementsd_SOURCES = $(elements_daemon_sources) init/bitcoind.cpp
-elementsd_CPPFLAGS = $(elements_bin_cppflags)
-elementsd_CXXFLAGS = $(elements_bin_cxxflags)
-elementsd_LDFLAGS = $(elements_bin_ldflags)
-elementsd_LDADD = $(LIBBITCOIN_NODE) $(elements_bin_ldadd)
+sequentiad_SOURCES = $(elements_daemon_sources) init/bitcoind.cpp
+sequentiad_CPPFLAGS = $(elements_bin_cppflags)
+sequentiad_CXXFLAGS = $(elements_bin_cxxflags)
+sequentiad_LDFLAGS = $(elements_bin_ldflags)
+sequentiad_LDADD = $(LIBBITCOIN_NODE) $(elements_bin_ldadd)
 
-elements_node_SOURCES = $(elements_daemon_sources) init/bitcoin-node.cpp
-elements_node_CPPFLAGS = $(elements_bin_cppflags)
-elements_node_CXXFLAGS = $(elements_bin_cxxflags)
-elements_node_LDFLAGS = $(elements_bin_ldflags)
-elements_node_LDADD = $(LIBBITCOIN_NODE) $(elements_bin_ldadd) $(LIBBITCOIN_IPC) $(LIBMULTIPROCESS_LIBS)
+sequentia_node_SOURCES = $(elements_daemon_sources) init/bitcoin-node.cpp
+sequentia_node_CPPFLAGS = $(elements_bin_cppflags)
+sequentia_node_CXXFLAGS = $(elements_bin_cxxflags)
+sequentia_node_LDFLAGS = $(elements_bin_ldflags)
+sequentia_node_LDADD = $(LIBBITCOIN_NODE) $(elements_bin_ldadd) $(LIBBITCOIN_IPC) $(LIBMULTIPROCESS_LIBS)
 
 # bitcoin-cli binary #
-elements_cli_SOURCES = bitcoin-cli.cpp
-elements_cli_CPPFLAGS = $(AM_CPPFLAGS) $(BITCOIN_INCLUDES) $(EVENT_CFLAGS)
-elements_cli_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
-elements_cli_LDFLAGS = $(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS) $(PTHREAD_FLAGS)
+sequentia_cli_SOURCES = bitcoin-cli.cpp
+sequentia_cli_CPPFLAGS = $(AM_CPPFLAGS) $(BITCOIN_INCLUDES) $(EVENT_CFLAGS)
+sequentia_cli_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
+sequentia_cli_LDFLAGS = $(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS) $(PTHREAD_FLAGS)
 
 if TARGET_WINDOWS
-elements_cli_SOURCES += bitcoin-cli-res.rc
+sequentia_cli_SOURCES += bitcoin-cli-res.rc
 endif
 
-elements_cli_LDADD = \
+sequentia_cli_LDADD = \
   $(LIBBITCOIN_CLI) \
   $(LIBUNIVALUE) \
   $(LIBBITCOIN_UTIL) \
   $(LIBBITCOIN_CRYPTO)
 
-elements_cli_LDADD += $(EVENT_LIBS)
+sequentia_cli_LDADD += $(EVENT_LIBS)
 #
 
 # bitcoin-tx binary #
-elements_tx_SOURCES = bitcoin-tx.cpp
-elements_tx_CPPFLAGS = $(AM_CPPFLAGS) $(BITCOIN_INCLUDES)
-elements_tx_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
-elements_tx_LDFLAGS = $(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS) $(PTHREAD_FLAGS)
+sequentia_tx_SOURCES = bitcoin-tx.cpp
+sequentia_tx_CPPFLAGS = $(AM_CPPFLAGS) $(BITCOIN_INCLUDES)
+sequentia_tx_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
+sequentia_tx_LDFLAGS = $(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS) $(PTHREAD_FLAGS)
 
 if TARGET_WINDOWS
-elements_tx_SOURCES += bitcoin-tx-res.rc
+sequentia_tx_SOURCES += bitcoin-tx-res.rc
 endif
 
-elements_tx_LDADD = \
+sequentia_tx_LDADD = \
   $(LIBUNIVALUE) \
   $(LIBBITCOIN_COMMON) \
   $(LIBBITCOIN_UTIL) \
@@ -810,12 +810,12 @@ elements_tx_LDADD = \
 #
 
 # bitcoin-wallet binary #
-elements_wallet_SOURCES = bitcoin-wallet.cpp
-elements_wallet_SOURCES += init/bitcoin-wallet.cpp
-elements_wallet_CPPFLAGS = $(elements_bin_cppflags)
-elements_wallet_CXXFLAGS = $(elements_bin_cxxflags)
-elements_wallet_LDFLAGS = $(elements_bin_ldflags)
-elements_wallet_LDADD = \
+sequentia_wallet_SOURCES = bitcoin-wallet.cpp
+sequentia_wallet_SOURCES += init/bitcoin-wallet.cpp
+sequentia_wallet_CPPFLAGS = $(elements_bin_cppflags)
+sequentia_wallet_CXXFLAGS = $(elements_bin_cxxflags)
+sequentia_wallet_LDFLAGS = $(elements_bin_ldflags)
+sequentia_wallet_LDADD = \
   $(LIBBITCOIN_WALLET_TOOL) \
   $(LIBBITCOIN_WALLET) \
   $(LIBBITCOIN_COMMON) \
@@ -834,21 +834,21 @@ elements_wallet_LDADD = \
   $(SQLITE_LIBS)
 
 if TARGET_WINDOWS
-elements_wallet_SOURCES += bitcoin-wallet-res.rc
+sequentia_wallet_SOURCES += bitcoin-wallet-res.rc
 endif
 #
 
 # bitcoin-util binary #
-elements_util_SOURCES = bitcoin-util.cpp
-elements_util_CPPFLAGS = $(AM_CPPFLAGS) $(BITCOIN_INCLUDES)
-elements_util_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
-elements_util_LDFLAGS = $(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS) $(PTHREAD_FLAGS)
+sequentia_util_SOURCES = bitcoin-util.cpp
+sequentia_util_CPPFLAGS = $(AM_CPPFLAGS) $(BITCOIN_INCLUDES)
+sequentia_util_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
+sequentia_util_LDFLAGS = $(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS) $(PTHREAD_FLAGS)
 
 if TARGET_WINDOWS
-elements_util_SOURCES += bitcoin-util-res.rc
+sequentia_util_SOURCES += bitcoin-util-res.rc
 endif
 
-elements_util_LDADD = \
+sequentia_util_LDADD = \
   $(LIBBITCOIN_COMMON) \
   $(LIBBITCOIN_UTIL) \
   $(LIBUNIVALUE) \

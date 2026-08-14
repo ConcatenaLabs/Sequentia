@@ -249,10 +249,10 @@ Finally, reaching `0` is now always somebody's decision. When
 `con_bitcoin_anchor` is set and the Bitcoin daemon is unreachable at startup the
 node **asks**, through `uiInterface.ThreadSafeQuestion`:
 
-- an interactive frontend (`elements-qt`) offers two named choices — close and
+- an interactive frontend (`sequentia-qt`) offers two named choices — close and
   start Bitcoin Core first, which is the default and what closing the window
   does, or start without following Bitcoin;
-- every non-interactive frontend, `elementsd` included, answers no, so the node
+- every non-interactive frontend, `sequentiad` included, answers no, so the node
   refuses to start. That is the right default when there is nobody watching.
 
 A node that took the second option keeps a warning in the status bar for the
@@ -312,13 +312,13 @@ If `con_bitcoin_anchor` is set and the Bitcoin daemon cannot be reached at
 startup, the node asks — it does not decide. `AppInitMain` puts the question
 through `uiInterface.ThreadSafeQuestion`, so:
 
-- **elementsd** and every other non-interactive frontend answer "no" (there is
+- **sequentiad** and every other non-interactive frontend answer "no" (there is
   nobody to ask) and the node **does not start**. This is the pre-existing
   behaviour, and it is the right default for a machine nobody is watching. Note
   that the test is now "can this frontend ask a human", not `-server`: a GUI user
   who had enabled the RPC server used to get the daemon's flat refusal, for no
   good reason.
-- **elements-qt** shows a dialog with two named buttons — *Close and start
+- **sequentia-qt** shows a dialog with two named buttons — *Close and start
   Bitcoin Core first* (the default, and what closing the window does) and *Start
   without following Bitcoin*.
 

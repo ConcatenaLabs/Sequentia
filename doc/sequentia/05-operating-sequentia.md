@@ -151,7 +151,7 @@ mainchainrpcport=8332
 mainchainrpccookiefile=/home/YOU/.bitcoin/.cookie   # or mainchainrpcuser/password
 ```
 
-Prerequisites: a built `elementsd` / `elements-cli`; a Bitcoin node reachable
+Prerequisites: a built `sequentiad` / `sequentia-cli`; a Bitcoin node reachable
 over RPC for anchoring (mainnet, testnet, or regtest, as long as all operators
 agree on which parent chain to anchor to); and Python 3 for the bundled tooling
 (§10).
@@ -170,8 +170,8 @@ persisted to `<datadir>/exchangerates.json`; see
 [`02-open-fee-market.md`](02-open-fee-market.md) §2). Set and read it directly:
 
 ```
-elements-cli setfeeexchangerates '{"<asset-hex>": 100000000, "<other-asset>": 50000000}'
-elements-cli getfeeexchangerates
+sequentia-cli setfeeexchangerates '{"<asset-hex>": 100000000, "<other-asset>": 50000000}'
+sequentia-cli getfeeexchangerates
 ```
 
 The rate is an **integer**: a fee output's reference value is
@@ -224,7 +224,7 @@ whitelist). Two consequences to know:
 - Writes are last-writer-wins on the whole table: a manual
   `setfeeexchangerates` is simply overwritten at the sidecar's next poll.
 
-Manual kill-switch: `elements-cli setfeeexchangerates '{}'` (empties the
+Manual kill-switch: `sequentia-cli setfeeexchangerates '{}'` (empties the
 whitelist). ⚠ This now means the node accepts **no fee asset at all** and will
 relay nothing, rather than falling back to the policy asset. Restore a working
 table before leaving the node unattended.
@@ -238,13 +238,13 @@ fee output is then denominated in that asset, not SEQ.
 Worked flow. Issue or obtain asset `X`, and have the producer price it:
 
 ```
-elements-cli setfeeexchangerates '{"<X>": 100000000}'
+sequentia-cli setfeeexchangerates '{"<X>": 100000000}'
 ```
 
 Send, paying the fee in `X`:
 
 ```
-elements-cli sendtoaddress -named address=<dest> amount=<n> assetlabel=<X> fee_asset_label=<X>
+sequentia-cli sendtoaddress -named address=<dest> amount=<n> assetlabel=<X> fee_asset_label=<X>
 ```
 
 The resulting transaction carries a fee output denominated in `X`. A producer
@@ -258,9 +258,9 @@ bootstrap) as a wallet, create the wallet **non-blank** so it can generate its
 own change and issuance addresses, then import the key as a descriptor:
 
 ```
-elements-cli createwallet "<name>" false false   # NON-blank
-elements-cli getdescriptorinfo "wpkh(<WIF>)"      # returns the checksum
-elements-cli importdescriptors '[{"desc":"wpkh(<WIF>)#<checksum>","timestamp":0}]'
+sequentia-cli createwallet "<name>" false false   # NON-blank
+sequentia-cli getdescriptorinfo "wpkh(<WIF>)"      # returns the checksum
+sequentia-cli importdescriptors '[{"desc":"wpkh(<WIF>)#<checksum>","timestamp":0}]'
 ```
 
 Import the **WIF** form (`wpkh(<WIF>)`), not the public descriptor - the wallet
@@ -281,8 +281,8 @@ Send the original as replaceable, then bump it - the replacement may pay a
 higher fee and even switch the fee asset:
 
 ```
-elements-cli sendtoaddress -named address=<dest> amount=<n> assetlabel=<X> fee_asset_label=<X> replaceable=true
-elements-cli bumpfee <txid> '{"fee_rate":N,"fee_asset":"<asset>"}'
+sequentia-cli sendtoaddress -named address=<dest> amount=<n> assetlabel=<X> fee_asset_label=<X> replaceable=true
+sequentia-cli bumpfee <txid> '{"fee_rate":N,"fee_asset":"<asset>"}'
 ```
 
 ### CPFP (child-pays-for-parent)
@@ -292,7 +292,7 @@ with a high-fee child. `include_unsafe` lets the wallet spend the not-yet-
 confirmed parent:
 
 ```
-elements-cli send '{"<dest>":<amount>}' '{"include_unsafe": true, "fee_asset": "<asset>"}'
+sequentia-cli send '{"<dest>":<amount>}' '{"include_unsafe": true, "fee_asset": "<asset>"}'
 ```
 
 ## 6. Bitcoin anchoring
@@ -365,7 +365,7 @@ opens; the committee then certifies it with a single BLS-aggregated signature
 ### Single host (one operator holds a committee quorum of keys)
 
 ```
-elements-cli generateposblock "<leader-WIF>" '["<member-WIF>", "<member-WIF>", ...]'
+sequentia-cli generateposblock "<leader-WIF>" '["<member-WIF>", "<member-WIF>", ...]'
 ```
 
 The node computes the VRF proofs, builds the block, and (under
@@ -440,25 +440,25 @@ older coordinator model, where each slot's certificate is assembled by hand
    `getposschedule` (fed in internal byte order - reverse the `getposschedule`
    hex, which is what `getposblocktemplate` also returns):
    ```
-   elements-cli vrfprove "<member-WIF>" "<seed>"
+   sequentia-cli vrfprove "<member-WIF>" "<seed>"
    ```
 2. **Template.** The leader assembles the unsigned block and the hash to sign:
    ```
-   elements-cli getposblocktemplate "<leader-WIF>" \
+   sequentia-cli getposblocktemplate "<leader-WIF>" \
      '[{"pubkey":"<m1>","vrfproof":"<p1>"}, {"pubkey":"<m2>","vrfproof":"<p2>"}, ...]'
    ```
 3. **Round 1** - each member, on its own node, with a fresh session id:
    ```
-   elements-cli musignonce "<sid>" "<member-WIF>" '[<members>]' "<signhash>"
+   sequentia-cli musignonce "<sid>" "<member-WIF>" '[<members>]' "<signhash>"
    ```
 4. **Round 2** - each member, given all the public nonces:
    ```
-   elements-cli musigpartialsign "<sid>" "<member-WIF>" '[<members>]' '[<pubnonces>]' "<signhash>"
+   sequentia-cli musigpartialsign "<sid>" "<member-WIF>" '[<members>]' '[<pubnonces>]' "<signhash>"
    ```
 5. **Aggregate** (coordinator, public data only) and submit:
    ```
-   elements-cli musigaggregate '[<members>]' '[<pubnonces>]' '[<partials>]' "<signhash>"
-   elements-cli submitposblock "<block>" "<leader-WIF>" "<aggregatesig>"
+   sequentia-cli musigaggregate '[<members>]' '[<pubnonces>]' '[<partials>]' "<signhash>"
+   sequentia-cli submitposblock "<block>" "<leader-WIF>" "<aggregatesig>"
    ```
 
 A signing session is single-use and bound to its `(signer, member set, message)`
@@ -485,7 +485,7 @@ carries no weight (its amount is hidden), and an amount below `-posminstake`
 1. On a public-committee chain (the public testnet), first derive your
    committee BLS registration from your staker key:
    ```
-   elements-cli getblsregistration "<staker-WIF>"
+   sequentia-cli getblsregistration "<staker-WIF>"
    ```
    It returns `blspubkey` (48 bytes) and `pop` (the proof-of-possession,
    96 bytes), both deterministic from the key. A staking output without this
@@ -493,7 +493,7 @@ carries no weight (its amount is hidden), and an amount below `-posminstake`
    cannot sit on the public committee.
 2. Get the staking script for your staker key:
    ```
-   elements-cli getstakescript "<pubkey>" null <csv_seconds> <blspubkey> <pop>
+   sequentia-cli getstakescript "<pubkey>" null <csv_seconds> <blspubkey> <pop>
    ```
    (omit the last two arguments on a chain without the public committee). It
    returns the `scriptPubKey`, the lock it encodes (`lock_seconds`), and the

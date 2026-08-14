@@ -15,12 +15,12 @@ The following are some helpful notes on how to run Bitcoin Core on your native p
 
 Unpack the files into a directory and run:
 
-- `bin/elementsd` (headless)
-- `bin/elements-qt` (GUI)
+- `bin/sequentiad` (headless)
+- `bin/sequentia-qt` (GUI)
 
 ### Windows
 
-Unpack the files into a directory, and then run elements-qt.exe.
+Unpack the files into a directory, and then run sequentia-qt.exe.
 
 ### macOS
 
