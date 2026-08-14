@@ -172,7 +172,12 @@ update_index() {
     glob="$(grep -m1 '^PRODUCT_INDEX_GLOB=' "$recipe" | cut -d= -f2- | tr -d '"')"
     [ -n "$glob" ] || continue
     for one in $glob; do
-      newest="$(cd "$DOWNLOAD_DIR" && ls -1 $one 2>/dev/null | sort -V | tail -1)"
+      # `|| true` is load-bearing: ls fails when a pattern matches nothing, and
+      # under set -e with pipefail that killed the whole driver before a single
+      # card was rewritten. A product with no artifacts yet is normal -- a newly
+      # added recipe has none until its first build -- so it must be skipped, not
+      # fatal.
+      newest="$( (cd "$DOWNLOAD_DIR" && ls -1 $one 2>/dev/null || true) | sort -V | tail -1 )"
       [ -n "$newest" ] || continue
       # Turn the concrete filename back into a pattern by replacing its version.
       local pat; pat="$(printf '%s' "$one" | sed 's/\*/[0-9][0-9.]*/g')"
@@ -182,7 +187,7 @@ update_index() {
 
   # The single version label tracks the node, which is what the page is about.
   local newest_node
-  newest_node="$(cd "$DOWNLOAD_DIR" && ls -1 sequentia-core-*-linux-x86_64.tar.gz 2>/dev/null | sort -V | tail -1)"
+  newest_node="$( (cd "$DOWNLOAD_DIR" && ls -1 sequentia-core-*-linux-x86_64.tar.gz 2>/dev/null || true) | sort -V | tail -1 )"
   if [ -n "$newest_node" ]; then
     local v; v="$(printf '%s' "$newest_node" | sed -E 's#sequentia-core-([0-9.]+)-linux.*#\1#')"
     sed -i -E "s#(<span class=\"ver\">version )[0-9][0-9.]*#\1$v#" "$index"
