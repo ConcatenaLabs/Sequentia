@@ -171,13 +171,28 @@ update_index() {
     # Read the glob without running the recipe's build.
     glob="$(grep -m1 '^PRODUCT_INDEX_GLOB=' "$recipe" | cut -d= -f2- | tr -d '"')"
     [ -n "$glob" ] || continue
-    for one in $glob; do
+    # Split on spaces WITHOUT letting bash expand the patterns. `for one in $glob`
+    # looks equivalent and is not: unquoted expansion also does pathname
+    # expansion, so whenever the working directory happened to contain a matching
+    # file, the pattern silently became that filename and every substitution
+    # turned into a no-op. It survived because systemd runs this from /, where
+    # nothing matches -- so it worked in production and failed under test.
+    local -a globs=()
+    read -r -a globs <<< "$glob"
+    for one in "${globs[@]}"; do
       # `|| true` is load-bearing: ls fails when a pattern matches nothing, and
       # under set -e with pipefail that killed the whole driver before a single
       # card was rewritten. A product with no artifacts yet is normal -- a newly
       # added recipe has none until its first build -- so it must be skipped, not
       # fatal.
-      newest="$( (cd "$DOWNLOAD_DIR" && ls -1 $one 2>/dev/null || true) | sort -V | tail -1 )"
+      # Only files whose name carries a version, and only real files. The download
+      # directory also holds unversioned aliases -- ambra-latest.apk and friends,
+      # symlinks kept for stable URLs -- and "latest" sorts above every number, so
+      # they won every comparison and the card ended up naming a file with no
+      # version in it. Since each card shows its filename as the version, that
+      # silently removed the version from the page.
+      newest="$(find "$DOWNLOAD_DIR" -maxdepth 1 -type f -name "$one" -printf '%f\n' 2>/dev/null \
+                 | grep -E '[0-9]+\.[0-9]+' | sort -V | tail -1 || true)"
       [ -n "$newest" ] || continue
       # Turn the concrete filename back into a pattern by replacing its version.
       local pat; pat="$(printf '%s' "$one" | sed 's/\*/[0-9][0-9.]*/g')"
