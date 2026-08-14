@@ -9,7 +9,11 @@ PRODUCT_INDEX_GLOB="sequentia-core-*-linux-x86_64.tar.gz sequentia-core-*-win64-
 
 # --enable-any-asset-fees is not optional for a published build: without it fee
 # amounts are labelled BTC/sat, which are Bitcoin's units and not this chain's.
-NODE_CONFIGURE_ARGS="${SEQ_NODE_CONFIGURE_ARGS:---disable-tests --disable-bench --enable-any-asset-fees}"
+# --with-gui=qt5 is explicit rather than left to autodetection: the download page
+# offers this as "Desktop wallet + node", so a build that quietly finds no Qt and
+# produces a headless tarball has built the wrong product. Explicit means configure
+# fails loudly instead.
+NODE_CONFIGURE_ARGS="${SEQ_NODE_CONFIGURE_ARGS:---with-gui=qt5 --disable-tests --disable-bench --enable-any-asset-fees}"
 # 0 publishes the Linux tarball only; the page then keeps the previous installer.
 NODE_BUILD_WINDOWS="${SEQ_NODE_BUILD_WINDOWS:-1}"
 
@@ -62,11 +66,16 @@ build() {
     [ -x "src/$b" ] || { log "[node] expected src/$b after the build"; return 1; }
     install -m755 "src/$b" "$stage/bin/$b"
   done
-  if [ -x src/qt/sequentia-qt ]; then
-    install -m755 src/qt/sequentia-qt "$stage/bin/sequentia-qt"
-  else
-    log "[node] WARNING: no GUI built; shipping daemon and tools only"
+  # Refuse to publish a "desktop wallet" with no desktop wallet in it. This warned
+  # and shipped once, when moving the build clone left the depends prefixes
+  # pointing at their old absolute path so Qt became undetectable -- a broken
+  # environment that produced a plausible-looking tarball, which is the worst kind.
+  if [ ! -x src/qt/sequentia-qt ]; then
+    log "[node] no GUI at src/qt/sequentia-qt -- the page offers this as a desktop wallet, refusing to publish without it"
+    log "[node] (check that depends/x86_64-pc-linux-gnu still holds Qt and that its paths match this checkout)"
+    return 1
   fi
+  install -m755 src/qt/sequentia-qt "$stage/bin/sequentia-qt"
   strip "$stage"/bin/* 2>/dev/null || true
   local f
   for f in price_server.py README.md config.example.json ORACLE-AND-REFERENCE-DESIGN.md; do
