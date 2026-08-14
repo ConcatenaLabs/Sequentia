@@ -252,6 +252,19 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "issueasset", 2, "blind" },
     { "issueasset", 5, "denomination" },
     { "issueasset", 6, "contract" },   // SEQUENTIA: asset-registry contract object
+    { "issueasset", 7, "supervision" }, // SEQUENTIA: supervised-asset keys and feature bits
+    // SEQUENTIA: supervised assets. Without these the numbers arrive as strings and
+    // every command in doc/sequentia/supervised-assets.md fails from the command
+    // line with "JSON value is not an integer as expected" -- which is where an
+    // issuer's whole freeze flow lived until the Supervision page existed. The
+    // string arguments (asset, target, keys, signatures) are deliberately absent:
+    // an address or a bare hex id is not valid JSON, so converting them would turn
+    // a working argument into a parse error.
+    { "getsupervisedassetid", 1, "vout" },
+    { "getsupervisedassetid", 5, "pause" },
+    { "getsupervisionrecordhash", 5, "vout" },
+    { "getsupervisionunfreezehash", 1, "vout" },
+    { "setsupervisionunfreezesig", 1, "vin" },
     { "reissueasset", 1, "assetamount" },
     { "initpegoutwallet", 1, "bip32_counter"},
     { "rawblindrawtransaction", 1, "inputamountblinders" },

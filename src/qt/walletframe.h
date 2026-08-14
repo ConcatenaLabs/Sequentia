@@ -50,6 +50,10 @@ Q_SIGNALS:
     void createWalletButtonClicked();
     void message(const QString& title, const QString& message, unsigned int style);
     void currentWalletSet();
+    /** Whether the wallet now on screen has a supervised asset to operate. Reported
+     *  for the current wallet only: the Supervision tab belongs to a wallet, not to
+     *  the window, and switching wallets has to move it. */
+    void supervisionAvailable(bool available);
 
 private:
     QStackedWidget *walletStack;
@@ -77,6 +81,8 @@ public Q_SLOTS:
     void gotoAssetsPage();
     /** Switch to the Staking page */
     void gotoStakingPage();
+    /** Switch to the Supervision page */
+    void gotoSupervisionPage();
     /** Open the fee-acceptance policy dialog */
     void gotoFeePolicyDialog();
     /** Switch to send coins page */
