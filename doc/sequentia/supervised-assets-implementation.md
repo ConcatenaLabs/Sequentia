@@ -4,8 +4,85 @@ Companion to `supervised-assets-proposal.pdf`. That document argues the case and
 the boundaries; this one is for whoever writes the code. It assumes you accept the
 design and want the details, the insertion points, and the places it will bite.
 
-Status: nothing here is implemented. A sketch written during analysis was reverted
-unbuilt. File references are against `master` at the time of writing.
+Status: **the consensus feature is implemented and tested** on branch
+`worktree-usdc-bridged-standard`, in four commits: supervised issuance, records and the
+freeze registry, enforcement plus the mempool defences, and the RPCs with an end-to-end
+functional test (`test/functional/feature_supervised_assets.py`). It is OFF on the live
+testnet (`supervised_assets_height = 0`) until the height is agreed, and active from
+height 1 on mainnet and on the custom/regtest chains.
+
+Everything below still describes the design. Section 0 records where building it changed
+the design, which is where a reader who reviewed the earlier draft should start.
+
+---
+
+## 0. What building it changed
+
+Four things. The first is a design change and needs review; the rest are the kind of
+detail that only shows up when the code runs.
+
+### 0.1 The record's script is not the spend authority (CHANGED)
+
+§3.2 below had the freeze record end `<pubkey> OP_CHECKSIG`, with consensus checking the
+current operational key on top. Building it showed those cannot both hold. A script is
+fixed when its output is created, so it can only ever name the key that was current then:
+
+- Name it and honour it, and after a rotation the OLD key still lifts every existing
+  freeze. That is precisely the trap Alberto's point 2 exists to close.
+- Name it and also require the current key, and after a rotation NO key satisfies both,
+  so every freeze becomes permanent and unfreezing is impossible.
+
+There is no third option, so the script cannot carry the authority and consensus has to,
+in both directions. The record's script therefore ends `OP_TRUE` and says nothing, and
+`CheckSupervisionRecordSpend` does the work against the registry's current key. This is
+less alarming than it reads: the output carries no value, so a spend consensus rejects
+gains its author nothing but a rejected transaction, and admission was already a
+consensus check by Alberto's own requirement. The script was decoration in the reviewed
+design too; this makes that explicit rather than half-true.
+
+The admission signature also binds the transaction's first input. Without that it could
+be lifted off the chain and replayed by anybody to re-freeze a target the issuer had
+deliberately unfrozen.
+
+### 0.2 Zero-value outputs needed a carve-out, and so did zero-value inputs
+
+`VerifyAmounts` refuses every SPENDABLE zero-value output, because a zero-value output of
+a reissuance token would authorise reissuing an asset without holding its tokens.
+Supervision outputs must be zero-valued (an issuer must not burn value into a script only
+consensus can release; and the dust rule, which applies only to the fee asset, would
+otherwise reject a record denominated in the policy asset) and must NOT be provably
+unspendable (the whole state is read back out of the UTXO set), so they need an exception.
+
+It is gated on the activation height, and that gate is load-bearing:
+`Consensus::CheckTxInputs` vets every declaration and record before `VerifyAmounts` runs
+and only admits ones naming an asset the registry already knows is supervised, and a
+registry asset is never a reissuance token. Applied ungated the carve-out would reopen
+exactly the inflation hole the original rule prevents.
+
+The mirror on the input side is worse and was missed entirely in the design: spending a
+zero-value output fails in `secp256k1_pedersen_commit`, so without the same exception no
+freeze could ever have been LIFTED.
+
+### 0.3 Two encodings that satisfy consensus and never relay
+
+Both would have shipped a freeze an issuer can sign and never publish:
+
+- The record kind must be a small-integer opcode, not a one-byte push:
+  `SCRIPT_VERIFY_MINIMALDATA` rejects a push of a single byte in 1..16.
+- The record script must end `OP_2DROP OP_TRUE`, consuming the admission signature AND
+  the one item the spender pushes. `OP_DROP OP_TRUE` leaves two items and fails
+  `SCRIPT_VERIFY_CLEANSTACK`.
+
+The lesson generalises: a consensus rule for a new script shape needs a test that runs a
+real spend through `VerifyScript` under `STANDARD_SCRIPT_VERIFY_FLAGS`, not only through
+the consensus check.
+
+### 0.4 The sighash RPCs must not use GetHex()
+
+`uint256::GetHex()` reverses the bytes for display. An RPC that returns a message to sign
+must return `HexStr`, the internal order consensus verifies over, or every signature made
+from it is over a message that reads backwards and fails for reasons that look like
+anything but byte order.
 
 ---
 
@@ -160,8 +237,11 @@ built, is not.
 
 ### 3.2 Freeze record
 
-A record is an output. Suggested shape, mirroring `BuildDelegationScript`
-(`src/pos.cpp:696`):
+A record is an output. **The shape below is superseded by §0.1**: the implemented record
+ends `OP_2DROP OP_TRUE` and carries its admission signature inline, because the script
+cannot be the spend authority once the key can rotate. The reasoning about admission and
+about the unfreeze trap is unchanged and still governs. Original sketch, mirroring
+`BuildDelegationScript` (`src/pos.cpp:696`):
 
 ```
 <FREEZE_MARKER> OP_DROP <asset_id:32> OP_DROP <target_spk_hash:32> OP_DROP
@@ -435,25 +515,32 @@ Adversarial:
 
 ---
 
-## 10. Scope estimate
+## 10. Scope, and what is done
 
-A release, not a patch. Ordered roughly by dependency:
+A release, not a patch. Items 1-7 are **done and tested**; 8 and 9 are not started, and
+neither is the submission channel of §8a. Ordered roughly by dependency:
 
-1. **Descriptor and derivation** (§3.1): descriptor type and serialization, entropy
+1. **DONE. Descriptor and derivation** (§3.1): descriptor type and serialization, entropy
    derivation, issuance validation, plus the reissuance-token requirement (§3.1b).
-2. **Registry** (§3.3): freeze set, current-operational-key tracking, apply/revert/rebuild
+2. **DONE. Registry** (§3.3): freeze set, current-operational-key tracking, apply/revert/rebuild
    with the `StakeRegistry` discipline.
-3. **Records** (§3.2): freeze, unfreeze-with-current-key (the trap), rotation, wildcard
+3. **DONE, except pause. Records** (§3.2): freeze, unfreeze-with-current-key (the trap), rotation, wildcard
    pause.
-4. **Enforcement** (§4) with next-block effectiveness (§3.4).
-5. **Mempool eviction** (§5), the highest-risk piece.
-6. **RPCs**: `freezeasset`, `unfreezeasset`, `rotatesupervisionkey`, `listassetfreezes`,
-   `getassetsupervision`, plus the machine-readable rejection reason.
-7. **Wallets**: explicit change for supervised assets in the node wallet and in the DEX's
+4. **DONE. Enforcement** (§4) with next-block effectiveness (§3.4).
+5. **DONE. Mempool eviction** (§5), the highest-risk piece.
+6. **DONE. RPCs**: shipped as `getsupervisedassetid`, `getsupervisionrecordhash`,
+   `buildsupervisionrecord`, `getsupervisionunfreezehash`, `getsupervisedassets`,
+   `getassetfreezes`, `isassetfrozen`, `decodesupervisionscript`, two assembly helpers,
+   and a `supervision` option on `rawissueasset`. Note the shape: none of them takes a
+   private key. The node says what to sign, the issuer signs wherever the key lives, and
+   the node assembles the result -- which is the whole point of choosing BIP340, since it
+   lets the authority sit behind FROST and never exist in one place. A `freezeasset` RPC
+   that took a key would have undone that.
+7. **DONE for the node wallet; the DEX daemon is not checked. Wallets**: explicit change for supervised assets in the node wallet and in the DEX's
    wallet daemon (§6), before or with consensus.
-8. **Display**: the property and a coin's frozen status must be visible before anyone can
+8. **NOT STARTED. Display**: the property and a coin's frozen status must be visible before anyone can
    acquire or try to spend, across the web wallet, explorer, registry and DEX.
-9. **sequentia-qt** (Alberto's standing reminder, and it belongs on this list rather than
+9. **NOT STARTED. sequentia-qt** (Alberto's standing reminder, and it belongs on this list rather than
    after it): issuance page with the supervised flag and reissuance-token handling, coin
    display showing frozen status before a spend is attempted, send flows keeping change
    unblinded for supervised assets, and the new RPCs surfaced in the GUI. Plan the Qt delta
@@ -467,3 +554,17 @@ rotation. Pause may slip if its feature bit is reserved.
 It also permanently enlarges the consensus surface, which is the scarcest thing the project
 has. That remains the strongest argument for keeping the reserved bits unimplemented until
 someone actually needs them.
+
+
+### Left to do, precisely
+
+- **Pause** (§3.2, Alberto's point 7). The feature bit is reserved and refused, so no asset
+  can claim it yet; the machinery it would reuse is all built.
+- **The submission channel** (§8a). Infrastructure, not consensus, but the compliance
+  promise weakens without it: a freeze in the public mempool is front-runnable.
+- **Display** across web wallet, explorer, registry and DEX, and the **sequentia-qt** delta.
+  A holder must be able to see that an asset is supervised, and that a coin is frozen,
+  before trying to spend it.
+- **The DEX wallet daemon's** change blinding, the same fix as the node wallet's.
+- **The testnet activation height**, which is 0 (off) and must stay 0 until every operator
+  has the binary and a height is agreed.
