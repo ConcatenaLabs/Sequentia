@@ -27,12 +27,14 @@ Anything the recipe writes into `outdir` gets published. Nothing else is needed.
 
 ## The products
 
-| Product | Versioned by | Status |
+| Product | Versioned by | Publishes |
 |---|---|---|
 | `node` | git **tag** | Linux tarball + Windows installer |
 | `extension` | `manifest.json` | zip of the repo, minus development files |
-| `fulmen` | `package.json` | Linux AppImage + Windows zip |
-| `ambra` | `app/pubspec.yaml` | **skipped**: needs an Android toolchain and a signing key |
+| `fulmen` | `package.json` | Linux AppImage + Windows zip + Windows installer |
+| `ambra` | `app/pubspec.yaml` | signed Android APK |
+
+Every artifact the download page offers is covered. Nothing is published by hand.
 
 The node is versioned by tag and the rest by their version field, and that is
 deliberate: `doc/sequentia/release-versioning.md` requires a tag for the node,
@@ -53,10 +55,11 @@ For the others, bumping the version field and pushing is enough.
 
 **It will not move a card backwards.** The state file only knows what this script
 published; artifacts placed by hand over the years are older history it has never
-seen, and some are *ahead* of what their repository's version field currently says.
-Ambra is exactly that case today: `pubspec.yaml` reads 0.13.7 while the page offers
-0.16.4. Publishing then would quietly offer users a downgrade, which for a wallet is
-worse than offering nothing.
+seen, and one can be *ahead* of what its repository's default branch currently says.
+Ambra was exactly that case: the page offered 0.16.4 while `main` still read 0.13.7,
+because the work sat on an unmerged branch. The branch has since been merged, but the
+guard stays: publishing a lower version would quietly offer users a downgrade, which
+for a wallet is worse than offering nothing.
 
 **It will not publish a debug-signed APK.** Such a build installs and can then never
 be upgraded by a real release, stranding whoever installed it.
@@ -98,16 +101,30 @@ systemctl daemon-reload
 systemctl enable --now seq-release-publisher.timer
 ```
 
-Still outstanding, and each is a decision rather than an oversight:
+Ambra additionally needs a Flutter, Android and Rust toolchain:
 
-- **Fulmen's `Setup.exe`** needs wine for electron-builder's NSIS target. Until it is
-  installed and the result has been run on Windows, that card keeps the previous
-  installer and the Windows zip covers users in the meantime.
-- **Ambra** needs Flutter, an Android SDK/NDK, Rust, and a release signing keystore at
-  `/etc/sequentia/ambra-release.keystore`. That key *is* the app's identity — phones
-  refuse an update signed by a different one — so putting it on a server that also runs
-  a public node is a decision for whoever owns the key, not something this script should
-  quietly arrange.
+```
+apt-get install -y openjdk-17-jdk-headless
+curl -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
+rustup target add aarch64-linux-android
+cargo install cargo-ndk
+git clone -b stable --depth 1 https://github.com/flutter/flutter.git /opt/flutter
+# Android SDK + the NDK version pinned in app/android/app/build.gradle.kts
+sdkmanager --sdk_root=/opt/android-sdk "platform-tools" "platforms;android-34" \
+  "build-tools;34.0.0" "ndk;29.0.14206865"
+```
+
+and the release signing key, which is the one thing the box cannot install for
+itself:
+
+```
+/etc/sequentia/ambra-release.keystore   # mode 600, root
+/etc/sequentia/ambra-key.properties     # storeFile= points at the above
+```
+
+That key *is* the app's identity: a phone refuses an update signed by a different
+one, so it can never be regenerated or rotated without stranding every existing
+user. It is copied there by hand, once, and lives nowhere in git.
 
 ## Operating it
 

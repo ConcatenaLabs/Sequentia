@@ -1,26 +1,24 @@
 # Ambra: the Flutter mobile wallet, published as a signed Android APK.
 #
-# This recipe is complete but will SKIP itself until two things exist on the box,
-# and both are deliberate decisions rather than oversights:
+# ambra_core is Rust compiled to .so libraries that the Flutter app loads, so the
+# Rust half is built first: building Dart against a stale core is a silent bug
+# that ships.
 #
-#   1. A Flutter + Android SDK/NDK + Rust toolchain. ambra_core is Rust compiled
-#      to .so libraries that the Flutter app loads, so the Rust half must be built
-#      too, not just the Dart half.
+# The signing key IS the app's identity -- a phone refuses an update signed by a
+# different key, so a lost or rotated key strands every existing user. It lives at
+# /etc/sequentia, root-only, and never in git.
 #
-#   2. A release signing keystore. An Android release APK is signed with a key
-#      that IS the app's identity: users' phones refuse an update signed by a
-#      different key, so losing it or leaking it cannot be undone by rotating it.
-#      Today that key lives on the laptop. Putting it on a server that also runs
-#      a public node is a decision for whoever owns the key, not something this
-#      script should quietly arrange, so it is read from a path that does not
-#      exist by default and the product is skipped until it does.
-#
-# Debug-signed APKs are NOT published. An APK signed with a debug key installs
-# but can never be upgraded by a real release, so shipping one would strand every
-# user who installed it.
+# Debug-signed APKs are NOT published. Such a build installs and can then never be
+# upgraded by a real release, stranding whoever installed it.
 PRODUCT_NAME="ambra"
 PRODUCT_REPO="${SEQ_AMBRA_REPO:-https://github.com/GracedEternalKingCabbageMan/ambra.git}"
 PRODUCT_INDEX_GLOB="ambra-*.apk"
+
+# Toolchain, as installed on the box. Exported rather than assumed to be on PATH,
+# because the timer runs this with systemd's environment, not a login shell's.
+export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-/opt/android-sdk}"
+export ANDROID_HOME="$ANDROID_SDK_ROOT"
+export PATH="/opt/flutter/bin:/root/.cargo/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
 
 # Empty means "ask the remote what its default branch is".
 AMBRA_BRANCH="${SEQ_AMBRA_BRANCH:-}"
@@ -30,21 +28,18 @@ AMBRA_KEYSTORE="${SEQ_AMBRA_KEYSTORE:-/etc/sequentia/ambra-release.keystore}"
 AMBRA_KEY_PROPERTIES="${SEQ_AMBRA_KEY_PROPERTIES:-/etc/sequentia/ambra-key.properties}"
 
 requirements() {
-  have flutter || { echo "flutter not installed"; return 1; }
-  have cargo   || { echo "rust toolchain not installed (ambra_core is Rust)"; return 1; }
-  have java    || { echo "java not installed (Android build)"; return 1; }
-  [ -n "${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}" ] || { echo "ANDROID_SDK_ROOT not set"; return 1; }
-  [ -f "$AMBRA_KEYSTORE" ] || { echo "no release keystore at $AMBRA_KEYSTORE (see the note in this recipe)"; return 1; }
+  have flutter || { echo "flutter not on PATH (expected /opt/flutter/bin)"; return 1; }
+  have cargo   || { echo "cargo not on PATH (expected /root/.cargo/bin); ambra_core is Rust"; return 1; }
+  have java    || { echo "java not installed"; return 1; }
+  [ -d "$ANDROID_SDK_ROOT/platform-tools" ] || { echo "no Android SDK at $ANDROID_SDK_ROOT"; return 1; }
+  # The key cannot be generated or recovered here: it IS the app's identity, and
+  # a different one strands every user who already installed Ambra. So this is
+  # the one thing the box must be given rather than install for itself.
+  [ -f "$AMBRA_KEYSTORE" ] || { echo "no release keystore at $AMBRA_KEYSTORE"; return 1; }
   [ -f "$AMBRA_KEY_PROPERTIES" ] || { echo "no key.properties at $AMBRA_KEY_PROPERTIES"; return 1; }
   return 0
 }
 
-# NOTE, before enabling this product: app/pubspec.yaml currently reads 0.13.7
-# while the download page already offers ambra-0.16.4.apk, so the APKs published
-# so far were versioned from somewhere other than pubspec. Confirm which is the
-# real source before turning this on. Until then the driver's downgrade guard
-# refuses to publish 0.13.7 over 0.16.4, which is the safe outcome but not a
-# substitute for knowing the answer.
 remote_version() {
   local dir="$BUILD_ROOT/src/ambra" br; br="$(branch)"
   [ -n "$br" ] || return 1
@@ -62,11 +57,17 @@ build() {
   local version="$1" out="$2" br; br="$(branch)"
   local dir; dir="$(prepare_checkout ambra "$PRODUCT_REPO" "origin/$br")"
 
-  # The Rust core first: the Flutter build bundles whatever .so files are already
-  # staged, so building Dart against a stale core is a silent, shipped bug.
-  log "[ambra] building ambra_core (Rust)"
-  ( cd "$dir/ambra_core" && nice -n "$NICE" bash -c './build-android.sh' ) \
+  # The Rust core first. app/android/app/src/main/jniLibs is gitignored and never
+  # committed, so the Flutter build bundles whatever .so happens to be staged --
+  # building Dart against a stale core is a silent bug that ships. Building into
+  # a clean checkout each time is what makes that impossible here.
+  log "[ambra] cross-compiling ambra_core for Android"
+  ( cd "$dir/ambra_core" \
+      && nice -n "$NICE" cargo ndk -t arm64-v8a \
+           -o ../app/android/app/src/main/jniLibs build --release ) \
     || { log "[ambra] ambra_core build failed"; return 1; }
+  [ -n "$(ls -A "$dir/app/android/app/src/main/jniLibs" 2>/dev/null)" ] \
+    || { log "[ambra] no jniLibs produced; the APK would ship without its core"; return 1; }
 
   log "[ambra] building the signed release APK"
   cp "$AMBRA_KEY_PROPERTIES" "$dir/app/android/key.properties"
