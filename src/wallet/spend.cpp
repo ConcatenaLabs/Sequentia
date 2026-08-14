@@ -1224,8 +1224,8 @@ static bool CreateTransactionInternal(
     // Detected from the recipients and the fee asset, which between them cover
     // every way a supervised asset leaves this wallet: a supervised input can
     // only become a supervised output or a supervised fee.
-    bool supervised_tx = false;
-    if (blind_details && SupervisionActive(wallet.GetLastBlockHeight() + 1)) {
+    bool supervised_tx = issuance_details && issuance_details->supervision.has_value();
+    if (blind_details && !supervised_tx && SupervisionActive(wallet.GetLastBlockHeight() + 1)) {
         const SupervisionRegistry& supervision = SupervisionRegistry::GetInstance();
         if (!supervision.Empty()) {
             for (const auto& recipient : vecSend) {
@@ -1246,9 +1246,13 @@ static bool CreateTransactionInternal(
                 return false;
             }
         }
-        // Nothing left to blind, so no blinding at all. Change gets no blinding
-        // pubkey below, and BlindTransaction is never asked to run.
-        blind_details = nullptr;
+        // Nothing is blinded, but blind_details is KEPT rather than dropped.
+        // The issuance path hands the same structure on to CommitTransaction,
+        // which asserts its arrays match the transaction's outputs one for one,
+        // so nulling it here would leave the caller holding a stale one. What
+        // suppresses the blinding is that no output gets a blinding pubkey:
+        // recipients were refused above if confidential, and the change block
+        // below skips its own for the same reason.
     }
 
     bool may_need_blinded_dummy = !!blind_details;
@@ -1414,6 +1418,12 @@ static bool CreateTransactionInternal(
                     // explicit request for confidential change, and it is to be honoured
                     // rather than quietly downgraded (see fillBlindDetails).
                     if (blind_pub) blind_details->blind_change_requested = true;
+                } else if (supervised_tx) {
+                    // SEQUENTIA: a transaction moving a supervised asset is
+                    // fully explicit, change included. Attaching a pubkey here
+                    // is what would otherwise blind the change and have the
+                    // node reject the wallet's own transaction.
+                    blind_pub = std::nullopt;
                 } else {
                     // Otherwise, we generated it from our own wallet, so get the
                     // blinding key from our own wallet.
@@ -1516,7 +1526,16 @@ static bool CreateTransactionInternal(
             CAsset asset;
             CAsset token;
             // Initial issuance always uses vin[0]
-            GenerateAssetEntropy(entropy, txNew.vin[0].prevout, issuance_details->contract_hash);
+            if (issuance_details->supervision) {
+                // SEQUENTIA: a supervised issuance derives over its descriptor
+                // as well, so the freeze terms are part of the asset's identity
+                // rather than a claim about it (src/supervision.h).
+                GenerateSupervisedAssetEntropy(entropy, txNew.vin[0].prevout,
+                                               issuance_details->contract_hash,
+                                               *issuance_details->supervision);
+            } else {
+                GenerateAssetEntropy(entropy, txNew.vin[0].prevout, issuance_details->contract_hash);
+            }
             CalculateAsset(asset, entropy);
             CalculateReissuanceToken(token, entropy, issuance_details->blind_issuance);
             CScript blindingScript(CScript() << OP_RETURN << std::vector<unsigned char>(txNew.vin[0].prevout.hash.begin(), txNew.vin[0].prevout.hash.end()) << txNew.vin[0].prevout.n);
@@ -1550,6 +1569,28 @@ static bool CreateTransactionInternal(
             }
             // SEQUENTIA: Add denomination in the asset issuance
             txNew.vin[0].assetIssuance.nDenomination = issuance_details->denomination;
+            // ...and the declaration output, which is what lets a node read the
+            // supervised-asset set out of the UTXO set. Zero of the asset it
+            // declares, and never spendable.
+            if (issuance_details->supervision) {
+                // BEFORE the fee output, which consensus requires to be last,
+                // and never at the front: nChangePosInOut and the parallel
+                // blinding arrays are positional, so inserting ahead of them
+                // silently re-points the change output at somebody else's.
+                size_t at = txNew.vout.size();
+                while (at > 0 && txNew.vout[at - 1].IsFee()) --at;
+                txNew.vout.insert(txNew.vout.begin() + at,
+                    CTxOut(asset, 0, BuildSupervisionScript(asset, *issuance_details->supervision)));
+                if (blind_details) {
+                    blind_details->o_pubkeys.insert(blind_details->o_pubkeys.begin() + at, CPubKey());
+                }
+                // The insert invalidated every iterator into vout, and
+                // change_position is live from well above here to well below.
+                // The INDEX is unaffected (the declaration goes in after the
+                // change output, before the fee), so re-derive rather than
+                // adjust.
+                change_position = txNew.vout.begin() + nChangePosInOut;
+            }
         // Asset being reissued with explicitly named asset/token
         } else if (asset_index != -1) {
             assert(reissuance_index != -1);

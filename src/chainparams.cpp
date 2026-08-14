@@ -795,25 +795,34 @@ public:
         // every already-synced node effectively does today.
         consensus.pos_escape_stall_mtp_height = 80000;
         g_pos_escape_stall_mtp_height = consensus.pos_escape_stall_mtp_height;
-        // Supervised assets (src/supervision.h): NOT SCHEDULED on this chain yet.
+        // Supervised assets (src/supervision.h). COORDINATED ACTIVATION HEIGHT.
         //
-        // 0 is this parameter's "rule off" sentinel, and it is the correct value
-        // until the height is agreed, not a placeholder someone forgot. Unlike
-        // the gates above, this one cannot be picked unilaterally and left to
-        // take care of itself: below it a supervision declaration is inert and
-        // the issuance derives a plain asset id, above it the same issuance
-        // derives a different one, so a node that crosses H while another has
-        // not is on a different chain. Pick H only when every operator has the
-        // binary, the way the Simplicity activation and the 60-second-block fork
-        // were coordinated, and put the agreed value and its date here.
+        // Chosen 2026-08-14 04:25 UTC, when the tip was 92,445. The chain runs
+        // at 30-second blocks until the spacing fork at 93,800 (about eleven
+        // hours out from then) and 60-second blocks after it, which puts this
+        // height at roughly 05:00 UTC on 2026-08-15, a little over twenty-four
+        // hours later. Every node under our control is cut over well before it.
+        //
+        // The margin only ever grows. The chain cannot reach a height EARLY:
+        // past 93,800 the minimum-spacing rule is consensus, and below it the
+        // producers' own floor holds the cadence. A stall delays H and nothing
+        // else.
+        //
+        // Why this gate cannot be picked casually, unlike the two above. Below
+        // H a supervision declaration is inert and the issuance derives a plain
+        // asset id; at H the same issuance derives a different one. A node that
+        // crosses H while another has not is on a different chain. Same class of
+        // cutover as the Simplicity activation and the 60-second-block fork, and
+        // coordinated the same way: every node stopped, binary swapped, every
+        // node relaunched, all at once.
         //
         // Consequence for the USDC bridge, recorded so it is not rediscovered as
-        // a surprise: USDC.e cannot be issued supervised on this testnet before
-        // H, and an asset issued unsupervised can never be converted. Bridge
-        // deposits stay closed across the fork and USDC.e is re-issued
-        // supervised immediately after it, while supply is still zero. See
+        // a surprise: USDC.e cannot be issued supervised before H, and an asset
+        // issued unsupervised can never be converted. Bridge deposits stay
+        // closed across the fork and USDC.e is re-issued supervised immediately
+        // after it, while supply is still zero. See
         // doc/sequentia/bridged-usdc-standard.md.
-        consensus.supervised_assets_height = 0;
+        consensus.supervised_assets_height = 94600;
         // SEQUENTIA: 200,000 weight units — a twentieth of Bitcoin's 4,000,000
         // — so that, at ~30-second blocks (20x Bitcoin's cadence), a saturated
         // Minimum block spacing (hard fork; see params.h). The VALUE is live

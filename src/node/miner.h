@@ -195,6 +195,10 @@ private:
     /** Add transactions based on feerate including unconfirmed ancestors
       * Increments nPackagesSelected / nDescendantsUpdated with corresponding
       * statistics from the package selection (for logging statistics). */
+    /** SEQUENTIA: add privately submitted supervision records
+     *  (src/supervision_submit.h). Before the mempool, so a freeze cannot lose
+     *  its place to fee pressure and hand its target another block to escape in. */
+    void addSupervisionSubmissions() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     void addPackageTxs(int& nPackagesSelected, int& nDescendantsUpdated, std::chrono::seconds required_wait = std::chrono::seconds(0)) EXCLUSIVE_LOCKS_REQUIRED(m_mempool.cs);
 
     // helper functions for addPackageTxs()

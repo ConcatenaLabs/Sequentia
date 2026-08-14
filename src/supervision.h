@@ -60,27 +60,53 @@ static const uint8_t SUPERVISION_VERSION = 1;
 
 /** Feature bits.
  *
- *  RESERVED ONLY. None of these is implemented, and issuing an asset that sets
- *  one is refused (see ValidateSupervisionDescriptor) precisely so that the
- *  meaning stays free until somebody builds it. They exist because reserving a
- *  bit costs nothing now, whereas adding one later costs an asset-class
- *  migration for every asset already issued.
+ *  One is implemented (PAUSE); the rest are reserved and refused at issuance,
+ *  so their meaning stays free until somebody builds them. They exist because
+ *  reserving a bit costs nothing now, whereas adding one later costs an
+ *  asset-class migration for every asset already issued: the bits are in the
+ *  asset id, so an asset cannot gain or lose one.
  */
 enum SupervisionFeature : uint16_t {
-    //! All scripts freezable, not only single-owner ones. The
-    //! trapped-third-party problem that the single-owner rule exists to
+    //! All scripts freezable, not only single-owner ones. RESERVED, not built.
+    //! The trapped-third-party problem that the single-owner rule exists to
     //! prevent would have to be handled a level up, by issuer reissuance or by
     //! delayed effectiveness on shared scripts.
     SUPERVISION_FEATURE_TOTAL     = (1 << 0),
-    //! Asset-wide pause, expressed as a freeze record with a wildcard target.
+    //! IMPLEMENTED. Asset-wide pause: the issuer may freeze every single-owner
+    //! holding of the asset at once, with one record naming the wildcard target
+    //! (SUPERVISION_PAUSE_TARGET) instead of a script.
+    //!
+    //! Opt-in at issuance, and permanently so, because it is in the asset id.
+    //! An issuer who never wants the power cannot be given it, and a holder can
+    //! see at issuance whether the asset they are about to accept can be
+    //! stopped wholesale. That visibility is the reason it is a committed bit
+    //! rather than a rule every supervised asset gets.
     SUPERVISION_FEATURE_PAUSE     = (1 << 1),
-    //! Securities-style transfer allowlists. Explicitly out of scope.
+    //! Securities-style transfer allowlists. RESERVED, explicitly out of scope.
     SUPERVISION_FEATURE_WHITELIST = (1 << 2),
 };
 
 /** Every bit currently defined; anything outside this mask is malformed. */
 static const uint16_t SUPERVISION_FEATURE_MASK =
     SUPERVISION_FEATURE_TOTAL | SUPERVISION_FEATURE_PAUSE | SUPERVISION_FEATURE_WHITELIST;
+
+/** The bits an asset may actually be issued with today.
+ *
+ *  Only PAUSE is implemented. The other two stay refused so their meaning
+ *  remains free: an asset issued claiming a capability nothing enforces would
+ *  be a permanent lie, since the bits are in the asset id and cannot be
+ *  corrected afterwards. */
+static const uint16_t SUPERVISION_FEATURE_IMPLEMENTED = SUPERVISION_FEATURE_PAUSE;
+
+/** The wildcard freeze target: "every script holding this asset".
+ *
+ *  All-zero, which no real script hashes to, so it cannot collide with a
+ *  targeted freeze. Pause is a freeze record naming this instead of a script
+ *  (Alberto's point 7), not a new record type: it reuses signed admission, the
+ *  registry, unfreeze-as-spend, reorg handling and mempool eviction unchanged,
+ *  at the cost of one sentinel value. Lifting a pause is spending its record,
+ *  exactly like any other freeze. */
+static const uint256 SUPERVISION_PAUSE_TARGET = uint256();
 
 /** Serialize an x-only key as its bare 32 bytes.
  *
@@ -375,6 +401,9 @@ private:
         XOnlyPubKey operational;
         XOnlyPubKey recovery;
         //! target script hash -> number of unspent freeze records naming it.
+        //! The wildcard target SUPERVISION_PAUSE_TARGET lives in here too, so
+        //! a pause counts, reverts and rebuilds by exactly the same code as
+        //! every other freeze. That reuse is the whole design.
         std::map<uint256, uint32_t> frozen;
     };
 
@@ -466,7 +495,30 @@ public:
         LOCK(m_mutex);
         auto it = m_assets.find(asset);
         if (it == m_assets.end()) return false;
+        // A pause is a freeze on everything, so it answers for every target.
+        // Checked here rather than at the call sites so no enforcement path can
+        // ask about one script and miss that the whole asset is stopped.
+        if (it->second.frozen.count(SUPERVISION_PAUSE_TARGET) > 0) return true;
         return it->second.frozen.count(target) > 0;
+    }
+
+    //! Whether the asset as a whole is paused. Distinct from IsFrozen only for
+    //! reporting: an RPC has to be able to say WHY a spend is blocked.
+    bool IsPaused(const CAsset& asset) const
+    {
+        LOCK(m_mutex);
+        auto it = m_assets.find(asset);
+        if (it == m_assets.end()) return false;
+        return it->second.frozen.count(SUPERVISION_PAUSE_TARGET) > 0;
+    }
+
+    //! Whether this asset was issued with the pause capability at all.
+    bool PauseAllowed(const CAsset& asset) const
+    {
+        LOCK(m_mutex);
+        auto it = m_assets.find(asset);
+        if (it == m_assets.end()) return false;
+        return (it->second.descriptor.feature_bits & SUPERVISION_FEATURE_PAUSE) != 0;
     }
 
     void AddFreeze(const CAsset& asset, const uint256& target)
