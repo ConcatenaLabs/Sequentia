@@ -39,12 +39,25 @@ build() {
     || nice -n "$NICE" npm install --no-audit --no-fund >/dev/null 2>&1 \
     || { log "[fulmen] dependency install failed"; return 1; }
 
-  # AppImage is native. The Windows zip is a directory that gets zipped. The NSIS
-  # installer is the one that needs wine, which is why it is listed last: if wine
-  # is broken the first two still get published.
-  log "[fulmen] building Linux AppImage, Windows zip and Windows installer"
-  nice -n "$NICE" npx electron-builder --linux AppImage --win zip --win nsis >/dev/null 2>&1 \
-    || { log "[fulmen] electron-builder failed"; return 1; }
+  # Separate invocations, not one with three targets. electron-builder fails the
+  # whole command if any target fails, so a wine problem in the NSIS step threw
+  # away the AppImage and the zip that had already built successfully -- the page
+  # then kept all three at the previous version because of one broken installer.
+  # Run them independently so each publishes on its own merit, and put NSIS last:
+  # it is the only one that needs wine.
+  local built=0 tgt rc
+  for tgt in "--linux AppImage" "--win zip" "--win nsis"; do
+    log "[fulmen] building $tgt"
+    # shellcheck disable=SC2086
+    if nice -n "$NICE" npx electron-builder $tgt > "$BUILD_ROOT/fulmen-$(echo "$tgt" | tr -d ' -').log" 2>&1; then
+      built=1
+    else
+      rc=$?
+      log "[fulmen] $tgt FAILED (rc=$rc); last lines:"
+      tail -12 "$BUILD_ROOT/fulmen-$(echo "$tgt" | tr -d ' -').log" | sed 's/^/    /'
+    fi
+  done
+  [ "$built" = "1" ] || { log "[fulmen] every target failed"; return 1; }
 
   # electron-builder names artifacts from package.json; collect whatever it
   # produced rather than predicting the exact spelling.
