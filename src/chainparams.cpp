@@ -13,6 +13,7 @@
 #include <issuance.h>
 #include <anchor.h>
 #include <pos.h>
+#include <supervision.h>
 #include <primitives/transaction.h>
 #include <util/system.h>
 #include <crypto/sha256.h>
@@ -443,6 +444,18 @@ public:
         // "always on").
         consensus.pos_escape_stall_mtp_height = 1;
         g_pos_escape_stall_mtp_height = consensus.pos_escape_stall_mtp_height;
+        // Supervised assets (src/supervision.h): in force from mainnet's first
+        // block, so a supervised issuance is possible from day one and there is
+        // no flag day to coordinate later. 1 and not 0 for the same reason as
+        // the two heights above: 0 is this parameter's "rule off" sentinel.
+        //
+        // This is what lets a bridged stablecoin be issued supervised at launch
+        // rather than migrated into supervision afterwards, which is not
+        // possible at all: the descriptor is in the asset id, so an asset issued
+        // unsupervised can never become supervised. See
+        // doc/sequentia/bridged-usdc-standard.md.
+        consensus.supervised_assets_height = 1;
+        consensus.nMaxBlockWeight = 200000;             // a twentieth of Bitcoin (doc 11 §4)
         // Minimum block spacing: the 30-second cadence as a CONSENSUS RULE, in
         // force from mainnet's first block. Mainnet has not launched, so there
         // is no history to exempt and nothing to coordinate later.
@@ -782,6 +795,27 @@ public:
         // every already-synced node effectively does today.
         consensus.pos_escape_stall_mtp_height = 80000;
         g_pos_escape_stall_mtp_height = consensus.pos_escape_stall_mtp_height;
+        // Supervised assets (src/supervision.h): NOT SCHEDULED on this chain yet.
+        //
+        // 0 is this parameter's "rule off" sentinel, and it is the correct value
+        // until the height is agreed, not a placeholder someone forgot. Unlike
+        // the gates above, this one cannot be picked unilaterally and left to
+        // take care of itself: below it a supervision declaration is inert and
+        // the issuance derives a plain asset id, above it the same issuance
+        // derives a different one, so a node that crosses H while another has
+        // not is on a different chain. Pick H only when every operator has the
+        // binary, the way the Simplicity activation and the 60-second-block fork
+        // were coordinated, and put the agreed value and its date here.
+        //
+        // Consequence for the USDC bridge, recorded so it is not rediscovered as
+        // a surprise: USDC.e cannot be issued supervised on this testnet before
+        // H, and an asset issued unsupervised can never be converted. Bridge
+        // deposits stay closed across the fork and USDC.e is re-issued
+        // supervised immediately after it, while supply is still zero. See
+        // doc/sequentia/bridged-usdc-standard.md.
+        consensus.supervised_assets_height = 0;
+        // SEQUENTIA: 200,000 weight units — a twentieth of Bitcoin's 4,000,000
+        // — so that, at ~30-second blocks (20x Bitcoin's cadence), a saturated
         // Minimum block spacing (hard fork; see params.h). The VALUE is live
         // from this binary — node::PosEarliestBlockTime reads it directly, so
         // producers stop emitting too-close blocks immediately — while the
@@ -1843,6 +1877,14 @@ protected:
         consensus.pos_escape_stall_mtp_height =
             (int)args.GetIntArg("-posescapestallmtpheight", 1);
         g_pos_escape_stall_mtp_height = consensus.pos_escape_stall_mtp_height;
+        // Supervised assets (src/supervision.h). Default 1 = active from the
+        // first block, which is what a fresh chain should be (CONTRIBUTING.md:
+        // height-gate only what an already-running chain requires) and what
+        // makes the functional tests exercise the rule by default. Arg-readable
+        // only here so a test can put the activation in the middle of its own
+        // chain and check both sides of the boundary; the real chains pin it.
+        consensus.supervised_assets_height =
+            (int)args.GetIntArg("-supervisedassetsheight", 1);
         // Minimum block spacing. Arg-readable only on this custom/regtest chain
         // so tests can exercise the rule and both sides of its activation; the
         // real chains pin it in code above.
@@ -2835,4 +2877,13 @@ void SelectParams(const std::string& network)
     // params makes the value a consequence of the chain, not of argument-parsing
     // order.
     g_con_any_asset_fees = globalChainParams->GetConsensus().elements_mode;
+
+    // SEQUENTIA: supervised assets (src/supervision.h). Set here, and only here,
+    // for the same reason the line above is: Consensus::CheckTxInputs is reached
+    // without Consensus::Params, so the gate has to be a global, and a global
+    // assigned in a CChainParams constructor holds whatever the last help-string
+    // construction happened to leave behind. This one governs whether an asset
+    // id is derived over its supervision descriptor, so a value that is right by
+    // accident is a chain split waiting for the next reordering.
+    g_supervision_height = globalChainParams->GetConsensus().supervised_assets_height;
 }

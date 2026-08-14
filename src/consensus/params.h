@@ -256,6 +256,25 @@ struct Params {
     //! blocks. Below H the rule is simply not applied, which is exactly the
     //! behaviour every already-synced node has today.
     int pos_escape_stall_mtp_height{0};
+    //! SEQUENTIA: block height from which supervised assets exist (src/supervision.h).
+    //!
+    //! Same convention as pos_exprace_height above: 0 = rule off, a positive H
+    //! = active from height H. A chain launched WITH the rule sets 1.
+    //!
+    //! This gate is not the usual courtesy to old history. Consensus DERIVES an
+    //! asset id rather than reading it from the transaction, so below H a
+    //! supervision declaration is inert data and the issuance derives plainly,
+    //! which is exactly what a node without this code does. Above H the same
+    //! issuance derives a different asset. The two behaviours cannot coexist on
+    //! one chain, so a supervised asset cannot be issued before every node has
+    //! crossed H. Set H above the tip at release and cut every node over at
+    //! once, as with the Simplicity activation.
+    //!
+    //! One height, not two: the same value gates the derivation and, later, the
+    //! freeze enforcement built on it. Splitting them would allow a window in
+    //! which supervised assets exist but cannot be supervised, which is the one
+    //! state the feature must never be in.
+    int supervised_assets_height{0};
     //! SEQUENTIA PoS: the MINIMUM SECONDS between a block and its parent,
     //! enforced by consensus. 0 = no minimum (the rule is off).
     //!

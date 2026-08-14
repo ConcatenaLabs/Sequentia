@@ -21,10 +21,10 @@
 </head><body>
 
 <h1>Supervised assets</h1>
-<p class="sub">Issuer-freezable assets on Sequentia: what consensus can enforce, what it cannot, and who covers the difference. 2026-08-12, for Andreas and Alberto.</p>
+<p class="sub">Issuer-freezable assets on Sequentia: what consensus can enforce, what it cannot, and who covers the difference. 2026-08-12, revised 2026-08-13 with Alberto's decisions. Design settled; implementation under way.</p>
 
 <div class="box">
-<p><strong>Proposal: add a declared asset class, <em>supervised</em>, whose issuer can freeze holders by consensus rule, and pair it with freeze-awareness in the Lightning and DEX implementations.</strong> Freezability is committed into the asset id at issuance, so it is permanent, visible before acquisition, and cannot be added to an existing asset.</p>
+<p><strong>Proposal: add a declared asset class, <em>supervised</em>, whose issuer can freeze holders by consensus rule, and pair it with freeze-awareness in the Lightning and DEX implementations.</strong> Freezability is fixed at issuance, so it is permanent, visible before acquisition, and can never be added to an asset that was not born with it.</p>
 <p><strong>The split is not a compromise, it is a boundary.</strong> Consensus can freeze what it can see and attribute: ordinary on-chain holdings, and resting covenant orders. It cannot freeze a Lightning balance, and no version of this rule ever will, because a channel's value lives in a shared output and in off-chain state that consensus cannot attribute to either party. That half must be enforced by the Lightning implementation as policy, which is exactly the division Andreas described.</p>
 <p><strong>The bar is parity with Ethereum, not improvement on it.</strong> That is what makes the Lightning boundary acceptable rather than a shortfall: whenever USDC sits inside a shared-state contract on Ethereum, blacklisting the holder's own address does not reach it either, because the contract holds the tokens while the holder's claim on them moves separately, without USDC ever being transferred. Circle's only lever there is to blacklist the <em>contract</em>, freezing everyone inside it, which it did in February 2026 (5.1). A Lightning channel is that same shape. So a supervised asset reaches a holder's own balance exactly as an EVM blacklist does, and stops exactly where an EVM blacklist stops.</p>
 </div>
@@ -50,7 +50,13 @@
 
 <h3>2.1 A supervised asset is declared at birth</h3>
 
-<p>The issuance commits an <strong>issuer freeze key</strong> into the asset id. Freezability therefore cannot be added to an existing asset or removed from a supervised one, and a freeze record is valid only if signed by that key. Ordinary assets are untouched by every rule below.</p>
+<p>The issuance commits a <strong>supervision descriptor</strong> into the asset id: a version, reserved feature bits, an <strong>operational freeze key</strong> and a <strong>recovery key</strong>. Only the issuance can do this, so supervision cannot be added to an existing asset, removed from a supervised one, or altered. Ordinary assets are untouched by every rule below.</p>
+
+<p><strong>Two keys, not one.</strong> The operational key signs freezes and unfreezes. The recovery key, kept deep cold and itself threshold-shared, can do exactly one thing: sign a rotation record replacing the operational key or itself. This removes the compromise race by construction. With a single key, a thief and the issuer both hold it and whoever rotates first wins permanently, so the attacker's opening move is to seize the authority silently; separating use from rotation means a stolen operational key can grief visibly but can never rotate. One trap to build deliberately: after a rotation, an unfreeze must be validated against the <em>current</em> operational key, or a stolen old key could lift every existing freeze.</p>
+
+<p><strong>Version and feature bits cost nothing now and cannot be added later.</strong> An asset id is forever, so a field not committed at issuance can never reach already-issued assets, and a future supervision variant would otherwise need its own derivation constant: a separate asset class, invisible to every wallet and parser written before it. Reserved and deliberately unimplemented: a total-supervision mode making all scripts freezable, a pause-allowed bit, and a securities-style whitelist mode. Reserving them keeps those a flag rather than a future migration.</p>
+
+<p><strong>Keys are BIP340 x-only.</strong> Schnorr gives issuer multisig for free: FROST and MuSig2 both produce one ordinary signature under one ordinary key, so an issuer splitting freeze authority across compliance, legal and cold storage needs nothing from the protocol, which never learns a quorum is behind it.</p>
 
 <h3>2.2 Enforcement is on spending, and only for single-owner outputs</h3>
 
@@ -64,6 +70,14 @@
 </ul>
 
 <p>The cost of that second rule is explicit: a holder who moves supervised funds into a shared script before being frozen has escaped the consensus rule. That is the same escape a holder gets on Ethereum by moving USDC into a pooled contract, where their claim becomes a separate token that changes hands without USDC ever being transferred. It is why section 3 exists.</p>
+
+<h3>2.2a What supervision does not grant</h3>
+
+<p>Consensus never lets an issuer spend a holder's output. An issuer-spend power would break the script model and become the chain's largest honeypot, so seize and burn are not built as consensus machinery. They fall out economically instead, which is how Tether already operates at scale: a permanent freeze is a de-facto burn, and a permanent freeze plus reissuing the same amount to a court-designated address is a de-facto seize. The single enabling condition is that the asset is reissuable, so <strong>a supervised issuance must create reissuance tokens</strong>. That one check prevents a supervised asset that cannot comply from existing, and closes the seize-and-burn half of the GENIUS and FinCEN requirements with no enforcement code at all.</p>
+
+<h3>2.2b Freezes take effect from the next block</h3>
+
+<p>A freeze record confirmed in block N binds spends from block N+1. This removes any same-block record-and-spend ambiguity, which would otherwise depend on update ordering inside block connection, exactly the kind of ordering where mempool and block validation can disagree, and a disagreement there is a chain split. It also gives the mempool eviction pass a full block to run. The frozen party gains about sixty seconds, which is not the exposure that matters: see the submission channel in section 4.5.</p>
 
 <h3>2.3 Resting DEX orders are covered, and cleanly</h3>
 
@@ -93,7 +107,7 @@
 
 <h3>4.1 Mempool eviction</h3>
 
-<p>A spend that was valid on entry becomes invalid the moment a freeze confirms, and nothing removes it today: the mempool drops only transactions included in a block or directly conflicting, and a freeze record conflicts with nothing. The stale transaction is re-selected into every block template, template construction fails, and producers skip slots — a chain halt, not an inconvenience. The node also asserts this cannot happen: <code>CTxMemPool::check</code> re-runs <code>CheckTxInputs</code> inside a bare <code>assert</code> commented &quot;should always pass&quot; (<code>src/txmempool.cpp:920</code>), so a freeze would abort nodes. Eviction on freeze, re-admission on unfreeze, and a reconsidered assert are part of the feature, not follow-up work.</p>
+<p>A spend that was valid on entry becomes invalid the moment a freeze confirms, and nothing removes it today: the mempool drops only transactions included in a block or directly conflicting, and a freeze record conflicts with nothing. The stale transaction is re-selected into every block template, template construction fails, and producers skip slots, which is a chain halt rather than an inconvenience. The node also asserts this cannot happen: <code>CTxMemPool::check</code> re-runs <code>CheckTxInputs</code> inside a bare <code>assert</code> commented &quot;should always pass&quot; (<code>src/txmempool.cpp:920</code>), so a freeze would abort nodes. Eviction on freeze, re-admission on unfreeze, and a reconsidered assert are part of the feature, not follow-up work.</p>
 
 <h3>4.2 A freeze signal tools can read</h3>
 
@@ -103,7 +117,15 @@
 
 <p>Per 2.4: keep supervised-asset change explicit in the node wallet and in the DEX's wallet daemon. This is the item most likely to be discovered late and to look like an unrelated bug.</p>
 
-<h3>4.4 Activation and cutover</h3>
+<h3>4.4 The Qt wallet, as part of each change</h3>
+
+<p>Every consensus and wallet change in this project has a second half in <code>sequentia-qt</code>: the issuance page needs the supervised flag and reissuance-token handling, coin display must show frozen status <em>before</em> anyone tries to spend, send flows must keep change unblinded for supervised assets, and the new RPCs need surfacing. This belongs in the plan for each change rather than as a follow-up, alongside the web wallet, explorer, registry and DEX.</p>
+
+<h3>4.5 An issuer-to-producer submission channel</h3>
+
+<p>A freeze record sits in the public mempool before it confirms, so a watcher can move funds to a fresh script before it bites, reducing a freeze to a chase. The same race exists on Ethereum, where issuers use private relays; the equivalent here is authenticated submission of freeze records straight to producers, outside the public mempool. It is infrastructure rather than consensus, but it must be scheduled alongside this work: without it the compliance guarantee is materially weaker in practice than on paper, and an issuer should not be the one to discover that.</p>
+
+<h3>4.6 Activation and cutover</h3>
 
 <p>Height-gated above the tip at release, with the same all-nodes-at-once discipline as the Simplicity activation and the 60-second-block fork, because an un-upgraded node diverges at the gate.</p>
 
@@ -155,19 +177,16 @@
 <p>The sequencing matters and is cheap. Re-issuing costs one transaction while supply is zero, and the registry entry and bridge configuration are a few lines. The alternative is discovering in a due-diligence conversation a year from now that the asset cannot be adopted and cannot be fixed.</p>
 
 <div class="q">
-<p><strong>But this is a consensus change, so when the asset can be issued depends on an answer we have not settled.</strong> The rule needs an activation height (4.4). Whether <code>USDC.e</code> can be re-issued supervised <em>before</em> that height turns on how the freeze key is committed, which 7.2 asks Alberto and which is therefore a scheduling decision rather than a matter of taste.</p>
-<ul>
-<li><strong>A distinct derivation constant</strong> changes how the asset id is computed, and consensus computes that id rather than reading it from the transaction (<code>CalculateAsset</code>, <code>src/confidential_validation.cpp:219</code>). A node without the rule would derive a different id for the same issuance, so the issuance is a chain split until every node has the new binary. Under this encoding the asset cannot be issued until after activation, and <strong>USDC deposits must stay closed until then</strong>, since any USDC bridged in the meantime lands in an asset that can never be supervised.</li>
-<li><strong>A declaration output in the issuance transaction</strong> leaves derivation untouched, so every node computes the same asset id and there is no split. The asset can be issued supervised today; the declaration sits inert, and enforcement simply begins at the activation height. This decouples the asset decision from the fork schedule entirely.</li>
-</ul>
-<p>The second is strictly better for sequencing and is what I would choose unless it fails review on other grounds. It is the difference between shipping USDC on our own timetable and holding the bridge closed until a consensus fork lands.</p>
+<p><strong>Sequencing, now decided.</strong> The descriptor is committed in the asset-id derivation, and consensus <em>derives</em> that id rather than reading it from the transaction, so a node without the rule would derive a different id for the same issuance. A supervised asset therefore cannot exist before the activation height without splitting the chain.</p>
+<p>The practical consequence for USDC: <strong>bridge deposits stay closed until the fork activates</strong>, and <code>USDC.e</code> is re-issued supervised immediately afterwards, while its supply is still zero. Any USDC bridged in the meantime would land in an asset that can never be supervised, which is the outcome this whole document exists to avoid.</p>
+<p>An earlier draft proposed a declaration-output encoding that would have allowed issuing before the fork. Alberto chose derivation for its cryptographic authority and forward compatibility, accepting the wait. Recorded so the tradeoff is visible, not to reopen it.</p>
 </div>
 
 <h2>7. For Alberto</h2>
 
 <ol>
 <li><strong>Single-owner detection at spend time.</strong> The rule turns on classifying a revealed script as single-owner. P2WPKH and P2TR key-path are clear. Is a bare P2PK or a 1-of-1 multisig worth including, and where should the classifier live so that mempool and block validation cannot disagree?</li>
-<li><strong>Where the freeze key is committed, which is really a scheduling question.</strong> A distinct derivation constant makes the class visible from the id alone but cannot be issued before the fork activates without splitting the chain; a declaration output in the issuance transaction leaves derivation untouched and can therefore be issued today, inert until activation. See the box in section 6: this decides whether USDC deposits can open before the fork or must wait for it.</li>
+<li><strong>Whether the reissuance-token requirement is consensus or policy.</strong> Alberto prefers consensus and calls it negotiable; I lean the same way, since a supervised asset that cannot comply should not be expressible.</li>
 <li><strong>Mempool eviction design.</strong> This is the piece most likely to go wrong, and it touches code we both rely on. I would want your review of the eviction and re-admission paths specifically.</li>
 <li><strong>Whether supervised assets may pay fees</strong>, given a frozen holder's fee output interacts with producer fee handling.</li>
 </ol>

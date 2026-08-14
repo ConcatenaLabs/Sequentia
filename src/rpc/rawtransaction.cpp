@@ -41,6 +41,7 @@
 #include <script/sign.h>
 #include <script/signingprovider.h>
 #include <script/standard.h>
+#include <supervision.h>
 #include <uint256.h>
 #include <util/bip32.h>
 #include <util/moneystr.h>
@@ -2907,7 +2908,7 @@ struct RawIssuanceDetails
 // Appends a single issuance to the first input that doesn't have one, and includes
 // a single output per asset type in shuffled positions. Requires at least one output
 // to exist (the fee output, which must be last).
-void issueasset_base(CMutableTransaction& mtx, RawIssuanceDetails& issuance_details, const CAmount asset_amount, const CAmount token_amount, const CTxDestination& asset_dest, const CTxDestination& token_dest, const bool blind_issuance, const uint256& contract_hash, const uint8_t denomination)
+void issueasset_base(CMutableTransaction& mtx, RawIssuanceDetails& issuance_details, const CAmount asset_amount, const CAmount token_amount, const CTxDestination& asset_dest, const CTxDestination& token_dest, const bool blind_issuance, const uint256& contract_hash, const uint8_t denomination, const SupervisionDescriptor* supervision)
 {
     CHECK_NONFATAL(asset_amount > 0 || token_amount > 0);
     CHECK_NONFATAL(mtx.vout.size() > 0);
@@ -2931,7 +2932,14 @@ void issueasset_base(CMutableTransaction& mtx, RawIssuanceDetails& issuance_deta
     uint256 entropy;
     CAsset asset;
     CAsset token;
-    GenerateAssetEntropy(entropy, mtx.vin[issuance_input_index].prevout, contract_hash);
+    // SEQUENTIA: a supervised issuance derives over its descriptor as well, so
+    // the freeze terms are part of the asset's identity rather than an
+    // assertion about it (src/supervision.h).
+    if (supervision) {
+        GenerateSupervisedAssetEntropy(entropy, mtx.vin[issuance_input_index].prevout, contract_hash, *supervision);
+    } else {
+        GenerateAssetEntropy(entropy, mtx.vin[issuance_input_index].prevout, contract_hash);
+    }
     CalculateAsset(asset, entropy);
     CalculateReissuanceToken(token, entropy, blind_issuance);
 
@@ -2947,6 +2955,13 @@ void issueasset_base(CMutableTransaction& mtx, RawIssuanceDetails& issuance_deta
 
     mtx.vin[issuance_input_index].assetIssuance.assetEntropy = contract_hash;
     mtx.vin[issuance_input_index].assetIssuance.nDenomination = issuance_details.denomination;
+
+    // The declaration output. It carries zero of the asset it declares, is
+    // never spendable, and is retained in the UTXO set so that the set of
+    // supervised assets can be read back off it.
+    if (supervision) {
+        mtx.vout.insert(mtx.vout.begin(), CTxOut(asset, 0, BuildSupervisionScript(asset, *supervision)));
+    }
 
     if (asset_amount > 0) {
         // Fee output is required to be last. We will insert _before_ the selected position, which preserves that.
@@ -3037,6 +3052,13 @@ static RPCHelpMan rawissueasset()
                                     {"blind", RPCArg::Type::BOOL, RPCArg::Default{false}, "Whether to mark the issuance input for blinding or not. Only affects issuances with re-issuance tokens."},
                                     {"contract_hash", RPCArg::Type::STR_HEX, RPCArg::Default{"0000...0000"}, "Contract hash that is put into issuance definition. Must be 32 bytes worth in hex string form. This will affect the asset id."},
                                     {"denomination", RPCArg::Type::NUM, RPCArg::Default{8}, "Number of decimals to denominate the asset - default: 8\n"},
+                                    {"supervision", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "SEQUENTIA: issue the asset SUPERVISED, meaning its issuer can freeze holders by consensus rule.\n"
+"This is decided here and nowhere else. The keys go into the asset id, so an asset issued without this can never become supervised, and one issued with it can never stop being.\n"
+"A freeze binds only single-owner scripts; Lightning channels, HTLCs and covenants are out of reach by design. Reissuance tokens are required, because freeze-plus-reissue is how seize and burn are answered without ever giving an issuer a spending power over someone else's coins.",
+                                        {
+                                            {"operationalkey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "x-only (BIP340) key that signs freezes and unfreezes."},
+                                            {"recoverykey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "x-only key whose only power is rotating either key. Keep it cold and separate; it is what stops a stolen operational key from seizing the authority permanently."},
+                                        }},
                                 }
                             }
                         }
@@ -3149,9 +3171,44 @@ static RPCHelpMan rawissueasset()
             denomination = static_cast<uint8_t>(d);
         }
 
+        // SEQUENTIA: optional supervision. Present means the asset is issued
+        // freezable by its issuer, and that is decided HERE and only here: the
+        // descriptor goes into the asset id, so an asset issued without one can
+        // never become supervised, and one issued with it can never stop being.
+        SupervisionDescriptor supervision;
+        bool supervised = false;
+        if (!issuance_o["supervision"].isNull()) {
+            const UniValue& sup = issuance_o["supervision"].get_obj();
+            RPCTypeCheckObj(sup, {
+                {"operationalkey", UniValueType(UniValue::VSTR)},
+                {"recoverykey", UniValueType(UniValue::VSTR)},
+            });
+            const std::string op_hex = sup["operationalkey"].get_str();
+            const std::string rec_hex = sup["recoverykey"].get_str();
+            if (!IsHex(op_hex) || op_hex.size() != 64 || !IsHex(rec_hex) || rec_hex.size() != 64) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "supervision keys must be 32-byte x-only public keys in hex");
+            }
+            supervision.operational_key = XOnlyPubKey(ParseHex(op_hex));
+            supervision.recovery_key = XOnlyPubKey(ParseHex(rec_hex));
+            std::string sup_err;
+            if (!ValidateSupervisionDescriptor(supervision, sup_err)) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, sup_err);
+            }
+            if (g_supervision_height <= 0) {
+                throw JSONRPCError(RPC_MISC_ERROR, "supervised assets are not scheduled on this chain");
+            }
+            if (blind_issuance) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "a supervised asset cannot be blinded: consensus must be able to read its outputs to freeze them");
+            }
+            if (token_amount <= 0) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "a supervised issuance must create reissuance tokens; freeze-plus-reissue is how seize and burn are answered without giving the issuer a spending power");
+            }
+            supervised = true;
+        }
+
         RawIssuanceDetails details;
 
-        issueasset_base(mtx, details, asset_amount, token_amount, asset_dest, token_dest, blind_issuance, contract_hash, denomination);
+        issueasset_base(mtx, details, asset_amount, token_amount, asset_dest, token_dest, blind_issuance, contract_hash, denomination, supervised ? &supervision : nullptr);
         if (details.input_index == -1) {
             throw JSONRPCError(RPC_INVALID_PARAMETER, "Failed to find enough blank inputs for listed issuances.");
         }
