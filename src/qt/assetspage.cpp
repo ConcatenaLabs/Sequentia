@@ -32,7 +32,6 @@
 #include <QHBoxLayout>
 #include <QHash>
 #include <QHeaderView>
-#include <QIntValidator>
 #include <QLabel>
 #include <QLineEdit>
 #include <QLocale>
@@ -124,8 +123,13 @@ AssetsPage::AssetsPage(const PlatformStyle* platformStyle, QWidget* parent)
     m_issue_precision->setValue(8);
     m_issue_amount = new QLineEdit(issueGroup);
     m_issue_amount->setPlaceholderText(tr("e.g. 1000000"));
-    m_issue_tokens = new QLineEdit(issueGroup);
-    m_issue_tokens->setText("1");
+    // A reissuance token is never consumed by reissuing, so the number this
+    // field used to ask for was a trap: it read as "how many times can I make
+    // more", when any amount above zero already means mintable forever and zero
+    // means closed for good. Ask the only question that exists -- open or
+    // closed -- and pass 1 or 0 to the node.
+    m_issue_reissuable = new QCheckBox(tr("Allow making more of this asset later"), issueGroup);
+    m_issue_reissuable->setChecked(true);
     m_issue_blind = new QCheckBox(tr("Confidential (blinded) issuance"), issueGroup);
     m_issue_blind->setChecked(false);
     m_issue_button = new QPushButton(tr("Issue asset"), issueGroup);
@@ -169,7 +173,21 @@ AssetsPage::AssetsPage(const PlatformStyle* platformStyle, QWidget* parent)
     issueForm->addRow(domainHint);
     issueForm->addRow(tr("Decimal places:"), m_issue_precision);
     issueForm->addRow(tr("Amount of units:"), m_issue_amount);
-    issueForm->addRow(tr("Reissuance tokens:"), m_issue_tokens);
+    issueForm->addRow(QString(), m_issue_reissuable);
+    QLabel* reissueHint = new QLabel(
+        tr("Ticked, this wallet also receives a <b>reissuance token</b> - the inflation key for this "
+           "asset. Whoever holds any amount of it can mint more units at any time, without limit: it "
+           "is a key, not a counter, and reissuing never uses it up. It moves like any other asset - "
+           "it can be sent, and even split into decimal fractions - and every fraction carries the "
+           "whole power, so sending someone a piece of it does not share the power, it copies it."
+           "<br><br>Unticked, the amount above is all there will ever be. A closed supply can never "
+           "be reopened."),
+        issueGroup);
+    reissueHint->setWordWrap(true);
+    // Same clipping trap as domainHint above: give it a spanning row and an
+    // explicit size policy, or QFormLayout shows only the top of the text.
+    reissueHint->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
+    issueForm->addRow(reissueHint);
     issueForm->addRow(QString(), m_issue_blind);
     issueForm->addRow(QString(), m_issue_button);
     issueForm->addRow(tr("Result:"), m_issue_result);
@@ -253,7 +271,6 @@ AssetsPage::AssetsPage(const PlatformStyle* platformStyle, QWidget* parent)
         QLocale lc(QLocale::C); lc.setNumberOptions(QLocale::RejectGroupSeparator);
         auto* issueAmt = new QDoubleValidator(0, 1e15, 8, this); issueAmt->setLocale(lc);
         m_issue_amount->setValidator(issueAmt);
-        m_issue_tokens->setValidator(new QIntValidator(0, 1000000, this));
         auto* reissueAmt = new QDoubleValidator(0, 1e15, 8, this); reissueAmt->setLocale(lc);
         m_reissue_amount->setValidator(reissueAmt);
         // Keep the ticker to what a registry will accept, while it can still be
@@ -431,19 +448,24 @@ bool AssetsPage::domainResolves(const QString& domain) const
     return LookupHost(domain.toStdString(), ips, 1, /*fAllowLookup=*/true) && !ips.empty();
 }
 
-bool AssetsPage::confirmIssuance(const QString& name, const QString& ticker, const QString& domain)
+bool AssetsPage::confirmIssuance(const QString& name, const QString& ticker, const QString& domain, bool reissuable)
 {
     QMessageBox box(this);
     box.setIcon(QMessageBox::Warning);
     box.setWindowTitle(tr("Issue this asset?"));
     box.setText(tr("Issue %1 (%2), from %3?").arg(name, ticker, domain));
-    box.setInformativeText(
+    QString detail =
         tr("The name (%1), the ticker (%2) and the domain (%3) become part of this asset's identity "
            "for good. They cannot be edited, and no one can change them later - if the domain is "
            "wrong, the only way out is to abandon this asset and issue another one.\n\n"
            "After issuing you will need to put a small file on %3 to prove the domain is yours. "
            "Until you do, wallets show this asset as a long string of digits instead of its name.")
-            .arg(name, ticker, domain));
+            .arg(name, ticker, domain);
+    if (!reissuable) {
+        detail += tr("\n\nYou chose not to allow reissuance: the amount you entered is all there "
+                     "will ever be, and a closed supply can never be reopened.");
+    }
+    box.setInformativeText(detail);
     box.setStandardButtons(QMessageBox::Cancel | QMessageBox::Ok);
     if (QAbstractButton* ok_button = box.button(QMessageBox::Ok)) ok_button->setText(tr("Issue it"));
     box.setDefaultButton(QMessageBox::Cancel);
@@ -456,7 +478,7 @@ void AssetsPage::onIssue()
     const QString name = m_issue_name->text().trimmed();
     const QString ticker = m_issue_ticker->text().trimmed();
     const QString amount = m_issue_amount->text().trimmed();
-    const QString tokens = m_issue_tokens->text().trimmed();
+    const bool reissuable = m_issue_reissuable->isChecked();
     const QString domain = issuerDomain();
 
     if (name.isEmpty()) { setStatus(tr("Give the asset a name. It cannot be added later."), true); m_issue_name->setFocus(); return; }
@@ -489,7 +511,7 @@ void AssetsPage::onIssue()
         if (answer != QMessageBox::Ok) { m_issue_domain->setFocus(); return; }
     }
 
-    if (!confirmIssuance(name, ticker, domain)) return;
+    if (!confirmIssuance(name, ticker, domain, reissuable)) return;
 
     UniValue contract(UniValue::VOBJ);
     contract.pushKV("name", name.toStdString());
@@ -499,7 +521,7 @@ void AssetsPage::onIssue()
 
     UniValue params(UniValue::VARR);
     params.push_back(UniValue(UniValue::VNUM, amount.toStdString()));
-    params.push_back(UniValue(UniValue::VNUM, tokens.isEmpty() ? std::string("0") : tokens.toStdString()));
+    params.push_back(UniValue(UniValue::VNUM, reissuable ? std::string("1") : std::string("0")));
     params.push_back(m_issue_blind->isChecked());
     params.push_back(NullUniValue); // contract_hash: the contract below supersedes it
     params.push_back(NullUniValue); // fee_asset
@@ -512,7 +534,13 @@ void AssetsPage::onIssue()
 
     const QString asset = r.exists("asset") ? QString::fromStdString(r["asset"].get_str()) : QString();
     const QString token = r.exists("token") ? QString::fromStdString(r["token"].get_str()) : QString();
-    m_issue_result->setText(tr("Asset id: %1\nReissuance token: %2").arg(asset, token));
+    // The node reports the token id even when zero tokens were issued; showing
+    // it then would suggest a power that no one has.
+    if (reissuable) {
+        m_issue_result->setText(tr("Asset id: %1\nReissuance token: %2").arg(asset, token));
+    } else {
+        m_issue_result->setText(tr("Asset id: %1\nSupply closed: no reissuance token exists.").arg(asset));
+    }
 
     m_proof_asset = asset;
     m_proof_domain = domain;

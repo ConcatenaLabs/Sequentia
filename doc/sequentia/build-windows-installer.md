@@ -3,7 +3,7 @@
 This runbook produces the Windows setup executable
 (`elements-X.Y.Z-win64-setup.exe`, typically published as
 `sequentia-core-X.Y.Z-win64-setup.exe`) containing the GUI node
-(`elements-qt`), the daemon and CLI tools, and the bundled price server with
+(`sequentia-qt`), the daemon and CLI tools, and the bundled price server with
 its own Python runtime.
 
 The installer is **cross-compiled from Linux** with MinGW and packaged with
@@ -105,7 +105,7 @@ network and the Linux release builds use `RFU` and `rfa`.
 - **A `git reset --hard` / `git clean` silently un-configures the cross
   build.** The next bare `make` re-runs configure as a *native Linux* build:
   `EXEEXT` becomes empty and `make deploy` later fails looking for
-  `elements-qt` without `.exe`. After any git operation that touches the
+  `sequentia-qt` without `.exe`. After any git operation that touches the
   tree, always re-run step 2 of §3 (`./configure` with the MinGW
   `CONFIG_SITE`) before `make deploy`.
 - **Don't skip the embeddable-Python fetch** (step 3 of §3). The build and

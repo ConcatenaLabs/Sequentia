@@ -7,7 +7,7 @@
 > assembled dockerlessly from an ubuntu-base 24.04 tarball + /opt/seqln overlay
 > (`build/make-wsl-rootfs.sh`); clnrest came from the existing seqln Rust build.
 > Verified headless against live infra: bundled + packaged lightningd synced
-> fresh nodes on sequentia-testnet (bundled elements-cli) AND Bitcoin testnet4
+> fresh nodes on sequentia-testnet (bundled sequentia-cli) AND Bitcoin testnet4
 > (bundled bitcoin-cli), hsm_secret/emergency.recover created, clean stop.
 > NOT verified: GUI click-through (no display here), the whole Windows/WSL2
 > path on a real Windows machine (§6.8 still owed), backend flags vs box
@@ -18,7 +18,7 @@ Goal: Fulmen installs and runs like a normal desktop app, ships SeqLN inside it,
 starts/supervises `lightningd` itself. The user never builds, installs, or configures
 SeqLN by hand. External dependencies:
 
-- a **Sequentia node** (elementsd), local or reached over RPC, and
+- a **Sequentia node** (sequentiad), local or reached over RPC, and
 - **optionally a Bitcoin node** (bitcoind) — SeqLN runs on Bitcoin networks too
   (bitcoin / testnet4), and the dual-chain direction (pure-LN asset<->BTC swaps,
   every Sequentia wallet is dual-chain) means Fulmen should be able to manage a
@@ -78,7 +78,7 @@ Verified against built artifacts in `~/seqln` (`config.vars`: `RUST=0`,
   ```
   seqln/
     bin/        lightningd, lightning_*  (subdaemons NEXT to lightningd)
-                lightning-cli, lightning-hsmtool, elements-cli, bitcoin-cli
+                lightning-cli, lightning-hsmtool, sequentia-cli, bitcoin-cli
     plugins/    bcli, pay, ...           (= bin/../plugins)
     lib/        libsqlite3.so.0, libsodium.so.23    (Linux bundle only)
   ```
@@ -88,12 +88,12 @@ Verified against built artifacts in `~/seqln` (`config.vars`: `RUST=0`,
   and spawn lightningd with `LD_LIBRARY_PATH=<resources>/seqln/lib`.
 - **Chain backend is `bcli` and it does NOT speak HTTP itself.** It shells out to
   the CLI named in chainparams (`bitcoin/chainparams.c:250,274`):
-  - `sequentia-testnet` / `sequentia` -> **`elements-cli`** (cli_args `-chain=test` /
+  - `sequentia-testnet` / `sequentia` -> **`sequentia-cli`** (cli_args `-chain=test` /
     `-chain=sequentia`)
   - `bitcoin` / `testnet4` -> **`bitcoin-cli`**
-  The CLI does the actual HTTP RPC, so elementsd/bitcoind can be fully remote —
+  The CLI does the actual HTTP RPC, so sequentiad/bitcoind can be fully remote —
   exactly the "only external dep is a node" model. **Both CLI binaries must be
-  bundled.** `elements-cli` from this repo's `build-linux/src/elements-cli` has no
+  bundled.** `sequentia-cli` from this repo's `build-linux/src/sequentia-cli` has no
   non-standard shared deps (checked with ldd). `bitcoin-cli` comes from a Bitcoin
   Core release build (needs testnet4 support, i.e. v28+; verify its ldd footprint
   the same way, or build static via depends).
@@ -129,14 +129,14 @@ Fulmen must generate the node's config instead of asking users to write one.
   bitcoin-rpcport=<port>            # 18332 default for sequentia-testnet
   bitcoin-rpcuser=<user>
   bitcoin-rpcpassword=<pass>
-  bitcoin-cli=<resources>/seqln/bin/elements-cli
+  bitcoin-cli=<resources>/seqln/bin/sequentia-cli
   log-file=<lightning-dir>/log
   ```
 
   (bcli option names keep the `bitcoin-` prefix on every network; for a Bitcoin-side
   instance the same options point at bitcoind and `bitcoin-cli=<...>/bitcoin-cli`.)
 - Settings/onboarding UI needs the four RPC fields per chain plus a **Test
-  connection** button that runs the bundled CLI (`elements-cli -rpcconnect=...
+  connection** button that runs the bundled CLI (`sequentia-cli -rpcconnect=...
   getblockchaininfo`) before ever starting lightningd, so backend errors surface
   as "can't reach your Sequentia node" instead of a lightningd startup failure.
 - Defaults to change in `main.js`: `network` default `'bitcoin'` ->
@@ -171,7 +171,7 @@ backend CLI. Distinct clnrest ports on Windows (e.g. 9737/9738).
 1. **Staging script** `build/make-seqln-bundle.sh` in the fulmen repo:
    - build seqln in a jammy container (`RUST=0`, sqlite3, no postgres);
    - stage the layout from §2 into `build/seqln-linux-x64/`;
-   - copy `elements-cli` (from a jammy-built Sequentia, same glibc rule)
+   - copy `sequentia-cli` (from a jammy-built Sequentia, same glibc rule)
      and `bitcoin-cli`;
    - copy `libsqlite3.so.0` + `libsodium.so.23` from the build container into `lib/`;
    - `strip` everything (subdaemons+plugins are ~60-80 MB unstripped; stripping
@@ -189,7 +189,7 @@ backend CLI. Distinct clnrest ports on Windows (e.g. 9737/9738).
    - `app.requestSingleInstanceLock()` in `main.js` (lightningd has its own pid
      lock, but a second Fulmen should focus the first window, not fight over the node).
 4. **Acceptance**: fresh Linux user (or clean $HOME), download AppImage, run,
-   complete onboarding against a reachable Sequentia testnet elementsd, node syncs,
+   complete onboarding against a reachable Sequentia testnet sequentiad, node syncs,
    `getinfo`/`listfunds` render, receive + pay a testnet invoice, quit cleanly
    (socket gone, no orphan processes), relaunch resumes. The existing headless
    smoke test (`node src/main/node.js <path> <dir> <network>`) is the fast loop;
@@ -204,7 +204,7 @@ fork/execs the CLI). No native Windows lightningd — WSL2 is the right runtime,
 1. **Build the rootfs** — `build/make-wsl-rootfs.sh` (Docker is available on this
    laptop): ubuntu:24.04 (or debian-slim) base; build seqln **with `RUST=1`** so
    `clnrest` exists; install to `/opt/seqln/bin` + `/opt/seqln/plugins` (same §2
-   layout); include linux `elements-cli` + `bitcoin-cli` in `/opt/seqln/bin`;
+   layout); include linux `sequentia-cli` + `bitcoin-cli` in `/opt/seqln/bin`;
    `docker export` -> `build/wsl/Fulmen-seqln-rootfs.tar`. Expect ~100-200 MB;
    debian-slim if size matters.
 2. **Fix the layout mismatch** (real bug): `_startWSL` defaults assume

@@ -43,7 +43,7 @@ way while bringing it up:
     sub-quorum block can never be certified at all. The parent clock is therefore
     driven with setmocktime, which is also what makes the run deterministic
     instead of dependent on how fast the machine is.
-  * A leftover elementsd from an aborted run holds the fixed test ports; the
+  * A leftover sequentiad from an aborted run holds the fixed test ports; the
     gossip peer then never binds and the symptom looks like a consensus failure.
 
 WHAT IS ASSERTED

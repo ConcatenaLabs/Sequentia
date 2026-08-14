@@ -24,7 +24,7 @@ make # use "-j N" for N parallel jobs
 make install # optional
 ```
 
-This will build elements-qt as well if the dependencies are met.
+This will build sequentia-qt as well if the dependencies are met.
 
 Dependencies
 ---------------------
@@ -127,7 +127,7 @@ libqrencode (optional) can be installed with:
 
     sudo apt-get install libqrencode-dev
 
-Once these are installed, they will be found by configure and a elements-qt executable will be
+Once these are installed, they will be found by configure and a sequentia-qt executable will be
 built by default.
 
 
@@ -193,7 +193,7 @@ built by default.
 
 Notes
 -----
-The release is built with GCC and then "strip elementsd" to strip the debug
+The release is built with GCC and then "strip sequentiad" to strip the debug
 symbols, which reduces the executable size by about 90%.
 
 miniupnpc

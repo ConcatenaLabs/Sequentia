@@ -35,8 +35,8 @@ bool TransactionFilterProxy::filterAcceptsRow(int sourceRow, const QModelIndex &
         return false;
 
     if (!m_asset_filter.isEmpty()) {
-        QString asset = index.data(TransactionTableModel::AssetRole).toString();
-        if (asset != m_asset_filter)
+        QString asset_id = index.data(TransactionTableModel::AssetIdRole).toString();
+        if (asset_id != m_asset_filter)
             return false;
     }
 
@@ -86,10 +86,10 @@ void TransactionFilterProxy::setTypeFilter(quint32 modes)
     invalidateFilter();
 }
 
-void TransactionFilterProxy::setAssetFilter(const QString& assetName)
+void TransactionFilterProxy::setAssetFilter(const QString& asset_id)
 {
-    if (m_asset_filter == assetName) return;
-    m_asset_filter = assetName;
+    if (m_asset_filter == asset_id) return;
+    m_asset_filter = asset_id;
     invalidateFilter();
 }
 

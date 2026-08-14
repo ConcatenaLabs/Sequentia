@@ -2,7 +2,7 @@
 
 **Updated for MacOS [11.2](https://www.apple.com/macos/big-sur/)**
 
-This guide describes how to build elementsd, command-line utilities, and GUI on macOS
+This guide describes how to build sequentiad, command-line utilities, and GUI on macOS
 
 ## Dependencies
 
@@ -96,7 +96,7 @@ git clone https://github.com/ElementsProject/elements.git
 
 #### Wallet Dependencies
 
-It is not necessary to build wallet functionality to run `elementsd` or  `elements-qt`.
+It is not necessary to build wallet functionality to run `sequentiad` or  `sequentia-qt`.
 To enable legacy wallets, you must install `berkeley-db@4`.
 To enable [descriptor wallets](https://github.com/bitcoin/bitcoin/blob/master/doc/descriptors.md), `sqlite` is required.
 Skip `berkeley-db@4` if you intend to *exclusively* use descriptor wallets.
@@ -281,10 +281,10 @@ make deploy
 
 ## Running Elements Core
 
-Elements Core should now be available at `./src/elementsd`.
-If you compiled support for the GUI, it should be available at `./src/qt/elements-qt`.
+Elements Core should now be available at `./src/sequentiad`.
+If you compiled support for the GUI, it should be available at `./src/qt/sequentia-qt`.
 
-The first time you run `elementsd` or `elements-qt`, it will start downloading the blockchain.
+The first time you run `sequentiad` or `sequentia-qt`, it will start downloading the blockchain.
 This process could take many hours, or even days on slower than average systems.
 
 By default, blockchain and wallet data files will be stored in:
@@ -312,8 +312,8 @@ tail -f $HOME/Library/Application\ Support/Elements/debug.log
 ## Other commands:
 
 ```shell
-./src/elementsd -daemon      # Starts the elements daemon.
-./src/elements-cli --help    # Outputs a list of command-line options.
-./src/elements-cli help      # Outputs a list of RPC commands when the daemon is running.
-./src/qt/elements-qt -server # Starts the elements-qt server mode, allows elements-cli control
+./src/sequentiad -daemon      # Starts the elements daemon.
+./src/sequentia-cli --help    # Outputs a list of command-line options.
+./src/sequentia-cli help      # Outputs a list of RPC commands when the daemon is running.
+./src/qt/sequentia-qt -server # Starts the sequentia-qt server mode, allows sequentia-cli control
 ```

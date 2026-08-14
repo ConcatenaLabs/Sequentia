@@ -13,7 +13,7 @@ from decimal import Decimal
 
 # Parse arguments
 parser = argparse.ArgumentParser()
-parser.add_argument('--elementsd-dir', type=str, default='./src')
+parser.add_argument('--sequentiad-dir', type=str, default='./src')
 parser.add_argument('--bitcoind-dir', type=str, default='../bitcoin/src')
 parser.add_argument('--no-cleanup', default=False, action="store_true")
 
@@ -31,7 +31,7 @@ bitcoin = Daemon(
 e1 = Daemon(
     "Elements1",
     "elements",
-    args.elementsd_dir + "/elementsd",
+    args.sequentiad_dir + "/sequentiad",
     "contrib/assets_tutorial/elements1.conf",
     not args.no_cleanup,
 )
@@ -39,7 +39,7 @@ e1 = Daemon(
 e2 = Daemon(
     "Elements2",
     "elements",
-    args.elementsd_dir + "/elementsd",
+    args.sequentiad_dir + "/sequentiad",
     "contrib/assets_tutorial/elements2.conf",
     not args.no_cleanup,
 )
@@ -48,11 +48,11 @@ e2 = Daemon(
 print ("1. Start nodes")
 #
 # 1a. Confirm that we not start an elements node if validatepegin is set and there
-#     is no bitcoind. When validatepegin is set, elementsd attempts to connect to
+#     is no bitcoind. When validatepegin is set, sequentiad attempts to connect to
 #     bitcoind to check if peg-in transactions are confirmed in the Bitcoin chain.
 #
 # Alternatively, you can set validatepegin=0 (it defaults to being on) in the
-# elementsd config, and run it without a Bitcoin node, but this means that you
+# sequentiad config, and run it without a Bitcoin node, but this means that you
 # will not be fully validating the two-way peg.
 print ("1a. Attempting to start a validatepegin daemon without a bitcoind (will fail)")
 
@@ -61,13 +61,13 @@ assert e1["validatepegin"] == "1"
 e1.start()
 try:
     e1.getinfo()
-    print ("ERROR: was able to start an elementsd without a working bitcoind")
+    print ("ERROR: was able to start an sequentiad without a working bitcoind")
     sys.exit(1)
 except:
     pass
 
-# 1b. Start bitcoind, then elementsd. Initially, the bitcoind may be warming up and
-#     inaccessible over RPC. elementsd can detect this case and will stall until the
+# 1b. Start bitcoind, then sequentiad. Initially, the bitcoind may be warming up and
+#     inaccessible over RPC. sequentiad can detect this case and will stall until the
 #     bitcoind is warmed up.
 print ("1b. Attempting to start validatepegin daemons with a bitcoind (will succeed)")
 
@@ -351,7 +351,7 @@ assert new_issuances[1]['assetamount'] == 1
 # this field. Python makes it annoying to assert this.
 
 print ("5c. Issue a new asset with only reissuance tokens, no actual asset.")
-new_issue = e1.issueasset(0, 1, False) # `False` tells elementsd not to blind the issuance
+new_issue = e1.issueasset(0, 1, False) # `False` tells sequentiad not to blind the issuance
 assert len(e1.listissuances()) == 4
 assert len(e2.listissuances()) == 1
 issuance = [i for i in e1.listissuances() if i.get('asset') == new_issue['asset']][0]

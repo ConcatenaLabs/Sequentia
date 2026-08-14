@@ -45,7 +45,7 @@ _bitcoind() {
             ;;
     esac
 } &&
-complete -F _bitcoind elementsd bitcoin-qt
+complete -F _bitcoind sequentiad bitcoin-qt
 
 # Local variables:
 # mode: shell-script

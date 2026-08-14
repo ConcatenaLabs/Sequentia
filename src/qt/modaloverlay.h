@@ -52,6 +52,12 @@ private:
     //! Give the wrapping warning paragraphs the height their text needs at the
     //! width they were given, so the last line is not cut off.
     void FitInfoText();
+    //! Same for the "number of blocks left" field, which wraps while it holds
+    //! the header-sync sentence: without this its second line is painted over
+    //! the row above instead of the row growing to hold it.
+    void FitBlocksLeft();
+    //! Set that field's text and re-fit it once the layout has settled.
+    void SetBlocksLeftText(const QString& text);
 
     Ui::ModalOverlay *ui;
     int bestHeaderHeight; //best known height (based on the headers)

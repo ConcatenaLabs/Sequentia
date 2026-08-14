@@ -147,8 +147,8 @@ class FrameworkInfo(object):
 class ApplicationBundleInfo(object):
     def __init__(self, path: str):
         self.path = path
-        # for backwards compatibility reasons, this must remain as Elements-Qt
-        self.binaryPath = os.path.join(path, "Contents", "MacOS", "Elements-Qt")
+        # must match CFBundleExecutable in share/qt/Info.plist.in and OSX_APP in Makefile.am
+        self.binaryPath = os.path.join(path, "Contents", "MacOS", "Sequentia-Qt")
         if not os.path.exists(self.binaryPath):
             raise RuntimeError(f"Could not find bundle binary for {path}")
         self.resourcesPath = os.path.join(path, "Contents", "Resources")
@@ -426,7 +426,7 @@ if os.path.exists(appname + ".temp.dmg"):
 
 # ------------------------------------------------
 
-target = os.path.join("dist", "Elements-Qt.app")
+target = os.path.join("dist", "Sequentia-Qt.app")
 
 print("+ Copying source bundle +")
 if verbose:
@@ -534,7 +534,7 @@ ds['.']['icvp'] = icvp
 ds['.']['vSrn'] = ('long', 1)
 
 ds['Applications']['Iloc'] = (370, 156)
-ds['Elements-Qt.app']['Iloc'] = (128, 156)
+ds['Sequentia-Qt.app']['Iloc'] = (128, 156)
 
 ds.flush()
 ds.close()

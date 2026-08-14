@@ -1,13 +1,13 @@
 AC_PREREQ([2.69])
-define(_CLIENT_VERSION_MAJOR, 23)
-define(_CLIENT_VERSION_MINOR, 3)
-define(_CLIENT_VERSION_BUILD, 8)
+define(_CLIENT_VERSION_MAJOR, 24)
+define(_CLIENT_VERSION_MINOR, 0)
+define(_CLIENT_VERSION_BUILD, 0)
 define(_CLIENT_VERSION_RC, 0)
 define(_CLIENT_VERSION_IS_RELEASE, true)
 define(_COPYRIGHT_YEAR, 2026)
 define(_COPYRIGHT_HOLDERS,[The %s developers])
 define(_COPYRIGHT_HOLDERS_SUBSTITUTION,[[Sequentia]])
-AC_INIT([Sequentia Core],m4_join([.], _CLIENT_VERSION_MAJOR, _CLIENT_VERSION_MINOR, _CLIENT_VERSION_BUILD)m4_if(_CLIENT_VERSION_RC, [0], [], [rc]_CLIENT_VERSION_RC),[https://github.com/ElementsProject/elements/issues],[elements],[https://sequentia.io/])
+AC_INIT([Sequentia Core],m4_join([.], _CLIENT_VERSION_MAJOR, _CLIENT_VERSION_MINOR, _CLIENT_VERSION_BUILD)m4_if(_CLIENT_VERSION_RC, [0], [], [rc]_CLIENT_VERSION_RC),[https://github.com/GracedEternalKingCabbageMan/Sequentia/issues],[sequentia],[https://sequentia.io/])
 AC_CONFIG_SRCDIR([src/validation.cpp])
 AC_CONFIG_HEADERS([src/config/bitcoin-config.h])
 AC_CONFIG_AUX_DIR([build-aux])
@@ -19,15 +19,15 @@ if test "$PKG_CONFIG" = ""; then
   AC_MSG_ERROR([pkg-config not found])
 fi
 
-BITCOIN_DAEMON_NAME=elementsd
-BITCOIN_GUI_NAME=elements-qt
-BITCOIN_CLI_NAME=elements-cli
-BITCOIN_TX_NAME=elements-tx
-BITCOIN_UTIL_NAME=elements-util
-BITCOIN_WALLET_TOOL_NAME=elements-wallet
+BITCOIN_DAEMON_NAME=sequentiad
+BITCOIN_GUI_NAME=sequentia-qt
+BITCOIN_CLI_NAME=sequentia-cli
+BITCOIN_TX_NAME=sequentia-tx
+BITCOIN_UTIL_NAME=sequentia-util
+BITCOIN_WALLET_TOOL_NAME=sequentia-wallet
 dnl Multi Process
-BITCOIN_MP_NODE_NAME=elements-node
-BITCOIN_MP_GUI_NAME=elements-gui
+BITCOIN_MP_NODE_NAME=sequentia-node
+BITCOIN_MP_GUI_NAME=sequentia-gui
 
 dnl Unless the user specified ARFLAGS, force it to be cr
 AC_ARG_VAR([ARFLAGS], [Flags for the archiver, defaults to <cr> if not set])

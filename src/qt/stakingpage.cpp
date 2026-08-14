@@ -229,14 +229,24 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
         // The draw gates when you may PROPOSE; the committee then backs the lowest
         // draw among the proposals it collected. Saying "slot 0 produces" would
         // promise a block that neither the cadence floor nor the vote guarantees.
+        // Two different numbers, and conflating them misreads the mechanism: the
+        // cadence (%1) is how often the chain produces a block at all, while the
+        // draw is scaled by the slot interval (%2). Every draw below %1/%2 lands
+        // under the cadence, so those stakers all offer at the same moment.
         m_next_slot->setToolTip(tr("From the previous block and its Bitcoin anchor every staker derives the same "
                                    "seed, then draws from it with their own secret key — so your draw is yours "
-                                   "alone to know, and nobody can tell in advance who comes next. The draw sets the "
-                                   "earliest you may offer a block: slot 0 at the usual %1 s cadence, each further "
-                                   "slot %1 s later. Whoever is due offers a block, the committee gathers the offers "
-                                   "for a few seconds, and then everyone signs the one whose draw came out lowest. "
-                                   "So a low slot gets you into that gathering; the draw itself decides who wins it. "
-                                   "You find out you led when your block comes back signed by the committee.")
+                                   "alone to know, and nobody can tell in advance who comes next. The chain makes "
+                                   "a block every %1 s, and no block may be closer than that to the one before it. "
+                                   "Your draw sets the earliest you may offer one: draw 0 straight away, each "
+                                   "further draw %2 s later — so every draw that lands inside the %1 s cadence "
+                                   "offers at the same moment. Whoever is due offers a block, the committee gathers "
+                                   "the offers for a few seconds, and then everyone signs the one whose draw came "
+                                   "out lowest. So a low draw gets you into that gathering; the draw itself decides "
+                                   "who wins it. You find out you led when your block comes back signed by the "
+                                   "committee.")
+                                    .arg(Params().GetConsensus().pos_block_spacing > 0
+                                             ? Params().GetConsensus().pos_block_spacing
+                                             : g_pos_slot_interval)
                                     .arg(g_pos_slot_interval));
         QFormLayout* f2 = new QFormLayout();
         f2->addRow(tr("Your draw for the next block:"), m_next_slot);

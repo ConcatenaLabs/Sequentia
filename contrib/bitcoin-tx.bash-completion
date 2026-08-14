@@ -46,7 +46,7 @@ _bitcoin_tx() {
 
     return 0
 } &&
-complete -F _bitcoin_tx elements-tx
+complete -F _bitcoin_tx sequentia-tx
 
 # Local variables:
 # mode: shell-script

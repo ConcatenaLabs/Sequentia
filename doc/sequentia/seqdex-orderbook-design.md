@@ -52,7 +52,7 @@ This means the relay never holds funds, never holds a PSET that can move funds, 
                     │   each party signs its own inputs; broadcasts    │
                     ▼                                                  ▼
         ┌──────────────────────────────────────────────────────────────────────┐
-        │   Sequentia node (elements-qt) + Bitcoin testnet4 node (cross-chain)   │
+        │   Sequentia node (sequentia-qt) + Bitcoin testnet4 node (cross-chain)   │
         │   settled tx is anchor-bound to Bitcoin (Principle 1) — no change      │
         └──────────────────────────────────────────────────────────────────────┘
 ```

@@ -3,7 +3,7 @@
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Stand up a local, Bitcoin-anchored, autonomous Proof-of-Stake Sequentia
-network of N real elementsd daemons — the same consensus path a mainnet
+network of N real sequentiad daemons — the same consensus path a mainnet
 operator runs, only with its own genesis committee and pointed at a parent
 Bitcoin you choose (real testnet via a proxy, or a throwaway local parent).
 
@@ -103,8 +103,8 @@ def write_conf(path, lines):
         f.write("\n".join(lines) + "\n")
 
 
-def start_daemon(elementsd, datadir):
-    subprocess.run([elementsd, "-datadir=%s" % datadir, "-daemon"],
+def start_daemon(sequentiad, datadir):
+    subprocess.run([sequentiad, "-datadir=%s" % datadir, "-daemon"],
                    capture_output=True, text=True, check=True)
 
 
@@ -113,11 +113,11 @@ def read_pids(base):
     return json.load(open(pf)) if os.path.exists(pf) else {}
 
 
-def stop_all(base, elementsd):
+def stop_all(base, sequentiad):
     pids = read_pids(base)
     for name, info in pids.items():
         try:
-            cli(elementsd.replace("elementsd", "elements-cli"), info["datadir"],
+            cli(sequentiad.replace("sequentiad", "sequentia-cli"), info["datadir"],
                 info["rpcport"], ["stop"], check=False, timeout=20)
         except Exception:
             pass
@@ -158,14 +158,14 @@ def main():
     ap.add_argument("--run-seconds", type=int, default=0, help="auto-stop after N seconds (0 = run until Ctrl-C)")
     args = ap.parse_args()
 
-    elementsd = os.path.join(args.bindir, "elementsd")
-    elementscli = os.path.join(args.bindir, "elements-cli")
-    for b in (elementsd, elementscli):
+    sequentiad = os.path.join(args.bindir, "sequentiad")
+    elementscli = os.path.join(args.bindir, "sequentia-cli")
+    for b in (sequentiad, elementscli):
         if not os.path.exists(b):
             sys.exit("missing binary: %s (build first, or pass --bindir)" % b)
 
     if args.stop:
-        stop_all(args.basedir, elementsd)
+        stop_all(args.basedir, sequentiad)
         return
 
     N = args.nodes
@@ -197,7 +197,7 @@ def main():
             "fallbackfee=0.0001",
         ])
         print("Starting local parent (throwaway Bitcoin stand-in)...")
-        start_daemon(elementsd, pdir)
+        start_daemon(sequentiad, pdir)
         wait_rpc(elementscli, pdir, p_rpc, "parent")
         cli(elementscli, pdir, p_rpc, ["-named", "createwallet", "wallet_name=w", "descriptors=true"],
             args.rpcuser, args.rpcpassword)
@@ -273,7 +273,7 @@ def main():
         # consensus block (shared verbatim) first, node-local after.
         write_conf(os.path.join(d, "elements.conf"),
                    ["chain=%s" % CHAIN, "[%s]" % CHAIN] + consensus + [""] + local)
-        start_daemon(elementsd, d)
+        start_daemon(sequentiad, d)
         pids["node%03d" % i] = {"datadir": d, "rpcport": args.rpc_base + i, "pid": _read_pid(d)}
         if (i + 1) % 10 == 0:
             print("  started %d/%d" % (i + 1, N))
@@ -336,7 +336,7 @@ def main():
     except KeyboardInterrupt:
         print("\nCtrl-C — stopping network...")
     finally:
-        stop_all(base, elementsd)
+        stop_all(base, sequentiad)
 
 
 def _forked(cli_bin, pids, args, hs):
@@ -359,7 +359,7 @@ def _forked(cli_bin, pids, args, hs):
 
 
 def _read_pid(datadir):
-    pidf = os.path.join(datadir, CHAIN, "elementsd.pid")
+    pidf = os.path.join(datadir, CHAIN, "sequentiad.pid")
     for _ in range(50):
         if os.path.exists(pidf):
             try:

@@ -75,7 +75,7 @@ Fields per Sequentia entry, with the Sequentia-specific values:
   CLN tree; everything else routes through `chainparams->fee_asset_tag` and `amount_asset_is_main()`. See
   section 4 for why this becomes a per-node option rather than a pure per-network constant.
 - `p2pkh_version` / `p2sh_version`, `bip32_key_version`, `testnet` bool, ports (`rpc_port`, `ln_port`),
-  `cli` = `elements-cli`, `cli_args` = `-chain=<name>`, `dust_limit` 546, `max_funding`, `max_supply`,
+  `cli` = `sequentia-cli`, `cli_args` = `-chain=<name>`, `dust_limit` 546, `max_funding`, `max_supply`,
   `when_lightning_became_cool`: fill from `src/chainparams.cpp`.
 
 Implication: adding the networks is genuinely small. The hard parts are the block-header parser (section 3),

@@ -627,6 +627,18 @@ namespace Consensus { struct Params; }
  *  fork off by default on regtest and custom chains (-posexpraceheight). */
 bool PosExpRaceActive(const Consensus::Params& params, int height);
 
+/** SEQUENTIA: seconds after the parent at which a leader holding sortition
+ *  `slot` may produce. THE single definition of the leader time-gate, shared by
+ *  consensus (CheckPosStakeRules), the block assembler, the autonomous producer
+ *  and the RPCs that report it, so the four can never disagree about when a
+ *  slot opens -- a disagreement there means a producer building blocks its own
+ *  peers reject as bad-posvrf-early.
+ *
+ *  From pos_slot_gate_height a score unit buys pos_slot_gate_seconds; before
+ *  it, and under the legacy rank election at any height, it buys one whole
+ *  g_pos_slot_interval, which is the scale that rank was designed for. */
+int64_t PosSlotGateSeconds(const Consensus::Params& params, int height, uint64_t slot);
+
 /** Build the tagged coinbase OP_RETURN output script carrying the leader's
  *  VRF proof: OP_RETURN PUSH("SEQVRF" || proof). */
 CScript BuildPosVrfCommitment(const std::vector<unsigned char>& proof);
@@ -803,7 +815,7 @@ extern uint64_t g_pos_min_stake;
 /** Height from which the escaping-stall parent-chain MTP evidence is part of
  *  the rules, mirrored from Consensus::Params::pos_escape_stall_mtp_height
  *  when the chain is selected. Lives in the common layer because
- *  chainparams.cpp assigns it and elements-cli / elements-tx link
+ *  chainparams.cpp assigns it and sequentia-cli / sequentia-tx link
  *  libbitcoin_common without libbitcoin_server.
  *
  *  0 = not gated (rule off), positive H = enforced from height H, matching
@@ -987,7 +999,7 @@ void SeedGenesisStake(const CBlock& genesis);
 // never make a node seek or download a particular branch. These live in the
 // common layer (here) rather than the node-layer anchor module because
 // chainparams.cpp configures them and must link them into libbitcoin_common
-// (and tools such as elements-tx), which does not link the node module.
+// (and tools such as sequentia-tx), which does not link the node module.
 
 /** Drop all configured checkpoints (chain-parameter (re)load). */
 void ClearConfiguredPosCheckpoints();

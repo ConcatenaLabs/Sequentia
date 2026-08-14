@@ -64,7 +64,7 @@ private:
     QPushButton* m_issue_domain_open{nullptr};
     QSpinBox* m_issue_precision{nullptr};
     QLineEdit* m_issue_amount{nullptr};
-    QLineEdit* m_issue_tokens{nullptr};
+    QCheckBox* m_issue_reissuable{nullptr};
     QCheckBox* m_issue_blind{nullptr};
     QPushButton* m_issue_button{nullptr};
     QLabel* m_issue_result{nullptr};
@@ -105,7 +105,7 @@ private:
     std::string walletUri() const;
     void setStatus(const QString& msg, bool error = false);
     //! Ask the user to confirm what issuance permanently commits to; false to abort.
-    bool confirmIssuance(const QString& name, const QString& ticker, const QString& domain);
+    bool confirmIssuance(const QString& name, const QString& ticker, const QString& domain, bool reissuable);
     //! Warn if the issuer domain does not resolve, since a typo cannot be undone.
     bool domainResolves(const QString& domain) const;
     //! The domain as it will be committed: no scheme, no path, lower case.

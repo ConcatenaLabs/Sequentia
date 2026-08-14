@@ -8,12 +8,12 @@ import sys
 import tempfile
 
 BINARIES = [
-'src/elementsd',
-'src/elements-cli',
-'src/elements-tx',
-'src/elements-wallet',
-'src/elements-util',
-'src/qt/elements-qt',
+'src/sequentiad',
+'src/sequentia-cli',
+'src/sequentia-tx',
+'src/sequentia-wallet',
+'src/sequentia-util',
+'src/qt/sequentia-qt',
 ]
 
 # Paths to external utilities.
