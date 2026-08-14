@@ -89,17 +89,30 @@ apt-get install -y g++-mingw-w64-x86-64 nsis bison flex zip
 update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
 update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix
 
+# The publisher's own clone, pinned to master. Kept apart from every product's
+# checkout: the node recipe checks out a release TAG, and when the publisher lived
+# in that same tree it replaced its own script with the tagged version's.
+git clone https://github.com/GracedEternalKingCabbageMan/Sequentia.git \
+  /root/sequentia/release-build/publisher
+
+# The node's build tree, where the depends prefixes live.
 git clone https://github.com/GracedEternalKingCabbageMan/Sequentia.git \
   /root/sequentia/release-build/src/node
 cd /root/sequentia/release-build/src/node
 nice -n 19 make -C depends HOST=x86_64-pc-linux-gnu -j4   # Linux prefix, incl. Qt
 nice -n 19 make -C depends HOST=x86_64-w64-mingw32 -j4    # Windows cross prefix
 
-install -m644 contrib/sequentia/release-publisher/seq-release-publisher.{service,timer} \
+install -m644 /root/sequentia/release-build/publisher/contrib/sequentia/release-publisher/seq-release-publisher.{service,timer} \
   /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now seq-release-publisher.timer
 ```
+
+A depends prefix is **not relocatable**: absolute paths are baked into its `.pc`
+files and into the libraries themselves. Moving the build tree breaks it, and
+rewriting those paths with `sed` corrupts every binary it touches, because a
+shorter replacement truncates the file. If the tree has to move, either rebuild
+depends from scratch or leave a symlink at the old path.
 
 Ambra additionally needs a Flutter, Android and Rust toolchain:
 
