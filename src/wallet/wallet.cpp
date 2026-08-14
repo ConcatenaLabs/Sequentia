@@ -2171,7 +2171,7 @@ TransactionError CWallet::SignPSBT(PartiallySignedTransaction& psbtx, bool& comp
         // fixed. Passing nullptr means an unsigned supervised issuance would
         // look unbalanced here rather than balanced, which is the safe way
         // round for a warning.
-        if (!VerifyAmounts(inputs_utxos, tx_tmp, nullptr, nullptr, false)) {
+        if (!VerifyAmounts(inputs_utxos, tx_tmp, false, nullptr, nullptr, false)) {
             return TransactionError::VALUE_IMBALANCE;
         }
     }

@@ -572,6 +572,27 @@ bool CheckSupervisionRecordSpend(const CTxIn& input, const CTxOut& record_out,
  *  funds. */
 bool IsSingleOwnerSpend(const CTransaction& tx, unsigned int n, const CScript& script_pubkey);
 
+/** Whether this output is a supervision declaration or record, correctly
+ *  denominated in the asset it names.
+ *
+ *  Used for one thing: VerifyAmounts otherwise refuses every SPENDABLE
+ *  zero-value output, because a zero-value output of a reissuance token would
+ *  let anyone reissue an asset without holding its tokens. Supervision outputs
+ *  must be zero-valued (an issuer must not burn value into a script only
+ *  consensus can release) and must NOT be provably unspendable (the whole
+ *  supervision state is read back out of the UTXO set), so they need a carve-out
+ *  from that rule.
+ *
+ *  The carve-out is only safe because of where it is applied: Consensus::
+ *  CheckTxInputs vets every declaration and record BEFORE VerifyAmounts runs,
+ *  and only admits ones naming an asset the registry already knows is
+ *  supervised. A registry asset is never a reissuance token, so the inflation
+ *  the original rule prevents stays prevented. Applying it anywhere the vetting
+ *  has not happened -- below the activation height, in particular -- would
+ *  reopen exactly that hole, which is why VerifyAmounts takes the gate as an
+ *  argument rather than reading the script alone. */
+bool IsSupervisionOutput(const CTxOut& out);
+
 /** Whether a transaction is one a newly-confirmed record could have invalidated.
  *
  *  The failure this exists to prevent is specific and lethal. A spend that was

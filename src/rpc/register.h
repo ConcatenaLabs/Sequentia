@@ -23,6 +23,8 @@ void RegisterRawTransactionRPCCommands(CRPCTable &tableRPC);
 void RegisterSignerRPCCommands(CRPCTable &tableRPC);
 /** ELEMENTS: Register exchange rates RPC commands */
 void RegisterExchangeRatesRPCCommands(CRPCTable &tableRPC);
+/** SEQUENTIA: Register supervised-asset RPC commands */
+void RegisterSupervisionRPCCommands(CRPCTable &tableRPC);
 
 static inline void RegisterAllCoreRPCCommands(CRPCTable &t)
 {
@@ -32,6 +34,7 @@ static inline void RegisterAllCoreRPCCommands(CRPCTable &t)
     RegisterMiningRPCCommands(t);
     RegisterRawTransactionRPCCommands(t);
     RegisterExchangeRatesRPCCommands(t);
+    RegisterSupervisionRPCCommands(t);
 #ifdef ENABLE_EXTERNAL_SIGNER
     RegisterSignerRPCCommands(t);
 #endif // ENABLE_EXTERNAL_SIGNER
