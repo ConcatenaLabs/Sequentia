@@ -1,163 +1,215 @@
 #!/bin/bash
-# Publish a Sequentia Core release to the download page, unattended.
+# Publish new releases to the download page, unattended, for every product the
+# page offers -- not just the node.
 #
-# Watches the repository for a new release tag and, when one appears, builds the
-# Linux tarball and the Windows installer from that exact tag and publishes both.
-# Run it from a timer; it is idempotent, so running it when nothing has changed
-# costs one `git ls-remote` and exits.
+# This is a driver. It knows nothing about how any product is built: each one is
+# a recipe in products.d/, and adding a product to the download page means adding
+# one file there and nothing else.
 #
-# WHY IT BUILDS FROM A TAG AND NOT FROM master: what the download page offers is
-# the one artifact a stranger runs without reading the source, so it has to be a
-# thing we named. A tag is also the only way this script can tell "there is a new
-# release" from "someone pushed a commit".
+# For every recipe it asks "what version is published upstream", compares that
+# with what it published last, and if they differ it builds that version and
+# copies the artifacts into the download directory. Then it points each card on
+# the page at the newest file that actually exists.
 #
-# WHY IT HAS ITS OWN CLONE: the committee is started from
-# /root/SequentiaByClaude/src/sequentiad. A release build in that tree would swap
-# the binary 20 running nodes were started from. This one builds in its own clone
-# and never writes outside it and the download directory.
+# A product whose toolchain is missing is SKIPPED with a reason, and the rest
+# still publish. That matters: the box can build the node and the extension
+# today, while Ambra needs an Android toolchain and a signing key that are a
+# separate decision. One product's prerequisites must never block the others.
 #
-# The build is deliberately niced and limited to a few jobs: this machine also
-# produces blocks, and starving it is how a testnet stalls.
+# The build is niced and job-limited throughout, because this machine also
+# produces blocks and starving it is how the testnet stalls.
 set -euo pipefail
 
-REPO_URL="${SEQ_REPO_URL:-https://github.com/GracedEternalKingCabbageMan/Sequentia.git}"
 BUILD_ROOT="${SEQ_BUILD_ROOT:-/root/sequentia/release-build}"
-REPO_DIR="${SEQ_REPO_DIR:-$BUILD_ROOT/Sequentia}"
 STATE_DIR="${SEQ_STATE_DIR:-$BUILD_ROOT/state}"
 DOWNLOAD_DIR="${SEQ_DOWNLOAD_DIR:-/root/sequentia/downloads}"
+RECIPE_DIR="${SEQ_RECIPE_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/products.d}"
 JOBS="${SEQ_BUILD_JOBS:-4}"
 NICE="${SEQ_BUILD_NICE:-19}"
-# Set to 0 to publish the Linux tarball only (skips the cross build, which is the
-# slow half). The page then keeps advertising the previous Windows installer.
-BUILD_WINDOWS="${SEQ_BUILD_WINDOWS:-1}"
-CONFIGURE_ARGS="${SEQ_CONFIGURE_ARGS:---disable-tests --disable-bench --enable-any-asset-fees}"
+# Space-separated recipe names to run; empty means all of them.
+ONLY="${SEQ_ONLY:-}"
 
-log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
-die() { log "ERROR: $*"; exit 1; }
+export BUILD_ROOT DOWNLOAD_DIR JOBS NICE
 
-mkdir -p "$STATE_DIR" "$BUILD_ROOT"
+log()  { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+die()  { log "ERROR: $*"; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+export -f log have
 
-# One publisher at a time. A second timer tick during a two-hour build must not
-# start a second build in the same tree.
+mkdir -p "$STATE_DIR" "$BUILD_ROOT" "$DOWNLOAD_DIR"
+
+# One publisher at a time: a timer tick during a two-hour build must not start a
+# second build in the same trees.
 exec 9>"$STATE_DIR/publish.lock"
 if ! flock -n 9; then
   log "another publish is running; nothing to do"
   exit 0
 fi
 
-[ -d "$REPO_DIR/.git" ] || die "no clone at $REPO_DIR (create it once: git clone $REPO_URL $REPO_DIR)"
-
-# --- Is there a new release? ---------------------------------------------------
-# Sort by version, not lexically, so v24.0.10 beats v24.0.9.
-latest_tag=$(git -C "$REPO_DIR" ls-remote --tags --refs origin 'v[0-9]*' \
-  | awk '{print $2}' | sed 's#refs/tags/##' \
-  | sort -V | tail -1)
-[ -n "$latest_tag" ] || die "no version tags found on origin"
-
-state_file="$STATE_DIR/published-tag"
-published=$(cat "$state_file" 2>/dev/null || echo "")
-
-if [ "$latest_tag" = "$published" ]; then
-  log "up to date: $latest_tag already published"
-  exit 0
-fi
-
-version="${latest_tag#v}"
-log "new release: $latest_tag (last published: ${published:-none})"
-
-linux_art="sequentia-core-$version-linux-x86_64.tar.gz"
-win_art="sequentia-core-$version-win64-setup.exe"
-
-# --- Check out exactly that tag ------------------------------------------------
-git -C "$REPO_DIR" fetch -q --tags origin
-git -C "$REPO_DIR" reset -q --hard
-git -C "$REPO_DIR" clean -qfd -e depends
-git -C "$REPO_DIR" checkout -q "refs/tags/$latest_tag"
-log "checked out $latest_tag ($(git -C "$REPO_DIR" rev-parse --short HEAD))"
-
-cd "$REPO_DIR"
-
-build() { nice -n "$NICE" "$@"; }
-
-# --- Linux -------------------------------------------------------------------
-depends_linux="$REPO_DIR/depends/x86_64-pc-linux-gnu"
-[ -d "$depends_linux" ] || die "missing depends prefix $depends_linux (build once: make -C depends HOST=x86_64-pc-linux-gnu)"
-
-log "building Linux ($JOBS jobs, nice $NICE)"
-build ./autogen.sh >/dev/null
-# shellcheck disable=SC2086
-CONFIG_SITE="$depends_linux/share/config.site" build ./configure $CONFIGURE_ARGS >/dev/null
-build make -j"$JOBS" >/dev/null
-
-stage="$BUILD_ROOT/stage/sequentia-core-$version"
-rm -rf "$BUILD_ROOT/stage"
-mkdir -p "$stage/bin" "$stage/price-server"
-for b in sequentiad sequentia-cli sequentia-tx sequentia-util sequentia-wallet; do
-  [ -x "src/$b" ] || die "expected src/$b after the build"
-  install -m755 "src/$b" "$stage/bin/$b"
-done
-if [ -x src/qt/sequentia-qt ]; then
-  install -m755 src/qt/sequentia-qt "$stage/bin/sequentia-qt"
-else
-  log "WARNING: no GUI built (src/qt/sequentia-qt missing); shipping daemon + tools only"
-fi
-strip "$stage"/bin/* 2>/dev/null || true
-for f in price_server.py README.md config.example.json ORACLE-AND-REFERENCE-DESIGN.md; do
-  [ -f "contrib/price-server/$f" ] && cp "contrib/price-server/$f" "$stage/price-server/"
-done
-
-tar -C "$BUILD_ROOT/stage" -czf "$DOWNLOAD_DIR/$linux_art.part" "sequentia-core-$version"
-mv "$DOWNLOAD_DIR/$linux_art.part" "$DOWNLOAD_DIR/$linux_art"
-log "published $linux_art ($(du -h "$DOWNLOAD_DIR/$linux_art" | cut -f1))"
-
-# --- Windows -----------------------------------------------------------------
-# Cross build, so the tree must be reconfigured for the other host. Without the
-# distclean a bare `make` silently reconfigures native and dies confusingly.
-if [ "$BUILD_WINDOWS" = "1" ]; then
-  depends_win="$REPO_DIR/depends/x86_64-w64-mingw32"
-  if [ ! -d "$depends_win" ]; then
-    log "WARNING: no depends prefix $depends_win; skipping the Windows installer"
-  elif ! command -v makensis >/dev/null; then
-    log "WARNING: makensis not installed; skipping the Windows installer"
-  else
-    log "building Windows installer"
-    build make distclean >/dev/null 2>&1 || true
-    build ./autogen.sh >/dev/null
-    # shellcheck disable=SC2086
-    CONFIG_SITE="$depends_win/share/config.site" build ./configure --prefix=/ $CONFIGURE_ARGS >/dev/null
-    grep -q 'EXEEXT = \.exe' Makefile || die "configure produced a native build, not a cross build"
-    # SHA256-pinned embeddable interpreter the installer bundles with the sidecar.
-    build bash contrib/price-server/fetch-embeddable-python.sh >/dev/null
-    build make -j"$JOBS" >/dev/null
-    build make deploy >/dev/null
-    # The tarname changed with the binary rename, so find the artifact rather
-    # than assume its prefix.
-    produced=$(ls -t ./*-win64-setup.exe 2>/dev/null | head -1) \
-      || die "make deploy produced no installer"
-    [ -n "$produced" ] || die "make deploy produced no installer"
-    cp "$produced" "$DOWNLOAD_DIR/$win_art.part"
-    mv "$DOWNLOAD_DIR/$win_art.part" "$DOWNLOAD_DIR/$win_art"
-    log "published $win_art ($(du -h "$DOWNLOAD_DIR/$win_art" | cut -f1))"
+# --- Keep a product's checkout at the version we are about to build -----------
+# Recipes call this; it is the only git any of them need.
+prepare_checkout() {
+  local name="$1" url="$2" ref="$3" dir="$BUILD_ROOT/src/$name"
+  mkdir -p "$BUILD_ROOT/src"
+  if [ ! -d "$dir/.git" ]; then
+    git clone -q "$url" "$dir"
   fi
-fi
+  git -C "$dir" fetch -q --tags --force origin
+  git -C "$dir" reset -q --hard
+  # depends/ prefixes cost hours to rebuild; never let clean take them.
+  git -C "$dir" clean -qfd -e depends
+  git -C "$dir" checkout -q "$ref"
+  echo "$dir"
+}
+export -f prepare_checkout
 
-# --- Point the page at what actually exists -----------------------------------
-# Each card is rewritten from the newest file PRESENT, not from the version we
-# just built. If the Windows half was skipped or failed, its card keeps offering
-# the previous installer instead of turning into a 404.
-newest() { ls -1 "$DOWNLOAD_DIR"/$1 2>/dev/null | xargs -r -n1 basename | sort -V | tail -1; }
-index="$DOWNLOAD_DIR/index.html"
-if [ -f "$index" ]; then
+# Read a JSON string field without needing jq.
+json_field() {
+  python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2],""))' "$1" "$2"
+}
+export -f json_field
+
+# Ask the remote which branch is its default, rather than assuming. These repos
+# do not agree -- two are on master and one on main -- and a wrong guess fails as
+# "couldn't find remote ref", which reads like a network problem rather than a
+# wrong name.
+default_branch() {
+  git ls-remote --symref "$1" HEAD 2>/dev/null \
+    | awk '/^ref:/ { sub("refs/heads/", "", $2); print $2; exit }'
+}
+export -f default_branch
+
+# --- Run one recipe ------------------------------------------------------------
+# Each recipe defines: PRODUCT_NAME, PRODUCT_REPO, PRODUCT_INDEX_GLOB,
+# remote_version(), and build(version, outdir). It may define requirements(),
+# which prints a reason to skip and returns non-zero when it cannot build.
+run_recipe() {
+  local recipe="$1"
+  local name; name="$(basename "$recipe" .sh)"
+
+  ( # subshell: a recipe's variables and cd must not leak into the next one
+    set -euo pipefail
+    # shellcheck disable=SC1090
+    source "$recipe"
+
+    if declare -F requirements >/dev/null; then
+      local why
+      if ! why="$(requirements)"; then
+        log "[$name] skipped: ${why:-prerequisites not met}"
+        return 0
+      fi
+    fi
+
+    local version
+    version="$(remote_version)" || { log "[$name] could not read upstream version; skipping"; return 0; }
+    [ -n "$version" ] || { log "[$name] upstream version is empty; skipping"; return 0; }
+
+    local state_file="$STATE_DIR/$name.version"
+    local published; published="$(cat "$state_file" 2>/dev/null || echo "")"
+    if [ "$version" = "$published" ]; then
+      log "[$name] up to date at $version"
+      return 0
+    fi
+
+    # Never move a card backwards. The state file only knows what THIS script
+    # published; artifacts put there by hand over the years are older history it
+    # has never seen, and some of them are ahead of what their repository's
+    # version field currently says. Publishing then would quietly offer users a
+    # downgrade, which for a wallet is worse than offering nothing.
+    local newest_present offered
+    newest_present="$(cd "$DOWNLOAD_DIR" && ls -1 ${PRODUCT_INDEX_GLOB%% *} 2>/dev/null | sort -V | tail -1 || true)"
+    if [ -n "$newest_present" ]; then
+      offered="$(printf '%s' "$newest_present" | grep -oE '[0-9]+(\.[0-9]+)+' | head -1)"
+      if [ -n "$offered" ] && [ "$(printf '%s\n%s\n' "$offered" "${version#v}" | sort -V | tail -1)" != "${version#v}" ]; then
+        log "[$name] upstream says $version but the page already offers $offered; refusing to downgrade"
+        return 0
+      fi
+    fi
+
+    log "[$name] new version $version (last published: ${published:-none})"
+    local out="$BUILD_ROOT/out/$name"
+    rm -rf "$out"; mkdir -p "$out"
+
+    if ! build "$version" "$out"; then
+      log "[$name] BUILD FAILED at $version; the page is unchanged and the next run will retry"
+      return 1
+    fi
+
+    local published_any=0
+    shopt -s nullglob
+    for f in "$out"/*; do
+      [ -f "$f" ] || continue
+      local base; base="$(basename "$f")"
+      # Land it complete or not at all: a half-copied artifact must never be
+      # servable, and the page is only repointed after this.
+      cp "$f" "$DOWNLOAD_DIR/$base.part"
+      mv "$DOWNLOAD_DIR/$base.part" "$DOWNLOAD_DIR/$base"
+      log "[$name] published $base ($(du -h "$DOWNLOAD_DIR/$base" | cut -f1))"
+      published_any=1
+    done
+    shopt -u nullglob
+
+    [ "$published_any" = "1" ] || { log "[$name] build produced no artifacts; not recording $version"; return 1; }
+    echo "$version" > "$state_file"
+    log "[$name] done at $version"
+  )
+}
+
+# --- Point every card at a file that exists -----------------------------------
+# Rewritten from what is PRESENT, never from what this run happened to build, so
+# a product that was skipped or failed keeps offering its previous version
+# instead of turning into a 404.
+update_index() {
+  local index="$DOWNLOAD_DIR/index.html"
+  [ -f "$index" ] || { log "no index.html; nothing to repoint"; return 0; }
   cp -p "$index" "$index.bak-publish"
-  newest_linux=$(newest 'sequentia-core-*-linux-x86_64.tar.gz')
-  newest_win=$(newest 'sequentia-core-*-win64-setup.exe')
-  [ -n "$newest_linux" ] && sed -i -E "s#sequentia-core-[0-9][0-9.]*-linux-x86_64\.tar\.gz#$newest_linux#g" "$index"
-  [ -n "$newest_win" ]   && sed -i -E "s#sequentia-core-[0-9][0-9.]*-win64-setup\.exe#$newest_win#g" "$index"
-  # The single version label tracks the Linux build, which is the one this box
-  # can always produce; each card still names its own file.
-  [ -n "$newest_linux" ] && sed -i -E "s#(<span class=\"ver\">version )[0-9][0-9.]*#\1$(echo "$newest_linux" | sed -E 's#sequentia-core-([0-9.]+)-linux.*#\1#')#" "$index"
-  log "index.html now offers: ${newest_linux:-none} / ${newest_win:-none}"
-fi
 
-echo "$latest_tag" > "$state_file"
-log "done: $latest_tag published"
+  local recipe name glob newest
+  for recipe in "$RECIPE_DIR"/*.sh; do
+    [ -f "$recipe" ] || continue
+    name="$(basename "$recipe" .sh)"
+    # Read the glob without running the recipe's build.
+    glob="$(grep -m1 '^PRODUCT_INDEX_GLOB=' "$recipe" | cut -d= -f2- | tr -d '"')"
+    [ -n "$glob" ] || continue
+    for one in $glob; do
+      newest="$(cd "$DOWNLOAD_DIR" && ls -1 $one 2>/dev/null | sort -V | tail -1)"
+      [ -n "$newest" ] || continue
+      # Turn the concrete filename back into a pattern by replacing its version.
+      local pat; pat="$(printf '%s' "$one" | sed 's/\*/[0-9][0-9.]*/g')"
+      sed -i -E "s#$pat#$newest#g" "$index"
+    done
+  done
+
+  # The single version label tracks the node, which is what the page is about.
+  local newest_node
+  newest_node="$(cd "$DOWNLOAD_DIR" && ls -1 sequentia-core-*-linux-x86_64.tar.gz 2>/dev/null | sort -V | tail -1)"
+  if [ -n "$newest_node" ]; then
+    local v; v="$(printf '%s' "$newest_node" | sed -E 's#sequentia-core-([0-9.]+)-linux.*#\1#')"
+    sed -i -E "s#(<span class=\"ver\">version )[0-9][0-9.]*#\1$v#" "$index"
+  fi
+
+  # Only what the page actually links: the surrounding prose mentions filenames
+  # too ("run Fulmen.exe"), and reporting those as offered artifacts is noise.
+  log "page now offers:"
+  grep -oE 'href="[^"]+\.(tar\.gz|exe|zip|AppImage|apk)"' "$index" \
+    | sed -E 's#href="(.*)"#\1#' | sort -u | sed 's/^/  /'
+}
+
+# --- Go ------------------------------------------------------------------------
+[ -d "$RECIPE_DIR" ] || die "no recipes at $RECIPE_DIR"
+
+failed=0
+for recipe in "$RECIPE_DIR"/*.sh; do
+  [ -f "$recipe" ] || continue
+  name="$(basename "$recipe" .sh)"
+  if [ -n "$ONLY" ] && ! printf '%s ' $ONLY | grep -q "$name "; then
+    continue
+  fi
+  # One product failing must not stop the others.
+  run_recipe "$recipe" || failed=1
+done
+
+update_index
+
+[ "$failed" = "0" ] || die "at least one product failed to publish (see above)"
+log "all products up to date"
