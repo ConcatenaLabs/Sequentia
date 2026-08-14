@@ -934,7 +934,7 @@ bool assetHasMarketPrice(const CAsset& asset)
     return it != prices.end() && it->second > 0.0;
 }
 
-QString formatMultiAssetReferenceApprox(const CAmountMap& amountmap, const QString& refTicker)
+QString formatMultiAssetReferenceApprox(const CAmountMap& amountmap, const QString& refTicker, double extraBtcWhole)
 {
     const std::map<std::string, double> prices = GetReferencePrices();
     if (prices.empty()) return QString();
@@ -950,6 +950,15 @@ QString formatMultiAssetReferenceApprox(const CAmountMap& amountmap, const QStri
         sum += (static_cast<double>(it.second) / factor) * itA->second / pr;
         any = true;
     }
+    // Parent-chain bitcoin is not a CAsset, so it cannot travel in the map; callers
+    // pass it separately and it is valued through the feed's WBTC entry.
+    if (extraBtcWhole > 0.0) {
+        const auto itB = prices.find("WBTC");
+        if (itB != prices.end() && itB->second > 0.0) {
+            sum += extraBtcWhole * itB->second / pr;
+            any = true;
+        }
+    }
     return any ? FormatRefValue(sum, ref) : QString();
 }
 
@@ -964,6 +973,10 @@ QString formatReferenceApproxByLabel(const QString& assetLabel, double wholeUnit
     QString assetKey = assetLabel.toUpper();
     if (assetLabel == BitcoinUnits::policyAssetTicker() || assetLabel.compare(QStringLiteral("bitcoin"), Qt::CaseInsensitive) == 0)
         assetKey = QStringLiteral("SEQ");
+    // Parent-chain bitcoin (the dual-address tBTC balance) is priced under the feed's
+    // WBTC entry, same mapping RefBasePriceOf applies on the reference side.
+    else if (assetKey == QLatin1String("BTC") || assetKey == QLatin1String("TBTC"))
+        assetKey = QStringLiteral("WBTC");
     if (assetKey == ref || (ref == QLatin1String("BTC") && assetKey == QLatin1String("WBTC"))) return QString();
     const auto itA = prices.find(assetKey.toStdString());
     const double pa = itA != prices.end() ? itA->second : 0.0;

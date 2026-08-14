@@ -19,6 +19,7 @@
 #include <interfaces/node.h>
 #include <policy/policy.h>
 #include <univalue.h>
+#include <util/strencodings.h>
 #include <util/system.h>
 
 #include <QAbstractItemDelegate>
@@ -279,16 +280,11 @@ OverviewPage::OverviewPage(const PlatformStyle *platformStyle, QWidget *parent) 
         ui->verticalLayout_4->insertWidget(2, m_asset_table);
     }
 
-    // Parent-chain (Bitcoin testnet4) balance, shown inside the Balances panel rather
-    // than the network-status panel: a Sequentia receiving address is ALSO a Bitcoin
-    // testnet4 address, so the same address can hold real tBTC. It is scanned from the
-    // parent chain (not part of the Sequentia wallet balance), so it sits on its own
-    // separated row below the asset balances, with the dual-address note as a tooltip.
+    // Parent-chain (Bitcoin testnet4) status line. The tBTC balance itself lives as a row
+    // of the balances table (populateAssetTable) and inside the headline total, like any
+    // other asset — this label only carries the states that have no row to live in:
+    // "loading", "scanning" and "not connected to Bitcoin Core". Hidden otherwise.
     {
-        QFrame* btcSep = new QFrame(ui->frame);
-        btcSep->setFrameShape(QFrame::HLine);
-        btcSep->setFrameShadow(QFrame::Sunken);
-        ui->verticalLayout_4->addWidget(btcSep);
         m_btc_label = new QLabel(tr("Bitcoin (testnet4): loading..."), ui->frame);
         m_btc_label->setWordWrap(true);
         m_btc_label->setStyleSheet("color:#9b988e;");
@@ -342,7 +338,11 @@ void OverviewPage::setBalance(const interfaces::WalletBalances& balances)
         const CAmountMap all = walletModel->wallet().privateKeysDisabled()
             ? balances.watch_only_balance + balances.unconfirmed_watch_only_balance + balances.immature_watch_only_balance
             : balances.balance + balances.unconfirmed_balance + balances.immature_balance;
-        bool holds_anything = false;
+        // Parent-chain bitcoin at this wallet's addresses counts as part of what the
+        // wallet is worth — it is money the wallet's keys control, whatever chain it
+        // sits on. It is not a CAsset, so it rides beside the map, priced as WBTC.
+        const double btc_whole = m_btc_amount > 0 ? m_btc_amount / double(COIN) : 0.0;
+        bool holds_anything = btc_whole > 0.0;
         for (const auto& it : all) if (it.second > 0) { holds_anything = true; break; }
 
         QString text;
@@ -356,10 +356,11 @@ void OverviewPage::setBalance(const interfaces::WalletBalances& balances)
             m_total_value->setToolTip(tr("Anything you receive shows up here, each asset on its own line. "
                                          "Use the Receive tab to get an address."));
         } else {
-            text = GUIUtil::formatMultiAssetReferenceApprox(all, refCur);
+            text = GUIUtil::formatMultiAssetReferenceApprox(all, refCur, btc_whole);
             f.setPointSizeF(m_headline_point_size);
             m_total_value->setStyleSheet(QString());
-            m_total_value->setToolTip(tr("Everything in this wallet, valued at the latest prices the node has. "
+            m_total_value->setToolTip(tr("Everything in this wallet, valued at the latest prices the node has — "
+                                         "including Bitcoin found at your addresses on the parent chain. "
                                          "Assets with no published price are not counted."));
         }
         m_total_value->setFont(f);
@@ -462,6 +463,43 @@ void OverviewPage::populateAssetTable(const interfaces::WalletBalances& balances
         addSection(balances.watch_only_balance, balances.unconfirmed_watch_only_balance, balances.immature_watch_only_balance, tr(" (watch-only)"));
     }
 
+    // Parent-chain bitcoin sits in the same table as everything else — it is money at
+    // this wallet's addresses like any other row — but it is not a CAsset: its numbers
+    // come from the periodic parent-chain scan, not from the wallet. Zero and unknown
+    // both drop the row, exactly as a zero asset drops its own.
+    if (m_btc_amount > 0) {
+        const int row = t->rowCount();
+        t->insertRow(row);
+
+        auto* name = new QTableWidgetItem(QStringLiteral("tBTC"));
+        name->setToolTip(tr("Your Sequentia receiving address is also a Bitcoin testnet4 address, so the same "
+                            "address can hold real testnet Bitcoin (tBTC). Scanned from the Bitcoin testnet4 "
+                            "chain across %1 of your addresses; confirmed outputs only. It is not a Sequentia "
+                            "asset, and spending it requires a Bitcoin node.").arg(m_btc_addresses));
+        t->setItem(row, COL_ASSET, name);
+
+        auto* origin = new QTableWidgetItem(tr("Bitcoin (testnet4) — parent chain"));
+        origin->setForeground(QColor("#9b988e"));
+        origin->setToolTip(name->toolTip());
+        t->setItem(row, COL_ID, origin);
+
+        QString s;
+        if (m_privacy) s = QString::fromUtf8("\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2"); // "••••"
+        else s = BitcoinUnits::format(BitcoinUnits::BTC, m_btc_amount, false, BitcoinUnits::SeparatorStyle::ALWAYS);
+        auto* avail = new QTableWidgetItem(s);
+        avail->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        t->setItem(row, COL_AVAILABLE, avail);
+        t->setItem(row, COL_PENDING, new QTableWidgetItem(QString()));
+        t->setItem(row, COL_IMMATURE, new QTableWidgetItem(QString()));
+
+        QString val;
+        if (!m_privacy) val = GUIUtil::formatReferenceApproxByLabel(QStringLiteral("BTC"), m_btc_amount / double(COIN), refCur);
+        auto* v = new QTableWidgetItem(val.isEmpty() ? QString::fromUtf8("\xE2\x80\x94") : val); // "—"
+        v->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        if (val.isEmpty()) v->setForeground(QColor("#9b988e"));
+        t->setItem(row, COL_VALUE, v);
+    }
+
     // Hide the Pending/Immature columns entirely when nothing needs them, so the everyday case
     // reads as a clean Asset | Available | Value table.
     t->setColumnHidden(COL_PENDING, !anyPending);
@@ -501,6 +539,12 @@ QString OverviewPage::assetTableSignature(const interfaces::WalletBalances& bala
     } else {
         section(balances.balance, balances.unconfirmed_balance, balances.immature_balance);
         section(balances.watch_only_balance, balances.unconfirmed_watch_only_balance, balances.immature_watch_only_balance);
+    }
+    // The tBTC row renders from the scan state, so its inputs fingerprint too — a fresh
+    // scan or a WBTC price move must count as "the table changed".
+    if (m_btc_amount > 0) {
+        sig += QStringLiteral("|tBTC:") + QString::number(m_btc_amount)
+             + QStringLiteral("=") + GUIUtil::formatReferenceApproxByLabel(QStringLiteral("BTC"), m_btc_amount / double(COIN), refCur);
     }
     return sig;
 }
@@ -724,7 +768,12 @@ void OverviewPage::refreshBtcBalance()
     // Run the (slow) parent-chain scantxoutset off the GUI thread, then post the
     // result back to the GUI thread. Avoids freezing the UI; no extra Qt module.
     std::thread([self, nodePtr, uri]() {
+        bool ok = false;
         QString text;
+        CAmount amount = -1;
+        int naddr = 0;
+        int parent_height = 0;
+        QList<GUIUtil::ParentChainUtxo> utxos;
         try {
             UniValue r = nodePtr->executeRpc("getbtcbalance", UniValue(UniValue::VARR), uri);
             if (r.isObject()) {
@@ -742,10 +791,27 @@ void OverviewPage::refreshBtcBalance()
                         ? tr("Bitcoin (testnet4): balance unavailable — not connected to Bitcoin Core")
                         : QStringLiteral("Bitcoin (testnet4): ") + QString::fromStdString(e);
                 } else {
-                    const QString amt = r.exists("btc") ? QString::fromStdString(r["btc"].getValStr()) : QStringLiteral("0");
-                    const int naddr = r.exists("addresses") ? r["addresses"].get_int() : 0;
-                    text = QStringLiteral("Bitcoin (testnet4): ") + amt + QStringLiteral(" tBTC across ")
-                           + QString::number(naddr) + QStringLiteral(" of your addresses");
+                    ok = true;
+                    const std::string amt = r.exists("btc") ? r["btc"].getValStr() : std::string("0");
+                    int64_t parsed = 0;
+                    amount = ParseFixedPoint(amt, 8, &parsed) ? parsed : 0;
+                    naddr = r.exists("addresses") ? r["addresses"].get_int() : 0;
+                    parent_height = (r.exists("parent_height") && r["parent_height"].isNum()) ? r["parent_height"].get_int() : 0;
+                    if (r.exists("utxos") && r["utxos"].isArray()) {
+                        for (size_t i = 0; i < r["utxos"].size(); ++i) {
+                            const UniValue& u = r["utxos"][i];
+                            if (!u.isObject()) continue;
+                            GUIUtil::ParentChainUtxo x;
+                            if (u.exists("txid")) x.txid = QString::fromStdString(u["txid"].getValStr());
+                            if (u.exists("vout") && u["vout"].isNum()) x.vout = u["vout"].get_int();
+                            if (u.exists("btc")) x.amount = QString::fromStdString(u["btc"].getValStr());
+                            if (u.exists("height") && u["height"].isNum()) x.height = u["height"].get_int();
+                            if (u.exists("confirmations") && u["confirmations"].isNum()) x.confirmations = u["confirmations"].get_int();
+                            if (u.exists("time") && u["time"].isNum()) x.time = u["time"].get_int64();
+                            if (u.exists("address")) x.address = QString::fromStdString(u["address"].getValStr());
+                            utxos.append(x);
+                        }
+                    }
                 }
             } else {
                 text = QStringLiteral("Bitcoin (testnet4): unexpected response");
@@ -757,13 +823,41 @@ void OverviewPage::refreshBtcBalance()
         } catch (...) {
             text = QStringLiteral("Bitcoin (testnet4): query failed");
         }
-        QMetaObject::invokeMethod(qApp, [self, text]() {
+        QMetaObject::invokeMethod(qApp, [self, ok, text, amount, naddr, parent_height, utxos]() {
             if (self) {
-                if (self->m_btc_label) self->m_btc_label->setText(text);
                 self->m_btc_scan_inflight = false;
+                self->onBtcScanResult(ok, text, amount, naddr, parent_height, utxos);
             }
         });
     }).detach();
+}
+
+void OverviewPage::onBtcScanResult(bool ok, const QString& error_text, CAmount amount, int naddr,
+                                   int parent_height, const QList<GUIUtil::ParentChainUtxo>& utxos)
+{
+    const CAmount shown_before = m_btc_amount;
+    if (ok) {
+        m_btc_amount = amount;
+        m_btc_addresses = naddr;
+        // The balance now has a table row (and the headline) to live in; the status
+        // line would only repeat it, so it stays for the states that have no row.
+        if (m_btc_label) m_btc_label->setVisible(false);
+    } else {
+        // Unreachable: drop the row rather than keep quoting a number the node can no
+        // longer stand behind, and let the status line say why there is no row.
+        m_btc_amount = -1;
+        m_btc_addresses = 0;
+        if (m_btc_label) {
+            m_btc_label->setText(error_text);
+            m_btc_label->setVisible(true);
+        }
+    }
+    if (m_btc_amount != shown_before && m_balances.balance[::policyAsset] != -1) {
+        setBalance(m_balances); // rebuilds the table and the headline with the new tBTC state
+    }
+    m_btc_parent_height = parent_height;
+    m_btc_utxos = utxos;
+    Q_EMIT btcUtxosChanged(m_btc_utxos, m_btc_parent_height);
 }
 
 void OverviewPage::changeEvent(QEvent* e)
