@@ -8,7 +8,7 @@ import subprocess
 
 class Daemon():
     """
-    A class for representing a bitcoind or elementsd node.
+    A class for representing a bitcoind or sequentiad node.
 
     Wraps the process management, creation and deletion of datadirs, and
     RPC connectivity, into a simple object that will clean itself up on

@@ -83,9 +83,9 @@ def jcli(*a, **k):
 
 
 def read_pid(datadir, subdir):
-    """elementsd.pid lives under the chain's network subdir (testnet3 for
+    """sequentiad.pid lives under the chain's network subdir (testnet3 for
     chain=test, the chain name otherwise)."""
-    pidf = os.path.join(datadir, subdir, "elementsd.pid")
+    pidf = os.path.join(datadir, subdir, "sequentiad.pid")
     for _ in range(50):
         if os.path.exists(pidf):
             try:
@@ -192,18 +192,18 @@ def main():
     except Exception:
         pass
 
-    elementsd = os.path.join(args.bindir, "elementsd")
-    ec = os.path.join(args.bindir, "elements-cli")
-    for b in (elementsd, ec):
+    sequentiad = os.path.join(args.bindir, "sequentiad")
+    ec = os.path.join(args.bindir, "sequentia-cli")
+    for b in (sequentiad, ec):
         if not os.path.exists(b):
             sys.exit("missing binary: %s" % b)
     if args.stop:
-        stop_all(args.basedir, elementsd)
+        stop_all(args.basedir, sequentiad)
         return
 
     chain = args.chain
     is_test = (chain == "test")
-    subdir = "testnet3" if is_test else chain        # elementsd's network datadir subdir
+    subdir = "testnet3" if is_test else chain        # sequentiad's network datadir subdir
     # chain=test bakes these; the custom chain takes them from the command line.
     slot = TEST_SLOT if is_test else args.slot
     unbonding = TEST_UNBONDING if is_test else args.posunbonding
@@ -257,7 +257,7 @@ def main():
             "fallbackfee=0.0001",
         ])
         print("Starting local parent (throwaway Bitcoin stand-in)...")
-        start_daemon(elementsd, pdir)
+        start_daemon(sequentiad, pdir)
         wait_rpc(ec, pdir, p_rpc, "parent")
         cli(ec, pdir, p_rpc, ["-named", "createwallet", "wallet_name=w", "descriptors=true"], args.rpcuser, args.rpcpassword)
         addr, _ = cli(ec, pdir, p_rpc, ["getnewaddress"], args.rpcuser, args.rpcpassword)
@@ -358,7 +358,7 @@ def main():
     # ---- Phase 1: start the founder ALONE ------------------------------------
     print("=== Phase 1: founder genesis (node000), chain=%s ===" % chain)
     fdir = node_conf(0, founder_wif)
-    start_daemon(elementsd, fdir)
+    start_daemon(sequentiad, fdir)
     wait_rpc(ec, fdir, rb, "founder")
     pids["node000"] = {"datadir": fdir, "rpcport": rb, "pid": read_pid(fdir, subdir)}
     json.dump(pids, open(os.path.join(base, "pids.json"), "w", encoding="utf8"))
@@ -379,7 +379,7 @@ def main():
     fee_atoms = to_atoms("0.001")
     change = in_atoms - (N - 1) * stake_atoms - fee_atoms
     if change < 0:
-        stop_all(base, elementsd)
+        stop_all(base, sequentiad)
         sys.exit("founder funding output (%s SEQ) too small for %d x %s SEQ" % (fund["value"], N - 1, stake_seq))
 
     def bls_args(wif):
@@ -407,7 +407,7 @@ def main():
         signed, rc = jcli(ec, fdir, rb, ["signrawtransactionwithkey", tx.serialize().hex(),
                                          json.dumps([founder_wif]), json.dumps(prevtxs)], check=False)
         if not signed or not signed.get("complete"):
-            stop_all(base, elementsd)
+            stop_all(base, sequentiad)
             sys.exit("registration tx signing failed: %s" % (signed.get("errors") if signed else "rc=%d" % rc))
         tx_hex = signed["hex"]
     else:
@@ -418,7 +418,7 @@ def main():
     _r = subprocess.run(_cmd, capture_output=True, text=True)
     txid, rc = _r.stdout.strip(), _r.returncode
     if rc != 0:
-        stop_all(base, elementsd)
+        stop_all(base, sequentiad)
         sys.exit("registration tx rejected: %s" % ((_r.stderr or _r.stdout).strip()))
     print("  registration tx broadcast: %s" % txid)
 
@@ -437,14 +437,14 @@ def main():
             break
         time.sleep(5 if parent_miner else 20)
     if not b1:
-        stop_all(base, elementsd)
+        stop_all(base, sequentiad)
         sys.exit("could not produce the escaping-stall block (parent reachable / advanced?)")
     print("  block 1: height=%d countersignatures=%d (sub-quorum, founder only)" %
           (b1["height"], b1["countersignatures"]))
     reg, _ = jcli(ec, fdir, rb, ["getstakerinfo"])
     missing = [p for _, p in members if p not in (reg or {})]
     if missing:
-        stop_all(base, elementsd)
+        stop_all(base, sequentiad)
         sys.exit("stakers not registered after block 1: %d missing" % len(missing))
     print("  registry now holds %d stakers (founder + %d). Quorum is reachable." % (len(reg), N - 1))
 
@@ -452,7 +452,7 @@ def main():
     print("=== Phase 4: starting %d staker nodes; committee goes autonomous ===" % (N - 1))
     for i in range(1, N):
         d = node_conf(i, members[i - 1][0])
-        start_daemon(elementsd, d)
+        start_daemon(sequentiad, d)
         pids["node%03d" % i] = {"datadir": d, "rpcport": rb + i, "pid": read_pid(d, subdir)}
         if i % 10 == 0:
             print("  started %d/%d" % (i, N - 1))
@@ -487,7 +487,7 @@ def main():
     except KeyboardInterrupt:
         print("\nCtrl-C — stopping...")
     finally:
-        stop_all(base, elementsd)
+        stop_all(base, sequentiad)
 
 
 def _hash_fork(ec, pids, N, rb, common):

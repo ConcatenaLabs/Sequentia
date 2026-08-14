@@ -248,7 +248,7 @@ static const int64_t DEFAULT_POS_ESCAPE_STALL_MTP_GAP = 600;
 
 /*  The activation height for the gap above lives in the COMMON layer
  *  (pos.h: g_pos_escape_stall_mtp_height / PosEscapeStallMtpHeightActive),
- *  because chainparams.cpp assigns it and elements-cli / elements-tx link
+ *  because chainparams.cpp assigns it and sequentia-cli / sequentia-tx link
  *  libbitcoin_common without libbitcoin_server. Same reason the operator
  *  checkpoints live there. */
 
@@ -355,7 +355,7 @@ std::vector<PosCheckpoint> GetPosCheckpointConflicts();
 
 // Operator-configured static checkpoints (-poscheckpoint=height:hash) live in
 // the common layer (pos.h / pos.cpp), not here: chainparams.cpp configures them
-// and must link them into libbitcoin_common (and tools like elements-tx), which
+// and must link them into libbitcoin_common (and tools like sequentia-tx), which
 // does not pull in this node-layer module.
 
 #endif // BITCOIN_ANCHOR_H

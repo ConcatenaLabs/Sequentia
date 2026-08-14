@@ -5,7 +5,7 @@
 """A headless node with anchoring on and no reachable parent chain daemon must not start.
 
 When con_bitcoin_anchor is set and the Bitcoin daemon cannot be reached,
-AppInitMain asks whether to continue without following Bitcoin. elementsd has
+AppInitMain asks whether to continue without following Bitcoin. sequentiad has
 nobody to ask, so ThreadSafeQuestion answers "no" and startup aborts. The
 alternative -- starting with validateanchor silently forced to 0 -- would leave
 a node that cannot notice a Bitcoin reorganization invalidating its own chain,
@@ -50,7 +50,7 @@ class AnchorUnreachableParentTest(BitcoinTestFramework):
             "-mainchainrpcpassword=nothing",
         ]
 
-        self.log.info("elementsd refuses to start when the parent chain daemon is unreachable")
+        self.log.info("sequentiad refuses to start when the parent chain daemon is unreachable")
         self.nodes[0].assert_start_raises_init_error(
             extra_args=unreachable_args,
             expected_msg="could not reach the Bitcoin node it anchors its blocks to",

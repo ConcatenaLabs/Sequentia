@@ -628,7 +628,7 @@ RPCHelpMan sendtomainchain_pak()
 
         descriptor = Parse(pwallet->offline_desc, provider, error);
         if (!descriptor) {
-            throw JSONRPCError(RPC_WALLET_ERROR, "descriptor still null. This is a bug in elementsd.");
+            throw JSONRPCError(RPC_WALLET_ERROR, "descriptor still null. This is a bug in sequentiad.");
         }
     }
 

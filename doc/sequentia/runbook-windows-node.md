@@ -7,7 +7,7 @@ prior Sequentia experience. Commands are shown for the **Windows Command Prompt
 (cmd.exe)**; in PowerShell they work the same, only the line-continuation and
 `%VAR%` syntax differ.
 
-> Naming: the binaries are `elementsd.exe` (the node) and `elements-cli.exe`
+> Naming: the binaries are `sequentiad.exe` (the node) and `sequentia-cli.exe`
 > (the command-line tool). Sequentia is an Elements-based chain, so the programs
 > keep the Elements names.
 
@@ -60,7 +60,7 @@ before running commands.
 To check the binaries run:
 
 ```
-elements-cli.exe --version
+sequentia-cli.exe --version
 ```
 
 ---
@@ -84,7 +84,7 @@ chain=test
 pospubliccommittee=1
 poscommitteesize=250
 
-# --- your node's local RPC (used by elements-cli on this machine only) ---
+# --- your node's local RPC (used by sequentia-cli on this machine only) ---
 server=1
 rpcuser=alberto
 rpcpassword=<choose-a-long-random-password>
@@ -208,15 +208,15 @@ Pruning is fine for anchor validation, which only queries headers/tip.
 Start the daemon (it runs in the background):
 
 ```
-elementsd.exe -daemon
+sequentiad.exe -daemon
 ```
 
 Watch it find the network and catch up:
 
 ```
-elements-cli.exe getblockchaininfo
-elements-cli.exe getconnectioncount
-elements-cli.exe getpeerinfo
+sequentia-cli.exe getblockchaininfo
+sequentia-cli.exe getconnectioncount
+sequentia-cli.exe getpeerinfo
 ```
 
 You're synced when `getblockchaininfo` shows `"initialblockdownload": false` and
@@ -224,17 +224,17 @@ You're synced when `getblockchaininfo` shows `"initialblockdownload": false` and
 view too:
 
 ```
-elements-cli.exe getposschedule
-elements-cli.exe getstakerinfo
-elements-cli.exe getanchorstatus
+sequentia-cli.exe getposschedule
+sequentia-cli.exe getstakerinfo
+sequentia-cli.exe getanchorstatus
 ```
 
 `getanchorstatus` should read `"anchorstatus": "ok"` - that confirms your
 testnet4 RPC is reachable and the tip's anchor checks out. **Tell the operator
 once you're synced; they'll send your tSEQ.**
 
-Stop the node any time with `elements-cli.exe stop`; restart with
-`elementsd.exe -daemon`.
+Stop the node any time with `sequentia-cli.exe stop`; restart with
+`sequentiad.exe -daemon`.
 
 ---
 
@@ -244,24 +244,24 @@ Create a wallet (use a legacy wallet - it makes the staking key step in §5
 straightforward):
 
 ```
-elements-cli.exe -named createwallet wallet_name=main descriptors=false
+sequentia-cli.exe -named createwallet wallet_name=main descriptors=false
 ```
 
 Generate an address and give it to the operator to receive your tSEQ:
 
 ```
-elements-cli.exe -rpcwallet=main getnewaddress
+sequentia-cli.exe -rpcwallet=main getnewaddress
 ```
 
 When the tSEQ arrives, confirm it:
 
 ```
-elements-cli.exe -rpcwallet=main getbalance "*"
+sequentia-cli.exe -rpcwallet=main getbalance "*"
 ```
 
 You should see a `"bitcoin"` balance (that's the policy asset, the Sequence token (SEQ) - it carries
 the Elements default label "bitcoin"). You can also see individual coins with
-`elements-cli.exe -rpcwallet=main listunspent`.
+`sequentia-cli.exe -rpcwallet=main listunspent`.
 
 ---
 
@@ -277,20 +277,20 @@ Registering stake takes three ingredients, all from your own node:
 
 1. **A staker key.** Generate one and note its pubkey and WIF (private key):
    ```
-   elements-cli.exe -rpcwallet=main getnewaddress
-   elements-cli.exe -rpcwallet=main getaddressinfo <that-address>
-   elements-cli.exe -rpcwallet=main dumpprivkey <that-address>
+   sequentia-cli.exe -rpcwallet=main getnewaddress
+   sequentia-cli.exe -rpcwallet=main getaddressinfo <that-address>
+   sequentia-cli.exe -rpcwallet=main dumpprivkey <that-address>
    ```
    (`getaddressinfo` shows the `pubkey`; `dumpprivkey` the WIF.)
 2. **Your committee BLS registration**, derived from the staker key (the
    public committee names its signers by their registered BLS keys):
    ```
-   elements-cli.exe getblsregistration "<staker-WIF>"
+   sequentia-cli.exe getblsregistration "<staker-WIF>"
    ```
    Note the `blspubkey` and `pop` values it returns.
 3. **The staking script** for that key with the ~15-day unbonding lock:
    ```
-   elements-cli.exe getstakescript "<staker-pubkey>" null 1296384 <blspubkey> <pop>
+   sequentia-cli.exe getstakescript "<staker-pubkey>" null 1296384 <blspubkey> <pop>
    ```
    It returns the `script` (hex) your stake must pay to.
 
@@ -308,8 +308,8 @@ Wait for that txid to confirm (the live committee mines it within a block or
 two):
 
 ```
-elements-cli.exe -rpcwallet=main gettransaction <txid>
-elements-cli.exe getstakerinfo
+sequentia-cli.exe -rpcwallet=main gettransaction <txid>
+sequentia-cli.exe getstakerinfo
 ```
 
 When your staker's pubkey appears in `getstakerinfo`, you're registered. Now
@@ -322,15 +322,15 @@ posproducerkey=<your-staker-WIF-from-step-1>
 ```
 
 ```
-elements-cli.exe stop
-elementsd.exe -daemon
+sequentia-cli.exe stop
+sequentiad.exe -daemon
 ```
 
 Your node now signs and produces whenever the VRF sortition selects you. Confirm
 participation over a few minutes:
 
 ```
-elements-cli.exe getposschedule
+sequentia-cli.exe getposschedule
 ```
 
 Look for your pubkey in the schedule/committee. The more you stake, the more
@@ -348,33 +348,33 @@ Issue an asset (here 1,000,000 units, with a reissuance token so you can mint
 more later; `false` = unblinded, which is the testnet default):
 
 ```
-elements-cli.exe -rpcwallet=main issueasset 1000000 1 false
+sequentia-cli.exe -rpcwallet=main issueasset 1000000 1 false
 ```
 
 It returns an `asset` id (hex) and a `token` id (the reissuance token). Save the
 `asset` id. Confirm it after a block:
 
 ```
-elements-cli.exe -rpcwallet=main getbalance "*"
-elements-cli.exe -rpcwallet=main listissuances
+sequentia-cli.exe -rpcwallet=main getbalance "*"
+sequentia-cli.exe -rpcwallet=main listissuances
 ```
 
 Mint more of an existing asset (using the reissuance token you hold):
 
 ```
-elements-cli.exe -rpcwallet=main reissueasset <asset-id> 500000
+sequentia-cli.exe -rpcwallet=main reissueasset <asset-id> 500000
 ```
 
 Send some of your asset to any address:
 
 ```
-elements-cli.exe -rpcwallet=main -named sendtoaddress address=<dest> amount=10 assetlabel=<asset-id>
+sequentia-cli.exe -rpcwallet=main -named sendtoaddress address=<dest> amount=10 assetlabel=<asset-id>
 ```
 
 Destroy (burn) units provably:
 
 ```
-elements-cli.exe -rpcwallet=main destroyamount <asset-id> 100
+sequentia-cli.exe -rpcwallet=main destroyamount <asset-id> 100
 ```
 
 ---
@@ -392,7 +392,7 @@ set A=<asset-id-1>
 set B=<asset-id-2>
 set D1=<dest-addr-1>
 set D2=<dest-addr-2>
-elements-cli.exe -rpcwallet=main -named sendmany ^
+sequentia-cli.exe -rpcwallet=main -named sendmany ^
   amounts="{\"%D1%\":5,\"%D2%\":7}" ^
   output_assets="{\"%D1%\":\"%A%\",\"%D2%\":\"%B%\"}"
 ```
@@ -402,8 +402,8 @@ asset, the producer must *price* that asset. On your own node you set the price
 (this controls what *you* accept when you produce a block):
 
 ```
-elements-cli.exe setfeeexchangerates "{\"<asset-id>\":100000000}"
-elements-cli.exe getfeeexchangerates
+sequentia-cli.exe setfeeexchangerates "{\"<asset-id>\":100000000}"
+sequentia-cli.exe getfeeexchangerates
 ```
 
 A rate of `100000000` means "1 unit of this asset = 1 SEQ of reference fee
@@ -412,7 +412,7 @@ you build will be mineable by any producer that also prices it (ask the operator
 to price your test asset across the committee if you want it mined quickly):
 
 ```
-elements-cli.exe -rpcwallet=main -named sendtoaddress ^
+sequentia-cli.exe -rpcwallet=main -named sendtoaddress ^
   address=<dest> amount=5 assetlabel=<asset-id> fee_asset_label=<asset-id>
 ```
 
@@ -420,9 +420,9 @@ elements-cli.exe -rpcwallet=main -named sendtoaddress ^
 transaction, then bump it - optionally switching the fee asset:
 
 ```
-elements-cli.exe -rpcwallet=main -named sendtoaddress ^
+sequentia-cli.exe -rpcwallet=main -named sendtoaddress ^
   address=<dest> amount=2 replaceable=true fee_rate=1
-elements-cli.exe -rpcwallet=main -named bumpfee txid=<txid> ^
+sequentia-cli.exe -rpcwallet=main -named bumpfee txid=<txid> ^
   options="{\"fee_rate\":50}"
 ```
 
@@ -434,7 +434,7 @@ confidential form of an address:
 
 ```
 set ADDR=<a getnewaddress address>
-elements-cli.exe -rpcwallet=main getaddressinfo %ADDR%
+sequentia-cli.exe -rpcwallet=main getaddressinfo %ADDR%
 ```
 
 Take the `confidential` field from that output and send to it; the amount on
@@ -446,9 +446,9 @@ anchored to Bitcoin testnet4, when testnet4 reorgs, Sequentia follows. Watch the
 tip and the anchor over time:
 
 ```
-elements-cli.exe getblockcount
-elements-cli.exe getanchorstatus
-elements-cli.exe getcheckpointinfo
+sequentia-cli.exe getblockcount
+sequentia-cli.exe getanchorstatus
+sequentia-cli.exe getcheckpointinfo
 ```
 
 If testnet4 reorgs a referenced block, you'll see the Sequentia tip roll back and
@@ -460,7 +460,7 @@ re-extend, with finality holding modulo the Bitcoin reorg - exactly as designed.
 
 | Symptom | Check / fix |
 |---|---|
-| `getconnectioncount` is 0 | the `addnode` host/port (item 2) is wrong or not reachable; confirm with the operator; check Windows Firewall isn't blocking `elementsd.exe`. |
+| `getconnectioncount` is 0 | the `addnode` host/port (item 2) is wrong or not reachable; confirm with the operator; check Windows Firewall isn't blocking `sequentiad.exe`. |
 | Stuck in `initialblockdownload` | give it time on first sync; confirm you have a peer (§3) and the testnet4 RPC works (`getanchorstatus`). |
 | `getanchorstatus` not `"ok"` | your `mainchainrpc*` settings are wrong/unreachable - fix them in `elements.conf` and restart. |
 | Startup error "no valid response was received from the mainchain daemon" | the testnet4 RPC endpoint in `mainchainrpc*` is down or refusing the connection. If it points at your own Bitcoin Core, test it with the `curl.exe` command in §2b - if that fails too, it's the wrong-datadir pitfall (§2b step 2) or a missing `server=1`. |
@@ -469,7 +469,7 @@ re-extend, with finality holding modulo the Bitcoin reorg - exactly as designed.
 | `getstakescript` says the lock "is below the chain's minimum" | raise the `csv_seconds` argument to at least `1296000` (~15 days). |
 | Your staker never appears in `getposschedule` | confirm the registration tx is mined (`getstakerinfo`), that `posproducer=1` and `posproducerkey` are set, and the node has been restarted. |
 | A fee-in-asset tx won't confirm | no producer prices that asset; ask the operator to price it across the committee. |
-| Node won't start after edits | run `elementsd.exe` (without `-daemon`) to see the error in the console. |
+| Node won't start after edits | run `sequentiad.exe` (without `-daemon`) to see the error in the console. |
 
 **Useful introspection RPCs:** `getblockchaininfo`, `getposschedule`,
 `getstakerinfo`, `getanchorstatus`, `getcheckpointinfo`, `getbalance "*"`,

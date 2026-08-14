@@ -1,11 +1,11 @@
 .PHONY: FORCE
 all: FORCE
-	$(MAKE) -C .. elements_qt test_elements_qt
+	$(MAKE) -C .. sequentia_qt test_sequentia_qt
 clean: FORCE
-	$(MAKE) -C .. elements_qt_clean test_elements_qt_clean
+	$(MAKE) -C .. sequentia_qt_clean test_sequentia_qt_clean
 check: FORCE
-	$(MAKE) -C .. test_elements_qt_check
-elements-qt elements-qt.exe: FORCE
-	 $(MAKE) -C .. elements_qt
+	$(MAKE) -C .. test_sequentia_qt_check
+sequentia-qt sequentia-qt.exe: FORCE
+	 $(MAKE) -C .. sequentia_qt
 apk: FORCE
-	$(MAKE) -C .. elements_qt_apk
+	$(MAKE) -C .. sequentia_qt_apk

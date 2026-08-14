@@ -147,7 +147,7 @@ static constexpr int MAX_32BIT_MEMPOOL_MB{500};
 #ifdef LIQUID
 const char * const BITCOIN_PID_FILENAME = "liquid.pid";
 #else
-const char * const BITCOIN_PID_FILENAME = "elementsd.pid";
+const char * const BITCOIN_PID_FILENAME = "sequentiad.pid";
 #endif
 
 static fs::path GetPidFile(const ArgsManager& args)
@@ -2285,7 +2285,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             // ThreadSafeQuestion returns false on every non-interactive
             // frontend, so "yes" can only ever come from a human clicking it.
             // That, not -server, is the right test for "is there someone to
-            // ask": elementsd soft-sets -server=1, but so does a GUI user who
+            // ask": sequentiad soft-sets -server=1, but so does a GUI user who
             // enabled the RPC server, and refusing to start was never the
             // useful answer for them.
             const bool start_anyway = uiInterface.ThreadSafeQuestion(

@@ -42,8 +42,8 @@ from test_framework.script import (CScript, LegacySignatureHash, SIGHASH_ALL,  #
     OP_CHECKLOCKTIMEVERIFY, OP_DROP)
 
 COIN = 100_000_000
-ELD = os.path.join(REPO, "src", "elementsd")
-ELC = os.path.join(REPO, "src", "elements-cli")
+ELD = os.path.join(REPO, "src", "sequentiad")
+ELC = os.path.join(REPO, "src", "sequentia-cli")
 
 
 def common_args(chain, datadir, port):
