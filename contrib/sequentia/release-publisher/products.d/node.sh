@@ -38,11 +38,22 @@ build() {
     return 1
   fi
 
-  log "[node] building Linux ($JOBS jobs, nice $NICE)"
-  nice -n "$NICE" ./autogen.sh >/dev/null
+  # Keep the output. Discarding it meant a failed unattended build reported only
+  # "BUILD FAILED" and the reason had to be reproduced by hand afterwards.
+  local blog="$BUILD_ROOT/node-linux.log"
+  node_step() {
+    local what="$1"; shift
+    if ! nice -n "$NICE" "$@" >>"$blog" 2>&1; then
+      log "[node] $what FAILED; last lines:"; tail -15 "$blog" | sed 's/^/    /'; return 1
+    fi
+  }
+
+  log "[node] building Linux ($JOBS jobs, nice $NICE) -> $blog"
+  : > "$blog"
+  node_step autogen ./autogen.sh || return 1
   # shellcheck disable=SC2086
-  CONFIG_SITE="$depends_linux/share/config.site" nice -n "$NICE" ./configure $NODE_CONFIGURE_ARGS >/dev/null
-  nice -n "$NICE" make -j"$JOBS" >/dev/null
+  CONFIG_SITE="$depends_linux/share/config.site" node_step configure ./configure $NODE_CONFIGURE_ARGS || return 1
+  node_step make make -j"$JOBS" || return 1
 
   local stage="$BUILD_ROOT/stage/sequentia-core-$v"
   rm -rf "$BUILD_ROOT/stage"; mkdir -p "$stage/bin" "$stage/price-server"
@@ -77,18 +88,27 @@ build() {
     return 0
   fi
 
-  log "[node] building the Windows installer"
+  local wlog="$BUILD_ROOT/node-windows.log"
+  win_step() {
+    local what="$1"; shift
+    if ! nice -n "$NICE" "$@" >>"$wlog" 2>&1; then
+      log "[node] windows $what FAILED; last lines:"; tail -15 "$wlog" | sed 's/^/    /'; return 1
+    fi
+  }
+
+  log "[node] building the Windows installer -> $wlog"
+  : > "$wlog"
   # Cross build: the tree must be reconfigured for the other host. Without the
   # distclean a bare make silently reconfigures native and dies confusingly.
-  nice -n "$NICE" make distclean >/dev/null 2>&1 || true
-  nice -n "$NICE" ./autogen.sh >/dev/null
+  nice -n "$NICE" make distclean >>"$wlog" 2>&1 || true
+  win_step autogen ./autogen.sh || return 1
   # shellcheck disable=SC2086
-  CONFIG_SITE="$depends_win/share/config.site" nice -n "$NICE" ./configure --prefix=/ $NODE_CONFIGURE_ARGS >/dev/null
+  CONFIG_SITE="$depends_win/share/config.site" win_step configure ./configure --prefix=/ $NODE_CONFIGURE_ARGS || return 1
   grep -q 'EXEEXT = \.exe' Makefile || { log "[node] configure produced a native build, not a cross build"; return 1; }
   # SHA256-pinned interpreter the installer bundles with the price-server sidecar.
-  nice -n "$NICE" bash contrib/price-server/fetch-embeddable-python.sh >/dev/null
-  nice -n "$NICE" make -j"$JOBS" >/dev/null
-  nice -n "$NICE" make deploy >/dev/null
+  win_step fetch-python bash contrib/price-server/fetch-embeddable-python.sh || return 1
+  win_step make make -j"$JOBS" || return 1
+  win_step deploy make deploy || return 1
 
   # The package tarname changed with the binary rename, so find the artifact
   # rather than assume its prefix.

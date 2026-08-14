@@ -24,6 +24,7 @@ export PATH="/opt/flutter/bin:/root/.cargo/bin:$ANDROID_SDK_ROOT/platform-tools:
 AMBRA_BRANCH="${SEQ_AMBRA_BRANCH:-}"
 branch() { echo "${AMBRA_BRANCH:-$(default_branch "$PRODUCT_REPO")}"; }
 # Point these at the real key to enable the product.
+SWK_REPO="${SEQ_SWK_REPO:-https://github.com/GracedEternalKingCabbageMan/SWK.git}"
 AMBRA_KEYSTORE="${SEQ_AMBRA_KEYSTORE:-/etc/sequentia/ambra-release.keystore}"
 AMBRA_KEY_PROPERTIES="${SEQ_AMBRA_KEY_PROPERTIES:-/etc/sequentia/ambra-key.properties}"
 
@@ -56,6 +57,19 @@ remote_version() {
 build() {
   local version="$1" out="$2" br; br="$(branch)"
   local dir; dir="$(prepare_checkout ambra "$PRODUCT_REPO" "origin/$br")"
+
+  # ambra_core does not depend on published crates for the Sequentia-aware parts:
+  # ambra_core/Cargo.toml patches lwk_common, lwk_signer, lwk_wollet and elements
+  # to ../../SWK/*, the unpublished wallet-kit fork whose rust-elements can
+  # (de)serialize this chain's anchored block headers. Those are PATH patches, so
+  # SWK has to exist as a sibling of the ambra checkout or cargo stops at
+  # "failed to load source for dependency `elements`". prepare_checkout puts every
+  # product under $BUILD_ROOT/src/<name>, which is exactly that layout.
+  local swk_branch="${SEQ_SWK_BRANCH:-$(default_branch "$SWK_REPO")}"
+  [ -n "$swk_branch" ] || { log "[ambra] cannot resolve SWK's default branch"; return 1; }
+  log "[ambra] preparing SWK ($swk_branch) for the path-patched crates"
+  prepare_checkout SWK "$SWK_REPO" "origin/$swk_branch" >/dev/null \
+    || { log "[ambra] could not check out SWK"; return 1; }
 
   # The Rust core first. app/android/app/src/main/jniLibs is gitignored and never
   # committed, so the Flutter build bundles whatever .so happens to be staged --
