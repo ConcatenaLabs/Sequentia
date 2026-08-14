@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Sequentia Core: the node, the wallet and the GUI.
 #
 # Versioned by git TAG, unlike the other products here, because
@@ -6,6 +7,7 @@
 # Sorting and version comparison below are locale-sensitive.
 export LC_ALL=C
 
+# shellcheck disable=SC2034  # read by the driver, not used in this file
 PRODUCT_NAME="node"
 PRODUCT_REPO="${SEQ_NODE_REPO:-https://github.com/GracedEternalKingCabbageMan/Sequentia.git}"
 PRODUCT_INDEX_GLOB="sequentia-core-*-linux-x86_64.tar.gz sequentia-core-*-win64-setup.exe"
@@ -36,7 +38,7 @@ build() {
   local version="$1" out="$2"
   local v="${version#v}"
   local dir; dir="$(prepare_checkout node "$PRODUCT_REPO" "refs/tags/$version")"
-  cd "$dir"
+  cd "$dir" || return 1
 
   local depends_linux="$dir/depends/x86_64-pc-linux-gnu"
   if [ ! -d "$depends_linux" ]; then
