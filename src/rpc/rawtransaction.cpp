@@ -3058,6 +3058,7 @@ static RPCHelpMan rawissueasset()
                                         {
                                             {"operationalkey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "x-only (BIP340) key that signs freezes and unfreezes."},
                                             {"recoverykey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "x-only key whose only power is rotating either key. Keep it cold and separate; it is what stops a stolen operational key from seizing the authority permanently."},
+                                            {"pause", RPCArg::Type::BOOL, RPCArg::Default{false}, "Whether the issuer may PAUSE the asset, stopping every single-owner holding at once. Permanent either way: it is committed in the asset id, so it can never be added later or given up."},
                                         }},
                                 }
                             }
@@ -3190,6 +3191,9 @@ static RPCHelpMan rawissueasset()
             }
             supervision.operational_key = XOnlyPubKey(ParseHex(op_hex));
             supervision.recovery_key = XOnlyPubKey(ParseHex(rec_hex));
+            if (!sup["pause"].isNull() && sup["pause"].get_bool()) {
+                supervision.feature_bits |= SUPERVISION_FEATURE_PAUSE;
+            }
             std::string sup_err;
             if (!ValidateSupervisionDescriptor(supervision, sup_err)) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, sup_err);

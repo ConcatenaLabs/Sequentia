@@ -189,6 +189,36 @@ AssetsPage::AssetsPage(const PlatformStyle* platformStyle, QWidget* parent)
     reissueHint->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
     issueForm->addRow(reissueHint);
     issueForm->addRow(QString(), m_issue_blind);
+
+    // SEQUENTIA: supervision. Presented as what it is -- a permanent power over
+    // everyone who will ever hold the asset -- rather than as a feature toggle,
+    // because it cannot be undone and the people it binds are not in the room.
+    m_issue_supervised = new QCheckBox(tr("Supervised: I can freeze holders of this asset"), issueGroup);
+    m_issue_supervised->setChecked(false);
+    m_issue_pause = new QCheckBox(tr("...and pause the whole asset at once"), issueGroup);
+    m_issue_pause->setChecked(false);
+    m_issue_pause->setEnabled(false);
+    m_issue_supervision_hint = new QLabel(
+        tr("For regulated assets such as a stablecoin, where an issuer must be able to act on a court "
+           "order. It is <b>permanent and cannot be added later</b>: the freeze keys are part of the "
+           "asset's identity, so this asset and the unsupervised one are different assets, and holders "
+           "can see which they are accepting."
+           "<br><br>What it does and does not reach: you can freeze an ordinary address holding the "
+           "asset, and anyone can still be <i>paid</i>. You cannot freeze funds in a Lightning channel, "
+           "an atomic swap or any other shared contract, because someone who did nothing would be "
+           "trapped with them. You never gain the power to spend anyone's coins; the answer to a "
+           "seizure order is to freeze and reissue."
+           "<br><br>Two keys are generated and shown once. The <b>operational</b> key freezes and "
+           "unfreezes. The <b>recovery</b> key does nothing but replace either key, and exists so that a "
+           "stolen operational key cannot be used to take the authority away from you permanently. "
+           "Keep the recovery key offline and somewhere else."), issueGroup);
+    m_issue_supervision_hint->setWordWrap(true);
+    m_issue_supervision_hint->setVisible(false);
+    m_issue_supervision_hint->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
+    issueForm->addRow(QString(), m_issue_supervised);
+    issueForm->addRow(QString(), m_issue_pause);
+    issueForm->addRow(m_issue_supervision_hint);
+
     issueForm->addRow(QString(), m_issue_button);
     issueForm->addRow(tr("Result:"), m_issue_result);
 
@@ -252,8 +282,9 @@ AssetsPage::AssetsPage(const PlatformStyle* platformStyle, QWidget* parent)
     // --- Issuances ---
     QGroupBox* issGroup = new QGroupBox(tr("Your issuances"), this);
     QVBoxLayout* issLayout = new QVBoxLayout(issGroup);
-    m_issuances = new QTableWidget(0, 4, issGroup);
-    m_issuances->setHorizontalHeaderLabels({tr("Asset"), tr("Reissuance token"), tr("Issued amount"), tr("Registry")});
+    m_issuances = new QTableWidget(0, 5, issGroup);
+    m_issuances->setHorizontalHeaderLabels({tr("Asset"), tr("Reissuance token"), tr("Issued amount"),
+                                            tr("Registry"), tr("Supervision")});
     m_issuances->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     m_issuances->verticalHeader()->setVisible(false);
     m_issuances->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -280,6 +311,7 @@ AssetsPage::AssetsPage(const PlatformStyle* platformStyle, QWidget* parent)
 
     connect(refreshBtn, &QPushButton::clicked, this, &AssetsPage::refresh);
     connect(m_issue_button, &QPushButton::clicked, this, &AssetsPage::onIssue);
+    connect(m_issue_supervised, &QCheckBox::toggled, this, &AssetsPage::onSupervisedToggled);
     connect(m_reissue_button, &QPushButton::clicked, this, &AssetsPage::onReissue);
     connect(m_proof_save_button, &QPushButton::clicked, this, &AssetsPage::onSaveProofFile);
     connect(m_contract_save_button, &QPushButton::clicked, this, &AssetsPage::onSaveContract);
@@ -346,6 +378,22 @@ void AssetsPage::refresh()
         }
     }
 
+    // SEQUENTIA: which assets are supervised, and whether a freeze or a pause is
+    // currently in force. One call for the whole table.
+    struct SupervisionRow { bool paused{false}; int frozen{0}; };
+    QHash<QString, SupervisionRow> supervised_assets;
+    UniValue sup_assets = callWalletRpc("getsupervisedassets", UniValue(UniValue::VARR), ok, err);
+    if (ok && sup_assets.isArray()) {
+        for (size_t i = 0; i < sup_assets.size(); ++i) {
+            const UniValue& e = sup_assets[i];
+            if (!e.exists("asset")) continue;
+            SupervisionRow r;
+            r.paused = e.exists("paused") && e["paused"].get_bool();
+            r.frozen = e.exists("frozen") ? e["frozen"].get_int() : 0;
+            supervised_assets.insert(QString::fromStdString(e["asset"].get_str()), r);
+        }
+    }
+
     // Issuances: listissuances
     UniValue iss = callWalletRpc("listissuances", UniValue(UniValue::VARR), ok, err);
     if (ok && iss.isArray()) {
@@ -383,6 +431,27 @@ void AssetsPage::refresh()
                                         "domain and register the asset, then this becomes its name."));
             }
             m_issuances->setItem(row, 3, registry);
+
+            // SEQUENTIA: whether this asset is supervised, and whether that
+            // power is currently in use. Shown next to the asset rather than
+            // buried in an RPC, because a holder deciding whether to accept it
+            // needs to know before they do, not after.
+            QTableWidgetItem* supervision = new QTableWidgetItem();
+            const auto sup = supervised_assets.constFind(asset);
+            if (sup == supervised_assets.constEnd()) {
+                supervision->setText(tr("no"));
+                supervision->setToolTip(tr("Nobody can freeze this asset. That cannot be changed: it "
+                                           "is part of the asset's identity."));
+            } else {
+                QStringList parts;
+                if (sup.value().paused) parts << tr("PAUSED");
+                if (sup.value().frozen > 0) parts << tr("%n address(es) frozen", "", sup.value().frozen);
+                supervision->setText(parts.isEmpty() ? tr("yes") : parts.join(", "));
+                supervision->setToolTip(tr("The issuer can freeze holders of this asset. Shared scripts "
+                                           "such as Lightning channels are out of reach, and the issuer "
+                                           "can never spend anyone's coins."));
+            }
+            m_issuances->setItem(row, 4, supervision);
         }
     }
 
@@ -472,6 +541,83 @@ bool AssetsPage::confirmIssuance(const QString& name, const QString& ticker, con
     return box.exec() == QMessageBox::Ok;
 }
 
+bool AssetsPage::supervisionKeys(QString& operational, QString& recovery)
+{
+    // Two fresh keys from this wallet, x-only for BIP340. An issuer with a real
+    // signing setup (FROST across officers, an HSM) uses the RPC and brings its
+    // own; this path exists so that a smaller issuer is not blocked on one.
+    auto fresh_xonly = [&](QString& out) -> bool {
+        bool ok; QString err;
+        UniValue addr_params(UniValue::VARR);
+        UniValue addr = callWalletRpc("getnewaddress", addr_params, ok, err);
+        if (!ok) { setStatus(tr("Could not make a supervision key: %1").arg(err), true); return false; }
+        UniValue info_params(UniValue::VARR);
+        info_params.push_back(addr.getValStr());
+        UniValue info = callWalletRpc("getaddressinfo", info_params, ok, err);
+        if (!ok || !info.exists("pubkey")) {
+            setStatus(tr("Could not read back a supervision key: %1").arg(err), true);
+            return false;
+        }
+        // A compressed pubkey is 33 bytes; the x-only form is the 32 after the
+        // parity byte, which is what BIP340 signs under.
+        const QString compressed = QString::fromStdString(info["pubkey"].get_str());
+        if (compressed.size() != 66) {
+            setStatus(tr("This wallet returned a key in a form supervision cannot use."), true);
+            return false;
+        }
+        out = compressed.mid(2);
+        return true;
+    };
+
+    if (!fresh_xonly(operational)) return false;
+    if (!fresh_xonly(recovery)) return false;
+    if (operational == recovery) {
+        setStatus(tr("This wallet handed out the same key twice; try again."), true);
+        return false;
+    }
+
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Warning);
+    box.setWindowTitle(tr("Write these two keys down"));
+    box.setText(tr("This asset will be supervised, and these are the keys that supervise it."));
+    box.setInformativeText(
+        tr("Operational key (freezes and unfreezes):\n%1\n\n"
+           "Recovery key (replaces either key, and nothing else):\n%2\n\n"
+           "They are committed in the asset's identity and can never be changed for this asset. "
+           "Both live in this wallet: back it up now, and keep the backup somewhere the wallet is not. "
+           "If you lose them you keep your coins, but you lose the ability to freeze anything - which "
+           "for a regulated asset is the obligation you took this on for.")
+            .arg(operational, recovery));
+    box.setStandardButtons(QMessageBox::Cancel | QMessageBox::Ok);
+    if (QAbstractButton* ok_button = box.button(QMessageBox::Ok)) ok_button->setText(tr("I have written them down"));
+    box.setDefaultButton(QMessageBox::Cancel);
+    return box.exec() == QMessageBox::Ok;
+}
+
+void AssetsPage::onSupervisedToggled(bool checked)
+{
+    m_issue_pause->setEnabled(checked);
+    if (!checked) m_issue_pause->setChecked(false);
+    m_issue_supervision_hint->setVisible(checked);
+    if (checked) {
+        // A supervised asset is always explicit: consensus has to be able to
+        // read an output's asset to freeze it. Say so rather than letting the
+        // node refuse the transaction later for a reason that reads like a bug.
+        m_issue_blind->setChecked(false);
+        m_issue_reissuable->setChecked(true);
+    }
+    m_issue_blind->setEnabled(!checked);
+    m_issue_reissuable->setEnabled(!checked);
+    m_issue_blind->setToolTip(checked
+        ? tr("A supervised asset cannot be confidential: consensus must be able to read an output's "
+             "asset in order to freeze it.")
+        : QString());
+    m_issue_reissuable->setToolTip(checked
+        ? tr("A supervised asset must be reissuable. Freezing plus reissuing is how a seizure order is "
+             "answered without ever giving an issuer the power to spend someone else's coins.")
+        : QString());
+}
+
 void AssetsPage::onIssue()
 {
     if (!m_wallet_model) return;
@@ -528,6 +674,19 @@ void AssetsPage::onIssue()
     params.push_back(NullUniValue); // denomination: taken from the contract's precision
     params.push_back(contract);
 
+    // SEQUENTIA: supervision. The two keys come from this wallet, so an issuer
+    // using the GUI does not have to run a signing setup to get started; an
+    // issuer who does (FROST, an HSM) uses the RPC and passes its own.
+    QString op_key, rec_key;
+    if (m_issue_supervised->isChecked()) {
+        if (!supervisionKeys(op_key, rec_key)) return;
+        UniValue supervision(UniValue::VOBJ);
+        supervision.pushKV("operationalkey", op_key.toStdString());
+        supervision.pushKV("recoverykey", rec_key.toStdString());
+        supervision.pushKV("pause", m_issue_pause->isChecked());
+        params.push_back(supervision);
+    }
+
     bool ok; QString err;
     UniValue r = callWalletRpc("issueasset", params, ok, err);
     if (!ok) { setStatus(tr("Issue failed: %1").arg(err), true); return; }
@@ -536,7 +695,10 @@ void AssetsPage::onIssue()
     const QString token = r.exists("token") ? QString::fromStdString(r["token"].get_str()) : QString();
     // The node reports the token id even when zero tokens were issued; showing
     // it then would suggest a power that no one has.
-    if (reissuable) {
+    if (m_issue_supervised->isChecked()) {
+        m_issue_result->setText(tr("Asset id: %1\nReissuance token: %2\nSupervised. Operational key: %3\nRecovery key: %4")
+                                    .arg(asset, token, op_key, rec_key));
+    } else if (reissuable) {
         m_issue_result->setText(tr("Asset id: %1\nReissuance token: %2").arg(asset, token));
     } else {
         m_issue_result->setText(tr("Asset id: %1\nSupply closed: no reissuance token exists.").arg(asset));

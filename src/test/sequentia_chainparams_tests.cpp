@@ -89,6 +89,39 @@ BOOST_AUTO_TEST_CASE(simplicity_activation_is_pinned)
     SelectParams(CBaseChainParams::REGTEST);
 }
 
+//! SEQUENTIA: the supervised-assets activation, pinned per chain.
+//!
+//! Not decoration. This height decides which asset id an issuance derives, so
+//! two nodes disagreeing about it are on different chains. Pinning it means a
+//! careless edit fails a test rather than splitting the network, and it records
+//! the shape of the decision: fresh chains active from block one, the live
+//! testnet on a coordinated height.
+BOOST_AUTO_TEST_CASE(supervised_assets_activation_is_pinned)
+{
+    ArgsManager empty;
+    {
+        // Mainnet has no history to disagree about, so the rule is in force from
+        // its first block and there is no flag day to remember later. 1 and not
+        // 0, because 0 is this parameter's "rule off" sentinel.
+        const auto params = CreateChainParams(empty, CBaseChainParams::SEQUENTIA);
+        BOOST_CHECK_EQUAL(params->GetConsensus().supervised_assets_height, 1);
+    }
+    {
+        // The live testnet: a coordinated cutover, agreed 2026-08-14 for roughly
+        // 05:00 UTC on 2026-08-15. Changing this without cutting every node over
+        // at the same time forks the chain.
+        const auto params = CreateChainParams(empty, CBaseChainParams::TESTNET);
+        BOOST_CHECK_EQUAL(params->GetConsensus().supervised_assets_height, 94600);
+    }
+    {
+        // Custom and regtest chains default to active from block one, so the
+        // functional suite exercises the rule rather than skipping past it.
+        const auto params = CreateChainParams(empty, "elementsregtest");
+        BOOST_CHECK_EQUAL(params->GetConsensus().supervised_assets_height, 1);
+    }
+    SelectParams(CBaseChainParams::REGTEST);
+}
+
 //! The Bitcoin soft forks Sequentia depends on are buried-active on the mainnet
 //! chain. CSV in particular: without BIP112 the staking output's unbonding lock
 //! is unenforceable (nothing-at-stake), and CLTV backs any absolute-timelock

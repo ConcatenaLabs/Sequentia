@@ -19,8 +19,10 @@
 #include <consensus/validation.h>
 #include <deploymentstatus.h>
 #include <policy/feerate.h>
+#include <pegins.h>
 #include <policy/policy.h>
 #include <supervision.h>
+#include <supervision_submit.h>
 #include <pow.h>
 #include <primitives/transaction.h>
 #include <timedata.h>
@@ -256,6 +258,15 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
         } else {
             ResetChallenge(*pblock, *pindexPrev, chainparams.GetConsensus());
         }
+    }
+
+    // SEQUENTIA: privately submitted supervision records go in FIRST
+    // (src/supervision_submit.h). Before the mempool, deliberately: a freeze
+    // that loses its place to fee pressure is a freeze the target has another
+    // block to escape, which is the whole failure this channel exists to close.
+    // They are few, tiny, and only ever supervision records.
+    if (SupervisionActive(nHeight)) {
+        addSupervisionSubmissions();
     }
 
     int nPackagesSelected = 0;
@@ -517,6 +528,47 @@ void BlockAssembler::SortForBlock(const CTxMemPool::setEntries& package, std::ve
 // Each time through the loop, we compare the best transaction in
 // mapModifiedTxs with the next transaction in the mempool to decide what
 // transaction package to work on next.
+void BlockAssembler::addSupervisionSubmissions()
+{
+    const auto submissions = SupervisionSubmissionQueue::GetInstance().Entries();
+    if (submissions.empty()) return;
+
+    CCoinsViewCache view(&m_chainstate.CoinsTip());
+    for (const CTransactionRef& tx : submissions) {
+        // Re-validated here, not trusted from submission time: the tip has
+        // moved since, and a submission that has become invalid would fail
+        // TestBlockValidity and cost this producer its slot -- every slot, for
+        // as long as it sat in the queue.
+        if (!view.HaveInputs(*tx)) continue;
+        TxValidationState state;
+        CAmountMap fee_map;
+        std::set<std::pair<uint256, COutPoint>> pegins_spent;
+        const auto& fedpegscripts = GetValidFedpegScripts(m_chainstate.m_chain.Tip(),
+                                                          chainparams.GetConsensus(), true);
+        if (!Consensus::CheckTxInputs(*tx, state, view, nHeight, fee_map, pegins_spent,
+                                      nullptr, false, true, fedpegscripts)) {
+            LogPrintf("Supervision: private submission %s is no longer valid (%s); skipping\n",
+                      tx->GetHash().ToString(), state.ToString());
+            continue;
+        }
+        const size_t weight = GetTransactionWeight(*tx);
+        if (nBlockWeight + weight >= nBlockMaxWeight) continue;
+
+        pblocktemplate->block.vtx.emplace_back(tx);
+        pblocktemplate->vTxFees.push_back(0);
+        pblocktemplate->vTxSigOpsCost.push_back(GetLegacySigOpCount(*tx) * WITNESS_SCALE_FACTOR);
+        nBlockWeight += weight;
+        ++nBlockTx;
+        feeMap += fee_map;
+        // Keep the working view in step, so a second submission spending the
+        // first one's outputs still validates.
+        for (const CTxIn& in : tx->vin) {
+            if (!in.m_is_pegin) view.SpendCoin(in.prevout);
+        }
+        AddCoins(view, *tx, nHeight);
+    }
+}
+
 void BlockAssembler::addPackageTxs(int& nPackagesSelected, int& nDescendantsUpdated, std::chrono::seconds min_tx_age)
 {
     AssertLockHeld(m_mempool.cs);

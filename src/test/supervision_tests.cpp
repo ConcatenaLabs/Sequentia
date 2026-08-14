@@ -139,9 +139,21 @@ BOOST_AUTO_TEST_CASE(descriptor_validation_rejects_the_unusable)
     same_keys.recovery_key = same_keys.operational_key;
     BOOST_CHECK(!ValidateSupervisionDescriptor(same_keys, err));
 
+    // PAUSE is implemented, so it may be claimed...
+    SupervisionDescriptor pause_bit = MakeDescriptor();
+    pause_bit.feature_bits = SUPERVISION_FEATURE_PAUSE;
+    BOOST_CHECK(ValidateSupervisionDescriptor(pause_bit, err));
+
+    // ...but the two that are not built stay refused, so their meaning stays
+    // free. An asset claiming a capability nothing enforces would be a
+    // permanent lie: the bits are in the asset id and cannot be corrected.
     SupervisionDescriptor reserved_bit = MakeDescriptor();
-    reserved_bit.feature_bits = SUPERVISION_FEATURE_PAUSE;
+    reserved_bit.feature_bits = SUPERVISION_FEATURE_TOTAL;
     BOOST_CHECK(!ValidateSupervisionDescriptor(reserved_bit, err));
+
+    SupervisionDescriptor whitelist_bit = MakeDescriptor();
+    whitelist_bit.feature_bits = SUPERVISION_FEATURE_WHITELIST;
+    BOOST_CHECK(!ValidateSupervisionDescriptor(whitelist_bit, err));
 
     SupervisionDescriptor unknown_bit = MakeDescriptor();
     unknown_bit.feature_bits = 0x8000;
@@ -852,6 +864,112 @@ BOOST_AUTO_TEST_CASE(freeze_targets_are_script_hashes)
     const CScript b = CScript() << OP_0 << std::vector<unsigned char>(20, 0x04);
     BOOST_CHECK(SupervisionTargetHash(a) == SupervisionTargetHash(a));
     BOOST_CHECK(SupervisionTargetHash(a) != SupervisionTargetHash(b));
+}
+
+/* ---------------------------------------------------------------------------
+ * Pause: a freeze naming every script at once.
+ * ------------------------------------------------------------------------ */
+
+//! Pause reuses the freeze machinery entirely, which is the point of expressing
+//! it as a wildcard target rather than a new record type: signed admission, the
+//! registry, unfreeze-as-spend, reorg handling and eviction all apply unchanged.
+BOOST_AUTO_TEST_CASE(pause_is_a_freeze_on_every_script)
+{
+    SupervisionRegistry registry;
+    const CKey op = MakePrivKey(101), rec = MakePrivKey(102);
+
+    SupervisionDeclaration decl;
+    decl.descriptor.operational_key = XOnlyPubKey(op.GetPubKey());
+    decl.descriptor.recovery_key = XOnlyPubKey(rec.GetPubKey());
+    decl.descriptor.feature_bits = SUPERVISION_FEATURE_PAUSE;
+    uint256 entropy;
+    GenerateSupervisedAssetEntropy(entropy, ISSUANCE_PREVOUT, CONTRACT_HASH, decl.descriptor);
+    CalculateAsset(decl.asset, entropy);
+    registry.AddAsset(decl);
+
+    const uint256 alice = uint256S("0xa11ce"), bob = uint256S("0xb0b");
+    BOOST_CHECK(!registry.IsFrozen(decl.asset, alice));
+    BOOST_CHECK(!registry.IsPaused(decl.asset));
+    BOOST_CHECK(registry.PauseAllowed(decl.asset));
+
+    // One record, and everybody is frozen -- including holders nobody named.
+    registry.AddFreeze(decl.asset, SUPERVISION_PAUSE_TARGET);
+    BOOST_CHECK(registry.IsPaused(decl.asset));
+    BOOST_CHECK(registry.IsFrozen(decl.asset, alice));
+    BOOST_CHECK(registry.IsFrozen(decl.asset, bob));
+
+    // Lifting it is spending that record, like any other freeze.
+    registry.SubFreeze(decl.asset, SUPERVISION_PAUSE_TARGET);
+    BOOST_CHECK(!registry.IsPaused(decl.asset));
+    BOOST_CHECK(!registry.IsFrozen(decl.asset, alice));
+
+    // A pause and a targeted freeze are independent: lifting the pause must not
+    // lift a freeze aimed at somebody in particular.
+    registry.AddFreeze(decl.asset, alice);
+    registry.AddFreeze(decl.asset, SUPERVISION_PAUSE_TARGET);
+    registry.SubFreeze(decl.asset, SUPERVISION_PAUSE_TARGET);
+    BOOST_CHECK(registry.IsFrozen(decl.asset, alice));
+    BOOST_CHECK(!registry.IsFrozen(decl.asset, bob));
+}
+
+//! Only an asset issued with the capability may be paused. Checked at admission
+//! rather than at enforcement, because a record that should never have been
+//! admitted must not reach the registry at all: by enforcement time the
+//! wildcard has already answered "frozen" for every holder of the asset.
+BOOST_AUTO_TEST_CASE(pause_needs_the_capability_it_was_issued_with)
+{
+    SupervisionRegistry registry;
+    const CKey op = MakePrivKey(111), rec = MakePrivKey(112);
+    std::string err;
+
+    // An asset issued WITHOUT the bit.
+    const SupervisionDeclaration plain = RegisterAsset(registry, op, rec);
+    BOOST_CHECK(!registry.PauseAllowed(plain.asset));
+    const auto refused = SignRecord(SupervisionRecordKind::FREEZE, plain.asset,
+                                    SUPERVISION_PAUSE_TARGET, XOnlyPubKey(), op, RECORD_INPUT);
+    BOOST_CHECK(!CheckSupervisionRecords(CTransaction(RecordTx(refused)), registry, err));
+    // A targeted freeze on the same asset is fine, so it is the wildcard that
+    // was refused and not the record.
+    const auto targeted = SignRecord(SupervisionRecordKind::FREEZE, plain.asset,
+                                     uint256S("0x1234"), XOnlyPubKey(), op, RECORD_INPUT);
+    BOOST_CHECK_MESSAGE(CheckSupervisionRecords(CTransaction(RecordTx(targeted)), registry, err),
+                        err);
+
+    // An asset issued WITH the bit.
+    SupervisionDeclaration allowed;
+    allowed.descriptor.operational_key = XOnlyPubKey(op.GetPubKey());
+    allowed.descriptor.recovery_key = XOnlyPubKey(rec.GetPubKey());
+    allowed.descriptor.feature_bits = SUPERVISION_FEATURE_PAUSE;
+    uint256 entropy;
+    GenerateSupervisedAssetEntropy(entropy, COutPoint(uint256S("0x77"), 1), CONTRACT_HASH,
+                                   allowed.descriptor);
+    CalculateAsset(allowed.asset, entropy);
+    registry.AddAsset(allowed);
+
+    const auto ok = SignRecord(SupervisionRecordKind::FREEZE, allowed.asset,
+                               SUPERVISION_PAUSE_TARGET, XOnlyPubKey(), op, RECORD_INPUT);
+    BOOST_CHECK_MESSAGE(CheckSupervisionRecords(CTransaction(RecordTx(ok)), registry, err), err);
+
+    // And a pause still needs the operational key like any other freeze.
+    const auto forged = SignRecord(SupervisionRecordKind::FREEZE, allowed.asset,
+                                   SUPERVISION_PAUSE_TARGET, XOnlyPubKey(), MakePrivKey(113),
+                                   RECORD_INPUT);
+    BOOST_CHECK(!CheckSupervisionRecords(CTransaction(RecordTx(forged)), registry, err));
+}
+
+//! The pause bit changes the asset id, like every other committed field. A
+//! holder can therefore tell from the id alone whether what they are accepting
+//! can be stopped wholesale.
+BOOST_AUTO_TEST_CASE(the_pause_bit_changes_the_asset_id)
+{
+    SupervisionDescriptor plain = MakeDescriptor();
+    SupervisionDescriptor pausable = MakeDescriptor();
+    pausable.feature_bits = SUPERVISION_FEATURE_PAUSE;
+
+    uint256 a, b;
+    GenerateSupervisedAssetEntropy(a, ISSUANCE_PREVOUT, CONTRACT_HASH, plain);
+    GenerateSupervisedAssetEntropy(b, ISSUANCE_PREVOUT, CONTRACT_HASH, pausable);
+    BOOST_CHECK(a != b);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

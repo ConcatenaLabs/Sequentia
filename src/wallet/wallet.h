@@ -28,6 +28,7 @@
 #include <wallet/scriptpubkeyman.h>
 #include <wallet/transaction.h>
 #include <wallet/walletdb.h>
+#include <supervision.h>
 #include <wallet/walletutil.h>
 
 #include <algorithm>
@@ -188,6 +189,12 @@ struct IssuanceDetails {
 
     // SEQUENTIA: Asset denomination
     uint8_t denomination = 8;
+
+    // SEQUENTIA: supervision (src/supervision.h). Set means the asset is issued
+    // freezable by its issuer, which is decided here and nowhere else: the
+    // descriptor goes into the asset id, so an asset issued without one can
+    // never become supervised and one issued with it can never stop being.
+    std::optional<SupervisionDescriptor> supervision;
 };
 //end ELEMENTS
 
