@@ -3,6 +3,9 @@
 # Versioned by git TAG, unlike the other products here, because
 # doc/sequentia/release-versioning.md requires it: a tag is the only reliable map
 # from a version a node reports on the wire back to the code it is running.
+# Sorting and version comparison below are locale-sensitive.
+export LC_ALL=C
+
 PRODUCT_NAME="node"
 PRODUCT_REPO="${SEQ_NODE_REPO:-https://github.com/GracedEternalKingCabbageMan/Sequentia.git}"
 PRODUCT_INDEX_GLOB="sequentia-core-*-linux-x86_64.tar.gz sequentia-core-*-win64-setup.exe"

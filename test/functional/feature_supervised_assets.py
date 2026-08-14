@@ -38,7 +38,7 @@ Covered, in the order the test runs them:
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.blocktools import COINBASE_MATURITY
 from test_framework.key import ECKey, compute_xonly_pubkey, sign_schnorr
-from test_framework.util import assert_equal, assert_raises_rpc_error, assert_greater_than
+from test_framework.util import assert_equal, assert_raises_rpc_error
 
 from decimal import Decimal
 
@@ -198,7 +198,7 @@ class SupervisedAssetsTest(BitcoinTestFramework):
             "supervision": {"operationalkey": self.op_pub, "recoverykey": self.rec_pub},
         }])[0]
 
-        txid = self.send_raw(node, issued["hex"])
+        self.send_raw(node, issued["hex"])
         self.generate(node, 1)
         self.sync_all()
 

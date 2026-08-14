@@ -4,6 +4,9 @@
 # it is the only number a user can compare against what they have installed.
 # There is no build step: the extension is the repository, minus its development
 # files, zipped.
+# Sorting and version comparison below are locale-sensitive.
+export LC_ALL=C
+
 PRODUCT_NAME="extension"
 PRODUCT_REPO="${SEQ_EXTENSION_REPO:-https://github.com/GracedEternalKingCabbageMan/sequentia-extension.git}"
 PRODUCT_INDEX_GLOB="sequentia-wallet-extension-*.zip"

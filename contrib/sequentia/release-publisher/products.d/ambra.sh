@@ -10,6 +10,9 @@
 #
 # Debug-signed APKs are NOT published. Such a build installs and can then never be
 # upgraded by a real release, stranding whoever installed it.
+# Sorting and version comparison below are locale-sensitive.
+export LC_ALL=C
+
 PRODUCT_NAME="ambra"
 PRODUCT_REPO="${SEQ_AMBRA_REPO:-https://github.com/GracedEternalKingCabbageMan/ambra.git}"
 PRODUCT_INDEX_GLOB="ambra-*.apk"

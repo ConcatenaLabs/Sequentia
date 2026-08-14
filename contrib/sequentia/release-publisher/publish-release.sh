@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Publish new releases to the download page, unattended, for every product the
 # page offers -- not just the node.
 #
@@ -18,6 +18,11 @@
 #
 # The build is niced and job-limited throughout, because this machine also
 # produces blocks and starving it is how the testnet stalls.
+
+# Which artifact a card ends up naming is decided by sorting and version
+# comparison, and both are locale-sensitive.
+export LC_ALL=C
+
 set -euo pipefail
 
 BUILD_ROOT="${SEQ_BUILD_ROOT:-/root/sequentia/release-build}"
