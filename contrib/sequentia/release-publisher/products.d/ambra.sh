@@ -25,6 +25,7 @@ AMBRA_BRANCH="${SEQ_AMBRA_BRANCH:-}"
 branch() { echo "${AMBRA_BRANCH:-$(default_branch "$PRODUCT_REPO")}"; }
 # Point these at the real key to enable the product.
 SWK_REPO="${SEQ_SWK_REPO:-https://github.com/GracedEternalKingCabbageMan/SWK.git}"
+SEQLN_REPO="${SEQ_SEQLN_REPO:-https://github.com/GracedEternalKingCabbageMan/seqln.git}"
 AMBRA_KEYSTORE="${SEQ_AMBRA_KEYSTORE:-/etc/sequentia/ambra-release.keystore}"
 AMBRA_KEY_PROPERTIES="${SEQ_AMBRA_KEY_PROPERTIES:-/etc/sequentia/ambra-key.properties}"
 
@@ -65,11 +66,26 @@ build() {
   # SWK has to exist as a sibling of the ambra checkout or cargo stops at
   # "failed to load source for dependency `elements`". prepare_checkout puts every
   # product under $BUILD_ROOT/src/<name>, which is exactly that layout.
-  local swk_branch="${SEQ_SWK_BRANCH:-$(default_branch "$SWK_REPO")}"
-  [ -n "$swk_branch" ] || { log "[ambra] cannot resolve SWK's default branch"; return 1; }
-  log "[ambra] preparing SWK ($swk_branch) for the path-patched crates"
-  prepare_checkout SWK "$SWK_REPO" "origin/$swk_branch" >/dev/null \
-    || { log "[ambra] could not check out SWK"; return 1; }
+  # seqln is the second one: ambra_core takes seqln-signer from
+  # ../../seqln/contrib/seqln-signer by path as well.
+  #
+  # Each is checked out and then CONFIRMED by the directory cargo will actually
+  # read. A checkout that half-succeeds leaves a clone whose contents are missing,
+  # and the failure then surfaces from cargo as a puzzling "failed to load source
+  # for dependency", naming the crate rather than the checkout that never happened.
+  sibling() {  # sibling <name> <repo> <path cargo needs, relative to the clone>
+    local name="$1" repo="$2" probe="$3" br
+    br="${SEQ_SIBLING_BRANCH:-$(default_branch "$repo")}"
+    [ -n "$br" ] || { log "[ambra] cannot resolve $name's default branch"; return 1; }
+    log "[ambra] preparing $name ($br) for the path-patched crates"
+    prepare_checkout "$name" "$repo" "origin/$br" >/dev/null \
+      || { log "[ambra] could not check out $name"; return 1; }
+    [ -e "$BUILD_ROOT/src/$name/$probe" ] \
+      || { log "[ambra] $name checked out but $probe is missing; cargo needs it"; return 1; }
+  }
+
+  sibling SWK   "$SWK_REPO"   "rust-elements/Cargo.toml"          || return 1
+  sibling seqln "$SEQLN_REPO" "contrib/seqln-signer/Cargo.toml"   || return 1
 
   # The Rust core first. app/android/app/src/main/jniLibs is gitignored and never
   # committed, so the Flutter build bundles whatever .so happens to be staged --
