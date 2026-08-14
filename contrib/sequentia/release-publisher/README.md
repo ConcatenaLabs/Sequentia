@@ -1,54 +1,94 @@
 # Release publisher
 
-Publishes a Sequentia Core release to the download page without anyone touching
-the box. It watches the repository for a new version tag and, when one appears,
-builds the Linux tarball and the Windows installer **from that tag** and puts both
-where the download page serves them.
+Keeps `sequentiatestnet.com/download/` current without anyone touching the box.
+It covers **everything the page offers**, not only the node: Sequentia Core, the
+Fulmen Lightning wallet, the browser extension and the Ambra mobile wallet.
 
-Cutting a release is therefore two commands on a laptop, and nothing else:
+Every ten minutes it asks each product what version is published upstream. If that
+differs from what it published last, it builds that version and puts the artifacts
+where the page serves them, then points each card at the newest file that actually
+exists.
+
+## Adding a product
+
+Drop one file in `products.d/`. The driver knows nothing about how anything is
+built. A recipe defines:
+
+| | |
+|---|---|
+| `PRODUCT_NAME` | its name |
+| `PRODUCT_REPO` | where it lives |
+| `PRODUCT_INDEX_GLOB` | the artifact filename patterns on the download page |
+| `remote_version()` | what version is published upstream |
+| `build(version, outdir)` | put artifacts in `outdir` |
+| `requirements()` | optional: print a reason and fail to be skipped |
+
+Anything the recipe writes into `outdir` gets published. Nothing else is needed.
+
+## The products
+
+| Product | Versioned by | Status |
+|---|---|---|
+| `node` | git **tag** | Linux tarball + Windows installer |
+| `extension` | `manifest.json` | zip of the repo, minus development files |
+| `fulmen` | `package.json` | Linux AppImage + Windows zip |
+| `ambra` | `app/pubspec.yaml` | **skipped**: needs an Android toolchain and a signing key |
+
+The node is versioned by tag and the rest by their version field, and that is
+deliberate: `doc/sequentia/release-versioning.md` requires a tag for the node,
+because a tag is the only reliable map from the version a node reports on the wire
+back to the code it is running. The other products have no such wire identity, and
+requiring a tag in four repositories would mean four chances to forget one.
+
+Cutting a node release is therefore:
 
 ```
-git tag -a v24.0.1 <commit> -m "Sequentia Core 24.0.1"
-git push origin v24.0.1
+git tag -a v24.1.0 <commit> -m "Sequentia Core 24.1.0"
+git push origin v24.1.0
 ```
 
-Within ten minutes the box starts building. It publishes when the build finishes.
+For the others, bumping the version field and pushing is enough.
 
-## Why it is built this way
+## What it refuses to do
 
-**It builds from a tag, not from `master`.** What the download page offers is the
-one artifact a stranger runs without reading the source, so it should be something
-we deliberately named. A tag is also the only way the script can distinguish "there
-is a new release" from "someone pushed a commit".
+**It will not move a card backwards.** The state file only knows what this script
+published; artifacts placed by hand over the years are older history it has never
+seen, and some are *ahead* of what their repository's version field currently says.
+Ambra is exactly that case today: `pubspec.yaml` reads 0.13.7 while the page offers
+0.16.4. Publishing then would quietly offer users a downgrade, which for a wallet is
+worse than offering nothing.
 
-**It has its own clone.** The committee is started from
-`/root/SequentiaByClaude/src/sequentiad`. A release build in that tree would swap
-the binary twenty running nodes were started from, and the swap would only surface
-at the next restart. The publisher builds in `/root/sequentia/release-build` and
-writes nowhere else except the download directory.
+**It will not publish a debug-signed APK.** Such a build installs and can then never
+be upgraded by a real release, stranding whoever installed it.
 
-**It is niced and job-limited.** This box also produces blocks. `SEQ_BUILD_JOBS`
-defaults to 4 and the whole build runs at `nice 19` with idle I/O, because starving
-this machine is how the testnet stalls.
+**It will not point a card at a file that is not there.** Cards are rewritten from
+what is present, so a product that was skipped or failed keeps offering its previous
+version rather than becoming a 404.
 
-**It rewrites the page from what exists, not from what it just built.** Each card
-on the download page is pointed at the newest file actually present. If the Windows
-half is skipped or fails, that card keeps offering the previous installer instead of
-becoming a 404.
+**One product's problems stay its own.** A missing toolchain skips that product with
+a reason; the others still publish.
+
+## Why it builds where it does
+
+The committee is started from `/root/SequentiaByClaude/src/sequentiad`. A release
+build in that tree would replace the binary twenty running nodes were started from,
+and because a running process keeps its inode the swap would only surface at the next
+restart. The publisher builds under `/root/sequentia/release-build` and writes nowhere
+else except the download directory.
+
+It is also niced with limited jobs throughout. This box produces blocks, and starving
+it is how the testnet stalls.
 
 ## One-time setup
 
-The build toolchain has to exist on the box first. This is the slow part, and it is
-only done once:
-
 ```
-apt-get install -y g++-mingw-w64-x86-64 nsis
+apt-get install -y g++-mingw-w64-x86-64 nsis bison flex zip
 update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
 update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix
 
 git clone https://github.com/GracedEternalKingCabbageMan/Sequentia.git \
-  /root/sequentia/release-build/Sequentia
-cd /root/sequentia/release-build/Sequentia
+  /root/sequentia/release-build/src/node
+cd /root/sequentia/release-build/src/node
 nice -n 19 make -C depends HOST=x86_64-pc-linux-gnu -j4   # Linux prefix, incl. Qt
 nice -n 19 make -C depends HOST=x86_64-w64-mingw32 -j4    # Windows cross prefix
 
@@ -58,7 +98,16 @@ systemctl daemon-reload
 systemctl enable --now seq-release-publisher.timer
 ```
 
-Both prefixes include Qt, so the GUI is part of the published artifacts.
+Still outstanding, and each is a decision rather than an oversight:
+
+- **Fulmen's `Setup.exe`** needs wine for electron-builder's NSIS target. Until it is
+  installed and the result has been run on Windows, that card keeps the previous
+  installer and the Windows zip covers users in the meantime.
+- **Ambra** needs Flutter, an Android SDK/NDK, Rust, and a release signing keystore at
+  `/etc/sequentia/ambra-release.keystore`. That key *is* the app's identity — phones
+  refuse an update signed by a different one — so putting it on a server that also runs
+  a public node is a decision for whoever owns the key, not something this script should
+  quietly arrange.
 
 ## Operating it
 
@@ -66,29 +115,29 @@ Both prefixes include Qt, so the GUI is part of the published artifacts.
 systemctl list-timers seq-release-publisher.timer   # when it next checks
 journalctl -u seq-release-publisher.service -f      # follow a build
 systemctl start seq-release-publisher.service       # check right now
+SEQ_ONLY=node ./publish-release.sh                  # one product
 ```
 
-State is one file, `/root/sequentia/release-build/state/published-tag`. Delete it to
-force the current tag to be built and published again.
+State is one file per product under `/root/sequentia/release-build/state/`. Delete one
+to force that product to be built and published again.
 
 ## Settings
 
-All optional; the defaults are what the box uses.
-
 | Variable | Default | |
 |---|---|---|
-| `SEQ_REPO_URL` | the GitHub repo | where tags are read from |
-| `SEQ_BUILD_ROOT` | `/root/sequentia/release-build` | clone, state and staging live here |
+| `SEQ_BUILD_ROOT` | `/root/sequentia/release-build` | clones, state and staging |
 | `SEQ_DOWNLOAD_DIR` | `/root/sequentia/downloads` | what the page serves |
 | `SEQ_BUILD_JOBS` | `4` | raise only if the committee is not running |
 | `SEQ_BUILD_NICE` | `19` | |
-| `SEQ_BUILD_WINDOWS` | `1` | `0` publishes the Linux tarball only |
-| `SEQ_CONFIGURE_ARGS` | `--disable-tests --disable-bench --enable-any-asset-fees` | `--enable-any-asset-fees` is what gives fee amounts their reference units instead of labelling them BTC/sat |
+| `SEQ_ONLY` | all | space-separated product names |
+| `SEQ_NODE_BUILD_WINDOWS` | `1` | `0` publishes the Linux tarball only |
+| `SEQ_NODE_CONFIGURE_ARGS` | `--disable-tests --disable-bench --enable-any-asset-fees` | `--enable-any-asset-fees` is what gives fee amounts their reference units instead of labelling them BTC/sat |
+| `SEQ_AMBRA_KEYSTORE` | `/etc/sequentia/ambra-release.keystore` | |
 
 ## Failure
 
-A failed build leaves the download page untouched: artifacts are written to a
-`.part` file and moved into place only once complete, and the state file is written
-last, so a failure means the next tick retries the same tag rather than skipping it.
-`systemctl status seq-release-publisher.service` shows the failure and the journal
-has the build output.
+A failed build leaves the page untouched: artifacts land via a `.part` file and are
+moved into place only once complete, and the version is recorded last, so a failure
+retries the same version rather than skipping it.
+`systemctl status seq-release-publisher.service` shows it and the journal has the
+build output.
