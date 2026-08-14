@@ -15,6 +15,14 @@ src/sequentia-node
 src/sequentia-tx
 src/sequentia-util
 src/sequentia-wallet
+# The pre-rename names. A tree built before the binaries were renamed still has
+# these lying in src/, and once they stopped being ignored a single `git add -A`
+# committed 47MB of them. Keep ignoring them until nobody has such a tree left.
+src/elementsd
+src/elements-cli
+src/elements-tx
+src/elements-util
+src/elements-wallet
 src/test/fuzz/fuzz
 src/test/test_bitcoin
 src/qt/test/test_sequentia-qt
@@ -101,6 +109,7 @@ src/qt/bitcoin-qt.includes
 Makefile
 !depends/Makefile
 src/qt/sequentia-qt
+src/qt/elements-qt
 Elements-Qt.app
 
 # Qt Creator
