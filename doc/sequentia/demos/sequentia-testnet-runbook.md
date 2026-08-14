@@ -22,9 +22,9 @@ with `--chain test`.
 
 ## Prerequisites (already satisfied on this machine)
 
-- A built `src/elementsd` / `src/elements-cli` containing the latest consensus + launcher
+- A built `src/sequentiad` / `src/sequentia-cli` containing the latest consensus + launcher
   changes. Rebuild if in doubt: `make -j$(nproc)` (no sudo). Sanity:
-  `strings src/elementsd | grep -q posdebugroundskewms && echo ok`.
+  `strings src/sequentiad | grep -q posdebugroundskewms && echo ok`.
 - A local Bitcoin **testnet4** node, RPC reachable. Config (`~/.bitcoin/bitcoin.conf`):
   `testnet4=1`, `[testnet4]` `rpcport=48332`, `rpcuser=seq`, `rpcpassword=seq`,
   `rpcthreads=64`, `rpcworkqueue=8192`. Start: `~/bitcoin-28.0/bin/bitcoind -daemon`.
@@ -37,7 +37,7 @@ A large committee plus 100+ daemons is memory-heavy. Stop any prior run first:
 ```bash
 # stop the old elementsregtest 100-node run, if present:
 python3 ~/Sequentia/contrib/sequentia/bootstrap-autonomous-testnet.py --stop --basedir ~/seq-bootstrap100 2>/dev/null
-pgrep -c elementsd        # confirm it drops
+pgrep -c sequentiad        # confirm it drops
 ```
 
 ## Step 1 — Self-contained smoke (~1 min, no testnet4 needed)
@@ -92,7 +92,7 @@ blocks autonomously with no coordinator.
 ## Step 3 — Watch / inspect (second terminal)
 
 ```bash
-B="$HOME/Sequentia/src/elements-cli -chain=test -rpcuser=seq -rpcpassword=seq"
+B="$HOME/Sequentia/src/sequentia-cli -chain=test -rpcuser=seq -rpcpassword=seq"
 D=$HOME/seq-testnet
 q(){ $B -datadir=$D/node$1 -rpcport=$((18200+10#$1)) "${@:2}" 2>&1; }
 for n in 000 001 005 009; do echo -n "node$n: "; q $n getblockcount; done

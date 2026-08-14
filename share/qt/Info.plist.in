@@ -34,16 +34,16 @@
   <string>????</string>
 
   <key>CFBundleExecutable</key>
-  <string>Elements-Qt</string>
+  <string>Sequentia-Qt</string>
 
   <key>CFBundleName</key>
-  <string>Elements-Qt</string>
+  <string>Sequentia-Qt</string>
 
   <key>LSHasLocalizedDisplayName</key>
   <true/>
 
   <key>CFBundleIdentifier</key>
-  <string>org.elementsproject.Elements-Qt</string>
+  <string>io.sequentia.Sequentia-Qt</string>
 
   <key>CFBundleURLTypes</key>
   <array>

@@ -3368,7 +3368,10 @@ int CWallet::GetTxBlocksToMaturity(const CWalletTx& wtx) const
         return 0;
     int chain_depth = GetTxDepthInMainChain(wtx);
     assert(chain_depth >= 0); // coinbase tx should not be conflicted
-    return std::max(0, (COINBASE_MATURITY+1) - chain_depth);
+    // SEQUENTIA: the same depth consensus will demand of a spend made now,
+    // not the inherited constant -- a wallet using the smaller number would
+    // offer coins to spend that every node rejects as premature.
+    return std::max(0, (CoinbaseMaturityAt(GetLastBlockHeight() + 1) + 1) - chain_depth);
 }
 
 bool CWallet::IsTxImmatureCoinBase(const CWalletTx& wtx) const

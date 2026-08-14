@@ -22,6 +22,7 @@
 #include <chrono>
 #include <optional>
 
+#include <QAbstractItemView>
 #include <QApplication>
 #include <QComboBox>
 #include <QDateTimeEdit>
@@ -294,6 +295,17 @@ void TransactionView::setModel(WalletModel *_model)
                 asset_refresh, qOverload<>(&QTimer::start));
         connect(_model->getTransactionTableModel(), &QAbstractItemModel::modelReset,
                 asset_refresh, qOverload<>(&QTimer::start));
+        // Asset tickers come from the registry, which the node fetches a few seconds
+        // after startup and re-polls thereafter. The set of assets in the drop-down
+        // only changes when rows arrive, but their *names* can change at any time —
+        // and a wallet that receives nothing new would otherwise keep showing raw
+        // hex ids for assets that do have a name. Re-resolve the labels on a timer;
+        // this is a handful of map lookups, and touches the widget only when a name
+        // actually changed.
+        QTimer* asset_name_refresh = new QTimer(this);
+        asset_name_refresh->setInterval(3000);
+        connect(asset_name_refresh, &QTimer::timeout, this, &TransactionView::refreshAssetFilterNames);
+        asset_name_refresh->start();
         // Newly inserted payments carry their fee child nested; keep it expanded.
         connect(transactionProxyModel, &QAbstractItemModel::rowsInserted, this,
                 [this](const QModelIndex& parent, int first, int last) {
@@ -415,16 +427,30 @@ void TransactionView::updateAssetFilterChoices()
     if (!model || !assetWidget)
         return;
 
-    // Preserve the current selection across the rebuild.
-    const QString selected = assetWidget->currentData().toString();
+    m_assets_present = model->getTransactionTableModel()->assetsPresent();
+    rebuildAssetFilterItems();
+}
 
-    const QStringList assets = model->getTransactionTableModel()->assetsPresent();
+void TransactionView::rebuildAssetFilterItems()
+{
+    if (!assetWidget) return;
+
+    // Preserve the current selection across the rebuild. Selections are carried by
+    // the asset id, so a token keeps its filter even if it gains a ticker meanwhile.
+    const QString selected = assetWidget->currentData().toString();
 
     const QSignalBlocker blocker(assetWidget);
     assetWidget->clear();
     assetWidget->addItem(tr("All tokens"), QString());
-    for (const QString& a : assets) {
-        assetWidget->addItem(a, a);
+    for (const CAsset& asset : m_assets_present) {
+        const QString id = QString::fromStdString(asset.GetHex());
+        // Show the registry ticker where there is one. An asset the registry has
+        // not named has no identity beyond its 64-hex id, which does not fit the
+        // drop-down, so it is elided in the middle with the full value in the
+        // tooltip — the same treatment the amounts column gives it.
+        const bool named = GUIUtil::assetIsNamed(asset);
+        assetWidget->addItem(named ? GUIUtil::assetDisplayName(asset) : GUIUtil::ellipsizeMiddle(id), id);
+        assetWidget->setItemData(assetWidget->count() - 1, id, Qt::ToolTipRole);
     }
 
     int restore = assetWidget->findData(selected);
@@ -432,6 +458,29 @@ void TransactionView::updateAssetFilterChoices()
     // If the previously selected token vanished, fall back to showing all.
     if (restore < 0 && !selected.isEmpty()) {
         transactionProxyModel->setAssetFilter(QString());
+    }
+}
+
+void TransactionView::refreshAssetFilterNames()
+{
+    if (!assetWidget) return;
+    // Never rebuild under an open drop-down: it would close the popup, or move an
+    // entry out from under the pointer, mid-choice.
+    if (assetWidget->view() && assetWidget->view()->isVisible()) return;
+
+    // Row 0 is "All tokens"; the rest mirror m_assets_present in order.
+    if (assetWidget->count() != static_cast<int>(m_assets_present.size()) + 1) return;
+    for (size_t i = 0; i < m_assets_present.size(); ++i) {
+        const CAsset& asset = m_assets_present[i];
+        const QString shown = GUIUtil::assetIsNamed(asset)
+            ? GUIUtil::assetDisplayName(asset)
+            : GUIUtil::ellipsizeMiddle(QString::fromStdString(asset.GetHex()));
+        if (assetWidget->itemText(static_cast<int>(i) + 1) != shown) {
+            // A label appeared or changed; the sort order follows the names, so
+            // rebuild the whole list rather than patching this one entry.
+            updateAssetFilterChoices();
+            return;
+        }
     }
 }
 

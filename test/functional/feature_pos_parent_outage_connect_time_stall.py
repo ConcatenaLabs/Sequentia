@@ -60,7 +60,7 @@ the block is poisoned permanently; on the patched build it produces a ConnectTip
 stall and the chain converges by itself once the parent returns.
 
 See the companion test for the two regtest environment traps this also handles
-(the 600-second parent MTP gap needing setmocktime, and leftover elementsd
+(the 600-second parent MTP gap needing setmocktime, and leftover sequentiad
 holding the fixed test ports).
 """
 

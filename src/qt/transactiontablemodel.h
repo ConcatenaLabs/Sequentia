@@ -5,12 +5,14 @@
 #ifndef BITCOIN_QT_TRANSACTIONTABLEMODEL_H
 #define BITCOIN_QT_TRANSACTIONTABLEMODEL_H
 
+#include <asset.h>
 #include <qt/bitcoinunits.h>
 
 #include <QAbstractItemModel>
 #include <QStringList>
 
 #include <memory>
+#include <vector>
 
 namespace interfaces {
 class Handler;
@@ -75,8 +77,11 @@ public:
         StatusRole,
         /** Unprocessed icon */
         RawDecorationRole,
-        /** Display name (ticker) of the record's asset, for the token filter */
+        /** Display name (ticker) of the record's asset, or its hex id when unnamed */
         AssetRole,
+        /** Hex id of the record's asset: the stable identity the token filter
+         *  matches on, unaffected by a registry label arriving later */
+        AssetIdRole,
     };
 
     int rowCount(const QModelIndex &parent) const override;
@@ -87,9 +92,11 @@ public:
     QModelIndex parent(const QModelIndex & index) const override;
     bool processingQueuedTransactions() const { return fProcessingQueuedTransactions; }
 
-    /** SEQUENTIA: distinct asset display names (tickers) present across all
-     *  records, sorted, for populating the token filter drop-down. */
-    QStringList assetsPresent() const;
+    /** SEQUENTIA: distinct assets present across all records, sorted by display
+     *  name, for populating the token filter drop-down. Assets, not names: a
+     *  ticker can appear (or change) when the registry is merged, so the caller
+     *  resolves the label at display time and keys on the asset id. */
+    std::vector<CAsset> assetsPresent() const;
 
 private:
     WalletModel *walletModel;

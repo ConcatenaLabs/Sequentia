@@ -39,7 +39,19 @@ userClosed(false)
     }
     // "Number of blocks left" carries a sentence while headers are still coming
     // in ("Unknown. Syncing headers…"), which ran off the panel's fixed width.
+    // Wrapping it costs the same care the paragraphs above needed: the row is
+    // built for one line, so a second line is painted outside it — and centred
+    // vertically, which puts that overflow *above* the row, over the field name.
+    // Anchoring the text to the top keeps it in its own row whatever happens,
+    // and FitBlocksLeft() gives the row the height the wrapped text needs.
     ui->numberOfBlocksLeft->setWordWrap(true);
+    ui->numberOfBlocksLeft->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    {
+        QSizePolicy sp = ui->numberOfBlocksLeft->sizePolicy();
+        sp.setHeightForWidth(true);
+        sp.setVerticalPolicy(QSizePolicy::Minimum);
+        ui->numberOfBlocksLeft->setSizePolicy(sp);
+    }
     connect(ui->closeButton, &QPushButton::clicked, this, &ModalOverlay::closeClicked);
     if (parent) {
         parent->installEventFilter(this);
@@ -166,7 +178,7 @@ void ModalOverlay::tipUpdate(int count, const QDateTime& blockDate, double nVeri
 
     // show remaining number of blocks
     if (estimateNumHeadersLeft < HEADER_HEIGHT_DELTA_SYNC && hasBestHeader) {
-        ui->numberOfBlocksLeft->setText(QString::number(bestHeaderHeight - count));
+        SetBlocksLeftText(QString::number(bestHeaderHeight - count));
     } else {
         UpdateHeaderSyncLabel();
         ui->expectedTimeLeft->setText(tr("Unknown…"));
@@ -200,7 +212,32 @@ void ModalOverlay::UpdateHeaderSyncLabel() {
                       double(target - m_header_sync_start_height);
         pct = qBound(0.0, pct, 100.0);
     }
-    ui->numberOfBlocksLeft->setText(tr("Unknown. Syncing Headers (%1, %2%)…").arg(bestHeaderHeight).arg(QString::number(pct, 'f', 1)));
+    SetBlocksLeftText(tr("Unknown. Syncing Headers (%1, %2%)…").arg(bestHeaderHeight).arg(QString::number(pct, 'f', 1)));
+}
+
+void ModalOverlay::SetBlocksLeftText(const QString& text)
+{
+    ui->numberOfBlocksLeft->setText(text);
+    // The column width follows the new text and the height the text needs
+    // follows that width, so measure on the next turn of the event loop, once
+    // the layout has settled — measuring now answers for the previous text.
+    QTimer::singleShot(0, this, [this] { FitBlocksLeft(); });
+}
+
+void ModalOverlay::FitBlocksLeft()
+{
+    QLabel* const l = ui->numberOfBlocksLeft;
+    // Drop the floor left by the previous text before measuring. QLabel never
+    // reports a height below its own minimum, so an old floor would answer for
+    // the new text and the row would stay two lines tall for a plain number.
+    if (l->minimumHeight() != 0) {
+        l->setMinimumHeight(0);
+        if (QLayout* const parent_layout = ui->contentWidget->layout()) parent_layout->activate();
+    }
+    const int w = l->width();
+    if (w <= 0) return;
+    const int needed = l->heightForWidth(w);
+    if (needed > 0 && needed != l->minimumHeight()) l->setMinimumHeight(needed);
 }
 
 void ModalOverlay::toggleVisibility()
@@ -258,11 +295,12 @@ void ModalOverlay::showEvent(QShowEvent* ev)
     QWidget::showEvent(ev);
     // The widths are only real once the panel has been laid out, so measure on
     // the next turn of the event loop rather than now.
-    QTimer::singleShot(0, this, [this] { FitInfoText(); });
+    QTimer::singleShot(0, this, [this] { FitInfoText(); FitBlocksLeft(); });
 }
 
 void ModalOverlay::resizeEvent(QResizeEvent* ev)
 {
     QWidget::resizeEvent(ev);
     FitInfoText();
+    FitBlocksLeft();
 }

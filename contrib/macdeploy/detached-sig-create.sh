@@ -7,8 +7,8 @@ export LC_ALL=C
 set -e
 
 ROOTDIR=dist
-BUNDLE="${ROOTDIR}/Elements-Qt.app"
-BINARY="${BUNDLE}/Contents/MacOS/Elements-Qt"
+BUNDLE="${ROOTDIR}/Sequentia-Qt.app"
+BINARY="${BUNDLE}/Contents/MacOS/Sequentia-Qt"
 SIGNAPPLE=signapple
 TEMPDIR=sign.temp
 ARCH=$(${SIGNAPPLE} info ${BINARY} | head -n 1 | cut -d " " -f 1)

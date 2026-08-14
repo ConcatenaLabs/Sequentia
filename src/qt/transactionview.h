@@ -9,6 +9,8 @@
 
 #include <uint256.h>
 
+#include <vector>
+
 #include <QWidget>
 #include <QKeyEvent>
 
@@ -92,9 +94,20 @@ private:
 
     QWidget *createDateRangeWidget();
 
-    /** Rebuild the token filter drop-down from the assets present in the wallet,
-     *  preserving the current selection where possible. */
+    /** Re-read the assets present in the wallet and rebuild the token filter
+     *  drop-down from them. */
     void updateAssetFilterChoices();
+    /** Refill the token filter's items from m_assets_present, preserving the
+     *  current selection (carried by asset id) where possible. */
+    void rebuildAssetFilterItems();
+    /** Re-resolve the token filter's labels against the asset registry, which
+     *  can name an asset long after its transactions were loaded. Rebuilds only
+     *  when something a user would read has actually changed. */
+    void refreshAssetFilterNames();
+
+    /** Assets present in the wallet, in drop-down order. Held as assets rather
+     *  than as names so the filter keeps working across a registry update. */
+    std::vector<CAsset> m_assets_present;
 
     bool eventFilter(QObject *obj, QEvent *event) override;
 

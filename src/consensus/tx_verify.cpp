@@ -237,8 +237,11 @@ bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, 
             const Coin& coin = inputs.AccessCoin(prevout);
             assert(!coin.IsSpent());
 
-            // If prev is coinbase, check that it's matured
-            if (coin.IsCoinBase() && nSpendHeight - coin.nHeight < COINBASE_MATURITY) {
+            // If prev is coinbase, check that it's matured. SEQUENTIA: the
+            // required depth is chain- and height-dependent, because a maturity
+            // counted in blocks protects for less and less wall-clock time as a
+            // chain's cadence shortens (see CoinbaseMaturityAt, consensus.h).
+            if (coin.IsCoinBase() && nSpendHeight - coin.nHeight < CoinbaseMaturityAt(nSpendHeight)) {
                 return state.Invalid(TxValidationResult::TX_PREMATURE_SPEND, "bad-txns-premature-spend-of-coinbase",
                     strprintf("tried to spend coinbase at depth %d", nSpendHeight - coin.nHeight));
             }

@@ -224,12 +224,12 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
         fname_bitcoind = os.path.join(
             config["environment"]["BUILDDIR"],
             "src",
-            "elementsd" + config["environment"]["EXEEXT"],
+            "sequentiad" + config["environment"]["EXEEXT"],
         )
         fname_bitcoincli = os.path.join(
             config["environment"]["BUILDDIR"],
             "src",
-            "elements-cli" + config["environment"]["EXEEXT"],
+            "sequentia-cli" + config["environment"]["EXEEXT"],
         )
         self.options.bitcoind = os.getenv("BITCOIND", default=fname_bitcoind)
         self.options.bitcoincli = os.getenv("BITCOINCLI", default=fname_bitcoincli)
@@ -469,9 +469,9 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
                 if versions[i] is None or versions[i] >= 229900:
                     extra_args[i] = extra_args[i] + ["-sandbox=log-and-abort"]
         if binary is None:
-            binary = [get_bin_from_version(v, 'elementsd', self.options.bitcoind) for v in versions]
+            binary = [get_bin_from_version(v, 'sequentiad', self.options.bitcoind) for v in versions]
         if binary_cli is None:
-            binary_cli = [get_bin_from_version(v, 'elements-cli', self.options.bitcoincli) for v in versions]
+            binary_cli = [get_bin_from_version(v, 'sequentia-cli', self.options.bitcoincli) for v in versions]
         if chain is None:
             chain = [self.chain] * num_nodes
         assert_equal(len(extra_confs), num_nodes)

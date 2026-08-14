@@ -256,6 +256,8 @@ public:
         g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
         g_pos_slot_interval = DEFAULT_POS_SLOT_INTERVAL;
         g_pos_unbonding_period = DEFAULT_POS_UNBONDING_PERIOD;
+        g_coinbase_maturity = 0;                 // inherited COINBASE_MATURITY
+        g_coinbase_maturity_height = 0;
         g_pos_payout_notice = DEFAULT_POS_PAYOUT_NOTICE;
         consensus.total_valid_epochs = 0;
         consensus.elements_mode = g_con_elementsmode;
@@ -454,6 +456,49 @@ public:
         // doc/sequentia/bridged-usdc-standard.md.
         consensus.supervised_assets_height = 1;
         consensus.nMaxBlockWeight = 200000;             // a twentieth of Bitcoin (doc 11 §4)
+        // Minimum block spacing: the 30-second cadence as a CONSENSUS RULE, in
+        // force from mainnet's first block. Mainnet has not launched, so there
+        // is no history to exempt and nothing to coordinate later.
+        //
+        // The producers collect the fees, so their incentive is to shorten the
+        // cadence, and until this rule existed nothing stopped them: the floor
+        // in PosProducer::Step is producer-side and unverified. Deliberately a
+        // separate number from the slot-gate unit (-posslotinterval): raising
+        // the spacing must not stretch the leader time-gate too.
+        //
+        // 1 and not 0 for the same reason as the two gates above: 0 is this
+        // parameter's "not gated" sentinel.
+        consensus.pos_block_spacing = 60;
+        consensus.pos_block_spacing_height = 1;
+        // Coinbase maturity held equal to Bitcoin in WALL-CLOCK terms rather
+        // than in blocks: 1000 x 60 s == 100 x 600 s == 16 h 40 min. Keep the
+        // two in step -- the invariant is the time, not the block count.
+        // Active from the first block; mainnet has no spends to grandfather.
+        consensus.coinbase_maturity = 1000;
+        consensus.coinbase_maturity_height = 1;
+        // Leader time-gate: ten seconds per unit of sortition score, from the
+        // first block. Mainnet has no legacy-scale history, so it never spends
+        // a block on the whole-interval scale that costs the testnet ~3.8% of
+        // its throughput. NOT g_pos_slot_interval, which stays 30 -- see
+        // params.h: that global also scales the unbonding requirement.
+        consensus.pos_slot_gate_seconds = 10;
+        consensus.pos_slot_gate_height = 1;
+        g_coinbase_maturity = consensus.coinbase_maturity;
+        g_coinbase_maturity_height = consensus.coinbase_maturity_height;
+        // 400,000 weight units — a TENTH of Bitcoin's 4,000,000 — so that, at
+        // 60-second blocks (10x Bitcoin's cadence), a saturated chain grows at
+        // exactly the same total rate as a saturated Bitcoin chain (whitepaper
+        // §3.10): 400,000 / 60 s == 4,000,000 / 600 s. The cap counts the full
+        // serialized weight (coinbase, VRF proof, committee signature, anchor
+        // datum), so "total disk" — not just user data — is what is held equal
+        // to Bitcoin. Keep this in step with pos_block_spacing above: the
+        // invariant is weight-per-second, not weight-per-block.
+        //
+        // Halving the cadence and doubling the cap is not a wash, it is a small
+        // gain: the ~2,100 WU of fixed per-block overhead is paid once per
+        // block, so it falls from 1.04% of the cap to 0.52%, leaving slightly
+        // more of the same total disk for actual payload.
+        consensus.nMaxBlockWeight = 400000;
         consensus.connect_genesis_outputs = true;
         anyonecanspend_aremine = false;
         accept_unlimited_issuances = false;
@@ -509,7 +554,20 @@ public:
         g_pos_unbonding_period = 43200;                  // x30s = ~15 days (§3.11)
         // Consensus-critical: pin the payout notice period so no node can change
         // when a producer's payout policy binds by passing -pospayoutnotice.
-        g_pos_payout_notice = DEFAULT_POS_PAYOUT_NOTICE;   // 2880 x 30s = ~1 day
+        //
+        // Counted in BLOCKS, not seconds: ConnectBlock compares
+        // policy.activation against pindex->nHeight + this (validation.cpp,
+        // "bad-payout-notice"). So it does NOT survive a cadence change on its
+        // own -- at the 60-second spacing the inherited 2,880 would quietly
+        // mean ~2 days instead of the ~1 day it is meant to be. Halved to keep
+        // the wall-clock intent.
+        //
+        // Contrast g_pos_unbonding_period just above, which is NOT halved: that
+        // one is normalised to seconds by PosRequiredUnbondingSeconds()
+        // (period x g_pos_slot_interval), and g_pos_slot_interval stays 30, so
+        // its ~15 days are unaffected by the cadence. Halving it would have cut
+        // a security parameter in half rather than preserved it.
+        g_pos_payout_notice = 1440;                        // 1440 x 60s = ~1 day
         consensus.total_valid_epochs = 0;
         consensus.dynamic_epoch_length = 10;
         consensus.elements_mode = g_con_elementsmode;
@@ -758,12 +816,98 @@ public:
         consensus.supervised_assets_height = 0;
         // SEQUENTIA: 200,000 weight units — a twentieth of Bitcoin's 4,000,000
         // — so that, at ~30-second blocks (20x Bitcoin's cadence), a saturated
+        // Minimum block spacing (hard fork; see params.h). The VALUE is live
+        // from this binary — node::PosEarliestBlockTime reads it directly, so
+        // producers stop emitting too-close blocks immediately — while the
+        // consensus RULE waits for the height below.
+        //
+        // That split is not a style choice. A scan of all 86,357 blocks on
+        // 2026-08-10 found 2,186 of them closer than 30 s to their parent:
+        // 2,183 at exactly 29 s, plus 23 s once and 9 s twice. The 29-second
+        // ones are not cheating, they are a one-second clock skew between
+        // producers (the producer waits correctly, then the assembler stamped
+        // GetAdjustedTime()), and they were STILL OCCURRING at the tip, the
+        // most recent at height 86,318. Activating the rule without shipping
+        // the clamp first would invalidate blocks honest producers are emitting
+        // right now, over and over.
+        //
+        // The clamp is covered by feature_pos_block_spacing.py, which drives a
+        // node whose clock advances one second per block against a floor that
+        // demands ten and checks every gap -- the 29-second case exactly -- and
+        // every path that stamps a block time funnels through
+        // BlockAssembler::CreateNewBlock, where the clamp sits. The two later
+        // adjustments (the slot-open bump below in miner.cpp, and the regtest
+        // equivocation fault injection) only ever raise nTime, so neither can
+        // undo it. No observation window is needed to establish that.
+        //
+        // WHAT THIS HEIGHT MUST SATISFY, and it is not what it looks like: it
+        // has to sit ABOVE THE TIP AT CUTOVER, not merely above the tip today.
+        // Blocks produced between this height and the moment the last node is
+        // upgraded come from binaries WITHOUT the clamp, so they may be closer
+        // than 60 s to their parent -- and from the cutover on they are
+        // permanently invalid to anyone syncing from scratch. That is exactly
+        // how pos_escape_stall_mtp_height above came to exist. Setting it too
+        // HIGH costs nothing (the rule simply binds later); setting it too low
+        // makes the chain unsyncable. Err high.
+        //
+        // Chosen for a cutover on the evening of 2026-08-12: the tip was 88,675
+        // at 22:28 UTC on 2026-08-11 running at ~37.6 s, so the tip at cutover
+        // is ~90,970 and 93,800 leaves ~2,800 blocks of margin, reached late on
+        // 2026-08-14 at the new 60 s cadence. If the cutover slips past midday
+        // on the 13th, RAISE THIS before deploying: check the tip first.
+        //
+        // 60 and not 30: the cadence is being halved deliberately (see
+        // nMaxBlockWeight below). The producer follows the VALUE immediately,
+        // so upgraded nodes start spacing at 60 s from this release while
+        // un-upgraded ones still offer blocks at 30 s. That is safe — both are
+        // valid until the height above — and it makes the transition gradual:
+        // the chain drifts toward 60 s as the fleet upgrades, rather than
+        // stepping there on a flag day.
+        //
+        // DO NOT also raise -posslotinterval to 60 to "match". It is the
+        // leader time-gate unit, not the cadence, and leaving it at 30 is what
+        // lets the 60-second floor absorb sortition slots 0, 1 AND 2 instead of
+        // just 0 and 1: measured over 400,000 simulated rounds that alone cuts
+        // the exponential-race gate's throughput loss from 17.7% to 3.8%,
+        // whereas raising it to 60 keeps the loss at 17.7% and doubles the cost
+        // of every lost slot (mean interval 72.9 s on a 60-second chain).
+        consensus.pos_block_spacing = 60;
+        consensus.pos_block_spacing_height = 93800;
+        // Coinbase maturity: same invariant as mainnet (1000 x 60 s == 100 x
+        // 600 s), and the same height as the spacing above so the cadence and
+        // the maturity that depends on it change in one cutover rather than two.
+        // Raising it rejects more, so it cannot reach back: this chain has
+        // coinbases spent at depths between 100 and 1000 already.
+        consensus.coinbase_maturity = 1000;
+        consensus.coinbase_maturity_height = 93800;
+        // Leader time-gate (hard fork; see params.h). Same height as the
+        // spacing and the maturity, so the cadence and everything scaled
+        // against it move in one cutover. Ten seconds and not one: at a 60 s
+        // cadence ten already recovers 99.4% of the lost throughput (0.024%
+        // remaining against 3.78% today), while a smaller unit only keeps
+        // widening the simultaneous field -- 5.3 candidates of twelve at ten
+        // seconds against 11.9 at one -- which buys no throughput and gives
+        // the anchor-freshness key more material to reorder.
+        consensus.pos_slot_gate_seconds = 10;
+        consensus.pos_slot_gate_height = 93800;
+        g_coinbase_maturity = consensus.coinbase_maturity;
+        g_coinbase_maturity_height = consensus.coinbase_maturity_height;
+        // SEQUENTIA: 400,000 weight units — a TENTH of Bitcoin's 4,000,000 —
+        // so that, at 60-second blocks (10x Bitcoin's cadence), a saturated
         // chain grows at exactly the same total rate as a saturated Bitcoin
-        // chain (whitepaper §3.10): 200,000 / 30 s == 4,000,000 / 600 s. The cap
+        // chain (whitepaper §3.10): 400,000 / 60 s == 4,000,000 / 600 s. The cap
         // counts the full serialized weight (coinbase, VRF proof, committee
         // signature, anchor datum), so "total disk" — not just user data — is
-        // what is held equal to Bitcoin. Cadence is the -posslotinterval (30 s).
-        consensus.nMaxBlockWeight = 200000;
+        // what is held equal to Bitcoin. Cadence is pos_block_spacing above,
+        // NOT -posslotinterval; keep the two in step, since the invariant is
+        // weight-per-second and not weight-per-block.
+        //
+        // Raising the cap only ever ACCEPTS more, so it cannot invalidate a
+        // block already in the chain and needs no height of its own. It is
+        // still a hard fork for the running network — an un-upgraded node
+        // rejects the first over-200,000 block it sees — so it rides the same
+        // coordinated cutover as everything else here.
+        consensus.nMaxBlockWeight = 400000;
         consensus.connect_genesis_outputs = true;
         // SEQUENTIA: match mainnet (CSequentiaParams) — anyone-can-spend (OP_TRUE)
         // outputs are NOT the wallet's own. Block fees now pay to the elected
@@ -916,7 +1060,20 @@ public:
         g_pos_unbonding_period = TESTNET_POS_UNBONDING_PERIOD;
         // Consensus-critical: pin the payout notice period so no node can change
         // when a producer's payout policy binds by passing -pospayoutnotice.
-        g_pos_payout_notice = DEFAULT_POS_PAYOUT_NOTICE;   // 2880 x 30s = ~1 day
+        //
+        // Counted in BLOCKS, not seconds: ConnectBlock compares
+        // policy.activation against pindex->nHeight + this (validation.cpp,
+        // "bad-payout-notice"). So it does NOT survive a cadence change on its
+        // own -- at the 60-second spacing the inherited 2,880 would quietly
+        // mean ~2 days instead of the ~1 day it is meant to be. Halved to keep
+        // the wall-clock intent.
+        //
+        // Contrast g_pos_unbonding_period just above, which is NOT halved: that
+        // one is normalised to seconds by PosRequiredUnbondingSeconds()
+        // (period x g_pos_slot_interval), and g_pos_slot_interval stays 30, so
+        // its ~15 days are unaffected by the cadence. Halving it would have cut
+        // a security parameter in half rather than preserved it.
+        g_pos_payout_notice = 1440;                        // 1440 x 60s = ~1 day
         consensus.elements_mode = g_con_elementsmode;
         consensus.total_valid_epochs = 0;
         consensus.dynamic_epoch_length = 10;
@@ -1306,6 +1463,8 @@ public:
         g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
         g_pos_slot_interval = DEFAULT_POS_SLOT_INTERVAL;
         g_pos_unbonding_period = DEFAULT_POS_UNBONDING_PERIOD;
+        g_coinbase_maturity = 0;                 // inherited COINBASE_MATURITY
+        g_coinbase_maturity_height = 0;
         g_pos_payout_notice = DEFAULT_POS_PAYOUT_NOTICE;
         consensus.total_valid_epochs = 0;
         consensus.elements_mode = g_con_elementsmode;
@@ -1426,6 +1585,8 @@ public:
         g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
         g_pos_slot_interval = DEFAULT_POS_SLOT_INTERVAL;
         g_pos_unbonding_period = DEFAULT_POS_UNBONDING_PERIOD;
+        g_coinbase_maturity = 0;                 // inherited COINBASE_MATURITY
+        g_coinbase_maturity_height = 0;
         g_pos_payout_notice = DEFAULT_POS_PAYOUT_NOTICE;
         consensus.total_valid_epochs = 0;
 
@@ -1724,6 +1885,27 @@ protected:
         // chain and check both sides of the boundary; the real chains pin it.
         consensus.supervised_assets_height =
             (int)args.GetIntArg("-supervisedassetsheight", 1);
+        // Minimum block spacing. Arg-readable only on this custom/regtest chain
+        // so tests can exercise the rule and both sides of its activation; the
+        // real chains pin it in code above.
+        //
+        // Default 0 = OFF, which is the one place this parameter departs from
+        // the "active from genesis on every fresh chain" convention, and it is
+        // deliberate: dozens of functional tests generate blocks back to back
+        // to go fast, and a 30-second consensus floor would wedge every one of
+        // them. A test that wants the rule asks for it. The height defaults to
+        // 1 so that asking for the spacing alone is enough to get the rule.
+        consensus.pos_block_spacing = args.GetIntArg("-posblockspacing", 0);
+        // Leader time-gate unit. Arg-readable only here so tests can drive both
+        // scales and the transition; the real chains pin it in code. 0 = keep
+        // the historic whole-interval unit.
+        consensus.pos_slot_gate_seconds = args.GetIntArg("-posslotgateseconds", 0);
+        consensus.pos_slot_gate_height = (int)args.GetIntArg("-posslotgateheight", 1);
+        consensus.pos_block_spacing_height =
+            (int)args.GetIntArg("-posblockspacingheight", 1);
+        if (consensus.pos_block_spacing < 0 || consensus.pos_block_spacing > 86400) {
+            throw std::runtime_error("-posblockspacing must be between 0 and 86400");
+        }
         if (g_pos_public_committee &&
             (g_pos_committee_size < 1 || g_pos_committee_size > MAX_POS_PUBLIC_COMMITTEE_SIZE)) {
             throw std::runtime_error(strprintf("-poscommitteesize must be between 1 and %d under -pospubliccommittee", MAX_POS_PUBLIC_COMMITTEE_SIZE));
@@ -2171,6 +2353,8 @@ public:
         g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
         g_pos_slot_interval = DEFAULT_POS_SLOT_INTERVAL;
         g_pos_unbonding_period = DEFAULT_POS_UNBONDING_PERIOD;
+        g_coinbase_maturity = 0;                 // inherited COINBASE_MATURITY
+        g_coinbase_maturity_height = 0;
         g_pos_payout_notice = DEFAULT_POS_PAYOUT_NOTICE;
         g_con_elementsmode = true;
         consensus.elements_mode = g_con_elementsmode;

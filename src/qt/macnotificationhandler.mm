@@ -13,7 +13,7 @@
 - (NSString *)__bundleIdentifier
 {
     if (self == [NSBundle mainBundle]) {
-        return @"org.elementsproject.Elements-Qt";
+        return @"io.sequentia.Sequentia-Qt";
     } else {
         return [self __bundleIdentifier];
     }

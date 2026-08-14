@@ -357,10 +357,10 @@ Order of operations for a public deployment:
 ## Inspecting state on the node
 
 ```sh
-elements-cli getfeeexchangerates            # the whitelist (asset -> rate)
-elements-cli getfeeacceptancepolicy         # the whitelist as {asset: {rate}}
-elements-cli setfeeexchangerates '{...}'    # operator manual set (persists to exchangerates.json)
-elements-cli setfeeexchangerates '{}'       # empty the whitelist
+sequentia-cli getfeeexchangerates            # the whitelist (asset -> rate)
+sequentia-cli getfeeacceptancepolicy         # the whitelist as {asset: {rate}}
+sequentia-cli setfeeexchangerates '{...}'    # operator manual set (persists to exchangerates.json)
+sequentia-cli setfeeexchangerates '{}'       # empty the whitelist
 ```
 
 ## Windows installer bundle

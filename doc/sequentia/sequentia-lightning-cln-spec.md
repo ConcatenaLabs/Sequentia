@@ -91,9 +91,9 @@ Verified state of CLN master relevant to us:
   refused on elements. Matches Sequentia transparent-by-default; blech32 (`tsqb`/`sqb`) is simply
   out of scope for LN.
 - Anchors/taproot/splicing: disabled on elements (`options.c` strips the anchors feature; splicing
-  tests skipped: "elementsd doesnt yet support PSBT features we need").
+  tests skipped: "sequentiad doesnt yet support PSBT features we need").
 - Backend seam: `plugins/bcli.c` implements exactly 5 documented methods (getchaininfo,
-  getrawblockbyheight, estimatefees, sendrawtransaction, getutxout) against `elements-cli`; a
+  getrawblockbyheight, estimatefees, sendrawtransaction, getutxout) against `sequentia-cli`; a
   replacement backend plugin is a first-class, documented substitution point
   (`--disable-plugin bcli`).
 - minimum_depth: chosen by the fundee in accept_channel; CLN's default `funding_confirms` is already
@@ -117,7 +117,7 @@ Add three rows (mainnet values fixed at re-genesis/launch):
 | lightning_hrp | `tsq` (invoices `lntsq...`) | `sq` (invoices `lnsq...`) | `rsq` (invoices `lnrsq...`) |
 | bip70_name | the EXACT string a live node returns from `getblockchaininfo.chain` (verify at implementation; current testnet datadirs suggest a legacy name, see Open question Q3) | set at launch | ditto |
 | genesis_blockhash (chain_hash) | Sequentia testnet genesis | mainnet genesis | regtest genesis |
-| cli | `elements-cli` (our binary name) with the right `-chain=` arg | ditto | ditto |
+| cli | `sequentia-cli` (our binary name) with the right `-chain=` arg | ditto | ditto |
 | is_elements | true | true | true |
 | fee_asset_tag | 0x01 + tSEQ asset id (internal byte order) | 0x01 + SEQ asset id | 0x01 + regtest policy asset |
 | new: has_bitcoin_anchor | true | true | per regtest config (likely false) |

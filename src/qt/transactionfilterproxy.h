@@ -41,8 +41,10 @@ public:
     void setTypeFilter(quint32 modes);
     void setMinAmount(const CAmount& minimum);
     void setWatchOnlyFilter(WatchOnlyFilter filter);
-    /** Filter by asset ticker (display name). Empty string means all assets. */
-    void setAssetFilter(const QString& assetName);
+    /** Filter by asset id (64-hex). Empty string means all assets. The id, not
+      * the ticker: a display name can appear or change when the asset registry
+      * is merged, which would silently break a name-based filter. */
+    void setAssetFilter(const QString& asset_id);
 
     /** Set maximum number of rows returned, -1 if unlimited. */
     void setLimit(int limit);
@@ -59,7 +61,7 @@ private:
     std::optional<QDateTime> dateFrom;
     std::optional<QDateTime> dateTo;
     QString m_search_string;
-    QString m_asset_filter;
+    QString m_asset_filter; //!< hex asset id, empty for "all tokens"
     quint32 typeFilter;
     WatchOnlyFilter watchOnlyFilter;
     CAmount minAmount;
