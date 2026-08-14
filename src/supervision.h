@@ -6,18 +6,21 @@
 #define BITCOIN_SUPERVISION_H
 
 #include <asset.h>
+#include <primitives/transaction.h>
 #include <pubkey.h>
 #include <script/script.h>
 #include <serialize.h>
+#include <sync.h>
 #include <uint256.h>
 
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
 
-class COutPoint;
-class CTransaction;
-class CTxOut;
+class CBlock;
+class CBlockUndo;
+class CCoinsView;
 
 /** SEQUENTIA: supervised assets.
  *
@@ -243,6 +246,315 @@ void GenerateSupervisedAssetEntropy(uint256& entropy, const COutPoint& prevout,
  *    issuer cannot burn real value into a script nothing can ever spend. */
 bool CheckSupervisedIssuance(const CTransaction& tx, const SupervisionDeclaration& decl,
                              uint256& entropy, std::string& err);
+
+/* -------------------------------------------------------------------------
+ * Records: freezing, unfreezing and key rotation.
+ * ---------------------------------------------------------------------- */
+
+/** What a record does. */
+enum class SupervisionRecordKind : uint8_t {
+    //! Freeze one script for one asset. Creating the record freezes; spending
+    //! it unfreezes.
+    FREEZE = 1,
+    //! Replace the operational key. Signed by the RECOVERY key.
+    ROTATE_OPERATIONAL = 2,
+    //! Replace the recovery key. Signed by the RECOVERY key.
+    ROTATE_RECOVERY = 3,
+};
+
+/** An x-only key in the record's fixed-width payload slot.
+ *
+ *  A rotation reuses the freeze record's `target` field to carry the new key,
+ *  so the two record shapes stay one parser and one width. Both are 32 bytes,
+ *  which is the whole reason it works. */
+inline uint256 SupervisionKeyAsTarget(const XOnlyPubKey& key)
+{
+    return uint256(key.data(), key.size());
+}
+
+/** A freeze or rotation record, as carried in an output.
+ *
+ *  `target` is the payload, read according to `kind`: for FREEZE it is the
+ *  hash of the frozen scriptPubKey; for the rotations it is the new key. A
+ *  rotation also carries `old_key`, the key it replaces, which is what lets the
+ *  registry replay rotations from the UTXO set in any order: each record names
+ *  its predecessor, so they chain from the descriptor rather than needing a
+ *  timestamp the UTXO set does not keep.
+ *
+ *  `signature` is the ADMISSION signature, not a spend condition. See
+ *  BuildSupervisionRecordScript for why the two are separate. */
+struct SupervisionRecord
+{
+    SupervisionRecordKind kind{SupervisionRecordKind::FREEZE};
+    CAsset asset;
+    uint256 target;
+    XOnlyPubKey old_key;
+    std::vector<unsigned char> signature;
+
+    bool IsRotation() const
+    {
+        return kind == SupervisionRecordKind::ROTATE_OPERATIONAL ||
+               kind == SupervisionRecordKind::ROTATE_RECOVERY;
+    }
+    //! The new key a rotation installs. Meaningless for a freeze.
+    XOnlyPubKey NewKey() const { return XOnlyPubKey(target); }
+    void SetNewKey(const XOnlyPubKey& key) { target = SupervisionKeyAsTarget(key); }
+};
+
+/** Marker prefix identifying a supervision record output. */
+extern const std::vector<unsigned char> SUPERVISION_RECORD_MARKER;
+
+/** Build a record's scriptPubKey.
+ *
+ *      <MARKER> OP_DROP <kind> OP_DROP <asset> OP_DROP <target> OP_DROP
+ *      [<old_key> OP_DROP]  <signature> OP_DROP  OP_TRUE
+ *
+ *  Retained in the UTXO set, like a declaration and for the same reason: the
+ *  freeze set has to be a function of the UTXO set. Unlike a declaration this
+ *  one ends OP_TRUE rather than OP_RETURN, because a freeze record is meant to
+ *  be spent -- spending it is the unfreeze.
+ *
+ *  The OP_TRUE is the part that looks alarming and is not. The script is NOT
+ *  the spend authority; consensus is, and it requires a signature by the
+ *  asset's CURRENT operational key (CheckSupervisionRecordSpend). The script
+ *  cannot be the authority, and this is forced rather than chosen: a script is
+ *  fixed when the output is created, so it can only ever name the key that was
+ *  current then. Name it and a rotation leaves every existing freeze liftable
+ *  by the old key, which is precisely the trap rotation exists to close
+ *  (Alberto's point 2); require the current key on top of it and no key
+ *  satisfies both after a rotation, so freezes become permanent and unfreezing
+ *  is impossible. There is no third option, so the script contributes nothing
+ *  and says so, and the authority lives in the one place that can follow a
+ *  rotation. The output carries no value, so a spend that consensus rejects
+ *  gains its author nothing but a rejected transaction. */
+CScript BuildSupervisionRecordScript(const SupervisionRecord& record);
+
+/** Parse a record output, or nullopt if it is not one. */
+std::optional<SupervisionRecord> ParseSupervisionRecordScript(const CScript& script);
+
+/** The message an admission signature covers.
+ *
+ *  Binds the record's contents AND the first outpoint the creating transaction
+ *  spends. The outpoint is what makes the signature single-use: without it, a
+ *  freeze record's signature could be lifted off the chain and replayed to
+ *  re-freeze a target the issuer had deliberately unfrozen, by anybody. */
+uint256 SupervisionRecordSigHash(const SupervisionRecord& record, const COutPoint& first_input);
+
+/** The message that authorises spending a freeze record, i.e. unfreezing.
+ *
+ *  Binds the record being spent, so the signature cannot be moved to another
+ *  record of the same asset. */
+uint256 SupervisionUnfreezeSigHash(const COutPoint& record_outpoint, const CAsset& asset,
+                                   const uint256& target);
+
+/** Hash of a scriptPubKey, as named by a freeze record.
+ *
+ *  A hash rather than the script itself so a record is fixed-width whatever it
+ *  freezes, and so the record does not restate a script the chain already has. */
+uint256 SupervisionTargetHash(const CScript& script);
+
+/** The supervised assets of the active chain, and their freeze state.
+ *
+ *  A pure function of the UTXO set, exactly like StakeRegistry's UTXO layers
+ *  (src/pos.h) and maintained on the same discipline: applied in ConnectTip,
+ *  exactly inverted in DisconnectTip, rebuilt by a UTXO scan at startup. That
+ *  discipline is the whole reason declarations and records are retained
+ *  outputs. A failure to read undo data on disconnect must be fatal, as it is
+ *  for the stake registry, or the registry silently disagrees with consensus.
+ *
+ *  Frozen targets are COUNTED, not held in a set: two records may name the same
+ *  target, and the freeze must lift only when the last of them is spent, or the
+ *  registry stops being an exact function of the UTXO set under reorg. */
+class SupervisionRegistry
+{
+private:
+    struct Entry {
+        //! As committed in the asset id, and therefore never changing.
+        SupervisionDescriptor descriptor;
+        //! Current keys: the descriptor's, advanced by every rotation record.
+        XOnlyPubKey operational;
+        XOnlyPubKey recovery;
+        //! target script hash -> number of unspent freeze records naming it.
+        std::map<uint256, uint32_t> frozen;
+    };
+
+    mutable Mutex m_mutex;
+    std::map<CAsset, Entry> m_assets GUARDED_BY(m_mutex);
+
+public:
+    static SupervisionRegistry& GetInstance()
+    {
+        static SupervisionRegistry instance;
+        return instance;
+    }
+
+    void Clear()
+    {
+        LOCK(m_mutex);
+        m_assets.clear();
+    }
+
+    //! Nothing supervised anywhere. The short-circuit that keeps this feature
+    //! free for chains and blocks that never use it.
+    bool Empty() const
+    {
+        LOCK(m_mutex);
+        return m_assets.empty();
+    }
+
+    //! Whether any asset has at least one frozen target. Separate from Empty()
+    //! because supervised assets with no freezes are the ordinary case, and the
+    //! spend path should cost nothing then.
+    bool AnyFrozen() const
+    {
+        LOCK(m_mutex);
+        for (const auto& e : m_assets) {
+            if (!e.second.frozen.empty()) return true;
+        }
+        return false;
+    }
+
+    void AddAsset(const SupervisionDeclaration& decl)
+    {
+        LOCK(m_mutex);
+        Entry& entry = m_assets[decl.asset];
+        entry.descriptor = decl.descriptor;
+        entry.operational = decl.descriptor.operational_key;
+        entry.recovery = decl.descriptor.recovery_key;
+    }
+
+    void RemoveAsset(const CAsset& asset)
+    {
+        LOCK(m_mutex);
+        m_assets.erase(asset);
+    }
+
+    bool IsSupervised(const CAsset& asset) const
+    {
+        LOCK(m_mutex);
+        return m_assets.count(asset) > 0;
+    }
+
+    std::optional<SupervisionDescriptor> Descriptor(const CAsset& asset) const
+    {
+        LOCK(m_mutex);
+        auto it = m_assets.find(asset);
+        if (it == m_assets.end()) return std::nullopt;
+        return it->second.descriptor;
+    }
+
+    //! The key that may sign freezes and unfreezes for this asset right now.
+    std::optional<XOnlyPubKey> OperationalKey(const CAsset& asset) const
+    {
+        LOCK(m_mutex);
+        auto it = m_assets.find(asset);
+        if (it == m_assets.end()) return std::nullopt;
+        return it->second.operational;
+    }
+
+    //! The key that may sign rotations for this asset right now.
+    std::optional<XOnlyPubKey> RecoveryKey(const CAsset& asset) const
+    {
+        LOCK(m_mutex);
+        auto it = m_assets.find(asset);
+        if (it == m_assets.end()) return std::nullopt;
+        return it->second.recovery;
+    }
+
+    bool IsFrozen(const CAsset& asset, const uint256& target) const
+    {
+        LOCK(m_mutex);
+        auto it = m_assets.find(asset);
+        if (it == m_assets.end()) return false;
+        return it->second.frozen.count(target) > 0;
+    }
+
+    void AddFreeze(const CAsset& asset, const uint256& target)
+    {
+        LOCK(m_mutex);
+        auto it = m_assets.find(asset);
+        if (it == m_assets.end()) return;
+        it->second.frozen[target]++;
+    }
+
+    void SubFreeze(const CAsset& asset, const uint256& target)
+    {
+        LOCK(m_mutex);
+        auto it = m_assets.find(asset);
+        if (it == m_assets.end()) return;
+        auto f = it->second.frozen.find(target);
+        if (f == it->second.frozen.end()) return;
+        if (--f->second == 0) it->second.frozen.erase(f);
+    }
+
+    //! Install a rotation. `expect_old` guards the caller's assumption about
+    //! which key is being replaced, so a revert that has drifted fails loudly
+    //! rather than installing a key nothing authorised.
+    bool Rotate(const CAsset& asset, bool operational_role, const XOnlyPubKey& expect_old,
+                const XOnlyPubKey& new_key)
+    {
+        LOCK(m_mutex);
+        auto it = m_assets.find(asset);
+        if (it == m_assets.end()) return false;
+        XOnlyPubKey& slot = operational_role ? it->second.operational : it->second.recovery;
+        if (!(slot == expect_old)) return false;
+        slot = new_key;
+        return true;
+    }
+
+    //! Every supervised asset, for RPC and for tests. Not on the validation path.
+    std::map<CAsset, SupervisionDescriptor> Assets() const
+    {
+        LOCK(m_mutex);
+        std::map<CAsset, SupervisionDescriptor> out;
+        for (const auto& e : m_assets) out.emplace(e.first, e.second.descriptor);
+        return out;
+    }
+
+    //! Frozen targets of one asset, with their record counts. RPC and tests.
+    std::map<uint256, uint32_t> FrozenTargets(const CAsset& asset) const
+    {
+        LOCK(m_mutex);
+        auto it = m_assets.find(asset);
+        if (it == m_assets.end()) return {};
+        return it->second.frozen;
+    }
+};
+
+/** Admit (or refuse) the supervision records a transaction creates.
+ *
+ *  Consulted from Consensus::CheckTxInputs, so mempool acceptance and
+ *  ConnectBlock reach it by the same path and cannot disagree. Refusal is a
+ *  consensus failure, not a policy one: a record that reached a block without
+ *  a valid signature would freeze someone on nobody's authority.
+ *
+ *  What is checked: the named asset is supervised; a freeze is signed by its
+ *  current operational key and a rotation by its current recovery key; a
+ *  rotation names the key it actually replaces and installs a different, valid
+ *  one. Note the asymmetry, which is Alberto's point 2: the operational key
+ *  cannot rotate anything, not even itself, so a thief who has it can grief
+ *  but can never seize the authority. */
+bool CheckSupervisionRecords(const CTransaction& tx, const SupervisionRegistry& registry,
+                             std::string& err);
+
+/** Authorise spending a freeze record, i.e. lifting the freeze.
+ *
+ *  THE UNFREEZE TRAP (Alberto's point 2), and the reason this is a consensus
+ *  check rather than something the record's own script could do: validity is
+ *  judged against the registry's CURRENT operational key. After a rotation the
+ *  old key lifts nothing, which is the entire point of rotating after a
+ *  compromise. */
+bool CheckSupervisionRecordSpend(const CTxIn& input, const CTxOut& record_out,
+                                 const SupervisionRegistry& registry, std::string& err);
+
+/** Mirror a connected block's declarations and records into the registry. */
+void SupervisionApplyBlock(const CBlock& block, const CBlockUndo& undo);
+
+/** Exact inverse of SupervisionApplyBlock, for tip disconnects. */
+void SupervisionRevertBlock(const CBlock& block, const CBlockUndo& undo);
+
+/** Rebuild the registry by scanning the (flushed) UTXO set. */
+bool RebuildSupervisionRegistry(CCoinsView& view);
 
 /** Height from which supervised assets exist on this chain; 0 means never.
  *

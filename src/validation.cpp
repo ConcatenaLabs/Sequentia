@@ -3766,6 +3766,19 @@ bool CChainState::DisconnectTip(BlockValidationState& state, DisconnectedBlockTr
         }
     }
 
+    // SEQUENTIA: the same discipline for the supervision registry, which feeds
+    // consensus just as directly -- it decides which spends are frozen and
+    // which key may freeze. Gated on the height because below it a declaration
+    // is inert data that never supervised anything.
+    if (SupervisionActive(pindexDelete->nHeight)) {
+        CBlockUndo block_undo;
+        if (UndoReadFromDisk(block_undo, pindexDelete)) {
+            SupervisionRevertBlock(block, block_undo);
+        } else {
+            return AbortNode(state, "Failed to read undo data for supervision tracking; the supervision registry would desync from consensus");
+        }
+    }
+
     // Let wallets know transactions went from 1-confirmed to
     // 0-confirmed or conflicted:
     GetMainSignals().BlockDisconnected(pblock, pindexDelete);
@@ -3945,6 +3958,24 @@ bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew
             PosApplyBlockStake(blockConnecting, block_undo);
         } else {
             return AbortNode(state, "Failed to read undo data for stake tracking; the stake registry would desync from consensus");
+        }
+    }
+
+    // SEQUENTIA: mirror this block's supervision declarations and records into
+    // the registry, once per tip transition, DisconnectTip inverting it exactly.
+    //
+    // After the block has validated, deliberately: CheckTxInputs consulted the
+    // registry as applied through the previous block, so a freeze confirmed in
+    // this block binds spends from the NEXT one (Alberto's point 5). That
+    // removes the same-block record-plus-spend case, whose outcome would
+    // otherwise depend on update ordering inside ConnectBlock -- exactly where
+    // mempool acceptance and block validation can diverge.
+    if (SupervisionActive(pindexNew->nHeight)) {
+        CBlockUndo block_undo;
+        if (UndoReadFromDisk(block_undo, pindexNew)) {
+            SupervisionApplyBlock(blockConnecting, block_undo);
+        } else {
+            return AbortNode(state, "Failed to read undo data for supervision tracking; the supervision registry would desync from consensus");
         }
     }
 
