@@ -26,6 +26,8 @@ branch() { echo "${AMBRA_BRANCH:-$(default_branch "$PRODUCT_REPO")}"; }
 # Point these at the real key to enable the product.
 SWK_REPO="${SEQ_SWK_REPO:-https://github.com/GracedEternalKingCabbageMan/SWK.git}"
 SEQLN_REPO="${SEQ_SEQLN_REPO:-https://github.com/GracedEternalKingCabbageMan/seqln.git}"
+# The ABIs Flutter packages into the APK. The Rust core has to exist for each.
+AMBRA_ABIS="${SEQ_AMBRA_ABIS:-arm64-v8a armeabi-v7a x86_64}"
 AMBRA_KEYSTORE="${SEQ_AMBRA_KEYSTORE:-/etc/sequentia/ambra-release.keystore}"
 AMBRA_KEY_PROPERTIES="${SEQ_AMBRA_KEY_PROPERTIES:-/etc/sequentia/ambra-key.properties}"
 
@@ -91,13 +93,22 @@ build() {
   # committed, so the Flutter build bundles whatever .so happens to be staged --
   # building Dart against a stale core is a silent bug that ships. Building into
   # a clean checkout each time is what makes that impossible here.
-  log "[ambra] cross-compiling ambra_core for Android"
+  # Every ABI the APK ships, not just the one most phones use. Flutter packages
+  # arm64-v8a, armeabi-v7a and x86_64, and it does so whether or not the Rust core
+  # exists for each: a device on a missing ABI installs the app and then fails when
+  # it loads the core. Building only arm64 published exactly that, and the download
+  # page advertises "arm64 + x86-64".
+  log "[ambra] cross-compiling ambra_core for $AMBRA_ABIS"
+  local ndk_targets=() abi
+  for abi in $AMBRA_ABIS; do ndk_targets+=(-t "$abi"); done
   ( cd "$dir/ambra_core" \
-      && nice -n "$NICE" cargo ndk -t arm64-v8a \
+      && nice -n "$NICE" cargo ndk "${ndk_targets[@]}" \
            -o ../app/android/app/src/main/jniLibs build --release ) \
     || { log "[ambra] ambra_core build failed"; return 1; }
-  [ -n "$(ls -A "$dir/app/android/app/src/main/jniLibs" 2>/dev/null)" ] \
-    || { log "[ambra] no jniLibs produced; the APK would ship without its core"; return 1; }
+  for abi in $AMBRA_ABIS; do
+    [ -f "$dir/app/android/app/src/main/jniLibs/$abi/libambra_core.so" ] \
+      || { log "[ambra] no core built for $abi; the APK would install and then fail there"; return 1; }
+  done
 
   log "[ambra] building the signed release APK"
   cp "$AMBRA_KEY_PROPERTIES" "$dir/app/android/key.properties"
@@ -115,6 +126,17 @@ build() {
     log "[ambra] APK is debug-signed; refusing to publish"
     return 1
   fi
+
+  # Check the artifact, not the inputs. The build-side check above asks whether
+  # each core was produced; this asks whether the APK actually carries one for
+  # every ABI it ships, which is the thing a phone cares about. They can differ:
+  # Flutter packages an ABI whether or not a core exists for it, so an APK can
+  # look complete, install cleanly, and fail on first use.
+  local missing=""
+  for abi in $(unzip -l "$apk" 2>/dev/null | grep -oE 'lib/[a-z0-9_-]+/' | cut -d/ -f2 | sort -u); do
+    unzip -l "$apk" 2>/dev/null | grep -q "lib/$abi/libambra_core.so" || missing="$missing $abi"
+  done
+  [ -z "$missing" ] || { log "[ambra] APK ships ABIs with no core:$missing; refusing to publish"; return 1; }
 
   cp "$apk" "$out/ambra-$version.apk"
 }
