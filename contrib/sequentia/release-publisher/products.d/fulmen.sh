@@ -45,42 +45,60 @@ build() {
   # then kept all three at the previous version because of one broken installer.
   # Run them independently so each publishes on its own merit, and put NSIS last:
   # it is the only one that needs wine.
-  local built=0 tgt rc
+  # A target that fails still leaves whatever it got as far as writing. electron-
+  # builder's NSIS step assembles the installer and only then appends the app, so a
+  # wine failure at the end leaves a VALID 170KB installer that installs nothing.
+  # It is a real PE file and a real Nullsoft archive, so no format check will catch
+  # it. Only publish what a SUCCEEDING target produced.
+  local ok_appimage=0 ok_zip=0 ok_nsis=0 tgt rc slug
   for tgt in "--linux AppImage" "--win zip" "--win nsis"; do
+    slug="$(echo "$tgt" | tr -d ' -')"
     log "[fulmen] building $tgt"
     # shellcheck disable=SC2086
-    if nice -n "$NICE" npx electron-builder $tgt > "$BUILD_ROOT/fulmen-$(echo "$tgt" | tr -d ' -').log" 2>&1; then
-      built=1
+    if nice -n "$NICE" npx electron-builder $tgt > "$BUILD_ROOT/fulmen-$slug.log" 2>&1; then
+      case "$tgt" in
+        *AppImage) ok_appimage=1 ;;
+        *zip)      ok_zip=1 ;;
+        *nsis)     ok_nsis=1 ;;
+      esac
     else
       rc=$?
       log "[fulmen] $tgt FAILED (rc=$rc); last lines:"
-      tail -12 "$BUILD_ROOT/fulmen-$(echo "$tgt" | tr -d ' -').log" | sed 's/^/    /'
+      tail -12 "$BUILD_ROOT/fulmen-$slug.log" | sed 's/^/    /'
     fi
   done
-  [ "$built" = "1" ] || { log "[fulmen] every target failed"; return 1; }
+  [ "$((ok_appimage + ok_zip + ok_nsis))" -gt 0 ] || { log "[fulmen] every target failed"; return 1; }
 
   # electron-builder names artifacts from package.json; collect whatever it
   # produced rather than predicting the exact spelling.
-  shopt -s nullglob
-  local found=0 f
-  for f in dist/*.AppImage; do cp "$f" "$out/Fulmen-$version-linux-x86_64.AppImage"; found=1; done
-  for f in dist/*-win.zip dist/*win*.zip; do cp "$f" "$out/Fulmen-$version-win64.zip"; found=1; break; done
-  # electron-builder names the NSIS output from package.json, so match on the
-  # extension rather than predicting the spelling, and exclude the zip.
-  for f in dist/*.exe; do cp "$f" "$out/Fulmen-Setup-$version.exe"; found=1; break; done
-  shopt -u nullglob
-  [ "$found" = "1" ] || { log "[fulmen] electron-builder produced no recognisable artifacts"; return 1; }
+  # An Electron artifact carries a whole browser runtime, so any of these is tens
+  # of megabytes. A few hundred KB means the build stopped before the payload went
+  # in -- which is exactly what a half-failed NSIS step leaves behind. Size is the
+  # check that catches it; the file type does not, because the stub is a perfectly
+  # well-formed PE and Nullsoft archive.
+  local MIN_BYTES="${SEQ_FULMEN_MIN_ARTIFACT_BYTES:-20000000}"
+  take() {  # take <built-ok> <source glob> <published name>
+    local ok="$1" glob="$2" name="$3" f sz
+    [ "$ok" = "1" ] || { log "[fulmen] $name: target did not succeed, leaving the published one alone"; return 0; }
+    shopt -s nullglob
+    for f in $glob; do
+      sz=$(stat -c %s "$f")
+      if [ "$sz" -lt "$MIN_BYTES" ]; then
+        log "[fulmen] $name: $(basename "$f") is only $sz bytes, too small to contain the app; refusing it"
+        shopt -u nullglob; return 0
+      fi
+      cp "$f" "$out/$name"
+      shopt -u nullglob; return 0
+    done
+    shopt -u nullglob
+    log "[fulmen] $name: the target succeeded but produced no file"
+  }
 
-  # A Windows installer built under wine that nobody has run on Windows is a
-  # coin toss, so refuse to publish one that is not even the right kind of file:
-  # a PE executable. This catches the common wine failure where the NSIS step
-  # half-succeeds and leaves a stub behind.
-  if [ -f "$out/Fulmen-Setup-$version.exe" ]; then
-    if ! file "$out/Fulmen-Setup-$version.exe" | grep -qi 'PE32\|MS Windows'; then
-      log "[fulmen] the produced Setup.exe is not a Windows executable; dropping it"
-      rm -f "$out/Fulmen-Setup-$version.exe"
-    fi
-  else
-    log "[fulmen] no installer produced; page keeps the previous one"
-  fi
+  take "$ok_appimage" 'dist/*.AppImage'            "Fulmen-$version-linux-x86_64.AppImage"
+  take "$ok_zip"      'dist/*win*.zip'             "Fulmen-$version-win64.zip"
+  # electron-builder names the installer from package.json, so match the extension
+  # rather than predicting the spelling.
+  take "$ok_nsis"     'dist/*.exe'                 "Fulmen-Setup-$version.exe"
+
+  [ -n "$(ls -A "$out" 2>/dev/null)" ] || { log "[fulmen] nothing passed the checks"; return 1; }
 }
