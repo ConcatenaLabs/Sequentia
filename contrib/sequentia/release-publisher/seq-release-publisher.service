@@ -1,0 +1,22 @@
+[Unit]
+Description=Publish a new Sequentia Core release to the download page
+Documentation=file:/root/sequentia/release-build/Sequentia/contrib/sequentia/release-publisher/README.md
+# Nothing to do without the network, and a failed ls-remote is a wasted wake-up.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/root/sequentia/release-build/Sequentia/contrib/sequentia/release-publisher/publish-release.sh
+# A release build takes hours on a box that is also producing blocks; do not let
+# systemd kill it half way through and leave a half-written artifact.
+TimeoutStartSec=infinity
+# The build is already niced inside the script; this keeps it off the CPU that
+# the committee needs even when the script is invoked by hand.
+Nice=19
+IOSchedulingClass=idle
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
