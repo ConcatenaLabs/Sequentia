@@ -143,6 +143,32 @@ void GenerateSupervisedAssetEntropy(uint256& entropy, const COutPoint& prevout,
     entropy = ComputeFastMerkleRoot(leaves);
 }
 
+void GenerateIssuanceEntropyFromTx(uint256& entropy, const CTransaction& tx, size_t vin)
+{
+    assert(vin < tx.vin.size());
+    const CAssetIssuance& issuance = tx.vin[vin].assetIssuance;
+    GenerateAssetEntropy(entropy, tx.vin[vin].prevout, issuance.assetEntropy);
+
+    // An unsupervised issuance is done: there is no declaration to find, and the
+    // loop below costs one script parse per output on the rare transaction that
+    // has one at all.
+    for (const CTxOut& out : tx.vout) {
+        const std::optional<SupervisionDeclaration> decl = ParseSupervisionScript(out.scriptPubKey);
+        if (!decl) continue;
+        uint256 supervised;
+        GenerateSupervisedAssetEntropy(supervised, tx.vin[vin].prevout, issuance.assetEntropy,
+                                       decl->descriptor);
+        CAsset asset;
+        CalculateAsset(asset, supervised);
+        // The declaration names its asset, so this confirms the declaration is
+        // describing THIS issuance before its derivation is adopted.
+        if (asset == decl->asset) {
+            entropy = supervised;
+            return;
+        }
+    }
+}
+
 const std::vector<unsigned char> SUPERVISION_RECORD_MARKER = {'S', 'E', 'Q', 'F', 'R', 'Z'};
 
 //! The signature's fixed width. BIP340 signatures are always 64 bytes; there is
