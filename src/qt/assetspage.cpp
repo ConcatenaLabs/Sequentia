@@ -14,6 +14,7 @@
 #include <assetsdir.h>
 #include <interfaces/node.h>
 #include <netbase.h>
+#include <policy/policy.h>
 #include <rpc/util.h>
 
 #include <cmath>
@@ -21,6 +22,7 @@
 #include <QAbstractButton>
 #include <QByteArray>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDoubleValidator>
@@ -189,6 +191,8 @@ AssetsPage::AssetsPage(const PlatformStyle* platformStyle, QWidget* parent)
     reissueHint->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
     issueForm->addRow(reissueHint);
     issueForm->addRow(QString(), m_issue_blind);
+    m_issue_fee_asset = new QComboBox(issueGroup);
+    issueForm->addRow(tr("Pay the fee in:"), m_issue_fee_asset);
 
     // SEQUENTIA: supervision. Presented as what it is -- a permanent power over
     // everyone who will ever hold the asset -- rather than as a feature toggle,
@@ -250,8 +254,10 @@ AssetsPage::AssetsPage(const PlatformStyle* platformStyle, QWidget* parent)
     m_reissue_amount = new QLineEdit(reissueGroup);
     m_reissue_amount->setPlaceholderText(tr("amount to mint"));
     m_reissue_button = new QPushButton(tr("Reissue"), reissueGroup);
+    m_reissue_fee_asset = new QComboBox(reissueGroup);
     reissueForm->addRow(tr("Asset id:"), m_reissue_asset);
     reissueForm->addRow(tr("Amount:"), m_reissue_amount);
+    reissueForm->addRow(tr("Pay the fee in:"), m_reissue_fee_asset);
     reissueForm->addRow(QString(), m_reissue_button);
     layout->addWidget(reissueGroup);
 
@@ -323,7 +329,41 @@ AssetsPage::AssetsPage(const PlatformStyle* platformStyle, QWidget* parent)
 void AssetsPage::setModel(WalletModel* model)
 {
     m_wallet_model = model;
-    if (m_wallet_model) refresh();
+    if (m_wallet_model) {
+        populateFeeAssets();
+        connect(m_wallet_model, &WalletModel::assetTypesChanged, this, &AssetsPage::populateFeeAssets);
+        refresh();
+    }
+}
+
+void AssetsPage::populateFeeAssets()
+{
+    if (!m_wallet_model) return;
+    // The policy asset first because it is the one a new wallet is most likely to
+    // hold, not because it is privileged: on this chain a fee may be paid in any
+    // asset a producer accepts, and none of them is a default.
+    for (QComboBox* selector : {m_issue_fee_asset, m_reissue_fee_asset}) {
+        if (!selector) continue;
+        const QString previous = selector->currentData().toString();
+        selector->clear();
+        selector->addItem(GUIUtil::assetDisplayName(::policyAsset),
+                          QString::fromStdString(::policyAsset.GetHex()));
+        for (const CAsset& asset : m_wallet_model->getAssetTypes()) {
+            if (asset == ::policyAsset) continue;
+            selector->addItem(GUIUtil::assetDisplayName(asset),
+                              QString::fromStdString(asset.GetHex()));
+        }
+        const int index = selector->findData(previous);
+        if (index >= 0) selector->setCurrentIndex(index);
+    }
+}
+
+UniValue AssetsPage::chosenFeeAsset(const QComboBox* selector) const
+{
+    if (!selector) return NullUniValue;
+    const QString asset = selector->currentData().toString();
+    if (asset.isEmpty()) return NullUniValue;
+    return UniValue(asset.toStdString());
 }
 
 std::string AssetsPage::walletUri() const
@@ -670,7 +710,7 @@ void AssetsPage::onIssue()
     params.push_back(UniValue(UniValue::VNUM, reissuable ? std::string("1") : std::string("0")));
     params.push_back(m_issue_blind->isChecked());
     params.push_back(NullUniValue); // contract_hash: the contract below supersedes it
-    params.push_back(NullUniValue); // fee_asset
+    params.push_back(chosenFeeAsset(m_issue_fee_asset));
     params.push_back(NullUniValue); // denomination: taken from the contract's precision
     params.push_back(contract);
 
@@ -874,6 +914,7 @@ void AssetsPage::onReissue()
     UniValue params(UniValue::VARR);
     params.push_back(asset.toStdString());
     params.push_back(UniValue(UniValue::VNUM, amount.toStdString()));
+    params.push_back(chosenFeeAsset(m_reissue_fee_asset));
 
     bool ok; QString err;
     callWalletRpc("reissueasset", params, ok, err);
