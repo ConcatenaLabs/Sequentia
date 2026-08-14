@@ -36,6 +36,9 @@
 
 #include <univalue.h>
 
+#include <algorithm>
+#include <map>
+
 using wallet::CRecipient;
 
 namespace wallet {
@@ -994,6 +997,17 @@ RPCHelpMan getbtcbalance()
                     {RPCResult::Type::STR_AMOUNT, "btc", "total unspent parent-chain balance across this wallet's addresses"},
                     {RPCResult::Type::NUM, "addresses", "number of wallet receiving addresses scanned"},
                     {RPCResult::Type::NUM, "parent_height", "the parent-chain height the scan covered"},
+                    {RPCResult::Type::ARR, "utxos", "the unspent outputs found, newest first (capped at 200)", {
+                        {RPCResult::Type::OBJ, "", "", {
+                            {RPCResult::Type::STR_HEX, "txid", "the parent-chain transaction id"},
+                            {RPCResult::Type::NUM, "vout", "the output index"},
+                            {RPCResult::Type::STR_AMOUNT, "btc", "the output's amount"},
+                            {RPCResult::Type::NUM, "height", "the parent-chain height it confirmed at"},
+                            {RPCResult::Type::NUM, "confirmations", "parent-chain confirmations"},
+                            {RPCResult::Type::NUM_TIME, "time", "the block time of that height, 0 when not resolved"},
+                            {RPCResult::Type::STR, "address", "the receiving address it paid"},
+                        }},
+                    }},
                     {RPCResult::Type::STR, "error", "non-empty if the parent chain could not be queried"},
                 }},
                 RPCExamples{HelpExampleCli("getbtcbalance", "") + HelpExampleRpc("getbtcbalance", "")},
@@ -1030,6 +1044,7 @@ RPCHelpMan getbtcbalance()
         result.pushKV("btc", ValueFromAmount(0));
         result.pushKV("addresses", 0);
         result.pushKV("parent_height", 0);
+        result.pushKV("utxos", UniValue(UniValue::VARR));
         result.pushKV("error", "no receiving addresses yet - create one on the Receive tab");
         return result;
     }
@@ -1042,6 +1057,7 @@ RPCHelpMan getbtcbalance()
     CAmount total = 0;
     int parent_height = 0;
     std::string err;
+    UniValue utxos(UniValue::VARR);
     try {
         UniValue reply = CallMainChainRPC("scantxoutset", params);
         if (reply.exists("error") && !reply["error"].isNull()) {
@@ -1051,6 +1067,66 @@ RPCHelpMan getbtcbalance()
             const UniValue& res = reply["result"];
             if (res.exists("total_amount")) total = AmountFromValue(res["total_amount"]);
             if (res.exists("height") && res["height"].isNum()) parent_height = res["height"].get_int();
+
+            // The individual outputs, so a wallet can show WHAT arrived and when, not just
+            // the sum. This is the UTXO set, not history: an output disappears from here
+            // the moment it is spent, and unconfirmed outputs never appear at all.
+            if (res.exists("unspents") && res["unspents"].isArray()) {
+                struct Found { std::string txid; int vout; UniValue amount; int height; std::string address; };
+                std::vector<Found> found;
+                for (size_t i = 0; i < res["unspents"].size(); ++i) {
+                    const UniValue& u = res["unspents"][i];
+                    if (!u.isObject()) continue;
+                    Found f;
+                    f.txid = (u.exists("txid") && u["txid"].isStr()) ? u["txid"].get_str() : "";
+                    f.vout = (u.exists("vout") && u["vout"].isNum()) ? u["vout"].get_int() : 0;
+                    if (u.exists("amount")) f.amount = u["amount"];
+                    f.height = (u.exists("height") && u["height"].isNum()) ? u["height"].get_int() : 0;
+                    // scantxoutset echoes the matching descriptor as "addr(<address>)#checksum";
+                    // recover the plain address from it.
+                    if (u.exists("desc") && u["desc"].isStr()) {
+                        const std::string d = u["desc"].get_str();
+                        const size_t open = d.find("addr(");
+                        const size_t close = (open == std::string::npos) ? std::string::npos : d.find(')', open);
+                        if (close != std::string::npos) f.address = d.substr(open + 5, close - open - 5);
+                    }
+                    found.push_back(std::move(f));
+                }
+                std::sort(found.begin(), found.end(), [](const Found& a, const Found& b) { return a.height > b.height; });
+                if (found.size() > 200) found.resize(200); // this feeds a GUI list, not an accounting export
+                // Resolve block times for the heights involved (two parent RPCs per distinct
+                // height, capped so a wallet with many old outputs cannot stall the call).
+                std::map<int, int64_t> height_time;
+                for (const Found& f : found) {
+                    if (f.height <= 0 || height_time.count(f.height) || height_time.size() >= 24) continue;
+                    try {
+                        UniValue hp(UniValue::VARR);
+                        hp.push_back(f.height);
+                        UniValue hr = CallMainChainRPC("getblockhash", hp);
+                        if (!hr.exists("result") || !hr["result"].isStr()) continue;
+                        UniValue bp(UniValue::VARR);
+                        bp.push_back(hr["result"].get_str());
+                        UniValue br = CallMainChainRPC("getblockheader", bp);
+                        if (br.exists("result") && br["result"].isObject() && br["result"]["time"].isNum()) {
+                            height_time[f.height] = br["result"]["time"].get_int64();
+                        }
+                    } catch (...) {
+                        // A missing timestamp is not worth failing the whole scan over.
+                    }
+                }
+                for (const Found& f : found) {
+                    UniValue o(UniValue::VOBJ);
+                    o.pushKV("txid", f.txid);
+                    o.pushKV("vout", f.vout);
+                    o.pushKV("btc", f.amount);
+                    o.pushKV("height", f.height);
+                    o.pushKV("confirmations", (f.height > 0 && parent_height >= f.height) ? parent_height - f.height + 1 : 0);
+                    const auto it = height_time.find(f.height);
+                    o.pushKV("time", it != height_time.end() ? it->second : int64_t{0});
+                    o.pushKV("address", f.address);
+                    utxos.push_back(o);
+                }
+            }
         }
     } catch (const std::exception& e) {
         err = std::string("parent chain unreachable: ") + e.what();
@@ -1061,6 +1137,7 @@ RPCHelpMan getbtcbalance()
     result.pushKV("btc", ValueFromAmount(total));
     result.pushKV("addresses", naddr);
     result.pushKV("parent_height", parent_height);
+    result.pushKV("utxos", utxos);
     result.pushKV("error", err);
     return result;
 },

@@ -275,8 +275,11 @@ namespace GUIUtil
        currency, using the node's cached USD price feed. Empty when unpriced/unavailable or when the
        amount is already in the reference denomination. Display-only — never used for copy/export. */
     QString formatReferenceApprox(const CAsset& asset, const CAmount& amount, const QString& refTicker);
-    /* SEQUENTIA: as above, summed across a multi-asset map (e.g. a total balance). */
-    QString formatMultiAssetReferenceApprox(const CAmountMap& amountmap, const QString& refTicker);
+    /* SEQUENTIA: as above, summed across a multi-asset map (e.g. a total balance).
+       `extraBtcWhole` adds that many whole parent-chain bitcoin (valued via the feed's
+       WBTC entry) into the sum — the dual-address tBTC balance is not a CAsset, so it
+       cannot travel inside the map. */
+    QString formatMultiAssetReferenceApprox(const CAmountMap& amountmap, const QString& refTicker, double extraBtcWhole = 0.0);
     /* SEQUENTIA: "≈ <ref>" from an asset LABEL/ticker + a whole-unit amount (for RPC-string tables
        like the assets page, where no CAsset/CAmount is available). Empty if unpriced. */
     QString formatReferenceApproxByLabel(const QString& assetLabel, double wholeUnits, const QString& refTicker);
@@ -302,6 +305,19 @@ namespace GUIUtil
     /* SEQUENTIA: render a reference-currency value as a bare "<number> <REF>" (no "≈"),
        with the decimal count that suits the reference (8 for BTC, else 2/6 by magnitude). */
     QString formatReferenceAmount(double value, const QString& refTicker);
+
+    /* SEQUENTIA: one unspent parent-chain (Bitcoin) output paying a wallet address, as the
+       wallet's getbtcbalance scan reports it. Display-only: the amount stays the decimal
+       string the RPC printed, so nothing is re-rounded on the way to the screen. */
+    struct ParentChainUtxo {
+        QString txid;
+        int vout{0};
+        QString amount;
+        int height{0};
+        int confirmations{0};
+        qint64 time{0}; // block time; 0 when the scan could not resolve it
+        QString address;
+    };
 
     /* SEQUENTIA: the user's chosen reference currency ticker (QSettings), defaulting to USD. */
     QString referenceCurrency();

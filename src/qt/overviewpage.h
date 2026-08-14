@@ -6,7 +6,9 @@
 #define BITCOIN_QT_OVERVIEWPAGE_H
 
 #include <interfaces/wallet.h>
+#include <qt/guiutil.h>
 
+#include <QList>
 #include <QWidget>
 #include <memory>
 
@@ -59,6 +61,10 @@ private:
 Q_SIGNALS:
     void transactionClicked(const QModelIndex &index);
     void outOfSyncWarningClicked();
+    // Sequentia: a fresh parent-chain scan finished; carries the unspent Bitcoin outputs
+    // paying this wallet's addresses (empty when unreachable). The Transactions tab
+    // listens to show them, so the scan runs once for the whole wallet view.
+    void btcUtxosChanged(const QList<GUIUtil::ParentChainUtxo>& utxos, int parentHeight);
 
 protected:
     void changeEvent(QEvent* e) override;
@@ -87,9 +93,17 @@ private:
     QLabel *m_anchor_label{nullptr};
     QLabel *m_staking_label{nullptr};
     QLabel *m_finality_label{nullptr};
-    QLabel *m_btc_label{nullptr};
+    QLabel *m_btc_label{nullptr};         // scan status/error line; hidden once the balance has a table row
     bool m_btc_scan_inflight{false};      // guards re-entry of the slow parent-chain scan
     unsigned m_btc_refresh_tick{0};       // throttles the periodic dual-balance refresh
+
+    // Last successful parent-chain scan: the tBTC balance rides in the asset table and the
+    // headline total, so it is kept here between scans. -1 = no successful scan yet (or the
+    // parent became unreachable), which drops the row rather than showing a stale number.
+    CAmount m_btc_amount{-1};
+    int m_btc_addresses{0};
+    int m_btc_parent_height{0};
+    QList<GUIUtil::ParentChainUtxo> m_btc_utxos;
 
     const PlatformStyle* m_platform_style;
 
@@ -104,6 +118,10 @@ private Q_SLOTS:
     void setMonospacedFont(bool use_embedded_font);
     void updateSeqStatus();
     void refreshBtcBalance();
+    // Lands the worker thread's parent-chain scan on the GUI thread: refreshes the
+    // tBTC table row / headline / status line and republishes the utxo list.
+    void onBtcScanResult(bool ok, const QString& error_text, CAmount amount, int naddr,
+                         int parent_height, const QList<GUIUtil::ParentChainUtxo>& utxos);
 };
 
 #endif // BITCOIN_QT_OVERVIEWPAGE_H
