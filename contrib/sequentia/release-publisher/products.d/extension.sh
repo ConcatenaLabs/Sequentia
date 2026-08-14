@@ -11,7 +11,11 @@ export LC_ALL=C
 
 PRODUCT_NAME="extension"
 PRODUCT_REPO="${SEQ_EXTENSION_REPO:-https://github.com/GracedEternalKingCabbageMan/sequentia-extension.git}"
-PRODUCT_INDEX_GLOB="sequentia-wallet-extension-*.zip"
+# Both spellings, new one first. The extension was renamed to Ambra, and the old
+# artifacts stay on the download server, so the page has to keep resolving a link
+# to either while the transition settles. Drop the second pattern once no card
+# names it.
+PRODUCT_INDEX_GLOB="ambra-*-chromium.zip sequentia-wallet-extension-*.zip"
 
 # Empty means "ask the remote what its default branch is".
 EXTENSION_BRANCH="${SEQ_EXTENSION_BRANCH:-}"
@@ -45,7 +49,9 @@ build() {
   # What a user installs must not carry our development scaffolding: CLAUDE.md
   # is instructions to an agent, doc/ and test material are noise, and .git would
   # multiply the download size for nothing.
-  local zipfile="$out/sequentia-wallet-extension-$version.zip"
+  # This script names the artifact, not the extension repository: the zip is made
+  # here, out of the checkout. Mirrors the Android spelling, ambra-<version>-...
+  local zipfile="$out/ambra-$version-chromium.zip"
   nice -n "$NICE" zip -q -r "$zipfile" . \
     -x '.git/*' '.github/*' 'doc/*' 'docs/*' 'test/*' 'tests/*' \
        'CLAUDE.md' '*.md.bak' '.gitignore' '*.zip'
