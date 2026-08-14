@@ -138,6 +138,7 @@ BitcoinGUI::BitcoinGUI(interfaces::Node& node, const PlatformStyle *_platformSty
             this->message(title, message, style);
         });
         connect(walletFrame, &WalletFrame::currentWalletSet, [this] { updateWalletStatus(); });
+        connect(walletFrame, &WalletFrame::supervisionAvailable, this, &BitcoinGUI::setSupervisionTabVisible);
         setCentralWidget(walletFrame);
     } else
 #endif // ENABLE_WALLET
@@ -328,6 +329,17 @@ void BitcoinGUI::createActions()
     stakingAction->setShortcut(QKeySequence(Qt::ALT + Qt::Key_6));
     tabGroup->addAction(stakingAction);
 
+    // SEQUENTIA: supervised assets (doc/sequentia/supervised-assets.md). The tab is
+    // hidden unless the wallet on screen has one to operate, so most users never
+    // see it -- and the issuer who does has the freeze, unfreeze, pause and rotate
+    // flows here rather than in a shell.
+    supervisionAction = new QAction(platformStyle->SingleColorIcon(":/icons/assets"), tr("Su&pervision"), this);
+    supervisionAction->setStatusTip(tr("Freeze, unfreeze, pause and rotate keys for supervised assets you issued"));
+    supervisionAction->setToolTip(supervisionAction->statusTip());
+    supervisionAction->setCheckable(true);
+    supervisionAction->setShortcut(QKeySequence(Qt::ALT + Qt::Key_7));
+    tabGroup->addAction(supervisionAction);
+
     // Sequentia operator tool (menu action, not a tab): view/edit which assets this node
     // accepts for fees.
     feePolicyAction = new QAction(tr("&Fee acceptance…"), this);
@@ -354,6 +366,8 @@ void BitcoinGUI::createActions()
     connect(assetsAction, &QAction::triggered, this, &BitcoinGUI::gotoAssetsPage);
     connect(stakingAction, &QAction::triggered, [this]{ showNormalIfMinimized(); });
     connect(stakingAction, &QAction::triggered, this, &BitcoinGUI::gotoStakingPage);
+    connect(supervisionAction, &QAction::triggered, [this]{ showNormalIfMinimized(); });
+    connect(supervisionAction, &QAction::triggered, this, &BitcoinGUI::gotoSupervisionPage);
     connect(feePolicyAction, &QAction::triggered, [this]{ showNormalIfMinimized(); });
     connect(feePolicyAction, &QAction::triggered, this, &BitcoinGUI::gotoFeePolicyDialog);
 #endif // ENABLE_WALLET
@@ -635,7 +649,7 @@ void BitcoinGUI::createToolBars()
         QButtonGroup* navGroup = new QButtonGroup(this);
         navGroup->setExclusive(true);
         for (QAction* action : {overviewAction, sendCoinsAction, receiveCoinsAction,
-                                historyAction, assetsAction, stakingAction}) {
+                                historyAction, assetsAction, stakingAction, supervisionAction}) {
             // Recolour the icon to the muted text colour: the action's icon is
             // single-colour amber, and a QPushButton shows it at full strength for
             // every state, which made every tab look selected. Amber is left to
@@ -648,7 +662,14 @@ void BitcoinGUI::createToolBars()
             button->setCursor(Qt::PointingHandCursor);
             button->setToolTip(action->toolTip());
             navGroup->addButton(button);
-            toolbar->addWidget(button);
+            QAction* const placed = toolbar->addWidget(button);
+            // The sidebar entry a wallet with a supervised asset switches on. Held
+            // by the action addWidget returns, which is what hides the button
+            // itself rather than merely disabling it.
+            if (action == supervisionAction) {
+                m_supervision_tab_action = placed;
+                placed->setVisible(false);
+            }
             connect(button, &QPushButton::clicked, action, &QAction::trigger);
             connect(action, &QAction::toggled, button, &QPushButton::setChecked);
         }
@@ -870,6 +891,9 @@ void BitcoinGUI::setWalletActionsEnabled(bool enabled)
     historyAction->setEnabled(enabled);
     assetsAction->setEnabled(enabled);
     stakingAction->setEnabled(enabled);
+    // Enabled with the rest; whether its sidebar entry is there at all is a
+    // separate question, answered per wallet by setSupervisionTabVisible.
+    supervisionAction->setEnabled(enabled);
     feePolicyAction->setEnabled(enabled);
     encryptWalletAction->setEnabled(enabled);
     backupWalletAction->setEnabled(enabled);
@@ -1035,6 +1059,21 @@ void BitcoinGUI::gotoStakingPage()
 {
     stakingAction->setChecked(true);
     if (walletFrame) walletFrame->gotoStakingPage();
+}
+
+void BitcoinGUI::gotoSupervisionPage()
+{
+    supervisionAction->setChecked(true);
+    if (walletFrame) walletFrame->gotoSupervisionPage();
+}
+
+void BitcoinGUI::setSupervisionTabVisible(bool visible)
+{
+    if (m_supervision_tab_action) m_supervision_tab_action->setVisible(visible);
+    // A wallet switch can take the tab away while it is the one on screen. Leaving
+    // the window on a page whose entry has just vanished would strand the user with
+    // no lit tab and no way back except guessing.
+    if (!visible && supervisionAction->isChecked()) gotoOverviewPage();
 }
 
 void BitcoinGUI::gotoFeePolicyDialog()
