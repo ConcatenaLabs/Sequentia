@@ -54,6 +54,12 @@ build() {
 
   log "[node] building Linux ($JOBS jobs, nice $NICE) -> $blog"
   : > "$blog"
+  # Start from a clean tree. The same checkout builds both hosts, so it may still
+  # be configured for the mingw cross build from a previous run -- and configuring
+  # native on top of that leaves libtool .la files still naming Windows libraries,
+  # so the native link fails with "cannot find -lkernel32" and friends, which reads
+  # like a missing dependency rather than a stale build.
+  nice -n "$NICE" make distclean >>"$blog" 2>&1 || true
   node_step autogen ./autogen.sh || return 1
   # shellcheck disable=SC2086
   CONFIG_SITE="$depends_linux/share/config.site" node_step configure ./configure $NODE_CONFIGURE_ARGS || return 1
