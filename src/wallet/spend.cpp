@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <blind.h> // ELEMENTS: for MAX_RANGEPROOF_SIZE
+#include <supervision.h>
 #include <consensus/amount.h>
 #include <consensus/validation.h>
 #include <exchangerates.h>
@@ -1213,6 +1214,43 @@ static bool CreateTransactionInternal(
     // ELEMENTS: If we have blinded inputs but no blinded outputs (which, since the wallet
     //  makes an effort to not produce change, is a common case) then we need to add a
     //  dummy output.
+    // SEQUENTIA: a transaction that moves a supervised asset must be FULLY
+    // EXPLICIT, in every output and not merely the supervised ones, because
+    // which asset a blinded output carries is exactly what consensus cannot
+    // determine (src/supervision.h). Without this the wallet would build a
+    // perfectly ordinary send -- asset out, asset change, fee-asset change --
+    // and the node would reject it, which reads as an unrelated wallet bug.
+    //
+    // Detected from the recipients and the fee asset, which between them cover
+    // every way a supervised asset leaves this wallet: a supervised input can
+    // only become a supervised output or a supervised fee.
+    bool supervised_tx = false;
+    if (blind_details && SupervisionActive(wallet.GetLastBlockHeight() + 1)) {
+        const SupervisionRegistry& supervision = SupervisionRegistry::GetInstance();
+        if (!supervision.Empty()) {
+            for (const auto& recipient : vecSend) {
+                if (supervision.IsSupervised(recipient.asset)) { supervised_tx = true; break; }
+            }
+            if (!supervised_tx && supervision.IsSupervised(coin_selection_params.m_fee_asset)) {
+                supervised_tx = true;
+            }
+        }
+    }
+    if (supervised_tx) {
+        for (const auto& recipient : vecSend) {
+            if (recipient.confidentiality_key.IsFullyValid()) {
+                // Refused rather than silently downgraded: the caller asked for
+                // a confidential payment and would otherwise get a transparent
+                // one without being told.
+                error = _("Cannot send a supervised asset to a confidential address: consensus must be able to read the output to freeze it, so supervised assets are always explicit.");
+                return false;
+            }
+        }
+        // Nothing left to blind, so no blinding at all. Change gets no blinding
+        // pubkey below, and BlindTransaction is never asked to run.
+        blind_details = nullptr;
+    }
+
     bool may_need_blinded_dummy = !!blind_details;
     for (const auto& recipient : vecSend)
     {

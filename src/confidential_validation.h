@@ -89,7 +89,13 @@ public:
 
 ScriptError QueueCheck(std::vector<CCheck*>* queue, CCheck* check);
 
-bool VerifyAmounts(const std::vector<CTxOut>& inputs, const CTransaction& tx, std::vector<CCheck*>* pvChecks, const bool cacheStore);
+//! SEQUENTIA: `supervision` is the declaration governing this transaction's new
+//! issuances, or nullptr for the ordinary case. Non-null switches asset-id
+//! derivation to the supervised form. The caller supplies it rather than this
+//! function reading it off the transaction, because whether a declaration counts
+//! depends on the activation height, which this function does not have.
+struct SupervisionDescriptor;
+bool VerifyAmounts(const std::vector<CTxOut>& inputs, const CTransaction& tx, bool supervision_active, const SupervisionDescriptor* supervision, std::vector<CCheck*>* pvChecks, const bool cacheStore);
 
 bool VerifyCoinbaseAmount(const CTransaction& tx, const CAmountMap& mapFees);
 

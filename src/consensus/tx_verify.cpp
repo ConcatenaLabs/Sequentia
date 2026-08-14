@@ -9,10 +9,12 @@
 #include <consensus/amount.h>
 #include <consensus/consensus.h>
 #include <consensus/validation.h>
+#include <issuance.h>
 #include <pegins.h>
 #include <primitives/transaction.h>
 #include <script/interpreter.h>
 #include <script/pegins.h>
+#include <supervision.h>
 #include <util/moneystr.h>
 
 bool IsFinalTx(const CTransaction &tx, int nBlockHeight, int64_t nBlockTime)
@@ -202,6 +204,10 @@ bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, 
 
     std::vector<CTxOut> spent_inputs;
     CAmount nValueIn = 0;
+    // SEQUENTIA: set when any input, or any reissuance, carries a supervised
+    // asset. Such a transaction must keep every output explicit, which is what
+    // makes the explicit-only property inductive from issuance.
+    bool touches_supervised = false;
     for (unsigned int i = 0; i < tx.vin.size(); ++i) {
         const COutPoint &prevout = tx.vin[i].prevout;
         if (tx.vin[i].m_is_pegin) {
@@ -243,6 +249,47 @@ bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, 
             if (coin.out.nValue.IsExplicit()) {
                 nValueIn += coin.out.nValue.GetAmount();
             }
+
+            // SEQUENTIA: supervised assets, spend side (src/supervision.h).
+            if (SupervisionActive(nSpendHeight)) {
+                const SupervisionRegistry& supervision = SupervisionRegistry::GetInstance();
+                if (!supervision.Empty()) {
+                    // Spending a freeze record is the unfreeze, and the record's
+                    // own script deliberately does not authorise it -- see
+                    // BuildSupervisionRecordScript. Consensus does, against the
+                    // CURRENT operational key, which is the unfreeze trap: after
+                    // a rotation the old key lifts nothing.
+                    std::string err;
+                    if (!CheckSupervisionRecordSpend(tx.vin[i], coin.out, supervision, err)) {
+                        return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                                             "bad-txns-supervision-unfreeze", err);
+                    }
+
+                    // IsExplicit() before GetAsset(): the latter asserts, so a
+                    // blinded input would abort the node rather than be skipped.
+                    // A supervised asset can never be in a blinded output --
+                    // that is enforced from issuance onwards, below and in
+                    // CheckSupervisedIssuance -- so a blinded input is simply
+                    // some other asset.
+                    if (coin.out.nAsset.IsExplicit()) {
+                        const CAsset& asset = coin.out.nAsset.GetAsset();
+                        if (supervision.IsSupervised(asset)) {
+                            touches_supervised = true;
+                        }
+                        // Cheap test first: almost every supervised asset has no
+                        // freezes at all, and almost every spend of one is not of
+                        // a frozen script.
+                        if (supervision.AnyFrozen() &&
+                            supervision.IsFrozen(asset,
+                                                 SupervisionTargetHash(coin.out.scriptPubKey)) &&
+                            IsSingleOwnerSpend(tx, i, coin.out.scriptPubKey)) {
+                            return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                                "bad-txns-asset-frozen",
+                                strprintf("input %u spends frozen %s", i, asset.GetHex()));
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -252,8 +299,95 @@ bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, 
             return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-fee-outofrange");
         }
 
+        // SEQUENTIA: supervised assets (src/supervision.h).
+        //
+        // Here, and not in VerifyAmounts, because this is the one function both
+        // mempool acceptance (validation.cpp AcceptToMemoryPool) and ConnectBlock
+        // pass through, and because the gate needs nSpendHeight, which is the
+        // height of the block the transaction confirms in on both paths.
+        //
+        // Below the activation height a declaration is inert: the issuance
+        // derives plainly, which is exactly what a node without this code does,
+        // so old and new nodes agree about every block that already exists.
+        const SupervisionDescriptor* supervision = nullptr;
+        std::optional<SupervisionDeclaration> declaration;
+        if (SupervisionActive(nSpendHeight)) {
+            bool malformed = false;
+            declaration = SupervisionFromTx(tx, malformed);
+            if (malformed) {
+                return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-supervision-multiple-declarations");
+            }
+            if (declaration) {
+                uint256 entropy;
+                std::string err;
+                if (!CheckSupervisedIssuance(tx, *declaration, entropy, err)) {
+                    return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-supervision-declaration", err);
+                }
+                supervision = &declaration->descriptor;
+            }
+
+            // Freeze and rotation records. Admission is consensus, not policy:
+            // a record that reached a block unsigned would freeze someone on
+            // nobody's authority. The registry it is checked against is the one
+            // applied through the PREVIOUS block -- ConnectTip updates it only
+            // after the block validates -- which is what gives Alberto's
+            // next-block effectiveness and keeps mempool acceptance and block
+            // validation reading the same state.
+            std::string err;
+            if (!CheckSupervisionRecords(tx, SupervisionRegistry::GetInstance(), err)) {
+                return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                                     "bad-txns-supervision-record", err);
+            }
+
+            // Reissuing a supervised asset counts as touching it, even though
+            // no input carries it: the reissuance creates units out of the
+            // token, and those units must land explicit like every other one.
+            // The asset comes from the entropy the reissuance quotes, so it is
+            // readable here without the spent output.
+            const SupervisionRegistry& supervision = SupervisionRegistry::GetInstance();
+            if (!supervision.Empty()) {
+                for (const CTxIn& in : tx.vin) {
+                    if (in.assetIssuance.IsNull() || in.assetIssuance.assetBlindingNonce.IsNull()) {
+                        continue;
+                    }
+                    CAsset reissued;
+                    CalculateAsset(reissued, in.assetIssuance.assetEntropy);
+                    if (!supervision.IsSupervised(reissued)) continue;
+                    touches_supervised = true;
+                    if (!in.assetIssuance.nAmount.IsExplicit()) {
+                        return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                            "bad-txns-supervised-blinded",
+                            "a supervised asset may not be reissued into a blinded amount");
+                    }
+                }
+            }
+
+            // The induction step. Issuance starts a supervised asset in
+            // explicit outputs (CheckSupervisedIssuance); this keeps it there
+            // for ever after. Consensus cannot read a blinded output's asset,
+            // so a supervised asset inside one would be unfreezable and
+            // unauditable, and enforcing only at spend time would strand
+            // whoever already held such an output, permanently.
+            //
+            // EVERY output, not merely the supervised ones, because which asset
+            // a blinded output carries is exactly what cannot be determined.
+            // The cost is real and lands on wallets rather than users: a
+            // transaction that moves a supervised asset cannot blind its change
+            // in some other asset either. See the wallet note in
+            // doc/sequentia/supervised-assets-implementation.md.
+            if (touches_supervised) {
+                for (const CTxOut& out : tx.vout) {
+                    if (!out.nAsset.IsExplicit() || !out.nValue.IsExplicit()) {
+                        return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                            "bad-txns-supervised-blinded",
+                            "a transaction moving a supervised asset must keep every output explicit");
+                    }
+                }
+            }
+        }
+
         // Verify that amounts add up.
-        if (fScriptChecks && !VerifyAmounts(spent_inputs, tx, pvChecks, cacheStore)) {
+        if (fScriptChecks && !VerifyAmounts(spent_inputs, tx, SupervisionActive(nSpendHeight), supervision, pvChecks, cacheStore)) {
             return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-in-ne-out", "value in != value out");
         }
         fee_map += GetFeeMap(tx);

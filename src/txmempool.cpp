@@ -20,6 +20,7 @@
 #include <policy/settings.h>
 #include <policy/value.h>
 #include <reverse_iterator.h>
+#include <supervision.h>
 #include <util/check.h>
 #include <util/moneystr.h>
 #include <util/overflow.h>
@@ -696,6 +697,19 @@ void CTxMemPool::removeForReorg(CChain& chain, std::function<bool(txiter)> check
             txToRemove.insert(it);
             continue;
         }
+
+        // SEQUENTIA: and, on the same reasoning, every supervision declaration
+        // (src/supervision.h). A reorg can move a transaction to a height on the
+        // other side of the supervision activation, and the asset id it derives
+        // differs across that boundary, so an entry admitted on one side is
+        // invalid on the other with none of its inputs spent -- the state that
+        // stalls block production. Declarations are rare enough that dropping
+        // them all and letting them be resubmitted costs nothing.
+        bool malformed = false;
+        if (SupervisionFromTx(tx, malformed) || malformed) {
+            txToRemove.insert(it);
+            continue;
+        }
         for (const auto& input : tx.vin) {
             if (input.m_is_pegin) {
                 txToRemove.insert(it);
@@ -733,6 +747,29 @@ void CTxMemPool::removeConflicts(const CTransaction &tx)
 /**
  * Called when a block is connected. Removes from mempool and updates the miner fee estimator.
  */
+void CTxMemPool::removeStaleSupervision(CCoinsView& view)
+{
+    AssertLockHeld(cs);
+    const SupervisionRegistry& supervision = SupervisionRegistry::GetInstance();
+    if (supervision.Empty()) return;
+
+    std::vector<CTransactionRef> to_remove;
+    for (const auto& entry : mapTx) {
+        if (SupervisionInvalidates(entry.GetTx(), view, supervision)) {
+            to_remove.push_back(entry.GetSharedTx());
+        }
+    }
+    // With descendants: a child of an evicted transaction cannot be mined
+    // either, and leaving it behind reproduces the stall one level down.
+    for (const auto& tx : to_remove) {
+        const uint256 txid = tx->GetHash();
+        LogPrintf("Supervision: evicting %s from the mempool, a record invalidated it\n",
+                  txid.ToString());
+        removeRecursive(*tx, MemPoolRemovalReason::CONFLICT);
+        ClearPrioritisation(txid);
+    }
+}
+
 void CTxMemPool::removeForBlock(const std::vector<CTransactionRef>& vtx, unsigned int nBlockHeight, const CBlockIndex* p_block_index_new)
 {
     AssertLockHeld(cs);
@@ -917,7 +954,21 @@ void CTxMemPool::check(const CBlockIndex* active_chain_tip, const CCoinsViewCach
         const auto& fedpegscripts = GetValidFedpegScripts(active_chain_tip, Params().GetConsensus(), true /* nextblock_validation */);
         bool cacheStore = true;
         bool fScriptChecks = true;
-        assert(Consensus::CheckTxInputs(tx, dummy_state, mempoolDuplicate, spendheight, fee_map, setPeginsSpent, nullptr, cacheStore, fScriptChecks, fedpegscripts));
+        // SEQUENTIA: supervision is the one thing that can invalidate a resident
+        // entry with none of its inputs spent and no ancestor changed, so it is
+        // the one failure this assert must not treat as an internal
+        // inconsistency. ConnectTip evicts such entries (removeStaleSupervision)
+        // and this should therefore never fire; asserting on it anyway would
+        // turn any issuer's freeze into a remote crash of every node running
+        // -checkmempool. Log it and carry on, so the invariant keeps its value
+        // for everything else.
+        if (!Consensus::CheckTxInputs(tx, dummy_state, mempoolDuplicate, spendheight, fee_map, setPeginsSpent, nullptr, cacheStore, fScriptChecks, fedpegscripts)) {
+            if (!IsSupervisionRejection(dummy_state.GetRejectReason())) {
+                assert(false);
+            }
+            LogPrintf("Supervision: mempool entry %s is no longer valid (%s); it should have been evicted\n",
+                      tx.GetHash().ToString(), dummy_state.GetRejectReason());
+        }
         for (const auto& input: tx.vin) mempoolDuplicate.SpendCoin(input.prevout);
         AddCoins(mempoolDuplicate, tx, std::numeric_limits<int>::max());
     }

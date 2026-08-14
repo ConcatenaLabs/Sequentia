@@ -2,6 +2,7 @@
 #include <chainparams.h>
 #include <confidential_validation.h>
 #include <issuance.h>
+#include <supervision.h>
 #include <pegins.h>
 #include <script/sigcache.h>
 #include <blind.h>
@@ -132,7 +133,7 @@ static bool VerifyIssuanceAmount(secp256k1_pedersen_commitment& value_commit, se
     return true;
 }
 
-bool VerifyAmounts(const std::vector<CTxOut>& inputs, const CTransaction& tx, std::vector<CCheck*>* checks, const bool store_result) {
+bool VerifyAmounts(const std::vector<CTxOut>& inputs, const CTransaction& tx, bool supervision_active, const SupervisionDescriptor* supervision, std::vector<CCheck*>* checks, const bool store_result) {
     assert(!tx.IsCoinBase());
     assert(inputs.size() == tx.vin.size());
 
@@ -182,7 +183,25 @@ bool VerifyAmounts(const std::vector<CTxOut>& inputs, const CTransaction& tx, st
             if (!MoneyRange(val.GetAmount()))
                 return false;
 
-            // Fails if val.GetAmount() == 0
+            // SEQUENTIA: the mirror of the zero-value carve-out in the output
+            // loop below. A freeze record carries zero of its asset, and
+            // spending one is how a freeze is lifted, so this is the one input
+            // that can legitimately be worth nothing. It contributes nothing to
+            // the sum, so skipping it is exactly right; without the skip
+            // secp256k1_pedersen_commit fails on the zero and no freeze could
+            // ever be lifted.
+            //
+            // Guarded the same way as the output side: only for an output this
+            // node recognises as a supervision record correctly denominated in
+            // its own asset, and only where CheckTxInputs has vetted it.
+            if (val.GetAmount() == 0) {
+                if (supervision_active && IsSupervisionOutput(inputs[i])) {
+                    target_generators.pop_back();
+                    continue;
+                }
+                return false;
+            }
+
             if (secp256k1_pedersen_commit(secp256k1_ctx_verify_amounts, &commit, explicit_blinds, val.GetAmount(), &gen) != 1)
                 return false;
         } else if (val.IsCommitment()) {
@@ -216,7 +235,17 @@ bool VerifyAmounts(const std::vector<CTxOut>& inputs, const CTransaction& tx, st
         // New issuance, compute the asset ids
         if (issuance.assetBlindingNonce.IsNull()) {
             uint256 entropy;
-            GenerateAssetEntropy(entropy, tx.vin[i].prevout, issuance.assetEntropy);
+            // SEQUENTIA: a supervised issuance derives over its declaration as
+            // well, which is what binds the freeze terms to the asset itself
+            // (src/supervision.h). The caller decides whether supervision is in
+            // force -- this function has no height and must not guess, because a
+            // node deriving supervised where its peers derive plainly is on a
+            // different chain.
+            if (supervision) {
+                GenerateSupervisedAssetEntropy(entropy, tx.vin[i].prevout, issuance.assetEntropy, *supervision);
+            } else {
+                GenerateAssetEntropy(entropy, tx.vin[i].prevout, issuance.assetEntropy);
+            }
             CalculateAsset(assetID, entropy);
             // Null nAmount is considered explicit 0, so just check for commitment
             CalculateReissuanceToken(assetTokenID, entropy, issuance.nAmount.IsCommitment());
@@ -380,11 +409,29 @@ bool VerifyAmounts(const std::vector<CTxOut>& inputs, const CTransaction& tx, st
             if (val.GetAmount() == 0) {
                 if (tx.vout[i].scriptPubKey.IsUnspendable()) {
                     continue;
-                } else {
-                    // No spendable 0-value outputs
-                    // Reason: A spendable output of 0 reissuance tokens would allow reissuance without reissuance tokens.
-                    return false;
                 }
+                // SEQUENTIA: supervision declarations and records are the one
+                // exception. They must carry zero -- an issuer must not be able
+                // to burn value into a script only consensus can release -- and
+                // they must NOT be provably unspendable, because the whole
+                // supervision state is read back out of the UTXO set and a
+                // pruned output cannot be read.
+                //
+                // The rule they are exempted from prevents inflation: a
+                // zero-value output of a REISSUANCE TOKEN would authorise
+                // reissuing an asset without holding its tokens. That stays
+                // prevented, because CheckTxInputs has already vetted every
+                // declaration and record in this transaction and only admits
+                // ones naming an asset the registry knows is supervised, and a
+                // registry asset is never a token. Hence the gate: without it
+                // this carve-out would apply to unvetted outputs below the
+                // activation height and reopen the hole.
+                if (supervision_active && IsSupervisionOutput(tx.vout[i])) {
+                    continue;
+                }
+                // No spendable 0-value outputs
+                // Reason: A spendable output of 0 reissuance tokens would allow reissuance without reissuance tokens.
+                return false;
             }
 
             ret = secp256k1_pedersen_commit(secp256k1_ctx_verify_amounts, &commit, explicit_blinds, val.GetAmount(), &gen);
