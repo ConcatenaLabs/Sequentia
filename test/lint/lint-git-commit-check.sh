@@ -45,5 +45,9 @@ while IFS= read -r commit_hash  || [[ -n "$commit_hash" ]]; do
     done < <(git log --format=%B -n 1 "$commit_hash")
 done < <(git log "${COMMIT_RANGE}" --format=%H)
 
+# This check is currently reporting only: it prints what it finds and exits 0.
+# Deciding to enforce it again is a policy call, so it is left as it was found --
+# but the line below is then unreachable, which shellcheck rightly points out.
 exit 0 ## REMOVE ME
-exit ${EXIT_CODE}
+# shellcheck disable=SC2317  # reachable once the line above goes
+exit "${EXIT_CODE}"

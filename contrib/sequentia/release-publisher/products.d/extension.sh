@@ -1,9 +1,14 @@
+# shellcheck shell=bash
+# shellcheck disable=SC2034  # PRODUCT_* are read by the driver, not used here
 # The Sequentia browser wallet extension.
 #
 # Versioned by manifest.json, which is the version the browser itself shows, so
 # it is the only number a user can compare against what they have installed.
 # There is no build step: the extension is the repository, minus its development
 # files, zipped.
+# Sorting and version comparison below are locale-sensitive.
+export LC_ALL=C
+
 PRODUCT_NAME="extension"
 PRODUCT_REPO="${SEQ_EXTENSION_REPO:-https://github.com/GracedEternalKingCabbageMan/sequentia-extension.git}"
 PRODUCT_INDEX_GLOB="sequentia-wallet-extension-*.zip"
@@ -35,7 +40,7 @@ remote_version() {
 build() {
   local version="$1" out="$2" br; br="$(branch)"
   local dir; dir="$(prepare_checkout extension "$PRODUCT_REPO" "origin/$br")"
-  cd "$dir"
+  cd "$dir" || return 1
 
   # What a user installs must not carry our development scaffolding: CLAUDE.md
   # is instructions to an agent, doc/ and test material are noise, and .git would
