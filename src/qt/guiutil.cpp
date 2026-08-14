@@ -23,6 +23,7 @@
 #include <protocol.h>
 #include <script/script.h>
 #include <script/standard.h>
+#include <sync.h>
 #include <util/system.h>
 #include <util/time.h>
 
@@ -800,11 +801,46 @@ QString ConnectionTypeToQString(ConnectionType conn_type, bool prepend_direction
     assert(false);
 }
 
+namespace {
+// SEQUENTIA: reissuance token -> the asset it mints, for every loaded wallet.
+// A token's id is a hash over the issuance entropy, so nothing about the id
+// itself says it is one: only a wallet that has the issuance can tell us, and
+// what it tells us is the same for every wallet, so the answers merge.
+Mutex g_reissuance_tokens_mutex;
+std::map<CAsset, CAsset> g_reissuance_tokens GUARDED_BY(g_reissuance_tokens_mutex);
+} // namespace
+
+void rememberReissuanceTokens(const std::map<CAsset, CAsset>& tokens)
+{
+    LOCK(g_reissuance_tokens_mutex);
+    for (const auto& entry : tokens) g_reissuance_tokens.insert(entry);
+}
+
+bool isReissuanceToken(const CAsset& asset, CAsset* issued_asset)
+{
+    LOCK(g_reissuance_tokens_mutex);
+    const auto it = g_reissuance_tokens.find(asset);
+    if (it == g_reissuance_tokens.end()) return false;
+    if (issued_asset) *issued_asset = it->second;
+    return true;
+}
+
 QString assetDisplayName(const CAsset& asset)
 {
     // The policy asset's registry identifier defaults to "bitcoin"; show the chain-aware
     // ticker (tSEQ/SEQ) used by amount fields instead, so labels stay consistent.
     if (asset == ::policyAsset) return BitcoinUnits::policyAssetTicker();
+    // A reissuance token is the authority to mint its asset without limit, and it has no
+    // registry entry of its own -- registering names the asset, never the token -- so left
+    // alone it shows up as a nameless hex id next to ordinary holdings. Name it after what
+    // it mints, because that is the only thing about it a holder needs to recognise: send
+    // it away and the mint goes with it.
+    CAsset issued;
+    if (isReissuanceToken(asset, &issued)) {
+        const QString of = assetIsNamed(issued) ? assetDisplayName(issued)
+                                                : ellipsizeMiddle(QString::fromStdString(issued.GetHex()));
+        return QObject::tr("Inflation key (%1)").arg(of);
+    }
     return QString::fromStdString(gAssetsDir.GetIdentifier(asset));
 }
 
@@ -814,6 +850,10 @@ bool assetIsNamed(const CAsset& asset)
     // "named" only if the registry carries a human-readable label for it; otherwise its
     // sole identity is the 64-hex id and it must be shown (and elided) as such.
     if (asset == ::policyAsset) return true;
+    // A recognised inflation key always has a label of its own making ("Inflation key (X)",
+    // with X elided to its id when the asset it mints is itself unregistered), so callers
+    // must show that rather than fall back to the raw id.
+    if (isReissuanceToken(asset)) return true;
     return !gAssetsDir.GetLabel(asset).empty();
 }
 

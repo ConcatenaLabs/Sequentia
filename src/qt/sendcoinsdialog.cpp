@@ -226,7 +226,12 @@ void SendCoinsDialog::setModel(WalletModel *_model)
                 ui->feeAssetSelector->clear();
                 ui->feeAssetSelector->addItem(GUIUtil::assetDisplayName(::policyAsset),
                                               QString::fromStdString(::policyAsset.GetHex()));
-                for (const CAsset& asset : model->getAssetTypes()) {
+                // Reissuance tokens are not on offer: the fee is paid to whichever
+                // producer mines this transaction, into its coinbase, so a fee in an
+                // inflation key would give that producer the power to mint the asset
+                // without limit. Any fraction of the token carries the whole power,
+                // which is why there is no "small enough" amount to spend on a fee.
+                for (const CAsset& asset : model->getFeePayableAssetTypes()) {
                     if (asset == ::policyAsset) continue;
                     ui->feeAssetSelector->addItem(GUIUtil::assetDisplayName(asset),
                                                   QString::fromStdString(asset.GetHex()));
@@ -352,8 +357,18 @@ bool SendCoinsDialog::PrepareSendText(QString& question_string, QString& informa
     CAmount txFee = m_current_transaction->getTransactionFee();
     int bitcoin_unit = model->getOptionsModel()->getDisplayUnit();
     QStringList formatted;
+    // SEQUENTIA: which of these recipients is being sent an inflation key, named by
+    // the asset it mints. Warned about below, before the transaction is created.
+    QStringList inflation_keys;
     for (const SendAssetsRecipient &rcp : m_current_transaction->getRecipients())
     {
+        CAsset minted;
+        if (GUIUtil::isReissuanceToken(rcp.asset, &minted)) {
+            const QString name = GUIUtil::assetIsNamed(minted)
+                ? GUIUtil::assetDisplayName(minted)
+                : GUIUtil::ellipsizeMiddle(QString::fromStdString(minted.GetHex()));
+            if (!inflation_keys.contains(name)) inflation_keys.append(name);
+        }
         // generate amount string with wallet name in case of multiwallet
         QString amount = GUIUtil::formatAssetAmount(rcp.asset, rcp.asset_amount, bitcoin_unit, BitcoinUnits::SeparatorStyle::STANDARD, true);
         // SEQUENTIA: append the amount valued in the user's reference currency (display only).
@@ -403,6 +418,24 @@ bool SendCoinsDialog::PrepareSendText(QString& question_string, QString& informa
         question_string.append(tr("Please, review your transaction."));
     }
     question_string.append("</span>%1");
+
+    // SEQUENTIA: an inflation key does not behave like an amount of anything. Whoever
+    // holds any fraction of one can mint the asset without limit, and sending part of
+    // it does not divide that power, it copies it -- the recipient gains the mint and
+    // the sender does not lose it, so a "small" transfer is the full handover. Say so
+    // here, where the transaction can still be abandoned, rather than leaving the
+    // holder to discover it from someone else's issuance.
+    if (!inflation_keys.isEmpty()) {
+        question_string.append("<hr /><span style='color:#ff6b6b; font-weight:bold;'>");
+        question_string.append(tr("You are sending an inflation key (%1).")
+                                   .arg(inflation_keys.join(", ").toHtmlEscaped()));
+        question_string.append("</span><br /><span style='font-size:10pt;'>");
+        question_string.append(tr("Whoever receives it can mint that asset in any quantity, for ever. "
+                                  "The power is copied, not divided: sending a fraction gives the "
+                                  "recipient the whole mint while you keep yours, and there is no way "
+                                  "to take it back afterwards."));
+        question_string.append("</span>");
+    }
 
     if(txFee > 0)
     {
