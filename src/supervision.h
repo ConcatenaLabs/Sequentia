@@ -547,6 +547,57 @@ bool CheckSupervisionRecords(const CTransaction& tx, const SupervisionRegistry& 
 bool CheckSupervisionRecordSpend(const CTxIn& input, const CTxOut& record_out,
                                  const SupervisionRegistry& registry, std::string& err);
 
+/** Whether input `n` spends a script only one party can satisfy.
+ *
+ *  THE RULE THAT KEEPS A FREEZE FROM TAKING HOSTAGES, and the reason supervised
+ *  assets can be used on Lightning and on the DEX at all.
+ *
+ *  A freeze binds only single-owner scripts. Everything else -- a Lightning
+ *  channel's 2-of-2, an HTLC, a covenant, any P2WSH or script-path spend -- is
+ *  out of reach, because the frozen party is not the only party to those funds.
+ *  Blocking such a spend would strand a counterparty who did nothing, and worse,
+ *  freeze a contract whose timelocks keep running: the innocent side would lose
+ *  the race it did not know it was in. Consensus cannot freeze a Lightning
+ *  balance and should not pretend to. What it CAN do is what Ethereum does,
+ *  which is the parity bar: an address holding the asset outright is freezable,
+ *  and shared state is not. Breaking a blacklisted holder's channels cleanly is
+ *  the Lightning implementation's job, at the layer that knows whose channel it
+ *  is.
+ *
+ *  Decidable at spend time, which is the other half of why it works: an address
+ *  only commits to a script's hash, but spending it reveals the script.
+ *
+ *  Be conservative. Anything unrecognised is NOT single-owner. A false negative
+ *  means a freeze does not bite; a false positive destroys somebody's contract
+ *  funds. */
+bool IsSingleOwnerSpend(const CTransaction& tx, unsigned int n, const CScript& script_pubkey);
+
+/** Whether a transaction is one a newly-confirmed record could have invalidated.
+ *
+ *  The failure this exists to prevent is specific and lethal. A spend that was
+ *  valid on entry to the mempool becomes invalid the moment a freeze confirms,
+ *  and nothing evicts it: removeForBlock drops only included and directly
+ *  conflicting transactions, and a freeze record conflicts with nothing. The
+ *  stale entry then stays resident for its full expiry, is re-selected into
+ *  every block template, and fails TestBlockValidity every time -- so every
+ *  producer skips its slot and THE CHAIN STOPS MAKING BLOCKS.
+ *
+ *  Three things become stale this way, and all three are checked here: a spend
+ *  of a script a new record froze; a record whose admission signature was
+ *  written against a key a new rotation has retired; and an unfreeze signed by
+ *  that same retired key.
+ *
+ *  `view` must resolve the transaction's inputs, including outputs created by
+ *  other mempool entries, or a child of an evicted parent is missed. */
+bool SupervisionInvalidates(const CTransaction& tx, CCoinsView& view,
+                            const SupervisionRegistry& registry);
+
+/** Whether a validation failure was one supervision caused.
+ *
+ *  Used by CTxMemPool::check, whose assert would otherwise turn an issuer's
+ *  freeze into a remote node crash under -checkmempool. */
+bool IsSupervisionRejection(const std::string& reject_reason);
+
 /** Mirror a connected block's declarations and records into the registry. */
 void SupervisionApplyBlock(const CBlock& block, const CBlockUndo& undo);
 

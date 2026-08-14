@@ -11,6 +11,7 @@
 #include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <primitives/txwitness.h>
+#include <script/standard.h>
 #include <streams.h>
 #include <tinyformat.h>
 #include <undo.h>
@@ -368,6 +369,103 @@ bool CheckSupervisionRecordSpend(const CTxIn& input, const CTxOut& record_out,
         return false;
     }
     return true;
+}
+
+bool IsSingleOwnerSpend(const CTransaction& tx, unsigned int n, const CScript& script_pubkey)
+{
+    if (n >= tx.vin.size()) return false;
+
+    std::vector<std::vector<unsigned char>> solutions;
+    const TxoutType type = Solver(script_pubkey, solutions);
+
+    const std::vector<std::vector<unsigned char>>* witness = nullptr;
+    if (tx.witness.vtxinwit.size() > n) {
+        witness = &tx.witness.vtxinwit[n].scriptWitness.stack;
+    }
+
+    switch (type) {
+    case TxoutType::PUBKEY:
+    case TxoutType::PUBKEYHASH:
+        // One key named in the output itself. Legacy forms, rare on a chain
+        // whose default address is bech32, but they are unambiguous.
+        return true;
+
+    case TxoutType::WITNESS_V0_KEYHASH:
+        // P2WPKH: <sig> <pubkey>.
+        return witness && witness->size() == 2;
+
+    case TxoutType::WITNESS_V1_TAPROOT: {
+        // A taproot KEY-path spend is one witness element, plus an optional
+        // annex. A script-path spend carries a control block, so it is longer,
+        // and is not single-owner: the script could be anything, including a
+        // channel or a covenant.
+        if (!witness) return false;
+        size_t size = witness->size();
+        if (size >= 2 && !witness->back().empty() && witness->back()[0] == ANNEX_TAG) size--;
+        return size == 1;
+    }
+
+    case TxoutType::SCRIPTHASH: {
+        // P2SH is only single-owner when it wraps P2WPKH, which the spend
+        // reveals: the scriptSig is exactly a push of the 22-byte v0 program
+        // and the witness is the P2WPKH pair. Covered rather than skipped
+        // because leaving it out would make a legacy-wrapped address an
+        // evasion route, and because a wrapped P2WPKH cannot be shared with
+        // anyone.
+        if (!witness || witness->size() != 2) return false;
+        CScript::const_iterator pc = tx.vin[n].scriptSig.begin();
+        opcodetype opcode;
+        std::vector<unsigned char> redeem;
+        if (!tx.vin[n].scriptSig.GetOp(pc, opcode, redeem)) return false;
+        if (pc != tx.vin[n].scriptSig.end()) return false;
+        const CScript redeem_script(redeem.begin(), redeem.end());
+        int version;
+        std::vector<unsigned char> program;
+        return redeem_script.IsWitnessProgram(version, program) && version == 0 &&
+               program.size() == 20;
+    }
+
+    default:
+        // Bare multisig, P2WSH, unknown witness versions, non-standard scripts:
+        // any of them may be shared, so none of them is freezable.
+        return false;
+    }
+}
+
+bool SupervisionInvalidates(const CTransaction& tx, CCoinsView& view,
+                            const SupervisionRegistry& registry)
+{
+    if (registry.Empty()) return false;
+
+    // A record this transaction creates, whose admission signature was written
+    // against a key that has since been rotated away.
+    std::string err;
+    if (!CheckSupervisionRecords(tx, registry, err)) return true;
+
+    for (unsigned int i = 0; i < tx.vin.size(); ++i) {
+        if (tx.vin[i].m_is_pegin) continue;
+        Coin coin;
+        if (!view.GetCoin(tx.vin[i].prevout, coin) || coin.IsSpent()) continue;
+
+        // An unfreeze signed by a key a rotation has since retired.
+        if (!CheckSupervisionRecordSpend(tx.vin[i], coin.out, registry, err)) return true;
+
+        if (!coin.out.nAsset.IsExplicit()) continue;
+        if (!registry.IsFrozen(coin.out.nAsset.GetAsset(),
+                               SupervisionTargetHash(coin.out.scriptPubKey))) {
+            continue;
+        }
+        if (IsSingleOwnerSpend(tx, i, coin.out.scriptPubKey)) return true;
+    }
+    return false;
+}
+
+bool IsSupervisionRejection(const std::string& reject_reason)
+{
+    return reject_reason == "bad-txns-asset-frozen" ||
+           reject_reason == "bad-txns-supervision-unfreeze" ||
+           reject_reason == "bad-txns-supervision-record" ||
+           reject_reason == "bad-txns-supervised-blinded";
 }
 
 void SupervisionApplyBlock(const CBlock& block, const CBlockUndo& undo)

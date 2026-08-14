@@ -20,6 +20,7 @@
 #include <deploymentstatus.h>
 #include <policy/feerate.h>
 #include <policy/policy.h>
+#include <supervision.h>
 #include <pow.h>
 #include <primitives/transaction.h>
 #include <timedata.h>
@@ -381,6 +382,19 @@ bool BlockAssembler::TestPackageTransactions(const CTxMemPool::setEntries& packa
         }
         if (!fIncludeWitness && it->GetTx().HasWitness()) {
             return false;
+        }
+        // SEQUENTIA: a spend a freeze has caught, or a record a rotation has
+        // stranded, must never reach the template. ConnectTip already evicts
+        // these (CTxMemPool::removeStaleSupervision), so this is the second
+        // line rather than the first -- but the cost of the first line being
+        // wrong is that every producer's template fails validation and the
+        // chain stops making blocks, which is worth a cheap re-check that
+        // degrades to skipping one transaction instead.
+        if (SupervisionActive(nHeight) && !SupervisionRegistry::GetInstance().Empty()) {
+            CCoinsViewMemPool view(&m_chainstate.CoinsTip(), m_mempool);
+            if (SupervisionInvalidates(it->GetTx(), view, SupervisionRegistry::GetInstance())) {
+                return false;
+            }
         }
     }
     return true;
