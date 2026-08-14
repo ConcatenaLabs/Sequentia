@@ -39,11 +39,11 @@ build() {
     || nice -n "$NICE" npm install --no-audit --no-fund >/dev/null 2>&1 \
     || { log "[fulmen] dependency install failed"; return 1; }
 
-  # AppImage is a native Linux target and needs nothing extra. The Windows ZIP
-  # target does not need wine either, because it is a directory that gets
-  # zipped -- unlike the NSIS installer, see below.
-  log "[fulmen] building Linux AppImage and Windows zip"
-  nice -n "$NICE" npx electron-builder --linux AppImage --win zip >/dev/null 2>&1 \
+  # AppImage is native. The Windows zip is a directory that gets zipped. The NSIS
+  # installer is the one that needs wine, which is why it is listed last: if wine
+  # is broken the first two still get published.
+  log "[fulmen] building Linux AppImage, Windows zip and Windows installer"
+  nice -n "$NICE" npx electron-builder --linux AppImage --win zip --win nsis >/dev/null 2>&1 \
     || { log "[fulmen] electron-builder failed"; return 1; }
 
   # electron-builder names artifacts from package.json; collect whatever it
@@ -52,14 +52,22 @@ build() {
   local found=0 f
   for f in dist/*.AppImage; do cp "$f" "$out/Fulmen-$version-linux-x86_64.AppImage"; found=1; done
   for f in dist/*-win.zip dist/*win*.zip; do cp "$f" "$out/Fulmen-$version-win64.zip"; found=1; break; done
+  # electron-builder names the NSIS output from package.json, so match on the
+  # extension rather than predicting the spelling, and exclude the zip.
+  for f in dist/*.exe; do cp "$f" "$out/Fulmen-Setup-$version.exe"; found=1; break; done
   shopt -u nullglob
   [ "$found" = "1" ] || { log "[fulmen] electron-builder produced no recognisable artifacts"; return 1; }
 
-  # The NSIS installer (Fulmen-Setup-<v>.exe) is deliberately NOT built here.
-  # electron-builder needs wine to produce it on Linux, and a half-working wine
-  # produces an installer that fails on a user's machine rather than failing in
-  # the build. Until wine is installed and the result has been run on Windows,
-  # the page keeps offering the previous Setup.exe, which is honest: that file
-  # exists and works. The zip covers Windows users in the meantime.
-  log "[fulmen] Setup.exe not built (needs wine); page keeps the previous installer"
+  # A Windows installer built under wine that nobody has run on Windows is a
+  # coin toss, so refuse to publish one that is not even the right kind of file:
+  # a PE executable. This catches the common wine failure where the NSIS step
+  # half-succeeds and leaves a stub behind.
+  if [ -f "$out/Fulmen-Setup-$version.exe" ]; then
+    if ! file "$out/Fulmen-Setup-$version.exe" | grep -qi 'PE32\|MS Windows'; then
+      log "[fulmen] the produced Setup.exe is not a Windows executable; dropping it"
+      rm -f "$out/Fulmen-Setup-$version.exe"
+    fi
+  else
+    log "[fulmen] no installer produced; page keeps the previous one"
+  fi
 }
