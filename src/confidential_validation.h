@@ -95,7 +95,7 @@ ScriptError QueueCheck(std::vector<CCheck*>* queue, CCheck* check);
 //! function reading it off the transaction, because whether a declaration counts
 //! depends on the activation height, which this function does not have.
 struct SupervisionDescriptor;
-bool VerifyAmounts(const std::vector<CTxOut>& inputs, const CTransaction& tx, const SupervisionDescriptor* supervision, std::vector<CCheck*>* pvChecks, const bool cacheStore);
+bool VerifyAmounts(const std::vector<CTxOut>& inputs, const CTransaction& tx, bool supervision_active, const SupervisionDescriptor* supervision, std::vector<CCheck*>* pvChecks, const bool cacheStore);
 
 bool VerifyCoinbaseAmount(const CTransaction& tx, const CAmountMap& mapFees);
 

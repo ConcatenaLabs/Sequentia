@@ -15,6 +15,7 @@
 #include <streams.h>
 #include <tinyformat.h>
 #include <undo.h>
+#include <util/strencodings.h>
 #include <version.h>
 
 #include <string>
@@ -430,6 +431,18 @@ bool IsSingleOwnerSpend(const CTransaction& tx, unsigned int n, const CScript& s
         // any of them may be shared, so none of them is freezable.
         return false;
     }
+}
+
+bool IsSupervisionOutput(const CTxOut& out)
+{
+    if (!out.nAsset.IsExplicit()) return false;
+    if (const auto decl = ParseSupervisionScript(out.scriptPubKey)) {
+        return out.nAsset.GetAsset() == decl->asset;
+    }
+    if (const auto record = ParseSupervisionRecordScript(out.scriptPubKey)) {
+        return out.nAsset.GetAsset() == record->asset;
+    }
+    return false;
 }
 
 bool SupervisionInvalidates(const CTransaction& tx, CCoinsView& view,

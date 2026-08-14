@@ -384,7 +384,7 @@ bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, 
         }
 
         // Verify that amounts add up.
-        if (fScriptChecks && !VerifyAmounts(spent_inputs, tx, supervision, pvChecks, cacheStore)) {
+        if (fScriptChecks && !VerifyAmounts(spent_inputs, tx, SupervisionActive(nSpendHeight), supervision, pvChecks, cacheStore)) {
             return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-in-ne-out", "value in != value out");
         }
         fee_map += GetFeeMap(tx);
