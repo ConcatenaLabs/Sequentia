@@ -1049,7 +1049,16 @@ QString findPythonInterpreter(const QString& scriptDir)
     // sidecar would appear to launch and then never listen -- the failure this
     // check exists to prevent.
     auto usable = [](const QString& path) {
-        if (path.isEmpty() || !QFileInfo::exists(path)) return false;
+        if (path.isEmpty()) return false;
+        const QFileInfo fi(path);
+        // Existing is not enough: it must be something this OS can actually run.
+        // contrib/price-server/python/ holds the Windows embeddable interpreter
+        // fetched for packaging (fetch-embeddable-python.sh), so on Linux a
+        // developer tree has a python.exe sitting right next to the script that
+        // exists, is not executable, and is a PE binary. Selecting it made the
+        // sidecar fail to start with "Ensure Python is available" on a machine
+        // that had a perfectly good python3 on PATH.
+        if (!fi.exists() || !fi.isFile() || !fi.isExecutable()) return false;
 #ifdef WIN32
         if (path.contains(QLatin1String("WindowsApps"), Qt::CaseInsensitive)) return false;
 #endif
@@ -1057,10 +1066,14 @@ QString findPythonInterpreter(const QString& scriptDir)
     };
 
     // Bundled interpreters first: a packaged install ships its own, and it is the
-    // one guaranteed to have the sidecar's dependencies.
-    const QStringList bundled{
-        scriptDir + "/python/python.exe", scriptDir + "/python/python3",
-        appDir + "/python/python.exe",    appDir + "/python/python3"};
+    // one guaranteed to have the sidecar's dependencies. Only ever consider the
+    // name this platform can execute -- the other one is a foreign binary.
+#ifdef WIN32
+    const QString bundledName{"/python/python.exe"};
+#else
+    const QString bundledName{"/python/python3"};
+#endif
+    const QStringList bundled{scriptDir + bundledName, appDir + bundledName};
     for (const QString& c : bundled) {
         if (usable(c)) return QFileInfo(c).absoluteFilePath();
     }
