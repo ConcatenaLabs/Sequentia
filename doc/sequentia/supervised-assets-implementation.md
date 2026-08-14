@@ -4,12 +4,33 @@ Companion to `supervised-assets-proposal.pdf`. That document argues the case and
 the boundaries; this one is for whoever writes the code. It assumes you accept the
 design and want the details, the insertion points, and the places it will bite.
 
-Status: **the consensus feature is implemented and tested** on branch
-`worktree-usdc-bridged-standard`, in four commits: supervised issuance, records and the
-freeze registry, enforcement plus the mempool defences, and the RPCs with an end-to-end
-functional test (`test/functional/feature_supervised_assets.py`). It is OFF on the live
-testnet (`supervised_assets_height = 0`) until the height is agreed, and active from
-height 1 on mainnet and on the custom/regtest chains.
+Status: **complete and scheduled.** Everything in this document is implemented and
+tested, plus pause, the issuer-to-producer submission channel and the Qt wallet.
+
+The testnet activation height is **94600**, agreed 2026-08-14 with the tip at 92,445,
+which lands at roughly **05:00 UTC on 2026-08-15**. Mainnet and the custom/regtest chains
+are active from height 1. The height is pinned in
+`src/test/sequentia_chainparams_tests.cpp`.
+
+**This is a hard fork and needs the usual all-at-once cutover**: every node stopped,
+binary swapped, every node relaunched, exactly as for the Simplicity activation and the
+60-second-block fork. Below 94600 the rule is inert, so deploying early is strictly
+better than deploying late, and a node still on an older binary past 94600 forks off the
+chain.
+
+The ecosystem side is done too, in four other repositories:
+
+| Repository | Change |
+|---|---|
+| `sequentia-registry` | Verifies supervised assets (the third derivation leaf) and publishes the flag in `index.minimal.json` |
+| `sequentia-web-wallet` | Supervision badge next to the ticker |
+| `seqdex` | Wallet daemon keeps transactions explicit when they move a supervised asset (`SEQDEX_SUPERVISED_ASSETS`) |
+| `seqdex-web` | Markets and wallet rows marked |
+| `sequentia-explorer` | Supervision row on the asset page |
+
+The registry one was not cosmetic: `deriveAssetId` knew about two merkle leaves, so a
+supervised asset would have re-derived to a different id and could never have been
+registered at all.
 
 Everything below still describes the design. Section 0 records where building it changed
 the design, which is where a reader who reviewed the earlier draft should start.
@@ -558,13 +579,34 @@ someone actually needs them.
 
 ### Left to do, precisely
 
-- **Pause** (§3.2, Alberto's point 7). The feature bit is reserved and refused, so no asset
-  can claim it yet; the machinery it would reuse is all built.
-- **The submission channel** (§8a). Infrastructure, not consensus, but the compliance
-  promise weakens without it: a freeze in the public mempool is front-runnable.
-- **Display** across web wallet, explorer, registry and DEX, and the **sequentia-qt** delta.
-  A holder must be able to see that an asset is supervised, and that a coin is frozen,
-  before trying to spend it.
-- **The DEX wallet daemon's** change blinding, the same fix as the node wallet's.
-- **The testnet activation height**, which is 0 (off) and must stay 0 until every operator
-  has the binary and a height is agreed.
+Nothing in the feature itself. What remains is operational and one deliberate omission:
+
+- **The cutover**, which is the only thing standing between here and 94600. Every
+  committee node, the dexnode, the explorer node and any GUI node must be on a binary
+  containing this commit before that height. Alberto's node at 13.140.162.77 is outside
+  our control and needs telling by a human.
+- **`SEQDEX_SUPERVISED_ASSETS`** must be set on the DEX wallet daemon when the first
+  supervised asset exists. It is empty by default, which is correct until then, and the
+  daemon has no node RPC of its own to discover the set for itself.
+- **Total-supervision and whitelist** remain reserved bits and refused at issuance, as
+  Alberto asked. Nothing needs doing; they are recorded here so the decision stays
+  deliberate rather than becoming an accident.
+
+### Deploying the fork
+
+The order that matters, learned from the Simplicity and 60-second-block cutovers:
+
+1. Build on the box from a checkout of master, never by copying a binary in. Both clones,
+   `/root/SequentiaByClaude` and `/root/sequentia/SequentiaByClaude`, must end up on the
+   same commit.
+2. Capture the dynamically loaded wallet set before stopping anything: a restart drops
+   wallets that appear in no configuration file.
+3. Stop everything. The committee and dexnode are ordinary processes from a script; the
+   explorer node is a systemd unit, so "stop everything" takes more than one mechanism.
+   Never `pkill -f` over SSH, since the SSH command line contains the pattern and the
+   command kills itself.
+4. Relaunch every node on the new binary, uniformly. Mixed binaries past 94600 fragment
+   the chain.
+5. Check: every node should log `Supervision: registry loaded: 0 supervised asset(s)` on
+   first start, and `getsupervisedassets` should return the same empty array everywhere.
+   A node that disagrees is a divergence and wants investigating before 94600, not after.
