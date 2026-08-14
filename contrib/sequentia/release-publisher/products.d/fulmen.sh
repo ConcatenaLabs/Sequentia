@@ -1,7 +1,12 @@
+# shellcheck shell=bash
+# shellcheck disable=SC2034  # PRODUCT_* are read by the driver, not used here
 # Fulmen: the Electron Lightning wallet.
 #
 # Versioned by package.json, which is what electron-builder stamps into the
 # artifact names, so the version and the filenames cannot drift apart.
+# Sorting and version comparison below are locale-sensitive.
+export LC_ALL=C
+
 PRODUCT_NAME="fulmen"
 PRODUCT_REPO="${SEQ_FULMEN_REPO:-https://github.com/GracedEternalKingCabbageMan/fulmen.git}"
 PRODUCT_INDEX_GLOB="Fulmen-*-linux-x86_64.AppImage Fulmen-*-win64.zip Fulmen-Setup-*.exe"
@@ -30,7 +35,7 @@ remote_version() {
 build() {
   local version="$1" out="$2" br; br="$(branch)"
   local dir; dir="$(prepare_checkout fulmen "$PRODUCT_REPO" "origin/$br")"
-  cd "$dir"
+  cd "$dir" || return 1
 
   log "[fulmen] installing dependencies"
   # ci, not install: build from the lockfile so a published artifact is
