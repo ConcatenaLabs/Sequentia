@@ -189,6 +189,7 @@ BITCOIN_CORE_H = \
   interfaces/wallet.h \
   issuance.h \
   supervision.h \
+  supervision_submit.h \
   key.h \
   key_io.h \
   logging.h \
@@ -646,6 +647,7 @@ libbitcoin_common_a_SOURCES = \
   init/common.cpp \
   issuance.cpp \
   supervision.cpp \
+  supervision_submit.cpp \
   key.cpp \
   key_io.cpp \
   merkleblock.cpp \

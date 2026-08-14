@@ -9,6 +9,7 @@
 #include <core_io.h>
 #include <deploymentstatus.h>
 #include <issuance.h>
+#include <supervision.h>
 #include <key_io.h>
 #include <mainchainrpc.h>
 #include <rpc/rawtransaction_util.h>
@@ -1427,6 +1428,14 @@ RPCHelpMan issueasset()
                             {"issuer_pubkey", RPCArg::Type::STR_HEX, RPCArg::DefaultHint{"a fresh key from this wallet"}, "The issuer's public key, as 33-byte compressed or 32-byte x-only lower-case hex."},
                         },
                     },
+                    {"supervision", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "SEQUENTIA: issue the asset SUPERVISED, meaning its issuer can freeze holders by consensus rule.\n"
+"Decided here and nowhere else, permanently: the keys are committed in the asset id, so an asset issued without this can never become supervised, and one issued with it can never stop being.\n"
+"A freeze binds only single-owner scripts, so Lightning channels, HTLCs and covenants are out of reach by design. Reissuance tokens are required, because freeze-plus-reissue is how seize and burn are answered without ever giving an issuer a spending power over someone else's coins. A supervised asset is always explicit, never blinded.",
+                        {
+                            {"operationalkey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "x-only (BIP340) key that signs freezes and unfreezes."},
+                            {"recoverykey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "x-only key whose only power is rotating either key. Keep it cold and separate; it is what stops a stolen operational key from seizing the authority permanently."},
+                            {"pause", RPCArg::Type::BOOL, RPCArg::Default{false}, "Whether the issuer may PAUSE the asset, stopping every single-owner holding at once. Also permanent, and also visible in the asset id."},
+                        }},
                 },
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
@@ -1583,6 +1592,40 @@ RPCHelpMan issueasset()
     IssuanceDetails issuance_details;
     issuance_details.blind_issuance = blind_issuances;
     issuance_details.contract_hash = contract_hash;
+
+    // SEQUENTIA: supervision (src/supervision.h).
+    if (!request.params[7].isNull()) {
+        const UniValue& sup = request.params[7].get_obj();
+        RPCTypeCheckObj(sup, {
+            {"operationalkey", UniValueType(UniValue::VSTR)},
+            {"recoverykey", UniValueType(UniValue::VSTR)},
+        });
+        if (g_supervision_height <= 0) {
+            throw JSONRPCError(RPC_MISC_ERROR, "supervised assets are not scheduled on this chain");
+        }
+        const std::string op_hex = sup["operationalkey"].get_str();
+        const std::string rec_hex = sup["recoverykey"].get_str();
+        if (!IsHex(op_hex) || op_hex.size() != 64 || !IsHex(rec_hex) || rec_hex.size() != 64) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "supervision keys must be 32-byte x-only public keys in hex");
+        }
+        SupervisionDescriptor desc;
+        desc.operational_key = XOnlyPubKey(ParseHex(op_hex));
+        desc.recovery_key = XOnlyPubKey(ParseHex(rec_hex));
+        if (!sup["pause"].isNull() && sup["pause"].get_bool()) {
+            desc.feature_bits |= SUPERVISION_FEATURE_PAUSE;
+        }
+        std::string sup_err;
+        if (!ValidateSupervisionDescriptor(desc, sup_err)) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, sup_err);
+        }
+        if (blind_issuances) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "a supervised asset cannot be blinded: consensus must be able to read its outputs to freeze them");
+        }
+        if (nTokens <= 0) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "a supervised issuance must create reissuance tokens; freeze-plus-reissue is how seize and burn are answered without giving the issuer a spending power");
+        }
+        issuance_details.supervision = desc;
+    }
     CCoinControl coin_control;
     if (g_con_any_asset_fees) {
         // SEQUENTIA: no default fee asset. An issuance pays a fee like any other
@@ -1618,7 +1661,12 @@ RPCHelpMan issueasset()
     CAsset asset;
     CAsset token;
     CHECK_NONFATAL(!tx_ref->vin.empty());
-    GenerateAssetEntropy(issuance_details.entropy, tx_ref->vin[0].prevout, issuance_details.contract_hash);
+    if (issuance_details.supervision) {
+        GenerateSupervisedAssetEntropy(issuance_details.entropy, tx_ref->vin[0].prevout,
+                                       issuance_details.contract_hash, *issuance_details.supervision);
+    } else {
+        GenerateAssetEntropy(issuance_details.entropy, tx_ref->vin[0].prevout, issuance_details.contract_hash);
+    }
     CalculateAsset(asset, issuance_details.entropy);
     CalculateReissuanceToken(token, issuance_details.entropy, blind_issuances);
 
@@ -1626,6 +1674,13 @@ RPCHelpMan issueasset()
     ret.pushKV("txid", tx_ref->GetHash().GetHex());
     ret.pushKV("vin", 0);
     ret.pushKV("entropy", issuance_details.entropy.GetHex());
+    if (issuance_details.supervision) {
+        ret.pushKV("supervised", true);
+        ret.pushKV("operationalkey", HexStr(issuance_details.supervision->operational_key));
+        ret.pushKV("recoverykey", HexStr(issuance_details.supervision->recovery_key));
+        ret.pushKV("pauseallowed",
+                   (issuance_details.supervision->feature_bits & SUPERVISION_FEATURE_PAUSE) != 0);
+    }
     ret.pushKV("asset", asset.GetHex());
     ret.pushKV("token", token.GetHex());
     if (!contract.isNull()) {

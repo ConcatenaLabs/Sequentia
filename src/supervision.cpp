@@ -30,11 +30,13 @@ bool ValidateSupervisionDescriptor(const SupervisionDescriptor& desc, std::strin
         err = strprintf("unknown supervision version %d", (int)desc.version);
         return false;
     }
-    // Every defined bit is reserved and unimplemented. Refusing them keeps the
-    // meanings free: an asset issued today claiming a capability nothing
-    // enforces would be a permanent lie, since the bits are in the asset id.
-    if (desc.feature_bits != 0) {
-        err = "supervision feature bits are reserved and must be zero";
+    // Only implemented capabilities may be claimed. Refusing the rest keeps
+    // their meanings free: an asset issued today claiming a capability nothing
+    // enforces would be a permanent lie, since the bits are in the asset id and
+    // cannot be corrected afterwards.
+    if (desc.feature_bits & ~SUPERVISION_FEATURE_IMPLEMENTED) {
+        err = strprintf("supervision feature bits 0x%04x are reserved and not implemented",
+                        desc.feature_bits & ~SUPERVISION_FEATURE_IMPLEMENTED);
         return false;
     }
     if (!desc.operational_key.IsFullyValid()) {
@@ -308,6 +310,19 @@ bool CheckSupervisionRecords(const CTransaction& tx, const SupervisionRegistry& 
                 err = "rotation would make the operational and recovery keys equal";
                 return false;
             }
+        }
+
+        // A wildcard target is a PAUSE, and only an asset issued with the
+        // capability may be paused. The check is here rather than at
+        // enforcement because a record that should never have been admitted
+        // must not sit in the registry at all: enforcement asks "is this
+        // frozen", and by then the wildcard has already answered yes for every
+        // holder of the asset.
+        if (record->kind == SupervisionRecordKind::FREEZE &&
+            record->target == SUPERVISION_PAUSE_TARGET &&
+            !registry.PauseAllowed(record->asset)) {
+            err = "asset was not issued with the pause capability";
+            return false;
         }
 
         const uint256 sighash = SupervisionRecordSigHash(*record, tx.vin[0].prevout);

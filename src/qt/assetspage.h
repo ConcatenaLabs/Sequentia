@@ -45,6 +45,7 @@ protected:
 
 private Q_SLOTS:
     void onIssue();
+    void onSupervisedToggled(bool checked);
     void onReissue();
     void onSaveProofFile();
     void onSaveContract();
@@ -66,6 +67,11 @@ private:
     QLineEdit* m_issue_amount{nullptr};
     QCheckBox* m_issue_reissuable{nullptr};
     QCheckBox* m_issue_blind{nullptr};
+    // SEQUENTIA: supervision (src/supervision.h). Permanent at issuance,
+    // because the keys are committed in the asset id.
+    QCheckBox* m_issue_supervised{nullptr};
+    QCheckBox* m_issue_pause{nullptr};
+    QLabel* m_issue_supervision_hint{nullptr};
     QPushButton* m_issue_button{nullptr};
     QLabel* m_issue_result{nullptr};
 
@@ -106,6 +112,9 @@ private:
     void setStatus(const QString& msg, bool error = false);
     //! Ask the user to confirm what issuance permanently commits to; false to abort.
     bool confirmIssuance(const QString& name, const QString& ticker, const QString& domain, bool reissuable);
+    //! SEQUENTIA: derive the two supervision keys from this wallet and show them
+    //! once, since they are committed in the asset id and cannot be changed.
+    bool supervisionKeys(QString& operational, QString& recovery);
     //! Warn if the issuer domain does not resolve, since a typo cannot be undone.
     bool domainResolves(const QString& domain) const;
     //! The domain as it will be committed: no scheme, no path, lower case.
