@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2034  # PRODUCT_* are read by the driver, not used here
 # Sequentia Core: the node, the wallet and the GUI.
 #
 # Versioned by git TAG, unlike the other products here, because
@@ -7,7 +8,6 @@
 # Sorting and version comparison below are locale-sensitive.
 export LC_ALL=C
 
-# shellcheck disable=SC2034  # read by the driver, not used in this file
 PRODUCT_NAME="node"
 PRODUCT_REPO="${SEQ_NODE_REPO:-https://github.com/GracedEternalKingCabbageMan/Sequentia.git}"
 PRODUCT_INDEX_GLOB="sequentia-core-*-linux-x86_64.tar.gz sequentia-core-*-win64-setup.exe"
@@ -132,7 +132,9 @@ build() {
 
   # The package tarname changed with the binary rename, so find the artifact
   # rather than assume its prefix.
-  local produced; produced="$(ls -t ./*-win64-setup.exe 2>/dev/null | head -1 || true)"
+  local produced
+  produced="$(find . -maxdepth 1 -type f -name '*-win64-setup.exe' -printf '%T@ %p\n' 2>/dev/null \
+              | sort -rn | head -1 | cut -d' ' -f2-)"
   [ -n "$produced" ] || { log "[node] make deploy produced no installer"; return 1; }
   cp "$produced" "$out/sequentia-core-$v-win64-setup.exe"
 }

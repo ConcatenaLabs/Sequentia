@@ -54,7 +54,8 @@ fi
 # --- Keep a product's checkout at the version we are about to build -----------
 # Recipes call this; it is the only git any of them need.
 prepare_checkout() {
-  local name="$1" url="$2" ref="$3" dir="$BUILD_ROOT/src/$name"
+  local name="$1" url="$2" ref="$3"
+  local dir="$BUILD_ROOT/src/$name"
   mkdir -p "$BUILD_ROOT/src"
   if [ ! -d "$dir/.git" ]; then
     git clone -q "$url" "$dir"
@@ -122,7 +123,7 @@ run_recipe() {
     # version field currently says. Publishing then would quietly offer users a
     # downgrade, which for a wallet is worse than offering nothing.
     local newest_present offered
-    newest_present="$(cd "$DOWNLOAD_DIR" && ls -1 ${PRODUCT_INDEX_GLOB%% *} 2>/dev/null | sort -V | tail -1 || true)"
+    newest_present="$(find "$DOWNLOAD_DIR" -maxdepth 1 -type f -name "${PRODUCT_INDEX_GLOB%% *}" -printf '%f\n' 2>/dev/null | sort -V | tail -1 || true)"
     if [ -n "$newest_present" ]; then
       offered="$(printf '%s' "$newest_present" | grep -oE '[0-9]+(\.[0-9]+)+' | head -1)"
       if [ -n "$offered" ] && [ "$(printf '%s\n%s\n' "$offered" "${version#v}" | sort -V | tail -1)" != "${version#v}" ]; then
@@ -207,7 +208,7 @@ update_index() {
 
   # The single version label tracks the node, which is what the page is about.
   local newest_node
-  newest_node="$( (cd "$DOWNLOAD_DIR" && ls -1 sequentia-core-*-linux-x86_64.tar.gz 2>/dev/null || true) | sort -V | tail -1 )"
+  newest_node="$(find "$DOWNLOAD_DIR" -maxdepth 1 -type f -name 'sequentia-core-*-linux-x86_64.tar.gz' -printf '%f\n' 2>/dev/null | sort -V | tail -1)"
   if [ -n "$newest_node" ]; then
     local v; v="$(printf '%s' "$newest_node" | sed -E 's#sequentia-core-([0-9.]+)-linux.*#\1#')"
     sed -i -E "s#(<span class=\"ver\">version )[0-9][0-9.]*#\1$v#" "$index"
@@ -227,6 +228,7 @@ failed=0
 for recipe in "$RECIPE_DIR"/*.sh; do
   [ -f "$recipe" ] || continue
   name="$(basename "$recipe" .sh)"
+  # shellcheck disable=SC2086  # ONLY is a space-separated list and must split
   if [ -n "$ONLY" ] && ! printf '%s ' $ONLY | grep -q "$name "; then
     continue
   fi

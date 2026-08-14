@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2034  # PRODUCT_* are read by the driver, not used here
 # Ambra: the Flutter mobile wallet, published as a signed Android APK.
 #
 # ambra_core is Rust compiled to .so libraries that the Flutter app loads, so the
@@ -14,7 +15,6 @@
 # Sorting and version comparison below are locale-sensitive.
 export LC_ALL=C
 
-# shellcheck disable=SC2034  # read by the driver, not used in this file
 PRODUCT_NAME="ambra"
 PRODUCT_REPO="${SEQ_AMBRA_REPO:-https://github.com/GracedEternalKingCabbageMan/ambra.git}"
 PRODUCT_INDEX_GLOB="ambra-*.apk"

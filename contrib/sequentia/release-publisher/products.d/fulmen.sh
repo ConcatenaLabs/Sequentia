@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2034  # PRODUCT_* are read by the driver, not used here
 # Fulmen: the Electron Lightning wallet.
 #
 # Versioned by package.json, which is what electron-builder stamps into the
@@ -6,7 +7,6 @@
 # Sorting and version comparison below are locale-sensitive.
 export LC_ALL=C
 
-# shellcheck disable=SC2034  # read by the driver, not used in this file
 PRODUCT_NAME="fulmen"
 PRODUCT_REPO="${SEQ_FULMEN_REPO:-https://github.com/GracedEternalKingCabbageMan/fulmen.git}"
 PRODUCT_INDEX_GLOB="Fulmen-*-linux-x86_64.AppImage Fulmen-*-win64.zip Fulmen-Setup-*.exe"

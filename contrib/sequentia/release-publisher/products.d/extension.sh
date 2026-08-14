@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2034  # PRODUCT_* are read by the driver, not used here
 # The Sequentia browser wallet extension.
 #
 # Versioned by manifest.json, which is the version the browser itself shows, so
@@ -8,7 +9,6 @@
 # Sorting and version comparison below are locale-sensitive.
 export LC_ALL=C
 
-# shellcheck disable=SC2034  # read by the driver, not used in this file
 PRODUCT_NAME="extension"
 PRODUCT_REPO="${SEQ_EXTENSION_REPO:-https://github.com/GracedEternalKingCabbageMan/sequentia-extension.git}"
 PRODUCT_INDEX_GLOB="sequentia-wallet-extension-*.zip"
