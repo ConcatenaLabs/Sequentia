@@ -27,6 +27,7 @@ Reference (current):
 |---|---|
 | [`issuing-an-asset-guide.md`](issuing-an-asset-guide.md) | For issuers who are not web developers: finding your exact domain (the `www` question), what to type into Core, publishing the proof file on your site (WordPress included), checking it worked, and the usual questions. |
 | [`asset-contracts-and-verification.md`](asset-contracts-and-verification.md) | The mechanism underneath: the contract committed into the asset id at issuance, the canonical hash, the domain proof, the registry, and why none of it can be added afterwards. |
+| [`supervised-assets.md`](supervised-assets.md) | For issuers and operators: what supervision is and is not, the operational and recovery keys and why there are two, issuing, freezing, unfreezing, pause, key rotation, publishing records without being front-run, and the RPC reference. |
 
 Operating runbooks (current):
 
