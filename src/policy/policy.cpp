@@ -109,7 +109,8 @@ bool IsStandard(const CScript& scriptPubKey, TxoutType& whichType)
         // the height is known, in MemPoolAccept (validation.cpp), because a
         // declaration accepted below it derives a plain asset id and would turn
         // invalid under the node's feet at the boundary.
-        if (g_supervision_height > 0 && ParseSupervisionScript(scriptPubKey)) {
+        if (g_supervision_height > 0 &&
+            (ParseSupervisionScript(scriptPubKey) || ParseSupervisionRecordScript(scriptPubKey))) {
             return true;
         }
         return false;
@@ -243,6 +244,13 @@ bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
             if (g_con_pos && whichType == TxoutType::NONSTANDARD &&
                 (ParseStakeScript(prev.scriptPubKey) || ParseDelegationScript(prev.scriptPubKey) ||
                  ParsePayoutScript(prev.scriptPubKey))) {
+                continue;
+            }
+            // SEQUENTIA: spending a freeze record is the unfreeze, and it must
+            // relay under default policy or a freeze could be applied on
+            // mainnet and never lifted. Its creation relays as standard above.
+            if (g_supervision_height > 0 && whichType == TxoutType::NONSTANDARD &&
+                ParseSupervisionRecordScript(prev.scriptPubKey)) {
                 continue;
             }
             // WITNESS_UNKNOWN failures are typically also caught with a policy

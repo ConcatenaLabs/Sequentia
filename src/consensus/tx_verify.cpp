@@ -241,6 +241,20 @@ bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, 
             if (coin.out.nValue.IsExplicit()) {
                 nValueIn += coin.out.nValue.GetAmount();
             }
+
+            // SEQUENTIA: spending a freeze record is the unfreeze, and the
+            // record's own script deliberately does not authorise it -- see
+            // BuildSupervisionRecordScript. Consensus does, against the CURRENT
+            // operational key, which is the unfreeze trap: after a rotation the
+            // old key lifts nothing.
+            if (SupervisionActive(nSpendHeight) && !SupervisionRegistry::GetInstance().Empty()) {
+                std::string err;
+                if (!CheckSupervisionRecordSpend(tx.vin[i], coin.out,
+                                                 SupervisionRegistry::GetInstance(), err)) {
+                    return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                                         "bad-txns-supervision-unfreeze", err);
+                }
+            }
         }
     }
 
@@ -275,6 +289,19 @@ bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, 
                     return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-supervision-declaration", err);
                 }
                 supervision = &declaration->descriptor;
+            }
+
+            // Freeze and rotation records. Admission is consensus, not policy:
+            // a record that reached a block unsigned would freeze someone on
+            // nobody's authority. The registry it is checked against is the one
+            // applied through the PREVIOUS block -- ConnectTip updates it only
+            // after the block validates -- which is what gives Alberto's
+            // next-block effectiveness and keeps mempool acceptance and block
+            // validation reading the same state.
+            std::string err;
+            if (!CheckSupervisionRecords(tx, SupervisionRegistry::GetInstance(), err)) {
+                return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                                     "bad-txns-supervision-record", err);
             }
         }
 

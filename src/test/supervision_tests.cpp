@@ -4,7 +4,9 @@
 
 #include <issuance.h>
 #include <key.h>
+#include <policy/policy.h>
 #include <primitives/transaction.h>
+#include <script/interpreter.h>
 #include <streams.h>
 #include <supervision.h>
 #include <util/strencodings.h>
@@ -397,6 +399,345 @@ BOOST_AUTO_TEST_CASE(activation_gate_follows_the_height)
     BOOST_CHECK(SupervisionActive(101));
 
     g_supervision_height = saved;
+}
+
+/* ---------------------------------------------------------------------------
+ * Records: freezing, unfreezing and rotation.
+ * ------------------------------------------------------------------------ */
+
+static CKey MakePrivKey(uint8_t seed)
+{
+    CKey key;
+    unsigned char bytes[32];
+    memset(bytes, seed, sizeof(bytes));
+    key.Set(bytes, bytes + 32, true);
+    BOOST_REQUIRE(key.IsValid());
+    return key;
+}
+
+static const COutPoint RECORD_INPUT{uint256S("0x11"), 3};
+
+//! A signed record of the given kind, as an issuer would build it.
+static SupervisionRecord SignRecord(SupervisionRecordKind kind, const CAsset& asset,
+                                    const uint256& target, const XOnlyPubKey& old_key,
+                                    const CKey& signer, const COutPoint& first_input)
+{
+    SupervisionRecord record;
+    record.kind = kind;
+    record.asset = asset;
+    record.target = target;
+    record.old_key = old_key;
+    const uint256 sighash = SupervisionRecordSigHash(record, first_input);
+    record.signature.resize(64);
+    BOOST_REQUIRE(signer.SignSchnorr(sighash, record.signature, nullptr, uint256()));
+    return record;
+}
+
+static CMutableTransaction RecordTx(const SupervisionRecord& record)
+{
+    CMutableTransaction tx;
+    tx.vin.emplace_back(RECORD_INPUT);
+    tx.vout.emplace_back(record.asset, CConfidentialValue(0),
+                         BuildSupervisionRecordScript(record));
+    return tx;
+}
+
+//! Put one supervised asset in a registry under the given keys.
+static SupervisionDeclaration RegisterAsset(SupervisionRegistry& registry, const CKey& op,
+                                            const CKey& rec)
+{
+    SupervisionDeclaration decl;
+    decl.descriptor.operational_key = XOnlyPubKey(op.GetPubKey());
+    decl.descriptor.recovery_key = XOnlyPubKey(rec.GetPubKey());
+    uint256 entropy;
+    GenerateSupervisedAssetEntropy(entropy, ISSUANCE_PREVOUT, CONTRACT_HASH, decl.descriptor);
+    CalculateAsset(decl.asset, entropy);
+    registry.AddAsset(decl);
+    return decl;
+}
+
+BOOST_AUTO_TEST_CASE(record_roundtrips_through_its_output)
+{
+    const CKey op = MakePrivKey(11);
+    const SupervisionRecord freeze =
+        SignRecord(SupervisionRecordKind::FREEZE, CAsset(uint256S("0xaa")), uint256S("0xbb"),
+                   XOnlyPubKey(), op, RECORD_INPUT);
+
+    const CScript script = BuildSupervisionRecordScript(freeze);
+    const auto parsed = ParseSupervisionRecordScript(script);
+    BOOST_REQUIRE(parsed.has_value());
+    BOOST_CHECK(parsed->kind == freeze.kind);
+    BOOST_CHECK(parsed->asset == freeze.asset);
+    BOOST_CHECK(parsed->target == freeze.target);
+    BOOST_CHECK(parsed->signature == freeze.signature);
+    // Retained in the UTXO set, like a declaration and for the same reason: the
+    // freeze set is a function of the UTXO set and cannot be if it is pruned.
+    BOOST_CHECK(!script.IsUnspendable());
+
+    const SupervisionRecord rotation =
+        SignRecord(SupervisionRecordKind::ROTATE_OPERATIONAL, CAsset(uint256S("0xaa")),
+                   SupervisionKeyAsTarget(XOnlyPubKey(MakePrivKey(12).GetPubKey())), XOnlyPubKey(op.GetPubKey()),
+                   op, RECORD_INPUT);
+    const auto parsed_rot = ParseSupervisionRecordScript(BuildSupervisionRecordScript(rotation));
+    BOOST_REQUIRE(parsed_rot.has_value());
+    BOOST_CHECK(parsed_rot->old_key == rotation.old_key);
+    BOOST_CHECK(parsed_rot->NewKey() == rotation.NewKey());
+
+    // An unknown kind is not forward compatibility; it is a record whose
+    // meaning this node cannot know, so it must not parse.
+    BOOST_CHECK(!ParseSupervisionRecordScript(CScript() << SUPERVISION_RECORD_MARKER << OP_DROP
+                                                        << (int64_t)9 << OP_DROP)
+                     .has_value());
+}
+
+//! The rule that makes a record authoritative. Anyone can put a record-shaped
+//! output in a transaction; only a signature by the asset's current key gets it
+//! admitted.
+BOOST_AUTO_TEST_CASE(records_need_the_current_key)
+{
+    SupervisionRegistry registry;
+    const CKey op = MakePrivKey(21), rec = MakePrivKey(22), stranger = MakePrivKey(23);
+    const SupervisionDeclaration decl = RegisterAsset(registry, op, rec);
+    const uint256 target = uint256S("0xbeef");
+    std::string err;
+
+    const auto good = SignRecord(SupervisionRecordKind::FREEZE, decl.asset, target, XOnlyPubKey(),
+                                 op, RECORD_INPUT);
+    BOOST_CHECK_MESSAGE(CheckSupervisionRecords(CTransaction(RecordTx(good)), registry, err), err);
+
+    // Signed by somebody else.
+    const auto forged = SignRecord(SupervisionRecordKind::FREEZE, decl.asset, target,
+                                   XOnlyPubKey(), stranger, RECORD_INPUT);
+    BOOST_CHECK(!CheckSupervisionRecords(CTransaction(RecordTx(forged)), registry, err));
+
+    // Signed by the RECOVERY key, which may rotate but must never freeze.
+    const auto by_recovery = SignRecord(SupervisionRecordKind::FREEZE, decl.asset, target,
+                                        XOnlyPubKey(), rec, RECORD_INPUT);
+    BOOST_CHECK(!CheckSupervisionRecords(CTransaction(RecordTx(by_recovery)), registry, err));
+
+    // An asset nobody declared supervised.
+    const auto unknown_asset = SignRecord(SupervisionRecordKind::FREEZE, CAsset(uint256S("0xdead")),
+                                          target, XOnlyPubKey(), op, RECORD_INPUT);
+    BOOST_CHECK(!CheckSupervisionRecords(CTransaction(RecordTx(unknown_asset)), registry, err));
+
+    // The signature binds the transaction's first input, so it cannot be lifted
+    // off the chain and replayed to re-freeze what the issuer unfroze.
+    CMutableTransaction replayed = RecordTx(good);
+    replayed.vin[0].prevout = COutPoint(uint256S("0x99"), 1);
+    BOOST_CHECK(!CheckSupervisionRecords(CTransaction(replayed), registry, err));
+}
+
+//! Alberto's point 2, the asymmetry that makes two keys worth having: the
+//! operational key cannot rotate anything, not even itself, so a thief who has
+//! it can grief but can never take the authority away from its owner.
+BOOST_AUTO_TEST_CASE(only_the_recovery_key_rotates)
+{
+    SupervisionRegistry registry;
+    const CKey op = MakePrivKey(31), rec = MakePrivKey(32), fresh = MakePrivKey(33);
+    const SupervisionDeclaration decl = RegisterAsset(registry, op, rec);
+    const XOnlyPubKey old_op(op.GetPubKey()), new_op(fresh.GetPubKey());
+    std::string err;
+
+    const auto by_operational = SignRecord(SupervisionRecordKind::ROTATE_OPERATIONAL, decl.asset,
+                                           SupervisionKeyAsTarget(new_op), old_op, op, RECORD_INPUT);
+    BOOST_CHECK(!CheckSupervisionRecords(CTransaction(RecordTx(by_operational)), registry, err));
+
+    const auto by_recovery = SignRecord(SupervisionRecordKind::ROTATE_OPERATIONAL, decl.asset,
+                                        SupervisionKeyAsTarget(new_op), old_op, rec, RECORD_INPUT);
+    BOOST_CHECK_MESSAGE(CheckSupervisionRecords(CTransaction(RecordTx(by_recovery)), registry, err),
+                        err);
+
+    // Naming a key that is not the current one is a stale rotation.
+    const auto stale = SignRecord(SupervisionRecordKind::ROTATE_OPERATIONAL, decl.asset,
+                                  SupervisionKeyAsTarget(new_op), XOnlyPubKey(MakePrivKey(34).GetPubKey()), rec,
+                                  RECORD_INPUT);
+    BOOST_CHECK(!CheckSupervisionRecords(CTransaction(RecordTx(stale)), registry, err));
+
+    // Rotating the operational key onto the recovery key would collapse the
+    // separation the two keys exist to create.
+    const auto collapse =
+        SignRecord(SupervisionRecordKind::ROTATE_OPERATIONAL, decl.asset,
+                   SupervisionKeyAsTarget(XOnlyPubKey(rec.GetPubKey())), old_op, rec, RECORD_INPUT);
+    BOOST_CHECK(!CheckSupervisionRecords(CTransaction(RecordTx(collapse)), registry, err));
+
+    BOOST_REQUIRE(registry.Rotate(decl.asset, true, old_op, new_op));
+    // ...and after the rotation the old key signs nothing.
+    const auto after = SignRecord(SupervisionRecordKind::FREEZE, decl.asset, uint256S("0x1"),
+                                  XOnlyPubKey(), op, RECORD_INPUT);
+    BOOST_CHECK(!CheckSupervisionRecords(CTransaction(RecordTx(after)), registry, err));
+    const auto after_new = SignRecord(SupervisionRecordKind::FREEZE, decl.asset, uint256S("0x1"),
+                                      XOnlyPubKey(), fresh, RECORD_INPUT);
+    BOOST_CHECK_MESSAGE(CheckSupervisionRecords(CTransaction(RecordTx(after_new)), registry, err),
+                        err);
+}
+
+//! THE UNFREEZE TRAP. After a rotation a stolen old key must not be able to
+//! lift the freezes it set, or rotating after a compromise achieves nothing.
+BOOST_AUTO_TEST_CASE(unfreeze_needs_the_current_key_not_the_records_own)
+{
+    SupervisionRegistry registry;
+    const CKey op = MakePrivKey(41), rec = MakePrivKey(42), fresh = MakePrivKey(43);
+    const SupervisionDeclaration decl = RegisterAsset(registry, op, rec);
+    const uint256 target = uint256S("0xcafe");
+    std::string err;
+
+    const auto record = SignRecord(SupervisionRecordKind::FREEZE, decl.asset, target, XOnlyPubKey(),
+                                   op, RECORD_INPUT);
+    const CTxOut record_out(decl.asset, CConfidentialValue(0),
+                            BuildSupervisionRecordScript(record));
+    const COutPoint record_outpoint(uint256S("0x77"), 0);
+
+    const uint256 sighash = SupervisionUnfreezeSigHash(record_outpoint, decl.asset, target);
+    std::vector<unsigned char> sig(64);
+    BOOST_REQUIRE(op.SignSchnorr(sighash, sig, nullptr, uint256()));
+
+    CTxIn input(record_outpoint);
+    input.scriptSig = CScript() << sig;
+    BOOST_CHECK_MESSAGE(CheckSupervisionRecordSpend(input, record_out, registry, err), err);
+
+    // Rotate, and the very same spend stops working: the record still names the
+    // old key in its own bytes, but consensus asks the registry.
+    BOOST_REQUIRE(registry.Rotate(decl.asset, true, XOnlyPubKey(op.GetPubKey()),
+                                  XOnlyPubKey(fresh.GetPubKey())));
+    BOOST_CHECK(!CheckSupervisionRecordSpend(input, record_out, registry, err));
+
+    // The new key can.
+    std::vector<unsigned char> new_sig(64);
+    BOOST_REQUIRE(fresh.SignSchnorr(sighash, new_sig, nullptr, uint256()));
+    CTxIn new_input(record_outpoint);
+    new_input.scriptSig = CScript() << new_sig;
+    BOOST_CHECK_MESSAGE(CheckSupervisionRecordSpend(new_input, record_out, registry, err), err);
+
+    // A signature for a different record does not travel.
+    const uint256 other_sighash =
+        SupervisionUnfreezeSigHash(COutPoint(uint256S("0x78"), 0), decl.asset, target);
+    std::vector<unsigned char> other_sig(64);
+    BOOST_REQUIRE(fresh.SignSchnorr(other_sighash, other_sig, nullptr, uint256()));
+    CTxIn wrong_input(record_outpoint);
+    wrong_input.scriptSig = CScript() << other_sig;
+    BOOST_CHECK(!CheckSupervisionRecordSpend(wrong_input, record_out, registry, err));
+
+    // No signature at all.
+    CTxIn bare(record_outpoint);
+    BOOST_CHECK(!CheckSupervisionRecordSpend(bare, record_out, registry, err));
+}
+
+//! A rotation is a statement about the past. Spending one would erase it from
+//! the UTXO set and take the key change with it, leaving the registry
+//! unrebuildable.
+BOOST_AUTO_TEST_CASE(rotation_records_cannot_be_spent)
+{
+    SupervisionRegistry registry;
+    const CKey op = MakePrivKey(51), rec = MakePrivKey(52), fresh = MakePrivKey(53);
+    const SupervisionDeclaration decl = RegisterAsset(registry, op, rec);
+    std::string err;
+
+    const auto rotation = SignRecord(SupervisionRecordKind::ROTATE_OPERATIONAL, decl.asset,
+                                     SupervisionKeyAsTarget(XOnlyPubKey(fresh.GetPubKey())),
+                                     XOnlyPubKey(op.GetPubKey()), rec, RECORD_INPUT);
+    const CTxOut out(decl.asset, CConfidentialValue(0),
+                     BuildSupervisionRecordScript(rotation));
+    CTxIn input(COutPoint(uint256S("0x77"), 0));
+    input.scriptSig = CScript() << std::vector<unsigned char>(64, 0x00);
+    BOOST_CHECK(!CheckSupervisionRecordSpend(input, out, registry, err));
+}
+
+//! The registry must be an EXACT function of the UTXO set: two records may name
+//! one target, and the freeze lifts only when the last of them is spent.
+BOOST_AUTO_TEST_CASE(freezes_are_counted_not_set)
+{
+    SupervisionRegistry registry;
+    const SupervisionDeclaration decl = RegisterAsset(registry, MakePrivKey(61), MakePrivKey(62));
+    const uint256 target = uint256S("0x5150");
+
+    BOOST_CHECK(!registry.IsFrozen(decl.asset, target));
+    registry.AddFreeze(decl.asset, target);
+    registry.AddFreeze(decl.asset, target);
+    BOOST_CHECK(registry.IsFrozen(decl.asset, target));
+    registry.SubFreeze(decl.asset, target);
+    BOOST_CHECK(registry.IsFrozen(decl.asset, target));
+    registry.SubFreeze(decl.asset, target);
+    BOOST_CHECK(!registry.IsFrozen(decl.asset, target));
+    // Erased, not left at zero, so the map does not grow without bound.
+    BOOST_CHECK(registry.FrozenTargets(decl.asset).empty());
+
+    // An unsupervised asset is never frozen, and saying so must not create it.
+    registry.AddFreeze(CAsset(uint256S("0xdead")), target);
+    BOOST_CHECK(!registry.IsFrozen(CAsset(uint256S("0xdead")), target));
+}
+
+//! The record script must actually execute, and leave a CLEAN stack.
+//!
+//! This is the test that justifies the OP_2DROP. A record ending OP_DROP
+//! OP_TRUE would satisfy consensus and leave two items on the stack, failing
+//! SCRIPT_VERIFY_CLEANSTACK, so every unfreeze would be a valid transaction
+//! that no node relays -- indistinguishable, in practice, from a freeze that
+//! cannot be lifted.
+BOOST_AUTO_TEST_CASE(unfreeze_spend_executes_under_standard_flags)
+{
+    const CKey op = MakePrivKey(71);
+    const SupervisionRecord record =
+        SignRecord(SupervisionRecordKind::FREEZE, CAsset(uint256S("0xaa")), uint256S("0xbb"),
+                   XOnlyPubKey(), op, RECORD_INPUT);
+    const CScript record_script = BuildSupervisionRecordScript(record);
+
+    ScriptError serror = SCRIPT_ERR_UNKNOWN_ERROR;
+    const CScriptWitness empty_witness;
+
+    // Exactly one item: passes, with nothing left over.
+    const CScript one_item = CScript() << std::vector<unsigned char>(64, 0x01);
+    BOOST_CHECK_MESSAGE(VerifyScript(one_item, record_script, &empty_witness,
+                                     STANDARD_SCRIPT_VERIFY_FLAGS, BaseSignatureChecker(), &serror),
+                        ScriptErrorString(serror));
+
+    // No item: the OP_2DROP has nothing to remove, so the output cannot be
+    // spent by accident or by a transaction that forgot the signature.
+    BOOST_CHECK(!VerifyScript(CScript(), record_script, &empty_witness,
+                              STANDARD_SCRIPT_VERIFY_FLAGS, BaseSignatureChecker(), &serror));
+
+    // Two items: valid script, dirty stack, so it would never relay. Refusing
+    // it here keeps one encoding of an unfreeze, matching the consensus check.
+    const CScript two_items = CScript() << std::vector<unsigned char>(64, 0x01)
+                                        << std::vector<unsigned char>(64, 0x02);
+    BOOST_CHECK(!VerifyScript(two_items, record_script, &empty_witness,
+                              STANDARD_SCRIPT_VERIFY_FLAGS, BaseSignatureChecker(), &serror));
+    BOOST_CHECK_EQUAL(serror, SCRIPT_ERR_CLEANSTACK);
+
+    // And a declaration is unspendable however it is approached.
+    const CScript declaration =
+        BuildSupervisionScript(CAsset(uint256S("0xabc")), MakeDescriptor());
+    BOOST_CHECK(!VerifyScript(one_item, declaration, &empty_witness,
+                              STANDARD_SCRIPT_VERIFY_FLAGS, BaseSignatureChecker(), &serror));
+}
+
+//! A record output must be denominated in the asset it governs, carrying zero.
+//! The dust rule applies only to the fee asset, so a record denominated in the
+//! policy asset would be dust and would never relay: a freeze the issuer could
+//! sign and never publish.
+BOOST_AUTO_TEST_CASE(record_outputs_carry_zero_of_their_own_asset)
+{
+    SupervisionRegistry registry;
+    const CKey op = MakePrivKey(81), rec = MakePrivKey(82);
+    const SupervisionDeclaration decl = RegisterAsset(registry, op, rec);
+    const auto record = SignRecord(SupervisionRecordKind::FREEZE, decl.asset, uint256S("0x1234"),
+                                   XOnlyPubKey(), op, RECORD_INPUT);
+    std::string err;
+
+    BOOST_CHECK_MESSAGE(CheckSupervisionRecords(CTransaction(RecordTx(record)), registry, err),
+                        err);
+
+    CMutableTransaction other_asset = RecordTx(record);
+    other_asset.vout[0].nAsset = CConfidentialAsset(CAsset(uint256S("0xfee")));
+    BOOST_CHECK(!CheckSupervisionRecords(CTransaction(other_asset), registry, err));
+
+    CMutableTransaction funded = RecordTx(record);
+    funded.vout[0].nValue = CConfidentialValue(1);
+    BOOST_CHECK(!CheckSupervisionRecords(CTransaction(funded), registry, err));
+
+    CMutableTransaction blinded = RecordTx(record);
+    blinded.vout[0].nAsset.vchCommitment.assign(33, 0x00);
+    blinded.vout[0].nAsset.vchCommitment[0] = 10;
+    BOOST_CHECK(!CheckSupervisionRecords(CTransaction(blinded), registry, err));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

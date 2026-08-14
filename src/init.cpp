@@ -13,6 +13,7 @@
 #include <banman.h>
 #include <anchor.h>
 #include <pos.h>
+#include <supervision.h>
 #include <pos_producer.h>
 #include <key_io.h>
 #include <blockfilter.h>
@@ -2189,6 +2190,22 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         const StakeRegistry& reg = StakeRegistry::GetInstance();
         LogPrintf("PoS: stake registry loaded: %u staker(s), total weight %llu\n",
                   (unsigned)reg.Size(), (unsigned long long)PosTotalWeight(reg));
+    }
+
+    // SEQUENTIA: and the supervision registry, on the same terms. It is a pure
+    // function of the UTXO set (src/supervision.h), so a scan here plus the
+    // incremental mirroring on every tip transition is the whole of its
+    // persistence. Not behind g_con_pos: supervision and proof-of-stake are
+    // independent, and a chain could run either without the other.
+    if (g_supervision_height > 0) {
+        LOCK(cs_main);
+        CChainState& sup_chainstate = chainman.ActiveChainstate();
+        sup_chainstate.ForceFlushStateToDisk();
+        if (!RebuildSupervisionRegistry(sup_chainstate.CoinsDB())) {
+            return InitError(_("Failed to rebuild the supervision registry from the UTXO set"));
+        }
+        LogPrintf("Supervision: registry loaded: %u supervised asset(s)\n",
+                  (unsigned)SupervisionRegistry::GetInstance().Assets().size());
     }
 
     // SEQUENTIA: resolve -validateanchor BEFORE the producer starts. The
