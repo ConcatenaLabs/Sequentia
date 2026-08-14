@@ -3977,6 +3977,31 @@ bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew
         } else {
             return AbortNode(state, "Failed to read undo data for supervision tracking; the supervision registry would desync from consensus");
         }
+
+        // ...and then evict whatever the block's records just invalidated. This
+        // is not housekeeping. A freeze record conflicts with no transaction, so
+        // removeForBlock above leaves a now-frozen spend sitting in the mempool,
+        // where every block template re-selects it and every template then fails
+        // TestBlockValidity -- so every producer skips its slot and the chain
+        // stops making blocks. It runs after the registry update, because that
+        // is when the answer it needs becomes true, and only when the block
+        // carried a record, so an ordinary block pays nothing for it.
+        if (m_mempool) {
+            bool carries_records = false;
+            for (const CTransactionRef& tx : blockConnecting.vtx) {
+                for (const CTxOut& out : tx->vout) {
+                    if (ParseSupervisionRecordScript(out.scriptPubKey)) { carries_records = true; break; }
+                }
+                if (carries_records) break;
+            }
+            // A spend of a record is an unfreeze, which can only widen what is
+            // allowed, so it needs no eviction pass of its own.
+            if (carries_records) {
+                LOCK(m_mempool->cs);
+                CCoinsViewMemPool mempool_view(&CoinsTip(), *m_mempool);
+                m_mempool->removeStaleSupervision(mempool_view);
+            }
+        }
     }
 
     int64_t nTime6 = GetTimeMicros(); nTimePostConnect += nTime6 - nTime5; nTimeTotal += nTime6 - nTime1;

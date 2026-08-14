@@ -740,4 +740,118 @@ BOOST_AUTO_TEST_CASE(record_outputs_carry_zero_of_their_own_asset)
     BOOST_CHECK(!CheckSupervisionRecords(CTransaction(blinded), registry, err));
 }
 
+/* ---------------------------------------------------------------------------
+ * Enforcement: which spends a freeze can reach.
+ * ------------------------------------------------------------------------ */
+
+//! Build a transaction with one input spending `spk`, with the given witness
+//! and scriptSig.
+static CMutableTransaction SpendOf(const CScript& script_sig,
+                                   const std::vector<std::vector<unsigned char>>& witness)
+{
+    CMutableTransaction tx;
+    tx.vin.emplace_back(COutPoint(uint256S("0x55"), 0));
+    tx.vin[0].scriptSig = script_sig;
+    tx.witness.vtxinwit.resize(1);
+    tx.witness.vtxinwit[0].scriptWitness.stack = witness;
+    return tx;
+}
+
+static const std::vector<unsigned char> SIG64(64, 0x01);
+static const std::vector<unsigned char> PUBKEY33(33, 0x02);
+
+//! Single-owner scripts are freezable. This is the permissive half, and every
+//! entry here is a form in which somebody can hold a supervised asset outright.
+BOOST_AUTO_TEST_CASE(single_owner_spends_are_freezable)
+{
+    const std::vector<unsigned char> hash20(20, 0x03), hash32(32, 0x04);
+
+    // P2WPKH: <sig> <pubkey>.
+    const CScript p2wpkh = CScript() << OP_0 << hash20;
+    BOOST_CHECK(IsSingleOwnerSpend(CTransaction(SpendOf(CScript(), {SIG64, PUBKEY33})), 0, p2wpkh));
+
+    // P2TR key path: one witness element, and one more if there is an annex.
+    const CScript p2tr = CScript() << OP_1 << hash32;
+    BOOST_CHECK(IsSingleOwnerSpend(CTransaction(SpendOf(CScript(), {SIG64})), 0, p2tr));
+    const std::vector<unsigned char> annex{0x50, 0x00};
+    BOOST_CHECK(IsSingleOwnerSpend(CTransaction(SpendOf(CScript(), {SIG64, annex})), 0, p2tr));
+
+    // Legacy forms, unambiguous from the output alone.
+    const CScript p2pkh = CScript() << OP_DUP << OP_HASH160 << hash20 << OP_EQUALVERIFY
+                                    << OP_CHECKSIG;
+    BOOST_CHECK(IsSingleOwnerSpend(CTransaction(SpendOf(CScript(), {})), 0, p2pkh));
+    const CScript p2pk = CScript() << PUBKEY33 << OP_CHECKSIG;
+    BOOST_CHECK(IsSingleOwnerSpend(CTransaction(SpendOf(CScript(), {})), 0, p2pk));
+
+    // P2SH wrapping P2WPKH, which the spend reveals. Covered so that a
+    // legacy-wrapped address is not an evasion route.
+    CScript witness_program;
+    witness_program << OP_0 << hash20;
+    const CScript p2sh = CScript() << OP_HASH160 << hash20 << OP_EQUAL;
+    const CScript redeem_push =
+        CScript() << std::vector<unsigned char>(witness_program.begin(), witness_program.end());
+    BOOST_CHECK(
+        IsSingleOwnerSpend(CTransaction(SpendOf(redeem_push, {SIG64, PUBKEY33})), 0, p2sh));
+}
+
+//! THE RULE THAT KEEPS A FREEZE FROM TAKING HOSTAGES. Everything here is a
+//! script somebody else may have a claim on, so freezing it would strand a
+//! counterparty who did nothing, and freeze a contract whose timelocks keep
+//! running. This is why supervised assets work on Lightning and on the DEX.
+BOOST_AUTO_TEST_CASE(shared_scripts_are_never_freezable)
+{
+    const std::vector<unsigned char> hash20(20, 0x03), hash32(32, 0x04);
+
+    // P2WSH: a Lightning funding output, an HTLC, a covenant.
+    const CScript p2wsh = CScript() << OP_0 << hash32;
+    BOOST_CHECK(!IsSingleOwnerSpend(CTransaction(SpendOf(CScript(), {SIG64, SIG64, {}})), 0,
+                                    p2wsh));
+
+    // P2TR SCRIPT path: the control block makes the witness longer than one.
+    const CScript p2tr = CScript() << OP_1 << hash32;
+    const std::vector<unsigned char> control(33, 0xc0);
+    BOOST_CHECK(!IsSingleOwnerSpend(CTransaction(SpendOf(CScript(), {SIG64, SIG64, control})), 0,
+                                    p2tr));
+
+    // Bare multisig.
+    const CScript multisig = CScript() << OP_2 << PUBKEY33 << PUBKEY33 << OP_2 << OP_CHECKMULTISIG;
+    BOOST_CHECK(!IsSingleOwnerSpend(CTransaction(SpendOf(CScript(), {})), 0, multisig));
+
+    // P2SH that does NOT wrap P2WPKH.
+    const CScript p2sh = CScript() << OP_HASH160 << hash20 << OP_EQUAL;
+    const CScript redeem_push = CScript() << std::vector<unsigned char>{OP_TRUE};
+    BOOST_CHECK(!IsSingleOwnerSpend(CTransaction(SpendOf(redeem_push, {SIG64, PUBKEY33})), 0,
+                                    p2sh));
+
+    // A future witness version nobody has defined yet.
+    const CScript unknown_version = CScript() << OP_2 << hash32;
+    BOOST_CHECK(!IsSingleOwnerSpend(CTransaction(SpendOf(CScript(), {SIG64})), 0,
+                                    unknown_version));
+
+    // A supervision record itself, which is bare and consensus-gated.
+    const CKey op = MakePrivKey(91);
+    const auto record = SignRecord(SupervisionRecordKind::FREEZE, CAsset(uint256S("0xaa")),
+                                   uint256S("0xbb"), XOnlyPubKey(), op, RECORD_INPUT);
+    BOOST_CHECK(!IsSingleOwnerSpend(CTransaction(SpendOf(CScript() << SIG64, {})), 0,
+                                    BuildSupervisionRecordScript(record)));
+
+    // A witness the transaction does not carry at all.
+    CMutableTransaction no_witness;
+    no_witness.vin.emplace_back(COutPoint(uint256S("0x55"), 0));
+    const CScript p2wpkh = CScript() << OP_0 << hash20;
+    BOOST_CHECK(!IsSingleOwnerSpend(CTransaction(no_witness), 0, p2wpkh));
+    // ...and an input index that does not exist.
+    BOOST_CHECK(!IsSingleOwnerSpend(CTransaction(no_witness), 7, p2wpkh));
+}
+
+//! A freeze names a scriptPubKey by its hash, so the registry answer must
+//! depend on the exact script and nothing else.
+BOOST_AUTO_TEST_CASE(freeze_targets_are_script_hashes)
+{
+    const CScript a = CScript() << OP_0 << std::vector<unsigned char>(20, 0x03);
+    const CScript b = CScript() << OP_0 << std::vector<unsigned char>(20, 0x04);
+    BOOST_CHECK(SupervisionTargetHash(a) == SupervisionTargetHash(a));
+    BOOST_CHECK(SupervisionTargetHash(a) != SupervisionTargetHash(b));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

@@ -679,6 +679,16 @@ public:
      *                                        and updates an entry's LockPoints.
      * */
     void removeForReorg(CChain& chain, std::function<bool(txiter)> filter_final_and_mature) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
+    /** SEQUENTIA: evict entries a newly-confirmed supervision record made
+     *  invalid (src/supervision.h).
+     *
+     *  Nothing else does this. A freeze record conflicts with no transaction,
+     *  so removeForBlock leaves a now-frozen spend resident, every block
+     *  template re-selects it, every template then fails TestBlockValidity, and
+     *  every producer skips its slot: the chain stops. Called from ConnectTip
+     *  once the block's records are in the registry, and only when the block
+     *  carried one, so an ordinary block pays nothing. */
+    void removeStaleSupervision(CCoinsView& view) EXCLUSIVE_LOCKS_REQUIRED(cs);
     void removeConflicts(const CTransaction& tx) EXCLUSIVE_LOCKS_REQUIRED(cs);
     void removeForBlock(const std::vector<CTransactionRef>& vtx, unsigned int nBlockHeight,
                         const CBlockIndex* p_block_index_new = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs);
