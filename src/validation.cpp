@@ -48,6 +48,7 @@
 #include <script/sigcache.h>
 #include <shutdown.h>
 #include <supervision.h>
+#include <supervision_submit.h>
 #include <signet.h>
 #include <timedata.h>
 #include <tinyformat.h>
@@ -3987,6 +3988,10 @@ bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew
         // stops making blocks. It runs after the registry update, because that
         // is when the answer it needs becomes true, and only when the block
         // carried a record, so an ordinary block pays nothing for it.
+        // Drop what this block confirmed from the private submission queue, and
+        // expire anything that has waited too long (src/supervision_submit.h).
+        SupervisionSubmissionQueue::GetInstance().Update(blockConnecting, pindexNew->nHeight);
+
         if (m_mempool) {
             bool carries_records = false;
             for (const CTransactionRef& tx : blockConnecting.vtx) {

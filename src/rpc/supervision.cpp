@@ -3,6 +3,8 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <chainparams.h>
+#include <consensus/tx_verify.h>
+#include <consensus/validation.h>
 #include <core_io.h>
 #include <issuance.h>
 #include <key_io.h>
@@ -10,7 +12,11 @@
 #include <rpc/server.h>
 #include <rpc/server_util.h>
 #include <rpc/util.h>
+#include <pegins.h>
+#include <script/pegins.h>
 #include <supervision.h>
+#include <supervision_submit.h>
+#include <validation.h>
 #include <util/strencodings.h>
 
 /* SEQUENTIA: RPCs for supervised assets (src/supervision.h).
@@ -77,11 +83,15 @@ static CScript ParseTargetScript(const std::string& target)
 
 static SupervisionRecordKind ParseRecordKind(const std::string& kind)
 {
-    if (kind == "freeze") return SupervisionRecordKind::FREEZE;
+    // "pause" is not a record type. It is a FREEZE naming the wildcard target,
+    // which is the whole reason pause costs no new machinery: signed admission,
+    // the registry, unfreeze-as-spend, reorg handling and mempool eviction all
+    // apply to it unchanged.
+    if (kind == "freeze" || kind == "pause") return SupervisionRecordKind::FREEZE;
     if (kind == "rotateoperational") return SupervisionRecordKind::ROTATE_OPERATIONAL;
     if (kind == "rotaterecovery") return SupervisionRecordKind::ROTATE_RECOVERY;
     throw JSONRPCError(RPC_INVALID_PARAMETER,
-                       "kind must be one of freeze, rotateoperational, rotaterecovery");
+                       "kind must be one of freeze, pause, rotateoperational, rotaterecovery");
 }
 
 static std::string RecordKindName(SupervisionRecordKind kind)
@@ -117,6 +127,9 @@ static SupervisionRecord RecordFromArgs(const JSONRPCRequest& request)
         if (record.NewKey() == record.old_key) {
             throw JSONRPCError(RPC_INVALID_PARAMETER, "newkey and oldkey are the same key");
         }
+    } else if (request.params[0].get_str() == "pause") {
+        // Every script for this asset, so there is no target to name.
+        record.target = SUPERVISION_PAUSE_TARGET;
     } else {
         record.target = SupervisionTargetHash(ParseTargetScript(request.params[2].get_str()));
     }
@@ -136,6 +149,7 @@ static RPCHelpMan getsupervisedassetid()
             {"operationalkey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "x-only key that will sign freezes and unfreezes."},
             {"recoverykey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "x-only key that will sign rotations, and nothing else. Keep it cold."},
             {"contracthash", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Contract hash committing to the asset's terms (default: zero)."},
+            {"pause", RPCArg::Type::BOOL, RPCArg::Default{false}, "Whether the issuer may PAUSE the asset, stopping every single-owner holding at once. Permanent either way, because it is committed in the asset id: an issuer who does not take it can never be given it, and a holder can see at issuance whether what they accept can be stopped wholesale."},
         },
         RPCResult{RPCResult::Type::OBJ, "", "", {
             {RPCResult::Type::STR_HEX, "asset", "The supervised asset id."},
@@ -156,8 +170,17 @@ static RPCHelpMan getsupervisedassetid()
         uint256 contract;
         if (!request.params[4].isNull()) contract = ParseHashV(request.params[4], "contracthash");
 
+        SupervisionDescriptor with_features = desc;
+        if (!request.params[5].isNull() && request.params[5].get_bool()) {
+            with_features.feature_bits |= SUPERVISION_FEATURE_PAUSE;
+        }
+        std::string feature_err;
+        if (!ValidateSupervisionDescriptor(with_features, feature_err)) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, feature_err);
+        }
+
         uint256 entropy;
-        GenerateSupervisedAssetEntropy(entropy, prevout, contract, desc);
+        GenerateSupervisedAssetEntropy(entropy, prevout, contract, with_features);
         CAsset asset, token;
         CalculateAsset(asset, entropy);
         CalculateReissuanceToken(token, entropy, false);
@@ -166,7 +189,7 @@ static RPCHelpMan getsupervisedassetid()
         result.pushKV("asset", asset.GetHex());
         result.pushKV("token", token.GetHex());
         result.pushKV("entropy", entropy.GetHex());
-        const CScript declaration = BuildSupervisionScript(asset, desc);
+        const CScript declaration = BuildSupervisionScript(asset, with_features);
         result.pushKV("declarationscript", HexStr(declaration));
         return result;
     }};
@@ -183,9 +206,9 @@ static RPCHelpMan getsupervisionrecordhash()
         "other. Without that, a freeze signature could be lifted off the chain and replayed by anyone to\n"
         "re-freeze a target the issuer had deliberately unfrozen.\n",
         {
-            {"kind", RPCArg::Type::STR, RPCArg::Optional::NO, "freeze, rotateoperational, or rotaterecovery."},
+            {"kind", RPCArg::Type::STR, RPCArg::Optional::NO, "freeze, pause, rotateoperational, or rotaterecovery. A pause is a freeze naming every script at once, and needs the asset to have been issued with the pause capability."},
             {"asset", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The supervised asset."},
-            {"target", RPCArg::Type::STR, RPCArg::Optional::NO, "For freeze: the address or scriptPubKey to freeze. For a rotation: the new x-only key."},
+            {"target", RPCArg::Type::STR, RPCArg::Optional::NO, "For freeze: the address or scriptPubKey to freeze. For a rotation: the new x-only key. Ignored for pause, which names every script."},
             {"oldkey", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Rotations only: the x-only key being replaced, which must be the current one."},
             {"txid", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "txid of the first input the record's transaction will spend."},
             {"vout", RPCArg::Type::NUM, RPCArg::Optional::NO, "vout of that input."},
@@ -226,9 +249,9 @@ static RPCHelpMan buildsupervisionrecord()
         "to say Lightning channels, HTLCs and covenants, are out of reach by design, because the frozen party is\n"
         "not the only party to those funds.\n",
         {
-            {"kind", RPCArg::Type::STR, RPCArg::Optional::NO, "freeze, rotateoperational, or rotaterecovery."},
+            {"kind", RPCArg::Type::STR, RPCArg::Optional::NO, "freeze, pause, rotateoperational, or rotaterecovery. A pause is a freeze naming every script at once, and needs the asset to have been issued with the pause capability."},
             {"asset", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The supervised asset."},
-            {"target", RPCArg::Type::STR, RPCArg::Optional::NO, "For freeze: the address or scriptPubKey. For a rotation: the new x-only key."},
+            {"target", RPCArg::Type::STR, RPCArg::Optional::NO, "For freeze: the address or scriptPubKey. For a rotation: the new x-only key. Ignored for pause."},
             {"oldkey", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Rotations only: the x-only key being replaced."},
             {"signature", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The 64-byte BIP340 signature over getsupervisionrecordhash."},
         },
@@ -323,6 +346,8 @@ static RPCHelpMan getsupervisedassets()
             const auto recovery = registry.RecoveryKey(entry.first);
             if (operational) item.pushKV("operationalkey", HexStr(*operational));
             if (recovery) item.pushKV("recoverykey", HexStr(*recovery));
+            item.pushKV("pauseallowed", registry.PauseAllowed(entry.first));
+            item.pushKV("paused", registry.IsPaused(entry.first));
             item.pushKV("frozen", (int)registry.FrozenTargets(entry.first).size());
             out.push_back(item);
         }
@@ -402,8 +427,13 @@ static RPCHelpMan isassetfrozen()
                                type == TxoutType::WITNESS_V1_TAPROOT ||
                                type == TxoutType::SCRIPTHASH;
 
+        const SupervisionRegistry& registry = SupervisionRegistry::GetInstance();
         UniValue result(UniValue::VOBJ);
-        result.pushKV("frozen", SupervisionRegistry::GetInstance().IsFrozen(asset, target));
+        result.pushKV("frozen", registry.IsFrozen(asset, target));
+        // Separately, because a holder told only "frozen" cannot tell a freeze
+        // aimed at them from the whole asset being stopped, and the two call
+        // for completely different responses.
+        result.pushKV("paused", registry.IsPaused(asset));
         result.pushKV("freezable", freezable);
         result.pushKV("targethash", target.GetHex());
         return result;
@@ -453,6 +483,9 @@ static RPCHelpMan decodesupervisionscript()
             if (record->IsRotation()) {
                 result.pushKV("newkey", HexStr(record->NewKey()));
                 result.pushKV("oldkey", HexStr(record->old_key));
+            } else if (record->target == SUPERVISION_PAUSE_TARGET) {
+                result.pushKV("kind", "pause");
+                result.pushKV("targethash", record->target.GetHex());
             } else {
                 result.pushKV("targethash", record->target.GetHex());
             }
@@ -536,6 +569,111 @@ static RPCHelpMan setsupervisionunfreezesig()
     }};
 }
 
+
+static RPCHelpMan submitsupervisionrecord()
+{
+    return RPCHelpMan{"submitsupervisionrecord",
+        "\nSubmit a supervision record straight to this producer, bypassing the public mempool.\n"
+        "\nWithout this a freeze is systematically front-runnable: the record sits in the public mempool for a\n"
+        "block before it confirms, so a watcher sees the target and moves the funds to a fresh script before the\n"
+        "freeze binds, and every freeze becomes a chase the issuer loses. The same race exists on Ethereum,\n"
+        "where issuers answer it with private relays. This is the equivalent.\n"
+        "\nThe transaction is validated exactly as any other, then held privately and included in the next block\n"
+        "THIS node produces. It is never announced and never relayed, so it is invisible until it is in a block.\n"
+        "Submit to every producer you have an arrangement with: the more of the stake you reach, the sooner it\n"
+        "lands. Unmined submissions are dropped after " + strprintf("%d", SupervisionSubmissionQueue::EXPIRY_BLOCKS) + " blocks and logged.\n"
+        "\nOnly transactions that CREATE a supervision record are accepted. That restriction is deliberate: a\n"
+        "general private path into block templates is a censorship and ordering lever, and building one by\n"
+        "accident while making freezes work would be a bad trade.\n",
+        {
+            {"hexstring", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The signed raw transaction."},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "", {
+            {RPCResult::Type::STR_HEX, "txid", "The transaction id."},
+            {RPCResult::Type::NUM, "queued", "How many submissions this producer is now holding."},
+        }},
+        RPCExamples{HelpExampleCli("submitsupervisionrecord", "\"<rawtx>\"")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+    {
+        RequireSupervisionScheduled();
+
+        CMutableTransaction mtx;
+        if (!DecodeHexTx(mtx, request.params[0].get_str())) {
+            throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "TX decode failed");
+        }
+        CTransactionRef tx = MakeTransactionRef(std::move(mtx));
+        if (!IsSupervisionSubmission(*tx)) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                "this channel carries supervision records only");
+        }
+
+        ChainstateManager& chainman = EnsureAnyChainman(request.context);
+
+        int height = 0;
+        {
+            LOCK(cs_main);
+            CChainState& chainstate = chainman.ActiveChainstate();
+            height = chainstate.m_chain.Height();
+
+            // Validated against the tip before it is queued, and refused rather
+            // than held if it fails. A queued transaction goes into every
+            // template this node builds, so an invalid one would fail
+            // TestBlockValidity every time and cost the producer every slot.
+            CCoinsViewCache view(&chainstate.CoinsTip());
+            TxValidationState state;
+            CAmountMap fee_map;
+            std::set<std::pair<uint256, COutPoint>> pegins_spent;
+            const auto& fedpegscripts = GetValidFedpegScripts(
+                chainstate.m_chain.Tip(), Params().GetConsensus(), true);
+            if (!view.HaveInputs(*tx)) {
+                throw JSONRPCError(RPC_VERIFY_REJECTED,
+                    "inputs are missing or already spent; the transaction cannot be mined");
+            }
+            if (!Consensus::CheckTxInputs(*tx, state, view, height + 1, fee_map, pegins_spent,
+                                          nullptr, false, true, fedpegscripts)) {
+                throw JSONRPCError(RPC_VERIFY_REJECTED, state.ToString());
+            }
+        }
+
+        std::string err;
+        if (!SupervisionSubmissionQueue::GetInstance().Add(tx, height, err)) {
+            throw JSONRPCError(RPC_VERIFY_REJECTED, err);
+        }
+
+        UniValue result(UniValue::VOBJ);
+        result.pushKV("txid", tx->GetHash().GetHex());
+        result.pushKV("queued", (int)SupervisionSubmissionQueue::GetInstance().Size());
+        return result;
+    }};
+}
+
+static RPCHelpMan getsupervisionsubmissions()
+{
+    return RPCHelpMan{"getsupervisionsubmissions",
+        "\nThe supervision records this producer is holding privately for inclusion.\n"
+        "\nThese are not in the mempool and have not been announced to anyone. They are invisible to the rest of\n"
+        "the network until one of them is in a block.\n",
+        {},
+        RPCResult{RPCResult::Type::ARR, "", "", {
+            {RPCResult::Type::OBJ, "", "", {
+                {RPCResult::Type::STR_HEX, "txid", "The transaction id."},
+                {RPCResult::Type::NUM, "height", "Chain height when it was accepted."},
+            }},
+        }},
+        RPCExamples{HelpExampleCli("getsupervisionsubmissions", "")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+    {
+        UniValue out(UniValue::VARR);
+        for (const CTransactionRef& tx : SupervisionSubmissionQueue::GetInstance().Entries()) {
+            UniValue item(UniValue::VOBJ);
+            item.pushKV("txid", tx->GetHash().GetHex());
+            item.pushKV("height", SupervisionSubmissionQueue::GetInstance().HeightOf(tx->GetHash()));
+            out.push_back(item);
+        }
+        return out;
+    }};
+}
+
 void RegisterSupervisionRPCCommands(CRPCTable& t)
 {
 // clang-format off
@@ -552,6 +690,8 @@ static const CRPCCommand commands[] =
     { "supervision",        &decodesupervisionscript,       },
     { "supervision",        &addsupervisionrecordoutput,    },
     { "supervision",        &setsupervisionunfreezesig,     },
+    { "supervision",        &submitsupervisionrecord,       },
+    { "supervision",        &getsupervisionsubmissions,     },
 };
 // clang-format on
     for (const auto& c : commands) {
