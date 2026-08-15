@@ -27,6 +27,12 @@ namespace Consensus { struct Params; };
 namespace node {
 static const bool DEFAULT_PRINTPRIORITY = false;
 
+/** Weight BlockAssembler holds back for the coinbase before it selects anything.
+ *  Named because anyone projecting what fits in the next block has to start from
+ *  the same figure; starting from zero promises a whole coinbase more room than
+ *  the block will have. */
+static constexpr size_t COINBASE_RESERVED_WEIGHT = 4000;
+
 struct CBlockTemplate
 {
     CBlock block;
