@@ -103,6 +103,10 @@ WalletView::WalletView(WalletModel* wallet_model, const PlatformStyle* _platform
 
     connect(overviewPage, &OverviewPage::outOfSyncWarningClicked, this, &WalletView::outOfSyncWarningClicked);
 
+    // The Overview page owns the periodic parent-chain (Bitcoin) scan; the Transactions
+    // page shows the unspent outputs it finds, so one scan feeds both.
+    connect(overviewPage, &OverviewPage::btcUtxosChanged, transactionView, &TransactionView::setParentChainUtxos);
+
     connect(sendCoinsPage, &SendCoinsDialog::coinsSent, this, &WalletView::coinsSent);
     // Highlight transaction after send
     connect(sendCoinsPage, &SendCoinsDialog::coinsSent, transactionView, qOverload<const uint256&>(&TransactionView::focusTransaction));
