@@ -32,6 +32,7 @@ private:
     std::string label;
     uint8_t precision{DEFAULT_ASSET_PRECISION};
     PrecisionSource precision_source{PrecisionSource::Default};
+    bool registry_listed{false};
 
 public:
     AssetMetadata() : label("") {};
@@ -63,6 +64,16 @@ public:
         precision_source = _source;
         return true;
     }
+
+    /** SEQUENTIA: whether the Asset Registry publishes this asset (as a verified
+     *  entry). Distinct from "has a label": an operator -assetdir entry or the
+     *  chain's own pegged-asset name also produce one, and neither says anything
+     *  about the asset being discoverable by the price servers other block
+     *  producers run. That difference is what a wallet needs in order to warn
+     *  that a fee asset this node happens to accept may be accepted nowhere
+     *  else — see GetFeeAssetInfo() in exchangerates.h. */
+    bool IsRegistryListed() const { return registry_listed; }
+    void MarkRegistryListed() { registry_listed = true; }
 };
 
 /** SEQUENTIA: one asset as published by the Sequentia Asset Registry index. */
@@ -133,6 +144,10 @@ public:
 
     /** @return the label associated to the asset id, or some other identifier */
     std::string GetIdentifier(const CAsset& asset) const;
+
+    /** SEQUENTIA: whether the Asset Registry publishes this asset. See
+     *  AssetMetadata::IsRegistryListed(). */
+    bool IsRegistryListed(const CAsset& asset) const;
 
     std::vector<CAsset> GetKnownAssets() const;
 };
