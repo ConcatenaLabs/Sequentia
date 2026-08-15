@@ -340,7 +340,7 @@ void OverviewPage::setBalance(const interfaces::WalletBalances& balances)
             : balances.balance + balances.unconfirmed_balance + balances.immature_balance;
         // Parent-chain bitcoin at this wallet's addresses counts as part of what the
         // wallet is worth — it is money the wallet's keys control, whatever chain it
-        // sits on. It is not a CAsset, so it rides beside the map, priced as WBTC.
+        // sits on. It is not a CAsset, so it rides beside the map, at the feed's bitcoin price.
         const double btc_whole = m_btc_amount > 0 ? m_btc_amount / double(COIN) : 0.0;
         bool holds_anything = btc_whole > 0.0;
         for (const auto& it : all) if (it.second > 0) { holds_anything = true; break; }
@@ -454,19 +454,11 @@ void OverviewPage::populateAssetTable(const interfaces::WalletBalances& balances
         for (const CAsset& a : order) addRow(a, get(avail, a), get(pending, a), get(immature, a), suffix);
     };
 
-    if (walletModel->wallet().privateKeysDisabled()) {
-        // Watch-only wallet: the "watch-only" maps are the only balances it has.
-        addSection(balances.watch_only_balance, balances.unconfirmed_watch_only_balance, balances.immature_watch_only_balance, QString());
-    } else {
-        addSection(balances.balance, balances.unconfirmed_balance, balances.immature_balance, QString());
-        // Any watch-only holdings follow, tagged so they are not confused with spendable ones.
-        addSection(balances.watch_only_balance, balances.unconfirmed_watch_only_balance, balances.immature_watch_only_balance, tr(" (watch-only)"));
-    }
-
     // Parent-chain bitcoin sits in the same table as everything else — it is money at
     // this wallet's addresses like any other row — but it is not a CAsset: its numbers
-    // come from the periodic parent-chain scan, not from the wallet. Zero and unknown
-    // both drop the row, exactly as a zero asset drops its own.
+    // come from the periodic parent-chain scan, not from the wallet. When present it is
+    // ALWAYS the first row, above the native asset: it is the money a newcomer already
+    // knows. Zero and unknown both drop the row, exactly as a zero asset drops its own.
     if (m_btc_amount > 0) {
         const int row = t->rowCount();
         t->insertRow(row);
@@ -498,6 +490,15 @@ void OverviewPage::populateAssetTable(const interfaces::WalletBalances& balances
         v->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
         if (val.isEmpty()) v->setForeground(QColor("#9b988e"));
         t->setItem(row, COL_VALUE, v);
+    }
+
+    if (walletModel->wallet().privateKeysDisabled()) {
+        // Watch-only wallet: the "watch-only" maps are the only balances it has.
+        addSection(balances.watch_only_balance, balances.unconfirmed_watch_only_balance, balances.immature_watch_only_balance, QString());
+    } else {
+        addSection(balances.balance, balances.unconfirmed_balance, balances.immature_balance, QString());
+        // Any watch-only holdings follow, tagged so they are not confused with spendable ones.
+        addSection(balances.watch_only_balance, balances.unconfirmed_watch_only_balance, balances.immature_watch_only_balance, tr(" (watch-only)"));
     }
 
     // Hide the Pending/Immature columns entirely when nothing needs them, so the everyday case
@@ -541,7 +542,7 @@ QString OverviewPage::assetTableSignature(const interfaces::WalletBalances& bala
         section(balances.watch_only_balance, balances.unconfirmed_watch_only_balance, balances.immature_watch_only_balance);
     }
     // The tBTC row renders from the scan state, so its inputs fingerprint too — a fresh
-    // scan or a WBTC price move must count as "the table changed".
+    // scan or a bitcoin price move must count as "the table changed".
     if (m_btc_amount > 0) {
         sig += QStringLiteral("|tBTC:") + QString::number(m_btc_amount)
              + QStringLiteral("=") + GUIUtil::formatReferenceApproxByLabel(QStringLiteral("BTC"), m_btc_amount / double(COIN), refCur);
