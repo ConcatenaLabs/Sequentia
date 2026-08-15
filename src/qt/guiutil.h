@@ -289,9 +289,9 @@ namespace GUIUtil
        amount is already in the reference denomination. Display-only — never used for copy/export. */
     QString formatReferenceApprox(const CAsset& asset, const CAmount& amount, const QString& refTicker);
     /* SEQUENTIA: as above, summed across a multi-asset map (e.g. a total balance).
-       `extraBtcWhole` adds that many whole parent-chain bitcoin (valued via the feed's
-       WBTC entry) into the sum — the dual-address tBTC balance is not a CAsset, so it
-       cannot travel inside the map. */
+       `extraBtcWhole` adds that many whole parent-chain bitcoin (at the feed's bitcoin
+       price, whatever key it uses — tBTC/BTC/WBTC) into the sum — the dual-address tBTC
+       balance is not a CAsset, so it cannot travel inside the map. */
     QString formatMultiAssetReferenceApprox(const CAmountMap& amountmap, const QString& refTicker, double extraBtcWhole = 0.0);
     /* SEQUENTIA: "≈ <ref>" from an asset LABEL/ticker + a whole-unit amount (for RPC-string tables
        like the assets page, where no CAsset/CAmount is available). Empty if unpriced. */

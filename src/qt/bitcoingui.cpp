@@ -2134,9 +2134,9 @@ ReferenceCurrencyStatusBarControl::ReferenceCurrencyStatusBarControl(const Platf
 }
 
 // (Re)build the list in the canonical order (matching the web explorer): BTC, USD,
-// SEQ first (always shown), then every other currently-priced asset ticker (WBTC shown
-// as BTC) ALPHABETICALLY, always including the current choice. Guarded so programmatic
-// changes don't fire onActivated.
+// SEQ first (always shown), then every other currently-priced asset ticker (any bitcoin
+// spelling — tBTC, WBTC — shown as BTC) ALPHABETICALLY, always including the current
+// choice. Guarded so programmatic changes don't fire onActivated.
 void ReferenceCurrencyStatusBarControl::rebuild()
 {
     m_updating = true;
@@ -2145,7 +2145,7 @@ void ReferenceCurrencyStatusBarControl::rebuild()
     QStringList rest;
     for (const auto& it : GetReferencePrices()) {
         QString t = QString::fromStdString(it.first).toUpper();
-        if (t == QLatin1String("WBTC")) t = QStringLiteral("BTC");
+        if (t == QLatin1String("WBTC") || t == QLatin1String("TBTC")) t = QStringLiteral("BTC");
         if (!head.contains(t) && !rest.contains(t)) rest << t;
     }
     if (!cur.isEmpty() && !head.contains(cur) && !rest.contains(cur)) rest << cur;
