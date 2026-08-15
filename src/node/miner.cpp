@@ -138,7 +138,7 @@ void BlockAssembler::resetBlock()
     inBlock.clear();
 
     // Reserve space for coinbase tx
-    nBlockWeight = 4000;
+    nBlockWeight = COINBASE_RESERVED_WEIGHT;
     nBlockSigOpsCost = 400;
     fIncludeWitness = false;
 
