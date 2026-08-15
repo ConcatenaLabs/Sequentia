@@ -9,6 +9,7 @@
 #include <chainparams.h>
 #include <deploymentstatus.h>
 #include <external_signer.h>
+#include <feeassets.h>
 #include <init.h>
 #include <interfaces/chain.h>
 #include <interfaces/handler.h>
@@ -260,6 +261,8 @@ public:
     }
     bool getNetworkActive() override { return m_context->connman && m_context->connman->GetNetworkActive(); }
     CFeeRate getDustRelayFee() override { return ::dustRelayFee; }
+    FeeAssetInfo getFeeAssetInfo(const CAsset& asset) override { return ::GetFeeAssetInfo(asset); }
+    std::vector<FeeAssetInfo> listFeeAssetInfo() override { return ::GetAllFeeAssetInfo(); }
     bool getAnchorNotWatchingBitcoin() override { return g_con_bitcoin_anchor && !g_validate_anchor; }
     interfaces::AnchorTipState getAnchorTipState() override
     {
