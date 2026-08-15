@@ -102,19 +102,28 @@ private:
 
     /** SEQUENTIA any-asset fees: the fee defaults to the asset being sent (first
         recipient), because that is what the user demonstrably holds and wants to
-        move — but only while that asset has a published price; producers are
-        unlikely to ever accept a fee they cannot value. A manual pick in the
+        move — but only while this node accepts a fee in it. A manual pick in the
         selector wins until the form is cleared. */
     bool m_fee_asset_user_choice{false};
     void updateDefaultFeeAsset();
     void updateFeeAssetWarning();
     /** The asset the fee will be paid in (the selector's pick, policy asset otherwise). */
     CAsset selectedFeeAsset() const;
-    /** SEQUENTIA: render a fee rate the way a user reads money — in the reference
-        currency, plus the equivalent in the fee asset and the rate applied. The
-        wallet's own policy-asset atoms are never shown as if they were a default
-        currency. Returns rich text (a muted span for the rate). */
-    QString formatFeeRate(const CAmount& policy_atoms_per_kvb) const;
+    /** SEQUENTIA: of the assets in the selector this node actually accepts fees
+        in, the one this wallet holds the most value of. Used as the fallback
+        default when the asset being sent cannot pay the fee. Null when the
+        wallet holds nothing acceptable. */
+    CAsset largestAcceptedHolding() const;
+    /** Balances as of the last balanceChanged, so ranking the holdings above does
+        not recompute them on every keystroke. */
+    interfaces::WalletBalances m_cached_balances;
+    /** SEQUENTIA: render a fee rate the way a user reads money — the amount in the
+        asset that will actually pay it, plus its worth in the reference currency
+        and the unit price behind that. The argument is already denominated in the
+        selected fee asset (that is what wallet::GetMinimumFee returns); a caller
+        holding a rate in the reference unit must convert first. Returns rich text
+        (a muted span for the unit price). */
+    QString formatFeeRate(const CAmount& fee_asset_atoms_per_kvb) const;
 
 private Q_SLOTS:
     void sendButtonClicked(bool checked);

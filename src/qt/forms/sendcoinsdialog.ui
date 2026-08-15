@@ -863,7 +863,7 @@ Note:  Since the fee is calculated on a per-byte basis, a fee rate of "100 atoms
                  <item>
                   <widget class="QComboBox" name="feeAssetSelector">
                    <property name="toolTip">
-                    <string>Pay the network fee in this asset. By default it follows the asset you are sending, as long as that asset has a published price — no asset is privileged. Block producers accept a fee they can value: paying in an asset with no price, hardly any liquidity or high volatility risks a payment that never confirms.</string>
+                    <string>Pay the network fee in this asset. By default it follows the asset you are sending, as long as this node accepts a fee in it — no asset is privileged. Each block producer decides which assets it will take, and prices them from the asset registry and a market feed: an asset that is unregistered, unpriced or barely traded risks a payment that never confirms.</string>
                    </property>
                   </widget>
                  </item>
@@ -890,11 +890,8 @@ Note:  Since the fee is calculated on a per-byte basis, a fee rate of "100 atoms
                  <property name="wordWrap">
                   <bool>true</bool>
                  </property>
-                 <property name="styleSheet">
-                  <string notr="true">color: #ffb84d;</string>
-                 </property>
                  <property name="text">
-                  <string>This fee asset has no published price, so block producers cannot value it and the payment may never confirm. Pick an asset with a price.</string>
+                  <string notr="true"/>
                  </property>
                 </widget>
                </item>
