@@ -21,6 +21,8 @@
 #include <qt/sendcoinsentry.h>
 
 #include <chainparams.h>
+#include <exchangerates.h>
+#include <feeassets.h>
 #include <interfaces/node.h>
 #include <key_io.h>
 #include <node/ui_interface.h>
@@ -218,8 +220,8 @@ void SendCoinsDialog::setModel(WalletModel *_model)
 
         // Sequentia any-asset fees: let the user pay the fee in any asset they hold. The fee
         // asset is a free choice — no asset is privileged. The default follows the asset being
-        // sent while it has a published price (see updateDefaultFeeAsset); producers are
-        // unlikely to ever accept a fee they cannot value, so unpriced picks get a warning.
+        // sent while this node accepts a fee in it (see updateDefaultFeeAsset); a pick this
+        // node will not value, or one no other producer is likely to, gets a warning.
         ui->feeAssetSelector->setVisible(g_con_any_asset_fees);
         ui->labelFeeAssetWarning->setVisible(false);
         if (g_con_any_asset_fees) {
@@ -913,6 +915,9 @@ bool SendCoinsDialog::handlePaymentRequest(const SendCoinsRecipient &rv)
 
 void SendCoinsDialog::setBalance(const interfaces::WalletBalances& balances)
 {
+    // Kept for largestAcceptedHolding(), which ranks the wallet's holdings on
+    // every recipient edit and must not recompute balances to do it.
+    m_cached_balances = balances;
     if(model && model->getOptionsModel())
     {
         CAmount balance = valueFor(balances.balance, ::policyAsset);
@@ -1068,7 +1073,11 @@ void SendCoinsDialog::updateFeeMinimizedLabel()
     if (ui->radioSmartFee->isChecked())
         ui->labelFeeMinimized->setText(ui->labelSmartFee->text());
     else {
-        ui->labelFeeMinimized->setText(formatFeeRate(ui->customFee->value()));
+        // The custom-fee field is a rate in the reference unit (that is what
+        // m_coin_control->m_feerate carries), while formatFeeRate speaks in the
+        // fee asset — so convert first, at the same whitelist rate the mempool
+        // will use. The two used to be passed to it interchangeably.
+        ui->labelFeeMinimized->setText(formatFeeRate(CFeeRate(ui->customFee->value()).GetFee(1000, selectedFeeAsset())));
     }
 }
 
@@ -1097,6 +1106,32 @@ void SendCoinsDialog::updateCoinControlState()
     m_coin_control->fAllowWatchOnly = model->wallet().privateKeysDisabled() && !model->wallet().hasExternalSigner();
 }
 
+CAsset SendCoinsDialog::largestAcceptedHolding() const
+{
+    if (!model) return CAsset();
+    CAsset best;
+    double best_value = 0.0;
+    for (int i = 0; i < ui->feeAssetSelector->count(); ++i) {
+        const CAsset candidate = GetAssetFromString(ui->feeAssetSelector->itemData(i).toString().toStdString());
+        if (candidate.IsNull()) continue;
+        const FeeAssetInfo info = model->node().getFeeAssetInfo(candidate);
+        if (!info.accepted) continue;
+        // Rank by what the holding is WORTH, not by how many atoms of it there
+        // are: "10000 of a millionth-of-a-cent token" must not outrank "3 of a
+        // dollar one". The whitelist rate is the right yardstick and not merely
+        // the convenient one — it is the very valuation this node's mempool will
+        // apply to the fee, it is denominated in one unit across every asset, and
+        // it exists for exactly the assets that can pay. The display price feed
+        // would answer the same question in USD, but only while it is up and only
+        // for assets it happens to quote, so it would rank on availability as
+        // much as on value.
+        const double value = static_cast<double>(valueFor(m_cached_balances.balance, candidate))
+                           * static_cast<double>(info.rate) / static_cast<double>(exchange_rate_scale);
+        if (value > best_value) { best_value = value; best = candidate; }
+    }
+    return best;
+}
+
 void SendCoinsDialog::updateDefaultFeeAsset()
 {
     if (!g_con_any_asset_fees || !model || ui->feeAssetSelector->count() == 0) return;
@@ -1111,15 +1146,18 @@ void SendCoinsDialog::updateDefaultFeeAsset()
         }
     }
 
-    // Only a priced asset makes a sane default; otherwise fall back to the first
-    // selector entry with a published price. If nothing is priced (price feed down,
-    // exotic wallet) leave the selection alone — the warning label takes over.
+    // ...but only while this node accepts a fee in it. The test is the fee
+    // whitelist, not the display price feed: the whitelist is what the mempool
+    // consults, so an asset missing from it fails here and now, while an asset
+    // missing from the feed merely cannot be shown in dollars. Defaulting on the
+    // feed used to do both wrong at once — it offered assets the node refuses and
+    // rejected assets it accepts.
     CAsset pick = sent;
-    if (!GUIUtil::assetHasMarketPrice(pick)) {
-        for (int i = 0; i < ui->feeAssetSelector->count(); ++i) {
-            const CAsset candidate = GetAssetFromString(ui->feeAssetSelector->itemData(i).toString().toStdString());
-            if (!candidate.IsNull() && GUIUtil::assetHasMarketPrice(candidate)) { pick = candidate; break; }
-        }
+    if (!model->node().getFeeAssetInfo(pick).accepted) {
+        const CAsset fallback = largestAcceptedHolding();
+        // Nothing acceptable in the wallet: leave the selection alone rather than
+        // moving it somewhere equally unusable, and let the warning explain.
+        if (!fallback.IsNull()) pick = fallback;
     }
     const int idx = ui->feeAssetSelector->findData(QString::fromStdString(pick.GetHex()));
     if (idx >= 0 && idx != ui->feeAssetSelector->currentIndex()) {
@@ -1135,28 +1173,34 @@ CAsset SendCoinsDialog::selectedFeeAsset() const
     return sel.IsNull() ? ::policyAsset : sel;
 }
 
-QString SendCoinsDialog::formatFeeRate(const CAmount& policy_atoms_per_kvb) const
+QString SendCoinsDialog::formatFeeRate(const CAmount& fee_asset_atoms_per_kvb) const
 {
-    // The wallet quotes fee rates in policy-asset atoms, but the policy asset is
-    // not a currency the user thinks in and must never read as the default coin.
-    // Lead with the user's reference currency; then, when the fee is actually
-    // payable in a priced asset, show that amount and the rate it came from.
+    // The figure arrives already denominated in the selected fee asset:
+    // wallet::GetMinimumFee() ends in GetFee(bytes, coin_control.m_fee_asset),
+    // which converts out of the reference unit at this node's whitelist rate.
+    // So the asset amount is the fact, and it is the number the user will pay;
+    // the reference currency is the aid that makes it legible. Reading the
+    // figure as policy-asset atoms and converting it into the fee asset a
+    // second time — at display-feed prices, no less — quoted a fee that was
+    // wrong by the ratio between the two rates whenever the two assets differed.
     const QString ref = GUIUtil::referenceCurrency();
     const CAsset feeAsset = selectedFeeAsset();
 
-    double refValue = 0.0;
-    const bool havePolicyPrice = GUIUtil::referenceValueOf(::policyAsset, policy_atoms_per_kvb, ref, refValue);
-
-    QStringList parts;
-    if (havePolicyPrice) {
-        parts << GUIUtil::formatReferenceAmount(refValue, ref) + QStringLiteral("/kvB");
+    // A fee asset this node does not accept converts to zero, and "0/kvB" reads
+    // as "free" rather than "impossible". The warning label says why.
+    if (g_con_any_asset_fees && model && !model->node().getFeeAssetInfo(feeAsset).accepted) {
+        return tr("unavailable — this node does not accept fees in %1").arg(GUIUtil::assetDisplayName(feeAsset));
     }
 
-    // The equivalent in the asset that will actually pay, plus the rate applied.
-    CAmount feeAtoms = 0;
-    if (GUIUtil::convertAssetAmount(::policyAsset, policy_atoms_per_kvb, feeAsset, feeAtoms)) {
-        QString line = GUIUtil::formatAssetAmount(feeAsset, feeAtoms, BitcoinUnits::BTC, BitcoinUnits::SeparatorStyle::STANDARD, /*include_asset_name=*/true) + QStringLiteral("/kvB");
-        // The rate that produced it, so the number is checkable rather than magic.
+    QStringList parts;
+    parts << GUIUtil::formatAssetAmount(feeAsset, fee_asset_atoms_per_kvb, BitcoinUnits::BTC,
+                                        BitcoinUnits::SeparatorStyle::STANDARD, /*include_asset_name=*/true)
+             + QStringLiteral("/kvB");
+
+    double refValue = 0.0;
+    if (GUIUtil::referenceValueOf(feeAsset, fee_asset_atoms_per_kvb, ref, refValue)) {
+        QString line = GUIUtil::formatReferenceAmount(refValue, ref) + QStringLiteral("/kvB");
+        // The unit price behind it, so the conversion is checkable rather than magic.
         double unitValue = 0.0;
         if (GUIUtil::unitReferenceValue(feeAsset, ref, unitValue)) {
             line += QStringLiteral(" <span style='color:#888'>(1 ") + GUIUtil::assetDisplayName(feeAsset)
@@ -1164,36 +1208,74 @@ QString SendCoinsDialog::formatFeeRate(const CAmount& policy_atoms_per_kvb) cons
         }
         parts << line;
     }
-
-    if (parts.isEmpty()) {
-        // No price for either side: quoting a bare policy-asset number here would
-        // present it as the default fee currency. Say what is actually wrong.
-        return tr("unavailable — no published price for this fee asset");
-    }
     return parts.join(QStringLiteral(" = "));
 }
 
 void SendCoinsDialog::updateFeeAssetWarning()
 {
-    if (!g_con_any_asset_fees || ui->feeAssetSelector->count() == 0) {
+    if (!g_con_any_asset_fees || !model || ui->feeAssetSelector->count() == 0) {
         ui->labelFeeAssetWarning->setVisible(false);
         return;
     }
     const CAsset sel = GetAssetFromString(ui->feeAssetSelector->currentData().toString().toStdString());
-    const bool unpriced = !sel.IsNull() && !GUIUtil::assetHasMarketPrice(sel);
-    ui->labelFeeAssetWarning->setVisible(unpriced);
-    // An unpriced fee asset is the one case where Replace-By-Fee is not just
-    // advisable but the only remedy: the fix is switching the fee asset later,
-    // which RBF is what allows.
-    if (unpriced && !ui->optInRBF->isChecked()) {
-        ui->labelFeeAssetWarning->setText(tr("This fee asset has no published price, so block producers cannot value it "
-                                             "and the payment may never confirm. Pick an asset with a price, or turn on "
-                                             "Replace-By-Fee below so you can switch the fee to a priced asset later."));
-    } else if (unpriced) {
-        ui->labelFeeAssetWarning->setText(tr("This fee asset has no published price, so block producers cannot value it "
-                                             "and the payment may never confirm. Pick an asset with a price, or use "
-                                             "\"Increase transaction fee\" later to switch the fee to a priced asset."));
+    if (sel.IsNull()) {
+        ui->labelFeeAssetWarning->setVisible(false);
+        return;
     }
+    const FeeAssetInfo info = model->node().getFeeAssetInfo(sel);
+    const QString name = GUIUtil::assetDisplayName(sel);
+
+    // Three different things can be wrong with a fee asset and they are not the
+    // same warning. Worst first.
+    //
+    // 1. This node does not accept it. Nothing downstream matters: the wallet's
+    //    own mempool refuses the transaction, so it never reaches a producer.
+    // 2. This node accepts it but the wider network probably will not, because
+    //    the registry does not publish it or no feed prices it — the two inputs
+    //    every price server uses to build its whitelist.
+    // 3. Nothing is wrong. Not being able to show the fee in dollars is not a
+    //    problem with the fee; it stays silent.
+    if (!info.accepted) {
+        // Being listed at rate 0 and being absent are the same refusal but not
+        // the same mistake: one is a policy someone wrote down, the other is an
+        // asset nobody has configured. Saying which saves the search.
+        const QString why = info.listed
+            ? tr("This node's fee policy lists %1 at rate 0, which refuses it.").arg(name)
+            : tr("%1 is not in this node's fee whitelist.").arg(name);
+        // Red, not amber: this one is not a risk to weigh, it is a transaction
+        // that cannot be sent.
+        ui->labelFeeAssetWarning->setStyleSheet(QStringLiteral("color: #ff6b6b;"));
+        ui->labelFeeAssetWarning->setText(
+            why + QLatin1Char(' ') +
+            tr("The transaction would be rejected by your own node before it ever reached a block "
+               "producer. Pick an accepted asset, or set a rate for %1 under Settings → Fee policy.").arg(name));
+        ui->labelFeeAssetWarning->setVisible(true);
+        return;
+    }
+
+    if (!info.registry_listed || !info.has_market_price) {
+        const QString why = !info.registry_listed
+            ? tr("%1 is not published on the Asset Registry, so the price servers other block producers "
+                 "run will not discover it.").arg(name)
+            : tr("No published market price for %1, so other block producers' price servers cannot "
+                 "value it.").arg(name);
+        // Replace-By-Fee is the remedy here and only here: this transaction is
+        // valid and relayable, it may simply sit unconfirmed, and the fix is to
+        // switch the fee to a better-travelled asset later — which is precisely
+        // what RBF allows.
+        const QString remedy = ui->optInRBF->isChecked()
+            ? tr("Replace-By-Fee is on, so you can switch the fee to another asset later if it does not confirm.")
+            : tr("Turn on Replace-By-Fee below so you can switch the fee to another asset later if it does not confirm.");
+        ui->labelFeeAssetWarning->setStyleSheet(QStringLiteral("color: #ffb84d;"));
+        ui->labelFeeAssetWarning->setText(
+            why + QLatin1Char(' ') +
+            tr("This node accepts it, so the payment may confirm only in a block this node produces.") +
+            QLatin1Char(' ') + remedy);
+        ui->labelFeeAssetWarning->setVisible(true);
+        return;
+    }
+
+    ui->labelFeeAssetWarning->setVisible(false);
 }
 
 void SendCoinsDialog::updateNumberOfBlocks(int count, const QDateTime& blockDate, double nVerificationProgress, bool headers, SynchronizationState sync_state) {
