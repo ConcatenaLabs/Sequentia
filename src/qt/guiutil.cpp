@@ -924,13 +924,29 @@ QString formatAssetAmount(const CAsset& asset, const CAmount& amount, const int 
 // server controls which references are available simply by what it lists. Amounts are scaled by
 // 1e8 like formatAssetAmount. Nothing here privileges SEQ as a reference.
 namespace {
+// USD (feed-base) price of one bitcoin, under whatever key the feed carries it. The
+// running testnet feed publishes it as tBTC; BTC and WBTC (wrapped) are accepted too,
+// so a differently-keyed feed does not silently unprice the parent chain.
+double BtcFeedPrice(const std::map<std::string, double>& prices)
+{
+    for (const char* k : {"TBTC", "BTC", "WBTC"}) {
+        const auto it = prices.find(k);
+        if (it != prices.end() && it->second > 0.0) return it->second;
+    }
+    return 0.0;
+}
+// Is this uppercased feed/lookup key one of the spellings of bitcoin?
+bool IsBtcKey(const QString& key)
+{
+    return key == QLatin1String("BTC") || key == QLatin1String("TBTC") || key == QLatin1String("WBTC");
+}
 // USD (the feed's common base) price of one whole unit of `ticker` (the chosen reference).
-// USD is the base (=1); BTC maps to the WBTC entry; any other ticker is looked up directly.
+// USD is the base (=1); BTC resolves through BtcFeedPrice; any other ticker is looked up directly.
 double RefBasePriceOf(const std::map<std::string, double>& prices, const QString& ticker)
 {
     if (ticker == QLatin1String("USD")) return 1.0;
-    const std::string key = (ticker == QLatin1String("BTC") ? std::string("WBTC") : ticker.toStdString());
-    const auto it = prices.find(key);
+    if (ticker == QLatin1String("BTC")) return BtcFeedPrice(prices);
+    const auto it = prices.find(ticker.toStdString());
     return it != prices.end() ? it->second : 0.0;
 }
 // The feed's price KEY for an asset (NOT a reference): the feed names the native asset "SEQ"
@@ -957,7 +973,7 @@ QString formatReferenceApprox(const CAsset& asset, const CAmount& amount, const 
     const QString ref = refTicker.isEmpty() ? QSettings().value("strReferenceCurrency", "USD").toString() : refTicker;
     const QString assetTicker = MarketTickerOf(asset);
     // Suppress when the amount is already in the chosen reference denomination (redundant).
-    if (assetTicker == ref || (ref == QLatin1String("BTC") && assetTicker == QLatin1String("WBTC"))) return QString();
+    if (assetTicker == ref || (ref == QLatin1String("BTC") && IsBtcKey(assetTicker))) return QString();
     const auto itA = prices.find(assetTicker.toStdString());
     const double pa = itA != prices.end() ? itA->second : 0.0;
     const double pr = RefBasePriceOf(prices, ref);
@@ -991,11 +1007,11 @@ QString formatMultiAssetReferenceApprox(const CAmountMap& amountmap, const QStri
         any = true;
     }
     // Parent-chain bitcoin is not a CAsset, so it cannot travel in the map; callers
-    // pass it separately and it is valued through the feed's WBTC entry.
+    // pass it separately and it is valued at the feed's bitcoin price.
     if (extraBtcWhole > 0.0) {
-        const auto itB = prices.find("WBTC");
-        if (itB != prices.end() && itB->second > 0.0) {
-            sum += extraBtcWhole * itB->second / pr;
+        const double pb = BtcFeedPrice(prices);
+        if (pb > 0.0) {
+            sum += extraBtcWhole * pb / pr;
             any = true;
         }
     }
@@ -1013,13 +1029,16 @@ QString formatReferenceApproxByLabel(const QString& assetLabel, double wholeUnit
     QString assetKey = assetLabel.toUpper();
     if (assetLabel == BitcoinUnits::policyAssetTicker() || assetLabel.compare(QStringLiteral("bitcoin"), Qt::CaseInsensitive) == 0)
         assetKey = QStringLiteral("SEQ");
-    // Parent-chain bitcoin (the dual-address tBTC balance) is priced under the feed's
-    // WBTC entry, same mapping RefBasePriceOf applies on the reference side.
-    else if (assetKey == QLatin1String("BTC") || assetKey == QLatin1String("TBTC"))
-        assetKey = QStringLiteral("WBTC");
-    if (assetKey == ref || (ref == QLatin1String("BTC") && assetKey == QLatin1String("WBTC"))) return QString();
-    const auto itA = prices.find(assetKey.toStdString());
-    const double pa = itA != prices.end() ? itA->second : 0.0;
+    if (assetKey == ref || (ref == QLatin1String("BTC") && IsBtcKey(assetKey))) return QString();
+    // Parent-chain bitcoin (the dual-address tBTC balance) resolves through BtcFeedPrice,
+    // the same lookup RefBasePriceOf applies on the reference side.
+    double pa;
+    if (IsBtcKey(assetKey)) {
+        pa = BtcFeedPrice(prices);
+    } else {
+        const auto itA = prices.find(assetKey.toStdString());
+        pa = itA != prices.end() ? itA->second : 0.0;
+    }
     const double pr = RefBasePriceOf(prices, ref);
     if (!(pa > 0.0) || !(pr > 0.0)) return QString();
     return FormatRefValue(wholeUnits * pa / pr, ref);
