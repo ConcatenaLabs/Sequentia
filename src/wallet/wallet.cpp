@@ -3323,7 +3323,7 @@ void CWallet::postInitProcess()
             if (!issuance.assetBlindingNonce.IsNull()) continue;
             uint256 entropy;
             CAsset asset;
-            GenerateAssetEntropy(entropy, wtx.tx->vin[i].prevout, issuance.assetEntropy);
+            GenerateIssuanceEntropyFromTx(entropy, *wtx.tx, i);
             CalculateAsset(asset, entropy);
             RegisterGlobalChainAssetPrecision(asset, issuance.nDenomination);
         }
@@ -3957,7 +3957,7 @@ void CWalletTx::GetIssuanceAssets(unsigned int input_index, CAsset* out_asset, C
 
     if (issuance.assetBlindingNonce.IsNull()) {
         uint256 entropy;
-        GenerateAssetEntropy(entropy, tx->vin[input_index].prevout, issuance.assetEntropy);
+        GenerateIssuanceEntropyFromTx(entropy, *tx, input_index);
         if (out_reissuance_token) {
             CalculateReissuanceToken(*out_reissuance_token, entropy, issuance.nAmount.IsCommitment());
         }
@@ -4077,7 +4077,12 @@ std::map<uint256, std::pair<CAsset, CAsset> > CWallet::GetReissuanceTokenTypes()
                 }
                 // Only looking at initial issuances
                 if (issuance.assetBlindingNonce.IsNull()) {
-                    GenerateAssetEntropy(entropy, pcoin->tx->vin[input_index].prevout, issuance.assetEntropy);
+                    // Supervision included: a supervised asset MUST be reissuable
+                    // (consensus refuses the issuance otherwise), so deriving the
+                    // ordinary way here would leave the wallet unable to find the
+                    // reissuance token of exactly the assets that are guaranteed
+                    // to have one.
+                    GenerateIssuanceEntropyFromTx(entropy, *pcoin->tx, input_index);
                     CalculateAsset(asset, entropy);
                     // TODO handle the case with null nAmount (not decided yet)
                     CalculateReissuanceToken(token, entropy, issuance.nAmount.IsCommitment());
