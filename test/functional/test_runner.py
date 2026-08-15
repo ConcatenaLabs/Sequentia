@@ -189,6 +189,7 @@ BASE_SCRIPTS = [
     'feature_supervised_reorg_resurrection.py',
     'feature_supervised_zero_supply.py',
     'feature_any_asset_fee.py',
+    'feature_any_asset_fee_congestion.py',
     'feature_any_asset_fee_info.py',
     'feature_any_asset_fee_no_default.py',
     'feature_any_asset_fee_rates.py',
