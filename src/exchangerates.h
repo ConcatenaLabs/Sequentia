@@ -84,6 +84,19 @@ public:
      */
     CAmount ConvertValueToAmount(const CValue& value, const CAsset& asset);
 
+    /**
+     * Look up one asset's rate without going through a conversion.
+     * @param[out] rate_out  the rate as listed; 0 means the asset is listed and
+     *                       explicitly refused, which is NOT the same state as
+     *                       being absent even though both refuse a fee.
+     * @return false if the asset is absent from the whitelist.
+     */
+    bool GetRate(const CAsset& asset, CAmount& rate_out);
+
+    /** A snapshot copy of the whole whitelist. Callers must not iterate the map
+     *  itself: it is mutated under m_write_mutex by SetRates(). */
+    std::map<CAsset, CAmount> GetRates();
+
     /** Load the whitelist from <datadir>/exchangerates.json (no-op if absent). */
     bool LoadFromDefaultJSONFile(std::vector<std::string>& errors);
 

@@ -120,11 +120,24 @@ int CAssetsDir::Merge(const std::vector<AssetRegistryEntry>& entries)
                 mapAssets[label] = asset;
                 added++;
             }
+            // After any reassignment above, so the flag is not dropped with the
+            // old record: the registry publishes this asset whatever its label
+            // ended up being.
+            it->second.MarkRegistryListed();
             continue;
         }
-        // Label collisions: an already-mapped label always wins.
-        if (mapAssets.count(label)) continue;
+        // Label collisions: an already-mapped label always wins. The asset is
+        // still on the registry, though, and losing a name race is no reason to
+        // forget that — record it label-less rather than dropping the entry, so
+        // it keeps the registry's precision and does not look unpublished.
+        if (mapAssets.count(label)) {
+            AssetMetadata& meta = mapAssetMetadata[asset];
+            meta.SetPrecision(precision, AssetMetadata::PrecisionSource::Registry);
+            meta.MarkRegistryListed();
+            continue;
+        }
         mapAssetMetadata[asset] = AssetMetadata(label, precision, AssetMetadata::PrecisionSource::Registry);
+        mapAssetMetadata[asset].MarkRegistryListed();
         mapAssets[label] = asset;
         added++;
     }
@@ -179,6 +192,11 @@ std::string CAssetsDir::GetIdentifier(const CAsset& asset) const
     const std::string label = GetMetadata(asset).GetLabel();
     if (!label.empty()) return label;
     return asset.GetHex();
+}
+
+bool CAssetsDir::IsRegistryListed(const CAsset& asset) const
+{
+    return GetMetadata(asset).IsRegistryListed();
 }
 
 std::vector<CAsset> CAssetsDir::GetKnownAssets() const
