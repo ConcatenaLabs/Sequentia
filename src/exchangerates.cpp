@@ -70,6 +70,26 @@ CAmount ExchangeRateMap::ConvertValueToAmount(const CValue& value, const CAsset&
     }
 }
 
+bool ExchangeRateMap::GetRate(const CAsset& asset, CAmount& rate_out) {
+    LOCK(m_write_mutex);
+    auto it = this->find(asset);
+    if (it == this->end()) {
+        rate_out = 0;
+        return false;
+    }
+    rate_out = it->second.m_scaled_value;
+    return true;
+}
+
+std::map<CAsset, CAmount> ExchangeRateMap::GetRates() {
+    LOCK(m_write_mutex);
+    std::map<CAsset, CAmount> out;
+    for (const auto& rate : *this) {
+        out[rate.first] = rate.second.m_scaled_value;
+    }
+    return out;
+}
+
 void ExchangeRateMap::ResetToBootstrapRates() {
     LOCK(m_write_mutex);
     this->clear();
