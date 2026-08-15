@@ -359,9 +359,17 @@ Order of operations for a public deployment:
 ```sh
 sequentia-cli getfeeexchangerates            # the whitelist (asset -> rate)
 sequentia-cli getfeeacceptancepolicy         # the whitelist as {asset: {rate}}
+sequentia-cli getfeeassetinfo                # per asset: accepted here? on the registry? priced?
+sequentia-cli getfeeassetinfo USDX           # ...for one asset
 sequentia-cli setfeeexchangerates '{...}'    # operator manual set (persists to exchangerates.json)
 sequentia-cli setfeeexchangerates '{}'       # empty the whitelist
 ```
+
+`getfeeassetinfo` is the quickest way to see why a wallet refuses to pay in an
+asset: `accepted` is this node's own answer, while `registry_listed` and
+`market_price` are the two inputs *other* operators' price servers work from —
+so an asset accepted here with neither of them is one this server admitted and
+theirs will not.
 
 ## Windows installer bundle
 
