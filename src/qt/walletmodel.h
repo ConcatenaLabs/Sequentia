@@ -85,6 +85,13 @@ public:
     RecentRequestsTableModel *getRecentRequestsTableModel();
 
     std::set<CAsset> getAssetTypes() const;
+    //! SEQUENTIA: the assets this wallet may offer as a fee asset — everything it
+    //! holds except its reissuance tokens. A fee is paid to the block producer,
+    //! into its coinbase, so a fee paid in an inflation key would hand the
+    //! producer the authority to mint that asset. Any fraction of the token
+    //! carries the whole power, so there is no small amount of it that is safe to
+    //! part with, and no selector should ever offer one.
+    std::set<CAsset> getFeePayableAssetTypes() const;
     EncryptionStatus getEncryptionStatus() const;
 
     // Check address for validity

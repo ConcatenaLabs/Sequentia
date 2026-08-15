@@ -197,6 +197,30 @@ sequentia-cli submitsupervisionrecord <hex>
 The producer holds the record privately for inclusion; `getsupervisionsubmissions` shows
 what it is holding. Producers accept these only from operators they have configured.
 
+## From the wallet, without a shell
+
+`sequentia-qt` grows a **Supervision** tab when the loaded wallet has a supervised
+asset to operate — it issued one, or it holds one of its keys — and shows nothing to
+every wallet that has not. It does the three steps above for you: freezing an address,
+lifting a freeze, pausing and resuming, and replacing either key, each with the record
+built, attached, signed and broadcast in one action.
+
+Where the two keys were derived from the wallet at issuance (the Assets page offers
+that to an issuer without a signing setup of their own), the wallet signs the record
+itself through `signsupervisionhash`, and the whole flow is one confirmation. Where
+they live anywhere else — an HSM, a FROST quorum, an offline signer — the page shows
+the message to sign and the key that must sign it, and takes the signature back by
+hand. The transaction is identical either way, and no private key is ever on the node.
+
+Two things the page cannot do, because nothing on the chain indexes them:
+
+- **Lift a freeze made by another wallet.** Lifting is spending the record's output,
+  and the records this wallet can point at are the ones in its own transactions. Lift
+  it from the wallet that created it.
+- **Name the address behind a frozen script.** A record names a script by hash, so the
+  list shows hashes. Use the page's *Check* box (`isassetfrozen`) to ask about a
+  particular address.
+
 ## For node operators
 
 The freeze registry is a pure function of the UTXO set, rebuilt by scanning it at startup.
@@ -237,3 +261,8 @@ All of these live under the `supervision` help category.
 | `decodesupervisionscript` | Read a declaration or record out of an output script |
 | `submitsupervisionrecord` | Submit a record straight to a producer, bypassing the public mempool |
 | `getsupervisionsubmissions` | The records a producer is holding privately |
+| `signsupervisionhash` | Sign a sighash with a supervision key **this wallet holds** (wallet RPC) |
+
+Only the last one touches a key, and only one the wallet already has — for the issuer
+whose keys came out of the wallet at issuance. An issuer signing in an HSM or behind a
+FROST quorum never calls it, and nothing else here can be given a private key at all.

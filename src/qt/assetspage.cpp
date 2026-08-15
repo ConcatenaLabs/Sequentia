@@ -348,7 +348,10 @@ void AssetsPage::populateFeeAssets()
         selector->clear();
         selector->addItem(GUIUtil::assetDisplayName(::policyAsset),
                           QString::fromStdString(::policyAsset.GetHex()));
-        for (const CAsset& asset : m_wallet_model->getAssetTypes()) {
+        // Never a reissuance token: the fee ends up in the producer's coinbase, and
+        // an inflation key there is the authority to mint the asset for ever. A
+        // fraction of the token is the whole power, not a fraction of it.
+        for (const CAsset& asset : m_wallet_model->getFeePayableAssetTypes()) {
             if (asset == ::policyAsset) continue;
             selector->addItem(GUIUtil::assetDisplayName(asset),
                               QString::fromStdString(asset.GetHex()));

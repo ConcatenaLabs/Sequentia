@@ -243,9 +243,22 @@ namespace GUIUtil
     QString PathToQString(const fs::path &path);
 
     /* User-facing label for an asset: the chain-aware ticker (tSEQ/SEQ) for the policy asset,
+       an "Inflation key (X)" label for a reissuance token this wallet can recognise,
        otherwise the asset registry identifier. Avoids the policy asset rendering as "bitcoin"
        (its default pegged-asset name) in selectors and amount labels. */
     QString assetDisplayName(const CAsset& asset);
+
+    /* SEQUENTIA: the reissuance tokens the loaded wallets know about, token -> the asset it
+       mints. Published here rather than kept in a wallet model because assetDisplayName is
+       reached from every table, selector and amount field, most of them with no wallet in
+       hand. Merged across wallets: which asset id is an inflation key is a fact about the
+       chain, not about who is looking. */
+    void rememberReissuanceTokens(const std::map<CAsset, CAsset>& tokens);
+
+    /* Whether this asset is a reissuance token — an inflation key — and, if so, which asset
+       it mints. Only tokens whose issuance a loaded wallet has seen can be recognised: the id
+       alone carries no evidence, since it is a hash over the issuance's entropy. */
+    bool isReissuanceToken(const CAsset& asset, CAsset* issued_asset = nullptr);
 
     /* SEQUENTIA: whether an asset carries a human-readable registry label. False for assets the
        node has never seen registered — their only identity is the 64-hex id, so the UI must show

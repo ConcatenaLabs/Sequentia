@@ -410,7 +410,18 @@ void OverviewPage::populateAssetTable(const interfaces::WalletBalances& balances
         const QString name = GUIUtil::assetDisplayName(asset);
 
         auto* a0 = new QTableWidgetItem((named ? name : tr("N/A")) + suffix);
-        if (named) {
+        CAsset minted;
+        if (GUIUtil::isReissuanceToken(asset, &minted)) {
+            // Named after what it mints, because that is the only thing about a
+            // token a holder needs to recognise -- and the balance column beside
+            // it reads as an amount when it is really a key.
+            a0->setToolTip(tr("The inflation key for %1. Holding any amount of it mints that asset "
+                              "without limit, and reissuing never uses it up. Whoever you send it to "
+                              "gains the same power, and you cannot take it back.")
+                               .arg(GUIUtil::assetIsNamed(minted)
+                                        ? GUIUtil::assetDisplayName(minted)
+                                        : QString::fromStdString(minted.GetHex())));
+        } else if (named) {
             a0->setToolTip(name);
         } else {
             a0->setForeground(QColor("#9b988e"));

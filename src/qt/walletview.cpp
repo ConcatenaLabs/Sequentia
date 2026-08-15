@@ -17,6 +17,7 @@
 #include <qt/receivecoinsdialog.h>
 #include <qt/sendcoinsdialog.h>
 #include <qt/signverifymessagedialog.h>
+#include <qt/supervisionpage.h>
 #include <qt/transactiontablemodel.h>
 #include <qt/transactionview.h>
 #include <qt/walletmodel.h>
@@ -74,6 +75,12 @@ WalletView::WalletView(WalletModel* wallet_model, const PlatformStyle* _platform
     stakingPage = new StakingPage(platformStyle);
     stakingPage->setModel(walletModel);
 
+    // SEQUENTIA: built for every wallet but reached from the sidebar only by one
+    // that has a supervised asset to operate -- the page itself decides, and says
+    // so through supervisionAvailable.
+    supervisionPage = new SupervisionPage(platformStyle);
+    supervisionPage->setModel(walletModel);
+
     usedSendingAddressesPage = new AddressBookPage(platformStyle, AddressBookPage::ForEditing, AddressBookPage::SendingTab, this);
     usedSendingAddressesPage->setModel(walletModel->getAddressTableModel());
 
@@ -86,6 +93,9 @@ WalletView::WalletView(WalletModel* wallet_model, const PlatformStyle* _platform
     addWidget(sendCoinsPage);
     addWidget(assetsPage);
     addWidget(stakingPage);
+    addWidget(supervisionPage);
+
+    connect(supervisionPage, &SupervisionPage::availabilityChanged, this, &WalletView::supervisionAvailable);
 
     connect(overviewPage, &OverviewPage::transactionClicked, this, &WalletView::transactionClicked);
     // Clicking on a transaction on the overview pre-selects the transaction on the transaction history page
@@ -180,6 +190,16 @@ void WalletView::gotoAssetsPage()
 void WalletView::gotoStakingPage()
 {
     setCurrentWidget(stakingPage);
+}
+
+void WalletView::gotoSupervisionPage()
+{
+    setCurrentWidget(supervisionPage);
+}
+
+bool WalletView::hasSupervision() const
+{
+    return supervisionPage->hasSupervision();
 }
 
 void WalletView::gotoFeePolicyDialog()

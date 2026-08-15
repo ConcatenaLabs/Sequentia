@@ -660,6 +660,23 @@ class SupervisedAssetsTest(BitcoinTestFramework):
         # The wallet built it fully explicit, or consensus would have refused it.
         assert_equal(node.getbalance()[r["asset"]], Decimal("100"))
 
+        # The wallet must READ its own supervised issuance back correctly, not only
+        # write it. A supervised asset id descends from a different entropy, so
+        # anything deriving the ordinary way reports an asset that does not exist:
+        # listissuances named a stranger, and reissueasset could not find the
+        # reissuance token of an asset consensus GUARANTEES has one -- which would
+        # have left freeze-plus-reissue, the whole answer to a seizure order,
+        # impossible from the wallet that issued the asset.
+        issuance = [i for i in node.listissuances() if i["asset"] == r["asset"]]
+        assert_equal(len(issuance), 1)
+        assert_equal(issuance[0]["token"], r["token"])
+        assert_equal(issuance[0]["entropy"], r["entropy"])
+
+        node.reissueasset(r["asset"], 50, self.policy_asset)
+        self.generate(node, 1)
+        self.sync_all()
+        assert_equal(node.getbalance()[r["asset"]], Decimal("150"))
+
         # The refusals the GUI mirrors, so a user is told before the node is.
         assert_raises_rpc_error(-8, "cannot be blinded", node.issueasset, 100, 1, True, None,
                                 self.policy_asset, 8, None,
