@@ -187,6 +187,7 @@ BASE_SCRIPTS = [
     # Sequentia tests
     'feature_supervised_assets.py',
     'feature_any_asset_fee.py',
+    'feature_any_asset_fee_info.py',
     'feature_any_asset_fee_no_default.py',
     'feature_any_asset_fee_rates.py',
     "feature_any_asset_fee_rbf.py",
