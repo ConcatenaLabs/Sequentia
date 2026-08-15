@@ -6,6 +6,7 @@
 #define BITCOIN_INTERFACES_NODE_H
 
 #include <consensus/amount.h>
+#include <feeassets.h>  // For FeeAssetInfo
 #include <net.h>        // For NodeId
 #include <net_types.h>  // For banmap_t
 #include <netaddress.h> // For Network
@@ -217,6 +218,14 @@ public:
     //! then poll getAnchorTipState freely, because that call short-circuits
     //! when anchors are not validated.
     virtual bool getAnchorNotWatchingBitcoin() = 0;
+
+    //! SEQUENTIA: whether a fee can be paid in an asset, and how well it will
+    //! travel — see FeeAssetInfo. In-process and lock-cheap (no chain access, no
+    //! RPC round-trip), so the send dialog may call it on every keystroke.
+    virtual FeeAssetInfo getFeeAssetInfo(const CAsset& asset) = 0;
+
+    //! SEQUENTIA: the same for every asset the node knows anything about.
+    virtual std::vector<FeeAssetInfo> listFeeAssetInfo() = 0;
 
     //! Execute rpc command.
     virtual UniValue executeRpc(const std::string& command, const UniValue& params, const std::string& uri) = 0;
