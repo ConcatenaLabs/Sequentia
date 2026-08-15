@@ -14,6 +14,7 @@
 #include <base58.h>
 #include <assetsdir.h>
 #include <chainparams.h>
+#include <feeassets.h>
 #include <referenceprices.h>
 #include <fs.h>
 #include <interfaces/node.h>
@@ -951,10 +952,11 @@ double RefBasePriceOf(const std::map<std::string, double>& prices, const QString
 }
 // The feed's price KEY for an asset (NOT a reference): the feed names the native asset "SEQ"
 // (independent of the chain-aware display ticker tSEQ); issued assets use their registry ticker.
+// Defined node-side (feeassets.h) because the fee-asset checks need the same key, and a display
+// layer that spelled it differently would disagree with the node about which assets are priced.
 QString MarketTickerOf(const CAsset& asset)
 {
-    if (asset == Params().GetConsensus().pegged_asset) return QStringLiteral("SEQ");
-    return QString::fromStdString(gAssetsDir.GetIdentifier(asset)).toUpper();
+    return QString::fromStdString(FeeAssetFeedTicker(asset));
 }
 QString FormatRefValue(double value, const QString& ref)
 {
@@ -980,14 +982,6 @@ QString formatReferenceApprox(const CAsset& asset, const CAmount& amount, const 
     if (!(pa > 0.0) || !(pr > 0.0)) return QString();
     const double factor = static_cast<double>(AssetAtomFactor(assetPrecision(asset)));
     return FormatRefValue((static_cast<double>(amount) / factor) * pa / pr, ref);
-}
-
-bool assetHasMarketPrice(const CAsset& asset)
-{
-    const std::map<std::string, double> prices = GetReferencePrices();
-    if (prices.empty()) return false;
-    const auto it = prices.find(MarketTickerOf(asset).toStdString());
-    return it != prices.end() && it->second > 0.0;
 }
 
 QString formatMultiAssetReferenceApprox(const CAmountMap& amountmap, const QString& refTicker, double extraBtcWhole)
