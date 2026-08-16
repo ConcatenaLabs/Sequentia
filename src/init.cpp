@@ -102,6 +102,7 @@
 
 #include <assetsdir.h> // InitGlobalAssetDir
 #include <assetregistry.h> // StartAssetRegistry
+#include <feeassets.h> // StartFeedDerivedFeeRates
 #include <referenceprices.h> // StartReferencePrices
 #include <pegins.h>
 
@@ -632,7 +633,7 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-referencepricesurl=<url>", "Sequentia reference-price feed URL (http only). When set, the node periodically fetches per-asset USD prices used by the GUI to value displayed amounts in a user-chosen reference currency (display only; never affects consensus or fees).", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-referencepricespoll=<n>", "Seconds between reference-price refreshes (0 disables periodic refresh; only the initial fetch runs). (default: 120)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-referencepricestimeout=<n>", "Timeout in seconds for a reference-price fetch. (default: 15)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
-    argsman.AddArg("-defaultpeggedassetname", "Default name of the pegged asset. (default: bitcoin)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
+    argsman.AddArg("-defaultpeggedassetname", "Default name of the pegged asset. (default: SEQ on the Sequentia network, tSEQ on its testnet, bitcoin on the chains inherited from Elements)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-blindedaddresses", "Give blind addresses by default via getnewaddress and getrawchangeaddress. (default: chain-dependent: 1 on Liquid/Elements chains, 0 on Sequentia chains where confidential transactions are opt-in; always 0 outside elements mode)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-blindedprefix", "The byte prefix, in decimal, of blinded addresses. (default: 4)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
 
@@ -1213,7 +1214,14 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     }
 
     try {
-        const std::string default_asset_name = gArgs.GetArg("-defaultpeggedassetname", "bitcoin");
+        // SEQUENTIA: the native asset of a Sequentia chain is SEQ, and naming it
+        // "bitcoin" (the Elements default) makes every RPC, config file and window
+        // that prints a label claim the chain's own coin is parent-chain bitcoin.
+        // The chains inherited from Elements keep the inherited name.
+        const std::string chain_name = gArgs.GetChainName();
+        const std::string default_asset_name = gArgs.GetArg("-defaultpeggedassetname",
+            chain_name == CBaseChainParams::SEQUENTIA ? "SEQ" :
+            chain_name == CBaseChainParams::TESTNET   ? "tSEQ" : "bitcoin");
         InitGlobalAssetDir(gArgs.GetArgs("-assetdir"), default_asset_name);
     } catch (const std::exception& e) {
         return InitError(Untranslated(strprintf("Error in -assetdir: %s\n", e.what())));
@@ -1438,6 +1446,11 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     // SEQUENTIA: fetch per-asset USD prices for the GUI's reference-currency
     // valuation (if -referencepricesurl is set) and refresh them periodically.
     StartReferencePrices(*node.scheduler);
+
+    // SEQUENTIA: and price those same assets into the fee whitelist, so a fee can
+    // be paid in any of them rather than only in the one the whitelist is seeded
+    // with. Rates an operator or a price server set are left alone.
+    StartFeedDerivedFeeRates(*node.scheduler, node.mempool.get());
 
     // Create client interfaces for wallets that are supposed to be loaded
     // according to -wallet and -disablewallet options. This only constructs

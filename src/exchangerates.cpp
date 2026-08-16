@@ -98,10 +98,34 @@ void ExchangeRateMap::ResetToBootstrapRates() {
 
 void ExchangeRateMap::SetRates(const std::map<CAsset, CAmount>& rates) {
     LOCK(m_write_mutex);
+    // A whitelist that says exactly what the node would have said on its own --
+    // the policy asset alone, at the seed rate -- is not a decision anybody made.
+    // It is what SaveToJSONFile writes back on the first start of an unconfigured
+    // node, and treating that echo as operator policy would pin the policy asset
+    // to a made-up rate of 1 while every other asset got a real price from the
+    // feed, which is the privilege this whole mechanism exists to avoid.
+    const bool is_bootstrap_echo = rates.size() == 1 &&
+                                   rates.count(::policyAsset) &&
+                                   rates.at(::policyAsset) == exchange_rate_scale;
     this->clear();
     for (const auto& rate : rates) {
-        (*this)[rate.first] = CAssetExchangeRate(rate.second);
+        (*this)[rate.first] = CAssetExchangeRate(rate.second, /*operator_set=*/!is_bootstrap_echo);
     }
+}
+
+int ExchangeRateMap::MergeFeedRates(const std::map<CAsset, CAmount>& rates) {
+    LOCK(m_write_mutex);
+    int changed = 0;
+    for (const auto& rate : rates) {
+        auto it = this->find(rate.first);
+        if (it != this->end()) {
+            if (it->second.m_operator_set) continue;                  // a decision; leave it
+            if (it->second.m_scaled_value == rate.second) continue;   // nothing new
+        }
+        (*this)[rate.first] = CAssetExchangeRate(rate.second, /*operator_set=*/false);
+        changed++;
+    }
+    return changed;
 }
 
 void ExchangeRateMap::ClearRates() {
