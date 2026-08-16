@@ -699,8 +699,20 @@ bool CheckSupervisedIssuance(const CTransaction& tx, const SupervisionDeclaratio
             return false;
         }
 
-        if (!issuance.nAmount.IsExplicit()) {
-            err = "supervised issuance amount must be explicit";
+        // NOT !IsExplicit(). The rule this enforces is "never blinded", and a
+        // NULL amount is not blinded: it is the encoding of zero, which is how
+        // an issuance that creates no units at all is written.
+        //
+        // That shape is not a corner case, it is how a bridged stablecoin must
+        // be issued. Circle's Bridged USDC Standard wants supply exactly backed
+        // from the first atom, so the bridge creates the asset with no units and
+        // exactly one reissuance token, then mints against verified deposits.
+        // Requiring an explicit amount here forbade precisely that, and a
+        // supervised zero-supply issuance is the one issuance the whole feature
+        // exists to serve. A commitment is still refused, which is the case that
+        // actually matters: consensus cannot read a blinded amount.
+        if (issuance.nAmount.IsCommitment()) {
+            err = "supervised issuance amount may not be blinded";
             return false;
         }
         if (!issuance.nInflationKeys.IsExplicit()) {

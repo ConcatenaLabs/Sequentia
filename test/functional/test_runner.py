@@ -186,6 +186,7 @@ BASE_SCRIPTS = [
     # vv Tests less than 30s vv
     # Sequentia tests
     'feature_supervised_assets.py',
+    'feature_supervised_zero_supply.py',
     'feature_any_asset_fee.py',
     'feature_any_asset_fee_no_default.py',
     'feature_any_asset_fee_rates.py',
