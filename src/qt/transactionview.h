@@ -22,9 +22,11 @@ QT_BEGIN_NAMESPACE
 class QComboBox;
 class QDateTimeEdit;
 class QFrame;
+class QLabel;
 class QLineEdit;
 class QMenu;
 class QModelIndex;
+class QTableWidget;
 class QTreeView;
 QT_END_NAMESPACE
 
@@ -109,6 +111,16 @@ private:
      *  than as names so the filter keeps working across a registry update. */
     std::vector<CAsset> m_assets_present;
 
+    /** SEQUENTIA: the Bitcoin (parent-chain) section under the transaction list — a
+     *  title plus a small table of the unspent outputs the periodic scan found at this
+     *  wallet's addresses. These cannot ride inside the Sequentia transaction model:
+     *  the wallet has no parent-chain history (the scan sees the UTXO set, so spent
+     *  outputs vanish), and their confirmations are Bitcoin's, not Sequentia states.
+     *  Hidden entirely while there is nothing to show. */
+    QLabel *m_btc_title{nullptr};
+    QTableWidget *m_btc_table{nullptr};
+    QList<GUIUtil::ParentChainUtxo> m_btc_utxos;
+
     bool eventFilter(QObject *obj, QEvent *event) override;
 
     const PlatformStyle* m_platform_style;
@@ -140,6 +152,9 @@ Q_SIGNALS:
     void bumpedFee(const uint256& txid);
 
 public Q_SLOTS:
+    /** SEQUENTIA: refresh the Bitcoin (parent-chain) section from a finished scan
+     *  (relayed from the Overview page, which owns the scan cycle). */
+    void setParentChainUtxos(const QList<GUIUtil::ParentChainUtxo>& utxos, int parentHeight);
     void chooseDate(int idx);
     void chooseType(int idx);
     void chooseAsset(int idx);

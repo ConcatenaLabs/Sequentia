@@ -1,0 +1,14 @@
+[Unit]
+Description=Check for a new Sequentia Core release every 10 minutes
+
+[Timer]
+# A tag can appear at any time, and a check that finds nothing is one ls-remote.
+OnBootSec=10min
+OnUnitActiveSec=10min
+# The check is cheap but the build is not: if the box was off when a release
+# landed, still catch it on the next boot rather than waiting for the interval.
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

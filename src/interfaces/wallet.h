@@ -219,6 +219,12 @@ public:
     //! Get balance.
     virtual CAmountMap getBalance() = 0;
 
+    //! SEQUENTIA: this wallet's reissuance tokens, mapped to the asset each one
+    //! mints. A token is an inflation key: any fraction of it reissues its asset
+    //! without limit, so the UI has to be able to tell one from an ordinary
+    //! holding rather than showing a nameless asset id.
+    virtual std::map<CAsset, CAsset> getReissuanceTokens() = 0;
+
     //! Get available balance.
     virtual CAmountMap getAvailableBalance(const wallet::CCoinControl& coin_control) = 0;
 

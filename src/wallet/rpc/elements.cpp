@@ -1866,7 +1866,7 @@ RPCHelpMan listissuances()
                 continue;
             }
             if (issuance.assetBlindingNonce.IsNull()) {
-                GenerateAssetEntropy(entropy, pcoin->tx->vin[vinIndex].prevout, issuance.assetEntropy);
+                GenerateIssuanceEntropyFromTx(entropy, *pcoin->tx, vinIndex);
                 CalculateAsset(asset, entropy);
                 // Null is considered explicit
                 CalculateReissuanceToken(token, entropy, issuance.nAmount.IsCommitment());
@@ -1979,7 +1979,7 @@ RPCHelpMan registerasset()
                 if (issuance.IsNull() || !issuance.assetBlindingNonce.IsNull()) continue;
                 uint256 entropy;
                 CAsset issued;
-                GenerateAssetEntropy(entropy, wtx.tx->vin[vin].prevout, issuance.assetEntropy);
+                GenerateIssuanceEntropyFromTx(entropy, *wtx.tx, vin);
                 CalculateAsset(issued, entropy);
                 if (issued != asset) continue;
                 UniValue parsed;

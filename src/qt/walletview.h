@@ -20,6 +20,7 @@ class WalletModel;
 class AddressBookPage;
 class AssetsPage;
 class StakingPage;
+class SupervisionPage;
 
 QT_BEGIN_NAMESPACE
 class QModelIndex;
@@ -50,6 +51,10 @@ public:
 
     void showOutOfSyncWarning(bool fShow);
 
+    //! Whether this wallet has a supervised asset to operate. The Supervision tab is
+    //! hidden for every wallet that has not, which is nearly all of them.
+    bool hasSupervision() const;
+
 private:
     ClientModel *clientModel;
 
@@ -65,6 +70,7 @@ private:
     SendCoinsDialog *sendCoinsPage;
     AssetsPage *assetsPage;
     StakingPage *stakingPage;
+    SupervisionPage *supervisionPage;
     AddressBookPage *usedSendingAddressesPage;
     AddressBookPage *usedReceivingAddressesPage;
 
@@ -84,6 +90,8 @@ public Q_SLOTS:
     void gotoAssetsPage();
     /** Switch to the Staking page */
     void gotoStakingPage();
+    /** Switch to the Supervision page */
+    void gotoSupervisionPage();
     /** Open the fee-acceptance policy dialog */
     void gotoFeePolicyDialog();
     /** Switch to send coins page */
@@ -128,6 +136,8 @@ Q_SIGNALS:
     void incomingTransaction(const QString& date, const QString& assetamount_str, const QString& type, const QString& address, const QString& label, const QString& walletName);
     /** Notify that the out of sync warning icon has been pressed */
     void outOfSyncWarningClicked();
+    /** This wallet gained (or lost) a supervised asset to operate */
+    void supervisionAvailable(bool available);
 };
 
 #endif // BITCOIN_QT_WALLETVIEW_H

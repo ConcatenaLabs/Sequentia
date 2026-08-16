@@ -211,7 +211,13 @@ void DebugMessageHandler(QtMsgType type, const QMessageLogContext& context, cons
 }
 
 static int qt_argc = 1;
-static const char* qt_argv = "bitcoin-qt";
+// The argv[0] Qt is given, which is NOT cosmetic: the xcb platform publishes it
+// as the first field of the window's WM_CLASS, and a desktop environment matches
+// a window to its .desktop file (and therefore to an icon) on exactly that. It
+// has to keep matching the installed entry's basename, sequentia-qt.desktop.
+// Renaming the binary in #80 did not reach here, so windows still announced
+// themselves as bitcoin-qt and no entry claimed them.
+static const char* qt_argv = "sequentia-qt";
 
 BitcoinApplication::BitcoinApplication():
     QApplication(qt_argc, const_cast<char **>(&qt_argv)),

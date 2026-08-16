@@ -76,6 +76,10 @@ WalletModel::WalletModel(std::unique_ptr<interfaces::Wallet> wallet, ClientModel
     timer(new QTimer(this))
 {
     fHaveWatchOnly = m_wallet->haveWatchOnly();
+    // SEQUENTIA: before any model builds a table, so a reissuance token is named
+    // the first time it is drawn rather than appearing as a bare id until the
+    // first balance poll comes round.
+    GUIUtil::rememberReissuanceTokens(m_wallet->getReissuanceTokens());
     addressTableModel = new AddressTableModel(this);
     transactionTableModel = new TransactionTableModel(platformStyle, this);
     recentRequestsTableModel = new RecentRequestsTableModel(this);
@@ -91,6 +95,16 @@ WalletModel::~WalletModel()
 std::set<CAsset> WalletModel::getAssetTypes() const
 {
     return cached_asset_types;
+}
+
+std::set<CAsset> WalletModel::getFeePayableAssetTypes() const
+{
+    std::set<CAsset> payable;
+    for (const CAsset& asset : cached_asset_types) {
+        if (GUIUtil::isReissuanceToken(asset)) continue;
+        payable.insert(asset);
+    }
+    return payable;
 }
 
 void WalletModel::startPollBalance()
@@ -158,6 +172,10 @@ void WalletModel::checkBalanceChanged(const interfaces::WalletBalances& new_bala
             new_asset_types.insert(assetamount.first);
         }
         if (new_asset_types != cached_asset_types) {
+            // A new asset in the balance can be a freshly issued reissuance token,
+            // so re-read them before anything repopulates a selector from the new
+            // set -- an inflation key must never reach a fee selector.
+            GUIUtil::rememberReissuanceTokens(m_wallet->getReissuanceTokens());
             cached_asset_types = new_asset_types;
             Q_EMIT assetTypesChanged();
         }
@@ -541,7 +559,10 @@ bool WalletModel::bumpFee(uint256 hash, uint256& new_hash)
         QStringList labels; QList<QString> hexes;
         labels << tr("Keep original (%1)").arg(GUIUtil::assetDisplayName(old_fee_asset));
         hexes  << QString::fromStdString(old_fee_asset.GetHex());
-        for (const CAsset& asset : getAssetTypes()) {
+        // Reissuance tokens are absent by construction: a fee is paid into the
+        // producer's coinbase, and paying one in an inflation key would hand the
+        // producer the right to mint that asset for ever.
+        for (const CAsset& asset : getFeePayableAssetTypes()) {
             if (asset == old_fee_asset) continue;
             labels << GUIUtil::assetDisplayName(asset);
             hexes  << QString::fromStdString(asset.GetHex());
@@ -714,7 +735,9 @@ bool WalletModel::createChildPaysForParent(uint256 parentHash, uint256& childHas
         QStringList labels; QList<QString> hexes;
         labels << BitcoinUnits::policyAssetTicker();
         hexes  << QString::fromStdString(::policyAsset.GetHex());
-        for (const CAsset& asset : getAssetTypes()) {
+        // No reissuance tokens here either: the child's fee reaches a producer's
+        // coinbase exactly as the parent's would.
+        for (const CAsset& asset : getFeePayableAssetTypes()) {
             if (asset == ::policyAsset) continue;
             labels << GUIUtil::assetDisplayName(asset);
             hexes  << QString::fromStdString(asset.GetHex());
@@ -822,7 +845,10 @@ bool WalletModel::replaceTransaction(uint256 hash, uint256& new_hash)
     if (g_con_any_asset_fees) {
         lay->addWidget(new QLabel(tr("Pay the fee in:"), &dlg));
         feeCombo->addItem(tr("Keep original (%1)").arg(GUIUtil::assetDisplayName(old_fee_asset)), QString::fromStdString(old_fee_asset.GetHex()));
-        for (const CAsset& a : getAssetTypes()) { if (a == old_fee_asset) continue; feeCombo->addItem(GUIUtil::assetDisplayName(a), QString::fromStdString(a.GetHex())); }
+        // The asset combo above chooses what to SEND, where a token is a legitimate
+        // (if drastic) choice; this one chooses what pays the producer, where it
+        // never is.
+        for (const CAsset& a : getFeePayableAssetTypes()) { if (a == old_fee_asset) continue; feeCombo->addItem(GUIUtil::assetDisplayName(a), QString::fromStdString(a.GetHex())); }
         lay->addWidget(feeCombo);
     }
     lay->addWidget(new QLabel(tr("Fee rate (atoms/vB):"), &dlg));

@@ -1,0 +1,21 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Sequentia Core
+GenericName=Sequentia node and wallet
+Comment=Run a Sequentia full node and dual-chain wallet
+Exec=sequentia-qt %u
+Icon=sequentia
+Terminal=false
+StartupNotify=true
+Categories=Office;Finance;
+Keywords=Sequentia;Bitcoin;wallet;node;assets;
+MimeType=x-scheme-handler/bitcoin;
+# A window is tied to this entry by its WM_CLASS. Its first field is the argv[0]
+# Qt was given (src/qt/bitcoin.cpp), which is "sequentia-qt" and so matches this
+# file's basename: that alone associates the window on every chain. The second
+# field is the per-chain application name from src/qt/networkstyle.cpp, which is
+# "Sequentia Core" on mainnet but "Sequentia-testnet" or "Sequentia-regtest"
+# elsewhere. Declaring the mainnet one below helps environments that match only
+# on that field; the basename match is what covers testnet and regtest.
+StartupWMClass=Sequentia Core

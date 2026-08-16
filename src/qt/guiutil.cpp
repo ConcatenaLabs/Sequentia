@@ -23,6 +23,7 @@
 #include <protocol.h>
 #include <script/script.h>
 #include <script/standard.h>
+#include <sync.h>
 #include <util/system.h>
 #include <util/time.h>
 
@@ -800,11 +801,46 @@ QString ConnectionTypeToQString(ConnectionType conn_type, bool prepend_direction
     assert(false);
 }
 
+namespace {
+// SEQUENTIA: reissuance token -> the asset it mints, for every loaded wallet.
+// A token's id is a hash over the issuance entropy, so nothing about the id
+// itself says it is one: only a wallet that has the issuance can tell us, and
+// what it tells us is the same for every wallet, so the answers merge.
+Mutex g_reissuance_tokens_mutex;
+std::map<CAsset, CAsset> g_reissuance_tokens GUARDED_BY(g_reissuance_tokens_mutex);
+} // namespace
+
+void rememberReissuanceTokens(const std::map<CAsset, CAsset>& tokens)
+{
+    LOCK(g_reissuance_tokens_mutex);
+    for (const auto& entry : tokens) g_reissuance_tokens.insert(entry);
+}
+
+bool isReissuanceToken(const CAsset& asset, CAsset* issued_asset)
+{
+    LOCK(g_reissuance_tokens_mutex);
+    const auto it = g_reissuance_tokens.find(asset);
+    if (it == g_reissuance_tokens.end()) return false;
+    if (issued_asset) *issued_asset = it->second;
+    return true;
+}
+
 QString assetDisplayName(const CAsset& asset)
 {
     // The policy asset's registry identifier defaults to "bitcoin"; show the chain-aware
     // ticker (tSEQ/SEQ) used by amount fields instead, so labels stay consistent.
     if (asset == ::policyAsset) return BitcoinUnits::policyAssetTicker();
+    // A reissuance token is the authority to mint its asset without limit, and it has no
+    // registry entry of its own -- registering names the asset, never the token -- so left
+    // alone it shows up as a nameless hex id next to ordinary holdings. Name it after what
+    // it mints, because that is the only thing about it a holder needs to recognise: send
+    // it away and the mint goes with it.
+    CAsset issued;
+    if (isReissuanceToken(asset, &issued)) {
+        const QString of = assetIsNamed(issued) ? assetDisplayName(issued)
+                                                : ellipsizeMiddle(QString::fromStdString(issued.GetHex()));
+        return QObject::tr("Inflation key (%1)").arg(of);
+    }
     return QString::fromStdString(gAssetsDir.GetIdentifier(asset));
 }
 
@@ -814,6 +850,10 @@ bool assetIsNamed(const CAsset& asset)
     // "named" only if the registry carries a human-readable label for it; otherwise its
     // sole identity is the 64-hex id and it must be shown (and elided) as such.
     if (asset == ::policyAsset) return true;
+    // A recognised inflation key always has a label of its own making ("Inflation key (X)",
+    // with X elided to its id when the asset it mints is itself unregistered), so callers
+    // must show that rather than fall back to the raw id.
+    if (isReissuanceToken(asset)) return true;
     return !gAssetsDir.GetLabel(asset).empty();
 }
 
@@ -884,13 +924,29 @@ QString formatAssetAmount(const CAsset& asset, const CAmount& amount, const int 
 // server controls which references are available simply by what it lists. Amounts are scaled by
 // 1e8 like formatAssetAmount. Nothing here privileges SEQ as a reference.
 namespace {
+// USD (feed-base) price of one bitcoin, under whatever key the feed carries it. The
+// running testnet feed publishes it as tBTC; BTC and WBTC (wrapped) are accepted too,
+// so a differently-keyed feed does not silently unprice the parent chain.
+double BtcFeedPrice(const std::map<std::string, double>& prices)
+{
+    for (const char* k : {"TBTC", "BTC", "WBTC"}) {
+        const auto it = prices.find(k);
+        if (it != prices.end() && it->second > 0.0) return it->second;
+    }
+    return 0.0;
+}
+// Is this uppercased feed/lookup key one of the spellings of bitcoin?
+bool IsBtcKey(const QString& key)
+{
+    return key == QLatin1String("BTC") || key == QLatin1String("TBTC") || key == QLatin1String("WBTC");
+}
 // USD (the feed's common base) price of one whole unit of `ticker` (the chosen reference).
-// USD is the base (=1); BTC maps to the WBTC entry; any other ticker is looked up directly.
+// USD is the base (=1); BTC resolves through BtcFeedPrice; any other ticker is looked up directly.
 double RefBasePriceOf(const std::map<std::string, double>& prices, const QString& ticker)
 {
     if (ticker == QLatin1String("USD")) return 1.0;
-    const std::string key = (ticker == QLatin1String("BTC") ? std::string("WBTC") : ticker.toStdString());
-    const auto it = prices.find(key);
+    if (ticker == QLatin1String("BTC")) return BtcFeedPrice(prices);
+    const auto it = prices.find(ticker.toStdString());
     return it != prices.end() ? it->second : 0.0;
 }
 // The feed's price KEY for an asset (NOT a reference): the feed names the native asset "SEQ"
@@ -917,7 +973,7 @@ QString formatReferenceApprox(const CAsset& asset, const CAmount& amount, const 
     const QString ref = refTicker.isEmpty() ? QSettings().value("strReferenceCurrency", "USD").toString() : refTicker;
     const QString assetTicker = MarketTickerOf(asset);
     // Suppress when the amount is already in the chosen reference denomination (redundant).
-    if (assetTicker == ref || (ref == QLatin1String("BTC") && assetTicker == QLatin1String("WBTC"))) return QString();
+    if (assetTicker == ref || (ref == QLatin1String("BTC") && IsBtcKey(assetTicker))) return QString();
     const auto itA = prices.find(assetTicker.toStdString());
     const double pa = itA != prices.end() ? itA->second : 0.0;
     const double pr = RefBasePriceOf(prices, ref);
@@ -934,7 +990,7 @@ bool assetHasMarketPrice(const CAsset& asset)
     return it != prices.end() && it->second > 0.0;
 }
 
-QString formatMultiAssetReferenceApprox(const CAmountMap& amountmap, const QString& refTicker)
+QString formatMultiAssetReferenceApprox(const CAmountMap& amountmap, const QString& refTicker, double extraBtcWhole)
 {
     const std::map<std::string, double> prices = GetReferencePrices();
     if (prices.empty()) return QString();
@@ -950,6 +1006,15 @@ QString formatMultiAssetReferenceApprox(const CAmountMap& amountmap, const QStri
         sum += (static_cast<double>(it.second) / factor) * itA->second / pr;
         any = true;
     }
+    // Parent-chain bitcoin is not a CAsset, so it cannot travel in the map; callers
+    // pass it separately and it is valued at the feed's bitcoin price.
+    if (extraBtcWhole > 0.0) {
+        const double pb = BtcFeedPrice(prices);
+        if (pb > 0.0) {
+            sum += extraBtcWhole * pb / pr;
+            any = true;
+        }
+    }
     return any ? FormatRefValue(sum, ref) : QString();
 }
 
@@ -964,9 +1029,16 @@ QString formatReferenceApproxByLabel(const QString& assetLabel, double wholeUnit
     QString assetKey = assetLabel.toUpper();
     if (assetLabel == BitcoinUnits::policyAssetTicker() || assetLabel.compare(QStringLiteral("bitcoin"), Qt::CaseInsensitive) == 0)
         assetKey = QStringLiteral("SEQ");
-    if (assetKey == ref || (ref == QLatin1String("BTC") && assetKey == QLatin1String("WBTC"))) return QString();
-    const auto itA = prices.find(assetKey.toStdString());
-    const double pa = itA != prices.end() ? itA->second : 0.0;
+    if (assetKey == ref || (ref == QLatin1String("BTC") && IsBtcKey(assetKey))) return QString();
+    // Parent-chain bitcoin (the dual-address tBTC balance) resolves through BtcFeedPrice,
+    // the same lookup RefBasePriceOf applies on the reference side.
+    double pa;
+    if (IsBtcKey(assetKey)) {
+        pa = BtcFeedPrice(prices);
+    } else {
+        const auto itA = prices.find(assetKey.toStdString());
+        pa = itA != prices.end() ? itA->second : 0.0;
+    }
     const double pr = RefBasePriceOf(prices, ref);
     if (!(pa > 0.0) || !(pr > 0.0)) return QString();
     return FormatRefValue(wholeUnits * pa / pr, ref);

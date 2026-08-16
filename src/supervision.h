@@ -242,6 +242,28 @@ void GenerateSupervisedAssetEntropy(uint256& entropy, const COutPoint& prevout,
                                     const uint256& contracthash,
                                     const SupervisionDescriptor& desc);
 
+/** The entropy of the initial issuance at input `vin` of `tx`, supervised or not.
+ *
+ *  For anything READING an issuance back out of a stored transaction, which is
+ *  what a wallet does constantly: listing issuances, finding a reissuance token,
+ *  recovering a contract, registering an asset's denomination. Deriving with
+ *  GenerateAssetEntropy alone is right for an ordinary issuance and silently wrong
+ *  for a supervised one -- it yields the id of an asset that does not exist, so
+ *  the wallet reports an asset nobody holds and cannot find the reissuance token
+ *  of the one it does. Consensus never has that problem because it derives from
+ *  the declaration; this does the same.
+ *
+ *  The declaration output that carries the descriptor is in the issuance's own
+ *  transaction (consensus requires it), and it names the asset it belongs to, so
+ *  a supervised derivation is taken only when it reproduces that asset. A
+ *  transaction carrying somebody else's declaration therefore cannot mislabel an
+ *  ordinary issuance.
+ *
+ *  Caller must have checked that the issuance is an initial one (a null
+ *  assetBlindingNonce); a reissuance quotes its entropy directly and has none to
+ *  derive. */
+void GenerateIssuanceEntropyFromTx(uint256& entropy, const CTransaction& tx, size_t vin);
+
 /** Validate a transaction that carries a supervision declaration.
  *
  *  Everything here is checked at issuance because none of it can be repaired

@@ -14,6 +14,7 @@ class PlatformStyle;
 
 QT_BEGIN_NAMESPACE
 class QTableWidget;
+class QComboBox;
 class QLineEdit;
 class QCheckBox;
 class QLabel;
@@ -67,6 +68,10 @@ private:
     QLineEdit* m_issue_amount{nullptr};
     QCheckBox* m_issue_reissuable{nullptr};
     QCheckBox* m_issue_blind{nullptr};
+    //! Which asset pays this transaction's fee. Named, never defaulted: the fee
+    //! market has no privileged asset, so the node rejects an issuance that does
+    //! not say.
+    QComboBox* m_issue_fee_asset{nullptr};
     // SEQUENTIA: supervision (src/supervision.h). Permanent at issuance,
     // because the keys are committed in the asset id.
     QCheckBox* m_issue_supervised{nullptr};
@@ -77,6 +82,7 @@ private:
 
     QLineEdit* m_reissue_asset{nullptr};
     QLineEdit* m_reissue_amount{nullptr};
+    QComboBox* m_reissue_fee_asset{nullptr};
     QPushButton* m_reissue_button{nullptr};
 
     QLabel* m_status{nullptr};
@@ -117,6 +123,11 @@ private:
     bool supervisionKeys(QString& operational, QString& recovery);
     //! Warn if the issuer domain does not resolve, since a typo cannot be undone.
     bool domainResolves(const QString& domain) const;
+    //! Fill both fee-asset selectors with what this wallet holds, keeping any
+    //! choice the user had already made.
+    void populateFeeAssets();
+    //! The asset id the given selector names, for an RPC's fee_asset argument.
+    UniValue chosenFeeAsset(const QComboBox* selector) const;
     //! The domain as it will be committed: no scheme, no path, lower case.
     QString issuerDomain() const;
 
