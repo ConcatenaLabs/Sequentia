@@ -53,6 +53,7 @@
 #include <assetsdir.h>
 #include <blind.h>
 #include <issuance.h>
+#include <supervision.h>
 #include <crypto/hmac_sha256.h>
 #include <random.h>
 
@@ -3297,6 +3298,7 @@ bool CWallet::UpgradeWallet(int version, bilingual_str& error)
     }
     return true;
 }
+
 
 void CWallet::postInitProcess()
 {
