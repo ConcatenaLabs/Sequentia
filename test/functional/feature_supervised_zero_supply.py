@@ -73,6 +73,27 @@ class SupervisedZeroSupplyTest(BitcoinTestFramework):
         assert_equal(node.getbalance()[r["token"]], Decimal("1"))
         assert r["asset"] not in node.getbalance()
 
+        # Dump a derivation vector for the indexer's test suite: the indexer
+        # must reproduce this asset id from the transaction alone. Run this test
+        # with --loglevel=info to print it.
+        #
+        # Note what is NOT dumped here. For an *initial* issuance the "assetEntropy"
+        # field of the decoded input is not the contract hash at all: core_write.cpp
+        # fills it with the already-computed entropy. Reading it as the contract
+        # hash reproduces a plausible but wrong asset id, which is a slow thing to
+        # debug. The contract hash for this issuance is zero, as issueasset sets no
+        # contract, so the vector states that directly rather than reading it back.
+        raw = node.getrawtransaction(r["txid"], True)
+        vin = raw["vin"][0]
+        decl = [o["scriptPubKey"]["hex"] for o in raw["vout"]
+                if o["scriptPubKey"]["hex"].startswith("06534551535550")][0]
+        self.log.info("VECTOR prevout_txid=%s", vin["txid"])
+        self.log.info("VECTOR prevout_vout=%s", vin["vout"])
+        self.log.info("VECTOR contract_hash=%s", "00" * 32)
+        self.log.info("VECTOR entropy=%s", r["entropy"])
+        self.log.info("VECTOR asset=%s", r["asset"])
+        self.log.info("VECTOR declaration=%s", decl)
+
         self.log.info("Reissuing against it, the way a deposit does")
         node.reissueasset(r["asset"], 250, policy)
         self.generate(node, 1)
