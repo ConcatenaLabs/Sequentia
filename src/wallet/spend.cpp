@@ -1255,7 +1255,9 @@ static bool CreateTransactionInternal(
         // below skips its own for the same reason.
     }
 
-    bool may_need_blinded_dummy = !!blind_details;
+    // Never for a supervised transaction: the dummy is a BLINDED output, which is
+    // exactly what such a transaction may not contain.
+    bool may_need_blinded_dummy = blind_details && !supervised_tx;
     for (const auto& recipient : vecSend)
     {
         CTxOut txout(recipient.asset, recipient.nAmount, recipient.scriptPubKey);
@@ -1324,6 +1326,32 @@ static bool CreateTransactionInternal(
     // Get available coins
     std::vector<COutput> vAvailableCoins;
     AvailableCoins(wallet, vAvailableCoins, &coin_control, 1, MAX_MONEY, MAX_MONEY, 0);
+
+    // SEQUENTIA: a transaction that moves a supervised asset must be fully
+    // explicit, and a BLINDED INPUT makes that impossible. The blinding factors
+    // have to cancel, so spending one forces a blinded output somewhere: the
+    // wallet would append its blinded dummy output and the node would reject the
+    // whole transaction for creating a blinded-asset output.
+    //
+    // So blinded coins are not candidates here. Filtering rather than failing
+    // late matters: a wallet holding both kinds otherwise builds a transaction
+    // that looks fine, gets rejected, and reads as a node bug.
+    if (supervised_tx) {
+        const size_t before = vAvailableCoins.size();
+        vAvailableCoins.erase(
+            std::remove_if(vAvailableCoins.begin(), vAvailableCoins.end(),
+                           [](const COutput& c) {
+                               const CTxOut& o = c.tx->tx->vout[c.i];
+                               return !o.nValue.IsExplicit() || !o.nAsset.IsExplicit();
+                           }),
+            vAvailableCoins.end());
+        if (vAvailableCoins.empty() && before > 0) {
+            error = _("This wallet holds only confidential coins, and a supervised asset must be "
+                      "moved in a fully explicit transaction. Send some funds to an unconfidential "
+                      "address of this wallet first, then retry.");
+            return false;
+        }
+    }
 
     // Choose coins to use
     std::optional<SelectionResult> result = SelectCoins(wallet, vAvailableCoins, /* nTargetValue */ map_selection_target, coin_control, coin_selection_params);
