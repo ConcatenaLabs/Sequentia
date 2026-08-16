@@ -36,6 +36,7 @@
 #include <QMessageBox>
 #include <QPointer>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QShowEvent>
 #include <QTableWidget>
 #include <QTableWidgetItem>
@@ -66,7 +67,26 @@ const char* PAUSE_TARGET_HEX = "000000000000000000000000000000000000000000000000
 SupervisionPage::SupervisionPage(const PlatformStyle* platformStyle, QWidget* parent)
     : QWidget(parent), m_platform_style(platformStyle)
 {
-    QVBoxLayout* layout = new QVBoxLayout(this);
+    // Everything below goes inside a scroll area rather than straight onto the
+    // page. Stacked one under another -- summaries, the freeze table, three group
+    // boxes and their explanations -- this content is about 1200 pixels tall, and
+    // a page states that as its MINIMUM height. Every tab shares one stacked
+    // widget, whose minimum is the tallest page's, so this page alone set the
+    // smallest the whole window could ever be: taller than a laptop screen, which
+    // left the window unshrinkable and the bottom of other tabs (the Send button,
+    // most visibly) cut off below the edge. Inside a scroll area the page asks for
+    // nothing and scrolls when it does not fit.
+    QVBoxLayout* outer = new QVBoxLayout(this);
+    outer->setContentsMargins(0, 0, 0, 0);
+    QScrollArea* scroll = new QScrollArea(this);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    QWidget* content = new QWidget(scroll);
+    scroll->setWidget(content);
+    outer->addWidget(scroll);
+
+    QVBoxLayout* layout = new QVBoxLayout(content);
 
     QLabel* title = new QLabel(tr("Supervision"), this);
     QFont tf = title->font();
