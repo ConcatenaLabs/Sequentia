@@ -12,6 +12,9 @@
 #include <string>
 #include <vector>
 
+class CScheduler;
+class CTxMemPool;
+
 /**
  * SEQUENTIA: what a wallet needs in order to judge a candidate fee asset.
  *
@@ -74,5 +77,16 @@ FeeAssetInfo GetFeeAssetInfo(const CAsset& asset);
  *  alone because the interesting answer is often about an asset that is NOT
  *  whitelisted. Sorted by identifier. */
 std::vector<FeeAssetInfo> GetAllFeeAssetInfo();
+
+/** SEQUENTIA: price every asset the reference feed quotes into the fee whitelist,
+ *  so that a fee can be paid in any of them and not only in the one the whitelist
+ *  is seeded with. Leaves rates an operator set alone.
+ *  @return how many rates changed. */
+int ApplyFeedDerivedFeeRates();
+
+/** Schedule the above shortly after startup and on every price poll. No-op when
+ *  no price feed is configured, which leaves the whitelist entirely to the
+ *  operator and any price-server sidecar, as before. */
+void StartFeedDerivedFeeRates(CScheduler& scheduler, CTxMemPool* mempool);
 
 #endif // BITCOIN_FEEASSETS_H

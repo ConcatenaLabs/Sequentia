@@ -180,7 +180,11 @@ OverviewPage::OverviewPage(const PlatformStyle *platformStyle, QWidget *parent) 
     // Recent transactions
     ui->listTransactions->setItemDelegate(txdelegate);
     ui->listTransactions->setIconSize(QSize(DECORATION_SIZE, DECORATION_SIZE));
-    ui->listTransactions->setMinimumHeight(NUM_ITEMS * (DECORATION_SIZE + 2));
+    // Room for two rows, not NUM_ITEMS of them. The list scrolls, so a taller
+    // minimum buys nothing but window height -- and the page's minimum is the
+    // window's minimum, which on a laptop screen is what pushes the bottom of
+    // every OTHER tab (the Send button, most visibly) off the display.
+    ui->listTransactions->setMinimumHeight(2 * (DECORATION_SIZE + 2));
     ui->listTransactions->setAttribute(Qt::WA_MacShowFocusRect, false);
 
     connect(ui->listTransactions, &TransactionOverviewWidget::clicked, this, &OverviewPage::handleTransactionClicked);
@@ -274,7 +278,7 @@ OverviewPage::OverviewPage(const PlatformStyle *platformStyle, QWidget *parent) 
         m_asset_table->setShowGrid(false);
         m_asset_table->setWordWrap(false);
         m_asset_table->setAlternatingRowColors(true);
-        m_asset_table->setMinimumHeight(120);
+        m_asset_table->setMinimumHeight(80); // it scrolls; see listTransactions above
         // Insert where the retired scroll area sat: under the total-value headline, above the
         // tBTC separator/label that setBalance appends below the asset rows.
         ui->verticalLayout_4->insertWidget(2, m_asset_table);

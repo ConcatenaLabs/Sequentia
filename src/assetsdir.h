@@ -95,6 +95,7 @@ class CAssetsDir
 
     void Set(const CAsset& asset, const AssetMetadata& metadata);
     void SetHex(const std::string& assetHex, const std::string& label);
+    void SetAlias(const std::string& alias, const CAsset& asset);
 public:
     void InitFromStrings(const std::vector<std::string>& assetsToInit, const std::string& pegged_asset_name);
 

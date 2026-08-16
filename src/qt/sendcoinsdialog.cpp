@@ -185,7 +185,11 @@ void SendCoinsDialog::setModel(WalletModel *_model)
 
         // fee section
         for (const int n : confTargets) {
-            ui->confTargetSelector->addItem(tr("%1 (%2 blocks)").arg(GUIUtil::formatNiceTimeOffset(n*Params().GetConsensus().nPowTargetSpacing)).arg(n));
+            // GUIUtil::nominalBlockSpacing(), not nPowTargetSpacing: the latter is
+            // Bitcoin's 600 s, inherited and never used by a PoS chain, so every
+            // target here read ten times longer than the wait it describes -- two
+            // blocks were offered as "20 minutes" when Sequentia takes 120 seconds.
+            ui->confTargetSelector->addItem(tr("%1 (%2 blocks)").arg(GUIUtil::formatNiceTimeOffset(n * GUIUtil::nominalBlockSpacing())).arg(n));
         }
         connect(ui->confTargetSelector, qOverload<int>(&QComboBox::currentIndexChanged), this, &SendCoinsDialog::updateSmartFeeLabel);
         connect(ui->confTargetSelector, qOverload<int>(&QComboBox::currentIndexChanged), this, &SendCoinsDialog::coinControlUpdateLabels);
@@ -947,6 +951,12 @@ void SendCoinsDialog::showEvent(QShowEvent* event)
             if (!a.IsNull()) ui->feeAssetSelector->setItemText(i, GUIUtil::assetDisplayName(a));
         }
     }
+    // Lay the page out against the height it actually has. This page is built
+    // while the wallet is loading, before it is on screen, and the window it
+    // lands in may be maximised and unable to grow to the size the layout asked
+    // for; the leftover was the fee panel and the Send button sitting below the
+    // bottom edge, reachable only by resizing the window to force a fresh pass.
+    if (layout()) layout()->activate();
 }
 
 void SendCoinsDialog::updateFeeSectionControls()
@@ -956,9 +966,14 @@ void SendCoinsDialog::updateFeeSectionControls()
     ui->labelSmartFee2          ->setEnabled(ui->radioSmartFee->isChecked());
     ui->labelSmartFee3          ->setEnabled(ui->radioSmartFee->isChecked());
     ui->labelFeeEstimation      ->setEnabled(ui->radioSmartFee->isChecked());
-    ui->labelCustomFeeWarning   ->setEnabled(ui->radioCustomFee->isChecked());
     ui->labelCustomPerKilobyte  ->setEnabled(ui->radioCustomFee->isChecked());
     ui->customFee               ->setEnabled(ui->radioCustomFee->isChecked());
+    // Hidden rather than greyed out. It is a wrapped paragraph in a narrow column,
+    // so it costs six or seven lines of height whether or not it applies, and that
+    // height is what pushes the Send button off the bottom of the panel on a screen
+    // that cannot grow. Advice about the custom fee rate is worth reading while
+    // setting one, and worth nothing the rest of the time.
+    ui->labelCustomFeeWarning   ->setVisible(ui->radioCustomFee->isChecked());
 }
 
 void SendCoinsDialog::updateFeeMinimizedLabel()
@@ -1149,6 +1164,10 @@ void SendCoinsDialog::updateFeeAssetWarning()
         return;
     }
 
+    // The policy asset is judged by the same two questions as every other asset,
+    // deliberately. Exempting it from the registry check would be a privilege, and
+    // outside staking eligibility no asset here has one; if the answer for it is
+    // uncomfortable the fix is to publish it on the registry, not to stop asking.
     if (!info.registry_listed || !info.has_market_price) {
         const QString why = !info.registry_listed
             ? tr("%1 is not published on the Asset Registry, so the price servers other block producers "

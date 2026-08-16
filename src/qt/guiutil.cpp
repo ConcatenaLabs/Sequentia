@@ -20,6 +20,7 @@
 #include <interfaces/node.h>
 #include <key_io.h>
 #include <policy/policy.h>
+#include <pos.h>
 #include <primitives/transaction.h>
 #include <protocol.h>
 #include <script/script.h>
@@ -982,6 +983,16 @@ QString formatReferenceApprox(const CAsset& asset, const CAmount& amount, const 
     if (!(pa > 0.0) || !(pr > 0.0)) return QString();
     const double factor = static_cast<double>(AssetAtomFactor(assetPrecision(asset)));
     return FormatRefValue((static_cast<double>(amount) / factor) * pa / pr, ref);
+}
+
+int64_t nominalBlockSpacing()
+{
+    if (!g_con_pos) return Params().GetConsensus().nPowTargetSpacing;
+    const int64_t spacing = Params().GetConsensus().pos_block_spacing;
+    // Falls back to the slot interval for a PoS chain that sets no spacing. Never
+    // g_pos_slot_interval when a spacing exists: the slot interval is the leader
+    // time-gate unit (30 s), a different number for a different purpose.
+    return spacing > 0 ? spacing : g_pos_slot_interval;
 }
 
 QString formatMultiAssetReferenceApprox(const CAmountMap& amountmap, const QString& refTicker, double extraBtcWhole)

@@ -359,6 +359,12 @@ namespace GUIUtil
        Empty when no usable interpreter exists. */
     QString findPythonInterpreter(const QString& scriptDir);
 
+    /* SEQUENTIA: seconds between blocks on the selected chain, for turning a number of
+       blocks into a human duration. On a PoS chain this is the consensus-enforced
+       pos_block_spacing (60 s on the Sequentia chains), NOT nPowTargetSpacing, which is
+       inherited from Bitcoin at 600 s and would overstate every wait by tenfold. */
+    int64_t nominalBlockSpacing();
+
     /* Parse an amount of a given asset from text */
     bool parseAssetAmount(const CAsset&, const QString& text, int bitcoin_unit, CAmount *val_out);
 
