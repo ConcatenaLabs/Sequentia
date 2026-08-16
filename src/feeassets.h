@@ -78,6 +78,17 @@ FeeAssetInfo GetFeeAssetInfo(const CAsset& asset);
  *  whitelisted. Sorted by identifier. */
 std::vector<FeeAssetInfo> GetAllFeeAssetInfo();
 
+/** SEQUENTIA: the whitelist rate for an asset worth `price` reference units (USD,
+ *  as the feed quotes) per whole unit. Rates are an internal unit -- atoms per
+ *  reference fee atom, carrying a 10^(8-precision) factor so the node can value a
+ *  fee without knowing an asset's decimals -- and nobody should have to think in
+ *  them to say what something is worth. 0 when the price cannot be represented. */
+CAmount FeeRateFromUnitPrice(double price, uint8_t precision);
+
+/** The inverse: what one whole unit is worth, given a whitelist rate. 0 when the
+ *  asset is unpriced or refused. */
+double UnitPriceFromFeeRate(CAmount rate, uint8_t precision);
+
 /** SEQUENTIA: price every asset the reference feed quotes into the fee whitelist,
  *  so that a fee can be paid in any of them and not only in the one the whitelist
  *  is seeded with. Leaves rates an operator set alone.
