@@ -84,6 +84,12 @@ bool WalletFrame::addView(WalletView* walletView)
         walletView->gotoOverviewPage();
     }
 
+    // A wallet that is not on screen may still discover it has a supervised asset,
+    // and it must not move the tab out from under the wallet that is.
+    connect(walletView, &WalletView::supervisionAvailable, this, [this, walletView](bool available) {
+        if (currentWalletView() == walletView) Q_EMIT supervisionAvailable(available);
+    });
+
     walletStack->addWidget(walletView);
     mapWalletViews[walletView->getWalletModel()] = walletView;
 
@@ -113,6 +119,7 @@ void WalletFrame::setCurrentWallet(WalletModel* wallet_model)
 
     walletStack->setCurrentWidget(walletView);
 
+    Q_EMIT supervisionAvailable(walletView->hasSupervision());
     Q_EMIT currentWalletSet();
 }
 
@@ -123,6 +130,9 @@ void WalletFrame::removeWallet(WalletModel* wallet_model)
     WalletView *walletView = mapWalletViews.take(wallet_model);
     walletStack->removeWidget(walletView);
     delete walletView;
+    // Nothing left to supervise once the last wallet is gone; with wallets still
+    // loaded, the tab is settled by the setCurrentWallet that follows.
+    if (mapWalletViews.isEmpty()) Q_EMIT supervisionAvailable(false);
 }
 
 void WalletFrame::removeAllWallets()
@@ -131,6 +141,7 @@ void WalletFrame::removeAllWallets()
     for (i = mapWalletViews.constBegin(); i != mapWalletViews.constEnd(); ++i)
         walletStack->removeWidget(i.value());
     mapWalletViews.clear();
+    Q_EMIT supervisionAvailable(false);
 }
 
 bool WalletFrame::handlePaymentRequest(const SendCoinsRecipient &recipient)
@@ -183,6 +194,13 @@ void WalletFrame::gotoStakingPage()
     QMap<WalletModel*, WalletView*>::const_iterator i;
     for (i = mapWalletViews.constBegin(); i != mapWalletViews.constEnd(); ++i)
         i.value()->gotoStakingPage();
+}
+
+void WalletFrame::gotoSupervisionPage()
+{
+    QMap<WalletModel*, WalletView*>::const_iterator i;
+    for (i = mapWalletViews.constBegin(); i != mapWalletViews.constEnd(); ++i)
+        i.value()->gotoSupervisionPage();
 }
 
 void WalletFrame::gotoFeePolicyDialog()

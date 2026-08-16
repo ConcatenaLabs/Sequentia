@@ -71,9 +71,9 @@ EXPECTED_CIRCULAR_DEPENDENCIES=(
     "chain -> node/context -> pos_producer -> node/miner -> chain"
     "dynafed -> node/context -> pos_producer -> node/miner -> dynafed"
     "anchor -> chain -> node/context -> pos_producer -> node/miner -> anchor"
-    "chain -> node/context -> pos_producer -> script/sign -> pegins -> chain"
-    "dynafed -> node/context -> pos_producer -> script/sign -> pegins -> dynafed"
-    "block_proof -> chain -> node/context -> pos_producer -> script/sign -> pegins -> block_proof"
+    "chain -> node/context -> pos_producer -> node/miner -> pegins -> chain"
+    "dynafed -> node/context -> pos_producer -> node/miner -> pegins -> dynafed"
+    "block_proof -> chain -> node/context -> pos_producer -> node/miner -> pegins -> block_proof"
 )
 
 EXIT_CODE=0

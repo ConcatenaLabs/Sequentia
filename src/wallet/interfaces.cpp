@@ -415,6 +415,17 @@ public:
         return true;
     }
     CAmountMap getBalance() override { return GetBalance(*m_wallet).m_mine_trusted; }
+    std::map<CAsset, CAsset> getReissuanceTokens() override
+    {
+        // GetReissuanceTokenTypes keys the pair by entropy, which nothing above
+        // the wallet needs; what the UI asks is "given this asset id, is it an
+        // inflation key, and for what?".
+        std::map<CAsset, CAsset> tokens;
+        for (const auto& entry : m_wallet->GetReissuanceTokenTypes()) {
+            tokens.emplace(entry.second.first, entry.second.second);
+        }
+        return tokens;
+    }
     CAmountMap getAvailableBalance(const CCoinControl& coin_control) override
     {
         return GetAvailableBalance(*m_wallet, &coin_control);

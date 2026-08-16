@@ -682,6 +682,7 @@ RPCHelpMan registerasset();
 RPCHelpMan reissueasset();
 RPCHelpMan sendtomainchain();
 RPCHelpMan signblock();
+RPCHelpMan signsupervisionhash();
 RPCHelpMan unblindrawtransaction();
 
 
@@ -781,6 +782,7 @@ static const CRPCCommand commands[] =
     { "wallet",             &listissuances,                  },
     { "wallet",             &issueasset,                     },
     { "wallet",             &registerasset,                  },
+    { "supervision",        &signsupervisionhash,            },
     { "wallet",             &reissueasset,                   },
     { "wallet",             &destroyamount,                  },
     { "hidden",             &generatepegoutproof,            },

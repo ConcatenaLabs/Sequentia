@@ -25,6 +25,7 @@
 #include <QAbstractItemView>
 #include <QApplication>
 #include <QComboBox>
+#include <QDateTime>
 #include <QDateTimeEdit>
 #include <QDesktopServices>
 #include <QDoubleValidator>
@@ -37,6 +38,8 @@
 #include <QScrollBar>
 #include <QSettings>
 #include <QSignalBlocker>
+#include <QTableWidget>
+#include <QTableWidgetItem>
 #include <QTimer>
 #include <QTreeView>
 #include <QUrl>
@@ -256,6 +259,58 @@ TransactionView::TransactionView(const PlatformStyle *platformStyle, QWidget *pa
     connect(this, &TransactionView::bumpedFee, [this](const uint256& txid) {
       focusTransaction(txid);
     });
+
+    // SEQUENTIA: the Bitcoin (parent-chain) section, below the Sequentia history. These
+    // entries come from scanning the parent chain's UTXO set at this wallet's addresses,
+    // so they are receipts that are still unspent — not a full history — and their
+    // confirmations are Bitcoin's own. That is why they get their own small table with
+    // its own header instead of rows inside the Sequentia list, whose types, states and
+    // filters do not apply to them. Both widgets stay hidden until a scan finds outputs.
+    {
+        m_btc_title = new QLabel(tr("Bitcoin (testnet4) — received at your addresses, still unspent"), this);
+        QFont tf = m_btc_title->font();
+        tf.setBold(true);
+        m_btc_title->setFont(tf);
+        m_btc_title->setContentsMargins(0, 8, 0, 2);
+        m_btc_title->setToolTip(tr("Your Sequentia receiving addresses are also Bitcoin testnet4 addresses. This "
+                                   "lists the confirmed, still-unspent Bitcoin outputs found there by scanning the "
+                                   "parent chain: an output disappears once it is spent, and unconfirmed ones do "
+                                   "not appear. Confirmations are Bitcoin confirmations. Spending requires a "
+                                   "Bitcoin node."));
+        m_btc_title->setVisible(false);
+        vlayout->addWidget(m_btc_title);
+
+        m_btc_table = new QTableWidget(0, 5, this);
+        m_btc_table->setHorizontalHeaderLabels({tr("Date"), tr("Address"), tr("Transaction id"), tr("Confirmations"), tr("Amount (tBTC)")});
+        m_btc_table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+        m_btc_table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+        m_btc_table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+        m_btc_table->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+        m_btc_table->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
+        m_btc_table->horizontalHeader()->setHighlightSections(false);
+        m_btc_table->setTextElideMode(Qt::ElideMiddle);
+        m_btc_table->verticalHeader()->setVisible(false);
+        m_btc_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        m_btc_table->setSelectionBehavior(QAbstractItemView::SelectRows);
+        m_btc_table->setSelectionMode(QAbstractItemView::SingleSelection);
+        m_btc_table->setShowGrid(false);
+        m_btc_table->setWordWrap(false);
+        m_btc_table->setAlternatingRowColors(true);
+        // The Sequentia history keeps the room; this table gets a few rows and scrolls.
+        m_btc_table->setMaximumHeight(170);
+        m_btc_table->setVisible(false);
+        m_btc_table->setContextMenuPolicy(Qt::CustomContextMenu);
+        connect(m_btc_table, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
+            const int row = m_btc_table->rowAt(pos.y());
+            if (row < 0 || row >= m_btc_utxos.size()) return;
+            QMenu menu(m_btc_table);
+            menu.addAction(tr("Copy address"), [this, row] { GUIUtil::setClipboard(m_btc_utxos[row].address); });
+            menu.addAction(tr("Copy transaction ID"), [this, row] { GUIUtil::setClipboard(m_btc_utxos[row].txid); });
+            menu.addAction(tr("Copy amount"), [this, row] { GUIUtil::setClipboard(m_btc_utxos[row].amount); });
+            menu.exec(m_btc_table->viewport()->mapToGlobal(pos));
+        });
+        vlayout->addWidget(m_btc_table);
+    }
 }
 
 TransactionView::~TransactionView()
@@ -358,6 +413,47 @@ void TransactionView::changeEvent(QEvent* e)
     }
 
     QWidget::changeEvent(e);
+}
+
+void TransactionView::setParentChainUtxos(const QList<GUIUtil::ParentChainUtxo>& utxos, int parentHeight)
+{
+    Q_UNUSED(parentHeight); // confirmations arrive pre-computed against it
+    if (!m_btc_table) return;
+    m_btc_utxos = utxos;
+
+    m_btc_table->setRowCount(0);
+    for (const GUIUtil::ParentChainUtxo& u : m_btc_utxos) {
+        const int row = m_btc_table->rowCount();
+        m_btc_table->insertRow(row);
+
+        // The scan resolves block times only for the most recent heights; an
+        // unresolved date falls back to the height, which still orders the entry.
+        auto* date = new QTableWidgetItem(u.time > 0
+            ? GUIUtil::dateTimeStr(QDateTime::fromSecsSinceEpoch(u.time))
+            : tr("block %1").arg(u.height));
+        m_btc_table->setItem(row, 0, date);
+
+        auto* addr = new QTableWidgetItem(u.address);
+        addr->setToolTip(u.address);
+        m_btc_table->setItem(row, 1, addr);
+
+        auto* txid = new QTableWidgetItem(u.txid);
+        txid->setToolTip(u.txid + QStringLiteral(":") + QString::number(u.vout));
+        m_btc_table->setItem(row, 2, txid);
+
+        auto* conf = new QTableWidgetItem(u.confirmations > 0 ? QString::number(u.confirmations) : QString::fromUtf8("\xE2\x80\x94")); // "—"
+        conf->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        m_btc_table->setItem(row, 3, conf);
+
+        auto* amt = new QTableWidgetItem(u.amount);
+        amt->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        m_btc_table->setItem(row, 4, amt);
+    }
+    m_btc_table->resizeRowsToContents();
+
+    const bool show = !m_btc_utxos.isEmpty();
+    if (m_btc_title) m_btc_title->setVisible(show);
+    m_btc_table->setVisible(show);
 }
 
 void TransactionView::chooseDate(int idx)

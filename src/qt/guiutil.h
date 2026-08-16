@@ -243,9 +243,22 @@ namespace GUIUtil
     QString PathToQString(const fs::path &path);
 
     /* User-facing label for an asset: the chain-aware ticker (tSEQ/SEQ) for the policy asset,
+       an "Inflation key (X)" label for a reissuance token this wallet can recognise,
        otherwise the asset registry identifier. Avoids the policy asset rendering as "bitcoin"
        (its default pegged-asset name) in selectors and amount labels. */
     QString assetDisplayName(const CAsset& asset);
+
+    /* SEQUENTIA: the reissuance tokens the loaded wallets know about, token -> the asset it
+       mints. Published here rather than kept in a wallet model because assetDisplayName is
+       reached from every table, selector and amount field, most of them with no wallet in
+       hand. Merged across wallets: which asset id is an inflation key is a fact about the
+       chain, not about who is looking. */
+    void rememberReissuanceTokens(const std::map<CAsset, CAsset>& tokens);
+
+    /* Whether this asset is a reissuance token — an inflation key — and, if so, which asset
+       it mints. Only tokens whose issuance a loaded wallet has seen can be recognised: the id
+       alone carries no evidence, since it is a hash over the issuance's entropy. */
+    bool isReissuanceToken(const CAsset& asset, CAsset* issued_asset = nullptr);
 
     /* SEQUENTIA: whether an asset carries a human-readable registry label. False for assets the
        node has never seen registered — their only identity is the 64-hex id, so the UI must show
@@ -275,8 +288,11 @@ namespace GUIUtil
        currency, using the node's cached USD price feed. Empty when unpriced/unavailable or when the
        amount is already in the reference denomination. Display-only — never used for copy/export. */
     QString formatReferenceApprox(const CAsset& asset, const CAmount& amount, const QString& refTicker);
-    /* SEQUENTIA: as above, summed across a multi-asset map (e.g. a total balance). */
-    QString formatMultiAssetReferenceApprox(const CAmountMap& amountmap, const QString& refTicker);
+    /* SEQUENTIA: as above, summed across a multi-asset map (e.g. a total balance).
+       `extraBtcWhole` adds that many whole parent-chain bitcoin (at the feed's bitcoin
+       price, whatever key it uses — tBTC/BTC/WBTC) into the sum — the dual-address tBTC
+       balance is not a CAsset, so it cannot travel inside the map. */
+    QString formatMultiAssetReferenceApprox(const CAmountMap& amountmap, const QString& refTicker, double extraBtcWhole = 0.0);
     /* SEQUENTIA: "≈ <ref>" from an asset LABEL/ticker + a whole-unit amount (for RPC-string tables
        like the assets page, where no CAsset/CAmount is available). Empty if unpriced. */
     QString formatReferenceApproxByLabel(const QString& assetLabel, double wholeUnits, const QString& refTicker);
@@ -302,6 +318,19 @@ namespace GUIUtil
     /* SEQUENTIA: render a reference-currency value as a bare "<number> <REF>" (no "≈"),
        with the decimal count that suits the reference (8 for BTC, else 2/6 by magnitude). */
     QString formatReferenceAmount(double value, const QString& refTicker);
+
+    /* SEQUENTIA: one unspent parent-chain (Bitcoin) output paying a wallet address, as the
+       wallet's getbtcbalance scan reports it. Display-only: the amount stays the decimal
+       string the RPC printed, so nothing is re-rounded on the way to the screen. */
+    struct ParentChainUtxo {
+        QString txid;
+        int vout{0};
+        QString amount;
+        int height{0};
+        int confirmations{0};
+        qint64 time{0}; // block time; 0 when the scan could not resolve it
+        QString address;
+    };
 
     /* SEQUENTIA: the user's chosen reference currency ticker (QSettings), defaulting to USD. */
     QString referenceCurrency();

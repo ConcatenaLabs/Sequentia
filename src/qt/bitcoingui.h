@@ -161,6 +161,11 @@ private:
     QAction* receiveCoinsAction = nullptr;
     QAction* assetsAction = nullptr;
     QAction* stakingAction = nullptr;
+    //! SEQUENTIA: the Supervision tab, and the handle that hides its sidebar button.
+    //! Shown only for a wallet with a supervised asset to operate, which is nearly
+    //! no wallet, so it is hidden until one says otherwise.
+    QAction* supervisionAction = nullptr;
+    QAction* m_supervision_tab_action = nullptr;
     QAction* feePolicyAction = nullptr;
     QAction* priceServerAction = nullptr;
     QProcess* m_price_server = nullptr; // SEQUENTIA: tracked price-server sidecar (killed on exit)
@@ -340,6 +345,10 @@ public Q_SLOTS:
     void gotoAssetsPage();
     /** Switch to the Staking page */
     void gotoStakingPage();
+    /** Switch to the Supervision page */
+    void gotoSupervisionPage();
+    /** Show or hide the Supervision tab, following the wallet on screen */
+    void setSupervisionTabVisible(bool visible);
     /** Open the fee-acceptance policy dialog */
     void gotoFeePolicyDialog();
     /** Launch the bundled price-server sidecar and open its configuration page */

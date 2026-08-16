@@ -54,6 +54,17 @@ DIST_SHARE = \
   $(top_srcdir)/share/genbuild.sh \
   $(top_srcdir)/share/rpcauth
 
+# Freedesktop integration for the GUI. Windows gets its icon from the .rc files
+# and macOS from the .icns in the bundle; on Linux nothing was installed at all,
+# so a desktop environment had no entry to match a window against and fell back
+# to a generic icon. The artwork already exists and is already the Sequentia
+# mark -- only the install was missing.
+DESKTOP_ENTRY = $(top_srcdir)/share/pixmaps/sequentia-qt.desktop
+# Installed under hicolor as sequentia.png, one per size, because the icon NAME a
+# .desktop file refers to is the basename. The sources keep their upstream
+# bitcoinNN.png names, which the Windows and macOS packaging still reference.
+DESKTOP_ICON_SIZES = 16 32 64 128 256
+
 BIN_CHECKS=$(top_srcdir)/contrib/devtools/symbol-check.py \
            $(top_srcdir)/contrib/devtools/security-check.py \
            $(top_srcdir)/contrib/devtools/utils.py
@@ -266,7 +277,26 @@ endif
 
 dist_noinst_SCRIPTS = autogen.sh
 
-EXTRA_DIST = $(DIST_SHARE) test/functional/test_runner.py test/functional test/bitcoin_functional/functional test/bitcoin_functional/functional/test_runner.py test/fuzz $(DIST_CONTRIB) $(WINDOWS_PACKAGING) $(OSX_PACKAGING) $(BIN_CHECKS)
+EXTRA_DIST = $(DIST_SHARE) test/functional/test_runner.py test/functional test/bitcoin_functional/functional test/bitcoin_functional/functional/test_runner.py test/fuzz $(DIST_CONTRIB) $(WINDOWS_PACKAGING) $(OSX_PACKAGING) $(BIN_CHECKS) $(DESKTOP_ENTRY)
+
+if ENABLE_QT
+# Only when the GUI is built: a desktop entry pointing at a binary that was not
+# installed would be worse than none at all.
+desktopdir = $(datadir)/applications
+dist_desktop_DATA = $(DESKTOP_ENTRY)
+
+install-data-local:
+	@for size in $(DESKTOP_ICON_SIZES); do \
+	  dir="$(DESTDIR)$(datadir)/icons/hicolor/$${size}x$${size}/apps"; \
+	  $(MKDIR_P) "$$dir" || exit 1; \
+	  $(INSTALL_DATA) "$(top_srcdir)/share/pixmaps/bitcoin$${size}.png" "$$dir/sequentia.png" || exit 1; \
+	done
+
+uninstall-local:
+	@for size in $(DESKTOP_ICON_SIZES); do \
+	  rm -f "$(DESTDIR)$(datadir)/icons/hicolor/$${size}x$${size}/apps/sequentia.png"; \
+	done
+endif
 
 EXTRA_DIST += \
     test/util/test_runner.py \

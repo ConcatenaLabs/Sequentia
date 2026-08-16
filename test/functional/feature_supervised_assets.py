@@ -38,7 +38,7 @@ Covered, in the order the test runs them:
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.blocktools import COINBASE_MATURITY
 from test_framework.key import ECKey, compute_xonly_pubkey, sign_schnorr
-from test_framework.util import assert_equal, assert_raises_rpc_error, assert_greater_than
+from test_framework.util import assert_equal, assert_raises_rpc_error
 
 from decimal import Decimal
 
@@ -198,7 +198,7 @@ class SupervisedAssetsTest(BitcoinTestFramework):
             "supervision": {"operationalkey": self.op_pub, "recoverykey": self.rec_pub},
         }])[0]
 
-        txid = self.send_raw(node, issued["hex"])
+        self.send_raw(node, issued["hex"])
         self.generate(node, 1)
         self.sync_all()
 
@@ -659,6 +659,23 @@ class SupervisedAssetsTest(BitcoinTestFramework):
         assert_equal(entry[0]["pauseallowed"], True)
         # The wallet built it fully explicit, or consensus would have refused it.
         assert_equal(node.getbalance()[r["asset"]], Decimal("100"))
+
+        # The wallet must READ its own supervised issuance back correctly, not only
+        # write it. A supervised asset id descends from a different entropy, so
+        # anything deriving the ordinary way reports an asset that does not exist:
+        # listissuances named a stranger, and reissueasset could not find the
+        # reissuance token of an asset consensus GUARANTEES has one -- which would
+        # have left freeze-plus-reissue, the whole answer to a seizure order,
+        # impossible from the wallet that issued the asset.
+        issuance = [i for i in node.listissuances() if i["asset"] == r["asset"]]
+        assert_equal(len(issuance), 1)
+        assert_equal(issuance[0]["token"], r["token"])
+        assert_equal(issuance[0]["entropy"], r["entropy"])
+
+        node.reissueasset(r["asset"], 50, self.policy_asset)
+        self.generate(node, 1)
+        self.sync_all()
+        assert_equal(node.getbalance()[r["asset"]], Decimal("150"))
 
         # The refusals the GUI mirrors, so a user is told before the node is.
         assert_raises_rpc_error(-8, "cannot be blinded", node.issueasset, 100, 1, True, None,

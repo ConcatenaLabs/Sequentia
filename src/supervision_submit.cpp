@@ -71,7 +71,7 @@ void SupervisionSubmissionQueue::Update(const CBlock& block, int height)
             // Said out loud rather than dropped quietly: an issuer whose freeze
             // never landed needs to know, and the silent case is exactly the
             // one where a compliance obligation is quietly not being met.
-            LogPrintf("Supervision: private submission %s expired unmined after %d blocks; "
+            LogPrintf("Supervision: private submission %s expired unmined after %d blocks; " /* Continued */
                       "resubmit, and to more producers\n",
                       it->tx->GetHash().ToString(), EXPIRY_BLOCKS);
             it = m_queue.erase(it);

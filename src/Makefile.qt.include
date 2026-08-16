@@ -63,6 +63,7 @@ QT_MOC_CPP = \
   qt/moc_overviewpage.cpp \
   qt/moc_assetspage.cpp \
   qt/moc_stakingpage.cpp \
+  qt/moc_supervisionpage.cpp \
   qt/moc_feepolicydialog.cpp \
   qt/moc_peertablemodel.cpp \
   qt/moc_peertablesortproxy.cpp \
@@ -140,6 +141,7 @@ BITCOIN_QT_H = \
   qt/overviewpage.h \
   qt/assetspage.h \
   qt/stakingpage.h \
+  qt/supervisionpage.h \
   qt/feepolicydialog.h \
   qt/peertablemodel.h \
   qt/peertablesortproxy.h \
@@ -271,6 +273,7 @@ BITCOIN_QT_WALLET_CPP = \
   qt/overviewpage.cpp \
   qt/assetspage.cpp \
   qt/stakingpage.cpp \
+  qt/supervisionpage.cpp \
   qt/feepolicydialog.cpp \
   qt/psbtoperationsdialog.cpp \
   qt/qrimagewidget.cpp \
