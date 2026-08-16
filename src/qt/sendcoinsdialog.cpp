@@ -199,9 +199,15 @@ void SendCoinsDialog::setModel(WalletModel *_model)
 #if (QT_VERSION >= QT_VERSION_CHECK(5, 15, 0))
         connect(ui->groupFee, &QButtonGroup::idClicked, this, &SendCoinsDialog::updateFeeSectionControls);
         connect(ui->groupFee, &QButtonGroup::idClicked, this, &SendCoinsDialog::coinControlUpdateLabels);
+        // Switching back to the recommended fee has to recompute it. Without this
+        // the two radios changed which controls were enabled and nothing else, so
+        // leaving Custom left the custom figure on display as if it were still the
+        // fee being paid.
+        connect(ui->groupFee, &QButtonGroup::idClicked, this, &SendCoinsDialog::updateSmartFeeLabel);
 #else
         connect(ui->groupFee, qOverload<int>(&QButtonGroup::buttonClicked), this, &SendCoinsDialog::updateFeeSectionControls);
         connect(ui->groupFee, qOverload<int>(&QButtonGroup::buttonClicked), this, &SendCoinsDialog::coinControlUpdateLabels);
+        connect(ui->groupFee, qOverload<int>(&QButtonGroup::buttonClicked), this, &SendCoinsDialog::updateSmartFeeLabel);
 #endif
 
         connect(ui->customFee, &BitcoinAmountField::valueChanged, this, &SendCoinsDialog::coinControlUpdateLabels);
