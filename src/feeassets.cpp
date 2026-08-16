@@ -81,7 +81,6 @@ std::vector<FeeAssetInfo> GetAllFeeAssetInfo()
     return out;
 }
 
-namespace {
 //! One whole unit's price, in reference units, expressed the way the whitelist
 //! wants it: scaled by exchange_rate_scale, and carrying a further 10^(8 -
 //! precision) so the node can value a fee without knowing the asset's decimals.
@@ -89,7 +88,7 @@ namespace {
 //! the two must agree or a sidecar taking over would move every fee.
 //! Returns 0 for anything that cannot be represented, so one absurd quote is
 //! dropped on its own rather than poisoning the batch.
-CAmount FeedPriceToRate(double price, uint8_t precision)
+CAmount FeeRateFromUnitPrice(double price, uint8_t precision)
 {
     if (!(price > 0.0)) return 0;
     long double scaled = static_cast<long double>(price) * static_cast<long double>(exchange_rate_scale);
@@ -99,7 +98,15 @@ CAmount FeedPriceToRate(double price, uint8_t precision)
     if (scaled > static_cast<long double>(std::numeric_limits<int64_t>::max())) return 0;
     return static_cast<CAmount>(scaled + 0.5L);
 }
-} // namespace
+
+double UnitPriceFromFeeRate(CAmount rate, uint8_t precision)
+{
+    if (rate <= 0) return 0.0;
+    long double price = static_cast<long double>(rate) / static_cast<long double>(exchange_rate_scale);
+    for (int i = precision; i < 8; ++i) price /= 10.0L;
+    for (int i = 8; i < precision; ++i) price *= 10.0L;
+    return static_cast<double>(price);
+}
 
 int ApplyFeedDerivedFeeRates()
 {
@@ -114,7 +121,7 @@ int ApplyFeedDerivedFeeRates()
     for (const CAsset& asset : gAssetsDir.GetKnownAssets()) {
         const auto it = prices.find(FeeAssetFeedTicker(asset));
         if (it == prices.end()) continue;
-        const CAmount rate = FeedPriceToRate(it->second, gAssetsDir.GetPrecision(asset));
+        const CAmount rate = FeeRateFromUnitPrice(it->second, gAssetsDir.GetPrecision(asset));
         if (rate > 0) derived.emplace(asset, rate);
     }
     const int changed = ExchangeRateMap::GetInstance().MergeFeedRates(derived);
