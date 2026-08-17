@@ -130,10 +130,11 @@ parameter, so C_V(pi) commits to exactly one policy version.
 
 ### 3.2 Predicate: blacklist by outpoint (the freeze mechanism)
 
-**Not in the shipped build.** The first covenant release enforces confinement
-and the whitelist only; `pi` commits the empty hash in the blacklist slot and
-the tooling warns when a snapshot carries blacklist entries. The design below
-is what the slot is reserved for, and the measured budget headroom affords it.
+**Enforced.** Non-membership is proved with an INTERVAL tree rather than
+adjacency over proof indices, which a dense tree cannot express cheaply: a leaf
+is `SHA256(0x02 || lo || hi)` and absence is one ordinary membership proof of
+the bracketing interval plus two strict 256-bit comparisons. See
+`opendamp/SPEC-dmt-v1.md`.
 
 For an input outpoint (t, v), the policy key is k_out = SHA256(t || BE32(v)).
 The issuer commits to a Merkle tree (sparse Merkle tree or Cartesian Merkle
@@ -153,14 +154,16 @@ public, signed, versioned history.
 ### 3.3 Predicate: whitelist by owner key
 
 Membership proofs keyed by stable owner x-only keys, which permits repeated
-transfers among approved holders. In the shipped build the verifier checks
-the **recipients** of regulated outputs; checking the **owners** of regulated
-inputs is specified here and is the first item of remaining work, so be
-precise about the consequence: removing a key from the whitelist stops it
-receiving, not spending, and there is no in-covenant freeze until either the
-input-side check or the blacklist slot lands. The tree is dmt-v1, a sorted
-dense Merkle tree of depth 16, specified byte for byte in
-`opendamp/SPEC-dmt-v1.md`. The list is
+transfers among approved holders. The verifier checks BOTH the owners of
+regulated inputs and the recipients of regulated outputs, so removing a key
+from the whitelist stops that holder spending as well as receiving: that is
+the in-covenant freeze, and it is per holder rather than a halt. A whitelist
+entry is a key plus two height bounds, `send_after` (the lockup, binding an
+input owner) and `recv_after` (the receive window, binding an output
+recipient), committed INSIDE the leaf so the proof that a key is approved also
+proves which windows bind it and a holder cannot shorten their own lockup. The
+tree is dmt-v1, a sorted dense Merkle tree of depth 16, specified byte for byte
+in `opendamp/SPEC-dmt-v1.md`. The list is
 compiled from SeqPal ID eligibility stamps by the registrar: enforcement is
 on-chain, vetting stays exactly where it is in the cosign model. Newly
 verified investors become spendable-to when the issuer publishes the next
@@ -182,8 +185,9 @@ standard reduction.
 
 ### 3.6 What stays off the chain
 
-Velocity, holder caps, and any rule requiring global chain state stay
-registrar-maintained: they are approximated by policy updates at issuer
+Every predicate this document specifies is enforced on chain; what follows is
+what it deliberately does not specify. Velocity, holder caps, and any rule
+requiring global chain state stay registrar-maintained: they are approximated by policy updates at issuer
 cadence, not enforced per transfer. Offering documents for an OpenDAMP asset
 must state which rules are covenant-enforced and which are registrar
 commitments. Issuers needing the full stateful rule set per transfer elect
