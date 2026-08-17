@@ -83,6 +83,26 @@ network — old nodes reject blocks containing the newly valid transactions — 
 so still needs an all-at-once cutover; that is a deployment question, not an
 activation-height one. Say which shape a change is in its commit message.
 
+**Every consensus change bumps the version, in the same pull request.** A
+relaxation is the case most likely to skip this, because it needs no activation
+gate and reads like an ordinary merge, and skipping it has already cost us a
+forked node: the supervised-asset zero-supply relaxation (`d49f5c0c`, 2026-08-16)
+shipped under the version string of builds that reject the blocks it makes valid,
+those blocks were produced seven hours later, and a peer running a legitimately
+built earlier binary of the *same reported version* forked off at height 96277
+and sat there for a day because nothing in `getpeerinfo` could distinguish the
+two. So:
+
+- bump `_CLIENT_VERSION_MINOR` in `configure.ac` in the same PR as any change to
+  consensus validation, relaxations included, and say in the commit message which
+  blocks become valid or invalid;
+- do not produce a transaction that exercises a new rule on a live chain until
+  every node reports the bumped version;
+- confirm the cutover behaviourally, not by version alone: a peer that has not
+  upgraded shows `synced_headers` frozen one block below the first block using the
+  rule while its byte counters keep climbing. `contrib/sequentia/peer-stall-check.sh`
+  reports exactly that and belongs in the cutover checklist.
+
 **Whatever the shape, a fresh chain gets it from genesis.** Regtest, a future
 testnet and mainnet must never have to be told about a rule the live testnet
 already has. That is what makes a new chain reproducible from this source tree
