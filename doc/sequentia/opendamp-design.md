@@ -1,6 +1,12 @@
 # OpenDAMP: network-enforced restricted assets on Sequentia
 
-Status: M0 (protocol specification). Nothing in this document is deployed.
+Status: M0 (this specification), M1 (the covenants) and M3 (the offline
+transfer tool) are implemented in the `opendamp` crate of the openamp
+repository and proven on regtest against the node; M2 (the policy library and
+snapshot service) is implemented in `openampd`. What the shipped covenants
+enforce, and what they deliberately do not, is stated in `opendamp/STATUS.md`
+and summarised in section 3.6 below. Nothing is deployed on the live testnet
+beyond the pilot recorded in section 8.
 Companion to `openamp-design.md`, which specifies the co-signed enforcement
 model this protocol coexists with. OpenDAMP is the Sequentia adaptation of
 DAMP, the Decentralized Asset Management Protocol proposed for Liquid by
@@ -124,6 +130,11 @@ parameter, so C_V(pi) commits to exactly one policy version.
 
 ### 3.2 Predicate: blacklist by outpoint (the freeze mechanism)
 
+**Not in the shipped build.** The first covenant release enforces confinement
+and the whitelist only; `pi` commits the empty hash in the blacklist slot and
+the tooling warns when a snapshot carries blacklist entries. The design below
+is what the slot is reserved for, and the measured budget headroom affords it.
+
 For an input outpoint (t, v), the policy key is k_out = SHA256(t || BE32(v)).
 The issuer commits to a Merkle tree (sparse Merkle tree or Cartesian Merkle
 tree; the concrete tree is fixed by the snapshot `tree` field) containing
@@ -142,8 +153,14 @@ public, signed, versioned history.
 ### 3.3 Predicate: whitelist by owner key
 
 Membership proofs keyed by stable owner x-only keys, which permits repeated
-transfers among approved holders. The verifier checks the owners of
-regulated inputs and the recipients of regulated outputs. The list is
+transfers among approved holders. In the shipped build the verifier checks
+the **recipients** of regulated outputs; checking the **owners** of regulated
+inputs is specified here and is the first item of remaining work, so be
+precise about the consequence: removing a key from the whitelist stops it
+receiving, not spending, and there is no in-covenant freeze until either the
+input-side check or the blacklist slot lands. The tree is dmt-v1, a sorted
+dense Merkle tree of depth 16, specified byte for byte in
+`opendamp/SPEC-dmt-v1.md`. The list is
 compiled from SeqPal ID eligibility stamps by the registrar: enforcement is
 on-chain, vetting stays exactly where it is in the cosign model. Newly
 verified investors become spendable-to when the issuer publishes the next
@@ -206,13 +223,31 @@ The registry contract's `openamp` block gains:
     "enforcement": "damp",
     "verifier_asset": <asset id of V>,
     "verifier_amount": q,
-    "issuer_update_key": <x-only I>,
-    "genesis_policy": <pi_0 hex>,
-    "genesis_snapshot_hash": <sha256 of snapshot seq 0>
+    "issuer_update_key": <x-only I>
 
 As with every contract field, this is committed into the issuance entropy:
-the asset id proves its own enforcement model, its verifier asset, and its
-genesis policy. Enforcement can never be retrofitted in either direction.
+the asset id proves its own enforcement model, its verifier asset, and the
+issuer key that may update the policy. Enforcement can never be retrofitted
+in either direction.
+
+**The genesis policy is deliberately NOT in the contract.** An earlier draft
+committed `genesis_policy` and `genesis_snapshot_hash` here, which cannot
+work: pi commits to asset A's id (section 3.1), and A's id commits to its
+contract, so a contract carrying pi_0 would have to contain a hash of itself.
+The setup order resolves it without a circular commitment:
+
+1. Issue V (q units) to an ordinary wallet output. V's id depends on nothing
+   about A.
+2. Issue A with the block above naming V, minting straight into user
+   covenants.
+3. Compute pi_0 from A's now-known id and the genesis predicate roots.
+4. Move the q units of V into C_V(pi_0). Only from this point can any
+   transfer of A settle, so there is no window in which A moves unpoliced.
+5. Publish snapshot seq 0.
+
+The genesis policy is instead authenticated the same way every later policy
+is: by the snapshot's issuer signature and the transparency log, with the
+verifier output on chain being the binding fact a holder verifies against.
 
 ## 6. Issuer operations
 
