@@ -3,8 +3,9 @@
 """Market-data API for the Sequentia open-fee-market testnet.
 
 Serves REAL market prices (USD) for the tokenized real-world assets, polled from Yahoo Finance, in
-the JSON shape the price server jsonapi source expects. USD is the reference unit: USDX 1:1 USD,
-EURX=EUR/USD, GOLD/SILVR/OILX=gold/silver/WTI spot, tBTC=BTC/USD. Only tSEQ (SEQ) is mocked: its
+the JSON shape the price server jsonapi source expects. USD is the reference unit: USDX and USDC
+1:1 USD, EURX and EURC=EUR/USD, GOLD/SILVR/OILX=gold/silver/WTI spot, tBTC=BTC/USD. Only tSEQ (SEQ)
+is mocked: its
 planned day-1 price (0.375 USD) with a bounded +/-10% fluctuation. Issuer offering-reference prices
 are seeded via POST /seed (static). Endpoints: GET /prices,/price/<T>,/healthz ; POST /seed.
 """
@@ -17,9 +18,15 @@ import urllib.request
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-REAL = {"EURX":"EURUSD=X", "GOLD":"GC=F", "SILVR":"SI=F", "OILX":"CL=F", "tBTC":"BTC-USD"}
+# EURC is a euro stablecoin, so it takes the same live EUR/USD rate EURX does;
+# USDC is a dollar one and is pinned to 1.00 below exactly as USDX is. They are
+# priced here rather than seeded through /seed because a seeded price carries no
+# market cap or volume, and the price server admits an asset only if it clears
+# those thresholds -- a bridged stablecoin with no price is an asset nobody can
+# pay a fee in, which is the whole point of the open fee market.
+REAL = {"EURX":"EURUSD=X", "EURC":"EURUSD=X", "GOLD":"GC=F", "SILVR":"SI=F", "OILX":"CL=F", "tBTC":"BTC-USD"}
 SEQ_DAY1 = 0.375
-SEED0 = {"EURX":1.08,"GOLD":2350.0,"SILVR":29.0,"OILX":78.0,"tBTC":64000.0,"SEQ":SEQ_DAY1,"USDX":1.00}
+SEED0 = {"EURX":1.08,"EURC":1.08,"GOLD":2350.0,"SILVR":29.0,"OILX":78.0,"tBTC":64000.0,"SEQ":SEQ_DAY1,"USDX":1.00,"USDC":1.00}
 _lock = threading.Lock()
 _state = {t:{"price":p,"market_cap":random.uniform(5e8,5e9),"volume_24h":random.uniform(5e6,5e8)} for t,p in SEED0.items()}
 _static = set()
@@ -68,6 +75,7 @@ def _refresh(tick):
             except Exception as e:
                 print("feed: %s (%s) failed: %s"%(t,sym,e), flush=True)
         _set("USDX", 1.00)
+        _set("USDC", 1.00)
         with _lock:
             cur = _state.get("SEQ",{}).get("price", SEQ_DAY1)
         cur = cur*(1+random.uniform(-0.02,0.02))
