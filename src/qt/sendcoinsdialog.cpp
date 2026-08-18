@@ -38,10 +38,15 @@
 
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <fstream>
 #include <memory>
 
+#include <QDoubleValidator>
 #include <QFontMetrics>
+#include <QGridLayout>
+#include <QLabel>
+#include <QLineEdit>
 #include <QScrollBar>
 #include <QSettings>
 #include <QShowEvent>
@@ -222,6 +227,7 @@ void SendCoinsDialog::setModel(WalletModel *_model)
             ui->customFee->setValue(requiredFee);
         }
         ui->customFee->setSingleStep(requiredFee);
+        buildFeeGrid();
         updateFeeSectionControls();
         updateSmartFeeLabel();
 
@@ -1194,6 +1200,196 @@ CAsset SendCoinsDialog::selectedFeeAsset() const
     return sel.IsNull() ? ::policyAsset : sel;
 }
 
+namespace {
+//! 10^precision, the atoms in one whole unit of an asset.
+double AtomsPerUnit(uint8_t precision)
+{
+    double f = 1.0;
+    for (uint8_t i = 0; i < precision; ++i) f *= 10.0;
+    return f;
+}
+//! Enough decimals to show the asset's smallest unit, and no more.
+QString FormatUnits(double units, uint8_t precision)
+{
+    QString s = QString::number(units, 'f', precision);
+    if (s.contains('.')) { while (s.endsWith('0')) s.chop(1); if (s.endsWith('.')) s.chop(1); }
+    return s;
+}
+} // namespace
+
+void SendCoinsDialog::buildFeeGrid()
+{
+    // Four cells, one number. A fee is a rate on the space a transaction takes,
+    // but what anyone wants to know is what THIS transaction costs, and neither
+    // figure means much in an asset whose unit price they do not carry in their
+    // head -- so both are shown, in the asset that pays and in the reference
+    // currency, and under Custom any of the four can be the one you type into.
+    auto* grid = new QGridLayout();
+    grid->setContentsMargins(0, 0, 0, 6);
+    grid->setHorizontalSpacing(12);
+
+    m_fee_grid_asset_header = new QLabel(this);
+    auto* ref_header = new QLabel(GUIUtil::referenceCurrency(), this);
+    QFont hf = m_fee_grid_asset_header->font();
+    hf.setBold(true);
+    m_fee_grid_asset_header->setFont(hf);
+    ref_header->setFont(hf);
+    grid->addWidget(m_fee_grid_asset_header, 0, 1);
+    grid->addWidget(ref_header, 0, 2);
+
+    auto cell = [this](QGridLayout* g, int row, const QString& label) {
+        g->addWidget(new QLabel(label, this), row, 0);
+        auto* a = new QLineEdit(this);
+        auto* r = new QLineEdit(this);
+        for (QLineEdit* e : {a, r}) {
+            e->setAlignment(Qt::AlignRight);
+            auto* v = new QDoubleValidator(0.0, 1e12, 12, e);
+            v->setNotation(QDoubleValidator::StandardNotation);
+            e->setValidator(v);
+            connect(e, &QLineEdit::textEdited, this, [this, e](const QString&) { onFeeCellEdited(e); });
+        }
+        g->addWidget(a, row, 1);
+        g->addWidget(r, row, 2);
+        return std::make_pair(a, r);
+    };
+
+    auto total = cell(grid, 1, tr("Total for this transaction"));
+    m_fee_total_asset = total.first; m_fee_total_ref = total.second;
+    auto perkvb = cell(grid, 2, tr("Per 1000 bytes"));
+    m_fee_kvb_asset = perkvb.first; m_fee_kvb_ref = perkvb.second;
+    grid->setColumnStretch(3, 1);
+
+    m_fee_note = new QLabel(this);
+    m_fee_note->setWordWrap(true);
+    m_fee_note->setStyleSheet(QStringLiteral("color:#888;"));
+
+    // Above the radio buttons, so the numbers come before the controls that
+    // change them rather than after.
+    if (auto* box = qobject_cast<QVBoxLayout*>(ui->frameFeeSelection->layout())) {
+        box->insertLayout(0, grid);
+        box->insertWidget(1, m_fee_note);
+    }
+
+    // Sizing a transaction runs coin selection, so it is not something to do on
+    // every keystroke; it settles after the typing stops.
+    m_size_timer = new QTimer(this);
+    m_size_timer->setSingleShot(true);
+    m_size_timer->setInterval(400);
+    connect(m_size_timer, &QTimer::timeout, this, &SendCoinsDialog::refreshTxSize);
+}
+
+void SendCoinsDialog::refreshTxSize()
+{
+    // The only honest size is the one the wallet would really build, so ask it
+    // rather than assume an input count. It can fail for ordinary reasons -- no
+    // recipient yet, not enough funds -- and a failure just means no total.
+    const unsigned int previous = m_tx_vsize;
+    m_tx_vsize = 0;
+    if (model && ui->entries->count() > 0) {
+        QList<SendAssetsRecipient> recipients;
+        bool valid = true;
+        for (int i = 0; i < ui->entries->count(); ++i) {
+            auto* entry = qobject_cast<SendCoinsEntry*>(ui->entries->itemAt(i)->widget());
+            if (!entry || entry->isHidden()) continue;
+            // Read the fields, never validate() them: validate() paints an empty
+            // or half-typed field red, and this runs while the user is still
+            // typing. Sizing a transaction must not tell them they got it wrong.
+            const SendAssetsRecipient rcp = entry->getValue();
+            if (rcp.address.isEmpty() || !model->validateAddress(rcp.address) || rcp.asset_amount <= 0) {
+                valid = false;
+                break;
+            }
+            recipients.append(rcp);
+        }
+        if (valid && !recipients.isEmpty()) {
+            WalletModelTransaction probe(recipients);
+            std::unique_ptr<wallet::BlindDetails> blind;
+            if (g_con_elementsmode) blind = std::make_unique<wallet::BlindDetails>();
+            updateCoinControlState();
+            if (model->prepareTransaction(probe, blind.get(), *m_coin_control).status == WalletModel::OK &&
+                probe.getWtx()) {
+                m_tx_vsize = GetVirtualTransactionSize(*probe.getWtx());
+            }
+        }
+    }
+    if (m_tx_vsize != previous) updateSmartFeeLabel();
+}
+
+void SendCoinsDialog::updateFeeGrid(const CAmount& asset_atoms_per_kvb)
+{
+    if (!m_fee_kvb_asset || !model) return;
+    const CAsset asset = selectedFeeAsset();
+    const FeeAssetInfo info = model->node().getFeeAssetInfo(asset);
+    const QString ref = GUIUtil::referenceCurrency();
+    const double factor = AtomsPerUnit(info.precision);
+    const double unit_price = UnitPriceFromFeeRate(info.rate, info.precision);
+
+    m_fee_grid_asset_header->setText(GUIUtil::assetDisplayName(asset));
+
+    m_fee_grid_updating = true;
+    m_fee_kvb_asset->setText(FormatUnits(asset_atoms_per_kvb / factor, info.precision));
+    m_fee_kvb_ref->setText(unit_price > 0.0
+        ? QString::number(asset_atoms_per_kvb / factor * unit_price, 'f', 8)
+        : QString());
+    if (m_tx_vsize > 0) {
+        const double total_atoms = std::ceil(static_cast<double>(asset_atoms_per_kvb) * m_tx_vsize / 1000.0);
+        m_fee_total_asset->setText(FormatUnits(total_atoms / factor, info.precision));
+        m_fee_total_ref->setText(unit_price > 0.0
+            ? QString::number(total_atoms / factor * unit_price, 'f', 8)
+            : QString());
+    } else {
+        m_fee_total_asset->setText(QStringLiteral("—"));
+        m_fee_total_ref->setText(QStringLiteral("—"));
+    }
+    const bool custom = ui->radioCustomFee->isChecked();
+    for (QLineEdit* e : {m_fee_total_asset, m_fee_total_ref, m_fee_kvb_asset, m_fee_kvb_ref}) {
+        e->setReadOnly(!custom);
+    }
+    const bool sizable = m_tx_vsize > 0;
+    m_fee_total_asset->setEnabled(custom && sizable);
+    m_fee_total_ref->setEnabled(custom && sizable && unit_price > 0.0);
+    m_fee_kvb_ref->setEnabled(custom && unit_price > 0.0);
+    m_fee_grid_updating = false;
+}
+
+void SendCoinsDialog::onFeeCellEdited(QLineEdit* source)
+{
+    if (m_fee_grid_updating || !model || !ui->radioCustomFee->isChecked()) return;
+    const CAsset asset = selectedFeeAsset();
+    const FeeAssetInfo info = model->node().getFeeAssetInfo(asset);
+    if (!info.accepted) return;
+    const double factor = AtomsPerUnit(info.precision);
+    const double unit_price = UnitPriceFromFeeRate(info.rate, info.precision);
+
+    bool ok = false;
+    const double typed = source->text().trimmed().toDouble(&ok);
+    if (!ok || typed < 0.0) return;
+
+    // Everything is derived from one figure: atoms of the fee asset per 1000
+    // bytes. Whichever cell was typed into is converted back to that, and the
+    // wallet's own field -- which is a rate in the reference unit -- follows.
+    double atoms_per_kvb = 0.0;
+    if (source == m_fee_kvb_asset) {
+        atoms_per_kvb = typed * factor;
+    } else if (source == m_fee_kvb_ref) {
+        if (!(unit_price > 0.0)) return;
+        atoms_per_kvb = typed / unit_price * factor;
+    } else if (source == m_fee_total_asset) {
+        if (m_tx_vsize == 0) return;
+        atoms_per_kvb = typed * factor * 1000.0 / m_tx_vsize;
+    } else if (source == m_fee_total_ref) {
+        if (m_tx_vsize == 0 || !(unit_price > 0.0)) return;
+        atoms_per_kvb = typed / unit_price * factor * 1000.0 / m_tx_vsize;
+    }
+    if (!(atoms_per_kvb >= 0.0)) return;
+
+    const CAmount reference_per_kvb =
+        static_cast<CAmount>(std::llround(atoms_per_kvb * static_cast<double>(info.rate) / static_cast<double>(exchange_rate_scale)));
+    ui->customFee->setValue(std::max<CAmount>(0, reference_per_kvb));
+    updateCoinControlState();
+    updateFeeMinimizedLabel();
+}
+
 QString SendCoinsDialog::formatFeeRate(const CAmount& fee_asset_atoms_per_kvb) const
 {
     // The figure arrives already denominated in the selected fee asset:
@@ -1329,6 +1525,74 @@ void SendCoinsDialog::updateSmartFeeLabel()
     CFeeRate feeRate = CFeeRate(model->wallet().getMinimumFee(1000, *m_coin_control, &returned_target, &reason));
 
     ui->labelSmartFee->setText(formatFeeRate(feeRate.GetFeePerK()));
+    // Kept populated because the collapsed summary reads it, but not shown: the
+    // grid above says the same rate, in both currencies and with the total.
+    ui->labelSmartFee->setVisible(false);
+    // Under Custom the grid must show what the user set, not what would have been
+    // recommended; m_coin_control->m_feerate was cleared above for the estimate.
+    const CAmount shown_rate = ui->radioCustomFee->isChecked()
+        ? CFeeRate(ui->customFee->value()).GetFee(1000, selectedFeeAsset())
+        : feeRate.GetFeePerK();
+    updateFeeGrid(shown_rate);
+
+    if (m_fee_note) {
+        const MempoolCongestion c = model->node().getMempoolCongestion();
+        const CAsset asset = selectedFeeAsset();
+        const FeeAssetInfo info = model->node().getFeeAssetInfo(asset);
+        const QString name = GUIUtil::assetDisplayName(asset);
+        auto in_asset = [&](CAmount reference_per_kvb) {
+            return formatFeeRate(CFeeRate(reference_per_kvb).GetFee(1000, asset));
+        };
+        QStringList notes;
+        const bool have_estimate = (reason != FeeReason::FALLBACK);
+        if (ui->radioCustomFee->isChecked()) {
+            const CAmount custom = ui->customFee->value();
+            if (custom < c.relay_min) {
+                notes << tr("Below %1 the network will not relay this transaction at all.").arg(in_asset(c.relay_min));
+            } else if (c.next_block_full && custom < c.next_block_min) {
+                notes << tr("This clears the relay minimum, but the next block is taking nothing below %1. "
+                            "Yours will wait until the queue clears.").arg(in_asset(c.next_block_min));
+            }
+        } else if (!have_estimate && !c.next_block_full) {
+            notes << tr("Blocks are not congested, and there is no recent fee history to estimate from. "
+                        "This is the least the network will relay, and the confirmation target cannot "
+                        "change it until transactions start competing for space.");
+        } else if (!have_estimate && c.next_block_full) {
+            notes << tr("Blocks are full, but there is no fee history to estimate from yet. Transactions "
+                        "making the next block are paying at least %1 — below that, yours waits.").arg(in_asset(c.next_block_min));
+        } else if (have_estimate && !c.next_block_full) {
+            notes << tr("Blocks are not congested, so a nearer target buys little: at this rate the next "
+                        "block has room for you either way.");
+        } else {
+            notes << tr("Blocks are full, with %1 of transactions waiting. A nearer target pays more, "
+                        "which is what puts you ahead of them.")
+                        .arg(tr("%1 blocks' worth").arg(QString::number(c.backlog_blocks, 'f', 1)));
+        }
+        if (c.mempool_min > c.relay_min) {
+            notes << tr("This node's queue is full and it is dropping the cheapest transactions. %1 is "
+                        "the least it will hold now.").arg(in_asset(c.mempool_min));
+        }
+        // An asset worth thousands per unit cannot be divided finely enough to
+        // pay a small fee: its smallest indivisible piece already exceeds what
+        // the network is asking, and the difference is pure overpayment.
+        if (info.accepted) {
+            const CAmount floor_in_asset = CFeeRate(c.relay_min).GetFee(1000, asset);
+            const double floor_units = static_cast<double>(floor_in_asset) / AtomsPerUnit(info.precision);
+            const double floor_value = floor_units * UnitPriceFromFeeRate(info.rate, info.precision);
+            const double network_min = static_cast<double>(c.relay_min) / static_cast<double>(exchange_rate_scale);
+            if (network_min > 0.0 && floor_value > network_min * 3.0) {
+                notes << tr("Paying in %1 costs at least %2 per 1000 bytes — about %3 times the network "
+                            "minimum, because one unit of %1 cannot be divided any further. A less "
+                            "valuable asset pays closer to the true cost.")
+                            .arg(name, in_asset(c.relay_min), QString::number(floor_value / network_min, 'f', 0));
+            }
+        }
+        if (m_tx_vsize == 0) {
+            notes << tr("The total appears once there is a recipient and an amount to size the transaction with.");
+        }
+        m_fee_note->setText(notes.join(QStringLiteral(" ")));
+        m_fee_note->setVisible(!notes.isEmpty());
+    }
 
     if (reason == FeeReason::FALLBACK) {
         ui->labelSmartFee2->show(); // (Smart fee not initialized yet. This usually takes a few blocks...)
@@ -1505,6 +1769,10 @@ void SendCoinsDialog::coinControlUpdateLabels()
 
     if (!model || !model->getOptionsModel())
         return;
+
+    // The recipients changed, so the transaction is a different size and the
+    // totals no longer follow from it. Sized once the typing settles.
+    if (m_size_timer) m_size_timer->start();
 
     updateCoinControlState();
 

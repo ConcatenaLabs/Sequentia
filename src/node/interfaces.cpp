@@ -263,6 +263,11 @@ public:
     CFeeRate getDustRelayFee() override { return ::dustRelayFee; }
     FeeAssetInfo getFeeAssetInfo(const CAsset& asset) override { return ::GetFeeAssetInfo(asset); }
     std::vector<FeeAssetInfo> listFeeAssetInfo() override { return ::GetAllFeeAssetInfo(); }
+    MempoolCongestion getMempoolCongestion() override
+    {
+        if (!m_context->mempool) return MempoolCongestion{};
+        return ::GetMempoolCongestion(*m_context->mempool);
+    }
     bool getAnchorNotWatchingBitcoin() override { return g_con_bitcoin_anchor && !g_validate_anchor; }
     interfaces::AnchorTipState getAnchorTipState() override
     {
