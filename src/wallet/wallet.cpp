@@ -3139,6 +3139,24 @@ std::shared_ptr<CWallet> CWallet::Create(WalletContext& context, const std::stri
         }
 
         walletInstance->m_default_max_tx_fee = max_fee.value();
+    } else if (g_con_any_asset_fees) {
+        // SEQUENTIA: no default ceiling where fees are paid in any asset.
+        //
+        // The inherited default is COIN/10, and on Bitcoin that is 0.1 BTC: a
+        // sanity stop so far above any real fee that reaching it means something
+        // has gone wrong. Here the comparison happens in reference units -- see
+        // CreateTransactionInternal, which converts the fee through the exchange
+        // rate before testing it -- and a reference unit is a dollar. The same
+        // constant therefore stops every fee above TEN CENTS: not a sanity stop
+        // but a cap below what a congested chain can legitimately ask, refusing
+        // honest transactions with a message naming Bitcoin's flags.
+        //
+        // Rather than pick a new number to be wrong later, there is no default
+        // ceiling: what a fee is worth paying is the payer's judgement, and an
+        // operator who wants a limit still sets -maxtxfee. The wallet warns
+        // instead of refusing -- see SendCoinsDialog::send() -- so an accident
+        // is caught while the transaction can still be abandoned.
+        walletInstance->m_default_max_tx_fee = MAX_MONEY;
     }
 
     if (args.IsArgSet("-consolidatefeerate")) {
