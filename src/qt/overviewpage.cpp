@@ -37,6 +37,7 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QStatusTipEvent>
+#include <QMenu>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTimer>
@@ -276,6 +277,38 @@ OverviewPage::OverviewPage(const PlatformStyle *platformStyle, QWidget *parent) 
         m_asset_table->setTextElideMode(Qt::ElideMiddle);
         m_asset_table->verticalHeader()->setVisible(false);
         m_asset_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        // An asset id is 64 characters that have to be retyped exactly to be used
+        // anywhere else, and the column elides them. Read-only was right; unreachable
+        // was not.
+        m_asset_table->setContextMenuPolicy(Qt::CustomContextMenu);
+        connect(m_asset_table, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
+            QTableWidgetItem* cell = m_asset_table->itemAt(pos);
+            if (!cell) return;
+            const int row = cell->row();
+            QTableWidgetItem* id_item = m_asset_table->item(row, COL_ID);
+            QTableWidgetItem* name_item = m_asset_table->item(row, COL_ASSET);
+            QMenu menu(m_asset_table);
+            // The id is what a command line or another wallet needs, so it leads.
+            if (id_item) {
+                QAction* copy_id = menu.addAction(tr("Copy asset id"));
+                connect(copy_id, &QAction::triggered, this, [id_item] {
+                    GUIUtil::setClipboard(id_item->text());
+                });
+            }
+            if (name_item) {
+                QAction* copy_name = menu.addAction(tr("Copy asset name"));
+                connect(copy_name, &QAction::triggered, this, [name_item] {
+                    GUIUtil::setClipboard(name_item->text());
+                });
+            }
+            if (cell != id_item && cell != name_item && !cell->text().isEmpty()) {
+                QAction* copy_cell = menu.addAction(tr("Copy amount"));
+                connect(copy_cell, &QAction::triggered, this, [cell] {
+                    GUIUtil::setClipboard(cell->text());
+                });
+            }
+            if (!menu.isEmpty()) menu.exec(m_asset_table->viewport()->mapToGlobal(pos));
+        });
         m_asset_table->setSelectionBehavior(QAbstractItemView::SelectRows);
         m_asset_table->setSelectionMode(QAbstractItemView::NoSelection);
         m_asset_table->setFocusPolicy(Qt::NoFocus);
