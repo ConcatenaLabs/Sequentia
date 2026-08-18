@@ -134,6 +134,9 @@ private:
     //! The note about the CHOSEN ASSET, which belongs beside the choice rather
     //! than at the bottom with the notes about estimation.
     QLabel* m_fee_asset_note{nullptr};
+    //! The cell currently being typed into, which the grid must not rewrite
+    //! underneath the cursor while it restates the other three.
+    QLineEdit* m_fee_cell_editing{nullptr};
     /** Guards the four cells against each other while one is recomputing the rest. */
     bool m_fee_grid_updating{false};
     /** vsize of the transaction as currently composed, 0 when it cannot be sized
