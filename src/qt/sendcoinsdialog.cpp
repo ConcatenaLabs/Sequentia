@@ -1306,6 +1306,15 @@ void SendCoinsDialog::updateFeeAssetWarning()
 void SendCoinsDialog::updateNumberOfBlocks(int count, const QDateTime& blockDate, double nVerificationProgress, bool headers, SynchronizationState sync_state) {
     if (sync_state == SynchronizationState::POST_INIT) {
         updateSmartFeeLabel();
+        // The fee-asset warning is judged from the asset registry and the price
+        // feed, and both land seconds AFTER this dialog is built: when the selector
+        // is first filled every asset still looks unregistered and unpriced, so the
+        // warning gets written for a state that is already obsolete. Nothing signals
+        // the registry poll, and otherwise this is only recomputed when the user
+        // touches the selector or Replace-By-Fee -- so left alone it goes on
+        // accusing a perfectly registered asset for the whole session. A new block
+        // already brings us here, so re-judge it.
+        updateFeeAssetWarning();
     }
 }
 

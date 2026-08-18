@@ -896,34 +896,17 @@ Note:  Since the fee is calculated on a per-byte basis, a fee rate of "100 atoms
                 </widget>
                </item>
                <item>
-                <layout class="QHBoxLayout" name="horizontalLayoutFee8">
-                 <item>
-                  <widget class="QLabel" name="labelCustomFeeWarning">
-                   <property name="enabled">
-                    <bool>true</bool>
-                   </property>
-                   <property name="wordWrap">
-                    <bool>true</bool>
-                   </property>
-                   <property name="text">
-                    <string>The lowest fee the network will relay. It confirms fine while blocks have room to spare, but once more payments compete for space than a block can hold, the cheapest ones wait — possibly forever. Raise it if your payment is time-sensitive.</string>
-                   </property>
-                  </widget>
-                 </item>
-                 <item>
-                  <spacer name="horizontalSpacer_2">
-                   <property name="orientation">
-                    <enum>Qt::Horizontal</enum>
-                   </property>
-                   <property name="sizeHint" stdset="0">
-                    <size>
-                     <width>1</width>
-                     <height>1</height>
-                    </size>
-                   </property>
-                  </spacer>
-                 </item>
-                </layout>
+                <widget class="QLabel" name="labelCustomFeeWarning">
+                 <property name="enabled">
+                  <bool>true</bool>
+                 </property>
+                 <property name="wordWrap">
+                  <bool>true</bool>
+                 </property>
+                 <property name="text">
+                  <string>The lowest fee the network will relay. It confirms fine while blocks have room to spare, but once more payments compete for space than a block can hold, the cheapest ones wait — possibly forever. Raise it if your payment is time-sensitive.</string>
+                 </property>
+                </widget>
                </item>
               </layout>
              </item>
