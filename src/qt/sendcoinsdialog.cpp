@@ -55,7 +55,15 @@
 using wallet::CCoinControl;
 using wallet::DEFAULT_PAY_TX_FEE;
 
-static constexpr std::array confTargets{2, 4, 6, 12, 24, 48, 144, 504, 1008};
+// Round minutes on a one-minute chain, not Bitcoin's block counts. The old set
+// ran to 1008 blocks -- sixteen hours here -- which is not a wait anyone picks
+// for a payment.
+static constexpr std::array confTargets{1, 2, 5, 10, 30, 60};
+
+//! Above this many reference units (dollars) a fee is read back to the sender
+//! before it goes. Not a limit -- there is none -- just the point past which an
+//! amount is far likelier to be a slip than an intention.
+static constexpr double HIGH_FEE_WARNING_VALUE = 30.0;
 int getConfTargetForIndex(int index) {
     if (index+1 > static_cast<int>(confTargets.size())) {
         return confTargets.back();
@@ -301,10 +309,9 @@ void SendCoinsDialog::setModel(WalletModel *_model)
             settings.setValue("nConfTarget", nConfirmTarget);
             settings.remove("nSmartFeeSliderPosition");
         }
-        if (settings.value("nConfTarget").toInt() == 0)
-            ui->confTargetSelector->setCurrentIndex(getIndexForConfTarget(model->wallet().getConfirmTarget()));
-        else
-            ui->confTargetSelector->setCurrentIndex(getIndexForConfTarget(settings.value("nConfTarget").toInt()));
+        // Always the nearest target. A remembered one is a decision taken in some
+        // earlier session about some other payment, silently applied to this one.
+        ui->confTargetSelector->setCurrentIndex(0);
     }
 }
 
@@ -576,6 +583,31 @@ bool SendCoinsDialog::PrepareSendText(QString& question_string, QString& informa
             question_string.append(tr("Not signalling Replace-By-Fee, BIP-125."));
         }
         question_string.append("</span>");
+
+        // Nothing refuses a large fee any more, so nothing catches a slipped
+        // decimal either. This is what replaces the ceiling: the amount said
+        // plainly, in the currency the sender thinks in, while the transaction
+        // can still be abandoned. A fee is unrecoverable once it confirms --
+        // it is paid to whoever produces the block, not held anywhere.
+        const CAsset fee_asset = selectedFeeAsset();
+        const FeeAssetInfo fee_info = model->node().getFeeAssetInfo(fee_asset);
+        if (fee_info.has_market_price) {
+            double factor = 1.0;
+            for (uint8_t i = 0; i < fee_info.precision; ++i) factor *= 10.0;
+            const double fee_value = static_cast<double>(txFee) / factor * fee_info.market_price;
+            if (fee_value > HIGH_FEE_WARNING_VALUE) {
+                question_string.append("<hr /><span style='color:#ff6b6b; font-weight:bold;'>");
+                question_string.append(tr("This fee is unusually high: %1 %2.")
+                                           .arg(QString::number(fee_value, 'f', 2),
+                                                GUIUtil::referenceCurrency()));
+                question_string.append("</span><br /><span style='font-size:10pt;'>");
+                question_string.append(tr("Nothing prevents you from paying it, but very few "
+                                          "transactions are worth this much. Check the fee before "
+                                          "sending: it goes to whoever produces the block and "
+                                          "cannot be recovered once confirmed."));
+                question_string.append("</span>");
+            }
+        }
     }
 
     // add total amount in all subdivision units
@@ -1084,6 +1116,13 @@ void SendCoinsDialog::updateFeeSectionControls()
     ui->labelFeeEstimation      ->setEnabled(ui->radioSmartFee->isChecked());
     ui->labelCustomPerKilobyte  ->setEnabled(ui->radioCustomFee->isChecked());
     ui->customFee               ->setEnabled(ui->radioCustomFee->isChecked());
+    // Hidden, not removed. It says the same thing as the grid's "Per 1000 bytes"
+    // row in a second place and a second notation, and two editable copies of one
+    // number invite the question of which one is real. It stays in the form and
+    // keeps holding the value, because it IS the rate the wallet spends -- the
+    // grid writes through to it -- it just no longer asks to be typed into.
+    ui->labelCustomPerKilobyte  ->setVisible(false);
+    ui->customFee               ->setVisible(false);
     // Hidden rather than greyed out. It is a wrapped paragraph in a narrow column,
     // so it costs six or seven lines of height whether or not it applies, and that
     // height is what pushes the Send button off the bottom of the panel on a screen
@@ -1263,11 +1302,26 @@ void SendCoinsDialog::buildFeeGrid()
     m_fee_note->setWordWrap(true);
     m_fee_note->setStyleSheet(QStringLiteral("color:#888;"));
 
-    // Above the radio buttons, so the numbers come before the controls that
-    // change them rather than after.
+    // What paying in THIS asset costs is a fact about the asset just picked, so it
+    // belongs under the picker. Left at the bottom it read as a footnote to the
+    // numbers instead of the reason for them.
+    m_fee_asset_note = new QLabel(this);
+    m_fee_asset_note->setWordWrap(true);
+    m_fee_asset_note->setStyleSheet(QStringLiteral("color:#888;"));
+    m_fee_asset_note->setVisible(false);
+
+    // Order in the box: the asset that pays, then Recommended/Custom, then the
+    // numbers those two produce, then the notes about them. The selector used to
+    // sit on the Custom rate row, which read as though choosing an asset were a
+    // sub-option of Custom. It never was -- the fee asset applies to the
+    // recommended rate just as much, and the code has always allowed changing it
+    // there -- so the row it sat on was making a claim the behaviour denied.
     if (auto* box = qobject_cast<QVBoxLayout*>(ui->frameFeeSelection->layout())) {
-        box->insertLayout(0, grid);
-        box->insertWidget(1, m_fee_note);
+        box->insertWidget(1, m_fee_asset_note);
+        int at = box->indexOf(ui->optInRBF);
+        if (at < 0) at = box->count();
+        box->insertLayout(at, grid);
+        box->insertWidget(at + 1, m_fee_note);
     }
 
     // Sizing a transaction runs coin selection, so it is not something to do on
@@ -1322,7 +1376,13 @@ void SendCoinsDialog::updateFeeGrid(const CAmount& asset_atoms_per_kvb)
     const FeeAssetInfo info = model->node().getFeeAssetInfo(asset);
     const QString ref = GUIUtil::referenceCurrency();
     const double factor = AtomsPerUnit(info.precision);
-    const double unit_price = UnitPriceFromFeeRate(info.rate, info.precision);
+    // The reference column is a market valuation, so it comes from the price feed
+    // and not from the whitelist rate. The two normally agree, since whitelist
+    // rates are derived from the feed -- but an asset an operator listed by hand
+    // has a rate and no quote, and reading the rate there printed a USD figure
+    // directly beside the warning saying this asset has no published price. No
+    // quote, no column: an empty cell is the honest answer.
+    const double unit_price = info.has_market_price ? info.market_price : 0.0;
 
     m_fee_grid_asset_header->setText(GUIUtil::assetDisplayName(asset));
 
@@ -1349,6 +1409,17 @@ void SendCoinsDialog::updateFeeGrid(const CAmount& asset_atoms_per_kvb)
     m_fee_total_asset->setEnabled(custom && sizable);
     m_fee_total_ref->setEnabled(custom && sizable && unit_price > 0.0);
     m_fee_kvb_ref->setEnabled(custom && unit_price > 0.0);
+    // Under Recommended these are a readout; under Custom they are the input, and
+    // nothing about a grey box says "type here". Colour only the cells that will
+    // actually accept typing: an unpriced reference column and a total with no
+    // transaction to size are read-only even under Custom, and highlighting those
+    // would promise an edit that does nothing.
+    for (QLineEdit* e : {m_fee_total_asset, m_fee_total_ref, m_fee_kvb_asset, m_fee_kvb_ref}) {
+        const bool editable = custom && e->isEnabled() && !e->isReadOnly();
+        e->setStyleSheet(editable
+            ? QStringLiteral("QLineEdit { color:#ffb84d; border:1px solid #ffb84d; }")
+            : QString());
+    }
     m_fee_grid_updating = false;
 }
 
@@ -1359,7 +1430,9 @@ void SendCoinsDialog::onFeeCellEdited(QLineEdit* source)
     const FeeAssetInfo info = model->node().getFeeAssetInfo(asset);
     if (!info.accepted) return;
     const double factor = AtomsPerUnit(info.precision);
-    const double unit_price = UnitPriceFromFeeRate(info.rate, info.precision);
+    // Same source as the display: whatever is typed in the reference column is
+    // converted back with the price it was shown with, or the round trip lies.
+    const double unit_price = info.has_market_price ? info.market_price : 0.0;
 
     bool ok = false;
     const double typed = source->text().trimmed().toDouble(&ok);
@@ -1544,6 +1617,7 @@ void SendCoinsDialog::updateSmartFeeLabel()
             return formatFeeRate(CFeeRate(reference_per_kvb).GetFee(1000, asset));
         };
         QStringList notes;
+        QString asset_note;
         const bool have_estimate = (reason != FeeReason::FALLBACK);
         if (ui->radioCustomFee->isChecked()) {
             const CAmount custom = ui->customFee->value();
@@ -1581,10 +1655,10 @@ void SendCoinsDialog::updateSmartFeeLabel()
             const double floor_value = floor_units * UnitPriceFromFeeRate(info.rate, info.precision);
             const double network_min = static_cast<double>(c.relay_min) / static_cast<double>(exchange_rate_scale);
             if (network_min > 0.0 && floor_value > network_min * 3.0) {
-                notes << tr("Paying in %1 costs at least %2 per 1000 bytes — about %3 times the network "
-                            "minimum, because one unit of %1 cannot be divided any further. A less "
-                            "valuable asset pays closer to the true cost.")
-                            .arg(name, in_asset(c.relay_min), QString::number(floor_value / network_min, 'f', 0));
+                asset_note = tr("Paying in %1 costs at least %2 per 1000 bytes — about %3 times the network "
+                                "minimum, because one unit of %1 cannot be divided any further. A less "
+                                "valuable asset pays closer to the true cost.")
+                                .arg(name, in_asset(c.relay_min), QString::number(floor_value / network_min, 'f', 0));
             }
         }
         if (m_tx_vsize == 0) {
@@ -1592,12 +1666,25 @@ void SendCoinsDialog::updateSmartFeeLabel()
         }
         m_fee_note->setText(notes.join(QStringLiteral(" ")));
         m_fee_note->setVisible(!notes.isEmpty());
+        if (m_fee_asset_note) {
+            m_fee_asset_note->setText(asset_note);
+            m_fee_asset_note->setVisible(!asset_note.isEmpty());
+        }
     }
 
     if (reason == FeeReason::FALLBACK) {
-        ui->labelSmartFee2->show(); // (Smart fee not initialized yet. This usually takes a few blocks...)
+        // "Fee estimation is currently not possible" is Bitcoin Core's line for a
+        // node that has not yet gathered fee history. Here it is not a fault and
+        // not temporary: estimation needs transactions competing for space, and on
+        // a chain whose blocks have room it will never initialise, so "this usually
+        // takes a few blocks" promises something that will not arrive. The grey
+        // note below states the actual position -- no congestion, no history, this
+        // is the relay minimum -- and states it in full, so the alarm above it was
+        // both redundant and wrong.
+        ui->labelSmartFee2->setText(tr("(no fee history to estimate from — this is the network minimum)"));
+        ui->labelSmartFee2->show();
         ui->labelFeeEstimation->setText("");
-        ui->fallbackFeeWarningLabel->setVisible(true);
+        ui->fallbackFeeWarningLabel->setVisible(false);
         int lightness = ui->fallbackFeeWarningLabel->palette().color(QPalette::WindowText).lightness();
         QColor warning_colour(255 - (lightness / 5), 176 - (lightness / 3), 48 - (lightness / 14));
         ui->fallbackFeeWarningLabel->setStyleSheet("QLabel { color: " + warning_colour.name() + "; }");
