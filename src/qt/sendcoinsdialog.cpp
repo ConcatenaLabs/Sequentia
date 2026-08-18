@@ -153,9 +153,19 @@ SendCoinsDialog::SendCoinsDialog(const PlatformStyle *_platformStyle, QWidget *p
         settings.setValue("nTransactionFee", (qint64)DEFAULT_PAY_TX_FEE);
     ui->groupFee->setId(ui->radioSmartFee, 0);
     ui->groupFee->setId(ui->radioCustomFee, 1);
-    ui->groupFee->button((int)std::max(0, std::min(1, settings.value("nFeeRadio").toInt())))->setChecked(true);
+    // Always Recommended, and never a custom rate carried over from last time.
+    //
+    // A custom fee is a decision about ONE payment: this asset, this size, this
+    // urgency. Restoring it presents an old decision as if it were this payment's,
+    // and here the number is not even in a familiar unit -- fee rates are held in
+    // the reference unit, so a rate typed while paying in one asset reappears
+    // beside another, with a value that has nothing to do with the earlier intent.
+    // A leftover of a few hundred reference units per 1000 bytes is then already
+    // selected, and Custom already checked, before the payment is even entered.
+    // The recommended rate is the honest starting point every time.
+    ui->groupFee->button(0)->setChecked(true);
     ui->customFee->SetAllowEmpty(false);
-    ui->customFee->setValue(settings.value("nTransactionFee").toLongLong());
+    ui->customFee->setValue(DEFAULT_PAY_TX_FEE);
     minimizeFeeSection(settings.value("fFeeSectionMinimized").toBool());
 
     GUIUtil::ExceptionSafeConnect(ui->sendButton, &QPushButton::clicked, this, &SendCoinsDialog::sendButtonClicked);
@@ -560,6 +570,7 @@ bool SendCoinsDialog::PrepareSendText(QString& question_string, QString& informa
         question_string.append("</span>");
     }
 
+    const CAsset fee_asset = selectedFeeAsset();
     if(txFee > 0)
     {
         // append fee string if a fee is required
@@ -571,8 +582,21 @@ bool SendCoinsDialog::PrepareSendText(QString& question_string, QString& informa
         question_string.append(" (" + QString::number((double)m_current_transaction->getTransactionSize() / 1000) + " kB): ");
 
         // append transaction fee value
+        //
+        // formatHtmlWithUnit() prints the POLICY asset, whatever the amount really
+        // is, because upstream there is only one thing a fee can be paid in. Here
+        // there is not: this figure is denominated in the fee asset, and printing
+        // "0.00706025 tSEQ" for a fee of 0.00706025 GOLD names an asset the sender
+        // is not spending and a value off by three orders of magnitude.
         question_string.append("<span style='color:#ff6b6b; font-weight:bold;'>");
-        question_string.append(BitcoinUnits::formatHtmlWithUnit(model->getOptionsModel()->getDisplayUnit(), txFee));
+        if (fee_asset == ::policyAsset) {
+            question_string.append(BitcoinUnits::formatHtmlWithUnit(model->getOptionsModel()->getDisplayUnit(), txFee));
+        } else {
+            CAmountMap fee_only;
+            fee_only[fee_asset] = txFee;
+            question_string.append(GUIUtil::formatMultiAssetAmount(fee_only, -1 /*bitcoin unit, hide*/,
+                                                                  BitcoinUnits::SeparatorStyle::STANDARD, ";<br />"));
+        }
         question_string.append("</span><br />");
 
         // append RBF message according to transaction's signalling
@@ -589,7 +613,6 @@ bool SendCoinsDialog::PrepareSendText(QString& question_string, QString& informa
         // plainly, in the currency the sender thinks in, while the transaction
         // can still be abandoned. A fee is unrecoverable once it confirms --
         // it is paid to whoever produces the block, not held anywhere.
-        const CAsset fee_asset = selectedFeeAsset();
         const FeeAssetInfo fee_info = model->node().getFeeAssetInfo(fee_asset);
         if (fee_info.has_market_price) {
             double factor = 1.0;
@@ -613,20 +636,39 @@ bool SendCoinsDialog::PrepareSendText(QString& question_string, QString& informa
     // add total amount in all subdivision units
     question_string.append("<hr />");
     CAmountMap totalAmount = m_current_transaction->getTotalTransactionAmount();
-    totalAmount[Params().GetConsensus().pegged_asset] += txFee;
-    QStringList alternativeUnits;
-    for (const BitcoinUnits::Unit u : BitcoinUnits::availableUnits())
-    {
-        if(u != model->getOptionsModel()->getDisplayUnit())
-            alternativeUnits.append(BitcoinUnits::formatHtmlWithUnit(u, totalAmount[Params().GetConsensus().pegged_asset]));
-    }
-    question_string.append(QString("<b>%1</b>: <b>%2</b>").arg(tr("Total Amount"))
-        .arg(BitcoinUnits::formatHtmlWithUnit(model->getOptionsModel()->getDisplayUnit(), totalAmount[Params().GetConsensus().pegged_asset])));
-    question_string.append(QString("<br /><span style='font-size:10pt; font-weight:normal;'>(=%1)</span>")
-        .arg(alternativeUnits.join(" " + tr("or") + " ")));
-    totalAmount.erase(Params().GetConsensus().pegged_asset);
-    if (!!totalAmount) {
-        question_string.append(" " + tr("and") + "<br />" + GUIUtil::formatMultiAssetAmount(totalAmount, -1 /*bitcoin unit, hide*/, BitcoinUnits::SeparatorStyle::STANDARD, ";<br />"));
+    // The fee belongs to the asset that pays it. Adding it to the policy asset's
+    // total was harmless while every fee was in the policy asset; with an open fee
+    // market it inflates a total the sender never spends and hides the one they do.
+    totalAmount[fee_asset] += txFee;
+    // The policy asset leads only when the transaction actually moves some.
+    //
+    // Upstream it always does, so the total is written as "so much BTC" with the
+    // other assets appended after an "and". Here a transaction can involve none of
+    // it at all -- sending an asset and paying the fee in a second one -- and the
+    // fixed shape then opened with "0.00000000 tSEQ", followed by three
+    // subdivisions of that same zero, before finally naming the two amounts the
+    // sender is really parting with. Four lines of nothing ahead of the answer.
+    const CAsset& policy = Params().GetConsensus().pegged_asset;
+    const CAmount policy_total = totalAmount[policy];
+    if (policy_total != 0) {
+        QStringList alternativeUnits;
+        for (const BitcoinUnits::Unit u : BitcoinUnits::availableUnits())
+        {
+            if(u != model->getOptionsModel()->getDisplayUnit())
+                alternativeUnits.append(BitcoinUnits::formatHtmlWithUnit(u, policy_total));
+        }
+        question_string.append(QString("<b>%1</b>: <b>%2</b>").arg(tr("Total Amount"))
+            .arg(BitcoinUnits::formatHtmlWithUnit(model->getOptionsModel()->getDisplayUnit(), policy_total)));
+        question_string.append(QString("<br /><span style='font-size:10pt; font-weight:normal;'>(=%1)</span>")
+            .arg(alternativeUnits.join(" " + tr("or") + " ")));
+        totalAmount.erase(policy);
+        if (!!totalAmount) {
+            question_string.append(" " + tr("and") + "<br />" + GUIUtil::formatMultiAssetAmount(totalAmount, -1 /*bitcoin unit, hide*/, BitcoinUnits::SeparatorStyle::STANDARD, ";<br />"));
+        }
+    } else {
+        totalAmount.erase(policy);
+        question_string.append(QString("<b>%1</b>: <b>%2</b>").arg(tr("Total Amount"))
+            .arg(GUIUtil::formatMultiAssetAmount(totalAmount, -1 /*bitcoin unit, hide*/, BitcoinUnits::SeparatorStyle::STANDARD, ";<br />")));
     }
 
     if (formatted.size() > 1) {
@@ -834,6 +876,13 @@ void SendCoinsDialog::clear()
     // whatever the user sends next.
     m_fee_asset_user_choice = false;
     updateDefaultFeeAsset();
+
+    // And on the fee itself, for the same reason: the custom rate that suited the
+    // payment just sent is not a proposal for the next one.
+    ui->radioSmartFee->setChecked(true);
+    ui->customFee->setValue(DEFAULT_PAY_TX_FEE);
+    updateFeeSectionControls();
+    updateSmartFeeLabel();
 
     updateTabsAndLabels();
 }
@@ -1387,19 +1436,25 @@ void SendCoinsDialog::updateFeeGrid(const CAmount& asset_atoms_per_kvb)
     m_fee_grid_asset_header->setText(GUIUtil::assetDisplayName(asset));
 
     m_fee_grid_updating = true;
-    m_fee_kvb_asset->setText(FormatUnits(asset_atoms_per_kvb / factor, info.precision));
-    m_fee_kvb_ref->setText(unit_price > 0.0
+    // The four cells are one number said four ways, so a redraw restates all of
+    // them -- except the one being typed into, whose text is the user's and whose
+    // cursor would jump to the end on every keystroke if we rewrote it.
+    auto put = [this](QLineEdit* cell, const QString& text) {
+        if (cell != m_fee_cell_editing) cell->setText(text);
+    };
+    put(m_fee_kvb_asset, FormatUnits(asset_atoms_per_kvb / factor, info.precision));
+    put(m_fee_kvb_ref, unit_price > 0.0
         ? QString::number(asset_atoms_per_kvb / factor * unit_price, 'f', 8)
         : QString());
     if (m_tx_vsize > 0) {
         const double total_atoms = std::ceil(static_cast<double>(asset_atoms_per_kvb) * m_tx_vsize / 1000.0);
-        m_fee_total_asset->setText(FormatUnits(total_atoms / factor, info.precision));
-        m_fee_total_ref->setText(unit_price > 0.0
+        put(m_fee_total_asset, FormatUnits(total_atoms / factor, info.precision));
+        put(m_fee_total_ref, unit_price > 0.0
             ? QString::number(total_atoms / factor * unit_price, 'f', 8)
             : QString());
     } else {
-        m_fee_total_asset->setText(QStringLiteral("—"));
-        m_fee_total_ref->setText(QStringLiteral("—"));
+        put(m_fee_total_asset, QStringLiteral("—"));
+        put(m_fee_total_ref, QStringLiteral("—"));
     }
     const bool custom = ui->radioCustomFee->isChecked();
     for (QLineEdit* e : {m_fee_total_asset, m_fee_total_ref, m_fee_kvb_asset, m_fee_kvb_ref}) {
@@ -1461,6 +1516,18 @@ void SendCoinsDialog::onFeeCellEdited(QLineEdit* source)
     ui->customFee->setValue(std::max<CAmount>(0, reference_per_kvb));
     updateCoinControlState();
     updateFeeMinimizedLabel();
+
+    // Redraw the other three now. Nothing else will: the only path back to the
+    // grid runs through refreshTxSize(), which recomputes only when the
+    // TRANSACTION SIZE changed -- and typing a fee does not change it. So the
+    // grid kept whatever it last held, and refreshed only when some unrelated
+    // event moved the size, by which time it was restating an earlier figure.
+    // That is what made the table read one edit behind and its two columns
+    // disagree: not the arithmetic, which was right, but that nobody asked for
+    // it to be run.
+    m_fee_cell_editing = source;
+    updateSmartFeeLabel();
+    m_fee_cell_editing = nullptr;
 }
 
 QString SendCoinsDialog::formatFeeRate(const CAmount& fee_asset_atoms_per_kvb) const
