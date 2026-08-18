@@ -262,6 +262,19 @@ void SupervisionPage::setModel(WalletModel* model)
     // asset looks like from here.
     refreshAssets();
     connect(m_wallet_model, &WalletModel::assetTypesChanged, this, &SupervisionPage::refreshAssets);
+    // ...and on every balance update, which is the only trigger that fires for a
+    // wallet that ALREADY holds what it supervises.
+    //
+    // The check above runs once, when the wallet is attached, and at that moment
+    // getsupervisedassets has nothing to say yet. After that assetTypesChanged is
+    // the only way back here, and it fires when the SET of assets held changes --
+    // never for a wallet that opened already holding its supervised asset and did
+    // not move it. So the tab stayed hidden for exactly the operator it exists
+    // for, and hidden means the page is never shown, which means showEvent cannot
+    // rescue it either: the condition that reveals the tab could only be rechecked
+    // by the page that the tab reveals.
+    connect(m_wallet_model, &WalletModel::balanceChanged, this,
+            [this](const interfaces::WalletBalances&) { refreshAssets(); });
 }
 
 std::string SupervisionPage::walletUri() const
@@ -416,9 +429,13 @@ void SupervisionPage::onAssetChanged()
             .arg(role, key.isEmpty() ? tr("unknown") : key,
                  ours ? tr("this wallet can sign") : tr("signed elsewhere (HSM, FROST, an offline key)"));
     };
-    m_keys_summary->setText(keyLine(tr("Operational key"), asset->operational_key, asset->wallet_has_operational) +
+    // "public" is part of the name, not a note: these are the x-only PUBLIC keys
+    // committed in the asset id and published in the issuance declaration output,
+    // readable from the chain by anyone. Labelling them as bare "keys" invited the
+    // reasonable question of why a wallet displays keys in the clear.
+    m_keys_summary->setText(keyLine(tr("Operational public key"), asset->operational_key, asset->wallet_has_operational) +
                             QStringLiteral("<br>") +
-                            keyLine(tr("Recovery key"), asset->recovery_key, asset->wallet_has_recovery));
+                            keyLine(tr("Recovery public key"), asset->recovery_key, asset->wallet_has_recovery));
 
     m_freeze_button->setEnabled(true);
     m_rotate_button->setEnabled(true);
