@@ -227,6 +227,9 @@ public:
     //! SEQUENTIA: the same for every asset the node knows anything about.
     virtual std::vector<FeeAssetInfo> listFeeAssetInfo() = 0;
 
+    //! SEQUENTIA: how hard the next block is to get into, for the fee panel.
+    virtual MempoolCongestion getMempoolCongestion() = 0;
+
     //! Execute rpc command.
     virtual UniValue executeRpc(const std::string& command, const UniValue& params, const std::string& uri) = 0;
 

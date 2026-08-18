@@ -2134,66 +2134,30 @@ static RPCHelpMan getmempoolcongestion()
     }
 
     const CTxMemPool& mempool = EnsureAnyMemPool(request.context);
-    // Mirror BlockAssembler's own clamp, so the projection is about the block
-    // THIS node would build rather than a nominal one.
-    const Consensus::Params& consensus = Params().GetConsensus();
-    const uint32_t chain_max_weight = consensus.nMaxBlockWeight ? consensus.nMaxBlockWeight : MAX_BLOCK_WEIGHT;
-    const size_t max_weight = std::max<size_t>(4000, std::min<size_t>(chain_max_weight - 4000,
-                                  gArgs.GetIntArg("-blockmaxweight", DEFAULT_BLOCK_MAX_WEIGHT)));
+    // Same computation the wallet UI runs, from the same function: a fee slider
+    // and an RPC disagreeing about what the next block costs would be worse than
+    // either being wrong on its own.
+    const MempoolCongestion c = GetMempoolCongestion(mempool);
 
     UniValue ret(UniValue::VOBJ);
-    LOCK(mempool.cs);
-
-    const CompareTxMemPoolEntryByConfidentialFee cmp;
-    size_t total_weight = 0;
-    size_t next_weight = 0;
-    int64_t next_txs = 0;
-    bool full = false;
-    // The rate of the cheapest transaction that still fits. The index is sorted
-    // descending, so that is simply the last one taken.
-    CAmount cut_atoms_per_kvb = 0;
-    for (auto it = mempool.mapTx.get<confidential_score>().begin();
-         it != mempool.mapTx.get<confidential_score>().end(); ++it) {
-        const size_t weight = WITNESS_SCALE_FACTOR * it->GetDiscountTxSize();
-        total_weight += weight;
-        if (full) continue; // keep going: the rest is backlog, and we want its size
-        // BlockAssembler starts its count at COINBASE_RESERVED_WEIGHT rather than
-        // at zero, so a projection that starts at zero promises room for a whole
-        // coinbase more than the block will actually have.
-        if (node::COINBASE_RESERVED_WEIGHT + next_weight + weight >= max_weight) { full = true; continue; }
-        next_weight += weight;
-        ++next_txs;
-        double mod_fee = 0.0, size = 0.0;
-        cmp.GetModFeeAndSize(*it, mod_fee, size);
-        if (size > 0.0) cut_atoms_per_kvb = static_cast<CAmount>(mod_fee * 1000.0 / size);
-    }
-
-    const size_t maxmempool = gArgs.GetIntArg("-maxmempool", DEFAULT_MAX_MEMPOOL_SIZE) * 1000000;
-    const CFeeRate mempool_min{std::max(mempool.GetMinFee(maxmempool), ::minRelayTxFee)};
-    // Not-full means nothing is competing, so the floor is all a transaction has
-    // to clear. Reporting a cut rate there would invent a competition that is not
-    // happening and quietly overcharge every wallet that trusts this number.
-    const CAmount min_atoms_per_kvb = full ? std::max(cut_atoms_per_kvb, mempool_min.GetFeePerK())
-                                           : mempool_min.GetFeePerK();
-
-    ret.pushKV("size", (int64_t)mempool.size());
-    ret.pushKV("bytes", (int64_t)mempool.GetTotalTxSize());
-    ret.pushKV("backlog_blocks", UniValue(static_cast<double>(total_weight) / static_cast<double>(max_weight)));
-    ret.pushKV("next_block_txs", next_txs);
-    ret.pushKV("next_block_weight", (int64_t)next_weight);
-    ret.pushKV("next_block_full", full);
-    ret.pushKV("next_block_min_feerate", ValueFromAmount(min_atoms_per_kvb));
-    ret.pushKV("next_block_min_atoms_per_kvb", min_atoms_per_kvb);
-    ret.pushKV("mempoolminfee", ValueFromAmount(mempool_min.GetFeePerK()));
-    ret.pushKV("minrelaytxfee", ValueFromAmount(::minRelayTxFee.GetFeePerK()));
+    ret.pushKV("size", c.size);
+    ret.pushKV("bytes", c.backlog_vsize);
+    ret.pushKV("backlog_blocks", UniValue(c.backlog_blocks));
+    ret.pushKV("next_block_txs", c.next_block_txs);
+    ret.pushKV("next_block_weight", c.next_block_weight);
+    ret.pushKV("next_block_full", c.next_block_full);
+    ret.pushKV("next_block_min_feerate", ValueFromAmount(c.next_block_min));
+    ret.pushKV("next_block_min_atoms_per_kvb", c.next_block_min);
+    ret.pushKV("mempoolminfee", ValueFromAmount(c.mempool_min));
+    ret.pushKV("minrelaytxfee", ValueFromAmount(c.relay_min));
 
     if (fee_asset) {
         const FeeAssetInfo info = GetFeeAssetInfo(*fee_asset);
         ret.pushKV("asset", fee_asset->GetHex());
         ret.pushKV("accepted", info.accepted);
         if (info.accepted) {
-            ret.pushKV("next_block_min_asset_atoms_per_kvb", CFeeRate(min_atoms_per_kvb).GetFee(1000, *fee_asset));
-            ret.pushKV("mempoolminfee_asset_atoms_per_kvb", mempool_min.GetFee(1000, *fee_asset));
+            ret.pushKV("next_block_min_asset_atoms_per_kvb", CFeeRate(c.next_block_min).GetFee(1000, *fee_asset));
+            ret.pushKV("mempoolminfee_asset_atoms_per_kvb", CFeeRate(c.mempool_min).GetFee(1000, *fee_asset));
         }
     }
     return ret;

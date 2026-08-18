@@ -13,6 +13,10 @@
 #include <QTimer>
 
 class ClientModel;
+QT_BEGIN_NAMESPACE
+class QLabel;
+class QLineEdit;
+QT_END_NAMESPACE
 class PlatformStyle;
 class SendCoinsEntry;
 class SendCoinsRecipient;
@@ -117,6 +121,32 @@ private:
     /** Balances as of the last balanceChanged, so ranking the holdings above does
         not recompute them on every keystroke. */
     interfaces::WalletBalances m_cached_balances;
+
+    /** SEQUENTIA fee grid: what this costs, in the asset that pays and in the
+        reference currency, per transaction and per 1000 bytes. Four views of one
+        number — edit any of them under Custom and the other three follow. */
+    QLineEdit* m_fee_total_asset{nullptr};
+    QLineEdit* m_fee_total_ref{nullptr};
+    QLineEdit* m_fee_kvb_asset{nullptr};
+    QLineEdit* m_fee_kvb_ref{nullptr};
+    QLabel* m_fee_grid_asset_header{nullptr};
+    QLabel* m_fee_note{nullptr};
+    /** Guards the four cells against each other while one is recomputing the rest. */
+    bool m_fee_grid_updating{false};
+    /** vsize of the transaction as currently composed, 0 when it cannot be sized
+        yet (no recipient, no amount, or the wallet cannot fund it). Without it
+        there is no honest total, only a rate. */
+    unsigned int m_tx_vsize{0};
+    QTimer* m_size_timer{nullptr};
+
+    void buildFeeGrid();
+    /** Fill the grid and the note from the current rate, asset and congestion. */
+    void updateFeeGrid(const CAmount& asset_atoms_per_kvb);
+    /** One of the four cells was edited: derive the rate and push it back. */
+    void onFeeCellEdited(QLineEdit* source);
+    /** Size the transaction as composed, so the totals can be real rather than
+        assumed. Debounced: it runs coin selection. */
+    void refreshTxSize();
     /** SEQUENTIA: render a fee rate the way a user reads money — the amount in the
         asset that will actually pay it, plus its worth in the reference currency
         and the unit price behind that. The argument is already denominated in the

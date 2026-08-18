@@ -8,6 +8,10 @@
 #include <exchangerates.h>
 #include <logging.h>
 #include <referenceprices.h>
+#include <node/miner.h>
+#include <policy/policy.h>
+#include <policy/settings.h>
+#include <validation.h>
 #include <scheduler.h>
 #include <txmempool.h>
 #include <util/strencodings.h>
@@ -78,6 +82,57 @@ std::vector<FeeAssetInfo> GetAllFeeAssetInfo()
     std::sort(out.begin(), out.end(), [](const FeeAssetInfo& a, const FeeAssetInfo& b) {
         return a.identifier < b.identifier;
     });
+    return out;
+}
+
+MempoolCongestion GetMempoolCongestion(const CTxMemPool& mempool)
+{
+    // Mirror BlockAssembler's own clamp, so the projection is about the block
+    // THIS node would build rather than a nominal one.
+    const Consensus::Params& consensus = Params().GetConsensus();
+    const uint32_t chain_max_weight = consensus.nMaxBlockWeight ? consensus.nMaxBlockWeight : MAX_BLOCK_WEIGHT;
+    const size_t max_weight = std::max<size_t>(4000, std::min<size_t>(chain_max_weight - 4000,
+                                  gArgs.GetIntArg("-blockmaxweight", DEFAULT_BLOCK_MAX_WEIGHT)));
+
+    MempoolCongestion out;
+    LOCK(mempool.cs);
+
+    const CompareTxMemPoolEntryByConfidentialFee cmp;
+    size_t total_weight = 0;
+    size_t next_weight = 0;
+    bool full = false;
+    // The rate of the cheapest transaction that still fits. The index is sorted
+    // descending, so that is simply the last one taken.
+    CAmount cut = 0;
+    for (auto it = mempool.mapTx.get<confidential_score>().begin();
+         it != mempool.mapTx.get<confidential_score>().end(); ++it) {
+        const size_t weight = WITNESS_SCALE_FACTOR * it->GetDiscountTxSize();
+        total_weight += weight;
+        if (full) continue; // keep going: the rest is backlog, and we want its size
+        // BlockAssembler starts its count at COINBASE_RESERVED_WEIGHT rather than
+        // at zero, so a projection that starts at zero promises room for a whole
+        // coinbase more than the block will actually have.
+        if (node::COINBASE_RESERVED_WEIGHT + next_weight + weight >= max_weight) { full = true; continue; }
+        next_weight += weight;
+        ++out.next_block_txs;
+        double mod_fee = 0.0, size = 0.0;
+        cmp.GetModFeeAndSize(*it, mod_fee, size);
+        if (size > 0.0) cut = static_cast<CAmount>(mod_fee * 1000.0 / size);
+    }
+
+    const size_t maxmempool = gArgs.GetIntArg("-maxmempool", DEFAULT_MAX_MEMPOOL_SIZE) * 1000000;
+    const CFeeRate mempool_min{std::max(mempool.GetMinFee(maxmempool), ::minRelayTxFee)};
+
+    out.size = (int64_t)mempool.size();
+    out.backlog_vsize = (int64_t)mempool.GetTotalTxSize();
+    out.backlog_blocks = static_cast<double>(total_weight) / static_cast<double>(max_weight);
+    out.next_block_weight = (int64_t)next_weight;
+    out.next_block_full = full;
+    out.mempool_min = mempool_min.GetFeePerK();
+    out.relay_min = ::minRelayTxFee.GetFeePerK();
+    // Not-full means nothing is competing, so the floor is all a transaction has
+    // to clear.
+    out.next_block_min = full ? std::max(cut, out.mempool_min) : out.mempool_min;
     return out;
 }
 

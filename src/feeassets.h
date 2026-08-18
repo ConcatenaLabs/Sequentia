@@ -78,6 +78,34 @@ FeeAssetInfo GetFeeAssetInfo(const CAsset& asset);
  *  whitelisted. Sorted by identifier. */
 std::vector<FeeAssetInfo> GetAllFeeAssetInfo();
 
+/** SEQUENTIA: how hard the next block is to get into. Same figures as the
+ *  getmempoolcongestion RPC, computed by the same code, so the wallet UI and an
+ *  external caller cannot disagree about what a transaction has to pay. */
+struct MempoolCongestion {
+    //! Transactions waiting, and the weight they occupy.
+    int64_t size{0};
+    int64_t backlog_vsize{0};
+    //! The queue in blocks: below 1 everything waiting fits in the next block.
+    double backlog_blocks{0.0};
+    int64_t next_block_txs{0};
+    int64_t next_block_weight{0};
+    //! The projected block ran out of room, so there is a real auction to price.
+    bool next_block_full{false};
+    //! Reference fee atoms per kvB a transaction must pay to make the next block:
+    //! the cheapest rate that still fits, or the relay floor when nothing is
+    //! competing. Quoting a cut where there is no competition would invent an
+    //! auction and overcharge every wallet that trusted it.
+    CAmount next_block_min{0};
+    //! The floors, also in reference fee atoms per kvB.
+    CAmount mempool_min{0};
+    CAmount relay_min{0};
+};
+
+/** Walk the mempool in the order the block assembler uses and report the above.
+ *  Approximate by design: it ignores sigop limits and the package rebuilding the
+ *  real assembler does. A fee slider's input, not a block template. */
+MempoolCongestion GetMempoolCongestion(const CTxMemPool& mempool);
+
 /** SEQUENTIA: the whitelist rate for an asset worth `price` reference units (USD,
  *  as the feed quotes) per whole unit. Rates are an internal unit -- atoms per
  *  reference fee atom, carrying a 10^(8-precision) factor so the node can value a
