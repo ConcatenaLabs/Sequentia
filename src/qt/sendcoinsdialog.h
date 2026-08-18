@@ -131,6 +131,9 @@ private:
     QLineEdit* m_fee_kvb_ref{nullptr};
     QLabel* m_fee_grid_asset_header{nullptr};
     QLabel* m_fee_note{nullptr};
+    //! The note about the CHOSEN ASSET, which belongs beside the choice rather
+    //! than at the bottom with the notes about estimation.
+    QLabel* m_fee_asset_note{nullptr};
     /** Guards the four cells against each other while one is recomputing the rest. */
     bool m_fee_grid_updating{false};
     /** vsize of the transaction as currently composed, 0 when it cannot be sized
