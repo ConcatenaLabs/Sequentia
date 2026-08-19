@@ -854,12 +854,12 @@ BOOST_AUTO_TEST_CASE(pos_apply_revert_is_exact_inverse)
     reg.Clear();
     reg.AddUtxoStake(q, 500); // a baseline staker the block must not disturb
 
-    PosApplyBlockStake(block, undo);
+    PosApplyBlockStake(block, undo, 100);
     // p was created and spent in the same block → net zero, entry erased.
     BOOST_CHECK_EQUAL(reg.GetWeight(p), 0U);
     BOOST_CHECK_EQUAL(reg.GetWeight(q), 500U);
 
-    PosRevertBlockStake(block, undo);
+    PosRevertBlockStake(block, undo, 100);
     // The exact inverse: p stays absent (the ordering bug would leave it at a),
     // q is untouched.
     BOOST_CHECK_EQUAL(reg.GetWeight(p), 0U);
@@ -878,9 +878,9 @@ BOOST_AUTO_TEST_CASE(pos_apply_revert_is_exact_inverse)
     cundo.vtxundo.emplace_back();
 
     reg.Clear();
-    PosApplyBlockStake(cblock, cundo);
+    PosApplyBlockStake(cblock, cundo, 101);
     BOOST_CHECK_EQUAL(reg.GetWeight(p), (uint64_t)a);
-    PosRevertBlockStake(cblock, cundo);
+    PosRevertBlockStake(cblock, cundo, 101);
     BOOST_CHECK_EQUAL(reg.GetWeight(p), 0U);
     BOOST_CHECK_EQUAL(reg.Size(), 0U);
 
@@ -1495,6 +1495,100 @@ BOOST_AUTO_TEST_CASE(anchor_uncontested_height)
 
     // Negative window is clamped to 0 (never widens acceptance oddly).
     BOOST_CHECK_EQUAL(AnchorUncontestedHeight(1000, -5, Br{{1000, 4}}), 996);
+}
+
+
+// SEQUENTIA split payouts: the pot script must round-trip exactly, and reject
+// everything that is not byte-for-byte the canonical template -- a lookalike
+// that parses would be claim-locked, and one that fails to parse would be
+// anyone-can-spend money.
+BOOST_AUTO_TEST_CASE(pos_pot_script_roundtrip)
+{
+    CKey key;
+    key.MakeNewKey(true);
+    const CPubKey signer = key.GetPubKey();
+
+    const CScript pot = BuildPotScript(signer);
+    // <6:"SEQPOT"> OP_DROP <33:signer> OP_DROP OP_TRUE
+    BOOST_CHECK_EQUAL(pot.size(), 1u + 6 + 1 + 1 + 33 + 1 + 1);
+    const auto parsed = ParsePotScript(pot);
+    BOOST_REQUIRE(parsed.has_value());
+    BOOST_CHECK(*parsed == signer);
+
+    // Not pots: the empty script, a stake script, a delegation record, a payout
+    // record, and a truncated pot.
+    BOOST_CHECK(!ParsePotScript(CScript()));
+    BOOST_CHECK(!ParsePotScript(BuildStakeScript(signer, 1000, {}, {}, 0)));
+    BOOST_CHECK(!ParsePotScript(BuildDelegationScript(signer, signer)));
+    CScript truncated(pot.begin(), pot.end() - 1);
+    BOOST_CHECK(!ParsePotScript(truncated));
+
+    // PotFromTxOut: explicit value and asset only. A blinded output carrying
+    // the pot script was never a pot.
+    CTxOut out;
+    out.scriptPubKey = pot;
+    out.nAsset = CConfidentialAsset(CAsset(uint256S("11")));
+    out.nValue = CConfidentialValue(50000);
+    BOOST_REQUIRE(PotFromTxOut(out).has_value());
+    BOOST_CHECK_EQUAL(PotFromTxOut(out)->value, 50000);
+    out.nValue = CConfidentialValue(); // null/blinded-shaped
+    BOOST_CHECK(!PotFromTxOut(out).has_value());
+}
+
+// The share arithmetic: per-input eligibility by creation height, the 1%
+// distribution reserve, and floor division. These numbers are consensus -- a
+// validator that computes different ones forks -- so they are pinned here.
+BOOST_AUTO_TEST_CASE(pos_split_shares)
+{
+    StakeRegistry& registry = StakeRegistry::GetInstance();
+    registry.Clear();
+
+    CKey k1, k2, k3;
+    k1.MakeNewKey(true);
+    k2.MakeNewKey(true);
+    k3.MakeNewKey(true);
+    const CPubKey pool = k1.GetPubKey();     // signer, with its own stake
+    const CPubKey early = k2.GetPubKey();    // delegated before the pot
+    const CPubKey late = k3.GetPubKey();     // delegated after the pot
+
+    registry.AddUtxoStake(pool, 100, {}, /*height=*/10);
+    registry.AddUtxoStake(early, 300, {}, /*height=*/10);
+    registry.AddUtxoDelegation(early, pool, /*height=*/12);
+    registry.AddUtxoStake(late, 600, {}, /*height=*/50);
+    registry.AddUtxoDelegation(late, pool, /*height=*/52);
+
+    // A pot created at height 40: only pool (own stake, no record needed) and
+    // early (record at 12 < 40, stake at 10 < 40) are eligible; late is not.
+    const CAsset asset(uint256S("22"));
+    {
+        const auto shares = PosComputePotShares(pool, {{asset, 10000, 40}});
+        // reserve: 10000 - 100 = 9900 distributable over weights {100, 300}.
+        BOOST_CHECK_EQUAL(shares.owed.at(pool).at(asset), 9900 * 100 / 400);
+        BOOST_CHECK_EQUAL(shares.owed.at(early).at(asset), 9900 * 300 / 400);
+        BOOST_CHECK(shares.owed.find(late) == shares.owed.end());
+        BOOST_CHECK_EQUAL(shares.swept.at(asset), 10000);
+    }
+    // A pot created at height 60: all three are eligible, floors and all.
+    {
+        const auto shares = PosComputePotShares(pool, {{asset, 10000, 60}});
+        BOOST_CHECK_EQUAL(shares.owed.at(pool).at(asset), 9900 * 100 / 1000);
+        BOOST_CHECK_EQUAL(shares.owed.at(early).at(asset), 9900 * 300 / 1000);
+        BOOST_CHECK_EQUAL(shares.owed.at(late).at(asset), 9900 * 600 / 1000);
+    }
+    // Both pots in one claim: sums per delegator, per input.
+    {
+        const auto shares = PosComputePotShares(pool, {{asset, 10000, 40}, {asset, 10000, 60}});
+        BOOST_CHECK_EQUAL(shares.owed.at(early).at(asset), 9900 * 300 / 400 + 9900 * 300 / 1000);
+        BOOST_CHECK_EQUAL(shares.owed.at(late).at(asset), 9900 * 600 / 1000);
+        BOOST_CHECK_EQUAL(shares.swept.at(asset), 20000);
+    }
+    // A pot older than everyone: nobody eligible, everything rolls.
+    {
+        const auto shares = PosComputePotShares(pool, {{asset, 10000, 5}});
+        BOOST_CHECK(shares.owed.empty());
+        BOOST_CHECK_EQUAL(shares.swept.at(asset), 10000);
+    }
+    registry.Clear();
 }
 
 BOOST_AUTO_TEST_SUITE_END()

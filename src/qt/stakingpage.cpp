@@ -491,10 +491,12 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
         // data is "<mode>:<commission bp>", "lottery:ask" when the operator sets
         // the percentage, or "custom" for the raw commitment.
         m_payout_preset = new QComboBox(op);
-        m_payout_preset->addItem(tr("Share everything: each block pays a delegator, you keep no commission"),
-                                 QStringLiteral("lottery:0"));
-        m_payout_preset->addItem(tr("Share, keeping 5%"), QStringLiteral("lottery:500"));
-        m_payout_preset->addItem(tr("Share, keeping a commission I choose"), QStringLiteral("lottery:ask"));
+        m_payout_preset->addItem(tr("Share everything: every delegator gets its exact proportional share"),
+                                 QStringLiteral("split:0"));
+        m_payout_preset->addItem(tr("Share, keeping 5%"), QStringLiteral("split:500"));
+        m_payout_preset->addItem(tr("Share, keeping a commission I choose"), QStringLiteral("split:ask"));
+        m_payout_preset->addItem(tr("Lottery: each block pays one delegator, drawn by stake weight"),
+                                 QStringLiteral("lottery:ask"));
         m_payout_preset->addItem(tr("Pay one address I commit to, every block"), QStringLiteral("direct:0"));
         m_payout_preset->addItem(tr("Custom: commit a script of my own"), QStringLiteral("custom"));
         m_payout_preset->setCurrentIndex(1);   // keeping 5%: the one most operators want
@@ -1743,11 +1745,13 @@ void StakingPage::refreshPoolOperator()
     onPayoutPresetChanged();
 }
 
-//! Whether the chosen arrangement is a lottery.
-bool StakingPage::payoutModeIsLottery() const
+//! "split", "lottery" or "direct" -- what the chosen arrangement announces.
+QString StakingPage::payoutModeName() const
 {
-    if (!m_payout_preset) return true;
-    return m_payout_preset->currentData().toString().startsWith(QLatin1String("lottery"));
+    if (!m_payout_preset) return QStringLiteral("split");
+    const QString data = m_payout_preset->currentData().toString();
+    if (data == QLatin1String("custom")) return QStringLiteral("direct"); // a raw script IS a direct commitment
+    return data.section(QLatin1Char(':'), 0, 0);
 }
 
 //! The commission the chosen arrangement carries, in basis points, or -1 when
@@ -1756,7 +1760,7 @@ int64_t StakingPage::payoutCommissionBp() const
 {
     if (!m_payout_preset) return 0;
     const QString data = m_payout_preset->currentData().toString();
-    if (data == QLatin1String("lottery:ask")) {
+    if (data.endsWith(QLatin1String(":ask"))) {
         if (!m_payout_commission) return 0;
         const QString txt = m_payout_commission->text().trimmed();
         if (txt.isEmpty()) return -1;
@@ -1774,7 +1778,7 @@ void StakingPage::onPayoutPresetChanged()
     if (!m_payout_preset) return;
     const QString data = m_payout_preset->currentData().toString();
     const bool custom = data == QLatin1String("custom");
-    const bool ask = data == QLatin1String("lottery:ask");
+    const bool ask = data.endsWith(QLatin1String(":ask"));
     const bool direct_addr = data == QLatin1String("direct:0");
 
     // Each arrangement asks for exactly what it needs and nothing else.
@@ -1799,20 +1803,25 @@ void StakingPage::onPayoutPresetChanged()
         note = tr("Every block you produce must pay the address you commit to. The chain stops you redirecting "
                   "that reward silently, but it does NOT check the address shares anything with your delegators, "
                   "and they can see that. Choose this when you are paying out by some arrangement of your own.");
+    } else if (payoutModeName() == QLatin1String("lottery")) {
+        note = tr("Every block you produce pays ONE of your delegators, drawn by stake weight from Bitcoin's "
+                  "proof of work so the draw cannot be rigged, and you keep the commission you set below as a "
+                  "share of blocks. Each delegator earns its exact share over time, arriving in occasional "
+                  "lumps rather than steadily. Most pools want the proportional arrangements above instead.");
     } else {
         const int64_t bp = payoutCommissionBp();
         const QString share = ask
             ? tr("the commission you set below")
             : tr("%1%").arg(QString::number(bp / 100.0, 'f', bp % 100 ? 2 : 0));
         note = bp == 0 && !ask
-            ? tr("Every block you produce pays one of your delegators, drawn by stake weight from Bitcoin's "
-                 "proof of work so the draw cannot be rigged. You take nothing beyond what your own stake wins "
-                 "as one participant among them. Each delegator earns its exact share over time, arriving in "
-                 "occasional lumps rather than steadily.")
-            : tr("Every block you produce pays one of your delegators, drawn by stake weight from Bitcoin's "
-                 "proof of work so the draw cannot be rigged, and you keep %1 of blocks. Each delegator earns "
-                 "its exact share of the rest over time, arriving in occasional lumps rather than steadily.")
-                  .arg(share);
+            ? tr("Your rewards pool up on-chain, and anyone may trigger the payout, which sends every delegator "
+                 "its exact proportional share -- the arrangement most delegators expect. You take nothing "
+                 "beyond what your own stake earns as one participant among them. Shares too small to pay "
+                 "simply wait for the next payout instead of being rounded away.")
+            : tr("Your rewards pool up on-chain, and anyone may trigger the payout, which sends every delegator "
+                 "its exact proportional share -- the arrangement most delegators expect. You keep %1 as "
+                 "commission. Shares too small to pay simply wait for the next payout instead of being rounded "
+                 "away.").arg(share);
     }
     m_payout_preset_note->setText(note);
 }
@@ -1820,11 +1829,11 @@ void StakingPage::onPayoutPresetChanged()
 void StakingPage::onAnnouncePayout()
 {
     if (!m_wallet_model) return;
-    const bool lottery = payoutModeIsLottery();
-    const QString mode = lottery ? QStringLiteral("lottery") : QStringLiteral("direct");
+    const QString mode = payoutModeName();
+    const bool shares_commission = mode != QLatin1String("direct");
 
     int64_t commission_bp = 0;
-    if (lottery) {
+    if (shares_commission) {
         commission_bp = payoutCommissionBp();
         if (commission_bp < 0) {
             setCardResult(m_payout_result, tr("Commission must be between 0 and 100 percent."), true);
@@ -1836,7 +1845,12 @@ void StakingPage::onAnnouncePayout()
     // block and cannot be revoked in less than the notice period.
     const QMessageBox::StandardButton confirmed = QMessageBox::question(
         this, tr("Announce this payout policy?"),
-        (lottery
+        (mode == QLatin1String("split")
+            ? tr("From the activation height on, every block you produce pays into your pool's pot, and anyone "
+                 "may trigger the payout that sends every delegator its exact proportional share. You keep %1% "
+                 "as commission. The chain enforces all of it: a block of yours that pays anywhere else is "
+                 "invalid, and so is a payout that shortchanges anyone.\n\n").arg(QString::number(commission_bp / 100.0, 'f', 2))
+        : mode == QLatin1String("lottery")
             ? tr("From the activation height on, every block you produce must pay one of your delegators, drawn "
                  "by stake weight, and you keep %1% of blocks as commission. The chain enforces this: a block of "
                  "yours that pays anyone else is invalid.\n\n").arg(QString::number(commission_bp / 100.0, 'f', 2))
@@ -1865,7 +1879,7 @@ void StakingPage::onAnnouncePayout()
     const QString activation = custom ? m_payout_activation->text().trimmed() : QString();
     params.push_back(activation.isEmpty() ? UniValue(UniValue::VNULL)
                                           : UniValue(UniValue::VNUM, activation.toStdString()));
-    if (lottery) {
+    if (shares_commission) {
         params.push_back(UniValue(UniValue::VNULL));            // address: not used
         params.push_back(commission_bp);
     } else {

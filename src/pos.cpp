@@ -31,6 +31,7 @@ bool g_pos_agg_committee = false;
 bool g_pos_bls = false;
 bool g_pos_public_committee = false;
 uint64_t g_pos_min_stake = 0;
+int g_split_payout_height = 0;
 int g_pos_escape_stall_mtp_height = 0;
 // SEQUENTIA: the coinbase maturity in force, mirrored out of
 // Consensus::Params by chainparams.cpp. It lives HERE, in the common
@@ -505,7 +506,8 @@ uint64_t PosVrfSlotExp(const uint256& beta, uint64_t weight, uint64_t total_weig
 bool PosExpRaceActive(const Consensus::Params& params, int height)
 {
     return params.pos_exprace_height > 0 && height >= params.pos_exprace_height;
-}
+}
+
 int64_t PosSlotGateSeconds(const Consensus::Params& params, int height, uint64_t slot)
 {
     // The exp-race score is a RATE, not a rank: its minimum over all stakers is
@@ -812,7 +814,8 @@ std::optional<std::pair<CPubKey, PosPayoutPolicy>> ParsePayoutScript(const CScri
     int64_t mode = 0;
     if (!script.GetOp(pc, opcode, data)) return std::nullopt;
     if (!ReadScriptNumToken(opcode, data, 1, mode)) return std::nullopt;
-    if (mode != (int64_t)PosPayoutMode::DIRECT && mode != (int64_t)PosPayoutMode::LOTTERY) return std::nullopt;
+    if (mode != (int64_t)PosPayoutMode::DIRECT && mode != (int64_t)PosPayoutMode::LOTTERY &&
+        mode != (int64_t)PosPayoutMode::SPLIT) return std::nullopt;
     policy.mode = (PosPayoutMode)mode;
     if (!script.GetOp(pc, opcode, data) || opcode != OP_DROP) return std::nullopt;
 
@@ -842,6 +845,237 @@ std::optional<std::pair<CPubKey, PosPayoutPolicy>> PayoutFromTxOut(const CTxOut&
     return ParsePayoutScript(out.scriptPubKey);
 }
 
+//! Whether a payout record is part of the rules given the height of the block
+//! that CREATED it. A split record below the flag day is an inert output on a
+//! node without the rule (its ParsePayoutScript rejects the mode byte), so it
+//! must be inert here too, or the two would diverge before the flag day.
+//! Keying on the record's creation height rather than the current height keeps
+//! the registry a pure function of the UTXO set: the same record is inert or
+//! recognised identically on every node, at every rescan, forever.
+static bool PayoutRecordRecognized(const PosPayoutPolicy& policy, int creation_height)
+{
+    if (policy.mode != PosPayoutMode::SPLIT) return true;
+    return g_split_payout_height == 0 || creation_height >= g_split_payout_height;
+}
+
+const char* PosPayoutModeName(PosPayoutMode mode)
+{
+    switch (mode) {
+    case PosPayoutMode::DIRECT: return "direct";
+    case PosPayoutMode::LOTTERY: return "lottery";
+    case PosPayoutMode::SPLIT: return "split";
+    case PosPayoutMode::LEADER: break;
+    }
+    return "leader";
+}
+
+static const std::vector<unsigned char> POT_MARKER = {'S', 'E', 'Q', 'P', 'O', 'T'};
+
+CScript BuildPotScript(const CPubKey& signer)
+{
+    CScript s;
+    s << POT_MARKER << OP_DROP;
+    s << ToByteVector(signer) << OP_DROP;
+    s << OP_TRUE;
+    return s;
+}
+
+std::optional<CPubKey> ParsePotScript(const CScript& script)
+{
+    CScript::const_iterator pc = script.begin();
+    opcodetype opcode;
+    std::vector<unsigned char> data;
+    if (!script.GetOp(pc, opcode, data) || data != POT_MARKER) return std::nullopt;
+    if (!script.GetOp(pc, opcode, data) || opcode != OP_DROP) return std::nullopt;
+    if (!script.GetOp(pc, opcode, data) || data.empty()) return std::nullopt;
+    CPubKey signer(data);
+    if (!signer.IsFullyValid()) return std::nullopt;
+    if (!script.GetOp(pc, opcode, data) || opcode != OP_DROP) return std::nullopt;
+    if (!script.GetOp(pc, opcode, data) || opcode != OP_TRUE) return std::nullopt;
+    if (pc != script.end()) return std::nullopt;
+    return signer;
+}
+
+std::optional<PotOut> PotFromTxOut(const CTxOut& out)
+{
+    if (!out.nValue.IsExplicit() || !out.nAsset.IsExplicit()) return std::nullopt;
+    if (out.nValue.GetAmount() <= 0) return std::nullopt;
+    auto signer = ParsePotScript(out.scriptPubKey);
+    if (!signer) return std::nullopt;
+    return PotOut{*signer, out.nAsset.GetAsset(), out.nValue.GetAmount()};
+}
+
+PosPotShares PosComputePotShares(const CPubKey& signer,
+                                 const std::vector<std::tuple<CAsset, int64_t, int>>& pot_inputs)
+{
+    const StakeRegistry& registry = StakeRegistry::GetInstance();
+    PosPotShares shares;
+    for (const auto& [asset, value, height] : pot_inputs) {
+        shares.swept[asset] += value;
+        // 1% of every pot input is reserved to fund the claim itself (the fee,
+        // and the claimer's margin, both bounded by the withhold cap). Shares
+        // are computed over the remaining 99%; whatever of the reserve the
+        // claim does not spend rolls back into the fresh pot.
+        const int64_t distributable = value - value / POS_SPLIT_RESERVE_DENOM;
+        // The participant set is PER POT OUTPUT, by its creation height: a
+        // delegator earns exactly from the blocks produced while its weight
+        // stood behind the pool, and someone who delegates one block before a
+        // claim is eligible for precisely the pots created after they arrived,
+        // which is none of these.
+        const std::map<CPubKey, uint64_t> participants = registry.ParticipantsBefore(signer, height);
+        uint64_t total = 0;
+        for (const auto& e : participants) total += e.second;
+        if (total == 0) continue; // nobody eligible: this input's value rolls
+        for (const auto& e : participants) {
+            // 128-bit intermediate: value (up to 2^51 atoms) times weight (up
+            // to the same) overflows 64 bits comfortably.
+            const int64_t cut = (int64_t)(((unsigned __int128)distributable * e.second) / total);
+            if (cut > 0) shares.owed[e.first][asset] += cut;
+        }
+    }
+    return shares;
+}
+
+bool CheckPosPotClaim(const CTransaction& tx, const std::vector<Coin>& spent_coins,
+                      std::string& reason)
+{
+    // 1) Which inputs are pots. A transaction spending none is not a claim and
+    //    none of this applies to it.
+    std::optional<CPubKey> signer;
+    std::vector<std::tuple<CAsset, int64_t, int>> pot_inputs;
+    std::map<CAsset, int64_t> external; // the claimer's own coins, per asset
+    for (size_t i = 0; i < spent_coins.size() && i < tx.vin.size(); ++i) {
+        const Coin& coin = spent_coins[i];
+        if (coin.IsSpent()) continue; // absent undo data; not ours to judge
+        if (auto pot = PotFromTxOut(coin.out)) {
+            if (signer && *signer != pot->signer) {
+                reason = "claim sweeps pots of two different pools";
+                return false;
+            }
+            signer = pot->signer;
+            pot_inputs.emplace_back(pot->asset, pot->value, (int)coin.nHeight);
+        } else {
+            // Tallied after this loop, once we know whether this is a claim
+            // at all: a blinded input could smuggle value past the withhold
+            // cap, so a claim may not have any.
+            if (coin.out.nValue.IsExplicit() && coin.out.nAsset.IsExplicit()) {
+                external[coin.out.nAsset.GetAsset()] += coin.out.nValue.GetAmount();
+            }
+        }
+    }
+    if (!signer) return true;
+    // Re-check: every non-pot input must have been explicit (the early inputs
+    // were scanned before we knew this was a claim).
+    for (size_t i = 0; i < spent_coins.size() && i < tx.vin.size(); ++i) {
+        const Coin& coin = spent_coins[i];
+        if (coin.IsSpent()) continue;
+        if (PotFromTxOut(coin.out)) continue;
+        if (!coin.out.nValue.IsExplicit() || !coin.out.nAsset.IsExplicit()) {
+            reason = "claim spends a blinded input";
+            return false;
+        }
+    }
+
+    const PosPotShares shares = PosComputePotShares(*signer, pot_inputs);
+
+    // 2) Classify every output. All must be explicit: a blinded output could
+    //    hide who was really paid.
+    std::map<CAsset, int64_t> fee, keeper, repot, paid;
+    std::map<CAsset, int> repot_count;
+    // scriptPubKey -> (controller, asset->owed) for exact-match tests
+    std::map<CPubKey, CScript> payout_script;
+    for (const auto& e : shares.owed) {
+        payout_script[e.first] = GetScriptForDestination(WitnessV0KeyHash(e.first.GetID()));
+    }
+    std::map<CPubKey, std::map<CAsset, int64_t>> paid_to;
+    for (const CTxOut& out : tx.vout) {
+        if (out.IsFee()) {
+            fee[out.nAsset.GetAsset()] += out.nValue.GetAmount();
+            continue;
+        }
+        if (!out.nValue.IsExplicit() || !out.nAsset.IsExplicit()) {
+            reason = "claim creates a blinded output";
+            return false;
+        }
+        const CAsset asset = out.nAsset.GetAsset();
+        const int64_t value = out.nValue.GetAmount();
+        if (auto pot = ParsePotScript(out.scriptPubKey)) {
+            if (*pot != *signer) {
+                reason = "claim re-pots value under a different pool";
+                return false;
+            }
+            if (++repot_count[asset] > 1) {
+                reason = "claim creates two pot outputs in one asset";
+                return false;
+            }
+            repot[asset] += value;
+            continue;
+        }
+        // A delegator's payout slot: the P2WPKH of a controller this claim
+        // owes. The match is by script, so the claimer cannot route its own
+        // margin through a delegator's address either.
+        bool matched = false;
+        for (const auto& e : payout_script) {
+            if (out.scriptPubKey == e.second) {
+                paid_to[e.first][asset] += value;
+                paid[asset] += value;
+                matched = true;
+                break;
+            }
+        }
+        if (!matched) keeper[asset] += value;
+    }
+
+    // 3) Every delegator owed a payable amount is paid exactly that; nobody is
+    //    paid anything else. Sub-threshold shares stay in the pot (the repot
+    //    output), where they accumulate for the next claim instead of being
+    //    rounded away every block.
+    for (const auto& d : shares.owed) {
+        for (const auto& a : d.second) {
+            const int64_t owed = a.second;
+            const auto pit = paid_to.find(d.first);
+            const int64_t got = (pit != paid_to.end() && pit->second.count(a.first)) ? pit->second.at(a.first) : 0;
+            if (owed >= POS_SPLIT_MIN_PAYOUT) {
+                if (got != owed) {
+                    reason = strprintf("claim pays a delegator %d of the %d it is owed", got, owed);
+                    return false;
+                }
+            } else if (got != 0) {
+                reason = "claim pays a delegator more than its share";
+                return false;
+            }
+        }
+    }
+    for (const auto& pt : paid_to) {
+        for (const auto& a : pt.second) {
+            if (!shares.owed.count(pt.first) || !shares.owed.at(pt.first).count(a.first)) {
+                reason = "claim pays a delegator in an asset it is not owed";
+                return false;
+            }
+        }
+    }
+
+    // 4) The withhold cap, per swept asset: fee plus the claimer's margin, net
+    //    of coins the claimer brought, may not exceed 1/99 of what delegators
+    //    actually received. This single invariant is the claim interval, the
+    //    keeper bound and the anti-grief rule at once: burning the pot requires
+    //    delivering 99 times the burn.
+    for (const auto& sw : shares.swept) {
+        const CAsset& asset = sw.first;
+        const int64_t ext = external.count(asset) ? external.at(asset) : 0;
+        const int64_t withheld_raw = (fee.count(asset) ? fee.at(asset) : 0)
+                                   + (keeper.count(asset) ? keeper.at(asset) : 0) - ext;
+        const int64_t withheld = withheld_raw > 0 ? withheld_raw : 0;
+        const int64_t delivered = paid.count(asset) ? paid.at(asset) : 0;
+        if (withheld * POS_SPLIT_WITHHOLD_RATIO > delivered) {
+            reason = strprintf("claim withholds %d against %d delivered; the cap is 1/%d",
+                               withheld, delivered, POS_SPLIT_WITHHOLD_RATIO);
+            return false;
+        }
+    }
+    return true;
+}
+
 //! A uniform 64-bit draw from the block's election seed, domain-separated by tag.
 static uint64_t PayoutDraw(const uint256& seed, const std::string& tag)
 {
@@ -862,6 +1096,19 @@ CScript PosRequiredCoinbaseScript(const CPubKey& leader, int64_t height, const u
     if (!policy) return PosLeaderFeeScript(leader);   // no committed policy
 
     if (policy->mode == PosPayoutMode::DIRECT) return policy->script;
+
+    // SPLIT: the reward goes into the pool's pot, to be distributed by a claim
+    // in exact proportion to lent weight. Commission reuses the lottery's own
+    // mechanism -- a bp/10000 chance, drawn from the unbiasable seed, that the
+    // block pays the leader instead -- which is exact in expectation and keeps
+    // the coinbase a single required script.
+    if (policy->mode == PosPayoutMode::SPLIT) {
+        if (policy->commission_bp > 0 &&
+            PayoutDraw(seed, "seqpay:commission") % POS_COMMISSION_DENOM < policy->commission_bp) {
+            return PosLeaderFeeScript(leader);
+        }
+        return BuildPotScript(leader);
+    }
 
     // LOTTERY: draw one participant, weighted by the stake it lent this signer.
     // The seed is SHA256(parent Bitcoin anchor hash || height) -- supplied by
@@ -1048,35 +1295,51 @@ std::optional<std::pair<CPubKey, uint64_t>> StakeFromTxOut(const CTxOut& out)
     return std::make_pair(parsed->first, (uint64_t)amount);
 }
 
-void PosApplyBlockStake(const CBlock& block, const CBlockUndo& undo)
+void PosApplyBlockStake(const CBlock& block, const CBlockUndo& undo, int height)
 {
     StakeRegistry& registry = StakeRegistry::GetInstance();
     // New staking outputs add weight (and, if they carry a committee BLS
     // registration whose PoP ConnectBlock has verified, register the key).
+    // Creation heights ride along: the split-payout claim rules pay a delegator
+    // from a pot output only for weight that existed before that output did.
     for (const CTransactionRef& tx : block.vtx) {
-        for (const CTxOut& out : tx->vout) {
+        for (size_t n = 0; n < tx->vout.size(); ++n) {
+            const CTxOut& out = tx->vout[n];
             if (auto stake = StakeFromTxOut(out)) {
                 std::vector<unsigned char> bls_pubkey;
                 if (auto reg = ParseStakeBlsRegistration(out.scriptPubKey)) bls_pubkey = reg->first;
-                registry.AddUtxoStake(stake->first, stake->second, bls_pubkey);
+                registry.AddUtxoStake(stake->first, stake->second, bls_pubkey, height);
                 LogPrintf("PoS: staking output adds %llu to %s\n", (unsigned long long)stake->second, HexStr(stake->first));
             }
             if (auto deleg = DelegationFromTxOut(out)) {
-                registry.AddUtxoDelegation(deleg->first, deleg->second);
+                registry.AddUtxoDelegation(deleg->first, deleg->second, height);
                 LogPrintf("PoS: %s delegates its stake weight to %s\n", HexStr(deleg->first), HexStr(deleg->second));
             }
             if (auto payout = PayoutFromTxOut(out)) {
-                registry.AddUtxoPayout(payout->first, payout->second);
-                LogPrintf("PoS: %s announces a payout policy effective at height %d\n",
-                          HexStr(payout->first), (int)payout->second.activation);
+                // A split record below its flag day is exactly as inert here as
+                // it is to a node that has never heard of the mode; recognising
+                // it would diverge from that node before the flag day.
+                if (PayoutRecordRecognized(payout->second, height)) {
+                    registry.AddUtxoPayout(payout->first, payout->second);
+                    LogPrintf("PoS: %s announces a payout policy effective at height %d\n",
+                              HexStr(payout->first), (int)payout->second.activation);
+                }
+            }
+            if (auto pot = PotFromTxOut(out)) {
+                registry.AddUtxoPot(pot->signer, COutPoint(tx->GetHash(), n), pot->asset, pot->value, height);
             }
         }
     }
-    // Spent staking outputs (recorded in the block's undo data) remove weight.
-    for (const CTxUndo& txundo : undo.vtxundo) {
-        for (const Coin& coin : txundo.vprevout) {
+    // Spent outputs (recorded in the block's undo data) leave the registry.
+    // Walked per transaction so a spent pot's OUTPOINT is at hand: undo data
+    // carries the coin but not where it lived.
+    for (size_t t = 1; t < block.vtx.size() && t - 1 < undo.vtxundo.size(); ++t) {
+        const CTransactionRef& tx = block.vtx[t];
+        const CTxUndo& txundo = undo.vtxundo[t - 1];
+        for (size_t j = 0; j < txundo.vprevout.size() && j < tx->vin.size(); ++j) {
+            const Coin& coin = txundo.vprevout[j];
             if (auto stake = StakeFromTxOut(coin.out)) {
-                registry.SubUtxoStake(stake->first, stake->second);
+                registry.SubUtxoStake(stake->first, stake->second, (int)coin.nHeight);
                 LogPrintf("PoS: staking output spend removes %llu from %s\n", (unsigned long long)stake->second, HexStr(stake->first));
             }
             // Conditional erase, so a rotation (old record spent + new record
@@ -1086,13 +1349,18 @@ void PosApplyBlockStake(const CBlock& block, const CBlockUndo& undo)
                 registry.SubUtxoDelegation(deleg->first, deleg->second);
             }
             if (auto payout = PayoutFromTxOut(coin.out)) {
-                registry.SubUtxoPayout(payout->first, payout->second);
+                if (PayoutRecordRecognized(payout->second, (int)coin.nHeight)) {
+                    registry.SubUtxoPayout(payout->first, payout->second);
+                }
+            }
+            if (auto pot = PotFromTxOut(coin.out)) {
+                registry.SubUtxoPot(pot->signer, tx->vin[j].prevout);
             }
         }
     }
 }
 
-void PosRevertBlockStake(const CBlock& block, const CBlockUndo& undo)
+void PosRevertBlockStake(const CBlock& block, const CBlockUndo& undo, int height)
 {
     StakeRegistry& registry = StakeRegistry::GetInstance();
     // Exact inverse of PosApplyBlockStake, which added created outputs then
@@ -1103,34 +1371,48 @@ void PosRevertBlockStake(const CBlock& block, const CBlockUndo& undo)
     // post-block weight is zero and its map entry was erased). Doing the
     // subtraction first there would hit SubUtxoStake's underflow guard and
     // corrupt the registry.
-    for (const CTxUndo& txundo : undo.vtxundo) {
-        for (const Coin& coin : txundo.vprevout) {
+    for (size_t t = 1; t < block.vtx.size() && t - 1 < undo.vtxundo.size(); ++t) {
+        const CTransactionRef& tx = block.vtx[t];
+        const CTxUndo& txundo = undo.vtxundo[t - 1];
+        for (size_t j = 0; j < txundo.vprevout.size() && j < tx->vin.size(); ++j) {
+            const Coin& coin = txundo.vprevout[j];
             if (auto stake = StakeFromTxOut(coin.out)) {
                 std::vector<unsigned char> bls_pubkey;
                 if (auto reg = ParseStakeBlsRegistration(coin.out.scriptPubKey)) bls_pubkey = reg->first;
-                registry.AddUtxoStake(stake->first, stake->second, bls_pubkey);
+                registry.AddUtxoStake(stake->first, stake->second, bls_pubkey, (int)coin.nHeight);
             }
             // Restore the record this block spent, before the created records
             // are removed below. A rotation then lands back on the old signer:
             // the erase of the created record is conditional and will not fire.
             if (auto deleg = DelegationFromTxOut(coin.out)) {
-                registry.AddUtxoDelegation(deleg->first, deleg->second);
+                registry.AddUtxoDelegation(deleg->first, deleg->second, (int)coin.nHeight);
             }
             if (auto payout = PayoutFromTxOut(coin.out)) {
-                registry.AddUtxoPayout(payout->first, payout->second);
+                if (PayoutRecordRecognized(payout->second, (int)coin.nHeight)) {
+                    registry.AddUtxoPayout(payout->first, payout->second);
+                }
+            }
+            if (auto pot = PotFromTxOut(coin.out)) {
+                registry.AddUtxoPot(pot->signer, tx->vin[j].prevout, pot->asset, pot->value, (int)coin.nHeight);
             }
         }
     }
     for (const CTransactionRef& tx : block.vtx) {
-        for (const CTxOut& out : tx->vout) {
+        for (size_t n = 0; n < tx->vout.size(); ++n) {
+            const CTxOut& out = tx->vout[n];
             if (auto stake = StakeFromTxOut(out)) {
-                registry.SubUtxoStake(stake->first, stake->second);
+                registry.SubUtxoStake(stake->first, stake->second, height);
             }
             if (auto deleg = DelegationFromTxOut(out)) {
                 registry.SubUtxoDelegation(deleg->first, deleg->second);
             }
             if (auto payout = PayoutFromTxOut(out)) {
-                registry.SubUtxoPayout(payout->first, payout->second);
+                if (PayoutRecordRecognized(payout->second, height)) {
+                    registry.SubUtxoPayout(payout->first, payout->second);
+                }
+            }
+            if (auto pot = PotFromTxOut(out)) {
+                registry.SubUtxoPot(pot->signer, COutPoint(tx->GetHash(), n));
             }
         }
     }
@@ -1142,6 +1424,9 @@ bool RebuildUtxoStake(CCoinsView& view)
     std::map<CPubKey, std::vector<unsigned char>> utxo_bls;
     std::map<CPubKey, CPubKey> utxo_deleg;
     std::map<CPubKey, std::map<int64_t, PosPayoutPolicy>> utxo_payout;
+    std::map<CPubKey, std::map<int, uint64_t>> utxo_tranches;
+    std::map<CPubKey, int> deleg_height;
+    std::map<CPubKey, std::map<COutPoint, PosPotRef>> pot_utxo;
     std::unique_ptr<CCoinsViewCursor> pcursor(view.Cursor());
     if (!pcursor) return false;
     while (pcursor->Valid()) {
@@ -1159,6 +1444,7 @@ bool RebuildUtxoStake(CCoinsView& view)
         // staking output, which this scan also reflects (the coin is gone).
         if (auto stake = StakeFromTxOut(coin.out)) {
             utxo_stake[stake->first] += stake->second;
+            utxo_tranches[stake->first][(int)coin.nHeight] += stake->second;
             // A staking output's BLS registration (its PoP was verified when the
             // output's block connected; the UTXO set is trusted here). All of a
             // staker's outputs carry the same key (a consensus rule at connect),
@@ -1172,17 +1458,28 @@ bool RebuildUtxoStake(CCoinsView& view)
         // controller, so this scan is unambiguous however the UTXOs are ordered.
         if (auto deleg = DelegationFromTxOut(coin.out)) {
             utxo_deleg[deleg->first] = deleg->second;
+            deleg_height[deleg->first] = (int)coin.nHeight;
         }
         // Unspent payout records. Keyed by activation height, so a pending policy
         // and the one it will replace coexist unambiguously (a consensus rule
         // forbids two records sharing a (signer, activation)).
         if (auto payout = PayoutFromTxOut(coin.out)) {
-            utxo_payout[payout->first][payout->second.activation] = payout->second;
+            // Split records created below the flag day stay inert here for the
+            // same reason PosApplyBlockStake leaves them inert: a node without
+            // the mode never sees them at all, and this scan must agree with it.
+            if (PayoutRecordRecognized(payout->second, (int)coin.nHeight)) {
+                utxo_payout[payout->first][payout->second.activation] = payout->second;
+            }
+        }
+        if (auto pot = PotFromTxOut(coin.out)) {
+            pot_utxo[pot->signer][key] = PosPotRef{pot->asset, pot->value, (int)coin.nHeight};
         }
         pcursor->Next();
     }
     StakeRegistry::GetInstance().SetUtxoStake(std::move(utxo_stake), std::move(utxo_bls),
-                                              std::move(utxo_deleg), std::move(utxo_payout));
+                                              std::move(utxo_deleg), std::move(utxo_payout),
+                                              std::move(utxo_tranches), std::move(deleg_height),
+                                              std::move(pot_utxo));
     return true;
 }
 
