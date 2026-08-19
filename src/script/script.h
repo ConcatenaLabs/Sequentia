@@ -60,6 +60,39 @@ static constexpr int64_t VALIDATION_WEIGHT_PER_SIGOP_PASSED{50};
 // How much weight budget is added to the witness size (Tapscript only, see BIP 342).
 static constexpr int64_t VALIDATION_WEIGHT_OFFSET{50};
 
+// SEQUENTIA: how much Simplicity execution budget one witness byte buys.
+//
+// Elements prices a Simplicity spend at one weight unit of execution per byte
+// of witness, which is the same ratio Tapscript uses for its sigop budget. A
+// program whose static cost bound exceeds what its own witness pays for cannot
+// be spent at all, so the only way to buy the difference is to carry inert
+// bytes. Real covenants hit this immediately: the OpenDAMP verifier's
+// functional witness is a few kilobytes and its cost bound is twenty thousand
+// weight units, so under a multiplier of one it had to haul twenty-two
+// kilobytes of padding that did nothing but exist. Every node stores and
+// relays those bytes, and the block they crowd out is the scarce thing.
+//
+// Four is chosen against the block, which is what actually binds. Total
+// Simplicity cost in a block is bounded by the block's own weight times this
+// multiplier, so a Sequentia block at 400,000 weight units admits at most
+// 1,600,000 weight units of Simplicity work. Liquid, at a 4,000,000 weight
+// block and a multiplier of one, already accepts 4,000,000. Sequentia at four
+// therefore stays at 40% of the validation cost per block that the chain this
+// interpreter came from has always allowed, while padding disappears.
+//
+// This only ever accepts more, so no previously valid block can fail under it
+// and it needs no activation height (CONTRIBUTING.md, consensus changes). It
+// is still a hard fork for a running network: a node on the old rule rejects
+// the unpadded spends this one admits, so the committee cuts over together.
+static constexpr int64_t SIMPLICITY_BUDGET_PER_WITNESS_BYTE{4};
+
+// The Simplicity interpreter requires budget <= BUDGET_MAX (its
+// src/simplicity/limitations.h). One witness byte per weight unit could never
+// reach it, because a witness cannot outgrow the block; four can on a chain
+// with a large enough block, so the budget is clamped rather than left to trip
+// the interpreter's precondition.
+static constexpr int64_t SIMPLICITY_BUDGET_MAX{4000050};
+
 // ELEMENTS:
 // Number of confirms on parent chain required to confirm on sidechain.
 static const unsigned int DEFAULT_PEGIN_CONFIRMATION_DEPTH = 8;
