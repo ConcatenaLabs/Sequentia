@@ -702,6 +702,14 @@ void SupervisionPage::priceRecord()
     }
     m_fee_widget->setKnownTotal(fee);
 
+    // And the size that fee was charged over. Under Recommended the panel shows
+    // the wallet's own figure and the size is merely corroboration; under Custom
+    // it is what lets the total be typed into at all, and what turns a rate the
+    // user sets into the total they will actually pay.
+    CMutableTransaction sized;
+    if (DecodeHexTx(sized, funded_hex.toStdString())) {
+        m_fee_widget->setTransactionSize(GetVirtualTransactionSize(CTransaction(sized)));
+    }
 }
 
 bool SupervisionPage::fundRecordTransaction(const QString& record_script, const QString& asset,
