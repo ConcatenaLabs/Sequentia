@@ -3,7 +3,7 @@
 Two things: a consensus change with a flag day on the live testnet, and delegated
 staking becoming usable from a wallet.
 
-**If you run a node against the live testnet, upgrade before height 101,200.** The
+**If you run a node against the live testnet, upgrade before height 101,750.** The
 consensus change below activates there, and a node that has not upgraded by then
 forks off.
 
@@ -27,7 +27,7 @@ Liquid, at a 4,000,000-weight block and a multiplier of one, already accepts
 4,000,000, so Sequentia at four stays at 40% of the per-block validation cost the
 interpreter this code came from has always allowed.
 
-### The flag day: height 101,200 on the testnet
+### The flag day: height 101,750 on the testnet
 
 The rule only ever accepts more, which is why it needs no activation gate for
 *correctness*. It is still a hard fork for a running network, and ungated it would
@@ -122,7 +122,7 @@ Stop the node, replace the binary, start it again. Committee operators upgrade e
 node in one pass, as with any consensus release: mixed binaries select different
 anchors and fragment share-locks.
 
-Do it **before height 101,200** on the testnet, then confirm behaviourally rather
+Do it **before height 101,750** on the testnet, then confirm behaviourally rather
 than by version alone:
 
     contrib/sequentia/peer-stall-check.sh
@@ -130,3 +130,33 @@ than by version alone:
 Every peer should report as following the chain. A peer frozen just below a
 consensus-change height is running a binary without that rule, whatever version it
 reports.
+
+### The inclusion probe gates the cutover, not the activation
+
+Before stopping anything, have an independent operator broadcast a fresh
+transaction funded from confirmed coins, with the fee in tSEQ, and watch it
+confirm within three blocks. Run it *after* the new binary is built on the box
+and *before* the committee is stopped.
+
+That ordering is the whole point. A probe that gates the activation leaves the
+chain committed with nothing to unwind if it fails; a probe that gates the
+cutover fails while the old binaries are still running and still producing, and
+costs a delay rather than an intervention. If the operator running the probe is
+unreachable inside the window, whether to proceed is a human decision, not one
+for whoever happens to be executing the cutover.
+
+### If the flag day has to be held after the cutover
+
+The height is a single constant, so a hold is deliberately cheap and is written
+down here rather than improvised:
+
+1. `consensus.simplicity_budget4_height` in `CTestNetParams`, re-derived as
+   `round_up_to_10(tip + 1440)`.
+2. The matching bounds in `src/test/simplicity_policy_tests.cpp`, and the three
+   heights in this file.
+3. Tag `v24.3.1`, rebuild, and run the same full cutover.
+
+It is a second stop/start of the whole committee inside the notice window, so it
+is a decision for the maintainers rather than for an operator or an agent acting
+alone. Nothing about it is exotic; the point of writing it out is that it is
+followed rather than invented under time pressure.

@@ -7,6 +7,18 @@ snapshot service) is implemented in `openampd`. What the shipped covenants
 enforce, and what they deliberately do not, is stated in `opendamp/STATUS.md`
 and summarised in section 3.6 below. Nothing is deployed on the live testnet
 beyond the pilot recorded in section 8.
+
+Revised after an adversarial review (2026-08-19) that found three defects and
+one wrong claim, all fixed here and in the crate: dmt-v1's structural guards
+were provable whitelist members, so a holder could burn regulated units to an
+address the issuer never approved and nothing could recover them (they now hash
+under their own domain byte); a receive window bound the sender's own change,
+turning it into a spend prohibition; pi was not actually committed by the
+covenant, so the "one policy version per address" claim in section 3.1 was not
+true; and the invariant in section 2.1 -- that q of V never exists outside a
+verifier covenant -- was load-bearing but unstated, with the halt in section 6
+breaking it by design. The same pass removed the covenant's 22 kB of budget
+padding, which is what section 2.2's shapes and the node's budget rule are for.
 Companion to `openamp-design.md`, which specifies the co-signed enforcement
 model this protocol coexists with. OpenDAMP is the Sequentia adaptation of
 DAMP, the Decentralized Asset Management Protocol proposed for Liquid by
@@ -72,6 +84,28 @@ another key. It then checks:
 These checks establish custody only. Policy is enforced by the verifier
 covenant spent in the same transaction.
 
+**What check 3 does not say.** It asks that *some* output carrying q of V sits
+at input zero, not that the output is a verifier covenant, and U cannot ask for
+more: C_V(pi) is a different address for every policy version while U is fixed
+for the life of the asset and committed inside every C_U address. Confinement
+therefore rests on an invariant no covenant can check:
+
+> q units of V must never exist outside a verifier covenant.
+
+If it is ever broken, whoever controls that output can place it at input zero
+and let any holder spend their C_U with no whitelist, no blacklist, no limit and
+no window, on their own signature alone. This is the paper's construction (3.2)
+and the paper's assumption (5.1); it is stated here because it is load-bearing
+and easy to break by accident. Two operational consequences, both enforced by
+the tooling rather than left to a runbook, are in section 6.
+
+Do not try to close this in the covenant. An earlier revision of U required
+output zero to recreate input zero's script unless the issuer signed; a holder
+of stray V simply pays it back to the same address, which satisfies the equality
+exactly. Simplicity exposes another input's script pubkey but not which leaf it
+executed, so nothing a fixed U can read distinguishes a real C_V(pi) from an
+imitation.
+
 ### 2.2 Verifier covenant C_V(pi)
 
 Let P(pi) be the primary spending path instantiated with policy commitment
@@ -89,12 +123,69 @@ key provides no key-path spend. On the primary path, P(pi) checks:
    taproot-construction jets.
 5. All enabled policy predicates hold (section 3).
 
-The output scan is a bounded unroll: the covenant commits to a maximum
-output count N_max, checked against `num_outputs`. N_max is part of the
-covenant's semantics and is sized against the Simplicity budget: execution
-cost is bought with witness bytes (budget = witness size + 50, capped at
-4,000,050) against a block weight of 200,000 on Sequentia mainnet and
-400,000 on the testnet.
+Checks 3 and 4 are stronger than the paper's, and check 4 has an exemption the
+paper does not need:
+
+- **The sender is proven once.** All regulated inputs of a transfer belong to
+  one owner -- the transfer limit needs that twice over, since a limit is per
+  sender and change is identified relative to one -- so P(pi) verifies one
+  whitelist membership proof for the sender, applies their lockup, and then
+  requires every A input's script to be exactly C_U(sender). That is the same
+  binding a per-input proof gave, it makes the single-sender rule structural,
+  and it removes a 16-level Merkle fold and a taproot reconstruction from every
+  input slot after the first.
+- **Change is exempt.** An A output paying C_U(sender) is change: no membership
+  proof, no receive window, no explicit value. A receive window restricts
+  *acquisition*; applying it to a sender's own change turns it into a spend
+  prohibition, so a holder inside a Reg S window could not transact at all
+  unless a UTXO happened to equal the payment exactly. The sender's standing was
+  established once already, and retaining your own coins is not an acquisition.
+
+**Shapes.** The scans are bounded unrolls: the covenant commits to maximum input
+and output counts, checked against `num_inputs` and `num_outputs`. Because
+Simplicity's cost bound is *static* over the whole program DAG and does not
+shrink when a slot goes unused, a single program sized for the widest transfer
+charges every ordinary transfer for slots it never touches. So P is compiled
+once per **shape** -- a pair (N_max_inputs, N_max_outputs) -- and every shape is
+a leaf of the same C_V(pi) taptree. The address does not depend on which leaf a
+spender uses; each leaf asserts its own bounds, so a narrow leaf cannot be used
+for a wide transaction; and a wallet picks the narrowest leaf that fits.
+
+The menu, with the canonical transfer given the shallow leaf so its control
+block is shortest:
+
+| leaf   | inputs | outputs | for                                            |
+|--------|--------|---------|------------------------------------------------|
+| `p3x5` | 3      | 5       | verifier, 1 regulated, fee; verifier, payment, change, fee-change, fee. **Canonical.** |
+| `p3x4` | 3      | 4       | the same with an exact fee UTXO                 |
+| `p4x6` | 4      | 6       | two regulated inputs, or two payments           |
+| `p5x7` | 5      | 7       | consolidation: three regulated inputs           |
+
+No shape has fewer than three inputs, and that is forced rather than chosen: a
+transfer cannot pay its fee in A, and the verifier input's q of V is returned
+whole to output zero, so the fee must come from an ordinary input that is
+neither.
+
+**Budget.** Execution cost is bought with witness bytes. Sequentia grants
+`SIMPLICITY_BUDGET_PER_WITNESS_BYTE` = 4 weight units of execution per witness
+byte (`src/script/script.h`), against Elements' one, capped at 4,000,050. Under
+that rule every shape's functional witness pays for its own static cost with a
+margin of 1.3x to 2.3x, and the covenants carry **no padding**. Under the
+one-to-one rule they are unspendable by design, which is the correct failure:
+they would otherwise need tens of kilobytes of inert bytes in every transfer.
+
+**On the live testnet the wider budget starts at height 101,750**, a little over
+a day past the tip at release. The rule only ever accepts more, so it needs no
+activation gate for correctness; the flag day exists because that chain is
+running and has other operators. Ungated, the fork would fire the instant anyone
+broadcast a spend the old budget could not pay for, and every node still on the
+old rule would reject that block and fork off, on a date nobody could predict.
+Until 101,750 the new binary enforces the old budget, so upgrading early is safe
+and OpenDAMP covenants are unspendable there; every fresh chain -- regtest,
+mainnet, a re-genesised testnet -- has the wider budget from genesis.
+The measured canonical transfer is a 3,634-byte verifier witness and a
+726-byte user witness, against 26,830 and 633 for the padded single-shape
+program it replaced.
 
 ### 2.3 Sequentia delta: any-asset fees
 
@@ -125,8 +216,16 @@ elect `cosign` instead; this is the point of offering both.
 
 `seq` increments on every policy update. `rules_root` is a Merkle root over
 the enabled predicate commitments in fixed order (absent predicates commit
-to the empty hash). The verifier program takes pi as its instantiation
-parameter, so C_V(pi) commits to exactly one policy version.
+to the empty hash).
+
+pi is a compile-time parameter of the verifier program and enters its DAG, so
+C_V(pi) commits to exactly one policy **version**. This is worth stating
+precisely because the near-miss is silent: the covenant enforces the whitelist
+root, the blacklist root and the limit *directly*, and if only those reached the
+program then two snapshots with identical rules and different sequence numbers
+would produce the same address, and a rollback would be indistinguishable on
+chain from the version it rolled back to. Committing pi costs one 256-bit
+comparison (measured: 2,807 milli-weight-units) and closes that.
 
 ### 3.2 Predicate: blacklist by outpoint (the freeze mechanism)
 
@@ -137,9 +236,11 @@ the bracketing interval plus two strict 256-bit comparisons. See
 `opendamp/SPEC-dmt-v1.md`.
 
 For an input outpoint (t, v), the policy key is k_out = SHA256(t || BE32(v)).
-The issuer commits to a Merkle tree (sparse Merkle tree or Cartesian Merkle
-tree; the concrete tree is fixed by the snapshot `tree` field) containing
-blacklisted outpoints. Each regulated input supplies a non-membership proof
+The issuer commits to a dmt-v1 interval tree (`opendamp/SPEC-dmt-v1.md`)
+containing blacklisted outpoints. An earlier draft of this document reserved
+`smt-v1` and `cmt-v1`; neither fits the Simplicity budget at depth 256, which is
+why dmt-v1 exists, and a snapshot declaring one is refused rather than accepted
+into an address no holder could spend. Each regulated input supplies a non-membership proof
 against the committed root. A listed UTXO cannot satisfy the verifier; an
 unlisted UTXO spends without contacting the issuer.
 
@@ -204,7 +305,7 @@ publication as a first-class obligation:
     snapshot/v1 = {
       "v": 1, "asset": A, "verifier_asset": V, "q": q,
       "pi": <hex>, "seq": n, "prev_pi": <hex or null>,
-      "tree": "cmt-v1" | "smt-v1",
+      "tree": "dmt-v1",
       "predicates": {
         "blacklist": { "root": <hex>, "entries": [...] | "url": ... },
         "whitelist": { "root": <hex>, "entries": [...] | "url": ... },
@@ -258,14 +359,28 @@ verifier output on chain being the binding fact a holder verifies against.
 - **Update**: spend C_V(pi) through G(I), create C_V(pi') with q of V, and
   publish snapshot seq+1 before or at broadcast. Wallets treat a verifier
   output whose pi has no published snapshot as unspendable-by-them and alert.
-- **Halt**: move V anywhere else through G(I). This is the pause analog and
-  is reversible by recreating a verifier output.
+- **Halt**: BURN V through G(I), to a bare `OP_RETURN`. This is the pause
+  analog. It must be a burn and not an ordinary address, because of the
+  invariant in section 2.1: q of V parked at a spendable output is a standing
+  bypass of the entire policy for whoever holds that key. An OP_RETURN output
+  can never be an input, so a burn leaves no such output in existence and A is
+  frozen, which is what a halt is supposed to mean. Resuming means reissuing V.
+  `IssuerReq::halt_to_burn` is the supported path and
+  `halt_leaves_live_verifier_asset` names the alternative for a caller that
+  insists on it.
 - **Parallel verifier outputs**: with retained V reissuance authority the
   issuer may run N verifier outputs to reduce the spending race. Keeping
   their policy versions consistent during an update is an operational
   runbook item: update all outputs in one transaction where possible, or
   publish the union semantics (a transfer is valid under the pi its chosen
   verifier input commits to).
+
+  **V's reissuance authority is as sensitive as the issuer key I.** Minting q of
+  V to an ordinary address is a complete bypass of the policy by the route in
+  section 2.1, so retaining that authority to run parallel outputs means
+  retaining a second key of the same criticality, held the same way. Destroying
+  it after setup is the safer default, at the cost of a single verifier output
+  and the spending race that comes with it.
 - **Redemption**: the primary path has no redemption exit. The issuer path
   still permits an informal exit: a collaborating holder and the issuer can
   move A outside confinement (both signatures required; a holder who does
@@ -292,11 +407,23 @@ Inherited from the DAMP paper with Sequentia specifics:
   not report simplicity active. On Sequentia: mainnet always-active; the
   live testnet is active (BIP9 bit 21, since height 89,856); regtest
   requires `-evbparams=simplicity:0:::`.
-- **Budget exhaustion**: N_max and proof sizes bound the witness; the
-  covenant must be sized so a maximal legitimate transfer fits the
-  Simplicity budget and the chain's block weight with margin.
+- **Budget exhaustion**: with no padding, every shape has to pay for its own
+  static cost out of the proofs it genuinely carries. The binding case is the
+  *smallest* legitimate witness -- the sender proof, one regulated input, one A
+  output -- because anything richer buys more budget against an unchanged cost.
+  `tests/cost_profile.rs` asserts that margin per shape (1.3x to 2.3x today) and
+  fails rather than letting a widened scan produce an unspendable leaf.
+- **Confinement rests on an unverifiable invariant**: q of V must never exist
+  outside a verifier covenant (section 2.1). Halt burns V and V's reissuance
+  authority is key-critical (section 6); neither is optional.
 - **Fixed input-zero position**: functionally limiting (the paper notes it);
   accepted for v1.
+- **Throughput**: a single verifier output serialises every transfer of an
+  asset, so contention, not size, is the first ceiling a busy asset hits. Size
+  is the second: a canonical transfer measures 1,582 vB (the node's own vsize,
+  asserted in the regtest suite) against 89,999 vB of real block payload, so 56
+  restricted transfers fit in a block. The padded single-shape program managed
+  12.
 
 ## 8. Toolchain and milestones
 

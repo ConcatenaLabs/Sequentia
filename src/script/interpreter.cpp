@@ -3357,7 +3357,23 @@ static bool VerifyWitnessProgram(const CScriptWitness& witness, int witversion, 
                 // Tapsimplicity (leaf version 0xbe)
                 const valtype& simplicity_program = SpanPopBack(stack);
                 const valtype& simplicity_witness = SpanPopBack(stack);
-                const int64_t budget = ::GetSerializeSize(witness.stack, PROTOCOL_VERSION) + VALIDATION_WEIGHT_OFFSET;
+                // SEQUENTIA: one witness byte buys SIMPLICITY_BUDGET_PER_WITNESS_BYTE
+                // weight units of execution rather than one, so a program does not
+                // have to carry inert padding to pay for its own static cost bound.
+                // See the comment on the constant in script.h, and
+                // Consensus::Params::SimplicityBudget4ActiveAt for why a rule that
+                // only ever accepts more is gated by height on the running testnet.
+                //
+                // `witness.stack` is the whole stack including any annex, which is
+                // deliberate: the annex is committed to by Simplicity's sigAllHash
+                // (via txHash -> inputsHash -> inputAnnexesHash), so budget bought
+                // with annex bytes cannot be stripped by a third party without
+                // invalidating the spend.
+                const int64_t per_byte = (flags & SCRIPT_VERIFY_SIMPLICITY_BUDGET4)
+                    ? SIMPLICITY_BUDGET_PER_WITNESS_BYTE : 1;
+                const int64_t budget = std::min<int64_t>(
+                    (int64_t)::GetSerializeSize(witness.stack, PROTOCOL_VERSION) * per_byte + VALIDATION_WEIGHT_OFFSET,
+                    SIMPLICITY_BUDGET_MAX);
                 rawElementsTapEnv simplicityRawTap;
                 simplicityRawTap.controlBlock = control.data();
                 simplicityRawTap.pathLen = (control.size() - TAPROOT_CONTROL_BASE_SIZE) / TAPROOT_CONTROL_NODE_SIZE;

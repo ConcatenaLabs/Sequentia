@@ -1176,6 +1176,18 @@ bool MemPoolAccept::PolicyScriptChecks(const ATMPArgs& args, Workspace& ws)
         scriptVerifyFlags |= SCRIPT_SIGHASH_RANGEPROOF;
     }
 
+    // SEQUENTIA: the wider Simplicity budget, on the same terms consensus applies
+    // it. This one is a RELAXATION, so it cannot live in STANDARD_SCRIPT_VERIFY_FLAGS
+    // unconditionally the way a restriction can: before the flag day that would make
+    // policy more permissive than consensus, and the mempool would fill with spends
+    // no block will accept. Reading it off the tip keeps policy at least as strict as
+    // consensus at every height -- for the one block after activation it is stricter,
+    // which costs a relay round and nothing else.
+    if (m_active_chainstate.m_chain.Tip() != nullptr &&
+        args.m_chainparams.GetConsensus().SimplicityBudget4ActiveAt(m_active_chainstate.m_chain.Tip()->nHeight)) {
+        scriptVerifyFlags |= SCRIPT_VERIFY_SIMPLICITY_BUDGET4;
+    }
+
     // Check input scripts and signatures.
     // This is done last to help prevent CPU exhaustion denial-of-service attacks.
     if (!CheckInputScripts(tx, state, m_view, scriptVerifyFlags, true, false, ws.m_precomputed_txdata)) {
@@ -2299,6 +2311,14 @@ static unsigned int GetBlockScriptFlags(const CBlockIndex* pindex, const Consens
 
     if (DeploymentActiveAfter(pindex->pprev, consensusparams, Consensus::DEPLOYMENT_SIMPLICITY)) {
         flags |= SCRIPT_VERIFY_SIMPLICITY;
+    }
+
+    // SEQUENTIA: the wider Simplicity execution budget, gated by height on the
+    // already-running testnet and in force from genesis everywhere else. The
+    // rule only ever accepts more, so the gate is a flag day rather than a
+    // correctness requirement -- see Consensus::Params for why it exists.
+    if (consensusparams.SimplicityBudget4ActiveAt(pindex->nHeight)) {
+        flags |= SCRIPT_VERIFY_SIMPLICITY_BUDGET4;
     }
 
     return flags;
