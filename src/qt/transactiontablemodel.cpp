@@ -374,7 +374,9 @@ QString TransactionTableModel::formatTxStatus(const TransactionRecord *wtx) cons
         status = tr("Confirming (%1 of %2 recommended confirmations)").arg(wtx->status.depth).arg(TransactionRecord::RecommendedNumConfirmations);
         break;
     case TransactionStatus::Confirmed:
-        status = tr("Confirmed (%1 confirmations)").arg(wtx->status.depth);
+        // Plural form: with one confirmation being the ordinary confirmed state,
+        // "Confirmed (1 confirmations)" would be the string most often on screen.
+        status = tr("Confirmed (%n confirmation(s))", "", wtx->status.depth);
         break;
     case TransactionStatus::Conflicted:
         status = tr("Conflicted");

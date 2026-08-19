@@ -94,8 +94,14 @@ public:
         Unstake,
     };
 
-    /** Number of confirmation recommended for accepting a transaction */
-    static const int RecommendedNumConfirmations = 2;
+    /** Confirmations after which the history stops hedging and says confirmed.
+     *
+     *  Display only. It changes no wallet policy, nothing about when a coin
+     *  becomes spendable, and no consensus rule -- only how many blocks a row is
+     *  asked to wait before it stops calling itself "confirming". One, because a
+     *  second block adds nothing a holder of this wallet is waiting for, and a
+     *  row that says "1 of 2" reads as unfinished business when there is none. */
+    static const int RecommendedNumConfirmations = 1;
 
     TransactionRecord():
             hash(), time(0), type(Other), address(""), amount(0), idx(0)
