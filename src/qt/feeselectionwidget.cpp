@@ -19,6 +19,7 @@
 
 #include <QComboBox>
 #include <QDoubleValidator>
+#include <QShowEvent>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -196,6 +197,29 @@ void FeeSelectionWidget::populateAssets()
     applyDefaultAsset();
 }
 
+void FeeSelectionWidget::relabelAssets()
+{
+    if (!m_asset_selector) return;
+    for (int i = 0; i < m_asset_selector->count(); ++i) {
+        const CAsset asset = GetAssetFromString(m_asset_selector->itemData(i).toString().toStdString());
+        if (asset.IsNull()) continue;
+        const QString name = GUIUtil::assetDisplayName(asset);
+        // Only when it actually changed: setItemText on the current item makes
+        // the combo emit, and re-entering refresh() from inside refresh() is a
+        // loop with no reason to exist.
+        if (m_asset_selector->itemText(i) != name) m_asset_selector->setItemText(i, name);
+    }
+}
+
+void FeeSelectionWidget::showEvent(QShowEvent* event)
+{
+    QWidget::showEvent(event);
+    // The registry is fetched over the network and merged long after this widget
+    // was built. Coming back to the page is the moment a stale hex id is most
+    // visible, and the cheapest moment to correct it.
+    relabelAssets();
+}
+
 CAsset FeeSelectionWidget::feeAsset() const
 {
     if (!g_con_any_asset_fees || m_asset_selector->count() == 0) return ::policyAsset;
@@ -326,6 +350,12 @@ CAmount FeeSelectionWidget::recommendedRate(bool& have_estimate) const
 void FeeSelectionWidget::refresh()
 {
     if (!m_model || !m_model->getOptionsModel()) return;
+
+    // Names resolve on the same schedule as the numbers below, and for the same
+    // reason: both wait on something that arrives after the wallet is attached.
+    // refresh() is wired to numBlocksChanged, so a label that resolves while the
+    // page is open is corrected within a block instead of never.
+    relabelAssets();
 
     bool have_estimate = false;
     const CAmount recommended = recommendedRate(have_estimate);
