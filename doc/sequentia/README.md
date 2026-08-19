@@ -70,20 +70,21 @@ not these, are authoritative for current behavior. Status of each:
 | Document | Status |
 |---|---|
 | [`openamp-design.md`](openamp-design.md) | Implemented in [`openamp`](https://github.com/GracedEternalKingCabbageMan/openamp); the daemon is live on the public testnet with the demo asset BONDX. Zero consensus changes in this repo. |
-| [`seqdex-orderbook-design.md`](seqdex-orderbook-design.md) | Implemented in [`seqdex`](https://github.com/GracedEternalKingCabbageMan/seqdex) (the seqob order book). |
-| [`cross-chain-orderbook-consolidation.md`](cross-chain-orderbook-consolidation.md) | Decision note for seqdex: cross-chain trading consolidated onto the order book (RFQ special-maker retired). |
 | [`seqln-core-lightning-fork-spec.md`](seqln-core-lightning-fork-spec.md) | The operative SeqLN design spec; implemented in [`seqln`](https://github.com/GracedEternalKingCabbageMan/seqln). |
 | [`sequentia-lightning-cln-spec.md`](sequentia-lightning-cln-spec.md) | Superseded by `seqln-core-lightning-fork-spec.md` (the earlier fork plan). |
 | [`seqln-asset-channels-build-plan.md`](seqln-asset-channels-build-plan.md) | Implemented in seqln (asset-aware channels). |
 | [`seqln-phase2-submarine-swaps.md`](seqln-phase2-submarine-swaps.md) | Implemented in seqln (submarine-swap primitives, both directions). |
-| [`seqln-phase2-dex-integration.md`](seqln-phase2-dex-integration.md) | Design: mapping the submarine-swap primitives onto the SeqDEX order book. |
 | [`seqln-step2-pure-ln-swaps-design.md`](seqln-step2-pure-ln-swaps-design.md) | Design for pure-Lightning asset↔BTC swaps; implemented in seqln per its milestone log. |
 | [`seqln-tier2-hosted-channels-design.md`](seqln-tier2-hosted-channels-design.md) | Design for the hosted-channel signer split (thin-wallet non-custodial Lightning); daemon-layer milestones implemented in seqln, wallet integration in progress. |
-| [`seqln-dex-instant-swap-latency.md`](seqln-dex-instant-swap-latency.md), [`seqln-dex-instant-swap-latency-followup.md`](seqln-dex-instant-swap-latency-followup.md) | Design notes on making Lightning-DEX swaps feel instant; the followup records the pure-LN endgame as built. |
-| [`seqdex-lightning-feasibility.md`](seqdex-lightning-feasibility.md) | Exploratory feasibility study (Lightning on Sequentia); partly superseded by the seqln docs above. |
-| [`seqdex-simplicity-assessment.md`](seqdex-simplicity-assessment.md) | Exploratory: what Simplicity covenants would open for SeqDEX. Simplicity is vendored but NEVER_ACTIVE on the bundled chains. |
-| [`simplicity-dex-covenant-offers-design.md`](simplicity-dex-covenant-offers-design.md) | Design + regtest proof of covenant-enforced resting DEX offers; exploratory (gated off on the public chain). |
 | [`ux-audit-spec-2026-07-02.md`](ux-audit-spec-2026-07-02.md) | UX audit and design-change spec across the ecosystem's user-facing surfaces; implementation tracked in the respective repos. |
+
+The SeqDEX and SeqOB design notes are **not** kept here. They document code in
+[`seqdex`](https://github.com/GracedEternalKingCabbageMan/seqdex) and live in
+that repository's `docs/`: the order-book and terminal specs, the covenant-offer
+design, the rail-crossing P2P/LSP spec, the Lightning feasibility and Simplicity
+assessments, and the instant-swap latency notes. The regtest proofs of the
+covenant order book live there too, in `test/regtest/`; they run against a built
+node from this repository.
 
 ## 3. Historical correspondence
 

@@ -3,7 +3,7 @@
 A plan for a Core Lightning (CLN) fork that runs Lightning on Sequentia, using the same binary that runs
 Lightning on Bitcoin (testnet4 now, mainnet later). Grounded in the codebase (CLN master `066056d915`,
 Elements support CI-tested against Elements Core 23.2.1; Sequentia = Elements 23.3.3) and in the safety
-analysis already done in `seqdex-lightning-feasibility.md`. This document supersedes that memo's one wrong
+analysis already done in `seqdex/docs/seqdex-lightning-feasibility.md`. This document supersedes that memo's one wrong
 claim that CLN "dropped Liquid entirely": CLN's Elements support is in-tree and maintained.
 
 ## 0. Goal, and why CLN is the right base
@@ -187,7 +187,7 @@ separately-specified phase.
 
 ## 6. Anchor-aware safety layer (Sequentia-specific, load-bearing)
 
-The safety analysis is settled in `seqdex-lightning-feasibility.md` and is a net upgrade over generic-sidechain
+The safety analysis is settled in `seqdex/docs/seqdex-lightning-feasibility.md` and is a net upgrade over generic-sidechain
 LN: a Sequentia reorg is always a tail truncation (anchor height is monotonic; the watcher disconnects a
 contiguous suffix), so causal order is preserved across reorgs, the CSV clock resets on a disconnected
 commitment (re-extending the defender's window, never shortening it), and no Sequentia-only reorg exists
@@ -354,5 +354,5 @@ minimum_depth, HRP registry, offer_chains). Prior art: Blockstream Lightning-on-
 Taproot Assets + bLIP-29 (edge/RFQ architecture), RGB-over-LN, dead multi-asset BOLT PR #72, ZmnSCPxj's
 free-option argument, PeerSwap, Boltz. Sequentia: `src/primitives/block.h` (anchor header),
 `src/chainparams.cpp` (network params, shared HRPs, dynafed off, signed-blocks proof), the shipped
-`getblockheader.poscertified` + `getanchorstatus` RPCs, `doc/sequentia/seqdex-lightning-feasibility.md`
-(safety analysis, timelock/anchor-depth policy), `doc/sequentia/seqdex-orderbook-design.md` (LightningTerms=22).
+`getblockheader.poscertified` + `getanchorstatus` RPCs, `seqdex/docs/seqdex-lightning-feasibility.md`
+(safety analysis, timelock/anchor-depth policy), `seqdex/docs/seqdex-orderbook-design.md` (LightningTerms=22).

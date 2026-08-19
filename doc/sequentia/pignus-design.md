@@ -14,7 +14,7 @@ name -- renaming costs one identifier.
 
 Companion documents: `openamp-design.md` and `opendamp-design.md` (the two
 restricted-asset models this coexists with, section 8),
-`simplicity-dex-covenant-offers-design.md` (the covenant-offer design this
+`seqdex/docs/simplicity-dex-covenant-offers-design.md` (the covenant-offer design this
 borrows its output-map and self-replication techniques from), and
 `03-bitcoin-anchoring.md` (why section 6.4 exists at all).
 
