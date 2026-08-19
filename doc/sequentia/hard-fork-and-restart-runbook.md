@@ -48,6 +48,8 @@ pass before the next.
 Bitcoin testnet4 (the anchor)
   -> Sequentia committee (node000-019)  [node000 = producer]
   -> dexnode (application node, RPC :18300)
+  -> explorer node (systemd seq-explorer-node, clone /root/sequentia/Sequentia)
+  -> pool-board node (systemd seq-pool-board-node, same clone)
   -> node RPC wallets loaded (EVERY wallet — they do NOT auto-load)
   -> relays (seqobd :9955 systemd + :9965/:9966/:9971)
   -> SeqLN fleet (btc-maker, btc-taker, ln-asset, ln-asset-b, prov nodes, speculad)
@@ -55,6 +57,29 @@ Bitcoin testnet4 (the anchor)
   -> maker fleets + settlers + seeding
   -> health verification (Section 6)
 ```
+
+**The sequentiad fleet is 23 nodes, not 20**: the committee plus the dexnode, the explorer
+node and the pool-board node, and a binary cutover moves ALL of them in one window. Never
+work from a remembered list — the 24.3.0 cutover found the pool-board node missing from
+every list anyone held. Derive the fleet live, and let the process table be the authority:
+
+```
+ps -eo pid,args | grep '[s]equentiad'                     # every running node + its datadir
+systemctl list-units 'seq-*' --type=service --state=running --no-legend
+```
+
+Three checks per node before declaring a cutover plan complete:
+
+- **Effective ExecStart comes from `systemctl show -p ExecStart --value <unit>`, never from
+  `systemctl cat`.** Drop-ins override, and cat's ordering misleads: at the 24.3.0 cutover
+  the explorer unit READ as sharing `/root/Sequentia` while actually running
+  `/root/sequentia/Sequentia/src/sequentiad`.
+- **Check `/proc/<pid>/exe` against the on-disk binary.** A node keeps running from a deleted
+  inode after a rename or rebuild; the dexnode ran the pre-rename path for a full day this
+  way, invisible to any path-based audit until its restart.
+- Nodes running from `/root/sequentia/Sequentia` need that clone fetched, checked out at the
+  tag and BUILT in the same window — one build there covers the explorer and pool-board
+  nodes both.
 
 ## 2. Committee (node000-019)
 
@@ -76,7 +101,31 @@ Verify: `getblockcount` agrees across nodes and advances; 20/20 answer RPC.
 dexnode (application node) is launched manually and its wallets must be explicitly loaded.
 The 2026-07-22 miss was exactly this — the sbtc-bridge wallet was never reloaded.
 
-**node000 (:18200) wallets:** `treasury  treasury2  compages  sbtc-bridge`
+**Capture the LIVE set before stopping — the lists below go stale** (node000 held 14 wallets
+at the 24.3.0 cutover against the 4 listed here). And capture how each wallet RESOLVES, not
+just its name:
+
+```
+/root/Sequentia/src/sequentia-cli -rpcport=18200 -rpcuser=seq -rpcpassword=seq listwallets
+/root/Sequentia/src/sequentia-cli -rpcport=18300 -rpcuser=seq -rpcpassword=seq listwallets
+ls /root/seq-testnet/node000/testnet3/wallets/    # the layout half of the capture
+```
+
+**The legacy-layout trap (found at the 24.3.0 cutover, would have bitten quietly):** seven of
+node000's wallets live directly in `testnet3/` rather than `testnet3/wallets/`.
+`loadwallet <name>` cannot see those; loading by ABSOLUTE PATH works but registers the wallet
+under that path, so every `-rpcwallet=<name>` in the box scripts (`addstakers.sh`,
+`reissue-loop.sh`, `reissue-run.sh`) then fails. The fix that keeps short names working is a
+symlink per legacy wallet, then load by name:
+
+```
+cd /root/seq-testnet/node000/testnet3/wallets && ln -s ../<name> <name>
+loadwallet <name>
+```
+
+Never load by absolute path.
+
+**node000 (:18200) wallets:** `treasury  treasury2  compages  sbtc-bridge` (+ the captured rest)
 ```
 for w in treasury treasury2 compages sbtc-bridge; do /root/Sequentia/src/sequentia-cli -rpcport=18200 -rpcuser=seq -rpcpassword=seq loadwallet $w; done
 ```
@@ -175,3 +224,10 @@ writes a status line the operator can watch — see the DEX gap-closure plan P0.
 - Never hand-launch seqobd :9955 (creates a port-holding duplicate that blocks the systemd
   unit); use `systemctl restart seqobd`.
 - `bitcoin-cli -testnet4` works; `-chain=testnet4` prints an error banner.
+- peer-stall-check throws transient hits during the restart window itself: inbound peers at
+  headers -1 (unknown), under a minute old. That is connection churn, not the
+  frozen-below-a-height stall signature; it clears on its own. Confirm a cutover by version
+  and height across all 23 nodes, never by the script alone.
+- From 24.3.0, the first start after an upgrade sweeps supervision-invalidated residue out of
+  a reloaded mempool.dat (`Supervision: evicting …` lines at startup are that sweep working,
+  not a problem).
