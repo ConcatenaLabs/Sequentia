@@ -333,7 +333,10 @@ void BitcoinGUI::createActions()
     // hidden unless the wallet on screen has one to operate, so most users never
     // see it -- and the issuer who does has the freeze, unfreeze, pause and rotate
     // flows here rather than in a shell.
-    supervisionAction = new QAction(platformStyle->SingleColorIcon(":/icons/assets"), tr("Su&pervision"), this);
+    // The padlock, not the assets ledger: sharing an icon with the Assets tab made
+    // two different sections look like one, and freezing is the power this tab is
+    // actually for.
+    supervisionAction = new QAction(platformStyle->SingleColorIcon(":/icons/lock_closed"), tr("Su&pervision"), this);
     supervisionAction->setStatusTip(tr("Freeze, unfreeze, pause and rotate keys for supervised assets you issued"));
     supervisionAction->setToolTip(supervisionAction->statusTip());
     supervisionAction->setCheckable(true);
