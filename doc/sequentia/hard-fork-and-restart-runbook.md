@@ -28,8 +28,8 @@ Current height ~42569 (2026-07-22 evening); 44300 is ~1730 blocks (~40h at ~80s/
 
 **Watch commands:**
 ```
-for n in 000 005 010 015 019; do /root/SequentiaByClaude/src/sequentia-cli -datadir=/root/seq-testnet/node$n getblockcount; done   # should agree + advance
-for n in 000 010 019; do /root/SequentiaByClaude/src/sequentia-cli -datadir=/root/seq-testnet/node$n getbestblockhash; done         # should be identical
+for n in 000 005 010 015 019; do /root/Sequentia/src/sequentia-cli -datadir=/root/seq-testnet/node$n getblockcount; done   # should agree + advance
+for n in 000 010 019; do /root/Sequentia/src/sequentia-cli -datadir=/root/seq-testnet/node$n getbestblockhash; done         # should be identical
 journalctl -u 'seq*committee*' --since '5 min ago' 2>/dev/null | grep -iE 'posvrf|certif|stall|leader' | tail
 ```
 
@@ -62,8 +62,8 @@ Bitcoin testnet4 (the anchor)
 /root/seq-committee-start.sh                 # idempotent; skips already-up nodes
 ```
 Gotchas (verified, do not relearn the hard way):
-- **Build in the RUN dir** `/root/SequentiaByClaude` (has BDB wallet support); the clone
-  `/root/sequentia/SequentiaByClaude` lacks BDB and crashes node000 (holds treasury BDB).
+- **Build in the RUN dir** `/root/Sequentia` (has BDB wallet support); the clone
+  `/root/sequentia/Sequentia` lacks BDB and crashes node000 (holds treasury BDB).
 - Committee network subdir is `testnet3`, datadir `-datadir=/root/seq-testnet/nodeNNN` (no
   trailing slash). Count only `sequentiad -datadir=…`, and kill stray `sequentia-cli` waiters
   (they fool the start script's pgrep).
@@ -78,7 +78,7 @@ The 2026-07-22 miss was exactly this — the sbtc-bridge wallet was never reload
 
 **node000 (:18200) wallets:** `treasury  treasury2  compages  sbtc-bridge`
 ```
-for w in treasury treasury2 compages sbtc-bridge; do /root/SequentiaByClaude/src/sequentia-cli -rpcport=18200 -rpcuser=seq -rpcpassword=seq loadwallet $w; done
+for w in treasury treasury2 compages sbtc-bridge; do /root/Sequentia/src/sequentia-cli -rpcport=18200 -rpcuser=seq -rpcpassword=seq loadwallet $w; done
 ```
 
 **dexnode (:18300) wallets:** `xmm  seqdex-mm-btc  bridge-taker` (+ load `subtaker submaker
@@ -86,7 +86,7 @@ submaker2 speculad-fee seqob-settler` if the LSP/settler need them — verify ag
 `/etc/sequentia/lsp-b5b1.env` SEQ_WALLET and the settler config; these were NOT loaded at the
 last audit and may thin the LSP self-custody paths).
 ```
-for w in xmm seqdex-mm-btc bridge-taker; do /root/SequentiaByClaude/src/sequentia-cli -rpcport=18300 -rpcuser=seq -rpcpassword=seq loadwallet $w; done
+for w in xmm seqdex-mm-btc bridge-taker; do /root/Sequentia/src/sequentia-cli -rpcport=18300 -rpcuser=seq -rpcpassword=seq loadwallet $w; done
 ```
 
 **bitcoind testnet4 wallets:** `seqdex-mm-btc  w  sell-maker-btc  sell-taker-recv
@@ -148,9 +148,9 @@ nodes up, bridge alive, no stranded HTLCs.
 # ports
 ss -tlnp | grep -E ':(9955|9965|9966|9971|9981|9987|18200|18300|9740|9741)' | wc -l   # expect ~10
 # committee producing
-/root/SequentiaByClaude/src/sequentia-cli -datadir=/root/seq-testnet/node000 getblockcount
+/root/Sequentia/src/sequentia-cli -datadir=/root/seq-testnet/node000 getblockcount
 # wallets loaded (each node's set from Section 3)
-/root/SequentiaByClaude/src/sequentia-cli -rpcport=18200 -rpcuser=seq -rpcpassword=seq listwallets
+/root/Sequentia/src/sequentia-cli -rpcport=18200 -rpcuser=seq -rpcpassword=seq listwallets
 # books non-empty + last_price live
 curl -s 127.0.0.1:9955/v1/markets | python3 -c 'import sys,json;m=json.load(sys.stdin)["markets"];print(len(m),"markets",sum(1 for x in m if x.get("last_price")),"priced")'
 # LN asset nodes
