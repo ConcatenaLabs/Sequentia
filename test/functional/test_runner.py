@@ -186,6 +186,7 @@ BASE_SCRIPTS = [
     # Sequentia tests
     'feature_supervised_assets.py',
     'feature_supervised_mempool_load.py',
+    'feature_supervised_reorg_resurrection.py',
     'feature_supervised_zero_supply.py',
     'feature_any_asset_fee.py',
     'feature_any_asset_fee_no_default.py',
