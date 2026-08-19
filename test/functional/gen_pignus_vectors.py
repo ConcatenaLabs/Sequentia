@@ -31,7 +31,9 @@ def vault_case(name, **kw):
     tap, leaves = pig.vault_taptree(**kw)
     return {
         "name": name,
-        "params": {k: (v.hex() if isinstance(v, bytes) else v) for k, v in kw.items()},
+        "params": {k: ([b.hex() for b in v] if isinstance(v, (list, tuple))
+                        else v.hex() if isinstance(v, bytes) else v)
+                   for k, v in kw.items()},
         "leaves": {n: bytes(s).hex() for n, s in leaves.items()},
         "scriptPubKey": bytes(tap.scriptPubKey).hex(),
         "output_key": tap.output_pubkey.hex(),
@@ -67,6 +69,24 @@ def main():
                    strike=1_000 * pig.PRICE_SCALE,
                    maturity=1_800_000_000, recover_after=1_802_592_000,
                    not_before=1_700_000_000, max_price=2_000 * pig.PRICE_SCALE),
+        # A threshold oracle set: a different leaf shape entirely, so an
+        # implementation that only handles the single-key form fails here rather
+        # than silently deriving a wrong address for a 2-of-3 vault.
+        vault_case("oracle_set_2_of_3",
+                   **{k: v for k, v in base.items() if k != "oracle_x"},
+                   oracles=[bytes.fromhex(h * 32) for h in ("22", "33", "44")],
+                   oracle_threshold=2,
+                   debt=1500 * COIN, strike=180 * pig.PRICE_SCALE,
+                   maturity=504, recover_after=604, not_before=1_700_000_000,
+                   max_price=1_000_000 * pig.PRICE_SCALE),
+        # A 3-of-3 set, so the threshold is pinned as well as the key list.
+        vault_case("oracle_set_3_of_3",
+                   **{k: v for k, v in base.items() if k != "oracle_x"},
+                   oracles=[bytes.fromhex(h * 32) for h in ("22", "33", "44")],
+                   oracle_threshold=3,
+                   debt=1500 * COIN, strike=180 * pig.PRICE_SCALE,
+                   maturity=504, recover_after=604, not_before=1_700_000_000,
+                   max_price=1_000_000 * pig.PRICE_SCALE),
         # A non-default bonus and price scale.
         vault_case("custom_bonus_and_scale", **base, debt=250 * COIN,
                    strike=42 * 1000, maturity=1000, recover_after=1100,
