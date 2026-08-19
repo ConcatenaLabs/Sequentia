@@ -11,6 +11,7 @@
 #include <key_io.h>
 #include <mainchainrpc.h>
 #include <policy/policy.h>
+#include <policy/settings.h>
 #include <pos.h>
 #include <rpc/rawtransaction_util.h>
 #include <rpc/util.h>
@@ -22,6 +23,7 @@
 #include <script/standard.h>
 #include <util/fees.h>
 #include <util/moneystr.h>
+#include <util/rbf.h>
 #include <util/time.h>
 #include <util/translation.h>
 #include <util/vector.h>
@@ -978,6 +980,921 @@ RPCHelpMan bumpwithdrawstakefee()
     CTxDestination dest;
     if (ExtractDestination(tx->vout[dest_idx].scriptPubKey, dest)) {
         result.pushKV("destination", EncodeDestination(dest));
+    }
+    return result;
+},
+    };
+}
+
+
+// --- SEQUENTIA staking pools: delegate, reclaim, and watch a pool ---
+//
+// The consensus primitive is a delegation record (BuildDelegationScript): a
+// small bare output naming a controller and a signer. While it is unspent the
+// controller's whole stake weight counts for the signer, who must produce and
+// sign the blocks -- and who can never spend the staked coins, because only the
+// controller's key appears in the record's OP_CHECKSIG. The coins never move.
+//
+// What was missing was any way to USE it from a wallet: the primitive shipped
+// with getdelegationscript, which hands back a script and leaves the caller to
+// hand-build a transaction paying a bare output. The RPCs below are that
+// missing layer -- fund a record, reclaim it, and watch what the pool you
+// delegated to has committed to.
+
+namespace {
+
+//! One of this wallet's unspent delegation records, with everything needed to
+//! spend it. The record is a bare output, which IsMine does not match, so -- as
+//! with staking outputs (FindWalletStakeUtxos) -- it is found by walking the
+//! wallet's own transactions. delegatestake funds the record from this wallet,
+//! so the funding transaction is always a wallet transaction; a record funded
+//! by some other wallet toward one of our keys is out of scope, and would take
+//! a full UTXO-set scan to find.
+struct DelegationUtxo {
+    COutPoint outpoint;
+    CTxOut txout;
+    CPubKey controller;
+    CPubKey signer;
+    CAmount amount{0};
+    bool unconfirmed{false};  //!< the funding transaction is still in the mempool
+    bool spending{false};     //!< a reclaim or rotation is sent but not yet confirmed
+};
+
+std::vector<DelegationUtxo> FindWalletDelegationUtxos(CWallet& wallet, const std::optional<CPubKey>& only_controller) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+{
+    // Which wallet transaction, if any, still spends an outpoint. Conflicted
+    // and abandoned spenders are dead and must not count -- the same reasoning
+    // (and the same replace-by-fee case) as in FindWalletStakeUtxos.
+    std::multimap<COutPoint, const CWalletTx*> spenders;
+    for (const auto& [txid, wtx] : wallet.mapWallet) {
+        for (const CTxIn& in : wtx.tx->vin) spenders.emplace(in.prevout, &wtx);
+    }
+    const auto live_spender = [&](const COutPoint& op) -> const CWalletTx* {
+        const auto range = spenders.equal_range(op);
+        for (auto it = range.first; it != range.second; ++it) {
+            if (it->second->isAbandoned()) continue;
+            if (wallet.GetTxDepthInMainChain(*it->second) < 0) continue; // replaced
+            return it->second;
+        }
+        return nullptr;
+    };
+
+    std::vector<DelegationUtxo> found;
+    for (const auto& [wtxid, wtx] : wallet.mapWallet) {
+        for (uint32_t n = 0; n < wtx.tx->vout.size(); ++n) {
+            const CTxOut& out = wtx.tx->vout[n];
+            auto parsed = DelegationFromTxOut(out);
+            if (!parsed) continue;
+            if (only_controller && parsed->first != *only_controller) continue;
+            // Only a record this wallet can actually spend is ours to manage.
+            if (!WalletControlsStakerKey(wallet, parsed->first)) continue;
+            DelegationUtxo d;
+            d.outpoint = COutPoint(wtxid, n);
+            if (wallet.IsSpent(wtxid, n)) {
+                const CWalletTx* sp = live_spender(d.outpoint);
+                if (!sp) continue;
+                if (wallet.GetTxDepthInMainChain(*sp) > 0) continue; // confirmed: really gone
+                d.spending = true;
+            }
+            d.txout = out;
+            d.controller = parsed->first;
+            d.signer = parsed->second;
+            d.amount = out.nValue.IsExplicit() ? out.nValue.GetAmount() : 0;
+            found.push_back(std::move(d));
+        }
+    }
+    if (found.empty()) return found;
+
+    std::map<COutPoint, Coin> coins;
+    for (const DelegationUtxo& d : found) coins[d.outpoint];
+    wallet.chain().findCoins(coins);
+    const int tip_height = wallet.GetLastBlockHeight();
+
+    std::vector<DelegationUtxo> live;
+    for (DelegationUtxo& d : found) {
+        if (d.spending) { live.push_back(std::move(d)); continue; }
+        const Coin& coin = coins[d.outpoint];
+        if (coin.out.IsNull()) continue; // spent
+        // findCoins reports mempool outputs with the MEMPOOL_HEIGHT sentinel.
+        if (coin.nHeight > (uint32_t)tip_height) d.unconfirmed = true;
+        live.push_back(std::move(d));
+    }
+    return live;
+}
+
+//! The value to put in a delegation record by default. The record must clear
+//! the dust floor to relay at all, and every re-pointing pays its fee out of
+//! the record itself (a rotation is self-contained: it spends the old record
+//! and creates the new one in ONE transaction, which is what keeps a block from
+//! ever holding two records for one controller). So the default is the dust
+//! floor plus room for ten rotations, and the record shrinks by a fee each time
+//! it is re-pointed.
+CAmount DefaultDelegationRecordAmount(const CWallet& wallet, const CScript& record)
+{
+    const CAsset& asset = Params().GetConsensus().pegged_asset;
+    const CAmount dust = GetDustThreshold(CTxOut(asset, 1, record), ::dustRelayFee);
+    CCoinControl coin_control;
+    // A rotation is one bare input, one record output and the fee output: about
+    // 250 vB once the worst-case signature is counted.
+    const CAmount rotation_fee = GetMinimumFeeRate(wallet, coin_control, nullptr).GetFee(250);
+    return dust + 10 * rotation_fee;
+}
+
+//! Spend delegation records back to `dest_script`, signing each with its
+//! controller key, or -- when `rotate_to` is given -- re-creating the single
+//! record it names pointed at a new signer.
+//!
+//! A rotation must share a transaction with the spend it replaces. Consensus
+//! allows at most one unspent record per controller, and a block holding a
+//! second one is invalid -- so "reclaim, then delegate again" as two loose
+//! transactions could be mined in the wrong order and take the whole block down
+//! with it. One transaction cannot be mis-ordered against itself.
+CTransactionRef SpendDelegationRecords(CWallet& wallet, const std::vector<DelegationUtxo>& records,
+                                       const CScript& dest_script,
+                                       const CScript* rotate_to, CAmount* rotate_value_out,
+                                       CAmount* fee_out, CAmount* reclaimed_out) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+{
+    const CAsset& asset = Params().GetConsensus().pegged_asset;
+    CAmount total = 0;
+    for (const DelegationUtxo& d : records) total += d.amount;
+
+    CMutableTransaction mtx;
+    mtx.nVersion = 2;
+    mtx.nLockTime = (uint32_t)wallet.GetLastBlockHeight();
+    for (const DelegationUtxo& d : records) {
+        CTxIn in(d.outpoint);
+        in.nSequence = MAX_BIP125_RBF_SEQUENCE; // no relative lock on a record; stay replaceable
+        mtx.vin.push_back(in);
+    }
+    // Output 0 is what the records' value becomes: the new record when
+    // re-pointing, otherwise the reclaimed coins coming back to the wallet.
+    mtx.vout.push_back(CTxOut(asset, total, rotate_to ? *rotate_to : dest_script));
+    mtx.vout.push_back(CTxOut(asset, 0, CScript())); // explicit fee output, patched below
+
+    CAmount fee = 0;
+    {
+        CMutableTransaction sizing = mtx;
+        for (CTxIn& in : sizing.vin) in.scriptSig = CScript() << std::vector<unsigned char>(73);
+        CCoinControl coin_control;
+        fee = GetMinimumFeeRate(wallet, coin_control, nullptr).GetFee(GetVirtualTransactionSize(CTransaction(sizing)));
+    }
+    if (total <= fee) {
+        throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
+            "the delegation record holds %s SEQ, which does not cover the network fee (%s SEQ) to spend it",
+            FormatMoney(total), FormatMoney(fee)));
+    }
+    const CAmount out_value = total - fee;
+    // A rotation writes the remainder back into a record, so it has to clear the
+    // dust floor or the transaction will not relay.
+    if (rotate_to) {
+        const CAmount dust = GetDustThreshold(CTxOut(asset, out_value, *rotate_to), ::dustRelayFee);
+        if (out_value < dust) {
+            throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
+                "re-pointing this delegation would leave %s SEQ in the record, below the %s SEQ the network "
+                "requires; reclaim it with undelegatestake and delegate again with a larger amount",
+                FormatMoney(out_value), FormatMoney(dust)));
+        }
+    }
+    mtx.vout.front().nValue = out_value;
+    mtx.vout.back().nValue = fee;
+
+    // Sign each record with its controller key. A record is a bare
+    // (pre-segwit) script, so this is a legacy signature over the script itself
+    // and the scriptSig is just the signature push -- the same shape as a
+    // staking spend (withdrawstake).
+    for (size_t i = 0; i < records.size(); ++i) {
+        const DelegationUtxo& d = records[i];
+        CKey key;
+        if (!GetStakerKey(wallet, d.controller, key)) {
+            throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
+                "the private key for controller %s is not available in this wallet", HexStr(d.controller)));
+        }
+        FlatSigningProvider provider;
+        provider.keys[d.controller.GetID()] = key;
+        std::vector<unsigned char> sig;
+        MutableTransactionSignatureCreator creator(&mtx, i, d.txout.nValue, SIGHASH_ALL);
+        if (!creator.CreateSig(provider, sig, d.controller.GetID(), d.txout.scriptPubKey, SigVersion::BASE, /*flags=*/0)) {
+            throw JSONRPCError(RPC_WALLET_ERROR, "failed to sign the delegation-record spend");
+        }
+        mtx.vin[i].scriptSig = CScript() << sig;
+    }
+
+    // Self-check before anything leaves the wallet: every input must satisfy
+    // its record script exactly as a validating node will judge it.
+    for (size_t i = 0; i < records.size(); ++i) {
+        ScriptError serror = SCRIPT_ERR_OK;
+        MutableTransactionSignatureChecker checker(&mtx, i, records[i].txout.nValue, MissingDataBehavior::FAIL);
+        if (!VerifyScript(mtx.vin[i].scriptSig, records[i].txout.scriptPubKey, nullptr,
+                          SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY | SCRIPT_VERIFY_CHECKSEQUENCEVERIFY,
+                          checker, &serror)) {
+            throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
+                "constructed an invalid delegation-record spend (%s); nothing was sent", ScriptErrorString(serror)));
+        }
+    }
+
+    const CTransactionRef tx = MakeTransactionRef(std::move(mtx));
+
+    // Record it in the wallet BEFORE broadcasting. A re-pointing pays nothing
+    // the wallet recognises as its own -- its only outputs are the new bare
+    // record and the fee -- so nothing would ever add it, and the wallet would
+    // lose sight of the very record it just created: unable to re-point it
+    // again, and unable to reclaim the coins in it. Adding it first also means
+    // a broadcast that fails after the transaction has already propagated
+    // leaves the record tracked rather than orphaned, which is the safe way for
+    // that race to go.
+    wallet.AddToWallet(tx, TxStateInactive{}, [](CWalletTx& wtx, bool /*new_tx*/) {
+        wtx.fTimeReceivedIsTxTime = true;
+        wtx.fFromMe = true;
+        return true;
+    });
+
+    std::string err_string;
+    if (!wallet.chain().broadcastTransaction(tx, wallet.m_default_max_tx_fee, /*relay=*/true, err_string)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, strprintf("failed to broadcast the delegation change: %s", err_string));
+    }
+    if (fee_out) *fee_out = fee;
+    if (rotate_value_out) *rotate_value_out = rotate_to ? out_value : 0;
+    if (reclaimed_out) *reclaimed_out = rotate_to ? 0 : out_value;
+    return tx;
+}
+
+//! The staker keys this wallet controls that have stake registered, in a stable
+//! order. These are the keys worth delegating -- a controller with no stake can
+//! hold a record, but it lends nothing.
+std::vector<CPubKey> WalletStakerKeys(CWallet& wallet) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+{
+    std::set<CPubKey> keys;
+    for (const StakeUtxo& s : FindWalletStakeUtxos(wallet, std::nullopt)) {
+        if (!s.withdrawing) keys.insert(s.parsed.pubkey);
+    }
+    return std::vector<CPubKey>(keys.begin(), keys.end());
+}
+
+} // namespace
+
+RPCHelpMan delegatestake()
+{
+    return RPCHelpMan{"delegatestake",
+                "\nSEQUENTIA staking pools: lend this wallet's stake weight to a signer -- a pool operator, or\n"
+                "this staker's own online key -- WITHOUT moving the staked coins. This funds a delegation record\n"
+                "(see getdelegationscript) naming the controller and the signer. While it is unspent the\n"
+                "controller's whole stake weight counts for the signer, who must produce and sign the blocks.\n"
+                "\nThe signer can NEVER spend the staked coins: only the controller's key appears in the record's\n"
+                "signature check, and the staking outputs are not touched at all. Because the record is a separate\n"
+                "output, this works even while the stake itself is frozen by a vesting lock, and it lets the key\n"
+                "that can move the coins stay offline while a hot key produces blocks.\n"
+                "\nCalling this again with a different signer RE-POINTS the delegation: the old record is spent and\n"
+                "the new one created in the SAME transaction, which is what stops a block from ever holding two\n"
+                "records for one controller. The re-pointing fee comes out of the record. Reclaim the rights (and\n"
+                "the record's coins) at any time, unilaterally, with undelegatestake.\n"
+                "\nCheck what a pool has committed to before delegating, and watch it afterwards: see listpools\n"
+                "and listdelegations. A pool's payout policy cannot change without a notice period.\n",
+                {
+                    {"signer", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The public key that will produce blocks with this stake's weight (hex). Pool operators publish theirs; see listpools."},
+                    {"controller", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "The staker public key whose weight to lend (hex). Defaults to this wallet's staker key when it has exactly one."},
+                    {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "SEQ to put in the delegation record (default: enough to cover the dust floor and ten re-pointings). Reclaimed in full, minus fees, by undelegatestake. This is NOT the stake: the staked coins never move."},
+                },
+                RPCResult{RPCResult::Type::OBJ, "", "", {
+                    {RPCResult::Type::STR_HEX, "txid", "the transaction that funded (or re-pointed) the record"},
+                    {RPCResult::Type::STR_HEX, "controller", "the staker key whose weight is now lent"},
+                    {RPCResult::Type::STR_HEX, "signer", "the key that now produces blocks with it"},
+                    {RPCResult::Type::STR_HEX, "previous_signer", /*optional=*/true, "the signer this replaced, when re-pointing"},
+                    {RPCResult::Type::STR_AMOUNT, "record_amount", "SEQ held in the delegation record"},
+                    {RPCResult::Type::STR_AMOUNT, "fee", /*optional=*/true, "the network fee taken out of the record, when re-pointing"},
+                    {RPCResult::Type::NUM, "delegated_weight", "stake weight this lends to the signer, once the record confirms (atoms)"},
+                    {RPCResult::Type::STR, "note", /*optional=*/true, "anything worth knowing about what was just done"},
+                }},
+                RPCExamples{HelpExampleCli("delegatestake", "\"02bb...\"") + HelpExampleCli("delegatestake", "\"02bb...\" \"02aa...\"")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!g_con_pos) throw JSONRPCError(RPC_MISC_ERROR, "Proof-of-Stake (con_pos) is not enabled on this chain");
+    std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
+    if (!pwallet) return NullUniValue;
+    pwallet->BlockUntilSyncedToCurrentChain();
+
+    CPubKey signer(ParseHexV(request.params[0], "signer"));
+    if (!signer.IsFullyValid()) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid signer public key");
+
+    LOCK(pwallet->cs_wallet);
+    EnsureWalletIsUnlocked(*pwallet);
+
+    // 1) Which staker key is being delegated. Only a key this wallet controls
+    //    can be a controller: the controller is the only key that can ever
+    //    reclaim the record, so delegating on behalf of a key we do not hold
+    //    would hand the rights away irrevocably.
+    CPubKey controller;
+    if (!request.params[1].isNull()) {
+        controller = CPubKey(ParseHexV(request.params[1], "controller"));
+        if (!controller.IsFullyValid()) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid controller public key");
+        if (!WalletControlsStakerKey(*pwallet, controller)) {
+            throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
+                "this wallet does not hold the private key for controller %s; only the controller can reclaim a "
+                "delegation, so delegating on its behalf would give the rights away for good", HexStr(controller)));
+        }
+    } else {
+        const std::vector<CPubKey> keys = WalletStakerKeys(*pwallet);
+        if (keys.empty()) {
+            throw JSONRPCError(RPC_WALLET_ERROR,
+                "this wallet has no staking outputs to delegate (see registerstake). To delegate a staker key "
+                "held elsewhere in this wallet, pass it as `controller`.");
+        }
+        if (keys.size() > 1) {
+            std::string list;
+            for (const CPubKey& k : keys) list += (list.empty() ? "" : ", ") + HexStr(k);
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
+                "this wallet stakes with more than one key, so `controller` is required. Its staker keys are: %s", list));
+        }
+        controller = keys.front();
+    }
+
+    if (signer == controller) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+            "delegating to the controller itself is what already happens with no record at all; to stop "
+            "delegating, reclaim the record with undelegatestake");
+    }
+
+    // 2) An existing record for this controller must be re-pointed, never
+    //    duplicated: consensus permits at most one unspent record per
+    //    controller (two would make the leader election node-dependent), and a
+    //    block containing a second one is invalid.
+    StakeRegistry& registry = StakeRegistry::GetInstance();
+    std::vector<DelegationUtxo> existing = FindWalletDelegationUtxos(*pwallet, controller);
+    const DelegationUtxo* live_record = nullptr;
+    for (const DelegationUtxo& d : existing) {
+        if (d.spending) {
+            throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
+                "a change to this delegation has already been sent and is waiting to confirm; wait for it "
+                "before re-pointing %s again", HexStr(controller)));
+        }
+        live_record = &d;
+    }
+    if (!live_record && registry.HasDelegation(controller)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
+            "controller %s already has a delegation record (to signer %s) that this wallet did not fund and "
+            "cannot find, so it cannot be re-pointed from here. Spend that record first; a second record for "
+            "the same controller would make any block containing it invalid.",
+            HexStr(controller), HexStr(registry.SignerFor(controller))));
+    }
+    if (live_record && live_record->signer == signer) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
+            "controller %s already delegates to signer %s", HexStr(controller), HexStr(signer)));
+    }
+
+    const CScript record_script = BuildDelegationScript(controller, signer);
+    const std::map<CPubKey, uint64_t> controller_weights = registry.ControllerWeights();
+    const auto weight_it = controller_weights.find(controller);
+    const uint64_t weight = weight_it == controller_weights.end() ? 0 : weight_it->second;
+
+    UniValue result(UniValue::VOBJ);
+    std::string note;
+
+    if (live_record) {
+        // 3a) Re-point: spend the old record and create the new one in one
+        //     transaction. The fee comes out of the record's own value.
+        const CPubKey previous = live_record->signer;
+        const std::vector<DelegationUtxo> spend_these{*live_record};
+        CAmount fee = 0, new_value = 0;
+        const CTransactionRef tx = SpendDelegationRecords(*pwallet, spend_these, CScript(), &record_script,
+                                                          &new_value, &fee, nullptr);
+        result.pushKV("txid", tx->GetHash().GetHex());
+        result.pushKV("previous_signer", HexStr(previous));
+        result.pushKV("record_amount", ValueFromAmount(new_value));
+        result.pushKV("fee", ValueFromAmount(fee));
+        note = "the delegation moves the moment this transaction confirms; the old signer stops commanding "
+               "this weight at that same confirmation";
+    } else {
+        // 3b) First delegation for this controller: an ordinary wallet payment
+        //     to the record script.
+        CAmount amount;
+        const CAsset& asset = Params().GetConsensus().pegged_asset;
+        if (!request.params[2].isNull()) {
+            amount = AmountFromValue(request.params[2], true);
+            if (amount <= 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "amount must be positive");
+            const CAmount dust = GetDustThreshold(CTxOut(asset, amount, record_script), ::dustRelayFee);
+            if (amount < dust) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
+                    "amount is below the %s SEQ dust floor for a delegation record; the network would not relay it",
+                    FormatMoney(dust)));
+            }
+        } else {
+            amount = DefaultDelegationRecordAmount(*pwallet, record_script);
+        }
+        CRecipient recipient = {record_script, amount, asset, CPubKey(), false};
+        std::vector<CRecipient> recipients = {recipient};
+        CCoinControl coin_control;
+        mapValue_t mapValue;
+        UniValue txid = SendMoney(*pwallet, coin_control, recipients, mapValue, /*verbose=*/false, /*ignore_blind_fail=*/true);
+        result.pushKV("txid", txid);
+        result.pushKV("record_amount", ValueFromAmount(amount));
+    }
+
+    result.pushKV("controller", HexStr(controller));
+    result.pushKV("signer", HexStr(signer));
+    result.pushKV("delegated_weight", weight);
+    if (weight == 0) {
+        note = "this controller has no registered stake, so the record lends nothing yet; it will lend whatever "
+               "is staked to this key from the moment it is registered";
+    }
+    if (!note.empty()) result.pushKV("note", note);
+    return result;
+},
+    };
+}
+
+RPCHelpMan undelegatestake()
+{
+    return RPCHelpMan{"undelegatestake",
+                "\nSEQUENTIA staking pools: stop delegating -- reclaim this wallet's block-signing rights from the\n"
+                "signer they were lent to, and the coins held in the delegation record with them. Spending the\n"
+                "record is unilateral and needs nobody's cooperation: only the controller's key can spend it, and\n"
+                "there is no lock and no notice period on leaving. From that confirmation on, the controller's\n"
+                "stake weight counts for the controller itself again.\n"
+                "\nThis does NOT unstake. The staked coins were never moved by delegating and are not moved by\n"
+                "reclaiming; use withdrawstake to unstake.\n",
+                {
+                    {"controller", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Reclaim only this staker key's delegation (hex). Default: every delegation this wallet holds."},
+                    {"address", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Where the record's coins go (default: a fresh address of this wallet). The output is explicit, not confidential."},
+                },
+                RPCResult{RPCResult::Type::OBJ, "", "", {
+                    {RPCResult::Type::STR_HEX, "txid", "the reclaim transaction id"},
+                    {RPCResult::Type::STR_AMOUNT, "amount", "SEQ arriving at the destination (the records' value minus the fee)"},
+                    {RPCResult::Type::STR_AMOUNT, "fee", "the network fee, paid out of the reclaimed coins"},
+                    {RPCResult::Type::STR, "destination", "the receiving address"},
+                    {RPCResult::Type::ARR, "reclaimed", "the delegations this ends", {
+                        {RPCResult::Type::OBJ, "", "", {
+                            {RPCResult::Type::STR_HEX, "controller", "the staker key taking its rights back"},
+                            {RPCResult::Type::STR_HEX, "signer", "the signer losing them"},
+                            {RPCResult::Type::NUM, "weight", "stake weight returning to the controller (atoms)"},
+                        }},
+                    }},
+                }},
+                RPCExamples{HelpExampleCli("undelegatestake", "") + HelpExampleCli("undelegatestake", "\"02aa...\"")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!g_con_pos) throw JSONRPCError(RPC_MISC_ERROR, "Proof-of-Stake (con_pos) is not enabled on this chain");
+    std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
+    if (!pwallet) return NullUniValue;
+    pwallet->BlockUntilSyncedToCurrentChain();
+
+    std::optional<CPubKey> only;
+    if (!request.params[0].isNull()) {
+        CPubKey pk(ParseHexV(request.params[0], "controller"));
+        if (!pk.IsFullyValid()) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid controller public key");
+        only = pk;
+    }
+
+    LOCK(pwallet->cs_wallet);
+    EnsureWalletIsUnlocked(*pwallet);
+
+    const std::vector<DelegationUtxo> all = FindWalletDelegationUtxos(*pwallet, only);
+    std::vector<DelegationUtxo> records;
+    bool any_pending = false, any_unconfirmed = false;
+    for (const DelegationUtxo& d : all) {
+        if (d.spending) { any_pending = true; continue; }
+        // Nothing to reclaim from a record that has not confirmed: the
+        // delegation is not in force until its funding block lands.
+        if (d.unconfirmed) { any_unconfirmed = true; continue; }
+        records.push_back(d);
+    }
+    if (records.empty()) {
+        if (any_pending) {
+            throw JSONRPCError(RPC_WALLET_ERROR,
+                "a change to this wallet's delegations has already been sent and is waiting to confirm");
+        }
+        if (any_unconfirmed) {
+            throw JSONRPCError(RPC_WALLET_ERROR,
+                "the delegation is still waiting to confirm; it is not in force yet, and can be reclaimed "
+                "once it is");
+        }
+        throw JSONRPCError(RPC_WALLET_ERROR, only
+            ? strprintf("this wallet holds no delegation for controller %s", HexStr(*only))
+            : std::string("this wallet is not delegating any stake (see delegatestake)"));
+    }
+
+    CTxDestination dest;
+    if (!request.params[1].isNull()) {
+        dest = DecodeDestination(request.params[1].get_str());
+        if (!IsValidDestination(dest)) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid address");
+    } else {
+        bilingual_str dest_error;
+        if (!pwallet->GetNewDestination(pwallet->m_default_address_type, "", dest, dest_error)) {
+            throw JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT, dest_error.original);
+        }
+    }
+    std::visit(SetBlindingPubKeyVisitor(CPubKey()), dest);
+    const CScript dest_script = GetScriptForDestination(dest);
+
+    const StakeRegistry& registry = StakeRegistry::GetInstance();
+    const std::map<CPubKey, uint64_t> controller_weights = registry.ControllerWeights();
+
+    CAmount fee = 0, reclaimed = 0;
+    const CTransactionRef tx = SpendDelegationRecords(*pwallet, records, dest_script, nullptr,
+                                                      nullptr, &fee, &reclaimed);
+
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("txid", tx->GetHash().GetHex());
+    result.pushKV("amount", ValueFromAmount(reclaimed));
+    result.pushKV("fee", ValueFromAmount(fee));
+    result.pushKV("destination", EncodeDestination(dest));
+    UniValue arr(UniValue::VARR);
+    for (const DelegationUtxo& d : records) {
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("controller", HexStr(d.controller));
+        o.pushKV("signer", HexStr(d.signer));
+        const auto it = controller_weights.find(d.controller);
+        o.pushKV("weight", it == controller_weights.end() ? (uint64_t)0 : it->second);
+        arr.push_back(o);
+    }
+    result.pushKV("reclaimed", arr);
+    return result;
+},
+    };
+}
+
+
+RPCHelpMan announcepayout()
+{
+    return RPCHelpMan{"announcepayout",
+                "\nSEQUENTIA staking pools, operator side: commit on-chain to how the blocks this wallet's signer\n"
+                "produces will pay out. This funds a payout record (see getpayoutscript) that binds the signer\n"
+                "from `activation` onward, and which anyone can read with listpools or getpayoutinfo.\n"
+                "\nMODES:\n"
+                "  direct  - every block's coinbase must pay a committed address. This stops the operator\n"
+                "            redirecting the reward silently; it does NOT make the chain check that the address\n"
+                "            shares anything with delegators. Trust-minimised, not trustless.\n"
+                "  lottery - every block's coinbase must pay ONE delegator, drawn by stake weight from a seed\n"
+                "            derived from Bitcoin's proof of work, so the draw cannot be biased. Each delegator\n"
+                "            earns its exact proportional share over time with no accounting at all -- but in\n"
+                "            rare lumps, not smoothed: 1% of a pool is 100% of one block in a hundred.\n"
+                "            `commission_bp` is the share of blocks the operator keeps, in basis points.\n"
+                "\nA policy cannot bind before the chain's notice period has passed since the block that ANNOUNCES\n"
+                "it, which is what gives delegators time to audit the change and leave. Announcing does not cancel\n"
+                "an earlier policy: the one in force at a height is the announced policy with the greatest\n"
+                "activation at or below it, so a pending change and the current rule coexist until the switch.\n"
+                "\nThe record is spendable by the signer, so this wallet must hold the signer's key -- otherwise the\n"
+                "announcement could never be withdrawn.\n",
+                {
+                    {"mode", RPCArg::Type::STR, RPCArg::Optional::NO, "\"direct\" or \"lottery\"."},
+                    {"signer", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "The block-producing public key this binds (hex). Defaults to this wallet's staker key when it has exactly one."},
+                    {"activation", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Block height from which the policy binds (default: comfortably past the notice period)."},
+                    {"address", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "direct mode: the address every coinbase must pay (default: a fresh address of this wallet)."},
+                    {"commission_bp", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "lottery mode: basis points of blocks the operator keeps (0..10000, default 0). At 0 the operator still earns on its own stake, as one participant among the rest."},
+                    {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "SEQ to put in the payout record (default: just over the dust floor). Recoverable by spending the record with the signer key."},
+                },
+                RPCResult{RPCResult::Type::OBJ, "", "", {
+                    {RPCResult::Type::STR_HEX, "txid", "the announcement transaction id"},
+                    {RPCResult::Type::STR_HEX, "signer", "the signer the policy binds"},
+                    {RPCResult::Type::STR, "mode", "\"direct\" or \"lottery\""},
+                    {RPCResult::Type::NUM, "activation", "height from which it binds"},
+                    {RPCResult::Type::NUM, "notice_blocks", "the chain's minimum notice period, in blocks"},
+                    {RPCResult::Type::NUM, "earliest_activation", "the lowest activation this announcement could have used, if it confirms in the next block"},
+                    {RPCResult::Type::STR, "address", /*optional=*/true, "direct: the committed payee"},
+                    {RPCResult::Type::NUM, "commission_bp", /*optional=*/true, "lottery: the operator's basis points"},
+                    {RPCResult::Type::STR_HEX, "script", "the payout-record scriptPubKey that was funded"},
+                    {RPCResult::Type::STR, "note", "what delegators will see, and when"},
+                }},
+                RPCExamples{HelpExampleCli("announcepayout", "\"lottery\"") + HelpExampleCli("announcepayout", "\"lottery\" \"02bb...\" null null 500")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!g_con_pos) throw JSONRPCError(RPC_MISC_ERROR, "Proof-of-Stake (con_pos) is not enabled on this chain");
+    std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
+    if (!pwallet) return NullUniValue;
+    pwallet->BlockUntilSyncedToCurrentChain();
+
+    const std::string mode = request.params[0].get_str();
+    if (mode != "direct" && mode != "lottery") {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "mode must be \"direct\" or \"lottery\"");
+    }
+
+    LOCK(pwallet->cs_wallet);
+    EnsureWalletIsUnlocked(*pwallet);
+
+    // The signer whose blocks this binds. The record is spendable by the signer
+    // alone, so a wallet that does not hold that key could announce a policy it
+    // could never withdraw.
+    CPubKey signer;
+    if (!request.params[1].isNull()) {
+        signer = CPubKey(ParseHexV(request.params[1], "signer"));
+        if (!signer.IsFullyValid()) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid signer public key");
+    } else {
+        const std::vector<CPubKey> keys = WalletStakerKeys(*pwallet);
+        if (keys.empty()) {
+            throw JSONRPCError(RPC_WALLET_ERROR,
+                "this wallet has no staking outputs, so it has no signer key to announce for; pass `signer`");
+        }
+        if (keys.size() > 1) {
+            std::string list;
+            for (const CPubKey& k : keys) list += (list.empty() ? "" : ", ") + HexStr(k);
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
+                "this wallet stakes with more than one key, so `signer` is required. Its staker keys are: %s", list));
+        }
+        signer = keys.front();
+    }
+    if (!WalletControlsStakerKey(*pwallet, signer)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
+            "this wallet does not hold the private key for signer %s; only that key can ever spend the payout "
+            "record, so the announcement could never be withdrawn", HexStr(signer)));
+    }
+
+    const int tip_height = pwallet->GetLastBlockHeight();
+    // Consensus measures the notice period from the block that CONFIRMS the
+    // announcement, which is at best the next one. Anything below this is
+    // certain to be rejected as bad-payout-notice.
+    const int64_t earliest = (int64_t)tip_height + 1 + (int64_t)g_pos_payout_notice;
+
+    PosPayoutPolicy policy;
+    if (!request.params[2].isNull()) {
+        policy.activation = request.params[2].get_int64();
+        if (policy.activation <= 0 || policy.activation > 0xffffffffLL) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "activation must be between 1 and 4294967295");
+        }
+        if (policy.activation < earliest) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
+                "activation %d is inside the notice period: this chain requires %d blocks between the block that "
+                "announces a policy and the block it binds at, so the earliest this announcement could use is %d. "
+                "The notice is what gives delegators time to audit the change and leave.",
+                (int)policy.activation, (int)g_pos_payout_notice, (int)earliest));
+        }
+    } else {
+        // A margin over the floor, because the announcement may wait in the
+        // mempool: every block it waits pushes its own announce height up.
+        policy.activation = earliest + 10;
+    }
+
+    std::string address_str;
+    if (mode == "direct") {
+        CTxDestination dest;
+        if (!request.params[3].isNull()) {
+            dest = DecodeDestination(request.params[3].get_str());
+            if (!IsValidDestination(dest)) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid address");
+        } else {
+            bilingual_str dest_error;
+            if (!pwallet->GetNewDestination(pwallet->m_default_address_type, "", dest, dest_error)) {
+                throw JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT, dest_error.original);
+            }
+        }
+        // The coinbase output the chain will compare against is explicit, so
+        // commit to the unconfidential form of the address.
+        std::visit(SetBlindingPubKeyVisitor(CPubKey()), dest);
+        policy.mode = PosPayoutMode::DIRECT;
+        policy.script = GetScriptForDestination(dest);
+        address_str = EncodeDestination(dest);
+        if (policy.script.empty() || policy.script.size() > 110) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "the committed script must be 1..110 bytes");
+        }
+        if (!request.params[4].isNull()) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "commission_bp applies to lottery mode only");
+        }
+    } else {
+        if (!request.params[3].isNull()) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                "address applies to direct mode only; a lottery pays whichever delegator the draw picks");
+        }
+        policy.mode = PosPayoutMode::LOTTERY;
+        const int64_t bp = request.params[4].isNull() ? 0 : request.params[4].get_int64();
+        if (bp < 0 || bp > (int64_t)POS_COMMISSION_DENOM) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "commission_bp must be between 0 and 10000");
+        }
+        policy.commission_bp = (uint32_t)bp;
+    }
+
+    // Consensus forbids two records sharing a (signer, activation): the second
+    // would be rejected as bad-payout-exists, taking its block down with it.
+    StakeRegistry& registry = StakeRegistry::GetInstance();
+    if (registry.HasPayoutAt(signer, policy.activation)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
+            "signer %s has already announced a policy activating at height %d; pick another activation",
+            HexStr(signer), (int)policy.activation));
+    }
+
+    const CScript record_script = BuildPayoutScript(signer, policy);
+    const CAsset& asset = Params().GetConsensus().pegged_asset;
+    CAmount amount;
+    if (!request.params[5].isNull()) {
+        amount = AmountFromValue(request.params[5], true);
+        if (amount <= 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "amount must be positive");
+        const CAmount dust = GetDustThreshold(CTxOut(asset, amount, record_script), ::dustRelayFee);
+        if (amount < dust) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
+                "amount is below the %s SEQ dust floor for a payout record; the network would not relay it",
+                FormatMoney(dust)));
+        }
+    } else {
+        amount = 2 * GetDustThreshold(CTxOut(asset, 1, record_script), ::dustRelayFee);
+    }
+
+    CRecipient recipient = {record_script, amount, asset, CPubKey(), false};
+    std::vector<CRecipient> recipients = {recipient};
+    CCoinControl coin_control;
+    mapValue_t mapValue;
+    UniValue txid = SendMoney(*pwallet, coin_control, recipients, mapValue, /*verbose=*/false, /*ignore_blind_fail=*/true);
+
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("txid", txid);
+    result.pushKV("signer", HexStr(signer));
+    result.pushKV("mode", mode);
+    result.pushKV("activation", policy.activation);
+    result.pushKV("notice_blocks", (int64_t)g_pos_payout_notice);
+    result.pushKV("earliest_activation", earliest);
+    if (mode == "direct") result.pushKV("address", address_str);
+    else result.pushKV("commission_bp", (int64_t)policy.commission_bp);
+    result.pushKV("script", HexStr(record_script));
+    result.pushKV("note", strprintf(
+        "delegators see this as a pending policy from the moment it confirms until it binds at height %d, and can "
+        "leave at any time until then (and after). It does not replace the current policy before that height.",
+        (int)policy.activation));
+    return result;
+},
+    };
+}
+
+RPCHelpMan listdelegations()
+{
+    return RPCHelpMan{"listdelegations",
+                "\nSEQUENTIA staking pools: what this wallet's stake is doing, and what the pools it is delegated\n"
+                "to have committed to. One entry per staker key, whether or not it delegates.\n"
+                "\nThis is the delegator's watch. A pool's payout policy cannot change without announcing it at\n"
+                "least the chain's notice period in advance, and leaving is instant and unilateral -- but that\n"
+                "only protects a delegator who SEES the notice. Any announced change that has not bound yet is\n"
+                "reported here as a pending policy, with how long is left to act, and summarised in `alerts`.\n",
+                {
+                    {"controller", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Only this staker public key (hex)."},
+                },
+                RPCResult{RPCResult::Type::ARR, "", "", {
+                    {RPCResult::Type::OBJ, "", "", {
+                        {RPCResult::Type::STR_HEX, "controller", "the staker key"},
+                        {RPCResult::Type::STR_HEX, "signer", "the key producing blocks with this weight (the controller itself when not delegating)"},
+                        {RPCResult::Type::BOOL, "delegated", "whether the weight is lent to someone else"},
+                        {RPCResult::Type::NUM, "weight", "this key's stake weight (atoms)"},
+                        {RPCResult::Type::NUM, "signer_weight", "total weight the signer commands, including everyone else's (atoms)"},
+                        {RPCResult::Type::NUM, "pool_share", /*optional=*/true, "this key's share of the signer's total weight (0..1)"},
+                        {RPCResult::Type::OBJ, "record", /*optional=*/true, "the delegation record, when delegating", {
+                            {RPCResult::Type::STR_HEX, "txid", "the funding transaction id"},
+                            {RPCResult::Type::NUM, "vout", "the funding output index"},
+                            {RPCResult::Type::STR_AMOUNT, "amount", "SEQ held in the record, reclaimable with undelegatestake"},
+                            {RPCResult::Type::BOOL, "confirmed", "whether the record has confirmed; the delegation is not in force until it has"},
+                            {RPCResult::Type::BOOL, "changing", "a reclaim or re-pointing has been sent and is waiting to confirm"},
+                        }},
+                        {RPCResult::Type::OBJ, "policy_in_force", /*optional=*/true, "the payout policy binding the signer right now, if it has committed to one", {
+                            {RPCResult::Type::NUM, "activation", "height from which it binds"},
+                            {RPCResult::Type::STR, "mode", "\"direct\" or \"lottery\""},
+                            {RPCResult::Type::STR_HEX, "payout_script", /*optional=*/true, "direct: the committed payee"},
+                            {RPCResult::Type::NUM, "commission_bp", /*optional=*/true, "lottery: the operator's basis points"},
+                        }},
+                        {RPCResult::Type::ARR, "policy_pending", "announced policies that have not bound yet -- the notice window", {
+                            {RPCResult::Type::OBJ, "", "", {
+                                {RPCResult::Type::NUM, "activation", "height from which it will bind"},
+                                {RPCResult::Type::NUM, "blocks_away", "blocks left before it binds"},
+                                {RPCResult::Type::NUM_TIME, "binds_around", "approximate time it binds"},
+                                {RPCResult::Type::STR, "mode", "\"direct\" or \"lottery\""},
+                                {RPCResult::Type::STR_HEX, "payout_script", /*optional=*/true, "direct: the committed payee"},
+                                {RPCResult::Type::NUM, "commission_bp", /*optional=*/true, "lottery: the operator's basis points"},
+                            }},
+                        }},
+                        {RPCResult::Type::ARR, "alerts", "what a delegator should know about this pool right now", {
+                            {RPCResult::Type::STR, "", "a plain-language warning"},
+                        }},
+                    }},
+                }},
+                RPCExamples{HelpExampleCli("listdelegations", "")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!g_con_pos) throw JSONRPCError(RPC_MISC_ERROR, "Proof-of-Stake (con_pos) is not enabled on this chain");
+    std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
+    if (!pwallet) return NullUniValue;
+    pwallet->BlockUntilSyncedToCurrentChain();
+
+    std::optional<CPubKey> only;
+    if (!request.params[0].isNull()) {
+        CPubKey pk(ParseHexV(request.params[0], "controller"));
+        if (!pk.IsFullyValid()) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid controller public key");
+        only = pk;
+    }
+
+    LOCK(pwallet->cs_wallet);
+    const int tip_height = pwallet->GetLastBlockHeight();
+    int64_t tip_time = 0;
+    pwallet->chain().findBlock(pwallet->GetLastBlockHash(), interfaces::FoundBlock().time(tip_time));
+
+    const StakeRegistry& registry = StakeRegistry::GetInstance();
+    const std::map<CPubKey, uint64_t> controller_weights = registry.ControllerWeights();
+    const std::map<CPubKey, uint64_t> signer_weights = registry.Weights();
+    const auto payouts = registry.Payouts();
+
+    // Every staker key this wallet has a reason to report on: one it stakes
+    // with, and one it holds a delegation record for (which may have no stake
+    // registered against it yet).
+    std::map<CPubKey, const DelegationUtxo*> records;
+    const std::vector<DelegationUtxo> record_list = FindWalletDelegationUtxos(*pwallet, only);
+    for (const DelegationUtxo& d : record_list) records[d.controller] = &d;
+
+    std::set<CPubKey> controllers;
+    for (const CPubKey& k : WalletStakerKeys(*pwallet)) {
+        if (!only || k == *only) controllers.insert(k);
+    }
+    for (const auto& e : records) controllers.insert(e.first);
+
+    UniValue result(UniValue::VARR);
+    for (const CPubKey& controller : controllers) {
+        const auto rec_it = records.find(controller);
+        const DelegationUtxo* rec = rec_it == records.end() ? nullptr : rec_it->second;
+        // The registry is the authority on who signs: it reflects what the
+        // whole network sees, including a record this wallet did not fund.
+        const CPubKey signer = registry.SignerFor(controller);
+        const bool delegated = signer != controller;
+
+        const auto cw = controller_weights.find(controller);
+        const uint64_t weight = cw == controller_weights.end() ? 0 : cw->second;
+        const auto sw = signer_weights.find(signer);
+        const uint64_t signer_weight = sw == signer_weights.end() ? 0 : sw->second;
+
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("controller", HexStr(controller));
+        o.pushKV("signer", HexStr(signer));
+        o.pushKV("delegated", delegated);
+        o.pushKV("weight", weight);
+        o.pushKV("signer_weight", signer_weight);
+        if (signer_weight > 0) o.pushKV("pool_share", (double)weight / (double)signer_weight);
+
+        if (rec) {
+            UniValue r(UniValue::VOBJ);
+            r.pushKV("txid", rec->outpoint.hash.GetHex());
+            r.pushKV("vout", (int64_t)rec->outpoint.n);
+            r.pushKV("amount", ValueFromAmount(rec->amount));
+            r.pushKV("confirmed", !rec->unconfirmed);
+            r.pushKV("changing", rec->spending);
+            o.pushKV("record", r);
+        }
+
+        UniValue alerts(UniValue::VARR);
+        UniValue pending(UniValue::VARR);
+
+        // What the signer has committed to. Only worth reporting for a pool:
+        // when signing for yourself the coinbase is yours by default anyway.
+        const auto describe = [&](const PosPayoutPolicy& p, UniValue& into) {
+            into.pushKV("activation", p.activation);
+            into.pushKV("mode", p.mode == PosPayoutMode::DIRECT ? "direct" : "lottery");
+            if (p.mode == PosPayoutMode::DIRECT) into.pushKV("payout_script", HexStr(p.script));
+            else into.pushKV("commission_bp", (int64_t)p.commission_bp);
+        };
+
+        const auto in_force = registry.PayoutFor(signer, tip_height);
+        if (in_force) {
+            UniValue p(UniValue::VOBJ);
+            describe(*in_force, p);
+            o.pushKV("policy_in_force", p);
+        }
+        const auto sp = payouts.find(signer);
+        if (sp != payouts.end()) {
+            for (const auto& e : sp->second) {
+                const PosPayoutPolicy& p = e.second;
+                if (p.activation <= tip_height) continue; // already binding, or superseded
+                UniValue po(UniValue::VOBJ);
+                describe(p, po);
+                const int64_t away = p.activation - tip_height;
+                po.pushKV("blocks_away", away);
+                po.pushKV("binds_around", tip_time + away * ApproxSecondsPerBlock());
+                pending.push_back(po);
+                if (delegated) {
+                    alerts.push_back(strprintf(
+                        "pool %s has announced a NEW payout policy (%s) binding at block %d, %d blocks from now "
+                        "(around %s). If you do not accept it, reclaim your stake's signing rights with "
+                        "undelegatestake before then -- leaving is instant and needs nobody's permission.",
+                        HexStr(signer), p.mode == PosPayoutMode::DIRECT ? "direct" : "lottery",
+                        (int)p.activation, (int)away, FormatISO8601DateTime(tip_time + away * ApproxSecondsPerBlock())));
+                }
+            }
+        }
+        o.pushKV("policy_pending", pending);
+
+        if (delegated) {
+            if (!in_force) {
+                alerts.push_back(strprintf(
+                    "pool %s has committed to no payout policy, so by default it keeps everything the blocks it "
+                    "produces earn. Nothing on-chain obliges it to pay you.", HexStr(signer)));
+            } else if (in_force->mode == PosPayoutMode::DIRECT) {
+                alerts.push_back(
+                    "this pool pays a committed address (direct mode). The chain stops the operator redirecting "
+                    "the reward silently, but does NOT check that the destination shares anything with you: "
+                    "check who that address belongs to.");
+            }
+            if (rec && rec->unconfirmed) {
+                alerts.push_back("this delegation has not confirmed yet, so the weight still counts for you.");
+            }
+            if (rec && rec->spending) {
+                alerts.push_back("a change to this delegation has been sent and is waiting to confirm.");
+            }
+            if (!rec) {
+                alerts.push_back(strprintf(
+                    "the delegation record for %s was not funded by this wallet, so it cannot be re-pointed or "
+                    "reclaimed from here.", HexStr(controller)));
+            }
+            if (weight == 0) {
+                alerts.push_back("this key has no registered stake, so the delegation lends nothing.");
+            }
+        }
+        o.pushKV("alerts", alerts);
+        result.push_back(o);
     }
     return result;
 },

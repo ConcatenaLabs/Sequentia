@@ -3980,6 +3980,259 @@ static RPCHelpMan getdelegationinfo()
     };
 }
 
+
+// SEQUENTIA staking pools: the public listing board, derived entirely from the
+// UTXO set and the block index. A "pool" here is nothing more than a signer
+// that commands weight it was lent -- there is no registration, no pool object
+// and no operator permission in consensus. What makes one auditable is that
+// everything it has committed to (its payout policy, and any change still
+// inside its notice period) is on-chain, and that a delegator can leave at any
+// moment without asking. This RPC is the whole audit surface in one call.
+static RPCHelpMan listpools()
+{
+    return RPCHelpMan{"listpools",
+                "\nSEQUENTIA: every block-producing signer on the network, with the weight it commands, who lent\n"
+                "it, what it has committed to paying, and how reliably it has been producing. This is the pool\n"
+                "listing board: read it before delegating with delegatestake, and watch it afterwards.\n"
+                "\nA signer appears here if it commands any stake weight or has announced a payout policy. A pool\n"
+                "with no policy keeps everything it earns -- that is the default, not a bug, and the listing says\n"
+                "so plainly. A policy change must be announced at least the chain's notice period ahead of\n"
+                "binding, and shows up under `policy_pending` for that whole window, which is the time a\n"
+                "delegator has to leave. Leaving is instant and unilateral (undelegatestake).\n"
+                "\n`blocks_produced` against `blocks_expected` is the reliability check: a pool commanding 10% of\n"
+                "the network stake should produce about 10% of the blocks. Well under that means it is offline,\n"
+                "missing its slots, or losing races -- and its delegators are earning nothing for the weight.\n",
+                {
+                    {"signer", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Only this signer's entry (hex)."},
+                    {"window", RPCArg::Type::NUM, RPCArg::Default{500}, "How many recent blocks to measure production over. 0 skips the measurement (and the block reads it costs)."},
+                    {"include_delegators", RPCArg::Type::BOOL, RPCArg::Default{false}, "List each pool's individual delegators and their weights."},
+                },
+                RPCResult{RPCResult::Type::OBJ, "", "", {
+                    {RPCResult::Type::NUM, "height", "the tip this was read at"},
+                    {RPCResult::Type::NUM, "network_weight", "total stake weight on the network (atoms)"},
+                    {RPCResult::Type::NUM, "min_stake", "the weight a signer needs before it is eligible to produce at all (atoms)"},
+                    {RPCResult::Type::NUM, "notice_blocks", "how far ahead a payout policy change must be announced"},
+                    {RPCResult::Type::NUM, "block_seconds", "the chain's block cadence, for turning a notice in blocks into a deadline"},
+                    {RPCResult::Type::NUM, "window", "blocks the production measurement covers"},
+                    {RPCResult::Type::ARR, "pools", "signers, heaviest first", {
+                        {RPCResult::Type::OBJ, "", "", {
+                            {RPCResult::Type::STR_HEX, "signer", "the block-producing public key"},
+                            {RPCResult::Type::NUM, "weight", "total weight it commands: its own plus everything lent to it (atoms)"},
+                            {RPCResult::Type::NUM, "own_weight", "weight from its own stake (atoms)"},
+                            {RPCResult::Type::NUM, "delegated_weight", "weight lent to it by others (atoms)"},
+                            {RPCResult::Type::NUM, "delegators", "how many other stakers have delegated to it"},
+                            {RPCResult::Type::NUM, "network_share", "its share of the network's stake weight (0..1)"},
+                            {RPCResult::Type::BOOL, "eligible", "whether it clears the minimum stake and can produce blocks"},
+                            {RPCResult::Type::BOOL, "committee_ready", "whether it has registered a committee BLS key"},
+                            {RPCResult::Type::NUM, "blocks_produced", /*optional=*/true, "blocks it produced in the window"},
+                            {RPCResult::Type::NUM, "blocks_expected", /*optional=*/true, "blocks its weight entitled it to over the window"},
+                            {RPCResult::Type::NUM, "reliability", /*optional=*/true, "produced / expected (1.0 is on target)"},
+                            {RPCResult::Type::STR, "payout", "one line describing what it has committed to paying"},
+                            {RPCResult::Type::OBJ, "policy_in_force", /*optional=*/true, "the payout policy binding right now", {
+                                {RPCResult::Type::NUM, "activation", "height from which it binds"},
+                                {RPCResult::Type::STR, "mode", "\"direct\" or \"lottery\""},
+                                {RPCResult::Type::STR_HEX, "payout_script", /*optional=*/true, "direct: the committed payee"},
+                                {RPCResult::Type::NUM, "commission_bp", /*optional=*/true, "lottery: the operator's basis points"},
+                            }},
+                            {RPCResult::Type::ARR, "policy_pending", "announced changes still inside their notice window", {
+                                {RPCResult::Type::OBJ, "", "", {
+                                    {RPCResult::Type::NUM, "activation", "height from which it will bind"},
+                                    {RPCResult::Type::NUM, "blocks_away", "blocks left to leave before it binds"},
+                                    {RPCResult::Type::STR, "mode", "\"direct\" or \"lottery\""},
+                                    {RPCResult::Type::STR_HEX, "payout_script", /*optional=*/true, "direct: the committed payee"},
+                                    {RPCResult::Type::NUM, "commission_bp", /*optional=*/true, "lottery: the operator's basis points"},
+                                }},
+                            }},
+                            {RPCResult::Type::ARR, "delegator_list", /*optional=*/true, "who lent this pool its weight", {
+                                {RPCResult::Type::OBJ, "", "", {
+                                    {RPCResult::Type::STR_HEX, "controller", "the staker key"},
+                                    {RPCResult::Type::NUM, "weight", "the weight it lent (atoms)"},
+                                }},
+                            }},
+                        }},
+                    }},
+                }},
+                RPCExamples{HelpExampleCli("listpools", "") + HelpExampleRpc("listpools", "")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!g_con_pos) {
+        throw JSONRPCError(RPC_MISC_ERROR, "Proof-of-Stake (con_pos) is not enabled on this chain");
+    }
+    std::optional<CPubKey> filter;
+    if (!request.params[0].isNull()) {
+        CPubKey pub(ParseHexV(request.params[0], "signer"));
+        if (!pub.IsFullyValid()) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid signer public key");
+        filter = pub;
+    }
+    const int window = request.params[1].isNull() ? 500 : request.params[1].get_int();
+    if (window < 0 || window > 5000) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "window must be between 0 and 5000");
+    }
+    const bool include_delegators = request.params[2].isNull() ? false : request.params[2].get_bool();
+
+    ChainstateManager& chainman = EnsureAnyChainman(request.context);
+
+    StakeRegistry& registry = StakeRegistry::GetInstance();
+    // One pass over the registry builds every pool: the weight keyed by
+    // CONTROLLER, plus the one-hop controller -> signer map, is all the
+    // information there is. Calling ParticipantsFor once per signer would walk
+    // the whole set again for each pool.
+    const std::map<CPubKey, uint64_t> controller_weights = registry.ControllerWeights();
+    const std::map<CPubKey, CPubKey> delegations = registry.Delegations();
+    const auto payouts = registry.Payouts();
+
+    struct Pool {
+        uint64_t own{0};
+        uint64_t delegated{0};
+        std::vector<std::pair<CPubKey, uint64_t>> delegators;
+    };
+    std::map<CPubKey, Pool> pools;
+    for (const auto& e : controller_weights) {
+        const CPubKey& controller = e.first;
+        const auto d = delegations.find(controller);
+        const CPubKey signer = d == delegations.end() ? controller : d->second;
+        Pool& p = pools[signer];
+        if (signer == controller) {
+            p.own += e.second;
+        } else {
+            p.delegated += e.second;
+            p.delegators.emplace_back(controller, e.second);
+        }
+    }
+    // A signer that has announced a policy but commands nothing yet is still a
+    // pool worth listing: that is exactly what a new operator looks like before
+    // anyone has delegated to it.
+    for (const auto& e : payouts) pools[e.first];
+
+    // How many blocks each signer actually produced over the window. The
+    // challenge names the leader and lives in the block index in memory, so
+    // this costs no disk reads.
+    std::map<CPubKey, int> produced;
+    int scanned = 0;
+    int tip_height = 0;
+    {
+        LOCK(cs_main);
+        const CBlockIndex* pindex = chainman.ActiveChain().Tip();
+        tip_height = pindex ? pindex->nHeight : 0;
+        for (int i = 0; i < window && pindex && pindex->nHeight > 0; ++i, pindex = pindex->pprev) {
+            if (pindex->trimmed()) break; // a trimmed index no longer carries its proof
+            const std::optional<PosChallengeParts> parts = ParsePosBlockChallenge(pindex->get_proof().challenge);
+            ++scanned;
+            if (parts) produced[parts->leader]++;
+        }
+    }
+
+    const uint64_t network_weight = PosTotalWeight(registry);
+
+    // Heaviest first: the order a delegator reads the board in. Ties break on
+    // the key so the listing is stable from one call to the next.
+    std::vector<std::pair<CPubKey, Pool>> ordered(pools.begin(), pools.end());
+    std::sort(ordered.begin(), ordered.end(), [](const auto& a, const auto& b) {
+        const uint64_t wa = a.second.own + a.second.delegated;
+        const uint64_t wb = b.second.own + b.second.delegated;
+        if (wa != wb) return wa > wb;
+        return a.first < b.first;
+    });
+
+    UniValue arr(UniValue::VARR);
+    for (auto& entry : ordered) {
+        const CPubKey& signer = entry.first;
+        if (filter && signer != *filter) continue;
+        Pool& p = entry.second;
+        const uint64_t weight = p.own + p.delegated;
+
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("signer", HexStr(signer));
+        o.pushKV("weight", weight);
+        o.pushKV("own_weight", p.own);
+        o.pushKV("delegated_weight", p.delegated);
+        o.pushKV("delegators", (int64_t)p.delegators.size());
+        o.pushKV("network_share", network_weight > 0 ? (double)weight / (double)network_weight : 0.0);
+        o.pushKV("eligible", g_pos_min_stake == 0 || weight >= g_pos_min_stake);
+        o.pushKV("committee_ready", registry.HasBls(signer));
+
+        if (scanned > 0) {
+            const auto pr = produced.find(signer);
+            const int blocks = pr == produced.end() ? 0 : pr->second;
+            const double expected = network_weight > 0 ? (double)scanned * (double)weight / (double)network_weight : 0.0;
+            o.pushKV("blocks_produced", blocks);
+            o.pushKV("blocks_expected", expected);
+            // Undefined rather than infinite when a pool was owed nothing: a
+            // signer with no weight that produced no blocks is not unreliable.
+            if (expected > 0) o.pushKV("reliability", (double)blocks / expected);
+        }
+
+        const auto in_force = registry.PayoutFor(signer, tip_height);
+        const auto describe = [](const PosPayoutPolicy& pol, UniValue& into) {
+            into.pushKV("activation", pol.activation);
+            into.pushKV("mode", pol.mode == PosPayoutMode::DIRECT ? "direct" : "lottery");
+            if (pol.mode == PosPayoutMode::DIRECT) into.pushKV("payout_script", HexStr(pol.script));
+            else into.pushKV("commission_bp", (int64_t)pol.commission_bp);
+        };
+        std::string payout_line;
+        if (!in_force) {
+            payout_line = "no policy committed: this pool keeps everything the blocks it produces earn";
+        } else if (in_force->mode == PosPayoutMode::DIRECT) {
+            payout_line = "pays a committed address on every block (direct). The chain stops a silent redirect "
+                          "but does not check that the address shares anything with delegators";
+        } else {
+            payout_line = strprintf(
+                "pays one delegator per block, drawn by stake weight from Bitcoin's proof of work (lottery), "
+                "operator commission %.2f%%. Each delegator earns its exact share over time, in rare lumps "
+                "rather than smoothly", (double)in_force->commission_bp / 100.0);
+        }
+        o.pushKV("payout", payout_line);
+        if (in_force) {
+            UniValue pol(UniValue::VOBJ);
+            describe(*in_force, pol);
+            o.pushKV("policy_in_force", pol);
+        }
+        UniValue pending(UniValue::VARR);
+        const auto sp = payouts.find(signer);
+        if (sp != payouts.end()) {
+            for (const auto& e : sp->second) {
+                if (e.second.activation <= tip_height) continue;
+                UniValue pol(UniValue::VOBJ);
+                describe(e.second, pol);
+                pol.pushKV("blocks_away", e.second.activation - tip_height);
+                pending.push_back(pol);
+            }
+        }
+        o.pushKV("policy_pending", pending);
+
+        if (include_delegators) {
+            std::sort(p.delegators.begin(), p.delegators.end(),
+                      [](const auto& a, const auto& b) { return a.second > b.second; });
+            UniValue dl(UniValue::VARR);
+            for (const auto& d : p.delegators) {
+                UniValue e(UniValue::VOBJ);
+                e.pushKV("controller", HexStr(d.first));
+                e.pushKV("weight", d.second);
+                dl.push_back(e);
+            }
+            o.pushKV("delegator_list", dl);
+        }
+        arr.push_back(o);
+    }
+
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("height", tip_height);
+    result.pushKV("network_weight", network_weight);
+    result.pushKV("min_stake", (int64_t)g_pos_min_stake);
+    result.pushKV("notice_blocks", (int64_t)g_pos_payout_notice);
+    // The notice period is a number of BLOCKS, and a delegator deciding whether
+    // there is time to act needs it as a duration. The cadence is
+    // pos_block_spacing, not the slot interval: the latter paces the leader
+    // time-gate, and using it would halve every deadline this feeds.
+    const int64_t spacing = Params().GetConsensus().pos_block_spacing;
+    result.pushKV("block_seconds", spacing > 0 ? spacing : g_pos_slot_interval);
+    result.pushKV("window", scanned);
+    result.pushKV("pools", arr);
+    return result;
+},
+    };
+}
+
 static RPCHelpMan getstakescript()
 {
     return RPCHelpMan{"getstakescript",
@@ -4260,6 +4513,7 @@ static const CRPCCommand commands[] =
     { "blockchain",         &getstakescript,                     },
     { "blockchain",         &getdelegationscript,                },
     { "blockchain",         &getdelegationinfo,                  },
+    { "blockchain",         &listpools,                          },
     { "blockchain",         &getpayoutscript,                    },
     { "blockchain",         &getpayoutinfo,                      },
     { "blockchain",         &getcheckpointpayload,               },
