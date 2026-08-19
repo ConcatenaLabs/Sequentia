@@ -253,6 +253,7 @@ public:
         // an in-process chain switch can never read a value left over from a
         // previously-selected (custom PoS) chain.
         g_pos_min_stake = 0;
+        g_split_payout_height = 0;
         g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
         g_pos_slot_interval = DEFAULT_POS_SLOT_INTERVAL;
         g_pos_unbonding_period = DEFAULT_POS_UNBONDING_PERIOD;
@@ -548,7 +549,8 @@ public:
                 throw std::runtime_error(strprintf("%s is a consensus rule of the Sequentia network and cannot be overridden; remove it from the configuration", flag));
             }
         }
-        g_pos_min_stake = 4000000000000ULL;             // 40,000 SEQ = 0.01% of 400M (§3.3)
+        g_pos_min_stake = 4000000000000ULL;              // 40,000 SEQ = 0.01% of 400M (§3.3)
+        g_split_payout_height = 0;
         g_pos_slot_interval = 30;                        // 30s nominal block time (doc 11 §4)
         g_pos_unbonding_period = 43200;                  // x30s = ~15 days (§3.11)
         // Consensus-critical: pin the payout notice period so no node can change
@@ -961,6 +963,7 @@ public:
         // of the testnet forks off. Every node on a given testnet must agree.
         g_pos_bls = args.GetBoolArg("-posbls", true);
         g_pos_min_stake = TESTNET_POS_MIN_STAKE;
+        g_split_payout_height = 0;
         // Expected committee size. DEFAULT 250 to MATCH THE LIVE PUBLIC TESTNET
         // (126-of-250 quorum): these params are NETWORK-WIDE consensus rules, so a
         // chain=test node started from a bare/default config must reach the same
@@ -1217,6 +1220,15 @@ public:
         // instead of waiting out a height that would no longer mean anything.
         consensus.simplicity_budget4_height = 101810;
         consensus.simplicity_budget4_chain_genesis = expected_genesis;
+
+        // SEQUENTIA: flag day for the SPLIT payout mode (proportional pool
+        // payouts through a claimable pot; doc/sequentia/split-payouts-design.md).
+        // Same discipline as the budget flag above: the height is a promise to
+        // every operator, so it is set with runway for a full committee cutover,
+        // and it is bound to this chain's genesis hash so a re-genesis drops it.
+        consensus.split_payout_height = 106500;
+        consensus.split_payout_chain_genesis = expected_genesis;
+        g_split_payout_height = consensus.split_payout_height;
 
         // SEQUENTIA: ONE-TIME treasury UTXO recovery. Read this before touching it.
         //
@@ -1509,6 +1521,7 @@ public:
         // an in-process chain switch can never read a value left over from a
         // previously-selected (custom PoS) chain.
         g_pos_min_stake = 0;
+        g_split_payout_height = 0;
         g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
         g_pos_slot_interval = DEFAULT_POS_SLOT_INTERVAL;
         g_pos_unbonding_period = DEFAULT_POS_UNBONDING_PERIOD;
@@ -1631,6 +1644,7 @@ public:
         // an in-process chain switch can never read a value left over from a
         // previously-selected (custom PoS) chain.
         g_pos_min_stake = 0;
+        g_split_payout_height = 0;
         g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
         g_pos_slot_interval = DEFAULT_POS_SLOT_INTERVAL;
         g_pos_unbonding_period = DEFAULT_POS_UNBONDING_PERIOD;
@@ -1800,6 +1814,11 @@ protected:
         UpdateActivationParametersFromArgs(args);
 
         consensus.nSubsidyHalvingInterval = args.GetIntArg("-con_nsubsidyhalvinginterval", consensus.nSubsidyHalvingInterval);
+        // SEQUENTIA: the split-payout flag day, overridable on custom chains so
+        // the functional suite can exercise the gate. 0 (default) = active from
+        // genesis, the correct shape for any fresh chain.
+        consensus.split_payout_height = args.GetIntArg("-con_splitpayoutheight", 0);
+        g_split_payout_height = consensus.split_payout_height;
         consensus.BIP16Exception = uint256S(args.GetArg("-con_bip16exception", "0x0"));
         consensus.BIP34Height = args.GetIntArg("-con_bip34height", 0);
         consensus.BIP34Hash = uint256S(args.GetArg("-con_bip34hash", "0x0"));
@@ -1993,6 +2012,7 @@ protected:
                 throw std::runtime_error("-posminstake must be non-negative (policy-asset atoms; 0 disables the floor)");
             }
             g_pos_min_stake = (uint64_t)min_stake;
+            g_split_payout_height = consensus.split_payout_height;
             g_signed_blocks = true;
             consensus.vDeployments[Consensus::DEPLOYMENT_DYNA_FED].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
             StakeRegistry::GetInstance().Clear();
@@ -2399,6 +2419,7 @@ public:
         // an in-process chain switch can never read a value left over from a
         // previously-selected (custom PoS) chain.
         g_pos_min_stake = 0;
+        g_split_payout_height = 0;
         g_pos_committee_size = DEFAULT_POS_COMMITTEE_SIZE;
         g_pos_slot_interval = DEFAULT_POS_SLOT_INTERVAL;
         g_pos_unbonding_period = DEFAULT_POS_UNBONDING_PERIOD;

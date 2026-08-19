@@ -3890,13 +3890,13 @@ static RPCHelpMan getpayoutscript()
         std::vector<unsigned char> spk = ParseHexV(request.params[3], "payout_script");
         if (spk.empty() || spk.size() > 110) throw JSONRPCError(RPC_INVALID_PARAMETER, "payout_script must be 1..110 bytes");
         policy.script = CScript(spk.begin(), spk.end());
-    } else if (mode == "lottery") {
-        policy.mode = PosPayoutMode::LOTTERY;
+    } else if (mode == "lottery" || mode == "split") {
+        policy.mode = mode == "split" ? PosPayoutMode::SPLIT : PosPayoutMode::LOTTERY;
         int64_t bp = request.params[4].isNull() ? 0 : request.params[4].get_int64();
         if (bp < 0 || bp > (int64_t)POS_COMMISSION_DENOM) throw JSONRPCError(RPC_INVALID_PARAMETER, "commission_bp must be 0..10000");
         policy.commission_bp = (uint32_t)bp;
     } else {
-        throw JSONRPCError(RPC_INVALID_PARAMETER, "mode must be \"direct\" or \"lottery\"");
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "mode must be \"direct\", \"lottery\" or \"split\"");
     }
 
     UniValue result(UniValue::VOBJ);
@@ -3958,7 +3958,7 @@ static RPCHelpMan getpayoutinfo()
             UniValue o(UniValue::VOBJ);
             o.pushKV("activation", p.activation);
             o.pushKV("in_force", in_force.has_value() && *in_force == p);
-            o.pushKV("mode", p.mode == PosPayoutMode::DIRECT ? "direct" : "lottery");
+            o.pushKV("mode", PosPayoutModeName(p.mode));
             if (p.mode == PosPayoutMode::DIRECT) o.pushKV("payout_script", HexStr(p.script));
             else o.pushKV("commission_bp", (int64_t)p.commission_bp);
             arr.push_back(o);
@@ -4057,6 +4057,10 @@ static RPCHelpMan listpools()
                             {RPCResult::Type::NUM, "blocks_expected", /*optional=*/true, "blocks its weight entitled it to over the window"},
                             {RPCResult::Type::NUM, "reliability", /*optional=*/true, "produced / expected (1.0 is on target)"},
                             {RPCResult::Type::STR, "payout", "one line describing what it has committed to paying"},
+                            {RPCResult::Type::OBJ_DYN, "pot", "a split pool's accrued, unclaimed rewards, keyed by asset id", {
+                                {RPCResult::Type::STR_AMOUNT, "asset", "amount accrued in that asset"},
+                            }},
+                            {RPCResult::Type::NUM, "pot_outputs", "how many pot outputs a claim would sweep"},
                             {RPCResult::Type::OBJ, "policy_in_force", /*optional=*/true, "the payout policy binding right now", {
                                 {RPCResult::Type::NUM, "activation", "height from which it binds"},
                                 {RPCResult::Type::STR, "mode", "\"direct\" or \"lottery\""},
@@ -4220,7 +4224,7 @@ static RPCHelpMan listpools()
         const auto in_force = registry.PayoutFor(signer, tip_height);
         const auto describe = [](const PosPayoutPolicy& pol, UniValue& into) {
             into.pushKV("activation", pol.activation);
-            into.pushKV("mode", pol.mode == PosPayoutMode::DIRECT ? "direct" : "lottery");
+            into.pushKV("mode", PosPayoutModeName(pol.mode));
             if (pol.mode == PosPayoutMode::DIRECT) into.pushKV("payout_script", HexStr(pol.script));
             else into.pushKV("commission_bp", (int64_t)pol.commission_bp);
         };
@@ -4230,6 +4234,11 @@ static RPCHelpMan listpools()
         } else if (in_force->mode == PosPayoutMode::DIRECT) {
             payout_line = "pays a committed address on every block (direct). The chain stops a silent redirect "
                           "but does not check that the address shares anything with delegators";
+        } else if (in_force->mode == PosPayoutMode::SPLIT) {
+            payout_line = strprintf(
+                "pays every delegator its exact proportional share (split): rewards pool up on-chain and anyone "
+                "may trigger the payout, operator commission %.2f%%. The proportional payout most delegators "
+                "expect", (double)in_force->commission_bp / 100.0);
         } else {
             payout_line = strprintf(
                 "pays one delegator per block, drawn by stake weight from Bitcoin's proof of work (lottery), "
@@ -4237,6 +4246,20 @@ static RPCHelpMan listpools()
                 "rather than smoothly", (double)in_force->commission_bp / 100.0);
         }
         o.pushKV("payout", payout_line);
+        // The pool's pot: what has accrued and not yet been claimed, per asset.
+        // Zero-entry object for non-split pools, so the field is always present.
+        {
+            UniValue pot(UniValue::VOBJ);
+            int64_t pot_total = 0;
+            std::map<CAsset, int64_t> per_asset;
+            for (const auto& pr : registry.PotsFor(signer)) {
+                per_asset[pr.second.asset] += pr.second.value;
+                pot_total += pr.second.value;
+            }
+            for (const auto& e : per_asset) pot.pushKV(e.first.GetHex(), ValueFromAmount(e.second));
+            o.pushKV("pot", pot);
+            o.pushKV("pot_outputs", (int64_t)registry.PotsFor(signer).size());
+        }
         if (in_force) {
             UniValue pol(UniValue::VOBJ);
             describe(*in_force, pol);

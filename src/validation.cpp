@@ -957,6 +957,27 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     }
 
     // Check for non-standard pay-to-script-hash in inputs
+    // SEQUENTIA split payouts: validate pot claims here as well as at connect.
+    // The pot script is anyone-can-spend, so without this gate anyone could
+    // park an invalid pot spend in the mempool; the block assembler would mine
+    // it, the block would die at ConnectBlock, and every producer would stall
+    // on the same poison. (The delegation/payout record rules do not need this:
+    // their spends are signature-gated, so only the owner can attempt one.)
+    if (g_con_pos && m_active_chainstate.m_params.GetConsensus().SplitPayoutActiveAt(m_active_chainstate.m_chain.Height() + 1)) {
+        std::vector<Coin> spent_coins;
+        spent_coins.reserve(tx.vin.size());
+        bool all_found = true;
+        for (const CTxIn& in : tx.vin) {
+            const Coin& c = m_view.AccessCoin(in.prevout);
+            if (c.IsSpent()) { all_found = false; break; }
+            spent_coins.push_back(c);
+        }
+        std::string claim_reason;
+        if (all_found && !CheckPosPotClaim(tx, spent_coins, claim_reason)) {
+            return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-pot-claim", claim_reason);
+        }
+    }
+
     if (fRequireStandard && !AreInputsStandard(tx, m_view)) {
         return state.Invalid(TxValidationResult::TX_INPUTS_NOT_STANDARD, "bad-txns-nonstandard-inputs");
     }
@@ -3216,6 +3237,14 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
             for (const CTxOut& out : tx->vout) {
                 auto p = PayoutFromTxOut(out);
                 if (!p) continue;
+                // A split record below its flag day is inert on every node that
+                // lacks the mode, which accepts any block containing one.
+                // Enforcing these rules on it here would reject that block and
+                // fork off the very chain the flag day exists to keep us on.
+                if (p->second.mode == PosPayoutMode::SPLIT &&
+                    !m_params.GetConsensus().SplitPayoutActiveAt(pindex->nHeight)) {
+                    continue;
+                }
                 if (p->second.activation < pindex->nHeight + (int64_t)g_pos_payout_notice) {
                     return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-payout-notice",
                                          "payout policy would bind before its notice period elapses");
@@ -3229,6 +3258,24 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
                     return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-payout-exists",
                                          "payout record duplicates an unspent record's activation height");
                 }
+            }
+        }
+    }
+
+    // SEQUENTIA split payouts: any transaction spending a pot output must be a
+    // valid claim -- it must pay every eligible delegator its exact share, and
+    // may withhold at most 1/99 of what it delivers. The pot's script is
+    // anyone-can-spend on purpose (claiming must not depend on the operator
+    // staying interested), so this overlay is the entire spend condition.
+    // Enforced from the flag day; below it a pot-shaped output is the ordinary
+    // anyone-can-spend script it is to every node without the mode.
+    if (g_con_pos && !fJustCheck && m_params.GetConsensus().SplitPayoutActiveAt(pindex->nHeight)) {
+        for (size_t t = 1; t < block.vtx.size() && t - 1 < blockundo.vtxundo.size(); ++t) {
+            std::string claim_reason;
+            if (!CheckPosPotClaim(*block.vtx[t], blockundo.vtxundo[t - 1].vprevout, claim_reason)) {
+                LogPrintf("ERROR: ConnectBlock(): invalid pot claim in %s: %s\n",
+                          block.vtx[t]->GetHash().ToString(), claim_reason);
+                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-pot-claim", claim_reason);
             }
         }
     }
@@ -3782,7 +3829,7 @@ bool CChainState::DisconnectTip(BlockValidationState& state, DisconnectedBlockTr
     if (g_con_pos && pindexDelete->nHeight > 0) {
         CBlockUndo block_undo;
         if (UndoReadFromDisk(block_undo, pindexDelete)) {
-            PosRevertBlockStake(block, block_undo);
+            PosRevertBlockStake(block, block_undo, pindexDelete->nHeight);
         } else {
             return AbortNode(state, "Failed to read undo data for stake tracking; the stake registry would desync from consensus");
         }
@@ -3977,7 +4024,7 @@ bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew
     if (g_con_pos && pindexNew->nHeight > 0) {
         CBlockUndo block_undo;
         if (UndoReadFromDisk(block_undo, pindexNew)) {
-            PosApplyBlockStake(blockConnecting, block_undo);
+            PosApplyBlockStake(blockConnecting, block_undo, pindexNew->nHeight);
         } else {
             return AbortNode(state, "Failed to read undo data for stake tracking; the stake registry would desync from consensus");
         }

@@ -1,142 +1,147 @@
-# Proportional payouts: a claimable pool pot
+# Split payouts: proportional pool rewards through a claimable pot
 
 A third payout mode, beside `direct` and `lottery`: a pool commits to paying its
-delegators **in proportion to what each lent**, rather than by a weighted draw.
+delegators **in proportion to what each lent**. This is the arrangement most
+delegators expect, and it reverses the 2026-07-09 decision to ship the lottery
+alone: the lottery buys exact proportionality *in expectation* at the cost of
+paying one delegator per block, which reads as "I lent my stake and got nothing
+for six weeks" to everyone who is not that delegator.
 
-This reverses the 2026-07-09 decision to ship the lottery alone. The reason to
-revisit it is that the lottery buys exact proportionality *in expectation* at the
-cost of paying one delegator per block, which reads as "I lent my stake and got
-nothing for six weeks" to everyone who is not that delegator.
+This document describes the mode **as built** (`pos.{h,cpp}`, enforced from
+`Consensus::Params::split_payout_height`); the functional proof is
+`test/functional/feature_pos_split.py` and the arithmetic is pinned by
+`pos_split_shares` in `src/test/pos_tests.cpp`.
 
 ## What the numbers force
 
-Measured over 400 consecutive blocks on the live testnet (heights ~100,100 to
-~100,500):
+A per-block split fails across the whole activity spectrum, for different
+reasons at each end:
 
-| | |
-|---|---|
-| blocks paying any reward at all | **12 of 400** |
-| median reward on a paying block | 745 atoms (0.00000745 SEQ) |
-| a 10% delegator's share of that | 74 atoms |
-| a 1% delegator's share | 7 atoms |
-| a 0.1% delegator's share | 0 atoms |
+1. **on a busy chain**, one output per delegator per fee asset *per block* does
+   not fit in blocks — the split must batch regardless of how much there is to
+   split;
+2. **at any activity level**, a small delegator's share of a single block is
+   dust: payouts must accumulate until they are worth making, and sub-dust
+   shares must roll forward rather than round away;
+3. **at the quiet end** — which is where the current testnet sits, having
+   invited no outside participants yet (measured near height 100,100: 12 of 400
+   blocks paid any reward, median 745 atoms; there is no subsidy, so an empty
+   block pays nothing) — a per-block split mostly divides zero. Not the
+   permanent state of the chain, but the worst case the mode must survive
+   without producing garbage.
 
-There is no subsidy, so a block with no transactions pays nothing, and most
-blocks have no transactions. Three consequences, and they decide the design:
-
-1. **A per-block split divides zero 97% of the time.** Whatever is built must
-   accumulate across blocks before paying anything.
-2. **Most per-block shares are below the dust floor.** Paying them out as
-   outputs is not merely wasteful, it is impossible: the network will not relay
-   them and they would bloat the UTXO set with unspendable change.
-3. **One output per delegator per fee asset does not fit.** Fees are payable in
-   any accepted asset, so a per-block split is `delegators x assets` outputs
-   every block. At any real pool size that is most of the block.
-
-So the mode has to accumulate, and pay out in chunks that clear dust. That is
-what "claim-based accrual" means here.
+Accumulate-then-claim is the design that is correct at both ends and everywhere
+between.
 
 ## The mechanism
 
-**Accrual is a UTXO, not a balance.** Under `split`, the coinbase of every block
-the pool produces must pay its reward into the pool's **pot**: a bare output
+**The pot.** Under a `split` policy, `PosRequiredCoinbaseScript` directs every
+fee-bearing coinbase output of the pool's blocks to the pot script:
 
 ```
-<"SEQPOT"> OP_DROP <signer> OP_CHECKSIG
+<"SEQPOT"> OP_DROP <signer> OP_DROP OP_TRUE
 ```
 
-one per fee asset. The pot is not spendable by the signer despite the
-`OP_CHECKSIG`: consensus additionally requires that any transaction spending a
-pot output be a **valid claim** (below). The signature keeps a stranger from
-grinding claims at the pool's expense; the consensus rule keeps the operator
-from taking the pot.
+one output per fee asset, exactly as the coinbase already accumulates them. The
+pot is **anyone-can-spend at the script layer on purpose**: the consensus
+overlay below is the entire spend condition, and it fully determines the
+outputs, so the only thing "anyone" can do with a pot is distribute it correctly
+and keep the bounded margin. A signature here would make claiming
+operator-permissioned — the opposite of the point, which is that nobody's payout
+depends on the operator staying interested.
 
-Accrual therefore needs **no new consensus state**. The amount owed to the pool's
-delegators is exactly the value sitting in its pot outputs, which is a pure
-function of the UTXO set, like every other layer of the stake registry, and is
-reorg-safe for the same reason.
+**Commission** reuses the lottery's own mechanism: a `commission_bp`/10000
+chance, drawn from the unbiasable election seed (Bitcoin's proof of work), that
+the block pays the leader instead of the pot. Exact in expectation, it keeps the
+coinbase a single required script, and it needs no claim-time policy lookup —
+which closes a rug: commission taken at claim time under "the policy in force
+now" would let an operator raise it against rewards already earned.
 
-**A claim distributes the whole pot at once.** A claim transaction spends one
-pot output and must pay every eligible delegator their exact proportional share
-of it. Anyone may broadcast it, not only the operator or a delegator: the
-distribution is fully determined by the chain, so there is nothing to trust the
-broadcaster with, and permissionless claiming means nobody's payout depends on
-the operator staying interested.
+**A claim distributes the pot.** Any transaction spending a pot output must be a
+valid claim (`CheckPosPotClaim`), enforced at `ConnectBlock` and, because the
+script is anyone-can-spend, **also at mempool acceptance** — without that,
+anyone could park an invalid pot spend in the mempool and every producer would
+mine a doomed block. A claim:
 
-**Eligibility is weight that has been lent long enough.** A delegator counts in a
-claim if its delegation record has been unspent for at least `SPLIT_MIN_AGE`
-blocks at the claiming height. Without that, anyone could delegate a large stake
-one block before a claim, take a proportional share of fees earned over weeks
-they had no part in, and leave. The age is checkable from the UTXO set (a coin
-carries the height it was created at), so this too needs no stored state.
+- sweeps pot outputs of **one signer** (any subset; several assets at once);
+- pays each eligible participant **exactly**
+  `floor(distributable_i x weight / total_weight)` summed over the swept inputs,
+  where `distributable_i` is the input's value minus its reserve (below);
+- pays participants at **P2WPKH of their controller key**, which makes the whole
+  transaction deterministic: anyone builds the same claim from the same UTXO
+  set, so permissionless claiming is trustless rather than merely permitted;
+- rolls shares below `POS_SPLIT_MIN_PAYOUT` (1,000 atoms — a consensus constant,
+  not the node-configurable relay dust) into a fresh pot for the same signer,
+  where they accumulate for the next claim instead of being rounded away;
+- may withhold — network fee plus the claimer's margin, net of any coins the
+  claimer brought — at most **1/99 of what it delivers to delegators**.
 
-**Shares below dust roll over.** A delegator whose share of this pot would not
-clear the dust floor is paid nothing and keeps its claim on the next one: the
-remainder stays in a fresh pot output. This is what makes the mode work for small
-delegators at all -- they accumulate across claims until they are worth paying,
-instead of being rounded to zero every block.
+**The 1% reserve.** Each pot input reserves `1/POS_SPLIT_RESERVE_DENOM` (1%) of
+itself; shares are computed over the other 99%. The reserve and the withhold cap
+are two sides of the same 1%: the cap bounds what a claim may take, the reserve
+is where it comes from, and whatever the fee does not use rolls back into the
+pot. Without the reserve the shares would sum to the whole pot and no claim
+could ever pay its own fee.
 
-**Commission** is the operator's share in basis points, exactly as in `lottery`,
-paid to a script the operator commits to in the same policy record.
+**Eligibility is per pot output, by creation height — no age constant.** A
+participant counts toward a pot output only if its delegation record *and* its
+stake outputs were created before that pot output was. Every quantity involved
+is a creation height the UTXO set already carries, and exactness rests on UTXO
+immutability: a record alive now with height `g` has stood, unchanged, since
+`g`. Delegating one block before a claim therefore earns exactly nothing from
+existing pots — the front-running attack is not mitigated but absent, with no
+`MIN_AGE` constant to tune. (The registry tracks stake in height buckets and
+delegation-record heights for this; both remain pure functions of the UTXO set.)
 
-## What consensus must enforce
+**Maturity.** Pot outputs are coinbase value and mature like any other coinbase
+reward: a claim sweeps only pots at least `COINBASE_MATURITY` blocks deep. A
+previous claim's own re-pot output is ordinary transaction value and carries no
+such delay.
 
-On a block whose leader has a `split` policy in force:
+## The one invariant that replaced three constants
 
-- every coinbase output carrying reward pays a pot output for its asset;
-- the pot script names the leader.
+There is **no claim interval, no keeper-cut constant, and no minimum-pot
+constant**. The withhold cap does all three jobs: a grief-claimer must deliver
+99x its own burn; the claimer's incentive is whatever the cap allows beyond the
+fee (`claimpoolrewards` pays it to the claiming wallet); and a claim on a pot
+too small to cover its fee under the cap is simply invalid, so claims happen
+exactly when a pot is worth claiming — a threshold that scales with chain
+traffic instead of being tuned to today's and wrong tomorrow.
 
-On a transaction spending a pot output:
+Formulating the cap against **delivered** value (not swept) closes the skim: a
+claim that rolls everything forward and pays nobody may withhold nothing.
 
-- it spends pot outputs only, and pays out in one pass: no partial claims, so
-  there is no "who has already claimed" to remember;
-- the payee set is exactly the eligible delegators at this height, each paid
-  `floor(pot x weight / total_weight)` of the asset, plus the operator's
-  commission to its committed script;
-- anything undistributable (sub-dust shares, rounding remainder) goes back into
-  a fresh pot output for the same signer and asset;
-- at most one claim per pot per `SPLIT_CLAIM_INTERVAL` blocks, so a griefer
-  cannot burn the pot down in fees by claiming it every block.
+## Sharp edges, stated rather than hidden
 
-Every one of those is a function of the spending transaction, the UTXO set and
-the current height. Nothing is carried between blocks.
-
-## Why not the alternatives
-
-**Per-block split.** Ruled out by the numbers above.
-
-**Balance accounting (the Cardano shape).** Consensus tracks `owed[delegator]`,
-incremented every block, decremented on withdrawal. It is the obvious design and
-it is what "claim-based accrual" usually means, but it introduces consensus state
-that is *not* derivable from the UTXO set: it must be persisted, updated on
-connect, reversed exactly on disconnect, and rebuilt on reindex. Every other
-layer of this chain's stake machinery is a pure function of the UTXO set, and
-that property is the reason reorg handling has needed no special care. The pot
-buys the same behaviour without giving it up.
-
-**Paying delegators directly from the coinbase over time.** A coinbase cannot pay
-a delegator who is owed less than dust, so the pool would have to remember the
-remainder, which is balance accounting again.
-
-## Open decisions
-
-1. **`SPLIT_CLAIM_INTERVAL`.** How often a pot may be claimed. Too short and the
-   claim's own fee eats the payout; too long and delegators wait. A first
-   estimate: the interval where a claim's fee is under 1% of a median pot.
-2. **`SPLIT_MIN_AGE`.** How long weight must have been lent to count. Long enough
-   that joining to farm an imminent claim does not pay, short enough that a new
-   delegator is not waiting weeks.
-3. **Who pays the claim's fee, and is there a keeper's cut?** Permissionless
-   claiming only happens if somebody is motivated to do it. A small cut of the
-   pot, or nothing and we accept that the operator claims.
-4. **Multi-asset pots.** One pot per asset is simple but a pool accepting five
-   fee assets accumulates five pots, each claimed separately. Acceptable, or
-   should the mode restrict payouts to the policy asset?
+- **Leaving forfeits unclaimed accruals.** A delegator who withdraws its stake
+  or re-points its record before a claim is no longer in the participant set and
+  its accrued share falls to the others. Claim before you leave; the wallets say
+  so.
+- A block producer can snipe a broadcast claim and take the margin themselves —
+  the pot script is anyone-can-spend, so the claim is not theirs to censor but
+  the margin is theirs to take. Keeper rewards drifting to stakers is
+  acceptable, and stated.
+- Rolled crumbs re-dilute: a fresh pot output's participant set is judged at its
+  own (new) creation height. The amounts involved are, by construction, crumbs.
+- The signer's own stake participates like any delegator's (as in the lottery).
+  One corner is approximate in its favour only: a signer that had delegated its
+  own weight elsewhere at pot time and reclaimed it since is counted.
 
 ## Activation
 
-A new payout mode is a **relaxation**: a `split` record is meaningless to an
-older node, which would accept a coinbase the new rule rejects. That makes it a
-hard fork for the running chain and therefore a flag day, gated on height and
-genesis hash like `simplicity_budget4_height`, per CONTRIBUTING.md. It bumps the
-version in the same pull request.
+To a node without the mode, a split policy record is an **inert output** (its
+`ParsePayoutScript` rejects the mode byte), so the moment a new node produces a
+pot-paying coinbase, old nodes reject the block: a hard fork, therefore a flag
+day — `split_payout_height = 106,500` on the live testnet, genesis-pinned, and
+active from genesis everywhere else (`-con_splitpayoutheight` on custom chains).
+
+Below the flag a new node treats split records exactly as an old node does:
+inert, unregistered, exempt from the record-creation rules — so the two cannot
+diverge before the date. Recognition is keyed on the **record's creation
+height**, not the current height, which keeps the registry a pure function of
+the UTXO set: the same record is inert or recognised identically on every node,
+at every rescan, forever. `announcepayout split` refuses to create a record
+before the flag, naming the height.
+
+Ships in 24.4.0; the version bump rides in the same pull request, per
+CONTRIBUTING.md.

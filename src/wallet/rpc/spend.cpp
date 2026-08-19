@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <assetsdir.h>
+#include <consensus/consensus.h>
 #include <consensus/validation.h>
 #include <core_io.h>
 #include <exchangerates.h>
@@ -1626,6 +1627,12 @@ RPCHelpMan announcepayout()
                 "            `payout_script` when the arrangement is something an address cannot express. This stops the operator\n"
                 "            redirecting the reward silently; it does NOT make the chain check that the address\n"
                 "            shares anything with delegators. Trust-minimised, not trustless.\n"
+                "  split   - every block's coinbase pays the pool's POT, and anyone may broadcast a CLAIM that\n"
+                "            distributes the pot to every delegator in exact proportion to the weight each had\n"
+                "            lent when the reward was earned (see claimpoolrewards). Shares too small to pay roll\n"
+                "            into the next claim instead of being rounded away. Commission is a bp/10000 chance,\n"
+                "            drawn from Bitcoin's proof of work, that a block pays the operator instead: exact in\n"
+                "            expectation. The proportional payout most delegators expect.\n"
                 "  lottery - every block's coinbase must pay ONE delegator, drawn by stake weight from a seed\n"
                 "            derived from Bitcoin's proof of work, so the draw cannot be biased. Each delegator\n"
                 "            earns its exact proportional share over time with no accounting at all -- but in\n"
@@ -1638,7 +1645,7 @@ RPCHelpMan announcepayout()
                 "\nThe record is spendable by the signer, so this wallet must hold the signer's key -- otherwise the\n"
                 "announcement could never be withdrawn.\n",
                 {
-                    {"mode", RPCArg::Type::STR, RPCArg::Optional::NO, "\"direct\" or \"lottery\"."},
+                    {"mode", RPCArg::Type::STR, RPCArg::Optional::NO, "\"direct\", \"lottery\" or \"split\"."},
                     {"signer", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "The block-producing public key this binds (hex). Defaults to this wallet's staker key when it has exactly one."},
                     {"activation", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Block height from which the policy binds (default: comfortably past the notice period)."},
                     {"address", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "direct mode: the address every coinbase must pay (default: a fresh address of this wallet)."},
@@ -1668,8 +1675,8 @@ RPCHelpMan announcepayout()
     pwallet->BlockUntilSyncedToCurrentChain();
 
     const std::string mode = request.params[0].get_str();
-    if (mode != "direct" && mode != "lottery") {
-        throw JSONRPCError(RPC_INVALID_PARAMETER, "mode must be \"direct\" or \"lottery\"");
+    if (mode != "direct" && mode != "lottery" && mode != "split") {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "mode must be \"direct\", \"lottery\" or \"split\"");
     }
 
     LOCK(pwallet->cs_wallet);
@@ -1782,7 +1789,20 @@ RPCHelpMan announcepayout()
             throw JSONRPCError(RPC_INVALID_PARAMETER,
                 "address applies to direct mode only; a lottery pays whichever delegator the draw picks");
         }
-        policy.mode = PosPayoutMode::LOTTERY;
+        if (mode == "split") {
+            // The mode is behind a flag day: a node without it treats a split
+            // record as an inert output and would accept a coinbase the new
+            // rule rejects. Announcing before the flag would create a record
+            // this chain does not recognise yet.
+            if (g_split_payout_height > 0 && tip_height + 1 < g_split_payout_height) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
+                    "the split payout mode activates at height %d on this chain (the tip is %d); announce it "
+                    "after that, or use lottery until then", g_split_payout_height, tip_height));
+            }
+            policy.mode = PosPayoutMode::SPLIT;
+        } else {
+            policy.mode = PosPayoutMode::LOTTERY;
+        }
         const int64_t bp = request.params[4].isNull() ? 0 : request.params[4].get_int64();
         if (bp < 0 || bp > (int64_t)POS_COMMISSION_DENOM) {
             throw JSONRPCError(RPC_INVALID_PARAMETER, "commission_bp must be between 0 and 10000");
@@ -1840,6 +1860,222 @@ RPCHelpMan announcepayout()
         "delegators see this as a pending policy from the moment it confirms until it binds at height %d, and can "
         "leave at any time until then (and after). It does not replace the current policy before that height.",
         (int)policy.activation));
+    return result;
+},
+    };
+}
+
+RPCHelpMan claimpoolrewards()
+{
+    return RPCHelpMan{"claimpoolrewards",
+                "\nSEQUENTIA split payouts: sweep a pool's POT and pay every delegator its exact share, in one\n"
+                "transaction. Anyone may do this for any pool -- the distribution is fully determined by the\n"
+                "chain, so there is nothing to trust the claimer with, and nobody's payout depends on the\n"
+                "operator staying interested. The network fee comes out of the pot, capped (with any claimer's\n"
+                "margin) at 1/99 of what the delegators receive; whatever margin the fee does not use is paid to\n"
+                "this wallet, which is the incentive to be the one who claims.\n"
+                "\nEach delegator is paid only from pot outputs created after its delegation (and its stake) "
+                "existed, so joining a pool just before a claim earns exactly nothing from it. Shares below the\n"
+                "minimum payout roll into a fresh pot and accumulate for the next claim.\n",
+                {
+                    {"signer", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "The pool to claim for (hex). Defaults to the pool this wallet's stake is delegated to."},
+                },
+                RPCResult{RPCResult::Type::OBJ, "", "", {
+                    {RPCResult::Type::STR_HEX, "txid", "the claim transaction id"},
+                    {RPCResult::Type::NUM, "pot_outputs", "pot outputs swept"},
+                    {RPCResult::Type::OBJ_DYN, "distributed", "paid to delegators, keyed by asset id", {
+                        {RPCResult::Type::STR_AMOUNT, "asset", "amount"}}},
+                    {RPCResult::Type::OBJ_DYN, "repotted", "rolled into the fresh pot (sub-minimum shares and remainders), keyed by asset id", {
+                        {RPCResult::Type::STR_AMOUNT, "asset", "amount"}}},
+                    {RPCResult::Type::STR_AMOUNT, "fee", "the network fee, paid out of the pot"},
+                    {RPCResult::Type::STR_AMOUNT, "margin", "the claimer's cut, paid to this wallet"},
+                    {RPCResult::Type::NUM, "delegators_paid", "how many delegators received a payout"},
+                }},
+                RPCExamples{HelpExampleCli("claimpoolrewards", "") + HelpExampleCli("claimpoolrewards", "\"02bb...\"")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!g_con_pos) throw JSONRPCError(RPC_MISC_ERROR, "Proof-of-Stake (con_pos) is not enabled on this chain");
+    std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
+    if (!pwallet) return NullUniValue;
+    pwallet->BlockUntilSyncedToCurrentChain();
+
+    StakeRegistry& registry = StakeRegistry::GetInstance();
+
+    LOCK(pwallet->cs_wallet);
+
+    // 1) Which pool. Explicit, or the one this wallet's stake is lent to.
+    CPubKey signer;
+    if (!request.params[0].isNull()) {
+        signer = CPubKey(ParseHexV(request.params[0], "signer"));
+        if (!signer.IsFullyValid()) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid signer public key");
+    } else {
+        const std::vector<CPubKey> keys = WalletStakerKeys(*pwallet);
+        for (const CPubKey& k : keys) {
+            const CPubKey s = registry.SignerFor(k);
+            if (s != k) { signer = s; break; }
+        }
+        if (!signer.IsFullyValid()) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                "this wallet's stake is not delegated to a pool; pass the pool's signer key explicitly");
+        }
+    }
+
+    // 2) The pot, and what a claim of it must pay. Both are pure functions of
+    //    the UTXO set, computed by the SAME code every validator runs.
+    const std::map<COutPoint, PosPotRef> all_pots = registry.PotsFor(signer);
+    if (all_pots.empty()) {
+        throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
+            "pool %s has no pot to claim: either it is not a split pool, or everything accrued has already "
+            "been distributed", HexStr(signer)));
+    }
+    // Pot outputs created by a coinbase are subject to coinbase maturity, like
+    // any other coinbase value: a claim can only sweep rewards at least
+    // COINBASE_MATURITY blocks deep. (A previous claim's own re-pot output is
+    // an ordinary transaction output and sweeps immediately, but sweeping it
+    // alone rarely clears the fee cap, so immature pots are simply left for
+    // the next claim rather than special-cased.)
+    const int tip_for_maturity = pwallet->GetLastBlockHeight();
+    std::map<COutPoint, PosPotRef> pots;
+    int immature = 0;
+    for (const auto& e : all_pots) {
+        if (e.second.height > 0 && tip_for_maturity - e.second.height + 1 < COINBASE_MATURITY) {
+            ++immature;
+            continue;
+        }
+        pots[e.first] = e.second;
+    }
+    if (pots.empty()) {
+        throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
+            "pool %s has %d pot output(s), all still inside coinbase maturity (%d blocks); claim once they mature",
+            HexStr(signer), immature, COINBASE_MATURITY));
+    }
+    std::vector<std::tuple<CAsset, int64_t, int>> pot_inputs;
+    for (const auto& e : pots) pot_inputs.emplace_back(e.second.asset, e.second.value, e.second.height);
+    const PosPotShares shares = PosComputePotShares(signer, pot_inputs);
+
+    // 3) Assemble. Inputs: every pot output (empty scriptSig satisfies the pot
+    //    script; the consensus overlay is the whole spend condition). Outputs:
+    //    each delegator's exact share where it clears the minimum, a fresh pot
+    //    per asset for what does not, the fee, and this wallet's margin.
+    const int tip_height = pwallet->GetLastBlockHeight();
+    CMutableTransaction mtx;
+    mtx.nVersion = 2;
+    mtx.nLockTime = (uint32_t)tip_height;
+    for (const auto& e : pots) {
+        CTxIn in(e.first);
+        in.nSequence = MAX_BIP125_RBF_SEQUENCE;
+        mtx.vin.push_back(in);
+    }
+
+    std::map<CAsset, int64_t> paid, repot;
+    int64_t delegators_paid = 0;
+    for (const auto& d : shares.owed) {
+        for (const auto& a : d.second) {
+            if (a.second < POS_SPLIT_MIN_PAYOUT) continue;
+            mtx.vout.push_back(CTxOut(a.first, a.second,
+                                      GetScriptForDestination(WitnessV0KeyHash(d.first.GetID()))));
+            paid[a.first] += a.second;
+            ++delegators_paid;
+        }
+    }
+    if (paid.empty()) {
+        throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
+            "pool %s has accrued %d pot output(s), but no delegator's share clears the minimum payout yet; "
+            "claim again once more has accrued", HexStr(signer), (int)pots.size()));
+    }
+
+    // The fee is paid in the swept asset with the largest distribution, which
+    // maximises the room under the withhold cap. (On this chain any accepted
+    // asset can pay a fee: the open fee market.)
+    CAsset fee_asset;
+    int64_t fee_room = -1;
+    for (const auto& e : paid) {
+        const int64_t room = e.second / POS_SPLIT_WITHHOLD_RATIO;
+        if (room > fee_room) { fee_room = room; fee_asset = e.first; }
+    }
+
+    // Fresh pots first (so sizing includes them), fee + margin after.
+    const CScript pot_script = BuildPotScript(signer);
+    for (const auto& sw : shares.swept) {
+        const int64_t leftover = sw.second - (paid.count(sw.first) ? paid.at(sw.first) : 0);
+        if (leftover > 0 && sw.first != fee_asset) {
+            mtx.vout.push_back(CTxOut(sw.first, leftover, pot_script));
+            repot[sw.first] += leftover;
+        }
+    }
+
+    // Size the fee against the finished shape: everything above, plus at most a
+    // repot output, a margin output and the fee output in the fee asset.
+    CCoinControl coin_control;
+    const CAmount fee_rate_estimate = GetMinimumFeeRate(*pwallet, coin_control, nullptr)
+                                          .GetFee(GetVirtualTransactionSize(CTransaction(mtx)) + 3 * 70);
+    if (fee_rate_estimate > fee_room) {
+        throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
+            "the pot is not yet worth claiming: the network fee (%s) would exceed 1/%d of what the delegators "
+            "would receive (%s). Claim again once more has accrued.",
+            FormatMoney(fee_rate_estimate), (int)POS_SPLIT_WITHHOLD_RATIO, FormatMoney(fee_room)));
+    }
+
+    // This wallet's margin: whatever the cap allows beyond the fee. Below the
+    // dust floor it is not worth an output; it stays in the pot.
+    bilingual_str dest_error;
+    CTxDestination margin_dest;
+    if (!pwallet->GetNewDestination(pwallet->m_default_address_type, "", margin_dest, dest_error)) {
+        throw JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT, dest_error.original);
+    }
+    std::visit(SetBlindingPubKeyVisitor(CPubKey()), margin_dest);
+    const CScript margin_script = GetScriptForDestination(margin_dest);
+    int64_t margin = fee_room - fee_rate_estimate;
+    const CAmount margin_dust = GetDustThreshold(CTxOut(fee_asset, 1, margin_script), ::dustRelayFee);
+    if (margin < margin_dust) margin = 0;
+
+    const int64_t fee_swept = shares.swept.count(fee_asset) ? shares.swept.at(fee_asset) : 0;
+    const int64_t fee_leftover = fee_swept - (paid.count(fee_asset) ? paid.at(fee_asset) : 0)
+                                 - fee_rate_estimate - margin;
+    if (fee_leftover < 0) {
+        throw JSONRPCError(RPC_WALLET_ERROR,
+            "the pot cannot cover its own claim fee yet; claim again once more has accrued");
+    }
+    if (margin > 0) mtx.vout.push_back(CTxOut(fee_asset, margin, margin_script));
+    if (fee_leftover > 0) {
+        mtx.vout.push_back(CTxOut(fee_asset, fee_leftover, pot_script));
+        repot[fee_asset] += fee_leftover;
+    }
+    mtx.vout.push_back(CTxOut(fee_asset, fee_rate_estimate, CScript())); // the explicit fee output
+
+    // 4) Self-check with the SAME function every validator runs, before
+    //    anything leaves this node: a claim this check rejects would poison the
+    //    mempool for every producer.
+    std::vector<Coin> spent_coins;
+    for (const auto& e : pots) {
+        CTxOut out(e.second.asset, e.second.value, pot_script);
+        spent_coins.emplace_back(std::move(out), e.second.height, /*fCoinBaseIn=*/false);
+    }
+    std::string claim_reason;
+    if (!CheckPosPotClaim(CTransaction(mtx), spent_coins, claim_reason)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
+            "constructed an invalid claim (%s); nothing was sent", claim_reason));
+    }
+
+    // 5) Broadcast. Nothing to sign: the pot script is anyone-can-spend, and
+    //    the consensus overlay is the entire spend condition.
+    const CTransactionRef tx = MakeTransactionRef(std::move(mtx));
+    std::string err_string;
+    if (!pwallet->chain().broadcastTransaction(tx, pwallet->m_default_max_tx_fee, /*relay=*/true, err_string)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, strprintf("failed to broadcast the claim: %s", err_string));
+    }
+
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("txid", tx->GetHash().GetHex());
+    result.pushKV("pot_outputs", (int64_t)pots.size());
+    UniValue dist(UniValue::VOBJ), rep(UniValue::VOBJ);
+    for (const auto& e : paid) dist.pushKV(e.first.GetHex(), ValueFromAmount(e.second));
+    for (const auto& e : repot) rep.pushKV(e.first.GetHex(), ValueFromAmount(e.second));
+    result.pushKV("distributed", dist);
+    result.pushKV("repotted", rep);
+    result.pushKV("fee", ValueFromAmount(fee_rate_estimate));
+    result.pushKV("margin", ValueFromAmount(margin));
+    result.pushKV("delegators_paid", delegators_paid);
     return result;
 },
     };
@@ -1970,7 +2206,7 @@ RPCHelpMan listdelegations()
         // when signing for yourself the coinbase is yours by default anyway.
         const auto describe = [&](const PosPayoutPolicy& p, UniValue& into) {
             into.pushKV("activation", p.activation);
-            into.pushKV("mode", p.mode == PosPayoutMode::DIRECT ? "direct" : "lottery");
+            into.pushKV("mode", PosPayoutModeName(p.mode));
             if (p.mode == PosPayoutMode::DIRECT) into.pushKV("payout_script", HexStr(p.script));
             else into.pushKV("commission_bp", (int64_t)p.commission_bp);
         };
@@ -1997,7 +2233,7 @@ RPCHelpMan listdelegations()
                         "pool %s has announced a NEW payout policy (%s) binding at block %d, %d blocks from now "
                         "(around %s). If you do not accept it, reclaim your stake's signing rights with "
                         "undelegatestake before then -- leaving is instant and needs nobody's permission.",
-                        HexStr(signer), p.mode == PosPayoutMode::DIRECT ? "direct" : "lottery",
+                        HexStr(signer), PosPayoutModeName(p.mode),
                         (int)p.activation, (int)away, FormatISO8601DateTime(tip_time + away * ApproxSecondsPerBlock())));
                 }
             }

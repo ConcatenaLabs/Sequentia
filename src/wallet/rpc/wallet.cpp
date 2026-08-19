@@ -641,6 +641,7 @@ RPCHelpMan delegatestake();
 RPCHelpMan undelegatestake();
 RPCHelpMan listdelegations();
 RPCHelpMan announcepayout();
+RPCHelpMan claimpoolrewards();
 RPCHelpMan getbtcbalance();
 RPCHelpMan settxfee();
 RPCHelpMan fundrawtransaction();
@@ -754,6 +755,7 @@ static const CRPCCommand commands[] =
     { "wallet",             &undelegatestake,                },
     { "wallet",             &listdelegations,                },
     { "wallet",             &announcepayout,                 },
+    { "wallet",             &claimpoolrewards,               },
     { "wallet",             &getbtcbalance,                  },
     { "wallet",             &sethdseed,                      },
     { "wallet",             &setlabel,                       },

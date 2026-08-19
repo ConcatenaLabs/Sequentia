@@ -451,6 +451,39 @@ struct Params {
         if (simplicity_budget4_chain_genesis != hashGenesisBlock) return true;
         return height >= simplicity_budget4_height;
     }
+    //! SEQUENTIA: flag day for the SPLIT payout mode (pos.h PosPayoutMode),
+    //! under which a pool's coinbase pays a claimable pot instead of one drawn
+    //! winner, and a new consensus rule constrains any transaction spending a
+    //! pot output.
+    //!
+    //! The gate exists for the same reason simplicity_budget4_height's does. To
+    //! a node without the rule a split policy record is an inert output (its
+    //! ParsePayoutScript rejects the mode byte), so the moment a new node
+    //! produces a pot-paying coinbase, old nodes reject the block. That is a
+    //! hard fork, and ungated it would be an unscheduled one. Below H, a new
+    //! node treats split records exactly as an old node does -- inert -- so the
+    //! two cannot diverge before the date every operator was given.
+    //!
+    //! Recognition is keyed on the RECORD's creation height, not the current
+    //! height, so the registry stays a pure function of the UTXO set: a split
+    //! record created below H is inert forever, on every node, however many
+    //! times the chain is rescanned.
+    int split_payout_height{0};
+    //! Genesis hash of the chain the height above was written for.
+    uint256 split_payout_chain_genesis;
+    //! Whether the split payout mode is part of the rules at `height`. Both
+    //! gates, as with SimplicityBudget4ActiveAt: a fresh chain has no history
+    //! and nobody to coordinate with, so it carries the rule from genesis
+    //! rather than inheriting a flag day meant for somebody else's network.
+    bool SplitPayoutActiveAt(int height) const
+    {
+        if (split_payout_height == 0) return true;
+        // The pin is only meaningful where one was written (the public chain);
+        // a custom chain's -con_splitpayoutheight is explicit operator intent
+        // and needs no re-genesis protection.
+        if (!split_payout_chain_genesis.IsNull() && split_payout_chain_genesis != hashGenesisBlock) return true;
+        return height >= split_payout_height;
+    }
     CAmount genesis_subsidy;
     //! SEQUENTIA: per-chain maximum block weight (BIP141 weight units). 0 means
     //! "use the global MAX_BLOCK_WEIGHT". Sequentia sets this to 200,000 (a

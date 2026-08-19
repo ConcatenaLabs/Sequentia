@@ -15,6 +15,8 @@
 #define BITCOIN_POS_H
 
 #include <arith_uint256.h>
+#include <asset.h>
+#include <primitives/transaction.h>
 #include <pubkey.h>
 #include <script/script.h>
 #include <sync.h>
@@ -24,6 +26,7 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <tuple>
 #include <set>
 #include <vector>
 
@@ -34,6 +37,19 @@ class CKey;
 /** When set, the chain uses Proof-of-Stake leader election for block validity
  *  (layered on g_signed_blocks). */
 extern bool g_con_pos;
+
+/** SEQUENTIA split payouts: the flag-day height, mirrored from
+ *  Consensus::Params::split_payout_height by chainparams.cpp so the common
+ *  layer (this module cannot see chainparams) and validation agree from one
+ *  source at runtime. 0 = the mode is part of the rules from genesis. */
+extern int g_split_payout_height;
+
+/** An unspent pot output: what a claim would sweep. */
+struct PosPotRef {
+    CAsset asset;
+    int64_t value{0};
+    int height{0};
+};
 
 /** Seconds per leader rank: the rank-r leader of a slot may only produce a
  *  block once this many seconds * r have elapsed since the parent block. Also
@@ -130,6 +146,16 @@ enum class PosPayoutMode : uint8_t {
     LEADER = 0,   //!< default: the coinbase pays the elected leader (no record)
     DIRECT = 1,   //!< the coinbase pays a scriptPubKey the operator committed to
     LOTTERY = 2,  //!< the coinbase pays one participant, drawn by stake weight
+    //! The coinbase pays the pool's POT (BuildPotScript), and a consensus rule
+    //! constrains any spend of a pot output to a CLAIM that distributes it to
+    //! the pool's delegators in exact proportion to the weight each had lent
+    //! when the pot output was created. Commission uses the lottery's own
+    //! mechanism: a bp/10000 chance, drawn from the unbiasable election seed,
+    //! that the block pays the leader instead of the pot -- exact in
+    //! expectation, and it keeps the coinbase a single required script.
+    //! Recognised only from Consensus::Params::split_payout_height; see
+    //! doc/sequentia/split-payouts-design.md.
+    SPLIT = 3,
 };
 
 /** A payout policy an operator has committed to, effective from `activation`. */
@@ -203,6 +229,22 @@ private:
     //! activation height and resolved by height at lookup, never by "latest
     //! seen". Consensus forbids two records sharing a (signer, activation).
     std::map<CPubKey, std::map<int64_t, PosPayoutPolicy>> m_payout_utxo GUARDED_BY(m_mutex);
+    //! SEQUENTIA split payouts: UTXO stake bucketed by CREATION HEIGHT, kept
+    //! alongside m_utxo (which stays the flat sum every election reads). A
+    //! claim pays each delegator from a pot output only for weight that
+    //! existed before that pot output did, and a stake UTXO's creation height
+    //! is the proof of when it existed: a UTXO alive now with height g was
+    //! alive continuously since g. Height 0 is the config/genesis era.
+    std::map<CPubKey, std::map<int, uint64_t>> m_utxo_tranches GUARDED_BY(m_mutex);
+    //! Creation height of each controller's delegation record, maintained
+    //! under exactly the conditions of m_deleg_utxo (including the
+    //! conditional erase). A record is one immutable UTXO, so "record height
+    //! < pot height and record still names this signer" proves the delegation
+    //! stood, unchanged, for the whole interval.
+    std::map<CPubKey, int> m_deleg_height GUARDED_BY(m_mutex);
+    //! Unspent pot outputs per signer, for the claim BUILDER only (validation
+    //! reads the claim's own inputs).
+    std::map<CPubKey, std::map<COutPoint, PosPotRef>> m_pot_utxo GUARDED_BY(m_mutex);
 
     //! The signer for a controller (itself when it has delegated nothing).
     CPubKey SignerForLocked(const CPubKey& controller) const EXCLUSIVE_LOCKS_REQUIRED(m_mutex)
@@ -242,6 +284,9 @@ public:
         m_bls_utxo.clear();
         m_deleg_utxo.clear();
         m_payout_utxo.clear();
+        m_utxo_tranches.clear();
+        m_deleg_height.clear();
+        m_pot_utxo.clear();
     }
     //! Set a configured staker's weight.
     void SetStake(const CPubKey& pubkey, uint64_t weight)
@@ -276,28 +321,41 @@ public:
     void SetUtxoStake(std::map<CPubKey, uint64_t>&& utxo,
                       std::map<CPubKey, std::vector<unsigned char>>&& bls_utxo = {},
                       std::map<CPubKey, CPubKey>&& deleg_utxo = {},
-                      std::map<CPubKey, std::map<int64_t, PosPayoutPolicy>>&& payout_utxo = {})
+                      std::map<CPubKey, std::map<int64_t, PosPayoutPolicy>>&& payout_utxo = {},
+                      std::map<CPubKey, std::map<int, uint64_t>>&& utxo_tranches = {},
+                      std::map<CPubKey, int>&& deleg_height = {},
+                      std::map<CPubKey, std::map<COutPoint, PosPotRef>>&& pot_utxo = {})
     {
         LOCK(m_mutex);
         m_utxo = std::move(utxo);
         m_bls_utxo = std::move(bls_utxo);
         m_deleg_utxo = std::move(deleg_utxo);
         m_payout_utxo = std::move(payout_utxo);
+        m_utxo_tranches = std::move(utxo_tranches);
+        m_deleg_height = std::move(deleg_height);
+        m_pot_utxo = std::move(pot_utxo);
+        // A caller that supplies weights without tranches (tests, mostly) gets
+        // the whole weight in the genesis-era bucket, which makes it eligible
+        // for every pot -- the least surprising reading of "no height given".
+        if (m_utxo_tranches.empty()) {
+            for (const auto& e : m_utxo) m_utxo_tranches[e.first][0] = e.second;
+        }
     }
     //! A staking output entered the UTXO set. A non-empty bls_pubkey registers
     //! (or re-affirms) the staker's UTXO-layer committee BLS key; ConnectBlock
     //! has verified its PoP and that it does not conflict with an existing key.
     void AddUtxoStake(const CPubKey& pubkey, uint64_t amount,
-                      const std::vector<unsigned char>& bls_pubkey = {})
+                      const std::vector<unsigned char>& bls_pubkey = {}, int height = 0)
     {
         LOCK(m_mutex);
         m_utxo[pubkey] += amount;
+        m_utxo_tranches[pubkey][height] += amount;
         if (!bls_pubkey.empty()) m_bls_utxo[pubkey] = bls_pubkey;
     }
     //! A staking output left the UTXO set (spent, or its creation reverted). The
     //! UTXO BLS key is tied to the staker having any UTXO weight: when the last
     //! staking output is gone, the registration goes with it.
-    void SubUtxoStake(const CPubKey& pubkey, uint64_t amount)
+    void SubUtxoStake(const CPubKey& pubkey, uint64_t amount, int height = 0)
     {
         LOCK(m_mutex);
         auto it = m_utxo.find(pubkey);
@@ -310,6 +368,17 @@ public:
             return;
         }
         it->second -= amount;
+        // The same subtraction against the height bucket the output was
+        // created in (the caller reads it off the spent coin).
+        auto tit = m_utxo_tranches.find(pubkey);
+        if (tit != m_utxo_tranches.end()) {
+            auto bit = tit->second.find(height);
+            if (bit != tit->second.end()) {
+                bit->second = bit->second >= amount ? bit->second - amount : 0;
+                if (bit->second == 0) tit->second.erase(bit);
+            }
+            if (tit->second.empty()) m_utxo_tranches.erase(tit);
+        }
         if (it->second == 0) {
             m_utxo.erase(it);
             m_bls_utxo.erase(pubkey);
@@ -368,10 +437,11 @@ public:
         return m_deleg_utxo;
     }
     //! A delegation record entered the UTXO set.
-    void AddUtxoDelegation(const CPubKey& controller, const CPubKey& signer)
+    void AddUtxoDelegation(const CPubKey& controller, const CPubKey& signer, int height = 0)
     {
         LOCK(m_mutex);
         m_deleg_utxo[controller] = signer;
+        m_deleg_height[controller] = height;
     }
     //! A delegation record left the UTXO set. Erase only if it is still the
     //! record in force: a rotation spends the old record and creates a new one in
@@ -382,7 +452,10 @@ public:
     {
         LOCK(m_mutex);
         auto it = m_deleg_utxo.find(controller);
-        if (it != m_deleg_utxo.end() && it->second == signer) m_deleg_utxo.erase(it);
+        if (it != m_deleg_utxo.end() && it->second == signer) {
+            m_deleg_utxo.erase(it);
+            m_deleg_height.erase(controller);
+        }
     }
 
     //! A payout record entered the UTXO set.
@@ -428,6 +501,84 @@ public:
         LOCK(m_mutex);
         return m_payout_utxo;
     }
+    //! A pot output entered the UTXO set.
+    void AddUtxoPot(const CPubKey& signer, const COutPoint& out, const CAsset& asset,
+                    int64_t value, int height)
+    {
+        LOCK(m_mutex);
+        m_pot_utxo[signer][out] = PosPotRef{asset, value, height};
+    }
+    //! A pot output left the UTXO set (claimed, or its creation reverted).
+    void SubUtxoPot(const CPubKey& signer, const COutPoint& out)
+    {
+        LOCK(m_mutex);
+        auto it = m_pot_utxo.find(signer);
+        if (it == m_pot_utxo.end()) return;
+        it->second.erase(out);
+        if (it->second.empty()) m_pot_utxo.erase(it);
+    }
+    //! The unspent pot outputs a claim for `signer` would sweep.
+    std::map<COutPoint, PosPotRef> PotsFor(const CPubKey& signer) const
+    {
+        LOCK(m_mutex);
+        auto it = m_pot_utxo.find(signer);
+        return it == m_pot_utxo.end() ? std::map<COutPoint, PosPotRef>() : it->second;
+    }
+
+    //! `controller`'s weight counting only stake created strictly before
+    //! `height`. Config/genesis-era stake lives in bucket 0 and counts for any
+    //! positive height.
+    uint64_t WeightBefore(const CPubKey& controller, int height) const
+    {
+        LOCK(m_mutex);
+        uint64_t w = 0;
+        auto cit = m_config.find(controller);
+        if (cit != m_config.end() && height > 0) w += cit->second;
+        auto tit = m_utxo_tranches.find(controller);
+        if (tit != m_utxo_tranches.end()) {
+            for (const auto& b : tit->second) {
+                if (b.first >= height) break; // ordered map
+                w += b.second;
+            }
+        }
+        return w;
+    }
+
+    //! The participants a pot output created at `height` pays: every controller
+    //! whose weight counts for `signer` NOW and already did when the pot output
+    //! was created. Exactness rests on UTXO immutability -- a delegation record
+    //! or stake output alive now with creation height < `height` has stood,
+    //! unchanged, since then. The one approximation: a signer that had
+    //! delegated its own weight elsewhere at pot time and has since reclaimed
+    //! it is counted; the corner involves only the operator's own stake.
+    std::map<CPubKey, uint64_t> ParticipantsBefore(const CPubKey& signer, int height) const
+    {
+        LOCK(m_mutex);
+        std::map<CPubKey, uint64_t> out;
+        std::set<CPubKey> controllers;
+        for (const auto& e : m_config) controllers.insert(e.first);
+        for (const auto& e : m_utxo_tranches) controllers.insert(e.first);
+        for (const CPubKey& c : controllers) {
+            if (SignerForLocked(c) != signer) continue;
+            if (c != signer) {
+                auto hit = m_deleg_height.find(c);
+                if (hit == m_deleg_height.end() || hit->second >= height) continue;
+            }
+            uint64_t w = 0;
+            auto cit = m_config.find(c);
+            if (cit != m_config.end() && height > 0) w += cit->second;
+            auto tit = m_utxo_tranches.find(c);
+            if (tit != m_utxo_tranches.end()) {
+                for (const auto& b : tit->second) {
+                    if (b.first >= height) break;
+                    w += b.second;
+                }
+            }
+            if (w > 0) out[c] = w;
+        }
+        return out;
+    }
+
     //! Every controller whose weight counts for `signer`, with that weight. The
     //! signer itself is included when it has not delegated its own stake away.
     //! This is the LOTTERY draw's participant set.
@@ -904,6 +1055,70 @@ CScript BuildDelegationScript(const CPubKey& controller, const CPubKey& signer);
  *  greatest activation <= h; older records linger harmlessly until spent. */
 CScript BuildPayoutScript(const CPubKey& signer, const PosPayoutPolicy& policy);
 
+/** SEQUENTIA split payouts: the POT, where a split pool's block rewards
+ *  accumulate until a claim distributes them.
+ *
+ *      <"SEQPOT"> OP_DROP <signer_pubkey> OP_DROP OP_TRUE
+ *
+ *  Anyone-can-spend at the script layer ON PURPOSE: the consensus overlay
+ *  (CheckPosPotClaim) is the entire spend condition, and it fully determines
+ *  the outputs, so the only thing "anyone" can do with a pot is distribute it
+ *  correctly and keep the bounded claimer's margin. A signature here would
+ *  make claiming operator-permissioned, which is the opposite of the point:
+ *  nobody's payout may depend on the operator staying interested. */
+//! "direct", "lottery" or "split" -- the one string every RPC and UI prints.
+const char* PosPayoutModeName(PosPayoutMode mode);
+
+CScript BuildPotScript(const CPubKey& signer);
+std::optional<CPubKey> ParsePotScript(const CScript& script);
+/** The pot a txout carries: (signer, asset, value). Explicit outputs only --
+ *  a blinded output carrying the pot script was never a pot (consensus only
+ *  creates explicit ones) and is treated as the ordinary anyone-can-spend
+ *  script it is. */
+struct PotOut {
+    CPubKey signer;
+    CAsset asset;
+    int64_t value{0};
+};
+std::optional<PotOut> PotFromTxOut(const CTxOut& out);
+
+/** The smallest per-delegator payment a claim may make, in atoms. A consensus
+ *  constant rather than the (node-configurable) relay dust: every validator
+ *  must agree on which delegators a claim must pay. Shares below this roll
+ *  into the fresh pot and accumulate for the next claim. */
+static const int64_t POS_SPLIT_MIN_PAYOUT = 1000;
+/** A claim may withhold (network fee + claimer's margin, net of any coins the
+ *  claimer brought) at most 1/POS_SPLIT_WITHHOLD_RATIO of what it delivers to
+ *  delegators. This one invariant replaces a claim interval, a keeper-cut
+ *  constant and a minimum-pot constant: grief-claiming must deliver 99x its
+ *  own damage, and claims happen exactly when a pot is worth claiming. */
+static const int64_t POS_SPLIT_WITHHOLD_RATIO = 99;
+/** Each pot input RESERVES 1/POS_SPLIT_RESERVE_DENOM of itself to fund its own
+ *  distribution: delegator shares are computed over the other 99%. Without the
+ *  reserve the shares would sum to the whole pot and the claim could never pay
+ *  its own fee -- the withhold cap above and this reserve are two sides of the
+ *  same 1%: the cap bounds what may be taken, the reserve is where it comes
+ *  from, and whatever the fee does not use rolls back into the pot. */
+static const int64_t POS_SPLIT_RESERVE_DENOM = 100;
+
+/** The exact amounts a claim of `pot_inputs` (asset, value, creation height)
+ *  must pay, per delegator per asset, plus what was swept per asset. Pure
+ *  function of the registry (itself a pure function of the UTXO set), so the
+ *  claim builder and every validator compute identical numbers. */
+struct PosPotShares {
+    std::map<CPubKey, std::map<CAsset, int64_t>> owed;
+    std::map<CAsset, int64_t> swept;
+};
+PosPotShares PosComputePotShares(const CPubKey& signer,
+                                 const std::vector<std::tuple<CAsset, int64_t, int>>& pot_inputs);
+
+/** Validate a transaction against the pot-claim rules. `spent_coins` aligns
+ *  with tx.vin (the coins being spent, with their creation heights). Returns
+ *  true for any transaction that spends no pot output. */
+class Coin;
+bool CheckPosPotClaim(const CTransaction& tx, const std::vector<Coin>& spent_coins,
+                      std::string& reason);
+
 /** The (signer, policy) a payout-record script names, or nullopt. */
 std::optional<std::pair<CPubKey, PosPayoutPolicy>> ParsePayoutScript(const CScript& script);
 std::optional<std::pair<CPubKey, PosPayoutPolicy>> PayoutFromTxOut(const CTxOut& out);
@@ -977,10 +1192,10 @@ std::optional<std::pair<CPubKey, uint64_t>> StakeFromTxOut(const CTxOut& out);
 /** Mirror a connected block into the UTXO stake layer: outputs that create
  *  staking UTXOs add weight; inputs that spend them (from the block's undo
  *  data) subtract it. Must be called exactly once per tip connect. */
-void PosApplyBlockStake(const CBlock& block, const CBlockUndo& undo);
+void PosApplyBlockStake(const CBlock& block, const CBlockUndo& undo, int height);
 
 /** Exact inverse of PosApplyBlockStake, for tip disconnects (reorgs). */
-void PosRevertBlockStake(const CBlock& block, const CBlockUndo& undo);
+void PosRevertBlockStake(const CBlock& block, const CBlockUndo& undo, int height);
 
 /** Rebuild the UTXO stake layer by scanning the (flushed) UTXO set. */
 bool RebuildUtxoStake(CCoinsView& view);
