@@ -4,7 +4,7 @@ export const meta = {
   phases: [ { title: 'Investigate' }, { title: 'Recommend' } ],
 }
 
-const NODE = '/home/aejkohl/SequentiaByClaude'
+const NODE = '/home/aejkohl/Sequentia'
 const WEB = '/home/aejkohl/sequentia-web-wallet'
 
 const CTX = `SEQUENTIA FIRST PRINCIPLES (do not contradict):

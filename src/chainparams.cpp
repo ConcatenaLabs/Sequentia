@@ -387,7 +387,7 @@ public:
         // GetBlockScriptFlags in validation.cpp), so while Taproot is inactive
         // a witness-v1 output is an unencumbered anyone-can-spend. It also
         // gates tapscript, and with it the introspection opcodes every covenant
-        // we ship depends on (SeqOB's passive order book).
+        // deployed on this chain depends on.
         //
         // The values inherited from Bitcoin mainnet were doubly wrong here:
         // under elements_mode, nStartTime/nTimeout are read as BLOCK HEIGHTS,

@@ -179,13 +179,14 @@ update_index() {
   [ -f "$index" ] || { log "no index.html; nothing to repoint"; return 0; }
   cp -p "$index" "$index.bak-publish"
 
-  local recipe name glob newest
+  local recipe name glob newest recipe_version
   for recipe in "$RECIPE_DIR"/*.sh; do
     [ -f "$recipe" ] || continue
     name="$(basename "$recipe" .sh)"
     # Read the glob without running the recipe's build.
     glob="$(grep -m1 '^PRODUCT_INDEX_GLOB=' "$recipe" | cut -d= -f2- | tr -d '"')"
     [ -n "$glob" ] || continue
+    recipe_version=""
     # Split on spaces WITHOUT letting bash expand the patterns. `for one in $glob`
     # looks equivalent and is not: unquoted expansion also does pathname
     # expansion, so whenever the working directory happened to contain a matching
@@ -212,16 +213,22 @@ update_index() {
       # Turn the concrete filename back into a pattern by replacing its version.
       local pat; pat="$(printf '%s' "$one" | sed 's/\*/[0-9][0-9.]*/g')"
       sed -i -E "s#$pat#$newest#g" "$index"
+      # The first glob that matched decides the version this product's heading
+      # shows. Filenames all carry the same version for a given product, so any
+      # of them would do; taking the first keeps it deterministic.
+      [ -n "$recipe_version" ] || recipe_version="$(printf '%s' "$newest" | grep -oE '[0-9]+(\.[0-9]+)+' | head -1)"
     done
+
+    # Each product section carries its OWN version, keyed by recipe name. The
+    # page used to show one label for everything, which read as if the node's
+    # version described Fulmen and Ambra too -- it never did, and the numbers
+    # visible on the cards contradicted it. A chip whose data-ver names no
+    # recipe is simply left alone.
+    if [ -n "$recipe_version" ]; then
+      sed -i -E "s#(<span class=\"ver\" data-ver=\"$name\">version )[0-9][0-9.]*#\1$recipe_version#" "$index"
+    fi
   done
 
-  # The single version label tracks the node, which is what the page is about.
-  local newest_node
-  newest_node="$(find "$DOWNLOAD_DIR" -maxdepth 1 -type f -name 'sequentia-core-*-linux-x86_64.tar.gz' -printf '%f\n' 2>/dev/null | sort -V | tail -1)"
-  if [ -n "$newest_node" ]; then
-    local v; v="$(printf '%s' "$newest_node" | sed -E 's#sequentia-core-([0-9.]+)-linux.*#\1#')"
-    sed -i -E "s#(<span class=\"ver\">version )[0-9][0-9.]*#\1$v#" "$index"
-  fi
 
   # Only what the page actually links: the surrounding prose mentions filenames
   # too ("run Fulmen.exe"), and reporting those as offered artifacts is noise.
