@@ -455,7 +455,6 @@ public:
         // unsupervised can never become supervised. See
         // doc/sequentia/bridged-usdc-standard.md.
         consensus.supervised_assets_height = 1;
-        consensus.nMaxBlockWeight = 200000;             // a twentieth of Bitcoin (doc 11 §4)
         // Minimum block spacing: the 30-second cadence as a CONSENSUS RULE, in
         // force from mainnet's first block. Mainnet has not launched, so there
         // is no history to exempt and nothing to coordinate later.
