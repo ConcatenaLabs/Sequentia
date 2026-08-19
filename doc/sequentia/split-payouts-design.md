@@ -132,7 +132,8 @@ claim that rolls everything forward and pays nobody may withhold nothing.
 To a node without the mode, a split policy record is an **inert output** (its
 `ParsePayoutScript` rejects the mode byte), so the moment a new node produces a
 pot-paying coinbase, old nodes reject the block: a hard fork, therefore a flag
-day — `split_payout_height = 106,500` on the live testnet, genesis-pinned, and
+day — `split_payout_height = 102,150` on the live testnet (24.4.1; 24.4.0 said
+106,500 before the operators were asked how much runway they wanted), genesis-pinned, and
 active from genesis everywhere else (`-con_splitpayoutheight` on custom chains).
 
 Below the flag a new node treats split records exactly as an old node does:
