@@ -17,6 +17,7 @@ QT_BEGIN_NAMESPACE
 class QComboBox;
 class QLabel;
 class QLineEdit;
+class QRadioButton;
 class QShowEvent;
 class QVBoxLayout;
 QT_END_NAMESPACE
@@ -142,6 +143,13 @@ private:
     QComboBox* m_asset_selector{nullptr};
     QWidget* m_rate_mode_slot{nullptr};
     int m_rate_mode_index{0};
+    //! The pair built above, kept so a host handing over its own can replace it.
+    //! A page that never calls setRateModeWidget() would otherwise be stuck on
+    //! the recommendation with no way to pay more -- which is the wrong default
+    //! for a freeze, where waiting is the whole risk.
+    QWidget* m_own_rate_mode{nullptr};
+    QRadioButton* m_radio_recommended{nullptr};
+    QRadioButton* m_radio_custom{nullptr};
 
     //! The four cells: what this costs, in the asset that pays and in the
     //! reference currency, per transaction and per 1000 bytes.
@@ -188,6 +196,14 @@ private:
      *  resolved later would otherwise stay a 64-hex id for the life of the
      *  window -- which is what it did. */
     void relabelAssets();
+    /** Build the Recommended/Custom pair this widget owns, for a host that has
+     *  none of its own. Discarded if the host later hands over its own with
+     *  setRateModeWidget(). */
+    void buildOwnRateMode();
+    /** The rate now on display, converted to the reference unit setCustomMode()
+     *  speaks. Used to seed Custom from the recommendation, so switching to it
+     *  starts from the figure that was just being quoted rather than from zero. */
+    CAmount shownRateAsReference() const;
     void applyDefaultAsset();
     void updateGrid(const CAmount& asset_atoms_per_kvb);
     void onCellEdited(QLineEdit* source);
