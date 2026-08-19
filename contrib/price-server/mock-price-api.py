@@ -100,9 +100,17 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok":True,"assets":sorted(_state)})
                 return
             if self.path.startswith("/price/"):
-                t=self.path.split("/price/",1)[1].strip("/").upper()
-                if t in _state:
-                    self._json(_state[t])
+                # Match case-INSENSITIVELY against the real keys rather than
+                # upper-casing the request. Some tickers are not upper-case --
+                # tBTC is the obvious one -- and upper-casing made every such
+                # ticker unreachable through /price/<T> while still listing it
+                # in /prices, which is a confusing way to be missing.
+                want=self.path.split("/price/",1)[1].strip("/")
+                with _lock:
+                    key=next((k for k in _state if k.lower()==want.lower()), None)
+                    hit=dict(_state[key]) if key else None
+                if hit is not None:
+                    self._json(hit)
                     return
         self._json({"error":"not found"},404)
     def do_POST(self):
