@@ -36,6 +36,15 @@ ONLY="${SEQ_ONLY:-}"
 
 export BUILD_ROOT DOWNLOAD_DIR JOBS NICE
 
+# systemd starts a service with no HOME, and every toolchain here keeps its cache
+# under one: pub, cargo, gradle, npm. Flutter does not degrade when it cannot find
+# the pub cache, it refuses to resolve packages at all -- "Could not find the pub
+# cache. No `HOME` environment variable exists." -- so the Ambra build failed on
+# every timer tick while the login shell it was developed in worked fine. Set it
+# here rather than in one recipe: the next toolchain to be added would hit this
+# too, and Environment= in the unit would leave a hand-run publish still broken.
+export HOME="${HOME:-/root}"
+
 log()  { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 die()  { log "ERROR: $*"; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
