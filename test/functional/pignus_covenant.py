@@ -83,10 +83,11 @@ doc/sequentia/pignus-design.md section 5.3.
 
 from test_framework.script import (
     CScript, taproot_construct,
-    OP_1, OP_1ADD, OP_ADD, OP_CAT, OP_CHECKLOCKTIMEVERIFY, OP_CHECKSIG,
+    OP_0, OP_1, OP_1ADD, OP_2DROP, OP_2DUP, OP_ADD, OP_CAT,
+    OP_CHECKLOCKTIMEVERIFY, OP_CHECKSIG, OP_CHECKSIGFROMSTACK,
     OP_CHECKSIGFROMSTACKVERIFY, OP_DROP, OP_DUP, OP_ELSE, OP_ENDIF, OP_EQUAL,
-    OP_EQUALVERIFY, OP_FROMALTSTACK, OP_IF, OP_LESSTHAN, OP_NIP, OP_SWAP,
-    OP_TOALTSTACK, OP_VERIFY,
+    OP_EQUALVERIFY, OP_FROMALTSTACK, OP_GREATERTHANOREQUAL, OP_IF, OP_LESSTHAN,
+    OP_NIP, OP_ROT, OP_SWAP, OP_TOALTSTACK, OP_VERIFY,
     OP_INSPECTINPUTVALUE, OP_PUSHCURRENTINPUTINDEX,
     OP_INSPECTOUTPUTASSET, OP_INSPECTOUTPUTVALUE, OP_INSPECTOUTPUTSCRIPTPUBKEY,
     OP_INSPECTNUMOUTPUTS,
@@ -233,16 +234,141 @@ def _oracle_check(feed_id, oracle_x, not_before):
     return s
 
 
+def _oracle_slot(feed_id, oracle_x, not_before, strike):
+    """One oracle's slot in a threshold set.
+
+    Consumes this slot's witness triple `(price, ts, sig)` (sig on top) and
+    leaves NOTHING on the main stack: the slot's effective price and its
+    accept/reject flag both go to the alt stack, so the next slot's witness
+    triple is on top when it runs. Piling results on the main stack instead
+    would bury the witness data that has not been read yet.
+
+    An EMPTY signature is an abstention, and this is a property of the opcode
+    rather than a convention: `OP_CHECKSIGFROMSTACK` pushes false for an empty
+    signature but ABORTS the script for a non-empty invalid one. So a spender
+    can present a real signature or none at all, and cannot present rubbish to
+    fill a slot.
+
+    A slot that accepts contributes its price; a slot that abstains contributes
+    zero, which can never win the maximum below because a zero price would fail
+    the division in the seizure anyway.
+    """
+    s = [OP_TOALTSTACK]                       # stash sig; [price, ts]
+    s += [OP_2DUP, OP_SWAP, OP_CAT]           # [price, ts, ts||price]
+    s += [feed_id, OP_SWAP, OP_CAT]           # [price, ts, msg]
+    s += [OP_FROMALTSTACK, OP_SWAP]           # [price, ts, sig, msg]
+    s += [oracle_x, OP_CHECKSIGFROMSTACK]     # [price, ts, ok]
+    s += [OP_IF]
+    #   accepted: this oracle's own timestamp and price must each pass
+    s += [le8(not_before), OP_GREATERTHANOREQUAL64, OP_VERIFY]   # [price]
+    if strike is not None:
+        s += [OP_DUP, le8(strike), OP_LESSTHAN64, OP_VERIFY]     # [price]
+    s += [OP_TOALTSTACK, OP_1, OP_TOALTSTACK]        # alt += (price, 1)
+    s += [OP_ELSE]
+    #   abstained
+    s += [OP_2DROP, le8(0), OP_TOALTSTACK, OP_0, OP_TOALTSTACK]  # alt += (0, 0)
+    s += [OP_ENDIF]
+    return s
+
+
+def _oracle_check_threshold(feed_id, oracle_keys, threshold, not_before, strike):
+    """Verify a threshold of INDEPENDENT oracles and leave [price] on the stack.
+
+    Each oracle signs its own `(ts, price)`; they never have to agree on a byte,
+    which matters because requiring several independent price sources to produce
+    an identical timestamp and an identical price is a coordination protocol, not
+    an oracle set. Each accepted price must independently clear the strike, so a
+    liquidation needs `threshold` oracles to agree the position is under water.
+
+    The price carried into the seizure is the MAXIMUM of the accepted prices.
+    That is the borrower-favourable choice -- a higher price means less
+    collateral seized -- and it also removes the incentive to shop: presenting
+    extra low attestations cannot drag the price down, because the spender must
+    still clear the threshold and the largest of whatever they present is what
+    counts. A liquidator's best play is to present exactly the `threshold`
+    lowest attestations they hold, which makes the effective price the
+    threshold-th lowest of the set: a robust quantile rather than any single
+    oracle's number.
+
+    Compared with a FROST/MuSig group key (one key, one signature, no script
+    change), this costs script size and buys independence: these oracles never
+    run a joint signing protocol, so there is no coordinator to compromise and
+    no liveness coupling between them. Both are supported; a vault with a single
+    key gets the cheap path in `_oracle_check`.
+    """
+    n = len(oracle_keys)
+    s = []
+    for key in oracle_keys:
+        s += _oracle_slot(feed_id, key, not_before, strike)
+    # alt is [eff_0, c_0, ..., eff_{n-1}, c_{n-1}]; unwind it into a running
+    # (count, max) pair.
+    s += [OP_FROMALTSTACK, OP_FROMALTSTACK]        # [c_{n-1}, eff_{n-1}]
+    for _ in range(n - 1):
+        s += [OP_FROMALTSTACK, OP_ROT, OP_ADD, OP_SWAP]   # count += c_i
+        s += [OP_FROMALTSTACK]                             # [count, max, eff_i]
+        s += [OP_2DUP, OP_GREATERTHANOREQUAL64]            # max >= eff_i ?
+        s += [OP_IF, OP_DROP, OP_ELSE, OP_NIP, OP_ENDIF]   # [count, max']
+    s += [OP_SWAP, threshold, OP_GREATERTHANOREQUAL, OP_VERIFY]   # [max]
+    return s
+
+
+def _resolve_oracles(oracle_x, oracles, threshold):
+    """Normalise the two ways of naming an oracle to (keys, threshold).
+
+    `oracle_x` is the single-key form and stays byte-identical to what shipped;
+    `oracles` names a set. Supplying both is a mistake worth refusing rather than
+    silently preferring one, because the two produce different addresses.
+    """
+    if oracles:
+        if oracle_x is not None:
+            raise ValueError("give oracle_x or oracles, not both: they compile "
+                             "to different vaults")
+        keys = list(oracles)
+        for k in keys:
+            if len(k) != 32:
+                raise ValueError("each oracle key must be 32 bytes (x-only)")
+        if len(set(keys)) != len(keys):
+            raise ValueError("duplicate oracle key: one signer would fill two "
+                             "slots and the threshold would not mean what it says")
+        t = len(keys) if threshold is None else int(threshold)
+        if not 1 <= t <= len(keys):
+            raise ValueError(f"threshold {t} outside 1..{len(keys)}")
+        return keys, t
+    if oracle_x is None:
+        raise ValueError("a vault needs an oracle: pass oracle_x or oracles")
+    if len(oracle_x) != 32:
+        raise ValueError("oracle_x must be 32 bytes (x-only)")
+    if threshold not in (None, 1):
+        raise ValueError("threshold > 1 needs an oracle SET, not one key")
+    return [oracle_x], 1
+
+
+def _oracle_section(feed_id, oracle_keys, threshold, not_before, strike):
+    """The single-key fast path, or the threshold path. The single-key script is
+    unchanged from what shipped, so vaults already funded keep their addresses."""
+    if len(oracle_keys) == 1 and threshold == 1:
+        s = _oracle_check(feed_id, oracle_keys[0], not_before)
+        if strike is not None:
+            s = s + [OP_DUP, le8(strike), OP_LESSTHAN64, OP_VERIFY]
+        return s
+    return _oracle_check_threshold(feed_id, oracle_keys, threshold,
+                                   not_before, strike)
+
+
 def build_liquidate_leaf(asset_c, asset_d, debt, lender_prog, borrower_prog,
                          feed_id, oracle_x, strike, not_before,
                          bonus_num=105, bonus_den=100, price_scale=PRICE_SCALE,
-                         max_price=None):
+                         max_price=None, oracles=None, oracle_threshold=None):
     """LIQUIDATE: permissionless seizure while the attested price is under the
     strike. Pays the lender, pays the liquidator the baked bonus, returns the
-    rest to the borrower."""
-    assert len(feed_id) == 32 and len(oracle_x) == 32
+    rest to the borrower.
+
+    Name ONE oracle with `oracle_x`, or a set with `oracles` plus an
+    `oracle_threshold`; see _oracle_check_threshold for what the set buys."""
+    assert len(feed_id) == 32
     assert 1 <= strike < (1 << 63)
     assert bonus_num >= bonus_den >= 1
+    keys, threshold = _resolve_oracles(oracle_x, oracles, oracle_threshold)
     gross = gross_owed(debt, bonus_num, bonus_den)
     # Overflow bound: the largest value the leaf ever forms is
     # gross*scale + price - 1, and LIQUIDATE only runs for price < strike.
@@ -251,9 +377,7 @@ def build_liquidate_leaf(asset_c, asset_d, debt, lender_prog, borrower_prog,
         "loan too large for 64-bit seizure arithmetic: reduce debt, or the "
         f"price_scale (gross={gross}, scale={price_scale}, bound={bound})")
 
-    s = _oracle_check(feed_id, oracle_x, not_before)             # [price]
-    # the trigger: strictly under the strike
-    s += [OP_DUP, le8(strike), OP_LESSTHAN64, OP_VERIFY]         # [price]
+    s = _oracle_section(feed_id, keys, threshold, not_before, strike)  # [price]
     s += _seizure_tail(asset_c, asset_d, debt, lender_prog, borrower_prog,
                        gross, price_scale)
     return CScript(s)
@@ -262,13 +386,14 @@ def build_liquidate_leaf(asset_c, asset_d, debt, lender_prog, borrower_prog,
 def build_default_leaf(asset_c, asset_d, debt, lender_prog, borrower_prog,
                        feed_id, oracle_x, maturity, not_before,
                        bonus_num=105, bonus_den=100, price_scale=PRICE_SCALE,
-                       max_price=None):
+                       max_price=None, oracles=None, oracle_threshold=None):
     """DEFAULT: LIQUIDATE without the price test, gated on the term being up.
 
     Permissionless on purpose. At maturity the debt is due at ANY price, so
     anyone may call the loan; the covenant still forces the surplus home, which
     is what makes it safe to let anyone do it."""
-    assert len(feed_id) == 32 and len(oracle_x) == 32
+    assert len(feed_id) == 32
+    keys, threshold = _resolve_oracles(oracle_x, oracles, oracle_threshold)
     gross = gross_owed(debt, bonus_num, bonus_den)
     # DEFAULT has no strike, so the caller must declare the highest price the
     # oracle can ever quote for this feed; the assert then pins the same bound
@@ -279,7 +404,7 @@ def build_default_leaf(asset_c, asset_d, debt, lender_prog, borrower_prog,
         f"(gross={gross}, scale={price_scale}, bound={bound})")
 
     s = [maturity, OP_CHECKLOCKTIMEVERIFY, OP_DROP]
-    s += _oracle_check(feed_id, oracle_x, not_before)            # [price]
+    s += _oracle_section(feed_id, keys, threshold, not_before, None)  # [price]
     s += _seizure_tail(asset_c, asset_d, debt, lender_prog, borrower_prog,
                        gross, price_scale)
     return CScript(s)
@@ -295,8 +420,9 @@ def build_recover_leaf(recover_after, lender_x):
 
 
 def vault_taptree(*, asset_c, asset_d, debt, lender_prog, borrower_prog,
-                  lender_x, feed_id, oracle_x, strike, maturity, recover_after,
-                  not_before, bonus_num=105, bonus_den=100,
+                  lender_x, feed_id, strike, maturity, recover_after,
+                  not_before, oracle_x=None, oracles=None, oracle_threshold=None,
+                  bonus_num=105, bonus_den=100,
                   price_scale=PRICE_SCALE, max_price=None, internal_key=NUMS):
     """Build the {REPAY, LIQUIDATE, DEFAULT, RECOVER} taproot vault.
 
@@ -308,10 +434,12 @@ def vault_taptree(*, asset_c, asset_d, debt, lender_prog, borrower_prog,
     repay = build_repay_leaf(asset_c, asset_d, debt, lender_prog, borrower_prog)
     liquidate = build_liquidate_leaf(asset_c, asset_d, debt, lender_prog, borrower_prog,
                                      feed_id, oracle_x, strike, not_before,
-                                     bonus_num, bonus_den, price_scale, max_price)
+                                     bonus_num, bonus_den, price_scale, max_price,
+                                     oracles, oracle_threshold)
     default = build_default_leaf(asset_c, asset_d, debt, lender_prog, borrower_prog,
                                  feed_id, oracle_x, maturity, not_before,
-                                 bonus_num, bonus_den, price_scale, max_price)
+                                 bonus_num, bonus_den, price_scale, max_price,
+                                 oracles, oracle_threshold)
     recover = build_recover_leaf(recover_after, lender_x)
     tap = taproot_construct(internal_key, [
         ("repay", repay), ("liquidate", liquidate),
@@ -349,11 +477,34 @@ def repay_witness(tap, leaves):
 
 
 def oracle_witness(tap, leaves, leaf_name, sig, price, timestamp):
-    """LIQUIDATE / DEFAULT witness: [sig, price, ts] then leaf and control block.
-    The script pops ts first, so ts is pushed last."""
+    """LIQUIDATE / DEFAULT witness for a SINGLE-oracle vault: [sig, price, ts]
+    then leaf and control block. The script pops ts first, so ts is pushed last."""
     assert len(sig) == 64
     return [sig, le8(price), le8(timestamp),
             bytes(leaves[leaf_name]), control_block(tap, leaf_name)]
+
+
+def threshold_oracle_witness(tap, leaves, leaf_name, slots):
+    """LIQUIDATE / DEFAULT witness for a THRESHOLD vault.
+
+    `slots` is one entry per oracle key, in the SAME ORDER the vault was built
+    with, each either None (abstain) or a `(sig, price, timestamp)` triple. The
+    leaf reads slot 0 first, so slots are pushed in reverse; within a slot the
+    order is `price, ts, sig` because the script stashes the signature first.
+
+    An abstaining slot still needs its price and timestamp pushed -- the script
+    drops them in the else branch -- and its signature is the empty push, which
+    is what makes OP_CHECKSIGFROMSTACK return false instead of aborting.
+    """
+    w = []
+    for slot in reversed(slots):
+        if slot is None:
+            w += [le8(0), le8(0), b""]
+        else:
+            sig, price, ts = slot
+            assert len(sig) == 64, "a present slot needs a 64-byte signature"
+            w += [le8(price), le8(ts), sig]
+    return w + [bytes(leaves[leaf_name]), control_block(tap, leaf_name)]
 
 
 def recover_witness(tap, leaves, sig_lender):
