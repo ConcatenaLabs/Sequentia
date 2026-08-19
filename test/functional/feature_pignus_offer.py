@@ -114,7 +114,7 @@ class PignusOfferTest(BitcoinTestFramework):
 
     def vault_kwargs(self, **over):
         kw = dict(asset_c=self.asset_c, asset_d=self.asset_d, debt=DEBT,
-                  lender_prog=self.lender_x, lender_x=self.lender_x,
+                  lender_prog=self.lender_x,
                   feed_id=self.feed, oracle_x=self.oracle_x, strike=STRIKE,
                   maturity=self.maturity, recover_after=self.maturity + 100,
                   not_before=NOT_BEFORE, max_price=1_000_000 * pig.PRICE_SCALE)
@@ -243,7 +243,7 @@ class PignusOfferTest(BitcoinTestFramework):
         self.offer_tap, self.offer_leaves = off.offer_taptree(
             asset_c=self.asset_c, asset_d=self.asset_d, principal=PRINCIPAL,
             collateral=COLLATERAL, vault_kwargs=self.vault_kwargs(),
-            expiry_locktime=self.expiry, lender_x=self.lender_x)
+            expiry_locktime=self.expiry)
         self.log.info("offer spk %s", bytes(self.offer_tap.scriptPubKey).hex())
         self.log.info("  TAKE leaf %d bytes, single-leaf vault %d bytes",
                       len(bytes(self.offer_leaves["take"])),
@@ -436,7 +436,9 @@ class PignusOfferTest(BitcoinTestFramework):
         node = self.nodes[0]
         btc = self.fresh(1)
         btc_amt = int(satoshi_round(btc["amount"]) * COIN)
-        dest = self.wallet_spk()
+        # The refund's destination is PINNED to the lender's payout program;
+        # paying anywhere else is what the covenant now refuses.
+        dest = bytes(CScript([OP_1, self.lender_x]))
         tx = CTransaction()
         tx.nVersion = 2
         tx.nLockTime = locktime
@@ -447,16 +449,10 @@ class PignusOfferTest(BitcoinTestFramework):
         tx.vout.append(CTxOut(CTxOutValue(FEE)))
         partial = node.signrawtransactionwithwallet(tx.serialize().hex())
         tx = tx_from_hex(partial["hex"])
-        spent = [self.ctxout(PRINCIPAL, bytes(self.offer_tap.scriptPubKey), self.D_OUT),
-                 self.ctxout(btc_amt, bytes.fromhex(btc["scriptPubKey"]),
-                             b"\x01" + bytes.fromhex(btc["asset"])[::-1])]
-        msg = TaprootSignatureHash(tx, spent, 0, self.genesis, 0, scriptpath=True,
-                                   script=self.offer_leaves["refund"])
-        sig = sign_schnorr(self.lender_sec, msg)
         while len(tx.wit.vtxinwit) < len(tx.vin):
             tx.wit.vtxinwit.append(CTxInWitness())
         tx.wit.vtxinwit[0].scriptWitness.stack = off.offer_refund_witness(
-            self.offer_tap, self.offer_leaves, sig)
+            self.offer_tap, self.offer_leaves)
         return tx
 
 

@@ -28,10 +28,15 @@ What this proves, and why each case is here:
                                       callable at any price once due, and the
                                       surplus still goes home
   REJECT RECOVER before recover_after
-  PASS   RECOVER after recover_after  the oracle-liveness backstop
+  PASS   RECOVER after recover_after  the oracle-liveness backstop, and it too
+                                      needs no signature -- its destination is
+                                      pinned to the lender
   REJECT a blinded lender credit      the covenant cannot police what it cannot
                                       read, so it refuses to try
   REJECT output aliasing              one payment cannot settle two loans
+  PASS   a vault paying SEGWIT V0 addresses, which is all the browser wallet
+         extension can receive at -- and a program of the wrong length for its
+         version is refused at construction
 
 Every rejection is the node's own script interpreter (code -26), asserted by
 reject-reason, so a case that fails for an incidental reason cannot pass for
@@ -47,7 +52,7 @@ from test_framework.messages import (
     COIN, COutPoint, CTransaction, CTxIn, CTxInWitness, CTxOut, CTxOutAsset,
     CTxOutNonce, CTxOutValue, uint256_from_str, tx_from_hex,
 )
-from test_framework.script import CScript, OP_1, TaprootSignatureHash
+from test_framework.script import CScript, OP_0, OP_1, TaprootSignatureHash
 
 import pignus_covenant as pig
 
@@ -283,16 +288,12 @@ class PignusVaultTest(BitcoinTestFramework):
         tx.vout.append(CTxOut(CTxOutValue(FEE)))
         partial = node.signrawtransactionwithwallet(tx.serialize().hex())
         tx = tx_from_hex(partial["hex"])
-        spent = [self.ctxout(COLLATERAL, bytes(self.tap.scriptPubKey), self.C_OUT),
-                 self.ctxout(btc_amt, bytes.fromhex(btc["scriptPubKey"]),
-                             b"\x01" + bytes.fromhex(btc["asset"])[::-1])]
-        msg = TaprootSignatureHash(tx, spent, 0, self.genesis, 0,
-                                   scriptpath=True, script=self.leaves["recover"])
-        sig = sign_schnorr(self.lender_sec, msg)
         while len(tx.wit.vtxinwit) < len(tx.vin):
             tx.wit.vtxinwit.append(CTxInWitness())
+        # No signature: the destination is pinned to the lender's payout, so the
+        # leaf reads everything it enforces out of the transaction.
         tx.wit.vtxinwit[0].scriptWitness.stack = pig.recover_witness(
-            self.tap, self.leaves, sig)
+            self.tap, self.leaves)
         return tx
 
     # ----------------------------------------------------------- the test
@@ -337,7 +338,7 @@ class PignusVaultTest(BitcoinTestFramework):
         self.recover_after = self.maturity + 100
         self.tap, self.leaves = pig.vault_taptree(
             asset_c=asset_c, asset_d=asset_d, debt=DEBT,
-            lender_prog=lender_x, borrower_prog=borrower_x, lender_x=lender_x,
+            lender_prog=lender_x, borrower_prog=borrower_x,
             feed_id=self.feed_id, oracle_x=oracle_x, strike=STRIKE,
             maturity=self.maturity, recover_after=self.recover_after,
             not_before=NOT_BEFORE, bonus_num=BONUS_NUM, bonus_den=BONUS_DEN,
@@ -358,6 +359,7 @@ class PignusVaultTest(BitcoinTestFramework):
         self.blinded_case(v[12])
         self.default_cases(v[13:15])
         self.recover_case(v[15])
+        self.v0_payout_case()
 
         self.log.info("Pignus vault: every exit proven, every cheat refused by "
                       "the script interpreter")
@@ -516,6 +518,74 @@ class PignusVaultTest(BitcoinTestFramework):
                      Decimal(COLLATERAL - seize))
         self.log.info("  called at maturity: lender paid, borrower kept the %d C "
                       "atom surplus a higher price earned them", COLLATERAL - seize)
+
+    def v0_payout_case(self):
+        """A loan whose payouts go to SEGWIT V0 addresses.
+
+        This is not a curiosity. The browser wallet extension is a
+        `wpkhSlip77` wallet: every address it can receive at is segwit v0, so a
+        covenant that could only pay a v1 taproot address could never settle a
+        loan from a browser at all. The payout witness version is therefore a
+        baked parameter, and this proves a v0 vault really settles -- by REPAY,
+        and by an oracle-attested LIQUIDATE.
+        """
+        node = self.nodes[0]
+        self.log.info("PASS: a vault paying SEGWIT V0 addresses, which is all "
+                      "the browser wallet can receive at")
+        def prog20():
+            a = node.getnewaddress("", "bech32")
+            u = node.getaddressinfo(a)["unconfidential"]
+            return bytes.fromhex(node.getaddressinfo(u)["scriptPubKey"])[2:]
+        lender20, borrower20 = prog20(), prog20()
+        assert_equal(len(lender20), 20)
+        lender_spk = bytes(CScript([OP_0, lender20]))
+        borrower_spk = bytes(CScript([OP_0, borrower20]))
+
+        tap, leaves = pig.vault_taptree(
+            asset_c=bytes.fromhex(self.C_display)[::-1],
+            asset_d=bytes.fromhex(self.D_display)[::-1], debt=DEBT,
+            lender_prog=lender20, borrower_prog=borrower20,
+            lender_ver=0, borrower_ver=0,
+            feed_id=self.feed_id,
+            oracle_x=compute_xonly_pubkey(self.oracle_sec)[0],
+            strike=STRIKE, maturity=node.getblockcount() + 400,
+            recover_after=node.getblockcount() + 500, not_before=NOT_BEFORE,
+            max_price=MAX_PRICE)
+        self.log.info("  v0 vault spk %s (REPAY leaf %d bytes, vs %d at v1)",
+                      bytes(tap.scriptPubKey).hex(), len(bytes(leaves["repay"])),
+                      len(bytes(self.leaves["repay"])))
+
+        keep = (self.tap, self.leaves, self.lender_spk, self.borrower_spk)
+        self.tap, self.leaves = tap, leaves
+        self.lender_spk, self.borrower_spk = lender_spk, borrower_spk
+        vaults = self.fund_vaults(2)
+
+        txid = node.sendrawtransaction(self.repay_tx(vaults[0]).serialize().hex())
+        self.generate(node, 1)
+        assert_equal(node.gettxout(txid, 0)["scriptPubKey"]["hex"], lender_spk.hex())
+        assert_equal(satoshi_round(node.gettxout(txid, 1)["value"]) * COIN,
+                     Decimal(COLLATERAL))
+        self.log.info("  REPAY settled to a v0 lender address")
+
+        seize = pig.seizure_atoms(DEBT, PRICE_LOW, BONUS_NUM, BONUS_DEN)
+        txid = node.sendrawtransaction(
+            self.seizure_tx(vaults[1], "liquidate", PRICE_LOW).serialize().hex())
+        self.generate(node, 1)
+        assert_equal(node.gettxout(txid, 1)["scriptPubKey"]["hex"], borrower_spk.hex())
+        assert_equal(satoshi_round(node.gettxout(txid, 1)["value"]) * COIN,
+                     Decimal(COLLATERAL - seize))
+        self.log.info("  LIQUIDATE returned the surplus to a v0 borrower address")
+
+        refused = False
+        try:
+            pig.build_repay_leaf(bytes(32), bytes(32), 1, bytes(32), bytes(20),
+                                 lender_ver=0, borrower_ver=0)
+        except ValueError as e:
+            refused = "must be 20 bytes" in str(e)
+        assert refused, "a 32-byte program passed as v0 was accepted"
+        self.log.info("  and a program of the wrong length for its version is "
+                      "refused at construction")
+        self.tap, self.leaves, self.lender_spk, self.borrower_spk = keep
 
     def recover_case(self, vault):
         node = self.nodes[0]

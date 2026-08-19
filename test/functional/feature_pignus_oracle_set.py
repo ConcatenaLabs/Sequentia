@@ -215,7 +215,7 @@ class PignusOracleSetTest(BitcoinTestFramework):
         self.tap, self.leaves = pig.vault_taptree(
             asset_c=bytes.fromhex(self.C)[::-1], asset_d=bytes.fromhex(self.D)[::-1],
             debt=DEBT, lender_prog=lender_x, borrower_prog=borrower_x,
-            lender_x=lender_x, feed_id=self.feed,
+            feed_id=self.feed,
             oracles=self.oracle_xs, oracle_threshold=THRESHOLD,
             strike=STRIKE, maturity=self.maturity,
             recover_after=self.maturity + 100, not_before=NOT_BEFORE,
