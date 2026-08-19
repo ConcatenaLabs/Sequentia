@@ -33,8 +33,14 @@ Anything the recipe writes into `outdir` gets published. Nothing else is needed.
 | `extension` | `manifest.json` | zip of the repo, minus development files |
 | `fulmen` | `package.json` | Linux AppImage + Windows zip + Windows installer |
 | `ambra` | `app/pubspec.yaml` | signed Android APK |
+| `seqognito` | `package.json` | Linux AppImage + Windows zip + Windows installer |
 
 Every artifact the download page offers is covered. Nothing is published by hand.
+
+`seqognito` is the only recipe that compiles something before packaging: it does
+not vendor its wasm signer, so it builds `lwk_wasm` from SWK first and refuses to
+package if the result lacks the mixing exports. That is a cold Rust build, but
+only when its version actually changed.
 
 The node is versioned by tag and the rest by their version field, and that is
 deliberate: `doc/sequentia/release-versioning.md` requires a tag for the node,
