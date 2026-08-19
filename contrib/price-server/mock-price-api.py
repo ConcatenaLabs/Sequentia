@@ -100,9 +100,19 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok":True,"assets":sorted(_state)})
                 return
             if self.path.startswith("/price/"):
-                t=self.path.split("/price/",1)[1].strip("/").upper()
-                if t in _state:
-                    self._json(_state[t])
+                # Match case-INSENSITIVELY against the real keys rather than
+                # upper-casing the request. Some tickers are not upper-case --
+                # tBTC is the obvious one -- and upper-casing made every such
+                # ticker unreachable through /price/<T> while still listing it
+                # in /prices, which is a confusing way to be missing.
+                # NB do_GET already holds _lock, and threading.Lock is NOT
+                # reentrant: acquiring it again here deadlocks this handler
+                # while it still holds the outer lock, which wedges every
+                # subsequent request too. Do not add a `with _lock` in here.
+                want=self.path.split("/price/",1)[1].strip("/")
+                key=next((k for k in _state if k.lower()==want.lower()), None)
+                if key is not None:
+                    self._json(_state[key])
                     return
         self._json({"error":"not found"},404)
     def do_POST(self):

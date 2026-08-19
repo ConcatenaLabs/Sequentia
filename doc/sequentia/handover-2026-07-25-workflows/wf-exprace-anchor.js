@@ -4,7 +4,7 @@ export const meta = {
   phases: [ { title: 'Investigate' }, { title: 'Synthesize' } ],
 }
 
-const NODE = '/home/aejkohl/SequentiaByClaude'
+const NODE = '/home/aejkohl/Sequentia'
 const SEQDEX = '/home/aejkohl/seqdex'
 
 const CONTEXT = `SEQUENTIA FIRST PRINCIPLE (supreme, never contradict): Bitcoin anchoring is supreme consensus law. Every Sequentia block references a Bitcoin block header; Sequentia reorgs whenever Bitcoin reorgs, in real time. Precedence: Bitcoin anchoring > checkpoints > immediate finality. Real-time reorg-following is what makes cross-chain atomic swaps safe. NEVER propose disabling anchor validation.

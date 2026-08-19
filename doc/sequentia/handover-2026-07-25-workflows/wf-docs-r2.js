@@ -4,7 +4,7 @@ export const meta = {
   phases: [ { title: 'Correct' }, { title: 'Verify' } ],
 }
 
-const NODE = '/home/aejkohl/SequentiaByClaude'
+const NODE = '/home/aejkohl/Sequentia'
 
 const RULES = `HOUSE WRITING RULES: NO em dashes. "Sequentia" is the network and is NEVER abbreviated as "SEQ" (SEQ is the ticker of the token named "Sequence", tSEQ on testnet). Final publishable prose, no placeholders. Match the surrounding doc/sequentia voice.
 FIRST PRINCIPLE: Bitcoin anchoring is supreme consensus law; Sequentia reorgs whenever Bitcoin reorgs. Nothing may contradict that.

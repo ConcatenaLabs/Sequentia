@@ -17,7 +17,7 @@ resolve many findings.
 > - **Lightning backend — COMPLETE + proven** (`seqln` `sequentia-stable`, committed): the non-custodial signer
 >   split M0-M5 (Rust device signer byte-exact vs libhsmd), the capstone (a device-keyed hosted-channel node did
 >   a real pure-LN GOLD<->BTC seqob trade), the secure BOLT-8 Noise_XK transport, the WASM browser signer, and a
->   WebSocket transport + wallet SDK (`contrib/seqln-signer/wasm`). See `seqln-tier2-hosted-channels-design.md`.
+>   WebSocket transport + wallet SDK (`contrib/seqln-signer/wasm`). See `seqln/doc/seqln-design/seqln-tier2-hosted-channels-design.md`.
 > - **Web wallet non-LN** — DONE (branch `lightning-ux-overhaul`, pushed): T2, T13, T5, T6, T9, T7, T14,
 >   T11, T12 + 4.1/4.2 cleanups. Flagged browser-verify: T4 (PSET fee preview), T5 Max-with-same-asset-fee, T3
 >   (needs the qr.rs wasm rebuild).
@@ -690,7 +690,7 @@ This is the load-bearing honesty section. Get the wording right before shipping 
 
 Tier 1 is non-custodial by construction. The user's money always sits in an on-chain HTLC the user can unilaterally refund after a timelock; the LSP can never take it without paying or receiving the matching BTC-LN payment (which requires revealing or learning P). Worst case is the user's CLTV refund; censorship (the LSP refuses to pay or settle) resolves to the same refund. No LN balance is ever custodied. This is exactly the Boltz trust model.
 
-Two honest residuals in Tier 1, both priceable, both surfaced and never hidden. (1) The fast-buy path uses a hold-invoice reverse so the user gets the asset at 0-1 conf while the LSP absorbs the anchor wait (`seqln-dex-instant-swap-latency.md`); a malicious LSP could settle the hold early and pray for a deep Bitcoin reorg, which it cannot cause, which only pays off on a rare deep reorg, and which burns reputation. Same risk grade as 0-conf, capped, NEVER shown as final. (2) Small sells fronted at 0-conf under `LightningTerms.max_0conf_amount` carry that same 0-conf grade, above which the wallet falls back to the anchor-gated path.
+Two honest residuals in Tier 1, both priceable, both surfaced and never hidden. (1) The fast-buy path uses a hold-invoice reverse so the user gets the asset at 0-1 conf while the LSP absorbs the anchor wait (`seqdex/docs/seqln-dex-instant-swap-latency.md`); a malicious LSP could settle the hold early and pray for a deep Bitcoin reorg, which it cannot cause, which only pays off on a rare deep reorg, and which burns reputation. Same risk grade as 0-conf, capped, NEVER shown as final. (2) Small sells fronted at 0-conf under `LightningTerms.max_0conf_amount` carry that same 0-conf grade, above which the wallet falls back to the anchor-gated path.
 
 Tier 2 is non-custodial for keys IF the signer split is built: the LSP runs the node and routing but cannot move channel funds unilaterally because the device must co-sign every commitment. Without the signer split, a hosted node holds the hsm_secret and is fully custodial. Either way, hosted channels add a LIVENESS dependency on the LSP that must be disclosed: instant-spendable, but the LSP is the sole channel peer; the escape hatch is force-close to reclaim on-chain, backed by option_data_loss_protect + our watchtower. Under the equal-standing rule (T13) any hosted asset-LN balance is one row among equals, labeled "Lightning / instant-spendable", and never rendered more final than an on-chain balance.
 

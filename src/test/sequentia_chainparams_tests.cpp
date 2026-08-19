@@ -53,11 +53,10 @@ BOOST_AUTO_TEST_CASE(taproot_always_active_on_sequentia_networks)
 //! Simplicity must be reachable on every Sequentia network: ALWAYS_ACTIVE on
 //! the fresh mainnet chain (no history to grandfather), and a live
 //! height-based BIP9 signalling deployment on the running testnet. It sat at
-//! NEVER_ACTIVE until 2026-08 while the covenant designs (the SeqOB covenant
-//! offers, the DEX order-book CovenantTerms) assumed the 0xbe tapleaf
-//! enforces Simplicity; while the deployment is inactive that leaf is an
-//! anyone-can-spend path instead. This pin keeps the activation from
-//! regressing silently.
+//! NEVER_ACTIVE until 2026-08, while covenant designs elsewhere in the
+//! ecosystem were already assuming the 0xbe tapleaf enforces Simplicity;
+//! while the deployment is inactive that leaf is an anyone-can-spend path
+//! instead. This pin keeps the activation from regressing silently.
 BOOST_AUTO_TEST_CASE(simplicity_activation_is_pinned)
 {
     ArgsManager empty;
