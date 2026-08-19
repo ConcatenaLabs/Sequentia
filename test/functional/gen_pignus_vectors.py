@@ -87,6 +87,19 @@ def main():
                    debt=1500 * COIN, strike=180 * pig.PRICE_SCALE,
                    maturity=504, recover_after=604, not_before=1_700_000_000,
                    max_price=1_000_000 * pig.PRICE_SCALE),
+        # SEGWIT V0 payouts. The browser wallet extension is a wpkhSlip77
+        # wallet and can only receive at v0, so this shape is not exotic -- it
+        # is the one every browser-originated loan uses, and an implementation
+        # that assumes taproot payouts fails here rather than in production.
+        vault_case("v0_payouts",
+                   **{k: v for k, v in base.items()
+                      if k not in ("lender_prog", "borrower_prog")},
+                   lender_prog=bytes.fromhex("cc" * 20),
+                   borrower_prog=bytes.fromhex("dd" * 20),
+                   lender_ver=0, borrower_ver=0,
+                   debt=1500 * COIN, strike=180 * pig.PRICE_SCALE,
+                   maturity=504, recover_after=604, not_before=1_700_000_000,
+                   max_price=1_000_000 * pig.PRICE_SCALE),
         # A non-default bonus and price scale.
         vault_case("custom_bonus_and_scale", **base, debt=250 * COIN,
                    strike=42 * 1000, maturity=1000, recover_after=1100,
