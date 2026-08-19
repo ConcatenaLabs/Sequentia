@@ -286,6 +286,12 @@ namespace GUIUtil
        anything else falls back to the raw reason so no refusal is ever shown as blank. */
     QString describeRejectReason(const QString& reject_reason);
 
+    /* SEQUENTIA: whether this refusal leaves the asset itself unspendable, rather than only
+       this attempt at spending it. A freeze and a pause do: releasing the inputs puts the
+       units back in the balance, but nobody can move them anywhere until the issuer lifts it.
+       Every other refusal frees funds that really are spendable again. */
+    bool rejectionBlocksTheAsset(const QString& reject_reason);
+
     /* SEQUENTIA: the number of decimal places to display/parse for an asset — the
        on-chain denomination when known, else the registry precision, else 8. The
        policy asset (SEQ) is always 8. */
