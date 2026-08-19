@@ -134,19 +134,19 @@ BOOST_AUTO_TEST_CASE(the_wider_budget_is_a_flag_day_on_a_running_chain_only)
     // A running chain with a flag day: the OLD budget until the height, so a
     // node that upgrades early cannot split the chain, and the date is fixed
     // rather than set by whoever first broadcasts an unpadded spend.
-    p.simplicity_budget4_height = 101760;
+    p.simplicity_budget4_height = 101750;
     p.simplicity_budget4_chain_genesis = uint256::ONE;
     BOOST_CHECK(!p.SimplicityBudget4ActiveAt(0));
-    BOOST_CHECK(!p.SimplicityBudget4ActiveAt(101759));
-    BOOST_CHECK(p.SimplicityBudget4ActiveAt(101760));
-    BOOST_CHECK(p.SimplicityBudget4ActiveAt(101761));
+    BOOST_CHECK(!p.SimplicityBudget4ActiveAt(101749));
+    BOOST_CHECK(p.SimplicityBudget4ActiveAt(101750));
+    BOOST_CHECK(p.SimplicityBudget4ActiveAt(101751));
 
     // A different chain that happens to reach the same height must NOT inherit
     // someone else's flag day: it has no history and no other operators, so it
     // gets the rule from genesis. This is what a re-genesis relies on.
     p.hashGenesisBlock = uint256::ZERO;
     BOOST_CHECK(p.SimplicityBudget4ActiveAt(0));
-    BOOST_CHECK(p.SimplicityBudget4ActiveAt(101759));
+    BOOST_CHECK(p.SimplicityBudget4ActiveAt(101749));
 }
 
 BOOST_AUTO_TEST_CASE(only_the_live_testnet_carries_a_flag_day)

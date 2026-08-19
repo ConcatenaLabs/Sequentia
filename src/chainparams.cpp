@@ -1188,7 +1188,7 @@ public:
         // would reject that block and fork off. Nobody could predict the date,
         // because it would be set by whoever first ran the new tooling.
         //
-        // 101,760 is about a day past the tip (100,293 at 2026-08-19T17:08Z),
+        // 101,750 is a day past the tip (100,310 at 2026-08-19T17:26Z),
         // which is the lead time the operators asked for. Until then this
         // binary enforces the OLD budget, so running it early is safe and
         // cannot split the chain; after it, a node that has not upgraded forks
@@ -1215,7 +1215,7 @@ public:
         //
         // Bound to this chain's genesis hash so a re-genesis drops the flag day
         // instead of waiting out a height that would no longer mean anything.
-        consensus.simplicity_budget4_height = 101760;
+        consensus.simplicity_budget4_height = 101750;
         consensus.simplicity_budget4_chain_genesis = expected_genesis;
 
         // SEQUENTIA: ONE-TIME treasury UTXO recovery. Read this before touching it.
