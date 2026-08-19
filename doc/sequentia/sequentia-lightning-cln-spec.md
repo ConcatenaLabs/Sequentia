@@ -4,7 +4,7 @@ A plan for forking Core Lightning (CLN, formerly c-lightning) to run Lightning o
 same client also able to run on real Bitcoin. "Sequentia" means the Sequentia testnet today and the
 Sequentia mainnet after launch; "Bitcoin" means testnet4 today and mainnet later. This document is the
 handover spec for the implementing session/team. It builds on the safety analysis in
-`seqdex-lightning-feasibility.md` (anchoring and LN, timelock sizing, swap designs) and on fresh
+`seqdex/docs/seqdex-lightning-feasibility.md` (anchoring and LN, timelock sizing, swap designs) and on fresh
 research into the CLN codebase (master `066056d915`, v26.06.2) and assets-on-Lightning prior art.
 
 Terminology guard: "anchor outputs" is a Lightning commitment-format feature (CPFP anchors);

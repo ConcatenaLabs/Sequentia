@@ -47,8 +47,8 @@ Design points, and why each is the way it is:
     k credits the lender at output 2k and returns collateral at output 2k+1.
     Because the index is derived per input from OP_PUSHCURRENTINPUTINDEX, two
     vault inputs can never both point at one shared lender-credit output, so a
-    single payment can never settle two loans. Same guarantee the SeqOB FILL leaf
-    relies on (seqob_covenant.py).
+    single payment can never settle two loans. Same guarantee the resting-order
+    FILL leaf relies on (`test/regtest/seqob_covenant.py` in the seqdex repo).
 
   * Fixed total repayment. `debt` is principal plus the whole term's interest,
     fixed at origination, so no interest accrual is computed on chain. Term
@@ -94,8 +94,7 @@ from test_framework.script import (
 )
 
 # BIP341 nothing-up-my-sleeve point: taproot internal key with no known discrete
-# log, so a NUMS-internal-key output has no key-path spend. Same constant the
-# SeqOB covenant pins.
+# log, so a NUMS-internal-key output has no key-path spend.
 NUMS = bytes.fromhex("50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0")
 
 # Default fixed-point scale for oracle prices. A price is quoted as
@@ -138,7 +137,7 @@ def _require_lender_credit(asset_d, lender_prog, debt):
 
 def _borrower_return_value(asset_c, borrower_prog):
     """Push the collateral amount returned to the borrower at output 2k+1, or 0
-    if no such output exists. Mirrors the SeqOB remainder probe: an output that
+    if no such output exists. Mirrors the resting-order remainder probe: an output that
     is absent, or carries a different asset, contributes nothing -- so a spender
     who owes a return and omits it fails the comparison that follows."""
     return (
