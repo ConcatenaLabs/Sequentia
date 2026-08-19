@@ -390,37 +390,36 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
         m_deleg_status->setTextInteractionFlags(Qt::TextSelectableByMouse);
         v->addWidget(m_deleg_status);
 
-        QLabel* hint = new QLabel(tr("A pool produces blocks on your behalf, so a stake too small to win blocks "
-                                     "often, or a wallet you would rather keep offline, still earns. Your coins "
-                                     "never move and the pool can never spend them — it is only lent the right to "
-                                     "sign with your weight. You can take that back at any moment, without asking."),
+        QLabel* hint = new QLabel(tr("A pool produces blocks on your behalf, so a holding too small to stake on "
+                                     "its own, or a wallet you would rather keep closed, still earns. There is no "
+                                     "minimum to delegate: the network judges a pool on what it commands in "
+                                     "total. Your coins never move and the pool can never spend them — it is only "
+                                     "lent the right to sign with your weight, and you can take that back at any "
+                                     "moment, without asking.\n\nPools are listed, with what each has committed "
+                                     "to paying and how reliably it produces, on the pool board at "
+                                     "sequentiatestnet.com/pools/. Paste the signer key of the one you choose."),
                                   pool);
         hint->setWordWrap(true);
         v->addWidget(hint);
 
-        m_pools = new QTableWidget(0, 5, pool);
-        m_pools->setHorizontalHeaderLabels({tr("Pool (signer key)"),
-                                            tr("Weight (%1)").arg(BitcoinUnits::policyAssetTicker()),
-                                            tr("Delegators"), tr("Reliability"), tr("Pays out")});
-        m_pools->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
-        m_pools->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
-        m_pools->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
-        m_pools->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
-        m_pools->horizontalHeader()->setSectionResizeMode(4, QHeaderView::Stretch);
-        m_pools->verticalHeader()->setVisible(false);
-        m_pools->setEditTriggers(QAbstractItemView::NoEditTriggers);
-        m_pools->setSelectionBehavior(QAbstractItemView::SelectRows);
-        m_pools->setSelectionMode(QAbstractItemView::SingleSelection);
-        m_pools->setToolTip(tr("Every signer producing blocks on this network. \"Reliability\" is the blocks it "
-                               "actually produced against the blocks its weight entitled it to: well under 1.00 "
-                               "means it is offline or missing its slots, and its delegators are earning nothing. "
-                               "\"Pays out\" is what it has committed to on-chain — a pool that has committed to "
-                               "nothing keeps everything it earns."));
-        v->addWidget(m_pools);
-
         QFormLayout* form = new QFormLayout();
         m_deleg_signer = new QLineEdit(pool);
-        m_deleg_signer->setPlaceholderText(tr("pool signer public key (66 hex characters), or pick a row above"));
+        m_deleg_signer->setPlaceholderText(tr("pool signer public key (66 hex characters)"));
+        m_deleg_signer->setToolTip(tr("Pools publish this key. The public pool board lists every pool with what "
+                                      "it has committed to paying and how reliably it produces."));
+
+        m_deleg_amount = new QLineEdit(pool);
+        m_deleg_amount->setPlaceholderText(tr("amount of %1 to stake and lend (leave empty to lend what you "
+                                              "already stake)").arg(BitcoinUnits::policyAssetTicker()));
+        m_deleg_amount->setToolTip(tr("There is NO minimum here. The network judges a pool on the weight it "
+                                      "commands in total, not on what each delegator brings, which is exactly "
+                                      "why pooling exists. Staking on your own is the path with a minimum."));
+        {
+            QLocale lc(QLocale::C); lc.setNumberOptions(QLocale::RejectGroupSeparator);
+            auto* v = new QDoubleValidator(0, 1e15, 8, m_deleg_amount);
+            v->setLocale(lc);
+            m_deleg_amount->setValidator(v);
+        }
         m_deleg_button = new QPushButton(tr("Delegate to this pool"), pool);
         m_undeleg_button = new QPushButton(tr("Take my stake back"), pool);
         m_undeleg_button->setToolTip(tr("Stop delegating: your stake's weight counts for you again from the next "
@@ -434,6 +433,7 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
             h->addWidget(m_undeleg_button);
             h->addStretch();
             form->addRow(tr("Pool:"), m_deleg_signer);
+            form->addRow(tr("Amount:"), m_deleg_amount);
             form->addRow(QString(), row);
         }
         m_deleg_result = new QLabel(pool);
@@ -634,7 +634,6 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
     connect(m_refresh_button, &QPushButton::clicked, this, &StakingPage::onRefreshClicked);
     connect(m_deleg_button, &QPushButton::clicked, this, &StakingPage::onDelegate);
     connect(m_undeleg_button, &QPushButton::clicked, this, &StakingPage::onUndelegate);
-    connect(m_pools, &QTableWidget::itemSelectionChanged, this, &StakingPage::onPoolPicked);
     connect(m_payout_button, &QPushButton::clicked, this, &StakingPage::onAnnouncePayout);
     connect(m_payout_mode, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &StakingPage::onPayoutModeChanged);
     connect(m_payout_preset, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &StakingPage::onPayoutPresetChanged);
@@ -1562,38 +1561,6 @@ void StakingPage::refreshDelegation()
     }
     m_undeleg_button->setEnabled(delegated_rows > 0);
 
-    // The board of pools to choose from.
-    UniValue pparams(UniValue::VARR);
-    pparams.push_back(UniValue(UniValue::VNULL));
-    pparams.push_back(500);   // blocks to measure production reliability over
-    bool pok = false; QString perr;
-    UniValue pools = callRpc("listpools", pparams, pok, perr, /*wallet=*/false);
-    m_pools->setRowCount(0);
-    if (!pok || !pools["pools"].isArray()) return;
-    const UniValue& arr = pools["pools"];
-    for (size_t i = 0; i < arr.size(); ++i) {
-        const UniValue& p = arr[i];
-        const int row = m_pools->rowCount();
-        m_pools->insertRow(row);
-        m_pools->setItem(row, 0, new QTableWidgetItem(QString::fromStdString(p["signer"].getValStr())));
-        const double w = p["weight"].isNum() ? (double)p["weight"].get_int64() / 100000000.0 : 0.0;
-        m_pools->setItem(row, 1, new QTableWidgetItem(QString::number(w, 'f', 2)));
-        m_pools->setItem(row, 2, new QTableWidgetItem(QString::number(p["delegators"].isNum() ? p["delegators"].get_int64() : 0)));
-        // Undefined rather than 0.00 when the pool was owed nothing over the
-        // window: a signer with no weight that produced no blocks is not
-        // unreliable, and printing 0.00 would read as if it were.
-        m_pools->setItem(row, 3, new QTableWidgetItem(
-            p["reliability"].isNum() ? QString::number(p["reliability"].get_real(), 'f', 2) : tr("—")));
-        m_pools->setItem(row, 4, new QTableWidgetItem(QString::fromStdString(p["payout"].getValStr())));
-    }
-}
-
-void StakingPage::onPoolPicked()
-{
-    if (!m_pools || !m_deleg_signer) return;
-    const int row = m_pools->currentRow();
-    if (row < 0 || !m_pools->item(row, 0)) return;
-    m_deleg_signer->setText(m_pools->item(row, 0)->text());
 }
 
 void StakingPage::onDelegate()
@@ -1618,9 +1585,15 @@ void StakingPage::onDelegate()
         QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
     if (confirmed != QMessageBox::Yes) return;
 
+    const QString amount = m_deleg_amount->text().trimmed();
     bool ok = false; QString err;
     UniValue params(UniValue::VARR);
     params.push_back(signer.toStdString());
+    // Empty means "lend what I already stake"; a figure means "stake this much
+    // and lend it", which is the path for anyone who does not hold enough to
+    // stake alone.
+    if (amount.isEmpty()) params.push_back(UniValue(UniValue::VNULL));
+    else params.push_back(UniValue(UniValue::VNUM, amount.toStdString()));
     UniValue res = callRpc("delegatestake", params, ok, err);
     if (!ok) { setCardResult(m_deleg_result, tr("Delegating failed: %1").arg(err), true); return; }
 
@@ -1631,7 +1604,11 @@ void StakingPage::onDelegate()
               .arg(QString::number(weight, 'f', 2), BitcoinUnits::policyAssetTicker(), signer, txid)
         : tr("Delegated %1 %2 of stake weight to %3.\nTransaction: %4")
               .arg(QString::number(weight, 'f', 2), BitcoinUnits::policyAssetTicker(), signer, txid);
-    msg += tr("\nIt takes effect when this confirms. Your staked coins were not touched.");
+    if (res.exists("staked")) {
+        msg += tr("\nStaked %1 %2 and lent it in the same transaction.")
+                   .arg(QString::fromStdString(res["staked"].getValStr()), BitcoinUnits::policyAssetTicker());
+    }
+    msg += tr("\nIt takes effect when this confirms. Your coins stay yours: leaving spends only the record.");
     if (res.exists("note")) msg += QStringLiteral("\n") + QString::fromStdString(res["note"].getValStr());
     m_deleg_result->setStyleSheet(QString());
     m_deleg_result->setText(msg);
@@ -1665,27 +1642,25 @@ void StakingPage::refreshPoolOperator()
 {
     if (!m_pool_status || !m_wallet_model) return;
 
-    // This node's own signer keys are the staker keys it controls. listpools is
-    // node-wide, so pick out the rows that are ours.
-    UniValue pparams(UniValue::VARR);
-    pparams.push_back(UniValue(UniValue::VNULL));
-    pparams.push_back(500);
-    bool ok = false; QString err;
-    UniValue pools = callRpc("listpools", pparams, ok, err, /*wallet=*/false);
-    if (!ok || !pools["pools"].isArray()) {
-        m_pool_status->setText(tr("Pool status unavailable: %1").arg(err));
-        return;
-    }
-
+    // Ask about THIS node's own signer keys by name, one at a time. Two reasons
+    // not to fetch the list and filter it: a signer that has not announced a
+    // payout policy is not a pool and is absent from an unfiltered listing, so
+    // an operator with stake but no commitment yet would be told it had none;
+    // and this card is about your own numbers, not a directory of everyone
+    // else's, which belongs on the public board.
     QString status, commitment;
     bool any_mine = false;
     QStringList mine_keys;
-    const UniValue& arr = pools["pools"];
-    for (size_t i = 0; i < arr.size(); ++i) {
-        const UniValue& p = arr[i];
-        const std::string signer = p["signer"].getValStr();
-        if (!m_my_pubkeys.count(signer)) continue;
-        any_mine = true;
+    bool ok = false; QString err;
+    for (const std::string& signer : m_my_pubkeys) {
+        UniValue pparams(UniValue::VARR);
+        pparams.push_back(signer);
+        pparams.push_back(500);
+        UniValue pools = callRpc("listpools", pparams, ok, err, /*wallet=*/false);
+        if (!ok || !pools["pools"].isArray() || pools["pools"].empty()) continue;
+        const UniValue& p = pools["pools"][0];
+        {
+            any_mine = true;
         mine_keys << QString::fromStdString(signer);
         const QString key = QString::fromStdString(signer);
         const double weight = (double)p["weight"].get_int64() / 100000000.0;
@@ -1717,8 +1692,9 @@ void StakingPage::refreshPoolOperator()
                 : tr("Committed: direct, every block pays a fixed script. Binding since height %1.\n")
                       .arg(QString::number(q["activation"].get_int64()));
         } else {
-            commitment += tr("Committed: nothing. You keep every fee your blocks earn, and delegators can see "
-                             "that.\n");
+            commitment += tr("Committed: nothing, so you keep every fee your blocks earn. You are a staker, not "
+                             "a pool: until you announce a policy below you are not listed on the pool board and "
+                             "nobody is being asked to delegate to you.\n");
         }
         if (p["policy_pending"].isArray()) {
             for (size_t j = 0; j < p["policy_pending"].size(); ++j) {
@@ -1728,6 +1704,7 @@ void StakingPage::refreshPoolOperator()
                                   .arg(QString::number(q["activation"].get_int64()),
                                        QString::number(q["blocks_away"].get_int64()));
             }
+        }
         }
     }
     if (!any_mine) {

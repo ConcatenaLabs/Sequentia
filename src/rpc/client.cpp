@@ -219,7 +219,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "registerasset", 1, "contract"},
     { "getstakerinfo", 0, "verbose"},
     { "getstakerinfo", 1, "bycontroller"},
-    { "delegatestake", 2, "amount"},
+    { "delegatestake", 1, "amount"},
     { "announcepayout", 2, "activation"},
     { "announcepayout", 4, "commission_bp"},
     { "announcepayout", 5, "amount"},

@@ -575,15 +575,29 @@ C, A's weight goes to B and B's own weight goes to C. Consensus also allows **at
 most one unspent record per controller**, because two would make the leader
 election node-dependent.
 
-**Delegating.** Any wallet with a stake can do it from its Staking tab: the
-desktop wallet, the web wallet, Ambra on Android and Ambra for Chromium. Pick a
-pool, delegate, and the same card shows what that pool has committed to, warns
-when it announces a change, and leaves in one action. From a node:
+**Delegating, and why it has no minimum.** The minimum-stake floor applies to
+what a SIGNER commands once delegation is resolved, not to each delegator:
+`PosIsEligibleStake` is tested against `registry.Weights()`, which is keyed by
+signer. So a holding far below the floor counts in full behind an eligible pool,
+and pooling small holdings is precisely what that arithmetic is for. Staking
+*alone* is the path with a floor, because a stake that small could never win a
+block by itself.
+
+You therefore do not bond first and delegate second. One call does both:
 
 ```
-sequentia-cli listpools                       # the declared pools, and on what terms
-sequentia-cli delegatestake "<signer pubkey>" # lend this wallet's weight to one
+sequentia-cli delegatestake "<signer pubkey>" 150   # bond 150 SEQ and lend it
+sequentia-cli delegatestake "<signer pubkey>"       # lend stake already bonded
 ```
+
+The stake and the record go in one transaction, so the weight counts for the
+pool from the block that confirms it. In a wallet it is one action on the Staking
+tab: the desktop wallet, the web wallet, Ambra on Android and Ambra for
+Chromium. The same card shows what the pool has committed to, warns when it
+announces a change, and leaves in one action.
+
+Pools are listed on the public board, not in the wallets: a wallet takes the
+signer key of the pool you chose.
 
 `delegatestake` funds the record from the wallet. Calling it again with a
 different signer **re-points** the delegation: it spends the old record and
