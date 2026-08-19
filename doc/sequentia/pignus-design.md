@@ -146,10 +146,24 @@ consensus change at all -- 0xc4 is gated only by always-active
 value formed on chain is `gross * price_scale + price - 1`, so the builders
 assert `gross * price_scale + bound < 2^63`, where `bound` is the strike for
 LIQUIDATE and a caller-declared `max_price` for DEFAULT. A vault that could
-abort mid-spend cannot be constructed. With the default `price_scale = 1e5`
-this permits debts into the tens of millions of units at 8 decimal places,
-which is far beyond anything the testnet will see; a larger loan lowers
-`price_scale` and loses price precision it does not need.
+abort mid-spend cannot be constructed -- the builder refuses at origination
+rather than leaving a loan that cannot be liquidated.
+
+The ceiling this puts on a single loan, at 8 decimal places and the default 5%
+bonus:
+
+| `price_scale` | max debt (units) | price precision |
+|---|---|---|
+| `1e5` (default) | ~878,000 | 1e-5 relative |
+| `1e4` | ~8,784,000 | 1e-4 relative |
+| `1e3` | ~87,841,000 | 1e-3 relative |
+
+So the default caps one loan at roughly 878,000 USDX, and a larger loan trades
+price precision for size by lowering `price_scale`. Neither knob is a protocol
+limit: two loans are two vaults, and nothing stops a borrower opening several.
+The numbers are worth stating because the first instinct -- "64 bits is plenty"
+-- is wrong here: the seizure forms `gross * price_scale`, and at 8 decimals
+that product eats 60 of the 63 available bits by itself.
 
 ## 3. Origination
 
