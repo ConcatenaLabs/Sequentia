@@ -183,6 +183,16 @@ old rule would reject that block and fork off, on a date nobody could predict.
 Until 101,200 the new binary enforces the old budget, so upgrading early is safe
 and OpenDAMP covenants are unspendable there; every fresh chain -- regtest,
 mainnet, a re-genesised testnet -- has the wider budget from genesis.
+
+**On the live testnet the wider budget starts at height 101,200**, a little over
+a day past the tip at release. The rule only ever accepts more, so it needs no
+activation gate for correctness; the flag day exists because that chain is
+running and has other operators. Ungated, the fork would fire the instant anyone
+broadcast a spend the old budget could not pay for, and every node still on the
+old rule would reject that block and fork off, on a date nobody could predict.
+Until 101,200 the new binary enforces the old budget, so upgrading early is safe
+and OpenDAMP covenants are unspendable there; every fresh chain -- regtest,
+mainnet, a re-genesised testnet -- has the wider budget from genesis.
 The measured canonical transfer is a 3,634-byte verifier witness and a
 726-byte user witness, against 26,830 and 633 for the padded single-shape
 program it replaced.
