@@ -280,6 +280,12 @@ namespace GUIUtil
        than head+tail+1 are returned unchanged. Put the full value in a tooltip. */
     QString ellipsizeMiddle(const QString& text, int head = 8, int tail = 8);
 
+    /* SEQUENTIA: a node's reject reason as a sentence, for a transaction the node refuses.
+       The reasons are consensus identifiers ("bad-txns-asset-frozen"), which say nothing to
+       someone whose payment has simply stopped; the supervision ones get a plain rendering,
+       anything else falls back to the raw reason so no refusal is ever shown as blank. */
+    QString describeRejectReason(const QString& reject_reason);
+
     /* SEQUENTIA: the number of decimal places to display/parse for an asset — the
        on-chain denomination when known, else the registry precision, else 8. The
        policy asset (SEQ) is always 8. */

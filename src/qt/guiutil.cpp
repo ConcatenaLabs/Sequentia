@@ -896,6 +896,28 @@ bool assetIsNamed(const CAsset& asset)
     return !gAssetsDir.GetLabel(asset).empty();
 }
 
+QString describeRejectReason(const QString& reject_reason)
+{
+    // Only the supervision refusals are translated. They are the ones a holder
+    // can actually run into without having done anything wrong -- someone else's
+    // freeze stops their payment -- and the ones whose identifier explains
+    // nothing. Everything else keeps the node's own wording, which is what an
+    // operator would search for anyway.
+    if (reject_reason == QLatin1String("bad-txns-asset-frozen")) {
+        return QObject::tr("the asset being spent is frozen at that address");
+    }
+    if (reject_reason == QLatin1String("bad-txns-supervision-unfreeze")) {
+        return QObject::tr("the unfreeze is not signed by the asset's current supervision key");
+    }
+    if (reject_reason == QLatin1String("bad-txns-supervision-record")) {
+        return QObject::tr("the supervision record in this transaction is not valid");
+    }
+    if (reject_reason == QLatin1String("bad-txns-supervised-blinded")) {
+        return QObject::tr("a supervised asset cannot be sent to a confidential address");
+    }
+    return reject_reason;
+}
+
 QString ellipsizeMiddle(const QString& text, int head, int tail)
 {
     // "aaaaaaaa…zzzzzzzz" — keep both ends so the id is still recognisable/verifiable at a
