@@ -160,6 +160,21 @@ class PosDelegationTest(BitcoinTestFramework):
         assert self.c_pub not in n0.getstakerinfo()
         # The coins did not move: the staking output is still unspent.
         assert n0.gettxout(fund_txid, 0) is not None
+
+        self.log.info("By controller, the weight still belongs to the key that owns it")
+        # The default view answers "who signs blocks with this?", which is why a
+        # delegator vanishes from it. `bycontroller` answers "whose coins are
+        # these?", and only the controller can ever spend them -- so anything
+        # asking about ownership rather than block production needs this view.
+        by_c = n0.getstakerinfo(True, True)
+        assert_equal(by_c[self.c_pub]["weight"], c_amount)
+        assert_equal(by_c[self.c_pub]["delegated"], True)
+        assert_equal(by_c[self.c_pub]["signer"], self.p1_pub)
+        # And the pool is credited with its own stake only, never its delegators'.
+        assert self.p1_pub not in by_c
+        # Without verbose there is no delegation detail, just the raw weights.
+        assert_equal(n0.getstakerinfo(False, True)[self.c_pub], c_amount)
+        assert self.p1_pub not in n0.getstakerinfo(False, True)
         assert self.can_produce(n0, self.p1_wif)
         assert not self.can_produce(n0, self.c_wif)
 
@@ -206,6 +221,10 @@ class PosDelegationTest(BitcoinTestFramework):
         assert_equal(n0.getdelegationinfo()[self.c_pub], self.p2_pub)
         assert_equal(n0.getstakerinfo()[self.p2_pub], c_amount)
         assert_equal(n0.getstakerinfo()[self.p1_pub], d_amount)  # only D's now
+        # Rotating pools changes who signs; it never changes who owns.
+        by_c = n0.getstakerinfo(True, True)
+        assert_equal(by_c[self.c_pub]["weight"], c_amount)
+        assert_equal(by_c[self.c_pub]["signer"], self.p2_pub)
         # The vesting-locked stake was never touched by the rotation.
         assert n0.gettxout(fund_txid, 0) is not None
         assert self.can_produce(n0, self.p2_wif)
