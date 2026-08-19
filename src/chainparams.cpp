@@ -1177,6 +1177,29 @@ public:
         assert(consensus.hashGenesisBlock == expected_genesis);
         assert(genesis.hashMerkleRoot == uint256S("0x94ccd459b890e0eed4f26e0a500b7c2adafef231742ac88531c204597502fbf2"));
 
+        // SEQUENTIA: the wider Simplicity execution budget, on a flag day.
+        //
+        // The rule only ever accepts more, so it needs no activation gate for
+        // correctness (CONTRIBUTING.md) and every fresh chain -- regtest,
+        // mainnet, a re-genesised testnet -- has it from genesis. This chain is
+        // running and has other operators, and that is the whole difference:
+        // ungated, the fork would fire the instant anyone broadcast a spend the
+        // old budget could not pay for, and every node still on the old rule
+        // would reject that block and fork off. Nobody could predict the date,
+        // because it would be set by whoever first ran the new tooling.
+        //
+        // 101,200 is a little over a day past the tip at release (99,729 on
+        // 2026-08-19), which is the lead time the operators asked for. Until
+        // then this binary enforces the OLD budget, so running it early is safe
+        // and cannot split the chain; after it, a node that has not upgraded
+        // forks off. Cut every node over before the height, and verify with
+        // contrib/sequentia/peer-stall-check.sh rather than by version string.
+        //
+        // Bound to this chain's genesis hash so a re-genesis drops the flag day
+        // instead of waiting out a height that would no longer mean anything.
+        consensus.simplicity_budget4_height = 101200;
+        consensus.simplicity_budget4_chain_genesis = expected_genesis;
+
         // SEQUENTIA: ONE-TIME treasury UTXO recovery. Read this before touching it.
         //
         // WHAT HAPPENED. On 2026-07-29 a watchdog process deleted the founder

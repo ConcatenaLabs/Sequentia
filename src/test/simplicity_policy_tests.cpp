@@ -2,17 +2,20 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-// SEQUENTIA: the two node-side rules that let a Simplicity covenant pay for its
-// own execution without hauling inert padding through every block.
+// SEQUENTIA: the node-side rules that let a Simplicity covenant pay for its own
+// execution without hauling inert padding through every block.
 //
-//  - the budget a witness byte buys (SIMPLICITY_BUDGET_PER_WITNESS_BYTE), and
+//  - the budget a witness byte buys (SIMPLICITY_BUDGET_PER_WITNESS_BYTE),
+//  - the height gate that turns it into a flag day on the running testnet, and
 //  - the annex, standard on a Simplicity leaf and nowhere else.
 //
 // The end-to-end proof that a pad-free covenant spends lives in the opendamp
 // crate's regtest suite; what is pinned here is the arithmetic and the
 // standardness predicate, which are cheap to get wrong and silent when wrong.
 
+#include <chainparams.h>
 #include <coins.h>
+#include <consensus/params.h>
 #include <consensus/tx_verify.h>
 #include <key.h>
 #include <policy/policy.h>
@@ -28,10 +31,10 @@ BOOST_FIXTURE_TEST_SUITE(simplicity_policy_tests, BasicTestingSetup)
 namespace {
 
 //! The budget a Simplicity spend is granted, mirroring interpreter.cpp.
-int64_t SimplicityBudget(size_t serialized_witness_size)
+int64_t SimplicityBudget(size_t serialized_witness_size, bool wide = true)
 {
     return std::min<int64_t>(
-        (int64_t)serialized_witness_size * SIMPLICITY_BUDGET_PER_WITNESS_BYTE + VALIDATION_WEIGHT_OFFSET,
+        (int64_t)serialized_witness_size * (wide ? SIMPLICITY_BUDGET_PER_WITNESS_BYTE : 1) + VALIDATION_WEIGHT_OFFSET,
         SIMPLICITY_BUDGET_MAX);
 }
 
@@ -111,6 +114,55 @@ BOOST_AUTO_TEST_CASE(simplicity_budget_scales_with_the_witness)
     BOOST_CHECK_EQUAL(SimplicityBudget(SIMPLICITY_BUDGET_MAX), SIMPLICITY_BUDGET_MAX);
     BOOST_CHECK_EQUAL(SimplicityBudget(1'000'000), SIMPLICITY_BUDGET_MAX);
     BOOST_CHECK(SimplicityBudget(999'000) < SIMPLICITY_BUDGET_MAX);
+
+    // Before the flag day the old budget applies, unchanged, which is what
+    // makes running the new binary early safe.
+    BOOST_CHECK_EQUAL(SimplicityBudget(1000, /*wide=*/false), 1050);
+    BOOST_CHECK((int64_t)SimplicityBudget(4300, /*wide=*/false) * 1000 < 11'700'000);
+}
+
+BOOST_AUTO_TEST_CASE(the_wider_budget_is_a_flag_day_on_a_running_chain_only)
+{
+    Consensus::Params p;
+    p.hashGenesisBlock = uint256::ONE;
+
+    // A fresh chain: no height set, so the rule is in force from genesis. This
+    // is regtest, mainnet, and any re-genesised testnet.
+    BOOST_CHECK(p.SimplicityBudget4ActiveAt(0));
+    BOOST_CHECK(p.SimplicityBudget4ActiveAt(1'000'000));
+
+    // A running chain with a flag day: the OLD budget until the height, so a
+    // node that upgrades early cannot split the chain, and the date is fixed
+    // rather than set by whoever first broadcasts an unpadded spend.
+    p.simplicity_budget4_height = 101200;
+    p.simplicity_budget4_chain_genesis = uint256::ONE;
+    BOOST_CHECK(!p.SimplicityBudget4ActiveAt(0));
+    BOOST_CHECK(!p.SimplicityBudget4ActiveAt(101199));
+    BOOST_CHECK(p.SimplicityBudget4ActiveAt(101200));
+    BOOST_CHECK(p.SimplicityBudget4ActiveAt(101201));
+
+    // A different chain that happens to reach the same height must NOT inherit
+    // someone else's flag day: it has no history and no other operators, so it
+    // gets the rule from genesis. This is what a re-genesis relies on.
+    p.hashGenesisBlock = uint256::ZERO;
+    BOOST_CHECK(p.SimplicityBudget4ActiveAt(0));
+    BOOST_CHECK(p.SimplicityBudget4ActiveAt(101199));
+}
+
+BOOST_AUTO_TEST_CASE(only_the_live_testnet_carries_a_flag_day)
+{
+    // Every fresh chain has the rule from genesis; only the chain that is
+    // already running, with operators to coordinate, waits.
+    for (const auto& chain : {CBaseChainParams::SEQUENTIA, CBaseChainParams::REGTEST}) {
+        const auto params = CreateChainParams(ArgsManager{}, chain);
+        BOOST_CHECK_MESSAGE(params->GetConsensus().SimplicityBudget4ActiveAt(0),
+                            chain + " must have the wider budget from genesis");
+    }
+    const auto testnet = CreateChainParams(ArgsManager{}, CBaseChainParams::TESTNET);
+    const auto& tp = testnet->GetConsensus();
+    BOOST_CHECK(!tp.SimplicityBudget4ActiveAt(tp.simplicity_budget4_height - 1));
+    BOOST_CHECK(tp.SimplicityBudget4ActiveAt(tp.simplicity_budget4_height));
+    BOOST_CHECK_EQUAL(tp.simplicity_budget4_chain_genesis, tp.hashGenesisBlock);
 }
 
 BOOST_AUTO_TEST_CASE(annex_is_standard_only_on_a_simplicity_leaf)
