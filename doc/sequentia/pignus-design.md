@@ -34,6 +34,9 @@ USDX. The vault's spending rules are the loan agreement, compiled. Precisely:
   address before funding it.
 - **No permission to exit.** REPAY is permissionless, needs no signature, no
   oracle and no witness data whatsoever. A solvent borrower can always leave.
+  In fact NO exit needs a signature: every leaf reads what it enforces out of
+  the transaction and pays a pinned destination, so there is no key anywhere in
+  a loan whose loss costs anybody anything.
 - **No discretionary seizure.** A liquidator cannot choose how much to take.
   The seizure is computed on chain from the attested price and the surplus is
   forced back to the borrower by the same script that lets the seizure happen.
@@ -121,18 +124,49 @@ liquidation.
 
 ### 2.5 RECOVER -- the oracle-liveness backstop
 
-`<recover_after> CLTV DROP <P_lender> CHECKSIG`. If the oracle is dead through
-the whole grace window the lender sweeps the vault, surplus and all.
+`<recover_after> CLTV DROP` and then the same pinned-payout check the other
+leaves use: after the backstop height ANYONE may sweep the vault, but only to
+the lender's payout program.
 
-This is the one blunt leaf and it is deliberately last. It exists because a
-dead oracle must not freeze collateral for ever, and it is acceptable because
-the borrower has the entire term to take the oracle-free REPAY exit and only
-reaches this leaf by ignoring it long after maturity. `recover_after` should sit
-far enough past `maturity` that a transient oracle outage cannot reach it;
+This is the one blunt leaf and it is deliberately last. It exists because a dead
+oracle must not freeze collateral for ever, and it is acceptable because the
+borrower has the entire term to take the oracle-free REPAY exit and only reaches
+this leaf by ignoring it long after maturity. `recover_after` should sit far
+enough past `maturity` that a transient oracle outage cannot reach it;
 `maturity + 30 days` is the suggested default, and the borrower must check the
 gap before funding, because it is the borrower who pays for a short one.
 
-### 2.6 Sizes and limits
+It used to require the lender's signature, and that was wrong. The browser
+wallet extension signs its own transaction inputs but cannot sign a covenant
+leaf, and exposes no x-only key to bake into one -- so a lender using a browser
+had a backstop nobody could execute, which is not a backstop but a trap holding
+their collateral. Pinning the destination fixes that and is better on its own
+terms: the lender needs no key beyond the address they are paid at, so there is
+nothing to lose, and they need not be online, for the same reason REPAY is
+permissionless. Letting anyone trigger it is safe because it can only ever pay
+the lender.
+
+**No exit in the system needs a signature.** Every leaf reads what it enforces
+out of the transaction and pays a pinned destination. That is what makes the
+whole thing drivable from a browser wallet, and it means there is no key
+anywhere in a loan whose loss costs anybody anything.
+
+### 2.6 Where the payouts go
+
+A payout is a witness PROGRAM and a witness VERSION, both baked in, not an
+address and not necessarily taproot. The version matters more than it sounds:
+the browser wallet extension is a `wpkhSlip77` wallet and every address it can
+receive at is segwit v0, so a covenant that could only pay a v1 taproot program
+could never settle a loan originated from a browser -- the lender could not be
+repaid and the borrower could not get their collateral back.
+
+So `lender_ver` and `borrower_ver` default to 1 and may be 0, and the builders
+refuse a program whose length does not match its version (20 bytes at v0, 32 at
+v1). That refusal is not fussiness: a mismatched program compiles silently into
+an address nobody can ever be paid at, and the loan looks perfectly healthy
+until somebody tries to leave it.
+
+### 2.7 Sizes and limits
 
 Measured leaf sizes: REPAY 192 bytes, LIQUIDATE 352, DEFAULT 345, RECOVER 39.
 A REPAY spend is in the same class as a covenant CLOB fill (a few hundred
@@ -452,3 +486,22 @@ The platform lives in its own repository, `pignus`, alongside the other
 Sequentia sub-projects; the covenant and its consensus-level proof stay here,
 the same way SeqOB's covenant ships with the node while the daemon driving it
 ships separately.
+
+What runs where:
+
+- **the browser**, at `/lending/` -- composes every transaction, derives every
+  address, and sends only a signature request to the wallet extension. It is
+  the only place a second implementation of the covenant exists (`web/pignus.js`
+  and `web/offer.js`), because a browser cannot import the Python one; both are
+  pinned byte for byte to the golden vectors and the page refuses to run at all
+  if that pinning fails.
+- **the CLI**, on the downloads page -- the same operations against your own
+  node, for anyone who would rather not use a website.
+- **the oracle and the loan book** -- services on the testnet server. Neither
+  can move anything: the book is discovery, and the oracle asserts a number.
+
+Two things were found only by building the browser client, and both are worth
+recording because neither was visible from the library side: payouts that could
+only be taproot (section 2.6), and exits that required a signature the extension
+cannot make (section 2.5). A design that is only ever exercised by its own test
+suite hides exactly this class of defect.
