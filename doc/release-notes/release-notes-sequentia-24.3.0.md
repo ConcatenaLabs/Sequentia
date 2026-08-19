@@ -81,7 +81,7 @@ close that:
 
 | RPC | |
 |---|---|
-| `delegatestake` | fund a delegation record. Called again with another signer it **re-points**: the old record is spent and the new one created in one transaction |
+| `delegatestake` | bond SEQ and lend it in one transaction, with no minimum, or lend stake already bonded. Called again with another signer it **re-points**: the old record is spent and the new one created in one transaction |
 | `undelegatestake` | spend the record back. Unilateral, no lock, no notice |
 | `announcepayout` | the operator side. Refuses an activation inside the notice period rather than letting the node reject the block later |
 | `listdelegations` | where this wallet's stake signs, and what the pool holding it has committed to |
@@ -89,6 +89,15 @@ close that:
 
 None of this changes consensus. Every rule these work within was already enforced,
 so old and new nodes agree on validity.
+
+**Delegating has no minimum, and does not require staking first.** The chain
+applies its minimum-stake floor to what a *signer* commands once delegation is
+resolved, not to each delegator, so a holding far below the floor counts in full
+behind an eligible pool. That is what pooling is for, and it means the people
+most likely to delegate are exactly the ones who cannot stake alone.
+`delegatestake "<signer>" <amount>` bonds and lends in one transaction. Staking
+alone keeps its floor, because a stake that small could never win a block by
+itself.
 
 **Re-pointing has to be one transaction.** Consensus permits at most one live record
 per controller, so reclaiming and re-delegating as two loose transactions could be
@@ -113,6 +122,10 @@ a stake is lent to.
 nobody advertises: a pool holding a tenth of the weight should produce about a tenth
 of the blocks, and well under that means its delegators are earning nothing for what
 they lent.
+
+Pools are listed on the public board, not in the wallets: a wallet takes the
+signer key of the pool you chose, which keeps one directory rather than several
+that can disagree.
 
 The desktop wallet's Staking tab gains both sides, and neither needs the command
 line. A **Staking pool** card picks a pool from the live listing, delegates,
