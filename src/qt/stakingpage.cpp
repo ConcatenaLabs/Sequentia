@@ -487,32 +487,23 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
         // common case harder than the rare one, and a commission invented on the
         // spot is a commission nobody reasoned about. The data is
         // "<mode>:<commission bp>", or "custom".
+        // Five arrangements, each a thing an operator actually wants to say. The
+        // data is "<mode>:<commission bp>", "lottery:ask" when the operator sets
+        // the percentage, or "custom" for the raw commitment.
         m_payout_preset = new QComboBox(op);
-        m_payout_preset->addItem(tr("Share everything: each block pays a delegator, you take no commission"),
+        m_payout_preset->addItem(tr("Share everything: each block pays a delegator, you keep no commission"),
                                  QStringLiteral("lottery:0"));
-        m_payout_preset->addItem(tr("Share, keeping 2%"), QStringLiteral("lottery:200"));
-        m_payout_preset->addItem(tr("Share, keeping 5% (a common choice)"), QStringLiteral("lottery:500"));
-        m_payout_preset->addItem(tr("Share, keeping 10%"), QStringLiteral("lottery:1000"));
+        m_payout_preset->addItem(tr("Share, keeping 5%"), QStringLiteral("lottery:500"));
+        m_payout_preset->addItem(tr("Share, keeping a commission I choose"), QStringLiteral("lottery:ask"));
         m_payout_preset->addItem(tr("Pay one address I commit to, every block"), QStringLiteral("direct:0"));
-        m_payout_preset->addItem(tr("Custom…"), QStringLiteral("custom"));
-        m_payout_preset->setCurrentIndex(2);   // 5%: the one most operators want
+        m_payout_preset->addItem(tr("Custom: commit a script of my own"), QStringLiteral("custom"));
+        m_payout_preset->setCurrentIndex(1);   // keeping 5%: the one most operators want
         form->addRow(tr("Payout:"), m_payout_preset);
 
         m_payout_preset_note = new QLabel(op);
         m_payout_preset_note->setWordWrap(true);
         m_payout_preset_note->setStyleSheet("QLabel{color:#666;}");
         form->addRow(QString(), m_payout_preset_note);
-
-        m_payout_mode = new QComboBox(op);
-        m_payout_mode->addItem(tr("Lottery: each block pays one delegator, drawn by stake weight"), QStringLiteral("lottery"));
-        m_payout_mode->addItem(tr("Direct: every block pays one committed address"), QStringLiteral("direct"));
-        m_payout_mode->setToolTip(tr("Lottery pays each delegator its exact proportional share over time with no "
-                                     "accounting, drawn from Bitcoin's proof of work so the draw cannot be rigged, "
-                                     "at the cost of occasional lumps rather than steady income. Direct pays a "
-                                     "single address you commit to: the chain stops you redirecting it silently, "
-                                     "but does not check that the address shares anything with your delegators."));
-        m_payout_mode_label = new QLabel(tr("Pays out:"), op);
-        form->addRow(m_payout_mode_label, m_payout_mode);
 
         m_payout_commission = new QLineEdit(op);
         m_payout_commission->setPlaceholderText(tr("percent you keep, e.g. 5 (0 is allowed)"));
@@ -531,6 +522,29 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
         m_payout_address->setPlaceholderText(tr("address every block must pay (leave empty for a fresh one of yours)"));
         m_payout_address_label = new QLabel(tr("Pay to:"), op);
         form->addRow(m_payout_address_label, m_payout_address);
+
+        m_payout_script = new QLineEdit(op);
+        m_payout_script->setPlaceholderText(tr("scriptPubKey in hex, up to 110 bytes"));
+        m_payout_script->setToolTip(tr("The exact bytes every coinbase must pay. Consensus compares the output "
+                                       "against these and asks nothing else of them, so anything expressible as "
+                                       "a script works: a multisig, a covenant, a contract that splits the "
+                                       "reward. It is equally on you that they can be spent at all — a script "
+                                       "nobody can satisfy burns every reward this key earns, and the chain will "
+                                       "enforce that just as faithfully."));
+        m_payout_script_label = new QLabel(tr("Payout script:"), op);
+        form->addRow(m_payout_script_label, m_payout_script);
+
+        m_payout_activation = new QLineEdit(op);
+        m_payout_activation->setPlaceholderText(tr("block height (leave empty for the earliest allowed)"));
+        m_payout_activation->setToolTip(tr("The height the policy binds from. It cannot be inside the chain's "
+                                           "notice period, which is what gives your delegators time to read the "
+                                           "change and leave."));
+        {
+            QLocale lc(QLocale::C); lc.setNumberOptions(QLocale::RejectGroupSeparator);
+            m_payout_activation->setValidator(new QIntValidator(1, 2000000000, m_payout_activation));
+        }
+        m_payout_activation_label = new QLabel(tr("Binds at height:"), op);
+        form->addRow(m_payout_activation_label, m_payout_activation);
 
         m_payout_button = new QPushButton(tr("Announce this policy"), op);
         form->addRow(QString(), m_payout_button);
@@ -635,7 +649,6 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
     connect(m_deleg_button, &QPushButton::clicked, this, &StakingPage::onDelegate);
     connect(m_undeleg_button, &QPushButton::clicked, this, &StakingPage::onUndelegate);
     connect(m_payout_button, &QPushButton::clicked, this, &StakingPage::onAnnouncePayout);
-    connect(m_payout_mode, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &StakingPage::onPayoutModeChanged);
     connect(m_payout_preset, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &StakingPage::onPayoutPresetChanged);
 }
 
@@ -1730,84 +1743,78 @@ void StakingPage::refreshPoolOperator()
     onPayoutPresetChanged();
 }
 
-void StakingPage::onPayoutModeChanged()
-{
-    if (!m_payout_mode) return;
-    const bool custom = m_payout_preset && m_payout_preset->currentData().toString() == QLatin1String("custom");
-    const bool lottery = payoutModeIsLottery();
-    // Each mode takes exactly one of the two fields, and the RPC rejects the
-    // other outright, so hide rather than merely ignore the one that does not
-    // apply. The commission box is only for a custom policy: a preset carries
-    // its own figure, and showing an editable one beside it would ask which wins.
-    m_payout_commission->setVisible(custom && lottery);
-    m_payout_commission_label->setVisible(custom && lottery);
-    // The payee, though, is asked for whenever the policy is `direct`, preset or
-    // not: nobody can guess which address an operator means, and left empty the
-    // RPC commits to a fresh one of this wallet's.
-    m_payout_address->setVisible(!lottery);
-    m_payout_address_label->setVisible(!lottery);
-}
-
-//! Whether the policy about to be announced is a lottery, from the preset when
-//! one is chosen and from the raw mode box when it is custom.
+//! Whether the chosen arrangement is a lottery.
 bool StakingPage::payoutModeIsLottery() const
 {
-    if (m_payout_preset && m_payout_preset->currentData().toString() != QLatin1String("custom")) {
-        return m_payout_preset->currentData().toString().startsWith(QLatin1String("lottery"));
-    }
-    return m_payout_mode && m_payout_mode->currentData().toString() == QLatin1String("lottery");
+    if (!m_payout_preset) return true;
+    return m_payout_preset->currentData().toString().startsWith(QLatin1String("lottery"));
 }
 
-//! The commission the chosen policy carries, in basis points, or -1 when the
-//! custom box holds something that is not a percentage.
+//! The commission the chosen arrangement carries, in basis points, or -1 when
+//! the operator's own figure is not a percentage.
 int64_t StakingPage::payoutCommissionBp() const
 {
-    if (m_payout_preset && m_payout_preset->currentData().toString() != QLatin1String("custom")) {
-        const QStringList parts = m_payout_preset->currentData().toString().split(QLatin1Char(':'));
-        return parts.size() == 2 ? parts.at(1).toLongLong() : 0;
+    if (!m_payout_preset) return 0;
+    const QString data = m_payout_preset->currentData().toString();
+    if (data == QLatin1String("lottery:ask")) {
+        if (!m_payout_commission) return 0;
+        const QString txt = m_payout_commission->text().trimmed();
+        if (txt.isEmpty()) return -1;
+        bool ok = false;
+        const double pct = txt.toDouble(&ok);
+        if (!ok || pct < 0 || pct > 100) return -1;
+        return (int64_t)std::llround(pct * 100.0);
     }
-    if (!m_payout_commission) return 0;
-    const QString txt = m_payout_commission->text().trimmed();
-    if (txt.isEmpty()) return 0;
-    bool ok = false;
-    const double pct = txt.toDouble(&ok);
-    if (!ok || pct < 0 || pct > 100) return -1;
-    return (int64_t)std::llround(pct * 100.0);
+    const QStringList parts = data.split(QLatin1Char(':'));
+    return parts.size() == 2 && parts.at(1) != QLatin1String("ask") ? parts.at(1).toLongLong() : 0;
 }
 
 void StakingPage::onPayoutPresetChanged()
 {
     if (!m_payout_preset) return;
-    const bool custom = m_payout_preset->currentData().toString() == QLatin1String("custom");
-    // The raw mode box is the custom control; a preset already says which mode
-    // it is, in words.
-    if (m_payout_mode) m_payout_mode->setVisible(custom);
-    if (m_payout_mode_label) m_payout_mode_label->setVisible(custom);
+    const QString data = m_payout_preset->currentData().toString();
+    const bool custom = data == QLatin1String("custom");
+    const bool ask = data == QLatin1String("lottery:ask");
+    const bool direct_addr = data == QLatin1String("direct:0");
 
-    // Say what the delegator experiences, which is the part an operator is
-    // actually choosing between and the part they will be judged on.
+    // Each arrangement asks for exactly what it needs and nothing else.
+    m_payout_commission->setVisible(ask);
+    m_payout_commission_label->setVisible(ask);
+    m_payout_address->setVisible(direct_addr);
+    m_payout_address_label->setVisible(direct_addr);
+    m_payout_script->setVisible(custom);
+    m_payout_script_label->setVisible(custom);
+    m_payout_activation->setVisible(custom);
+    m_payout_activation_label->setVisible(custom);
+
+    // Say what the DELEGATOR experiences, which is what the operator is choosing
+    // between and what they will be judged on.
     QString note;
-    const int64_t bp = payoutCommissionBp();
     if (custom) {
-        note = tr("Compose the policy yourself. Whatever you choose binds every block this key produces from "
-                  "the activation height, and cannot be changed again inside the notice period.");
-    } else if (payoutModeIsLottery()) {
-        note = bp == 0
+        note = tr("Commit an arbitrary scriptPubKey: every block you produce must pay it, byte for byte. For an "
+                  "arrangement an address cannot express, such as a multisig, a covenant, or a contract that "
+                  "splits the reward. The chain checks only that the coinbase pays these bytes, so whether they "
+                  "are spendable, and by whom, is entirely yours to get right.");
+    } else if (direct_addr) {
+        note = tr("Every block you produce must pay the address you commit to. The chain stops you redirecting "
+                  "that reward silently, but it does NOT check the address shares anything with your delegators, "
+                  "and they can see that. Choose this when you are paying out by some arrangement of your own.");
+    } else {
+        const int64_t bp = payoutCommissionBp();
+        const QString share = ask
+            ? tr("the commission you set below")
+            : tr("%1%").arg(QString::number(bp / 100.0, 'f', bp % 100 ? 2 : 0));
+        note = bp == 0 && !ask
             ? tr("Every block you produce pays one of your delegators, drawn by stake weight from Bitcoin's "
                  "proof of work so the draw cannot be rigged. You take nothing beyond what your own stake wins "
                  "as one participant among them. Each delegator earns its exact share over time, arriving in "
                  "occasional lumps rather than steadily.")
             : tr("Every block you produce pays one of your delegators, drawn by stake weight from Bitcoin's "
-                 "proof of work so the draw cannot be rigged, and you keep %1% of blocks as commission. Each "
-                 "delegator earns its exact share of the rest over time, arriving in occasional lumps rather "
-                 "than steadily.").arg(QString::number(bp / 100.0, 'f', bp % 100 ? 2 : 0));
-    } else {
-        note = tr("Every block you produce must pay the address you commit to. The chain stops you redirecting "
-                  "that reward silently, but it does NOT check the address shares anything with your delegators, "
-                  "and they can see that. Choose this when you are paying out by some arrangement of your own.");
+                 "proof of work so the draw cannot be rigged, and you keep %1 of blocks. Each delegator earns "
+                 "its exact share of the rest over time, arriving in occasional lumps rather than steadily.")
+                  .arg(share);
     }
     m_payout_preset_note->setText(note);
-    onPayoutModeChanged();
 }
 
 void StakingPage::onAnnouncePayout()
@@ -1833,9 +1840,14 @@ void StakingPage::onAnnouncePayout()
             ? tr("From the activation height on, every block you produce must pay one of your delegators, drawn "
                  "by stake weight, and you keep %1% of blocks as commission. The chain enforces this: a block of "
                  "yours that pays anyone else is invalid.\n\n").arg(QString::number(commission_bp / 100.0, 'f', 2))
-            : tr("From the activation height on, every block you produce must pay the committed address. The "
-                 "chain enforces that, but it does not check the address shares anything with your delegators, "
-                 "and they can see that.\n\n"))
+            : (m_payout_preset->currentData().toString() == QLatin1String("custom")
+                ? tr("From the activation height on, every block you produce must pay the script you entered, "
+                     "byte for byte. The chain checks only that, so if those bytes cannot be spent by anyone, "
+                     "every reward this key earns is burned and the chain will enforce that just as "
+                     "faithfully.\n\n")
+                : tr("From the activation height on, every block you produce must pay the committed address. The "
+                     "chain enforces that, but it does not check the address shares anything with your delegators, "
+                     "and they can see that.\n\n")))
         + tr("It cannot take effect immediately: the chain requires a notice period first, so your delegators "
              "can read it and leave before it binds. Until then your current arrangement stands.\n\nAnnounce it?"),
         QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
@@ -1848,13 +1860,27 @@ void StakingPage::onAnnouncePayout()
     const QString chosen = (m_payout_signer && m_payout_signer->isVisible())
                                ? m_payout_signer->currentText().trimmed() : QString();
     params.push_back(chosen.isEmpty() ? UniValue(UniValue::VNULL) : UniValue(chosen.toStdString()));
-    params.push_back(UniValue(UniValue::VNULL));   // activation: default, past the notice period
+
+    const bool custom = m_payout_preset->currentData().toString() == QLatin1String("custom");
+    const QString activation = custom ? m_payout_activation->text().trimmed() : QString();
+    params.push_back(activation.isEmpty() ? UniValue(UniValue::VNULL)
+                                          : UniValue(UniValue::VNUM, activation.toStdString()));
     if (lottery) {
         params.push_back(UniValue(UniValue::VNULL));            // address: not used
         params.push_back(commission_bp);
     } else {
-        const QString addr = m_payout_address->text().trimmed();
+        const QString addr = custom ? QString() : m_payout_address->text().trimmed();
         params.push_back(addr.isEmpty() ? UniValue(UniValue::VNULL) : UniValue(addr.toStdString()));
+        if (custom) {
+            const QString script = m_payout_script->text().trimmed();
+            if (script.isEmpty()) {
+                setCardResult(m_payout_result, tr("Enter the payout script to commit to, in hex."), true);
+                return;
+            }
+            params.push_back(UniValue(UniValue::VNULL));   // commission_bp: lottery only
+            params.push_back(UniValue(UniValue::VNULL));   // amount: default
+            params.push_back(script.toStdString());        // payout_script
+        }
     }
 
     bool ok = false; QString err;
