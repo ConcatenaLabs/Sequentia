@@ -218,6 +218,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "bumpwithdrawstakefee", 0, "fee_rate" },
     { "registerasset", 1, "contract"},
     { "getstakerinfo", 0, "verbose"},
+    { "getstakerinfo", 1, "bycontroller"},
     { "delegatestake", 2, "amount"},
     { "announcepayout", 2, "activation"},
     { "announcepayout", 4, "commission_bp"},
