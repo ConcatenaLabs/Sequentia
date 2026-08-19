@@ -94,9 +94,6 @@ private Q_SLOTS:
     //! take it back. Neither moves the staked coins.
     void onDelegate();
     void onUndelegate();
-    //! Copy the selected pool's signer key into the field, so delegating is a
-    //! click on a row rather than a paste of a 66-character key.
-    void onPoolPicked();
     //! Operator side: commit on-chain to how this node's blocks pay out.
     //! Running a pool is a node operation and lives only here.
     void onAnnouncePayout();
@@ -138,7 +135,7 @@ private:
     //! in a table.
     QLabel* m_deleg_alerts{nullptr};
     QLabel* m_deleg_status{nullptr};
-    QTableWidget* m_pools{nullptr};
+    QLineEdit* m_deleg_amount{nullptr};
     QLineEdit* m_deleg_signer{nullptr};
     QPushButton* m_deleg_button{nullptr};
     QPushButton* m_undeleg_button{nullptr};
