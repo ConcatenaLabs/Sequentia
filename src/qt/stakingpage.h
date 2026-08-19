@@ -219,8 +219,9 @@ private:
     //! Refresh the "Run a staking pool" card: what this node's signer commands,
     //! who lent it, how reliably it produces, and what it has committed to.
     void refreshPoolOperator();
-    //! The policy the card is about to announce, read from the chosen entry.
-    bool payoutModeIsLottery() const;
+    //! The policy the card is about to announce, read from the chosen entry:
+    //! "split", "lottery" or "direct" (custom commits a direct raw script).
+    QString payoutModeName() const;
     int64_t payoutCommissionBp() const;
 
     //! Run an RPC (wallet=true uses the /wallet/<name> endpoint; false the node endpoint).

@@ -215,6 +215,7 @@ BASE_SCRIPTS = [
     'feature_pos_stake_vesting.py',
     'feature_pos_delegation.py',
     'feature_pos_pools.py',
+    'feature_pos_split.py',
     'feature_pos_withdrawstake.py',
     'feature_pos_payout.py',
     'feature_pos_bls_gossip.py',

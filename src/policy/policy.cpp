@@ -98,6 +98,14 @@ bool IsStandard(const CScript& scriptPubKey, TxoutType& whichType)
         if (g_con_pos && ParsePayoutScript(scriptPubKey)) {
             return true;
         }
+        // ...and the bare pot script, where a split pool's rewards accumulate.
+        // Consensus creates pots in coinbases (which need no relay), but a
+        // CLAIM re-pots its undistributed remainder in an ordinary transaction,
+        // and that must relay under default policy or every claim would strand
+        // its own change.
+        if (g_con_pos && ParsePotScript(scriptPubKey)) {
+            return true;
+        }
         // SEQUENTIA: and the bare supervision declaration, which is how an
         // issuance says the asset it creates is freezable (src/supervision.h).
         // Bare because the output has to survive in the UTXO set, which a
@@ -243,7 +251,7 @@ bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
             // never withdrawn.
             if (g_con_pos && whichType == TxoutType::NONSTANDARD &&
                 (ParseStakeScript(prev.scriptPubKey) || ParseDelegationScript(prev.scriptPubKey) ||
-                 ParsePayoutScript(prev.scriptPubKey))) {
+                 ParsePayoutScript(prev.scriptPubKey) || ParsePotScript(prev.scriptPubKey))) {
                 continue;
             }
             // SEQUENTIA: spending a freeze record is the unfreeze, and it must
