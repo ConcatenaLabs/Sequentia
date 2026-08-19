@@ -3,7 +3,7 @@
 Two things: a consensus change with a flag day on the live testnet, and delegated
 staking becoming usable from a wallet.
 
-**If you run a node against the live testnet, upgrade before height 101,750.** The
+**If you run a node against the live testnet, upgrade before height 101,810.** The
 consensus change below activates there, and a node that has not upgraded by then
 forks off.
 
@@ -27,7 +27,7 @@ Liquid, at a 4,000,000-weight block and a multiplier of one, already accepts
 4,000,000, so Sequentia at four stays at 40% of the per-block validation cost the
 interpreter this code came from has always allowed.
 
-### The flag day: height 101,750 on the testnet
+### The flag day: height 101,810 on the testnet
 
 The rule only ever accepts more, which is why it needs no activation gate for
 *correctness*. It is still a hard fork for a running network, and ungated it would
@@ -52,6 +52,23 @@ Also: an annex is now standard on a Simplicity leaf spend and nowhere else, capp
 at 100,000 bytes, policy only. It is the one place a program can be given budget
 without also being given bytes it must read, and Simplicity's `sigAllHash` commits
 to it, so a relay node cannot strip it without invalidating the spend.
+
+## The persisted mempool is swept for frozen spends at startup
+
+A supervision record evicts the spends it invalidated when it confirms, and that
+sweep runs on connect, only when the connecting block carries a record. That is
+correct and cheap in the steady state, and it is also why it could not repair a
+node that started with residue already in `mempool.dat`: nothing re-examines a
+resident entry until some later block happens to carry a record, which may never
+come. A node in that state holds spends it will never mine and reports nothing
+about it, because mempool rejections are not logged by default.
+
+`mempool.dat` is now swept once, immediately after it loads. The invariant then
+holds regardless of what wrote the file or in what order the node started.
+
+This is the recovery path for anyone whose node ran an older binary through a
+pause: upgrading to 24.3.0 clears the residue at first start, with no manual
+intervention and nothing to diagnose.
 
 ## Delegated staking, from a wallet
 
@@ -128,7 +145,7 @@ Stop the node, replace the binary, start it again. Committee operators upgrade e
 node in one pass, as with any consensus release: mixed binaries select different
 anchors and fragment share-locks.
 
-Do it **before height 101,750** on the testnet, then confirm behaviourally rather
+Do it **before height 101,810** on the testnet, then confirm behaviourally rather
 than by version alone:
 
     contrib/sequentia/peer-stall-check.sh
