@@ -54,6 +54,7 @@
 #include <QSpinBox>
 #include <QFrame>
 #include <QSettings>
+#include <QTimer>
 #include <QShowEvent>
 #include <QTextDocument>
 
@@ -105,6 +106,16 @@ SendCoinsDialog::SendCoinsDialog(const PlatformStyle *_platformStyle, QWidget *p
     if (auto* box = qobject_cast<QVBoxLayout*>(ui->frameFeeSelection->layout())) {
         box->insertWidget(0, m_fee_widget);
     }
+
+    // Sizing a transaction runs coin selection, so it is not something to do on
+    // every keystroke; it settles after the typing stops. Without this the timer
+    // stays null, refreshTxSize() is never reached, and m_tx_vsize is zero for
+    // ever -- which reads, on screen, as a "Total for this transaction" that
+    // shows an em dash and refuses to be typed into even under Custom.
+    m_size_timer = new QTimer(this);
+    m_size_timer->setSingleShot(true);
+    m_size_timer->setInterval(400);
+    connect(m_size_timer, &QTimer::timeout, this, &SendCoinsDialog::refreshTxSize);
 
     if (!_platformStyle->getImagesOnButtons()) {
         ui->addButton->setIcon(QIcon());
