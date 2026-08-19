@@ -28,10 +28,54 @@ requirements() {
   return 0
 }
 
+# Say so, loudly, when master carries a version that was never tagged.
+#
+# This product releases on a TAG, so bumping _CLIENT_VERSION in configure.ac and
+# merging it does nothing here: the newest tag is unchanged, the run logs the
+# reassuring "[node] up to date at v<older>", and the download page keeps serving
+# the old build indefinitely. That is exactly how 24.2.0 sat unpublished -- the
+# bump merged to master, no v24.2.0 tag was ever pushed, and nothing anywhere
+# reported a problem, because from the publisher's point of view there was none.
+#
+# So an untagged bump has to announce itself. This warns rather than fails: the
+# release is still a deliberate act, and a red service would bury the real build
+# failures the exit status is there to report.
+#
+# The version to compare against is read from the publisher's own clone, which
+# the unit pins to this repo at origin/master -- this recipe is a file inside it.
+warn_if_master_is_untagged() {
+  local newest_tag="$1"
+  local root
+  root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)" || return 0
+  local ac="$root/configure.ac"
+  [ -f "$ac" ] || return 0
+
+  local major minor build
+  major="$(sed -n 's/^define(_CLIENT_VERSION_MAJOR, *\([0-9]*\)).*/\1/p' "$ac")"
+  minor="$(sed -n 's/^define(_CLIENT_VERSION_MINOR, *\([0-9]*\)).*/\1/p' "$ac")"
+  build="$(sed -n 's/^define(_CLIENT_VERSION_BUILD, *\([0-9]*\)).*/\1/p' "$ac")"
+  [ -n "$major" ] && [ -n "$minor" ] && [ -n "$build" ] || return 0
+
+  local master_version="v$major.$minor.$build"
+  [ "$master_version" != "$newest_tag" ] || return 0
+  # Only when master is AHEAD. A tag above master is a release branch, not this.
+  [ "$(printf '%s\n%s\n' "$newest_tag" "$master_version" | sort -V | tail -1)" \
+      = "$master_version" ] || return 0
+
+  log "[node] WARNING: master is at $master_version but the newest tag is ${newest_tag:-none}."
+  log "[node] WARNING: the download page stays on ${newest_tag:-nothing} until that version is tagged:"
+  log "[node] WARNING:   git tag -a $master_version <commit> -m 'Sequentia Core ${master_version#v}'"
+  log "[node] WARNING:   git push origin $master_version"
+}
+
 remote_version() {
   # sort -V, so v24.0.10 beats v24.0.9.
-  git ls-remote --tags --refs "$PRODUCT_REPO" 'v[0-9]*' \
-    | awk '{print $2}' | sed 's#refs/tags/##' | sort -V | tail -1
+  local newest
+  newest="$(git ls-remote --tags --refs "$PRODUCT_REPO" 'v[0-9]*' \
+    | awk '{print $2}' | sed 's#refs/tags/##' | sort -V | tail -1)"
+  # To stderr, so the driver's "$(remote_version)" still captures only the version.
+  warn_if_master_is_untagged "$newest" >&2
+  printf '%s\n' "$newest"
 }
 
 build() {
