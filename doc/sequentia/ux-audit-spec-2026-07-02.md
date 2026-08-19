@@ -17,7 +17,7 @@ resolve many findings.
 > - **Lightning backend — COMPLETE + proven** (`seqln` `sequentia-stable`, committed): the non-custodial signer
 >   split M0-M5 (Rust device signer byte-exact vs libhsmd), the capstone (a device-keyed hosted-channel node did
 >   a real pure-LN GOLD<->BTC seqob trade), the secure BOLT-8 Noise_XK transport, the WASM browser signer, and a
->   WebSocket transport + wallet SDK (`contrib/seqln-signer/wasm`). See `seqln-tier2-hosted-channels-design.md`.
+>   WebSocket transport + wallet SDK (`contrib/seqln-signer/wasm`). See `seqln/doc/seqln-design/seqln-tier2-hosted-channels-design.md`.
 > - **Web wallet non-LN** — DONE (branch `lightning-ux-overhaul`, pushed): T2, T13, T5, T6, T9, T7, T14,
 >   T11, T12 + 4.1/4.2 cleanups. Flagged browser-verify: T4 (PSET fee preview), T5 Max-with-same-asset-fee, T3
 >   (needs the qr.rs wasm rebuild).

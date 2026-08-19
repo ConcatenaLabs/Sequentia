@@ -70,21 +70,19 @@ not these, are authoritative for current behavior. Status of each:
 | Document | Status |
 |---|---|
 | [`openamp-design.md`](openamp-design.md) | Implemented in [`openamp`](https://github.com/GracedEternalKingCabbageMan/openamp); the daemon is live on the public testnet with the demo asset BONDX. Zero consensus changes in this repo. |
-| [`seqln-core-lightning-fork-spec.md`](seqln-core-lightning-fork-spec.md) | The operative SeqLN design spec; implemented in [`seqln`](https://github.com/GracedEternalKingCabbageMan/seqln). |
-| [`sequentia-lightning-cln-spec.md`](sequentia-lightning-cln-spec.md) | Superseded by `seqln-core-lightning-fork-spec.md` (the earlier fork plan). |
-| [`seqln-asset-channels-build-plan.md`](seqln-asset-channels-build-plan.md) | Implemented in seqln (asset-aware channels). |
-| [`seqln-phase2-submarine-swaps.md`](seqln-phase2-submarine-swaps.md) | Implemented in seqln (submarine-swap primitives, both directions). |
-| [`seqln-step2-pure-ln-swaps-design.md`](seqln-step2-pure-ln-swaps-design.md) | Design for pure-Lightning asset↔BTC swaps; implemented in seqln per its milestone log. |
-| [`seqln-tier2-hosted-channels-design.md`](seqln-tier2-hosted-channels-design.md) | Design for the hosted-channel signer split (thin-wallet non-custodial Lightning); daemon-layer milestones implemented in seqln, wallet integration in progress. |
 | [`ux-audit-spec-2026-07-02.md`](ux-audit-spec-2026-07-02.md) | UX audit and design-change spec across the ecosystem's user-facing surfaces; implementation tracked in the respective repos. |
 
-The SeqDEX and SeqOB design notes are **not** kept here. They document code in
-[`seqdex`](https://github.com/GracedEternalKingCabbageMan/seqdex) and live in
-that repository's `docs/`: the order-book and terminal specs, the covenant-offer
-design, the rail-crossing P2P/LSP spec, the Lightning feasibility and Simplicity
-assessments, and the instant-swap latency notes. The regtest proofs of the
-covenant order book live there too, in `test/regtest/`; they run against a built
-node from this repository.
+A design document belongs to the repository whose code it describes, so most of
+them are **not** kept here:
+
+| Looking for | It is in |
+|---|---|
+| The SeqDEX and SeqOB designs — order-book and terminal specs, the covenant-offer design, the rail-crossing P2P/LSP spec, the Lightning feasibility and Simplicity assessments, the instant-swap latency notes | [`seqdex`](https://github.com/GracedEternalKingCabbageMan/seqdex), under `docs/`. Its `test/regtest/` also holds the regtest proofs of the covenant order book, which run against a node built from this repository. |
+| The SeqLN designs — the Core Lightning fork spec, asset channels, submarine and pure-Lightning swaps, Tier-2 hosted channels | [`seqln`](https://github.com/GracedEternalKingCabbageMan/seqln), under `doc/seqln-design/`. |
+| How Fulmen bundles a SeqLN node | [`fulmen`](https://github.com/GracedEternalKingCabbageMan/fulmen), under `docs/`. |
+
+What stays here is the protocol: anchoring, proof of stake, the fee market, and
+the consensus rules those other projects build on.
 
 ## 3. Historical correspondence
 
