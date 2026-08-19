@@ -227,56 +227,53 @@ class PosPoolsTest(BitcoinTestFramework):
         assert_raises_rpc_error(-8, "already delegates to signer", w0.delegatestake, pool1)
         assert_raises_rpc_error(-8, "delegating to the controller itself", w0.delegatestake, ctrl)
 
-        self.log.info("A record must be able to pay its own way, in and out")
-        # A delegation record pays the fee to spend itself out of its own value,
-        # so a record funded below (dust + that fee) could be created, would
-        # delegate correctly, and could then never be reclaimed: the coins in it
-        # would be stranded. The gap is not a rounding concern here, since dust
-        # is tens of atoms and the spend fee is thousands. Refused at creation.
-        # Use a SECOND staking key: the first already delegates, so delegating
-        # again would take the re-point path instead.
-        from decimal import Decimal as _D
-        addr2 = w0.getnewaddress()
-        ctrl2 = w0.getaddressinfo(addr2)["pubkey"]
-        err = None
-        try:
-            w0.delegatestake(pool2, ctrl2, _D("0.00000001"))
-        except Exception as e:
-            err = str(e)
-        assert err is not None and "never" in err and "reclaimed" in err, err
-
-        # The refusal names the floor, and a record funded AT it is reclaimable,
-        # which is the whole point of setting the floor there.
-        floor = _D(err.split("below the ")[1].split(" SEQ")[0])
-        w0.delegatestake(pool2, ctrl2, floor)
+        self.log.info("A holder with far less than the solo minimum can still delegate")
+        # This is the whole point of pooling, and it must not require bonding
+        # first: consensus applies the minimum-stake floor to what a SIGNER
+        # commands once delegation is resolved, not to each delegator. So a
+        # holding a fraction of the floor can be bonded and lent in ONE call,
+        # and it counts in full toward the pool.
+        small = w0.get_wallet_rpc(self.default_wallet_name) if False else w0
+        n0.createwallet("smallholder")
+        sw = n0.get_wallet_rpc("smallholder")
+        w0.sendtoaddress(address=sw.getnewaddress(), amount=200, fee_asset_label="bitcoin")
         self.mine(1)
-        assert_equal(n0.getdelegationinfo()[ctrl2], pool2)
-        w0.undelegatestake(ctrl2)
+
+        # Nothing staked, and nowhere near the 40,000-style solo floor.
+        assert_equal(sw.listdelegations(), [])
+        before = n0.listpools(pool1, 0)["pools"][0]["weight"]
+
+        res = sw.delegatestake(pool1, 150)
+        assert_equal(res["staked"], Decimal("150"))
+        assert_equal(res["signer"], pool1)
+        assert_equal(res["delegated_weight"], 150 * COIN)
+        # One transaction carries both the stake and the record: no separate
+        # registerstake step, and nothing to get half-done.
+        tx = n0.getrawtransaction(res["txid"], True)
         self.mine(1)
-        assert ctrl2 not in n0.getdelegationinfo()
 
-        # Re-pointing is funded by the record it replaces, so an amount here has
-        # nothing to act on. Refused rather than silently ignored, which would
-        # let someone believe they had topped the record up.
-        assert_raises_rpc_error(-8, "amount cannot be set when re-pointing",
-                                w0.delegatestake, pool2, ctrl, _D("0.001"))
+        # It counts for the pool, in full.
+        assert_equal(n0.listpools(pool1, 0)["pools"][0]["weight"], before + 150 * COIN)
+        assert_equal(n0.getdelegationinfo()[res["controller"]], pool1)
+        row = sw.listdelegations()[0]
+        assert_equal(row["delegated"], True)
+        assert_equal(row["weight"], 150 * COIN)
 
-        self.log.info("A pool is a signer that DECLARED itself one, not any staker with weight")
-        # The whole point of the board is to list deliberate pooling initiatives.
-        # Every chain has stakers producing for themselves, and calling those
-        # pools puts words in their mouth. The only deliberate, on-chain opt-in
-        # is announcing a payout policy, so that is the line.
-        board = n0.listpools()
-        assert board["pools"] == [], "nobody has declared a pool yet, so none may be listed"
-        assert_equal(board["declared_pools"], 0)
-        assert_greater_than(board["stakers"], 0)  # ...but the chain has stakers
-        # They are still reachable, just not as pools.
-        everyone = n0.listpools(None, 0, False, True)
-        assert_greater_than(len(everyone["pools"]), 0)
-        assert all(p["declared"] is False for p in everyone["pools"])
-        # And one can always be read by name, which is how a wallet describes the
-        # signer its stake is currently lent to.
-        assert_equal(self.pool_entry(n0, pool1)["declared"], False)
+        # And it can leave, like any other delegator.
+        sw.undelegatestake()
+        self.mine(1)
+        assert res["controller"] not in n0.getdelegationinfo()
+
+        # Staking ALONE still has a floor, because a stake that small could
+        # never win a block by itself. The two paths differ on purpose.
+        if n0.listpools(None, 0, False, True)["min_stake"] > 0:
+            assert_raises_rpc_error(-8, "below the chain's minimum stake",
+                                    sw.registerstake, sw.getaddressinfo(sw.getnewaddress())["pubkey"], 10)
+
+        self.log.info("Delegating without an amount needs something already staked")
+        n0.createwallet("emptyholder")
+        ew = n0.get_wallet_rpc("emptyholder")
+        assert_raises_rpc_error(-4, "Pass `amount` to bond some SEQ", ew.delegatestake, pool1)
 
         self.log.info("announcepayout: an operator commits, and cannot dodge the notice period")
         tip = n0.getblockcount()
