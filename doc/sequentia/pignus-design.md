@@ -278,12 +278,45 @@ difference between the fabricated and the true price on the seized portion --
 bad, publicly evident from the signed log, and bounded. It cannot steal the
 collateral.
 
-Hardening, in order: publish every attestation so fabrication is detectable;
-run the signer behind a threshold key (the `PolicySigner`/FROST seam OpenAMP
-already built solves exactly this shape of problem); and let the *vault* name a
-2-of-3 oracle set, which needs three `CHECKSIGFROMSTACK` calls and a counter in
-the leaf -- a straightforward extension of the current leaf, and the right
-answer before real value is involved.
+Hardening comes in two shapes, and both are implemented.
+
+**A threshold group key** (FROST, the `PolicySigner` seam OpenAMP already
+built): the vault names ONE key, the m-of-n lives in the signing protocol, and
+nothing on chain changes. Cheapest, and the group key's invariance under
+resharing means the signer set can rotate without moving a single vault address.
+Its cost is that the signers must run a joint protocol -- there is a coordinator,
+and the signers' liveness is coupled.
+
+**An on-chain oracle set** (`oracles=[...]`, `oracle_threshold=m`): the vault
+names n keys and the covenant counts valid signatures itself. The oracles never
+talk to each other, never learn that the others exist, and no coordinator can be
+attacked. Its cost is script size -- the LIQUIDATE leaf grows from 352 to 633
+bytes for 2-of-3.
+
+The on-chain set does NOT require the oracles to agree on a byte. Each signs its
+own `(timestamp, price)`, each accepted price must independently clear the
+strike, and the price carried into the seizure is the **maximum** of the
+accepted ones. That choice does two things: it is borrower-favourable (a higher
+price seizes less collateral), and it makes shopping pointless, because
+presenting an extra low attestation cannot drag the price down when the largest
+of whatever is shown is what counts. A liquidator's best play is to present
+exactly the `m` lowest attestations they hold, which makes the effective price
+the m-th lowest of the set -- a robust quantile rather than any one oracle's
+number.
+
+Two properties fall out and are worth stating. A single compromised oracle can
+no longer trigger a liquidation, because it cannot reach the threshold alone --
+and a signature from one key replayed into another key's slot fails, since every
+slot pins its own key. A single dead oracle can no longer block one either, so
+the set improves both halves of the trust problem rather than trading one for
+the other. An abstaining slot carries an EMPTY signature, which
+`OP_CHECKSIGFROMSTACK` treats as false; a non-empty invalid signature aborts the
+script instead, so a slot cannot be stuffed with rubbish to fake an abstention.
+
+One trap the builder refuses outright: a 1-of-n set is weaker than a single
+oracle, not stronger, because ANY of the n can act alone. `sanity_check()` says
+so, and duplicate keys are rejected because one signer filling two slots makes
+the threshold mean less than it says.
 
 ### 6.2 What the platform can do
 
@@ -413,15 +446,9 @@ so a vault needs a key that is not simply the borrower's, and the natural route
 is expressing the pledge as a DAMP policy predicate rather than wrapping the
 asset. It is a genuine design problem and it is not solved here.
 
-## 9. What is next
+## 9. Where the code lives
 
-1. Oracle daemon and the published attestation log (built).
-2. Go covenant port, golden-vectored against the proven Python (built).
-3. Loan book, vault watcher, liquidator bot (built).
-4. Wallet integration: reconstruct-and-verify before signing, in SWK and the
-   web wallet.
-5. Bitcoin collateral (section 7).
-6. 2-of-3 oracle sets in the leaf (section 6.1).
-7. Funded resting loan offers (section 3), which needs address reconstruction
-   inside the covenant.
-8. The maturity-path DLC (section 7.2), and Tier D.
+The platform lives in its own repository, `pignus`, alongside the other
+Sequentia sub-projects; the covenant and its consensus-level proof stay here,
+the same way SeqOB's covenant ships with the node while the daemon driving it
+ships separately.
