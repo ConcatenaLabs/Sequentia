@@ -19,6 +19,7 @@
 
 #include <QComboBox>
 #include <QDoubleValidator>
+#include <QRadioButton>
 #include <QShowEvent>
 #include <QGridLayout>
 #include <QHBoxLayout>
@@ -85,8 +86,11 @@ void FeeSelectionWidget::buildUi()
     m_layout->addWidget(m_warning);
 
     // 2. The host's Recommended/Custom controls go here, between the asset and the
-    // numbers it produces. Empty for a page that has none.
+    // numbers it produces. A host with its own hands them over so they keep their
+    // place among their own labels; a host with none gets the pair below, because
+    // "recommended, take it or leave it" is not a fee panel.
     m_rate_mode_index = m_layout->count();
+    buildOwnRateMode();
 
     // 3. Four cells, one number. A fee is a rate on the space a transaction takes,
     // but what anyone wants to know is what THIS transaction costs, and neither
@@ -135,9 +139,64 @@ void FeeSelectionWidget::buildUi()
     m_layout->addWidget(m_note);
 }
 
+void FeeSelectionWidget::buildOwnRateMode()
+{
+    m_own_rate_mode = new QWidget(this);
+    auto* row = new QHBoxLayout(m_own_rate_mode);
+    row->setContentsMargins(0, 0, 0, 4);
+
+    m_radio_recommended = new QRadioButton(tr("Recommended"), m_own_rate_mode);
+    m_radio_custom = new QRadioButton(tr("Custom"), m_own_rate_mode);
+    m_radio_recommended->setChecked(true);
+    m_radio_recommended->setToolTip(tr("Let the wallet price this from recent blocks."));
+    m_radio_custom->setToolTip(tr("Set the fee yourself. Type into any of the four figures below "
+                                  "and the other three follow."));
+    row->addWidget(m_radio_recommended);
+    row->addWidget(m_radio_custom);
+    row->addStretch(1);
+
+    connect(m_radio_custom, &QRadioButton::toggled, this, [this](bool on) {
+        if (!on) return;
+        // Start from the figure that was just being quoted, not from zero: the
+        // point of Custom here is almost always to pay a little MORE than the
+        // recommendation, and an empty box makes the user rediscover it first.
+        setCustomMode(shownRateAsReference());
+    });
+    connect(m_radio_recommended, &QRadioButton::toggled, this, [this](bool on) {
+        if (on) setRecommendedMode(m_conf_target);
+    });
+
+    m_layout->insertWidget(m_rate_mode_index, m_own_rate_mode);
+}
+
+CAmount FeeSelectionWidget::shownRateAsReference() const
+{
+    if (!m_model) return m_custom_rate;
+    if (m_custom) return m_custom_rate;
+    bool have_estimate = false;
+    const CAmount asset_atoms_per_kvb = recommendedRate(have_estimate);
+    const FeeAssetInfo info = m_model->node().getFeeAssetInfo(feeAsset());
+    if (!info.accepted || info.rate <= 0) return m_custom_rate;
+    // Same conversion onCellEdited() makes, and it must stay the same one: this
+    // figure goes back out as the custom rate, so a different rate here would
+    // move the fee simply by switching the radio.
+    return static_cast<CAmount>(std::llround(
+        static_cast<double>(asset_atoms_per_kvb) * static_cast<double>(info.rate)
+        / static_cast<double>(exchange_rate_scale)));
+}
+
 void FeeSelectionWidget::setRateModeWidget(QWidget* widget)
 {
     if (!widget) return;
+    // The host has its own, so the pair built here would be a second, competing
+    // answer to the same question.
+    if (m_own_rate_mode) {
+        m_layout->removeWidget(m_own_rate_mode);
+        delete m_own_rate_mode;
+        m_own_rate_mode = nullptr;
+        m_radio_recommended = nullptr;
+        m_radio_custom = nullptr;
+    }
     m_rate_mode_slot = widget;
     m_layout->insertWidget(m_rate_mode_index, widget);
 }
@@ -402,7 +461,14 @@ void FeeSelectionWidget::updateGrid(const CAmount& asset_atoms_per_kvb)
         : QString());
     // A total the host was given outright beats one multiplied out here: it is the
     // fee the wallet actually charged, over the size the wallet actually estimated.
-    const double total_atoms = m_known_total >= 0
+    //
+    // Except under Custom, where it is the one figure that must NOT win. A quoted
+    // total is priced at the recommendation; the moment the user sets a rate of
+    // their own, holding that quote on screen would show them a fee the wallet is
+    // no longer going to charge -- and on this page raising the fee deliberately
+    // is the entire point of the control.
+    const bool use_quoted_total = m_known_total >= 0 && !m_custom;
+    const double total_atoms = use_quoted_total
         ? static_cast<double>(m_known_total)
         : (m_tx_vsize > 0
            ? std::ceil(static_cast<double>(asset_atoms_per_kvb) * m_tx_vsize / 1000.0)
