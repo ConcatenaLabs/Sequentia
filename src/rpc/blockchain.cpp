@@ -4116,9 +4116,17 @@ static RPCHelpMan listpools()
         tip_height = pindex ? pindex->nHeight : 0;
         for (int i = 0; i < window && pindex && pindex->nHeight > 0; ++i, pindex = pindex->pprev) {
             if (pindex->trimmed()) break; // a trimmed index no longer carries its proof
-            const std::optional<PosChallengeParts> parts = ParsePosBlockChallenge(pindex->get_proof().challenge);
+            // get_proof() unwraps an optional. It is always set for an untrimmed
+            // index on a signed-blocks chain, but this RPC is what a PUBLIC board
+            // polls, so a node-internal surprise here should cost the reliability
+            // column rather than the whole answer.
+            try {
+                const std::optional<PosChallengeParts> parts = ParsePosBlockChallenge(pindex->get_proof().challenge);
+                if (parts) produced[parts->leader]++;
+            } catch (const std::exception&) {
+                break;
+            }
             ++scanned;
-            if (parts) produced[parts->leader]++;
         }
     }
 
