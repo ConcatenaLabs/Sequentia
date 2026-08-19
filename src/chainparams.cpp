@@ -1188,16 +1188,34 @@ public:
         // would reject that block and fork off. Nobody could predict the date,
         // because it would be set by whoever first ran the new tooling.
         //
-        // 101,200 is a little over a day past the tip at release (99,729 on
-        // 2026-08-19), which is the lead time the operators asked for. Until
-        // then this binary enforces the OLD budget, so running it early is safe
-        // and cannot split the chain; after it, a node that has not upgraded
-        // forks off. Cut every node over before the height, and verify with
+        // 101,760 is about a day past the tip (100,293 at 2026-08-19T17:08Z),
+        // which is the lead time the operators asked for. Until then this
+        // binary enforces the OLD budget, so running it early is safe and
+        // cannot split the chain; after it, a node that has not upgraded forks
+        // off. Cut every node over before the height, and verify with
         // contrib/sequentia/peer-stall-check.sh rather than by version string.
+        //
+        // It was 101,200, chosen against a tip of 99,729 earlier the same day.
+        // That is the hazard with a height written in advance: the chain kept
+        // moving while this branch was in review, and the same constant that
+        // meant twenty-four hours when it was written meant fifteen a few hours
+        // later. A flag day is a promise measured in wall-clock time to the
+        // people who have to act on it, so it does not survive sitting in a
+        // branch.
+        //
+        // RE-DERIVE THIS IMMEDIATELY BEFORE MERGING, from the tip at that
+        // moment:
+        //
+        //     height = round_up_to_10(tip + 1440)      // 1440 blocks = ~24 h
+        //
+        // and re-run the unit test, which pins the arithmetic either side of
+        // the boundary. A stale value here does not fail a build or a test --
+        // it silently shortens the runway every other operator was promised,
+        // which is the one failure mode this gate exists to prevent.
         //
         // Bound to this chain's genesis hash so a re-genesis drops the flag day
         // instead of waiting out a height that would no longer mean anything.
-        consensus.simplicity_budget4_height = 101200;
+        consensus.simplicity_budget4_height = 101760;
         consensus.simplicity_budget4_chain_genesis = expected_genesis;
 
         // SEQUENTIA: ONE-TIME treasury UTXO recovery. Read this before touching it.
