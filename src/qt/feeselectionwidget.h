@@ -17,6 +17,7 @@ QT_BEGIN_NAMESPACE
 class QComboBox;
 class QLabel;
 class QLineEdit;
+class QShowEvent;
 class QVBoxLayout;
 QT_END_NAMESPACE
 
@@ -131,6 +132,9 @@ Q_SIGNALS:
     //! per 1000 bytes.
     void feeRateEdited(CAmount reference_per_kvb);
 
+protected:
+    void showEvent(QShowEvent* event) override;
+
 private:
     WalletModel* m_model{nullptr};
 
@@ -178,6 +182,12 @@ private:
 
     void buildUi();
     void populateAssets();
+    /** Rewrite the selector's item text from the registry, leaving the items,
+     *  their asset ids and the current choice exactly as they are. The names
+     *  arrive after the selector is first filled, and an asset whose label
+     *  resolved later would otherwise stay a 64-hex id for the life of the
+     *  window -- which is what it did. */
+    void relabelAssets();
     void applyDefaultAsset();
     void updateGrid(const CAmount& asset_atoms_per_kvb);
     void onCellEdited(QLineEdit* source);
