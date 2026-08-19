@@ -91,6 +91,7 @@ class SupervisedReorgResurrectionTest(BitcoinTestFramework):
         self.case_1_baseline_eviction(node, asset)
         self.case_2_disconnect_and_reconnect(node, asset)
         self.case_3_disconnect_pool(node, asset)
+        self.case_4_restart_round_trip(node)
 
     # -- 1 ----------------------------------------------------------------
 
@@ -224,6 +225,66 @@ class SupervisedReorgResurrectionTest(BitcoinTestFramework):
             "expected the pause to be the reason, got: %s" % verdict["reject-reason"]
         self.log.info("   resubmitting the same bytes is refused: %s",
                       verdict["reject-reason"])
+
+
+    # -- 4 ----------------------------------------------------------------
+
+    def case_4_restart_round_trip(self, node):
+        self.log.info("4. an evicted spend must not come back through mempool.dat")
+        # The dump side of the persisted mempool. A fixed binary cannot put a
+        # frozen entry INTO mempool.dat -- eviction at the record's connect
+        # removes it before any dump can see it -- so what is provable here is
+        # that the dump never re-exports what eviction removed. The load side,
+        # where a file written by an OLDER binary already contains one, needs a
+        # hand-crafted file and is covered separately.
+        # Several CONFIRMED policy-asset outputs first. The record is built on a
+        # raw funding outpoint from listunspent, which is confirmed-only, and
+        # the control spend below would otherwise consume the last one and leave
+        # the record with nothing to build on.
+        for _ in range(3):
+            self.spend_asset(node, self.policy_asset, Decimal("5"),
+                             node.getnewaddress())
+        self.generate(node, 1)
+        self.sync_all()
+
+        asset3 = self.issue_asset(node, pause=True)
+        self.generate(node, 1)
+        self.sync_all()
+
+        spend = self.spend_asset(node, asset3, Decimal("11"),
+                                 self.nodes[1].getnewaddress())
+        assert spend in node.getrawmempool()
+
+        self.record_tx(node, "pause", asset3, None, self.operational)
+        self.generate(node, 1)
+        self.sync_all()
+        assert spend not in node.getrawmempool(), "the pause must evict it first"
+
+        # The same discipline as case 3: a control that must SURVIVE the round
+        # trip, because "still absent after the restart" is also what you see if
+        # the mempool simply came back empty -- persistence off, dump skipped,
+        # reload failed. It is created AFTER the record block, so that the block
+        # which evicts the spend does not simply mine the control away.
+        control = self.spend_asset(node, self.policy_asset, Decimal("3"),
+                                   self.nodes[1].getnewaddress())
+        assert control in node.getrawmempool()
+        self.log.info("   evicted before the restart, control resident alongside")
+
+        self.restart_node(0)
+        self.connect_nodes(0, 1)
+
+        assert control in node.getrawmempool(), (
+            "the control did not survive the restart, so the mempool did not "
+            "round-trip at all and the assertion below proves nothing")
+        assert spend not in node.getrawmempool(), (
+            "an evicted spend came back through mempool.dat: the dump re-exported "
+            "something eviction had already removed")
+        self.log.info("   after restart: control survived, evicted spend did not return")
+
+        # And it is still refused on its merits, not merely missing.
+        verdict = node.testmempoolaccept([node.getrawtransaction(control)])[0]
+        assert_equal(verdict["allowed"], False)   # already in the mempool
+        self.log.info("   mempool.dat round-tripped without re-exporting the eviction")
 
 
 if __name__ == '__main__':
