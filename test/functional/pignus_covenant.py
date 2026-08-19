@@ -460,17 +460,38 @@ def build_default_leaf(asset_c, asset_d, debt, lender_prog, borrower_prog,
                                  lender_ver, borrower_ver))
 
 
-def build_recover_leaf(recover_after, lender_x):
-    """RECOVER: the oracle-liveness backstop. Only the lender, only long after
-    maturity, and only because a dead oracle must not freeze the collateral for
-    ever. A borrower who does not want to reach this leaf has the whole term to
-    take the oracle-free REPAY exit."""
-    assert len(lender_x) == 32
-    return CScript([recover_after, OP_CHECKLOCKTIMEVERIFY, OP_DROP, lender_x, OP_CHECKSIG])
+def build_recover_leaf(recover_after, asset_c, lender_prog, lender_ver=1):
+    """RECOVER: the oracle-liveness backstop, and the last signature-free exit.
+
+    After `recover_after` anyone may sweep the vault, but ONLY to the lender's
+    pinned payout. Pinning the destination instead of demanding the lender's
+    signature buys two things that matter more than the signature ever did:
+
+    * the lender needs no key beyond the address they are paid at, so a browser
+      wallet -- which can sign its own inputs but not a covenant leaf -- can
+      still originate loans whose backstop actually works. A backstop nobody can
+      exercise is not a backstop;
+    * the lender need not be online, which is the same reason REPAY is
+      permissionless.
+
+    Letting anyone trigger it is safe because it can only ever pay the lender,
+    and it is a race the borrower can always win by taking the oracle-free
+    REPAY exit, which stays open right up until this one is executed.
+    """
+    _check_prog(lender_prog, lender_ver)
+    s = [recover_after, OP_CHECKLOCKTIMEVERIFY, OP_DROP]
+    s += [OP_PUSHCURRENTINPUTINDEX, OP_INSPECTINPUTVALUE, OP_1, OP_EQUALVERIFY]
+    s += _CREDIT_IDX + [OP_INSPECTOUTPUTASSET, OP_1, OP_EQUALVERIFY,
+                        asset_c, OP_EQUALVERIFY]
+    s += _CREDIT_IDX + [OP_INSPECTOUTPUTSCRIPTPUBKEY, _ver_op(lender_ver),
+                        OP_EQUALVERIFY, lender_prog, OP_EQUALVERIFY]
+    s += _CREDIT_IDX + [OP_INSPECTOUTPUTVALUE, OP_1, OP_EQUALVERIFY]
+    s += [OP_SWAP, OP_GREATERTHANOREQUAL64]     # swept >= locked
+    return CScript(s)
 
 
 def vault_taptree(*, asset_c, asset_d, debt, lender_prog, borrower_prog,
-                  lender_x, feed_id, strike, maturity, recover_after,
+                  feed_id, strike, maturity, recover_after,
                   not_before, oracle_x=None, oracles=None, oracle_threshold=None,
                   bonus_num=105, bonus_den=100,
                   price_scale=PRICE_SCALE, max_price=None,
@@ -494,7 +515,8 @@ def vault_taptree(*, asset_c, asset_d, debt, lender_prog, borrower_prog,
                                  bonus_num, bonus_den, price_scale, max_price,
                                  oracles, oracle_threshold,
                                  lender_ver, borrower_ver)
-    recover = build_recover_leaf(recover_after, lender_x)
+    recover = build_recover_leaf(recover_after, asset_c, lender_prog,
+                                 lender_ver)
     tap = taproot_construct(internal_key, [
         ("repay", repay), ("liquidate", liquidate),
         ("default", default), ("recover", recover),
@@ -561,6 +583,7 @@ def threshold_oracle_witness(tap, leaves, leaf_name, slots):
     return w + [bytes(leaves[leaf_name]), control_block(tap, leaf_name)]
 
 
-def recover_witness(tap, leaves, sig_lender):
-    """RECOVER spends with the lender's schnorr signature over the leaf."""
-    return [sig_lender, bytes(leaves["recover"]), control_block(tap, "recover")]
+def recover_witness(tap, leaves):
+    """RECOVER needs no signature: like REPAY, it reads everything it enforces
+    from the transaction."""
+    return [bytes(leaves["recover"]), control_block(tap, "recover")]
