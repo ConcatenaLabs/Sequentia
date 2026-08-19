@@ -475,6 +475,13 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
         v->addWidget(m_pool_commitment);
 
         QFormLayout* form = new QFormLayout();
+        m_payout_signer = new QComboBox(op);
+        m_payout_signer->setToolTip(tr("A payout policy binds ONE block-producing key. This wallet stakes with "
+                                       "more than one, so choose which."));
+        m_payout_signer_label = new QLabel(tr("Signer:"), op);
+        form->addRow(m_payout_signer_label, m_payout_signer);
+        m_payout_signer->setVisible(false);
+        m_payout_signer_label->setVisible(false);
         m_payout_mode = new QComboBox(op);
         m_payout_mode->addItem(tr("Lottery: each block pays one delegator, drawn by stake weight"), QStringLiteral("lottery"));
         m_payout_mode->addItem(tr("Direct: every block pays one committed address"), QStringLiteral("direct"));
@@ -1649,12 +1656,14 @@ void StakingPage::refreshPoolOperator()
 
     QString status, commitment;
     bool any_mine = false;
+    QStringList mine_keys;
     const UniValue& arr = pools["pools"];
     for (size_t i = 0; i < arr.size(); ++i) {
         const UniValue& p = arr[i];
         const std::string signer = p["signer"].getValStr();
         if (!m_my_pubkeys.count(signer)) continue;
         any_mine = true;
+        mine_keys << QString::fromStdString(signer);
         const QString key = QString::fromStdString(signer);
         const double weight = (double)p["weight"].get_int64() / 100000000.0;
         const double lent = (double)p["delegated_weight"].get_int64() / 100000000.0;
@@ -1704,6 +1713,19 @@ void StakingPage::refreshPoolOperator()
     }
     m_pool_status->setText(status.trimmed());
     m_pool_commitment->setText(commitment.trimmed());
+
+    // With one key the RPC picks it and the row is noise; with several it cannot
+    // guess, and without the row the card would refuse every announcement.
+    if (m_payout_signer) {
+        const QString kept = m_payout_signer->currentText();
+        m_payout_signer->clear();
+        m_payout_signer->addItems(mine_keys);
+        const int at = m_payout_signer->findText(kept);
+        if (at >= 0) m_payout_signer->setCurrentIndex(at);
+        const bool many = mine_keys.size() > 1;
+        m_payout_signer->setVisible(many);
+        m_payout_signer_label->setVisible(many);
+    }
     if (m_payout_button) m_payout_button->setEnabled(any_mine);
     onPayoutModeChanged();
 }
@@ -1756,7 +1778,11 @@ void StakingPage::onAnnouncePayout()
 
     UniValue params(UniValue::VARR);
     params.push_back(mode.toStdString());
-    params.push_back(UniValue(UniValue::VNULL));   // signer: this wallet's staker key
+    // Empty means "this wallet's staker key", which the RPC resolves when there
+    // is exactly one; the selector is only populated when there is more.
+    const QString chosen = (m_payout_signer && m_payout_signer->isVisible())
+                               ? m_payout_signer->currentText().trimmed() : QString();
+    params.push_back(chosen.isEmpty() ? UniValue(UniValue::VNULL) : UniValue(chosen.toStdString()));
     params.push_back(UniValue(UniValue::VNULL));   // activation: default, past the notice period
     if (lottery) {
         params.push_back(UniValue(UniValue::VNULL));            // address: not used
