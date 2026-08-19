@@ -97,12 +97,18 @@ nobody advertises: a pool holding a tenth of the weight should produce about a t
 of the blocks, and well under that means its delegators are earning nothing for what
 they lent.
 
-The desktop wallet's Staking tab gains both sides. A **Staking pool** card picks a
-pool from the live listing, delegates, reclaims, and shows any pending policy change
-as a banner. A **Run a staking pool** card announces a payout policy; that one is
-node-only on purpose, because running a pool means being online with the signing key
-on the machine that produces the blocks, which a browser or phone wallet cannot
-promise.
+The desktop wallet's Staking tab gains both sides, and neither needs the command
+line. A **Staking pool** card picks a pool from the live listing, delegates,
+reclaims, and shows any pending policy change as a banner. A **Run a staking pool**
+card announces a payout policy, offering the usual arrangements to choose from
+(share everything; share keeping 2%, 5% or 10%; or pay one committed address) and
+spelling out what each one means for the people delegating before anything is
+signed. That second card is node-only on purpose, because running a pool means
+being online with the signing key on the machine that produces the blocks, which a
+browser or phone wallet cannot promise.
+
+Delegating is in every wallet: desktop, web, Ambra on Android and Ambra for
+Chromium.
 
 `listpools` is also a published contract: it feeds the public pool board at
 [sequentiatestnet.com/pools/](https://sequentiatestnet.com/pools/), whose source is
