@@ -18,6 +18,7 @@ class WalletModel;
 class PlatformStyle;
 
 QT_BEGIN_NAMESPACE
+class QComboBox;
 class QTableWidget;
 class QLineEdit;
 class QLabel;
@@ -89,6 +90,17 @@ private Q_SLOTS:
     void onUnstakeBump();
     void onEnableProduction();
     void onRefreshClicked();
+    //! Lend this wallet's stake weight to the signer named in the field, or
+    //! take it back. Neither moves the staked coins.
+    void onDelegate();
+    void onUndelegate();
+    //! Copy the selected pool's signer key into the field, so delegating is a
+    //! click on a row rather than a paste of a 66-character key.
+    void onPoolPicked();
+    //! Operator side: commit on-chain to how this node's blocks pay out.
+    //! Running a pool is a node operation and lives only here.
+    void onAnnouncePayout();
+    void onPayoutModeChanged();
 
 private:
     WalletModel* m_wallet_model{nullptr};
@@ -117,6 +129,34 @@ private:
     //! why the button is greyed out (a disabled widget gets no tooltip events).
     QWidget* m_unstake_button_holder{nullptr};
     QLabel* m_unstake_result{nullptr};
+
+    // --- "Staking pool" card: delegate to a pool, or watch the one you are in ---
+    //! The delegator's watch. A pool must announce a payout-policy change a
+    //! notice period before it binds -- which only protects a delegator who
+    //! SEES the notice, so anything pending is shouted here rather than filed
+    //! in a table.
+    QLabel* m_deleg_alerts{nullptr};
+    QLabel* m_deleg_status{nullptr};
+    QTableWidget* m_pools{nullptr};
+    QLineEdit* m_deleg_signer{nullptr};
+    QPushButton* m_deleg_button{nullptr};
+    QPushButton* m_undeleg_button{nullptr};
+    QLabel* m_deleg_result{nullptr};
+
+    // --- "Run a staking pool" card: the OPERATOR console ---
+    //! Deliberately node-only. Announcing a payout policy binds every block this
+    //! key produces, needs the signer's own key, and is audited by strangers, so
+    //! it belongs with the machine that produces the blocks rather than in a
+    //! phone or browser wallet that cannot even be online when a block is due.
+    QLabel* m_pool_status{nullptr};
+    QLabel* m_pool_commitment{nullptr};
+    QComboBox* m_payout_mode{nullptr};
+    QLineEdit* m_payout_commission{nullptr};
+    QLineEdit* m_payout_address{nullptr};
+    QLabel* m_payout_commission_label{nullptr};
+    QLabel* m_payout_address_label{nullptr};
+    QPushButton* m_payout_button{nullptr};
+    QLabel* m_payout_result{nullptr};
 
     // --- "Your stake" card ---
     QLabel* m_my_stake{nullptr};
@@ -159,6 +199,13 @@ private:
     //! Pass an already-fetched list to render exactly those numbers, so an
     //! action and the summary above it can never quote two different totals.
     void refreshUnstakeInfo(const UniValue* prefetched = nullptr);
+    //! Refresh the "Staking pool" card: where this wallet's weight is signing,
+    //! what that pool has committed to, what it has announced but not yet bound
+    //! (listdelegations), and the board of pools to choose from (listpools).
+    void refreshDelegation();
+    //! Refresh the "Run a staking pool" card: what this node's signer commands,
+    //! who lent it, how reliably it produces, and what it has committed to.
+    void refreshPoolOperator();
 
     //! Run an RPC (wallet=true uses the /wallet/<name> endpoint; false the node endpoint).
     UniValue callRpc(const std::string& method, const UniValue& params, bool& ok, QString& error, bool wallet = true);
