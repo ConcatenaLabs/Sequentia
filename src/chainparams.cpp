@@ -1226,7 +1226,17 @@ public:
         // Same discipline as the budget flag above: the height is a promise to
         // every operator, so it is set with runway for a full committee cutover,
         // and it is bound to this chain's genesis hash so a re-genesis drops it.
-        consensus.split_payout_height = 106500;
+        //
+        // 102,150 is a day past the tip (100,700 at 2026-08-20T00:45Z),
+        // re-derived at merge per the recipe above the budget flag. It was
+        // 106,500 in 24.4.0 -- about four days -- chosen without asking the
+        // operators how much runway they wanted; they wanted one. How long the
+        // runway is belongs to the people who must act inside it, so a flag
+        // day is agreed with them BEFORE it is set, not defaulted generously.
+        // Moving it is safe exactly because nothing binds below the flag: a
+        // split record is inert on every node until the height, so the only
+        // requirement is that every node upgrades before the NEW height.
+        consensus.split_payout_height = 102150;
         consensus.split_payout_chain_genesis = expected_genesis;
         g_split_payout_height = consensus.split_payout_height;
 
