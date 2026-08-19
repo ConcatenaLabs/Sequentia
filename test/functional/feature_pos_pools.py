@@ -90,6 +90,27 @@ class PosPoolsTest(BitcoinTestFramework):
                 return p
         return None
 
+    def check_script_vector(self, node):
+        """A pinned cross-implementation vector for the delegation record.
+
+        The wallet kit (SWK) builds this same script in Rust, because a light
+        wallet has to be able to SPEND a record to leave a pool and a bare script
+        matches no descriptor. Two independent implementations of one consensus
+        script is exactly where a silent divergence hides: a wrong push order
+        would still look like a valid script, still relay, and simply credit the
+        weight to the wrong key. The identical vector is asserted in
+        lwk_wollet/src/sequentia_delegation.rs, so neither side can drift alone."""
+        controller = "02989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f"
+        signer = "03f991f944d1e1954a7fc8b9bf62e0d78f015f4c07762d505e20e6c45260a3661b"
+        expected = ("06" + b"SEQDEL".hex() + "75"
+                    + "21" + signer + "75"
+                    + "21" + controller + "ac")
+        assert_equal(node.getdelegationscript(controller, signer)["script"], expected)
+        # The signer is pushed FIRST and the controller LAST, because the
+        # controller is the key the final OP_CHECKSIG tests and therefore the
+        # only key that can ever spend the record.
+        assert_equal(len(expected) // 2, 78)
+
     def check_board_contract(self, node, expect_signer):
         """listpools is a published contract, not just an RPC: the staking pool
         board (github.com/GracedEternalKingCabbageMan/sequentia-pool-board) is a
@@ -121,6 +142,9 @@ class PosPoolsTest(BitcoinTestFramework):
         n0 = self.nodes[0]
         w0 = n0.get_wallet_rpc(self.default_wallet_name)
         self.mine(1)
+
+        self.log.info("The delegation-record script matches the vector SWK builds in Rust")
+        self.check_script_vector(n0)
 
         self.log.info("A staker with no delegation signs for itself")
         addr = w0.getnewaddress()
@@ -194,6 +218,40 @@ class PosPoolsTest(BitcoinTestFramework):
         self.log.info("Delegating to the same signer twice, or to yourself, is refused")
         assert_raises_rpc_error(-8, "already delegates to signer", w0.delegatestake, pool1)
         assert_raises_rpc_error(-8, "delegating to the controller itself", w0.delegatestake, ctrl)
+
+        self.log.info("A record must be able to pay its own way, in and out")
+        # A delegation record pays the fee to spend itself out of its own value,
+        # so a record funded below (dust + that fee) could be created, would
+        # delegate correctly, and could then never be reclaimed: the coins in it
+        # would be stranded. The gap is not a rounding concern here, since dust
+        # is tens of atoms and the spend fee is thousands. Refused at creation.
+        # Use a SECOND staking key: the first already delegates, so delegating
+        # again would take the re-point path instead.
+        from decimal import Decimal as _D
+        addr2 = w0.getnewaddress()
+        ctrl2 = w0.getaddressinfo(addr2)["pubkey"]
+        err = None
+        try:
+            w0.delegatestake(pool2, ctrl2, _D("0.00000001"))
+        except Exception as e:
+            err = str(e)
+        assert err is not None and "never" in err and "reclaimed" in err, err
+
+        # The refusal names the floor, and a record funded AT it is reclaimable,
+        # which is the whole point of setting the floor there.
+        floor = _D(err.split("below the ")[1].split(" SEQ")[0])
+        w0.delegatestake(pool2, ctrl2, floor)
+        self.mine(1)
+        assert_equal(n0.getdelegationinfo()[ctrl2], pool2)
+        w0.undelegatestake(ctrl2)
+        self.mine(1)
+        assert ctrl2 not in n0.getdelegationinfo()
+
+        # Re-pointing is funded by the record it replaces, so an amount here has
+        # nothing to act on. Refused rather than silently ignored, which would
+        # let someone believe they had topped the record up.
+        assert_raises_rpc_error(-8, "amount cannot be set when re-pointing",
+                                w0.delegatestake, pool2, ctrl, _D("0.001"))
 
         self.log.info("announcepayout: an operator commits, and cannot dodge the notice period")
         tip = n0.getblockcount()

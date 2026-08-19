@@ -1089,15 +1089,34 @@ std::vector<DelegationUtxo> FindWalletDelegationUtxos(CWallet& wallet, const std
 //! ever holding two records for one controller). So the default is the dust
 //! floor plus room for ten rotations, and the record shrinks by a fee each time
 //! it is re-pointed.
-CAmount DefaultDelegationRecordAmount(const CWallet& wallet, const CScript& record)
+//! The network fee for spending a delegation record: one bare input, one output
+//! and the explicit fee output, about 250 vB once the worst-case signature is
+//! counted. Every reclaim and every re-pointing pays this out of the record.
+CAmount DelegationSpendFee(const CWallet& wallet)
+{
+    CCoinControl coin_control;
+    return GetMinimumFeeRate(wallet, coin_control, nullptr).GetFee(250);
+}
+
+//! The least a delegation record may hold and still be RECLAIMABLE: the dust
+//! floor for its output, plus the fee to spend it.
+//!
+//! The dust floor alone is not enough, and on this chain is not even close: dust
+//! is tens of atoms while the spend fee is thousands. A record funded between
+//! the two would relay, delegate correctly, and then be impossible to reclaim,
+//! because it could not pay for its own spend. That is a trap, so it is refused
+//! at the point of creation rather than discovered later.
+CAmount MinDelegationRecordAmount(const CWallet& wallet, const CScript& record)
 {
     const CAsset& asset = Params().GetConsensus().pegged_asset;
-    const CAmount dust = GetDustThreshold(CTxOut(asset, 1, record), ::dustRelayFee);
-    CCoinControl coin_control;
-    // A rotation is one bare input, one record output and the fee output: about
-    // 250 vB once the worst-case signature is counted.
-    const CAmount rotation_fee = GetMinimumFeeRate(wallet, coin_control, nullptr).GetFee(250);
-    return dust + 10 * rotation_fee;
+    return GetDustThreshold(CTxOut(asset, 1, record), ::dustRelayFee) + DelegationSpendFee(wallet);
+}
+
+//! The value to put in a record by default: enough to be reclaimed, plus room
+//! for ten re-pointings, since each takes its fee out of the record.
+CAmount DefaultDelegationRecordAmount(const CWallet& wallet, const CScript& record)
+{
+    return MinDelegationRecordAmount(wallet, record) + 10 * DelegationSpendFee(wallet);
 }
 
 //! Spend delegation records back to `dest_script`, signing each with its
@@ -1144,15 +1163,23 @@ CTransactionRef SpendDelegationRecords(CWallet& wallet, const std::vector<Delega
             FormatMoney(total), FormatMoney(fee)));
     }
     const CAmount out_value = total - fee;
-    // A rotation writes the remainder back into a record, so it has to clear the
-    // dust floor or the transaction will not relay.
-    if (rotate_to) {
-        const CAmount dust = GetDustThreshold(CTxOut(asset, out_value, *rotate_to), ::dustRelayFee);
+    // Whatever the remainder becomes -- the new record when re-pointing, the
+    // coins coming home when reclaiming -- it has to clear the dust floor for
+    // that script, or the transaction simply will not relay. This is reachable:
+    // a record funded with exactly the dust minimum has nothing left over after
+    // one fee.
+    {
+        const CScript& out_script = rotate_to ? *rotate_to : dest_script;
+        const CAmount dust = GetDustThreshold(CTxOut(asset, out_value, out_script), ::dustRelayFee);
         if (out_value < dust) {
-            throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
-                "re-pointing this delegation would leave %s SEQ in the record, below the %s SEQ the network "
-                "requires; reclaim it with undelegatestake and delegate again with a larger amount",
-                FormatMoney(out_value), FormatMoney(dust)));
+            throw JSONRPCError(RPC_WALLET_ERROR, rotate_to
+                ? strprintf("re-pointing this delegation would leave %s SEQ in the record, below the %s SEQ the "
+                            "network requires; reclaim it with undelegatestake and delegate again with a larger amount",
+                            FormatMoney(out_value), FormatMoney(dust))
+                : strprintf("reclaiming this delegation would return %s SEQ, below the %s SEQ the network will "
+                            "relay; the record cannot pay its own fee and leave a spendable amount. The delegation "
+                            "itself is unaffected, and the stake was never at risk",
+                            FormatMoney(out_value), FormatMoney(dust)));
         }
     }
     mtx.vout.front().nValue = out_value;
@@ -1351,6 +1378,17 @@ RPCHelpMan delegatestake()
     if (live_record) {
         // 3a) Re-point: spend the old record and create the new one in one
         //     transaction. The fee comes out of the record's own value.
+        //
+        //     Which means `amount` has nothing to act on here. Silently ignoring
+        //     it would let someone believe they had topped the record up, so
+        //     refuse instead and say where the value actually comes from.
+        if (!request.params[2].isNull()) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
+                "amount cannot be set when re-pointing an existing delegation: the new record is funded by the "
+                "old one, less the network fee. Controller %s currently holds %s SEQ in its record. To change "
+                "that, reclaim it with undelegatestake and delegate again.",
+                HexStr(controller), FormatMoney(live_record->amount)));
+        }
         const CPubKey previous = live_record->signer;
         const std::vector<DelegationUtxo> spend_these{*live_record};
         CAmount fee = 0, new_value = 0;
@@ -1370,11 +1408,17 @@ RPCHelpMan delegatestake()
         if (!request.params[2].isNull()) {
             amount = AmountFromValue(request.params[2], true);
             if (amount <= 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "amount must be positive");
-            const CAmount dust = GetDustThreshold(CTxOut(asset, amount, record_script), ::dustRelayFee);
-            if (amount < dust) {
+            // Not merely the dust floor: a record has to be able to pay the fee
+            // to spend itself, or it can never be reclaimed and the coins in it
+            // are stranded. On this chain dust is tens of atoms and that fee is
+            // thousands, so the gap between the two is a real trap rather than a
+            // rounding concern.
+            const CAmount floor = MinDelegationRecordAmount(*pwallet, record_script);
+            if (amount < floor) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
-                    "amount is below the %s SEQ dust floor for a delegation record; the network would not relay it",
-                    FormatMoney(dust)));
+                    "amount is below the %s SEQ a delegation record needs: enough to clear the network's dust "
+                    "floor AND to pay the fee to spend itself later. A smaller record could be created but never "
+                    "reclaimed, stranding the coins in it.", FormatMoney(floor)));
             }
         } else {
             amount = DefaultDelegationRecordAmount(*pwallet, record_script);
@@ -1392,8 +1436,12 @@ RPCHelpMan delegatestake()
     result.pushKV("signer", HexStr(signer));
     result.pushKV("delegated_weight", weight);
     if (weight == 0) {
-        note = "this controller has no registered stake, so the record lends nothing yet; it will lend whatever "
-               "is staked to this key from the moment it is registered";
+        // Both notes can apply at once (re-pointing a key whose stake has since
+        // been withdrawn), and the one about lending nothing is the one the
+        // caller most needs, so add rather than replace.
+        if (!note.empty()) note += ". Also: ";
+        note += "this controller has no registered stake, so the record lends nothing yet; it will lend whatever "
+                "is staked to this key from the moment it is registered";
     }
     if (!note.empty()) result.pushKV("note", note);
     return result;
