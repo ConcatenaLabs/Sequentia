@@ -621,23 +621,34 @@ so a pool's honesty about the *reward* is the only thing at stake. An operator
 commits to a payout policy on-chain, and a delegator checks it.
 
 Operators do this from the desktop wallet's Staking tab, under **Run a staking
-pool**, which offers the usual arrangements (share everything; share keeping 2%,
-5% or 10%; or pay one committed address) and spells out what each means for the
-people delegating before anything is signed. Running headless:
+pool**, which offers the usual arrangements (share everything; share keeping 5%
+or a custom cut; a lottery; pay one committed address; or a fully custom script)
+and spells out what each means for the people delegating before anything is
+signed. Running headless:
 
 ```
-sequentia-cli announcepayout lottery null null null 500   # operator: 5% commission
+sequentia-cli announcepayout split null null null 500     # operator: proportional shares, 5% commission
 sequentia-cli listdelegations                             # delegator: where my weight is, and what is coming
 ```
 
-- **direct** - every coinbase must pay a committed script. This stops a silent
-  redirect; it does **not** make the chain check that the destination shares
-  anything with delegators. Trust-minimised, not trustless.
+- **split** - the pool's rewards accumulate in an on-chain pot, and anyone may
+  broadcast the claim that distributes it: each delegator paid exactly its
+  proportional share of every pot output it was eligible for, at its own
+  controller key. The claim is fully determined by the UTXO set, so no payout
+  depends on the operator staying interested. `commission_bp` is a bp/10000
+  chance that a block pays the operator instead of the pot. One sharp edge:
+  leaving the pool forfeits unclaimed accruals — run `claimpoolrewards` before
+  you leave. Full mechanism: `split-payouts-design.md`.
 - **lottery** - every coinbase must pay ONE delegator, drawn weighted by stake
   from a seed derived from Bitcoin's proof of work, so the draw cannot be
   biased. Each delegator earns its exact proportional share over time with no
   accounting at all, at the cost of rare lumpy payouts rather than smoothed
   income. `commission_bp` is the share of blocks the operator keeps.
+- **direct** - every coinbase must pay a committed script. This stops a silent
+  redirect; it does **not** make the chain check that the destination shares
+  anything with delegators. Trust-minimised, not trustless. Committing a script
+  of your own construction (the desktop wallet's "custom" preset) is this mode
+  with your script in place of an address.
 - **neither** - a producer that has announced nothing keeps everything it earns.
   That is the default, not an abuse, and every listing says so plainly.
 
@@ -719,7 +730,8 @@ Two complementary layers (see [`04-proof-of-stake.md`](04-proof-of-stake.md)):
 | `getanchorstatus` | current Bitcoin anchor and parent-connection health (`not_validated` at height 0 is normal) |
 | `getposschedule` | next slot's seed, leader schedule, committee, and quorum |
 | `getstakerinfo` | the active stake registry |
-| `listpools` | the declared pools: weight commanded, who lent it, what each has committed to paying, announced changes still inside their notice window, and blocks produced against blocks owed. `include_undeclared` adds the stakers producing for themselves |
+| `listpools` | the declared pools: weight commanded, who lent it, what each has committed to paying, the accrued pot of a `split` pool, announced changes still inside their notice window, and blocks produced against blocks owed. `include_undeclared` adds the stakers producing for themselves |
+| `claimpoolrewards` | builds and broadcasts the claim that distributes a `split` pool's pot; anyone may run it, and the claimer keeps the bounded margin |
 | `listdelegations` | where this wallet's stake signs, and any payout change a pool has announced against it but not yet bound (the delegator's watch) |
 | `getdelegationinfo` / `getpayoutinfo` | the raw controller -> signer map, and every payout policy committed on-chain |
 | `getcheckpointinfo` | checkpoints, finality height, conflict alarm, configured pins |
