@@ -365,6 +365,34 @@ class PosPoolsTest(BitcoinTestFramework):
 
         assert_raises_rpc_error(-4, "not delegating any stake", w0.undelegatestake)
 
+        self.log.info("A pool can commit to a raw script, not only an address")
+        # The genuinely custom arrangement: consensus compares the coinbase
+        # output against the committed BYTES and asks nothing else of them, so
+        # anything expressible as a script is a valid commitment -- a multisig, a
+        # covenant, a contract that splits the reward. An address cannot say any
+        # of that, and it is the only degree of freedom a payout record has that
+        # the ordinary choices do not reach.
+        raw = "51"  # OP_TRUE: shortest script that is not any address
+        ann2 = pw.announcepayout("direct", pool2, None, None, None, None, raw)
+        assert_equal(ann2["payout_script"], raw)
+        assert "address" not in ann2, "OP_TRUE is no address, so none should be claimed"
+        self.mine(1)
+        # It reaches the board exactly as committed.
+        entry = self.pool_entry(n0, pool2)
+        assert_equal(entry["policy_pending"][0]["payout_script"], raw)
+        assert_equal(entry["declared"], True)
+
+        # An address and a raw script commit to different bytes, so both at once
+        # is refused rather than silently preferring one.
+        assert_raises_rpc_error(-8, "not both", pw.announcepayout,
+                                "direct", pool2, None, pw.getnewaddress(), None, None, raw)
+        # And a lottery has no script to commit to.
+        assert_raises_rpc_error(-8, "payout_script applies to direct mode only",
+                                pw.announcepayout, "lottery", pool2, None, None, 500, None, raw)
+        # Bounds are enforced: consensus caps the committed script at 110 bytes.
+        assert_raises_rpc_error(-8, "payout_script must be 1..110 bytes",
+                                pw.announcepayout, "direct", pool2, None, None, None, None, "ab" * 111)
+
         self.log.info("The board survives a restart: it is a pure function of the UTXO set")
         w0.delegatestake(pool1)
         self.mine(1)

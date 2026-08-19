@@ -1622,7 +1622,8 @@ RPCHelpMan announcepayout()
                 "produces will pay out. This funds a payout record (see getpayoutscript) that binds the signer\n"
                 "from `activation` onward, and which anyone can read with listpools or getpayoutinfo.\n"
                 "\nMODES:\n"
-                "  direct  - every block's coinbase must pay a committed address. This stops the operator\n"
+                "  direct  - every block's coinbase must pay a committed script: an address, or raw bytes via\n"
+                "            `payout_script` when the arrangement is something an address cannot express. This stops the operator\n"
                 "            redirecting the reward silently; it does NOT make the chain check that the address\n"
                 "            shares anything with delegators. Trust-minimised, not trustless.\n"
                 "  lottery - every block's coinbase must pay ONE delegator, drawn by stake weight from a seed\n"
@@ -1643,6 +1644,7 @@ RPCHelpMan announcepayout()
                     {"address", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "direct mode: the address every coinbase must pay (default: a fresh address of this wallet)."},
                     {"commission_bp", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "lottery mode: basis points of blocks the operator keeps (0..10000, default 0). At 0 the operator still earns on its own stake, as one participant among the rest."},
                     {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "SEQ to put in the payout record (default: just over the dust floor). Recoverable by spending the record with the signer key."},
+                    {"payout_script", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "direct mode: the exact scriptPubKey every coinbase must pay (hex, 1..110 bytes), instead of `address`. For committing to something an address cannot express -- a multisig, a covenant, a contract that splits the reward. The chain compares the coinbase output against these bytes and nothing else, so it is on you that they are spendable by whoever should receive them."},
                 },
                 RPCResult{RPCResult::Type::OBJ, "", "", {
                     {RPCResult::Type::STR_HEX, "txid", "the announcement transaction id"},
@@ -1651,7 +1653,8 @@ RPCHelpMan announcepayout()
                     {RPCResult::Type::NUM, "activation", "height from which it binds"},
                     {RPCResult::Type::NUM, "notice_blocks", "the chain's minimum notice period, in blocks"},
                     {RPCResult::Type::NUM, "earliest_activation", "the lowest activation this announcement could have used, if it confirms in the next block"},
-                    {RPCResult::Type::STR, "address", /*optional=*/true, "direct: the committed payee"},
+                    {RPCResult::Type::STR, "address", /*optional=*/true, "direct: the committed payee, when the script corresponds to an address"},
+                    {RPCResult::Type::STR_HEX, "payout_script", /*optional=*/true, "direct: the exact bytes every coinbase must pay"},
                     {RPCResult::Type::NUM, "commission_bp", /*optional=*/true, "lottery: the operator's basis points"},
                     {RPCResult::Type::STR_HEX, "script", "the payout-record scriptPubKey that was funded"},
                     {RPCResult::Type::STR, "note", "what delegators will see, and when"},
@@ -1726,29 +1729,55 @@ RPCHelpMan announcepayout()
 
     std::string address_str;
     if (mode == "direct") {
-        CTxDestination dest;
-        if (!request.params[3].isNull()) {
-            dest = DecodeDestination(request.params[3].get_str());
-            if (!IsValidDestination(dest)) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid address");
-        } else {
-            bilingual_str dest_error;
-            if (!pwallet->GetNewDestination(pwallet->m_default_address_type, "", dest, dest_error)) {
-                throw JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT, dest_error.original);
-            }
-        }
-        // The coinbase output the chain will compare against is explicit, so
-        // commit to the unconfidential form of the address.
-        std::visit(SetBlindingPubKeyVisitor(CPubKey()), dest);
         policy.mode = PosPayoutMode::DIRECT;
-        policy.script = GetScriptForDestination(dest);
-        address_str = EncodeDestination(dest);
-        if (policy.script.empty() || policy.script.size() > 110) {
-            throw JSONRPCError(RPC_INVALID_PARAMETER, "the committed script must be 1..110 bytes");
+        const bool has_script = !request.params[6].isNull();
+        if (has_script && !request.params[3].isNull()) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                "give either address or payout_script, not both: they would commit to different bytes");
+        }
+        if (has_script) {
+            // The raw form. Consensus compares the coinbase output against these
+            // bytes and asks nothing else of them, so anything expressible as a
+            // scriptPubKey is a valid commitment -- a multisig, a covenant, a
+            // contract that splits the reward among several parties. It is
+            // equally on the operator that they are spendable at all: a script
+            // nobody can satisfy burns every reward this key ever earns, and the
+            // chain will enforce that just as faithfully.
+            const std::vector<unsigned char> raw = ParseHexV(request.params[6], "payout_script");
+            if (raw.empty() || raw.size() > 110) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "payout_script must be 1..110 bytes");
+            }
+            policy.script = CScript(raw.begin(), raw.end());
+            CTxDestination parsed;
+            if (ExtractDestination(policy.script, parsed)) address_str = EncodeDestination(parsed);
+        } else {
+            CTxDestination dest;
+            if (!request.params[3].isNull()) {
+                dest = DecodeDestination(request.params[3].get_str());
+                if (!IsValidDestination(dest)) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid address");
+            } else {
+                bilingual_str dest_error;
+                if (!pwallet->GetNewDestination(pwallet->m_default_address_type, "", dest, dest_error)) {
+                    throw JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT, dest_error.original);
+                }
+            }
+            // The coinbase output the chain will compare against is explicit, so
+            // commit to the unconfidential form of the address.
+            std::visit(SetBlindingPubKeyVisitor(CPubKey()), dest);
+            policy.script = GetScriptForDestination(dest);
+            address_str = EncodeDestination(dest);
+            if (policy.script.empty() || policy.script.size() > 110) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "the committed script must be 1..110 bytes");
+            }
         }
         if (!request.params[4].isNull()) {
             throw JSONRPCError(RPC_INVALID_PARAMETER, "commission_bp applies to lottery mode only");
         }
     } else {
+        if (!request.params[6].isNull()) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                "payout_script applies to direct mode only; a lottery pays whichever delegator the draw picks");
+        }
         if (!request.params[3].isNull()) {
             throw JSONRPCError(RPC_INVALID_PARAMETER,
                 "address applies to direct mode only; a lottery pays whichever delegator the draw picks");
@@ -1799,7 +1828,12 @@ RPCHelpMan announcepayout()
     result.pushKV("activation", policy.activation);
     result.pushKV("notice_blocks", (int64_t)g_pos_payout_notice);
     result.pushKV("earliest_activation", earliest);
-    if (mode == "direct") result.pushKV("address", address_str);
+    if (mode == "direct") {
+        // A raw script need not correspond to any address, so report the bytes
+        // always and the address only when one exists.
+        result.pushKV("payout_script", HexStr(policy.script));
+        if (!address_str.empty()) result.pushKV("address", address_str);
+    }
     else result.pushKV("commission_bp", (int64_t)policy.commission_bp);
     result.pushKV("script", HexStr(record_script));
     result.pushKV("note", strprintf(
