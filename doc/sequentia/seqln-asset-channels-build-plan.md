@@ -1,10 +1,10 @@
 # SeqLN asset-aware channels — code-grounded build plan
 
-The DESIGN is settled in `seqln-core-lightning-fork-spec.md` §4–5 and `seqdex-lightning-feasibility.md`
+The DESIGN is settled in `seqln-core-lightning-fork-spec.md` §4–5 and `seqdex/docs/seqdex-lightning-feasibility.md`
 (Analysis A / Phase 2). This doc is the executable BUILD ORDER grounded in the SeqLN (CLN fork) code, with a
 regression-safe milestone sequence. Goal: a Lightning channel that holds an **issued Sequentia asset** (GOLD),
 not just the policy asset (tSEQ), so the DEX can do **pure-LN asset↔BTC-LN swaps** (the instant, trustless
-endgame — see `seqln-dex-instant-swap-latency.md`).
+endgame — see `seqdex/docs/seqln-dex-instant-swap-latency.md`).
 
 ## What's already done vs the gap
 

@@ -4,8 +4,8 @@ Phase 1 shipped policy-asset channels (live open/route/mutual-close). Phase 2 is
 SeqLN deliverable, and per the fork spec it can ship before asset channels (Phase 3) because it needs no
 asset-aware Lightning and no consensus/BOLT change.
 
-Grounding: `seqln-core-lightning-fork-spec.md` §8, `seqdex-lightning-feasibility.md` §5 (Analysis D — the
-full submarine-swap safety analysis), and the SeqDEX order-book design (`seqdex-orderbook-design.md`), whose
+Grounding: `seqln-core-lightning-fork-spec.md` §8, `seqdex/docs/seqdex-lightning-feasibility.md` §5 (Analysis D — the
+full submarine-swap safety analysis), and the SeqDEX order-book design (`seqdex/docs/seqdex-orderbook-design.md`), whose
 `CrossChainTerms` (=21) + `pkg/xchain` orchestrator already do the on-chain BTC↔asset version. Phase 2 is
 that construction with the **BTC leg moved onto Lightning**.
 

@@ -160,11 +160,6 @@ BASE_SCRIPTS = [
     'feature_taphash_pegins_issuances.py',
     'feature_tapscript_opcodes.py',
     'feature_openamp_m0.py',
-    'feature_seqob_covenant_fill.py',
-    'feature_seqob_matcher_covenant.py',
-    'feature_seqob_joint_covenant.py',
-    'feature_seqob_watcher.py',
-    'feature_seqob_bridge.py',
     'feature_pignus_vault.py',
     'feature_pignus_platform.py',
     # vv Tests less than 60s vv

@@ -4,8 +4,8 @@ STATUS: design/scoping pass (2026-07-04). Step 1 (asset-aware channels + routing
 proven (doc `seqln-asset-channels-build-plan.md`). This scopes Step 2, the user's stated next phase:
 "pure-LN swaps working" before wallet/DEX integration.
 
-Grounding docs: `seqdex-lightning-feasibility.md` (§4 the pure-LN mechanism, §3 the anchoring↔LN safety
-result, §8 phasing — this is that doc's **Phase 3**), `seqln-dex-instant-swap-latency.md` (§"endgame" — this
+Grounding docs: `seqdex/docs/seqdex-lightning-feasibility.md` (§4 the pure-LN mechanism, §3 the anchoring↔LN safety
+result, §8 phasing — this is that doc's **Phase 3**), `seqdex/docs/seqln-dex-instant-swap-latency.md` (§"endgame" — this
 is the instant-both-ways path), `seqln-phase2-submarine-swaps.md` (§5b/§5c/§5d — the live code seam we reuse).
 
 ---
@@ -31,7 +31,7 @@ In the feasibility doc's phasing this is **Phase 3**, which explicitly *depends 
   the success path**, so no 0-conf risk and — crucially — **no `min_anchor_depth` wait**. Submarine swaps
   (live today) are gated by burying the on-chain asset claim to Bitcoin-anchor depth (~20–30 min); the
   pure-LN swap removes the on-chain leg entirely, so that gate is gone. This is the whole point of
-  `seqln-dex-instant-swap-latency.md`: *"the 'instant' lives entirely in the pure-LN leg."*
+  `seqdex/docs/seqln-dex-instant-swap-latency.md`: *"the 'instant' lives entirely in the pure-LN leg."*
 - **Trustless (custody), both directions.** One shared secret reused across two LN payments, stitched at the
   translating node; the node can never take one leg without settling the other. Worst case is a timelock
   refund. Non-custodial exactly like Boltz.
