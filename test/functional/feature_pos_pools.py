@@ -84,7 +84,11 @@ class PosPoolsTest(BitcoinTestFramework):
             self.nodes[0].generateposblock(self.a_wif)
 
     def pool_entry(self, node, signer):
-        """The listpools row for a signer, or None."""
+        """The listpools row for a signer, or None.
+
+        Asking for one signer explicitly answers whether or not it has declared
+        itself a pool, which is what a wallet needs to describe the signer its
+        stake is lent to."""
         for p in node.listpools(signer, 0)["pools"]:
             if p["signer"] == signer:
                 return p
@@ -116,10 +120,13 @@ class PosPoolsTest(BitcoinTestFramework):
         board (github.com/GracedEternalKingCabbageMan/sequentia-pool-board) is a
         static page that renders exactly these fields. Assert every one of them,
         so a rename here fails a test rather than silently emptying a column on
-        a public page."""
-        feed = node.listpools(None, 100, True)
+        a public page.
+
+        `expect_signer` has not announced a payout policy at this point, so it is
+        NOT a pool and must be reachable only by asking for it explicitly."""
+        feed = node.listpools(None, 100, True, True)
         for key in ("height", "network_weight", "min_stake", "notice_blocks",
-                    "block_seconds", "window", "pools"):
+                    "block_seconds", "window", "pools", "declared_pools", "stakers"):
             assert key in feed, "listpools is missing %s" % key
         assert_equal(feed["notice_blocks"], NOTICE)
         # The board turns "binds in N blocks" into a date with this, so a zero
@@ -131,12 +138,13 @@ class PosPoolsTest(BitcoinTestFramework):
             if p["signer"] == expect_signer:
                 row = p
         assert row is not None, "the pool this wallet delegates to is missing from listpools"
-        for key in ("signer", "weight", "own_weight", "delegated_weight", "delegators",
+        for key in ("signer", "declared", "weight", "own_weight", "delegated_weight", "delegators",
                     "network_share", "eligible", "committee_ready", "payout",
                     "policy_pending", "blocks_produced", "blocks_expected", "delegator_list"):
             assert key in row, "listpools row is missing %s" % key
         assert_equal(row["delegated_weight"], STAKE * COIN)
         assert_equal(row["delegators"], 1)
+        assert_equal(row["declared"], False)
 
     def run_test(self):
         n0 = self.nodes[0]
@@ -253,6 +261,23 @@ class PosPoolsTest(BitcoinTestFramework):
         assert_raises_rpc_error(-8, "amount cannot be set when re-pointing",
                                 w0.delegatestake, pool2, ctrl, _D("0.001"))
 
+        self.log.info("A pool is a signer that DECLARED itself one, not any staker with weight")
+        # The whole point of the board is to list deliberate pooling initiatives.
+        # Every chain has stakers producing for themselves, and calling those
+        # pools puts words in their mouth. The only deliberate, on-chain opt-in
+        # is announcing a payout policy, so that is the line.
+        board = n0.listpools()
+        assert board["pools"] == [], "nobody has declared a pool yet, so none may be listed"
+        assert_equal(board["declared_pools"], 0)
+        assert_greater_than(board["stakers"], 0)  # ...but the chain has stakers
+        # They are still reachable, just not as pools.
+        everyone = n0.listpools(None, 0, False, True)
+        assert_greater_than(len(everyone["pools"]), 0)
+        assert all(p["declared"] is False for p in everyone["pools"])
+        # And one can always be read by name, which is how a wallet describes the
+        # signer its stake is currently lent to.
+        assert_equal(self.pool_entry(n0, pool1)["declared"], False)
+
         self.log.info("announcepayout: an operator commits, and cannot dodge the notice period")
         tip = n0.getblockcount()
         assert_raises_rpc_error(-8, "inside the notice period",
@@ -282,6 +307,14 @@ class PosPoolsTest(BitcoinTestFramework):
         board = self.pool_entry(n0, pool1)
         assert_equal(len(board["policy_pending"]), 1)
         assert_equal(board["policy_pending"][0]["commission_bp"], 500)
+
+        # Announcing IS the declaration, and a policy still serving its notice
+        # counts: that is exactly what a new pool looks like, and it has to be
+        # findable while delegators decide.
+        assert_equal(board["declared"], True)
+        listed = n0.listpools()
+        assert_equal(listed["declared_pools"], 1)
+        assert_equal([p["signer"] for p in listed["pools"]], [pool1])
 
         self.log.info("Once the notice has run, the policy binds and stops being pending")
         self.mine(activation - n0.getblockcount())

@@ -4006,14 +4006,24 @@ static RPCHelpMan getdelegationinfo()
 static RPCHelpMan listpools()
 {
     return RPCHelpMan{"listpools",
-                "\nSEQUENTIA: every block-producing signer on the network, with the weight it commands, who lent\n"
-                "it, what it has committed to paying, and how reliably it has been producing. This is the pool\n"
-                "listing board: read it before delegating with delegatestake, and watch it afterwards.\n"
-                "\nA signer appears here if it commands any stake weight or has announced a payout policy. A pool\n"
-                "with no policy keeps everything it earns -- that is the default, not a bug, and the listing says\n"
-                "so plainly. A policy change must be announced at least the chain's notice period ahead of\n"
-                "binding, and shows up under `policy_pending` for that whole window, which is the time a\n"
-                "delegator has to leave. Leaving is instant and unilateral (undelegatestake).\n"
+                "\nSEQUENTIA: the staking pools on the network, with the weight each commands, who lent it, what\n"
+                "it has committed to paying, and how reliably it has been producing. Read it before delegating\n"
+                "with delegatestake, and watch it afterwards.\n"
+                "\nA POOL IS A SIGNER THAT HAS DECLARED ITSELF ONE, by announcing a payout policy\n"
+                "(announcepayout). That is the only deliberate, on-chain opt-in there is, and it is what\n"
+                "separates an operator soliciting delegations from the many stakers who simply produce blocks\n"
+                "for themselves. Anyone may delegate to any signer -- consensus cannot restrict that and does\n"
+                "not try -- but a signer that has never made a commitment is not running a pool, and listing it\n"
+                "as one would put words in its mouth.\n"
+                "\nA policy that is announced but has not bound yet still counts as a declaration: that is\n"
+                "exactly what a new pool looks like while it serves its notice period, and it needs to be\n"
+                "findable then.\n"
+                "\nPass `include_undeclared` to see every signer with weight, each flagged `declared`; pass an\n"
+                "explicit `signer` to read one whether or not it has declared, which is how a wallet describes\n"
+                "the signer its stake is currently lent to.\n"
+                "\nA policy change must be announced at least the chain's notice period ahead of binding, and\n"
+                "shows up under `policy_pending` for that whole window, which is the time a delegator has to\n"
+                "leave. Leaving is instant and unilateral (undelegatestake).\n"
                 "\n`blocks_produced` against `blocks_expected` is the reliability check: a pool commanding 10% of\n"
                 "the network stake should produce about 10% of the blocks. Well under that means it is offline,\n"
                 "missing its slots, or losing races -- and its delegators are earning nothing for the weight.\n",
@@ -4021,6 +4031,7 @@ static RPCHelpMan listpools()
                     {"signer", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Only this signer's entry (hex)."},
                     {"window", RPCArg::Type::NUM, RPCArg::Default{500}, "How many recent blocks to measure production over. 0 skips the measurement (and the block reads it costs)."},
                     {"include_delegators", RPCArg::Type::BOOL, RPCArg::Default{false}, "List each pool's individual delegators and their weights."},
+                    {"include_undeclared", RPCArg::Type::BOOL, RPCArg::Default{false}, "Also list signers that have declared no payout policy, i.e. stakers producing for themselves rather than pools. Each entry carries `declared` either way."},
                 },
                 RPCResult{RPCResult::Type::OBJ, "", "", {
                     {RPCResult::Type::NUM, "height", "the tip this was read at"},
@@ -4029,9 +4040,12 @@ static RPCHelpMan listpools()
                     {RPCResult::Type::NUM, "notice_blocks", "how far ahead a payout policy change must be announced"},
                     {RPCResult::Type::NUM, "block_seconds", "the chain's block cadence, for turning a notice in blocks into a deadline"},
                     {RPCResult::Type::NUM, "window", "blocks the production measurement covers"},
+                    {RPCResult::Type::NUM, "declared_pools", "how many signers have declared themselves a pool"},
+                    {RPCResult::Type::NUM, "stakers", "how many signers command weight, declared or not; the rest produce for themselves"},
                     {RPCResult::Type::ARR, "pools", "signers, heaviest first", {
                         {RPCResult::Type::OBJ, "", "", {
                             {RPCResult::Type::STR_HEX, "signer", "the block-producing public key"},
+                            {RPCResult::Type::BOOL, "declared", "whether this signer has declared itself a pool by announcing a payout policy"},
                             {RPCResult::Type::NUM, "weight", "total weight it commands: its own plus everything lent to it (atoms)"},
                             {RPCResult::Type::NUM, "own_weight", "weight from its own stake (atoms)"},
                             {RPCResult::Type::NUM, "delegated_weight", "weight lent to it by others (atoms)"},
@@ -4084,6 +4098,7 @@ static RPCHelpMan listpools()
         throw JSONRPCError(RPC_INVALID_PARAMETER, "window must be between 0 and 5000");
     }
     const bool include_delegators = request.params[2].isNull() ? false : request.params[2].get_bool();
+    const bool include_undeclared = request.params[3].isNull() ? false : request.params[3].get_bool();
 
     ChainstateManager& chainman = EnsureAnyChainman(request.context);
 
@@ -4118,6 +4133,11 @@ static RPCHelpMan listpools()
     // pool worth listing: that is exactly what a new operator looks like before
     // anyone has delegated to it.
     for (const auto& e : payouts) pools[e.first];
+
+    // Declaring is announcing a payout policy, in force or still serving its
+    // notice. Everything else is a staker producing for itself, however much
+    // weight it commands.
+    const auto declared = [&](const CPubKey& signer) { return payouts.count(signer) > 0; };
 
     // How many blocks each signer actually produced over the window. The
     // challenge names the leader and lives in the block index in memory, so
@@ -4157,15 +4177,27 @@ static RPCHelpMan listpools()
         return a.first < b.first;
     });
 
+    int64_t declared_count = 0, staker_count = 0;
+    for (const auto& entry : ordered) {
+        if (declared(entry.first)) ++declared_count;
+        if (entry.second.own + entry.second.delegated > 0) ++staker_count;
+    }
+
     UniValue arr(UniValue::VARR);
     for (auto& entry : ordered) {
         const CPubKey& signer = entry.first;
         if (filter && signer != *filter) continue;
+        // An explicit signer is always answered, declared or not: a wallet has
+        // to be able to describe the signer its stake is lent to, and that
+        // signer may well have committed to nothing. Without the filter, only
+        // pools, unless the caller asked for the rest.
+        if (!filter && !include_undeclared && !declared(signer)) continue;
         Pool& p = entry.second;
         const uint64_t weight = p.own + p.delegated;
 
         UniValue o(UniValue::VOBJ);
         o.pushKV("signer", HexStr(signer));
+        o.pushKV("declared", declared(signer));
         o.pushKV("weight", weight);
         o.pushKV("own_weight", p.own);
         o.pushKV("delegated_weight", p.delegated);
@@ -4250,6 +4282,11 @@ static RPCHelpMan listpools()
     const int64_t spacing = Params().GetConsensus().pos_block_spacing;
     result.pushKV("block_seconds", spacing > 0 ? spacing : g_pos_slot_interval);
     result.pushKV("window", scanned);
+    // Both counts, always, whatever was filtered into `pools`: a board showing no
+    // pools still needs to say how many stakers are securing the chain, or an
+    // empty list reads as an empty network.
+    result.pushKV("declared_pools", declared_count);
+    result.pushKV("stakers", staker_count);
     result.pushKV("pools", arr);
     return result;
 },
