@@ -171,6 +171,13 @@ def build_repay_leaf(asset_c, asset_d, debt, lender_prog, borrower_prog):
     assert len(lender_prog) == 32 and len(borrower_prog) == 32
     assert debt >= 1
 
+    return CScript(_repay_body(asset_c, asset_d, debt, lender_prog, borrower_prog))
+
+
+def _repay_body(asset_c, asset_d, debt, lender_prog, borrower_prog):
+    """REPAY as a list of script elements, so the combined single-leaf vault used
+    by funded offers can embed the same logic byte for byte rather than a second
+    version of it."""
     s = []
     # locked = this covenant input's own value (must be explicit)
     s += [OP_PUSHCURRENTINPUTINDEX, OP_INSPECTINPUTVALUE, OP_1, OP_EQUALVERIFY]  # [C]
@@ -182,7 +189,7 @@ def build_repay_leaf(asset_c, asset_d, debt, lender_prog, borrower_prog):
                         borrower_prog, OP_EQUALVERIFY]
     s += _RETURN_IDX + [OP_INSPECTOUTPUTVALUE, OP_1, OP_EQUALVERIFY]             # [C, returned]
     s += [OP_SWAP, OP_GREATERTHANOREQUAL64]                                      # returned >= C
-    return CScript(s)
+    return s
 
 
 def _seizure_tail(asset_c, asset_d, debt, lender_prog, borrower_prog,
@@ -377,10 +384,23 @@ def build_liquidate_leaf(asset_c, asset_d, debt, lender_prog, borrower_prog,
         "loan too large for 64-bit seizure arithmetic: reduce debt, or the "
         f"price_scale (gross={gross}, scale={price_scale}, bound={bound})")
 
-    s = _oracle_section(feed_id, keys, threshold, not_before, strike)  # [price]
+    return CScript(_seizure_body(asset_c, asset_d, debt, lender_prog,
+                                 borrower_prog, feed_id, keys, threshold,
+                                 not_before, strike, gross, price_scale, None))
+
+
+def _seizure_body(asset_c, asset_d, debt, lender_prog, borrower_prog, feed_id,
+                  keys, threshold, not_before, strike, gross, price_scale,
+                  maturity):
+    """LIQUIDATE and DEFAULT are the same body: the oracle section, then the
+    seizure. They differ only in whether a strike bounds the price and whether a
+    CLTV bounds the time, so they are built from one function rather than two
+    that could drift apart."""
+    s = [] if maturity is None else [maturity, OP_CHECKLOCKTIMEVERIFY, OP_DROP]
+    s += _oracle_section(feed_id, keys, threshold, not_before, strike)  # [price]
     s += _seizure_tail(asset_c, asset_d, debt, lender_prog, borrower_prog,
                        gross, price_scale)
-    return CScript(s)
+    return s
 
 
 def build_default_leaf(asset_c, asset_d, debt, lender_prog, borrower_prog,
@@ -403,11 +423,9 @@ def build_default_leaf(asset_c, asset_d, debt, lender_prog, borrower_prog,
         "loan too large for 64-bit seizure arithmetic at the declared max_price "
         f"(gross={gross}, scale={price_scale}, bound={bound})")
 
-    s = [maturity, OP_CHECKLOCKTIMEVERIFY, OP_DROP]
-    s += _oracle_section(feed_id, keys, threshold, not_before, None)  # [price]
-    s += _seizure_tail(asset_c, asset_d, debt, lender_prog, borrower_prog,
-                       gross, price_scale)
-    return CScript(s)
+    return CScript(_seizure_body(asset_c, asset_d, debt, lender_prog,
+                                 borrower_prog, feed_id, keys, threshold,
+                                 not_before, None, gross, price_scale, maturity))
 
 
 def build_recover_leaf(recover_after, lender_x):
