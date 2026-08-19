@@ -3857,15 +3857,15 @@ static RPCHelpMan getpayoutscript()
                 {
                     {"signer", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The block-producing public key this policy binds (hex). It alone may spend this record."},
                     {"activation", RPCArg::Type::NUM, RPCArg::Optional::NO, "Block height from which the policy binds."},
-                    {"mode", RPCArg::Type::STR, RPCArg::Optional::NO, "\"direct\" or \"lottery\"."},
+                    {"mode", RPCArg::Type::STR, RPCArg::Optional::NO, "\"direct\", \"lottery\" or \"split\"."},
                     {"payout_script", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "direct mode: the scriptPubKey the coinbase must pay (hex, at most 110 bytes)."},
-                    {"commission_bp", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "lottery mode: basis points of blocks the operator keeps (0..10000, default 0)."},
+                    {"commission_bp", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "lottery or split mode: basis points of blocks the operator keeps (0..10000, default 0)."},
                 },
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
                     {
                         {RPCResult::Type::STR_HEX, "script", "the payout-record scriptPubKey (hex)"},
-                        {RPCResult::Type::STR, "mode", "\"direct\" or \"lottery\""},
+                        {RPCResult::Type::STR, "mode", "\"direct\", \"lottery\" or \"split\""},
                         {RPCResult::Type::NUM, "activation", "the height from which the policy binds"},
                         {RPCResult::Type::NUM, "notice_blocks", "the chain's minimum notice period, in blocks"},
                     }},
@@ -3924,7 +3924,7 @@ static RPCHelpMan getpayoutinfo()
                         {RPCResult::Type::OBJ, "", "", {
                             {RPCResult::Type::NUM, "activation", "height from which the policy binds"},
                             {RPCResult::Type::BOOL, "in_force", "whether it binds at the current tip"},
-                            {RPCResult::Type::STR, "mode", "\"direct\" or \"lottery\""},
+                            {RPCResult::Type::STR, "mode", "\"direct\", \"lottery\" or \"split\""},
                             {RPCResult::Type::STR_HEX, "payout_script", /*optional=*/true, "direct: the committed payee"},
                             {RPCResult::Type::NUM, "commission_bp", /*optional=*/true, "lottery: operator's basis points"},
                         }},
@@ -4063,7 +4063,7 @@ static RPCHelpMan listpools()
                             {RPCResult::Type::NUM, "pot_outputs", "how many pot outputs a claim would sweep"},
                             {RPCResult::Type::OBJ, "policy_in_force", /*optional=*/true, "the payout policy binding right now", {
                                 {RPCResult::Type::NUM, "activation", "height from which it binds"},
-                                {RPCResult::Type::STR, "mode", "\"direct\" or \"lottery\""},
+                                {RPCResult::Type::STR, "mode", "\"direct\", \"lottery\" or \"split\""},
                                 {RPCResult::Type::STR_HEX, "payout_script", /*optional=*/true, "direct: the committed payee"},
                                 {RPCResult::Type::NUM, "commission_bp", /*optional=*/true, "lottery: the operator's basis points"},
                             }},
@@ -4071,7 +4071,7 @@ static RPCHelpMan listpools()
                                 {RPCResult::Type::OBJ, "", "", {
                                     {RPCResult::Type::NUM, "activation", "height from which it will bind"},
                                     {RPCResult::Type::NUM, "blocks_away", "blocks left to leave before it binds"},
-                                    {RPCResult::Type::STR, "mode", "\"direct\" or \"lottery\""},
+                                    {RPCResult::Type::STR, "mode", "\"direct\", \"lottery\" or \"split\""},
                                     {RPCResult::Type::STR_HEX, "payout_script", /*optional=*/true, "direct: the committed payee"},
                                     {RPCResult::Type::NUM, "commission_bp", /*optional=*/true, "lottery: the operator's basis points"},
                                 }},
