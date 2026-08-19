@@ -34,6 +34,9 @@ USDX. The vault's spending rules are the loan agreement, compiled. Precisely:
   address before funding it.
 - **No permission to exit.** REPAY is permissionless, needs no signature, no
   oracle and no witness data whatsoever. A solvent borrower can always leave.
+  In fact NO exit needs a signature: every leaf reads what it enforces out of
+  the transaction and pays a pinned destination, so there is no key anywhere in
+  a loan whose loss costs anybody anything.
 - **No discretionary seizure.** A liquidator cannot choose how much to take.
   The seizure is computed on chain from the attested price and the surplus is
   forced back to the borrower by the same script that lets the seizure happen.
@@ -121,18 +124,49 @@ liquidation.
 
 ### 2.5 RECOVER -- the oracle-liveness backstop
 
-`<recover_after> CLTV DROP <P_lender> CHECKSIG`. If the oracle is dead through
-the whole grace window the lender sweeps the vault, surplus and all.
+`<recover_after> CLTV DROP` and then the same pinned-payout check the other
+leaves use: after the backstop height ANYONE may sweep the vault, but only to
+the lender's payout program.
 
-This is the one blunt leaf and it is deliberately last. It exists because a
-dead oracle must not freeze collateral for ever, and it is acceptable because
-the borrower has the entire term to take the oracle-free REPAY exit and only
-reaches this leaf by ignoring it long after maturity. `recover_after` should sit
-far enough past `maturity` that a transient oracle outage cannot reach it;
+This is the one blunt leaf and it is deliberately last. It exists because a dead
+oracle must not freeze collateral for ever, and it is acceptable because the
+borrower has the entire term to take the oracle-free REPAY exit and only reaches
+this leaf by ignoring it long after maturity. `recover_after` should sit far
+enough past `maturity` that a transient oracle outage cannot reach it;
 `maturity + 30 days` is the suggested default, and the borrower must check the
 gap before funding, because it is the borrower who pays for a short one.
 
-### 2.6 Sizes and limits
+It used to require the lender's signature, and that was wrong. The browser
+wallet extension signs its own transaction inputs but cannot sign a covenant
+leaf, and exposes no x-only key to bake into one -- so a lender using a browser
+had a backstop nobody could execute, which is not a backstop but a trap holding
+their collateral. Pinning the destination fixes that and is better on its own
+terms: the lender needs no key beyond the address they are paid at, so there is
+nothing to lose, and they need not be online, for the same reason REPAY is
+permissionless. Letting anyone trigger it is safe because it can only ever pay
+the lender.
+
+**No exit in the system needs a signature.** Every leaf reads what it enforces
+out of the transaction and pays a pinned destination. That is what makes the
+whole thing drivable from a browser wallet, and it means there is no key
+anywhere in a loan whose loss costs anybody anything.
+
+### 2.6 Where the payouts go
+
+A payout is a witness PROGRAM and a witness VERSION, both baked in, not an
+address and not necessarily taproot. The version matters more than it sounds:
+the browser wallet extension is a `wpkhSlip77` wallet and every address it can
+receive at is segwit v0, so a covenant that could only pay a v1 taproot program
+could never settle a loan originated from a browser -- the lender could not be
+repaid and the borrower could not get their collateral back.
+
+So `lender_ver` and `borrower_ver` default to 1 and may be 0, and the builders
+refuse a program whose length does not match its version (20 bytes at v0, 32 at
+v1). That refusal is not fussiness: a mismatched program compiles silently into
+an address nobody can ever be paid at, and the loan looks perfectly healthy
+until somebody tries to leave it.
+
+### 2.7 Sizes and limits
 
 Measured leaf sizes: REPAY 192 bytes, LIQUIDATE 352, DEFAULT 345, RECOVER 39.
 A REPAY spend is in the same class as a covenant CLOB fill (a few hundred
@@ -420,8 +454,8 @@ one to use where a choice exists.
 |---|---|---|---|
 | A | tSEQ, GOLD, SILVR, OILX, EURX, SBTC, and any unrestricted issued asset | The section-2 covenant | Oracle, for one number |
 | B | Native BTC | Section 7, cross-chain | Oracle, interactively, for liquidation only |
-| C | OpenAMP (`cosign`) assets | The issuer's policy server co-signs | Oracle **and** the issuer |
-| D | OpenDAMP (`damp`) assets | Not yet | -- |
+| C | OpenAMP (`cosign`) assets | A pledge the policy server enforces | Oracle **and** the issuer |
+| D | OpenDAMP (`damp`) assets | Not lending: a repurchase (8.1) | Oracle, and the lender for the bond |
 
 **Tier A** is the design. USDX is the debt asset throughout; every unrestricted
 asset can be collateral, and the fee for any of it is payable in any accepted
@@ -430,21 +464,187 @@ Sequentia.
 
 **Tier C** deserves a blunt statement. A restricted asset can only live in the
 shapes its issuer permits -- for OpenAMP, a 2-of-2 enclave output with the
-policy server. A loan vault holding one is therefore an enclave output, and
-every exit needs the policy server to co-sign. That is not non-custodial in the
-sense section 1 claims: the issuer can refuse a repayment. It is inherent to a
-transfer-restricted asset, not a flaw in this design, and the integration is
-worth having anyway because pledging a regulated asset is a real use case. The
-shape is a *pledge policy* in `openampd`: the issuer registers a loan and
-pre-authorises exactly the repay, liquidate and default transitions, so the
-server's discretion is spent once at registration rather than at each exit.
-The platform must label a Tier C loan as issuer-permissioned wherever a user
-can see it; quietly presenting it beside a Tier A loan would be a lie.
+policy server -- and a covenant vault is not one of them. Worse, if it were, the
+covenant would hand the collateral to whoever satisfied the loan's terms, which
+is exactly the transfer restriction the issuer exists to enforce. Self-enforcing
+collateral and issuer-enforced transferability are in direct tension. You can
+have one.
 
-**Tier D** is open. OpenDAMP's user covenant requires the holder's signature,
-so a vault needs a key that is not simply the borrower's, and the natural route
-is expressing the pledge as a DAMP policy predicate rather than wrapping the
-asset. It is a genuine design problem and it is not solved here.
+So the collateral does not move. What shipped in `openampd` is a **pledge**: a
+record that part of a holder's balance stands behind a debt, and a transfer
+check that refuses to let it leave. A holder may spend anything above their open
+pledges and nothing below, and pledges accumulate, so a second lender is never
+sold a claim on atoms a first lender already holds. The collateral stays in the
+borrower's own enclave for the whole life of the loan.
+
+The two operations that move value are deliberately not satisfied by the
+issuer's own authority. A **release** needs the LENDER's signature, because the
+lender is the only party who can say the debt was settled. A **seizure** needs
+the lender's signature *and* either a matured loan or the BORROWER's
+countersignature, so a lender cannot take collateral from a borrower still
+inside their term. The issuer may force a release with a written reason -- a
+lender who loses their key would otherwise lock the collateral forever, and a
+forced release only ever returns it to its owner -- and there is deliberately no
+forced seizure, because the direction that takes value away from its owner is
+the direction that must not have a unilateral override. A seizure is an L_claw
+spend with two asset outputs: the pledged atoms to the lender's enclave, the
+remainder straight back to the borrower's, so settling one loan never disturbs
+the borrower's free balance or another lender's collateral.
+
+Pledging an asset issued *without* a clawback leaf is refused outright, because
+the lock would hold but nobody could ever deliver on default: the collateral
+would freeze permanently rather than secure anything.
+
+What Tier C costs is not hidden anywhere: the lender's security is the issuer's
+promise, not a script. A policy server that is dishonest or compromised can
+release a pledge without repayment, and no amount of checking on the lender's
+side would reveal it beforehand. The platform labels a Tier C loan
+issuer-permissioned wherever a user can see it; presenting it quietly beside a
+Tier A loan would be a lie.
+
+**Tier D** is not open any more, and the answer is negative. A seizure-backed
+loan against an OpenDAMP asset is impossible, for three independent structural
+reasons, any one of which is sufficient:
+
+1. **The collateral cannot enter a vault.** The verifier covenant requires that
+   every output carrying the regulated asset pays `C_U(Y)` for a witness-supplied
+   recipient key Y (opendamp-design.md 2.2, check 4). A Pignus vault script is
+   not of that form and cannot be made to be. This is network-enforced, so it is
+   not something an issuer could waive even if it wanted to.
+2. **Exits cannot be pre-signed.** The DLC-style escape -- both parties sign the
+   repay and the seize transactions at origination, and the lender broadcasts
+   the seizure after maturity -- fails because every transfer spends the shared
+   verifier output as input zero and returns it to the same address (2.2, checks
+   1 and 2). That outpoint moves on *any* holder's transfer of the asset, and
+   `sig_all_hash` commits to it, so a pre-signed exit is invalidated by a
+   stranger's unrelated transaction. The window is not small; it is nil in
+   practice.
+3. **The issuer cannot move it either.** An OpenDAMP asset has no clawback leaf.
+   The issuer's powers are a policy update and a halt -- freeze a key, blacklist
+   an outpoint -- and neither delivers a coin to somebody else. The Tier C
+   escape hatch simply does not exist here.
+
+Together those say that on default, no party has a path to the collateral:
+not the covenant, not a pre-signature, not the issuer. Locking it is easy --
+a whitelist entry with `send_after` set to the maturity height freezes the
+borrower's key by consensus, which is a *better* lock than Tier C's -- but a
+lock nobody can ever open in the lender's favour is a trap for both sides, not
+collateral.
+
+What does work is a different instrument, and it is worth naming rather than
+pretending otherwise: a **repurchase**. The borrower sells the collateral to the
+lender outright -- an ordinary OpenDAMP transfer to `C_U(lender)`, which needs no
+new machinery at all -- and the lender's obligation to sell it back is secured by
+a Tier A covenant vault holding a bond. The bond need only cover the borrower's
+*equity*, collateral value minus debt, because the debt offsets the rest; a
+lender who never returns the collateral forfeits the bond, which leaves the
+borrower exactly as well off as if the loan had been liquidated at par.
+
+That inverts who holds what, and Pignus says so in those words. It is not
+collateralized lending and must never be shown as if it were: the borrower has
+sold their asset and holds a claim. It is also how securities financing actually
+works, which is the point -- the regulated-asset tier ends up with the
+regulated-market instrument. Section 8.1 specifies it.
+
+### 8.1 The repurchase, specified
+
+A repurchase has two legs, created together and settled together.
+
+**Leg one, off the covenant.** The borrower transfers `q` units of the OpenDAMP
+asset to `C_U(lender)` by an ordinary transfer. Nothing here is special: it is
+the transfer the asset already supports, subject to the whitelist the issuer
+already publishes, and the lender must be an approved holder for it to confirm
+at all -- which is the right gate, because a lender who could not lawfully hold
+the asset has no business financing it. The lender separately pays the borrower
+`principal` in the debt asset.
+
+**Leg two, on the covenant.** The lender funds a two-leaf vault with `bond` of
+the debt asset, where
+
+    bond = collateral_value_at_origination - debt
+
+in debt-asset atoms: the borrower's equity. The vault is built from the same
+leaf builders section 2 uses, with no change to any of them, but it is NOT the
+four-leaf `vault_taptree` -- the two leaves are parameterised independently,
+which is exactly what the section 2 vault cannot do because it passes one payout
+program to both REPAY and RECOVER.
+
+    RETURN  = build_repay_leaf(asset_c   = the debt asset,
+                               asset_d   = the OpenDAMP asset,
+                               debt      = q,
+                               lender_prog   = C_U(borrower),
+                               borrower_prog = the lender's payout)
+
+    FORFEIT = build_recover_leaf(recover_after = forfeit_after,
+                                 asset_c       = the debt asset,
+                                 lender_prog   = the borrower's payout)
+
+`C_U(borrower)` is a P2TR, so it is a 32-byte version-1 payout program and the
+covenant pins it like any other. RETURN therefore says, in the covenant and
+without an oracle: *the bond is released to the lender only in a transaction
+that delivers `q` units of the OpenDAMP asset to the borrower's own C_U
+address.* FORFEIT says: *after `forfeit_after`, anyone may sweep the bond, and
+only to the borrower.*
+
+**Settlement is one atomic transaction.** The borrower's payment of `debt` is
+NOT covenant-checked -- the two output slots RETURN inspects are already spent
+on the collateral and the bond -- so it must never be made outside the RETURN
+transaction. It does not need to be checked, because both parties must sign that
+transaction anyway: the lender signs their `C_U(lender)` input, the borrower
+signs the input funding the debt, and neither signs a transaction missing what
+they are owed. The full shape:
+
+| # | Input | | # | Output |
+|---|---|---|---|---|
+| 0 | the OpenDAMP verifier output | | 0 | the verifier output, returned |
+| 1 | `C_U(lender)`, holding q | | 1 | q to `C_U(borrower)` |
+| 2 | the bond vault | | 2 | the bond, to the lender |
+| 3 | the borrower's debt-asset UTXO | | 3 | `debt`, to the lender |
+| | | | 4 | the borrower's change |
+| | | | 5 | the fee |
+
+That is four inputs and six outputs, which is **exactly** OpenDAMP's
+`N_max_inputs` and `N_max_outputs`. There is no spare slot in either direction.
+Two consequences the platform must enforce, because nothing else will:
+
+- The borrower's debt-asset side must be a **single** UTXO. Pignus consolidates
+  it first if it is not, in a separate transaction, before composing settlement.
+- The **fee is paid in the debt asset**, out of that same input. A separate fee
+  input would not fit. Sequentia's any-asset fees make this ordinary rather than
+  a workaround, and OpenDAMP's fee delta (opendamp-design.md 2.3) is what lets
+  the verifier tolerate the fee output at all.
+
+**What each outcome pays.** Write `V` for the collateral's value at origination,
+so `bond = V - debt`.
+
+| Outcome | Borrower ends with | Lender ends with |
+|---|---|---|
+| Settled | the collateral, minus `debt - principal` | `debt - principal` |
+| Borrower never pays | `principal + bond = V - (debt - principal)` | the collateral, having paid out `V - (debt - principal)` |
+| Lender never returns | `principal + bond`, having paid nothing | the collateral, less the bond |
+
+The interest `debt - principal` is what the borrower pays in every branch and
+what the lender earns in every branch, which is the property that makes the
+instrument sound: neither party gains by failing to perform. A borrower who
+simply walks away after `forfeit_after` sweeps the bond themselves and is left
+exactly where a liquidation at the origination price would have left them.
+
+**What it does not protect against.** The bond is fixed at origination, so the
+borrower is made whole at the price the deal was struck at, not at the price on
+the day. If the collateral appreciates and the lender declines to return it, the
+borrower keeps `principal + bond` and loses the upside. That is the borrower's
+residual exposure, it is not fixable without a price feed for a private
+restricted asset, and Pignus states it in those words on the confirmation
+screen. Where such a feed does exist, the parties may instead use a
+three-leaf variant adding `build_liquidate_leaf`, and the platform offers it
+only when a feed is configured for that asset.
+
+**Naming.** The product is labelled **repurchase**, never "loan", in the book, in
+the offer list and on the confirmation, and the borrower's confirmation says in
+one sentence that they are selling the asset and holding a claim. It is not
+collateralized lending and must never be shown as if it were. It is also how
+securities financing actually works, which is the point: the regulated-asset
+tier ends up with the regulated-market instrument.
 
 ## 9. Where the code lives
 
@@ -452,3 +652,22 @@ The platform lives in its own repository, `pignus`, alongside the other
 Sequentia sub-projects; the covenant and its consensus-level proof stay here,
 the same way SeqOB's covenant ships with the node while the daemon driving it
 ships separately.
+
+What runs where:
+
+- **the browser**, at `/lending/` -- composes every transaction, derives every
+  address, and sends only a signature request to the wallet extension. It is
+  the only place a second implementation of the covenant exists (`web/pignus.js`
+  and `web/offer.js`), because a browser cannot import the Python one; both are
+  pinned byte for byte to the golden vectors and the page refuses to run at all
+  if that pinning fails.
+- **the CLI**, on the downloads page -- the same operations against your own
+  node, for anyone who would rather not use a website.
+- **the oracle and the loan book** -- services on the testnet server. Neither
+  can move anything: the book is discovery, and the oracle asserts a number.
+
+Two things were found only by building the browser client, and both are worth
+recording because neither was visible from the library side: payouts that could
+only be taproot (section 2.6), and exits that required a signature the extension
+cannot make (section 2.5). A design that is only ever exercised by its own test
+suite hides exactly this class of defect.
