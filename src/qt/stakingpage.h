@@ -151,6 +151,13 @@ private:
     QLabel* m_pool_status{nullptr};
     QLabel* m_pool_commitment{nullptr};
     QComboBox* m_payout_mode{nullptr};
+    //! Which of this wallet's staker keys the policy binds. Only shown when the
+    //! wallet stakes with more than one: announcing is per-key, and with several
+    //! the RPC cannot guess, so without this the card would be a dead end for
+    //! exactly the operator who keeps a vesting-locked tranche and a small
+    //! freely-spendable stake side by side.
+    QComboBox* m_payout_signer{nullptr};
+    QLabel* m_payout_signer_label{nullptr};
     QLineEdit* m_payout_commission{nullptr};
     QLineEdit* m_payout_address{nullptr};
     QLabel* m_payout_commission_label{nullptr};
