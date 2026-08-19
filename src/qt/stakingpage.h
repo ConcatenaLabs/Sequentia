@@ -97,7 +97,6 @@ private Q_SLOTS:
     //! Operator side: commit on-chain to how this node's blocks pay out.
     //! Running a pool is a node operation and lives only here.
     void onAnnouncePayout();
-    void onPayoutModeChanged();
     void onPayoutPresetChanged();
 
 private:
@@ -152,8 +151,12 @@ private:
     //! inventing a commission from nothing. "Custom" reveals the raw fields.
     QComboBox* m_payout_preset{nullptr};
     QLabel* m_payout_preset_note{nullptr};
-    QComboBox* m_payout_mode{nullptr};
-    QLabel* m_payout_mode_label{nullptr};
+    //! Truly custom: the exact scriptPubKey every coinbase must pay, and the
+    //! height it binds from. Nothing else in the card can express these.
+    QLineEdit* m_payout_script{nullptr};
+    QLabel* m_payout_script_label{nullptr};
+    QLineEdit* m_payout_activation{nullptr};
+    QLabel* m_payout_activation_label{nullptr};
     //! Which of this wallet's staker keys the policy binds. Only shown when the
     //! wallet stakes with more than one: announcing is per-key, and with several
     //! the RPC cannot guess, so without this the card would be a dead end for
@@ -216,8 +219,7 @@ private:
     //! Refresh the "Run a staking pool" card: what this node's signer commands,
     //! who lent it, how reliably it produces, and what it has committed to.
     void refreshPoolOperator();
-    //! The policy the card is about to announce, read from the preset when one
-    //! is chosen and from the raw controls when it is custom.
+    //! The policy the card is about to announce, read from the chosen entry.
     bool payoutModeIsLottery() const;
     int64_t payoutCommissionBp() const;
 
