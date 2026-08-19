@@ -4,7 +4,7 @@ export const meta = {
   phases: [ { title: 'Change' }, { title: 'Verify' } ],
 }
 
-const NODE = '/home/aejkohl/SequentiaByClaude'
+const NODE = '/home/aejkohl/Sequentia'
 
 const CTX = `TASK FROM THE PROJECT OWNER (Andreas): "Mainnet (which isn't live yet) should launch with the new rule from the start." The new rule is the exponential-race leader election.
 
