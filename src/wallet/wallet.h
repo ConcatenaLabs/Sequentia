@@ -127,6 +127,12 @@ constexpr CAmount HIGH_MAX_TX_FEE{100 * HIGH_TX_FEE_PER_KB};
 //! Pre-calculated constants for input size estimation in *virtual size*
 static constexpr size_t DUMMY_NESTED_P2WPKH_INPUT_SIZE = 91;
 
+//! How often the wallet re-asks the node about unconfirmed transactions missing
+//! from its mempool. Short enough that a refusal is on screen while the user is
+//! still looking at the send they just made, and costless on a quiet wallet:
+//! there is normally nothing in that state to ask about.
+static constexpr int64_t REJECTION_RECHECK_SECONDS = 20;
+
 class CCoinControl;
 class COutput;
 class CWalletTx;
@@ -329,6 +335,10 @@ private:
 
     /** The next scheduled rebroadcast of wallet transactions. */
     int64_t nNextResend = 0;
+    /** The next scheduled re-ask of the node about transactions it may be refusing.
+     *  Starts at zero so the first sweep runs as soon as the node is caught up:
+     *  no refusal survives a restart, so until then the wallet knows of none. */
+    mutable std::atomic<int64_t> m_next_rejection_check{0};
     /** Whether this wallet will submit newly created transactions to the node's mempool and
      * prompt rebroadcasts (see ResendWalletTransactions()). */
     bool fBroadcastTransactions = false;
@@ -642,6 +652,16 @@ public:
     void transactionRemovedFromMempool(const CTransactionRef& tx, MemPoolRemovalReason reason, uint64_t mempool_sequence) override;
     void ReacceptWalletTransactions() EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
     void ResendWalletTransactions();
+
+    /** Re-derive whether the node refuses this transaction, updating m_rejection.
+     *  Returns whether the answer changed. Notifies, and invalidates the caches
+     *  the answer feeds, so both the status and the balance follow it. */
+    bool UpdateTxRejection(CWalletTx& wtx) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+
+    /** Ask the node about every transaction that is unconfirmed and not in its
+     *  mempool. Rate-limited: this is how a refusal is noticed, and equally how
+     *  it stops being one once the chain no longer justifies it. */
+    void RecheckRejectedTransactions();
 
     OutputType TransactionChangeType(const std::optional<OutputType>& change_type, const std::vector<CRecipient>& vecSend) const;
 
@@ -1036,6 +1056,7 @@ public:
  * their transactions. Actual rebroadcast schedule is managed by the wallets themselves.
  */
 void MaybeResendWalletTxs(WalletContext& context);
+void MaybeRecheckRejectedWalletTxs(WalletContext& context);
 
 /** RAII object to check and reserve a wallet rescan */
 class WalletRescanReserver

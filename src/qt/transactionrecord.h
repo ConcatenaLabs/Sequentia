@@ -35,6 +35,7 @@ public:
         Confirming,         /**< Confirmed, but waiting for the recommended number of confirmations **/
         Conflicted,         /**< Conflicts with other transaction or mempool **/
         Abandoned,          /**< Abandoned from the wallet **/
+        Rejected,           /**< The node refuses it from its mempool, and says why **/
         /// Generated (mined) transactions
         Immature,           /**< Mined but waiting for maturity */
         NotAccepted         /**< Mined but not accepted */
@@ -53,6 +54,13 @@ public:
     /** @name Reported status
        @{*/
     Status status;
+    /** SEQUENTIA: the node's reason for refusing this transaction, set when
+     *  status == Rejected. Kept as the raw consensus identifier; it is turned
+     *  into a sentence at the point of display. */
+    QString reject_reason;
+    /** Whether that refusal released the inputs, so the funds are spendable
+     *  again even though the record is still here. */
+    bool reject_frees_inputs{false};
     qint64 depth;
     qint64 open_for; /**< Timestamp if status==OpenUntilDate, otherwise number
                       of additional blocks that need to be mined before

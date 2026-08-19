@@ -76,6 +76,20 @@ QString TransactionDesc::FormatTxStatus(const interfaces::WalletTx& wtx, const i
         if (nDepth < 0) {
             return tr("conflicted with a transaction with %1 confirmations").arg(-nDepth);
         } else if (nDepth == 0) {
+            if (!status.is_abandoned && !status.reject_reason.empty()) {
+                // Say it outright. "0/unconfirmed, not in memory pool" is
+                // literally true of a refused transaction and tells the reader
+                // nothing: it reads as one still on its way.
+                QString refused = tr("rejected by the network: %1")
+                    .arg(GUIUtil::describeRejectReason(QString::fromStdString(status.reject_reason)));
+                if (status.reject_frees_inputs) {
+                    refused += QLatin1String("<br>") +
+                        tr("The funds this payment was using are available again. The payment "
+                           "itself is still here and will be sent if the network stops refusing "
+                           "it — abandon it below if you no longer want that.");
+                }
+                return refused;
+            }
             const QString abandoned{status.is_abandoned ? QLatin1String(", ") + tr("abandoned") : QString()};
             return tr("0/unconfirmed, %1").arg(inMempool ? tr("in memory pool") : tr("not in memory pool")) + abandoned;
         } else if (nDepth < 6) {

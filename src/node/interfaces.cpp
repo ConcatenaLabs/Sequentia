@@ -637,6 +637,33 @@ public:
         auto it = m_node.mempool->GetIter(txid);
         return it && (*it)->GetCountWithDescendants() > 1;
     }
+    std::optional<interfaces::MempoolRefusal> checkMempoolAccept(const CTransactionRef& tx) override
+    {
+        if (!m_node.chainman || !m_node.mempool) return std::nullopt;
+        LOCK(cs_main);
+        const MempoolAcceptResult result = m_node.chainman->ProcessTransaction(tx, /*test_accept=*/true);
+        if (result.m_result_type == MempoolAcceptResult::ResultType::VALID) return std::nullopt;
+
+        const TxValidationState& state = result.m_state;
+        switch (state.GetResult()) {
+        case TxValidationResult::TX_MISSING_INPUTS:
+            // Says nothing about this transaction: its parent may simply be an
+            // unconfirmed transaction of ours that has not landed yet.
+            return std::nullopt;
+        case TxValidationResult::TX_CONFLICT:
+            // Reached when the transaction is already in the mempool or already
+            // mined -- both the opposite of a refusal.
+            return std::nullopt;
+        default:
+            break;
+        }
+        // A failure that is not "invalid" at all (an out-of-memory in the
+        // mempool, say) is the node's problem, not the transaction's.
+        if (!state.IsInvalid()) return std::nullopt;
+
+        return interfaces::MempoolRefusal{state.GetRejectReason(),
+                                          state.GetResult() == TxValidationResult::TX_CONSENSUS};
+    }
     bool broadcastTransaction(const CTransactionRef& tx,
         const CAmount& max_tx_fee,
         bool relay,
