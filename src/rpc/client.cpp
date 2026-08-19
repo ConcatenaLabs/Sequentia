@@ -225,6 +225,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "announcepayout", 5, "amount"},
     { "listpools", 1, "window"},
     { "listpools", 2, "include_delegators"},
+    { "listpools", 3, "include_undeclared"},
     { "getpayoutscript", 1, "activation"},
     { "getpayoutscript", 4, "commission_bp"},
     { "getposblocktemplate", 1, "members"},

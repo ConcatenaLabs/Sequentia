@@ -1,0 +1,52 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>The empty blocks were the pause enforcing itself, and the flag day should move one day, not indefinitely</title>
+<style>
+  body { font-family: "Liberation Sans", Arial, sans-serif; font-size: 11pt; line-height: 1.45; color: #1a1a1a; margin: 2.2cm 2.4cm; }
+  h1 { font-size: 18pt; margin: 0 0 2pt 0; color: #b8860b; }
+  .sub { color: #555; font-size: 10pt; margin: 0 0 16pt 0; }
+  h2 { font-size: 13pt; margin: 18pt 0 4pt 0; border-bottom: 1.5px solid #b8860b; padding-bottom: 2pt; }
+  p { margin: 5pt 0; }
+  code { font-family: "Liberation Mono", "Courier New", monospace; font-size: 9.5pt; background: #f3f1ea; padding: 0 2px; }
+  ul, ol { margin: 4pt 0 6pt 0; }
+  li { margin: 3pt 0; }
+  table { border-collapse: collapse; margin: 8pt 0; font-size: 9.5pt; width: 100%; }
+  th, td { border: 1px solid #d8d2c0; padding: 2pt 6pt; text-align: left; }
+  th { background: #f3f1ea; }
+</style>
+</head><body>
+<h1>The empty blocks were the pause enforcing itself, and the flag day should move one day, not indefinitely</h1>
+<p class="sub">Reply to bubu&#x27;s letter of 19 August (&quot;testnet is not including any transactions&quot;). Everything below was verified on the committee host today, with heights and identifiers given so each claim can be re-checked.</p>
+<h2>Your three questions, answered first</h2>
+<p><strong>1. What build are the producers running?</strong> All 20 committee producers and the dexnode run one uniform binary built 2026-08-16 from master commit <code>5e6a302d8</code>, reporting version 24.1.0. That commit is 41 commits past the <code>v24.1.0</code> tag, so it is a master snapshot, identical everywhere; the explorer-facing node runs the <code>v24.2.0</code> tag build. The mempool and supervision code is byte-identical between the two (<code>git diff 5e6a302d8 v24.2.0 -- src/txmempool.cpp src/validation.cpp src/supervision.cpp</code> is empty). The scheduled 24.3.0 cutover will put the whole set on a tagged release.</p>
+<p><strong>2. Do their mempools still hold a spend the pause invalidated?</strong> No. At 16:34Z every mempool on the host was empty: node000, node001, node005, node010, node015, node019, the dexnode, and the explorer node all reported <code>size: 0</code>. There was no resident spend of <code>d1bd783c…</code> anywhere, and there still is none.</p>
+<p><strong>3. Do their logs mention <code>Supervision: evicting …</code> around 10:13–10:15Z?</strong> No, on any node, at any point today. Nothing was resident to evict. The logs do show the pause registering cleanly at 10:13:50Z: <code>Supervision: d1bd783c… freezes script 0000…0000</code>.</p>
+<h2>What actually happened</h2>
+<p>Your correlation is real and exact, and the causation runs the other way: the pause did not break the producers, it invalidated the one flow that was feeding them.</p>
+<p>The evidence chain:</p>
+<ul>
+<li><strong>Block 99878 (10:12:44Z)</strong> carries a transfer of asset <code>d1bd783c…</code>. <strong>Block 99879 (10:13:44Z)</strong> carries the pause record for that same asset (<code>SEQFRZ</code>, target <code>0000…0000</code>). This asset is yours, and the pause was an issuer action from your side.</li>
+<li><strong>Every peer link from this host to your node (13.140.162.77) shows the same frozen timestamp</strong>: <code>last_transaction = 10:13:04Z</code>, unchanged for the following six hours. That field updates only when a <em>valid</em> transaction arrives. Your node kept live, relaying connections the whole time (four links, <code>relaytxes: true</code>, normal <code>minfeefilter</code>); what stopped at 10:13Z was your transactions surviving validation here. From the pause onward, everything your node offered was a spend of the paused asset or a child chained onto one, and each was rejected as a frozen-asset spend or as an orphan of a rejected parent.</li>
+<li><strong>The rejections were invisible on both sides</strong>, which is why this took hours to see: rejection logging lives under the <code>mempoolrej</code> debug category and is off by default. It is now enabled on the explorer node, so from 16:51Z onward every rejection at the public entry is logged with its reason.</li>
+<li><strong>Nothing on our host was submitting either.</strong> In the same window the box services happened to be idle; the only submissions were wallet re-broadcasts of transactions that were already invalid. So for six hours the network was offered nothing valid, and the producers, correctly, built empty blocks on schedule. Your own observation confirms the producers were healthy: 382 blocks, every one on time. The failure mode you quoted from <code>feature_supervised_assets.py</code> point 9 predicts the opposite signature, producers skipping their slots. That never happened.</li>
+</ul>
+<p>The window ended the moment anyone offered a valid transaction. The first fresh submission (16:36:25Z) confirmed at height 100262, twenty seconds later, followed within minutes by a faucet payout (100266) and staking transactions (100274 through 100280).</p>
+<h2>Inclusion verified end to end, today</h2>
+<p>Four independent paths, all confirming in one to three blocks:</p>
+<table><thead><tr><th>entry point</th><th>probe</th><th>confirmed at</th></tr></thead><tbody>
+<tr><td>local RPC on a producer</td><td><code>244b23ee…</code></td><td>100262</td></tr>
+<tr><td>public HTTP (explorer <code>sendrawtransaction</code>)</td><td><code>bb417817…</code></td><td>100274</td></tr>
+<tr><td>second RPC probe under full debug logging</td><td><code>5f8d450a…</code></td><td>100277</td></tr>
+<tr><td>pure P2P from a fresh external node, synced from genesis over the public port, exactly your topology (one 24.1.0 peer, one 24.2.0 peer)</td><td><code>3770559b…</code></td><td>100306</td></tr>
+</tbody></table>
+<h2>What to check on your node</h2>
+<p>Your mempool retains transactions this network rejects, and a day of wallet activity has likely chained on top of them. Three steps separate the recoverable from the dead:</p>
+<ol>
+<li><strong>Classify.</strong> For each stuck txid, decode it and check every input&#x27;s prevout asset. Anything touching <code>d1bd783c…</code> is dead until you unpause: the pause is still active, so those spends can never confirm anywhere. Abandon them (<code>abandontransaction</code>), or lift the pause through your issuer flow if the test is complete.</li>
+<li><strong>Rebroadcast the remainder.</strong> A transaction is announced once per peer and never again on that link, and wallet resend timers run on the scale of hours. Push each still-valid transaction through the public entry (<code>sendrawtransaction</code> against the explorer) and you will now get either a confirmation or a logged, quotable rejection reason.</li>
+<li><strong>Tell us your node&#x27;s build.</strong> You asked for ours; yours matters symmetrically. Our binaries evict pause-invalidated spends when the record&#x27;s block connects, and <code>feature_supervised_assets.py</code> asserts that behaviour (re-run green today on current master). A mempool still holding them a day later is behaviour neither of our two binaries produces, so the version and commit of the node at 13.140.162.77 would tell us whether some build has a real eviction gap, which we would then want fixed, or whether this is a restart and <code>mempool.dat</code> subtlety.</li>
+</ol>
+<p>The high-fee probe you broadcast is the one item we could not classify from here, because its rejection predates the logging. Send its txid, or simply re-broadcast it now: the explorer will either include it or log exactly why not.</p>
+<h2>The flag day: move it one day, with your own probe as the gate</h2>
+<p>Holding 101,200 while the incident was open was the right call, and the incident is now closed: no producer, template, or consensus component failed, and the chain&#x27;s ability to include transactions is demonstrated above at every entry point, on the record. An indefinite hold from here couples a scheduled consensus change to an incident that is over.</p>
+<p>The counterproposal: <strong>the budget fork activates about 24 hours out, at a height derived at merge time as <code>tip + 1440</code> rounded up</strong>, so the runway is a true day rather than a number that decays while the branch waits. That gives you the observation window your letter asked for, on a chain you can watch processing transactions.</p>
+<p>And the gate is yours rather than ours: <strong>before activation, broadcast a fresh probe from your node, funded from confirmed coins, fee in tSEQ.</strong> If it fails to confirm within three blocks, we hold the fork and debug together with <code>mempoolrej</code> on. If it confirms, the network has passed exactly the test your letter said it could not, and the fork proceeds. The cutover will be coordinated with Alberto as usual: it takes the committee from 24.1.0 to 24.3.0 in one step, all nodes at once, and the window will be announced before it starts.</p>
+</body></html>
