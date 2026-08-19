@@ -597,7 +597,7 @@ Nothing in the feature itself. What remains is operational and one deliberate om
 The order that matters, learned from the Simplicity and 60-second-block cutovers:
 
 1. Build on the box from a checkout of master, never by copying a binary in. Both clones,
-   `/root/SequentiaByClaude` and `/root/sequentia/SequentiaByClaude`, must end up on the
+   `/root/Sequentia` and `/root/sequentia/Sequentia`, must end up on the
    same commit.
 2. Capture the dynamically loaded wallet set before stopping anything: a restart drops
    wallets that appear in no configuration file.
