@@ -101,6 +101,7 @@ private Q_SLOTS:
     //! Running a pool is a node operation and lives only here.
     void onAnnouncePayout();
     void onPayoutModeChanged();
+    void onPayoutPresetChanged();
 
 private:
     WalletModel* m_wallet_model{nullptr};
@@ -150,7 +151,12 @@ private:
     //! phone or browser wallet that cannot even be online when a block is due.
     QLabel* m_pool_status{nullptr};
     QLabel* m_pool_commitment{nullptr};
+    //! Common payout policies, so an operator picks a shape rather than
+    //! inventing a commission from nothing. "Custom" reveals the raw fields.
+    QComboBox* m_payout_preset{nullptr};
+    QLabel* m_payout_preset_note{nullptr};
     QComboBox* m_payout_mode{nullptr};
+    QLabel* m_payout_mode_label{nullptr};
     //! Which of this wallet's staker keys the policy binds. Only shown when the
     //! wallet stakes with more than one: announcing is per-key, and with several
     //! the RPC cannot guess, so without this the card would be a dead end for
@@ -213,6 +219,10 @@ private:
     //! Refresh the "Run a staking pool" card: what this node's signer commands,
     //! who lent it, how reliably it produces, and what it has committed to.
     void refreshPoolOperator();
+    //! The policy the card is about to announce, read from the preset when one
+    //! is chosen and from the raw controls when it is custom.
+    bool payoutModeIsLottery() const;
+    int64_t payoutCommissionBp() const;
 
     //! Run an RPC (wallet=true uses the /wallet/<name> endpoint; false the node endpoint).
     UniValue callRpc(const std::string& method, const UniValue& params, bool& ok, QString& error, bool wallet = true);

@@ -575,10 +575,13 @@ C, A's weight goes to B and B's own weight goes to C. Consensus also allows **at
 most one unspent record per controller**, because two would make the leader
 election node-dependent.
 
-**Delegating.**
+**Delegating.** Any wallet with a stake can do it from its Staking tab: the
+desktop wallet, the web wallet, Ambra on Android and Ambra for Chromium. Pick a
+pool, delegate, and the same card shows what that pool has committed to, warns
+when it announces a change, and leaves in one action. From a node:
 
 ```
-sequentia-cli listpools                       # who is producing, and on what terms
+sequentia-cli listpools                       # the declared pools, and on what terms
 sequentia-cli delegatestake "<signer pubkey>" # lend this wallet's weight to one
 ```
 
@@ -588,7 +591,7 @@ creates the new one in the *same* transaction. That is not an optimisation - two
 loose transactions could be mined in an order that leaves two live records for
 one controller, which invalidates the block carrying the second.
 
-**Leaving.**
+**Leaving.** The Staking tab's card, or:
 
 ```
 sequentia-cli undelegatestake
@@ -601,7 +604,12 @@ the staked coins were never moved. Use `withdrawstake` for that.
 
 **What a pool is trusted for.** Blocks pay their fees to whoever produced them,
 so a pool's honesty about the *reward* is the only thing at stake. An operator
-may commit to a payout policy on-chain, and a delegator may check it:
+commits to a payout policy on-chain, and a delegator checks it.
+
+Operators do this from the desktop wallet's Staking tab, under **Run a staking
+pool**, which offers the usual arrangements (share everything; share keeping 2%,
+5% or 10%; or pay one committed address) and spells out what each means for the
+people delegating before anything is signed. Running headless:
 
 ```
 sequentia-cli announcepayout lottery null null null 500   # operator: 5% commission
