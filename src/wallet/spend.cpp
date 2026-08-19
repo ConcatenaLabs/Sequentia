@@ -2053,7 +2053,18 @@ bool CreateTransaction(
         BlindDetails* blind_details,
         const IssuanceDetails* issuance_details)
 {
-    if (vecSend.empty()) {
+    // A transaction with nobody to pay is usually a caller that forgot to say
+    // where the money goes, and refusing it is right. It is not the only shape,
+    // though: one that already names the inputs it must spend is asking to spend
+    // THEM, and the change and fee that funding appends are the only outputs it
+    // needs. Lifting a supervision freeze -- a pause included, which is a freeze
+    // on every address -- is exactly that transaction: it spends the freeze
+    // record, pays a fee, and has nothing else to say.
+    //
+    // The same relaxation was already made to the fundrawtransaction guard that
+    // runs before this one; this is the second gate on the same path, and while
+    // it stood an unfreeze could not be funded at all.
+    if (vecSend.empty() && !coin_control.HasSelected()) {
         error = _("Transaction must have at least one recipient");
         return false;
     }
