@@ -538,6 +538,114 @@ expires your stake nor needs renewing:
 That spend ends the stake; the freed SEQ becomes ordinary coin to hold or to pay
 into a fresh staking output and stake again.
 
+## 8b. Delegated staking (staking pools)
+
+A staker does not have to produce its own blocks. It can lend its **stake
+weight** to a **signer** - a pool operator, or simply its own online key - while
+the staked coins stay exactly where they are. Two problems this solves:
+
+- **A stake too small to matter alone.** Weight below the eligibility floor, or
+  merely small, wins blocks so rarely that running a producer for it is not
+  worth the uptime. Pooled behind one signer it earns at the pool's cadence.
+- **The hot-key hazard.** The key in a staking output is both the block-signing
+  identity and the spending key, so producing blocks meant keeping a
+  coin-controlling key on an always-on server. Delegation splits the two: the
+  signer produces, and the key that can move the coins never goes online.
+
+**How it works.** Delegation is a separate small output, a *delegation record*:
+
+```
+<"SEQDEL"> OP_DROP <signer> OP_DROP <controller> OP_CHECKSIG
+```
+
+While that record is unspent, the controller's whole weight counts for the
+signer, and the signer is the key that must produce and sign blocks. The record
+is a **separate output on purpose**, never a field inside the staking script:
+
+- **Custody.** The signer never appears in the staking output's signature check,
+  so it can never spend the stake. Only the controller can. The coins do not
+  move to delegate and do not move to stop.
+- **Rotation under a vesting lock.** Re-pointing or reclaiming spends only the
+  tiny record. A stake frozen for years by a `liquid_locktime` cannot be spent at
+  all, so a signer named *inside* it could never be replaced - a compromised
+  operator key would be irrevocable for the whole lock.
+
+Resolution is **one hop, never chained**: if A delegates to B and B delegates to
+C, A's weight goes to B and B's own weight goes to C. Consensus also allows **at
+most one unspent record per controller**, because two would make the leader
+election node-dependent.
+
+**Delegating.**
+
+```
+sequentia-cli listpools                       # who is producing, and on what terms
+sequentia-cli delegatestake "<signer pubkey>" # lend this wallet's weight to one
+```
+
+`delegatestake` funds the record from the wallet. Calling it again with a
+different signer **re-points** the delegation: it spends the old record and
+creates the new one in the *same* transaction. That is not an optimisation - two
+loose transactions could be mined in an order that leaves two live records for
+one controller, which invalidates the block carrying the second.
+
+**Leaving.**
+
+```
+sequentia-cli undelegatestake
+```
+
+Only the controller's key can spend the record, so leaving is unilateral: no
+cooperation, no permission, no lock and no notice period. The weight counts for
+the controller again the moment the reclaim confirms. This does **not** unstake;
+the staked coins were never moved. Use `withdrawstake` for that.
+
+**What a pool is trusted for.** Blocks pay their fees to whoever produced them,
+so a pool's honesty about the *reward* is the only thing at stake. An operator
+may commit to a payout policy on-chain, and a delegator may check it:
+
+```
+sequentia-cli announcepayout lottery null null null 500   # operator: 5% commission
+sequentia-cli listdelegations                             # delegator: where my weight is, and what is coming
+```
+
+- **direct** - every coinbase must pay a committed script. This stops a silent
+  redirect; it does **not** make the chain check that the destination shares
+  anything with delegators. Trust-minimised, not trustless.
+- **lottery** - every coinbase must pay ONE delegator, drawn weighted by stake
+  from a seed derived from Bitcoin's proof of work, so the draw cannot be
+  biased. Each delegator earns its exact proportional share over time with no
+  accounting at all, at the cost of rare lumpy payouts rather than smoothed
+  income. `commission_bp` is the share of blocks the operator keeps.
+- **neither** - a producer that has announced nothing keeps everything it earns.
+  That is the default, not an abuse, and every listing says so plainly.
+
+A policy cannot bind until it has been announced for the chain's notice period
+(`-pospayoutnotice`, ~1 day on the bundled chains). Announcing does not cancel an
+earlier policy: the one in force at a height is the announced policy with the
+greatest activation at or below it, so a pending change and the current rule
+coexist until the switch.
+
+**Watch the pool you are in.** The notice period is only worth what the delegator
+notices, so the wait is surfaced rather than filed away. `listdelegations`
+reports every announced-but-not-yet-binding change against your own stake, with
+the blocks remaining and a warning; the desktop wallet's Staking tab shows the
+same thing as a banner; and the public
+[staking pool board](https://github.com/GracedEternalKingCabbageMan/sequentia-pool-board)
+pulls every pool's pending change to the top of its page. Because leaving is instant, seeing the notice is the whole
+protection.
+
+**Monitoring a pool's actual work.** `listpools` reports `blocks_produced`
+against `blocks_expected` over a recent window. A signer commanding a tenth of
+the network's weight should produce about a tenth of the blocks; well under that
+means it is offline, missing its slots or losing races, and its delegators are
+earning nothing for the weight they lent it.
+
+**One operator caveat.** The committee BLS key rides in a *staking* output, so an
+operator with no stake of its own cannot register one. Fund a small stake output
+of your own to carry the registration. Keeping a large vesting-locked tranche
+BLS-less (leader-only) and registering the committee key on a separate small,
+freely-spendable stake output is the general form of the same trick.
+
 ## 9. Long-range-attack defenses
 
 Two complementary layers (see [`04-proof-of-stake.md`](04-proof-of-stake.md)):
@@ -576,6 +684,9 @@ Two complementary layers (see [`04-proof-of-stake.md`](04-proof-of-stake.md)):
 | `getanchorstatus` | current Bitcoin anchor and parent-connection health (`not_validated` at height 0 is normal) |
 | `getposschedule` | next slot's seed, leader schedule, committee, and quorum |
 | `getstakerinfo` | the active stake registry |
+| `listpools` | every signer producing blocks: weight commanded, who lent it, what it has committed to paying, announced changes still inside their notice window, and blocks produced against blocks owed |
+| `listdelegations` | where this wallet's stake signs, and any payout change a pool has announced against it but not yet bound (the delegator's watch) |
+| `getdelegationinfo` / `getpayoutinfo` | the raw controller -> signer map, and every payout policy committed on-chain |
 | `getcheckpointinfo` | checkpoints, finality height, conflict alarm, configured pins |
 | `getfeeacceptancepolicy` | the current fee-asset acceptance whitelist |
 

@@ -129,6 +129,107 @@ defaults to 0 so it never silently breaks small-weight test chains. It is
 enforced at connect time (`bad-posvrf-leader-below-min`) and at the producer
 RPCs.
 
+### The delegation layer: weight is keyed by SIGNER, not owner
+
+The registry the elections actually read is keyed by **signer**. A staker (the
+**controller**) may lend its weight to another key by holding an unspent
+**delegation record**, a third bare script:
+
+```
+<"SEQDEL"> OP_DROP <signer> OP_DROP <controller> OP_CHECKSIG
+```
+
+`GetWeight` and `Weights` re-key the merged weight onto signers, so leader
+election, VRF sortition and the eligibility floor all see what a *signer*
+commands rather than what an owner holds. Like the weight and BLS layers, the
+delegation map is a pure function of the UTXO set (`m_deleg_utxo`), so it is
+reorg-safe by construction and rebuilt from scratch at startup.
+
+Three properties follow from the record being a **separate output** rather than
+a field inside the staking script, and they are the whole design:
+
+- **The signer can never spend the stake.** Only the controller's key appears in
+  the staking output's `OP_CHECKSIG`, and the record does not change that.
+  Delegation is non-custodial in the strict sense: no coin moves to delegate, no
+  coin moves to stop, and the key that *can* move the coins never has to be
+  online. This is also what removes the hot-key hazard from ordinary staking,
+  since a staker may delegate to its own hot key and keep the cold one offline.
+- **It survives a vesting lock.** A staking output carrying a multi-year
+  `liquid_locktime` cannot be spent at all, so a signer named inside it could
+  never be replaced: one compromised operator key would be irrevocable for the
+  whole lock. Re-pointing spends only the record.
+- **Leaving is unilateral.** Spending the record needs the controller's
+  signature and nothing else. There is no unbonding delay on it, no cooperation
+  and no notice.
+
+Two rules keep the map well-defined:
+
+- **Resolution is one hop, never chained.** If A delegates to B and B delegates
+  to C, A's weight counts for B and B's own weight counts for C. Chasing chains
+  would admit cycles.
+- **At most one unspent record per controller**, enforced in `ConnectBlock`
+  (`bad-delegation-conflict`, `bad-delegation-exists`). Two live records would
+  make the resolved signer depend on iteration order, and so on the node. This
+  is why re-pointing must spend the old record and create the new one in the
+  *same* transaction: as two loose transactions they could be mined in the order
+  that produces the second record first, invalidating that block.
+
+The apply/revert path has one ordering hazard worth naming. `PosApplyBlockStake`
+adds created outputs *before* subtracting spent ones, so a rotation inside one
+transaction would have its new record erased by the removal of the old.
+`SubUtxoDelegation` therefore erases only if the record being removed is still
+the one in force, and `PosRevertBlockStake` is the exact inverse: restore spent
+records first, then remove created ones.
+
+### Payout policies, and why the notice period exists
+
+Delegation moves the *right to produce*, and blocks pay their fees to whoever
+produced them. So a pool is trusted for exactly one thing: the reward. An
+operator may commit to that on-chain with a payout record, spendable by the
+signer:
+
+```
+<"SEQPAY"> OP_DROP <activation> OP_DROP <mode> OP_DROP <param> OP_DROP <signer> OP_CHECKSIG
+```
+
+`PosRequiredCoinbaseScript(leader, height, seed)` is the single seam: the
+producer builds its coinbase from it and `ConnectBlock` enforces the same
+function. Two modes ship:
+
+- **DIRECT** - the coinbase must pay a committed scriptPubKey. This prevents a
+  *silent* redirect; it does not enforce fairness, since an operator may commit
+  to its own address. Trust-minimised, not trustless.
+- **LOTTERY** - the coinbase must pay ONE participant drawn weighted by stake
+  from the block's election seed, which is `SHA256(parent Bitcoin anchor hash ||
+  height)` and therefore unbiasable. Each delegator earns its exact proportional
+  share over time with zero accounting. It does **not** smooth variance: 1% of a
+  pool is 100% of one block in a hundred. Of the two reasons pools exist, this
+  addresses participation below the floor but not variance reduction. Operator
+  commission is in basis points; at 0 bp the operator still earns as one
+  participant among the rest.
+
+A producer that has committed nothing keeps everything, which is the default
+rather than an abuse.
+
+Consensus requires `activation >= announce_height + g_pos_payout_notice` (2880
+blocks, ~1 day, `-pospayoutnotice` on custom chains only). Announcing does not
+cancel an earlier policy: the policy in force at height h is the announced policy
+with the greatest activation `<= h`, so a pending change and the current rule
+coexist until the switch.
+
+**The notice period is the only reason a delegator can act at all, and it is
+worth exactly what the delegator notices.** Since exit is instant and unilateral,
+the entire protection is "see the change, then leave" - which makes surfacing it
+a consensus-adjacent requirement rather than a nicety. `listdelegations` reports
+every announced-but-not-yet-binding policy against the caller's own stake with
+the blocks remaining; `listpools` does the same for the whole network, and the
+public board renders it above everything else.
+
+**Deliberately not built:** smoothed *and* trustless payouts, which need
+per-delegator epoch reward accounting (the Cardano approach). That is a large
+subsystem, and the two shipped modes let the market decide whether it is wanted
+before it is paid for.
+
 ### The config layer (custom chains only)
 
 A chain may also be configured with a `-staker=<pubkeyhex>:<weight>` layer
