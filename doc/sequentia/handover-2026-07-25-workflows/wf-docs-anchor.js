@@ -4,7 +4,7 @@ export const meta = {
   phases: [ { title: 'Write' }, { title: 'Verify' } ],
 }
 
-const NODE = '/home/aejkohl/SequentiaByClaude'
+const NODE = '/home/aejkohl/Sequentia'
 
 const FACTS = `VERIFIED TECHNICAL FACTS (from a code investigation today; cite/keep accurate, do not restate loosely).
 

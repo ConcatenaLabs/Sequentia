@@ -5,7 +5,7 @@ export const meta = {
 }
 
 const SEQDEX = '/home/aejkohl/seqdex'
-const NODE = '/home/aejkohl/SequentiaByClaude'
+const NODE = '/home/aejkohl/Sequentia'
 
 const EVIDENCE = `CONCRETE EVIDENCE from live testnet4 runs today (real funds, seqdex branch phase3-pure-ln @07cfd41):
 FAILED run (maker -min-btc-conf 1): taker BTC HTLC confirmed at Bitcoin height 145609. Maker then locked the SEQ leg; it landed in seq block dbfd4a076e3b40264f655fd78bc0dfec301781017942777b3b743ce45d1c06f3 with anchorheight=145607, anchorstatus="ok", quorum-certified=true. Taker REFUSED to claim and after 20 minutes aborted with: 'anchor gate not passed in 20m0s: xchain: SEQ leg violates anchor-shortened ordering (anchorheight < BTC-leg height, or anchor not ok) (... anchorheight=145607, btc-leg height=145609 ...) (BTC refundable after T_btc 145867)'.

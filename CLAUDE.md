@@ -11,28 +11,58 @@ inherits from upstream does **not** apply here: the Bitcoin Core review and
 "decision making" process in its second half describes the upstream project. See
 below for what actually happens to a pull request in this repository.
 
-## Pull requests: open one, then merge it yourself
+<!-- BEGIN SHARED AGENT CONVENTIONS: identical in every Sequentia repo. Change it in all of them together. -->
+## Working with git and GitHub here
 
-There is no review process on this project. Open a PR so the change and its
-reasoning are recorded in history, then merge it immediately. Do not leave PRs
-open waiting for a review that will not come.
+These rules are the same in every Sequentia repository. They are repeated in each
+one because this file is the only thing an agent is guaranteed to read, whatever
+machine it is working from.
 
-If a particular PR should stay open, the repository owner will say so for that PR
-specifically. That never generalises to the next one.
+**Nothing pushed to GitHub credits Claude, Anthropic, or any AI tool.** No
+`Co-Authored-By: Claude` trailer, no `Claude-Session:` trailer or `claude.ai`
+link, no "Generated with Claude Code" in a commit message or a pull request body,
+no `claude/*` branch names or session ids, and no mention in source, comments,
+docs or issue text. Agent tooling offers several of these by default; compose the
+message without them rather than stripping them afterwards.
 
-Merging is not deploying. Even a consensus change should be merged straight away
-— the step that needs coordination is the node cutover, not the merge.
-
-## Commits
-
-Author commits as
+**Author every commit as**
 `GracedEternalKingCabbageMan <151803062+GracedEternalKingCabbageMan@users.noreply.github.com>`.
+Never a personal address.
 
-## These repositories are public
+**Every change lands through a pull request that you merge yourself, at once.**
+There is no reviewer on this project; the pull request exists so the reasoning is
+recorded beside the diff. Branch, push, open it, merge it, delete the branch, all
+in one sitting. Pushing straight to the default branch is the rule most often
+broken here, and it is the one that costs the record. A pull request stays open
+only when the repository owner asks for that specific one, and that never carries
+over to the next.
 
-Never commit private keys, seeds, `wallet.dat`, RPC credentials, `.env` files or
-API tokens. Scan the diff before every commit. Secrets belong on the server and
-in offline backups, never in git.
+**Name branches `area/short-description`**: `fix/`, `doc/`, `feature/`, `test/`,
+`build/`, or the component being changed. Never a tool name, a session id, or
+`worktree-*`.
+
+**Write the subject as `area: what changed`**, one line, 72 characters at the
+outside and 50 where you can manage it. Put the reasoning in the body, and
+explain why rather than what.
+
+**These repositories are public and world-readable.** Never commit private keys,
+seeds, `wallet.dat`, RPC credentials, `.env` files or API tokens. Read the diff
+before every commit. Secrets belong on the server and in offline backups.
+
+**A file belongs to the repository whose code it describes.** Decide which repo
+owns it before writing it; if it landed in the wrong one, move it rather than
+deleting it.
+
+**Push the same day you commit.** The testnet server pulls only from GitHub, so a
+branch left on one laptop is invisible to every other machine and to the box.
+<!-- END SHARED AGENT CONVENTIONS -->
+
+Two things this repository adds to the rules above. Merging is not deploying:
+even a consensus change is merged straight away, because the step that needs
+coordination is the node cutover rather than the merge. And every consensus
+change bumps the version in the same pull request, then gets a matching git tag,
+without which the download page keeps serving the old build; `CONTRIBUTING.md`
+carries the reasoning.
 
 ## Deploying to the testnet server
 
