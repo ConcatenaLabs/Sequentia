@@ -330,7 +330,7 @@ bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
 
         // Check policy limits for Taproot spends:
         // - MAX_STANDARD_TAPSCRIPT_STACK_ITEM_SIZE limit for stack item size
-        // - No annexes
+        // - No annexes, except on a Simplicity leaf (SEQUENTIA)
         if (witnessversion == 1 && witnessprogram.size() == WITNESS_V1_TAPROOT_SIZE && !p2sh) {
             // Missing witness; invalid by consensus rules
             if (i >= tx.witness.vtxinwit.size()) {
@@ -338,24 +338,43 @@ bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
             }
             // Taproot spend (non-P2SH-wrapped, version 1, witness program size 32; see BIP 341)
             Span stack{tx.witness.vtxinwit[i].scriptWitness.stack};
+            bool has_annex = false;
             if (stack.size() >= 2 && !stack.back().empty() && stack.back()[0] == ANNEX_TAG) {
-                // Annexes are nonstandard as long as no semantics are defined for them.
-                return false;
+                // Annexes are nonstandard as long as no semantics are defined for
+                // them -- with one SEQUENTIA exception, decided below once the leaf
+                // version is known. A Simplicity spend buys execution budget with
+                // witness bytes, so an annex is the one place a program can be
+                // given budget without also being given bytes it has to read. It
+                // has a defined meaning there, and Simplicity's sigAllHash commits
+                // to it (txHash -> inputsHash -> inputAnnexesHash), so a relay node
+                // cannot strip it without invalidating the spend.
+                has_annex = true;
+                SpanPopBack(stack);
             }
             if (stack.size() >= 2) {
                 // Script path spend (2 or more stack elements after removing optional annex)
                 const auto& control_block = SpanPopBack(stack);
                 SpanPopBack(stack); // Ignore script
                 if (control_block.empty()) return false; // Empty control block is invalid
-                if ((control_block[0] & TAPROOT_LEAF_MASK) == TAPROOT_LEAF_TAPSCRIPT) {
+                const uint8_t leaf_version = control_block[0] & TAPROOT_LEAF_MASK;
+                if (has_annex) {
+                    // SEQUENTIA: the carve-out is deliberately narrow -- only a
+                    // Simplicity leaf, and only up to a size the chain could
+                    // plausibly need. The cap is policy, not consensus, so raising
+                    // it later costs a relay update rather than a fork.
+                    if (leaf_version != TAPROOT_LEAF_TAPSIMPLICITY) return false;
+                    if (tx.witness.vtxinwit[i].scriptWitness.stack.back().size() > MAX_STANDARD_SIMPLICITY_ANNEX_SIZE) return false;
+                }
+                if (leaf_version == TAPROOT_LEAF_TAPSCRIPT) {
                     // Leaf version 0xc0 (aka Tapscript, see BIP 342)
                     for (const auto& item : stack) {
                         if (item.size() > MAX_STANDARD_TAPSCRIPT_STACK_ITEM_SIZE) return false;
                     }
                 }
             } else if (stack.size() == 1) {
-                // Key path spend (1 stack element after removing optional annex)
-                // (no policy rules apply)
+                // Key path spend (1 stack element after removing optional annex).
+                // No leaf runs, so an annex here still has no defined meaning.
+                if (has_annex) return false;
             } else {
                 // 0 stack elements; this is already invalid by consensus rules
                 return false;

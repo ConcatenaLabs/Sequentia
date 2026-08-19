@@ -422,6 +422,35 @@ struct Params {
             && height == utxo_recovery.height
             && utxo_recovery.chain_genesis == hashGenesisBlock;
     }
+    //! SEQUENTIA: height from which a Simplicity witness byte buys
+    //! SIMPLICITY_BUDGET_PER_WITNESS_BYTE weight units of execution budget
+    //! rather than one. 0 = in force from genesis.
+    //!
+    //! The rule itself needs no activation gate: it only ever accepts more, so
+    //! no previously accepted block can fail under it (CONTRIBUTING.md). What
+    //! the gate buys is a FLAG DAY. Without one the fork is unscheduled -- it
+    //! fires the instant anyone broadcasts a spend that the old budget could not
+    //! pay for, and every node still on the old rule rejects that block and
+    //! forks off. With one, the new binary keeps enforcing the old budget until
+    //! H, so nobody can trigger the split early and every operator has a date.
+    int simplicity_budget4_height{0};
+    //! Genesis hash of the chain the height above was written for.
+    uint256 simplicity_budget4_chain_genesis;
+    //! Whether the wider Simplicity budget is in force at `height`.
+    //!
+    //! Both gates again, and for the reason UtxoRecoveryAppliesAt gives: a fresh
+    //! chain -- regtest, a re-genesised testnet, a future mainnet -- has no
+    //! history and no other operators to coordinate with, so it should have the
+    //! rule from genesis rather than inherit a flag day meant for somebody
+    //! else's running network. Binding to the genesis hash is what makes a
+    //! re-genesis DROP the delay instead of waiting out a height that no longer
+    //! means anything.
+    bool SimplicityBudget4ActiveAt(int height) const
+    {
+        if (simplicity_budget4_height == 0) return true;
+        if (simplicity_budget4_chain_genesis != hashGenesisBlock) return true;
+        return height >= simplicity_budget4_height;
+    }
     CAmount genesis_subsidy;
     //! SEQUENTIA: per-chain maximum block weight (BIP141 weight units). 0 means
     //! "use the global MAX_BLOCK_WEIGHT". Sequentia sets this to 200,000 (a

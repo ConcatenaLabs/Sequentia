@@ -46,6 +46,12 @@ static const unsigned int MAX_STANDARD_P2WSH_STACK_ITEMS = 100;
 static const unsigned int MAX_STANDARD_P2WSH_STACK_ITEM_SIZE = 80;
 /** The maximum size in bytes of each witness stack item in a standard BIP 342 script (Taproot, leaf version 0xc0) */
 static const unsigned int MAX_STANDARD_TAPSCRIPT_STACK_ITEM_SIZE = 80;
+/** SEQUENTIA: largest annex that is standard on a Simplicity (0xbe) leaf spend.
+ * An annex is how a Simplicity program buys execution budget without buying
+ * bytes it must read; 100,000 bytes buys 400,000 weight units of budget under
+ * SIMPLICITY_BUDGET_PER_WITNESS_BYTE, which is a whole Sequentia block, so
+ * nothing legitimate needs more. Annexes remain nonstandard everywhere else. */
+static const unsigned int MAX_STANDARD_SIMPLICITY_ANNEX_SIZE = 100000;
 /** The maximum size in bytes of a standard witnessScript */
 static const unsigned int MAX_STANDARD_P2WSH_SCRIPT_SIZE = 3600;
 /** The maximum size of a standard ScriptSig */

@@ -159,6 +159,13 @@ enum : uint32_t {
     //
     SCRIPT_VERIFY_SIMPLICITY = (1U << 23),
 
+    // SEQUENTIA: a Simplicity witness byte buys SIMPLICITY_BUDGET_PER_WITNESS_BYTE
+    // weight units of execution budget rather than one. Set from height by
+    // GetBlockScriptFlags; see Consensus::Params::SimplicityBudget4ActiveAt for
+    // why a rule that only ever accepts more is gated at all.
+    //
+    SCRIPT_VERIFY_SIMPLICITY_BUDGET4 = (1U << 24),
+
     // Constants to point to the highest flag in use. Add new flags above this line.
     //
     SCRIPT_VERIFY_END_MARKER
