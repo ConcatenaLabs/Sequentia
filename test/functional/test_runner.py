@@ -168,6 +168,7 @@ BASE_SCRIPTS = [
     'feature_pignus_vault.py',
     'feature_pignus_oracle_set.py',
     'feature_pignus_offer.py',
+    'feature_pignus_attack.py',
     # vv Tests less than 60s vv
     'p2p_sendheaders.py',
     'wallet_importmulti.py --legacy-wallet',
