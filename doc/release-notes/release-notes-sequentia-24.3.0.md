@@ -68,7 +68,7 @@ close that:
 | `undelegatestake` | spend the record back. Unilateral, no lock, no notice |
 | `announcepayout` | the operator side. Refuses an activation inside the notice period rather than letting the node reject the block later |
 | `listdelegations` | where this wallet's stake signs, and what the pool holding it has committed to |
-| `listpools` | every signer producing blocks, what it commands, and how reliably it produces |
+| `listpools` | the declared pools: what each commands, and how reliably it produces |
 
 None of this changes consensus. Every rule these work within was already enforced,
 so old and new nodes agree on validity.
@@ -83,6 +83,14 @@ without being announced a notice period in advance, but that only protects a
 delegator who *sees* the notice. Every announced-but-not-yet-binding change against
 this wallet's stake is now reported with the blocks remaining and a plain warning.
 Since leaving is instant and unilateral, seeing it is the entire protection.
+
+**A pool is a signer that declared itself one**, by announcing a payout policy.
+That is the only deliberate on-chain opt-in there is, and `listpools` lists
+nothing else. Every chain has stakers producing for themselves; calling those
+pools would put words in their mouth, and would drown the operators actually
+asking for delegations. `include_undeclared` still shows them, each flagged, and
+an explicit `signer` is always answered so a wallet can describe whichever signer
+a stake is lent to.
 
 **`listpools` reports `blocks_produced` against `blocks_expected`**, the number
 nobody advertises: a pool holding a tenth of the weight should produce about a tenth
