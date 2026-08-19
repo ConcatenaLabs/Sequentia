@@ -4,7 +4,7 @@ export const meta = {
   phases: [ { title: 'Cut' }, { title: 'Verify' } ],
 }
 
-const NODE = '/home/aejkohl/SequentiaByClaude'
+const NODE = '/home/aejkohl/Sequentia'
 
 const RULES = `HOUSE RULES: NO em dashes. "Sequentia" is the network, NEVER abbreviated "SEQ" (SEQ is the ticker of the token named "Sequence"). Final publishable prose. Keep the file's existing wrap width.
 FIRST PRINCIPLE: Bitcoin anchoring is supreme consensus law. Never present -validateanchor=0 as reasonable.
