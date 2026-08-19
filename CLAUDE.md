@@ -69,8 +69,8 @@ carries the reasoning.
 The server pulls operational code from GitHub only. Never edit source on the
 server, and never copy binaries onto it — `git` checkout there, then build there.
 
-Two clones must stay consistent: `/root/SequentiaByClaude` (the run directory,
-the one the nodes execute) and `/root/sequentia/SequentiaByClaude`. They are
+Two clones must stay consistent: `/root/Sequentia` (the run directory,
+the one the nodes execute) and `/root/sequentia/Sequentia`. They are
 frequently on detached HEAD at different commits, so `git pull` may not do what
 you expect; fetch and check out explicitly.
 

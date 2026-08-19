@@ -73,7 +73,7 @@ a reason; the others still publish.
 
 ## Why it builds where it does
 
-The committee is started from `/root/SequentiaByClaude/src/sequentiad`. A release
+The committee is started from `/root/Sequentia/src/sequentiad`. A release
 build in that tree would replace the binary twenty running nodes were started from,
 and because a running process keeps its inode the swap would only surface at the next
 restart. The publisher builds under `/root/sequentia/release-build` and writes nowhere
