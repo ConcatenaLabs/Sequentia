@@ -4,6 +4,7 @@
 
 #include <addrdb.h>
 #include <anchor.h>
+#include <assetsdir.h>
 #include <banman.h>
 #include <chain.h>
 #include <chainparams.h>
@@ -35,6 +36,7 @@
 #include <rpc/protocol.h>
 #include <rpc/server.h>
 #include <shutdown.h>
+#include <supervision.h>
 #include <support/allocators/secure.h>
 #include <sync.h>
 #include <timedata.h>
@@ -661,7 +663,29 @@ public:
         // mempool, say) is the node's problem, not the transaction's.
         if (!state.IsInvalid()) return std::nullopt;
 
-        return interfaces::MempoolRefusal{state.GetRejectReason(),
+        std::string reason = state.GetRejectReason();
+        // A pause is stored as a freeze on every target, so consensus refuses a
+        // paused asset with the frozen reason. Right as a rule and wrong as an
+        // explanation: it tells a holder their address was singled out when the
+        // whole asset was stopped, which sends them looking for a freeze that
+        // does not exist. The registry knows which it was and the debug message
+        // names the asset, so the distinction is drawn here, where the registry
+        // is -- once per transaction, rather than per row in a wallet that has
+        // no business knowing what a pause is.
+        //
+        // The consensus reject reason is untouched: this string is returned
+        // through this interface and never goes on the wire.
+        if (reason == "bad-txns-asset-frozen") {
+            const std::string debug = state.GetDebugMessage();
+            const size_t at = debug.rfind(' ');
+            if (at != std::string::npos) {
+                const CAsset asset = GetAssetFromString(debug.substr(at + 1));
+                if (!asset.IsNull() && SupervisionRegistry::GetInstance().IsPaused(asset)) {
+                    reason = "bad-txns-asset-paused";
+                }
+            }
+        }
+        return interfaces::MempoolRefusal{reason,
                                           state.GetResult() == TxValidationResult::TX_CONSENSUS};
     }
     bool broadcastTransaction(const CTransactionRef& tx,

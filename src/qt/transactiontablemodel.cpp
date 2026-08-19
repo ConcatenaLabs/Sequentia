@@ -367,7 +367,10 @@ QString TransactionTableModel::formatTxStatus(const TransactionRecord *wtx) cons
         // user looking for funds that had silently stopped counting.
         status = tr("Rejected by the network: %1").arg(GUIUtil::describeRejectReason(wtx->status.reject_reason));
         if (wtx->status.reject_frees_inputs) {
-            status += QLatin1String(" ") + tr("(the funds it was using are available again)");
+            // "Back in your balance", not "available again": a freeze or a pause
+            // releases the inputs without making the asset spendable, and the
+            // claim that mattered here was only ever that nothing went missing.
+            status += QLatin1String(" ") + tr("(the funds it was using are back in your balance)");
         }
         break;
     case TransactionStatus::Confirming:

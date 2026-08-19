@@ -906,6 +906,13 @@ QString describeRejectReason(const QString& reject_reason)
     if (reject_reason == QLatin1String("bad-txns-asset-frozen")) {
         return QObject::tr("the asset being spent is frozen at that address");
     }
+    // Consensus calls this one frozen too -- a pause is a freeze on every
+    // address -- and the node tells them apart before it gets here. Worth the
+    // separate wording: the holder of a paused asset has done nothing to their
+    // address, and nothing about their address will fix it.
+    if (reject_reason == QLatin1String("bad-txns-asset-paused")) {
+        return QObject::tr("the whole asset is paused by its issuer, not just this address");
+    }
     if (reject_reason == QLatin1String("bad-txns-supervision-unfreeze")) {
         return QObject::tr("the unfreeze is not signed by the asset's current supervision key");
     }
@@ -916,6 +923,16 @@ QString describeRejectReason(const QString& reject_reason)
         return QObject::tr("a supervised asset cannot be sent to a confidential address");
     }
     return reject_reason;
+}
+
+bool rejectionBlocksTheAsset(const QString& reject_reason)
+{
+    // Only these two. A supervised asset sent to a confidential address, or a
+    // malformed or unauthorised record, refuses THAT transaction; the holder's
+    // units are untouched and spending them another way works. A freeze or a
+    // pause refuses the units themselves, wherever they are held.
+    return reject_reason == QLatin1String("bad-txns-asset-frozen") ||
+           reject_reason == QLatin1String("bad-txns-asset-paused");
 }
 
 QString ellipsizeMiddle(const QString& text, int head, int tail)

@@ -83,10 +83,24 @@ QString TransactionDesc::FormatTxStatus(const interfaces::WalletTx& wtx, const i
                 QString refused = tr("rejected by the network: %1")
                     .arg(GUIUtil::describeRejectReason(QString::fromStdString(status.reject_reason)));
                 if (status.reject_frees_inputs) {
+                    const QString reason = QString::fromStdString(status.reject_reason);
                     refused += QLatin1String("<br>") +
-                        tr("The funds this payment was using are available again. The payment "
-                           "itself is still here and will be sent if the network stops refusing "
-                           "it — abandon it below if you no longer want that.");
+                        tr("The funds this payment was using are back in your balance, so nothing "
+                           "is missing from your totals.");
+                    // The two halves are not equally free. Whatever paid the fee is
+                    // spendable again; units of a frozen or paused asset are back in
+                    // the balance and still cannot be moved, by anyone, anywhere. Saying
+                    // "available again" of both was true of the fee and false of the
+                    // asset the user was actually trying to send.
+                    if (GUIUtil::rejectionBlocksTheAsset(reason)) {
+                        refused += QLatin1String(" ") +
+                            tr("What paid the fee you can spend again. The supervised asset "
+                               "cannot be moved by anyone, wherever it is held, until the issuer "
+                               "lifts this.");
+                    }
+                    refused += QLatin1String(" ") +
+                        tr("The payment itself is still here and will be sent if the network "
+                           "stops refusing it — abandon it below if you no longer want that.");
                 }
                 return refused;
             }
