@@ -3401,9 +3401,16 @@ static RPCHelpMan getposschedule()
 static RPCHelpMan getstakerinfo()
 {
     return RPCHelpMan{"getstakerinfo",
-                "\nFor Proof-of-Stake chains: returns the registered stakers and their stake weights.\n",
+                "\nFor Proof-of-Stake chains: returns the registered stakers and their stake weights.\n"
+                "\nBy default the weights are EFFECTIVE and keyed by SIGNER: a delegation re-points a\n"
+                "controller's weight onto the signer that produces blocks with it, so a controller that has\n"
+                "delegated does not appear here at all and its pool operator appears carrying weight that is\n"
+                "not its own. That is the right answer for block production and the wrong one for asking who\n"
+                "OWNS a stake, which is what `bycontroller` returns: raw weight keyed by the controller, the\n"
+                "only key that can ever spend it, whether or not it is delegated.\n",
                 {
                     {"verbose", RPCArg::Type::BOOL, RPCArg::Default{false}, "If true, each value is an object with the stake weight and (impl spec Option A) the registered committee BLS public key, if any."},
+                    {"bycontroller", RPCArg::Type::BOOL, RPCArg::Default{false}, "If true, return raw weight keyed by CONTROLLER, before delegation is applied. A delegated stake still counts for the key that owns it, and a pool operator is credited only with its own."},
                 },
                 {
                     RPCResult{"for verbose=false (default)",
@@ -3423,15 +3430,23 @@ static RPCHelpMan getstakerinfo()
         throw JSONRPCError(RPC_MISC_ERROR, "Proof-of-Stake (con_pos) is not enabled on this chain");
     }
     const bool verbose = !request.params[0].isNull() && request.params[0].get_bool();
+    const bool bycontroller = !request.params[1].isNull() && request.params[1].get_bool();
     const StakeRegistry& reg = StakeRegistry::GetInstance();
+    const std::map<CPubKey, uint64_t> weights = bycontroller ? reg.ControllerWeights() : reg.Weights();
     UniValue result(UniValue::VOBJ);
-    for (const auto& entry : reg.Weights()) {
+    for (const auto& entry : weights) {
         if (!verbose) {
             result.pushKV(HexStr(entry.first), (uint64_t)entry.second);
         } else {
             UniValue o(UniValue::VOBJ);
             o.pushKV("weight", (uint64_t)entry.second);
             o.pushKV("blspubkey", HexStr(reg.GetBls(entry.first)));
+            if (bycontroller) {
+                const CPubKey signer = reg.SignerFor(entry.first);
+                const bool delegated = signer.IsValid() && signer != entry.first;
+                o.pushKV("delegated", delegated);
+                if (delegated) o.pushKV("signer", HexStr(signer));
+            }
             result.pushKV(HexStr(entry.first), o);
         }
     }
