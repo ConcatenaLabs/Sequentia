@@ -28,7 +28,9 @@ What this proves, and why each case is here:
                                       callable at any price once due, and the
                                       surplus still goes home
   REJECT RECOVER before recover_after
-  PASS   RECOVER after recover_after  the oracle-liveness backstop
+  PASS   RECOVER after recover_after  the oracle-liveness backstop, and it too
+                                      needs no signature -- its destination is
+                                      pinned to the lender
   REJECT a blinded lender credit      the covenant cannot police what it cannot
                                       read, so it refuses to try
   REJECT output aliasing              one payment cannot settle two loans
@@ -286,16 +288,12 @@ class PignusVaultTest(BitcoinTestFramework):
         tx.vout.append(CTxOut(CTxOutValue(FEE)))
         partial = node.signrawtransactionwithwallet(tx.serialize().hex())
         tx = tx_from_hex(partial["hex"])
-        spent = [self.ctxout(COLLATERAL, bytes(self.tap.scriptPubKey), self.C_OUT),
-                 self.ctxout(btc_amt, bytes.fromhex(btc["scriptPubKey"]),
-                             b"\x01" + bytes.fromhex(btc["asset"])[::-1])]
-        msg = TaprootSignatureHash(tx, spent, 0, self.genesis, 0,
-                                   scriptpath=True, script=self.leaves["recover"])
-        sig = sign_schnorr(self.lender_sec, msg)
         while len(tx.wit.vtxinwit) < len(tx.vin):
             tx.wit.vtxinwit.append(CTxInWitness())
+        # No signature: the destination is pinned to the lender's payout, so the
+        # leaf reads everything it enforces out of the transaction.
         tx.wit.vtxinwit[0].scriptWitness.stack = pig.recover_witness(
-            self.tap, self.leaves, sig)
+            self.tap, self.leaves)
         return tx
 
     # ----------------------------------------------------------- the test
@@ -340,7 +338,7 @@ class PignusVaultTest(BitcoinTestFramework):
         self.recover_after = self.maturity + 100
         self.tap, self.leaves = pig.vault_taptree(
             asset_c=asset_c, asset_d=asset_d, debt=DEBT,
-            lender_prog=lender_x, borrower_prog=borrower_x, lender_x=lender_x,
+            lender_prog=lender_x, borrower_prog=borrower_x,
             feed_id=self.feed_id, oracle_x=oracle_x, strike=STRIKE,
             maturity=self.maturity, recover_after=self.recover_after,
             not_before=NOT_BEFORE, bonus_num=BONUS_NUM, bonus_den=BONUS_DEN,
@@ -548,7 +546,6 @@ class PignusVaultTest(BitcoinTestFramework):
             asset_d=bytes.fromhex(self.D_display)[::-1], debt=DEBT,
             lender_prog=lender20, borrower_prog=borrower20,
             lender_ver=0, borrower_ver=0,
-            lender_x=compute_xonly_pubkey(self.lender_sec)[0],
             feed_id=self.feed_id,
             oracle_x=compute_xonly_pubkey(self.oracle_sec)[0],
             strike=STRIKE, maturity=node.getblockcount() + 400,

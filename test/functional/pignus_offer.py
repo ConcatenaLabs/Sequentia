@@ -122,10 +122,11 @@ def _tag_prefix(tag):
 # --------------------------------------------------------- the single leaf
 
 def offer_vault_leaf(*, asset_c, asset_d, debt, lender_prog, borrower_prog,
-                     lender_x, feed_id, strike, maturity, recover_after,
+                     feed_id, strike, maturity, recover_after,
                      not_before, oracle_x=None, oracles=None,
                      oracle_threshold=None, bonus_num=105, bonus_den=100,
-                     price_scale=pig.PRICE_SCALE, max_price=None):
+                     price_scale=pig.PRICE_SCALE, max_price=None,
+                     lender_ver=1, borrower_ver=1):
     """All four exits in ONE leaf, chosen by a selector at the top of the witness.
 
     The bodies are the four-leaf vault's own, so an offer-originated loan
@@ -140,14 +141,17 @@ def offer_vault_leaf(*, asset_c, asset_d, debt, lender_prog, borrower_prog,
         "loan too large for 64-bit seizure arithmetic "
         f"(gross={gross}, scale={price_scale}, bound={bound})")
 
-    repay = pig._repay_body(asset_c, asset_d, debt, lender_prog, borrower_prog)
+    repay = pig._repay_body(asset_c, asset_d, debt, lender_prog, borrower_prog,
+                            lender_ver, borrower_ver)
     liq = pig._seizure_body(asset_c, asset_d, debt, lender_prog, borrower_prog,
                             feed_id, keys, threshold, not_before, strike,
-                            gross, price_scale, None)
+                            gross, price_scale, None, lender_ver, borrower_ver)
     dflt = pig._seizure_body(asset_c, asset_d, debt, lender_prog, borrower_prog,
                              feed_id, keys, threshold, not_before, None,
-                             gross, price_scale, maturity)
-    recover = [recover_after, OP_CHECKLOCKTIMEVERIFY, OP_DROP, lender_x, OP_CHECKSIG]
+                             gross, price_scale, maturity,
+                             lender_ver, borrower_ver)
+    recover = list(pig.build_recover_leaf(recover_after, asset_c, lender_prog,
+                                          lender_ver))
 
     s = []
     s += [OP_DUP, OP_0, OP_EQUAL, OP_IF, OP_DROP] + repay + [OP_ELSE]
@@ -175,9 +179,14 @@ def offer_vault_chunks(**kw):
     disagree with the leaf the vault actually uses.
     """
     kw = dict(kw)
-    kw["borrower_prog"] = _SENTINEL
+    # The sentinel has to be the same LENGTH as the real borrower program, or
+    # the leaf it produces is a different size from the one that will actually
+    # be funded and every offset after it moves.
+    ver = kw.get("borrower_ver", 1)
+    sentinel = _SENTINEL[:20] if ver == 0 else _SENTINEL
+    kw["borrower_prog"] = sentinel
     blob = bytes(offer_vault_leaf(**kw))
-    chunks = blob.split(_SENTINEL)
+    chunks = blob.split(sentinel)
     assert len(chunks) >= 2, "borrower key does not appear in the leaf"
     return chunks
 
@@ -222,7 +231,8 @@ def build_take_leaf(*, asset_c, asset_d, principal, collateral, vault_kwargs):
     simply fails OP_TWEAKVERIFY.
     """
     chunks = offer_vault_chunks(**vault_kwargs)
-    leaf_len = sum(len(c) for c in chunks) + 32 * (len(chunks) - 1)
+    prog_len = 20 if vault_kwargs.get("borrower_ver", 1) == 0 else 32
+    leaf_len = sum(len(c) for c in chunks) + prog_len * (len(chunks) - 1)
 
     s = []
     # --- rebuild the vault address from the witness key -------------------
@@ -257,19 +267,35 @@ def build_take_leaf(*, asset_c, asset_d, principal, collateral, vault_kwargs):
     return CScript(s)
 
 
-def build_offer_refund_leaf(expiry_locktime, lender_x):
-    """The lender withdraws an untaken offer after its expiry."""
-    assert len(lender_x) == 32
-    return CScript([expiry_locktime, OP_CHECKLOCKTIMEVERIFY, OP_DROP,
-                    lender_x, OP_CHECKSIG])
+def build_offer_refund_leaf(expiry_locktime, asset_d, lender_prog, lender_ver=1):
+    """Return an untaken offer to the lender, after its expiry.
+
+    Signature-free and permissionless, for the same reason RECOVER is: the
+    destination is pinned to the lender's payout, so anyone may trigger it and
+    it can only ever pay the lender. A lender using a browser wallet has no key
+    to sign a covenant leaf with, and an offer whose principal could only be
+    reclaimed with a signature they cannot make would be a trap.
+    """
+    pig._check_prog(lender_prog, lender_ver)
+    s = [expiry_locktime, OP_CHECKLOCKTIMEVERIFY, OP_DROP]
+    s += [OP_PUSHCURRENTINPUTINDEX, OP_INSPECTINPUTVALUE, OP_1, OP_EQUALVERIFY]
+    s += _CREDIT_IDX + [OP_INSPECTOUTPUTASSET, OP_1, OP_EQUALVERIFY,
+                        asset_d, OP_EQUALVERIFY]
+    s += _CREDIT_IDX + [OP_INSPECTOUTPUTSCRIPTPUBKEY, pig._ver_op(lender_ver),
+                        OP_EQUALVERIFY, lender_prog, OP_EQUALVERIFY]
+    s += _CREDIT_IDX + [OP_INSPECTOUTPUTVALUE, OP_1, OP_EQUALVERIFY]
+    s += [OP_SWAP, OP_GREATERTHANOREQUAL64]
+    return CScript(s)
 
 
 def offer_taptree(*, asset_c, asset_d, principal, collateral, vault_kwargs,
-                  expiry_locktime, lender_x, internal_key=NUMS):
+                  expiry_locktime, internal_key=NUMS):
     take = build_take_leaf(asset_c=asset_c, asset_d=asset_d,
                            principal=principal, collateral=collateral,
                            vault_kwargs=vault_kwargs)
-    refund = build_offer_refund_leaf(expiry_locktime, lender_x)
+    refund = build_offer_refund_leaf(expiry_locktime, asset_d,
+                                     vault_kwargs["lender_prog"],
+                                     vault_kwargs.get("lender_ver", 1))
     tap = taproot_construct(internal_key, [("take", take), ("refund", refund)])
     return tap, {"take": take, "refund": refund}
 
@@ -288,8 +314,10 @@ def take_witness(tap, leaves, borrower_prog, vault_tap):
             control_block(tap, "take")]
 
 
-def offer_refund_witness(tap, leaves, sig_lender):
-    return [sig_lender, bytes(leaves["refund"]), control_block(tap, "refund")]
+def offer_refund_witness(tap, leaves):
+    """No signature: the refund's destination is pinned, so anyone may trigger
+    it and it can only pay the lender."""
+    return [bytes(leaves["refund"]), control_block(tap, "refund")]
 
 
 # --------------------------------------------------- vault spend witnesses
