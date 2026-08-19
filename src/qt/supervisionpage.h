@@ -11,9 +11,12 @@
 #include <QVector>
 #include <QWidget>
 
+#include <asset.h>
 #include <consensus/amount.h>
 #include <univalue.h>
 
+class ClientModel;
+class FeeSelectionWidget;
 class WalletModel;
 class PlatformStyle;
 
@@ -54,6 +57,10 @@ public:
     explicit SupervisionPage(const PlatformStyle* platformStyle, QWidget* parent = nullptr);
 
     void setModel(WalletModel* model);
+    //! Only for the block signal. A fee is judged from the whitelist, the asset
+    //! registry and the price feed, none of which announce themselves; a new block
+    //! is the one tick that reliably arrives after they have moved.
+    void setClientModel(ClientModel* client_model);
 
     //! Whether this wallet has any supervised asset it can act for. False keeps the
     //! tab out of the sidebar entirely.
@@ -105,6 +112,12 @@ private:
     WalletModel* m_wallet_model{nullptr};
     const PlatformStyle* m_platform_style;
 
+    //! Which asset a record pays its fee in and at what rate. The same widget the
+    //! Send tab uses: an issuer freezing an address is choosing a fee asset under
+    //! exactly the rules a payment is, and the two pages must not be able to drift
+    //! apart about what those rules are.
+    FeeSelectionWidget* m_fee_widget{nullptr};
+
     QVector<Asset> m_assets;
     //! Freeze records found for the selected asset, by target hash.
     QHash<QString, Record> m_records;
@@ -150,10 +163,37 @@ private:
     //! Whether this wallet can sign with the given x-only key.
     bool walletHoldsKey(const QString& xonly_hex) const;
 
-    //! An unspent, explicit policy-asset output to build a record transaction on.
-    //! Explicit because a record transaction is built and signed raw here: a
-    //! confidential input would need blinding this path does not do.
-    bool fundingOutpoint(QString& txid, int& vout, CAmount& amount, QString& error);
+    //! Assemble a record's output script from a signature. The signature is not
+    //! verified here or anywhere on the way to the chain, which is what lets the
+    //! same call produce the placeholder the funding pass is priced over.
+    QString recordScript(const QString& kind, const QString& asset, const UniValue& target,
+                         const UniValue& old_key, const QString& signature, QString& error);
+
+    //! The asset a record transaction pays its fee in.
+    CAsset selectedFeeAsset() const;
+
+    //! Price a record transaction without making one, so the fee panel can say
+    //! what a freeze will cost before the issuer commits to it. The wallet is
+    //! asked to fund a placeholder record and the fee it charges is the answer --
+    //! its own figure, over its own dummy-signed size estimate. Silent on failure:
+    //! an issuer with nothing to pay with should hear about it from the fee
+    //! panel's warning, not from a number going blank.
+    void priceRecord();
+
+    //! Hand a record transaction to the wallet to fund: it chooses the coins, the
+    //! fee and the change, in the fee asset the page names. `record_script` may be
+    //! empty, for an unfreeze, which creates no record. `inputs` are inputs the
+    //! transaction must contain, and funding leaves them where they are put --
+    //! which is what lets a record's signature cover the first of them. `fee_out`,
+    //! when asked for, is the fee the wallet charged -- which is how this page
+    //! can quote the price of a record without making one.
+    bool fundRecordTransaction(const QString& record_script, const QString& asset,
+                               const UniValue& inputs, const UniValue& input_weights,
+                               QString& funded_hex, QString& error, CAmount* fee_out = nullptr);
+
+    //! The outpoint a funded transaction's first input spends: the one a record's
+    //! admission signature has to cover.
+    bool firstInput(const QString& tx_hex, QString& txid, int& vout, QString& error);
 
     //! Ask for the BIP340 signature over `sighash` under `key`. Signs with the wallet
     //! when it holds that key; otherwise shows the message and takes a signature back.

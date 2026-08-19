@@ -147,6 +147,10 @@ void WalletView::setClientModel(ClientModel *_clientModel)
 
     overviewPage->setClientModel(_clientModel);
     sendCoinsPage->setClientModel(_clientModel);
+    // The Supervision page prices its records in a chosen fee asset, and what an
+    // asset is worth -- and whether this node will take it at all -- arrives after
+    // the wallet does. A new block is the tick that gets it re-read.
+    supervisionPage->setClientModel(_clientModel);
     walletModel->setClientModel(_clientModel);
 }
 

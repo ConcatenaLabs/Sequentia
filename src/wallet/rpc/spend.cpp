@@ -4784,8 +4784,15 @@ void FundTransaction(CWallet& wallet, CMutableTransaction& tx, CAmount& fee_out,
         }
     }
 
-    if (tx.vout.size() == 0)
-        throw JSONRPCError(RPC_INVALID_PARAMETER, "TX must have at least one output");
+    // SEQUENTIA: with neither an output nor an input there is nothing to fund,
+    // and that is what this guard is for. A transaction that already names its
+    // inputs is a different case: spending them IS the point, and the change and
+    // fee outputs funding appends are the only ones it needs. Lifting a
+    // supervision freeze is exactly that transaction -- it spends the freeze
+    // record, pays a fee, and has nothing else to say -- so the old form of this
+    // check would have forced it to carry an output invented to satisfy a check.
+    if (tx.vout.empty() && tx.vin.empty())
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "TX must have at least one output or one input");
 
     if (change_position != -1 && (change_position < 0 || (unsigned int)change_position > tx.vout.size()))
         throw JSONRPCError(RPC_INVALID_PARAMETER, "changePosition out of bounds");

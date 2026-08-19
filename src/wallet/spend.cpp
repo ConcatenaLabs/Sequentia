@@ -597,11 +597,26 @@ std::optional<SelectionResult> SelectCoins(const CWallet& wallet, const std::vec
             }
             // Just to calculate the marginal byte size
             if (GetTxSpendSize(wallet, wtx, outpoint.n, outpoint.n) < 0) {
-                continue;
+                // SEQUENTIA: nothing in this wallet signs for that script, so its
+                // size cannot be derived from it. A supervision freeze record is
+                // the case in hand: it is spent under a consensus rule rather than
+                // by a key, and its transaction is in the wallet because the wallet
+                // CREATED the freeze.
+                //
+                // Dropping it here does not drop it from the transaction. The
+                // caller preselected it, so it survives into the funded result
+                // either way; all that is lost is its weight, and the fee then
+                // comes out short by exactly the bytes nobody counted. An
+                // input_weights entry is the caller stating that weight, and is
+                // documented as overriding the calculated size, so it is honoured
+                // before giving up rather than after.
+                if (!coin_control.HasInputWeight(outpoint)) continue;
+                txout = wtx.tx->vout.at(outpoint.n);
+            } else {
+                input_bytes = GetTxSpendSize(wallet, wtx, outpoint.n, false);
+                txout = wtx.tx->vout.at(outpoint.n);
+                coin = CInputCoin(wallet, &wtx, outpoint.n, input_bytes);
             }
-            input_bytes = GetTxSpendSize(wallet, wtx, outpoint.n, false);
-            txout = wtx.tx->vout.at(outpoint.n);
-            coin = CInputCoin(wallet, &wtx, outpoint.n, input_bytes);
         } else {
             // The input is external. We did not find the tx in mapWallet.
             if (!coin_control.GetExternalOutput(outpoint, txout)) {
@@ -632,11 +647,24 @@ std::optional<SelectionResult> SelectCoins(const CWallet& wallet, const std::vec
             // error = _("Missing solving data for estimating transaction size"); // ELEMENTS
             return std::nullopt; // Not solvable, can't estimate size for fee
         }
-        coin.effective_value = coin.value - coin_selection_params.m_effective_feerate.GetFee(coin.m_input_bytes, coin_selection_params.m_fee_asset);
-        if (coin_selection_params.m_subtract_fee_outputs) {
-            value_to_select[coin.asset] -= coin.value;
-        } else {
-            value_to_select[coin.asset] -= coin.effective_value;
+        // SEQUENTIA: what a preset input contributes and what it costs are in two
+        // different assets, and only coincidentally the same one. It contributes
+        // `value` of ITS asset; it costs the fee for its own bytes, and a fee is
+        // denominated in the FEE asset -- which is what GetFee is told below.
+        // Folding the second into the first, as one effective_value, is right only
+        // while those two assets agree, and charges the input's weight to the wrong
+        // asset's target when they do not: preselect a GOLD input on a transaction
+        // paying its fee in SEQ and the wallet goes looking for more GOLD to cover a
+        // fee that will never be paid in GOLD.
+        //
+        // Where the preset input IS in the fee asset -- every transaction this
+        // wallet built before supervision records arrived -- the two lines below
+        // collapse back into the single one they replace, so nothing else moves.
+        const CAmount input_fee = coin_selection_params.m_effective_feerate.GetFee(coin.m_input_bytes, coin_selection_params.m_fee_asset);
+        coin.effective_value = coin.value - input_fee;
+        value_to_select[coin.asset] -= coin.value;
+        if (!coin_selection_params.m_subtract_fee_outputs) {
+            value_to_select[coin_selection_params.m_fee_asset] += input_fee;
         }
         setPresetCoins.insert(coin);
         /* Set depth, from_me, ancestors, and descendants to 0 or false as don't matter for preset inputs as no actual selection is being done.
