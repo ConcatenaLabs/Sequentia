@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 
+class CollapsibleSection;
 class WalletModel;
 class PlatformStyle;
 
@@ -105,6 +106,14 @@ private:
 
     QLabel* m_producer_status{nullptr};
     QPushButton* m_enable_button{nullptr};
+
+    // The foldable cards this page updates a one-line summary for while closed.
+    // Each is owned by its own group box; these are borrowed pointers.
+    CollapsibleSection* m_production_section{nullptr};
+    CollapsibleSection* m_pool_section{nullptr};
+    CollapsibleSection* m_registry_section{nullptr};
+    CollapsibleSection* m_blocks_section{nullptr};
+
     QLabel* m_summary{nullptr};
     QTableWidget* m_stakers{nullptr};
     QPushButton* m_refresh_button{nullptr};
