@@ -2476,7 +2476,18 @@ bool ScanParentUtxos(const CWallet& wallet, std::vector<ParentUtxo>& out, int& p
     params.push_back("start");
     params.push_back(descriptors);
     try {
-        UniValue reply = CallMainChainRPC("scantxoutset", params);
+        // One scan at a time per bitcoind: the balance refresh and a send that
+        // both scan can collide. The other scan finishes in seconds, so wait
+        // for it rather than bouncing the error to whoever came second.
+        UniValue reply;
+        for (int attempt = 0;; ++attempt) {
+            reply = CallMainChainRPC("scantxoutset", params);
+            const bool busy = reply.exists("error") && !reply["error"].isNull() &&
+                reply["error"].isObject() && reply["error"].exists("message") &&
+                reply["error"]["message"].get_str().find("in progress") != std::string::npos;
+            if (!busy || attempt >= 8) break;
+            UninterruptibleSleep(std::chrono::milliseconds{1500});
+        }
         if (reply.exists("error") && !reply["error"].isNull()) {
             const UniValue& e = reply["error"];
             err = (e.isObject() && e.exists("message")) ? e["message"].get_str() : e.write();
@@ -2588,11 +2599,13 @@ RPCHelpMan sendbtctoaddress()
             {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "The amount in BTC to send."},
             {"fee_rate", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED_NAMED_ARG, "Fee rate in sat/vB. Defaults to the parent chain's estimatesmartfee, floor 1 sat/vB."},
             {"subtractfeefromamount", RPCArg::Type::BOOL, RPCArg::Default{false}, "Deduct the fee from the amount instead of adding it on top."},
+            {"estimate_only", RPCArg::Type::BOOL, RPCArg::Default{false}, "Select coins and compute the fee, then stop: nothing is signed, broadcast, or recorded. For showing the fee before sending."},
         },
         RPCResult{RPCResult::Type::OBJ, "", "", {
-            {RPCResult::Type::STR_HEX, "txid", "the parent-chain transaction id"},
-            {RPCResult::Type::STR_AMOUNT, "fee", "the bitcoin fee paid"},
+            {RPCResult::Type::STR_HEX, "txid", "the parent-chain transaction id (absent with estimate_only)"},
+            {RPCResult::Type::STR_AMOUNT, "fee", "the bitcoin fee paid (or, with estimate_only, the fee that would be)"},
             {RPCResult::Type::NUM, "inputs", "how many parent-chain coins were spent"},
+            {RPCResult::Type::NUM, "fee_rate", "the sat/vB rate used"},
         }},
         RPCExamples{HelpExampleCli("sendbtctoaddress", "\"tb1q...\" 0.01") + HelpExampleRpc("sendbtctoaddress", "\"tb1q...\", 0.01")},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
@@ -2691,6 +2704,16 @@ selected:
     if (to_dest <= PARENT_DUST) throw JSONRPCError(RPC_INVALID_PARAMETER, "Amount after the fee would be dust on the parent chain");
     if (!with_change) fee = in_sum - to_dest; // no change output: the remainder is the fee
 
+    // The estimate stops here: selection and fee are decided, nothing has been
+    // signed, no change address consumed, nothing recorded or broadcast.
+    if (!request.params[4].isNull() && request.params[4].get_bool()) {
+        UniValue est(UniValue::VOBJ);
+        est.pushKV("fee", ValueFromAmount(fee));
+        est.pushKV("inputs", (int)picked.size());
+        est.pushKV("fee_rate", sat_per_vb);
+        return est;
+    }
+
     // The change returns to a fresh address of this wallet, which the parent-chain scan
     // covers, so the remainder reappears in the balance and the send's confirmations can
     // be read off it.
@@ -2786,6 +2809,7 @@ selected:
     result.pushKV("txid", txid);
     result.pushKV("fee", ValueFromAmount(fee));
     result.pushKV("inputs", (int)picked.size());
+    result.pushKV("fee_rate", sat_per_vb);
     return result;
 },
     };
@@ -2877,19 +2901,30 @@ RPCHelpMan listbtctransactions()
         o.pushKV("btc", s.exists("btc") ? s["btc"] : UniValue(UniValue::VNUM));
         if (s.exists("fee")) o.pushKV("fee", s["fee"]);
         o.pushKV("time", s.exists("time") ? s["time"].get_int64() : int64_t{0});
+        // Confirmations come from whichever of the send's outputs is still
+        // unspent: the change when it exists and has not itself been spent,
+        // else the destination (vout 0), which stays unspent until the
+        // recipient moves it. A send with every output spent is by then deep
+        // in the chain; report it as confirmed rather than unknown.
         int confs = -1;
-        const int change_vout = (s.exists("change_vout") && s["change_vout"].isNum()) ? s["change_vout"].get_int() : -1;
-        if (change_vout >= 0 && s.exists("txid")) {
-            try {
-                UniValue p(UniValue::VARR);
-                p.push_back(s["txid"].get_str());
-                p.push_back(change_vout);
-                p.push_back(true);
-                UniValue r = CallMainChainRPC("gettxout", p);
-                if (r.exists("result") && r["result"].isObject() && r["result"].exists("confirmations")) {
-                    confs = r["result"]["confirmations"].get_int();
-                }
-            } catch (...) {}
+        if (s.exists("txid")) {
+            const int change_vout = (s.exists("change_vout") && s["change_vout"].isNum()) ? s["change_vout"].get_int() : -1;
+            std::vector<int> candidates;
+            if (change_vout >= 0) candidates.push_back(change_vout);
+            candidates.push_back(0);
+            for (int vout : candidates) {
+                try {
+                    UniValue p(UniValue::VARR);
+                    p.push_back(s["txid"].get_str());
+                    p.push_back(vout);
+                    p.push_back(true);
+                    UniValue r = CallMainChainRPC("gettxout", p);
+                    if (r.exists("result") && r["result"].isObject() && r["result"].exists("confirmations")) {
+                        confs = r["result"]["confirmations"].get_int();
+                        break;
+                    }
+                } catch (...) {}
+            }
         }
         o.pushKV("confirmations", confs);
         rows.push_back(o);
