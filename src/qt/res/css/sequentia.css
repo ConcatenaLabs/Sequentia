@@ -193,6 +193,16 @@ QGroupBox {
     font-weight: normal;
 }
 
+/* A folded card (CollapsibleSection) is its title and nothing else. Hiding the
+   contents alone would leave the card's own padding behind as an empty box
+   under every title, so the body styling goes with the body. */
+QGroupBox[collapsed="true"] {
+    background: transparent;
+    border: none;
+    padding: 0;
+    margin-top: 8px;
+}
+
 QGroupBox::title {
     subcontrol-origin: margin;
     subcontrol-position: top left;

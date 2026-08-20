@@ -640,7 +640,7 @@ QVariant TransactionTableModel::data(const QModelIndex &index, int role) const
         case Status:
             return QString::fromStdString(rec->status.sortKey);
         case Date:
-            return QString::fromStdString(strprintf("%020-%s", rec->time, rec->status.sortKey));
+            return QString::fromStdString(strprintf("%020d-%s", rec->time, rec->status.sortKey)); // %020d: tinyformat ate the bare "-" as a flag, gluing time to sortKey
         case Type:
             return formatTxType(rec);
         case Watchonly:
