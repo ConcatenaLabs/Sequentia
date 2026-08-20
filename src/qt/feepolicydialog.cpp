@@ -9,6 +9,7 @@
 #include <qt/walletmodel.h>
 
 #include <assetsdir.h>
+#include <chainparamsbase.h>
 #include <interfaces/node.h>
 #include <util/system.h>
 
@@ -24,6 +25,9 @@
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QIntValidator>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonParseError>
 #include <QLabel>
 #include <QLineEdit>
 #include <QProcess>
@@ -162,6 +166,78 @@ std::map<std::string, int64_t> FeePolicyDialog::currentRates(bool& ok, QString& 
     return out;
 }
 
+bool FeePolicyDialog::nodeRpcEndpoint(QJsonObject& out) const
+{
+    // Where THIS node listens, and how the sidecar should authenticate to it.
+    // Prefer the cookie: it is what the node writes for its own tools, and it
+    // keeps an rpcpassword out of a second file on disk. The sidecar re-reads
+    // the cookie on every call, so a node restart rotating it is harmless.
+    const uint16_t port = static_cast<uint16_t>(gArgs.GetIntArg("-rpcport", BaseParams().RPCPort()));
+    out = QJsonObject();
+    out["host"] = QStringLiteral("127.0.0.1");
+    out["port"] = int(port);
+
+    const std::string user = gArgs.GetArg("-rpcuser", "");
+    const std::string pass = gArgs.GetArg("-rpcpassword", "");
+    if (!user.empty() && !pass.empty()) {
+        out["user"] = QString::fromStdString(user);
+        out["password"] = QString::fromStdString(pass);
+        return true;
+    }
+    const fs::path cookie = AbsPathForConfigVal(fs::PathFromString(gArgs.GetArg("-rpccookiefile", ".cookie")));
+    out["cookie"] = QString::fromStdString(fs::PathToString(cookie));
+    return true;
+}
+
+void FeePolicyDialog::writeNodeRpcInto(const QString& path) const
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return;
+    const QByteArray raw = f.readAll();
+    f.close();
+
+    QJsonParseError perr{};
+    QJsonDocument doc = QJsonDocument::fromJson(raw, &perr);
+    if (perr.error != QJsonParseError::NoError || !doc.isObject()) return;
+
+    QJsonObject root = doc.object();
+    QJsonObject rpc;
+    if (!nodeRpcEndpoint(rpc)) return;
+    // Keep the file's own explanation of the field; only the values are ours.
+    const QJsonObject existing = root.value("node_rpc").toObject();
+    if (existing.contains("_comment")) rpc["_comment"] = existing.value("_comment");
+    root["node_rpc"] = rpc;
+
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return;
+    f.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    f.close();
+}
+
+QString FeePolicyDialog::nodeRpcMismatch(const QString& path) const
+{
+    // An EXISTING config can point somewhere else entirely -- an older copy of
+    // the example, or a node that has since moved port. The sidecar will not
+    // complain in any way the operator sees: it polls, prices, pushes, and the
+    // pushes are refused. Say so here, where they are about to start it.
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return QString();
+    const QByteArray raw = f.readAll();
+    f.close();
+    QJsonParseError perr{};
+    const QJsonDocument doc = QJsonDocument::fromJson(raw, &perr);
+    if (perr.error != QJsonParseError::NoError || !doc.isObject()) return QString();
+
+    const QJsonObject rpc = doc.object().value("node_rpc").toObject();
+    if (rpc.isEmpty()) return QString();
+    const int configured = rpc.value("port").toInt();
+    const uint16_t actual = static_cast<uint16_t>(gArgs.GetIntArg("-rpcport", BaseParams().RPCPort()));
+    if (configured == int(actual)) return QString();
+    return tr("The price server config at %1 publishes to port %2, but this node listens on %3. "
+              "Nothing will reach it until that is corrected — the sidecar reports the refusals "
+              "only in its own log.")
+        .arg(path).arg(configured).arg(int(actual));
+}
+
 void FeePolicyDialog::refresh()
 {
     bool ok = false; QString err;
@@ -179,7 +255,13 @@ void FeePolicyDialog::refresh()
         for (int row = 0; row < (int)keys.size(); ++row) {
             const std::string& k = keys[row];
             const UniValue& e = policy[k];
-            m_whitelist->setItem(row, 0, roItem(QString::fromStdString(k)));
+            // Show the asset the way the rest of the GUI does. The raw key is
+            // still what the RPCs take, so it stays available on hover rather
+            // than being the thing on display: unexplained, "bitcoin" reads as
+            // a claim that this row is Bitcoin.
+            QTableWidgetItem* name = roItem(GUIUtil::assetDisplayNameForKey(k));
+            name->setToolTip(tr("Fee policy key: %1").arg(QString::fromStdString(k)));
+            m_whitelist->setItem(row, 0, name);
             m_whitelist->setItem(row, 1, roItem(e["rate"].isNum() ? QString::number(e["rate"].get_int64()) : QString()));
         }
         setStatus(tr("Loaded %1 accepted asset(s).").arg(keys.size()));
@@ -292,7 +374,17 @@ void FeePolicyDialog::onLaunchPriceServer()
             setStatus(tr("Could not create a default price-server config at %1.").arg(cfg), true);
             return;
         }
+        // The example ships a placeholder RPC endpoint, and copying it verbatim
+        // was a trap: the sidecar starts, polls, prices everything correctly and
+        // pushes it all at a port with no node behind it, for as long as nobody
+        // reads its log. We know exactly where this node listens and how to
+        // authenticate to it, so write that in rather than leave it to be
+        // discovered later by its absence.
+        QFile::setPermissions(cfg, QFile::ReadOwner | QFile::WriteOwner);
+        writeNodeRpcInto(cfg);
     }
+
+    const QString mismatch = nodeRpcMismatch(cfg);
 
     const int uiPort = 8089;
     const QStringList args{script, "--config", cfg, "--ui-port", QString::number(uiPort), "--ui-host", "127.0.0.1"};
@@ -304,6 +396,10 @@ void FeePolicyDialog::onLaunchPriceServer()
     // Give the sidecar a moment to bind, then open its configuration UI in the browser.
     const QString url = QString("http://127.0.0.1:%1/").arg(uiPort);
     QTimer::singleShot(1500, this, [url]{ QDesktopServices::openUrl(QUrl(url)); });
+    if (!mismatch.isEmpty()) {
+        setStatus(mismatch, true);
+        return;
+    }
     setStatus(tr("The price server is starting; its configuration page will open at %1. "
                  "It will maintain the whitelist; Refresh to see updates.").arg(url));
 }

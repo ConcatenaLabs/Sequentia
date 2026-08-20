@@ -864,6 +864,23 @@ QString assetDisplayName(const CAsset& asset)
     return QString::fromStdString(gAssetsDir.GetIdentifier(asset));
 }
 
+QString assetDisplayNameForKey(const std::string& key)
+{
+    // The fee RPCs key their maps the way the node names assets internally: a
+    // registry label where there is one, a 64-hex id otherwise -- and "bitcoin"
+    // for the policy asset, which is the name Elements gave the thing Sequentia
+    // calls SEQ. Showing that raw key told a user their tSEQ was "bitcoin",
+    // which is wrong twice over: wrong asset, wrong chain.
+    //
+    // GetAssetFromString resolves both shapes (label first, then hex), so the
+    // ordinary display path handles all of them; anything it cannot resolve is
+    // shown as it came, since an unrecognised key is still the operator's only
+    // handle on that entry.
+    const CAsset asset = GetAssetFromString(key);
+    if (!asset.IsNull()) return assetDisplayName(asset);
+    return QString::fromStdString(key);
+}
+
 bool assetIsNamed(const CAsset& asset)
 {
     // The policy asset is always shown by its ticker (tSEQ/SEQ). Every other asset is
