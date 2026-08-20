@@ -114,6 +114,17 @@ class SupervisedAssetsTest(BitcoinTestFramework):
         raw = node.addsupervisionrecordoutput(raw, built["script"], asset)
         return self.send_raw(node, raw), built["targethash"]
 
+    def trusted_policy_balance(self, node):
+        """The node's spendable policy asset.
+
+        getbalances() keys an asset by its LABEL where it has one, and only by
+        its hex id where it does not, so the policy asset arrives as "bitcoin"
+        rather than as self.policy_asset. An asset with nothing spendable is
+        absent from the map altogether rather than present as zero.
+        """
+        balances = node.getbalances()["mine"]["trusted"]
+        return balances.get("bitcoin", balances.get(self.policy_asset, 0))
+
     def spend_asset(self, node, asset, amount, destination):
         """Spend `amount` of `asset` from node's wallet to `destination`."""
         raw = node.createrawtransaction([], [{destination: amount, "asset": asset}])
@@ -525,6 +536,14 @@ class SupervisedAssetsTest(BitcoinTestFramework):
         assert_equal(entry["details"][0]["abandoned"], False)
 
         self.log.info("A valid spend that was merely never relayed is left alone")
+        # Give the holder a confirmed coin to pay with first. Everything it has
+        # at this point is change of the refused family: released back into the
+        # balance, but unconfirmed and therefore not trusted, so coin selection
+        # has nothing to spend and the control could not be built at all.
+        self.spend_asset(node, self.policy_asset, Decimal("5"), holder.getnewaddress())
+        self.generate(node, 1)
+        self.sync_all()
+
         # -walletbroadcast=0 reproduces the other case exactly: the wallet
         # commits the transaction and never submits it, so it sits unconfirmed
         # and outside every mempool while being entirely valid.
@@ -532,7 +551,8 @@ class SupervisedAssetsTest(BitcoinTestFramework):
         self.connect_nodes(0, 1)
         self.sync_all()
 
-        before = holder.getbalances()["mine"]["trusted"][self.policy_asset]
+        before = self.trusted_policy_balance(holder)
+        assert before > 0, "the control needs a confirmed coin to pay with"
         unrelayed = holder.sendtoaddress(address=node.getnewaddress(), amount=Decimal("1"),
                                          fee_asset_label=self.policy_asset)
         assert unrelayed not in holder.getrawmempool()
@@ -548,7 +568,7 @@ class SupervisedAssetsTest(BitcoinTestFramework):
 
         # Still reserved, exactly as before this change: a transaction that may
         # yet be relayed and mined has not released anything.
-        assert holder.getbalances()["mine"]["trusted"][self.policy_asset] < before
+        assert self.trusted_policy_balance(holder) < before
 
         # Put the holder back the way the remaining tests expect to find it.
         self.restart_node(1, self.extra_args[1])
