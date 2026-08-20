@@ -11,6 +11,7 @@
 #include <qt/guiutil.h>
 #include <qt/optionsmodel.h>
 #include <qt/platformstyle.h>
+#include <key_io.h>
 #include <qt/parentchaintxmodel.h>
 #include <qt/transactionfilterproxy.h>
 #include <QConcatenateTablesProxyModel>
@@ -281,6 +282,16 @@ OverviewPage::OverviewPage(const PlatformStyle *platformStyle, QWidget *parent) 
         // Insert where the retired scroll area sat: under the total-value headline, above the
         // tBTC separator/label that setBalance appends below the asset rows.
         ui->verticalLayout_4->insertWidget(2, m_asset_table, /*stretch=*/1);
+        // With no holdings the table hides itself, and with nothing left in the
+        // layout that wants the freed height, QVBoxLayout spreads it evenly
+        // BETWEEN the remaining labels -- the scattered, gap-riddled Overview
+        // this page showed on every empty wallet. This trailing spacer is the
+        // anchor that absorbs it instead, keeping the content packed at the top.
+        // Stretch 0 is deliberate: a nonzero factor would compete with the
+        // table's own stretch and leave the table half-height on a wallet that
+        // does have assets, whereas a zero-stretch spacer only expands once no
+        // stretchy item is left -- which is exactly the empty-wallet case.
+        ui->verticalLayout_4->addStretch(0);
     }
 
     // Parent-chain (Bitcoin testnet4) status line. The tBTC balance itself lives as a row
@@ -295,7 +306,10 @@ OverviewPage::OverviewPage(const PlatformStyle *platformStyle, QWidget *parent) 
                                    "address can hold real testnet Bitcoin (tBTC). This amount is scanned from the "
                                    "Bitcoin testnet4 chain; it is not a Sequentia balance and spending it requires a "
                                    "Bitcoin node."));
-        ui->verticalLayout_4->addWidget(m_btc_label);
+        // Directly under the balances table, above the trailing stretch -- appending
+        // after the stretch would strand the line at the bottom of the page, detached
+        // from the balances it qualifies.
+        ui->verticalLayout_4->insertWidget(3, m_btc_label);
     }
     m_seq_status_timer = new QTimer(this);
     m_seq_status_timer->setInterval(8000);
@@ -719,11 +733,29 @@ void OverviewPage::updateSeqStatus()
         } catch (const UniValue&) {
         } catch (const std::exception&) {}
         const bool producer = gArgs.GetBoolArg("-posproducer", false) && !gArgs.GetArgs("-posproducerkey").empty();
+        // Production is a NODE property (one producer in the process), but its
+        // signing key belongs to a wallet, and a reader on another wallet's page
+        // should not be left thinking THAT wallet produces. Say whose key it is.
+        bool producing_wallet = false;
+        if (producer && walletModel) {
+            for (const std::string& wif : gArgs.GetArgs("-posproducerkey")) {
+                const CKey key = DecodeSecret(wif);
+                if (!key.IsValid()) continue;
+                const CKeyID keyid = key.GetPubKey().GetID();
+                if (walletModel->wallet().isSpendable(PKHash(keyid)) ||
+                    walletModel->wallet().isSpendable(WitnessV0KeyHash(keyid))) {
+                    producing_wallet = true;
+                    break;
+                }
+            }
+        }
         // n is the number of *registered* stakers (the full registry), which is
         // distinct from and may exceed the per-block committee cap; label it as such.
         const QString registered = (n >= 0) ? tr("%1 registered staker(s)").arg(n) : tr("staker count unavailable");
-        m_staking_label->setText(tr("Staking: %1; this node %2")
-                                 .arg(registered, producer ? tr("produces blocks") : tr("observes (does not produce)")));
+        const QString role = !producer ? tr("this node observes (does not produce)")
+                           : producing_wallet ? tr("this node produces blocks with this wallet's key")
+                                              : tr("this node produces blocks (another wallet's key)");
+        m_staking_label->setText(tr("Staking: %1; %2").arg(registered, role));
     }
 
     // Finality + long-range-fork (checkpoint) status. No finalized checkpoint

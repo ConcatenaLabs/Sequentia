@@ -2334,11 +2334,13 @@ RPCHelpMan getbtcbalance()
 
     UniValue result(UniValue::VOBJ);
     if (naddr == 0) {
+        // No receiving addresses handed out yet means the parent-chain balance is a
+        // plain zero, not a failure: "error" is reserved for the parent chain being
+        // unreachable, and callers (the GUI Overview among them) surface it as such.
         result.pushKV("btc", ValueFromAmount(0));
         result.pushKV("addresses", 0);
         result.pushKV("parent_height", 0);
         result.pushKV("utxos", UniValue(UniValue::VARR));
-        result.pushKV("error", "no receiving addresses yet - create one on the Receive tab");
         return result;
     }
 
