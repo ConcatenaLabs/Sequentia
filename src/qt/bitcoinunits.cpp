@@ -4,6 +4,8 @@
 
 #include <qt/bitcoinunits.h>
 
+#include <policy/feerate.h>
+
 #include <consensus/amount.h>
 #include <chainparamsbase.h>
 
@@ -73,7 +75,7 @@ QString BitcoinUnits::longName(int unit)
     case BTC: return ticker;
     case mBTC: return QStringLiteral("m") + ticker;
     case uBTC: return QString::fromUtf8("μ") + ticker;
-    case SAT: return QStringLiteral("sat");
+    case SAT: return QString::fromStdString(CURRENCY_ATOM); // the node's own atom name: rfa under any-asset-fees, sat only where the unit IS bitcoin
     default: return QStringLiteral("???");
     }
 }
@@ -92,7 +94,7 @@ QString BitcoinUnits::description(int unit)
     case BTC: return ticker;
     case mBTC: return QString::fromUtf8("Milli-") + ticker + QString::fromUtf8(" (1 / 1" THIN_SP_UTF8 "000)");
     case uBTC: return QString::fromUtf8("Micro-") + ticker + QString::fromUtf8(" (1 / 1" THIN_SP_UTF8 "000" THIN_SP_UTF8 "000)");
-    case SAT: return QString::fromUtf8("sat (1 / 100" THIN_SP_UTF8 "000" THIN_SP_UTF8 "000)");
+    case SAT: return QString::fromStdString(CURRENCY_ATOM) + QString::fromUtf8(" (1 / 100" THIN_SP_UTF8 "000" THIN_SP_UTF8 "000)");
     default: return QStringLiteral("???");
     }
 }
