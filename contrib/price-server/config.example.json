@@ -6,11 +6,10 @@
   "source_name": "sequentia-price-server",
 
   "node_rpc": {
-    "_comment": "Your LOCAL Sequentia node's RPC (where the whitelist is published). Use either user+password or a cookie file path.",
+    "_comment": "Your LOCAL Sequentia node's RPC, where the whitelist is published. The node GUI fills this in from the node it is running when it creates your copy of this file, so it matches by construction; set it by hand only when running the sidecar yourself. Use either user+password from your node conf, or \"cookie\": \"<datadir>/<network>/.cookie\" -- the cookie is re-read on every call, so it survives a node restart rotating it. 18456 is the Sequentia testnet default. Getting this wrong does not stop the server: it keeps polling and every push is refused, so watch the log after the first poll for \"published N rate(s) to 0/1 node(s)\".",
     "host": "127.0.0.1",
-    "port": 7041,
-    "user": "rpcuser",
-    "password": "rpcpassword"
+    "port": 18456,
+    "cookie": "~/.sequentia/testnet3/.cookie"
   },
 
   "registry_url": "http://159.195.15.140/registry/index.minimal.json",
@@ -30,9 +29,11 @@
   },
 
   "feed_aliases": {
-    "_comment": "Map a registry ticker to the key the price feed uses for that asset, when they differ. The Sequence token's registry/display ticker is tSEQ (TSEQ) but the feed prices it under the chain-independent key SEQ (as the node GUI and explorer also do), so they refer to the same asset and merge into one row. SBTC (bridge-pegged Bitcoin) is priced exactly as BTC, which the feed keys as tBTC.",
+    "_comment": "Map a registry ticker to the key the price feed uses for that asset, when they differ. The Sequence token's registry/display ticker is tSEQ (TSEQ) but the feed prices it under the chain-independent key SEQ (as the node GUI and explorer also do), so they refer to the same asset and merge into one row. SBTC (bridge-pegged Bitcoin) is priced exactly as BTC, which the feed keys as tBTC. Bridged stablecoins carry a .e suffix in the registry and none in the feed. An asset whose registry ticker finds no feed key is simply never priced, and so never admitted -- silently, since there is nothing wrong with it: keep this map in step with the registry or assets go missing from the whitelist for no visible reason. Keys are matched case-insensitively.",
     "TSEQ": "SEQ",
-    "SBTC": "tBTC"
+    "SBTC": "tBTC",
+    "USDC.e": "USDC",
+    "EURC.e": "EURC"
   },
 
   "default_thresholds": {
