@@ -50,6 +50,7 @@ WalletView::WalletView(WalletModel* wallet_model, const PlatformStyle* _platform
     QVBoxLayout *vbox = new QVBoxLayout();
     QHBoxLayout *hbox_buttons = new QHBoxLayout();
     transactionView = new TransactionView(platformStyle, this);
+    transactionView->setParentChainModel(overviewPage->parentChainTxModel());
     transactionView->setModel(walletModel);
 
     vbox->addWidget(transactionView);
@@ -105,7 +106,6 @@ WalletView::WalletView(WalletModel* wallet_model, const PlatformStyle* _platform
 
     // The Overview page owns the periodic parent-chain (Bitcoin) scan; the Transactions
     // page shows the unspent outputs it finds, so one scan feeds both.
-    connect(overviewPage, &OverviewPage::btcUtxosChanged, transactionView, &TransactionView::setParentChainUtxos);
 
     connect(sendCoinsPage, &SendCoinsDialog::coinsSent, this, &WalletView::coinsSent);
     // Highlight transaction after send

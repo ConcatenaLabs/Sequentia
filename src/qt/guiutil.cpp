@@ -825,8 +825,28 @@ bool isReissuanceToken(const CAsset& asset, CAsset* issued_asset)
     return true;
 }
 
+const CAsset& parentBtcAsset()
+{
+    static const CAsset null_asset;
+    return null_asset;
+}
+
+bool isParentBtc(const CAsset& asset)
+{
+    return asset.IsNull();
+}
+
+QString parentBtcTicker()
+{
+    const std::string chain = gArgs.GetChainName();
+    if (chain == CBaseChainParams::TESTNET || chain == CBaseChainParams::SIGNET) return QStringLiteral("tBTC");
+    return QStringLiteral("BTC");
+}
+
 QString assetDisplayName(const CAsset& asset)
 {
+    // Native Bitcoin rides beside the assets under the null id; name it as what it is.
+    if (asset.IsNull()) return parentBtcTicker() + QStringLiteral(" (Bitcoin)");
     // The policy asset's registry identifier defaults to "bitcoin"; show the chain-aware
     // ticker (tSEQ/SEQ) used by amount fields instead, so labels stay consistent.
     if (asset == ::policyAsset) return BitcoinUnits::policyAssetTicker();
@@ -961,6 +981,14 @@ QString FormatRefValue(double value, const QString& ref)
     const int dp = (ref == QLatin1String("BTC")) ? 8 : (qAbs(value) >= 1.0 ? 2 : 6);
     QString num = QString::number(value, 'f', dp);
     if (num.contains('.')) { while (num.endsWith('0')) num.chop(1); if (num.endsWith('.')) num.chop(1); }
+    // Group the integer digits the way the amount columns do (thin spaces), so
+    // "138689.82" reads as "138 689.82" beside "57 999.99999925".
+    int int_end = num.indexOf('.');
+    if (int_end < 0) int_end = num.size();
+    const int first_digit = (num.startsWith('-')) ? 1 : 0;
+    for (int pos = int_end - 3; pos > first_digit; pos -= 3) {
+        num.insert(pos, QString::fromUtf8("\xE2\x80\x89")); // thin space
+    }
     return QString::fromUtf8("\xE2\x89\x88 ") + num + QStringLiteral(" ") + ref; // "≈ "
 }
 } // namespace

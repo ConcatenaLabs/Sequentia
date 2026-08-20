@@ -738,6 +738,8 @@ QVariant TransactionTableModel::data(const QModelIndex &index, int role) const
         return rec->status.status;
     case AssetRole:
         return GUIUtil::assetDisplayName(rec->asset);
+    case ParentChainRole:
+        return false;
     case AssetIdRole:
         return QString::fromStdString(rec->asset.GetHex());
     }
