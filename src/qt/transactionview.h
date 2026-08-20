@@ -16,6 +16,7 @@
 
 class PlatformStyle;
 class TransactionFilterProxy;
+class ParentChainTxModel;
 class WalletModel;
 
 QT_BEGIN_NAMESPACE
@@ -117,9 +118,7 @@ private:
      *  the wallet has no parent-chain history (the scan sees the UTXO set, so spent
      *  outputs vanish), and their confirmations are Bitcoin's, not Sequentia states.
      *  Hidden entirely while there is nothing to show. */
-    QLabel *m_btc_title{nullptr};
-    QTableWidget *m_btc_table{nullptr};
-    QList<GUIUtil::ParentChainUtxo> m_btc_utxos;
+    ParentChainTxModel* m_parent_chain_model{nullptr};
 
     bool eventFilter(QObject *obj, QEvent *event) override;
 
@@ -154,7 +153,9 @@ Q_SIGNALS:
 public Q_SLOTS:
     /** SEQUENTIA: refresh the Bitcoin (parent-chain) section from a finished scan
      *  (relayed from the Overview page, which owns the scan cycle). */
-    void setParentChainUtxos(const QList<GUIUtil::ParentChainUtxo>& utxos, int parentHeight);
+    //! The shared native-Bitcoin rows (owned by the Overview, which runs the scan);
+    //! must be set before setModel so the merged history can be assembled.
+    void setParentChainModel(ParentChainTxModel* model);
     void chooseDate(int idx);
     void chooseType(int idx);
     void chooseAsset(int idx);

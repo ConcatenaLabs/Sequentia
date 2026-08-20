@@ -94,6 +94,7 @@ void SendCoinsEntry::setModel(WalletModel *_model)
         connect(_model, &WalletModel::assetTypesChanged, this, &SendCoinsEntry::updateAssetTypes);
     }
 
+    updateAssetTypes();
     clear();
 }
 
@@ -254,7 +255,11 @@ void SendCoinsEntry::setFocus()
 void SendCoinsEntry::updateAssetTypes()
 {
     if (model) {
-        ui->payAmount->setAllowedAssets(model->getAssetTypes());
+        // Native Bitcoin sits in the same picker as every asset, first and selected by
+        // default: Bitcoin support is not a separate mode, it is another row.
+        std::set<CAsset> allowed = model->getAssetTypes();
+        allowed.insert(GUIUtil::parentBtcAsset());
+        ui->payAmount->setAllowedAssets(allowed);
     }
 }
 

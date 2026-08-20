@@ -421,7 +421,13 @@ void BitcoinAmountField::addAssetChoice(const CAsset& asset)
     // asset is listed once like any other asset (tSEQ) — no mtSEQ/µtSEQ/sat sub-denominations.
     // Use the shared display-name resolver so an asset the registry has named shows that name
     // (GOLD), and the policy asset shows tSEQ rather than its "bitcoin" default identifier.
-    unit->addItem(GUIUtil::assetDisplayName(asset), QVariant::fromValue(asset));
+    if (GUIUtil::isParentBtc(asset)) {
+        // Native Bitcoin leads the list: it is the money a newcomer already holds, and
+        // the only entry with a fixed seat. Everything below it is one asset among equals.
+        unit->insertItem(0, GUIUtil::assetDisplayName(asset), QVariant::fromValue(asset));
+    } else {
+        unit->addItem(GUIUtil::assetDisplayName(asset), QVariant::fromValue(asset));
+    }
     unit->setVisible(unit->count() > 1);  // hide the selector when only one asset is available
 }
 
@@ -467,6 +473,10 @@ void BitcoinAmountField::setAllowedAssets(const std::set<CAsset>& allowed_assets
             addAssetChoice(asset);
         }
     }
+    // The remove/re-add churn above can leave the combo with no current row at
+    // all; land on the first entry (native Bitcoin, when present) rather than
+    // presenting an empty selector.
+    if (unit->currentIndex() < 0 && unit->count() > 0) unit->setCurrentIndex(0);
 }
 
 void BitcoinAmountField::unitChanged(int idx)
@@ -477,7 +487,11 @@ void BitcoinAmountField::unitChanged(int idx)
     const QVariant& userdata = unit->itemData(idx, Qt::UserRole);
     if (userdata.type() == QVariant::UserType) {
         const CAsset asset = userdata.value<CAsset>();
-        unit->setToolTip(tr("Custom asset (%1)").arg(QString::fromStdString(asset.GetHex())));
+        if (GUIUtil::isParentBtc(asset)) {
+            unit->setToolTip(tr("Native Bitcoin on the parent chain. Sent as an ordinary Bitcoin transaction; the network fee is paid in bitcoin."));
+        } else {
+            unit->setToolTip(tr("Custom asset (%1)").arg(QString::fromStdString(asset.GetHex())));
+        }
 
         amount->setDisplayUnit(asset);
     } else {
@@ -492,6 +506,10 @@ void BitcoinAmountField::unitChanged(int idx)
     if (!(m_allowed_assets.count(previous_asset) || amount->value().first == previous_asset)) {
         removeAssetChoice(previous_asset);
     }
+
+    // A pure asset switch changes what the field MEANS; announce it like a value
+    // change so the dialog's fee panel and labels follow the selection.
+    Q_EMIT valueChanged();
 }
 
 void BitcoinAmountField::setDisplayUnit(const CAsset& asset)
