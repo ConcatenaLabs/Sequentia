@@ -175,13 +175,21 @@ class NodeRPC:
 
     def __init__(self, cfg):
         self.url = "http://%s:%d/" % (cfg.get("host", "127.0.0.1"), cfg["port"])
-        if "cookie" in cfg:
-            with open(cfg["cookie"], encoding="utf8") as f:
-                auth = f.read().strip()
-        else:
-            auth = "%s:%s" % (cfg["user"], cfg["password"])
-        self.auth_header = "Basic " + base64.b64encode(auth.encode()).decode()
+        # The cookie is re-read per call, not cached here: a node writes a NEW
+        # cookie every time it starts, so a cached one works right up until the
+        # node is restarted and then fails every push with 401 -- silently, if
+        # nobody is reading the log. Path only; the read is in auth().
+        self.cookie_path = os.path.expanduser(cfg["cookie"]) if "cookie" in cfg else None
+        self.static_auth = None
+        if self.cookie_path is None:
+            self.static_auth = "%s:%s" % (cfg["user"], cfg["password"])
         self.timeout = cfg.get("timeout", 30)
+
+    def auth(self):
+        if self.cookie_path is None:
+            return self.static_auth
+        with open(self.cookie_path, encoding="utf8") as f:
+            return f.read().strip()
 
     def call(self, method, *params):
         payload = json.dumps({
@@ -189,7 +197,7 @@ class NodeRPC:
             "method": method, "params": list(params),
         }).encode()
         req = urllib.request.Request(self.url, data=payload, headers={
-            "Authorization": self.auth_header,
+            "Authorization": "Basic " + base64.b64encode(self.auth().encode()).decode(),
             "Content-Type": "application/json",
         })
         with urllib.request.urlopen(req, timeout=self.timeout) as resp:
@@ -743,6 +751,17 @@ class PriceServer:
         self.node_status = node_status
         log.info("published %d rate(s) to %d/%d node(s) (%d/%d discovered admitted)",
                  len(rates), ok, len(self.rpcs), admitted, len(report))
+        # Reaching NO node is a total failure, and it must not read like the
+        # line above reads -- "published 6 rate(s) to 0/1 node(s)" has the word
+        # "published" in it and scrolls past as if something happened. Nothing
+        # did: the node is still on whatever whitelist it last had, or on its
+        # static file. This exact state ran unnoticed for weeks on a laptop
+        # whose config pointed at a port no node listened on.
+        if ok == 0 and self.rpcs:
+            log.error("PUBLISHED TO NO NODE: all %d configured node RPC(s) refused or were "
+                      "unreachable. The node is NOT using these rates. Check node_rpc in the "
+                      "config against the node's own rpcport/rpcuser (or cookie path): %s",
+                      len(self.rpcs), "; ".join("%s: %s" % (n["url"], n["error"]) for n in node_status))
         return rates
 
     def run(self):

@@ -248,6 +248,10 @@ namespace GUIUtil
        (its default pegged-asset name) in selectors and amount labels. */
     QString assetDisplayName(const CAsset& asset);
 
+    /* The same label, for the string keys the fee RPCs use (a registry label, a 64-hex id,
+       or "bitcoin" for the policy asset). Unresolvable keys are returned unchanged. */
+    QString assetDisplayNameForKey(const std::string& key);
+
     /* Native parent-chain Bitcoin in pickers and tables. It is not a CAsset, so views
        that traffic in CAsset carry it as the null asset id, which no real asset can
        have (every real id is an issuance hash). */

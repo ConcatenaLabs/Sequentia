@@ -3074,10 +3074,20 @@ std::shared_ptr<CWallet> CWallet::Create(WalletContext& context, const std::stri
                                _("This is the transaction fee you may pay when fee estimates are not available."));
         }
         walletInstance->m_fallback_fee = CFeeRate(fallback_fee.value());
-    } else {
-        // ELEMENTS: re-enable fallbackfee at 0.1 sat/byte
-        walletInstance->m_fallback_fee = CFeeRate(100);
     }
+    // No else: the member already holds DEFAULT_FALLBACK_FEE. What stood here was
+    // an inherited Elements line pinning the fallback to CFeeRate(100) -- exactly
+    // minrelaytxfee -- which quietly overrode DEFAULT_FALLBACK_FEE on every wallet
+    // load, so raising that constant to 2000 achieved nothing at all.
+    //
+    // Paying precisely the floor is not a margin, it is a coin toss, and on this
+    // chain it is a losing one: a fee is committed in the asset it is paid in, but
+    // relayed and mined against its value in reference units. The moment that
+    // asset is worth less than 1.0 the same transaction is BELOW the floor and
+    // stops being relayed at all. A stake deposit paying 29 tSEQ atoms (100
+    // rfa/kvB at tSEQ = 1.0) re-valued to 38 rfa/kvB the moment live rates put
+    // tSEQ at $0.39, and sat unrelayable until the wallet's own node happened to
+    // win a block.
 
     // Disable fallback fee in case value was set to 0, enable if non-null value
     walletInstance->m_allow_fallback_fee = walletInstance->m_fallback_fee.GetFeePerK() != 0;
