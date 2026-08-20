@@ -1109,7 +1109,12 @@ void ArgsManager::LogArgs() const
         logArgsPrefix("Config file arg:", section.first, section.second);
     }
     for (const auto& setting : m_settings.rw_settings) {
-        LogPrintf("Setting file arg: %s = %s\n", setting.first, setting.second.write());
+        // The settings file carries the same args the config file does, secrets
+        // included (a persisted -posproducerkey is a staking private key); mask
+        // exactly as config-file logging masks.
+        std::optional<unsigned int> flags = GetArgFlags('-' + setting.first);
+        const std::string value_str = (flags && (*flags & SENSITIVE)) ? "****" : setting.second.write();
+        LogPrintf("Setting file arg: %s = %s\n", setting.first, value_str);
     }
     logArgsPrefix("Command-line arg:", "", m_settings.command_line_options);
 }
