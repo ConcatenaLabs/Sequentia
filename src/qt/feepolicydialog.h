@@ -19,6 +19,7 @@ class PlatformStyle;
 QT_BEGIN_NAMESPACE
 class QTableWidget;
 class QComboBox;
+class QJsonObject;
 class QLineEdit;
 class QLabel;
 class QPushButton;
@@ -58,6 +59,13 @@ private:
     QPushButton* m_launch_price_server{nullptr};
     QLabel* m_status{nullptr};
     bool m_remove_selection_connected{false};
+
+    //! This node's own RPC endpoint and credentials, as the sidecar's config wants them.
+    bool nodeRpcEndpoint(QJsonObject& out) const;
+    //! Replace node_rpc in a freshly seeded config with this node's real endpoint.
+    void writeNodeRpcInto(const QString& path) const;
+    //! Empty unless an existing config publishes somewhere this node is not listening.
+    QString nodeRpcMismatch(const QString& path) const;
 
     UniValue callRpc(const std::string& method, const UniValue& params, bool& ok, QString& error);
     void setStatus(const QString& msg, bool error = false);
