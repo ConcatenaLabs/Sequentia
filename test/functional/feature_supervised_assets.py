@@ -570,10 +570,20 @@ class SupervisedAssetsTest(BitcoinTestFramework):
         # yet be relayed and mined has not released anything.
         assert self.trusted_policy_balance(holder) < before
 
+        # Abandon it before restoring the node. Left alone it would be broadcast
+        # the moment the wallet is allowed to again, and every test after this
+        # one would be running against a mempool holding a transaction that only
+        # exists to make a point about relay.
+        holder.abandontransaction(unrelayed)
+
         # Put the holder back the way the remaining tests expect to find it.
         self.restart_node(1, self.extra_args[1])
         self.connect_nodes(0, 1)
-        self.sync_all()
+        # Blocks only. sync_all() also waits for the mempools to match, which is
+        # the one thing this scenario cannot promise: the node spent the last
+        # minute deliberately not relaying, and what the tests after this need
+        # from it is a shared tip, not a shared mempool.
+        self.sync_blocks()
 
     def test_reorg_takes_the_freeze_with_it(self, node, asset):
         self.log.info("A reorg takes the freeze back with it")
