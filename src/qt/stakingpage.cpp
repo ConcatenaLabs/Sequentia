@@ -5,6 +5,7 @@
 #include <qt/stakingpage.h>
 
 #include <qt/bitcoinunits.h>
+#include <qt/collapsiblesection.h>
 #include <qt/guiutil.h>
 #include <qt/optionsmodel.h>
 #include <qt/platformstyle.h>
@@ -253,6 +254,10 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
         f2->addRow(tr("Your draw for the next block:"), m_next_slot);
         v->addLayout(f2);
         layout->addWidget(mine);
+        // The one card that stays open: it is the answer the page exists to
+        // give. Every other card here is either an action you have to ask for
+        // or a detail behind this one, so they fold to their titles.
+        CollapsibleSection::adopt(mine, QStringLiteral("staking/mine"), /*open_by_default=*/true);
     }
 
     // --- Block production over the recent chain ---
@@ -273,6 +278,7 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
         m_last_produced = new QLabel(tr("…"), prod);
         v->addWidget(m_last_produced);
         layout->addWidget(prod);
+        m_production_section = CollapsibleSection::adopt(prod, QStringLiteral("staking/production"));
     }
 
     // --- Stake action ---
@@ -312,6 +318,7 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
     stakeForm->addRow(QString(), m_stake_button);
     stakeForm->addRow(tr("Result:"), m_result);
     layout->addWidget(stakeGroup);
+    CollapsibleSection::adopt(stakeGroup, QStringLiteral("staking/stake"));
 
     // --- Unstake action ---
     QGroupBox* unstakeGroup = new QGroupBox(tr("Withdraw stake"), this);
@@ -367,6 +374,7 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
     unstakeForm->addRow(QString(), m_unstake_button_holder);
     unstakeForm->addRow(tr("Result:"), m_unstake_result);
     layout->addWidget(unstakeGroup);
+    CollapsibleSection::adopt(unstakeGroup, QStringLiteral("staking/unstake"));
 
     // --- Staking pool: lend your weight to a pool, or watch the one you are in ---
     //
@@ -442,6 +450,7 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
         form->addRow(tr("Result:"), m_deleg_result);
         v->addLayout(form);
         layout->addWidget(pool);
+        m_pool_section = CollapsibleSection::adopt(pool, QStringLiteral("staking/pool"));
     }
 
     // --- Run a staking pool: the operator console ---
@@ -556,6 +565,7 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
         form->addRow(tr("Result:"), m_payout_result);
         v->addLayout(form);
         layout->addWidget(op);
+        CollapsibleSection::adopt(op, QStringLiteral("staking/operator"));
     }
 
     // --- Committee / registry status ---
@@ -578,6 +588,7 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
     refreshRow->addWidget(m_refresh_button);
     statusLayout->addLayout(refreshRow);
     layout->addWidget(statusGroup);
+    m_registry_section = CollapsibleSection::adopt(statusGroup, QStringLiteral("staking/registry"));
 
     // --- Watch-only key: follow the staking wallet from anywhere, spend from nowhere ---
     {
@@ -603,6 +614,7 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
         m_xpub_hint->setVisible(false);
         v->addWidget(m_xpub_hint);
         layout->addWidget(wo);
+        CollapsibleSection::adopt(wo, QStringLiteral("staking/watchonly"));
         connect(m_xpub_copy, &QPushButton::clicked, this, [this] {
             if (!m_xpub || m_xpub->text().isEmpty()) return;
             QApplication::clipboard()->setText(m_xpub->text());
@@ -635,6 +647,7 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
                                                          "wait means your draw came up early for that block."));
         v->addWidget(m_blocks);
         layout->addWidget(blocks);
+        m_blocks_section = CollapsibleSection::adopt(blocks, QStringLiteral("staking/blocks"));
     }
 
     m_status = new QLabel(this);
@@ -771,6 +784,7 @@ void StakingPage::refresh()
     m_summary->setText(tr("%1 registered staker(s) — updated at %2.")
                            .arg(keys.size())
                            .arg(QTime::currentTime().toString(Qt::TextDate)));
+    if (m_registry_section) m_registry_section->setSummary(tr("%n staker(s)", "", int(keys.size())));
 
     refreshOwnStake(reg);
     refreshProducedBlocks();
@@ -982,6 +996,13 @@ void StakingPage::refreshProducedBlocks()
             : tr("Nothing yet in the last %1 blocks. With a small share of the stake this is normal — "
                  "your draw comes up less often.").arg(scanned));
     }
+    // Both cards are folded by default, so their headline number belongs in the
+    // title -- otherwise "did I produce anything?" needs a click to answer.
+    const QString produced_summary = produced > 0
+        ? tr("%1 of the last %2 blocks").arg(produced).arg(scanned)
+        : tr("none of the last %1 blocks").arg(scanned);
+    if (m_production_section) m_production_section->setSummary(produced_summary);
+    if (m_blocks_section) m_blocks_section->setSummary(produced_summary);
 }
 
 void StakingPage::refreshWatchOnlyKey()
@@ -1576,6 +1597,16 @@ void StakingPage::refreshDelegation()
     }
     m_undeleg_button->setEnabled(delegated_rows > 0);
 
+    if (m_pool_section) {
+        // An alert is the one thing a folded card must not hide: a pool's
+        // announced change only protects the delegator who sees it while there
+        // is still time to leave. So it opens the card rather than waiting to
+        // be clicked, and says so in the title either way.
+        m_pool_section->setSummary(!alerts.isEmpty()
+            ? tr("⚠ %n alert(s)", "", alerts.size())
+            : (delegated_rows > 0 ? tr("delegated") : tr("not delegating")));
+        if (!alerts.isEmpty()) m_pool_section->setOpen(true);
+    }
 }
 
 void StakingPage::onDelegate()

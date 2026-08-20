@@ -5,6 +5,7 @@
 #include <qt/assetspage.h>
 
 #include <qt/bitcoinunits.h>
+#include <qt/collapsiblesection.h>
 #include <qt/guiutil.h>
 #include <qt/optionsmodel.h>
 #include <qt/platformstyle.h>
@@ -295,11 +296,30 @@ AssetsPage::AssetsPage(const PlatformStyle* platformStyle, QWidget* parent)
     m_issuances->verticalHeader()->setVisible(false);
     m_issuances->setEditTriggers(QAbstractItemView::NoEditTriggers);
     issLayout->addWidget(m_issuances);
+    // A wallet that has issued nothing showed a headers-only table over a tall
+    // blank: it reads as something that failed to load. Say it in words instead,
+    // and put the table away until there is a row for it.
+    m_issuances_empty = new QLabel(tr("You have not issued an asset from this wallet yet."), issGroup);
+    m_issuances_empty->setWordWrap(true);
+    m_issuances_empty->setStyleSheet("color:#9b988e;");
+    issLayout->addWidget(m_issuances_empty);
+    m_issuances->setVisible(false);
     layout->addWidget(issGroup);
 
     m_status = new QLabel(this);
     m_status->setWordWrap(true);
     layout->addWidget(m_status);
+
+    // Fold the cards down to their titles. The page stacks four full forms, and
+    // the one you want was always below two you did not; closed, the page reads
+    // as a short menu of what it can do. The rule for what starts open: a card
+    // that only SHOWS you something ("Your issuances") is why you came, so it
+    // stays open, while a card you have to fill in waits to be asked for.
+    CollapsibleSection::adopt(issueGroup, QStringLiteral("assets/issue"));
+    CollapsibleSection::adopt(reissueGroup, QStringLiteral("assets/reissue"));
+    CollapsibleSection::adopt(regGroup, QStringLiteral("assets/register"));
+    m_issuances_section = CollapsibleSection::adopt(issGroup, QStringLiteral("assets/issuances"),
+                                                    /*open_by_default=*/true);
 
     layout->addStretch();
 
@@ -495,6 +515,14 @@ void AssetsPage::refresh()
                                            "can never spend anyone's coins."));
             }
             m_issuances->setItem(row, 4, supervision);
+        }
+        const int n = m_issuances->rowCount();
+        m_issuances->setVisible(n > 0);
+        if (m_issuances_empty) m_issuances_empty->setVisible(n == 0);
+        // So a folded card still answers "have I issued anything?".
+        if (m_issuances_section) {
+            m_issuances_section->setSummary(n == 0 ? tr("none yet")
+                                                   : tr("%n asset(s)", "", n));
         }
     }
 
