@@ -14,6 +14,7 @@
 
 class ClientModel;
 class TransactionFilterProxy;
+class ParentChainTxModel;
 class TxViewDelegate;
 class PlatformStyle;
 class WalletModel;
@@ -41,6 +42,9 @@ public:
 
     void setClientModel(ClientModel *clientModel);
     void setWalletModel(WalletModel *walletModel);
+    //! The native-Bitcoin history rows this page's parent-chain scan maintains;
+    //! shared with the Transactions tab so both views merge the same stream.
+    ParentChainTxModel* parentChainTxModel() const { return m_parent_tx_model; }
     void showOutOfSyncWarning(bool fShow);
 
 public Q_SLOTS:
@@ -100,6 +104,7 @@ private:
     // Last successful parent-chain scan: the tBTC balance rides in the asset table and the
     // headline total, so it is kept here between scans. -1 = no successful scan yet (or the
     // parent became unreachable), which drops the row rather than showing a stale number.
+    ParentChainTxModel* m_parent_tx_model{nullptr};
     CAmount m_btc_amount{-1};
     int m_btc_addresses{0};
     int m_btc_parent_height{0};

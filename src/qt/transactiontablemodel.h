@@ -82,6 +82,9 @@ public:
         /** Hex id of the record's asset: the stable identity the token filter
          *  matches on, unaffected by a registry label arriving later */
         AssetIdRole,
+        /** True for rows that live on the Bitcoin parent chain (native BTC);
+         *  wallet rows answer false. Gates the wallet-only context actions. */
+        ParentChainRole,
     };
 
     int rowCount(const QModelIndex &parent) const override;

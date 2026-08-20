@@ -14,6 +14,8 @@
 #include <qt/clientmodel.h>
 #include <qt/coincontroldialog.h>
 #include <qt/guiutil.h>
+#include <core_io.h>
+#include <univalue.h>
 #include <qt/optionsmodel.h>
 #include <qt/platformstyle.h>
 #include <qt/sendcoinsentry.h>
@@ -299,6 +301,69 @@ SendCoinsDialog::~SendCoinsDialog()
     delete ui;
 }
 
+bool SendCoinsDialog::trySendParentBtc()
+{
+    // Collect the entries; only engage when a recipient chose native Bitcoin.
+    QList<SendAssetsRecipient> recipients;
+    bool any_btc = false, any_asset = false;
+    for (int i = 0; i < ui->entries->count(); ++i) {
+        SendCoinsEntry* entry = qobject_cast<SendCoinsEntry*>(ui->entries->itemAt(i)->widget());
+        if (!entry || entry->isClear()) continue;
+        if (!entry->validate(model->node())) { ui->scrollArea->ensureWidgetVisible(entry); return true; }
+        const SendAssetsRecipient r = entry->getValue();
+        (GUIUtil::isParentBtc(r.asset) ? any_btc : any_asset) = true;
+        recipients.append(r);
+    }
+    if (!any_btc) return false;
+    if (any_asset || recipients.size() != 1) {
+        // One chain per transaction: Bitcoin moves on Bitcoin. Mixing it with Sequentia
+        // assets in one send would promise a single transaction that cannot exist.
+        QMessageBox::warning(this, tr("Send Coins"),
+            tr("Bitcoin travels on its own chain, so send it on its own: one recipient, no other assets in the same send."));
+        return true;
+    }
+
+    const SendAssetsRecipient& rcp = recipients.first();
+    const QString amount_str = BitcoinUnits::format(BitcoinUnits::BTC, rcp.asset_amount, false, BitcoinUnits::SeparatorStyle::ALWAYS);
+    const QString question = tr("Send %1 %2 to %3?")
+        .arg(amount_str, GUIUtil::parentBtcTicker(), rcp.address)
+        + QStringLiteral("<br><span style='font-size:10pt;color:#9b988e;'>")
+        + (rcp.fSubtractFeeFromAmount
+            ? tr("An ordinary Bitcoin transaction on the parent chain. The network fee is estimated from the parent chain and paid in bitcoin, deducted from this amount.")
+            : tr("An ordinary Bitcoin transaction on the parent chain. The network fee is estimated from the parent chain and paid in bitcoin, on top of this amount."))
+        + QStringLiteral("</span>");
+    auto confirmationDialog = new SendConfirmationDialog(tr("Confirm Bitcoin Send"), question, QString(), QString(), SEND_CONFIRM_DELAY, true, false, this);
+    confirmationDialog->setAttribute(Qt::WA_DeleteOnClose);
+    const auto retval = static_cast<QMessageBox::StandardButton>(confirmationDialog->exec());
+    if (retval != QMessageBox::Yes) return true;
+
+    UniValue params(UniValue::VARR);
+    params.push_back(rcp.address.toStdString());
+    params.push_back(ValueFromAmount(rcp.asset_amount));
+    params.push_back(UniValue(UniValue::VNULL)); // fee_rate: the parent chain's own estimate
+    params.push_back(UniValue(rcp.fSubtractFeeFromAmount));
+    const std::string uri = "/wallet/" + model->getWalletName().toStdString();
+    try {
+        UniValue r = model->node().executeRpc("sendbtctoaddress", params, uri);
+        QString txid, fee;
+        if (r.isObject() && r.exists("txid")) txid = QString::fromStdString(r["txid"].getValStr());
+        if (r.isObject() && r.exists("fee")) fee = QString::fromStdString(r["fee"].getValStr());
+        QMessageBox::information(this, tr("Bitcoin sent"),
+            tr("Broadcast on the parent chain.") + QStringLiteral("<br><br>")
+            + tr("Transaction id: %1").arg(QStringLiteral("<span style='font-family:monospace;'>") + txid.toHtmlEscaped() + QStringLiteral("</span>"))
+            + (fee.isEmpty() ? QString() : QStringLiteral("<br>") + tr("Fee: %1 %2").arg(fee, GUIUtil::parentBtcTicker())));
+        m_coin_control->UnSelectAll();
+        accept();
+        coinControlUpdateLabels();
+    } catch (const UniValue& e) {
+        const QString msg = QString::fromStdString(e.exists("message") ? e["message"].getValStr() : e.write());
+        QMessageBox::critical(this, tr("Bitcoin send failed"), msg.toHtmlEscaped());
+    } catch (const std::exception& e) {
+        QMessageBox::critical(this, tr("Bitcoin send failed"), QString::fromStdString(e.what()).toHtmlEscaped());
+    }
+    return true;
+}
+
 bool SendCoinsDialog::PrepareSendText(QString& question_string, QString& informative_text, QString& detailed_text)
 {
     QList<SendAssetsRecipient> recipients;
@@ -571,6 +636,12 @@ void SendCoinsDialog::sendButtonClicked([[maybe_unused]] bool checked)
 {
     if(!model || !model->getOptionsModel())
         return;
+
+    // Native Bitcoin takes its own road at the last moment: same form, same recipients,
+    // but the transaction is an ordinary Bitcoin one, built and signed by the wallet's
+    // keys and broadcast through the parent-chain node. Everything before this line —
+    // picker, amount, address — treated it exactly like any asset.
+    if (trySendParentBtc()) return;
 
     QString question_string, informative_text, detailed_text;
     if (!PrepareSendText(question_string, informative_text, detailed_text)) return;
@@ -1268,6 +1339,21 @@ void SendCoinsDialog::coinControlChangeEdited(const QString& text)
 // Coin Control: update labels
 void SendCoinsDialog::coinControlUpdateLabels()
 {
+    // Bitcoin pays its network fee in bitcoin, estimated from the parent chain; the
+    // Sequentia fee panel would only promise a fee that never applies. It returns the
+    // moment any recipient is back on a Sequentia asset.
+    if (ui->frameFee) {
+        bool any_entry = false;
+        bool all_btc = true;
+        for (int i = 0; i < ui->entries->count(); ++i) {
+            SendCoinsEntry* e = qobject_cast<SendCoinsEntry*>(ui->entries->itemAt(i)->widget());
+            if (!e) continue;
+            any_entry = true;
+            if (!GUIUtil::isParentBtc(e->getValue().asset)) { all_btc = false; break; }
+        }
+        ui->frameFee->setVisible(!(any_entry && all_btc));
+    }
+
     if (!model || !model->getOptionsModel())
         return;
 

@@ -86,6 +86,8 @@ private:
     void minimizeFeeSection(bool fMinimize);
     // Format confirmation message
     bool PrepareSendText(QString& question_string, QString& informative_text, QString& detailed_text);
+    //! When a recipient chose native Bitcoin, run the parent-chain send path; returns true when it handled the click.
+    bool trySendParentBtc();
     /* Sign PSBT using external signer.
      *
      * @param[in,out] psbtx the PSBT to sign
