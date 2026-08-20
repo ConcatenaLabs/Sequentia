@@ -248,6 +248,13 @@ namespace GUIUtil
        (its default pegged-asset name) in selectors and amount labels. */
     QString assetDisplayName(const CAsset& asset);
 
+    /* Native parent-chain Bitcoin in pickers and tables. It is not a CAsset, so views
+       that traffic in CAsset carry it as the null asset id, which no real asset can
+       have (every real id is an issuance hash). */
+    const CAsset& parentBtcAsset();
+    bool isParentBtc(const CAsset& asset);
+    QString parentBtcTicker();
+
     /* SEQUENTIA: the reissuance tokens the loaded wallets know about, token -> the asset it
        mints. Published here rather than kept in a wallet model because assetDisplayName is
        reached from every table, selector and amount field, most of them with no wallet in

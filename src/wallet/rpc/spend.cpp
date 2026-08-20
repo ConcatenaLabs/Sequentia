@@ -12,6 +12,9 @@
 #include <key_io.h>
 #include <mainchainrpc.h>
 #include <policy/policy.h>
+#include <primitives/bitcoin/transaction.h>
+#include <fstream>
+#include <wallet/scriptpubkeyman.h>
 #include <policy/settings.h>
 #include <pos.h>
 #include <rpc/rawtransaction_util.h>
@@ -2430,6 +2433,479 @@ RPCHelpMan getbtcbalance()
     result.pushKV("utxos", utxos);
     result.pushKV("error", err);
     return result;
+},
+    };
+}
+
+// SEQUENTIA parent-chain (native Bitcoin) spending. The wallet's receiving keys are
+// Bitcoin keys and its unblinded scriptPubKeys are byte-identical on the parent
+// chain, so the wallet can spend the Bitcoin found at its own addresses: scan the
+// parent UTXO set, build a plain Bitcoin transaction, sign it with the wallet's own
+// keys, and hand it to the configured -mainchainrpc node for broadcast. Nothing
+// here is a peg: the coins start and stay on Bitcoin.
+namespace {
+
+struct ParentUtxo {
+    uint256 txid;
+    int vout{0};
+    CAmount amount{0};
+    int height{0};
+    int64_t time{0};
+    CScript script;
+    std::string address;
+};
+
+//! Scan the parent chain's UTXO set for this wallet's receiving addresses.
+//! Returns false with `err` set when the parent chain cannot be queried.
+bool ScanParentUtxos(const CWallet& wallet, std::vector<ParentUtxo>& out, int& parent_height, std::string& err)
+{
+    UniValue descriptors(UniValue::VARR);
+    {
+        LOCK(wallet.cs_wallet);
+        for (const auto& item : wallet.m_address_book) {
+            CTxDestination dest = item.first;
+            std::visit(SetBlindingPubKeyVisitor(CPubKey()), dest);
+            const std::string addr = EncodeDestination(dest);
+            if (addr.empty()) continue;
+            descriptors.push_back("addr(" + addr + ")");
+        }
+    }
+    if (descriptors.empty()) { err = "no receiving addresses yet"; return false; }
+
+    UniValue params(UniValue::VARR);
+    params.push_back("start");
+    params.push_back(descriptors);
+    try {
+        UniValue reply = CallMainChainRPC("scantxoutset", params);
+        if (reply.exists("error") && !reply["error"].isNull()) {
+            const UniValue& e = reply["error"];
+            err = (e.isObject() && e.exists("message")) ? e["message"].get_str() : e.write();
+            return false;
+        }
+        if (!reply.exists("result") || !reply["result"].isObject()) { err = "unexpected parent chain response"; return false; }
+        const UniValue& res = reply["result"];
+        parent_height = (res.exists("height") && res["height"].isNum()) ? res["height"].get_int() : 0;
+        if (!res.exists("unspents") || !res["unspents"].isArray()) return true;
+        for (size_t i = 0; i < res["unspents"].size(); ++i) {
+            const UniValue& u = res["unspents"][i];
+            if (!u.isObject()) continue;
+            ParentUtxo x;
+            if (u.exists("txid") && u["txid"].isStr()) x.txid = uint256S(u["txid"].get_str());
+            if (u.exists("vout") && u["vout"].isNum()) x.vout = u["vout"].get_int();
+            if (u.exists("amount")) x.amount = AmountFromValue(u["amount"]);
+            if (u.exists("height") && u["height"].isNum()) x.height = u["height"].get_int();
+            if (u.exists("scriptPubKey") && u["scriptPubKey"].isStr()) {
+                const std::vector<unsigned char> raw = ParseHex(u["scriptPubKey"].get_str());
+                x.script = CScript(raw.begin(), raw.end());
+            }
+            if (u.exists("desc") && u["desc"].isStr()) {
+                const std::string d = u["desc"].get_str();
+                const size_t open = d.find("addr(");
+                const size_t close = (open == std::string::npos) ? std::string::npos : d.find(')', open);
+                if (close != std::string::npos) x.address = d.substr(open + 5, close - open - 5);
+            }
+            if (x.script.empty() && !x.address.empty()) {
+                // Older parent nodes omit scriptPubKey from scan results; the address
+                // is Bitcoin-identical, so our own decoder reconstructs the script.
+                CTxDestination d = DecodeDestination(x.address);
+                if (IsValidDestination(d)) x.script = GetScriptForDestination(d);
+            }
+            out.push_back(std::move(x));
+        }
+        std::sort(out.begin(), out.end(), [](const ParentUtxo& a, const ParentUtxo& b) { return a.amount > b.amount; });
+        return true;
+    } catch (const std::exception& e) {
+        err = std::string("parent chain unreachable: ") + e.what();
+        return false;
+    }
+}
+
+//! BIP143 (segwit v0) signature hash over the PARENT-chain transaction form.
+uint256 ParentBip143Sighash(const Sidechain::Bitcoin::CMutableTransaction& tx, unsigned int in_pos,
+                            const CScript& script_code, CAmount amount)
+{
+    CHashWriter hp(SER_GETHASH, 0), hs(SER_GETHASH, 0), ho(SER_GETHASH, 0);
+    for (const auto& in : tx.vin) hp << in.prevout;
+    for (const auto& in : tx.vin) hs << in.nSequence;
+    for (const auto& o : tx.vout) ho << o;
+    CHashWriter ss(SER_GETHASH, 0);
+    ss << tx.nVersion << hp.GetHash() << hs.GetHash()
+       << tx.vin[in_pos].prevout << script_code << amount << tx.vin[in_pos].nSequence
+       << ho.GetHash() << tx.nLockTime << int32_t{SIGHASH_ALL};
+    return ss.GetHash();
+}
+
+//! The wallet key behind a P2WPKH scriptPubKey, wherever the wallet keeps it.
+//! The pubkey comes from the public solving provider; the private key through
+//! the same by-pubkey accessor the staking spends use (GetStakerKey above),
+//! which is the sanctioned raw-key door for descriptor wallets in this tree.
+bool GetWalletKeyForP2WPKH(const CWallet& wallet, const CScript& spk, CKey& key, CPubKey& pubkey)
+{
+    int version = 0;
+    std::vector<unsigned char> program;
+    if (!spk.IsWitnessProgram(version, program) || version != 0 || program.size() != 20) return false;
+    const CKeyID keyid{uint160(program)};
+    const auto provider = wallet.GetSolvingProvider(spk);
+    if (!provider || !provider->GetPubKey(keyid, pubkey)) return false;
+    return GetStakerKey(wallet, pubkey, key);
+}
+
+fs::path ParentSendsPath(const CWallet& wallet)
+{
+    return fs::PathFromString(wallet.GetDatabase().Filename()).parent_path() / "parent_sends.json";
+}
+
+UniValue LoadParentSends(const CWallet& wallet)
+{
+    UniValue arr(UniValue::VARR);
+    std::ifstream f(fs::PathToString(ParentSendsPath(wallet)));
+    if (!f.good()) return arr;
+    const std::string data((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    UniValue parsed;
+    if (parsed.read(data) && parsed.isArray()) arr = parsed;
+    return arr;
+}
+
+void StoreParentSends(const CWallet& wallet, const UniValue& arr)
+{
+    std::ofstream f(fs::PathToString(ParentSendsPath(wallet)), std::ios::trunc);
+    f << arr.write(1) << std::endl;
+}
+
+} // namespace
+
+RPCHelpMan sendbtctoaddress()
+{
+    return RPCHelpMan{"sendbtctoaddress",
+        "\nSend native Bitcoin (parent-chain) from this wallet's addresses.\n"
+        "The wallet's receiving addresses are Bitcoin-identical, so Bitcoin received at them is\n"
+        "spendable with the wallet's own keys. This scans the parent chain for those coins, builds\n"
+        "and signs an ordinary Bitcoin transaction, and broadcasts it through the configured\n"
+        "-mainchainrpc node. This is native Bitcoin on its own chain, not a peg and not a\n"
+        "Sequentia asset; fees are paid in bitcoin out of the coins being spent.\n",
+        {
+            {"address", RPCArg::Type::STR, RPCArg::Optional::NO, "The destination, a bech32 (segwit) address. Sequentia and Bitcoin share the address format."},
+            {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "The amount in BTC to send."},
+            {"fee_rate", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED_NAMED_ARG, "Fee rate in sat/vB. Defaults to the parent chain's estimatesmartfee, floor 1 sat/vB."},
+            {"subtractfeefromamount", RPCArg::Type::BOOL, RPCArg::Default{false}, "Deduct the fee from the amount instead of adding it on top."},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "", {
+            {RPCResult::Type::STR_HEX, "txid", "the parent-chain transaction id"},
+            {RPCResult::Type::STR_AMOUNT, "fee", "the bitcoin fee paid"},
+            {RPCResult::Type::NUM, "inputs", "how many parent-chain coins were spent"},
+        }},
+        RPCExamples{HelpExampleCli("sendbtctoaddress", "\"tb1q...\" 0.01") + HelpExampleRpc("sendbtctoaddress", "\"tb1q...\", 0.01")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
+    if (!pwallet) return NullUniValue;
+    EnsureWalletIsUnlocked(*pwallet);
+
+    // Destination: the unconfidential, Bitcoin-identical form only. Confidential
+    // addresses have no meaning on the parent chain, and legacy base58 is not
+    // something this wallet ever hands out.
+    CTxDestination dest = DecodeDestination(request.params[0].get_str());
+    std::visit(SetBlindingPubKeyVisitor(CPubKey()), dest);
+    if (!IsValidDestination(dest) ||
+        (!std::holds_alternative<WitnessV0KeyHash>(dest) && !std::holds_alternative<WitnessV0ScriptHash>(dest) &&
+         !std::holds_alternative<WitnessV1Taproot>(dest))) {
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Bitcoin travels to a bech32 address (tb1.../bc1...); give one of those");
+    }
+    const CScript dest_script = GetScriptForDestination(dest);
+
+    const CAmount send_amount = AmountFromValue(request.params[1]);
+    if (send_amount <= 0) throw JSONRPCError(RPC_TYPE_ERROR, "Invalid amount for send");
+    const bool subtract_fee = !request.params[3].isNull() && request.params[3].get_bool();
+
+    // Fee rate, sat/vB: caller's, else the parent chain's own estimate, floor 1.
+    CAmount sat_per_vb = 0;
+    if (!request.params[2].isNull()) {
+        sat_per_vb = request.params[2].get_int64();
+        if (sat_per_vb < 1) throw JSONRPCError(RPC_INVALID_PARAMETER, "fee_rate must be at least 1 sat/vB");
+    } else {
+        try {
+            UniValue p(UniValue::VARR);
+            p.push_back(6);
+            UniValue r = CallMainChainRPC("estimatesmartfee", p);
+            if (r.exists("result") && r["result"].isObject() && r["result"].exists("feerate")) {
+                const CAmount per_kvb = AmountFromValue(r["result"]["feerate"]);
+                sat_per_vb = std::max<CAmount>(1, per_kvb / 1000);
+            }
+        } catch (...) {}
+        if (sat_per_vb < 1) sat_per_vb = 1;
+    }
+
+    std::vector<ParentUtxo> coins;
+    int parent_height = 0;
+    std::string err;
+    if (!ScanParentUtxos(*pwallet, coins, parent_height, err)) {
+        throw JSONRPCError(RPC_MISC_ERROR, "Cannot reach the Bitcoin parent chain: " + err);
+    }
+
+    // Spendable = confirmed P2WPKH coins whose key the wallet actually holds. Coins the
+    // scan found but this wallet cannot sign for (watch-only entries) stay untouched.
+    struct Selected { ParentUtxo utxo; CKey key; CPubKey pubkey; };
+    std::vector<Selected> spendable;
+    CAmount available = 0;
+    for (const ParentUtxo& u : coins) {
+        if (u.height <= 0 || u.amount <= 0) continue;
+        CKey key; CPubKey pubkey;
+        if (!GetWalletKeyForP2WPKH(*pwallet, u.script, key, pubkey)) continue;
+        spendable.push_back({u, key, pubkey});
+        available += u.amount;
+    }
+    if (available < send_amount) {
+        throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS,
+            strprintf("Insufficient Bitcoin: %s available at this wallet's addresses, %s requested",
+                      FormatMoney(available), FormatMoney(send_amount)));
+    }
+
+    // Largest-first selection with an iterated fee: vsize ~= 11 + 68 per input + 31 per
+    // output. Change below dust (546 sat) folds into the fee rather than creating an
+    // output the parent chain would refuse to relay.
+    static constexpr CAmount PARENT_DUST{546};
+    std::vector<Selected> picked;
+    CAmount in_sum = 0, fee = 0, change = 0;
+    bool with_change = false;
+    for (const Selected& s : spendable) {
+        picked.push_back(s);
+        in_sum += s.utxo.amount;
+        for (int outs = 2; outs >= 1; --outs) {
+            const CAmount f = sat_per_vb * (11 + 68 * (CAmount)picked.size() + 31 * outs);
+            const CAmount need = subtract_fee ? send_amount : send_amount + f;
+            if (in_sum >= need) {
+                fee = f;
+                with_change = (outs == 2);
+                change = with_change ? in_sum - need : 0;
+                if (with_change && change < PARENT_DUST) { with_change = false; continue; }
+                goto selected;
+            }
+        }
+    }
+    throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS,
+        strprintf("Insufficient Bitcoin once the fee is counted: %s available, %s requested at %d sat/vB",
+                  FormatMoney(available), FormatMoney(send_amount), sat_per_vb));
+selected:
+
+    const CAmount to_dest = subtract_fee ? send_amount - fee : send_amount;
+    if (to_dest <= PARENT_DUST) throw JSONRPCError(RPC_INVALID_PARAMETER, "Amount after the fee would be dust on the parent chain");
+    if (!with_change) fee = in_sum - to_dest; // no change output: the remainder is the fee
+
+    // The change returns to a fresh address of this wallet, which the parent-chain scan
+    // covers, so the remainder reappears in the balance and the send's confirmations can
+    // be read off it.
+    CScript change_script;
+    std::string change_address;
+    if (with_change) {
+        CTxDestination change_dest;
+        bilingual_str dest_err;
+        if (!pwallet->GetNewDestination(OutputType::BECH32, "", change_dest, dest_err)) {
+            throw JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT, dest_err.original);
+        }
+        std::visit(SetBlindingPubKeyVisitor(CPubKey()), change_dest);
+        change_script = GetScriptForDestination(change_dest);
+        change_address = EncodeDestination(change_dest);
+    }
+
+    Sidechain::Bitcoin::CMutableTransaction mtx;
+    mtx.nVersion = 2;
+    mtx.nLockTime = 0;
+    for (const Selected& s : picked) {
+        Sidechain::Bitcoin::CTxIn in;
+        in.prevout = Sidechain::Bitcoin::COutPoint(s.utxo.txid, s.utxo.vout);
+        in.nSequence = 0xfffffffd; // opt-in RBF, as every wallet send
+        mtx.vin.push_back(in);
+    }
+    {
+        Sidechain::Bitcoin::CTxOut out;
+        out.nValue = to_dest;
+        out.scriptPubKey = dest_script;
+        mtx.vout.push_back(out);
+    }
+    if (with_change) {
+        Sidechain::Bitcoin::CTxOut out;
+        out.nValue = change;
+        out.scriptPubKey = change_script;
+        mtx.vout.push_back(out);
+    }
+
+    for (size_t i = 0; i < picked.size(); ++i) {
+        const Selected& s = picked[i];
+        int version = 0;
+        std::vector<unsigned char> program;
+        s.utxo.script.IsWitnessProgram(version, program);
+        CScript script_code;
+        script_code << OP_DUP << OP_HASH160 << program << OP_EQUALVERIFY << OP_CHECKSIG;
+        const uint256 sighash = ParentBip143Sighash(mtx, i, script_code, s.utxo.amount);
+        std::vector<unsigned char> sig;
+        if (!s.key.Sign(sighash, sig)) throw JSONRPCError(RPC_WALLET_ERROR, "Signing the parent-chain transaction failed");
+        sig.push_back((unsigned char)SIGHASH_ALL);
+        mtx.vin[i].scriptWitness.stack = {sig, std::vector<unsigned char>(s.pubkey.begin(), s.pubkey.end())};
+    }
+
+    CDataStream ssTx(SER_NETWORK, PROTOCOL_VERSION);
+    ssTx << mtx;
+    const std::string tx_hex = HexStr(ssTx);
+
+    std::string txid;
+    try {
+        UniValue p(UniValue::VARR);
+        p.push_back(tx_hex);
+        UniValue r = CallMainChainRPC("sendrawtransaction", p);
+        if (r.exists("error") && !r["error"].isNull()) {
+            const UniValue& e = r["error"];
+            throw JSONRPCError(RPC_MISC_ERROR, "The Bitcoin node refused the transaction: " +
+                ((e.isObject() && e.exists("message")) ? e["message"].get_str() : e.write()));
+        }
+        if (!r.exists("result") || !r["result"].isStr()) throw JSONRPCError(RPC_MISC_ERROR, "Unexpected parent chain response to broadcast");
+        txid = r["result"].get_str();
+    } catch (const UniValue& e) {
+        throw;
+    } catch (const std::exception& e) {
+        throw JSONRPCError(RPC_MISC_ERROR, std::string("Cannot reach the Bitcoin parent chain to broadcast: ") + e.what());
+    }
+
+    // The send becomes part of this wallet's Bitcoin history. The scan alone cannot
+    // reconstruct it (spent coins leave the UTXO set), so it is recorded beside the
+    // wallet; listbtctransactions folds these records into the unified history.
+    {
+        UniValue sends = LoadParentSends(*pwallet);
+        UniValue rec(UniValue::VOBJ);
+        rec.pushKV("txid", txid);
+        rec.pushKV("time", GetTime());
+        rec.pushKV("address", request.params[0].get_str());
+        rec.pushKV("btc", ValueFromAmount(to_dest));
+        rec.pushKV("fee", ValueFromAmount(fee));
+        rec.pushKV("change_vout", with_change ? 1 : -1);
+        rec.pushKV("change_address", change_address);
+        sends.push_back(rec);
+        StoreParentSends(*pwallet, sends);
+    }
+
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("txid", txid);
+    result.pushKV("fee", ValueFromAmount(fee));
+    result.pushKV("inputs", (int)picked.size());
+    return result;
+},
+    };
+}
+
+RPCHelpMan listbtctransactions()
+{
+    return RPCHelpMan{"listbtctransactions",
+        "\nThe wallet's Bitcoin (parent-chain) history: coins received at its addresses and\n"
+        "sends made with sendbtctoaddress, newest first. Receives come from scanning the\n"
+        "parent UTXO set, so a received coin later spent elsewhere leaves the list; sends\n"
+        "are recorded when made and their confirmations read from the parent chain.\n",
+        {
+            {"scan", RPCArg::Type::BOOL, RPCArg::Default{true}, "Scan the parent chain for receives. false returns only the recorded sends, cheaply, for a caller that already holds a fresh scan."},
+        },
+        RPCResult{RPCResult::Type::ARR, "", "", {
+            {RPCResult::Type::OBJ, "", "", {
+                {RPCResult::Type::STR, "category", "\"receive\" or \"send\""},
+                {RPCResult::Type::STR_HEX, "txid", "the parent-chain transaction id"},
+                {RPCResult::Type::STR, "address", "the address involved"},
+                {RPCResult::Type::STR_AMOUNT, "btc", "the amount (positive for receive, the amount sent for send)"},
+                {RPCResult::Type::STR_AMOUNT, "fee", "the fee paid (sends only)"},
+                {RPCResult::Type::NUM_TIME, "time", "block time for receives, broadcast time for sends"},
+                {RPCResult::Type::NUM, "confirmations", "parent-chain confirmations; 0 in the mempool, -1 unknown"},
+            }},
+        }},
+        RPCExamples{HelpExampleCli("listbtctransactions", "") + HelpExampleRpc("listbtctransactions", "")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
+    if (!pwallet) return NullUniValue;
+
+    UniValue rows(UniValue::VARR);
+    const bool want_scan = request.params[0].isNull() || request.params[0].get_bool();
+    std::vector<ParentUtxo> coins;
+    int parent_height = 0;
+    std::string err;
+    const bool scanned = want_scan && ScanParentUtxos(*pwallet, coins, parent_height, err);
+
+    const UniValue sends = LoadParentSends(*pwallet);
+    std::set<std::string> send_txids;
+    for (size_t i = 0; i < sends.size(); ++i) {
+        if (sends[i].isObject() && sends[i].exists("txid")) send_txids.insert(sends[i]["txid"].get_str());
+    }
+
+    if (scanned) {
+        // Times for receive rows, as getbtcbalance resolves them (capped).
+        std::map<int, int64_t> height_time;
+        for (const ParentUtxo& u : coins) {
+            if (u.height <= 0 || height_time.count(u.height) || height_time.size() >= 24) continue;
+            try {
+                UniValue hp(UniValue::VARR);
+                hp.push_back(u.height);
+                UniValue hr = CallMainChainRPC("getblockhash", hp);
+                if (!hr.exists("result") || !hr["result"].isStr()) continue;
+                UniValue bp(UniValue::VARR);
+                bp.push_back(hr["result"].get_str());
+                UniValue br = CallMainChainRPC("getblockheader", bp);
+                if (br.exists("result") && br["result"].isObject() && br["result"]["time"].isNum()) {
+                    height_time[u.height] = br["result"]["time"].get_int64();
+                }
+            } catch (...) {}
+        }
+        for (const ParentUtxo& u : coins) {
+            // A send's change lands back at our own address; the scan sees it as a fresh
+            // coin, but as HISTORY it is part of the send, not a receive of its own.
+            if (send_txids.count(u.txid.GetHex())) continue;
+            UniValue o(UniValue::VOBJ);
+            o.pushKV("category", "receive");
+            o.pushKV("txid", u.txid.GetHex());
+            o.pushKV("address", u.address);
+            o.pushKV("btc", ValueFromAmount(u.amount));
+            const auto it = height_time.find(u.height);
+            o.pushKV("time", it != height_time.end() ? it->second : int64_t{0});
+            o.pushKV("confirmations", (u.height > 0 && parent_height >= u.height) ? parent_height - u.height + 1 : 0);
+            rows.push_back(o);
+        }
+    }
+
+    // Sends, with confirmations read from the parent chain via the change output
+    // (gettxout answers for unspent outputs, mempool included).
+    for (size_t i = 0; i < sends.size(); ++i) {
+        if (!sends[i].isObject()) continue;
+        const UniValue& s = sends[i];
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("category", "send");
+        o.pushKV("txid", s.exists("txid") ? s["txid"].get_str() : "");
+        o.pushKV("address", s.exists("address") ? s["address"].get_str() : "");
+        o.pushKV("btc", s.exists("btc") ? s["btc"] : UniValue(UniValue::VNUM));
+        if (s.exists("fee")) o.pushKV("fee", s["fee"]);
+        o.pushKV("time", s.exists("time") ? s["time"].get_int64() : int64_t{0});
+        int confs = -1;
+        const int change_vout = (s.exists("change_vout") && s["change_vout"].isNum()) ? s["change_vout"].get_int() : -1;
+        if (change_vout >= 0 && s.exists("txid")) {
+            try {
+                UniValue p(UniValue::VARR);
+                p.push_back(s["txid"].get_str());
+                p.push_back(change_vout);
+                p.push_back(true);
+                UniValue r = CallMainChainRPC("gettxout", p);
+                if (r.exists("result") && r["result"].isObject() && r["result"].exists("confirmations")) {
+                    confs = r["result"]["confirmations"].get_int();
+                }
+            } catch (...) {}
+        }
+        o.pushKV("confirmations", confs);
+        rows.push_back(o);
+    }
+
+    // Newest first, whatever chain the clock came from.
+    std::vector<size_t> order(rows.size());
+    for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::sort(order.begin(), order.end(), [&rows](size_t a, size_t b) {
+        const int64_t ta = rows[a].exists("time") ? rows[a]["time"].get_int64() : 0;
+        const int64_t tb = rows[b].exists("time") ? rows[b]["time"].get_int64() : 0;
+        return ta > tb;
+    });
+    UniValue sorted(UniValue::VARR);
+    for (size_t i : order) sorted.push_back(rows[i]);
+    return sorted;
 },
     };
 }

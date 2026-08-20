@@ -643,6 +643,8 @@ RPCHelpMan listdelegations();
 RPCHelpMan announcepayout();
 RPCHelpMan claimpoolrewards();
 RPCHelpMan getbtcbalance();
+RPCHelpMan sendbtctoaddress();
+RPCHelpMan listbtctransactions();
 RPCHelpMan settxfee();
 RPCHelpMan fundrawtransaction();
 RPCHelpMan bumpfee();
@@ -757,6 +759,8 @@ static const CRPCCommand commands[] =
     { "wallet",             &announcepayout,                 },
     { "wallet",             &claimpoolrewards,               },
     { "wallet",             &getbtcbalance,                  },
+    { "wallet",             &sendbtctoaddress,               },
+    { "wallet",             &listbtctransactions,            },
     { "wallet",             &sethdseed,                      },
     { "wallet",             &setlabel,                       },
     { "wallet",             &settxfee,                       },

@@ -11,7 +11,9 @@
 #include <qt/guiutil.h>
 #include <qt/optionsmodel.h>
 #include <qt/platformstyle.h>
+#include <qt/parentchaintxmodel.h>
 #include <qt/transactionfilterproxy.h>
+#include <QConcatenateTablesProxyModel>
 #include <qt/transactionoverviewwidget.h>
 #include <qt/transactiontablemodel.h>
 #include <qt/walletmodel.h>
@@ -178,6 +180,8 @@ OverviewPage::OverviewPage(const PlatformStyle *platformStyle, QWidget *parent) 
     ui->labelWalletStatus->setIcon(icon);
 
     // Recent transactions
+    m_parent_tx_model = new ParentChainTxModel(this);
+
     ui->listTransactions->setItemDelegate(txdelegate);
     ui->listTransactions->setIconSize(QSize(DECORATION_SIZE, DECORATION_SIZE));
     ui->listTransactions->setMinimumHeight(NUM_ITEMS * (DECORATION_SIZE + 2));
@@ -185,11 +189,10 @@ OverviewPage::OverviewPage(const PlatformStyle *platformStyle, QWidget *parent) 
 
     connect(ui->listTransactions, &TransactionOverviewWidget::clicked, this, &OverviewPage::handleTransactionClicked);
 
-    // Sequentia: the Overview no longer duplicates a "Recent transactions" list — the
-    // dedicated Transactions tab now carries the full, filterable history (with fees as
-    // sub-entries). Hide the whole panel so the Balances panel owns the page. The list
-    // machinery above is left wired (harmless, unshown) to keep the transactionClicked
-    // signal other views connect to intact.
+    // Sequentia: the Overview does not duplicate the Transactions tab — the Balances
+    // table owns this page and stretches into it; the full, filterable history (native
+    // Bitcoin included) lives in the Transactions tab. The list machinery above stays
+    // wired (harmless, unshown) so the transactionClicked signal keeps its consumers.
     ui->frame_2->setVisible(false);
 
     // start with displaying the "out of sync" warnings
@@ -265,7 +268,7 @@ OverviewPage::OverviewPage(const PlatformStyle *platformStyle, QWidget *parent) 
         m_asset_table->horizontalHeader()->setSectionResizeMode(COL_IMMATURE, QHeaderView::ResizeToContents);
         m_asset_table->horizontalHeader()->setSectionResizeMode(COL_VALUE, QHeaderView::ResizeToContents);
         m_asset_table->horizontalHeader()->setHighlightSections(false);
-        m_asset_table->setTextElideMode(Qt::ElideRight);
+        m_asset_table->setTextElideMode(Qt::ElideMiddle);
         m_asset_table->verticalHeader()->setVisible(false);
         m_asset_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
         m_asset_table->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -277,7 +280,7 @@ OverviewPage::OverviewPage(const PlatformStyle *platformStyle, QWidget *parent) 
         m_asset_table->setMinimumHeight(120);
         // Insert where the retired scroll area sat: under the total-value headline, above the
         // tBTC separator/label that setBalance appends below the asset rows.
-        ui->verticalLayout_4->insertWidget(2, m_asset_table);
+        ui->verticalLayout_4->insertWidget(2, m_asset_table, /*stretch=*/1);
     }
 
     // Parent-chain (Bitcoin testnet4) status line. The tBTC balance itself lives as a row
@@ -474,7 +477,13 @@ void OverviewPage::populateAssetTable(const interfaces::WalletBalances& balances
         const int row = t->rowCount();
         t->insertRow(row);
 
-        auto* name = new QTableWidgetItem(QStringLiteral("tBTC"));
+        auto* name = new QTableWidgetItem(GUIUtil::parentBtcTicker());
+        {
+            // The one asset with a fixed seat wears it visibly: bold, same table.
+            QFont bf = name->font();
+            bf.setBold(true);
+            name->setFont(bf);
+        }
         name->setToolTip(tr("Your Sequentia receiving address is also a Bitcoin testnet4 address, so the same "
                             "address can hold real testnet Bitcoin (tBTC). Scanned from the Bitcoin testnet4 "
                             "chain across %1 of your addresses; confirmed outputs only. It is not a Sequentia "
@@ -491,6 +500,11 @@ void OverviewPage::populateAssetTable(const interfaces::WalletBalances& balances
         else s = BitcoinUnits::format(BitcoinUnits::BTC, m_btc_amount, false, BitcoinUnits::SeparatorStyle::ALWAYS);
         auto* avail = new QTableWidgetItem(s);
         avail->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        {
+            QFont bf = avail->font();
+            bf.setBold(true);
+            avail->setFont(bf);
+        }
         t->setItem(row, COL_AVAILABLE, avail);
         t->setItem(row, COL_PENDING, new QTableWidgetItem(QString()));
         t->setItem(row, COL_IMMATURE, new QTableWidgetItem(QString()));
@@ -593,9 +607,15 @@ void OverviewPage::setWalletModel(WalletModel *model)
     this->walletModel = model;
     if(model && model->getOptionsModel())
     {
-        // Set up transaction list
+        m_parent_tx_model->setWalletModel(model);
+
+        // Set up the recent-activity list over the ONE history: wallet rows and
+        // native-Bitcoin rows concatenated, date-sorted, newest five.
+        auto* merged = new QConcatenateTablesProxyModel(this);
+        merged->addSourceModel(model->getTransactionTableModel());
+        merged->addSourceModel(m_parent_tx_model);
         filter.reset(new TransactionFilterProxy());
-        filter->setSourceModel(model->getTransactionTableModel());
+        filter->setSourceModel(merged);
         filter->setLimit(NUM_ITEMS);
         filter->setDynamicSortFilter(true);
         filter->setSortRole(Qt::EditRole);
@@ -702,8 +722,8 @@ void OverviewPage::updateSeqStatus()
         // n is the number of *registered* stakers (the full registry), which is
         // distinct from and may exceed the per-block committee cap; label it as such.
         const QString registered = (n >= 0) ? tr("%1 registered staker(s)").arg(n) : tr("staker count unavailable");
-        m_staking_label->setText(tr("Staking: %1 - this node is %2")
-                                 .arg(registered, producer ? tr("configured to produce") : tr("not producing")));
+        m_staking_label->setText(tr("Staking: %1; this node %2")
+                                 .arg(registered, producer ? tr("produces blocks") : tr("observes (does not produce)")));
     }
 
     // Finality + long-range-fork (checkpoint) status. No finalized checkpoint
@@ -869,6 +889,7 @@ void OverviewPage::onBtcScanResult(bool ok, const QString& error_text, CAmount a
     }
     m_btc_parent_height = parent_height;
     m_btc_utxos = utxos;
+    if (m_parent_tx_model) m_parent_tx_model->refresh(m_btc_utxos, m_btc_parent_height);
     Q_EMIT btcUtxosChanged(m_btc_utxos, m_btc_parent_height);
 }
 

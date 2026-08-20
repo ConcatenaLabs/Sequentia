@@ -61,6 +61,7 @@ QT_MOC_CPP = \
   qt/moc_optionsdialog.cpp \
   qt/moc_optionsmodel.cpp \
   qt/moc_overviewpage.cpp \
+  qt/moc_parentchaintxmodel.cpp \
   qt/moc_assetspage.cpp \
   qt/moc_stakingpage.cpp \
   qt/moc_supervisionpage.cpp \
@@ -139,6 +140,7 @@ BITCOIN_QT_H = \
   qt/optionsdialog.h \
   qt/optionsmodel.h \
   qt/overviewpage.h \
+  qt/parentchaintxmodel.h \
   qt/assetspage.h \
   qt/stakingpage.h \
   qt/supervisionpage.h \
@@ -271,6 +273,7 @@ BITCOIN_QT_WALLET_CPP = \
   qt/editaddressdialog.cpp \
   qt/openuridialog.cpp \
   qt/overviewpage.cpp \
+  qt/parentchaintxmodel.cpp \
   qt/assetspage.cpp \
   qt/stakingpage.cpp \
   qt/supervisionpage.cpp \
