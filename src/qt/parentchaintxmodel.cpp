@@ -13,6 +13,7 @@
 #include <univalue.h>
 #include <util/strencodings.h>
 
+#include <QIcon>
 #include <QPointer>
 #include <QSet>
 #include <QThread>
@@ -141,6 +142,17 @@ QVariant ParentChainTxModel::data(const QModelIndex& index, int role) const
         case TransactionTableModel::Amount: return qint64(r.amount);
         default: return data(index, Qt::DisplayRole);
         }
+    case Qt::DecorationRole:
+        if (index.column() == TransactionTableModel::Status) {
+            // The same ladder the wallet rows climb: unconfirmed, one to five
+            // parent-chain confirmations, then settled.
+            if (r.confirmations <= 0) return QIcon(":/icons/transaction_0");
+            if (r.confirmations >= 6) return QIcon(":/icons/transaction_confirmed");
+            return QIcon(QString(":/icons/transaction_%1").arg(r.confirmations));
+        }
+        return QVariant();
+    case TransactionTableModel::RawDecorationRole:
+        return r.send ? QIcon(":/icons/tx_output") : QIcon(":/icons/tx_input");
     case Qt::TextAlignmentRole:
         if (index.column() == TransactionTableModel::Amount || index.column() == TransactionTableModel::Value) {
             return QVariant(Qt::AlignRight | Qt::AlignVCenter);

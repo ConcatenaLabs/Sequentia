@@ -529,6 +529,11 @@ void BitcoinAmountField::setDisplayUnit(int newUnit)
     if (!hasAssetChoice(Params().GetConsensus().pegged_asset)) {
         addAssetChoice(Params().GetConsensus().pegged_asset);
     }
+    // This is an ASSET selector: the display-unit preference names how to show
+    // the pegged asset, and must not steal the selection away from an asset the
+    // user (or the default) has chosen -- native Bitcoin included.
+    const QVariant current = unit->itemData(unit->currentIndex(), Qt::UserRole);
+    if (current.isValid() && current.type() == QVariant::UserType) return;
     unit->setCurrentIndex(unit->findData(newUnit, Qt::UserRole));
 }
 

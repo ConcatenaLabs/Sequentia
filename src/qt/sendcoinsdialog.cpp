@@ -325,12 +325,45 @@ bool SendCoinsDialog::trySendParentBtc()
 
     const SendAssetsRecipient& rcp = recipients.first();
     const QString amount_str = BitcoinUnits::format(BitcoinUnits::BTC, rcp.asset_amount, false, BitcoinUnits::SeparatorStyle::ALWAYS);
+
+    // Ask the node what this send would cost before asking the user to approve
+    // it: same selection, same fee math, nothing signed or spent. A fee the
+    // user never saw is a fee they never agreed to.
+    QString fee_line;
+    {
+        UniValue est_params(UniValue::VARR);
+        est_params.push_back(rcp.address.toStdString());
+        est_params.push_back(ValueFromAmount(rcp.asset_amount));
+        est_params.push_back(UniValue(UniValue::VNULL));
+        est_params.push_back(UniValue(rcp.fSubtractFeeFromAmount));
+        est_params.push_back(UniValue(true)); // estimate_only
+        const std::string uri_est = "/wallet/" + model->getWalletName().toStdString();
+        try {
+            UniValue est = model->node().executeRpc("sendbtctoaddress", est_params, uri_est);
+            if (est.isObject() && est.exists("fee")) {
+                const QString fee_btc = QString::fromStdString(est["fee"].getValStr());
+                const QString rate = est.exists("fee_rate") ? QString::fromStdString(est["fee_rate"].getValStr()) : QString();
+                fee_line = tr("Network fee: %1 %2").arg(fee_btc, GUIUtil::parentBtcTicker());
+                if (!rate.isEmpty()) fee_line += QStringLiteral(" ") + tr("(%1 sat/vB, the parent chain's estimate)").arg(rate);
+            }
+        } catch (const UniValue& e) {
+            // The estimate failing IS the answer to show; the real send would fail the same way.
+            const QString msg = QString::fromStdString(e.exists("message") ? e["message"].getValStr() : e.write());
+            QMessageBox::critical(this, tr("Bitcoin send failed"), msg);
+            return true;
+        } catch (const std::exception& e) {
+            QMessageBox::critical(this, tr("Bitcoin send failed"), QString::fromStdString(e.what()));
+            return true;
+        }
+    }
+
     const QString question = tr("Send %1 %2 to %3?")
         .arg(amount_str, GUIUtil::parentBtcTicker(), rcp.address)
+        + (fee_line.isEmpty() ? QString() : QStringLiteral("<br><b>") + fee_line + QStringLiteral("</b>"))
         + QStringLiteral("<br><span style='font-size:10pt;color:#9b988e;'>")
         + (rcp.fSubtractFeeFromAmount
-            ? tr("An ordinary Bitcoin transaction on the parent chain. The network fee is estimated from the parent chain and paid in bitcoin, deducted from this amount.")
-            : tr("An ordinary Bitcoin transaction on the parent chain. The network fee is estimated from the parent chain and paid in bitcoin, on top of this amount."))
+            ? tr("An ordinary Bitcoin transaction on the parent chain, the fee deducted from the amount.")
+            : tr("An ordinary Bitcoin transaction on the parent chain, the fee on top of the amount."))
         + QStringLiteral("</span>");
     auto confirmationDialog = new SendConfirmationDialog(tr("Confirm Bitcoin Send"), question, QString(), QString(), SEND_CONFIRM_DELAY, true, false, this);
     confirmationDialog->setAttribute(Qt::WA_DeleteOnClose);
@@ -357,9 +390,9 @@ bool SendCoinsDialog::trySendParentBtc()
         coinControlUpdateLabels();
     } catch (const UniValue& e) {
         const QString msg = QString::fromStdString(e.exists("message") ? e["message"].getValStr() : e.write());
-        QMessageBox::critical(this, tr("Bitcoin send failed"), msg.toHtmlEscaped());
+        QMessageBox::critical(this, tr("Bitcoin send failed"), msg);
     } catch (const std::exception& e) {
-        QMessageBox::critical(this, tr("Bitcoin send failed"), QString::fromStdString(e.what()).toHtmlEscaped());
+        QMessageBox::critical(this, tr("Bitcoin send failed"), QString::fromStdString(e.what()));
     }
     return true;
 }
