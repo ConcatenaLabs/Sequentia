@@ -189,18 +189,7 @@ TransactionView::TransactionView(const PlatformStyle *platformStyle, QWidget *pa
         "QHeaderView::section { border-right: 1px solid palette(mid); padding: 2px 6px; }");
     transactionView->header()->setSectionsClickable(true);
 
-    QSettings settings;
-    if (!transactionView->header()->restoreState(settings.value("TransactionViewHeaderState").toByteArray())) {
-        transactionView->setColumnWidth(TransactionTableModel::Status, STATUS_COLUMN_WIDTH);
-        transactionView->setColumnWidth(TransactionTableModel::Watchonly, WATCHONLY_COLUMN_WIDTH);
-        transactionView->setColumnWidth(TransactionTableModel::Date, DATE_COLUMN_WIDTH);
-        transactionView->setColumnWidth(TransactionTableModel::Type, TYPE_COLUMN_WIDTH);
-        transactionView->setColumnWidth(TransactionTableModel::ToAddress, ADDRESS_COLUMN_WIDTH);
-        transactionView->setColumnWidth(TransactionTableModel::Amount, AMOUNT_MINIMUM_COLUMN_WIDTH);
-        transactionView->setColumnWidth(TransactionTableModel::Value, VALUE_COLUMN_WIDTH);
-        transactionView->header()->setMinimumSectionSize(MINIMUM_COLUMN_WIDTH);
-        transactionView->header()->setStretchLastSection(true);
-    }
+    // Header geometry is set up in setModel(), not here: see setupHeader().
 
     contextMenu = new QMenu(this);
     contextMenu->setObjectName("contextMenu");
@@ -269,12 +258,43 @@ TransactionView::TransactionView(const PlatformStyle *platformStyle, QWidget *pa
 TransactionView::~TransactionView()
 {
     QSettings settings;
-    settings.setValue("TransactionViewHeaderState", transactionView->header()->saveState());
+    settings.setValue("TransactionViewHeaderStateV2", transactionView->header()->saveState());
 }
 
 void TransactionView::setParentChainModel(ParentChainTxModel* model)
 {
     m_parent_chain_model = model;
+}
+
+void TransactionView::setupHeader()
+{
+    // Every call in here needs the view to HAVE columns, so it belongs after the
+    // model is attached and not in the constructor. A header with no sections
+    // silently drops resizeSection() -- which is why the default widths below
+    // never once applied while this lived in the constructor -- and indexes out
+    // of bounds on setSectionResizeMode(), which segfaults outright.
+    QHeaderView* header = transactionView->header();
+    header->setMinimumSectionSize(MINIMUM_COLUMN_WIDTH);
+
+    // The key carries a version suffix on purpose. The saved state pins whatever
+    // widths were in force when it was written, so changing a default width here
+    // is invisible to every existing profile unless the key moves with it.
+    QSettings settings;
+    if (header->restoreState(settings.value("TransactionViewHeaderStateV2").toByteArray())) return;
+
+    transactionView->setColumnWidth(TransactionTableModel::Status, STATUS_COLUMN_WIDTH);
+    transactionView->setColumnWidth(TransactionTableModel::Watchonly, WATCHONLY_COLUMN_WIDTH);
+    transactionView->setColumnWidth(TransactionTableModel::Date, DATE_COLUMN_WIDTH);
+    transactionView->setColumnWidth(TransactionTableModel::Type, TYPE_COLUMN_WIDTH);
+    transactionView->setColumnWidth(TransactionTableModel::ToAddress, ADDRESS_COLUMN_WIDTH);
+    transactionView->setColumnWidth(TransactionTableModel::Amount, AMOUNT_MINIMUM_COLUMN_WIDTH);
+    transactionView->setColumnWidth(TransactionTableModel::Value, VALUE_COLUMN_WIDTH);
+    // Give the leftover width to the label/address, the only column whose content
+    // is routinely too long for it. Stretching the LAST section instead parked
+    // all the spare room between the amount and the value, where nothing needed
+    // it, while addresses stayed elided.
+    header->setStretchLastSection(false);
+    header->setSectionResizeMode(TransactionTableModel::ToAddress, QHeaderView::Stretch);
 }
 
 void TransactionView::setModel(WalletModel *_model)
@@ -302,6 +322,9 @@ void TransactionView::setModel(WalletModel *_model)
         // doesn't (e.g. filtering type=Fee, or a token that only appears as a fee).
         transactionProxyModel->setRecursiveFilteringEnabled(true);
         transactionView->setModel(transactionProxyModel);
+        setupHeader();
+        // After the header, so the restored sort indicator cannot outrank it:
+        // newest first is what this list is for.
         transactionView->sortByColumn(TransactionTableModel::Date, Qt::DescendingOrder);
         // Show the nested fee sub-rows by default; the user can still collapse them.
         transactionView->expandAll();

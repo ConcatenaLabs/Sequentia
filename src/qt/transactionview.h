@@ -60,7 +60,10 @@ public:
         //! Wide enough for the "Status" header text, not just the state icon.
         STATUS_COLUMN_WIDTH = 60,
         WATCHONLY_COLUMN_WIDTH = 23,
-        DATE_COLUMN_WIDTH = 120,
+        //! Wide enough for the whole "m/d/yy hh:mm" stamp. At 120 the time
+        //! elided to "8/19/26 23..." on every row, which is precisely the part
+        //! that shows the list is in chronological order.
+        DATE_COLUMN_WIDTH = 150,
         TYPE_COLUMN_WIDTH = 113,
         ADDRESS_COLUMN_WIDTH = 200,
         AMOUNT_MINIMUM_COLUMN_WIDTH = 120,
@@ -72,6 +75,9 @@ protected:
     void changeEvent(QEvent* e) override;
 
 private:
+    //! Restore or lay out the column header. Must run with a model attached.
+    void setupHeader();
+
     WalletModel *model{nullptr};
     TransactionFilterProxy *transactionProxyModel{nullptr};
     QTreeView *transactionView{nullptr};

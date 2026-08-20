@@ -11,6 +11,7 @@
 #include <qt/walletmodel.h>
 #include <rpc/util.h>
 #include <univalue.h>
+#include <tinyformat.h>
 #include <util/strencodings.h>
 
 #include <QIcon>
@@ -135,11 +136,21 @@ QVariant ParentChainTxModel::data(const QModelIndex& index, int role) const
         }
         return QVariant();
     case Qt::EditRole:
-        // The proxies sort on EditRole; the date column must sort as a moment, the
-        // amount as a number, everything else as its display text.
+        // The proxies sort on EditRole, and sorting only interleaves when both
+        // sources return the SAME TYPE per column: the wallet rows sort Date as
+        // a zero-padded string and Value as a double, so these do too. A type
+        // mismatch here does not error, it just shuffles the merged history.
         switch (index.column()) {
-        case TransactionTableModel::Date: return when;
+        case TransactionTableModel::Date:
+            return QString::fromStdString(strprintf("%020d-btc-%s", r.time, r.txid.toStdString()));
         case TransactionTableModel::Amount: return qint64(r.amount);
+        case TransactionTableModel::Value: {
+            // The number inside the display string, as a sortable double.
+            QString v = data(index, Qt::DisplayRole).toString();
+            v.remove(QString::fromUtf8("\xE2\x89\x88")).remove(QString::fromUtf8("\xE2\x80\x89"));
+            const QStringList parts = v.trimmed().split(' ');
+            return parts.isEmpty() ? 0.0 : parts.first().toDouble();
+        }
         default: return data(index, Qt::DisplayRole);
         }
     case Qt::DecorationRole:
