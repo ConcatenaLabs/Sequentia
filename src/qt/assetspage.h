@@ -9,6 +9,7 @@
 
 #include <univalue.h>
 
+class CollapsibleSection;
 class WalletModel;
 class PlatformStyle;
 
@@ -59,6 +60,10 @@ private:
     const PlatformStyle* m_platform_style;
 
     QTableWidget* m_issuances{nullptr};
+    //! Stands in for the table while this wallet has issued nothing.
+    QLabel* m_issuances_empty{nullptr};
+    //! Owned by its group box; kept only to refresh the folded-card summary.
+    CollapsibleSection* m_issuances_section{nullptr};
 
     QLineEdit* m_issue_name{nullptr};
     QLineEdit* m_issue_ticker{nullptr};
