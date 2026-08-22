@@ -9,8 +9,13 @@ written before a pause confirmed, or by a build that predates supervision
 eviction entirely, can hold a spend the registry now forbids. Loading it is
 filtered by AcceptToMemoryPool, which is exactly as strong as the supervision
 registry at that moment, and the registry rebuild in init races the import
-thread; the loaded pool is therefore swept once after the load completes
-(CChainState::LoadMempool). This test plants such a file by hand, the way an
+thread; the pool is therefore swept on the init thread right after the
+rebuild (AppInitMain), which is ordered after every unfiltered admission
+whichever thread wins. A sweep on the import thread itself is NOT enough --
+losing the race is exactly when it sees an empty registry and does nothing,
+which is how 24.3.0 through 24.5.1 failed this test on scheduler timing
+(4 of 8 runs on one machine, 0 of 8 on another; reported 2026-08-22).
+This test plants such a file by hand, the way an
 older binary would have left it, and asserts the poisoned entry never
 surfaces while an honest transaction loaded from the same file survives.
 

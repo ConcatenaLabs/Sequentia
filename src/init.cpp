@@ -2138,6 +2138,48 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         }
     }
 
+    // SEQUENTIA: derive the supervision registry from the chainstate. It is a
+    // pure function of the UTXO set (src/supervision.h), so a scan here plus
+    // the incremental mirroring on every tip transition is the whole of its
+    // persistence. Not behind g_con_pos: supervision and proof-of-stake are
+    // independent, and a chain could run either without the other. It runs
+    // BEFORE SetRPCWarmupFinished on purpose: the sweep below is what makes
+    // the no-frozen-spends invariant hold, and RPC opening first would let a
+    // client observe -- and build on -- a pool the sweep has not cured yet.
+    if (g_supervision_height > 0) {
+        LOCK(cs_main);
+        CChainState& sup_chainstate = chainman.ActiveChainstate();
+        sup_chainstate.ForceFlushStateToDisk();
+        if (!RebuildSupervisionRegistry(sup_chainstate.CoinsDB())) {
+            return InitError(_("Failed to rebuild the supervision registry from the UTXO set"));
+        }
+        LogPrintf("Supervision: registry loaded: %u supervised asset(s)\n",
+                  (unsigned)SupervisionRegistry::GetInstance().Assets().size());
+
+        // Sweep the mempool now that the registry exists. The mempool.dat
+        // import runs on the loadblk thread, which started before this line,
+        // and its acceptance filtering is only as strong as the registry at
+        // that moment: entries admitted while the registry was still empty
+        // include spends a confirmed pause forbids, and the file may in any
+        // case have been written by a binary that never enforced freezes.
+        // Such an entry has no later cure -- the steady-state ConnectTip
+        // eviction runs only when a connecting block carries a supervision
+        // record, which is deliberate. A sweep on the loadblk thread itself
+        // (24.3.0 through 24.5.1) could not close this: losing the race is
+        // exactly when it saw an empty registry and did nothing. Sweeping
+        // here instead is ordered after every unfiltered admission whatever
+        // the load's progress: acceptance holds cs_main, so an entry it
+        // admitted against the empty registry is resident before this
+        // thread takes the lock above, and one it processes after the
+        // rebuild is refused outright. P2P admissions in the pre-rebuild
+        // window are swept on the same terms.
+        if (node.mempool) {
+            LOCK(node.mempool->cs);
+            CCoinsViewMemPool mempool_view(&sup_chainstate.CoinsTip(), *node.mempool);
+            node.mempool->removeStaleSupervision(mempool_view);
+        }
+    }
+
     // ********************************************************* Step 14: finished
 
     // At this point, the RPC is "started", but still in warmup, which means it
@@ -2190,22 +2232,6 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         const StakeRegistry& reg = StakeRegistry::GetInstance();
         LogPrintf("PoS: stake registry loaded: %u staker(s), total weight %llu\n",
                   (unsigned)reg.Size(), (unsigned long long)PosTotalWeight(reg));
-    }
-
-    // SEQUENTIA: and the supervision registry, on the same terms. It is a pure
-    // function of the UTXO set (src/supervision.h), so a scan here plus the
-    // incremental mirroring on every tip transition is the whole of its
-    // persistence. Not behind g_con_pos: supervision and proof-of-stake are
-    // independent, and a chain could run either without the other.
-    if (g_supervision_height > 0) {
-        LOCK(cs_main);
-        CChainState& sup_chainstate = chainman.ActiveChainstate();
-        sup_chainstate.ForceFlushStateToDisk();
-        if (!RebuildSupervisionRegistry(sup_chainstate.CoinsDB())) {
-            return InitError(_("Failed to rebuild the supervision registry from the UTXO set"));
-        }
-        LogPrintf("Supervision: registry loaded: %u supervised asset(s)\n",
-                  (unsigned)SupervisionRegistry::GetInstance().Assets().size());
     }
 
     // SEQUENTIA: resolve -validateanchor BEFORE the producer starts. The
