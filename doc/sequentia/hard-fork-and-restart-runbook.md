@@ -1,28 +1,43 @@
 # Sequentia testnet bring-up + hard-fork runbook
 
-Status: operational. The definitive ordered checklist for (a) watching the pos_exprace
-hard fork at height **44300** and (b) bringing the whole DEX stack back up correctly after
-ANY full restart. Written 2026-07-22 from a live-box audit; every wallet/port/service below
-was verified present. Keep it current — when a service moves, edit this file.
+Status: operational. The definitive ordered checklist for (a) watching a consensus
+activation on the testnet and (b) bringing the whole DEX stack back up correctly after ANY
+full restart. Written 2026-07-22 from a live-box audit and kept current since; every
+wallet/port/service below was verified present. When a service moves, edit this file.
 
 The 2026-07-22 v23.3.7 cutover restart is what unloaded the sbtc-bridge wallet and left the
 LN asset nodes and LSP in a degraded state that took manual probing to find. This runbook
 exists so that never costs a manual hunt again.
 
 Box access: `ssh seq` (never `ConnectionAttempts>1`; retry on drop; keep commands simple).
+RPC credentials are not written here: the box keeps them in its environment, and the
+commands below read them as `$RPCUSER` / `$RPCPASS`.
 
-## 0. The hard fork itself (height 44300)
+## 0. Watching a consensus activation
 
-The pos_exprace (exponential-race leader-election) fork is a **consensus activation on the
-already-deployed v23.3.7 binary** (committee confirmed on `/Elements Core:23.3.7/`). It is
-NOT a mass restart — the nodes already run the fork-aware binary and activate the new
-leader-election rule at 44300. The risk at the boundary is a **certification stall**, not a
-bring-up.
+A height-gated rule is a **consensus activation on an already-deployed binary**: the fleet
+has been cut over to the fork-aware build well before the height (Section 1), so the
+boundary is NOT a mass restart. The risk at the boundary is a **certification stall** —
+producers disagreeing on what the next block may look like — not a bring-up. At 60 s per
+block, a height N blocks ahead of the tip is about N minutes away.
 
-Current height ~42569 (2026-07-22 evening); 44300 is ~1730 blocks (~40h at ~80s/block).
+Activations the testnet has been through, with the build that first shipped each rule:
+
+| Height | Rule | First shipped in |
+|---|---|---|
+| 44,300 | `pos_exprace` exponential-race leader election | 23.3.7 |
+| 89,856 | Simplicity + introspection opcodes (BIP9 bit 21, locked in by signalling) | 24.0.0 |
+| 93,800 | 60-s minimum block spacing (`pos_block_spacing`) | 24.0.0 |
+| 94,600 | supervised assets (`supervised_assets_height`) | 24.1.0 |
+| 101,810 | Simplicity budget x4 (`simplicity_budget4_height`) | 24.3.0 |
+| 102,150 | split payouts (`split_payout_height`) | 24.4.0 |
+
+Every height except the Simplicity lock-in is a constant in `src/chainparams.cpp`, bound to
+the testnet genesis hash so a re-genesis drops it. Add a row when the next one lands.
 
 **At the boundary, watch for:**
-- Block production halting or slowing sharply right at 44300 (leader-election disagreement).
+- Block production halting or slowing sharply right at the activation height (rule
+  disagreement between producers).
 - Committee split on `getbestblockhash` (nodes disagreeing on the tip).
 - `bad-posvrf` / certification-fail spam in committee logs.
 
@@ -33,11 +48,11 @@ for n in 000 010 019; do /root/Sequentia/src/sequentia-cli -datadir=/root/seq-te
 journalctl -u 'seq*committee*' --since '5 min ago' 2>/dev/null | grep -iE 'posvrf|certif|stall|leader' | tail
 ```
 
-**If it stalls:** this is the "environmental stall" class (see agent memory
-`sequentia-testnet-stalls-are-environmental`). A finality/round wedge usually self-heals or
-needs a uniform committee relaunch (Section 2). Do NOT ignore Bitcoin anchoring to force it
-(Principle 1). If the fork rule itself misbehaves, that is a code issue for Andreas, not an
-ops recovery.
+**If it stalls:** testnet stalls have so far been environmental, not consensus bugs —
+mixed binaries across the fleet, a finality/round wedge, or a flapping Bitcoin anchor — and
+a uniform committee relaunch on one build (Section 2) clears all three; a finality wedge
+often self-heals first. Do NOT ignore Bitcoin anchoring to force it (Principle 1). If the
+rule itself misbehaves, that is a code issue for Andreas, not an ops recovery.
 
 ## 1. Restart ordering (dependency order)
 
@@ -106,8 +121,8 @@ at the 24.3.0 cutover against the 4 listed here). And capture how each wallet RE
 just its name:
 
 ```
-/root/Sequentia/src/sequentia-cli -rpcport=18200 -rpcuser=seq -rpcpassword=seq listwallets
-/root/Sequentia/src/sequentia-cli -rpcport=18300 -rpcuser=seq -rpcpassword=seq listwallets
+/root/Sequentia/src/sequentia-cli -rpcport=18200 -rpcuser=$RPCUSER -rpcpassword=$RPCPASS listwallets
+/root/Sequentia/src/sequentia-cli -rpcport=18300 -rpcuser=$RPCUSER -rpcpassword=$RPCPASS listwallets
 ls /root/seq-testnet/node000/testnet3/wallets/    # the layout half of the capture
 ```
 
@@ -127,7 +142,7 @@ Never load by absolute path.
 
 **node000 (:18200) wallets:** `treasury  treasury2  compages  sbtc-bridge` (+ the captured rest)
 ```
-for w in treasury treasury2 compages sbtc-bridge; do /root/Sequentia/src/sequentia-cli -rpcport=18200 -rpcuser=seq -rpcpassword=seq loadwallet $w; done
+for w in treasury treasury2 compages sbtc-bridge; do /root/Sequentia/src/sequentia-cli -rpcport=18200 -rpcuser=$RPCUSER -rpcpassword=$RPCPASS loadwallet $w; done
 ```
 
 **dexnode (:18300) wallets:** `xmm  seqdex-mm-btc  bridge-taker` (+ load `subtaker submaker
@@ -135,13 +150,13 @@ submaker2 speculad-fee seqob-settler` if the LSP/settler need them — verify ag
 `/etc/sequentia/lsp-b5b1.env` SEQ_WALLET and the settler config; these were NOT loaded at the
 last audit and may thin the LSP self-custody paths).
 ```
-for w in xmm seqdex-mm-btc bridge-taker; do /root/Sequentia/src/sequentia-cli -rpcport=18300 -rpcuser=seq -rpcpassword=seq loadwallet $w; done
+for w in xmm seqdex-mm-btc bridge-taker; do /root/Sequentia/src/sequentia-cli -rpcport=18300 -rpcuser=$RPCUSER -rpcpassword=$RPCPASS loadwallet $w; done
 ```
 
 **bitcoind testnet4 wallets:** `seqdex-mm-btc  w  sell-maker-btc  sell-taker-recv
 sbtc-reserve  lsp-bridge-recoup  seqln-btc-channel-test`
 ```
-for w in seqdex-mm-btc sbtc-reserve lsp-bridge-recoup; do bitcoin-cli -testnet4 -rpcuser=seq -rpcpassword=seq loadwallet $w; done
+for w in seqdex-mm-btc sbtc-reserve lsp-bridge-recoup; do bitcoin-cli -testnet4 -rpcuser=$RPCUSER -rpcpassword=$RPCPASS loadwallet $w; done
 ```
 
 Verify: `listwallets` on each node shows the full set above.
@@ -149,7 +164,7 @@ Verify: `listwallets` on each node shows the full set above.
 ## 4. Relays
 
 - **seqobd :9955** is now a systemd unit with a drop-in (`allflags.conf`) carrying
-  `-xsession-deadline 3h -node-rpc 127.0.0.1:18300 -node-rpc-user/-pass seq -trade-log …`.
+  `-xsession-deadline 3h -node-rpc 127.0.0.1:18300 -node-rpc-user/-pass $RPCUSER/$RPCPASS -trade-log …`.
   A plain `systemctl restart seqobd` now brings it up correct (3h cross deadline, covenant
   watcher ON, durable trade log). The reseed ExecStartPost refills same-chain books.
   DO NOT hand-launch it (that is what created the rogue duplicate the audit found).
@@ -199,7 +214,7 @@ ss -tlnp | grep -E ':(9955|9965|9966|9971|9981|9987|18200|18300|9740|9741)' | wc
 # committee producing
 /root/Sequentia/src/sequentia-cli -datadir=/root/seq-testnet/node000 getblockcount
 # wallets loaded (each node's set from Section 3)
-/root/Sequentia/src/sequentia-cli -rpcport=18200 -rpcuser=seq -rpcpassword=seq listwallets
+/root/Sequentia/src/sequentia-cli -rpcport=18200 -rpcuser=$RPCUSER -rpcpassword=$RPCPASS listwallets
 # books non-empty + last_price live
 curl -s 127.0.0.1:9955/v1/markets | python3 -c 'import sys,json;m=json.load(sys.stdin)["markets"];print(len(m),"markets",sum(1 for x in m if x.get("last_price")),"priced")'
 # LN asset nodes
@@ -219,8 +234,10 @@ writes a status line the operator can watch — see the DEX gap-closure plan P0.
 - Wallets never auto-load — always run the Section 3 loops.
 - ln-asset uses the isolated `-16 asset-bin` binary (NOT the shared `b1a4492`) to avoid the
   subdaemon version-mismatch reexec loop; the systemd units already point at it.
-- A seqln binary change is a FULL consistent cutover (kill+relaunch the whole LN fleet on one
-  build) — see agent memory `seqln-robustness-binary-upgrade`. Do not mix versions.
+- A seqln binary change is a FULL consistent cutover: stop the whole LN fleet (makers,
+  takers, asset nodes, prov nodes, speculad), swap the binary once, relaunch everything on
+  that build. Do not mix versions — a mixed fleet fails in ways that look like channel
+  problems.
 - Never hand-launch seqobd :9955 (creates a port-holding duplicate that blocks the systemd
   unit); use `systemctl restart seqobd`.
 - `bitcoin-cli -testnet4` works; `-chain=testnet4` prints an error banner.

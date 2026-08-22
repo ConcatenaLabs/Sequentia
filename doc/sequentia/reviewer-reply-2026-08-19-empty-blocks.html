@@ -14,7 +14,7 @@
 </style>
 </head><body>
 <h1>The empty blocks were the pause enforcing itself, and the flag day should move one day, not indefinitely</h1>
-<p class="sub">Reply to bubu&#x27;s letter of 19 August (&quot;testnet is not including any transactions&quot;). Everything below was verified on the committee host today, with heights and identifiers given so each claim can be re-checked.</p>
+<p class="sub">Reply to the reviewer&#x27;s letter of 19 August (&quot;testnet is not including any transactions&quot;). Everything below was verified on the committee host today, with heights and identifiers given so each claim can be re-checked.</p>
 <h2>Your three questions, answered first</h2>
 <p><strong>1. What build are the producers running?</strong> All 20 committee producers and the dexnode run one uniform binary built 2026-08-16 from master commit <code>5e6a302d8</code>, reporting version 24.1.0. That commit is 41 commits past the <code>v24.1.0</code> tag, so it is a master snapshot, identical everywhere; the explorer-facing node runs the <code>v24.2.0</code> tag build. The mempool and supervision code is byte-identical between the two (<code>git diff 5e6a302d8 v24.2.0 -- src/txmempool.cpp src/validation.cpp src/supervision.cpp</code> is empty). The scheduled 24.3.0 cutover will put the whole set on a tagged release.</p>
 <p><strong>2. Do their mempools still hold a spend the pause invalidated?</strong> No. At 16:34Z every mempool on the host was empty: node000, node001, node005, node010, node015, node019, the dexnode, and the explorer node all reported <code>size: 0</code>. There was no resident spend of <code>d1bd783c…</code> anywhere, and there still is none.</p>

@@ -1,6 +1,6 @@
 # Supervised assets — decisions on the open points
 
-*Alberto, August 2026. For Andreas and Saba.*
+*Alberto, August 2026. For Andreas.*
 
 I went through the proposal and the implementation notes in depth. I agree with the core design and none of it is revisited here: spend-only, single-owner-only enforcement, explicit-only via induction from issuance, height-gated activation, registry derived from unspent records with the StakeRegistry discipline, the whole §5 mempool-eviction machinery, wallets fixed before or together with consensus. Below are only the points where I'm deciding something the documents left open, or adding something to them — with my reasons, kept short. The last point is the structural one and the one I expect us to discuss most.
 

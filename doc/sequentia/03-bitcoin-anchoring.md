@@ -161,8 +161,8 @@ can stop. That walk is in memory. What it must not do is turn into traffic.
 
 Two things keep the traffic flat as the chain grows.
 
-**Anchors are shared.** Sequentia produces a block every 30 seconds and Bitcoin
-one every ~10 minutes, so about twenty consecutive Sequentia blocks carry the
+**Anchors are shared.** Sequentia produces a block every 60 seconds and Bitcoin
+one every ~10 minutes, so about ten consecutive Sequentia blocks carry the
 same anchor. The walk collapses each such run and asks about *distinct anchors*,
 of which there is roughly one per Bitcoin block the chain spans.
 

@@ -8,8 +8,8 @@ prior Sequentia experience. Commands are shown for the **Windows Command Prompt
 `%VAR%` syntax differ.
 
 > Naming: the binaries are `sequentiad.exe` (the node) and `sequentia-cli.exe`
-> (the command-line tool). Sequentia is an Elements-based chain, so the programs
-> keep the Elements names.
+> (the command-line tool). Two Elements leftovers remain: the config file is
+> `elements.conf` and the data directory is `%APPDATA%\Elements`.
 
 ---
 
@@ -20,7 +20,7 @@ Before you start, the person running the testnet (the "operator") gives you
 
 | # | Item | Looks like | Used for |
 |---|------|-----------|----------|
-| 1 | The installer | `SequentiaTestnetSetup-x.y.z.exe` (or a ZIP of the binaries), built from the current branch (post-2026-07-05 re-genesis) | installing the node |
+| 1 | The installer | `sequentia-core-x.y.z-win64-setup.exe` from `https://sequentiatestnet.com/download/` (or a ZIP of the binaries), built from the current branch (post-2026-07-05 re-genesis) | installing the node |
 | 2 | Your tSEQ | sent to an address you generate in §4, **after** your node is synced | staking, fees, asset issuance |
 
 The network endpoints are built into the node: on `chain=test` it defaults to
@@ -43,7 +43,7 @@ value always overrides the built-in default. The operator sends your tSEQ
 
 ## 1. Install
 
-**Installer path (recommended).** Double-click `SequentiaTestnetSetup-x.y.z.exe`
+**Installer path (recommended).** Double-click `sequentia-core-x.y.z-win64-setup.exe`
 and accept the defaults. It installs to `C:\Program Files\Sequentia\` and creates
 a data directory at `%APPDATA%\Elements\` with a starter `elements.conf`.
 
@@ -344,11 +344,17 @@ spend *is* the unbonding. Until you do, it keeps staking.
 
 ## 6. Create your own assets
 
+The testnet has no default fee asset: every transaction must name the asset its
+fee is paid in (`fee_asset=` on `issueasset`, `reissueasset` and `sendmany`,
+`fee_asset_label=` on `sendtoaddress`), and one that stays silent is refused.
+The examples below pay in your tSEQ, whose wallet label is `bitcoin` (§4);
+once you have priced your own asset (§7.2) you can name that instead.
+
 Issue an asset (here 1,000,000 units, with a reissuance token so you can mint
-more later; `false` = unblinded, which is the testnet default):
+more later; `blind=false` = unblinded, which is the testnet default):
 
 ```
-sequentia-cli.exe -rpcwallet=main issueasset 1000000 1 false
+sequentia-cli.exe -rpcwallet=main -named issueasset assetamount=1000000 tokenamount=1 blind=false fee_asset=bitcoin
 ```
 
 It returns an `asset` id (hex) and a `token` id (the reissuance token). Save the
@@ -362,13 +368,13 @@ sequentia-cli.exe -rpcwallet=main listissuances
 Mint more of an existing asset (using the reissuance token you hold):
 
 ```
-sequentia-cli.exe -rpcwallet=main reissueasset <asset-id> 500000
+sequentia-cli.exe -rpcwallet=main -named reissueasset asset=<asset-id> assetamount=500000 fee_asset=bitcoin
 ```
 
 Send some of your asset to any address:
 
 ```
-sequentia-cli.exe -rpcwallet=main -named sendtoaddress address=<dest> amount=10 assetlabel=<asset-id>
+sequentia-cli.exe -rpcwallet=main -named sendtoaddress address=<dest> amount=10 assetlabel=<asset-id> fee_asset_label=bitcoin
 ```
 
 Destroy (burn) units provably:
@@ -394,7 +400,8 @@ set D1=<dest-addr-1>
 set D2=<dest-addr-2>
 sequentia-cli.exe -rpcwallet=main -named sendmany ^
   amounts="{\"%D1%\":5,\"%D2%\":7}" ^
-  output_assets="{\"%D1%\":\"%A%\",\"%D2%\":\"%B%\"}"
+  output_assets="{\"%D1%\":\"%A%\",\"%D2%\":\"%B%\"}" ^
+  fee_asset=bitcoin
 ```
 
 **7.2 Pay a fee in a different asset.** For a producer to mine a fee paid in your
@@ -406,8 +413,10 @@ sequentia-cli.exe setfeeexchangerates "{\"<asset-id>\":100000000}"
 sequentia-cli.exe getfeeexchangerates
 ```
 
-A rate of `100000000` means "1 unit of this asset = 1 SEQ of reference fee
-value." A rate of `0` means "refuse this asset for fees." Then a fee-in-asset tx
+A rate of `100000000` means "1 unit of this asset = 1 reference unit (RFU)".
+SEQ is not the reference: it is listed at `100000000` in the bootstrap
+whitelist like any other asset. A rate of `0` means "refuse this asset for
+fees." Then a fee-in-asset tx
 you build will be mineable by any producer that also prices it (ask the operator
 to price your test asset across the committee if you want it mined quickly):
 
@@ -421,7 +430,7 @@ transaction, then bump it - optionally switching the fee asset:
 
 ```
 sequentia-cli.exe -rpcwallet=main -named sendtoaddress ^
-  address=<dest> amount=2 replaceable=true fee_rate=1
+  address=<dest> amount=2 replaceable=true fee_rate=1 fee_asset_label=bitcoin
 sequentia-cli.exe -rpcwallet=main -named bumpfee txid=<txid> ^
   options="{\"fee_rate\":50}"
 ```

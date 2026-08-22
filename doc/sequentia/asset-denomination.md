@@ -4,7 +4,7 @@
 the price server now denominates fee rates correctly (both on this branch). Wire format
 unchanged; **not** a consensus change. This document is the canonical reference for the field
 and the integration contract every other component (web wallet, Ambra, explorer, SeqDEX,
-bridges, registry) shares — §7 records each one's status from a 2026-07 review.
+bridges, registry) shares — §7 records each one's status from a 2026-08-22 review.
 
 **Audience:** the Sequentia core team and every wallet/service that displays, parses, or
 prices asset amounts.
@@ -19,9 +19,9 @@ Bitcoin. The field has existed on chain since Mihailo's "Feature 1: Any asset fe
 (commit `34128e76e`, Sep 2024) but, until this branch, **the Core desktop GUI never read
 it** — it formatted every asset with 8 decimals.
 
-The reason nobody noticed: **every asset live on the testnet today is 8dp**, so the wrong
-assumption and the right answer coincide. The moment an asset ships with a denomination
-other than 8 (Alberto's `tADLT` is 2dp), any component that assumes 8 shows amounts off by
+The reason nobody noticed: until `USDC.e` (6dp) went live, **every asset on the testnet
+was 8dp**, so the wrong assumption and the right answer coincided. The moment an asset ships
+with a denomination other than 8 (`USDC.e` is 6dp, `tADLT` 2dp), any component that assumes 8 shows amounts off by
 a factor of `10^(8 − d)` — and, worse, *parses user input* off by the same factor, which
 moves the wrong number of atoms. The 2026-06 audit already flagged this as latent in
 several places (AUDIT-2026-06 MED-4, MED-5). This document exists to close it everywhere,
@@ -187,7 +187,7 @@ Files: `assetsdir.{h,cpp}`, `assetregistry.cpp`, `qt/guiutil.{h,cpp}`, `qt/asset
 `wallet/wallet.cpp`, `rpc/rawtransaction.cpp`, `wallet/rpc/elements.cpp`,
 `primitives/confidential.h`, `validation.cpp`.
 
-*(Statuses below reflect a 2026-07 read of each repo, not just the earlier audit.)*
+*(Statuses below reflect a 2026-08-22 read of each repo, not just the earlier audit.)*
 
 ### 7.2 Price server — `Sequentia/contrib/price-server` — **Done (this branch)**
 
@@ -195,7 +195,7 @@ Was the one economic bug: it published `rate = round(price * 1e8)`, discarding t
 registry's `precision`, so fees in any non-8-decimal asset were mis-valued by `10^(8 - d)`
 (§6a). Fixed: it now reads `precision` from the index and scales the rate via
 `scaled_rate()`; `MAX_RATE` raised to `1e18` to leave headroom for the factor. A no-op for
-all currently-listed (8dp) assets. This fixes fee valuation for **every** consumer of the
+8dp assets; `USDC.e` (6dp) is the first live asset it corrects. This fixes fee valuation for **every** consumer of the
 published rate (node, web wallet, Ambra) at once.
 
 ### 7.3 Asset Registry — `sequentia-registry` — **Done (correct)**
@@ -203,7 +203,9 @@ published rate (node, web wallet, Ambra) at once.
 Publishes `precision` in the contract and in `index.minimal.json`
 (`[domain, ticker, name, precision, verified]`), validated `0..8`. This is the shared
 `precision` source for every client. Keep it equal to the on-chain `nDenomination` (they
-agree for assets issued via `issueasset`/OpenAMP by construction).
+agree for assets issued via `issueasset`/OpenAMP by construction). The registry accepts
+`precision` 0–8 only; an asset issued with denomination 9–18 is valid on chain but cannot
+be registered or named.
 
 ### 7.4 SWK (wallet kit) — `SWK` — **Done (supports it)**
 
@@ -217,7 +219,7 @@ Precision-aware: `parseAtoms(str, d)` / `fmtAtoms(atoms, d)`, and reference/USD 
 uses `units = atoms / 10^d`. `precisionKnown()` / `sendPrecision()` **block sending an asset
 whose precision is unknown** (closing audit MED-5). Fees use the node's published rate
 directly (now correct via 7.2). Remaining: confirm the swap write-back path rounds to
-per-asset precision (audit MED-4; latent while all live assets are 8dp).
+per-asset precision (audit MED-4; no longer latent now that `USDC.e` is 6dp).
 
 ### 7.6 Ambra wallet — `ambra` — **Good**
 
@@ -235,26 +237,25 @@ to 0 when absent. Enhancement: decode the on-chain `nDenomination` directly (the
 every issuance) so the explorer is the authority for arbitrary assets, and expose
 `denomination` in the asset API for light clients.
 
-### 7.8 SeqDEX — `seqdex` — **Precision-aware, but configured by hand**
+### 7.8 SeqDEX — `seqdex` — **Done**
 
 Each market stores `BaseAssetPrecision` / `QuoteAssetPrecision`, so pricing/order sizing is
-precision-aware. But these are **set manually per market** (CLI flags, default 8) with no
-link to the registry or chain. **Recommendation: source each market asset's precision from
-the registry (or on-chain `nDenomination`) at market creation**, leaving the flag as an
-override — otherwise a market opened for a non-8 asset with the default 8 misprices silently.
+precision-aware, and the daemon now sources each market asset's precision from the registry
+(`RegistryURL`, the minimal index) at market creation; the CLI flag is an override, and the
+default of 8 applies only when no registry is configured.
 
-### 7.9 OpenAMP — `openamp` — **Correct on issuance, one trap**
+### 7.9 OpenAMP — `openamp` — **Done**
 
 Sets the on-chain `Denomination` from the requested `precision` when issuing a restricted
-asset, and serves precision in its records — good. But `if req.Precision == 0 { req.Precision
-= 8 }` is the **same "0 means default" trap** fixed in Core: it makes an integer-only (0dp)
-restricted asset unissuable. Treat "unset" distinctly from an explicit `0`.
+asset, and serves precision in its records. The "0 means default" trap is fixed: an unset
+`precision` is distinguished from an explicit `0` by a pre-decode sentinel, so unset
+defaults to 8 and `0` issues an integer-only asset.
 
-### 7.10 Compages bridge — `compages` — **To confirm**
+### 7.10 Compages bridge — `compages` — **Done**
 
-No explicit precision handling found. Its asset USDX is 8dp, so this is latent. If the bridge
-ever mints/moves a non-8 asset, apply §3/§6a — a precision mismatch between the two sides is a
-silent `10^k` accounting error.
+Its asset `USDC.e` is 6dp and bridged with an explicit source-decimals → Sequentia-precision
+conversion (`unitsToAtoms(units, decimals, precision)`) on every mint, burn and reserve
+check, so the two sides agree by construction.
 
 ### 7.11 SeqLN / Fulmen — `seqln` / `fulmen` — **Wire-level handled; display at the wallet**
 
@@ -266,21 +267,21 @@ is the wallet's job (Fulmen) and should follow §3.
 
 ## 8. Integration checklist
 
-Every row must hold for a component to be denomination-correct. Status as of 2026-07.
+Every row must hold for a component to be denomination-correct. Status as of 2026-08-22.
 
 | Check | Core GUI | Price srv | Web wallet | Ambra | Explorer | SeqDEX | OpenAMP |
 |---|---|---|---|---|---|---|---|
 | Displays amounts at per-asset `d` | ✅ | n/a | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Parses user input at per-asset `d` | ✅ | n/a | ✅ | ✅ | n/a | ✅ | ✅ |
-| Unknown precision → 8 (not 0), or block | ✅ | ✅ | ✅ | ❓ | ⚠️ →0 | ❓ | ⚠️ 0-trap |
+| Unknown precision → 8 (not 0), or block | ✅ | ✅ | ✅ | ❓ | ⚠️ →0 | ✅ | ✅ |
 | Wire/RPC amounts stay 1e8 atoms | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Fee **rate** carries precision | ✅ | ✅ | ✅¹ | ✅¹ | n/a | n/a | n/a |
 | Prices/orders from units, not atoms | n/a | n/a | ✅ | ✅ | ✅ | ✅² | n/a |
-| `precision` == on-chain `nDenomination` | ✅ | ✅ | — | — | ⚠️ | ⚠️ manual | ✅ |
+| `precision` == on-chain `nDenomination` | ✅ | ✅ | — | — | ⚠️ | ✅ | ✅ |
 
 ✅ correct · ⚠️ gap/latent · ❓ to confirm · — n/a
 ¹ inherited from the price server's rate (7.2); must not re-apply a factor.
-² per-market precision is correct in code but set by hand (7.8).
+² per-market precision is sourced from the registry at market creation (7.8).
 
 ---
 
@@ -305,7 +306,8 @@ flip it as a side effect of denomination work.
 
 ## 11. Reference
 
-- **Field:** `CAssetIssuance::nDenomination`, `uint8_t`, default 8, range 0..18.
+- **Field:** `CAssetIssuance::nDenomination`, `uint8_t`, default 8, range 0..18. The
+  registry accepts `precision` 0–8 only, so 9–18 is valid on chain but unregistrable.
 - **Maths:** `units = atoms / 10^d`; `atoms = round(units × 10^d)`.
 - **Authority:** on-chain `nDenomination` › registry `precision` (index field 3) › 8.
 - **RPC boundary:** stays 1e8 atoms everywhere; scale in the UI layer.

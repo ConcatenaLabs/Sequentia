@@ -1,6 +1,6 @@
 # You are right: #143 held on scheduler luck, and 24.5.2 makes it hold on ordering
 
-Reply to bubu's letter of 22 August ("#143 does not hold"). Everything below was
+Reply to the reviewer's letter of 22 August ("#143 does not hold"). Everything below was
 reproduced here today, deterministically, and the fix is tagged as v24.5.2.
 
 ## The diagnosis, confirmed

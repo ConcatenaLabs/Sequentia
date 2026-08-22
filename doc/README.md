@@ -1,15 +1,21 @@
-Bitcoin Core
+Sequentia Core
 =============
 
 Setup
 ---------------------
-Bitcoin Core is the original Bitcoin client and it builds the backbone of the network. It downloads and, by default, stores the entire history of Bitcoin transactions, which requires a few hundred gigabytes of disk space. Depending on the speed of your computer and network connection, the synchronization process can take anywhere from a few hours to a day or more.
+Sequentia Core is the node for the Sequentia network, a Bitcoin sidechain for
+asset tokenization and decentralized exchange (a fork of Elements, which is a
+fork of Bitcoin Core). It downloads and stores the Sequentia chain and keeps a
+connection to a Bitcoin node to validate the Bitcoin anchor of every block.
+The public testnet chain is small; syncing it takes minutes, not days.
 
-To download Bitcoin Core, visit [bitcoincore.org](https://bitcoincore.org/en/download/).
+To download Sequentia Core, visit https://sequentiatestnet.com/download/.
+The Sequentia-specific documentation is in [sequentia/](sequentia/README.md);
+the rest of this directory is inherited Bitcoin Core and Elements documentation.
 
 Running
 ---------------------
-The following are some helpful notes on how to run Bitcoin Core on your native platform.
+The following are some helpful notes on how to run Sequentia Core on your native platform.
 
 ### Unix
 
@@ -24,7 +30,7 @@ Unpack the files into a directory, and then run sequentia-qt.exe.
 
 ### macOS
 
-Drag Bitcoin Core to your applications folder, and then run Bitcoin Core.
+Drag Sequentia Core to your applications folder, and then run Sequentia Core.
 
 ### Need Help?
 

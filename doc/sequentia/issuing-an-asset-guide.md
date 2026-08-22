@@ -92,8 +92,8 @@ exactly as you typed it, so you can see with your own eyes where you land.
 **Name** — what people read. `Alberto De Luigi Token`. Spaces and accents are
 fine.
 
-**Ticker** — the short symbol, like `GOLD` or `ADL`. Up to 12 characters, letters
-and digits. First come, first served across the whole network: if someone
+**Ticker** — the short symbol, like `GOLD` or `ADL`. Up to 12 characters: letters,
+digits, dot or dash. First come, first served across the whole network: if someone
 registered `ADL` before you, yours will be refused later, and by then it is too
 late to change. Pick something unlikely to collide.
 
