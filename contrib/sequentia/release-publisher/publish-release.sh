@@ -28,6 +28,7 @@ set -euo pipefail
 BUILD_ROOT="${SEQ_BUILD_ROOT:-/root/sequentia/release-build}"
 STATE_DIR="${SEQ_STATE_DIR:-$BUILD_ROOT/state}"
 DOWNLOAD_DIR="${SEQ_DOWNLOAD_DIR:-/root/sequentia/downloads}"
+SIGNING_GNUPGHOME="${SEQ_SIGNING_GNUPGHOME:-/etc/sequentia/release-signing}"
 RECIPE_DIR="${SEQ_RECIPE_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/products.d}"
 JOBS="${SEQ_BUILD_JOBS:-4}"
 NICE="${SEQ_BUILD_NICE:-19}"
@@ -261,6 +262,34 @@ write_checksums() {
   log "SHA256SUMS covers ${#files[@]} file(s)"
 }
 
+# --- Signature over the checksums ---------------------------------------------
+# A detached OpenPGP signature beside SHA256SUMS, from a key that exists only in
+# SIGNING_GNUPGHOME on this host and in its offline backup -- never in any
+# repository. The public half is exported beside the signature on every run so a
+# verifier has it from the same place, and its fingerprint is pinned in README.md
+# in the repository, which is the out-of-band copy to compare against. A host
+# with no key publishes the checksums unsigned and says so; the checksums are
+# still worth having.
+# Verify with: gpg --import sequentia-release-signing-key.asc
+#              gpg --verify SHA256SUMS.asc SHA256SUMS
+sign_checksums() {
+  local sums="$DOWNLOAD_DIR/SHA256SUMS"
+  [ -f "$sums" ] || return 0
+  local fpr
+  fpr="$(GNUPGHOME="$SIGNING_GNUPGHOME" gpg --batch --list-secret-keys --with-colons 2>/dev/null \
+         | awk -F: '/^fpr/{print $10; exit}' || true)"
+  if [ -z "$fpr" ]; then
+    log "no signing key in $SIGNING_GNUPGHOME; SHA256SUMS published unsigned"
+    return 0
+  fi
+  local key="$DOWNLOAD_DIR/sequentia-release-signing-key.asc"
+  GNUPGHOME="$SIGNING_GNUPGHOME" gpg --batch --yes --armor --detach-sign --output "$sums.asc.part" "$sums"
+  mv "$sums.asc.part" "$sums.asc"
+  GNUPGHOME="$SIGNING_GNUPGHOME" gpg --batch --armor --export "$fpr" > "$key.part"
+  mv "$key.part" "$key"
+  log "SHA256SUMS.asc signed, key $fpr"
+}
+
 # --- Go ------------------------------------------------------------------------
 [ -d "$RECIPE_DIR" ] || die "no recipes at $RECIPE_DIR"
 
@@ -278,6 +307,7 @@ done
 
 update_index
 write_checksums
+sign_checksums
 
 [ "$failed" = "0" ] || die "at least one product failed to publish (see above)"
 log "all products up to date"
