@@ -486,8 +486,8 @@ struct Params {
     }
     CAmount genesis_subsidy;
     //! SEQUENTIA: per-chain maximum block weight (BIP141 weight units). 0 means
-    //! "use the global MAX_BLOCK_WEIGHT". Sequentia sets this to 200,000 (a
-    //! twentieth of Bitcoin's 4,000,000) so that, at ~30-second blocks, a
+    //! "use the global MAX_BLOCK_WEIGHT". Sequentia sets this to 400,000 (a
+    //! tenth of Bitcoin's 4,000,000) so that, at the 60-second block spacing, a
     //! saturated Sequentia chain grows at the same total rate as a saturated
     //! Bitcoin chain (whitepaper §3.10).
     uint32_t nMaxBlockWeight{0};
