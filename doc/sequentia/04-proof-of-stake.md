@@ -194,7 +194,7 @@ signer:
 
 `PosRequiredCoinbaseScript(leader, height, seed)` is the single seam: the
 producer builds its coinbase from it and `ConnectBlock` enforces the same
-function. Two modes ship:
+function. Three modes ship:
 
 - **DIRECT** - the coinbase must pay a committed scriptPubKey. This prevents a
   *silent* redirect; it does not enforce fairness, since an operator may commit
@@ -207,12 +207,24 @@ function. Two modes ship:
   addresses participation below the floor but not variance reduction. Operator
   commission is in basis points; at 0 bp the operator still earns as one
   participant among the rest.
+- **SPLIT** - the coinbase must pay an on-chain pot, and anyone may broadcast
+  the claim (`claimpoolrewards`) that distributes it: each delegator is paid
+  its exact proportional share of every pot output it was eligible for, at its
+  own controller key. The claim is fully determined by the UTXO set, so no
+  payout depends on the operator staying interested, and variance is smoothed
+  without any per-delegator accounting. Commission is a bp/10000 chance that a
+  block pays the operator instead of the pot. Leaving the pool forfeits
+  unclaimed accruals, so claim before you leave. Full mechanism:
+  [`split-payouts-design.md`](split-payouts-design.md). Fresh chains carry it
+  from genesis; on the testnet it is in force from height 102,150
+  (`split_payout_height`).
 
 A producer that has committed nothing keeps everything, which is the default
 rather than an abuse.
 
-Consensus requires `activation >= announce_height + g_pos_payout_notice` (2880
-blocks, ~1 day, `-pospayoutnotice` on custom chains only). Announcing does not
+Consensus requires `activation >= announce_height + g_pos_payout_notice` (1440
+blocks, ~1 day at the 60-s spacing, pinned on the bundled chains;
+`-pospayoutnotice`, default 2880, on custom chains only). Announcing does not
 cancel an earlier policy: the policy in force at height h is the announced policy
 with the greatest activation `<= h`, so a pending change and the current rule
 coexist until the switch.
@@ -225,10 +237,9 @@ every announced-but-not-yet-binding policy against the caller's own stake with
 the blocks remaining; `listpools` does the same for the whole network, and the
 public board renders it above everything else.
 
-**Deliberately not built:** smoothed *and* trustless payouts, which need
-per-delegator epoch reward accounting (the Cardano approach). That is a large
-subsystem, and the two shipped modes let the market decide whether it is wanted
-before it is paid for.
+**Not built:** per-delegator epoch reward accounting (the Cardano approach).
+SPLIT gives smoothed *and* trustless payouts without it, from a pot the UTXO
+set fully determines, so that subsystem is not needed for what it would buy.
 
 ### The config layer (custom chains only)
 
@@ -344,7 +355,7 @@ times that delta, and both are defects. A stake-weighted election must not
 reward fragmenting stake at all, because the whole point of weighting by stake
 is that identities are free and weight is not; and 1.4x is not "approximately
 proportional". (The in-tree evidence for the size of that edge is
-`pos_vrf_exprace`'s own comment at `src/test/pos_tests.cpp:405`, which records
+the comment in `pos_vrf_exprace`, `src/test/pos_tests.cpp`, which records
 the jump for a raw `beta`
 ordering key. The precise share figures above came from re-running that model
 with *both* halves taken from the legacy rule, which is not a configuration the
@@ -692,7 +703,7 @@ sortition-eligible, `aggkey` equal to the aggregate of the named set) - only the
 
 The path is self-limiting and abuse-proof: a `+3` anchor gap requires Bitcoin to
 have genuinely produced three blocks (~30 minutes), which a healthy
-~30-second chain never permits, and each further sub-threshold block needs
+60-second chain never permits, and each further sub-threshold block needs
 another `+3` of parent-chain progress. It is what lets a young chain (or a
 temporarily under-quorum committee) make progress, and it is what the
 genesis-seeded launch uses for its slow start - see
@@ -807,8 +818,9 @@ Freshness is delivered at two safe layers:
    lowest-score election of §3. It is
    a **pre-certification** preference only: it selects which proposal the committee
    converges on, never reorders an already-certified block (the immediate-finality
-   gate forbids that; §6), and it never lowers the 51-genuine-signature finality
-   threshold - so it is pure coordination and can never create two "final" blocks.
+   gate forbids that; §6), and it never lowers the committee quorum (126-of-250
+   on the testnet) - so it is pure coordination and can never create two "final"
+   blocks.
 
 ## 8. Long-range-attack defenses
 

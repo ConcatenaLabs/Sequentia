@@ -1,6 +1,6 @@
 # The empty blocks were the pause enforcing itself, and the flag day should move one day, not indefinitely
 
-Reply to bubu's letter of 19 August ("testnet is not including any transactions"). Everything below was verified on the committee host today, with heights and identifiers given so each claim can be re-checked.
+Reply to the reviewer's letter of 19 August ("testnet is not including any transactions"). Everything below was verified on the committee host today, with heights and identifiers given so each claim can be re-checked.
 
 ## Your three questions, answered first
 

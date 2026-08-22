@@ -19,7 +19,7 @@ whitelist just stops changing (each node keeps the last set it received; on a
 node restart it falls back to the operator's static file). Nothing here touches
 consensus: it only decides which assets your node accepts fees in.
 
-No dependencies — just Python 3. Run the node with `-con_any_asset_fees=1`.
+No dependencies — just Python 3. On `chain=test` and `chain=sequentia` the open fee market is always on; a custom chain needs `-con_any_asset_fees=1`.
 
 ## Quick start
 
@@ -294,14 +294,14 @@ keep it private.
   "source_name": "my-price-server",        // publisher name shown on the public page / _meta
 
   "node_rpcs": [                            // every node that receives the whitelist
-    {"name": "local", "host": "127.0.0.1", "port": 7041,
+    {"name": "local", "host": "127.0.0.1", "port": 18776,
      "user": "rpcuser", "password": "rpcpassword"}   // or "cookie": "/path/.cookie"
   ],
 
-  "registry_url": "http://159.195.15.140/registry/index.minimal.json",
+  "registry_url": "http://sequentiatestnet.com/registry/index.minimal.json",
 
   "source": {
-    "url": "http://159.195.15.140/prices",  // or another operator's /api/prices
+    "url": "http://sequentiatestnet.com/prices", // or another operator's /api/prices
     "quote_currency": "USD",
     "format": "sequentia",                  // "custom" adds price_path / market_cap_path / volume_24h_path
     "mode": "all",                          // "all" | "except" | "only" (scope, see above)

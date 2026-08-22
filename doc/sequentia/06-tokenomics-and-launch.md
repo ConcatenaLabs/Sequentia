@@ -126,7 +126,8 @@ The launch sequence runs through three regimes:
    first users, who lock their own staking outputs. Each on-chain staking output
    enters `m_utxo`, so the eligible set grows. Once a committee quorum of
    sortition-eligible stakers participates, normal full-committee certification
-   takes over and the chain runs at its nominal 30s cadence.
+   takes over and the chain runs at its 60-second consensus spacing (slots
+   stay 30 s).
 
 The bootstrap tooling that drives a fresh network through this growth - seeding
 the founder, distributing to and registering the first committee members - lives
@@ -185,6 +186,7 @@ between honest operators without forking the chain (see
 | Committee regime & size (public fixed-size, cap 250 with quorum 126 on the testnet; threshold sortition caps at 100) | Launch governance | Consensus config (`pospubliccommittee`, `poscommitteesize`) |
 | Unbonding period (~15 days) | Launch governance | Staking-output CSV requirement |
 | Slot interval (~30s) | Launch governance | Hardcoded `g_pos_slot_interval = 30` in `CSequentiaParams`; `-posslotinterval` on custom chains |
+| Minimum block spacing (60 s) | Launch governance | `consensus.pos_block_spacing = 60` in `CSequentiaParams`; `-posblockspacing` on custom chains |
 | Leader-election rule (exponential race, in force from the first elected block) | Launch governance | `consensus.pos_exprace_height = 1` in `CSequentiaParams`; `-posexpraceheight` on custom chains. `1` and not `0`: for this parameter `0` means DISABLED, unlike `pos_coinbase_leader_height` where `0` means from genesis. See [`04-proof-of-stake.md`](04-proof-of-stake.md) |
 | Published Bitcoin checkpoints | Launch governance | Consensus config; see [`04-proof-of-stake.md`](04-proof-of-stake.md) |
 | Which parent chain to anchor to | Launch governance | Consensus config; see [`03-bitcoin-anchoring.md`](03-bitcoin-anchoring.md) |
