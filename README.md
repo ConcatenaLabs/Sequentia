@@ -293,7 +293,7 @@ All repos live at https://github.com/GracedEternalKingCabbageMan/ and are public
 | `pignus` | Pignus: non-custodial collateralised lending, loan terms compiled into a taproot covenant. Live at https://sequentiatestnet.com/lending/. |
 | `seqcj` | seqcj: CoinJoin coordinator (Chaumian blind-signature credentials over confidential transactions), with a BTC lane through sbtc-bridge. |
 | `seqognito` | Seqognito: a desktop mixing wallet on SWK, CoinJoin over confidential transactions, everything over Tor. |
-| `sbtc-bridge` | Independent application-level BTC-to-SBTC custody bridge (N-of-M multisig, 1:1 mint/burn of the SBTC asset). Not the consensus peg. |
+| `sbtc-bridge` | Independent application-level BTC-to-SBTC custody peg: SBTC is pegged 1:1 to BTC held in an N-of-M multisig reserve, an ordinary unprivileged asset. Not Elements' consensus peg. |
 | `emissio` | Emissio: community rewards platform, earning Sequence tokens (SEQ) for testnet contributions. |
 | `libwally-core` | libwally fork with the Sequentia transaction-parsing patch (issuance denomination byte) used by SeqLN. |
 
