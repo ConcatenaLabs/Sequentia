@@ -1,4 +1,4 @@
-# To Alberto & bubu — the empty blocks, the denomination sweep, and one heads-up about the price server
+# To Alberto — the empty blocks, the denomination sweep, and one heads-up about the price server
 
 Thanks for both write-ups — the empty-blocks note and the denomination emails. I worked through all of
 it and, at Andreas's request, took the follow-ups the whole way rather than handing them back: PR #15
@@ -177,4 +177,4 @@ Commits, for the record: `Sequentia` `eaaa267cb` (merge #15) · `003b21401` (Cor
 (abstract numeraire); `seqdex` `ebe370a2` (market precision); `openamp` `98c965c8` (0-trap); `SeqPal`
 `2d6f9cc` (seqpald 0-trap); `sequentia-web-wallet` `7d85b396` (MED-4). All pushed.
 
-— Saba
+— the Sequentia maintainers

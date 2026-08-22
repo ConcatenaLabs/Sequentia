@@ -51,6 +51,8 @@ poscommitteesize=250       # committee cap under the public committee (actual
                            # threshold sortition: expected size, max 100,
                            # fixed majority quorum.
 posslotinterval=30         # seconds per slot; 30s on the bundled chains
+posblockspacing=60         # consensus minimum block spacing in seconds, as on
+                           # the bundled chains (slots stay 30 s)
 # Minimum unbonding lock, in (Sequentia) blocks; the required wall-clock lock
 # is this x posslotinterval. The whitepaper (§3.11) requires the lock to
 # exceed the 2016-BTC-block (~2 week) checkpoint window, so stakers cannot
@@ -76,9 +78,9 @@ posminstake=4000000000000  # minimum stake to be a blocksigner, in SEQ atoms:
 #staker=02<pubkey-hex>:1000000
 #staker=03<pubkey-hex>:1000000
 
-# Block weight cap: 200,000 (a twentieth of Bitcoin's), so at ~30s blocks a
-# saturated chain grows at Bitcoin's rate (whitepaper §3.10). ~50 KB/block.
-con_maxblockweight=200000
+# Block weight cap: 400,000 (a tenth of Bitcoin's), so at the 60-s spacing a
+# saturated chain grows at Bitcoin's rate (whitepaper §3.10). ~100 KB/block.
+con_maxblockweight=400000
 
 # (4) Bitcoin-identical default addresses; confidential transactions opt-in.
 con_default_blinded_addresses=0

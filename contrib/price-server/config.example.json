@@ -6,17 +6,17 @@
   "source_name": "sequentia-price-server",
 
   "node_rpc": {
-    "_comment": "Your LOCAL Sequentia node's RPC, where the whitelist is published. The node GUI fills this in from the node it is running when it creates your copy of this file, so it matches by construction; set it by hand only when running the sidecar yourself. Use either user+password from your node conf, or \"cookie\": \"<datadir>/<network>/.cookie\" -- the cookie is re-read on every call, so it survives a node restart rotating it. 18456 is the Sequentia testnet default. Getting this wrong does not stop the server: it keeps polling and every push is refused, so watch the log after the first poll for \"published N rate(s) to 0/1 node(s)\".",
+    "_comment": "Your LOCAL Sequentia node's RPC, where the whitelist is published. The node GUI fills this in from the node it is running when it creates your copy of this file, so it matches by construction; set it by hand only when running the sidecar yourself. Use either user+password from your node conf, or \"cookie\": \"<datadir>/<network>/.cookie\" -- the cookie is re-read on every call, so it survives a node restart rotating it. 18776 is the chain=test default (the testnet is the default chain). Getting this wrong does not stop the server: it keeps polling and every push is refused, so watch the log after the first poll for \"published N rate(s) to 0/1 node(s)\".",
     "host": "127.0.0.1",
-    "port": 18456,
-    "cookie": "~/.sequentia/testnet3/.cookie"
+    "port": 18776,
+    "cookie": "~/.elements/testnet3/.cookie"
   },
 
-  "registry_url": "http://159.195.15.140/registry/index.minimal.json",
+  "registry_url": "http://sequentiatestnet.com/registry/index.minimal.json",
 
   "source": {
     "_comment": "A Sequentia-format API returns every asset keyed by ticker ({\"SEQ\":{\"price\":..,\"market_cap\":..,\"volume_24h\":..}, ...}) in one call, so no JSON paths are needed. For a third-party API set format=custom and add price_path / market_cap_path / volume_24h_path (with an optional {ticker} placeholder). Optional scoping: mode = \"all\" (default) | \"except\" | \"only\", with assets = a list of tickers or asset ids the mode refers to.",
-    "url": "http://159.195.15.140/prices",
+    "url": "http://sequentiatestnet.com/prices",
     "quote_currency": "USD",
     "format": "sequentia"
   },

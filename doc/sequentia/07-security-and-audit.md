@@ -192,16 +192,18 @@ The node and consensus core - open fee market, Bitcoin anchoring, PoS with VRF
 sortition, committees, checkpoints, minimum stake, unbonding and escaping-stall,
 opt-in confidential transactions with Bitcoin-identical addresses, and asset
 issuance via inherited Confidential Assets - is implemented. The block-weight cap
-(`-con_maxblockweight`, 200,000 on the Sequentia chain) holds a saturated chain's
-total disk growth equal to Bitcoin's at the 30-second cadence and is enforced in
+(`nMaxBlockWeight`, 400,000 on the Sequentia chains) holds a saturated chain's
+total disk growth equal to Bitcoin's at the 60-second consensus spacing
+(`400,000 / 60 s == 4,000,000 / 600 s`) and is enforced in
 `CheckBlock`/`ContextualCheckBlock`.
 
 The following whitepaper items are node-level but outside the four-property
 scope (future subsystems, not regressions):
 
-- **Asset ACLs** (whitelist/blacklist/freeze/amount/timelock filters) - to be
-  built with Simplicity, the Elements scripting language, rather than bespoke
-  opcodes.
+- **Asset ACLs.** Issuer-side freeze and pause shipped as supervised assets
+  ([`supervised-assets.md`](supervised-assets.md)); finer filters (whitelists,
+  amount and timelock limits) remain future work, expressible in Simplicity,
+  which is active on the testnet, rather than in bespoke opcodes.
 - **Programmable accounts** (an account VM, `OP_DEPLOY`) - long-term, and possibly
   unnecessary if Simplicity subsumes them.
 - **Utreexo / accumulator statelessness** - a future upgrade to track once it
