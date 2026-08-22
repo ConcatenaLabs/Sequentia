@@ -72,6 +72,20 @@ Both of yours match what the page serves, fetched and hashed independently here:
 From the 24.5.2 publish onward the publisher writes
 `sequentiatestnet.com/download/SHA256SUMS` beside the artifacts, covering
 everything the page serves, regenerated on every run:
-`sha256sum --ignore-missing -c SHA256SUMS`. Signatures are not there yet; that
-needs a signing key kept on the build host, and I would rather set that up
-properly than quickly.
+`sha256sum --ignore-missing -c SHA256SUMS`.
+
+And signed, from the run after that: `SHA256SUMS.asc` is a detached OpenPGP
+signature, `sequentia-release-signing-key.asc` beside it is the public key. The
+private half exists only on the build host. The fingerprint, pinned in the
+repository at `contrib/sequentia/release-publisher/README.md` so you are not
+trusting the same server for both the file and the key:
+
+```
+B4F5 7796 7E32 25D5 8FF6 3DFC 5974 FD59 E609 F11F
+```
+
+```
+gpg --import sequentia-release-signing-key.asc
+gpg --verify SHA256SUMS.asc SHA256SUMS
+sha256sum --ignore-missing -c SHA256SUMS
+```

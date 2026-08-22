@@ -43,6 +43,26 @@ verifies a download under whichever name it arrived with. It is regenerated from
 the directory, not from the run, for the same reason the index is: a product that
 was skipped keeps its previous artifact and that artifact still needs a line.
 
+`SHA256SUMS.asc` is a detached OpenPGP signature over it, and
+`sequentia-release-signing-key.asc` beside it is the public key. The signing key
+lives only on the box, in `/etc/sequentia/release-signing` (mode 700, passphrase
+free so the timer can use it; back it up with the other secrets there) and is
+never in any repository. Its fingerprint, the copy to compare against:
+
+```
+B4F5 7796 7E32 25D5 8FF6 3DFC 5974 FD59 E609 F11F
+```
+
+To verify a download:
+
+```
+gpg --import sequentia-release-signing-key.asc      # check the fingerprint above
+gpg --verify SHA256SUMS.asc SHA256SUMS
+sha256sum --ignore-missing -c SHA256SUMS
+```
+
+A box without the key publishes the checksums unsigned and logs that it did.
+
 `seqognito` is the only recipe that compiles something before packaging: it does
 not vendor its wasm signer, so it builds `lwk_wasm` from SWK first and refuses to
 package if the result lacks the mixing exports. That is a cold Rust build, but
@@ -169,6 +189,7 @@ to force that product to be built and published again.
 |---|---|---|
 | `SEQ_BUILD_ROOT` | `/root/sequentia/release-build` | clones, state and staging |
 | `SEQ_DOWNLOAD_DIR` | `/root/sequentia/downloads` | what the page serves |
+| `SEQ_SIGNING_GNUPGHOME` | `/etc/sequentia/release-signing` | the release signing key; absent means unsigned |
 | `SEQ_BUILD_JOBS` | `4` | raise only if the committee is not running |
 | `SEQ_BUILD_NICE` | `19` | |
 | `SEQ_ONLY` | all | space-separated product names |
