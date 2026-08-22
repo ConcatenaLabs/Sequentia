@@ -228,6 +228,8 @@ writes a status line the operator can watch — see the DEX gap-closure plan P0.
   headers -1 (unknown), under a minute old. That is connection churn, not the
   frozen-below-a-height stall signature; it clears on its own. Confirm a cutover by version
   and height across all 23 nodes, never by the script alone.
-- From 24.3.0, the first start after an upgrade sweeps supervision-invalidated residue out of
-  a reloaded mempool.dat (`Supervision: evicting …` lines at startup are that sweep working,
-  not a problem).
+- From 24.5.2, the first start after an upgrade sweeps supervision-invalidated residue out of
+  a reloaded mempool.dat before RPC opens (`Supervision: evicting …` lines at startup are that
+  sweep working, not a problem). 24.3.0 through 24.5.1 carried a sweep that raced the registry
+  rebuild and did nothing when it lost; a node on those builds can still be holding dead
+  spends, and this cutover is what clears them.
