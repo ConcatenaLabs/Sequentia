@@ -55,10 +55,12 @@ file to publish.
 ### From the RPC
 
 ```
-issueasset 1000 1 false null null null '{"name":"Gold (troy ounce)","ticker":"GOLD","domain":"example.com","precision":8}'
+issueasset 1000 1 false null <fee-asset> null '{"name":"Gold (troy ounce)","ticker":"GOLD","domain":"example.com","precision":8}'
 ```
 
-`issueasset` builds the contract, hashes it canonically, commits it, and returns
+The fifth argument names the asset that pays the fee; the testnet has no default
+fee asset, so it cannot be `null` there (`-named ... fee_asset=<asset>` reads
+better). `issueasset` builds the contract, hashes it canonically, commits it, and returns
 what you need next:
 
 ```json
@@ -122,6 +124,10 @@ anything, because after issuance nothing can be fixed.
 | `version` | `0` |
 
 Unknown top-level fields are rejected so that the hash stays well defined.
+
+The node itself accepts a `denomination` of 0–18, but the registry accepts
+`precision` 0–8 only: an asset issued with 9–18 decimals is valid on chain and
+can never be registered or named.
 
 ## Canonical JSON
 

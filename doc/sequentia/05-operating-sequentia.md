@@ -103,11 +103,13 @@ poscommitteesize=250         # committee cap under the public committee (the
                              # under threshold sortition (max 100, fixed
                              # majority quorum).
 posslotinterval=30           # seconds per slot; 30s on the bundled chains.
-posunbonding=43200           # minimum unbonding lock in (Sequentia) blocks; required
-                             # wall-clock = this x posslotinterval (x30s ~= 15
-                             # days). Exceeds the 16-bit height-CSV range, so
-                             # staking outputs use a time-based CSV lock
-                             # (getstakescript csv_seconds=).
+posblockspacing=60           # consensus minimum block spacing in seconds, as
+                             # on the bundled chains (slots stay 30 s).
+posunbonding=43200           # minimum unbonding lock in slot intervals, not a
+                             # block count; wall-clock = this x posslotinterval
+                             # (43200 x 30 s ~= 15 days). Exceeds the 16-bit
+                             # height-CSV range, so staking outputs use a
+                             # time-based CSV lock (getstakescript csv_seconds=).
 con_blocksubsidy=0           # no inflation: SEQ is pre-mined at genesis, never
                              # minted by production; producers earn fees only.
 posminstake=4000000000000    # minimum blocksigner stake in SEQ atoms: 0.01% of
@@ -121,8 +123,8 @@ posminstake=4000000000000    # minimum blocksigner stake in SEQ atoms: 0.01% of
 # getblsregistration when running the public committee).
 #staker=02<pubkey-hex>:1000000
 
-con_maxblockweight=200000    # block weight cap, a twentieth of Bitcoin's
-                             # 4,000,000; with the slot interval, a saturated
+con_maxblockweight=400000    # block weight cap, a tenth of Bitcoin's
+                             # 4,000,000; at the 60-s spacing a saturated
                              # chain grows at Bitcoin's rate.
 con_default_blinded_addresses=0   # Bitcoin-identical addresses; CT opt-in.
 signblockscript=51           # PoS computes the per-block challenge; placeholder.
@@ -205,8 +207,10 @@ python3 contrib/price-server/price_server.py --config config.json --once     # s
 python3 contrib/price-server/price_server.py --config config.json --dry-run  # decisions only
 ```
 
-A rate is `round(price_in_reference * 1e8)`; an asset trading at exactly one
-reference unit has rate `100000000`.
+A rate is `round(price_in_reference × 1e8 × 10^(8 − precision))`: the
+`10^(8 − d)` factor carries the asset's denomination (`asset-denomination.md`
+§6a), so for an 8-decimal asset it is `round(price × 1e8)`, and one trading at
+exactly one reference unit has rate `100000000`.
 
 The sidecar publishes through `setfeeexchangerates` with `persist=false`, which
 updates the whitelist in memory but does **not** write `exchangerates.json` (a

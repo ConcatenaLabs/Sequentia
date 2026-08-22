@@ -33,7 +33,7 @@ never published, and future genuinely-official releases have to skip over it.
    testing, a cosmetic fix, or an experiment keeps the version of the release
    it forked from and identifies itself with a user-agent comment instead:
    run with `-uacomment=<yourname>` (or set it in `elements.conf`), which
-   makes the node report e.g. `/Elements Core:23.3.3(alberto)/` to its peers.
+   makes the node report e.g. `/Sequentia Core:24.5.2(alberto)/` to its peers.
    The version number itself is reserved for operator-published releases.
 
 3. **Bump the version only in the commit the release is built from**, i.e. the

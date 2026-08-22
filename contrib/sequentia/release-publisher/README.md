@@ -194,7 +194,7 @@ to force that product to be built and published again.
 | `SEQ_BUILD_NICE` | `19` | |
 | `SEQ_ONLY` | all | space-separated product names |
 | `SEQ_NODE_BUILD_WINDOWS` | `1` | `0` publishes the Linux tarball only |
-| `SEQ_NODE_CONFIGURE_ARGS` | `--disable-tests --disable-bench --enable-any-asset-fees` | `--enable-any-asset-fees` is what gives fee amounts their reference units instead of labelling them BTC/sat |
+| `SEQ_NODE_CONFIGURE_ARGS` | `--with-gui=qt5 --disable-tests --disable-bench --enable-any-asset-fees` | `--enable-any-asset-fees` is what gives fee amounts their reference units instead of labelling them BTC/sat |
 | `SEQ_AMBRA_KEYSTORE` | `/etc/sequentia/ambra-release.keystore` | |
 
 ## Failure
