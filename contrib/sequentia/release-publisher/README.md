@@ -37,6 +37,12 @@ Anything the recipe writes into `outdir` gets published. Nothing else is needed.
 
 Every artifact the download page offers is covered. Nothing is published by hand.
 
+Every run also rewrites `SHA256SUMS` in the download directory over every
+artifact present, aliases included, so `sha256sum --ignore-missing -c SHA256SUMS`
+verifies a download under whichever name it arrived with. It is regenerated from
+the directory, not from the run, for the same reason the index is: a product that
+was skipped keeps its previous artifact and that artifact still needs a line.
+
 `seqognito` is the only recipe that compiles something before packaging: it does
 not vendor its wasm signer, so it builds `lwk_wasm` from SWK first and refuses to
 package if the result lacks the mixing exports. That is a cold Rust build, but

@@ -5719,23 +5719,14 @@ void CChainState::LoadMempool(const ArgsManager& args)
     if (args.GetBoolArg("-persistmempool", DEFAULT_PERSIST_MEMPOOL)) {
         ::LoadMempool(*m_mempool, *this);
 
-        // SEQUENTIA: sweep the loaded mempool against the supervision
-        // registry. Acceptance filtering above is only as strong as the
-        // registry at that moment, and the registry rebuild in init races
-        // this thread; mempool.dat may also have been written by a binary
-        // that did not enforce freezes at all. A frozen spend admitted here
-        // has no later cure: the steady-state eviction in ConnectTip runs
-        // only when a connecting block carries a supervision record, which
-        // is deliberate (an ordinary block pays nothing for it) and means a
-        // node that starts poisoned stays poisoned until some unrelated
-        // record confirms -- possibly never. One sweep after the load makes
-        // the invariant hold no matter who wrote the file or who won the
-        // race.
-        if (g_supervision_height > 0) {
-            LOCK2(cs_main, m_mempool->cs);
-            CCoinsViewMemPool mempool_view(&CoinsTip(), *m_mempool);
-            m_mempool->removeStaleSupervision(mempool_view);
-        }
+        // SEQUENTIA: acceptance filtering above is only as strong as the
+        // supervision registry at that moment, and the registry rebuild in
+        // init races this thread. A sweep HERE cannot repair that: losing the
+        // race is exactly the case where the registry is still empty and a
+        // sweep finds nothing to remove (it shipped that way in 24.3.0 and
+        // held or failed on scheduler luck). The sweep that actually closes
+        // the invariant runs on the init thread, after the rebuild and
+        // before RPC warmup ends -- see AppInitMain (init.cpp).
     }
     m_mempool->SetIsLoaded(!ShutdownRequested());
 }
