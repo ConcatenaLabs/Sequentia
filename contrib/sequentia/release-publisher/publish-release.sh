@@ -237,6 +237,30 @@ update_index() {
     | sed -E 's#href="(.*)"#\1#' | sort -u | sed 's/^/  /'
 }
 
+# --- Checksums for everything the directory serves ----------------------------
+# One SHA256SUMS over every artifact present, rewritten on every run so it can
+# neither name a file that is gone nor miss one that arrived. Built from the
+# directory rather than from this run's builds for the same reason the index is:
+# a product that was skipped or failed keeps its previous artifact, and that
+# artifact still needs a line. The unversioned aliases (ambra-latest.apk and
+# friends) are listed too, under their own names, because that is the name a
+# download through the stable URL arrives with and `sha256sum -c` matches on the
+# name. Verify with: sha256sum --ignore-missing -c SHA256SUMS
+write_checksums() {
+  local sums="$DOWNLOAD_DIR/SHA256SUMS"
+  local -a files=()
+  local f
+  while IFS= read -r f; do files+=("$f"); done < <(
+    find "$DOWNLOAD_DIR" -maxdepth 1 \( -type f -o -type l \) \
+      \( -name '*.tar.gz' -o -name '*.exe' -o -name '*.zip' -o -name '*.AppImage' -o -name '*.apk' \) \
+      -printf '%f\n' 2>/dev/null | sort -V)
+  [ "${#files[@]}" -gt 0 ] || { log "no artifacts to checksum"; return 0; }
+  # Complete or not at all, like the artifacts themselves.
+  (cd "$DOWNLOAD_DIR" && sha256sum -- "${files[@]}") > "$sums.part"
+  mv "$sums.part" "$sums"
+  log "SHA256SUMS covers ${#files[@]} file(s)"
+}
+
 # --- Go ------------------------------------------------------------------------
 [ -d "$RECIPE_DIR" ] || die "no recipes at $RECIPE_DIR"
 
@@ -253,6 +277,7 @@ for recipe in "$RECIPE_DIR"/*.sh; do
 done
 
 update_index
+write_checksums
 
 [ "$failed" = "0" ] || die "at least one product failed to publish (see above)"
 log "all products up to date"
