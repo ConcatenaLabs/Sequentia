@@ -15,10 +15,17 @@ class CAssetExchangeRate
 public:
     /** Fee rate: atoms of the asset equal to one reference unit (exchange_rate_scale). */
     CAmount m_scaled_value;
+    /** Somebody decided this rate: an operator, or a price server pushing through
+     *  setfeeexchangerates. Rates the node derived for itself from the price feed
+     *  are not, and only those may be replaced by a later feed reading. Without
+     *  the distinction the feed would either overwrite a deliberate policy every
+     *  poll, or never be able to correct its own earlier guess. */
+    bool m_operator_set{false};
 
     CAssetExchangeRate() : m_scaled_value(0) { }
     CAssetExchangeRate(CAmount amount) : m_scaled_value(amount) { }
     CAssetExchangeRate(uint64_t amount) : m_scaled_value(amount) { }
+    CAssetExchangeRate(CAmount amount, bool operator_set) : m_scaled_value(amount), m_operator_set(operator_set) { }
 };
 
 /**
@@ -84,6 +91,19 @@ public:
      */
     CAmount ConvertValueToAmount(const CValue& value, const CAsset& asset);
 
+    /**
+     * Look up one asset's rate without going through a conversion.
+     * @param[out] rate_out  the rate as listed; 0 means the asset is listed and
+     *                       explicitly refused, which is NOT the same state as
+     *                       being absent even though both refuse a fee.
+     * @return false if the asset is absent from the whitelist.
+     */
+    bool GetRate(const CAsset& asset, CAmount& rate_out);
+
+    /** A snapshot copy of the whole whitelist. Callers must not iterate the map
+     *  itself: it is mutated under m_write_mutex by SetRates(). */
+    std::map<CAsset, CAmount> GetRates();
+
     /** Load the whitelist from <datadir>/exchangerates.json (no-op if absent). */
     bool LoadFromDefaultJSONFile(std::vector<std::string>& errors);
 
@@ -109,6 +129,22 @@ public:
     /** Replace the whole whitelist. Used by both an operator and a price-server
      *  sidecar — the node treats them identically. */
     void SetRates(const std::map<CAsset, CAmount>& rates);
+
+    /**
+     * SEQUENTIA: add rates the node worked out from the reference price feed,
+     * for assets nobody has priced by hand.
+     *
+     * This is what stops the whitelist privileging one asset. Seeded with the
+     * policy asset alone, a node accepts fees in that asset and refuses every
+     * other — which is a preference, and outside staking eligibility Sequentia
+     * grants none. The node already fetches a price for each asset in order to
+     * display values; using the same figure to value a fee makes every priced
+     * asset payable on equal terms, the policy asset included and not exempted.
+     *
+     * An entry an operator set is never touched, whatever the feed says.
+     * @return how many rates changed.
+     */
+    int MergeFeedRates(const std::map<CAsset, CAmount>& rates);
 
     /** Empty the whitelist. Nothing survives: an empty whitelist accepts NO fee
      *  asset, the policy asset included. Use ResetToBootstrapRates() to get back

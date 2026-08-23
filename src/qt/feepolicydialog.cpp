@@ -10,6 +10,7 @@
 
 #include <assetsdir.h>
 #include <chainparamsbase.h>
+#include <feeassets.h>
 #include <interfaces/node.h>
 #include <util/system.h>
 
@@ -24,6 +25,7 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QDoubleValidator>
 #include <QIntValidator>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -57,16 +59,20 @@ FeePolicyDialog::FeePolicyDialog(const PlatformStyle* platformStyle, QWidget* pa
     resize(640, 560);
     auto* layout = new QVBoxLayout(this);
 
-    layout->addWidget(new QLabel(tr("Assets this node accepts for transaction fees: the fee "
-                                    "whitelist. Sequentia privileges no asset; the policy asset is "
-                                    "just one entry. Rates are integer atoms of the asset equal to "
-                                    "one reference fee atom (rfa). Entries are set manually below, "
-                                    "or maintained automatically by a price server if one is running."),
-                                 this));
+    // Wrapped, or this paragraph states its own length as the dialog's minimum
+    // width and the window opens wider than the screen with no way to drag it back.
+    auto* intro = new QLabel(tr("Assets this node accepts for transaction fees, and what one unit of "
+                                "each is worth. A fee is only worth what the asset it is paid in is "
+                                "worth, so this is what lets fees in different assets be compared. "
+                                "Prices are kept up to date automatically from the price feed; set one "
+                                "here to override it, or leave the list alone."),
+                             this);
+    intro->setWordWrap(true);
+    layout->addWidget(intro);
 
     // The single fee whitelist (the effective accepted set).
     m_whitelist = new QTableWidget(0, 2, this);
-    m_whitelist->setHorizontalHeaderLabels({tr("Asset"), tr("Rate (atoms per rfa)")});
+    m_whitelist->setHorizontalHeaderLabels({tr("Asset"), tr("Price of 1 unit (USD)")});
     m_whitelist->horizontalHeader()->setStretchLastSection(true);
     m_whitelist->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
     m_whitelist->verticalHeader()->setVisible(false);
@@ -83,9 +89,15 @@ FeePolicyDialog::FeePolicyDialog(const PlatformStyle* platformStyle, QWidget* pa
     m_asset->setToolTip(tr("Asset label or hex id."));
     form->addRow(tr("Asset:"), m_asset);
     m_rate = new QLineEdit(edit);
-    m_rate->setValidator(new QIntValidator(0, INT_MAX, m_rate));
-    m_rate->setToolTip(tr("Atoms of the asset equal to one reference fee atom (rfa). 0 = refuse this asset."));
-    form->addRow(tr("Rate:"), m_rate);
+    // A price, not the node's internal rate. The rate is atoms of the asset per
+    // reference fee atom, carrying a factor for the asset's decimals; nobody
+    // should have to think in that unit to say what a thing is worth.
+    auto* price_validator = new QDoubleValidator(0.0, 1e12, 10, m_rate);
+    price_validator->setNotation(QDoubleValidator::StandardNotation);
+    m_rate->setValidator(price_validator);
+    m_rate->setPlaceholderText(tr("e.g. 0.03"));
+    m_rate->setToolTip(tr("What one whole unit of the asset is worth in USD. 0 refuses the asset."));
+    form->addRow(tr("Price of 1 unit (USD):"), m_rate);
     auto* btns = new QHBoxLayout();
     m_add = new QPushButton(tr("Add / update"), edit);
     m_remove = new QPushButton(tr("Remove selected"), edit);
@@ -240,34 +252,36 @@ QString FeePolicyDialog::nodeRpcMismatch(const QString& path) const
 
 void FeePolicyDialog::refresh()
 {
-    bool ok = false; QString err;
-
-    // The single fee whitelist.
-    UniValue policy = callRpc("getfeeacceptancepolicy", UniValue(UniValue::VARR), ok, err);
     m_whitelist->setRowCount(0);
     m_remove->setEnabled(false);
-    if (ok) {
-        // getfeeacceptancepolicy returns { "<asset>": { "rate": <num> }, ... }. There is no
-        // per-entry origin/source — it is one flat whitelist. Show asset + rate; every row is
-        // editable/removable by the operator.
-        const std::vector<std::string> keys = policy.getKeys();
-        m_whitelist->setRowCount((int)keys.size());
-        for (int row = 0; row < (int)keys.size(); ++row) {
-            const std::string& k = keys[row];
-            const UniValue& e = policy[k];
-            // Show the asset the way the rest of the GUI does. The raw key is
-            // still what the RPCs take, so it stays available on hover rather
-            // than being the thing on display: unexplained, "bitcoin" reads as
-            // a claim that this row is Bitcoin.
-            QTableWidgetItem* name = roItem(GUIUtil::assetDisplayNameForKey(k));
-            name->setToolTip(tr("Fee policy key: %1").arg(QString::fromStdString(k)));
-            m_whitelist->setItem(row, 0, name);
-            m_whitelist->setItem(row, 1, roItem(e["rate"].isNum() ? QString::number(e["rate"].get_int64()) : QString()));
-        }
-        setStatus(tr("Loaded %1 accepted asset(s).").arg(keys.size()));
-    } else {
-        setStatus(err, true);
+    if (!m_wallet_model) { setStatus(tr("No wallet loaded."), true); return; }
+
+    // Shown as prices rather than as the rates the node stores. The stored rate
+    // is atoms of the asset per reference fee atom, times a factor for the
+    // asset's decimals -- a number that means nothing to read and cannot be
+    // sanity-checked by eye, where "1 GOLD is worth 4437 USD" can.
+    int accepted = 0;
+    for (const FeeAssetInfo& info : m_wallet_model->node().listFeeAssetInfo()) {
+        if (!info.listed) continue;
+        const int row = m_whitelist->rowCount();
+        m_whitelist->insertRow(row);
+        // Show the asset the way the rest of the GUI does. The raw key is
+        // still what the RPCs take, so it stays available on hover rather
+        // than being the thing on display: unexplained, "bitcoin" reads as
+        // a claim that this row is Bitcoin.
+        QTableWidgetItem* name = roItem(GUIUtil::assetDisplayNameForKey(info.identifier));
+        name->setToolTip(tr("Fee policy key: %1").arg(QString::fromStdString(info.identifier)));
+        m_whitelist->setItem(row, 0, name);
+        const double price = UnitPriceFromFeeRate(info.rate, info.precision);
+        auto* price_item = roItem(info.accepted ? QString::number(price, 'f', price >= 1.0 ? 2 : 8)
+                                                : tr("refused"));
+        // The rate is still the thing the node acts on, so keep it reachable for
+        // anyone comparing this against getfeeacceptancepolicy.
+        price_item->setToolTip(tr("Stored as a rate of %1").arg(info.rate));
+        m_whitelist->setItem(row, 1, price_item);
+        if (info.accepted) accepted++;
     }
+    setStatus(tr("%n asset(s) accepted for fees.", "", accepted));
 
     // Enable Remove whenever any row is selected (connect once).
     if (!m_remove_selection_connected) {
@@ -282,9 +296,19 @@ void FeePolicyDialog::onAddOrUpdate()
 {
     const std::string assetKey = m_asset->currentText().trimmed().toStdString();
     if (assetKey.empty()) { setStatus(tr("Choose an asset."), true); return; }
-    bool rateOk = false;
-    const long long rate = m_rate->text().toLongLong(&rateOk);
-    if (!rateOk || rate < 0) { setStatus(tr("Rate must be a non-negative integer (0 = refuse)."), true); return; }
+    bool priceOk = false;
+    const double price = m_rate->text().trimmed().toDouble(&priceOk);
+    if (!priceOk || price < 0.0) { setStatus(tr("Enter what one unit is worth in USD (0 refuses the asset)."), true); return; }
+
+    // The price is converted here, with the same arithmetic the node uses when it
+    // takes prices from the feed (FeeRateFromUnitPrice). Doing it any other way
+    // would make a hand-set price and a fed one mean different things.
+    const CAsset asset = GetAssetFromString(assetKey);
+    if (asset.IsNull()) { setStatus(tr("Unknown asset: %1").arg(QString::fromStdString(assetKey)), true); return; }
+    const uint8_t precision = m_wallet_model ? m_wallet_model->node().getFeeAssetInfo(asset).precision
+                                             : DEFAULT_ASSET_PRECISION;
+    const long long rate = (price == 0.0) ? 0 : FeeRateFromUnitPrice(price, precision);
+    if (price > 0.0 && rate <= 0) { setStatus(tr("That price is too small to represent for this asset."), true); return; }
 
     bool ok = false; QString err;
     // Start from the FULL current policy so every other accepted asset is preserved

@@ -182,6 +182,24 @@ resulting `{asset → rate}` table into the node's single whitelist through
 | `setfeeexchangerates {asset: rate, …} [persist=true]` | Replace the whole whitelist and `RecomputeFees()`. With `persist=true` (the default) it also writes `exchangerates.json` so the table survives a restart; with `persist=false` it updates only the in-memory whitelist. Pass `{}` to clear it, which leaves the node accepting **no** fee asset at all, SEQ included, and empties its mempool. |
 | `getfeeexchangerates` | Return the current whitelist as `{asset: rate}`. |
 | `getfeeacceptancepolicy` | Return the current acceptance set. |
+| `getfeeassetinfo [asset]` | Per asset: whether this node accepts it (`accepted`, plus `listed`/`rate` so a refusal written down as rate 0 is distinguishable from an asset nobody configured), whether the Asset Registry publishes it (`registry_listed`), and whether the reference feed prices it (`market_price`). |
+
+`getfeeassetinfo` is what a wallet asks before offering an asset as a way to
+pay, and it keeps those three facts apart because only the first is decisive.
+An asset missing from **this node's** whitelist is refused by the wallet's own
+mempool, so the transaction never reaches a producer at all. An asset that is
+accepted here but absent from the registry, or unpriced, is a different and
+milder problem: other producers build their whitelists from exactly those two
+sources, so the payment may confirm only in a block this node produces. A
+wallet that collapses the three into one "is it usable" flag warns about assets
+that work and stays silent about assets that cannot be sent.
+
+`estimatesmartfee` takes an optional third argument, `fee_asset`. The estimate
+does not depend on it — a fee rate is a rate in the reference unit, which is
+what every asset's fee is valued into — so it only converts the answer at this
+node's whitelist rate and reports acceptance. Acceptance is reported even when
+there is no estimate to convert, since a node with no fee history yet would
+otherwise look like it had a problem with the asset.
 
 There is a single whitelist; "static" versus "dynamic" is only how it is
 *operated*, not a protocol distinction. An operator setting rates by hand uses

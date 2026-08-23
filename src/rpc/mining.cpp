@@ -14,6 +14,7 @@
 #include <deploymentinfo.h>
 #include <deploymentstatus.h>
 #include <exchangerates.h>
+#include <feeassets.h>
 #include <key_io.h>
 #include <net.h>
 #include <musig.h>
@@ -53,6 +54,7 @@
 #include <policy/settings.h> // IsStandardTx
 
 #include <memory>
+#include <optional>
 #include <stdint.h>
 
 using node::BlockAssembler;
@@ -1128,11 +1130,22 @@ static RPCHelpMan estimatesmartfee()
             "                   target, but is not as responsive to short term drops in the\n"
             "                   prevailing fee market. Must be one of (case insensitive):\n"
              "\"" + FeeModes("\"\n\"") + "\""},
+            {"fee_asset", RPCArg::Type::STR, RPCArg::Optional::OMITTED_NAMED_ARG, "SEQUENTIA: label or hex id of the asset the fee would be paid in.\n"
+            "                   The estimate itself does not depend on it — a fee rate is a rate in the reference\n"
+            "                   unit, which is what every asset's fee is valued into — so this only converts the\n"
+            "                   answer into that asset at this node's whitelist rate, and reports whether the node\n"
+            "                   accepts the asset at all. Omit it and the output is unchanged."},
                 },
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
                     {
                         {RPCResult::Type::NUM, "feerate", /*optional=*/true, "estimate fee rate in " + CURRENCY_UNIT + "/kvB (only present if no errors were encountered)"},
+                        {RPCResult::Type::STR_HEX, "asset", /*optional=*/true, "SEQUENTIA: hex id of the requested fee asset (only when fee_asset was given)"},
+                        {RPCResult::Type::BOOL, "accepted", /*optional=*/true, "SEQUENTIA: whether this node accepts fees in that asset. When false there is no\n"
+            "conversion to report and the transaction would be refused by this node's own mempool."},
+                        {RPCResult::Type::NUM, "rate", /*optional=*/true, "SEQUENTIA: the whitelist rate applied, in atoms of the asset per reference fee atom"},
+                        {RPCResult::Type::NUM, "asset_feerate", /*optional=*/true, "SEQUENTIA: the same estimate denominated in the fee asset, per kvB"},
+                        {RPCResult::Type::NUM, "asset_atoms_per_kvb", /*optional=*/true, "SEQUENTIA: that figure in the asset's atoms, exact and precision-blind"},
                         {RPCResult::Type::ARR, "errors", /*optional=*/true, "Errors encountered during processing (if there are any)",
                             {
                                 {RPCResult::Type::STR, "", "error"},
@@ -1145,11 +1158,15 @@ static RPCHelpMan estimatesmartfee()
                     }},
                 RPCExamples{
                     HelpExampleCli("estimatesmartfee", "6") +
+                    HelpExampleCli("estimatesmartfee", "6 \"conservative\" \"USDX\"") +
                     HelpExampleRpc("estimatesmartfee", "6")
                 },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
-    RPCTypeCheck(request.params, {UniValue::VNUM, UniValue::VSTR});
+    // fAllowNull: an omitted named argument is padded to null, so asking for
+    // fee_asset without estimate_mode leaves a null in the middle. conf_target
+    // is still required — the explicit check below rejects a null there.
+    RPCTypeCheck(request.params, {UniValue::VNUM, UniValue::VSTR, UniValue::VSTR}, /*fAllowNull=*/true);
     RPCTypeCheckArgument(request.params[0], UniValue::VNUM);
 
     CBlockPolicyEstimator& fee_estimator = EnsureAnyFeeEstimator(request.context);
@@ -1166,20 +1183,53 @@ static RPCHelpMan estimatesmartfee()
         }
         if (fee_mode == FeeEstimateMode::ECONOMICAL) conservative = false;
     }
+    // SEQUENTIA: the asset the caller would pay in, if they said. Resolved before
+    // the estimate so a typo fails loudly instead of silently returning an
+    // unconverted answer the caller would read as the asset's own rate.
+    std::optional<CAsset> fee_asset;
+    if (!request.params[2].isNull()) {
+        const std::string assetstr = request.params[2].get_str();
+        const CAsset parsed = GetAssetFromString(assetstr);
+        if (parsed.IsNull()) {
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("Unknown label and invalid asset hex: %s", assetstr));
+        }
+        fee_asset = parsed;
+    }
 
     UniValue result(UniValue::VOBJ);
     UniValue errors(UniValue::VARR);
     FeeCalculation feeCalc;
     CFeeRate feeRate{fee_estimator.estimateSmartFee(conf_target, &feeCalc, conservative)};
-    if (feeRate != CFeeRate(0)) {
+    const bool have_estimate = feeRate != CFeeRate(0);
+    if (have_estimate) {
         CFeeRate min_mempool_feerate{mempool.GetMinFee(gArgs.GetIntArg("-maxmempool", DEFAULT_MAX_MEMPOOL_SIZE) * 1000000)};
         CFeeRate min_relay_feerate{::minRelayTxFee};
         feeRate = std::max({feeRate, min_mempool_feerate, min_relay_feerate});
         result.pushKV("feerate", ValueFromAmount(feeRate.GetFeePerK()));
     } else {
         errors.push_back("Insufficient data or no feerate found");
-        result.pushKV("errors", errors);
     }
+    if (fee_asset) {
+        // SEQUENTIA: whether this node accepts the asset does not depend on the
+        // estimate, and is answered even when there is no estimate to convert.
+        // A young node has no fee history for hours, and "we cannot tell you
+        // anything" would send a wallet looking for a fault in the asset.
+        const FeeAssetInfo info = GetFeeAssetInfo(*fee_asset);
+        result.pushKV("asset", fee_asset->GetHex());
+        result.pushKV("accepted", info.accepted);
+        if (info.listed) result.pushKV("rate", info.rate);
+        if (!info.accepted) {
+            errors.push_back(strprintf("This node does not accept fees in %s, so it would reject such a transaction itself", gAssetsDir.GetIdentifier(*fee_asset)));
+        } else if (have_estimate) {
+            // GetFee(1000, asset) is the per-kvB figure in the asset's own
+            // atoms, converted at the same rate the mempool will value the fee
+            // back with, so the two never disagree.
+            const CAmount atoms_per_kvb = feeRate.GetFee(1000, *fee_asset);
+            result.pushKV("asset_feerate", ValueFromAmount(atoms_per_kvb));
+            result.pushKV("asset_atoms_per_kvb", atoms_per_kvb);
+        }
+    }
+    if (!errors.empty()) result.pushKV("errors", errors);
     result.pushKV("blocks", feeCalc.returnedTarget);
     return result;
 },

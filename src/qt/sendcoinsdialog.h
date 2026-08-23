@@ -13,6 +13,10 @@
 #include <QTimer>
 
 class ClientModel;
+QT_BEGIN_NAMESPACE
+class QLabel;
+class QLineEdit;
+QT_END_NAMESPACE
 class PlatformStyle;
 class SendCoinsEntry;
 class SendCoinsRecipient;
@@ -102,19 +106,60 @@ private:
 
     /** SEQUENTIA any-asset fees: the fee defaults to the asset being sent (first
         recipient), because that is what the user demonstrably holds and wants to
-        move — but only while that asset has a published price; producers are
-        unlikely to ever accept a fee they cannot value. A manual pick in the
+        move — but only while this node accepts a fee in it. A manual pick in the
         selector wins until the form is cleared. */
     bool m_fee_asset_user_choice{false};
     void updateDefaultFeeAsset();
     void updateFeeAssetWarning();
     /** The asset the fee will be paid in (the selector's pick, policy asset otherwise). */
     CAsset selectedFeeAsset() const;
-    /** SEQUENTIA: render a fee rate the way a user reads money — in the reference
-        currency, plus the equivalent in the fee asset and the rate applied. The
-        wallet's own policy-asset atoms are never shown as if they were a default
-        currency. Returns rich text (a muted span for the rate). */
-    QString formatFeeRate(const CAmount& policy_atoms_per_kvb) const;
+    /** SEQUENTIA: of the assets in the selector this node actually accepts fees
+        in, the one this wallet holds the most value of. Used as the fallback
+        default when the asset being sent cannot pay the fee. Null when the
+        wallet holds nothing acceptable. */
+    CAsset largestAcceptedHolding() const;
+    /** Balances as of the last balanceChanged, so ranking the holdings above does
+        not recompute them on every keystroke. */
+    interfaces::WalletBalances m_cached_balances;
+
+    /** SEQUENTIA fee grid: what this costs, in the asset that pays and in the
+        reference currency, per transaction and per 1000 bytes. Four views of one
+        number — edit any of them under Custom and the other three follow. */
+    QLineEdit* m_fee_total_asset{nullptr};
+    QLineEdit* m_fee_total_ref{nullptr};
+    QLineEdit* m_fee_kvb_asset{nullptr};
+    QLineEdit* m_fee_kvb_ref{nullptr};
+    QLabel* m_fee_grid_asset_header{nullptr};
+    QLabel* m_fee_note{nullptr};
+    //! The note about the CHOSEN ASSET, which belongs beside the choice rather
+    //! than at the bottom with the notes about estimation.
+    QLabel* m_fee_asset_note{nullptr};
+    //! The cell currently being typed into, which the grid must not rewrite
+    //! underneath the cursor while it restates the other three.
+    QLineEdit* m_fee_cell_editing{nullptr};
+    /** Guards the four cells against each other while one is recomputing the rest. */
+    bool m_fee_grid_updating{false};
+    /** vsize of the transaction as currently composed, 0 when it cannot be sized
+        yet (no recipient, no amount, or the wallet cannot fund it). Without it
+        there is no honest total, only a rate. */
+    unsigned int m_tx_vsize{0};
+    QTimer* m_size_timer{nullptr};
+
+    void buildFeeGrid();
+    /** Fill the grid and the note from the current rate, asset and congestion. */
+    void updateFeeGrid(const CAmount& asset_atoms_per_kvb);
+    /** One of the four cells was edited: derive the rate and push it back. */
+    void onFeeCellEdited(QLineEdit* source);
+    /** Size the transaction as composed, so the totals can be real rather than
+        assumed. Debounced: it runs coin selection. */
+    void refreshTxSize();
+    /** SEQUENTIA: render a fee rate the way a user reads money — the amount in the
+        asset that will actually pay it, plus its worth in the reference currency
+        and the unit price behind that. The argument is already denominated in the
+        selected fee asset (that is what wallet::GetMinimumFee returns); a caller
+        holding a rate in the reference unit must convert first. Returns rich text
+        (a muted span for the unit price). */
+    QString formatFeeRate(const CAmount& fee_asset_atoms_per_kvb) const;
 
 private Q_SLOTS:
     void sendButtonClicked(bool checked);

@@ -37,7 +37,10 @@ class RawTransactionsTest(BitcoinTestFramework):
         self.setup_clean_chain = True
         # This test isn't testing tx relay. Set whitelist on the peers for
         # instant tx relay.
-        self.extra_args = [['-blindedaddresses=1', '-whitelist=noban@127.0.0.1']] * self.num_nodes
+        # SEQUENTIA: where fees are paid in any asset the wallet has no default
+        # fee ceiling (see CWallet::Create), so the ceiling the feerate tests
+        # expect to hit has to be set explicitly. 0.1 is the inherited default.
+        self.extra_args = [['-blindedaddresses=1', '-whitelist=noban@127.0.0.1', '-maxtxfee=0.1']] * self.num_nodes
         self.rpc_timeout = 90  # to prevent timeouts in `test_transaction_too_large`
 
     def skip_test_if_missing_module(self):

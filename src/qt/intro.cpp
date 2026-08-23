@@ -144,21 +144,12 @@ bool IsSequentiaChain()
 }
 
 //! Nominal seconds between blocks on the selected network, used to estimate
-//! how fast the chain grows on disk.
-//!
-//! On a PoS chain this is Consensus::Params::pos_block_spacing, the
-//! consensus-enforced cadence (60 s on the Sequentia chains). It is NOT
-//! g_pos_slot_interval: that is the leader time-gate unit, which is a
-//! different number for a different purpose (30 s), and reading it here would
-//! claim the chain produces twice as many blocks as it does -- doubling the
-//! disk estimate this function exists to make. Falls back to the slot interval
-//! only for a PoS chain that sets no spacing, and to the PoW target spacing
-//! off PoS.
+//! how fast the chain grows on disk. Moved to GUIUtil once a second caller
+//! appeared (the send dialog's confirmation targets): two copies of this would
+//! be two chances to reach for nPowTargetSpacing again.
 int64_t NominalBlockSpacing()
 {
-    if (!g_con_pos) return Params().GetConsensus().nPowTargetSpacing;
-    const int64_t spacing = Params().GetConsensus().pos_block_spacing;
-    return spacing > 0 ? spacing : g_pos_slot_interval;
+    return GUIUtil::nominalBlockSpacing();
 }
 
 //! Consensus block-weight cap of the selected network (200,000 WU on the

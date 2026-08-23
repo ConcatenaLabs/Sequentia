@@ -14,11 +14,13 @@
 #include <base58.h>
 #include <assetsdir.h>
 #include <chainparams.h>
+#include <feeassets.h>
 #include <referenceprices.h>
 #include <fs.h>
 #include <interfaces/node.h>
 #include <key_io.h>
 #include <policy/policy.h>
+#include <pos.h>
 #include <primitives/transaction.h>
 #include <protocol.h>
 #include <script/script.h>
@@ -988,10 +990,11 @@ double RefBasePriceOf(const std::map<std::string, double>& prices, const QString
 }
 // The feed's price KEY for an asset (NOT a reference): the feed names the native asset "SEQ"
 // (independent of the chain-aware display ticker tSEQ); issued assets use their registry ticker.
+// Defined node-side (feeassets.h) because the fee-asset checks need the same key, and a display
+// layer that spelled it differently would disagree with the node about which assets are priced.
 QString MarketTickerOf(const CAsset& asset)
 {
-    if (asset == Params().GetConsensus().pegged_asset) return QStringLiteral("SEQ");
-    return QString::fromStdString(gAssetsDir.GetIdentifier(asset)).toUpper();
+    return QString::fromStdString(FeeAssetFeedTicker(asset));
 }
 QString FormatRefValue(double value, const QString& ref)
 {
@@ -1027,12 +1030,14 @@ QString formatReferenceApprox(const CAsset& asset, const CAmount& amount, const 
     return FormatRefValue((static_cast<double>(amount) / factor) * pa / pr, ref);
 }
 
-bool assetHasMarketPrice(const CAsset& asset)
+int64_t nominalBlockSpacing()
 {
-    const std::map<std::string, double> prices = GetReferencePrices();
-    if (prices.empty()) return false;
-    const auto it = prices.find(MarketTickerOf(asset).toStdString());
-    return it != prices.end() && it->second > 0.0;
+    if (!g_con_pos) return Params().GetConsensus().nPowTargetSpacing;
+    const int64_t spacing = Params().GetConsensus().pos_block_spacing;
+    // Falls back to the slot interval for a PoS chain that sets no spacing. Never
+    // g_pos_slot_interval when a spacing exists: the slot interval is the leader
+    // time-gate unit (30 s), a different number for a different purpose.
+    return spacing > 0 ? spacing : g_pos_slot_interval;
 }
 
 QString formatMultiAssetReferenceApprox(const CAmountMap& amountmap, const QString& refTicker, double extraBtcWhole)

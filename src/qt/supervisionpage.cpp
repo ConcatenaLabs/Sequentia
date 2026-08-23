@@ -36,6 +36,7 @@
 #include <QMessageBox>
 #include <QPointer>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QShowEvent>
 #include <QTableWidget>
 #include <QTableWidgetItem>
@@ -66,7 +67,26 @@ const char* PAUSE_TARGET_HEX = "000000000000000000000000000000000000000000000000
 SupervisionPage::SupervisionPage(const PlatformStyle* platformStyle, QWidget* parent)
     : QWidget(parent), m_platform_style(platformStyle)
 {
-    QVBoxLayout* layout = new QVBoxLayout(this);
+    // Everything below goes inside a scroll area rather than straight onto the
+    // page. Stacked one under another -- summaries, the freeze table, three group
+    // boxes and their explanations -- this content is about 1200 pixels tall, and
+    // a page states that as its MINIMUM height. Every tab shares one stacked
+    // widget, whose minimum is the tallest page's, so this page alone set the
+    // smallest the whole window could ever be: taller than a laptop screen, which
+    // left the window unshrinkable and the bottom of other tabs (the Send button,
+    // most visibly) cut off below the edge. Inside a scroll area the page asks for
+    // nothing and scrolls when it does not fit.
+    QVBoxLayout* outer = new QVBoxLayout(this);
+    outer->setContentsMargins(0, 0, 0, 0);
+    QScrollArea* scroll = new QScrollArea(this);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    QWidget* content = new QWidget(scroll);
+    scroll->setWidget(content);
+    outer->addWidget(scroll);
+
+    QVBoxLayout* layout = new QVBoxLayout(content);
 
     QLabel* title = new QLabel(tr("Supervision"), this);
     QFont tf = title->font();
@@ -242,6 +262,19 @@ void SupervisionPage::setModel(WalletModel* model)
     // asset looks like from here.
     refreshAssets();
     connect(m_wallet_model, &WalletModel::assetTypesChanged, this, &SupervisionPage::refreshAssets);
+    // ...and on every balance update, which is the only trigger that fires for a
+    // wallet that ALREADY holds what it supervises.
+    //
+    // The check above runs once, when the wallet is attached, and at that moment
+    // getsupervisedassets has nothing to say yet. After that assetTypesChanged is
+    // the only way back here, and it fires when the SET of assets held changes --
+    // never for a wallet that opened already holding its supervised asset and did
+    // not move it. So the tab stayed hidden for exactly the operator it exists
+    // for, and hidden means the page is never shown, which means showEvent cannot
+    // rescue it either: the condition that reveals the tab could only be rechecked
+    // by the page that the tab reveals.
+    connect(m_wallet_model, &WalletModel::balanceChanged, this,
+            [this](const interfaces::WalletBalances&) { refreshAssets(); });
 }
 
 std::string SupervisionPage::walletUri() const
@@ -396,9 +429,13 @@ void SupervisionPage::onAssetChanged()
             .arg(role, key.isEmpty() ? tr("unknown") : key,
                  ours ? tr("this wallet can sign") : tr("signed elsewhere (HSM, FROST, an offline key)"));
     };
-    m_keys_summary->setText(keyLine(tr("Operational key"), asset->operational_key, asset->wallet_has_operational) +
+    // "public" is part of the name, not a note: these are the x-only PUBLIC keys
+    // committed in the asset id and published in the issuance declaration output,
+    // readable from the chain by anyone. Labelling them as bare "keys" invited the
+    // reasonable question of why a wallet displays keys in the clear.
+    m_keys_summary->setText(keyLine(tr("Operational public key"), asset->operational_key, asset->wallet_has_operational) +
                             QStringLiteral("<br>") +
-                            keyLine(tr("Recovery key"), asset->recovery_key, asset->wallet_has_recovery));
+                            keyLine(tr("Recovery public key"), asset->recovery_key, asset->wallet_has_recovery));
 
     m_freeze_button->setEnabled(true);
     m_rotate_button->setEnabled(true);
