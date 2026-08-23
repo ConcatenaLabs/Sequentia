@@ -52,9 +52,12 @@ class CreateTxWalletTest(BitcoinTestFramework):
         for output in outputs:
             output_dict.update(output)
 
+        # SEQUENTIA: where fees are paid in any asset the wallet has no default
+        # fee ceiling (see CWallet::Create), so the ceiling this test expects to
+        # hit has to be set explicitly. 0.1 is the inherited default.
         for fee_setting in ['-minrelaytxfee=0.01', '-mintxfee=0.01', '-paytxfee=0.01']:
             self.log.info('Check maxtxfee in combination with {}'.format(fee_setting))
-            self.restart_node(0, extra_args=[fee_setting])
+            self.restart_node(0, extra_args=[fee_setting, '-maxtxfee=0.1'])
             # SEQUENTIA: an open-fee-market chain has no default fee asset.
             assert_raises_rpc_error(
                 -6,
@@ -68,7 +71,7 @@ class CreateTxWalletTest(BitcoinTestFramework):
             )
 
         self.log.info('Check maxtxfee in combination with settxfee')
-        self.restart_node(0)
+        self.restart_node(0, extra_args=['-maxtxfee=0.1'])
         self.nodes[0].settxfee(0.01)
         assert_raises_rpc_error(
             -6,

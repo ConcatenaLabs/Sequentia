@@ -50,6 +50,16 @@ void CAssetsDir::SetHex(const std::string& assetHex, const std::string& label)
     Set(CAsset(uint256S(assetHex)), AssetMetadata(label));
 }
 
+void CAssetsDir::SetAlias(const std::string& alias, const CAsset& asset)
+{
+    LOCK(cs);
+    // A second NAME for an asset that already has a canonical one. Only mapAssets
+    // is written, so the alias resolves on the way in while GetLabel() keeps
+    // answering with the canonical name on the way out.
+    if (asset.IsNull() || alias.empty() || mapAssets.count(alias)) return;
+    mapAssets[alias] = asset;
+}
+
 void CAssetsDir::InitFromStrings(const std::vector<std::string>& assetsToInit, const std::string& pegged_asset_name)
 {
     LOCK(cs);
@@ -74,6 +84,19 @@ void CAssetsDir::InitFromStrings(const std::vector<std::string>& assetsToInit, c
     const CAsset& pegged_asset = Params().GetConsensus().pegged_asset;
     if (!pegged_asset.IsNull()) {
         Set(pegged_asset, AssetMetadata(pegged_asset_name));
+        // SEQUENTIA: on the Sequentia chains the native asset is named for the
+        // chain (SEQ / tSEQ), not "bitcoin" as Elements defaults it -- calling it
+        // bitcoin in dumpassetlabels, exchangerates.json and the fee-policy window
+        // reads as PARENT-CHAIN bitcoin, an asset that lives on another network and
+        // cannot pay a fee here at all. Existing datadirs hold an exchangerates.json
+        // written under the old name, and a name the directory cannot resolve is a
+        // hard startup failure (see the InitError around LoadFromDefaultJSONFile),
+        // so the old name keeps resolving as an alias. The file is rewritten with
+        // the canonical name on the same startup, so this is one release of
+        // tolerance rather than a permanent second name.
+        if (pegged_asset_name != "bitcoin") {
+            SetAlias("bitcoin", pegged_asset);
+        }
     }
 
     // SEQUENTIA: asset tickers/names (demo and user-issued) come from the Asset
@@ -120,11 +143,24 @@ int CAssetsDir::Merge(const std::vector<AssetRegistryEntry>& entries)
                 mapAssets[label] = asset;
                 added++;
             }
+            // After any reassignment above, so the flag is not dropped with the
+            // old record: the registry publishes this asset whatever its label
+            // ended up being.
+            it->second.MarkRegistryListed();
             continue;
         }
-        // Label collisions: an already-mapped label always wins.
-        if (mapAssets.count(label)) continue;
+        // Label collisions: an already-mapped label always wins. The asset is
+        // still on the registry, though, and losing a name race is no reason to
+        // forget that — record it label-less rather than dropping the entry, so
+        // it keeps the registry's precision and does not look unpublished.
+        if (mapAssets.count(label)) {
+            AssetMetadata& meta = mapAssetMetadata[asset];
+            meta.SetPrecision(precision, AssetMetadata::PrecisionSource::Registry);
+            meta.MarkRegistryListed();
+            continue;
+        }
         mapAssetMetadata[asset] = AssetMetadata(label, precision, AssetMetadata::PrecisionSource::Registry);
+        mapAssetMetadata[asset].MarkRegistryListed();
         mapAssets[label] = asset;
         added++;
     }
@@ -179,6 +215,11 @@ std::string CAssetsDir::GetIdentifier(const CAsset& asset) const
     const std::string label = GetMetadata(asset).GetLabel();
     if (!label.empty()) return label;
     return asset.GetHex();
+}
+
+bool CAssetsDir::IsRegistryListed(const CAsset& asset) const
+{
+    return GetMetadata(asset).IsRegistryListed();
 }
 
 std::vector<CAsset> CAssetsDir::GetKnownAssets() const

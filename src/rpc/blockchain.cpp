@@ -23,6 +23,7 @@
 #include <core_io.h>
 #include <deploymentinfo.h>
 #include <deploymentstatus.h>
+#include <feeassets.h>
 #include <fs.h>
 #include <hash.h>
 #include <index/blockfilterindex.h>
@@ -34,6 +35,7 @@
 #include <node/blockstorage.h>
 #include <node/coinstats.h>
 #include <node/context.h>
+#include <node/miner.h>
 #include <node/utxo_snapshot.h>
 #include <policy/feerate.h>
 #include <policy/fees.h>
@@ -2077,6 +2079,88 @@ static RPCHelpMan getmempoolinfo()
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
     return MempoolInfoToJSON(EnsureAnyMemPool(request.context));
+},
+    };
+}
+
+static RPCHelpMan getmempoolcongestion()
+{
+    return RPCHelpMan{"getmempoolcongestion",
+                "\nSEQUENTIA: how full the queue is, and what a transaction must pay to be in the next block.\n"
+                "\nThe mempool is walked in the order this node's block assembler uses -- descending\n"
+                "ancestor fee VALUE per discount vsize, where value is the fee converted into the\n"
+                "reference unit at this node's whitelist rates. That ordering is what makes fees in\n"
+                "different assets comparable at all, so the answer here is a single figure that every\n"
+                "asset's fee can be measured against, whatever asset it is paid in.\n"
+                "\nThe projection is an approximation of the real assembler: it ignores sigop limits and\n"
+                "the package-rebuilding it does as transactions are selected. It is the figure a wallet\n"
+                "needs for a fee slider, not a block template.\n",
+                {
+                    {"fee_asset", RPCArg::Type::STR, RPCArg::Optional::OMITTED_NAMED_ARG, "Label or hex id of an asset to also express the rates in, at this node's whitelist rate."},
+                },
+                RPCResult{
+                    RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::NUM, "size", "Transactions in the mempool"},
+                        {RPCResult::Type::NUM, "bytes", "Sum of their virtual sizes"},
+                        {RPCResult::Type::NUM, "backlog_blocks", "The queue expressed in blocks: total weight over the maximum block weight this node builds to. Below 1 means everything waiting fits in the next block."},
+                        {RPCResult::Type::NUM, "next_block_txs", "Transactions the next block would take"},
+                        {RPCResult::Type::NUM, "next_block_weight", "Weight they occupy, not counting the space reserved for the coinbase"},
+                        {RPCResult::Type::BOOL, "next_block_full", "Whether the projected block ran out of room. When false there is no competition and the floor below is just the relay minimum."},
+                        {RPCResult::Type::STR_AMOUNT, "next_block_min_feerate", "What a transaction must pay per kvB, in " + CURRENCY_UNIT + ", to make the next block: the cheapest rate that still fits, or the mempool/relay floor when the block is not full."},
+                        {RPCResult::Type::NUM, "next_block_min_atoms_per_kvb", "The same figure in reference fee atoms"},
+                        {RPCResult::Type::STR_AMOUNT, "mempoolminfee", "Minimum rate to enter the mempool at all, in " + CURRENCY_UNIT + "/kvB. Rises above minrelaytxfee only once the mempool is trimming."},
+                        {RPCResult::Type::STR_AMOUNT, "minrelaytxfee", "Minimum rate this node relays, in " + CURRENCY_UNIT + "/kvB"},
+                        {RPCResult::Type::STR_HEX, "asset", /*optional=*/true, "The requested fee asset (only when fee_asset was given)"},
+                        {RPCResult::Type::BOOL, "accepted", /*optional=*/true, "Whether this node accepts fees in it"},
+                        {RPCResult::Type::NUM, "next_block_min_asset_atoms_per_kvb", /*optional=*/true, "next_block_min_atoms_per_kvb converted into that asset's atoms"},
+                        {RPCResult::Type::NUM, "mempoolminfee_asset_atoms_per_kvb", /*optional=*/true, "mempoolminfee converted into that asset's atoms"},
+                    }},
+                RPCExamples{
+                    HelpExampleCli("getmempoolcongestion", "")
+            + HelpExampleCli("getmempoolcongestion", "USDX")
+            + HelpExampleRpc("getmempoolcongestion", "")
+                },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    std::optional<CAsset> fee_asset;
+    if (!request.params[0].isNull()) {
+        const std::string assetstr = request.params[0].get_str();
+        const CAsset parsed = GetAssetFromString(assetstr);
+        if (parsed.IsNull()) {
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("Unknown label and invalid asset hex: %s", assetstr));
+        }
+        fee_asset = parsed;
+    }
+
+    const CTxMemPool& mempool = EnsureAnyMemPool(request.context);
+    // Same computation the wallet UI runs, from the same function: a fee slider
+    // and an RPC disagreeing about what the next block costs would be worse than
+    // either being wrong on its own.
+    const MempoolCongestion c = GetMempoolCongestion(mempool);
+
+    UniValue ret(UniValue::VOBJ);
+    ret.pushKV("size", c.size);
+    ret.pushKV("bytes", c.backlog_vsize);
+    ret.pushKV("backlog_blocks", UniValue(c.backlog_blocks));
+    ret.pushKV("next_block_txs", c.next_block_txs);
+    ret.pushKV("next_block_weight", c.next_block_weight);
+    ret.pushKV("next_block_full", c.next_block_full);
+    ret.pushKV("next_block_min_feerate", ValueFromAmount(c.next_block_min));
+    ret.pushKV("next_block_min_atoms_per_kvb", c.next_block_min);
+    ret.pushKV("mempoolminfee", ValueFromAmount(c.mempool_min));
+    ret.pushKV("minrelaytxfee", ValueFromAmount(c.relay_min));
+
+    if (fee_asset) {
+        const FeeAssetInfo info = GetFeeAssetInfo(*fee_asset);
+        ret.pushKV("asset", fee_asset->GetHex());
+        ret.pushKV("accepted", info.accepted);
+        if (info.accepted) {
+            ret.pushKV("next_block_min_asset_atoms_per_kvb", CFeeRate(c.next_block_min).GetFee(1000, *fee_asset));
+            ret.pushKV("mempoolminfee_asset_atoms_per_kvb", CFeeRate(c.mempool_min).GetFee(1000, *fee_asset));
+        }
+    }
+    return ret;
 },
     };
 }
@@ -4571,6 +4655,7 @@ static const CRPCCommand commands[] =
     { "blockchain",         &getmempooldescendants,              },
     { "blockchain",         &getmempoolentry,                    },
     { "blockchain",         &getmempoolinfo,                     },
+    { "blockchain",         &getmempoolcongestion,               },
     { "blockchain",         &getrawmempool,                      },
     { "blockchain",         &gettxout,                           },
     { "blockchain",         &gettxoutsetinfo,                    },

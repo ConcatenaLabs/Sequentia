@@ -425,6 +425,16 @@ void AssetsPage::refresh()
     if (!m_wallet_model) return;
     bool ok; QString err;
 
+    // The fee selectors are filled once, when the wallet is attached. That happens
+    // before the asset registry has been fetched, so at that moment no asset but the
+    // policy one has a label yet and every other one shows as a raw 64-hex id. The
+    // merge that gives them names arrives seconds later and signals nothing, and
+    // assetTypesChanged only covers the wallet gaining an asset, not the registry
+    // learning its name -- so without this the ids stay on screen for the whole
+    // session. Rebuild them here: refresh() runs on tab show, on a new block and on
+    // the Refresh button, and populateFeeAssets() preserves the current choice.
+    populateFeeAssets();
+
     // (Balances now live only on the Overview page.)
 
     // Which assets does the registry vouch for? The node merges an entry only once
