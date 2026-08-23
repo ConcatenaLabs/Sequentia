@@ -91,6 +91,15 @@ std::optional<ParsedUrl> ParseRelayUrl(const std::string& url)
 
 //! An offer's asset ids are DISPLAY hex, the reversed form everything
 //! user-facing prints.
+//! The book names native Bitcoin "BTC", not an asset id: on the parent chain it
+//! has none.
+bool IsNativeBtcField(const UniValue& v)
+{
+    if (!v.isStr()) return false;
+    const std::string s = v.get_str();
+    return s == "BTC" || s == "btc";
+}
+
 CAsset AssetFromHexField(const UniValue& v)
 {
     if (!v.isStr()) return CAsset();
@@ -196,11 +205,19 @@ std::optional<SeqobOffer> ParseOffer(const UniValue& o)
     off.offer_id = id.get_str();
     const UniValue& mk = Field(o, "maker_pubkey", "makerPubkey");
     off.maker_pubkey = mk.isStr() ? mk.get_str() : "";
-    off.offer_asset = AssetFromHexField(Field(o, "offer_asset", "offerAsset"));
-    off.want_asset = AssetFromHexField(Field(o, "want_asset", "wantAsset"));
+    const UniValue& oa = Field(o, "offer_asset", "offerAsset");
+    const UniValue& wa = Field(o, "want_asset", "wantAsset");
+    off.offer_is_btc = IsNativeBtcField(oa);
+    off.want_is_btc = IsNativeBtcField(wa);
+    off.offer_asset = off.offer_is_btc ? CAsset() : AssetFromHexField(oa);
+    off.want_asset = off.want_is_btc ? CAsset() : AssetFromHexField(wa);
     off.offer_amount = AmountFromField(Field(o, "offer_amount", "offerAmount"));
     off.want_amount = AmountFromField(Field(o, "want_amount", "wantAmount"));
-    if (off.offer_asset.IsNull() || off.want_asset.IsNull()) return std::nullopt;
+    // Exactly one side may be BTC: an offer with neither asset resolved is
+    // noise, and one with both is not a trade.
+    if (off.offer_is_btc && off.want_is_btc) return std::nullopt;
+    if (!off.offer_is_btc && off.offer_asset.IsNull()) return std::nullopt;
+    if (!off.want_is_btc && off.want_asset.IsNull()) return std::nullopt;
     if (off.offer_amount <= 0 || off.want_amount <= 0) return std::nullopt;
     const UniValue& ap = Field(o, "allow_partial", "allowPartial");
     off.allow_partial = ap.isBool() ? ap.get_bool() : false;
@@ -227,6 +244,16 @@ std::vector<SeqobOffer> SeqobParseBook(const UniValue& j)
 std::string SeqdexRelayUrl()
 {
     return gArgs.GetArg("-seqoburl", "");
+}
+
+bool SeqdexRelayEndpoint(std::string& host, uint16_t& port, std::string& path_prefix)
+{
+    const auto url = ParseRelayUrl(SeqdexRelayUrl());
+    if (!url) return false;
+    host = url->host;
+    port = url->port;
+    path_prefix = url->prefix;
+    return true;
 }
 
 UniValue SeqdexHttpJson(const std::string& path, const std::string& method, const UniValue& body)
@@ -311,6 +338,40 @@ std::vector<SeqobOffer> SeqobFetchBook(const CAsset& base, const CAsset& quote)
             out.push_back(std::move(off));
         }
     }
+    return out;
+}
+
+std::vector<SeqobOffer> SeqobFetchBtcBids(const CAsset& asset)
+{
+    std::vector<SeqobOffer> out;
+    std::set<std::string> seen;
+    const std::vector<std::pair<std::string, std::string>> pairs{
+        {asset.GetHex(), "BTC"}, {"BTC", asset.GetHex()}};
+    for (const auto& p : pairs) {
+        UniValue j;
+        try {
+            j = SeqdexHttpJson(strprintf("/v1/market/%s/%s/orderbook", p.first, p.second), "GET");
+        } catch (const std::exception&) {
+            continue;
+        }
+        for (SeqobOffer& off : SeqobParseBook(j)) {
+            // A reverse offer is simply one that GIVES Bitcoin and wants this
+            // asset. A forward offer (wants BTC) rests in the same books and is
+            // not what a seller takes.
+            if (!off.offer_is_btc) continue;
+            if (off.want_is_btc || !(off.want_asset == asset)) continue;
+            const std::string key = off.maker_pubkey + ":" + off.offer_id;
+            if (!seen.insert(key).second) continue;
+            out.push_back(std::move(off));
+        }
+    }
+    // Most satoshis per unit of the asset first: that is what "best" means to
+    // whoever is selling it.
+    std::sort(out.begin(), out.end(), [](const SeqobOffer& a, const SeqobOffer& b) {
+        const double ra = a.want_amount > 0 ? (double)a.offer_amount / (double)a.want_amount : 0.0;
+        const double rb = b.want_amount > 0 ? (double)b.offer_amount / (double)b.want_amount : 0.0;
+        return ra > rb;
+    });
     return out;
 }
 
