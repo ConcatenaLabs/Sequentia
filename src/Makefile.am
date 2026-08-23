@@ -336,6 +336,7 @@ BITCOIN_CORE_H = \
   wallet/rpc/wallet.h \
   wallet/salvage.h \
   wallet/scriptpubkeyman.h \
+  wallet/covenantfill.h \
   wallet/rewardconvert.h \
   wallet/rewardexec.h \
   wallet/stakingrewards.h \
@@ -493,6 +494,7 @@ libbitcoin_wallet_a_SOURCES = \
   wallet/rpc/util.cpp \
   wallet/rpc/wallet.cpp \
   wallet/scriptpubkeyman.cpp \
+  wallet/covenantfill.cpp \
   wallet/rewardconvert.cpp \
   wallet/rewardexec.cpp \
   wallet/spend.cpp \
