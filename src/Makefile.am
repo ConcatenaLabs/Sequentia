@@ -197,6 +197,7 @@ BITCOIN_CORE_H = \
   logging/timer.h \
   anchor.h \
   mainchainrpc.h \
+  seqdexclient.h \
   mapport.h \
   memusage.h \
   merkleblock.h \
@@ -335,6 +336,9 @@ BITCOIN_CORE_H = \
   wallet/rpc/wallet.h \
   wallet/salvage.h \
   wallet/scriptpubkeyman.h \
+  wallet/rewardconvert.h \
+  wallet/rewardexec.h \
+  wallet/stakingrewards.h \
   wallet/spend.h \
   wallet/sqlite.h \
   wallet/transaction.h \
@@ -389,6 +393,7 @@ libbitcoin_node_a_SOURCES = \
   init.cpp \
   anchor.cpp \
   mainchainrpc.cpp \
+  seqdexclient.cpp \
   assetregistry.cpp \
   referenceprices.cpp \
   feeassets.cpp \
@@ -480,6 +485,7 @@ libbitcoin_wallet_a_SOURCES = \
   wallet/rpc/coins.cpp \
   wallet/rpc/elements.cpp \
   wallet/rpc/encrypt.cpp \
+  wallet/rpc/rewards.cpp \
   wallet/rpc/spend.cpp \
   wallet/rpc/signmessage.cpp \
   wallet/rpc/supervision.cpp \
@@ -487,6 +493,8 @@ libbitcoin_wallet_a_SOURCES = \
   wallet/rpc/util.cpp \
   wallet/rpc/wallet.cpp \
   wallet/scriptpubkeyman.cpp \
+  wallet/rewardconvert.cpp \
+  wallet/rewardexec.cpp \
   wallet/spend.cpp \
   wallet/transaction.cpp \
   wallet/wallet.cpp \

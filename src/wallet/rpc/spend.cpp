@@ -38,6 +38,7 @@
 #include <wallet/rpc/util.h>
 #include <wallet/scriptpubkeyman.h>
 #include <wallet/spend.h>
+#include <wallet/stakingrewards.h>
 #include <wallet/wallet.h>
 
 #include <univalue.h>
@@ -2277,31 +2278,8 @@ RPCHelpMan listdelegations()
     };
 }
 
-//! One coin this wallet was PAID for staking. Two shapes, because there are
-//! exactly two ways the consensus rules pay a staker: a coinbase output (the
-//! block's fees, paid to the leader or redirected by a payout policy) and a
-//! share of a pool's pot, distributed by claimpoolrewards.
-//! doc/sequentia/reward-autoconvert-design.md is the specification, and SWK
-//! implements the same rules for the light wallets.
-struct StakingReward {
-    COutPoint outpoint;
-    CAsset asset;
-    CAmount amount{0};
-    std::string source;          //!< "solo", "direct", "lottery" or "split"
-    CTxDestination dest;
-    CPubKey controller;          //!< the staking key it was paid on, when it was one
-    int height{0};               //!< 0 while unconfirmed
-    int depth{0};
-    int blocks_to_maturity{0};
-    bool spent{false};
-};
-
-/** Every staking reward this wallet has received, newest first.
- *
- *  Attribution is deliberately a function of WALLET data alone -- no chainstate
- *  lookup, no txindex -- because the light wallets have to reach the same
- *  verdict from the same facts, and a rule the node can only answer by reading
- *  a block is a rule they would have to approximate:
+/** Every staking reward this wallet has received, newest first. Declared in
+ *  wallet/stakingrewards.h, where the two shapes are spelled out.
  *
  *      coinbase && IsMine(out)                    -> solo | direct | lottery
  *      !coinbase && !IsFromMe && IsMine(out)
@@ -2311,7 +2289,7 @@ struct StakingReward {
  *  receive address, and requiring the transaction not to be ours excludes a
  *  delegator's own withdrawal or re-pointing, which also pay back to it.
  */
-std::vector<StakingReward> FindWalletStakingRewards(CWallet& wallet, bool include_spent) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+std::vector<StakingReward> FindWalletStakingRewards(CWallet& wallet, bool include_spent)
 {
     const StakeRegistry& registry = StakeRegistry::GetInstance();
 
