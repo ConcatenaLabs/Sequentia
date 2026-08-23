@@ -2277,6 +2277,260 @@ RPCHelpMan listdelegations()
     };
 }
 
+//! One coin this wallet was PAID for staking. Two shapes, because there are
+//! exactly two ways the consensus rules pay a staker: a coinbase output (the
+//! block's fees, paid to the leader or redirected by a payout policy) and a
+//! share of a pool's pot, distributed by claimpoolrewards.
+//! doc/sequentia/reward-autoconvert-design.md is the specification, and SWK
+//! implements the same rules for the light wallets.
+struct StakingReward {
+    COutPoint outpoint;
+    CAsset asset;
+    CAmount amount{0};
+    std::string source;          //!< "solo", "direct", "lottery" or "split"
+    CTxDestination dest;
+    CPubKey controller;          //!< the staking key it was paid on, when it was one
+    int height{0};               //!< 0 while unconfirmed
+    int depth{0};
+    int blocks_to_maturity{0};
+    bool spent{false};
+};
+
+/** Every staking reward this wallet has received, newest first.
+ *
+ *  Attribution is deliberately a function of WALLET data alone -- no chainstate
+ *  lookup, no txindex -- because the light wallets have to reach the same
+ *  verdict from the same facts, and a rule the node can only answer by reading
+ *  a block is a rule they would have to approximate:
+ *
+ *      coinbase && IsMine(out)                    -> solo | direct | lottery
+ *      !coinbase && !IsFromMe && IsMine(out)
+ *          && out pays P2WPKH(a staking key)      -> split (a pot claim)
+ *
+ *  The second rule is narrow on purpose. A staking key is never handed out as a
+ *  receive address, and requiring the transaction not to be ours excludes a
+ *  delegator's own withdrawal or re-pointing, which also pay back to it.
+ */
+std::vector<StakingReward> FindWalletStakingRewards(CWallet& wallet, bool include_spent) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+{
+    const StakeRegistry& registry = StakeRegistry::GetInstance();
+
+    // The keys a reward can be paid on. Three sources, because a staker's key
+    // reaches the wallet by three different routes:
+    //  - every key the REGISTRY knows as a staker whose P2WPKH this wallet can
+    //    spend. This is the one that catches a staker configured with -staker=,
+    //    which holds weight without the wallet holding a stake output at all --
+    //    how the committee nodes run;
+    //  - every key this wallet holds a stake output for, including stake being
+    //    withdrawn: a reward already earned is still a reward;
+    //  - every controller this wallet holds a delegation record for, which may
+    //    have no registered weight yet.
+    std::map<CScript, CPubKey> staking_scripts;
+    const auto consider = [&](const CPubKey& k) {
+        const CScript spk = PosLeaderFeeScript(k);
+        if (wallet.IsMine(spk) & ISMINE_SPENDABLE) staking_scripts.emplace(spk, k);
+    };
+    for (const auto& e : registry.ControllerWeights()) consider(e.first);
+    for (const auto& e : registry.Weights()) consider(e.first);
+    for (const StakeUtxo& s : FindWalletStakeUtxos(wallet, std::nullopt)) {
+        staking_scripts.emplace(PosLeaderFeeScript(s.parsed.pubkey), s.parsed.pubkey);
+    }
+    for (const DelegationUtxo& d : FindWalletDelegationUtxos(wallet, std::nullopt)) {
+        staking_scripts.emplace(PosLeaderFeeScript(d.controller), d.controller);
+    }
+
+    std::vector<StakingReward> rewards;
+    for (const auto& entry : wallet.mapWallet) {
+        const CWalletTx& wtx = entry.second;
+        const bool coinbase = wtx.tx->IsCoinBase();
+        // Our own spending is never a reward. A coinbase is never ours to send,
+        // so the test is only meaningful (and only applied) off the coinbase path.
+        if (!coinbase && CachedTxIsFromMe(wallet, wtx, ISMINE_ALL)) continue;
+
+        const int depth = wallet.GetTxDepthInMainChain(wtx);
+        if (depth < 0) continue;  // conflicted with a block: not money
+        int height = 0;
+        if (const auto* conf = wtx.state<TxStateConfirmed>()) height = conf->confirmed_block_height;
+
+        for (unsigned int i = 0; i < wtx.tx->vout.size(); ++i) {
+            const CTxOut& txout = wtx.tx->vout[i];
+            if (txout.IsFee()) continue;
+            if (!(wallet.IsMine(txout) & ISMINE_SPENDABLE)) continue;
+
+            const auto sk = staking_scripts.find(txout.scriptPubKey);
+            const bool on_staking_key = sk != staking_scripts.end();
+            if (!coinbase && !on_staking_key) continue;
+
+            StakingReward r;
+            r.outpoint = COutPoint(wtx.GetHash(), i);
+            r.spent = wallet.IsSpent(r.outpoint.hash, r.outpoint.n);
+            if (r.spent && !include_spent) continue;
+
+            r.amount = wtx.GetOutputValueOut(wallet, i);
+            r.asset = wtx.GetOutputAsset(wallet, i);
+            // A reward we cannot unblind is not a reward we can convert or even
+            // count. Consensus only ever creates explicit coinbase and pot-claim
+            // outputs, so this skips nothing real.
+            if (r.amount <= 0 || r.asset.IsNull()) continue;
+
+            // Which of the four sources. Note that the payout policy consulted
+            // here is the one in force NOW, not at the reward's height: the
+            // registry is a function of the current UTXO set. The label is
+            // informational -- nothing downstream, conversion included, depends
+            // on which of the coinbase sources a reward came from.
+            if (!coinbase) {
+                r.source = "split";
+                r.controller = sk->second;
+            } else if (on_staking_key) {
+                r.controller = sk->second;
+                // Paid on our own staking key: either we were the elected leader
+                // (not delegating), or a pool's lottery draw landed on us.
+                r.source = registry.SignerFor(sk->second) == sk->second ? "solo" : "lottery";
+            } else {
+                // A coinbase paying some other script of ours is a pool paying
+                // the address it committed to under a direct policy.
+                r.source = "direct";
+            }
+
+            r.height = height;
+            r.depth = depth;
+            r.blocks_to_maturity = coinbase ? wallet.GetTxBlocksToMaturity(wtx) : 0;
+            ExtractDestination(txout.scriptPubKey, r.dest);
+            rewards.push_back(std::move(r));
+        }
+    }
+
+    // Newest first, with a total order so the listing is stable across calls.
+    std::sort(rewards.begin(), rewards.end(), [](const StakingReward& a, const StakingReward& b) {
+        if (a.height != b.height) return a.height > b.height;
+        if (a.outpoint.hash != b.outpoint.hash) return a.outpoint.hash < b.outpoint.hash;
+        return a.outpoint.n < b.outpoint.n;
+    });
+    return rewards;
+}
+
+RPCHelpMan liststakingrewards()
+{
+    return RPCHelpMan{"liststakingrewards",
+                "\nSEQUENTIA staking: every coin this wallet was PAID for staking, in whatever asset it was\n"
+                "paid in. Sequentia has no block subsidy, so a staker earns the transaction fees of the blocks\n"
+                "it produces -- and under the open fee market those arrive in whichever assets the payers chose,\n"
+                "one coinbase output per asset. A pool delegator is paid the same way, through its pool.\n"
+                "\nFour sources, which are the four ways the rules pay a staker:\n"
+                "  solo     this wallet's own key was the elected leader and the coinbase paid it\n"
+                "  lottery  a pool's per-block draw landed on this wallet's stake\n"
+                "  direct   a pool paid the address it committed to under a direct payout policy\n"
+                "  split    a share of a pool's pot, distributed by claimpoolrewards\n"
+                "\nCoinbase rewards are spendable only once they mature (100 blocks); immature ones are listed\n"
+                "with the blocks left to wait. `totals` adds each asset up, which is what a wallet offering to\n"
+                "convert rewards needs: see doc/sequentia/reward-autoconvert-design.md.\n",
+                {
+                    {"include_spent", RPCArg::Type::BOOL, RPCArg::Default{false}, "Also list rewards that have already been spent."},
+                    {"asset", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Only this asset (hex id or label)."},
+                    {"count", RPCArg::Type::NUM, RPCArg::Default{0}, "Return at most this many rewards (0 = all). Totals always cover everything."},
+                },
+                RPCResult{RPCResult::Type::OBJ, "", "", {
+                    {RPCResult::Type::ARR, "rewards", "the reward outputs, newest first", {
+                        {RPCResult::Type::OBJ, "", "", {
+                            {RPCResult::Type::STR_HEX, "txid", "the transaction that paid it"},
+                            {RPCResult::Type::NUM, "vout", "the output index"},
+                            {RPCResult::Type::STR, "source", "\"solo\", \"lottery\", \"direct\" or \"split\""},
+                            {RPCResult::Type::STR_HEX, "asset", "the asset it was paid in"},
+                            {RPCResult::Type::STR, "assetlabel", /*optional=*/true, "the asset's label, when it has one"},
+                            {RPCResult::Type::STR_AMOUNT, "amount", "how much"},
+                            {RPCResult::Type::STR, "address", /*optional=*/true, "where it was paid"},
+                            {RPCResult::Type::STR_HEX, "controller", /*optional=*/true, "the staking key it was paid on, when it was paid on one"},
+                            {RPCResult::Type::NUM, "height", "the height it confirmed at, 0 while unconfirmed"},
+                            {RPCResult::Type::NUM, "confirmations", "confirmations"},
+                            {RPCResult::Type::BOOL, "mature", "whether it is spendable yet (coinbase value matures at 100 blocks)"},
+                            {RPCResult::Type::NUM, "blocks_to_maturity", "blocks left before it is spendable, 0 when it already is"},
+                            {RPCResult::Type::BOOL, "spent", "whether this wallet has already spent it"},
+                        }},
+                    }},
+                    {RPCResult::Type::ARR, "totals", "what has been earned, per asset, over every reward listed", {
+                        {RPCResult::Type::OBJ, "", "", {
+                            {RPCResult::Type::STR_HEX, "asset", "the asset"},
+                            {RPCResult::Type::STR, "assetlabel", /*optional=*/true, "its label, when it has one"},
+                            {RPCResult::Type::STR_AMOUNT, "mature", "spendable now"},
+                            {RPCResult::Type::STR_AMOUNT, "immature", "earned, still inside coinbase maturity"},
+                            {RPCResult::Type::NUM, "outputs", "how many reward outputs"},
+                        }},
+                    }},
+                }},
+                RPCExamples{HelpExampleCli("liststakingrewards", "")
+                          + HelpExampleCli("liststakingrewards", "false \"GOLD\"")
+                          + HelpExampleRpc("liststakingrewards", "")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!g_con_pos) throw JSONRPCError(RPC_MISC_ERROR, "Proof-of-Stake (con_pos) is not enabled on this chain");
+    std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
+    if (!pwallet) return NullUniValue;
+    pwallet->BlockUntilSyncedToCurrentChain();
+
+    const bool include_spent = request.params[0].isNull() ? false : request.params[0].get_bool();
+    std::optional<CAsset> only_asset;
+    if (!request.params[1].isNull()) {
+        const CAsset a = GetAssetFromString(request.params[1].get_str());
+        if (a.IsNull()) throw JSONRPCError(RPC_WALLET_INVALID_LABEL_NAME, "Unknown label and invalid asset hex: " + request.params[1].get_str());
+        only_asset = a;
+    }
+    const int count = request.params[2].isNull() ? 0 : request.params[2].get_int();
+    if (count < 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "count cannot be negative");
+
+    LOCK(pwallet->cs_wallet);
+    const std::vector<StakingReward> rewards = FindWalletStakingRewards(*pwallet, include_spent);
+
+    struct Total { CAmount mature{0}; CAmount immature{0}; int outputs{0}; };
+    std::map<CAsset, Total> totals;
+
+    UniValue list(UniValue::VARR);
+    for (const StakingReward& r : rewards) {
+        if (only_asset && r.asset != *only_asset) continue;
+
+        Total& t = totals[r.asset];
+        ++t.outputs;
+        (r.blocks_to_maturity > 0 ? t.immature : t.mature) += r.amount;
+
+        if (count > 0 && (int)list.size() >= count) continue;  // totals still cover everything
+
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("txid", r.outpoint.hash.GetHex());
+        o.pushKV("vout", (int64_t)r.outpoint.n);
+        o.pushKV("source", r.source);
+        o.pushKV("asset", r.asset.GetHex());
+        const std::string label = gAssetsDir.GetLabel(r.asset);
+        if (!label.empty()) o.pushKV("assetlabel", label);
+        o.pushKV("amount", ValueFromAmount(r.amount));
+        if (IsValidDestination(r.dest)) o.pushKV("address", EncodeDestination(r.dest));
+        if (r.controller.IsValid()) o.pushKV("controller", HexStr(r.controller));
+        o.pushKV("height", (int64_t)r.height);
+        o.pushKV("confirmations", (int64_t)r.depth);
+        o.pushKV("mature", r.blocks_to_maturity == 0);
+        o.pushKV("blocks_to_maturity", (int64_t)r.blocks_to_maturity);
+        o.pushKV("spent", r.spent);
+        list.push_back(o);
+    }
+
+    UniValue totals_arr(UniValue::VARR);
+    for (const auto& e : totals) {
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("asset", e.first.GetHex());
+        const std::string label = gAssetsDir.GetLabel(e.first);
+        if (!label.empty()) o.pushKV("assetlabel", label);
+        o.pushKV("mature", ValueFromAmount(e.second.mature));
+        o.pushKV("immature", ValueFromAmount(e.second.immature));
+        o.pushKV("outputs", (int64_t)e.second.outputs);
+        totals_arr.push_back(o);
+    }
+
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("rewards", list);
+    result.pushKV("totals", totals_arr);
+    return result;
+},
+    };
+}
+
 RPCHelpMan getbtcbalance()
 {
     return RPCHelpMan{"getbtcbalance",
