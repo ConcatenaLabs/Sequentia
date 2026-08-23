@@ -7,6 +7,7 @@
 #include <pos.h>
 #include <rpc/util.h>
 #include <seqdexclient.h>
+#include <wsclient.h>
 #include <util/moneystr.h>
 #include <wallet/rewardconvert.h>
 #include <wallet/rewardexec.h>
@@ -287,6 +288,68 @@ RPCHelpMan convertrewards()
     }
     const RewardPassReport rep = RunRewardConversionPass(*pwallet, dry_run);
     return ReportToUniValue(rep, settings);
+},
+    };
+}
+
+RPCHelpMan getseqdexstatus()
+{
+    return RPCHelpMan{"getseqdexstatus",
+                "\nSEQUENTIA: whether this node can reach the SeqDEX relay it converts staking rewards through,\n"
+                "and what it finds there.\n"
+                "\nConversion has two halves and they fail differently. Reading the book is a plain HTTP request;\n"
+                "agreeing a cross-chain swap with a maker is a WebSocket conversation. A relay that answers one\n"
+                "and not the other converts rewards into Sequentia assets but never into Bitcoin, which is worth\n"
+                "being able to see rather than infer from nothing happening.\n",
+                {},
+                RPCResult{RPCResult::Type::OBJ, "", "", {
+                    {RPCResult::Type::STR, "relay", "the configured -seqoburl, or empty when none is set"},
+                    {RPCResult::Type::BOOL, "book_readable", "whether the order book could be read"},
+                    {RPCResult::Type::NUM, "markets", /*optional=*/true, "how many markets it is serving"},
+                    {RPCResult::Type::BOOL, "courier_reachable", "whether the WebSocket a cross-chain swap needs could be opened"},
+                    {RPCResult::Type::STR, "error", /*optional=*/true, "what went wrong, when something did"},
+                }},
+                RPCExamples{HelpExampleCli("getseqdexstatus", "") + HelpExampleRpc("getseqdexstatus", "")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    UniValue out(UniValue::VOBJ);
+    out.pushKV("relay", SeqdexRelayUrl());
+
+    std::string first_error;
+    bool book_ok = false;
+    int markets = 0;
+    try {
+        const UniValue j = SeqdexHttpJson("/v1/markets", "GET");
+        if (j.exists("markets") && j["markets"].isArray()) {
+            markets = (int)j["markets"].size();
+            book_ok = true;
+        } else {
+            first_error = "the relay answered, but not with a market list";
+        }
+    } catch (const std::exception& e) {
+        first_error = e.what();
+    }
+    out.pushKV("book_readable", book_ok);
+    if (book_ok) out.pushKV("markets", (int64_t)markets);
+
+    bool ws_ok = false;
+    std::string host, prefix;
+    uint16_t port = 0;
+    if (SeqdexRelayEndpoint(host, port, prefix)) {
+        std::string ws_error;
+        auto ws = WsClient::Connect(host, port, prefix + "/v1/ws", std::chrono::seconds(15), ws_error);
+        if (ws) {
+            ws_ok = true;
+            ws->Close();
+        } else if (first_error.empty()) {
+            first_error = ws_error;
+        }
+    } else if (first_error.empty()) {
+        first_error = "no relay configured: set -seqoburl=http://host:port";
+    }
+    out.pushKV("courier_reachable", ws_ok);
+    if (!first_error.empty()) out.pushKV("error", first_error);
+    return out;
 },
     };
 }

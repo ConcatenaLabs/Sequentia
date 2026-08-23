@@ -39,6 +39,10 @@
 /** Where the relay is. Empty until -seqoburl is set. */
 std::string SeqdexRelayUrl();
 
+/** The configured relay, split up. False when -seqoburl is unset or is not a
+ *  plain http:// URL this node can speak. */
+bool SeqdexRelayEndpoint(std::string& host, uint16_t& port, std::string& path_prefix);
+
 /** A JSON request to the relay. `method` is "GET" or "POST"; `body` is ignored
  *  for GET. Throws std::runtime_error on a transport or HTTP-status failure,
  *  which every caller must treat as "the book is unreadable right now" rather
@@ -65,12 +69,20 @@ struct SeqobCovenant {
     int64_t expiry_locktime{0};
 };
 
-/** One resting offer, as the book reports it. */
+/** One resting offer, as the book reports it.
+ *
+ *  A CROSS-CHAIN offer names native Bitcoin with the literal string "BTC"
+ *  rather than an asset id, because on the parent chain it does not have one.
+ *  That is the whole difference between the two rails as the book sees them,
+ *  and a parser that insists on 32 bytes everywhere throws away exactly the
+ *  offers a staker converting to Bitcoin needs. */
 struct SeqobOffer {
     std::string offer_id;
     std::string maker_pubkey;
-    CAsset offer_asset;      //!< what the maker gives
-    CAsset want_asset;       //!< what the maker wants
+    CAsset offer_asset;      //!< what the maker gives; null when it gives BTC
+    CAsset want_asset;       //!< what the maker wants; null when it wants BTC
+    bool offer_is_btc{false};
+    bool want_is_btc{false};
     CAmount offer_amount{0};
     CAmount want_amount{0};
     bool allow_partial{false};
@@ -90,6 +102,14 @@ struct SeqobOffer {
  *  B may rest under either heading depending on which maker posted it. Asking
  *  for only one orientation silently misses half the book. */
 std::vector<SeqobOffer> SeqobFetchBook(const CAsset& base, const CAsset& quote);
+
+/** Offers that BUY `asset` for native Bitcoin: the maker gives BTC and wants
+ *  the asset, which is what a staker selling a reward for Bitcoin takes.
+ *
+ *  Both orientations again, since a cross offer rests under `<asset>/BTC` or
+ *  `BTC/<asset>` depending on which maker posted it. Best price first, where
+ *  "best" means the most Bitcoin per unit of the asset. */
+std::vector<SeqobOffer> SeqobFetchBtcBids(const CAsset& asset);
 
 /** The offers in one orderbook response. Exposed so the parsing can be tested
  *  against a captured real response rather than only against the live relay:
