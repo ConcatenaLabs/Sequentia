@@ -228,6 +228,8 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "announcepayout", 2, "activation"},
     { "announcepayout", 4, "commission_bp"},
     { "announcepayout", 5, "amount"},
+    { "liststakingrewards", 0, "include_spent"},
+    { "liststakingrewards", 2, "count"},
     { "listpools", 1, "window"},
     { "listpools", 2, "include_delegators"},
     { "listpools", 3, "include_undeclared"},
