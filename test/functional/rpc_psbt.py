@@ -51,7 +51,11 @@ class PSBTTest(BitcoinTestFramework):
         self.num_nodes = 3
         self.extra_args = [
             ["-walletrbf=1", "-addresstype=bech32", "-changetype=bech32"], #TODO: Remove address type restrictions once taproot has psbt extensions
-            ["-walletrbf=0", "-changetype=legacy"],
+            # SEQUENTIA: where fees are paid in any asset the wallet has no
+            # default fee ceiling (see CWallet::Create), so the ceiling the
+            # feerate tests expect to hit has to be set explicitly. 0.1 is the
+            # inherited default.
+            ["-walletrbf=0", "-changetype=legacy", "-maxtxfee=0.1"],
             []
         ]
         self.supports_cli = False
