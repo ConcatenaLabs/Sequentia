@@ -5,13 +5,21 @@
 #include <wallet/rewardexec.h>
 
 #include <assetsdir.h>
+#include <core_io.h>
 #include <fs.h>
+#include <interfaces/chain.h>
+#include <key_io.h>
+#include <policy/policy.h>
+#include <script/standard.h>
 #include <logging.h>
 #include <random.h>
 #include <scheduler.h>
 #include <util/strencodings.h>
 #include <util/system.h>
 #include <util/time.h>
+#include <wallet/coincontrol.h>
+#include <wallet/covenantfill.h>
+#include <wallet/spend.h>
 #include <wallet/stakingrewards.h>
 #include <wallet/wallet.h>
 
@@ -177,6 +185,178 @@ std::set<COutPoint> RewardConvertedOutpoints(const CWallet& wallet)
     return out;
 }
 
+
+namespace {
+
+//! The maker's credit output: a v1 Taproot output paying `maker_prog`. The leaf
+//! compares these bytes exactly, so this is not a choice of address type.
+CScript MakerCreditSpk(const std::vector<unsigned char>& maker_prog)
+{
+    return CScript() << OP_1 << maker_prog;
+}
+
+struct FillOutcome {
+    bool ok{false};
+    std::string txid;
+    CAmount received{0};
+    std::string error;
+};
+
+/** Take `filled` atoms of asset A out of one resting covenant offer.
+ *
+ *  One transaction, broadcast by this node, with the maker offline. The
+ *  covenant sits at input 0 -- which is what makes the credit output index 0
+ *  and the remainder index 1, since the leaf derives both from its own input
+ *  index -- and the wallet funds the maker's credit and the network fee.
+ */
+FillOutcome ExecuteCovenantFill(CWallet& wallet, const SeqobOffer& offer, CAmount filled)
+{
+    FillOutcome out;
+    if (!offer.covenant) { out.error = "offer is not covenant-backed"; return out; }
+    const SeqobCovenant& cov = *offer.covenant;
+
+    const auto scripts = BuildSeqobFillScripts(cov);
+    if (!scripts) { out.error = "covenant terms are not self-consistent"; return out; }
+
+    // The coin the offer claims to rest on, as the CHAIN has it. This is the
+    // whole trust model: the relay is not believed about the terms, the value,
+    // or even that the offer is still there. A node has the UTXO set, so it can
+    // simply look.
+    const COutPoint cov_out(cov.txid, cov.vout);
+    std::map<COutPoint, Coin> coins{{cov_out, Coin()}};
+    wallet.chain().findCoins(coins);
+    const Coin& coin = coins[cov_out];
+    if (coin.IsSpent()) { out.error = "the offer's covenant output is already spent"; return out; }
+    if (coin.out.scriptPubKey != scripts->spk) {
+        out.error = "the offer's terms do not rebuild the covenant it claims to rest on";
+        return out;
+    }
+    if (!coin.out.nValue.IsExplicit() || !coin.out.nAsset.IsExplicit()) {
+        out.error = "the covenant output is blinded, which no covenant this node fills ever is";
+        return out;
+    }
+    const CAmount locked = coin.out.nValue.GetAmount();
+    if (coin.out.nAsset.GetAsset() != cov.asset_a) { out.error = "covenant asset mismatch"; return out; }
+
+    const auto plan = PlanSeqobFill(cov, locked, filled);
+    if (!plan) { out.error = "that size is not a fill this covenant accepts"; return out; }
+
+    // Outputs, in the order the leaf demands: credit at 2k, remainder at 2k+1.
+    CMutableTransaction mtx;
+    mtx.nVersion = 2;
+    mtx.vin.emplace_back(cov_out);
+    mtx.vout.emplace_back(cov.asset_b, plan->credit, MakerCreditSpk(cov.maker_prog));
+    if (plan->partial) {
+        // Slot 1 (2k+1) is the self-replicating remainder covenant.
+        mtx.vout.emplace_back(cov.asset_a, plan->remainder, scripts->spk);
+    }
+    // A FULL fill has no remainder, but the leaf still READS slot 1 whenever one
+    // exists: it only takes the "remainder = 0" branch when what it finds there
+    // is not asset A. So a full fill needs some other-asset output sitting in
+    // that slot, which is arranged after funding, once there is one to move.
+
+    // What we came for: the filled asset A, to this wallet.
+    CTxDestination dest;
+    {
+        LOCK(wallet.cs_wallet);
+        bilingual_str err;
+        if (!wallet.GetNewDestination(OutputType::BECH32, "reward conversion", dest, err)) {
+            out.error = "could not get a receiving address: " + err.original;
+            return out;
+        }
+    }
+    mtx.vout.emplace_back(cov.asset_a, plan->filled, GetScriptForDestination(dest));
+
+    // Fund the maker's credit and the fee. The covenant input is EXTERNAL: the
+    // wallet does not own it, so it has to be told what it is worth or it will
+    // try to fund asset A as well.
+    CCoinControl cc;
+    cc.m_add_inputs = true;
+    cc.fAllowOtherInputs = true;
+    cc.Select(cov_out);
+    cc.SelectExternal(cov_out, coin.out);
+
+    CAmount fee = 0;
+    int change_pos = (int)mtx.vout.size();   // never 0 or 1: the leaf reads those
+    bilingual_str error;
+    if (!FundTransaction(wallet, mtx, fee, change_pos, error, /*lockUnspents=*/false,
+                         /*setSubtractFeeFromOutputs=*/{}, cc)) {
+        out.error = "could not fund the fill: " + error.original;
+        return out;
+    }
+
+    // Put the outputs back in the order the leaf reads them. Funding appends,
+    // so slot 0 and slot 1 should be untouched -- but "should be" is not a
+    // thing to broadcast money on, so check rather than assume.
+    if (mtx.vout.size() < 2 || mtx.vout[0].scriptPubKey != MakerCreditSpk(cov.maker_prog)) {
+        out.error = "funding disturbed the maker credit output";
+        return out;
+    }
+    if (plan->partial) {
+        if (mtx.vout[1].scriptPubKey != scripts->spk) {
+            out.error = "funding disturbed the remainder output";
+            return out;
+        }
+    } else {
+        // Move a non-asset-A output into slot 1. Change in the asset we paid
+        // with is the usual candidate; the fee output serves when there is no
+        // change at all. Signing happens AFTER this, so reordering is free.
+        size_t gap = 0;
+        for (size_t i = 1; i < mtx.vout.size(); ++i) {
+            if (mtx.vout[i].nAsset.IsExplicit() && mtx.vout[i].nAsset.GetAsset() == cov.asset_a) continue;
+            gap = i;
+            break;
+        }
+        if (gap == 0) {
+            out.error = "a full fill needs one output that is not the asset being bought to sit "
+                        "at the remainder slot, and this transaction has none";
+            return out;
+        }
+        if (gap != 1) std::swap(mtx.vout[1], mtx.vout[gap]);
+    }
+
+    // The covenant input's witness is the leaf and its control block, and
+    // nothing else: the leaf has no CHECKSIG, so there is nothing to sign.
+    for (size_t i = 0; i < mtx.vin.size(); ++i) {
+        if (mtx.vin[i].prevout != cov_out) continue;
+        if (i != 0) { out.error = "funding moved the covenant off input 0"; return out; }
+        CScriptWitness wit;
+        wit.stack.emplace_back(scripts->fill_leaf.begin(), scripts->fill_leaf.end());
+        wit.stack.push_back(scripts->control_block);
+        mtx.witness.vtxinwit.resize(mtx.vin.size());
+        mtx.witness.vtxinwit[i].scriptWitness = wit;
+    }
+
+    // Sign OUR inputs. The covenant input is signed by nobody, so it is handed
+    // in as a known coin and its "failure" to sign is the expected outcome.
+    {
+        LOCK(wallet.cs_wallet);
+        std::map<COutPoint, Coin> sign_coins;
+        sign_coins[cov_out] = coin;
+        std::map<int, bilingual_str> input_errors;
+        wallet.SignTransaction(mtx, sign_coins, SIGHASH_ALL, input_errors);
+        for (const auto& e : input_errors) {
+            if (mtx.vin[e.first].prevout == cov_out) continue;   // expected
+            out.error = "could not sign the fill: " + e.second.original;
+            return out;
+        }
+    }
+
+    CTransactionRef tx = MakeTransactionRef(std::move(mtx));
+    std::string rejected;
+    if (!wallet.chain().broadcastTransaction(tx, wallet.m_default_max_tx_fee, /*relay=*/true, rejected)) {
+        out.error = "broadcast refused: " + rejected;
+        return out;
+    }
+
+    out.ok = true;
+    out.txid = tx->GetHash().GetHex();
+    out.received = plan->filled;
+    return out;
+}
+
+} // namespace
+
 RewardPassReport RunRewardConversionPass(CWallet& wallet, bool dry_run)
 {
     RewardPassReport report;
@@ -208,6 +388,7 @@ RewardPassReport RunRewardConversionPass(CWallet& wallet, bool dry_run)
         // What the book offers. A book we could not READ is not a book that
         // said no: treat it as "no market for now" rather than an error the
         // staker has to act on.
+        std::optional<SeqobWalk> walk;
         try {
             const CAsset want = settings.target ? *settings.target : CAsset();
             if (settings.TargetIsNativeBtc()) {
@@ -217,7 +398,7 @@ RewardPassReport RunRewardConversionPass(CWallet& wallet, bool dry_run)
                 row.quote = std::nullopt;
             } else {
                 const auto book = SeqobFetchBook(batch.asset, want);
-                const auto walk = SeqobWalkBook(book, batch.asset, want, batch.value);
+                walk = SeqobWalkBook(book, batch.asset, want, batch.value);
                 if (walk) row.quote = RewardQuote{walk->receives, walk->reference};
             }
         } catch (const std::exception& e) {
@@ -226,6 +407,65 @@ RewardPassReport RunRewardConversionPass(CWallet& wallet, bool dry_run)
         }
 
         row.decision = DecideRewardConversion(batch, row.quote, settings);
+
+        if (!dry_run && row.decision.Converts() && walk) {
+            // Commit to the coins BEFORE spending them. If the node dies between
+            // here and the broadcast returning, they stay claimed by a `pending`
+            // record rather than being offered to a second conversion -- the sale
+            // may well have happened, and there is no way to know.
+            RewardConversion rec;
+            rec.id = batch.asset.GetHex() + ":" + ToString(batch.value) + ":" + ToString(GetTime());
+            rec.state = "pending";
+            rec.time = GetTime();
+            rec.asset = batch.asset;
+            rec.value = batch.value;
+            rec.target = settings.target;
+            rec.expected = row.quote->receives;
+            rec.inputs = batch.inputs;
+            auto log = LoadRewardConversions(wallet);
+            log.push_back(rec);
+            StoreRewardConversions(wallet, log);
+
+            CAmount got = 0;
+            std::string last_error;
+            for (const SeqobWalkLeg& leg : walk->legs) {
+                const FillOutcome r = ExecuteCovenantFill(wallet, leg.offer, leg.receive);
+                if (r.ok) {
+                    got += r.received;
+                    row.txid = r.txid;
+                    row.executed = true;
+                } else {
+                    // One offer failing is not the sale failing: a covenant
+                    // someone else just took, or an offer that moved, is
+                    // ordinary. Walk on; nothing was committed for a fill that
+                    // did not broadcast.
+                    last_error = r.error;
+                }
+            }
+
+            log = LoadRewardConversions(wallet);
+            for (auto it = log.rbegin(); it != log.rend(); ++it) {
+                if (it->id != rec.id) continue;
+                if (got > 0) {
+                    it->state = "done";
+                    it->received = got;
+                    it->txid = row.txid;
+                } else {
+                    // Nothing was sold, definitively: release the coins so the
+                    // next pass can reconsider them.
+                    it->state = "failed";
+                    it->error = last_error.empty() ? "no fill completed" : last_error;
+                    row.error = it->error;
+                    report.errors.push_back(it->error);
+                }
+                break;
+            }
+            StoreRewardConversions(wallet, log);
+            LogPrintf("[rewards] %s conversion of %d %s: %s\n",
+                      got > 0 ? "completed" : "abandoned", batch.value,
+                      batch.asset.GetHex(), got > 0 ? row.txid : row.error);
+        }
+
         report.considered.push_back(row);
     }
 

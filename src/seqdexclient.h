@@ -106,11 +106,16 @@ std::vector<SeqobOffer> SeqobParseBook(const UniValue& orderbook_response);
  *  of a young pair, and the caller waits. `reference` is what the size would
  *  fetch at the BEST offer's price, so the gap to `receives` is the slippage
  *  walking the book actually costs. */
+struct SeqobWalkLeg {
+    SeqobOffer offer;
+    CAmount pay{0};      //!< atoms of the asset being sold that this leg costs
+    CAmount receive{0};  //!< atoms of the target asset it delivers
+};
 struct SeqobWalk {
     CAmount receives{0};
     CAmount reference{0};
-    //! The offers to take, in order, and how much of each (in `sell` atoms).
-    std::vector<std::pair<SeqobOffer, CAmount>> legs;
+    //! The offers to take, in order.
+    std::vector<SeqobWalkLeg> legs;
 };
 std::optional<SeqobWalk> SeqobWalkBook(const std::vector<SeqobOffer>& book,
                                        const CAsset& sell, const CAsset& want,

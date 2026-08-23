@@ -375,7 +375,11 @@ std::optional<SeqobWalk> SeqobWalkBook(const std::vector<SeqobOffer>& book,
             const CAmount remainder = o.offer_amount - pays;
             if (remainder != 0 && remainder < o.covenant->min_lot) continue;
         }
-        walk.legs.emplace_back(o, takes);
+        SeqobWalkLeg leg;
+        leg.offer = o;
+        leg.pay = takes;
+        leg.receive = pays;
+        walk.legs.push_back(std::move(leg));
         walk.receives += pays;
         left -= takes;
     }
