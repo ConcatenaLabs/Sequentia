@@ -1780,10 +1780,16 @@ void BitcoinGUI::message(const QString& title, QString message, unsigned int sty
 void BitcoinGUI::changeEvent(QEvent *e)
 {
     if (e->type() == QEvent::PaletteChange) {
-        overviewAction->setIcon(platformStyle->SingleColorIcon(QStringLiteral(":/icons/overview")));
-        sendCoinsAction->setIcon(platformStyle->SingleColorIcon(QStringLiteral(":/icons/send")));
-        receiveCoinsAction->setIcon(platformStyle->SingleColorIcon(QStringLiteral(":/icons/receiving_addresses")));
-        historyAction->setIcon(platformStyle->SingleColorIcon(QStringLiteral(":/icons/history")));
+        // These actions do not exist yet for the whole first half of the
+        // constructor: createActions() runs well after RestoreWindowGeometry(),
+        // and restoring a geometry pumps events. On Windows the shell delivers
+        // the theme to a process it activates, so a palette change lands in that
+        // window and every pointer here is still null -- an access violation
+        // before the log file is even open, which is why it leaves no trace.
+        if (overviewAction) overviewAction->setIcon(platformStyle->SingleColorIcon(QStringLiteral(":/icons/overview")));
+        if (sendCoinsAction) sendCoinsAction->setIcon(platformStyle->SingleColorIcon(QStringLiteral(":/icons/send")));
+        if (receiveCoinsAction) receiveCoinsAction->setIcon(platformStyle->SingleColorIcon(QStringLiteral(":/icons/receiving_addresses")));
+        if (historyAction) historyAction->setIcon(platformStyle->SingleColorIcon(QStringLiteral(":/icons/history")));
     }
 
     QMainWindow::changeEvent(e);
