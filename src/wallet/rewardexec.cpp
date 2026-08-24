@@ -276,18 +276,47 @@ FillOutcome ExecuteCovenantFill(CWallet& wallet, const SeqobOffer& offer, CAmoun
     CMutableTransaction mtx;
     mtx.nVersion = 2;
 
-    // The wallet's asset-B coins. The fee is paid in asset B too: it is the
-    // asset this fill is already spending, and an open fee market means it can
-    // be. Selecting for two assets when one will do only makes the transaction
-    // bigger and the failure modes stranger.
-    std::vector<COutput> avail;
-    {
-        LOCK(wallet.cs_wallet);
-        AvailableCoins(wallet, avail, nullptr, 1, MAX_MONEY, MAX_MONEY, 0, &asset_b);
-    }
-    std::sort(avail.begin(), avail.end(), [&](const COutput& x, const COutput& y) {
-        return x.tx->GetOutputValueOut(wallet, x.i) > y.tx->GetOutputValueOut(wallet, y.i);
-    });
+    // Coins, per asset. Two lists, because the fee usually cannot come out of
+    // the asset being sold: a staker converting GOLD rewards may hold no GOLD
+    // but the rewards themselves, and taking the fee from those would mean the
+    // batch could never be converted whole. That is not a hypothetical -- it is
+    // what the live testnet's treasury looked like the first time this ran
+    // against it. So the credit is paid in the asset the covenant wants, and
+    // the fee in the policy asset, which is what a wallet reliably has.
+    const CAsset fee_asset = ::policyAsset;
+    const bool fee_in_b = (fee_asset == asset_b);
+
+    auto explicit_coins = [&](const CAsset& want) {
+        std::vector<COutput> found;
+        {
+            LOCK(wallet.cs_wallet);
+            AvailableCoins(wallet, found, nullptr, 1, MAX_MONEY, MAX_MONEY, 0, &want);
+        }
+        std::vector<COutput> keep;
+        for (const COutput& c : found) {
+            if (!c.fSpendable) continue;
+            if (c.tx->GetHash() == cov_out.hash && (uint32_t)c.i == cov_out.n) continue;
+            if (!(c.tx->GetOutputAsset(wallet, c.i) == want)) continue;
+            // EXPLICIT coins only. A covenant fill is an explicit construction
+            // throughout -- the leaf inspects values and assets directly -- so a
+            // confidential coin cannot fund one without blinding the
+            // transaction, which would then fail the leaf's own checks.
+            // Sequentia is transparent-by-default, so this discards nothing on a
+            // real chain; a chain left on the Elements default has to be told
+            // (-con_default_blinded_addresses=0).
+            if (!c.tx->tx->vout[c.i].nValue.IsExplicit()) continue;
+            if (!c.tx->tx->vout[c.i].nAsset.IsExplicit()) continue;
+            if (c.tx->GetOutputValueOut(wallet, c.i) <= 0) continue;
+            keep.push_back(c);
+        }
+        std::sort(keep.begin(), keep.end(), [&](const COutput& x, const COutput& y) {
+            return x.tx->GetOutputValueOut(wallet, x.i) > y.tx->GetOutputValueOut(wallet, y.i);
+        });
+        return keep;
+    };
+
+    const std::vector<COutput> b_coins = explicit_coins(asset_b);
+    const std::vector<COutput> f_coins = fee_in_b ? std::vector<COutput>() : explicit_coins(fee_asset);
 
     // Two passes: pick coins against an estimated fee, then settle the fee
     // against the size that actually resulted. One correction is enough --
@@ -299,40 +328,39 @@ FillOutcome ExecuteCovenantFill(CWallet& wallet, const SeqobOffer& offer, CAmoun
         mtx.witness.vtxinwit.clear();
         mtx.vin.emplace_back(cov_out);
 
-        CAmount gathered = 0;
-        std::vector<const COutput*> chosen;
-        for (const COutput& c : avail) {
-            if (!c.fSpendable) continue;
-            if (c.tx->GetHash() == cov_out.hash && (uint32_t)c.i == cov_out.n) continue;
-            // Check the asset here rather than trusting the filter: a coin of
-            // the wrong asset counted as asset B unbalances the transaction in
-            // a way that reads, from the outside, as "value in != value out"
-            // and says nothing about which asset was wrong.
-            if (!(c.tx->GetOutputAsset(wallet, c.i) == asset_b)) continue;
-            // EXPLICIT coins only. A covenant fill is an explicit construction
-            // throughout -- the leaf inspects values and assets directly, and
-            // every output it reads must be unblinded -- so a confidential coin
-            // cannot fund one without blinding the transaction, which would
-            // then fail the leaf's own checks. Sequentia is
-            // transparent-by-default, so this discards nothing on a real chain;
-            // a chain left on the Elements default has to be told
-            // (-con_default_blinded_addresses=0).
-            if (!c.tx->tx->vout[c.i].nValue.IsExplicit()) continue;
-            if (!c.tx->tx->vout[c.i].nAsset.IsExplicit()) continue;
-            const CAmount v = c.tx->GetOutputValueOut(wallet, c.i);
-            if (v <= 0) continue;
-            chosen.push_back(&c);
-            gathered += v;
+        int inputs_added = 0;
+        const CAmount need_b = plan->credit + (fee_in_b ? fee : 0);
+        CAmount gathered_b = 0;
+        for (const COutput& c : b_coins) {
+            if (gathered_b >= need_b) break;
+            gathered_b += c.tx->GetOutputValueOut(wallet, c.i);
             mtx.vin.emplace_back(COutPoint(c.tx->GetHash(), c.i));
-            if (gathered >= plan->credit + fee) break;
+            ++inputs_added;
         }
-        if (gathered < plan->credit + fee) {
-            LogPrintf("[rewards]   funding short: %d candidates, gathered %d, needed %d (+fee %d)\n",
-                      (int)avail.size(), gathered, plan->credit, fee);
+        if (gathered_b < need_b) {
+            LogPrintf("[rewards]   funding short: %d %s candidates, gathered %d, needed %d\n",
+                      (int)b_coins.size(), asset_b.GetHex(), gathered_b, need_b);
             out.error = strprintf(
-                "not enough unblinded %s to pay the maker and the fee (a covenant fill cannot be "
-                "funded from confidential coins)", asset_b.GetHex());
+                "not enough unblinded %s to pay the maker (a covenant fill cannot be funded from "
+                "confidential coins)", asset_b.GetHex());
             return out;
+        }
+
+        CAmount gathered_f = 0;
+        if (!fee_in_b) {
+            for (const COutput& c : f_coins) {
+                if (gathered_f >= fee) break;
+                gathered_f += c.tx->GetOutputValueOut(wallet, c.i);
+                mtx.vin.emplace_back(COutPoint(c.tx->GetHash(), c.i));
+                ++inputs_added;
+            }
+            if (gathered_f < fee) {
+                LogPrintf("[rewards]   fee short: %d %s candidates, gathered %d, needed %d\n",
+                          (int)f_coins.size(), fee_asset.GetHex(), gathered_f, fee);
+                out.error = strprintf("not enough unblinded %s to pay the network fee",
+                                      fee_asset.GetHex());
+                return out;
+            }
         }
 
         // Slot 0 is the maker's credit and slot 1 is what the leaf reads as the
@@ -340,23 +368,29 @@ FillOutcome ExecuteCovenantFill(CWallet& wallet, const SeqobOffer& offer, CAmoun
         // anything that is NOT asset A, so the leaf takes its remainder-is-zero
         // branch. The change (or, failing that, the fee) does that job.
         mtx.vout.emplace_back(asset_b, plan->credit, MakerCreditSpk(cov.maker_prog));
-        const CAmount change = gathered - plan->credit - fee;
-        const CTxOut change_out(asset_b, change, pay_to);
-        const CTxOut fee_out(asset_b, fee, CScript());
-        const CTxOut receive_out(asset_a, plan->filled, pay_to);
 
+        const CAmount change_b = gathered_b - plan->credit - (fee_in_b ? fee : 0);
+        const CAmount change_f = fee_in_b ? 0 : (gathered_f - fee);
+
+        // Everything this transaction carries that is NOT asset A. The fee
+        // output is always among them, so there is always something to put in
+        // the remainder slot of a full fill.
+        std::vector<CTxOut> others;
+        if (change_b > 0) others.emplace_back(asset_b, change_b, pay_to);
+        if (change_f > 0) others.emplace_back(fee_asset, change_f, pay_to);
+        others.emplace_back(fee_asset, fee, CScript());
+
+        // Slot 1 is what the leaf reads as the remainder: the self-replicating
+        // covenant on a partial fill, and on a full fill anything that is NOT
+        // asset A, so the leaf takes its remainder-is-zero branch.
         if (plan->partial) {
             mtx.vout.emplace_back(asset_a, plan->remainder, scripts->spk);
-            mtx.vout.push_back(receive_out);
-            if (change > 0) mtx.vout.push_back(change_out);
-            mtx.vout.push_back(fee_out);
-        } else if (change > 0) {
-            mtx.vout.push_back(change_out);          // slot 1: not asset A
-            mtx.vout.push_back(receive_out);
-            mtx.vout.push_back(fee_out);
+            mtx.vout.emplace_back(asset_a, plan->filled, pay_to);
+            for (const CTxOut& o : others) mtx.vout.push_back(o);
         } else {
-            mtx.vout.push_back(fee_out);             // slot 1: not asset A
-            mtx.vout.push_back(receive_out);
+            mtx.vout.push_back(others.front());
+            mtx.vout.emplace_back(asset_a, plan->filled, pay_to);
+            for (size_t i = 1; i < others.size(); ++i) mtx.vout.push_back(others[i]);
         }
 
         if (pass == 0) {
@@ -364,7 +398,7 @@ FillOutcome ExecuteCovenantFill(CWallet& wallet, const SeqobOffer& offer, CAmoun
             // signatures the wallet's own inputs will grow.
             const size_t cov_witness = scripts->fill_leaf.size() + scripts->control_block.size() + 8;
             const size_t est = GetVirtualTransactionSize(CTransaction(mtx))
-                             + cov_witness / WITNESS_SCALE_FACTOR + chosen.size() * 108;
+                             + cov_witness / WITNESS_SCALE_FACTOR + inputs_added * 108;
             CCoinControl cc;
             const CFeeRate rate = GetMinimumFeeRate(wallet, cc, nullptr);
             const CAmount want = rate.GetFee(est);
