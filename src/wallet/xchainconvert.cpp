@@ -22,6 +22,7 @@
 #include <util/strencodings.h>
 #include <util/system.h>
 #include <util/time.h>
+#include <exchangerates.h>
 #include <wallet/coincontrol.h>
 #include <crypto/sha256.h>
 #include <script/interpreter.h>
@@ -243,22 +244,35 @@ ParentOut ReadParentOutput(const std::string& txid, uint32_t vout)
             if (blk.isObject() && blk.exists("height")) out.height = (int)blk["height"].get_int64();
         }
         out.found = true;
-    } catch (const std::exception&) {
+    } catch (const std::exception& e) {
         // Unreadable is not "absent": the caller must not treat a daemon that
-        // is momentarily unavailable as a maker that funded nothing.
+        // is momentarily unavailable as a maker that funded nothing. Say why,
+        // though -- the commonest cause is a parent daemon without -txindex,
+        // which cannot look up a transaction it was not asked to watch, and
+        // that is a five-second fix once somebody can see it.
+        LogPrintf("[rewards] could not read %s:%d on the parent chain: %s\n", txid, vout, e.what());
         out.found = false;
     }
     return out;
 }
 
-//! The parent-chain fee rate, or nothing when it cannot be read.
+//! What claiming on the parent chain costs per virtual byte.
 //!
-//! Nothing is the honest answer, and the callers treat it as one: you cannot
-//! judge whether a swap is worth making without knowing what claiming will
-//! cost, and guessing in the optimistic direction is how an asset gets
-//! committed for proceeds that can never be collected. Both callers would
-//! rather wait and ask again.
-std::optional<CAmount> ParentFeeratePerVb()
+//! When the estimate cannot be had, the answer is the CEILING rather than the
+//! floor, and never a cheerful default. Both callers are better served by
+//! assuming the parent chain is expensive:
+//!
+//! - deciding whether a swap is worth making, a high guess declines the
+//!   marginal ones, which is the safe way to be wrong;
+//! - claiming, the asset has ALREADY been handed over -- the maker took it, and
+//!   revealing the secret is how we learned to claim. Declining to claim
+//!   because the fee is unknown would give up the Bitcoin and the asset both.
+//!   Overpaying a claim already judged worth making is a far smaller loss.
+//!
+//! The old failure was worse than either: the estimate was never parsed at all,
+//! so this quietly returned 2 sat/vB while the parent chain wanted fifty times
+//! that.
+CAmount ParentFeeratePerVb()
 {
     try {
         UniValue params(UniValue::VARR);
@@ -271,11 +285,13 @@ std::optional<CAmount> ParentFeeratePerVb()
             if (per_vb > 0) return std::min<CAmount>(per_vb, MAX_PARENT_FEERATE_SAT_VB);
         }
     } catch (const std::exception& e) {
-        LogPrintf("[rewards] could not read the parent-chain fee rate: %s\n", e.what());
-        return std::nullopt;
+        LogPrintf("[rewards] could not read the parent-chain fee rate (%s); "
+                  "assuming the ceiling of %d sat/vB\n", e.what(), MAX_PARENT_FEERATE_SAT_VB);
+        return MAX_PARENT_FEERATE_SAT_VB;
     }
-    LogPrintf("[rewards] the parent chain returned no usable fee estimate\n");
-    return std::nullopt;
+    LogPrintf("[rewards] the parent chain gave no usable fee estimate; assuming the ceiling "
+              "of %d sat/vB\n", MAX_PARENT_FEERATE_SAT_VB);
+    return MAX_PARENT_FEERATE_SAT_VB;
 }
 
 //! This node's own Bitcoin anchor: the height the chain tip commits to. The
@@ -380,6 +396,23 @@ bool FindPreimageOnChain(CWallet& wallet, const XchainSwap& s, std::vector<unsig
 
 } // namespace
 
+//! The parent chain's height, or nothing when it cannot be read.
+//!
+//! Exported because a swap's refund clock is measured in parent-chain blocks,
+//! and telling a staker how long their asset stays locked means knowing where
+//! that chain is. It lives here rather than at the call site so that every read
+//! of the parent chain still goes through one door.
+std::optional<int> ParentChainTip()
+{
+    try {
+        const UniValue r = MainChainResult("getblockcount", UniValue(UniValue::VARR));
+        if (r.isNum()) return r.get_int();
+    } catch (const std::exception& e) {
+        LogPrintf("[rewards] could not read the parent-chain height: %s\n", e.what());
+    }
+    return std::nullopt;
+}
+
 std::vector<XchainSwap> LoadXchainSwaps(const CWallet& wallet)
 {
     std::vector<XchainSwap> out;
@@ -473,12 +506,7 @@ bool ClaimBtcLeg(CWallet& wallet, XchainSwap& s, std::string& error)
     }
     const CScript pay_to = GetScriptForDestination(dest);
 
-    const auto feerate = ParentFeeratePerVb();
-    if (!feerate) {
-        error = "cannot read the parent-chain fee rate, so cannot size the claim; will retry";
-        return false;
-    }
-    const CAmount fee = *feerate * CLAIM_VSIZE;
+    const CAmount fee = ParentFeeratePerVb() * CLAIM_VSIZE;
     if (s.btc_leg_amount <= fee) {
         error = strprintf("the Bitcoin leg (%d) does not cover the fee to claim it (%d)", s.btc_leg_amount, fee);
         return false;
@@ -564,10 +592,112 @@ bool RefundSeqLeg(CWallet& wallet, XchainSwap& s, std::string& error)
 
     // A refund pays its own fee out of the refunded amount: there is nothing
     // else in this transaction to pay it from.
+    //
+    // And it pays that fee in the asset being refunded, not the policy asset.
+    // A refund of, say, GOLD holds nothing but GOLD, so a policy-asset fee
+    // output would leave the transaction unbalanced in two assets at once --
+    // short by the fee in the one it does hold, and conjuring the fee in one it
+    // does not. Such a refund is rejected every time it is tried, which is the
+    // worst possible moment to discover it: the refund is the promise that a
+    // staker's asset comes back when a maker walks away. Sequentia's open fee
+    // market is exactly what makes the fix the obvious one -- there is no asset
+    // a fee has to be paid in.
     const CAmount fee = 2000;
-    if (value <= fee) { error = "the leg is too small to refund"; return false; }
-    mtx.vout.emplace_back(asset, value - fee, GetScriptForDestination(dest));
-    mtx.vout.emplace_back(::policyAsset, fee, CScript());   // explicit fee output
+
+    // Can the fee come out of the asset itself? Only if this node has a rate
+    // for it, which is what "accepts it for fees" means on a chain with an open
+    // fee market. Usually it can, and for a good reason: a staking reward IS a
+    // fee somebody already paid, so a reward asset is one producers were
+    // accepting. But rates come and go, and a refund that only works while a
+    // rate happens to be listed is not the guarantee it is supposed to be.
+    CAmount unused_rate = 0;
+    const bool asset_pays_its_own_fee =
+        g_con_any_asset_fees && ExchangeRateMap::GetInstance().GetRate(asset, unused_rate);
+
+    std::vector<COutput> fee_coins;
+    CAmount fee_gathered = 0;
+    if (asset_pays_its_own_fee) {
+        if (value <= fee) { error = "the leg is too small to refund"; return false; }
+    } else {
+        // Fall back to the policy asset, out of the wallet's own coins. The
+        // refunded asset then comes back whole, which is the better outcome
+        // anyway -- it is the staker's asset, not the fee's.
+        std::vector<COutput> avail;
+        {
+            LOCK(wallet.cs_wallet);
+            AvailableCoins(wallet, avail, nullptr, 1, MAX_MONEY, MAX_MONEY, 0, &::policyAsset);
+        }
+        for (const COutput& c : avail) {
+            if (fee_gathered >= fee) break;
+            if (!c.fSpendable) continue;
+            if (!(c.tx->GetOutputAsset(wallet, c.i) == ::policyAsset)) continue;
+            if (!c.tx->tx->vout[c.i].nValue.IsExplicit()) continue;
+            if (!c.tx->tx->vout[c.i].nAsset.IsExplicit()) continue;
+            const CAmount v = c.tx->GetOutputValueOut(wallet, c.i);
+            if (v <= 0) continue;
+            fee_coins.push_back(c);
+            fee_gathered += v;
+        }
+        if (fee_gathered < fee) {
+            error = strprintf("this node does not take fees in %s, and the wallet has no %s to pay "
+                              "the refund's fee with; the asset stays locked and refundable until "
+                              "it does", asset.GetHex(), ::policyAsset.GetHex());
+            return false;
+        }
+        for (const COutput& c : fee_coins) mtx.vin.emplace_back(COutPoint(c.tx->GetHash(), c.i));
+    }
+
+    if (asset_pays_its_own_fee) {
+        mtx.vout.emplace_back(asset, value - fee, GetScriptForDestination(dest));
+        mtx.vout.emplace_back(asset, fee, CScript());   // explicit fee output
+    } else {
+        mtx.vout.emplace_back(asset, value, GetScriptForDestination(dest));
+        if (fee_gathered > fee) {
+            CTxDestination change;
+            {
+                LOCK(wallet.cs_wallet);
+                bilingual_str err;
+                if (!wallet.GetNewDestination(OutputType::BECH32, "reward conversion refund", change, err)) {
+                    error = "could not get a change address: " + err.original;
+                    return false;
+                }
+            }
+            mtx.vout.emplace_back(::policyAsset, fee_gathered - fee, GetScriptForDestination(change));
+        }
+        mtx.vout.emplace_back(::policyAsset, fee, CScript());
+    }
+
+    // The wallet's own fee inputs get signed first. That order is safe: the
+    // timelock branch is signed with SIGHASH_ALL under the legacy rules, which
+    // blank every other input's scriptSig, and the wallet's own signatures
+    // commit to outpoints and outputs that are already final.
+    //
+    // The wallet is asked to sign a transaction one of whose inputs it can
+    // never sign -- the contract is redeemed by a key held in the swap, not in
+    // the keystore -- so a blanket failure from it means nothing here. What
+    // matters is whether the inputs it WAS meant to sign came back signed, so
+    // that is what gets checked.
+    if (!fee_coins.empty()) {
+        std::map<COutPoint, Coin> coins;
+        for (const COutput& c : fee_coins) {
+            Coin coin;
+            coin.out = c.tx->tx->vout[c.i];
+            coin.nHeight = 1;
+            coins[COutPoint(c.tx->GetHash(), c.i)] = std::move(coin);
+        }
+        std::map<int, bilingual_str> input_errors;
+        wallet.SignTransaction(mtx, coins, SIGHASH_ALL, input_errors);
+        for (size_t i = 1; i < mtx.vin.size(); ++i) {
+            const bool has_witness = i < mtx.witness.vtxinwit.size() &&
+                                     !mtx.witness.vtxinwit[i].scriptWitness.IsNull();
+            if (mtx.vin[i].scriptSig.empty() && !has_witness) {
+                const auto it = input_errors.find((int)i);
+                error = "could not sign the refund's fee input: " +
+                        (it != input_errors.end() ? it->second.original : std::string("unknown"));
+                return false;
+            }
+        }
+    }
 
     const CKey refund_key = KeyFromBytes(s.taker_seq_refund_priv);
     if (!refund_key.IsValid()) { error = "the refund key is unusable"; return false; }
@@ -617,13 +747,7 @@ XchainOutcome RunXchainConversion(CWallet& wallet, const SeqobOffer& offer, CAmo
     // recoverable only by waiting out the timelock. That check already exists
     // in ClaimBtcLeg, but by then the asset is gone, which is far too late for
     // it to be useful. So it is made here, before anything is spent.
-    const auto claim_feerate = ParentFeeratePerVb();
-    if (!claim_feerate) {
-        out.error = "cannot read the parent-chain fee rate, so cannot tell whether this is worth "
-                    "claiming; nothing was spent";
-        return out;
-    }
-    const CAmount claim_cost = *claim_feerate * CLAIM_VSIZE;
+    const CAmount claim_cost = ParentFeeratePerVb() * CLAIM_VSIZE;
     if (want_btc <= claim_cost * 2) {
         out.error = strprintf(
             "this would fetch %d satoshis, which does not cover the %d it costs to claim them. "
