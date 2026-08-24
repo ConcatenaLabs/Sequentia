@@ -170,3 +170,6 @@ dist/
 
 # nix
 result
+
+# Agent worktrees and local agent state (never belongs in the repo).
+.claude/
