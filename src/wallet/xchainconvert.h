@@ -119,6 +119,14 @@ void ResumeXchainSwaps(CWallet& wallet);
 
 std::vector<XchainSwap> LoadXchainSwaps(const CWallet& wallet);
 
+//! The payload of a parent-chain JSON-RPC reply.
+//!
+//! Separated from the call itself so it can be tested: the mistake it exists to
+//! prevent -- reading a payload field straight off the reply that wraps it --
+//! fails silently, finding nothing rather than erroring, and a silent nothing
+//! is exactly what a test has to catch.
+UniValue MainChainPayload(const std::string& method, const UniValue& reply);
+
 } // namespace wallet
 
 #endif // BITCOIN_WALLET_XCHAINCONVERT_H
