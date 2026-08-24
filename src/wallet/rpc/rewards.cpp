@@ -398,7 +398,12 @@ UniValue SwapToPublicJson(const XchainSwap& s, int tip, int parent_tip)
     // The refund clocks. Our asset is what is at risk, so its countdown is the
     // one that matters; the maker's is shown too, because a taker who can see
     // both can tell a swap that is merely slow from one that has gone wrong.
-    if (s.seq_locktime > 0 && !s.Terminal()) {
+    //
+    // Ours appears only once something of ours is actually locked. A swap that
+    // agreed a timelock but never funded has nothing to refund, and showing a
+    // countdown for it would tell a staker their asset is at risk when it is
+    // sitting safely in their wallet.
+    if (s.seq_locktime > 0 && !s.Terminal() && !s.seq_fund_txid.empty()) {
         UniValue r(UniValue::VOBJ);
         r.pushKV("locktime", (uint64_t)s.seq_locktime);
         r.pushKV("blocks_to_go", std::max<int64_t>(0, (int64_t)s.seq_locktime - tip));

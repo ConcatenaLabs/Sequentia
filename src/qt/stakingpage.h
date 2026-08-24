@@ -78,6 +78,7 @@ public:
 
 private:
     void refreshRewards();
+    void refreshSwaps();
 
     QTableWidget* m_rewards_table{nullptr};
     QCheckBox* m_ac_enabled{nullptr};
@@ -88,6 +89,14 @@ private:
     QPushButton* m_ac_save{nullptr};
     QLabel* m_ac_status{nullptr};
 
+    //! Cross-chain conversions with something of the staker's locked in them.
+    //! Only a conversion into Bitcoin has a middle like this; a same-chain one
+    //! is a single transaction and needs no watching.
+    QWidget* m_swaps_box{nullptr};
+    QLabel* m_swaps_intro{nullptr};
+    QTableWidget* m_swaps_table{nullptr};
+    QPushButton* m_swaps_resume{nullptr};
+
 public:
 
 public Q_SLOTS:
@@ -97,6 +106,7 @@ private Q_SLOTS:
     //! Reward auto-conversion: the standing instruction, and what it would do.
     void onRewardConvertToggled(bool on);
     void onRewardConvertSave();
+    void onResumeSwaps();
 
 protected:
     void showEvent(QShowEvent* event) override;

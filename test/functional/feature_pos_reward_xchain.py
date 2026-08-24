@@ -179,10 +179,13 @@ class RewardXchainTest(BitcoinTestFramework):
 
     def write_swap(self, swap):
         """Put the negotiated swap where the wallet keeps them."""
+        self.write_swap_list([swap])
+
+    def write_swap_list(self, swaps):
         wallet_dir = os.path.join(get_datadir_path(self.options.tmpdir, 1),
                                   "elementsregtest", "wallets", self.wallet_name)
         with open(os.path.join(wallet_dir, "xchainswaps.json"), "w", encoding="utf8") as f:
-            json.dump([swap], f)
+            json.dump(swaps, f)
 
     def maker_takes_the_asset(self, redeem, txid, vout, asset, amount, preimage, claim_key):
         """The maker spends our contract with the secret, revealing it on chain.
@@ -259,9 +262,82 @@ class RewardXchainTest(BitcoinTestFramework):
         self.log.info("fee-accepted asset %s..., unaccepted asset %s...",
                       taken[:12], untaken[:12])
 
+        self.interrupted_before_funding(parent, seq, wallet, taken)
         self.claim_ending(parent, seq, wallet, pw, taken)
         self.refund_ending(parent, seq, wallet, pw, taken)
         self.refund_ending(parent, seq, wallet, pw, untaken, fee_from_wallet=True)
+
+    # ---------------------------------------------------------------------
+
+    def interrupted_before_funding(self, parent, seq, wallet, asset):
+        """A swap that agreed terms and then lost the node before it funded.
+
+        Nothing of the staker's ever moved, so there is nothing to rescue -- but
+        the record must not sit unfinished for good, and above all it must not
+        claim the asset is locked. It never was.
+        """
+        self.log.info("INTERRUPTED: terms agreed, then the node stopped before funding")
+
+        preimage = os.urandom(32)
+        digest = sha256(preimage)
+        maker_seq_claim = make_key()
+        taker_seq_refund = make_key()
+        maker_btc_refund = make_key()
+        taker_btc_claim = make_key()
+        btc_locktime = parent.getblockcount() + 500
+        btc_redeem = htlc_script(digest, taker_btc_claim.get_pubkey().get_bytes(),
+                                 maker_btc_refund.get_pubkey().get_bytes(), btc_locktime)
+        btc_txid, btc_vout, _, _ = self.lock_bitcoin(btc_redeem, BTC_LEG)
+
+        def record(offer_id, started_at):
+            return {
+                "state": "btc_locked", "time": started_at, "offer_id": offer_id,
+                "maker_pubkey": maker_seq_claim.get_pubkey().get_bytes().hex(),
+                "asset": asset,
+                "seq_amount": 10000000000, "btc_amount": int(BTC_LEG * 100000000),
+                "hash_h": digest.hex(),
+                "maker_seq_claim_pub": maker_seq_claim.get_pubkey().get_bytes().hex(),
+                "maker_btc_refund_pub": maker_btc_refund.get_pubkey().get_bytes().hex(),
+                "taker_seq_refund_pub": taker_seq_refund.get_pubkey().get_bytes().hex(),
+                "taker_btc_claim_pub": taker_btc_claim.get_pubkey().get_bytes().hex(),
+                "taker_seq_refund_priv": taker_seq_refund.get_bytes().hex(),
+                "taker_btc_claim_priv": taker_btc_claim.get_bytes().hex(),
+                "seq_locktime": seq.getblockcount() + 200, "btc_locktime": btc_locktime,
+                "btc_leg_txid": btc_txid, "btc_leg_vout": btc_vout,
+                "btc_leg_script": bytes(btc_redeem).hex(),
+                "btc_leg_amount": int(BTC_LEG * 100000000),
+                "btc_leg_height": parent.getblockcount() - 1,
+                # never funded -- that is the whole point
+                "seq_fund_txid": "", "seq_fund_vout": 0, "seq_redeem": "",
+                "preimage": "", "btc_claim_txid": "", "error": "",
+            }
+
+        # A swap that only just started is one a live pass may still be holding.
+        # Retiring it would pull the record out from under that pass, which
+        # would then fund against a swap already marked dead.
+        now = int(seq.getblockchaininfo()["mediantime"])
+        self.write_swap(record("test-interrupted-fresh", now))
+        still = wallet.resumerewardswaps()
+        assert_equal(len(still), 1)
+        assert_equal(still[0]["state"], "btc_locked")
+        # And it must NOT claim our asset is locked: we never funded.
+        assert "our_refund" not in still[0], \
+            "an unfunded swap must not show a countdown for an asset that was never locked"
+        assert "our_lock" not in still[0]
+        assert "maker_refund" in still[0]      # the maker's Bitcoin IS locked
+        self.log.info("  a fresh one is left alone, and does not pretend the asset is locked")
+
+        # One older than any pass could still be holding is written off.
+        self.write_swap(record("test-interrupted-stale", now - (4 * 60 * 60 + 2 * 60 * 60)))
+        assert_equal(wallet.resumerewardswaps(), [])
+        done = {s["offer_id"]: s for s in wallet.listrewardswaps(True)}
+        assert_equal(done["test-interrupted-stale"]["state"], "failed")
+        assert "nothing was spent" in done["test-interrupted-stale"]["error"]
+        self.log.info("  a long-stale one is retired: %s",
+                      done["test-interrupted-stale"]["error"][:60])
+
+        # Leave the ledger clean for the scenarios that follow.
+        self.write_swap_list([])
 
     # ---------------------------------------------------------------------
 
