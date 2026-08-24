@@ -9,7 +9,7 @@
 export LC_ALL=C
 
 PRODUCT_NAME="node"
-PRODUCT_REPO="${SEQ_NODE_REPO:-https://github.com/GracedEternalKingCabbageMan/Sequentia.git}"
+PRODUCT_REPO="${SEQ_NODE_REPO:-https://github.com/ConcatenaLabs/Sequentia.git}"
 PRODUCT_INDEX_GLOB="sequentia-core-*-linux-x86_64.tar.gz sequentia-core-*-win64-setup.exe"
 
 # --enable-any-asset-fees is not optional for a published build: without it fee

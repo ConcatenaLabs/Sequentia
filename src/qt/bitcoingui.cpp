@@ -1486,7 +1486,7 @@ void BitcoinGUI::showAnchorUnvalidatedDetails()
     } else {
         text += tr("Restart Sequentia with Bitcoin Core running to check anchors again.");
     }
-    text += QString("\n\n") + QStringLiteral("https://github.com/GracedEternalKingCabbageMan/Sequentia/blob/master/doc/sequentia/03-bitcoin-anchoring.md");
+    text += QString("\n\n") + QStringLiteral("https://github.com/ConcatenaLabs/Sequentia/blob/master/doc/sequentia/03-bitcoin-anchoring.md");
     message(tr("Not following the Bitcoin chain"), text,
             CClientUIInterface::MSG_WARNING | CClientUIInterface::MODAL);
 }

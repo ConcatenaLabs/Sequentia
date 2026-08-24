@@ -2327,7 +2327,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                 "Sequentia will keep saying so in the status bar, and will warn you if it ever accepts a block it could not "
                 "check. The checks come back when you restart with Bitcoin Core running.\n"
                 "\n"
-                "https://github.com/GracedEternalKingCabbageMan/Sequentia/blob/master/doc/sequentia/03-bitcoin-anchoring.md");
+                "https://github.com/ConcatenaLabs/Sequentia/blob/master/doc/sequentia/03-bitcoin-anchoring.md");
             // Logged by every frontend, and all an operator of a headless node
             // ever sees, so it carries the troubleshooting. Deliberately states
             // no verdict: the GUI logs this too, moments before the user may

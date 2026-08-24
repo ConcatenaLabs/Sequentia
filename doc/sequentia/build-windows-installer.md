@@ -43,7 +43,7 @@ Clone the repository somewhere inside the Linux filesystem (not under
 `/mnt/c/...` — the 9p filesystem makes the build many times slower):
 
 ```sh
-git clone https://github.com/GracedEternalKingCabbageMan/Sequentia.git
+git clone https://github.com/ConcatenaLabs/Sequentia.git
 cd Sequentia
 ```
 

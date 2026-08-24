@@ -8,7 +8,7 @@
 export LC_ALL=C
 
 PRODUCT_NAME="fulmen"
-PRODUCT_REPO="${SEQ_FULMEN_REPO:-https://github.com/GracedEternalKingCabbageMan/fulmen.git}"
+PRODUCT_REPO="${SEQ_FULMEN_REPO:-https://github.com/ConcatenaLabs/fulmen.git}"
 PRODUCT_INDEX_GLOB="Fulmen-*-linux-x86_64.AppImage Fulmen-*-win64.zip Fulmen-Setup-*.exe"
 
 # Empty means "ask the remote what its default branch is".

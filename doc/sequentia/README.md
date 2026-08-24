@@ -79,10 +79,10 @@ not these, are authoritative for current behavior. Status of each:
 
 | Document | Status |
 |---|---|
-| [`openamp-design.md`](openamp-design.md) | Implemented in [`openamp`](https://github.com/GracedEternalKingCabbageMan/openamp); the daemon is live on the public testnet with the demo asset BONDX. Zero consensus changes in this repo. |
+| [`openamp-design.md`](openamp-design.md) | Implemented in [`openamp`](https://github.com/ConcatenaLabs/openamp); the daemon is live on the public testnet with the demo asset BONDX. Zero consensus changes in this repo. |
 | [`opendamp-design.md`](opendamp-design.md) | OpenDAMP, network-enforced restricted assets through Simplicity covenants. The covenants and the issuance path are implemented in the `openamp` repository (`opendamp/`); this repository's part is the Simplicity execution-budget ×4 flag day at testnet height 101,810 (24.3.0). |
-| [`sbtc-peg-design.md`](sbtc-peg-design.md) | Implemented in [`sbtc-bridge`](https://github.com/GracedEternalKingCabbageMan/sbtc-bridge): SBTC is pegged bitcoin (1:1 BTC in a multisig custody reserve), an ordinary unprivileged asset; it is not Elements' federated consensus peg, which the chain does not configure. One divergence from this design: the shipped bridge does not burn returned SBTC; it holds it as float and reissues only the shortfall, so circulating (not total issued) supply equals the reserve. |
-| [`bridged-usdc-standard.md`](bridged-usdc-standard.md) | The unified bridged-stablecoin standard (one `USDC.e` fed from several chains, precision 6, issued supervised). Implemented in [`compages`](https://github.com/GracedEternalKingCabbageMan/compages). |
+| [`sbtc-peg-design.md`](sbtc-peg-design.md) | Implemented in [`sbtc-bridge`](https://github.com/ConcatenaLabs/sbtc-bridge): SBTC is pegged bitcoin (1:1 BTC in a multisig custody reserve), an ordinary unprivileged asset; it is not Elements' federated consensus peg, which the chain does not configure. One divergence from this design: the shipped bridge does not burn returned SBTC; it holds it as float and reissues only the shortfall, so circulating (not total issued) supply equals the reserve. |
+| [`bridged-usdc-standard.md`](bridged-usdc-standard.md) | The unified bridged-stablecoin standard (one `USDC.e` fed from several chains, precision 6, issued supervised). Implemented in [`compages`](https://github.com/ConcatenaLabs/compages). |
 | [`ux-audit-spec-2026-07-02.md`](ux-audit-spec-2026-07-02.md) | UX audit and design-change spec across the ecosystem's user-facing surfaces; implementation tracked in the respective repos. |
 
 A design document belongs to the repository whose code it describes, so most of
@@ -90,12 +90,12 @@ them are **not** kept here:
 
 | Looking for | It is in |
 |---|---|
-| The SeqDEX and SeqOB designs — order-book and terminal specs, the covenant-offer design, the rail-crossing P2P/LSP spec, the Lightning feasibility and Simplicity assessments, the instant-swap latency notes | [`seqdex`](https://github.com/GracedEternalKingCabbageMan/seqdex), under `docs/`. Its `test/regtest/` also holds the regtest proofs of the covenant order book, which run against a node built from this repository. |
-| The SeqLN designs — the Core Lightning fork spec, asset channels, submarine and pure-Lightning swaps, Tier-2 hosted channels | [`seqln`](https://github.com/GracedEternalKingCabbageMan/seqln), under `doc/seqln-design/`. |
-| How Fulmen bundles a SeqLN node | [`fulmen`](https://github.com/GracedEternalKingCabbageMan/fulmen), under `docs/`. |
-| The Pignus lending design (the loan covenant, the oracle set, Bitcoin collateral) | [`pignus`](https://github.com/GracedEternalKingCabbageMan/pignus), `docs/pignus-design.md`. The covenant builder and its functional tests (`test/functional/pignus_*.py`, `feature_pignus_*.py`) live here because they run against this node. |
-| The Levo launchpad covenant and sale flow | [`levo`](https://github.com/GracedEternalKingCabbageMan/levo), under `doc/`. |
-| The seqcj CoinJoin design and threat model | [`seqcj`](https://github.com/GracedEternalKingCabbageMan/seqcj), `docs/DESIGN.md`. |
+| The SeqDEX and SeqOB designs — order-book and terminal specs, the covenant-offer design, the rail-crossing P2P/LSP spec, the Lightning feasibility and Simplicity assessments, the instant-swap latency notes | [`seqdex`](https://github.com/ConcatenaLabs/seqdex), under `docs/`. Its `test/regtest/` also holds the regtest proofs of the covenant order book, which run against a node built from this repository. |
+| The SeqLN designs — the Core Lightning fork spec, asset channels, submarine and pure-Lightning swaps, Tier-2 hosted channels | [`seqln`](https://github.com/ConcatenaLabs/seqln), under `doc/seqln-design/`. |
+| How Fulmen bundles a SeqLN node | [`fulmen`](https://github.com/ConcatenaLabs/fulmen), under `docs/`. |
+| The Pignus lending design (the loan covenant, the oracle set, Bitcoin collateral) | [`pignus`](https://github.com/ConcatenaLabs/pignus), `docs/pignus-design.md`. The covenant builder and its functional tests (`test/functional/pignus_*.py`, `feature_pignus_*.py`) live here because they run against this node. |
+| The Levo launchpad covenant and sale flow | [`levo`](https://github.com/ConcatenaLabs/levo), under `doc/`. |
+| The seqcj CoinJoin design and threat model | [`seqcj`](https://github.com/ConcatenaLabs/seqcj), `docs/DESIGN.md`. |
 
 What stays here is the protocol: anchoring, proof of stake, the fee market, and
 the consensus rules those other projects build on.

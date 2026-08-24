@@ -117,7 +117,7 @@ class PosPoolsTest(BitcoinTestFramework):
 
     def check_board_contract(self, node, expect_signer):
         """listpools is a published contract, not just an RPC: the staking pool
-        board (github.com/GracedEternalKingCabbageMan/sequentia-pool-board) is a
+        board (github.com/ConcatenaLabs/sequentia-pool-board) is a
         static page that renders exactly these fields. Assert every one of them,
         so a rename here fails a test rather than silently emptying a column on
         a public page.
