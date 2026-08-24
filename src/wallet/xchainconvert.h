@@ -86,6 +86,7 @@ struct XchainSwap {
 
     std::vector<unsigned char> preimage;   //!< once the maker reveals it
     std::string btc_claim_txid;
+    std::string seq_refund_txid;   //!< where the asset went, when it came back
     std::string error;
 
     bool Terminal() const {

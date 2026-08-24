@@ -23,6 +23,7 @@
 #include <util/system.h>
 #include <util/time.h>
 #include <exchangerates.h>
+#include <policy/policy.h>
 #include <wallet/coincontrol.h>
 #include <crypto/sha256.h>
 #include <script/interpreter.h>
@@ -136,6 +137,7 @@ UniValue SwapToJson(const XchainSwap& s)
     o.pushKV("seq_redeem", Hex(s.seq_redeem));
     o.pushKV("preimage", Hex(s.preimage));
     o.pushKV("btc_claim_txid", s.btc_claim_txid);
+    o.pushKV("seq_refund_txid", s.seq_refund_txid);
     o.pushKV("error", s.error);
     return o;
 }
@@ -169,6 +171,7 @@ XchainSwap SwapFromJson(const UniValue& o)
     s.seq_redeem = UnHex(F(o, "seq_redeem", "seq_redeem"));
     s.preimage = UnHex(F(o, "preimage", "preimage"));
     if (o.exists("btc_claim_txid") && o["btc_claim_txid"].isStr()) s.btc_claim_txid = o["btc_claim_txid"].get_str();
+    if (o.exists("seq_refund_txid") && o["seq_refund_txid"].isStr()) s.seq_refund_txid = o["seq_refund_txid"].get_str();
     if (o.exists("error") && o["error"].isStr()) s.error = o["error"].get_str();
     return s;
 }
@@ -602,17 +605,34 @@ bool RefundSeqLeg(CWallet& wallet, XchainSwap& s, std::string& error)
     // staker's asset comes back when a maker walks away. Sequentia's open fee
     // market is exactly what makes the fix the obvious one -- there is no asset
     // a fee has to be paid in.
-    const CAmount fee = 2000;
-
+    // Size the fee the way every fee on this chain is sized: a reference-unit
+    // amount for the transaction's size, converted into whichever asset ends up
+    // paying it. A flat atom count cannot be right for two assets at once --
+    // the same 2000 atoms is dust in a cheap asset and, in a valuable one, a
+    // fee so far above the going rate that the node refuses it outright. That
+    // is not hypothetical on this chain: one live asset prices a whole staking
+    // reward at single-digit atoms.
+    //
     // Can the fee come out of the asset itself? Only if this node has a rate
-    // for it, which is what "accepts it for fees" means on a chain with an open
-    // fee market. Usually it can, and for a good reason: a staking reward IS a
+    // for it, which is what "accepts it for fees" means where the fee market is
+    // open. Usually it can, and for a pleasing reason: a staking reward IS a
     // fee somebody already paid, so a reward asset is one producers were
     // accepting. But rates come and go, and a refund that only works while a
-    // rate happens to be listed is not the guarantee it is supposed to be.
-    CAmount unused_rate = 0;
+    // rate happens to be listed is not the guarantee it is meant to be.
     const bool asset_pays_its_own_fee =
-        g_con_any_asset_fees && ExchangeRateMap::GetInstance().GetRate(asset, unused_rate);
+        g_con_any_asset_fees && ::minRelayTxFee.GetFee(1000, asset) > 0;
+    const CAsset fee_asset = asset_pays_its_own_fee ? asset : ::policyAsset;
+
+    // The fee follows the transaction's MEASURED size, not a guess at it.
+    // Guessing high wastes a little; guessing low is unrecoverable in the way
+    // that matters -- the refund is rejected, the asset stays locked, and the
+    // next pass guesses exactly the same number and is rejected again. So the
+    // transaction is built once to be measured and once to be sent. Elements
+    // amounts are fixed-width, so the second build is the same size as the
+    // first bar a byte of signature, which the margin covers.
+    const uint32_t FIRST_GUESS_VSIZE = 380;
+    const uint32_t SIG_WOBBLE = 2;
+    CAmount fee = std::max<CAmount>(1, ::minRelayTxFee.GetFee(FIRST_GUESS_VSIZE, fee_asset));
 
     std::vector<COutput> fee_coins;
     CAmount fee_gathered = 0;
@@ -647,21 +667,42 @@ bool RefundSeqLeg(CWallet& wallet, XchainSwap& s, std::string& error)
         for (const COutput& c : fee_coins) mtx.vin.emplace_back(COutPoint(c.tx->GetHash(), c.i));
     }
 
+    CTxDestination change;
+    if (!asset_pays_its_own_fee) {
+        LOCK(wallet.cs_wallet);
+        bilingual_str err;
+        if (!wallet.GetNewDestination(OutputType::BECH32, "reward conversion refund", change, err)) {
+            error = "could not get a change address: " + err.original;
+            return false;
+        }
+    }
+
+    const std::vector<CTxIn> vin_template = mtx.vin;
+    for (int pass = 0; pass < 2; ++pass) {
+    mtx.vin = vin_template;
+    mtx.vout.clear();
+    mtx.witness.SetNull();
+
+    // A fee is not allowed to eat what it is paying to rescue. If sizing says
+    // otherwise the rate is wrong, not the refund, and half is a limit that
+    // gets the asset home either way.
+    if (asset_pays_its_own_fee && fee > value / 2) fee = std::max<CAmount>(1, value / 2);
+    if (asset_pays_its_own_fee && value <= fee) {
+        error = "the leg is too small to refund";
+        return false;
+    }
+    if (!asset_pays_its_own_fee && fee_gathered < fee) {
+        error = strprintf("the wallet has only %d %s, and this refund needs %d for its fee",
+                          fee_gathered, ::policyAsset.GetHex(), fee);
+        return false;
+    }
+
     if (asset_pays_its_own_fee) {
         mtx.vout.emplace_back(asset, value - fee, GetScriptForDestination(dest));
         mtx.vout.emplace_back(asset, fee, CScript());   // explicit fee output
     } else {
         mtx.vout.emplace_back(asset, value, GetScriptForDestination(dest));
         if (fee_gathered > fee) {
-            CTxDestination change;
-            {
-                LOCK(wallet.cs_wallet);
-                bilingual_str err;
-                if (!wallet.GetNewDestination(OutputType::BECH32, "reward conversion refund", change, err)) {
-                    error = "could not get a change address: " + err.original;
-                    return false;
-                }
-            }
             mtx.vout.emplace_back(::policyAsset, fee_gathered - fee, GetScriptForDestination(change));
         }
         mtx.vout.emplace_back(::policyAsset, fee, CScript());
@@ -713,12 +754,19 @@ bool RefundSeqLeg(CWallet& wallet, XchainSwap& s, std::string& error)
     mtx.vin[0].scriptSig = CScript() << sig << std::vector<unsigned char>()
                                      << std::vector<unsigned char>(redeem.begin(), redeem.end());
 
+    if (pass == 0) {
+        const uint32_t measured = GetVirtualTransactionSize(CTransaction(mtx)) + SIG_WOBBLE;
+        fee = std::max<CAmount>(1, ::minRelayTxFee.GetFee(measured, fee_asset));
+    }
+    }   // end of the measure-then-send passes
+
     CTransactionRef tx = MakeTransactionRef(std::move(mtx));
     std::string rejected;
     if (!wallet.chain().broadcastTransaction(tx, wallet.m_default_max_tx_fee, /*relay=*/true, rejected)) {
         error = "the refund was refused: " + rejected;
         return false;
     }
+    s.seq_refund_txid = tx->GetHash().GetHex();
     return true;
 }
 
