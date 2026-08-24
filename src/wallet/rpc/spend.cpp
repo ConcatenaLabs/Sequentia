@@ -2481,7 +2481,9 @@ RPCHelpMan liststakingrewards()
 
     const bool include_spent = request.params[0].isNull() ? false : request.params[0].get_bool();
     std::optional<CAsset> only_asset;
-    if (!request.params[1].isNull()) {
+    // An empty string means "every asset", not "an asset called nothing". A
+    // positional call has no other way to skip this argument.
+    if (!request.params[1].isNull() && !request.params[1].get_str().empty()) {
         const CAsset a = GetAssetFromString(request.params[1].get_str());
         if (a.IsNull()) throw JSONRPCError(RPC_WALLET_INVALID_LABEL_NAME, "Unknown label and invalid asset hex: " + request.params[1].get_str());
         only_asset = a;
