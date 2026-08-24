@@ -131,6 +131,26 @@ UniValue MainChainPayload(const std::string& method, const UniValue& reply);
 //! The parent chain's height, or nothing when it cannot be read.
 std::optional<int> ParentChainTip();
 
+//! One output on the parent chain, as the node's Bitcoin daemon reports it.
+struct ParentOut {
+    bool found{false};
+    CScript spk;
+    CAmount value{0};
+    int height{0};
+    int confirmations{0};
+};
+
+//! Is the maker's Bitcoin lock the one that was agreed, and does it pay us?
+//!
+//! Split from the reading of it so that it can be tested, because this is the
+//! decision the staker's money rests on: everything before it is talk, and the
+//! next thing that happens after it says yes is that an asset gets locked up.
+//! Every one of its refusals is a way a maker could take an asset and give
+//! nothing back, so every one of them needs a test that watches it refuse.
+//!
+//! Returns an empty string when the lock is good, and otherwise why it is not.
+std::string CheckMakerBtcLeg(const XchainSwap& s, const ParentOut& out);
+
 } // namespace wallet
 
 #endif // BITCOIN_WALLET_XCHAINCONVERT_H
