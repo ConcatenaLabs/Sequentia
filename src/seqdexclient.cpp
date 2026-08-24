@@ -444,8 +444,11 @@ std::optional<SeqobWalk> SeqobWalkBook(const std::vector<SeqobOffer>& book,
         walk.receives += pays;
         left -= takes;
     }
-    if (left > 0 || walk.legs.empty()) return std::nullopt;   // not enough depth to fill it all
+    if (walk.legs.empty()) return std::nullopt;   // nothing on the book crossed
 
-    walk.reference = (CAmount)(((__int128)atoms * asks[0].offer_amount) / asks[0].want_amount);
+    walk.sells = atoms - left;
+    // Price the part that FILLED at the best offer, so the slippage number means
+    // "what walking the book cost" rather than "how much of the batch was left".
+    walk.reference = (CAmount)(((__int128)walk.sells * asks[0].offer_amount) / asks[0].want_amount);
     return walk;
 }
