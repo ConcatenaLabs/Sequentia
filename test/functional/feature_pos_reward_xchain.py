@@ -133,6 +133,7 @@ class RewardXchainTest(BitcoinTestFramework):
         seq_args = [
             "-port=%d" % p2p_port(1), "-rpcport=%d" % rpc_port(1),
             "-validatepegin=0", "-anyonecanspendaremine=1", "-signblockscript=51",
+            "-txindex=1",       # so the test can read back the transactions it asserts on
             "-con_blocksubsidy=5000000000", "-initialfreecoins=2100000000000000",
             "-con_connect_genesis_outputs=1",
             "-con_default_blinded_addresses=0", "-blindedaddresses=0",
@@ -223,6 +224,7 @@ class RewardXchainTest(BitcoinTestFramework):
         self.wallet_name = "staker"
         seq.createwallet(wallet_name=self.wallet_name, descriptors=False, blank=False)
         wallet = seq.get_wallet_rpc(self.wallet_name)
+        self.policy_asset = seq.dumpassetlabels()["bitcoin"]
         parent.createwallet(wallet_name="maker")
         pw = parent.get_wallet_rpc("maker")
 
@@ -446,8 +448,9 @@ class RewardXchainTest(BitcoinTestFramework):
 
         left = wallet.resumerewardswaps()
         assert_equal(left, [])
-        states = {s["offer_id"]: s["state"] for s in wallet.listrewardswaps(True)}
-        assert_equal(states[offer_id], "refunded")
+        swaps = {s["offer_id"]: s for s in wallet.listrewardswaps(True)}
+        assert_equal(swaps[offer_id]["state"], "refunded")
+        refund_txid = swaps[offer_id]["refund_txid"]
 
         self.generatetoaddress(seq, 1, wallet.getnewaddress(), sync_fun=self.no_op)
         after = wallet.getbalance()[asset]
@@ -466,12 +469,40 @@ class RewardXchainTest(BitcoinTestFramework):
         # wallet's own coins and the asset comes back WHOLE. That is the better
         # outcome of the two: it is the staker's asset, not the fee's.
         recovered = after - before
+
+        # Which asset actually paid is read off the refund transaction rather
+        # than inferred from balances -- the wallet is also collecting block
+        # subsidies here, and a balance delta cannot tell those apart from a
+        # fee. The fee output is the one with an empty scriptPubKey.
+        rtx = seq.getrawtransaction(refund_txid, True)
+        fee_outs = [o for o in rtx["vout"] if not o["scriptPubKey"]["hex"]]
+        assert_equal(len(fee_outs), 1)
+        fee_asset = fee_outs[0]["asset"]
+        fee_paid = fee_outs[0]["value"]
+
+        # The amount is checked as a property, not a constant: it is derived
+        # from the transaction's MEASURED size at this node's relay rate,
+        # converted into whichever asset pays. Pinning a number would only
+        # record today's rate -- and a flat number is precisely what was wrong
+        # before, since the same atom count is dust in one asset and an absurd
+        # fee in another.
+        assert_greater_than(fee_paid, 0)
+        expected_rate_band = Decimal(rtx["vsize"]) / Decimal(100000000)   # ~1 atom/vB at the default
+        assert_greater_than(fee_paid * 4, expected_rate_band)
+        assert_greater_than(expected_rate_band * 4, fee_paid)
+
         if fee_from_wallet:
+            # The asset comes home WHOLE, and the policy asset paid instead.
             assert_equal(recovered, leg)
-            self.log.info("  the asset came home whole: %s, the fee paid from the wallet", recovered)
+            assert_equal(fee_asset, self.policy_asset)
+            self.log.info("  the asset came home whole: %s, with %s of the policy asset paying",
+                          recovered, fee_paid)
         else:
-            assert_equal(recovered, leg - Decimal("0.00002000"))
-            self.log.info("  the asset came home: %s of %s, having paid its own fee", recovered, leg)
+            # The asset paid for its own rescue, and nothing else was touched.
+            assert_equal(fee_asset, asset)
+            assert_equal(recovered, leg - fee_paid)
+            self.log.info("  the asset came home: %s of %s, having paid %s of itself",
+                          recovered, leg, fee_paid)
 
 
 if __name__ == '__main__':

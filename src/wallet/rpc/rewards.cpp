@@ -393,6 +393,7 @@ UniValue SwapToPublicJson(const XchainSwap& s, int tip, int parent_tip)
         o.pushKV("our_lock", leg);
     }
     if (!s.btc_claim_txid.empty()) o.pushKV("bitcoin_claim_txid", s.btc_claim_txid);
+    if (!s.seq_refund_txid.empty()) o.pushKV("refund_txid", s.seq_refund_txid);
 
     // The refund clocks. Our asset is what is at risk, so its countdown is the
     // one that matters; the maker's is shown too, because a taker who can see
@@ -452,6 +453,7 @@ RPCHelpMan listrewardswaps()
                 {RPCResult::Type::STR_HEX, "txid", ""},
                 {RPCResult::Type::NUM, "vout", ""}}},
             {RPCResult::Type::STR_HEX, "bitcoin_claim_txid", /*optional=*/true, "the claim, once made"},
+            {RPCResult::Type::STR_HEX, "refund_txid", /*optional=*/true, "the refund, if the asset came back instead"},
             {RPCResult::Type::OBJ, "our_refund", /*optional=*/true, "when our asset comes back by itself", {
                 {RPCResult::Type::NUM, "locktime", ""},
                 {RPCResult::Type::NUM, "blocks_to_go", ""}}},
