@@ -571,6 +571,20 @@ XchainOutcome RunXchainConversion(CWallet& wallet, const SeqobOffer& offer, CAmo
         return out;
     }
 
+    // Will the Bitcoin be worth claiming? Claiming an HTLC costs a
+    // parent-chain transaction, and if the leg is worth less than that fee the
+    // swap ends with the asset committed and the proceeds unreachable --
+    // recoverable only by waiting out the timelock. That check already exists
+    // in ClaimBtcLeg, but by then the asset is gone, which is far too late for
+    // it to be useful. So it is made here, before anything is spent.
+    const CAmount claim_cost = ParentFeeratePerVb() * CLAIM_VSIZE;
+    if (want_btc <= claim_cost * 2) {
+        out.error = strprintf(
+            "this would fetch %d satoshis, which does not cover the %d it costs to claim them. "
+            "These rewards wait until there are more of them.", want_btc, claim_cost);
+        return out;
+    }
+
     XchainSwap s;
     s.state = "negotiating";
     s.time = GetTime();
