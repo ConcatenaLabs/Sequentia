@@ -4,6 +4,10 @@
 
 #include <qt/stakingpage.h>
 
+#include <QCheckBox>
+#include <QFormLayout>
+#include <QSignalBlocker>
+
 #include <qt/bitcoinunits.h>
 #include <qt/collapsiblesection.h>
 #include <qt/guiutil.h>
@@ -568,6 +572,73 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
         CollapsibleSection::adopt(op, QStringLiteral("staking/operator"));
     }
 
+    // --- Staking rewards, and converting them ---
+    {
+        QGroupBox* rw = new QGroupBox(tr("Staking rewards"), this);
+        rw->setToolTip(tr("What staking has paid you, in whatever assets the fees were paid in. Sequentia has no "
+                          "block subsidy: a block earns its own transaction fees and nothing else, so rewards "
+                          "arrive in the assets the payers chose."));
+        QVBoxLayout* v = new QVBoxLayout(rw);
+
+        QLabel* blurb = new QLabel(tr("Block rewards are spendable 100 blocks after they are earned; a pool payout "
+                                      "is spendable at once."), rw);
+        blurb->setWordWrap(true);
+        v->addWidget(blurb);
+
+        m_rewards_table = new QTableWidget(0, 3, rw);
+        m_rewards_table->setHorizontalHeaderLabels({tr("Asset"), tr("Spendable"), tr("Maturing")});
+        m_rewards_table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+        m_rewards_table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+        m_rewards_table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+        m_rewards_table->verticalHeader()->setVisible(false);
+        m_rewards_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        v->addWidget(m_rewards_table);
+
+        m_ac_enabled = new QCheckBox(tr("Convert my staking rewards automatically"), rw);
+        m_ac_enabled->setToolTip(tr("Sell each reward for one asset of your choosing on SeqDEX, as the rewards "
+                                    "arrive and whenever there is a market for the pair."));
+        v->addWidget(m_ac_enabled);
+
+        QLabel* warn = new QLabel(tr("<b>Once this is on, the wallet sells without asking again.</b> It never "
+                                     "converts more than staking has paid you, never touches your stake, and never "
+                                     "converts what it cannot get a fair price for — but the selling itself is "
+                                     "unattended, which is the point of it."), rw);
+        warn->setWordWrap(true);
+        v->addWidget(warn);
+
+        m_ac_form = new QWidget(rw);
+        QFormLayout* f = new QFormLayout(m_ac_form);
+        m_ac_target = new QComboBox(m_ac_form);
+        m_ac_target->setToolTip(tr("Bitcoin is the parent chain's own coin, delivered to this wallet's Bitcoin "
+                                   "address. Any other choice is a Sequentia asset, delivered here."));
+        f->addRow(tr("Convert into"), m_ac_target);
+        m_ac_min = new QLineEdit(m_ac_form);
+        m_ac_min->setPlaceholderText(QStringLiteral("0.0001"));
+        m_ac_min->setToolTip(tr("Smaller batches wait for the next reward rather than paying a swap's costs to "
+                                "convert dust."));
+        f->addRow(tr("Only once worth at least"), m_ac_min);
+        m_ac_slippage = new QComboBox(m_ac_form);
+        m_ac_slippage->addItem(tr("0.5% off the reference price"), 50);
+        m_ac_slippage->addItem(tr("1%"), 100);
+        m_ac_slippage->addItem(tr("2%"), 200);
+        m_ac_slippage->addItem(tr("5%"), 500);
+        f->addRow(tr("Refuse a price worse than"), m_ac_slippage);
+        m_ac_save = new QPushButton(tr("Save"), m_ac_form);
+        f->addRow(QString(), m_ac_save);
+        m_ac_form->setVisible(false);
+        v->addWidget(m_ac_form);
+
+        m_ac_status = new QLabel(rw);
+        m_ac_status->setWordWrap(true);
+        v->addWidget(m_ac_status);
+
+        connect(m_ac_enabled, &QCheckBox::toggled, this, &StakingPage::onRewardConvertToggled);
+        connect(m_ac_save, &QPushButton::clicked, this, &StakingPage::onRewardConvertSave);
+
+        layout->addWidget(rw);
+        CollapsibleSection::adopt(rw, QStringLiteral("staking/rewards"));
+    }
+
     // --- Committee / registry status ---
     QGroupBox* statusGroup = new QGroupBox(tr("Stake registry"), this);
     statusGroup->setToolTip(tr("Everyone staking on the network right now, and with how much weight. Your share of "
@@ -718,6 +789,8 @@ void StakingPage::setCardResult(QLabel* result, const QString& msg, bool error)
 
 void StakingPage::refresh()
 {
+    refreshRewards();
+
     // Fetch the stake registry first; the producer banner needs it to verify that a
     // configured producer key is actually staked at/above the chain minimum.
     UniValue reg; bool haveReg = false; QString regErr;
@@ -823,6 +896,148 @@ void StakingPage::scheduleRefresh(bool force)
         self->m_refresh_pending = false;
         self->refresh();
     });
+}
+
+
+//! What staking has paid, and what the standing instruction would do with it.
+//! Everything comes from the wallet RPCs, so the GUI and the command line can
+//! never disagree about a staker's own money.
+void StakingPage::refreshRewards()
+{
+    if (!m_rewards_table) return;
+    if (!m_wallet_model) { m_rewards_table->setRowCount(0); return; }
+
+    bool ok = false;
+    QString err;
+    const UniValue rewards = callRpc("liststakingrewards", UniValue(UniValue::VARR), ok, err, /*wallet=*/true);
+    m_rewards_table->setRowCount(0);
+    if (ok && rewards.isObject() && rewards["totals"].isArray()) {
+        const UniValue& totals = rewards["totals"];
+        for (size_t i = 0; i < totals.size(); ++i) {
+            const UniValue& t = totals[i];
+            const QString name = t["assetlabel"].isStr()
+                ? QString::fromStdString(t["assetlabel"].get_str())
+                : QString::fromStdString(t["asset"].get_str()).left(12) + QStringLiteral("…");
+            const int row = m_rewards_table->rowCount();
+            m_rewards_table->insertRow(row);
+            m_rewards_table->setItem(row, 0, new QTableWidgetItem(name));
+            m_rewards_table->setItem(row, 1, new QTableWidgetItem(QString::fromStdString(t["mature"].getValStr())));
+            m_rewards_table->setItem(row, 2, new QTableWidgetItem(QString::fromStdString(t["immature"].getValStr())));
+        }
+    }
+    if (m_rewards_table->rowCount() == 0) {
+        const int row = m_rewards_table->rowCount();
+        m_rewards_table->insertRow(row);
+        m_rewards_table->setItem(row, 0, new QTableWidgetItem(
+            tr("No staking rewards yet. A block pays its own fees, so rewards appear once a block you "
+               "(or your pool) produced carried some.")));
+        m_rewards_table->setSpan(row, 0, 1, 3);
+    }
+
+    // The standing instruction, and a dry run of what it would do now.
+    const UniValue ac = callRpc("getrewardautoconvert", UniValue(UniValue::VARR), ok, err, /*wallet=*/true);
+    if (!ok || !ac.isObject()) {
+        m_ac_status->setText(err.isEmpty() ? QString() : err);
+        return;
+    }
+
+    const bool enabled = ac["enabled"].isBool() && ac["enabled"].get_bool();
+    {
+        const QSignalBlocker block(m_ac_enabled);
+        m_ac_enabled->setChecked(enabled);
+    }
+    m_ac_form->setVisible(enabled);
+
+    // The target picker: Bitcoin first -- the top seat is the whole of its
+    // privilege here -- then whatever else this wallet holds.
+    const QString target = ac["target"].isStr() ? QString::fromStdString(ac["target"].get_str()) : QStringLiteral("bitcoin");
+    {
+        const QSignalBlocker block(m_ac_target);
+        m_ac_target->clear();
+        m_ac_target->addItem(tr("%1 (Bitcoin)").arg(GUIUtil::parentBtcTicker()), QStringLiteral("bitcoin"));
+        bool bok = false;
+        QString berr;
+        const UniValue bal = callRpc("getbalances", UniValue(UniValue::VARR), bok, berr, /*wallet=*/true);
+        if (bok && bal.isObject() && bal["mine"].isObject() && bal["mine"]["trusted"].isObject()) {
+            const UniValue& trusted = bal["mine"]["trusted"];
+            for (const std::string& key : trusted.getKeys()) {
+                m_ac_target->addItem(QString::fromStdString(key), QString::fromStdString(key));
+            }
+        }
+        const int at = m_ac_target->findData(target);
+        m_ac_target->setCurrentIndex(at >= 0 ? at : 0);
+    }
+    if (ac["min_receive"].isNum() || ac["min_receive"].isStr()) {
+        m_ac_min->setText(QString::fromStdString(ac["min_receive"].getValStr()));
+    }
+    if (ac["max_slippage_bp"].isNum()) {
+        const int at = m_ac_slippage->findData((int)ac["max_slippage_bp"].get_int64());
+        if (at >= 0) m_ac_slippage->setCurrentIndex(at);
+    }
+
+    // What it decided, in the staker's own terms. "Nothing happened" and
+    // "nothing should have happened" look identical otherwise, and the second
+    // is by far the more common.
+    QStringList lines;
+    if (!enabled) {
+        lines << tr("Rewards are being kept as they are.");
+    } else if (ac["considered"].isArray() && ac["considered"].size() > 0) {
+        const UniValue& rows = ac["considered"];
+        for (size_t i = 0; i < rows.size(); ++i) {
+            const UniValue& r = rows[i];
+            const QString name = r["assetlabel"].isStr()
+                ? QString::fromStdString(r["assetlabel"].get_str())
+                : QString::fromStdString(r["asset"].get_str()).left(12) + QStringLiteral("…");
+            lines << QStringLiteral("%1 %2 — %3")
+                         .arg(QString::fromStdString(r["amount"].getValStr()), name,
+                              QString::fromStdString(r["reason"].getValStr()));
+        }
+    } else {
+        lines << tr("Nothing to convert right now. Rewards are gathered per asset until a batch is worth converting.");
+    }
+    if (ac["relay"].isStr() && ac["relay"].get_str().empty()) {
+        lines << tr("No SeqDEX relay is configured, so nothing can be converted: set -seqoburl.");
+    }
+    m_ac_status->setText(lines.join(QStringLiteral("\n")));
+}
+
+void StakingPage::onRewardConvertToggled(bool on)
+{
+    bool ok = false;
+    QString err;
+    UniValue params(UniValue::VARR);
+    params.push_back(on);
+    callRpc("setrewardautoconvert", params, ok, err, /*wallet=*/true);
+    if (!ok) {
+        m_ac_status->setText(err);
+        return;
+    }
+    refreshRewards();
+}
+
+void StakingPage::onRewardConvertSave()
+{
+    bool ok = false;
+    QString err;
+    UniValue params(UniValue::VARR);
+    params.push_back(m_ac_enabled->isChecked());
+    params.push_back(m_ac_target->currentData().toString().toStdString());
+    const QString min = m_ac_min->text().trimmed();
+    if (min.isEmpty()) {
+        params.push_back(UniValue());
+    } else {
+        bool numeric = false;
+        const double v = min.toDouble(&numeric);
+        if (!numeric || v < 0) {
+            m_ac_status->setText(tr("That is not an amount."));
+            return;
+        }
+        params.push_back(UniValue(UniValue::VNUM, min.toStdString()));
+    }
+    params.push_back((int64_t)m_ac_slippage->currentData().toInt());
+    callRpc("setrewardautoconvert", params, ok, err, /*wallet=*/true);
+    m_ac_status->setText(ok ? tr("Saved.") : err);
+    refreshRewards();
 }
 
 void StakingPage::refreshOwnStake(const UniValue& registry)

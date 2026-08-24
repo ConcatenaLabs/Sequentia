@@ -19,6 +19,7 @@ class WalletModel;
 class PlatformStyle;
 
 QT_BEGIN_NAMESPACE
+class QCheckBox;
 class QComboBox;
 class QTableWidget;
 class QLineEdit;
@@ -75,8 +76,27 @@ public:
     explicit StakingPage(const PlatformStyle* platformStyle, QWidget* parent = nullptr);
     void setModel(WalletModel* model);
 
+private:
+    void refreshRewards();
+
+    QTableWidget* m_rewards_table{nullptr};
+    QCheckBox* m_ac_enabled{nullptr};
+    QWidget* m_ac_form{nullptr};
+    QComboBox* m_ac_target{nullptr};
+    QLineEdit* m_ac_min{nullptr};
+    QComboBox* m_ac_slippage{nullptr};
+    QPushButton* m_ac_save{nullptr};
+    QLabel* m_ac_status{nullptr};
+
+public:
+
 public Q_SLOTS:
     void refresh();
+
+private Q_SLOTS:
+    //! Reward auto-conversion: the standing instruction, and what it would do.
+    void onRewardConvertToggled(bool on);
+    void onRewardConvertSave();
 
 protected:
     void showEvent(QShowEvent* event) override;
