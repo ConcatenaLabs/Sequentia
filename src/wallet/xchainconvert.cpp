@@ -218,15 +218,6 @@ UniValue MainChainResult(const std::string& method, const UniValue& params)
     return MainChainPayload(method, CallMainChainRPC(method, params));
 }
 
-//! One output on the parent chain, as the node's own Bitcoin daemon reports it.
-struct ParentOut {
-    bool found{false};
-    CScript spk;
-    CAmount value{0};
-    int height{0};
-    int confirmations{0};
-};
-
 ParentOut ReadParentOutput(const std::string& txid, uint32_t vout)
 {
     ParentOut out;
@@ -422,6 +413,33 @@ std::optional<int> ParentChainTip()
     return std::nullopt;
 }
 
+std::string CheckMakerBtcLeg(const XchainSwap& s, const ParentOut& out)
+{
+    // The script first: what the maker SAYS it locked. A script that is not the
+    // one agreed is not the maker's mistake to make -- each of these is a way of
+    // handing over an asset for a contract that cannot pay.
+    const CScript witness_script(s.btc_leg_script.begin(), s.btc_leg_script.end());
+    const auto terms = ParseHtlcRedeemScript(witness_script);
+    if (!terms) return "the maker's Bitcoin lock is not an HTLC";
+    if (terms->hash != s.hash_h) return "the maker's Bitcoin lock uses a different hash";
+    if (terms->claim_pub != s.taker_btc_claim_pub) {
+        return "the maker's Bitcoin lock cannot be claimed by this wallet";
+    }
+    if (terms->locktime != s.btc_locktime) return "the maker's Bitcoin lock has a different timelock";
+
+    // Then the chain: what the maker ACTUALLY locked. A script that checks out
+    // proves nothing on its own -- the output it was supposed to fund is a
+    // separate claim, and it is the one that can quietly be false.
+    if (!out.found) return "could not read the maker's Bitcoin lock from the parent chain";
+    if (out.spk != HtlcP2wshSpk(witness_script)) {
+        return "the output the maker pointed at does not pay the script it described";
+    }
+    if (out.value < s.btc_amount) {
+        return strprintf("the maker locked %d satoshis, not the %d agreed", out.value, s.btc_amount);
+    }
+    return "";
+}
+
 std::vector<XchainSwap> LoadXchainSwaps(const CWallet& wallet)
 {
     std::vector<XchainSwap> out;
@@ -471,27 +489,9 @@ CAmount ProportionalBtcFloor(CAmount whole_btc, CAmount take, CAmount whole_asse
 //! said. The message is a claim; the coin is the fact.
 bool VerifyMakerBtcLeg(XchainSwap& s, std::string& why)
 {
-    const auto script_bytes = s.btc_leg_script;
-    const CScript witness_script(script_bytes.begin(), script_bytes.end());
-    const auto terms = ParseHtlcRedeemScript(witness_script);
-    if (!terms) { why = "the maker's Bitcoin lock is not an HTLC"; return false; }
-    if (terms->hash != s.hash_h) { why = "the maker's Bitcoin lock uses a different hash"; return false; }
-    if (terms->claim_pub != s.taker_btc_claim_pub) {
-        why = "the maker's Bitcoin lock cannot be claimed by this wallet";
-        return false;
-    }
-    if (terms->locktime != s.btc_locktime) { why = "the maker's Bitcoin lock has a different timelock"; return false; }
-
     const ParentOut out = ReadParentOutput(s.btc_leg_txid, s.btc_leg_vout);
-    if (!out.found) { why = "could not read the maker's Bitcoin lock from the parent chain"; return false; }
-    if (out.spk != HtlcP2wshSpk(witness_script)) {
-        why = "the output the maker pointed at does not pay the script it described";
-        return false;
-    }
-    if (out.value < s.btc_amount) {
-        why = strprintf("the maker locked %d satoshis, not the %d agreed", out.value, s.btc_amount);
-        return false;
-    }
+    why = CheckMakerBtcLeg(s, out);
+    if (!why.empty()) return false;
     s.btc_leg_height = out.height;
     return true;
 }

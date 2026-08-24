@@ -11,6 +11,9 @@
 
 #include <wallet/htlc.h>
 #include <wallet/xchainconvert.h>
+#include <crypto/sha256.h>
+#include <key.h>
+#include <script/standard.h>
 
 #include <test/util/setup_common.h>
 #include <util/strencodings.h>
@@ -108,9 +111,6 @@ BOOST_AUTO_TEST_CASE(both_chains_pay_the_same_script_their_own_way)
     BOOST_CHECK(HexStr(p2sh) != HexStr(p2wsh));
 }
 
-BOOST_AUTO_TEST_SUITE_END()
-} // namespace wallet
-
 //! The parent-chain JSON-RPC envelope.
 //!
 //! This is here because getting it wrong is silent. CallMainChainRPC hands back
@@ -128,13 +128,13 @@ BOOST_AUTO_TEST_CASE(mainchain_payload_unwraps_the_envelope)
     reply.pushKV("error", NullUniValue);
     reply.pushKV("id", 1);
 
-    const UniValue got = wallet::MainChainPayload("estimatesmartfee", reply);
+    const UniValue got = MainChainPayload("estimatesmartfee", reply);
     BOOST_CHECK(got.isObject());
     BOOST_CHECK(got.exists("feerate"));
 
     // The mistake itself: the payload handed in where the envelope belongs. It
     // must not read as an empty-but-fine answer.
-    BOOST_CHECK_THROW(wallet::MainChainPayload("estimatesmartfee", inner), std::runtime_error);
+    BOOST_CHECK_THROW(MainChainPayload("estimatesmartfee", inner), std::runtime_error);
 
     // An error in the envelope is an error, not an empty result.
     UniValue bad(UniValue::VOBJ);
@@ -143,5 +143,145 @@ BOOST_AUTO_TEST_CASE(mainchain_payload_unwraps_the_envelope)
     e.pushKV("code", -5);
     e.pushKV("message", "No such mempool transaction");
     bad.pushKV("error", e);
-    BOOST_CHECK_THROW(wallet::MainChainPayload("getrawtransaction", bad), std::runtime_error);
+    BOOST_CHECK_THROW(MainChainPayload("getrawtransaction", bad), std::runtime_error);
 }
+
+
+//! Every way the maker's Bitcoin lock can fail to be the agreed one.
+//!
+//! This is the check the staker's money rests on. Everything before it is talk;
+//! the next thing that happens once it says yes is that an asset gets locked in
+//! a contract. So each refusal here is a way a maker could take an asset and
+//! give nothing back, and each one gets a test that watches it refuse -- a
+//! fund-safety check nobody has seen say no is a check nobody knows works.
+namespace {
+struct MakerLegFixture {
+    XchainSwap swap;
+    CScript script;
+    CKey claim_key, refund_key;
+
+    MakerLegFixture()
+    {
+        claim_key.MakeNewKey(true);
+        refund_key.MakeNewKey(true);
+        const std::vector<unsigned char> preimage(32, 0x11);
+        unsigned char digest[CSHA256::OUTPUT_SIZE];
+        CSHA256().Write(preimage.data(), preimage.size()).Finalize(digest);
+
+        swap.hash_h.assign(digest, digest + 32);
+        const CPubKey cp = claim_key.GetPubKey();
+        const CPubKey rp = refund_key.GetPubKey();
+        swap.taker_btc_claim_pub.assign(cp.begin(), cp.end());
+        swap.maker_btc_refund_pub.assign(rp.begin(), rp.end());
+        swap.btc_locktime = 800000;
+        swap.btc_amount = 100000;
+
+        script = *BuildHtlcRedeemScript(swap.hash_h, swap.taker_btc_claim_pub,
+                                        swap.maker_btc_refund_pub, swap.btc_locktime);
+        swap.btc_leg_script.assign(script.begin(), script.end());
+    }
+
+    ParentOut GoodOutput() const
+    {
+        ParentOut o;
+        o.found = true;
+        o.spk = HtlcP2wshSpk(script);
+        o.value = 100000;
+        o.height = 900;
+        o.confirmations = 6;
+        return o;
+    }
+};
+}  // namespace
+
+BOOST_AUTO_TEST_CASE(maker_btc_leg_accepts_the_agreed_lock)
+{
+    MakerLegFixture f;
+    BOOST_CHECK_EQUAL(CheckMakerBtcLeg(f.swap, f.GoodOutput()), "");
+
+    // More than agreed is fine. A maker that overpays is not a problem.
+    ParentOut generous = f.GoodOutput();
+    generous.value = 100001;
+    BOOST_CHECK_EQUAL(CheckMakerBtcLeg(f.swap, generous), "");
+}
+
+BOOST_AUTO_TEST_CASE(maker_btc_leg_refuses_a_script_that_is_not_the_agreed_one)
+{
+    // Not an HTLC at all.
+    {
+        MakerLegFixture f;
+        const CScript junk = CScript() << OP_TRUE;
+        f.swap.btc_leg_script.assign(junk.begin(), junk.end());
+        BOOST_CHECK(!CheckMakerBtcLeg(f.swap, f.GoodOutput()).empty());
+    }
+
+    // Locks a different secret: we could never claim it, only the maker could.
+    {
+        MakerLegFixture f;
+        auto other = f.swap.hash_h;
+        other[0] ^= 0xff;
+        const CScript s = *BuildHtlcRedeemScript(other, f.swap.taker_btc_claim_pub,
+                                                 f.swap.maker_btc_refund_pub, f.swap.btc_locktime);
+        f.swap.btc_leg_script.assign(s.begin(), s.end());
+        BOOST_CHECK(!CheckMakerBtcLeg(f.swap, f.GoodOutput()).empty());
+    }
+
+    // Claimable by somebody else. The nastiest of the lot: the secret is right,
+    // the amount is right, and revealing the secret hands the asset over for a
+    // contract that pays a stranger.
+    {
+        MakerLegFixture f;
+        CKey thief;
+        thief.MakeNewKey(true);
+        const CPubKey tp = thief.GetPubKey();
+        const std::vector<unsigned char> theirs(tp.begin(), tp.end());
+        const CScript s = *BuildHtlcRedeemScript(f.swap.hash_h, theirs,
+                                                 f.swap.maker_btc_refund_pub, f.swap.btc_locktime);
+        f.swap.btc_leg_script.assign(s.begin(), s.end());
+        BOOST_CHECK(!CheckMakerBtcLeg(f.swap, f.GoodOutput()).empty());
+    }
+
+    // A shorter timelock than agreed: the maker could take its Bitcoin back
+    // before we had any reason to claim it.
+    {
+        MakerLegFixture f;
+        const CScript s = *BuildHtlcRedeemScript(f.swap.hash_h, f.swap.taker_btc_claim_pub,
+                                                 f.swap.maker_btc_refund_pub, 700000);
+        f.swap.btc_leg_script.assign(s.begin(), s.end());
+        BOOST_CHECK(!CheckMakerBtcLeg(f.swap, f.GoodOutput()).empty());
+    }
+}
+
+BOOST_AUTO_TEST_CASE(maker_btc_leg_refuses_what_the_chain_does_not_bear_out)
+{
+    MakerLegFixture f;
+
+    // Unreadable is not "absent, therefore fine". A parent daemon that is
+    // momentarily unavailable must never be mistaken for a verified lock.
+    {
+        ParentOut missing;
+        missing.found = false;
+        BOOST_CHECK(!CheckMakerBtcLeg(f.swap, missing).empty());
+    }
+
+    // The script is the agreed one, but the output does not pay it. This is the
+    // check that makes the script check mean anything: a maker can describe a
+    // perfect contract and fund something else entirely.
+    {
+        ParentOut elsewhere = f.GoodOutput();
+        CKey other;
+        other.MakeNewKey(true);
+        elsewhere.spk = GetScriptForDestination(PKHash(other.GetPubKey()));
+        BOOST_CHECK(!CheckMakerBtcLeg(f.swap, elsewhere).empty());
+    }
+
+    // Underfunded by one satoshi is still underfunded.
+    {
+        ParentOut short_paid = f.GoodOutput();
+        short_paid.value = 99999;
+        BOOST_CHECK(!CheckMakerBtcLeg(f.swap, short_paid).empty());
+    }
+}
+
+BOOST_AUTO_TEST_SUITE_END()
+} // namespace wallet
