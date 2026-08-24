@@ -632,8 +632,43 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
         m_ac_status->setWordWrap(true);
         v->addWidget(m_ac_status);
 
+        // Converting into Bitcoin is a swap across two chains, so there is a
+        // stretch where the asset is locked in a contract and the Bitcoin has
+        // not arrived. Nothing needs doing during it -- the wallet finishes or
+        // refunds by itself -- but a staker who cannot SEE it has no way to
+        // tell a swap that is merely slow from one that has gone wrong. This
+        // appears only while there is something to show.
+        m_swaps_box = new QWidget(rw);
+        {
+            QVBoxLayout* sv = new QVBoxLayout(m_swaps_box);
+            sv->setContentsMargins(0, 8, 0, 0);
+            m_swaps_intro = new QLabel(m_swaps_box);
+            m_swaps_intro->setWordWrap(true);
+            sv->addWidget(m_swaps_intro);
+            m_swaps_table = new QTableWidget(0, 4, m_swaps_box);
+            m_swaps_table->setHorizontalHeaderLabels(
+                {tr("Selling"), tr("For"), tr("Stage"), tr("If nothing happens")});
+            m_swaps_table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+            m_swaps_table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+            m_swaps_table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+            m_swaps_table->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
+            m_swaps_table->verticalHeader()->setVisible(false);
+            m_swaps_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+            sv->addWidget(m_swaps_table);
+            m_swaps_resume = new QPushButton(tr("Carry these on now"), m_swaps_box);
+            m_swaps_resume->setToolTip(tr("The wallet does this by itself every couple of minutes. This is for "
+                                          "when you would rather not wait."));
+            QHBoxLayout* srow = new QHBoxLayout();
+            srow->addStretch();
+            srow->addWidget(m_swaps_resume);
+            sv->addLayout(srow);
+        }
+        m_swaps_box->setVisible(false);
+        v->addWidget(m_swaps_box);
+
         connect(m_ac_enabled, &QCheckBox::toggled, this, &StakingPage::onRewardConvertToggled);
         connect(m_ac_save, &QPushButton::clicked, this, &StakingPage::onRewardConvertSave);
+        connect(m_swaps_resume, &QPushButton::clicked, this, &StakingPage::onResumeSwaps);
 
         layout->addWidget(rw);
         CollapsibleSection::adopt(rw, QStringLiteral("staking/rewards"));
@@ -999,6 +1034,95 @@ void StakingPage::refreshRewards()
         lines << tr("No SeqDEX relay is configured, so nothing can be converted: set -seqoburl.");
     }
     m_ac_status->setText(lines.join(QStringLiteral("\n")));
+
+    refreshSwaps();
+}
+
+//! Cross-chain conversions that have started and not finished.
+//!
+//! The staker is not being asked to do anything here. The wallet claims the
+//! Bitcoin the moment the maker reveals the secret, and takes the asset back
+//! when the timelock passes, whether or not anyone is watching. What this
+//! answers is the question that arises anyway once an asset has left the
+//! balance: where is it, and what happens if nothing else does.
+void StakingPage::refreshSwaps()
+{
+    if (!m_swaps_box || !m_swaps_table) return;
+    if (!m_wallet_model) { m_swaps_box->setVisible(false); return; }
+
+    bool ok = false;
+    QString err;
+    const UniValue swaps = callRpc("listrewardswaps", UniValue(UniValue::VARR), ok, err, /*wallet=*/true);
+    m_swaps_table->setRowCount(0);
+    if (!ok || !swaps.isArray() || swaps.empty()) {
+        m_swaps_box->setVisible(false);
+        return;
+    }
+
+    for (size_t i = 0; i < swaps.size(); ++i) {
+        const UniValue& sw = swaps[i];
+        const QString asset = sw["assetlabel"].isStr()
+            ? QString::fromStdString(sw["assetlabel"].get_str())
+            : QString::fromStdString(sw["asset"].get_str()).left(12) + QStringLiteral("…");
+
+        // The stage, said in terms of what has happened rather than in the
+        // state machine's own words.
+        const std::string state = sw["state"].isStr() ? sw["state"].get_str() : "";
+        QString stage;
+        if (state == "negotiating")      stage = tr("agreeing terms");
+        else if (state == "btc_locked")  stage = tr("the maker has locked its Bitcoin");
+        else if (state == "seq_funded")  stage = tr("your asset is locked, waiting on the maker");
+        else                             stage = QString::fromStdString(state);
+
+        // And what happens if nobody does anything at all. For a funded swap
+        // that is the refund, which is the answer that actually reassures.
+        QString outcome;
+        if (sw["our_refund"].isObject()) {
+            const int64_t to_go = sw["our_refund"]["blocks_to_go"].isNum()
+                                      ? sw["our_refund"]["blocks_to_go"].get_int64() : 0;
+            outcome = to_go > 0
+                ? tr("your asset returns to you in %n block(s)", "", (int)to_go)
+                : tr("your asset is due back now; the wallet is taking it");
+        } else if (sw["maker_refund"].isObject()) {
+            outcome = tr("nothing of yours is locked in this one yet");
+        }
+        if (sw["error"].isStr() && !sw["error"].get_str().empty()) {
+            outcome += QStringLiteral(" — ") + QString::fromStdString(sw["error"].get_str());
+        }
+
+        const int row = m_swaps_table->rowCount();
+        m_swaps_table->insertRow(row);
+        m_swaps_table->setItem(row, 0, new QTableWidgetItem(
+            QString::fromStdString(sw["amount"].getValStr()) + QStringLiteral(" ") + asset));
+        m_swaps_table->setItem(row, 1, new QTableWidgetItem(
+            QString::fromStdString(sw["btc_expected"].getValStr()) + QStringLiteral(" BTC")));
+        m_swaps_table->setItem(row, 2, new QTableWidgetItem(stage));
+        m_swaps_table->setItem(row, 3, new QTableWidgetItem(outcome));
+    }
+
+    m_swaps_intro->setText(tr("Converting into Bitcoin happens across two chains, so there is a stretch where "
+                              "your asset is locked in a contract and the Bitcoin has not arrived. You do not "
+                              "have to do anything: the wallet takes the Bitcoin as soon as the maker reveals "
+                              "the secret, and takes your asset back if the maker never does."));
+    m_swaps_box->setVisible(true);
+}
+
+void StakingPage::onResumeSwaps()
+{
+    if (!m_wallet_model) return;
+    bool ok = false;
+    QString err;
+    m_swaps_resume->setEnabled(false);
+    const UniValue left = callRpc("resumerewardswaps", UniValue(UniValue::VARR), ok, err, /*wallet=*/true);
+    m_swaps_resume->setEnabled(true);
+    if (!ok) {
+        m_ac_status->setText(tr("Could not carry the swaps on: %1").arg(err));
+        return;
+    }
+    if (left.isArray() && left.empty()) {
+        m_ac_status->setText(tr("Every swap is finished."));
+    }
+    refreshSwaps();
 }
 
 void StakingPage::onRewardConvertToggled(bool on)

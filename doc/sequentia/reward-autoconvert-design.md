@@ -232,7 +232,24 @@ expected back, and how many blocks remain before an unfinished swap refunds
 itself. It deliberately does not print the keys that redeem either leg, since
 those are in the same record. `resumerewardswaps` carries every unfinished swap
 as far as it can go right now, which the wallet also does by itself every two
-minutes; it exists for the staker who would rather not wait.
+minutes; it exists for the staker who would rather not wait. The Qt wallet shows
+the same thing on its Staking page, appearing only while there is a swap to
+show, and offers the same button.
+
+The countdown appears only once something of the staker's is actually locked. A
+swap that agreed a timelock but never funded has nothing to refund, and showing
+it a countdown would say the asset is at risk while it sits safely in the
+wallet. A swap that ended in a refund records where the asset went, the same way
+one that ended in a claim records the claim.
+
+A swap interrupted before anything was committed — the node stopped between
+agreeing terms and funding — is eventually written off rather than left
+unfinished for good. It is deliberately **not** funded instead: the maker's
+session ended when the node did, and by then it has almost certainly taken its
+own Bitcoin back, so funding would lock the staker's asset until our own
+timelock for no possible gain. The write-off waits out the longest a live pass
+can hold a swap, so that the resume pass can never retire a swap another thread
+is still working on.
 
 The endings are two, and the wallet executes both alone:
 
@@ -298,7 +315,7 @@ to the next batch.
 
 | | attribution | policy | execution |
 | --- | --- | --- | --- |
-| node / Qt | `liststakingrewards` | `wallet/rewardconvert` | covenant fill + cross-chain HTLC, on the node's scheduler |
+| node / Qt | `liststakingrewards` | `wallet/rewardconvert` | covenant fill + cross-chain HTLC, on the node's scheduler; swaps in flight via `listrewardswaps` |
 | web wallet | SWK (wasm) | SWK (wasm) | `takeMarketWalk` / `driveReverse` |
 | extension | SWK (wasm) | SWK (wasm) | covenant fill / the Lightning rail |
 | Ambra | SWK (`api::rewards`) | SWK (`api::rewards`) | the phone's existing swap services |

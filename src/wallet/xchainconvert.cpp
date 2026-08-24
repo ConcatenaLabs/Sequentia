@@ -67,6 +67,12 @@ constexpr int SESSION_TIMEOUT_S = 20;
 constexpr int BTC_CONF_POLL_S = 30;
 constexpr int BTC_CONF_MAX_WAIT_S = 3 * 60 * 60;
 
+//! When a swap that never committed anything is written off. It has to be
+//! comfortably longer than the longest a live pass can hold one -- otherwise
+//! the resume pass would retire a swap another thread is still working on, and
+//! then that thread would fund against a record already marked dead.
+constexpr int STRANDED_AFTER_S = BTC_CONF_MAX_WAIT_S + 60 * 60;
+
 //! A parent-chain fee rate this node will not exceed no matter what
 //! estimatesmartfee says. testnet4's estimator runs hot enough to eat a small
 //! claim whole, and a claim that pays more than it collects is not a claim.
@@ -974,7 +980,32 @@ void ResumeXchainSwaps(CWallet& wallet)
 
     for (XchainSwap& s : swaps) {
         if (s.Terminal()) continue;
-        if (s.state != "seq_funded") continue;   // nothing was committed yet
+
+        if (s.state != "seq_funded") {
+            // Nothing of ours was committed, so there is nothing to rescue --
+            // but a swap left here by a node that stopped mid-negotiation would
+            // otherwise sit unfinished for good, and an unfinished swap is
+            // something a staker has to keep wondering about.
+            //
+            // It is NOT funded now instead. The maker's session ended when the
+            // node did; by this point it has almost certainly taken its own
+            // Bitcoin back, and funding into that would lock the staker's asset
+            // until our own timelock for no possible gain.
+            //
+            // The wait is what makes this safe against the live pass, which
+            // holds a swap in btc_locked while it waits for the maker's lock to
+            // confirm. Past that window no pass can still be holding it, so
+            // retiring it cannot pull the record out from under one.
+            if (s.time > 0 && GetTime() - s.time > STRANDED_AFTER_S) {
+                s.state = "failed";
+                s.error = "this swap was interrupted before anything of yours was committed, and "
+                          "too long ago to still be in progress; nothing was spent";
+                dirty = true;
+                LogPrintf("[rewards] cross-chain: retiring %s, interrupted at '%s' and long stale\n",
+                          s.offer_id, s.state);
+            }
+            continue;
+        }
 
         // 1. Has the maker taken the asset? Then the secret is on chain, and
         //    the Bitcoin is ours to take.
