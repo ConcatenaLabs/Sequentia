@@ -223,6 +223,59 @@ trusted with funds. Adding a TLS dependency for a wallet convenience would be a
 reproducible-build change out of all proportion to the feature; running a relay
 locally, or terminating TLS in front of the node, is the operator's call.
 
+### Watching a swap, and the two ways it can end
+
+A cross-chain conversion is the one part of this feature with a middle: a period
+where the staker's asset is locked in a contract and the Bitcoin has not arrived.
+`listrewardswaps` is where that period is visible — what is locked, what is
+expected back, and how many blocks remain before an unfinished swap refunds
+itself. It deliberately does not print the keys that redeem either leg, since
+those are in the same record. `resumerewardswaps` carries every unfinished swap
+as far as it can go right now, which the wallet also does by itself every two
+minutes; it exists for the staker who would rather not wait.
+
+The endings are two, and the wallet executes both alone:
+
+- **the maker takes the asset.** It cannot do that without publishing the secret,
+  because taking it means spending our contract down its hashlock branch. The
+  wallet reads the secret off the Sequentia chain and uses it to take the
+  maker's Bitcoin, paying the proceeds to its own parent-chain address;
+- **the maker walks away.** The timelock passes and the wallet takes the asset
+  back. This needs nobody's cooperation, which is the whole reason the order of
+  operations above is safe.
+
+Two things about the refund are worth stating, because both were wrong once and
+neither is visible until the day it matters:
+
+- **it pays its fee in the asset it is refunding**, when this node accepts that
+  asset for fees. Paying in the policy asset instead leaves the transaction
+  unbalanced in two assets at once — short by the fee in the one it holds, and
+  inventing the fee in one it does not — so it is rejected every time. Rewards
+  are mostly not the policy asset; that is what an open fee market means, and it
+  is exactly the case that used to fail;
+- **when the node does not accept that asset for fees**, the fee comes from the
+  wallet's own coins instead and the asset comes back whole. Usually the first
+  path is the one taken, for a pleasing reason: a staking reward IS a fee
+  somebody already paid, so a reward asset is by construction one that producers
+  were accepting. But rates come and go, and a safety net that only works while
+  a rate happens to be listed is not a safety net.
+
+### What the parent chain has to be
+
+Converting to native BTC means reading the parent chain, and the node reads it
+through the same `-mainchainrpc*` connection pegins use. Two requirements follow,
+and both are silent when unmet:
+
+- the parent daemon needs **`-txindex`**. The wallet looks the maker's lock up by
+  txid alone, which a daemon that did not index it cannot answer. This is the
+  same requirement pegins already place on the parent;
+- the parent's **fee estimate** is what sizes the claim. Where there is no
+  estimate — a freshly synced daemon, a regtest chain with no history — the node
+  assumes the CEILING rather than a cheerful default. Assuming cheap would be
+  wrong in both directions at once: it would let through swaps whose proceeds
+  cannot cover collecting them, and it would underpay a claim that must confirm
+  before the maker's own timelock expires.
+
 ## Settings
 
 One set of settings, the same names in every wallet:

@@ -646,6 +646,8 @@ RPCHelpMan liststakingrewards();
 RPCHelpMan getrewardautoconvert();
 RPCHelpMan setrewardautoconvert();
 RPCHelpMan convertrewards();
+RPCHelpMan listrewardswaps();
+RPCHelpMan resumerewardswaps();
 RPCHelpMan getseqdexstatus();
 RPCHelpMan getbtcbalance();
 RPCHelpMan sendbtctoaddress();
@@ -767,6 +769,8 @@ static const CRPCCommand commands[] =
     { "wallet",             &getrewardautoconvert,           },
     { "wallet",             &setrewardautoconvert,           },
     { "wallet",             &convertrewards,                 },
+    { "wallet",             &listrewardswaps,                },
+    { "wallet",             &resumerewardswaps,              },
     { "wallet",             &getseqdexstatus,                },
     { "wallet",             &getbtcbalance,                  },
     { "wallet",             &sendbtctoaddress,               },

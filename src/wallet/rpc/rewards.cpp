@@ -11,6 +11,7 @@
 #include <util/moneystr.h>
 #include <wallet/rewardconvert.h>
 #include <wallet/rewardexec.h>
+#include <wallet/xchainconvert.h>
 #include <wallet/rpc/util.h>
 #include <wallet/wallet.h>
 
@@ -349,6 +350,173 @@ RPCHelpMan getseqdexstatus()
     }
     out.pushKV("courier_reachable", ws_ok);
     if (!first_error.empty()) out.pushKV("error", first_error);
+    return out;
+},
+    };
+}
+
+
+namespace {
+
+//! One cross-chain swap, as a staker needs to see it.
+//!
+//! Deliberately not a dump of the record: it holds the private keys that redeem
+//! both legs, and an RPC that prints those turns a listing into a way to lose
+//! the swap. What a staker actually needs is what is locked, what is expected
+//! back, and -- for a swap that is stuck -- how long until the asset comes home
+//! on its own.
+UniValue SwapToPublicJson(const XchainSwap& s, int tip, int parent_tip)
+{
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("state", s.state);
+    o.pushKV("time", s.time);
+    o.pushKV("offer_id", s.offer_id);
+    o.pushKV("maker", s.maker_pubkey);
+    o.pushKV("asset", s.asset.GetHex());
+    const std::string label = gAssetsDir.GetLabel(s.asset);
+    if (!label.empty()) o.pushKV("assetlabel", label);
+    o.pushKV("amount", ValueFromAmount(s.seq_amount));
+    o.pushKV("btc_expected", ValueFromAmount(s.btc_amount));
+
+    if (!s.btc_leg_txid.empty()) {
+        UniValue leg(UniValue::VOBJ);
+        leg.pushKV("txid", s.btc_leg_txid);
+        leg.pushKV("vout", (uint64_t)s.btc_leg_vout);
+        leg.pushKV("amount", ValueFromAmount(s.btc_leg_amount));
+        leg.pushKV("height", s.btc_leg_height);
+        o.pushKV("maker_bitcoin_lock", leg);
+    }
+    if (!s.seq_fund_txid.empty()) {
+        UniValue leg(UniValue::VOBJ);
+        leg.pushKV("txid", s.seq_fund_txid);
+        leg.pushKV("vout", (uint64_t)s.seq_fund_vout);
+        o.pushKV("our_lock", leg);
+    }
+    if (!s.btc_claim_txid.empty()) o.pushKV("bitcoin_claim_txid", s.btc_claim_txid);
+
+    // The refund clocks. Our asset is what is at risk, so its countdown is the
+    // one that matters; the maker's is shown too, because a taker who can see
+    // both can tell a swap that is merely slow from one that has gone wrong.
+    if (s.seq_locktime > 0 && !s.Terminal()) {
+        UniValue r(UniValue::VOBJ);
+        r.pushKV("locktime", (uint64_t)s.seq_locktime);
+        r.pushKV("blocks_to_go", std::max<int64_t>(0, (int64_t)s.seq_locktime - tip));
+        o.pushKV("our_refund", r);
+    }
+    if (s.btc_locktime > 0 && !s.Terminal() && parent_tip > 0) {
+        UniValue r(UniValue::VOBJ);
+        r.pushKV("locktime", (uint64_t)s.btc_locktime);
+        r.pushKV("blocks_to_go", std::max<int64_t>(0, (int64_t)s.btc_locktime - parent_tip));
+        o.pushKV("maker_refund", r);
+    }
+    if (!s.error.empty()) o.pushKV("error", s.error);
+    return o;
+}
+
+} // namespace
+
+namespace {
+int ParentTipOrZero()
+{
+    return ParentChainTip().value_or(0);
+}
+} // namespace
+
+RPCHelpMan listrewardswaps()
+{
+    return RPCHelpMan{"listrewardswaps",
+        "\nCross-chain reward conversions this wallet has in flight, and the ones it finished.\n"
+        "\nA conversion to native Bitcoin is a two-legged swap, so between starting and finishing it\n"
+        "there is a period where an asset of yours is locked in a contract. This is where you see\n"
+        "that: what is locked, what is coming back, and how many blocks remain before an unfinished\n"
+        "swap refunds itself to you.\n",
+        {
+            {"include_finished", RPCArg::Type::BOOL, RPCArg::Default{false},
+             "also list swaps that have already been claimed, refunded or abandoned"},
+        },
+        RPCResult{RPCResult::Type::ARR, "", "", {{RPCResult::Type::OBJ, "", "", {
+            {RPCResult::Type::STR, "state", "negotiating, btc_locked, seq_funded, btc_claimed, refunded or failed"},
+            {RPCResult::Type::NUM_TIME, "time", "when the swap started"},
+            {RPCResult::Type::STR, "offer_id", "the SeqDEX offer being taken"},
+            {RPCResult::Type::STR_HEX, "maker", "the maker's public key"},
+            {RPCResult::Type::STR_HEX, "asset", "the asset being sold"},
+            {RPCResult::Type::STR, "assetlabel", /*optional=*/true, "its label, if it has one"},
+            {RPCResult::Type::STR_AMOUNT, "amount", "how much of it"},
+            {RPCResult::Type::STR_AMOUNT, "btc_expected", "the Bitcoin it should fetch"},
+            {RPCResult::Type::OBJ, "maker_bitcoin_lock", /*optional=*/true, "the maker's locked Bitcoin", {
+                {RPCResult::Type::STR_HEX, "txid", ""},
+                {RPCResult::Type::NUM, "vout", ""},
+                {RPCResult::Type::STR_AMOUNT, "amount", ""},
+                {RPCResult::Type::NUM, "height", ""}}},
+            {RPCResult::Type::OBJ, "our_lock", /*optional=*/true, "our locked asset", {
+                {RPCResult::Type::STR_HEX, "txid", ""},
+                {RPCResult::Type::NUM, "vout", ""}}},
+            {RPCResult::Type::STR_HEX, "bitcoin_claim_txid", /*optional=*/true, "the claim, once made"},
+            {RPCResult::Type::OBJ, "our_refund", /*optional=*/true, "when our asset comes back by itself", {
+                {RPCResult::Type::NUM, "locktime", ""},
+                {RPCResult::Type::NUM, "blocks_to_go", ""}}},
+            {RPCResult::Type::OBJ, "maker_refund", /*optional=*/true, "when the maker's Bitcoin comes back", {
+                {RPCResult::Type::NUM, "locktime", ""},
+                {RPCResult::Type::NUM, "blocks_to_go", ""}}},
+            {RPCResult::Type::STR, "error", /*optional=*/true, "what went wrong, if anything did"},
+        }}}},
+        RPCExamples{HelpExampleCli("listrewardswaps", "") + HelpExampleRpc("listrewardswaps", "true")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    const std::shared_ptr<const CWallet> wallet = GetWalletForJSONRPCRequest(request);
+    if (!wallet) return NullUniValue;
+
+    const bool include_finished = !request.params[0].isNull() && request.params[0].get_bool();
+    int tip = 0;
+    {
+        LOCK(wallet->cs_wallet);
+        tip = wallet->GetLastBlockHeight();
+    }
+    const int parent_tip = ParentTipOrZero();
+
+    UniValue out(UniValue::VARR);
+    for (const XchainSwap& s : LoadXchainSwaps(*wallet)) {
+        if (s.Terminal() && !include_finished) continue;
+        out.push_back(SwapToPublicJson(s, tip, parent_tip));
+    }
+    return out;
+},
+    };
+}
+
+RPCHelpMan resumerewardswaps()
+{
+    return RPCHelpMan{"resumerewardswaps",
+        "\nCarry every unfinished cross-chain reward conversion as far as it can go, right now.\n"
+        "\nThe wallet does this by itself every couple of minutes; this is for when you would rather\n"
+        "not wait. It claims the Bitcoin from any swap whose maker has revealed the secret, and takes\n"
+        "back the asset from any swap whose refund time has arrived. It is safe to call at any time,\n"
+        "and does nothing at all when there is nothing to carry.\n",
+        {},
+        RPCResult{RPCResult::Type::ARR, "", "the swaps still unfinished afterwards",
+                  {{RPCResult::Type::OBJ, "", "", {
+                      {RPCResult::Type::ELISION, "", "as returned by listrewardswaps"},
+                  }}}},
+        RPCExamples{HelpExampleCli("resumerewardswaps", "") + HelpExampleRpc("resumerewardswaps", "")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    const std::shared_ptr<CWallet> wallet = GetWalletForJSONRPCRequest(request);
+    if (!wallet) return NullUniValue;
+
+    ResumeXchainSwaps(*wallet);
+
+    int tip = 0;
+    {
+        LOCK(wallet->cs_wallet);
+        tip = wallet->GetLastBlockHeight();
+    }
+    const int parent_tip = ParentTipOrZero();
+
+    UniValue out(UniValue::VARR);
+    for (const XchainSwap& s : LoadXchainSwaps(*wallet)) {
+        if (s.Terminal()) continue;
+        out.push_back(SwapToPublicJson(s, tip, parent_tip));
+    }
     return out;
 },
     };

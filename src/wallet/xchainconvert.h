@@ -127,6 +127,9 @@ std::vector<XchainSwap> LoadXchainSwaps(const CWallet& wallet);
 //! is exactly what a test has to catch.
 UniValue MainChainPayload(const std::string& method, const UniValue& reply);
 
+//! The parent chain's height, or nothing when it cannot be read.
+std::optional<int> ParentChainTip();
+
 } // namespace wallet
 
 #endif // BITCOIN_WALLET_XCHAINCONVERT_H
