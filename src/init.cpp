@@ -659,6 +659,10 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-mainchainrpcpassword=<pwd>", "The rpc password which the daemon will use to connect to the trusted mainchain daemon to validate peg-ins, if enabled. (default: cookie auth)", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::ELEMENTS);
     argsman.AddArg("-mainchainrpccookiefile=<file>", "The bitcoind cookie auth path which the daemon will use to connect to the trusted mainchain daemon to validate peg-ins. (default: `<datadir>/regtest/.cookie`)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-mainchainrpctimeout=<n>", strprintf("Timeout in seconds during mainchain RPC requests, or 0 for no timeout. (default: %d)", DEFAULT_HTTP_CLIENT_TIMEOUT), ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
+    argsman.AddArg("-seqoburl=<url>", "SEQUENTIA: the SeqDEX order-book relay this wallet reads the market from when converting staking rewards "
+                   "(see setrewardautoconvert). A plain http:// URL, because the node links no TLS library; what crosses the wire is a signed public "
+                   "order book, and nothing here is trusted with funds. Unset by default, and never contacted unless a wallet has conversion switched on.", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
+    argsman.AddArg("-seqobtimeout=<n>", "SEQUENTIA: timeout in seconds for SeqDEX relay requests (default: 30)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-peginconfirmationdepth=<n>", strprintf("Pegin claims must be this deep to be considered valid. (default: %d)", DEFAULT_PEGIN_CONFIRMATION_DEPTH), ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-parentpubkeyprefix", strprintf("The byte prefix, in decimal, of the parent chain's base58 pubkey address. (default: %d)", 111), ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-parentscriptprefix", strprintf("The byte prefix, in decimal, of the parent chain's base58 script address. (default: %d)", 196), ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
