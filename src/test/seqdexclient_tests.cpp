@@ -88,11 +88,19 @@ BOOST_AUTO_TEST_CASE(a_pair_with_no_market_is_nullopt_not_an_error)
     const auto offers = SeqobParseBook(j);
     const CAsset nothing = AssetDisplay(std::string(64, 'a'));
     BOOST_CHECK(!SeqobWalkBook(offers, nothing, offers[0].offer_asset, 1000).has_value());
-    // ...and neither is asking for more depth than rests.
-    BOOST_CHECK(!SeqobWalkBook(offers, offers[0].want_asset, offers[0].offer_asset,
-                               offers[0].want_amount * 1000).has_value());
     // Nor is a nonsensical size.
     BOOST_CHECK(!SeqobWalkBook(offers, offers[0].want_asset, offers[0].offer_asset, 0).has_value());
+
+    // Asking for MORE than rests is not nothing, though: a book that can fill
+    // part of the amount fills that part and says so. Refusing the whole sale
+    // because the last atom has no bid would leave a staker with a thin market
+    // converting nothing, forever.
+    const auto partial = SeqobWalkBook(offers, offers[0].want_asset, offers[0].offer_asset,
+                                       offers[0].want_amount * 1000);
+    BOOST_REQUIRE(partial.has_value());
+    BOOST_CHECK_GT(partial->sells, 0);
+    BOOST_CHECK_LT(partial->sells, offers[0].want_amount * 1000);
+    BOOST_CHECK_GT(partial->receives, 0);
 }
 
 BOOST_AUTO_TEST_CASE(the_covenant_price_rounds_the_way_the_script_does)

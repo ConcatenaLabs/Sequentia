@@ -140,13 +140,17 @@ asset are batched, and a batch is converted only when it is worth converting.
 
 **What policy must never do:**
 
-- **never spend a coin that is not a reward.** The conversion's inputs are reward
-  coins and, where a fee must be paid in another asset, the smallest possible
-  addition — never the staker's principal, and never a staking output. A bug here
-  sells the stake, which is the one outcome from which a staker cannot recover by
-  waiting.
+- **never convert more than staking has paid.** The batch is the bound, and it is
+  the AMOUNT that is bounded, not the identity of the coins. An asset is fungible,
+  so selling the batch is satisfied by any coins of that asset, and none of the
+  take paths on any wallet accepts a list of specific UTXOs to spend. An earlier
+  draft of this document promised UTXO-level selection; that promise could not be
+  kept and was worth less than it sounded, because the guarantee that matters is
+  the total.
 - **never touch stake, delegation records, or payout records.** Those are coins
-  in the wallet that look spendable and are load-bearing.
+  in the wallet that look spendable and are load-bearing. This one holds by
+  construction rather than by care: they are bare scripts, which no wallet's coin
+  selection can spend at all.
 - **never block staking.** Conversion runs behind block production, not in front
   of it; a wallet that cannot convert must still produce.
 - **never quietly convert away the thing the staker is accumulating.** Rewards in
@@ -179,20 +183,45 @@ anything auto-conversion introduces:
   sides' rails cross, exactly as a manual swap does;
 - the swap's refund path is the swap's own. A conversion that fails leaves the
   reward coins where they were, marked as not converted, and the next pass tries
-  again;
+  again — but only when the failure is DEFINITE. An executor that threw may have
+  paid before it threw, and a wallet that released those coins on an ambiguous
+  failure would sell the same reward twice; those records stay claimed, visibly
+  stuck, until a human or a resume pass settles them;
+- a cross-chain conversion has an order, and the order is the safety. Nothing of
+  the staker's moves until the maker's Bitcoin is locked, confirmed and verified
+  against the parent chain by the wallet itself. The asset is funded only once
+  the wallet's own Bitcoin anchor has reached the height that lock confirmed at —
+  the block that confirms the funding commits to an anchor and that number
+  freezes on confirmation, so waiting afterwards can never repair it. And the
+  lock is checked once more immediately before spending, because one parent-chain
+  reorg is all it takes for a lock that was confirmed at the first check to be
+  gone by the second. After funding, the asset is recoverable by timelock
+  whatever the maker does, and the refund needs nobody's cooperation;
 - a conversion is never a Limit order. A resting order that the staker forgot is
   worse than a reward that did not convert.
 
-**The Qt wallet is the exception, and this is stated rather than hidden.** The
-node's wallet has no SeqDEX client at all: it can hold assets, produce blocks,
-and since 24.5.0 send native parent-chain BTC, but it cannot take an offer of
-either kind, because the HTLC construction and the relay/LSP client live in SWK
-and the light wallets. So the node ships layers 1 and 2 — `liststakingrewards`,
-the setting, and the visible reward ledger — and the conversion itself runs in
-the wallets that can execute it. A solo staker who wants automatic conversion
-today watches the same keys from a light wallet. Closing this gap means a taker
-client in C++, which is a real piece of work and is deliberately not smuggled in
-here.
+**The node's wallet converts too, and how it manages to is worth knowing.** It
+has no interactive DEX client and cannot hold a co-signing conversation with a
+maker — but for the same-chain case it does not need one. A covenant offer is a
+Taproot output whose FILL leaf spends nothing and signs nothing: it only
+*inspects* the transaction spending it, and passes when that transaction pays the
+maker at the committed rate and returns any remainder to an identical output. So
+the node builds one transaction and broadcasts it, with the maker offline. It
+rebuilds the maker's committed leaf byte for byte and refuses to spend unless the
+result hashes to the Taproot output the offer is actually funded by on chain —
+the relay is never trusted about terms, value, or even that the offer is still
+there.
+
+The cross-chain case *is* a conversation, so the node grew the parts to have one:
+a minimal RFC 6455 WebSocket client, AES-256-GCM to open the courier's sealed
+payloads (pinned against the NIST vectors; nothing in consensus, P2P or wallet
+storage uses it), and the HTLC both legs share. What it does NOT have is TLS —
+Core dropped OpenSSL and nothing replaced it — so the relay endpoint is
+configured with `-seqoburl` as a plain `http://` URL. What crosses that wire is a
+signed public order book and sealed courier payloads: nothing secret, and nothing
+trusted with funds. Adding a TLS dependency for a wallet convenience would be a
+reproducible-build change out of all proportion to the feature; running a relay
+locally, or terminating TLS in front of the node, is the operator's call.
 
 ## Settings
 
@@ -203,7 +232,7 @@ One set of settings, the same names in every wallet:
 | `enabled` | off | opt-in, always. Nobody's rewards are converted because they upgraded. |
 | `target` | native BTC | what to convert into. Any asset with a market; BTC is offered first. |
 | `exclude` | empty | assets to keep as they are, on top of the target itself. |
-| `min_receive` | 0.0001 BTC, or the target's equivalent | the floor a batch must clear, in the target asset. |
+| `min_receive` | 0.0001 BTC, or the target's equivalent | the floor a batch must clear, in the target asset. This is the "minimum value before anything is sold" dial: below it a batch simply waits, indefinitely if that is how long it takes. |
 | `max_slippage_bp` | 200 (2%) | how far from the reference price a fill may land. |
 | `destination` | the wallet's own address for the target | where the proceeds go — parent-chain for BTC, Sequentia otherwise. |
 
@@ -211,6 +240,21 @@ Off by default is not timidity. Converting someone's rewards is irreversible and
 the staker may have chosen those assets deliberately; the feature has to be asked
 for. Changing the target does not retroactively re-convert anything: it applies
 to the next batch.
+
+## Where it is implemented
+
+| | attribution | policy | execution |
+| --- | --- | --- | --- |
+| node / Qt | `liststakingrewards` | `wallet/rewardconvert` | covenant fill + cross-chain HTLC, on the node's scheduler |
+| web wallet | SWK (wasm) | SWK (wasm) | `takeMarketWalk` / `driveReverse` |
+| extension | SWK (wasm) | SWK (wasm) | covenant fill / the Lightning rail |
+| Ambra | SWK (`api::rewards`) | SWK (`api::rewards`) | the phone's existing swap services |
+
+Two implementations of attribution and policy exist — the node's C++ and SWK's
+Rust — and they are pinned to the same cases, in the same order, with the same
+numbers. A node wallet and a light wallet watching one staker's keys must reach
+the same verdict about that staker's coins; two implementations that were never
+compared have already drifted.
 
 ## What this is not
 
