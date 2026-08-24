@@ -121,11 +121,11 @@ std::vector<SeqobOffer> SeqobParseBook(const UniValue& orderbook_response);
 /** What the book would pay to sell `atoms` of `sell` for `want`, having walked
  *  the crossable offers best price first.
  *
- *  Returns nullopt when there is no market for the pair, or none with the depth
- *  to fill the whole amount -- which is not an error: it is the ordinary state
- *  of a young pair, and the caller waits. `reference` is what the size would
- *  fetch at the BEST offer's price, so the gap to `receives` is the slippage
- *  walking the book actually costs. */
+ *  Returns nullopt only when NOTHING crosses -- which is not an error: it is the
+ *  ordinary state of a young pair, and the caller waits. A book that can fill
+ *  part of the amount returns that part, in `sells`. `reference` prices the part
+ *  that filled at the BEST offer, so the gap to `receives` is the slippage
+ *  walking the book actually costs and not an artefact of a partial fill. */
 struct SeqobWalkLeg {
     SeqobOffer offer;
     CAmount pay{0};      //!< atoms of the asset being sold that this leg costs
@@ -134,6 +134,11 @@ struct SeqobWalkLeg {
 struct SeqobWalk {
     CAmount receives{0};
     CAmount reference{0};
+    //! How much of the asset being SOLD this walk actually consumes. A book
+    //! that can only partly fill still converts what it can: refusing the whole
+    //! sale because the last atom has no bid would leave a staker with a thin
+    //! market converting nothing, forever.
+    CAmount sells{0};
     //! The offers to take, in order.
     std::vector<SeqobWalkLeg> legs;
 };
