@@ -38,6 +38,8 @@
 #include <wallet/rpc/util.h>
 #include <wallet/scriptpubkeyman.h>
 #include <wallet/spend.h>
+#include <wallet/parentchain.h>
+#include <wallet/stakingrewards.h>
 #include <wallet/wallet.h>
 
 #include <univalue.h>
@@ -1004,6 +1006,39 @@ RPCHelpMan bumpwithdrawstakefee()
 // hand-build a transaction paying a bare output. The RPCs below are that
 // missing layer -- fund a record, reclaim it, and watch what the pool you
 // delegated to has committed to.
+
+// Moved out of the anonymous namespace so the cross-chain conversion path can
+// use them: a second copy of a SIGHASH is exactly the kind of thing that
+// drifts, and a drifted sighash is a signature nobody can verify.
+//! BIP143 (segwit v0) signature hash over the PARENT-chain transaction form.
+uint256 ParentBip143Sighash(const Sidechain::Bitcoin::CMutableTransaction& tx, unsigned int in_pos,
+                            const CScript& script_code, CAmount amount)
+{
+    CHashWriter hp(SER_GETHASH, 0), hs(SER_GETHASH, 0), ho(SER_GETHASH, 0);
+    for (const auto& in : tx.vin) hp << in.prevout;
+    for (const auto& in : tx.vin) hs << in.nSequence;
+    for (const auto& o : tx.vout) ho << o;
+    CHashWriter ss(SER_GETHASH, 0);
+    ss << tx.nVersion << hp.GetHash() << hs.GetHash()
+       << tx.vin[in_pos].prevout << script_code << amount << tx.vin[in_pos].nSequence
+       << ho.GetHash() << tx.nLockTime << int32_t{SIGHASH_ALL};
+    return ss.GetHash();
+}
+
+//! The wallet key behind a P2WPKH scriptPubKey, wherever the wallet keeps it.
+//! The pubkey comes from the public solving provider; the private key through
+//! the same by-pubkey accessor the staking spends use (GetStakerKey above),
+//! which is the sanctioned raw-key door for descriptor wallets in this tree.
+bool GetWalletKeyForP2WPKH(const CWallet& wallet, const CScript& spk, CKey& key, CPubKey& pubkey)
+{
+    int version = 0;
+    std::vector<unsigned char> program;
+    if (!spk.IsWitnessProgram(version, program) || version != 0 || program.size() != 20) return false;
+    const CKeyID keyid{uint160(program)};
+    const auto provider = wallet.GetSolvingProvider(spk);
+    if (!provider || !provider->GetPubKey(keyid, pubkey)) return false;
+    return GetStakerKey(wallet, pubkey, key);
+}
 
 namespace {
 
@@ -2277,31 +2312,8 @@ RPCHelpMan listdelegations()
     };
 }
 
-//! One coin this wallet was PAID for staking. Two shapes, because there are
-//! exactly two ways the consensus rules pay a staker: a coinbase output (the
-//! block's fees, paid to the leader or redirected by a payout policy) and a
-//! share of a pool's pot, distributed by claimpoolrewards.
-//! doc/sequentia/reward-autoconvert-design.md is the specification, and SWK
-//! implements the same rules for the light wallets.
-struct StakingReward {
-    COutPoint outpoint;
-    CAsset asset;
-    CAmount amount{0};
-    std::string source;          //!< "solo", "direct", "lottery" or "split"
-    CTxDestination dest;
-    CPubKey controller;          //!< the staking key it was paid on, when it was one
-    int height{0};               //!< 0 while unconfirmed
-    int depth{0};
-    int blocks_to_maturity{0};
-    bool spent{false};
-};
-
-/** Every staking reward this wallet has received, newest first.
- *
- *  Attribution is deliberately a function of WALLET data alone -- no chainstate
- *  lookup, no txindex -- because the light wallets have to reach the same
- *  verdict from the same facts, and a rule the node can only answer by reading
- *  a block is a rule they would have to approximate:
+/** Every staking reward this wallet has received, newest first. Declared in
+ *  wallet/stakingrewards.h, where the two shapes are spelled out.
  *
  *      coinbase && IsMine(out)                    -> solo | direct | lottery
  *      !coinbase && !IsFromMe && IsMine(out)
@@ -2311,7 +2323,7 @@ struct StakingReward {
  *  receive address, and requiring the transaction not to be ours excludes a
  *  delegator's own withdrawal or re-pointing, which also pay back to it.
  */
-std::vector<StakingReward> FindWalletStakingRewards(CWallet& wallet, bool include_spent) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+std::vector<StakingReward> FindWalletStakingRewards(CWallet& wallet, bool include_spent)
 {
     const StakeRegistry& registry = StakeRegistry::GetInstance();
 
@@ -2785,36 +2797,6 @@ bool ScanParentUtxos(const CWallet& wallet, std::vector<ParentUtxo>& out, int& p
         err = std::string("parent chain unreachable: ") + e.what();
         return false;
     }
-}
-
-//! BIP143 (segwit v0) signature hash over the PARENT-chain transaction form.
-uint256 ParentBip143Sighash(const Sidechain::Bitcoin::CMutableTransaction& tx, unsigned int in_pos,
-                            const CScript& script_code, CAmount amount)
-{
-    CHashWriter hp(SER_GETHASH, 0), hs(SER_GETHASH, 0), ho(SER_GETHASH, 0);
-    for (const auto& in : tx.vin) hp << in.prevout;
-    for (const auto& in : tx.vin) hs << in.nSequence;
-    for (const auto& o : tx.vout) ho << o;
-    CHashWriter ss(SER_GETHASH, 0);
-    ss << tx.nVersion << hp.GetHash() << hs.GetHash()
-       << tx.vin[in_pos].prevout << script_code << amount << tx.vin[in_pos].nSequence
-       << ho.GetHash() << tx.nLockTime << int32_t{SIGHASH_ALL};
-    return ss.GetHash();
-}
-
-//! The wallet key behind a P2WPKH scriptPubKey, wherever the wallet keeps it.
-//! The pubkey comes from the public solving provider; the private key through
-//! the same by-pubkey accessor the staking spends use (GetStakerKey above),
-//! which is the sanctioned raw-key door for descriptor wallets in this tree.
-bool GetWalletKeyForP2WPKH(const CWallet& wallet, const CScript& spk, CKey& key, CPubKey& pubkey)
-{
-    int version = 0;
-    std::vector<unsigned char> program;
-    if (!spk.IsWitnessProgram(version, program) || version != 0 || program.size() != 20) return false;
-    const CKeyID keyid{uint160(program)};
-    const auto provider = wallet.GetSolvingProvider(spk);
-    if (!provider || !provider->GetPubKey(keyid, pubkey)) return false;
-    return GetStakerKey(wallet, pubkey, key);
 }
 
 fs::path ParentSendsPath(const CWallet& wallet)

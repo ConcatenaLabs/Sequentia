@@ -14,6 +14,7 @@
 #include <util/translation.h>
 #include <wallet/context.h>
 #include <wallet/spend.h>
+#include <wallet/rewardexec.h>
 #include <wallet/wallet.h>
 #include <wallet/walletdb.h>
 
@@ -149,6 +150,12 @@ void StartWallets(WalletContext& context, CScheduler& scheduler)
         scheduler.scheduleEvery([&context] { MaybeCompactWalletDB(context); }, std::chrono::milliseconds{500});
     }
     scheduler.scheduleEvery([&context] { MaybeResendWalletTxs(context); }, std::chrono::milliseconds{1000});
+
+    // SEQUENTIA: convert staking rewards, for any wallet whose staker has asked
+    // for it, and finish any cross-chain swap already in flight. Both are no-ops
+    // until a wallet switches conversion on, so a node that never stakes never
+    // notices them.
+    StartRewardConversionScheduler(context, scheduler);
 }
 
 void FlushWallets(WalletContext& context)
