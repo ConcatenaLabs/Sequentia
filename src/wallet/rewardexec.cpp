@@ -18,7 +18,9 @@
 #include <util/system.h>
 #include <util/time.h>
 #include <wallet/coincontrol.h>
+#include <wallet/context.h>
 #include <wallet/covenantfill.h>
+#include <wallet/xchainconvert.h>
 #include <wallet/spend.h>
 #include <wallet/stakingrewards.h>
 #include <wallet/wallet.h>
@@ -389,14 +391,34 @@ RewardPassReport RunRewardConversionPass(CWallet& wallet, bool dry_run)
         // said no: treat it as "no market for now" rather than an error the
         // staker has to act on.
         std::optional<SeqobWalk> walk;
+        std::optional<SeqobOffer> btc_offer;
+        CAmount btc_slice = 0;
         try {
-            const CAsset want = settings.target ? *settings.target : CAsset();
             if (settings.TargetIsNativeBtc()) {
-                // Native BTC is the parent chain's own coin: the sale is a
-                // cross-chain HTLC, not a book walk. Priced and executed by the
-                // cross-chain path below.
-                row.quote = std::nullopt;
+                // Native Bitcoin is the parent chain's own coin, so this is a
+                // cross-chain swap against a maker rather than a walk down a
+                // book of covenants. The rail rests WHOLE offers, so the price
+                // comes from the best one that can take our size, and the slice
+                // is clamped to it -- never the other way round, which would
+                // sell coins staking never paid.
+                const auto bids = SeqobFetchBtcBids(batch.asset);
+                for (const SeqobOffer& o : bids) {
+                    const CAmount take = RewardSliceForWholeHtlc(o.want_amount, batch.value);
+                    if (take <= 0) continue;
+                    const CAmount pays = (CAmount)(((__int128)o.offer_amount * take) / o.want_amount);
+                    if (pays <= 0) continue;
+                    btc_offer = o;
+                    btc_slice = take;
+                    // The reference is what the whole batch would fetch at this
+                    // (best) price; `receives` is what this offer can actually
+                    // take, so a partial shows up as slippage rather than as a
+                    // silently smaller sale.
+                    const CAmount reference = (CAmount)(((__int128)o.offer_amount * batch.value) / o.want_amount);
+                    row.quote = RewardQuote{pays, reference};
+                    break;
+                }
             } else {
+                const CAsset want = *settings.target;
                 const auto book = SeqobFetchBook(batch.asset, want);
                 walk = SeqobWalkBook(book, batch.asset, want, batch.value);
                 if (walk) row.quote = RewardQuote{walk->receives, walk->reference};
@@ -408,7 +430,7 @@ RewardPassReport RunRewardConversionPass(CWallet& wallet, bool dry_run)
 
         row.decision = DecideRewardConversion(batch, row.quote, settings);
 
-        if (!dry_run && row.decision.Converts() && walk) {
+        if (!dry_run && row.decision.Converts() && (walk || btc_offer)) {
             // Commit to the coins BEFORE spending them. If the node dies between
             // here and the broadcast returning, they stay claimed by a `pending`
             // record rather than being offered to a second conversion -- the sale
@@ -427,19 +449,35 @@ RewardPassReport RunRewardConversionPass(CWallet& wallet, bool dry_run)
             StoreRewardConversions(wallet, log);
 
             CAmount got = 0;
+            bool committed = false;
             std::string last_error;
-            for (const SeqobWalkLeg& leg : walk->legs) {
-                const FillOutcome r = ExecuteCovenantFill(wallet, leg.offer, leg.receive);
+            if (btc_offer) {
+                // Cross-chain. Long-running by nature -- it waits on Bitcoin
+                // confirmations -- and it reports separately whether our asset
+                // was committed, because a swap that got that far must never
+                // have its coins offered to a second attempt.
+                const XchainOutcome r = RunXchainConversion(wallet, *btc_offer, btc_slice);
+                committed = r.committed;
                 if (r.ok) {
                     got += r.received;
-                    row.txid = r.txid;
                     row.executed = true;
                 } else {
-                    // One offer failing is not the sale failing: a covenant
-                    // someone else just took, or an offer that moved, is
-                    // ordinary. Walk on; nothing was committed for a fill that
-                    // did not broadcast.
                     last_error = r.error;
+                }
+            } else {
+                for (const SeqobWalkLeg& leg : walk->legs) {
+                    const FillOutcome r = ExecuteCovenantFill(wallet, leg.offer, leg.receive);
+                    if (r.ok) {
+                        got += r.received;
+                        row.txid = r.txid;
+                        row.executed = true;
+                    } else {
+                        // One offer failing is not the sale failing: a covenant
+                        // someone else just took, or an offer that moved, is
+                        // ordinary. Walk on; nothing was committed for a fill
+                        // that did not broadcast.
+                        last_error = r.error;
+                    }
                 }
             }
 
@@ -450,6 +488,13 @@ RewardPassReport RunRewardConversionPass(CWallet& wallet, bool dry_run)
                     it->state = "done";
                     it->received = got;
                     it->txid = row.txid;
+                } else if (committed) {
+                    // The asset WAS committed even though the swap did not
+                    // finish: it is either about to settle or refundable by
+                    // timelock, and either way those coins are spoken for.
+                    // Releasing them here is how a wallet sells twice.
+                    it->error = last_error.empty() ? "cross-chain swap in flight" : last_error;
+                    row.error = it->error;
                 } else {
                     // Nothing was sold, definitively: release the coins so the
                     // next pass can reconsider them.
@@ -472,10 +517,37 @@ RewardPassReport RunRewardConversionPass(CWallet& wallet, bool dry_run)
     return report;
 }
 
-void StartRewardConversionScheduler()
+void StartRewardConversionScheduler(WalletContext& context, CScheduler& scheduler)
 {
-    // Placeholder until execution lands: wiring a timer that can only decide
-    // and never act would be a timer that does nothing.
+    // Rewards arrive at block pace at best, and every pass reads the book, so
+    // looking more often would only cost the relay requests. The resume pass is
+    // separate and quicker: it is what finishes a cross-chain swap whose maker
+    // has just revealed the secret, or refunds one whose maker never did.
+    scheduler.scheduleEvery([&context]{
+        for (const std::shared_ptr<CWallet>& wallet : GetWallets(context)) {
+            if (!wallet) continue;
+            try {
+                ResumeXchainSwaps(*wallet);
+            } catch (const std::exception& e) {
+                LogPrintf("[rewards] resume failed for %s: %s\n", wallet->GetName(), e.what());
+            }
+        }
+    }, std::chrono::minutes{2});
+
+    scheduler.scheduleEvery([&context]{
+        for (const std::shared_ptr<CWallet>& wallet : GetWallets(context)) {
+            if (!wallet) continue;
+            try {
+                if (!LoadRewardConvertSettings(*wallet).enabled) continue;
+                const RewardPassReport rep = RunRewardConversionPass(*wallet, /*dry_run=*/false);
+                for (const std::string& e : rep.errors) {
+                    LogPrintf("[rewards] %s: %s\n", wallet->GetName(), e);
+                }
+            } catch (const std::exception& e) {
+                LogPrintf("[rewards] conversion pass failed for %s: %s\n", wallet->GetName(), e.what());
+            }
+        }
+    }, std::chrono::minutes{10});
 }
 
 } // namespace wallet

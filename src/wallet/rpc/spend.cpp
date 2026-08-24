@@ -38,6 +38,7 @@
 #include <wallet/rpc/util.h>
 #include <wallet/scriptpubkeyman.h>
 #include <wallet/spend.h>
+#include <wallet/parentchain.h>
 #include <wallet/stakingrewards.h>
 #include <wallet/wallet.h>
 
@@ -1005,6 +1006,39 @@ RPCHelpMan bumpwithdrawstakefee()
 // hand-build a transaction paying a bare output. The RPCs below are that
 // missing layer -- fund a record, reclaim it, and watch what the pool you
 // delegated to has committed to.
+
+// Moved out of the anonymous namespace so the cross-chain conversion path can
+// use them: a second copy of a SIGHASH is exactly the kind of thing that
+// drifts, and a drifted sighash is a signature nobody can verify.
+//! BIP143 (segwit v0) signature hash over the PARENT-chain transaction form.
+uint256 ParentBip143Sighash(const Sidechain::Bitcoin::CMutableTransaction& tx, unsigned int in_pos,
+                            const CScript& script_code, CAmount amount)
+{
+    CHashWriter hp(SER_GETHASH, 0), hs(SER_GETHASH, 0), ho(SER_GETHASH, 0);
+    for (const auto& in : tx.vin) hp << in.prevout;
+    for (const auto& in : tx.vin) hs << in.nSequence;
+    for (const auto& o : tx.vout) ho << o;
+    CHashWriter ss(SER_GETHASH, 0);
+    ss << tx.nVersion << hp.GetHash() << hs.GetHash()
+       << tx.vin[in_pos].prevout << script_code << amount << tx.vin[in_pos].nSequence
+       << ho.GetHash() << tx.nLockTime << int32_t{SIGHASH_ALL};
+    return ss.GetHash();
+}
+
+//! The wallet key behind a P2WPKH scriptPubKey, wherever the wallet keeps it.
+//! The pubkey comes from the public solving provider; the private key through
+//! the same by-pubkey accessor the staking spends use (GetStakerKey above),
+//! which is the sanctioned raw-key door for descriptor wallets in this tree.
+bool GetWalletKeyForP2WPKH(const CWallet& wallet, const CScript& spk, CKey& key, CPubKey& pubkey)
+{
+    int version = 0;
+    std::vector<unsigned char> program;
+    if (!spk.IsWitnessProgram(version, program) || version != 0 || program.size() != 20) return false;
+    const CKeyID keyid{uint160(program)};
+    const auto provider = wallet.GetSolvingProvider(spk);
+    if (!provider || !provider->GetPubKey(keyid, pubkey)) return false;
+    return GetStakerKey(wallet, pubkey, key);
+}
 
 namespace {
 
@@ -2763,36 +2797,6 @@ bool ScanParentUtxos(const CWallet& wallet, std::vector<ParentUtxo>& out, int& p
         err = std::string("parent chain unreachable: ") + e.what();
         return false;
     }
-}
-
-//! BIP143 (segwit v0) signature hash over the PARENT-chain transaction form.
-uint256 ParentBip143Sighash(const Sidechain::Bitcoin::CMutableTransaction& tx, unsigned int in_pos,
-                            const CScript& script_code, CAmount amount)
-{
-    CHashWriter hp(SER_GETHASH, 0), hs(SER_GETHASH, 0), ho(SER_GETHASH, 0);
-    for (const auto& in : tx.vin) hp << in.prevout;
-    for (const auto& in : tx.vin) hs << in.nSequence;
-    for (const auto& o : tx.vout) ho << o;
-    CHashWriter ss(SER_GETHASH, 0);
-    ss << tx.nVersion << hp.GetHash() << hs.GetHash()
-       << tx.vin[in_pos].prevout << script_code << amount << tx.vin[in_pos].nSequence
-       << ho.GetHash() << tx.nLockTime << int32_t{SIGHASH_ALL};
-    return ss.GetHash();
-}
-
-//! The wallet key behind a P2WPKH scriptPubKey, wherever the wallet keeps it.
-//! The pubkey comes from the public solving provider; the private key through
-//! the same by-pubkey accessor the staking spends use (GetStakerKey above),
-//! which is the sanctioned raw-key door for descriptor wallets in this tree.
-bool GetWalletKeyForP2WPKH(const CWallet& wallet, const CScript& spk, CKey& key, CPubKey& pubkey)
-{
-    int version = 0;
-    std::vector<unsigned char> program;
-    if (!spk.IsWitnessProgram(version, program) || version != 0 || program.size() != 20) return false;
-    const CKeyID keyid{uint160(program)};
-    const auto provider = wallet.GetSolvingProvider(spk);
-    if (!provider || !provider->GetPubKey(keyid, pubkey)) return false;
-    return GetStakerKey(wallet, pubkey, key);
 }
 
 fs::path ParentSendsPath(const CWallet& wallet)
