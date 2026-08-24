@@ -10,6 +10,7 @@
 // not against whatever this file happens to produce.
 
 #include <wallet/htlc.h>
+#include <wallet/xchainconvert.h>
 
 #include <test/util/setup_common.h>
 #include <util/strencodings.h>
@@ -109,3 +110,38 @@ BOOST_AUTO_TEST_CASE(both_chains_pay_the_same_script_their_own_way)
 
 BOOST_AUTO_TEST_SUITE_END()
 } // namespace wallet
+
+//! The parent-chain JSON-RPC envelope.
+//!
+//! This is here because getting it wrong is silent. CallMainChainRPC hands back
+//! the whole reply; reading "feerate" or "vout" straight off it finds nothing,
+//! throws nothing, and leaves the caller with a default. That shipped once: the
+//! fee estimate quietly fell back to 2 sat/vB while the parent chain wanted 100,
+//! and the maker's Bitcoin lock could not be read at all.
+BOOST_AUTO_TEST_CASE(mainchain_payload_unwraps_the_envelope)
+{
+    UniValue inner(UniValue::VOBJ);
+    inner.pushKV("feerate", 0.00100513);
+
+    UniValue reply(UniValue::VOBJ);
+    reply.pushKV("result", inner);
+    reply.pushKV("error", NullUniValue);
+    reply.pushKV("id", 1);
+
+    const UniValue got = wallet::MainChainPayload("estimatesmartfee", reply);
+    BOOST_CHECK(got.isObject());
+    BOOST_CHECK(got.exists("feerate"));
+
+    // The mistake itself: the payload handed in where the envelope belongs. It
+    // must not read as an empty-but-fine answer.
+    BOOST_CHECK_THROW(wallet::MainChainPayload("estimatesmartfee", inner), std::runtime_error);
+
+    // An error in the envelope is an error, not an empty result.
+    UniValue bad(UniValue::VOBJ);
+    bad.pushKV("result", NullUniValue);
+    UniValue e(UniValue::VOBJ);
+    e.pushKV("code", -5);
+    e.pushKV("message", "No such mempool transaction");
+    bad.pushKV("error", e);
+    BOOST_CHECK_THROW(wallet::MainChainPayload("getrawtransaction", bad), std::runtime_error);
+}

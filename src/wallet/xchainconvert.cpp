@@ -31,9 +31,25 @@
 #include <wallet/spend.h>
 #include <wallet/wallet.h>
 
+#include <optional>
 #include <fstream>
 
 namespace wallet {
+
+UniValue MainChainPayload(const std::string& method, const UniValue& reply)
+{
+    // A JSON-RPC reply is an envelope: {"result": ..., "error": ..., "id": ...}.
+    // Reaching for a payload field on the envelope itself finds nothing and says
+    // nothing about why, so an unreadable reply has to be made loud here.
+    const UniValue err = find_value(reply, "error");
+    if (!err.isNull()) {
+        throw std::runtime_error(strprintf("%s: %s", method, err.write()));
+    }
+    if (!reply.isObject() || !reply.exists("result")) {
+        throw std::runtime_error(strprintf("%s: reply carried no result", method));
+    }
+    return find_value(reply, "result");
+}
 
 namespace {
 
@@ -53,7 +69,6 @@ constexpr int BTC_CONF_MAX_WAIT_S = 3 * 60 * 60;
 //! estimatesmartfee says. testnet4's estimator runs hot enough to eat a small
 //! claim whole, and a claim that pays more than it collects is not a claim.
 constexpr CAmount MAX_PARENT_FEERATE_SAT_VB = 50;
-constexpr CAmount DEFAULT_PARENT_FEERATE_SAT_VB = 2;
 
 //! The claim transaction's size, near enough: one P2WSH input carrying a
 //! signature, a 32-byte preimage and the script, and one P2WPKH output.
@@ -182,6 +197,17 @@ void SaveSwap(const CWallet& wallet, const XchainSwap& s)
 
 // ---- parent chain -------------------------------------------------------
 
+//! CallMainChainRPC hands back the whole JSON-RPC reply, not the result inside
+//! it. Reading a payload field straight off that reply finds nothing, silently:
+//! the fee estimate fell back to its default on every call, and the maker's
+//! Bitcoin lock could never be verified at all, which would have aborted every
+//! cross-chain conversion at its first look at the parent chain. Nothing here
+//! reads the parent chain any other way.
+UniValue MainChainResult(const std::string& method, const UniValue& params)
+{
+    return MainChainPayload(method, CallMainChainRPC(method, params));
+}
+
 //! One output on the parent chain, as the node's own Bitcoin daemon reports it.
 struct ParentOut {
     bool found{false};
@@ -198,7 +224,7 @@ ParentOut ReadParentOutput(const std::string& txid, uint32_t vout)
         UniValue params(UniValue::VARR);
         params.push_back(txid);
         params.push_back(true);
-        const UniValue tx = CallMainChainRPC("getrawtransaction", params);
+        const UniValue tx = MainChainResult("getrawtransaction", params);
         if (!tx.isObject() || !tx.exists("vout") || !tx["vout"].isArray()) return out;
         if (vout >= tx["vout"].size()) return out;
         const UniValue& o = tx["vout"][vout];
@@ -213,7 +239,7 @@ ParentOut ReadParentOutput(const std::string& txid, uint32_t vout)
         if (tx.exists("blockhash") && tx["blockhash"].isStr() && out.confirmations > 0) {
             UniValue bp(UniValue::VARR);
             bp.push_back(tx["blockhash"].get_str());
-            const UniValue blk = CallMainChainRPC("getblockheader", bp);
+            const UniValue blk = MainChainResult("getblockheader", bp);
             if (blk.isObject() && blk.exists("height")) out.height = (int)blk["height"].get_int64();
         }
         out.found = true;
@@ -225,22 +251,31 @@ ParentOut ReadParentOutput(const std::string& txid, uint32_t vout)
     return out;
 }
 
-CAmount ParentFeeratePerVb()
+//! The parent-chain fee rate, or nothing when it cannot be read.
+//!
+//! Nothing is the honest answer, and the callers treat it as one: you cannot
+//! judge whether a swap is worth making without knowing what claiming will
+//! cost, and guessing in the optimistic direction is how an asset gets
+//! committed for proceeds that can never be collected. Both callers would
+//! rather wait and ask again.
+std::optional<CAmount> ParentFeeratePerVb()
 {
     try {
         UniValue params(UniValue::VARR);
         params.push_back(6);
-        const UniValue r = CallMainChainRPC("estimatesmartfee", params);
+        const UniValue r = MainChainResult("estimatesmartfee", params);
         if (r.isObject() && r.exists("feerate") && r["feerate"].isNum()) {
             // BTC/kvB -> sat/vB.
             const CAmount per_kvb = AmountFromValue(r["feerate"]);
             const CAmount per_vb = per_kvb / 1000;
             if (per_vb > 0) return std::min<CAmount>(per_vb, MAX_PARENT_FEERATE_SAT_VB);
         }
-    } catch (const std::exception&) {
-        // fall through to the default
+    } catch (const std::exception& e) {
+        LogPrintf("[rewards] could not read the parent-chain fee rate: %s\n", e.what());
+        return std::nullopt;
     }
-    return DEFAULT_PARENT_FEERATE_SAT_VB;
+    LogPrintf("[rewards] the parent chain returned no usable fee estimate\n");
+    return std::nullopt;
 }
 
 //! This node's own Bitcoin anchor: the height the chain tip commits to. The
@@ -438,7 +473,12 @@ bool ClaimBtcLeg(CWallet& wallet, XchainSwap& s, std::string& error)
     }
     const CScript pay_to = GetScriptForDestination(dest);
 
-    const CAmount fee = ParentFeeratePerVb() * CLAIM_VSIZE;
+    const auto feerate = ParentFeeratePerVb();
+    if (!feerate) {
+        error = "cannot read the parent-chain fee rate, so cannot size the claim; will retry";
+        return false;
+    }
+    const CAmount fee = *feerate * CLAIM_VSIZE;
     if (s.btc_leg_amount <= fee) {
         error = strprintf("the Bitcoin leg (%d) does not cover the fee to claim it (%d)", s.btc_leg_amount, fee);
         return false;
@@ -476,7 +516,7 @@ bool ClaimBtcLeg(CWallet& wallet, XchainSwap& s, std::string& error)
     try {
         UniValue params(UniValue::VARR);
         params.push_back(HexStr(ss));
-        const UniValue r = CallMainChainRPC("sendrawtransaction", params);
+        const UniValue r = MainChainResult("sendrawtransaction", params);
         s.btc_claim_txid = r.isStr() ? r.get_str() : tx.GetHash().GetHex();
     } catch (const std::exception& e) {
         error = std::string("the parent chain refused the claim: ") + e.what();
@@ -577,7 +617,13 @@ XchainOutcome RunXchainConversion(CWallet& wallet, const SeqobOffer& offer, CAmo
     // recoverable only by waiting out the timelock. That check already exists
     // in ClaimBtcLeg, but by then the asset is gone, which is far too late for
     // it to be useful. So it is made here, before anything is spent.
-    const CAmount claim_cost = ParentFeeratePerVb() * CLAIM_VSIZE;
+    const auto claim_feerate = ParentFeeratePerVb();
+    if (!claim_feerate) {
+        out.error = "cannot read the parent-chain fee rate, so cannot tell whether this is worth "
+                    "claiming; nothing was spent";
+        return out;
+    }
+    const CAmount claim_cost = *claim_feerate * CLAIM_VSIZE;
     if (want_btc <= claim_cost * 2) {
         out.error = strprintf(
             "this would fetch %d satoshis, which does not cover the %d it costs to claim them. "
