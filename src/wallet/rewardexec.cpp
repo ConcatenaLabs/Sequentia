@@ -525,6 +525,10 @@ RewardPassReport RunRewardConversionPass(CWallet& wallet, bool dry_run)
                 // is clamped to it -- never the other way round, which would
                 // sell coins staking never paid.
                 const auto bids = SeqobFetchBtcBids(batch.asset);
+                // A book with offers but no price for THIS size is not an empty
+                // book; the quote records that with receives 0 and a non-zero
+                // reference, so the staker is told the truth.
+                if (!bids.empty()) row.quote = RewardQuote{0, 1};
                 for (const SeqobOffer& o : bids) {
                     const CAmount take = RewardSliceForWholeHtlc(o.want_amount, batch.value);
                     if (take <= 0) continue;
@@ -543,6 +547,7 @@ RewardPassReport RunRewardConversionPass(CWallet& wallet, bool dry_run)
             } else {
                 const CAsset want = *settings.target;
                 const auto book = SeqobFetchBook(batch.asset, want);
+                if (!book.empty()) row.quote = RewardQuote{0, 1};
                 walk = SeqobWalkBook(book, batch.asset, want, batch.value);
                 if (walk) row.quote = RewardQuote{walk->receives, walk->reference};
             }

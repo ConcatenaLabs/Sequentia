@@ -105,7 +105,8 @@ enum class RewardDecisionKind {
     Convert,
     Disabled,          //!< the setting is off
     NotConverted,      //!< the asset IS the target, or the staker excluded it
-    NoMarket,          //!< no market for the pair, or none deep enough
+    NoMarket,          //!< no market for the pair at all
+    TooSmallToPrice,   //!< a market exists, but this batch prices to nothing
     BelowFloor,        //!< the proceeds would not clear the minimum
     SlippageTooHigh,   //!< a market that exists, quoted too far from reference
 };

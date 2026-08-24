@@ -113,10 +113,29 @@ BOOST_AUTO_TEST_CASE(no_market_is_a_wait_not_an_error)
 {
     auto d = DecideRewardConversion(Batch(Asset(3), 100), std::nullopt, On());
     BOOST_CHECK(d.kind == RewardDecisionKind::NoMarket);
-    // A market with no depth to deliver anything is the same situation.
-    const RewardQuote empty{0, 20000};
+    // A book with nothing in it at all says the same.
+    const RewardQuote empty{0, 0};
     d = DecideRewardConversion(Batch(Asset(3), 100), empty, On());
     BOOST_CHECK(d.kind == RewardDecisionKind::NoMarket);
+}
+
+BOOST_AUTO_TEST_CASE(a_market_that_exists_is_not_reported_as_no_market)
+{
+    // "No market for this pair" sends a staker looking for liquidity. When the
+    // liquidity is already there and the batch is simply worth less than one
+    // atom of the target, saying that is a lie with a cost. The reference price
+    // tells the two apart: it is only set when there were offers.
+    const RewardQuote priced_to_nothing{0, 1};
+    const auto small = DecideRewardConversion(Batch(Asset(3), 100), priced_to_nothing, On());
+    BOOST_CHECK(small.kind == RewardDecisionKind::TooSmallToPrice);
+    BOOST_CHECK(small.Reason().find("there is a market") != std::string::npos);
+
+    // A genuinely empty book still says so.
+    const RewardQuote nothing_at_all{0, 0};
+    const auto empty = DecideRewardConversion(Batch(Asset(3), 100), nothing_at_all, On());
+    BOOST_CHECK(empty.kind == RewardDecisionKind::NoMarket);
+    BOOST_CHECK(DecideRewardConversion(Batch(Asset(3), 100), std::nullopt, On()).kind
+                == RewardDecisionKind::NoMarket);
 }
 
 BOOST_AUTO_TEST_CASE(a_batch_below_the_floor_waits_for_more_rewards)
