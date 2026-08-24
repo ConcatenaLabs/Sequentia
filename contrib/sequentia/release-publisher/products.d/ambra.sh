@@ -16,7 +16,7 @@
 export LC_ALL=C
 
 PRODUCT_NAME="ambra"
-PRODUCT_REPO="${SEQ_AMBRA_REPO:-https://github.com/GracedEternalKingCabbageMan/ambra.git}"
+PRODUCT_REPO="${SEQ_AMBRA_REPO:-https://github.com/ConcatenaLabs/ambra.git}"
 PRODUCT_INDEX_GLOB="ambra-*.apk"
 
 # Toolchain, as installed on the box. Exported rather than assumed to be on PATH,
@@ -29,8 +29,8 @@ export PATH="/opt/flutter/bin:/root/.cargo/bin:$ANDROID_SDK_ROOT/platform-tools:
 AMBRA_BRANCH="${SEQ_AMBRA_BRANCH:-}"
 branch() { echo "${AMBRA_BRANCH:-$(default_branch "$PRODUCT_REPO")}"; }
 # Point these at the real key to enable the product.
-SWK_REPO="${SEQ_SWK_REPO:-https://github.com/GracedEternalKingCabbageMan/SWK.git}"
-SEQLN_REPO="${SEQ_SEQLN_REPO:-https://github.com/GracedEternalKingCabbageMan/seqln.git}"
+SWK_REPO="${SEQ_SWK_REPO:-https://github.com/ConcatenaLabs/SWK.git}"
+SEQLN_REPO="${SEQ_SEQLN_REPO:-https://github.com/ConcatenaLabs/seqln.git}"
 # The ABIs Flutter packages into the APK. The Rust core has to exist for each.
 AMBRA_ABIS="${SEQ_AMBRA_ABIS:-arm64-v8a armeabi-v7a x86_64}"
 AMBRA_KEYSTORE="${SEQ_AMBRA_KEYSTORE:-/etc/sequentia/ambra-release.keystore}"

@@ -21,10 +21,10 @@ export LC_ALL=C
 [ -d "$HOME/.cargo/bin" ] && export PATH="$HOME/.cargo/bin:$PATH"
 
 PRODUCT_NAME="seqognito"
-PRODUCT_REPO="${SEQ_SEQOGNITO_REPO:-https://github.com/GracedEternalKingCabbageMan/seqognito.git}"
+PRODUCT_REPO="${SEQ_SEQOGNITO_REPO:-https://github.com/ConcatenaLabs/seqognito.git}"
 PRODUCT_INDEX_GLOB="Seqognito-*-linux-x86_64.AppImage Seqognito-*-win64.zip Seqognito-Setup-*.exe"
 
-SEQOGNITO_SWK_REPO="${SEQ_SWK_REPO:-https://github.com/GracedEternalKingCabbageMan/SWK.git}"
+SEQOGNITO_SWK_REPO="${SEQ_SWK_REPO:-https://github.com/ConcatenaLabs/SWK.git}"
 SEQOGNITO_SWK_BRANCH="${SEQ_SWK_BRANCH:-sequentia}"
 
 # Empty means "ask the remote what its default branch is".

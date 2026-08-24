@@ -10,7 +10,7 @@
 export LC_ALL=C
 
 PRODUCT_NAME="extension"
-PRODUCT_REPO="${SEQ_EXTENSION_REPO:-https://github.com/GracedEternalKingCabbageMan/sequentia-extension.git}"
+PRODUCT_REPO="${SEQ_EXTENSION_REPO:-https://github.com/ConcatenaLabs/sequentia-extension.git}"
 # Both spellings, new one first. The extension was renamed to Ambra, and the old
 # artifacts stay on the download server, so the page has to keep resolving a link
 # to either while the transition settles. Drop the second pattern once no card

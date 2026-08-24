@@ -70,7 +70,7 @@ registrar's opinion, and requires no trust in them:
 That chain is cryptographic: the registrar cannot invent metadata for someone
 else's asset, and a registrar that lies can be caught by anyone repeating the
 same checks. The reference implementation is the
-[sequentia-registry](https://github.com/GracedEternalKingCabbageMan/sequentia-registry)
+[sequentia-registry](https://github.com/ConcatenaLabs/sequentia-registry)
 server, which does exactly this on `POST /`, and confines its own operator
 override to seed entries marked `operator_verified` — recording
 `verified_by: "operator"` and leaving `verified_chain`/`verified_domain` false,
@@ -216,7 +216,7 @@ Rejections are specific, because each one is something the issuer can go and fix
 ### Compatibility is the point
 
 Every rule above deliberately mirrors the reference implementation
-([sequentia-registry](https://github.com/GracedEternalKingCabbageMan/sequentia-registry)),
+([sequentia-registry](https://github.com/ConcatenaLabs/sequentia-registry)),
 down to refusing to follow redirects on the proof fetch. An asset this server
 accepts is one that registry accepts, and vice versa. That is what makes "point
 your node at a different registry" a real option rather than a slogan: the

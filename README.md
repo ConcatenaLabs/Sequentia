@@ -264,12 +264,12 @@ expect ("rfa/vB") match.
 | `doc/` (everything else) | Inherited Elements/Bitcoin documentation. |
 
 Contributions: PRs against branch `master`
-of https://github.com/GracedEternalKingCabbageMan/Sequentia (the default
+of https://github.com/ConcatenaLabs/Sequentia (the default
 branch). See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## The Sequentia ecosystem
 
-All repos live at https://github.com/GracedEternalKingCabbageMan/ and are public.
+All repos live at https://github.com/ConcatenaLabs/ and are public.
 
 | Repo | One-liner |
 |---|---|

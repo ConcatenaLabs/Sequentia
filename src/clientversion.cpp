@@ -91,7 +91,7 @@ std::string CopyrightHolders(const std::string& strPrefix)
 
 std::string LicenseInfo()
 {
-    const std::string URL_SOURCE_CODE = "<https://github.com/GracedEternalKingCabbageMan/Sequentia>";
+    const std::string URL_SOURCE_CODE = "<https://github.com/ConcatenaLabs/Sequentia>";
 
     const std::string copyright_devs = strprintf(_(COPYRIGHT_HOLDERS).translated, COPYRIGHT_HOLDERS_SUBSTITUTION);
     return strprintf(_("Copyright (C) %i %s").translated, COPYRIGHT_YEAR, copyright_devs) + "\n" +

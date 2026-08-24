@@ -49,7 +49,7 @@ resolve many findings.
 
 ## 1. Surfaces, repos, deploy
 
-All repos are `github.com/GracedEternalKingCabbageMan/<name>`; develop on the laptop, push, pull on the
+All repos are `github.com/ConcatenaLabs/<name>`; develop on the laptop, push, pull on the
 box. The box now serves everything over HTTPS at `https://sequentiatestnet.com` (Caddy -> serve-public.js
 on :8080); see [[sequentia-server-deploy]].
 

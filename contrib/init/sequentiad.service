@@ -11,7 +11,7 @@
 
 [Unit]
 Description=Sequentia daemon
-Documentation=https://github.com/GracedEternalKingCabbageMan/Sequentia/blob/master/doc/init.md
+Documentation=https://github.com/ConcatenaLabs/Sequentia/blob/master/doc/init.md
 
 # https://www.freedesktop.org/wiki/Software/systemd/NetworkTarget/
 After=network-online.target

@@ -105,7 +105,7 @@ AssetsPage::AssetsPage(const PlatformStyle* platformStyle, QWidget* parent)
     QLabel* issueIntro = new QLabel(
         tr("An asset's name, ticker and domain become part of its identity the moment you issue it, "
            "and can never be changed afterwards. Take a moment over them. "
-           "<a href=\"https://github.com/GracedEternalKingCabbageMan/Sequentia/blob/master/doc/sequentia/issuing-an-asset-guide.md\">"
+           "<a href=\"https://github.com/ConcatenaLabs/Sequentia/blob/master/doc/sequentia/issuing-an-asset-guide.md\">"
            "Step-by-step guide, including how to put the file on your site</a>."), issueGroup);
     issueIntro->setWordWrap(true);
     issueIntro->setOpenExternalLinks(true);
@@ -816,7 +816,7 @@ void AssetsPage::onIssue()
                "file on the usual website platforms, and what to do when it does not work.")
                 .arg(ticker.toHtmlEscaped(), domain.toHtmlEscaped(), proof_url.toHtmlEscaped(),
                      m_proof_contract.toHtmlEscaped(),
-                     "https://github.com/GracedEternalKingCabbageMan/Sequentia/blob/master/doc/sequentia/issuing-an-asset-guide.md"));
+                     "https://github.com/ConcatenaLabs/Sequentia/blob/master/doc/sequentia/issuing-an-asset-guide.md"));
         m_proof_explainer->setVisible(true);
         m_proof_save_button->setVisible(true);
         m_contract_save_button->setVisible(!m_proof_contract.isEmpty());

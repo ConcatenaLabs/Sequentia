@@ -667,7 +667,7 @@ notices, so the wait is surfaced rather than filed away. `listdelegations`
 reports every announced-but-not-yet-binding change against your own stake, with
 the blocks remaining and a warning; the desktop wallet's Staking tab shows the
 same thing as a banner; and the public
-[staking pool board](https://github.com/GracedEternalKingCabbageMan/sequentia-pool-board)
+[staking pool board](https://github.com/ConcatenaLabs/sequentia-pool-board)
 pulls every pool's pending change to the top of its page. Because leaving is instant, seeing the notice is the whole
 protection.
 

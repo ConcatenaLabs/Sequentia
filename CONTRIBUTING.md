@@ -9,7 +9,7 @@ maintainer lists) describe the upstream Bitcoin Core project, not Sequentia.
 
 For this repository:
 
-- Send pull requests to https://github.com/GracedEternalKingCabbageMan/Sequentia
+- Send pull requests to https://github.com/ConcatenaLabs/Sequentia
   against the default branch `master`.
 - Sequentia-specific code and documentation are mapped in the top-level
   [README](README.md); the protocol documentation lives in
