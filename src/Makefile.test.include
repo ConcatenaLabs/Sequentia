@@ -123,6 +123,7 @@ BITCOIN_TESTS =\
   test/pos_tests.cpp \
   test/aes_gcm_tests.cpp \
   test/seqdexclient_tests.cpp \
+  test/seqobcourier_tests.cpp \
   test/vrf_tests.cpp \
   test/pow_tests.cpp \
   test/prevector_tests.cpp \

@@ -13,8 +13,11 @@
 
 #include <univalue.h>
 
+class CScheduler;
+
 namespace wallet {
 class CWallet;
+struct WalletContext;
 
 /**
  * SEQUENTIA reward auto-conversion, node side: remembering the staker's
@@ -83,11 +86,14 @@ struct RewardPassReport {
  *  batch is reconsidered next pass. */
 RewardPassReport RunRewardConversionPass(CWallet& wallet, bool dry_run);
 
-/** The background pass, wired into the node's scheduler at startup: every
- *  loaded wallet whose staker has switched conversion on, on a slow tick.
- *  Rewards arrive at block pace at best, so looking more often only costs the
- *  relay a book read. */
-void StartRewardConversionScheduler();
+/** The background passes, wired into the node's scheduler at startup.
+ *
+ *  Two of them: a slow one that converts (every loaded wallet whose staker has
+ *  switched it on), and a quicker one that finishes what is already in flight --
+ *  claiming the Bitcoin from a cross-chain swap whose maker has revealed the
+ *  secret, or reclaiming the asset from one whose maker never did. The second
+ *  is what makes a node that restarted mid-swap finish it rather than strand it. */
+void StartRewardConversionScheduler(WalletContext& context, CScheduler& scheduler);
 
 } // namespace wallet
 

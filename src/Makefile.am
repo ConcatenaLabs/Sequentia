@@ -198,6 +198,7 @@ BITCOIN_CORE_H = \
   anchor.h \
   mainchainrpc.h \
   seqdexclient.h \
+  seqobcourier.h \
   wsclient.h \
   mapport.h \
   memusage.h \
@@ -339,6 +340,8 @@ BITCOIN_CORE_H = \
   wallet/scriptpubkeyman.h \
   wallet/covenantfill.h \
   wallet/htlc.h \
+  wallet/parentchain.h \
+  wallet/xchainconvert.h \
   wallet/rewardconvert.h \
   wallet/rewardexec.h \
   wallet/stakingrewards.h \
@@ -397,6 +400,7 @@ libbitcoin_node_a_SOURCES = \
   anchor.cpp \
   mainchainrpc.cpp \
   seqdexclient.cpp \
+  seqobcourier.cpp \
   wsclient.cpp \
   assetregistry.cpp \
   referenceprices.cpp \
@@ -499,6 +503,7 @@ libbitcoin_wallet_a_SOURCES = \
   wallet/scriptpubkeyman.cpp \
   wallet/covenantfill.cpp \
   wallet/htlc.cpp \
+  wallet/xchainconvert.cpp \
   wallet/rewardconvert.cpp \
   wallet/rewardexec.cpp \
   wallet/spend.cpp \
