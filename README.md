@@ -2,9 +2,9 @@
 
 Sequentia is a Bitcoin sidechain for asset tokenization and decentralized
 exchange, built as a fork of [Blockstream Elements](https://github.com/ElementsProject/elements) 23.3.3.
-This repository is the Sequentia node, released as **Sequentia Core**
-(currently 24.5.2; see the release tags): the `sequentiad` daemon, `sequentia-cli`, and the
-`sequentia-qt` desktop GUI, covering consensus, Bitcoin anchoring, proof of
+This repository is the Sequentia node, released as **Sequentia Core**: the
+`sequentiad` daemon, `sequentia-cli`, and the `sequentia-qt` desktop GUI,
+covering consensus, Bitcoin anchoring, proof of
 stake, the open fee market, and the canonical protocol documentation in
 [`doc/sequentia/`](doc/sequentia/README.md).
 
@@ -58,38 +58,35 @@ plays no role. Sequentia configures no parent-chain peg and depends on no
 pegged asset; anchoring-based atomic swaps against native BTC replace the peg's
 main use.
 
-Five consensus changes shipped after the fork, active from genesis on every
-fresh chain and height-gated only on the already-running testnet:
+Consensus rules added since the fork. Each is active from genesis on every
+fresh chain, and height-gated only on the already-running testnet:
 
 - **Simplicity and tapscript introspection.** Full
   [Simplicity](https://blockstream.com/simplicity.pdf) (tapleaf version
   `0xbe`) and Elements' transaction-introspection opcodes (tapleaf `0xc4`),
-  activated on the testnet via BIP9 at height 89,856 (2026-08-12). This is
-  what the covenant-based on-chain order book builds on.
+  activated on the testnet via BIP9 at height 89,856. This is what the
+  covenant-based on-chain order book builds on.
 - **60-second block spacing as a consensus rule.** A minimum-spacing hard
   fork at height 93,800, with coinbase maturity and the leader time-gate
   rescaled at the same height. Fresh chains enforce it from block 1.
 - **Supervised assets.** An issuer may opt an asset into supervision at
   issuance (and only then: an unsupervised asset can never become
   supervised), gaining on-chain freeze/unfreeze of individual outputs.
-  Consensus-enforced from height 94,600 on the testnet (first shipped in
-  24.1.0). See
+  Consensus-enforced from height 94,600 on the testnet. See
   [`doc/sequentia/supervised-assets-implementation.md`](doc/sequentia/supervised-assets-implementation.md).
 - **Simplicity execution budget ×4.** The per-input Simplicity budget is
-  quadrupled from height 101,810 (24.3.0), so the covenant order book's
+  quadrupled from height 101,810, so the covenant order book's
   larger programs fit. See
   [`doc/sequentia/opendamp-design.md`](doc/sequentia/opendamp-design.md).
 - **Split pool payouts.** A staking pool can commit to proportional payouts
-  from an on-chain pot that any delegator may claim, from height 102,150
-  (24.4.0). See
+  from an on-chain pot that any delegator may claim, from height 102,150.
+  See
   [`doc/sequentia/split-payouts-design.md`](doc/sequentia/split-payouts-design.md).
 
-## Public testnet status
+## The public testnet
 
-- Re-genesis on **2026-07-05**: genesis
-  `ddd11d54c87a2bd94400fd31ce05d8e1110bb4b78e7103f738342086fc4ea92e`, a public
-  BLS committee (20 producers at launch), parent chain **Bitcoin testnet4**.
-  60-second blocks since the spacing fork at height 93,800.
+- Genesis `ddd11d54c87a2bd94400fd31ce05d8e1110bb4b78e7103f738342086fc4ea92e`,
+  a public BLS committee, parent chain **Bitcoin testnet4**, 60-second blocks.
 - Issued testnet assets: GOLD, USDX, EURX, SILVR, OILX (all reissuable),
   `USDC.e` (unified bridged USDC, precision 6, fed by the Compages bridge),
   plus demo assets such as BONDX (OpenAMP).
@@ -138,9 +135,8 @@ Prebuilt binaries (a Linux tarball and a Windows installer, published
 automatically from each release tag) are on
 https://sequentiatestnet.com/download/, or build from source as described
 below. Every consensus change above shipped as a release, so an older binary
-stops following the chain at the first activation height it does not know:
-anything before 24.4.0 cannot follow the chain past height 102,150. Always
-run the newest tag.
+stops following the chain at the first activation height it does not know.
+Always run the newest tag.
 
 To stake and produce blocks, see the operator manual
 [`doc/sequentia/05-operating-sequentia.md`](doc/sequentia/05-operating-sequentia.md)
