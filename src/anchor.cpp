@@ -1386,7 +1386,6 @@ void ScanRawBlockForCheckpoints(const Sidechain::Bitcoin::CBlock& block, int btc
         for (const auto& out : tx->vout) RecordCheckpointIfPresent(out.scriptPubKey, btc_height, btc_hash);
     }
 }
-
 namespace {
 
 //! Does this parent daemon serve blocks THIS node can parse?

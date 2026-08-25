@@ -2656,7 +2656,11 @@ fs::path ParentCoinsPath(const CWallet& wallet)
     return fs::PathFromString(wallet.GetDatabase().Filename()).parent_path() / "parent_coins.json";
 }
 
-ParentCoinSet LoadParentCoins(const CWallet& wallet)
+//! Read the record as it is on disk, usable or not. A record can be unusable for
+//! spending and still hold the only copy of something: which coins are committed to
+//! a spend of ours, and the change of that spend, neither of which the parent chain
+//! will admit to until the transaction confirms.
+ParentCoinSet LoadParentCoinsRaw(const CWallet& wallet)
 {
     ParentCoinSet out;
     std::ifstream f(fs::PathToString(ParentCoinsPath(wallet)));
@@ -2688,6 +2692,21 @@ ParentCoinSet LoadParentCoins(const CWallet& wallet)
         }
     }
     out.loaded = true;
+    return out;
+}
+
+//! The record, if it is one this build can spend from. A coin without its script
+//! cannot be spent, and this chain cannot recover the script from the address it
+//! was paid to -- parent-chain addresses do not decode here. A record written
+//! before the script was kept is therefore not a usable record: report none, and
+//! let the caller rebuild it once rather than carry coins it can only look at.
+ParentCoinSet LoadParentCoins(const CWallet& wallet)
+{
+    ParentCoinSet out = LoadParentCoinsRaw(wallet);
+    if (!out.loaded) return out;
+    for (const ParentCoin& c : out.coins) {
+        if (c.script_hex.empty() && c.height > 0) return ParentCoinSet{};
+    }
     return out;
 }
 
@@ -2740,6 +2759,12 @@ std::map<std::string, std::string> WalletParentScripts(const CWallet& wallet)
         const std::string addr = EncodeDestination(dest);
         if (addr.empty()) continue;
         const CScript spk = GetScriptForDestination(dest);
+        // The address book holds every address this wallet has WRITTEN DOWN,
+        // which includes the ones it pays: a saved payee is in there beside our
+        // own receiving addresses. Counting coins at those as ours inflates the
+        // balance with somebody else money -- visible the moment a send refuses
+        // to spend what the overview claims is there.
+        if (!wallet.IsMine(spk)) continue;
         out[HexStr(spk)] = addr;
     }
     return out;
@@ -3123,7 +3148,7 @@ RPCHelpMan getbtcbalance()
             // the sum. This is the UTXO set, not history: an output disappears from here
             // the moment it is spent, and unconfirmed outputs never appear at all.
             if (res.exists("unspents") && res["unspents"].isArray()) {
-                struct Found { std::string txid; int vout; UniValue amount; int height; std::string address; };
+                struct Found { std::string txid; int vout; UniValue amount; int height; std::string address; std::string script; };
                 std::vector<Found> found;
                 for (size_t i = 0; i < res["unspents"].size(); ++i) {
                     const UniValue& u = res["unspents"][i];
@@ -3133,6 +3158,11 @@ RPCHelpMan getbtcbalance()
                     f.vout = (u.exists("vout") && u["vout"].isNum()) ? u["vout"].get_int() : 0;
                     if (u.exists("amount")) f.amount = u["amount"];
                     f.height = (u.exists("height") && u["height"].isNum()) ? u["height"].get_int() : 0;
+                    // The scriptPubKey, kept because it is the only handle that
+                    // survives: the parent chain writes its addresses in Bitcoin
+                    // form (tb1...), which this chain's decoder rejects outright,
+                    // so an address is not something a spend can work back from.
+                    if (u.exists("scriptPubKey") && u["scriptPubKey"].isStr()) f.script = u["scriptPubKey"].get_str();
                     // scantxoutset echoes the matching descriptor as "addr(<address>)#checksum";
                     // recover the plain address from it.
                     if (u.exists("desc") && u["desc"].isStr()) {
@@ -3153,6 +3183,7 @@ RPCHelpMan getbtcbalance()
                     int64_t amt = 0;
                     if (ParseFixedPoint(f.amount.getValStr(), 8, &amt)) c.amount = amt;
                     c.height = f.height;
+                    c.script_hex = f.script;
                     c.address = f.address;
                     scanned_coins.push_back(std::move(c));
                 }
@@ -3219,6 +3250,29 @@ RPCHelpMan getbtcbalance()
         record.scanned_height = parent_height;
         record.coins = std::move(scanned_coins);
         record.full_scan_ms = GetTimeMillis() - scan_started_ms;
+
+        // A scan sees the CONFIRMED chain, so it re-offers every coin we have
+        // already committed to a send that is still in the mempool, and knows
+        // nothing of that send's change. Carrying both across a rebuild is the
+        // whole point of keeping a record: without it, a rebuild -- a reorg, a
+        // migration, any riallineamento -- silently re-arms the double spend the
+        // record exists to prevent.
+        const ParentCoinSet previous = LoadParentCoinsRaw(*pwallet);
+        if (previous.loaded) {
+            for (const ParentCoin& old : previous.coins) {
+                if (!old.spent_by.empty()) {
+                    for (ParentCoin& c : record.coins) {
+                        if (c.txid == old.txid && c.vout == old.vout) c.spent_by = old.spent_by;
+                    }
+                } else if (old.height == 0) {
+                    // Our own unconfirmed change: the scan cannot see it, and if it
+                    // has confirmed meanwhile the scan already listed it.
+                    const bool already = std::any_of(record.coins.begin(), record.coins.end(),
+                        [&](const ParentCoin& c) { return c.txid == old.txid && c.vout == old.vout; });
+                    if (!already) record.coins.push_back(old);
+                }
+            }
+        }
         try {
             UniValue hp(UniValue::VARR);
             hp.push_back(parent_height);
@@ -3386,10 +3440,9 @@ bool ParentUtxosForSpending(const CWallet& wallet, std::vector<ParentUtxo>& out,
             const std::vector<unsigned char> raw = ParseHex(c.script_hex);
             u.script = CScript(raw.begin(), raw.end());
         } else {
-            // Records written before the script was kept: rebuild it from the address.
-            CTxDestination dest = DecodeDestination(c.address);
-            if (!IsValidDestination(dest)) continue;
-            u.script = GetScriptForDestination(dest);
+            // Cannot happen with a record this build wrote, and cannot be repaired
+            // here: parent-chain addresses do not decode on this chain.
+            continue;
         }
         out.push_back(std::move(u));
     }
@@ -3412,6 +3465,11 @@ void RecordParentSpend(const CWallet& wallet,
             if (c.txid == sp.first && c.vout == sp.second) c.spent_by = txid;
         }
     }
+    // Nothing on the parent chain has happened that a block watcher could see: the
+    // send is in a mempool. Ring the same bell anyway, so the overview re-reads the
+    // balance on its next tick instead of showing the spent coin until a block
+    // arrives -- or, worse, until the half-hour safety refresh.
+    NoteParentWatchTouch();
     if (with_change && change_amount > 0) {
         ParentCoin c;
         c.txid = uint256S(txid);
@@ -3837,6 +3895,22 @@ RPCHelpMan listbtctransactions()
                         break;
                     }
                 } catch (...) {}
+            }
+            // gettxout only answers about outputs that still EXIST. Once a later
+            // send spends them, this says nothing about the earlier one -- which
+            // is how a transaction with 42 confirmations came to be reported as
+            // unknown, minutes after its change was spent. The record kept the
+            // height of every coin it ever saw, including the ones now spent.
+            if (confs < 0) {
+                const ParentCoinSet rec = LoadParentCoinsRaw(*pwallet);
+                if (rec.loaded && rec.scanned_height > 0) {
+                    const uint256 txid = uint256S(s["txid"].get_str());
+                    for (const ParentCoin& c : rec.coins) {
+                        if (c.txid != txid) continue;
+                        confs = (c.height > 0) ? rec.scanned_height - c.height + 1 : 0;
+                        break;
+                    }
+                }
             }
         }
         o.pushKV("confirmations", confs);

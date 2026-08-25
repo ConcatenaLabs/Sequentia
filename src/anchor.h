@@ -369,6 +369,11 @@ void SetWatchedParentOutputs(std::set<std::vector<unsigned char>> scripts,
  *  refreshes when it moves. */
 uint64_t GetParentWatchTouches();
 
+/** Note that something touched a watched output, without a block having said so.
+ *  For a spend of our own: it is in a mempool, no block walk will see it, and the
+ *  balance on screen is wrong until somebody looks again. */
+void NoteParentWatchTouch();
+
 /** Build the OP_RETURN payload committing to a Sequentia block:
  *  "SEQCKPT" || hash || LE32(height). Embed it in any parent-chain
  *  transaction (e.g. a `data` output). */
