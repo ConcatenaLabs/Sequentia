@@ -155,11 +155,24 @@ A fresh worktree has no *built* `depends/` output, so a plain `./configure` fail
 with "Boost is not available!". Point it at an existing checkout's prebuilt
 dependencies:
 
-    CONFIG_SITE=<checkout>/depends/x86_64-pc-linux-gnu/share/config.site \
-      ./configure --enable-any-asset-fees --with-gui=no --disable-bench \
+    export CONFIG_SITE=<checkout>/depends/x86_64-pc-linux-gnu/share/config.site
+    ./autogen.sh
+    ./configure --enable-any-asset-fees --with-gui=no --disable-bench \
       --disable-fuzz-binary
+    make -j$(nproc)
 
-(Run `./autogen.sh` first in a fresh worktree.)
+**`export` it, rather than setting it for `configure` alone.** Whenever
+`configure.ac` is newer than the generated build system — which every version
+bump makes true — `make` re-runs `configure` itself, and that re-run inherits
+only the environment. Set for the one command, it is gone by then, and the build
+dies partway through with the same "Boost is not available!" (or, on a GUI
+build, "Qt5Core >= 5.9.5 not found") that it was there to prevent. The failure
+lands *after* a successful `./configure`, which makes it read like a broken
+checkout rather than a lost variable.
+
+`./autogen.sh` is not only for a fresh worktree: run it after anything that
+touches `configure.ac`, so `configure` is newer than it and `make` has no reason
+to regenerate at all.
 
 `--enable-any-asset-fees` is not optional. It is a compile-time flag, distinct
 from the runtime `-con_any_asset_fees` chain parameter, and it is the only thing
