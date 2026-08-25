@@ -2544,6 +2544,36 @@ RPCHelpMan liststakingrewards()
 },
     };
 }
+namespace {
+// bitcoind runs one scantxoutset at a time for the whole process, and this wallet
+// has several reasons to want one: every loaded wallet refreshes its Bitcoin balance
+// on its own timer, and a Bitcoin send scans before it spends. Two wallets open in
+// one GUI is enough -- their timers start together and collide once a minute, for
+// ever.
+//
+// So wait for the slot rather than returning bitcoind refusal to a caller who did
+// nothing wrong. The wait is a DEADLINE, not a number of tries: a scan of testnet4
+// measured 18.8 s over 14.2 million outputs, and a retry budget shorter than one
+// scan means whoever comes second always gives up just before the slot frees --
+// which is exactly how "Scan already in progress" ended up parked under the
+// balances. The deadline is generous enough for a scan several times that size and
+// still bounded, so an abandoned scan cannot hang a wallet for ever.
+UniValue ScanParentChainUtxoSet(const UniValue& params)
+{
+    constexpr auto wait_budget = std::chrono::seconds{90};
+    const auto deadline = std::chrono::steady_clock::now() + wait_budget;
+    UniValue reply;
+    for (;;) {
+        reply = CallMainChainRPC("scantxoutset", params);
+        const bool busy = reply.exists("error") && !reply["error"].isNull() &&
+            reply["error"].isObject() && reply["error"].exists("message") &&
+            reply["error"]["message"].get_str().find("in progress") != std::string::npos;
+        if (!busy || std::chrono::steady_clock::now() >= deadline) break;
+        UninterruptibleSleep(std::chrono::milliseconds{1500});
+    }
+    return reply;
+}
+} // namespace
 
 RPCHelpMan getbtcbalance()
 {
@@ -2622,7 +2652,7 @@ RPCHelpMan getbtcbalance()
     std::string err;
     UniValue utxos(UniValue::VARR);
     try {
-        UniValue reply = CallMainChainRPC("scantxoutset", params);
+        UniValue reply = ScanParentChainUtxoSet(params);
         if (reply.exists("error") && !reply["error"].isNull()) {
             const UniValue& e = reply["error"];
             err = (e.isObject() && e.exists("message")) ? e["message"].get_str() : e.write();
@@ -2749,15 +2779,7 @@ bool ScanParentUtxos(const CWallet& wallet, std::vector<ParentUtxo>& out, int& p
         // One scan at a time per bitcoind: the balance refresh and a send that
         // both scan can collide. The other scan finishes in seconds, so wait
         // for it rather than bouncing the error to whoever came second.
-        UniValue reply;
-        for (int attempt = 0;; ++attempt) {
-            reply = CallMainChainRPC("scantxoutset", params);
-            const bool busy = reply.exists("error") && !reply["error"].isNull() &&
-                reply["error"].isObject() && reply["error"].exists("message") &&
-                reply["error"]["message"].get_str().find("in progress") != std::string::npos;
-            if (!busy || attempt >= 8) break;
-            UninterruptibleSleep(std::chrono::milliseconds{1500});
-        }
+        UniValue reply = ScanParentChainUtxoSet(params);
         if (reply.exists("error") && !reply["error"].isNull()) {
             const UniValue& e = reply["error"];
             err = (e.isObject() && e.exists("message")) ? e["message"].get_str() : e.write();
