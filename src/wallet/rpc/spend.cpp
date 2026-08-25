@@ -2973,6 +2973,79 @@ bool FillMissingCoinTimes(ParentCoinSet& set)
     return changed;
 }
 
+//! Defined below: the list of Bitcoin sends this wallet has made.
+UniValue LoadParentSends(const CWallet& wallet);
+
+//! Re-derive our unconfirmed spends from the sends we recorded, by asking the
+//! parent chain what those transactions actually spend.
+//!
+//! The record is the usual source for this, but it cannot be the only one: it is
+//! rebuilt from a scan when it is missing, unusable or too far behind, and a scan
+//! sees only the confirmed chain. A wallet whose record was rebuilt in the minutes
+//! after a send would offer that send's coins again -- exactly the double spend
+//! the marking exists to stop. The list of our own sends survives all of that, and
+//! a transaction still in a mempool will tell us its inputs.
+void RecoverPendingSpendsFromSends(const CWallet& wallet, ParentCoinSet& record)
+{
+    const UniValue sends = LoadParentSends(wallet);
+    for (size_t i = 0; i < sends.size(); ++i) {
+        const UniValue& s = sends[i];
+        if (!s.isObject() || !s["txid"].isStr()) continue;
+        const std::string txid_hex = s["txid"].get_str();
+
+        // Only transactions still waiting matter. A confirmed one has already had
+        // its effect applied by the scan or the block walk.
+        UniValue tx;
+        try {
+            UniValue p(UniValue::VARR);
+            p.push_back(txid_hex);
+            p.push_back(true);
+            UniValue r = CallMainChainRPC("getrawtransaction", p);
+            if (!r.exists("result") || !r["result"].isObject()) continue;
+            tx = r["result"];
+        } catch (const std::exception&) {
+            continue; // unreachable, or unknown without a transaction index
+        }
+        const UniValue& confs = find_value(tx, "confirmations");
+        if (confs.isNum() && confs.get_int() > 0) continue;
+
+        const UniValue& vins = find_value(tx, "vin");
+        if (vins.isArray()) {
+            for (size_t k = 0; k < vins.size(); ++k) {
+                const UniValue& pt = find_value(vins[k], "txid");
+                const UniValue& pv = find_value(vins[k], "vout");
+                if (!pt.isStr() || !pv.isNum()) continue;
+                const uint256 ptxid = uint256S(pt.get_str());
+                const uint32_t pvout = (uint32_t)pv.get_int();
+                for (ParentCoin& c : record.coins) {
+                    if (c.txid == ptxid && c.vout == pvout) c.spent_by = txid_hex;
+                }
+            }
+        }
+
+        // The change of that send is ours and is not in the confirmed set either.
+        const int change_vout = (s["change_vout"].isNum()) ? s["change_vout"].get_int() : -1;
+        if (change_vout < 0) continue;
+        const UniValue& vouts = find_value(tx, "vout");
+        if (!vouts.isArray() || (size_t)change_vout >= vouts.size()) continue;
+        const UniValue& out = vouts[change_vout];
+        const uint256 txid = uint256S(txid_hex);
+        const bool already = std::any_of(record.coins.begin(), record.coins.end(),
+            [&](const ParentCoin& c) { return c.txid == txid && c.vout == (uint32_t)change_vout; });
+        if (already) continue;
+        ParentCoin c;
+        c.txid = txid;
+        c.vout = (uint32_t)change_vout;
+        c.amount = AmountFromValue(find_value(out, "value"));
+        c.height = 0;
+        c.time = s["time"].isNum() ? s["time"].get_int64() : GetTime();
+        const UniValue& spk = find_value(out, "scriptPubKey");
+        if (spk.isObject() && find_value(spk, "hex").isStr()) c.script_hex = find_value(spk, "hex").get_str();
+        c.address = s["change_address"].getValStr();
+        if (!c.script_hex.empty()) record.coins.push_back(std::move(c));
+    }
+}
+
 //! The getbtcbalance answer, built from the record instead of from a scan.
 UniValue ParentBalanceReply(const ParentCoinSet& set, int naddr)
 {
@@ -3281,6 +3354,9 @@ RPCHelpMan getbtcbalance()
         } catch (const std::exception&) {
             // No hash means the next call cannot trust the height and will rescan.
         }
+        // ...and for what no record could know, because it was rebuilt after the
+        // send rather than before it.
+        RecoverPendingSpendsFromSends(*pwallet, record);
         if (!record.scanned_hash.empty()) StoreParentCoins(*pwallet, record);
 
         std::set<std::pair<uint256, uint32_t>> watched_outpoints;

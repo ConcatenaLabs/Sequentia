@@ -1486,6 +1486,17 @@ void SendCoinsDialog::refreshTxSize()
                 valid = false;
                 break;
             }
+            // Bitcoin is not sized here, and must not even be offered: it does not
+            // travel in a Sequentia transaction, so its asset is the null one by
+            // design, and asking the wallet to build for it fails with "No asset
+            // provided for recipient". That failure is not silent -- prepareTransaction
+            // shows the wallet error to the user -- so this probe, which runs 400 ms
+            // after every keystroke, put an error dialog on screen for anyone typing
+            // an amount in tBTC. The real send takes the parent-chain road instead.
+            if (GUIUtil::isParentBtc(rcp.asset)) {
+                valid = false;
+                break;
+            }
             recipients.append(rcp);
         }
         if (valid && !recipients.isEmpty()) {
