@@ -652,6 +652,7 @@ RPCHelpMan getseqdexstatus();
 RPCHelpMan getbtcbalance();
 RPCHelpMan getbtcscanprogress();
 RPCHelpMan sendbtctoaddress();
+RPCHelpMan getbtcfeerate();
 RPCHelpMan listbtctransactions();
 RPCHelpMan settxfee();
 RPCHelpMan fundrawtransaction();
@@ -776,6 +777,7 @@ static const CRPCCommand commands[] =
     { "wallet",             &getbtcbalance,                  },
     { "wallet",             &getbtcscanprogress,             },
     { "wallet",             &sendbtctoaddress,               },
+    { "wallet",             &getbtcfeerate,                  },
     { "wallet",             &listbtctransactions,            },
     { "wallet",             &sethdseed,                      },
     { "wallet",             &setlabel,                       },

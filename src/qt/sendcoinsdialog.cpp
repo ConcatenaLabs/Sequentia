@@ -48,6 +48,9 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QScrollBar>
+#include <QRadioButton>
+#include <QSpinBox>
+#include <QFrame>
 #include <QSettings>
 #include <QShowEvent>
 #include <QTextDocument>
@@ -336,6 +339,79 @@ SendCoinsDialog::~SendCoinsDialog()
     delete ui;
 }
 
+void SendCoinsDialog::buildBtcFeeControls()
+{
+    if (!ui->frameFee || !ui->frameFee->parentWidget()) return;
+    QBoxLayout* host = qobject_cast<QBoxLayout*>(ui->frameFee->parentWidget()->layout());
+    if (!host) return;
+
+    m_btc_fee_frame = new QFrame(this);
+    m_btc_fee_frame->setFrameShape(ui->frameFee->frameShape());
+    QVBoxLayout* box = new QVBoxLayout(m_btc_fee_frame);
+
+    QLabel* title = new QLabel(tr("Bitcoin network fee"), m_btc_fee_frame);
+    QFont bold = title->font();
+    bold.setBold(true);
+    title->setFont(bold);
+    box->addWidget(title);
+
+    m_btc_fee_recommended = new QRadioButton(tr("Recommended"), m_btc_fee_frame);
+    m_btc_fee_recommended->setChecked(true);
+    box->addWidget(m_btc_fee_recommended);
+
+    QHBoxLayout* row = new QHBoxLayout();
+    m_btc_fee_custom = new QRadioButton(tr("Custom:"), m_btc_fee_frame);
+    m_btc_fee_spin = new QSpinBox(m_btc_fee_frame);
+    m_btc_fee_spin->setRange(1, 5000);
+    m_btc_fee_spin->setSuffix(tr(" sat/vB"));
+    m_btc_fee_spin->setEnabled(false);
+    row->addWidget(m_btc_fee_custom);
+    row->addWidget(m_btc_fee_spin);
+    row->addStretch(1);
+    box->addLayout(row);
+
+    connect(m_btc_fee_custom, &QRadioButton::toggled, this, [this](bool on) {
+        if (m_btc_fee_spin) m_btc_fee_spin->setEnabled(on);
+    });
+
+    const int idx = host->indexOf(ui->frameFee);
+    if (idx >= 0) host->insertWidget(idx + 1, m_btc_fee_frame); else host->addWidget(m_btc_fee_frame);
+    m_btc_fee_frame->setVisible(false);
+}
+
+void SendCoinsDialog::refreshBtcFeeHint()
+{
+    if (!model || !m_btc_fee_recommended) return;
+    int rate = 0;
+    bool estimated = false;
+    try {
+        UniValue r = model->node().executeRpc("getbtcfeerate", UniValue(UniValue::VARR),
+                                              "/wallet/" + model->getWalletName().toStdString());
+        if (r.isObject() && r.exists("sat_vb") && r["sat_vb"].isNum()) {
+            rate = (int)r["sat_vb"].get_int64();
+            estimated = r.exists("estimated") && r["estimated"].get_bool();
+        }
+    } catch (...) {
+        // Leave the label generic: an unreachable parent is reported by the send
+        // itself, and a fee panel is not the place to explain it.
+    }
+    m_btc_fee_hint = rate;
+    if (rate > 0) {
+        m_btc_fee_recommended->setText(estimated
+            ? tr("Recommended: %1 sat/vB (the Bitcoin node's estimate)").arg(rate)
+            : tr("Recommended: %1 sat/vB (minimum; Bitcoin gave no estimate)").arg(rate));
+        if (m_btc_fee_spin && m_btc_fee_spin->value() < rate) m_btc_fee_spin->setValue(rate);
+    }
+}
+
+int SendCoinsDialog::chosenBtcFeeRate() const
+{
+    if (m_btc_fee_custom && m_btc_fee_custom->isChecked() && m_btc_fee_spin) {
+        return m_btc_fee_spin->value();
+    }
+    return 0; // the node applies its own estimate
+}
+
 bool SendCoinsDialog::trySendParentBtc()
 {
     // Collect the entries; only engage when a recipient chose native Bitcoin.
@@ -369,7 +445,9 @@ bool SendCoinsDialog::trySendParentBtc()
         UniValue est_params(UniValue::VARR);
         est_params.push_back(rcp.address.toStdString());
         est_params.push_back(ValueFromAmount(rcp.asset_amount));
-        est_params.push_back(UniValue(UniValue::VNULL));
+        const int chosen_rate = chosenBtcFeeRate();
+        if (chosen_rate > 0) est_params.push_back(UniValue(chosen_rate));
+        else est_params.push_back(UniValue(UniValue::VNULL));
         est_params.push_back(UniValue(rcp.fSubtractFeeFromAmount));
         est_params.push_back(UniValue(true)); // estimate_only
         const std::string uri_est = "/wallet/" + model->getWalletName().toStdString();
@@ -1379,6 +1457,12 @@ void SendCoinsDialog::buildFeeGrid()
     m_size_timer->setSingleShot(true);
     m_size_timer->setInterval(400);
     connect(m_size_timer, &QTimer::timeout, this, &SendCoinsDialog::refreshTxSize);
+
+    // The Bitcoin fee controls, which stand in for the asset fee panel when every
+    // recipient is paid in bitcoin: that panel prices Sequentia assets and has
+    // nothing to say about sat/vB on the parent chain, so it is hidden -- which
+    // used to leave no fee controls at all.
+    buildBtcFeeControls();
 }
 
 void SendCoinsDialog::refreshTxSize()
@@ -1918,7 +2002,15 @@ void SendCoinsDialog::coinControlUpdateLabels()
             any_entry = true;
             if (!GUIUtil::isParentBtc(e->getValue().asset)) { all_btc = false; break; }
         }
-        ui->frameFee->setVisible(!(any_entry && all_btc));
+        const bool paying_in_btc = any_entry && all_btc;
+        ui->frameFee->setVisible(!paying_in_btc);
+        // The asset panel goes away for a Bitcoin send because it prices assets;
+        // without something in its place the user had no fee controls at all, and
+        // no sight of what they were about to pay.
+        if (m_btc_fee_frame) {
+            if (paying_in_btc && !m_btc_fee_frame->isVisible()) refreshBtcFeeHint();
+            m_btc_fee_frame->setVisible(paying_in_btc);
+        }
     }
 
     if (!model || !model->getOptionsModel())
