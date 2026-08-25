@@ -2848,13 +2848,29 @@ bool AdvanceParentCoins(const CWallet& wallet, ParentCoinSet& set, std::string& 
 
     const std::map<std::string, std::string> mine = WalletParentScripts(wallet);
     std::string last_hash = set.scanned_hash;
-    for (int h = set.scanned_height + 1; h <= tip_height; ++h) {
+
+    // Follow nextblockhash from the block we stopped at rather than asking for each
+    // height. Every parent RPC opens its own TCP connection and authenticates again
+    // -- fine once, ruinous by the thousand -- so halving the calls halves the real
+    // cost of catching up. A block already names its successor; asking for what we
+    // have been told is a round trip spent on nothing.
+    std::string next_hash;
+    {
         try {
             UniValue hp(UniValue::VARR);
-            hp.push_back(h);
+            hp.push_back(set.scanned_height + 1);
             UniValue hr = CallMainChainRPC("getblockhash", hp);
             if (!hr.exists("result") || !hr["result"].isStr()) { err = "parent chain unreachable"; return false; }
-            const std::string bhash = hr["result"].get_str();
+            next_hash = hr["result"].get_str();
+        } catch (const std::exception& e) {
+            err = std::string("parent chain unreachable: ") + e.what();
+            return false;
+        }
+    }
+
+    for (int h = set.scanned_height + 1; h <= tip_height && !next_hash.empty(); ++h) {
+        try {
+            const std::string bhash = next_hash;
             UniValue bp(UniValue::VARR);
             bp.push_back(bhash);
             bp.push_back(2);
@@ -2862,6 +2878,8 @@ bool AdvanceParentCoins(const CWallet& wallet, ParentCoinSet& set, std::string& 
             if (!br.exists("result") || !br["result"].isObject()) { err = "parent chain unreachable"; return false; }
             const UniValue& btime = find_value(br["result"], "time");
             ApplyParentBlock(br["result"], h, btime.isNum() ? btime.get_int64() : 0, mine, set);
+            const UniValue& nxt = find_value(br["result"], "nextblockhash");
+            next_hash = nxt.isStr() ? nxt.get_str() : std::string();
             last_hash = bhash;
         } catch (const std::exception& e) {
             // Stop where we got to: the record stays consistent at scanned_height,
