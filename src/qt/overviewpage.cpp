@@ -925,6 +925,7 @@ void OverviewPage::refreshBtcBalance()
     // result back to the GUI thread. Avoids freezing the UI; no extra Qt module.
     std::thread([self, nodePtr, uri]() {
         bool ok = false;
+        bool stale = false;
         QString text;
         CAmount amount = -1;
         int naddr = 0;
@@ -933,6 +934,7 @@ void OverviewPage::refreshBtcBalance()
         try {
             UniValue r = nodePtr->executeRpc("getbtcbalance", UniValue(UniValue::VARR), uri);
             if (r.isObject()) {
+                stale = r.exists("stale") && r["stale"].isBool() && r["stale"].get_bool();
                 const std::string e = r.exists("error") ? r["error"].getValStr() : std::string();
                 if (!e.empty()) {
                     // Not reaching Bitcoin is an ordinary, often DELIBERATE state
@@ -979,10 +981,15 @@ void OverviewPage::refreshBtcBalance()
         } catch (...) {
             text = QStringLiteral("Bitcoin (testnet4): query failed");
         }
-        QMetaObject::invokeMethod(qApp, [self, ok, text, amount, naddr, parent_height, utxos]() {
+        QMetaObject::invokeMethod(qApp, [self, ok, stale, text, amount, naddr, parent_height, utxos]() {
             if (self) {
                 self->m_btc_scan_inflight = false;
                 self->onBtcScanResult(ok, text, amount, naddr, parent_height, utxos);
+                // The figures stand, but they are dated: say so without hiding them.
+                if (stale && self->m_btc_label) {
+                    self->m_btc_label->setText(tr("Bitcoin (testnet4): last known at parent block %1 -- Bitcoin Core is not answering").arg(parent_height));
+                    self->m_btc_label->setVisible(true);
+                }
             }
         });
     }).detach();

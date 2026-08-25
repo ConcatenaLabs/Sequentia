@@ -3053,6 +3053,17 @@ RPCHelpMan getbtcbalance()
             return ParentBalanceReply(record, naddr);
         }
         if (record.loaded) {
+            // Bitcoin being unreachable is not a reason to report zero. The record
+            // holds coins that exist whether or not a daemon is answering right
+            // now, and a wallet that shows 0.00 because it cannot ask is worse than
+            // one that shows what it last knew: the first looks like theft, the
+            // second like weather. Say the balance, and say it may have moved --
+            // a full scan below would fail for the same reason anyway.
+            if (ferr.find("unreachable") != std::string::npos) {
+                UniValue stale = ParentBalanceReply(record, naddr);
+                stale.pushKV("stale", true);
+                return stale;
+            }
             LogPrintf("Bitcoin balance: falling back to a full parent-chain scan: %s\n", ferr);
         }
     }
