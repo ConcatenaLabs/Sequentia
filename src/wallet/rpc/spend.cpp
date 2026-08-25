@@ -2646,6 +2646,7 @@ struct ParentCoin {
 struct ParentCoinSet {
     int scanned_height{0};      //!< every block up to here has been applied
     std::string scanned_hash;   //!< ...and this was its hash, so a reorg is visible
+    int64_t full_scan_ms{0};    //!< what one full scan cost here, measured, not guessed
     std::vector<ParentCoin> coins;
     bool loaded{false};         //!< false = no record yet, a full scan is owed
 };
@@ -2666,6 +2667,8 @@ ParentCoinSet LoadParentCoins(const CWallet& wallet)
     out.scanned_height = parsed.exists("scanned_height") && parsed["scanned_height"].isNum()
                          ? parsed["scanned_height"].get_int() : 0;
     out.scanned_hash = parsed.exists("scanned_hash") ? parsed["scanned_hash"].getValStr() : "";
+    out.full_scan_ms = parsed.exists("full_scan_ms") && parsed["full_scan_ms"].isNum()
+                       ? parsed["full_scan_ms"].get_int64() : 0;
     if (parsed.exists("coins") && parsed["coins"].isArray()) {
         const UniValue& arr = parsed["coins"];
         for (size_t i = 0; i < arr.size(); ++i) {
@@ -2693,6 +2696,7 @@ void StoreParentCoins(const CWallet& wallet, const ParentCoinSet& set)
     UniValue root(UniValue::VOBJ);
     root.pushKV("scanned_height", set.scanned_height);
     root.pushKV("scanned_hash", set.scanned_hash);
+    root.pushKV("full_scan_ms", set.full_scan_ms);
     UniValue arr(UniValue::VARR);
     for (const ParentCoin& c : set.coins) {
         UniValue o(UniValue::VOBJ);
@@ -2838,11 +2842,25 @@ bool AdvanceParentCoins(const CWallet& wallet, ParentCoinSet& set, std::string& 
         }
     }
 
-    // Reading blocks is cheap per block and hopeless by the thousand: past this
-    // many, one full scan is the faster answer.
-    constexpr int max_catch_up = 500;
-    if (tip_height - set.scanned_height > max_catch_up) {
-        err = "too far behind to catch up block by block";
+    // Past some gap, one full scan is simply faster than reading block by block.
+    // Where that point lies is not a constant: it depends on how long a scan takes
+    // here (seconds on testnet4, minutes on a mainnet-sized UTXO set) against what a
+    // block costs, which is dominated by the connection rather than the block --
+    // every parent RPC opens a fresh TCP connection and authenticates again.
+    // Measured on 2026-08-25: 38 blocks took 33.5 s, about 0.9 s each, against 33.6 s
+    // for a full scan of the same wallet. So the crossing point was around forty
+    // blocks, not the five hundred first assumed -- which would have meant seven
+    // minutes of catching up to avoid half a minute of scanning.
+    //
+    // Compare the two costs instead of hardcoding a winner, using the scan time this
+    // wallet actually saw. Batched parent RPC (upstream 24.7.5) will cut the per
+    // block cost sharply, and this arithmetic will follow it without being touched.
+    constexpr int64_t ms_per_block_estimate = 900;
+    const int behind = tip_height - set.scanned_height;
+    const int64_t known_scan_ms = set.full_scan_ms > 0 ? set.full_scan_ms : 30000;
+    if ((int64_t)behind * ms_per_block_estimate > known_scan_ms) {
+        err = strprintf("%d blocks behind: a full scan (%d ms last time) is faster than catching up",
+                        behind, known_scan_ms);
         return false;
     }
 
@@ -3090,6 +3108,7 @@ RPCHelpMan getbtcbalance()
     std::string err;
     UniValue utxos(UniValue::VARR);
     std::vector<ParentCoin> scanned_coins;
+    const int64_t scan_started_ms = GetTimeMillis();
     try {
         UniValue reply = ScanParentChainUtxoSet(params);
         if (reply.exists("error") && !reply["error"].isNull()) {
@@ -3199,6 +3218,7 @@ RPCHelpMan getbtcbalance()
         record.loaded = true;
         record.scanned_height = parent_height;
         record.coins = std::move(scanned_coins);
+        record.full_scan_ms = GetTimeMillis() - scan_started_ms;
         try {
             UniValue hp(UniValue::VARR);
             hp.push_back(parent_height);
