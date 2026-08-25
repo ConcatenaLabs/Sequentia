@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <anchor.h>
 #include <assetsdir.h>
 #include <consensus/consensus.h>
 #include <consensus/validation.h>
@@ -2575,6 +2576,47 @@ UniValue ScanParentChainUtxoSet(const UniValue& params)
 }
 } // namespace
 
+RPCHelpMan getbtcscanprogress()
+{
+    return RPCHelpMan{"getbtcscanprogress",
+        "\nHow far along the parent-chain scan behind getbtcbalance is, if one is running.\n"
+        "\nThe first reading of a wallet Bitcoin balance walks the whole parent-chain UTXO set,\n"
+        "which takes seconds on testnet4 and minutes on a mainnet-sized set. A caller that shows\n"
+        "the balance can poll this to say how far it has got instead of showing nothing at all.\n",
+        {},
+        RPCResult{RPCResult::Type::OBJ, "", "", {
+            {RPCResult::Type::BOOL, "scanning", "whether a parent-chain scan is running right now"},
+            {RPCResult::Type::NUM, "progress", "percent complete, 0-100; absent when nothing is running"},
+        }},
+        RPCExamples{HelpExampleCli("getbtcscanprogress", "") + HelpExampleRpc("getbtcscanprogress", "")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    UniValue result(UniValue::VOBJ);
+    UniValue params(UniValue::VARR);
+    params.push_back("status");
+    // A scan holds bitcoind single scan slot, and asking for its status does not
+    // queue behind it -- that is the whole reason this can be polled while one runs.
+    UniValue reply;
+    try {
+        reply = CallMainChainRPC("scantxoutset", params);
+    } catch (const std::exception&) {
+        result.pushKV("scanning", false);
+        return result;
+    }
+    const UniValue& res = reply.exists("result") ? reply["result"] : NullUniValue;
+    // bitcoind answers null when no scan is running.
+    if (!res.isObject()) {
+        result.pushKV("scanning", false);
+        return result;
+    }
+    result.pushKV("scanning", true);
+    if (res.exists("progress") && res["progress"].isNum()) {
+        result.pushKV("progress", res["progress"].get_int());
+    }
+    return result;
+}};
+}
+
 RPCHelpMan getbtcbalance()
 {
     return RPCHelpMan{"getbtcbalance",
@@ -2610,6 +2652,7 @@ RPCHelpMan getbtcbalance()
 
     // Gather this wallet's receiving addresses (Bitcoin-identical) as scan descriptors.
     UniValue descriptors(UniValue::VARR);
+    std::set<std::vector<unsigned char>> watched_scripts;
     int naddr = 0;
     {
         LOCK(pwallet->cs_wallet);
@@ -2626,6 +2669,10 @@ RPCHelpMan getbtcbalance()
             const std::string addr = EncodeDestination(dest);
             if (addr.empty()) continue;
             descriptors.push_back("addr(" + addr + ")");
+            // The same addresses, as raw scripts, for the node to watch new parent
+            // blocks with. Unblinded, so byte-identical to what Bitcoin sees.
+            const CScript spk = GetScriptForDestination(dest);
+            watched_scripts.insert(std::vector<unsigned char>(spk.begin(), spk.end()));
             ++naddr;
         }
     }
@@ -2725,6 +2772,25 @@ RPCHelpMan getbtcbalance()
         err = std::string("parent chain unreachable: ") + e.what();
     } catch (...) {
         err = "parent chain query failed";
+    }
+
+    // Hand the node what to watch, so the NEXT balance does not need a scan at all:
+    // it walks every new parent block already, and can tell us when one pays or
+    // spends something of ours. Only after a scan that actually succeeded -- a
+    // failed one knows nothing, and must not replace what we knew before.
+    //
+    // The outpoints come from the same list the GUI shows, which is capped; a wallet
+    // above that cap still gets every RECEIVE noticed by script, and its spends are
+    // caught by the periodic safety refresh.
+    if (err.empty()) {
+        std::set<std::pair<uint256, uint32_t>> watched_outpoints;
+        for (size_t i = 0; i < utxos.size(); ++i) {
+            const UniValue& u = utxos[i];
+            if (!u.isObject() || !u["txid"].isStr() || !u["vout"].isNum()) continue;
+            watched_outpoints.insert(std::make_pair(uint256S(u["txid"].get_str()),
+                                                    (uint32_t)u["vout"].get_int()));
+        }
+        SetWatchedParentOutputs(std::move(watched_scripts), std::move(watched_outpoints));
     }
 
     result.pushKV("btc", ValueFromAmount(total));

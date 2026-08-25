@@ -345,7 +345,29 @@ PosReconcileStatus GetPosReconcileStatus();
 static const int DEFAULT_POS_CHECKPOINT_DEPTH = 2016;
 /** How many parent-chain blocks to scan backwards for checkpoints on the
  *  first watcher pass. */
+#include <set>
+
 static const int DEFAULT_POS_CHECKPOINT_SCAN = 100;
+
+/** SEQUENTIA: parent-chain outputs a wallet wants to hear about.
+ *
+ * A wallet balance on the parent chain costs a full scantxoutset, which is
+ * seconds on testnet4 and minutes on a mainnet-sized UTXO set. Redoing it on a
+ * timer is what made a balance expensive. But the node ALREADY walks every new
+ * parent block for PoS checkpoints, output by output. Handing it the scripts
+ * and outpoints a wallet cares about turns "has anything changed for me?" into
+ * a set lookup on work already being done: no extra RPC, no index, no filters.
+ *
+ * Scripts and outpoints are raw bytes on purpose, so this header stays free of
+ * script and transaction types.
+ */
+void SetWatchedParentOutputs(std::set<std::vector<unsigned char>> scripts,
+                             std::set<std::pair<uint256, uint32_t>> outpoints);
+
+/** How many times a walked parent block has paid, or spent, a watched output.
+ *  Monotonic since startup: a caller remembers the value it last acted on and
+ *  refreshes when it moves. */
+uint64_t GetParentWatchTouches();
 
 /** Build the OP_RETURN payload committing to a Sequentia block:
  *  "SEQCKPT" || hash || LE32(height). Embed it in any parent-chain

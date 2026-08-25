@@ -717,16 +717,39 @@ void OverviewPage::updateSeqStatus()
         if (assetTableSignature(m_balances, refCur) != m_asset_sig) setBalance(m_balances);
     }
 
-    // Periodically re-scan the parent chain for the dual (tBTC) balance. The status
-    // timer fires every 8s; refresh roughly once a minute so the slow scantxoutset
-    // does not hammer the parent node (refreshBtcBalance also self-guards re-entry).
-    if (++m_btc_refresh_tick % 8 == 1) refreshBtcBalance();
+    // Re-read the parent-chain (tBTC) balance when there is a REASON to, not on a
+    // clock. Each reading costs a full scantxoutset -- 18.8 s over 14.2 million
+    // outputs on testnet4, minutes on a mainnet-sized set -- so doing it every
+    // minute forever spent most of that work confirming nothing had changed. The
+    // node walks each new parent block anyway (for PoS checkpoints) and now counts
+    // the ones that pay or spend something of ours; that count is the reason.
+    //
+    // Two guards around it: no more than one attempt a minute even when there is a
+    // reason (a failed scan must not turn into a retry storm), and one scan every
+    // ~30 minutes regardless, which covers the cases the count cannot see -- the
+    // node not walking blocks at all, a wallet with more UTXOs than the watch list
+    // holds, or a fresh start before the first scan taught the node what to watch.
+    ++m_btc_refresh_tick;
+    const bool never_read = (m_btc_touches_applied == UINT64_MAX);
+    const bool something_moved = (m_parent_watch_touches != m_btc_touches_applied);
+    const bool minute_gate = (m_btc_refresh_tick % 8 == 1);
+    const bool safety_net = (m_btc_refresh_tick % 225 == 1); // ~30 min at 8s a tick
+    if (((never_read || something_moved) && minute_gate) || safety_net) refreshBtcBalance();
+    // While that scan runs -- seconds on testnet4, minutes on a mainnet-sized
+    // UTXO set -- say how far it has got. A wallet that shows nothing for two
+    // minutes looks broken; one that counts up looks busy, which it is.
+    else if (m_btc_scan_inflight) updateBtcScanProgress();
 
     // Bitcoin anchor status (node RPC)
     if (m_anchor_label) {
         try {
             UniValue r = node.executeRpc("getanchorstatus", UniValue(UniValue::VARR), std::string());
             if (r.isObject()) {
+                // Rides along on a call this page already makes every tick, so
+                // knowing whether the Bitcoin balance moved costs nothing at all.
+                if (r.exists("parentwatchtouches") && r["parentwatchtouches"].isNum()) {
+                    m_parent_watch_touches = (uint64_t)r["parentwatchtouches"].get_int64();
+                }
                 const int tip = r.exists("tipheight") ? r["tipheight"].get_int() : -1;
                 const int anc = r.exists("anchorheight") ? r["anchorheight"].get_int() : -1;
                 const QString st = r.exists("anchorstatus") ? QString::fromStdString(r["anchorstatus"].get_str()) : tr("unknown");
@@ -854,6 +877,38 @@ bool ParentChainUnreachable(const std::string& err)
 }
 } // namespace
 
+void OverviewPage::updateBtcScanProgress()
+{
+    if (!walletModel || !m_btc_label) return;
+    const std::string uri = "/wallet/" + walletModel->getWalletName().toStdString();
+    interfaces::Node* nodePtr = &walletModel->node();
+    QPointer<OverviewPage> self(this);
+    // Off the GUI thread like the scan itself: asking bitcoind anything can block
+    // for as long as its HTTP timeout when it is busy or gone, and a frozen window
+    // is worse than a stale percentage.
+    std::thread([self, nodePtr, uri]() {
+        int pct = -1;
+        try {
+            UniValue r = nodePtr->executeRpc("getbtcscanprogress", UniValue(UniValue::VARR), uri);
+            if (r.isObject() && r.exists("scanning") && r["scanning"].get_bool() &&
+                r.exists("progress") && r["progress"].isNum()) {
+                pct = r["progress"].get_int();
+            }
+        } catch (...) {
+            // No progress to show is not an error worth reporting: the scan result
+            // itself will say what happened.
+        }
+        QMetaObject::invokeMethod(qApp, [self, pct]() {
+            if (!self || !self->m_btc_label || pct < 0) return;
+            // Only while our own scan is the one running, so a percentage from
+            // somebody else's scan never overwrites a balance we already show.
+            if (!self->m_btc_scan_inflight) return;
+            self->m_btc_label->setText(tr("Bitcoin (testnet4): reading the parent chain... %1%").arg(pct));
+            self->m_btc_label->setVisible(true);
+        });
+    }).detach();
+}
+
 void OverviewPage::refreshBtcBalance()
 {
     if (!walletModel || !m_btc_label) return;
@@ -940,6 +995,10 @@ void OverviewPage::onBtcScanResult(bool ok, const QString& error_text, CAmount a
     if (ok) {
         m_btc_amount = amount;
         m_btc_addresses = naddr;
+        // What is on screen now answers for every block the node has walked so far.
+        // Recorded only on success: a failed read still owes an answer, and must
+        // stay due rather than wait for the safety net.
+        m_btc_touches_applied = m_parent_watch_touches;
         // The balance now has a table row (and the headline) to live in; the status
         // line would only repeat it, so it stays for the states that have no row.
         if (m_btc_label) m_btc_label->setVisible(false);

@@ -1295,12 +1295,57 @@ std::vector<PosCheckpoint> GetPosCheckpointConflicts()
 // ClearConfiguredPosCheckpoints / AddConfiguredPosCheckpoint /
 // GetConfiguredPosCheckpoints now live in pos.cpp (common layer).
 
+namespace {
+//! SEQUENTIA: what a wallet asked to hear about on the parent chain, and how often
+//! it has been touched. Guarded rather than atomic-per-container because the sets
+//! are replaced wholesale after each successful scan, while the walk reads them for
+//! every output of every new block.
+Mutex g_parent_watch_mutex;
+std::set<std::vector<unsigned char>> g_watched_scripts GUARDED_BY(g_parent_watch_mutex);
+std::set<std::pair<uint256, uint32_t>> g_watched_outpoints GUARDED_BY(g_parent_watch_mutex);
+std::atomic<uint64_t> g_parent_watch_touches{0};
+
+bool IsWatchedScript(const CScript& script)
+{
+    const std::vector<unsigned char> raw(script.begin(), script.end());
+    LOCK(g_parent_watch_mutex);
+    return g_watched_scripts.count(raw) > 0;
+}
+
+bool IsWatchedOutpoint(const uint256& txid, uint32_t vout)
+{
+    LOCK(g_parent_watch_mutex);
+    return g_watched_outpoints.count(std::make_pair(txid, vout)) > 0;
+}
+} // namespace
+
+void SetWatchedParentOutputs(std::set<std::vector<unsigned char>> scripts,
+                             std::set<std::pair<uint256, uint32_t>> outpoints)
+{
+    LOCK(g_parent_watch_mutex);
+    g_watched_scripts = std::move(scripts);
+    g_watched_outpoints = std::move(outpoints);
+}
+
+uint64_t GetParentWatchTouches() { return g_parent_watch_touches.load(); }
+
+void NoteParentWatchTouch() { g_parent_watch_touches.fetch_add(1); }
+
 //! Record the checkpoint in one output script, if it holds one.
 //!
 //! The single place that decides what a checkpoint is, so that the raw and JSON
 //! paths cannot come to different answers about the same output.
 void RecordCheckpointIfPresent(const CScript& script, int btc_height, const uint256& btc_hash)
 {
+    // SEQUENTIA: a wallet balance on the parent chain rides on this same walk. The
+    // node reads every new parent block already; asking whether an output pays a
+    // watched script is a set lookup on work being done anyway, and it belongs
+    // HERE, at the one place both the raw and the JSON path agree on -- put in
+    // either path alone it would answer differently depending on which daemon is
+    // on the other end. Before the OP_RETURN test, because a payment to us is an
+    // ordinary output and that test would discard it.
+    if (IsWatchedScript(script)) g_parent_watch_touches.fetch_add(1);
+
     CScript::const_iterator pc = script.begin();
     opcodetype opcode;
     std::vector<unsigned char> data;
@@ -1332,6 +1377,12 @@ void ScanRawBlockForCheckpoints(const Sidechain::Bitcoin::CBlock& block, int btc
     // checkpoint. Only the route the script took to get here is new.
     for (const auto& tx : block.vtx) {
         if (!tx) continue;
+        // SEQUENTIA: spending a watched coin moves a wallet balance as much as
+        // receiving one, and nothing else can see it happen -- the output simply
+        // stops existing.
+        for (const auto& in : tx->vin) {
+            if (IsWatchedOutpoint(in.prevout.hash, in.prevout.n)) g_parent_watch_touches.fetch_add(1);
+        }
         for (const auto& out : tx->vout) RecordCheckpointIfPresent(out.scriptPubKey, btc_height, btc_hash);
     }
 }
