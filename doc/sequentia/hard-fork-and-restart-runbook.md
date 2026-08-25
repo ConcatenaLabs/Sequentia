@@ -107,6 +107,29 @@ Gotchas (verified, do not relearn the hard way):
 - Committee network subdir is `testnet3`, datadir `-datadir=/root/seq-testnet/nodeNNN` (no
   trailing slash). Count only `sequentiad -datadir=…`, and kill stray `sequentia-cli` waiters
   (they fool the start script's pgrep).
+- **The stray `sequentia-cli` that fools it is usually one you just created.** The start
+  script decides a node is already up with `pgrep -f -- "-datadir=$d "`, and a
+  `sequentia-cli -datadir=<same dir> stop` that has not exited yet matches that pattern. So a
+  stop loop feeding straight into the start script silently skips whichever nodes were
+  slowest to shut down — which is exactly the set holding the most wallets, i.e. node000, the
+  producer. At the 24.7.7 cutover this skipped four nodes including node000, and the fleet ran
+  16/20 for twenty minutes looking healthy, because the chain kept advancing without it.
+
+  Wait for the waiters to clear between stopping and starting, and verify by COUNT:
+
+  ```
+  while [ "$(ps -C sequentiad -o pid= | wc -l)" -ne 0 ]; do sleep 2; done
+  while [ "$(ps -C sequentia-cli -o pid= | wc -l)" -ne 0 ]; do sleep 2; done   # <- the missing one
+  /root/seq-committee-start.sh
+  ps -C sequentiad -o args= | grep -c 'seq-testnet/node0'                      # must be 20
+  ```
+
+  `pkill -x sequentia-cli` is safe over SSH where `pkill -f` is not: `-x` matches the process
+  NAME, so the ssh command line carrying the pattern cannot match itself.
+- **`-rpcwait` without `-rpcwaittimeout` waits for ever.** A bring-up script that blocks on
+  `sequentia-cli -rpcwait` against a node the start script skipped will hang indefinitely, and
+  `-rpcclienttimeout` does NOT bound it — that is the per-attempt timeout. Always pair them:
+  `-rpcwait -rpcwaittimeout=300`.
 - node000 is THE producer; it is sometimes manually launched and must be explicitly started.
 
 Verify: `getblockcount` agrees across nodes and advances; 20/20 answer RPC.
@@ -245,6 +268,10 @@ writes a status line the operator can watch — see the DEX gap-closure plan P0.
   headers -1 (unknown), under a minute old. That is connection churn, not the
   frozen-below-a-height stall signature; it clears on its own. Confirm a cutover by version
   and height across all 23 nodes, never by the script alone.
+- A partially-restarted committee keeps producing. At the 24.7.7 cutover four nodes were
+  skipped, node000 among them, and the chain advanced normally on the other sixteen — nothing
+  in the block stream said anything was wrong. Confirm by COUNT and by version/height across
+  all 23, never by the chain still moving.
 - From 24.5.2, the first start after an upgrade sweeps supervision-invalidated residue out of
   a reloaded mempool.dat before RPC opens (`Supervision: evicting …` lines at startup are that
   sweep working, not a problem). 24.3.0 through 24.5.1 carried a sweep that raced the registry
