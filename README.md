@@ -1,7 +1,7 @@
 # Sequentia
 
-Sequentia is a Bitcoin sidechain for asset tokenization and decentralized
-exchange, built as a fork of [Blockstream Elements](https://github.com/ElementsProject/elements) 23.3.3.
+Sequentia is a Bitcoin sidechain for asset tokenization and disintermediated
+exchanges, built as a fork of [Blockstream Elements](https://github.com/ElementsProject/elements) 23.3.3.
 This repository is the Sequentia node, released as **Sequentia Core**: the
 `sequentiad` daemon, `sequentia-cli`, and the `sequentia-qt` desktop GUI,
 covering consensus, Bitcoin anchoring, proof of
