@@ -9,6 +9,7 @@
 #include <mainchainrpc.h>
 #include <pos.h>
 #include <script/script.h>
+#include <shutdown.h>
 #include <sync.h>
 #include <tinyformat.h>
 #include <util/strencodings.h>
@@ -774,6 +775,9 @@ static void MaybeReconcileFinality(ChainstateManager& chainman)
 void AnchorWatchTask(ChainstateManager& chainman)
 {
     if (!g_con_bitcoin_anchor || !g_validate_anchor) return;
+    // Nothing worth starting on the way down; see the phase-2 verdict loop for
+    // why abandoning a tick costs nothing.
+    if (ShutdownRequested()) return;
 
     uint256 best;
     if (!GetMainchainBestBlockHash(best)) return;
@@ -853,6 +857,10 @@ void AnchorWatchTask(ChainstateManager& chainman)
         }
         bool any_reconsidered = false;
         for (const uint256& hash : invalidated) {
+            // Leaving early here is the same as the NO_CONNECTION break below:
+            // the set is re-read from ground truth next tick, and anything not
+            // reconsidered now is reconsidered then.
+            if (ShutdownRequested()) break;
             CBlockIndex* pindex = nullptr;
             uint32_t anchor_height = 0;
             uint256 anchor_hash;
@@ -986,6 +994,11 @@ void AnchorWatchTask(ChainstateManager& chainman)
     //    never verification. A depth floor remains forbidden.
     uint256 lowest_bad;
     while (true) {
+        // Top of the loop only. Never between the InvalidateBlock and the
+        // ActivateBestChain below: those two are one step, and a shutdown
+        // wedged between them would leave a block invalidated with the chain
+        // never reactivated onto its replacement.
+        if (ShutdownRequested()) return;
         lowest_bad.SetNull();
         // Phase 1: snapshot the (immutable) anchor of each candidate block under
         // cs_main, top-down, down to height 1 — there is NO finality floor on
@@ -1058,6 +1071,24 @@ void AnchorWatchTask(ChainstateManager& chainman)
         // stale block was found before the NO_CONNECTION, there is nothing to act
         // on — bail and retry next tick.
         for (const AnchorRef& ref : to_check) {
+            // Abandon the tick if the node is going down. This loop is the one
+            // place the watcher runs for minutes at a time: every verdict it
+            // cannot serve from g_anchor_ok_cache is a round trip to the parent
+            // daemon, and that cache lives in memory only -- so the FIRST tick
+            // after any start asks about every distinct anchor on the whole
+            // chain, thousands of them once the chain has any age.
+            //
+            // Shutdown joins this thread, so with no check here `sequentiad
+            // stop` sat holding the datadir lock until the walk finished:
+            // five minutes, measured, on a freshly synced 100k-block chain,
+            // during which the GUI cannot open the datadir it just closed.
+            //
+            // Abandoning is safe, and is not even a new behaviour. The tick
+            // re-derives every verdict from ground truth each time and carries
+            // nothing across the point where it stops -- which is exactly why
+            // the next line already abandons the walk on NO_CONNECTION. All that
+            // is lost is work the next tick, or the next start, does again.
+            if (ShutdownRequested()) return;
             AnchorCheckResult res = CheckMainchainAnchor(ref.anchor_height, ref.anchor_hash);
             if (res == AnchorCheckResult::NO_CONNECTION) break; // cannot judge deeper
             if (res != AnchorCheckResult::OK) lowest_bad = ref.block_hash;
@@ -1382,6 +1413,19 @@ void ScanNewMainchainBlocks(ChainstateManager& chainman, const uint256& new_tip)
     uint256 cursor = new_tip;
     int tip_height = -1;
     for (int i = 0; i < window && !cursor.IsNull() && cursor != last_scanned; ++i) {
+        // The other place the watcher runs for a long time. Each turn of this
+        // loop pulls a whole parent-chain BLOCK, and on the first pass after a
+        // start there is no scan cursor yet, so it pulls the entire window --
+        // 100 Bitcoin blocks by default, which measured ~40 seconds over a
+        // tunnelled RPC. Shutdown joins this thread, so that was 40 seconds of
+        // `sequentiad stop` holding the datadir lock.
+        //
+        // RETURN rather than break, and note what is skipped by doing so: the
+        // scan cursor below is NOT advanced. Breaking would fall through and
+        // record new_tip as scanned when most of the window never was, and
+        // those parent blocks' checkpoints would then be skipped for good. The
+        // next start simply rescans instead.
+        if (ShutdownRequested()) return;
         int height = 0;
         uint256 prev;
         if (!ScanMainchainBlockForCheckpoints(cursor, height, prev)) break;
