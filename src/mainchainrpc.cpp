@@ -101,17 +101,13 @@ static void http_error_cb(enum evhttp_request_error err, void *ctx)
 }
 #endif
 
-UniValue CallMainChainRPC(const std::string& strMethod, const UniValue& params)
+//! POST one already-serialized JSON-RPC body and return the parsed reply.
+//!
+//! Split out so that the single-call and batch paths share one piece of
+//! transport, authentication and error handling. Two copies of this would drift
+//! the first time somebody fixed a bug in one of them.
+static UniValue MainChainHttpJson(const std::string& strRequest)
 {
-    // Count at entry, before anything can throw: a call that fails still cost a
-    // connection attempt to the parent daemon, and the point of the counter is
-    // to measure the load this node puts on that daemon.
-    g_mainchain_rpc_calls.fetch_add(1, std::memory_order_relaxed);
-    {
-        std::lock_guard<std::mutex> lock(g_mainchain_rpc_bymethod_mutex);
-        ++g_mainchain_rpc_bymethod[strMethod];
-    }
-
     std::string host = gArgs.GetArg("-mainchainrpchost", DEFAULT_RPCCONNECT);
     int port = gArgs.GetIntArg("-mainchainrpcport", BaseParams().MainchainRPCPort());
 
@@ -150,7 +146,6 @@ UniValue CallMainChainRPC(const std::string& strMethod, const UniValue& params)
     evhttp_add_header(output_headers, "Authorization", (std::string("Basic ") + EncodeBase64(strRPCUserColonPass)).c_str());
 
     // Attach request data
-    std::string strRequest = JSONRPCRequestObj(strMethod, params, 1).write() + "\n";
     struct evbuffer* output_buffer = evhttp_request_get_output_buffer(req.get());
     assert(output_buffer);
     evbuffer_add(output_buffer, strRequest.data(), strRequest.size());
@@ -172,15 +167,84 @@ UniValue CallMainChainRPC(const std::string& strMethod, const UniValue& params)
     else if (response.body.empty())
         throw std::runtime_error("no response from server");
 
-    // Parse reply
+    // Parse reply. NOT forced to an object here: a batch reply is an array,
+    // and the callers below check the shape they each expect.
     UniValue valReply(UniValue::VSTR);
     if (!valReply.read(response.body))
         throw std::runtime_error("couldn't parse reply from server");
+    return valReply;
+}
+
+UniValue CallMainChainRPC(const std::string& strMethod, const UniValue& params)
+{
+    // Count at entry, before anything can throw: a call that fails still cost a
+    // connection attempt to the parent daemon, and the point of the counter is
+    // to measure the load this node puts on that daemon.
+    g_mainchain_rpc_calls.fetch_add(1, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(g_mainchain_rpc_bymethod_mutex);
+        ++g_mainchain_rpc_bymethod[strMethod];
+    }
+
+    const UniValue valReply = MainChainHttpJson(JSONRPCRequestObj(strMethod, params, 1).write() + "\n");
     const UniValue& reply = valReply.get_obj();
     if (reply.empty())
         throw std::runtime_error("expected reply to have result, error and id properties");
 
     return reply;
+}
+
+std::vector<UniValue> CallMainChainRPCBatch(const std::string& strMethod,
+                                            const std::vector<UniValue>& params_list)
+{
+    if (params_list.empty()) return {};
+
+    // Counted as what it is: N calls the daemon has to answer. They cost one
+    // connection between them rather than N, which is the whole point, but the
+    // daemon still does N lookups and the counter is about ITS load.
+    g_mainchain_rpc_calls.fetch_add(params_list.size(), std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(g_mainchain_rpc_bymethod_mutex);
+        g_mainchain_rpc_bymethod[strMethod] += params_list.size();
+    }
+
+    UniValue batch(UniValue::VARR);
+    for (size_t i = 0; i < params_list.size(); ++i) {
+        batch.push_back(JSONRPCRequestObj(strMethod, params_list[i], (int)i));
+    }
+
+    return MatchBatchReplies(MainChainHttpJson(batch.write() + "\n"), params_list.size(), strMethod);
+}
+
+std::vector<UniValue> MatchBatchReplies(const UniValue& valReply, size_t expected,
+                                        const std::string& strMethod)
+{
+    if (!valReply.isArray() || valReply.size() != expected) {
+        throw std::runtime_error(strprintf(
+            "batched %s: expected an array of %u replies, got %s of %u",
+            strMethod, (unsigned)expected,
+            uvTypeName(valReply.type()), (unsigned)valReply.size()));
+    }
+
+    // Match by id, never by position. A JSON-RPC batch reply may come back in
+    // any order, and pairing an answer with the wrong question here would mean
+    // judging one anchor by another anchor's verdict -- and then invalidating
+    // a block on the strength of it.
+    std::vector<UniValue> out(expected);
+    std::vector<bool> filled(expected, false);
+    for (size_t i = 0; i < valReply.size(); ++i) {
+        const UniValue& r = valReply[i];
+        if (!r.isObject()) throw std::runtime_error(strprintf("batched %s: reply %u is not an object", strMethod, (unsigned)i));
+        const UniValue& id = find_value(r, "id");
+        if (!id.isNum()) throw std::runtime_error(strprintf("batched %s: reply %u has no numeric id", strMethod, (unsigned)i));
+        const int64_t idx = id.get_int64();
+        if (idx < 0 || (size_t)idx >= expected || filled[idx]) {
+            throw std::runtime_error(strprintf("batched %s: reply id %d is out of range or repeated", strMethod, (int)idx));
+        }
+        out[idx] = r;
+        filled[idx] = true;
+    }
+    return out;
 }
 
 bool IsConfirmedBitcoinBlock(const uint256& hash, const int nMinConfirmationDepth, const int nbTxs)

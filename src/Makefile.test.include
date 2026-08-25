@@ -121,6 +121,7 @@ BITCOIN_TESTS =\
   test/pos_compact_tests.cpp \
   test/musig_tests.cpp \
   test/pos_tests.cpp \
+  test/anchor_batch_tests.cpp \
   test/aes_gcm_tests.cpp \
   test/seqdexclient_tests.cpp \
   test/seqobcourier_tests.cpp \

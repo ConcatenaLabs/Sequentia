@@ -445,6 +445,103 @@ PosReconcileStatus GetPosReconcileStatus()
     return g_reconcile_status;
 }
 
+//! Record a verdict, honouring the cache ceiling.
+static void CacheAnchorVerdict(uint32_t height, const uint256& hash, AnchorCheckResult res)
+    EXCLUSIVE_LOCKS_REQUIRED(!g_anchor_mutex)
+{
+    LOCK(g_anchor_mutex);
+    if (res == AnchorCheckResult::OK) {
+        if (g_anchor_ok_cache.size() < ANCHOR_OK_CACHE_MAX) {
+            g_anchor_ok_cache.emplace(height, hash);
+        } else {
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                LogPrintf("WARNING: the canonical-anchor cache reached its %u-entry ceiling; anchors beyond it are re-checked against the parent chain daemon on every watcher tick, which is slow and noisy for that daemon (see ANCHOR_OK_CACHE_MAX in anchor.cpp)\n",
+                          (unsigned)ANCHOR_OK_CACHE_MAX);
+            }
+        }
+    } else if (res != AnchorCheckResult::NO_CONNECTION) {
+        // A definitive off-best-chain verdict. NO_CONNECTION is not a verdict
+        // and must never be memoized as one.
+        g_anchor_stale_cache.emplace(height, hash);
+    }
+}
+
+//! What one `getblockheader` reply says about one anchor.
+//!
+//! Shared by the single-call and batched paths so that the two can never come
+//! to different conclusions about the same reply. Pure: it reads a reply and
+//! returns a verdict, touching neither the network nor the caches.
+AnchorCheckResult InterpretAnchorHeaderReply(const UniValue& reply, uint32_t height)
+{
+    const UniValue errval = find_value(reply, "error");
+    if (!errval.isNull()) return AnchorCheckResult::NOT_FOUND;
+    const UniValue result = find_value(reply, "result");
+    if (!result.isObject()) return AnchorCheckResult::NOT_FOUND;
+    const UniValue confirmations = find_value(result.get_obj(), "confirmations");
+    // confirmations == -1 means the block is not on the best chain
+    if (!confirmations.isNum() || confirmations.get_int64() < 1) return AnchorCheckResult::STALE;
+    const UniValue blockheight = find_value(result.get_obj(), "height");
+    if (!blockheight.isNum() || blockheight.get_int64() != (int64_t)height) {
+        return AnchorCheckResult::HEIGHT_MISMATCH;
+    }
+    return AnchorCheckResult::OK;
+}
+
+void PrefetchAnchorVerdicts(const std::vector<std::pair<uint32_t, uint256>>& refs)
+{
+    // Ask the parent daemon about many anchors per round trip instead of one.
+    //
+    // Nothing about WHAT is verified changes here, which is the point: every
+    // anchor is still asked about, from ground truth, on every tick, to any
+    // depth. Only the number of TCP connections it takes to ask changes -- from
+    // one per anchor to one per few hundred. On a cold cache over a long chain
+    // that is the difference between minutes and seconds.
+    //
+    // Best-effort throughout. Anything that goes wrong here leaves the caches
+    // exactly as they were and the per-anchor path below re-asks the daemon the
+    // old way, so a batching failure costs speed and never correctness.
+    constexpr size_t BATCH = 256;
+
+    std::vector<std::pair<uint32_t, uint256>> want;
+    {
+        LOCK(g_anchor_mutex);
+        for (const auto& r : refs) {
+            if (g_anchor_ok_cache.count(r) || g_anchor_stale_cache.count(r)) continue;
+            want.push_back(r);
+        }
+    }
+    if (want.size() < 2) return;   // one question does not need a batch
+
+    size_t done = 0;
+    for (size_t i = 0; i < want.size(); i += BATCH) {
+        if (ShutdownRequested()) return;
+        const size_t n = std::min(BATCH, want.size() - i);
+        std::vector<UniValue> params_list;
+        params_list.reserve(n);
+        for (size_t k = 0; k < n; ++k) {
+            UniValue p(UniValue::VARR);
+            p.push_back(want[i + k].second.GetHex());
+            params_list.push_back(p);
+        }
+        try {
+            const std::vector<UniValue> replies = CallMainChainRPCBatch("getblockheader", params_list);
+            for (size_t k = 0; k < n; ++k) {
+                CacheAnchorVerdict(want[i + k].first, want[i + k].second,
+                                   InterpretAnchorHeaderReply(replies[k], want[i + k].first));
+            }
+            done += n;
+        } catch (const std::exception& e) {
+            LogPrintf("WARNING: batched anchor check failed after %u of %u (%s); falling back to one call per anchor\n",
+                      (unsigned)done, (unsigned)want.size(), e.what());
+            return;
+        }
+    }
+    LogPrintf("Anchor watcher: fetched %u anchor verdicts in %u request(s)\n",
+              (unsigned)done, (unsigned)((done + BATCH - 1) / BATCH));
+}
+
 AnchorCheckResult CheckMainchainAnchor(uint32_t height, const uint256& hash)
 {
     {
@@ -456,46 +553,19 @@ AnchorCheckResult CheckMainchainAnchor(uint32_t height, const uint256& hash)
         // while the entry is here it is still true and needs no RPC.
         if (g_anchor_stale_cache.count({height, hash})) return AnchorCheckResult::STALE;
     }
-    // Memoize a DEFINITIVE off-best-chain verdict (not NO_CONNECTION) so the
-    // every-tick recovery loop does not re-RPC the same orphaned anchor for as
-    // long as the parent chain leaves it orphaned.
-    auto cache_stale = [&](AnchorCheckResult r) {
-        LOCK(g_anchor_mutex);
-        g_anchor_stale_cache.emplace(height, hash);
-        return r;
-    };
     try {
         UniValue params(UniValue::VARR);
         params.push_back(hash.GetHex());
-        UniValue reply = CallMainChainRPC("getblockheader", params);
-        UniValue errval = find_value(reply, "error");
-        if (!errval.isNull()) {
-            return cache_stale(AnchorCheckResult::NOT_FOUND);
+        const UniValue reply = CallMainChainRPC("getblockheader", params);
+        const AnchorCheckResult res = InterpretAnchorHeaderReply(reply, height);
+        if (res != AnchorCheckResult::OK) {
+            // Memoize a DEFINITIVE off-best-chain verdict so the every-tick
+            // recovery loop does not re-ask about the same orphaned anchor for
+            // as long as the parent chain leaves it orphaned.
+            CacheAnchorVerdict(height, hash, res);
+            return res;
         }
-        UniValue result = find_value(reply, "result");
-        if (!result.isObject()) {
-            return cache_stale(AnchorCheckResult::NOT_FOUND);
-        }
-        UniValue confirmations = find_value(result.get_obj(), "confirmations");
-        if (!confirmations.isNum() || confirmations.get_int64() < 1) {
-            // confirmations == -1 means the block is not on the best chain
-            return cache_stale(AnchorCheckResult::STALE);
-        }
-        UniValue blockheight = find_value(result.get_obj(), "height");
-        if (!blockheight.isNum() || blockheight.get_int64() != (int64_t)height) {
-            return cache_stale(AnchorCheckResult::HEIGHT_MISMATCH);
-        }
-        LOCK(g_anchor_mutex);
-        if (g_anchor_ok_cache.size() < ANCHOR_OK_CACHE_MAX) {
-            g_anchor_ok_cache.emplace(height, hash);
-        } else {
-            static bool warned = false;
-            if (!warned) {
-                warned = true;
-                LogPrintf("WARNING: the canonical-anchor cache reached its %u-entry ceiling; anchors beyond it are re-checked against the parent chain daemon on every watcher tick, which is slow and noisy for that daemon (see ANCHOR_OK_CACHE_MAX in anchor.cpp)\n",
-                          (unsigned)ANCHOR_OK_CACHE_MAX);
-            }
-        }
+        CacheAnchorVerdict(height, hash, AnchorCheckResult::OK);
         return AnchorCheckResult::OK;
     } catch (const CConnectionFailed&) {
         LogPrintf("WARNING: lost connection to mainchain daemon while checking anchor %s\n", hash.ToString());
@@ -1070,6 +1140,16 @@ void AnchorWatchTask(ChainstateManager& chainman)
         // block (below it) stays connected and is simply re-judged next tick. If no
         // stale block was found before the NO_CONNECTION, there is nothing to act
         // on — bail and retry next tick.
+        // One round trip per few hundred anchors instead of one per anchor.
+        // Purely a transport change: the loop below still asks about every
+        // entry, it simply finds most of the answers already in hand.
+        {
+            std::vector<std::pair<uint32_t, uint256>> refs;
+            refs.reserve(to_check.size());
+            for (const AnchorRef& ref : to_check) refs.emplace_back(ref.anchor_height, ref.anchor_hash);
+            PrefetchAnchorVerdicts(refs);
+        }
+
         for (const AnchorRef& ref : to_check) {
             // Abandon the tick if the node is going down. This loop is the one
             // place the watcher runs for minutes at a time: every verdict it
