@@ -16,6 +16,7 @@
 #define BITCOIN_ANCHOR_H
 
 #include <uint256.h>
+#include <primitives/bitcoin/block.h>
 #include <univalue.h>
 
 #include <atomic>
@@ -126,6 +127,14 @@ AnchorCheckResult InterpretAnchorHeaderReply(const UniValue& reply, uint32_t hei
  *  connections it takes to ask changes. Best-effort: on any failure the caches
  *  are left untouched and the per-anchor path re-asks the old way. */
 void PrefetchAnchorVerdicts(const std::vector<std::pair<uint32_t, uint256>>& refs);
+
+/** Record every PoS checkpoint committed in one already-parsed parent block.
+ *
+ *  Exposed so it can be tested directly: the block now arrives raw and is taken
+ *  apart here rather than by the parent daemon, and that is worth a test that
+ *  puts a real block in and checks the outputs that come out. */
+void ScanRawBlockForCheckpoints(const Sidechain::Bitcoin::CBlock& block, int btc_height,
+                                const uint256& btc_hash);
 
 /** Pure selection math for the anti-contested-anchor policy (Fix A), testable
  *  without a parent chain daemon. Given the active tip height, the contest

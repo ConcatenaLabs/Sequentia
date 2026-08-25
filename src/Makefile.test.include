@@ -122,6 +122,7 @@ BITCOIN_TESTS =\
   test/musig_tests.cpp \
   test/pos_tests.cpp \
   test/anchor_batch_tests.cpp \
+  test/checkpoint_scan_tests.cpp \
   test/aes_gcm_tests.cpp \
   test/seqdexclient_tests.cpp \
   test/seqobcourier_tests.cpp \

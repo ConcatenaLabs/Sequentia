@@ -8,8 +8,10 @@
 #include <logging.h>
 #include <mainchainrpc.h>
 #include <pos.h>
+#include <primitives/bitcoin/block.h>
 #include <script/script.h>
 #include <shutdown.h>
+#include <streams.h>
 #include <sync.h>
 #include <tinyformat.h>
 #include <util/strencodings.h>
@@ -1293,25 +1295,73 @@ std::vector<PosCheckpoint> GetPosCheckpointConflicts()
 // ClearConfiguredPosCheckpoints / AddConfiguredPosCheckpoint /
 // GetConfiguredPosCheckpoints now live in pos.cpp (common layer).
 
+//! Record the checkpoint in one output script, if it holds one.
+//!
+//! The single place that decides what a checkpoint is, so that the raw and JSON
+//! paths cannot come to different answers about the same output.
+void RecordCheckpointIfPresent(const CScript& script, int btc_height, const uint256& btc_hash)
+{
+    CScript::const_iterator pc = script.begin();
+    opcodetype opcode;
+    std::vector<unsigned char> data;
+    if (!script.GetOp(pc, opcode, data) || opcode != OP_RETURN) return;
+    if (!script.GetOp(pc, opcode, data)) return;
+    auto parsed = ParseCheckpointPayload(data);
+    if (!parsed) return;
+
+    LOCK(g_anchor_mutex);
+    // Keep the earliest commitment for a given block.
+    auto it = g_pos_checkpoints.find(parsed->first);
+    if (it == g_pos_checkpoints.end() || it->second.btc_height > btc_height) {
+        g_pos_checkpoints[parsed->first] = PosCheckpoint{parsed->first, parsed->second, btc_height, btc_hash};
+        LogPrintf("PoS: observed checkpoint for block %s (height %u) committed in parent block %s (height %d)\n",
+                  parsed->first.ToString(), parsed->second, btc_hash.ToString(), btc_height);
+    }
+}
+
+//! Record every tagged checkpoint OP_RETURN in one already-parsed parent block.
+//!
+//! At namespace scope, and declared in the header, because the parsing that
+//! feeds it moved out of the parent daemon and into this file -- which is worth
+//! a test that can hand it a real block directly.
+void ScanRawBlockForCheckpoints(const Sidechain::Bitcoin::CBlock& block, int btc_height,
+                                const uint256& btc_hash)
+{
+    // Unchanged from the day it was written: walk every output, take the ones
+    // that are OP_RETURN followed by a push, and keep whatever parses as a
+    // checkpoint. Only the route the script took to get here is new.
+    for (const auto& tx : block.vtx) {
+        if (!tx) continue;
+        for (const auto& out : tx->vout) RecordCheckpointIfPresent(out.scriptPubKey, btc_height, btc_hash);
+    }
+}
+
 namespace {
 
-//! Scan one parent-chain block (via getblock verbosity 2, so this works
-//! against any Bitcoin-RPC-compatible daemon regardless of its transaction
-//! serialization) for tagged checkpoint OP_RETURN outputs. Returns false on
-//! connection problems.
-bool ScanMainchainBlockForCheckpoints(const uint256& btc_hash, int& btc_height_out, uint256& prev_hash_out)
+//! Does this parent daemon serve blocks THIS node can parse?
+//!
+//! Not every parent is bitcoind. The functional tests drive an Elements-mode
+//! node as the parent, and its raw block serialization is not Bitcoin's, so
+//! taking one apart here fails outright. One failed parse is enough to know
+//! that for the rest of the run: it is a property of which daemon is on the
+//! other end, and that does not change under us.
+std::atomic<bool> g_parent_blocks_are_bitcoin{true};
+
+//! The old path, and still the general one: ask the daemon to decode the block
+//! and read the output scripts out of the JSON. Works against ANY
+//! Bitcoin-RPC-compatible daemon whatever its serialization, which is exactly
+//! why it is kept.
+bool ScanBlockViaJson(const uint256& btc_hash, int btc_height, uint256& prev_hash_out)
 {
     try {
         UniValue params(UniValue::VARR);
         params.push_back(btc_hash.GetHex());
         params.push_back(2);
-        UniValue reply = CallMainChainRPC("getblock", params);
-        UniValue errval = find_value(reply, "error");
-        if (!errval.isNull()) return false;
-        UniValue result = find_value(reply, "result");
+        const UniValue reply = CallMainChainRPC("getblock", params);
+        if (!find_value(reply, "error").isNull()) return false;
+        const UniValue result = find_value(reply, "result");
         if (!result.isObject()) return false;
-        btc_height_out = find_value(result, "height").get_int();
-        UniValue prev = find_value(result, "previousblockhash");
+        const UniValue prev = find_value(result, "previousblockhash");
         prev_hash_out = prev.isStr() ? uint256S(prev.get_str()) : uint256();
 
         const UniValue& txs = find_value(result, "tx").get_array();
@@ -1322,23 +1372,8 @@ bool ScanMainchainBlockForCheckpoints(const uint256& btc_hash, int& btc_height_o
                 if (!spk.isObject()) continue;
                 const UniValue& hexval = find_value(spk, "hex");
                 if (!hexval.isStr()) continue;
-                std::vector<unsigned char> raw = ParseHex(hexval.get_str());
-                CScript script(raw.begin(), raw.end());
-                CScript::const_iterator pc = script.begin();
-                opcodetype opcode;
-                std::vector<unsigned char> data;
-                if (!script.GetOp(pc, opcode, data) || opcode != OP_RETURN) continue;
-                if (!script.GetOp(pc, opcode, data)) continue;
-                auto parsed = ParseCheckpointPayload(data);
-                if (!parsed) continue;
-                LOCK(g_anchor_mutex);
-                // Keep the earliest commitment for a given block.
-                auto it = g_pos_checkpoints.find(parsed->first);
-                if (it == g_pos_checkpoints.end() || it->second.btc_height > btc_height_out) {
-                    g_pos_checkpoints[parsed->first] = PosCheckpoint{parsed->first, parsed->second, btc_height_out, btc_hash};
-                    LogPrintf("PoS: observed checkpoint for block %s (height %u) committed in parent block %s (height %d)\n",
-                              parsed->first.ToString(), parsed->second, btc_hash.ToString(), btc_height_out);
-                }
+                const std::vector<unsigned char> raw = ParseHex(hexval.get_str());
+                RecordCheckpointIfPresent(CScript(raw.begin(), raw.end()), btc_height, btc_hash);
             }
         }
         return true;
@@ -1346,6 +1381,66 @@ bool ScanMainchainBlockForCheckpoints(const uint256& btc_hash, int& btc_height_o
         LogPrintf("WARNING: checkpoint scan of parent block %s failed: %s\n", btc_hash.ToString(), e.what());
         return false;
     }
+}
+
+//! The cheap path: fetch the block raw and take it apart here.
+//!
+//! Verbosity 2 makes the parent daemon decode a whole block -- every input,
+//! every witness, every address -- so that this can look at the one thing it
+//! cares about, the output scripts. Measured on testnet4 the JSON runs over
+//! three times the size of the block itself, and the daemon does that work per
+//! block, on a scan that pulls a hundred of them the first time it runs.
+//!
+//! The block's own hash is what makes this safe to prefer. A block that
+//! deserializes AND hashes to the hash we asked for was parsed correctly; one
+//! that does not, however plausibly it parsed, is thrown away and the JSON path
+//! answers instead. A wrong parse cannot quietly become a wrong checkpoint,
+//! because nothing is recorded until after that check.
+//!
+//! What the raw block does not carry is its height -- that is chain context,
+//! not block data. The caller has it: the walk is contiguous ancestry, so one
+//! header lookup at the tip fixes every height below it.
+bool ScanBlockViaRaw(const uint256& btc_hash, int btc_height, uint256& prev_hash_out)
+{
+    if (!g_parent_blocks_are_bitcoin.load()) return false;
+    UniValue result;
+    try {
+        UniValue params(UniValue::VARR);
+        params.push_back(btc_hash.GetHex());
+        params.push_back(0);
+        const UniValue reply = CallMainChainRPC("getblock", params);
+        if (!find_value(reply, "error").isNull()) return false;   // an RPC problem, not a format one
+        result = find_value(reply, "result");
+        if (!result.isStr() || !IsHex(result.get_str())) return false;
+    } catch (const std::exception&) {
+        return false;   // ditto: let the caller fall back, but keep trying raw
+    }
+
+    try {
+        const std::vector<unsigned char> raw = ParseHex(result.get_str());
+        CDataStream ss(raw, SER_NETWORK, PROTOCOL_VERSION);
+        Sidechain::Bitcoin::CBlock block;
+        ss >> block;
+        if (block.GetHash() != btc_hash) throw std::runtime_error("hash mismatch");
+
+        prev_hash_out = block.hashPrevBlock;
+        ScanRawBlockForCheckpoints(block, btc_height, btc_hash);
+        return true;
+    } catch (const std::exception& e) {
+        // A parse failure says what the parent daemon IS, so say it once and
+        // stop asking. Everything from here uses the JSON path.
+        if (g_parent_blocks_are_bitcoin.exchange(false)) {
+            LogPrintf("The parent daemon does not serve Bitcoin-serialized blocks (%s); "
+                      "reading parent blocks as JSON from now on\n", e.what());
+        }
+        return false;
+    }
+}
+
+bool ScanMainchainBlockForCheckpoints(const uint256& btc_hash, int btc_height, uint256& prev_hash_out)
+{
+    if (ScanBlockViaRaw(btc_hash, btc_height, prev_hash_out)) return true;
+    return ScanBlockViaJson(btc_hash, btc_height, prev_hash_out);
 }
 
 //! Recompute the finality point: the highest checkpointed block that is on
@@ -1490,8 +1585,27 @@ void ScanNewMainchainBlocks(ChainstateManager& chainman, const uint256& new_tip)
         last_scanned = g_last_checkpoint_scan_tip;
     }
     const int window = (int)gArgs.GetIntArg("-poscheckpointscan", DEFAULT_POS_CHECKPOINT_SCAN);
-    uint256 cursor = new_tip;
+
+    // One header lookup fixes every height in the walk. A raw block does not
+    // carry its own height, and asking per block is what the old JSON fetch was
+    // paying for; the walk descends contiguous ancestry, so subtracting is
+    // exact, and each block's own hashPrevBlock is what carries us down.
     int tip_height = -1;
+    try {
+        UniValue params(UniValue::VARR);
+        params.push_back(new_tip.GetHex());
+        const UniValue reply = CallMainChainRPC("getblockheader", params);
+        if (find_value(reply, "error").isNull()) {
+            const UniValue result = find_value(reply, "result");
+            const UniValue h = result.isObject() ? find_value(result, "height") : NullUniValue;
+            if (h.isNum()) tip_height = (int)h.get_int64();
+        }
+    } catch (const std::exception& e) {
+        LogPrintf("WARNING: could not read the height of parent tip %s: %s\n", new_tip.ToString(), e.what());
+    }
+    if (tip_height < 0) return;   // cannot place the walk; try again next tick
+
+    uint256 cursor = new_tip;
     for (int i = 0; i < window && !cursor.IsNull() && cursor != last_scanned; ++i) {
         // The other place the watcher runs for a long time. Each turn of this
         // loop pulls a whole parent-chain BLOCK, and on the first pass after a
@@ -1506,10 +1620,8 @@ void ScanNewMainchainBlocks(ChainstateManager& chainman, const uint256& new_tip)
         // those parent blocks' checkpoints would then be skipped for good. The
         // next start simply rescans instead.
         if (ShutdownRequested()) return;
-        int height = 0;
         uint256 prev;
-        if (!ScanMainchainBlockForCheckpoints(cursor, height, prev)) break;
-        if (tip_height < 0) tip_height = height;
+        if (!ScanMainchainBlockForCheckpoints(cursor, tip_height - i, prev)) break;
         cursor = prev;
     }
     {
