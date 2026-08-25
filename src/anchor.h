@@ -16,6 +16,7 @@
 #define BITCOIN_ANCHOR_H
 
 #include <uint256.h>
+#include <univalue.h>
 
 #include <atomic>
 #include <cstdint>
@@ -111,6 +112,20 @@ enum class AnchorCheckResult {
  *  walk from costing one RPC per anchor per parent block. See AnchorWatchTask
  *  and MainchainUnchangedHeight in anchor.cpp. */
 AnchorCheckResult CheckMainchainAnchor(uint32_t height, const uint256& hash);
+
+/** What one `getblockheader` reply says about one anchor.
+ *
+ *  Shared by the single-call and batched paths, so the two cannot reach
+ *  different conclusions about the same reply. Pure: no network, no caches. */
+AnchorCheckResult InterpretAnchorHeaderReply(const UniValue& reply, uint32_t height);
+
+/** Fill the verdict caches for many anchors in a few round trips.
+ *
+ *  Changes nothing about WHAT is verified -- every anchor is still asked about,
+ *  from ground truth, on every tick, to any depth. Only the number of
+ *  connections it takes to ask changes. Best-effort: on any failure the caches
+ *  are left untouched and the per-anchor path re-asks the old way. */
+void PrefetchAnchorVerdicts(const std::vector<std::pair<uint32_t, uint256>>& refs);
 
 /** Pure selection math for the anti-contested-anchor policy (Fix A), testable
  *  without a parent chain daemon. Given the active tip height, the contest

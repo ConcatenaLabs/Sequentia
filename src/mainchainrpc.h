@@ -16,6 +16,7 @@
 #include <stdexcept>
 
 #include <univalue.h>
+#include <vector>
 
 static const bool DEFAULT_NAMED=false;
 static const char DEFAULT_RPCCONNECT[] = "127.0.0.1";
@@ -36,6 +37,34 @@ public:
 };
 
 UniValue CallMainChainRPC(const std::string& strMethod, const UniValue& params);
+
+/** Many calls of one method, in a SINGLE HTTP round trip.
+ *
+ *  The parent-chain client opens a fresh connection per call and closes it
+ *  again, so asking N questions costs N connects, N authentications and N
+ *  round trips. That is invisible at N=1 and ruinous at N=10,000, which is
+ *  what verifying every anchor on a long chain against a cold cache actually
+ *  costs -- ten minutes of it, measured.
+ *
+ *  Returns one reply object per entry of `params_list`, in THE SAME ORDER,
+ *  matched back by JSON-RPC id rather than by position: a batch reply may
+ *  legally arrive in any order, and quietly pairing the wrong verdict with the
+ *  wrong anchor would invalidate the wrong block. Anything it cannot match
+ *  exactly throws rather than guessing.
+ *
+ *  This is one round trip: the caller decides how many calls belong in it. */
+std::vector<UniValue> CallMainChainRPCBatch(const std::string& strMethod,
+                                            const std::vector<UniValue>& params_list);
+
+/** Put a batch reply back in request order, by id.
+ *
+ *  Separated from the call so it can be tested against the orderings a daemon
+ *  is ALLOWED to send and almost never does. Pairing an answer with the wrong
+ *  question is the one failure of batching that would be silent and wrong
+ *  rather than loud and slow, so it is checked rather than assumed: every id
+ *  must be present, in range, and used exactly once, or this throws. */
+std::vector<UniValue> MatchBatchReplies(const UniValue& valReply, size_t expected,
+                                        const std::string& strMethod);
 
 /** SEQUENTIA: how many times this node has called the parent chain daemon.
  *
