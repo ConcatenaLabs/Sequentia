@@ -216,12 +216,22 @@ The cross-chain case *is* a conversation, so the node grew the parts to have one
 a minimal RFC 6455 WebSocket client, AES-256-GCM to open the courier's sealed
 payloads (pinned against the NIST vectors; nothing in consensus, P2P or wallet
 storage uses it), and the HTLC both legs share. What it does NOT have is TLS —
-Core dropped OpenSSL and nothing replaced it — so the relay endpoint is
-configured with `-seqoburl` as a plain `http://` URL. What crosses that wire is a
-signed public order book and sealed courier payloads: nothing secret, and nothing
-trusted with funds. Adding a TLS dependency for a wallet convenience would be a
-reproducible-build change out of all proportion to the feature; running a relay
-locally, or terminating TLS in front of the node, is the operator's call.
+Core dropped OpenSSL and nothing replaced it — so the relay endpoint is a plain
+`http://` URL. What crosses that wire is a signed public order book and sealed
+courier payloads: nothing secret, and nothing trusted with funds. Adding a TLS
+dependency for a wallet convenience would be a reproducible-build change out of
+all proportion to the feature; running a relay locally, or terminating TLS in
+front of the node, is the operator's call.
+
+On the public test network the relay is **defaulted**, alongside the parent-chain
+anchor RPC, the asset registry and the price feed, so that switching conversion
+on does not first require finding a URL. `-seqoburl` overrides it, and nothing is
+contacted until a wallet actually has conversion switched on. Wherever it points,
+it has to be a route that answers over plain http **without redirecting**: this
+client follows no redirects and speaks no TLS, so a `301` to an https site reads
+to it as a relay that is not there — which is why the shared site serves this one
+route over http deliberately, as it already does for the registry and the price
+feed.
 
 ### Watching a swap, and the two ways it can end
 
