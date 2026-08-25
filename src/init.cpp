@@ -863,6 +863,18 @@ void InitParameterInteraction(ArgsManager& args)
         // breakage, same fix.
         if (args.SoftSetArg("-referencepricesurl", "http://sequentiatestnet.com/prices"))
             LogPrintf("%s: chain=test -> setting -referencepricesurl=http://sequentiatestnet.com/prices\n", __func__);
+        // And the SeqDEX order-book relay, so a staker who switches reward
+        // conversion on has somewhere to sell into without first being told to
+        // go and configure a URL. Same plain-HTTP reason as the two above: the
+        // node links no TLS and follows no redirects, so this route is served
+        // over http deliberately while the rest of the site redirects to https.
+        //
+        // Nothing is contacted because of this line. The relay is read only
+        // once a wallet actually has conversion switched on, which is off by
+        // default; what the default removes is a dead end that looked like a
+        // missing feature.
+        if (args.SoftSetArg("-seqoburl", "http://sequentiatestnet.com/seqob"))
+            LogPrintf("%s: chain=test -> setting -seqoburl=http://sequentiatestnet.com/seqob\n", __func__);
     }
 }
 
