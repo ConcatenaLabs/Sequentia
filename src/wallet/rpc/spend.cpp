@@ -2882,8 +2882,16 @@ bool AdvanceParentCoins(const CWallet& wallet, ParentCoinSet& set, std::string& 
     // block cost sharply, and this arithmetic will follow it without being touched.
     constexpr int64_t ms_per_block_estimate = 900;
     const int behind = tip_height - set.scanned_height;
+
+    // Speed is not the only reason to walk blocks. A scan sees the confirmed chain
+    // and nothing else, so it silently drops what only the record knows: the coins
+    // committed to a send still in a mempool, and that send's change. Walking keeps
+    // them. So a short gap is walked whatever the clock says -- on a small chain a
+    // scan can be milliseconds, and a wallet that always rescans because rescanning
+    // is quick would keep forgetting its own pending sends.
+    constexpr int always_walk_below = 20;
     const int64_t known_scan_ms = set.full_scan_ms > 0 ? set.full_scan_ms : 30000;
-    if ((int64_t)behind * ms_per_block_estimate > known_scan_ms) {
+    if (behind > always_walk_below && (int64_t)behind * ms_per_block_estimate > known_scan_ms) {
         err = strprintf("%d blocks behind: a full scan (%d ms last time) is faster than catching up",
                         behind, known_scan_ms);
         return false;
@@ -3214,7 +3222,14 @@ RPCHelpMan getbtcbalance()
             err = (e.isObject() && e.exists("message")) ? e["message"].get_str() : e.write();
         } else if (reply.exists("result") && reply["result"].isObject()) {
             const UniValue& res = reply["result"];
-            if (res.exists("total_amount")) total = AmountFromValue(res["total_amount"]);
+            // The total is summed from the coins below, not read from a field. The
+            // parent daemon reports its own total under a name that depends on what
+            // it is: bitcoind says total_amount, an Elements-style daemon says
+            // total_unblinded_bitcoin_amount, and reading the wrong one yields a
+            // silent zero next to a list of coins that are plainly there. Summing
+            // what we are about to record also makes the two impossible to
+            // disagree -- a balance that does not match its own coins is worse
+            // than one that is late.
             if (res.exists("height") && res["height"].isNum()) parent_height = res["height"].get_int();
 
             // The individual outputs, so a wallet can show WHAT arrived and when, not just
@@ -3260,6 +3275,7 @@ RPCHelpMan getbtcbalance()
                     c.address = f.address;
                     scanned_coins.push_back(std::move(c));
                 }
+                for (const ParentCoin& c : scanned_coins) total += c.amount;
                 if (found.size() > 200) found.resize(200); // this feeds a GUI list, not an accounting export
                 // Resolve block times for the heights involved (two parent RPCs per distinct
                 // height, capped so a wallet with many old outputs cannot stall the call).
