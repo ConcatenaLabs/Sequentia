@@ -99,8 +99,8 @@ stdenv.mkDerivation rec {
   enableParallelBuilding = true;
 
   meta = with lib; {
-    description = "Sequentia is a Bitcoin sidechain dedicated to asset tokenization and decentralized exchanges";
-    homepage = "https://www.github.com/SequentiaSEQ/SEQ-Core-Elements";
+    description = "Sequentia is a Bitcoin sidechain dedicated to asset tokenization and disintermediated exchanges";
+    homepage = "https://github.com/ConcatenaLabs/Sequentia";
     maintainers = [];
     license = licenses.mit;
     platforms = platforms.unix;

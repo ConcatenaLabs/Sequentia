@@ -4,7 +4,7 @@ Sequentia Core
 Setup
 ---------------------
 Sequentia Core is the node for the Sequentia network, a Bitcoin sidechain for
-asset tokenization and decentralized exchange (a fork of Elements, which is a
+asset tokenization and disintermediated exchanges (a fork of Elements, which is a
 fork of Bitcoin Core). It downloads and stores the Sequentia chain and keeps a
 connection to a Bitcoin node to validate the Bitcoin anchor of every block.
 The public testnet chain is small; syncing it takes minutes, not days.
