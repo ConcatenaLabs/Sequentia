@@ -77,9 +77,9 @@ std::optional<ParsedUrl> ParseRelayUrl(const std::string& url)
     if (colon != std::string::npos) {
         const std::string p = hostport.substr(colon + 1);
         if (p.empty() || p.find_first_not_of("0123456789") != std::string::npos) return std::nullopt;
-        const int n = atoi(p.c_str());
-        if (n <= 0 || n > 65535) return std::nullopt;
-        out.port = (uint16_t)n;
+        const std::optional<int> n = ToIntegral<int>(p);
+        if (!n || *n <= 0 || *n > 65535) return std::nullopt;
+        out.port = (uint16_t)*n;
         out.host = hostport.substr(0, colon);
     } else {
         out.host = hostport;
@@ -130,10 +130,9 @@ CAmount AmountFromField(const UniValue& v)
     if (v.isStr()) {
         const std::string s = v.get_str();
         if (s.empty() || s.find_first_not_of("0123456789") != std::string::npos) return 0;
-        errno = 0;
-        const long long n = strtoll(s.c_str(), nullptr, 10);
-        if (errno != 0 || n < 0) return 0;
-        return (CAmount)n;
+        const std::optional<int64_t> n = ToIntegral<int64_t>(s);
+        if (!n || *n < 0) return 0;
+        return (CAmount)*n;
     }
     if (v.isNum()) {
         const int64_t n = v.get_int64();
@@ -265,7 +264,10 @@ UniValue SeqdexHttpJson(const std::string& path, const std::string& method, cons
     const auto url = ParseRelayUrl(base);
     if (!url) {
         throw std::runtime_error(strprintf(
-            "-seqoburl must be a plain http:// URL (this node links no TLS): %s", base));
+            // Not spelled "http://" on purpose: lint-format-strings.py strips
+            // "// " as a comment before parsing the call, and cannot then find
+            // the closing paren.
+            "-seqoburl must be a plain http URL, not https (this node links no TLS): %s", base));
     }
 
     raii_event_base ev_base = obtain_event_base();

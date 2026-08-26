@@ -52,7 +52,7 @@ from test_framework.messages import (
     COIN, COutPoint, CTransaction, CTxIn, CTxInWitness, CTxOut, CTxOutAsset,
     CTxOutNonce, CTxOutValue, uint256_from_str, tx_from_hex,
 )
-from test_framework.script import CScript, OP_0, OP_1, TaprootSignatureHash
+from test_framework.script import CScript, OP_0, OP_1
 
 import pignus_covenant as pig
 
@@ -532,6 +532,7 @@ class PignusVaultTest(BitcoinTestFramework):
         node = self.nodes[0]
         self.log.info("PASS: a vault paying SEGWIT V0 addresses, which is all "
                       "the browser wallet can receive at")
+
         def prog20():
             a = node.getnewaddress("", "bech32")
             u = node.getaddressinfo(a)["unconfidential"]

@@ -159,7 +159,6 @@ class PosSplitTest(BitcoinTestFramework):
         res2 = w2.delegatestake(self.a_pub, 50)
         self.mine(1)
         ctrl0, ctrl2 = res0["controller"], res2["controller"]
-        deleg_height = n0.getblockcount()   # both delegations confirmed by here
         assert_equal(n0.getstakerinfo()[self.a_pub], 300 * COIN)  # 100 own + 150 + 50
 
         self.log.info("Wait out the notice, then a fee-paying block's coinbase pays the POT")
@@ -253,8 +252,6 @@ class PosSplitTest(BitcoinTestFramework):
         for _ in range(3):
             w0.sendtoaddress(address=w2.getnewaddress(), amount=1, fee_asset_label="bitcoin")
         self.mine(1)
-        pot_h5 = n0.getblockcount()
-        pot5_value = self.coinbase_fee_outputs(n0, pot_h5)[0][1]
         self.mine(100)
         claim2 = w3.claimpoolrewards(self.a_pub)
         tx2 = n0.getrawtransaction(claim2["txid"], True)

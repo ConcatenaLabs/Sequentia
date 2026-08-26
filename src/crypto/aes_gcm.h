@@ -5,6 +5,7 @@
 #ifndef BITCOIN_CRYPTO_AES_GCM_H
 #define BITCOIN_CRYPTO_AES_GCM_H
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 

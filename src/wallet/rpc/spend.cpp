@@ -36,7 +36,6 @@
 #include <wallet/fees.h>
 #include <wallet/receive.h>
 #include <wallet/rpc/util.h>
-#include <wallet/scriptpubkeyman.h>
 #include <wallet/spend.h>
 #include <wallet/parentchain.h>
 #include <wallet/stakingrewards.h>

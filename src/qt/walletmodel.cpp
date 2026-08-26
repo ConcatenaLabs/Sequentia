@@ -868,8 +868,8 @@ bool WalletModel::replaceTransaction(uint256 hash, uint256& new_hash)
     if (!GUIUtil::parseAssetAmount(sendAsset, amtEdit->text(), getOptionsModel()->getDisplayUnit(), &amount) || amount <= 0) {
         QMessageBox::critical(nullptr, tr("Replace transaction"), tr("Invalid amount.")); return false;
     }
-    bool frok = false; double frate = feerateEdit->text().toDouble(&frok);
-    if (!frok || frate <= 0) frate = 2.0;
+    bool rate_ok = false; double frate = feerateEdit->text().toDouble(&rate_ok);
+    if (!rate_ok || frate <= 0) frate = 2.0;
 
     // Re-pin the original's inputs (BIP125 conflict). Allow CONFIRMED top-ups only (m_min_depth=1) so
     // coin selection can never pull in the original's own unconfirmed change — which would make the

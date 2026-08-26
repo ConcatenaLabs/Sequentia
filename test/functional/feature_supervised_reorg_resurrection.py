@@ -30,7 +30,7 @@ Three cases:
 from decimal import Decimal
 
 from test_framework.test_framework import BitcoinTestFramework
-from test_framework.util import assert_equal, assert_raises_rpc_error
+from test_framework.util import assert_equal
 
 # Reuse the record-building machinery rather than reimplementing the signing
 # dance: it is the same issuer flow and it is already proven by that test.

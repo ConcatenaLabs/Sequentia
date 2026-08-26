@@ -37,7 +37,7 @@ from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import assert_equal, assert_greater_than
 from test_framework.key import ECKey, compute_xonly_pubkey
 from test_framework.address import byte_to_base58
-from test_framework.messages import COutPoint, CTransaction, CTxIn, CTxOut, sha256
+from test_framework.messages import COutPoint, CTransaction, CTxIn, CTxOut
 from test_framework.script import (
     CScript, LEAF_VERSION_TAPSCRIPT, taproot_construct,
     OP_1, OP_ADD, OP_CHECKSIG, OP_CHECKLOCKTIMEVERIFY, OP_DROP, OP_DUP, OP_ELSE,
@@ -133,7 +133,7 @@ class FakeRelay(http.server.BaseHTTPRequestHandler):
     verifies every covenant against the chain before spending, and this file
     could lie about the terms without the node losing a coin.
     """
-    offers = []
+    offers: list = []
 
     def do_GET(self):
         if '/orderbook' in self.path:
@@ -217,7 +217,6 @@ class PosRewardConvertTest(BitcoinTestFramework):
         self.mine(1)
 
         self.log.info("Own the producing key, so its blocks' fees are this wallet's rewards")
-        desc = n0.getdescriptorinfo("wpkh(%s)" % self.a_pub)["descriptor"]
         w0.importprivkey(self.a_wif, "staker", False)
 
         policy = n0.dumpassetlabels()["bitcoin"]
