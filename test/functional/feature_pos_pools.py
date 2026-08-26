@@ -233,7 +233,6 @@ class PosPoolsTest(BitcoinTestFramework):
         # commands once delegation is resolved, not to each delegator. So a
         # holding a fraction of the floor can be bonded and lent in ONE call,
         # and it counts in full toward the pool.
-        small = w0.get_wallet_rpc(self.default_wallet_name) if False else w0
         n0.createwallet("smallholder")
         sw = n0.get_wallet_rpc("smallholder")
         w0.sendtoaddress(address=sw.getnewaddress(), amount=200, fee_asset_label="bitcoin")
@@ -249,7 +248,6 @@ class PosPoolsTest(BitcoinTestFramework):
         assert_equal(res["delegated_weight"], 150 * COIN)
         # One transaction carries both the stake and the record: no separate
         # registerstake step, and nothing to get half-done.
-        tx = n0.getrawtransaction(res["txid"], True)
         self.mine(1)
 
         # It counts for the pool, in full.

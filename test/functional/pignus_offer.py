@@ -79,8 +79,8 @@ lender the same divisibility for none of that complexity.
 import hashlib
 
 from test_framework.script import (
-    CScript, taproot_construct, TaggedHash,
-    OP_0, OP_1, OP_2, OP_CAT, OP_CHECKLOCKTIMEVERIFY, OP_CHECKSIG, OP_DROP,
+    CScript, taproot_construct,
+    OP_0, OP_1, OP_2, OP_CAT, OP_CHECKLOCKTIMEVERIFY, OP_DROP,
     OP_DUP, OP_ELSE, OP_ENDIF, OP_EQUAL, OP_EQUALVERIFY, OP_IF, OP_LESSTHAN,
     OP_NIP, OP_OVER, OP_ROT, OP_SWAP, OP_VERIFY,
     OP_SHA256INITIALIZE, OP_SHA256UPDATE, OP_SHA256FINALIZE, OP_TWEAKVERIFY,

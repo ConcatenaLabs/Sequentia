@@ -37,7 +37,7 @@ from test_framework.messages import (
     COIN, COutPoint, CTransaction, CTxIn, CTxInWitness, CTxOut, CTxOutAsset,
     CTxOutValue, uint256_from_str, tx_from_hex,
 )
-from test_framework.script import CScript, OP_1, TaprootSignatureHash
+from test_framework.script import CScript, OP_1
 
 import pignus_covenant as pig
 import pignus_offer as off
@@ -297,7 +297,6 @@ class PignusOfferTest(BitcoinTestFramework):
         self.log.info("  a different key produced a different vault, as it must")
 
     def reject_cases(self):
-        node = self.nodes[0]
         offer = self.fund_offer(2 * PRINCIPAL)
         value = 2 * PRINCIPAL
         bx = compute_xonly_pubkey(generate_privkey())[0]

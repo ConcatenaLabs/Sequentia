@@ -50,7 +50,7 @@ from test_framework.util import (
 )
 from test_framework.key import ECKey
 from test_framework.address import program_to_witness, script_to_p2sh
-from test_framework.messages import CTransaction, sha256, hash256
+from test_framework.messages import CTransaction, sha256
 from test_framework.script import (
     CScript, CScriptNum, LegacySignatureHash, SIGHASH_ALL,
     OP_IF, OP_ELSE, OP_ENDIF, OP_SIZE, OP_EQUALVERIFY, OP_SHA256,

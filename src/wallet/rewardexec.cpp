@@ -21,7 +21,6 @@
 #include <wallet/context.h>
 #include <wallet/covenantfill.h>
 #include <wallet/xchainconvert.h>
-#include <policy/policy.h>
 #include <wallet/fees.h>
 #include <wallet/spend.h>
 #include <wallet/stakingrewards.h>
@@ -72,7 +71,9 @@ std::optional<COutPoint> OutPointFromString(const std::string& s)
     if (!IsHex(txid)) return std::nullopt;
     const std::string n = s.substr(colon + 1);
     if (n.empty() || n.find_first_not_of("0123456789") != std::string::npos) return std::nullopt;
-    return COutPoint(uint256S(txid), (uint32_t)atoi(n.c_str()));
+    const std::optional<uint32_t> vout = ToIntegral<uint32_t>(n);
+    if (!vout) return std::nullopt;
+    return COutPoint(uint256S(txid), *vout);
 }
 
 } // namespace

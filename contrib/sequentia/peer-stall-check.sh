@@ -28,6 +28,8 @@
 #   contrib/sequentia/peer-stall-check.sh --lag 2 \
 #     --cli "src/sequentia-cli -chain=test -rpcport=18200 -rpcuser=u -rpcpassword=p"
 
+export LC_ALL=C
+
 set -euo pipefail
 
 LAG=6

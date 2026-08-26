@@ -1430,7 +1430,7 @@ bool ScanBlockViaRaw(const uint256& btc_hash, int btc_height, uint256& prev_hash
         // A parse failure says what the parent daemon IS, so say it once and
         // stop asking. Everything from here uses the JSON path.
         if (g_parent_blocks_are_bitcoin.exchange(false)) {
-            LogPrintf("The parent daemon does not serve Bitcoin-serialized blocks (%s); "
+            LogPrintf(/* Continued */ "The parent daemon does not serve Bitcoin-serialized blocks (%s); "
                       "reading parent blocks as JSON from now on\n", e.what());
         }
         return false;

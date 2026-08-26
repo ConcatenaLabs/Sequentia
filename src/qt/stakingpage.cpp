@@ -36,7 +36,6 @@
 #include <QGuiApplication>
 #include <QScreen>
 #include <QDoubleValidator>
-#include <QFormLayout>
 #include <QComboBox>
 #include <QGroupBox>
 #include <QHBoxLayout>

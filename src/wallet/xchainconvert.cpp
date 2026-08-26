@@ -109,7 +109,7 @@ int64_t NumField(const UniValue& v)
     if (v.isStr()) {
         const std::string s = v.get_str();
         if (s.empty() || s.find_first_not_of("0123456789") != std::string::npos) return 0;
-        return strtoll(s.c_str(), nullptr, 10);
+        return ToIntegral<int64_t>(s).value_or(0);
     }
     return 0;
 }
@@ -285,11 +285,11 @@ CAmount ParentFeeratePerVb()
             if (per_vb > 0) return std::min<CAmount>(per_vb, MAX_PARENT_FEERATE_SAT_VB);
         }
     } catch (const std::exception& e) {
-        LogPrintf("[rewards] could not read the parent-chain fee rate (%s); "
+        LogPrintf(/* Continued */ "[rewards] could not read the parent-chain fee rate (%s); "
                   "assuming the ceiling of %d sat/vB\n", e.what(), MAX_PARENT_FEERATE_SAT_VB);
         return MAX_PARENT_FEERATE_SAT_VB;
     }
-    LogPrintf("[rewards] the parent chain gave no usable fee estimate; assuming the ceiling "
+    LogPrintf(/* Continued */ "[rewards] the parent chain gave no usable fee estimate; assuming the ceiling "
               "of %d sat/vB\n", MAX_PARENT_FEERATE_SAT_VB);
     return MAX_PARENT_FEERATE_SAT_VB;
 }
