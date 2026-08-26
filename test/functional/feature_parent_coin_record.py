@@ -34,7 +34,6 @@ from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal,
     assert_greater_than,
-    assert_raises_rpc_error,
     get_auth_cookie,
     get_datadir_path,
     rpc_port,
