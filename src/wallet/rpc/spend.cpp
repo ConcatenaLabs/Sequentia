@@ -3548,7 +3548,8 @@ void RecordParentSpend(const CWallet& wallet,
                        const std::vector<std::pair<uint256, uint32_t>>& spent,
                        const std::string& txid,
                        bool with_change, const std::string& change_address,
-                       CAmount change_amount, const CScript& change_script)
+                       CAmount change_amount, const CScript& change_script,
+                       uint32_t change_vout)
 {
     ParentCoinSet record = LoadParentCoins(wallet);
     if (!record.loaded) return; // no record yet: the next balance will build one
@@ -3565,7 +3566,7 @@ void RecordParentSpend(const CWallet& wallet,
     if (with_change && change_amount > 0) {
         ParentCoin c;
         c.txid = uint256S(txid);
-        c.vout = 1; // the send builds recipient first, change second
+        c.vout = change_vout; // destinations first, change after them
         c.amount = change_amount;
         c.height = 0; // ours, not yet in a block
         c.time = GetTime();
@@ -3651,21 +3652,55 @@ RPCHelpMan sendbtctoaddress()
     if (!pwallet) return NullUniValue;
     EnsureWalletIsUnlocked(*pwallet);
 
-    // Destination: the unconfidential, Bitcoin-identical form only. Confidential
+    // Destinations: the unconfidential, Bitcoin-identical form only. Confidential
     // addresses have no meaning on the parent chain, and legacy base58 is not
     // something this wallet ever hands out.
-    CTxDestination dest = DecodeDestination(request.params[0].get_str());
-    std::visit(SetBlindingPubKeyVisitor(CPubKey()), dest);
-    if (!IsValidDestination(dest) ||
-        (!std::holds_alternative<WitnessV0KeyHash>(dest) && !std::holds_alternative<WitnessV0ScriptHash>(dest) &&
-         !std::holds_alternative<WitnessV1Taproot>(dest))) {
-        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Bitcoin travels to a bech32 address (tb1.../bc1...); give one of those");
-    }
-    const CScript dest_script = GetScriptForDestination(dest);
+    //
+    // One transaction may pay several destinations -- that is ordinary on Bitcoin,
+    // and it is one transaction rather than one each, so it costs one fee and one
+    // set of inputs instead of N.
+    struct ParentRecipient { CScript script; std::string address; CAmount amount{0}; };
+    std::vector<ParentRecipient> recipients;
 
-    const CAmount send_amount = AmountFromValue(request.params[1]);
-    if (send_amount <= 0) throw JSONRPCError(RPC_TYPE_ERROR, "Invalid amount for send");
+    auto add_recipient = [&](const std::string& addr_str, const UniValue& amount_val) {
+        CTxDestination dest = DecodeDestination(addr_str);
+        std::visit(SetBlindingPubKeyVisitor(CPubKey()), dest);
+        if (!IsValidDestination(dest) ||
+            (!std::holds_alternative<WitnessV0KeyHash>(dest) && !std::holds_alternative<WitnessV0ScriptHash>(dest) &&
+             !std::holds_alternative<WitnessV1Taproot>(dest))) {
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Bitcoin travels to a bech32 address (tb1.../bc1...); give one of those");
+        }
+        const CAmount amt = AmountFromValue(amount_val);
+        if (amt <= 0) throw JSONRPCError(RPC_TYPE_ERROR, "Invalid amount for send");
+        recipients.push_back({GetScriptForDestination(dest), EncodeDestination(dest), amt});
+    };
+
+    if (request.params[0].isArray()) {
+        const UniValue& list = request.params[0];
+        if (list.empty()) throw JSONRPCError(RPC_INVALID_PARAMETER, "No destinations given");
+        for (size_t i = 0; i < list.size(); ++i) {
+            const UniValue& o = list[i];
+            if (!o.isObject() || !o["address"].isStr() || o["amount"].isNull()) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Each destination needs an address and an amount");
+            }
+            add_recipient(o["address"].get_str(), o["amount"]);
+        }
+    } else {
+        if (request.params[1].isNull()) throw JSONRPCError(RPC_INVALID_PARAMETER, "No amount given");
+        add_recipient(request.params[0].get_str(), request.params[1]);
+    }
+
+    CAmount send_amount = 0;
+    for (const ParentRecipient& r : recipients) send_amount += r.amount;
+
     const bool subtract_fee = !request.params[3].isNull() && request.params[3].get_bool();
+    // Deducting the fee from an amount is unambiguous with one destination and a
+    // choice with several -- whose payment shrinks? Rather than decide for the
+    // caller and move somebody money quietly, refuse and let them say.
+    if (subtract_fee && recipients.size() > 1) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+            "subtractfeefromamount needs one destination: with several, say which amounts to reduce by lowering them yourself");
+    }
 
     // Fee rate, sat/vB: caller's, else the parent chain's own estimate, floor 1.
     CAmount sat_per_vb = 0;
@@ -3720,12 +3755,13 @@ RPCHelpMan sendbtctoaddress()
     for (const Selected& s : spendable) {
         picked.push_back(s);
         in_sum += s.utxo.amount;
-        for (int outs = 2; outs >= 1; --outs) {
+        const int outs_max = (int)recipients.size() + 1;   // destinations plus change
+        for (int outs = outs_max; outs >= outs_max - 1; --outs) {
             const CAmount f = sat_per_vb * (11 + 68 * (CAmount)picked.size() + 31 * outs);
             const CAmount need = subtract_fee ? send_amount : send_amount + f;
             if (in_sum >= need) {
                 fee = f;
-                with_change = (outs == 2);
+                with_change = (outs == outs_max);
                 change = with_change ? in_sum - need : 0;
                 if (with_change && change < PARENT_DUST) { with_change = false; continue; }
                 goto selected;
@@ -3739,6 +3775,9 @@ selected:
 
     const CAmount to_dest = subtract_fee ? send_amount - fee : send_amount;
     if (to_dest <= PARENT_DUST) throw JSONRPCError(RPC_INVALID_PARAMETER, "Amount after the fee would be dust on the parent chain");
+    // With one destination the deduction lands on it; with several there is no
+    // deduction at all (refused above), so each is paid exactly what was asked.
+    if (subtract_fee) recipients.front().amount = to_dest;
 
     // Bitcoin's safety ceiling, kept for Bitcoin. Sequentia removed the default fee
     // ceiling because fees there can be paid in any asset, where one number cannot
@@ -3789,10 +3828,10 @@ selected:
         in.nSequence = 0xfffffffd; // opt-in RBF, as every wallet send
         mtx.vin.push_back(in);
     }
-    {
+    for (const ParentRecipient& r : recipients) {
         Sidechain::Bitcoin::CTxOut out;
-        out.nValue = to_dest;
-        out.scriptPubKey = dest_script;
+        out.nValue = r.amount;
+        out.scriptPubKey = r.script;
         mtx.vout.push_back(out);
     }
     if (with_change) {
@@ -3848,7 +3887,7 @@ selected:
         for (const Selected& sel : picked) {
             spent.push_back(std::make_pair(sel.utxo.txid, (uint32_t)sel.utxo.vout));
         }
-        RecordParentSpend(*pwallet, spent, txid, with_change, change_address, change, change_script);
+        RecordParentSpend(*pwallet, spent, txid, with_change, change_address, change, change_script, (uint32_t)recipients.size());
     }
 
     // The send becomes part of this wallet's Bitcoin history. The scan alone cannot
@@ -3859,10 +3898,13 @@ selected:
         UniValue rec(UniValue::VOBJ);
         rec.pushKV("txid", txid);
         rec.pushKV("time", GetTime());
-        rec.pushKV("address", request.params[0].get_str());
+        // With several destinations one address cannot stand for the transaction:
+        // record the first, say how many there were, and keep the total.
+        rec.pushKV("address", recipients.front().address);
+        if (recipients.size() > 1) rec.pushKV("recipients", (int)recipients.size());
         rec.pushKV("btc", ValueFromAmount(to_dest));
         rec.pushKV("fee", ValueFromAmount(fee));
-        rec.pushKV("change_vout", with_change ? 1 : -1);
+        rec.pushKV("change_vout", with_change ? (int)recipients.size() : -1);
         rec.pushKV("change_address", change_address);
         sends.push_back(rec);
         StoreParentSends(*pwallet, sends);

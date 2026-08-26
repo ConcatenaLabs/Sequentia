@@ -426,16 +426,36 @@ bool SendCoinsDialog::trySendParentBtc()
         recipients.append(r);
     }
     if (!any_btc) return false;
-    if (any_asset || recipients.size() != 1) {
+    if (any_asset) {
         // One chain per transaction: Bitcoin moves on Bitcoin. Mixing it with Sequentia
         // assets in one send would promise a single transaction that cannot exist.
+        // Several Bitcoin recipients, on the other hand, are one ordinary Bitcoin
+        // transaction with several outputs -- and one fee instead of several.
         QMessageBox::warning(this, tr("Send Coins"),
-            tr("Bitcoin travels on its own chain, so send it on its own: one recipient, no other assets in the same send."));
+            tr("Bitcoin and Sequentia assets cannot travel in the same transaction: they are different chains. "
+               "Send the Bitcoin recipients on their own."));
         return true;
     }
 
     const SendAssetsRecipient& rcp = recipients.first();
-    const QString amount_str = BitcoinUnits::format(BitcoinUnits::BTC, rcp.asset_amount, false, BitcoinUnits::SeparatorStyle::ALWAYS);
+    const bool subtract_fee = rcp.fSubtractFeeFromAmount;
+
+    // One Bitcoin transaction, one output per recipient. Sent separately they would
+    // cost a fee each and spend inputs each; together they cost one of both.
+    UniValue destinations(UniValue::VARR);
+    CAmount total_amount = 0;
+    QStringList destination_lines;
+    for (const SendAssetsRecipient& r : recipients) {
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("address", r.address.toStdString());
+        o.pushKV("amount", ValueFromAmount(r.asset_amount));
+        destinations.push_back(o);
+        total_amount += r.asset_amount;
+        destination_lines << tr("%1 %2 to %3").arg(
+            BitcoinUnits::format(BitcoinUnits::BTC, r.asset_amount, false, BitcoinUnits::SeparatorStyle::ALWAYS),
+            GUIUtil::parentBtcTicker(), r.address);
+    }
+    const QString amount_str = BitcoinUnits::format(BitcoinUnits::BTC, total_amount, false, BitcoinUnits::SeparatorStyle::ALWAYS);
 
     // Ask the node what this send would cost before asking the user to approve
     // it: same selection, same fee math, nothing signed or spent. A fee the
@@ -443,12 +463,12 @@ bool SendCoinsDialog::trySendParentBtc()
     QString fee_line;
     {
         UniValue est_params(UniValue::VARR);
-        est_params.push_back(rcp.address.toStdString());
-        est_params.push_back(ValueFromAmount(rcp.asset_amount));
+        est_params.push_back(destinations);
+        est_params.push_back(UniValue(UniValue::VNULL)); // amounts ride with the destinations
         const int chosen_rate = chosenBtcFeeRate();
         if (chosen_rate > 0) est_params.push_back(UniValue(chosen_rate));
         else est_params.push_back(UniValue(UniValue::VNULL));
-        est_params.push_back(UniValue(rcp.fSubtractFeeFromAmount));
+        est_params.push_back(UniValue(subtract_fee));
         est_params.push_back(UniValue(true)); // estimate_only
         const std::string uri_est = "/wallet/" + model->getWalletName().toStdString();
         try {
@@ -470,11 +490,13 @@ bool SendCoinsDialog::trySendParentBtc()
         }
     }
 
-    const QString question = tr("Send %1 %2 to %3?")
-        .arg(amount_str, GUIUtil::parentBtcTicker(), rcp.address)
+    const QString question = (recipients.size() == 1
+            ? tr("Send %1 %2 to %3?").arg(amount_str, GUIUtil::parentBtcTicker(), rcp.address)
+            : tr("Send %1 %2 in one transaction?").arg(amount_str, GUIUtil::parentBtcTicker())
+              + QStringLiteral("<br>") + destination_lines.join(QStringLiteral("<br>")))
         + (fee_line.isEmpty() ? QString() : QStringLiteral("<br><b>") + fee_line + QStringLiteral("</b>"))
         + QStringLiteral("<br><span style='font-size:10pt;color:#9b988e;'>")
-        + (rcp.fSubtractFeeFromAmount
+        + (subtract_fee
             ? tr("An ordinary Bitcoin transaction on the parent chain, the fee deducted from the amount.")
             : tr("An ordinary Bitcoin transaction on the parent chain, the fee on top of the amount."))
         + QStringLiteral("</span>");
@@ -484,10 +506,10 @@ bool SendCoinsDialog::trySendParentBtc()
     if (retval != QMessageBox::Yes) return true;
 
     UniValue params(UniValue::VARR);
-    params.push_back(rcp.address.toStdString());
-    params.push_back(ValueFromAmount(rcp.asset_amount));
+    params.push_back(destinations);
+    params.push_back(UniValue(UniValue::VNULL)); // amounts ride with the destinations
     params.push_back(UniValue(UniValue::VNULL)); // fee_rate: the parent chain's own estimate
-    params.push_back(UniValue(rcp.fSubtractFeeFromAmount));
+    params.push_back(UniValue(subtract_fee));
     const std::string uri = "/wallet/" + model->getWalletName().toStdString();
     try {
         UniValue r = model->node().executeRpc("sendbtctoaddress", params, uri);
@@ -1463,6 +1485,28 @@ void SendCoinsDialog::buildFeeGrid()
     // nothing to say about sat/vB on the parent chain, so it is hidden -- which
     // used to leave no fee controls at all.
     buildBtcFeeControls();
+    if (ui->frameFee && ui->frameFee->parentWidget()) {
+        if (QBoxLayout* host = qobject_cast<QBoxLayout*>(ui->frameFee->parentWidget()->layout())) {
+            m_mixed_chain_warning = new QLabel(this);
+            m_mixed_chain_warning->setWordWrap(true);
+            m_mixed_chain_warning->setText(tr("Bitcoin and Sequentia assets cannot travel in the same transaction: "
+                                              "they are different chains. Send the Bitcoin recipients on their own."));
+            m_mixed_chain_warning->setStyleSheet("QLabel { color: #c0392b; }");
+            m_mixed_chain_warning->setVisible(false);
+            const int idx = host->indexOf(ui->frameFee);
+            if (idx >= 0) host->insertWidget(idx, m_mixed_chain_warning); else host->addWidget(m_mixed_chain_warning);
+        }
+    }
+
+    // Sizing a transaction runs coin selection, so it is not something to do on
+    // every keystroke; it settles after the typing stops. Without this the timer
+    // stays null, refreshTxSize() is never reached, and m_tx_vsize is zero for
+    // ever -- which reads, on screen, as a "Total for this transaction" that
+    // shows an em dash and refuses to be typed into even under Custom.
+    m_size_timer = new QTimer(this);
+    m_size_timer->setSingleShot(true);
+    m_size_timer->setInterval(400);
+    connect(m_size_timer, &QTimer::timeout, this, &SendCoinsDialog::refreshTxSize);
 }
 
 void SendCoinsDialog::refreshTxSize()
@@ -2013,6 +2057,16 @@ void SendCoinsDialog::coinControlUpdateLabels()
             any_entry = true;
             if (!GUIUtil::isParentBtc(e->getValue().asset)) { all_btc = false; break; }
         }
+        // Mixed chains: say it now, while the form is being filled, instead of at
+        // the end. The user has already typed everything by then.
+        bool has_btc = false, has_asset = false;
+        for (int i = 0; i < ui->entries->count(); ++i) {
+            SendCoinsEntry* e = qobject_cast<SendCoinsEntry*>(ui->entries->itemAt(i)->widget());
+            if (!e || e->isClear()) continue;
+            (GUIUtil::isParentBtc(e->getValue().asset) ? has_btc : has_asset) = true;
+        }
+        if (m_mixed_chain_warning) m_mixed_chain_warning->setVisible(has_btc && has_asset);
+
         const bool paying_in_btc = any_entry && all_btc;
         ui->frameFee->setVisible(!paying_in_btc);
         // The asset panel goes away for a Bitcoin send because it prices assets;

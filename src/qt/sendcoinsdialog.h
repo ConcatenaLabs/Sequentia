@@ -134,6 +134,9 @@ private:
     // recipient is being paid in bitcoin: that panel prices Sequentia assets and
     // has nothing to say about sat/vB on the parent chain.
     QFrame* m_btc_fee_frame{nullptr};
+    // Says, while the form is being filled, that Bitcoin and a Sequentia asset
+    // cannot travel together -- rather than waiting for Send to refuse.
+    QLabel* m_mixed_chain_warning{nullptr};
     QRadioButton* m_btc_fee_recommended{nullptr};
     QRadioButton* m_btc_fee_custom{nullptr};
     QSpinBox* m_btc_fee_spin{nullptr};
