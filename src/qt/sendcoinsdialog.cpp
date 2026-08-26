@@ -1497,16 +1497,6 @@ void SendCoinsDialog::buildFeeGrid()
             if (idx >= 0) host->insertWidget(idx, m_mixed_chain_warning); else host->addWidget(m_mixed_chain_warning);
         }
     }
-
-    // Sizing a transaction runs coin selection, so it is not something to do on
-    // every keystroke; it settles after the typing stops. Without this the timer
-    // stays null, refreshTxSize() is never reached, and m_tx_vsize is zero for
-    // ever -- which reads, on screen, as a "Total for this transaction" that
-    // shows an em dash and refuses to be typed into even under Custom.
-    m_size_timer = new QTimer(this);
-    m_size_timer->setSingleShot(true);
-    m_size_timer->setInterval(400);
-    connect(m_size_timer, &QTimer::timeout, this, &SendCoinsDialog::refreshTxSize);
 }
 
 void SendCoinsDialog::refreshTxSize()
