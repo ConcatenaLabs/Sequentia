@@ -48,6 +48,9 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QScrollBar>
+#include <QRadioButton>
+#include <QSpinBox>
+#include <QFrame>
 #include <QSettings>
 #include <QShowEvent>
 #include <QTextDocument>
@@ -336,6 +339,79 @@ SendCoinsDialog::~SendCoinsDialog()
     delete ui;
 }
 
+void SendCoinsDialog::buildBtcFeeControls()
+{
+    if (!ui->frameFee || !ui->frameFee->parentWidget()) return;
+    QBoxLayout* host = qobject_cast<QBoxLayout*>(ui->frameFee->parentWidget()->layout());
+    if (!host) return;
+
+    m_btc_fee_frame = new QFrame(this);
+    m_btc_fee_frame->setFrameShape(ui->frameFee->frameShape());
+    QVBoxLayout* box = new QVBoxLayout(m_btc_fee_frame);
+
+    QLabel* title = new QLabel(tr("Bitcoin network fee"), m_btc_fee_frame);
+    QFont bold = title->font();
+    bold.setBold(true);
+    title->setFont(bold);
+    box->addWidget(title);
+
+    m_btc_fee_recommended = new QRadioButton(tr("Recommended"), m_btc_fee_frame);
+    m_btc_fee_recommended->setChecked(true);
+    box->addWidget(m_btc_fee_recommended);
+
+    QHBoxLayout* row = new QHBoxLayout();
+    m_btc_fee_custom = new QRadioButton(tr("Custom:"), m_btc_fee_frame);
+    m_btc_fee_spin = new QSpinBox(m_btc_fee_frame);
+    m_btc_fee_spin->setRange(1, 5000);
+    m_btc_fee_spin->setSuffix(tr(" sat/vB"));
+    m_btc_fee_spin->setEnabled(false);
+    row->addWidget(m_btc_fee_custom);
+    row->addWidget(m_btc_fee_spin);
+    row->addStretch(1);
+    box->addLayout(row);
+
+    connect(m_btc_fee_custom, &QRadioButton::toggled, this, [this](bool on) {
+        if (m_btc_fee_spin) m_btc_fee_spin->setEnabled(on);
+    });
+
+    const int idx = host->indexOf(ui->frameFee);
+    if (idx >= 0) host->insertWidget(idx + 1, m_btc_fee_frame); else host->addWidget(m_btc_fee_frame);
+    m_btc_fee_frame->setVisible(false);
+}
+
+void SendCoinsDialog::refreshBtcFeeHint()
+{
+    if (!model || !m_btc_fee_recommended) return;
+    int rate = 0;
+    bool estimated = false;
+    try {
+        UniValue r = model->node().executeRpc("getbtcfeerate", UniValue(UniValue::VARR),
+                                              "/wallet/" + model->getWalletName().toStdString());
+        if (r.isObject() && r.exists("sat_vb") && r["sat_vb"].isNum()) {
+            rate = (int)r["sat_vb"].get_int64();
+            estimated = r.exists("estimated") && r["estimated"].get_bool();
+        }
+    } catch (...) {
+        // Leave the label generic: an unreachable parent is reported by the send
+        // itself, and a fee panel is not the place to explain it.
+    }
+    m_btc_fee_hint = rate;
+    if (rate > 0) {
+        m_btc_fee_recommended->setText(estimated
+            ? tr("Recommended: %1 sat/vB (the Bitcoin node's estimate)").arg(rate)
+            : tr("Recommended: %1 sat/vB (minimum; Bitcoin gave no estimate)").arg(rate));
+        if (m_btc_fee_spin && m_btc_fee_spin->value() < rate) m_btc_fee_spin->setValue(rate);
+    }
+}
+
+int SendCoinsDialog::chosenBtcFeeRate() const
+{
+    if (m_btc_fee_custom && m_btc_fee_custom->isChecked() && m_btc_fee_spin) {
+        return m_btc_fee_spin->value();
+    }
+    return 0; // the node applies its own estimate
+}
+
 bool SendCoinsDialog::trySendParentBtc()
 {
     // Collect the entries; only engage when a recipient chose native Bitcoin.
@@ -350,16 +426,36 @@ bool SendCoinsDialog::trySendParentBtc()
         recipients.append(r);
     }
     if (!any_btc) return false;
-    if (any_asset || recipients.size() != 1) {
+    if (any_asset) {
         // One chain per transaction: Bitcoin moves on Bitcoin. Mixing it with Sequentia
         // assets in one send would promise a single transaction that cannot exist.
+        // Several Bitcoin recipients, on the other hand, are one ordinary Bitcoin
+        // transaction with several outputs -- and one fee instead of several.
         QMessageBox::warning(this, tr("Send Coins"),
-            tr("Bitcoin travels on its own chain, so send it on its own: one recipient, no other assets in the same send."));
+            tr("Bitcoin and Sequentia assets cannot travel in the same transaction: they are different chains. "
+               "Send the Bitcoin recipients on their own."));
         return true;
     }
 
     const SendAssetsRecipient& rcp = recipients.first();
-    const QString amount_str = BitcoinUnits::format(BitcoinUnits::BTC, rcp.asset_amount, false, BitcoinUnits::SeparatorStyle::ALWAYS);
+    const bool subtract_fee = rcp.fSubtractFeeFromAmount;
+
+    // One Bitcoin transaction, one output per recipient. Sent separately they would
+    // cost a fee each and spend inputs each; together they cost one of both.
+    UniValue destinations(UniValue::VARR);
+    CAmount total_amount = 0;
+    QStringList destination_lines;
+    for (const SendAssetsRecipient& r : recipients) {
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("address", r.address.toStdString());
+        o.pushKV("amount", ValueFromAmount(r.asset_amount));
+        destinations.push_back(o);
+        total_amount += r.asset_amount;
+        destination_lines << tr("%1 %2 to %3").arg(
+            BitcoinUnits::format(BitcoinUnits::BTC, r.asset_amount, false, BitcoinUnits::SeparatorStyle::ALWAYS),
+            GUIUtil::parentBtcTicker(), r.address);
+    }
+    const QString amount_str = BitcoinUnits::format(BitcoinUnits::BTC, total_amount, false, BitcoinUnits::SeparatorStyle::ALWAYS);
 
     // Ask the node what this send would cost before asking the user to approve
     // it: same selection, same fee math, nothing signed or spent. A fee the
@@ -367,10 +463,12 @@ bool SendCoinsDialog::trySendParentBtc()
     QString fee_line;
     {
         UniValue est_params(UniValue::VARR);
-        est_params.push_back(rcp.address.toStdString());
-        est_params.push_back(ValueFromAmount(rcp.asset_amount));
-        est_params.push_back(UniValue(UniValue::VNULL));
-        est_params.push_back(UniValue(rcp.fSubtractFeeFromAmount));
+        est_params.push_back(destinations);
+        est_params.push_back(UniValue(UniValue::VNULL)); // amounts ride with the destinations
+        const int chosen_rate = chosenBtcFeeRate();
+        if (chosen_rate > 0) est_params.push_back(UniValue(chosen_rate));
+        else est_params.push_back(UniValue(UniValue::VNULL));
+        est_params.push_back(UniValue(subtract_fee));
         est_params.push_back(UniValue(true)); // estimate_only
         const std::string uri_est = "/wallet/" + model->getWalletName().toStdString();
         try {
@@ -392,11 +490,13 @@ bool SendCoinsDialog::trySendParentBtc()
         }
     }
 
-    const QString question = tr("Send %1 %2 to %3?")
-        .arg(amount_str, GUIUtil::parentBtcTicker(), rcp.address)
+    const QString question = (recipients.size() == 1
+            ? tr("Send %1 %2 to %3?").arg(amount_str, GUIUtil::parentBtcTicker(), rcp.address)
+            : tr("Send %1 %2 in one transaction?").arg(amount_str, GUIUtil::parentBtcTicker())
+              + QStringLiteral("<br>") + destination_lines.join(QStringLiteral("<br>")))
         + (fee_line.isEmpty() ? QString() : QStringLiteral("<br><b>") + fee_line + QStringLiteral("</b>"))
         + QStringLiteral("<br><span style='font-size:10pt;color:#9b988e;'>")
-        + (rcp.fSubtractFeeFromAmount
+        + (subtract_fee
             ? tr("An ordinary Bitcoin transaction on the parent chain, the fee deducted from the amount.")
             : tr("An ordinary Bitcoin transaction on the parent chain, the fee on top of the amount."))
         + QStringLiteral("</span>");
@@ -406,10 +506,10 @@ bool SendCoinsDialog::trySendParentBtc()
     if (retval != QMessageBox::Yes) return true;
 
     UniValue params(UniValue::VARR);
-    params.push_back(rcp.address.toStdString());
-    params.push_back(ValueFromAmount(rcp.asset_amount));
+    params.push_back(destinations);
+    params.push_back(UniValue(UniValue::VNULL)); // amounts ride with the destinations
     params.push_back(UniValue(UniValue::VNULL)); // fee_rate: the parent chain's own estimate
-    params.push_back(UniValue(rcp.fSubtractFeeFromAmount));
+    params.push_back(UniValue(subtract_fee));
     const std::string uri = "/wallet/" + model->getWalletName().toStdString();
     try {
         UniValue r = model->node().executeRpc("sendbtctoaddress", params, uri);
@@ -1379,6 +1479,24 @@ void SendCoinsDialog::buildFeeGrid()
     m_size_timer->setSingleShot(true);
     m_size_timer->setInterval(400);
     connect(m_size_timer, &QTimer::timeout, this, &SendCoinsDialog::refreshTxSize);
+
+    // The Bitcoin fee controls, which stand in for the asset fee panel when every
+    // recipient is paid in bitcoin: that panel prices Sequentia assets and has
+    // nothing to say about sat/vB on the parent chain, so it is hidden -- which
+    // used to leave no fee controls at all.
+    buildBtcFeeControls();
+    if (ui->frameFee && ui->frameFee->parentWidget()) {
+        if (QBoxLayout* host = qobject_cast<QBoxLayout*>(ui->frameFee->parentWidget()->layout())) {
+            m_mixed_chain_warning = new QLabel(this);
+            m_mixed_chain_warning->setWordWrap(true);
+            m_mixed_chain_warning->setText(tr("Bitcoin and Sequentia assets cannot travel in the same transaction: "
+                                              "they are different chains. Send the Bitcoin recipients on their own."));
+            m_mixed_chain_warning->setStyleSheet("QLabel { color: #c0392b; }");
+            m_mixed_chain_warning->setVisible(false);
+            const int idx = host->indexOf(ui->frameFee);
+            if (idx >= 0) host->insertWidget(idx, m_mixed_chain_warning); else host->addWidget(m_mixed_chain_warning);
+        }
+    }
 }
 
 void SendCoinsDialog::refreshTxSize()
@@ -1399,6 +1517,17 @@ void SendCoinsDialog::refreshTxSize()
             // typing. Sizing a transaction must not tell them they got it wrong.
             const SendAssetsRecipient rcp = entry->getValue();
             if (rcp.address.isEmpty() || !model->validateAddress(rcp.address) || rcp.asset_amount <= 0) {
+                valid = false;
+                break;
+            }
+            // Bitcoin is not sized here, and must not even be offered: it does not
+            // travel in a Sequentia transaction, so its asset is the null one by
+            // design, and asking the wallet to build for it fails with "No asset
+            // provided for recipient". That failure is not silent -- prepareTransaction
+            // shows the wallet error to the user -- so this probe, which runs 400 ms
+            // after every keystroke, put an error dialog on screen for anyone typing
+            // an amount in tBTC. The real send takes the parent-chain road instead.
+            if (GUIUtil::isParentBtc(rcp.asset)) {
                 valid = false;
                 break;
             }
@@ -1918,7 +2047,25 @@ void SendCoinsDialog::coinControlUpdateLabels()
             any_entry = true;
             if (!GUIUtil::isParentBtc(e->getValue().asset)) { all_btc = false; break; }
         }
-        ui->frameFee->setVisible(!(any_entry && all_btc));
+        // Mixed chains: say it now, while the form is being filled, instead of at
+        // the end. The user has already typed everything by then.
+        bool has_btc = false, has_asset = false;
+        for (int i = 0; i < ui->entries->count(); ++i) {
+            SendCoinsEntry* e = qobject_cast<SendCoinsEntry*>(ui->entries->itemAt(i)->widget());
+            if (!e || e->isClear()) continue;
+            (GUIUtil::isParentBtc(e->getValue().asset) ? has_btc : has_asset) = true;
+        }
+        if (m_mixed_chain_warning) m_mixed_chain_warning->setVisible(has_btc && has_asset);
+
+        const bool paying_in_btc = any_entry && all_btc;
+        ui->frameFee->setVisible(!paying_in_btc);
+        // The asset panel goes away for a Bitcoin send because it prices assets;
+        // without something in its place the user had no fee controls at all, and
+        // no sight of what they were about to pay.
+        if (m_btc_fee_frame) {
+            if (paying_in_btc && !m_btc_fee_frame->isVisible()) refreshBtcFeeHint();
+            m_btc_fee_frame->setVisible(paying_in_btc);
+        }
     }
 
     if (!model || !model->getOptionsModel())

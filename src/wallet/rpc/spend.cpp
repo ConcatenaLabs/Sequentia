@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <anchor.h>
 #include <assetsdir.h>
 #include <consensus/consensus.h>
 #include <consensus/validation.h>
@@ -2543,6 +2544,570 @@ RPCHelpMan liststakingrewards()
 },
     };
 }
+namespace {
+// bitcoind runs one scantxoutset at a time for the whole process, and this wallet
+// has several reasons to want one: every loaded wallet refreshes its Bitcoin balance
+// on its own timer, and a Bitcoin send scans before it spends. Two wallets open in
+// one GUI is enough -- their timers start together and collide once a minute, for
+// ever.
+//
+// So wait for the slot rather than returning bitcoind refusal to a caller who did
+// nothing wrong. The wait is a DEADLINE, not a number of tries: a scan of testnet4
+// measured 18.8 s over 14.2 million outputs, and a retry budget shorter than one
+// scan means whoever comes second always gives up just before the slot frees --
+// which is exactly how "Scan already in progress" ended up parked under the
+// balances. The deadline is generous enough for a scan several times that size and
+// still bounded, so an abandoned scan cannot hang a wallet for ever.
+UniValue ScanParentChainUtxoSet(const UniValue& params)
+{
+    constexpr auto wait_budget = std::chrono::seconds{90};
+    const auto deadline = std::chrono::steady_clock::now() + wait_budget;
+    UniValue reply;
+    for (;;) {
+        reply = CallMainChainRPC("scantxoutset", params);
+        const bool busy = reply.exists("error") && !reply["error"].isNull() &&
+            reply["error"].isObject() && reply["error"].exists("message") &&
+            reply["error"]["message"].get_str().find("in progress") != std::string::npos;
+        if (!busy || std::chrono::steady_clock::now() >= deadline) break;
+        UninterruptibleSleep(std::chrono::milliseconds{1500});
+    }
+    return reply;
+}
+} // namespace
+
+RPCHelpMan getbtcscanprogress()
+{
+    return RPCHelpMan{"getbtcscanprogress",
+        "\nHow far along the parent-chain scan behind getbtcbalance is, if one is running.\n"
+        "\nThe first reading of a wallet Bitcoin balance walks the whole parent-chain UTXO set,\n"
+        "which takes seconds on testnet4 and minutes on a mainnet-sized set. A caller that shows\n"
+        "the balance can poll this to say how far it has got instead of showing nothing at all.\n",
+        {},
+        RPCResult{RPCResult::Type::OBJ, "", "", {
+            {RPCResult::Type::BOOL, "scanning", "whether a parent-chain scan is running right now"},
+            {RPCResult::Type::NUM, "progress", "percent complete, 0-100; absent when nothing is running"},
+        }},
+        RPCExamples{HelpExampleCli("getbtcscanprogress", "") + HelpExampleRpc("getbtcscanprogress", "")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    UniValue result(UniValue::VOBJ);
+    UniValue params(UniValue::VARR);
+    params.push_back("status");
+    // A scan holds bitcoind single scan slot, and asking for its status does not
+    // queue behind it -- that is the whole reason this can be polled while one runs.
+    UniValue reply;
+    try {
+        reply = CallMainChainRPC("scantxoutset", params);
+    } catch (const std::exception&) {
+        result.pushKV("scanning", false);
+        return result;
+    }
+    const UniValue& res = reply.exists("result") ? reply["result"] : NullUniValue;
+    // bitcoind answers null when no scan is running.
+    if (!res.isObject()) {
+        result.pushKV("scanning", false);
+        return result;
+    }
+    result.pushKV("scanning", true);
+    if (res.exists("progress") && res["progress"].isNum()) {
+        result.pushKV("progress", res["progress"].get_int());
+    }
+    return result;
+}};
+}
+
+namespace {
+
+//! SEQUENTIA: the wallet's own record of its parent-chain coins.
+//!
+//! Without it, every question about Bitcoin -- what is my balance, what can I
+//! spend -- was answered by rebuilding the answer from nothing: a scantxoutset
+//! over the whole parent UTXO set, measured at 18.8 s across 14.2 million
+//! outputs on testnet4 and minutes on a mainnet-sized set. That is the reason a
+//! balance took twenty seconds and a send froze the window twice.
+//!
+//! Every serious wallet instead KEEPS what it owns and edits it as blocks
+//! arrive. This is that record: filled once by a full scan, then moved forward
+//! block by block. A balance becomes a sum of local rows, and coin selection a
+//! walk over them -- the same thing the wallet already does for Sequentia
+//! assets, which is why those were always instant.
+struct ParentCoin {
+    uint256 txid;
+    uint32_t vout{0};
+    CAmount amount{0};
+    int height{0};              //!< 0 = ours but not yet in a block (our own change)
+    int64_t time{0};            //!< block time, so a list can say when it arrived
+    std::string script_hex;     //!< the scriptPubKey, so spending never has to guess it
+    std::string address;
+    std::string spent_by;       //!< txid of our spend, while that spend is unconfirmed
+};
+
+struct ParentCoinSet {
+    int scanned_height{0};      //!< every block up to here has been applied
+    std::string scanned_hash;   //!< ...and this was its hash, so a reorg is visible
+    int64_t full_scan_ms{0};    //!< what one full scan cost here, measured, not guessed
+    std::vector<ParentCoin> coins;
+    bool loaded{false};         //!< false = no record yet, a full scan is owed
+};
+
+fs::path ParentCoinsPath(const CWallet& wallet)
+{
+    return fs::PathFromString(wallet.GetDatabase().Filename()).parent_path() / "parent_coins.json";
+}
+
+//! Read the record as it is on disk, usable or not. A record can be unusable for
+//! spending and still hold the only copy of something: which coins are committed to
+//! a spend of ours, and the change of that spend, neither of which the parent chain
+//! will admit to until the transaction confirms.
+ParentCoinSet LoadParentCoinsRaw(const CWallet& wallet)
+{
+    ParentCoinSet out;
+    std::ifstream f(fs::PathToString(ParentCoinsPath(wallet)));
+    if (!f.good()) return out;
+    const std::string data((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    UniValue parsed;
+    if (!parsed.read(data) || !parsed.isObject()) return out;
+    out.scanned_height = parsed.exists("scanned_height") && parsed["scanned_height"].isNum()
+                         ? parsed["scanned_height"].get_int() : 0;
+    out.scanned_hash = parsed.exists("scanned_hash") ? parsed["scanned_hash"].getValStr() : "";
+    out.full_scan_ms = parsed.exists("full_scan_ms") && parsed["full_scan_ms"].isNum()
+                       ? parsed["full_scan_ms"].get_int64() : 0;
+    if (parsed.exists("coins") && parsed["coins"].isArray()) {
+        const UniValue& arr = parsed["coins"];
+        for (size_t i = 0; i < arr.size(); ++i) {
+            const UniValue& c = arr[i];
+            if (!c.isObject() || !c["txid"].isStr()) continue;
+            ParentCoin coin;
+            coin.txid = uint256S(c["txid"].get_str());
+            coin.vout = c["vout"].isNum() ? (uint32_t)c["vout"].get_int() : 0;
+            int64_t parsed_amt = 0;
+            if (c["btc"].isStr() && ParseFixedPoint(c["btc"].get_str(), 8, &parsed_amt)) coin.amount = parsed_amt;
+            coin.height = c["height"].isNum() ? c["height"].get_int() : 0;
+            coin.time = c["time"].isNum() ? c["time"].get_int64() : 0;
+            coin.script_hex = c["script"].getValStr();
+            coin.address = c["address"].getValStr();
+            coin.spent_by = c["spent_by"].getValStr();
+            out.coins.push_back(std::move(coin));
+        }
+    }
+    out.loaded = true;
+    return out;
+}
+
+//! The record, if it is one this build can spend from. A coin without its script
+//! cannot be spent, and this chain cannot recover the script from the address it
+//! was paid to -- parent-chain addresses do not decode here. A record written
+//! before the script was kept is therefore not a usable record: report none, and
+//! let the caller rebuild it once rather than carry coins it can only look at.
+ParentCoinSet LoadParentCoins(const CWallet& wallet)
+{
+    ParentCoinSet out = LoadParentCoinsRaw(wallet);
+    if (!out.loaded) return out;
+    for (const ParentCoin& c : out.coins) {
+        if (c.script_hex.empty() && c.height > 0) return ParentCoinSet{};
+    }
+    return out;
+}
+
+void StoreParentCoins(const CWallet& wallet, const ParentCoinSet& set)
+{
+    UniValue root(UniValue::VOBJ);
+    root.pushKV("scanned_height", set.scanned_height);
+    root.pushKV("scanned_hash", set.scanned_hash);
+    root.pushKV("full_scan_ms", set.full_scan_ms);
+    UniValue arr(UniValue::VARR);
+    for (const ParentCoin& c : set.coins) {
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("txid", c.txid.GetHex());
+        o.pushKV("vout", (int)c.vout);
+        o.pushKV("btc", ValueFromAmount(c.amount).getValStr());
+        o.pushKV("height", c.height);
+        o.pushKV("time", c.time);
+        if (!c.script_hex.empty()) o.pushKV("script", c.script_hex);
+        o.pushKV("address", c.address);
+        if (!c.spent_by.empty()) o.pushKV("spent_by", c.spent_by);
+        arr.push_back(o);
+    }
+    root.pushKV("coins", arr);
+    std::ofstream f(fs::PathToString(ParentCoinsPath(wallet)), std::ios::trunc);
+    f << root.write(1) << std::endl;
+}
+
+//! What the wallet can spend right now: ours, and not already committed to a
+//! spend of ours that has yet to confirm. Spending a coin twice is how the
+//! second send of a session became a replacement its own predecessor refused.
+CAmount SpendableParentBalance(const ParentCoinSet& set)
+{
+    CAmount total = 0;
+    for (const ParentCoin& c : set.coins) {
+        if (c.spent_by.empty()) total += c.amount;
+    }
+    return total;
+}
+
+//! This wallet's parent-chain scripts, by hex, with the address each belongs to.
+//! The unblinded scriptPubKey is byte-identical to what Bitcoin sees, which is the
+//! whole reason a Sequentia wallet can hold Bitcoin at its own addresses.
+std::map<std::string, std::string> WalletParentScripts(const CWallet& wallet)
+{
+    std::map<std::string, std::string> out;
+    LOCK(wallet.cs_wallet);
+    for (const auto& item : wallet.m_address_book) {
+        CTxDestination dest = item.first;
+        std::visit(SetBlindingPubKeyVisitor(CPubKey()), dest);
+        const std::string addr = EncodeDestination(dest);
+        if (addr.empty()) continue;
+        const CScript spk = GetScriptForDestination(dest);
+        // The address book holds every address this wallet has WRITTEN DOWN,
+        // which includes the ones it pays: a saved payee is in there beside our
+        // own receiving addresses. Counting coins at those as ours inflates the
+        // balance with somebody else money -- visible the moment a send refuses
+        // to spend what the overview claims is there.
+        if (!wallet.IsMine(spk)) continue;
+        out[HexStr(spk)] = addr;
+    }
+    return out;
+}
+
+//! Apply one parent block to the record: coins of ours it creates, coins of ours
+//! it spends. Both directions matter -- a wallet that only watched for money
+//! arriving would keep offering coins it no longer owns.
+void ApplyParentBlock(const UniValue& block, int height, int64_t block_time,
+                      const std::map<std::string, std::string>& mine,
+                      ParentCoinSet& set)
+{
+    const UniValue& txs = find_value(block, "tx");
+    if (!txs.isArray()) return;
+    for (size_t i = 0; i < txs.size(); ++i) {
+        const UniValue& tx = txs[i];
+        const std::string txid_hex = find_value(tx, "txid").getValStr();
+
+        // Spent: drop ours that this block consumes, whoever spent them. Our own
+        // pending spend confirming lands here too, which is how a coin marked
+        // spent_by finally leaves the record.
+        const UniValue& vins = find_value(tx, "vin");
+        if (vins.isArray()) {
+            for (size_t k = 0; k < vins.size(); ++k) {
+                const UniValue& pt = find_value(vins[k], "txid");
+                const UniValue& pv = find_value(vins[k], "vout");
+                if (!pt.isStr() || !pv.isNum()) continue; // coinbase
+                const uint256 ptxid = uint256S(pt.get_str());
+                const uint32_t pvout = (uint32_t)pv.get_int();
+                set.coins.erase(std::remove_if(set.coins.begin(), set.coins.end(),
+                    [&](const ParentCoin& c) { return c.txid == ptxid && c.vout == pvout; }),
+                    set.coins.end());
+            }
+        }
+
+        // Received: outputs paying one of our scripts.
+        const UniValue& vouts = find_value(tx, "vout");
+        if (!vouts.isArray()) continue;
+        for (size_t j = 0; j < vouts.size(); ++j) {
+            const UniValue& spk = find_value(vouts[j], "scriptPubKey");
+            if (!spk.isObject()) continue;
+            const auto it = mine.find(find_value(spk, "hex").getValStr());
+            if (it == mine.end()) continue;
+            const uint256 txid = uint256S(txid_hex);
+            const uint32_t vout = (uint32_t)find_value(vouts[j], "n").get_int();
+            // Our own change, recorded at height 0 when we sent it, is the same coin:
+            // confirm it in place rather than listing it twice.
+            auto existing = std::find_if(set.coins.begin(), set.coins.end(),
+                [&](const ParentCoin& c) { return c.txid == txid && c.vout == vout; });
+            if (existing != set.coins.end()) {
+                existing->height = height;
+                existing->time = block_time;
+                continue;
+            }
+            ParentCoin coin;
+            coin.txid = txid;
+            coin.vout = vout;
+            coin.amount = AmountFromValue(find_value(vouts[j], "value"));
+            coin.height = height;
+            coin.time = block_time;
+            coin.script_hex = it->first;
+            coin.address = it->second;
+            set.coins.push_back(std::move(coin));
+        }
+    }
+}
+
+//! Move the record forward to the parent tip by reading only the blocks that
+//! arrived since last time. Returns false when the record cannot be advanced and
+//! a full scan is owed instead -- the caller decides whether to pay for one.
+bool AdvanceParentCoins(const CWallet& wallet, ParentCoinSet& set, std::string& err)
+{
+    if (!set.loaded) { err = "no record yet"; return false; }
+    int tip_height = 0;
+    try {
+        UniValue r = CallMainChainRPC("getblockcount", UniValue(UniValue::VARR));
+        if (!r.exists("result") || !r["result"].isNum()) { err = "parent chain unreachable"; return false; }
+        tip_height = r["result"].get_int();
+    } catch (const std::exception& e) {
+        err = std::string("parent chain unreachable: ") + e.what();
+        return false;
+    }
+    if (tip_height <= set.scanned_height) return true; // already current
+
+    // A record describes a history. If the block it stopped at is no longer the
+    // one at that height, the parent chain reorganised under us and every coin
+    // after it is in doubt: rescan rather than guess.
+    if (!set.scanned_hash.empty()) {
+        try {
+            UniValue hp(UniValue::VARR);
+            hp.push_back(set.scanned_height);
+            UniValue hr = CallMainChainRPC("getblockhash", hp);
+            if (hr.exists("result") && hr["result"].isStr() && hr["result"].get_str() != set.scanned_hash) {
+                err = "parent chain reorganised past the recorded point";
+                return false;
+            }
+        } catch (const std::exception&) {
+            err = "parent chain unreachable";
+            return false;
+        }
+    }
+
+    // Past some gap, one full scan is simply faster than reading block by block.
+    // Where that point lies is not a constant: it depends on how long a scan takes
+    // here (seconds on testnet4, minutes on a mainnet-sized UTXO set) against what a
+    // block costs, which is dominated by the connection rather than the block --
+    // every parent RPC opens a fresh TCP connection and authenticates again.
+    // Measured on 2026-08-25: 38 blocks took 33.5 s, about 0.9 s each, against 33.6 s
+    // for a full scan of the same wallet. So the crossing point was around forty
+    // blocks, not the five hundred first assumed -- which would have meant seven
+    // minutes of catching up to avoid half a minute of scanning.
+    //
+    // Compare the two costs instead of hardcoding a winner, using the scan time this
+    // wallet actually saw. Batched parent RPC (upstream 24.7.5) will cut the per
+    // block cost sharply, and this arithmetic will follow it without being touched.
+    constexpr int64_t ms_per_block_estimate = 900;
+    const int behind = tip_height - set.scanned_height;
+
+    // Speed is not the only reason to walk blocks. A scan sees the confirmed chain
+    // and nothing else, so it silently drops what only the record knows: the coins
+    // committed to a send still in a mempool, and that send's change. Walking keeps
+    // them. So a short gap is walked whatever the clock says -- on a small chain a
+    // scan can be milliseconds, and a wallet that always rescans because rescanning
+    // is quick would keep forgetting its own pending sends.
+    constexpr int always_walk_below = 20;
+    const int64_t known_scan_ms = set.full_scan_ms > 0 ? set.full_scan_ms : 30000;
+    if (behind > always_walk_below && (int64_t)behind * ms_per_block_estimate > known_scan_ms) {
+        err = strprintf("%d blocks behind: a full scan (%d ms last time) is faster than catching up",
+                        behind, known_scan_ms);
+        return false;
+    }
+
+    const std::map<std::string, std::string> mine = WalletParentScripts(wallet);
+    std::string last_hash = set.scanned_hash;
+
+    // Follow nextblockhash from the block we stopped at rather than asking for each
+    // height. Every parent RPC opens its own TCP connection and authenticates again
+    // -- fine once, ruinous by the thousand -- so halving the calls halves the real
+    // cost of catching up. A block already names its successor; asking for what we
+    // have been told is a round trip spent on nothing.
+    std::string next_hash;
+    {
+        try {
+            UniValue hp(UniValue::VARR);
+            hp.push_back(set.scanned_height + 1);
+            UniValue hr = CallMainChainRPC("getblockhash", hp);
+            if (!hr.exists("result") || !hr["result"].isStr()) { err = "parent chain unreachable"; return false; }
+            next_hash = hr["result"].get_str();
+        } catch (const std::exception& e) {
+            err = std::string("parent chain unreachable: ") + e.what();
+            return false;
+        }
+    }
+
+    for (int h = set.scanned_height + 1; h <= tip_height && !next_hash.empty(); ++h) {
+        try {
+            const std::string bhash = next_hash;
+            UniValue bp(UniValue::VARR);
+            bp.push_back(bhash);
+            bp.push_back(2);
+            UniValue br = CallMainChainRPC("getblock", bp);
+            if (!br.exists("result") || !br["result"].isObject()) { err = "parent chain unreachable"; return false; }
+            const UniValue& btime = find_value(br["result"], "time");
+            ApplyParentBlock(br["result"], h, btime.isNum() ? btime.get_int64() : 0, mine, set);
+            const UniValue& nxt = find_value(br["result"], "nextblockhash");
+            next_hash = nxt.isStr() ? nxt.get_str() : std::string();
+            last_hash = bhash;
+        } catch (const std::exception& e) {
+            // Stop where we got to: the record stays consistent at scanned_height,
+            // and the next call picks up from there.
+            err = std::string("parent chain unreachable: ") + e.what();
+            set.scanned_hash = last_hash;
+            StoreParentCoins(wallet, set);
+            return false;
+        }
+        set.scanned_height = h;
+        set.scanned_hash = last_hash;
+    }
+    StoreParentCoins(wallet, set);
+    return true;
+}
+
+//! Dates for coins that have none. A full scan resolves only a bounded number of
+//! block times -- two parent RPCs each -- so an old coin can land in the record
+//! dateless. Fill a few per call and keep them: the cost is paid once per coin,
+//! ever, instead of every time a list is drawn.
+bool FillMissingCoinTimes(ParentCoinSet& set)
+{
+    int budget = 8;
+    bool changed = false;
+    std::map<int, int64_t> resolved;
+    for (ParentCoin& c : set.coins) {
+        if (c.time != 0 || c.height <= 0) continue;
+        const auto known = resolved.find(c.height);
+        if (known != resolved.end()) { c.time = known->second; changed = true; continue; }
+        if (budget-- <= 0) break;
+        try {
+            UniValue hp(UniValue::VARR);
+            hp.push_back(c.height);
+            UniValue hr = CallMainChainRPC("getblockhash", hp);
+            if (!hr.exists("result") || !hr["result"].isStr()) continue;
+            UniValue bp(UniValue::VARR);
+            bp.push_back(hr["result"].get_str());
+            UniValue br = CallMainChainRPC("getblockheader", bp);
+            if (br.exists("result") && br["result"].isObject() && br["result"]["time"].isNum()) {
+                c.time = br["result"]["time"].get_int64();
+                resolved[c.height] = c.time;
+                changed = true;
+            }
+        } catch (const std::exception&) {
+            break; // parent unreachable: the dates can wait, the balance cannot
+        }
+    }
+    return changed;
+}
+
+//! Defined below: the list of Bitcoin sends this wallet has made.
+UniValue LoadParentSends(const CWallet& wallet);
+
+//! Re-derive our unconfirmed spends from the sends we recorded, by asking the
+//! parent chain what those transactions actually spend.
+//!
+//! The record is the usual source for this, but it cannot be the only one: it is
+//! rebuilt from a scan when it is missing, unusable or too far behind, and a scan
+//! sees only the confirmed chain. A wallet whose record was rebuilt in the minutes
+//! after a send would offer that send's coins again -- exactly the double spend
+//! the marking exists to stop. The list of our own sends survives all of that, and
+//! a transaction still in a mempool will tell us its inputs.
+void RecoverPendingSpendsFromSends(const CWallet& wallet, ParentCoinSet& record)
+{
+    const UniValue sends = LoadParentSends(wallet);
+    for (size_t i = 0; i < sends.size(); ++i) {
+        const UniValue& s = sends[i];
+        if (!s.isObject() || !s["txid"].isStr()) continue;
+        const std::string txid_hex = s["txid"].get_str();
+
+        // A send we already marked settled has nothing left to say: its coins are
+        // spent on the confirmed chain and its change is in the record. Skipping
+        // it is what keeps a rebuild from costing one parent call per send ever
+        // made -- which, on a wallet with a long history, is the whole cost.
+        if (s["settled"].isBool() && s["settled"].get_bool()) continue;
+
+        // Only transactions still waiting matter. A confirmed one has already had
+        // its effect applied by the scan or the block walk.
+        UniValue tx;
+        try {
+            UniValue p(UniValue::VARR);
+            p.push_back(txid_hex);
+            p.push_back(true);
+            UniValue r = CallMainChainRPC("getrawtransaction", p);
+            if (!r.exists("result") || !r["result"].isObject()) continue;
+            tx = r["result"];
+        } catch (const std::exception&) {
+            continue; // unreachable, or unknown without a transaction index
+        }
+        const UniValue& confs = find_value(tx, "confirmations");
+        if (confs.isNum() && confs.get_int() > 0) continue;
+
+        const UniValue& vins = find_value(tx, "vin");
+        if (vins.isArray()) {
+            for (size_t k = 0; k < vins.size(); ++k) {
+                const UniValue& pt = find_value(vins[k], "txid");
+                const UniValue& pv = find_value(vins[k], "vout");
+                if (!pt.isStr() || !pv.isNum()) continue;
+                const uint256 ptxid = uint256S(pt.get_str());
+                const uint32_t pvout = (uint32_t)pv.get_int();
+                for (ParentCoin& c : record.coins) {
+                    if (c.txid == ptxid && c.vout == pvout) c.spent_by = txid_hex;
+                }
+            }
+        }
+
+        // The change of that send is ours and is not in the confirmed set either.
+        const int change_vout = (s["change_vout"].isNum()) ? s["change_vout"].get_int() : -1;
+        if (change_vout < 0) continue;
+        const UniValue& vouts = find_value(tx, "vout");
+        if (!vouts.isArray() || (size_t)change_vout >= vouts.size()) continue;
+        const UniValue& out = vouts[change_vout];
+        const uint256 txid = uint256S(txid_hex);
+        const bool already = std::any_of(record.coins.begin(), record.coins.end(),
+            [&](const ParentCoin& c) { return c.txid == txid && c.vout == (uint32_t)change_vout; });
+        if (already) continue;
+        ParentCoin c;
+        c.txid = txid;
+        c.vout = (uint32_t)change_vout;
+        c.amount = AmountFromValue(find_value(out, "value"));
+        c.height = 0;
+        c.time = s["time"].isNum() ? s["time"].get_int64() : GetTime();
+        const UniValue& spk = find_value(out, "scriptPubKey");
+        if (spk.isObject() && find_value(spk, "hex").isStr()) c.script_hex = find_value(spk, "hex").get_str();
+        c.address = s["change_address"].getValStr();
+        if (!c.script_hex.empty()) record.coins.push_back(std::move(c));
+    }
+}
+
+//! The getbtcbalance answer, built from the record instead of from a scan.
+UniValue ParentBalanceReply(const ParentCoinSet& set, int naddr)
+{
+    std::vector<const ParentCoin*> spendable;
+    for (const ParentCoin& c : set.coins) {
+        if (c.spent_by.empty()) spendable.push_back(&c);
+    }
+    std::sort(spendable.begin(), spendable.end(),
+              [](const ParentCoin* a, const ParentCoin* b) { return a->height > b->height; });
+
+    CAmount total = 0;
+    UniValue utxos(UniValue::VARR);
+    for (const ParentCoin* c : spendable) {
+        total += c->amount;
+        if (utxos.size() >= 200) continue; // the list feeds a GUI, the total does not
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("txid", c->txid.GetHex());
+        o.pushKV("vout", (int)c->vout);
+        o.pushKV("btc", ValueFromAmount(c->amount));
+        o.pushKV("height", c->height);
+        o.pushKV("confirmations", (c->height > 0 && set.scanned_height >= c->height)
+                                  ? set.scanned_height - c->height + 1 : 0);
+        o.pushKV("time", c->time);
+        o.pushKV("address", c->address);
+        utxos.push_back(o);
+    }
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("btc", ValueFromAmount(total));
+    result.pushKV("addresses", naddr);
+    result.pushKV("parent_height", set.scanned_height);
+    result.pushKV("utxos", utxos);
+    result.pushKV("error", "");
+    return result;
+}
+
+//! Tell the node what to watch, from the record.
+void RegisterWatchFromRecord(const CWallet& wallet, const ParentCoinSet& set)
+{
+    std::set<std::vector<unsigned char>> scripts;
+    for (const auto& item : WalletParentScripts(wallet)) {
+        const std::vector<unsigned char> raw = ParseHex(item.first);
+        scripts.insert(raw);
+    }
+    std::set<std::pair<uint256, uint32_t>> outpoints;
+    for (const ParentCoin& c : set.coins) outpoints.insert(std::make_pair(c.txid, c.vout));
+    SetWatchedParentOutputs(std::move(scripts), std::move(outpoints));
+}
+
+} // namespace
 
 RPCHelpMan getbtcbalance()
 {
@@ -2579,6 +3144,7 @@ RPCHelpMan getbtcbalance()
 
     // Gather this wallet's receiving addresses (Bitcoin-identical) as scan descriptors.
     UniValue descriptors(UniValue::VARR);
+    std::set<std::vector<unsigned char>> watched_scripts;
     int naddr = 0;
     {
         LOCK(pwallet->cs_wallet);
@@ -2595,7 +3161,39 @@ RPCHelpMan getbtcbalance()
             const std::string addr = EncodeDestination(dest);
             if (addr.empty()) continue;
             descriptors.push_back("addr(" + addr + ")");
+            // The same addresses, as raw scripts, for the node to watch new parent
+            // blocks with. Unblinded, so byte-identical to what Bitcoin sees.
+            const CScript spk = GetScriptForDestination(dest);
+            watched_scripts.insert(std::vector<unsigned char>(spk.begin(), spk.end()));
             ++naddr;
+        }
+    }
+
+    // The fast path, and after the first time the only one: read what we already
+    // know, move it forward over the handful of blocks that arrived since, answer.
+    // A full scan is what this exists to avoid -- it stays below, for the first
+    // reading of a wallet and for a record that cannot be moved forward.
+    {
+        ParentCoinSet record = LoadParentCoins(*pwallet);
+        std::string ferr;
+        if (record.loaded && AdvanceParentCoins(*pwallet, record, ferr)) {
+            if (FillMissingCoinTimes(record)) StoreParentCoins(*pwallet, record);
+            RegisterWatchFromRecord(*pwallet, record);
+            return ParentBalanceReply(record, naddr);
+        }
+        if (record.loaded) {
+            // Bitcoin being unreachable is not a reason to report zero. The record
+            // holds coins that exist whether or not a daemon is answering right
+            // now, and a wallet that shows 0.00 because it cannot ask is worse than
+            // one that shows what it last knew: the first looks like theft, the
+            // second like weather. Say the balance, and say it may have moved --
+            // a full scan below would fail for the same reason anyway.
+            if (ferr.find("unreachable") != std::string::npos) {
+                UniValue stale = ParentBalanceReply(record, naddr);
+                stale.pushKV("stale", true);
+                return stale;
+            }
+            LogPrintf("Bitcoin balance: falling back to a full parent-chain scan: %s\n", ferr);
         }
     }
 
@@ -2620,21 +3218,30 @@ RPCHelpMan getbtcbalance()
     int parent_height = 0;
     std::string err;
     UniValue utxos(UniValue::VARR);
+    std::vector<ParentCoin> scanned_coins;
+    const int64_t scan_started_ms = GetTimeMillis();
     try {
-        UniValue reply = CallMainChainRPC("scantxoutset", params);
+        UniValue reply = ScanParentChainUtxoSet(params);
         if (reply.exists("error") && !reply["error"].isNull()) {
             const UniValue& e = reply["error"];
             err = (e.isObject() && e.exists("message")) ? e["message"].get_str() : e.write();
         } else if (reply.exists("result") && reply["result"].isObject()) {
             const UniValue& res = reply["result"];
-            if (res.exists("total_amount")) total = AmountFromValue(res["total_amount"]);
+            // The total is summed from the coins below, not read from a field. The
+            // parent daemon reports its own total under a name that depends on what
+            // it is: bitcoind says total_amount, an Elements-style daemon says
+            // total_unblinded_bitcoin_amount, and reading the wrong one yields a
+            // silent zero next to a list of coins that are plainly there. Summing
+            // what we are about to record also makes the two impossible to
+            // disagree -- a balance that does not match its own coins is worse
+            // than one that is late.
             if (res.exists("height") && res["height"].isNum()) parent_height = res["height"].get_int();
 
             // The individual outputs, so a wallet can show WHAT arrived and when, not just
             // the sum. This is the UTXO set, not history: an output disappears from here
             // the moment it is spent, and unconfirmed outputs never appear at all.
             if (res.exists("unspents") && res["unspents"].isArray()) {
-                struct Found { std::string txid; int vout; UniValue amount; int height; std::string address; };
+                struct Found { std::string txid; int vout; UniValue amount; int height; std::string address; std::string script; };
                 std::vector<Found> found;
                 for (size_t i = 0; i < res["unspents"].size(); ++i) {
                     const UniValue& u = res["unspents"][i];
@@ -2644,6 +3251,11 @@ RPCHelpMan getbtcbalance()
                     f.vout = (u.exists("vout") && u["vout"].isNum()) ? u["vout"].get_int() : 0;
                     if (u.exists("amount")) f.amount = u["amount"];
                     f.height = (u.exists("height") && u["height"].isNum()) ? u["height"].get_int() : 0;
+                    // The scriptPubKey, kept because it is the only handle that
+                    // survives: the parent chain writes its addresses in Bitcoin
+                    // form (tb1...), which this chain's decoder rejects outright,
+                    // so an address is not something a spend can work back from.
+                    if (u.exists("scriptPubKey") && u["scriptPubKey"].isStr()) f.script = u["scriptPubKey"].get_str();
                     // scantxoutset echoes the matching descriptor as "addr(<address>)#checksum";
                     // recover the plain address from it.
                     if (u.exists("desc") && u["desc"].isStr()) {
@@ -2655,6 +3267,20 @@ RPCHelpMan getbtcbalance()
                     found.push_back(std::move(f));
                 }
                 std::sort(found.begin(), found.end(), [](const Found& a, const Found& b) { return a.height > b.height; });
+                // The record gets every coin, before the list is cut down: a balance
+                // built from a truncated record would simply be wrong.
+                for (const Found& f : found) {
+                    ParentCoin c;
+                    c.txid = uint256S(f.txid);
+                    c.vout = (uint32_t)f.vout;
+                    int64_t amt = 0;
+                    if (ParseFixedPoint(f.amount.getValStr(), 8, &amt)) c.amount = amt;
+                    c.height = f.height;
+                    c.script_hex = f.script;
+                    c.address = f.address;
+                    scanned_coins.push_back(std::move(c));
+                }
+                for (const ParentCoin& c : scanned_coins) total += c.amount;
                 if (found.size() > 200) found.resize(200); // this feeds a GUI list, not an accounting export
                 // Resolve block times for the heights involved (two parent RPCs per distinct
                 // height, capped so a wallet with many old outputs cannot stall the call).
@@ -2676,6 +3302,11 @@ RPCHelpMan getbtcbalance()
                         // A missing timestamp is not worth failing the whole scan over.
                     }
                 }
+                // The record was filled before these were known.
+                for (ParentCoin& c : scanned_coins) {
+                    const auto it = height_time.find(c.height);
+                    if (it != height_time.end()) c.time = it->second;
+                }
                 for (const Found& f : found) {
                     UniValue o(UniValue::VOBJ);
                     o.pushKV("txid", f.txid);
@@ -2694,6 +3325,69 @@ RPCHelpMan getbtcbalance()
         err = std::string("parent chain unreachable: ") + e.what();
     } catch (...) {
         err = "parent chain query failed";
+    }
+
+    // Hand the node what to watch, so the NEXT balance does not need a scan at all:
+    // it walks every new parent block already, and can tell us when one pays or
+    // spends something of ours. Only after a scan that actually succeeded -- a
+    // failed one knows nothing, and must not replace what we knew before.
+    //
+    // The outpoints come from the same list the GUI shows, which is capped; a wallet
+    // above that cap still gets every RECEIVE noticed by script, and its spends are
+    // caught by the periodic safety refresh.
+    if (err.empty()) {
+        // Now there is a record, so the next reading costs blocks instead of the
+        // whole UTXO set. The hash pins the height: without it a later reorg would
+        // be invisible and the record would quietly describe a chain nobody is on.
+        ParentCoinSet record;
+        record.loaded = true;
+        record.scanned_height = parent_height;
+        record.coins = std::move(scanned_coins);
+        record.full_scan_ms = GetTimeMillis() - scan_started_ms;
+
+        // A scan sees the CONFIRMED chain, so it re-offers every coin we have
+        // already committed to a send that is still in the mempool, and knows
+        // nothing of that send's change. Carrying both across a rebuild is the
+        // whole point of keeping a record: without it, a rebuild -- a reorg, a
+        // migration, any riallineamento -- silently re-arms the double spend the
+        // record exists to prevent.
+        const ParentCoinSet previous = LoadParentCoinsRaw(*pwallet);
+        if (previous.loaded) {
+            for (const ParentCoin& old : previous.coins) {
+                if (!old.spent_by.empty()) {
+                    for (ParentCoin& c : record.coins) {
+                        if (c.txid == old.txid && c.vout == old.vout) c.spent_by = old.spent_by;
+                    }
+                } else if (old.height == 0) {
+                    // Our own unconfirmed change: the scan cannot see it, and if it
+                    // has confirmed meanwhile the scan already listed it.
+                    const bool already = std::any_of(record.coins.begin(), record.coins.end(),
+                        [&](const ParentCoin& c) { return c.txid == old.txid && c.vout == old.vout; });
+                    if (!already) record.coins.push_back(old);
+                }
+            }
+        }
+        try {
+            UniValue hp(UniValue::VARR);
+            hp.push_back(parent_height);
+            UniValue hr = CallMainChainRPC("getblockhash", hp);
+            if (hr.exists("result") && hr["result"].isStr()) record.scanned_hash = hr["result"].get_str();
+        } catch (const std::exception&) {
+            // No hash means the next call cannot trust the height and will rescan.
+        }
+        // ...and for what no record could know, because it was rebuilt after the
+        // send rather than before it.
+        RecoverPendingSpendsFromSends(*pwallet, record);
+        if (!record.scanned_hash.empty()) StoreParentCoins(*pwallet, record);
+
+        std::set<std::pair<uint256, uint32_t>> watched_outpoints;
+        for (size_t i = 0; i < utxos.size(); ++i) {
+            const UniValue& u = utxos[i];
+            if (!u.isObject() || !u["txid"].isStr() || !u["vout"].isNum()) continue;
+            watched_outpoints.insert(std::make_pair(uint256S(u["txid"].get_str()),
+                                                    (uint32_t)u["vout"].get_int()));
+        }
+        SetWatchedParentOutputs(std::move(watched_scripts), std::move(watched_outpoints));
     }
 
     result.pushKV("btc", ValueFromAmount(total));
@@ -2748,15 +3442,7 @@ bool ScanParentUtxos(const CWallet& wallet, std::vector<ParentUtxo>& out, int& p
         // One scan at a time per bitcoind: the balance refresh and a send that
         // both scan can collide. The other scan finishes in seconds, so wait
         // for it rather than bouncing the error to whoever came second.
-        UniValue reply;
-        for (int attempt = 0;; ++attempt) {
-            reply = CallMainChainRPC("scantxoutset", params);
-            const bool busy = reply.exists("error") && !reply["error"].isNull() &&
-                reply["error"].isObject() && reply["error"].exists("message") &&
-                reply["error"]["message"].get_str().find("in progress") != std::string::npos;
-            if (!busy || attempt >= 8) break;
-            UninterruptibleSleep(std::chrono::milliseconds{1500});
-        }
+        UniValue reply = ScanParentChainUtxoSet(params);
         if (reply.exists("error") && !reply["error"].isNull()) {
             const UniValue& e = reply["error"];
             err = (e.isObject() && e.exists("message")) ? e["message"].get_str() : e.write();
@@ -2824,6 +3510,124 @@ void StoreParentSends(const CWallet& wallet, const UniValue& arr)
 
 } // namespace
 
+//! The coins a send can choose from, taken from the record. Falls back to a full
+//! scan only when there is no record to move forward -- the first send of a wallet,
+//! or after a reorg deep enough to throw the record away.
+bool ParentUtxosForSpending(const CWallet& wallet, std::vector<ParentUtxo>& out,
+                            int& parent_height, std::string& err)
+{
+    ParentCoinSet record = LoadParentCoins(wallet);
+    if (!record.loaded || !AdvanceParentCoins(wallet, record, err)) {
+        return ScanParentUtxos(wallet, out, parent_height, err);
+    }
+    parent_height = record.scanned_height;
+    for (const ParentCoin& c : record.coins) {
+        // A coin already committed to a send of ours is not available. Offering it
+        // again is how a second send became a replacement of the first, refused for
+        // not paying more than the transaction it was unknowingly replacing.
+        if (!c.spent_by.empty()) continue;
+        ParentUtxo u;
+        u.txid = c.txid;
+        u.vout = (int)c.vout;
+        u.amount = c.amount;
+        u.height = c.height;
+        u.time = c.time;
+        u.address = c.address;
+        if (!c.script_hex.empty()) {
+            const std::vector<unsigned char> raw = ParseHex(c.script_hex);
+            u.script = CScript(raw.begin(), raw.end());
+        } else {
+            // Cannot happen with a record this build wrote, and cannot be repaired
+            // here: parent-chain addresses do not decode on this chain.
+            continue;
+        }
+        out.push_back(std::move(u));
+    }
+    return true;
+}
+
+//! After a broadcast: the coins are committed, and the change is ours already.
+//! Recording both is what lets the next send happen immediately instead of waiting
+//! for a confirmation -- and what stops it colliding with this one.
+void RecordParentSpend(const CWallet& wallet,
+                       const std::vector<std::pair<uint256, uint32_t>>& spent,
+                       const std::string& txid,
+                       bool with_change, const std::string& change_address,
+                       CAmount change_amount, const CScript& change_script,
+                       uint32_t change_vout)
+{
+    ParentCoinSet record = LoadParentCoins(wallet);
+    if (!record.loaded) return; // no record yet: the next balance will build one
+    for (ParentCoin& c : record.coins) {
+        for (const auto& sp : spent) {
+            if (c.txid == sp.first && c.vout == sp.second) c.spent_by = txid;
+        }
+    }
+    // Nothing on the parent chain has happened that a block watcher could see: the
+    // send is in a mempool. Ring the same bell anyway, so the overview re-reads the
+    // balance on its next tick instead of showing the spent coin until a block
+    // arrives -- or, worse, until the half-hour safety refresh.
+    NoteParentWatchTouch();
+    if (with_change && change_amount > 0) {
+        ParentCoin c;
+        c.txid = uint256S(txid);
+        c.vout = change_vout; // destinations first, change after them
+        c.amount = change_amount;
+        c.height = 0; // ours, not yet in a block
+        c.time = GetTime();
+        c.script_hex = HexStr(change_script);
+        c.address = change_address;
+        record.coins.push_back(std::move(c));
+    }
+    StoreParentCoins(wallet, record);
+}
+
+RPCHelpMan getbtcfeerate()
+{
+    return RPCHelpMan{"getbtcfeerate",
+        "\nThe fee rate a Bitcoin send would use if you do not choose one.\n"
+        "\nThis is the parent chain's own estimatesmartfee, in sat/vB, floored at 1. It is worth\n"
+        "showing rather than applying silently: an estimator can quote an absurd rate -- testnet4\n"
+        "quoted 362 sat/vB on 2026-08-25, which is 0.0005 BTC of fee on a 0.01 BTC send -- and a\n"
+        "fee nobody was shown is a fee nobody agreed to.\n",
+        {
+            {"conf_target", RPCArg::Type::NUM, RPCArg::Default{6}, "Blocks to target."},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "", {
+            {RPCResult::Type::NUM, "sat_vb", "the rate a send would use, in sat/vB"},
+            {RPCResult::Type::BOOL, "estimated", "true if the parent chain answered; false if this is the 1 sat/vB floor"},
+        }},
+        RPCExamples{HelpExampleCli("getbtcfeerate", "") + HelpExampleRpc("getbtcfeerate", "")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    int conf_target = 6;
+    if (!request.params[0].isNull()) conf_target = request.params[0].get_int();
+    if (conf_target < 1) conf_target = 1;
+
+    CAmount sat_per_vb = 0;
+    bool estimated = false;
+    try {
+        UniValue p(UniValue::VARR);
+        p.push_back(conf_target);
+        UniValue r = CallMainChainRPC("estimatesmartfee", p);
+        if (r.exists("result") && r["result"].isObject() && r["result"].exists("feerate")) {
+            const CAmount per_kvb = AmountFromValue(r["result"]["feerate"]);
+            sat_per_vb = per_kvb / 1000;
+            estimated = sat_per_vb > 0;
+        }
+    } catch (const std::exception&) {
+        // Unreachable parent: the floor is still a usable answer, and the caller
+        // learns it was not an estimate.
+    }
+    if (sat_per_vb < 1) sat_per_vb = 1;
+
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("sat_vb", (int64_t)sat_per_vb);
+    result.pushKV("estimated", estimated);
+    return result;
+}};
+}
+
 RPCHelpMan sendbtctoaddress()
 {
     return RPCHelpMan{"sendbtctoaddress",
@@ -2853,21 +3657,55 @@ RPCHelpMan sendbtctoaddress()
     if (!pwallet) return NullUniValue;
     EnsureWalletIsUnlocked(*pwallet);
 
-    // Destination: the unconfidential, Bitcoin-identical form only. Confidential
+    // Destinations: the unconfidential, Bitcoin-identical form only. Confidential
     // addresses have no meaning on the parent chain, and legacy base58 is not
     // something this wallet ever hands out.
-    CTxDestination dest = DecodeDestination(request.params[0].get_str());
-    std::visit(SetBlindingPubKeyVisitor(CPubKey()), dest);
-    if (!IsValidDestination(dest) ||
-        (!std::holds_alternative<WitnessV0KeyHash>(dest) && !std::holds_alternative<WitnessV0ScriptHash>(dest) &&
-         !std::holds_alternative<WitnessV1Taproot>(dest))) {
-        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Bitcoin travels to a bech32 address (tb1.../bc1...); give one of those");
-    }
-    const CScript dest_script = GetScriptForDestination(dest);
+    //
+    // One transaction may pay several destinations -- that is ordinary on Bitcoin,
+    // and it is one transaction rather than one each, so it costs one fee and one
+    // set of inputs instead of N.
+    struct ParentRecipient { CScript script; std::string address; CAmount amount{0}; };
+    std::vector<ParentRecipient> recipients;
 
-    const CAmount send_amount = AmountFromValue(request.params[1]);
-    if (send_amount <= 0) throw JSONRPCError(RPC_TYPE_ERROR, "Invalid amount for send");
+    auto add_recipient = [&](const std::string& addr_str, const UniValue& amount_val) {
+        CTxDestination dest = DecodeDestination(addr_str);
+        std::visit(SetBlindingPubKeyVisitor(CPubKey()), dest);
+        if (!IsValidDestination(dest) ||
+            (!std::holds_alternative<WitnessV0KeyHash>(dest) && !std::holds_alternative<WitnessV0ScriptHash>(dest) &&
+             !std::holds_alternative<WitnessV1Taproot>(dest))) {
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Bitcoin travels to a bech32 address (tb1.../bc1...); give one of those");
+        }
+        const CAmount amt = AmountFromValue(amount_val);
+        if (amt <= 0) throw JSONRPCError(RPC_TYPE_ERROR, "Invalid amount for send");
+        recipients.push_back({GetScriptForDestination(dest), EncodeDestination(dest), amt});
+    };
+
+    if (request.params[0].isArray()) {
+        const UniValue& list = request.params[0];
+        if (list.empty()) throw JSONRPCError(RPC_INVALID_PARAMETER, "No destinations given");
+        for (size_t i = 0; i < list.size(); ++i) {
+            const UniValue& o = list[i];
+            if (!o.isObject() || !o["address"].isStr() || o["amount"].isNull()) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Each destination needs an address and an amount");
+            }
+            add_recipient(o["address"].get_str(), o["amount"]);
+        }
+    } else {
+        if (request.params[1].isNull()) throw JSONRPCError(RPC_INVALID_PARAMETER, "No amount given");
+        add_recipient(request.params[0].get_str(), request.params[1]);
+    }
+
+    CAmount send_amount = 0;
+    for (const ParentRecipient& r : recipients) send_amount += r.amount;
+
     const bool subtract_fee = !request.params[3].isNull() && request.params[3].get_bool();
+    // Deducting the fee from an amount is unambiguous with one destination and a
+    // choice with several -- whose payment shrinks? Rather than decide for the
+    // caller and move somebody money quietly, refuse and let them say.
+    if (subtract_fee && recipients.size() > 1) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+            "subtractfeefromamount needs one destination: with several, say which amounts to reduce by lowering them yourself");
+    }
 
     // Fee rate, sat/vB: caller's, else the parent chain's own estimate, floor 1.
     CAmount sat_per_vb = 0;
@@ -2890,7 +3728,7 @@ RPCHelpMan sendbtctoaddress()
     std::vector<ParentUtxo> coins;
     int parent_height = 0;
     std::string err;
-    if (!ScanParentUtxos(*pwallet, coins, parent_height, err)) {
+    if (!ParentUtxosForSpending(*pwallet, coins, parent_height, err)) {
         throw JSONRPCError(RPC_MISC_ERROR, "Cannot reach the Bitcoin parent chain: " + err);
     }
 
@@ -2899,17 +3737,27 @@ RPCHelpMan sendbtctoaddress()
     struct Selected { ParentUtxo utxo; CKey key; CPubKey pubkey; };
     std::vector<Selected> spendable;
     CAmount available = 0;
+    CAmount unconfirmed_own = 0;
     for (const ParentUtxo& u : coins) {
-        if (u.height <= 0 || u.amount <= 0) continue;
+        if (u.amount <= 0) continue;
+        // Height 0 means our own change, from a send of ours that has not been
+        // mined yet -- nothing else can get into the record without a block. It is
+        // ours and it is spendable: refusing it would make every send wait for a
+        // confirmation, which is exactly the wait this record was built to remove.
+        // The transaction that spends it simply confirms after its parent, which is
+        // ordinary on Bitcoin.
         CKey key; CPubKey pubkey;
         if (!GetWalletKeyForP2WPKH(*pwallet, u.script, key, pubkey)) continue;
+        if (u.height == 0) unconfirmed_own += u.amount;
         spendable.push_back({u, key, pubkey});
         available += u.amount;
     }
     if (available < send_amount) {
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS,
-            strprintf("Insufficient Bitcoin: %s available at this wallet's addresses, %s requested",
-                      FormatMoney(available), FormatMoney(send_amount)));
+            strprintf("Insufficient Bitcoin: %s available at this wallet's addresses%s, %s requested",
+                      FormatMoney(available),
+                      unconfirmed_own > 0 ? strprintf(" (%s of it change not yet mined)", FormatMoney(unconfirmed_own)) : "",
+                      FormatMoney(send_amount)));
     }
 
     // Largest-first selection with an iterated fee: vsize ~= 11 + 68 per input + 31 per
@@ -2922,12 +3770,13 @@ RPCHelpMan sendbtctoaddress()
     for (const Selected& s : spendable) {
         picked.push_back(s);
         in_sum += s.utxo.amount;
-        for (int outs = 2; outs >= 1; --outs) {
+        const int outs_max = (int)recipients.size() + 1;   // destinations plus change
+        for (int outs = outs_max; outs >= outs_max - 1; --outs) {
             const CAmount f = sat_per_vb * (11 + 68 * (CAmount)picked.size() + 31 * outs);
             const CAmount need = subtract_fee ? send_amount : send_amount + f;
             if (in_sum >= need) {
                 fee = f;
-                with_change = (outs == 2);
+                with_change = (outs == outs_max);
                 change = with_change ? in_sum - need : 0;
                 if (with_change && change < PARENT_DUST) { with_change = false; continue; }
                 goto selected;
@@ -2941,6 +3790,22 @@ selected:
 
     const CAmount to_dest = subtract_fee ? send_amount - fee : send_amount;
     if (to_dest <= PARENT_DUST) throw JSONRPCError(RPC_INVALID_PARAMETER, "Amount after the fee would be dust on the parent chain");
+    // With one destination the deduction lands on it; with several there is no
+    // deduction at all (refused above), so each is paid exactly what was asked.
+    if (subtract_fee) recipients.front().amount = to_dest;
+
+    // Bitcoin's safety ceiling, kept for Bitcoin. Sequentia removed the default fee
+    // ceiling because fees there can be paid in any asset, where one number cannot
+    // mean anything -- but this fee is bitcoin, priced by the parent chain's own
+    // estimator, and that estimator can return absurdities: testnet4 was quoting 362
+    // sat/vB on 2026-08-25, which turned a 0.01 BTC send into a 0.0005 BTC fee. A
+    // ceiling is the difference between an expensive send and a lost coin.
+    if (fee > DEFAULT_TRANSACTION_MAXFEE) {
+        throw JSONRPCError(RPC_WALLET_ERROR,
+            strprintf("Fee of %s BTC is above the %s BTC safety ceiling for Bitcoin sends "
+                      "(the parent chain estimated %d sat/vB). Pass fee_rate to choose the rate yourself.",
+                      FormatMoney(fee), FormatMoney(DEFAULT_TRANSACTION_MAXFEE), sat_per_vb));
+    }
     if (!with_change) fee = in_sum - to_dest; // no change output: the remainder is the fee
 
     // The estimate stops here: selection and fee are decided, nothing has been
@@ -2978,10 +3843,10 @@ selected:
         in.nSequence = 0xfffffffd; // opt-in RBF, as every wallet send
         mtx.vin.push_back(in);
     }
-    {
+    for (const ParentRecipient& r : recipients) {
         Sidechain::Bitcoin::CTxOut out;
-        out.nValue = to_dest;
-        out.scriptPubKey = dest_script;
+        out.nValue = r.amount;
+        out.scriptPubKey = r.script;
         mtx.vout.push_back(out);
     }
     if (with_change) {
@@ -3027,6 +3892,19 @@ selected:
         throw JSONRPCError(RPC_MISC_ERROR, std::string("Cannot reach the Bitcoin parent chain to broadcast: ") + e.what());
     }
 
+    // The record, immediately: these coins are committed and this change is ours.
+    // Until this existed, the wallet asked the parent chain what it owned and the
+    // parent chain answered with CONFIRMED coins only -- so a second send within the
+    // same block chose the same coins again and Bitcoin refused it as a replacement
+    // that paid no more than what it replaced.
+    {
+        std::vector<std::pair<uint256, uint32_t>> spent;
+        for (const Selected& sel : picked) {
+            spent.push_back(std::make_pair(sel.utxo.txid, (uint32_t)sel.utxo.vout));
+        }
+        RecordParentSpend(*pwallet, spent, txid, with_change, change_address, change, change_script, (uint32_t)recipients.size());
+    }
+
     // The send becomes part of this wallet's Bitcoin history. The scan alone cannot
     // reconstruct it (spent coins leave the UTXO set), so it is recorded beside the
     // wallet; listbtctransactions folds these records into the unified history.
@@ -3035,10 +3913,24 @@ selected:
         UniValue rec(UniValue::VOBJ);
         rec.pushKV("txid", txid);
         rec.pushKV("time", GetTime());
-        rec.pushKV("address", request.params[0].get_str());
+        // Every destination, not just the first: a transaction that paid three
+        // people is three lines of history, and a record that keeps one of them
+        // loses the other two for good -- the parent chain cannot give them back
+        // once the outputs are spent.
+        rec.pushKV("address", recipients.front().address);
         rec.pushKV("btc", ValueFromAmount(to_dest));
+        if (recipients.size() > 1) {
+            UniValue dests(UniValue::VARR);
+            for (const ParentRecipient& r : recipients) {
+                UniValue d(UniValue::VOBJ);
+                d.pushKV("address", r.address);
+                d.pushKV("btc", ValueFromAmount(r.amount));
+                dests.push_back(d);
+            }
+            rec.pushKV("destinations", dests);
+        }
         rec.pushKV("fee", ValueFromAmount(fee));
-        rec.pushKV("change_vout", with_change ? 1 : -1);
+        rec.pushKV("change_vout", with_change ? (int)recipients.size() : -1);
         rec.pushKV("change_address", change_address);
         sends.push_back(rec);
         StoreParentSends(*pwallet, sends);
@@ -3089,6 +3981,12 @@ RPCHelpMan listbtctransactions()
     const bool scanned = want_scan && ScanParentUtxos(*pwallet, coins, parent_height, err);
 
     const UniValue sends = LoadParentSends(*pwallet);
+    // Read once, not once per send. Inside the loop this re-parsed the whole
+    // record for every transaction whose outputs were already spent -- which,
+    // given time, is nearly all of them -- so the cost grew with the SQUARE of
+    // the history. A thousand sends meant a thousand reads of the same file.
+    const ParentCoinSet record_for_confs = LoadParentCoinsRaw(*pwallet);
+    std::map<size_t, int> newly_settled;   // index -> the height it settled at
     std::set<std::string> send_txids;
     for (size_t i = 0; i < sends.size(); ++i) {
         if (sends[i].isObject() && sends[i].exists("txid")) send_txids.insert(sends[i]["txid"].get_str());
@@ -3146,7 +4044,18 @@ RPCHelpMan listbtctransactions()
         // recipient moves it. A send with every output spent is by then deep
         // in the chain; report it as confirmed rather than unknown.
         int confs = -1;
-        if (s.exists("txid")) {
+
+        // A settled send is never asked about again. Marking it was only half the
+        // saving: the calls have to stop as well, and for that its confirmations
+        // must be computable without asking -- hence the height it settled at.
+        const bool settled = s["settled"].isBool() && s["settled"].get_bool();
+        if (settled) {
+            // Buried is buried, with or without the height: a record written before
+            // the height was kept must not go back to costing a call per read.
+            const int h = s["settled_height"].isNum() ? s["settled_height"].get_int() : 0;
+            confs = (h > 0 && record_for_confs.scanned_height >= h)
+                    ? record_for_confs.scanned_height - h + 1 : 6;
+        } else if (s.exists("txid")) {
             const int change_vout = (s.exists("change_vout") && s["change_vout"].isNum()) ? s["change_vout"].get_int() : -1;
             std::vector<int> candidates;
             if (change_vout >= 0) candidates.push_back(change_vout);
@@ -3164,9 +4073,67 @@ RPCHelpMan listbtctransactions()
                     }
                 } catch (...) {}
             }
+            // gettxout only answers about outputs that still EXIST. Once a later
+            // send spends them, this says nothing about the earlier one -- which
+            // is how a transaction with 42 confirmations came to be reported as
+            // unknown, minutes after its change was spent. The record kept the
+            // height of every coin it ever saw, including the ones now spent.
+            if (confs < 0) {
+                const ParentCoinSet& rec = record_for_confs;
+                if (rec.loaded && rec.scanned_height > 0) {
+                    const uint256 txid = uint256S(s["txid"].get_str());
+                    for (const ParentCoin& c : rec.coins) {
+                        if (c.txid != txid) continue;
+                        confs = (c.height > 0) ? rec.scanned_height - c.height + 1 : 0;
+                        break;
+                    }
+                }
+            }
+        }
+        // Six confirmations is buried: the answer will not change again. Note which
+        // sends reached it and write them down ONCE after the loop -- without this,
+        // opening the tab cost two parent calls per send for ever.
+        if (confs >= 6 && !settled) {
+            newly_settled[i] = record_for_confs.scanned_height > 0
+                               ? record_for_confs.scanned_height - confs + 1 : 0;
         }
         o.pushKV("confirmations", confs);
+
+        // One row per destination. The fee belongs to the transaction, not to any
+        // one payment, so it rides on the first row only and is not counted three
+        // times by anyone adding the column up.
+        if (s.exists("destinations") && s["destinations"].isArray() && s["destinations"].size() > 1) {
+            const UniValue& dests = s["destinations"];
+            for (size_t d = 0; d < dests.size(); ++d) {
+                if (!dests[d].isObject()) continue;
+                UniValue row = o;
+                row.pushKV("address", dests[d]["address"].getValStr());
+                row.pushKV("btc", dests[d]["btc"].getValStr());
+                if (d > 0) row.pushKV("fee", "0.00000000");
+                rows.push_back(row);
+            }
+            continue;
+        }
         rows.push_back(o);
+    }
+
+    // One write for however many sends became buried during this read. UniValue
+    // has no in-place element assignment, so the array is rebuilt -- which is
+    // still one pass and one write, rather than one file write per send.
+    if (!newly_settled.empty()) {
+        UniValue updated(UniValue::VARR);
+        for (size_t k = 0; k < sends.size(); ++k) {
+            const auto it_settled = newly_settled.find(k);
+            if (it_settled != newly_settled.end() && sends[k].isObject()) {
+                UniValue r = sends[k];
+                r.pushKV("settled", true);
+                if (it_settled->second > 0) r.pushKV("settled_height", it_settled->second);
+                updated.push_back(r);
+            } else {
+                updated.push_back(sends[k]);
+            }
+        }
+        StoreParentSends(*pwallet, updated);
     }
 
     // Newest first, whatever chain the clock came from.
