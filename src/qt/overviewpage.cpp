@@ -734,7 +734,15 @@ void OverviewPage::updateSeqStatus()
     const bool something_moved = (m_parent_watch_touches != m_btc_touches_applied);
     const bool minute_gate = (m_btc_refresh_tick % 8 == 1);
     const bool safety_net = (m_btc_refresh_tick % 225 == 1); // ~30 min at 8s a tick
-    if (((never_read || something_moved) && minute_gate) || safety_net) refreshBtcBalance();
+    // A move we have been TOLD about is answered at the next tick. The once-a-minute
+    // gate exists so a failing read does not become a retry storm; applying it to a
+    // real event made the user wait up to a minute to see their own send appear,
+    // while Bitcoin Core -- which holds the transaction itself -- showed it at once.
+    if (something_moved || never_read) {
+        if (something_moved || minute_gate) refreshBtcBalance();
+    } else if (safety_net) {
+        refreshBtcBalance();
+    }
     // While that scan runs -- seconds on testnet4, minutes on a mainnet-sized
     // UTXO set -- say how far it has got. A wallet that shows nothing for two
     // minutes looks broken; one that counts up looks busy, which it is.

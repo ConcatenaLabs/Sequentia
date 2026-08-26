@@ -3001,6 +3001,12 @@ void RecoverPendingSpendsFromSends(const CWallet& wallet, ParentCoinSet& record)
         if (!s.isObject() || !s["txid"].isStr()) continue;
         const std::string txid_hex = s["txid"].get_str();
 
+        // A send we already marked settled has nothing left to say: its coins are
+        // spent on the confirmed chain and its change is in the record. Skipping
+        // it is what keeps a rebuild from costing one parent call per send ever
+        // made -- which, on a wallet with a long history, is the whole cost.
+        if (s["settled"].isBool() && s["settled"].get_bool()) continue;
+
         // Only transactions still waiting matter. A confirmed one has already had
         // its effect applied by the scan or the block walk.
         UniValue tx;
@@ -3976,6 +3982,12 @@ RPCHelpMan listbtctransactions()
     const bool scanned = want_scan && ScanParentUtxos(*pwallet, coins, parent_height, err);
 
     const UniValue sends = LoadParentSends(*pwallet);
+    // Read once, not once per send. Inside the loop this re-parsed the whole
+    // record for every transaction whose outputs were already spent -- which,
+    // given time, is nearly all of them -- so the cost grew with the SQUARE of
+    // the history. A thousand sends meant a thousand reads of the same file.
+    const ParentCoinSet record_for_confs = LoadParentCoinsRaw(*pwallet);
+    std::set<size_t> newly_settled;
     std::set<std::string> send_txids;
     for (size_t i = 0; i < sends.size(); ++i) {
         if (sends[i].isObject() && sends[i].exists("txid")) send_txids.insert(sends[i]["txid"].get_str());
@@ -4057,7 +4069,7 @@ RPCHelpMan listbtctransactions()
             // unknown, minutes after its change was spent. The record kept the
             // height of every coin it ever saw, including the ones now spent.
             if (confs < 0) {
-                const ParentCoinSet rec = LoadParentCoinsRaw(*pwallet);
+                const ParentCoinSet& rec = record_for_confs;
                 if (rec.loaded && rec.scanned_height > 0) {
                     const uint256 txid = uint256S(s["txid"].get_str());
                     for (const ParentCoin& c : rec.coins) {
@@ -4067,6 +4079,12 @@ RPCHelpMan listbtctransactions()
                     }
                 }
             }
+        }
+        // Six confirmations is buried: the answer will not change again. Note which
+        // sends reached it and write them down ONCE after the loop -- without this,
+        // opening the tab cost two parent calls per send for ever.
+        if (confs >= 6 && !(s.exists("settled") && s["settled"].isBool() && s["settled"].get_bool())) {
+            newly_settled.insert(i);
         }
         o.pushKV("confirmations", confs);
 
@@ -4086,6 +4104,23 @@ RPCHelpMan listbtctransactions()
             continue;
         }
         rows.push_back(o);
+    }
+
+    // One write for however many sends became buried during this read. UniValue
+    // has no in-place element assignment, so the array is rebuilt -- which is
+    // still one pass and one write, rather than one file write per send.
+    if (!newly_settled.empty()) {
+        UniValue updated(UniValue::VARR);
+        for (size_t k = 0; k < sends.size(); ++k) {
+            if (newly_settled.count(k) && sends[k].isObject()) {
+                UniValue r = sends[k];
+                r.pushKV("settled", true);
+                updated.push_back(r);
+            } else {
+                updated.push_back(sends[k]);
+            }
+        }
+        StoreParentSends(*pwallet, updated);
     }
 
     // Newest first, whatever chain the clock came from.
