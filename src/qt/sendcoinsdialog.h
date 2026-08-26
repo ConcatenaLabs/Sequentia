@@ -124,12 +124,6 @@ private:
     /** Balances as of the last balanceChanged, so ranking the holdings above does
         not recompute them on every keystroke. */
     interfaces::WalletBalances m_cached_balances;
-    /** SEQUENTIA any-asset fees: which asset pays and at what rate, in a widget
-        shared with the other pages that have to answer the same question. This
-        dialog keeps what is genuinely its own -- recipients, subtract-fee-from-
-        amount, Replace-By-Fee -- and hands the widget its Recommended/Custom
-        controls so they keep their place among the numbers they produce. */
-    FeeSelectionWidget* m_fee_widget{nullptr};
     // The Bitcoin fee controls, which stand in for the asset fee panel when every
     // recipient is being paid in bitcoin: that panel prices Sequentia assets and
     // has nothing to say about sat/vB on the parent chain.
