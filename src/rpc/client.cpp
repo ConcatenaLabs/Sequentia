@@ -283,6 +283,8 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "getsupervisedassetid", 1, "vout" },
     { "getsupervisedassetid", 5, "pause" },
     { "getsupervisionrecordhash", 5, "vout" },
+    { "signopenamptransfer", 1, "inputs" }, // SEQUENTIA: OpenAMP enclave inputs to sign
+    { "getopenampaccount", 0, "pubkeys" },
     { "getsupervisionunfreezehash", 1, "vout" },
     { "setsupervisionunfreezesig", 1, "vin" },
     { "reissueasset", 1, "assetamount" },

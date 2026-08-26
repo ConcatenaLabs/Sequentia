@@ -20,6 +20,7 @@ class WalletModel;
 class AddressBookPage;
 class AssetsPage;
 class StakingPage;
+class OpenAmpPage;
 class SupervisionPage;
 
 QT_BEGIN_NAMESPACE
@@ -71,6 +72,7 @@ private:
     AssetsPage *assetsPage;
     StakingPage *stakingPage;
     SupervisionPage *supervisionPage;
+    OpenAmpPage *openAmpPage;
     AddressBookPage *usedSendingAddressesPage;
     AddressBookPage *usedReceivingAddressesPage;
 
@@ -92,6 +94,8 @@ public Q_SLOTS:
     void gotoStakingPage();
     /** Switch to the Supervision page */
     void gotoSupervisionPage();
+    //! Switch to the OpenAMP page.
+    void gotoOpenAmpPage();
     /** Open the fee-acceptance policy dialog */
     void gotoFeePolicyDialog();
     /** Switch to send coins page */

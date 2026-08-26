@@ -25,6 +25,7 @@ void RegisterSignerRPCCommands(CRPCTable &tableRPC);
 void RegisterExchangeRatesRPCCommands(CRPCTable &tableRPC);
 /** SEQUENTIA: Register supervised-asset RPC commands */
 void RegisterSupervisionRPCCommands(CRPCTable &tableRPC);
+void RegisterOpenAmpRPCCommands(CRPCTable &tableRPC);
 
 static inline void RegisterAllCoreRPCCommands(CRPCTable &t)
 {
@@ -35,6 +36,7 @@ static inline void RegisterAllCoreRPCCommands(CRPCTable &t)
     RegisterRawTransactionRPCCommands(t);
     RegisterExchangeRatesRPCCommands(t);
     RegisterSupervisionRPCCommands(t);
+    RegisterOpenAmpRPCCommands(t);
 #ifdef ENABLE_EXTERNAL_SIGNER
     RegisterSignerRPCCommands(t);
 #endif // ENABLE_EXTERNAL_SIGNER

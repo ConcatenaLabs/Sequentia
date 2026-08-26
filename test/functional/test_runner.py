@@ -160,6 +160,7 @@ BASE_SCRIPTS = [
     'feature_taphash_pegins_issuances.py',
     'feature_tapscript_opcodes.py',
     'feature_openamp_m0.py',
+    'feature_openamp_wallet.py',
     'feature_pignus_vault.py',
     'feature_pignus_oracle_set.py',
     'feature_pignus_offer.py',

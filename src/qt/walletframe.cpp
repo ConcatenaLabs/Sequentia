@@ -203,6 +203,13 @@ void WalletFrame::gotoSupervisionPage()
         i.value()->gotoSupervisionPage();
 }
 
+void WalletFrame::gotoOpenAmpPage()
+{
+    QMap<WalletModel*, WalletView*>::const_iterator i;
+    for (i = mapWalletViews.constBegin(); i != mapWalletViews.constEnd(); ++i)
+        i.value()->gotoOpenAmpPage();
+}
+
 void WalletFrame::gotoFeePolicyDialog()
 {
     WalletView* view = currentWalletView();

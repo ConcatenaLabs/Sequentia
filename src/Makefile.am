@@ -432,6 +432,7 @@ libbitcoin_node_a_SOURCES = \
   rest.cpp \
   rpc/blockchain.cpp \
   rpc/exchangerates.cpp \
+  rpc/openamp.cpp \
   rpc/supervision.cpp \
   rpc/mining.cpp \
   rpc/misc.cpp \
@@ -496,6 +497,7 @@ libbitcoin_wallet_a_SOURCES = \
   wallet/rpc/rewards.cpp \
   wallet/rpc/spend.cpp \
   wallet/rpc/signmessage.cpp \
+  wallet/rpc/openamp.cpp \
   wallet/rpc/supervision.cpp \
   wallet/rpc/transactions.cpp \
   wallet/rpc/util.cpp \

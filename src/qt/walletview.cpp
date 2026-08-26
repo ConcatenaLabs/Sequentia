@@ -17,6 +17,7 @@
 #include <qt/receivecoinsdialog.h>
 #include <qt/sendcoinsdialog.h>
 #include <qt/signverifymessagedialog.h>
+#include <qt/openamppage.h>
 #include <qt/supervisionpage.h>
 #include <qt/transactiontablemodel.h>
 #include <qt/transactionview.h>
@@ -79,6 +80,9 @@ WalletView::WalletView(WalletModel* wallet_model, const PlatformStyle* _platform
     // SEQUENTIA: built for every wallet but reached from the sidebar only by one
     // that has a supervised asset to operate -- the page itself decides, and says
     // so through supervisionAvailable.
+    openAmpPage = new OpenAmpPage(platformStyle);
+    openAmpPage->setModel(walletModel);
+
     supervisionPage = new SupervisionPage(platformStyle);
     supervisionPage->setModel(walletModel);
 
@@ -95,6 +99,7 @@ WalletView::WalletView(WalletModel* wallet_model, const PlatformStyle* _platform
     addWidget(assetsPage);
     addWidget(stakingPage);
     addWidget(supervisionPage);
+    addWidget(openAmpPage);
 
     connect(supervisionPage, &SupervisionPage::availabilityChanged, this, &WalletView::supervisionAvailable);
 
@@ -194,6 +199,11 @@ void WalletView::gotoAssetsPage()
 void WalletView::gotoStakingPage()
 {
     setCurrentWidget(stakingPage);
+}
+
+void WalletView::gotoOpenAmpPage()
+{
+    setCurrentWidget(openAmpPage);
 }
 
 void WalletView::gotoSupervisionPage()
