@@ -3732,17 +3732,27 @@ RPCHelpMan sendbtctoaddress()
     struct Selected { ParentUtxo utxo; CKey key; CPubKey pubkey; };
     std::vector<Selected> spendable;
     CAmount available = 0;
+    CAmount unconfirmed_own = 0;
     for (const ParentUtxo& u : coins) {
-        if (u.height <= 0 || u.amount <= 0) continue;
+        if (u.amount <= 0) continue;
+        // Height 0 means our own change, from a send of ours that has not been
+        // mined yet -- nothing else can get into the record without a block. It is
+        // ours and it is spendable: refusing it would make every send wait for a
+        // confirmation, which is exactly the wait this record was built to remove.
+        // The transaction that spends it simply confirms after its parent, which is
+        // ordinary on Bitcoin.
         CKey key; CPubKey pubkey;
         if (!GetWalletKeyForP2WPKH(*pwallet, u.script, key, pubkey)) continue;
+        if (u.height == 0) unconfirmed_own += u.amount;
         spendable.push_back({u, key, pubkey});
         available += u.amount;
     }
     if (available < send_amount) {
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS,
-            strprintf("Insufficient Bitcoin: %s available at this wallet's addresses, %s requested",
-                      FormatMoney(available), FormatMoney(send_amount)));
+            strprintf("Insufficient Bitcoin: %s available at this wallet's addresses%s, %s requested",
+                      FormatMoney(available),
+                      unconfirmed_own > 0 ? strprintf(" (%s of it change not yet mined)", FormatMoney(unconfirmed_own)) : "",
+                      FormatMoney(send_amount)));
     }
 
     // Largest-first selection with an iterated fee: vsize ~= 11 + 68 per input + 31 per
@@ -3898,11 +3908,22 @@ selected:
         UniValue rec(UniValue::VOBJ);
         rec.pushKV("txid", txid);
         rec.pushKV("time", GetTime());
-        // With several destinations one address cannot stand for the transaction:
-        // record the first, say how many there were, and keep the total.
+        // Every destination, not just the first: a transaction that paid three
+        // people is three lines of history, and a record that keeps one of them
+        // loses the other two for good -- the parent chain cannot give them back
+        // once the outputs are spent.
         rec.pushKV("address", recipients.front().address);
-        if (recipients.size() > 1) rec.pushKV("recipients", (int)recipients.size());
         rec.pushKV("btc", ValueFromAmount(to_dest));
+        if (recipients.size() > 1) {
+            UniValue dests(UniValue::VARR);
+            for (const ParentRecipient& r : recipients) {
+                UniValue d(UniValue::VOBJ);
+                d.pushKV("address", r.address);
+                d.pushKV("btc", ValueFromAmount(r.amount));
+                dests.push_back(d);
+            }
+            rec.pushKV("destinations", dests);
+        }
         rec.pushKV("fee", ValueFromAmount(fee));
         rec.pushKV("change_vout", with_change ? (int)recipients.size() : -1);
         rec.pushKV("change_address", change_address);
@@ -4048,6 +4069,22 @@ RPCHelpMan listbtctransactions()
             }
         }
         o.pushKV("confirmations", confs);
+
+        // One row per destination. The fee belongs to the transaction, not to any
+        // one payment, so it rides on the first row only and is not counted three
+        // times by anyone adding the column up.
+        if (s.exists("destinations") && s["destinations"].isArray() && s["destinations"].size() > 1) {
+            const UniValue& dests = s["destinations"];
+            for (size_t d = 0; d < dests.size(); ++d) {
+                if (!dests[d].isObject()) continue;
+                UniValue row = o;
+                row.pushKV("address", dests[d]["address"].getValStr());
+                row.pushKV("btc", dests[d]["btc"].getValStr());
+                if (d > 0) row.pushKV("fee", "0.00000000");
+                rows.push_back(row);
+            }
+            continue;
+        }
         rows.push_back(o);
     }
 
