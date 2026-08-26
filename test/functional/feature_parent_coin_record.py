@@ -102,6 +102,37 @@ class ParentCoinRecordTest(BitcoinTestFramework):
         return os.path.join(get_datadir_path(self.options.tmpdir, 1),
                             "elementsregtest", "wallets", "w", "parent_coins.json")
 
+    def sends_path(self):
+        """Where the wallet keeps the Bitcoin sends it has made."""
+        return os.path.join(get_datadir_path(self.options.tmpdir, 1),
+                            "elementsregtest", "wallets", "w", "parent_sends.json")
+
+    def write_fake_history(self, settled, pending):
+        """A history of `settled` buried sends and `pending` recent ones.
+
+        Fabricated rather than sent: the point is the COST of reading a long
+        history, and a wallet that has been used for a year is not something a
+        test can afford to produce one transaction at a time.
+        """
+        rows = []
+        for i in range(settled + pending):
+            rows.append({
+                "txid": "%064x" % (i + 1),
+                "time": 1700000000 + i,
+                "address": "tb1qexampleexampleexampleexampleexampleexam",
+                "btc": "0.00010000",
+                "fee": "0.00000200",
+                "change_vout": -1,
+                "settled": i < settled,
+            })
+        with open(self.sends_path(), "w", encoding="utf8") as f:
+            json.dump(rows, f)
+        return len(rows)
+
+    def parent_calls(self, node, method):
+        stats = node.getmainchainrpcstats()
+        return int(stats["bymethod"].get(method, 0))
+
     def read_record(self):
         with open(self.record_path(), encoding="utf8") as f:
             return json.load(f)
@@ -216,7 +247,30 @@ class ParentCoinRecordTest(BitcoinTestFramework):
         self.log.info("   rebuilt after the reorg: height %s -> %s, balance %s",
                       height_before, rec["scanned_height"], r["btc"])
 
-        self.log.info("6. With the parent unreachable, the record answers and says so")
+        self.log.info("6. A long history costs what is still in flight, not what it holds")
+        # Reading the history used to re-check every send ever made against the
+        # parent chain -- up to two calls each, for ever -- and to re-parse the
+        # whole coin record inside that loop, so the cost grew with the SQUARE of
+        # the history. A wallet with a year behind it would open its transaction
+        # tab in minutes. Six confirmations is final: those sends are marked and
+        # never asked about again.
+        total = self.write_fake_history(settled=500, pending=3)
+        before = self.parent_calls(node, "gettxout")
+        rows = node.listbtctransactions(False)
+        spent_calls = self.parent_calls(node, "gettxout") - before
+
+        assert_greater_than(len(rows), 500)   # the history is all there
+        # Two calls per pending send at most; the 500 buried ones cost nothing.
+        assert spent_calls <= 2 * 3, \
+            "%d parent calls for %d sends: the buried ones are still being asked about" % (spent_calls, total)
+        self.log.info("   %d sends read with %d parent-chain calls", total, spent_calls)
+
+        # And reading it again costs the same: nothing has become un-buried.
+        before = self.parent_calls(node, "gettxout")
+        node.listbtctransactions(False)
+        assert_equal(self.parent_calls(node, "gettxout") - before, spent_calls)
+
+        self.log.info("7. With the parent unreachable, the record answers and says so")
         self.stop_node(0)
         r = node.getbtcbalance()
         assert_equal(r.get("stale"), True)
