@@ -28,6 +28,7 @@ Reference (current):
 | [`issuing-an-asset-guide.md`](issuing-an-asset-guide.md) | For issuers who are not web developers: finding your exact domain (the `www` question), what to type into Core, publishing the proof file on your site (WordPress included), checking it worked, and the usual questions. |
 | [`asset-contracts-and-verification.md`](asset-contracts-and-verification.md) | The mechanism underneath: the contract committed into the asset id at issuance, the canonical hash, the domain proof, the registry, and why none of it can be added afterwards. |
 | [`supervised-assets.md`](supervised-assets.md) | For issuers and operators: what supervision is and is not, the operational and recovery keys and why there are two, issuing, freezing, unfreezing, pause, key rotation, publishing records without being front-run, and the RPC reference. |
+| [`openamp-holder.md`](openamp-holder.md) | For holders: how a Core wallet holds an issuer-governed (OpenAMP) restricted asset — the enclave, the account id it derives rather than fetches, the GUI's OpenAMP tab, `getopenampaccount` and `signopenamptransfer`, linking a SeqPal ID, and why the node does not talk to the policy server itself. |
 | [`supervised-assets-implementation.md`](supervised-assets-implementation.md) | Implementation notes for supervised assets: the consensus rules as coded, the record format, activation (testnet height 94,600), and the tests. Companion to the proposal below. |
 
 Operating runbooks (current):
@@ -79,7 +80,7 @@ not these, are authoritative for current behavior. Status of each:
 
 | Document | Status |
 |---|---|
-| [`openamp-design.md`](openamp-design.md) | Implemented in [`openamp`](https://github.com/ConcatenaLabs/openamp); the daemon is live on the public testnet with the demo asset BONDX. Zero consensus changes in this repo. |
+| [`openamp-design.md`](openamp-design.md) | The policy server is implemented in [`openamp`](https://github.com/ConcatenaLabs/openamp) and is live on the public testnet with the demo asset BONDX. Zero consensus changes here; this repository's part is the holder's side — `getopenampaccount`, `signopenamptransfer` and the GUI's OpenAMP page, described in [`openamp-holder.md`](openamp-holder.md). |
 | [`opendamp-design.md`](opendamp-design.md) | OpenDAMP, network-enforced restricted assets through Simplicity covenants. The covenants and the issuance path are implemented in the `openamp` repository (`opendamp/`); this repository's part is the Simplicity execution-budget ×4 flag day at testnet height 101,810 (24.3.0). |
 | [`sbtc-peg-design.md`](sbtc-peg-design.md) | Implemented in [`sbtc-bridge`](https://github.com/ConcatenaLabs/sbtc-bridge): SBTC is pegged bitcoin (1:1 BTC in a multisig custody reserve), an ordinary unprivileged asset; it is not Elements' federated consensus peg, which the chain does not configure. One divergence from this design: the shipped bridge does not burn returned SBTC; it holds it as float and reissues only the shortfall, so circulating (not total issued) supply equals the reserve. |
 | [`bridged-usdc-standard.md`](bridged-usdc-standard.md) | The unified bridged-stablecoin standard (one `USDC.e` fed from several chains, precision 6, issued supervised). Implemented in [`compages`](https://github.com/ConcatenaLabs/compages). |

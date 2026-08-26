@@ -340,6 +340,18 @@ void BitcoinGUI::createActions()
     supervisionAction->setShortcut(QKeySequence(Qt::ALT + Qt::Key_7));
     tabGroup->addAction(supervisionAction);
 
+    // SEQUENTIA: OpenAMP restricted assets (doc/sequentia/openamp-design.md). Unlike
+    // supervision this cannot be detected from the chain -- whether the user holds an
+    // issuer-governed asset is the issuer's knowledge rather than ours -- so the tab
+    // is always present, and the page explains itself to anyone who opens it without
+    // knowing what it is for.
+    openAmpAction = new QAction(platformStyle->SingleColorIcon(":/icons/assets"), tr("Open&AMP"), this);
+    openAmpAction->setStatusTip(tr("Hold and transfer issuer-governed restricted assets"));
+    openAmpAction->setToolTip(openAmpAction->statusTip());
+    openAmpAction->setCheckable(true);
+    openAmpAction->setShortcut(QKeySequence(Qt::ALT + Qt::Key_8));
+    tabGroup->addAction(openAmpAction);
+
     // Sequentia operator tool (menu action, not a tab): view/edit which assets this node
     // accepts for fees.
     feePolicyAction = new QAction(tr("&Fee acceptance…"), this);
@@ -368,6 +380,8 @@ void BitcoinGUI::createActions()
     connect(stakingAction, &QAction::triggered, this, &BitcoinGUI::gotoStakingPage);
     connect(supervisionAction, &QAction::triggered, [this]{ showNormalIfMinimized(); });
     connect(supervisionAction, &QAction::triggered, this, &BitcoinGUI::gotoSupervisionPage);
+    connect(openAmpAction, &QAction::triggered, [this]{ showNormalIfMinimized(); });
+    connect(openAmpAction, &QAction::triggered, this, &BitcoinGUI::gotoOpenAmpPage);
     connect(feePolicyAction, &QAction::triggered, [this]{ showNormalIfMinimized(); });
     connect(feePolicyAction, &QAction::triggered, this, &BitcoinGUI::gotoFeePolicyDialog);
 #endif // ENABLE_WALLET
@@ -649,7 +663,8 @@ void BitcoinGUI::createToolBars()
         QButtonGroup* navGroup = new QButtonGroup(this);
         navGroup->setExclusive(true);
         for (QAction* action : {overviewAction, sendCoinsAction, receiveCoinsAction,
-                                historyAction, assetsAction, stakingAction, supervisionAction}) {
+                                historyAction, assetsAction, stakingAction, supervisionAction,
+                                openAmpAction}) {
             // Recolour the icon to the muted text colour: the action's icon is
             // single-colour amber, and a QPushButton shows it at full strength for
             // every state, which made every tab look selected. Amber is left to
@@ -1065,6 +1080,12 @@ void BitcoinGUI::gotoSupervisionPage()
 {
     supervisionAction->setChecked(true);
     if (walletFrame) walletFrame->gotoSupervisionPage();
+}
+
+void BitcoinGUI::gotoOpenAmpPage()
+{
+    openAmpAction->setChecked(true);
+    if (walletFrame) walletFrame->gotoOpenAmpPage();
 }
 
 void BitcoinGUI::setSupervisionTabVisible(bool visible)

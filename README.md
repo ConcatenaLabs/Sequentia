@@ -214,6 +214,12 @@ Added by this fork (each gated on the relevant chain feature):
   `addsupervisionrecordoutput`, `submitsupervisionrecord`,
   `getsupervisionsubmissions`, `decodesupervisionscript`); implemented in
   `src/supervision.{h,cpp}`.
+- **OpenAMP restricted assets (holder side):** `getopenampaccount` derives an
+  account id and the 2-of-2 enclave a restricted asset is held in, offline from
+  public keys; `signopenamptransfer` signs a transfer the issuer's policy server
+  built, refusing any sighash that does not match the transaction it came with.
+  The GUI's OpenAMP tab is both. See
+  [`doc/sequentia/openamp-holder.md`](doc/sequentia/openamp-holder.md).
 - **Addresses/CT:** `-con_default_blinded_addresses` (custom chains);
   `-blindedaddresses` defaults to the chain's setting (off on Sequentia
   chains). Opt in per call with `getnewaddress "" blech32`.
@@ -241,6 +247,7 @@ Sequentia functional tests live in `test/functional/`. Run one with
 | `feature_pos_pools.py` | staking pools: pool creation, delegating into a pool, the committed payout modes |
 | `feature_pos_exprace*.py`, `feature_pos_finalized_anchor_reorg.py`, `feature_pos_certified_sibling_guard.py`, `feature_anchor_unreachable_parent.py` | the exponential-race sortition rule, anchor reorgs across a finalized block, the certified-sibling guard, an unreachable parent-chain RPC |
 | `feature_supervised_assets.py`, `feature_supervised_zero_supply.py`, `feature_supervised_mempool_load.py`, `feature_supervised_reorg_resurrection.py` | supervised issuance and the end-to-end freeze/unfreeze flow, plus its edge cases (zero-supply issuance, mempool reload, frozen outputs across a reorg) |
+| `feature_openamp_m0.py`, `feature_openamp_wallet.py` | OpenAMP restricted assets: the enclave, co-signed transfers, freeze-by-refusal, fee conversion and clawback; and the holder side in this repository — account and enclave derivation against openampd's own vectors, a wallet-signed transfer accepted by consensus, and the refusals that keep it from blind signing |
 | `feature_fee_estimation.py` | per-asset fee estimation |
 | `feature_pos_genesis_bootstrap.py` | bootstrapping a chain from a genesis-seeded staking output |
 | `feature_ct_opt_in.py` | transparent-by-default addresses with opt-in confidential transactions |

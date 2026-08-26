@@ -83,6 +83,8 @@ public Q_SLOTS:
     void gotoStakingPage();
     /** Switch to the Supervision page */
     void gotoSupervisionPage();
+    /** Switch to the OpenAMP page */
+    void gotoOpenAmpPage();
     /** Open the fee-acceptance policy dialog */
     void gotoFeePolicyDialog();
     /** Switch to send coins page */

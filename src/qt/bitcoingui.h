@@ -165,6 +165,7 @@ private:
     //! Shown only for a wallet with a supervised asset to operate, which is nearly
     //! no wallet, so it is hidden until one says otherwise.
     QAction* supervisionAction = nullptr;
+    QAction* openAmpAction = nullptr;
     QAction* m_supervision_tab_action = nullptr;
     QAction* feePolicyAction = nullptr;
     QAction* priceServerAction = nullptr;
@@ -347,6 +348,8 @@ public Q_SLOTS:
     void gotoStakingPage();
     /** Switch to the Supervision page */
     void gotoSupervisionPage();
+    /** Switch to the OpenAMP page */
+    void gotoOpenAmpPage();
     /** Show or hide the Supervision tab, following the wallet on screen */
     void setSupervisionTabVisible(bool visible);
     /** Open the fee-acceptance policy dialog */
