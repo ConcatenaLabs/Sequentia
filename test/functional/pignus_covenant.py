@@ -92,6 +92,7 @@ from test_framework.script import (
     OP_INSPECTOUTPUTASSET, OP_INSPECTOUTPUTVALUE, OP_INSPECTOUTPUTSCRIPTPUBKEY,
     OP_INSPECTNUMOUTPUTS,
     OP_ADD64, OP_SUB64, OP_DIV64, OP_GREATERTHANOREQUAL64, OP_LESSTHAN64,
+    OP_SHA256,
 )
 
 # BIP341 nothing-up-my-sleeve point: taproot internal key with no known discrete
@@ -477,16 +478,46 @@ def build_recover_leaf(recover_after, asset_c, lender_prog, lender_ver=1):
     and it is a race the borrower can always win by taking the oracle-free
     REPAY exit, which stays open right up until this one is executed.
     """
-    _check_prog(lender_prog, lender_ver)
-    s = [recover_after, OP_CHECKLOCKTIMEVERIFY, OP_DROP]
-    s += [OP_PUSHCURRENTINPUTINDEX, OP_INSPECTINPUTVALUE, OP_1, OP_EQUALVERIFY]
+    return CScript([recover_after, OP_CHECKLOCKTIMEVERIFY, OP_DROP]
+                   + _sweep_body(asset_c, lender_prog, lender_ver))
+
+
+def _sweep_body(asset_c, payee_prog, payee_ver=1):
+    """Everything at output 2k, to one pinned payee: the whole input value, in
+    the one asset, at the one program. Whatever gates this decides WHO may
+    trigger it; the body decides where the money can possibly go, which is the
+    part that has to be true no matter who triggers it."""
+    _check_prog(payee_prog, payee_ver)
+    s = [OP_PUSHCURRENTINPUTINDEX, OP_INSPECTINPUTVALUE, OP_1, OP_EQUALVERIFY]
     s += _CREDIT_IDX + [OP_INSPECTOUTPUTASSET, OP_1, OP_EQUALVERIFY,
                         asset_c, OP_EQUALVERIFY]
-    s += _CREDIT_IDX + [OP_INSPECTOUTPUTSCRIPTPUBKEY, _ver_op(lender_ver),
-                        OP_EQUALVERIFY, lender_prog, OP_EQUALVERIFY]
+    s += _CREDIT_IDX + [OP_INSPECTOUTPUTSCRIPTPUBKEY, _ver_op(payee_ver),
+                        OP_EQUALVERIFY, payee_prog, OP_EQUALVERIFY]
     s += _CREDIT_IDX + [OP_INSPECTOUTPUTVALUE, OP_1, OP_EQUALVERIFY]
     s += [OP_SWAP, OP_GREATERTHANOREQUAL64]     # swept >= locked
-    return CScript(s)
+    return s
+
+
+def build_hashlock_leaf(preimage_hash, asset_c, payee_prog, payee_ver=1):
+    """Pay everything to one pinned payee, to whoever publishes the preimage.
+
+    The cross-chain half of Pignus needs a fact to travel from Sequentia to
+    Bitcoin, and the only thing that crosses is a secret: whoever learns it can
+    finish a Bitcoin spend that was signed in advance. So one side is paid here
+    by revealing a secret, and the revelation is what unlocks the other chain.
+
+    Two properties make this safe to let ANYONE trigger. The payout is pinned,
+    so publishing the secret can only pay the party it was always going to pay;
+    and the secret is known only to that party, so nobody else can trigger it
+    early. It needs no signature, which is what lets a browser wallet drive a
+    cross-chain loan end to end -- the same reason REPAY and RECOVER need none.
+
+    Witness: [preimage, leaf, control_block].
+    """
+    if len(preimage_hash) != 32:
+        raise ValueError("a SHA-256 commitment is 32 bytes")
+    return CScript([OP_SHA256, preimage_hash, OP_EQUALVERIFY]
+                   + _sweep_body(asset_c, payee_prog, payee_ver))
 
 
 def vault_taptree(*, asset_c, asset_d, debt, lender_prog, borrower_prog,
@@ -586,3 +617,25 @@ def recover_witness(tap, leaves):
     """RECOVER needs no signature: like REPAY, it reads everything it enforces
     from the transaction."""
     return [bytes(leaves["recover"]), control_block(tap, "recover")]
+
+
+def hashlock_witness(tap, leaves, leaf_name, preimage):
+    """A hashlock sweep: the secret, and then the leaf that pins where it pays.
+    Publishing the secret in the witness is the point, not a side effect."""
+    return [preimage, bytes(leaves[leaf_name]), control_block(tap, leaf_name)]
+
+
+def hashlock_taptree(*, preimage_hash, asset, payee_prog, refund_after,
+                     refund_prog, payee_ver=1, refund_ver=1):
+    """The two-leaf output both cross-chain payments use.
+
+    CLAIM pays the payee against the secret; REFUND returns the money to the
+    sender once a deadline passes and it is clear the secret is never coming.
+    Neither leaf needs a signature and neither can pay anyone else, so both
+    parties can check the address they are about to fund by rebuilding it.
+    """
+    claim = build_hashlock_leaf(preimage_hash, asset, payee_prog, payee_ver)
+    refund = build_recover_leaf(refund_after, asset, refund_prog, refund_ver)
+    leaves = {"claim": claim, "refund": refund}
+    tap = taproot_construct(NUMS, [(n, leaves[n]) for n in ("claim", "refund")])
+    return tap, leaves

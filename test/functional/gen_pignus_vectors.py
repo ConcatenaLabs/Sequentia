@@ -171,6 +171,37 @@ def main():
             "control_blocks": {n: off.control_block(tap, n).hex() for n in leaves},
         })
 
+    # --- hashlock sweeps: the cross-chain payments ---------------------------
+    # Both legs of a native-Bitcoin loan are paid on Sequentia through one of
+    # these: the principal the borrower opens with `w`, and the repayment the
+    # lender opens with `t`. A browser has to rebuild both addresses before it
+    # commits any Bitcoin, so both shapes are pinned here.
+    hashlocks = []
+    for name, kw in [
+        ("hashlock_v1", dict(
+            preimage_hash=bytes.fromhex("77" * 32), asset=base["asset_d"],
+            payee_prog=base["borrower_prog"], refund_after=900,
+            refund_prog=base["lender_prog"])),
+        # What a browser-originated loan actually uses: the wallet extension
+        # receives at segwit v0, so the payee program is 20 bytes.
+        ("hashlock_v0_payee", dict(
+            preimage_hash=bytes.fromhex("88" * 32), asset=base["asset_d"],
+            payee_prog=bytes.fromhex("dd" * 20), payee_ver=0,
+            refund_after=1_800_000_000, refund_prog=bytes.fromhex("cc" * 20),
+            refund_ver=0)),
+    ]:
+        tap, leaves = pig.hashlock_taptree(**kw)
+        hashlocks.append({
+            "name": name,
+            "params": {k: (v.hex() if isinstance(v, bytes) else v)
+                       for k, v in kw.items()},
+            "leaves": {n: bytes(sc).hex() for n, sc in leaves.items()},
+            "scriptPubKey": bytes(tap.scriptPubKey).hex(),
+            "output_key": tap.output_pubkey.hex(),
+            "negflag": tap.negflag,
+            "control_blocks": {n: pig.control_block(tap, n).hex() for n in leaves},
+        })
+
     # --- repurchases (Tier D) -----------------------------------------------
     # A repurchase is not a loan and does not use vault_taptree: RETURN is
     # build_repay_leaf with the lender payout set to C_U(borrower), FORFEIT is
@@ -224,6 +255,7 @@ def main():
         "seizures": seizures,
         "offers": offers,
         "repurchase": repurchases,
+        "hashlocks": hashlocks,
     }
     json.dump(out, sys.stdout, indent=2)
     sys.stdout.write("\n")
