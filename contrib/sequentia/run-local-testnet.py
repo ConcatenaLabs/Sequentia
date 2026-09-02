@@ -154,6 +154,19 @@ def main():
                     help="seconds between parent-chain polls per node (0 = slot/2). Raise it "
                          "for a big committee against a shared/public parent to avoid rate limits.")
     ap.add_argument("--no-anchor", action="store_true", help="disable anchoring entirely (not mainnet-faithful)")
+    # Fee-market / congestion testing
+    ap.add_argument("--blockmaxweight", type=int, default=0,
+                    help="shrink the blocks every node builds, in weight units. 4000 of it is "
+                         "reserved for the coinbase, so 6000 leaves room for about 500 vB of "
+                         "transactions and 8000 for about 1 kvB -- small enough that a handful of "
+                         "transactions is a full block, and the fee auction becomes visible without "
+                         "putting any load on the machine.")
+    ap.add_argument("--initialfreecoins", type=int, default=0,
+                    help="atoms of the policy asset spendable from genesis, so a wallet has "
+                         "something to pay fees with (100000000000000 = 1,000,000 units)")
+    ap.add_argument("--client-conf", default="",
+                    help="also write an elements.conf for a NON-producing wallet node (the Qt "
+                         "GUI, say) that joins this network, at this path")
     ap.add_argument("--stop", action="store_true", help="stop a network previously started in --basedir")
     ap.add_argument("--run-seconds", type=int, default=0, help="auto-stop after N seconds (0 = run until Ctrl-C)")
     args = ap.parse_args()
@@ -242,7 +255,12 @@ def main():
         # (a fixed 8000 rejects a 100-member cert as block-proof-invalid).
         "con_max_block_sig_size=%d" % (280 * N + 2000), "signblockscript=51",
         "con_blocksubsidy=5000000000", "anyonecanspendaremine=1", "validatepegin=0",
-    ] + (["con_bitcoin_anchor=1"] if not args.no_anchor else []) \
+        # Transparent by default, as on the real chains: a custom chain otherwise keeps
+        # the Elements default, and the wallet under test would be handling confidential
+        # addresses that behave nothing like the ones testnet gives it.
+        "con_default_blinded_addresses=0",
+    ] + (["initialfreecoins=%d" % args.initialfreecoins] if args.initialfreecoins else []) \
+      + (["con_bitcoin_anchor=1"] if not args.no_anchor else []) \
       + ["staker=%s:1" % pub for _, pub in stakers]
 
     # Low-diameter mesh: ring + a 4-node hub backbone (same shape as the demo).
@@ -268,7 +286,8 @@ def main():
             "listen=1", "discover=0", "dnsseed=0", "upnp=0",
             "maxconnections=%d" % (len(peers) + 16),
             "posproducer=1", "posproducerkey=%s" % stakers[i][0],
-        ] + anchor_lines + ["addnode=127.0.0.1:%d" % p2p(j) for j in sorted(peers)]
+        ] + (["blockmaxweight=%d" % args.blockmaxweight] if args.blockmaxweight else []) \
+          + anchor_lines + ["addnode=127.0.0.1:%d" % p2p(j) for j in sorted(peers)]
         # elements.conf: chain selector, then everything under the [chain] section —
         # consensus block (shared verbatim) first, node-local after.
         write_conf(os.path.join(d, "elements.conf"),
@@ -293,6 +312,31 @@ def main():
         print("!! genesis MISMATCH on nodes %s — consensus configs differ" % bad)
     else:
         print("Genesis hash identical on all %d nodes: %s" % (N, g0))
+    # A wallet under test is not a producer, but it still needs the consensus
+    # block verbatim: a node that computes a different genesis never connects,
+    # and the failure looks like a networking problem rather than a config one.
+    if args.client_conf:
+        cdir = os.path.dirname(os.path.abspath(args.client_conf))
+        if cdir and not os.path.isdir(cdir):
+            os.makedirs(cdir)
+        client_local = [
+            "server=1",
+            "rpcuser=%s" % args.rpcuser, "rpcpassword=%s" % args.rpcpassword,
+            "port=%d" % (args.p2p_base + N + 1), "rpcport=%d" % (args.rpc_base + N + 1),
+            "listen=1", "discover=0", "dnsseed=0", "upnp=0", "fallbackfee=0.0001",
+        # The same ceiling as the producers, though this node builds nothing: its
+        # own fee estimate and getmempoolcongestion project against the block IT
+        # would build, so a client left at the default would tell the operator
+        # there is room when the producers have none.
+        ] + (["blockmaxweight=%d" % args.blockmaxweight] if args.blockmaxweight else []) \
+          + (list(anchor_lines) if not args.no_anchor else []) \
+          + ["addnode=127.0.0.1:%d" % p2p(j) for j in hubs]
+        write_conf(args.client_conf,
+                   ["chain=%s" % CHAIN, "[%s]" % CHAIN] + consensus + [""] + client_local)
+        print("Joining (non-producing) node conf written to %s" % args.client_conf)
+        print("  Copy it in as <its own datadir>/elements.conf -- NOT one of this network's\n"
+              "  datadirs -- and start the wallet with: sequentia-qt -datadir=<that> -chain=%s" % CHAIN)
+
     print("Quorum = %d of %d. Slot = %ds. Anchor = %s." %
           (N // 2 + 1, N, args.slot, "off" if args.no_anchor else "on"))
 
