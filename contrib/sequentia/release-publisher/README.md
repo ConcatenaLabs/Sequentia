@@ -2,7 +2,8 @@
 
 Keeps `sequentiatestnet.com/download/` current without anyone touching the box.
 It covers **everything the page offers**, not only the node: Sequentia Core, the
-Fulmen Lightning wallet, the browser extension and the Ambra mobile wallet.
+Fulmen Lightning wallet, the browser extension, the Ambra mobile wallet,
+Seqognito and the Pignus lending CLI.
 
 Every ten minutes it asks each product what version is published upstream. If that
 differs from what it published last, it builds that version and puts the artifacts
@@ -34,6 +35,7 @@ Anything the recipe writes into `outdir` gets published. Nothing else is needed.
 | `fulmen` | `package.json` | Linux AppImage + Windows zip + Windows installer |
 | `ambra` | `app/pubspec.yaml` | signed Android APK |
 | `seqognito` | `package.json` | Linux AppImage + Windows zip + Windows installer |
+| `pignus` | `pignus/__init__.py` | source tarball of the repository, minus development files |
 
 Every artifact the download page offers is covered. Nothing is published by hand.
 
