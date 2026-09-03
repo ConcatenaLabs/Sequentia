@@ -146,6 +146,32 @@ def main():
             strike=180 * pig.PRICE_SCALE, maturity=504, recover_after=604,
             not_before=1_700_000_000, max_price=1_000_000 * pig.PRICE_SCALE),
          1450 * COIN, 10 * COIN),
+        # An offer whose loans are judged by SEVERAL oracles. The single-leaf
+        # vault an offer creates carries the whole m-of-n section, and the CLI
+        # and the page both let a lender ask for one -- so without a case here
+        # that form of the builder is pinned by nothing, in either language,
+        # and a drift moves a live vault address with no test going red.
+        ("offer_threshold_2_of_3", dict(
+            asset_c=base["asset_c"], asset_d=base["asset_d"], debt=1500 * COIN,
+            lender_prog=base["lender_prog"],
+            feed_id=base["feed_id"],
+            oracles=[bytes.fromhex(h * 32) for h in ("22", "33", "44")],
+            oracle_threshold=2,
+            strike=180 * pig.PRICE_SCALE, maturity=504, recover_after=604,
+            not_before=1_700_000_000, max_price=1_000_000 * pig.PRICE_SCALE),
+         1450 * COIN, 10 * COIN),
+        # ...and the same with v0 payouts, which is what a browser-originated
+        # loan looks like: the two variations are independent.
+        ("offer_threshold_v0_payouts", dict(
+            asset_c=base["asset_c"], asset_d=base["asset_d"], debt=1500 * COIN,
+            lender_prog=bytes.fromhex("cc" * 20),
+            lender_ver=0, borrower_ver=0,
+            feed_id=base["feed_id"],
+            oracles=[bytes.fromhex(h * 32) for h in ("22", "33", "44")],
+            oracle_threshold=3,
+            strike=180 * pig.PRICE_SCALE, maturity=504, recover_after=604,
+            not_before=1_700_000_000, max_price=1_000_000 * pig.PRICE_SCALE),
+         1450 * COIN, 10 * COIN),
     ]:
         borrower = (bytes.fromhex("dd" * 20) if vk.get("borrower_ver") == 0
                     else bytes.fromhex("dd" * 32))
@@ -157,7 +183,9 @@ def main():
             expiry_locktime=1000)
         offers.append({
             "name": name,
-            "params": {k: (v.hex() if isinstance(v, bytes) else v)
+            "params": {k: (v.hex() if isinstance(v, bytes) else
+                           [x.hex() if isinstance(x, bytes) else x for x in v]
+                           if isinstance(v, (list, tuple)) else v)
                        for k, v in vk.items()},
             "principal": principal, "collateral": collateral,
             "expiry_locktime": 1000,
