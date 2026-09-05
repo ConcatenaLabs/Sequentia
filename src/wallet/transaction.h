@@ -16,6 +16,7 @@
 #include <util/string.h>
 
 #include <list>
+#include <optional>
 #include <variant>
 #include <vector>
 
@@ -60,6 +61,23 @@ struct TxStateUnrecognized {
     int index;
 
     TxStateUnrecognized(const uint256& block_hash, int index) : block_hash(block_hash), index(index) {}
+};
+
+//! The node's standing refusal to take a transaction into its mempool.
+//!
+//! Deliberately kept out of TxState and out of serialization. A refusal is a
+//! fact about the chain right now, not about the transaction: "bad-txns-asset-frozen"
+//! lasts exactly as long as the freeze does, and lifting the freeze must make
+//! the very same transaction sendable again. Holding it only in memory means the
+//! wallet re-asks the node instead of ever believing a stale "no" -- and it keeps
+//! the wallet file readable by a build that knows nothing about any of this.
+struct TxRejection {
+    //! The node's reject reason, e.g. "bad-txns-asset-frozen".
+    std::string reason;
+    //! Invalid by consensus, rather than merely unwanted by this mempool. Only
+    //! then is it safe to treat the inputs as unspent again: no node following
+    //! these rules can mine the transaction while the condition holds.
+    bool is_consensus{false};
 };
 
 //! All possible CWalletTx states
@@ -197,6 +215,9 @@ public:
     mutable bool m_is_cache_empty{true};
     mutable bool fChangeCached;
     mutable CAmountMap nChangeCached;
+    /** Why the node currently refuses this transaction, if it does. Memory only:
+     *  re-derived by asking the node, never read back from disk. */
+    std::optional<TxRejection> m_rejection;
 
     CWalletTx(CTransactionRef tx, const TxState& state) : tx(std::move(tx)), m_state(state)
     {
@@ -293,6 +314,9 @@ public:
     template<typename T> T* state() { return std::get_if<T>(&m_state); }
 
     bool isAbandoned() const { return state<TxStateInactive>() && state<TxStateInactive>()->abandoned; }
+    bool isRejected() const { return m_rejection.has_value(); }
+    //! Whether this refusal is grounds for releasing the inputs, as abandoning would.
+    bool rejectionFreesInputs() const { return m_rejection && m_rejection->is_consensus; }
     bool isConflicted() const { return state<TxStateConflicted>(); }
     bool isUnconfirmed() const { return !isAbandoned() && !isConflicted() && !isConfirmed(); }
     bool isConfirmed() const { return state<TxStateConfirmed>(); }

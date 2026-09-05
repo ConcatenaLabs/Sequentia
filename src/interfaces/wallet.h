@@ -432,6 +432,14 @@ struct WalletTxStatus
     bool is_abandoned;
     bool is_coinbase;
     bool is_in_main_chain;
+    //! The node's reason for refusing this transaction from its mempool, empty
+    //! if it is not refusing it. Set only for transactions that are unconfirmed
+    //! and absent from the mempool, which is the state that used to be shown as
+    //! an ordinary pending payment.
+    std::string reject_reason;
+    //! Whether that refusal is a consensus one, and so has released the inputs
+    //! back into the spendable balance.
+    bool reject_frees_inputs{false};
 };
 
 //! Wallet transaction output.

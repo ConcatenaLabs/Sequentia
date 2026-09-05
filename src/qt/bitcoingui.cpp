@@ -333,7 +333,10 @@ void BitcoinGUI::createActions()
     // hidden unless the wallet on screen has one to operate, so most users never
     // see it -- and the issuer who does has the freeze, unfreeze, pause and rotate
     // flows here rather than in a shell.
-    supervisionAction = new QAction(platformStyle->SingleColorIcon(":/icons/assets"), tr("Su&pervision"), this);
+    // The padlock, not the assets ledger: sharing an icon with the Assets tab made
+    // two different sections look like one, and freezing is the power this tab is
+    // actually for.
+    supervisionAction = new QAction(platformStyle->SingleColorIcon(":/icons/lock_closed"), tr("Su&pervision"), this);
     supervisionAction->setStatusTip(tr("Freeze, unfreeze, pause and rotate keys for supervised assets you issued"));
     supervisionAction->setToolTip(supervisionAction->statusTip());
     supervisionAction->setCheckable(true);
@@ -1801,10 +1804,16 @@ void BitcoinGUI::message(const QString& title, QString message, unsigned int sty
 void BitcoinGUI::changeEvent(QEvent *e)
 {
     if (e->type() == QEvent::PaletteChange) {
-        overviewAction->setIcon(platformStyle->SingleColorIcon(QStringLiteral(":/icons/overview")));
-        sendCoinsAction->setIcon(platformStyle->SingleColorIcon(QStringLiteral(":/icons/send")));
-        receiveCoinsAction->setIcon(platformStyle->SingleColorIcon(QStringLiteral(":/icons/receiving_addresses")));
-        historyAction->setIcon(platformStyle->SingleColorIcon(QStringLiteral(":/icons/history")));
+        // These actions do not exist yet for the whole first half of the
+        // constructor: createActions() runs well after RestoreWindowGeometry(),
+        // and restoring a geometry pumps events. On Windows the shell delivers
+        // the theme to a process it activates, so a palette change lands in that
+        // window and every pointer here is still null -- an access violation
+        // before the log file is even open, which is why it leaves no trace.
+        if (overviewAction) overviewAction->setIcon(platformStyle->SingleColorIcon(QStringLiteral(":/icons/overview")));
+        if (sendCoinsAction) sendCoinsAction->setIcon(platformStyle->SingleColorIcon(QStringLiteral(":/icons/send")));
+        if (receiveCoinsAction) receiveCoinsAction->setIcon(platformStyle->SingleColorIcon(QStringLiteral(":/icons/receiving_addresses")));
+        if (historyAction) historyAction->setIcon(platformStyle->SingleColorIcon(QStringLiteral(":/icons/history")));
     }
 
     QMainWindow::changeEvent(e);

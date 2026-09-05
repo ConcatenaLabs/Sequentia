@@ -119,6 +119,10 @@ WalletTxStatus MakeWalletTxStatus(const CWallet& wallet, const CWalletTx& wtx)
     result.is_abandoned = wtx.isAbandoned();
     result.is_coinbase = wtx.IsCoinBase();
     result.is_in_main_chain = wallet.IsTxInMainChain(wtx);
+    if (wtx.m_rejection) {
+        result.reject_reason = wtx.m_rejection->reason;
+        result.reject_frees_inputs = wtx.m_rejection->is_consensus;
+    }
     return result;
 }
 

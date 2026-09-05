@@ -291,6 +291,8 @@ void TransactionRecord::updateStatus(const interfaces::WalletTxStatus& wtx, cons
         idx,
         typesort);
     status.countsForBalance = wtx.is_trusted && !(wtx.blocks_to_maturity > 0);
+    status.reject_reason = QString::fromStdString(wtx.reject_reason);
+    status.reject_frees_inputs = wtx.reject_frees_inputs;
     status.depth = wtx.depth_in_main_chain;
     status.m_cur_block_hash = block_hash;
 
@@ -325,6 +327,13 @@ void TransactionRecord::updateStatus(const interfaces::WalletTxStatus& wtx, cons
             status.status = TransactionStatus::Unconfirmed;
             if (wtx.is_abandoned)
                 status.status = TransactionStatus::Abandoned;
+            else if (!wtx.reject_reason.empty()) {
+                // Not pending: the node has refused it and given a reason. Shown
+                // as an ordinary unconfirmed payment this is indistinguishable
+                // from one still making its way across the network, which is how
+                // a refusal turns into funds that simply disappear.
+                status.status = TransactionStatus::Rejected;
+            }
         }
         else if (status.depth < RecommendedNumConfirmations)
         {

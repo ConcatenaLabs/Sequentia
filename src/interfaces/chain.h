@@ -39,6 +39,17 @@ namespace interfaces {
 class Handler;
 class Wallet;
 
+//! Why the node will not take a transaction into its mempool.
+//!
+//! is_consensus separates "this transaction is invalid" from "this mempool
+//! does not want it": only the former means no node following these rules can
+//! mine it, which is what lets the wallet treat the inputs as free again. Both
+//! are still worth telling the user about.
+struct MempoolRefusal {
+    std::string reason;
+    bool is_consensus{false};
+};
+
 //! Helper for findBlock to selectively return pieces of block data. If block is
 //! found, data will be returned by setting specified output variables. If block
 //! is not found, output variables will keep their previous values.
@@ -168,6 +179,16 @@ public:
 
     //! Check if transaction has descendants in mempool.
     virtual bool hasDescendantsInMempool(const uint256& txid) = 0;
+
+    //! Ask whether the node would accept this transaction into its mempool,
+    //! without submitting it -- testmempoolaccept for a single transaction.
+    //!
+    //! Returns the refusal if the node turns it down, and std::nullopt both when
+    //! it would be accepted and when the node cannot form an opinion. Missing
+    //! inputs are the second case, not the first: a transaction spending an
+    //! output of an unconfirmed parent looks unspendable on its own, and calling
+    //! that a rejection would condemn every perfectly good chained payment.
+    virtual std::optional<MempoolRefusal> checkMempoolAccept(const CTransactionRef& tx) = 0;
 
     //! Transaction is added to memory pool, if the transaction fee is below the
     //! amount specified by max_tx_fee, and broadcast to all peers if relay is set to true.

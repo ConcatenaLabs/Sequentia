@@ -4,6 +4,7 @@
 
 #include <addrdb.h>
 #include <anchor.h>
+#include <assetsdir.h>
 #include <banman.h>
 #include <chain.h>
 #include <chainparams.h>
@@ -35,6 +36,7 @@
 #include <rpc/protocol.h>
 #include <rpc/server.h>
 #include <shutdown.h>
+#include <supervision.h>
 #include <support/allocators/secure.h>
 #include <sync.h>
 #include <timedata.h>
@@ -636,6 +638,55 @@ public:
         LOCK(m_node.mempool->cs);
         auto it = m_node.mempool->GetIter(txid);
         return it && (*it)->GetCountWithDescendants() > 1;
+    }
+    std::optional<interfaces::MempoolRefusal> checkMempoolAccept(const CTransactionRef& tx) override
+    {
+        if (!m_node.chainman || !m_node.mempool) return std::nullopt;
+        LOCK(cs_main);
+        const MempoolAcceptResult result = m_node.chainman->ProcessTransaction(tx, /*test_accept=*/true);
+        if (result.m_result_type == MempoolAcceptResult::ResultType::VALID) return std::nullopt;
+
+        const TxValidationState& state = result.m_state;
+        switch (state.GetResult()) {
+        case TxValidationResult::TX_MISSING_INPUTS:
+            // Says nothing about this transaction: its parent may simply be an
+            // unconfirmed transaction of ours that has not landed yet.
+            return std::nullopt;
+        case TxValidationResult::TX_CONFLICT:
+            // Reached when the transaction is already in the mempool or already
+            // mined -- both the opposite of a refusal.
+            return std::nullopt;
+        default:
+            break;
+        }
+        // A failure that is not "invalid" at all (an out-of-memory in the
+        // mempool, say) is the node's problem, not the transaction's.
+        if (!state.IsInvalid()) return std::nullopt;
+
+        std::string reason = state.GetRejectReason();
+        // A pause is stored as a freeze on every target, so consensus refuses a
+        // paused asset with the frozen reason. Right as a rule and wrong as an
+        // explanation: it tells a holder their address was singled out when the
+        // whole asset was stopped, which sends them looking for a freeze that
+        // does not exist. The registry knows which it was and the debug message
+        // names the asset, so the distinction is drawn here, where the registry
+        // is -- once per transaction, rather than per row in a wallet that has
+        // no business knowing what a pause is.
+        //
+        // The consensus reject reason is untouched: this string is returned
+        // through this interface and never goes on the wire.
+        if (reason == "bad-txns-asset-frozen") {
+            const std::string debug = state.GetDebugMessage();
+            const size_t at = debug.rfind(' ');
+            if (at != std::string::npos) {
+                const CAsset asset = GetAssetFromString(debug.substr(at + 1));
+                if (!asset.IsNull() && SupervisionRegistry::GetInstance().IsPaused(asset)) {
+                    reason = "bad-txns-asset-paused";
+                }
+            }
+        }
+        return interfaces::MempoolRefusal{reason,
+                                          state.GetResult() == TxValidationResult::TX_CONSENSUS};
     }
     bool broadcastTransaction(const CTransactionRef& tx,
         const CAmount& max_tx_fee,

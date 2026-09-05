@@ -362,11 +362,24 @@ QString TransactionTableModel::formatTxStatus(const TransactionRecord *wtx) cons
     case TransactionStatus::Abandoned:
         status = tr("Abandoned");
         break;
+    case TransactionStatus::Rejected:
+        // The reason is the whole point: without it this is the "?" that sent a
+        // user looking for funds that had silently stopped counting.
+        status = tr("Rejected by the network: %1").arg(GUIUtil::describeRejectReason(wtx->status.reject_reason));
+        if (wtx->status.reject_frees_inputs) {
+            // "Back in your balance", not "available again": a freeze or a pause
+            // releases the inputs without making the asset spendable, and the
+            // claim that mattered here was only ever that nothing went missing.
+            status += QLatin1String(" ") + tr("(the funds it was using are back in your balance)");
+        }
+        break;
     case TransactionStatus::Confirming:
         status = tr("Confirming (%1 of %2 recommended confirmations)").arg(wtx->status.depth).arg(TransactionRecord::RecommendedNumConfirmations);
         break;
     case TransactionStatus::Confirmed:
-        status = tr("Confirmed (%1 confirmations)").arg(wtx->status.depth);
+        // Plural form: with one confirmation being the ordinary confirmed state,
+        // "Confirmed (1 confirmations)" would be the string most often on screen.
+        status = tr("Confirmed (%n confirmation(s))", "", wtx->status.depth);
         break;
     case TransactionStatus::Conflicted:
         status = tr("Conflicted");
@@ -533,6 +546,11 @@ QVariant TransactionTableModel::txStatusDecoration(const TransactionRecord *wtx)
         return QIcon(":/icons/transaction_0");
     case TransactionStatus::Abandoned:
         return QIcon(":/icons/transaction_abandoned");
+    case TransactionStatus::Rejected:
+        // Same "no" as an orphaned block reward, and for the same reason: the
+        // question mark of transaction_0 promises a state that may still
+        // resolve, and this one will not until something on the chain changes.
+        return QIcon(":/icons/transaction_denied");
     case TransactionStatus::Confirming:
         switch(wtx->status.depth)
         {
@@ -662,8 +680,9 @@ QVariant TransactionTableModel::data(const QModelIndex &index, int role) const
     case Qt::TextAlignmentRole:
         return column_alignments[index.column()];
     case Qt::ForegroundRole:
-        // Use the "danger" color for abandoned transactions
-        if(rec->status.status == TransactionStatus::Abandoned)
+        // Use the "danger" color for abandoned and rejected transactions
+        if(rec->status.status == TransactionStatus::Abandoned ||
+           rec->status.status == TransactionStatus::Rejected)
         {
             return COLOR_TX_STATUS_DANGER;
         }

@@ -99,6 +99,8 @@ private:
     QLabel *m_finality_label{nullptr};
     QLabel *m_btc_label{nullptr};         // scan status/error line; hidden once the balance has a table row
     bool m_btc_scan_inflight{false};      // guards re-entry of the slow parent-chain scan
+    uint64_t m_parent_watch_touches{0};  // last count the node reported (getanchorstatus)
+    uint64_t m_btc_touches_applied{UINT64_MAX}; // count behind the balance on screen; MAX = never read
     unsigned m_btc_refresh_tick{0};       // throttles the periodic dual-balance refresh
 
     // Last successful parent-chain scan: the tBTC balance rides in the asset table and the
@@ -123,6 +125,7 @@ private Q_SLOTS:
     void setMonospacedFont(bool use_embedded_font);
     void updateSeqStatus();
     void refreshBtcBalance();
+    void updateBtcScanProgress();
     // Lands the worker thread's parent-chain scan on the GUI thread: refreshes the
     // tBTC table row / headline / status line and republishes the utxo list.
     void onBtcScanResult(bool ok, const QString& error_text, CAmount amount, int naddr,

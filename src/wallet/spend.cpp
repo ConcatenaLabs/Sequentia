@@ -597,11 +597,26 @@ std::optional<SelectionResult> SelectCoins(const CWallet& wallet, const std::vec
             }
             // Just to calculate the marginal byte size
             if (GetTxSpendSize(wallet, wtx, outpoint.n, outpoint.n) < 0) {
-                continue;
+                // SEQUENTIA: nothing in this wallet signs for that script, so its
+                // size cannot be derived from it. A supervision freeze record is
+                // the case in hand: it is spent under a consensus rule rather than
+                // by a key, and its transaction is in the wallet because the wallet
+                // CREATED the freeze.
+                //
+                // Dropping it here does not drop it from the transaction. The
+                // caller preselected it, so it survives into the funded result
+                // either way; all that is lost is its weight, and the fee then
+                // comes out short by exactly the bytes nobody counted. An
+                // input_weights entry is the caller stating that weight, and is
+                // documented as overriding the calculated size, so it is honoured
+                // before giving up rather than after.
+                if (!coin_control.HasInputWeight(outpoint)) continue;
+                txout = wtx.tx->vout.at(outpoint.n);
+            } else {
+                input_bytes = GetTxSpendSize(wallet, wtx, outpoint.n, false);
+                txout = wtx.tx->vout.at(outpoint.n);
+                coin = CInputCoin(wallet, &wtx, outpoint.n, input_bytes);
             }
-            input_bytes = GetTxSpendSize(wallet, wtx, outpoint.n, false);
-            txout = wtx.tx->vout.at(outpoint.n);
-            coin = CInputCoin(wallet, &wtx, outpoint.n, input_bytes);
         } else {
             // The input is external. We did not find the tx in mapWallet.
             if (!coin_control.GetExternalOutput(outpoint, txout)) {
@@ -632,11 +647,24 @@ std::optional<SelectionResult> SelectCoins(const CWallet& wallet, const std::vec
             // error = _("Missing solving data for estimating transaction size"); // ELEMENTS
             return std::nullopt; // Not solvable, can't estimate size for fee
         }
-        coin.effective_value = coin.value - coin_selection_params.m_effective_feerate.GetFee(coin.m_input_bytes, coin_selection_params.m_fee_asset);
-        if (coin_selection_params.m_subtract_fee_outputs) {
-            value_to_select[coin.asset] -= coin.value;
-        } else {
-            value_to_select[coin.asset] -= coin.effective_value;
+        // SEQUENTIA: what a preset input contributes and what it costs are in two
+        // different assets, and only coincidentally the same one. It contributes
+        // `value` of ITS asset; it costs the fee for its own bytes, and a fee is
+        // denominated in the FEE asset -- which is what GetFee is told below.
+        // Folding the second into the first, as one effective_value, is right only
+        // while those two assets agree, and charges the input's weight to the wrong
+        // asset's target when they do not: preselect a GOLD input on a transaction
+        // paying its fee in SEQ and the wallet goes looking for more GOLD to cover a
+        // fee that will never be paid in GOLD.
+        //
+        // Where the preset input IS in the fee asset -- every transaction this
+        // wallet built before supervision records arrived -- the two lines below
+        // collapse back into the single one they replace, so nothing else moves.
+        const CAmount input_fee = coin_selection_params.m_effective_feerate.GetFee(coin.m_input_bytes, coin_selection_params.m_fee_asset);
+        coin.effective_value = coin.value - input_fee;
+        value_to_select[coin.asset] -= coin.value;
+        if (!coin_selection_params.m_subtract_fee_outputs) {
+            value_to_select[coin_selection_params.m_fee_asset] += input_fee;
         }
         setPresetCoins.insert(coin);
         /* Set depth, from_me, ancestors, and descendants to 0 or false as don't matter for preset inputs as no actual selection is being done.
@@ -1055,6 +1083,37 @@ static bool CreateTransactionInternal(
             }
             outputs_to_subtract_fee_from++;
             coin_selection_params.m_subtract_fee_outputs = true;
+        }
+    }
+
+    // Pad for the preselected inputs too. Change is per asset, and an asset can
+    // arrive on an input the recipients never mention: the loop below hands out
+    // a change script for each of those as well, from this same vector, but only
+    // the recipients were ever counted when sizing it. It went unnoticed while
+    // every caller with preselected inputs also paid someone in the same asset --
+    // and it says "Keypool ran out" when it does bite, because running off the
+    // end of this vector shares a branch with the keypool being empty, so the one
+    // caller that hits it is told to refill a keypool that is full.
+    //
+    // Lifting a supervision freeze is that caller: it spends the freeze record and
+    // pays nobody, so the record's asset is named by no recipient at all.
+    {
+        std::vector<COutPoint> preset_inputs;
+        coin_control.ListSelected(preset_inputs);
+        for (const COutPoint& preset : preset_inputs) {
+            CAsset asset;
+            const auto it = wallet.mapWallet.find(preset.hash);
+            CTxOut txout;
+            if (it != wallet.mapWallet.end()) {
+                asset = it->second.GetOutputAsset(wallet, preset.n);
+            } else if (coin_control.GetExternalOutput(preset, txout)) {
+                asset = txout.nAsset.GetAsset();
+            } else {
+                continue;  // Unresolvable here; the loop below fails on it gracefully.
+            }
+            if (assets_seen.insert(asset).second) {
+                reservedest.emplace_back(new ReserveDestination(&wallet, change_type));
+            }
         }
     }
 
@@ -2025,7 +2084,18 @@ bool CreateTransaction(
         BlindDetails* blind_details,
         const IssuanceDetails* issuance_details)
 {
-    if (vecSend.empty()) {
+    // A transaction with nobody to pay is usually a caller that forgot to say
+    // where the money goes, and refusing it is right. It is not the only shape,
+    // though: one that already names the inputs it must spend is asking to spend
+    // THEM, and the change and fee that funding appends are the only outputs it
+    // needs. Lifting a supervision freeze -- a pause included, which is a freeze
+    // on every address -- is exactly that transaction: it spends the freeze
+    // record, pays a fee, and has nothing else to say.
+    //
+    // The same relaxation was already made to the fundrawtransaction guard that
+    // runs before this one; this is the second gate on the same path, and while
+    // it stood an unfreeze could not be funded at all.
+    if (vecSend.empty() && !coin_control.HasSelected()) {
         error = _("Transaction must have at least one recipient");
         return false;
     }
