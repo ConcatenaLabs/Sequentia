@@ -229,6 +229,22 @@ class PignusHashlockTest(BitcoinTestFramework):
             tap, leaves, "claim", out, value=VALUE, asset=self.D,
             payee_spk=payee_spk, preimage=hashlib.sha256(b"not it").digest()))
 
+        self.log.info("a claim with a preimage of the WRONG LENGTH is refused, "
+                      "even one whose hash matches")
+        # The commitment is what the OTHER chain is bound by, and everything
+        # waiting there for the secret expects 32 bytes. A leaf that accepted
+        # any preimage with the right hash paid the claimant here and left the
+        # counterparty unable to use what was published.
+        long_secret = secret + b"\x00"
+        tap_long, leaves_long = pig.hashlock_taptree(
+            preimage_hash=hashlib.sha256(long_secret).digest(), asset=asset_c,
+            payee_prog=payee_spk[2:], refund_after=DEADLINE,
+            refund_prog=sender_spk[2:])
+        out_long = self.fund(bytes(tap_long.scriptPubKey), VALUE, self.D)
+        self.assert_rejected(self.spend(
+            tap_long, leaves_long, "claim", out_long, value=VALUE, asset=self.D,
+            payee_spk=payee_spk, preimage=long_secret))
+
         self.log.info("a claim with NO preimage is refused")
         self.assert_rejected(self.spend(
             tap, leaves, "claim", out, value=VALUE, asset=self.D,
