@@ -268,7 +268,7 @@ class AnyAssetFeeMarketTest(BitcoinTestFramework):
         full before it was mined. Both matter: the under-bidder must confirm (it
         was queued, not dropped) and it must confirm in a block that had ROOM --
         a chain of nothing but full blocks would never take it at all, and real
-        congestion comes in waves. This is the trough of one.
+        congestion comes in waves. This is the quiet part of one.
         """
         for _ in range(limit):
             was_full = self.a.getmempoolcongestion()['next_block_full']

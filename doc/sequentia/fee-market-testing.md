@@ -116,8 +116,8 @@ that the block it landed in was **not** full.
 
 That last assertion is the interesting one. Real congestion comes in waves; a
 chain of nothing but full blocks would never confirm an under-bidder at all, and
-"never" is not the behaviour under test. The suite therefore reproduces the trough
-of a wave rather than a permanent siege.
+"never" is not the behaviour under test. The suite therefore reproduces the quiet
+part of a wave rather than a permanent siege.
 
 ### 3. Under the producer's own floor — not even in an empty block
 

@@ -197,7 +197,7 @@ def read_auth(args):
     if not os.path.exists(cookie):
         sys.exit("no rpcuser/rpcpassword in the conf and no cookie at %s "
                  "(node not running, or wrong --chain-subdir?)" % cookie)
-    user, _, pw = open(cookie).read().strip().partition(":")
+    user, _, pw = open(cookie, encoding="utf8").read().strip().partition(":")
     return user, pw
 
 
