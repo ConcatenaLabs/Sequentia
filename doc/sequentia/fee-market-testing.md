@@ -312,3 +312,59 @@ The suite is deliberately blunt about its own preconditions: it asserts the bloc
 really filled before drawing any conclusion from an exclusion. A fee-market test
 that quietly stops congesting is a test that passes for the rest of its life
 without measuring anything.
+
+---
+
+## 6. Known gap: cross-asset `bumpfee` and a confidential input
+
+Found on 2026-09-06 driving the desktop wallet against a local regtest. It is
+recorded here rather than as a passing test because **the suite does not yet
+reproduce it**, and a test that passes for the wrong reason is worse than no test.
+
+**What happens.** `bumpfee` switching to a different fee asset produced a
+replacement the wallet's own node refused with `bad-txns-in-ne-out` — after the
+GUI had told the user the fee was increased. The user is left with a stuck
+transaction and a wallet that believes it replaced it.
+
+**The measurement.** Decoding the pair shows which side fails to balance:
+
+```
+original     1 in,  3 out   change 4997.988692 SPLIT + pay 1.0 SPLIT + fee 0.002056 SPLIT
+replacement  2 in,  4 out   change 199.97908863 gasset
+                            change 4997.990748 SPLIT + pay 1.0 SPLIT
+                            fee 0.003528 gasset
+```
+
+The SPLIT side balances exactly, old fee correctly returned to change. The gasset
+side does not: its input is the second one — and that prevout is **blinded**.
+
+**Why that breaks.** A bump builds an entirely explicit transaction: every
+recipient is rebuilt from the original without a blinding key, and the new fee
+asset's change is requested with `add_blinding_key = false`
+(`CreateRateBumpTransaction`, `src/wallet/feebumper.cpp`). Coin selection is then
+left free with `fAllowOtherInputs = true`, and a confidential coin reaches it as
+`CInputCoin` with `effective_value`, `value` and `asset` all left at zero
+(`src/wallet/coinselection.h`). So the wallet can pick an input whose value the
+explicit accounting cannot see, and the sums do not match.
+
+`feebumper.cpp` already refuses to bump a transaction whose *outputs* are blinded
+("bumpfee can only be called on an unblinded transaction"). The same invariant is
+simply not applied to the inputs the bump goes and fetches.
+
+**What a fix probably is.** Keep the invariant on both sides: exclude confidential
+coins from selection for a bump (a coin-control flag honoured in
+`AvailableCoins`), so the bump either finds explicit funds or fails honestly.
+Blinding the replacement properly is the larger alternative, and contradicts the
+guard already there.
+
+**What a reproduction still needs.** The suite builds nothing blinded, which is
+why case 8 and case 10 both pass. Sending to a confidential address is not enough:
+with `ignoreblindfail` on (the default) a transaction whose blinding cannot be
+honoured silently falls back to an explicit output, so the confidential UTXO never
+appears. A reproduction needs a genuinely blinded output in the wallet — two
+blinded outputs in one transaction, or `ignoreblindfail=false` and a shape that
+can actually blind — and then the same bump across assets.
+
+**How it was hit in the first place**, for anyone retracing it: a wallet that had
+been used normally for a while, including a CPFP whose child paid in another
+asset. The child's change was the confidential output the later bump reached for.
