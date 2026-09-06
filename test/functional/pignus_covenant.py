@@ -87,7 +87,7 @@ from test_framework.script import (
     OP_CHECKLOCKTIMEVERIFY, OP_CHECKSIGFROMSTACK,
     OP_CHECKSIGFROMSTACKVERIFY, OP_DROP, OP_DUP, OP_ELSE, OP_ENDIF, OP_EQUAL,
     OP_EQUALVERIFY, OP_FROMALTSTACK, OP_GREATERTHANOREQUAL, OP_IF, OP_LESSTHAN,
-    OP_NIP, OP_ROT, OP_SWAP, OP_TOALTSTACK, OP_VERIFY,
+    OP_NIP, OP_ROT, OP_SIZE, OP_SWAP, OP_TOALTSTACK, OP_VERIFY,
     OP_INSPECTINPUTVALUE, OP_PUSHCURRENTINPUTINDEX,
     OP_INSPECTOUTPUTASSET, OP_INSPECTOUTPUTVALUE, OP_INSPECTOUTPUTSCRIPTPUBKEY,
     OP_INSPECTNUMOUTPUTS,
@@ -513,10 +513,22 @@ def build_hashlock_leaf(preimage_hash, asset_c, payee_prog, payee_ver=1):
     cross-chain loan end to end -- the same reason REPAY and RECOVER need none.
 
     Witness: [preimage, leaf, control_block].
+
+    The preimage must be exactly 32 bytes, and the leaf says so before it
+    hashes anything. OP_SHA256 will hash a stack item of any length, so without
+    the size check a claimant who chose a 33-byte secret spends this output just
+    as validly -- and the secret then has to cross to the OTHER chain, where
+    the party waiting for it looks for a 32-byte witness item, and where a
+    long preimage makes the Bitcoin spend it unlocks non-standard. Either way
+    the claimant is paid here and the counterparty is left with nothing that
+    starts or finishes their side. Pinning the size is what makes "publishing
+    the secret unlocks the other chain" a property of the script rather than
+    of the claimant's good behaviour.
     """
     if len(preimage_hash) != 32:
         raise ValueError("a SHA-256 commitment is 32 bytes")
-    return CScript([OP_SHA256, preimage_hash, OP_EQUALVERIFY]
+    return CScript([OP_SIZE, 32, OP_EQUALVERIFY,
+                    OP_SHA256, preimage_hash, OP_EQUALVERIFY]
                    + _sweep_body(asset_c, payee_prog, payee_ver))
 
 
