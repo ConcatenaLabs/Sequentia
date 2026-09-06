@@ -262,6 +262,16 @@ void AvailableCoins(const CWallet& wallet, std::vector<COutput> &vCoins, const C
                 continue;
             }
 
+            // SEQUENTIA: see CCoinControl::m_only_explicit_inputs. The wallet can
+            // unblind its own outputs, so the amount below is known here -- but it
+            // is not known to a transaction that carries no blinding, which is why
+            // the test is on the output as it stands on chain rather than on what
+            // the wallet can work out about it.
+            if (coinControl && coinControl->m_only_explicit_inputs &&
+                !(wtx.tx->vout[i].nValue.IsExplicit() && wtx.tx->vout[i].nAsset.IsExplicit())) {
+                continue;
+            }
+
             CAmount outValue = wtx.GetOutputValueOut(wallet, i);
             CAsset asset = wtx.GetOutputAsset(wallet, i);
             if (asset_filter && asset != *asset_filter) {

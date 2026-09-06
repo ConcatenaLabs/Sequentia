@@ -181,7 +181,7 @@ class AnyAssetFeeMarketTest(BitcoinTestFramework):
         raise AssertionError("out of confirmed %s outputs" % asset[:8])
 
     def build(self, fee_asset, fee_rate, amount=Decimal('0.001'), replaceable=False,
-              node=None, spend=None, change_assets=None, funding_assets=None):
+              node=None, spend=None, change_assets=None, funding_assets=None, to=None):
         """A signed, UNBROADCAST transaction paying `fee_rate` reference atoms/vB.
 
         Returned rather than sent, because half this suite is about what happens
@@ -197,8 +197,14 @@ class AnyAssetFeeMarketTest(BitcoinTestFramework):
             # or bumpfee later refuses the transaction as not BIP125 replaceable.
             for i in inputs:
                 i['sequence'] = BIP125_SEQUENCE_NUMBER
+        # Paid OUT of this wallet unless a caller needs the output back. Every
+        # payment to self leaves a 0.001 coin behind, and one of those is worth
+        # EXACTLY the fee a later bump first estimates -- coin selection takes it as
+        # a perfect match, the transaction then grows by an input and a change
+        # output, and the bump dies as "Could not cover fee". The suite is
+        # congesting a chain, not paying itself.
         raw = node.createrawtransaction(inputs, [
-            {node.getnewaddress(): amount, 'asset': fee_asset},
+            {to if to is not None else self.sink: amount, 'asset': fee_asset},
             {'fee': 0, 'fee_asset': fee_asset}])
         # add_inputs=False so the funding above is the whole story: an extra input
         # the wallet chose could be unconfirmed, see take_confirmed.
@@ -285,6 +291,8 @@ class AnyAssetFeeMarketTest(BitcoinTestFramework):
     def init(self):
         # Outputs already handed out, so take_confirmed never repeats one.
         self.spent = set()
+        # Somewhere outside this wallet for filler payments to land.
+        self.sink = self.b.getnewaddress()
         self.generate(self.a, COINBASE_MATURITY + 1)
 
         # Four assets, because the interesting cases are all about disagreement:
@@ -479,7 +487,7 @@ class AnyAssetFeeMarketTest(BitcoinTestFramework):
         """A child that pays for its parent, in the parent's own asset."""
         self.log.info("7. CPFP in the same asset -> parent and child land together")
         self.drain()
-        parent_hex = self.build(self.listed, UNDER_WALL)
+        parent_hex = self.build(self.listed, UNDER_WALL, to=self.a.getnewaddress())
         parent = self.a.sendrawtransaction(parent_hex)
         block = self.mine_full_block()
         assert_equal(parent in block['tx'], False)
@@ -514,7 +522,7 @@ class AnyAssetFeeMarketTest(BitcoinTestFramework):
         """The child pays in another asset than the parent, and still lifts it."""
         self.log.info("9. CPFP switching fee asset -> the package is valued as one")
         self.drain()
-        parent_hex = self.build(self.listed, UNDER_WALL)
+        parent_hex = self.build(self.listed, UNDER_WALL, to=self.a.getnewaddress())
         parent = self.a.sendrawtransaction(parent_hex)
         block = self.mine_full_block()
         assert_equal(parent in block['tx'], False)
@@ -525,86 +533,136 @@ class AnyAssetFeeMarketTest(BitcoinTestFramework):
         assert_equal(child in block['tx'], True)
         self.drain()
 
-    def test_10_rbf_changing_fee_asset_pulls_in_a_confidential_input(self):
-        """Case 8 when the wallet has to reach for a CONFIDENTIAL input to pay.
+    # ------------------------------------------- confidential funds and fee bumps
 
-        Switching the fee asset means the replacement needs an input in the new
-        asset, and coin selection is free to take any -- including a blinded one.
-        But a bump builds an entirely explicit transaction: every recipient is
-        rebuilt without a blinding key, and the new fee asset's change is asked
-        for with add_blinding_key = false. A blinded input in an explicit
-        transaction contributes nothing the amounts can be checked against
-        (CInputCoin leaves its value and asset at zero), so the result would not
-        balance.
+    def mine_out(self, main, limit=30):
+        """Mine until the queue is empty, without touching the bare RPC endpoint.
 
-        This case covers the ordinary shape -- the fee asset sourced from a
-        separate input, with confidential outputs sitting in the wallet beside
-        explicit ones -- and it PASSES. It stays in the suite as the regression
-        guard for that shape.
-
-        It does NOT yet reproduce the failure seen on a real wallet, where exactly
-        this bump produced an unbalanced transaction the node refused as
-        bad-txns-in-ne-out. Every attempt to blind the funding here falls back to
-        an explicit output (ignoreblindfail), so the confidential input the real
-        wallet had is not recreated. The known-gap section of
-        doc/sequentia/fee-market-testing.md carries the measured evidence and what
-        a reproduction still needs.
+        self.drain() cannot be used once a second wallet is loaded: the framework's
+        generate() asks the NODE for an address, and a node with two wallets has no
+        default one to ask.
         """
-        self.log.info("10. RBF switching fee asset, funded by a CONFIDENTIAL input")
+        addr = main.getnewaddress()
+        for _ in range(limit):
+            if not self.a.getrawmempool():
+                return
+            self.a.generatetoaddress(1, addr, invalid_call=False)
+        assert_equal(self.a.getrawmempool(), [])
+
+    def descriptor_wallet(self, name, *, confidential, explicit):
+        """A fresh wallet holding `listed` explicitly and GASSET in the given shapes.
+
+        Confidential funding takes TWO outputs in one transaction on purpose. A
+        single one cannot be balanced, so the wallet silently drops the blinding and
+        hands back an explicit output (ignoreblindfail defaults to true) -- an
+        earlier version of these cases funded that way and passed while testing the
+        explicit path it meant to avoid.
+        """
+        main = self.a.get_wallet_rpc(self.default_wallet_name)
+        self.a.createwallet(wallet_name=name, descriptors=True)
+        w = self.a.get_wallet_rpc(name)
+        addr = w.getnewaddress()
+        conf = [w.getaddressinfo(w.getnewaddress())['confidential'] for _ in range(2)]
+        main.sendtoaddress(address=addr, amount=Decimal('10'), assetlabel=self.listed,
+                           fee_asset_label=GASSET, fee_rate=OVER_WALL)
+        if confidential:
+            main.sendmany(dummy="", amounts={conf[0]: Decimal('5'), conf[1]: Decimal('5')},
+                          output_assets={c: GASSET for c in conf},
+                          fee_asset=GASSET, fee_rate=OVER_WALL)
+        if explicit:
+            main.sendtoaddress(address=addr, amount=Decimal('10'), assetlabel=GASSET,
+                               fee_asset_label=GASSET, fee_rate=OVER_WALL)
+        self.mine_out(main)
+
+        shapes = {False: 0, True: 0}
+        for u in w.listunspent():
+            if u['asset'] == GASSET:
+                shapes[u.get('amountblinder', '0' * 64) != '0' * 64] += 1
+        assert_equal(shapes[True] > 0, confidential)
+        assert_equal(shapes[False] > 0, explicit)
+        return w
+
+    def underbid_from(self, w, dest):
+        """A replaceable transaction paying its fee in `listed`, under the wall."""
+        txid = w.sendtoaddress(address=dest, amount=Decimal('1'), assetlabel=self.listed,
+                               fee_asset_label=self.listed, replaceable=True,
+                               fee_rate=UNDER_WALL)
+        assert txid in self.a.getrawmempool()
+        return txid
+
+    def test_10_bump_across_assets_takes_the_explicit_coin(self):
+        """Switching fee asset must spend the explicit coin, not the confidential one.
+
+        A bump rebuilds every recipient without a blinding key and asks for the new
+        fee asset's change with add_blinding_key = false, so the replacement is
+        entirely explicit -- the same invariant this path already enforces on the
+        transaction being replaced. Coin selection has to respect it: a blinded coin
+        reaches selection as a CInputCoin with its value and asset left at zero, so
+        spending one funds a transaction with an input the amount accounting cannot
+        see.
+
+        Here the wallet holds the fee asset both ways, which is the ordinary state
+        of a wallet that has been used. The replacement must be accepted, and every
+        input it spends must be explicit.
+        """
+        self.log.info("10. bump across assets, wallet holding both shapes -> takes the explicit coin")
         self.drain()
-        # With a second wallet loaded the node's bare RPC endpoint no longer
-        # resolves to a default one, so everything wallet-shaped -- including the
-        # framework's own generate(), which asks the node for an address -- has to
-        # name its wallet from here on.
-        # No wall for this one: it asks whether the replacement is well formed at
-        # all, which nothing about congestion changes. The block goes back to full
-        # size because the wallet has to fund itself the way a wallet does, and a
-        # wallet-built transaction is several times the size of the deliberately
-        # tiny block the other cases use -- it would simply never confirm.
+        # No wall for these two: they ask whether the replacement is well formed at
+        # all, which congestion does not change. Full-size blocks again, because the
+        # wallet has to fund itself the way a wallet does and its transactions are
+        # several times the size of the deliberately tiny block used above.
         self.restart_node(0, extra_args=self.extra_args[0])
         self.connect_nodes(0, 1)
         self.rates_a()
         main = self.a.get_wallet_rpc(self.default_wallet_name)
-        mine_to = main.getnewaddress()
         dest = main.getnewaddress()
 
-        # Take the address, then put the second wallet away again: everything the
-        # suite's own helpers do goes through the node's bare endpoint, which stops
-        # resolving the moment a second wallet is loaded.
-        self.a.createwallet(wallet_name='desc', descriptors=True)
-        addr = self.a.get_wallet_rpc('desc').getnewaddress()
-        self.a.unloadwallet('desc')
-        # The listed funds explicit, the fee asset's BLINDED: the bump will have to
-        # reach for the confidential one, which is the whole point of the case.
-        self.a.loadwallet('desc')
-        conf_addr = self.a.get_wallet_rpc('desc').getaddressinfo(addr)['confidential']
-        self.a.unloadwallet('desc')
-        main.sendtoaddress(address=addr, amount=Decimal('10'), assetlabel=self.listed,
-                           fee_asset_label=GASSET, fee_rate=OVER_WALL)
-        main.sendtoaddress(address=conf_addr, amount=Decimal('10'), assetlabel=GASSET,
-                           fee_asset_label=GASSET, fee_rate=OVER_WALL)
-        for _ in range(20):
-            if not self.a.getrawmempool():
-                break
-            self.a.generatetoaddress(1, mine_to, invalid_call=False)
-        assert_equal(self.a.getrawmempool(), [])
-
-        self.a.loadwallet('desc')
-        w = self.a.get_wallet_rpc('desc')
-        txid = w.sendtoaddress(address=dest, amount=Decimal('1'),
-                               assetlabel=self.listed, fee_asset_label=self.listed,
-                               replaceable=True, fee_rate=UNDER_WALL)
-        assert txid in self.a.getrawmempool()
-
+        w = self.descriptor_wallet('mixed', confidential=True, explicit=True)
+        txid = self.underbid_from(w, dest)
         bumped = w.bumpfee(txid, {'fee_rate': OVER_WALL, 'fee_asset': GASSET})
         assert_equal(bumped['fee_asset'], GASSET)
-        # The wallet's own node must accept its own replacement. On a legacy wallet
-        # it does; on a descriptor wallet the replacement comes out with inputs
-        # that do not match outputs and is refused as bad-txns-in-ne-out -- so the
-        # user is left with a stuck transaction and a wallet that believes it
-        # replaced it.
-        assert_equal(bumped['txid'] in self.a.getrawmempool(), True)
-        self.a.unloadwallet('desc')
+
+        if bumped['txid'] not in self.a.getrawmempool():
+            # Say WHY. "not in the mempool" alone sends the next reader looking at
+            # relay or at BIP125 rules rather than at the transaction itself.
+            reason = self.a.testmempoolaccept(
+                [w.gettransaction(bumped['txid'], True)['hex']])[0].get('reject-reason', '?')
+            raise AssertionError("the wallet's own node refused its replacement: %s" % reason)
+
+        # And it got there by choosing correctly, not by luck.
+        replacement = self.a.decoderawtransaction(w.gettransaction(bumped['txid'], True)['hex'])
+        for vin in replacement['vin']:
+            prev = self.a.getrawtransaction(vin['txid'], True)['vout'][vin['vout']]
+            assert 'value' in prev, "the replacement spends a confidential output"
+        self.a.unloadwallet('mixed')
+
+    def test_11_bump_with_only_confidential_funds_is_refused(self):
+        """And when there is no explicit coin, refuse -- clearly, and in time.
+
+        This is the case that was failing in the field. The wallet would build the
+        replacement anyway, record the bump, and hand the node a transaction it
+        refused as bad-txns-in-ne-out: the user is left with a stuck transaction and
+        a wallet that believes it replaced it.
+
+        Refusing is the honest outcome, but only if the reason given is the true
+        one. "Insufficient funds" would be a lie to someone looking at the balance
+        in their own wallet -- the money is there, it just cannot be spent by a
+        transaction that has to stay unblinded.
+        """
+        self.log.info("11. bump across assets, only confidential funds -> refused, and says why")
+        main = self.a.get_wallet_rpc(self.default_wallet_name)
+        dest = main.getnewaddress()
+        w = self.descriptor_wallet('confonly', confidential=True, explicit=False)
+        txid = self.underbid_from(w, dest)
+
+        assert_raises_rpc_error(-4, "only in confidential outputs",
+                                w.bumpfee, txid, {'fee_rate': OVER_WALL, 'fee_asset': GASSET})
+        # The original is untouched: a refused bump must not leave the wallet in a
+        # state where the transaction is neither replaced nor replaceable again.
+        assert txid in self.a.getrawmempool()
+        bumped = w.bumpfee(txid, {'fee_rate': OVER_WALL})
+        assert bumped['txid'] in self.a.getrawmempool()
+        self.a.unloadwallet('confonly')
 
     # ------------------------------------------------------------------ CPFP help
 
@@ -638,7 +696,8 @@ class AnyAssetFeeMarketTest(BitcoinTestFramework):
         self.test_7_cpfp_same_asset()
         self.test_8_rbf_changing_fee_asset()
         self.test_9_cpfp_changing_fee_asset()
-        self.test_10_rbf_changing_fee_asset_pulls_in_a_confidential_input()
+        self.test_10_bump_across_assets_takes_the_explicit_coin()
+        self.test_11_bump_with_only_confidential_funds_is_refused()
 
 
 if __name__ == '__main__':
