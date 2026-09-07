@@ -5,6 +5,8 @@
 #include <arith_uint256.h>
 #include <blind.h>
 #include <coins.h>
+#include <random.h>
+#include <script/sigcache.h>
 #include <uint256.h>
 #include <validation.h>
 
@@ -368,4 +370,73 @@ BOOST_AUTO_TEST_CASE(naive_blinding_test)
         BOOST_CHECK(!VerifyAmounts(inputs, CTransaction(txtemp), false, nullptr, nullptr, false));
     }
 }
+// Build a valid rangeproof for `amount` of `asset` locked to `scriptPubKey`,
+// returning the serialised value and asset commitments alongside it.
+static void MakeRangeproof(std::vector<unsigned char>& rangeproof, CConfidentialValue& conf_value, CConfidentialAsset& conf_asset, const CAsset& asset, const CAmount amount, const CScript& scriptPubKey)
+{
+    uint256 value_blind = GetRandHash();
+    uint256 asset_blind = GetRandHash();
+
+    secp256k1_generator asset_gen;
+    BlindAsset(conf_asset, asset_gen, asset, asset_blind.begin());
+
+    secp256k1_pedersen_commitment value_commit;
+    CreateValueCommitment(conf_value, value_commit, value_blind.begin(), asset_gen, amount);
+
+    std::vector<unsigned char*> value_blindptrs{value_blind.begin()};
+    std::vector<const unsigned char*> asset_blindptrs{asset_blind.begin()};
+    BOOST_CHECK(GenerateRangeproof(rangeproof, value_blindptrs, GetRandHash(), amount, scriptPubKey, value_commit, asset_gen, asset, asset_blindptrs));
+}
+
+// The rangeproof cache must key on every argument secp256k1_rangeproof_verify
+// is given. It used to key on the proof and the value commitment alone, so a
+// proof accepted for one asset and script was replayed, unverified, under any
+// other asset and script -- which is enough to hand an output a value nobody
+// ever proved to be in range.
+BOOST_AUTO_TEST_CASE(rangeproof_cache_binding_test)
+{
+    secp256k1_context* ctx = secp256k1_context_create(SECP256K1_CONTEXT_VERIFY | SECP256K1_CONTEXT_SIGN);
+    BOOST_CHECK(ctx != nullptr);
+
+    const CachingRangeProofChecker checker(true /* store */);
+
+    const CAsset asset(GetRandHash());
+    const CScript script = CScript() << OP_1 << OP_EQUAL;
+    const CScript other_script = CScript() << OP_2 << OP_EQUAL;
+
+    std::vector<unsigned char> rangeproof;
+    CConfidentialValue conf_value;
+    CConfidentialAsset conf_asset;
+    MakeRangeproof(rangeproof, conf_value, conf_asset, asset, 1000, script);
+
+    // The genuine article verifies, and lands in the cache.
+    BOOST_CHECK(checker.VerifyRangeProof(rangeproof, conf_value.vchCommitment, conf_asset.vchCommitment, script, ctx));
+    BOOST_CHECK(checker.VerifyRangeProof(rangeproof, conf_value.vchCommitment, conf_asset.vchCommitment, script, ctx));
+
+    // Same proof, same value commitment, different asset commitment: the proof
+    // says nothing about this generator, so the cache must not answer for it.
+    CConfidentialAsset other_conf_asset;
+    secp256k1_generator other_gen;
+    uint256 other_asset_blind = GetRandHash();
+    BlindAsset(other_conf_asset, other_gen, CAsset(GetRandHash()), other_asset_blind.begin());
+    BOOST_CHECK(!checker.VerifyRangeProof(rangeproof, conf_value.vchCommitment, other_conf_asset.vchCommitment, script, ctx));
+
+    // Same proof, different script: the script is the proof's extra commitment,
+    // and it also decides whether a zero minimum value is allowed.
+    BOOST_CHECK(!checker.VerifyRangeProof(rangeproof, conf_value.vchCommitment, conf_asset.vchCommitment, other_script, ctx));
+
+    // The shape the issuance path hands us: an issuance rangeproof commits to
+    // an empty (unspendable) script, so it is allowed a minimum value of zero.
+    // Replaying it on a spendable output is how a reissuance token gets
+    // conjured out of nothing.
+    std::vector<unsigned char> issuance_rangeproof;
+    CConfidentialValue issuance_value;
+    CConfidentialAsset issuance_asset;
+    MakeRangeproof(issuance_rangeproof, issuance_value, issuance_asset, CAsset(GetRandHash()), 0, CScript());
+    BOOST_CHECK(checker.VerifyRangeProof(issuance_rangeproof, issuance_value.vchCommitment, issuance_asset.vchCommitment, CScript(), ctx));
+    BOOST_CHECK(!checker.VerifyRangeProof(issuance_rangeproof, issuance_value.vchCommitment, issuance_asset.vchCommitment, script, ctx));
+
+    secp256k1_context_destroy(ctx);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
