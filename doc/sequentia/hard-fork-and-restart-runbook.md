@@ -62,7 +62,7 @@ pass before the next.
 ```
 Bitcoin testnet4 (the anchor)
   -> Sequentia committee (node000-019)  [node000 = producer]
-  -> dexnode (application node, RPC :18300)
+  -> dexnode (systemd seq-dexnode, RPC :18300)
   -> explorer node (systemd seq-explorer-node, clone /root/sequentia/Sequentia)
   -> pool-board node (systemd seq-pool-board-node, same clone)
   -> node RPC wallets loaded (EVERY wallet — they do NOT auto-load)
@@ -115,14 +115,25 @@ Gotchas (verified, do not relearn the hard way):
   producer. At the 24.7.7 cutover this skipped four nodes including node000, and the fleet ran
   16/20 for twenty minutes looking healthy, because the chain kept advancing without it.
 
-  Wait for the waiters to clear between stopping and starting, and verify by COUNT:
+  A process COUNT is not a safe thing to wait on either: at the 24.7.10 cutover a
+  `while [ "$(ps -C sequentiad -o pid= | wc -l)" -ne 0 ]` loop passed the same second the
+  stops were issued, while node000 took five more seconds to release its wallets, and the
+  start script skipped the same four slow nodes again. Wait on the PIDs you are stopping,
+  captured before the stop, so the loop cannot pass until each one is actually gone, then
+  clear any waiter and verify by COUNT:
 
   ```
-  while [ "$(ps -C sequentiad -o pid= | wc -l)" -ne 0 ]; do sleep 2; done
-  while [ "$(ps -C sequentia-cli -o pid= | wc -l)" -ne 0 ]; do sleep 2; done   # <- the missing one
+  pids=$(pgrep -x sequentiad)
+  for n in $(seq -w 0 19); do /root/Sequentia/src/sequentia-cli -datadir=/root/seq-testnet/node0$n stop; done
+  for p in $pids; do while kill -0 "$p" 2>/dev/null; do sleep 1; done; done
+  pkill -x sequentia-cli                                                       # any stop still waiting
   /root/seq-committee-start.sh
   ps -C sequentiad -o args= | grep -c 'seq-testnet/node0'                      # must be 20
   ```
+
+  If the count is short, the missing nodes are down by now and a second run of the start
+  script launches them; nothing else recovers them, because a partial committee keeps
+  producing and looks healthy (Section 8).
 
   `pkill -x sequentia-cli` is safe over SSH where `pkill -f` is not: `-x` matches the process
   NAME, so the ssh command line carrying the pattern cannot match itself.
@@ -136,17 +147,25 @@ Verify: `getblockcount` agrees across nodes and advances; 20/20 answer RPC.
 
 ## 3. dexnode + node RPC wallets (they do NOT auto-load)
 
-dexnode (application node) is launched manually and its wallets must be explicitly loaded.
-The 2026-07-22 miss was exactly this — the sbtc-bridge wallet was never reloaded.
+The dexnode is the systemd unit `seq-dexnode` (`/root/Sequentia/src/sequentiad
+-datadir=/root/seq-testnet/dexnode`, with `-wallet=seqdex-mm-btc` on its ExecStart). Only the
+wallets named on a node's command line or in its `elements.conf` (`wallet=sbtc-bridge` on
+node000, `wallet=covenant-seeder` on the dexnode) are guaranteed back after a restart. Wallets
+loaded by RPC may come back on their own, when the node recorded them in its datadir
+`settings.json`, or may not: at the 24.7.10 cutover ten of node000's fifteen returned by
+themselves and five did not. The 2026-07-22 miss was exactly this — the sbtc-bridge wallet
+was never reloaded. So loop over the captured set and load whatever `listwallets` does not
+show, rather than trusting either mechanism.
 
 **Capture the LIVE set before stopping — the lists below go stale** (node000 held 14 wallets
 at the 24.3.0 cutover against the 4 listed here). And capture how each wallet RESOLVES, not
-just its name:
+just its name. With `-datadir` the CLI reads the node's own cookie, so no credentials are
+needed:
 
 ```
-/root/Sequentia/src/sequentia-cli -rpcport=18200 -rpcuser=$RPCUSER -rpcpassword=$RPCPASS listwallets
-/root/Sequentia/src/sequentia-cli -rpcport=18300 -rpcuser=$RPCUSER -rpcpassword=$RPCPASS listwallets
-ls /root/seq-testnet/node000/testnet3/wallets/    # the layout half of the capture
+/root/Sequentia/src/sequentia-cli -datadir=/root/seq-testnet/node000 listwallets
+/root/Sequentia/src/sequentia-cli -datadir=/root/seq-testnet/dexnode listwallets
+ls -la /root/seq-testnet/node000/testnet3/wallets/    # the layout half of the capture
 ```
 
 **The legacy-layout trap (found at the 24.3.0 cutover, would have bitten quietly):** seven of
@@ -163,17 +182,26 @@ loadwallet <name>
 
 Never load by absolute path.
 
-**node000 (:18200) wallets:** `treasury  treasury2  compages  sbtc-bridge` (+ the captured rest)
+**node000 (:18200) wallets**, fifteen at the 24.7.10 cutover: `treasury compages treasury2
+salvage vtest recovered treasury2026 openampd-demo seqpal-escrow sbtc-bridge openampd-watch
+seqcj cjtest1 cjtest2 pignus-borrower-check` (+ whatever the capture adds)
 ```
-for w in treasury treasury2 compages sbtc-bridge; do /root/Sequentia/src/sequentia-cli -rpcport=18200 -rpcuser=$RPCUSER -rpcpassword=$RPCPASS loadwallet $w; done
+CLI=/root/Sequentia/src/sequentia-cli; D=/root/seq-testnet/node000
+for w in treasury compages treasury2 salvage vtest recovered treasury2026 openampd-demo seqpal-escrow sbtc-bridge openampd-watch seqcj cjtest1 cjtest2 pignus-borrower-check; do
+  $CLI -datadir=$D listwallets | grep -q "\"$w\"" || $CLI -datadir=$D loadwallet $w
+done
 ```
 
-**dexnode (:18300) wallets:** `xmm  seqdex-mm-btc  bridge-taker` (+ load `subtaker submaker
-submaker2 speculad-fee seqob-settler` if the LSP/settler need them — verify against
-`/etc/sequentia/lsp-b5b1.env` SEQ_WALLET and the settler config; these were NOT loaded at the
-last audit and may thin the LSP self-custody paths).
+**dexnode (:18300) wallets**, three at the 24.7.10 cutover: `seqdex-mm-btc xmm covenant-seeder`
+(+ load `bridge-taker subtaker submaker submaker2 speculad-fee seqob-settler xtaker
+lsp-inventory` if the LSP/settler need them — verify against `/etc/sequentia/lsp-b5b1.env`
+SEQ_WALLET and the settler config; these were NOT loaded at the last audit and may thin the
+LSP self-custody paths).
 ```
-for w in xmm seqdex-mm-btc bridge-taker; do /root/Sequentia/src/sequentia-cli -rpcport=18300 -rpcuser=$RPCUSER -rpcpassword=$RPCPASS loadwallet $w; done
+CLI=/root/Sequentia/src/sequentia-cli; D=/root/seq-testnet/dexnode
+for w in seqdex-mm-btc xmm covenant-seeder; do
+  $CLI -datadir=$D listwallets | grep -q "\"$w\"" || $CLI -datadir=$D loadwallet $w
+done
 ```
 
 **bitcoind testnet4 wallets:** `seqdex-mm-btc  w  sell-maker-btc  sell-taker-recv
@@ -222,8 +250,10 @@ Systemd units (Restart=always): `seqob-scmakers`, `seqob-scmakers-buy`, `seqob-x
 loop (ensure ONE instance — two were found running concurrently on 2026-07-22).
 ```
 systemctl restart seqob-scmakers seqob-scmakers-buy seqob-xmakers seqob-subasset-maker seqob-subasset-sell-maker seqob-submarine-gold-sell
-pgrep -fc supervise-xresume.sh    # must be 1, not 2
+ps -eo args | grep -c '^bash /root/seqob-test/supervise-xresume.sh'    # must be 1, not 2
 ```
+(`pgrep -f` over ssh counts the ssh shell carrying the pattern too, and reads as 2 when there
+is one.)
 Same-chain books reseed automatically (seqobd ExecStartPost). Cross/LN/subasset depend on
 their maker fleets reconnecting to the relays + (for LN) ln-asset being up first.
 
@@ -246,15 +276,15 @@ for d in ln-asset ln-asset-b; do systemctl is-active seqob-$d; done
 systemctl is-active lsp-b5b1
 # sbtc-bridge not erroring
 tail -1 /root/sequentia/sbtc-bridge/bridge.log
-# single xresume
-pgrep -fc supervise-xresume.sh
+# single xresume (not pgrep -f: over ssh it counts the shell carrying the pattern)
+ps -eo args | grep -c '^bash /root/seqob-test/supervise-xresume.sh'
 ```
 Section 7 is the basis for the standing health-probe cron (`/root/seq-health-probe.sh`) that
 writes a status line the operator can watch — see the DEX gap-closure plan P0.8.
 
 ## 8. Known post-restart gotchas (do not relearn)
 
-- Wallets never auto-load — always run the Section 3 loops.
+- Wallets do not reliably auto-load — always run the Section 3 loops.
 - ln-asset uses the isolated `-16 asset-bin` binary (NOT the shared `b1a4492`) to avoid the
   subdaemon version-mismatch reexec loop; the systemd units already point at it.
 - A seqln binary change is a FULL consistent cutover: stop the whole LN fleet (makers,
