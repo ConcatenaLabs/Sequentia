@@ -1661,9 +1661,18 @@ void SendCoinsDialog::updateFeeAssetWarning()
     // outside staking eligibility no asset here has one; if the answer for it is
     // uncomfortable the fix is to publish it on the registry, not to stop asking.
     if (!info.registry_listed || !info.has_market_price) {
+        // "Not published" and "we have no registry to ask" are the same silence
+        // and not the same statement. A node with no -assetregistryurl reads
+        // every asset as unpublished, so the first wording accused the whole
+        // chain -- the policy asset included, which is how this was noticed --
+        // of a fact nobody here had checked. No asset is exempted from the
+        // question; the answer is just reported for what it is.
         const QString why = !info.registry_listed
-            ? tr("%1 is not published on the Asset Registry, so the price servers other block producers "
-                 "run will not discover it.").arg(name)
+            ? (info.registry_available
+                   ? tr("%1 is not published on the Asset Registry, so the price servers other block producers "
+                        "run will not discover it.").arg(name)
+                   : tr("This node reads no Asset Registry, so it cannot tell whether %1 is published on one. "
+                        "If it is not, the price servers other block producers run will not discover it.").arg(name))
             : tr("No published market price for %1, so other block producers' price servers cannot "
                  "value it.").arg(name);
         // Replace-By-Fee is the remedy here and only here: this transaction is

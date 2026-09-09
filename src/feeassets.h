@@ -51,8 +51,17 @@ struct FeeAssetInfo {
     bool accepted{false};
     //! Atoms of the asset equal to one reference fee atom. 0 when not listed.
     CAmount rate{0};
-    //! Published by the Asset Registry this node reads.
+    //! Published by the Asset Registry this node reads. Only meaningful when
+    //! `registry_available`: with no registry configured every asset reads as
+    //! unpublished, which is an absence of knowledge and not a finding about the
+    //! asset.
     bool registry_listed{false};
+    //! This node has an Asset Registry to consult (-assetregistryurl is set).
+    //! Without one it cannot tell a genuinely unpublished asset from one it has
+    //! simply never been in a position to look up, and saying the first when it
+    //! means the second accuses every asset on the chain -- which is what a
+    //! regtest, or any node run without a registry, actually sees.
+    bool registry_available{false};
     //! The display price feed quotes this asset above zero.
     bool has_market_price{false};
     //! That price, in the feed's base unit (USD today). 0 when unquoted.
