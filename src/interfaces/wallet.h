@@ -163,6 +163,15 @@ public:
     //! Return whether transaction can be bumped.
     virtual bool transactionCanBeBumped(const uint256& txid) = 0;
 
+    //! SEQUENTIA: why a fee bump is refused, or empty when it is not. For an
+    //! interface that has to explain a disabled control instead of merely
+    //! disabling it.
+    virtual bilingual_str transactionBumpRefusedReason(const uint256& txid) = 0;
+
+    //! SEQUENTIA: whether the transaction can be replaced by one with different
+    //! outputs. Weaker than bumpable: a replacement may be confidential.
+    virtual bool transactionCanBeReplaced(const uint256& txid) = 0;
+
     //! Create bump transaction.
     virtual bool createBumpTransaction(const uint256& txid,
         const wallet::CCoinControl& coin_control,

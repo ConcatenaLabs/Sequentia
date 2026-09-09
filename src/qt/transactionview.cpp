@@ -217,6 +217,9 @@ TransactionView::TransactionView(const PlatformStyle *platformStyle, QWidget *pa
                                  "producer picks it up sooner. Recipient and amount stay the same; you can also "
                                  "switch the fee to a different asset — the cure when producers don't value the "
                                  "original one. For payments you sent that are still unconfirmed.")));
+    // Kept so the tooltip can be swapped for the refusal reason when the entry is
+    // disabled, and swapped back when it is not.
+    bumpFeeAction->setProperty("defaultToolTip", bumpFeeAction->toolTip());
     speedUpAction = contextMenu->addAction(tr("&Speed up (pay child fee, CPFP)"));
     GUIUtil::ExceptionSafeConnect(speedUpAction, &QAction::triggered, this, &TransactionView::speedUp);
     speedUpAction->setObjectName("speedUpAction");
@@ -614,10 +617,29 @@ void TransactionView::contextualMenu(const QPoint &point)
     // address, id and amount work the same for every row.
     const bool parent_chain = selection.at(0).data(TransactionTableModel::ParentChainRole).toBool();
     abandonAction->setEnabled(!parent_chain && model->wallet().transactionCanBeAbandoned(hash));
-    bumpFeeAction->setEnabled(!parent_chain && model->wallet().transactionCanBeBumped(hash));
+    const bool can_bump = !parent_chain && model->wallet().transactionCanBeBumped(hash);
+    bumpFeeAction->setEnabled(can_bump);
     speedUpAction->setEnabled(!parent_chain && model->canDoCPFP(hash));
-    // Replaceable = the same condition as bumpable (unconfirmed, ours, opt-in RBF signalled).
-    replaceAction->setEnabled(!parent_chain && model->wallet().transactionCanBeBumped(hash));
+    // Nearly the same condition as bumpable (unconfirmed, ours, opt-in RBF
+    // signalled) minus one: a replacement is built from scratch and may be
+    // confidential, so a wallet whose transactions come out blinded keeps this
+    // even though it has lost the bump.
+    replaceAction->setEnabled(!parent_chain && model->wallet().transactionCanBeReplaced(hash));
+    // A greyed-out entry with no reason beside it is a feature the user has
+    // simply lost: on a wallet holding confidential coins EVERY transaction is
+    // unbumpable, and nothing on screen said so. The menu shows tooltips
+    // (setToolTipsVisible above) and Qt serves them for disabled entries too, so
+    // this is where the reason belongs.
+    if (can_bump || parent_chain) {
+        bumpFeeAction->setToolTip(bumpFeeAction->property("defaultToolTip").toString());
+    } else {
+        const bilingual_str why = model->wallet().transactionBumpRefusedReason(hash);
+        bumpFeeAction->setToolTip(why.empty()
+            ? bumpFeeAction->property("defaultToolTip").toString()
+            : QStringLiteral("<qt><div style='width:260px'><b>%1</b><br/>%2</div></qt>")
+                  .arg(tr("Not available for this transaction."),
+                       QString::fromStdString(why.translated).toHtmlEscaped()));
+    }
     copyAddressAction->setEnabled(GUIUtil::hasEntryData(transactionView, 0, TransactionTableModel::AddressRole));
     copyLabelAction->setEnabled(GUIUtil::hasEntryData(transactionView, 0, TransactionTableModel::LabelRole));
 
