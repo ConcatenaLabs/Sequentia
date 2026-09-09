@@ -220,6 +220,9 @@ void SendCoinsDialog::setModel(WalletModel *_model)
         connect(ui->confTargetSelector, qOverload<int>(&QComboBox::currentIndexChanged), this, &SendCoinsDialog::coinControlUpdateLabels);
 
 #if (QT_VERSION >= QT_VERSION_CHECK(5, 15, 0))
+        // First in the chain: the two that follow read customFee, so it has to
+        // hold a real figure before they run.
+        connect(ui->groupFee, &QButtonGroup::idClicked, this, &SendCoinsDialog::seedCustomFeeFromRecommended);
         connect(ui->groupFee, &QButtonGroup::idClicked, this, &SendCoinsDialog::updateFeeSectionControls);
         connect(ui->groupFee, &QButtonGroup::idClicked, this, &SendCoinsDialog::coinControlUpdateLabels);
         // Switching back to the recommended fee has to recompute it. Without this
@@ -228,6 +231,7 @@ void SendCoinsDialog::setModel(WalletModel *_model)
         // fee being paid.
         connect(ui->groupFee, &QButtonGroup::idClicked, this, &SendCoinsDialog::updateSmartFeeLabel);
 #else
+        connect(ui->groupFee, qOverload<int>(&QButtonGroup::buttonClicked), this, &SendCoinsDialog::seedCustomFeeFromRecommended);
         connect(ui->groupFee, qOverload<int>(&QButtonGroup::buttonClicked), this, &SendCoinsDialog::updateFeeSectionControls);
         connect(ui->groupFee, qOverload<int>(&QButtonGroup::buttonClicked), this, &SendCoinsDialog::coinControlUpdateLabels);
         connect(ui->groupFee, qOverload<int>(&QButtonGroup::buttonClicked), this, &SendCoinsDialog::updateSmartFeeLabel);
@@ -1180,6 +1184,7 @@ void SendCoinsDialog::updateFeeSectionControls()
     ui->labelCustomFeeWarning   ->setVisible(ui->radioCustomFee->isChecked());
 }
 
+
 void SendCoinsDialog::updateFeeMinimizedLabel()
 {
     if(!model || !model->getOptionsModel())
@@ -1476,6 +1481,47 @@ void SendCoinsDialog::updateFeeGrid(const CAmount& asset_atoms_per_kvb)
             : QString());
     }
     m_fee_grid_updating = false;
+}
+
+void SendCoinsDialog::seedCustomFeeFromRecommended()
+{
+    if (!model || !ui->radioCustomFee->isChecked()) return;
+    // customFee holds DEFAULT_PAY_TX_FEE, which is zero, and stays there for as
+    // long as Recommended is selected -- the field is hidden and nothing writes
+    // to it. So the moment Custom was picked the grid restated that zero, the
+    // two figures the user had been reading vanished, and the validator
+    // announced a fee below the relay minimum: an accusation about a number
+    // nobody had entered, on a state that existed only because the radio moved.
+    //
+    // Custom means "the recommendation, but mine to change", so it starts from
+    // the recommendation. A value the user has already set is left alone.
+    // Strictly greater, not "at least": the field is initialised to exactly the
+    // required fee (setModel raises it to that floor), so "already set" tested
+    // as >= is true from startup and this would never run. A user who wants the
+    // floor itself gets it re-seeded to the recommendation, which is the same
+    // figure they were being shown a moment earlier.
+    const CAmount required = model->wallet().getRequiredFee(1000);
+    if (ui->customFee->value() > required) return;
+
+    // Seed from the number the grid is showing, converted back exactly the way
+    // onFeeCellEdited() converts what the user types. Recomputing the estimate
+    // here does not work: Recommended and Custom reach the grid through
+    // different conversions, so a figure that is right for one prints as the
+    // wrong one for the other. Reusing the round trip the field already uses is
+    // the only way the value cannot drift from what was on screen.
+    CAmount seeded = 0;
+    if (m_fee_kvb_asset) {
+        const CAsset asset = selectedFeeAsset();
+        const FeeAssetInfo info = model->node().getFeeAssetInfo(asset);
+        bool ok = false;
+        const double typed = m_fee_kvb_asset->text().trimmed().toDouble(&ok);
+        if (ok && typed > 0.0 && info.rate > 0) {
+            const double atoms_per_kvb = typed * AtomsPerUnit(info.precision);
+            seeded = static_cast<CAmount>(std::llround(
+                atoms_per_kvb * static_cast<double>(info.rate) / static_cast<double>(exchange_rate_scale)));
+        }
+    }
+    ui->customFee->setValue(std::max(seeded, required));
 }
 
 void SendCoinsDialog::onFeeCellEdited(QLineEdit* source)

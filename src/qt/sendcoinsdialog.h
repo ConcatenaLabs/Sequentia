@@ -181,6 +181,10 @@ private Q_SLOTS:
     void coinControlClipboardLowOutput();
     void coinControlClipboardChange();
     void updateFeeSectionControls();
+    //! SEQUENTIA: entering Custom starts from the figure the user was just
+    //! shown, not from zero. See the definition for why zero was worse than it
+    //! looks.
+    void seedCustomFeeFromRecommended();
     void updateNumberOfBlocks(int count, const QDateTime& blockDate, double nVerificationProgress, bool headers, SynchronizationState sync_state);
     void updateSmartFeeLabel();
 
