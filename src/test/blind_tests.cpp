@@ -439,4 +439,84 @@ BOOST_AUTO_TEST_CASE(rangeproof_cache_binding_test)
     secp256k1_context_destroy(ctx);
 }
 
+// The rangeproof cache key must not be a raw, length-undelimited concatenation
+// of its fields. If it were, two DISTINCT argument tuples whose fields
+// concatenate to the same byte stream would map to the same cache entry, and a
+// positive result cached for one would be returned for the other without
+// verification. Length-prefixed serialization removes that: distinct tuples
+// cannot share an encoding. This is the exact "boundary shift" collision class.
+BOOST_AUTO_TEST_CASE(rangeproof_cache_length_prefix_test)
+{
+    // Two 33-byte commitment blobs (contents irrelevant; this exercises the key
+    // derivation, not proof verification).
+    std::vector<unsigned char> cc(33), ac(33);
+    for (int i = 0; i < 33; ++i) { cc[i] = (unsigned char)(0x40 + i); ac[i] = (unsigned char)(0x80 + i); }
+
+    // Tuple A: proof={0xAA}, comm=cc, asset=ac, script={0xBB}
+    std::vector<unsigned char> proofA{0xAA};
+    std::vector<unsigned char> commA = cc;
+    std::vector<unsigned char> assetA = ac;
+    std::vector<unsigned char> sbytesA{0xBB};
+    CScript scriptA(sbytesA.begin(), sbytesA.end());
+
+    // Tuple B: one byte shifted across each field boundary, so the raw
+    // concatenation proof|comm|asset|script is byte-for-byte identical to A,
+    // while the tuple itself is different.
+    std::vector<unsigned char> proofB{0xAA, cc[0]};
+    std::vector<unsigned char> commB(cc.begin() + 1, cc.end());   // cc[1..32]
+    commB.push_back(ac[0]);                                       // + ac[0]  -> 33 bytes
+    std::vector<unsigned char> assetB(ac.begin() + 1, ac.end());  // ac[1..32]
+    assetB.push_back(0xBB);                                       // + 0xBB   -> 33 bytes
+    std::vector<unsigned char> sbytesB;                           // empty
+    CScript scriptB(sbytesB.begin(), sbytesB.end());
+
+    // Sanity: the raw concatenations really are identical (the pre-fix collision).
+    auto raw = [](const std::vector<unsigned char>& p, const std::vector<unsigned char>& c,
+                  const std::vector<unsigned char>& a, const std::vector<unsigned char>& s) {
+        std::vector<unsigned char> r;
+        r.insert(r.end(), p.begin(), p.end());
+        r.insert(r.end(), c.begin(), c.end());
+        r.insert(r.end(), a.begin(), a.end());
+        r.insert(r.end(), s.begin(), s.end());
+        return r;
+    };
+    BOOST_CHECK(raw(proofA, commA, assetA, sbytesA) == raw(proofB, commB, assetB, sbytesB));
+    // ...but the tuples are genuinely different.
+    BOOST_CHECK(proofA != proofB);
+
+    uint256 entryA, entryB;
+    TestComputeEntryRangeProof(entryA, proofA, commA, assetA, scriptA);
+    TestComputeEntryRangeProof(entryB, proofB, commB, assetB, scriptB);
+    // The whole point: identical raw stream, different keys.
+    BOOST_CHECK(entryA != entryB);
+
+    // And the key is still deterministic for identical inputs (the cache works).
+    uint256 entryA2;
+    TestComputeEntryRangeProof(entryA2, proofA, commA, assetA, scriptA);
+    BOOST_CHECK(entryA == entryA2);
+}
+
+// The surjection cache key must depend on the target generator set (vTags):
+// two verifications that differ only in vTags must not share a cache entry.
+BOOST_AUTO_TEST_CASE(surjection_cache_vtags_test)
+{
+    uint256 wtxid = GetRandHash();
+    std::vector<unsigned char> proof{1, 2, 3};
+    std::vector<unsigned char> commitment(64, 0x07);
+
+    secp256k1_generator g1, g2;
+    memset(g1.data, 0x11, sizeof(g1.data));
+    memset(g2.data, 0x22, sizeof(g2.data));
+    std::vector<secp256k1_generator> tags1{g1};
+    std::vector<secp256k1_generator> tags2{g1, g2};
+
+    uint256 e1, e2, e1b;
+    TestComputeEntrySurjectionProof(e1, wtxid, proof, commitment, tags1);
+    TestComputeEntrySurjectionProof(e2, wtxid, proof, commitment, tags2);
+    TestComputeEntrySurjectionProof(e1b, wtxid, proof, commitment, tags1);
+
+    BOOST_CHECK(e1 != e2);   // different target set -> different key
+    BOOST_CHECK(e1 == e1b);  // deterministic for identical inputs
+}
+
 BOOST_AUTO_TEST_SUITE_END()
