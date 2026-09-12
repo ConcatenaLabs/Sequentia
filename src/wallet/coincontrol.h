@@ -67,6 +67,14 @@ public:
     int m_max_depth = DEFAULT_MAX_DEPTH;
     //! ELEMENT: Override the chain's default fee asset if set and con_any_asset_fees is enabled
     std::optional<CAsset> m_fee_asset;
+    //! SEQUENTIA: refuse confidential coins when the caller is building a
+    //! transaction that must stay explicit. A blinded output reaches coin
+    //! selection as a CInputCoin whose value and asset are left at zero, so
+    //! selecting one funds a transaction with an input the explicit amount
+    //! accounting cannot see -- the result does not balance and the node refuses
+    //! it as bad-txns-in-ne-out. Set by the fee bumper, which rebuilds every
+    //! output explicitly.
+    bool m_only_explicit_inputs = false;
 
     CCoinControl();
 

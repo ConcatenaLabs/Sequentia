@@ -279,6 +279,17 @@ Result CreateRateBumpTransaction(CWallet& wallet, const uint256& txid, const CCo
     }
     new_coin_control.fAllowOtherInputs = true;
 
+    // SEQUENTIA: and only explicit ones. This function rebuilds every recipient
+    // without a blinding key and asks for the new fee asset's change with
+    // add_blinding_key = false, so the replacement is entirely explicit -- which is
+    // the same invariant the check at the top of this function enforces on the
+    // transaction being replaced. Without this, switching to a fee asset the wallet
+    // holds confidentially lets coin selection pick a blinded coin, and the
+    // replacement comes out unbalanced: the node refuses it as bad-txns-in-ne-out
+    // AFTER the wallet has recorded the bump, leaving the user with a stuck
+    // transaction and a wallet that believes it was replaced.
+    new_coin_control.m_only_explicit_inputs = true;
+
     // We cannot source new unconfirmed inputs(bip125 rule 2)
     new_coin_control.m_min_depth = 1;
 
@@ -288,6 +299,39 @@ Result CreateRateBumpTransaction(CWallet& wallet, const uint256& txid, const CCo
     bilingual_str fail_reason;
     FeeCalculation fee_calc_out;
     if (!CreateTransaction(wallet, recipients, tx_new, fee_ret, change_pos_in_out, fail_reason, new_coin_control, fee_calc_out, false)) {
+        // "Insufficient funds" is a misleading thing to tell someone who can see
+        // the balance sitting in their wallet. If the fee asset is there but only
+        // in confidential outputs, the wallet is not short of money -- it is short
+        // of money it can spend in a replacement that has to stay explicit -- and
+        // saying so points at the one thing that would help: pay the bump in
+        // another asset.
+        if (g_con_any_asset_fees) {
+            bool confidential_only = false;
+            {
+                LOCK(wallet.cs_wallet);
+                std::vector<COutput> coins;
+                CCoinControl probe;
+                probe.m_min_depth = new_coin_control.m_min_depth;
+                AvailableCoins(wallet, coins, &probe, 1, MAX_MONEY, MAX_MONEY, 0, &fee_asset);
+                bool any_explicit = false, any_confidential = false;
+                for (const COutput& out : coins) {
+                    const CTxOut& txout = out.tx->tx->vout[out.i];
+                    if (txout.nValue.IsExplicit() && txout.nAsset.IsExplicit()) {
+                        any_explicit = true;
+                    } else {
+                        any_confidential = true;
+                    }
+                }
+                confidential_only = any_confidential && !any_explicit;
+            }
+            if (confidential_only) {
+                errors.push_back(Untranslated(
+                    "Cannot bump the fee in this asset: the wallet holds it only in confidential "
+                    "outputs, and a fee bump has to be an unblinded transaction. Bump in another "
+                    "asset, or send the confidential balance to yourself unblinded first."));
+                return Result::WALLET_ERROR;
+            }
+        }
         errors.push_back(Untranslated("Unable to create transaction.") + Untranslated(" ") + fail_reason);
         return Result::WALLET_ERROR;
     }
