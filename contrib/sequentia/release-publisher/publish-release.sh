@@ -175,9 +175,21 @@ run_recipe() {
 # Rewritten from what is PRESENT, never from what this run happened to build, so
 # a product that was skipped or failed keeps offering its previous version
 # instead of turning into a 404.
+#
+# Two pages carry cards: the full one at index.html and the Sequentia Core one
+# at core/index.html, which the site's front page links and which reaches the
+# same files through "../". The substitutions below match the filename wherever
+# it appears in a link, so one pass serves both.
 update_index() {
-  local index="$DOWNLOAD_DIR/index.html"
-  [ -f "$index" ] || { log "no index.html; nothing to repoint"; return 0; }
+  local page
+  for page in "$DOWNLOAD_DIR/index.html" "$DOWNLOAD_DIR/core/index.html"; do
+    repoint_page "$page"
+  done
+}
+
+repoint_page() {
+  local index="$1"
+  [ -f "$index" ] || { log "no ${index#"$DOWNLOAD_DIR/"}; nothing to repoint"; return 0; }
   cp -p "$index" "$index.bak-publish"
 
   local recipe name glob newest recipe_version
@@ -233,9 +245,9 @@ update_index() {
 
   # Only what the page actually links: the surrounding prose mentions filenames
   # too ("run Fulmen.exe"), and reporting those as offered artifacts is noise.
-  log "page now offers:"
+  log "${index#"$DOWNLOAD_DIR/"} now offers:"
   grep -oE 'href="[^"]+\.(tar\.gz|exe|zip|AppImage|apk)"' "$index" \
-    | sed -E 's#href="(.*)"#\1#' | sort -u | sed 's/^/  /'
+    | sed -E 's#href="(\.\./)?(.*)"#\2#' | sort -u | sed 's/^/  /'
 }
 
 # --- Checksums for everything the directory serves ----------------------------
