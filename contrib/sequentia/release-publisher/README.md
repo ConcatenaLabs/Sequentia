@@ -3,7 +3,9 @@
 Keeps `sequentiatestnet.com/download/` current without anyone touching the box.
 It covers **everything the page offers**, not only the node: Sequentia Core, the
 Fulmen Lightning wallet, the browser extension, the Ambra mobile wallet,
-Seqognito and the Pignus lending CLI.
+Seqognito and the Pignus lending CLI. The Sequentia Core page at
+`sequentiatestnet.com/download/core/`, the one the site's front page links, is
+repointed in the same pass; it shows the node alone and links the same files.
 
 Every ten minutes it asks each product what version is published upstream. If that
 differs from what it published last, it builds that version and puts the artifacts
