@@ -126,7 +126,7 @@ class PosWalletStakingTest(BitcoinTestFramework):
 
         self.log.info("the merged key set is persisted for the next restart")
         settings = os.path.join(n0.datadir, self.chain, "settings.json")
-        with open(settings) as f:
+        with open(settings, encoding="utf8") as f:
             saved = json.load(f)
         assert_equal(saved["posproducer"], True)
         assert_equal(len(saved["posproducerkey"]), keys_before + 1)
