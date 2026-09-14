@@ -205,6 +205,13 @@ private:
     //! config layer takes precedence when both are present.
     std::map<CPubKey, std::vector<unsigned char>> m_bls GUARDED_BY(m_mutex);
     std::map<CPubKey, std::vector<unsigned char>> m_bls_utxo GUARDED_BY(m_mutex);
+    //! How many unspent staking outputs of each staker carry its BLS key. The
+    //! key stays registered while any of them exists: a staker may hold
+    //! BLS-less outputs beside registered ones (the registration is added by
+    //! funding one more output), and losing the registered output to a spend
+    //! or a reorg must drop the key even though weight remains, exactly as a
+    //! restart's rebuild from the UTXO set would.
+    std::map<CPubKey, uint32_t> m_bls_utxo_outputs GUARDED_BY(m_mutex);
     //! SEQUENTIA delegation: controller pubkey -> the signer that produces blocks
     //! with the controller's weight. Derived from unspent delegation-record
     //! outputs (BuildDelegationScript), so it is a pure function of the UTXO set,
@@ -282,6 +289,7 @@ public:
         m_utxo.clear();
         m_bls.clear();
         m_bls_utxo.clear();
+        m_bls_utxo_outputs.clear();
         m_deleg_utxo.clear();
         m_payout_utxo.clear();
         m_utxo_tranches.clear();
@@ -324,11 +332,18 @@ public:
                       std::map<CPubKey, std::map<int64_t, PosPayoutPolicy>>&& payout_utxo = {},
                       std::map<CPubKey, std::map<int, uint64_t>>&& utxo_tranches = {},
                       std::map<CPubKey, int>&& deleg_height = {},
-                      std::map<CPubKey, std::map<COutPoint, PosPotRef>>&& pot_utxo = {})
+                      std::map<CPubKey, std::map<COutPoint, PosPotRef>>&& pot_utxo = {},
+                      std::map<CPubKey, uint32_t>&& bls_utxo_outputs = {})
     {
         LOCK(m_mutex);
         m_utxo = std::move(utxo);
         m_bls_utxo = std::move(bls_utxo);
+        // A caller that supplies registrations without counting the outputs
+        // behind them (the unit tests) means one output each.
+        m_bls_utxo_outputs = std::move(bls_utxo_outputs);
+        if (m_bls_utxo_outputs.empty()) {
+            for (const auto& e : m_bls_utxo) m_bls_utxo_outputs[e.first] = 1;
+        }
         m_deleg_utxo = std::move(deleg_utxo);
         m_payout_utxo = std::move(payout_utxo);
         m_utxo_tranches = std::move(utxo_tranches);
@@ -350,12 +365,17 @@ public:
         LOCK(m_mutex);
         m_utxo[pubkey] += amount;
         m_utxo_tranches[pubkey][height] += amount;
-        if (!bls_pubkey.empty()) m_bls_utxo[pubkey] = bls_pubkey;
+        if (!bls_pubkey.empty()) {
+            m_bls_utxo[pubkey] = bls_pubkey;
+            ++m_bls_utxo_outputs[pubkey];
+        }
     }
-    //! A staking output left the UTXO set (spent, or its creation reverted). The
-    //! UTXO BLS key is tied to the staker having any UTXO weight: when the last
-    //! staking output is gone, the registration goes with it.
-    void SubUtxoStake(const CPubKey& pubkey, uint64_t amount, int height = 0)
+    //! A staking output left the UTXO set (spent, or its creation reverted).
+    //! `carried_bls` says whether that output registered the staker's BLS key:
+    //! the key stays while any registered output remains and goes with the last
+    //! one, so the registry keeps matching a rebuild from the UTXO set. It also
+    //! goes when the staker's last output of any kind is gone.
+    void SubUtxoStake(const CPubKey& pubkey, uint64_t amount, int height = 0, bool carried_bls = false)
     {
         LOCK(m_mutex);
         auto it = m_utxo.find(pubkey);
@@ -379,9 +399,17 @@ public:
             }
             if (tit->second.empty()) m_utxo_tranches.erase(tit);
         }
+        if (carried_bls) {
+            auto cit = m_bls_utxo_outputs.find(pubkey);
+            if (cit != m_bls_utxo_outputs.end() && --cit->second == 0) {
+                m_bls_utxo_outputs.erase(cit);
+                m_bls_utxo.erase(pubkey);
+            }
+        }
         if (it->second == 0) {
             m_utxo.erase(it);
             m_bls_utxo.erase(pubkey);
+            m_bls_utxo_outputs.erase(pubkey);
         }
     }
 

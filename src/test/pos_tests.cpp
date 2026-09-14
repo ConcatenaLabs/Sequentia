@@ -1029,11 +1029,29 @@ BOOST_AUTO_TEST_CASE(pos_stake_bls_registration)
     BOOST_CHECK(reg.HasBls(staker));
     BOOST_CHECK(reg.GetBls(staker) == blspub);
     reg.AddUtxoStake(staker, 50, blspub);        // second output, same key
-    reg.SubUtxoStake(staker, 50);                // spend one — key stays
+    reg.SubUtxoStake(staker, 50, 0, true);       // spend one — key stays
     BOOST_CHECK(reg.HasBls(staker));
-    reg.SubUtxoStake(staker, 100);               // spend the last — key gone
+    reg.SubUtxoStake(staker, 100, 0, true);      // spend the last — key gone
     BOOST_CHECK(!reg.HasBls(staker));
     BOOST_CHECK(reg.GetBls(staker).empty());
+
+    // The key belongs to the outputs that CARRY it, not to the staker's
+    // weight. A BLS-less output beside a registered one keeps the weight when
+    // the registered output goes (spent, or reorged away), and the key must go
+    // with it, as a rebuild from the UTXO set would have it; otherwise a
+    // running node and a restarted one disagree on committee membership.
+    reg.Clear();
+    reg.AddUtxoStake(staker, 100);               // no registration
+    reg.AddUtxoStake(staker, 50, blspub);        // the registered output
+    BOOST_CHECK(reg.HasBls(staker));
+    reg.SubUtxoStake(staker, 50, 0, true);       // the registered output leaves
+    BOOST_CHECK(!reg.HasBls(staker));
+    BOOST_CHECK_EQUAL(reg.GetWeight(staker), 100U);
+    reg.AddUtxoStake(staker, 50, blspub);        // it comes back (reconsidered)
+    BOOST_CHECK(reg.HasBls(staker));
+    reg.SubUtxoStake(staker, 100, 0, false);     // the BLS-less output leaves
+    BOOST_CHECK(reg.HasBls(staker));             // key stays with its output
+    BOOST_CHECK_EQUAL(reg.GetWeight(staker), 50U);
 
     // Config layer takes precedence over the UTXO layer.
     const std::vector<unsigned char> cfgkey(48, 0x33);

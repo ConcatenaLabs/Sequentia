@@ -1339,7 +1339,8 @@ void PosApplyBlockStake(const CBlock& block, const CBlockUndo& undo, int height)
         for (size_t j = 0; j < txundo.vprevout.size() && j < tx->vin.size(); ++j) {
             const Coin& coin = txundo.vprevout[j];
             if (auto stake = StakeFromTxOut(coin.out)) {
-                registry.SubUtxoStake(stake->first, stake->second, (int)coin.nHeight);
+                registry.SubUtxoStake(stake->first, stake->second, (int)coin.nHeight,
+                                      ParseStakeBlsRegistration(coin.out.scriptPubKey).has_value());
                 LogPrintf("PoS: staking output spend removes %llu from %s\n", (unsigned long long)stake->second, HexStr(stake->first));
             }
             // Conditional erase, so a rotation (old record spent + new record
@@ -1401,7 +1402,8 @@ void PosRevertBlockStake(const CBlock& block, const CBlockUndo& undo, int height
         for (size_t n = 0; n < tx->vout.size(); ++n) {
             const CTxOut& out = tx->vout[n];
             if (auto stake = StakeFromTxOut(out)) {
-                registry.SubUtxoStake(stake->first, stake->second, height);
+                registry.SubUtxoStake(stake->first, stake->second, height,
+                                      ParseStakeBlsRegistration(out.scriptPubKey).has_value());
             }
             if (auto deleg = DelegationFromTxOut(out)) {
                 registry.SubUtxoDelegation(deleg->first, deleg->second);
@@ -1422,6 +1424,7 @@ bool RebuildUtxoStake(CCoinsView& view)
 {
     std::map<CPubKey, uint64_t> utxo_stake;
     std::map<CPubKey, std::vector<unsigned char>> utxo_bls;
+    std::map<CPubKey, uint32_t> utxo_bls_outputs;
     std::map<CPubKey, CPubKey> utxo_deleg;
     std::map<CPubKey, std::map<int64_t, PosPayoutPolicy>> utxo_payout;
     std::map<CPubKey, std::map<int, uint64_t>> utxo_tranches;
@@ -1451,6 +1454,7 @@ bool RebuildUtxoStake(CCoinsView& view)
             // so any one is authoritative.
             if (auto reg = ParseStakeBlsRegistration(coin.out.scriptPubKey)) {
                 utxo_bls[stake->first] = reg->first;
+                ++utxo_bls_outputs[stake->first];
             }
         }
         // Unspent delegation records re-point weight onto signers. A consensus
@@ -1479,7 +1483,7 @@ bool RebuildUtxoStake(CCoinsView& view)
     StakeRegistry::GetInstance().SetUtxoStake(std::move(utxo_stake), std::move(utxo_bls),
                                               std::move(utxo_deleg), std::move(utxo_payout),
                                               std::move(utxo_tranches), std::move(deleg_height),
-                                              std::move(pot_utxo));
+                                              std::move(pot_utxo), std::move(utxo_bls_outputs));
     return true;
 }
 
