@@ -18,7 +18,6 @@
 #include <policy/settings.h>
 #include <bls.h>
 #include <set>
-#include <interfaces/chain.h>
 #include <pos.h>
 #include <rpc/rawtransaction_util.h>
 #include <rpc/util.h>
