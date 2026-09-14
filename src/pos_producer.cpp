@@ -521,7 +521,7 @@ void PosProducer::Start()
     g_active_producer.store(this);
     RegisterValidationInterface(this);
     m_thread = std::thread(&util::TraceThread, "posproducer", [this] { ThreadLoop(); });
-    LogPrintf("PoS producer: started with %d staking key(s)\n", (int)m_keys.size());
+    LogPrintf("PoS producer: started with %d staking key(s)\n", (int)Keys().size());
 }
 
 void PosProducer::Stop()
@@ -536,6 +536,32 @@ void PosProducer::Stop()
     m_cv.notify_all();
     if (m_thread.joinable()) m_thread.join();
     m_running = false;
+}
+
+std::vector<CKey> PosProducer::Keys() const
+{
+    std::lock_guard<std::mutex> lock(m_keys_mutex);
+    return m_keys;
+}
+
+size_t PosProducer::AddKeys(const std::vector<CKey>& keys)
+{
+    size_t added = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_keys_mutex);
+        std::set<CPubKey> have;
+        for (const CKey& k : m_keys) have.insert(k.GetPubKey());
+        for (const CKey& k : keys) {
+            if (!k.IsValid() || !have.insert(k.GetPubKey()).second) continue;
+            m_keys.push_back(k);
+            ++added;
+        }
+    }
+    if (added > 0) {
+        LogPrintf("PoS producer: %d staking key(s) added at runtime, %d loaded\n", (int)added, (int)Keys().size());
+        Wake();
+    }
+    return added;
 }
 
 void PosProducer::UpdatedBlockTip(const CBlockIndex*, const CBlockIndex*, bool)
@@ -716,15 +742,18 @@ int64_t PosProducer::Step()
     // schedule prefix (leader election stays private-VRF).
     std::set<CPubKey> public_committee;
     if (g_pos_public_committee) public_committee = PosPublicCommitteeSet(registry, seed);
+    // One snapshot per pass: a key added at runtime (AddKeys) joins the next pass
+    // rather than shifting indices under this one.
+    const std::vector<CKey> keys = Keys();
     int best_idx = -1;
     uint64_t best_slot = 0;
     int local_committee_eligible = 0; // how many of our keys are committee members this slot
-    for (size_t i = 0; i < m_keys.size(); ++i) {
-        const CPubKey pub = m_keys[i].GetPubKey();
+    for (size_t i = 0; i < keys.size(); ++i) {
+        const CPubKey pub = keys[i].GetPubKey();
         if (!PosIsEligibleStake(registry.GetWeight(pub))) continue;
         uint64_t slot;
         if (g_pos_vrf) {
-            auto proof = VrfProve(m_keys[i], Span<const unsigned char>(seed.begin(), 32));
+            auto proof = VrfProve(keys[i], Span<const unsigned char>(seed.begin(), 32));
             if (!proof) continue;
             uint256 beta;
             if (!VrfVerify(pub, Span<const unsigned char>(seed.begin(), 32), *proof, beta)) continue;
@@ -794,7 +823,7 @@ int64_t PosProducer::Step()
                 if (start) m_proposed_height = height;
             }
             if (start) {
-                ProposeGossip(m_keys[best_idx]);
+                ProposeGossip(keys[best_idx]);
                 round_poll = 150;
             }
         }
@@ -815,13 +844,13 @@ int64_t PosProducer::Step()
     // Due now: assemble, sign, submit. The remaining keys serve as committee
     // signers for the single-host committee case (none for committee = 1).
     std::vector<CKey> committee_keys;
-    for (size_t i = 0; i < m_keys.size(); ++i) {
-        if ((int)i != best_idx) committee_keys.push_back(m_keys[i]);
+    for (size_t i = 0; i < keys.size(); ++i) {
+        if ((int)i != best_idx) committee_keys.push_back(keys[i]);
     }
     PosProduceResult res;
     std::string err;
     PosProduceError kind = PosProduceError::NONE;
-    if (ProducePosBlock(m_chainman, m_mempool, m_chainparams, m_keys[best_idx], committee_keys, res, err, kind)) {
+    if (ProducePosBlock(m_chainman, m_mempool, m_chainparams, keys[best_idx], committee_keys, res, err, kind)) {
         LogPrintf("PoS producer: created block %s at height %d (rank %d, %d countersignature(s))\n",
                   res.hash.GetHex(), res.height, (int)res.rank, res.countersignatures);
     } else {
@@ -903,7 +932,7 @@ std::vector<PosShare> PosProducer::MakeLocalShares(const CBlock& block)
     // format) but no longer decides membership.
     std::set<CPubKey> public_committee;
     if (g_pos_public_committee) public_committee = PosPublicCommitteeSet(reg, seed);
-    for (const CKey& k : m_keys) {
+    for (const CKey& k : Keys()) {
         const CPubKey pub = k.GetPubKey();
         if (!PosIsEligibleStake(reg.GetWeight(pub))) continue;
         if (g_pos_public_committee && !public_committee.count(pub)) continue;

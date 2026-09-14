@@ -16,6 +16,9 @@
 #include <fstream>
 #include <wallet/scriptpubkeyman.h>
 #include <policy/settings.h>
+#include <bls.h>
+#include <set>
+#include <interfaces/chain.h>
 #include <pos.h>
 #include <rpc/rawtransaction_util.h>
 #include <rpc/util.h>
@@ -133,6 +136,12 @@ UniValue SendMoney(CWallet& wallet, const CCoinControl &coin_control, std::vecto
     return tx->GetHash().GetHex();
 }
 
+// Defined with the unstake helpers below (same unnamed namespace).
+namespace {
+bool WalletControlsStakerKey(const CWallet& wallet, const CPubKey& pubkey) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
+bool GetStakerKey(const CWallet& wallet, const CPubKey& pubkey, CKey& key_out);
+} // namespace
+
 RPCHelpMan registerstake()
 {
     return RPCHelpMan{"registerstake",
@@ -140,15 +149,19 @@ RPCHelpMan registerstake()
                 "canonical staking output (see getstakescript) from this wallet. The amount counts as the\n"
                 "key's on-chain stake while the output stays unspent; spending it (unbonding) requires the\n"
                 "staker key and the script's CSV maturity. Get a staker pubkey with getnewaddress followed\n"
-                "by getaddressinfo. To then produce blocks, call startposproducer with the staker key's WIF\n"
-                "(no restart needed; it persists across restarts) — or start the node with -posproducer and\n"
-                "-posproducerkey.\n",
+                "by getaddressinfo. To then produce blocks, call startstaking (this wallet hands the key to\n"
+                "the node's producer, no restart, persists across restarts) — or start the node with\n"
+                "-posproducer and -posproducerkey.\n"
+                "On a chain with the public fixed-size committee (-pospubliccommittee), a staker also needs a\n"
+                "committee BLS key registered in its staking output, or the committee can never certify the\n"
+                "blocks it leads. When this wallet holds the staker key and no blspubkey is given, that\n"
+                "registration is derived from the key and included automatically.\n",
                 {
                     {"pubkey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The staker public key (hex)."},
                     {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "Amount of Sequence (SEQ) to stake (at or above the chain's minimum stake)."},
                     {"csv_blocks", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Height-based unbonding delay in blocks (default: the chain minimum)."},
                     {"csv_seconds", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Time-based unbonding delay in seconds (mutually exclusive with csv_blocks)."},
-                    {"blspubkey", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "SEQUENTIA: committee BLS public key to register with this stake (from getblsregistration), so the staker can join the public fixed-size committee. Requires pop."},
+                    {"blspubkey", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "SEQUENTIA: committee BLS public key to register with this stake (from getblsregistration), so the staker can join the public fixed-size committee. Requires pop. Omit it when this wallet holds the staker key: on a public-committee chain the registration is derived and included by itself."},
                     {"pop", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "SEQUENTIA: the BLS proof-of-possession for blspubkey (from getblsregistration)."},
                     {"liquid_locktime", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "SEQUENTIA vesting: an absolute timelock (BIP65) before which the stake cannot be spent, sold, or transferred, while still accruing stake weight throughout (a \"staking-only period\"). A unix time (>=500000000) or a block height (<500000000)."},
                 },
@@ -158,6 +171,9 @@ RPCHelpMan registerstake()
                     {RPCResult::Type::NUM, "csv", "the BIP68 CSV value encoded in the script"},
                     {RPCResult::Type::NUM, "unbonding_seconds", "the unbonding lock in seconds before the stake can be withdrawn"},
                     {RPCResult::Type::NUM, "liquid_locktime", /*optional=*/true, "the absolute vesting locktime encoded in the script, if any"},
+                    {RPCResult::Type::STR_HEX, "blspubkey", /*optional=*/true, "the committee BLS key registered in the output, given or derived"},
+                    {RPCResult::Type::BOOL, "committee_ready", "whether the output registers a committee BLS key (always true off the public committee, where none is needed)"},
+                    {RPCResult::Type::STR, "note", /*optional=*/true, "why no committee key could be registered, when committee_ready is false on a public-committee chain"},
                 }},
                 RPCExamples{HelpExampleCli("registerstake", "\"02abc...\" 50000")},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
@@ -208,6 +224,35 @@ RPCHelpMan registerstake()
         if (liquid_locktime <= 0 || liquid_locktime > 0xffffffffLL)
             throw JSONRPCError(RPC_INVALID_PARAMETER, "liquid_locktime must be between 1 and 4294967295 (a unix time, or a block height below 500000000)");
     }
+    // No registration given on a public-committee chain: derive it from the
+    // staker key when this wallet holds it. A stake without one carries weight
+    // and can be elected leader, but its blocks can never be certified, which
+    // is invisible until the operator wonders why it produces nothing. The
+    // registry admits one BLS key per staker, and the derivation is a pure
+    // function of the key, so a later output always matches an earlier one.
+    std::string bls_note;
+    if (!has_bls && g_pos_public_committee) {
+        CKey staker_key;
+        bool held = false;
+        {
+            LOCK(pwallet->cs_wallet);
+            held = WalletControlsStakerKey(*pwallet, pubkey);
+            if (held && pwallet->IsLocked()) {
+                throw JSONRPCError(RPC_WALLET_UNLOCK_NEEDED, "Error: Please enter the wallet passphrase with walletpassphrase first: the committee BLS registration is derived from the staker key");
+            }
+            if (held) held = GetStakerKey(*pwallet, pubkey, staker_key);
+        }
+        if (held) {
+            const std::vector<unsigned char> seed = PosBlsSeedFromKey(staker_key);
+            auto pub = BlsDerivePubKey(seed);
+            auto pop = BlsProvePossession(seed);
+            if (!pub || !pop) throw JSONRPCError(RPC_MISC_ERROR, "BLS registration derivation failed");
+            bls_pubkey = *pub;
+            bls_pop = *pop;
+        } else {
+            bls_note = "this wallet does not hold the staker key, so no committee BLS key was registered; pass blspubkey and pop (getblsregistration) or the stake can lead but never be certified";
+        }
+    }
     CScript stake_script = BuildStakeScript(pubkey, csv, bls_pubkey, bls_pop, liquid_locktime);
     CAmount amount = AmountFromValue(request.params[1], true);
     // Enforce the chain's minimum-stake floor: a sub-floor output is silently
@@ -231,6 +276,9 @@ RPCHelpMan registerstake()
     result.pushKV("csv", (int64_t)csv);
     if (lock) result.pushKV("unbonding_seconds", (int64_t)*lock);
     if (liquid_locktime > 0) result.pushKV("liquid_locktime", liquid_locktime);
+    if (!bls_pubkey.empty()) result.pushKV("blspubkey", HexStr(bls_pubkey));
+    result.pushKV("committee_ready", !g_pos_public_committee || !bls_pubkey.empty());
+    if (!bls_note.empty()) result.pushKV("note", bls_note);
     return result;
 },
     };
@@ -986,6 +1034,89 @@ RPCHelpMan bumpwithdrawstakefee()
     if (ExtractDestination(tx->vout[dest_idx].scriptPubKey, dest)) {
         result.pushKV("destination", EncodeDestination(dest));
     }
+    return result;
+},
+    };
+}
+
+// --- SEQUENTIA: turn block production on from this wallet's own staker keys ---
+
+RPCHelpMan startstaking()
+{
+    return RPCHelpMan{"startstaking",
+                "\nEnable Proof-of-Stake block production for the staker keys this wallet holds, at runtime,\n"
+                "with no restart. The wallet hands each key to the node's producer in-process, so nothing is\n"
+                "exported; the node persists the set (settings.json in the datadir, where -posproducerkey\n"
+                "lives) so production resumes automatically after a restart. Works for descriptor and legacy\n"
+                "wallets alike. A key produces only once its stake is registered at or above the chain\n"
+                "minimum (registerstake) and, on a public-committee chain, carries a committee BLS key.\n",
+                {
+                    {"pubkeys", RPCArg::Type::ARR, RPCArg::Optional::OMITTED, "Staker public keys to enable (hex). Default: every staker key this wallet registered a stake for (liststakeutxos).",
+                        {{"pubkey", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "A staker public key this wallet holds."}}},
+                },
+                RPCResult{RPCResult::Type::OBJ, "", "", {
+                    {RPCResult::Type::BOOL, "producing", "true if the autonomous producer is now running"},
+                    {RPCResult::Type::NUM, "keys", "number of distinct producer keys now loaded"},
+                    {RPCResult::Type::NUM, "added", "how many of this wallet's keys were new to the producer"},
+                    {RPCResult::Type::BOOL, "persisted", "true if the choice was saved for the next restart"},
+                    {RPCResult::Type::BOOL, "started", "true if this call started the producer (false if it was already running)"},
+                    {RPCResult::Type::ARR, "pubkeys", "the staker keys handed to the producer", {{RPCResult::Type::STR_HEX, "pubkey", ""}}},
+                }},
+                RPCExamples{HelpExampleCli("startstaking", "") + HelpExampleCli("startstaking", "'[\"02abc...\"]'")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!g_con_pos) throw JSONRPCError(RPC_MISC_ERROR, "Proof-of-Stake (con_pos) is not enabled on this chain");
+    std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
+    if (!pwallet) return NullUniValue;
+    pwallet->BlockUntilSyncedToCurrentChain();
+
+    std::vector<CPubKey> pubkeys;
+    if (!request.params[0].isNull()) {
+        const UniValue& arr = request.params[0].get_array();
+        for (size_t i = 0; i < arr.size(); ++i) {
+            CPubKey pk(ParseHexV(arr[i], "pubkey"));
+            if (!pk.IsFullyValid()) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid staker public key");
+            pubkeys.push_back(pk);
+        }
+        if (pubkeys.empty()) throw JSONRPCError(RPC_INVALID_PARAMETER, "pubkeys must name at least one staker key");
+    }
+
+    std::vector<CKey> keys;
+    UniValue enabled(UniValue::VARR);
+    {
+        LOCK(pwallet->cs_wallet);
+        EnsureWalletIsUnlocked(*pwallet);
+        if (pubkeys.empty()) {
+            // Every key this wallet has registered a stake for, confirmed or not:
+            // a stake still in the mempool is exactly the one the operator just
+            // made and wants producing the moment it confirms.
+            std::set<CPubKey> seen;
+            for (const StakeUtxo& s : FindWalletStakeUtxos(*pwallet, std::nullopt)) {
+                if (!s.withdrawing && seen.insert(s.parsed.pubkey).second) pubkeys.push_back(s.parsed.pubkey);
+            }
+            if (pubkeys.empty()) throw JSONRPCError(RPC_WALLET_ERROR, "This wallet has no registered stake to produce with (see registerstake)");
+        }
+        for (const CPubKey& pk : pubkeys) {
+            CKey key;
+            if (!WalletControlsStakerKey(*pwallet, pk) || !GetStakerKey(*pwallet, pk, key)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, strprintf("This wallet does not hold the private key for staker %s", HexStr(pk)));
+            }
+            keys.push_back(key);
+            enabled.push_back(HexStr(pk));
+        }
+    }
+
+    interfaces::PosProducerStart out;
+    std::string error;
+    if (!pwallet->chain().startPosProducer(keys, out, error)) throw JSONRPCError(RPC_MISC_ERROR, error);
+
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("producing", out.producing);
+    result.pushKV("keys", out.keys);
+    result.pushKV("added", out.added);
+    result.pushKV("persisted", out.persisted);
+    result.pushKV("started", out.started);
+    result.pushKV("pubkeys", enabled);
     return result;
 },
     };

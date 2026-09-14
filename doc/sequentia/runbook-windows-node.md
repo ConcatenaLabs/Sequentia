@@ -273,68 +273,55 @@ as long as the output stays unspent - indefinitely; the lock is only the
 *unbonding delay* before you could withdraw). See
 `doc/sequentia/04-proof-of-stake.md` §2 and `05-operating-sequentia.md` §8.
 
-Registering stake takes three ingredients, all from your own node:
+Your wallet does all of it. Three commands, from your own node:
 
-1. **A staker key.** Generate one and note its pubkey and WIF (private key):
+1. **A staker key.** Generate one and note its pubkey:
    ```
    sequentia-cli.exe -rpcwallet=main getnewaddress
    sequentia-cli.exe -rpcwallet=main getaddressinfo <that-address>
-   sequentia-cli.exe -rpcwallet=main dumpprivkey <that-address>
    ```
-   (`getaddressinfo` shows the `pubkey`; `dumpprivkey` the WIF.)
-2. **Your committee BLS registration**, derived from the staker key (the
-   public committee names its signers by their registered BLS keys):
+   (`getaddressinfo` shows the `pubkey`.)
+2. **Register the stake** for that key, at or above the 40,000-tSEQ minimum
+   (e.g. `50000`):
    ```
-   sequentia-cli.exe getblsregistration "<staker-WIF>"
+   sequentia-cli.exe -rpcwallet=main registerstake <staker-pubkey> 50000
    ```
-   Note the `blspubkey` and `pop` values it returns.
-3. **The staking script** for that key with the ~15-day unbonding lock:
+   This funds the staking output from your wallet, with the ~15-day unbonding
+   lock, and, because the testnet runs the public committee, derives your
+   committee BLS registration from the key and includes it. The result names
+   the registration `txid` and says `committee_ready: true`; if it says
+   `false`, read its `note` before going on, because a stake without the
+   committee key can be elected but never has its blocks certified.
+3. **Turn production on:**
    ```
-   sequentia-cli.exe getstakescript "<staker-pubkey>" null 1296384 <blspubkey> <pop>
+   sequentia-cli.exe -rpcwallet=main startstaking
    ```
-   It returns the `script` (hex) your stake must pay to.
+   The wallet hands the key to the node's producer inside the node process,
+   nothing is exported, and the node remembers it across restarts. No config
+   edit, no restart.
 
-The staking script is a **bare script with no address form**, so an ordinary
-`sendtoaddress` cannot pay it; the funding transaction has to be built raw
-(the repo tool `contrib/sequentia/bootstrap-autonomous-testnet.py` shows the
-construction). The practical path for a Windows tester today is to send the
-`script` hex from step 3 to the operator together with the amount you want to
-stake (e.g. `50000` tSEQ, comfortably above the 40,000-tSEQ minimum): the
-operator funds the script from your tSEQ with their tooling and returns the
-**registration txid**. Keep the staker WIF from step 1 - you'll put it in the
-config next.
-
-Wait for that txid to confirm (the live committee mines it within a block or
-two):
+Wait for the registration to confirm (the live committee mines it within a
+block or two):
 
 ```
 sequentia-cli.exe -rpcwallet=main gettransaction <txid>
-sequentia-cli.exe getstakerinfo
+sequentia-cli.exe getstakerinfo true
 ```
 
-When your staker's pubkey appears in `getstakerinfo`, you're registered. Now
-**enable producing**: stop the node, add these two lines to the `[test]` section
-of `elements.conf`, and restart:
-
-```ini
-posproducer=1
-posproducerkey=<your-staker-WIF-from-step-1>
-```
-
-```
-sequentia-cli.exe stop
-sequentiad.exe -daemon
-```
-
-Your node now signs and produces whenever the VRF sortition selects you. Confirm
-participation over a few minutes:
+When your staker's pubkey appears in `getstakerinfo` with a `blspubkey`,
+you're registered and on the committee's list. Your node now signs and
+produces whenever the VRF sortition selects you. Confirm participation over a
+few minutes:
 
 ```
 sequentia-cli.exe getposschedule
+sequentia-cli.exe listpools <staker-pubkey>
 ```
 
-Look for your pubkey in the schedule/committee. The more you stake, the more
-often you're selected (it's proportional to your share of total stake).
+Look for your pubkey in the schedule/committee; `listpools` shows
+`committee_ready` and the blocks you have produced. The more you stake, the
+more often you're selected (it's proportional to your share of total stake).
+The desktop wallet's Staking tab is these same calls with buttons.
 
 **To stop staking later (unbond):** after the ~15-day lock has matured, spend the
 staking output back to a normal address. There's no separate ceremony - that

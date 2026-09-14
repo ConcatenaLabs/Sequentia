@@ -484,7 +484,25 @@ holding an *explicit* (unblinded) policy-asset amount. A confidential output
 carries no weight (its amount is hidden), and an amount below `-posminstake`
 (40,000 SEQ on the bundled chains) is ignored for eligibility.
 
-**Becoming a staker.**
+**Becoming a staker, from a wallet.** The node's wallet does the whole thing:
+
+```
+sequentia-cli -rpcwallet=<name> getnewaddress
+sequentia-cli -rpcwallet=<name> getaddressinfo <address>      # its "pubkey"
+sequentia-cli -rpcwallet=<name> registerstake <pubkey> <amount>
+sequentia-cli -rpcwallet=<name> startstaking
+```
+
+`registerstake` funds the staking output for a key the wallet holds; on a
+public-committee chain (the public testnet) it derives the committee BLS
+registration from that key and includes it, and its result says
+`committee_ready`. `startstaking` hands the key to the node's producer in the
+same process, so nothing is exported, and the node remembers it across
+restarts. The Staking tab of the desktop wallet is these two calls with
+buttons. The steps below are the same thing done by hand, for a key that lives
+outside a wallet.
+
+**Becoming a staker, by hand.**
 
 1. On a public-committee chain (the public testnet), first derive your
    committee BLS registration from your staker key:

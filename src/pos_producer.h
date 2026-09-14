@@ -159,9 +159,14 @@ public:
     /** Unregister, stop the worker thread, and join it. Idempotent. */
     void Stop();
 
-    /** The producer's signing keys (read-only). Used to rebuild the producer with
-     *  a merged key set when enabling another staking key at runtime. */
-    const std::vector<CKey>& Keys() const { return m_keys; }
+    /** A snapshot of the producer's signing keys. */
+    std::vector<CKey> Keys() const;
+    /** Add staking keys to a RUNNING producer, so enabling another stake at
+     *  runtime takes effect at once rather than at the next restart. Keys the
+     *  producer already holds are skipped; returns how many were new. The
+     *  worker thread and the message thread each work from a snapshot taken
+     *  under the key lock, so no in-flight round observes a half-updated set. */
+    size_t AddKeys(const std::vector<CKey>& keys);
 
     // --- Gossip committee (called from net_processing on the message thread) ---
     //
@@ -244,7 +249,10 @@ private:
     CTxMemPool& m_mempool;
     const CChainParams& m_chainparams;
     CConnman* const m_connman;
-    const std::vector<CKey> m_keys;
+    //! Guarded by m_keys_mutex: AddKeys() writes it from the RPC thread while
+    //! Step() (worker) and MakeLocalShares() (message thread) read it.
+    mutable std::mutex m_keys_mutex;
+    std::vector<CKey> m_keys;
 
     std::thread m_thread;
     std::mutex m_mutex;

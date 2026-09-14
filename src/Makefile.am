@@ -217,6 +217,7 @@ BITCOIN_CORE_H = \
   node/coinstats.h \
   node/context.h \
   node/miner.h \
+  node/pos_control.h \
   node/minisketchwrapper.h \
   node/psbt.h \
   node/transaction.h \
@@ -415,6 +416,7 @@ libbitcoin_node_a_SOURCES = \
   node/coinstats.cpp \
   node/context.cpp \
   node/interfaces.cpp \
+  node/pos_control.cpp \
   node/miner.cpp \
   node/minisketchwrapper.cpp \
   pos_producer.cpp \

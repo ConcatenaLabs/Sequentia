@@ -5,6 +5,7 @@
 #ifndef BITCOIN_INTERFACES_CHAIN_H
 #define BITCOIN_INTERFACES_CHAIN_H
 
+#include <key.h>                    // SEQUENTIA: staker keys handed to the producer
 #include <primitives/transaction.h> // For CTransactionRef
 #include <util/settings.h>          // For util::SettingsValue
 #include <validation.h>             // ELEMENTS For MempoolAcceptResult
@@ -38,6 +39,15 @@ namespace interfaces {
 
 class Handler;
 class Wallet;
+
+//! SEQUENTIA: what Chain::startPosProducer did.
+struct PosProducerStart {
+    bool producing{false}; //!< the autonomous producer is running now
+    int keys{0};           //!< distinct staker keys it holds now
+    int added{0};          //!< how many of the requested keys were new to it
+    bool persisted{false}; //!< the merged key set was saved for the next restart
+    bool started{false};   //!< this call started the producer (false if it was already running)
+};
 
 //! Helper for findBlock to selectively return pieces of block data. If block is
 //! found, data will be returned by setting specified output variables. If block
@@ -288,6 +298,13 @@ public:
 
 // ELEMENTS
     virtual CBlockIndex* getTip() = 0;
+// SEQUENTIA
+    //! Enable Proof-of-Stake block production for staker keys the wallet holds,
+    //! at runtime and persisted (see node::StartPosProducerWithKeys). This is
+    //! how a wallet turns staking on without ever exporting a private key: the
+    //! key crosses this interface in-process and lands in the node's own
+    //! settings, the same place -posproducerkey lives.
+    virtual bool startPosProducer(const std::vector<CKey>& keys, PosProducerStart& out, std::string& error) = 0;
     virtual MempoolAcceptResult testPeginClaimAcceptance(const CTransactionRef tx) = 0;
     virtual bool testBlockValidity(BlockValidationState& state, const CChainParams& chainparams, const CBlock& block, CBlockIndex* pindexPrev, bool fCheckPOW, bool fCheckMerkleRoot) = 0;
 };
