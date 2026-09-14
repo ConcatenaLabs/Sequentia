@@ -148,6 +148,55 @@ class PosBlsRegistrationTest(BitcoinTestFramework):
         self.sync_blocks()
         assert_equal(self.bls_of(n1, self.b_pub), "")
 
+        self.log.info("A registered output beside a BLS-less one: the key follows its output through a reorg")
+        # B stakes again with no registration, then adds one more output that
+        # carries the key (how a wallet repairs a stake registered without one).
+        # Disconnecting the registered output must drop the key while the weight
+        # of the other output stays, as a restart's rebuild from the UTXO set
+        # would have it; a running node that kept the key would sit on a
+        # different committee than a restarted one.
+        change_amount = in_amount - stake_amount - FEE
+        plain_script = bytes.fromhex(n0.getstakescript(self.b_pub, UNBONDING)["script"])
+        plain_amount, reg_amount = 3 * COIN, 2 * COIN
+        tx1 = CTransaction()
+        tx1.nVersion = 2
+        tx1.vin = [CTxIn(COutPoint(int(stake_txid, 16), 1))]
+        tx1.vout = [
+            CTxOut(plain_amount, plain_script),
+            CTxOut(change_amount - plain_amount - FEE, CScript([0x51])),
+            CTxOut(FEE),
+        ]
+        tx1_txid = n0.sendrawtransaction(tx1.serialize().hex())
+        n0.generateposblock(self.a_wif)
+        assert_equal(n0.getstakerinfo()[self.b_pub], plain_amount)
+        assert_equal(self.bls_of(n0, self.b_pub), "")
+        tx2 = CTransaction()
+        tx2.nVersion = 2
+        tx2.vin = [CTxIn(COutPoint(int(tx1_txid, 16), 1))]
+        tx2.vout = [
+            CTxOut(reg_amount, stake_script),
+            CTxOut(change_amount - plain_amount - FEE - reg_amount - FEE, CScript([0x51])),
+            CTxOut(FEE),
+        ]
+        n0.sendrawtransaction(tx2.serialize().hex())
+        reg2_block = n0.generateposblock(self.a_wif)['hash']
+        assert_equal(n0.getstakerinfo()[self.b_pub], plain_amount + reg_amount)
+        assert_equal(self.bls_of(n0, self.b_pub), blspub)
+        self.sync_blocks()
+        assert_equal(self.bls_of(n1, self.b_pub), blspub)
+
+        n0.invalidateblock(reg2_block)
+        assert_equal(n0.getstakerinfo()[self.b_pub], plain_amount)   # weight stays
+        assert_equal(self.bls_of(n0, self.b_pub), "")                 # the key does not
+        n0.reconsiderblock(reg2_block)
+        assert_equal(n0.getstakerinfo()[self.b_pub], plain_amount + reg_amount)
+        assert_equal(self.bls_of(n0, self.b_pub), blspub)
+        # The same view after a restart, which rebuilds from the UTXO set.
+        self.restart_node(0)
+        self.connect_nodes(0, 1)
+        assert_equal(n0.getstakerinfo()[self.b_pub], plain_amount + reg_amount)
+        assert_equal(self.bls_of(n0, self.b_pub), blspub)
+
         self.log.info("Runtime UTXO-layer BLS registration: register, observe, reorg, restart, unbond — OK")
 
 
