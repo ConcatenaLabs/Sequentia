@@ -35,6 +35,7 @@
 #include <node/blockstorage.h>
 #include <node/coinstats.h>
 #include <node/context.h>
+#include <node/pos_control.h>
 #include <node/miner.h>
 #include <node/utxo_snapshot.h>
 #include <policy/feerate.h>
@@ -3794,10 +3795,11 @@ static RPCHelpMan startposproducer()
 {
     return RPCHelpMan{"startposproducer",
                 "\nEnable autonomous Proof-of-Stake block production at runtime, with no restart.\n"
-                "Adds the given staker private key(s) to the running producer (creating it if this\n"
-                "node was not producing yet), and persists the choice (settings.json in the datadir)\n"
-                "so production resumes automatically after a restart. Each key must hold an eligible\n"
-                "registered stake (see registerstake / getstakerinfo) to actually produce blocks.\n",
+                "Adds the given staker private key(s) to the producer (starting it if this node was not\n"
+                "producing yet; a running producer takes them live), and persists the choice (settings.json\n"
+                "in the datadir) so production resumes automatically after a restart. Each key must hold an\n"
+                "eligible registered stake (see registerstake / getstakerinfo) to actually produce blocks.\n"
+                "A wallet that holds the staker key can do the same without exporting it: startstaking.\n",
                 {
                     {"keys", RPCArg::Type::ARR, RPCArg::Optional::NO, "Staker private key(s) in WIF. Kept secret in the datadir.",
                         {{"wif", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "A staker private key (WIF)."}}},
@@ -3805,7 +3807,9 @@ static RPCHelpMan startposproducer()
                 RPCResult{RPCResult::Type::OBJ, "", "", {
                     {RPCResult::Type::BOOL, "producing", "true if the autonomous producer is now running"},
                     {RPCResult::Type::NUM, "keys", "number of distinct producer keys now loaded"},
+                    {RPCResult::Type::NUM, "added", "how many of the given keys were new to the producer"},
                     {RPCResult::Type::BOOL, "persisted", "true if the choice was saved for the next restart"},
+                    {RPCResult::Type::BOOL, "started", "true if this call started the producer (false if it was already running)"},
                 }},
                 RPCExamples{HelpExampleCli("startposproducer", "'[\"cV…WIF…\"]'")},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
@@ -3813,64 +3817,25 @@ static RPCHelpMan startposproducer()
     if (!g_con_pos) throw JSONRPCError(RPC_MISC_ERROR, "Proof-of-Stake (con_pos) is not enabled on this chain");
     NodeContext& node = EnsureAnyNodeContext(request.context);
 
-    // Validate and de-duplicate the requested keys. Also gather the keys a running
-    // producer already holds (merged with the new ones) so the PERSISTED set never
-    // drops a key this node was already producing with.
-    std::set<CPubKey> seen;
-    std::vector<std::string> all_wifs;          // merged set, for persistence
-    std::vector<CKey> new_keys;                 // newly requested keys not already loaded
-    const bool already_running = (node.pos_producer != nullptr);
-    if (already_running) {
-        for (const CKey& k : node.pos_producer->Keys()) {
-            if (seen.insert(k.GetPubKey()).second) all_wifs.push_back(EncodeSecret(k));
-        }
-    }
+    std::vector<CKey> keys;
     const UniValue& arr = request.params[0].get_array();
     for (size_t i = 0; i < arr.size(); ++i) {
         CKey key = DecodeSecret(arr[i].get_str());
         if (!key.IsValid()) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid staker private key (expected a WIF)");
-        if (seen.insert(key.GetPubKey()).second) { all_wifs.push_back(EncodeSecret(key)); new_keys.push_back(key); }
+        keys.push_back(key);
     }
-    if (all_wifs.empty()) throw JSONRPCError(RPC_INVALID_PARAMETER, "Provide at least one staker private key (WIF)");
+    if (keys.empty()) throw JSONRPCError(RPC_INVALID_PARAMETER, "Provide at least one staker private key (WIF)");
 
-    // Start the autonomous producer if this node is not producing yet. We deliberately
-    // do NOT rebuild a *running* producer here: net_processing reads the active producer
-    // pointer locklessly on the message thread (GetActivePosProducer), so destroying a
-    // live producer would be a use-after-free. When already running, the merged keys are
-    // persisted instead and take effect on the next restart (handled below).
-    bool started_now = false;
-    if (!already_running) {
-        std::vector<CKey> keys = new_keys;
-        CTxMemPool& mempool = EnsureMemPool(node);
-        ChainstateManager& chainman = EnsureChainman(node);
-        CConnman& connman = EnsureConnman(node);
-        node.pos_producer = std::make_unique<PosProducer>(chainman, mempool, Params(), &connman, std::move(keys));
-        node.pos_producer->Start();
-        started_now = true;
-    }
+    interfaces::PosProducerStart out;
+    std::string error;
+    if (!node::StartPosProducerWithKeys(node, keys, out, error)) throw JSONRPCError(RPC_MISC_ERROR, error);
 
-    // Reflect into the live args so status readers (GUI overview / staking page) update,
-    // and persist to settings.json so the existing startup path (AppInitMain:
-    // -posproducer + -posproducerkey) resumes production after a restart with no manual
-    // config editing.
-    gArgs.ForceSetArg("-posproducer", "1");
-    bool persisted = false;
-    {
-        UniValue wif_arr(UniValue::VARR);
-        for (const std::string& w : all_wifs) wif_arr.push_back(w);
-        gArgs.LockSettings([&](util::Settings& settings) {
-            settings.rw_settings["posproducer"] = true;
-            settings.rw_settings["posproducerkey"] = wif_arr;
-        });
-        persisted = gArgs.WriteSettingsFile();
-    }
-
-    const int live_keys = node.pos_producer ? (int)node.pos_producer->Keys().size() : 0;
     UniValue result(UniValue::VOBJ);
-    result.pushKV("producing", node.pos_producer != nullptr);
-    result.pushKV("keys", live_keys);                 // keys active in the running producer now
-    result.pushKV("persisted", persisted);            // saved set (size all_wifs) applies next restart
-    result.pushKV("started", started_now);            // false if it was already producing
+    result.pushKV("producing", out.producing);
+    result.pushKV("keys", out.keys);
+    result.pushKV("added", out.added);
+    result.pushKV("persisted", out.persisted);
+    result.pushKV("started", out.started);
     return result;
 },
     };

@@ -244,6 +244,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "getposrecentblocks", 0, "count"},
     { "getposschedule", 0, "count"},
     { "startposproducer", 0, "keys"},
+    { "startstaking", 0, "pubkeys"},
     { "musigaggregatepubkey", 0, "pubkeys"},
     { "musignonce", 2, "pubkeys"},
     { "musigpartialsign", 2, "pubkeys"},

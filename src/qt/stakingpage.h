@@ -272,12 +272,15 @@ private:
     //! bottom of a scrolled page, so a refusal shown only there reads as "the
     //! button does nothing".
     void setCardResult(QLabel* result, const QString& msg, bool error);
-    //! Enable autonomous block production at runtime for the given staking WIF(s)
-    //! (via startposproducer). No restart. Returns true if the node is now producing.
-    bool enableProduction(const QStringList& wifs, QString& err);
-    //! Export WIFs for every registered stake this wallet controls (best-effort;
-    //! legacy wallets only, like dumpprivkey).
-    QStringList walletStakingWifs();
+    //! Enable autonomous block production at runtime for the given staker public
+    //! keys, through the wallet (startstaking): the wallet hands its own keys to
+    //! the node's producer in-process, so this works for descriptor and legacy
+    //! wallets alike and nothing is exported. An empty list means every key this
+    //! wallet registered a stake for. No restart. Returns true if the node is now
+    //! producing; `keys` receives how many keys the producer holds.
+    bool enableProduction(const QStringList& pubkeys, QString& err, int* keys = nullptr);
+    //! The registered staker public keys this wallet controls.
+    QStringList walletStakerPubkeys();
 
     //! Kick a refresh onto the next event-loop turn so the tab switch paints
     //! first, never blocking the switch on the registry/chain RPC cascade. When

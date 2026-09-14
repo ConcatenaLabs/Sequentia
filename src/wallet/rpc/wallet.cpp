@@ -634,6 +634,7 @@ RPCHelpMan encryptwallet();
 RPCHelpMan sendtoaddress();
 RPCHelpMan sendmany();
 RPCHelpMan registerstake();
+RPCHelpMan startstaking();
 RPCHelpMan liststakeutxos();
 RPCHelpMan withdrawstake();
 RPCHelpMan bumpwithdrawstakefee();
@@ -758,6 +759,7 @@ static const CRPCCommand commands[] =
     { "wallet",             &sendmany,                       },
     { "wallet",             &sendtoaddress,                  },
     { "wallet",             &registerstake,                  },
+    { "wallet",             &startstaking,                   },
     { "wallet",             &liststakeutxos,                 },
     { "wallet",             &withdrawstake,                  },
     { "wallet",             &bumpwithdrawstakefee,           },

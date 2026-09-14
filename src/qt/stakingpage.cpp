@@ -200,7 +200,8 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
     m_producer_status->setTextFormat(Qt::PlainText);
     layout->addWidget(m_producer_status);
     // One-click enable: starts the autonomous producer at runtime (no restart) for the
-    // staking keys this wallet controls, and persists it so it resumes after a restart.
+    // staking keys this wallet controls, through the wallet (startstaking, so it works
+    // for descriptor wallets too), and persists it so it resumes after a restart.
     m_enable_button = new QPushButton(tr("Start producing blocks"), this);
     m_enable_button->setToolTip(tr("Turns block production on right now for the staking keys this wallet controls - "
                                    "no config editing, no restart. From then on the node produces a block whenever "
@@ -868,7 +869,7 @@ void StakingPage::refresh()
                                           "restart needed."));
             m_producer_status->setStyleSheet("QLabel{padding:8px;border-radius:4px;background:#fff3cd;color:#856404;}");
             // Offer one-click enable when this wallet actually controls a registered stake.
-            if (m_enable_button) m_enable_button->setVisible(!walletStakingWifs().isEmpty());
+            if (m_enable_button) m_enable_button->setVisible(!walletStakerPubkeys().isEmpty());
         }
     }
 
@@ -1443,28 +1444,30 @@ void StakingPage::onStake()
     const QString txid = res.exists("txid") ? QString::fromStdString(res["txid"].getValStr()) : QString();
     const qint64 unbond = res.exists("unbonding_seconds") ? (qint64)res["unbonding_seconds"].get_int64() : 0;
 
-    // 4) the WIF, used to enable block production seamlessly (best-effort export;
-    //    legacy wallets only, as with dumpprivkey)
-    QString wif;
-    UniValue dpparams(UniValue::VARR); dpparams.push_back(addr.toStdString());
-    bool dok; QString derr;
-    UniValue wifv = callRpc("dumpprivkey", dpparams, dok, derr);
-    if (dok) wif = QString::fromStdString(wifv.getValStr());
+    const bool committee_ready = !res.exists("committee_ready") || res["committee_ready"].get_bool();
 
     QString msg = tr("Staked %1 %4.\nRegistration txid: %2\nStaking public key: %3").arg(amount, txid, pubkey, BitcoinUnits::policyAssetTicker());
+    if (!committee_ready) {
+        // registerstake derives the committee key itself when the wallet holds
+        // the staker key, so this only happens for a key the wallet does not own.
+        msg += tr("\nNo committee key could be registered for this stake (%1); it can lead rounds but the "
+                  "committee cannot certify its blocks.")
+                   .arg(res.exists("note") ? QString::fromStdString(res["note"].get_str()) : tr("see registerstake"));
+    }
     if (unbond > 0) {
         msg += tr("\nUnbonding lock: ~%1 day(s) before you could withdraw (the stake keeps counting the whole time).")
                    .arg(QString::number((double)unbond / 86400.0, 'f', 1));
     }
-    // Turn on block production right now — no restart, no manual config. The choice is
+    // Turn on block production right now — no restart, no manual config, no key
+    // export: the wallet hands the key to the producer itself. The choice is
     // persisted so it resumes automatically after a restart.
-    bool enabled = false; QString enErr;
-    if (!wif.isEmpty()) enabled = enableProduction(QStringList{wif}, enErr);
+    QString enErr;
+    const bool enabled = enableProduction(QStringList{pubkey}, enErr);
     if (enabled) {
         msg += tr("\n\nBlock production is now ON for this key, automatically, no restart. You'll start "
                   "producing as soon as the stake confirms and the committee elects you, and it resumes "
                   "by itself after a restart.");
-    } else if (!wif.isEmpty()) {
+    } else if (!enErr.isEmpty()) {
         msg += tr("\n\nYour stake is registered, but block production couldn't be turned on automatically "
                   "(%1). Click \"Start producing blocks\" to retry.").arg(enErr);
     } else {
@@ -1834,26 +1837,31 @@ void StakingPage::onUnstake()
     refresh();
 }
 
-bool StakingPage::enableProduction(const QStringList& wifs, QString& err)
+bool StakingPage::enableProduction(const QStringList& pubkeys, QString& err, int* keys)
 {
-    if (wifs.isEmpty()) { err = tr("no staking key available to enable"); return false; }
-    UniValue arr(UniValue::VARR);
-    for (const QString& w : wifs) arr.push_back(w.toStdString());
-    UniValue params(UniValue::VARR); params.push_back(arr);
+    UniValue params(UniValue::VARR);
+    if (!pubkeys.isEmpty()) {
+        UniValue arr(UniValue::VARR);
+        for (const QString& pk : pubkeys) arr.push_back(pk.toStdString());
+        params.push_back(arr);
+    }
     bool ok;
-    UniValue r = callRpc("startposproducer", params, ok, err, /*wallet=*/false);
-    return ok && r.isObject() && r.exists("producing") && r["producing"].get_bool();
+    UniValue r = callRpc("startstaking", params, ok, err);
+    const bool producing = ok && r.isObject() && r.exists("producing") && r["producing"].get_bool();
+    if (keys && producing && r.exists("keys")) *keys = r["keys"].get_int();
+    return producing;
 }
 
-QStringList StakingPage::walletStakingWifs()
+QStringList StakingPage::walletStakerPubkeys()
 {
-    QStringList wifs;
-    if (!m_wallet_model) return wifs;
+    QStringList pubkeys;
+    if (!m_wallet_model) return pubkeys;
     bool ok; QString err;
     UniValue reg = callRpc("getstakerinfo", UniValue(UniValue::VARR), ok, err, /*wallet=*/false);
-    if (!ok || !reg.isObject()) return wifs;
-    // For each registered staker pubkey, derive an address, check this wallet controls
-    // it, and export its WIF. dumpprivkey is best-effort (legacy wallets only).
+    if (!ok || !reg.isObject()) return pubkeys;
+    // For each registered staker pubkey, derive its address and ask the wallet
+    // whether it controls it. No key leaves the wallet here: production is
+    // enabled through startstaking, which hands the key to the producer itself.
     for (const std::string& pk : reg.getKeys()) {
         UniValue diParams(UniValue::VARR); diParams.push_back("wpkh(" + pk + ")");
         UniValue di = callRpc("getdescriptorinfo", diParams, ok, err, /*wallet=*/false);
@@ -1861,15 +1869,11 @@ QStringList StakingPage::walletStakingWifs()
         UniValue daParams(UniValue::VARR); daParams.push_back(di["descriptor"].get_str());
         UniValue da = callRpc("deriveaddresses", daParams, ok, err, /*wallet=*/false);
         if (!ok || !da.isArray() || da.empty()) continue;
-        const std::string addr = da[0].getValStr();
-        UniValue aiParams(UniValue::VARR); aiParams.push_back(addr);
+        UniValue aiParams(UniValue::VARR); aiParams.push_back(da[0].getValStr());
         UniValue ai = callRpc("getaddressinfo", aiParams, ok, err);
-        if (!ok || !(ai.exists("ismine") && ai["ismine"].get_bool())) continue;
-        UniValue dpParams(UniValue::VARR); dpParams.push_back(addr);
-        UniValue wv = callRpc("dumpprivkey", dpParams, ok, err);
-        if (ok) wifs << QString::fromStdString(wv.getValStr());
+        if (ok && ai.exists("ismine") && ai["ismine"].get_bool()) pubkeys << QString::fromStdString(pk);
     }
-    return wifs;
+    return pubkeys;
 }
 
 void StakingPage::refreshDelegation()
@@ -2288,15 +2292,15 @@ void StakingPage::onEnableProduction()
 {
     if (!m_wallet_model) return;
     if (m_enable_button) m_enable_button->setEnabled(false);
-    const QStringList wifs = walletStakingWifs();
-    if (wifs.isEmpty()) {
+    const QStringList pubkeys = walletStakerPubkeys();
+    if (pubkeys.isEmpty()) {
         setStatus(tr("No staking keys controlled by this wallet were found. Stake first, then try again."), true);
         if (m_enable_button) m_enable_button->setEnabled(true);
         return;
     }
-    QString err;
-    const bool enabled = enableProduction(wifs, err);
-    setStatus(enabled ? tr("Block production is on for %1 key(s). It resumes automatically after a restart.").arg(wifs.size())
+    QString err; int keys = 0;
+    const bool enabled = enableProduction(pubkeys, err, &keys);
+    setStatus(enabled ? tr("Block production is on for %1 key(s). It resumes automatically after a restart.").arg(keys)
                       : tr("Could not start block production: %1").arg(err), !enabled);
     if (m_enable_button) m_enable_button->setEnabled(true);
     refresh();

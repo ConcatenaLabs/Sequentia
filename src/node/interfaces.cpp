@@ -23,6 +23,7 @@
 #include <node/blockstorage.h>
 #include <node/coin.h>
 #include <node/context.h>
+#include <node/pos_control.h>
 #include <node/transaction.h>
 #include <node/ui_interface.h>
 #include <policy/feerate.h>
@@ -787,6 +788,9 @@ public:
         return TestBlockValidity(state, chainparams, m_node.chainman->ActiveChainstate(), block, pindexPrev, fCheckPOW, fCheckMerkleRoot);
     }
 // end ELEMENTS
+    bool startPosProducer(const std::vector<CKey>& keys, interfaces::PosProducerStart& out, std::string& error) override {
+        return StartPosProducerWithKeys(m_node, keys, out, error);
+    }
     NodeContext& m_node;
 };
 } // namespace
