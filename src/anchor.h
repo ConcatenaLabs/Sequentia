@@ -156,9 +156,12 @@ int AnchorUncontestedHeight(int active_tip_height, int window,
  *  resolves. This back-off is purely a block-producer policy — it changes only
  *  which anchor THIS node picks for blocks it produces, never which blocks it
  *  accepts — and costs anchor freshness only while a parent fork is actually
- *  live. Falls back to the previous block's anchor if the parent chain daemon
- *  is unreachable. Returns false if no valid (non-null) anchor can be
- *  determined. */
+ *  live. Falls back to the previous block's anchor in two cases, which the log
+ *  keeps apart because only the first is a fault: the parent chain daemon is
+ *  unreachable, or the daemon answered and the target is not above the previous
+ *  anchor, which monotonicity forbids moving onto and which resolves itself
+ *  once the contesting branches leave the window. Returns false if no valid
+ *  (non-null) anchor can be determined. */
 bool GetAnchorForNewBlock(uint32_t prev_anchor_height, const uint256& prev_anchor_hash,
                           uint32_t& anchor_height, uint256& anchor_hash);
 

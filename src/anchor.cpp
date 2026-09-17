@@ -597,6 +597,13 @@ bool GetAnchorForNewBlock(uint32_t prev_anchor_height, const uint256& prev_ancho
 {
     const int min_conf = std::max<int64_t>(1, gArgs.GetIntArg("-anchorminconf", DEFAULT_ANCHOR_MIN_CONF));
     int count = 0;
+    // Set when the daemon answered but the target it yielded is not above this
+    // block's parent anchor, so monotonicity forbids moving onto it. The
+    // fallback below reports that case separately from an unreachable daemon:
+    // only the second is a fault, and calling the first one by its name is what
+    // stops an operator hunting an RPC problem that is not there.
+    bool target_held = false;
+    int held_target = 0;
     if (GetMainchainBlockCount(count)) {
         int target = count - (min_conf - 1);
         // Fix A (producer-side anti-contested-anchor policy): do not advance the
@@ -624,14 +631,24 @@ bool GetAnchorForNewBlock(uint32_t prev_anchor_height, const uint256& prev_ancho
                 anchor_hash = hash;
                 return true;
             }
+        } else {
+            target_held = true;
+            held_target = target;
         }
     }
-    // Parent chain daemon unreachable (or behind the previous anchor, e.g.
-    // while it is still syncing): fall back to the previous block's anchor,
-    // which is monotone by construction and already validated.
+    // No fresh anchor: fall back to the previous block's anchor, which is
+    // monotone by construction and already validated. Two different conditions
+    // arrive here. A held target is the anti-contested policy doing its job
+    // while a parent fork is live, and it clears itself once the rival branches
+    // leave the contest window; an unreachable daemon is a fault to act on.
     if (!prev_anchor_hash.IsNull()) {
-        LogPrintf("WARNING: could not query mainchain daemon for a new anchor; reusing previous anchor %s (height %d)\n",
-                  prev_anchor_hash.ToString(), prev_anchor_height);
+        if (target_held) {
+            LogPrintf("Anchor: keeping this block's parent anchor %s (height %d); the uncontested target %d is not above it, so the anchor holds until the parent chain settles\n",
+                      prev_anchor_hash.ToString(), prev_anchor_height, held_target);
+        } else {
+            LogPrintf("WARNING: could not query mainchain daemon for a new anchor; reusing previous anchor %s (height %d)\n",
+                      prev_anchor_hash.ToString(), prev_anchor_height);
+        }
         anchor_height = prev_anchor_height;
         anchor_hash = prev_anchor_hash;
         return true;
