@@ -21,7 +21,11 @@
 namespace wallet {
 //! Check whether transaction has descendant in wallet or mempool, or has been
 //! mined, or conflicts with a mined transaction. Return a feebumper::Result.
-static feebumper::Result PreconditionChecks(const CWallet& wallet, const CWalletTx& wtx, std::vector<bilingual_str>& errors) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+//! @param require_unblinded  Apply the rule that only a fee BUMP needs: the
+//!   original has to be transparent. A replacement built from scratch does not,
+//!   so it passes false and shares every other precondition rather than growing
+//!   a second, drifting copy of them.
+static feebumper::Result PreconditionChecks(const CWallet& wallet, const CWalletTx& wtx, std::vector<bilingual_str>& errors, bool require_unblinded = true) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
 {
     if (wallet.HasWalletSpend(wtx.GetHash())) {
         errors.push_back(Untranslated("Transaction has descendants in the wallet"));
@@ -58,6 +62,26 @@ static feebumper::Result PreconditionChecks(const CWallet& wallet, const CWallet
         return feebumper::Result::WALLET_ERROR;
     }
 
+    // SEQUENTIA: a bump rewrites the original's amounts in the clear, so it can
+    // only be applied to a transparent transaction. CreateRateBumpTransaction
+    // has always refused a blinded one -- but only once it was already walking
+    // the outputs, which is after the user has picked a new fee and a new fee
+    // asset. Asking here instead means TransactionCanBeBumped() knows, so the
+    // interface can say so before the work rather than after it.
+    //
+    // This is not a rare state: a wallet holding any confidential coin produces
+    // confidential transactions, so on such a wallet EVERY bump is refused, and
+    // until now the user was given no way to find out why.
+    if (require_unblinded) {
+        for (const CTxOut& output : wtx.tx->vout) {
+            if (!output.nValue.IsExplicit() || !output.nAsset.IsExplicit()) {
+                errors.push_back(_("This transaction is confidential. Increasing the fee rewrites its "
+                                   "amounts in the clear, which can only be done to a transparent "
+                                   "transaction."));
+                return feebumper::Result::WALLET_ERROR;
+            }
+        }
+    }
 
     return feebumper::Result::OK;
 }
@@ -175,6 +199,31 @@ bool TransactionCanBeBumped(const CWallet& wallet, const uint256& txid)
     return res == feebumper::Result::OK;
 }
 
+bilingual_str BumpRefusedReason(const CWallet& wallet, const uint256& txid)
+{
+    LOCK(wallet.cs_wallet);
+    const CWalletTx* wtx = wallet.GetWalletTx(txid);
+    if (wtx == nullptr) return bilingual_str{};
+
+    std::vector<bilingual_str> errors;
+    if (PreconditionChecks(wallet, *wtx, errors) == feebumper::Result::OK) return bilingual_str{};
+    // The checks stop at the first thing wrong, so there is exactly one, and the
+    // untranslated ones inherited from upstream are still worth showing: a raw
+    // English sentence tells the user more than a menu entry that has gone grey
+    // for no stated reason.
+    return errors.empty() ? bilingual_str{} : errors.front();
+}
+
+bool TransactionCanBeReplaced(const CWallet& wallet, const uint256& txid)
+{
+    LOCK(wallet.cs_wallet);
+    const CWalletTx* wtx = wallet.GetWalletTx(txid);
+    if (wtx == nullptr) return false;
+
+    std::vector<bilingual_str> errors_dummy;
+    return PreconditionChecks(wallet, *wtx, errors_dummy, /*require_unblinded=*/false) == feebumper::Result::OK;
+}
+
 Result CreateRateBumpTransaction(CWallet& wallet, const uint256& txid, const CCoinControl& coin_control, std::vector<bilingual_str>& errors,
                                  CAmount& old_fee, CAmount& new_fee, CMutableTransaction& mtx)
 {
@@ -279,6 +328,17 @@ Result CreateRateBumpTransaction(CWallet& wallet, const uint256& txid, const CCo
     }
     new_coin_control.fAllowOtherInputs = true;
 
+    // SEQUENTIA: and only explicit ones. This function rebuilds every recipient
+    // without a blinding key and asks for the new fee asset's change with
+    // add_blinding_key = false, so the replacement is entirely explicit -- which is
+    // the same invariant the check at the top of this function enforces on the
+    // transaction being replaced. Without this, switching to a fee asset the wallet
+    // holds confidentially lets coin selection pick a blinded coin, and the
+    // replacement comes out unbalanced: the node refuses it as bad-txns-in-ne-out
+    // AFTER the wallet has recorded the bump, leaving the user with a stuck
+    // transaction and a wallet that believes it was replaced.
+    new_coin_control.m_only_explicit_inputs = true;
+
     // We cannot source new unconfirmed inputs(bip125 rule 2)
     new_coin_control.m_min_depth = 1;
 
@@ -288,6 +348,39 @@ Result CreateRateBumpTransaction(CWallet& wallet, const uint256& txid, const CCo
     bilingual_str fail_reason;
     FeeCalculation fee_calc_out;
     if (!CreateTransaction(wallet, recipients, tx_new, fee_ret, change_pos_in_out, fail_reason, new_coin_control, fee_calc_out, false)) {
+        // "Insufficient funds" is a misleading thing to tell someone who can see
+        // the balance sitting in their wallet. If the fee asset is there but only
+        // in confidential outputs, the wallet is not short of money -- it is short
+        // of money it can spend in a replacement that has to stay explicit -- and
+        // saying so points at the one thing that would help: pay the bump in
+        // another asset.
+        if (g_con_any_asset_fees) {
+            bool confidential_only = false;
+            {
+                LOCK(wallet.cs_wallet);
+                std::vector<COutput> coins;
+                CCoinControl probe;
+                probe.m_min_depth = new_coin_control.m_min_depth;
+                AvailableCoins(wallet, coins, &probe, 1, MAX_MONEY, MAX_MONEY, 0, &fee_asset);
+                bool any_explicit = false, any_confidential = false;
+                for (const COutput& out : coins) {
+                    const CTxOut& txout = out.tx->tx->vout[out.i];
+                    if (txout.nValue.IsExplicit() && txout.nAsset.IsExplicit()) {
+                        any_explicit = true;
+                    } else {
+                        any_confidential = true;
+                    }
+                }
+                confidential_only = any_confidential && !any_explicit;
+            }
+            if (confidential_only) {
+                errors.push_back(Untranslated(
+                    "Cannot bump the fee in this asset: the wallet holds it only in confidential "
+                    "outputs, and a fee bump has to be an unblinded transaction. Bump in another "
+                    "asset, or send the confidential balance to yourself unblinded first."));
+                return Result::WALLET_ERROR;
+            }
+        }
         errors.push_back(Untranslated("Unable to create transaction.") + Untranslated(" ") + fail_reason);
         return Result::WALLET_ERROR;
     }

@@ -4,6 +4,7 @@
 
 #include <feeassets.h>
 
+#include <assetregistry.h>
 #include <chainparams.h>
 #include <exchangerates.h>
 #include <logging.h>
@@ -39,6 +40,7 @@ FeeAssetInfo BuildWithoutPrice(const CAsset& asset)
     info.identifier = meta.GetLabel().empty() ? asset.GetHex() : meta.GetLabel();
     info.precision = meta.GetPrecision();
     info.registry_listed = meta.IsRegistryListed();
+    info.registry_available = !AssetRegistryBaseUrl().empty();
     info.listed = ExchangeRateMap::GetInstance().GetRate(asset, info.rate);
     info.accepted = info.listed && info.rate > 0;
     return info;
@@ -130,6 +132,7 @@ MempoolCongestion GetMempoolCongestion(const CTxMemPool& mempool)
     out.next_block_full = full;
     out.mempool_min = mempool_min.GetFeePerK();
     out.relay_min = ::minRelayTxFee.GetFeePerK();
+    out.replacement_min = ::incrementalRelayFee.GetFeePerK();
     // Not-full means nothing is competing, so the floor is all a transaction has
     // to clear.
     out.next_block_min = full ? std::max(cut, out.mempool_min) : out.mempool_min;

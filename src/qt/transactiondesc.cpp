@@ -29,6 +29,7 @@
 #include <QStringList>
 
 using wallet::ISMINE_ALL;
+using wallet::ISMINE_NO;
 using wallet::ISMINE_SPENDABLE;
 using wallet::ISMINE_WATCH_ONLY;
 using wallet::isminetype;
@@ -158,23 +159,27 @@ QString TransactionDesc::toHTML(interfaces::Node& node, interfaces::Wallet& wall
         // Offline transaction
         if (fPureCredit)
         {
-            // Credit
+            // Credit. The address this was paid to is a fact of the transaction,
+            // so it is printed whether or not the address book has an entry for
+            // it: gating the whole row on getAddress() meant a receive to an
+            // unlabelled address showed no address at all. Only the annotations
+            // -- whose address it is, what it is called -- depend on the lookup.
             CTxDestination address = DecodeDestination(rec->address);
             if (IsValidDestination(address)) {
                 std::string name;
-                isminetype ismine;
-                if (wallet.getAddress(address, &name, &ismine, /* purpose= */ nullptr))
-                {
-                    strHTML += "<b>" + tr("From") + ":</b> " + tr("unknown") + "<br>";
-                    strHTML += "<b>" + tr("To") + ":</b> ";
-                    strHTML += GUIUtil::HtmlEscape(rec->address);
+                isminetype ismine = ISMINE_NO;
+                const bool known = wallet.getAddress(address, &name, &ismine, /* purpose= */ nullptr);
+                strHTML += "<b>" + tr("From") + ":</b> " + tr("unknown") + "<br>";
+                strHTML += "<b>" + tr("To") + ":</b> ";
+                strHTML += GUIUtil::HtmlEscape(rec->address);
+                if (known) {
                     QString addressOwned = ismine == ISMINE_SPENDABLE ? tr("own address") : tr("watch-only");
                     if (!name.empty())
                         strHTML += " (" + addressOwned + ", " + tr("label") + ": " + GUIUtil::HtmlEscape(name) + ")";
                     else
                         strHTML += " (" + addressOwned + ")";
-                    strHTML += "<br>";
                 }
+                strHTML += "<br>";
             }
         }
     }
@@ -228,10 +233,14 @@ QString TransactionDesc::toHTML(interfaces::Node& node, interfaces::Wallet& wall
             if(fAllFromMe > mine) fAllFromMe = mine;
         }
 
+        // The explicit fee output belongs to nobody, and counting it here made
+        // fAllToMe false for every transaction that pays a fee -- which is all of
+        // them. So the "payment to self" summary below could never print.
         isminetype fAllToMe = ISMINE_SPENDABLE;
-        for (const isminetype mine : wtx.txout_is_mine)
+        for (size_t i = 0; i < wtx.txout_is_mine.size(); ++i)
         {
-            if(fAllToMe > mine) fAllToMe = mine;
+            if (i < wtx.tx->vout.size() && wtx.tx->vout[i].IsFee()) continue;
+            if (fAllToMe > wtx.txout_is_mine[i]) fAllToMe = wtx.txout_is_mine[i];
         }
 
         if (fAllFromMe)
@@ -242,13 +251,19 @@ QString TransactionDesc::toHTML(interfaces::Node& node, interfaces::Wallet& wall
             //
             // Debit
             //
-            auto mine = wtx.txout_is_mine.begin();
             for (unsigned int i = 0; i < wtx.tx->vout.size(); ++i)
             {
                 const CTxOut& txout = wtx.tx->vout[i];
-                // Ignore change
-                isminetype toSelf = *(mine++);
-                if ((toSelf == ISMINE_SPENDABLE) && (fAllFromMe == ISMINE_SPENDABLE))
+                const isminetype toSelf = wtx.txout_is_mine[i];
+                // Ignore change -- but only real change. This used to skip EVERY
+                // output of ours, so a payment to an address of this same wallet
+                // was dropped along with the change, and its details window
+                // printed a fee, a net amount and no recipient whatsoever. The
+                // transaction list decides change with txout_is_change (see
+                // transactionrecord.cpp, which is why the same payment appears
+                // there as a Sent/Received pair); this reads the same flag.
+                const bool is_change = i < wtx.txout_is_change.size() && wtx.txout_is_change[i];
+                if (is_change && (fAllFromMe == ISMINE_SPENDABLE))
                     continue;
                 // The explicit fee output has its own "Transaction fee" row below;
                 // listing it here as a Debit would double-report it.

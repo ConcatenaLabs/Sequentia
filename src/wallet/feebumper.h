@@ -6,10 +6,12 @@
 #define BITCOIN_WALLET_FEEBUMPER_H
 
 #include <primitives/transaction.h>
+// BumpRefusedReason returns a bilingual_str by value, so the complete type is
+// needed here rather than the forward declaration this header used to carry.
+#include <util/translation.h>
 
 class uint256;
 enum class FeeEstimateMode;
-struct bilingual_str;
 
 namespace wallet {
 class CCoinControl;
@@ -30,6 +32,21 @@ enum class Result
 
 //! Return whether transaction can be bumped.
 bool TransactionCanBeBumped(const CWallet& wallet, const uint256& txid);
+
+//! SEQUENTIA: why a fee bump is refused, decided before the user is asked to
+//! choose a fee. Empty when nothing refuses it.
+//!
+//! A caller that only greys out a menu entry leaves the user with a function
+//! that has silently disappeared, which on a wallet holding confidential coins
+//! is every fee bump it will ever offer. The reason is worth carrying.
+bilingual_str BumpRefusedReason(const CWallet& wallet, const uint256& txid);
+
+//! SEQUENTIA: whether this transaction can be REPLACED by one with different
+//! outputs. The same preconditions as a bump, minus the requirement that the
+//! original be unblinded: a replacement is built from scratch and may be
+//! confidential, whereas a bump rewrites the original's amounts in the clear and
+//! therefore cannot be applied to a confidential transaction.
+bool TransactionCanBeReplaced(const CWallet& wallet, const uint256& txid);
 
 //! Create bumpfee transaction based on feerate estimates.
 Result CreateRateBumpTransaction(CWallet& wallet,

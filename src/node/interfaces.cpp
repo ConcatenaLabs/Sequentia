@@ -269,6 +269,18 @@ public:
         if (!m_context->mempool) return MempoolCongestion{};
         return ::GetMempoolCongestion(*m_context->mempool);
     }
+    interfaces::PosFinality getPosFinality() override
+    {
+        interfaces::PosFinality out;
+        out.signed_blocks = g_signed_blocks;
+        out.enabled = g_con_pos;
+        if (!out.enabled) return out;
+        LOCK(::cs_main);
+        int height = -1;
+        uint256 hash;
+        if (PosGetImmediateFinalPoint(height, hash)) out.height = height;
+        return out;
+    }
     bool getAnchorNotWatchingBitcoin() override { return g_con_bitcoin_anchor && !g_validate_anchor; }
     interfaces::AnchorTipState getAnchorTipState() override
     {

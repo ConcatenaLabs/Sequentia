@@ -379,6 +379,24 @@ namespace GUIUtil
     /* Parse an amount of a given asset from text */
     bool parseAssetAmount(const CAsset&, const QString& text, int bitcoin_unit, CAmount *val_out);
 
+    /* SEQUENTIA: 10^precision, the atoms in one whole unit of an asset, and the
+       shortest decimal rendering that still reaches the asset's smallest unit.
+       Both live here because two windows now price the same fee -- the Send tab's
+       fee grid and the replacement dialog -- and a fee shown as one figure in one
+       window and another in the other is worse than either being slightly off. */
+    double atomsPerUnit(uint8_t precision);
+    QString formatUnits(double units, uint8_t precision);
+
+    /* SEQUENTIA: whether a fee paid in this asset will TRAVEL, said in one line,
+       or empty when there is nothing to warn about. This node accepting a fee
+       asset settles only that the transaction leaves the wallet; whether other
+       producers will value it depends on the Asset Registry and the price feed,
+       which is a separate question and gets a separate answer. Shared by every
+       window that offers a choice of fee asset, so they cannot come to different
+       verdicts about the same asset. */
+    QString feeAssetTravelNote(const QString& asset_name, bool registry_available, bool registry_listed,
+                               bool has_market_price);
+
     /** Convert enum Network to QString */
     QString NetworkToQString(Network net);
 

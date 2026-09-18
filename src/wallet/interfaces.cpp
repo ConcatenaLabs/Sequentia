@@ -298,6 +298,14 @@ public:
     {
         return feebumper::TransactionCanBeBumped(*m_wallet.get(), txid);
     }
+    bilingual_str transactionBumpRefusedReason(const uint256& txid) override
+    {
+        return feebumper::BumpRefusedReason(*m_wallet.get(), txid);
+    }
+    bool transactionCanBeReplaced(const uint256& txid) override
+    {
+        return feebumper::TransactionCanBeReplaced(*m_wallet.get(), txid);
+    }
     bool createBumpTransaction(const uint256& txid,
         const CCoinControl& coin_control,
         std::vector<bilingual_str>& errors,

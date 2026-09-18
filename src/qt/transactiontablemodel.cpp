@@ -17,6 +17,7 @@
 #include <assetsdir.h>
 #include <core_io.h>
 #include <interfaces/handler.h>
+#include <interfaces/node.h>
 #include <uint256.h>
 #include <util/system.h>
 #include <policy/policy.h>
@@ -235,7 +236,11 @@ public:
         int numBlocks;
         int64_t block_time;
         if (!cur_block_hash.IsNull() && rec->statusUpdateNeeded(cur_block_hash) && wallet.tryGetTxStatus(rec->hash, wtx, numBlocks, block_time)) {
-            rec->updateStatus(wtx, cur_block_hash, numBlocks, block_time);
+            // Read per refresh rather than cached: the finality point moves with
+            // the tip, and a status computed against a stale one would keep
+            // calling a settled payment provisional.
+            rec->updateStatus(wtx, cur_block_hash, numBlocks, block_time,
+                              parent->walletModel->node().getPosFinality());
         }
     }
 
@@ -294,6 +299,9 @@ TransactionTableModel::TransactionTableModel(const PlatformStyle *_platformStyle
         fProcessingQueuedTransactions(false),
         platformStyle(_platformStyle)
 {
+    const interfaces::PosFinality finality = walletModel->node().getPosFinality();
+    m_chain_has_finality = finality.signed_blocks || finality.enabled;
+    m_chain_has_certification = finality.enabled;
     subscribeToCoreSignals();
 
     // The first column shows the confirmation state as an icon. Upstream leaves
@@ -363,11 +371,37 @@ QString TransactionTableModel::formatTxStatus(const TransactionRecord *wtx) cons
         status = tr("Abandoned");
         break;
     case TransactionStatus::Confirming:
-        status = tr("Confirming (%1 of %2 recommended confirmations)").arg(wtx->status.depth).arg(TransactionRecord::RecommendedNumConfirmations);
+        // On a PoS chain the wait is for the committee, not for a number of
+        // blocks: quoting a threshold of confirmations would promise that
+        // sitting still for one more block settles it, which is not what
+        // settles it.
+        // Reachable only where there is something to wait FOR: a committee that
+        // has not certified the block yet, or a chain whose blocks are mined and
+        // can therefore be out-mined.
+        status = m_chain_has_certification
+            ? tr("In a block, waiting for the producer committee to certify it")
+            : tr("Confirming (%1 of %2 recommended confirmations)").arg(wtx->status.depth).arg(TransactionRecord::RecommendedNumConfirmations);
         break;
-    case TransactionStatus::Confirmed:
-        status = tr("Confirmed (%1 confirmations)").arg(wtx->status.depth);
+    case TransactionStatus::Confirmed: {
+        // "Final" is said only where the chain can back it: a block that cannot
+        // be out-mined (blocks here are signed, not mined) is settled by being in
+        // the chain, and one the committee has certified is settled in a way no
+        // rival Sequentia chain may undo. Where blocks ARE mined, depth is all
+        // there is and the old wording stands. Spelled out rather than left to
+        // tr()'s %n, which prints "1 block(s)" for any string not in the shipped
+        // catalogue.
+        const QString deep = wtx->status.depth == 1
+            ? tr("1 block deep")
+            : tr("%1 blocks deep").arg(wtx->status.depth);
+        if (wtx->status.is_final && m_chain_has_certification) {
+            status = tr("Final — certified by the producer committee (%1)").arg(deep);
+        } else if (wtx->status.is_final) {
+            status = tr("Final (%1)").arg(deep);
+        } else {
+            status = tr("Confirmed (%1 confirmations)").arg(wtx->status.depth);
+        }
         break;
+    }
     case TransactionStatus::Conflicted:
         status = tr("Conflicted");
         break;
@@ -456,6 +490,15 @@ QVariant TransactionTableModel::txAddressDecoration(const TransactionRecord *wtx
     default:
         return QIcon(":/icons/tx_inout");
     }
+}
+
+QString TransactionTableModel::replacementMarker(const TransactionRecord* wtx) const
+{
+    if (wtx->is_replacement) return QStringLiteral("RBF · ");
+    // Past tense on purpose: this row is not going anywhere, and its successor is
+    // the one to look at.
+    if (wtx->was_replaced) return QString(tr("replaced") + QStringLiteral(" · "));
+    return QString();
 }
 
 QString TransactionTableModel::formatTxToAddress(const TransactionRecord *wtx, bool tooltip) const
@@ -619,7 +662,11 @@ QVariant TransactionTableModel::data(const QModelIndex &index, int role) const
         case Type:
             return formatTxType(rec);
         case ToAddress:
-            return formatTxToAddress(rec, false);
+            // A wallet that has been replacing fees is a column of near-identical
+            // rows, and only the fee tells them apart. Say which row is the
+            // replacement and which one it displaced -- in the DISPLAY only, so
+            // that "Copy address" still copies an address.
+            return QString(replacementMarker(rec) + formatTxToAddress(rec, false));
         case Amount:
             // The amount in its own asset (e.g. "3 GOLD"); the reference value now
             // lives in its own Value column instead of trailing the amount inline.

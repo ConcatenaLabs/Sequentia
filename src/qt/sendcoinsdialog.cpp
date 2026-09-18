@@ -214,12 +214,23 @@ void SendCoinsDialog::setModel(WalletModel *_model)
             // Bitcoin's 600 s, inherited and never used by a PoS chain, so every
             // target here read ten times longer than the wait it describes -- two
             // blocks were offered as "20 minutes" when Sequentia takes 120 seconds.
-            ui->confTargetSelector->addItem(tr("%1 (%2 blocks)").arg(GUIUtil::formatNiceTimeOffset(n * GUIUtil::nominalBlockSpacing())).arg(n));
+            // One block is not "1 blocks", and the shortest target on a
+            // 60-second chain is exactly one -- so the wrong plural is the FIRST
+            // entry anybody opens the selector on. Spelled out rather than left
+            // to tr()'s %n: a string this new is not in the shipped English
+            // catalogue, and without a catalogue entry the plural machinery
+            // falls back to printing the source text, "(s)" and all.
+            const QString blocks = (n == 1) ? tr("1 block") : tr("%1 blocks").arg(n);
+            ui->confTargetSelector->addItem(tr("%1 (%2)")
+                                                .arg(GUIUtil::formatNiceTimeOffset(n * GUIUtil::nominalBlockSpacing()), blocks));
         }
         connect(ui->confTargetSelector, qOverload<int>(&QComboBox::currentIndexChanged), this, &SendCoinsDialog::updateSmartFeeLabel);
         connect(ui->confTargetSelector, qOverload<int>(&QComboBox::currentIndexChanged), this, &SendCoinsDialog::coinControlUpdateLabels);
 
 #if (QT_VERSION >= QT_VERSION_CHECK(5, 15, 0))
+        // First in the chain: the two that follow read customFee, so it has to
+        // hold a real figure before they run.
+        connect(ui->groupFee, &QButtonGroup::idClicked, this, &SendCoinsDialog::seedCustomFeeFromRecommended);
         connect(ui->groupFee, &QButtonGroup::idClicked, this, &SendCoinsDialog::updateFeeSectionControls);
         connect(ui->groupFee, &QButtonGroup::idClicked, this, &SendCoinsDialog::coinControlUpdateLabels);
         // Switching back to the recommended fee has to recompute it. Without this
@@ -228,6 +239,7 @@ void SendCoinsDialog::setModel(WalletModel *_model)
         // fee being paid.
         connect(ui->groupFee, &QButtonGroup::idClicked, this, &SendCoinsDialog::updateSmartFeeLabel);
 #else
+        connect(ui->groupFee, qOverload<int>(&QButtonGroup::buttonClicked), this, &SendCoinsDialog::seedCustomFeeFromRecommended);
         connect(ui->groupFee, qOverload<int>(&QButtonGroup::buttonClicked), this, &SendCoinsDialog::updateFeeSectionControls);
         connect(ui->groupFee, qOverload<int>(&QButtonGroup::buttonClicked), this, &SendCoinsDialog::coinControlUpdateLabels);
         connect(ui->groupFee, qOverload<int>(&QButtonGroup::buttonClicked), this, &SendCoinsDialog::updateSmartFeeLabel);
@@ -1180,6 +1192,7 @@ void SendCoinsDialog::updateFeeSectionControls()
     ui->labelCustomFeeWarning   ->setVisible(ui->radioCustomFee->isChecked());
 }
 
+
 void SendCoinsDialog::updateFeeMinimizedLabel()
 {
     if(!model || !model->getOptionsModel())
@@ -1289,20 +1302,10 @@ CAsset SendCoinsDialog::selectedFeeAsset() const
 }
 
 namespace {
-//! 10^precision, the atoms in one whole unit of an asset.
-double AtomsPerUnit(uint8_t precision)
-{
-    double f = 1.0;
-    for (uint8_t i = 0; i < precision; ++i) f *= 10.0;
-    return f;
-}
-//! Enough decimals to show the asset's smallest unit, and no more.
-QString FormatUnits(double units, uint8_t precision)
-{
-    QString s = QString::number(units, 'f', precision);
-    if (s.contains('.')) { while (s.endsWith('0')) s.chop(1); if (s.endsWith('.')) s.chop(1); }
-    return s;
-}
+//! Both moved to GUIUtil: the replacement dialog prices the same fee from the
+//! same figures, and two copies of this arithmetic would be free to drift.
+double AtomsPerUnit(uint8_t precision) { return GUIUtil::atomsPerUnit(precision); }
+QString FormatUnits(double units, uint8_t precision) { return GUIUtil::formatUnits(units, precision); }
 } // namespace
 
 void SendCoinsDialog::buildFeeGrid()
@@ -1478,6 +1481,47 @@ void SendCoinsDialog::updateFeeGrid(const CAmount& asset_atoms_per_kvb)
     m_fee_grid_updating = false;
 }
 
+void SendCoinsDialog::seedCustomFeeFromRecommended()
+{
+    if (!model || !ui->radioCustomFee->isChecked()) return;
+    // customFee holds DEFAULT_PAY_TX_FEE, which is zero, and stays there for as
+    // long as Recommended is selected -- the field is hidden and nothing writes
+    // to it. So the moment Custom was picked the grid restated that zero, the
+    // two figures the user had been reading vanished, and the validator
+    // announced a fee below the relay minimum: an accusation about a number
+    // nobody had entered, on a state that existed only because the radio moved.
+    //
+    // Custom means "the recommendation, but mine to change", so it starts from
+    // the recommendation. A value the user has already set is left alone.
+    // Strictly greater, not "at least": the field is initialised to exactly the
+    // required fee (setModel raises it to that floor), so "already set" tested
+    // as >= is true from startup and this would never run. A user who wants the
+    // floor itself gets it re-seeded to the recommendation, which is the same
+    // figure they were being shown a moment earlier.
+    const CAmount required = model->wallet().getRequiredFee(1000);
+    if (ui->customFee->value() > required) return;
+
+    // Seed from the number the grid is showing, converted back exactly the way
+    // onFeeCellEdited() converts what the user types. Recomputing the estimate
+    // here does not work: Recommended and Custom reach the grid through
+    // different conversions, so a figure that is right for one prints as the
+    // wrong one for the other. Reusing the round trip the field already uses is
+    // the only way the value cannot drift from what was on screen.
+    CAmount seeded = 0;
+    if (m_fee_kvb_asset) {
+        const CAsset asset = selectedFeeAsset();
+        const FeeAssetInfo info = model->node().getFeeAssetInfo(asset);
+        bool ok = false;
+        const double typed = m_fee_kvb_asset->text().trimmed().toDouble(&ok);
+        if (ok && typed > 0.0 && info.rate > 0) {
+            const double atoms_per_kvb = typed * AtomsPerUnit(info.precision);
+            seeded = static_cast<CAmount>(std::llround(
+                atoms_per_kvb * static_cast<double>(info.rate) / static_cast<double>(exchange_rate_scale)));
+        }
+    }
+    ui->customFee->setValue(std::max(seeded, required));
+}
+
 void SendCoinsDialog::onFeeCellEdited(QLineEdit* source)
 {
     if (m_fee_grid_updating || !model || !ui->radioCustomFee->isChecked()) return;
@@ -1615,9 +1659,18 @@ void SendCoinsDialog::updateFeeAssetWarning()
     // outside staking eligibility no asset here has one; if the answer for it is
     // uncomfortable the fix is to publish it on the registry, not to stop asking.
     if (!info.registry_listed || !info.has_market_price) {
+        // "Not published" and "we have no registry to ask" are the same silence
+        // and not the same statement. A node with no -assetregistryurl reads
+        // every asset as unpublished, so the first wording accused the whole
+        // chain -- the policy asset included, which is how this was noticed --
+        // of a fact nobody here had checked. No asset is exempted from the
+        // question; the answer is just reported for what it is.
         const QString why = !info.registry_listed
-            ? tr("%1 is not published on the Asset Registry, so the price servers other block producers "
-                 "run will not discover it.").arg(name)
+            ? (info.registry_available
+                   ? tr("%1 is not published on the Asset Registry, so the price servers other block producers "
+                        "run will not discover it.").arg(name)
+                   : tr("This node reads no Asset Registry, so it cannot tell whether %1 is published on one. "
+                        "If it is not, the price servers other block producers run will not discover it.").arg(name))
             : tr("No published market price for %1, so other block producers' price servers cannot "
                  "value it.").arg(name);
         // Replace-By-Fee is the remedy here and only here: this transaction is
@@ -1705,9 +1758,9 @@ void SendCoinsDialog::updateSmartFeeLabel()
             notes << tr("Blocks are not congested, so a nearer target buys little: at this rate the next "
                         "block has room for you either way.");
         } else {
-            notes << tr("Blocks are full, with %1 of transactions waiting. A nearer target pays more, "
-                        "which is what puts you ahead of them.")
-                        .arg(tr("%1 blocks' worth").arg(QString::number(c.backlog_blocks, 'f', 1)));
+            notes << tr("Blocks are full, and there are enough transactions waiting to fill %1 blocks. "
+                        "Yours waits behind them unless it pays more than they do.")
+                        .arg(QString::number(c.backlog_blocks, 'f', 1));
         }
         if (c.mempool_min > c.relay_min) {
             notes << tr("This node's queue is full and it is dropping the cheapest transactions. %1 is "
@@ -1731,7 +1784,14 @@ void SendCoinsDialog::updateSmartFeeLabel()
         if (m_tx_vsize == 0) {
             notes << tr("The total appears once there is a recipient and an amount to size the transaction with.");
         }
-        m_fee_note->setText(notes.join(QStringLiteral(" ")));
+        // Each note is a separate statement about a separate thing -- the state of
+        // the queue, this node's own mempool, a total that cannot be computed yet --
+        // and joined by a space they read as one rambling paragraph, leaving the
+        // reader to work out where one ends. A bullet per line says how many there
+        // are before any of them is read.
+        QStringList bulleted;
+        for (const QString& note : notes) bulleted << QString::fromUtf8("• ") + note;
+        m_fee_note->setText(bulleted.join(QStringLiteral("\n")));
         m_fee_note->setVisible(!notes.isEmpty());
         if (m_fee_asset_note) {
             m_fee_asset_note->setText(asset_note);

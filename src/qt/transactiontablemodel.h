@@ -109,6 +109,12 @@ private:
     TransactionTablePriv *priv;
     bool fProcessingQueuedTransactions;
     const PlatformStyle *platformStyle;
+    /** SEQUENTIA: what this chain can say about settlement. Both are chain
+     *  parameters, fixed for the session, so they are read once rather than per
+     *  painted row: whether a block is settlement by construction (signed, not
+     *  mined) and whether a committee certifies it on top of that. */
+    bool m_chain_has_finality{false};
+    bool m_chain_has_certification{false};
 
     void subscribeToCoreSignals();
     void unsubscribeFromCoreSignals();
@@ -119,6 +125,9 @@ private:
     QString formatTxDate(const TransactionRecord *wtx) const;
     QString formatTxType(const TransactionRecord *wtx) const;
     QString formatTxToAddress(const TransactionRecord *wtx, bool tooltip) const;
+    /** "RBF · " for a replacement, "replaced · " for what it displaced, empty
+     *  otherwise. Display only: never part of the address the row copies. */
+    QString replacementMarker(const TransactionRecord* wtx) const;
     QString formatTxAmount(const TransactionRecord *wtx, bool showUnconfirmed=true, BitcoinUnits::SeparatorStyle separators=BitcoinUnits::SeparatorStyle::STANDARD) const;
     QString formatTooltip(const TransactionRecord *rec) const;
     QVariant txStatusDecoration(const TransactionRecord *wtx) const;

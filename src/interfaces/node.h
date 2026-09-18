@@ -55,6 +55,29 @@ struct BlockAndHeaderTipInfo
     double verification_progress;
 };
 
+//! SEQUENTIA: how far immediate finality reaches. A block carrying a full
+//! committee quorum is final the moment it is certified -- no competing
+//! Sequentia chain may reorganise it -- so a wallet has no reason to count
+//! confirmations towards a threshold the way a proof-of-work wallet must. The
+//! two states below are not the same and must not be collapsed: a chain without
+//! proof-of-stake has no finality to report, while a PoS chain whose tip is not
+//! yet certified has finality that simply has not reached this transaction.
+struct PosFinality
+{
+    //! This chain's blocks are signed rather than mined. There is no proof of
+    //! work to out-race, so a transaction in a block is settled the moment it is
+    //! in one: counting confirmations towards a threshold is a proof-of-work
+    //! habit that means nothing here, and telling somebody to wait for a second
+    //! block tells them to wait for nothing.
+    bool signed_blocks{false};
+    //! This chain runs proof-of-stake at all.
+    bool enabled{false};
+    //! Height of the highest quorum-certified block on the active chain, or -1
+    //! when nothing is certified (no quorum yet, or an escaping stall). Blocks
+    //! at or below it are final; above it they are merely confirmed.
+    int height{-1};
+};
+
 //! SEQUENTIA: the GUI-relevant state of the chain tip's Bitcoin anchor, for
 //! the status bar's "waiting for the Bitcoin network" indicator (incident
 //! 2026-07-11 §8.3). Only meaningful when `validated` is true.
@@ -229,6 +252,10 @@ public:
 
     //! SEQUENTIA: how hard the next block is to get into, for the fee panel.
     virtual MempoolCongestion getMempoolCongestion() = 0;
+
+    //! SEQUENTIA: the immediate-finality point, for a wallet that has to say
+    //! whether a payment is settled. Cheap (one cs_main peek, no RPC).
+    virtual PosFinality getPosFinality() = 0;
 
     //! Execute rpc command.
     virtual UniValue executeRpc(const std::string& command, const UniValue& params, const std::string& uri) = 0;

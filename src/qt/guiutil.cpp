@@ -1326,6 +1326,43 @@ QString formatMultiAssetAmountWithValue(const CAmountMap& amountmap, const int b
     return ret.join(line_separator);
 }
 
+QString feeAssetTravelNote(const QString& asset_name, bool registry_available, bool registry_listed,
+                           bool has_market_price)
+{
+    // "Not published" and "we have no registry to ask" are the same silence and
+    // not the same statement: a node with no registry configured reads every
+    // asset as unpublished, and reporting that as a fact accuses the whole chain
+    // of something nobody checked.
+    if (!registry_listed) {
+        return registry_available
+            ? QObject::tr("%1 is not published on the Asset Registry, so the price servers other block "
+                          "producers run will not discover it: this node would take the fee, and they may "
+                          "not.").arg(asset_name)
+            : QObject::tr("This node reads no Asset Registry, so it cannot tell whether %1 is published on "
+                          "one. If it is not, the price servers other block producers run will not discover "
+                          "it.").arg(asset_name);
+    }
+    if (!has_market_price) {
+        return QObject::tr("No published market price for %1, so other block producers' price servers "
+                           "cannot value it.").arg(asset_name);
+    }
+    return QString();
+}
+
+double atomsPerUnit(uint8_t precision)
+{
+    double f = 1.0;
+    for (uint8_t i = 0; i < precision; ++i) f *= 10.0;
+    return f;
+}
+
+QString formatUnits(double units, uint8_t precision)
+{
+    QString s = QString::number(units, 'f', precision);
+    if (s.contains('.')) { while (s.endsWith('0')) s.chop(1); if (s.endsWith('.')) s.chop(1); }
+    return s;
+}
+
 bool parseAssetAmount(const CAsset& asset, const QString& text, const int bitcoin_unit, CAmount *val_out)
 {
     if (asset == Params().GetConsensus().pegged_asset) {
