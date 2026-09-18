@@ -15,6 +15,7 @@
 namespace interfaces {
 class Node;
 class Wallet;
+struct PosFinality;
 struct WalletTx;
 struct WalletTxStatus;
 }
@@ -59,6 +60,13 @@ public:
                       finalization */
     /**@}*/
 
+    /** SEQUENTIA: the block this transaction is in (-1 when unconfirmed), and
+     *  whether that block is at or below the immediate-finality point. On a
+     *  proof-of-stake chain this, not the depth, is what says a payment has
+     *  settled. */
+    int block_height{-1};
+    bool is_final{false};
+
     /** Current block hash (to know whether cached status is still valid) */
     uint256 m_cur_block_hash{};
 
@@ -86,7 +94,10 @@ public:
         Unstake,
     };
 
-    /** Number of confirmation recommended for accepting a transaction */
+    /** Number of confirmations recommended for accepting a transaction, on a
+     *  chain that has no finality to offer. Where proof-of-stake is running,
+     *  waiting a number of blocks is not what settles a payment -- committee
+     *  certification is -- and this threshold is not consulted at all. */
     static const int RecommendedNumConfirmations = 2;
 
     TransactionRecord():
@@ -139,6 +150,14 @@ public:
     /** Whether the transaction was sent/received with a watch-only address */
     bool involvesWatchAddress;
 
+    /** SEQUENTIA: this transaction replaced another one (RBF), or was itself
+     *  replaced. The wallet records both -- "replaces_txid" on the replacement,
+     *  "replaced_by_txid" on the original -- and the list says so, because a
+     *  wallet that has been raising fees is otherwise a column of near-identical
+     *  rows telling you nothing. */
+    bool is_replacement{false};
+    bool was_replaced{false};
+
     /** Return the unique identifier for this transaction (part) */
     QString getTxHash() const;
 
@@ -147,7 +166,8 @@ public:
 
     /** Update status from core wallet tx.
      */
-    void updateStatus(const interfaces::WalletTxStatus& wtx, const uint256& block_hash, int numBlocks, int64_t block_time);
+    void updateStatus(const interfaces::WalletTxStatus& wtx, const uint256& block_hash, int numBlocks, int64_t block_time,
+                      const interfaces::PosFinality& finality);
 
     /** Return whether a status update is needed.
      */

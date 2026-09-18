@@ -5,6 +5,7 @@
 #include <qt/transactionrecord.h>
 
 #include <chain.h>
+#include <interfaces/node.h>
 #include <interfaces/wallet.h>
 #include <key_io.h>
 #include <policy/policy.h>
@@ -254,10 +255,22 @@ QList<TransactionRecord> TransactionRecord::decomposeTransaction(const interface
         parts.last().involvesWatchAddress = involvesWatchAddress;
     }
 
+    // A property of the transaction, so it goes on every row it produced. The
+    // wallet writes "replaces_txid" when it commits a replacement (feebumper,
+    // and WalletModel::replaceTransaction) and "replaced_by_txid" on the one
+    // that was displaced.
+    const bool is_replacement = wtx.value_map.count("replaces_txid") > 0;
+    const bool was_replaced = wtx.value_map.count("replaced_by_txid") > 0;
+    for (TransactionRecord& part : parts) {
+        part.is_replacement = is_replacement;
+        part.was_replaced = was_replaced;
+    }
+
     return parts;
 }
 
-void TransactionRecord::updateStatus(const interfaces::WalletTxStatus& wtx, const uint256& block_hash, int numBlocks, int64_t block_time)
+void TransactionRecord::updateStatus(const interfaces::WalletTxStatus& wtx, const uint256& block_hash, int numBlocks, int64_t block_time,
+                                     const interfaces::PosFinality& finality)
 {
     // Determine transaction status
 
@@ -293,6 +306,16 @@ void TransactionRecord::updateStatus(const interfaces::WalletTxStatus& wtx, cons
     status.countsForBalance = wtx.is_trusted && !(wtx.blocks_to_maturity > 0);
     status.depth = wtx.depth_in_main_chain;
     status.m_cur_block_hash = block_hash;
+    status.block_height = wtx.block_height;
+    // SEQUENTIA: settled, rather than merely deep. A quorum-certified block
+    // cannot be reorganised by any competing Sequentia chain, so once the
+    // finality point has reached this transaction's block there is nothing
+    // further to wait for -- and counting confirmations towards a threshold,
+    // which is how a proof-of-work wallet copes with not having this, tells the
+    // user to wait for something that has already happened.
+    status.is_final = finality.enabled
+        ? (finality.height >= 0 && wtx.block_height > 0 && wtx.block_height <= finality.height)
+        : (finality.signed_blocks && status.depth > 0);
 
     // For generated transactions, determine maturity
     if (type == TransactionRecord::Generated) {
@@ -326,8 +349,16 @@ void TransactionRecord::updateStatus(const interfaces::WalletTxStatus& wtx, cons
             if (wtx.is_abandoned)
                 status.status = TransactionStatus::Abandoned;
         }
-        else if (status.depth < RecommendedNumConfirmations)
+        else if (finality.enabled
+                     ? !status.is_final
+                     : (!finality.signed_blocks && status.depth < RecommendedNumConfirmations))
         {
+            // The only wait left worth showing. On a proof-of-stake chain
+            // is_final says whether the committee has certified the block; on a
+            // signed-block chain there is nothing to certify and nothing to
+            // out-race, so a block IS the settlement; and where blocks are mined,
+            // depth is the only guard against a reorganisation and the threshold
+            // stands.
             status.status = TransactionStatus::Confirming;
         }
         else
