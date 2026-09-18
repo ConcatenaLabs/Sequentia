@@ -293,13 +293,18 @@ BitcoinAmountField::BitcoinAmountField(std::set<CAsset> allowed_assets, QWidget 
     amount->setMaximumWidth(240);
 
     QHBoxLayout *layout = new QHBoxLayout(this);
-    layout->addWidget(amount);
     unit = new QComboBox(this);
     m_allowed_assets = allowed_assets;
     for (const auto& asset : allowed_assets) {
         addAssetChoice(asset);
     }
+    // The asset comes first, before the number. An amount means nothing until it
+    // is known what it counts, and with the box on the right the reflex is to
+    // type the figure into the field one's eye lands on and discover only at the
+    // error message that it was counted in whatever asset happened to be
+    // selected. Reading order decides which field gets typed into.
     layout->addWidget(unit);
+    layout->addWidget(amount);
     layout->addStretch(1);
     layout->setContentsMargins(0,0,0,0);
 
