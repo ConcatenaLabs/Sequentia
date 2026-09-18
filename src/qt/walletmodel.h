@@ -156,6 +156,44 @@ public:
     // Build, sign, and broadcast an opt-in-RBF replacement that re-pins this tx's inputs but sends
     // brand-new outputs (a different address/asset/amount) — to correct a still-unconfirmed payment.
     bool replaceTransaction(uint256 hash, uint256& new_hash);
+    //! SEQUENTIA: draft a candidate replacement for `hash` -- build it, do not
+    //! commit it -- and report its virtual size, so a replacement can be priced
+    //! before it is made. A fee is a price on size and the size is not known
+    //! until the wallet has selected coins for it, which is why this cannot be
+    //! computed in the dialog that asks for the fee.
+    //!
+    //! Reports failure by return value and `error` rather than through the
+    //! message() signal prepareTransaction() raises: this runs while the user is
+    //! still typing, and a modal box per keystroke is not a fee estimate.
+    //! SEQUENTIA: the same for a fee bump, which the wallet builds itself. The
+    //! draft IS the transaction that would be sent, so the size and the fee
+    //! reported here are the real ones rather than an approximation of them.
+    bool probeBumpSize(const uint256& hash,
+                       const CAsset& fee_asset,
+                       CAmount reference_per_kvb,
+                       int64_t& vsize_out,
+                       CAmount& fee_out,
+                       QString& error);
+
+    //! SEQUENTIA: the same for a child-pays-for-parent child spending output `n`
+    //! of `parentHash`. The child's size is what turns its fee rate into a fee,
+    //! and the package figure the user is shown is only as good as it.
+    bool probeChildSize(const uint256& parentHash,
+                        uint32_t n,
+                        const QString& address,
+                        CAmount amount,
+                        const CAsset& fee_asset,
+                        CAmount reference_per_kvb,
+                        int64_t& vsize_out,
+                        QString& error);
+    bool probeReplacementSize(const uint256& hash,
+                              const QString& address,
+                              const CAsset& send_asset,
+                              CAmount amount,
+                              const CAsset& fee_asset,
+                              CAmount reference_per_kvb,
+                              int64_t& vsize_out,
+                              QString& error);
     bool displayAddress(std::string sAddress);
 
     static bool isWalletEnabled();

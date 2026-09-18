@@ -9,11 +9,13 @@
 #include <qt/walletmodel.h>
 
 #include <qt/addresstablemodel.h>
+#include <qt/childpaysdialog.h>
 #include <qt/clientmodel.h>
 #include <qt/guiconstants.h>
 #include <qt/guiutil.h>
 #include <qt/optionsmodel.h>
 #include <qt/recentrequeststablemodel.h>
+#include <qt/replacetxdialog.h>
 #include <qt/sendcoinsdialog.h>
 #include <qt/transactiontablemodel.h>
 
@@ -551,42 +553,23 @@ bool WalletModel::bumpFee(uint256 hash, uint256& new_hash)
     }
     CAsset new_fee_asset = old_fee_asset; // unless the user switches it below
 
-    // Sequentia any-asset fees: let the user choose which asset pays the increased fee — any
-    // held asset; no asset is privileged. The default keeps the original tx's fee asset (also
-    // what feebumper pins when m_fee_asset is unset). Switching to a more widely accepted asset
-    // is how a stranded any-asset-fee tx is rescued.
+    // Sequentia any-asset fees: which asset pays the increased fee, and HOW MUCH.
+    // The figure used to be chosen here, by the wallet, at the estimator's entry
+    // price with nothing added -- and an entry price is a moving cut, so a bump
+    // that lands exactly on it is overtaken by the next transaction and waits as
+    // long as the one it replaced. The window states the cut, shows what the
+    // replacement pays against what the original paid, and refuses to send
+    // anything the node would not accept.
+    ReplaceTxDialog dlg(this, hash, ReplaceTxDialog::Mode::Bump);
+    if (dlg.exec() != QDialog::Accepted) return false;
     if (g_con_any_asset_fees) {
-        QStringList labels; QList<QString> hexes;
-        labels << tr("Keep original (%1)").arg(GUIUtil::assetDisplayName(old_fee_asset));
-        hexes  << QString::fromStdString(old_fee_asset.GetHex());
-        // Reissuance tokens are absent by construction: a fee is paid into the
-        // producer's coinbase, and paying one in an inflation key would hand the
-        // producer the right to mint that asset for ever.
-        for (const CAsset& asset : getFeePayableAssetTypes()) {
-            if (asset == old_fee_asset) continue;
-            labels << GUIUtil::assetDisplayName(asset);
-            hexes  << QString::fromStdString(asset.GetHex());
-        }
-        if (labels.size() > 1) {
-            QDialog dlg(nullptr);
-            dlg.setWindowTitle(tr("Choose fee asset"));
-            auto* lay = new QVBoxLayout(&dlg);
-            lay->addWidget(new QLabel(tr("Pay the increased fee in:"), &dlg));
-            auto* combo = new QComboBox(&dlg);
-            for (int i = 0; i < labels.size(); ++i) combo->addItem(labels[i], hexes[i]);
-            lay->addWidget(combo);
-            auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
-            lay->addWidget(bb);
-            connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
-            connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
-            if (dlg.exec() != QDialog::Accepted) return false;
-            const CAsset sel = GetAssetFromString(combo->currentData().toString().toStdString());
-            if (!sel.IsNull() && sel != old_fee_asset) {
-                coin_control.m_fee_asset = sel; // honored by feebumper
-                new_fee_asset = sel;
-            }
+        const CAsset sel = dlg.feeAsset();
+        if (!sel.IsNull() && sel != old_fee_asset) {
+            coin_control.m_fee_asset = sel; // honored by feebumper
+            new_fee_asset = sel;
         }
     }
+    coin_control.m_feerate = CFeeRate(dlg.referencePerKvb());
 
     std::vector<bilingual_str> errors;
     CAmount old_fee;
@@ -696,6 +679,78 @@ bool WalletModel::canDoCPFP(uint256 hash)
     return false;
 }
 
+bool WalletModel::probeBumpSize(const uint256& hash, const CAsset& fee_asset, CAmount reference_per_kvb,
+                                int64_t& vsize_out, CAmount& fee_out, QString& error)
+{
+    CCoinControl cc;
+    cc.m_signal_bip125_rbf = true;
+    // Same rule as the real bump below: feebumper pins the original's fee asset
+    // when m_fee_asset is unset, so it is set only to CHANGE the asset -- using a
+    // different code path for the same outcome would make the draft stop
+    // matching what gets sent.
+    CAsset old_fee_asset = ::policyAsset;
+    if (CTransactionRef orig = m_wallet->getTx(hash)) old_fee_asset = orig->GetFeeAsset(::policyAsset);
+    if (g_con_any_asset_fees && !fee_asset.IsNull() && fee_asset != old_fee_asset) cc.m_fee_asset = fee_asset;
+    cc.m_feerate = CFeeRate(reference_per_kvb);
+
+    std::vector<bilingual_str> errors;
+    CAmount old_fee = 0;
+    CAmount new_fee = 0;
+    CMutableTransaction mtx;
+    if (!m_wallet->createBumpTransaction(hash, cc, errors, old_fee, new_fee, mtx)) {
+        error = errors.empty() ? tr("the wallet refused it")
+                               : QString::fromStdString(errors[0].translated);
+        return false;
+    }
+    vsize_out = GetVirtualTransactionSize(CTransaction(mtx));
+    fee_out = new_fee;
+    return true;
+}
+
+bool WalletModel::probeChildSize(const uint256& parentHash, uint32_t n, const QString& address, CAmount amount,
+                                 const CAsset& fee_asset, CAmount reference_per_kvb, int64_t& vsize_out, QString& error)
+{
+    interfaces::WalletTxStatus st;
+    interfaces::WalletOrderForm of;
+    bool in_mempool = false;
+    int nblocks = 0;
+    interfaces::WalletTx wtx = m_wallet->getWalletTxDetails(parentHash, st, of, in_mempool, nblocks);
+    if (!wtx.tx || n >= wtx.txout_assets.size()) { error = tr("the transaction is gone"); return false; }
+    if (!IsValidDestinationString(address.toStdString())) { error = tr("invalid address"); return false; }
+    if (amount <= 0) { error = tr("invalid amount"); return false; }
+    const CAsset childAsset = wtx.txout_assets[n];
+
+    // The same coin control the real child is built with, below.
+    CCoinControl cc;
+    cc.Select(COutPoint(parentHash, n));
+    cc.fAllowOtherInputs = true;
+    cc.m_include_unsafe_inputs = true;
+    cc.m_signal_bip125_rbf = true;
+    if (g_con_any_asset_fees && !fee_asset.IsNull() && fee_asset != ::policyAsset) cc.m_fee_asset = fee_asset;
+    cc.m_feerate = CFeeRate(reference_per_kvb);
+    cc.fOverrideFeeRate = true;
+
+    CTxDestination dest = DecodeDestination(address.toStdString());
+    CScript spk = GetScriptForDestination(dest);
+    CPubKey blind = GetDestinationBlindingKey(dest);
+    const bool sameAsset = (fee_asset == childAsset);
+    std::vector<CRecipient> vecSend{ {spk, amount, childAsset, blind, /*fSubtractFeeFromAmount=*/sameAsset} };
+
+    std::unique_ptr<wallet::BlindDetails> blind_details;
+    if (g_con_elementsmode) blind_details = std::make_unique<wallet::BlindDetails>();
+    int changePos = -1;
+    CAmount fee = 0;
+    bilingual_str err;
+    CTransactionRef draft = m_wallet->createTransaction(
+        vecSend, cc, !wallet().privateKeysDisabled() /*sign*/, changePos, fee, blind_details.get(), err);
+    if (!draft) {
+        error = QString::fromStdString(err.translated);
+        return false;
+    }
+    vsize_out = GetVirtualTransactionSize(*draft);
+    return true;
+}
+
 bool WalletModel::createChildPaysForParent(uint256 parentHash, uint256& childHash)
 {
     interfaces::WalletTxStatus st;
@@ -707,59 +762,29 @@ bool WalletModel::createChildPaysForParent(uint256 parentHash, uint256& childHas
         QMessageBox::critical(nullptr, tr("Speed up"), tr("This transaction is no longer unconfirmed."));
         return false;
     }
-
-    // Pick a spendable wallet-owned output of the parent — prefer its change.
-    std::optional<size_t> pick;
-    for (size_t n = 0; n < wtx.tx->vout.size(); ++n) {
-        if (n >= wtx.txout_is_mine.size() || wtx.txout_is_mine[n] == wallet::ISMINE_NO) continue;
-        const auto coins = m_wallet->getCoins({COutPoint(parentHash, (uint32_t)n)});
-        if (coins.empty() || coins[0].is_spent) continue;
-        if (n < wtx.txout_is_change.size() && wtx.txout_is_change[n]) { pick = n; break; }
-        if (!pick) pick = n;
-    }
-    if (!pick) {
+    // Which output carries the child, where its value goes, what the child pays
+    // and in which asset: all of it was decided in here and none of it was shown.
+    // The window states the one figure that governs the outcome -- what the two
+    // transactions pay TOGETHER, against what the next block is taking -- and
+    // proposes the same defaults this function used to apply silently.
+    ChildPaysDialog dlg(this, parentHash);
+    if (!dlg.isUsable()) {
         QMessageBox::critical(nullptr, tr("Speed up"), tr("No spendable output to attach a child fee to."));
         return false;
     }
-    const size_t n = *pick;
+    if (dlg.exec() != QDialog::Accepted) return false;
+
+    const size_t n = dlg.outputIndex();
+    if (n >= wtx.txout_assets.size()) return false;
     const CAsset childAsset = wtx.txout_assets[n];
-    const CAmount childValue = wtx.txout_amounts[n];
-
-    // CPFP: spend the parent's unconfirmed output (the link a miner evaluates as a package) and pay
-    // a HIGH child fee, funded from the wallet in a PRODUCER-ACCEPTED asset (default the policy
-    // asset, which producers always mine) — NOT confined to the pinned output's asset, which may be
-    // exactly the one producers reject (confining the fee to the change asset was the old bug, and
-    // makes the child strand alongside the parent). The user may pick any accepted asset.
-    CAsset feeAsset = ::policyAsset;
-    if (g_con_any_asset_fees) {
-        QStringList labels; QList<QString> hexes;
-        labels << BitcoinUnits::policyAssetTicker();
-        hexes  << QString::fromStdString(::policyAsset.GetHex());
-        // No reissuance tokens here either: the child's fee reaches a producer's
-        // coinbase exactly as the parent's would.
-        for (const CAsset& asset : getFeePayableAssetTypes()) {
-            if (asset == ::policyAsset) continue;
-            labels << GUIUtil::assetDisplayName(asset);
-            hexes  << QString::fromStdString(asset.GetHex());
-        }
-        if (labels.size() > 1) {
-            QDialog dlg(nullptr);
-            dlg.setWindowTitle(tr("Speed up: fee asset"));
-            auto* lay = new QVBoxLayout(&dlg);
-            lay->addWidget(new QLabel(tr("Pay the child fee in (a producer-accepted asset lets the package confirm):"), &dlg));
-            auto* combo = new QComboBox(&dlg);
-            for (int i = 0; i < labels.size(); ++i) combo->addItem(labels[i], hexes[i]);
-            lay->addWidget(combo);
-            auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
-            lay->addWidget(bb);
-            connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
-            connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
-            if (dlg.exec() != QDialog::Accepted) return false;
-            feeAsset = GetAssetFromString(combo->currentData().toString().toStdString());
-            if (feeAsset.IsNull()) feeAsset = ::policyAsset;
-        }
+    const CAmount childValue = dlg.amount();
+    if (childValue <= 0) {
+        QMessageBox::critical(nullptr, tr("Speed up"), tr("Invalid amount.")); return false;
     }
-
+    if (!IsValidDestinationString(dlg.address().toStdString())) {
+        QMessageBox::critical(nullptr, tr("Speed up"), tr("Invalid address.")); return false;
+    }
+    const CAsset feeAsset = dlg.feeAsset();
     CCoinControl cc;
     cc.Select(COutPoint(parentHash, (uint32_t)n));
     cc.fAllowOtherInputs = true;       // pull in fee-asset funds to pay the child fee
@@ -767,24 +792,19 @@ bool WalletModel::createChildPaysForParent(uint256 parentHash, uint256& childHas
     cc.m_signal_bip125_rbf = true;
     if (g_con_any_asset_fees && feeAsset != ::policyAsset) cc.m_fee_asset = feeAsset;
 
-    // Package-aware feerate: size the child so that, even crediting the parent with zero effective
-    // fee, the {parent, child} package clears the target (mirrors Wollet::cpfp_suggested_feerate).
-    const CAmount min_per_k = m_wallet->getMinimumFee(1000, cc, nullptr, nullptr);
-    const int64_t parent_vsize = GetVirtualTransactionSize(*wtx.tx);
-    const int64_t child_vsize = 1100; // conservative confidential-child estimate
-    const CAmount target_per_k = min_per_k * 5; // a healthy confirmation target
-    cc.m_feerate = CFeeRate(target_per_k * (parent_vsize + child_vsize) / child_vsize);
+    // The rate the window settled on, already in reference fee atoms per kvB. It
+    // opens at the package-aware figure this function used to compute for itself
+    // (five times the entry price, sized so the package clears it even crediting
+    // the parent with nothing), so leaving the window alone does what it always
+    // did -- the difference is that the number, and what it buys, were on screen.
+    cc.m_feerate = CFeeRate(dlg.referencePerKvb());
     cc.fOverrideFeeRate = true;
 
     // Send the pinned output's value back to the wallet in its OWN asset. Subtract the fee from it
     // only when the fee is paid in that same asset; otherwise preserve it and fund the fee from the
     // separately-selected fee-asset inputs.
     const bool sameAsset = (feeAsset == childAsset);
-    CTxDestination dest;
-    if (!m_wallet->getNewDestination(m_wallet->getDefaultAddressType(), "CPFP", dest, /*add_blinding_key=*/true)) {
-        QMessageBox::critical(nullptr, tr("Speed up"), tr("Could not get a new address."));
-        return false;
-    }
+    CTxDestination dest = DecodeDestination(dlg.address().toStdString());
     CScript spk = GetScriptForDestination(dest);
     CPubKey blind = GetDestinationBlindingKey(dest);
     std::vector<CRecipient> vecSend{ {spk, childValue, childAsset, blind, /*fSubtractFeeFromAmount=*/sameAsset} };
@@ -809,6 +829,46 @@ bool WalletModel::createChildPaysForParent(uint256 parentHash, uint256& childHas
     return true;
 }
 
+bool WalletModel::probeReplacementSize(const uint256& hash, const QString& address, const CAsset& send_asset,
+                                       CAmount amount, const CAsset& fee_asset, CAmount reference_per_kvb,
+                                       int64_t& vsize_out, QString& error)
+{
+    CTransactionRef orig = m_wallet->getTx(hash);
+    if (!orig) { error = tr("the original is gone"); return false; }
+    if (!IsValidDestinationString(address.toStdString())) { error = tr("invalid address"); return false; }
+    if (amount <= 0) { error = tr("invalid amount"); return false; }
+
+    // The same coin control the real replacement is built with (see below), or
+    // the size measured here would be the size of a different transaction.
+    CCoinControl cc;
+    for (const CTxIn& txin : orig->vin) cc.Select(txin.prevout);
+    cc.fAllowOtherInputs = true;
+    cc.m_min_depth = 1;
+    cc.m_signal_bip125_rbf = true;
+    if (g_con_any_asset_fees && !fee_asset.IsNull() && fee_asset != ::policyAsset) cc.m_fee_asset = fee_asset;
+    cc.m_feerate = CFeeRate(reference_per_kvb);
+    cc.fOverrideFeeRate = true;
+
+    CTxDestination dest = DecodeDestination(address.toStdString());
+    CScript spk = GetScriptForDestination(dest);
+    CPubKey blind = GetDestinationBlindingKey(dest);
+    std::vector<CRecipient> vecSend{ {spk, amount, send_asset, blind, /*fSubtractFeeFromAmount=*/false} };
+
+    std::unique_ptr<wallet::BlindDetails> blind_details;
+    if (g_con_elementsmode) blind_details = std::make_unique<wallet::BlindDetails>();
+    int changePos = -1;
+    CAmount fee = 0;
+    bilingual_str err;
+    CTransactionRef draft = m_wallet->createTransaction(
+        vecSend, cc, !wallet().privateKeysDisabled() /*sign*/, changePos, fee, blind_details.get(), err);
+    if (!draft) {
+        error = QString::fromStdString(err.translated);
+        return false;
+    }
+    vsize_out = GetVirtualTransactionSize(*draft);
+    return true;
+}
+
 bool WalletModel::replaceTransaction(uint256 hash, uint256& new_hash)
 {
     interfaces::WalletTxStatus st;
@@ -817,59 +877,42 @@ bool WalletModel::replaceTransaction(uint256 hash, uint256& new_hash)
     int nblocks = 0;
     interfaces::WalletTx wtx = m_wallet->getWalletTxDetails(hash, st, of, in_mempool, nblocks);
     CTransactionRef orig = m_wallet->getTx(hash);
-    if (!orig || st.depth_in_main_chain != 0 || !in_mempool || st.is_abandoned) {
-        QMessageBox::critical(nullptr, tr("Replace transaction"), tr("This transaction is no longer unconfirmed."));
+    // A transaction that has DROPPED OUT of this node's mempool -- evicted under
+    // memory pressure, expired, never relayed by anyone -- used to be refused
+    // here, with "no longer unconfirmed" for a transaction that is precisely
+    // still unconfirmed. That is the state where replacing matters most: the
+    // coins it was holding are otherwise stuck behind a transaction that no
+    // longer exists anywhere, and a replacement both frees them and is the only
+    // honest way to do it (if some peer does still hold the original, the
+    // replacement outbids it under BIP125 rather than pretending it never was).
+    if (!orig || st.depth_in_main_chain != 0 || st.is_abandoned) {
+        QMessageBox::critical(nullptr, tr("Replace transaction"),
+                              st.is_abandoned ? tr("This transaction has been abandoned; the coins it was "
+                                                   "spending are already free to spend again.")
+                                              : tr("This transaction is no longer unconfirmed."));
         return false;
     }
     const CAsset old_fee_asset = orig->GetFeeAsset(::policyAsset);
 
-    // Dialog: brand-new outputs (address + amount + asset) + fee asset + fee rate. Unlike "Increase
-    // fee" (same payment, higher fee), Replace re-pins this tx's inputs but sends what you specify —
-    // to correct a still-unconfirmed payment.
-    QDialog dlg(nullptr);
-    dlg.setWindowTitle(tr("Replace transaction (RBF)"));
-    auto* lay = new QVBoxLayout(&dlg);
-    lay->addWidget(new QLabel(tr("Re-spends this transaction's inputs with NEW outputs, replacing the\noriginal before it confirms. The new fee must exceed the original's."), &dlg));
-    lay->addWidget(new QLabel(tr("Send to:"), &dlg));
-    auto* addrEdit = new QLineEdit(&dlg); lay->addWidget(addrEdit);
-    lay->addWidget(new QLabel(tr("Amount:"), &dlg));
-    auto* amtEdit = new QLineEdit(&dlg); lay->addWidget(amtEdit);
-    auto* assetCombo = new QComboBox(&dlg);
-    if (g_con_any_asset_fees) {
-        for (const CAsset& a : getAssetTypes()) assetCombo->addItem(GUIUtil::assetDisplayName(a), QString::fromStdString(a.GetHex()));
-    } else {
-        assetCombo->addItem(BitcoinUnits::policyAssetTicker(), QString::fromStdString(::policyAsset.GetHex()));
-    }
-    lay->addWidget(assetCombo);
-    auto* feeCombo = new QComboBox(&dlg);
-    if (g_con_any_asset_fees) {
-        lay->addWidget(new QLabel(tr("Pay the fee in:"), &dlg));
-        feeCombo->addItem(tr("Keep original (%1)").arg(GUIUtil::assetDisplayName(old_fee_asset)), QString::fromStdString(old_fee_asset.GetHex()));
-        // The asset combo above chooses what to SEND, where a token is a legitimate
-        // (if drastic) choice; this one chooses what pays the producer, where it
-        // never is.
-        for (const CAsset& a : getFeePayableAssetTypes()) { if (a == old_fee_asset) continue; feeCombo->addItem(GUIUtil::assetDisplayName(a), QString::fromStdString(a.GetHex())); }
-        lay->addWidget(feeCombo);
-    }
-    lay->addWidget(new QLabel(tr("Fee rate (atoms/vB):"), &dlg));
-    auto* feerateEdit = new QLineEdit("2", &dlg); lay->addWidget(feerateEdit);
-    auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
-    lay->addWidget(bb);
-    connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
-    connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    // The window does the arithmetic. A replacement has to beat the stuck
+    // transaction by a margin this node sets -- more than the original's fee,
+    // plus an increment for the replacement's own size -- and no bare fee-rate
+    // field can tell anyone whether it does. It also opens with the original's
+    // recipient, amount and asset: being able to change them is precisely what
+    // this offers over "Increase transaction fee", but it is not what anybody
+    // opening it usually wants.
+    ReplaceTxDialog dlg(this, hash);
     if (dlg.exec() != QDialog::Accepted) return false;
 
-    if (!IsValidDestinationString(addrEdit->text().toStdString())) {
+    if (!IsValidDestinationString(dlg.address().toStdString())) {
         QMessageBox::critical(nullptr, tr("Replace transaction"), tr("Invalid address.")); return false;
     }
-    CTxDestination dest = DecodeDestination(addrEdit->text().toStdString());
-    const CAsset sendAsset = g_con_any_asset_fees ? GetAssetFromString(assetCombo->currentData().toString().toStdString()) : ::policyAsset;
-    CAmount amount = 0;
-    if (!GUIUtil::parseAssetAmount(sendAsset, amtEdit->text(), getOptionsModel()->getDisplayUnit(), &amount) || amount <= 0) {
+    CTxDestination dest = DecodeDestination(dlg.address().toStdString());
+    const CAsset sendAsset = dlg.sendAsset();
+    const CAmount amount = dlg.amount();
+    if (amount <= 0) {
         QMessageBox::critical(nullptr, tr("Replace transaction"), tr("Invalid amount.")); return false;
     }
-    bool rate_ok = false; double frate = feerateEdit->text().toDouble(&rate_ok);
-    if (!rate_ok || frate <= 0) frate = 2.0;
 
     // Re-pin the original's inputs (BIP125 conflict). Allow CONFIRMED top-ups only (m_min_depth=1) so
     // coin selection can never pull in the original's own unconfirmed change — which would make the
@@ -881,10 +924,12 @@ bool WalletModel::replaceTransaction(uint256 hash, uint256& new_hash)
     cc.m_min_depth = 1;
     cc.m_signal_bip125_rbf = true;
     if (g_con_any_asset_fees) {
-        const CAsset feeAsset = GetAssetFromString(feeCombo->currentData().toString().toStdString());
+        const CAsset feeAsset = dlg.feeAsset();
         if (!feeAsset.IsNull() && feeAsset != ::policyAsset) cc.m_fee_asset = feeAsset;
     }
-    cc.m_feerate = CFeeRate((CAmount)(frate * 1000)); // sat/vB -> sat/kvB
+    // Already per kvB and already in reference fee atoms: the unit the window
+    // converts out of, and the one CCoinControl wants.
+    cc.m_feerate = CFeeRate(dlg.referencePerKvb());
     cc.fOverrideFeeRate = true;
 
     CScript spk = GetScriptForDestination(dest);
@@ -904,7 +949,11 @@ bool WalletModel::replaceTransaction(uint256 hash, uint256& new_hash)
             QString::fromStdString(err.translated) + ")");
         return false;
     }
-    m_wallet->commitTransaction(rep, {} /* mapValue */, {} /* orderForm */, blind_details.get());
+    // Record what this replaced, the way the fee-bump path does (feebumper sets
+    // the same key): it is what lets the transaction list say afterwards that
+    // this row is a replacement, and of what.
+    m_wallet->commitTransaction(rep, {{"replaces_txid", hash.ToString()}}, {} /* orderForm */,
+                                blind_details.get());
     new_hash = rep->GetHash();
     return true;
 }

@@ -214,7 +214,15 @@ void SendCoinsDialog::setModel(WalletModel *_model)
             // Bitcoin's 600 s, inherited and never used by a PoS chain, so every
             // target here read ten times longer than the wait it describes -- two
             // blocks were offered as "20 minutes" when Sequentia takes 120 seconds.
-            ui->confTargetSelector->addItem(tr("%1 (%2 blocks)").arg(GUIUtil::formatNiceTimeOffset(n * GUIUtil::nominalBlockSpacing())).arg(n));
+            // One block is not "1 blocks", and the shortest target on a
+            // 60-second chain is exactly one -- so the wrong plural is the FIRST
+            // entry anybody opens the selector on. Spelled out rather than left
+            // to tr()'s %n: a string this new is not in the shipped English
+            // catalogue, and without a catalogue entry the plural machinery
+            // falls back to printing the source text, "(s)" and all.
+            const QString blocks = (n == 1) ? tr("1 block") : tr("%1 blocks").arg(n);
+            ui->confTargetSelector->addItem(tr("%1 (%2)")
+                                                .arg(GUIUtil::formatNiceTimeOffset(n * GUIUtil::nominalBlockSpacing()), blocks));
         }
         connect(ui->confTargetSelector, qOverload<int>(&QComboBox::currentIndexChanged), this, &SendCoinsDialog::updateSmartFeeLabel);
         connect(ui->confTargetSelector, qOverload<int>(&QComboBox::currentIndexChanged), this, &SendCoinsDialog::coinControlUpdateLabels);
@@ -1294,20 +1302,10 @@ CAsset SendCoinsDialog::selectedFeeAsset() const
 }
 
 namespace {
-//! 10^precision, the atoms in one whole unit of an asset.
-double AtomsPerUnit(uint8_t precision)
-{
-    double f = 1.0;
-    for (uint8_t i = 0; i < precision; ++i) f *= 10.0;
-    return f;
-}
-//! Enough decimals to show the asset's smallest unit, and no more.
-QString FormatUnits(double units, uint8_t precision)
-{
-    QString s = QString::number(units, 'f', precision);
-    if (s.contains('.')) { while (s.endsWith('0')) s.chop(1); if (s.endsWith('.')) s.chop(1); }
-    return s;
-}
+//! Both moved to GUIUtil: the replacement dialog prices the same fee from the
+//! same figures, and two copies of this arithmetic would be free to drift.
+double AtomsPerUnit(uint8_t precision) { return GUIUtil::atomsPerUnit(precision); }
+QString FormatUnits(double units, uint8_t precision) { return GUIUtil::formatUnits(units, precision); }
 } // namespace
 
 void SendCoinsDialog::buildFeeGrid()
@@ -1760,9 +1758,9 @@ void SendCoinsDialog::updateSmartFeeLabel()
             notes << tr("Blocks are not congested, so a nearer target buys little: at this rate the next "
                         "block has room for you either way.");
         } else {
-            notes << tr("Blocks are full, with %1 of transactions waiting. A nearer target pays more, "
-                        "which is what puts you ahead of them.")
-                        .arg(tr("%1 blocks' worth").arg(QString::number(c.backlog_blocks, 'f', 1)));
+            notes << tr("Blocks are full, and there are enough transactions waiting to fill %1 blocks. "
+                        "Yours waits behind them unless it pays more than they do.")
+                        .arg(QString::number(c.backlog_blocks, 'f', 1));
         }
         if (c.mempool_min > c.relay_min) {
             notes << tr("This node's queue is full and it is dropping the cheapest transactions. %1 is "
@@ -1786,7 +1784,14 @@ void SendCoinsDialog::updateSmartFeeLabel()
         if (m_tx_vsize == 0) {
             notes << tr("The total appears once there is a recipient and an amount to size the transaction with.");
         }
-        m_fee_note->setText(notes.join(QStringLiteral(" ")));
+        // Each note is a separate statement about a separate thing -- the state of
+        // the queue, this node's own mempool, a total that cannot be computed yet --
+        // and joined by a space they read as one rambling paragraph, leaving the
+        // reader to work out where one ends. A bullet per line says how many there
+        // are before any of them is read.
+        QStringList bulleted;
+        for (const QString& note : notes) bulleted << QString::fromUtf8("• ") + note;
+        m_fee_note->setText(bulleted.join(QStringLiteral("\n")));
         m_fee_note->setVisible(!notes.isEmpty());
         if (m_fee_asset_note) {
             m_fee_asset_note->setText(asset_note);
