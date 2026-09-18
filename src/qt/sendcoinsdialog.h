@@ -17,6 +17,9 @@ QT_BEGIN_NAMESPACE
 class QLabel;
 class QLineEdit;
 QT_END_NAMESPACE
+class QSpinBox;
+class QRadioButton;
+class QFrame;
 class PlatformStyle;
 class SendCoinsEntry;
 class SendCoinsRecipient;
@@ -121,6 +124,24 @@ private:
     /** Balances as of the last balanceChanged, so ranking the holdings above does
         not recompute them on every keystroke. */
     interfaces::WalletBalances m_cached_balances;
+    // The Bitcoin fee controls, which stand in for the asset fee panel when every
+    // recipient is being paid in bitcoin: that panel prices Sequentia assets and
+    // has nothing to say about sat/vB on the parent chain.
+    QFrame* m_btc_fee_frame{nullptr};
+    // Says, while the form is being filled, that Bitcoin and a Sequentia asset
+    // cannot travel together -- rather than waiting for Send to refuse.
+    QLabel* m_mixed_chain_warning{nullptr};
+    QRadioButton* m_btc_fee_recommended{nullptr};
+    QRadioButton* m_btc_fee_custom{nullptr};
+    QSpinBox* m_btc_fee_spin{nullptr};
+    int m_btc_fee_hint{0};          //!< the parent chain's estimate, in sat/vB
+    void buildBtcFeeControls();
+    void refreshBtcFeeHint();
+    int chosenBtcFeeRate() const;   //!< 0 = let the node use its own estimate
+
+    /** Tell the widget which asset this transaction is about, so it can default
+        the fee to it while this node accepts a fee in that asset. */
+    void updatePreferredFeeAsset();
 
     /** SEQUENTIA fee grid: what this costs, in the asset that pays and in the
         reference currency, per transaction and per 1000 bytes. Four views of one
