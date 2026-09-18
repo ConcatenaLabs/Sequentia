@@ -132,6 +132,7 @@ MempoolCongestion GetMempoolCongestion(const CTxMemPool& mempool)
     out.next_block_full = full;
     out.mempool_min = mempool_min.GetFeePerK();
     out.relay_min = ::minRelayTxFee.GetFeePerK();
+    out.replacement_min = ::incrementalRelayFee.GetFeePerK();
     // Not-full means nothing is competing, so the floor is all a transaction has
     // to clear.
     out.next_block_min = full ? std::max(cut, out.mempool_min) : out.mempool_min;

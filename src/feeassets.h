@@ -108,6 +108,12 @@ struct MempoolCongestion {
     //! The floors, also in reference fee atoms per kvB.
     CAmount mempool_min{0};
     CAmount relay_min{0};
+    //! What a BIP125 replacement must add on top of the fee it replaces, per kvB
+    //! of the REPLACEMENT's own size (-incrementalrelayfee). A wallet offering to
+    //! replace a stuck transaction has to be able to state the figure that
+    //! decides whether the node takes the new one: paying more than the original
+    //! is not enough on its own.
+    CAmount replacement_min{0};
 };
 
 /** Walk the mempool in the order the block assembler uses and report the above.

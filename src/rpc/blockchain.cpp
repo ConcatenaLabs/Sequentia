@@ -2112,6 +2112,7 @@ static RPCHelpMan getmempoolcongestion()
                         {RPCResult::Type::NUM, "next_block_min_atoms_per_kvb", "The same figure in reference fee atoms"},
                         {RPCResult::Type::STR_AMOUNT, "mempoolminfee", "Minimum rate to enter the mempool at all, in " + CURRENCY_UNIT + "/kvB. Rises above minrelaytxfee only once the mempool is trimming."},
                         {RPCResult::Type::STR_AMOUNT, "minrelaytxfee", "Minimum rate this node relays, in " + CURRENCY_UNIT + "/kvB"},
+                        {RPCResult::Type::STR_AMOUNT, "incrementalrelayfee", "What a BIP125 replacement must add on top of the fee it replaces, in " + CURRENCY_UNIT + " per kvB of the replacement's own size"},
                         {RPCResult::Type::STR_HEX, "asset", /*optional=*/true, "The requested fee asset (only when fee_asset was given)"},
                         {RPCResult::Type::BOOL, "accepted", /*optional=*/true, "Whether this node accepts fees in it"},
                         {RPCResult::Type::NUM, "next_block_min_asset_atoms_per_kvb", /*optional=*/true, "next_block_min_atoms_per_kvb converted into that asset's atoms"},
@@ -2151,6 +2152,7 @@ static RPCHelpMan getmempoolcongestion()
     ret.pushKV("next_block_min_atoms_per_kvb", c.next_block_min);
     ret.pushKV("mempoolminfee", ValueFromAmount(c.mempool_min));
     ret.pushKV("minrelaytxfee", ValueFromAmount(c.relay_min));
+    ret.pushKV("incrementalrelayfee", ValueFromAmount(c.replacement_min));
 
     if (fee_asset) {
         const FeeAssetInfo info = GetFeeAssetInfo(*fee_asset);
