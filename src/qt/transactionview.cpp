@@ -10,11 +10,13 @@
 
 #include <qt/addresstablemodel.h>
 #include <qt/bitcoinunits.h>
+#include <qt/childpaysdialog.h>
 #include <qt/csvmodelwriter.h>
 #include <qt/editaddressdialog.h>
 #include <qt/guiutil.h>
 #include <qt/optionsmodel.h>
 #include <qt/platformstyle.h>
+#include <qt/replacetxdialog.h>
 #include <qt/transactiondescdialog.h>
 #include <qt/transactionfilterproxy.h>
 #include <qt/transactionrecord.h>
@@ -677,9 +679,14 @@ void TransactionView::bumpFee([[maybe_unused]] bool checked)
     QString hashQStr = selection.at(0).data(TransactionTableModel::TxHashRole).toString();
     hash.SetHex(hashQStr.toStdString());
 
-    // Bump tx fee over the walletModel
+    // The window that asks belongs here, in the view: the model takes the answer.
+    // Same window as Replace, with the payment fields hidden -- the question a
+    // bump asks is the same one, minus the freedom to change what is being paid.
+    ReplaceTxDialog dlg(model, hash, ReplaceTxDialog::Mode::Bump);
+    if (dlg.exec() != QDialog::Accepted) return;
+
     uint256 newHash;
-    if (model->bumpFee(hash, newHash)) {
+    if (model->bumpFee(hash, {dlg.feeAsset(), dlg.referencePerKvb()}, newHash)) {
         // Update the table
         transactionView->selectionModel()->clearSelection();
         model->getTransactionTableModel()->updateTransaction(hashQStr, CT_UPDATED, true);
@@ -701,9 +708,18 @@ void TransactionView::speedUp([[maybe_unused]] bool checked)
     QString hashQStr = selection.at(0).data(TransactionTableModel::TxHashRole).toString();
     hash.SetHex(hashQStr.toStdString());
 
+    ChildPaysDialog dlg(model, hash);
+    if (!dlg.isUsable()) {
+        QMessageBox::critical(this, tr("Speed up"), tr("No spendable output to attach a child fee to."));
+        return;
+    }
+    if (dlg.exec() != QDialog::Accepted) return;
+
     // Attach a child-pays-for-parent child over the walletModel.
     uint256 childHash;
-    if (model->createChildPaysForParent(hash, childHash)) {
+    const WalletModel::ChildRequest req{dlg.outputIndex(), dlg.address(), dlg.amount(),
+                                        {dlg.feeAsset(), dlg.referencePerKvb()}};
+    if (model->createChildPaysForParent(hash, req, childHash)) {
         transactionView->selectionModel()->clearSelection();
         model->getTransactionTableModel()->updateTransaction(hashQStr, CT_UPDATED, true);
         qApp->processEvents();
@@ -723,9 +739,14 @@ void TransactionView::replace([[maybe_unused]] bool checked)
     QString hashQStr = selection.at(0).data(TransactionTableModel::TxHashRole).toString();
     hash.SetHex(hashQStr.toStdString());
 
+    ReplaceTxDialog dlg(model, hash);
+    if (dlg.exec() != QDialog::Accepted) return;
+
     // Build an opt-in-RBF replacement with brand-new outputs over the walletModel.
     uint256 newHash;
-    if (model->replaceTransaction(hash, newHash)) {
+    const WalletModel::ReplacementRequest req{dlg.address(), dlg.sendAsset(), dlg.amount(),
+                                              {dlg.feeAsset(), dlg.referencePerKvb()}};
+    if (model->replaceTransaction(hash, req, newHash)) {
         transactionView->selectionModel()->clearSelection();
         model->getTransactionTableModel()->updateTransaction(hashQStr, CT_UPDATED, true);
         qApp->processEvents();

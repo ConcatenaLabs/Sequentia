@@ -146,16 +146,39 @@ public:
 
     UnlockContext requestUnlock();
 
-    bool bumpFee(uint256 hash, uint256& new_hash);
+    //! SEQUENTIA: what the user settled on in the window that asked. The values
+    //! arrive already chosen because the windows belong to the view: a model that
+    //! opens dialogs is a model the dialogs must include back, which is a cycle
+    //! the linter refuses and a layering the code should not want either.
+    struct FeeChoice {
+        CAsset fee_asset;
+        //! Fee rate in reference fee atoms per kvB -- the unit
+        //! CCoinControl::m_feerate carries, never one shown to anybody.
+        CAmount reference_per_kvb{0};
+    };
+    struct ReplacementRequest {
+        QString address;
+        CAsset send_asset;
+        CAmount amount{0};
+        FeeChoice fee;
+    };
+    struct ChildRequest {
+        uint32_t n{0};
+        QString address;
+        CAmount amount{0};
+        FeeChoice fee;
+    };
+
+    bool bumpFee(uint256 hash, const FeeChoice& fee, uint256& new_hash);
     // Sequentia CPFP "Speed up": true if `hash` is an unconfirmed tx with a spendable
     // wallet-owned output a child fee can be attached to.
     bool canDoCPFP(uint256 hash);
     // Build, sign, and broadcast a child-pays-for-parent tx spending the parent's unconfirmed
     // wallet-owned output (paying the child fee in that output's own asset).
-    bool createChildPaysForParent(uint256 parentHash, uint256& childHash);
+    bool createChildPaysForParent(uint256 parentHash, const ChildRequest& req, uint256& childHash);
     // Build, sign, and broadcast an opt-in-RBF replacement that re-pins this tx's inputs but sends
     // brand-new outputs (a different address/asset/amount) — to correct a still-unconfirmed payment.
-    bool replaceTransaction(uint256 hash, uint256& new_hash);
+    bool replaceTransaction(uint256 hash, const ReplacementRequest& req, uint256& new_hash);
     //! SEQUENTIA: draft a candidate replacement for `hash` -- build it, do not
     //! commit it -- and report its virtual size, so a replacement can be priced
     //! before it is made. A fee is a price on size and the size is not known

@@ -9,13 +9,11 @@
 #include <qt/walletmodel.h>
 
 #include <qt/addresstablemodel.h>
-#include <qt/childpaysdialog.h>
 #include <qt/clientmodel.h>
 #include <qt/guiconstants.h>
 #include <qt/guiutil.h>
 #include <qt/optionsmodel.h>
 #include <qt/recentrequeststablemodel.h>
-#include <qt/replacetxdialog.h>
 #include <qt/sendcoinsdialog.h>
 #include <qt/transactiontablemodel.h>
 
@@ -541,7 +539,7 @@ void WalletModel::UnlockContext::CopyFrom(UnlockContext&& rhs)
     rhs.relock = false;
 }
 
-bool WalletModel::bumpFee(uint256 hash, uint256& new_hash)
+bool WalletModel::bumpFee(uint256 hash, const FeeChoice& fee, uint256& new_hash)
 {
     CCoinControl coin_control;
     coin_control.m_signal_bip125_rbf = true;
@@ -557,19 +555,13 @@ bool WalletModel::bumpFee(uint256 hash, uint256& new_hash)
     // The figure used to be chosen here, by the wallet, at the estimator's entry
     // price with nothing added -- and an entry price is a moving cut, so a bump
     // that lands exactly on it is overtaken by the next transaction and waits as
-    // long as the one it replaced. The window states the cut, shows what the
-    // replacement pays against what the original paid, and refuses to send
-    // anything the node would not accept.
-    ReplaceTxDialog dlg(this, hash, ReplaceTxDialog::Mode::Bump);
-    if (dlg.exec() != QDialog::Accepted) return false;
-    if (g_con_any_asset_fees) {
-        const CAsset sel = dlg.feeAsset();
-        if (!sel.IsNull() && sel != old_fee_asset) {
-            coin_control.m_fee_asset = sel; // honored by feebumper
-            new_fee_asset = sel;
-        }
+    // long as the one it replaced. Both now arrive from the window that showed
+    // the user what they buy.
+    if (g_con_any_asset_fees && !fee.fee_asset.IsNull() && fee.fee_asset != old_fee_asset) {
+        coin_control.m_fee_asset = fee.fee_asset; // honored by feebumper
+        new_fee_asset = fee.fee_asset;
     }
-    coin_control.m_feerate = CFeeRate(dlg.referencePerKvb());
+    coin_control.m_feerate = CFeeRate(fee.reference_per_kvb);
 
     std::vector<bilingual_str> errors;
     CAmount old_fee;
@@ -751,7 +743,7 @@ bool WalletModel::probeChildSize(const uint256& parentHash, uint32_t n, const QS
     return true;
 }
 
-bool WalletModel::createChildPaysForParent(uint256 parentHash, uint256& childHash)
+bool WalletModel::createChildPaysForParent(uint256 parentHash, const ChildRequest& req, uint256& childHash)
 {
     interfaces::WalletTxStatus st;
     interfaces::WalletOrderForm of;
@@ -763,28 +755,21 @@ bool WalletModel::createChildPaysForParent(uint256 parentHash, uint256& childHas
         return false;
     }
     // Which output carries the child, where its value goes, what the child pays
-    // and in which asset: all of it was decided in here and none of it was shown.
-    // The window states the one figure that governs the outcome -- what the two
-    // transactions pay TOGETHER, against what the next block is taking -- and
-    // proposes the same defaults this function used to apply silently.
-    ChildPaysDialog dlg(this, parentHash);
-    if (!dlg.isUsable()) {
-        QMessageBox::critical(nullptr, tr("Speed up"), tr("No spendable output to attach a child fee to."));
-        return false;
-    }
-    if (dlg.exec() != QDialog::Accepted) return false;
-
-    const size_t n = dlg.outputIndex();
+    // and in which asset: all of it used to be decided in here and none of it was
+    // shown. It arrives chosen now, from a window that states the one figure that
+    // governs the outcome -- what the two transactions pay TOGETHER, against what
+    // the next block is taking.
+    const size_t n = req.n;
     if (n >= wtx.txout_assets.size()) return false;
     const CAsset childAsset = wtx.txout_assets[n];
-    const CAmount childValue = dlg.amount();
+    const CAmount childValue = req.amount;
     if (childValue <= 0) {
         QMessageBox::critical(nullptr, tr("Speed up"), tr("Invalid amount.")); return false;
     }
-    if (!IsValidDestinationString(dlg.address().toStdString())) {
+    if (!IsValidDestinationString(req.address.toStdString())) {
         QMessageBox::critical(nullptr, tr("Speed up"), tr("Invalid address.")); return false;
     }
-    const CAsset feeAsset = dlg.feeAsset();
+    const CAsset feeAsset = req.fee.fee_asset;
     CCoinControl cc;
     cc.Select(COutPoint(parentHash, (uint32_t)n));
     cc.fAllowOtherInputs = true;       // pull in fee-asset funds to pay the child fee
@@ -797,14 +782,14 @@ bool WalletModel::createChildPaysForParent(uint256 parentHash, uint256& childHas
     // (five times the entry price, sized so the package clears it even crediting
     // the parent with nothing), so leaving the window alone does what it always
     // did -- the difference is that the number, and what it buys, were on screen.
-    cc.m_feerate = CFeeRate(dlg.referencePerKvb());
+    cc.m_feerate = CFeeRate(req.fee.reference_per_kvb);
     cc.fOverrideFeeRate = true;
 
     // Send the pinned output's value back to the wallet in its OWN asset. Subtract the fee from it
     // only when the fee is paid in that same asset; otherwise preserve it and fund the fee from the
     // separately-selected fee-asset inputs.
     const bool sameAsset = (feeAsset == childAsset);
-    CTxDestination dest = DecodeDestination(dlg.address().toStdString());
+    CTxDestination dest = DecodeDestination(req.address.toStdString());
     CScript spk = GetScriptForDestination(dest);
     CPubKey blind = GetDestinationBlindingKey(dest);
     std::vector<CRecipient> vecSend{ {spk, childValue, childAsset, blind, /*fSubtractFeeFromAmount=*/sameAsset} };
@@ -869,7 +854,7 @@ bool WalletModel::probeReplacementSize(const uint256& hash, const QString& addre
     return true;
 }
 
-bool WalletModel::replaceTransaction(uint256 hash, uint256& new_hash)
+bool WalletModel::replaceTransaction(uint256 hash, const ReplacementRequest& req, uint256& new_hash)
 {
     interfaces::WalletTxStatus st;
     interfaces::WalletOrderForm of;
@@ -894,22 +879,16 @@ bool WalletModel::replaceTransaction(uint256 hash, uint256& new_hash)
     }
     const CAsset old_fee_asset = orig->GetFeeAsset(::policyAsset);
 
-    // The window does the arithmetic. A replacement has to beat the stuck
+    // The window did the arithmetic: a replacement has to beat the stuck
     // transaction by a margin this node sets -- more than the original's fee,
     // plus an increment for the replacement's own size -- and no bare fee-rate
-    // field can tell anyone whether it does. It also opens with the original's
-    // recipient, amount and asset: being able to change them is precisely what
-    // this offers over "Increase transaction fee", but it is not what anybody
-    // opening it usually wants.
-    ReplaceTxDialog dlg(this, hash);
-    if (dlg.exec() != QDialog::Accepted) return false;
-
-    if (!IsValidDestinationString(dlg.address().toStdString())) {
+    // field can tell anyone whether it does.
+    if (!IsValidDestinationString(req.address.toStdString())) {
         QMessageBox::critical(nullptr, tr("Replace transaction"), tr("Invalid address.")); return false;
     }
-    CTxDestination dest = DecodeDestination(dlg.address().toStdString());
-    const CAsset sendAsset = dlg.sendAsset();
-    const CAmount amount = dlg.amount();
+    CTxDestination dest = DecodeDestination(req.address.toStdString());
+    const CAsset sendAsset = req.send_asset;
+    const CAmount amount = req.amount;
     if (amount <= 0) {
         QMessageBox::critical(nullptr, tr("Replace transaction"), tr("Invalid amount.")); return false;
     }
@@ -924,12 +903,12 @@ bool WalletModel::replaceTransaction(uint256 hash, uint256& new_hash)
     cc.m_min_depth = 1;
     cc.m_signal_bip125_rbf = true;
     if (g_con_any_asset_fees) {
-        const CAsset feeAsset = dlg.feeAsset();
+        const CAsset feeAsset = req.fee.fee_asset;
         if (!feeAsset.IsNull() && feeAsset != ::policyAsset) cc.m_fee_asset = feeAsset;
     }
     // Already per kvB and already in reference fee atoms: the unit the window
     // converts out of, and the one CCoinControl wants.
-    cc.m_feerate = CFeeRate(dlg.referencePerKvb());
+    cc.m_feerate = CFeeRate(req.fee.reference_per_kvb);
     cc.fOverrideFeeRate = true;
 
     CScript spk = GetScriptForDestination(dest);
