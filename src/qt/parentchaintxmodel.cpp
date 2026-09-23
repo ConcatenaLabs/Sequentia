@@ -155,9 +155,17 @@ QVariant ParentChainTxModel::data(const QModelIndex& index, int role) const
         }
     case Qt::DecorationRole:
         if (index.column() == TransactionTableModel::Status) {
-            // The same ladder the wallet rows climb: unconfirmed, one to five
+            // The same ladder the wallet rows climb: waiting, one to five
             // parent-chain confirmations, then settled.
-            if (r.confirmations <= 0) return QIcon(":/icons/transaction_0");
+            //
+            // Zero confirmations is WAITING, and the clock says so. It used to
+            // draw transaction_0 -- the question mark, which is the icon for a
+            // state nobody can vouch for -- so a send that had just been
+            // broadcast looked like something had gone wrong with it. The
+            // question mark is right for one case only: when the confirmation
+            // count could not be established at all.
+            if (r.confirmations < 0) return QIcon(":/icons/transaction_0");
+            if (r.confirmations == 0) return QIcon(":/icons/transaction_1");
             if (r.confirmations >= 6) return QIcon(":/icons/transaction_confirmed");
             return QIcon(QString(":/icons/transaction_%1").arg(r.confirmations));
         }
@@ -172,7 +180,8 @@ QVariant ParentChainTxModel::data(const QModelIndex& index, int role) const
     case Qt::ToolTipRole:
         return tr("%1 on the Bitcoin parent chain\nTransaction id: %2\nConfirmations: %3")
             .arg(r.send ? tr("Sent") : tr("Received"), r.txid,
-                 r.confirmations >= 0 ? QString::number(r.confirmations) : tr("unknown"));
+                 r.confirmations >= 0 ? QString::number(r.confirmations)
+                                      : tr("waiting for the parent chain to say"));
     case TransactionTableModel::TypeRole:
         return r.send ? int(TransactionRecord::SendToAddress) : int(TransactionRecord::RecvWithAddress);
     case TransactionTableModel::DateRole:
