@@ -244,7 +244,15 @@ void SendCoinsDialog::setModel(WalletModel *_model)
             // Bitcoin's 600 s, inherited and never used by a PoS chain, so every
             // target here read ten times longer than the wait it describes -- two
             // blocks were offered as "20 minutes" when Sequentia takes 120 seconds.
-            ui->confTargetSelector->addItem(tr("%1 (%2 blocks)").arg(GUIUtil::formatNiceTimeOffset(n * GUIUtil::nominalBlockSpacing())).arg(n));
+            // One block is not "1 blocks", and the shortest target on a
+            // 60-second chain is exactly one -- so the wrong plural is the FIRST
+            // entry anybody opens the selector on. Spelled out rather than left
+            // to tr()'s %n: a string this new is not in the shipped English
+            // catalogue, and without a catalogue entry the plural machinery
+            // falls back to printing the source text, "(s)" and all.
+            const QString blocks = (n == 1) ? tr("1 block") : tr("%1 blocks").arg(n);
+            ui->confTargetSelector->addItem(tr("%1 (%2)")
+                                                .arg(GUIUtil::formatNiceTimeOffset(n * GUIUtil::nominalBlockSpacing()), blocks));
         }
         connect(ui->confTargetSelector, qOverload<int>(&QComboBox::currentIndexChanged), this, &SendCoinsDialog::updateSmartFeeLabel);
         connect(ui->confTargetSelector, qOverload<int>(&QComboBox::currentIndexChanged), this, &SendCoinsDialog::coinControlUpdateLabels);
