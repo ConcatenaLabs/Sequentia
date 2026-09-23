@@ -317,6 +317,10 @@ void SendCoinsDialog::setModel(WalletModel *_model)
         m_fee_widget->setRateModeWidget(ui->frameFeeRateMode);
         m_fee_widget->setModel(model);
         m_fee_widget->setReplaceable(ui->optInRBF->isChecked());
+        // Here the missing size has a name, so the note says it instead of
+        // "something": this page is waiting for a recipient and an amount.
+        m_fee_widget->setMissingSizeNote(
+            tr("The total appears once there is a recipient and an amount to size the transaction with."));
         connect(m_fee_widget, &FeeSelectionWidget::feeAssetChanged, this, [this] {
             coinControlUpdateLabels();
             updateSmartFeeLabel();
