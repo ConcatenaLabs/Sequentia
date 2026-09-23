@@ -340,6 +340,12 @@ CAsset FeeSelectionWidget::largestAcceptedHolding() const
     return best;
 }
 
+void FeeSelectionWidget::setMissingSizeNote(const QString& note)
+{
+    m_missing_size_note = note;
+    refresh();
+}
+
 void FeeSelectionWidget::setTransactionSize(unsigned int vsize)
 {
     if (m_tx_vsize == vsize) return;
@@ -713,7 +719,9 @@ void FeeSelectionWidget::updateNotes(const CAmount& custom_reference_per_kvb, bo
         }
     }
     if (m_tx_vsize == 0 && m_known_total < 0) {
-        notes << tr("The total appears once there is something to size the transaction with.");
+        notes << (m_missing_size_note.isEmpty()
+                      ? tr("The total appears once there is something to size the transaction with.")
+                      : m_missing_size_note);
     }
     // Each note is a separate statement about a separate thing -- the state of
     // the queue, this node's own mempool, a total that cannot be computed yet --

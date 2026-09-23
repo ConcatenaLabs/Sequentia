@@ -100,6 +100,14 @@ public:
     //! honest total -- only a rate.
     void setTransactionSize(unsigned int vsize);
 
+    //! What the host still needs before it can size a transaction, as a whole
+    //! sentence shown where the total would be. The default says "something",
+    //! which is all this widget can honestly say: it knows a size is missing,
+    //! not what would supply one. A host that does know says so -- the Send tab
+    //! is waiting for a recipient and an amount, and naming them is the
+    //! difference between a note that helps and one that states the obvious.
+    void setMissingSizeNote(const QString& note);
+
     //! The total this transaction will actually pay, in atoms of the fee asset,
     //! for a host that learns the fee directly rather than the size. Funding a
     //! transaction returns the fee it charged, which is a better answer than any
@@ -190,6 +198,7 @@ private:
     unsigned int m_tx_vsize{0};
     //! A total supplied outright, in fee-asset atoms; -1 when none was.
     CAmount m_known_total{-1};
+    QString m_missing_size_note;
     bool m_replaceable{true};
     CAsset m_preferred_asset;
     //! Set by a real pick in the selector, never by a programmatic one. From then
