@@ -29,20 +29,10 @@
 #include <cmath>
 
 namespace {
-//! 10^precision, the atoms in one whole unit of an asset.
-double AtomsPerUnit(uint8_t precision)
-{
-    double f = 1.0;
-    for (uint8_t i = 0; i < precision; ++i) f *= 10.0;
-    return f;
-}
-//! Enough decimals to show the asset's smallest unit, and no more.
-QString FormatUnits(double units, uint8_t precision)
-{
-    QString s = QString::number(units, 'f', precision);
-    if (s.contains('.')) { while (s.endsWith('0')) s.chop(1); if (s.endsWith('.')) s.chop(1); }
-    return s;
-}
+//! Both forward to GUIUtil: the replacement dialog prices the same fee from the
+//! same figures, and two copies of this arithmetic would be free to drift.
+double AtomsPerUnit(uint8_t precision) { return GUIUtil::atomsPerUnit(precision); }
+QString FormatUnits(double units, uint8_t precision) { return GUIUtil::formatUnits(units, precision); }
 } // namespace
 
 FeeSelectionWidget::FeeSelectionWidget(QWidget* parent) : QWidget(parent)
@@ -538,9 +528,18 @@ void FeeSelectionWidget::updateWarning()
     // outside staking eligibility no asset here has one; if the answer for it is
     // uncomfortable the fix is to publish it on the registry, not to stop asking.
     if (!info.registry_listed || !info.has_market_price) {
+        // "Not published" and "we have no registry to ask" are the same silence
+        // and not the same statement. A node with no -assetregistryurl reads
+        // every asset as unpublished, so the first wording accused the whole
+        // chain -- the policy asset included, which is how this was noticed --
+        // of a fact nobody here had checked. No asset is exempted from the
+        // question; the answer is just reported for what it is.
         const QString why = !info.registry_listed
-            ? tr("%1 is not published on the Asset Registry, so the price servers other block producers "
-                 "run will not discover it.").arg(name)
+            ? (info.registry_available
+                   ? tr("%1 is not published on the Asset Registry, so the price servers other block producers "
+                        "run will not discover it.").arg(name)
+                   : tr("This node reads no Asset Registry, so it cannot tell whether %1 is published on one. "
+                        "If it is not, the price servers other block producers run will not discover it.").arg(name))
             : tr("No published market price for %1, so other block producers' price servers cannot "
                  "value it.").arg(name);
         // Replace-By-Fee is the remedy here and only here: this transaction is
@@ -594,9 +593,9 @@ void FeeSelectionWidget::updateNotes(const CAmount& custom_reference_per_kvb, bo
         notes << tr("Blocks are not congested, so a nearer target buys little: at this rate the next "
                     "block has room for you either way.");
     } else {
-        notes << tr("Blocks are full, with %1 of transactions waiting. A nearer target pays more, "
-                    "which is what puts you ahead of them.")
-                    .arg(tr("%1 blocks' worth").arg(QString::number(c.backlog_blocks, 'f', 1)));
+        notes << tr("Blocks are full, and there are enough transactions waiting to fill %1 blocks. "
+                    "Yours waits behind them unless it pays more than they do.")
+                    .arg(QString::number(c.backlog_blocks, 'f', 1));
     }
     if (c.mempool_min > c.relay_min) {
         notes << tr("This node's queue is full and it is dropping the cheapest transactions. %1 is "
@@ -620,7 +619,15 @@ void FeeSelectionWidget::updateNotes(const CAmount& custom_reference_per_kvb, bo
     if (m_tx_vsize == 0 && m_known_total < 0) {
         notes << tr("The total appears once there is something to size the transaction with.");
     }
-    m_note->setText(notes.join(QStringLiteral(" ")));
+    // Each note is a separate statement about a separate thing -- the state of
+    // the queue, this node's own mempool, a total that cannot be computed yet --
+    // and joined by a space they read as one rambling paragraph, leaving the
+    // reader to work out where one ends. A bullet per line says how many there
+    // are before any of them is read.
+    QStringList bulleted;
+    for (const QString& note : notes) bulleted << QString::fromUtf8("• ") + note;
+    m_note->setText(bulleted.join(QStringLiteral("
+")));
     m_note->setVisible(!notes.isEmpty());
     m_asset_note->setText(asset_note);
     m_asset_note->setVisible(!asset_note.isEmpty());
