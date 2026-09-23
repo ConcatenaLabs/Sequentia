@@ -722,8 +722,7 @@ void FeeSelectionWidget::updateNotes(const CAmount& custom_reference_per_kvb, bo
     // are before any of them is read.
     QStringList bulleted;
     for (const QString& note : notes) bulleted << QString::fromUtf8("• ") + note;
-    m_note->setText(bulleted.join(QStringLiteral("
-")));
+    m_note->setText(bulleted.join(QStringLiteral("\n")));
     m_note->setVisible(!notes.isEmpty());
     m_asset_note->setText(asset_note);
     m_asset_note->setVisible(!asset_note.isEmpty());

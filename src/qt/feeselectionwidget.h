@@ -84,6 +84,17 @@ public:
     //! The confirmation target the recommendation is estimated for.
     int confTarget() const { return m_conf_target; }
 
+    //! The rate now on display, converted to the reference unit setCustomMode()
+    //! speaks. It seeds Custom from the recommendation, so switching to it starts
+    //! from the figure that was just being quoted rather than from zero.
+    //!
+    //! Public because a host that supplies its own Recommended/Custom controls
+    //! through setRateModeWidget() has to do that seeding on its own side of the
+    //! boundary -- the widget's built-in radios do it for a host that uses them,
+    //! and the Send tab, which does not, needs the same answer from the same
+    //! round trip rather than a second estimate of its own.
+    CAmount shownRateAsReference() const;
+
     //! The size of the transaction being priced, or 0 when the host cannot size
     //! it yet. Without it, or without a total from setKnownTotal(), there is no
     //! honest total -- only a rate.
@@ -200,10 +211,6 @@ private:
      *  none of its own. Discarded if the host later hands over its own with
      *  setRateModeWidget(). */
     void buildOwnRateMode();
-    /** The rate now on display, converted to the reference unit setCustomMode()
-     *  speaks. Used to seed Custom from the recommendation, so switching to it
-     *  starts from the figure that was just being quoted rather than from zero. */
-    CAmount shownRateAsReference() const;
     void applyDefaultAsset();
     void updateGrid(const CAmount& asset_atoms_per_kvb);
     void onCellEdited(QLineEdit* source);
