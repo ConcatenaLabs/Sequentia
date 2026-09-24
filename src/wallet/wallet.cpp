@@ -644,7 +644,13 @@ bool CWallet::IsSpent(const uint256& hash, unsigned int n) const
         std::map<uint256, CWalletTx>::const_iterator mit = mapWallet.find(wtxid);
         if (mit != mapWallet.end()) {
             int depth = GetTxDepthInMainChain(mit->second);
-            if (depth > 0  || (depth == 0 && !mit->second.isAbandoned()))
+            // A transaction consensus refuses is not going to spend anything,
+            // and holding its inputs hostage is what makes the coins vanish
+            // from the balance with nothing on screen to explain it. Treat them
+            // as unspent, exactly as for an abandoned transaction -- but without
+            // abandoning, so the record stays and the inputs are locked again by
+            // themselves the moment the node stops refusing.
+            if (depth > 0  || (depth == 0 && !mit->second.isAbandoned() && !mit->second.rejectionFreesInputs()))
                 return true; // Spent
         }
     }
@@ -1783,7 +1789,79 @@ bool CWallet::SubmitTxMemoryPoolAndRelay(CWalletTx& wtx, std::string& err_string
     // TransactionRemovedFromMempool fires.
     bool ret = chain().broadcastTransaction(wtx.tx, m_default_max_tx_fee, relay, err_string);
     if (ret) wtx.m_state = TxStateInMempool{};
+    // Either way the node's answer may have just changed, so have the sweep look
+    // again on its next tick rather than reasoning about it twice. err_string
+    // alone would not do: broadcastTransaction flattens every failure into
+    // false, and only a fresh check separates consensus refusing the
+    // transaction from the mempool merely declining to hold it.
+    m_next_rejection_check = 0;
     return ret;
+}
+
+bool CWallet::UpdateTxRejection(CWalletTx& wtx)
+{
+    AssertLockHeld(cs_wallet);
+
+    const std::optional<TxRejection> before = wtx.m_rejection;
+    std::optional<TxRejection> after;
+
+    // Only a transaction that is unconfirmed and absent from the mempool can be
+    // under refusal. For anything else the node has already made up its mind,
+    // and asking would spend a full validation to be told what we know.
+    if (!wtx.IsCoinBase() && !wtx.isAbandoned() &&
+        GetTxDepthInMainChain(wtx) == 0 && !wtx.InMempool()) {
+        if (auto refusal = chain().checkMempoolAccept(wtx.tx)) {
+            after = TxRejection{refusal->reason, refusal->is_consensus};
+        }
+    }
+
+    const bool changed = before.has_value() != after.has_value() ||
+                         (after && before->reason != after->reason);
+    if (!changed) return false;
+
+    const bool freed_inputs_before = before && before->is_consensus;
+    wtx.m_rejection = after;
+
+    if (freed_inputs_before != wtx.rejectionFreesInputs()) {
+        // What the inputs are worth just changed, and the parents' cached credit
+        // cannot see it: IsSpent is what moved, not any transaction.
+        wtx.MarkDirty(*this);
+        MarkInputsDirty(wtx.tx);
+    }
+    if (after) {
+        WalletLogPrintf("Transaction %s refused by the node: %s%s\n",
+                        wtx.GetHash().ToString(), after->reason,
+                        after->is_consensus ? " (inputs released)" : "");
+    } else {
+        WalletLogPrintf("Transaction %s is no longer refused by the node\n",
+                        wtx.GetHash().ToString());
+    }
+    NotifyTransactionChanged(wtx.GetHash(), CT_UPDATED);
+    return true;
+}
+
+void CWallet::RecheckRejectedTransactions()
+{
+    // Never while the node's own view is still forming. During IBD, and before
+    // the tip is current, an honest transaction can look impossible; a refusal
+    // invented out of our own ignorance is worse than reporting none at all.
+    if (!chain().isReadyToBroadcast()) return;
+
+    const int64_t now = GetTime();
+    if (now < m_next_rejection_check) return;
+    m_next_rejection_check = now + REJECTION_RECHECK_SECONDS;
+
+    LOCK(cs_wallet);
+    for (auto& item : mapWallet) {
+        CWalletTx& wtx = item.second;
+        // The candidates are few, and normally none. A transaction in a block or
+        // in the mempool is skipped without a validation, so the sweep costs
+        // nothing on a quiet wallet.
+        if (wtx.IsCoinBase() || wtx.isAbandoned()) continue;
+        if (GetTxDepthInMainChain(wtx) != 0) continue;
+        if (!wtx.isRejected() && wtx.InMempool()) continue;
+        UpdateTxRejection(wtx);
+    }
 }
 
 std::set<uint256> CWallet::GetTxConflicts(const CWalletTx& wtx) const
@@ -1848,6 +1926,13 @@ void MaybeResendWalletTxs(WalletContext& context)
 {
     for (const std::shared_ptr<CWallet>& pwallet : GetWallets(context)) {
         pwallet->ResendWalletTransactions();
+    }
+}
+
+void MaybeRecheckRejectedWalletTxs(WalletContext& context)
+{
+    for (const std::shared_ptr<CWallet>& pwallet : GetWallets(context)) {
+        pwallet->RecheckRejectedTransactions();
     }
 }
 

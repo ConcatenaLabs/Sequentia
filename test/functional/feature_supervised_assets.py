@@ -25,6 +25,12 @@ Covered, in the order the test runs them:
   7. Unfreezing, by spending the record.
   8. Key rotation, and the trap it exists to close: after rotating, the old key
      neither freezes nor unfreezes.
+  9a. A spend the freeze refuses is reported as refused, and stops holding its
+     inputs hostage. Left as an ordinary pending payment it reads as one still
+     on its way, while the asset AND the fee it used vanish from the balance.
+  9b. A valid transaction that simply has not been relayed is left strictly
+     alone -- it is the case that looks identical from the wallet's side and
+     that must never be treated as refused.
   9. A freeze evicts the spends it invalidated from the mempool. Without this
      every block template would re-select them, every template would fail
      validation, and the chain would stop making blocks.
@@ -108,6 +114,17 @@ class SupervisedAssetsTest(BitcoinTestFramework):
         raw = node.addsupervisionrecordoutput(raw, built["script"], asset)
         return self.send_raw(node, raw), built["targethash"]
 
+    def trusted_policy_balance(self, node):
+        """The node's spendable policy asset.
+
+        getbalances() keys an asset by its LABEL where it has one, and only by
+        its hex id where it does not, so the policy asset arrives as "bitcoin"
+        rather than as self.policy_asset. An asset with nothing spendable is
+        absent from the map altogether rather than present as zero.
+        """
+        balances = node.getbalances()["mine"]["trusted"]
+        return balances.get("bitcoin", balances.get(self.policy_asset, 0))
+
     def spend_asset(self, node, asset, amount, destination):
         """Spend `amount` of `asset` from node's wallet to `destination`."""
         raw = node.createrawtransaction([], [{destination: amount, "asset": asset}])
@@ -141,6 +158,7 @@ class SupervisedAssetsTest(BitcoinTestFramework):
         self.test_unfreeze(node, asset, holder)
         self.test_rotation_closes_the_trap(node, asset, holder)
         self.test_mempool_eviction(node, asset)
+        self.test_a_refusal_is_reported_and_frees_its_funds(node, asset)
         self.test_reorg_takes_the_freeze_with_it(node, asset)
         self.test_pause(node)
         self.test_private_submission(node)
@@ -431,9 +449,14 @@ class SupervisedAssetsTest(BitcoinTestFramework):
         self.generate(node, 1)
         self.sync_all()
 
+        # What the holder has before spending anything, so the next test can say
+        # whether the refused spend gave it all back.
+        self.balance_before_refused = self.nodes[1].getbalances()["mine"]["trusted"]
+
         # A spend that is perfectly valid right now.
         pending = self.spend_asset(self.nodes[1], asset, Decimal("20"), node.getnewaddress())
         assert pending in self.nodes[1].getrawmempool()
+        self.refused_txid = pending
 
         # Freeze the script this transaction actually spends, whichever of the
         # holder's outputs its wallet happened to pick.
@@ -464,6 +487,103 @@ class SupervisedAssetsTest(BitcoinTestFramework):
         self.generate(node, 2)
         self.sync_all()
         assert_equal(node.getblockcount(), height + 2)
+
+    def test_a_refusal_is_reported_and_frees_its_funds(self, node, asset):
+        """The two opposite cases a wallet cannot tell apart on its own.
+
+        After the eviction above, the holder's wallet is in the exact state that
+        was reported: a transaction it made, unconfirmed, in nobody's mempool,
+        not abandoned. Consensus will refuse it for as long as the freeze
+        stands, but nothing in the wallet said so, and the inputs it reserved --
+        the asset and the fee asset both -- were simply gone from the balance.
+
+        The opposite case is a transaction that is perfectly valid and has just
+        not been relayed yet. It looks the same from here, and it must be left
+        exactly as Bitcoin Core leaves it: pending, with its inputs reserved.
+        """
+        self.log.info("A refused spend is reported as refused and frees its funds")
+        holder = self.nodes[1]
+
+        # The state under test, before anything is asserted about it.
+        entry = holder.gettransaction(self.refused_txid)
+        assert_equal(entry["confirmations"], 0)
+        assert_equal(entry["details"][0]["abandoned"], False)
+        assert self.refused_txid not in holder.getrawmempool()
+
+        # And the node does refuse it, with the reason the user has to be told.
+        verdict = holder.testmempoolaccept([entry["hex"]])[0]
+        assert_equal(verdict["allowed"], False)
+        assert_equal(verdict["reject-reason"], "bad-txns-asset-frozen")
+
+        # The wallet asks the node on a timer, so give it one round to notice.
+        # What it must conclude is that the inputs are not spent after all:
+        # every asset the refused spend touched comes back, the fee asset
+        # included, which is the half of the report that had no explanation.
+        self.wait_until(
+            lambda: holder.getbalances()["mine"]["trusted"] == self.balance_before_refused,
+            timeout=90)
+
+        # It is reported, not silently repaired -- and reported as consensus
+        # refusing it, which is what justifies releasing the inputs at all.
+        holder.assert_debug_log(
+            expected_msgs=["Transaction {} refused by the node: bad-txns-asset-frozen "
+                           "(inputs released)".format(self.refused_txid)],
+            timeout=1)
+
+        # Nothing was abandoned on the user's behalf. The record is still here,
+        # and lifting the freeze must be able to bring it back.
+        entry = holder.gettransaction(self.refused_txid)
+        assert_equal(entry["details"][0]["abandoned"], False)
+
+        self.log.info("A valid spend that was merely never relayed is left alone")
+        # Give the holder a confirmed coin to pay with first. Everything it has
+        # at this point is change of the refused family: released back into the
+        # balance, but unconfirmed and therefore not trusted, so coin selection
+        # has nothing to spend and the control could not be built at all.
+        self.spend_asset(node, self.policy_asset, Decimal("5"), holder.getnewaddress())
+        self.generate(node, 1)
+        self.sync_all()
+
+        # -walletbroadcast=0 reproduces the other case exactly: the wallet
+        # commits the transaction and never submits it, so it sits unconfirmed
+        # and outside every mempool while being entirely valid.
+        self.restart_node(1, self.extra_args[1] + ["-walletbroadcast=0"])
+        self.connect_nodes(0, 1)
+        self.sync_all()
+
+        before = self.trusted_policy_balance(holder)
+        assert before > 0, "the control needs a confirmed coin to pay with"
+        unrelayed = holder.sendtoaddress(address=node.getnewaddress(), amount=Decimal("1"),
+                                         fee_asset_label=self.policy_asset)
+        assert unrelayed not in holder.getrawmempool()
+        assert unrelayed not in node.getrawmempool()
+        assert_equal(holder.gettransaction(unrelayed)["confirmations"], 0)
+
+        # Two full rounds of the sweep, so "it has not got round to it yet"
+        # cannot be mistaken for "it decided to leave this one alone".
+        holder.assert_debug_log(
+            expected_msgs=[],
+            unexpected_msgs=["Transaction {} refused by the node".format(unrelayed)],
+            timeout=45)
+
+        # Still reserved, exactly as before this change: a transaction that may
+        # yet be relayed and mined has not released anything.
+        assert self.trusted_policy_balance(holder) < before
+
+        # Abandon it before restoring the node. Left alone it would be broadcast
+        # the moment the wallet is allowed to again, and every test after this
+        # one would be running against a mempool holding a transaction that only
+        # exists to make a point about relay.
+        holder.abandontransaction(unrelayed)
+
+        # Put the holder back the way the remaining tests expect to find it.
+        self.restart_node(1, self.extra_args[1])
+        self.connect_nodes(0, 1)
+        # Blocks only. sync_all() also waits for the mempools to match, which is
+        # the one thing this scenario cannot promise: the node spent the last
+        # minute deliberately not relaying, and what the tests after this need
+        # from it is a shared tip, not a shared mempool.
+        self.sync_blocks()
 
     def test_reorg_takes_the_freeze_with_it(self, node, asset):
         self.log.info("A reorg takes the freeze back with it")

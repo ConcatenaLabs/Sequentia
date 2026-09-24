@@ -1068,6 +1068,37 @@ static bool CreateTransactionInternal(
         }
     }
 
+    // Pad for the preselected inputs too. Change is per asset, and an asset can
+    // arrive on an input the recipients never mention: the loop below hands out
+    // a change script for each of those as well, from this same vector, but only
+    // the recipients were ever counted when sizing it. It went unnoticed while
+    // every caller with preselected inputs also paid someone in the same asset --
+    // and it says "Keypool ran out" when it does bite, because running off the
+    // end of this vector shares a branch with the keypool being empty, so the one
+    // caller that hits it is told to refill a keypool that is full.
+    //
+    // Lifting a supervision freeze is that caller: it spends the freeze record and
+    // pays nobody, so the record's asset is named by no recipient at all.
+    {
+        std::vector<COutPoint> preset_inputs;
+        coin_control.ListSelected(preset_inputs);
+        for (const COutPoint& preset : preset_inputs) {
+            CAsset asset;
+            const auto it = wallet.mapWallet.find(preset.hash);
+            CTxOut txout;
+            if (it != wallet.mapWallet.end()) {
+                asset = it->second.GetOutputAsset(wallet, preset.n);
+            } else if (coin_control.GetExternalOutput(preset, txout)) {
+                asset = txout.nAsset.GetAsset();
+            } else {
+                continue;  // Unresolvable here; the loop below fails on it gracefully.
+            }
+            if (assets_seen.insert(asset).second) {
+                reservedest.emplace_back(new ReserveDestination(&wallet, change_type));
+            }
+        }
+    }
+
     // Create change script that will be used if we need change
     // ELEMENTS: A map that keeps track of the change script for each asset and also
     // the index of the reservedest used for that script (-1 if none).
@@ -2035,7 +2066,18 @@ bool CreateTransaction(
         BlindDetails* blind_details,
         const IssuanceDetails* issuance_details)
 {
-    if (vecSend.empty()) {
+    // A transaction with nobody to pay is usually a caller that forgot to say
+    // where the money goes, and refusing it is right. It is not the only shape,
+    // though: one that already names the inputs it must spend is asking to spend
+    // THEM, and the change and fee that funding appends are the only outputs it
+    // needs. Lifting a supervision freeze -- a pause included, which is a freeze
+    // on every address -- is exactly that transaction: it spends the freeze
+    // record, pays a fee, and has nothing else to say.
+    //
+    // The same relaxation was already made to the fundrawtransaction guard that
+    // runs before this one; this is the second gate on the same path, and while
+    // it stood an unfreeze could not be funded at all.
+    if (vecSend.empty() && !coin_control.HasSelected()) {
         error = _("Transaction must have at least one recipient");
         return false;
     }

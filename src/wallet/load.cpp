@@ -150,6 +150,9 @@ void StartWallets(WalletContext& context, CScheduler& scheduler)
         scheduler.scheduleEvery([&context] { MaybeCompactWalletDB(context); }, std::chrono::milliseconds{500});
     }
     scheduler.scheduleEvery([&context] { MaybeResendWalletTxs(context); }, std::chrono::milliseconds{1000});
+    // Same tick: both are self-rate-limiting, and both are about transactions
+    // that have not made it into a block.
+    scheduler.scheduleEvery([&context] { MaybeRecheckRejectedWalletTxs(context); }, std::chrono::milliseconds{1000});
 
     // SEQUENTIA: convert staking rewards, for any wallet whose staker has asked
     // for it, and finish any cross-chain swap already in flight. Both are no-ops

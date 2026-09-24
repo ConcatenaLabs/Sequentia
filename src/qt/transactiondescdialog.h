@@ -7,12 +7,17 @@
 
 #include <QDialog>
 
+#include <uint256.h>
+
+class WalletModel;
+
 namespace Ui {
     class TransactionDescDialog;
 }
 
 QT_BEGIN_NAMESPACE
 class QModelIndex;
+class QPushButton;
 QT_END_NAMESPACE
 
 /** Dialog showing transaction details. */
@@ -21,11 +26,20 @@ class TransactionDescDialog : public QDialog
     Q_OBJECT
 
 public:
-    explicit TransactionDescDialog(const QModelIndex &idx, QWidget *parent = nullptr);
+    explicit TransactionDescDialog(const QModelIndex &idx, WalletModel *wallet_model, QWidget *parent = nullptr);
     ~TransactionDescDialog();
+
+private Q_SLOTS:
+    void abandon();
 
 private:
     Ui::TransactionDescDialog *ui;
+    WalletModel* const m_wallet_model;
+    uint256 m_txid;
+    /** Shown only when the wallet says this transaction can be abandoned, which
+     *  is the same condition under which the node may be refusing it. Nobody
+     *  goes looking for a context menu on a row that claims to be pending. */
+    QPushButton* m_abandon_button{nullptr};
 };
 
 #endif // BITCOIN_QT_TRANSACTIONDESCDIALOG_H
