@@ -1069,6 +1069,17 @@ QString formatReferenceApprox(const CAsset& asset, const CAmount& amount, const 
     return FormatRefValue((static_cast<double>(amount) / factor) * pa / pr, ref);
 }
 
+bool blockSpacingIsMeaningful()
+{
+    // A PoS chain enforces its spacing, so the figure is real. A chain whose
+    // blocks are signed has no target at all -- the 600 s that nPowTargetSpacing
+    // still carries is Bitcoin's, inherited and never used -- and quoting it
+    // invents a schedule the chain does not keep. Anywhere blocks are actually
+    // mined, nPowTargetSpacing is the genuine target and stands.
+    if (g_con_pos) return true;
+    return !g_signed_blocks;
+}
+
 int64_t nominalBlockSpacing()
 {
     if (!g_con_pos) return Params().GetConsensus().nPowTargetSpacing;
