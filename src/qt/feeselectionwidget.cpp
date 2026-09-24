@@ -684,6 +684,25 @@ void FeeSelectionWidget::updateNotes(const CAmount& custom_reference_per_kvb, bo
             notes << tr("This clears the relay minimum, but the next block is taking nothing below %1. "
                         "Yours will wait until the queue clears.").arg(in_asset(c.next_block_min));
         }
+        // How full the chain is, said in Custom too. Until now this mode spoke
+        // only about the figure typed -- and only to object to it -- so somebody
+        // choosing their own fee, which is exactly when knowing the queue is
+        // worth most, was the one person never told there was a queue. It is a
+        // fact about the chain, not about the number, and it is the reason the
+        // thresholds above sit where they do.
+        if (c.next_block_full) {
+            const QString backlog = QString::number(c.backlog_blocks, 'f', 1);
+            if (custom_reference_per_kvb >= c.next_block_min) {
+                // Said differently on purpose: the Recommended wording ends "unless it
+                // pays more than they do", which would contradict itself here, where it
+                // already does.
+                notes << tr("Blocks are full, with enough transactions waiting to fill %1 blocks. "
+                            "At this rate yours is ahead of them.").arg(backlog);
+            } else {
+                notes << tr("Blocks are full, and there are enough transactions waiting to fill %1 blocks.")
+                             .arg(backlog);
+            }
+        }
     } else if (!have_estimate && !c.next_block_full) {
         notes << tr("Blocks are not congested, and there is no recent fee history to estimate from. "
                     "This is the least the network will relay, and the confirmation target cannot "
