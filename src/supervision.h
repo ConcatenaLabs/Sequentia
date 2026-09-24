@@ -395,6 +395,27 @@ uint256 SupervisionRecordSigHash(const SupervisionRecord& record, const COutPoin
 uint256 SupervisionUnfreezeSigHash(const COutPoint& record_outpoint, const CAsset& asset,
                                    const uint256& target);
 
+/** Transaction weight of the input that spends a freeze record.
+ *
+ *  A wallet cannot work this out for itself. Sizing an input means producing a
+ *  dummy signature for its script, and this script is deliberately not the spend
+ *  authority (see BuildSupervisionRecordScript) -- no key satisfies it, so
+ *  ProduceSignature fails and the input is sized at -1. It is a fixed width all
+ *  the same, because consensus admits exactly one thing in the scriptSig:
+ *
+ *      36  outpoint
+ *   +   1  scriptSig length
+ *   +   1  push opcode for the signature
+ *   +  64  the signature (SupervisionUnfreezeSigHash, BIP340)
+ *   +   4  nSequence
+ *   = 106  base bytes, x4
+ *   +   4  an empty witness: four zero-length fields
+ *   = 428  weight units
+ *
+ *  Pass it to fundrawtransaction as this input's input_weights entry, so that
+ *  the unfreeze pays for the bytes it really occupies. */
+static const int64_t SUPERVISION_UNFREEZE_INPUT_WEIGHT = 428;
+
 /** Hash of a scriptPubKey, as named by a freeze record.
  *
  *  A hash rather than the script itself so a record is fixed-width whatever it

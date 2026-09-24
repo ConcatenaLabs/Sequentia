@@ -825,38 +825,8 @@
             <number>0</number>
            </property>
            <item>
-            <layout class="QHBoxLayout" name="horizontalLayoutFeeAsset">
-             <item>
-              <widget class="QLabel" name="labelFeeAsset">
-               <property name="text">
-                <string>Pay the fee in:</string>
-               </property>
-              </widget>
-             </item>
-             <item>
-              <widget class="QComboBox" name="feeAssetSelector">
-               <property name="toolTip">
-                <string>Pay the network fee in this asset. By default it follows the asset you are sending, as long as this node accepts a fee in it — no asset is privileged. Each block producer decides which assets it will take, and prices them from the asset registry and a market feed: an asset that is unregistered, unpriced or barely traded risks a payment that never confirms.</string>
-               </property>
-              </widget>
-             </item>
-             <item>
-              <spacer name="horizontalSpacerFeeAsset">
-               <property name="orientation">
-                <enum>Qt::Horizontal</enum>
-               </property>
-               <property name="sizeHint" stdset="0">
-                <size>
-                 <width>1</width>
-                 <height>1</height>
-                </size>
-               </property>
-              </spacer>
-             </item>
-            </layout>
-           </item>
-           <item>
-            <layout class="QGridLayout" name="gridLayoutFee">
+            <widget class="QWidget" name="frameFeeRateMode" native="true">
+             <layout class="QGridLayout" name="gridLayoutFee">
              <property name="topMargin">
               <number>10</number>
              </property>
@@ -907,19 +877,6 @@ Note:  Since the fee is calculated on a per-byte basis, a fee rate of "100 atoms
                 </layout>
                </item>
                <item>
-                <widget class="QLabel" name="labelFeeAssetWarning">
-                 <property name="visible">
-                  <bool>false</bool>
-                 </property>
-                 <property name="wordWrap">
-                  <bool>true</bool>
-                 </property>
-                 <property name="text">
-                  <string notr="true"/>
-                 </property>
-                </widget>
-               </item>
-               <item>
                 <widget class="QLabel" name="labelCustomFeeWarning">
                  <property name="enabled">
                   <bool>true</bool>
@@ -928,7 +885,7 @@ Note:  Since the fee is calculated on a per-byte basis, a fee rate of "100 atoms
                   <bool>true</bool>
                  </property>
                  <property name="text">
-                  <string>The lowest fee the network will relay. It confirms fine while blocks have room to spare, but once more payments compete for space than a block can hold, the cheapest ones wait — possibly forever. Raise it if your payment is time-sensitive.</string>
+                  <string>Set the rate yourself, starting from the recommendation. Lower it and your payment competes for block space with everything else waiting; the cheapest wait longest, and while blocks stay full they can wait indefinitely. The notes under the figures say what the chain is asking for right now.</string>
                  </property>
                 </widget>
                </item>
@@ -1097,7 +1054,8 @@ Note:  Since the fee is calculated on a per-byte basis, a fee rate of "100 atoms
                </item>
               </layout>
              </item>
-            </layout>
+             </layout>
+            </widget>
            </item>
            <item>
             <widget class="QCheckBox" name="optInRBF">

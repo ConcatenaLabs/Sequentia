@@ -4,6 +4,9 @@
 
 #include <qt/supervisionpage.h>
 
+#include <qt/clientmodel.h>
+#include <qt/feeselectionwidget.h>
+
 #include <qt/bitcoinunits.h>
 #include <qt/guiutil.h>
 #include <qt/platformstyle.h>
@@ -11,6 +14,7 @@
 
 #include <assetsdir.h>
 #include <core_io.h>
+#include <supervision.h>
 #include <interfaces/node.h>
 #include <interfaces/wallet.h>
 #include <key_io.h>
@@ -18,6 +22,7 @@
 #include <rpc/util.h>
 #include <script/standard.h>
 #include <util/strencodings.h>
+#include <tinyformat.h>
 
 #include <QAbstractButton>
 #include <QApplication>
@@ -44,15 +49,17 @@
 #include <QVBoxLayout>
 
 namespace {
-//! What a record transaction pays the producer. A record is tiny and wants to
-//! confirm quickly -- a freeze that waits is a freeze that can be outrun -- so it
-//! is not worth economising on, and it is paid in the policy asset because that is
-//! the one every producer accepts.
-const CAmount RECORD_FEE = 100000; // 0.001
-
-//! Below this the change output would be dust, and the transaction would be
-//! refused for it rather than for anything to do with supervision.
-const CAmount MIN_CHANGE = 10000; // 0.0001
+//! A signature-shaped placeholder: 64 zero bytes, in hex.
+//!
+//! The admission signature covers the transaction's FIRST INPUT, so the input has
+//! to be chosen before the signature can exist -- and choosing inputs is coin
+//! selection, which belongs to the wallet. So the wallet funds the transaction
+//! first, over a record carrying this instead of a signature. It is exactly as
+//! wide as the real one, so the transaction the wallet sizes and prices here is
+//! the transaction that is finally broadcast. buildsupervisionrecord accepts it
+//! because it does not verify signatures; nothing that does is asked to.
+const char* PLACEHOLDER_SIGNATURE = "0000000000000000000000000000000000000000000000000000000000000000"
+                                    "0000000000000000000000000000000000000000000000000000000000000000";
 
 //! A supervision record output's script begins with a push of "SEQFRZ"
 //! (SUPERVISION_RECORD_MARKER). Matching that in the raw transaction hex tells us
@@ -122,6 +129,22 @@ SupervisionPage::SupervisionPage(const PlatformStyle* platformStyle, QWidget* pa
     m_keys_summary->setWordWrap(true);
     m_keys_summary->setTextInteractionFlags(Qt::TextSelectableByMouse);
     layout->addWidget(m_keys_summary);
+
+    // --- What a record costs ---
+    QGroupBox* feeGroup = new QGroupBox(tr("What a record costs"), this);
+    QVBoxLayout* feeLayout = new QVBoxLayout(feeGroup);
+    QLabel* feeHint = new QLabel(
+        tr("Every action on this page is a transaction, and it pays a fee like any other. Freezing is "
+           "time-critical in a way an ordinary payment is not -- a record that waits is a record the "
+           "target can outrun -- so it is worth paying for the next block rather than the cheapest one."
+           "<br><br>The fee may be paid in any asset this node accepts, the asset being supervised "
+           "included. It is a supervision record either way; nothing about it is settled in the asset "
+           "it governs."), feeGroup);
+    feeHint->setWordWrap(true);
+    feeLayout->addWidget(feeHint);
+    m_fee_widget = new FeeSelectionWidget(feeGroup);
+    feeLayout->addWidget(m_fee_widget);
+    layout->addWidget(feeGroup);
 
     // --- Freezes in force ---
     QGroupBox* freezeGroup = new QGroupBox(tr("Freezes in force"), this);
@@ -250,6 +273,27 @@ SupervisionPage::SupervisionPage(const PlatformStyle* platformStyle, QWidget* pa
     connect(m_pause_button, &QPushButton::clicked, this, &SupervisionPage::onPause);
     connect(m_rotate_generate, &QPushButton::clicked, this, &SupervisionPage::onNewKeyFromWallet);
     connect(m_rotate_button, &QPushButton::clicked, this, &SupervisionPage::onRotate);
+    // A different fee asset is a differently sized transaction -- different coins,
+    // possibly a different number of them -- so the price has to be recomputed
+    // rather than restated.
+    connect(m_fee_widget, &FeeSelectionWidget::feeAssetChanged, this, &SupervisionPage::priceRecord);
+}
+
+void SupervisionPage::setClientModel(ClientModel* client_model)
+{
+    if (!client_model) return;
+    connect(client_model, &ClientModel::numBlocksChanged, this,
+            [this](int, const QDateTime&, double, bool, SynchronizationState sync_state) {
+                if (sync_state != SynchronizationState::POST_INIT) return;
+                // The fee panel is judged from the asset registry and the price feed,
+                // and both land seconds after the wallet is attached: at that moment
+                // every asset still looks unregistered and unpriced. Nothing signals
+                // either poll, so without a tick that arrives afterwards the panel
+                // would go on reporting the state it was built in for the whole
+                // session. A new block is that tick.
+                m_fee_widget->refresh();
+                priceRecord();
+            });
 }
 
 void SupervisionPage::setModel(WalletModel* model)
@@ -275,6 +319,14 @@ void SupervisionPage::setModel(WalletModel* model)
     // by the page that the tab reveals.
     connect(m_wallet_model, &WalletModel::balanceChanged, this,
             [this](const interfaces::WalletBalances&) { refreshAssets(); });
+
+    m_fee_widget->setModel(model);
+    // A record is never replaceable: bumping a fee re-runs coin selection, and the
+    // admission signature covers the first input it chose (see sendRecord). So the
+    // fee panel must not offer "you can switch the asset later" as a remedy here,
+    // because here there is no later.
+    m_fee_widget->setReplaceable(false);
+    priceRecord();
 }
 
 std::string SupervisionPage::walletUri() const
@@ -602,39 +654,165 @@ void SupervisionPage::showEvent(QShowEvent* event)
     scheduleRefresh();
 }
 
-bool SupervisionPage::fundingOutpoint(QString& txid, int& vout, CAmount& amount, QString& error)
+QString SupervisionPage::recordScript(const QString& kind, const QString& asset, const UniValue& target,
+                                     const UniValue& old_key, const QString& signature, QString& error)
 {
-    bool ok; QString err;
+    bool ok;
     UniValue params(UniValue::VARR);
-    params.push_back(1); // confirmed only: the sighash binds this outpoint
-    UniValue unspent = callWalletRpc("listunspent", params, ok, err);
-    if (!ok) { error = err; return false; }
-
-    const QString policy = QString::fromStdString(::policyAsset.GetHex());
-    static const QString explicit_blinder(64, QLatin1Char('0'));
-    for (size_t i = 0; i < unspent.size(); ++i) {
-        const UniValue& u = unspent[i];
-        if (!u.exists("asset") || QString::fromStdString(u["asset"].getValStr()) != policy) continue;
-        if (u.exists("spendable") && !u["spendable"].get_bool()) continue;
-        // The record transaction is built and signed raw here, with explicit values
-        // throughout. A confidential input would need blinding, which this path does
-        // not do and consensus would reject the result of.
-        if (u.exists("amountblinder") &&
-            QString::fromStdString(u["amountblinder"].getValStr()) != explicit_blinder) continue;
-        CAmount value = 0;
-        try { value = AmountFromValue(u["amount"], /*check_range=*/false); } catch (...) { continue; }
-        if (value < RECORD_FEE + MIN_CHANGE) continue;
-        txid = QString::fromStdString(u["txid"].get_str());
-        vout = u["vout"].get_int();
-        amount = value;
-        return true;
+    params.push_back(kind.toStdString());
+    params.push_back(asset.toStdString());
+    params.push_back(target);
+    params.push_back(old_key);
+    params.push_back(signature.toStdString());
+    UniValue built = callWalletRpc("buildsupervisionrecord", params, ok, error);
+    if (!ok || !built.exists("script")) {
+        error = tr("The record would not assemble: %1").arg(error);
+        return QString();
     }
-    error = tr("No confirmed, unblinded %1 output large enough to pay for a record transaction. "
-               "A record needs a fee of %2, paid in %1 because that is the asset every producer accepts.")
-                .arg(GUIUtil::assetDisplayName(::policyAsset),
-                     GUIUtil::formatAssetAmount(::policyAsset, RECORD_FEE, BitcoinUnits::BTC,
-                                                BitcoinUnits::SeparatorStyle::STANDARD, true));
-    return false;
+    return QString::fromStdString(built["script"].get_str());
+}
+
+CAsset SupervisionPage::selectedFeeAsset() const
+{
+    return m_fee_widget ? m_fee_widget->feeAsset() : ::policyAsset;
+}
+
+void SupervisionPage::priceRecord()
+{
+    if (!m_wallet_model || !m_fee_widget) return;
+    const Asset* selected = selectedAsset();
+    if (!selected) { m_fee_widget->setKnownTotal(-1); return; }
+
+    QString err;
+    const QString placeholder = recordScript(QStringLiteral("freeze"), selected->id,
+                                             UniValue("51"), UniValue(UniValue::VNULL),
+                                             QString::fromUtf8(PLACEHOLDER_SIGNATURE), err);
+    if (placeholder.isEmpty()) { m_fee_widget->setKnownTotal(-1); return; }
+
+    // A freeze of a nominal script (OP_TRUE), funded but not signed and never
+    // broadcast. Every record is the same width whatever it names -- a target is a
+    // 32-byte hash of the script, not the script -- so this one prices all four
+    // actions on the page, and nothing about the target it names reaches anywhere.
+    QString funded_hex;
+    CAmount fee = 0;
+    if (!fundRecordTransaction(placeholder, selected->id, UniValue(UniValue::VARR),
+                               UniValue(UniValue::VARR), funded_hex, err, &fee)) {
+        m_fee_widget->setKnownTotal(-1);
+        return;
+    }
+    m_fee_widget->setKnownTotal(fee);
+
+    // And the size that fee was charged over. Under Recommended the panel shows
+    // the wallet's own figure and the size is merely corroboration; under Custom
+    // it is what lets the total be typed into at all, and what turns a rate the
+    // user sets into the total they will actually pay.
+    CMutableTransaction sized;
+    if (DecodeHexTx(sized, funded_hex.toStdString())) {
+        m_fee_widget->setTransactionSize(GetVirtualTransactionSize(CTransaction(sized)));
+    }
+}
+
+bool SupervisionPage::fundRecordTransaction(const QString& record_script, const QString& asset,
+                                            const UniValue& inputs, const UniValue& input_weights,
+                                            QString& funded_hex, QString& error, CAmount* fee_out)
+{
+    bool ok;
+
+    // An empty shell: whatever inputs the caller insists on, and no outputs at
+    // all. The record output goes on next, and everything else -- which coins
+    // pay, how much the fee is, where the change goes -- is the wallet's to
+    // decide. That is the whole point of the change: this page used to answer
+    // all three itself, from a scan of listunspent, and could therefore only
+    // ever answer them for one asset and at one hardcoded price.
+    UniValue create_params(UniValue::VARR);
+    create_params.push_back(inputs);
+    create_params.push_back(UniValue(UniValue::VARR));
+    UniValue raw = callWalletRpc("createrawtransaction", create_params, ok, error);
+    if (!ok) {
+        error = tr("Could not start the transaction: %1").arg(error);
+        return false;
+    }
+
+    // The record output carries zero of the asset it governs, which keeps it clear
+    // of the dust rule and stops an issuer burning value into a script only
+    // consensus can release. An unfreeze creates no record and passes no script:
+    // it spends one.
+    QString shell = QString::fromStdString(raw.getValStr());
+    if (!record_script.isEmpty()) {
+        UniValue add_params(UniValue::VARR);
+        add_params.push_back(shell.toStdString());
+        add_params.push_back(record_script.toStdString());
+        add_params.push_back(asset.toStdString());
+        UniValue with_record = callWalletRpc("addsupervisionrecordoutput", add_params, ok, error);
+        if (!ok) {
+            error = tr("Could not attach the record: %1").arg(error);
+            return false;
+        }
+        shell = QString::fromStdString(with_record.getValStr());
+    }
+
+    UniValue options(UniValue::VOBJ);
+    // Named, never left to a default. On a chain with an open fee market there is
+    // no default to fall back on, and asking for one is how the policy asset would
+    // quietly become privileged again.
+    options.pushKV("fee_asset", selectedFeeAsset().GetHex());
+    // Not replaceable, and this is a property of the record rather than a
+    // preference. Bumping a transaction's fee means re-running coin selection,
+    // which means new inputs -- and the admission signature covers the first one,
+    // so a bumped record is an invalid record. Signalling RBF would advertise a
+    // repair that destroys the thing it was called to repair.
+    options.pushKV("replaceable", false);
+    if (!input_weights.empty()) options.pushKV("input_weights", input_weights);
+    // The rate the fee panel is showing, so that what is quoted and what is charged
+    // are the same number. Under the recommendation there is nothing to state:
+    // naming the target lets the wallet estimate, which is what the panel quoted.
+    if (m_fee_widget) {
+        if (m_fee_widget->hasCustomRate()) {
+            // fundrawtransaction's fee_rate is per VBYTE; the panel, like
+            // CCoinControl::m_feerate, holds atoms per KVB. Written out with three
+            // decimals, which is exactly the precision the RPC parses back and
+            // exactly what a per-kvB integer can need.
+            const CAmount per_kvb = m_fee_widget->customRate();
+            options.pushKV("fee_rate", UniValue(UniValue::VNUM,
+                strprintf("%d.%03d", per_kvb / 1000, per_kvb % 1000)));
+        } else if (m_fee_widget->confTarget() > 0) {
+            options.pushKV("conf_target", m_fee_widget->confTarget());
+        }
+    }
+
+    UniValue fund_params(UniValue::VARR);
+    fund_params.push_back(shell.toStdString());
+    fund_params.push_back(options);
+    UniValue funded = callWalletRpc("fundrawtransaction", fund_params, ok, error);
+    if (!ok || !funded.exists("hex")) {
+        error = tr("The wallet could not fund the record: %1").arg(error);
+        return false;
+    }
+    funded_hex = QString::fromStdString(funded["hex"].get_str());
+    if (fee_out && funded.exists("fee")) {
+        try { *fee_out = AmountFromValue(funded["fee"], /*check_range=*/false); } catch (...) { *fee_out = 0; }
+    }
+    return true;
+}
+
+bool SupervisionPage::firstInput(const QString& tx_hex, QString& txid, int& vout, QString& error)
+{
+    bool ok;
+    UniValue params(UniValue::VARR);
+    params.push_back(tx_hex.toStdString());
+    UniValue decoded = callWalletRpc("decoderawtransaction", params, ok, error);
+    if (!ok || !decoded.exists("vin") || decoded["vin"].empty()) {
+        error = tr("Could not read the transaction back: %1").arg(error);
+        return false;
+    }
+    const UniValue& in = decoded["vin"][0];
+    if (!in.exists("txid") || !in.exists("vout")) {
+        error = tr("The funded transaction's first input names no outpoint.");
+        return false;
+    }
+    txid = QString::fromStdString(in["txid"].get_str());
+    vout = in["vout"].get_int();
+    return true;
 }
 
 QString SupervisionPage::requestSignature(const QString& sighash, const QString& key, const QString& role,
@@ -713,13 +891,29 @@ QString SupervisionPage::sendRecord(const QString& kind, const QString& asset, c
     if (!selected) return QString();
     bool ok; QString err;
 
-    QString funding_txid; int funding_vout = 0; CAmount funding_amount = 0;
-    if (!fundingOutpoint(funding_txid, funding_vout, funding_amount, err)) {
+    // 1. A transaction the wallet funds, over a record that is not signed yet.
+    //
+    // The order is inverted from the obvious one and has to be: the admission
+    // signature covers the first input, so there must BE a first input before
+    // there is anything to sign. Handing the finished transaction to
+    // fundrawtransaction afterwards would choose different inputs and invalidate
+    // the signature; funding first and signing over what was chosen is the only
+    // order in which the wallet gets to pick the coins.
+    const QString placeholder_script =
+        recordScript(kind, asset, target, old_key, QString::fromUtf8(PLACEHOLDER_SIGNATURE), err);
+    if (placeholder_script.isEmpty()) { setStatus(err, true); return QString(); }
+
+    QString probe_hex;
+    if (!fundRecordTransaction(placeholder_script, asset, UniValue(UniValue::VARR),
+                               UniValue(UniValue::VARR), probe_hex, err)) {
         setStatus(err, true);
         return QString();
     }
 
-    // 1. What to sign, and which key must sign it. The node's answer, not ours: the
+    QString funding_txid; int funding_vout = 0;
+    if (!firstInput(probe_hex, funding_txid, funding_vout, err)) { setStatus(err, true); return QString(); }
+
+    // 2. What to sign, and which key must sign it. The node's answer, not ours: the
     // rules about which key signs what are consensus rules.
     UniValue hash_params(UniValue::VARR);
     hash_params.push_back(kind.toStdString());
@@ -739,25 +933,17 @@ QString SupervisionPage::sendRecord(const QString& kind, const QString& asset, c
     const QString role = recovery ? tr("recovery") : tr("operational");
     const QString key = recovery ? selected->recovery_key : selected->operational_key;
 
-    // 2. Sign it, here or elsewhere.
+    // 3. Sign it, here or elsewhere.
     const QString signature = requestSignature(sighash, key, role, kind);
     if (signature.isEmpty()) return QString();
 
-    // 3. Assemble, attach, broadcast.
-    UniValue build_params(UniValue::VARR);
-    build_params.push_back(kind.toStdString());
-    build_params.push_back(asset.toStdString());
-    build_params.push_back(target);
-    build_params.push_back(old_key);
-    build_params.push_back(signature.toStdString());
-    UniValue built = callWalletRpc("buildsupervisionrecord", build_params, ok, err);
-    if (!ok || !built.exists("script")) {
-        setStatus(tr("The record would not assemble: %1").arg(err), true);
-        return QString();
-    }
-
-    UniValue change = callWalletRpc("getnewaddress", UniValue(UniValue::VARR), ok, err);
-    if (!ok) { setStatus(tr("Could not get a change address: %1").arg(err), true); return QString(); }
+    // 4. Fund it again, this time round the real record and with that first input
+    // pinned. Pinned rather than reused wholesale: the wallet is free to choose
+    // the rest again, and only the outpoint the signature names has to stay where
+    // it is. The record is the same width as the placeholder, so this second pass
+    // is pricing the same transaction.
+    const QString record_script = recordScript(kind, asset, target, old_key, signature, err);
+    if (record_script.isEmpty()) { setStatus(err, true); return QString(); }
 
     UniValue inputs(UniValue::VARR);
     UniValue input(UniValue::VOBJ);
@@ -765,32 +951,26 @@ QString SupervisionPage::sendRecord(const QString& kind, const QString& asset, c
     input.pushKV("vout", funding_vout);
     inputs.push_back(input);
 
-    UniValue outputs(UniValue::VARR);
-    UniValue change_out(UniValue::VOBJ);
-    change_out.pushKV(change.getValStr(), ValueFromAmount(funding_amount - RECORD_FEE));
-    outputs.push_back(change_out);
-    UniValue fee_out(UniValue::VOBJ);
-    fee_out.pushKV("fee", ValueFromAmount(RECORD_FEE));
-    outputs.push_back(fee_out);
+    QString funded_hex;
+    if (!fundRecordTransaction(record_script, asset, inputs, UniValue(UniValue::VARR), funded_hex, err)) {
+        setStatus(err, true);
+        return QString();
+    }
 
-    UniValue raw_params(UniValue::VARR);
-    raw_params.push_back(inputs);
-    raw_params.push_back(outputs);
-    UniValue raw = callWalletRpc("createrawtransaction", raw_params, ok, err);
-    if (!ok) { setStatus(tr("Could not build the transaction: %1").arg(err), true); return QString(); }
-
-    // The record output carries zero of the asset it governs, which keeps it clear
-    // of the dust rule and stops an issuer burning value into a script only
-    // consensus can release.
-    UniValue add_params(UniValue::VARR);
-    add_params.push_back(raw.getValStr());
-    add_params.push_back(built["script"].get_str());
-    add_params.push_back(asset.toStdString());
-    UniValue with_record = callWalletRpc("addsupervisionrecordoutput", add_params, ok, err);
-    if (!ok) { setStatus(tr("Could not attach the record: %1").arg(err), true); return QString(); }
+    // Funding preserves a preselected input's position, so this holds; it is
+    // checked anyway because it is the one thing whose failure would produce a
+    // transaction that looks finished and is refused by consensus for a reason
+    // that names none of this.
+    QString final_txid; int final_vout = 0;
+    if (!firstInput(funded_hex, final_txid, final_vout, err)) { setStatus(err, true); return QString(); }
+    if (final_txid != funding_txid || final_vout != funding_vout) {
+        setStatus(tr("The wallet moved the input the signature covers, so this record would be refused. "
+                     "Nothing was broadcast."), true);
+        return QString();
+    }
 
     UniValue sign_params(UniValue::VARR);
-    sign_params.push_back(with_record.getValStr());
+    sign_params.push_back(funded_hex.toStdString());
     UniValue signed_tx = callWalletRpc("signrawtransactionwithwallet", sign_params, ok, err);
     if (!ok || !signed_tx.exists("hex")) {
         setStatus(tr("The wallet could not sign the transaction: %1").arg(err), true);
@@ -815,12 +995,11 @@ QString SupervisionPage::sendUnfreeze(const QString& asset, const Record& record
     const Asset* selected = selectedAsset();
     if (!selected) return QString();
 
-    QString funding_txid; int funding_vout = 0; CAmount funding_amount = 0;
-    if (!fundingOutpoint(funding_txid, funding_vout, funding_amount, err)) {
-        setStatus(err, true);
-        return QString();
-    }
-
+    // Unlike a record, an unfreeze can be signed before it is funded: its message
+    // binds the freeze record being spent and nothing else, so no funding input
+    // has to exist first. The signature is asked for up front for that reason --
+    // there is no point choosing coins for a transaction the issuer may decline to
+    // authorise.
     UniValue hash_params(UniValue::VARR);
     hash_params.push_back(record.txid.toStdString());
     hash_params.push_back(record.vout);
@@ -842,33 +1021,34 @@ QString SupervisionPage::sendUnfreeze(const QString& asset, const Record& record
     record_in.pushKV("txid", record.txid.toStdString());
     record_in.pushKV("vout", record.vout);
     inputs.push_back(record_in);
-    UniValue funding_in(UniValue::VOBJ);
-    funding_in.pushKV("txid", funding_txid.toStdString());
-    funding_in.pushKV("vout", funding_vout);
-    inputs.push_back(funding_in);
 
-    UniValue change = callWalletRpc("getnewaddress", UniValue(UniValue::VARR), ok, err);
-    if (!ok) { setStatus(tr("Could not get a change address: %1").arg(err), true); return QString(); }
+    // No wallet can size that input: sizing one means producing a dummy signature
+    // for its script, and a record's script is deliberately not the spend
+    // authority, so nothing signs it. Left unsaid the input would be funded as
+    // though it were free, and the fee would come out short by exactly the bytes
+    // it occupies -- enough, on a transaction this small, to fall under the relay
+    // floor and be refused for a reason that mentions none of this. Its width is
+    // fixed by consensus, so it can simply be stated.
+    UniValue weights(UniValue::VARR);
+    UniValue weight(UniValue::VOBJ);
+    weight.pushKV("txid", record.txid.toStdString());
+    weight.pushKV("vout", record.vout);
+    weight.pushKV("weight", (int64_t)SUPERVISION_UNFREEZE_INPUT_WEIGHT);
+    weights.push_back(weight);
 
-    UniValue outputs(UniValue::VARR);
-    UniValue change_out(UniValue::VOBJ);
-    change_out.pushKV(change.getValStr(), ValueFromAmount(funding_amount - RECORD_FEE));
-    outputs.push_back(change_out);
-    UniValue fee_out(UniValue::VOBJ);
-    fee_out.pushKV("fee", ValueFromAmount(RECORD_FEE));
-    outputs.push_back(fee_out);
+    // Nothing is created here, so there is no record output to attach: the
+    // transaction spends the freeze and pays a fee, and has nothing else to say.
+    QString funded_hex;
+    if (!fundRecordTransaction(QString(), asset, inputs, weights, funded_hex, err)) {
+        setStatus(err, true);
+        return QString();
+    }
 
-    UniValue raw_params(UniValue::VARR);
-    raw_params.push_back(inputs);
-    raw_params.push_back(outputs);
-    UniValue raw = callWalletRpc("createrawtransaction", raw_params, ok, err);
-    if (!ok) { setStatus(tr("Could not build the transaction: %1").arg(err), true); return QString(); }
-
-    // The wallet signs its own input and leaves the record's alone -- no wallet can
+    // The wallet signs its own inputs and leaves the record's alone -- no wallet can
     // produce that one, because the record's script is deliberately not the spend
     // authority. Incomplete here is expected, not a failure.
     UniValue sign_params(UniValue::VARR);
-    sign_params.push_back(raw.getValStr());
+    sign_params.push_back(funded_hex.toStdString());
     UniValue signed_tx = callWalletRpc("signrawtransactionwithwallet", sign_params, ok, err);
     if (!ok || !signed_tx.exists("hex")) {
         setStatus(tr("The wallet could not sign the transaction: %1").arg(err), true);
