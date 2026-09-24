@@ -262,8 +262,16 @@ void SendCoinsDialog::setModel(WalletModel *_model)
             // catalogue, and without a catalogue entry the plural machinery
             // falls back to printing the source text, "(s)" and all.
             const QString blocks = (n == 1) ? tr("1 block") : tr("%1 blocks").arg(n);
-            ui->confTargetSelector->addItem(tr("%1 (%2)")
-                                                .arg(GUIUtil::formatNiceTimeOffset(n * GUIUtil::nominalBlockSpacing()), blocks));
+            // And no duration at all where the chain keeps no schedule: on a
+            // signed-blocks chain the only honest answer to "how long is one
+            // block?" is that nobody has promised. Quoting the inherited 600 s
+            // made a one-block target read as ten minutes.
+            if (GUIUtil::blockSpacingIsMeaningful()) {
+                ui->confTargetSelector->addItem(tr("%1 (%2)")
+                                                    .arg(GUIUtil::formatNiceTimeOffset(n * GUIUtil::nominalBlockSpacing()), blocks));
+            } else {
+                ui->confTargetSelector->addItem(blocks);
+            }
         }
         connect(ui->confTargetSelector, qOverload<int>(&QComboBox::currentIndexChanged), this, &SendCoinsDialog::updateSmartFeeLabel);
         connect(ui->confTargetSelector, qOverload<int>(&QComboBox::currentIndexChanged), this, &SendCoinsDialog::coinControlUpdateLabels);

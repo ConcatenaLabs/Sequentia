@@ -388,6 +388,18 @@ namespace GUIUtil
        inherited from Bitcoin at 600 s and would overstate every wait by tenfold. */
     int64_t nominalBlockSpacing();
 
+    /* SEQUENTIA: whether that spacing means anything on this chain.
+
+       Blocks here are signed, not mined: a producer publishes one when it
+       publishes one, and no rule says how far apart. nPowTargetSpacing still
+       holds Bitcoin's 600 s because it is inherited and never removed, so
+       nominalBlockSpacing() hands it back for want of anything better -- fine
+       for "has this waited a long time?", which only needs an order of
+       magnitude, and wrong for "how long is a one-block target?", which is
+       then quoted to the user as ten minutes on a chain that has no such
+       target. A caller that would SHOW the duration asks this first. */
+    bool blockSpacingIsMeaningful();
+
     /* Parse an amount of a given asset from text */
     bool parseAssetAmount(const CAsset&, const QString& text, int bitcoin_unit, CAmount *val_out);
 
