@@ -885,7 +885,7 @@ Note:  Since the fee is calculated on a per-byte basis, a fee rate of "100 atoms
                   <bool>true</bool>
                  </property>
                  <property name="text">
-                  <string>The lowest fee the network will relay. It confirms fine while blocks have room to spare, but once more payments compete for space than a block can hold, the cheapest ones wait — possibly forever. Raise it if your payment is time-sensitive.</string>
+                  <string>Set the rate yourself, starting from the recommendation. Lower it and your payment competes for block space with everything else waiting; the cheapest wait longest, and while blocks stay full they can wait indefinitely. The notes under the figures say what the chain is asking for right now.</string>
                  </property>
                 </widget>
                </item>
