@@ -709,9 +709,11 @@ a condition on the deployment.
 
 - **An external security audit** of `CompagesVault` and of the daemon's mint, release and
   burn paths. Only internal review and the test suites exist.
-- **Owner custody.** The vault owner is a single externally owned key. It MUST be a Safe
-  (or equivalent multisig) before the vault holds value, with the guardian a separate
-  key and the operator the only hot key.
+- **Owner custody held by the issuer's signers.** The vault owner MUST be a Safe (or
+  equivalent multisig) whose signers are the issuer's, with the guardian a separate key
+  and the operator the only hot key. On the testnet vault the owner is a 2-of-3 Safe,
+  `0xc5540Be5eDc4D06459964dE061aFAB5c3b0025c0`, whose signers are the bridge operator's
+  keys.
 - **Threshold custody of the asset's powers.** The supervision keys and the reissuance
   token MUST be held under threshold custody (FROST or MuSig2 for the Schnorr supervision
   keys), with the recovery key cold. On the testnet assets the recovery key is a single
