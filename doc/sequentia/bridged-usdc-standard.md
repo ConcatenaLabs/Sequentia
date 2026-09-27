@@ -473,6 +473,13 @@ The node offers no per-asset supply accounting (section 3), so the standard supp
    asset: escrow on each source chain read live from that chain, USDC in transit over
    CCTP, circulating supply read from the Sequentia chain beside the daemon's ledger, and
    a `backed` verdict. An unmeasured side is reported as `null`, never as zero.
+   At fixed Sequentia heights the bridge also takes a signed snapshot: circulating
+   supply from the supply auditor at height H, escrow at the last Ethereum block at or
+   before H's time, CCTP transfers in flight at that moment (each proven on chain by its
+   Solana burn and its CCTP nonce), each snapshot linked by hash to the one before. The
+   history is served at `GET /api/por/history` and copied, verified, into the public
+   repository `ConcatenaLabs/compages-reserves`; `reserves/verify.mjs` in the Compages
+   repository re-derives any snapshot from public endpoints.
 4. **An independent watcher.** `watcher/compages-watch.js` in the Compages repository
    trusts none of the daemon's bookkeeping. Once a minute it rebuilds every vault's books
    from the token's own transfers and the vault's events up to Ethereum's finalized block,
@@ -691,7 +698,7 @@ Circle's requirements (quoted from the Bridged USDC Standard) against this spec:
 | Solana leg, including SPL USDC | `daemon/lib/sol.js` |
 | CCTP V2: consolidation, inbound deposits, outbound payouts | `daemon/lib/cctp.js`, `daemon/lib/cctp-sol.js`, and the vault's `receiveCctp`, `releaseViaCctp`, `refundViaCctp` |
 | Supply auditor | `contrib/asset-supply-audit/` (node repository) |
-| Proof of reserves | `GET /api/por` on the bridge |
+| Proof of reserves | `GET /api/por` on the bridge (live); signed snapshots at `GET /api/por/history`, taken by `reserves/snapshot.mjs` (Compages repository) and mirrored in `ConcatenaLabs/compages-reserves` |
 | Independent watcher | `watcher/compages-watch.js` (Compages repository) |
 | Supervision | `src/supervision.cpp` and the `supervision` RPC category (node repository) |
 | Registry succession | `POST /succeed` (`sequentia-registry`) |
@@ -707,12 +714,14 @@ a condition on the deployment.
   key and the operator the only hot key.
 - **Threshold custody of the asset's powers.** The supervision keys and the reissuance
   token MUST be held under threshold custody (FROST or MuSig2 for the Schnorr supervision
-  keys), with the recovery key cold. A mainnet asset MUST be issued with pinned public
+  keys), with the recovery key cold. On the testnet assets the recovery key is a single
+  cold key held off the bridge's host, and the operational key and the token are in the
+  bridge's node wallet. A mainnet asset MUST be issued with pinned public
   keys rather than keys derived from the bridge's node wallet, since the keys committed at
   issuance are permanent in the asset id.
-- **Signed, retained reserve history.** `/api/por` is a live snapshot. The due-diligence
-  record needs the history: periodic snapshots, signed by the operator and retained in a
-  public, append-only form, so the backing can be checked over time and not only now.
+- **An unbroken reserve history from the first mainnet deposit.** Signed snapshots at
+  fixed heights, hash-linked and mirrored publicly (section 5.4), MUST run from the
+  mainnet asset's first deposit, so the record Circle inherits has no gap.
 - **A verified registry identity.** The registry serves the asset's contract and
   supervision data but does not mark the entry chain- and domain-verified. The asset MUST
   be registered through the verified path, with the domain proof served, before the
@@ -749,8 +758,8 @@ single call; it is not required, since the auditor already answers the question.
   depends on it, but display spoofing is a real, chain-wide concern that succession does
   not worsen. Registry transport hardening is worth doing independently of this spec.
 - Until the custody requirements of section 9 are met, a compromised operator key can
-  misuse the bridge within the vault's limits, and a compromised node wallet holds the
-  testnet asset's supervision keys.
+  misuse the bridge within the vault's limits, and a compromised node wallet holds the testnet asset's operational supervision key
+  (never its recovery key, which is cold and can rotate the operational key away).
 
 **Decisions this standard rests on:**
 
