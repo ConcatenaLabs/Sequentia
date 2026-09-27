@@ -39,6 +39,9 @@ an asset that has one does not have a knowable supply. When that happens the
 tool labels the figure a bound, prints what is hidden, and exits with status 2.
 Exit 0 means the number is exact.
 
-This is the property a compliant bridged asset must maintain: holders may blind
-their own transfers freely (that hides distribution, never supply), but the
-issuer must keep every supply-changing event explicit.
+This is the property a compliant bridged asset must maintain: the issuer keeps
+every supply-changing event explicit. Holders of an ordinary asset may blind
+their own transfers, which hides distribution but never supply. A supervised
+asset, such as the bridged USDC.e, can never be blinded at all: consensus
+rejects any transaction that puts one in a blinded output, so its supply is
+explicit by rule rather than by the issuer's discipline.
