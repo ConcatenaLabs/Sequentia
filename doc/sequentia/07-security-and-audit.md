@@ -102,7 +102,7 @@ eligibility, the aggregate signature, the anchor, and the finality gate.
   others stake. At a full majority quorum, immediate finality is fork-free because
   the committee **excludes any equivocating leader** (Liveness theorem 1; see
   `proposals/autonomous-committee.md` §12.4), so an equivocator's blocks never
-  reach 51. In the *relaxed* escaping-stall mode the quorum protection is
+  reach a quorum. In the *relaxed* escaping-stall mode the quorum protection is
   intentionally weakened, so competing sub-threshold blocks are instead resolved
   deterministically by the fork choice, with the checkpoint depth
   (`-poscheckpointdepth`) as the long-range backstop - there is no slashing, and
@@ -220,18 +220,16 @@ BLS-certified block across separate hosts with no coordinator - fully
 implemented and tested (`feature_pos_bls_gossip.py`), with anti-DoS
 validate-before-relay/misbehaviour scoring and crashed-member round recovery
 (`feature_pos_gossip_dos.py`, `feature_pos_gossip_failover.py`), including the
-round-robin / anchor-reshuffle recovery paths and large (100-member) committees,
-detailed in
+round-robin recovery path, certificate gossip and the share-lock, detailed in
 [`proposals/autonomous-committee.md`](proposals/autonomous-committee.md)
 §12.4 - which also explains why **stake slashing is a deliberate non-goal**
 (safety rests on independent validation and Bitcoin checkpoints, not stake-at-
-risk, so the deterrent is redundant). BLS certification is the **default**
-committee certification on the bundled chains (`-posbls` defaults true on
-`-chain=sequentia` and `-chain=test`, false on custom chains); MuSig2 is the
-legacy fallback selected by `-posbls=0`. The autonomous gossip-and-sign
-committee is how the bundled chains run - the live public testnet runs it with
-the public fixed-size committee and bitfield certificates
-(`-pospubliccommittee`, cap 250) since the 2026-07-05 re-genesis. The open
+risk, so the deterrent is redundant). BLS certification is the committee
+certification of the bundled chains: the mainnet parameters pin it, and the
+testnet defaults to it and refuses a conflicting value. MuSig2 remains for
+custom chains run with `-posbls=0`. The autonomous gossip-and-sign committee is
+how the bundled chains produce blocks, with the public fixed-size committee and
+bitfield certificates (cap 250). The open
 hardening items and external sign-offs in
 [§1](#1-audit-findings-and-their-disposition) are the
 remaining pre-mainnet review tasks.

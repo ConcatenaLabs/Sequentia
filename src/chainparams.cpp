@@ -456,15 +456,15 @@ public:
         // unsupervised can never become supervised. See
         // doc/sequentia/bridged-usdc-standard.md.
         consensus.supervised_assets_height = 1;
-        // Minimum block spacing: the 30-second cadence as a CONSENSUS RULE, in
+        // Minimum block spacing: the 60-second cadence as a CONSENSUS RULE, in
         // force from mainnet's first block. Mainnet has not launched, so there
         // is no history to exempt and nothing to coordinate later.
         //
         // The producers collect the fees, so their incentive is to shorten the
         // cadence, and until this rule existed nothing stopped them: the floor
         // in PosProducer::Step is producer-side and unverified. Deliberately a
-        // separate number from the slot-gate unit (-posslotinterval): raising
-        // the spacing must not stretch the leader time-gate too.
+        // separate number from the slot-gate unit (pos_slot_gate_seconds
+        // below): raising the spacing must not stretch the leader time-gate too.
         //
         // 1 and not 0 for the same reason as the two gates above: 0 is this
         // parameter's "not gated" sentinel.
@@ -953,6 +953,7 @@ public:
         constexpr int      TESTNET_POS_COMMITTEE_SIZE   = 250;          // 126-of-250 quorum
         constexpr int64_t  TESTNET_POS_SLOT_INTERVAL    = 30;           // 30 s nominal block time (doc 11 §4)
         constexpr int64_t  TESTNET_POS_UNBONDING_PERIOD = 43200;        // x30 s = ~15 days (§3.11)
+        constexpr uint32_t TESTNET_POS_PAYOUT_NOTICE    = 1440;         // x60 s = ~1 day
         constexpr uint64_t TESTNET_POS_MIN_STAKE        = 4000000000000ULL; // 40,000 SEQ = 0.01% of 400M (§3.3)
 
         g_pos_vrf = true;
@@ -1053,7 +1054,7 @@ public:
             refuse_int("-posslotinterval", TESTNET_POS_SLOT_INTERVAL);
             refuse_int("-posunbonding", TESTNET_POS_UNBONDING_PERIOD);
             refuse_int("-posminstake", (int64_t)TESTNET_POS_MIN_STAKE);
-            refuse_int("-pospayoutnotice", (int64_t)DEFAULT_POS_PAYOUT_NOTICE);
+            refuse_int("-pospayoutnotice", (int64_t)TESTNET_POS_PAYOUT_NOTICE);
             refuse_int("-poscheckpointdepth", (int64_t)DEFAULT_POS_CHECKPOINT_DEPTH);
         }
 
@@ -1084,7 +1085,7 @@ public:
         // (period x g_pos_slot_interval), and g_pos_slot_interval stays 30, so
         // its ~15 days are unaffected by the cadence. Halving it would have cut
         // a security parameter in half rather than preserved it.
-        g_pos_payout_notice = 1440;                        // 1440 x 60s = ~1 day
+        g_pos_payout_notice = TESTNET_POS_PAYOUT_NOTICE;   // 1440 x 60s = ~1 day
         consensus.elements_mode = g_con_elementsmode;
         consensus.total_valid_epochs = 0;
         consensus.dynamic_epoch_length = 10;
@@ -2099,7 +2100,7 @@ protected:
         // Sequentia chains use false, making CT opt-in).
         m_default_blinded_addresses = args.GetBoolArg("-con_default_blinded_addresses", true);
         // SEQUENTIA: per-chain max block weight (0 = the global 4,000,000).
-        // Sequentia uses 200,000 (whitepaper §3.10); set it on custom chains too.
+        // The Sequentia chains use 400,000 (whitepaper §3.10); set it on custom chains too.
         {
             int64_t mbw = args.GetIntArg("-con_maxblockweight", 0);
             if (mbw < 0 || mbw > MAX_BLOCK_WEIGHT) {

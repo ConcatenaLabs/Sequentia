@@ -10,10 +10,10 @@
 // missing piece for a coordinator-free node: a background thread that, when the
 // operator supplies one or more staking keys (-posproducerkey), detects its own
 // eligibility each round, waits out the slot clock, and assembles, signs, and
-// submits a block on its own — Phase 1 of the autonomous gossip-and-sign
-// committee (doc/sequentia/proposals/autonomous-committee.md §12). It covers the
-// leader-only / single-host cases; the peer-to-peer committee gossip and BLS
-// aggregation are later phases.
+// submits a block on its own. The same thread runs the peer-to-peer
+// gossip-and-sign committee with BLS aggregation
+// (doc/sequentia/proposals/autonomous-committee.md §12); ProducePosBlock covers
+// the leader-only and single-host cases.
 //
 // ProducePosBlock() is the shared produce-one-block core, factored out of
 // generateposblock so the RPC and the thread run identical signing logic.

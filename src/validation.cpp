@@ -148,7 +148,7 @@ bool CBlockIndexWorkComparator::operator()(const CBlockIndex *pa, const CBlockIn
         // immediate-finality gate in ContextualCheckBlockHeader). Cross-chain-swap
         // freshness is instead delivered *inside* the committee round: members
         // preferentially sign the freshest-anchored proposal so it reaches the
-        // 51/100 effective-signature threshold first and is the block that gets
+        // quorum first and is the block that gets
         // finalized — never by reorging one that already did (doc 10 §7).
         if (pa->m_pos_vrf_score > pb->m_pos_vrf_score) return true;  // higher beta is worse
         if (pa->m_pos_vrf_score < pb->m_pos_vrf_score) return false;
@@ -5138,7 +5138,7 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
 
     // SEQUENTIA: the chain's cadence, as a consensus rule rather than a habit
     // of the producer software. See Consensus::Params::pos_block_spacing for
-    // why it exists; the short version is that PosProducer::Step's 30-second
+    // why it exists; the short version is that PosProducer::Step's cadence
     // floor is producer-side and unverified, so a modified producer ignores it
     // and every node accepts the result.
     //

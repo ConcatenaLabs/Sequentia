@@ -1,640 +1,575 @@
 # The autonomous gossip-and-sign committee
 
-> This document is the specification for Sequentia's autonomous
-> (coordinator-free) Proof-of-Stake committee, the layer that drives block
-> *production* on the wire (block *validation* is specified in
-> [`../04-proof-of-stake.md`](../04-proof-of-stake.md)). The autonomous producer
-> thread, BLS aggregate certification (`-posbls`), and the single-round gossip
-> committee (`posproposal` / `poscmpctprop` / `getposprop` / `posshare`) that
-> assembles a BLS-certified block across separate hosts with no coordinator are
-> the way the bundled chains run, including the 100-node testnet. Two items are
-> deliberately deferred: the Bitcoin-hash *leadership reshuffle* (Principle 7
-> rule II), marginal under production-time freshest anchoring, and the
-> key-registry optimization that drops static per-staker keys from each block
-> (§12). Both are noted where they belong below.
+> This document specifies Sequentia's autonomous (coordinator-free)
+> Proof-of-Stake committee: the layer that drives block *production* on the wire.
+> Block *validation* is specified in
+> [`../04-proof-of-stake.md`](../04-proof-of-stake.md). The autonomous producer
+> thread, BLS aggregate certification, and the gossip committee
+> (`posproposal` / `poscmpctprop` / `getposprop` / `posshare` / `poscert` /
+> `getposcert`) that assembles a BLS-certified block across separate hosts with
+> no coordinator are how the bundled chains produce blocks. One item of the
+> Theoretical Paper is not implemented: the Bitcoin-hash *leadership reshuffle*
+> (Principle 7 rule II), which is marginal under production-time freshest
+> anchoring (§12.4).
 
 ## 0. What this layer is
 
-Block **validation** is fully decentralized: every node independently verifies
-VRF proofs, committee eligibility, the aggregate signature, the anchor, and the
-immediate-finality gate ([`../04-proof-of-stake.md`](../04-proof-of-stake.md)
-§§3–6, [`../07-security-and-audit.md`](../07-security-and-audit.md) §6).
+Block **validation** is fully decentralized. Every node independently verifies
+the leader's VRF proof, the committee and its quorum, the aggregate signature,
+the minimum block spacing, the anchor, and the immediate-finality gate
+([`../04-proof-of-stake.md`](../04-proof-of-stake.md) §§3–6,
+[`../07-security-and-audit.md`](../07-security-and-audit.md) §6).
 
-Block **production** is decentralized by the autonomous committee specified here.
-The cryptographic protocol and a full set of RPCs are the coordinator path —
-`getposschedule`, `vrfprove`, `getposblocktemplate`, `musignonce`,
-`musigpartialsign`, `musigaggregate`, `submitposblock`, and the single-host
-shortcut `generateposblock` — but *orchestrating* a 100-member committee to
-assemble one certified block each slot does not require external tooling: a
-producer thread and a small peer-to-peer protocol let independent members
-discover their own eligibility and converge on a block with no coordinator.
-
-This document specifies that layer: a round engine plus a family of gossiped
-P2P messages that realize, on the wire, the 12-step round protocol of the
+Block **production** is decentralized by the committee specified here: a
+producer thread and a small peer-to-peer protocol let independent stakers
+discover their own eligibility and converge on one certified block per height
+with no coordinator. It realizes, on the wire, the round protocol of the
 theoretical paper (Alberto De Luigi, *Sequentia Theoretical Paper*, 2022;
 ed. A. Kohl, 2024), Principle 6.
 
-### Reusable building blocks already in the tree
+A coordinator path also exists, for chains certified with MuSig2
+(`-posbls=0`, custom chains only): `getposschedule`, `vrfprove`,
+`getposblocktemplate`, `musignonce`, `musigpartialsign`, `musigaggregate`,
+`submitposblock`, and the single-host shortcut `generateposblock`. The bundled
+chains pin BLS certification, and there the gossip committee is the production
+path.
 
-| Component | File | Role in the autonomous layer |
+### Building blocks
+
+| Component | Where | Role |
 |---|---|---|
-| Election seed | `ComputePosSeed(parent_anchor_hash, height)` (`src/pos.cpp`) | Deterministic per-round randomness; unchanged. |
-| Sortition | `PosSchedule(registry, seed)` → ordered `vector<CPubKey>` (`src/pos.h:204`) | Committee + leader ranking; each node runs it locally. |
-| VRF | `src/vrf.{h,cpp}` (ECVRF-SECP256K1), `vrfprove`/`vrfverify` | A member proves its slot eligibility; peers verify. |
-| Aggregation | `src/musig.{h,cpp}` — `MuSigSessionNonce` / `MuSigSessionPartialSign` / `MuSigAggregatePartials` | The interactive two-round signing the gossip would drive (but see §7). |
-| Template / submit | `getposblocktemplate` / `submitposblock` internals (`src/rpc/mining.cpp`) | The leader's block assembly and the final accept path, called internally instead of over RPC. |
-| Stake set | `StakeRegistry`, `StakeFromTxOut` (`src/pos.h`) | The eligible-signer set, rebuilt from the UTXO set. |
+| Election seed | `PosSeedForChild` → `ComputePosSeed(parent anchor hash, height)` (`src/pos.cpp`) | Deterministic per-height randomness, taken from Bitcoin's proof of work. |
+| Leader election | `PosVrfSlotExp` / `PosVrfScoreExp` (`src/pos.h`), `src/vrf.{h,cpp}` (ECVRF-SECP256K1) | Each staker privately computes its own slot; the proof is published with the block. |
+| Committee | `PosPublicCommittee`, `PosPublicQuorum`, `PosSlotQuorum` (`src/pos.h`) | The public fixed-size committee and its quorum, derived from the seed and the stake registry. |
+| Leader time gate | `PosSlotGateSeconds` (`src/pos.cpp`) | How long after the parent a leader in a given slot may propose. |
+| Stake set | `StakeRegistry`, `StakeFromTxOut` (`src/pos.h`) | The eligible-signer set and its registered BLS keys, rebuilt from the UTXO set. |
+| BLS | `src/bls.{h,cpp}` over the vendored `src/blst/` | Sign, verify, aggregate, fast-aggregate-verify, proof of possession. |
+| Round engine | `PosProducer` (`src/pos_producer.{h,cpp}`) | The producer thread, the per-height round state, the gossip handlers. |
 
-The autonomous layer adds only the *coordination* on top of these: a thread that
-drives the round, a per-height session manager, and the wire messages. It changes
-no consensus *rule* (the signature-scheme choice in §7 is a deliberate design
-decision, not a rule change to validation).
+The consensus rules this layer produces blocks under - minimum spacing, the
+leader time gate, the election, the certificate format and quorum, on-chain BLS
+registration, and the escaping-stall evidence - are validation rules and are
+specified in `04-proof-of-stake.md`. This document covers how blocks that
+satisfy them get made.
 
 ## 1. The paper's protocol, mapped to the wire
 
-Principle 6 defines a 12-step round. The autonomous layer is a faithful
-realization of it. The mapping:
+Principle 6 defines a 12-step round. The mapping:
 
-| Paper step (P6) | Autonomous-layer action | Message |
+| Paper step (P6) | What the node does | Message |
 |---|---|---|
-| 1. Stake, publish VF | On-chain stake registration (exists) | — (UTXO) |
-| 2. Block r-1 → public seed | `ComputePosSeed` over the parent's anchor hash | — (local) |
-| 3. Each participant runs VRF | Local `PosSchedule` + VRF over the seed with the node's staking key | — (local) |
-| 4. Committee/leader determined; members broadcast result via proposed block | Leader(s) build and flood a **block proposal** carrying the VRF proof | `posproposal` |
-| 5. Peers verify VRF outputs | On receipt, verify the proof against the registry before relaying | (relay gate) |
-| 6. Single out lowest-VRF; relay only that, at the timeout | Relay rule: forward only the lowest-VRF *valid* proposal seen; reset the timer on each new certified block | `posproposal` relay rule |
-| 7. New Bitcoin block ⇒ a fresher-anchored proposal may reshuffle the leader | Anchor-reshuffle: a new VRF round keyed on the fresher anchor; committee unchanged; anchor-weight favours it (§6, §8) | `posproposal` |
-| 8. Every node votes for the lowest-VRF block | Members emit a BLS share over the winning proposal — a share *is* a vote | `posshare` |
-| 9. After timeout, if < 51 votes, re-vote round-robin | Round-robin re-vote on the proposal store after the upper-bound timeout | `posshare` (new round-id) |
-| 10. Verify consensus-rule compliance *after* the first vote | Full block validation gated to the post-first-vote step; on failure, resume round-robin | (local) |
-| 11. Aggregate the 51 signatures | Members flood BLS shares; any node aggregates ≥51 (§7) | `posshare` |
-| 12. 51/100 ⇒ certified; its seed drives r+1 | Assemble the certificate, submit internally, reset to step 3 | standard block relay |
+| 1. Stake, publish the verification key | On-chain staking output, carrying the staker's BLS key and proof of possession | — (UTXO) |
+| 2. Block r-1 gives the public seed | `PosSeedForChild` over the parent's Bitcoin anchor hash | — (local) |
+| 3. Each participant runs the VRF | For each staking key held, compute its slot over the seed (`PosVrfSlotExp`) | — (local) |
+| 4. Leaders announce themselves through a proposed block | Every eligible staker proposes once per height when its time gate opens; the block carries the VRF proof and the leader's signature | `poscmpctprop` |
+| 5. Peers verify VRF outputs | A proposal is recorded and relayed only if its leader has stake and its VRF proof and signature verify | (relay gate) |
+| 6. Converge on one proposal | After a collection window, every node backs the best-ranked candidate: freshest Bitcoin anchor first, then lowest election score (`BackedForRound`) | — (local) |
+| 7. A fresher Bitcoin block may reshuffle the leader | Not implemented as a re-election. Freshness is served by the ordering in step 6 (§12.4) | — |
+| 8. Every node votes for the chosen block | Committee members sign the backed proposal; a share *is* a vote | `posshare` |
+| 9. No quorum after the timeout: re-vote round-robin | The round index advances on a shared clock and members back the next candidate, subject to the share-lock (§3) | `posshare` |
+| 10. Check consensus rules before committing | `TestBlockValidity` runs on the backed proposal immediately before signing; an invalid block excludes its leader | — (local) |
+| 11. Aggregate the signatures | Any node holding a quorum of shares aggregates them | — (local) |
+| 12. Certified; its seed drives the next round | The assembler submits the block and floods its certificate | `poscert`, block relay |
 
-Three liveness/safety rules sit alongside the happy path:
+Three liveness and safety rules sit alongside the happy path:
 
-- **Escaping stall (P8).** If the last certified block anchors to a Bitcoin
-  block now 4 deep (height *h*), a block referencing *h+3* may certify
-  sub-quorum (down to one signer). `POS_ESCAPING_STALL_ANCHOR_GAP = 3`. The
-  round engine falls into this mode automatically when the upper-bound timeout
-  expires repeatedly and the anchor gap is satisfied.
-- **Enforce consensus (P4 / Liveness Theorem 1).** If an invalid block `b0` is
-  certified by a malicious quorum, the honest non-signers may certify a valid
-  `b1` at the same height with a majority of the members who did *not* sign `b0`
-  (e.g. 60 sign invalid ⇒ 21 of the remaining 40 suffice). The session manager
-  must therefore support forming a certificate for an *alternative* block at an
-  already-occupied height, not only building forward.
-- **Convergence (P8 convergence theorem).** Competing escaping-stall blocks are
-  ordered by countersignature count, then VRF score; a threshold-certified block
-  beats an escaping-stall one. This is already the `CBlockIndexWorkComparator` +
-  finality-gate behaviour; the gossip layer only needs to *feed* it.
+- **Escaping stall (P8).** A block may be certified below quorum, down to one
+  signer, when the Bitcoin anchor has advanced at least
+  `POS_ESCAPING_STALL_ANCHOR_GAP` (3) past the parent's anchor *and* the two
+  anchors are separated by at least `-posescapestallmtpgap` seconds of Bitcoin
+  median-time-past (default 600). The producer lowers its own minimum to one
+  signer whenever both hold for the proposal it is backing; a node that holds a
+  certificate for the height does not use the valve.
+- **A quorum cannot make an invalid block valid.** Every node validates every
+  block, so a block that breaks a rule is rejected whoever signed it. The
+  paper's *enforce-consensus* procedure - certifying an alternative block with a
+  majority of the members who did not sign the invalid one - is not implemented;
+  after an invalid certified block, production resumes from the last valid block
+  under the normal quorum or, failing that, the escaping-stall rule.
+- **Convergence (P8).** Same-height candidates are ordered by countersignature
+  count, then leader VRF score, then block hash (`CBlockIndexWorkComparator`),
+  so a quorum-certified block beats a sub-quorum one. The gossip layer only
+  feeds that comparator.
 
 ## 2. Component architecture
 
-Four node-local pieces, behind a `-posproducer` (run the engine) and
-`-posgossip` (relay committee messages) split so a pure validator can relay
-committee traffic without producing. **`-posgossip` defaults on**: every full
-node relays committee traffic by default, which densifies propagation and
-strengthens liveness/convergence, while the eligibility gate (§9) keeps the added
-surface bounded (a node only relays messages from provably-eligible committee
-members). `-posproducer` is off unless the operator stakes and opts in. An
-operator may set `-posgossip=0` to stay quiet.
+The engine runs on a node that produces: one started with `-posproducer` and at
+least one `-posproducerkey`, or one whose wallet has started staking. A node
+with no producer validates and relays blocks as usual but takes no part in
+committee gossip: every committee message handler returns at once when no
+producer is running.
 
 ```
             ┌──────────────────────────────────────────────┐
             │  PoS round engine (thread, src/pos_producer)  │
-            │  - local round clock (P10)                    │
-            │  - self-eligibility (PosSchedule + VRF)       │
-            │  - drives the per-height state machine (§3)   │
+            │  - self-eligibility (VRF over the seed)       │
+            │  - the per-height round state (§3)            │
             └───────────────┬───────────────┬──────────────┘
                             │ produces       │ consumes
                             ▼                ▼
    ┌────────────────────────────┐   ┌────────────────────────────┐
-   │ Committee session manager  │   │  Validation / chainstate    │
-   │ (per height/round state):  │   │  ComputePosSeed, PosSchedule │
-   │  proposals[], shares[]      │   │  block accept, finality gate │
-   │  (a share is a vote),       │   └────────────────────────────┘
-   │  certificate assembly      │
+   │ Per-height round state:    │   │  Validation / chainstate    │
+   │  candidates, shares,        │   │  seed, registry, committee,  │
+   │  the share-lock, the        │   │  block accept, finality gate │
+   │  certificate pin            │   └────────────────────────────┘
    └─────────────┬──────────────┘
                  │ emit / ingest
                  ▼
    ┌────────────────────────────────────────────────────────────┐
    │ net_processing: NetMsgType handlers + relay rules (§4)      │
    │   posproposal · poscmpctprop · getposprop · posshare        │
+   │   poscert · getposcert                                      │
    └────────────────────────────────────────────────────────────┘
 ```
 
-The engine is event-driven: it wakes on (a) a new certified tip (reset the
-clock, recompute eligibility for the next height), (b) the lower-bound timer
-firing (eligible leader may propose), (c) an inbound committee message, (d) the
-upper-bound timeout (enter round-robin / escaping-stall), and (e) a new Bitcoin
-anchor (consider an anchor-reshuffle proposal).
+The thread wakes on a new tip, on an inbound committee message, and on its own
+poll timer (one second when idle, 150 ms while a round is open, or exactly at
+the moment its own slot opens).
 
-## 3. The per-height round state machine
+## 3. The per-height round
 
-One instance per height being worked, discarded when that height certifies or
-the tip advances past it.
+One round state per height being worked, discarded when the tip advances.
 
 ```
-        new certified tip at h-1
-                  │  (reset local clock; seed = ComputePosSeed(anchor(h-1), h))
-                  ▼
-            ┌───────────┐   not eligible
-            │ SORTITION │──────────────► OBSERVE (relay only)
-            └─────┬─────┘
-       eligible (committee member and/or leader rank k)
-                  ▼
-   lower-bound n elapsed AND leader-rank delay k·δ elapsed
-            ┌───────────┐
-            │  PROPOSE  │  leader: build template, flood posproposal(VRF proof)
-            └─────┬─────┘
-                  ▼
-            ┌──────────────────┐  collect proposals; keep lowest-VRF valid one
-            │ COLLECT/PROPAGATE │  (anchor-weighted §6); relay-gate by eligibility
-            └─────┬────────────┘
-                  ▼  (lowest-VRF settled at proposal-timeout)
-            ┌───────────┐  member emits posshare for the winner (a share is a vote)
-            │   VOTE    │
-            └─────┬─────┘
-        ≥51 votes for one proposal       upper-bound timeout, <51
-                  ▼                                  │
-            ┌───────────┐                            ▼
-            │ VALIDATE  │ full block check     ROUND-ROBIN: re-vote on store;
-            │ (post-vote)│ (P6 step 10)        if anchor gap ≥3 ⇒ ESCAPING_STALL
-            └─────┬─────┘  invalid ──► back to ROUND-ROBIN
-                  ▼ valid
-            ┌──────────────────────────┐
-            │ SIGN (§7): members flood  │  BLS posshare; any node
-            │ posshare; collect ≥51     │  aggregates whichever arrive
-            └─────┬────────────────────┘
-                  ▼  aggregate
-            ┌───────────┐  assemble certificate; submit internally; the certified
-            │ CERTIFIED │  block rides standard block relay; tip advances ⇒ engine resets to SORTITION(h+1)
-            └───────────┘
+        new tip at h-1
+              │  seed = PosSeedForChild(tip)
+              ▼
+        ┌───────────┐  no key with stake
+        │ ELIGIBLE? │──────────────► take no part in this height
+        └─────┬─────┘
+              ▼  time gate open: nTime ≥ max(parent + slot gate, parent + spacing)
+        ┌───────────┐
+        │  PROPOSE  │  assemble a block, sign it as leader, flood poscmpctprop
+        └─────┬─────┘
+              ▼
+        ┌───────────┐  record one candidate per leader (cheap checks only);
+        │  COLLECT  │  relay each valid new one; exclude a leader that sends two
+        └─────┬─────┘
+              ▼  WINDOW_MS after the best candidate's timestamp
+        ┌───────────┐  back candidate r in (freshest anchor, election score) order;
+        │   BACK    │  validate it fully; if invalid, exclude its leader and re-pick
+        └─────┬─────┘
+              ▼  committee members only
+        ┌───────────┐  flood a BLS share over the block hash; collect others'
+        │   SIGN    │
+        └─────┬─────┘
+     quorum of shares            no quorum within ROUND_MS
+              ▼                            │
+        ┌───────────┐                      ▼
+        │ CERTIFIED │              round r+1: back the next candidate,
+        └───────────┘              subject to the share-lock
+   assemble, submit, flood poscert
 ```
 
-The **VALIDATE-after-VOTE** ordering is deliberate and from the paper (P6 step
-10): full block validation is the expensive step, so a node defers it until a
-proposal has actually gathered a lead in votes, avoiding validating every
-competing proposal.
+**Backing.** Candidates are ordered by Bitcoin anchor height, fresher first,
+and then by the election key: the exponential-race score from
+`pos_exprace_height`, the raw leader VRF output below it. Round *r* backs the
+(r+1)-th candidate in that order. Every eligible staker proposes, not only
+committee members, so the order is complete and the same on every node that has
+seen the same proposals.
+
+**The round clock.** The round index is
+`floor((now − T·1000 − WINDOW_MS) / ROUND_MS)`, where `T` is the block
+timestamp of the best-ranked candidate currently known. Reading the clock off a
+gossiped block rather than off each node's arrival time keeps honest nodes in
+the same round. `WINDOW_MS` and `ROUND_MS` are in §6.
+
+**Validate before signing.** Proposals are recorded after only the cheap
+checks. Full validation (`TestBlockValidity`) runs once, on the proposal a node
+is about to sign. A block that fails it excludes its leader for the height, and
+the node backs the next candidate. Only validated blocks are ever signed.
+
+**The share-lock.** A member that has signed block X at a height does not sign
+a rival at that height until the round has ended, it has asked its peers for a
+certificate on X (`getposcert`), and one further `ROUND_MS` has passed in
+silence. It also does not sign or lead at the next height on a parent that is a
+rival of X until the escaping-stall evidence holds for that parent. The
+arithmetic that makes this safe, and what it cannot bind, are in
+[`../04-proof-of-stake.md`](../04-proof-of-stake.md) §9.
+
+**The certificate pin.** A node that receives a valid quorum certificate for a
+height (`poscert`) treats the round as over: it signs nothing more at that
+height, and fetches the block body if it does not have it. The hold is bounded
+at 30 seconds, so a certificate whose body never arrives cannot stall a node.
+
+**The anchor-rollback pause.** While the anchor watcher holds a
+quorum-certified child of the current tip whose anchor it has not yet confirmed
+off Bitcoin's best chain, the producer neither proposes nor drives rounds at
+that height. The pause ends when the block is restored, when its anchor is
+confirmed stale, or after `-posanchorrecoverywait` seconds (default 30), so an
+unreachable Bitcoin daemon cannot deadlock production.
+
+**Assembly.** The leader ships its own signature inside the proposal, so any
+node that gathers a quorum of shares can assemble the certificate and submit
+the block. Competing assemblies share the block hash and duplicates are
+dropped. A leader that proposes and then withholds or crashes is covered by
+whichever node completes the quorum first.
+
+**Exhaustion.** If the round index runs past the last candidate, collection
+restarts and the node re-arms its own proposal.
 
 ## 4. P2P messages
 
-Four message types in `NetMsgType` (`src/protocol.{h,cpp}`), dispatched in
-`net_processing.cpp::ProcessMessage`. With BLS aggregation (§7) the signing half
-is a single, non-interactive share — there is no nonce/partial round to gossip.
-All messages are **eligibility-gated**: a node relays a committee message for
-height *h* only if the sender is provably in *h*'s committee (its VRF proof
-verifies against the registry-derived schedule), which is the core anti-DoS lever
-(§9).
+Six message types in `NetMsgType` (`src/protocol.{h,cpp}`), dispatched in
+`net_processing.cpp`. With BLS aggregation (§7) signing is one non-interactive
+share; there is no nonce or partial-signature round. A message that fails
+validation scores the sending peer 10 misbehaviour points.
 
-| Message | Payload (sketch) | Relay rule |
+| Message | Payload | Handling |
 |---|---|---|
-| `posproposal` | height, parent, anchor ref, leader pubkey, **VRF proof**, full block | Relay if it is from a sortitioned leader and structurally valid; supersede a leader's earlier block only as evidence of equivocation; one block per leader per height. |
-| `poscmpctprop` | height, leader pubkey, **VRF proof**, block header + coinbase + the other transactions' *ids* (BIP152-style) | Compact transport for a proposal: reconstructed from the receiver's mempool; on a miss the receiver fetches the full body. |
-| `getposprop` | height, proposal id | Fetch the full `posproposal` body when compact reconstruction misses. |
-| `posshare` | height, round index, proposal id, member pubkey, **BLS signature share** over the proposal's member-independent `signhash` | Relay if member ∈ committee; one per member per round index; each share is individually verifiable. |
+| `poscmpctprop` | `PosCompactProposal`: block header, coinbase, and the ids of the other transactions (BIP152-style) | The normal form of a proposal. Rebuilt from the receiver's mempool and checked against the header's merkle root; on a miss the receiver sends `getposprop` to the sender. |
+| `posproposal` | One serialized block. The leader's key is in the `OP_2 <leader>` challenge, its VRF proof in the coinbase, its signature in the proof solution | Sent in reply to `getposprop`. Accepted only if it extends the active tip, the leader has registered stake, and the VRF proof and signature verify. A valid new proposal is relayed, always in compact form. A second, different block from the same leader excludes that leader for the height and is relayed as evidence. |
+| `getposprop` | A block hash | Answered from the live candidate set, or from disk for a connected block. |
+| `posshare` | `PosShare`: block hash, member key, VRF proof, BLS public key, proof of possession, BLS signature share | Checked for sizes, proof of possession and share signature. Under the public committee the member must be in the committee for the height and its BLS key must be the registered one; under threshold sortition the member's VRF proof is verified. Shares for unknown blocks are dropped. Deduplicated on (block hash, member). |
+| `poscert` | The header of a certified block; the certificate is its proof solution | Verified against the registered keys. A certificate below quorum is ignored and never pins. On success the node pins the height (§3), relays the certificate, and fetches the body if it lacks it. |
+| `getposcert` | A block hash | Answered with `poscert` if the node holds that certificate, otherwise with silence. Sent once per lock by a share-locked member. |
 
-A member's share over a proposal *is* its vote for that proposal, so there is no
-separate `posvote` message — share emission carries the round-robin re-vote index
-(§6, P6 step 9), and a share both backs and signs in one round. The certified
-block itself has no dedicated `poscert` message: its header carries the BLS
-aggregate and signer bitmask, and it rides **standard block relay**
-(`cmpctblock` / `block`), which is the existing accept path. Proposals use
-**compact relay** (`poscmpctprop`, with `getposprop` to fill a miss) to avoid
-flooding ~100 near-identical full blocks per round; shares are small and flood
-directly with dedup. Each message is bounded to the current and next height;
-anything older or further ahead is dropped, capping memory.
+A share carries no height and no round index: the round is local and
+clock-derived, and a share is identified by the block it signs. The certified
+block itself rides standard block relay; `poscert` exists so that proof of
+certification, a few hundred bytes, travels independently of the block and
+reaches a node that a partition kept from the body.
 
-## 5. Self-eligibility detection
+Proposals are accepted only when they extend the active tip, and shares only
+for known candidates. The deduplication sets are bounded and cleared when they
+fill, and the per-height candidate and share maps are capped (§9).
 
-No coordinator tells a node it is selected — it learns this locally, and
-privately (the schedule needs the staking secret key, so it is not publicly
-predictable, which is the anti-grinding property):
+## 5. Self-eligibility
 
-1. On a new certified tip at *h-1*, compute `seed = ComputePosSeed(anchor(h-1), h)`.
-2. `order = PosSchedule(registry, seed)` gives the stake-weighted committee and
-   the leader ranking for *h*.
-3. For each staking key the node holds, compute its VRF output over `seed`; the
-   node's slot/rank tells it whether it is (a) the rank-0 leader, (b) a backup
-   leader (rank *k*), and/or (c) a committee member (slot < committee size).
-4. The node arms the appropriate role(s) in the state machine. A node with no
-   eligible key for *h* is an `OBSERVE`-only relayer for that height.
+No coordinator tells a node it is selected. On a new tip at *h-1* a node:
 
-## 6. Timing model (Principle 10)
+1. computes the seed for *h* from the tip's Bitcoin anchor hash;
+2. for each staking key it holds with at least the minimum stake, computes that
+   key's VRF output over the seed and from it the key's slot. Nobody without
+   the key can predict this, so the leader order is not publicly knowable in
+   advance;
+3. proposes with its lowest-slot key when that slot's time gate opens (§6);
+4. signs as a committee member with every key it holds that is in the
+   committee for *h*.
 
-The paper is explicit and minimal: **no NTP, no network-adjusted time.** Each
-validator counts local time from the last certified block it received.
+Leader election is private; committee membership on the bundled chains is not.
+The committee is `PosPublicCommittee`: the first
+`K = min(BLS-registered stakers, cap)` entries of the public schedule, a
+function of the seed and the registry that any node can compute. A leader need
+not be a committee member.
 
-- **Slot floor `n`, target 30 s, timestamp-retargeted.** A member will not
-  countersign a proposal until `n` seconds have elapsed on its local clock since
-  the previous certified block — the anti-fast-frequency floor. The **target is
-  30 s** (not the paper's ~90 s UX figure), pinned by the ledger-growth-parity
-  invariant: the block weight cap (`-con_maxblockweight = 200,000`) satisfies
-  `200,000 / 30 s = 4,000,000 / 600 s`, so a saturated Sequentia ledger grows at
-  exactly Bitcoin's saturated rate. The effective floor is **retargeted to hold
-  the realized average cadence at that 30 s target**, exactly as the paper
-  prescribes (P10: adjust *"based on the timestamps of blocks, similar to how
-  Bitcoin deals with the change of difficulty every 2016 blocks"*). Retargeting
-  does **not** contradict the parity rule — it is the mechanism that makes it hold
-  in practice: the weight cap fixes the *weight* half of `weight / time`, and the
-  retarget steers the *time* half to 30 s, since uncorrected drift in block
-  intervals would otherwise break the equality. The weight cap stays fixed; the
-  cadence is driven to it.
+## 6. Timing
 
-  The retarget is computed **deterministically from block-header timestamps** over
-  an epoch aligned to the paper's ~2-week / 2016-Bitcoin-block boundary (the same
-  clock its lowering-staking-requirement rule uses): at each boundary, compare the
-  epoch's realized average inter-block time to the 30 s target and nudge `n` up
-  (blocks ran fast) or down toward a floor (slow), clamped per step like Bitcoin's
-  4× difficulty limit. Because every node derives the same `n` from the same
-  on-chain timestamps, the floor stays synchronized network-wide **without being a
-  hard validity rule** — consistent with P10's point that the bound is a local
-  clock and not publicly enforceable: a block is never rejected for `n`; nodes
-  simply will not countersign before it.
-- **Leader-rank stagger `k·δ`, `δ` = 3 s (default).** The rank-0 leader proposes
-  at the slot boundary; a rank-*k* backup waits an extra `k·δ` and proposes only
-  if it has seen no valid lower-rank proposal, so backups fill in just for missing
-  leaders and the common case stays a single proposal. `δ` = 3 s is a few times
-  the network-propagation time of a ≤200,000-weight block under compact relay
-  (sub-second to ~1–2 s), so a backup reliably observes the primary's proposal
-  before competing, while still absorbing several missing leaders well inside the
-  round-robin window below.
-- **Upper-bound timeout `T` ≈ 45 s (default, ≈ 1.5 · n).** If no proposal has
-  gathered 51 shares within `T` of the last certified block, the engine begins
-  **round-robin re-voting** on the proposal store (P6 step 9), incrementing a
-  round-robin index that namespaces the votes. `T − n` ≈ 15 s ≈ 5 · δ absorbs on
-  the order of five missing/forked leaders plus share propagation before the
-  recovery path engages. Round-robin is the *fast* recovery (seconds); the
-  *slow* recovery, escaping-stall sub-quorum certification, only becomes
-  available once the Bitcoin anchor has advanced +3 (≈ 30 min of Bitcoin), so the
-  two operate on very different timescales.
+Two timings are consensus rules; two are local.
 
-`δ` and `T` are free local heuristics (configurable defaults). `n` is special:
-its 30 s target is tied to the weight cap by the parity rule, and its retargeted
-value is derived deterministically from on-chain timestamps so every node agrees
-— but, like all the paper's bounds, compliance is soft (a local clock), never a
-hard validity check.
-- **Anchor reshuffle (P7).** On learning of a new Bitcoin block not referenced by
-  the parent, an eligible node may propose a fresher-anchored block; its VRF is
-  compared under an **anchor-weighting coefficient** that favours the fresher
-  anchor. This is the *same* weight already used as the committee signing
-  preference — a fixed local commit-timing weight (~0.3× quorum, +15 at 51/100)
-  that steers convergence but **never counts toward the 51-signature finality
-  threshold** ([`../04-proof-of-stake.md`](../04-proof-of-stake.md) §7). The
-  autonomous layer is where this weight finally has a job: tipping which of two
-  not-yet-certified proposals the committee converges on.
+**Consensus: minimum block spacing.** `block.nTime ≥ parent.nTime +
+pos_block_spacing`, else `bad-pos-spacing`. It is 60 seconds on the bundled
+chains. The check compares two timestamps written in blocks, never a local
+clock, so every node reaches the same verdict. The block weight cap is 400,000
+on the bundled chains, which keeps a saturated ledger growing at exactly
+Bitcoin's saturated rate: `400,000 / 60 s = 4,000,000 / 600 s`.
 
-None of these bounds is consensus-enforced (they are local clocks); they are
-incentive-shaped, exactly as the paper argues (propose too early → fewer fees;
-too late → risk being replaced by a lower-VRF competitor).
+**Consensus: the leader time gate.** `block.nTime ≥ parent.nTime +
+PosSlotGateSeconds(slot)`, else `bad-posvrf-early`. The slot is the integer
+part of the leader's election score, and the gate is 10 seconds per slot on the
+bundled chains. A leader whose score is below 1 has slot 0 and may propose as
+soon as the spacing allows; with a 10-second unit under a 60-second spacing,
+slots 0 to 6 all open at the spacing floor. The gate orders leaders when the best ones are
+absent; the spacing sets the cadence
+([`../04-proof-of-stake.md`](../04-proof-of-stake.md) §4b explains why the two
+are separate numbers).
 
-## 7. Signature scheme: BLS aggregate (decided)
+A producer proposes at `max(parent.nTime + gate, parent.nTime + spacing)`, and
+the block assembler clamps the block's timestamp the same way.
 
-The autonomous committee certifies blocks with **BLS aggregate signatures
-(BLS12-381), non-interactively.** It is the **default** certification on the
-bundled chains (`-posbls` defaults on for `chain=sequentia` and `chain=test`;
-it defaults off on custom chains). MuSig2 (BIP327) is retained unchanged as the
-legacy fallback (`-posbls=0`) and for the single-host and coordinator paths,
-where it is ideal.
+**Local: the collection window and the round.** After the best candidate's
+timestamp a node collects proposals for `WINDOW_MS = 500 + 25 × cap`
+milliseconds before it backs one, and each backed leader then has
+`ROUND_MS = 700 + 35 × cap` milliseconds to be certified before the round
+advances. `cap` is the configured committee size, so on the bundled chains
+(cap 250) these are 6.75 and 9.45 seconds. They are tuned engineering
+constants, overridable with `-poswindowms` and `-posroundms`, and they are not
+consensus rules: no block is valid or invalid because of them. A node tuned
+differently from its peers contributes late; the share-lock keeps a timing
+disagreement from becoming a double-sign (§3).
+
+Certification runs at the speed of the fastest quorum, not the slowest member:
+a block certifies as soon as a quorum of shares reaches any one node.
+
+There is no retargeting of any of these, and no stagger between leaders beyond
+the time gate. A stagger wider than the collection window would let an early
+proposer be signed before others' proposals arrived and split the shares; the
+window plus the common ordering resolve multiple proposers on their own.
+
+## 7. Signature scheme: BLS aggregate
+
+The committee certifies blocks with **BLS aggregate signatures (BLS12-381),
+non-interactively.** The Sequentia mainnet parameters pin this and refuse the
+`-pos*` consensus flags outright; the testnet defaults to it and refuses a
+conflicting value. MuSig2 (BIP327) certification remains for custom chains run
+with `-posbls=0`, where a known, reliable signer set suits it.
 
 ### Why not MuSig2 for the autonomous path
 
-MuSig2 is an *n-of-n*, *two-round interactive* aggregate. To realize 51-of-100 it
-must aggregate *exactly* the 51 chosen signers, which on the wire means: fix the
-signer subset, gossip round-1 `posnonce` from all 51, gossip round-2 `pospartial`
-from all 51, then aggregate. In an open, lossy committee this is brittle: because
-it is n-of-n over the chosen subset, a single member failing to send its nonce or
-partial fails the whole aggregate, forcing the engine to pick a *different*
-51-subset and restart both rounds. In a 100-member committee where ~30% may be
-offline, subset selection becomes guesswork and restarts add latency. It is a
-fine scheme for a *known, reliable* set (the coordinator path); it fights the
-gossip model.
+MuSig2 is an *n-of-n*, *two-round interactive* aggregate. To realize a quorum
+of a larger committee it must aggregate *exactly* a chosen subset, which on the
+wire means fixing that subset, gossiping a nonce from every member of it,
+gossiping a partial signature from every member of it, and then aggregating. In
+an open, lossy committee that is brittle: one member failing to send its nonce
+or partial fails the whole aggregate, and the engine must pick a different
+subset and restart both rounds. It is a fine scheme for a known, reliable set;
+it fights the gossip model.
 
 ### Why BLS
 
-BLS aggregation is **non-interactive**, which is exactly what the paper called for
-(P6 step 11: *"any party can aggregate signatures after the broadcast without
+BLS aggregation is non-interactive, which is what the paper called for (P6 step
+11: *"any party can aggregate signatures after the broadcast without
 communicating with the original signers"*). Each committee member signs the
-proposal independently and floods a single `posshare`; **any** node aggregates
-whichever ≥51 shares arrive — no subset pre-commitment, no second round, and the
+proposal independently and floods one share; any node aggregates whichever
+shares arrive, with no subset pre-commitment and no second round, and the
 aggregate is a single constant-size group element regardless of signer count.
-This makes the signing half of the protocol robust to offline members by
-construction: you collect whoever responds rather than betting on a fixed 51.
+The signing half of the protocol is robust to offline members by construction:
+you collect whoever responds.
 
-### Member-independent block hash (the single-round enabler)
+### Member-independent block hash
 
-Private VRF sortition means the leader cannot enumerate the committee before
-members reveal themselves, so the message the committee signs must not depend on
-*who* signs — otherwise the leader could not fix a block for them to sign, and
-the committee would need a second round (announce eligibility, then sign). The
-paper's Principle 6 already implies the resolution: members countersign the
-*leader's fixed block*; the certificate (who signed, and the aggregate) is
-separate from the block content.
+Members must be able to sign the instant a proposal arrives, before anyone
+knows which of them will sign. So the message they sign cannot depend on who
+signs. The certificate lives in the block proof `solution`, which Elements
+already excludes from `block.GetHash()`: the hash is determined by the leader's
+proposal alone (its transactions, anchor and VRF proof), members countersign
+that fixed block in **one round**, and any node aggregates the shares. The
+challenge collapses to `OP_2 <leader>`.
 
-This is realized by putting the **entire BLS certificate in the block proof
-`solution`** — the leader signature, each member (key, VRF proof, BLS key,
-proof-of-possession), and the 96-byte aggregate — which Elements already excludes
-from `block.GetHash()`. So the hash is determined by the leader's proposal alone
-(its transactions, anchor, VRF), independent of the member set: members sign it
-the instant they receive the proposal, **one round**, and any node aggregates
-whatever shares arrive. The challenge collapses to `OP_2 <leader>`; `CheckProof`
-reads the certificate from the solution and fast-aggregate-verifies it against
-the member-independent hash; `CheckPosStakeRules` adds the sortition checks
-(`src/pos.cpp`, `src/block_proof.cpp`, `src/validation.cpp`). This is implemented
-and tested single-host; it is the format the gossip rounds assemble.
+### Registration and the certificate
 
-### On forward security — checkpoints are the accepted defense
+A staker registers its BLS key on-chain, once, inside its staking output:
+
+```
+<csv> OP_CHECKSEQUENCEVERIFY OP_DROP <blspubkey(48)> OP_DROP <pop(96)> OP_DROP <pubkey> OP_CHECKSIG
+```
+
+The proof of possession closes the rogue-key attack and is verified when the
+output is connected (`bad-stake-bls-pop`); a staker has one BLS key
+(`bad-stake-bls-conflict`). Both values are derived deterministically from the
+staking key, so a staker manages one key (`getblsregistration`).
+
+Because the keys are in the registry, the certificate on the bundled chains
+carries no per-member data:
+
+```
+<leader signature> <aggregate signature (96)> <bitfield>
+```
+
+Bit *i* of the bitfield, least significant first, is seat *i* of
+`PosPublicCommittee`. At a 250-seat committee the whole certificate is about
+200 bytes. The leader's signature is checked with the proof; the aggregate is
+verified at connect time against the registered keys of the seats the bitfield
+names (`PosVerifyBitfieldCertificate`), and the number of signers against the
+quorum (`bad-posbls-agg-quorum`).
+
+Under threshold VRF sortition (custom chains) the certificate takes the
+full-member form instead, carrying each member's key, VRF proof, BLS key and
+proof of possession, 258 bytes a member.
+
+### On forward security
 
 BLS keys are long-lived and not forward-secure, so the paper's Principle 11
-*posterior corruption* concern (old blocksigner keys sold and reused for a
-long-range attack) is **not** addressed by the signature scheme itself. That is a
-deliberate, accepted trade-off here: Sequentia's long-range defense is the
-**Bitcoin-anchored checkpoint system** (a checkpoint consolidates after 2016
-Bitcoin confirmations ≈ 2 weeks and is then irreversible locally), combined with
-the rule that the **stake locktime exceeds the checkpoint depth** so that a
-signer's keys still control bonded stake throughout the window in which their
-signatures could rewrite history. Within that finalized horizon, leaked
-historical keys cannot reorganize the chain. The paper's forward-secure option,
-**Pixel**, is therefore **not adopted**; it would buy protocol-level forward
-security at the cost of evolving-key operations for every staker (per-period key
-update, mandatory secure deletion, heavier audit) — redundant given the
-checkpoint guarantee. Pixel is a forward-compatible upgrade path (it is "BLS plus
-key evolution," so this BLS design extends toward it), not part of the design.
+*posterior corruption* concern - old signer keys sold and reused for a
+long-range attack - is not addressed by the signature scheme. The long-range
+defence is the Bitcoin-anchored checkpoint
+([`../04-proof-of-stake.md`](../04-proof-of-stake.md) §8): a checkpoint
+consolidates after 2016 Bitcoin confirmations and is then irreversible for a
+node that holds the checkpointed block. The paper's forward-secure option,
+Pixel, is not adopted; it would add per-period key evolution and mandatory
+secure deletion for every staker. It remains a compatible upgrade path, since
+it is BLS plus key evolution.
 
-### Implementation notes
+## 8. Equivocation and convergence
 
-- New `src/bls.{h,cpp}` wrapping a vetted BLS12-381 library (e.g. `blst`):
-  sign, verify, aggregate-signatures, aggregate-verify, fast-aggregate-verify.
-- Each staker commits a **BLS public key** alongside its stake (in or bound to
-  the staking output) with a **proof-of-possession** to close the BLS rogue-key
-  attack; the committee's expected signer set for a height is the BLS keys of the
-  sortitioned members, so a node verifies the aggregate against the
-  fast-aggregate of the present signers' keys plus a signer bitmask.
-- The certification scheme + the per-staker key commitment are gated behind the
-  `-posbls` chain flag. It defaults **on** for the bundled chains (chain=sequentia,
-  chain=test) and off on custom chains; MuSig2 (`-posbls=0`) is the legacy fallback.
-- Against the interactive MuSig2 alternative, the two-message `posnonce` +
-  `pospartial` exchange collapses to a single `posshare` (member pubkey + BLS
-  signature share), and the certified block's header carries the aggregate +
-  signer bitmask on standard block relay (no dedicated certificate message).
-
-## 8. Equivocation, enforce-consensus, convergence
-
-- **Double-signing.** A member emitting a `posshare` (which is its vote) for two
-  distinct proposals at the same height is equivocating. There is *no slashing* by design
-  (the paper, P7): the defence is enforce-consensus + checkpoints. The gossip
-  layer should still propagate the conflicting pair as *evidence* (useful for
-  monitoring and for the comparator/finality-gate which already reject a
-  competitor below a certified block) and score the peer.
-- **Enforce-consensus (LT1).** The session manager keeps, per height, the set of
-  members who signed each certified-but-invalid block, so the honest remainder
-  can assemble an alternative certificate (majority of the non-signers). This is
-  the one place the manager forms a certificate at an *already-occupied* height.
-- **Convergence.** Purely a fork-choice concern, already handled by the
-  comparator + immediate-finality gate; the gossip layer only supplies the
-  competing certified blocks and lets validation decide.
+- **A leader that proposes two blocks** at one height is excluded for that
+  height by every node that sees both: it backs neither, and relays the second
+  as evidence so its peers do the same. The committee converges on the next
+  candidate. The sender is not penalised, since relaying evidence is correct
+  behaviour.
+- **A member that signs two blocks** is not detected or scored. Honest members
+  do sign different blocks in different rounds once the share-lock has released
+  them, so two shares from one member are not in themselves a fault. What
+  prevents honest members from producing two certificates at one height is the
+  share-lock (§3). A member that deliberately signs twice is bound by nothing
+  in the protocol, and there is no slashing (§12.4).
+- **Convergence** is a fork-choice matter: the comparator and the
+  immediate-finality gate decide between competing certified blocks, and the
+  gossip layer only supplies them. For a node left on a branch that is no
+  longer being certified, the finality-reconciliation monitor (`-posreconcile`,
+  on by default) releases its finalized point, but only for a rival carrying a
+  full-quorum certificate at least `-posreconcilemindepth` (3) heights above
+  it, and only after `-posreconcilepatience` (600) seconds without a certified
+  extension of its own ([`../04-proof-of-stake.md`](../04-proof-of-stake.md)
+  §6).
 
 ## 9. Anti-DoS and validation
 
-The committee gossip is a new inbound surface, so every rule is designed to be
-*cheap to reject and eligibility-gated*:
+The committee gossip is an inbound surface of its own, so its rules are cheap
+to reject and bounded:
 
-- **Eligibility gate.** Relay a `posproposal`/`posshare` only if the
-  sender's pubkey is in the height's committee (VRF proof in the proposal; for
-  shares, the pubkey must match a committee slot). Non-committee chatter is
-  dropped without further work.
-- **Bounded windows.** Accept messages only for the current height and the next
-  (anchor-reshuffle look-ahead); drop everything else. Memory is O(committee ×
-  small) per height and freed on tip advance.
-- **Per-member, per-round dedupe and rate limits.** One proposal per leader per
-  round-robin index; one share (the member's vote) per member per round index;
-  excess is misbehaviour-scored.
-- **Validate lazily.** Cheap checks (eligibility, structural, signature-share
-  verification) gate relay; full block validation runs once, post-vote (P6 step
-  10), as already noted.
-- **Compact proposal relay** (`poscmpctprop` / `getposprop`) bounds proposal bandwidth.
+- **Only producers take part.** A node with no running producer ignores
+  committee messages and relays none.
+- **Proposals are gated on the leader.** A proposal is recorded and relayed
+  only if it extends the active tip, its leader has registered stake, and its
+  VRF proof and leader signature verify. One candidate is kept per leader, and
+  at most 100 candidates per height.
+- **Shares are gated on the member.** Sizes, proof of possession (cached) and
+  the share signature are checked before anything else, and for the backed
+  proposal the member must be in the committee. The share map is capped at the
+  committee size.
+- **Validation is lazy.** Cheap checks gate relay; full block validation runs
+  once per round, on the proposal about to be signed (§3).
+- **Compact relay** bounds proposal bandwidth: a proposal floods as a header, a
+  coinbase and transaction ids.
+- **Bounded memory.** Deduplication sets are cleared when they reach 20,000
+  proposals, 200,000 shares or 20,000 certificates; the certificate caches hold
+  100 entries.
+- **Penalties.** An invalid proposal, share or malformed certificate scores its
+  sender 10 points against the usual discouragement threshold of 100.
+  Duplicates and equivocation evidence are not scored.
 
 ## 10. Integration points
 
 | Concern | Where |
 |---|---|
-| Round engine + session manager + local clock | `src/pos_producer.{h,cpp}` |
+| Round engine, round state, gossip handlers | `src/pos_producer.{h,cpp}` |
 | Message type constants | `src/protocol.{h,cpp}` (`NetMsgType`) |
-| Receive/relay handlers | `src/net_processing.cpp` (`ProcessMessage` cases; relay in the send loop) |
-| Start/stop the producer thread | `src/init.cpp` behind `-posproducer` / `-posgossip` |
-| Internal template/submit (no RPC hop) | the bodies of `getposblocktemplate`/`submitposblock` (`src/rpc/mining.cpp`) are callable helpers the engine shares |
-| Signature scheme (autonomous) | `src/bls.*` (BLS12-381) + a per-staker BLS key commitment with proof-of-possession (§7); `src/musig.*` retained as the legacy fallback and for the coordinator path |
-| Eligibility / schedule | `PosSchedule`, `ComputePosSeed`, `src/vrf.*` |
-
-The RPCs stay as-is: they remain the coordinator path and the test surface, and
-the engine calls the same underlying helpers, so there is one code path for block
-assembly and acceptance.
+| Receive and relay | `src/net_processing.cpp` |
+| Starting the producer | `src/init.cpp` (`-posproducer`, `-posproducerkey`); `src/node/pos_control.cpp` (wallet staking) |
+| Block assembly for a proposal | `BuildUnsignedBlsBlock` → `BlockAssembler::CreateNewBlock`; accepted through `ProcessNewBlock` |
+| Single-host production | `ProducePosBlock`, shared with `generateposblock` |
+| Signatures | `src/bls.*` over `src/blst/`; `src/musig.*` for MuSig2 chains |
+| Election and committee | `PosSeedForChild`, `PosVrfSlotExp`, `PosVrfScoreExp`, `PosSlotGateSeconds`, `PosPublicCommittee`, `PosPublicQuorum` (`src/pos.h`), `src/vrf.*` |
+| Anchor watcher, reconciliation monitor | `src/anchor.{h,cpp}` |
 
 ## 11. Compatibility
 
-- The coordinator/RPC path is supported alongside the autonomous engine; running
-  the engine is opt-in (`-posproducer`).
-- BLS certification (§7) is selected by `-posbls`, which **defaults on** for the
-  bundled chains (`chain=sequentia`, `chain=test`) and off on custom chains. The
-  MuSig2 fallback (`-posbls=0`) and the coordinator path remain available. The
-  choice is chain-wide: every node and producer on a chain must agree on it.
-- The functional tests spin up *N* nodes (no coordinator), each holding one or
-  more staking keys, and assert they produce and certify a chain end-to-end,
-  including the offline-member and recovery cases (`feature_pos_bls_gossip.py`,
-  `feature_pos_gossip_failover.py`, `feature_pos_bls_large_committee.py`),
-  alongside the coordinator-orchestrated `feature_pos_distributed_committee.py`.
+- Producing is opt-in. A node that neither sets `-posproducer` nor stakes from
+  its wallet validates the chain and is silent on the committee protocol.
+- The certification scheme and the committee regime are chain-wide: every node
+  on a chain must agree on them. The mainnet parameters pin them and refuse the
+  flags that would change them; the testnet refuses a value that conflicts with
+  its own.
+- The functional tests start *N* nodes with no coordinator, each holding one or
+  more staking keys, and assert that they produce and certify a chain end to
+  end, including with members offline and through recovery:
+  `feature_pos_bls_gossip.py`, `feature_pos_gossip_failover.py`,
+  `feature_pos_bls_large_committee.py`, `feature_pos_public_committee.py`,
+  `feature_pos_cert_gossip.py`. `feature_pos_distributed_committee.py` covers
+  the coordinator path.
 
 ## 12. The layers, end to end
 
-The autonomous committee is built from four layers, each independently testable
-and each leaving the coordinator path working.
+The committee is built from four layers, each independently testable.
 
-1. **Engine + self-eligibility + autonomous production.**
-   `src/pos_producer.{h,cpp}`, `-posproducer`/`-posproducerkey`; test
+1. **Engine, self-eligibility, single-node production.**
+   `src/pos_producer.{h,cpp}`, `-posproducer` / `-posproducerkey`; test
    `feature_pos_autonomous_producer.py`. A node with one or more staking keys
-   elects the best-ranked key each round, waits out the slot clock (with the soft
-   cadence floor), and assembles/signs/submits a block with no coordinator; the
-   produced blocks propagate and validate via the normal block-relay path, so a
-   single-node producer needs no committee wire message. The shared
-   `ProducePosBlock()` core also backs `generateposblock`. This is the thread, the
-   clock, sortition, and the accept path.
-2. **BLS certification format.**
-   `src/bls.*`, `-posbls`; tests `bls_tests`, `feature_pos_bls_committee.py`.
-   Blocks are certified by a non-interactive BLS12-381 aggregate (§7), with the
-   whole certificate carried in the proof solution so the signed block hash is
-   member-independent (the member-independent block hash, §7) — the format the
-   gossip rounds assemble. It works single-host (one node holding the committee
-   keys) and is validated by a non-producing node.
-3. **The gossip rounds.**
-   `posproposal` / `poscmpctprop` / `getposprop` / `posshare` in
-   `src/protocol.*`, the round engine in `src/pos_producer.*`, dispatch/relay in
-   `src/net_processing.cpp`; test `feature_pos_bls_gossip.py`. The elected leader
-   floods its unsigned block; each node collects proposals for a short window,
-   signs the single lowest-leader-VRF proposal once (P6 step 6/8 convergence) and
-   floods its share over the member-independent block hash; the winning leader (an
-   elected participant, not an external coordinator) collects a quorum, assembles
-   the certificate into the solution, and submits, after which the block
-   propagates by normal block relay. Because the signed hash is member-independent
-   this is a **single round** — no announce step. Three hosts holding one
-   committee key each (no single-host quorum) certify a chain over gossip with no
-   forks.
-4. **Hardening.** The committee is hardened against DoS, equivocation, leader
-   failure, and scale:
-   - **Anti-DoS** (`feature_pos_gossip_dos.py`): every `posproposal`/`posshare` is
-     fully validated before relay (malformed form, forged leader/member VRF
-     eligibility, bad BLS proof-of-possession or signature → dropped and the
-     sender is misbehaviour-scored to disconnection); a leader-equivocation guard
-     (one block per leader per height); per-round caps on the proposer and
-     share maps; and non-producing nodes do not relay committee traffic.
-   - **Liveness recovery** (`feature_pos_gossip_failover.py`): a round that yields
-     no block within a recovery timeout resets so the committee re-converges on an
-     available leader — a member crash (even of the round leader) does not stall
-     the chain.
-   - **Scale** (`feature_pos_bls_large_committee.py`): validated to a 15-member
-     committee (quorum 8) with multi-key hosts and the larger in-solution
-     certificate, including through a host failure. There is no per-slot leader
-     *stagger*: a stagger wider than the collection window would let an early
-     proposer sign before others' proposals arrived, splitting shares, so the
-     collection window plus lowest-VRF convergence resolve multiple proposers on
-     their own.
-   - **Decentralised aggregation**: the leader signs its block hash and ships that
-     signature *in* the proposal, so any node that gathers a quorum assembles and
-     submits (competing assemblies share the block hash, so duplicates are
-     dropped). No single aggregator can stall a round — a leader that proposes
-     then withholds or crashes is covered by another node.
-   - **Validate before backing**: a proposal is fully validated (TestBlockValidity)
-     before it is signed. Since the per-height leader is fixed by the slot seed, an
-     invalid block from the lowest-VRF leader would otherwise be signed, fail to
-     assemble, and stall that height permanently; instead the committee converges
-     on the lowest-VRF *valid* leader.
+   leads with its best key each round, waits for its time gate and the block
+   spacing, and assembles, signs and submits a block. A single-node producer
+   needs no committee message; its blocks propagate by normal block relay.
+2. **BLS certification.** `src/bls.*`; tests `bls_tests`,
+   `feature_pos_bls_committee.py`, `feature_pos_bls_registration.py`. Blocks are
+   certified by a non-interactive BLS12-381 aggregate carried in the proof
+   solution, so the signed block hash is member-independent (§7).
+3. **The gossip rounds.** The six messages of §4, the round engine, and the
+   relay rules; tests `feature_pos_bls_gossip.py`,
+   `feature_pos_public_committee.py`. Each eligible staker floods its unsigned
+   block; each node collects for a window, backs the best-ranked candidate,
+   validates it and signs; any node that gathers a quorum assembles the
+   certificate and submits. Because the signed hash is member-independent this
+   is a single round.
+4. **Hardening.** What keeps the rounds safe and live:
+   - **Anti-DoS** (`feature_pos_gossip_dos.py`): §9.
+   - **Liveness under failure** (`feature_pos_gossip_failover.py`): a leader
+     that crashes or withholds costs one round; the round index advances on the
+     shared clock and the committee backs the next candidate.
+   - **Scale** (`feature_pos_bls_large_committee.py`): multi-key hosts and
+     larger committees, including through a host failure.
+   - **Leader-equivocator exclusion** (`feature_pos_gossip_byzantine.py`): a
+     leader that sends two blocks is excluded for the height (`m_excluded`,
+     which also holds leaders whose block failed validation). The fault
+     injector `-posbyzantineequivocate` confirms that an equivocating leader is
+     excluded at every height and the honest nodes never diverge.
+   - **Lazy validation** (`feature_pos_gossip_invalid.py`): an invalid backed
+     block excludes its leader and the committee re-picks.
+   - **Certificate gossip and the share-lock**
+     (`feature_pos_cert_gossip.py`, `feature_pos_certified_sibling_guard.py`):
+     §3.
+   - **Freshest-anchor preference** (`feature_pos_anchor_freshness.py`; P7 rule
+     III): candidates are ordered by Bitcoin anchor height before the election
+     score, so the committee converges on the freshest-anchored proposal and
+     the tip tracks Bitcoin's tip. The Bitcoin-hash *leadership reshuffle* (P7
+     rule II, a new Bitcoin block re-running the leader election) is not
+     implemented; with production-time freshest anchoring it is a marginal
+     refinement.
+   - **Compact proposals** (`src/test/pos_compact_tests.cpp`): proposals flood
+     as header, coinbase and transaction ids. The merkle root verifies the
+     reconstruction, and any failure degrades to fetching the full block, never
+     to a wrong one. The paper's "relay only the lowest-VRF proposal" (step 6)
+     is not used: it would leave nodes with different candidate sets and break
+     the common ordering.
 
-   - **Equivocator exclusion** (P6 / Liveness theorem 1, `feature_pos_gossip_byzantine.py`):
-     on seeing a leader's second, conflicting block, honest nodes exclude that
-     leader for the height (backing *neither* of its blocks) and relay the block as
-     evidence, so all converge on the next-lowest valid leader. This is what keeps
-     immediate finality fork-free at a majority quorum (see "Quorum" below). The
-     fault injector (`-posbyzantineequivocate`) confirms a Byzantine equivocating
-     leader is excluded at every height and the honest nodes never diverge.
-   - **Deterministic round-robin** (P6 §9): every eligible member proposes once per
-     height, so the candidate/leader order is complete and common; round *r* (a
-     clock-derived index) backs the (r+1)-th lowest-VRF candidate. A round that
-     does not certify within `ROUND_MS` advances all honest nodes to the next
-     leader *in lockstep* — handling a leader that *withholds* (proposes validly
-     then never helps assemble) where exclusion does not apply.
+   **Certificate weight.** The certificate lives in the legacy
+   `CProof.solution`, which `GetBlockWeight` would count in both serialization
+   passes, four times its size. On PoS chains `CProof::Serialize` skips the
+   solution in the no-witness pass, so the certificate is weighted once, like a
+   witness; the hash already excluded the solution, so what the committee signs
+   is unchanged (`feature_pos_cert_weight.py`). With the bitfield form this
+   matters little, since the certificate is about 200 bytes. It matters for the
+   full-member form, where a 100-member certificate is about 26 KB. The block
+   assembler reserves `max_block_signature_size` (32,000 on the bundled chains,
+   sized for the full-member form) in every template whatever the certificate
+   actually weighs.
 
-   - **Freshest-anchor preference** (P7 rule III): `BackedForRound` orders
-     candidates by Bitcoin anchor height then VRF, so the committee converges on
-     the freshest-anchored proposal and the tip tracks Bitcoin's tip
-     (`04-proof-of-stake.md` §7). The Bitcoin-hash *leadership reshuffle* (P7 rule
-     II — a new Bitcoin block re-running the leader VRF) is not implemented; with
-     production-time freshest anchoring it is a marginal refinement, deferred.
+   **Quorum: a strict majority, not two-thirds.** The certification quorum is a
+   majority of the committee, as the Theoretical Paper specifies (Principle 6):
+   `PosPublicQuorum(K) = K/2 + 1`, plus one more when `K` is odd, so 126 at the
+   250-seat cap. The paper rejects a two-thirds threshold because "maximising
+   persistence also stalls blocks if the 2/3rd threshold is unmet because some
+   participants are [offline]" (§i.5).
 
-   - **Compact proposals** (`poscmpctprop`, BIP152-style; unit test
-     `src/test/pos_compact_tests.cpp`, exercised end-to-end by the gossip
-     integration tests): proposals flood as header + coinbase + the other transactions' *ids*,
-     reconstructed from the receiver's mempool, removing the redundant tx data of
-     ~100 near-identical full blocks per round at scale. The header merkle root
-     verifies the reconstruction; on a miss the receiver fetches the full block
-     (`getposprop` → `posproposal`). It is pure transport — the round-robin,
-     exclusion and finality operate on the reconstructed block — and self-correcting
-     (any failure degrades to the full block, never a wrong one). The paper's "relay
-     only the lowest-VRF proposal" (step 6) is not used: it would leave nodes with
-     different candidate sets and break the deterministic round-robin.
+   - *The would-be fork.* Two quorums of one committee overlap in at least two
+     members, so two conflicting blocks can each reach a quorum only if at
+     least two members sign both.
+   - *Why honest members do not do that.* They back the same candidate, exclude
+     a leader that proposes twice, and are held by the share-lock once they have
+     signed. So a second certificate cannot form from honest members.
+   - *The residual.* A member that deliberately signs twice is not bound. With
+     only a few such members a double certification also takes an adversary
+     able to make the honest members back different blocks during the
+     collection window; when the honest members see the same proposals, it
+     takes a dishonest majority of the committee. That is the accepted limit of
+     a majority quorum. The alternative, two-thirds, is rejected for the
+     liveness reason above: it would force anchor-gated escaping-stalls
+     whenever participation dipped toward two-thirds. Beyond this, a finalized
+     block changes only if Bitcoin reorganizes its anchor.
 
-   - **Lazy validation** (P6 step 10; `feature_pos_gossip_invalid.py`): proposals
-     are recorded after only the cheap objective checks (sortition, leader
-     signature, equivocation); full `TestBlockValidity` is deferred to the moment a
-     node signs the backed proposal — ~one validation per round, not one per
-     proposal on the message thread. An invalid backed block excludes its leader
-     (same exclusion path as equivocation) and the committee re-picks the next
-     valid one; only validated blocks are ever signed, so safety is unchanged.
+   The margin against a dishonest coalition comes from the size of the
+   committee rather than from the quorum fraction: the committee is a
+   stake-weighted sample, and the cap is chosen so that a coalition short of a
+   majority of the stake is very unlikely to hold a majority of the seats.
 
-   **Certificate weight at a *maximum* 100-member committee.** The cert is ~26 KB
-   (257 B/member: secp key 33 + VRF proof 80 + BLS key 48 + PoP 96, plus the leader
-   sig and aggregate). It lives in the legacy `CProof.solution`. Naively that script
-   is counted by `GetBlockWeight` in *both* serialization passes (×4, like base
-   data), so 26 KB would be ≈ 104 K weight ≈ **52%** of Sequentia's 200 K
-   block-weight cap. This is **not inherent**, and is addressed in two parts:
-   1. *Witness-discount it.* Elements' dynafed signed blocks put
-      the block signature in `m_signblock_witness`, which the serializer omits from
-      the base (NO_WITNESS) pass ("we do not serialize witness for ... weight
-      calculation"), i.e. ×1. Rather than physically relocate the cert, on PoS
-      chains `CProof::Serialize` skips the `solution` in the NO_WITNESS pass
-      too (gated on `g_con_pos`; other signed chains such as Liquid are unchanged),
-      so the cert is weighted ×1 exactly like a witness. The hash already excluded
-      the solution, so what the committee signs is unchanged. This cuts the cert 4×
-      → ~26 K weight ≈ **13%**. (Verified by `feature_pos_cert_weight.py`: a
-      12-member committee produces sustained blocks under a `-con_maxblockweight`
-      that the ×4 accounting could not fit.)
-   2. *Don't carry static keys per block* — the **key-registry optimization, a
-      deferred refinement**. The BLS key (48) + PoP (96) are static per staker;
-      registering them once in the stake registry would leave ~113 B/member ≈ 11.5
-      KB (the VRF proof and secp key are genuinely per-slot). Combined with (1):
-      ~11.5 K weight ≈ **6%**. Part (1) already brings the maximum cert well under
-      the cap, so this is a scale headroom optimization rather than a requirement.
-
-   (A two-phase lightweight VRF announcement would cut origination further, but
-   compact proposals already make per-round traffic flat in transaction volume.)
-
-   **Quorum — a strict majority (51/100), and fork-free by leader exclusion, not 2/3.**
-   The certification quorum is a simple majority, exactly as the Theoretical Paper
-   specifies (Principle 6) — and the paper deliberately rejects a 2/3 threshold,
-   because "maximising persistence also stalls blocks if the 2/3rd threshold is
-   unmet because some participants are [offline]" (§i.5). Immediate finality is
-   nonetheless **fork-free under the paper's model** (a simple majority of honest,
-   active members + the slot's synchrony), via **equivocator exclusion**, not via
-   any fork "resolving later":
-
-   - *The would-be fork.* Two majorities of a committee of size *n* must overlap,
-     so two conflicting blocks could each reach a quorum only if the overlap
-     members double-sign — at least `2q − n = 1` (odd *n*) or `2` (even *n*)
-     equivocators (with `q = ⌊n/2⌋+1`).
-   - *Why it cannot happen (Liveness theorem 1 / P6).* Honest nodes collect
-     proposals for the slot window, back the **lowest-VRF *valid*** one, and
-     **exclude any leader that proposes two blocks** — backing *neither* and
-     relaying the conflicting block as evidence so every honest node converges on
-     the next-lowest valid leader. So an equivocator's blocks gather only the
-     dishonest minority (< 51) and never certify; exactly one block reaches 51 and
-     is locked final. Implemented in `OnProposal` (`m_equivocators`) and verified
-     in `feature_pos_gossip_byzantine.py` (a Byzantine equivocating leader is
-     excluded at every height and the honest nodes never diverge). This is why a
-     majority quorum is *safe* without a member-level cryptographic guard: the
-     guard is at the consensus layer (exclude the equivocator), not the signature.
-   - *The residual, and why it's the right trade.* The above relies on synchrony —
-     the window must let the evidence propagate before signing. The ~30 s slot
-     makes that strong (propagation ≪ slot). An adversary who partitions a
-     *majority* of the committee for a whole slot could split it; that is the
-     accepted limit of a majority quorum, and the only alternative — 2/3 — is
-     rejected for the liveness reason above (it would force constant anchor-gated
-     escaping-stalls whenever participation dips toward two-thirds). Beyond that,
-     a finalized block changes only if **Bitcoin reorgs its anchor** — Bitcoin is
-     the security root. **Decision: 51/100 retained; equivocators excluded at the
-     consensus layer; 2/3 rejected (per the paper).**
-
-   **Round-schedule alignment, and the share-lock.** The equivocator-exclusion
-   argument above assumes honest nodes are in the *same round* of the round-robin
-   re-vote when they sign. The round index is a function of time, so the schedule
-   is anchored to the round-0 leader's own block timestamp, a value every node
-   reads identically off the same gossiped block, and honest nodes step through
-   rounds together regardless of when each received the proposal (`DriveRound`,
-   `src/pos_producer.cpp`).
+   **Round-schedule alignment, and the share-lock.** The round index is a
+   function of time, so the schedule is anchored to the best candidate's own
+   block timestamp, a value every node reads identically off the same gossiped
+   block, and honest nodes step through rounds together regardless of when each
+   received the proposal.
 
    Safety does not rest on that alignment. A member that signs across a round
-   boundary would be double-signing, and a certificate that completes just as the
-   round rolls over would race the re-vote; either way two blocks could certify at
-   one height out of nothing but honest nodes following the clock. The
-   **share-lock** ([`../04-proof-of-stake.md`](../04-proof-of-stake.md) §9) closes
-   both. A member that has signed a block at a height signs no rival at that
-   height until the round has ended, it has asked its peers for a certificate on
-   the block it signed, and one grace round has passed in silence. Every signer of
-   a certifiable block is held this way, fewer than a quorum remain free, and a
-   second certificate cannot form from honest members however far their clocks
-   disagree. Clock skew costs liveness, not safety.
+   boundary would be double-signing, and a certificate that completes just as
+   the round rolls over would race the re-vote; either way two blocks could
+   certify at one height out of nothing but honest nodes following the clock.
+   The share-lock (§3) closes both. Every signer of a certifiable block is held,
+   fewer than a quorum remain free, and a second certificate cannot form from
+   honest members however far their clocks disagree. Clock skew costs liveness,
+   not safety.
 
-   Injecting a gradient of per-node round-clock skew (`-posdebugroundskewms`,
-   regtest only) and checking hash agreement at every height
+   Injecting a gradient of per-node round-clock skew (`-posdebugroundskewms`, a
+   test-only option) and checking hash agreement at every height
    (`test/functional/pos_round_skew_experiment.py`) gives, over five 35-second
-   trials each at a 12-member committee (ROUND_MS = 1120 at that size):
+   trials each at a 12-member committee (`ROUND_MS` = 1120 at that size):
 
    | Max inter-node skew | Forks | Blocks certified per trial |
    |---|---|---|
@@ -648,68 +583,45 @@ and each leaving the coordinator path working.
    nothing certifies (a stall, not a fork). Real-world NTP keeps skew at the
    millisecond scale, far inside the margin at which even liveness is affected.
 
-   What the share-lock cannot bind is a member that deliberately signs two blocks
-   at one height. Two quorums overlap in at least two members under the public
-   fixed-size committee, so a double certification takes at least two such
-   members, and with only a few it also takes an adversary able to make the honest
-   members back different blocks; when the honest members see the same proposals,
-   it takes a dishonest majority of the committee.
-
-   **Not a goal — stake slashing.** Unlike economic-finality PoS (where slashing
-   *is* the finality guarantee — reverting must burn ≥⅓ of stake), Sequentia's
-   safety does not rest on stake-at-risk, so slashing is redundant on every axis:
-   (a) **independent validation** — every node verifies each block, so a malicious
-   committee can never mint an invalid block (no theft, no inflation), only censor
-   or stall; (b) **equivocator exclusion** (above) — a member that double-proposes
-   is excluded from the round by consensus, so equivocation cannot fork a finalized
-   block under the security model, with no economic penalty needed to prevent it;
-   and (c) **Bitcoin-anchored checkpoints** — the long-range / posterior-corruption
-   defense (Principle 11) is the checkpoint plus a stake locktime exceeding the
-   checkpoint depth, not stake-at-risk. The remaining misbehaviours (a leader
-   censoring or withholding) cost only a round — the round-robin routes around
-   them — and a member's equivocation is detectable evidence usable for off-chain
-   committee governance if ever desired. Slashing would buy nothing the protocol
-   does not already guarantee, at the cost of evolving-key / stake-forfeiture
-   machinery — the same "redundant" category as the rejected Pixel forward
-   security (§7) — and is deliberately omitted.
-
-Each layer is independently testable and leaves the coordinator path working.
+   **Not a goal: stake slashing.** In economic-finality PoS, slashing *is* the
+   finality guarantee: reverting a block must burn a third of the stake.
+   Sequentia's safety does not rest on stake at risk. It rests on (a)
+   **independent validation** - every node verifies each block, so a committee
+   can never make an invalid block valid, only censor or stall; (b) the
+   **leader exclusion and share-lock** above; and (c) **Bitcoin-anchored
+   checkpoints** for the long-range case. There is also a reason specific to
+   anchoring: when Bitcoin reorganizes from one branch to another and back, a
+   committee that follows it correctly signs different blocks at the same
+   height, so punishing a double signature would punish honest behaviour. Two
+   signatures from one member remain attributable evidence; the protocol does
+   not act on it.
 
 ## 13. Settled design points
 
-**Signature scheme (§7).** The autonomous committee certifies with
-**BLS aggregate signatures (BLS12-381), non-interactively** (the bundled-chain
-default, `-posbls`); MuSig2 is the legacy fallback and the single-host/coordinator
-path. Pixel / protocol-level forward security is **not** adopted: Sequentia's
-long-range defense is the Bitcoin-anchored checkpoint system (2016-confirmation
-consolidation) together with a stake locktime that exceeds the checkpoint depth.
+**Signature scheme (§7).** The committee certifies with BLS aggregate
+signatures (BLS12-381), non-interactively; MuSig2 is for custom chains run with
+`-posbls=0`. Pixel and protocol-level forward security are not adopted: the
+long-range defence is the Bitcoin-anchored checkpoint.
 
-**Timing (§6).** The slot **target is 30 s**, pinned by the
-ledger-growth-parity invariant (`200,000 weight / 30 s = 4,000,000 / 600 s`) and
-**held there by a timestamp-based retarget** as the paper prescribes (P10,
-Bitcoin-difficulty-style, on the ~2-week / 2016-block epoch) — the retarget is
-what makes parity hold in practice, not a departure from it. Leader-rank stagger
-**`δ` = 3 s** and round-robin timeout **`T` ≈ 45 s (≈ 1.5 · n)** are local-clock
-defaults.
+**Committee (§5, §7).** On the bundled chains the committee is a public
+fixed-size list, capped at 250, drawn from the stakers that registered a BLS
+key; only leader election stays private. Threshold VRF sortition, with a
+private committee of expected size up to 100, is the base model and remains on
+custom chains.
 
-**Gossip default (§2).** **`-posgossip` defaults on**: every full node
-relays committee traffic, bounded by the eligibility gate; producing
-(`-posproducer`) is opt-in.
+**Timing (§6).** The cadence is a consensus rule: a minimum spacing of 60
+seconds, with a block weight cap of 400,000 that holds ledger growth equal to
+Bitcoin's. The leader time gate is 10 seconds per slot. The collection window
+and the round length are local, and scale with the committee cap.
 
-**Quorum (§12.4).** The certification quorum is a **strict majority
-(51/100), not two-thirds** — exactly the Theoretical Paper (Principle 6), which
-rejects 2/3 because it stalls whenever some members are offline. Immediate
-finality is kept fork-free not by a higher threshold but by **excluding
-equivocating leaders** (Liveness theorem 1): an equivocator's blocks gather only
-the dishonest minority and never certify, so exactly one block reaches 51 and is
-final. A 2/3 quorum would buy committee-level Byzantine safety the exclusion rule
-already provides, while forcing frequent anchor-gated escaping-stalls when live
-participation dips toward two-thirds — collapsing the fast sidechain to Bitcoin's
-cadence (the paper's participation tables). Majority quorum for fast liveness;
-equivocator exclusion for fork-free finality; Bitcoin for the long-range root.
+**Who relays (§2).** Only nodes running a producer take part in committee
+gossip. Producing is opt-in.
 
-The autonomous committee is the production block-production layer of the bundled
-chains (§12). Two refinements are deliberately deferred: the Bitcoin-hash
-*leadership reshuffle* (Principle 7 rule II), marginal under production-time
-freshest anchoring (§12.4), and the key-registry optimization that drops static
-per-staker keys from each block (§12.4, certificate weight).
+**Quorum (§12.4).** A strict majority, not two-thirds, as the Theoretical Paper
+specifies. Honest members cannot produce two certificates at one height,
+because of leader exclusion and the share-lock; the margin against dishonest
+members comes from the committee's size; Bitcoin is the long-range root.
+
+**Not implemented.** The Bitcoin-hash leadership reshuffle (Principle 7 rule
+II), and the paper's enforce-consensus procedure for certifying an alternative
+to an invalid certified block (§1).
