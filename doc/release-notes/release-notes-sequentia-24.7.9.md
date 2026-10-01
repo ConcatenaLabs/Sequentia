@@ -1,11 +1,14 @@
 # Sequentia Core 24.7.9
 
-A security release. It fixes the Elements rangeproof cache bug that was used to
-drain the Liquid federation of roughly 4000 BTC on 6 September 2026. Sequentia
-inherited the defective code verbatim from Elements, so every release up to and
-including 24.7.8 carries it.
+A security release. It binds the Elements rangeproof cache to the asset and the
+script a proof was verified under, which closes one of two defects in that
+cache. It does not close the other, the key collision that was used to drain the
+Liquid federation of roughly 4000 BTC on 6 September 2026: that takes
+[24.7.10](release-notes-sequentia-24.7.10.md). Sequentia inherited the defective
+code verbatim from Elements, so every release up to and including 24.7.8 carries
+both.
 
-Update your node.
+Update your node, to 24.7.10 or later.
 
 ## Sequentia had no federation reserve at risk
 
@@ -60,6 +63,12 @@ chain split and not a quiet inflation.
 ## The fix
 
 The cache key now includes the asset commitment and the scriptPubKey.
+
+The two fields are appended to the key by plain concatenation, with no length
+prefixes. Because the proof and the script are both variable-length, two
+different inputs can still be made to produce the same key, and that collision
+is the defect that was exploited on Liquid, whose functionaries were running
+this same change. 24.7.10 closes it; its notes describe the collision.
 
 This is upstream `ElementsProject/elements@c26d719c`, *"fix: range proof cache
 bind to asset and scriptpubkey"*, ported byte-identically — our base and theirs
