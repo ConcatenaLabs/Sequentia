@@ -46,30 +46,76 @@ asset, SEQ, is unlisted-means-refused like everything else. What a never
 configured node accepts comes from a **seed**, not from a special case: the map
 is constructed holding SEQ at `1e8` (`ExchangeRateMap::ResetToBootstrapRates`),
 so fees work out of the box, and any write that replaces the table replaces the
-seed along with it.
+seed along with it. The seed is a placeholder, not a decision: a node running
+the reference feed ([§2](#2-per-producer-acceptance-one-table-two-writers))
+re-prices SEQ from it like any other asset.
 
 A rate of `0` reads as "refuse this asset": it is a valid stored value that flows
 through to the conversion as "not accepted". Setting a rate accepts any
 **non-negative** value; only **negative** rates are rejected by the RPCs. A
-producer can therefore drop an asset either by omitting it from the next write or
-by listing it with an explicit `0`.
+producer drops an asset by listing it with an explicit `0`. Omitting it from the
+next write also drops it, but only on a node that is not running the reference
+feed: with the feed on, an asset the operator has said nothing about is priced
+back in at the next poll ([§2](#2-per-producer-acceptance-one-table-two-writers)).
 
 Mempool entries carry `nFeeAsset` and `nFeeValue` (the rfa value); the miner
 (`src/node/miner.cpp`) ranks packages by rfa value, and `RecomputeFees()`
 re-values the mempool whenever rates change.
 
-## 2. Per-producer acceptance: a single whitelist
+## 2. Per-producer acceptance: one table, two writers
 
-A producer keeps **one** `{asset → rate}` whitelist - the `ExchangeRateMap`
-singleton. There are no static and dynamic layers and no precedence between
-writers: the most recent write replaces the table (last-writer-wins), and there
-is no per-asset "source" or provenance.
+A producer keeps **one** `{asset → rate}` table - the `ExchangeRateMap`
+singleton. Two things write to it, and they are not equals.
 
-The table is written with `setfeeexchangerates` and read with
-`getfeeexchangerates`. Writing persists the table to `exchangerates.json` and
-calls `RecomputeFees()`. A price server ([§5](#5-the-price-server)) writes
-the same single table; `getfeeacceptancepolicy` returns the current acceptance
-set. The operator-facing setup - listing assets, running the price server, and
+**The operator.** `setfeeexchangerates` replaces the whole table, and so does
+`exchangerates.json` when the node loads it at startup. Every entry written this
+way is a decision, a rate of `0` included, and nothing but the next operator
+write changes it. A price server ([§5](#5-the-price-server)) is an operator in
+this sense: it writes through the same RPC. `getfeeexchangerates` reads the
+table and `getfeeacceptancepolicy` returns the acceptance set.
+
+**The reference feed.** When `-referencepricesurl` is set, the node fetches
+per-asset prices from that URL and, on a timer (`StartFeedDerivedFeeRates`,
+`src/feeassets.cpp`), prices into the table every asset it knows that the feed
+quotes - but only where the operator has no entry (`MergeFeedRates`,
+`src/exchangerates.cpp`). It never overrides an operator entry, and it treats
+the bootstrap seed as no entry at all, so on an otherwise unconfigured node SEQ
+gets its price from the feed like everything else. It is driven by the assets in
+the node's asset directory rather than by the feed's keys, so a price for
+something that is not an asset on this chain does not make it payable. The rate
+is the same conversion the price server uses (`FeeRateFromUnitPrice`). Feed
+entries live in memory only and are never written to `exchangerates.json`.
+
+The feed is off unless `-referencepricesurl` is set. The binary sets it by
+default on `-chain=test` (`InitParameterInteraction`, `src/init.cpp`); an empty
+`-referencepricesurl=` turns it off there.
+
+Four consequences follow, and each one catches people out:
+
+- **Omitting an asset does not refuse it while the feed is on.** After an
+  operator write, any known asset the write left out and the feed quotes is back
+  in the table within one feed poll. To refuse an asset, list it at `0`.
+- **Clearing the table is not a kill-switch while the feed is on.**
+  `setfeeexchangerates '{}'` empties the table and the mempool, and the next
+  feed poll refills the table. To stop accepting fees, list every asset at `0`,
+  or run without the feed.
+- **A price server and the feed overlap.** The price server publishes only the
+  assets that pass its admission rules and leaves the rest out; the feed prices
+  those back in. An operator who wants the admission rules to be the whole
+  policy runs the node without the feed, or has every rejected asset listed at
+  `0`.
+- **The feed is unauthenticated.** It is fetched over plain HTTP with no TLS and
+  no signature, as is the Asset Registry index that tells the node which assets
+  exist. Whoever can answer for those URLs sets the rate at which this node
+  accepts every asset its operator left unset. That is policy, not consensus -
+  it decides what this node relays and puts in its own blocks, never what is
+  valid - but a producer that cares what it is paid in sets its own rates.
+
+An asset the feed stops quoting keeps the last rate the feed gave it until the
+node restarts or an operator write replaces the table; the node has no
+staleness rule for either writer.
+
+The operator-facing setup - listing assets, running the price server, and
 constructing transactions that pay fees in a chosen asset - is in
 [`05-operating-sequentia.md`](05-operating-sequentia.md).
 
@@ -174,12 +220,12 @@ It periodically queries operator-designated external APIs (exchange endpoints,
 DEX oracles) for per-asset market data, applies operator-defined **admission
 thresholds** (e.g. market cap, 24h volume, volatility), computes each admitted
 asset's rate from its price relative to the reference unit, and writes the
-resulting `{asset → rate}` table into the node's single whitelist through
+resulting `{asset → rate}` table into the node's table through
 `setfeeexchangerates` (`src/rpc/exchangerates.cpp`):
 
 | RPC | Purpose |
 |---|---|
-| `setfeeexchangerates {asset: rate, …} [persist=true]` | Replace the whole whitelist and `RecomputeFees()`. With `persist=true` (the default) it also writes `exchangerates.json` so the table survives a restart; with `persist=false` it updates only the in-memory whitelist. Pass `{}` to clear it, which leaves the node accepting **no** fee asset at all, SEQ included, and empties its mempool. |
+| `setfeeexchangerates {asset: rate, …} [persist=true]` | Replace the whole whitelist and `RecomputeFees()`. With `persist=true` (the default) it also writes `exchangerates.json` so the table survives a restart; with `persist=false` it updates only the in-memory whitelist. Pass `{}` to clear it, which leaves the node accepting **no** fee asset at all, SEQ included, and empties its mempool - until the reference feed, if it is on, refills the table at its next poll ([§2](#2-per-producer-acceptance-one-table-two-writers)). |
 | `getfeeexchangerates` | Return the current whitelist as `{asset: rate}`. |
 | `getfeeacceptancepolicy` | Return the current acceptance set. |
 | `getfeeassetinfo [asset]` | Per asset: whether this node accepts it (`accepted`, plus `listed`/`rate` so a refusal written down as rate 0 is distinguishable from an asset nobody configured), whether the Asset Registry publishes it (`registry_listed`), and whether the reference feed prices it (`market_price`). |
@@ -201,7 +247,7 @@ node's whitelist rate and reports acceptance. Acceptance is reported even when
 there is no estimate to convert, since a node with no fee history yet would
 otherwise look like it had a problem with the asset.
 
-There is a single whitelist; "static" versus "dynamic" is only how it is
+There is a single table; "static" versus "dynamic" is only how it is
 *operated*, not a protocol distinction. An operator setting rates by hand uses
 the default `persist=true` so the table survives a restart. A price server driving
 the whitelist automatically uses `persist=false`: it re-pushes every poll, so
@@ -212,7 +258,8 @@ The reference unit is anchored to a chosen value (for example a USD-equivalent
 stablecoin) so rates are meaningful; the choice is operator policy, not consensus.
 The node holds the last-set rates indefinitely - there is **no** staleness or
 max-age option; keeping rates fresh (and refusing assets when a feed dies, by
-writing `0` or omitting them) is the sidecar's job. The one rule the node enforces
+writing `0`, or by omitting them on a node that is not running the reference
+feed) is the sidecar's job. The one rule the node enforces
 is the **non-negative-rate** floor: a negative quote is rejected outright, while a
 zero is accepted and read as "refuse this asset". Vetting source data - quorum
 across feeds, guarding implausible inter-poll jumps and dust-priced rates - is the

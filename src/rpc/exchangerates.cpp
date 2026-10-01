@@ -52,6 +52,9 @@ static RPCHelpMan setfeeexchangerates()
                 "as if it were listed at rate 0, and that applies to every asset including the fee/policy asset:\n"
                 "the reference unit is an abstract factor, never a token, so no asset is valued by default. Passing\n"
                 "{} therefore leaves this node accepting NO fee asset at all, which will empty its mempool.\n"
+                "\nOne exception: when -referencepricesurl is set, the node prices from that feed every asset it\n"
+                "knows that this set leaves out, at its next feed poll. An entry given here is never overridden,\n"
+                "a rate of 0 included, so list an asset at 0 to refuse it while the feed is running.\n"
                 "\nThere is a single whitelist; \"static\" versus \"dynamic\" is only how it is operated, not a\n"
                 "protocol distinction. By default the set persists to " + exchange_rates_config_file + " so a\n"
                 "hand-configured (static) whitelist survives a restart. A price server that drives the whitelist\n"
@@ -198,9 +201,11 @@ static RPCHelpMan getfeeassetinfo()
 static RPCHelpMan getreferenceprices()
 {
     return RPCHelpMan{"getreferenceprices",
-                "\nGet the cached per-asset USD reference prices. DISPLAY ONLY: the node GUI uses these to\n"
-                "value amounts in a user-chosen reference currency (USD, BTC, or any priced asset). This\n"
-                "never affects consensus, fees or the mempool. Empty unless -referencepricesurl is set.\n",
+                "\nGet the cached per-asset USD reference prices. The node GUI uses these to value amounts in\n"
+                "a user-chosen reference currency (USD, BTC, or any priced asset), and the node derives from\n"
+                "them the fee-payment rate of every asset it knows that has no operator-set rate (see\n"
+                "setfeeexchangerates and getfeeassetinfo). Never affects consensus. Empty unless\n"
+                "-referencepricesurl is set.\n",
                 {},
                 {
                     RPCResult{"prices", RPCResult::Type::OBJ, "", "",
