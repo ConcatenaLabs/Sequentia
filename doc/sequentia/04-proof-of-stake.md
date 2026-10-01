@@ -265,10 +265,30 @@ height - both header fields fixed at block-index creation, so the seed is
 identical on every node. It is deliberately *not* the Sequentia block hash (which a
 producer could grind) and *not* a VRF score. The anchor hash is Bitcoin's
 proof-of-work, which a Sequentia producer cannot bias; its only freedom is which
-recent, monotone, anchor-valid Bitcoin block to reference, and that influences
-only the *next* block's committee - a committee that is itself privately
-VRF-sortitioned, so the residual grinding is limited and VRF-mitigated. See
+recent, monotone, anchor-valid Bitcoin block to reference, and that choice sets
+the seed of the *next* block. See
 [`03-bitcoin-anchoring.md`](03-bitcoin-anchoring.md) for the anchor commitment.
+
+What that freedom is worth depends on the committee regime (§4). Under threshold
+VRF sortition the producer cannot see the committee a seed would give, because
+membership is each staker's private VRF output, so the choice is blind. Under
+the public fixed-size committee the committee is a public function of the seed
+and the registry: a producer that leads a block can compute the next committee
+for each of the `k` anchors open to it and take the one that seats most of its
+own coalition. The gain is bounded. It is the best of a handful of choices, it
+is available only on blocks the coalition leads, and nothing carries over from
+one block to the next, since each committee is seeded by an independent Bitcoin
+block. At a cap of 250 against a coalition holding one third of the stake, the
+chance of the coalition holding a quorum of a given committee is about 1.8e-8
+with no choice of anchor and about 3.6e-8 with four (`committee-seed-grind.py`,
+beside this file, computes the table).
+
+Two alternatives do not remove it. Seeding from an anchor further back only
+hands the same choice to an earlier producer; the capture probability has no
+term for the depth. A seed chained from the participants' own VRF outputs would
+replace an external beacon that no Sequentia actor can influence with an
+internal one that a participant can bias by withholding. If the residual ever
+needs to shrink, the lever is the committee cap.
 
 ### Private VRF sortition
 

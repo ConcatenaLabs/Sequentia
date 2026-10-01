@@ -13,8 +13,13 @@ Each poll it:
 4. **publishes** the result to your node(s) via the `setfeeexchangerates` RPC
    with `persist=false`.
 
-The node itself keeps a single whitelist and is unaware of all this — running
-this sidecar is what makes the whitelist "dynamic". Stop the sidecar and the
+The node itself keeps a single whitelist, and to it this sidecar is just an
+operator writing that whitelist — running the sidecar is what makes the
+whitelist "dynamic". One thing to know: a node started with
+`-referencepricesurl` (the default on the public testnet) also prices, from that
+feed, any asset it knows that your published set leaves out. If your admission
+rules should be the node's whole policy, start the node with an empty
+`-referencepricesurl=`. Stop the sidecar and the
 whitelist just stops changing (each node keeps the last set it received; on a
 node restart it falls back to the operator's static file). Nothing here touches
 consensus: it only decides which assets your node accepts fees in.

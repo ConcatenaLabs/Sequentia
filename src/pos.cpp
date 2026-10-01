@@ -399,8 +399,12 @@ uint256 PosSeedForChild(const CBlockIndex* pindexPrev)
     // The parent's anchor is fixed once the parent exists, so within a Bitcoin
     // interval all same-height candidates share the seed; a producer's only
     // freedom is which recent Bitcoin block its *own* block anchors to, which
-    // affects only the NEXT block's (privately VRF-sortitioned) committee —
-    // bounded, VRF-mitigated grinding, not a seed-grinding lever here.
+    // sets the seed of the NEXT block. Under threshold VRF sortition that
+    // choice is blind (membership is each staker's private VRF output). Under
+    // the public fixed-size committee the producer can compute the committee
+    // each candidate anchor would give and pick among them: a bounded,
+    // memoryless best-of-k, covered by the committee cap rather than by the
+    // seed (doc/sequentia/04-proof-of-stake.md §3).
     return ComputePosSeed(pindexPrev->m_anchor_hash, (uint32_t)(pindexPrev->nHeight + 1));
 }
 
