@@ -192,6 +192,7 @@ BASE_SCRIPTS = [
     'feature_supervised_zero_supply.py',
     'feature_any_asset_fee.py',
     'feature_any_asset_fee_congestion.py',
+    'feature_any_asset_fee_feed_display_only.py',
     'feature_any_asset_fee_info.py',
     'feature_any_asset_fee_market.py',
     'feature_any_asset_fee_no_default.py',
