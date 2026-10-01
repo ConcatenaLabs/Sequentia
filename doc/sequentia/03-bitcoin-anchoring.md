@@ -94,6 +94,24 @@ forward. In the ordinary case rivals appear near the tip and expire behind it,
 so the anchor advances in steps rather than block for block, and once no rival
 is live it is back at the tip.
 
+**Once committed to a branch, the producer follows it.** When Bitcoin has rival
+branches, Sequentia anchors to the latest uncontested Bitcoin block (the last
+block those branches share) only if the latest Sequentia block is itself
+anchored to an uncontested Bitcoin block. If it is already anchored to one of
+the Bitcoin branches, Sequentia keeps following that branch for as long as it
+remains Bitcoin's best chain. The reason is that holding back only helps while
+the chain is still on shared ground. Once the parent block's anchor sits above a
+rival's fork point, the chain is committed against that rival: if the rival
+wins, the parent block is unwound whatever the new block anchors to. Backing
+off would protect nothing, and since the target would fall below the parent's
+anchor it would freeze the anchor for as long as the rival kept pace, and with
+it the escaping-stall relaxation (§5). In code, `AnchorUncontestedHeight` skips
+every rival whose fork point lies below the parent block's anchor, provided the
+Bitcoin node still reports that anchor at its height. If it does not, the
+parent's anchor has been reorganized away, every rival counts again, and the
+reorg-following watcher of §3 takes over. Rivals that fork at or above the
+parent's anchor are still backed off from as before.
+
 Anchoring is governed by these settings:
 
 ```ini
@@ -414,7 +432,8 @@ normal condition on Bitcoin mainnet, which sees far fewer contested blocks than
 testnet4. The exception is a **contested parent tip**. While rival branches are
 live at or near Bitcoin's tip, the producer holds the anchor at the last
 parent-chain height every contender agrees on instead of advancing onto ground
-that may be reorganized away (§2). The trade is deliberate: a Sequentia block
+that may be reorganized away, for as long as the chain itself is still anchored
+on that shared ground (§2). The trade is deliberate: a Sequentia block
 anchored to a losing parent block must be unwound when the parent fork resolves,
 and unwinding certified Sequentia history is far more disruptive than carrying a
 slightly older anchor for a few blocks. The policy was adopted after the
@@ -509,6 +528,16 @@ direction the 2026-07-17 fix pushed when it added the parent-chain
 median-time-past requirement to the same relaxation, and it is the intended
 trade in both cases - a sub-quorum block should be hard to mint - but it is a
 liveness cost, and it lands exactly when the parent chain is least settled.
+
+The cost is bounded by the rule of §2 that a producer follows the branch it is
+already committed to. The back-off can delay an escaping-stall block only while
+the parent block's anchor is still on ground the rivals share. As soon as one
+block anchors above a rival's fork point, that rival stops holding the anchor
+back, and the next escaping-stall block is due as soon as the parent chain
+supplies the height and time gaps. Without that rule, a rival that forked just
+below the parent's anchor and kept pace with the tip would pin the target under
+the parent's anchor, and a committee below quorum could not certify anything
+until the rival dropped out of the window.
 
 ## 6. Cross-chain atomic swaps
 

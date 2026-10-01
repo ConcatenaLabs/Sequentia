@@ -356,8 +356,10 @@ AnchorCheckResult GetMainchainMedianTime(const uint256& hash, int64_t& mtp)
 //! and defers the selection math to AnchorUncontestedHeight. Returns false if
 //! getchaintips is unavailable (caller then keeps the plain -anchorminconf
 //! target). Never lowers below the previous anchor: that clamp is the caller's
-//! (monotonicity).
-bool GetMainchainUncontestedHeight(int active_tip_height, int& uncontested_height)
+//! (monotonicity). `committed_height` is passed through to
+//! AnchorUncontestedHeight; the default (-1) counts every live rival.
+bool GetMainchainUncontestedHeight(int active_tip_height, int& uncontested_height,
+                                   int committed_height = -1)
 {
     const int window = (int)gArgs.GetIntArg("-anchorcontestwindow", DEFAULT_ANCHOR_CONTEST_WINDOW);
     try {
@@ -377,7 +379,7 @@ bool GetMainchainUncontestedHeight(int active_tip_height, int& uncontested_heigh
             if (!h.isNum() || !bl.isNum()) continue;
             competing.emplace_back(h.get_int(), bl.get_int());
         }
-        uncontested_height = AnchorUncontestedHeight(active_tip_height, window, competing);
+        uncontested_height = AnchorUncontestedHeight(active_tip_height, window, competing, committed_height);
         return true;
     } catch (const std::exception& e) {
         LogPrint(BCLog::NET, "Could not reach mainchain daemon for getchaintips: %s\n", e.what());
@@ -579,7 +581,8 @@ AnchorCheckResult CheckMainchainAnchor(uint32_t height, const uint256& hash)
 }
 
 int AnchorUncontestedHeight(int active_tip_height, int window,
-                            const std::vector<std::pair<int, int>>& competing_branches)
+                            const std::vector<std::pair<int, int>>& competing_branches,
+                            int committed_height)
 {
     const int w = std::max(0, window);
     int uncontested = active_tip_height;
@@ -587,6 +590,7 @@ int AnchorUncontestedHeight(int active_tip_height, int window,
         if (branchlen <= 0) continue;                    // shares the active chain: not a fork
         if (tip_height + w < active_tip_height) continue; // further than the window behind: losing the race
         const int fork_point = tip_height - branchlen;    // last block still shared with the active chain
+        if (fork_point < committed_height) continue;      // already anchored past this fork: nothing left to avoid
         if (fork_point < uncontested) uncontested = fork_point;
     }
     return uncontested;
@@ -616,9 +620,26 @@ bool GetAnchorForNewBlock(uint32_t prev_anchor_height, const uint256& prev_ancho
         // monotonicity; with no live fork the uncontested height equals the tip
         // and the target is unchanged (full anchor freshness). If getchaintips is
         // unavailable we keep the plain -anchorminconf target.
+        //
+        // The back-off only helps while the parent block's anchor is still on
+        // ground a rival shares. Once that anchor sits above a rival's fork
+        // point, this chain is already committed to the active branch: if the
+        // rival wins, the parent block is unwound anyway, so holding the new
+        // block's anchor back avoids nothing. It only freezes the anchor, and
+        // with it the escaping-stall relaxation, which needs the anchor to
+        // advance. Such rivals are therefore ignored, and the producer follows
+        // the branch it is committed to for as long as that branch is the
+        // parent chain's best chain: the parent anchor must still be the
+        // daemon's block at its height, otherwise every rival counts as before.
         if (gArgs.GetBoolArg("-anchoravoidcontested", DEFAULT_ANCHOR_AVOID_CONTESTED)) {
+            int committed = -1;
+            uint256 active_at_prev;
+            if (!prev_anchor_hash.IsNull() && GetMainchainBlockHashAt(prev_anchor_height, active_at_prev) &&
+                active_at_prev == prev_anchor_hash) {
+                committed = (int)prev_anchor_height;
+            }
             int uncontested = -1;
-            if (GetMainchainUncontestedHeight(count, uncontested) && uncontested >= 0 && uncontested < target) {
+            if (GetMainchainUncontestedHeight(count, uncontested, committed) && uncontested >= 0 && uncontested < target) {
                 LogPrintf("Anchor: parent chain height %d is contested; backing the new block's anchor down to the last uncontested height %d\n",
                           target, uncontested);
                 target = uncontested;
