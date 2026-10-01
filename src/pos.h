@@ -51,12 +51,14 @@ struct PosPotRef {
     int height{0};
 };
 
-/** Seconds per leader rank: the rank-r leader of a slot may only produce a
- *  block once this many seconds * r have elapsed since the parent block. Also
- *  the chain's nominal block time (one slot = one rank step), used to convert
- *  block-count locks to wall-clock (see PosRequiredUnbondingSeconds). Sequentia
- *  targets 30 s blocks; with nMaxBlockWeight = 200,000 the saturated chain grows
- *  at exactly Bitcoin's total rate (200,000 / 30 s == 4,000,000 / 600 s). */
+/** Seconds per leader slot under the legacy election, and wherever no separate
+ *  slot-gate unit is in force (see PosSlotGateSeconds): a slot-s leader may
+ *  only produce a block once this many seconds * s have elapsed since the
+ *  parent block. Also the unit that converts block-count locks to wall-clock
+ *  (see PosRequiredUnbondingSeconds). It is NOT the chain's cadence: that is
+ *  Consensus::Params::pos_block_spacing, 60 s on the Sequentia chains, where
+ *  nMaxBlockWeight = 400,000 makes a saturated chain grow at exactly Bitcoin's
+ *  total rate (400,000 / 60 s == 4,000,000 / 600 s). */
 extern int64_t g_pos_slot_interval;
 static const int64_t DEFAULT_POS_SLOT_INTERVAL = 30;
 
@@ -865,18 +867,6 @@ inline bool PosEscapingStallAllowed(uint32_t parent_anchor_height, uint32_t bloc
            block_anchor_height - parent_anchor_height >= POS_ESCAPING_STALL_ANCHOR_GAP;
 }
 
-/** Is the escaping-stall parent-chain MTP-gap requirement enforced at `height`?
- *
- *  The MTP gap was introduced after the testnet chain had already produced
- *  blocks that violate it, which made that history unvalidatable and the chain
- *  unsyncable from genesis (see Consensus::Params::pos_escape_stall_mtp_height
- *  for the full rationale). Gating it by height is the standard soft-fork
- *  treatment.
- *
- *  CONVENTION, deliberately the opposite of PosExpRaceActive: 0 means ENFORCED
- *  FROM GENESIS — the right setting for a chain launched with the rule already
- *  in place, so a new chain needs no future migration. A positive H enforces it
-
 /** A committee member's eligibility claim carried in the block: its key and
  *  its VRF proof over the slot seed. */
 struct PosVrfMember {
@@ -912,8 +902,8 @@ struct PosBlsCertificate {
 };
 
 /** Encode a BLS committee certificate into a block proof solution:
- *      <leader_sig> <agg_sig(96)> <member_1(257)> ... <member_m(257)>
- *  each member being secp_pubkey(33) || vrf_proof(80) || bls_pubkey(48) || bls_pop(96).
+ *      <leader_sig> <agg_sig(96)> <member_1(258)> ... <member_m(258)>
+ *  each member being secp_pubkey(33) || vrf_proof(81) || bls_pubkey(48) || bls_pop(96).
  *  The certificate lives in the solution (excluded from the block hash), so the
  *  hash the committee signs does not depend on who signs. */
 CScript BuildPosBlsSolution(const std::vector<unsigned char>& leader_sig,

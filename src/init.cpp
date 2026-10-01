@@ -2280,7 +2280,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     // SEQUENTIA PoS: start the autonomous block producer if configured. With
     // one or more staking keys it elects the best-ranked key each round, waits
     // out the slot clock, and produces blocks with no external coordinator
-    // (doc/sequentia/proposals/autonomous-committee.md, Phase 1).
+    // (doc/sequentia/proposals/autonomous-committee.md §12).
     if (g_con_pos && args.GetBoolArg("-posproducer", false)) {
         std::vector<CKey> producer_keys;
         for (const std::string& wif : args.GetArgs("-posproducerkey")) {

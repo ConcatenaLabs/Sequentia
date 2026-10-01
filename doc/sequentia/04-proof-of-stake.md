@@ -57,8 +57,11 @@ fixed-size committee; requires `-posbls`), `-poscommitteesize`,
 `-posminstake`, `-poscheckpoint`, and `-poscheckpointdepth`. The bundled
 Sequentia chains enable VRF and BLS committee aggregation by default;
 `-posbls`, `-pospubliccommittee`, and `-poscommitteesize` are network-wide
-consensus rules, so every node on a given network must agree on their values
-(the public testnet runs `-pospubliccommittee=1 -poscommitteesize=250`).
+consensus rules, so every node on a given network must agree on their values.
+The mainnet parameters pin them, together with the other `-pos*` consensus
+flags, and a node that passes any of them refuses to start; the testnet
+defaults to the public committee at a cap of 250 and refuses a value that
+conflicts with its own.
 
 ## 2. The stake registry
 
@@ -345,7 +348,7 @@ With `U = beta / 2^256`, the legacy slot is `⌊ U · W / w ⌋`, so a staker re
 slot 0 only when `U < w/W`, and slot 1 only when `U < 2w/W`: the smaller the
 stake, the lower the `beta` it must draw before it may offer a block early at
 all. The producer's cadence floor then holds every block to at least
-`pos_block_spacing` after its parent (`max(slot · interval, spacing)`,
+`pos_block_spacing` after its parent (`max(slot gate, spacing)`,
 `src/pos_producer.cpp`; consensus enforces the floor and the slot gate
 independently - see *Minimum block spacing* below), which
 collapses slots 0 and 1 into a single offering time, so the proposals a
@@ -452,15 +455,15 @@ size can draw, but it is not above every representable one: `-ln(U)` is at most
 holding less than roughly 1/5,900 of eligible weight, and then only on a `beta`
 small enough that the draw never occurs in practice.
 
-**Cadence is unchanged.** The leader is still the lowest-scoring staker, still
-gated by `nTime ≥ parent.nTime + slot · posslotinterval`, and the slot interval
-is still 30 seconds. The two rules even agree closely on how often some staker
+**Cadence is unchanged.** The leader is still the lowest-scoring staker and is
+still held back by a time gate proportional to its slot (*Time-gating* below).
+The two rules even agree closely on how often some staker
 draws slot 0, the case consensus lets produce with no wait at all beyond its
 parent: `1 - (1 - 1/n)^n` under the legacy rule against `1 - e^{-1}` under the
 exponential race. The two agree to within a percentage point for any committee
-of a realistic size and converge as `n` grows. The producer's cadence floor holds
-either winner to one slot interval after its parent in any case. What the fork
-changes is *which* staker wins, not how fast blocks arrive.
+of a realistic size and converge as `n` grows. The minimum block spacing (§4b)
+holds either winner to at least `pos_block_spacing` after its parent in any
+case. What the fork changes is *which* staker wins, not how fast blocks arrive.
 
 **It is a height-gated, coordinated hard fork.** Because the two rules elect
 different blocks from the same draws, they cannot be mixed on one network: a node
@@ -531,9 +534,17 @@ A block records the leader's VRF proof in a coinbase `OP_RETURN` (tagged
 connect time `CheckPosStakeRules` verifies the proof against the leader's
 challenge key over the slot seed, recomputes `slot` under the sortition rule in
 force at the block's own height, and requires
-`block.nTime ≥ parent.nTime + slot · posslotinterval` (`bad-posvrf-early`). So
-the rank-0 leader may produce earliest; if it is absent, a higher-slot staker
-may step in after its slot opens. This is the whitepaper's local wall-clock
+`block.nTime ≥ parent.nTime + PosSlotGateSeconds(slot)` (`bad-posvrf-early`).
+The gate is the slot multiplied by a unit: `pos_slot_gate_seconds`, 10 seconds
+on both real chains, once the exponential race and the slot gate are active;
+`-posslotinterval` (30 seconds) under the legacy rule and on a chain that sets
+no gate unit. The unit is smaller than the slot interval because the
+exponential-race score is a rate with an unbounded tail, not a bounded rank:
+scaled by a whole interval, a long draw silences the chain for that many
+intervals, where a smaller unit lets the block spacing absorb most of the tail.
+`-posslotinterval` itself stays at 30, since it also scales the unbonding
+requirement. So a slot-0 leader may produce earliest; if it is absent, a
+higher-slot staker may step in after its slot opens. This is the whitepaper's local wall-clock
 round timeout with the lowest-ranked participant as proposer - lowest
 exponential-race score from `pos_exprace_height` onward, lowest legacy slot
 below it.
@@ -582,12 +593,12 @@ OP_2 <leader(33)>                   # the BLS aggregate-committee form
 The `OP_2` is a version marker. The certificate lives in the block's proof
 *solution*, which is excluded from the signed block hash - so the hash the
 committee signs does not depend on who signs, which is what lets members
-produce non-interactive signature shares independently and lets the leader
-aggregate any quorum of them (the gossip committee, §9). Two encodings:
+produce non-interactive signature shares independently and lets any node
+aggregate a quorum of them (the gossip committee, §9). Two encodings:
 
 - **Full-member form** (sortitioned committees): `<leader_sig> <agg_sig(96)>
-  <member_1(257)> ... <member_m(257)>`, each member being
-  `secp_pubkey(33) ‖ vrf_proof(80) ‖ bls_pubkey(48) ‖ bls_pop(96)` - the
+  <member_1(258)> ... <member_m(258)>`, each member being
+  `secp_pubkey(33) ‖ vrf_proof(81) ‖ bls_pubkey(48) ‖ bls_pop(96)` - the
   members prove their own sortition eligibility and BLS keys inside the
   certificate (`PosBlsCertificate`, `src/pos.h`).
 - **Bitfield form** (public fixed-size committee): `<leader_sig> <agg_sig(96)>
@@ -657,8 +668,8 @@ block.nTime >= parent.nTime + pos_block_spacing        # bad-pos-spacing
 by `pos_block_spacing_height`, and checked in `ContextualCheckBlockHeader`
 beside `time-too-old`.
 
-**Why it is not the slot gate.** The gate delays a leader by
-`slot · interval`, and `slot` scales with the reciprocal of the staker's weight,
+**Why it is not the slot gate.** The gate delays a leader in proportion to its
+`slot`, and `slot` scales with the reciprocal of the staker's weight,
 so it can never be a uniform speed limit: the winning draw floors to 0 in
 `1 - e^-1 ≈ 63%` of rounds, which is exactly when a brake would be needed. Left
 to the gate alone, a set holding all the stake can drive the chain to a 17.5 s
@@ -669,7 +680,7 @@ permanent and grows with congestion, and more blocks in the same time is more
 disk, more bandwidth and more validation for every node for ever.
 
 The two parameters therefore stay separate: `pos_block_spacing` answers *how
-fast may the chain run*, `-posslotinterval` answers *in what order may leaders
+fast may the chain run*, the slot gate answers *in what order may leaders
 propose*. Folding them into one number is what makes every value of that number
 a bad trade.
 
@@ -737,14 +748,17 @@ genesis-seeded launch uses for its slow start - see
 Signed blocks all have equal nominal "work" (height), so same-height candidates
 are ordered by a PoS-specific comparator in `CBlockIndexWorkComparator`
 (`src/validation.cpp`), using two keys set on `CBlockIndex` at acceptance and
-never mutated:
+never mutated, and then the block hash:
 
 1. **more committee countersignatures wins** - `m_pos_countersigs`, the named
    committee size (so a full-threshold block always beats an escaping-stall
    sub-threshold one);
 2. on an equal count, the **lower leader VRF score** wins - `m_pos_vrf_score`,
    the top 64 bits of the leader's `beta` over the slot seed (registry-
-   independent, hence deterministic across nodes).
+   independent, hence deterministic across nodes);
+3. on an equal score, the **lower block hash** wins. Unlike first-seen order,
+   which two honest nodes can observe differently, the hash is the same
+   everywhere, so every node breaks the tie the same way.
 
 Both keys are computed from the block body in `SetPosForkChoiceKeys` before the
 block enters the candidate set, and persisted in `CDiskBlockIndex` so a
@@ -920,7 +934,7 @@ Three paths lead to a live network:
   block, every node signs the best-ranked proposal it has collected
   (`BackedForRound`: freshest anchor, then lowest election score) and floods a
   non-interactive
-  BLS share, and the leader aggregates a quorum into the certificate - assembling
+  BLS share, and any node that gathers a quorum aggregates it into the certificate - assembling
   a committee-certified block across separate hosts with no coordinator. This
   rests on BLS aggregation and the member-independent block hash (the certificate
   lives in the proof solution). Under `-pospubliccommittee` the same gossip

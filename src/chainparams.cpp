@@ -456,15 +456,15 @@ public:
         // unsupervised can never become supervised. See
         // doc/sequentia/bridged-usdc-standard.md.
         consensus.supervised_assets_height = 1;
-        // Minimum block spacing: the 30-second cadence as a CONSENSUS RULE, in
+        // Minimum block spacing: the 60-second cadence as a CONSENSUS RULE, in
         // force from mainnet's first block. Mainnet has not launched, so there
         // is no history to exempt and nothing to coordinate later.
         //
         // The producers collect the fees, so their incentive is to shorten the
         // cadence, and until this rule existed nothing stopped them: the floor
         // in PosProducer::Step is producer-side and unverified. Deliberately a
-        // separate number from the slot-gate unit (-posslotinterval): raising
-        // the spacing must not stretch the leader time-gate too.
+        // separate number from the slot-gate unit (pos_slot_gate_seconds
+        // below): raising the spacing must not stretch the leader time-gate too.
         //
         // 1 and not 0 for the same reason as the two gates above: 0 is this
         // parameter's "not gated" sentinel.
@@ -2099,7 +2099,7 @@ protected:
         // Sequentia chains use false, making CT opt-in).
         m_default_blinded_addresses = args.GetBoolArg("-con_default_blinded_addresses", true);
         // SEQUENTIA: per-chain max block weight (0 = the global 4,000,000).
-        // Sequentia uses 200,000 (whitepaper §3.10); set it on custom chains too.
+        // The Sequentia chains use 400,000 (whitepaper §3.10); set it on custom chains too.
         {
             int64_t mbw = args.GetIntArg("-con_maxblockweight", 0);
             if (mbw < 0 || mbw > MAX_BLOCK_WEIGHT) {
