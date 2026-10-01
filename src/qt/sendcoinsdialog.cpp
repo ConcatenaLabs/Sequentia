@@ -1743,6 +1743,25 @@ QString SendCoinsDialog::formatFeeRate(const CAmount& fee_asset_atoms_per_kvb) c
 
 void SendCoinsDialog::updateFeeAssetWarning()
 {
+    // Before anything about the chosen asset: a node whose whitelist accepts
+    // nothing cannot send in any of them, and with nothing accepted the
+    // selector below may well be empty, which would otherwise hide the warning
+    // exactly when it matters most.
+    if (g_con_any_asset_fees && model) {
+        bool any_accepted = false;
+        for (const FeeAssetInfo& candidate : model->node().listFeeAssetInfo()) {
+            if (candidate.accepted) { any_accepted = true; break; }
+        }
+        if (!any_accepted) {
+            ui->labelFeeAssetWarning->setStyleSheet(QStringLiteral("color: #ff6b6b;"));
+            ui->labelFeeAssetWarning->setText(
+                tr("This node accepts no asset for transaction fees yet, so nothing can be sent. "
+                   "Set prices by hand or launch the price server under Settings → Fee acceptance. "
+                   "Receiving is not affected."));
+            ui->labelFeeAssetWarning->setVisible(true);
+            return;
+        }
+    }
     if (!g_con_any_asset_fees || !model || ui->feeAssetSelector->count() == 0) {
         ui->labelFeeAssetWarning->setVisible(false);
         return;
@@ -1778,7 +1797,7 @@ void SendCoinsDialog::updateFeeAssetWarning()
         ui->labelFeeAssetWarning->setText(
             why + QLatin1Char(' ') +
             tr("The transaction would be rejected by your own node before it ever reached a block "
-               "producer. Pick an accepted asset, or set a rate for %1 under Settings → Fee policy.").arg(name));
+               "producer. Pick an accepted asset, or set a price for %1 under Settings → Fee acceptance.").arg(name));
         ui->labelFeeAssetWarning->setVisible(true);
         return;
     }

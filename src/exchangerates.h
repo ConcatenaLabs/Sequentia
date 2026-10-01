@@ -54,13 +54,18 @@ public:
      * Seed the out-of-box whitelist: the policy asset alone, priced at
      * exchange_rate_scale.
      *
-     * SEQUENTIA: this SEED is the entire bootstrap mechanism. It is what lets a
-     * node that has never been configured accept fees at all, and it is why the
-     * converters need no special case for the policy asset: an unlisted asset is
-     * unlisted, whichever asset it is. The reference unit stays an abstract
-     * factor and is never itself a token; the seed merely states an opening
-     * price for one asset, which an operator or price-server sidecar is free to
-     * change, set to 0 (refuse), or drop entirely by replacing the whitelist.
+     * SEQUENTIA: this SEED is the entire bootstrap mechanism. Where it is kept
+     * (the testnet and custom chains) it is what lets a node that has never
+     * been configured accept fees at all, and it is why the converters need no
+     * special case for the policy asset: an unlisted asset is unlisted,
+     * whichever asset it is. The reference unit stays an abstract factor and is
+     * never itself a token; the seed merely states an opening price for one
+     * asset, which an operator or price-server sidecar is free to change, set
+     * to 0 (refuse), or drop entirely by replacing the whitelist.
+     *
+     * A chain whose CChainParams::SeedFeeWhitelist() is false (the mainnet)
+     * discards the seed at startup, so an unconfigured node there accepts
+     * nothing until its operator writes the whitelist.
      */
     void ResetToBootstrapRates();
 
@@ -122,6 +127,10 @@ public:
     /** Replace the whole whitelist. Used by both an operator and a price-server
      *  sidecar — the node treats them identically. */
     void SetRates(const std::map<CAsset, CAmount>& rates);
+
+    /** Whether at least one asset is accepted, i.e. listed at a positive rate.
+     *  False means this node can neither create nor relay any transaction. */
+    bool HasAcceptedAsset();
 
     /** Empty the whitelist. Nothing survives: an empty whitelist accepts NO fee
      *  asset, the policy asset included. Use ResetToBootstrapRates() to get back

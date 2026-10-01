@@ -177,6 +177,11 @@ production behaviour needs `-con_default_blinded_addresses=0`.
 **No privileged asset outside staking.** Only SEQ can stake. For everything else
 it is one asset among equals — fees are payable in any accepted asset. A silent
 fallback to the policy asset is a privilege, and privileges are bugs.
+The mainnet (`sequentia`) therefore starts with an empty fee whitelist
+(`m_seed_fee_whitelist = false`): a node there accepts nothing, and its wallet
+refuses to send, until the operator lists assets or sets up a price server. The
+testnet and custom chains start with SEQ listed at 1:1 instead, so a regtest
+node reproducing mainnet behaviour needs `-con_seed_fee_whitelist=0`.
 
 **Bitcoin anchoring is supreme.** Every block references a Bitcoin block header.
 If that anchor is reorged away, this chain reorgs too, in real time. Immediate

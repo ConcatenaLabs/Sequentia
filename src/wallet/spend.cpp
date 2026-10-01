@@ -1013,6 +1013,13 @@ static bool CreateTransactionInternal(
     // must also refuse fees paid in it. ConvertAmountToValue has no special case
     // for the policy asset; it reports whatever rate the whitelist holds.
     if (g_con_any_asset_fees) {
+        // An empty whitelist is a different mistake from a wrong choice of
+        // asset, and "choose a different fee asset" would send the user round
+        // every asset in turn. Say what is actually missing.
+        if (!ExchangeRateMap::GetInstance().HasAcceptedAsset()) {
+            error = _("This node accepts no asset for transaction fees yet, so nothing can be sent. Write the fee whitelist first: list assets and prices in exchangerates.json or with setfeeexchangerates, or set up a price server. Receiving is not affected.");
+            return false;
+        }
         CAmount probe = ExchangeRateMap::GetInstance().ConvertAmountToValue(exchange_rate_scale, coin_selection_params.m_fee_asset).GetValue();
         if (probe <= 0) {
             error = _("The chosen fee asset is not accepted (no exchange rate on this node); choose a different fee asset");

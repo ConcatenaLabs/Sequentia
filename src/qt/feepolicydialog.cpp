@@ -281,7 +281,11 @@ void FeePolicyDialog::refresh()
         m_whitelist->setItem(row, 1, price_item);
         if (info.accepted) accepted++;
     }
-    setStatus(tr("%n asset(s) accepted for fees.", "", accepted));
+    if (accepted == 0) {
+        setStatus(tr("No asset is accepted for fees yet, so this node cannot send. Add one above, or launch the price server."), true);
+    } else {
+        setStatus(tr("%n asset(s) accepted for fees.", "", accepted));
+    }
 
     // Enable Remove whenever any row is selected (connect once).
     if (!m_remove_selection_connected) {

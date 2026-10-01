@@ -85,6 +85,7 @@
 #include <cstdio>
 #include <fstream>
 #include <functional>
+#include <iostream>
 #include <set>
 #include <string>
 #include <thread>
@@ -1493,6 +1494,11 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         // If fees can be paid in any asset, node operators need to be able to specify asset exchange
         // rates using either the static config file and/or the exchange rates RPCs.
         ExchangeRateMap& exchangeRateMap = ExchangeRateMap::GetInstance();
+        // SEQUENTIA: on a chain that does not seed the whitelist (the mainnet),
+        // an unconfigured node accepts no fee asset at all. Cleared before the
+        // load, so a whitelist the operator has written is kept: the file, when
+        // there is one, replaces the table either way.
+        if (!Params().SeedFeeWhitelist()) exchangeRateMap.ClearRates();
         std::string file_path_string = gArgs.GetArg("-initialexchangeratesjsonfile", "");
         std::vector<std::string> errors;
         if (!file_path_string.empty()) {
@@ -1514,6 +1520,19 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         // sidecar's job — it adds/removes assets and re-pushes via
         // setfeeexchangerates with persist=false. The node just holds whatever was
         // last set.
+        if (!exchangeRateMap.HasAcceptedAsset()) {
+            // Said at startup rather than left to be discovered from a refused
+            // send. Not an InitWarning: the GUI asks the same thing with a
+            // button that leads to the answer, and one prompt is enough.
+            const std::string notice = strprintf(
+                "This node accepts no asset for transaction fees, so it will not send or relay "
+                "transactions. It still validates the chain, and its wallet can still receive. "
+                "To change that, write the fee whitelist: list assets and prices in %s or with "
+                "setfeeexchangerates, or set up a price server to keep it current.",
+                exchange_rates_config_file);
+            LogPrintf("Warning: %s\n", notice);
+            tfm::format(std::cerr, "Warning: %s\n", notice);
+        }
     }
 
     /* Start the RPC server already.  It will be started in "warmup" mode
