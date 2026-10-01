@@ -915,6 +915,46 @@ Three paths lead to a live network:
   design is in
   [`proposals/autonomous-committee.md`](proposals/autonomous-committee.md).
 
+### The share-lock
+
+In the gossip committee a member signs one block per height for as long as that
+block can still be certified. Having share-signed block X at height H, a node
+does not sign a same-height rival until all three of these hold: the round in
+which it signed X has ended; it has asked its peers for a certificate on X
+(`getposcert`); and one further round has passed with no certificate arriving.
+A certificate is a self-verifying object of a few hundred bytes that travels on
+its own (`poscert`), so if X was certified anywhere, proof of it is one
+round-trip away, and the node adopts X instead of backing a rival.
+
+The quorum arithmetic is what gives the rule its force. For X to be certifiable
+at all, at least a quorum must have signed it. Those members are all locked,
+fewer than a quorum remain free, and so no rival can gather a quorum while the
+lock holds. If too few members signed X for it ever to certify, fewer than a
+quorum are locked and the next leader certifies without waiting. The lock
+therefore delays the chain by one round only when a block was on the verge of
+certifying, and costs nothing otherwise.
+
+A partition can outlast any number of rounds: a member cut off from the side
+where X certified can ask its peers indefinitely and hear nothing. So the lock
+has a second arm, keyed on the parent chain rather than the clock. A node does
+not sign or lead at H+1 on a parent that is a same-height rival of the block it
+signed until the escaping-stall evidence holds for that parent - the Bitcoin
+anchor gap of §5 together with the median-time-past gap of §6, the same
+evidence consensus accepts for a sub-quorum block - and it asks its peers for
+X's certificate while it waits. The cut-off minority waits out the partition; the
+majority side never waits.
+
+The share-lock is local signing policy, not a validity rule: no block is valid
+or invalid because of it. It turns the round timings into a liveness matter
+only. A node whose clock or round length differs from its peers' contributes
+late; it does not sign twice. What the lock cannot bind is a member that
+deliberately signs two blocks at one height, and there is no slashing to deter
+one. Under the public fixed-size committee any two quorums overlap in at least
+two members (§4), so certifying two blocks at one height takes at least two such
+members. The lock state lives in `PosProducer` (`m_lock_hash`,
+`src/pos_producer.{h,cpp}`); the certificate query is exercised in
+`feature_pos_cert_gossip.py`.
+
 Operating a producer and the surrounding tooling are covered in
 [`05-operating-sequentia.md`](05-operating-sequentia.md); the security model and
 audit findings in [`07-security-and-audit.md`](07-security-and-audit.md).

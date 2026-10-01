@@ -611,42 +611,49 @@ and each leaving the coordinator path working.
      the security root. **Decision: 51/100 retained; equivocators excluded at the
      consensus layer; 2/3 rejected (per the paper).**
 
-   **Round-schedule alignment — the synchrony assumption, made concrete.** The
-   equivocator-exclusion argument above assumes honest nodes are in the *same
-   round* of the round-robin re-vote when they sign: only then do they all back
-   one leader, so only one block per height reaches a quorum. The round index is a
-   function of time, so this is really a clock-agreement assumption. Deriving the
-   index from each node's *local* arrival time for the height — which gossip latency
-   desynchronizes — would let two honest nodes sit in different rounds at once, sign
-   different leaders' blocks at the same height, and (because a member that signs
-   across a round boundary double-signs) form two competing 51-of-100 certificates:
-   a real fork at 100-member scale. The schedule is therefore anchored to the
-   round-0 leader's own block timestamp, a value every node reads identically off
-   the same gossiped block, so honest nodes step through rounds together regardless
-   of when each received the proposal (`DriveRound`, `src/pos_producer.cpp`).
+   **Round-schedule alignment, and the share-lock.** The equivocator-exclusion
+   argument above assumes honest nodes are in the *same round* of the round-robin
+   re-vote when they sign. The round index is a function of time, so the schedule
+   is anchored to the round-0 leader's own block timestamp, a value every node
+   reads identically off the same gossiped block, and honest nodes step through
+   rounds together regardless of when each received the proposal (`DriveRound`,
+   `src/pos_producer.cpp`).
 
-   This reduces the requirement to *bounded clock skew*, and the bound is
-   quantified. Injecting a gradient of per-node round-clock skew
-   (`-posdebugroundskewms`, regtest only) and checking hash agreement at every
-   height (`test/functional/pos_round_skew_experiment.py`) gives, over five trials
-   each at a 12-member committee (ROUND_MS = 700):
+   Safety does not rest on that alignment. A member that signs across a round
+   boundary would be double-signing, and a certificate that completes just as the
+   round rolls over would race the re-vote; either way two blocks could certify at
+   one height out of nothing but honest nodes following the clock. The
+   **share-lock** ([`../04-proof-of-stake.md`](../04-proof-of-stake.md) §9) closes
+   both. A member that has signed a block at a height signs no rival at that
+   height until the round has ended, it has asked its peers for a certificate on
+   the block it signed, and one grace round has passed in silence. Every signer of
+   a certifiable block is held this way, fewer than a quorum remain free, and a
+   second certificate cannot form from honest members however far their clocks
+   disagree. Clock skew costs liveness, not safety.
 
-   | Max inter-node skew | Forks |
-   |---|---|
-   | 0 ms (synchronized)     | 0 / 5 |
-   | 528 ms (< ROUND_MS)     | 0 / 5 |
-   | 1056 ms (> ROUND_MS)    | 3 / 5 |
+   Injecting a gradient of per-node round-clock skew (`-posdebugroundskewms`,
+   regtest only) and checking hash agreement at every height
+   (`test/functional/pos_round_skew_experiment.py`) gives, over five 35-second
+   trials each at a 12-member committee (ROUND_MS = 1120 at that size):
 
-   So the committee is fork-free as long as inter-node clock skew stays below one
-   round (~700 ms); past that, nodes land in different rounds and forks appear
-   (~60 % at 1.5× ROUND_MS), and at extreme skew (several × ROUND_MS) no block
-   certifies at all (a stall, not a fork). Real-world NTP keeps skew at the
-   millisecond scale — ~1000× inside this margin — so the assumption holds
-   comfortably in practice. One alternative — a per-height member-level "sign at
-   most one block" lock — would give unconditional safety independent of any clock
-   assumption, but it is a deliberate safety/liveness trade (it constrains the
-   round-robin's ability to abandon a stalled leader), so it is not adopted by
-   default.
+   | Max inter-node skew | Forks | Blocks certified per trial |
+   |---|---|---|
+   | 0 ms (synchronized)        | 0 / 5 | 30 to 42 |
+   | 561 ms (0.5 × ROUND_MS)    | 0 / 5 | 27 to 37 |
+   | 1683 ms (1.5 × ROUND_MS)   | 0 / 5 | 2 to 14 |
+   | 4477 ms (4 × ROUND_MS)     | 0 / 5 | 0 to 2 |
+
+   Past one round of skew, nodes land in different rounds, the locked members
+   wait out their grace, and the chain slows; at several rounds of skew almost
+   nothing certifies (a stall, not a fork). Real-world NTP keeps skew at the
+   millisecond scale, far inside the margin at which even liveness is affected.
+
+   What the share-lock cannot bind is a member that deliberately signs two blocks
+   at one height. Two quorums overlap in at least two members under the public
+   fixed-size committee, so a double certification takes at least two such
+   members, and with only a few it also takes an adversary able to make the honest
+   members back different blocks; when the honest members see the same proposals,
+   it takes a dishonest majority of the committee.
 
    **Not a goal — stake slashing.** Unlike economic-finality PoS (where slashing
    *is* the finality guarantee — reverting must burn ≥⅓ of stake), Sequentia's
