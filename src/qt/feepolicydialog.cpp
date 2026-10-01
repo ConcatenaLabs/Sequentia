@@ -64,8 +64,8 @@ FeePolicyDialog::FeePolicyDialog(const PlatformStyle* platformStyle, QWidget* pa
     auto* intro = new QLabel(tr("Assets this node accepts for transaction fees, and what one unit of "
                                 "each is worth. A fee is only worth what the asset it is paid in is "
                                 "worth, so this is what lets fees in different assets be compared. "
-                                "Prices are kept up to date automatically from the price feed; set one "
-                                "here to override it, or leave the list alone."),
+                                "An asset that is not listed is not accepted. Set prices here by "
+                                "hand, or launch the price server to keep the list up to date."),
                              this);
     intro->setWordWrap(true);
     layout->addWidget(intro);
@@ -300,9 +300,9 @@ void FeePolicyDialog::onAddOrUpdate()
     const double price = m_rate->text().trimmed().toDouble(&priceOk);
     if (!priceOk || price < 0.0) { setStatus(tr("Enter what one unit is worth in USD (0 refuses the asset)."), true); return; }
 
-    // The price is converted here, with the same arithmetic the node uses when it
-    // takes prices from the feed (FeeRateFromUnitPrice). Doing it any other way
-    // would make a hand-set price and a fed one mean different things.
+    // The price is converted here with the same arithmetic the price server uses
+    // (FeeRateFromUnitPrice). Doing it any other way would make a hand-set price
+    // and one the price server published mean different things.
     const CAsset asset = GetAssetFromString(assetKey);
     if (asset.IsNull()) { setStatus(tr("Unknown asset: %1").arg(QString::fromStdString(assetKey)), true); return; }
     const uint8_t precision = m_wallet_model ? m_wallet_model->node().getFeeAssetInfo(asset).precision

@@ -182,17 +182,8 @@ The rate is an **integer**: a fee output's reference value is
 at half the reference unit, `200000000` at twice it. A rate of `0` refuses the
 asset. An asset that is **not listed is not accepted** - the policy asset
 included. There is no exception and no implicit entry: a node ships with a
-bootstrap whitelist that lists the policy asset explicitly.
-
-One thing besides the operator writes to the table. On the public testnet the
-binary turns on the reference-price feed (`-referencepricesurl`), and the node
-prices into the table every asset it knows that the feed quotes and that the
-operator has no entry for. So on such a node an operator write is not the whole
-truth: an asset the write leaves out comes back at the next feed poll. An entry
-the operator did write is never overridden, a `0` included. To refuse an asset,
-list it at `0`; to make the table exactly what was written, start the node with
-an empty `-referencepricesurl=`. The mechanics and the trust the feed carries
-are in [`02-open-fee-market.md`](02-open-fee-market.md) §2.
+bootstrap whitelist that lists the policy asset explicitly, and once an operator
+replaces the table, the table is the whole truth.
 
 `getfeeacceptancepolicy` returns the current acceptance set - what the node
 actually uses when valuing mempool transactions and building blocks.
@@ -200,12 +191,12 @@ actually uses when valuing mempool transactions and building blocks.
 ### Keeping the whitelist dynamic: the price server
 
 The price server in [`contrib/price-server/`](../../contrib/price-server) is a
-sidecar that keeps that same table fresh: it polls
+sidecar that keeps that same single whitelist fresh: it polls
 operator-designated market-data sources, applies admission thresholds (market
 cap, 24h volume, source agreement, price clamps), and pushes the resulting
-whole whitelist to the node. To the node the sidecar is just an operator
-writing the table; whether the whitelist is "static" or "dynamic" is determined
-by whether a sidecar is running (see the sidecar's own
+whole whitelist to the node. The node is unaware of the sidecar; whether the
+whitelist is "static" or "dynamic" is determined entirely by whether a sidecar
+is running (see the sidecar's own
 [README](../../contrib/price-server/README.md)).
 
 ```
@@ -229,25 +220,18 @@ whitelist). Two consequences to know:
 
 - The node holds the last-set rates **indefinitely** - there is no built-in
   staleness or expiry. Keeping rates fresh, and refusing assets when a feed
-  dies (by writing `0`), is the sidecar's job. On clean
+  dies (by writing `0` or omitting them), is the sidecar's job. On clean
   shutdown the sidecar **leaves the last published rates in place**: clearing
   them would leave every fed node accepting no fee asset at all, which stops
   relay. (`clear_whitelist_on_shutdown` opts back into clearing; it is off by
   default for that reason.)
-- Operator writes are last-writer-wins on the whole table: a manual
+- Writes are last-writer-wins on the whole table: a manual
   `setfeeexchangerates` is simply overwritten at the sidecar's next poll.
-- The sidecar publishes only the assets that pass its admission rules. On a
-  node that also runs the reference-price feed, the feed prices the rejected
-  ones back in, so the admission rules are not the node's whole policy there.
-  Run the node with an empty `-referencepricesurl=` if they should be.
 
 Manual kill-switch: `sequentia-cli setfeeexchangerates '{}'` (empties the
-whitelist). ⚠ The node then accepts **no fee asset at all** and will relay
-nothing, rather than falling back to the policy asset. Restore a working table
-before leaving the node unattended. On a node that runs the reference-price
-feed the empty table does not last: the feed refills it at its next poll. There
-the kill-switch is to list each asset at `0`, or to restart the node with an
-empty `-referencepricesurl=`.
+whitelist). ⚠ This now means the node accepts **no fee asset at all** and will
+relay nothing, rather than falling back to the policy asset. Restore a working
+table before leaving the node unattended.
 
 ## 4. Paying fees in an arbitrary asset
 

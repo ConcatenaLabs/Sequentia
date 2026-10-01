@@ -102,7 +102,6 @@
 
 #include <assetsdir.h> // InitGlobalAssetDir
 #include <assetregistry.h> // StartAssetRegistry
-#include <feeassets.h> // StartFeedDerivedFeeRates
 #include <referenceprices.h> // StartReferencePrices
 #include <pegins.h>
 
@@ -630,7 +629,7 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-assetregistryurl=<url>", "Sequentia Asset Registry index URL (http only). When set, the node periodically fetches asset labels and merges the registry-verified ones into the asset directory (used by RPC output and the GUI). These labels are ADVISORY only: the index is fetched over plain HTTP with no TLS and no signature, so they are not cryptographically authenticated to the node and must not be trusted for value decisions. Operator -assetdir entries always take precedence.", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-assetregistrypoll=<n>", "Seconds between Asset Registry refreshes (0 disables periodic refresh; only the initial fetch runs). (default: 300)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-assetregistrytimeout=<n>", "Timeout in seconds for an Asset Registry fetch. (default: 15)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
-    argsman.AddArg("-referencepricesurl=<url>", "Sequentia reference-price feed URL (http only). When set, the node periodically fetches per-asset USD prices. The GUI uses them to value displayed amounts in a user-chosen reference currency, and the node uses them to price, for fee payment, every asset it knows that has no operator-set rate (see setfeeexchangerates). The feed is fetched over plain HTTP with no TLS and no signature, so set your own rates if you care what your node accepts. Never affects consensus.", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
+    argsman.AddArg("-referencepricesurl=<url>", "Sequentia reference-price feed URL (http only). When set, the node periodically fetches per-asset USD prices used by the GUI to value displayed amounts in a user-chosen reference currency (display only; never affects consensus or fees).", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-referencepricespoll=<n>", "Seconds between reference-price refreshes (0 disables periodic refresh; only the initial fetch runs). (default: 120)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-referencepricestimeout=<n>", "Timeout in seconds for a reference-price fetch. (default: 15)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-defaultpeggedassetname", "Default name of the pegged asset. (default: SEQ on the Sequentia network, tSEQ on its testnet, bitcoin on the chains inherited from Elements)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
@@ -1462,11 +1461,6 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     // SEQUENTIA: fetch per-asset USD prices for the GUI's reference-currency
     // valuation (if -referencepricesurl is set) and refresh them periodically.
     StartReferencePrices(*node.scheduler);
-
-    // SEQUENTIA: and price those same assets into the fee whitelist, so a fee can
-    // be paid in any of them rather than only in the one the whitelist is seeded
-    // with. Rates an operator or a price server set are left alone.
-    StartFeedDerivedFeeRates(*node.scheduler, node.mempool.get());
 
     // Create client interfaces for wallets that are supposed to be loaded
     // according to -wallet and -disablewallet options. This only constructs

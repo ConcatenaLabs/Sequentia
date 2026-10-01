@@ -13,7 +13,6 @@
 #include <policy/policy.h>
 #include <policy/settings.h>
 #include <validation.h>
-#include <scheduler.h>
 #include <txmempool.h>
 #include <util/strencodings.h>
 #include <util/system.h>
@@ -164,46 +163,4 @@ double UnitPriceFromFeeRate(CAmount rate, uint8_t precision)
     for (int i = precision; i < 8; ++i) price /= 10.0L;
     for (int i = 8; i < precision; ++i) price *= 10.0L;
     return static_cast<double>(price);
-}
-
-int ApplyFeedDerivedFeeRates()
-{
-    const std::map<std::string, double> prices = GetReferencePrices();
-    if (prices.empty()) return 0;
-
-    // Driven by the assets this chain knows, never by the feed's keys: the feed
-    // also quotes things that are not assets here at all (the parent chain's
-    // bitcoin, for one), and those must not become payable just because a price
-    // exists for them.
-    std::map<CAsset, CAmount> derived;
-    for (const CAsset& asset : gAssetsDir.GetKnownAssets()) {
-        const auto it = prices.find(FeeAssetFeedTicker(asset));
-        if (it == prices.end()) continue;
-        const CAmount rate = FeeRateFromUnitPrice(it->second, gAssetsDir.GetPrecision(asset));
-        if (rate > 0) derived.emplace(asset, rate);
-    }
-    const int changed = ExchangeRateMap::GetInstance().MergeFeedRates(derived);
-    if (changed > 0) {
-        LogPrintf("FeeAssets: priced %d asset(s) for fee payment from the reference feed\n", changed);
-    }
-    return changed;
-}
-
-void StartFeedDerivedFeeRates(CScheduler& scheduler, CTxMemPool* mempool)
-{
-    if (gArgs.GetArg("-referencepricesurl", "").empty()) return;
-
-    auto tick = [mempool] {
-        if (ApplyFeedDerivedFeeRates() > 0 && mempool != nullptr) {
-            // Every entry in the mempool was valued at the old rates, and the
-            // miner sorts on that valuation; leaving them stale would rank the
-            // queue by prices nobody quotes any more.
-            mempool->RecomputeFees();
-        }
-    };
-    // A few seconds behind the first price fetch, which StartReferencePrices
-    // schedules; if it has not landed yet the next poll picks it up.
-    scheduler.scheduleFromNow(tick, std::chrono::seconds{10});
-    const int poll = gArgs.GetIntArg("-referencepricespoll", 300);
-    if (poll > 0) scheduler.scheduleEvery(tick, std::chrono::seconds{poll});
 }

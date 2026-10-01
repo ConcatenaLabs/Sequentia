@@ -1558,9 +1558,9 @@ void SendCoinsDialog::updateFeeGrid(const CAmount& asset_atoms_per_kvb)
     const QString ref = GUIUtil::referenceCurrency();
     const double factor = AtomsPerUnit(info.precision);
     // The reference column is a market valuation, so it comes from the price feed
-    // and not from the whitelist rate. The two normally agree, since whitelist
-    // rates are derived from the feed -- but an asset an operator listed by hand
-    // has a rate and no quote, and reading the rate there printed a USD figure
+    // and not from the whitelist rate. The two usually agree, since a price server
+    // derives whitelist rates from market prices -- but an asset an operator listed
+    // by hand has a rate and no quote, and reading the rate there printed a USD figure
     // directly beside the warning saying this asset has no published price. No
     // quote, no column: an empty cell is the honest answer.
     const double unit_price = info.has_market_price ? info.market_price : 0.0;
