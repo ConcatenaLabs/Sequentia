@@ -1513,6 +1513,19 @@ BOOST_AUTO_TEST_CASE(anchor_uncontested_height)
 
     // Negative window is clamped to 0 (never widens acceptance oddly).
     BOOST_CHECK_EQUAL(AnchorUncontestedHeight(1000, -5, Br{{1000, 4}}), 996);
+
+    // The parent block is already anchored above a rival's fork point: the chain
+    // is committed against that rival, so it no longer lowers the target. This
+    // is the 2026-10-01 testnet4 shape -- fork at 997, parent anchored at 998,
+    // and a rival that keeps pace with the tip.
+    BOOST_CHECK_EQUAL(AnchorUncontestedHeight(1000, 2, Br{{1000, 3}}, 998), 1000);
+    // Anchored exactly at the fork point is still common ground: back off.
+    BOOST_CHECK_EQUAL(AnchorUncontestedHeight(1000, 2, Br{{1000, 3}}, 997), 997);
+    // Only the rivals forking below the committed height drop out; one forking
+    // above it is still a live contest for the heights over its fork point.
+    BOOST_CHECK_EQUAL(AnchorUncontestedHeight(1000, 2, Br{{1000, 3}, {1000, 1}}, 998), 999);
+    // -1 (no committed anchor to honor) counts every live rival, as before.
+    BOOST_CHECK_EQUAL(AnchorUncontestedHeight(1000, 2, Br{{1000, 3}}, -1), 997);
 }
 
 

@@ -337,7 +337,10 @@ parent-connection health.
 `-anchoravoidcontested` and `-anchorcontestwindow` are **producer-side policy**:
 while the parent chain has a live fork at or near its tip, the blocks this node
 produces anchor to the last height every live branch still agrees on, rather
-than to a tip that may be reorganized away. They never change which blocks the
+than to a tip that may be reorganized away. Once the chain's latest block is
+already anchored on one branch above the fork, the node keeps following that
+branch for as long as it stays the parent's best chain, since backing off could
+no longer avoid anything. They never change which blocks the
 node accepts, so operators may set them differently without splitting the
 network. What the back-off costs, what makes the anchor advance again, and why
 the trade is worth making are in

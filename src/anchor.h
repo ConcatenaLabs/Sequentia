@@ -143,9 +143,16 @@ void ScanRawBlockForCheckpoints(const Sidechain::Bitcoin::CBlock& block, int btc
  *  returns the highest uncontested parent-chain height: the lowest fork point
  *  (tip height - branchlen) among branches whose tip is within `window` of the
  *  active tip, or the active tip height when none qualify. A branch further
- *  than `window` behind the active tip is losing the race and ignored. */
+ *  than `window` behind the active tip is losing the race and ignored.
+ *
+ *  `committed_height` is the height of the parent block's anchor when that
+ *  anchor is on the active branch (-1 when there is none to honor). A rival
+ *  that forked below it is ignored too: the chain is already committed against
+ *  that rival, so backing off for it protects nothing and only freezes the
+ *  anchor. A rival forking at or above it still counts. */
 int AnchorUncontestedHeight(int active_tip_height, int window,
-                            const std::vector<std::pair<int, int>>& competing_branches);
+                            const std::vector<std::pair<int, int>>& competing_branches,
+                            int committed_height = -1);
 
 /** Pick the anchor for a new block: the highest parent-chain block with at
  *  least -anchorminconf confirmations, but never below the previous block's
@@ -153,7 +160,10 @@ int AnchorUncontestedHeight(int active_tip_height, int window,
  *  additionally backed down below any parent-chain height a live competing
  *  branch is contesting, so a new block anchors to Bitcoin ground every current
  *  contender agrees on and needs no Sequentia reorg when the parent fork
- *  resolves. This back-off is purely a block-producer policy — it changes only
+ *  resolves. Rivals that forked below the previous block's anchor are not
+ *  backed off for, as long as that anchor is still on the parent chain's best
+ *  chain: the chain is already committed to that branch, so the producer keeps
+ *  following it. This back-off is purely a block-producer policy — it changes only
  *  which anchor THIS node picks for blocks it produces, never which blocks it
  *  accepts — and costs anchor freshness only while a parent fork is actually
  *  live. Falls back to the previous block's anchor in two cases, which the log
