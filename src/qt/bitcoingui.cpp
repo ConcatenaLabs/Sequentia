@@ -37,6 +37,7 @@
 #include <chainparams.h>
 #include <interfaces/handler.h>
 #include <interfaces/node.h>
+#include <primitives/transaction.h> // g_con_any_asset_fees
 #include <node/ui_interface.h>
 #include <util/system.h>
 #include <util/translation.h>
@@ -838,6 +839,13 @@ void BitcoinGUI::addWallet(WalletModel* walletModel)
         m_wallet_selector_action->setVisible(true);
     }
 
+    // SEQUENTIA: once there is a wallet to act on, ask for the fee whitelist if
+    // this node has none. Deferred so the main window is up before the question.
+    if (!m_fee_setup_prompted) {
+        m_fee_setup_prompted = true;
+        QTimer::singleShot(1500, this, &BitcoinGUI::promptFeeSetupIfNeeded);
+    }
+
     connect(wallet_view, &WalletView::outOfSyncWarningClicked, this, &BitcoinGUI::showModalOverlay);
     connect(wallet_view, &WalletView::transactionClicked, this, &BitcoinGUI::gotoHistoryPage);
     connect(wallet_view, &WalletView::coinsSent, this, &BitcoinGUI::gotoHistoryPage);
@@ -1103,6 +1111,27 @@ void BitcoinGUI::setSupervisionTabVisible(bool visible)
 void BitcoinGUI::gotoFeePolicyDialog()
 {
     if (walletFrame) walletFrame->gotoFeePolicyDialog();
+}
+
+void BitcoinGUI::promptFeeSetupIfNeeded()
+{
+    if (!g_con_any_asset_fees || !walletFrame) return;
+    for (const FeeAssetInfo& info : m_node.listFeeAssetInfo()) {
+        if (info.accepted) return;
+    }
+    // Nothing is accepted, so nothing can be sent or relayed. That is how a node
+    // starts on a chain that does not seed the whitelist, and the user should
+    // hear it here rather than from a refused payment.
+    QMessageBox box(QMessageBox::Information, tr("Set up fee acceptance"),
+                    tr("This node does not yet accept any asset for transaction fees, so it cannot "
+                       "send or relay transactions. You can receive in the meantime.\n\n"
+                       "Choose which assets it accepts and what each is worth. You can set the "
+                       "prices by hand, or set up the price server to keep them current."),
+                    QMessageBox::NoButton, this);
+    QPushButton* setup = box.addButton(tr("Set up now"), QMessageBox::AcceptRole);
+    box.addButton(tr("Later"), QMessageBox::RejectRole);
+    box.exec();
+    if (box.clickedButton() == setup) gotoFeePolicyDialog();
 }
 
 void BitcoinGUI::launchPriceServer()

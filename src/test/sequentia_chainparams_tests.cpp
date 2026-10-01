@@ -339,4 +339,47 @@ BOOST_AUTO_TEST_CASE(fresh_chains_have_no_utxo_recovery)
     SelectParams(CBaseChainParams::REGTEST);
 }
 
+//! The mainnet node starts with an EMPTY fee whitelist; the other chains seed it.
+//!
+//! A node that came up already accepting the policy asset would make that asset
+//! the network's fee currency by default, which is the one privilege the open
+//! fee market withholds. On the mainnet the operator writes the whitelist, by
+//! hand or through a price server, before the node will send or relay anything.
+//! The testnet keeps the seed: its price server ships wired to a feed.
+BOOST_AUTO_TEST_CASE(fee_whitelist_is_seeded_everywhere_but_mainnet)
+{
+    {
+        ArgsManager args;
+        const auto params = CreateChainParams(args, CBaseChainParams::SEQUENTIA);
+        BOOST_CHECK(!params->SeedFeeWhitelist());
+    }
+    {
+        ArgsManager args;
+        const auto params = CreateChainParams(args, CBaseChainParams::TESTNET);
+        BOOST_CHECK(params->SeedFeeWhitelist());
+    }
+    SelectParams(CBaseChainParams::REGTEST);
+}
+
+//! The testnet's payout notice is 1440 blocks, and that is the value the
+//! conflicting-flag check must compare against. It used to compare against the
+//! custom-chain default of 2880, so the network's real value was refused and
+//! the wrong one was accepted and then overridden by the pin.
+BOOST_AUTO_TEST_CASE(testnet_payout_notice_check_uses_the_pinned_value)
+{
+    {
+        ArgsManager args;
+        args.ForceSetArg("-pospayoutnotice", "1440");
+        const auto params = CreateChainParams(args, CBaseChainParams::TESTNET);
+        BOOST_CHECK_EQUAL(params->NetworkIDString(), CBaseChainParams::TESTNET);
+        BOOST_CHECK_EQUAL(g_pos_payout_notice, 1440U);
+    }
+    {
+        ArgsManager args;
+        args.ForceSetArg("-pospayoutnotice", "2880");
+        BOOST_CHECK_THROW(CreateChainParams(args, CBaseChainParams::TESTNET), std::runtime_error);
+    }
+    SelectParams(CBaseChainParams::REGTEST);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

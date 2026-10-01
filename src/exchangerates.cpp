@@ -21,13 +21,15 @@ CValue ExchangeRateMap::ConvertAmountToValue(const CAmount& amount, const CAsset
         // there is no asset the node values 1:1 by fiat. SEQ is privileged ONLY
         // for staking eligibility, never for fee acceptance.
         //
-        // Nothing is lost by having no special case here: a fresh node still
-        // accepts policy-asset fees out of the box because the whitelist is
-        // SEEDED with the policy asset at exchange_rate_scale on construction
-        // (ResetToBootstrapRates). Reaching this branch for the policy asset
-        // means the seed was replaced by a whitelist that leaves it out, which
-        // is an operator policy that omits it, and refusing is the honest
-        // reading of it (the same policy stated as an explicit rate of 0).
+        // Nothing is lost by having no special case here: on a chain that
+        // seeds the whitelist, a fresh node still accepts policy-asset fees
+        // out of the box because the map is constructed holding the policy
+        // asset at exchange_rate_scale (ResetToBootstrapRates). Reaching this
+        // branch for the policy asset means either that the seed was replaced
+        // by a whitelist that leaves it out, which is an operator policy and
+        // refusing is the honest reading of it (the same policy stated as an
+        // explicit rate of 0), or that the chain starts unseeded (the mainnet)
+        // and nobody has listed it yet.
         return CValue(0);
     }
     auto scaled_value = it->second.m_scaled_value;
@@ -102,6 +104,14 @@ void ExchangeRateMap::SetRates(const std::map<CAsset, CAmount>& rates) {
     for (const auto& rate : rates) {
         (*this)[rate.first] = CAssetExchangeRate(rate.second);
     }
+}
+
+bool ExchangeRateMap::HasAcceptedAsset() {
+    LOCK(m_write_mutex);
+    for (const auto& rate : *this) {
+        if (rate.second.m_scaled_value > 0) return true;
+    }
+    return false;
 }
 
 void ExchangeRateMap::ClearRates() {

@@ -23,10 +23,12 @@ governance versus per-node engineering.
 - SEQ's only privileged role is **staking**: it is the asset stake weight is
   denominated in (staking outputs are policy-asset outputs; see
   [`04-proof-of-stake.md`](04-proof-of-stake.md)). For **fees** SEQ is just
-  another asset: an unconfigured producer starts with SEQ seeded at 1:1, and a
-  producer may re-price it (any rate), refuse it (rate 0) or drop it from the
-  whitelist entirely, at which point it is not accepted like any other unlisted
-  asset. The reference unit is an abstract factor and is never itself a token.
+  another asset: a producer may price it (any rate), refuse it (rate 0) or leave
+  it off the whitelist entirely, at which point it is not accepted like any
+  other unlisted asset. On mainnet no asset is on the whitelist until the
+  operator puts it there, SEQ included; the testnet starts with SEQ listed at
+  1:1 so that a node there works without configuration. The reference unit is
+  an abstract factor and is never itself a token.
   See [`02-open-fee-market.md`](02-open-fee-market.md).
 
 ## Minimum stake

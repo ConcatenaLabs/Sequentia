@@ -181,9 +181,19 @@ The rate is an **integer**: a fee output's reference value is
 **more** per unit; a **lower** rate values it less - `50000000` values the asset
 at half the reference unit, `200000000` at twice it. A rate of `0` refuses the
 asset. An asset that is **not listed is not accepted** - the policy asset
-included. There is no exception and no implicit entry: a node ships with a
-bootstrap whitelist that lists the policy asset explicitly, and once an operator
-replaces the table, the table is the whole truth.
+included. There is no exception and no implicit entry: the table is the whole
+truth.
+
+**On mainnet the table starts empty, and filling it is the first thing to do.**
+Until then the node prints, at startup and in `debug.log`, that it accepts no
+asset for fees. It still syncs and validates, and its wallet still receives,
+but it relays nothing and every send is refused with a message naming the
+cause. Either write the whitelist yourself (`setfeeexchangerates`, or
+`exchangerates.json` in the data directory before starting) or set up the price
+server described below; the desktop wallet offers both on first run under
+Settings → Fee acceptance. The testnet and custom chains instead start with the
+policy asset listed at 1:1, so that a test node needs no setup;
+`-con_seed_fee_whitelist=0` makes a custom chain start empty as mainnet does.
 
 `getfeeacceptancepolicy` returns the current acceptance set - what the node
 actually uses when valuing mempool transactions and building blocks.

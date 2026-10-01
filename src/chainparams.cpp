@@ -658,6 +658,13 @@ public:
         blech32_hrp = "sqb";   // confidential (opt-in) addresses
 
         m_default_blinded_addresses = false;
+        // No asset is accepted for fees until the operator says so. A node that
+        // came up already accepting the policy asset would make that asset the
+        // network's fee currency by default, which is the one privilege the
+        // open fee market exists to withhold; and on this chain the price
+        // server ships with no feed to fall back on either. So the node starts
+        // with an empty whitelist and says what it needs.
+        m_seed_fee_whitelist = false;
 
         vFixedSeeds.clear();
 
@@ -2099,6 +2106,9 @@ protected:
         // (true = the historical Liquid/Elements opt-out CT behavior;
         // Sequentia chains use false, making CT opt-in).
         m_default_blinded_addresses = args.GetBoolArg("-con_default_blinded_addresses", true);
+        // SEQUENTIA: whether an unconfigured node's fee whitelist starts with the
+        // policy asset in it (true), or empty as on the Sequentia mainnet.
+        m_seed_fee_whitelist = args.GetBoolArg("-con_seed_fee_whitelist", true);
         // SEQUENTIA: per-chain max block weight (0 = the global 4,000,000).
         // The Sequentia chains use 400,000 (whitepaper §3.10); set it on custom chains too.
         {

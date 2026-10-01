@@ -59,7 +59,8 @@ substrate resolves this with an asset-independent unit.
   fee-floor checks, fee estimation - happen in rfa.
 - **`ExchangeRateMap`** (`src/exchangerates.{h,cpp}`) is a singleton
   `std::map<CAsset, CAssetExchangeRate>`. Each rate is scaled by
-  `exchange_rate_scale = COIN (1e8)`; `policyAsset` is seeded at scale `1.0`.
+  `exchange_rate_scale = COIN (1e8)`. On the testnet and custom chains
+  `policyAsset` is seeded at scale `1.0`; on mainnet the map starts empty.
   - `ConvertAmountToValue(amount, asset)` → rfa, computed as
     `amount * rate / scale` (128-bit intermediate, saturating at `INT64_MAX`).
     An asset **absent from the map converts to 0 rfa** - i.e. "not accepted".

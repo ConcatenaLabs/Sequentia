@@ -10,10 +10,11 @@ from the transactions paying in those assets.
 **SEQ holds no privileged fee status.** It is special only as the asset that
 unlocks block-production eligibility - staking (see
 [`04-proof-of-stake.md`](04-proof-of-stake.md)). For fees it is just another
-asset: an unconfigured producer starts with SEQ seeded at 1:1, and from there a
-producer may re-price SEQ at any rate, refuse it, or drop it and price other
-assets instead. The reference unit stays an abstract factor throughout: no asset
-is ever *defined* to be the reference, and none is valued without being listed.
+asset: a producer may price SEQ at any rate, refuse it, or leave it out and
+price other assets instead. On mainnet a node accepts no asset at all until its
+operator says which, so SEQ is not even the default. The reference unit stays an
+abstract factor throughout: no asset is ever *defined* to be the reference, and
+none is valued without being listed.
 The fee market is the design's lowest-risk property because it is entirely
 node-local policy and requires **no consensus change**
 ([§6](#6-why-no-consensus-change)).
@@ -42,11 +43,26 @@ The rate is an integer scaled by `COIN` (1e8):
 
 An asset **absent** from the map values to `0` rfa - i.e. not accepted - so the
 table *is* the producer's acceptance set, with **no exceptions**: the policy
-asset, SEQ, is unlisted-means-refused like everything else. What a never
-configured node accepts comes from a **seed**, not from a special case: the map
-is constructed holding SEQ at `1e8` (`ExchangeRateMap::ResetToBootstrapRates`),
-so fees work out of the box, and any write that replaces the table replaces the
-seed along with it.
+asset, SEQ, is unlisted-means-refused like everything else.
+
+What a never configured node accepts depends on the chain
+(`CChainParams::SeedFeeWhitelist`):
+
+- **Mainnet (`sequentia`) starts empty.** The node accepts no asset, and says so
+  at startup. It validates the chain and its wallet receives as usual, but it
+  relays no transaction and its wallet refuses to send, until the operator
+  writes the whitelist by hand or sets up a price server
+  ([§5](#5-the-price-server)). No asset is pre-loaded, so none is favoured, and
+  the node does not appear to work before somebody has decided what it accepts
+  and at what price.
+- **The testnet and custom chains start from a seed**: the map is constructed
+  holding SEQ at `1e8` (`ExchangeRateMap::ResetToBootstrapRates`), so a test
+  node can send without any setup, and any write that replaces the table
+  replaces the seed along with it. A custom chain can start empty as mainnet
+  does with `-con_seed_fee_whitelist=0`.
+
+An empty whitelist is a state the operator can also return to on any chain, by
+writing `{}`. The node then behaves as an unconfigured mainnet node does.
 
 A rate of `0` reads as "refuse this asset": it is a valid stored value that flows
 through to the conversion as "not accepted". Setting a rate accepts any
@@ -134,8 +150,8 @@ affordance in front of the user, not a rule hidden in the back end.
 ## 4. Fee floors and replacement, in reference units
 
 Every configured fee floor is denominated in the reference unit, so the mempool
-and miner treat all assets uniformly. Because the seed prices SEQ at 1:1 with
-rfa, a SEQ-atom floor equals an rfa floor out of the box; a producer that
+and miner treat all assets uniformly. Where the seed is in place it prices SEQ
+at 1:1 with rfa, so a SEQ-atom floor equals an rfa floor there; a producer that
 re-prices SEQ, or drops it in favour of other assets, changes that equivalence
 while the floors stay rfa-denominated.
 

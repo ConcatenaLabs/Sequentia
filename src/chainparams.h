@@ -135,6 +135,12 @@ public:
     //! opt-out); Sequentia chains do not (CT is opt-in, and the default
     //! address format matches Bitcoin's). See doc/sequentia/01-architecture.md.
     bool DefaultBlindedAddresses() const { return m_default_blinded_addresses; }
+    //! SEQUENTIA: whether an unconfigured node starts with a fee whitelist that
+    //! already accepts the policy asset. False on the Sequentia mainnet: there a
+    //! node accepts no fee asset until its operator writes the whitelist, by
+    //! hand or through a price server, so no asset is accepted merely by
+    //! default. See doc/sequentia/02-open-fee-market.md.
+    bool SeedFeeWhitelist() const { return m_seed_fee_whitelist; }
     bool anyonecanspend_aremine;
     const std::string& ParentBech32HRP() const { return parent_bech32_hrp; }
     const std::string& ParentBlech32HRP() const { return parent_blech32_hrp; }
@@ -167,6 +173,8 @@ protected:
     //! SEQUENTIA: see DefaultBlindedAddresses(). True preserves the historical
     //! Liquid/Elements behavior; the Sequentia chain sets this to false.
     bool m_default_blinded_addresses{true};
+    //! SEQUENTIA: see SeedFeeWhitelist().
+    bool m_seed_fee_whitelist{true};
     std::vector<uint8_t> vFixedSeeds;
     bool fDefaultConsistencyChecks;
     bool fRequireStandard;

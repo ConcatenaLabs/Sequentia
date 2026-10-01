@@ -238,6 +238,8 @@ private:
     GUIUtil::ClickableLabel* m_anchor_unvalidated_icon = nullptr;
     bool m_anchor_not_watching_session = false;
     bool m_anchor_back_online_notified = false;
+    //! SEQUENTIA: the fee-setup question is asked once per session.
+    bool m_fee_setup_prompted = false;
 
     const PlatformStyle *platformStyle;
     const NetworkStyle* const m_network_style;
@@ -354,6 +356,9 @@ public Q_SLOTS:
     void setSupervisionTabVisible(bool visible);
     /** Open the fee-acceptance policy dialog */
     void gotoFeePolicyDialog();
+    /** SEQUENTIA: ask the user to set up the fee whitelist when this node accepts
+     *  no fee asset (how a mainnet node starts). */
+    void promptFeeSetupIfNeeded();
     /** Launch the bundled price-server sidecar and open its configuration page */
     void launchPriceServer();
     /** Terminate the price-server sidecar if running (called on GUI teardown). */
