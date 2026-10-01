@@ -953,6 +953,7 @@ public:
         constexpr int      TESTNET_POS_COMMITTEE_SIZE   = 250;          // 126-of-250 quorum
         constexpr int64_t  TESTNET_POS_SLOT_INTERVAL    = 30;           // 30 s nominal block time (doc 11 §4)
         constexpr int64_t  TESTNET_POS_UNBONDING_PERIOD = 43200;        // x30 s = ~15 days (§3.11)
+        constexpr uint32_t TESTNET_POS_PAYOUT_NOTICE    = 1440;         // x60 s = ~1 day
         constexpr uint64_t TESTNET_POS_MIN_STAKE        = 4000000000000ULL; // 40,000 SEQ = 0.01% of 400M (§3.3)
 
         g_pos_vrf = true;
@@ -1053,7 +1054,7 @@ public:
             refuse_int("-posslotinterval", TESTNET_POS_SLOT_INTERVAL);
             refuse_int("-posunbonding", TESTNET_POS_UNBONDING_PERIOD);
             refuse_int("-posminstake", (int64_t)TESTNET_POS_MIN_STAKE);
-            refuse_int("-pospayoutnotice", (int64_t)DEFAULT_POS_PAYOUT_NOTICE);
+            refuse_int("-pospayoutnotice", (int64_t)TESTNET_POS_PAYOUT_NOTICE);
             refuse_int("-poscheckpointdepth", (int64_t)DEFAULT_POS_CHECKPOINT_DEPTH);
         }
 
@@ -1084,7 +1085,7 @@ public:
         // (period x g_pos_slot_interval), and g_pos_slot_interval stays 30, so
         // its ~15 days are unaffected by the cadence. Halving it would have cut
         // a security parameter in half rather than preserved it.
-        g_pos_payout_notice = 1440;                        // 1440 x 60s = ~1 day
+        g_pos_payout_notice = TESTNET_POS_PAYOUT_NOTICE;   // 1440 x 60s = ~1 day
         consensus.elements_mode = g_con_elementsmode;
         consensus.total_valid_epochs = 0;
         consensus.dynamic_epoch_length = 10;
