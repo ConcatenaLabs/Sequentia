@@ -1474,6 +1474,12 @@ RPCHelpMan issueasset()
     if (!wallet) return NullUniValue;
     CWallet* const pwallet = wallet.get();
 
+    // Wait for the wallet to catch up with the chain, as the spend RPCs do:
+    // a coin confirmed in the block just connected is otherwise still an
+    // untrusted receipt to a wallet that has not processed that block, and
+    // the issuance fails with "Insufficient funds".
+    pwallet->BlockUntilSyncedToCurrentChain();
+
     LOCK(pwallet->cs_wallet);
 
     if (!g_con_elementsmode) {
@@ -1724,6 +1730,12 @@ RPCHelpMan reissueasset()
     std::shared_ptr<CWallet> const wallet = GetWalletForJSONRPCRequest(request);
     if (!wallet) return NullUniValue;
     CWallet* const pwallet = wallet.get();
+
+    // Wait for the wallet to catch up with the chain, as the spend RPCs do:
+    // a coin confirmed in the block just connected is otherwise still an
+    // untrusted receipt to a wallet that has not processed that block, and
+    // the issuance fails with "Insufficient funds".
+    pwallet->BlockUntilSyncedToCurrentChain();
 
     LOCK(pwallet->cs_wallet);
 

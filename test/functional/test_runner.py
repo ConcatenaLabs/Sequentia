@@ -127,6 +127,7 @@ BASE_SCRIPTS = [
     'wallet_issuance_transparent.py --descriptors',
     'wallet_change_size.py --legacy-wallet',
     'wallet_change_size.py --descriptors',
+    'wallet_issuance_sync.py',
     'wallet_elements_regression_1172.py --legacy-wallet',
     'wallet_elements_regression_1259.py --legacy-wallet',
     'wallet_elements_21million.py',
