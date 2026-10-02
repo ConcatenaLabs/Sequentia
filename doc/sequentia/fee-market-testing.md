@@ -212,10 +212,10 @@ which is to say, case 2 fails intermittently for a reason that has nothing to do
 with the code under test. Every transaction in the suite is therefore funded from
 a confirmed output handed out exactly once.
 
-**A blinded input blinds the transaction.** Custom chains keep the Elements
-default, so the wallet's change from setup is confidential even when
-`-blindedaddresses=0`. Spending one of those forces the whole transaction to be
-blinded, and the raw send dies with `output has nonce, but is not blinded` — a
+**A blinded input blinds the transaction.** A coin the wallet received
+confidentially stays blinded: one paid to a confidential address, or the change
+of a transaction that was already confidential. Spending one of those forces the
+whole transaction to be blinded, and the raw send dies with `output has nonce, but is not blinded` — a
 confidentiality error that reads like a fee error. The suite only ever funds from
 unblinded outputs.
 

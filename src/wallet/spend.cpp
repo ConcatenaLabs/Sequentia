@@ -1408,6 +1408,30 @@ static bool CreateTransactionInternal(
         return false;
     }
 
+    // SEQUENTIA: is this transaction confidential whatever its change does? It
+    // is when a recipient is a confidential address, a selected coin is
+    // blinded, or the issuance is blinded. On a wallet that does not hand out
+    // confidential addresses by default (-blindedaddresses=0, the Sequentia
+    // chains' default), change the caller did not ask to blind is blinded only
+    // then: a transparent send stays transparent however many change outputs
+    // it has. Without this, a send in one asset paying its fee in another has
+    // two change outputs, which is a blindable shape, and both were blinded --
+    // about ten times the size of the explicit transaction, unasked.
+    const bool wallet_blinds_by_default = gArgs.GetBoolArg("-blindedaddresses", g_con_elementsmode && Params().DefaultBlindedAddresses());
+    bool tx_confidential_anyway = false;
+    if (blind_details) {
+        for (const CPubKey& pk : blind_details->o_pubkeys) {
+            if (pk.IsFullyValid()) { tx_confidential_anyway = true; break; }
+        }
+        for (const auto& coin : result->GetInputSet()) {
+            if (!coin.txout.nValue.IsExplicit() || !coin.txout.nAsset.IsExplicit()) {
+                tx_confidential_anyway = true;
+                break;
+            }
+        }
+        if (issuance_details && issuance_details->blind_issuance) tx_confidential_anyway = true;
+    }
+
     // If all of our inputs are explicit, we don't need a blinded dummy
     if (may_need_blinded_dummy) {
         may_need_blinded_dummy = false;
@@ -1500,13 +1524,21 @@ static bool CreateTransactionInternal(
                     // is what would otherwise blind the change and have the
                     // node reject the wallet's own transaction.
                     blind_pub = std::nullopt;
+                } else if (!wallet_blinds_by_default && !tx_confidential_anyway) {
+                    // SEQUENTIA: a transparent wallet sending a transparent
+                    // transaction, and nobody asked for confidential change:
+                    // every change output stays explicit (see
+                    // tx_confidential_anyway above).
+                    blind_pub = std::nullopt;
                 } else {
                     // Otherwise, we generated it from our own wallet, so get the
                     // blinding key from our own wallet.
                     blind_pub = wallet.GetBlindingPubKey(itScript->second.second);
-                    // SEQUENTIA: no address was named, so nobody asked for anything. Note
-                    // that a blinding pubkey is attached anyway, because it costs nothing
-                    // when the transaction has something else to blind. It is only the
+                    // SEQUENTIA: no address was named, so nobody asked for anything. A
+                    // blinding pubkey is attached anyway on a wallet that blinds by
+                    // default, or when the transaction is confidential regardless (a
+                    // confidential recipient or a blinded input), where blinding the
+                    // change keeps its amount from being derived. It is only the
                     // going-out-of-our-way in fillBlindDetails that is withheld.
                     //
                     // Deliberately NOT treating -blindedaddresses=1 as a request here. It

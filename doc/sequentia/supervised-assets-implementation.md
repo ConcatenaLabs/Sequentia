@@ -419,9 +419,11 @@ never enter a blinded output in the first place. Enforcing only at spend time is
 enough: a holder who already owns a blinded supervised output would be stranded
 permanently.
 
-**The wallet is the trap.** The node wallet blinds change automatically once a transaction
-has two or more change outputs, which under any-asset fees is the *ordinary* case for
-sending an issued asset (asset out, fee paid in another asset). The DEX's own wallet
+**The wallet is the trap.** A wallet that blinds by default (the node wallet under
+`-blindedaddresses=1`, or on a transaction that is already confidential) blinds change
+automatically once a transaction has two or more change outputs, which under any-asset
+fees is the *ordinary* case for sending an issued asset (asset out, fee paid in another
+asset). The DEX's own wallet
 daemon does the same. Shipping the consensus rule without fixing both would break ordinary
 sends of supervised assets and look like an unrelated wallet bug. Fix the wallets first,
 or ship them together.

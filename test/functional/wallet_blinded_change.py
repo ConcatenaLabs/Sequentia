@@ -17,9 +17,12 @@ device the wallet already uses for the mirror case of blinded inputs with nothin
 to blind) and the lone blinded change becomes legal.
 
 Sequentia is transparent by default, so the wallet only does this when confidential
-change was actually asked for: a confidential change address, or a wallet handing
-out confidential addresses (-blindedaddresses=1). With no request the change stays
-explicit -- but no longer silently: the funding RPCs report it in `warnings`, and
+change was actually asked for, by naming a confidential change address. On a wallet
+that does not hand out confidential addresses (-blindedaddresses=0) an unrequested
+change output on an otherwise explicit transaction is simply explicit: nothing was
+attempted, so nothing is reported. On a wallet that does (-blindedaddresses=1) the
+wallet attaches a blinding key to its change, a lone blinded change output is
+demoted -- but not silently: the funding RPCs report it in `warnings`, and
 `ignoreblindfail=false` turns it into an error.
 """
 
@@ -89,15 +92,14 @@ class WalletBlindedChangeTest(BitcoinTestFramework):
         for utxo in node.listunspent():
             assert_equal(utxo['amountblinder'], '00' * 32)
 
-        self.test_no_request_stays_explicit_but_loud(node, explicit_addr)
-        self.test_strict_mode_errors(node, explicit_addr)
+        self.test_transparent_wallet_change_is_explicit(node, explicit_addr)
         self.test_confidential_change_address_is_honoured(node, explicit_addr)
         self.test_change_dropped_after_dummy_added(node, explicit_addr)
         self.test_blinded_by_default_wallet(node)
         self.test_mirror_case_still_works(node)
 
-    def test_no_request_stays_explicit_but_loud(self, node, explicit_addr):
-        self.log.info("No request for confidential change: change stays explicit, and says so")
+    def test_transparent_wallet_change_is_explicit(self, node, explicit_addr):
+        self.log.info("No request on a transparent wallet: change is explicit, and nothing is reported")
 
         res, decoded = self.fund(node, explicit_addr, 1.0)
         change_pos = res['changepos']
@@ -107,38 +109,18 @@ class WalletBlindedChangeTest(BitcoinTestFramework):
         assert not is_blinded_nonce(change), "change was blinded without being asked for"
         # The transparent default costs nothing extra: no dummy output is manufactured.
         assert_equal(op_return_dummies(decoded), [])
+        # Nothing was demoted, because nothing was going to be blinded.
+        assert 'warnings' not in res, res.get('warnings')
 
-        assert 'warnings' in res, "the demotion was silent"
-        assert_equal(len(res['warnings']), 1)
-        assert "left unblinded" in res['warnings'][0], res['warnings']
-        assert f"index {change_pos}" in res['warnings'][0], res['warnings']
-
-        # walletcreatefundedpsbt reports it the same way.
-        raw = node.createrawtransaction([], [{explicit_addr: 1.0}])
         psbt_res = node.walletcreatefundedpsbt(
             [], [{explicit_addr: 1.0}], 0, {'fee_asset': FEE_ASSET})
-        assert 'warnings' in psbt_res, "walletcreatefundedpsbt demoted change silently"
-        assert "left unblinded" in psbt_res['warnings'][0], psbt_res['warnings']
-        assert raw  # createrawtransaction still works for the funding calls below
+        assert 'warnings' not in psbt_res, psbt_res.get('warnings')
 
-    def test_strict_mode_errors(self, node, explicit_addr):
-        self.log.info("ignoreblindfail=false refuses to hand back a demoted change output")
-
+        # And strict mode has nothing to refuse.
         raw = node.createrawtransaction([], [{explicit_addr: 1.0}])
-        assert_raises_rpc_error(
-            -4,
-            "Change output could not be blinded as there are no blinded inputs and no other blinded outputs.",
-            node.fundrawtransaction, raw,
-            {'fee_asset': FEE_ASSET, 'ignoreblindfail': False})
-
-        assert_raises_rpc_error(
-            -4,
-            "Change output could not be blinded as there are no blinded inputs and no other blinded outputs.",
-            node.walletcreatefundedpsbt, [], [{explicit_addr: 1.0}], 0,
-            {'fee_asset': FEE_ASSET, 'ignoreblindfail': False})
-
-        # The default is unchanged: the same call without the option still succeeds.
-        assert node.fundrawtransaction(raw, {'fee_asset': FEE_ASSET})['hex']
+        assert node.fundrawtransaction(raw, {'fee_asset': FEE_ASSET, 'ignoreblindfail': False})['hex']
+        assert node.walletcreatefundedpsbt([], [{explicit_addr: 1.0}], 0,
+                                           {'fee_asset': FEE_ASSET, 'ignoreblindfail': False})['psbt']
 
     def test_confidential_change_address_is_honoured(self, node, explicit_addr):
         self.log.info("A confidential change address is honoured instead of demoted")
@@ -269,6 +251,33 @@ class WalletBlindedChangeTest(BitcoinTestFramework):
         # extra ~1160 vbytes. Turning this into a request is a default worth deciding on
         # purpose; until then it must not happen by accident.
         recipient = default.getaddressinfo(default.getnewaddress())['unconfidential']
+
+        # This wallet does attach a blinding key to its change, so the lone blinded
+        # change output is demoted -- and says so.
+        res = fresh.fundrawtransaction(fresh.createrawtransaction([], [{recipient: 1.0}]),
+                                       {'fee_asset': FEE_ASSET})
+        change_pos = res['changepos']
+        assert_greater_than(change_pos, -1)
+        assert not is_blinded_nonce(fresh.decoderawtransaction(res['hex'])['vout'][change_pos])
+        assert 'warnings' in res, "the demotion was silent"
+        assert_equal(len(res['warnings']), 1)
+        assert "left unblinded" in res['warnings'][0], res['warnings']
+        assert f"index {change_pos}" in res['warnings'][0], res['warnings']
+        psbt_res = fresh.walletcreatefundedpsbt([], [{recipient: 1.0}], 0, {'fee_asset': FEE_ASSET})
+        assert "left unblinded" in psbt_res['warnings'][0], psbt_res.get('warnings')
+
+        self.log.info("  ignoreblindfail=false refuses to hand back a demoted change output")
+        raw = fresh.createrawtransaction([], [{recipient: 1.0}])
+        assert_raises_rpc_error(
+            -4,
+            "Change output could not be blinded as there are no blinded inputs and no other blinded outputs.",
+            fresh.fundrawtransaction, raw,
+            {'fee_asset': FEE_ASSET, 'ignoreblindfail': False})
+        assert_raises_rpc_error(
+            -4,
+            "Change output could not be blinded as there are no blinded inputs and no other blinded outputs.",
+            fresh.walletcreatefundedpsbt, [], [{recipient: 1.0}], 0,
+            {'fee_asset': FEE_ASSET, 'ignoreblindfail': False})
         txid = fresh.sendtoaddress(address=recipient, amount=1.0, fee_asset_label=FEE_ASSET)
         self.generatetoaddress(self.nodes[0], 1, default.getnewaddress(), sync_fun=self.no_op)
 
