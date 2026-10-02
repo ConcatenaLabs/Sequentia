@@ -1759,6 +1759,17 @@ RPCHelpMan reissueasset()
     if (issuance_details.reissuance_token.IsNull()) {
         throw JSONRPCError(RPC_WALLET_ERROR, "Asset reissuance token definition could not be found in wallet.");
     }
+    // SEQUENTIA: whether this reissuance is blinded is not a choice. The token id
+    // commits to it: a token derived as confidential requires a blinded amount,
+    // one derived explicit an explicit amount (confidential_validation.cpp). Say
+    // which, rather than leave IssuanceDetails' default (blinded) standing for
+    // every reissuance, which made each one count as confidential and get a
+    // blinding key on its change.
+    {
+        CAsset confidential_token;
+        CalculateReissuanceToken(confidential_token, issuance_details.entropy, /*fConfidential=*/true);
+        issuance_details.blind_issuance = confidential_token == issuance_details.reissuance_token;
+    }
 
     // Add destination for the to-be-created asset. SEQUENTIA: blind the reissued
     // outputs only when this chain blinds by default (mirrors getnewaddress /
