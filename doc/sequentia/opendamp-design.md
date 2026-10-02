@@ -405,8 +405,11 @@ Inherited from the DAMP paper with Sequentia specifics:
 - **Anyone-can-spend hazard**: an unenforced 0xbe leaf is anyone-can-spend.
   Never fund an OpenDAMP covenant on a chain where `getdeploymentinfo` does
   not report simplicity active. On Sequentia: mainnet always-active; the
-  live testnet is active (BIP9 bit 21, since height 89,856); regtest
-  requires `-evbparams=simplicity:0:::`.
+  live testnet is active (BIP9 bit 21, since height 89,856); a custom chain
+  such as `elementsregtest` needs `-evbparams=simplicity:-1:::`, which makes
+  it active from genesis. `simplicity:0:::` only starts signalling and leaves
+  the leaf anyone-can-spend until height 384 at the earliest. See
+  [`simplicity.md`](simplicity.md).
 - **Budget exhaustion**: with no padding, every shape has to pay for its own
   static cost out of the proofs it genuinely carries. The binding case is the
   *smallest* legitimate witness -- the sender proof, one regulated input, one A
