@@ -218,7 +218,13 @@ Elements already provides the machinery; only the *default* changes:
     wants it.
 - Sending is driven by the destination, as in Elements: paying a confidential
   address produces a blinded output; paying a Bitcoin-format address produces a
-  transparent output. Send logic is unchanged.
+  transparent output.
+- Change follows the transaction. With `-blindedaddresses=0` every change output
+  is explicit unless the transaction is confidential anyway (a confidential
+  recipient, a blinded input or a blinded issuance) or the caller names a
+  confidential change address, so a transparent send stays transparent however
+  many assets it touches. With `-blindedaddresses=1` the wallet blinds its change
+  wherever the transaction has a blindable shape, as Elements does.
 
 By default, Sequentia amounts and assets are **public**, exactly like Bitcoin.
 Users who want confidentiality use the confidential address format end-to-end;
