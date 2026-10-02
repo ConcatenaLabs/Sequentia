@@ -189,7 +189,15 @@ bool IsStandardTx(const CTransaction& tx, bool permit_bare_multisig, const CFeeR
         }
 
         if (whichType == TxoutType::NULL_DATA) {
-            nDataOut++;
+            // SEQUENTIA: a bare OP_RETURN, with nothing after the opcode, carries
+            // no data. It is a burn: whatever amount it holds is destroyed. The
+            // one-OP_RETURN limit below exists to bound data carried on chain,
+            // so burns do not count against it, and a transaction may destroy
+            // the remains of several outputs (each in its own asset) at once.
+            // Every OP_RETURN that pushes data still counts, exactly as before.
+            if (!IsBareBurnScript(txout.scriptPubKey)) {
+                nDataOut++;
+            }
         } else if ((whichType == TxoutType::MULTISIG) && (!permit_bare_multisig)) {
             reason = "bare-multisig";
             return false;
@@ -199,7 +207,7 @@ bool IsStandardTx(const CTransaction& tx, bool permit_bare_multisig, const CFeeR
         }
     }
 
-    // only one OP_RETURN txout is permitted
+    // only one data-carrying OP_RETURN txout is permitted (bare burns aside)
     if (!params.GetMultiDataPermitted() && nDataOut > 1) {
         reason = "multi-op-return";
         return false;

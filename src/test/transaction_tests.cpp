@@ -866,7 +866,7 @@ BOOST_AUTO_TEST_CASE(test_IsStandard)
     t.vout[0].scriptPubKey = CScript() << OP_RETURN;
     CheckIsStandard(t);
 
-    // Only one TxoutType::NULL_DATA permitted in all cases
+    // Only one data-carrying TxoutType::NULL_DATA permitted in all cases
     t.vout.resize(2);
     t.vout[0].scriptPubKey = CScript() << OP_RETURN << ParseHex("04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38");
     t.vout[0].nValue = 0;
@@ -874,13 +874,36 @@ BOOST_AUTO_TEST_CASE(test_IsStandard)
     t.vout[1].nValue = 0;
     CheckIsNotStandard(t, "multi-op-return");
 
+    // SEQUENTIA: a bare OP_RETURN carries no data; it is a value burn and does
+    // not count against the limit, alongside a data output or not.
     t.vout[0].scriptPubKey = CScript() << OP_RETURN << ParseHex("04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38");
     t.vout[1].scriptPubKey = CScript() << OP_RETURN;
-    CheckIsNotStandard(t, "multi-op-return");
+    CheckIsStandard(t);
 
     t.vout[0].scriptPubKey = CScript() << OP_RETURN;
     t.vout[1].scriptPubKey = CScript() << OP_RETURN;
+    t.vout[0].nValue = 1000;
+    t.vout[1].nValue = 1000;
+    CheckIsStandard(t);
+
+    // One data output and two burns: standard.
+    t.vout.resize(3);
+    t.vout[2].scriptPubKey = CScript() << OP_RETURN << ParseHex("01");
+    t.vout[2].nValue = 0;
+    CheckIsStandard(t);
+
+    // Two data outputs and a burn: still refused, burns or not.
+    t.vout[1].scriptPubKey = CScript() << OP_RETURN << ParseHex("02");
     CheckIsNotStandard(t, "multi-op-return");
+
+    // An OP_RETURN followed by an empty push is data, not a bare burn.
+    t.vout[0].scriptPubKey = CScript() << OP_RETURN << std::vector<unsigned char>();
+    t.vout[1].scriptPubKey = CScript() << OP_RETURN;
+    CheckIsNotStandard(t, "multi-op-return");
+    BOOST_CHECK(!IsBareBurnScript(t.vout[0].scriptPubKey));
+    BOOST_CHECK(IsBareBurnScript(t.vout[1].scriptPubKey));
+    t.vout[0].nValue = 0;
+    t.vout[1].nValue = 0;
 
     // Check large scriptSig (non-standard if size is >1650 bytes)
     t.vout.resize(1);

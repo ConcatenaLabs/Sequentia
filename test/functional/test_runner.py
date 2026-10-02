@@ -383,6 +383,7 @@ BASE_SCRIPTS = [
     'feature_nulldummy.py --legacy-wallet',
     'feature_nulldummy.py --descriptors',
     'mempool_accept.py',
+    'mempool_burn_outputs.py',
     'mempool_expiry.py',
     'wallet_import_rescan.py --legacy-wallet',
     'wallet_import_with_label.py --legacy-wallet',
