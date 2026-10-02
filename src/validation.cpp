@@ -460,7 +460,12 @@ void CChainState::MaybeUpdateMempoolForReorg(
                 const Coin& coin{CoinsTip().AccessCoin(txin.prevout)};
                 assert(!coin.IsSpent());
                 const auto mempool_spend_height{m_chain.Tip()->nHeight + 1};
-                if (coin.IsCoinBase() && mempool_spend_height - coin.nHeight < COINBASE_MATURITY) {
+                // SEQUENTIA: the maturity consensus applies at that height
+                // (CheckTxInputs), not the inherited constant. A reorg that
+                // lowers the tip by one block makes a spend admitted at exactly
+                // the chain's maturity premature again; reading 100 here kept
+                // it, and every block template then failed on it.
+                if (coin.IsCoinBase() && mempool_spend_height - coin.nHeight < CoinbaseMaturityAt(mempool_spend_height)) {
                     return true;
                 }
             }
@@ -4011,6 +4016,18 @@ bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew
         // as well as peg-in inputs during transitional periods.
         m_mempool->removeForBlock(blockConnecting.vtx, pindexNew->nHeight, pindexNew);
         disconnectpool.removeForBlock(blockConnecting.vtx);
+        // SEQUENTIA: where the coinbase maturity rises at a height (the
+        // testnet's 100 -> 1,000, CoinbaseMaturityAt), a resident spend that
+        // was mature for this block is premature for the next one, with none
+        // of its inputs spent and no reorg to trigger the maturity pass in
+        // MaybeUpdateMempoolForReorg. Left in place, every block template
+        // re-selects it and fails validation. Only the boundary block pays
+        // for the scan: elsewhere a block adds one to every depth and the
+        // maturity stays put, so nothing resident can become premature.
+        const int next_height = pindexNew->nHeight + 1;
+        if (CoinbaseMaturityAt(next_height) > CoinbaseMaturityAt(pindexNew->nHeight)) {
+            m_mempool->removeImmatureCoinbaseSpends(CoinsTip(), next_height);
+        }
     }
     // Update m_chain & related variables.
     m_chain.SetTip(pindexNew);
