@@ -227,6 +227,7 @@ BASE_SCRIPTS = [
     'feature_pos_reward_xchain.py',
     'feature_pos_rewards.py',
     'feature_pos_split.py',
+    'feature_pos_split_maturity.py',
     'feature_pos_withdrawstake.py',
     'feature_pos_payout.py',
     'feature_pos_bls_gossip.py',

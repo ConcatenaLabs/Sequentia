@@ -94,7 +94,10 @@ existing pots — the front-running attack is not mitigated but absent, with no
 delegation-record heights for this; both remain pure functions of the UTXO set.)
 
 **Maturity.** Pot outputs are coinbase value and mature like any other coinbase
-reward: a claim sweeps only pots at least `COINBASE_MATURITY` blocks deep. A
+reward: a claim sweeps only the pots that are mature at the height the claim
+confirms in, under the chain's coinbase maturity (`CoinbaseMaturityAt`: 1,000
+blocks on the real chains, the inherited 100 on custom chains unless
+`-con_coinbase_maturity` sets it). Younger pots are left for the next claim. A
 previous claim's own re-pot output is ordinary transaction value and carries no
 such delay.
 

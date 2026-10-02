@@ -1837,6 +1837,18 @@ protected:
         // genesis, the correct shape for any fresh chain.
         consensus.split_payout_height = args.GetIntArg("-con_splitpayoutheight", 0);
         g_split_payout_height = consensus.split_payout_height;
+        // SEQUENTIA: coinbase maturity, settable on custom chains so the
+        // functional suite can run a chain with the real chains' 1,000 blocks
+        // and catch code that still reads the inherited COINBASE_MATURITY. The
+        // default 0 keeps the inherited 100, which the suite's back-to-back
+        // block generation assumes everywhere.
+        consensus.coinbase_maturity = (int)args.GetIntArg("-con_coinbase_maturity", 0);
+        consensus.coinbase_maturity_height = (int)args.GetIntArg("-con_coinbase_maturity_height", 1);
+        if (consensus.coinbase_maturity < 0 || consensus.coinbase_maturity_height < 0) {
+            throw std::runtime_error("-con_coinbase_maturity and -con_coinbase_maturity_height must be non-negative");
+        }
+        g_coinbase_maturity = consensus.coinbase_maturity;
+        g_coinbase_maturity_height = consensus.coinbase_maturity_height;
         consensus.BIP16Exception = uint256S(args.GetArg("-con_bip16exception", "0x0"));
         consensus.BIP34Height = args.GetIntArg("-con_bip34height", 0);
         consensus.BIP34Hash = uint256S(args.GetArg("-con_bip34hash", "0x0"));
