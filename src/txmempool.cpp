@@ -770,6 +770,40 @@ void CTxMemPool::removeStaleSupervision(CCoinsView& view)
     }
 }
 
+bool CTxMemPool::SpendsImmatureCoinbase(const CTxMemPoolEntry& entry, const CCoinsViewCache& coins_tip, int spend_height) const
+{
+    AssertLockHeld(cs);
+    if (!entry.GetSpendsCoinbase()) return false;
+    for (const CTxIn& txin : entry.GetTx().vin) {
+        // A peg-in spends a parent-chain output, and an in-mempool parent is
+        // never a coinbase: neither is subject to coinbase maturity here.
+        if (txin.m_is_pegin || mapTx.count(txin.prevout.hash)) continue;
+        const Coin& coin = coins_tip.AccessCoin(txin.prevout);
+        if (!coin.IsSpent() && coin.IsCoinBase() &&
+            spend_height - (int)coin.nHeight < CoinbaseMaturityAt(spend_height)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void CTxMemPool::removeImmatureCoinbaseSpends(const CCoinsViewCache& coins_tip, int spend_height)
+{
+    AssertLockHeld(cs);
+    setEntries premature;
+    for (txiter it = mapTx.begin(); it != mapTx.end(); ++it) {
+        if (SpendsImmatureCoinbase(*it, coins_tip, spend_height)) premature.insert(it);
+    }
+    if (premature.empty()) return;
+    setEntries to_remove;
+    for (txiter it : premature) {
+        LogPrintf("Evicting %s from the mempool: its coinbase input is premature at height %d (maturity %d)\n",
+                  it->GetTx().GetHash().ToString(), spend_height, CoinbaseMaturityAt(spend_height));
+        CalculateDescendants(it, to_remove);
+    }
+    RemoveStaged(to_remove, false, MemPoolRemovalReason::REORG);
+}
+
 void CTxMemPool::removeForBlock(const std::vector<CTransactionRef>& vtx, unsigned int nBlockHeight, const CBlockIndex* p_block_index_new)
 {
     AssertLockHeld(cs);

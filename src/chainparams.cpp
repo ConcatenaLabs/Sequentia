@@ -1847,6 +1847,13 @@ protected:
         if (consensus.coinbase_maturity < 0 || consensus.coinbase_maturity_height < 0) {
             throw std::runtime_error("-con_coinbase_maturity and -con_coinbase_maturity_height must be non-negative");
         }
+        // CoinbaseMaturityAt reads a height of 0 as "never", so accepting it
+        // would leave the chain on the inherited 100 while the operator
+        // believes it runs on the maturity they set. Genesis is never spent,
+        // so 1 already means "from the start".
+        if (consensus.coinbase_maturity > 0 && consensus.coinbase_maturity_height < 1) {
+            throw std::runtime_error("-con_coinbase_maturity_height must be at least 1 when -con_coinbase_maturity is set (1 applies it from the first block)");
+        }
         g_coinbase_maturity = consensus.coinbase_maturity;
         g_coinbase_maturity_height = consensus.coinbase_maturity_height;
         consensus.BIP16Exception = uint256S(args.GetArg("-con_bip16exception", "0x0"));

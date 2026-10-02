@@ -12,7 +12,9 @@ hold that at 1,000 blocks -- the wall-clock figure of Bitcoin's 100 at a
 
 This runs a custom chain with -con_coinbase_maturity=1000 and places pots at
 four depths relative to the claim's spend height: 1,000 (mature), 999, 500 and
-100 (all immature). The claim must take exactly the first, and confirm.
+100 (all immature). The claim must take exactly the first, and confirm. A
+one-block rollback right after the claim leaves it premature; the producer must
+still build the next block.
 """
 
 from decimal import Decimal
@@ -158,6 +160,26 @@ class PosSplitMaturityTest(BitcoinTestFramework):
         tx = n0.getrawtransaction(claim["txid"], True)
         spent = [(i["txid"], i["vout"]) for i in tx["vin"]]
         assert_equal(spent, [self.pot_outpoint(h1)])
+
+        # The claim is built at exactly the maturity for the next block, with
+        # no margin, so a one-block rollback (what a Bitcoin reorg of the anchor
+        # does) leaves it premature. It must leave the mempool rather than fail
+        # every block the producer assembles. Its nLockTime is the tip it was
+        # built on, so the same rollback also makes it non-final; either rule
+        # evicts it (mempool_coinbase_maturity.py and
+        # feature_pos_maturity_reorg.py cover a spend only maturity catches).
+        self.log.info("A one-block rollback makes the fresh claim premature; the producer still builds")
+        claim_hex = tx["hex"]
+        n0.invalidateblock(n0.getbestblockhash())
+        assert_equal(n0.getblockcount() + 2, claim_height)
+        assert claim["txid"] not in n0.getrawmempool()
+        # Other traffic, so the rebuilt block is not byte-identical to the
+        # invalidated one, which a node refuses as a duplicate for that alone.
+        other = w0.sendtoaddress(address=w0.getnewaddress(), amount=1, fee_asset_label="bitcoin")
+        self.mine(1)
+        assert_equal(n0.getblockcount() + 1, claim_height)
+        assert other in n0.getblock(n0.getbestblockhash())["tx"]
+        n0.sendrawtransaction(claim_hex)
         self.mine(1)
         tx = n0.getrawtransaction(claim["txid"], True)
         assert_equal(n0.getblock(tx["blockhash"])["height"], claim_height)

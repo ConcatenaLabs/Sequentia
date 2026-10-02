@@ -689,6 +689,17 @@ public:
      *  once the block's records are in the registry, and only when the block
      *  carried one, so an ordinary block pays nothing. */
     void removeStaleSupervision(CCoinsView& view) EXCLUSIVE_LOCKS_REQUIRED(cs);
+    /** SEQUENTIA: whether `entry` spends a confirmed coinbase output that is
+     *  not mature for a spend at `spend_height` under the chain's maturity
+     *  there (CoinbaseMaturityAt), reading confirmed coins from `coins_tip`.
+     *  The block assembler asks this of every candidate, so a premature spend
+     *  costs the template one transaction instead of failing it whole. */
+    bool SpendsImmatureCoinbase(const CTxMemPoolEntry& entry, const CCoinsViewCache& coins_tip, int spend_height) const EXCLUSIVE_LOCKS_REQUIRED(cs);
+    /** SEQUENTIA: evict, with their descendants, the entries for which
+     *  SpendsImmatureCoinbase holds. Called from ConnectTip on the block after
+     *  which the coinbase maturity rises, the one case where a resident entry
+     *  becomes premature without a reorg. */
+    void removeImmatureCoinbaseSpends(const CCoinsViewCache& coins_tip, int spend_height) EXCLUSIVE_LOCKS_REQUIRED(cs);
     void removeConflicts(const CTransaction& tx) EXCLUSIVE_LOCKS_REQUIRED(cs);
     void removeForBlock(const std::vector<CTransactionRef>& vtx, unsigned int nBlockHeight,
                         const CBlockIndex* p_block_index_new = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs);

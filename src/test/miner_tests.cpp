@@ -518,4 +518,46 @@ BOOST_AUTO_TEST_CASE(CreateNewBlock_validity)
     fCheckpointsEnabled = true;
 }
 
+// SEQUENTIA: the template must leave out a coinbase spend that is premature at
+// the template's own height under the chain's maturity there (CoinbaseMaturityAt),
+// rather than include it and fail TestBlockValidity -- which would stop every
+// producer holding the entry. The mempool evicts such entries on a reorg and at a
+// maturity boundary; this is the second line, so the entry goes in through
+// addUnchecked, past the checks that would normally keep it out.
+BOOST_FIXTURE_TEST_CASE(CreateNewBlock_skips_immature_coinbase_spend, TestChain100Setup)
+{
+    const int saved_maturity{g_coinbase_maturity};
+    const int saved_height{g_coinbase_maturity_height};
+    struct Restore {
+        int m, h;
+        ~Restore() { g_coinbase_maturity = m; g_coinbase_maturity_height = h; }
+    } restore{saved_maturity, saved_height};
+
+    const CScript script = CScript() << ToByteVector(coinbaseKey.GetPubKey()) << OP_CHECKSIG;
+    // The height-1 coinbase, spent in block 101: depth 100.
+    const CAmount in_value = m_coinbase_txns[0]->vout[0].nValue.GetAmount();
+    const CMutableTransaction spend = CreateValidMempoolTransaction(m_coinbase_txns[0], 0, 1, coinbaseKey, script,
+                                                                    in_value - 1000, /*submit=*/false);
+    {
+        LOCK2(cs_main, m_node.mempool->cs);
+        TestMemPoolEntryHelper entry;
+        m_node.mempool->addUnchecked(entry.Fee(1000).Time(GetTime()).SpendsCoinbase(true).FromTx(spend));
+    }
+    BOOST_CHECK_EQUAL(m_node.chainman->ActiveChain().Height(), 100);
+
+    // Maturity 150 from height 1: premature in block 101. Left out, template valid.
+    g_coinbase_maturity = 150;
+    g_coinbase_maturity_height = 1;
+    std::unique_ptr<CBlockTemplate> tmpl = BlockAssembler{m_node.chainman->ActiveChainstate(), *m_node.mempool, Params()}.CreateNewBlock(script);
+    BOOST_REQUIRE(tmpl);
+    BOOST_CHECK_EQUAL(tmpl->block.vtx.size(), 1U);
+
+    // Maturity 150 only from height 102: block 101 is still under 100, so it goes in.
+    g_coinbase_maturity_height = 102;
+    tmpl = BlockAssembler{m_node.chainman->ActiveChainstate(), *m_node.mempool, Params()}.CreateNewBlock(script);
+    BOOST_REQUIRE(tmpl);
+    BOOST_REQUIRE_EQUAL(tmpl->block.vtx.size(), 2U);
+    BOOST_CHECK(tmpl->block.vtx[1]->GetHash() == spend.GetHash());
+}
+
 BOOST_AUTO_TEST_SUITE_END()

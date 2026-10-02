@@ -414,6 +414,7 @@ bool BlockAssembler::TestPackage(uint64_t packageSize, int64_t packageSigOpsCost
 // - transaction finality (locktime)
 // - premature witness (in case segwit transactions are added to mempool before
 //   segwit activation)
+// - premature coinbase spends, under the chain's maturity at this height
 bool BlockAssembler::TestPackageTransactions(const CTxMemPool::setEntries& package) const
 {
     for (CTxMemPool::txiter it : package) {
@@ -421,6 +422,14 @@ bool BlockAssembler::TestPackageTransactions(const CTxMemPool::setEntries& packa
             return false;
         }
         if (!fIncludeWitness && it->GetTx().HasWitness()) {
+            return false;
+        }
+        // SEQUENTIA: a coinbase spend must be mature at THIS block's height
+        // under the chain's maturity there (CoinbaseMaturityAt). The mempool
+        // evicts what a reorg or a maturity boundary makes premature, so this
+        // is the second line; the first being wrong otherwise fails every
+        // template TestBlockValidity and stops every producer.
+        if (m_mempool.SpendsImmatureCoinbase(*it, m_chainstate.CoinsTip(), nHeight)) {
             return false;
         }
         // SEQUENTIA: a spend a freeze has caught, or a record a rotation has
