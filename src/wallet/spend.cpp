@@ -880,6 +880,20 @@ static size_t AppendBlindingDummyOutput(BlindDetails* det, CWallet* wallet, CMut
     return txNew.vout.size() - 1;
 }
 
+// SEQUENTIA: whether the issuance a transaction carries has a blinded amount.
+// For an initial issuance that is the caller's choice (blind_issuance). For a
+// reissuance it is not a choice at all: the token id commits to it, so a token
+// derived as confidential requires a blinded reissuance amount and one derived
+// explicit requires an explicit amount (confidential_validation.cpp). Reading
+// blind_issuance for a reissuance would read a default nobody set.
+static bool IssuanceIsBlinded(const IssuanceDetails& issuance)
+{
+    if (issuance.reissuance_token.IsNull()) return issuance.blind_issuance;
+    CAsset confidential_token;
+    CalculateReissuanceToken(confidential_token, issuance.entropy, /*fConfidential=*/true);
+    return confidential_token == issuance.reissuance_token;
+}
+
 static bool fillBlindDetails(BlindDetails* det, CWallet* wallet, CMutableTransaction& txNew, std::vector<CInputCoin>& selected_coins, bilingual_str& error) {
     int num_inputs_blinded = 0;
 
@@ -944,10 +958,28 @@ static bool fillBlindDetails(BlindDetails* det, CWallet* wallet, CMutableTransac
                 error = _("Change output could not be blinded as there are no blinded inputs and no other blinded outputs.");
                 return false;
             }
+        } else if (det->only_recipient_blind_index == -1) {
+            // SEQUENTIA: the one thing to blind is an issuance or reissuance
+            // amount, not an output. It cannot be unblinded the way a lone
+            // recipient is below: the caller asked for a blinded issuance, and
+            // a reissuance of a token derived as confidential must be blinded
+            // or consensus refuses it. So give BlindTransaction an output to
+            // balance it with, as for requested blinded change above. The
+            // dummy's asset must appear among the inputs for its surjection
+            // proof, and the first selected coin's always does.
+            //
+            // This used to be an assertion, reachable from issueasset on a
+            // transparent wallet: a wallet call must never be able to abort
+            // the node.
+            if (det->i_assets.empty()) {
+                error = _("A blinded issuance needs an input to balance its blinding against.");
+                return false;
+            }
+            AppendBlindingDummyOutput(det, wallet, txNew, det->i_assets[0]);
+            wallet->WalletLogPrintf("Adding OP_RETURN output so the blinded issuance can be balanced despite there being no blinded inputs and no blinded outputs.\n");
         } else {
             // 1 blinded destination
             // TODO Attempt to get a blinded input, OR add unblinded coin to make blinded change
-            assert(det->only_recipient_blind_index != -1);
             if (det->ignore_blind_failure) {
                 det->num_to_blind--;
                 txNew.vout[det->only_recipient_blind_index].nNonce.SetNull();
@@ -1359,7 +1391,7 @@ static bool CreateTransactionInternal(
             coin_selection_params.tx_noinputs_size += 2 * 32 + 2 * (2 - issue_count);
         }
         // Allocate non-null nAmount/nInflationKeys and rangeproofs
-        if (issuance_details->blind_issuance) {
+        if (IssuanceIsBlinded(*issuance_details)) {
             coin_selection_params.tx_noinputs_size += issue_count * (33 * WITNESS_SCALE_FACTOR + MAX_RANGEPROOF_SIZE + WITNESS_SCALE_FACTOR - 1) / WITNESS_SCALE_FACTOR;
         } else {
             coin_selection_params.tx_noinputs_size += issue_count * 9;
@@ -1429,18 +1461,7 @@ static bool CreateTransactionInternal(
                 break;
             }
         }
-        if (issuance_details && issuance_details->blind_issuance) tx_confidential_anyway = true;
-    }
-
-    // If all of our inputs are explicit, we don't need a blinded dummy
-    if (may_need_blinded_dummy) {
-        may_need_blinded_dummy = false;
-        for (const auto& coin : result->GetInputSet()) {
-            if (!coin.txout.nValue.IsExplicit()) {
-                may_need_blinded_dummy = true;
-                break;
-            }
-        }
+        if (issuance_details && IssuanceIsBlinded(*issuance_details)) tx_confidential_anyway = true;
     }
 
     // Always make a change output
@@ -1783,8 +1804,20 @@ static bool CreateTransactionInternal(
         // If the change was blinded, and was the only blinded output, we cannot drop it
         // without causing the transaction to fail to balance. So keep it, and merely
         // zero it out.
-        if (was_blinded && blind_details->num_to_blind == 1) {
-            assert (may_need_blinded_dummy);
+        //
+        // SEQUENTIA: counted in OUTPUTS, not in num_to_blind. A blinded issuance
+        // amount also counts towards num_to_blind but is not an output: when it
+        // and the change were the two things to blind, dropping the change left
+        // the issuance with nothing to balance against, and the second pass of
+        // fillBlindDetails below then hit an assertion and aborted the node
+        // (issueasset blind=true on a transparent wallet with a small leftover).
+        int blinded_outputs = 0;
+        if (blind_details) {
+            for (const CPubKey& pk : blind_details->o_pubkeys) {
+                if (pk.IsValid()) ++blinded_outputs;
+            }
+        }
+        if (was_blinded && blinded_outputs == 1) {
             change_position->scriptPubKey = CScript() << OP_RETURN;
             change_position->nValue = 0;
         } else {
