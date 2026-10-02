@@ -2097,16 +2097,21 @@ RPCHelpMan claimpoolrewards()
             "been distributed", HexStr(signer)));
     }
     // Pot outputs created by a coinbase are subject to coinbase maturity, like
-    // any other coinbase value: a claim can only sweep rewards at least
-    // COINBASE_MATURITY blocks deep. (A previous claim's own re-pot output is
-    // an ordinary transaction output and sweeps immediately, but sweeping it
-    // alone rarely clears the fee cap, so immature pots are simply left for
-    // the next claim rather than special-cased.)
-    const int tip_for_maturity = pwallet->GetLastBlockHeight();
+    // any other coinbase value: a claim can only sweep rewards that are mature
+    // at the height the claim would confirm in. That is the chain's maturity
+    // in force there (CoinbaseMaturityAt, 1,000 blocks on the real chains),
+    // exactly what Consensus::CheckTxInputs applies -- never the inherited
+    // COINBASE_MATURITY, which would build claims that cannot confirm. (A
+    // previous claim's own re-pot output is an ordinary transaction output and
+    // sweeps immediately, but sweeping it alone rarely clears the fee cap, so
+    // immature pots are simply left for the next claim rather than
+    // special-cased.)
+    const int spend_height = pwallet->GetLastBlockHeight() + 1;
+    const int maturity = CoinbaseMaturityAt(spend_height);
     std::map<COutPoint, PosPotRef> pots;
     int immature = 0;
     for (const auto& e : all_pots) {
-        if (e.second.height > 0 && tip_for_maturity - e.second.height + 1 < COINBASE_MATURITY) {
+        if (e.second.height > 0 && spend_height - e.second.height < maturity) {
             ++immature;
             continue;
         }
@@ -2115,7 +2120,7 @@ RPCHelpMan claimpoolrewards()
     if (pots.empty()) {
         throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
             "pool %s has %d pot output(s), all still inside coinbase maturity (%d blocks); claim once they mature",
-            HexStr(signer), immature, COINBASE_MATURITY));
+            HexStr(signer), immature, maturity));
     }
     std::vector<std::tuple<CAsset, int64_t, int>> pot_inputs;
     for (const auto& e : pots) pot_inputs.emplace_back(e.second.asset, e.second.value, e.second.height);

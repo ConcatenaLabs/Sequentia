@@ -100,7 +100,8 @@ payout; that is a payment nobody makes by accident, and the consequence of the
 mistake is that it gets converted along with the rest.
 
 **Maturity is part of attribution, not an afterthought.** Coinbase value is
-spendable only `COINBASE_MATURITY` blocks deep. A reward that is not yet mature
+spendable only once mature under the chain's coinbase maturity (1,000 blocks on
+the real chains). A reward that is not yet mature
 is reported, so a staker can see it coming, and is not eligible for conversion.
 Pot-claim outputs are ordinary outputs and mature immediately — but the pot they
 came from was itself coinbase value, which `claimpoolrewards` already respects.
