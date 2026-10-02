@@ -109,6 +109,14 @@ bool IsDust(const CTxOut& txout, const CFeeRate& dustRelayFee);
 
 bool IsStandard(const CScript& scriptPubKey, TxoutType& whichType);
 
+/** SEQUENTIA: a value burn -- an output whose script is a bare OP_RETURN with
+ *  nothing after it. It carries no data, so IsStandardTx does not count it
+ *  against the one-data-output limit. */
+inline bool IsBareBurnScript(const CScript& scriptPubKey)
+{
+    return scriptPubKey.size() == 1 && scriptPubKey[0] == OP_RETURN;
+}
+
 
 // Changing the default transaction version requires a two step process: first
 // adapting relay policy by bumping TX_MAX_STANDARD_VERSION, and then later
