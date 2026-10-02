@@ -29,6 +29,7 @@ Reference (current):
 | [`asset-contracts-and-verification.md`](asset-contracts-and-verification.md) | The mechanism underneath: the contract committed into the asset id at issuance, the canonical hash, the domain proof, the registry, and why none of it can be added afterwards. |
 | [`supervised-assets.md`](supervised-assets.md) | For issuers and operators: what supervision is and is not, the operational and recovery keys and why there are two, issuing, freezing, unfreezing, pause, key rotation, publishing records without being front-run, and the RPC reference. |
 | [`openamp-holder.md`](openamp-holder.md) | For holders: how a Core wallet holds an issuer-governed (OpenAMP) restricted asset — the enclave, the account id it derives rather than fetches, the GUI's OpenAMP tab, `getopenampaccount` and `signopenamptransfer`, linking a SeqPal ID, and why the node does not talk to the policy server itself. |
+| [`simplicity.md`](simplicity.md) | For developers writing Simplicity programs: the `0xbe` leaf and its witness layout, the execution budget and the annex, activation on each chain and the regtest flag, and the traps (unactivated chains, mempool-only refusals, the relative-timelock jets, `lbtc_asset`). |
 | [`supervised-assets-implementation.md`](supervised-assets-implementation.md) | Implementation notes for supervised assets: the consensus rules as coded, the record format, activation (testnet height 94,600), and the tests. Companion to the proposal below. |
 
 Operating runbooks (current):
