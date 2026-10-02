@@ -169,9 +169,12 @@ class KeyPoolTest(BitcoinTestFramework):
         assert_equal(res[0]['success'], True)
         w1.walletpassphrase('test', 100)
 
-        # ELEMENTS: the cost of change at a 10sat/b feerate is ~15000 sat,
-        #  so we need to start with a bigger utxo to trigger change creation.
-        #  all the below numbers are increased by 15000.
+        # ELEMENTS: a 25,000 sat coin rather than upstream's 10,000, so that a
+        #  5,000 sat payment leaves change whatever the change costs. The
+        #  amounts that must leave no change are derived from the measured fee
+        #  below: on a transparent wallet (the tests' default) change is priced
+        #  as an explicit output, so a fixed offset for the cost of a blinded
+        #  one no longer applies.
         # SEQUENTIA: an open-fee-market chain has no default fee asset.
         res = w1.sendtoaddress(address=address, amount=0.00025000, fee_asset_label='bitcoin')
         self.generate(nodes[0], 1)
@@ -188,14 +191,17 @@ class KeyPoolTest(BitcoinTestFramework):
         # creating a 10,000 sat transaction without change should still be possible
         res = w2.walletcreatefundedpsbt(inputs=[], outputs=[{destination: 0.00025000}], options={"subtractFeeFromOutputs": [0], "feeRate": 0.00010})
         assert_equal("psbt" in res, True)
+        exact_fee = res["fee"]
         # should work without subtractFeeFromOutputs if the exact fee is subtracted from the amount
         # (nothing else determines the fee asset once subtractFeeFromOutputs is gone, so name it)
-        res = w2.walletcreatefundedpsbt(inputs=[], outputs=[{destination: 0.00008570}], options={"feeRate": 0.00010, "fee_asset": "bitcoin"})
+        res = w2.walletcreatefundedpsbt(inputs=[], outputs=[{destination: Decimal("0.00025000") - exact_fee}], options={"feeRate": 0.00010, "fee_asset": "bitcoin"})
         assert_equal("psbt" in res, True)
+        assert_equal(res["changepos"], -1)
 
         # dust change should be removed
-        res = w2.walletcreatefundedpsbt(inputs=[], outputs=[{destination: 0.00008200}], options={"feeRate": 0.00010, "fee_asset": "bitcoin"})
+        res = w2.walletcreatefundedpsbt(inputs=[], outputs=[{destination: Decimal("0.00025000") - exact_fee - Decimal("0.00000100")}], options={"feeRate": 0.00010, "fee_asset": "bitcoin"})
         assert_equal("psbt" in res, True)
+        assert_equal(res["changepos"], -1)
 
         # create a transaction without change at the maximum fee rate, such that the output is still spendable:
         res = w2.walletcreatefundedpsbt(inputs=[], outputs=[{destination: 0.00025000}], options={"subtractFeeFromOutputs": [0], "feeRate": 0.0008823})

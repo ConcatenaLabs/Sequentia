@@ -1233,19 +1233,48 @@ static bool CreateTransactionInternal(
     CTxOut change_prototype_txout(mapScriptChange.begin()->first, 0, mapScriptChange.begin()->second.second);
     // TODO CA: Set this for each change output
     coin_selection_params.change_output_size = GetSerializeSize(change_prototype_txout);
+
+    // SEQUENTIA: price the change as it will be built. Change is blinded only
+    // when the transaction is confidential anyway (see tx_confidential_anyway
+    // below), and on a transparent wallet that is decided by things mostly
+    // known before selection: the wallet blinds by default, a recipient is
+    // confidential, the issuance is blinded, or a confidential change address
+    // was named. Pricing every elements-mode change as blinded (commitments,
+    // a rangeproof and a surjection proof: about 1,400 vbytes against about 66
+    // for explicit change) set the threshold below which change goes to the
+    // fee some twenty times too high, so a transparent send could give away a
+    // leftover many times its own fee. The one thing selection itself decides
+    // is whether a blinded coin is spent; if it is, selection runs again at
+    // the blinded size (below).
+    const bool wallet_blinds_by_default = gArgs.GetBoolArg("-blindedaddresses", g_con_elementsmode && Params().DefaultBlindedAddresses());
+    size_t explicit_change_output_size = coin_selection_params.change_output_size;
+    size_t blinded_change_output_size = coin_selection_params.change_output_size;
+    bool change_priced_blinded = false;
     if (g_con_elementsmode) {
+        CTxOut explicit_change = change_prototype_txout;
+        explicit_change.nAsset.vchCommitment.resize(33);
+        explicit_change.nValue.vchCommitment.resize(9);
+        explicit_change.nNonce.vchCommitment.resize(1);
+        explicit_change_output_size = GetSerializeSize(explicit_change);
         if (blind_details) {
             change_prototype_txout.nAsset.vchCommitment.resize(33);
             change_prototype_txout.nValue.vchCommitment.resize(33);
             change_prototype_txout.nNonce.vchCommitment.resize(33);
-            coin_selection_params.change_output_size = GetSerializeSize(change_prototype_txout);
-            coin_selection_params.change_output_size += (MAX_RANGEPROOF_SIZE + DEFAULT_SURJECTIONPROOF_SIZE + WITNESS_SCALE_FACTOR - 1)/WITNESS_SCALE_FACTOR;
+            blinded_change_output_size = GetSerializeSize(change_prototype_txout);
+            blinded_change_output_size += (MAX_RANGEPROOF_SIZE + DEFAULT_SURJECTIONPROOF_SIZE + WITNESS_SCALE_FACTOR - 1)/WITNESS_SCALE_FACTOR;
+
+            change_priced_blinded = wallet_blinds_by_default ||
+                                    (issuance_details && IssuanceIsBlinded(*issuance_details));
+            for (const auto& recipient : vecSend) {
+                if (recipient.confidentiality_key.IsFullyValid()) change_priced_blinded = true;
+            }
+            for (const auto& named : mapBlindingKeyChange) {
+                if (named.second) change_priced_blinded = true;
+            }
         } else {
-            change_prototype_txout.nAsset.vchCommitment.resize(33);
-            change_prototype_txout.nValue.vchCommitment.resize(9);
-            change_prototype_txout.nNonce.vchCommitment.resize(1);
-            coin_selection_params.change_output_size = GetSerializeSize(change_prototype_txout);
+            change_prototype_txout = explicit_change;
         }
+        coin_selection_params.change_output_size = change_priced_blinded ? blinded_change_output_size : explicit_change_output_size;
     }
 
     // Get size of spending the change output
@@ -1281,8 +1310,11 @@ static bool CreateTransactionInternal(
     // For creating the change output now, we use the effective feerate.
     // For spending the change output in the future, we use the discard feerate for now.
     // So cost of change = (change output size * effective feerate) + (size of spending change output * discard feerate)
-    coin_selection_params.m_change_fee = coin_selection_params.m_effective_feerate.GetFee(coin_selection_params.change_output_size, coin_selection_params.m_fee_asset);
-    coin_selection_params.m_cost_of_change = coin_selection_params.m_discard_feerate.GetFee(coin_selection_params.change_spend_size, coin_selection_params.m_fee_asset) + coin_selection_params.m_change_fee;
+    const auto price_change = [&coin_selection_params]() {
+        coin_selection_params.m_change_fee = coin_selection_params.m_effective_feerate.GetFee(coin_selection_params.change_output_size, coin_selection_params.m_fee_asset);
+        coin_selection_params.m_cost_of_change = coin_selection_params.m_discard_feerate.GetFee(coin_selection_params.change_spend_size, coin_selection_params.m_fee_asset) + coin_selection_params.m_change_fee;
+    };
+    price_change();
 
     // vouts to the payees
     if (!coin_selection_params.m_subtract_fee_outputs) {
@@ -1368,12 +1400,21 @@ static bool CreateTransactionInternal(
             }
         }
     }
-    if (may_need_blinded_dummy && !coin_selection_params.m_subtract_fee_outputs) {
-        // dummy output: 33 bytes value, 2 byte scriptPubKey, 33 bytes asset, 1 byte nonce, 66 bytes dummy rangeproof, 1 byte null surjectionproof
-        // FIXME actually, we currently just hand off to BlindTransaction which will put
-        //  a full rangeproof and surjectionproof. We should fix this when we overhaul
-        //  the blinding logic.
-        coin_selection_params.tx_noinputs_size += 70 + 66 +(MAX_RANGEPROOF_SIZE + DEFAULT_SURJECTIONPROOF_SIZE + WITNESS_SCALE_FACTOR - 1)/WITNESS_SCALE_FACTOR;
+    // dummy output: 33 bytes value, 2 byte scriptPubKey, 33 bytes asset, 1 byte nonce, 66 bytes dummy rangeproof, 1 byte null surjectionproof
+    // FIXME actually, we currently just hand off to BlindTransaction which will put
+    //  a full rangeproof and surjectionproof. We should fix this when we overhaul
+    //  the blinding logic.
+    const size_t blinded_dummy_size = 70 + 66 +(MAX_RANGEPROOF_SIZE + DEFAULT_SURJECTIONPROOF_SIZE + WITNESS_SCALE_FACTOR - 1)/WITNESS_SCALE_FACTOR;
+    // SEQUENTIA: the dummy is only ever needed to balance blinded inputs, so it
+    // is reserved on the same terms as the change is priced blinded: up front
+    // when the transaction is confidential before selection, otherwise only if
+    // selection turns out to spend a blinded coin (the re-selection below).
+    // Reserving its ~1,400 vbytes for every transparent send is what turned a
+    // send with a leftover below ~1,400 vbytes' worth of fee into
+    // "Insufficient funds".
+    const bool reserve_blinded_dummy = may_need_blinded_dummy && !coin_selection_params.m_subtract_fee_outputs;
+    if (reserve_blinded_dummy && change_priced_blinded) {
+        coin_selection_params.tx_noinputs_size += blinded_dummy_size;
     }
     // If we are going to issue an asset, add the issuance data to the noinputs_size so that
     // we allocate enough coins for them.
@@ -1434,7 +1475,31 @@ static bool CreateTransactionInternal(
     }
 
     // Choose coins to use
-    std::optional<SelectionResult> result = SelectCoins(wallet, vAvailableCoins, /* nTargetValue */ map_selection_target, coin_control, coin_selection_params);
+    // SEQUENTIA: a blinded coin makes the transaction confidential, and with it
+    // the change (tx_confidential_anyway below). If selection picked one while
+    // the change was priced explicit, price it blinded, reserve the blinding
+    // dummy, and select again, so the change and the fee are sized for what is
+    // actually built. The second selection is priced exactly as every
+    // selection was before transparent sends were priced explicit.
+    const auto spends_blinded_coin = [](const SelectionResult& selection) {
+        for (const auto& coin : selection.GetInputSet()) {
+            if (!coin.txout.nValue.IsExplicit() || !coin.txout.nAsset.IsExplicit()) return true;
+        }
+        return false;
+    };
+    std::optional<SelectionResult> result = [&]() -> std::optional<SelectionResult> {
+        std::optional<SelectionResult> first = SelectCoins(wallet, vAvailableCoins, /* nTargetValue */ map_selection_target, coin_control, coin_selection_params);
+        if (!first || !blind_details || change_priced_blinded || !spends_blinded_coin(*first)) return first;
+        change_priced_blinded = true;
+        coin_selection_params.change_output_size = blinded_change_output_size;
+        price_change();
+        if (reserve_blinded_dummy) {
+            coin_selection_params.tx_noinputs_size += blinded_dummy_size;
+            map_selection_target[coin_selection_params.m_fee_asset] +=
+                coin_selection_params.m_effective_feerate.GetFee(blinded_dummy_size, coin_selection_params.m_fee_asset);
+        }
+        return SelectCoins(wallet, vAvailableCoins, /* nTargetValue */ map_selection_target, coin_control, coin_selection_params);
+    }();
     if (!result) {
         error = _("Insufficient funds");
         return false;
@@ -1449,7 +1514,6 @@ static bool CreateTransactionInternal(
     // it has. Without this, a send in one asset paying its fee in another has
     // two change outputs, which is a blindable shape, and both were blinded --
     // about ten times the size of the explicit transaction, unasked.
-    const bool wallet_blinds_by_default = gArgs.GetBoolArg("-blindedaddresses", g_con_elementsmode && Params().DefaultBlindedAddresses());
     bool tx_confidential_anyway = false;
     if (blind_details) {
         for (const CPubKey& pk : blind_details->o_pubkeys) {
