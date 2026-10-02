@@ -70,7 +70,7 @@ class BurnOutputsTest(BitcoinTestFramework):
     def run_test(self):
         self.node = self.nodes[0]
         self.btc = self.node.dumpassetlabels()['bitcoin']
-        self.generatetoaddress(self.node, COINBASE_MATURITY + 1, self.node.getnewaddress(), sync_fun=self.no_op)
+        self.generatetoaddress(self.node, COINBASE_MATURITY + 10, self.node.getnewaddress(), sync_fun=self.no_op)
         issued = self.node.issueasset(assetamount=1000, tokenamount=0, blind=False, fee_asset='bitcoin')
         self.asset = issued['asset']
         self.generate(self.node, 1, sync_fun=self.no_op)
