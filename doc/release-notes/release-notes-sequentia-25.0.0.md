@@ -1,10 +1,16 @@
-# Sequentia Core 24.8.0
+# Sequentia Core 25.0.0
 
 Finality now survives committee members who sign two blocks at one height,
 and a stake that leaves now stays locked until a Bitcoin checkpoint could have
-secured what its keys signed. The second is a consensus rule, which is why the
-minor version moves; it is off on the testnet until a cutover height is agreed,
-so a node on 24.8.0 and a node on 24.7.13 agree about every testnet block.
+secured what its keys signed. The second is a consensus rule and a testnet hard fork,
+which is why the version moves to 25.
+
+**Testnet hard fork at height 159,000.** From that block a node on 25.0.0
+rejects a block that spends a staking output anywhere but into stake or an
+unbonding output, which a node on 24.7.x still accepts. Every block producer
+must run 25.0.0 before the testnet reaches it; a node that does not will follow
+whichever branch an outdated producer extends, and will need `reconsiderblock`
+after upgrading if it accepted a block the new rule rejects.
 
 ## Finality against equivocating committee members
 
@@ -65,9 +71,8 @@ it.
   an Unbonding row shows what is waiting and when the next amount unlocks, with a
   Claim button; the transaction list shows the first step as "Unbonding" and the
   claim as "Unstake".
-- Mainnet enforces the rule from its first block. The testnet does not enforce
-  it until a cutover height is set in `chainparams.cpp`; custom chains take
-  `-posunbondheight` and `-posunbonddepth`.
+- Mainnet enforces the rule from its first block and the testnet from height
+  159,000; custom chains take `-posunbondheight` and `-posunbonddepth`.
 
 ## Other changes since 24.7.13
 

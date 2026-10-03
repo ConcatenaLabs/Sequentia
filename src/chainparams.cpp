@@ -915,9 +915,10 @@ public:
         consensus.pos_slot_gate_seconds = 10;
         consensus.pos_slot_gate_height = 93800;
         // Two-step unbonding (params.h): a HARD FORK on this running chain.
-        // Off until an activation height is agreed and every operator has
-        // upgraded; set the height here, with the depth below, in one release.
-        consensus.pos_unbond_height = 0;
+        // 159000 was ~3,600 blocks (about 2.7 days at 62-68 s a block) ahead of
+        // the tip when 25.0.0 was cut, which is the time every producer has to
+        // upgrade. The depth is the checkpoint depth, as on mainnet.
+        consensus.pos_unbond_height = 159000;
         consensus.pos_unbond_anchor_depth = 2016;
         g_coinbase_maturity = consensus.coinbase_maturity;
         g_coinbase_maturity_height = consensus.coinbase_maturity_height;
