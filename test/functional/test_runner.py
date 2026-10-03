@@ -121,6 +121,8 @@ BASE_SCRIPTS = [
     'rpc_getnewblockhex.py',
     'wallet_blinded_change.py --legacy-wallet',
     'wallet_blinded_change.py --descriptors',
+    'wallet_subtract_fee_too_small.py --legacy-wallet',
+    'wallet_subtract_fee_too_small.py --descriptors',
     'wallet_transparent_change.py --legacy-wallet',
     'wallet_transparent_change.py --descriptors',
     'wallet_issuance_transparent.py --legacy-wallet',
