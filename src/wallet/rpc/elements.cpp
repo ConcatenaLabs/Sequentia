@@ -1139,10 +1139,11 @@ RPCHelpMan blindrawtransaction()
                 "Returns the hex-encoded raw transaction.\n"
                 "The output keys used can be specified by using a confidential address in createrawtransaction.\n"
                 "This call may add an additional 0-value unspendable output in order to balance the blinders.\n"
-                "With no blinded input, a lone item to blind cannot be balanced. A blinded issuance counts as one, so on a wallet\n"
-                "that does not blind by default, whose funding change is explicit, an issuance to blind needs a confidential output\n"
-                "beside it: a confidential asset_address or token_address in rawissueasset, or a confidential changeAddress in\n"
-                "fundrawtransaction.\n",
+                "With no blinded input, a lone item to blind cannot be balanced: by default (ignoreblindfail) it is left explicit\n"
+                "and the transaction is returned without error; with ignoreblindfail=false the call fails. A blinded issuance counts\n"
+                "as such an item, so on a wallet that does not blind by default, whose funding change is explicit, an issuance to\n"
+                "blind needs a confidential output beside it: a confidential asset_address or token_address in rawissueasset, or a\n"
+                "confidential changeAddress in fundrawtransaction.\n",
                 {
                     {"hexstring", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "A hex-encoded raw transaction."},
                     {"ignoreblindfail", RPCArg::Type::BOOL , RPCArg::Default{true}, "Return a transaction even when a blinding attempt fails due to number of blinded inputs/outputs."},
