@@ -805,9 +805,20 @@ default 3 s) with no unresolved competing certificate at its height (below).
 `UpdateTip`, and a scheduler pass every 250 ms, track the highest active-chain
 quorum-certified block that qualifies; `ContextualCheckBlockHeader` and the
 activation-time gate reject any block that would fork at or below it. So a certified block is locked
-against every Sequentia-internal competitor - *including one that later gathers more
-signatures* - and is never reorged to chase a fresher anchor. The VRF/committee
+against every Sequentia-internal competitor - *including one whose certificate names more
+members* - and is never reorged to chase a fresher anchor. The VRF/committee
 result is the ultimate truth.
+
+Once final, a block stays final, and so does every ancestor of it: no pass opens
+its window again, however long the chain grows behind it on escaping-stall
+blocks. A window opens when a quorum block joins the active chain while the node
+is past its initial block download; a block that was connected during that
+download, or loaded from disk at startup, counts as observed, so a restarted
+node finds its finalized block final again before it connects to any peer. A
+pass looks only at the blocks connected since the previous one and those still
+in their window, never at a whole stall stretch or, on a chain with nothing to
+finalize, the whole chain (`-debug=bench` reports any pass that examines more
+than a hundred blocks).
 
 The rejection is the soft, non-banning `BLOCK_RECENT_CONSENSUS_CHANGE`, because
 the one legitimate exception is a **Bitcoin reorg** of a finalized block's

@@ -79,3 +79,35 @@ then the hash decide, as for certified blocks.
 
 This changes which branch a node follows when same-height siblings compete,
 not which blocks are valid; it is why the version moves.
+
+## A finalized block stays final
+
+### What was wrong
+
+25.0.0 kept the time each quorum block was first seen for its observation
+window only for blocks within 100 of the tip, and every finality pass gave a
+block it had no record of a fresh window. Once the newest quorum block was more
+than 100 blocks below the tip, which is what a committee stall does (escaping-
+stall blocks carry no quorum), it was back in its window on every pass and
+nothing was final. A rival branch forking below it was then adopted: in a test,
+25.0.0 reorganized a finalized block away for a longer branch whose only
+quorum block was its own block at that height, where 24.7.13 refused it with
+`bad-fork-prior-to-pos-final`. After a restart the same held until a quorum
+block was again within 100 of the tip. In that state each pass, run on every
+block and every 250 ms, also walked the chain down to its first block.
+
+### What changed
+
+- A finalized block, and every ancestor of it, stays final. Its window is never
+  opened again, whatever the distance to the tip.
+- The window opens when a quorum block joins the active chain after the initial
+  block download. A block connected during that download or loaded from disk
+  counts as observed, so a restarted node finds its finalized block final again
+  before it connects to any peer.
+- Only Bitcoin moves the finalized point back, as before: when the anchor
+  watcher invalidates a finalized block whose anchor was reorganized away, its
+  ancestors stay final and the node follows the branch Bitcoin leaves standing.
+- A pass examines only the blocks connected since the previous one and those
+  still in their window.
+
+None of this changes which blocks are valid.
