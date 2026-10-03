@@ -55,7 +55,16 @@ it.
   anchor of the block that created it, the depth a checkpoint needs to
   consolidate.
 - `withdrawstake` performs the first step and `claimunbonded` the second. The
-  fee of the first step may come out of the stake, up to 1% of it.
+  fee of the first step may come out of the stake, up to 1% of it, and
+  `bumpwithdrawstakefee` re-sends a pending first step within the same limit.
+- `listunbonding` lists the wallet's unbonding outputs, how many Bitcoin blocks
+  each still has to wait, and what can be claimed now.
+- The wallet recognises a withdrawal that pays one of its staker keys' unbonding
+  outputs, so a rescan or a restored backup finds the coins waiting there.
+- GUI: the Staking tab says, before a withdrawal, how long the coins will wait;
+  an Unbonding row shows what is waiting and when the next amount unlocks, with a
+  Claim button; the transaction list shows the first step as "Unbonding" and the
+  claim as "Unstake".
 - Mainnet enforces the rule from its first block. The testnet does not enforce
   it until a cutover height is set in `chainparams.cpp`; custom chains take
   `-posunbondheight` and `-posunbonddepth`.

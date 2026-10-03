@@ -103,7 +103,8 @@ TransactionView::TransactionView(const PlatformStyle *platformStyle, QWidget *pa
     typeWidget->addItem(tr("Sent"), TransactionFilterProxy::TYPE(TransactionRecord::SendToAddress) |
                                   TransactionFilterProxy::TYPE(TransactionRecord::SendToOther));
     typeWidget->addItem(tr("Staking"), TransactionFilterProxy::TYPE(TransactionRecord::Staking));
-    typeWidget->addItem(tr("Unstake"), TransactionFilterProxy::TYPE(TransactionRecord::Unstake));
+    typeWidget->addItem(tr("Unstake"), TransactionFilterProxy::TYPE(TransactionRecord::Unstake) |
+                                       TransactionFilterProxy::TYPE(TransactionRecord::Unbonding));
     typeWidget->addItem(tr("Block reward"), TransactionFilterProxy::TYPE(TransactionRecord::Generated));
     typeWidget->addItem(tr("Fee"), TransactionFilterProxy::TYPE(TransactionRecord::Fee));
     typeWidget->addItem(tr("Issuance"), TransactionFilterProxy::TYPE(TransactionRecord::IssuedAsset));

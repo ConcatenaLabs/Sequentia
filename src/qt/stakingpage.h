@@ -119,6 +119,8 @@ private Q_SLOTS:
     void onUnstakeMax();
     //! Re-send the pending withdrawal with a higher network fee.
     void onUnstakeBump();
+    //! Two-step unbonding: send every matured unbonding output to this wallet.
+    void onClaimUnbonded();
     void onEnableProduction();
     void onRefreshClicked();
     //! Lend this wallet's stake weight to the signer named in the field, or
@@ -165,6 +167,18 @@ private:
     //! why the button is greyed out (a disabled widget gets no tooltip events).
     QWidget* m_unstake_button_holder{nullptr};
     QLabel* m_unstake_result{nullptr};
+    //! Two-step unbonding (from the chain's activation height): a withdrawal
+    //! parks the coins in an unbonding output, claimable only after the parent
+    //! chain has advanced m_unbond_depth blocks. The row below says what is
+    //! waiting and when; Claim moves what has matured to this wallet.
+    QLabel* m_unbond_info{nullptr};
+    QPushButton* m_claim_button{nullptr};
+    QWidget* m_unbond_row{nullptr};
+    QLabel* m_unbond_label{nullptr};
+    bool m_two_step{false};
+    int m_unbond_depth{0};
+    bool m_unbond_parent_blocks{true};    //!< the depth counts Bitcoin blocks (else Sequentia blocks)
+    int m_unstake_seen_tip{-1};           //!< tip the Withdraw card was last refreshed for
 
     // --- "Staking pool" card: delegate to a pool, or watch the one you are in ---
     //! The delegator's watch. A pool must announce a payout-policy change a
@@ -251,6 +265,10 @@ private:
     //! Pass an already-fetched list to render exactly those numbers, so an
     //! action and the summary above it can never quote two different totals.
     void refreshUnstakeInfo(const UniValue* prefetched = nullptr);
+    //! Refresh the unbonding row from listunbonding, and m_two_step with it.
+    void refreshUnbonding();
+    //! "about 2 weeks" for `count` blocks of the unit the unbonding depth uses.
+    QString approxUnbondWait(int64_t count) const;
     //! Refresh the "Staking pool" card: where this wallet's weight is signing,
     //! what that pool has committed to, what it has announced but not yet bound
     //! (listdelegations), and the board of pools to choose from (listpools).
