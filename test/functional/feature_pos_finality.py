@@ -29,6 +29,12 @@ from test_framework.key import ECKey
 from test_framework.address import byte_to_base58
 
 
+def hash_order(h):
+    """The order of uint256::operator<, which the comparator's hash key uses:
+    the stored bytes, least significant first, i.e. the displayed hex reversed."""
+    return bytes.fromhex(h)[::-1]
+
+
 def make_staker():
     k = ECKey()
     k.generate(compressed=True)
@@ -78,8 +84,18 @@ class PosFinalityTest(BitcoinTestFramework):
 
         # n1 finalizes B with the FULL 3-member committee, a certificate naming
         # more members than A's. Built on the same parent (a competing sibling).
-        res_b = n1.generateposblock(leader, [m1, m2])
-        b = res_b['hash']
+        # Both are certified and share the leader, hence the VRF score, so the
+        # comparator ranks the lower hash first: B is rebuilt until it is the
+        # lower, so that only the finality gate can keep A.
+        for _ in range(30):
+            res_b = n1.generateposblock(leader, [m1, m2])
+            b = res_b['hash']
+            if hash_order(b) < hash_order(a):
+                break
+            n1.invalidateblock(b)
+            time.sleep(1.1)
+        else:
+            raise AssertionError("B never had the lower hash")
         assert_equal(res_b['countersignatures'], 3)
         assert_equal(n1.getbestblockhash(), b)
         assert_equal(n1.getblockheader(b)['previousblockhash'], parent)
@@ -93,7 +109,8 @@ class PosFinalityTest(BitcoinTestFramework):
         # sight; only then does the gate refuse competitors. (Inside the window
         # a competing quorum certificate is proof of equivocation and the
         # deterministic comparator decides: see feature_pos_split_equivocation.)
-        time.sleep(3.5)
+        self.wait_until(lambda: n0.getposfinality()["finalized_height"] == 2)
+        self.wait_until(lambda: n1.getposfinality()["finalized_height"] == 2)
         b_hex = n1.getblock(b, 0)
         with n0.assert_debug_log(["bad-fork-prior-to-pos-final"]):
             n0.submitblock(b_hex)
