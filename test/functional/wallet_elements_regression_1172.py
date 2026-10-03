@@ -40,24 +40,43 @@ class WalletCtTest(BitcoinTestFramework):
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
 
-    def test_send(self, amt, from_idx, to_idx, confidential):
+    def test_send(self, amt, from_idx, to_idx, confidential, keeps_change=False):
         # Try to send those coins to yet another wallet, sending a large enough amount
         # that the change output is dropped.
         address = self.nodes[to_idx].getnewaddress()
         if not confidential:
             address = self.nodes[to_idx].getaddressinfo(address)['unconfidential']
+        sender = self.nodes[from_idx]
+        before = sender.getbalance().get('bitcoin', Decimal(0))
         # SEQUENTIA: an open-fee-market chain has no default fee asset.
-        txid = self.nodes[from_idx].sendtoaddress(address=address, amount=amt, fee_asset_label='bitcoin')
+        txid = sender.sendtoaddress(address=address, amount=amt, fee_asset_label='bitcoin')
+        fee = -sender.gettransaction(txid)['fee']['bitcoin']
+        change = [v for v in sender.getrawtransaction(txid, True)['vout']
+                  if 'address' in v['scriptPubKey'] and sender.getaddressinfo(v['scriptPubKey']['address'])['ismine']]
         self.log.info(f"Sent {amt} LBTC to node {to_idx} in {txid}")
         self.generate(self.nodes[from_idx], 2)
         self.sync_all()
 
         for i in range(self.num_nodes):
             self.log.info(f"Finished with node {i} balance: {self.nodes[i].getbalance()}")
-        assert_holds_nothing(self.nodes[from_idx].getbalance())
-        assert_equal(self.nodes[to_idx].getbalance(), { "bitcoin": amt })
+        if keeps_change:
+            # The leftover is worth more than a change output costs, so it is
+            # kept rather than given to the fee. Lock it, so the next sends
+            # start from one coin as before.
+            assert_equal(len(change), 1)
+            kept = before - amt - fee
+            assert kept > 0
+            assert_equal(sender.getbalance(), {"bitcoin": kept})
+            sender.lockunspent(False, [{'txid': txid, 'vout': change[0]['n']}])
+            self.locked[from_idx] += kept
+        else:
+            assert_equal(change, [])
+            assert_holds_nothing({a: v for a, v in sender.getbalance().items()
+                                  if not (a == 'bitcoin' and v == self.locked[from_idx])})
+        assert_equal(self.nodes[to_idx].getbalance(), {"bitcoin": amt + self.locked[to_idx]} if amt + self.locked[to_idx] else {})
 
     def run_test(self):
+        self.locked = [Decimal(0)] * self.num_nodes
         # Mine 101 blocks to get the initial coins out of IBD
         self.generate(self.nodes[0], COINBASE_MATURITY + 1)
         self.nodes[0].syncwithvalidationinterfacequeue()
@@ -77,13 +96,16 @@ class WalletCtTest(BitcoinTestFramework):
         amt = satoshi_round(Decimal(0.9995))
         self.test_send(amt, 1, 2, True)
 
-        # Repeat, sending to a non-confidential output
+        # Repeat, sending to a non-confidential output. The change is then the
+        # only blinded output, which balances the blinded input and cannot be
+        # dropped, so it keeps its value.
         amt = satoshi_round(Decimal(amt - Decimal(0.00035)))
-        self.test_send(amt, 2, 1, False)
+        self.test_send(amt, 2, 1, False, keeps_change=True)
 
-        # Again, sending from non-confidential to non-confidential
+        # Again, sending from non-confidential to non-confidential. Nothing is
+        # blinded, so the change is explicit, and its leftover pays for it.
         amt = satoshi_round(Decimal(amt - Decimal(0.00033)))
-        self.test_send(amt, 1, 2, False)
+        self.test_send(amt, 1, 2, False, keeps_change=True)
 
         # Finally sending from non-confidential to confidential
         amt = satoshi_round(Decimal(amt - Decimal(0.0005)))

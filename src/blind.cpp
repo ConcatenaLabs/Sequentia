@@ -246,6 +246,12 @@ uint256 GenerateOutputRangeproofNonce(CTxOut& out, const CPubKey output_pubkey)
     return nonce;
 }
 
+size_t RangeproofSize(const CAmount max_amount)
+{
+    const int ct_bits = (int)gArgs.GetIntArg("-ct_bits", 52);
+    return secp256k1_rangeproof_max_size(secp256k1_blind_context, max_amount > 0 ? (uint64_t)max_amount : 0, ct_bits);
+}
+
 bool GenerateRangeproof(std::vector<unsigned char>& rangeproof, const std::vector<unsigned char*>& value_blindptrs, const uint256& nonce, const CAmount amount, const CScript& scriptPubKey, const secp256k1_pedersen_commitment& value_commit, const secp256k1_generator& gen, const CAsset& asset, std::vector<const unsigned char*>& asset_blindptrs)
 {
     // Prep range proof

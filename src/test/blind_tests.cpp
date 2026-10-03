@@ -268,6 +268,11 @@ BOOST_AUTO_TEST_CASE(naive_blinding_test)
         // Check wallet borromean-based rangeproof results against expected args
         size_t proof_size = DEFAULT_RANGEPROOF_SIZE;
         BOOST_CHECK_EQUAL(tx4.witness.vtxoutwit[2].vchRangeproof.size(), proof_size);
+        // The wallet prices a rangeproof at the size it is built.
+        BOOST_CHECK_EQUAL(RangeproofSize(unblinded_amount), proof_size);
+        BOOST_CHECK_EQUAL(RangeproofSize(21000000 * COIN), proof_size);
+        // An amount past 52 bits needs a larger proof, and is priced so.
+        BOOST_CHECK(RangeproofSize(400000000 * COIN) > proof_size);
         secp256k1_context *ctx = secp256k1_context_create(SECP256K1_CONTEXT_VERIFY);
         int exp = 0;
         int mantissa = 0;
