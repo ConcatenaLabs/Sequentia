@@ -16,7 +16,9 @@ being spent in two ways:
 
 Either way the entry must leave the mempool, and the template must never carry
 it: otherwise every block template fails validation and no producer holding the
-entry can build a block. Both nodes of the reorg case run the custom chain's
+entry can build a block. And only then: a reorg that crosses a boundary judges
+its entries at the tip it ends on, not at the blocks it passes through, so a
+spend that is mature at the final tip stays. Both nodes of the reorg case run the custom chain's
 default mempool consistency checks on one side and none on the other, so the
 eviction is shown on its own and not only as "the checker did not abort".
 
@@ -31,6 +33,8 @@ from test_framework.util import assert_equal, assert_raises_rpc_error
 
 MATURITY = 150
 BOUNDARY = 130
+# A boundary above the maturity, so a spend can be mature just above it.
+HIGH_BOUNDARY = 200
 FEE = Decimal('0.0001')
 BASE = ["-con_blocksubsidy=5000000000", "-validatepegin=0", "-par=1", "-txindex=1"]
 
@@ -38,7 +42,7 @@ BASE = ["-con_blocksubsidy=5000000000", "-validatepegin=0", "-par=1", "-txindex=
 class MempoolCoinbaseMaturityTest(BitcoinTestFramework):
     def set_test_params(self):
         self.setup_clean_chain = True
-        self.num_nodes = 3
+        self.num_nodes = 5
         self.extra_args = [
             # Reorg pair: the custom chain's default -checkmempool, and none.
             BASE + ["-con_coinbase_maturity=%d" % MATURITY],
@@ -47,11 +51,17 @@ class MempoolCoinbaseMaturityTest(BitcoinTestFramework):
             # chain, so it is not connected to the pair.
             BASE + ["-con_coinbase_maturity=%d" % MATURITY,
                     "-con_coinbase_maturity_height=%d" % BOUNDARY],
+            # Reorg-across-a-boundary pair: 100 below height 200, 150 from it.
+            BASE + ["-con_coinbase_maturity=%d" % MATURITY,
+                    "-con_coinbase_maturity_height=%d" % HIGH_BOUNDARY],
+            BASE + ["-con_coinbase_maturity=%d" % MATURITY,
+                    "-con_coinbase_maturity_height=%d" % HIGH_BOUNDARY],
         ]
 
     def setup_network(self):
         self.setup_nodes()
         self.connect_nodes(0, 1)
+        self.connect_nodes(3, 4)
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
@@ -81,6 +91,7 @@ class MempoolCoinbaseMaturityTest(BitcoinTestFramework):
     def run_test(self):
         self.test_reorg()
         self.test_boundary()
+        self.test_reorg_across_boundary()
         self.test_height_zero_refused()
 
     def test_reorg(self):
@@ -156,6 +167,46 @@ class MempoolCoinbaseMaturityTest(BitcoinTestFramework):
         n.sendrawtransaction(hex_tx)
         self.generatetoaddress(n, 1, self.addr(n), sync_fun=self.no_op)
         assert_equal(n.getrawtransaction(txid, True)['confirmations'], 1)
+
+    def test_reorg_across_boundary(self):
+        n3, n4 = self.nodes[3], self.nodes[4]
+        pair = lambda: self.sync_blocks([n3, n4])
+        self.log.info("Reorg across a boundary: maturity rises from 100 to %d at height %d", MATURITY, HIGH_BOUNDARY)
+        a3 = self.addr(n3)
+        self.generatetoaddress(n3, 60, a3, sync_fun=pair)
+        self.generatetoaddress(n3, HIGH_BOUNDARY + 3 - 60, self.addr(n4), sync_fun=pair)
+        assert_equal(n3.getblockcount(), HIGH_BOUNDARY + 3)
+
+        # Block 204 is the next: the height-54 coinbase is at depth 150 there,
+        # exactly mature; the height-50 one at 154.
+        self.disconnect_nodes(3, 4)
+        spend54, txid54 = self.spend_of_coinbase(n3, 54, a3)
+        spend50, txid50 = self.spend_of_coinbase(n3, 50, a3)
+        n3.sendrawtransaction(spend54)
+        n3.sendrawtransaction(spend50)
+
+        self.log.info("node4 forks from %d and overtakes to %d", HIGH_BOUNDARY - 5, HIGH_BOUNDARY + 5)
+        n4.invalidateblock(n4.getblockhash(HIGH_BOUNDARY - 4))
+        assert_equal(n4.getblockcount(), HIGH_BOUNDARY - 5)
+        self.generatetoaddress(n4, 10, self.addr(n4), sync_fun=self.no_op)
+        self.connect_nodes(3, 4)
+        pair()
+        final = n3.getblockcount()
+        assert_equal(final, HIGH_BOUNDARY + 5)
+
+        # The reorg connects block 199, the last before the boundary, on its way
+        # up. Judged there, for block 200, the height-54 spend is at depth 146
+        # and premature; at the tip the reorg ends on it is at depth 152.
+        self.log.info("Both spends are mature for block %d and stay in the mempool", final + 1)
+        pool = n3.getrawmempool()
+        assert txid50 in pool
+        assert txid54 in pool, "a spend mature at the final tip was evicted during the reorg"
+
+        self.log.info("The next block carries both")
+        block = n3.generatetoaddress(1, a3, invalid_call=False)[0]
+        carried = [tx['txid'] for tx in n3.getblock(block, 2)['tx']]
+        assert txid54 in carried and txid50 in carried
+        pair()
 
     def test_height_zero_refused(self):
         self.log.info("-con_coinbase_maturity_height=0 with a maturity set is refused at start-up")
