@@ -112,8 +112,11 @@ checkpoint depth; `-posunbonddepth` on custom chains) past the anchor of the
 block that created it - counted in Bitcoin blocks, like the checkpoint, so the
 two cannot drift apart if the Sequentia cadence changes; on a chain without
 anchoring, in Sequentia blocks. The only value that may leave a stake on the way
-out is the network fee, up to 1% of the amount withdrawn (`CheckPosUnbondingTx`,
-reject reasons `bad-unbond-required` and `bad-unbond-premature`).
+out is the network fee paid in SEQ, up to 1% of the staking outputs the
+transaction spends (`CheckPosUnbondingTx`, reject reasons `bad-unbond-required`
+and `bad-unbond-premature`). A fee paid in another asset, from other inputs, is
+not taken from the stake and so needs no allowance: the whole stake goes to the
+unbonding output.
 
 The layer is a pure function of the UTXO set: it is rebuilt from the UTXO set at
 node startup and mirrored exactly on every tip connect and disconnect, so it is

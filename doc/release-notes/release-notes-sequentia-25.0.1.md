@@ -111,3 +111,32 @@ block and every 250 ms, also walked the chain down to its first block.
   still in their window.
 
 None of this changes which blocks are valid.
+
+## Withdrawal fees are sized in the asset that pays them
+
+### What was wrong
+
+`withdrawstake`, `claimunbonded` and `bumpwithdrawstakefee` computed the fee in
+reference units and paid that number of SEQ atoms, without the exchange rate.
+The fee was right only while SEQ was priced at one reference unit per atom: at
+0.25 a withdrawal paid a quarter of the node's fee rate, at 4 four times it, and
+at 0.01 a claim fell below the relay minimum and was refused. None of the three
+let the fee be paid in another asset, although consensus accepts that.
+
+### What changed
+
+- Each fee is the node's fee rate over the transaction's size, converted into
+  the paying asset at the node's exchange rate, as every other send does.
+- By default the fee is still paid in SEQ out of the coins being moved. Under
+  two-step unbonding a stake may pay at most 1% of the staking outputs it spends
+  that way (a consensus rule: a 10 SEQ partial withdrawal from a 100 SEQ output
+  may pay up to 1 SEQ). A fee above that, or a node that does not accept SEQ, is
+  refused with a message that names `fee_asset`.
+- `fee_asset`, on all three, pays the fee in that asset, any the node accepts
+  and SEQ included, from the wallet's other transparent coins; the whole stake
+  or claim then arrives. `bumpwithdrawstakefee` keeps the pending withdrawal's
+  fee asset unless told otherwise, and its replacement pays the original's fee
+  value plus the incremental relay fee, judged at the node's exchange rates.
+- Under two-step unbonding `withdrawstake` refuses an `address` instead of
+  ignoring it: the coins go to an unbonding output, and `claimunbonded` takes
+  the address.
