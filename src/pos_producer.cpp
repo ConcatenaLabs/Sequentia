@@ -71,6 +71,24 @@ std::vector<unsigned char> BuildSignerBitfield(const std::vector<CPubKey>& commi
     return bf;
 }
 
+//! A block this node could not assemble is a missed slot, and when it keeps
+//! failing the chain can stop; the reason must reach the default log. Once per
+//! height and reason, since a producer retries every poll.
+static void LogAssemblyFailure(const char* who, int height, const std::string& what)
+{
+    static Mutex s_mutex;
+    static int s_height GUARDED_BY(s_mutex){-1};
+    static std::string s_what GUARDED_BY(s_mutex);
+    LOCK(s_mutex);
+    if (height == s_height && what == s_what) {
+        LogPrint(BCLog::VALIDATION, "%s: no block at height %d, block assembly failed: %s\n", who, height, what);
+        return;
+    }
+    s_height = height;
+    s_what = what;
+    LogPrintf("%s: no block at height %d, block assembly failed: %s\n", who, height, what);
+}
+
 //! Build the leader's unsigned BLS committee block extending the active tip:
 //! the OP_2 <leader> challenge, the leader's VRF commitment in the coinbase, an
 //! empty solution (the certificate is assembled once members sign). Returns the
@@ -110,7 +128,7 @@ std::shared_ptr<CBlock> BuildUnsignedBlsBlock(ChainstateManager& chainman, CTxMe
         // assembly, so the proof no longer matches. That is a transient race, not a
         // fault: skip this slot and the next poll re-proposes on the current tip.
         // A staker must never abort the daemon over one unbuildable slot.
-        LogPrint(BCLog::VALIDATION, "PoS gossip: skipping proposal, block assembly failed: %s\n", e.what());
+        LogAssemblyFailure("PoS gossip: skipping proposal", tip->nHeight + 1, e.what());
         return nullptr;
     }
     if (!tmpl) return nullptr;
@@ -321,6 +339,7 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
         // staker must not abort the daemon over one unbuildable slot.
         error = strprintf("Block assembly failed: %s", e.what());
         err_kind = PosProduceError::MISC;  // recoverable: a stale-tip race or, via RPC, too few committee keys
+        LogAssemblyFailure("PoS producer", tip->nHeight + 1, e.what());
         return false;
     }
     if (!pblocktemplate.get()) {

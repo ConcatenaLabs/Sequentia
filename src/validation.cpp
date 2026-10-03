@@ -384,6 +384,21 @@ static bool IsCurrentForFeeEstimation(CChainState& active_chainstate) EXCLUSIVE_
     return true;
 }
 
+bool PosUnbondingFailsNextBlock(const CTransaction& tx, const CCoinsViewCache& view, const CBlockIndex* tip,
+                                const Consensus::Params& params, std::string& reason)
+{
+    if (!g_con_pos || tip == nullptr || !params.PosUnbondingActiveAt(tip->nHeight + 1)) return false;
+    const bool by_anchor = g_con_bitcoin_anchor;
+    const int spend_anchor = by_anchor ? (int)tip->m_anchor_height : tip->nHeight + 1;
+    const auto anchor_at = [tip, by_anchor](int h) -> int {
+        if (h < 0 || h > tip->nHeight) return -1; // created in the mempool
+        const CBlockIndex* a = tip->GetAncestor(h);
+        if (!a) return -1;
+        return by_anchor ? (int)a->m_anchor_height : h;
+    };
+    return !CheckPosUnbondingTx(tx, view, spend_anchor, anchor_at, params.pos_unbond_anchor_depth, reason);
+}
+
 void CChainState::MaybeUpdateMempoolForReorg(
     DisconnectedBlockTransactions& disconnectpool,
     bool fAddToMempool)
@@ -470,6 +485,21 @@ void CChainState::MaybeUpdateMempoolForReorg(
                 if (coin.IsCoinBase() && mempool_spend_height - coin.nHeight < CoinbaseMaturityAt(mempool_spend_height)) {
                     return true;
                 }
+            }
+        }
+        // SEQUENTIA two-step unbonding: judged again at the tip the reorg ended
+        // on. A reorg can disconnect the unbonding transaction a waiting claim
+        // spends (an anchor-driven reorg puts it back in the mempool, and a
+        // claim of a mempool output is premature), lower the anchor a claim was
+        // admitted against, or carry the chain across the activation height.
+        // Left in place, any of these makes every block template fail.
+        if (g_con_pos) {
+            CCoinsViewCache view(&view_mempool);
+            std::string reason;
+            if (PosUnbondingFailsNextBlock(tx, view, m_chain.Tip(), m_params.GetConsensus(), reason)) {
+                LogPrintf("Evicting %s from the mempool after a reorg: %s at height %d\n",
+                          tx.GetHash().ToString(), reason, m_chain.Height() + 1);
+                return true;
             }
         }
         // Transaction is still valid and cached LockPoints are updated.
@@ -954,18 +984,10 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     // SEQUENTIA two-step unbonding (params.h). Judged for the next block, whose
     // anchor is at least the tip's: a spend the tip's anchor already allows is
     // allowed in the next block too, and one it does not is retried later.
-    if (g_con_pos && m_active_chainstate.m_chain.Tip() &&
-        args.m_chainparams.GetConsensus().PosUnbondingActiveAt(m_active_chainstate.m_chain.Height() + 1)) {
-        const CChain& chain = m_active_chainstate.m_chain;
-        const bool by_anchor = g_con_bitcoin_anchor;
-        const int spend_anchor = by_anchor ? (int)chain.Tip()->m_anchor_height : chain.Height() + 1;
-        const auto anchor_at = [&chain, by_anchor](int h) -> int {
-            if (h < 0 || h > chain.Height()) return -1; // unconfirmed parent
-            return by_anchor ? (int)chain[h]->m_anchor_height : h;
-        };
+    {
         std::string reason;
-        if (!CheckPosUnbondingTx(tx, m_view, spend_anchor, anchor_at,
-                                 args.m_chainparams.GetConsensus().pos_unbond_anchor_depth, reason)) {
+        if (PosUnbondingFailsNextBlock(tx, m_view, m_active_chainstate.m_chain.Tip(),
+                                       args.m_chainparams.GetConsensus(), reason)) {
             return state.Invalid(reason == "bad-unbond-premature" ? TxValidationResult::TX_PREMATURE_SPEND
                                                                   : TxValidationResult::TX_CONSENSUS, reason);
         }
@@ -4194,6 +4216,28 @@ bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew
         const int next_height = pindexNew->nHeight + 1;
         if (!reorg_pending && CoinbaseMaturityAt(next_height) > CoinbaseMaturityAt(pindexNew->nHeight)) {
             m_mempool->removeImmatureCoinbaseSpends(CoinsTip(), next_height);
+        }
+        // SEQUENTIA two-step unbonding, the same boundary: a staking output
+        // spent straight to an address was valid in this block and is invalid
+        // in the next, the first the rule binds. Admission judges the next
+        // block, so such a spend admitted one block before this one is still
+        // resident, and nothing else removes it; every producer's template
+        // would carry it into the first block under the rule and fail. Judged
+        // at this block's anchor, the lowest the next block can carry. Skipped
+        // during a reorg for the reason above: MaybeUpdateMempoolForReorg
+        // judges the rule at the tip the reorg ends on.
+        const Consensus::Params& consensus = m_params.GetConsensus();
+        if (g_con_pos && !reorg_pending && !consensus.PosUnbondingActiveAt(pindexNew->nHeight) &&
+            consensus.PosUnbondingActiveAt(next_height)) {
+            CCoinsViewMemPool view_mempool(&CoinsTip(), *m_mempool);
+            CCoinsViewCache view(&view_mempool);
+            m_mempool->removeFailing([&](const CTransaction& tx) {
+                std::string reason;
+                if (!PosUnbondingFailsNextBlock(tx, view, pindexNew, consensus, reason)) return false;
+                LogPrintf("Evicting %s from the mempool: %s from height %d, where two-step unbonding begins\n",
+                          tx.GetHash().ToString(), reason, next_height);
+                return true;
+            });
         }
     }
     // Update m_chain & related variables.

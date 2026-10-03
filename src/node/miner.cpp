@@ -445,6 +445,20 @@ bool BlockAssembler::TestPackageTransactions(const CTxMemPool::setEntries& packa
                 return false;
             }
         }
+        // SEQUENTIA: likewise a spend the two-step unbonding rule refuses in
+        // this block. ConnectTip evicts what the activation height makes
+        // invalid and MaybeUpdateMempoolForReorg what a reorg does; this is
+        // the second line, judged at the parent's anchor (the template's
+        // anchor is chosen after selection and is never lower).
+        if (g_con_pos && chainparams.GetConsensus().PosUnbondingActiveAt(nHeight)) {
+            CCoinsViewMemPool view_mempool(&m_chainstate.CoinsTip(), m_mempool);
+            CCoinsViewCache view(&view_mempool);
+            std::string reason;
+            if (PosUnbondingFailsNextBlock(it->GetTx(), view, m_chainstate.m_chain.Tip(), chainparams.GetConsensus(), reason)) {
+                LogPrint(BCLog::MEMPOOL, "CreateNewBlock: skipping %s: %s\n", it->GetTx().GetHash().ToString(), reason);
+                return false;
+            }
+        }
     }
     return true;
 }

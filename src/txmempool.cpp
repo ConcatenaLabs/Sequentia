@@ -804,6 +804,19 @@ void CTxMemPool::removeImmatureCoinbaseSpends(const CCoinsViewCache& coins_tip, 
     RemoveStaged(to_remove, false, MemPoolRemovalReason::REORG);
 }
 
+void CTxMemPool::removeFailing(const std::function<bool(const CTransaction&)>& fails)
+{
+    AssertLockHeld(cs);
+    setEntries failing;
+    for (txiter it = mapTx.begin(); it != mapTx.end(); ++it) {
+        if (fails(it->GetTx())) failing.insert(it);
+    }
+    if (failing.empty()) return;
+    setEntries to_remove;
+    for (txiter it : failing) CalculateDescendants(it, to_remove);
+    RemoveStaged(to_remove, false, MemPoolRemovalReason::REORG);
+}
+
 void CTxMemPool::removeForBlock(const std::vector<CTransactionRef>& vtx, unsigned int nBlockHeight, const CBlockIndex* p_block_index_new)
 {
     AssertLockHeld(cs);
