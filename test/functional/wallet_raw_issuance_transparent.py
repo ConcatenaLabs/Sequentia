@@ -8,8 +8,9 @@ fundrawtransaction -> rawissueasset(blind) -> blindrawtransaction -> sign ->
 send. Confidentiality is chosen per output, so on a wallet that does not blind
 by default the change funding adds is explicit, and a blinded issuance amount
 needs a confidential output beside it to balance its blinding. Without one,
-blindrawtransaction leaves the amount explicit, or fails with ignoreblindfail
-false (the rawissueasset and blindrawtransaction help say so). With one -- a
+blindrawtransaction fails and names the missing output, except that by default
+(ignoreblindfail) it returns an issuance with no token with its amount explicit
+(the rawissueasset and blindrawtransaction help say so). With one -- a
 confidential asset_address, or a confidential changeAddress when funding -- the
 issuance confirms.
 
@@ -17,11 +18,15 @@ The changeAddress route needs the wallet's blinding dummy to sit before the fee
 output: rawissueasset requires the fee to be the last output.
 """
 
+from decimal import Decimal
+
 from test_framework.blocktools import COINBASE_MATURITY
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import assert_equal, assert_raises_rpc_error
 
 FEE_ASSET = 'bitcoin'
+NO_CONFIDENTIAL_OUTPUT = ("Unable to blind transaction: a blinded issuance needs a confidential output in the same "
+                          "transaction to balance it, and this transaction has none.")
 
 
 class WalletRawIssuanceTransparentTest(BitcoinTestFramework):
@@ -64,14 +69,20 @@ class WalletRawIssuanceTransparentTest(BitcoinTestFramework):
         funded_hex, vout = self.fund()
         assert_equal([v for v in vout if v.get('commitmentnonce_fully_valid')], [])
         issued = n.rawissueasset(funded_hex, [{"asset_amount": 1, "asset_address": n.getnewaddress(), "blind": True}])[0]
-        assert_raises_rpc_error(-8, "Unable to blind transaction: Add another output to blind in order to complete the blinding.",
-                                n.blindrawtransaction, issued['hex'], False, [], True)
+        assert_raises_rpc_error(-8, NO_CONFIDENTIAL_OUTPUT, n.blindrawtransaction, issued['hex'], False, [], True)
         # By default (ignoreblindfail) the transaction comes back unchanged, the
         # issuance amount explicit: what the help says, not a blinded issuance.
         unblinded = n.blindrawtransaction(issued['hex'])
         assert_equal(unblinded, issued['hex'])
         issuance = n.decoderawtransaction(unblinded)['vin'][issued['vin']]['issuance']
         assert 'assetamount' in issuance and 'assetamountcommitment' not in issuance
+
+        self.log.info("With a token as well, blinding fails either way, and says what is missing")
+        funded_hex, _ = self.fund()
+        issued = n.rawissueasset(funded_hex, [{"asset_amount": 1, "asset_address": n.getnewaddress(),
+                                               "token_amount": 1, "token_address": n.getnewaddress(), "blind": True}])[0]
+        assert_raises_rpc_error(-8, NO_CONFIDENTIAL_OUTPUT, n.blindrawtransaction, issued['hex'])
+        assert_raises_rpc_error(-8, NO_CONFIDENTIAL_OUTPUT, n.blindrawtransaction, issued['hex'], False, [], True)
 
         self.log.info("A confidential asset_address balances it")
         funded_hex, _ = self.fund()
@@ -83,6 +94,17 @@ class WalletRawIssuanceTransparentTest(BitcoinTestFramework):
         assert_equal(len(dummies), 1)
         assert_equal(dummies[0], len(vout) - 2)
         self.issue_blind_and_send(funded_hex, n.getnewaddress())
+
+        self.log.info("A blinded input does not balance it either")
+        blinded_txid = n.sendtoaddress(address=n.getnewaddress("", "blech32"), amount=1, fee_asset_label=FEE_ASSET)
+        self.generatetoaddress(n, 1, n.getnewaddress(), sync_fun=self.no_op)
+        coin = [u for u in n.listunspent() if u['txid'] == blinded_txid and 'amountcommitment' in u and u['amount'] == 1]
+        assert_equal(len(coin), 1)
+        fee = Decimal('0.001')
+        raw = n.createrawtransaction([{'txid': coin[0]['txid'], 'vout': coin[0]['vout']}],
+                                     [{n.getnewaddress(): coin[0]['amount'] - fee}, {'fee': fee}])
+        issued = n.rawissueasset(raw, [{"asset_amount": 1, "asset_address": n.getnewaddress(), "blind": True}])[0]
+        assert_raises_rpc_error(-8, NO_CONFIDENTIAL_OUTPUT, n.blindrawtransaction, issued['hex'])
 
 
 if __name__ == '__main__':
