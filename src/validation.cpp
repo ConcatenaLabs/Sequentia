@@ -5694,9 +5694,45 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
     return true;
 }
 
+// Anchor invalidation follows OUR parent-chain daemon and OUR watcher's poll
+// phase. An honest peer whose watcher has not ticked yet keeps building on the
+// orphaned tip for up to -anchorpollinterval, and relays what it builds. The
+// block stays invalid for us either way; the question is only what the header
+// says about the peer. Scoring it as BLOCK_INVALID_PREV (100) dropped the
+// connection right when the network has to re-converge: a producer that loses
+// its only peer never proposes again. AcceptBlockHeader therefore reports such
+// headers as BLOCK_RECENT_CONSENSUS_CHANGE, the verdict an anchor-stale header
+// already gets in ContextualCheckBlockHeader: rejected, not stored, not punished.
+//
+// Provenance is read from the bottom of the failed run, the block the watcher
+// called InvalidateBlock on. Only that block carries BLOCK_FAILED_ANCHOR; the
+// blocks disconnected above it carry plain failure bits with no provenance of
+// their own.
+bool ChainstateManager::IsAnchorOrphaned(const CBlockIndex* pindex) const
+{
+    AssertLockHeld(cs_main);
+    if (m_anchor_invalidating != nullptr &&
+        pindex->GetAncestor(m_anchor_invalidating->nHeight) == m_anchor_invalidating) {
+        return true;
+    }
+    const CBlockIndex* root = pindex;
+    while (root->pprev != nullptr && (root->pprev->nStatus & BLOCK_FAILED_MASK)) {
+        root = root->pprev;
+    }
+    return root->nStatus & BLOCK_FAILED_ANCHOR;
+}
+
 bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValidationState& state, const CChainParams& chainparams, CBlockIndex** ppindex, bool* duplicate)
 {
     AssertLockHeld(cs_main);
+    // SEQUENTIA: building on a block only a parent-chain reorg made invalid is
+    // not misbehaviour (see IsAnchorOrphaned).
+    const auto invalid_prev = [&](const CBlockIndex* prev) {
+        if (IsAnchorOrphaned(prev)) {
+            return state.Invalid(BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE, "bad-prevblk-anchor-orphaned");
+        }
+        return state.Invalid(BlockValidationResult::BLOCK_INVALID_PREV, "bad-prevblk");
+    };
     // Check for duplicate
     uint256 hash = block.GetHash();
     BlockMap::iterator miSelf{m_blockman.m_block_index.find(hash)};
@@ -5714,6 +5750,11 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
                 *ppindex = pindex;
             if (pindex->nStatus & BLOCK_FAILED_MASK) {
                 LogPrint(BCLog::VALIDATION, "%s: block %s is marked invalid\n", __func__, hash.ToString());
+                // SEQUENTIA: a peer re-sending a block that only our anchor
+                // watcher has dropped so far (see IsAnchorOrphaned).
+                if (IsAnchorOrphaned(pindex)) {
+                    return state.Invalid(BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE, "duplicate-anchor-orphaned");
+                }
                 return state.Invalid(BlockValidationResult::BLOCK_CACHED_INVALID, "duplicate");
             }
             return true;
@@ -5734,7 +5775,7 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
         pindexPrev = (*mi).second;
         if (pindexPrev->nStatus & BLOCK_FAILED_MASK) {
             LogPrint(BCLog::VALIDATION, "%s: %s prev block invalid\n", __func__, hash.ToString());
-            return state.Invalid(BlockValidationResult::BLOCK_INVALID_PREV, "bad-prevblk");
+            return invalid_prev(pindexPrev);
         }
         if (!ContextualCheckBlockHeader(block, state, m_blockman, chainparams, pindexPrev, GetAdjustedTime())) {
             LogPrint(BCLog::VALIDATION, "%s: Consensus::ContextualCheckBlockHeader: %s, %s\n", __func__, hash.ToString(), state.ToString());
@@ -5775,7 +5816,7 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
                         invalid_walk = invalid_walk->pprev;
                     }
                     LogPrint(BCLog::VALIDATION, "%s: %s prev block invalid\n", __func__, hash.ToString());
-                    return state.Invalid(BlockValidationResult::BLOCK_INVALID_PREV, "bad-prevblk");
+                    return invalid_prev(pindexPrev);
                 }
             }
         }

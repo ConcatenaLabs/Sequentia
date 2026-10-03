@@ -1222,11 +1222,16 @@ void AnchorWatchTask(ChainstateManager& chainman)
             LOCK(cs_main);
             pindex_bad = chainman.m_blockman.LookupBlockIndex(lowest_bad);
             if (!pindex_bad) return;
+            // Until the provenance marker below is set, peers still building on
+            // the blocks being disconnected are not misbehaving either
+            // (ChainstateManager::IsAnchorOrphaned).
+            chainman.m_anchor_invalidating = pindex_bad;
         }
         BlockValidationState state;
         if (!chainman.ActiveChainstate().InvalidateBlock(state, pindex_bad)) {
             LogPrintf("WARNING: failed to invalidate block %s after parent chain reorganization: %s\n",
                       lowest_bad.ToString(), state.ToString());
+            WITH_LOCK(cs_main, chainman.m_anchor_invalidating = nullptr);
             return;
         }
         {
@@ -1240,6 +1245,7 @@ void AnchorWatchTask(ChainstateManager& chainman)
         {
             LOCK(cs_main);
             chainman.ActiveChainstate().MarkAnchorInvalid(pindex_bad);
+            chainman.m_anchor_invalidating = nullptr;
         }
         BlockValidationState abc_state;
         if (!chainman.ActiveChainstate().ActivateBestChain(abc_state)) {
