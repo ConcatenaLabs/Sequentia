@@ -951,6 +951,26 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
         return false; // state filled in by CheckTxInputs
     }
 
+    // SEQUENTIA two-step unbonding (params.h). Judged for the next block, whose
+    // anchor is at least the tip's: a spend the tip's anchor already allows is
+    // allowed in the next block too, and one it does not is retried later.
+    if (g_con_pos && m_active_chainstate.m_chain.Tip() &&
+        args.m_chainparams.GetConsensus().PosUnbondingActiveAt(m_active_chainstate.m_chain.Height() + 1)) {
+        const CChain& chain = m_active_chainstate.m_chain;
+        const bool by_anchor = g_con_bitcoin_anchor;
+        const int spend_anchor = by_anchor ? (int)chain.Tip()->m_anchor_height : chain.Height() + 1;
+        const auto anchor_at = [&chain, by_anchor](int h) -> int {
+            if (h < 0 || h > chain.Height()) return -1; // unconfirmed parent
+            return by_anchor ? (int)chain[h]->m_anchor_height : h;
+        };
+        std::string reason;
+        if (!CheckPosUnbondingTx(tx, m_view, spend_anchor, anchor_at,
+                                 args.m_chainparams.GetConsensus().pos_unbond_anchor_depth, reason)) {
+            return state.Invalid(reason == "bad-unbond-premature" ? TxValidationResult::TX_PREMATURE_SPEND
+                                                                  : TxValidationResult::TX_CONSENSUS, reason);
+        }
+    }
+
     // ELEMENTS: extra policy check for consistency between issuances and their rangeproof
     if (fRequireStandard) {
         for (unsigned i = 0; i < std::min(tx.witness.vtxinwit.size(), tx.vin.size()); i++) {
@@ -3136,6 +3156,25 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
                 return error("%s: Consensus::CheckTxInputs: %s, %s", __func__, tx.GetHash().ToString(), state.ToString());
             }
             control.Add(vChecks);
+
+            // SEQUENTIA two-step unbonding (params.h): stake leaves only through
+            // an unbonding output, which unlocks only after the checkpoint depth
+            // of parent-chain blocks has passed since the block that created it.
+            if (g_con_pos && m_params.GetConsensus().PosUnbondingActiveAt(pindex->nHeight)) {
+                const bool by_anchor = g_con_bitcoin_anchor;
+                const int spend_anchor = by_anchor ? (int)pindex->m_anchor_height : pindex->nHeight;
+                const auto anchor_at = [pindex, by_anchor](int h) -> int {
+                    const CBlockIndex* a = (h >= 0 && h <= pindex->nHeight) ? pindex->GetAncestor(h) : nullptr;
+                    if (!a) return -1;
+                    return by_anchor ? (int)a->m_anchor_height : h;
+                };
+                std::string reason;
+                if (!CheckPosUnbondingTx(tx, view, spend_anchor, anchor_at,
+                                         m_params.GetConsensus().pos_unbond_anchor_depth, reason)) {
+                    LogPrintf("ERROR: %s: %s in tx %s\n", __func__, reason, tx.GetHash().ToString());
+                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, reason);
+                }
+            }
 
             if (!MoneyRange(fee_map)) {
                 LogPrintf("ERROR: %s: accumulated fee in the block out of range.\n", __func__);

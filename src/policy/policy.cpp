@@ -93,6 +93,11 @@ bool IsStandard(const CScript& scriptPubKey, TxoutType& whichType)
         if (g_con_pos && ParseDelegationScript(scriptPubKey)) {
             return true;
         }
+        // ...and the unbonding output a withdrawn stake waits in (two-step
+        // unbonding, consensus/params.h); otherwise stake could not be left.
+        if (g_con_pos && ParseUnbondScript(scriptPubKey)) {
+            return true;
+        }
         // ...and the bare payout-record script, by which a pool operator commits
         // to how it will pay its delegators. It must relay under default policy.
         if (g_con_pos && ParsePayoutScript(scriptPubKey)) {
@@ -263,7 +268,8 @@ bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
             // never withdrawn.
             if (g_con_pos && whichType == TxoutType::NONSTANDARD &&
                 (ParseStakeScript(prev.scriptPubKey) || ParseDelegationScript(prev.scriptPubKey) ||
-                 ParsePayoutScript(prev.scriptPubKey) || ParsePotScript(prev.scriptPubKey))) {
+                 ParsePayoutScript(prev.scriptPubKey) || ParsePotScript(prev.scriptPubKey) ||
+                 ParseUnbondScript(prev.scriptPubKey))) {
                 continue;
             }
             // SEQUENTIA: spending a freeze record is the unfreeze, and it must

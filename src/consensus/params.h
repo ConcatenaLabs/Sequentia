@@ -404,6 +404,30 @@ struct Params {
         return pos_block_spacing > 0 && pos_block_spacing_height > 0 &&
                height >= pos_block_spacing_height;
     }
+
+    //! SEQUENTIA two-step unbonding (paper §11.5). A staking output counts as
+    //! stake for as long as it is unspent, and its relative timelock runs from
+    //! the block that created it, so a stake older than the lock could sign at
+    //! one height and leave at the next: its keys would be worthless to their
+    //! owner long before a Bitcoin checkpoint secured what they signed.
+    //!
+    //! From pos_unbond_height a staking output may only be spent into another
+    //! staking output or into an UNBONDING output of the same key
+    //! (BuildUnbondScript), which carries no weight, and an unbonding output may
+    //! only be spent once the parent chain has advanced pos_unbond_anchor_depth
+    //! blocks past the anchor of the block that created it — the same depth a
+    //! checkpoint needs to consolidate (-poscheckpointdepth), so the history the
+    //! departing keys could rewrite is checkpointable before the coins are free.
+    //! Counted in parent-chain (Bitcoin) blocks via the anchors, like the
+    //! checkpoint; on a chain without anchoring, in Sequentia blocks.
+    //!
+    //! A HARD FORK: it rejects spends that were valid before. 0 = off.
+    int pos_unbond_height{0};
+    int pos_unbond_anchor_depth{2016};
+    bool PosUnbondingActiveAt(int height) const
+    {
+        return pos_unbond_height > 0 && height >= pos_unbond_height;
+    }
     //! SEQUENTIA: the one-time UTXO-set rewrite this chain applies, if any.
     //! Empty (height 0) on every chain but the one it was written for -- see the
     //! UtxoRecovery comment above and CTestNetParams in chainparams.cpp.

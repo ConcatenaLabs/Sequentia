@@ -1299,6 +1299,90 @@ std::optional<std::pair<CPubKey, uint64_t>> StakeFromTxOut(const CTxOut& out)
     return std::make_pair(parsed->first, (uint64_t)amount);
 }
 
+//! Marker of the unbonding output. Like the delegation record it begins with a
+//! data push, so it can never be mistaken for a staking script (which begins
+//! with a CSV number and OP_CHECKSEQUENCEVERIFY).
+static const std::vector<unsigned char> UNBOND_MARKER = {'S', 'E', 'Q', 'U', 'N', 'B', 'O', 'N', 'D'};
+
+CScript BuildUnbondScript(const CPubKey& pubkey)
+{
+    CScript s;
+    s << UNBOND_MARKER << OP_DROP;
+    s << ToByteVector(pubkey) << OP_CHECKSIG;
+    return s;
+}
+
+std::optional<CPubKey> ParseUnbondScript(const CScript& script)
+{
+    CScript::const_iterator pc = script.begin();
+    opcodetype opcode;
+    std::vector<unsigned char> data;
+    if (!script.GetOp(pc, opcode, data) || data != UNBOND_MARKER) return std::nullopt;
+    if (!script.GetOp(pc, opcode, data) || opcode != OP_DROP) return std::nullopt;
+    if (!script.GetOp(pc, opcode, data) || data.empty()) return std::nullopt;
+    CPubKey pubkey(data);
+    if (!pubkey.IsFullyValid()) return std::nullopt;
+    if (!script.GetOp(pc, opcode, data) || opcode != OP_CHECKSIG) return std::nullopt;
+    if (pc != script.end()) return std::nullopt;
+    return pubkey;
+}
+
+bool CheckPosUnbondingTx(const CTransaction& tx, const CCoinsViewCache& inputs,
+                         int spend_anchor, const std::function<int(int)>& anchor_at,
+                         int anchor_depth, std::string& reason)
+{
+    if (tx.IsCoinBase()) return true;
+    // 1) Unbonding inputs wait out the depth; staking inputs are tallied per key.
+    std::map<CPubKey, CAmount> staked_in;
+    for (const CTxIn& in : tx.vin) {
+        if (in.m_is_pegin) continue;
+        const Coin& coin = inputs.AccessCoin(in.prevout);
+        if (coin.IsSpent()) continue; // missing inputs are reported elsewhere
+        if (ParseUnbondScript(coin.out.scriptPubKey)) {
+            const int created = anchor_at((int)coin.nHeight);
+            if (created < 0 || spend_anchor < created + anchor_depth) {
+                reason = "bad-unbond-premature";
+                return false;
+            }
+            continue;
+        }
+        if (auto st = StakeFromTxOut(coin.out)) staked_in[st->first] += (CAmount)st->second;
+    }
+    if (staked_in.empty()) return true;
+    // 2) What leaves a key's stake must go back into stake or into unbonding
+    //    for the same key. The only slack is the network fee, capped.
+    std::map<CPubKey, CAmount> kept;
+    CAmount fee = 0;
+    for (const CTxOut& out : tx.vout) {
+        if (out.IsFee()) {
+            if (out.nAsset.IsExplicit() && out.nAsset.GetAsset() == ::policyAsset && out.nValue.IsExplicit()) {
+                fee += out.nValue.GetAmount();
+            }
+            continue;
+        }
+        if (auto st = StakeFromTxOut(out)) {
+            kept[st->first] += (CAmount)st->second;
+            continue;
+        }
+        if (auto pk = ParseUnbondScript(out.scriptPubKey)) {
+            if (out.nValue.IsExplicit() && out.nAsset.IsExplicit() && out.nAsset.GetAsset() == ::policyAsset) {
+                kept[*pk] += out.nValue.GetAmount();
+            }
+        }
+    }
+    CAmount shortfall = 0, staked_total = 0;
+    for (const auto& [pk, amount] : staked_in) {
+        const CAmount back = kept.count(pk) ? kept[pk] : 0;
+        if (amount > back) shortfall += amount - back;
+        staked_total += amount;
+    }
+    if (shortfall > std::min(fee, staked_total / 1000 * POS_UNBOND_MAX_FEE_PERMILLE)) {
+        reason = "bad-unbond-required";
+        return false;
+    }
+    return true;
+}
+
 void PosApplyBlockStake(const CBlock& block, const CBlockUndo& undo, int height)
 {
     StakeRegistry& registry = StakeRegistry::GetInstance();

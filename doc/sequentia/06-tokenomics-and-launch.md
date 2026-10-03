@@ -186,7 +186,8 @@ between honest operators without forking the chain (see
 | No inflation / no block subsidy | Launch governance | `con_blocksubsidy = 0`, fixed in code |
 | Minimum stake (0.01% = 40,000 SEQ) | Launch governance | Hardcoded `g_pos_min_stake` in `CSequentiaParams`; `-posminstake` on custom chains |
 | Committee regime & size (public fixed-size, cap 250 with quorum 126 on the testnet; threshold sortition caps at 100) | Launch governance | Consensus config (`pospubliccommittee`, `poscommitteesize`) |
-| Unbonding period (~15 days) | Launch governance | Staking-output CSV requirement |
+| Staking lock (~15 days) | Launch governance | Staking-output CSV requirement |
+| Unbonding wait (2,016 Bitcoin blocks, ~2 weeks) | Launch governance | `pos_unbond_height` / `pos_unbond_anchor_depth` in chainparams |
 | Slot interval (~30s) | Launch governance | Hardcoded `g_pos_slot_interval = 30` in `CSequentiaParams`; `-posslotinterval` on custom chains |
 | Minimum block spacing (60 s) | Launch governance | `consensus.pos_block_spacing = 60` in `CSequentiaParams`; `-posblockspacing` on custom chains |
 | Leader-election rule (exponential race, in force from the first elected block) | Launch governance | `consensus.pos_exprace_height = 1` in `CSequentiaParams`; `-posexpraceheight` on custom chains. `1` and not `0`: for this parameter `0` means DISABLED, unlike `pos_coinbase_leader_height` where `0` means from genesis. See [`04-proof-of-stake.md`](04-proof-of-stake.md) |

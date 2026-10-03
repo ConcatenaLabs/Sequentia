@@ -577,10 +577,16 @@ expires your stake nor needs renewing:
 - So an output stakes **continuously for as long as it is unspent - indefinitely.**
   There is no re-locking, renewal, or keep-alive: to keep staking, do nothing.
 
-**Unbonding** is simply spending the staking output once its lock has matured
-(the staker's signature satisfies the script) - there is no separate ceremony.
-That spend ends the stake; the freed SEQ becomes ordinary coin to hold or to pay
-into a fresh staking output and stake again.
+**Unbonding** takes two steps on chains that enforce two-step unbonding
+(mainnet; `-posunbondheight` on custom chains). Once the lock has matured,
+`withdrawstake` moves the stake into an unbonding output of the same key: the
+weight is gone as soon as that confirms, and the coins wait there until the
+parent chain has advanced 2,016 blocks (about two weeks) past the anchor of the
+block that confirmed it. `claimunbonded` then sends them to an address of the
+wallet, as ordinary coin to hold or to stake again. The network fee of the first
+step comes out of the stake, up to 1% of the amount withdrawn. On a chain that
+does not enforce the rule, `withdrawstake` sends the coins straight to the
+wallet.
 
 ## 8b. Delegated staking (staking pools)
 

@@ -14,6 +14,7 @@
 #include <policy/policy.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
+#include <script/standard.h>
 #include <undo.h>
 #include <util/system.h>
 #include <vrf.h>
@@ -1620,6 +1621,89 @@ BOOST_AUTO_TEST_CASE(pos_split_shares)
         BOOST_CHECK_EQUAL(shares.swept.at(asset), 10000);
     }
     registry.Clear();
+}
+
+// Two-step unbonding (consensus/params.h pos_unbond_height): stake leaves only
+// through an unbonding output of the same key, and that output unlocks only
+// after the checkpoint depth of parent-chain blocks.
+BOOST_AUTO_TEST_CASE(pos_unbonding_two_step)
+{
+    // Fee outputs only exist in Elements mode (CTxOut::IsFee).
+    const bool saved_elementsmode = g_con_elementsmode;
+    g_con_elementsmode = true;
+    CPubKey staker = MakeKey();
+    CPubKey other = MakeKey();
+    const CAmount STAKE = 100 * COIN;
+
+    // Script round-trip, and it is neither a staking script nor weight.
+    CScript unbond = BuildUnbondScript(staker);
+    BOOST_REQUIRE(ParseUnbondScript(unbond).has_value());
+    BOOST_CHECK(*ParseUnbondScript(unbond) == staker);
+    BOOST_CHECK(!ParseStakeScript(unbond).has_value());
+    BOOST_CHECK(!StakeFromTxOut(CTxOut(CConfidentialAsset(::policyAsset), CConfidentialValue(STAKE), unbond)).has_value());
+    BOOST_CHECK(!ParseUnbondScript(BuildStakeScript(staker, 10)).has_value());
+    CScript trailing = unbond;
+    trailing << OP_DROP;
+    BOOST_CHECK(!ParseUnbondScript(trailing).has_value());
+
+    CCoinsView base;
+    CCoinsViewCache view(&base);
+    const COutPoint stake_op(InsecureRand256(), 0);
+    view.AddCoin(stake_op, Coin(CTxOut(CConfidentialAsset(::policyAsset), CConfidentialValue(STAKE), BuildStakeScript(staker, 10)), 5, false), false);
+    const COutPoint unbond_op(InsecureRand256(), 0);
+    view.AddCoin(unbond_op, Coin(CTxOut(CConfidentialAsset(::policyAsset), CConfidentialValue(STAKE), unbond), 20, false), false);
+
+    // Anchors: block h is anchored to parent-chain height 1000 + h.
+    const auto anchor_at = [](int h) { return 1000 + h; };
+    const int DEPTH = 2016;
+    std::string reason;
+    const CAmount fee = 1000;
+    auto spend_stake_to = [&](const CScript& dest, CAmount value, CAmount tx_fee) {
+        CMutableTransaction m;
+        m.vin.emplace_back(stake_op);
+        m.vout.emplace_back(CConfidentialAsset(::policyAsset), CConfidentialValue(value), dest);
+        m.vout.emplace_back(CConfidentialAsset(::policyAsset), CConfidentialValue(tx_fee), CScript());
+        return CTransaction(m);
+    };
+
+    // 1) Stake straight to an address: refused.
+    CScript addr = GetScriptForDestination(PKHash(other));
+    BOOST_CHECK(!CheckPosUnbondingTx(spend_stake_to(addr, STAKE - fee, fee), view, 5000, anchor_at, DEPTH, reason));
+    BOOST_CHECK_EQUAL(reason, "bad-unbond-required");
+    // ...to ANOTHER key's unbonding output: refused too.
+    BOOST_CHECK(!CheckPosUnbondingTx(spend_stake_to(BuildUnbondScript(other), STAKE - fee, fee), view, 5000, anchor_at, DEPTH, reason));
+    // 2) To its own unbonding output, minus the fee: allowed.
+    BOOST_CHECK(CheckPosUnbondingTx(spend_stake_to(unbond, STAKE - fee, fee), view, 5000, anchor_at, DEPTH, reason));
+    // ...back into stake (a re-stake): allowed.
+    BOOST_CHECK(CheckPosUnbondingTx(spend_stake_to(BuildStakeScript(staker, 10), STAKE - fee, fee), view, 5000, anchor_at, DEPTH, reason));
+    // 3) The fee is the only slack, and it is capped: a stake cannot leave
+    //    through a large fee to a producer its owner controls.
+    const CAmount big = STAKE / 1000 * POS_UNBOND_MAX_FEE_PERMILLE + 1; // just over 1% of the stake
+    // ...while exactly 1% is still allowed.
+    BOOST_CHECK(CheckPosUnbondingTx(spend_stake_to(unbond, STAKE - (big - 1), big - 1), view, 5000, anchor_at, DEPTH, reason));
+    BOOST_CHECK(!CheckPosUnbondingTx(spend_stake_to(unbond, STAKE - big, big), view, 5000, anchor_at, DEPTH, reason));
+    BOOST_CHECK_EQUAL(reason, "bad-unbond-required");
+    // ...and a shortfall bigger than the fee actually paid is refused.
+    BOOST_CHECK(!CheckPosUnbondingTx(spend_stake_to(unbond, STAKE - 2 * fee, fee), view, 5000, anchor_at, DEPTH, reason));
+
+    // 4) Spending the unbonding output (created in block 20, anchor 1020):
+    //    refused until the spending block's anchor reaches 1020 + DEPTH.
+    CMutableTransaction claim;
+    claim.vin.emplace_back(unbond_op);
+    claim.vout.emplace_back(CConfidentialAsset(::policyAsset), CConfidentialValue(STAKE - fee), addr);
+    claim.vout.emplace_back(CConfidentialAsset(::policyAsset), CConfidentialValue(fee), CScript());
+    const CTransaction claim_tx(claim);
+    BOOST_CHECK(!CheckPosUnbondingTx(claim_tx, view, 1020 + DEPTH - 1, anchor_at, DEPTH, reason));
+    BOOST_CHECK_EQUAL(reason, "bad-unbond-premature");
+    BOOST_CHECK(CheckPosUnbondingTx(claim_tx, view, 1020 + DEPTH, anchor_at, DEPTH, reason));
+    // The count is in PARENT-CHAIN blocks: Sequentia blocks whose anchor has
+    // not advanced do not unlock it.
+    const auto stuck_anchor = [](int h) { return 1020; };
+    BOOST_CHECK(!CheckPosUnbondingTx(claim_tx, view, 1020 + 5, stuck_anchor, DEPTH, reason));
+    // An unknown creating block (an unconfirmed parent) never unlocks.
+    const auto unknown = [](int h) { return -1; };
+    BOOST_CHECK(!CheckPosUnbondingTx(claim_tx, view, 1000000, unknown, DEPTH, reason));
+    g_con_elementsmode = saved_elementsmode;
 }
 
 BOOST_AUTO_TEST_SUITE_END()
