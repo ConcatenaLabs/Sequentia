@@ -140,3 +140,14 @@ let the fee be paid in another asset, although consensus accepts that.
 - Under two-step unbonding `withdrawstake` refuses an `address` instead of
   ignoring it: the coins go to an unbonding output, and `claimunbonded` takes
   the address.
+
+## Custom chains enforce two-step unbonding from genesis
+
+A fresh custom chain (such as `elementsregtest`) now enforces two-step unbonding
+from its first block, as the mainnet does, instead of only when
+`-posunbondheight` was given. `-posunbondheight` still moves the height on a
+custom chain, and `-posunbondheight=0` turns the rule off, which is how a test
+reproduces the one-step withdrawal the testnet allows below 159,000. A custom
+chain whose history already holds a one-step withdrawal must be started with
+`-posunbondheight=0`, or a height above that withdrawal, to sync or reindex.
+The testnet and the mainnet are not affected: their heights are fixed in code.

@@ -33,9 +33,10 @@ quorum-certified height-1 parent, all by the same leader, so their VRF scores
 are equal and the hash breaks ties: two sub-quorum siblings, certified by the
 leader alone (1) and by the leader plus a member (2), which the escaping stall
 permits once the Bitcoin anchor has advanced; and a certified sibling (3). The
-weak sibling is rebuilt (on a fresh anchor) until its hash is the lower of the
-two, so that ranking by count would pick the other, and the certified sibling
-until its hash is the highest, so that only certification can make it win. Each pair is exposed in
+pair is rebuilt (on a fresh anchor) until the weak sibling's hash is the lower,
+so that ranking by count would pick the other, and the certified sibling until
+its hash is higher than the weak one's, so that only certification can make it
+win. Each pair is exposed in
 both arrival orders, and the last once more after a restart, when whether a
 block is certified is measured again from the stored countersignature count.
 
@@ -167,14 +168,26 @@ class PosForkChoiceTest(BitcoinTestFramework):
         self.advance_parent(3)
 
         self.log.info("Two uncertified siblings: the lower hash wins, not the larger certificate")
-        res_s = node.generateposblock(leader, wifs[1:2])
-        strong = res_s['hash']
+        # Build the pair afresh, on a new anchor, until the 1-member sibling has
+        # the lower hash (an even chance each time), so that count and hash
+        # would choose differently.
+        for _ in range(30):
+            res_s = node.generateposblock(leader, wifs[1:2])
+            strong = res_s['hash']
+            node.invalidateblock(strong)
+            assert_equal(node.getbestblockhash(), parent_hash)
+            res_w = node.generateposblock(leader, [])
+            weak = res_w['hash']
+            if hash_order(weak) < hash_order(strong):
+                break
+            node.invalidateblock(weak)
+            self.advance_parent(1)
+            self.wait_until(lambda: node.getbestblockhash() == parent_hash)
+        else:
+            raise AssertionError("no pair with the wanted hash order in 30 attempts")
         assert_equal(res_s['countersignatures'], 2)
         assert_equal(node.getblockheader(strong)['poscertified'], False)
-        node.invalidateblock(strong)
-        assert_equal(node.getbestblockhash(), parent_hash)
-        res_w = self.sibling(node, leader, [], parent_hash, better_than=strong)
-        weak = res_w['hash']
+        assert_equal(node.getblockheader(strong)['previousblockhash'], parent_hash)
         assert_equal(res_w['countersignatures'], 1)
         assert_equal(node.getblockheader(weak)['poscertified'], False)
         assert_equal(node.getbestblockhash(), weak)
@@ -188,11 +201,11 @@ class PosForkChoiceTest(BitcoinTestFramework):
         assert_equal(node.getbestblockhash(), weak)
         assert_equal(node.getblockhash(1), parent_hash)
 
-        self.log.info("A certified sibling beats both, though its hash is the highest")
+        self.log.info("A certified sibling beats both, though its hash is higher than the uncertified winner's")
         node.invalidateblock(weak)
         node.invalidateblock(strong)
         assert_equal(node.getbestblockhash(), parent_hash)
-        res_c = self.sibling(node, leader, wifs[1:3], parent_hash, worse_than=max(weak, strong, key=hash_order))
+        res_c = self.sibling(node, leader, wifs[1:3], parent_hash, worse_than=weak)
         cert = res_c['hash']
         assert_equal(res_c['countersignatures'], 3)
         assert_equal(node.getblockheader(cert)['poscertified'], True)

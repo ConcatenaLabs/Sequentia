@@ -52,6 +52,10 @@ class PosWithdrawStakeTest(BitcoinTestFramework):
             "-con_pos=1",
             "-posvrf=1",
             "-posunbonding=%d" % UNBONDING,
+            # The one-step withdrawal (a staking output spent straight to an address),
+            # which this test exercises: custom chains enforce two-step unbonding from
+            # genesis unless told otherwise, as the testnet does below its activation height.
+            "-posunbondheight=0",
             "-posslotinterval=1",
             "-signblockscript=51",
             "-initialfreecoins=1000000000000",

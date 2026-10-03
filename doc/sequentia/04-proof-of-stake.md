@@ -98,8 +98,9 @@ never needs renewing. Holding ordinary (non-staking-output) SEQ confers no
 weight; staking is opt-in. The `OP_CHECKSEQUENCEVERIFY` lock - the
 whitepaper's stake locktime - is enforced by the script itself.
 
-**Two-step unbonding** (`Consensus::Params::pos_unbond_height`; mainnet from its
-first block, `-posunbondheight` on custom chains). Because the lock runs from the
+**Two-step unbonding** (`Consensus::Params::pos_unbond_height`; the mainnet and
+custom chains from their first block, the testnet from height 159,000;
+`-posunbondheight` moves it on a custom chain, and 0 turns it off). Because the lock runs from the
 output's creation and the weight lasts until the spend, a stake older than the
 lock could otherwise sign at one height and leave at the next, its keys worth
 nothing to their owner long before a Bitcoin checkpoint secured what they

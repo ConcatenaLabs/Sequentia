@@ -2019,10 +2019,13 @@ protected:
         // the historic whole-interval unit.
         consensus.pos_slot_gate_seconds = args.GetIntArg("-posslotgateseconds", 0);
         consensus.pos_slot_gate_height = (int)args.GetIntArg("-posslotgateheight", 1);
-        // Two-step unbonding. Arg-readable only here so tests can exercise it and
-        // both sides of its activation; the real chains pin it in code. Off by
-        // default, so the one-step withdrawal tests keep testing what they test.
-        consensus.pos_unbond_height = (int)args.GetIntArg("-posunbondheight", 0);
+        // Two-step unbonding. Arg-readable only here so tests can exercise both
+        // sides of its activation; the real chains pin it in code. In force from
+        // the first block by default, as on the mainnet: a fresh chain gets a
+        // rule the testnet has without being told (CONTRIBUTING.md). 0 = off,
+        // for a test of the one-step withdrawal the testnet allows below its
+        // activation height.
+        consensus.pos_unbond_height = (int)args.GetIntArg("-posunbondheight", 1);
         consensus.pos_unbond_anchor_depth = (int)args.GetIntArg("-posunbonddepth", 2016);
         if (consensus.pos_unbond_anchor_depth < 1 || consensus.pos_unbond_anchor_depth > 1000000) {
             throw std::runtime_error("-posunbonddepth must be between 1 and 1000000");
