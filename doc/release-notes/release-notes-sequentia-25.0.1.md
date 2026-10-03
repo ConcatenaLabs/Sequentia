@@ -6,9 +6,31 @@ at the two-step-unbonding fork. The fork itself is unchanged: from height
 unbonding output of the same key, and that height is the same as in 25.0.0.
 
 **Every node must run 25.0.1 before the testnet reaches height 159,000**, the
-block producers above all. 25.0.0 must not be the version that crosses that
-height: a single withdrawal broadcast at the wrong moment stops every 25.0.0
-producer there (below).
+block producers above all; at about a block a minute that is around
+6 October 2026 (UTC), but the height decides, not the date. 25.0.0 must not be
+the version that crosses that height: a single withdrawal broadcast at the
+wrong moment stops every 25.0.0 producer there (below). Upgrade the committee
+all at once, as for every release that changes fork choice.
+
+## A node left behind at 159,000
+
+A node still on 24.7.x accepts a block at 159,000 that spends a staking output
+straight to an address, which every 25.0.x node refuses. What it looks like:
+
+- On an upgraded node, `getpeerinfo` shows the old peer's `synced_headers`
+  frozen at 158,999 while its byte counters keep climbing
+  (`contrib/sequentia/peer-stall-check.sh` reports exactly this), the old
+  node's block at 159,000 is `invalid` in `getchaintips`, and the debug log
+  names the transaction: `ConnectBlock: bad-unbond-required in tx <txid>`.
+- On the old node, the upgraded chain's tip is `headers-only`.
+
+Recovery: upgrade it to 25.0.1 and restart. It does not validate again the
+blocks it already accepted. If the valid chain is longer than its own branch,
+it moves onto it by itself and lists its old branch as `valid-fork`. If its own
+branch is the longer one, it stays there: `invalidateblock <hash of its block
+at 159,000>` moves it onto the valid chain, and in either case keeps it from
+ever returning to that branch. `reconsiderblock` does nothing here, because
+nothing was marked invalid on the old node.
 
 ## Producers no longer stop at the activation height
 
@@ -16,7 +38,7 @@ producer there (below).
 
 The mempool admits a transaction for the next block. A staking output spent
 straight to an address is valid in every block below 159,000, so such a
-withdrawal admitted at height 158,998 and not mined in block 158,999 stayed in
+withdrawal admitted with the tip at 158,998 and not mined in block 158,999 stayed in
 the mempool, invalid for block 159,000, and nothing removed it. Every
 producer's template for 159,000 carried it and failed validation
 (`TestBlockValidity failed: bad-unbond-required`), every producer skipped its
@@ -151,3 +173,14 @@ reproduces the one-step withdrawal the testnet allows below 159,000. A custom
 chain whose history already holds a one-step withdrawal must be started with
 `-posunbondheight=0`, or a height above that withdrawal, to sync or reindex.
 The testnet and the mainnet are not affected: their heights are fixed in code.
+
+## Tests
+
+`feature_pos_unbonding.py` forces every refusal of the unbonding rule into a
+block, built by a producer with the rule off and judged by a `-par=1` node that
+must name the reason (`bad-unbond-required`, `bad-unbond-premature`), and accepts
+the edge cases in blocks: a fee of exactly 1% of the stake, a claim at the depth.
+Given the 24.7.13 release (`PREVIOUS_RELEASES_DIR/v24.7.13/bin`) it also
+crosses an activation height beside a 24.7.13 node: the two accept each other's
+one-step withdrawals below it, the new node refuses the old node's block at it,
+and the old node, upgraded in place, is brought back with `invalidateblock`.
