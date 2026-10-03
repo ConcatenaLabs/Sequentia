@@ -3816,9 +3816,38 @@ static std::vector<uint256> PosHeldBy(const CBlockIndex* f, int64_t now,
     }
     return held;
 }
-// When each quorum-certified block was first seen on the active chain (steady
-// ms), for the finality observation window. Pruned to the recent tip.
+// When each quorum-certified block connected in this process was first
+// connected to the active chain (height, steady ms), for the finality
+// observation window. A block with no entry has been observed for as long as
+// any window lasts: it was loaded from disk at startup, connected during the
+// initial block download (historical, settled by the network long ago), or is
+// at or below the finalized point, where entries are pruned. So no window is
+// ever re-opened for a block at or below the finalized point, and a restart
+// finds the finalized block final again at its first pass.
 static std::map<uint256, std::pair<int, int64_t>> g_pos_quorum_first_active GUARDED_BY(::cs_main);
+// Where the last pass stopped looking: a block such that every block from it
+// down to the finalized block it found (g_pos_final_floor_final_*, height -1 if
+// none: down to genesis) holds fewer countersignatures than
+// g_pos_final_floor_quorum. A pass that reaches it has its answer, so a pass
+// examines only the blocks connected since the last one and those still in
+// their window, never a whole stall stretch or, with nothing to finalize, the
+// whole chain. Height -1 = none.
+static int g_pos_final_floor_height GUARDED_BY(::cs_main) = -1;
+static uint256 g_pos_final_floor_hash GUARDED_BY(::cs_main);
+static int g_pos_final_floor_quorum GUARDED_BY(::cs_main) = 0;
+static int g_pos_final_floor_final_height GUARDED_BY(::cs_main) = -1;
+static uint256 g_pos_final_floor_final_hash GUARDED_BY(::cs_main);
+
+//! Record that `pindex`, a block just connected to the active chain, opens
+//! its observation window now, if it is a quorum block.
+static void PosNoteActiveQuorumBlock(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    if (!g_con_pos || g_pos_finality_delay_ms <= 0 || pindex == nullptr) return;
+    if ((int)pindex->m_pos_countersigs < PosSlotQuorum(StakeRegistry::GetInstance())) return;
+    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    g_pos_quorum_first_active.emplace(pindex->GetBlockHash(), std::make_pair(pindex->nHeight, now));
+}
 
 // Recompute the immediate-finality point from `tip`: the highest active-chain
 // block carrying a full quorum whose observation window has elapsed.
@@ -3855,23 +3884,63 @@ static void RecomputePosImmediateFinality(const CBlockIndex* tip,
             if (!PosHeldBy(f, now, lookup).empty()) held_floor = f->nHeight;
         }
     }
+    // The finalized point never moves back into its window: the block already
+    // final, and every ancestor of it, stays final without being observed
+    // again, and the walk can stop at the first quorum block among them. If
+    // a reorg has taken the final block off the active chain (only Bitcoin
+    // does that: the anchor watcher invalidating it), its ancestors that
+    // remain are still final, and the blocks of the new branch above them
+    // pass through their own windows.
+    const CBlockIndex* old_final = old_final_height >= 0 ? lookup(g_pos_immediate_final_hash) : nullptr;
+    if (quorum < g_pos_final_floor_quorum) g_pos_final_floor_height = -1; // a lower quorum may count more blocks
     g_pos_immediate_final_height = -1;
-    for (const CBlockIndex* f = tip; f && f->nHeight > 0; f = f->pprev) {
+    const CBlockIndex* lowest_pending = nullptr; // lowest quorum block passed over (in its window, or held)
+    bool settled = false;
+    int examined = 0;
+    for (const CBlockIndex* f = tip; f && f->nHeight > 0; f = f->pprev, ++examined) {
+        if (f->nHeight == g_pos_final_floor_height && f->GetBlockHash() == g_pos_final_floor_hash) {
+            // Nothing below here up to the floor's finalized block is a quorum block.
+            if (g_pos_final_floor_final_height >= 0) {
+                if (const CBlockIndex* b = lookup(g_pos_final_floor_final_hash)) {
+                    g_pos_immediate_final_height = b->nHeight;
+                    g_pos_immediate_final_hash = b->GetBlockHash();
+                }
+            }
+            break;
+        }
+        if (!settled && old_final && f->nHeight <= old_final->nHeight && old_final->GetAncestor(f->nHeight) == f) {
+            settled = true;
+        }
         if ((int)f->m_pos_countersigs < quorum) continue;
-        if (g_pos_finality_delay_ms > 0) {
-            auto it = g_pos_quorum_first_active.emplace(f->GetBlockHash(), std::make_pair(f->nHeight, now)).first;
-            if (now - it->second.second < g_pos_finality_delay_ms) continue; // still in its observation window
-            if (f->nHeight >= held_floor) continue;                           // contested at or below it
+        if (!settled && g_pos_finality_delay_ms > 0) {
+            auto it = g_pos_quorum_first_active.find(f->GetBlockHash());
+            const bool in_window = it != g_pos_quorum_first_active.end() && now - it->second.second < g_pos_finality_delay_ms;
+            if (in_window || f->nHeight >= held_floor) {  // still observed, or contested at or below it
+                lowest_pending = f;
+                continue;
+            }
         }
         g_pos_immediate_final_height = f->nHeight;
         g_pos_immediate_final_hash = f->GetBlockHash();
         break;
     }
-    if (tip) {
-        for (auto it = g_pos_quorum_first_active.begin(); it != g_pos_quorum_first_active.end();) {
-            if (it->second.first + 100 < tip->nHeight) it = g_pos_quorum_first_active.erase(it);
-            else ++it;
-        }
+    // The next pass need look no lower than the lowest block this one passed
+    // over that may still become final (or the tip, if none).
+    if (const CBlockIndex* floor = lowest_pending ? lowest_pending->pprev : tip) {
+        g_pos_final_floor_height = floor->nHeight;
+        g_pos_final_floor_hash = floor->GetBlockHash();
+        g_pos_final_floor_quorum = quorum;
+        g_pos_final_floor_final_height = g_pos_immediate_final_height;
+        g_pos_final_floor_final_hash = g_pos_immediate_final_hash;
+    }
+    if (examined > 100) {
+        LogPrint(BCLog::BENCH, "PoS finality: a pass examined %d blocks below the tip (finalized height %d)\n",
+                 examined, g_pos_immediate_final_height);
+    }
+    // A window is never needed at or below the finalized point.
+    for (auto it = g_pos_quorum_first_active.begin(); it != g_pos_quorum_first_active.end();) {
+        if (it->second.first <= g_pos_immediate_final_height) it = g_pos_quorum_first_active.erase(it);
+        else ++it;
     }
     // Reconciliation (anchor.h): a RISING finalized point means a
     // quorum-certified block extended this chain — our branch is alive, so
@@ -3883,7 +3952,7 @@ static void RecomputePosImmediateFinality(const CBlockIndex* tip,
 
 void PosRefreshImmediateFinality(ChainstateManager& chainman)
 {
-    if (!g_con_pos || g_pos_finality_delay_ms <= 0) return;
+    if (!g_con_pos) return;
     LOCK(::cs_main);
     const CBlockIndex* tip = chainman.ActiveChain().Tip();
     if (tip) RecomputePosImmediateFinality(tip, [&chainman](const uint256& h) { return chainman.m_blockman.LookupBlockIndex(h); });
@@ -4281,6 +4350,11 @@ bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew
     }
     // Update m_chain & related variables.
     m_chain.SetTip(pindexNew);
+    // SEQUENTIA immediate finality: a quorum block's observation window opens
+    // when it joins the active chain. Not during the initial block download,
+    // whose blocks the network settled long ago: they become final as soon as
+    // they are the highest quorum block, as a block loaded at startup does.
+    if (g_con_pos && !IsInitialBlockDownload()) PosNoteActiveQuorumBlock(pindexNew);
     UpdateTip(pindexNew);
 
     // SEQUENTIA PoS: mirror this block's staking-output creations/spends into

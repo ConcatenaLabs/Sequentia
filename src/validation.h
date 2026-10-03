@@ -207,7 +207,8 @@ PosFinalityInfo PosGetFinalityInfo(ChainstateManager& chainman);
 
 /** Re-evaluate the immediate-finality point against the active tip, so a
  *  quorum block whose observation window has elapsed becomes final even when no
- *  new block arrives. Called periodically from the scheduler. */
+ *  new block arrives. Called periodically from the scheduler, and once when the
+ *  chain is loaded at startup. */
 void PosRefreshImmediateFinality(ChainstateManager& chainman);
 
 /** Steady-clock seconds at the last ADVANCE of the immediate-finality point
