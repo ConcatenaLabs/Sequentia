@@ -2,7 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-#include <blind.h> // ELEMENTS: for MAX_RANGEPROOF_SIZE
+#include <blind.h> // ELEMENTS: for RangeproofSize
 #include <supervision.h>
 #include <consensus/amount.h>
 #include <consensus/validation.h>
@@ -1032,7 +1032,9 @@ static bool CreateTransactionInternal(
         FeeCalculation& fee_calc_out,
         bool sign,
         BlindDetails* blind_details,
-        const IssuanceDetails* issuance_details) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+        const IssuanceDetails* issuance_details,
+        CAmount fee_target_floor = 0,
+        CAmount* fee_target_floor_out = nullptr) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
 {
     if (blind_details || issuance_details) {
         assert(g_con_elementsmode);
@@ -1257,6 +1259,40 @@ static bool CreateTransactionInternal(
     // TODO CA: Set this for each change output
     coin_selection_params.change_output_size = GetSerializeSize(change_prototype_txout);
 
+    // Get available coins
+    std::vector<COutput> vAvailableCoins;
+    AvailableCoins(wallet, vAvailableCoins, &coin_control, 1, MAX_MONEY, MAX_MONEY, 0);
+
+    // SEQUENTIA: a rangeproof's size depends on how many bits the amount it
+    // proves needs (blind.h, RangeproofSize). A change output holds at most what
+    // the wallet can spend of its asset, so the largest such total bounds every
+    // change rangeproof this transaction can carry. Pricing each one at the
+    // 64-bit maximum instead made every blinded item look about 240 vbytes
+    // larger than it is built.
+    CAmount largest_spendable = 0;
+    {
+        CAmountMap spendable;
+        for (const COutput& out : vAvailableCoins) {
+            const CAmount value = out.tx->GetOutputValueOut(wallet, out.i);
+            if (value > 0) spendable[out.tx->GetOutputAsset(wallet, out.i)] += value;
+        }
+        for (const auto& [asset, total] : spendable) largest_spendable = std::max(largest_spendable, total);
+        // Inputs from outside the wallet add value it cannot see here.
+        std::vector<COutPoint> preset;
+        coin_control.ListSelected(preset);
+        for (const COutPoint& outpoint : preset) {
+            if (coin_control.IsExternalSelected(outpoint)) largest_spendable = MAX_MONEY;
+        }
+    }
+    const size_t change_rangeproof_size = RangeproofSize(largest_spendable);
+    // The witness of a blinded output: its surjection proof and its rangeproof,
+    // each with its length prefix, in vbytes.
+    const auto blinded_output_witness = [](size_t rangeproof_size) -> size_t {
+        const size_t weight = GetSizeOfCompactSize(DEFAULT_SURJECTIONPROOF_SIZE) + DEFAULT_SURJECTIONPROOF_SIZE +
+                              GetSizeOfCompactSize(rangeproof_size) + rangeproof_size;
+        return (weight + WITNESS_SCALE_FACTOR - 1) / WITNESS_SCALE_FACTOR;
+    };
+
     // SEQUENTIA: price the change as it will be built. Change is blinded only
     // when the transaction is confidential anyway (see tx_confidential_anyway
     // below), and on a transparent wallet that is decided by things mostly
@@ -1284,7 +1320,7 @@ static bool CreateTransactionInternal(
             change_prototype_txout.nValue.vchCommitment.resize(33);
             change_prototype_txout.nNonce.vchCommitment.resize(33);
             blinded_change_output_size = GetSerializeSize(change_prototype_txout);
-            blinded_change_output_size += (MAX_RANGEPROOF_SIZE + DEFAULT_SURJECTIONPROOF_SIZE + WITNESS_SCALE_FACTOR - 1)/WITNESS_SCALE_FACTOR;
+            blinded_change_output_size += blinded_output_witness(change_rangeproof_size);
 
             change_priced_blinded = wallet_blinds_by_default ||
                                     (issuance_details && IssuanceIsBlinded(*issuance_details));
@@ -1418,7 +1454,10 @@ static bool CreateTransactionInternal(
                 blind_details->num_to_blind++;
                 blind_details->only_recipient_blind_index = txNew.vout.size()-1;
                 if (!coin_selection_params.m_subtract_fee_outputs) {
-                    coin_selection_params.tx_noinputs_size += (MAX_RANGEPROOF_SIZE + DEFAULT_SURJECTIONPROOF_SIZE + WITNESS_SCALE_FACTOR - 1)/WITNESS_SCALE_FACTOR;
+                    // SEQUENTIA: its value is built as a 33-byte commitment, not
+                    // the 9-byte explicit amount serialized above.
+                    coin_selection_params.tx_noinputs_size += 33 - 9;
+                    coin_selection_params.tx_noinputs_size += blinded_output_witness(RangeproofSize(recipient.nAmount));
                 }
             }
         }
@@ -1427,7 +1466,7 @@ static bool CreateTransactionInternal(
     // FIXME actually, we currently just hand off to BlindTransaction which will put
     //  a full rangeproof and surjectionproof. We should fix this when we overhaul
     //  the blinding logic.
-    const size_t blinded_dummy_size = 70 + 66 +(MAX_RANGEPROOF_SIZE + DEFAULT_SURJECTIONPROOF_SIZE + WITNESS_SCALE_FACTOR - 1)/WITNESS_SCALE_FACTOR;
+    const size_t blinded_dummy_size = 70 + 66 + blinded_output_witness(RangeproofSize(0));
     // SEQUENTIA: the dummy is only ever needed to balance blinded inputs, so it
     // is reserved on the same terms as the change is priced blinded: up front
     // when the transaction is confidential before selection, otherwise only if
@@ -1436,7 +1475,22 @@ static bool CreateTransactionInternal(
     // send with a leftover below ~1,400 vbytes' worth of fee into
     // "Insufficient funds".
     const bool reserve_blinded_dummy = may_need_blinded_dummy && !coin_selection_params.m_subtract_fee_outputs;
-    if (reserve_blinded_dummy && change_priced_blinded) {
+    // SEQUENTIA: a blinded issuance with no confidential output beside it is
+    // balanced by its blinded change, which therefore always exists: the change
+    // is kept, or kept as a zero-value blinded OP_RETURN when it is dust, and
+    // never removed (see change_slot_stays below). So the change slot is part of
+    // the transaction rather than an option, and is priced with the outputs. The
+    // blinding dummy is never built in such a transaction, since the change
+    // balances the issuance. Reserving the dummy and pricing the change as
+    // optional on top made selection ask for two blinded outputs where one is
+    // built, and refuse coins that cover the issuance.
+    const bool change_slot_mandatory = reserve_blinded_dummy && change_priced_blinded &&
+                                       issuance_details && IssuanceIsBlinded(*issuance_details);
+    if (change_slot_mandatory) {
+        coin_selection_params.tx_noinputs_size += coin_selection_params.change_output_size;
+        coin_selection_params.change_output_size = 0;
+        price_change();
+    } else if (reserve_blinded_dummy && change_priced_blinded) {
         coin_selection_params.tx_noinputs_size += blinded_dummy_size;
     }
     // If we are going to issue an asset, add the issuance data to the noinputs_size so that
@@ -1456,7 +1510,12 @@ static bool CreateTransactionInternal(
         }
         // Allocate non-null nAmount/nInflationKeys and rangeproofs
         if (IssuanceIsBlinded(*issuance_details)) {
-            coin_selection_params.tx_noinputs_size += issue_count * (33 * WITNESS_SCALE_FACTOR + MAX_RANGEPROOF_SIZE + WITNESS_SCALE_FACTOR - 1) / WITNESS_SCALE_FACTOR;
+            for (const CTxOut& out : txNew.vout) {
+                if (out.nAsset.IsExplicit() && (out.nAsset.GetAsset() == CAsset(uint256S("1")) || out.nAsset.GetAsset() == CAsset(uint256S("2")))) {
+                    const size_t rangeproof_size = RangeproofSize(out.nValue.GetAmount());
+                    coin_selection_params.tx_noinputs_size += (33 * WITNESS_SCALE_FACTOR + GetSizeOfCompactSize(rangeproof_size) + rangeproof_size + WITNESS_SCALE_FACTOR - 1) / WITNESS_SCALE_FACTOR;
+                }
+            }
         } else {
             coin_selection_params.tx_noinputs_size += issue_count * 9;
         }
@@ -1466,10 +1525,11 @@ static bool CreateTransactionInternal(
     const CAmount not_input_fees = coin_selection_params.m_effective_feerate.GetFee(coin_selection_params.tx_noinputs_size, coin_selection_params.m_fee_asset);
     CAmountMap map_selection_target = map_recipients_sum;
     map_selection_target[coin_selection_params.m_fee_asset] += not_input_fees;
-
-    // Get available coins
-    std::vector<COutput> vAvailableCoins;
-    AvailableCoins(wallet, vAvailableCoins, &coin_control, 1, MAX_MONEY, MAX_MONEY, 0);
+    // SEQUENTIA: what an earlier attempt's coins turned out to need, once built
+    // (see fee_target_floor_out below). Never asking for less keeps selection
+    // from landing on coins already shown to be short.
+    map_selection_target[coin_selection_params.m_fee_asset] =
+        std::max(map_selection_target[coin_selection_params.m_fee_asset], fee_target_floor);
 
     // SEQUENTIA: a transaction that moves a supervised asset must be fully
     // explicit, and a BLINDED INPUT makes that impossible. The blinding factors
@@ -1512,6 +1572,21 @@ static bool CreateTransactionInternal(
     };
     std::optional<SelectionResult> result = [&]() -> std::optional<SelectionResult> {
         std::optional<SelectionResult> first = SelectCoins(wallet, vAvailableCoins, /* nTargetValue */ map_selection_target, coin_control, coin_selection_params);
+        // SEQUENTIA: with its change slot priced in, the estimate of a blinded
+        // issuance still runs a little high: the change's surjection proof is
+        // priced for the most inputs it can name, and each blinded part's
+        // witness is rounded up on its own. Coins in that margin cover the
+        // issuance, so before refusing them select once more without it.
+        // Whether they cover it is then decided on the transaction as built
+        // (see change_slot_mandatory below), not on an estimate.
+        if (!first && change_slot_mandatory) {
+            const size_t estimate_margin = (DEFAULT_SURJECTIONPROOF_SIZE + WITNESS_SCALE_FACTOR - 1) / WITNESS_SCALE_FACTOR + 4;
+            CAmountMap without_margin = map_selection_target;
+            without_margin[coin_selection_params.m_fee_asset] = std::max(fee_target_floor,
+                map_selection_target[coin_selection_params.m_fee_asset] -
+                coin_selection_params.m_effective_feerate.GetFee(estimate_margin, coin_selection_params.m_fee_asset));
+            return SelectCoins(wallet, vAvailableCoins, without_margin, coin_control, coin_selection_params);
+        }
         if (!first || !blind_details || change_priced_blinded || !spends_blinded_coin(*first)) return first;
         change_priced_blinded = true;
         coin_selection_params.change_output_size = blinded_change_output_size;
@@ -1902,6 +1977,21 @@ static bool CreateTransactionInternal(
         }
     }
     const bool change_slot_stays = was_blinded && blinded_outputs == 1;
+    // SEQUENTIA: a mandatory change slot was priced as kept, so coins that
+    // leave it negative do not cover the transaction as priced. Say so here,
+    // where the transaction is exact, rather than zero the slot and run into
+    // the internal-error branch below.
+    if (change_slot_mandatory && change_slot_stays && change_amount < 0) {
+        // What these coins would have to be worth, in the terms selection
+        // compares against its target: their effective value plus the gap.
+        if (fee_target_floor_out) {
+            CAmount effective = 0;
+            for (const CInputCoin& coin : selected_coins) effective += coin.effective_value;
+            *fee_target_floor_out = effective - change_amount;
+        }
+        error = _("Insufficient funds");
+        return false;
+    }
     // SEQUENTIA: change worth less than it costs goes to the fee, on the
     // assumption that dropping it saves the output. A change slot that has to
     // stay saves nothing but its script: it becomes a zero-value blinded
@@ -2269,7 +2359,21 @@ bool CreateTransaction(
 
     int nChangePosIn = nChangePosInOut;
     Assert(!tx); // tx is an out-param. TODO change the return type from bool to tx (or nullptr)
-    bool res = CreateTransactionInternal(wallet, vecSend, tx, nFeeRet, nChangePosInOut, error, coin_control, fee_calc_out, sign, blind_details, issuance_details);
+    // SEQUENTIA: an attempt whose coins turn out short once the transaction is
+    // built (a blinded issuance, whose estimate and build can differ by a few
+    // vbytes) reports what they would have had to be worth; select again asking
+    // for at least that, so the answer is decided by the wallet's coins rather
+    // than by the first set selection tried. A few rounds settle it: each one
+    // rules out every set no better than the one the last showed to be short.
+    CAmount fee_target_floor = 0;
+    bool res = false;
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        CAmount needed = 0;
+        nChangePosInOut = nChangePosIn;
+        res = CreateTransactionInternal(wallet, vecSend, tx, nFeeRet, nChangePosInOut, error, coin_control, fee_calc_out, sign, blind_details, issuance_details, fee_target_floor, &needed);
+        if (res || needed <= fee_target_floor) break;
+        fee_target_floor = needed;
+    }
     // try with avoidpartialspends unless it's enabled already
     if (res && nFeeRet > 0 /* 0 means non-functional fee rate estimation */ && wallet.m_max_aps_fee > -1 && !coin_control.m_avoid_partial_spends) {
         CCoinControl tmp_cc = coin_control;
@@ -2284,7 +2388,7 @@ bool CreateTransaction(
         // silently run the retry under the opposite policy.
         BlindDetails blind_details2 = blind_details ? *blind_details : BlindDetails();
         BlindDetails *blind_details2_ptr = blind_details ? &blind_details2 : nullptr;
-        if (CreateTransactionInternal(wallet, vecSend, tx2, nFeeRet2, nChangePosInOut2, error2, tmp_cc, fee_calc_out, sign, blind_details2_ptr, issuance_details)) {
+        if (CreateTransactionInternal(wallet, vecSend, tx2, nFeeRet2, nChangePosInOut2, error2, tmp_cc, fee_calc_out, sign, blind_details2_ptr, issuance_details, fee_target_floor)) {
             // if fee of this alternative one is within the range of the max fee, we use this one
             const bool use_aps = nFeeRet2 <= nFeeRet + wallet.m_max_aps_fee;
             wallet.WalletLogPrintf("Fee non-grouped = %lld, grouped = %lld, using %s\n", nFeeRet, nFeeRet2, use_aps ? "grouped" : "non-grouped");

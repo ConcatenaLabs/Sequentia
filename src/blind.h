@@ -46,6 +46,13 @@ bool VerifyConfidentialPair(const CConfidentialValue& conf_value, const CConfide
  */
 bool UnblindConfidentialPair(const CKey& blinding_key, const CConfidentialValue& conf_value, const CConfidentialAsset& conf_asset, const CConfidentialNonce& nonce_commitment, const CScript& committedScript, const std::vector<unsigned char>& vchRangeproof, CAmount& amount_out, uint256& blinding_factor_out, CAsset& asset_out, uint256& asset_blinding_factor_out);
 
+/**
+ * The size of the rangeproof GenerateRangeproof builds for an amount of at most
+ * `max_amount`, under this node's -ct_bits. Exact with the default exponent, an
+ * upper bound with any other.
+ */
+size_t RangeproofSize(CAmount max_amount);
+
 bool GenerateRangeproof(std::vector<unsigned char>& rangeproof, const std::vector<unsigned char*>& value_blindptrs, const uint256& nonce, const CAmount amount, const CScript& scriptPubKey, const secp256k1_pedersen_commitment& value_commit, const secp256k1_generator& gen, const CAsset& asset, std::vector<const unsigned char*>& asset_blindptrs);
 
 bool SurjectOutput(CTxOutWitness& txoutwit, const std::vector<secp256k1_fixed_asset_tag>& surjection_targets, const std::vector<secp256k1_generator>& target_asset_generators, const std::vector<uint256 >& target_asset_blinders, const std::vector<const unsigned char*> asset_blindptrs, const secp256k1_generator& output_asset_gen, const CAsset& asset);
