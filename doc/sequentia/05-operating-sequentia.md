@@ -577,8 +577,9 @@ expires your stake nor needs renewing:
 - So an output stakes **continuously for as long as it is unspent - indefinitely.**
   There is no re-locking, renewal, or keep-alive: to keep staking, do nothing.
 
-**Unbonding** takes two steps on chains that enforce two-step unbonding
-(mainnet; `-posunbondheight` on custom chains). Once the lock has matured,
+**Unbonding** takes two steps on chains that enforce two-step unbonding (the
+mainnet and custom chains from their first block, the testnet from height
+159,000; `-posunbondheight` moves it on a custom chain, and 0 turns it off). Once the lock has matured,
 `withdrawstake` moves the stake into an unbonding output of the same key: the
 weight is gone as soon as that confirms, and the coins wait there until the
 parent chain has advanced 2,016 blocks (about two weeks) past the anchor of the
