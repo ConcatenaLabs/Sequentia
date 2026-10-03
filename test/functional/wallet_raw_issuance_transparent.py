@@ -8,9 +8,10 @@ fundrawtransaction -> rawissueasset(blind) -> blindrawtransaction -> sign ->
 send. Confidentiality is chosen per output, so on a wallet that does not blind
 by default the change funding adds is explicit, and a blinded issuance amount
 needs a confidential output beside it to balance its blinding. Without one,
-blindrawtransaction refuses (the rawissueasset and blindrawtransaction help say
-so). With one -- a confidential asset_address, or a confidential changeAddress
-when funding -- the issuance confirms.
+blindrawtransaction leaves the amount explicit, or fails with ignoreblindfail
+false (the rawissueasset and blindrawtransaction help say so). With one -- a
+confidential asset_address, or a confidential changeAddress when funding -- the
+issuance confirms.
 
 The changeAddress route needs the wallet's blinding dummy to sit before the fee
 output: rawissueasset requires the fee to be the last output.
@@ -65,6 +66,12 @@ class WalletRawIssuanceTransparentTest(BitcoinTestFramework):
         issued = n.rawissueasset(funded_hex, [{"asset_amount": 1, "asset_address": n.getnewaddress(), "blind": True}])[0]
         assert_raises_rpc_error(-8, "Unable to blind transaction: Add another output to blind in order to complete the blinding.",
                                 n.blindrawtransaction, issued['hex'], False, [], True)
+        # By default (ignoreblindfail) the transaction comes back unchanged, the
+        # issuance amount explicit: what the help says, not a blinded issuance.
+        unblinded = n.blindrawtransaction(issued['hex'])
+        assert_equal(unblinded, issued['hex'])
+        issuance = n.decoderawtransaction(unblinded)['vin'][issued['vin']]['issuance']
+        assert 'assetamount' in issuance and 'assetamountcommitment' not in issuance
 
         self.log.info("A confidential asset_address balances it")
         funded_hex, _ = self.fund()
