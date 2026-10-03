@@ -511,6 +511,170 @@ std::string DescribeImmaturity(const StakeUtxo& s, int tip_height, int64_t tip_t
     return strprintf("vesting-locked until block %d (around %s)", (int)s.parsed.liquid_locktime, FormatISO8601DateTime(eta));
 }
 
+//! How a staking or unbonding spend (withdrawstake, claimunbonded,
+//! bumpwithdrawstakefee) pays its network fee. By default out of the Sequence
+//! token it moves: the spend then determines its own fee asset, the way a send
+//! that subtracts its fee from an output does. With fee_asset named, in that
+//! asset (any the node accepts, the Sequence token included) from this
+//! wallet's own coins of it, and everything the spend moves arrives whole.
+struct SpendFee {
+    CAsset asset;
+    bool from_wallet{false};
+};
+
+SpendFee ParseSpendFeeAsset(const UniValue& arg)
+{
+    SpendFee fee;
+    const std::optional<CAsset> named = ParseFeeAssetArg(arg);
+    fee.asset = named.value_or(Params().GetConsensus().pegged_asset);
+    fee.from_wallet = named.has_value();
+    if (named && !g_con_any_asset_fees && *named != ::policyAsset) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "this chain takes fees only in its policy asset");
+    }
+    return fee;
+}
+
+//! The asset `fee` names, as the error messages say it.
+std::string FeeAssetName(const CAsset& asset)
+{
+    const std::string label = gAssetsDir.GetIdentifier(asset);
+    return label.empty() ? asset.GetHex() : label;
+}
+
+//! A fee in an asset this node puts no value on is worth nothing, and the node
+//! would not relay the transaction: refuse before building it.
+void RequireAcceptedFeeAsset(const SpendFee& fee)
+{
+    if (!g_con_any_asset_fees) return;
+    if (ExchangeRateMap::GetInstance().ConvertAmountToValue(exchange_rate_scale, fee.asset).GetValue() > 0) return;
+    if (fee.from_wallet) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
+            "this node does not accept %s for transaction fees (it has no exchange rate for it); name another "
+            "fee_asset (getfeeexchangerates lists what this node accepts)", FeeAssetName(fee.asset)));
+    }
+    throw JSONRPCError(RPC_INVALID_PARAMETER,
+        "this node does not accept the Sequence token (SEQ) for transaction fees, so the fee cannot come out of "
+        "the coins this spends; pass fee_asset to pay it from this wallet's coins of an asset the node accepts "
+        "(getfeeexchangerates lists them)");
+}
+
+//! The virtual size of `mtx` once signed: its first `n_spend` inputs with a
+//! staker signature push, the rest (whose outputs are `wallet_txouts`, in
+//! order) by this wallet's keys at their largest signature size.
+int64_t SignedSpendVsize(const CWallet& wallet, const CMutableTransaction& mtx, size_t n_spend,
+                         const std::vector<CTxOut>& wallet_txouts) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+{
+    CMutableTransaction sizing = mtx;
+    for (size_t i = 0; i < n_spend && i < sizing.vin.size(); ++i) {
+        sizing.vin[i].scriptSig = CScript() << std::vector<unsigned char>(73);
+    }
+    for (size_t i = n_spend; i < sizing.vin.size(); ++i) {
+        const CTxOut& txout = wallet_txouts.at(i - n_spend);
+        std::unique_ptr<SigningProvider> provider = wallet.GetSolvingProvider(txout.scriptPubKey);
+        if (!provider || !DummySignInput(*provider, sizing, i, txout, /*use_max_sig=*/true)) {
+            throw JSONRPCError(RPC_WALLET_ERROR, "could not estimate the size of the coins paying the fee");
+        }
+    }
+    return GetVirtualTransactionSize(CTransaction(sizing));
+}
+
+//! Pay the fee of `mtx` in `asset` from this wallet's own explicit coins of it,
+//! leaving every output already in `mtx` as it is. `mtx` holds the spend's own
+//! inputs (the first `n_spend`, signed later with staker keys) and the outputs
+//! the spend is for; this appends the coins, a change output unless the change
+//! would be dust, and the fee output, and returns the fee: `rate` over the
+//! signed size converted into `asset`, and at least `floor(vsize)` (what a
+//! replacement must pay). Coins in `preferred` are tried first. The coins it
+//! adds go to `added`.
+CAmount AddWalletFee(CWallet& wallet, CMutableTransaction& mtx, size_t n_spend, const CAsset& asset, const CFeeRate& rate,
+                     const std::function<CAmount(int64_t)>& floor,
+                     const std::vector<std::pair<COutPoint, CTxOut>>& preferred,
+                     std::vector<std::pair<COutPoint, CTxOut>>& added) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+{
+    std::vector<std::pair<COutPoint, CTxOut>> candidates = preferred;
+    {
+        std::vector<COutput> coins;
+        CCoinControl coin_control;
+        AvailableCoins(wallet, coins, &coin_control, 1, MAX_MONEY, MAX_MONEY, 0, &asset);
+        std::vector<std::pair<COutPoint, CTxOut>> more;
+        for (const COutput& c : coins) {
+            if (!c.fSpendable || !c.fSafe) continue;
+            const CTxOut& out = c.tx->tx->vout[c.i];
+            // The fee leg stays transparent: a confidential coin would need its
+            // change blinded, which nothing else in the spend needs.
+            if (!out.nValue.IsExplicit() || !out.nAsset.IsExplicit() || out.nAsset.GetAsset() != asset) continue;
+            const COutPoint op(c.tx->GetHash(), c.i);
+            if (std::any_of(preferred.begin(), preferred.end(), [&op](const auto& p) { return p.first == op; })) continue;
+            more.emplace_back(op, out);
+        }
+        std::sort(more.begin(), more.end(), [](const auto& a, const auto& b) {
+            return a.second.nValue.GetAmount() > b.second.nValue.GetAmount();
+        });
+        candidates.insert(candidates.end(), more.begin(), more.end());
+    }
+
+    CTxDestination change_dest;
+    bilingual_str dest_error;
+    if (!wallet.GetNewChangeDestination(wallet.TransactionChangeType(wallet.m_default_change_type, {}), change_dest, dest_error)) {
+        throw JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT, dest_error.original);
+    }
+    std::visit(SetBlindingPubKeyVisitor(CPubKey()), change_dest); // explicit, like the rest of the spend
+    const CScript change_script = GetScriptForDestination(change_dest);
+
+    const size_t change_idx = mtx.vout.size();
+    mtx.vout.push_back(CTxOut(asset, 0, change_script));
+    mtx.vout.push_back(CTxOut(asset, 0, CScript())); // the explicit fee output
+    std::vector<CTxOut> txouts;
+    CAmount in_total = 0, fee = 0;
+    bool covered = false;
+    for (const auto& [op, out] : candidates) {
+        mtx.vin.push_back(CTxIn(op));
+        txouts.push_back(out);
+        added.emplace_back(op, out);
+        in_total += out.nValue.GetAmount();
+        const int64_t vsize = SignedSpendVsize(wallet, mtx, n_spend, txouts);
+        fee = std::max(rate.GetFee(vsize, asset), floor(vsize));
+        if (in_total >= fee) { covered = true; break; }
+    }
+    if (!covered) {
+        throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, strprintf(
+            "this wallet does not hold enough %s in transparent coins to pay the fee (%s needed, %s available)",
+            FeeAssetName(asset), FormatMoney(fee), FormatMoney(in_total)));
+    }
+    const CAmount change = in_total - fee;
+    if (change > 0 && !IsDust(CTxOut(asset, change, change_script), wallet.chain().relayDustFee())) {
+        mtx.vout[change_idx].nValue = change;
+    } else {
+        // No change worth an output: it goes to the fee, which is then more
+        // than the smaller transaction without the change output needs.
+        mtx.vout.erase(mtx.vout.begin() + change_idx);
+        fee = in_total;
+    }
+    mtx.vout.back().nValue = fee;
+    return fee;
+}
+
+//! Sign the wallet coins `AddWalletFee` added to `mtx` (the inputs after the
+//! first `n_spend`, whose outputs are `spend_txouts`). The spend's own inputs
+//! are signed afterwards with their staker keys, overwriting whatever this
+//! left in them.
+void SignWalletFeeInputs(const CWallet& wallet, CMutableTransaction& mtx, size_t n_spend,
+                         const std::vector<CTxOut>& spend_txouts,
+                         const std::vector<std::pair<COutPoint, CTxOut>>& added) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+{
+    if (added.empty()) return;
+    std::map<COutPoint, Coin> coins;
+    for (size_t i = 0; i < n_spend; ++i) coins[mtx.vin[i].prevout] = Coin(spend_txouts.at(i), 1, false);
+    for (const auto& [op, out] : added) coins[op] = Coin(out, 1, false);
+    std::map<int, bilingual_str> input_errors;
+    wallet.SignTransaction(mtx, coins, SIGHASH_ALL, input_errors);
+    for (const auto& [index, error] : input_errors) {
+        if ((size_t)index >= n_spend) {
+            throw JSONRPCError(RPC_WALLET_ERROR, strprintf("could not sign the coins paying the fee: %s", error.original));
+        }
+    }
+}
+
 } // namespace
 
 RPCHelpMan liststakeutxos()
@@ -590,16 +754,24 @@ RPCHelpMan withdrawstake()
                 "confirms, and the key's registered stake weight drops at that same confirmation. See\n"
                 "liststakeutxos for what is withdrawable and when.\n"
                 "\nStaking outputs are whole coins. To withdraw part of one, the remainder is re-staked into a\n"
-                "fresh staking output for the same key — which restarts the remainder's unbonding clock.\n",
+                "fresh staking output for the same key — which restarts the remainder's unbonding clock.\n"
+                "\nUnder two-step unbonding the stake goes to an unbonding output of its own key instead, and\n"
+                "claimunbonded sends it to an address once the unbonding depth has passed.\n"
+                "\nThe network fee is the node's fee rate over the transaction's size, converted into the fee\n"
+                "asset at the node's exchange rate. By default it is paid in SEQ out of the amount withdrawn; under two-step unbonding a stake\n"
+                "may pay at most 1% of the staking outputs it spends that way. Name fee_asset to pay it instead\n"
+                "from this wallet's other coins, in any asset this node accepts for fees.\n",
                 {
                     {"pubkey", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Withdraw only stake registered to this staker public key (hex). Required for a partial withdrawal when the wallet stakes with more than one key."},
-                    {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "Amount of SEQ to remove from the stake (default: all withdrawable stake). The network fee is paid out of this amount."},
-                    {"address", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Destination address (default: a fresh address of this wallet). The withdrawal output is explicit (not confidential)."},
+                    {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "Amount of SEQ to remove from the stake (default: all withdrawable stake). Unless fee_asset is named, the network fee is paid out of this amount."},
+                    {"address", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Destination address (default: a fresh address of this wallet). The withdrawal output is explicit (not confidential). Refused under two-step unbonding, where the coins go to an unbonding output: pass it to claimunbonded."},
+                    {"fee_asset", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Label or hex id of the asset to pay the network fee in, from this wallet's own transparent coins of it, any asset this node accepts for fees (getfeeexchangerates), the Sequence token included. Then the whole amount withdrawn arrives. Default: the fee is paid in SEQ out of the amount withdrawn."},
                 },
                 RPCResult{RPCResult::Type::OBJ, "", "", {
                     {RPCResult::Type::STR_HEX, "txid", "the withdrawal transaction id"},
-                    {RPCResult::Type::STR_AMOUNT, "amount", "SEQ arriving at the destination (the withdrawn amount minus the fee)"},
-                    {RPCResult::Type::STR_AMOUNT, "fee", "the network fee, paid out of the withdrawn amount"},
+                    {RPCResult::Type::STR_AMOUNT, "amount", "SEQ arriving at the destination (the withdrawn amount, minus the fee unless fee_asset was named)"},
+                    {RPCResult::Type::STR_AMOUNT, "fee", "the network fee, in fee_asset"},
+                    {RPCResult::Type::STR_HEX, "fee_asset", "the asset the fee is paid in"},
                     {RPCResult::Type::STR, "destination", "the receiving address, or \"unbonding\" when the coins go to an unbonding output first"},
                     {RPCResult::Type::BOOL, "unbonding", /*optional=*/true, "two-step unbonding is in force: the coins wait in an unbonding output; claim them with claimunbonded once unbond_depth parent-chain blocks have passed"},
                     {RPCResult::Type::NUM, "unbond_depth", /*optional=*/true, "parent-chain (Bitcoin) blocks the unbonding output must wait"},
@@ -620,7 +792,8 @@ RPCHelpMan withdrawstake()
                     {RPCResult::Type::NUM, "share_before", /*optional=*/true, "this wallet's share of the network stake now (0..1)"},
                     {RPCResult::Type::NUM, "share_after", /*optional=*/true, "this wallet's share once the withdrawal confirms (0..1)"},
                 }},
-                RPCExamples{HelpExampleCli("withdrawstake", "") + HelpExampleCli("withdrawstake", "\"02abc...\" 10000")},
+                RPCExamples{HelpExampleCli("withdrawstake", "") + HelpExampleCli("withdrawstake", "\"02abc...\" 10000") +
+                            HelpExampleCli("-named withdrawstake", "fee_asset=\"USDC\"")},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
     if (!g_con_pos) throw JSONRPCError(RPC_MISC_ERROR, "Proof-of-Stake (con_pos) is not enabled on this chain");
@@ -639,6 +812,7 @@ RPCHelpMan withdrawstake()
         want = AmountFromValue(request.params[1], true);
         if (*want <= 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "amount must be positive");
     }
+    const SpendFee fee_choice = ParseSpendFeeAsset(request.params[3]);
 
     LOCK(pwallet->cs_wallet);
     EnsureWalletIsUnlocked(*pwallet);
@@ -646,6 +820,18 @@ RPCHelpMan withdrawstake()
     const int tip_height = pwallet->GetLastBlockHeight();
     int64_t tip_time = 0;
     pwallet->chain().findBlock(pwallet->GetLastBlockHash(), interfaces::FoundBlock().time(tip_time));
+    // Two-step unbonding (consensus/params.h): once it is in force, stake can
+    // only leave through an unbonding output of the same key, which carries no
+    // weight and unlocks after pos_unbond_anchor_depth parent-chain blocks;
+    // claimunbonded then sends the coins to an address.
+    const bool two_step = Params().GetConsensus().PosUnbondingActiveAt(tip_height + 1);
+    if (two_step && !request.params[2].isNull()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+            "address cannot be used here: under two-step unbonding the stake first moves to an unbonding output of "
+            "its own key, and claimunbonded sends the coins to an address once the unbonding depth has passed. "
+            "Withdraw without an address, then pass it to claimunbonded.");
+    }
+    RequireAcceptedFeeAsset(fee_choice);
 
     // 1) The wallet's live staking outputs, split by maturity.
     std::vector<StakeUtxo> stakes = FindWalletStakeUtxos(*pwallet, only);
@@ -733,21 +919,27 @@ RPCHelpMan withdrawstake()
     }
 
     // 3) The destination: a fresh address of this wallet unless one was given.
+    //    None under two-step unbonding, where the coins go to an unbonding
+    //    output and claimunbonded takes the address.
     CTxDestination dest;
-    if (!request.params[2].isNull()) {
-        dest = DecodeDestination(request.params[2].get_str());
-        if (!IsValidDestination(dest)) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid address");
-    } else {
-        bilingual_str dest_error;
-        if (!pwallet->GetNewDestination(pwallet->m_default_address_type, "", dest, dest_error)) {
-            throw JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT, dest_error.original);
+    CScript dest_script;
+    std::string dest_str;
+    if (!two_step) {
+        if (!request.params[2].isNull()) {
+            dest = DecodeDestination(request.params[2].get_str());
+            if (!IsValidDestination(dest)) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid address");
+        } else {
+            bilingual_str dest_error;
+            if (!pwallet->GetNewDestination(pwallet->m_default_address_type, "", dest, dest_error)) {
+                throw JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT, dest_error.original);
+            }
         }
+        // The withdrawal output is explicit, so report the unconfidential form of
+        // the address — that is what the chain will show.
+        std::visit(SetBlindingPubKeyVisitor(CPubKey()), dest);
+        dest_script = GetScriptForDestination(dest);
+        dest_str = EncodeDestination(dest);
     }
-    // The withdrawal output is explicit, so report the unconfidential form of
-    // the address — that is what the chain will show.
-    std::visit(SetBlindingPubKeyVisitor(CPubKey()), dest);
-    const CScript dest_script = GetScriptForDestination(dest);
-    const std::string dest_str = EncodeDestination(dest);
 
     // 4) Build the spend. nVersion 2 activates BIP68; each input's nSequence
     //    must encode a relative lock at least as long as its script's CSV value
@@ -777,11 +969,6 @@ RPCHelpMan withdrawstake()
         mtx.vin.push_back(in);
     }
     const CAsset& asset = Params().GetConsensus().pegged_asset;
-    // Two-step unbonding (consensus/params.h): once it is in force, stake can
-    // only leave through an unbonding output of the same key, which carries no
-    // weight and unlocks after pos_unbond_anchor_depth parent-chain blocks;
-    // claimunbonded then sends the coins to an address.
-    const bool two_step = Params().GetConsensus().PosUnbondingActiveAt(tip_height + 1);
     if (two_step) {
         std::map<CPubKey, CAmount> per_key;
         for (const StakeUtxo& s : selected) per_key[s.parsed.pubkey] += s.amount;
@@ -800,33 +987,47 @@ RPCHelpMan withdrawstake()
         mtx.vout.push_back(CTxOut(asset, restake_amt,
             BuildStakeScript(src.parsed.pubkey, src.parsed.csv, src.parsed.bls_pubkey, src.parsed.bls_pop, 0)));
     }
-    mtx.vout.push_back(CTxOut(asset, 0, CScript())); // the explicit fee output, patched below
-
-    // 5) The fee, from the final transaction's size with worst-case signatures
-    //    (a staking spend's scriptSig is a single ECDSA signature push).
+    // 5) The fee: the node's fee rate over the final transaction's size with
+    //    worst-case signatures (a staking spend's scriptSig is a single ECDSA
+    //    signature push), converted into the fee asset at the node's rate.
+    CCoinControl fee_control;
+    const CFeeRate fee_rate = GetMinimumFeeRate(*pwallet, fee_control, nullptr);
     CAmount fee = 0;
-    {
-        CMutableTransaction sizing = mtx;
-        for (CTxIn& in : sizing.vin) in.scriptSig = CScript() << std::vector<unsigned char>(73);
-        CCoinControl coin_control;
-        fee = GetMinimumFeeRate(*pwallet, coin_control, nullptr).GetFee(GetVirtualTransactionSize(CTransaction(sizing)));
+    std::vector<std::pair<COutPoint, CTxOut>> fee_coins;
+    if (fee_choice.from_wallet) {
+        fee = AddWalletFee(*pwallet, mtx, selected.size(), fee_choice.asset, fee_rate,
+                           [](int64_t) { return CAmount{0}; }, {}, fee_coins);
+    } else {
+        mtx.vout.push_back(CTxOut(asset, 0, CScript())); // the explicit fee output
+        fee = fee_rate.GetFee(SignedSpendVsize(*pwallet, mtx, selected.size(), {}), asset);
+        const CAmount front_amt = mtx.vout.front().nValue.GetAmount();
+        if (front_amt <= fee) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
+                "the withdrawal (%s SEQ) would not cover its own network fee (%s SEQ); pass fee_asset to pay the fee "
+                "from this wallet's other coins", FormatMoney(front_amt), FormatMoney(fee)));
+        }
+        const CAmount cap = selected_total / 1000 * POS_UNBOND_MAX_FEE_PERMILLE;
+        if (two_step && fee > cap) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
+                "at this node's fee rate the unbonding pays %s SEQ in fees, more than a stake may pay out of itself on "
+                "its way out: %s SEQ, 1%% of the %s SEQ in the staking outputs it spends. Pass fee_asset to pay the fee "
+                "from this wallet's other coins instead (any asset this node accepts for fees, the Sequence token "
+                "included); the whole stake then goes to the unbonding output.",
+                FormatMoney(fee), FormatMoney(cap), FormatMoney(selected_total)));
+        }
+        mtx.vout.front().nValue = front_amt - fee;
+        mtx.vout.back().nValue = fee;
     }
-    const CAmount front_amt = mtx.vout.front().nValue.GetAmount();
-    if (front_amt <= fee) {
-        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
-            "the withdrawal (%s SEQ) would not cover its own network fee (%s SEQ)", FormatMoney(front_amt), FormatMoney(fee)));
-    }
-    if (two_step && fee > selected_total / 1000 * POS_UNBOND_MAX_FEE_PERMILLE) {
-        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
-            "the unbonding fee (%s SEQ) exceeds the most a stake may pay out of itself on its way out (%s SEQ, 1%%)",
-            FormatMoney(fee), FormatMoney(selected_total / 1000 * POS_UNBOND_MAX_FEE_PERMILLE)));
-    }
-    mtx.vout.front().nValue = front_amt - fee;
-    mtx.vout.back().nValue = fee;
 
-    // 6) Sign each staking input with its staker key. The spend is a bare
-    //    (pre-segwit) script, so this is a legacy signature over the staking
-    //    script itself; the scriptSig is just the signature push.
+    // 6) Sign the coins paying the fee, if any, then each staking input with
+    //    its staker key. The spend is a bare (pre-segwit) script, so this is a
+    //    legacy signature over the staking script itself; the scriptSig is just
+    //    the signature push.
+    {
+        std::vector<CTxOut> stake_txouts;
+        for (const StakeUtxo& s : selected) stake_txouts.push_back(s.txout);
+        SignWalletFeeInputs(*pwallet, mtx, selected.size(), stake_txouts, fee_coins);
+    }
     for (size_t i = 0; i < selected.size(); ++i) {
         const StakeUtxo& s = selected[i];
         CKey key;
@@ -876,15 +1077,17 @@ RPCHelpMan withdrawstake()
     }
     // An unbonding output is not an address of this wallet, so the wallet would
     // not pick the transaction up by itself; record it, or claimunbonded could
-    // never find what it has to claim.
-    if (two_step) {
+    // never find what it has to claim. Record it too when it spends wallet
+    // coins for the fee, so they are not offered again before it confirms.
+    if (two_step || !fee_coins.empty()) {
         pwallet->CommitTransaction(tx, {}, {});
     }
 
     UniValue result(UniValue::VOBJ);
     result.pushKV("txid", tx->GetHash().GetHex());
-    result.pushKV("amount", ValueFromAmount(want_amt - fee));
+    result.pushKV("amount", ValueFromAmount(fee_choice.from_wallet ? want_amt : want_amt - fee));
     result.pushKV("fee", ValueFromAmount(fee));
+    result.pushKV("fee_asset", fee_choice.asset.GetHex());
     result.pushKV("destination", two_step ? std::string("unbonding") : dest_str);
     if (two_step) {
         result.pushKV("unbonding", true);
@@ -982,26 +1185,33 @@ RPCHelpMan claimunbonded()
                 "\nSend this wallet's matured unbonding outputs to an address. Under two-step unbonding,\n"
                 "withdrawstake moves stake into an unbonding output that carries no weight; the coins can be\n"
                 "claimed once the parent chain (Bitcoin) has advanced the unbonding depth past the anchor of the\n"
-                "block that created it, the same depth a checkpoint needs to consolidate.\n",
+                "block that created it, the same depth a checkpoint needs to consolidate.\n"
+                "\nThe network fee is the node's fee rate over the transaction's size, converted into the fee\n"
+                "asset at the node's exchange rate. By default it is paid in SEQ out of the coins claimed; name\n"
+                "fee_asset to pay it instead from this wallet's other coins, in any asset this node accepts for fees.\n",
                 {
                     {"address", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Destination address (default: a fresh address of this wallet)."},
+                    {"fee_asset", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Label or hex id of the asset to pay the network fee in, from this wallet's own transparent coins of it, any asset this node accepts for fees (getfeeexchangerates), the Sequence token included. Then everything claimed arrives. Default: the fee is paid in SEQ out of the coins claimed."},
                 },
                 RPCResult{RPCResult::Type::OBJ, "", "", {
                     {RPCResult::Type::STR_HEX, "txid", "the claim transaction id"},
                     {RPCResult::Type::STR_AMOUNT, "amount", "SEQ arriving at the destination"},
-                    {RPCResult::Type::STR_AMOUNT, "fee", "the network fee"},
+                    {RPCResult::Type::STR_AMOUNT, "fee", "the network fee, in fee_asset"},
+                    {RPCResult::Type::STR_HEX, "fee_asset", "the asset the fee is paid in"},
                     {RPCResult::Type::STR, "destination", "the receiving address"},
                     {RPCResult::Type::NUM, "claimed_outputs", "how many unbonding outputs were spent"},
                 }},
-                RPCExamples{HelpExampleCli("claimunbonded", "")},
+                RPCExamples{HelpExampleCli("claimunbonded", "") + HelpExampleCli("-named claimunbonded", "fee_asset=\"USDC\"")},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
     if (!g_con_pos) throw JSONRPCError(RPC_MISC_ERROR, "Proof-of-Stake (con_pos) is not enabled on this chain");
     std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
     if (!pwallet) return NullUniValue;
     pwallet->BlockUntilSyncedToCurrentChain();
+    const SpendFee fee_choice = ParseSpendFeeAsset(request.params[1]);
     LOCK(pwallet->cs_wallet);
     EnsureWalletIsUnlocked(*pwallet);
+    RequireAcceptedFeeAsset(fee_choice);
 
     const int tip_height = pwallet->GetLastBlockHeight();
     const int spend_anchor = UnbondSpendPoint(*pwallet);
@@ -1046,17 +1256,29 @@ RPCHelpMan claimunbonded()
     }
     const CAsset& asset = Params().GetConsensus().pegged_asset;
     mtx.vout.push_back(CTxOut(asset, total, GetScriptForDestination(dest)));
-    mtx.vout.push_back(CTxOut(asset, 0, CScript()));
+    CCoinControl fee_control;
+    const CFeeRate fee_rate = GetMinimumFeeRate(*pwallet, fee_control, nullptr);
     CAmount fee = 0;
-    {
-        CMutableTransaction sizing = mtx;
-        for (CTxIn& in : sizing.vin) in.scriptSig = CScript() << std::vector<unsigned char>(73);
-        CCoinControl coin_control;
-        fee = GetMinimumFeeRate(*pwallet, coin_control, nullptr).GetFee(GetVirtualTransactionSize(CTransaction(sizing)));
+    std::vector<std::pair<COutPoint, CTxOut>> fee_coins;
+    if (fee_choice.from_wallet) {
+        fee = AddWalletFee(*pwallet, mtx, mature.size(), fee_choice.asset, fee_rate,
+                           [](int64_t) { return CAmount{0}; }, {}, fee_coins);
+    } else {
+        mtx.vout.push_back(CTxOut(asset, 0, CScript()));
+        fee = fee_rate.GetFee(SignedSpendVsize(*pwallet, mtx, mature.size(), {}), asset);
+        if (total <= fee) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
+                "the unbonded amount (%s SEQ) would not cover the network fee (%s SEQ); pass fee_asset to pay the fee "
+                "from this wallet's other coins", FormatMoney(total), FormatMoney(fee)));
+        }
+        mtx.vout.front().nValue = total - fee;
+        mtx.vout.back().nValue = fee;
     }
-    if (total <= fee) throw JSONRPCError(RPC_INVALID_PARAMETER, "the unbonded amount would not cover the network fee");
-    mtx.vout.front().nValue = total - fee;
-    mtx.vout.back().nValue = fee;
+    {
+        std::vector<CTxOut> unbond_txouts;
+        for (const UnbondUtxo& u : mature) unbond_txouts.push_back(u.out);
+        SignWalletFeeInputs(*pwallet, mtx, mature.size(), unbond_txouts, fee_coins);
+    }
     for (size_t i = 0; i < mature.size(); ++i) {
         CKey key;
         if (!GetStakerKey(*pwallet, mature[i].pk, key)) {
@@ -1076,10 +1298,12 @@ RPCHelpMan claimunbonded()
     if (!pwallet->chain().broadcastTransaction(tx, pwallet->m_default_max_tx_fee, /*relay=*/true, err_string)) {
         throw JSONRPCError(RPC_WALLET_ERROR, strprintf("failed to broadcast the claim: %s", err_string));
     }
+    if (!fee_coins.empty()) pwallet->CommitTransaction(tx, {}, {});
     UniValue result(UniValue::VOBJ);
     result.pushKV("txid", tx->GetHash().GetHex());
-    result.pushKV("amount", ValueFromAmount(total - fee));
+    result.pushKV("amount", ValueFromAmount(fee_choice.from_wallet ? total : total - fee));
     result.pushKV("fee", ValueFromAmount(fee));
+    result.pushKV("fee_asset", fee_choice.asset.GetHex());
     result.pushKV("destination", EncodeDestination(dest));
     result.pushKV("claimed_outputs", (int64_t)mature.size());
     return result;
@@ -1167,16 +1391,23 @@ RPCHelpMan bumpwithdrawstakefee()
                 "recognises as its own, and a staking output is a bare script that IsMine does not match — nor\n"
                 "could the generic signer re-sign it. This rebuilds the very same withdrawal — same staking\n"
                 "inputs, same destination, same re-staked remainder — and only moves value from the withdrawn\n"
-                "amount to the fee, so the replacement is the original transaction paying more.\n",
+                "amount to the fee, so the replacement is the original transaction paying more.\n"
+                "\nThe fee is paid in the asset, and from the coins, the pending withdrawal pays it with, unless\n"
+                "fee_asset names an asset: then it is paid in that asset from this wallet's other coins, and the\n"
+                "withdrawn amount arrives whole. The replacement must pay the fee value of the original plus one\n"
+                "incremental relay fee, judged at this node's exchange rates.\n",
                 {
-                    {"fee_rate", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "Fee rate in " + CURRENCY_ATOM + "/vB for the replacement (default: the smallest increase the network will accept)."},
+                    {"fee_rate", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "Fee rate in " + CURRENCY_ATOM + "/vB for the replacement, converted into the fee asset at this node's exchange rate (default: the smallest increase the network will accept)."},
+                    {"fee_asset", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Label or hex id of the asset to pay the replacement's fee in, from this wallet's own transparent coins of it (any asset this node accepts for fees, the Sequence token included). Default: as the pending withdrawal pays it."},
                 },
                 RPCResult{RPCResult::Type::OBJ, "", "", {
                     {RPCResult::Type::STR_HEX, "txid", "the replacement transaction id"},
                     {RPCResult::Type::STR_HEX, "replaced_txid", "the transaction it replaces"},
-                    {RPCResult::Type::STR_AMOUNT, "old_fee", "the fee the original paid"},
-                    {RPCResult::Type::STR_AMOUNT, "fee", "the fee the replacement pays"},
-                    {RPCResult::Type::STR_AMOUNT, "amount", "SEQ now arriving at the destination (the extra fee comes out of it)"},
+                    {RPCResult::Type::STR_AMOUNT, "old_fee", "the fee the original paid, in old_fee_asset"},
+                    {RPCResult::Type::STR_HEX, "old_fee_asset", "the asset the original paid its fee in"},
+                    {RPCResult::Type::STR_AMOUNT, "fee", "the fee the replacement pays, in fee_asset"},
+                    {RPCResult::Type::STR_HEX, "fee_asset", "the asset the replacement pays its fee in"},
+                    {RPCResult::Type::STR_AMOUNT, "amount", "SEQ now arriving at the destination (the fee comes out of it unless the wallet's other coins pay it)"},
                     {RPCResult::Type::STR, "destination", "the receiving address (unchanged)"},
                 }},
                 RPCExamples{HelpExampleCli("bumpwithdrawstakefee", "") + HelpExampleCli("bumpwithdrawstakefee", "2")},
@@ -1221,70 +1452,160 @@ RPCHelpMan bumpwithdrawstakefee()
         throw JSONRPCError(RPC_WALLET_ERROR, "more than one pending stake withdrawal; wait for them to confirm");
     }
 
-    // Rebuild it: same inputs, same outputs, only the split between the
-    // destination and the fee changes.
-    CMutableTransaction mtx(*original->tx);
-    int dest_idx = -1, fee_idx = -1;
-    for (size_t i = 0; i < mtx.vout.size(); ++i) {
-        if (mtx.vout[i].IsFee()) { fee_idx = (int)i; continue; }
-        // The re-staked remainder must not shrink — that would silently change
-        // how much stays staked. Only the payout to ourselves absorbs the fee.
-        if (ParseStakeScript(mtx.vout[i].scriptPubKey)) continue;
-        if (dest_idx < 0) dest_idx = (int)i;
-    }
-    if (dest_idx < 0 || fee_idx < 0) {
-        throw JSONRPCError(RPC_WALLET_ERROR, "the pending withdrawal does not look like one this wallet built");
-    }
-    const CAmount old_fee = mtx.vout[fee_idx].nValue.GetAmount();
-
-    // What the replacement must pay: BIP125 wants the old fee rate plus one
-    // incremental relay fee over the new size, and the caller may ask for more.
-    const int64_t vsize = GetVirtualTransactionSize(CTransaction(mtx));
-    const CFeeRate incremental = std::max(pwallet->chain().relayIncrementalFee(), CFeeRate(WALLET_INCREMENTAL_RELAY_FEE));
-    CAmount new_fee = old_fee + incremental.GetFee(vsize);
-    if (!request.params[0].isNull()) {
-        const CFeeRate asked{AmountFromValue(request.params[0], /*is_policy_asset=*/true, /*decimals=*/3) * 1000};
-        const CAmount wanted = asked.GetFee(vsize);
-        if (wanted <= new_fee) {
-            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
-                "fee_rate is too low to replace the pending withdrawal: it would pay %s SEQ, and the network "
-                "requires at least %s SEQ (the original paid %s)",
-                FormatMoney(wanted), FormatMoney(new_fee), FormatMoney(old_fee)));
-        }
-        new_fee = wanted;
-    }
-    // Under two-step unbonding the payout is the unbonding output, and consensus
-    // caps what a stake may pay out of itself on its way out.
-    const bool two_step = ParseUnbondScript(mtx.vout[dest_idx].scriptPubKey).has_value();
-    if (two_step) {
-        CAmount staked = 0;
-        for (const StakeUtxo& s : spent) staked += s.amount;
-        const CAmount cap = staked / 1000 * POS_UNBOND_MAX_FEE_PERMILLE;
-        if (new_fee > cap) {
-            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
-                "a fee of %s SEQ exceeds the most a stake may pay out of itself on its way out (%s SEQ, 1%%)",
-                FormatMoney(new_fee), FormatMoney(cap)));
-        }
-    }
-    const CAmount extra = new_fee - old_fee;
-    if (mtx.vout[dest_idx].nValue.GetAmount() <= extra) {
-        throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
-            "the withdrawn amount (%s SEQ) cannot absorb a fee increase of %s SEQ",
-            FormatMoney(mtx.vout[dest_idx].nValue.GetAmount()), FormatMoney(extra)));
-    }
-    mtx.vout[dest_idx].nValue = mtx.vout[dest_idx].nValue.GetAmount() - extra;
-    mtx.vout[fee_idx].nValue = new_fee;
-    if (IsDust(mtx.vout[dest_idx], pwallet->chain().relayDustFee())) {
-        throw JSONRPCError(RPC_WALLET_ERROR, "raising the fee that far would leave a dust output");
-    }
-
-    // Re-sign every staking input over the new amounts.
-    for (size_t i = 0; i < mtx.vin.size(); ++i) {
+    // Rebuild it: the same staking inputs and the outputs they pay for. Only
+    // the fee changes, with the coins paying it when they are wallet coins.
+    const CTransaction& old_tx = *original->tx;
+    CMutableTransaction mtx;
+    mtx.nVersion = old_tx.nVersion;
+    mtx.nLockTime = old_tx.nLockTime;
+    std::vector<const StakeUtxo*> stake_ins;
+    std::vector<std::pair<COutPoint, CTxOut>> old_fee_coins;
+    for (const CTxIn& in : old_tx.vin) {
         const StakeUtxo* s = nullptr;
         for (const StakeUtxo& c : spent) {
-            if (c.outpoint == mtx.vin[i].prevout) { s = &c; break; }
+            if (c.outpoint == in.prevout) { s = &c; break; }
         }
-        if (!s) throw JSONRPCError(RPC_WALLET_ERROR, "the pending withdrawal spends an input this wallet cannot re-sign");
+        if (s) {
+            CTxIn copy(in.prevout, CScript(), in.nSequence);
+            mtx.vin.push_back(copy);
+            stake_ins.push_back(s);
+            continue;
+        }
+        // Not a staking output: a wallet coin that paid the fee.
+        const CWalletTx* prev = pwallet->GetWalletTx(in.prevout.hash);
+        if (!prev || in.prevout.n >= prev->tx->vout.size()) {
+            throw JSONRPCError(RPC_WALLET_ERROR, "the pending withdrawal spends an input this wallet cannot re-sign");
+        }
+        old_fee_coins.emplace_back(in.prevout, prev->tx->vout[in.prevout.n]);
+    }
+    const size_t n_stake = mtx.vin.size();
+    const bool old_from_wallet = !old_fee_coins.empty();
+    int dest_idx = -1;
+    CAmount old_fee = 0;
+    CAsset old_fee_asset;
+    bool fee_seen = false;
+    for (size_t i = 0; i < old_tx.vout.size(); ++i) {
+        const CTxOut& out = old_tx.vout[i];
+        if (out.IsFee()) {
+            fee_seen = true;
+            old_fee = out.nValue.GetAmount();
+            old_fee_asset = out.nAsset.GetAsset();
+            continue;
+        }
+        // The re-staked remainder must not shrink, which would silently change
+        // how much stays staked; it is kept as it is.
+        if (ParseStakeScript(out.scriptPubKey)) { mtx.vout.push_back(out); continue; }
+        // The payout: an unbonding output, or the destination, which
+        // withdrawstake puts first.
+        if (ParseUnbondScript(out.scriptPubKey) || i == 0) {
+            if (dest_idx < 0) dest_idx = (int)mtx.vout.size();
+            mtx.vout.push_back(out);
+            continue;
+        }
+        // Anything else is the change of the wallet coins that paid the fee.
+        if (!old_from_wallet) {
+            throw JSONRPCError(RPC_WALLET_ERROR, "the pending withdrawal does not look like one this wallet built");
+        }
+    }
+    if (dest_idx < 0 || !fee_seen) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "the pending withdrawal does not look like one this wallet built");
+    }
+    // A fee taken out of the payout goes back into it; the replacement takes its own.
+    if (!old_from_wallet) mtx.vout[dest_idx].nValue = mtx.vout[dest_idx].nValue.GetAmount() + old_fee;
+    const bool two_step = ParseUnbondScript(mtx.vout[dest_idx].scriptPubKey).has_value();
+
+    // The fee asset: as the pending withdrawal pays it unless fee_asset names
+    // another, which is then paid from this wallet's coins.
+    SpendFee fee_choice{old_fee_asset, old_from_wallet};
+    if (!request.params[1].isNull()) fee_choice = ParseSpendFeeAsset(request.params[1]);
+    RequireAcceptedFeeAsset(fee_choice);
+
+    // What the replacement must pay (BIP125): the fee value of the transaction
+    // it replaces plus one incremental relay fee over its own size, and a
+    // higher fee rate than it, which matters when paying from wallet coins
+    // makes the replacement larger. The mempool compares fee values in the
+    // reference unit, so the floor is set there and converted into the fee
+    // asset, whichever assets the two pay in.
+    const CFeeRate incremental = std::max(pwallet->chain().relayIncrementalFee(), CFeeRate(WALLET_INCREMENTAL_RELAY_FEE));
+    const CAmount old_value = g_con_any_asset_fees
+        ? ExchangeRateMap::GetInstance().ConvertAmountToValue(old_fee, old_fee_asset).GetValue() : old_fee;
+    const int64_t old_vsize = GetVirtualTransactionSize(old_tx);
+    const auto rbf_floor = [&](int64_t vsize) -> CAmount {
+        const CAmount needed = std::max(old_value + incremental.GetFee(vsize), old_value * vsize / std::max<int64_t>(old_vsize, 1) + 1);
+        return g_con_any_asset_fees ? ExchangeRateMap::GetInstance().ConvertValueToAmount(CValue(needed), fee_choice.asset) : needed;
+    };
+    std::optional<CFeeRate> asked;
+    if (!request.params[0].isNull()) {
+        asked = CFeeRate{AmountFromValue(request.params[0], /*is_policy_asset=*/true, /*decimals=*/3) * 1000};
+    }
+    const auto too_low = [&](CAmount wanted, CAmount needed) {
+        return JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
+            "fee_rate is too low to replace the pending withdrawal: it would pay %s %s, and the network requires at "
+            "least %s %s (the original paid %s %s)",
+            FormatMoney(wanted), FeeAssetName(fee_choice.asset), FormatMoney(needed), FeeAssetName(fee_choice.asset),
+            FormatMoney(old_fee), FeeAssetName(old_fee_asset)));
+    };
+
+    CAmount new_fee = 0;
+    std::vector<std::pair<COutPoint, CTxOut>> fee_coins;
+    if (fee_choice.from_wallet) {
+        std::vector<std::pair<COutPoint, CTxOut>> preferred;
+        for (const auto& c : old_fee_coins) {
+            if (c.second.nAsset.IsExplicit() && c.second.nAsset.GetAsset() == fee_choice.asset) preferred.push_back(c);
+        }
+        CCoinControl fee_control;
+        const CFeeRate rate = asked.value_or(GetMinimumFeeRate(*pwallet, fee_control, nullptr));
+        new_fee = AddWalletFee(*pwallet, mtx, n_stake, fee_choice.asset, rate, rbf_floor, preferred, fee_coins);
+        if (asked) {
+            std::vector<CTxOut> coin_outs;
+            for (const auto& c : fee_coins) coin_outs.push_back(c.second);
+            const int64_t vsize = SignedSpendVsize(*pwallet, mtx, n_stake, coin_outs);
+            const CAmount wanted = asked->GetFee(vsize, fee_choice.asset);
+            if (wanted <= rbf_floor(vsize)) throw too_low(wanted, rbf_floor(vsize));
+        }
+    } else {
+        mtx.vout.push_back(CTxOut(fee_choice.asset, 0, CScript())); // the explicit fee output
+        const int64_t vsize = SignedSpendVsize(*pwallet, mtx, n_stake, {});
+        new_fee = rbf_floor(vsize);
+        if (asked) {
+            const CAmount wanted = asked->GetFee(vsize, fee_choice.asset);
+            if (wanted <= new_fee) throw too_low(wanted, new_fee);
+            new_fee = wanted;
+        }
+        // Under two-step unbonding the payout is the unbonding output, and
+        // consensus caps what a stake may pay out of itself on its way out.
+        if (two_step) {
+            CAmount staked = 0;
+            for (const StakeUtxo* s : stake_ins) staked += s->amount;
+            const CAmount cap = staked / 1000 * POS_UNBOND_MAX_FEE_PERMILLE;
+            if (new_fee > cap) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
+                    "a fee of %s SEQ exceeds the most a stake may pay out of itself on its way out: %s SEQ, 1%% of "
+                    "the %s SEQ in the staking outputs it spends. Pass fee_asset to pay the replacement's fee from "
+                    "this wallet's other coins instead.",
+                    FormatMoney(new_fee), FormatMoney(cap), FormatMoney(staked)));
+            }
+        }
+        const CAmount payout = mtx.vout[dest_idx].nValue.GetAmount();
+        if (payout <= new_fee) {
+            throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
+                "the withdrawn amount (%s SEQ) cannot pay a fee of %s SEQ", FormatMoney(payout), FormatMoney(new_fee)));
+        }
+        mtx.vout[dest_idx].nValue = payout - new_fee;
+        mtx.vout.back().nValue = new_fee;
+        if (IsDust(mtx.vout[dest_idx], pwallet->chain().relayDustFee())) {
+            throw JSONRPCError(RPC_WALLET_ERROR, "raising the fee that far would leave a dust output");
+        }
+    }
+
+    // Sign the coins paying the fee, then re-sign every staking input over the new amounts.
+    {
+        std::vector<CTxOut> stake_txouts;
+        for (const StakeUtxo* s : stake_ins) stake_txouts.push_back(s->txout);
+        SignWalletFeeInputs(*pwallet, mtx, n_stake, stake_txouts, fee_coins);
+    }
+    for (size_t i = 0; i < n_stake; ++i) {
+        const StakeUtxo* s = stake_ins[i];
         CKey key;
         if (!GetStakerKey(*pwallet, s->parsed.pubkey, key)) {
             throw JSONRPCError(RPC_WALLET_ERROR, strprintf("the private key for staker %s is not available in this wallet", HexStr(s->parsed.pubkey)));
@@ -1298,9 +1619,8 @@ RPCHelpMan bumpwithdrawstakefee()
         }
         mtx.vin[i].scriptSig = CScript() << sig;
     }
-    for (size_t i = 0; i < mtx.vin.size(); ++i) {
-        const StakeUtxo* s = nullptr;
-        for (const StakeUtxo& c : spent) if (c.outpoint == mtx.vin[i].prevout) { s = &c; break; }
+    for (size_t i = 0; i < n_stake; ++i) {
+        const StakeUtxo* s = stake_ins[i];
         ScriptError serror = SCRIPT_ERR_OK;
         MutableTransactionSignatureChecker checker(&mtx, i, s->txout.nValue, MissingDataBehavior::FAIL);
         if (!VerifyScript(mtx.vin[i].scriptSig, s->txout.scriptPubKey, nullptr,
@@ -1316,8 +1636,9 @@ RPCHelpMan bumpwithdrawstakefee()
         throw JSONRPCError(RPC_WALLET_ERROR, strprintf("failed to broadcast the replacement: %s", err_string));
     }
     const uint256 replaced = original->GetHash();
-    if (two_step) {
-        // As in withdrawstake: nothing in it is an address of this wallet.
+    if (two_step || !fee_coins.empty() || old_from_wallet) {
+        // As in withdrawstake: nothing in an unbonding is an address of this
+        // wallet, and coins paying the fee must not be offered again.
         pwallet->CommitTransaction(tx, {{"replaces_txid", replaced.GetHex()}}, {});
     }
 
@@ -1325,7 +1646,9 @@ RPCHelpMan bumpwithdrawstakefee()
     result.pushKV("txid", tx->GetHash().GetHex());
     result.pushKV("replaced_txid", replaced.GetHex());
     result.pushKV("old_fee", ValueFromAmount(old_fee));
+    result.pushKV("old_fee_asset", old_fee_asset.GetHex());
     result.pushKV("fee", ValueFromAmount(new_fee));
+    result.pushKV("fee_asset", fee_choice.asset.GetHex());
     result.pushKV("amount", ValueFromAmount(tx->vout[dest_idx].nValue.GetAmount()));
     CTxDestination dest;
     if (two_step) {

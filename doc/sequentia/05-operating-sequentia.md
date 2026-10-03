@@ -583,10 +583,20 @@ expires your stake nor needs renewing:
 weight is gone as soon as that confirms, and the coins wait there until the
 parent chain has advanced 2,016 blocks (about two weeks) past the anchor of the
 block that confirmed it. `claimunbonded` then sends them to an address of the
-wallet, as ordinary coin to hold or to stake again. The network fee of the first
-step comes out of the stake, up to 1% of the amount withdrawn. On a chain that
-does not enforce the rule, `withdrawstake` sends the coins straight to the
-wallet.
+wallet, as ordinary coin to hold or to stake again. On a chain that does not
+enforce the rule, `withdrawstake` sends the coins straight to the wallet; an
+`address` given to it under two-step unbonding is refused, because that address
+belongs to `claimunbonded`.
+
+Each fee is the node's fee rate over the transaction's size, converted into the
+asset that pays it at the node's exchange rate. By default the fee is paid in
+SEQ out of the coins being moved. Consensus caps what the first step may take
+from the stake that way: at most 1% of the staking outputs it spends, so a
+10 SEQ partial withdrawal from a 100 SEQ output may pay up to 1 SEQ. A fee above
+the cap is refused with a message naming `fee_asset`. Each of `withdrawstake`,
+`claimunbonded` and `bumpwithdrawstakefee` takes `fee_asset`, which pays the fee
+instead in that asset (any the node accepts, SEQ included) from the wallet's
+other transparent coins; the whole stake, or the whole claim, then arrives.
 
 ## 8b. Delegated staking (staking pools)
 

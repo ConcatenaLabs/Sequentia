@@ -246,6 +246,7 @@ BASE_SCRIPTS = [
     'feature_pos_unbonding.py',
     'feature_pos_unbonding_mempool.py',
     'feature_pos_unbonding_producers.py',
+    'feature_pos_unbonding_fees.py',
     'feature_pos_payout.py',
     'feature_pos_bls_gossip.py',
     'feature_pos_exprace.py',
