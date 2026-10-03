@@ -24,13 +24,36 @@ straight to an address, which every 25.0.x node refuses. What it looks like:
   names the transaction: `ConnectBlock: bad-unbond-required in tx <txid>`.
 - On the old node, the upgraded chain's tip is `headers-only`.
 
-Recovery: upgrade it to 25.0.1 and restart. It does not validate again the
-blocks it already accepted. If the valid chain is longer than its own branch,
-it moves onto it by itself and lists its old branch as `valid-fork`. If its own
-branch is the longer one, it stays there: `invalidateblock <hash of its block
-at 159,000>` moves it onto the valid chain, and in either case keeps it from
-ever returning to that branch. `reconsiderblock` does nothing here, because
-nothing was marked invalid on the old node.
+Recovery: upgrade it to 25.0.1 and restart, then run
+
+    sequentia-cli invalidateblock <hash of its own block at 159,000>
+
+which moves it onto the valid chain at once and keeps it from ever returning to
+its own branch. The node does not validate again the blocks it already
+accepted, so until something moves it, it stays on its own branch whenever
+that branch is the longer one, and nothing but `invalidateblock` moves it then.
+`reconsiderblock` does nothing here, because nothing was marked invalid on the
+old node.
+
+When the valid chain is the longer one, what the node does by itself depends on
+whether its own branch is certified:
+
+- A branch without committee quorums is left for the longer valid chain at
+  once, and listed as `valid-fork`.
+- On the testnet the committee certifies every block, so a node left behind
+  normally holds a certified branch of its own. After the restart it holds
+  nothing final for one observation window (`-posfinalitydelayms`, 3 s by
+  default); a longer valid chain that reaches it within those seconds is
+  adopted. Otherwise it finalizes the newest certified block of its own branch
+  and refuses the valid chain, logging `bad-fork-prior-to-pos-final`, while
+  `getchaintips` lists the valid chain as `valid-headers`. A node that watches
+  Bitcoin (`-validateanchor`, the default) then moves onto the valid chain by
+  itself through finality reconciliation, once no certified block has extended
+  its own branch for `-posreconcilepatience` seconds (600 by default, counted
+  from the restart) and the valid chain carries a certified block at least
+  three blocks above the node's finalized one, anchored where Bitcoin is
+  settled. A node run with `-validateanchor=0` enforces no finality and moves
+  as soon as the valid chain is the longer.
 
 ## Producers no longer stop at the activation height
 
