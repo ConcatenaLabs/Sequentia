@@ -143,9 +143,15 @@ bool CBlockIndexWorkComparator::operator()(const CBlockIndex *pa, const CBlockIn
     // different sizes, and each node keeps the count of the first it saw. Two
     // nodes holding the same two certified siblings could then rank them
     // oppositely, finalize opposite blocks once the observation window closed,
-    // and stay split. Whether a block is certified is the same on every node
-    // that accepted it in the same stake state: every valid certificate of a
-    // block that is not escaping a stall reaches the quorum. A certified
+    // and stay split. Certified means the certificate carries the quorum of
+    // the stake state the block's PARENT leaves, never of the observing node's
+    // tip, so it is the same on every node holding the block, its parent and
+    // the certificate: every valid certificate of a block that cannot escape a
+    // stall carries that quorum, and only a block that may escape one has its
+    // count judged, against that same parent quorum (CBlockIndex::
+    // m_pos_certified). Siblings share the parent and so the quorum; measured
+    // against each node's own tip, a sibling that changes the committee would
+    // be certified on one node and not on another. A certified
     // block is final against every sibling once its window has passed,
     // however many members a sibling's certificate names (the immediate-
     // finality gate, ContextualCheckBlockHeader); the window exists so that
@@ -396,11 +402,91 @@ static bool IsCurrentForFeeEstimation(CChainState& active_chainstate) EXCLUSIVE_
     return true;
 }
 
-void PosRefreshCertifiedKeys(ChainstateManager& chainman)
+//! SEQUENTIA PoS: bumped whenever a block's PosCarriesQuorum() answer changes,
+//! so the finality pass never trusts a floor laid down under another answer.
+static uint64_t g_pos_cert_epoch GUARDED_BY(::cs_main) = 0;
+
+//! SEQUENTIA PoS: the certification quorum of the stake state `pindex` leaves,
+//! the quorum its children's certificates are measured against, or -1 when this
+//! node does not know it. Outside the public committee it is fixed by
+//! configuration and PosSlotQuorum does not read the registry.
+static int PosQuorumAfter(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    if (pindex == nullptr) return -1;
+    if (!g_pos_public_committee) return PosSlotQuorum(StakeRegistry::GetInstance());
+    return pindex->m_pos_child_quorum;
+}
+
+//! SEQUENTIA PoS: whether `pindex`'s certificate carries the certification
+//! quorum of its parent's stake state, given that quorum (-1 when unknown).
+//! nullopt when the answer needs the parent's quorum and it is unknown;
+//! `by_parent` is set when the answer depended on that quorum rather than on
+//! the headers. Never reads the observing node's own stake state.
+static std::optional<bool> PosJudgeCertified(const CBlockIndex* pindex, int parent_quorum, bool* by_parent = nullptr)
+{
+    if (by_parent) *by_parent = false;
+    // A block whose keys were never measured (header only) names nobody.
+    if (pindex->pprev == nullptr || pindex->m_pos_countersigs == 0) return false;
+    if (!g_pos_public_committee) return (int)pindex->m_pos_countersigs >= parent_quorum;
+    // Under the BLS committee a block that cannot escape a stall is valid only
+    // with its parent's quorum on its certificate (CheckPosStakeRules:
+    // bad-posbls-agg-quorum), so for it the headers give the answer.
+    const bool may_escape_stall = g_con_bitcoin_anchor &&
+        PosEscapingStallAllowed(pindex->pprev->m_anchor_height, pindex->m_anchor_height);
+    if (g_pos_vrf && g_pos_bls && g_pos_committee_size > 1 && !may_escape_stall) return true;
+    if (by_parent) *by_parent = true;
+    if (parent_quorum < 0) return std::nullopt;
+    return (int)pindex->m_pos_countersigs >= parent_quorum;
+}
+
+//! SEQUENTIA PoS: record a block's certified answer. The comparator reads
+//! m_pos_certified, so a block whose answer changes is taken out of every
+//! candidate set first and put back afterwards. An unknown answer is held as
+//! certified (see CBlockIndex::m_pos_cert_known).
+static void PosSetCertified(ChainstateManager& chainman, CBlockIndex* pindex, std::optional<bool> verdict)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    const bool certified = verdict.value_or(true);
+    const bool carried = pindex->PosCarriesQuorum();
+    if (certified == pindex->m_pos_certified) {
+        pindex->m_pos_cert_known = verdict.has_value();
+    } else {
+        std::vector<CChainState*> holders;
+        for (CChainState* chainstate : chainman.GetAll()) {
+            if (chainstate->setBlockIndexCandidates.erase(pindex)) holders.push_back(chainstate);
+        }
+        pindex->m_pos_certified = certified;
+        pindex->m_pos_cert_known = verdict.has_value();
+        for (CChainState* chainstate : holders) chainstate->setBlockIndexCandidates.insert(pindex);
+    }
+    if (pindex->PosCarriesQuorum() != carried) ++g_pos_cert_epoch;
+}
+
+//! SEQUENTIA PoS: judge `pindex` against `parent_quorum` and record the answer.
+//! An answer that needed the parent's stake state is also kept in the block's
+//! status bits, so a restart, which knows that state for no block but the tip,
+//! does not lose it. Returns true when the status bits changed, so the caller
+//! marks the block index entry dirty.
+[[nodiscard]] static bool PosRecordCertified(ChainstateManager& chainman, CBlockIndex* pindex, int parent_quorum)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    bool by_parent = false;
+    const std::optional<bool> verdict = PosJudgeCertified(pindex, parent_quorum, &by_parent);
+    PosSetCertified(chainman, pindex, verdict);
+    if (!by_parent || !verdict) return false;
+    const uint32_t bits = BLOCK_POS_CERT_DECIDED | (*verdict ? BLOCK_POS_CERTIFIED : 0);
+    if ((pindex->nStatus & (BLOCK_POS_CERT_DECIDED | BLOCK_POS_CERTIFIED)) == bits) return false;
+    pindex->nStatus = (pindex->nStatus & ~(uint32_t)(BLOCK_POS_CERT_DECIDED | BLOCK_POS_CERTIFIED)) | bits;
+    return true;
+}
+
+void PosRefreshCertifiedKeys(ChainstateManager& chainman, CBlockIndex* registry_tip)
 {
     AssertLockHeld(::cs_main);
     if (!g_con_pos) return;
-    const int quorum = PosSlotQuorum(StakeRegistry::GetInstance());
+    // The registry was just rebuilt from the UTXO set at `registry_tip`, so the
+    // quorum its children must reach is known; no other block's is.
+    if (registry_tip) registry_tip->m_pos_child_quorum = PosSlotQuorum(StakeRegistry::GetInstance());
     // The comparator reads m_pos_certified, so no block may change it while it
     // sits in a candidate set: empty the sets, re-measure, insert again.
     std::vector<std::pair<CChainState*, std::vector<CBlockIndex*>>> candidates;
@@ -410,8 +496,16 @@ void PosRefreshCertifiedKeys(ChainstateManager& chainman)
         chainstate->setBlockIndexCandidates.clear();
     }
     for (const auto& [hash, pindex] : chainman.m_blockman.m_block_index) {
-        pindex->m_pos_certified = (int)pindex->m_pos_countersigs >= quorum;
+        bool by_parent = false;
+        std::optional<bool> verdict = PosJudgeCertified(pindex, PosQuorumAfter(pindex->pprev), &by_parent);
+        // Decided when the block connected, against its parent's stake state.
+        if (by_parent && (pindex->nStatus & BLOCK_POS_CERT_DECIDED)) {
+            verdict = (pindex->nStatus & BLOCK_POS_CERTIFIED) != 0;
+        }
+        pindex->m_pos_certified = verdict.value_or(true);
+        pindex->m_pos_cert_known = verdict.has_value();
     }
+    ++g_pos_cert_epoch;
     for (auto& [chainstate, blocks] : candidates) {
         chainstate->setBlockIndexCandidates.insert(blocks.begin(), blocks.end());
     }
@@ -2853,13 +2947,15 @@ static bool CheckPosStakeRulesAtAccept(const CBlock& block, BlockValidationState
 
 //! SEQUENTIA: compute and store the PoS fork-choice keys (whitepaper §3.8) on a
 //! freshly accepted block: the countersignature count of the certificate it
-//! arrived with, whether that count reaches the certification quorum, and the
-//! leader's VRF score over the slot seed. MUST be called before the block
-//! enters setBlockIndexCandidates and never again, so
-//! CBlockIndexWorkComparator's ordering stays stable (PosRefreshCertifiedKeys
-//! re-measures every block at startup, with the candidate set rebuilt around
-//! it). No-op for non-PoS chains / unrecognized challenges.
-static void SetPosForkChoiceKeys(CBlockIndex* pindex, const CBlock& block)
+//! arrived with, whether that certificate carries its parent's certification
+//! quorum (CBlockIndex::m_pos_certified), and the leader's VRF score over the
+//! slot seed. Called before the block enters setBlockIndexCandidates; the
+//! certified answer may later be settled when the block connects, and is
+//! re-derived for every block at startup (PosRefreshCertifiedKeys), each time
+//! with the candidate sets kept consistent. No-op for non-PoS chains /
+//! unrecognized challenges.
+static void SetPosForkChoiceKeys(ChainstateManager& chainman, CBlockIndex* pindex, const CBlock& block)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
     if (!g_con_pos || pindex == nullptr || pindex->pprev == nullptr) return;
     std::optional<PosChallengeParts> parts = ParsePosBlockChallenge(block.proof.challenge);
@@ -2899,9 +2995,10 @@ static void SetPosForkChoiceKeys(CBlockIndex* pindex, const CBlock& block)
         count = parts->committee.size();
     }
     pindex->m_pos_countersigs = (uint16_t)std::min<size_t>(count, (size_t)PosMaxCommitteeMembers());
-    // Certified against the quorum of the stake state the node holds now,
-    // the same measure the immediate-finality point applies.
-    pindex->m_pos_certified = (int)pindex->m_pos_countersigs >= PosSlotQuorum(StakeRegistry::GetInstance());
+    // Certified against the quorum of the parent's stake state, never this
+    // node's tip: provisional when that quorum is not known yet. The index
+    // entry is written with the block data (ReceivedBlockTransactions).
+    (void)PosRecordCertified(chainman, pindex, PosQuorumAfter(pindex->pprev));
     // Leader VRF score (the top 64 bits of beta; lower is better). Registry-
     // independent: it only needs the leader key and the slot seed.
     if (g_pos_vrf) {
@@ -3825,16 +3922,16 @@ static std::vector<uint256> PosHeldBy(const CBlockIndex* f, int64_t now,
 // ever re-opened for a block at or below the finalized point, and a restart
 // finds the finalized block final again at its first pass.
 static std::map<uint256, std::pair<int, int64_t>> g_pos_quorum_first_active GUARDED_BY(::cs_main);
-// Where the last pass stopped looking: a block such that every block from it
-// down to the finalized block it found (g_pos_final_floor_final_*, height -1 if
-// none: down to genesis) holds fewer countersignatures than
-// g_pos_final_floor_quorum. A pass that reaches it has its answer, so a pass
+// Where the last pass stopped looking: a block such that no block from it down
+// to the finalized block it found (g_pos_final_floor_final_*, height -1 if
+// none: down to genesis) carried a quorum while the certified answers stood at
+// g_pos_final_floor_epoch. A pass that reaches it has its answer, so a pass
 // examines only the blocks connected since the last one and those still in
 // their window, never a whole stall stretch or, with nothing to finalize, the
 // whole chain. Height -1 = none.
 static int g_pos_final_floor_height GUARDED_BY(::cs_main) = -1;
 static uint256 g_pos_final_floor_hash GUARDED_BY(::cs_main);
-static int g_pos_final_floor_quorum GUARDED_BY(::cs_main) = 0;
+static uint64_t g_pos_final_floor_epoch GUARDED_BY(::cs_main) = 0;
 static int g_pos_final_floor_final_height GUARDED_BY(::cs_main) = -1;
 static uint256 g_pos_final_floor_final_hash GUARDED_BY(::cs_main);
 
@@ -3843,7 +3940,7 @@ static uint256 g_pos_final_floor_final_hash GUARDED_BY(::cs_main);
 static void PosNoteActiveQuorumBlock(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
     if (!g_con_pos || g_pos_finality_delay_ms <= 0 || pindex == nullptr) return;
-    if ((int)pindex->m_pos_countersigs < PosSlotQuorum(StakeRegistry::GetInstance())) return;
+    if (!pindex->PosCarriesQuorum()) return;
     const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
     g_pos_quorum_first_active.emplace(pindex->GetBlockHash(), std::make_pair(pindex->nHeight, now));
@@ -3869,7 +3966,6 @@ static void RecomputePosImmediateFinality(const CBlockIndex* tip,
                                           const std::function<const CBlockIndex*(const uint256&)>& lookup)
     EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
-    const int quorum = PosSlotQuorum(StakeRegistry::GetInstance());
     const int old_final_height = g_pos_immediate_final_height;
     const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -3892,7 +3988,7 @@ static void RecomputePosImmediateFinality(const CBlockIndex* tip,
     // remain are still final, and the blocks of the new branch above them
     // pass through their own windows.
     const CBlockIndex* old_final = old_final_height >= 0 ? lookup(g_pos_immediate_final_hash) : nullptr;
-    if (quorum < g_pos_final_floor_quorum) g_pos_final_floor_height = -1; // a lower quorum may count more blocks
+    if (g_pos_cert_epoch != g_pos_final_floor_epoch) g_pos_final_floor_height = -1; // an answer below it may have changed
     g_pos_immediate_final_height = -1;
     const CBlockIndex* lowest_pending = nullptr; // lowest quorum block passed over (in its window, or held)
     bool settled = false;
@@ -3911,7 +4007,7 @@ static void RecomputePosImmediateFinality(const CBlockIndex* tip,
         if (!settled && old_final && f->nHeight <= old_final->nHeight && old_final->GetAncestor(f->nHeight) == f) {
             settled = true;
         }
-        if ((int)f->m_pos_countersigs < quorum) continue;
+        if (!f->PosCarriesQuorum()) continue;
         if (!settled && g_pos_finality_delay_ms > 0) {
             auto it = g_pos_quorum_first_active.find(f->GetBlockHash());
             const bool in_window = it != g_pos_quorum_first_active.end() && now - it->second.second < g_pos_finality_delay_ms;
@@ -3929,7 +4025,7 @@ static void RecomputePosImmediateFinality(const CBlockIndex* tip,
     if (const CBlockIndex* floor = lowest_pending ? lowest_pending->pprev : tip) {
         g_pos_final_floor_height = floor->nHeight;
         g_pos_final_floor_hash = floor->GetBlockHash();
-        g_pos_final_floor_quorum = quorum;
+        g_pos_final_floor_epoch = g_pos_cert_epoch;
         g_pos_final_floor_final_height = g_pos_immediate_final_height;
         g_pos_final_floor_final_hash = g_pos_immediate_final_hash;
     }
@@ -3993,7 +4089,8 @@ void CChainState::UpdateTip(const CBlockIndex* pindexNew)
     }
 
     // SEQUENTIA immediate finality: recompute the highest active-chain block that
-    // carries a full committee quorum (>= PosQuorum). Such a block is "final" —
+    // carries its parent's certification quorum (CBlockIndex::PosCarriesQuorum).
+    // Such a block is "final" —
     // no SEQ-internal competitor may reorg it (enforced at accept time, below).
     // Recomputing from the *active* chain on every tip change means a Bitcoin
     // reorg (the anchor watcher invalidating a finalized block) or a manual
@@ -4124,6 +4221,7 @@ bool CChainState::DisconnectTip(BlockValidationState& state, DisconnectedBlockTr
         CBlockUndo block_undo;
         if (UndoReadFromDisk(block_undo, pindexDelete)) {
             PosRevertBlockStake(block, block_undo, pindexDelete->nHeight);
+            pindexDelete->pprev->m_pos_child_quorum = PosSlotQuorum(StakeRegistry::GetInstance());
         } else {
             return AbortNode(state, "Failed to read undo data for stake tracking; the stake registry would desync from consensus");
         }
@@ -4291,6 +4389,15 @@ bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew
         bool flushed = view.Flush();
         assert(flushed);
     }
+    // SEQUENTIA PoS: the stake registry still holds the parent's state, whose
+    // quorum ConnectBlock just verified the certificate against. Record it, and
+    // settle this block's certified answer with it, whatever was provisional
+    // when the block was accepted.
+    if (g_con_pos && pindexNew->pprev) {
+        const int parent_quorum = PosSlotQuorum(StakeRegistry::GetInstance());
+        pindexNew->pprev->m_pos_child_quorum = parent_quorum;
+        if (PosRecordCertified(m_chainman, pindexNew, parent_quorum)) m_blockman.m_dirty_blockindex.insert(pindexNew);
+    }
     int64_t nTime4 = GetTimeMicros(); nTimeFlush += nTime4 - nTime3;
     LogPrint(BCLog::BENCH, "  - Flush: %.2fms [%.2fs (%.2fms/blk)]\n", (nTime4 - nTime3) * MILLI, nTimeFlush * MICRO, nTimeFlush * MILLI / nBlocksTotal);
     // Write the chain state to disk, if necessary.
@@ -4366,6 +4473,7 @@ bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew
         CBlockUndo block_undo;
         if (UndoReadFromDisk(block_undo, pindexNew)) {
             PosApplyBlockStake(blockConnecting, block_undo, pindexNew->nHeight);
+            pindexNew->m_pos_child_quorum = PosSlotQuorum(StakeRegistry::GetInstance());
         } else {
             return AbortNode(state, "Failed to read undo data for stake tracking; the stake registry would desync from consensus");
         }
@@ -5978,7 +6086,7 @@ bool CChainState::AcceptBlock(const std::shared_ptr<const CBlock>& pblock, Block
     // SEQUENTIA: fix the PoS fork-choice keys before the block becomes a
     // chain-selection candidate (ReceivedBlockTransactions inserts it into
     // setBlockIndexCandidates); they must never change afterward.
-    SetPosForkChoiceKeys(pindex, block);
+    SetPosForkChoiceKeys(m_chainman, pindex, block);
 
     // Write block to history file
     if (fNewBlock) *fNewBlock = true;

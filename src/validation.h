@@ -156,13 +156,14 @@ extern CBlockIndex *pindexBestHeader;
 bool PosUnbondingFailsNextBlock(const CTransaction& tx, const CCoinsViewCache& view, const CBlockIndex* tip,
                                 const Consensus::Params& params, std::string& reason);
 
-/** SEQUENTIA PoS: measure every block's certificate against the certification
- *  quorum of the current stake registry (CBlockIndex::m_pos_certified) and
- *  rebuild the chain-selection candidate sets around the new keys. The flag is
- *  not persisted and the registry is empty while the block index loads, so
- *  this runs once the registry has been rebuilt at startup, before the tip is
- *  activated. */
-void PosRefreshCertifiedKeys(ChainstateManager& chainman) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+/** SEQUENTIA PoS: derive every block's certified answer
+ *  (CBlockIndex::m_pos_certified) from its headers, from the answer persisted
+ *  when it connected, or from the quorum of `registry_tip`, the block the
+ *  stake registry was just rebuilt at, for that block's children; and rebuild
+ *  the chain-selection candidate sets around the answers. The answers are not
+ *  in the block index records, so this runs at startup once the registry has
+ *  been rebuilt, before the tip is activated. */
+void PosRefreshCertifiedKeys(ChainstateManager& chainman, CBlockIndex* registry_tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
 // --- SEQUENTIA immediate finality: reconciliation hooks (anchor.cpp monitor) ---
 
