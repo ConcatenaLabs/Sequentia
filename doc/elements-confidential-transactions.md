@@ -193,8 +193,18 @@ last. The last blinding factor is chosen so that the blinding factors
 (and therefore the commitments) sum to zero. As a consequence, when
 blinding a transaction, there must be at least one output available to
 "balance the blinding factors". The Elements RPCs
-`blindrawtransaction` and `blindrawtransaction` may add an additional
+`blindrawtransaction` and `rawblindrawtransaction` may add an additional
 zero-valued output.
+
+A blinded issuance or reissuance amount needs balancing too, but it is
+not an output. On a wallet that does not hand out confidential
+addresses by default, which is the default on Sequentia's chains, the
+change `fundrawtransaction` adds is explicit, so a transaction whose only
+blinded item is an issuance has nothing to balance it with, and
+`blindrawtransaction` refuses it. Give such a transaction a confidential
+output: a confidential `asset_address` or `token_address` in
+`rawissueasset`, or a confidential `changeAddress` in
+`fundrawtransaction`.
 
 
 ## Asset Issuances and Reissuances

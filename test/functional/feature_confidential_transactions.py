@@ -836,7 +836,10 @@ class CTTest (BitcoinTestFramework):
         outputs = self.nodes[0].getrawtransaction(txid, 1)["vout"]
         assert_equal(len(outputs), 3)
         assert "value" in outputs[0] and "value" in outputs[1] and "value" in outputs[2]
-        assert_equal(outputs[2]["scriptPubKey"]["type"], 'nulldata')
+        # SEQUENTIA: the wallet places its dummy before the fee output, which
+        # stays last.
+        assert_equal(outputs[1]["scriptPubKey"]["type"], 'nulldata')
+        assert_equal(outputs[2]["scriptPubKey"]["type"], 'fee')
 
         # Test burn argument in createrawtransaction
         raw_burn1 = self.nodes[0].createrawtransaction([], [{self.nodes[0].getnewaddress():1}, {"burn":2}])

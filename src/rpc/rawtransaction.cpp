@@ -3038,7 +3038,8 @@ void reissueasset_base(CMutableTransaction& mtx, size_t issuance_input_index, co
 static RPCHelpMan rawissueasset()
 {
     return RPCHelpMan{"rawissueasset",
-                "\nCreate an asset by attaching issuances to transaction inputs. Returns the transaction hex. There must be as many inputs as issuances requested. The final transaction hex is the final version of the transaction appended to the last object in the array.\n",
+                "\nCreate an asset by attaching issuances to transaction inputs. Returns the transaction hex. There must be as many inputs as issuances requested. The final transaction hex is the final version of the transaction appended to the last object in the array.\n"
+                "\nA blinded issuance amount has to be balanced by at least one blinded output when no input is blinded. On a wallet that does not blind by default, the change fundrawtransaction adds is explicit, so give the transaction a confidential output: a confidential asset_address or token_address here, or a confidential changeAddress when funding. Otherwise blindrawtransaction refuses to blind it.\n",
                 {
                     {"transaction", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Transaction in hex in which to include an issuance input."},
                     {"issuances", RPCArg::Type::ARR, RPCArg::Optional::NO, "List of issuances to create. Each issuance must have one non-zero amount.",

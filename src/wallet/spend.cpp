@@ -863,21 +863,44 @@ static void resetBlindDetails(BlindDetails* det, bool preserve_output_data = fal
 // blindable output and the configuration is legal again. The asset must be one the
 // transaction can build a surjection proof for, i.e. one that appears among the inputs.
 //
-// Returns the index of the appended output.
+// SEQUENTIA: the dummy goes in before a trailing fee output rather than after
+// it. Consensus does not care where the fee output is, but the raw issuance
+// flow does: rawissueasset requires the fee to be the last output, so a funded
+// transaction whose dummy came after the fee could not take an issuance (as
+// with fundrawtransaction and a confidential changeAddress). Every change
+// output sits before the fee, so their indices are unaffected.
+//
+// Returns the index of the inserted output.
 static size_t AppendBlindingDummyOutput(BlindDetails* det, CWallet* wallet, CMutableTransaction& txNew, const CAsset& asset)
 {
     CTxOut newTxOut(asset, 0, CScript() << OP_RETURN);
     //TODO Have blinding do some extremely minimal rangeproof
     const CPubKey blind_pub = wallet->GetBlindingPubKey(newTxOut.scriptPubKey); // irrelevant, just needs to be non-null
     newTxOut.nNonce.vchCommitment = std::vector<unsigned char>(blind_pub.begin(), blind_pub.end());
-    txNew.vout.push_back(newTxOut);
-    det->o_pubkeys.push_back(blind_pub);
-    det->o_amount_blinds.push_back(uint256());
-    det->o_asset_blinds.push_back(uint256());
-    det->o_amounts.push_back(0);
-    det->o_assets.push_back(asset);
+    // The per-output arrays are positional. They always match the outputs here;
+    // should they ever not, append as before rather than misplace an entry.
+    const size_t n = txNew.vout.size();
+    const bool aligned = det->o_pubkeys.size() == n && det->o_amount_blinds.size() == n &&
+                         det->o_asset_blinds.size() == n && det->o_amounts.size() == n && det->o_assets.size() == n;
+    if (!aligned || n == 0 || !txNew.vout.back().IsFee()) {
+        txNew.vout.push_back(newTxOut);
+        det->o_pubkeys.push_back(blind_pub);
+        det->o_amount_blinds.push_back(uint256());
+        det->o_asset_blinds.push_back(uint256());
+        det->o_amounts.push_back(0);
+        det->o_assets.push_back(asset);
+        det->num_to_blind++;
+        return txNew.vout.size() - 1;
+    }
+    const size_t at = n - 1;
+    txNew.vout.insert(txNew.vout.begin() + at, newTxOut);
+    det->o_pubkeys.insert(det->o_pubkeys.begin() + at, blind_pub);
+    det->o_amount_blinds.insert(det->o_amount_blinds.begin() + at, uint256());
+    det->o_asset_blinds.insert(det->o_asset_blinds.begin() + at, uint256());
+    det->o_amounts.insert(det->o_amounts.begin() + at, 0);
+    det->o_assets.insert(det->o_assets.begin() + at, asset);
     det->num_to_blind++;
-    return txNew.vout.size() - 1;
+    return at;
 }
 
 // SEQUENTIA: whether the issuance a transaction carries has a blinded amount.
