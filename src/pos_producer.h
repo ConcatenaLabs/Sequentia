@@ -33,6 +33,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <thread>
@@ -222,8 +223,27 @@ private:
     //! later blocks are dropped. m_gossip_mutex held.
     void RecordCandidate(const std::shared_ptr<const CBlock>& block, const CPubKey& leader, const uint256& leader_beta, int height);
     //! The proposal backed in round `r`: the (r+1)-th lowest-leader-VRF candidate,
-    //! or nullptr if fewer than r+1 candidates are known. m_gossip_mutex held.
+    //! starting over from the first once every candidate has had a round;
+    //! nullptr if no candidate is known. m_gossip_mutex held.
     std::shared_ptr<const CBlock> BackedForRound(int r) const;
+    //! Proposal collection window and round length (ms): local liveness timings
+    //! scaled with the committee size, or the -poswindowms/-posroundms overrides.
+    int64_t WindowMs() const;
+    int64_t RoundMs() const;
+    //! How many rounds a collection runs before it is abandoned. m_gossip_mutex held.
+    int RoundsPerCollection() const;
+    //! When the current collection runs out of rounds without certifying, so
+    //! DriveRound restarts it and every producer re-proposes. Derived from the
+    //! round-0 block's timestamp and RoundsPerCollection(), so it is the same
+    //! instant on every node. nullopt if no round is active at `height`.
+    //! m_gossip_mutex held.
+    std::optional<int64_t> RoundsExhaustedAtMs(int height) const;
+    //! Abandon the exhausted collection at the current height and re-arm our own
+    //! proposal (see DriveRound). Returns the block we share-signed at this
+    //! height, if any: the caller must query peers for its certificate, since
+    //! the re-seeded round's grace is counted from this restart. m_gossip_mutex
+    //! held.
+    std::optional<uint256> RestartCollection(int height, int64_t now);
     //! Produce shares for every locally-held key that is sortition-eligible for
     //! `block`'s slot.
     std::vector<PosShare> MakeLocalShares(const CBlock& block);
@@ -294,6 +314,8 @@ private:
     uint256 m_backed_hash;                             //!< hash of the proposal we are signing/collecting for
     int m_signed_round{-1};                            //!< highest round index we have signed for
     int m_proposed_height{0};                          //!< height we have already proposed our own block at
+    int m_propose_at_height{0};                        //!< height m_propose_at_ms is for
+    int64_t m_propose_at_ms{0};                        //!< whole-second instant to propose at once the slot is open (see Step)
     uint256 m_last_tip;                                //!< active tip last seen by Step(); detects parent-reorg rollbacks
     std::set<uint256> m_seen_proposals;                //!< proposal dedup
     std::set<std::pair<uint256, CPubKey>> m_seen_shares; //!< share dedup
