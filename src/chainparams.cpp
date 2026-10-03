@@ -916,7 +916,7 @@ public:
         consensus.pos_slot_gate_height = 93800;
         // Two-step unbonding (params.h): a HARD FORK on this running chain.
         // 159000 was ~3,600 blocks (about 2.7 days at 62-68 s a block) ahead of
-        // the tip when 24.8.0 was cut, which is the time every producer has to
+        // the tip when 25.0.0 was cut, which is the time every producer has to
         // upgrade. The depth is the checkpoint depth, as on mainnet.
         consensus.pos_unbond_height = 159000;
         consensus.pos_unbond_anchor_depth = 2016;

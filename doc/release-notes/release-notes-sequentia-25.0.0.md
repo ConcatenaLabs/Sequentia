@@ -1,14 +1,14 @@
-# Sequentia Core 24.8.0
+# Sequentia Core 25.0.0
 
 Finality now survives committee members who sign two blocks at one height,
 and a stake that leaves now stays locked until a Bitcoin checkpoint could have
-secured what its keys signed. The second is a consensus rule, which is why the
-minor version moves.
+secured what its keys signed. The second is a consensus rule and a testnet hard fork,
+which is why the version moves to 25.
 
-**Testnet hard fork at height 159,000.** From that block a node on 24.8.0
+**Testnet hard fork at height 159,000.** From that block a node on 25.0.0
 rejects a block that spends a staking output anywhere but into stake or an
 unbonding output, which a node on 24.7.x still accepts. Every block producer
-must run 24.8.0 before the testnet reaches it; a node that does not will follow
+must run 25.0.0 before the testnet reaches it; a node that does not will follow
 whichever branch an outdated producer extends, and will need `reconsiderblock`
 after upgrading if it accepted a block the new rule rejects.
 
