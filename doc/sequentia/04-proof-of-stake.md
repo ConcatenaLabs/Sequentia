@@ -792,8 +792,9 @@ different sizes, and each node keeps the count of the first it received. Ranked
 by that count, two nodes holding the same two certified siblings could order
 them oppositely and finalize different blocks.
 
-Whether a block is certified is the same on every node, because it is judged
-against its parent's stake state and never against the observing node's tip.
+Whether a block that cannot escape a stall is certified is the same on every
+node, because it is judged against its parent's stake state and never against
+the observing node's tip.
 On the public committee the quorum follows the number of eligible stakers, so a
 block that registers or drops a committee key changes the quorum for the blocks
 after it, and a node whose tip is that block would hold a higher quorum than a
@@ -809,8 +810,11 @@ know it treats the block as certified for fork choice, learns the answer by
 connecting it, and does not count it towards finality until then. A judged
 answer is kept in the block's index entry (`BLOCK_POS_CERT_DECIDED`), so a
 restart, which knows the stake state of the tip alone, does not lose it.
-`getblockheader` reports the same answer as `poscertified`, and the parent's
-quorum as `posquorum` once the node knows it. Tested in
+For a block that may escape a stall the count is that of the certificate the
+node holds, which lies outside the block hash, so two nodes holding different
+certificates for it can judge it differently. `getblockheader` reports the
+answer as `poscertified`, which reads `false` while the node does not yet know
+it, and the parent's quorum as `posquorum` once the node knows it. Tested in
 `feature_pos_certified_parent_quorum.py` (siblings of which one changes the
 committee) and `feature_pos_certified_stall_quorum.py` (the same on the
 anchored committee, for blocks escaping a stall, across a restart).
