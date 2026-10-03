@@ -87,13 +87,28 @@ gossip.
 
 ### What changed
 
-Same-height blocks are ordered by whether they are certified (the certificate
-names at least the quorum), then by the leader's VRF score, then by block hash.
-The number of members a certificate names is never compared: every valid
-certificate of a block that is not escaping a stall reaches the quorum, so
-whether a block is certified is the same on every node. A certified block is
-still final against every sibling once its observation window has passed, and
-finality still never blocks a reorg that follows Bitcoin.
+Same-height blocks are ordered by whether they are certified, then by the
+leader's VRF score, then by block hash. The number of members a certificate
+names is never compared.
+
+Certified means the certificate names at least the quorum of the stake state
+the block's parent leaves, the quorum the certificate is verified against, and
+never the quorum at the node's own tip. On the public committee the quorum
+follows the number of eligible stakers, so a block that registers a committee
+key raises it for the blocks after it; judged against their own tips, a node
+holding that block and a node holding its sibling would disagree on whether the
+sibling is certified, and finalize different blocks. Siblings share a parent,
+and with it the quorum, so whether a block is certified is the same on every
+node. Every valid certificate of a block that is not escaping a stall carries
+its parent's quorum, so for such a block the answer follows from its headers;
+a block escaping a stall has its count judged against its parent's quorum, and
+the node keeps that answer across restarts. `getblockheader` reports the same
+answer as `poscertified`, and `posquorum` is the parent's quorum, present once
+the node knows it.
+
+A certified block is still final against every sibling once its observation
+window has passed, and finality still never blocks a reorg that follows
+Bitcoin.
 
 Between two blocks that are both below the quorum (escaping-stall blocks),
 the one whose certificate names more members no longer wins; the VRF score and

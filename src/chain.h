@@ -155,6 +155,17 @@ enum BlockStatus : uint32_t {
     //! restarts. Set only by AnchorWatchTask's invalidation; cleared when the
     //! block is reconsidered.
     BLOCK_FAILED_ANCHOR      =   512,
+
+    //! SEQUENTIA PoS, node-local: whether this block's certificate carries the
+    //! certification quorum of its parent's stake state has been judged against
+    //! that state, when the block was accepted with the state known or when it
+    //! connected (BLOCK_POS_CERTIFIED holds the answer). Set only for blocks
+    //! whose answer the headers cannot give: under the public committee, a
+    //! block that may escape a stall below the quorum. Persisted so a restarted
+    //! node, which knows the stake state of its tip only, keeps the answer.
+    //! Pure bookkeeping, outside every validity and failure mask.
+    BLOCK_POS_CERT_DECIDED   =  1024,
+    BLOCK_POS_CERTIFIED      =  2048,
 };
 
 /** The block chain is a tree shaped structure starting with the
@@ -311,14 +322,41 @@ public:
     //! assemble one, and two certificates of one block can name different
     //! numbers of members. So CBlockIndexWorkComparator never compares counts.
     //! It orders same-height (equal-work) blocks by m_pos_certified (certified
-    //! first), then the VRF score, then the block hash. m_pos_certified is the count measured
-    //! against the certification quorum (PosSlotQuorum) when the block is
-    //! accepted, and again for every block when the registry is rebuilt at
-    //! startup; it is never changed while the block is a chain-selection
-    //! candidate, so the set ordering stays stable. Memory only.
+    //! first), then the VRF score, then the block hash.
+    //!
+    //! m_pos_certified says whether the certificate carries the certification
+    //! quorum of the stake state the block's PARENT leaves -- the quorum
+    //! ConnectBlock verifies it against -- never the quorum of the observing
+    //! node's tip, which differs between nodes on different branches whenever
+    //! a block changes the committee. So it is a function of the block, its
+    //! parent and the certificate, the same on every node holding them. Where
+    //! the quorum is fixed by configuration it is the count against that.
+    //! Under the public committee consensus already makes every valid block
+    //! that cannot escape a stall carry its parent's quorum, so for those the
+    //! headers answer; only a block that may escape a stall needs its count
+    //! judged against its parent's quorum, which this node knows once the
+    //! parent has been connected or disconnected here (m_pos_child_quorum),
+    //! and always once the block itself connects; once judged, the answer is
+    //! kept across restarts (BLOCK_POS_CERT_DECIDED).
+    //!
+    //! Until then the answer is provisional: m_pos_cert_known is false and
+    //! m_pos_certified is true, so fork choice tries the block and learns the
+    //! answer by connecting it rather than passing over a block that may be
+    //! certified. Finality and the anchor monitors count only a known answer
+    //! (PosCarriesQuorum). A changed answer is written only with the block out
+    //! of every chain-selection candidate set, so the set ordering stays
+    //! stable. Memory only, apart from the BLOCK_POS_CERT_* status bits.
     uint16_t m_pos_countersigs{0};
     uint64_t m_pos_vrf_score{std::numeric_limits<uint64_t>::max()}; // lower = better; max = unset
     bool m_pos_certified{false};
+    bool m_pos_cert_known{false};
+    //! The certification quorum of the stake state this block leaves, which
+    //! its children's certificates must reach; -1 when this node has not held
+    //! that state since it started. Memory only.
+    int m_pos_child_quorum{-1};
+
+    //! Whether this block is known to carry its parent's certification quorum.
+    bool PosCarriesQuorum() const { return m_pos_cert_known && m_pos_certified; }
 
     CBlockIndex()
     {

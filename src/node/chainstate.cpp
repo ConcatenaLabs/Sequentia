@@ -122,9 +122,9 @@ std::optional<ChainstateLoadingError> LoadChainstate(bool fReset,
             if (g_con_pos && !RebuildUtxoStake(chainstate->CoinsDB())) {
                 return ChainstateLoadingError::ERROR_GENERIC_BLOCKDB_OPEN_FAILED;
             }
-            // Whether each block is certified is a fork-choice key measured
-            // against this registry's quorum; it is not on disk.
-            PosRefreshCertifiedKeys(chainman);
+            // Whether each block is certified is a fork-choice key, judged
+            // against its parent's quorum; only part of it is on disk.
+            PosRefreshCertifiedKeys(chainman, chainman.m_blockman.LookupBlockIndex(chainstate->CoinsTip().GetBestBlock()));
             // LoadChainTip initializes the chain based on CoinsTip()'s best block
             if (!chainstate->LoadChainTip()) {
                 return ChainstateLoadingError::ERROR_LOADCHAINTIP_FAILED;

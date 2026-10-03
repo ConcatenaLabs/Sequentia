@@ -212,9 +212,21 @@ UniValue blockheaderToJSON(const CBlockIndex* tip, const CBlockIndex* blockindex
 
     CBlockIndex tmpBlockIndexFull;
     const CBlockIndex* blockindex;
+    // SEQUENTIA PoS: the certified answer and the parent's quorum are written
+    // under cs_main (they can settle when the block connects).
+    bool pos_certified{false};
+    int pos_quorum{-1};
     {
         LOCK(cs_main);
         blockindex = blockindex_->untrim_to(&tmpBlockIndexFull);
+        if (g_con_pos) {
+            pos_certified = blockindex_->PosCarriesQuorum();
+            if (!g_pos_public_committee) {
+                pos_quorum = PosSlotQuorum(StakeRegistry::GetInstance()); // fixed by configuration
+            } else if (blockindex_->pprev) {
+                pos_quorum = blockindex_->pprev->m_pos_child_quorum;
+            }
+        }
     }
 
     UniValue result(UniValue::VOBJ);
@@ -238,12 +250,13 @@ UniValue blockheaderToJSON(const CBlockIndex* tip, const CBlockIndex* blockindex
     // merely anchored: anchoring binds the leg to Bitcoin, quorum certification
     // means the committee finalized it. Exposed so an off-node swap driver
     // (VerifySeqLegSafe) and the wallet cross-maker can require both.
+    //
+    // Certified is judged against the quorum of the stake state the block's
+    // parent leaves, never this node's tip, so every node answers alike.
+    // posquorum is that quorum, present once this node knows it.
     if (g_con_pos) {
-        const int pos_quorum = PosSlotQuorum(StakeRegistry::GetInstance());
-        const int pos_countersigs = (int)blockindex->m_pos_countersigs;
-        const bool pos_certified = pos_countersigs >= pos_quorum;
-        result.pushKV("poscountersigs", pos_countersigs);
-        result.pushKV("posquorum", pos_quorum);
+        result.pushKV("poscountersigs", (int)blockindex->m_pos_countersigs);
+        if (pos_quorum >= 0) result.pushKV("posquorum", pos_quorum);
         result.pushKV("poscertified", pos_certified);
     }
     if (!g_signed_blocks) {

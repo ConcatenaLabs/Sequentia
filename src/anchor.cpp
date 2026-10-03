@@ -703,9 +703,6 @@ std::optional<uint256> AnchorCertifiedSiblingPending(ChainstateManager& chainman
         invalidated = g_anchor_invalidated;
         stale = g_anchor_stale_cache;
     }
-    // Mirror UpdateTip's immediate-finality quorum exactly (incl. the
-    // degenerate-size floor), so "guarded" == "could have been final".
-    const int quorum = PosSlotQuorum(StakeRegistry::GetInstance());
     LOCK(cs_main);
     // Roots: recovery-set entries that could still be restored at/below our
     // height. Skip manual/consensus invalidations (failed WITHOUT the
@@ -748,15 +745,17 @@ std::optional<uint256> AnchorCertifiedSiblingPending(ChainstateManager& chainman
     // that descendant is what recovery must protect (it held finality and may
     // carry e.g. an atomic-swap leg). A branch that is sub-quorum throughout
     // is deliberately not guarded: it never held finality, and the
-    // countersignature comparator arbitrates rivals there.
-    int best = target->m_pos_countersigs;
-    if (best < quorum) {
+    // fork-choice comparator arbitrates rivals there. "Carries a quorum" is
+    // the answer UpdateTip's immediate-finality pass uses (each block against
+    // its own parent's quorum), so "guarded" == "could have been final".
+    bool guarded = target->PosCarriesQuorum();
+    if (!guarded) {
         for (const auto& [hash, p] : chainman.m_blockman.m_block_index) {
-            if (p->nHeight <= child_height || (int)p->m_pos_countersigs <= best) continue;
-            if (p->GetAncestor(child_height) == target) best = p->m_pos_countersigs;
+            if (p->nHeight <= child_height || !p->PosCarriesQuorum()) continue;
+            if (p->GetAncestor(child_height) == target) { guarded = true; break; }
         }
     }
-    if (best < quorum) return std::nullopt;
+    if (!guarded) return std::nullopt;
     return target->GetBlockHash();
 }
 
@@ -819,10 +818,10 @@ static void MaybeReconcileFinality(ChainstateManager& chainman)
                         inactive = true; // best known header extends our own finalized chain
                     } else {
                         // Rival branch: its highest quorum-certified, non-failed
-                        // block strictly above our finalized height.
-                        const int quorum = PosSlotQuorum(StakeRegistry::GetInstance());
+                        // block strictly above our finalized height, each judged
+                        // against its own parent's quorum, as finality judges.
                         for (const CBlockIndex* p = best; p && p->nHeight > final_height; p = p->pprev) {
-                            if ((p->nStatus & BLOCK_FAILED_MASK) || (int)p->m_pos_countersigs < quorum) continue;
+                            if ((p->nStatus & BLOCK_FAILED_MASK) || !p->PosCarriesQuorum()) continue;
                             cert_height = p->nHeight;
                             cert_hash = p->GetBlockHash();
                             cert_anchor_height = p->m_anchor_height;

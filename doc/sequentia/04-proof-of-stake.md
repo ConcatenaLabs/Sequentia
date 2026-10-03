@@ -766,13 +766,14 @@ genesis-seeded launch uses for its slow start - see
 
 Signed blocks all have equal nominal "work" (height), so same-height candidates
 are ordered by a PoS-specific comparator in `CBlockIndexWorkComparator`
-(`src/validation.cpp`), using keys set on `CBlockIndex` at acceptance and
-never changed while the block is a candidate, and then the block hash:
+(`src/validation.cpp`), using keys set on `CBlockIndex` at acceptance, and then
+the block hash:
 
 1. a **certified block wins** over an uncertified one - `m_pos_certified`,
    whether the block's certificate names at least the certification quorum
-   (`PosSlotQuorum`), so a full-threshold block always beats an escaping-stall
-   or leader-only one;
+   (`PosSlotQuorum`) of the stake state its **parent** leaves, the quorum
+   `ConnectBlock` verifies the certificate against, so a full-threshold block
+   always beats an escaping-stall or leader-only one;
 2. between two certified or two uncertified blocks, the **lower leader VRF
    score** wins - `m_pos_vrf_score`, the top 64 bits of the leader's `beta`
    over the slot seed (registry-independent, hence deterministic across
@@ -789,17 +790,38 @@ certificate is outside the block hash and any node holding a quorum of shares
 can assemble one, so one block reaches different nodes with certificates of
 different sizes, and each node keeps the count of the first it received. Ranked
 by that count, two nodes holding the same two certified siblings could order
-them oppositely and finalize different blocks. Whether a block is certified is
-the same on every node: every valid certificate of a block that is not escaping
-a stall reaches the quorum.
+them oppositely and finalize different blocks.
+
+Whether a block is certified is the same on every node, because it is judged
+against its parent's stake state and never against the observing node's tip.
+On the public committee the quorum follows the number of eligible stakers, so a
+block that registers or drops a committee key changes the quorum for the blocks
+after it, and a node whose tip is that block would hold a higher quorum than a
+node on its sibling; measured against each node's own tip, the sibling would be
+certified on one node and not on the other, and the two would finalize
+different blocks. Siblings share a parent, and with it the quorum. Every valid
+certificate of a block that cannot escape a stall carries its parent's quorum,
+so for such a block the headers give the answer. Only a block that may escape
+a stall, valid with fewer members, has its count judged, against the quorum its
+parent leaves: a node knows that quorum once it has connected or disconnected
+the parent, and always when the block itself connects. A node that does not yet
+know it treats the block as certified for fork choice, learns the answer by
+connecting it, and does not count it towards finality until then. A judged
+answer is kept in the block's index entry (`BLOCK_POS_CERT_DECIDED`), so a
+restart, which knows the stake state of the tip alone, does not lose it.
+`getblockheader` reports the same answer as `poscertified`, and the parent's
+quorum as `posquorum` once the node knows it. Tested in
+`feature_pos_certified_parent_quorum.py` (siblings of which one changes the
+committee) and `feature_pos_certified_stall_quorum.py` (the same on the
+anchored committee, for blocks escaping a stall, across a restart).
 
 The VRF score and the count are computed from the block in
 `SetPosForkChoiceKeys` before the block enters the candidate set, and persisted
-in `CDiskBlockIndex`. The certified flag is measured there against the quorum
-of the node's stake registry, and again for every block at startup, once the
-registry has been rebuilt (`PosRefreshCertifiedKeys`). **Anchor freshness is
-deliberately not a fork-choice key** (§7 explains why, and how freshness is
-delivered instead).
+in `CDiskBlockIndex`; the certified answer is derived again for every block at
+startup (`PosRefreshCertifiedKeys`). A changed answer is written only with the
+block out of every candidate set, so the set ordering stays consistent.
+**Anchor freshness is deliberately not a fork-choice key** (§7 explains why,
+and how freshness is delivered instead).
 
 ### The immediate-finality gate
 
