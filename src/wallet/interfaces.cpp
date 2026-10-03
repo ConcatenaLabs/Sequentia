@@ -72,8 +72,11 @@ WalletTx MakeWalletTx(CWallet& wallet, const CWalletTx& wtx)
         // spent output is reachable here.
         if (g_con_pos && !result.spends_stake) {
             const auto prev = wallet.mapWallet.find(txin.prevout.hash);
+            // Claiming an unbonding output (two-step unbonding) is the second
+            // half of the same withdrawal.
             if (prev != wallet.mapWallet.end() && txin.prevout.n < prev->second.tx->vout.size() &&
-                ParseStakeScript(prev->second.tx->vout[txin.prevout.n].scriptPubKey)) {
+                (ParseStakeScript(prev->second.tx->vout[txin.prevout.n].scriptPubKey) ||
+                 ParseUnbondScript(prev->second.tx->vout[txin.prevout.n].scriptPubKey))) {
                 result.spends_stake = true;
             }
         }

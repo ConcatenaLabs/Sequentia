@@ -22,6 +22,7 @@
 #include <policy/policy.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
+#include <pos.h>
 #include <psbt.h>
 #include <script/descriptor.h>
 #include <script/pegins.h>
@@ -1094,6 +1095,22 @@ bool CWallet::LoadToWallet(const uint256& hash, const UpdateWalletTxFn& fill_wtx
     return true;
 }
 
+bool CWallet::CreatesOwnUnbond(const CTransaction& tx) const
+{
+    // SEQUENTIA: a stake withdrawal under two-step unbonding spends staking
+    // outputs and pays an unbonding output of the same staker key, and IsMine
+    // recognises neither, so without this a rescan would never find it — nor
+    // the coins waiting in it, nor a re-staked remainder.
+    if (!g_con_pos) return false;
+    for (const CTxOut& out : tx.vout) {
+        const auto pk = ParseUnbondScript(out.scriptPubKey);
+        if (!pk) continue;
+        if (IsMine(GetScriptForDestination(WitnessV0KeyHash(*pk))) & ISMINE_SPENDABLE) return true;
+        if (IsMine(GetScriptForDestination(PKHash(*pk))) & ISMINE_SPENDABLE) return true;
+    }
+    return false;
+}
+
 bool CWallet::AddToWalletIfInvolvingMe(const CTransactionRef& ptx, const SyncTxState& state, bool fUpdate, bool rescanning_old_block)
 {
     const CTransaction& tx = *ptx;
@@ -1115,7 +1132,7 @@ bool CWallet::AddToWalletIfInvolvingMe(const CTransactionRef& ptx, const SyncTxS
 
         bool fExisted = mapWallet.count(tx.GetHash()) != 0;
         if (fExisted && !fUpdate) return false;
-        if (fExisted || IsMine(tx) || IsFromMe(tx))
+        if (fExisted || IsMine(tx) || IsFromMe(tx) || CreatesOwnUnbond(tx))
         {
             /* Check if any keys in the wallet keypool that were supposed to be unused
              * have appeared in a new transaction. If so, remove those keys from the keypool.

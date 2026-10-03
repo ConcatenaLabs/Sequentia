@@ -111,10 +111,34 @@ class PosUnbondingTest(BitcoinTestFramework):
         assert_equal(res["unbonding"], True)
         assert_equal(res["destination"], "unbonding")
         assert_equal(res["unbond_depth"], DEPTH)
+        lu = s.listunbonding()
+        assert_equal((lu["active"], lu["unbond_depth"], lu["unit"]), (True, DEPTH, "parent-chain block"))
+        assert_equal(len(lu["outputs"]), 1)
+        assert_equal(lu["outputs"][0]["confirmations"], 0)
+        assert "unlock_at" not in lu["outputs"][0]
+        assert_equal(lu["claimable"], 0)
+
+        self.log.info("The pending withdrawal can be re-sent with a higher fee; it still goes to unbonding")
+        bump = s.bumpwithdrawstakefee()
+        assert_equal(bump["destination"], "unbonding")
+        assert_equal(bump["replaced_txid"], res["txid"])
+        lu = s.listunbonding()
+        assert_equal(len(lu["outputs"]), 1)
+        assert_equal(lu["outputs"][0]["txid"], bump["txid"])
+        assert_equal(lu["total"], bump["amount"])
+        assert_raises_rpc_error(-8, "most a stake may pay out of itself", s.bumpwithdrawstakefee, 1000000)
         self.mine(1)
         assert pub not in s.getstakerinfo()
         created_anchor = self.anchor()
         self.log.info("  unbonding output created in a block anchored to parent height %d", created_anchor)
+        out = s.listunbonding()["outputs"][0]
+        assert_equal((out["unlock_at"], out["remaining"], out["claimable"]), (created_anchor + DEPTH, DEPTH, False))
+
+        self.log.info("A rescan finds the unbonding output again, although no address of the wallet is in it")
+        s.removeprunedfunds(bump["txid"])
+        assert_equal(s.listunbonding()["outputs"], [])
+        s.rescanblockchain(0)
+        assert_equal(s.listunbonding()["outputs"][0]["txid"], bump["txid"])
 
         self.log.info("Sequentia blocks alone do not unlock it: the wait is counted in Bitcoin blocks")
         assert_raises_rpc_error(-4, "not claimable yet", s.claimunbonded)
@@ -132,13 +156,15 @@ class PosUnbondingTest(BitcoinTestFramework):
         self.parent(1)
         self.mine(1)
         assert_equal(self.anchor(), created_anchor + DEPTH)
+        assert_equal(s.listunbonding()["claimable"], bump["amount"])
         balance_before = s.getbalance()["bitcoin"]
         claim = s.claimunbonded()
         assert_equal(claim["claimed_outputs"], 1)
         self.mine(1)
         assert_equal(s.gettransaction(claim["txid"])["confirmations"], 1)
         assert_equal(s.getbalance()["bitcoin"], balance_before + claim["amount"])
-        assert_equal(claim["amount"] + claim["fee"] + res["fee"], Decimal(100))
+        assert_equal(claim["amount"] + claim["fee"] + bump["fee"], Decimal(100))
+        assert_equal(s.listunbonding()["outputs"], [])
         self.log.info("two-step unbonding: weight leaves at once, coins after %d Bitcoin blocks — OK", DEPTH)
 
 
