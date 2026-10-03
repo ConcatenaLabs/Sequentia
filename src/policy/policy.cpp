@@ -189,13 +189,17 @@ bool IsStandardTx(const CTransaction& tx, bool permit_bare_multisig, const CFeeR
         }
 
         if (whichType == TxoutType::NULL_DATA) {
-            // SEQUENTIA: a bare OP_RETURN, with nothing after the opcode, carries
-            // no data. It is a burn: whatever amount it holds is destroyed. The
-            // one-OP_RETURN limit below exists to bound data carried on chain,
-            // so burns do not count against it, and a transaction may destroy
-            // the remains of several outputs (each in its own asset) at once.
-            // Every OP_RETURN that pushes data still counts, exactly as before.
-            if (!IsBareBurnScript(txout.scriptPubKey)) {
+            // SEQUENTIA: a bare OP_RETURN, with nothing after the opcode and a
+            // null nonce, carries no data. It is a burn: whatever amount it
+            // holds is destroyed. The one-OP_RETURN limit below exists to bound
+            // data carried on chain, so such burns do not count against it, and
+            // a transaction may destroy the remains of several outputs (each in
+            // its own asset) at once. The nonce is part of the output and its
+            // author can fill it -- 33 bytes, or a blinding key ground to carry
+            // data -- so a bare OP_RETURN with a nonce counts like any other
+            // data output (IsDataFreeBurn), as does every OP_RETURN that pushes
+            // data.
+            if (!IsDataFreeBurn(txout)) {
                 nDataOut++;
             }
         } else if ((whichType == TxoutType::MULTISIG) && (!permit_bare_multisig)) {
@@ -207,7 +211,7 @@ bool IsStandardTx(const CTransaction& tx, bool permit_bare_multisig, const CFeeR
         }
     }
 
-    // only one data-carrying OP_RETURN txout is permitted (bare burns aside)
+    // only one data-carrying OP_RETURN txout is permitted (data-free burns aside)
     if (!params.GetMultiDataPermitted() && nDataOut > 1) {
         reason = "multi-op-return";
         return false;

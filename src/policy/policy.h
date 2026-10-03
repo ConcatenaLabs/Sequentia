@@ -109,12 +109,22 @@ bool IsDust(const CTxOut& txout, const CFeeRate& dustRelayFee);
 
 bool IsStandard(const CScript& scriptPubKey, TxoutType& whichType);
 
-/** SEQUENTIA: a value burn -- an output whose script is a bare OP_RETURN with
- *  nothing after it. It carries no data, so IsStandardTx does not count it
- *  against the one-data-output limit. */
+/** SEQUENTIA: a script that is a bare OP_RETURN with nothing after it. */
 inline bool IsBareBurnScript(const CScript& scriptPubKey)
 {
     return scriptPubKey.size() == 1 && scriptPubKey[0] == OP_RETURN;
+}
+
+/** SEQUENTIA: a value burn that carries no data -- a bare OP_RETURN script
+ *  with a null nonce. IsStandardTx does not count it against the
+ *  one-data-output limit. The nonce matters because it is a field of the
+ *  output too: up to 33 bytes the transaction's author chooses, and on a
+ *  blinded output an ephemeral key that can be ground to carry data. A bare
+ *  OP_RETURN with a nonce is therefore counted as a data output, which
+ *  includes every confidential burn and the wallet's blinding dummy. */
+inline bool IsDataFreeBurn(const CTxOut& txout)
+{
+    return IsBareBurnScript(txout.scriptPubKey) && txout.nNonce.IsNull();
 }
 
 

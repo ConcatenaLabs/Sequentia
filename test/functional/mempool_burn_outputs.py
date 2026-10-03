@@ -5,19 +5,22 @@
 """Relay policy: any number of value burns, still one data output.
 
 A burn is an output whose script is a bare OP_RETURN, nothing after the opcode:
-it carries no data, and the amount it holds is destroyed. Relay policy limits a
-transaction to one OP_RETURN output to bound the data carried on chain
-(multi-op-return); burns carry none, so they do not count against that limit.
-An issuer can destroy the remains of several outputs, in several assets, in one
-transaction. The limit on data-carrying OP_RETURN outputs is unchanged.
+the amount it holds is destroyed. Relay policy limits a transaction to one
+OP_RETURN output to bound the data carried on chain (multi-op-return). A burn
+with a null nonce carries no data, so it does not count against that limit: an
+issuer can destroy the remains of several outputs, in several assets, in one
+transaction. The nonce is a field of the output its author can fill, so a burn
+carrying one counts as a data output, like an OP_RETURN that pushes data.
 
-Consensus accepts every shape here; the last case forces the still-refused one
-into a block to show the refusal is relay policy only.
+Consensus accepts every shape here; the refused shapes are forced into blocks
+to show the refusal is relay policy only.
 """
 
 from decimal import Decimal
 
 from test_framework.blocktools import COINBASE_MATURITY
+from test_framework.messages import CTxOutNonce, tx_from_hex
+from test_framework.p2p import P2PDataStore
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import assert_equal, assert_raises_rpc_error
 
@@ -41,9 +44,10 @@ class BurnOutputsTest(BitcoinTestFramework):
         return max((u for u in self.node.listunspent() if u['asset'] == asset),
                    key=lambda u: u['amount'])
 
-    def build(self, special_outputs):
+    def build(self, special_outputs, nonce_payload=None):
         """A signed transaction spending one coin of each asset the special outputs
-        burn (and one of the fee asset), with explicit change and an explicit fee."""
+        burn (and one of the fee asset), with explicit change and an explicit fee.
+        With nonce_payload, every bare burn carries it in its nonce."""
         spend = {self.btc: Decimal(0)}
         for o in special_outputs:
             if 'burn' in o:
@@ -56,6 +60,12 @@ class BurnOutputsTest(BitcoinTestFramework):
             outputs.append({self.node.getnewaddress(): u['amount'] - amount, 'asset': asset})
         outputs.append({'fee': FEE})
         raw = self.node.createrawtransaction(inputs, outputs)
+        if nonce_payload is not None:
+            tx = tx_from_hex(raw)
+            for o in tx.vout:
+                if o.scriptPubKey == b'\x6a':
+                    o.nNonce = CTxOutNonce(b'\x02' + nonce_payload)
+            raw = tx.serialize().hex()
         signed = self.node.signrawtransactionwithwallet(raw)
         assert_equal(signed['complete'], True)
         return signed['hex']
@@ -105,6 +115,39 @@ class BurnOutputsTest(BitcoinTestFramework):
         assert_equal(self.node.testmempoolaccept([hex_tx2])[0]['reject-reason'], 'multi-op-return')
 
         self.log.info("Consensus accepts the refused shape: it is relay policy only")
+        self.force_into_block(hex_tx)
+
+        self.log.info("25 burns with a null nonce relay and confirm")
+        hex_tx = self.build([{'burn': 0}] * 25)
+        assert_equal(self.scripts(hex_tx).count('6a'), 25)
+        assert_equal(self.node.testmempoolaccept([hex_tx])[0]['allowed'], True)
+        self.confirm(self.node.sendrawtransaction(hex_tx))
+
+        self.log.info("25 burns each carrying 32 bytes in the nonce are data outputs: refused")
+        payload = b"data carried in a burn's nonce.."
+        assert_equal(len(payload), 32)
+        hex_tx = self.build([{'burn': 0}] * 25, nonce_payload=payload)
+        assert_equal(bytes.fromhex(hex_tx).count(payload), 25)
+        res = self.node.testmempoolaccept([hex_tx])[0]
+        assert_equal(res['allowed'], False)
+        assert_equal(res['reject-reason'], 'multi-op-return')
+        # Over P2P, which is how such a transaction reaches the network
+        # (sendrawtransaction refuses an unblinded output with a nonce before
+        # relay policy is consulted).
+        peer = self.node.add_p2p_connection(P2PDataStore())
+        ptx = tx_from_hex(hex_tx)
+        ptx.rehash()
+        peer.send_txs_and_test([ptx], self.node, success=False, reject_reason='multi-op-return')
+        self.node.disconnect_p2ps()
+        self.force_into_block(hex_tx)
+
+        self.log.info("One burn carrying a nonce is the transaction's one data output")
+        hex_tx = self.build([{'burn': 0}], nonce_payload=payload)
+        assert_equal(self.node.testmempoolaccept([hex_tx])[0]['allowed'], True)
+        hex_tx = self.build([{'data': 'aa'}, {'burn': 0}], nonce_payload=payload)
+        assert_equal(self.node.testmempoolaccept([hex_tx])[0]['reject-reason'], 'multi-op-return')
+
+    def force_into_block(self, hex_tx):
         block = self.generateblock(self.node, output=self.node.getnewaddress(), transactions=[hex_tx],
                                    sync_fun=self.no_op)
         txid = self.node.decoderawtransaction(hex_tx)['txid']
