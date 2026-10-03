@@ -24,12 +24,12 @@ one leader, so the hash decides between equally certified ones:
   B  three signatures: certified, the parent's quorum exactly
   S  two signatures: below the parent's quorum, valid only as a stall escape
 
-rebuilt until S < B < A by hash, so B wins only if it is certified on the node
-holding A, and S loses only because it is not certified. X receives A first,
-Y receives B first; both must pick B and finalize it. X restarts and still
-holds A and B as certified, an answer that needs the parent's stake state and
-so is kept from when each block connected. Connected again, X and Y extend
-one chain.
+They are drawn, one candidate for each per round, until some S < B < A by hash,
+so B wins only if it is certified on the node holding A, and S loses only
+because it is not certified. X receives A first, Y receives B first; both must
+pick B and finalize it. X restarts and still holds A and B as certified, S as
+not: answers that need the parent's stake state, kept from when each block was
+judged. Connected again, X and Y extend one chain.
 """
 import os
 import shutil
@@ -143,17 +143,6 @@ class PosCertifiedStallQuorumTest(BitcoinTestFramework):
             time.sleep(0.5)
         raise AssertionError("could not produce: %s" % last)
 
-    def sibling(self, node, signers, leader, lower_than):
-        """A child of the tip with `signers` countersignatures and a hash below
-        `lower_than` (None: any)."""
-        for _ in range(30):
-            res = self.produce(node, signers, leaders=[leader])
-            if lower_than is None or hash_order(res["hash"]) < hash_order(lower_than):
-                return res
-            node.invalidateblock(res["hash"])
-            time.sleep(1.1)
-        raise AssertionError("no sibling with the wanted hash order")
-
     def free_coin(self, node):
         genesis = node.getblock(node.getblockhash(0), 2)
         for tx in genesis['tx']:
@@ -192,27 +181,34 @@ class PosCertifiedStallQuorumTest(BitcoinTestFramework):
                    CTxOut(amount - 2 * COIN - FEE, CScript([OP_TRUE]), asset), CTxOut(FEE, b'', asset)]
         registration = z1.sendrawtransaction(tx.serialize().hex())
 
-        for _ in range(20):
-            a = self.produce(z1, 3, leaders=[leader])   # A: E's registration, 4 signatures
-            b = self.produce(z2, 2, leaders=[leader])   # B: 3 signatures
-            A, B = a["hash"], b["hash"]
-            if hash_order(B) < hash_order(A):
+        # Every round adds a candidate for each of A, B and S, all children of
+        # P; the first combination in the wanted hash order is used.
+        cand = {"A": [], "B": [], "S": []}
+        found = None
+        for _ in range(15):
+            for role, node, signers in (("A", z1, 3), ("B", z2, 2), ("S", z2, 1)):
+                res = self.produce(node, signers, leaders=[leader])
+                cand[role].append((res, node.getblock(res["hash"], 0)))
+                node.invalidateblock(res["hash"])
+            for b, b_hex in cand["B"]:
+                lower = [c for c in cand["S"] if hash_order(c[0]["hash"]) < hash_order(b["hash"])]
+                higher = [c for c in cand["A"] if hash_order(c[0]["hash"]) > hash_order(b["hash"])]
+                if lower and higher:
+                    found = (higher[0], (b, b_hex), lower[0])
+                    break
+            if found:
                 break
-            z1.invalidateblock(A)
-            z2.invalidateblock(B)
             time.sleep(1.1)
         else:
-            raise AssertionError("B never had the lower hash")
-        z2.invalidateblock(B)
-        s = self.sibling(z2, 1, leader, lower_than=B)    # S: 2 signatures, below the quorum
-        S = s["hash"]
+            raise AssertionError("no siblings in the wanted hash order")
+        (a, block_a), (b, block_b), (s, block_s) = found
+        A, B, S = a["hash"], b["hash"], s["hash"]
         assert_equal((a["countersignatures"], b["countersignatures"], s["countersignatures"]), (4, 3, 2))
         assert registration in z1.getblock(A)["tx"]
         for h, node in ((A, z1), (B, z2), (S, z2)):
             header = node.getblockheader(h)
             assert_equal(header["previousblockhash"], parent)
             assert header["anchorheight"] >= parent_anchor + 3, "not a stall escape"
-        block_a, block_b, block_s = z1.getblock(A, 0), z2.getblock(B, 0), z2.getblock(S, 0)
 
         self.log.info("X receives A, B, S; Y receives B, A, S: each judged against P's quorum")
         assert_equal(x.submitblock(block_a), None)
