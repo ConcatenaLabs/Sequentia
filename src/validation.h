@@ -208,9 +208,17 @@ PosFinalityInfo PosGetFinalityInfo(ChainstateManager& chainman);
 
 /** Re-evaluate the immediate-finality point against the active tip, so a
  *  quorum block whose observation window has elapsed becomes final even when no
- *  new block arrives. Called periodically from the scheduler, and once when the
- *  chain is loaded at startup. */
+ *  new block arrives. Called periodically from the scheduler. */
 void PosRefreshImmediateFinality(ChainstateManager& chainman);
+
+/** At startup, once the chain tip is loaded: restore the finalized point
+ *  exactly as it was written with the block index, rather than finalizing
+ *  whatever the tip is. Every quorum block above it that was loaded from disk
+ *  is observed from now, for one observation window; the finalized block and
+ *  its ancestors stay final. With nothing on disk (a node that never finalized,
+ *  or one upgraded from a release that did not write it) no block is final
+ *  until that window has passed. */
+void PosRestoreImmediateFinality(ChainstateManager& chainman);
 
 /** Steady-clock seconds at the last ADVANCE of the immediate-finality point
  *  (0 = never advanced since startup). Lock-free; the reconciliation monitor

@@ -839,12 +839,22 @@ Once final, a block stays final, and so does every ancestor of it: no pass opens
 its window again, however long the chain grows behind it on escaping-stall
 blocks. A window opens when a quorum block joins the active chain while the node
 is past its initial block download; a block that was connected during that
-download, or loaded from disk at startup, counts as observed, so a restarted
-node finds its finalized block final again before it connects to any peer. A
-pass looks only at the blocks connected since the previous one and those still
-in their window, never at a whole stall stretch or, on a chain with nothing to
-finalize, the whole chain (`-debug=bench` reports any pass that examines more
-than a hundred blocks).
+download counts as observed. A pass looks only at the blocks connected since the
+previous one and those still in their window, never at a whole stall stretch or,
+on a chain with nothing to finalize, the whole chain (`-debug=bench` reports any
+pass that examines more than a hundred blocks).
+
+The finalized point is written with the block index and restored exactly at
+startup (`PosRestoreImmediateFinality`), before the node connects to any peer,
+so a restart neither moves it nor finalizes the tip merely because it is the
+tip. A quorum block above the restored point that was still in its window when
+the node stopped may have a better-ranked sibling the node has not seen yet, so
+its window runs again from startup: the node then ends on the same block as one
+that never stopped. A node with nothing written, because it never finalized a
+block or because it was upgraded from a release that did not write the point,
+holds nothing final for that first window and then finalizes its highest quorum
+block. Tested in `feature_pos_finality_restart.py`; `feature_pos_finality_kept.py`
+restarts a node holding a finalized block that Bitcoin later takes away.
 
 The rejection is the soft, non-banning `BLOCK_RECENT_CONSENSUS_CHANGE`, because
 the one legitimate exception is a **Bitcoin reorg** of a finalized block's
