@@ -4070,7 +4070,7 @@ public:
  *
  * The block is added to connectTrace if connection succeeds.
  */
-bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew, const std::shared_ptr<const CBlock>& pblock, ConnectTrace& connectTrace, DisconnectedBlockTransactions& disconnectpool, bool& fStall)
+bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew, const std::shared_ptr<const CBlock>& pblock, ConnectTrace& connectTrace, DisconnectedBlockTransactions& disconnectpool, bool& fStall, bool reorg_pending)
 {
     AssertLockHeld(cs_main);
     if (m_mempool) AssertLockHeld(m_mempool->cs);
@@ -4183,8 +4183,16 @@ bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew
         // re-selects it and fails validation. Only the boundary block pays
         // for the scan: elsewhere a block adds one to every depth and the
         // maturity stays put, so nothing resident can become premature.
+        //
+        // Not while a reorg is under way (reorg_pending: this activation step
+        // has disconnected blocks). A block connected in the middle of a reorg
+        // is not the tip the mempool will be judged against; judged at it, an
+        // entry can look premature that is mature at the tip the reorg ends
+        // on, and an evicted entry is not put back. MaybeUpdateMempoolForReorg
+        // runs once the step ends and applies the maturity in force at the
+        // tip it ended on, which covers a boundary crossed on the way.
         const int next_height = pindexNew->nHeight + 1;
-        if (CoinbaseMaturityAt(next_height) > CoinbaseMaturityAt(pindexNew->nHeight)) {
+        if (!reorg_pending && CoinbaseMaturityAt(next_height) > CoinbaseMaturityAt(pindexNew->nHeight)) {
             m_mempool->removeImmatureCoinbaseSpends(CoinsTip(), next_height);
         }
     }
@@ -4449,7 +4457,7 @@ bool CChainState::ActivateBestChainStep(BlockValidationState& state, CBlockIndex
 
         // Connect new blocks.
         for (CBlockIndex* pindexConnect : reverse_iterate(vpindexToConnect)) {
-            if (!ConnectTip(state, pindexConnect, pindexConnect == pindexMostWork ? pblock : std::shared_ptr<const CBlock>(), connectTrace, disconnectpool, fStall)) {
+            if (!ConnectTip(state, pindexConnect, pindexConnect == pindexMostWork ? pblock : std::shared_ptr<const CBlock>(), connectTrace, disconnectpool, fStall, fBlocksDisconnected)) {
                 if (state.IsInvalid()) {
                     // The block violates a consensus rule.
                     if (state.GetResult() != BlockValidationResult::BLOCK_MUTATED) {
