@@ -762,23 +762,40 @@ genesis-seeded launch uses for its slow start - see
 
 Signed blocks all have equal nominal "work" (height), so same-height candidates
 are ordered by a PoS-specific comparator in `CBlockIndexWorkComparator`
-(`src/validation.cpp`), using two keys set on `CBlockIndex` at acceptance and
-never mutated, and then the block hash:
+(`src/validation.cpp`), using keys set on `CBlockIndex` at acceptance and
+never changed while the block is a candidate, and then the block hash:
 
-1. **more committee countersignatures wins** - `m_pos_countersigs`, the named
-   committee size (so a full-threshold block always beats an escaping-stall
-   sub-threshold one);
-2. on an equal count, the **lower leader VRF score** wins - `m_pos_vrf_score`,
-   the top 64 bits of the leader's `beta` over the slot seed (registry-
-   independent, hence deterministic across nodes);
-3. on an equal score, the **lower block hash** wins. Unlike first-seen order,
-   which two honest nodes can observe differently, the hash is the same
-   everywhere, so every node breaks the tie the same way.
+1. a **certified block wins** over an uncertified one - `m_pos_certified`,
+   whether the block's certificate names at least the certification quorum
+   (`PosSlotQuorum`), so a full-threshold block always beats an escaping-stall
+   or leader-only one;
+2. between two certified or two uncertified blocks, the **lower leader VRF
+   score** wins - `m_pos_vrf_score`, the top 64 bits of the leader's `beta`
+   over the slot seed (registry-independent, hence deterministic across
+   nodes);
+3. on an equal score, the **lower block hash** wins, in `uint256` order: the
+   hash's bytes compared as stored, which is the displayed hex read two
+   digits at a time from the right. Unlike first-seen order, which two honest
+   nodes can observe differently, the hash is the same everywhere, so every
+   node breaks the tie the same way.
 
-Both keys are computed from the block body in `SetPosForkChoiceKeys` before the
-block enters the candidate set, and persisted in `CDiskBlockIndex` so a
-restarted node orders identically. **Anchor freshness is deliberately not a
-fork-choice key** (§7 explains why, and how freshness is delivered instead).
+The number of members a certificate names (`m_pos_countersigs`, reported as
+`poscountersigs`) is **not** a key. In the BLS certificate forms the
+certificate is outside the block hash and any node holding a quorum of shares
+can assemble one, so one block reaches different nodes with certificates of
+different sizes, and each node keeps the count of the first it received. Ranked
+by that count, two nodes holding the same two certified siblings could order
+them oppositely and finalize different blocks. Whether a block is certified is
+the same on every node: every valid certificate of a block that is not escaping
+a stall reaches the quorum.
+
+The VRF score and the count are computed from the block in
+`SetPosForkChoiceKeys` before the block enters the candidate set, and persisted
+in `CDiskBlockIndex`. The certified flag is measured there against the quorum
+of the node's stake registry, and again for every block at startup, once the
+registry has been rebuilt (`PosRefreshCertifiedKeys`). **Anchor freshness is
+deliberately not a fork-choice key** (§7 explains why, and how freshness is
+delivered instead).
 
 ### The immediate-finality gate
 
@@ -798,8 +815,8 @@ anchor: the anchor watcher invalidates the affected block on its own path (not
 the accept-time gate), which lowers the finalized point via `UpdateTip`, after
 which the Bitcoin-consistent chain is accepted. Bitcoin stays the security root -
 Sequentia finality is immediate *modulo* a Bitcoin reorg. Tested in
-`feature_pos_finality.py` (a higher-countersignature competitor does not reorg a
-finalized block) and `feature_pos_fork_choice.py`.
+`feature_pos_finality.py` (a competitor whose certificate names more members
+does not reorg a finalized block) and `feature_pos_fork_choice.py`.
 
 ### Equivocating members and the observation window
 
@@ -816,8 +833,9 @@ the gate would refuse the other, and the split would be permanent.
 Two valid certificates at one height are themselves proof of equivocation, so
 the observation window settles them deterministically instead: while a quorum
 block is inside its window, a competing quorum-certified sibling is judged by
-the ordinary comparator (countersignatures, then leader VRF score, then block
-hash), and every node that holds both converges on the same one. A certificate
+the ordinary comparator (both are certified, so leader VRF score, then block
+hash, whatever number of members either certificate names), and every node that
+holds both converges on the same one. A certificate
 is ~300 bytes and every node relays it at once, so the window only has to cover
 its travel. The competing *block* can be large, full of transactions nobody has
 seen, and slow to validate, and its content is the attacker's choice - so a node

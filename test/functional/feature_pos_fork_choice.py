@@ -9,35 +9,35 @@ and doc/sequentia/04-proof-of-stake.md):
 
     Bitcoin anchoring  >  checkpoints  >  immediate finality
 
-so the countersignature tiebreak this test covers is the LAST word only where
-neither candidate is final yet:
+so the comparator this test covers is the LAST word only where neither
+candidate is final yet:
 
   * A quorum-certified block is FINAL against every Sequentia-internal
-    competitor, including a sibling that later gathers MORE countersignatures.
-    That case is feature_pos_finality.py, and the answer there is "no reorg".
+    competitor once its observation window has passed, including a sibling
+    whose certificate names MORE members. That case is feature_pos_finality.py,
+    and the answer there is "no reorg".
   * The only thing that may undo a final block is BITCOIN. That case is
     feature_pos_finalized_anchor_reorg.py (and, at depth,
-    feature_pos_deep_anchor_reorg.py): the anchor of a FINALIZED block is
-    orphaned by a parent-chain reorg and the block must be discarded anyway.
-  * Between two blocks that are NOT final — both certified by FEWER than
-    quorum members, which the escaping stall permits once the Bitcoin anchor
-    has advanced (whitepaper §3.8, feature_pos_escaping_stall.py) — there is
-    no finality to protect either one, and CBlockIndexWorkComparator decides:
-    more countersignatures wins, regardless of arrival order.
+    feature_pos_deep_anchor_reorg.py).
+  * Between blocks that are NOT final, CBlockIndexWorkComparator decides:
+    a certified block (its certificate names at least the quorum) beats an
+    uncertified one, then the lower leader VRF score wins, then the lower
+    block hash, regardless of arrival order. The number of members a
+    certificate names is never a key: in the BLS forms one block can reach two
+    nodes with certificates of different sizes (feature_pos_split_equivocation
+    covers that), so ranking by it could order the same two blocks oppositely
+    on two nodes.
 
-That last case is what this test exercises, and it is the ONLY case in which
-the comparator's countersignature branch is reachable: on a healthy chain every
-accepted block already carries a quorum, so the first one connected is
-immediately final and the gate — not the comparator — settles every rival.
-
-Committee size 5 ⇒ quorum 3. Two height-2 siblings are built on a shared
-quorum-certified height-1 parent: one certified by the leader alone (1) and one
-by the leader plus a member (2). Both are below quorum, so neither is final
-(getblockheader reports poscertified=false for each), and the height-1 parent
-stays the immediately-finalized point throughout — both siblings descend from
-it, so the finality gate lets both through and the comparator has the say. The
-WEAKER sibling is made the tip first (arrival order favouring the loser); the
-stronger one is then exposed and must win.
+Committee size 5 ⇒ quorum 3. Height-2 siblings are built on a shared
+quorum-certified height-1 parent, all by the same leader, so their VRF scores
+are equal and the hash breaks ties: two sub-quorum siblings, certified by the
+leader alone (1) and by the leader plus a member (2), which the escaping stall
+permits once the Bitcoin anchor has advanced; and a certified sibling (3). The
+weak sibling is rebuilt (on a fresh anchor) until its hash is the lower of the
+two, so that ranking by count would pick the other, and the certified sibling
+until its hash is the highest, so that only certification can make it win. Each pair is exposed in
+both arrival orders, and the last once more after a restart, when whether a
+block is certified is measured again from the stored countersignature count.
 
 Topology mirrors feature_pos_escaping_stall.py: node0 is the parent
 ("Bitcoin") chain, node1 is the anchored PoS chain. The escaping stall demands
@@ -58,6 +58,12 @@ PARENT_BLOCK_SECONDS = 600   # parent-chain block spacing (one Bitcoin interval)
 # the spacing one-for-one once that window is full: pre-grow past it before
 # measuring any gap.
 PARENT_WARMUP_BLOCKS = 12
+
+
+def hash_order(h):
+    """The order of uint256::operator<, which the comparator's hash key uses:
+    the stored bytes, least significant first, i.e. the displayed hex reversed."""
+    return bytes.fromhex(h)[::-1]
 
 
 def make_staker():
@@ -125,6 +131,21 @@ class PosForkChoiceTest(BitcoinTestFramework):
             parent.setmocktime(self.parent_time)
             self.generatetoaddress(parent, 1, addr, sync_fun=self.no_op)
 
+    def sibling(self, node, leader, members, parent_hash, better_than=None, worse_than=None):
+        """Build a height-2 sibling on `parent_hash` (the tip must be the parent),
+        rebuilding it on a fresh anchor until its hash compares as asked."""
+        for _ in range(30):
+            res = node.generateposblock(leader, members)
+            h = res['hash']
+            assert_equal(node.getblockheader(h)['previousblockhash'], parent_hash)
+            if (better_than is None or hash_order(h) < hash_order(better_than)) and \
+               (worse_than is None or hash_order(h) > hash_order(worse_than)):
+                return res
+            node.invalidateblock(h)
+            self.advance_parent(1)
+            self.wait_until(lambda: node.getbestblockhash() == parent_hash)
+        raise AssertionError("no sibling with the wanted hash order in 30 attempts")
+
     def run_test(self):
         node = self.nodes[1]
         wifs = [w for w, _ in self.stakers]
@@ -145,42 +166,59 @@ class PosForkChoiceTest(BitcoinTestFramework):
         # sub-quorum height-2 blocks become acceptable on this parent. ---
         self.advance_parent(3)
 
-        # --- The STRONG sibling: leader + 1 member = 2 countersignatures. ---
+        self.log.info("Two uncertified siblings: the lower hash wins, not the larger certificate")
         res_s = node.generateposblock(leader, wifs[1:2])
         strong = res_s['hash']
         assert_equal(res_s['countersignatures'], 2)
         assert_equal(node.getblockheader(strong)['poscertified'], False)
-        assert_equal(node.getblockheader(strong)['previousblockhash'], parent_hash)
-
-        # Bury it so the WEAK sibling becomes the tip first: arrival order must
-        # not decide the winner.
         node.invalidateblock(strong)
         assert_equal(node.getbestblockhash(), parent_hash)
-
-        # --- The WEAK sibling: leader alone = 1 countersignature. ---
-        res_w = node.generateposblock(leader, [])
+        res_w = self.sibling(node, leader, [], parent_hash, better_than=strong)
         weak = res_w['hash']
         assert_equal(res_w['countersignatures'], 1)
         assert_equal(node.getblockheader(weak)['poscertified'], False)
-        assert_equal(node.getblockheader(weak)['previousblockhash'], parent_hash)
         assert_equal(node.getbestblockhash(), weak)
-        assert weak != strong
-
-        # Neither height-2 candidate is final, so the immediately-finalized
-        # point is still the height-1 parent and both siblings descend from it:
-        # the finality gate does not apply and the comparator decides.
-        assert_equal(node.getblockheader(node.getbestblockhash())['poscertified'], False)
-
-        # --- Expose the strong sibling: same height and work as the current
-        # tip, more countersignatures, neither final ⇒ reorg onto it. ---
+        # Weak is the tip; the 2-member sibling arrives: the lower hash stays.
         node.reconsiderblock(strong)
+        assert_equal(node.getbestblockhash(), weak)
+        # And the other arrival order: strong the tip first, weak arrives.
+        node.invalidateblock(weak)
         assert_equal(node.getbestblockhash(), strong)
-        assert_equal(node.getblockcount(), 2)
-        assert_equal(node.getblockheader(strong)['previousblockhash'], parent_hash)
-
-        # The reorg did NOT cross the finalized point: the quorum-certified
-        # height-1 parent is still on the chain, untouched.
+        node.reconsiderblock(weak)
+        assert_equal(node.getbestblockhash(), weak)
         assert_equal(node.getblockhash(1), parent_hash)
+
+        self.log.info("A certified sibling beats both, though its hash is the highest")
+        node.invalidateblock(weak)
+        node.invalidateblock(strong)
+        assert_equal(node.getbestblockhash(), parent_hash)
+        res_c = self.sibling(node, leader, wifs[1:3], parent_hash, worse_than=max(weak, strong, key=hash_order))
+        cert = res_c['hash']
+        assert_equal(res_c['countersignatures'], 3)
+        assert_equal(node.getblockheader(cert)['poscertified'], True)
+        # Inside the certified block's observation window the comparator, not
+        # the finality gate, decides.
+        node.reconsiderblock(weak)
+        node.reconsiderblock(strong)
+        assert_equal(node.getbestblockhash(), cert)
+        # The other arrival order: an uncertified tip, the certified block arrives.
+        node.invalidateblock(cert)
+        assert_equal(node.getbestblockhash(), weak)
+        node.reconsiderblock(cert)
+        assert_equal(node.getbestblockhash(), cert)
+
+        # No reorg crossed the finalized point: the quorum-certified height-1
+        # parent is still on the chain, untouched.
+        assert_equal(node.getblockhash(1), parent_hash)
+
+        self.log.info("After a restart the keys are measured again: the certified sibling still wins")
+        self.restart_node(1)
+        node = self.nodes[1]
+        assert_equal(node.getbestblockhash(), cert)
+        node.invalidateblock(cert)
+        assert_equal(node.getbestblockhash(), weak)
+        node.reconsiderblock(cert)
+        assert_equal(node.getbestblockhash(), cert)
 
 
 if __name__ == '__main__':

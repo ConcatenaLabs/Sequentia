@@ -5,17 +5,17 @@
 """Tests immediate finality (whitepaper §3.8, doc 10 §7).
 
 A quorum-certified block is FINAL: once a block at a height carries a committee
-quorum, no SEQ-internal competitor may reorg it — not even one that later gathers
-MORE signatures (committee equivocation). This is the property the conceptual
+quorum, no SEQ-internal competitor may reorg it — not even one whose certificate
+names MORE members (committee equivocation). This is the property the conceptual
 creator insisted on ("no reorg even if the same committee later signs another
 block at the same height with 70/100"), and it is what makes the immediate-
 finality model safe without a longest-chain fallback.
 
-Contrast with feature_pos_fork_choice: there NEITHER sibling is final (both are
-sub-quorum, which the escaping stall permits), so nothing is being protected and
-the comparator has the last word — more countersignatures wins. Here the
-higher-countersignature block is a competitor to an already-FINALIZED one, so
-the comparator never gets to speak: the finality gate refuses it, logging
+Contrast with feature_pos_fork_choice: there NEITHER sibling is final, so
+nothing is being protected and the comparator has the last word (certified
+first, then leader VRF score, then block hash). Here the rival, whose
+certificate names more members, is a competitor to an already-FINALIZED block,
+so the comparator never gets to speak: the finality gate refuses it, logging
 bad-fork-prior-to-pos-final, and the finalized tip stands. Those are the only
 two regimes; which one applies is decided by whether the incumbent is final,
 never by how the rival arrived.
@@ -42,9 +42,9 @@ class PosFinalityTest(BitcoinTestFramework):
         self.num_nodes = 2
         self.setup_clean_chain = True
         # 3 unit-weight stakers, committee size 3 ⇒ quorum 2. A block certified
-        # by 2 members is final; one certified by 3 has strictly more
-        # certification (the comparator would prefer it). Both nodes hold all
-        # staker keys so each can independently certify a competing block.
+        # by 2 members is final; one certified by 3 names more members (which
+        # the comparator does not weigh: both are certified). Both nodes hold
+        # all staker keys so each can independently certify a competing block.
         self.stakers = [make_staker() for _ in range(3)]
         common = [
             "-con_pos=1", "-posvrf=1", "-posaggcommittee=1",
@@ -76,19 +76,17 @@ class PosFinalityTest(BitcoinTestFramework):
         assert_equal(res_a['countersignatures'], 2)
         assert_equal(n0.getbestblockhash(), a)
 
-        # n1 finalizes B with the FULL 3-member committee — strictly MORE
-        # certification than A. Built on the same parent (a competing sibling).
+        # n1 finalizes B with the FULL 3-member committee, a certificate naming
+        # more members than A's. Built on the same parent (a competing sibling).
         res_b = n1.generateposblock(leader, [m1, m2])
         b = res_b['hash']
         assert_equal(res_b['countersignatures'], 3)
         assert_equal(n1.getbestblockhash(), b)
         assert_equal(n1.getblockheader(b)['previousblockhash'], parent)
 
-        # Hand B to n0 directly (as the network would). Even though B carries MORE
-        # countersignatures than n0's finalized A — so the fork-choice comparator
-        # alone would reorganize onto it — the immediate-finality gate must reject
-        # it (logging bad-fork-prior-to-pos-final): A is final and cannot be
-        # overwritten. The log assertion proves the gate (not mere first-seen)
+        # Hand B to n0 directly (as the network would). However many members B's
+        # certificate names, the immediate-finality gate must reject it (logging
+        # bad-fork-prior-to-pos-final): A is final and cannot be overwritten. The log assertion proves the gate (not mere first-seen)
         # protected A.
         # A becomes final once its observation window (-posfinalitydelayms,
         # default 3 s) has elapsed with no competing quorum certificate in

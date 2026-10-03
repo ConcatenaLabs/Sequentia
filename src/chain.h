@@ -300,16 +300,25 @@ public:
     //! (memory only) Maximum nTime in the chain up to and including this block.
     unsigned int nTimeMax{0};
 
-    //! SEQUENTIA PoS fork-choice keys (whitepaper §3.8), used by
-    //! CBlockIndexWorkComparator to order same-height (equal-work) blocks:
-    //! prefer more committee countersignatures, then the lower leader VRF
-    //! score. Set once at block acceptance (before the block enters
-    //! setBlockIndexCandidates) and never mutated thereafter, so the set
-    //! ordering stays stable. Both are deterministic functions of the block
-    //! (coinbase member count; leader's VRF beta over the slot seed), so all
-    //! nodes agree. Persisted in CDiskBlockIndex on PoS chains.
+    //! SEQUENTIA PoS certification and fork-choice keys (whitepaper §3.8).
+    //! m_pos_countersigs is the number of committee members on the certificate
+    //! this node first received with the block; m_pos_vrf_score is the leader's
+    //! VRF score over the slot seed (lower is better). Both are persisted in
+    //! CDiskBlockIndex on PoS chains.
+    //!
+    //! The count is NOT the same on every node: in the BLS forms the block hash
+    //! excludes the certificate, any node holding a quorum of shares can
+    //! assemble one, and two certificates of one block can name different
+    //! numbers of members. So CBlockIndexWorkComparator never compares counts.
+    //! It orders same-height (equal-work) blocks by m_pos_certified (certified
+    //! first), then the VRF score, then the block hash. m_pos_certified is the count measured
+    //! against the certification quorum (PosSlotQuorum) when the block is
+    //! accepted, and again for every block when the registry is rebuilt at
+    //! startup; it is never changed while the block is a chain-selection
+    //! candidate, so the set ordering stays stable. Memory only.
     uint16_t m_pos_countersigs{0};
     uint64_t m_pos_vrf_score{std::numeric_limits<uint64_t>::max()}; // lower = better; max = unset
+    bool m_pos_certified{false};
 
     CBlockIndex()
     {
