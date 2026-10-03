@@ -1330,7 +1330,7 @@ void PosApplyBlockStake(const CBlock& block, const CBlockUndo& undo, int height)
                 }
             }
             if (auto pot = PotFromTxOut(out)) {
-                registry.AddUtxoPot(pot->signer, COutPoint(tx->GetHash(), n), pot->asset, pot->value, height);
+                registry.AddUtxoPot(pot->signer, COutPoint(tx->GetHash(), n), pot->asset, pot->value, height, tx->IsCoinBase());
             }
         }
     }
@@ -1398,7 +1398,7 @@ void PosRevertBlockStake(const CBlock& block, const CBlockUndo& undo, int height
                 }
             }
             if (auto pot = PotFromTxOut(coin.out)) {
-                registry.AddUtxoPot(pot->signer, tx->vin[j].prevout, pot->asset, pot->value, (int)coin.nHeight);
+                registry.AddUtxoPot(pot->signer, tx->vin[j].prevout, pot->asset, pot->value, (int)coin.nHeight, coin.IsCoinBase());
             }
         }
     }
@@ -1480,7 +1480,7 @@ bool RebuildUtxoStake(CCoinsView& view)
             }
         }
         if (auto pot = PotFromTxOut(coin.out)) {
-            pot_utxo[pot->signer][key] = PosPotRef{pot->asset, pot->value, (int)coin.nHeight};
+            pot_utxo[pot->signer][key] = PosPotRef{pot->asset, pot->value, (int)coin.nHeight, coin.IsCoinBase()};
         }
         pcursor->Next();
     }

@@ -406,7 +406,10 @@ QString TransactionDesc::toHTML(interfaces::Node& node, interfaces::Wallet& wall
 
     if (wtx.is_coinbase)
     {
-        quint32 numBlocksToMaturity = COINBASE_MATURITY +  1;
+        // The chain's maturity, not the inherited 100 (CoinbaseMaturityAt:
+        // 1,000 blocks on the real chains), plus the block of margin the
+        // wallet keeps before it counts a reward as spendable.
+        quint32 numBlocksToMaturity = CoinbaseMaturityAt(numBlocks + 1) + 1;
         strHTML += "<br>" + tr("A block reward must mature %1 blocks before it can be spent. When your node produced this block it was broadcast to the network to be added to the chain. If it fails to get into the chain its state will change to \"not accepted\" and it won't be spendable. This may occasionally happen if another node produces a block within a few seconds of yours.").arg(QString::number(numBlocksToMaturity)) + "<br>";
     }
 

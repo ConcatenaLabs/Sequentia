@@ -14,7 +14,8 @@ This runs a custom chain with -con_coinbase_maturity=1000 and places pots at
 four depths relative to the claim's spend height: 1,000 (mature), 999, 500 and
 100 (all immature). The claim must take exactly the first, and confirm. A
 one-block rollback right after the claim leaves it premature; the producer must
-still build the next block.
+still build the next block. The claim's re-pot is not coinbase value, so the
+next claim sweeps it at once.
 """
 
 from decimal import Decimal
@@ -130,6 +131,13 @@ class PosSplitMaturityTest(BitcoinTestFramework):
         n0.sendrawtransaction(fund.serialize().hex())
         self.mine(1)
         w0.delegatestake(self.a_pub, 150)
+        # A delegator too small for its share of a pot to clear the minimum
+        # payout, so a claim re-pots that share (checked at the end).
+        n0.createwallet("small")
+        w1 = n0.get_wallet_rpc("small")
+        w0.sendtoaddress(address=w1.getnewaddress(), amount=1, fee_asset_label="bitcoin")
+        self.mine(1)
+        w1.delegatestake(self.a_pub, Decimal("0.01"))
         self.mine(1)
         self.mine_to(activation)
 
@@ -188,6 +196,21 @@ class PosSplitMaturityTest(BitcoinTestFramework):
         for h in (h2, h3, h4):
             txid, n = self.pot_outpoint(h)
             assert n0.gettxout(txid, n) is not None, "pot at height %d was swept early" % h
+
+        # A claim re-pots what it cannot pay out. That output is made by a
+        # transaction, not a coinbase, so coinbase maturity does not apply: the
+        # next claim sweeps it at once, here together with the pot that turns
+        # 1,000 deep one block after the first claim.
+        self.log.info("A claim's re-pot is swept by the next claim, one block later")
+        repots = [(claim["txid"], v["n"]) for v in tx["vout"]
+                  if v["scriptPubKey"]["hex"] == pot_script_hex(self.a_pub) and v.get("value", 0) > 0]
+        assert_equal(len(repots), 1)
+        assert_equal(n0.getblockcount(), claim_height)
+        claim2 = w0.claimpoolrewards(self.a_pub)
+        spent2 = [(i["txid"], i["vout"]) for i in n0.getrawtransaction(claim2["txid"], True)["vin"]]
+        assert_equal(sorted(spent2), sorted([self.pot_outpoint(h2), repots[0]]))
+        self.mine(1)
+        assert_equal(n0.getrawtransaction(claim2["txid"], True)["confirmations"], 1)
 
 
 if __name__ == '__main__':

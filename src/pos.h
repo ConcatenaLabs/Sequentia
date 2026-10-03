@@ -44,11 +44,14 @@ extern bool g_con_pos;
  *  source at runtime. 0 = the mode is part of the rules from genesis. */
 extern int g_split_payout_height;
 
-/** An unspent pot output: what a claim would sweep. */
+/** An unspent pot output: what a claim would sweep. `coinbase` says whether a
+ *  coinbase created it (a block's fees) or a claim did (a re-pot of what it
+ *  could not pay out): only the first is held to coinbase maturity. */
 struct PosPotRef {
     CAsset asset;
     int64_t value{0};
     int height{0};
+    bool coinbase{false};
 };
 
 /** Seconds per leader slot under the legacy election, and wherever no separate
@@ -533,10 +536,10 @@ public:
     }
     //! A pot output entered the UTXO set.
     void AddUtxoPot(const CPubKey& signer, const COutPoint& out, const CAsset& asset,
-                    int64_t value, int height)
+                    int64_t value, int height, bool coinbase)
     {
         LOCK(m_mutex);
-        m_pot_utxo[signer][out] = PosPotRef{asset, value, height};
+        m_pot_utxo[signer][out] = PosPotRef{asset, value, height, coinbase};
     }
     //! A pot output left the UTXO set (claimed, or its creation reverted).
     void SubUtxoPot(const CPubKey& signer, const COutPoint& out)
