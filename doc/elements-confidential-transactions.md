@@ -197,15 +197,21 @@ blinding a transaction, there must be at least one output available to
 zero-valued output.
 
 A blinded issuance or reissuance amount needs balancing too, but it is
-not an output. On a wallet that does not hand out confidential
-addresses by default, which is the default on Sequentia's chains, the
-change `fundrawtransaction` adds is explicit, so a transaction whose only
-blinded item is an issuance has nothing to balance it with.
-`blindrawtransaction` then leaves the issuance amount explicit and
-returns the transaction without error, or, with `ignoreblindfail` set to
-false, fails. Give such a transaction a confidential output: a
-confidential `asset_address` or `token_address` in `rawissueasset`, or a
-confidential `changeAddress` in `fundrawtransaction`.
+not an output, and only a confidential output in the same transaction
+can balance it; blinded inputs cannot. On a wallet that does not hand
+out confidential addresses by default, which is the default on
+Sequentia's chains, the change `fundrawtransaction` adds is explicit, so
+a raw issuance has nothing to balance it with unless it is given a
+confidential output: a confidential `asset_address` or `token_address`
+in `rawissueasset`, or a confidential `changeAddress` in
+`fundrawtransaction`.
+
+Without one, `blindrawtransaction` fails with an error that says the
+issuance needs a confidential output. The one exception is an issuance
+with no token, in a transaction with no blinded input: by default
+(`ignoreblindfail`) the call returns it unchanged, with the issuance
+amount explicit, and only with `ignoreblindfail` set to false does it
+fail. An issuance that also creates reissuance tokens always fails.
 
 
 ## Asset Issuances and Reissuances

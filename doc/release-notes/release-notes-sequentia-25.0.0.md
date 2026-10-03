@@ -76,14 +76,50 @@ it.
 
 ## Other changes since 24.7.13
 
-- mempool: the chain's coinbase maturity applies to mempool admission, and
-  `claimpoolrewards` honours it; re-pots are swept at once and the GUI states
-  the maturity.
-- policy: value burns pass the one-`OP_RETURN` limit, and only a null-nonce burn
-  is exempt from the data limit.
-- wallet: issuance RPCs wait for the wallet to sync, a blinded issuance no
-  longer aborts the node, raw issuance works with confidential change, change
-  stays explicit on a transparent wallet, and the change size is priced as it
-  will be built.
-- doc: a Simplicity developer page, and what `blindrawtransaction` does with a
+### Upgrading
+
+- **Burn transactions need upgraded nodes.** A node on 24.7.x refuses any
+  transaction with more than one `OP_RETURN` output (`multi-op-return`). From
+  25.0.0 a value burn, an `OP_RETURN` output with a null nonce, passes that
+  limit, so a transaction with two burns, or a burn beside a data output,
+  propagates only through upgraded nodes and is mined only by upgraded block
+  producers. A burn with a nonce still counts as a data output: one beside
+  another data output is refused by both versions.
+- **Custom chains:** a node now refuses to start when
+  `-con_coinbase_maturity` is set with `-con_coinbase_maturity_height=0`.
+  Use 1 to apply the maturity from the first block.
+
+### Mempool and block template
+
+- Mempool admission already applied the chain's coinbase maturity. What
+  changes is everything after admission. The pass that follows a reorg now
+  applies the maturity in force at the new tip. At a height where the
+  maturity rises, the mempool evicts the spends that become premature. And
+  the block template leaves out any spend that is premature for the block it
+  builds. Before, a spend admitted at exactly the maturity stayed in the
+  mempool after a one-block rollback, or across a maturity boundary, and
+  every block template then failed with
+  `TestBlockValidity failed: bad-txns-premature-spend-of-coinbase`.
+- `claimpoolrewards` honours the coinbase maturity and sweeps re-pots at
+  once, and the GUI states the maturity.
+
+### Wallet
+
+- Issuance RPCs wait for the wallet to catch up with the chain, a blinded
+  issuance no longer aborts the node, change stays explicit on a transparent
+  wallet, and the change size is priced as it will be built.
+- **Raw blinded issuance on a transparent wallet** needs a confidential
+  output beside it: a confidential `asset_address` or `token_address` in
+  `rawissueasset`, or a confidential `changeAddress` in
+  `fundrawtransaction`. Without one, `blindrawtransaction` by default
+  returns an issuance with no token unchanged, its amount explicit, and
+  reports no error. One with a token fails, with an error that names the
+  inputs' asset types rather than the missing output.
+- The blinding dummy the wallet adds to a funded transaction (for a
+  confidential `changeAddress` on a transparent wallet) now sits before
+  the fee output, so `rawissueasset` accepts the funded transaction.
+
+### Documentation
+
+- A Simplicity developer page, and what `blindrawtransaction` does with a
   lone issuance.

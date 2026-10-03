@@ -1139,11 +1139,13 @@ RPCHelpMan blindrawtransaction()
                 "Returns the hex-encoded raw transaction.\n"
                 "The output keys used can be specified by using a confidential address in createrawtransaction.\n"
                 "This call may add an additional 0-value unspendable output in order to balance the blinders.\n"
-                "With no blinded input, a lone item to blind cannot be balanced: by default (ignoreblindfail) it is left explicit\n"
-                "and the transaction is returned without error; with ignoreblindfail=false the call fails. A blinded issuance counts\n"
-                "as such an item, so on a wallet that does not blind by default, whose funding change is explicit, an issuance to\n"
-                "blind needs a confidential output beside it: a confidential asset_address or token_address in rawissueasset, or a\n"
-                "confidential changeAddress in fundrawtransaction.\n",
+                "With no blinded input, a lone output to blind cannot be balanced: by default (ignoreblindfail) it is left explicit\n"
+                "and the transaction is returned without error; with ignoreblindfail=false the call fails.\n"
+                "A blinded issuance is balanced only by a confidential output in the same transaction. On a wallet that does not\n"
+                "blind by default, whose funding change is explicit, give it one: a confidential asset_address or token_address in\n"
+                "rawissueasset, or a confidential changeAddress in fundrawtransaction. Without one the call fails and says so, with\n"
+                "one exception: an issuance with no token, in a transaction with no blinded input, is by default (ignoreblindfail)\n"
+                "returned with its amount explicit.\n",
                 {
                     {"hexstring", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "A hex-encoded raw transaction."},
                     {"ignoreblindfail", RPCArg::Type::BOOL , RPCArg::Default{true}, "Return a transaction even when a blinding attempt fails due to number of blinded inputs/outputs."},
@@ -1274,12 +1276,22 @@ RPCHelpMan blindrawtransaction()
             key_index = i;
         }
     }
+    // SEQUENTIA: a blinded issuance amount is balanced only by a blinded
+    // output; inputs cannot do it (BlindTransaction). Name that, rather than
+    // let BlindTransaction come back short and blame the inputs' assets.
+    const bool confidential_output = num_pubkeys > 0;
+    static const std::string no_confidential_output{
+        "Unable to blind transaction: a blinded issuance needs a confidential output in the same transaction to balance "
+        "it, and this transaction has none. Give it one: a confidential asset_address or token_address in rawissueasset, "
+        "or a confidential changeAddress in fundrawtransaction."};
+    int num_issuance_keys = 0;
     for (const CKey& key : asset_keys) {
-        if (key.IsValid()) num_pubkeys++;
+        if (key.IsValid()) num_issuance_keys++;
     }
     for (const CKey& key : token_keys) {
-        if (key.IsValid()) num_pubkeys++;
+        if (key.IsValid()) num_issuance_keys++;
     }
+    num_pubkeys += num_issuance_keys;
 
     if (num_pubkeys == 0 && n_blinded_ins == 0) {
         // Vacuous, just return the transaction
@@ -1293,11 +1305,16 @@ RPCHelpMan blindrawtransaction()
     } else if (n_blinded_ins == 0 && num_pubkeys == 1) {
         if (ignore_blind_fail) {
             // Just get rid of the ECDH key in the nonce field and return
-            tx.vout[key_index].nNonce.SetNull();
+            if (confidential_output) tx.vout[key_index].nNonce.SetNull();
             return EncodeHexTx(CTransaction(tx));
+        } else if (!confidential_output) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, no_confidential_output);
         } else {
             throw JSONRPCError(RPC_INVALID_PARAMETER, "Unable to blind transaction: Add another output to blind in order to complete the blinding.");
         }
+    }
+    if (!confidential_output && num_issuance_keys > 0) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, no_confidential_output);
     }
 
     if (BlindTransaction(input_blinds, input_asset_blinds, input_assets, input_amounts, output_blinds, output_asset_blinds, output_pubkeys, asset_keys, token_keys, tx, (auxiliary_generators.size() ? &auxiliary_generators : NULL)) != num_pubkeys) {
