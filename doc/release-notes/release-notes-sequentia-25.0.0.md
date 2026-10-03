@@ -7,10 +7,11 @@ which is why the version moves to 25.
 
 **Testnet hard fork at height 159,000.** From that block a node on 25.0.0
 rejects a block that spends a staking output anywhere but into stake or an
-unbonding output, which a node on 24.7.x still accepts. Every block producer
-must run 25.0.0 before the testnet reaches it; a node that does not will follow
-whichever branch an outdated producer extends, and will need `reconsiderblock`
-after upgrading if it accepted a block the new rule rejects.
+unbonding output, which a node on 24.7.x still accepts. Run 25.0.1 rather
+than this release: it fixes defects in 25.0.0 that would stop or split the
+network at that height. A node left on 24.7.x follows whichever branch an
+outdated producer extends; its release notes say what such a node shows and how
+to bring it back (`invalidateblock`, not `reconsiderblock`).
 
 ## Finality against equivocating committee members
 
