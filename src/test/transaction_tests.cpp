@@ -905,6 +905,25 @@ BOOST_AUTO_TEST_CASE(test_IsStandard)
     t.vout[0].nValue = 0;
     t.vout[1].nValue = 0;
 
+    // A bare OP_RETURN with a nonce is not data-free: the nonce can carry 33
+    // bytes the author chose. Two of them are two data outputs...
+    t.vout.resize(2);
+    t.vout[0].scriptPubKey = CScript() << OP_RETURN;
+    t.vout[1].scriptPubKey = CScript() << OP_RETURN;
+    t.vout[0].nNonce.vchCommitment = std::vector<unsigned char>(33, 0x02);
+    t.vout[1].nNonce.vchCommitment = std::vector<unsigned char>(33, 0x03);
+    BOOST_CHECK(!IsDataFreeBurn(t.vout[0]));
+    CheckIsNotStandard(t, "multi-op-return");
+    // ...one of them beside a data-free burn is one, and standard...
+    t.vout[1].nNonce.SetNull();
+    BOOST_CHECK(IsDataFreeBurn(t.vout[1]));
+    CheckIsStandard(t);
+    // ...and beside a data-pushing OP_RETURN it makes two.
+    t.vout[1].scriptPubKey = CScript() << OP_RETURN << ParseHex("01");
+    CheckIsNotStandard(t, "multi-op-return");
+    t.vout[0].nNonce.SetNull();
+    CheckIsStandard(t);
+
     // Check large scriptSig (non-standard if size is >1650 bytes)
     t.vout.resize(1);
     t.vout[0].nValue = MAX_MONEY;
