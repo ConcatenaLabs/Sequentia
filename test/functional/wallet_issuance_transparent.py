@@ -8,10 +8,11 @@ On a wallet that does not blind by default, the outputs an issuance creates are
 explicit, so a blinded issuance amount has only the change to balance its
 blinding against. Two things follow, and this test holds the wallet to both:
 
-- When the change is small enough to go to the fee, it cannot simply be
-  dropped: it is kept as a zero-value blinded OP_RETURN instead. Dropping it
-  used to leave the issuance with nothing to balance, and the wallet then hit
-  an assertion and aborted the node -- from a wallet RPC.
+- The change cannot be dropped: dropping it used to leave the issuance with
+  nothing to balance, and the wallet then hit an assertion and aborted the
+  node -- from a wallet RPC. Since its slot stays, its value stays too, at
+  whatever size: giving a leftover to the fee saves only the change's script,
+  so the fee never exceeds that of the same issuance with its change kept.
 - Whether a REISSUANCE is blinded is fixed by its token: one derived as
   confidential requires a blinded amount (consensus), one derived explicit an
   explicit amount. An explicit reissuance therefore has explicit change, and
@@ -26,8 +27,9 @@ from test_framework.util import assert_equal
 
 COIN = 100_000_000
 FEE_ASSET = 'bitcoin'
-SMALL_LEFTOVERS = (15_000, 25_000)   # below the blinded change's cost: dropped
-LARGE_LEFTOVER = 200_000             # above it: kept as change
+# Leftovers on both sides of the blinded change's cost (about 1,400 vbytes of
+# fee), which is where change used to be given to the fee.
+LEFTOVERS = (16_000, 20_000, 24_000, 28_000, 40_000, 200_000)
 
 
 def sat(value):
@@ -79,30 +81,31 @@ class WalletIssuanceTransparentTest(BitcoinTestFramework):
         self.test_reissue_explicit_token()
 
     def test_blind_issuance_small_change(self):
-        self.log.info("Blind issuance: measure its fee when it keeps change")
-        probe = self.fresh_wallet('probe', COIN)
-        r = probe.issueasset(assetamount=1, tokenamount=0, blind=True, fee_asset=FEE_ASSET)
-        fee_with_change = self.fee_sat(self.confirmed(r['txid']))
-        self.log.info("  fee with change: %d sat", fee_with_change)
+        for token_amount in (0, 1):
+            self.log.info("Blind issuance, token %d: measure its fee when it keeps change", token_amount)
+            probe = self.fresh_wallet('probe%d' % token_amount, COIN)
+            r = probe.issueasset(assetamount=1, tokenamount=token_amount, blind=True, fee_asset=FEE_ASSET)
+            fee_with_change = self.fee_sat(self.confirmed(r['txid']))
+            self.log.info("  fee with change: %d sat", fee_with_change)
 
-        for leftover in SMALL_LEFTOVERS + (LARGE_LEFTOVER,):
-            self.log.info("One coin of that fee + %d sat: issueasset(blind=True)", leftover)
-            w = self.fresh_wallet('issue%d' % leftover, fee_with_change + leftover)
-            r = w.issueasset(assetamount=1, tokenamount=0, blind=True, fee_asset=FEE_ASSET)
-            tx = self.confirmed(r['txid'])
-            assert 'assetamountcommitment' in tx['vin'][0]['issuance'], "the issuance amount is not blinded"
-            assert_equal(w.getbalances()['mine']['trusted'][r['asset']], Decimal(1))
-            if leftover == LARGE_LEFTOVER:
-                # The change is kept and blinded (it balances the issuance).
-                assert_equal(len(self.blinded_opreturns(tx)), 0)
+            for leftover in LEFTOVERS:
+                w = self.fresh_wallet('issue%d_%d' % (token_amount, leftover), fee_with_change + leftover)
+                r = w.issueasset(assetamount=1, tokenamount=token_amount, blind=True, fee_asset=FEE_ASSET)
+                tx = self.confirmed(r['txid'])
+                fee = self.fee_sat(tx)
+                zeroed = self.blinded_opreturns(tx)
+                self.log.info("  one coin of that fee + %6d sat: fee %d sat, %s", leftover, fee,
+                              "change zeroed" if zeroed else "change kept")
+                assert 'assetamountcommitment' in tx['vin'][0]['issuance'], "the issuance amount is not blinded"
+                assert_equal(w.getbalances()['mine']['trusted'][r['asset']], Decimal(1))
+                # Exactly one blinded output, kept or zeroed: it balances the
+                # issuance, which is the only other thing blinded.
                 assert_equal(len([v for v in tx['vout'] if 'valuecommitment' in v]), 1)
-            else:
-                # The change went to the fee; its slot remains as the blinded
-                # zero-value output that balances the issuance.
-                dummies = self.blinded_opreturns(tx)
-                assert_equal(len(dummies), 1)
-                assert_equal(self.fee_sat(tx), fee_with_change + leftover)
-                assert_equal(len([v for v in tx['vout'] if 'valuecommitment' in v]), 1)
+                # Never more than the same transaction with its change kept:
+                # the slot stays either way, so dropping the change's value
+                # into the fee saves nothing.
+                assert fee <= fee_with_change, "fee %d overpays the %d of the same issuance with change kept" % (fee, fee_with_change)
+                assert_equal(zeroed, [])
 
     def test_reissue_confidential_token(self):
         self.log.info("Reissuing an asset issued blinded, from explicit coins only")

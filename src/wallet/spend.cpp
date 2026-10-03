@@ -1884,27 +1884,34 @@ static bool CreateTransactionInternal(
     // 1. The change output would be dust
     // 2. The change is within the (almost) exact match window, i.e. it is less than or equal to the cost of the change output (cost_of_change)
     CAmount change_amount = change_position->nValue.GetAmount();
-    if (IsDust(*change_position, coin_selection_params.m_discard_feerate) || change_amount <= coin_selection_params.m_cost_of_change)
-    {
-        bool was_blinded = blind_details && blind_details->o_pubkeys[nChangePosInOut].IsValid();
-
-        // If the change was blinded, and was the only blinded output, we cannot drop it
-        // without causing the transaction to fail to balance. So keep it, and merely
-        // zero it out.
-        //
-        // SEQUENTIA: counted in OUTPUTS, not in num_to_blind. A blinded issuance
-        // amount also counts towards num_to_blind but is not an output: when it
-        // and the change were the two things to blind, dropping the change left
-        // the issuance with nothing to balance against, and the second pass of
-        // fillBlindDetails below then hit an assertion and aborted the node
-        // (issueasset blind=true on a transparent wallet with a small leftover).
-        int blinded_outputs = 0;
-        if (blind_details) {
-            for (const CPubKey& pk : blind_details->o_pubkeys) {
-                if (pk.IsValid()) ++blinded_outputs;
-            }
+    const bool change_is_dust = IsDust(*change_position, coin_selection_params.m_discard_feerate);
+    const bool was_blinded = blind_details && blind_details->o_pubkeys[nChangePosInOut].IsValid();
+    // If the change was blinded, and was the only blinded output, we cannot drop it
+    // without causing the transaction to fail to balance.
+    //
+    // SEQUENTIA: counted in OUTPUTS, not in num_to_blind. A blinded issuance
+    // amount also counts towards num_to_blind but is not an output: when it
+    // and the change were the two things to blind, dropping the change left
+    // the issuance with nothing to balance against, and the second pass of
+    // fillBlindDetails below then hit an assertion and aborted the node
+    // (issueasset blind=true on a transparent wallet with a small leftover).
+    int blinded_outputs = 0;
+    if (blind_details) {
+        for (const CPubKey& pk : blind_details->o_pubkeys) {
+            if (pk.IsValid()) ++blinded_outputs;
         }
-        if (was_blinded && blinded_outputs == 1) {
+    }
+    const bool change_slot_stays = was_blinded && blinded_outputs == 1;
+    // SEQUENTIA: change worth less than it costs goes to the fee, on the
+    // assumption that dropping it saves the output. A change slot that has to
+    // stay saves nothing but its script: it becomes a zero-value blinded
+    // OP_RETURN, rangeproof and all. Giving its value to the fee then overpaid
+    // by up to the whole cost of a blinded output, so such change keeps its
+    // value and goes to the fee only when it is dust.
+    if (change_is_dust || (change_amount <= coin_selection_params.m_cost_of_change && !change_slot_stays))
+    {
+        if (change_slot_stays) {
+            // Keep the slot, and merely zero it out.
             change_position->scriptPubKey = CScript() << OP_RETURN;
             change_position->nValue = 0;
         } else {
