@@ -129,6 +129,8 @@ BASE_SCRIPTS = [
     'wallet_issuance_transparent.py --descriptors',
     'wallet_change_size.py --legacy-wallet',
     'wallet_change_size.py --descriptors',
+    'wallet_change_several_assets.py --legacy-wallet',
+    'wallet_change_several_assets.py --descriptors',
     'wallet_issuance_sync.py',
     'wallet_raw_issuance_transparent.py --legacy-wallet',
     'wallet_raw_issuance_transparent.py --descriptors',

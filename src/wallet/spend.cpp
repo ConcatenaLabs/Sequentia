@@ -1270,8 +1270,8 @@ static bool CreateTransactionInternal(
     // 64-bit maximum instead made every blinded item look about 240 vbytes
     // larger than it is built.
     CAmount largest_spendable = 0;
+    CAmountMap spendable;
     {
-        CAmountMap spendable;
         for (const COutput& out : vAvailableCoins) {
             const CAmount value = out.tx->GetOutputValueOut(wallet, out.i);
             if (value > 0) spendable[out.tx->GetOutputAsset(wallet, out.i)] += value;
@@ -1484,6 +1484,19 @@ static bool CreateTransactionInternal(
     // balances the issuance. Reserving the dummy and pricing the change as
     // optional on top made selection ask for two blinded outputs where one is
     // built, and refuse coins that cover the issuance.
+    // SEQUENTIA: assets other than the fee asset that this send may leave change
+    // in: each one sent of which the wallet can spend more than it sends. One
+    // the send uses up entirely, such as a reissuance token returned in full,
+    // leaves none.
+    size_t other_change_outputs = 0;
+    if (g_con_elementsmode && !coin_selection_params.m_subtract_fee_outputs) {
+        for (const auto& [asset, amount] : map_recipients_sum) {
+            if (asset == coin_selection_params.m_fee_asset) continue;
+            const auto held = spendable.find(asset);
+            if (held != spendable.end() && held->second > amount) ++other_change_outputs;
+        }
+    }
+    const size_t change_size_before_slot = coin_selection_params.change_output_size;
     const bool change_slot_mandatory = reserve_blinded_dummy && change_priced_blinded &&
                                        issuance_details && IssuanceIsBlinded(*issuance_details);
     if (change_slot_mandatory) {
@@ -1493,6 +1506,18 @@ static bool CreateTransactionInternal(
     } else if (reserve_blinded_dummy && change_priced_blinded) {
         coin_selection_params.tx_noinputs_size += blinded_dummy_size;
     }
+    // SEQUENTIA: selection prices one change output (m_change_fee) where the
+    // transaction carries one for every asset it leaves change in. With change
+    // in two other assets the smallest transaction that can be built, the fee
+    // asset's change given to the fee, still has two, so a fee coin that paid
+    // for one passed selection and then failed with the wallet's internal
+    // "Could not cover fee" instead of "Insufficient funds". So every other
+    // asset's change output beyond the one already priced is priced with the
+    // outputs; where the fee asset's change slot is itself priced with the
+    // outputs (change_slot_mandatory), none is already priced.
+    const size_t extra_change_outputs = change_slot_mandatory ? other_change_outputs
+                                        : (other_change_outputs > 0 ? other_change_outputs - 1 : 0);
+    coin_selection_params.tx_noinputs_size += extra_change_outputs * change_size_before_slot;
     // If we are going to issue an asset, add the issuance data to the noinputs_size so that
     // we allocate enough coins for them.
     if (issuance_details) {
@@ -1589,8 +1614,13 @@ static bool CreateTransactionInternal(
         }
         if (!first || !blind_details || change_priced_blinded || !spends_blinded_coin(*first)) return first;
         change_priced_blinded = true;
+        const size_t growth = blinded_change_output_size - coin_selection_params.change_output_size;
         coin_selection_params.change_output_size = blinded_change_output_size;
         price_change();
+        // The other assets' change outputs are blinded with it.
+        coin_selection_params.tx_noinputs_size += extra_change_outputs * growth;
+        map_selection_target[coin_selection_params.m_fee_asset] +=
+            coin_selection_params.m_effective_feerate.GetFee(extra_change_outputs * growth, coin_selection_params.m_fee_asset);
         if (reserve_blinded_dummy) {
             coin_selection_params.tx_noinputs_size += blinded_dummy_size;
             map_selection_target[coin_selection_params.m_fee_asset] +=
@@ -2083,6 +2113,18 @@ static bool CreateTransactionInternal(
     // The only time that fee_needed should be less than the amount available for fees (in change_and_fee - change_amount) is when
     // we are subtracting the fee from the outputs. If this occurs at any other time, it is a bug.
     if (!coin_selection_params.m_subtract_fee_outputs && fee_needed > map_change_and_fee.at(coin_selection_params.m_fee_asset) - change_amount) {
+        // SEQUENTIA: or when selection's estimate of the transaction came in
+        // under the transaction as built, which a vbyte of rounding is enough
+        // for: then these coins do not cover it, and that is "Insufficient
+        // funds" unless others do. Report what these would have to be worth,
+        // so CreateTransaction selects again asking for at least that.
+        if (fee_target_floor_out) {
+            CAmount effective = 0;
+            for (const CInputCoin& coin : selected_coins) effective += coin.effective_value;
+            *fee_target_floor_out = effective + fee_needed - (map_change_and_fee.at(coin_selection_params.m_fee_asset) - change_amount);
+            error = _("Insufficient funds");
+            return false;
+        }
         wallet.WalletLogPrintf("ERROR: not enough coins to cover for fee (needed: %d, total: %d, change: %d)\n",
             fee_needed, map_change_and_fee.at(coin_selection_params.m_fee_asset), change_amount);
         error = _("Could not cover fee");
@@ -2360,11 +2402,12 @@ bool CreateTransaction(
     int nChangePosIn = nChangePosInOut;
     Assert(!tx); // tx is an out-param. TODO change the return type from bool to tx (or nullptr)
     // SEQUENTIA: an attempt whose coins turn out short once the transaction is
-    // built (a blinded issuance, whose estimate and build can differ by a few
-    // vbytes) reports what they would have had to be worth; select again asking
-    // for at least that, so the answer is decided by the wallet's coins rather
-    // than by the first set selection tried. A few rounds settle it: each one
-    // rules out every set no better than the one the last showed to be short.
+    // built (selection works from an estimate, which can come in a few vbytes
+    // under the transaction) reports what they would have had to be worth;
+    // select again asking for at least that, so the answer is decided by the
+    // wallet's coins rather than by the first set selection tried. A few rounds
+    // settle it: each one rules out every set no better than the one the last
+    // showed to be short.
     CAmount fee_target_floor = 0;
     bool res = false;
     for (int attempt = 0; attempt < 4; ++attempt) {
