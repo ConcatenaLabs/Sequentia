@@ -247,6 +247,7 @@ BASE_SCRIPTS = [
     'feature_pos_gossip_dos.py',
     'feature_pos_gossip_failover.py',
     'feature_pos_gossip_byzantine.py',
+    'feature_pos_gossip_restart.py',
     'feature_pos_gossip_invalid.py',
     'feature_pos_bls_large_committee.py',
     'feature_pos_cert_weight.py',

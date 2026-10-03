@@ -14,6 +14,8 @@ many heights the Byzantine member is elected repeatedly, so sustained progress
 demonstrates the round-robin works (fault injection via -posbyzantineequivocate).
 """
 
+import re
+
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import assert_equal
 from test_framework.key import ECKey
@@ -78,6 +80,17 @@ class PosGossipByzantineTest(BitcoinTestFramework):
         assert_equal(honest[0].getblockhash(h2), honest[1].getblockhash(h2))
         self.log.info("Round-robin routed around the Byzantine leader to height %d" %
                       min(n.getblockcount() for n in honest))
+
+        # Only the Byzantine member may ever be convicted of equivocation. When a
+        # height's rounds all fail, every member re-proposes a fresh block there;
+        # that must open a new collection, not read as an honest leader's second
+        # block — excluding the honest leaders in turn stalls the height for good.
+        self.log.info("No honest leader was excluded for equivocation")
+        byzantine = self.stakers[2][1][:16]
+        for i in range(2):
+            with open(self.nodes[i].debug_log_path, encoding='utf-8') as f:
+                convicted = set(re.findall(r"PoS gossip: leader ([0-9a-f]{16}) equivocated", f.read()))
+            assert convicted <= {byzantine}, "node%d excluded honest leader(s) %s" % (i, convicted - {byzantine})
 
 
 if __name__ == '__main__':
