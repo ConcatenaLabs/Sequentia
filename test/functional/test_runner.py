@@ -267,6 +267,8 @@ BASE_SCRIPTS = [
     'feature_pos_reload_registry.py',
     'feature_pos_fork_choice.py',
     'feature_pos_finality.py',
+    'feature_pos_split_equivocation.py',
+    'feature_pos_finality_hold.py',
     'feature_pos_anchor_freshness.py',
     'feature_pos_genesis_bootstrap.py',
     'feature_pos_stake.py',

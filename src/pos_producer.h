@@ -41,6 +41,8 @@
 
 class CBlock;
 class CChainParams;
+class ChainstateManager;
+namespace Consensus { struct Params; }
 class CConnman;
 class CTxMemPool;
 class ChainstateManager;
@@ -354,6 +356,16 @@ private:
     int64_t m_recovery_hold_since_ms{0};
     bool m_recovery_hold_expired_logged{false};
 };
+
+/** Verify a gossiped certificate (the header of a quorum-certified block,
+ *  the certificate in its proof solution) against the local view: parent
+ *  known, leader signature, and a full quorum of committee signatures.
+ *  Relay = a valid full-quorum certificate (height in `height_out`); Ignore =
+ *  unverifiable here or already held as a block; Invalid = provable garbage.
+ *  Shared by the producer and by nodes that run no producer, so every node can
+ *  hold its finality for a competing certificate (validation.h). */
+PosGossipAction PosVerifyCertificate(const CBlockHeader& header, ChainstateManager& chainman,
+                                     const Consensus::Params& consensus, int& height_out);
 
 /** The running producer (for net_processing to deliver gossip to), or nullptr. */
 PosProducer* GetActivePosProducer();

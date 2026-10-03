@@ -179,10 +179,13 @@ on the Bitcoin anchor could let a new Bitcoin block reorder or overwrite an
 already-certified block. The VRF/committee result is the truth; cross-chain-swap
 freshness is delivered by block production and a committee signing preference, not
 by fork choice. A hard immediate-finality gate (`UpdateTip` +
-`ContextualCheckBlockHeader`) locks a quorum-certified block against any
-Sequentia-internal competitor - even one carrying more signatures - using a soft,
-retryable rejection, so only a Bitcoin reorg of the anchor (via the watcher,
-which lowers the finalized point) can displace it. The mechanics are specified in
+`ContextualCheckBlockHeader`) locks a quorum-certified block, once its observation window has passed, against
+any Sequentia-internal competitor - even one carrying more signatures - using a
+soft, retryable rejection, so only a Bitcoin reorg of the anchor (via the
+watcher, which lowers the finalized point) can displace it. Inside the window a
+competing quorum certificate, which only members who signed twice can produce,
+is settled by the same comparator on every node, and finality waits until the
+competing block has been judged. The mechanics are specified in
 [`04-proof-of-stake.md`](04-proof-of-stake.md); the behaviour is exercised by
 `feature_pos_finality.py`.
 

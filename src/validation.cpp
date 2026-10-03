@@ -72,6 +72,8 @@
 #include <dynafed.h>
 
 #include <algorithm>
+#include <functional>
+#include <limits>
 #include <atomic>
 #include <chrono>
 #include <numeric>
@@ -3674,6 +3676,137 @@ void PosSetReconcileRelease(int height, const uint256& hash)
     g_pos_reconcile_release_hash = hash;
 }
 
+int64_t g_pos_finality_delay_ms = DEFAULT_POS_FINALITY_DELAY_MS;
+int64_t g_pos_finality_hold_ms = DEFAULT_POS_FINALITY_HOLD_MS;
+// Verified full-quorum certificates seen by this node: height -> (hash -> when
+// first seen, steady ms). Consulted when a block at that height is about to
+// become final (competing-certificate hold, validation.h).
+static std::map<int, std::map<uint256, int64_t>> g_pos_competing_certs GUARDED_BY(::cs_main);
+
+static int64_t PosSteadyMs()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+bool PosNoteCompetingCertificate(const uint256& hash, int height)
+{
+    LOCK(::cs_main);
+    auto& at = g_pos_competing_certs[height];
+    const bool fresh = at.emplace(hash, PosSteadyMs()).second;
+    while (g_pos_competing_certs.size() > 200) g_pos_competing_certs.erase(g_pos_competing_certs.begin());
+    return fresh;
+}
+
+//! Competing certificates at `f`'s height that still hold its finality: their
+//! block has not yet been received and judged (fully downloaded, or failed),
+//! and the hold has not expired.
+static std::vector<uint256> PosHeldBy(const CBlockIndex* f, int64_t now,
+                                      const std::function<const CBlockIndex*(const uint256&)>& lookup)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    std::vector<uint256> held;
+    auto it = g_pos_competing_certs.find(f->nHeight);
+    if (it == g_pos_competing_certs.end()) return held;
+    for (const auto& [hash, seen] : it->second) {
+        if (hash == f->GetBlockHash()) continue;
+        if (now - seen >= g_pos_finality_hold_ms) continue; // gave up waiting
+        const CBlockIndex* c = lookup(hash);
+        const bool judged = c && ((c->nStatus & BLOCK_FAILED_MASK) || c->HaveTxsDownloaded());
+        if (!judged) held.push_back(hash);
+    }
+    return held;
+}
+// When each quorum-certified block was first seen on the active chain (steady
+// ms), for the finality observation window. Pruned to the recent tip.
+static std::map<uint256, std::pair<int, int64_t>> g_pos_quorum_first_active GUARDED_BY(::cs_main);
+
+// Recompute the immediate-finality point from `tip`: the highest active-chain
+// block carrying a full quorum whose observation window has elapsed.
+//
+// Why the window (paper §6.2): majority quorums overlap in only two members, so
+// two members who sign BOTH of two same-height proposals can complete two
+// certificates when the honest members happen to split between them — a split
+// an attacker can provoke by timing a late proposal, without any network
+// partition. Finalizing on connection would let each half keep the block it
+// saw first, forever. Both certificates are ~300-byte gossip objects that every
+// node relays at once, so within a few seconds every node holds both, and the
+// fork-choice comparator (more countersignatures, then lower VRF, then lower
+// hash) gives every node the same winner. Keeping the newest quorum block
+// reorganizable for that long turns a permanent split into a short contested
+// height; keeping a split alive would require hiding one certificate from half
+// the network for the whole window, i.e. a real partition.
+static void RecomputePosImmediateFinality(const CBlockIndex* tip,
+                                          const std::function<const CBlockIndex*(const uint256&)>& lookup)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    const int quorum = PosSlotQuorum(StakeRegistry::GetInstance());
+    const int old_final_height = g_pos_immediate_final_height;
+    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    // A competing certificate whose block we have not judged yet keeps its
+    // height undecided (bounded by the hold) -- and with it every block above,
+    // or finalizing a later block would finalize the contested one with it.
+    int held_floor = std::numeric_limits<int>::max();
+    if (g_pos_finality_delay_ms > 0) {
+        int scanned = 0;
+        for (const CBlockIndex* f = tip; f && f->nHeight > 0 && f->nHeight > old_final_height && scanned < 200;
+             f = f->pprev, ++scanned) {
+            if (!PosHeldBy(f, now, lookup).empty()) held_floor = f->nHeight;
+        }
+    }
+    g_pos_immediate_final_height = -1;
+    for (const CBlockIndex* f = tip; f && f->nHeight > 0; f = f->pprev) {
+        if ((int)f->m_pos_countersigs < quorum) continue;
+        if (g_pos_finality_delay_ms > 0) {
+            auto it = g_pos_quorum_first_active.emplace(f->GetBlockHash(), std::make_pair(f->nHeight, now)).first;
+            if (now - it->second.second < g_pos_finality_delay_ms) continue; // still in its observation window
+            if (f->nHeight >= held_floor) continue;                           // contested at or below it
+        }
+        g_pos_immediate_final_height = f->nHeight;
+        g_pos_immediate_final_hash = f->GetBlockHash();
+        break;
+    }
+    if (tip) {
+        for (auto it = g_pos_quorum_first_active.begin(); it != g_pos_quorum_first_active.end();) {
+            if (it->second.first + 100 < tip->nHeight) it = g_pos_quorum_first_active.erase(it);
+            else ++it;
+        }
+    }
+    // Reconciliation (anchor.h): a RISING finalized point means a
+    // quorum-certified block extended this chain — our branch is alive, so
+    // restart the abandonment patience clock.
+    if (g_pos_immediate_final_height > old_final_height) {
+        PosStampFinalAdvanceNow();
+    }
+}
+
+void PosRefreshImmediateFinality(ChainstateManager& chainman)
+{
+    if (!g_con_pos || g_pos_finality_delay_ms <= 0) return;
+    LOCK(::cs_main);
+    const CBlockIndex* tip = chainman.ActiveChain().Tip();
+    if (tip) RecomputePosImmediateFinality(tip, [&chainman](const uint256& h) { return chainman.m_blockman.LookupBlockIndex(h); });
+    for (auto it = g_pos_competing_certs.begin(); it != g_pos_competing_certs.end() && tip;) {
+        if (it->first + 100 < tip->nHeight) it = g_pos_competing_certs.erase(it);
+        else ++it;
+    }
+}
+
+PosFinalityInfo PosGetFinalityInfo(ChainstateManager& chainman)
+{
+    LOCK(::cs_main);
+    PosFinalityInfo info;
+    info.final_height = g_pos_immediate_final_height;
+    info.final_hash = g_pos_immediate_final_hash;
+    const int64_t now = PosSteadyMs();
+    const auto lookup = [&chainman](const uint256& h) { return chainman.m_blockman.LookupBlockIndex(h); };
+    for (const CBlockIndex* f = chainman.ActiveChain().Tip(); f && f->nHeight > info.final_height; f = f->pprev) {
+        for (const uint256& h : PosHeldBy(f, now, lookup)) info.held_by.emplace_back(f->nHeight, h);
+    }
+    return info;
+}
+
 void CChainState::UpdateTip(const CBlockIndex* pindexNew)
 {
     AssertLockHeld(::cs_main);
@@ -3697,24 +3830,11 @@ void CChainState::UpdateTip(const CBlockIndex* pindexNew)
     // reorg (the anchor watcher invalidating a finalized block) or a manual
     // invalidate/reconsider naturally lowers the finalized point — Bitcoin stays
     // the security root. Escaping-stall / leader-only (sub-quorum) tips simply
-    // leave no immediate-final point until a quorum block is connected.
+    // leave no immediate-final point until a quorum block is connected. The
+    // newest quorum block becomes final only after its observation window
+    // (-posfinalitydelayms, see RecomputePosImmediateFinality).
     if (g_con_pos) {
-        const int quorum = PosSlotQuorum(StakeRegistry::GetInstance());
-        const int old_final_height = g_pos_immediate_final_height;
-        g_pos_immediate_final_height = -1;
-        for (const CBlockIndex* f = pindexNew; f && f->nHeight > 0; f = f->pprev) {
-            if ((int)f->m_pos_countersigs >= quorum) {
-                g_pos_immediate_final_height = f->nHeight;
-                g_pos_immediate_final_hash = f->GetBlockHash();
-                break;
-            }
-        }
-        // Reconciliation (anchor.h): a RISING finalized point means a
-        // quorum-certified block extended this chain — our branch is alive, so
-        // restart the abandonment patience clock.
-        if (g_pos_immediate_final_height > old_final_height) {
-            PosStampFinalAdvanceNow();
-        }
+        RecomputePosImmediateFinality(pindexNew, [this](const uint256& h) { return m_blockman.LookupBlockIndex(h); });
         // Release token consumed: once the active chain contains the released
         // rival block the reorg has happened and the recomputed finalized point
         // protects the adopted branch. Clear so the gate is airtight again.

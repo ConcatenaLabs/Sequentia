@@ -356,6 +356,15 @@ and clears a finality partition more slowly; lowering it speeds both up and lets
 a release fire while the parent chain is less settled. Validity is unaffected in
 either direction, so this is a convergence-speed knob, not a fork risk.
 
+`-posfinalitydelayms` (default 3000) and `-posfinalityholdms` (default 30000)
+are node-local too. A quorum-certified block becomes final only after standing on
+the active chain for the first of them; if this node has verified a competing
+quorum certificate at the same height, it also waits until it has received and
+judged that block, for at most the second. `getposfinality` shows the finalized
+point and anything holding the next one. Lowering the window below the time a
+~300-byte certificate needs to cross the network re-opens the permanent split
+the window exists to prevent ([`04-proof-of-stake.md`](04-proof-of-stake.md) §6).
+
 On the public testnet (`-chain=test`) these settings default to a shared
 Bitcoin **testnet4** endpoint (`src/init.cpp`, `InitParameterInteraction`), so
 a fresh node validates anchors with no configuration; set the `mainchainrpc*`
