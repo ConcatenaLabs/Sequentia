@@ -2032,7 +2032,13 @@ static bool CreateTransactionInternal(
                     value -= to_reduce % outputs_to_subtract_fee_from;
                 }
 
-                // Error if this output is reduced to be below dust
+                // Error if this output is reduced to be below dust. SEQUENTIA:
+                // judged on the reduced value, so the output carries it first.
+                // Judged on the amount before the fee came out of it, a fee
+                // larger than the amount went through as a negative output:
+                // a transaction no node accepts, and in a blinded one an
+                // output no rangeproof can be made for, which aborted the node.
+                txout.nValue = value;
                 if (IsDust(txout, wallet.chain().relayDustFee())) {
                     if (value < 0) {
                         error = _("The transaction amount is too small to pay the fee");
@@ -2041,8 +2047,6 @@ static bool CreateTransactionInternal(
                     }
                     return false;
                 }
-
-                txout.nValue = value;
             }
             ++i;
         }
