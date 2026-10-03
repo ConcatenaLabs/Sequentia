@@ -15,8 +15,10 @@
 #include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <script/standard.h>
+#include <txmempool.h>
 #include <undo.h>
 #include <util/system.h>
+#include <validation.h>
 #include <vrf.h>
 #include <test/util/setup_common.h>
 #include <tinyformat.h>
@@ -1704,6 +1706,88 @@ BOOST_AUTO_TEST_CASE(pos_unbonding_two_step)
     const auto unknown = [](int h) { return -1; };
     BOOST_CHECK(!CheckPosUnbondingTx(claim_tx, view, 1000000, unknown, DEPTH, reason));
     g_con_elementsmode = saved_elementsmode;
+}
+
+BOOST_AUTO_TEST_CASE(pos_unbonding_next_block)
+{
+    // The judgement every mempool path shares (admission, the activation
+    // boundary, the end of a reorg, the block template): the rule as it binds
+    // the block after `tip`, at the tip's anchor.
+    const bool saved_elementsmode = g_con_elementsmode;
+    const bool saved_pos = g_con_pos;
+    const bool saved_anchor = g_con_bitcoin_anchor;
+    g_con_elementsmode = true;
+    g_con_pos = true;
+    g_con_bitcoin_anchor = true;
+    const CPubKey staker = MakeKey();
+    const CAmount STAKE = 100 * COIN;
+    const CAmount fee = 1000;
+
+    // 30 blocks; block h is anchored to parent-chain height 1000 + h.
+    std::vector<CBlockIndex> blocks(30);
+    for (int h = 0; h < 30; ++h) {
+        blocks[h].nHeight = h;
+        blocks[h].m_anchor_height = 1000 + h;
+        blocks[h].pprev = h ? &blocks[h - 1] : nullptr;
+        blocks[h].BuildSkip();
+    }
+    Consensus::Params params;
+    params.pos_unbond_height = 20;
+    params.pos_unbond_anchor_depth = 6;
+
+    CCoinsView base;
+    CCoinsViewCache view(&base);
+    const CScript unbond = BuildUnbondScript(staker);
+    const COutPoint stake_op(InsecureRand256(), 0);
+    view.AddCoin(stake_op, Coin(CTxOut(CConfidentialAsset(::policyAsset), CConfidentialValue(STAKE), BuildStakeScript(staker, 10)), 5, false), false);
+    const COutPoint unbond_op(InsecureRand256(), 0);    // confirmed in block 21, anchor 1021
+    view.AddCoin(unbond_op, Coin(CTxOut(CConfidentialAsset(::policyAsset), CConfidentialValue(STAKE), unbond), 21, false), false);
+    const COutPoint pending_op(InsecureRand256(), 0);   // created by a mempool transaction
+    view.AddCoin(pending_op, Coin(CTxOut(CConfidentialAsset(::policyAsset), CConfidentialValue(STAKE), unbond), MEMPOOL_HEIGHT, false), false);
+    auto spend = [&](const COutPoint& op, const CScript& dest) {
+        CMutableTransaction m;
+        m.vin.emplace_back(op);
+        m.vout.emplace_back(CConfidentialAsset(::policyAsset), CConfidentialValue(STAKE - fee), dest);
+        m.vout.emplace_back(CConfidentialAsset(::policyAsset), CConfidentialValue(fee), CScript());
+        return CTransaction(m);
+    };
+    const CScript addr = GetScriptForDestination(PKHash(MakeKey()));
+    const CTransaction to_address = spend(stake_op, addr);
+    std::string reason;
+
+    // Below the height the rule does not bind the next block...
+    BOOST_CHECK(!PosUnbondingFailsNextBlock(to_address, view, &blocks[18], params, reason));
+    // ...and the block before the height judges the first block it binds.
+    BOOST_CHECK(PosUnbondingFailsNextBlock(to_address, view, &blocks[19], params, reason));
+    BOOST_CHECK_EQUAL(reason, "bad-unbond-required");
+    BOOST_CHECK(!PosUnbondingFailsNextBlock(spend(stake_op, unbond), view, &blocks[19], params, reason));
+    // A rule that is off never fails anything.
+    Consensus::Params off = params;
+    off.pos_unbond_height = 0;
+    BOOST_CHECK(!PosUnbondingFailsNextBlock(to_address, view, &blocks[29], off, reason));
+
+    // A claim waits for 1021 + 6 at the TIP's anchor, the lowest the next block can carry.
+    BOOST_CHECK(PosUnbondingFailsNextBlock(spend(unbond_op, addr), view, &blocks[26], params, reason));
+    BOOST_CHECK_EQUAL(reason, "bad-unbond-premature");
+    BOOST_CHECK(!PosUnbondingFailsNextBlock(spend(unbond_op, addr), view, &blocks[27], params, reason));
+    // A claim of an output created in the mempool is never valid in the next block.
+    BOOST_CHECK(PosUnbondingFailsNextBlock(spend(pending_op, addr), view, &blocks[29], params, reason));
+    BOOST_CHECK_EQUAL(reason, "bad-unbond-premature");
+    // A tip below the creating block (a reorg that disconnected it) does not know it.
+    BOOST_CHECK(PosUnbondingFailsNextBlock(spend(unbond_op, addr), view, &blocks[20], params, reason));
+
+    // Without anchoring the wait is counted in Sequentia blocks: the next block's height.
+    g_con_bitcoin_anchor = false;
+    BOOST_CHECK(PosUnbondingFailsNextBlock(spend(unbond_op, addr), view, &blocks[25], params, reason));
+    BOOST_CHECK(!PosUnbondingFailsNextBlock(spend(unbond_op, addr), view, &blocks[26], params, reason));
+
+    // Not a PoS chain: nothing to judge.
+    g_con_pos = false;
+    BOOST_CHECK(!PosUnbondingFailsNextBlock(to_address, view, &blocks[29], params, reason));
+
+    g_con_elementsmode = saved_elementsmode;
+    g_con_pos = saved_pos;
+    g_con_bitcoin_anchor = saved_anchor;
 }
 
 BOOST_AUTO_TEST_SUITE_END()

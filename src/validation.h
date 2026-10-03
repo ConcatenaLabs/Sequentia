@@ -144,6 +144,18 @@ extern arith_uint256 nMinimumChainWork;
 /** Best header we've seen so far (used for getheaders queries' starting points). */
 extern CBlockIndex *pindexBestHeader;
 
+/** SEQUENTIA two-step unbonding (Consensus::Params::pos_unbond_height): whether
+ *  `tx` breaks the unbonding rule in a block built on `tip`, i.e. at height
+ *  tip + 1. Judged at the tip's anchor, the lowest anchor such a block can
+ *  carry, so a spend allowed here is allowed in that block whatever its anchor.
+ *  Inputs created in the mempool count as created at no anchor yet. Returns
+ *  false when the rule is not in force at tip + 1. This is the rule
+ *  ConnectBlock enforces, applied wherever a transaction is judged for the next
+ *  block: admission, the activation boundary, the end of a reorg and the block
+ *  template. */
+bool PosUnbondingFailsNextBlock(const CTransaction& tx, const CCoinsViewCache& view, const CBlockIndex* tip,
+                                const Consensus::Params& params, std::string& reason);
+
 // --- SEQUENTIA immediate finality: reconciliation hooks (anchor.cpp monitor) ---
 
 /** The current immediate-finality point (highest active-chain quorum-certified

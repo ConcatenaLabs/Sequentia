@@ -700,6 +700,11 @@ public:
      *  which the coinbase maturity rises, the one case where a resident entry
      *  becomes premature without a reorg. */
     void removeImmatureCoinbaseSpends(const CCoinsViewCache& coins_tip, int spend_height) EXCLUSIVE_LOCKS_REQUIRED(cs);
+    /** SEQUENTIA: evict, with their descendants, the entries `fails` reports.
+     *  Every entry is judged before any is removed. Called from ConnectTip on
+     *  the block before two-step unbonding begins, where a resident spend
+     *  becomes invalid without a reorg; `fails` logs what it reports. */
+    void removeFailing(const std::function<bool(const CTransaction&)>& fails) EXCLUSIVE_LOCKS_REQUIRED(cs);
     void removeConflicts(const CTransaction& tx) EXCLUSIVE_LOCKS_REQUIRED(cs);
     void removeForBlock(const std::vector<CTransactionRef>& vtx, unsigned int nBlockHeight,
                         const CBlockIndex* p_block_index_new = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs);
