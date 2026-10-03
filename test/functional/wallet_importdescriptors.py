@@ -407,7 +407,12 @@ class ImportDescriptorsTest(BitcoinTestFramework):
         # SEQUENTIA: an open-fee-market chain has no default fee asset.
         txid = w0.sendtoaddress(address=address, amount=49.99965520, fee_asset_label='bitcoin')
         self.generatetoaddress(self.nodes[0], 6, w0.getnewaddress())
-        tx = wpriv.createrawtransaction([{"txid": txid, "vout": 0}], [{w0.getnewaddress(): 49.999}, {"fee": 0.00065520}])
+        # The payment may keep change, at a random position: spend the output
+        # that pays the address, wherever it is.
+        paid = [o['n'] for o in self.nodes[0].decoderawtransaction(w0.gettransaction(txid)['hex'])['vout']
+                if o['scriptPubKey'].get('address') == address]
+        assert_equal(len(paid), 1)
+        tx = wpriv.createrawtransaction([{"txid": txid, "vout": paid[0]}], [{w0.getnewaddress(): 49.999}, {"fee": 0.00065520}])
         signed_tx = wpriv.signrawtransactionwithwallet(tx)
         w1.sendrawtransaction(signed_tx['hex'])
 
