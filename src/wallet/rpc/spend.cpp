@@ -600,7 +600,9 @@ RPCHelpMan withdrawstake()
                     {RPCResult::Type::STR_HEX, "txid", "the withdrawal transaction id"},
                     {RPCResult::Type::STR_AMOUNT, "amount", "SEQ arriving at the destination (the withdrawn amount minus the fee)"},
                     {RPCResult::Type::STR_AMOUNT, "fee", "the network fee, paid out of the withdrawn amount"},
-                    {RPCResult::Type::STR, "destination", "the receiving address"},
+                    {RPCResult::Type::STR, "destination", "the receiving address, or \"unbonding\" when the coins go to an unbonding output first"},
+                    {RPCResult::Type::BOOL, "unbonding", /*optional=*/true, "two-step unbonding is in force: the coins wait in an unbonding output; claim them with claimunbonded once unbond_depth parent-chain blocks have passed"},
+                    {RPCResult::Type::NUM, "unbond_depth", /*optional=*/true, "parent-chain (Bitcoin) blocks the unbonding output must wait"},
                     {RPCResult::Type::STR_AMOUNT, "unstaked", "stake weight removed from the staker key (amount + fee)"},
                     {RPCResult::Type::STR_AMOUNT, "restaked", /*optional=*/true, "remainder re-staked into a fresh output (its unbonding clock restarts)"},
                     {RPCResult::Type::ARR, "withdrawn_outputs", "the staking outputs this withdrawal spends", {
@@ -775,7 +777,21 @@ RPCHelpMan withdrawstake()
         mtx.vin.push_back(in);
     }
     const CAsset& asset = Params().GetConsensus().pegged_asset;
-    mtx.vout.push_back(CTxOut(asset, want_amt, dest_script)); // fee patched out below
+    // Two-step unbonding (consensus/params.h): once it is in force, stake can
+    // only leave through an unbonding output of the same key, which carries no
+    // weight and unlocks after pos_unbond_anchor_depth parent-chain blocks;
+    // claimunbonded then sends the coins to an address.
+    const bool two_step = Params().GetConsensus().PosUnbondingActiveAt(tip_height + 1);
+    if (two_step) {
+        std::map<CPubKey, CAmount> per_key;
+        for (const StakeUtxo& s : selected) per_key[s.parsed.pubkey] += s.amount;
+        per_key[selected.back().parsed.pubkey] -= restake_amt;
+        for (const auto& [pk, amt] : per_key) {
+            if (amt > 0) mtx.vout.push_back(CTxOut(asset, amt, BuildUnbondScript(pk))); // fee patched out below
+        }
+    } else {
+        mtx.vout.push_back(CTxOut(asset, want_amt, dest_script)); // fee patched out below
+    }
     if (restake_amt > 0) {
         const StakeUtxo& src = selected.back(); // the output whose split created the remainder
         // Same key, same unbonding delay, same BLS registration (a consensus
@@ -795,11 +811,17 @@ RPCHelpMan withdrawstake()
         CCoinControl coin_control;
         fee = GetMinimumFeeRate(*pwallet, coin_control, nullptr).GetFee(GetVirtualTransactionSize(CTransaction(sizing)));
     }
-    if (want_amt <= fee) {
+    const CAmount front_amt = mtx.vout.front().nValue.GetAmount();
+    if (front_amt <= fee) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
-            "the withdrawal (%s SEQ) would not cover its own network fee (%s SEQ)", FormatMoney(want_amt), FormatMoney(fee)));
+            "the withdrawal (%s SEQ) would not cover its own network fee (%s SEQ)", FormatMoney(front_amt), FormatMoney(fee)));
     }
-    mtx.vout.front().nValue = want_amt - fee;
+    if (two_step && fee > selected_total / 1000 * POS_UNBOND_MAX_FEE_PERMILLE) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
+            "the unbonding fee (%s SEQ) exceeds the most a stake may pay out of itself on its way out (%s SEQ, 1%%)",
+            FormatMoney(fee), FormatMoney(selected_total / 1000 * POS_UNBOND_MAX_FEE_PERMILLE)));
+    }
+    mtx.vout.front().nValue = front_amt - fee;
     mtx.vout.back().nValue = fee;
 
     // 6) Sign each staking input with its staker key. The spend is a bare
@@ -852,12 +874,22 @@ RPCHelpMan withdrawstake()
     if (!pwallet->chain().broadcastTransaction(tx, pwallet->m_default_max_tx_fee, /*relay=*/true, err_string)) {
         throw JSONRPCError(RPC_WALLET_ERROR, strprintf("failed to broadcast the withdrawal: %s", err_string));
     }
+    // An unbonding output is not an address of this wallet, so the wallet would
+    // not pick the transaction up by itself; record it, or claimunbonded could
+    // never find what it has to claim.
+    if (two_step) {
+        pwallet->CommitTransaction(tx, {}, {});
+    }
 
     UniValue result(UniValue::VOBJ);
     result.pushKV("txid", tx->GetHash().GetHex());
     result.pushKV("amount", ValueFromAmount(want_amt - fee));
     result.pushKV("fee", ValueFromAmount(fee));
-    result.pushKV("destination", dest_str);
+    result.pushKV("destination", two_step ? std::string("unbonding") : dest_str);
+    if (two_step) {
+        result.pushKV("unbonding", true);
+        result.pushKV("unbond_depth", Params().GetConsensus().pos_unbond_anchor_depth);
+    }
     result.pushKV("unstaked", ValueFromAmount(unstaked));
     if (restake_amt > 0) result.pushKV("restaked", ValueFromAmount(restake_amt));
     UniValue ins(UniValue::VARR);
@@ -876,6 +908,251 @@ RPCHelpMan withdrawstake()
     result.pushKV("network_stake_after", total_after);
     if (total_before > 0) result.pushKV("share_before", (double)mine_before / (double)total_before);
     if (total_after > 0) result.pushKV("share_after", (double)mine_after / (double)total_after);
+    return result;
+},
+    };
+}
+
+namespace {
+//! The anchor height of the block `hash` (the block's own height on a chain
+//! without anchoring), or -1 if the wallet's chain view cannot find it.
+int AnchorOfBlock(const CWallet& wallet, const uint256& hash)
+{
+    CBlock block;
+    int height = -1;
+    if (!wallet.chain().findBlock(hash, interfaces::FoundBlock().height(height).data(block))) return -1;
+    return g_con_bitcoin_anchor ? (int)block.m_anchor_height : height;
+}
+
+//! One of this wallet's unspent unbonding outputs.
+struct UnbondUtxo {
+    COutPoint op;
+    CTxOut out;
+    CPubKey pk;
+    int confirmations{0};
+    int unlock_at{-1};      //!< first spend anchor (or height) that may claim it; -1 until confirmed
+    bool claimable{false};
+};
+
+//! Where claims are judged: the anchor a claim mined in the next block has at
+//! least (the tip's), or the next block's height on a chain without anchoring.
+int UnbondSpendPoint(const CWallet& wallet) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+{
+    return g_con_bitcoin_anchor ? AnchorOfBlock(wallet, wallet.GetLastBlockHash())
+                                : wallet.GetLastBlockHeight() + 1;
+}
+
+std::vector<UnbondUtxo> FindWalletUnbondUtxos(const CWallet& wallet) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+{
+    const int depth = Params().GetConsensus().pos_unbond_anchor_depth;
+    const int spend_point = UnbondSpendPoint(wallet);
+    std::vector<UnbondUtxo> found;
+    for (const auto& [txid, wtx] : wallet.mapWallet) {
+        for (uint32_t n = 0; n < wtx.tx->vout.size(); ++n) {
+            const CTxOut& out = wtx.tx->vout[n];
+            auto pk = ParseUnbondScript(out.scriptPubKey);
+            if (!pk || wallet.IsSpent(txid, n) || !WalletControlsStakerKey(wallet, *pk)) continue;
+            UnbondUtxo u;
+            u.op = COutPoint(txid, n);
+            u.out = out;
+            u.pk = *pk;
+            u.confirmations = wallet.GetTxDepthInMainChain(wtx);
+            if (u.confirmations < 0) continue; // conflicted: never existed
+            // Replaced by fee and not yet conflicted (the replacement has not
+            // confirmed): out of the mempool, so it is not coming either.
+            if (u.confirmations == 0 && (wtx.isAbandoned() || !wtx.InMempool())) continue;
+            if (const auto* conf = wtx.state<TxStateConfirmed>(); conf && u.confirmations > 0) {
+                const int created = g_con_bitcoin_anchor ? AnchorOfBlock(wallet, conf->confirmed_block_hash)
+                                                         : conf->confirmed_block_height;
+                if (created >= 0) {
+                    u.unlock_at = created + depth;
+                    u.claimable = spend_point >= u.unlock_at;
+                }
+            }
+            found.push_back(std::move(u));
+        }
+    }
+    return found;
+}
+} // namespace
+
+RPCHelpMan claimunbonded()
+{
+    return RPCHelpMan{"claimunbonded",
+                "\nSend this wallet's matured unbonding outputs to an address. Under two-step unbonding,\n"
+                "withdrawstake moves stake into an unbonding output that carries no weight; the coins can be\n"
+                "claimed once the parent chain (Bitcoin) has advanced the unbonding depth past the anchor of the\n"
+                "block that created it, the same depth a checkpoint needs to consolidate.\n",
+                {
+                    {"address", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Destination address (default: a fresh address of this wallet)."},
+                },
+                RPCResult{RPCResult::Type::OBJ, "", "", {
+                    {RPCResult::Type::STR_HEX, "txid", "the claim transaction id"},
+                    {RPCResult::Type::STR_AMOUNT, "amount", "SEQ arriving at the destination"},
+                    {RPCResult::Type::STR_AMOUNT, "fee", "the network fee"},
+                    {RPCResult::Type::STR, "destination", "the receiving address"},
+                    {RPCResult::Type::NUM, "claimed_outputs", "how many unbonding outputs were spent"},
+                }},
+                RPCExamples{HelpExampleCli("claimunbonded", "")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!g_con_pos) throw JSONRPCError(RPC_MISC_ERROR, "Proof-of-Stake (con_pos) is not enabled on this chain");
+    std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
+    if (!pwallet) return NullUniValue;
+    pwallet->BlockUntilSyncedToCurrentChain();
+    LOCK(pwallet->cs_wallet);
+    EnsureWalletIsUnlocked(*pwallet);
+
+    const int tip_height = pwallet->GetLastBlockHeight();
+    const int spend_anchor = UnbondSpendPoint(*pwallet);
+
+    std::vector<UnbondUtxo> mature;
+    int waiting = 0, soonest = -1;
+    for (UnbondUtxo& u : FindWalletUnbondUtxos(*pwallet)) {
+        if (u.claimable) {
+            mature.push_back(std::move(u));
+            continue;
+        }
+        ++waiting;
+        if (u.unlock_at >= 0 && (soonest < 0 || u.unlock_at < soonest)) soonest = u.unlock_at;
+    }
+    if (mature.empty()) {
+        if (waiting == 0) throw JSONRPCError(RPC_WALLET_ERROR, "this wallet has no unbonding outputs (see withdrawstake)");
+        throw JSONRPCError(RPC_WALLET_ERROR, soonest >= 0
+            ? strprintf("%d unbonding output(s) not claimable yet; the soonest unlocks at %s height %d (now %d)",
+                        waiting, g_con_bitcoin_anchor ? "parent-chain" : "block", soonest, spend_anchor)
+            : strprintf("%d unbonding output(s) not claimable yet (waiting to confirm)", waiting));
+    }
+
+    CTxDestination dest;
+    if (!request.params[0].isNull()) {
+        dest = DecodeDestination(request.params[0].get_str());
+        if (!IsValidDestination(dest)) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid address");
+    } else {
+        bilingual_str dest_error;
+        if (!pwallet->GetNewDestination(pwallet->m_default_address_type, "", dest, dest_error)) {
+            throw JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT, dest_error.original);
+        }
+    }
+    std::visit(SetBlindingPubKeyVisitor(CPubKey()), dest);
+
+    CMutableTransaction mtx;
+    mtx.nVersion = 2;
+    mtx.nLockTime = (uint32_t)tip_height;
+    CAmount total = 0;
+    for (const UnbondUtxo& u : mature) {
+        mtx.vin.push_back(CTxIn(u.op));
+        total += u.out.nValue.GetAmount();
+    }
+    const CAsset& asset = Params().GetConsensus().pegged_asset;
+    mtx.vout.push_back(CTxOut(asset, total, GetScriptForDestination(dest)));
+    mtx.vout.push_back(CTxOut(asset, 0, CScript()));
+    CAmount fee = 0;
+    {
+        CMutableTransaction sizing = mtx;
+        for (CTxIn& in : sizing.vin) in.scriptSig = CScript() << std::vector<unsigned char>(73);
+        CCoinControl coin_control;
+        fee = GetMinimumFeeRate(*pwallet, coin_control, nullptr).GetFee(GetVirtualTransactionSize(CTransaction(sizing)));
+    }
+    if (total <= fee) throw JSONRPCError(RPC_INVALID_PARAMETER, "the unbonded amount would not cover the network fee");
+    mtx.vout.front().nValue = total - fee;
+    mtx.vout.back().nValue = fee;
+    for (size_t i = 0; i < mature.size(); ++i) {
+        CKey key;
+        if (!GetStakerKey(*pwallet, mature[i].pk, key)) {
+            throw JSONRPCError(RPC_WALLET_ERROR, strprintf("the private key for staker %s is not available in this wallet", HexStr(mature[i].pk)));
+        }
+        FlatSigningProvider provider;
+        provider.keys[mature[i].pk.GetID()] = key;
+        std::vector<unsigned char> sig;
+        MutableTransactionSignatureCreator creator(&mtx, i, mature[i].out.nValue, SIGHASH_ALL);
+        if (!creator.CreateSig(provider, sig, mature[i].pk.GetID(), mature[i].out.scriptPubKey, SigVersion::BASE, /*flags=*/0)) {
+            throw JSONRPCError(RPC_WALLET_ERROR, "failed to sign the unbonding claim");
+        }
+        mtx.vin[i].scriptSig = CScript() << sig;
+    }
+    const CTransactionRef tx = MakeTransactionRef(std::move(mtx));
+    std::string err_string;
+    if (!pwallet->chain().broadcastTransaction(tx, pwallet->m_default_max_tx_fee, /*relay=*/true, err_string)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, strprintf("failed to broadcast the claim: %s", err_string));
+    }
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("txid", tx->GetHash().GetHex());
+    result.pushKV("amount", ValueFromAmount(total - fee));
+    result.pushKV("fee", ValueFromAmount(fee));
+    result.pushKV("destination", EncodeDestination(dest));
+    result.pushKV("claimed_outputs", (int64_t)mature.size());
+    return result;
+},
+    };
+}
+
+RPCHelpMan listunbonding()
+{
+    return RPCHelpMan{"listunbonding",
+                "\nThis wallet's unbonding outputs (two-step unbonding): stake withdrawn with withdrawstake that\n"
+                "no longer counts as stake and waits to be claimed with claimunbonded.\n",
+                {},
+                RPCResult{RPCResult::Type::OBJ, "", "", {
+                    {RPCResult::Type::BOOL, "active", "whether a withdrawal made now goes through an unbonding output"},
+                    {RPCResult::Type::NUM, "activation_height", "the block height two-step unbonding starts at (0: not scheduled)"},
+                    {RPCResult::Type::NUM, "unbond_depth", "how far the unbonding output must wait"},
+                    {RPCResult::Type::STR, "unit", "what unbond_depth and the heights below count: \"parent-chain block\" or \"block\""},
+                    {RPCResult::Type::NUM, "current", "where a claim would be judged now, in that unit"},
+                    {RPCResult::Type::STR_AMOUNT, "total", "SEQ in unbonding outputs"},
+                    {RPCResult::Type::STR_AMOUNT, "claimable", "SEQ claimable now"},
+                    {RPCResult::Type::ARR, "outputs", "", {
+                        {RPCResult::Type::OBJ, "", "", {
+                            {RPCResult::Type::STR_HEX, "txid", "the withdrawal transaction"},
+                            {RPCResult::Type::NUM, "vout", "output index"},
+                            {RPCResult::Type::STR_AMOUNT, "amount", "SEQ in the output"},
+                            {RPCResult::Type::STR_HEX, "pubkey", "staker public key"},
+                            {RPCResult::Type::NUM, "confirmations", "confirmations of the withdrawal"},
+                            {RPCResult::Type::NUM, "unlock_at", /*optional=*/true, "first point (in unit) a claim may be mined at; absent until the withdrawal confirms"},
+                            {RPCResult::Type::NUM, "remaining", /*optional=*/true, "how many more of unit until then"},
+                            {RPCResult::Type::BOOL, "claimable", "whether claimunbonded would spend it now"},
+                        }},
+                    }},
+                }},
+                RPCExamples{HelpExampleCli("listunbonding", "")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!g_con_pos) throw JSONRPCError(RPC_MISC_ERROR, "Proof-of-Stake (con_pos) is not enabled on this chain");
+    std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
+    if (!pwallet) return NullUniValue;
+    pwallet->BlockUntilSyncedToCurrentChain();
+    LOCK(pwallet->cs_wallet);
+
+    const Consensus::Params& consensus = Params().GetConsensus();
+    const int spend_point = UnbondSpendPoint(*pwallet);
+    UniValue outputs(UniValue::VARR);
+    CAmount total = 0, claimable = 0;
+    for (const UnbondUtxo& u : FindWalletUnbondUtxos(*pwallet)) {
+        const CAmount amt = u.out.nValue.GetAmount();
+        total += amt;
+        if (u.claimable) claimable += amt;
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("txid", u.op.hash.GetHex());
+        o.pushKV("vout", (int64_t)u.op.n);
+        o.pushKV("amount", ValueFromAmount(amt));
+        o.pushKV("pubkey", HexStr(u.pk));
+        o.pushKV("confirmations", u.confirmations);
+        if (u.unlock_at >= 0) {
+            o.pushKV("unlock_at", u.unlock_at);
+            o.pushKV("remaining", std::max(0, u.unlock_at - spend_point));
+        }
+        o.pushKV("claimable", u.claimable);
+        outputs.push_back(o);
+    }
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("active", consensus.PosUnbondingActiveAt(pwallet->GetLastBlockHeight() + 1));
+    result.pushKV("activation_height", consensus.pos_unbond_height);
+    result.pushKV("unbond_depth", consensus.pos_unbond_anchor_depth);
+    result.pushKV("unit", g_con_bitcoin_anchor ? "parent-chain block" : "block");
+    result.pushKV("current", spend_point);
+    result.pushKV("total", ValueFromAmount(total));
+    result.pushKV("claimable", ValueFromAmount(claimable));
+    result.pushKV("outputs", outputs);
     return result;
 },
     };
@@ -932,6 +1209,8 @@ RPCHelpMan bumpwithdrawstakefee()
     for (const StakeUtxo& s : spent) {
         for (const auto& [txid, wtx] : pwallet->mapWallet) {
             if (wtx.isAbandoned() || pwallet->GetTxDepthInMainChain(wtx) != 0) continue;
+            // Replaced but not yet conflicted (its replacement has not confirmed).
+            if (!wtx.InMempool()) continue;
             for (const CTxIn& in : wtx.tx->vin) {
                 if (in.prevout == s.outpoint) { spender_ids.insert(txid); original = &wtx; }
             }
@@ -973,6 +1252,19 @@ RPCHelpMan bumpwithdrawstakefee()
                 FormatMoney(wanted), FormatMoney(new_fee), FormatMoney(old_fee)));
         }
         new_fee = wanted;
+    }
+    // Under two-step unbonding the payout is the unbonding output, and consensus
+    // caps what a stake may pay out of itself on its way out.
+    const bool two_step = ParseUnbondScript(mtx.vout[dest_idx].scriptPubKey).has_value();
+    if (two_step) {
+        CAmount staked = 0;
+        for (const StakeUtxo& s : spent) staked += s.amount;
+        const CAmount cap = staked / 1000 * POS_UNBOND_MAX_FEE_PERMILLE;
+        if (new_fee > cap) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
+                "a fee of %s SEQ exceeds the most a stake may pay out of itself on its way out (%s SEQ, 1%%)",
+                FormatMoney(new_fee), FormatMoney(cap)));
+        }
     }
     const CAmount extra = new_fee - old_fee;
     if (mtx.vout[dest_idx].nValue.GetAmount() <= extra) {
@@ -1023,15 +1315,22 @@ RPCHelpMan bumpwithdrawstakefee()
     if (!pwallet->chain().broadcastTransaction(tx, pwallet->m_default_max_tx_fee, /*relay=*/true, err_string)) {
         throw JSONRPCError(RPC_WALLET_ERROR, strprintf("failed to broadcast the replacement: %s", err_string));
     }
+    const uint256 replaced = original->GetHash();
+    if (two_step) {
+        // As in withdrawstake: nothing in it is an address of this wallet.
+        pwallet->CommitTransaction(tx, {{"replaces_txid", replaced.GetHex()}}, {});
+    }
 
     UniValue result(UniValue::VOBJ);
     result.pushKV("txid", tx->GetHash().GetHex());
-    result.pushKV("replaced_txid", original->GetHash().GetHex());
+    result.pushKV("replaced_txid", replaced.GetHex());
     result.pushKV("old_fee", ValueFromAmount(old_fee));
     result.pushKV("fee", ValueFromAmount(new_fee));
     result.pushKV("amount", ValueFromAmount(tx->vout[dest_idx].nValue.GetAmount()));
     CTxDestination dest;
-    if (ExtractDestination(tx->vout[dest_idx].scriptPubKey, dest)) {
+    if (two_step) {
+        result.pushKV("destination", "unbonding");
+    } else if (ExtractDestination(tx->vout[dest_idx].scriptPubKey, dest)) {
         result.pushKV("destination", EncodeDestination(dest));
     }
     return result;

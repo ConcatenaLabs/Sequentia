@@ -24,10 +24,12 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <optional>
 #include <tuple>
 #include <set>
+#include <string>
 #include <vector>
 
 class CBlockIndex;
@@ -1209,6 +1211,36 @@ int64_t PosRequiredUnbondingSeconds();
  *  policy-asset amount, and an unbonding lock of at least
  *  PosRequiredUnbondingSeconds() — return its staker key and weight (atoms). */
 std::optional<std::pair<CPubKey, uint64_t>> StakeFromTxOut(const CTxOut& out);
+
+// --- SEQUENTIA two-step unbonding (Consensus::Params::pos_unbond_height) ---
+
+/** The unbonding output a staker's coins pass through on their way out:
+ *      <"SEQUNBOND"> OP_DROP <pubkey> OP_CHECKSIG
+ *  It carries no stake weight (it is not a staking script), and consensus lets
+ *  it be spent only pos_unbond_anchor_depth parent-chain blocks after the
+ *  anchor of the block that created it. */
+CScript BuildUnbondScript(const CPubKey& pubkey);
+/** The staker key of an unbonding output, or nullopt if `script` is not one. */
+std::optional<CPubKey> ParseUnbondScript(const CScript& script);
+
+/** Most that the policy-asset value leaving a set of staking inputs may fall
+ *  short of the stake and unbonding outputs that receive it, in parts per
+ *  thousand of that value: the network fee of the unbonding transaction may
+ *  come out of the stake, up to 1% of it. A larger fee is always possible by
+ *  adding other inputs; the bound only stops a staker from routing its stake
+ *  out through a fee paid to a producer it controls, which would bypass the
+ *  unbonding wait for everything but a sliver. */
+static const CAmount POS_UNBOND_MAX_FEE_PERMILLE = 10;
+
+class CCoinsViewCache;
+/** Consensus check of the two-step unbonding rules for one transaction.
+ *  `spend_anchor` is the anchor height of the block the spend lands in, and
+ *  `anchor_at(h)` the anchor height of the block at height h on the same chain
+ *  (-1 if unknown, which fails the check). On a chain without anchoring both
+ *  are plain block heights. Returns false with a reject reason on violation. */
+bool CheckPosUnbondingTx(const CTransaction& tx, const CCoinsViewCache& inputs,
+                         int spend_anchor, const std::function<int(int)>& anchor_at,
+                         int anchor_depth, std::string& reason);
 
 /** Mirror a connected block into the UTXO stake layer: outputs that create
  *  staking UTXOs add weight; inputs that spend them (from the block's undo

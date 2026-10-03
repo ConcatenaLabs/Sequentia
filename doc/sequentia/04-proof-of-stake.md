@@ -95,10 +95,25 @@ its amount adds to its key's weight, indefinitely: the lock gates *withdrawal*,
 not participation, so a staking output keeps its weight for as long as it is
 unspent - once the lock matures it still stakes until actually spent, and it
 never needs renewing. Holding ordinary (non-staking-output) SEQ confers no
-weight; staking is opt-in. Unbonding is simply the CSV-gated spend:
-the `OP_CHECKSEQUENCEVERIFY` lock - the whitepaper's stake locktime - is
-enforced by the script itself, so unstaking is delayed by the configured period
-and there is no separate unbonding ceremony.
+weight; staking is opt-in. The `OP_CHECKSEQUENCEVERIFY` lock - the
+whitepaper's stake locktime - is enforced by the script itself.
+
+**Two-step unbonding** (`Consensus::Params::pos_unbond_height`; mainnet from its
+first block, `-posunbondheight` on custom chains). Because the lock runs from the
+output's creation and the weight lasts until the spend, a stake older than the
+lock could otherwise sign at one height and leave at the next, its keys worth
+nothing to their owner long before a Bitcoin checkpoint secured what they
+signed. Where the rule is active, a staking output may only be spent into
+another staking output or into an **unbonding output** of the same key,
+`<"SEQUNBOND"> OP_DROP <pubkey> OP_CHECKSIG`, which carries no weight: the stake
+stops counting as soon as it is created. An unbonding output may be spent only
+once the parent chain has advanced `pos_unbond_anchor_depth` blocks (2,016, the
+checkpoint depth; `-posunbonddepth` on custom chains) past the anchor of the
+block that created it - counted in Bitcoin blocks, like the checkpoint, so the
+two cannot drift apart if the Sequentia cadence changes; on a chain without
+anchoring, in Sequentia blocks. The only value that may leave a stake on the way
+out is the network fee, up to 1% of the amount withdrawn (`CheckPosUnbondingTx`,
+reject reasons `bad-unbond-required` and `bad-unbond-premature`).
 
 The layer is a pure function of the UTXO set: it is rebuilt from the UTXO set at
 node startup and mirrored exactly on every tip connect and disconnect, so it is

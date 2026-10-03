@@ -120,6 +120,9 @@ QList<TransactionRecord> TransactionRecord::decomposeTransaction(const interface
             // wallet shows a single "Staking" line for the amount locked, rather
             // than a confusing send/receive pair to an unfamiliar script.
             const bool is_stake = g_con_pos && ParseStakeScript(txout.scriptPubKey).has_value();
+            // Two-step unbonding: a withdrawal parks the coins in an unbonding
+            // output of the staker key, which no address of the wallet matches.
+            const bool is_unbond = g_con_pos && ParseUnbondScript(txout.scriptPubKey).has_value();
 
             if (fAllFromMe && assets_issued_to_me_only.count(asset) == 0) {
                 // Change is only really possible if we're the sender
@@ -162,6 +165,16 @@ QList<TransactionRecord> TransactionRecord::decomposeTransaction(const interface
             // "Staking" debit above; don't also emit a credit for it (the
             // output is ours but locked), which would net to a puzzling zero.
             if (is_stake && fAllFromMe) {
+                continue;
+            }
+            if (is_unbond) {
+                TransactionRecord sub(hash, nTime);
+                sub.idx = i;
+                sub.type = TransactionRecord::Unbonding;
+                sub.asset = asset;
+                sub.unbond_amount = wtx.txout_amounts[i];
+                sub.involvesWatchAddress = involvesWatchAddress;
+                parts.append(sub);
                 continue;
             }
 
@@ -292,6 +305,7 @@ void TransactionRecord::updateStatus(const interfaces::WalletTxStatus& wtx, cons
     case RecvWithAddress:
     case RecvFromOther:
     case Unstake:
+    case Unbonding:
         typesort = 3;
         break;
     default:

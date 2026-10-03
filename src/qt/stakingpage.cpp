@@ -13,6 +13,8 @@
 #include <qt/guiutil.h>
 #include <qt/optionsmodel.h>
 #include <qt/platformstyle.h>
+#include <qt/clientmodel.h>
+#include <validation.h>
 #include <qt/walletmodel.h>
 
 #include <asset.h>
@@ -364,7 +366,7 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
     // explanation has to hang on an enabled container around it.
     m_unstake_bump = new QPushButton(tr("Speed up (higher fee)"), unstakeGroup);
     m_unstake_bump->setToolTip(tr("Re-send the withdrawal that is waiting to confirm, paying a higher network fee "
-                                  "so it is picked up sooner. It goes to the same address for the same amount, "
+                                  "so it is picked up sooner. It goes to the same place for the same amount, "
                                   "less the extra fee."));
     m_unstake_bump->setVisible(false);
     m_unstake_button_holder = new QWidget(unstakeGroup);
@@ -376,6 +378,25 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
         h->addStretch();
     }
     unstakeForm->addRow(QString(), m_unstake_button_holder);
+    // Two-step unbonding: what a withdrawal has left waiting, and the button
+    // that collects it. Hidden while nothing is waiting.
+    m_unbond_info = new QLabel(unstakeGroup);
+    m_unbond_info->setWordWrap(true);
+    m_unbond_info->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_claim_button = new QPushButton(tr("Claim"), unstakeGroup);
+    m_claim_button->setToolTip(tr("Move every unbonding amount whose wait is over to a fresh address of this "
+                                  "wallet, as a normal incoming payment. The network fee is paid out of it."));
+    {
+        m_unbond_row = new QWidget(unstakeGroup);
+        QHBoxLayout* h = new QHBoxLayout(m_unbond_row);
+        h->setContentsMargins(0, 0, 0, 0);
+        h->addWidget(m_unbond_info, 1);
+        h->addWidget(m_claim_button, 0, Qt::AlignTop);
+        m_unbond_label = new QLabel(tr("Unbonding:"), unstakeGroup);
+        unstakeForm->addRow(m_unbond_label, m_unbond_row);
+        m_unbond_row->setVisible(false);
+        m_unbond_label->setVisible(false);
+    }
     unstakeForm->addRow(tr("Result:"), m_unstake_result);
     layout->addWidget(unstakeGroup);
     CollapsibleSection::adopt(unstakeGroup, QStringLiteral("staking/unstake"));
@@ -766,6 +787,7 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
     connect(m_unstake_button, &QPushButton::clicked, this, &StakingPage::onUnstake);
     connect(m_unstake_max, &QPushButton::clicked, this, &StakingPage::onUnstakeMax);
     connect(m_unstake_bump, &QPushButton::clicked, this, &StakingPage::onUnstakeBump);
+    connect(m_claim_button, &QPushButton::clicked, this, &StakingPage::onClaimUnbonded);
     connect(m_refresh_button, &QPushButton::clicked, this, &StakingPage::onRefreshClicked);
     connect(m_deleg_button, &QPushButton::clicked, this, &StakingPage::onDelegate);
     connect(m_undeleg_button, &QPushButton::clicked, this, &StakingPage::onUndelegate);
@@ -776,7 +798,19 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
 void StakingPage::setModel(WalletModel* model)
 {
     m_wallet_model = model;
-    if (m_wallet_model) refresh();
+    if (m_wallet_model) {
+        // An unbonding amount counts down in blocks, so the Withdraw card must
+        // not go stale while the page is open. Only that card, and only once per
+        // new tip: the rest of the page still refreshes on show or on request.
+        connect(&m_wallet_model->clientModel(), &ClientModel::numBlocksChanged, this,
+                [this](int count, const QDateTime&, double, bool header, SynchronizationState sync_state) {
+                    if (header || sync_state != SynchronizationState::POST_INIT || !isVisible()) return;
+                    if (count == m_unstake_seen_tip) return;
+                    m_unstake_seen_tip = count;
+                    refreshUnstakeInfo();
+                });
+        refresh();
+    }
 }
 
 std::string StakingPage::walletUri() const
@@ -1482,9 +1516,111 @@ void StakingPage::onStake()
     refresh();
 }
 
+QString StakingPage::approxUnbondWait(int64_t count) const
+{
+    // Bitcoin blocks come every ten minutes on average; Sequentia's every minute.
+    const double days = (double)count * (m_unbond_parent_blocks ? 600.0 : 60.0) / 86400.0;
+    if (days >= 2.0) return tr("about %1 days").arg(QString::number(days, 'f', 0));
+    const double hours = days * 24.0;
+    if (hours >= 2.0) return tr("about %1 hours").arg(QString::number(hours, 'f', 0));
+    return tr("about %1 minutes").arg(QString::number(std::max(1.0, hours * 60.0), 'f', 0));
+}
+
+void StakingPage::refreshUnbonding()
+{
+    if (!m_unbond_info || !m_wallet_model) return;
+    bool ok = true; QString err;
+    const UniValue res = callRpc("listunbonding", UniValue(UniValue::VARR), ok, err);
+    if (!ok || !res.isObject()) {
+        // An older node, or no proof of stake: nothing to show, and withdrawals
+        // pay out directly.
+        m_two_step = false;
+        m_unbond_row->setVisible(false);
+        m_unbond_label->setVisible(false);
+        return;
+    }
+    m_two_step = res["active"].isBool() && res["active"].get_bool();
+    m_unbond_depth = res["unbond_depth"].isNum() ? res["unbond_depth"].get_int() : 0;
+    m_unbond_parent_blocks = res["unit"].getValStr() != "block";
+    const QString ticker = BitcoinUnits::policyAssetTicker();
+    const QString unit = m_unbond_parent_blocks ? tr("Bitcoin blocks") : tr("blocks");
+
+    CAmount total = 0, claimable = 0, pending = 0;
+    int64_t soonest = -1;
+    const UniValue& outs = res["outputs"];
+    for (size_t i = 0; outs.isArray() && i < outs.size(); ++i) {
+        const UniValue& o = outs[i];
+        CAmount amt = 0;
+        try { amt = AmountFromValue(o["amount"]); } catch (...) { continue; }
+        total += amt;
+        if (o["claimable"].isBool() && o["claimable"].get_bool()) {
+            claimable += amt;
+        } else if (o["remaining"].isNum()) {
+            const int64_t left = o["remaining"].get_int64();
+            if (soonest < 0 || left < soonest) soonest = left;
+        } else {
+            pending += amt; // the withdrawal has not confirmed yet
+        }
+    }
+    const bool show = total > 0;
+    m_unbond_row->setVisible(show);
+    m_unbond_label->setVisible(show);
+    m_claim_button->setEnabled(claimable > 0);
+    if (!show) return;
+
+    QStringList parts;
+    if (claimable > 0) {
+        parts << tr("%1 %2 can be claimed now.").arg(FormatWeight((uint64_t)claimable), ticker);
+    }
+    const CAmount waiting = total - claimable - pending;
+    if (waiting > 0 && soonest >= 0) {
+        parts << tr("%1 %2 is waiting; the next amount can be claimed in %3 %4 (%5).")
+                     .arg(FormatWeight((uint64_t)waiting), ticker, QString::number(soonest), unit,
+                          approxUnbondWait(soonest));
+    }
+    if (pending > 0) {
+        parts << tr("%1 %2 starts its wait of %3 %4 (%5) when the withdrawal confirms.")
+                     .arg(FormatWeight((uint64_t)pending), ticker, QString::number(m_unbond_depth), unit,
+                          approxUnbondWait(m_unbond_depth));
+    }
+    m_unbond_info->setText(parts.join(QLatin1Char(' ')));
+    m_claim_button->setToolTip(claimable > 0
+        ? tr("Move %1 %2 to a fresh address of this wallet, as a normal incoming payment. The network fee is "
+             "paid out of it.").arg(FormatWeight((uint64_t)claimable), ticker)
+        : tr("Nothing has finished its unbonding wait yet."));
+}
+
+void StakingPage::onClaimUnbonded()
+{
+    if (!m_wallet_model) return;
+    const QString ticker = BitcoinUnits::policyAssetTicker();
+    if (AskCentred(this, tr("Claim unbonded stake?"),
+                   tr("Every unbonding amount whose wait is over moves to a fresh address of this wallet, as a "
+                      "normal incoming payment, minus the network fee.")) != QMessageBox::Yes) {
+        return;
+    }
+    m_claim_button->setEnabled(false);
+    bool ok; QString err;
+    const UniValue res = callRpc("claimunbonded", UniValue(UniValue::VARR), ok, err);
+    if (!ok) {
+        m_claim_button->setEnabled(true);
+        setCardResult(m_unstake_result, tr("Could not claim: %1").arg(err), true);
+        return;
+    }
+    const QString amt = QString::fromStdString(res["amount"].getValStr());
+    const QString fee = QString::fromStdString(res["fee"].getValStr());
+    const QString dest = QString::fromStdString(res["destination"].getValStr());
+    const QString txid = QString::fromStdString(res["txid"].getValStr());
+    setCardResult(m_unstake_result, tr("Claimed %1 %2 to %3 (network fee %4 %2).\nTransaction: %5")
+                                        .arg(amt, ticker, dest, fee, txid), false);
+    setStatus(tr("Unbonded stake claimed. It is spendable once the transaction confirms."), false);
+    refresh();
+}
+
 void StakingPage::refreshUnstakeInfo(const UniValue* prefetched)
 {
     if (!m_unstake_info || !m_wallet_model) return;
+    refreshUnbonding();
     bool ok = true; QString err;
     UniValue list = prefetched ? *prefetched : callRpc("liststakeutxos", UniValue(UniValue::VARR), ok, err);
     if (!ok || !list.isArray()) {
@@ -1549,7 +1685,22 @@ void StakingPage::refreshUnstakeInfo(const UniValue* prefetched)
         text = tr("Withdrawable now: %1 %3. Still unbonding: %2 %3 (%4).")
                    .arg(FormatWeight((uint64_t)mature), FormatWeight((uint64_t)immature), ticker, next_unlock);
     }
+    const QString unit = m_unbond_parent_blocks ? tr("Bitcoin blocks") : tr("blocks");
+    if (m_two_step && mature > 0) {
+        text += QLatin1Char(' ') + tr("A withdrawal then waits %1 %2 (%3) before it can be claimed.")
+                                       .arg(QString::number(m_unbond_depth), unit, approxUnbondWait(m_unbond_depth));
+    }
     m_unstake_info->setText(text);
+    if (m_unstake_amount) {
+        m_unstake_amount->setToolTip(m_two_step
+            ? tr("What happens when you withdraw: the %1 stops counting as stake (and earning fees) when the "
+                 "withdrawal confirms, and waits %2 %3 (%4) before you can claim it into this wallet with Claim. "
+                 "The network fee is paid out of the withdrawn amount.")
+                  .arg(ticker, QString::number(m_unbond_depth), unit, approxUnbondWait(m_unbond_depth))
+            : tr("What happens when you withdraw: the %1 comes back to this wallet as a normal incoming payment, "
+                 "spendable as soon as the withdrawal confirms, and your stake (and share of the fees) shrinks "
+                 "by the withdrawn amount. The network fee is paid out of the withdrawn amount.").arg(ticker));
+    }
     if (m_unstake_button) m_unstake_button->setEnabled(mature > 0);
     // Offer the fee bump only while there is something to bump.
     if (m_unstake_bump) m_unstake_bump->setVisible(withdrawing > 0);
@@ -1559,7 +1710,10 @@ void StakingPage::refreshUnstakeInfo(const UniValue* prefetched)
     // disabled widget.
     if (m_unstake_button_holder) {
         QString tip;
-        if (mature > 0) {
+        if (mature > 0 && m_two_step) {
+            tip = tr("Withdraw %1 %2: it leaves the stake when the withdrawal confirms and can be claimed %3 %4 "
+                     "later.").arg(FormatWeight((uint64_t)mature), ticker, QString::number(m_unbond_depth), unit);
+        } else if (mature > 0) {
             tip = tr("Withdraw %1 %2 back to this wallet.").arg(FormatWeight((uint64_t)mature), ticker);
         } else if (immature > 0) {
             tip = tr("Nothing can be withdrawn yet: your %1 %2 is still serving its unbonding wait (%3). "
@@ -1657,7 +1811,7 @@ void StakingPage::onUnstakeBump()
     const QString ticker = BitcoinUnits::policyAssetTicker();
     if (AskCentred(this, tr("Speed up the withdrawal?"),
                    tr("The withdrawal waiting to confirm will be re-sent with a higher network fee, so it is "
-                      "picked up sooner.\n\nIt goes to the same address for the same amount, less the extra "
+                      "picked up sooner.\n\nIt goes to the same place for the same amount, less the extra "
                       "fee. The original is replaced, not repeated — only one of the two can ever confirm.")) != QMessageBox::Yes) {
         return;
     }
@@ -1675,8 +1829,11 @@ void StakingPage::onUnstakeBump()
     const QString amt = res.exists("amount") ? QString::fromStdString(res["amount"].getValStr()) : QString();
     if (m_unstake_result) {
         m_unstake_result->setStyleSheet(QString());
-        m_unstake_result->setText(tr("Withdrawal re-sent with a higher fee: %1 %2 instead of %3 %2.\n"
-                                     "You now receive %4 %2.\nTransaction: %5")
+        m_unstake_result->setText((res["destination"].getValStr() == "unbonding"
+                                       ? tr("Withdrawal re-sent with a higher fee: %1 %2 instead of %3 %2.\n"
+                                            "%4 %2 now goes into unbonding.\nTransaction: %5")
+                                       : tr("Withdrawal re-sent with a higher fee: %1 %2 instead of %3 %2.\n"
+                                            "You now receive %4 %2.\nTransaction: %5"))
                                       .arg(newf, ticker, oldf, amt, txid));
     }
     setStatus(tr("Withdrawal re-sent with a higher fee."), false);
@@ -1771,10 +1928,19 @@ void StakingPage::onUnstake()
     QString msg = tr("You are about to withdraw %1 %2 from your stake.")
                       .arg(FormatWeight((uint64_t)want), ticker);
     msg += "\n\n";
-    msg += tr("The %1 returns to this wallet at a fresh receiving address, as a normal incoming payment, "
-              "minus the network fee. It is spendable as soon as the withdrawal confirms: the unbonding "
-              "wait started when you staked these coins, and it has already been served.")
-               .arg(ticker);
+    if (m_two_step) {
+        msg += tr("The %1 does not come back right away. When the withdrawal confirms it stops counting as "
+                  "stake and moves, minus the network fee, into an unbonding output that only this wallet can "
+                  "spend. It can be claimed into the wallet after %2 %3 (%4): that wait gives the network time "
+                  "to checkpoint the blocks this stake helped sign. Claim it with the Claim button on this card.")
+                   .arg(ticker, QString::number(m_unbond_depth),
+                        m_unbond_parent_blocks ? tr("Bitcoin blocks") : tr("blocks"), approxUnbondWait(m_unbond_depth));
+    } else {
+        msg += tr("The %1 returns to this wallet at a fresh receiving address, as a normal incoming payment, "
+                  "minus the network fee. It is spendable as soon as the withdrawal confirms: the unbonding "
+                  "wait started when you staked these coins, and it has already been served.")
+                   .arg(ticker);
+    }
     msg += "\n\n";
     msg += tr("When the withdrawal confirms, your registered stake drops from %1 to %2 %3")
                .arg(FormatWeight((uint64_t)my_total), FormatWeight((uint64_t)(my_total - want)), ticker);
@@ -1816,7 +1982,16 @@ void StakingPage::onUnstake()
     const QString dest = res.exists("destination") ? QString::fromStdString(res["destination"].getValStr()) : QString();
     const QString amt = res.exists("amount") ? QString::fromStdString(res["amount"].getValStr()) : QString();
     const QString fee = res.exists("fee") ? QString::fromStdString(res["fee"].getValStr()) : QString();
-    QString out = tr("Withdrew %1 %2 to %3 (network fee %4 %2).\nTransaction: %5").arg(amt, ticker, dest, fee, txid);
+    QString out;
+    if (res.exists("unbonding") && res["unbonding"].isBool() && res["unbonding"].get_bool()) {
+        const int depth = res["unbond_depth"].isNum() ? res["unbond_depth"].get_int() : m_unbond_depth;
+        out = tr("Withdrew %1 %2 into unbonding (network fee %3 %2). It can be claimed %4 %5 (%6) after the "
+                 "withdrawal confirms.\nTransaction: %7")
+                  .arg(amt, ticker, fee, QString::number(depth),
+                       m_unbond_parent_blocks ? tr("Bitcoin blocks") : tr("blocks"), approxUnbondWait(depth), txid);
+    } else {
+        out = tr("Withdrew %1 %2 to %3 (network fee %4 %2).\nTransaction: %5").arg(amt, ticker, dest, fee, txid);
+    }
     if (res.exists("restaked")) {
         out += tr("\nRe-staked remainder: %1 %2 (its unbonding clock restarted).")
                    .arg(QString::fromStdString(res["restaked"].getValStr()), ticker);

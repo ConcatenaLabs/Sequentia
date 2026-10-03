@@ -100,6 +100,7 @@ public:
         IssuedAsset,
         Staking,
         Unstake,
+        Unbonding,
     };
 
     /** Number of confirmations recommended for accepting a transaction, on a
@@ -165,6 +166,12 @@ public:
      *  rows telling you nothing. */
     bool is_replacement{false};
     bool was_replaced{false};
+
+    /** SEQUENTIA: for an Unbonding row, what waits in the unbonding output. The
+     *  row's own amount is zero: the coins left the balance when they were
+     *  staked and come back when they are claimed (an Unstake row), so showing
+     *  them here as well would count them twice. */
+    CAmount unbond_amount{0};
 
     /** Return the unique identifier for this transaction (part) */
     QString getTxHash() const;

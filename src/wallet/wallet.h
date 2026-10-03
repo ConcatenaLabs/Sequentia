@@ -372,6 +372,8 @@ private:
      * not discovered in real time, but during a rescan of old blocks.
      */
     bool AddToWalletIfInvolvingMe(const CTransactionRef& tx, const SyncTxState& state, bool fUpdate, bool rescanning_old_block) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    //! SEQUENTIA: does `tx` pay an unbonding output of a staker key this wallet holds?
+    bool CreatesOwnUnbond(const CTransaction& tx) const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
 
     /** Mark a transaction (and its in-wallet descendants) as conflicting with a particular block. */
     void MarkConflicted(const uint256& hashBlock, int conflicting_height, const uint256& hashTx);

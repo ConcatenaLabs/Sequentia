@@ -445,6 +445,13 @@ public:
         // "always on").
         consensus.pos_escape_stall_mtp_height = 1;
         g_pos_escape_stall_mtp_height = consensus.pos_escape_stall_mtp_height;
+        // Two-step unbonding (params.h): in force from mainnet's first block,
+        // for the same reason as the rules above -- a chain with no history has
+        // nothing to coordinate. The depth is the checkpoint depth: the coins
+        // of a departing staker unlock only after a checkpoint taken when it
+        // left could have consolidated (2,016 Bitcoin blocks, about two weeks).
+        consensus.pos_unbond_height = 1;
+        consensus.pos_unbond_anchor_depth = 2016;
         // Supervised assets (src/supervision.h): in force from mainnet's first
         // block, so a supervised issuance is possible from day one and there is
         // no flag day to coordinate later. 1 and not 0 for the same reason as
@@ -907,6 +914,11 @@ public:
         // the anchor-freshness key more material to reorder.
         consensus.pos_slot_gate_seconds = 10;
         consensus.pos_slot_gate_height = 93800;
+        // Two-step unbonding (params.h): a HARD FORK on this running chain.
+        // Off until an activation height is agreed and every operator has
+        // upgraded; set the height here, with the depth below, in one release.
+        consensus.pos_unbond_height = 0;
+        consensus.pos_unbond_anchor_depth = 2016;
         g_coinbase_maturity = consensus.coinbase_maturity;
         g_coinbase_maturity_height = consensus.coinbase_maturity_height;
         // SEQUENTIA: 400,000 weight units — a TENTH of Bitcoin's 4,000,000 —
@@ -2006,6 +2018,14 @@ protected:
         // the historic whole-interval unit.
         consensus.pos_slot_gate_seconds = args.GetIntArg("-posslotgateseconds", 0);
         consensus.pos_slot_gate_height = (int)args.GetIntArg("-posslotgateheight", 1);
+        // Two-step unbonding. Arg-readable only here so tests can exercise it and
+        // both sides of its activation; the real chains pin it in code. Off by
+        // default, so the one-step withdrawal tests keep testing what they test.
+        consensus.pos_unbond_height = (int)args.GetIntArg("-posunbondheight", 0);
+        consensus.pos_unbond_anchor_depth = (int)args.GetIntArg("-posunbonddepth", 2016);
+        if (consensus.pos_unbond_anchor_depth < 1 || consensus.pos_unbond_anchor_depth > 1000000) {
+            throw std::runtime_error("-posunbonddepth must be between 1 and 1000000");
+        }
         consensus.pos_block_spacing_height =
             (int)args.GetIntArg("-posblockspacingheight", 1);
         if (consensus.pos_block_spacing < 0 || consensus.pos_block_spacing > 86400) {

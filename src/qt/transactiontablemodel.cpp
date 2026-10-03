@@ -477,6 +477,8 @@ QString TransactionTableModel::formatTxType(const TransactionRecord *wtx) const
         return tr("Staking");
     case TransactionRecord::Unstake:
         return tr("Unstake");
+    case TransactionRecord::Unbonding:
+        return tr("Unbonding");
     default:
         return QString();
     }
@@ -538,6 +540,11 @@ QString TransactionTableModel::formatTxToAddress(const TransactionRecord *wtx, b
         return tr("Network fee") + watchAddress;
     case TransactionRecord::Staking:
         return tr("Staking deposit") + watchAddress;
+    case TransactionRecord::Unbonding:
+        return tr("%1 leaving the stake, claimable later from the Staking tab")
+                   .arg(GUIUtil::formatAssetAmount(wtx->asset, wtx->unbond_amount,
+                                                   walletModel->getOptionsModel()->getDisplayUnit(),
+                                                   BitcoinUnits::SeparatorStyle::ALWAYS)) + watchAddress;
     default:
         return tr("(n/a)") + watchAddress;
     }

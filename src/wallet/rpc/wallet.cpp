@@ -637,6 +637,8 @@ RPCHelpMan registerstake();
 RPCHelpMan startstaking();
 RPCHelpMan liststakeutxos();
 RPCHelpMan withdrawstake();
+RPCHelpMan claimunbonded();
+RPCHelpMan listunbonding();
 RPCHelpMan bumpwithdrawstakefee();
 RPCHelpMan delegatestake();
 RPCHelpMan undelegatestake();
@@ -764,6 +766,8 @@ static const CRPCCommand commands[] =
     { "wallet",             &startstaking,                   },
     { "wallet",             &liststakeutxos,                 },
     { "wallet",             &withdrawstake,                  },
+    { "wallet",             &claimunbonded,                  },
+    { "wallet",             &listunbonding,                  },
     { "wallet",             &bumpwithdrawstakefee,           },
     { "wallet",             &delegatestake,                  },
     { "wallet",             &undelegatestake,                },
