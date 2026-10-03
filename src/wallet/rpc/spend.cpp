@@ -2101,17 +2101,16 @@ RPCHelpMan claimpoolrewards()
     // at the height the claim would confirm in. That is the chain's maturity
     // in force there (CoinbaseMaturityAt, 1,000 blocks on the real chains),
     // exactly what Consensus::CheckTxInputs applies -- never the inherited
-    // COINBASE_MATURITY, which would build claims that cannot confirm. (A
+    // COINBASE_MATURITY, which would build claims that cannot confirm. A
     // previous claim's own re-pot output is an ordinary transaction output and
-    // sweeps immediately, but sweeping it alone rarely clears the fee cap, so
-    // immature pots are simply left for the next claim rather than
-    // special-cased.)
+    // sweeps as soon as it confirms; sweeping it alone rarely clears the fee
+    // cap, so it is normally collected along with the next mature pot.
     const int spend_height = pwallet->GetLastBlockHeight() + 1;
     const int maturity = CoinbaseMaturityAt(spend_height);
     std::map<COutPoint, PosPotRef> pots;
     int immature = 0;
     for (const auto& e : all_pots) {
-        if (e.second.height > 0 && spend_height - e.second.height < maturity) {
+        if (e.second.coinbase && spend_height - e.second.height < maturity) {
             ++immature;
             continue;
         }
