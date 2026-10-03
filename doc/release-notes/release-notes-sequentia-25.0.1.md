@@ -121,13 +121,15 @@ follows the number of eligible stakers, so a block that registers a committee
 key raises it for the blocks after it; judged against their own tips, a node
 holding that block and a node holding its sibling would disagree on whether the
 sibling is certified, and finalize different blocks. Siblings share a parent,
-and with it the quorum, so whether a block is certified is the same on every
-node. Every valid certificate of a block that is not escaping a stall carries
-its parent's quorum, so for such a block the answer follows from its headers;
-a block escaping a stall has its count judged against its parent's quorum, and
-the node keeps that answer across restarts. `getblockheader` reports the same
-answer as `poscertified`, and `posquorum` is the parent's quorum, present once
-the node knows it.
+and with it the quorum, so for a block that is not escaping a stall whether it
+is certified is the same on every node: every valid certificate of such a block
+carries its parent's quorum, and the answer follows from its headers. A block
+escaping a stall has the count of the certificate the node holds judged against
+its parent's quorum, and the node keeps that answer across restarts; the
+certificate lies outside the block hash, so two nodes holding different
+certificates for such a block can still judge it differently. `getblockheader`
+reports the answer as `poscertified`, which reads `false` while the node does
+not yet know it, and the parent's quorum as `posquorum` once the node knows it.
 
 A certified block is still final against every sibling once its observation
 window has passed, and finality still never blocks a reorg that follows
@@ -170,9 +172,13 @@ block and every 250 ms, also walked the chain down to its first block.
   adopted. A node upgraded from a release that does not write the point holds
   nothing final for that first window after it starts, and then finalizes its
   highest quorum block.
-- Only Bitcoin moves the finalized point back, as before: when the anchor
-  watcher invalidates a finalized block whose anchor was reorganized away, its
-  ancestors stay final and the node follows the branch Bitcoin leaves standing.
+- No competing branch moves the finalized point back. Bitcoin does, as before:
+  when the anchor watcher invalidates a finalized block whose anchor was
+  reorganized away, its ancestors stay final and the node follows the branch
+  Bitcoin leaves standing. So do the two ways a node left on a branch of its own
+  is brought back (the section above): the reconciliation after its patience,
+  and `invalidateblock`. After a crash the node starts from the last point it
+  wrote, which may be a few blocks below the one it held.
 - A pass examines only the blocks connected since the previous one and those
   still in their window.
 
@@ -217,6 +223,21 @@ reproduces the one-step withdrawal the testnet allows below 159,000. A custom
 chain whose history already holds a one-step withdrawal must be started with
 `-posunbondheight=0`, or a height above that withdrawal, to sync or reindex.
 The testnet and the mainnet are not affected: their heights are fixed in code.
+
+## Other changes
+
+- `fundrawtransaction` and `walletcreatefundedpsbt` accept a transaction that
+  has inputs and no outputs.
+- A preselected input in an asset other than the fee asset counts against its
+  own asset, and the fee for its bytes against the fee asset: the wallet no
+  longer adds a further input of the preselected asset to cover a fee that is
+  paid in another one. A preselected input the wallet owns but cannot sign for
+  is sized from the caller's `input_weights` entry.
+- A peer that relays a header building on a block whose Bitcoin anchor was
+  reorganized away is no longer scored as misbehaving for it. The header is
+  refused as before.
+- The desktop wallet's fee panel is shared by the Send tab and the Supervision
+  page.
 
 ## Tests
 
