@@ -11,6 +11,7 @@
 #include <consensus/params.h>
 #include <key.h>
 #include <musig.h>
+#include <node/blockstorage.h>
 #include <policy/policy.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
@@ -1706,6 +1707,45 @@ BOOST_AUTO_TEST_CASE(pos_unbonding_two_step)
     const auto unknown = [](int h) { return -1; };
     BOOST_CHECK(!CheckPosUnbondingTx(claim_tx, view, 1000000, unknown, DEPTH, reason));
     g_con_elementsmode = saved_elementsmode;
+}
+
+BOOST_AUTO_TEST_CASE(pos_fork_choice_ignores_certificate_size)
+{
+    // Same-height blocks: certified first, then the lower VRF score, then the
+    // lower hash -- never the countersignature count, which differs between
+    // nodes holding different certificates of one block.
+    const bool saved_pos = g_con_pos;
+    g_con_pos = true;
+    const node::CBlockIndexWorkComparator worse;
+    uint256 ha = uint256S("01"), hb = uint256S("02");   // ha < hb in uint256 order
+    CBlockIndex a, b;
+    a.phashBlock = &ha;
+    b.phashBlock = &hb;
+    a.nChainWork = b.nChainWork = 7;
+    a.m_pos_vrf_score = b.m_pos_vrf_score = 42;
+    a.m_pos_certified = b.m_pos_certified = true;
+    // Both certified, equal score: the lower hash wins whatever the counts.
+    for (const auto& [ca, cb] : std::vector<std::pair<uint16_t, uint16_t>>{{3, 4}, {4, 3}, {3, 3}, {20, 11}}) {
+        a.m_pos_countersigs = ca;
+        b.m_pos_countersigs = cb;
+        BOOST_CHECK(worse(&b, &a));
+        BOOST_CHECK(!worse(&a, &b));
+    }
+    // The VRF score comes before the hash.
+    a.m_pos_vrf_score = 43;
+    BOOST_CHECK(worse(&a, &b));
+    a.m_pos_vrf_score = 42;
+    // A certified block beats an uncertified one whatever its hash, score or count.
+    a.m_pos_certified = false;
+    a.m_pos_vrf_score = 0;
+    a.m_pos_countersigs = 30;
+    b.m_pos_countersigs = 3;
+    BOOST_CHECK(worse(&a, &b));
+    BOOST_CHECK(!worse(&b, &a));
+    // More work always wins.
+    a.nChainWork = 8;
+    BOOST_CHECK(worse(&b, &a));
+    g_con_pos = saved_pos;
 }
 
 BOOST_AUTO_TEST_CASE(pos_unbonding_next_block)

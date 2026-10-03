@@ -133,14 +133,26 @@ bool CBlockIndexWorkComparator::operator()(const CBlockIndex *pa, const CBlockIn
     if (pa->nChainWork < pb->nChainWork) return true;
 
     // SEQUENTIA PoS (whitepaper §3.8): among equal-work (same-height) blocks,
-    // prefer the stronger certification before falling back to first-seen — a
-    // block with MORE committee countersignatures wins (so a full-threshold
-    // block beats an escaping-stall sub-threshold one), and on a tie the LOWER
-    // leader VRF score wins. Both keys are fixed at acceptance and deterministic
-    // across nodes, so this is a consistent ordering and cannot split consensus.
+    // prefer a certified block (a full committee quorum) to an uncertified one
+    // (an escaping-stall or leader-only block), then the LOWER leader VRF
+    // score, then the LOWER block hash, before falling back to first-seen.
+    //
+    // Never the raw countersignature count. In the BLS forms the certificate
+    // is outside the block hash and any node holding a quorum of shares can
+    // assemble one, so one block reaches different nodes with certificates of
+    // different sizes, and each node keeps the count of the first it saw. Two
+    // nodes holding the same two certified siblings could then rank them
+    // oppositely, finalize opposite blocks once the observation window closed,
+    // and stay split. Whether a block is certified is the same on every node
+    // that accepted it in the same stake state: every valid certificate of a
+    // block that is not escaping a stall reaches the quorum. A certified
+    // block is final against every sibling once its window has passed,
+    // however many members a sibling's certificate names (the immediate-
+    // finality gate, ContextualCheckBlockHeader); the window exists so that
+    // every node holding both certificates picks the same one first.
     if (g_con_pos) {
-        if (pa->m_pos_countersigs < pb->m_pos_countersigs) return true;
-        if (pa->m_pos_countersigs > pb->m_pos_countersigs) return false;
+        if (!pa->m_pos_certified && pb->m_pos_certified) return true;
+        if (pa->m_pos_certified && !pb->m_pos_certified) return false;
         // On equal certification, the LOWER leader VRF score wins (whitepaper
         // §3.8). The VRF result is the ultimate truth here: there is deliberately
         // NO anchor-freshness key in the fork choice. In an immediate-finality
@@ -382,6 +394,27 @@ static bool IsCurrentForFeeEstimation(CChainState& active_chainstate) EXCLUSIVE_
     if (active_chainstate.m_chain.Height() < pindexBestHeader->nHeight - 1)
         return false;
     return true;
+}
+
+void PosRefreshCertifiedKeys(ChainstateManager& chainman)
+{
+    AssertLockHeld(::cs_main);
+    if (!g_con_pos) return;
+    const int quorum = PosSlotQuorum(StakeRegistry::GetInstance());
+    // The comparator reads m_pos_certified, so no block may change it while it
+    // sits in a candidate set: empty the sets, re-measure, insert again.
+    std::vector<std::pair<CChainState*, std::vector<CBlockIndex*>>> candidates;
+    for (CChainState* chainstate : chainman.GetAll()) {
+        candidates.emplace_back(chainstate, std::vector<CBlockIndex*>(chainstate->setBlockIndexCandidates.begin(),
+                                                                      chainstate->setBlockIndexCandidates.end()));
+        chainstate->setBlockIndexCandidates.clear();
+    }
+    for (const auto& [hash, pindex] : chainman.m_blockman.m_block_index) {
+        pindex->m_pos_certified = (int)pindex->m_pos_countersigs >= quorum;
+    }
+    for (auto& [chainstate, blocks] : candidates) {
+        chainstate->setBlockIndexCandidates.insert(blocks.begin(), blocks.end());
+    }
 }
 
 bool PosUnbondingFailsNextBlock(const CTransaction& tx, const CCoinsViewCache& view, const CBlockIndex* tip,
@@ -2819,11 +2852,13 @@ static bool CheckPosStakeRulesAtAccept(const CBlock& block, BlockValidationState
 }
 
 //! SEQUENTIA: compute and store the PoS fork-choice keys (whitepaper §3.8) on a
-//! freshly accepted block, from the block body alone — deterministic and
-//! registry-independent (member count from the coinbase; the leader's VRF beta
-//! over the slot seed). MUST be called before the block enters
-//! setBlockIndexCandidates and never again, so CBlockIndexWorkComparator's
-//! ordering stays stable. No-op for non-PoS chains / unrecognized challenges.
+//! freshly accepted block: the countersignature count of the certificate it
+//! arrived with, whether that count reaches the certification quorum, and the
+//! leader's VRF score over the slot seed. MUST be called before the block
+//! enters setBlockIndexCandidates and never again, so
+//! CBlockIndexWorkComparator's ordering stays stable (PosRefreshCertifiedKeys
+//! re-measures every block at startup, with the candidate set rebuilt around
+//! it). No-op for non-PoS chains / unrecognized challenges.
 static void SetPosForkChoiceKeys(CBlockIndex* pindex, const CBlock& block)
 {
     if (!g_con_pos || pindex == nullptr || pindex->pprev == nullptr) return;
@@ -2864,6 +2899,9 @@ static void SetPosForkChoiceKeys(CBlockIndex* pindex, const CBlock& block)
         count = parts->committee.size();
     }
     pindex->m_pos_countersigs = (uint16_t)std::min<size_t>(count, (size_t)PosMaxCommitteeMembers());
+    // Certified against the quorum of the stake state the node holds now,
+    // the same measure the immediate-finality point applies.
+    pindex->m_pos_certified = (int)pindex->m_pos_countersigs >= PosSlotQuorum(StakeRegistry::GetInstance());
     // Leader VRF score (the top 64 bits of beta; lower is better). Registry-
     // independent: it only needs the leader key and the slot seed.
     if (g_pos_vrf) {
@@ -3792,8 +3830,9 @@ static std::map<uint256, std::pair<int, int64_t>> g_pos_quorum_first_active GUAR
 // partition. Finalizing on connection would let each half keep the block it
 // saw first, forever. Both certificates are ~300-byte gossip objects that every
 // node relays at once, so within a few seconds every node holds both, and the
-// fork-choice comparator (more countersignatures, then lower VRF, then lower
-// hash) gives every node the same winner. Keeping the newest quorum block
+// fork-choice comparator (certified first, then lower VRF, then lower hash;
+// never the countersignature count, which differs between nodes) gives every
+// node the same winner. Keeping the newest quorum block
 // reorganizable for that long turns a permanent split into a short contested
 // height; keeping a split alive would require hiding one certificate from half
 // the network for the whole window, i.e. a real partition.
