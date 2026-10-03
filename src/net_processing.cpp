@@ -4269,7 +4269,29 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         CBlockHeader header;
         vRecv >> header;
         PosProducer* prod = GetActivePosProducer();
-        if (!prod) return;
+        if (!prod) {
+            // No producer: still verify, so a competing certificate holds this
+            // node's finality (validation.h), relay it, and fetch the block.
+            int height = 0;
+            const uint256 hash = header.GetHash();
+            switch (PosVerifyCertificate(header, m_chainman, m_chainparams.GetConsensus(), height)) {
+            case PosGossipAction::Invalid:
+                Misbehaving(pfrom.GetId(), 10, "invalid poscert");
+                break;
+            case PosGossipAction::Relay:
+                if (!PosNoteCompetingCertificate(hash, height)) break; // already known
+                m_connman.PushMessage(&pfrom, CNetMsgMaker(pfrom.GetCommonVersion()).Make(
+                    NetMsgType::GETDATA, std::vector<CInv>{CInv(MSG_BLOCK | MSG_WITNESS_FLAG, hash)}));
+                m_connman.ForEachNode([&](CNode* pnode) {
+                    if (pnode->GetId() == pfrom.GetId()) return;
+                    m_connman.PushMessage(pnode, CNetMsgMaker(pnode->GetCommonVersion()).Make(NetMsgType::POSCERT, header));
+                });
+                break;
+            case PosGossipAction::Ignore:
+                break;
+            }
+            return;
+        }
         switch (prod->OnCertificate(header)) {
         case PosGossipAction::Invalid:
             Misbehaving(pfrom.GetId(), 10, "invalid poscert");

@@ -4515,6 +4515,49 @@ static RPCHelpMan getcheckpointpayload()
 }
 
 // SEQUENTIA PoS: observed checkpoints and the current finality point.
+static RPCHelpMan getposfinality()
+{
+    return RPCHelpMan{"getposfinality",
+        "\nThe immediate-finality point of this node and what, if anything, is holding the next one: a\n"
+        "quorum-certified block becomes final after -posfinalitydelayms on the active chain, and not while a\n"
+        "competing quorum certificate at its height awaits its block (at most -posfinalityholdms).\n",
+        {},
+        RPCResult{RPCResult::Type::OBJ, "", "", {
+            {RPCResult::Type::NUM, "finalized_height", "height of the immediately-finalized block, or -1"},
+            {RPCResult::Type::STR_HEX, "finalized_hash", /*optional=*/true, "its hash"},
+            {RPCResult::Type::NUM, "window_ms", "the observation window (-posfinalitydelayms)"},
+            {RPCResult::Type::NUM, "hold_ms", "the competing-certificate hold (-posfinalityholdms)"},
+            {RPCResult::Type::ARR, "held_by", "competing certificates whose blocks are still awaited", {
+                {RPCResult::Type::OBJ, "", "", {
+                    {RPCResult::Type::NUM, "height", "height of the contested block"},
+                    {RPCResult::Type::STR_HEX, "hash", "the competing block"},
+                }},
+            }},
+        }},
+        RPCExamples{HelpExampleCli("getposfinality", "")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!g_con_pos) throw JSONRPCError(RPC_MISC_ERROR, "Proof-of-Stake (con_pos) is not enabled on this chain");
+    ChainstateManager& chainman = EnsureAnyChainman(request.context);
+    const PosFinalityInfo info = PosGetFinalityInfo(chainman);
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("finalized_height", info.final_height);
+    if (info.final_height >= 0) result.pushKV("finalized_hash", info.final_hash.GetHex());
+    result.pushKV("window_ms", g_pos_finality_delay_ms);
+    result.pushKV("hold_ms", g_pos_finality_hold_ms);
+    UniValue held(UniValue::VARR);
+    for (const auto& [h, hash] : info.held_by) {
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("height", h);
+        o.pushKV("hash", hash.GetHex());
+        held.push_back(o);
+    }
+    result.pushKV("held_by", held);
+    return result;
+},
+    };
+}
+
 static RPCHelpMan getcheckpointinfo()
 {
     return RPCHelpMan{"getcheckpointinfo",
@@ -4655,6 +4698,7 @@ static const CRPCCommand commands[] =
     { "blockchain",         &getpayoutinfo,                      },
     { "blockchain",         &getcheckpointpayload,               },
     { "blockchain",         &getcheckpointinfo,                  },
+    { "blockchain",         &getposfinality,                     },
 
     /* Not shown in help */
     { "hidden",              &invalidateblock,                   },

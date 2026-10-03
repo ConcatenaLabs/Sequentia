@@ -21,6 +21,8 @@ two regimes; which one applies is decided by whether the incumbent is final,
 never by how the rival arrived.
 """
 
+import time
+
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import assert_equal
 from test_framework.key import ECKey
@@ -88,6 +90,12 @@ class PosFinalityTest(BitcoinTestFramework):
         # it (logging bad-fork-prior-to-pos-final): A is final and cannot be
         # overwritten. The log assertion proves the gate (not mere first-seen)
         # protected A.
+        # A becomes final once its observation window (-posfinalitydelayms,
+        # default 3 s) has elapsed with no competing quorum certificate in
+        # sight; only then does the gate refuse competitors. (Inside the window
+        # a competing quorum certificate is proof of equivocation and the
+        # deterministic comparator decides: see feature_pos_split_equivocation.)
+        time.sleep(3.5)
         b_hex = n1.getblock(b, 0)
         with n0.assert_debug_log(["bad-fork-prior-to-pos-final"]):
             n0.submitblock(b_hex)

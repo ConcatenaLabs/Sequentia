@@ -767,9 +767,12 @@ fork-choice key** (§7 explains why, and how freshness is delivered instead).
 
 ### The immediate-finality gate
 
-A hard finality gate makes a quorum-certified block final. `UpdateTip` tracks
-the highest active-chain quorum-certified block; `ContextualCheckBlockHeader`
-rejects any block that would fork at or below it. So a certified block is locked
+A hard finality gate makes a quorum-certified block final once it has stood on
+the active chain for the **finality observation window** (`-posfinalitydelayms`,
+default 3 s) with no unresolved competing certificate at its height (below).
+`UpdateTip`, and a scheduler pass every 250 ms, track the highest active-chain
+quorum-certified block that qualifies; `ContextualCheckBlockHeader` and the
+activation-time gate reject any block that would fork at or below it. So a certified block is locked
 against every Sequentia-internal competitor - *including one that later gathers more
 signatures* - and is never reorged to chase a fresher anchor. The VRF/committee
 result is the ultimate truth.
@@ -782,6 +785,42 @@ which the Bitcoin-consistent chain is accepted. Bitcoin stays the security root 
 Sequentia finality is immediate *modulo* a Bitcoin reorg. Tested in
 `feature_pos_finality.py` (a higher-countersignature competitor does not reorg a
 finalized block) and `feature_pos_fork_choice.py`.
+
+### Equivocating members and the observation window
+
+Two quorums of a majority-quorum committee overlap in at least two members
+(§4), so a double certification needs two members that sign both blocks - and
+nothing more, if the honest members happen to be split between the two. An
+attacker can provoke that split by timing alone: it watches the signature
+shares in gossip, releases a competing proposal as the collection window closes
+so that some members back it and others have already signed, and signs both
+blocks only when the division came out even. Were a block final the moment it
+connected, each half of the network would keep the certificate it saw first,
+the gate would refuse the other, and the split would be permanent.
+
+Two valid certificates at one height are themselves proof of equivocation, so
+the observation window settles them deterministically instead: while a quorum
+block is inside its window, a competing quorum-certified sibling is judged by
+the ordinary comparator (countersignatures, then leader VRF score, then block
+hash), and every node that holds both converges on the same one. A certificate
+is ~300 bytes and every node relays it at once, so the window only has to cover
+its travel. The competing *block* can be large, full of transactions nobody has
+seen, and slow to validate, and its content is the attacker's choice - so a node
+that has verified a competing full-quorum certificate whose block it has not yet
+received and judged keeps that height, and every block above it, undecided until
+it has, for at most `-posfinalityholdms` (default 30 s). Every node verifies
+`poscert` messages for this, with or without a producer, relays them and fetches
+the block from the sender. `getposfinality` reports the finalized point and any
+certificate holding the next one.
+
+Both settings are node-local fork-choice timing, like the gate itself; no block
+is valid or invalid because of them. A node so slow that the competing
+certificate reaches it only after the window is in the position of a pinned
+minority below, and rejoins through reconciliation. Tested in
+`feature_pos_split_equivocation.py` (finality on connection splits the network
+permanently; the window converges it) and `feature_pos_finality_hold.py` (a
+competing certificate holds the height until its block is judged, or until the
+hold expires).
 
 The watcher is not the only release valve anymore. Two rival branches can both
 end up quorum-certified with canonical anchors (a committee legitimately

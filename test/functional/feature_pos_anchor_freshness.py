@@ -24,6 +24,8 @@ Topology mirrors feature_pos_escaping_stall: node0 is the parent ("Bitcoin")
 chain; node1 is the anchored PoS chain.
 """
 
+import time
+
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal, assert_greater_than,
@@ -132,6 +134,11 @@ class PosAnchorFreshnessTest(BitcoinTestFramework):
         # the fresher-anchored B_new against the accepted B_old leaves the chain
         # on B_old: the fresher anchor does NOT override it (the VRF result /
         # first-seen is the truth, not the anchor).
+        # B_old becomes final once its observation window (-posfinalitydelayms,
+        # default 3 s) has elapsed; a competitor shown inside the window would be
+        # judged by the deterministic comparator instead (proof of equivocation,
+        # feature_pos_split_equivocation).
+        time.sleep(3.5)
         node.reconsiderblock(b_new)
         assert_equal(node.getbestblockhash(), b_old)
         assert_equal(node.getblockcount(), 2)

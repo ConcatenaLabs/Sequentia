@@ -1723,14 +1723,18 @@ bool PosProducer::TryConnectCertified()
     return false;
 }
 
-PosGossipAction PosProducer::OnCertificate(const CBlockHeader& header)
+//! How many committee members a certificate names (for logging only).
+static int PopulatedSignerCount(const CBlockHeader& header)
+{
+    if (auto cert = ParsePosBlsBitfieldSolution(header.proof.solution)) return (int)PosBitfieldPopcount(cert->bitfield);
+    if (auto cert = ParsePosBlsSolution(header.proof.solution)) return (int)cert->members.size();
+    return 0;
+}
+
+PosGossipAction PosVerifyCertificate(const CBlockHeader& header, ChainstateManager& chainman,
+                                     const Consensus::Params& consensus, int& height_out)
 {
     const uint256 hash = header.GetHash();
-    {
-        std::lock_guard<std::mutex> lock(m_gossip_mutex);
-        if (!m_seen_certs.insert(hash).second) return PosGossipAction::Ignore;
-        if (m_seen_certs.size() > 20000) m_seen_certs.clear();
-    }
     // Certificates exist only under the BLS committee (the certificate is the
     // header's proof solution, member-independent block hash).
     if (!g_pos_bls || g_pos_committee_size <= 1) return PosGossipAction::Ignore;
@@ -1743,9 +1747,9 @@ PosGossipAction PosProducer::OnCertificate(const CBlockHeader& header)
     bool already_have = false;
     {
         LOCK(cs_main);
-        const CBlockIndex* self = m_chainman.m_blockman.LookupBlockIndex(hash);
+        const CBlockIndex* self = chainman.m_blockman.LookupBlockIndex(hash);
         already_have = self && (self->nStatus & BLOCK_HAVE_DATA);
-        parent = m_chainman.m_blockman.LookupBlockIndex(header.hashPrevBlock);
+        parent = chainman.m_blockman.LookupBlockIndex(header.hashPrevBlock);
     }
     if (already_have) return PosGossipAction::Ignore; // nothing new: the block itself already arrived
     if (!parent) return PosGossipAction::Ignore;
@@ -1754,7 +1758,7 @@ PosGossipAction PosProducer::OnCertificate(const CBlockHeader& header)
     // The leader signature (and structural size) is self-contained and objective,
     // so provable garbage is penalised. Under the bitfield form this is all
     // CheckProof verifies; the aggregate is registry-dependent (below).
-    if (!CheckProof(header, m_chainparams.GetConsensus())) return PosGossipAction::Invalid;
+    if (!CheckProof(header, consensus)) return PosGossipAction::Invalid;
     // Only a FULL-quorum certificate pins anyone: a sub-quorum escaping-stall
     // block is deliberately second-class (never immediately final, loses
     // fork-choice to quorum siblings) and must not suppress production.
@@ -1794,6 +1798,26 @@ PosGossipAction PosProducer::OnCertificate(const CBlockHeader& header)
         }
         signer_count = (int)named.size();
     }
+    height_out = height;
+    (void)signer_count;
+    return PosGossipAction::Relay;
+}
+
+PosGossipAction PosProducer::OnCertificate(const CBlockHeader& header)
+{
+    const uint256 hash = header.GetHash();
+    {
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        if (!m_seen_certs.insert(hash).second) return PosGossipAction::Ignore;
+        if (m_seen_certs.size() > 20000) m_seen_certs.clear();
+    }
+    int height = 0;
+    const PosGossipAction verdict = PosVerifyCertificate(header, m_chainman, m_chainparams.GetConsensus(), height);
+    if (verdict != PosGossipAction::Relay) return verdict;
+    // A competing certificate holds this node's finality at that height until
+    // its block has been received and judged (validation.h).
+    PosNoteCompetingCertificate(hash, height);
+    const int signer_count = PopulatedSignerCount(header);
     // A verified quorum certificate: pin this height. No rival will be
     // proposed, backed or signed here (Step/DriveRound), and the block is
     // completed on the spot if we hold its validated proposal body.

@@ -691,6 +691,8 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-posdebugroundskewms", "SEQUENTIA TEST ONLY: add this many milliseconds of clock skew to the autonomous producer's gossip round scheduler, to measure how much inter-node synchrony loss the round anchor tolerates before rounds desync. Never set this on a real node.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-posanchorrecoverywait=<n>", "SEQUENTIA: seconds the autonomous producer refuses to treat a height as vacant while a quorum-certified block at that height awaits anchor-reorg recovery (committee-equivocation prevention: it neither proposes nor countersigns a rival there). The hold ends early when the block is restored or its anchor is confirmed off the parent chain's best chain; 0 disables the guard. (default: 30)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-posescapestallmtpgap=<n>", strprintf("SEQUENTIA: seconds of parent-chain (Bitcoin) median-time-past that must separate a sub-quorum (escaping-stall) block's anchor from its parent's anchor, in addition to the consensus anchor-height gap. Real-time stall evidence: during a parent-chain block-storm heights advance in seconds, so the height gap alone can be met with the chain fully alive (the 2026-07-17 finality partition). 0 disables. Skipped with -validateanchor=0. (default: %d)", (int)DEFAULT_POS_ESCAPE_STALL_MTP_GAP), ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
+    argsman.AddArg("-posfinalitydelayms=<n>", strprintf("SEQUENTIA: finality observation window in milliseconds. A quorum-certified block becomes immediately final only after it has been on the active chain this long without a competing quorum-certified block at the same height; if one appears (provable equivocation by committee members), every node converges on the same block via the deterministic fork-choice comparator. Local fork-choice timing, not a consensus rule. 0 = final on connection. (default: %d)", DEFAULT_POS_FINALITY_DELAY_MS), ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
+    argsman.AddArg("-posfinalityholdms=<n>", strprintf("SEQUENTIA: longest this node keeps a height undecided after verifying a competing quorum certificate for it whose block it has not yet received and judged. Local fork-choice timing, not a consensus rule. (default: %d)", DEFAULT_POS_FINALITY_HOLD_MS), ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-posreconcile", "SEQUENTIA: enable the finality reconciliation monitor. When this node's finalized branch has received no quorum-certified block for -posreconcilepatience seconds while a rival branch carries quorum certificates strictly above the local finalized height with anchors settled on the parent best chain, release the local finalized point and adopt the network's branch (heals a finality partition; the local blocks are not invalidated, they become inactive history). Requires -validateanchor. (default: true)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-posreconcilepatience=<n>", strprintf("SEQUENTIA: seconds without a quorum-certified extension of the local chain before the local finalized branch counts as abandoned by the committee (the reconciliation monitor's patience; local steady-clock, not consensus). (default: %d)", (int)DEFAULT_POS_RECONCILE_PATIENCE), ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-posreconcilemindepth=<n>", strprintf("SEQUENTIA: the rival branch's quorum-certified block must be at least this many heights above the local finalized height before reconciliation may release it. (default: %d)", DEFAULT_POS_RECONCILE_MIN_DEPTH), ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
@@ -2291,6 +2293,10 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     g_pos_escape_stall_mtp_gap = std::clamp<int64_t>(
         gArgs.GetIntArg("-posescapestallmtpgap", DEFAULT_POS_ESCAPE_STALL_MTP_GAP), 0, 7200);
     g_pos_reconcile = gArgs.GetBoolArg("-posreconcile", true);
+    g_pos_finality_hold_ms = std::clamp<int64_t>(
+        gArgs.GetIntArg("-posfinalityholdms", DEFAULT_POS_FINALITY_HOLD_MS), 0, 600000);
+    g_pos_finality_delay_ms = std::clamp<int64_t>(
+        gArgs.GetIntArg("-posfinalitydelayms", DEFAULT_POS_FINALITY_DELAY_MS), 0, 60000);
     g_pos_reconcile_patience = std::clamp<int64_t>(
         gArgs.GetIntArg("-posreconcilepatience", DEFAULT_POS_RECONCILE_PATIENCE), 60, 86400);
     g_pos_reconcile_min_depth = (int)std::clamp<int64_t>(
@@ -2464,6 +2470,14 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 
     for (const auto& client : node.chain_clients) {
         client->start(*node.scheduler);
+    }
+
+    // SEQUENTIA: let a quorum block whose finality observation window has
+    // elapsed become final even when no new block arrives (validation.h).
+    if (g_con_pos && g_pos_finality_delay_ms > 0) {
+        node.scheduler->scheduleEvery([pchainman]{
+            PosRefreshImmediateFinality(*pchainman);
+        }, std::chrono::milliseconds{250});
     }
 
     BanMan* banman = node.banman.get();

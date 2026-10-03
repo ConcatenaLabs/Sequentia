@@ -150,6 +150,46 @@ extern CBlockIndex *pindexBestHeader;
  *  block, maintained by UpdateTip). Returns false when none. */
 bool PosGetImmediateFinalPoint(int& height, uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
+/** Finality observation window (-posfinalitydelayms). A quorum-certified block
+ *  becomes the immediate-finality point only after it has been on the active
+ *  chain this long. Until then a competing quorum-certified block at the same
+ *  height — which can only exist if committee members signed both, i.e.
+ *  provable equivocation — still wins or loses on the deterministic fork-choice
+ *  comparator, so every node that sees both certificates within the window
+ *  converges on the same block instead of each keeping the one it saw first.
+ *  Node-local fork-choice timing, like the finality gate itself: no block is
+ *  valid or invalid because of it. 0 restores finality at connection. */
+static const int64_t DEFAULT_POS_FINALITY_DELAY_MS = 3000;
+extern int64_t g_pos_finality_delay_ms;
+
+/** Competing-certificate hold (-posfinalityholdms). The observation window
+ *  only has to let a ~300-byte certificate travel; the competing BLOCK may be
+ *  large, full of transactions nobody has seen, and slow to download and
+ *  validate on a weak node -- and its content is chosen by the attacker. So
+ *  when a node has verified a full-quorum certificate for a block at the same
+ *  height as the block it is about to finalize, and has not yet received and
+ *  judged that block, it keeps the height undecided until it has, or until
+ *  this hold expires. */
+static const int64_t DEFAULT_POS_FINALITY_HOLD_MS = 30000;
+extern int64_t g_pos_finality_hold_ms;
+
+/** Record a verified full-quorum certificate (block `hash` at `height`).
+ *  Returns false if it was already known. */
+bool PosNoteCompetingCertificate(const uint256& hash, int height);
+
+/** Immediate-finality state, for getposfinality. */
+struct PosFinalityInfo {
+    int final_height{-1};
+    uint256 final_hash;
+    std::vector<std::pair<int, uint256>> held_by; //!< competing certificates whose blocks are still awaited
+};
+PosFinalityInfo PosGetFinalityInfo(ChainstateManager& chainman);
+
+/** Re-evaluate the immediate-finality point against the active tip, so a
+ *  quorum block whose observation window has elapsed becomes final even when no
+ *  new block arrives. Called periodically from the scheduler. */
+void PosRefreshImmediateFinality(ChainstateManager& chainman);
+
 /** Steady-clock seconds at the last ADVANCE of the immediate-finality point
  *  (0 = never advanced since startup). Lock-free; the reconciliation monitor
  *  reads this as "when did my branch last receive a quorum-certified block". */
