@@ -280,6 +280,7 @@ BASE_SCRIPTS = [
     'feature_pos_split_equivocation.py',
     'feature_pos_certified_parent_quorum.py',
     'feature_pos_certified_stall_quorum.py',
+    'feature_pos_finality_restart.py',
     'feature_pos_finality_hold.py',
     'feature_pos_anchor_freshness.py',
     'feature_pos_genesis_bootstrap.py',

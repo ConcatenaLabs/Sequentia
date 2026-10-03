@@ -138,9 +138,15 @@ block and every 250 ms, also walked the chain down to its first block.
 - A finalized block, and every ancestor of it, stays final. Its window is never
   opened again, whatever the distance to the tip.
 - The window opens when a quorum block joins the active chain after the initial
-  block download. A block connected during that download or loaded from disk
-  counts as observed, so a restarted node finds its finalized block final again
-  before it connects to any peer.
+  block download. A block connected during that download counts as observed.
+- The finalized point is written with the block index, and a restart restores
+  exactly it before the node connects to any peer: a restart neither moves it
+  nor makes the tip final because it is the tip. A quorum block above it that
+  was still in its window when the node stopped is observed again from startup,
+  for one window, so a sibling that ranks above it and arrives then is still
+  adopted. A node upgraded from a release that does not write the point holds
+  nothing final for that first window after it starts, and then finalizes its
+  highest quorum block.
 - Only Bitcoin moves the finalized point back, as before: when the anchor
   watcher invalidates a finalized block whose anchor was reorganized away, its
   ancestors stay final and the node follows the branch Bitcoin leaves standing.

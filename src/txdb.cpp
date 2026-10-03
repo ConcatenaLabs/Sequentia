@@ -36,6 +36,8 @@ static constexpr uint8_t DB_LAST_BLOCK{'l'};
 static constexpr uint8_t DB_PEGIN_FLAG{'w'};
 // static constexpr uint8_t DB_INVALID_BLOCK_Q{'q'};  // No longer used, but avoid reuse.
 static constexpr uint8_t DB_PAK{'p'};
+// SEQUENTIA: the PoS immediate-finality point, a block hash.
+static constexpr uint8_t DB_POS_FINALIZED{'Z'};
 
 // Keys used in previous version that might still be found in the DB:
 static constexpr uint8_t DB_TXINDEX_BLOCK{'T'};
@@ -307,6 +309,14 @@ bool CBlockTreeDB::WriteBatchSync(const std::vector<std::pair<int, const CBlockF
         batch.Write(std::make_pair(DB_BLOCK_INDEX, (*it)->GetBlockHash()), CDiskBlockIndex(*it));
     }
     return WriteBatch(batch, true);
+}
+
+bool CBlockTreeDB::WritePosFinalized(const uint256& hash) {
+    return Write(DB_POS_FINALIZED, hash);
+}
+
+bool CBlockTreeDB::ReadPosFinalized(uint256& hash) {
+    return Read(DB_POS_FINALIZED, hash);
 }
 
 bool CBlockTreeDB::WriteFlag(const std::string &name, bool fValue) {

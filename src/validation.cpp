@@ -402,8 +402,10 @@ static bool IsCurrentForFeeEstimation(CChainState& active_chainstate) EXCLUSIVE_
     return true;
 }
 
-//! SEQUENTIA PoS: bumped whenever a block's PosCarriesQuorum() answer changes,
-//! so the finality pass never trusts a floor laid down under another answer.
+//! SEQUENTIA PoS: bumped whenever the PosCarriesQuorum() answer of a block on
+//! an active chain changes, so the finality pass never trusts a floor laid down
+//! under another answer. A block is judged before it joins the active chain, so
+//! in practice only startup and a re-downloaded pruned block can bump it.
 static uint64_t g_pos_cert_epoch GUARDED_BY(::cs_main) = 0;
 
 //! SEQUENTIA PoS: the certification quorum of the stake state `pindex` leaves,
@@ -459,7 +461,11 @@ static void PosSetCertified(ChainstateManager& chainman, CBlockIndex* pindex, st
         pindex->m_pos_cert_known = verdict.has_value();
         for (CChainState* chainstate : holders) chainstate->setBlockIndexCandidates.insert(pindex);
     }
-    if (pindex->PosCarriesQuorum() != carried) ++g_pos_cert_epoch;
+    if (pindex->PosCarriesQuorum() != carried) {
+        for (CChainState* chainstate : chainman.GetAll()) {
+            if (chainstate->m_chain.Contains(pindex)) ++g_pos_cert_epoch;
+        }
+    }
 }
 
 //! SEQUENTIA PoS: judge `pindex` against `parent_quorum` and record the answer.
@@ -3586,6 +3592,9 @@ CoinsCacheSizeState CChainState::GetCoinsCacheSizeState(
     return CoinsCacheSizeState::OK;
 }
 
+//! SEQUENTIA: the immediate-finality point as it goes to disk (null: none).
+static uint256 PosFinalizedHashForDisk() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
 bool CChainState::FlushStateToDisk(
     BlockValidationState &state,
     FlushStateMode mode,
@@ -3677,6 +3686,12 @@ bool CChainState::FlushStateToDisk(
                 }
                 if (!m_blockman.WriteBlockIndexDB()) {
                     return AbortNode(state, "Failed to write to block index database");
+                }
+                // SEQUENTIA: the finalized point goes to disk after the block
+                // index entry it names, so a restart restores exactly it.
+                if (g_con_pos && this == &m_chainman.ActiveChainstate() &&
+                    !m_blockman.m_block_tree_db->WritePosFinalized(PosFinalizedHashForDisk())) {
+                    return AbortNode(state, "Failed to write the finalized point to the block index database");
                 }
 
                 // This should be done inside WriteBatchSync, but CBlockIndex is const there
@@ -3915,13 +3930,20 @@ static std::vector<uint256> PosHeldBy(const CBlockIndex* f, int64_t now,
 }
 // When each quorum-certified block connected in this process was first
 // connected to the active chain (height, steady ms), for the finality
-// observation window. A block with no entry has been observed for as long as
-// any window lasts: it was loaded from disk at startup, connected during the
-// initial block download (historical, settled by the network long ago), or is
-// at or below the finalized point, where entries are pruned. So no window is
-// ever re-opened for a block at or below the finalized point, and a restart
-// finds the finalized block final again at its first pass.
+// observation window. A block with no entry was connected during the initial
+// block download (historical, settled by the network long ago), is at or below
+// the finalized point, where entries are pruned, or was loaded from disk at
+// startup. The first two have been observed for as long as any window lasts.
+// The last has been observed only since the node started (g_pos_load_ms): the
+// finalized point is restored from disk exactly (PosRestoreImmediateFinality),
+// and a quorum block above it that was still in its window at shutdown may
+// have a better-ranked sibling the node has not seen yet, so its window runs
+// again from load time. No window is ever re-opened for a block at or below
+// the finalized point.
 static std::map<uint256, std::pair<int, int64_t>> g_pos_quorum_first_active GUARDED_BY(::cs_main);
+// Steady ms at which the finalized point was restored at startup (0: never,
+// e.g. after -reindex, whose blocks all connect during the download).
+static int64_t g_pos_load_ms GUARDED_BY(::cs_main) = 0;
 // Where the last pass stopped looking: a block such that no block from it down
 // to the finalized block it found (g_pos_final_floor_final_*, height -1 if
 // none: down to genesis) carried a quorum while the certified answers stood at
@@ -3988,6 +4010,8 @@ static void RecomputePosImmediateFinality(const CBlockIndex* tip,
     // remain are still final, and the blocks of the new branch above them
     // pass through their own windows.
     const CBlockIndex* old_final = old_final_height >= 0 ? lookup(g_pos_immediate_final_hash) : nullptr;
+    // Blocks loaded from disk above the restored point are observed from load time.
+    const bool load_window_open = g_pos_load_ms > 0 && now - g_pos_load_ms < g_pos_finality_delay_ms;
     if (g_pos_cert_epoch != g_pos_final_floor_epoch) g_pos_final_floor_height = -1; // an answer below it may have changed
     g_pos_immediate_final_height = -1;
     const CBlockIndex* lowest_pending = nullptr; // lowest quorum block passed over (in its window, or held)
@@ -4007,12 +4031,17 @@ static void RecomputePosImmediateFinality(const CBlockIndex* tip,
         if (!settled && old_final && f->nHeight <= old_final->nHeight && old_final->GetAncestor(f->nHeight) == f) {
             settled = true;
         }
-        if (!f->PosCarriesQuorum()) continue;
+        // The finalized block itself stays final whatever its answer says now.
+        if (!f->PosCarriesQuorum() && f != old_final) continue;
         if (!settled && g_pos_finality_delay_ms > 0) {
             auto it = g_pos_quorum_first_active.find(f->GetBlockHash());
-            const bool in_window = it != g_pos_quorum_first_active.end() && now - it->second.second < g_pos_finality_delay_ms;
+            const bool loaded = it == g_pos_quorum_first_active.end();
+            const bool in_window = loaded ? load_window_open : now - it->second.second < g_pos_finality_delay_ms;
             if (in_window || f->nHeight >= held_floor) {  // still observed, or contested at or below it
                 lowest_pending = f;
+                // With nothing restored, every lower block is in its window
+                // too: it was loaded at the same time, or connected since.
+                if (in_window && loaded && !old_final) break;
                 continue;
             }
         }
@@ -4044,6 +4073,33 @@ static void RecomputePosImmediateFinality(const CBlockIndex* tip,
     if (g_pos_immediate_final_height > old_final_height) {
         PosStampFinalAdvanceNow();
     }
+}
+
+static uint256 PosFinalizedHashForDisk()
+{
+    AssertLockHeld(::cs_main);
+    return g_pos_immediate_final_height >= 0 ? g_pos_immediate_final_hash : uint256();
+}
+
+void PosRestoreImmediateFinality(ChainstateManager& chainman)
+{
+    if (!g_con_pos) return;
+    LOCK(::cs_main);
+    uint256 hash;
+    const CBlockIndex* restored = nullptr;
+    if (chainman.m_blockman.m_block_tree_db->ReadPosFinalized(hash) && !hash.IsNull()) {
+        restored = chainman.m_blockman.LookupBlockIndex(hash);
+    }
+    g_pos_immediate_final_height = restored ? restored->nHeight : -1;
+    g_pos_immediate_final_hash = restored ? restored->GetBlockHash() : uint256();
+    g_pos_final_floor_height = -1;
+    g_pos_load_ms = PosSteadyMs();
+    const CBlockIndex* tip = chainman.ActiveChain().Tip();
+    if (tip) RecomputePosImmediateFinality(tip, [&chainman](const uint256& h) { return chainman.m_blockman.LookupBlockIndex(h); });
+    LogPrintf("PoS finality: restored finalized point %s (height %d); finalized now %s (height %d)\n",
+              restored ? hash.ToString() : "none", restored ? restored->nHeight : -1,
+              g_pos_immediate_final_height >= 0 ? g_pos_immediate_final_hash.ToString() : "none",
+              g_pos_immediate_final_height);
 }
 
 void PosRefreshImmediateFinality(ChainstateManager& chainman)

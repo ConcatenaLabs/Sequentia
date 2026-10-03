@@ -88,6 +88,10 @@ public:
     void ReadReindexing(bool &fReindexing);
     bool WriteFlag(const std::string &name, bool fValue);
     bool ReadFlag(const std::string &name, bool &fValue);
+    //! SEQUENTIA: the PoS immediate-finality point (null: none), kept with the
+    //! block index so a restart restores exactly it.
+    bool WritePosFinalized(const uint256& hash);
+    bool ReadPosFinalized(uint256& hash);
     bool LoadBlockIndexGuts(const Consensus::Params& consensusParams, std::function<CBlockIndex*(const uint256&)> insertBlockIndex, int trimBelowHeight)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     // ELEMENTS:

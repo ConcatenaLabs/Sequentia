@@ -130,9 +130,9 @@ std::optional<ChainstateLoadingError> LoadChainstate(bool fReset,
                 return ChainstateLoadingError::ERROR_LOADCHAINTIP_FAILED;
             }
             assert(chainstate->m_chain.Tip() != nullptr);
-            // The finalized point is not on disk either: find it again before
+            // Restore the finalized point written with the block index before
             // any peer can offer a branch that forks below it.
-            if (g_con_pos && chainstate == &chainman.ActiveChainstate()) PosRefreshImmediateFinality(chainman);
+            if (g_con_pos && chainstate == &chainman.ActiveChainstate()) PosRestoreImmediateFinality(chainman);
         }
     }
 

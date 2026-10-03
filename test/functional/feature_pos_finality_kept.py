@@ -15,7 +15,12 @@ final again at once. Then:
    height;
  - a parent-chain (Bitcoin) reorg that orphans the finalized block's anchor
    still takes it away: the anchor watcher invalidates it, its ancestors stay
-   final, and the node follows the branch Bitcoin leaves standing.
+   final, and the node follows the branch Bitcoin leaves standing;
+ - a node without the watcher (-validateanchor=0) imposes no finality gate:
+   holding the same finalized block, it follows that branch by most work as
+   soon as the branch is the longer one.
+
+Both happen after a restart, which restores the finalized point from disk.
 
 Here the committee stalls after quorum block Q: more than a hundred
 escaping-stall blocks (one member, allowed once the parent chain has moved on)
@@ -28,7 +33,7 @@ does).
 
 Nodes: 0 parent chain; 1 S, aggregate committee of 3 (quorum 2),
 -validateanchor; 2 S2, isolated after height 2, builds the rival branch;
-3 a standalone leader-only chain.
+3 a standalone leader-only chain; 4 F, following S with -validateanchor=0.
 """
 import os
 import time
@@ -52,7 +57,7 @@ def make_staker():
 class PosFinalityKeptTest(BitcoinTestFramework):
     def set_test_params(self):
         self.setup_clean_chain = True
-        self.num_nodes = 4
+        self.num_nodes = 5
         self.stakers = [make_staker() for _ in range(3)]
         self.leader_only = make_staker()
 
@@ -87,7 +92,11 @@ class PosFinalityKeptTest(BitcoinTestFramework):
             "-staker=%s:1" % self.leader_only[1], "-debug=bench",
         ]], chain=[chain])
         self.start_node(3)
+        no_watcher = [a if a != "-validateanchor=1" else "-validateanchor=0" for a in common]
+        self.add_nodes(1, [no_watcher + ["-port=%d" % p2p_port(4), "-rpcport=%d" % rpc_port(4)]], chain=[chain])
+        self.start_node(4)
         self.connect_nodes(1, 2)
+        self.connect_nodes(1, 4)
         self.nodes[0].createwallet(wallet_name="w", descriptors=True)
         self.paddr = self.nodes[0].getnewaddress()
 
@@ -113,8 +122,15 @@ class PosFinalityKeptTest(BitcoinTestFramework):
     def fin(self, node):
         return node.getposfinality()["finalized_height"]
 
+    def block_at(self, node, height):
+        """The block at `height`, or None while the chain is shorter (mid-reorg)."""
+        try:
+            return node.getblockhash(height)
+        except JSONRPCException:
+            return None
+
     def run_test(self):
-        parent, s, s2, lo = self.nodes
+        parent, s, s2, lo, f = self.nodes
         self.advance_parent(12)
         for _ in range(2):
             self.produce(s, True)
@@ -149,10 +165,17 @@ class PosFinalityKeptTest(BitcoinTestFramework):
         assert_equal(s.getblockcount(), Q + STRETCH)
         assert_equal(self.fin(s), Q)
 
-        self.log.info("After a restart it is final at once")
+        self.sync_blocks([s, f])
+        self.wait_until(lambda: self.fin(f) == Q, timeout=10)
+
+        self.log.info("After a restart it is final at once, on both")
         self.restart_node(1)
-        assert_equal(self.fin(s), Q)
-        assert_equal(s.getposfinality()["finalized_hash"], q_hash)
+        self.restart_node(4)
+        s, f = self.nodes[1], self.nodes[4]
+        for node in (s, f):
+            assert_equal(self.fin(node), Q)
+            assert_equal(node.getposfinality()["finalized_hash"], q_hash)
+        self.connect_nodes(1, 4)
 
         self.log.info("A longer rival branch forking at the finalized height is refused")
         target = s.getblockcount() + 1
@@ -168,6 +191,11 @@ class PosFinalityKeptTest(BitcoinTestFramework):
         assert_equal(self.fin(s), Q)
 
         self.log.info("A parent-chain reorg that orphans the finalized block's anchor still takes it away")
+        # F rejoins once S has settled: on its way S briefly follows the rival
+        # branch, whose blocks it then invalidates and no longer serves, and a
+        # node without the watcher that learned those headers from it would wait
+        # out a block download timeout before asking again.
+        self.disconnect_nodes(1, 4)
         tip_height = parent.getblockcount()
         parent.invalidateblock(parent.getblockhash(q_anchor))
         self.advance_parent(tip_height - q_anchor + 2)
@@ -176,12 +204,23 @@ class PosFinalityKeptTest(BitcoinTestFramework):
         # S2's rival block 3 is anchored below it and stands: S, which refused
         # it while Q was final, now follows it. The rival's later blocks are
         # anchored on the orphaned parent blocks too, and go the same way.
-        self.wait_until(lambda: s.getblockhash(Q) == r3["hash"] and s.getblockcount() == Q, timeout=60)
+        self.wait_until(lambda: self.block_at(s, Q) == r3["hash"] and s.getblockcount() == Q, timeout=60)
         assert_equal(s.getblock(q_hash, 1)["confirmations"], -1)
         self.wait_until(lambda: s.getposfinality()["finalized_hash"] == r3["hash"], timeout=10)
         assert_equal(self.fin(s), Q)
         self.produce(s, True)
         assert_equal(s.getblockcount(), Q + 1)
+
+        self.log.info("Without the watcher, F follows that branch once it is the longer one")
+        # F holds Q final too, but imposes no gate: Bitcoin's verdict reaches it
+        # through most-work fork choice, transitively, from the nodes that watch.
+        assert_equal(f.getblockhash(Q), q_hash)
+        f_height = f.getblockcount()
+        while s.getblockcount() <= f_height:
+            self.produce(s, True)
+        self.connect_nodes(1, 4)
+        self.wait_until(lambda: self.block_at(f, Q) == r3["hash"] and f.getbestblockhash() == s.getbestblockhash(),
+                        timeout=60)
 
         self.log.info("A chain with nothing to finalize is not walked whole on every pass")
         for _ in range(150):
