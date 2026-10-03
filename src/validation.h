@@ -1014,6 +1014,20 @@ public:
      */
     std::set<CBlockIndex*> m_failed_blocks;
 
+    //! SEQUENTIA: the block the Bitcoin-anchor watcher is invalidating right
+    //! now. Set from just before its InvalidateBlock until the block carries
+    //! BLOCK_FAILED_ANCHOR, so IsAnchorOrphaned also covers that window. On a
+    //! deep parent reorg the window lasts seconds: InvalidateBlock disconnects
+    //! one block per cs_main hold.
+    const CBlockIndex* m_anchor_invalidating GUARDED_BY(::cs_main){nullptr};
+
+    /** SEQUENTIA: whether failed block pindex is failed only because the anchor
+     *  watcher orphaned it, or an ancestor, after a parent-chain reorganization
+     *  (rather than for a consensus failure or an operator's invalidateblock).
+     *  See the definition for why peers relaying on such blocks are not
+     *  misbehaving. */
+    bool IsAnchorOrphaned(const CBlockIndex* pindex) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
     //! The total number of bytes available for us to use across all in-memory
     //! coins caches. This will be split somehow across chainstates.
     int64_t m_total_coinstip_cache{0};

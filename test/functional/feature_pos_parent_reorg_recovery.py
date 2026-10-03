@@ -23,12 +23,23 @@ non-forward tip change (pos_producer.cpp PosProducer::Step).
 Topology mirrors feature_pos_autonomous_escaping_stall.py: node0 = parent
 ("Bitcoin"); node1 = the founder PoS node (sole genesis staker, -posproducer);
 node2 = a non-staking PoS peer providing gossip connectivity.
+
+The two anchor watchers poll at different rates on purpose (founder every
+FOUNDER_POLL seconds, peer every second), so the peer always sees the parent
+reorg first. Meanwhile the founder, which reads the parent tip live when it
+picks an anchor, certifies a block on top of the block the peer has just
+invalidated, and relays it. That is honest: its watcher simply has not ticked
+yet. The peer must reject the block without treating the founder as
+misbehaving. It used to score it 100 ("invalid header via cmpctblock") and
+drop the connection, leaving the founder with no peers. A producer without
+peers never proposes, so the chain never resumed.
 """
 
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal, get_auth_cookie, get_datadir_path, rpc_port, p2p_port,
 )
+from test_framework.authproxy import JSONRPCException
 from test_framework.key import ECKey
 from test_framework.address import byte_to_base58
 
@@ -46,6 +57,7 @@ STAKE_CSV = 15               # height-based CSV (>= posunbonding 10 * slot 1)
 COMMITTEE = 3                # quorum 2 -> the lone founder is sub-quorum (escaping stall)
 PARENT_BLOCK_SECONDS = 600   # parent-chain block spacing (one Bitcoin interval)
 PARENT_BLOCKS_PER_ROUND = 4  # >= POS_ESCAPING_STALL_ANCHOR_GAP (3)
+FOUNDER_POLL = 20            # founder's -anchorpollinterval; the peer polls every second
 
 
 class PosParentReorgRecoveryTest(BitcoinTestFramework):
@@ -81,14 +93,16 @@ class PosParentReorgRecoveryTest(BitcoinTestFramework):
             "-con_blocksubsidy=5000000000",
             "-con_genesis_stake=%s:%d:%d" % (self.founder_pub, SEED_STAKE, STAKE_CSV),
             "-con_connect_genesis_outputs=1", "-initialfreecoins=500000000",
-            "-con_bitcoin_anchor=1", "-validateanchor=1", "-anchorpollinterval=1", "-anchorminconf=1",
+            "-con_bitcoin_anchor=1", "-validateanchor=1", "-anchorminconf=1",
             "-mainchainrpchost=127.0.0.1", "-mainchainrpcport=%d" % rpc_port(0),
             "-mainchainrpcuser=%s" % rpc_u, "-mainchainrpcpassword=%s" % rpc_p,
             "-parentgenesisblockhash=%s" % self.parentgenesis,
         ]
         founder_args = consensus + ["-port=%d" % p2p_port(1), "-rpcport=%d" % rpc_port(1),
+                                    "-anchorpollinterval=%d" % FOUNDER_POLL,
                                     "-posproducer=1", "-posproducerkey=%s" % self.founder_wif]
         peer_args = consensus + ["-port=%d" % p2p_port(2), "-rpcport=%d" % rpc_port(2),
+                                 "-anchorpollinterval=1",
                                  "-posproducer=1", "-posproducerkey=%s" % self.peer_wif]
         self.add_nodes(1, [founder_args], chain=[chain])
         self.start_node(1)
@@ -139,18 +153,53 @@ class PosParentReorgRecoveryTest(BitcoinTestFramework):
         # parent's best chain replaces the orphaned blocks.
         fork_at = 9
         bad = parent.getblockhash(fork_at)
-        parent.invalidateblock(bad)
-        assert_equal(parent.getblockcount(), fork_at - 1)
-        # Mine a competing branch taller than the old one (old tip was parent_h),
-        # at the same Bitcoin cadence so its median-time-past keeps advancing.
-        self.advance_parent((parent_h - fork_at) + 6)
-        assert parent.getblockcount() > parent_h
-        self.log.info("parent reorged: new best height %d, old block-3 anchor orphaned" % parent.getblockcount())
 
-        # The founder's anchor watcher invalidates block 3 (orphaned anchor) and
-        # rolls the Sequentia tip back to height 2.
-        self.wait_until(lambda: founder.getblockcount() == 2, timeout=120)
-        self.log.info("Sequentia tip rolled back to height 2 after the parent reorg")
+        def block3_replaced():
+            """True once the founder's active chain no longer holds the old block 3."""
+            try:
+                return founder.getblockhash(3) != h3_old
+            except JSONRPCException:  # height 3 not reached (tip rolled back to 2)
+                return True
+
+        with peer.assert_debug_log(expected_msgs=[], unexpected_msgs=["Misbehaving"]):
+            parent.invalidateblock(bad)
+            assert_equal(parent.getblockcount(), fork_at - 1)
+            # One block on the new branch before waiting. Without it the parent
+            # tip can be exactly the one the peer's watcher saw before the climb's
+            # last blocks (8 -> 12 -> 8 between two ticks): the watcher then sees no
+            # move and keeps the verdict "anchor 12 is canonical" cached while
+            # validating block 3. A real parent never returns to an earlier tip.
+            # Height 9 is still too low for the founder to anchor block 4.
+            self.advance_parent(1)
+            # The peer's watcher drops block 3 within a second; the founder's has
+            # not ticked yet.
+            self.wait_until(lambda: peer.getblockcount() == 2, timeout=30)
+            # Mine a competing branch taller than the old one (old tip was parent_h),
+            # at the same Bitcoin cadence so its median-time-past keeps advancing.
+            self.advance_parent((parent_h - fork_at) + 5)
+            assert parent.getblockcount() > parent_h
+            self.log.info("parent reorged: new best height %d, old block-3 anchor orphaned" % parent.getblockcount())
+
+            # Still blind to the reorg, the founder extends the orphaned block 3
+            # with a fresh anchor and relays it to the peer, which has already
+            # invalidated block 3. Unless the founder's watcher happened to tick
+            # during the parent's reorg, which is rare at FOUNDER_POLL.
+            self.wait_until(lambda: founder.getblockcount() >= 4 or block3_replaced(), timeout=60)
+            if not block3_replaced():
+                self.log.info("founder extended the orphaned block 3 before noticing the reorg")
+            else:
+                self.log.info("founder noticed the reorg first; the stale relay was not exercised this run")
+
+            # The founder's anchor watcher invalidates block 3 (orphaned anchor) and
+            # rolls the Sequentia tip back. The producer may rebuild height 3 at once
+            # (the new parent branch already gives it the anchor gap), so wait for
+            # block 3 to leave the active chain rather than for height 2.
+            self.wait_until(block3_replaced, timeout=FOUNDER_POLL + 60)
+            self.log.info("Sequentia tip rolled back past the orphaned block 3")
+
+        # The peer did not drop the founder for relaying on a block only the peer
+        # had already seen orphaned. Without peers the producer never proposes.
+        assert_equal(len(founder.getpeerinfo()), 1)
 
         # THE REGRESSION: the autonomous producer must RESUME and rebuild past the
         # rolled-back height on a fresh anchor. Without the round-state reset it is
