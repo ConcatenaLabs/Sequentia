@@ -435,9 +435,9 @@ void FeeSelectionWidget::updateGrid(const CAmount& asset_atoms_per_kvb)
     const FeeAssetInfo info = m_model->node().getFeeAssetInfo(asset);
     const double factor = AtomsPerUnit(info.precision);
     // The reference column is a market valuation, so it comes from the price feed
-    // and not from the whitelist rate. The two normally agree, since whitelist
-    // rates are derived from the feed -- but an asset an operator listed by hand
-    // has a rate and no quote, and reading the rate there printed a USD figure
+    // and not from the whitelist rate. The two usually agree, since a price server
+    // derives whitelist rates from market prices -- but an asset an operator listed
+    // by hand has a rate and no quote, and reading the rate there printed a USD figure
     // directly beside the warning saying this asset has no published price. No
     // quote, no column: an empty cell is the honest answer.
     const double unit_price = info.has_market_price ? info.market_price : 0.0;
@@ -589,6 +589,25 @@ QString FeeSelectionWidget::formatFeeRate(const CAmount& fee_asset_atoms_per_kvb
 
 void FeeSelectionWidget::updateWarning()
 {
+    // Before anything about the chosen asset: a node whose whitelist accepts
+    // nothing cannot send in any of them, and with nothing accepted the
+    // selector below may well be empty, which would otherwise hide the warning
+    // exactly when it matters most.
+    if (g_con_any_asset_fees && m_model) {
+        bool any_accepted = false;
+        for (const FeeAssetInfo& candidate : m_model->node().listFeeAssetInfo()) {
+            if (candidate.accepted) { any_accepted = true; break; }
+        }
+        if (!any_accepted) {
+            m_warning->setStyleSheet(QStringLiteral("color: #ff6b6b;"));
+            m_warning->setText(
+                tr("This node accepts no asset for transaction fees yet, so nothing can be sent. "
+                   "Set prices by hand or launch the price server under Settings → Fee acceptance. "
+                   "Receiving is not affected."));
+            m_warning->setVisible(true);
+            return;
+        }
+    }
     if (!g_con_any_asset_fees || !m_model || m_asset_selector->count() == 0) {
         m_warning->setVisible(false);
         return;
@@ -620,7 +639,7 @@ void FeeSelectionWidget::updateWarning()
         m_warning->setText(
             why + QLatin1Char(' ') +
             tr("The transaction would be rejected by your own node before it ever reached a block "
-               "producer. Pick an accepted asset, or set a rate for %1 under Settings → Fee policy.").arg(name));
+               "producer. Pick an accepted asset, or set a price for %1 under Settings → Fee acceptance.").arg(name));
         m_warning->setVisible(true);
         return;
     }
