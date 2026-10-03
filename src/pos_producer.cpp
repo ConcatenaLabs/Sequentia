@@ -133,6 +133,16 @@ std::shared_ptr<CBlock> BuildUnsignedBlsBlock(ChainstateManager& chainman, CTxMe
     }
     if (!tmpl) return nullptr;
     auto block = std::make_shared<CBlock>(tmpl->block);
+    // The proposal's timestamp is the origin of the committee's round schedule
+    // (DriveRound), so it must be the second the proposal is actually made.
+    // GetAdjustedTime() rests on time(), which on Linux reads a coarse clock that
+    // still shows the previous second for a few milliseconds after it ends —
+    // exactly when Step wakes a producer, on the whole second its slot opens.
+    // Stamped a second early, the proposal opens every node's collection window
+    // up to a second before it exists, and arrives with the window shut. Raise
+    // the stamp to the precise clock; raising it is always valid (the slot gate
+    // and the spacing floor are lower bounds, and it moves by one second at most).
+    block->nTime = std::max<int64_t>(block->nTime, GetTime<std::chrono::seconds>().count() + GetTimeOffset());
     {
         LOCK(cs_main);
         unsigned int extra_nonce = 0;
@@ -644,6 +654,7 @@ int64_t PosProducer::Step()
                           tip_hash.ToString(), tip->nHeight, m_round_height, m_proposed_height);
                 m_round_height = 0;
                 m_proposed_height = 0;
+                m_propose_at_height = 0;
                 m_candidates.clear();
                 m_collected.clear();
                 m_excluded.clear();
@@ -831,7 +842,33 @@ int64_t PosProducer::Step()
         const int height = tip->nHeight + 1;
         int64_t round_poll = DriveRound();
         const bool connected = m_connman && m_connman->GetNodeCount(ConnectionDirection::Both) > 0;
-        if (now_ms >= target_ms && connected) {
+        // The round schedule is anchored to the round-0 block's timestamp, which
+        // is whole seconds. A proposal sent at a fractional second carries the
+        // second already begun, so every node's collection window opened before
+        // the proposal existed: sent 700 ms into the second, it arrives with the
+        // window already shut, and each node signs whatever it happens to hold —
+        // often only its own block — splitting the committee. On time (we woke at
+        // the slot, as in steady state) nothing changes. Late by more than half
+        // the window (start-up, catch-up), we propose at the next whole second
+        // instead, so the timestamp is the moment of proposal and the window is
+        // whole; the instant is fixed once, as a "next second" recomputed on
+        // every poll would recede forever. After a collection restart,
+        // RestartCollection has fixed it from the exhausted schedule: that is
+        // the same on every node, so the re-proposals share one timestamp too.
+        int64_t propose_ms = earliest_sec * 1000;
+        bool proposed;
+        {
+            std::lock_guard<std::mutex> lock(m_gossip_mutex);
+            proposed = m_proposed_height >= height;
+            if (m_propose_at_height != height && !proposed && connected &&
+                now_ms > propose_ms + WindowMs() / 2) {
+                m_propose_at_height = height;
+                m_propose_at_ms = ((now_ms + 999) / 1000) * 1000;
+            }
+            if (m_propose_at_height == height) propose_ms = std::max(propose_ms, m_propose_at_ms);
+        }
+        const int64_t propose_now_ms = GetTimeMillis();
+        if (propose_now_ms >= propose_ms && connected) {
             bool start;
             {
                 std::lock_guard<std::mutex> lock(m_gossip_mutex);
@@ -847,11 +884,11 @@ int64_t PosProducer::Step()
             }
         }
         int64_t wait = std::min<int64_t>(round_poll, POS_PRODUCER_POLL_MS);
-        // No active round and not yet due to propose: wake right at our slot
-        // target (the stagger is sub-second, so we must not overshoot it with a
-        // full poll interval).
-        if (wait >= POS_PRODUCER_POLL_MS && now_ms < target_ms) {
-            wait = std::clamp<int64_t>(target_ms - now_ms, 1, POS_PRODUCER_POLL_MS);
+        // Not yet due to propose: wake right at the proposal instant (it is a
+        // whole-second boundary every node aims at, so we must not overshoot it
+        // with a full poll interval).
+        if (!proposed && propose_now_ms < propose_ms) {
+            wait = std::clamp<int64_t>(propose_ms - propose_now_ms, 1, wait);
         }
         return wait;
     }
@@ -1013,7 +1050,12 @@ std::shared_ptr<const CBlock> PosProducer::BackedForRound(int r) const
     // it, the legacy raw leader VRF (beta). Every node gates on the same height
     // (m_round_height, the block's own height) so all honest nodes converge on
     // the identical leader — a divergence here would split the committee.
-    if (r < 0 || (size_t)r >= m_candidates.size()) return nullptr;
+    //
+    // A collection can run more rounds than it has candidates (see
+    // RoundsExhaustedAtMs); the order then starts over, giving each candidate
+    // another round rather than leaving the extra rounds idle.
+    if (r < 0 || m_candidates.empty()) return nullptr;
+    r %= (int)m_candidates.size();
 
     const bool exprace = PosExpRaceActive(m_chainparams.GetConsensus(), m_round_height);
     const StakeRegistry& registry = StakeRegistry::GetInstance();
@@ -1035,6 +1077,78 @@ std::shared_ptr<const CBlock> PosProducer::BackedForRound(int r) const
                   return a.cand->beta < b.cand->beta;       // legacy: lowest raw VRF
               });
     return ordered[r].cand->block;
+}
+
+int64_t PosProducer::WindowMs() const
+{
+    return m_window_override_ms > 0 ? m_window_override_ms : 500 + 25 * (int64_t)g_pos_committee_size;
+}
+
+int64_t PosProducer::RoundMs() const
+{
+    return m_round_override_ms > 0 ? m_round_override_ms : 700 + 35 * (int64_t)g_pos_committee_size;
+}
+
+int PosProducer::RoundsPerCollection() const
+{
+    // m_gossip_mutex held. A fixed count, the committee size, rather than the
+    // number of candidates this node happens to hold: candidate sets can differ
+    // between nodes (a proposal lost or late, a block one node found invalid,
+    // an equivocator not yet exposed everywhere), and an end that moved with
+    // them would let one node restart and re-propose while its peers were still
+    // a round or more inside the old collection — where a second block from
+    // the same leader is equivocation. More candidates than members (possible
+    // under private sortition) each still get their round.
+    return std::max<int>(g_pos_committee_size, (int)m_candidates.size());
+}
+
+std::optional<int64_t> PosProducer::RoundsExhaustedAtMs(int height) const
+{
+    // m_gossip_mutex held.
+    if (m_round_height != height || m_candidates.empty()) return std::nullopt;
+    const std::shared_ptr<const CBlock> round0 = BackedForRound(0);
+    return (int64_t)round0->nTime * 1000 + WindowMs() + (int64_t)RoundsPerCollection() * RoundMs();
+}
+
+std::optional<uint256> PosProducer::RestartCollection(int height, int64_t now)
+{
+    // m_gossip_mutex held. Every node reaches this at the same instant (the
+    // exhausted schedule is derived from shared data), so all of them re-propose
+    // together, at the next whole second after it — the same second everywhere,
+    // which keeps the re-proposals' timestamps, and so the new schedule, common.
+    const std::optional<int64_t> exhausted = RoundsExhaustedAtMs(height);
+    LogPrintf("PoS gossip: no certificate at height %d after %d round(s) — restarting collection\n",
+              height, RoundsPerCollection());
+    m_propose_at_height = height;
+    m_propose_at_ms = ((exhausted.value_or(now) + 999) / 1000) * 1000;
+    m_round_height = 0;
+    m_candidates.clear();
+    m_collected.clear();
+    m_backed_hash.SetNull();
+    m_signed_round = -1;
+    // Re-arm our own proposal: restarting collection only helps if producers
+    // actually re-seed, and Step()'s once-per-height gate (m_proposed_height)
+    // would otherwise keep every node mute at this height forever — no round
+    // ever forms again and the escaping-stall valve, being only a quorum
+    // relaxation on an existing proposal, has nothing to fire on: a permanent
+    // liveness deadlock. The re-proposal is safe: the share-lock arms still
+    // gate what we SIGN, and RecordCandidate re-clears the per-height
+    // exclusions when the re-seeded round arrives.
+    m_proposed_height = 0;
+    // The share-lock outlives the restart: a block we share-signed here may
+    // still certify, and every re-proposal is a rival of it. Start its grace
+    // now rather than at our first wish to sign in the re-seeded round. Left
+    // to that wish, the grace would run from a different instant on each node
+    // — whoever signed last in the abandoned rounds waits longest — so locked
+    // members would sign the re-seeded round's blocks one round apart and
+    // split again, round after round. Started here, every locked member's
+    // grace ends together, inside the re-seeded round 0.
+    if (!m_lock_hash.IsNull() && m_lock_height == height) {
+        m_lock_grace_start_ms = now;
+        m_lock_queried = false;
+        return m_lock_hash;
+    }
+    return std::nullopt;
 }
 
 void PosProducer::ProposeGossip(const CKey& leader_key)
@@ -1123,7 +1237,9 @@ int64_t PosProducer::DriveRound()
     // whose round failed to certify (it withheld, equivocated into a sub-quorum
     // split, or too few of its backers were online) is deterministically excluded
     // and the committee converges on the next leader in lockstep — the paper's
-    // round-robin re-vote (P6 §9).
+    // round-robin re-vote (P6 §9). A collection runs RoundsPerCollection()
+    // rounds, cycling through its candidates; if none certifies, it is
+    // abandoned and every member proposes afresh (RestartCollection).
     //
     // The round index MUST be derived from a network-global reference, not each
     // node's local round-start: anchoring to a local arrival time lets gossip
@@ -1144,10 +1260,8 @@ int64_t PosProducer::DriveRound()
     // node, not consensus rules, so enlarging them is safe. ~25 ms/member of
     // window and ~35 ms/member of round keeps small committees near the old values
     // while giving a 100-member committee ~3 s to collect.
-    const int64_t WINDOW_MS = m_window_override_ms > 0 ? m_window_override_ms
-        : 500 + 25 * (int64_t)g_pos_committee_size;
-    const int64_t ROUND_MS = m_round_override_ms > 0 ? m_round_override_ms
-        : 700 + 35 * (int64_t)g_pos_committee_size;
+    const int64_t WINDOW_MS = WindowMs();
+    const int64_t ROUND_MS = RoundMs();
     CBlockIndex* tip;
     {
         LOCK(cs_main);
@@ -1181,6 +1295,7 @@ int64_t PosProducer::DriveRound()
     // Determine the current round index and the proposal it backs.
     int round_index;
     std::shared_ptr<const CBlock> backed;
+    std::optional<uint256> restart_lock;
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
         if (m_round_height != height) return POS_PRODUCER_POLL_MS; // no active round yet
@@ -1190,28 +1305,17 @@ int64_t PosProducer::DriveRound()
         const int64_t elapsed = now - anchor_ms;
         if (elapsed < WINDOW_MS) return 150;                        // still collecting proposals
         round_index = (int)((elapsed - WINDOW_MS) / ROUND_MS);
-        backed = BackedForRound(round_index);
-        if (!backed) {
-            // We have excluded every candidate we know without certifying. This
-            // needs more than (#candidates) leaders to have failed — beyond our
-            // fault assumption. Restart collection so producers re-seed candidates.
-            m_round_height = 0;
-            m_candidates.clear();
-            m_collected.clear();
-            m_backed_hash.SetNull();
-            m_signed_round = -1;
-            // Re-arm our own proposal: restarting collection only helps if
-            // producers actually re-seed, and Step()'s once-per-height gate
-            // (m_proposed_height) would otherwise keep every node mute at this
-            // height forever — no round ever forms again and the escaping-stall
-            // valve, being only a quorum relaxation on an existing proposal,
-            // has nothing to fire on: a permanent liveness deadlock. The
-            // re-proposal is safe: the share-lock arms still gate what we SIGN,
-            // and RecordCandidate re-clears the per-height exclusions when the
-            // re-seeded round arrives.
-            m_proposed_height = 0;
-            return 150;
+        if (round_index >= RoundsPerCollection()) {
+            // The collection ran all its rounds without certifying. Restart it
+            // so producers re-seed candidates.
+            restart_lock = RestartCollection(height, now);
+        } else {
+            backed = BackedForRound(round_index);
         }
+    }
+    if (!backed) {
+        if (restart_lock) SendCertQueryOnce(*restart_lock);
+        return 150;
     }
 
     // Share-lock, ancestry arm (3A residual): our current parent is a
@@ -1324,9 +1428,20 @@ int64_t PosProducer::DriveRound()
         // Valid: commit, collect our own shares (we are a potential aggregator)
         // and flood them (so every node is too).
         std::vector<PosShare> shares = MakeLocalShares(*backed);
+        bool still_backed = true;
         {
             std::lock_guard<std::mutex> lock(m_gossip_mutex);
-            if (m_round_height == height) {
+            // The backed block was picked before validation, without the lock;
+            // gossip may have changed the round meanwhile. Above all, the
+            // evidence that its leader equivocated may have landed — the second
+            // block typically arrives a few milliseconds after the first — and
+            // signing an excluded leader's block both wastes the round and
+            // share-locks us away from the leader the rest of the committee
+            // now backs. Release the shares only if the block is still the
+            // round's choice; otherwise re-evaluate on the next poll.
+            if (m_round_height != height || BackedForRound(round_index) != backed) {
+                still_backed = false;
+            } else {
                 m_signed_round = round_index;
                 if (m_backed_hash != backed->GetHash()) {
                     m_backed_hash = backed->GetHash();
@@ -1344,6 +1459,7 @@ int64_t PosProducer::DriveRound()
                 }
             }
         }
+        if (!still_backed) return 150;
         for (const PosShare& sh : shares) FloodShare(sh);
     }
 
@@ -1551,9 +1667,32 @@ PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& blo
     //     every honest node detects it and converges on the next-lowest valid
     //     leader instead of splitting on the two. Bounds validation too: an
     //     equivocator's later blocks never reach TestBlockValidity.
+    //
+    // "This round" means the current collection. When a collection has run all
+    // its rounds without certifying, DriveRound abandons it, and every member
+    // — honest ones included — builds and proposes a fresh
+    // block at the same height: a new timestamp, so a new hash. A node whose own
+    // restart is still a poll away would see that as a second block from the
+    // same leader, exclude every honest leader in turn, and stall the height for
+    // good. So a second block that arrives once the schedule has run out starts
+    // the new collection instead of convicting its leader. The timing is what
+    // separates the two: the schedule's end is derived from shared data, no
+    // honest member re-proposes before it, and an equivocator's two blocks sent
+    // at the start of a round — the attack, which must split the committee
+    // before anyone signs — are still caught. The margin covers clock skew
+    // between members; a block that only arrives within it opens the next
+    // collection a little early, where its leader is judged afresh.
     bool equivocation_evidence = false;
+    std::optional<uint256> restart_lock;
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        if (m_round_height == height && (m_excluded.count(parts->leader) || m_candidates.count(parts->leader))) {
+            const int64_t now = GetTimeMillis() + m_debug_round_skew_ms;
+            const std::optional<int64_t> exhausted = RoundsExhaustedAtMs(height);
+            if (exhausted && now + RoundMs() / 2 >= *exhausted) {
+                restart_lock = RestartCollection(height, now);
+            }
+        }
         if (m_round_height == height) {
             if (m_excluded.count(parts->leader)) return PosGossipAction::Ignore;
             auto it = m_candidates.find(parts->leader);
@@ -1568,6 +1707,7 @@ PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& blo
             }
         }
     }
+    if (restart_lock) SendCertQueryOnce(*restart_lock);
     if (equivocation_evidence) {
         LogPrintf("PoS gossip: leader %s equivocated at height %d — excluding it\n",
                   HexStr(parts->leader).substr(0, 16), height);
