@@ -3638,7 +3638,7 @@ static RPCHelpMan getposslot()
     int64_t best_slot = -1;
     if (producer) {
         std::set<CPubKey> public_committee;
-        if (g_pos_public_committee) public_committee = PosPublicCommitteeSet(registry, seed);
+        if (g_pos_public_committee) public_committee = PosPublicCommitteeSetAt(registry, seed, next_height);
         for (const CKey& key : producer->Keys()) {
             const CPubKey pub = key.GetPubKey();
             const uint64_t weight = registry.GetWeight(pub);

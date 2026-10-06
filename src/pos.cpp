@@ -201,6 +201,109 @@ std::vector<CPubKey> PosPublicCommittee(const StakeRegistry& registry, const uin
     return committee;
 }
 
+bool PosSeatsActiveAt(int height)
+{
+    return g_pos_hardening_height > 0 && height >= g_pos_hardening_height;
+}
+
+PosCommitteeSeats PosPublicCommitteeSeats(const StakeRegistry& registry, const uint256& seed, int height)
+{
+    PosCommitteeSeats out;
+    if (!PosSeatsActiveAt(height)) {
+        out.members = PosPublicCommittee(registry, seed);
+        out.seats.assign(out.members.size(), 1);
+        out.total = (int)out.members.size();
+        return out;
+    }
+    const uint64_t K = (uint64_t)std::max(g_pos_committee_size, 0);
+    // Eligible, BLS-registered stakers, in ticket order for this seed.
+    std::vector<std::pair<uint256, std::pair<CPubKey, uint64_t>>> pool;
+    uint64_t W = 0;
+    for (const auto& [pk, w] : registry.Weights()) {
+        if (!PosIsEligibleStake(w) || !registry.HasBls(pk)) continue;
+        CHashWriter ss(SER_GETHASH, 0);
+        ss << std::string("SEQSEAT") << seed << pk;
+        pool.push_back({ss.GetHash(), {pk, w}});
+        W += w;
+    }
+    if (K == 0 || pool.empty() || W == 0) return out;
+    // As many seats as eligible stakers when they are fewer than the cap, as
+    // the member count was before: equal stakes then give everyone one seat
+    // and the quorum is unchanged.
+    const uint64_t seats_total = std::min<uint64_t>(K, pool.size());
+    std::sort(pool.begin(), pool.end(), [](const auto& a, const auto& b) {
+        if (a.first != b.first) return a.first < b.first;
+        return a.second.first < b.second.first;
+    });
+    // Quota K*w/W as whole seats plus a remainder in units of 1/W seat; the
+    // remainders sum to exactly (K - whole seats) * W.
+    std::vector<uint64_t> whole(pool.size()), rem(pool.size());
+    uint64_t assigned = 0;
+    for (size_t i = 0; i < pool.size(); ++i) {
+        const unsigned __int128 n = (unsigned __int128)seats_total * pool[i].second.second;
+        whole[i] = (uint64_t)(n / W);
+        rem[i] = (uint64_t)(n % W);
+        assigned += whole[i];
+    }
+    // The seats left over, in one systematic draw: thresholds u, u+W, u+2W, ...
+    // across the running sum of remainders, u uniform in [0, W) from the seed.
+    // Each staker gets one extra seat with probability rem/W, never two.
+    const uint64_t left = seats_total - assigned;
+    CHashWriter us(SER_GETHASH, 0);
+    us << std::string("SEQSEATOFFSET") << seed;
+    // 128 bits of the hash, reduced modulo W: the bias is below 2^-76.
+    const uint256 offset_hash = us.GetHash();
+    unsigned __int128 wide = 0;
+    for (int b = 0; b < 16; ++b) wide = (wide << 8) | offset_hash.begin()[b];
+    const uint64_t u = (uint64_t)(wide % W);
+    unsigned __int128 cum = 0;
+    uint64_t drawn = 0;
+    for (size_t i = 0; i < pool.size(); ++i) {
+        const unsigned __int128 lo = cum, hi = cum + rem[i];
+        cum = hi;
+        int seats = (int)whole[i];
+        if (drawn < left) {
+            const unsigned __int128 t = (unsigned __int128)u + (unsigned __int128)drawn * W;
+            if (t >= lo && t < hi) {
+                ++seats;
+                ++drawn;
+            }
+        }
+        if (seats > 0) {
+            out.members.push_back(pool[i].second.first);
+            out.seats.push_back(seats);
+            out.total += seats;
+        }
+    }
+    return out;
+}
+
+int PosPublicSeatTotal(const StakeRegistry& registry, int height)
+{
+    // min(cap, eligible registered stakers) either way; from the hardening
+    // height they are seats apportioned by stake rather than one per member.
+    (void)height;
+    return PosPublicCommitteeSize(registry);
+}
+
+std::vector<CPubKey> PosPublicCommitteeAt(const StakeRegistry& registry, const uint256& seed, int height)
+{
+    if (!PosSeatsActiveAt(height)) return PosPublicCommittee(registry, seed);
+    return PosPublicCommitteeSeats(registry, seed, height).members;
+}
+
+std::set<CPubKey> PosPublicCommitteeSetAt(const StakeRegistry& registry, const uint256& seed, int height)
+{
+    const std::vector<CPubKey> members = PosPublicCommitteeAt(registry, seed, height);
+    return std::set<CPubKey>(members.begin(), members.end());
+}
+
+int PosSlotQuorumAt(const StakeRegistry& registry, int height)
+{
+    if (g_pos_public_committee && PosSeatsActiveAt(height)) return PosPublicQuorum(PosPublicSeatTotal(registry, height));
+    return PosSlotQuorum(registry);
+}
+
 int PosPublicCommitteeSize(const StakeRegistry& registry)
 {
     // Seat count is min(#eligible registered stakers, cap) and does not depend
@@ -685,10 +788,12 @@ int PosBitfieldPopcount(const std::vector<unsigned char>& bitfield)
 
 CScript BuildPosBlsBitfieldSolution(const std::vector<unsigned char>& leader_sig,
                                     const std::vector<unsigned char>& agg_sig,
-                                    const std::vector<unsigned char>& bitfield)
+                                    const std::vector<unsigned char>& bitfield,
+                                    int seats)
 {
     CScript s;
     s << leader_sig << agg_sig << bitfield;
+    if (seats >= 0) s << (int64_t)seats;
     return s;
 }
 
@@ -706,7 +811,26 @@ std::optional<PosBlsBitfieldCert> ParsePosBlsBitfieldSolution(const CScript& sol
     // Cap the bitfield at the committee cap (in bytes) to bound work.
     if (data.size() > (size_t)(MAX_POS_PUBLIC_COMMITTEE_SIZE + 7) / 8) return std::nullopt;
     cert.bitfield = data;
-    if (pc != solution.end()) return std::nullopt; // trailing data
+    if (pc != solution.end()) {
+        // The seat total (g_pos_hardening_height): one small non-negative number.
+        if (!solution.GetOp(pc, opcode, data)) return std::nullopt;
+        int64_t seats = 0;
+        if (opcode == OP_0) {
+            seats = 0;
+        } else if (opcode >= OP_1 && opcode <= OP_16) {
+            seats = (int)opcode - (int)(OP_1 - 1);
+        } else {
+            if (data.empty() || data.size() > 4) return std::nullopt;
+            try {
+                seats = CScriptNum(data, /*fRequireMinimal=*/true, 4).getint();
+            } catch (const scriptnum_error&) {
+                return std::nullopt;
+            }
+        }
+        if (seats < 0 || seats > MAX_POS_PUBLIC_COMMITTEE_SIZE) return std::nullopt;
+        cert.seats = (int)seats;
+        if (pc != solution.end()) return std::nullopt; // trailing data
+    }
     return cert;
 }
 

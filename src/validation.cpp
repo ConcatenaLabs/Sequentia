@@ -492,7 +492,7 @@ void PosRefreshCertifiedKeys(ChainstateManager& chainman, CBlockIndex* registry_
     if (!g_con_pos) return;
     // The registry was just rebuilt from the UTXO set at `registry_tip`, so the
     // quorum its children must reach is known; no other block's is.
-    if (registry_tip) registry_tip->m_pos_child_quorum = PosSlotQuorum(StakeRegistry::GetInstance());
+    if (registry_tip) registry_tip->m_pos_child_quorum = PosSlotQuorumAt(StakeRegistry::GetInstance(), registry_tip->nHeight + 1);
     // The comparator reads m_pos_certified, so no block may change it while it
     // sits in a candidate set: empty the sets, re-measure, insert again.
     std::vector<std::pair<CChainState*, std::vector<CBlockIndex*>>> candidates;
@@ -2637,13 +2637,21 @@ int PosVerifyBitfieldCertificate(const CBlockHeader& header, const CBlockIndex* 
     std::optional<PosBlsBitfieldCert> cert = ParsePosBlsBitfieldSolution(header.proof.solution);
     if (!cert) { reason = "bad-posbls-bitfield-malformed"; return -1; }
     const uint256 seed = PosSeedForChild(pindexPrev);
-    const std::vector<CPubKey> committee = PosPublicCommittee(registry, seed);
+    const int height = pindexPrev->nHeight + 1;
+    // From the hardening height a member holds seats in proportion to stake and
+    // the certificate is weighed in seats (PosPublicCommitteeSeats); below it
+    // every member holds one.
+    const PosCommitteeSeats committee = PosPublicCommitteeSeats(registry, seed, height);
+    const bool seats_active = PosSeatsActiveAt(height);
+    if (seats_active != (cert->seats >= 0)) { reason = "bad-posbls-seats-form"; return -1; }
     std::vector<std::vector<unsigned char>> bls_pubkeys;
-    for (size_t i = 0; i < committee.size(); ++i) {
+    int signed_seats = 0;
+    for (size_t i = 0; i < committee.members.size(); ++i) {
         if (!PosBitfieldTest(cert->bitfield, i)) continue;
-        std::vector<unsigned char> bls = registry.GetBls(committee[i]);
+        std::vector<unsigned char> bls = registry.GetBls(committee.members[i]);
         if (bls.size() != BLS_PK_SIZE) { reason = "bad-posbls-member-unregistered"; return -1; }
         bls_pubkeys.push_back(std::move(bls));
+        signed_seats += committee.seats[i];
     }
     // Every set bit must map to a committee seat: a bit beyond the committee is a
     // phantom signer inflating the count, so reject if the popcount exceeds the
@@ -2656,7 +2664,10 @@ int PosVerifyBitfieldCertificate(const CBlockHeader& header, const CBlockIndex* 
     if (!BlsFastAggregateVerify(bls_pubkeys, Span<const unsigned char>(hash.begin(), 32), cert->agg_sig)) {
         reason = "bad-posbls-agg-invalid"; return -1;
     }
-    return (int)bls_pubkeys.size();
+    // The seat total a header carries is what fork choice and finality read
+    // before the block connects; it must be the true one.
+    if (seats_active && cert->seats != signed_seats) { reason = "bad-posbls-seats-mismatch"; return -1; }
+    return signed_seats;
 }
 
 bool PosCheckTxRecords(const CTransaction& tx, const std::vector<Coin>& spent, int height,
@@ -3027,7 +3038,7 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
             if (signers < 0) {
                 return state.Invalid(BlockValidationResult::BLOCK_MUTATED, reason, "invalid bitfield BLS certificate");
             }
-            const int quorum = PosSlotQuorum(registry);
+            const int quorum = PosSlotQuorumAt(registry, pindexPrev->nHeight + 1);
             const bool escaping_stall = g_con_bitcoin_anchor &&
                 PosEscapingStallAllowed(pindexPrev->m_anchor_height, block.m_anchor_height);
             const int min_members = escaping_stall ? 1 : quorum;
@@ -3069,7 +3080,7 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
             // min(#stakers, cap) — restoring quorum intersection (any two
             // quorums share >= 2 members), which threshold sortition loses
             // once the staker pool exceeds the committee target.
-            const int quorum = PosSlotQuorum(registry);
+            const int quorum = PosSlotQuorumAt(registry, pindexPrev->nHeight + 1);
             const bool escaping_stall = g_con_bitcoin_anchor &&
                 PosEscapingStallAllowed(pindexPrev->m_anchor_height, block.m_anchor_height);
             const int min_members = escaping_stall ? 1 : quorum;
@@ -3219,7 +3230,7 @@ static void SetPosForkChoiceKeys(ChainstateManager& chainman, CBlockIndex* pinde
         // Bitfield certificate: the signer count is the bitfield popcount.
         count = 0;
         if (auto cert = ParsePosBlsBitfieldSolution(block.proof.solution)) {
-            count = (size_t)PosBitfieldPopcount(cert->bitfield);
+            count = cert->seats >= 0 ? (size_t)cert->seats : (size_t)PosBitfieldPopcount(cert->bitfield);
         }
     } else if (parts->is_bls) {
         std::set<CPubKey> distinct;
@@ -4691,7 +4702,7 @@ bool CChainState::DisconnectTip(BlockValidationState& state, DisconnectedBlockTr
         CBlockUndo block_undo;
         if (UndoReadFromDisk(block_undo, pindexDelete)) {
             PosRevertBlockStake(block, block_undo, pindexDelete->nHeight);
-            pindexDelete->pprev->m_pos_child_quorum = PosSlotQuorum(StakeRegistry::GetInstance());
+            pindexDelete->pprev->m_pos_child_quorum = PosSlotQuorumAt(StakeRegistry::GetInstance(), pindexDelete->nHeight);
         } else {
             return AbortNode(state, "Failed to read undo data for stake tracking; the stake registry would desync from consensus");
         }
@@ -4876,7 +4887,7 @@ bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew
     // settle this block's certified answer with it, whatever was provisional
     // when the block was accepted.
     if (g_con_pos && pindexNew->pprev) {
-        const int parent_quorum = PosSlotQuorum(StakeRegistry::GetInstance());
+        const int parent_quorum = PosSlotQuorumAt(StakeRegistry::GetInstance(), pindexNew->nHeight);
         pindexNew->pprev->m_pos_child_quorum = parent_quorum;
         if (PosRecordCertified(m_chainman, pindexNew, parent_quorum)) m_blockman.m_dirty_blockindex.insert(pindexNew);
     }
@@ -4955,7 +4966,7 @@ bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew
         CBlockUndo block_undo;
         if (UndoReadFromDisk(block_undo, pindexNew)) {
             PosApplyBlockStake(blockConnecting, block_undo, pindexNew->nHeight);
-            pindexNew->m_pos_child_quorum = PosSlotQuorum(StakeRegistry::GetInstance());
+            pindexNew->m_pos_child_quorum = PosSlotQuorumAt(StakeRegistry::GetInstance(), pindexNew->nHeight + 1);
         } else {
             return AbortNode(state, "Failed to read undo data for stake tracking; the stake registry would desync from consensus");
         }

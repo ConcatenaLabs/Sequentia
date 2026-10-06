@@ -45,12 +45,18 @@ def make_staker():
     return byte_to_base58(k.get_bytes() + b'\x01', 239), k.get_pubkey().get_bytes().hex()
 
 
-def script_pushes(script):
-    """Split a push-only script into its pushed data items."""
+def script_pushes(script, limit=None):
+    """Split a push-only script into its pushed data items. With `limit`, stop
+    after that many and return (pushes, the remaining bytes)."""
     pushes, i = [], 0
     while i < len(script):
+        if limit is not None and len(pushes) == limit:
+            return pushes, script[i:]
         opcode = script[i]
         i += 1
+        if 0x51 <= opcode <= 0x60:  # OP_1..OP_16: a small number, no data
+            pushes.append(bytes([opcode - 0x50]))
+            continue
         if opcode < 0x4c:
             size = opcode
         elif opcode == 0x4c:
@@ -66,7 +72,7 @@ def script_pushes(script):
             raise ValueError("not a push-only script: opcode %#x" % opcode)
         pushes.append(script[i:i + size])
         i += size
-    return pushes
+    return (pushes, b"") if limit is not None else pushes
 
 
 def block_from_hex(raw):
@@ -78,15 +84,16 @@ def block_from_hex(raw):
 
 def corrupt_aggregate(block):
     """Garble the 96-byte BLS aggregate of a bitfield certificate, leaving the
-    leader signature, the bitfield and therefore the block hash untouched.
-    Solution layout: <leader_sig> <96-byte aggregate> <bitfield>."""
-    leader_sig, agg, bitfield = script_pushes(block.proof.solution)
+    leader signature, the bitfield (and the seat total, when the certificate
+    carries one) and therefore the block hash untouched. Solution layout:
+    <leader_sig> <96-byte aggregate> <bitfield> [<seats>]."""
+    (leader_sig, agg, bitfield), tail = script_pushes(block.proof.solution, limit=3)
     assert_equal(len(agg), BLS_SIG_SIZE)
     bad = bytearray(agg)
     bad[0] ^= 0xff
     bad[-1] ^= 0xff
     hash_before = block.hash
-    block.proof.solution = bytes(CScript([leader_sig, bytes(bad), bitfield]))
+    block.proof.solution = bytes(CScript([leader_sig, bytes(bad), bitfield])) + tail
     block.rehash()
     assert_equal(block.hash, hash_before)
     return block

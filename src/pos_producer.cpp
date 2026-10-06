@@ -72,6 +72,35 @@ std::vector<unsigned char> BuildSignerBitfield(const std::vector<CPubKey>& commi
     return bf;
 }
 
+//! The seats `members` hold together in the public committee of the block at
+//! `height` built on the slot `seed`: one per member below the hardening
+//! height, their stake-apportioned seats from it (PosPublicCommitteeSeats).
+int PublicSeatsOf(const StakeRegistry& reg, const uint256& seed, int height, const std::set<CPubKey>& members)
+{
+    const PosCommitteeSeats committee = PosPublicCommitteeSeats(reg, seed, height);
+    int seats = 0;
+    for (size_t i = 0; i < committee.members.size(); ++i) {
+        if (members.count(committee.members[i])) seats += committee.seats[i];
+    }
+    return seats;
+}
+
+//! The bitfield certificate solution signed by `signers` for the block at
+//! `height`: the bitfield over the ordered public committee and, from the
+//! hardening height, the seats the signers hold (validated at connect).
+CScript BuildPublicCertificate(const std::vector<unsigned char>& leader_sig, const std::vector<unsigned char>& agg_sig,
+                               const StakeRegistry& reg, const uint256& seed, int height,
+                               const std::set<CPubKey>& signers)
+{
+    const PosCommitteeSeats committee = PosPublicCommitteeSeats(reg, seed, height);
+    int seats = 0;
+    for (size_t i = 0; i < committee.members.size(); ++i) {
+        if (signers.count(committee.members[i])) seats += committee.seats[i];
+    }
+    return BuildPosBlsBitfieldSolution(leader_sig, agg_sig, BuildSignerBitfield(committee.members, signers),
+                                       PosSeatsActiveAt(height) ? seats : -1);
+}
+
 //! A block this node could not assemble is a missed slot, and when it keeps
 //! failing the chain can stop; the reason must reach the default log. Once per
 //! height and reason, since a producer retries every poll.
@@ -280,7 +309,7 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
             // (the certificate format carries it) but no longer decides
             // membership and is not verified by validators in this mode.
             std::set<CPubKey> public_committee;
-            if (g_pos_public_committee) public_committee = PosPublicCommitteeSet(registry, seed);
+            if (g_pos_public_committee) public_committee = PosPublicCommitteeSetAt(registry, seed, tip->nHeight + 1);
             int eligible = 0;
             for (const auto& [member_pub, member_key] : candidates) {
                 if ((int)vrf_committee.size() >= member_cap) break;
@@ -317,7 +346,13 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
                 }
                 eligible++;
             }
-            const int quorum = PosSlotQuorum(registry);
+            const int quorum = PosSlotQuorumAt(registry, tip->nHeight + 1);
+            // Under the public committee the quorum is in seats (one per member
+            // below the hardening height).
+            if (g_pos_public_committee) {
+                eligible = PublicSeatsOf(registry, seed, tip->nHeight + 1,
+                                         std::set<CPubKey>(vrf_committee.begin(), vrf_committee.end()));
+            }
             if (eligible < quorum) {
                 // Aggregate committees (MuSig2 or BLS) may certify below quorum
                 // under the escaping-stall rule; script multisig always needs
@@ -424,14 +459,14 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
             // signers by a bitfield over the ordered public committee instead
             // of carrying each member's key and proof.
             const StakeRegistry& reg = StakeRegistry::GetInstance();
-            std::vector<CPubKey> committee = PosPublicCommittee(reg, seed);
             std::set<CPubKey> signers;
             for (const PosBlsMember& m : bls_members) signers.insert(m.pubkey);
-            block.proof.solution = BuildPosBlsBitfieldSolution(leader_sig, *agg_sig, BuildSignerBitfield(committee, signers));
+            block.proof.solution = BuildPublicCertificate(leader_sig, *agg_sig, reg, seed, tip->nHeight + 1, signers);
+            countersigs = PublicSeatsOf(reg, seed, tip->nHeight + 1, signers);
         } else {
             block.proof.solution = BuildPosBlsSolution(leader_sig, *agg_sig, bls_members);
+            countersigs = (int)bls_members.size();
         }
-        countersigs = (int)bls_members.size();
     } else if (!parts->agg_key.empty()) {
         std::vector<unsigned char> leader_sig;
         if (!leader_key.Sign(block.GetHash(), leader_sig)) {
@@ -784,7 +819,8 @@ int64_t PosProducer::Step()
     // Under the public fixed-size committee, MEMBERSHIP is the deterministic
     // schedule prefix (leader election stays private-VRF).
     std::set<CPubKey> public_committee;
-    if (g_pos_public_committee) public_committee = PosPublicCommitteeSet(registry, seed);
+    if (g_pos_public_committee) public_committee = PosPublicCommitteeSetAt(registry, seed, tip->nHeight + 1);
+    std::set<CPubKey> local_members; // our keys on the public committee
     // One snapshot per pass: a key added at runtime (AddKeys) joins the next pass
     // rather than shifting indices under this one.
     const std::vector<CKey> keys = Keys();
@@ -806,6 +842,7 @@ int64_t PosProducer::Step()
             if (g_pos_public_committee ? public_committee.count(pub) > 0
                                        : PosVrfIsCommitteeMember(beta, registry.GetWeight(pub), total_weight)) {
                 local_committee_eligible++;
+                if (g_pos_public_committee) local_members.insert(pub);
             }
         } else {
             std::optional<size_t> rank = PosRank(registry, seed, pub);
@@ -819,7 +856,9 @@ int64_t PosProducer::Step()
     }
     if (best_idx < 0) return POS_PRODUCER_POLL_MS; // none of our keys is an eligible staker
 
-    const int quorum = PosSlotQuorum(registry);
+    const int quorum = PosSlotQuorumAt(registry, tip->nHeight + 1);
+    // The quorum is in seats under the public committee: weigh our own keys so.
+    if (g_pos_public_committee) local_committee_eligible = PublicSeatsOf(registry, seed, tip->nHeight + 1, local_members);
 
     // Slot timing: the leader's slot opens slot*interval after the parent, and
     // we never produce faster than one interval since the parent — the paper's
@@ -1000,7 +1039,7 @@ std::vector<PosShare> PosProducer::MakeLocalShares(const CBlock& block)
     // schedule prefix; the VRF proof still rides in the share (certificate
     // format) but no longer decides membership.
     std::set<CPubKey> public_committee;
-    if (g_pos_public_committee) public_committee = PosPublicCommitteeSet(reg, seed);
+    if (g_pos_public_committee) public_committee = PosPublicCommitteeSetAt(reg, seed, prev->nHeight + 1);
     for (const CKey& k : Keys()) {
         const CPubKey pub = k.GetPubKey();
         if (!PosIsEligibleStake(reg.GetWeight(pub))) continue;
@@ -1494,7 +1533,14 @@ int64_t PosProducer::DriveRound()
         // (otherwise it would be stranded in the gossip path, unable to reach a
         // full quorum). In steady state Bitcoin is slower than the slot, so the
         // gap is never met and this stays a strict quorum.
-        const int quorum = PosSlotQuorum(StakeRegistry::GetInstance());
+        const int quorum = PosSlotQuorumAt(StakeRegistry::GetInstance(), height);
+        // Collected shares weighed in seats under the public committee.
+        int collected = (int)m_collected.size();
+        if (g_pos_public_committee) {
+            std::set<CPubKey> signers;
+            for (const auto& [pub, sh] : m_collected) signers.insert(pub);
+            collected = PublicSeatsOf(StakeRegistry::GetInstance(), PosSeedForChild(tip), height, signers);
+        }
         bool escaping_stall = g_con_bitcoin_anchor &&
             PosEscapingStallAllowed(tip->m_anchor_height, backed->m_anchor_height);
         // Escaping-stall real-time evidence (anchor.h, incident 2026-07-17):
@@ -1509,14 +1555,14 @@ int64_t PosProducer::DriveRound()
         // there, so demanding it here would never refuse a block the network
         // accepts. record_unverified=false: this is the producer weighing its
         // own options, not a block being accepted.
-        if (escaping_stall && (int)m_collected.size() < quorum &&
+        if (escaping_stall && collected < quorum &&
             CheckEscapingStallMtpGap(tip->m_anchor_hash, backed->m_anchor_hash, height,
                                      /*record_unverified=*/false) != EscapeStallTimeVerdict::ALLOWED) {
             escaping_stall = false;
         }
         const int min_members = escaping_stall ? 1 : quorum;
         if (m_round_height == height && m_backed_hash == backed->GetHash() &&
-            (int)m_collected.size() >= min_members) {
+            collected >= min_members) {
             CScript::const_iterator pc = backed->proof.solution.begin();
             opcodetype op;
             std::vector<unsigned char> leader_sig;
@@ -1538,10 +1584,10 @@ int64_t PosProducer::DriveRound()
                     if (g_pos_public_committee) {
                         // Bitfield certificate (impl spec Option A phase 2).
                         const StakeRegistry& reg = StakeRegistry::GetInstance();
-                        std::vector<CPubKey> committee = PosPublicCommittee(reg, PosSeedForChild(tip));
                         std::set<CPubKey> signers;
                         for (const PosBlsMember& m : members) signers.insert(m.pubkey);
-                        final_block->proof.solution = BuildPosBlsBitfieldSolution(leader_sig, *agg, BuildSignerBitfield(committee, signers));
+                        final_block->proof.solution = BuildPublicCertificate(leader_sig, *agg, reg, PosSeedForChild(tip),
+                                                                             height, signers);
                     } else {
                         final_block->proof.solution = BuildPosBlsSolution(leader_sig, *agg, members);
                     }
@@ -1873,7 +1919,7 @@ PosGossipAction PosProducer::OnShare(const PosShare& share)
         // signed with the member's REGISTERED BLS key, since the certificate's
         // aggregate is verified against registry keys — a share under any other
         // key would only assemble into a certificate that fails validation.
-        if (!PosPublicCommitteeSet(reg, seed).count(share.pubkey)) return PosGossipAction::Invalid;
+        if (!PosPublicCommitteeSetAt(reg, seed, tip->nHeight + 1).count(share.pubkey)) return PosGossipAction::Invalid;
         if (reg.GetBls(share.pubkey) != share.bls_pubkey) return PosGossipAction::Invalid;
     } else {
     uint256 beta;
@@ -1956,7 +2002,9 @@ bool PosProducer::TryConnectCertified()
 //! How many committee members a certificate names (for logging only).
 static int PopulatedSignerCount(const CBlockHeader& header)
 {
-    if (auto cert = ParsePosBlsBitfieldSolution(header.proof.solution)) return (int)PosBitfieldPopcount(cert->bitfield);
+    if (auto cert = ParsePosBlsBitfieldSolution(header.proof.solution)) {
+        return cert->seats >= 0 ? cert->seats : (int)PosBitfieldPopcount(cert->bitfield);
+    }
     if (auto cert = ParsePosBlsSolution(header.proof.solution)) return (int)cert->members.size();
     return 0;
 }
@@ -2028,7 +2076,7 @@ PosGossipAction PosVerifyCertificate(const CBlockHeader& header, ChainstateManag
             }
             return PosGossipAction::Ignore;
         }
-        if (signers < PosSlotQuorum(reg)) return PosGossipAction::Ignore;
+        if (signers < PosSlotQuorumAt(reg, height)) return PosGossipAction::Ignore;
         signer_count = signers;
     } else {
         // Full-member certificate: members carry their own keys and VRF proofs;

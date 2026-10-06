@@ -4,6 +4,7 @@
 
 #include <pos.h>
 #include <anchor.h>
+#include <bls.h>
 
 #include <chainparams.h>
 #include <chainparamsbase.h>
@@ -1624,6 +1625,102 @@ BOOST_AUTO_TEST_CASE(pos_split_shares)
         BOOST_CHECK_EQUAL(shares.swept.at(asset), 10000);
     }
     registry.Clear();
+}
+
+// Audit A13: from the hardening height the public committee's seats are
+// apportioned by stake. These properties are consensus; pinned here.
+BOOST_AUTO_TEST_CASE(pos_committee_seats)
+{
+    const int saved_hardening = g_pos_hardening_height;
+    const int saved_size = g_pos_committee_size;
+    StakeRegistry& registry = StakeRegistry::GetInstance();
+    const auto add = [&](uint64_t weight) {
+        const CPubKey pk = MakeKey();
+        registry.SetStake(pk, weight);
+        registry.SetBls(pk, std::vector<unsigned char>(BLS_PK_SIZE, 0x42));
+        return pk;
+    };
+    const auto seats_of = [](const PosCommitteeSeats& c, const CPubKey& pk) {
+        for (size_t i = 0; i < c.members.size(); ++i) {
+            if (c.members[i] == pk) return c.seats[i];
+        }
+        return 0;
+    };
+    g_pos_hardening_height = 10;
+
+    // Equal stakes, as many seats as stakers: one seat each, as before.
+    registry.Clear();
+    g_pos_committee_size = 4;
+    std::vector<CPubKey> four;
+    for (int i = 0; i < 4; ++i) four.push_back(add(1000));
+    {
+        const PosCommitteeSeats c = PosPublicCommitteeSeats(registry, uint256S("01"), 20);
+        BOOST_CHECK_EQUAL(c.total, 4);
+        BOOST_CHECK_EQUAL(c.members.size(), 4U);
+        for (const CPubKey& pk : four) BOOST_CHECK_EQUAL(seats_of(c, pk), 1);
+        BOOST_CHECK_EQUAL(PosSlotQuorumAt(registry, 20), PosPublicQuorum(4));
+    }
+
+    // A large staker holds seats in proportion; everyone gets floor or ceil of
+    // its quota; the total is always the committee size.
+    registry.Clear();
+    g_pos_committee_size = 250;
+    const CPubKey whale = add(2000000);              // 20% of 10,000,000
+    std::vector<CPubKey> small;
+    for (int i = 0; i < 800; ++i) small.push_back(add(10000)); // 0.1% each
+    for (int s = 0; s < 50; ++s) {
+        const PosCommitteeSeats c = PosPublicCommitteeSeats(registry, ArithToUint256(arith_uint256(s + 1)), 20);
+        BOOST_CHECK_EQUAL(c.total, 250);
+        BOOST_CHECK_EQUAL(seats_of(c, whale), 50);   // quota exactly 50
+        int sum = 0;
+        for (const CPubKey& pk : small) {
+            const int v = seats_of(c, pk);
+            BOOST_CHECK(v == 0 || v == 1);           // quota 0.25: floor 0, ceil 1
+            sum += v;
+        }
+        BOOST_CHECK_EQUAL(sum, 200);
+    }
+
+    // Splitting buys nothing: a third of the stake split into 1,000 small
+    // identities, against honest stake in 10 large ones, averages a third of
+    // the seats over many seeds (one seat per identity gave it every
+    // non-large seat, i.e. the whole committee but 10).
+    registry.Clear();
+    g_pos_committee_size = 250;
+    std::set<CPubKey> coalition;
+    for (int i = 0; i < 1000; ++i) coalition.insert(add(1000));       // 1,000,000
+    for (int i = 0; i < 10; ++i) add(200000);                          // 2,000,000
+    long long coalition_seats = 0;
+    const int draws = 200;
+    for (int s = 0; s < draws; ++s) {
+        const PosCommitteeSeats c = PosPublicCommitteeSeats(registry, ArithToUint256(arith_uint256(1000 + s)), 20);
+        BOOST_CHECK_EQUAL(c.total, 250);
+        int mine = 0;
+        for (size_t i = 0; i < c.members.size(); ++i) {
+            if (coalition.count(c.members[i])) mine += c.seats[i];
+        }
+        // Quota 83.33. The leftover seats are a fixed 90, so the coalition gets
+        // whatever the 10 large stakers' fractional seats (one each at most)
+        // leave: never more than 90 nor fewer than 80.
+        BOOST_CHECK(mine >= 80 && mine <= 90);
+        coalition_seats += mine;
+    }
+    BOOST_CHECK(coalition_seats >= 83LL * draws && coalition_seats <= 84LL * draws);
+    BOOST_CHECK(PosSlotQuorumAt(registry, 20) == PosPublicQuorum(250));
+
+    // Below the hardening height: the old one-place-per-staker committee.
+    {
+        const PosCommitteeSeats c = PosPublicCommitteeSeats(registry, uint256S("05"), 5);
+        BOOST_CHECK_EQUAL(c.members.size(), 250U);
+        for (int v : c.seats) BOOST_CHECK_EQUAL(v, 1);
+    }
+    // Deterministic for a seed.
+    BOOST_CHECK(PosPublicCommitteeSeats(registry, uint256S("07"), 20).members ==
+                PosPublicCommitteeSeats(registry, uint256S("07"), 20).members);
+
+    registry.Clear();
+    g_pos_committee_size = saved_size;
+    g_pos_hardening_height = saved_hardening;
 }
 
 // The audit hardening's participant cap: a pot created from the hardening height

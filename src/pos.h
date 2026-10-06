@@ -669,8 +669,43 @@ int PosQuorum(size_t committee_size);
 
 /** The ACTUAL committee size under the public fixed-size committee:
  *  min(#eligible stakers, g_pos_committee_size). Depends only on the registry
- *  (the seed decides WHO is in the committee, not how many). */
+ *  (the seed decides WHO is in the committee, not how many). Counted in
+ *  members; from g_pos_hardening_height the committee is counted in SEATS
+ *  instead (PosPublicCommitteeSeats). */
 int PosPublicCommitteeSize(const StakeRegistry& registry);
+
+/** SEQUENTIA: from g_pos_hardening_height (the audit hardening fork) the public
+ *  committee holds g_pos_committee_size SEATS, apportioned to stakers in
+ *  proportion to stake, rather than one place per staker (audit A13). */
+bool PosSeatsActiveAt(int height);
+
+/** The public committee for a slot: its members, in bitfield order, and the
+ *  seats each holds. Below g_pos_hardening_height every member holds one seat and
+ *  the members are the schedule prefix (PosPublicCommittee's old rule).
+ *
+ *  From it, the g_pos_committee_size seats are apportioned among the eligible,
+ *  BLS-registered stakers by stake: each has a quota K*w/W, receives its whole
+ *  part, and the seats left over go to the fractional parts by one systematic
+ *  draw from the seed, so each staker's expected seats equal its quota exactly
+ *  and no staker gets more than one seat beyond its whole part. One place per
+ *  staker capped a large stake at a single seat and handed the remaining
+ *  seats almost uniformly to whoever held many small identities: a coalition
+ *  split into minimum-stake identities captured committees far beyond its
+ *  stake. Seats proportional to stake make splitting worthless. Members (the
+ *  stakers holding at least one seat) are ordered by their ticket for the
+ *  seed, which is also the order of the draw. */
+struct PosCommitteeSeats {
+    std::vector<CPubKey> members;
+    std::vector<int> seats;          //!< seats[i] belongs to members[i]
+    int total{0};                    //!< sum of seats
+};
+PosCommitteeSeats PosPublicCommitteeSeats(const StakeRegistry& registry, const uint256& seed, int height);
+
+/** Total seats of the public committee for a slot at `height`, which the quorum
+ *  is a strict majority of: min(g_pos_committee_size, eligible registered
+ *  stakers), as members below g_pos_hardening_height and as stake-apportioned
+ *  seats from it. */
+int PosPublicSeatTotal(const StakeRegistry& registry, int height);
 
 /** Countersignature quorum for an actual committee of k members under the
  *  public fixed-size committee: a strict majority, plus one when k is odd, so
@@ -683,15 +718,21 @@ int PosPublicQuorum(int k);
  *  actual size under g_pos_public_committee, else the fixed
  *  PosQuorum(g_pos_committee_size) of the nominal size. */
 int PosSlotQuorum(const StakeRegistry& registry);
+/** PosSlotQuorum for a block at `height`, in seats from g_pos_hardening_height. */
+int PosSlotQuorumAt(const StakeRegistry& registry, int height);
 
 /** The ordered public committee for a slot under g_pos_public_committee: the
  *  schedule prefix (PosSchedule order) restricted to BLS-registered stakers and
  *  capped at g_pos_committee_size. The ORDER is the bitfield index order of the
  *  certificate, so producer and validator must derive it identically. */
 std::vector<CPubKey> PosPublicCommittee(const StakeRegistry& registry, const uint256& seed);
+/** PosPublicCommittee for a block at `height`: the seat-holding members, in
+ *  bitfield order, from g_pos_hardening_height (PosPublicCommitteeSeats). */
+std::vector<CPubKey> PosPublicCommitteeAt(const StakeRegistry& registry, const uint256& seed, int height);
 
 /** The public committee for a slot as a set, for membership checks. */
 std::set<CPubKey> PosPublicCommitteeSet(const StakeRegistry& registry, const uint256& seed);
+std::set<CPubKey> PosPublicCommitteeSetAt(const StakeRegistry& registry, const uint256& seed, int height);
 
 /** Cap on the number of committee members a certificate may name (and a node
  *  collects shares for): the configured committee size under the public
@@ -951,6 +992,10 @@ struct PosBlsBitfieldCert {
     std::vector<unsigned char> leader_sig;  //!< the leader's ECDSA signature over the block hash
     std::vector<unsigned char> agg_sig;     //!< 96-byte BLS aggregate of the signers' shares
     std::vector<unsigned char> bitfield;    //!< bit i set == committee[i] signed (LSB-first)
+    //! From g_pos_hardening_height: the seats the signers hold together, carried so
+    //! that a header alone tells how much of the committee certified it. Checked
+    //! against the registry when the block connects. -1 when absent.
+    int seats{-1};
 };
 
 /** Encode a bitfield BLS certificate into a block proof solution:
@@ -958,7 +1003,8 @@ struct PosBlsBitfieldCert {
  *  The signed block hash excludes the solution, so it is member-independent. */
 CScript BuildPosBlsBitfieldSolution(const std::vector<unsigned char>& leader_sig,
                                     const std::vector<unsigned char>& agg_sig,
-                                    const std::vector<unsigned char>& bitfield);
+                                    const std::vector<unsigned char>& bitfield,
+                                    int seats = -1);
 
 /** Decode a bitfield BLS certificate solution, or nullopt if malformed. */
 std::optional<PosBlsBitfieldCert> ParsePosBlsBitfieldSolution(const CScript& solution);
