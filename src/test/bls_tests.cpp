@@ -8,7 +8,12 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <algorithm>
 #include <vector>
+
+#ifndef WIN32
+#include <sys/mman.h>
+#endif
 
 BOOST_FIXTURE_TEST_SUITE(bls_tests, BasicTestingSetup)
 
@@ -114,5 +119,66 @@ BOOST_AUTO_TEST_CASE(bls_bad_encodings)
     BOOST_CHECK(!BlsVerify(std::vector<unsigned char>(BLS_PK_SIZE, 0xff), msg, sig));
     BOOST_CHECK(!BlsVerify(pk, msg, std::vector<unsigned char>(BLS_SIG_SIZE, 0xff)));
 }
+
+#ifndef WIN32
+//! A copy of `in` placed flush against an unreadable guard page, so that reading
+//! even one byte past its end faults instead of silently hitting heap slack.
+class GuardedBuffer
+{
+    static constexpr size_t PAGE{4096};
+    unsigned char* m_base{nullptr};
+    size_t m_size;
+
+public:
+    explicit GuardedBuffer(const std::vector<unsigned char>& in) : m_size(in.size())
+    {
+        void* base = mmap(nullptr, 2 * PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        BOOST_REQUIRE(base != MAP_FAILED);
+        m_base = static_cast<unsigned char*>(base);
+        BOOST_REQUIRE(mprotect(m_base + PAGE, PAGE, PROT_NONE) == 0);
+        std::copy(in.begin(), in.end(), data());
+    }
+    ~GuardedBuffer() { munmap(m_base, 2 * PAGE); }
+    unsigned char* data() const { return m_base + PAGE - m_size; }
+    Span<const unsigned char> span() const { return {data(), m_size}; }
+};
+
+// Audit D6: blst picks the point encoding from the FIRST byte of its input. A
+// first byte without the compression flag (0x80) means "uncompressed", which is
+// 96 bytes for G1 and 192 for G2 — twice what every BLS buffer here holds. The
+// wrappers must reject such input by its length, never read past the buffer.
+BOOST_AUTO_TEST_CASE(bls_uncompressed_flag_never_reads_past_buffer)
+{
+    const auto sk = Seed(4);
+    const auto pk = *BlsDerivePubKey(sk);
+    const auto msg = Msg(0x66);
+    const auto sig = *BlsSign(sk, msg);
+    const auto pop = *BlsProvePossession(sk);
+
+    // 0x00: uncompressed; 0x40: uncompressed infinity (also a full-width read).
+    for (const unsigned char first : {0x00, 0x01, 0x40}) {
+        std::vector<unsigned char> bad_pk(BLS_PK_SIZE, 0);
+        std::vector<unsigned char> bad_sig(BLS_SIG_SIZE, 0);
+        bad_pk[0] = first;
+        bad_sig[0] = first;
+        const GuardedBuffer gpk(bad_pk), gsig(bad_sig);
+
+        BOOST_CHECK(!BlsVerify(gpk.span(), msg, sig));
+        BOOST_CHECK(!BlsVerify(pk, msg, gsig.span()));
+        BOOST_CHECK(!BlsVerifyPossession(gpk.span(), pop));
+        BOOST_CHECK(!BlsVerifyPossession(pk, gsig.span()));
+        BOOST_CHECK(!BlsFastAggregateVerify({pk}, msg, gsig.span()));
+
+        // The aggregators take owned vectors; heap slack usually hides an
+        // overread there, so this checks only that they reject the input.
+        BOOST_CHECK(!BlsFastAggregateVerify({bad_pk}, msg, sig));
+        BOOST_CHECK(!BlsFastAggregateVerify({pk, bad_pk}, msg, sig));
+        BOOST_CHECK(!BlsAggregatePublicKeys({bad_pk}).has_value());
+        BOOST_CHECK(!BlsAggregatePublicKeys({pk, bad_pk}).has_value());
+        BOOST_CHECK(!BlsAggregate({bad_sig}).has_value());
+        BOOST_CHECK(!BlsAggregate({sig, bad_sig}).has_value());
+    }
+}
+#endif // WIN32
 
 BOOST_AUTO_TEST_SUITE_END()
