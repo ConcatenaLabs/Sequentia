@@ -551,7 +551,12 @@ public:
         // -poscommitteesize on the real network is a node whose operator believes
         // they are changing a consensus rule; silently overriding them would leave
         // that belief intact until the fork.
-        for (const char* flag : {"-posbls", "-pospubliccommittee", "-poscommitteesize", "-posvrf", "-posaggcommittee", "-posunbonding", "-posminstake", "-pospayoutnotice", "-posslotinterval", "-poscheckpointdepth"}) {
+        // -posescapestallmtpgap and -poscheckpointscan are read live at their
+        // point of use, so a different value really does change which blocks
+        // this node accepts: the first decides whether a sub-quorum block is
+        // rejected as bad-pos-escape-stall-too-soon, the second how much of the
+        // parent chain is searched for the checkpoints behind the finality floor.
+        for (const char* flag : {"-posbls", "-pospubliccommittee", "-poscommitteesize", "-posvrf", "-posaggcommittee", "-posunbonding", "-posminstake", "-pospayoutnotice", "-posslotinterval", "-poscheckpointdepth", "-posescapestallmtpgap", "-poscheckpointscan"}) {
             if (args.IsArgSet(flag)) {
                 throw std::runtime_error(strprintf("%s is a consensus rule of the Sequentia network and cannot be overridden; remove it from the configuration", flag));
             }
@@ -1076,6 +1081,20 @@ public:
             refuse_int("-posminstake", (int64_t)TESTNET_POS_MIN_STAKE);
             refuse_int("-pospayoutnotice", (int64_t)TESTNET_POS_PAYOUT_NOTICE);
             refuse_int("-poscheckpointdepth", (int64_t)DEFAULT_POS_CHECKPOINT_DEPTH);
+            // Read live at the point of use, like -poscheckpointdepth: the gap
+            // decides whether a sub-quorum block is rejected outright
+            // (bad-pos-escape-stall-too-soon), so a different value forks.
+            refuse_int("-posescapestallmtpgap", (int64_t)DEFAULT_POS_ESCAPE_STALL_MTP_GAP);
+            // A wider checkpoint scan only finds more checkpoints, which can only
+            // raise the finality floor; a narrower one can miss the checkpoint
+            // that holds it, and accept forks the network refuses.
+            if (args.IsArgSet("-poscheckpointscan") &&
+                args.GetIntArg("-poscheckpointscan", DEFAULT_POS_CHECKPOINT_SCAN) < DEFAULT_POS_CHECKPOINT_SCAN) {
+                throw std::runtime_error(strprintf(
+                    "-poscheckpointscan cannot be lowered below %d on the Sequentia testnet: a narrower scan can "
+                    "miss the checkpoint that holds the finality floor and accept forks the network refuses.",
+                    DEFAULT_POS_CHECKPOINT_SCAN));
+            }
         }
 
         if (g_pos_public_committee && !g_pos_bls) {

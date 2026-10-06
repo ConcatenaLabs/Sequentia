@@ -195,6 +195,12 @@ public:
     //! peer's getposcert, or nullopt. Served from the recent-certificate
     //! cache, which keeps certificates we verified OR assembled ourselves.
     std::optional<CBlockHeader> GetCertificate(const uint256& hash);
+    //! Whether this exact proposal (hash and staging solution) was already
+    //! processed, so a compact copy need not be reconstructed again.
+    bool ProposalSeen(const CBlockHeader& header);
+    //! Whether to request the body of `hash` now: false while a request for it
+    //! made within the last POS_PROPOSAL_FETCH_RETRY_SECONDS may still answer.
+    bool ShouldFetchProposal(const uint256& hash);
 
 protected:
     void UpdatedBlockTip(const CBlockIndex* pindexNew, const CBlockIndex* pindexFork,
@@ -222,6 +228,17 @@ private:
     //! first block seen from a given leader wins, so an equivocating leader's
     //! later blocks are dropped. m_gossip_mutex held.
     void RecordCandidate(const std::shared_ptr<const CBlock>& block, const CPubKey& leader, const uint256& leader_beta, int height);
+
+public:
+    //! Make `block` a round candidate without the checks OnProposal applies, so
+    //! unit tests can exercise share handling for a block the node knows.
+    void AddCandidateForTesting(const std::shared_ptr<const CBlock>& block, const CPubKey& leader)
+    {
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        RecordCandidate(block, leader, uint256(), 1);
+    }
+
+private:
     //! The proposal backed in round `r`: the (r+1)-th lowest-leader-VRF candidate,
     //! starting over from the first once every candidate has had a round;
     //! nullptr if no candidate is known. m_gossip_mutex held.
@@ -317,7 +334,8 @@ private:
     int m_propose_at_height{0};                        //!< height m_propose_at_ms is for
     int64_t m_propose_at_ms{0};                        //!< whole-second instant to propose at once the slot is open (see Step)
     uint256 m_last_tip;                                //!< active tip last seen by Step(); detects parent-reorg rollbacks
-    std::set<uint256> m_seen_proposals;                //!< proposal dedup
+    std::set<uint256> m_seen_proposals;                //!< proposal dedup, by hash and staging solution
+    std::map<uint256, int64_t> m_proposal_fetches;     //!< block hash -> when its body was last requested
     std::set<uint256> m_seen_shares;                   //!< share dedup, by hash of the whole share
 
     // Certificate gossip (honest-splits fix 3A, Tier 1). A verified quorum
@@ -386,6 +404,13 @@ private:
  *  unverifiable here or already held as a block; Invalid = provable garbage.
  *  Shared by the producer and by nodes that run no producer, so every node can
  *  hold its finality for a competing certificate (validation.h). */
+/** Seconds before a proposal body asked for and not received is asked for again. */
+static constexpr int64_t POS_PROPOSAL_FETCH_RETRY_SECONDS = 10;
+
+/** For a node without a producer: whether this exact certificate (block hash
+ *  and certificate) was already judged, so it is not verified again. */
+bool PosCertificateSeenBefore(const CBlockHeader& header);
+
 PosGossipAction PosVerifyCertificate(const CBlockHeader& header, ChainstateManager& chainman,
                                      const Consensus::Params& consensus, int& height_out);
 

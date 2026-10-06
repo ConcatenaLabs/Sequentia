@@ -4277,11 +4277,17 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         vRecv >> compact;
         PosProducer* prod = GetActivePosProducer();
         if (!prod) return;
+        // Reconstruction walks the mempool; a proposal already processed is
+        // not worth that again, however many peers relay it.
+        if (prod->ProposalSeen(compact.header)) return;
         std::shared_ptr<CBlock> pblock = ReconstructPosProposal(compact, m_mempool);
         if (!pblock) {
             // A referenced transaction is missing (or the merkle root did not
-            // verify): fetch the full block from the sender and process that.
-            m_connman.PushMessage(&pfrom, CNetMsgMaker(pfrom.GetCommonVersion()).Make(NetMsgType::GETPOSPROPOSAL, compact.header.GetHash()));
+            // verify): fetch the full block from the sender and process that,
+            // unless a request for it is already out.
+            if (prod->ShouldFetchProposal(compact.header.GetHash())) {
+                m_connman.PushMessage(&pfrom, CNetMsgMaker(pfrom.GetCommonVersion()).Make(NetMsgType::GETPOSPROPOSAL, compact.header.GetHash()));
+            }
             return;
         }
         switch (prod->OnProposal(pblock)) {
@@ -4370,6 +4376,9 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         if (!prod) {
             // No producer: still verify, so a competing certificate holds this
             // node's finality (validation.h), relay it, and fetch the block.
+            // Each certificate once: verifying one costs pairings, and a peer
+            // could otherwise make us repeat that for the same bytes at will.
+            if (PosCertificateSeenBefore(header)) return;
             int height = 0;
             const uint256 hash = header.GetHash();
             switch (PosVerifyCertificate(header, m_chainman, m_chainparams.GetConsensus(), height)) {
@@ -4402,7 +4411,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 const CBlockIndex* pindex = m_chainman.m_blockman.LookupBlockIndex(hash);
                 have_body = pindex && (pindex->nStatus & BLOCK_HAVE_DATA);
             }
-            if (!have_body) {
+            if (!have_body && prod->ShouldFetchProposal(hash)) {
                 m_connman.PushMessage(&pfrom, CNetMsgMaker(pfrom.GetCommonVersion()).Make(NetMsgType::GETPOSPROPOSAL, hash));
             }
             m_connman.ForEachNode([&](CNode* pnode) {

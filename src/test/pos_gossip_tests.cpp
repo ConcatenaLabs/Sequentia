@@ -7,11 +7,13 @@
 #include <key.h>
 #include <pos.h>
 #include <pos_producer.h>
+#include <primitives/block.h>
 #include <vrf.h>
 #include <test/util/setup_common.h>
 
 #include <boost/test/unit_test.hpp>
 
+#include <memory>
 #include <vector>
 
 BOOST_FIXTURE_TEST_SUITE(pos_gossip_tests, TestingSetup)
@@ -37,7 +39,12 @@ BOOST_AUTO_TEST_CASE(forged_share_never_shadows_a_member)
     reg.SetBls(key_b.GetPubKey(), *BlsDerivePubKey(bls_b));
 
     PosProducer producer(*m_node.chainman, *m_node.mempool, Params(), /*connman=*/nullptr, {});
-    const uint256 block_hash = InsecureRand256();
+    // A block the node holds as a round candidate: shares for it are judged
+    // in full, and relayed when valid.
+    auto block = std::make_shared<CBlock>();
+    block->nTime = 1;
+    producer.AddCandidateForTesting(block, key_a.GetPubKey());
+    const uint256 block_hash = block->GetHash();
     const uint256 other_hash = InsecureRand256();
     const auto make_share = [&](const CKey& author, const std::vector<unsigned char>& bls_sk, bool good_sig) {
         PosShare share;
@@ -71,9 +78,14 @@ BOOST_AUTO_TEST_CASE(forged_share_never_shadows_a_member)
     reg.SetStake(key_c.GetPubKey(), 1);
     BOOST_CHECK(producer.OnShare(make_share(key_c, bls_b, /*good_sig=*/true)) == PosGossipAction::Ignore);
 
-    // A's genuine share for a block this node knows nothing about is valid,
-    // just not worth relaying.
-    BOOST_CHECK(producer.OnShare(make_share(key_a, bls_a, /*good_sig=*/true)) == PosGossipAction::Ignore);
+    // A's genuine share is accepted and relayed.
+    BOOST_CHECK(producer.OnShare(make_share(key_a, bls_a, /*good_sig=*/true)) == PosGossipAction::Relay);
+
+    // A share for a block the node knows nothing about is dropped before any
+    // pairing, so even a bad signature costs nothing and is not judged.
+    PosShare unknown = make_share(key_b, bls_b, /*good_sig=*/false);
+    unknown.block_hash = InsecureRand256();
+    BOOST_CHECK(producer.OnShare(unknown) == PosGossipAction::Ignore);
 
     reg.Clear();
     g_pos_public_committee = saved_public;

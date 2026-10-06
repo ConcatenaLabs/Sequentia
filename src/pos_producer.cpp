@@ -1582,6 +1582,36 @@ int64_t PosProducer::DriveRound()
     return POS_PRODUCER_POLL_MS;
 }
 
+//! Identity of a gossiped block for deduplication: its hash AND its proof
+//! solution, which the hash does not cover. Keying on the hash alone let a copy
+//! with a garbled solution, sent first, shut out the genuine one.
+static uint256 PosGossipContentId(const CBlockHeader& header)
+{
+    CHashWriter id(SER_GETHASH, 0);
+    id << header.GetHash() << header.proof.solution;
+    return id.GetHash();
+}
+
+bool PosProducer::ProposalSeen(const CBlockHeader& header)
+{
+    std::lock_guard<std::mutex> lock(m_gossip_mutex);
+    return m_seen_proposals.count(PosGossipContentId(header)) > 0;
+}
+
+bool PosProducer::ShouldFetchProposal(const uint256& hash)
+{
+    // One body request per block hash at a time, whoever announced it. Every
+    // compact proposal and every certificate otherwise sent its own request
+    // for a body of up to a full block, on every mesh edge it crossed.
+    const int64_t now = GetTime();
+    std::lock_guard<std::mutex> lock(m_gossip_mutex);
+    auto it = m_proposal_fetches.find(hash);
+    if (it != m_proposal_fetches.end() && now - it->second < POS_PROPOSAL_FETCH_RETRY_SECONDS) return false;
+    if (m_proposal_fetches.size() > 1000) m_proposal_fetches.clear();
+    m_proposal_fetches[hash] = now;
+    return true;
+}
+
 PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& block)
 {
     const uint256 hash = block->GetHash();
@@ -1603,6 +1633,13 @@ PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& blo
             }
         }
         if (have_cert) {
+            // Once the body is stored, further copies are worth nothing: each
+            // used to cost a full ProcessNewBlock, for free.
+            {
+                LOCK(cs_main);
+                const CBlockIndex* pindex = m_chainman.m_blockman.LookupBlockIndex(hash);
+                if (pindex && (pindex->nStatus & BLOCK_HAVE_DATA)) return PosGossipAction::Ignore;
+            }
             auto full = std::make_shared<CBlock>(*block);
             full->proof.solution = cert_header.proof.solution;
             if (m_chainman.ProcessNewBlock(m_chainparams, full, /*force_processing=*/true, nullptr)) {
@@ -1614,7 +1651,7 @@ PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& blo
     }
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
-        if (!m_seen_proposals.insert(hash).second) return PosGossipAction::Ignore; // already seen
+        if (!m_seen_proposals.insert(PosGossipContentId(*block)).second) return PosGossipAction::Ignore; // already seen
         if (m_seen_proposals.size() > 20000) m_seen_proposals.clear();
     }
     // A posproposal that is not even the BLS committee form is malformed: no
@@ -1774,6 +1811,22 @@ PosGossipAction PosProducer::OnShare(const PosShare& share)
         if (registered.empty() || registered != share.bls_pubkey) return PosGossipAction::Ignore;
         pop_known = true;
     }
+    // Classify the share BEFORE any pairing: for the proposal we are backing
+    // this round, for some other known candidate (a different round's leader —
+    // relay so its aggregators get it), or for nothing we know (junk — drop, do
+    // not amplify). A share for nothing we know was dropped anyway, after paying
+    // for its verification.
+    bool is_backed = false, is_candidate = false;
+    {
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        is_backed = (!m_backed_hash.IsNull() && share.block_hash == m_backed_hash);
+        if (!is_backed) {
+            for (const auto& [leader, cand] : m_candidates) {
+                if (cand.block->GetHash() == share.block_hash) { is_candidate = true; break; }
+            }
+        }
+    }
+    if (!is_backed && !is_candidate) return PosGossipAction::Ignore;
     // A member's proof-of-possession is the same bytes every block, so its
     // (costly) pairing check is cached after the first success — measured to
     // halve the per-share cost at large committees. The signature share is
@@ -1797,20 +1850,7 @@ PosGossipAction PosProducer::OnShare(const PosShare& share)
         m_pop_verified.insert(pop_key);
     }
     if (!BlsVerify(share.bls_pubkey, Span<const unsigned char>(share.block_hash.begin(), 32), share.bls_share)) return PosGossipAction::Invalid;
-    // Classify the share: for the proposal we are backing this round, for some
-    // other known candidate (a different round's leader — relay so its aggregators
-    // get it), or for nothing we know (junk — drop, do not amplify).
-    bool is_backed = false, is_candidate = false;
-    {
-        std::lock_guard<std::mutex> lock(m_gossip_mutex);
-        is_backed = (!m_backed_hash.IsNull() && share.block_hash == m_backed_hash);
-        if (!is_backed) {
-            for (const auto& [leader, cand] : m_candidates) {
-                if (cand.block->GetHash() == share.block_hash) { is_candidate = true; break; }
-            }
-        }
-    }
-    if (!is_backed) return is_candidate ? PosGossipAction::Relay : PosGossipAction::Ignore;
+    if (!is_backed) return PosGossipAction::Relay; // a known candidate (classified above)
     // For the backed proposal we can (and must) check the signer's sortition. The
     // proposal extends the active tip, so the slot seed is that of the tip.
     CBlockIndex* tip;
@@ -1921,6 +1961,17 @@ static int PopulatedSignerCount(const CBlockHeader& header)
     return 0;
 }
 
+bool PosCertificateSeenBefore(const CBlockHeader& header)
+{
+    static Mutex mutex;
+    static std::set<uint256> seen GUARDED_BY(mutex);
+    const uint256 id = PosGossipContentId(header);
+    LOCK(mutex);
+    if (!seen.insert(id).second) return true;
+    if (seen.size() > 20000) seen.clear();
+    return false;
+}
+
 PosGossipAction PosVerifyCertificate(const CBlockHeader& header, ChainstateManager& chainman,
                                      const Consensus::Params& consensus, int& height_out)
 {
@@ -2014,11 +2065,9 @@ PosGossipAction PosProducer::OnCertificate(const CBlockHeader& header)
     // the genuine one, and keying on the hash let whichever arrived first shut
     // the other out. A garbage copy then suppressed the real certificate (and
     // the finality signal it carries) at every producer it reached first.
-    CHashWriter cert_id(SER_GETHASH, 0);
-    cert_id << hash << header.proof.solution;
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
-        if (!m_seen_certs.insert(cert_id.GetHash()).second) return PosGossipAction::Ignore;
+        if (!m_seen_certs.insert(PosGossipContentId(header)).second) return PosGossipAction::Ignore;
         if (m_seen_certs.size() > 20000) m_seen_certs.clear();
     }
     int height = 0;

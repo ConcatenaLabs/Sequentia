@@ -3281,7 +3281,13 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
     // pos_coinbase_leader_height to grandfather pre-rule blocks an already-running
     // chain produced before this rule activated. Zero-value commitment/OP_RETURN
     // outputs (SEQCMT/SEQBLS/VRF, witness commitment) carry no value and are exempt.
-    if (g_con_pos && pindex->nHeight >= m_params.GetConsensus().pos_coinbase_leader_height) {
+    //
+    // The payee comes from the stake registry (payout policies, delegators), so
+    // like the other registry rules it is skipped by VerifyDB's reconnect pass
+    // (check_pos_rules false), whose registry is the tip's: judged against it,
+    // a historical block whose producer has since announced a policy failed,
+    // and -checklevel=4 reported a healthy chain as corrupt.
+    if (g_con_pos && check_pos_rules && pindex->nHeight >= m_params.GetConsensus().pos_coinbase_leader_height) {
         if (std::optional<PosChallengeParts> parts = ParsePosBlockChallenge(block.proof.challenge); parts && parts->leader.IsValid()) {
             // The leader is paid unless it has committed a payout policy, which
             // may redirect the reward (DIRECT) or hand it to one of its
@@ -4381,6 +4387,26 @@ void CChainState::UpdateTip(const CBlockIndex* pindexNew)
     // (-posfinalitydelayms, see RecomputePosImmediateFinality).
     if (g_con_pos) {
         RecomputePosImmediateFinality(pindexNew, [this](const uint256& h) { return m_blockman.LookupBlockIndex(h); });
+        // Only stakers with a registered BLS key sit on the public committee.
+        // When fewer than two do, one key certifies and finalizes on its own
+        // whatever the stake behind the rest, and with none no certificate can
+        // verify and the chain stops. Neither showed anywhere; say so loudly.
+        if (g_pos_public_committee && g_pos_committee_size > 1) {
+            static int warned_size = -1;
+            const int size = PosPublicCommitteeSize(StakeRegistry::GetInstance());
+            if (size <= 1 && size != warned_size) {
+                const std::string msg = size == 0
+                    ? "No staker has a registered committee BLS key: no block can be certified and the chain cannot advance until one registers."
+                    : "Only one staker has a registered committee BLS key: that single key certifies and finalizes every block, whatever the stake of the others.";
+                LogPrintf("WARNING: %s\n", msg);
+                SetMiscWarning(Untranslated(msg));
+                warned_size = size;
+            } else if (size > 1 && warned_size >= 0) {
+                LogPrintf("The committee has %d BLS-registered members again\n", size);
+                SetMiscWarning(bilingual_str());
+                warned_size = -1;
+            }
+        }
         // Release token consumed: once the active chain contains the released
         // rival block the reorg has happened and the recomputed finalized point
         // protects the adopted branch. Clear so the gate is airtight again.
