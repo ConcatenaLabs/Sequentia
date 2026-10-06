@@ -769,6 +769,22 @@ CScript PosLeaderFeeScript(const CPubKey& leader);
 /** Compute the election seed for the block that would extend `pindexPrev`. */
 uint256 PosSeedForChild(const CBlockIndex* pindexPrev);
 
+/** Consensus::Params::pos_hardening_height, mirrored for code that has no chain
+ *  parameters to hand (set by chainparams). 0 = never. */
+extern int g_pos_hardening_height;
+
+/** The seed the payout draws (lottery winner, commission) of the block that
+ *  would extend `pindexPrev` use. Below g_pos_hardening_height it is the
+ *  election seed, which the PARENT's anchor fixes, so the parent's producer,
+ *  choosing among the recent Bitcoin blocks it could anchor to, could compute
+ *  the next block's draw for each and pick the one paying itself or a friend
+ *  (audit T2-PAY-1). From that height it is fixed by the anchor of the block
+ *  three below: whoever chose that anchor could not know who would lead the
+ *  block it decides, since two elections that depend on anchors others choose
+ *  lie in between. Only that one anchor feeds it; mixing in the parent's would
+ *  hand the lever back. */
+uint256 PosPayoutSeedForChild(const CBlockIndex* pindexPrev);
+
 // --- VRF sortition (g_pos_vrf; doc/sequentia/04-proof-of-stake.md §4) ---
 
 class CBlock;
@@ -1128,6 +1144,15 @@ static const int64_t POS_SPLIT_RESERVE_DENOM = 100;
  *  must pay, per delegator per asset, plus what was swept per asset. Pure
  *  function of the registry (itself a pure function of the UTXO set), so the
  *  claim builder and every validator compute identical numbers. */
+/** From g_pos_hardening_height, a pot created at or above it is shared among at
+ *  most this many of the pool's delegators: the largest by lent weight (ties by
+ *  key), in proportion among themselves. A claim pays every participant in one
+ *  transaction, one output each (~264 weight units), so with no bound a pool of
+ *  ~1,500 delegators had a pot no block could hold, and anyone could lock a pool
+ *  that way with dust delegations; even below that, distributions crowded out
+ *  ordinary transactions. 100 participants cost about a fifteenth of a block. */
+static constexpr size_t POS_SPLIT_MAX_PARTICIPANTS = 100;
+
 struct PosPotShares {
     std::map<CPubKey, std::map<CAsset, int64_t>> owed;
     std::map<CAsset, int64_t> swept;

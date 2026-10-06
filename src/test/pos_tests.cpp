@@ -1626,6 +1626,82 @@ BOOST_AUTO_TEST_CASE(pos_split_shares)
     registry.Clear();
 }
 
+// The audit hardening's participant cap: a pot created from the hardening height
+// is shared among the POS_SPLIT_MAX_PARTICIPANTS largest participants only, in
+// proportion among themselves; a pot created before it keeps everyone.
+BOOST_AUTO_TEST_CASE(pos_split_participant_cap)
+{
+    const int saved_hardening = g_pos_hardening_height;
+    g_pos_hardening_height = 100;
+    StakeRegistry& registry = StakeRegistry::GetInstance();
+    registry.Clear();
+
+    const CPubKey pool = MakeKey();
+    registry.AddUtxoStake(pool, 1000000, {}, /*height=*/1);
+    // 150 delegators of weight 1000..1149: the 100 largest are 1050..1149.
+    std::vector<CPubKey> delegators;
+    for (int i = 0; i < 150; ++i) {
+        const CPubKey d = MakeKey();
+        registry.AddUtxoStake(d, 1000 + i, {}, /*height=*/1);
+        registry.AddUtxoDelegation(d, pool, /*height=*/2);
+        delegators.push_back(d);
+    }
+    const CAsset asset(uint256S("23"));
+    const int64_t value = 100000000;
+    const int64_t distributable = value - value / POS_SPLIT_RESERVE_DENOM;
+
+    // Before the hardening height: all 151 participants share.
+    {
+        const auto shares = PosComputePotShares(pool, {{asset, value, 50}});
+        BOOST_CHECK_EQUAL(shares.owed.size(), 151U);
+    }
+    // From it: the pool (largest) and the 99 largest delegators.
+    {
+        const auto shares = PosComputePotShares(pool, {{asset, value, 150}});
+        BOOST_CHECK_EQUAL(shares.owed.size(), POS_SPLIT_MAX_PARTICIPANTS);
+        uint64_t total = 1000000;
+        for (int i = 51; i < 150; ++i) total += 1000 + i;
+        BOOST_CHECK(shares.owed.count(pool));
+        BOOST_CHECK(!shares.owed.count(delegators[50]));   // 1050: the 101st largest
+        BOOST_CHECK(shares.owed.count(delegators[51]));    // 1051: the 100th
+        BOOST_CHECK_EQUAL(shares.owed.at(delegators[149]).at(asset),
+                          (int64_t)(((unsigned __int128)distributable * 1149) / total));
+    }
+    registry.Clear();
+    g_pos_hardening_height = saved_hardening;
+}
+
+// The audit hardening's payout seed: below the height it is the election seed;
+// from it, a function of the anchor three blocks down and the height alone, so
+// the parent's (and grandparent's) anchor choice cannot move the draw.
+BOOST_AUTO_TEST_CASE(pos_payout_seed_from_three_below)
+{
+    const int saved_hardening = g_pos_hardening_height;
+    std::vector<CBlockIndex> chain(10);
+    for (int h = 0; h < 10; ++h) {
+        chain[h].nHeight = h;
+        chain[h].pprev = h ? &chain[h - 1] : nullptr;
+        chain[h].m_anchor_hash = uint256S(strprintf("%x", 0x100 + h));
+        chain[h].BuildSkip();
+    }
+    g_pos_hardening_height = 0;
+    BOOST_CHECK(PosPayoutSeedForChild(&chain[8]) == PosSeedForChild(&chain[8]));
+
+    g_pos_hardening_height = 5;
+    const uint256 seed9 = PosPayoutSeedForChild(&chain[8]);    // the draw of block 9
+    BOOST_CHECK(seed9 != PosSeedForChild(&chain[8]));
+    // Changing the anchors of blocks 7 and 8 (parent and grandparent) leaves it.
+    chain[8].m_anchor_hash = uint256S("dead");
+    chain[7].m_anchor_hash = uint256S("beef");
+    BOOST_CHECK(PosPayoutSeedForChild(&chain[8]) == seed9);
+    // Changing the anchor of block 6 (three below) moves it.
+    chain[6].m_anchor_hash = uint256S("f00d");
+    BOOST_CHECK(PosPayoutSeedForChild(&chain[8]) != seed9);
+    // Below the height, the election seed as before.
+    BOOST_CHECK(PosPayoutSeedForChild(&chain[3]) == PosSeedForChild(&chain[3]));
+    g_pos_hardening_height = saved_hardening;
+}
+
 // Two-step unbonding (consensus/params.h pos_unbond_height): stake leaves only
 // through an unbonding output of the same key, and that output unlocks only
 // after the checkpoint depth of parent-chain blocks.

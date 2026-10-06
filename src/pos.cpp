@@ -389,6 +389,26 @@ std::optional<PosChallengeParts> ParsePosBlockChallenge(const CScript& challenge
     return parts;
 }
 
+int g_pos_hardening_height = 0;
+
+uint256 PosPayoutSeedForChild(const CBlockIndex* pindexPrev)
+{
+    if (pindexPrev == nullptr) return uint256();
+    const int height = pindexPrev->nHeight + 1;
+    if (g_pos_hardening_height <= 0 || height < g_pos_hardening_height || height < 3) {
+        return PosSeedForChild(pindexPrev);
+    }
+    // Block N-3 is two steps below the parent (N-1). Walked by hand: this file
+    // is linked into tools that do not carry CBlockIndex::GetAncestor.
+    const CBlockIndex* source = pindexPrev->pprev ? pindexPrev->pprev->pprev : nullptr;
+    if (source == nullptr) return PosSeedForChild(pindexPrev);
+    // The height keeps the draws of consecutive blocks apart: many blocks share
+    // an anchor, and so may share the source block's.
+    CHashWriter ss(SER_GETHASH, 0);
+    ss << std::string("SEQPAYSEED") << source->m_anchor_hash << (int32_t)height;
+    return ss.GetSHA256();
+}
+
 uint256 PosSeedForChild(const CBlockIndex* pindexPrev)
 {
     if (pindexPrev == nullptr) return uint256();
@@ -952,7 +972,19 @@ PosPotShares PosComputePotShares(const CPubKey& signer,
         // stood behind the pool, and someone who delegates one block before a
         // claim is eligible for precisely the pots created after they arrived,
         // which is none of these.
-        const std::map<CPubKey, uint64_t> participants = registry.ParticipantsBefore(signer, height);
+        std::map<CPubKey, uint64_t> participants = registry.ParticipantsBefore(signer, height);
+        // The participant cap (POS_SPLIT_MAX_PARTICIPANTS), by the pot's own
+        // creation height, so the set stays a pure function of the UTXO set.
+        if (g_pos_hardening_height > 0 && height >= g_pos_hardening_height &&
+            participants.size() > POS_SPLIT_MAX_PARTICIPANTS) {
+            std::vector<std::pair<CPubKey, uint64_t>> ranked(participants.begin(), participants.end());
+            std::sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) {
+                if (a.second != b.second) return a.second > b.second;
+                return a.first < b.first;
+            });
+            ranked.resize(POS_SPLIT_MAX_PARTICIPANTS);
+            participants = std::map<CPubKey, uint64_t>(ranked.begin(), ranked.end());
+        }
         uint64_t total = 0;
         for (const auto& e : participants) total += e.second;
         if (total == 0) continue; // nobody eligible: this input's value rolls

@@ -2073,7 +2073,7 @@ static RPCHelpMan getposblocktemplate()
     // (ProducePosBlock, src/pos_producer.cpp), so the two paths cannot
     // disagree about who gets paid.
     if (feeDestinationScript == CScript()) {
-        feeDestinationScript = PosRequiredCoinbaseScript(pubkey, tip->nHeight + 1, seed);
+        feeDestinationScript = PosRequiredCoinbaseScript(pubkey, tip->nHeight + 1, PosPayoutSeedForChild(tip));
     }
 
     std::unique_ptr<CBlockTemplate> pblocktemplate(

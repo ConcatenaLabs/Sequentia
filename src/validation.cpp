@@ -3350,7 +3350,7 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
             // may redirect the reward (DIRECT) or hand it to one of its
             // delegators drawn by stake weight (LOTTERY). The producer builds the
             // coinbase from this same function, so the two cannot disagree.
-            const uint256 payout_seed = PosSeedForChild(pindex->pprev);
+            const uint256 payout_seed = PosPayoutSeedForChild(pindex->pprev);
             const CScript required_script = PosRequiredCoinbaseScript(parts->leader, pindex->nHeight, payout_seed);
             for (const auto& txout : block.vtx[0]->vout) {
                 const bool mustPay = !txout.nValue.IsExplicit() || txout.nValue.GetAmount() != 0;
