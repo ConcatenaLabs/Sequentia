@@ -8,8 +8,10 @@ overall implementation status.
 The threat review covered six subsystems - PoS block validation; anchoring,
 reorg-following and fork choice; the VRF and MuSig2 cryptography; genesis, money
 and tokenomics; the stake registry and unbonding; and the fee market, RPC and
-DoS surface. No reviewer found a way to steal funds, mint SEQ beyond the 400M
-cap, or force a permanent consensus split. Block **validation** is fully
+DoS surface. No reviewer of that first round found a way to steal funds, mint
+SEQ beyond the 400M cap, or force a permanent consensus split. The October 2026
+audit (below) did find ways to take a staker's weight and a producer's rewards,
+and to halt or split the chain; their fixes are listed there. Block **validation** is fully
 decentralized: every node independently verifies the VRF proofs, committee
 eligibility, the aggregate signature, the anchor, and the finality gate.
 
@@ -94,6 +96,41 @@ eligibility, the aggregate signature, the anchor, and the finality gate.
   value is not part of the genesis commitment, so changing it does not change the
   genesis. This enables the bootstrap tooling
   ([`05-operating-sequentia.md`](05-operating-sequentia.md) §7).
+
+### October 2026 audit
+
+An adversarial audit of the protocol and the node against master `bbaed47ca`.
+Fixed without a fork (local validation, mempool, block assembly, gossip, anchor
+handling, configuration):
+
+- a bad committee certificate, which the block hash does not commit to, no
+  longer marks the honest block's hash invalid (it is `BLOCK_MUTATED`, and a
+  stored copy is discarded and fetched again);
+- the BLS wrappers decode points with their length (an out-of-bounds read
+  reachable from gossip);
+- committee gossip is deduplicated on content, shares must be signed with the
+  member's registered key, and certificate, share and proposal handling stopped
+  paying for crypto and full-block fetches before classifying;
+- the block-level record rules (delegation, payout, BLS registration, pot
+  claims, per-asset fee total) are applied at mempool admission, in the block
+  assembler and in `TestBlockValidity`, so a single dust transaction can no
+  longer stall every producer; a template that still fails yields a block
+  without transactions;
+- parent-daemon errors and "not found" from a daemon still syncing are no
+  longer read as an anchor being off Bitcoin's best chain; checkpoints are kept
+  per commitment and persisted across restarts; the parent RPC timeout is 10 s.
+
+Fixed by the hardening fork (`pos_hardening_height`; 163,000 on the testnet,
+block 1 on mainnet): delegation and payout records need their key's
+authorisation; one supervision key rotation per asset and role per block; no
+identical record re-creation within a block; no issuance on a supervision
+record input; an anchor repeating its parent's hash must repeat its height; the
+lottery seed comes from three blocks down; a split pot is shared among at most
+100 participants; and the public committee is apportioned in seats by stake
+(see [`04-proof-of-stake.md`](04-proof-of-stake.md) §2 and §4).
+
+Not done yet: a pull model for pool rewards, where each delegator withdraws
+its own accrued share, to replace the capped split.
 
 ### Accepted by design (documented, not bugs)
 

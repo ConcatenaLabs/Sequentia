@@ -51,8 +51,9 @@ operator-permissioned — the opposite of the point, which is that nobody's payo
 depends on the operator staying interested.
 
 **Commission** reuses the lottery's own mechanism: a `commission_bp`/10000
-chance, drawn from the unbiasable election seed (Bitcoin's proof of work), that
-the block pays the leader instead of the pot. Exact in expectation, it keeps the
+chance, drawn from the payout seed (from the hardening fork, fixed by the anchor
+of the block three below; `PosPayoutSeedForChild`), that the block pays the
+leader instead of the pot. Exact in expectation, it keeps the
 coinbase a single required script, and it needs no claim-time policy lookup —
 which closes a rug: commission taken at claim time under "the policy in force
 now" would let an operator raise it against rewards already earned.

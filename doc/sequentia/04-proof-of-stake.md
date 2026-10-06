@@ -189,6 +189,19 @@ Two rules keep the map well-defined:
 - **Resolution is one hop, never chained.** If A delegates to B and B delegates
   to C, A's weight counts for B and B's own weight counts for C. Chasing chains
   would admit cycles.
+- **Only the controller creates a record** (from `pos_hardening_height`). A
+  record took effect merely by existing, so anyone could create one naming any
+  controller for a dust output and take its whole weight (audit A1). A record
+  is now valid only in a transaction that spends a coin only the controller's
+  key can spend: a P2PK/P2PKH/P2WPKH output of the key, its staking or
+  unbonding output, or its previous record (which every rotation spends).
+  `delegatestake` arranges it by paying a small amount to the key's P2WPKH and
+  spending it in the record's transaction (`authorization_txid`). A record
+  naming the controller as its own signer is refused, and so is a record spent
+  and re-created byte for byte in one block (`bad-record-recreated`). The same
+  authorisation applies to payout records and their signer
+  (`bad-payout-unauthorized`): without it anyone could have announced a DIRECT
+  policy paying themselves from any producer's blocks.
 - **At most one unspent record per controller**, enforced in `ConnectBlock`
   (`bad-delegation-conflict`, `bad-delegation-exists`). Two live records would
   make the resolved signer depend on iteration order, and so on the node. This
@@ -221,9 +234,13 @@ function. Three modes ship:
 - **DIRECT** - the coinbase must pay a committed scriptPubKey. This prevents a
   *silent* redirect; it does not enforce fairness, since an operator may commit
   to its own address. Trust-minimised, not trustless.
-- **LOTTERY** - the coinbase must pay ONE participant drawn weighted by stake
-  from the block's election seed, which is `SHA256(parent Bitcoin anchor hash ||
-  height)` and therefore unbiasable. Each delegator earns its exact proportional
+- **LOTTERY** - the coinbase must pay ONE participant drawn weighted by stake.
+  Below `pos_hardening_height` the draw used the block's election seed, fixed
+  by the parent's anchor, so the parent's producer could compute the draw for
+  each Bitcoin block it might anchor to and pick the one paying itself (audit
+  T2-PAY-1). From that height the draw's seed is fixed by the anchor of the
+  block three below and the height (`PosPayoutSeedForChild`): whoever chose
+  that anchor could not know who would lead the block it decides. Each delegator earns its exact proportional
   share over time with zero accounting. It does **not** smooth variance: 1% of a
   pool is 100% of one block in a hundred. Of the two reasons pools exist, this
   addresses participation below the floor but not variance reduction. Operator
@@ -232,7 +249,11 @@ function. Three modes ship:
 - **SPLIT** - the coinbase must pay an on-chain pot, and anyone may broadcast
   the claim (`claimpoolrewards`) that distributes it: each delegator is paid
   its exact proportional share of every pot output it was eligible for, at its
-  own controller key. The claim is fully determined by the UTXO set, so no
+  own controller key. A pot created from `pos_hardening_height` is shared among
+  the `POS_SPLIT_MAX_PARTICIPANTS` (100) largest participants only, in
+  proportion among themselves: the claim pays every participant in one
+  transaction, and without a bound a pool of ~1,500 delegators had a pot no
+  block could hold (audit A11). The claim is fully determined by the UTXO set, so no
   payout depends on the operator staying interested, and variance is smoothed
   without any per-delegator accounting. Commission is a bp/10000 chance that a
   block pays the operator instead of the pot. Leaving the pool forfeits
@@ -600,6 +621,25 @@ raised to `MAX_POS_PUBLIC_COMMITTEE_SIZE` (1000); the testnet runs cap 250
 the BLS key they sign with on-chain, inside their staking output (§2), or via
 the `-staker=<pubkey>:<weight>:<blspubkey>:<pop>` config form on custom
 chains; `getblsregistration` derives the registration from the staking key.
+
+**Seats by stake (from `pos_hardening_height`; 163,000 on the testnet, block 1
+on mainnet).** One place per staker, ordered by `H(seed, key)/stake`, capped a
+large stake at a single seat and handed the remaining seats almost uniformly to
+whoever held many identities, so a coalition split into minimum-stake
+identities took far more seats than its stake (audit A13): the capture figures
+below hold for equal stakes only. From the hardening height the committee is
+`K = -poscommitteesize` **seats** apportioned by stake
+(`PosPublicCommitteeSeats`): each eligible, BLS-registered staker has a quota
+`K·w/W`, receives its whole part, and the seats left over go to the fractional
+parts in one systematic draw from the seed, so expected seats equal the quota
+exactly and nobody gets more than one seat beyond its whole part. Splitting
+stake across identities gains nothing. A member signs once and counts its
+seats; the quorum is `PosPublicQuorum(K)` seats, in effect a strict majority of
+the stake behind the committee. The bitfield still names members, and the
+certificate carries a fourth push, the seat total of its signers, so fork
+choice and finality can weigh a header before its block connects; `ConnectBlock`
+checks it (`bad-posbls-seats-mismatch`). With equal stakes and as many seats as
+stakers, every staker holds one seat, exactly as before.
 
 ### BLS certification (the default, `-posbls`)
 
