@@ -407,6 +407,7 @@ static RPCHelpMan isassetfrozen()
         RPCResult{RPCResult::Type::OBJ, "", "", {
             {RPCResult::Type::BOOL, "frozen", "Whether a freeze record currently names this script."},
             {RPCResult::Type::BOOL, "freezable", "Whether a freeze could bind it, i.e. whether it is single-owner."},
+            {RPCResult::Type::BOOL, "conditional", "For P2SH and Taproot: \"freezable\" holds only for some ways of spending it. A freeze binds a P2SH output spent as wrapped P2WPKH and a Taproot output spent by its key path, not a multisig redeem script or a script-path spend, and which one a holder will use cannot be read from the script."},
             {RPCResult::Type::STR_HEX, "targethash", "The hash a record would name."},
         }},
         RPCExamples{HelpExampleCli("isassetfrozen", "\"<asset>\" \"<address>\"")},
@@ -435,6 +436,7 @@ static RPCHelpMan isassetfrozen()
         // for completely different responses.
         result.pushKV("paused", registry.IsPaused(asset));
         result.pushKV("freezable", freezable);
+        result.pushKV("conditional", type == TxoutType::SCRIPTHASH || type == TxoutType::WITNESS_V1_TAPROOT);
         result.pushKV("targethash", target.GetHex());
         return result;
     }};

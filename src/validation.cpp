@@ -1224,6 +1224,15 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     }
 
     CValue currentFeeValue = ExchangeRateMap::GetInstance().ConvertAmountToValue(ws.m_base_fees, feeAsset);
+    // ELEMENTS: the conversion saturates at the int64 ceiling, which a rate set
+    // high enough reaches with a handful of atoms. Saturated fees all tie at the
+    // top of every ordering, whatever they are really worth, and since nothing
+    // can pay more than the ceiling, no replacement can ever outbid one. No
+    // honest fee is worth anywhere near MAX_MONEY reference units; refuse it.
+    if (g_con_any_asset_fees && currentFeeValue.GetValue() > MAX_MONEY) {
+        return state.Invalid(TxValidationResult::TX_NOT_STANDARD, "fee-value-out-of-range",
+                             "the fee is worth more than the reference unit can express at the configured rate");
+    }
     entry.reset(new CTxMemPoolEntry(ptx, ws.m_base_fees, feeAsset, currentFeeValue, nAcceptTime, m_active_chainstate.m_chain.Height(),
             fSpendsCoinbase, nSigOpsCost, lp, setPeginsSpent));
     ws.m_vsize = entry->GetTxSize();

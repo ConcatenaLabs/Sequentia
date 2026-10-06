@@ -372,7 +372,11 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
     if (g_con_bitcoin_anchor) {
         if (!GetAnchorForNewBlock(pindexPrev->m_anchor_height, pindexPrev->m_anchor_hash,
                                   pblock->m_anchor_height, pblock->m_anchor_hash)) {
-            throw std::runtime_error(strprintf("%s: unable to determine a parent chain anchor; is the mainchain daemon reachable? (see -mainchainrpc* options)", __func__));
+            // Two causes, and the second is not about connectivity at all: the
+            // daemon cannot be asked, or no parent-chain block can follow the
+            // parent's anchor (the block at that height was replaced; see
+            // debug.log for the anchor messages just before this).
+            throw std::runtime_error(strprintf("%s: unable to determine a parent chain anchor: either the mainchain daemon is unreachable (see -mainchainrpc* options) or no parent-chain block can follow the parent block's anchor (see debug.log)", __func__));
         }
     }
     pblock->nNonce         = 0;
@@ -384,9 +388,10 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
         // in. Throwing here costs this producer its slot, and since every
         // producer selects from the same mempool, every producer every slot:
         // one bad transaction stalls the chain until it is found and removed.
-        // Produce a block without transactions instead, which keeps the chain
-        // moving and the failure loud.
-        if (!m_coinbase_only && nBlockTx > 0) {
+        // On a PoS chain, produce a block without transactions instead, which
+        // keeps the chain moving and the failure loud. (A PoW miner calling
+        // this gets the error, as upstream, and decides for itself.)
+        if (g_con_pos && !m_coinbase_only && nBlockTx > 0) {
             LogPrintf("CreateNewBlock: the template with %u transactions failed validation (%s); "
                       "producing a block without transactions instead\n", nBlockTx, state.ToString());
             m_coinbase_only = true;

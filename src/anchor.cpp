@@ -335,6 +335,9 @@ int MainchainUnchangedHeight(const uint256& old_tip)
 
     uint256 cursor = old_tip;
     for (int depth = 0; depth <= ANCHOR_FORK_WALK_MAX; ++depth) {
+        // Up to one RPC per step: give way to shutdown, which joins this
+        // thread. Dropping every cached verdict is always safe.
+        if (ShutdownRequested()) return -1;
         MainchainHeaderInfo info;
         if (!GetMainchainHeaderInfo(cursor, info)) {
             // Unreachable daemon, or a hash it does not know (e.g. the node was
@@ -1189,6 +1192,20 @@ void AnchorWatchTask(ChainstateManager& chainman)
                       anchor_hash.ToString(), anchor_height, hash.ToString());
             {
                 LOCK(cs_main);
+                // ResetBlockFailureFlags also clears every ancestor's failure
+                // marks, as reconsiderblock does. Those are not ours to clear
+                // when the failure is not the watcher's: an ancestor an operator
+                // invalidated (invalidateblock) or that failed validation stays
+                // failed, and so does this branch above it.
+                bool foreign_failure = false;
+                for (const CBlockIndex* a = pindex->pprev; a != nullptr && !foreign_failure; a = a->pprev) {
+                    foreign_failure = (a->nStatus & BLOCK_FAILED_VALID) && !(a->nStatus & BLOCK_FAILED_ANCHOR);
+                }
+                if (foreign_failure) {
+                    LogPrint(BCLog::VALIDATION, "Anchor watcher: not reconsidering %s: an ancestor was invalidated for another reason\n",
+                             hash.ToString());
+                    continue;
+                }
                 // ResetBlockFailureFlags also clears the BLOCK_FAILED_ANCHOR marker.
                 chainman.ActiveChainstate().ResetBlockFailureFlags(pindex);
             }

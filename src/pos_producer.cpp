@@ -2087,6 +2087,18 @@ PosGossipAction PosProducer::OnCertificate(const CBlockHeader& header)
         m_recent_certs[hash] = header; // answers getposcert share-lock queries
         // Bound the maps (certificates for live heights only; stale entries
         // are pruned as the tip advances in Step).
+        //
+        // Evict the LOWEST height first. The maps are keyed by block hash, and
+        // dropping their first entry dropped an arbitrary certificate, possibly
+        // the current height's: the node then stopped pinning that height and
+        // stopped answering share-lock queries for it while a quorum
+        // certificate existed.
+        while (m_certified.size() > 100 && !m_certified_heights.empty()) {
+            const auto lowest = m_certified_heights.begin();
+            m_certified.erase(lowest->second);
+            m_recent_certs.erase(lowest->second);
+            m_certified_heights.erase(lowest);
+        }
         if (m_certified.size() > 100) {
             m_certified.erase(m_certified.begin());
         }

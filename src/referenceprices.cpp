@@ -25,6 +25,9 @@
 
 namespace {
 
+//! Largest price-feed reply accepted, in bytes.
+constexpr size_t MAX_REFERENCE_PRICES_BODY = 1 << 20;
+
 Mutex g_prices_mutex;
 std::map<std::string, double> g_prices GUARDED_BY(g_prices_mutex);
 
@@ -81,6 +84,10 @@ bool HttpGet(const std::string& url, std::string& out_body, std::string& out_err
     raii_event_base base = obtain_event_base();
     raii_evhttp_connection evcon = obtain_evhttp_connection_base(base.get(), host, port);
     evhttp_connection_set_timeout(evcon.get(), gArgs.GetIntArg("-referencepricestimeout", 15));
+    // A price list is a few kilobytes. The feed is plain HTTP, so anyone on the
+    // path can answer instead of it, and without a cap libevent buffers the
+    // whole reply in memory, every poll, however large.
+    evhttp_connection_set_max_body_size(evcon.get(), MAX_REFERENCE_PRICES_BODY);
 
     HTTPReply response;
     raii_evhttp_request req = obtain_evhttp_request(http_request_done, (void*)&response);

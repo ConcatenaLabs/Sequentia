@@ -556,10 +556,20 @@ public:
         // this node accepts: the first decides whether a sub-quorum block is
         // rejected as bad-pos-escape-stall-too-soon, the second how much of the
         // parent chain is searched for the checkpoints behind the finality floor.
-        for (const char* flag : {"-posbls", "-pospubliccommittee", "-poscommitteesize", "-posvrf", "-posaggcommittee", "-posunbonding", "-posminstake", "-pospayoutnotice", "-posslotinterval", "-poscheckpointdepth", "-posescapestallmtpgap", "-poscheckpointscan"}) {
+        for (const char* flag : {"-posbls", "-pospubliccommittee", "-poscommitteesize", "-posvrf", "-posaggcommittee", "-posunbonding", "-posminstake", "-pospayoutnotice", "-posslotinterval", "-poscheckpointdepth", "-posescapestallmtpgap", "-poscheckpointscan", "-con_max_block_sig_size"}) {
             if (args.IsArgSet(flag)) {
                 throw std::runtime_error(strprintf("%s is a consensus rule of the Sequentia network and cannot be overridden; remove it from the configuration", flag));
             }
+        }
+        for (const char* flag : {"-posbyzantineequivocate", "-posbyzantineinvalid", "-posdebugroundskewms"}) {
+            if (args.IsArgSet(flag)) {
+                throw std::runtime_error(strprintf("%s is a test-only fault injection and is refused on the Sequentia network", flag));
+            }
+        }
+        // Parsed only on custom chains. Ignoring it here would leave an operator
+        // believing a static checkpoint protects them when nothing does.
+        if (args.IsArgSet("-poscheckpoint")) {
+            throw std::runtime_error("-poscheckpoint is only available on custom chains; on the Sequentia network the long-range defense is the parent-chain checkpoints");
         }
         g_pos_min_stake = 4000000000000ULL;              // 40,000 SEQ = 0.01% of 400M (§3.3)
         g_split_payout_height = 0;
@@ -1153,8 +1163,29 @@ public:
             // sortition is a threshold, so an above-mean draw can select more
             // members than -poscommitteesize (up to the cap) and must still fit.
             const int bls_default = 300 * MAX_POS_AGG_COMMITTEE_SIZE + 2000;
-            consensus.max_block_signature_size = args.GetIntArg(
-                "-con_max_block_sig_size", g_pos_bls ? bls_default : 200);
+            const int64_t network_value = g_pos_bls ? bls_default : 200;
+            // CheckProof enforces this on every block, so a different value
+            // rejects the network's blocks (or accepts larger ones) in silence.
+            if (args.IsArgSet("-con_max_block_sig_size") &&
+                args.GetIntArg("-con_max_block_sig_size", network_value) != network_value) {
+                throw std::runtime_error(strprintf(
+                    "-con_max_block_sig_size is a consensus rule of the Sequentia testnet and must be %d on this "
+                    "network; a different value forks this node off in silence. Remove it from the configuration, "
+                    "or use -chain=regtest / a custom chain to experiment.", network_value));
+            }
+            consensus.max_block_signature_size = network_value;
+        }
+        // Fault injection for the functional tests. On a real network it turns
+        // the node into an attacker of the network it serves.
+        for (const char* flag : {"-posbyzantineequivocate", "-posbyzantineinvalid", "-posdebugroundskewms"}) {
+            if (args.IsArgSet(flag)) {
+                throw std::runtime_error(strprintf("%s is a test-only fault injection and is refused on the Sequentia testnet", flag));
+            }
+        }
+        // Parsed only on custom chains. Ignoring it here would leave an operator
+        // believing a static checkpoint protects them when nothing does.
+        if (args.IsArgSet("-poscheckpoint")) {
+            throw std::runtime_error("-poscheckpoint is only available on custom chains; on the Sequentia testnet the long-range defense is the parent-chain checkpoints");
         }
         g_signed_blocks = true;
 
