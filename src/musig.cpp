@@ -77,7 +77,7 @@ bool AggKey(const std::vector<CPubKey>& pubkeys, secp256k1_xonly_pubkey& agg_pk,
     if (!ParseSorted(pubkeys, parsed)) return false;
     std::vector<const secp256k1_pubkey*> ptrs(parsed.size());
     for (size_t i = 0; i < parsed.size(); ++i) ptrs[i] = &parsed[i];
-    return secp256k1_musig_pubkey_agg(Ctx(), nullptr, &agg_pk, &cache, ptrs.data(), ptrs.size());
+    return secp256k1_musig_pubkey_agg(Ctx(), &agg_pk, &cache, ptrs.data(), ptrs.size());
 }
 
 //! A fingerprint binding a signing session to its exact (set, message): the
