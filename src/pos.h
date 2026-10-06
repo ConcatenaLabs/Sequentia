@@ -1165,6 +1165,15 @@ CScript PosRequiredCoinbaseScript(const CPubKey& leader, int64_t height, const u
  *  script is not of the canonical form. */
 std::optional<std::pair<CPubKey, CPubKey>> ParseDelegationScript(const CScript& script);
 
+/** Whether `spent` (the coins a transaction spends) include one only `key` can
+ *  spend: a P2PK, P2PKH or P2WPKH output of the key, its staking or unbonding
+ *  output, or a delegation or payout record it controls. From
+ *  pos_hardening_height a delegation record may only be created by a
+ *  transaction that spends such a coin of its controller, and a payout record
+ *  by one that spends such a coin of its signer: both records direct what the
+ *  key's stake earns or decides, and anyone could otherwise create them. */
+bool PosTxSpendsKey(const CPubKey& key, const std::vector<Coin>& spent);
+
 /** The (controller, signer) a txout registers, or nullopt if it is not a
  *  delegation record. Value and asset are unconstrained: the record carries no
  *  weight of its own, it only re-points weight the staking outputs already hold. */

@@ -136,6 +136,47 @@ UniValue SendMoney(CWallet& wallet, const CCoinControl &coin_control, std::vecto
     return tx->GetHash().GetHex();
 }
 
+//! SEQUENTIA audit hardening (Consensus::Params::pos_hardening_height): a
+//! delegation or payout record must be created by a transaction that spends a
+//! coin only the record's key can spend (PosTxSpendsKey), or anyone could
+//! create one in another key's name. Arrange such a coin for the record's
+//! transaction: pay a small amount to the key's P2WPKH now and select that
+//! output, so the record's transaction spends it straight away, unconfirmed;
+//! both are mined together. Returns the payment's txid, or null when the rule
+//! is not yet in force at the next block and nothing was sent.
+static uint256 SelectKeyAuthorization(CWallet& wallet, const CPubKey& key, CCoinControl& coin_control)
+{
+    const int next_height = wallet.chain().getHeight().value_or(0) + 1;
+    if (!Params().GetConsensus().PosHardeningActiveAt(next_height)) return uint256();
+
+    const CAsset& asset = Params().GetConsensus().pegged_asset;
+    const CScript script = GetScriptForDestination(WitnessV0KeyHash(key));
+    const CAmount amount = 2 * GetDustThreshold(CTxOut(asset, 1, script), ::dustRelayFee);
+    std::vector<CRecipient> recipients{{script, amount, asset, CPubKey(), false}};
+
+    CAmount fee = 0;
+    int change_pos = -1;
+    bilingual_str error;
+    CTransactionRef tx;
+    FeeCalculation fee_calc;
+    CCoinControl payment_control;
+    auto blind_details = g_con_elementsmode ? std::make_unique<BlindDetails>() : nullptr;
+    if (blind_details) blind_details->ignore_blind_failure = true;
+    if (!CreateTransaction(wallet, recipients, tx, fee, change_pos, error, payment_control, fee_calc, true, blind_details.get())) {
+        throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, strprintf(
+            "cannot fund the payment to the record's key that authorises it: %s", error.original));
+    }
+    wallet.CommitTransaction(tx, {}, {}, blind_details.get());
+    for (uint32_t n = 0; n < tx->vout.size(); ++n) {
+        if (tx->vout[n].scriptPubKey == script) {
+            coin_control.Select(COutPoint(tx->GetHash(), n));
+            coin_control.fAllowOtherInputs = true;
+            return tx->GetHash();
+        }
+    }
+    throw JSONRPCError(RPC_WALLET_ERROR, "the authorising payment has no output to the record's key");
+}
+
 // Defined with the unstake helpers below (same unnamed namespace).
 namespace {
 bool WalletControlsStakerKey(const CWallet& wallet, const CPubKey& pubkey) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
@@ -2081,6 +2122,7 @@ RPCHelpMan delegatestake()
                 },
                 RPCResult{RPCResult::Type::OBJ, "", "", {
                     {RPCResult::Type::STR_HEX, "txid", "the transaction that funded (or re-pointed) the record"},
+                    {RPCResult::Type::STR_HEX, "authorization_txid", /*optional=*/true, "a small payment to the controller key's P2WPKH that the record's transaction spends, proving the controller authorised it (required by consensus from the audit hardening height)"},
                     {RPCResult::Type::STR_HEX, "controller", "the staker key whose weight is now lent"},
                     {RPCResult::Type::STR_HEX, "signer", "the key that now produces blocks with it"},
                     {RPCResult::Type::STR_HEX, "previous_signer", /*optional=*/true, "the signer this replaced, when re-pointing"},
@@ -2265,9 +2307,11 @@ RPCHelpMan delegatestake()
         recipients.push_back({record_script, record_amount, asset, CPubKey(), false});
 
         CCoinControl coin_control;
+        const uint256 auth = SelectKeyAuthorization(*pwallet, controller, coin_control);
         mapValue_t mapValue;
         UniValue txid = SendMoney(*pwallet, coin_control, recipients, mapValue, /*verbose=*/false, /*ignore_blind_fail=*/true);
         result.pushKV("txid", txid);
+        if (!auth.IsNull()) result.pushKV("authorization_txid", auth.GetHex());
         if (stake_amount) result.pushKV("staked", ValueFromAmount(*stake_amount));
         result.pushKV("record_amount", ValueFromAmount(record_amount));
     }
@@ -2445,6 +2489,7 @@ RPCHelpMan announcepayout()
                 },
                 RPCResult{RPCResult::Type::OBJ, "", "", {
                     {RPCResult::Type::STR_HEX, "txid", "the announcement transaction id"},
+                    {RPCResult::Type::STR_HEX, "authorization_txid", /*optional=*/true, "a small payment to the signer key's P2WPKH that the announcement spends, proving the signer authorised it (required by consensus from the audit hardening height)"},
                     {RPCResult::Type::STR_HEX, "signer", "the signer the policy binds"},
                     {RPCResult::Type::STR, "mode", "\"direct\", \"lottery\" or \"split\""},
                     {RPCResult::Type::NUM, "activation", "height from which it binds"},
@@ -2628,11 +2673,13 @@ RPCHelpMan announcepayout()
     CRecipient recipient = {record_script, amount, asset, CPubKey(), false};
     std::vector<CRecipient> recipients = {recipient};
     CCoinControl coin_control;
+    const uint256 auth = SelectKeyAuthorization(*pwallet, signer, coin_control);
     mapValue_t mapValue;
     UniValue txid = SendMoney(*pwallet, coin_control, recipients, mapValue, /*verbose=*/false, /*ignore_blind_fail=*/true);
 
     UniValue result(UniValue::VOBJ);
     result.pushKV("txid", txid);
+    if (!auth.IsNull()) result.pushKV("authorization_txid", auth.GetHex());
     result.pushKV("signer", HexStr(signer));
     result.pushKV("mode", mode);
     result.pushKV("activation", policy.activation);

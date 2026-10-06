@@ -165,6 +165,8 @@ struct PosRecordState {
     std::set<CPubKey> created_delegations;
     std::set<std::pair<CPubKey, int64_t>> created_payouts;
     std::map<CPubKey, std::vector<unsigned char>> bls_keys;
+    std::set<CScript> spent_record_scripts;
+    std::set<std::pair<CAsset, int>> supervision_rotations;
 };
 
 /** SEQUENTIA PoS: the block-level rules ConnectBlock applies to stake records,

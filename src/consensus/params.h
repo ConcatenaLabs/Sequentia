@@ -428,6 +428,18 @@ struct Params {
     {
         return pos_unbond_height > 0 && height >= pos_unbond_height;
     }
+    //! SEQUENTIA: the October 2026 audit's consensus fixes, all from one
+    //! height so the network cuts over once. Restrictions (soft-fork shaped):
+    //! a delegation record must be authorised by its controller; at most one
+    //! supervision rotation per (asset, role) per block; a block may not spend
+    //! a stake record and re-create it identically; the anchor's parent-chain
+    //! check is skipped only when height AND hash repeat the parent's; no
+    //! issuance rides on a supervision record input. 0 = off.
+    int pos_hardening_height{0};
+    bool PosHardeningActiveAt(int height) const
+    {
+        return pos_hardening_height > 0 && height >= pos_hardening_height;
+    }
     //! SEQUENTIA: the one-time UTXO-set rewrite this chain applies, if any.
     //! Empty (height 0) on every chain but the one it was written for -- see the
     //! UtxoRecovery comment above and CTestNetParams in chainparams.cpp.

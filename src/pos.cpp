@@ -752,6 +752,32 @@ std::optional<std::pair<CPubKey, CPubKey>> ParseDelegationScript(const CScript& 
     return std::make_pair(controller, signer);
 }
 
+bool PosTxSpendsKey(const CPubKey& key, const std::vector<Coin>& spent)
+{
+    const uint160 key_id{key.GetID()};
+    for (const Coin& coin : spent) {
+        if (coin.IsSpent()) continue; // a peg-in input spends no coin
+        const CScript& spk = coin.out.scriptPubKey;
+        std::vector<std::vector<unsigned char>> solutions;
+        switch (Solver(spk, solutions)) {
+        case TxoutType::PUBKEY:
+            if (CPubKey(solutions[0]) == key) return true;
+            break;
+        case TxoutType::PUBKEYHASH:
+        case TxoutType::WITNESS_V0_KEYHASH:
+            if (uint160(solutions[0]) == key_id) return true;
+            break;
+        default:
+            break;
+        }
+        if (auto stake = ParseStakeScript(spk); stake && stake->first == key) return true;
+        if (auto unbond = ParseUnbondScript(spk); unbond && *unbond == key) return true;
+        if (auto deleg = ParseDelegationScript(spk); deleg && deleg->first == key) return true;
+        if (auto payout = ParsePayoutScript(spk); payout && payout->first == key) return true;
+    }
+    return false;
+}
+
 std::optional<std::pair<CPubKey, CPubKey>> DelegationFromTxOut(const CTxOut& out)
 {
     return ParseDelegationScript(out.scriptPubKey);

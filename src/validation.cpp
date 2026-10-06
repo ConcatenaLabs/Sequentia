@@ -2671,13 +2671,34 @@ bool PosCheckTxRecords(const CTransaction& tx, const std::vector<Coin>& spent, i
     // Records this transaction spends free their slot for a replacement, exactly
     // as a spend anywhere in the block does at connect.
     for (const Coin& coin : spent) {
-        if (auto deleg = DelegationFromTxOut(coin.out)) next.spent_delegations.insert(deleg->first);
-        if (auto p = PayoutFromTxOut(coin.out)) next.spent_payouts.emplace(p->first, p->second.activation);
+        if (auto deleg = DelegationFromTxOut(coin.out)) {
+            next.spent_delegations.insert(deleg->first);
+            next.spent_record_scripts.insert(coin.out.scriptPubKey);
+        }
+        if (auto p = PayoutFromTxOut(coin.out)) {
+            next.spent_payouts.emplace(p->first, p->second.activation);
+            next.spent_record_scripts.insert(coin.out.scriptPubKey);
+        }
     }
+    const bool hardening = params.PosHardeningActiveAt(height);
 
     for (const CTxOut& out : tx.vout) {
         // ConnectBlock: at most one unspent delegation record per controller.
         if (auto deleg = DelegationFromTxOut(out)) {
+            // ConnectBlock, from pos_hardening_height: controller authorisation,
+            // no self-delegation, no identical re-creation.
+            if (hardening && next.spent_record_scripts.count(out.scriptPubKey)) {
+                reason = "bad-record-recreated";
+                return false;
+            }
+            if (hardening && deleg->first == deleg->second) {
+                reason = "bad-delegation-self";
+                return false;
+            }
+            if (hardening && !PosTxSpendsKey(deleg->first, spent)) {
+                reason = "bad-delegation-unauthorized";
+                return false;
+            }
             if (!next.created_delegations.insert(deleg->first).second) {
                 reason = "bad-delegation-conflict";
                 return false;
@@ -2690,6 +2711,14 @@ bool PosCheckTxRecords(const CTransaction& tx, const std::vector<Coin>& spent, i
         // ConnectBlock: payout notice, and one record per (signer, activation).
         if (auto p = PayoutFromTxOut(out)) {
             if (p->second.mode == PosPayoutMode::SPLIT && !params.SplitPayoutActiveAt(height)) continue;
+            if (hardening && next.spent_record_scripts.count(out.scriptPubKey)) {
+                reason = "bad-record-recreated";
+                return false;
+            }
+            if (hardening && !PosTxSpendsKey(p->first, spent)) {
+                reason = "bad-payout-unauthorized";
+                return false;
+            }
             if (p->second.activation < height + (int64_t)g_pos_payout_notice) {
                 reason = "bad-payout-notice";
                 return false;
@@ -2727,6 +2756,25 @@ bool PosCheckTxRecords(const CTransaction& tx, const std::vector<Coin>& spent, i
                 return false;
             }
             next.bls_keys[full->pubkey] = full->bls_pubkey;
+        }
+    }
+
+    // ConnectBlock, from pos_hardening_height: no issuance on an input spending
+    // a supervision record, and one key rotation per asset and role per block.
+    if (hardening) {
+        for (size_t i = 0; i < tx.vin.size() && i < spent.size(); ++i) {
+            if (!tx.vin[i].assetIssuance.IsNull() && ParseSupervisionRecordScript(spent[i].out.scriptPubKey)) {
+                reason = "bad-issuance-on-supervision-record";
+                return false;
+            }
+        }
+        for (const CTxOut& out : tx.vout) {
+            const auto record = ParseSupervisionRecordScript(out.scriptPubKey);
+            if (record && record->IsRotation() &&
+                !next.supervision_rotations.emplace(record->asset, (int)record->kind).second) {
+                reason = "bad-supervision-rotation-conflict";
+                return false;
+            }
         }
     }
 
@@ -3682,6 +3730,106 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
                 if (registry.HasPayoutAt(p->first, p->second.activation) && !spent_payouts.count(key)) {
                     state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-payout-exists",
                                   "payout record duplicates an unspent record's activation height");
+                    break;
+                }
+            }
+        }
+
+        // SEQUENTIA audit hardening (Consensus::Params::pos_hardening_height).
+        //
+        // Who may create a record. A delegation record re-points a controller's
+        // whole stake weight and a payout record redirects what a signer's
+        // blocks earn, yet both took effect merely by existing, so anyone could
+        // create one naming any key for a dust output: take over a victim's
+        // weight, or have its coinbase pay a script of the attacker's choosing.
+        // A record now needs a transaction spending a coin only its key can
+        // spend (PosTxSpendsKey); a rotation, which spends the old record,
+        // always does. A delegation to the controller itself is refused too: it
+        // delegates nothing and only blocks the controller's own records.
+        //
+        // No identical re-creation. The registry applies a block by adding
+        // what it creates and subtracting what it spends, keyed on the record's
+        // content, so a record spent and re-created byte for byte in one block
+        // vanished from a running node's registry while the UTXO set, and so a
+        // restarted node's rebuild, still held it: two nodes, two committees.
+        if (state.IsValid() && m_params.GetConsensus().PosHardeningActiveAt(pindex->nHeight)) {
+            std::set<CScript> spent_record_scripts;
+            for (const CTxUndo& txundo : blockundo.vtxundo) {
+                for (const Coin& coin : txundo.vprevout) {
+                    if (DelegationFromTxOut(coin.out) || PayoutFromTxOut(coin.out)) {
+                        spent_record_scripts.insert(coin.out.scriptPubKey);
+                    }
+                }
+            }
+            static const std::vector<Coin> no_coins;
+            for (size_t t = 0; t < block.vtx.size() && state.IsValid(); ++t) {
+                const std::vector<Coin>& spent = t == 0 ? no_coins : blockundo.vtxundo[t - 1].vprevout;
+                for (const CTxOut& out : block.vtx[t]->vout) {
+                    const auto deleg = DelegationFromTxOut(out);
+                    const auto payout = deleg ? std::nullopt : PayoutFromTxOut(out);
+                    if (!deleg && !payout) continue;
+                    if (payout && payout->second.mode == PosPayoutMode::SPLIT &&
+                        !m_params.GetConsensus().SplitPayoutActiveAt(pindex->nHeight)) {
+                        continue; // inert below its flag day, as above
+                    }
+                    if (spent_record_scripts.count(out.scriptPubKey)) {
+                        state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-record-recreated",
+                                      "a stake record spent and re-created identically in one block");
+                        break;
+                    }
+                    if (deleg && deleg->first == deleg->second) {
+                        state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-delegation-self",
+                                      "delegation record naming its controller as signer");
+                        break;
+                    }
+                    const CPubKey& owner = deleg ? deleg->first : payout->first;
+                    if (!PosTxSpendsKey(owner, spent)) {
+                        state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                      deleg ? "bad-delegation-unauthorized" : "bad-payout-unauthorized",
+                                      "stake record created without spending a coin of the key it binds");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // SEQUENTIA audit hardening: at most one supervision key rotation per
+    // (asset, role) per block. Each rotation is admitted against the registry
+    // as the PARENT left it, so two of them both named the same current key and
+    // both passed; applying the block kept the first and silently dropped the
+    // second, which then sat in the UTXO set as a rotation that chains to
+    // nothing. Rebuilding the registry from the UTXO set (every restart, every
+    // fresh sync) failed on it, and the node would not start again.
+    //
+    // And no issuance may ride on an input that spends a supervision record.
+    // Those zero-value inputs are carved out of the amount check
+    // (VerifyAmounts), so an issuance on one skipped every issuance check
+    // there while CheckSupervisedIssuance still registered the asset: a
+    // supervised asset with no supply and no reissuance token, for good.
+    if (state.IsValid() && m_params.GetConsensus().PosHardeningActiveAt(pindex->nHeight)) {
+        for (size_t t = 1; t < block.vtx.size() && t - 1 < blockundo.vtxundo.size() && state.IsValid(); ++t) {
+            const CTransaction& tx = *block.vtx[t];
+            const std::vector<Coin>& spent = blockundo.vtxundo[t - 1].vprevout;
+            for (size_t i = 0; i < tx.vin.size() && i < spent.size(); ++i) {
+                if (!tx.vin[i].assetIssuance.IsNull() && ParseSupervisionRecordScript(spent[i].out.scriptPubKey)) {
+                    state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-issuance-on-supervision-record",
+                                  "an issuance on an input spending a supervision record");
+                    break;
+                }
+            }
+        }
+    }
+    if (state.IsValid() && m_params.GetConsensus().PosHardeningActiveAt(pindex->nHeight)) {
+        std::set<std::pair<CAsset, int>> rotations;
+        for (const CTransactionRef& tx : block.vtx) {
+            if (!state.IsValid()) break;
+            for (const CTxOut& out : tx->vout) {
+                const auto record = ParseSupervisionRecordScript(out.scriptPubKey);
+                if (!record || !record->IsRotation()) continue;
+                if (!rotations.emplace(record->asset, (int)record->kind).second) {
+                    state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-supervision-rotation-conflict",
+                                  "two key rotations for one asset and role in a block");
                     break;
                 }
             }
@@ -5992,6 +6140,17 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
             LogPrintf("ERROR: %s: anchor hash changed at unchanged anchor height %d\n", __func__, block.m_anchor_height);
             return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-anchor-conflict");
         }
+        // ...and, from pos_hardening_height, the converse: a parent-chain block
+        // has one height, so the parent's anchor hash at another height is a
+        // false claim, whatever any daemon says (see R3 below for why it
+        // mattered).
+        if (consensusParams.PosHardeningActiveAt(nHeight) &&
+            !pindexPrev->m_anchor_hash.IsNull() &&
+            block.m_anchor_hash == pindexPrev->m_anchor_hash &&
+            block.m_anchor_height != pindexPrev->m_anchor_height) {
+            LogPrintf("ERROR: %s: anchor height changed at unchanged anchor hash %s\n", __func__, block.m_anchor_hash.ToString());
+            return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-anchor-height-conflict");
+        }
         // R3: the anchor must be on the parent chain's best chain (requires a
         // parent chain daemon connection; skipped with -validateanchor=0).
         // The check is skipped when the anchor is unchanged from the parent
@@ -6005,7 +6164,17 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
         // and the block can be accepted on a later re-announcement once the
         // local view catches up. Only HEIGHT_MISMATCH is a permanent
         // structural violation (a block hash's height never changes).
-        if (g_validate_anchor && block.m_anchor_hash != pindexPrev->m_anchor_hash) {
+        //
+        // From pos_hardening_height the skip needs the HEIGHT unchanged too.
+        // Keyed on the hash alone it let a block repeat its parent's anchor hash
+        // under any larger height: R2 only asks heights not to decrease, R3
+        // never looked, and the claimed height drives the unbonding clock, the
+        // escaping-stall gap and checkpoint burial (an unbonding claimable a
+        // block after it started). A repeated hash at a new height now reaches
+        // the parent chain, which answers HEIGHT_MISMATCH.
+        const bool anchor_unchanged = block.m_anchor_hash == pindexPrev->m_anchor_hash &&
+            (!consensusParams.PosHardeningActiveAt(nHeight) || block.m_anchor_height == pindexPrev->m_anchor_height);
+        if (g_validate_anchor && !anchor_unchanged) {
             switch (CheckMainchainAnchor(block.m_anchor_height, block.m_anchor_hash)) {
             case AnchorCheckResult::OK:
                 break;

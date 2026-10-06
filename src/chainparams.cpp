@@ -452,6 +452,9 @@ public:
         // left could have consolidated (2,016 Bitcoin blocks, about two weeks).
         consensus.pos_unbond_height = 1;
         consensus.pos_unbond_anchor_depth = 2016;
+        // The audit hardening (params.h): from the first block, like every rule
+        // a chain with no history can simply have.
+        consensus.pos_hardening_height = 1;
         // Supervised assets (src/supervision.h): in force from mainnet's first
         // block, so a supervised issuance is possible from day one and there is
         // no flag day to coordinate later. 1 and not 0 for the same reason as
@@ -935,6 +938,10 @@ public:
         // upgrade. The depth is the checkpoint depth, as on mainnet.
         consensus.pos_unbond_height = 159000;
         consensus.pos_unbond_anchor_depth = 2016;
+        // The audit hardening (params.h), one cutover for all of it. 163000
+        // was ~2,870 blocks (about 50 hours at 62.5 s a block) ahead of the tip
+        // when it was set, which is the time every producer has to upgrade.
+        consensus.pos_hardening_height = 163000;
         g_coinbase_maturity = consensus.coinbase_maturity;
         g_coinbase_maturity_height = consensus.coinbase_maturity_height;
         // SEQUENTIA: 400,000 weight units — a TENTH of Bitcoin's 4,000,000 —
@@ -2076,6 +2083,9 @@ protected:
         // for a test of the one-step withdrawal the testnet allows below its
         // activation height.
         consensus.pos_unbond_height = (int)args.GetIntArg("-posunbondheight", 1);
+        // The audit hardening: from the first block by default, as on mainnet;
+        // arg-readable so tests can exercise both sides of the activation.
+        consensus.pos_hardening_height = (int)args.GetIntArg("-poshardeningheight", 1);
         consensus.pos_unbond_anchor_depth = (int)args.GetIntArg("-posunbonddepth", 2016);
         if (consensus.pos_unbond_anchor_depth < 1 || consensus.pos_unbond_anchor_depth > 1000000) {
             throw std::runtime_error("-posunbonddepth must be between 1 and 1000000");
