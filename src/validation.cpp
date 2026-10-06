@@ -3267,6 +3267,14 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
     // in multiple threads). Preallocate the vector size so a new allocation
     // doesn't invalidate pointers into the vector, and keep txsdata in scope
     // for as long as `control`.
+    //
+    // Because `control` is declared before `txsdata`, its destructor (which
+    // waits on the queue) would run after `txsdata` is destroyed on any
+    // early return, leaving queued script checks with dangling txdata
+    // pointers. Between the first control.Add() and control.Wait() below,
+    // validation failures must therefore set `state` and break out of the
+    // loop instead of returning early, so that control.Wait() always runs
+    // while `txsdata` is still alive.
     CCheckQueueControl<CCheck> control(fScriptChecks && g_parallel_script_checks ? &scriptcheckqueue : nullptr);
     std::vector<PrecomputedTransactionData> txsdata;
     for (unsigned int i = 0; i< block.vtx.size(); i++ ){
@@ -3301,6 +3309,7 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
 
     for (unsigned int i = 0; i < block.vtx.size(); i++)
     {
+        if (!state.IsValid()) break;
         const CTransaction &tx = *(block.vtx[i]);
 
         nInputs += tx.vin.size();
@@ -3316,7 +3325,8 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
                 // Any transaction validation failure in ConnectBlock is a block consensus failure
                 state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
                         tx_state.GetRejectReason(), tx_state.GetDebugMessage());
-                return error("%s: Consensus::CheckTxInputs: %s, %s", __func__, tx.GetHash().ToString(), state.ToString());
+                LogPrintf("ERROR: %s: Consensus::CheckTxInputs: %s, %s\n", __func__, tx.GetHash().ToString(), state.ToString());
+                break;
             }
             control.Add(vChecks);
 
@@ -3335,13 +3345,15 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
                 if (!CheckPosUnbondingTx(tx, view, spend_anchor, anchor_at,
                                          m_params.GetConsensus().pos_unbond_anchor_depth, reason)) {
                     LogPrintf("ERROR: %s: %s in tx %s\n", __func__, reason, tx.GetHash().ToString());
-                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, reason);
+                    state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, reason);
+                    break;
                 }
             }
 
             if (!MoneyRange(fee_map)) {
                 LogPrintf("ERROR: %s: accumulated fee in the block out of range.\n", __func__);
-                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-txns-accumulated-fee-outofrange");
+                state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-txns-accumulated-fee-outofrange");
+                break;
             }
 
             // Check that transaction is BIP68 final
@@ -3358,7 +3370,8 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
 
             if (!SequenceLocks(tx, nLockTimeFlags, prevheights, *pindex)) {
                 LogPrintf("ERROR: %s: contains a non-BIP68-final transaction\n", __func__);
-                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-txns-nonfinal");
+                state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-txns-nonfinal");
+                break;
             }
         }
 
@@ -3369,7 +3382,8 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
         nSigOpsCost += GetTransactionSigOpCost(tx, view, flags);
         if (nSigOpsCost > MAX_BLOCK_SIGOPS_COST) {
             LogPrintf("ERROR: ConnectBlock(): too many sigops\n");
-            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-sigops");
+            state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-sigops");
+            break;
         }
 
         if (!tx.IsCoinBase())
@@ -3381,8 +3395,9 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
                 // Any transaction validation failure in ConnectBlock is a block consensus failure
                 state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
                               tx_state.GetRejectReason(), tx_state.GetDebugMessage());
-                return error("ConnectBlock(): CheckInputScripts on %s failed with %s",
+                LogPrintf("ERROR: ConnectBlock(): CheckInputScripts on %s failed with %s\n",
                     tx.GetHash().ToString(), state.ToString());
+                break;
             }
             control.Add(vChecks);
         }
@@ -3404,7 +3419,7 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
     // legal: it spends the old record and creates the new one. The record's
     // script already restricts spending to the controller, so only the stake's
     // owner can re-point or reclaim it.
-    if (g_con_pos && !fJustCheck) {
+    if (g_con_pos && !fJustCheck && state.IsValid()) {
         std::set<CPubKey> spent_records;
         for (const CTxUndo& txundo : blockundo.vtxundo) {
             for (const Coin& coin : txundo.vprevout) {
@@ -3414,16 +3429,19 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
         const StakeRegistry& registry = StakeRegistry::GetInstance();
         std::set<CPubKey> created_records;
         for (const CTransactionRef& tx : block.vtx) {
+            if (!state.IsValid()) break;
             for (const CTxOut& out : tx->vout) {
                 auto deleg = DelegationFromTxOut(out);
                 if (!deleg) continue;
                 if (!created_records.insert(deleg->first).second) {
-                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-delegation-conflict",
-                                         "two delegation records for one controller in a block");
+                    state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-delegation-conflict",
+                                  "two delegation records for one controller in a block");
+                    break;
                 }
                 if (registry.HasDelegation(deleg->first) && !spent_records.count(deleg->first)) {
-                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-delegation-exists",
-                                         "delegation record for a controller that already has one unspent");
+                    state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-delegation-exists",
+                                  "delegation record for a controller that already has one unspent");
+                    break;
                 }
             }
         }
@@ -3443,6 +3461,7 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
         }
         std::set<std::pair<CPubKey, int64_t>> created_payouts;
         for (const CTransactionRef& tx : block.vtx) {
+            if (!state.IsValid()) break;
             for (const CTxOut& out : tx->vout) {
                 auto p = PayoutFromTxOut(out);
                 if (!p) continue;
@@ -3455,17 +3474,20 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
                     continue;
                 }
                 if (p->second.activation < pindex->nHeight + (int64_t)g_pos_payout_notice) {
-                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-payout-notice",
-                                         "payout policy would bind before its notice period elapses");
+                    state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-payout-notice",
+                                  "payout policy would bind before its notice period elapses");
+                    break;
                 }
                 const auto key = std::make_pair(p->first, p->second.activation);
                 if (!created_payouts.insert(key).second) {
-                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-payout-conflict",
-                                         "two payout records for one signer at one activation height");
+                    state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-payout-conflict",
+                                  "two payout records for one signer at one activation height");
+                    break;
                 }
                 if (registry.HasPayoutAt(p->first, p->second.activation) && !spent_payouts.count(key)) {
-                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-payout-exists",
-                                         "payout record duplicates an unspent record's activation height");
+                    state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-payout-exists",
+                                  "payout record duplicates an unspent record's activation height");
+                    break;
                 }
             }
         }
@@ -3478,13 +3500,14 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
     // staying interested), so this overlay is the entire spend condition.
     // Enforced from the flag day; below it a pot-shaped output is the ordinary
     // anyone-can-spend script it is to every node without the mode.
-    if (g_con_pos && !fJustCheck && m_params.GetConsensus().SplitPayoutActiveAt(pindex->nHeight)) {
+    if (g_con_pos && !fJustCheck && state.IsValid() && m_params.GetConsensus().SplitPayoutActiveAt(pindex->nHeight)) {
         for (size_t t = 1; t < block.vtx.size() && t - 1 < blockundo.vtxundo.size(); ++t) {
             std::string claim_reason;
             if (!CheckPosPotClaim(*block.vtx[t], blockundo.vtxundo[t - 1].vprevout, claim_reason)) {
                 LogPrintf("ERROR: ConnectBlock(): invalid pot claim in %s: %s\n",
                           block.vtx[t]->GetHash().ToString(), claim_reason);
-                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-pot-claim", claim_reason);
+                state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-pot-claim", claim_reason);
+                break;
             }
         }
     }
@@ -3506,25 +3529,30 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
     //
     // The extra CTxUndo goes at the END of vtxundo, past the per-transaction
     // ones, so it changes nothing about how they are indexed on the way back out.
-    if (!fJustCheck && consensusParams.UtxoRecoveryAppliesAt(pindex->nHeight)) {
+    if (!fJustCheck && state.IsValid() && consensusParams.UtxoRecoveryAppliesAt(pindex->nHeight)) {
         blockundo.vtxundo.emplace_back();
         ApplyUtxoRecovery(consensusParams.utxo_recovery, view, pindex->nHeight, blockundo.vtxundo.back());
     }
 
     CAmountMap block_reward = fee_map;
     block_reward[consensusParams.subsidy_asset] += GetBlockSubsidy(pindex->nHeight, consensusParams);
-    if (!MoneyRange(block_reward)) {
+    if (state.IsValid() && !MoneyRange(block_reward)) {
         LogPrintf("ERROR: ConnectBlock(): total block reward overflowed\n");
-        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blockreward-outofrange");
+        state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blockreward-outofrange");
     }
-    if (!VerifyCoinbaseAmount(*(block.vtx[0]), block_reward)) {
+    if (state.IsValid() && !VerifyCoinbaseAmount(*(block.vtx[0]), block_reward)) {
         LogPrintf("ERROR: ConnectBlock(): coinbase pays too much\n");
-        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-cb-amount");
+        state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-cb-amount");
     }
 
-    if (!control.Wait()) {
+    // Wait for the queued script checks to finish while `txsdata` is still
+    // in scope; failures above only flagged `state` without returning early.
+    if (!control.Wait() && state.IsValid()) {
         LogPrintf("ERROR: %s: CheckQueue failed\n", __func__);
-        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "block-validation-failed");
+        state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "block-validation-failed");
+    }
+    if (!state.IsValid()) {
+        return false;
     }
     int64_t nTime4 = GetTimeMicros(); nTimeVerify += nTime4 - nTime2;
     LogPrint(BCLog::BENCH, "    - Verify %u txins: %.2fms (%.3fms/txin) [%.2fs (%.2fms/blk)]\n", nInputs - 1, MILLI * (nTime4 - nTime2), nInputs <= 1 ? 0 : MILLI * (nTime4 - nTime2) / (nInputs-1), nTimeVerify * MICRO, nTimeVerify * MILLI / nBlocksTotal);
