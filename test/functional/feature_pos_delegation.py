@@ -254,19 +254,10 @@ class PosDelegationTest(BitcoinTestFramework):
             CTxOut(change_val - RECORD_VALUE - FEE, CScript([0x51])),
             CTxOut(FEE),
         ]
-        n0.sendrawtransaction(dup_tx.serialize().hex())
-        tip_before, height_before = n0.getbestblockhash(), n0.getblockcount()
-        try:
-            n0.generateposblock(self.p2_wif)   # builds a block containing dup_tx
-        except Exception:
-            pass
-        # ConnectBlock rejects it (bad-delegation-exists): the tip does not move,
-        # and the delegation in force is unchanged.
-        assert_equal(n0.getbestblockhash(), tip_before)
-        assert_equal(n0.getblockcount(), height_before)
-        assert_equal(n0.getdelegationinfo()[self.c_pub], self.p2_pub)
-        # -persistmempool=0, so the restart drops the offending transaction.
-        self.restart_node(0)
+        # ConnectBlock would reject a block carrying it (bad-delegation-exists),
+        # so the mempool refuses it: admitted, it would sit in every template
+        # and stall every producer.
+        assert_raises_rpc_error(-26, "bad-delegation-exists", n0.sendrawtransaction, dup_tx.serialize().hex())
         assert_equal(n0.getdelegationinfo()[self.c_pub], self.p2_pub)
 
         self.log.info("Reclaiming: spending the record returns signing rights to the controller")

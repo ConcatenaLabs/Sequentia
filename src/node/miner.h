@@ -12,6 +12,7 @@
 
 #include <memory>
 #include <optional>
+#include <set>
 #include <stdint.h>
 
 #include <boost/multi_index/ordered_index.hpp>
@@ -19,6 +20,7 @@
 
 class ChainstateManager;
 class CBlockIndex;
+struct PosRecordState;
 class CChainParams;
 class CScript;
 
@@ -161,6 +163,15 @@ private:
     uint64_t nBlockSigOpsCost;
     CAmountMap feeMap;
     CTxMemPool::setEntries inBlock;
+    //! SEQUENTIA PoS: the stake records the block's transactions create and
+    //! spend so far (PosCheckTxRecords).
+    std::shared_ptr<PosRecordState> m_pos_records;
+    //! Outpoints the privately submitted supervision records spend, which no
+    //! mempool transaction in the same block may spend again.
+    std::set<COutPoint> m_submission_spent;
+    //! Build a coinbase-only block: the fallback when a full template fails
+    //! TestBlockValidity (CreateNewBlock).
+    bool m_coinbase_only{false};
 
     // Chain context for the block
     int nHeight;
@@ -205,7 +216,7 @@ private:
      *  (src/supervision_submit.h). Before the mempool, so a freeze cannot lose
      *  its place to fee pressure and hand its target another block to escape in. */
     void addSupervisionSubmissions() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
-    void addPackageTxs(int& nPackagesSelected, int& nDescendantsUpdated, std::chrono::seconds required_wait = std::chrono::seconds(0)) EXCLUSIVE_LOCKS_REQUIRED(m_mempool.cs);
+    void addPackageTxs(int& nPackagesSelected, int& nDescendantsUpdated, std::chrono::seconds required_wait = std::chrono::seconds(0)) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool.cs);
 
     // helper functions for addPackageTxs()
     /** Remove confirmed (inBlock) entries from given set */
@@ -217,6 +228,12 @@ private:
       * These checks should always succeed, and they're here
       * only as an extra check in case of suboptimal node configuration */
     bool TestPackageTransactions(const CTxMemPool::setEntries& package) const EXCLUSIVE_LOCKS_REQUIRED(m_mempool.cs);
+    /** SEQUENTIA: the block-level rules ConnectBlock applies across
+      * transactions, for a package in block order: the PoS stake-record rules
+      * and the per-asset total-fee range. On success `records` holds the
+      * block's record state with the package added. */
+    bool TestPackageBlockRules(const std::vector<CTxMemPool::txiter>& sorted, PosRecordState& records) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool.cs);
     /** Return true if given transaction from mapTx has already been evaluated,
       * or if the transaction's cached data in mapTx is incorrect. */
     bool SkipMapTxEntry(CTxMemPool::txiter it, indexed_modified_transaction_set& mapModifiedTx, CTxMemPool::setEntries& failedTx) EXCLUSIVE_LOCKS_REQUIRED(m_mempool.cs);

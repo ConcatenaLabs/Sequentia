@@ -19,6 +19,7 @@
 #include <node/blockstorage.h>
 #include <policy/feerate.h>
 #include <policy/packages.h>
+#include <pubkey.h>
 #include <script/script_error.h>
 #include <sync.h>
 #include <txdb.h>
@@ -155,6 +156,39 @@ extern CBlockIndex *pindexBestHeader;
  *  template. */
 bool PosUnbondingFailsNextBlock(const CTransaction& tx, const CCoinsViewCache& view, const CBlockIndex* tip,
                                 const Consensus::Params& params, std::string& reason);
+
+/** SEQUENTIA PoS: what the transactions placed so far in a block under
+ *  construction have done to the stake records (see PosCheckTxRecords). */
+struct PosRecordState {
+    std::set<CPubKey> spent_delegations;
+    std::set<std::pair<CPubKey, int64_t>> spent_payouts;
+    std::set<CPubKey> created_delegations;
+    std::set<std::pair<CPubKey, int64_t>> created_payouts;
+    std::map<CPubKey, std::vector<unsigned char>> bls_keys;
+};
+
+/** SEQUENTIA PoS: the block-level rules ConnectBlock applies to stake records,
+ *  delegation and payout records, BLS registrations and pot claims, judged for
+ *  one transaction joining a block at `height` built on the tip, after the
+ *  transactions already recorded in `st`. The stake registry must be the tip's.
+ *  `spent` holds the coins `tx` spends, in input order.
+ *
+ *  Stricter than ConnectBlock in one way only: a record may replace an existing
+ *  one only if this or an EARLIER transaction spends it, where a block may also
+ *  spend it later. So whatever passes here also passes at connect. It exists so
+ *  the mempool and the block assembler refuse what ConnectBlock would: a
+ *  transaction that only fails there is mined by every producer and kills every
+ *  block, and anyone can create these records for the cost of a dust output.
+ *  On success `st` is updated to include `tx`. */
+bool PosCheckTxRecords(const CTransaction& tx, const std::vector<Coin>& spent, int height,
+                       const Consensus::Params& params, PosRecordState& st, std::string& reason,
+                       std::string& debug);
+
+/** The input scripts of `tx` under the flags the mempool applies at the tip, for
+ *  transactions that reach a block template without passing the mempool. */
+bool CheckTemplateTxScripts(const CTransaction& tx, const CCoinsViewCache& view, const CBlockIndex* tip,
+                            const Consensus::Params& params, TxValidationState& state)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
 /** SEQUENTIA PoS: derive every block's certified answer
  *  (CBlockIndex::m_pos_certified) from its headers, from the answer persisted

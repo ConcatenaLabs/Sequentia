@@ -633,6 +633,11 @@ static RPCHelpMan submitsupervisionrecord()
                                           nullptr, false, true, fedpegscripts)) {
                 throw JSONRPCError(RPC_VERIFY_REJECTED, state.ToString());
             }
+            // Nothing else runs the scripts of a transaction that skips the
+            // mempool; the block assembler re-runs them on every template.
+            if (!CheckTemplateTxScripts(*tx, view, chainstate.m_chain.Tip(), Params().GetConsensus(), state)) {
+                throw JSONRPCError(RPC_VERIFY_REJECTED, state.ToString());
+            }
         }
 
         std::string err;

@@ -502,6 +502,18 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
         err_kind = PosProduceError::INTERNAL;
         return false;
     }
+    // ProcessNewBlock reports only whether the block was stored: a block that
+    // then fails to connect comes back as success, and the caller would be told
+    // it produced a block while the chain stood still.
+    {
+        LOCK(cs_main);
+        const CBlockIndex* pindex = chainman.m_blockman.LookupBlockIndex(block.GetHash());
+        if (!pindex || (pindex->nStatus & BLOCK_FAILED_MASK)) {
+            error = "the block was rejected when it was connected; see debug.log for the reason";
+            err_kind = PosProduceError::INTERNAL;
+            return false;
+        }
+    }
 
     result.hash = block.GetHash();
     result.height = tip->nHeight + 1;

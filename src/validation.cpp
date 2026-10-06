@@ -1138,27 +1138,40 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
         }
     }
 
-    // Check for non-standard pay-to-script-hash in inputs
-    // SEQUENTIA split payouts: validate pot claims here as well as at connect.
-    // The pot script is anyone-can-spend, so without this gate anyone could
-    // park an invalid pot spend in the mempool; the block assembler would mine
-    // it, the block would die at ConnectBlock, and every producer would stall
-    // on the same poison. (The delegation/payout record rules do not need this:
-    // their spends are signature-gated, so only the owner can attempt one.)
-    if (g_con_pos && m_active_chainstate.m_params.GetConsensus().SplitPayoutActiveAt(m_active_chainstate.m_chain.Height() + 1)) {
+    // SEQUENTIA PoS: the block-level stake-record rules (pot claims, delegation
+    // and payout records, BLS registrations), judged as for the next block.
+    // Every one of them only fails at ConnectBlock, and creating a record costs
+    // anyone a dust output: without this gate such a transaction would relay,
+    // be mined by every producer, and kill every block. Records the mempool
+    // holds against each other, and records that go stale while waiting, are
+    // the block assembler's to sort out (it re-judges every package).
+    if (g_con_pos) {
         std::vector<Coin> spent_coins;
         spent_coins.reserve(tx.vin.size());
         bool all_found = true;
         for (const CTxIn& in : tx.vin) {
+            // A peg-in spends no coin; its undo entry is empty (UpdateCoins).
+            if (in.m_is_pegin) { spent_coins.emplace_back(); continue; }
             const Coin& c = m_view.AccessCoin(in.prevout);
             if (c.IsSpent()) { all_found = false; break; }
             spent_coins.push_back(c);
         }
-        std::string claim_reason;
-        if (all_found && !CheckPosPotClaim(tx, spent_coins, claim_reason)) {
-            return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-pot-claim", claim_reason);
+        PosRecordState records;
+        std::string record_reason, record_debug;
+        if (all_found && !PosCheckTxRecords(tx, spent_coins, m_active_chainstate.m_chain.Height() + 1,
+                                            m_active_chainstate.m_params.GetConsensus(), records,
+                                            record_reason, record_debug)) {
+            // Pot claims have been refused here since the split payout mode
+            // shipped, so a peer relaying a bad one is misbehaving. The other
+            // rules are new to admission: older nodes still accept and relay
+            // such records, and must not be punished for it.
+            const TxValidationResult result = record_reason == "bad-pot-claim" ? TxValidationResult::TX_CONSENSUS
+                                                                                : TxValidationResult::TX_NOT_STANDARD;
+            return state.Invalid(result, record_reason, record_debug);
         }
     }
+
+    // Check for non-standard pay-to-script-hash in inputs
 
     if (fRequireStandard && !AreInputsStandard(tx, m_view)) {
         return state.Invalid(TxValidationResult::TX_INPUTS_NOT_STANDARD, "bad-txns-nonstandard-inputs");
@@ -2637,6 +2650,107 @@ int PosVerifyBitfieldCertificate(const CBlockHeader& header, const CBlockIndex* 
     return (int)bls_pubkeys.size();
 }
 
+bool PosCheckTxRecords(const CTransaction& tx, const std::vector<Coin>& spent, int height,
+                       const Consensus::Params& params, PosRecordState& st, std::string& reason,
+                       std::string& debug)
+{
+    if (!g_con_pos) return true;
+    const StakeRegistry& registry = StakeRegistry::GetInstance();
+    // Work on a copy, so a transaction that fails leaves no trace in `st`.
+    PosRecordState next = st;
+
+    // Records this transaction spends free their slot for a replacement, exactly
+    // as a spend anywhere in the block does at connect.
+    for (const Coin& coin : spent) {
+        if (auto deleg = DelegationFromTxOut(coin.out)) next.spent_delegations.insert(deleg->first);
+        if (auto p = PayoutFromTxOut(coin.out)) next.spent_payouts.emplace(p->first, p->second.activation);
+    }
+
+    for (const CTxOut& out : tx.vout) {
+        // ConnectBlock: at most one unspent delegation record per controller.
+        if (auto deleg = DelegationFromTxOut(out)) {
+            if (!next.created_delegations.insert(deleg->first).second) {
+                reason = "bad-delegation-conflict";
+                return false;
+            }
+            if (registry.HasDelegation(deleg->first) && !next.spent_delegations.count(deleg->first)) {
+                reason = "bad-delegation-exists";
+                return false;
+            }
+        }
+        // ConnectBlock: payout notice, and one record per (signer, activation).
+        if (auto p = PayoutFromTxOut(out)) {
+            if (p->second.mode == PosPayoutMode::SPLIT && !params.SplitPayoutActiveAt(height)) continue;
+            if (p->second.activation < height + (int64_t)g_pos_payout_notice) {
+                reason = "bad-payout-notice";
+                return false;
+            }
+            const auto key = std::make_pair(p->first, p->second.activation);
+            if (!next.created_payouts.insert(key).second) {
+                reason = "bad-payout-conflict";
+                return false;
+            }
+            if (registry.HasPayoutAt(p->first, p->second.activation) && !next.spent_payouts.count(key)) {
+                reason = "bad-payout-exists";
+                return false;
+            }
+        }
+        // CheckPosStakeRules: a BLS registration must prove possession, and a
+        // staker has one key, against its registered key and within the block.
+        if (g_pos_public_committee && StakeFromTxOut(out)) {
+            auto full = ParseStakeScriptFull(out.scriptPubKey);
+            if (!full || full->bls_pubkey.empty()) continue;
+            const std::vector<unsigned char> existing = registry.GetBls(full->pubkey);
+            if (!existing.empty() && existing != full->bls_pubkey) {
+                reason = "bad-stake-bls-conflict";
+                return false;
+            }
+            auto seen = next.bls_keys.find(full->pubkey);
+            if (seen != next.bls_keys.end() && seen->second != full->bls_pubkey) {
+                reason = "bad-stake-bls-conflict";
+                return false;
+            }
+            // The pairing last, after every cheap reason to refuse. Every
+            // registration is verified, even one restating a known key:
+            // ConnectBlock verifies each one.
+            if (!BlsVerifyPossession(full->bls_pubkey, full->bls_pop)) {
+                reason = "bad-stake-bls-pop";
+                return false;
+            }
+            next.bls_keys[full->pubkey] = full->bls_pubkey;
+        }
+    }
+
+    // ConnectBlock: a pot spend must be a valid claim, from the flag day. The
+    // shares follow the live registry, so a claim valid when it was admitted can
+    // go stale while it waits; the template re-judges it every time.
+    if (params.SplitPayoutActiveAt(height) && !CheckPosPotClaim(tx, spent, debug)) {
+        reason = "bad-pot-claim";
+        return false;
+    }
+
+    st = std::move(next);
+    return true;
+}
+
+bool CheckTemplateTxScripts(const CTransaction& tx, const CCoinsViewCache& view, const CBlockIndex* tip,
+                            const Consensus::Params& params, TxValidationState& state)
+{
+    AssertLockHeld(cs_main);
+    // The mempool's flags (MemPoolAccept::PolicyScriptChecks): at least as strict
+    // as any block's, so a transaction they accept cannot fail a block for its
+    // scripts.
+    unsigned int flags = STANDARD_SCRIPT_VERIFY_FLAGS;
+    if (DeploymentActiveAfter(tip, params, Consensus::DEPLOYMENT_DYNA_FED)) {
+        flags |= SCRIPT_SIGHASH_RANGEPROOF;
+    }
+    if (tip != nullptr && params.SimplicityBudget4ActiveAt(tip->nHeight)) {
+        flags |= SCRIPT_VERIFY_SIMPLICITY_BUDGET4;
+    }
+    PrecomputedTransactionData txdata;
+    return CheckInputScripts(tx, state, view, flags, /*cacheSigStore=*/false, /*cacheFullScriptStore=*/false, txdata);
+}
+
 /** SEQUENTIA PoS: stake-registry-dependent block rules — leader election /
  *  sortition eligibility, slot time-gating, and committee membership. These
  *  belong at connect time, NOT in ContextualCheckBlock(Header): the stake
@@ -3478,7 +3592,14 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
     // legal: it spends the old record and creates the new one. The record's
     // script already restricts spending to the controller, so only the stake's
     // owner can re-point or reclaim it.
-    if (g_con_pos && !fJustCheck && state.IsValid()) {
+    //
+    // Enforced for TestBlockValidity too (fJustCheck): there the registry is
+    // the tip's, which is the template's or proposal's parent state, and a
+    // producer or countersigner that skipped these rules would build or certify
+    // a block that then dies at connect. Not for VerifyDB's reconnect pass
+    // (check_pos_rules false), whose registry is the tip's rather than the
+    // historical block's parent state.
+    if (g_con_pos && check_pos_rules && state.IsValid()) {
         std::set<CPubKey> spent_records;
         for (const CTxUndo& txundo : blockundo.vtxundo) {
             for (const Coin& coin : txundo.vprevout) {
@@ -3559,7 +3680,7 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
     // staying interested), so this overlay is the entire spend condition.
     // Enforced from the flag day; below it a pot-shaped output is the ordinary
     // anyone-can-spend script it is to every node without the mode.
-    if (g_con_pos && !fJustCheck && state.IsValid() && m_params.GetConsensus().SplitPayoutActiveAt(pindex->nHeight)) {
+    if (g_con_pos && check_pos_rules && state.IsValid() && m_params.GetConsensus().SplitPayoutActiveAt(pindex->nHeight)) {
         for (size_t t = 1; t < block.vtx.size() && t - 1 < blockundo.vtxundo.size(); ++t) {
             std::string claim_reason;
             if (!CheckPosPotClaim(*block.vtx[t], blockundo.vtxundo[t - 1].vprevout, claim_reason)) {
