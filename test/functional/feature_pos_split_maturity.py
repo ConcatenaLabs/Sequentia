@@ -51,6 +51,9 @@ class PosSplitMaturityTest(BitcoinTestFramework):
         self.a_wif, self.a_pub = make_staker()
         self.extra_args = [[
             "-con_pos=1",
+            # Records here are funded from OP_TRUE coins, which the audit hardening
+            # rejects (feature_pos_hardening covers it); this test is about other rules.
+            "-poshardeningheight=0",
             "-posvrf=1",
             "-posunbonding=5",
             "-posslotinterval=1",

@@ -64,6 +64,9 @@ class PosDelegationTest(BitcoinTestFramework):
 
         self.extra_args = [[
             "-con_pos=1",
+            # Records here are funded from OP_TRUE coins, which the audit hardening
+            # rejects (feature_pos_hardening covers it); this test is about other rules.
+            "-poshardeningheight=0",
             "-posvrf=1",
             "-posunbonding=%d" % UNBONDING,
             # The one-step withdrawal (a staking output spent straight to an address),

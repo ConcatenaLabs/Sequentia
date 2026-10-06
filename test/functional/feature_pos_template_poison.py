@@ -53,7 +53,10 @@ class PosTemplatePoisonTest(BitcoinTestFramework):
         self.setup_clean_chain = True
         self.stakers = [make_staker() for _ in range(4)]
         self.common = [
-            "-con_pos=1", "-posvrf=1", "-posbls=1", "-pospubliccommittee=1", "-poscommitteesize=4",
+            "-con_pos=1",
+            # Records here are funded from OP_TRUE coins, which the audit hardening
+            # rejects (feature_pos_hardening covers it); this test is about other rules.
+            "-poshardeningheight=0", "-posvrf=1", "-posbls=1", "-pospubliccommittee=1", "-poscommitteesize=4",
             "-posslotinterval=1", "-con_max_block_sig_size=8000", "-posunbonding=%d" % UNBONDING,
             "-pospayoutnotice=%d" % NOTICE,
             "-signblockscript=51", "-con_blocksubsidy=0", "-initialfreecoins=1000000000000",
