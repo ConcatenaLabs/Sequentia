@@ -9,6 +9,7 @@
 #include <bls.h>
 #include <chainparams.h>
 #include <crypto/sha256.h>
+#include <hash.h>
 #include <logging.h>
 #include <consensus/merkle.h>
 #include <musig.h>
@@ -1732,9 +1733,15 @@ PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& blo
 
 PosGossipAction PosProducer::OnShare(const PosShare& share)
 {
+    // Deduplicate on the share's whole content, never on (block, member) alone:
+    // anyone can sign a share for a block under a key of their own and name a
+    // committee member as its author, and keying on the pair let that forgery
+    // shadow the member's real share at every node it reached first. Identical
+    // bytes always earn the identical verdict, so skipping them stays safe.
+    const uint256 share_id = SerializeHash(share);
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
-        if (!m_seen_shares.insert({share.block_hash, share.pubkey}).second) return PosGossipAction::Ignore;
+        if (!m_seen_shares.insert(share_id).second) return PosGossipAction::Ignore;
         if (m_seen_shares.size() > 200000) m_seen_shares.clear();
     }
     // Crypto validation (registry-independent, objective): malformed sizes, a bad
@@ -1742,6 +1749,18 @@ PosGossipAction PosProducer::OnShare(const PosShare& share)
     if (share.bls_pubkey.size() != BLS_PK_SIZE || share.bls_pop.size() != BLS_SIG_SIZE ||
         share.bls_share.size() != BLS_SIG_SIZE || share.vrf_proof.size() != VRF_PROOF_SIZE || !share.pubkey.IsValid()) {
         return PosGossipAction::Invalid;
+    }
+    // Under the public committee a certificate is verified against the BLS key
+    // the member's staking output registered, so a share under any other key can
+    // never be part of one. Drop it before the pairings and without relaying it:
+    // a forgery naming a member then costs no crypto and reaches nobody. Ignored
+    // rather than punished, since peers running older code relay such shares.
+    // The registered key's proof of possession was verified when it connected.
+    bool pop_known = false;
+    if (g_pos_public_committee) {
+        const std::vector<unsigned char> registered = StakeRegistry::GetInstance().GetBls(share.pubkey);
+        if (registered.empty() || registered != share.bls_pubkey) return PosGossipAction::Ignore;
+        pop_known = true;
     }
     // A member's proof-of-possession is the same bytes every block, so its
     // (costly) pairing check is cached after the first success — measured to
@@ -1754,8 +1773,8 @@ PosGossipAction PosProducer::OnShare(const PosShare& share)
         hasher.Write(share.bls_pop.data(), share.bls_pop.size());
         hasher.Finalize(pop_key.begin());
     }
-    bool pop_cached;
-    {
+    bool pop_cached = pop_known;
+    if (!pop_cached) {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
         pop_cached = m_pop_verified.count(pop_key) > 0;
     }
@@ -1904,11 +1923,13 @@ PosGossipAction PosVerifyCertificate(const CBlockHeader& header, ChainstateManag
     // certificate on an unknown branch cannot be verified — neither pin nor relay.
     const CBlockIndex* parent;
     bool already_have = false;
+    bool parent_is_tip = false;
     {
         LOCK(cs_main);
         const CBlockIndex* self = chainman.m_blockman.LookupBlockIndex(hash);
         already_have = self && (self->nStatus & BLOCK_HAVE_DATA);
         parent = chainman.m_blockman.LookupBlockIndex(header.hashPrevBlock);
+        parent_is_tip = parent && parent == chainman.ActiveChain().Tip();
     }
     if (already_have) return PosGossipAction::Ignore; // nothing new: the block itself already arrived
     if (!parent) return PosGossipAction::Ignore;
@@ -1927,11 +1948,22 @@ PosGossipAction PosVerifyCertificate(const CBlockHeader& header, ChainstateManag
         // registry via the SAME helper as ConnectBlock (so gossip-accept and
         // block-validation cannot diverge). Registry-dependent failures are
         // subjective (Ignore, our tip may not be the cert's branch); only a
-        // malformed structure is objective (Invalid).
+        // malformed structure is objective (Invalid) — and so is every failure
+        // of a certificate for a child of our tip, where the registry IS the
+        // parent's state. Since certificates are deduplicated by content, a
+        // peer could otherwise feed endless garbage variants of one live
+        // certificate, each costing a pairing, for free.
         std::string reason;
         const int signers = PosVerifyBitfieldCertificate(header, parent, reg, reason);
         if (signers < 0) {
-            return reason == "bad-posbls-bitfield-malformed" ? PosGossipAction::Invalid : PosGossipAction::Ignore;
+            if (reason == "bad-posbls-bitfield-malformed") return PosGossipAction::Invalid;
+            // The registry was read without cs_main: only blame the peer if
+            // the tip did not move under us while verifying.
+            if (parent_is_tip) {
+                LOCK(cs_main);
+                if (parent == chainman.ActiveChain().Tip()) return PosGossipAction::Invalid;
+            }
+            return PosGossipAction::Ignore;
         }
         if (signers < PosSlotQuorum(reg)) return PosGossipAction::Ignore;
         signer_count = signers;
@@ -1965,9 +1997,16 @@ PosGossipAction PosVerifyCertificate(const CBlockHeader& header, ChainstateManag
 PosGossipAction PosProducer::OnCertificate(const CBlockHeader& header)
 {
     const uint256 hash = header.GetHash();
+    // Deduplicate on the certificate, not just the block hash it certifies: the
+    // hash excludes the proof solution, so a malleated certificate shares it with
+    // the genuine one, and keying on the hash let whichever arrived first shut
+    // the other out. A garbage copy then suppressed the real certificate (and
+    // the finality signal it carries) at every producer it reached first.
+    CHashWriter cert_id(SER_GETHASH, 0);
+    cert_id << hash << header.proof.solution;
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
-        if (!m_seen_certs.insert(hash).second) return PosGossipAction::Ignore;
+        if (!m_seen_certs.insert(cert_id.GetHash()).second) return PosGossipAction::Ignore;
         if (m_seen_certs.size() > 20000) m_seen_certs.clear();
     }
     int height = 0;

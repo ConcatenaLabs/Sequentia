@@ -318,7 +318,7 @@ private:
     int64_t m_propose_at_ms{0};                        //!< whole-second instant to propose at once the slot is open (see Step)
     uint256 m_last_tip;                                //!< active tip last seen by Step(); detects parent-reorg rollbacks
     std::set<uint256> m_seen_proposals;                //!< proposal dedup
-    std::set<std::pair<uint256, CPubKey>> m_seen_shares; //!< share dedup
+    std::set<uint256> m_seen_shares;                   //!< share dedup, by hash of the whole share
 
     // Certificate gossip (honest-splits fix 3A, Tier 1). A verified quorum
     // certificate for a height pins this node: it will not propose, back or
@@ -329,7 +329,7 @@ private:
     // body is deliberately withheld degrades into a bounded pause, never a
     // deadlock: the share-lock (Tier 2) is where the stronger guarantee
     // lands. State under m_gossip_mutex.
-    std::set<uint256> m_seen_certs;                    //!< certificate dedup
+    std::set<uint256> m_seen_certs;                    //!< certificate dedup, by block hash AND certificate
     std::map<uint256, CBlockHeader> m_certified;       //!< block hash -> certified header (the certificate)
     std::map<int, uint256> m_certified_heights;        //!< height -> certified block hash
     int m_cert_hold_height{0};                         //!< height the current hold is for
