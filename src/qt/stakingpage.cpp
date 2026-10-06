@@ -2172,6 +2172,10 @@ void StakingPage::onDelegate()
                    .arg(QString::fromStdString(res["staked"].getValStr()), BitcoinUnits::policyAssetTicker());
     }
     msg += tr("\nIt takes effect when this confirms. Your coins stay yours: leaving spends only the record.");
+    if (res.exists("authorization_txid")) {
+        msg += tr("\nA small payment to your staking key went out first (%1): the record spends it, which is how "
+                  "the network knows the delegation is yours.").arg(QString::fromStdString(res["authorization_txid"].getValStr()));
+    }
     if (res.exists("note")) msg += QStringLiteral("\n") + QString::fromStdString(res["note"].getValStr());
     m_deleg_result->setStyleSheet(QString());
     m_deleg_result->setText(msg);
@@ -2397,7 +2401,11 @@ void StakingPage::onAnnouncePayout()
             ? tr("From the activation height on, every block you produce pays into your pool's pot, and anyone "
                  "may trigger the payout that sends every delegator its exact proportional share. You keep %1% "
                  "as commission. The chain enforces all of it: a block of yours that pays anywhere else is "
-                 "invalid, and so is a payout that shortchanges anyone.\n\n").arg(QString::number(commission_bp / 100.0, 'f', 2))
+                 "invalid, and so is a payout that shortchanges anyone.\n\n"
+                 "Each payout is shared among at most the %2 largest delegators, in proportion among themselves: "
+                 "a payout that paid everyone would not fit in a block once a pool grows large. If your pool has "
+                 "more delegators than that, tell the smaller ones.\n\n")
+                  .arg(QString::number(commission_bp / 100.0, 'f', 2), QString::number(POS_SPLIT_MAX_PARTICIPANTS))
         : mode == QLatin1String("lottery")
             ? tr("From the activation height on, every block you produce must pay one of your delegators, drawn "
                  "by stake weight, and you keep %1% of blocks as commission. The chain enforces this: a block of "
@@ -2457,6 +2465,10 @@ void StakingPage::onAnnouncePayout()
         msg += tr("\nEvery block will pay: %1").arg(QString::fromStdString(res["address"].getValStr()));
     }
     msg += tr("\nUntil that height your delegators can read it and leave, which is what the wait is for.");
+    if (res.exists("authorization_txid")) {
+        msg += tr("\nA small payment to your signing key went out first (%1): the announcement spends it, which is "
+                  "how the network knows the policy is yours.").arg(QString::fromStdString(res["authorization_txid"].getValStr()));
+    }
     m_payout_result->setStyleSheet(QString());
     m_payout_result->setText(msg);
     setStatus(tr("Payout policy announced. It binds after the notice period."), false);
