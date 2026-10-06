@@ -854,6 +854,9 @@ bool ActivateBestChainStep(BlockValidationState& state, CBlockIndex* pindexMostW
     bool ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew, const std::shared_ptr<const CBlock>& pblock, ConnectTrace& connectTrace, DisconnectedBlockTransactions& disconnectpool, bool& fStall, bool reorg_pending) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
 
     void InvalidBlockFound(CBlockIndex* pindex, const BlockValidationState& state) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    //! Forget a stored block body that turned out not to match its hash (a bad
+    //! PoS certificate), so the block is downloaded again instead of failed.
+    void DiscardBlockData(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     CBlockIndex* FindMostWorkChain() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /** SEQUENTIA: does the immediate-finality gate refuse to ACTIVATE this

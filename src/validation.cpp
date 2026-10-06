@@ -1990,6 +1990,52 @@ void CChainState::InvalidBlockFound(CBlockIndex* pindex, const BlockValidationSt
     }
 }
 
+void CChainState::DiscardBlockData(CBlockIndex* pindex)
+{
+    AssertLockHeld(cs_main);
+    assert(pindex->pprev && !m_chain.Contains(pindex));
+
+    // Return the block to the state of a header whose body never arrived, so
+    // every invariant CheckBlockIndex holds for such a header holds again. The
+    // bytes stay in the block file, unreferenced, as after a reorg.
+    setBlockIndexCandidates.erase(pindex);
+    auto range = m_blockman.m_blocks_unlinked.equal_range(pindex->pprev);
+    for (auto it = range.first; it != range.second;) {
+        it = it->second == pindex ? m_blockman.m_blocks_unlinked.erase(it) : std::next(it);
+    }
+    pindex->nStatus &= ~(BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO | BLOCK_OPT_WITNESS |
+                         BLOCK_POS_CERT_DECIDED | BLOCK_POS_CERTIFIED);
+    pindex->nStatus = (pindex->nStatus & ~BLOCK_VALID_MASK) | BLOCK_VALID_TREE;
+    pindex->nTx = 0;
+    pindex->nChainTx = 0;
+    if (pindex->nSequenceId > 0) pindex->nSequenceId = 0;
+    pindex->nFile = 0;
+    pindex->nDataPos = 0;
+    pindex->nUndoPos = 0;
+    // The fork-choice keys were measured on the discarded certificate; the
+    // next body measures them again (SetPosForkChoiceKeys). Until then the
+    // block names nobody, like any header.
+    pindex->m_pos_countersigs = 0;
+    pindex->m_pos_vrf_score = std::numeric_limits<uint64_t>::max();
+    PosSetCertified(m_chainman, pindex, false);
+    m_blockman.m_dirty_blockindex.insert(pindex);
+
+    // Descendants we hold bodies for wait for this one, exactly as blocks that
+    // arrived before their parent: out of the candidate sets, unlinked, and
+    // relinked by ReceivedBlockTransactions when the parent's body arrives.
+    for (const auto& [hash, entry] : m_blockman.m_block_index) {
+        if (entry->nHeight <= pindex->nHeight || entry->GetAncestor(pindex->nHeight) != pindex) continue;
+        setBlockIndexCandidates.erase(entry);
+        entry->nChainTx = 0;
+        if (entry->nSequenceId > 0) entry->nSequenceId = 0;
+        if (!(entry->nStatus & BLOCK_HAVE_DATA)) continue;
+        bool linked = false;
+        auto siblings = m_blockman.m_blocks_unlinked.equal_range(entry->pprev);
+        for (auto it = siblings.first; it != siblings.second; ++it) linked |= it->second == entry;
+        if (!linked) m_blockman.m_blocks_unlinked.emplace(entry->pprev, entry);
+    }
+}
+
 void UpdateCoins(const CTransaction& tx, CCoinsViewCache& inputs, CTxUndo &txundo, int nHeight)
 {
     // mark inputs spent
@@ -2795,26 +2841,37 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
         // would countersign and the committee could never advance. The real
         // certificate is verified when the assembled block actually connects
         // (fJustCheck == false); no block joins the chain via a fJustCheck pass.
+        //
+        // Every failure below is a failure of the CERTIFICATE, which the block
+        // hash does not commit to: anyone relaying the block can swap it for a
+        // garbage aggregate, a malformed bitfield, or a valid aggregate of too
+        // few gossiped shares, while the same hash with its real certificate is
+        // valid. So these are BLOCK_MUTATED, like a merkle mutation, and never
+        // mark the hash failed: AcceptBlock leaves an unstored block unmarked,
+        // and ConnectTip drops a stored body (DiscardBlockData) so the block is
+        // fetched again. The relaying peer is still punished.
         if (!fJustCheck && !block.proof.solution.empty()) {
             std::string reason;
             const int signers = PosVerifyBitfieldCertificate(block, pindexPrev, registry, reason);
             if (signers < 0) {
-                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, reason, "invalid bitfield BLS certificate");
+                return state.Invalid(BlockValidationResult::BLOCK_MUTATED, reason, "invalid bitfield BLS certificate");
             }
             const int quorum = PosSlotQuorum(registry);
             const bool escaping_stall = g_con_bitcoin_anchor &&
                 PosEscapingStallAllowed(pindexPrev->m_anchor_height, block.m_anchor_height);
             const int min_members = escaping_stall ? 1 : quorum;
             if (signers < min_members) {
-                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-agg-quorum", "fewer BLS committee members than the certification quorum");
+                return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-posbls-agg-quorum", "fewer BLS committee members than the certification quorum");
             }
             // Escaping-stall real-time evidence (anchor.h, incident 2026-07-17):
-            // see the aggregate-MuSig2 path above for the rationale.
+            // see the aggregate-MuSig2 path above for the rationale. A full
+            // quorum on the same hash needs no gap, so this too judges the
+            // certificate.
             if (escaping_stall && signers < quorum) {
                 switch (CheckEscapingStallMtpGap(pindexPrev->m_anchor_hash, block.m_anchor_hash, pindexPrev->nHeight + 1)) {
                 case EscapeStallTimeVerdict::ALLOWED: break;
                 case EscapeStallTimeVerdict::TOO_SOON:
-                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-pos-escape-stall-too-soon", "sub-quorum block without the escaping-stall parent-chain time gap");
+                    return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-pos-escape-stall-too-soon", "sub-quorum block without the escaping-stall parent-chain time gap");
                 case EscapeStallTimeVerdict::UNKNOWN:
                     return state.Invalid(BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE, "pos-escape-stall-unverifiable", "cannot verify the escaping-stall parent-chain time gap");
                 }
@@ -2826,12 +2883,14 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
         // a real block's certificate (leader sig, member set, aggregate) is gated
         // by CheckProof in CheckBlockHeader before connect. So validate the
         // members' sortition eligibility only when the certificate is present.
+        // The member list is part of the certificate, outside the block hash,
+        // so its failures are BLOCK_MUTATED (see the bitfield form above).
         std::optional<PosBlsCertificate> cert = ParsePosBlsSolution(block.proof.solution);
         if (cert && !cert->members.empty()) {
             std::map<CPubKey, PosBlsMember> named;
             for (const PosBlsMember& member : cert->members) {
                 if (!named.emplace(member.pubkey, member).second) {
-                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-member-duplicate", "duplicate BLS committee member");
+                    return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-posbls-member-duplicate", "duplicate BLS committee member");
                 }
             }
             // Under the public fixed-size committee (-pospubliccommittee, impl
@@ -2844,7 +2903,7 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
                 PosEscapingStallAllowed(pindexPrev->m_anchor_height, block.m_anchor_height);
             const int min_members = escaping_stall ? 1 : quorum;
             if ((int)named.size() < min_members) {
-                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-agg-quorum", "fewer BLS committee members than the certification quorum");
+                return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-posbls-agg-quorum", "fewer BLS committee members than the certification quorum");
             }
             // Escaping-stall real-time evidence (anchor.h, incident 2026-07-17):
             // see the aggregate-MuSig2 path above for the rationale.
@@ -2852,27 +2911,27 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
                 switch (CheckEscapingStallMtpGap(pindexPrev->m_anchor_hash, block.m_anchor_hash, pindexPrev->nHeight + 1)) {
                 case EscapeStallTimeVerdict::ALLOWED: break;
                 case EscapeStallTimeVerdict::TOO_SOON:
-                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-pos-escape-stall-too-soon", "sub-quorum block without the escaping-stall parent-chain time gap");
+                    return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-pos-escape-stall-too-soon", "sub-quorum block without the escaping-stall parent-chain time gap");
                 case EscapeStallTimeVerdict::UNKNOWN:
                     return state.Invalid(BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE, "pos-escape-stall-unverifiable", "cannot verify the escaping-stall parent-chain time gap");
                 }
             }
             if ((int)named.size() > PosMaxCommitteeMembers()) {
-                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-member-count", "more BLS committee members than the aggregate committee cap");
+                return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-posbls-member-count", "more BLS committee members than the aggregate committee cap");
             }
             // Private threshold sortition: each named member proves its own VRF
             // eligibility over the slot seed (the public-committee bitfield form
             // is handled above).
             for (const auto& [member, entry] : named) {
                 if (registry.GetWeight(member) == 0) {
-                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-member-not-selected", "BLS committee member was not selected by sortition for this slot");
+                    return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-posbls-member-not-selected", "BLS committee member was not selected by sortition for this slot");
                 }
                 uint256 member_beta;
                 if (!VrfVerify(member, seed, entry.proof, member_beta)) {
-                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-member-invalid", "invalid BLS committee member VRF eligibility proof");
+                    return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-posbls-member-invalid", "invalid BLS committee member VRF eligibility proof");
                 }
                 if (!PosVrfIsCommitteeMember(member_beta, registry.GetWeight(member), total_weight)) {
-                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-member-not-selected", "BLS committee member was not selected by sortition for this slot");
+                    return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-posbls-member-not-selected", "BLS committee member was not selected by sortition for this slot");
                 }
             }
         }
@@ -4484,6 +4543,18 @@ bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew
                 state = BlockValidationState();
                 fStall = true;
                 return true;
+            }
+            // SEQUENTIA PoS: BLOCK_MUTATED here means the body on disk carries a
+            // bad committee certificate, which the block hash does not commit to
+            // (CheckPosStakeRules). The hash may be perfectly valid with its real
+            // certificate, so it must not be marked failed; but leaving the bad
+            // body in place would retry it forever (see InvalidBlockFound). Drop
+            // the body instead, so the block leaves the candidate sets and is
+            // downloaded again like any block we lack.
+            if (state.GetResult() == BlockValidationResult::BLOCK_MUTATED) {
+                LogPrintf("%s: discarding stored body of %s (height %d): %s; the block will be fetched again\n",
+                          __func__, pindexNew->GetBlockHash().ToString(), pindexNew->nHeight, state.GetRejectReason());
+                DiscardBlockData(pindexNew);
             }
             if (state.IsInvalid()) {
                 InvalidBlockFound(pindexNew, state);

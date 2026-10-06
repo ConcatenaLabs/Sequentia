@@ -1087,6 +1087,15 @@ void PeerManagerImpl::FindNextBlocksToDownload(NodeId nodeid, unsigned int count
         return;
     }
 
+    // SEQUENTIA: a block whose stored body was discarded (a bad PoS committee
+    // certificate, CChainState::DiscardBlockData) lost its transactions, and so
+    // did every descendant's chain count. A common block at or past it would
+    // keep the walk below from ever asking for the discarded body again, so
+    // find the common block afresh.
+    if (state->pindexLastCommonBlock != nullptr && !state->pindexLastCommonBlock->HaveTxsDownloaded() &&
+        !m_chainman.ActiveChain().Contains(state->pindexLastCommonBlock)) {
+        state->pindexLastCommonBlock = nullptr;
+    }
     if (state->pindexLastCommonBlock == nullptr) {
         // Bootstrap quickly by guessing a parent of our best tip is the forking point.
         // Guessing wrong in either direction is not a problem.
