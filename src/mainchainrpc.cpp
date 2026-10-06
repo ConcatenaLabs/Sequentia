@@ -1,5 +1,7 @@
 #include <mainchainrpc.h>
 
+#include <algorithm>
+
 #include <chainparamsbase.h>
 #include <util/system.h>
 #include <util/strencodings.h>
@@ -116,7 +118,9 @@ static UniValue MainChainHttpJson(const std::string& strRequest)
 
     // Synchronously look up hostname
     raii_evhttp_connection evcon = obtain_evhttp_connection_base(base.get(), host, port);
-    evhttp_connection_set_timeout(evcon.get(), gArgs.GetIntArg("-mainchainrpctimeout", DEFAULT_HTTP_CLIENT_TIMEOUT));
+    // Never 0: libevent reads that as "use my own defaults", not "no timeout".
+    evhttp_connection_set_timeout(evcon.get(), std::clamp<int64_t>(gArgs.GetIntArg("-mainchainrpctimeout", DEFAULT_MAINCHAIN_RPC_TIMEOUT),
+                                                                   1, MAX_MAINCHAIN_RPC_TIMEOUT));
 
     HTTPReply response;
     raii_evhttp_request req = obtain_evhttp_request(http_request_done, (void*)&response);

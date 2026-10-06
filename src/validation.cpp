@@ -3884,6 +3884,10 @@ static int g_pos_reconcile_release_height GUARDED_BY(::cs_main) = -1;
 // to see WHY a fork was not adopted — but it must not flood the log either.
 static uint256 g_pos_final_gate_logged GUARDED_BY(::cs_main);
 static uint256 g_pos_reconcile_release_hash GUARDED_BY(::cs_main);
+// The finalized height when the release was granted. The release answers "our
+// finalized branch is abandoned"; once that branch is finalized further, it is
+// not, and the release is withdrawn.
+static int g_pos_reconcile_release_final_height GUARDED_BY(::cs_main) = -1;
 // Steady-clock seconds at the last advance of the finality point (0 = never).
 static std::atomic<int64_t> g_pos_final_advance_steady{0};
 
@@ -3913,6 +3917,18 @@ void PosSetReconcileRelease(int height, const uint256& hash)
     AssertLockHeld(::cs_main);
     g_pos_reconcile_release_height = height;
     g_pos_reconcile_release_hash = hash;
+    g_pos_reconcile_release_final_height = g_pos_immediate_final_height;
+}
+
+//! Withdraw the reconciliation release, if any.
+static void PosRevokeReconcileRelease(const char* why) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    if (g_pos_reconcile_release_height < 0) return;
+    LogPrintf("PoS finality reconciliation: withdrawing the release for %s (height %d): %s\n",
+              g_pos_reconcile_release_hash.ToString(), g_pos_reconcile_release_height, why);
+    g_pos_reconcile_release_height = -1;
+    g_pos_reconcile_release_hash.SetNull();
+    g_pos_reconcile_release_final_height = -1;
 }
 
 int64_t g_pos_finality_delay_ms = DEFAULT_POS_FINALITY_DELAY_MS;
@@ -4193,7 +4209,14 @@ void CChainState::UpdateTip(const CBlockIndex* pindexNew)
             if (anc && anc->GetBlockHash() == g_pos_reconcile_release_hash) {
                 g_pos_reconcile_release_height = -1;
                 g_pos_reconcile_release_hash.SetNull();
+                g_pos_reconcile_release_final_height = -1;
             }
+        }
+        // Not consumed, and our own branch was finalized further since the
+        // release: it was not abandoned after all, so finality protects it again.
+        if (g_pos_reconcile_release_height >= 0 &&
+            g_pos_immediate_final_height > g_pos_reconcile_release_final_height) {
+            PosRevokeReconcileRelease("the local finalized branch advanced again");
         }
     }
 
@@ -4808,6 +4831,16 @@ bool CChainState::ActivateBestChainStep(BlockValidationState& state, CBlockIndex
         for (CBlockIndex* pindexConnect : reverse_iterate(vpindexToConnect)) {
             if (!ConnectTip(state, pindexConnect, pindexConnect == pindexMostWork ? pblock : std::shared_ptr<const CBlock>(), connectTrace, disconnectpool, fStall, fBlocksDisconnected)) {
                 if (state.IsInvalid()) {
+                    // SEQUENTIA: the released rival branch does not connect. The
+                    // monitor judged it certified from its headers, which a
+                    // forger can fake; now that it has failed, finality must
+                    // protect our branch again, and the monitor wait out its
+                    // full patience before it may release anything else.
+                    if (g_pos_reconcile_release_height >= 0 && pindexConnect->nHeight >= g_pos_reconcile_release_height &&
+                        pindexConnect->GetAncestor(g_pos_reconcile_release_height)->GetBlockHash() == g_pos_reconcile_release_hash) {
+                        PosRevokeReconcileRelease("a block of the released branch failed to connect");
+                        PosStampFinalAdvanceNow();
+                    }
                     // The block violates a consensus rule.
                     if (state.GetResult() != BlockValidationResult::BLOCK_MUTATED) {
                         InvalidChainFound(vpindexToConnect.front());
@@ -5552,7 +5585,16 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
     if (g_con_pos) {
         int fin_height = -1;
         uint256 fin_hash;
-        if (GetPosFinalizedCheckpoint(fin_height, fin_hash)) {
+        const CBlockIndex* fin_index = nullptr;
+        const bool have_floor = GetPosFinalizedCheckpoint(fin_height, fin_hash);
+        if (have_floor) fin_index = blockman.LookupBlockIndex(fin_hash);
+        // Anchoring supremacy, as in PosFinalityGateRefuses: once the anchor
+        // watcher has invalidated the finalized block itself, its commitment is
+        // off Bitcoin's best chain and the floor no longer holds. The floor only
+        // retreats on the watcher's next pass over the checkpoints, which may
+        // be a whole tick or a daemon outage away; until then this gate would
+        // refuse, and punish, exactly the peers serving the recovery branch.
+        if (have_floor && !(fin_index && (fin_index->nStatus & BLOCK_FAILED_MASK))) {
             if (nHeight <= fin_height) {
                 LogPrintf("ERROR: %s: rejecting block at height %d at or below the checkpoint-finalized height %d\n", __func__, nHeight, fin_height);
                 return state.Invalid(BlockValidationResult::BLOCK_CHECKPOINT, "bad-fork-prior-to-pos-checkpoint");

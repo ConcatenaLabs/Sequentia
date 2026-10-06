@@ -1037,8 +1037,8 @@ daemon to validate peg\-ins, if enabled. (default: 8332)
 .HP
 \fB\-mainchainrpctimeout=\fR<n>
 .IP
-Timeout in seconds during mainchain RPC requests, or 0 for no timeout.
-(default: 900)
+Timeout in seconds during mainchain RPC requests, from 1 to 900. Anchor
+checks wait for it while holding the chain state lock. (default: 10)
 .HP
 \fB\-mainchainrpcuser=\fR<user>
 .IP
