@@ -1,18 +1,18 @@
-# Sequentia Core 25.1.0
+# Sequentia Core 25.2.0
 
-25.1.0 fixes what the October 2026 security audit found, and carries a fork.
+25.2.0 fixes what the October 2026 security audit found, and carries a fork.
 Part of the fixes change only what a node does locally and take effect as soon
-as it runs. The rest changes consensus and takes effect from one height,
-`pos_hardening_height`: **163,000** on the testnet; from block 1 on mainnet,
-which has not launched.
+as it runs. The rest changes consensus and takes effect from one height:
+**163,000** on the testnet (`pos_hardening_height` and `pos_records_v2_height`);
+from block 1 on mainnet, which has not launched.
 
-**Every node must run 25.1.0 before the testnet reaches height 163,000**, the
+**Every node must run 25.2.0 before the testnet reaches height 163,000**, the
 block producers and committee members above all. At about a block a minute that
-is around 8 October 2026, late evening UTC, but the height decides, not the
-date. From 163,000 the committee certificate carries a new field and blocks
-follow new rules, so a 25.0.x node and a 25.1.0 node refuse each other's blocks
-there. Upgrade the committee all at once, as for every release that changes fork
-choice.
+is around 8 October 2026, evening UTC, but the height decides, not the date.
+From 163,000 the committee certificate carries a new field, stake record spends
+are signed differently and blocks follow new rules, so a 25.0.x node and a
+25.2.0 node refuse each other's blocks there. Upgrade the committee all at once,
+as for every release that changes fork choice.
 
 ## What changes at 163,000
 
@@ -31,13 +31,28 @@ choice.
   first pay a small amount to the key and spend it in the record's
   transaction). A delegation to the controller itself is refused, and a record
   may not be spent and re-created identically in one block.
+- **Stake record spends sign the amount.** Spending a staking, unbonding,
+  delegation or payout output now signs the segwit-v0 hash, which commits to the
+  amount spent, and its scriptSig has one valid encoding: a signer that sees only
+  the transaction cannot be lied to about the fee, and nobody can change its
+  txid. The wallet signs for whichever rule the next block follows. A
+  withdrawal, claim or record spend still waiting in the mempool when the chain
+  reaches 163,000 is evicted: send it again (`withdrawstake`, `claimunbonded`).
 - **No removal of a payout policy without notice.** The payout record in force
   cannot be spent. To change or end a policy, announce the next one (a direct
   payout to yourself, to stop sharing), wait out the notice, and then reclaim
   the old record. A record still inside its notice may be withdrawn.
-- **Lottery and split pools.** The lottery draw is seeded from the anchor three
-  blocks below, which the producer of the parent block cannot choose. A split
-  pot is shared among at most the 100 heaviest participants.
+- **Split pools pay in rounds, with no limit on delegators.** A split pool's
+  rewards of one epoch (1,440 blocks, about a day) become a round, shared among
+  those who stood behind the pool when the epoch began, in buckets of about 32
+  delegators. Each claim pays one bucket of each round, so any delegator
+  collects its share with a small transaction however large the pool, and nobody
+  can block anyone else's payout. `claimpoolrewards` pays the bucket of the
+  wallet's own delegated key by default; `listpools` lists open rounds; the GUI
+  has a "Collect my pool rewards" button. Joining a pool during an epoch earns
+  from the next one. Pots from before 163,000 are claimed as before.
+- **Lottery.** The lottery draw is seeded from the anchor three blocks below,
+  which the producer of the parent block cannot choose.
 - **Anchors.** An anchor that repeats its parent's Bitcoin hash must repeat its
   height too; a block could claim a later Bitcoin height and advance every clock
   that reads it (unbonding, stalls, finality).
@@ -80,16 +95,16 @@ Records, stake and policies created before 163,000 stay valid as they are.
 
 Stop the node, replace `sequentiad` and `sequentia-cli` (and `sequentia-qt`),
 start it. Nothing to migrate: `poscheckpoints.dat` is created on first run. Check
-that `sequentiad -version` reports v25.1.0.
+that `sequentiad -version` reports v25.2.0.
 
 ## A node left behind at 163,000
 
-A 25.0.x node refuses the first 25.1.0 block at 163,000 (its certificate has a
+A 25.0.x node refuses the first 25.2.0 block at 163,000 (its certificate has a
 field the old code reads as trailing data) and marks it invalid. On an upgraded
 node, its peer's `synced_headers` stays at 162,999; on the old node,
 `getchaintips` lists the valid chain's block at 163,000 as `invalid`.
 
-Recovery: upgrade to 25.1.0, restart, then
+Recovery: upgrade to 25.2.0, restart, then
 
     sequentia-cli reconsiderblock <hash of the valid block at 163,000>
 
