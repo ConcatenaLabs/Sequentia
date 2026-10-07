@@ -46,14 +46,56 @@ extern bool g_con_pos;
  *  source at runtime. 0 = the mode is part of the rules from genesis. */
 extern int g_split_payout_height;
 
+/** SEQUENTIA split payouts, second generation (pos_records_v2_height): a
+ *  ROUND, the rewards a split pool earned in one epoch, in one asset, being
+ *  paid out a bucket of delegators at a time.
+ *
+ *  The first generation paid every delegator of a pot in one transaction, so a
+ *  pool's delegators were bounded by what a block can hold (audit A11), and
+ *  then capped at 100. A round is shared among everyone who stood behind the
+ *  pool when its epoch began, however many, in buckets of about
+ *  POS_ROUND_BUCKET_TARGET: anyone may pay any unpaid bucket, a small
+ *  transaction whatever the pool's size, and the round's bitmap records which
+ *  buckets are paid. See doc/sequentia/split-payouts-design.md. */
+struct PosRound {
+    uint32_t epoch{0};          //!< the epoch whose pots this round holds
+    uint64_t weight{0};         //!< total eligible weight when the round was created
+    //! The pool's own weight among it. Every other participant's weight can
+    //! only shrink after the round is made (stake leaves, records are
+    //! immutable), but the signer's own stake counts again once it stops
+    //! delegating it elsewhere, so it is capped at what it was.
+    uint64_t signer_weight{0};
+    int64_t distributable{0};   //!< the round's value when it was created
+    uint16_t buckets{1};        //!< a power of two, 1..POS_ROUND_MAX_BUCKETS
+    uint256 salt;               //!< keys the bucket assignment
+    std::vector<unsigned char> paid; //!< bitmap of paid buckets
+
+    bool IsPaid(int b) const { return (paid[b / 8] >> (b % 8)) & 1; }
+    void SetPaid(int b) { paid[b / 8] |= (unsigned char)(1 << (b % 8)); }
+    int Unpaid() const
+    {
+        int n = 0;
+        for (int b = 0; b < buckets; ++b) n += !IsPaid(b);
+        return n;
+    }
+    friend bool operator==(const PosRound& a, const PosRound& b)
+    {
+        return a.epoch == b.epoch && a.weight == b.weight && a.signer_weight == b.signer_weight &&
+               a.distributable == b.distributable &&
+               a.buckets == b.buckets && a.salt == b.salt && a.paid == b.paid;
+    }
+};
+
 /** An unspent pot output: what a claim would sweep. `coinbase` says whether a
  *  coinbase created it (a block's fees) or a claim did (a re-pot of what it
- *  could not pay out): only the first is held to coinbase maturity. */
+ *  could not pay out): only the first is held to coinbase maturity. `round` is
+ *  set for a second-generation round output (PosRound) instead of a pot. */
 struct PosPotRef {
     CAsset asset;
     int64_t value{0};
     int height{0};
     bool coinbase{false};
+    std::optional<PosRound> round;
 };
 
 /** Seconds per leader slot under the legacy election, and wherever no separate
@@ -538,10 +580,10 @@ public:
     }
     //! A pot output entered the UTXO set.
     void AddUtxoPot(const CPubKey& signer, const COutPoint& out, const CAsset& asset,
-                    int64_t value, int height, bool coinbase)
+                    int64_t value, int height, bool coinbase, std::optional<PosRound> round = std::nullopt)
     {
         LOCK(m_mutex);
-        m_pot_utxo[signer][out] = PosPotRef{asset, value, height, coinbase};
+        m_pot_utxo[signer][out] = PosPotRef{asset, value, height, coinbase, std::move(round)};
     }
     //! A pot output left the UTXO set (claimed, or its creation reverted).
     void SubUtxoPot(const CPubKey& signer, const COutPoint& out)
@@ -1183,6 +1225,48 @@ struct PotOut {
 };
 std::optional<PotOut> PotFromTxOut(const CTxOut& out);
 
+/** Blocks per split-payout epoch (Consensus::Params::pos_split_epoch, mirrored).
+ *  A round holds the pots of one epoch and pays those who stood behind the pool
+ *  when the epoch began. */
+extern int g_pos_split_epoch;
+static constexpr int DEFAULT_POS_SPLIT_EPOCH = 1440;
+/** A round's buckets hold about this many delegators each. */
+static constexpr size_t POS_ROUND_BUCKET_TARGET = 32;
+/** At most this many buckets (the bitmap is 256 bytes). Beyond 65,536
+ *  delegators a bucket holds more than the target. */
+static constexpr int POS_ROUND_MAX_BUCKETS = 2048;
+
+/** The round script:
+ *      <"SEQRND"> OP_DROP <signer_pubkey> OP_DROP <round data> OP_DROP OP_TRUE
+ *  Anyone-can-spend at the script layer, like the pot: the claim rules are the
+ *  whole spend condition. */
+CScript BuildRoundScript(const CPubKey& signer, const PosRound& round);
+std::optional<std::pair<CPubKey, PosRound>> ParseRoundScript(const CScript& script);
+struct RoundOut {
+    CPubKey signer;
+    CAsset asset;
+    int64_t value{0};
+    PosRound round;
+};
+/** The round a txout carries, explicit outputs only. Consensus recognises one
+ *  only when it was created at or above pos_records_v2_height (PosSplitV2Coin). */
+std::optional<RoundOut> RoundFromTxOut(const CTxOut& out);
+/** Whether a pot or round output created at `coin_height` follows the second
+ *  generation's rules. */
+bool PosSplitV2Coin(uint32_t coin_height);
+/** Buckets for a round of `participants` delegators. */
+int PosRoundBucketCount(size_t participants);
+/** The bucket `controller` falls in. */
+int PosRoundBucket(const uint256& salt, const CPubKey& controller, int buckets);
+/** A new round's salt: a hash of the pot outpoints it was made from, sorted.
+ *  Unknown when the delegators' keys were fixed (before the epoch began), so
+ *  nobody can arrange to share a bucket with a victim. */
+uint256 PosRoundSalt(const std::vector<COutPoint>& sorted_pots);
+/** What paying `bucket` of `round` owes each of its delegators, by the registry
+ *  as it stands: floor(99% of the round's value at creation x weight / the
+ *  round's weight), for shares of at least POS_SPLIT_MIN_PAYOUT. */
+std::map<CPubKey, int64_t> PosRoundBucketOwed(const CPubKey& signer, const PosRound& round, int bucket);
+
 /** The smallest per-delegator payment a claim may make, in atoms. A consensus
  *  constant rather than the (node-configurable) relay dust: every validator
  *  must agree on which delegators a claim must pay. Shares below this roll
@@ -1227,7 +1311,7 @@ PosPotShares PosComputePotShares(const CPubKey& signer,
  *  true for any transaction that spends no pot output. */
 class Coin;
 bool CheckPosPotClaim(const CTransaction& tx, const std::vector<Coin>& spent_coins,
-                      std::string& reason);
+                      int spend_height, std::string& reason);
 
 /** The (signer, policy) a payout-record script names, or nullopt. */
 std::optional<std::pair<CPubKey, PosPayoutPolicy>> ParsePayoutScript(const CScript& script);

@@ -132,8 +132,12 @@ lottery seed comes from three blocks down; a split pot is shared among at most
 100 participants; and the public committee is apportioned in seats by stake
 (see [`04-proof-of-stake.md`](04-proof-of-stake.md) §2 and §4).
 
-Not done yet: a pull model for pool rewards, where each delegator withdraws
-its own accrued share, to replace the capped split.
+Fixed by the second fork (`pos_records_v2_height`, not scheduled on the testnet
+yet): a stake record spend signs the segwit-v0 hash, which commits to the
+amount, with a canonical scriptSig, so a signer cannot be lied to about the fee
+and nobody can change the txid (M4); and split rewards are paid in rounds, a
+bucket of about 32 delegators at a time, which removes the 100-participant cap
+(A11, see [`split-payouts-design.md`](split-payouts-design.md)).
 
 ### Accepted by design (documented, not bugs)
 

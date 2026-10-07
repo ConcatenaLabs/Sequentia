@@ -2841,7 +2841,7 @@ bool PosCheckTxRecords(const CTransaction& tx, const std::vector<Coin>& spent, i
     // ConnectBlock: a pot spend must be a valid claim, from the flag day. The
     // shares follow the live registry, so a claim valid when it was admitted can
     // go stale while it waits; the template re-judges it every time.
-    if (params.SplitPayoutActiveAt(height) && !CheckPosPotClaim(tx, spent, debug)) {
+    if (params.SplitPayoutActiveAt(height) && !CheckPosPotClaim(tx, spent, height, debug)) {
         reason = "bad-pot-claim";
         return false;
     }
@@ -3964,7 +3964,7 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
     if (g_con_pos && check_pos_rules && state.IsValid() && m_params.GetConsensus().SplitPayoutActiveAt(pindex->nHeight)) {
         for (size_t t = 1; t < block.vtx.size() && t - 1 < blockundo.vtxundo.size(); ++t) {
             std::string claim_reason;
-            if (!CheckPosPotClaim(*block.vtx[t], blockundo.vtxundo[t - 1].vprevout, claim_reason)) {
+            if (!CheckPosPotClaim(*block.vtx[t], blockundo.vtxundo[t - 1].vprevout, pindex->nHeight, claim_reason)) {
                 LogPrintf("ERROR: ConnectBlock(): invalid pot claim in %s: %s\n",
                           block.vtx[t]->GetHash().ToString(), claim_reason);
                 state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-pot-claim", claim_reason);

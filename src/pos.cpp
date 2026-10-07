@@ -19,6 +19,7 @@
 #include <util/strencodings.h>
 
 #include <algorithm>
+#include <limits>
 
 // g_con_pos is defined in primitives/block.cpp (the consensus library) so the
 // standalone libelementsconsensus resolves CProof's serialization; it is
@@ -1094,6 +1095,134 @@ std::optional<PotOut> PotFromTxOut(const CTxOut& out)
     return PotOut{*signer, out.nAsset.GetAsset(), out.nValue.GetAmount()};
 }
 
+int g_pos_split_epoch = DEFAULT_POS_SPLIT_EPOCH;
+
+static const std::vector<unsigned char> ROUND_MARKER = {'S', 'E', 'Q', 'R', 'N', 'D'};
+//! epoch, weight, signer weight, distributable, buckets, salt; the bitmap follows.
+static constexpr size_t ROUND_DATA_FIXED = 4 + 8 + 8 + 8 + 2 + 32;
+
+CScript BuildRoundScript(const CPubKey& signer, const PosRound& round)
+{
+    std::vector<unsigned char> data;
+    const auto put = [&data](uint64_t v, int bytes) {
+        for (int i = 0; i < bytes; ++i) data.push_back((unsigned char)(v >> (8 * i)));
+    };
+    put(round.epoch, 4);
+    put(round.weight, 8);
+    put(round.signer_weight, 8);
+    put((uint64_t)round.distributable, 8);
+    put(round.buckets, 2);
+    data.insert(data.end(), round.salt.begin(), round.salt.end());
+    data.insert(data.end(), round.paid.begin(), round.paid.end());
+    CScript s;
+    s << ROUND_MARKER << OP_DROP;
+    s << ToByteVector(signer) << OP_DROP;
+    s << data << OP_DROP;
+    s << OP_TRUE;
+    return s;
+}
+
+std::optional<std::pair<CPubKey, PosRound>> ParseRoundScript(const CScript& script)
+{
+    CScript::const_iterator pc = script.begin();
+    opcodetype opcode;
+    std::vector<unsigned char> data;
+    if (!script.GetOp(pc, opcode, data) || data != ROUND_MARKER) return std::nullopt;
+    if (!script.GetOp(pc, opcode, data) || opcode != OP_DROP) return std::nullopt;
+    if (!script.GetOp(pc, opcode, data) || data.size() != CPubKey::COMPRESSED_SIZE) return std::nullopt;
+    CPubKey signer(data);
+    if (!signer.IsFullyValid()) return std::nullopt;
+    if (!script.GetOp(pc, opcode, data) || opcode != OP_DROP) return std::nullopt;
+    std::vector<unsigned char> rd;
+    if (!script.GetOp(pc, opcode, rd) || rd.size() < ROUND_DATA_FIXED) return std::nullopt;
+    if (!script.GetOp(pc, opcode, data) || opcode != OP_DROP) return std::nullopt;
+    if (!script.GetOp(pc, opcode, data) || opcode != OP_TRUE) return std::nullopt;
+    if (pc != script.end()) return std::nullopt;
+    size_t at = 0;
+    const auto get = [&rd, &at](int bytes) {
+        uint64_t v = 0;
+        for (int i = 0; i < bytes; ++i) v |= (uint64_t)rd[at + i] << (8 * i);
+        at += bytes;
+        return v;
+    };
+    PosRound round;
+    round.epoch = (uint32_t)get(4);
+    round.weight = get(8);
+    round.signer_weight = get(8);
+    round.distributable = (int64_t)get(8);
+    round.buckets = (uint16_t)get(2);
+    std::copy(rd.begin() + at, rd.begin() + at + 32, round.salt.begin());
+    at += 32;
+    // Canonical: a power-of-two bucket count within bounds, a bitmap of exactly
+    // the bytes it needs and no bit set beyond the last bucket.
+    if (round.buckets == 0 || round.buckets > POS_ROUND_MAX_BUCKETS || (round.buckets & (round.buckets - 1))) return std::nullopt;
+    if (round.weight == 0 || round.signer_weight > round.weight) return std::nullopt;
+    if (round.distributable <= 0 || !MoneyRange(round.distributable)) return std::nullopt;
+    const size_t bytes = (round.buckets + 7) / 8;
+    if (rd.size() != ROUND_DATA_FIXED + bytes) return std::nullopt;
+    round.paid.assign(rd.begin() + at, rd.end());
+    if (round.buckets % 8 && (round.paid.back() >> (round.buckets % 8))) return std::nullopt;
+    return std::make_pair(signer, round);
+}
+
+std::optional<RoundOut> RoundFromTxOut(const CTxOut& out)
+{
+    if (!out.nValue.IsExplicit() || !out.nAsset.IsExplicit()) return std::nullopt;
+    if (out.nValue.GetAmount() <= 0) return std::nullopt;
+    auto parsed = ParseRoundScript(out.scriptPubKey);
+    if (!parsed) return std::nullopt;
+    return RoundOut{parsed->first, out.nAsset.GetAsset(), out.nValue.GetAmount(), std::move(parsed->second)};
+}
+
+bool PosSplitV2Coin(uint32_t coin_height)
+{
+    return g_pos_records_v2_height > 0 && coin_height >= (uint32_t)g_pos_records_v2_height;
+}
+
+int PosRoundBucketCount(size_t participants)
+{
+    const size_t want = (participants + POS_ROUND_BUCKET_TARGET - 1) / POS_ROUND_BUCKET_TARGET;
+    int buckets = 1;
+    while ((size_t)buckets < want && buckets < POS_ROUND_MAX_BUCKETS) buckets <<= 1;
+    return buckets;
+}
+
+int PosRoundBucket(const uint256& salt, const CPubKey& controller, int buckets)
+{
+    static const std::string tag = "SEQBKT";
+    CSHA256 sha;
+    sha.Write((const unsigned char*)tag.data(), tag.size());
+    sha.Write(salt.begin(), salt.size());
+    sha.Write(controller.data(), controller.size());
+    unsigned char out[CSHA256::OUTPUT_SIZE];
+    sha.Finalize(out);
+    const uint32_t v = (uint32_t)out[0] | ((uint32_t)out[1] << 8) | ((uint32_t)out[2] << 16) | ((uint32_t)out[3] << 24);
+    return (int)(v & (uint32_t)(buckets - 1));
+}
+
+uint256 PosRoundSalt(const std::vector<COutPoint>& sorted_pots)
+{
+    CHashWriter hw(SER_GETHASH, 0);
+    hw << std::string("SEQRNDSALT");
+    for (const COutPoint& o : sorted_pots) hw << o;
+    return hw.GetSHA256();
+}
+
+std::map<CPubKey, int64_t> PosRoundBucketOwed(const CPubKey& signer, const PosRound& round, int bucket)
+{
+    const StakeRegistry& registry = StakeRegistry::GetInstance();
+    std::map<CPubKey, int64_t> owed;
+    const int64_t distributable = round.distributable - round.distributable / POS_SPLIT_RESERVE_DENOM;
+    const int start = (int)std::min<int64_t>((int64_t)round.epoch * g_pos_split_epoch, std::numeric_limits<int>::max());
+    for (const auto& [controller, current] : registry.ParticipantsBefore(signer, start)) {
+        if (PosRoundBucket(round.salt, controller, round.buckets) != bucket) continue;
+        const uint64_t weight = controller == signer ? std::min(current, round.signer_weight) : current;
+        const int64_t cut = (int64_t)(((unsigned __int128)distributable * weight) / round.weight);
+        if (cut >= POS_SPLIT_MIN_PAYOUT) owed[controller] = cut;
+    }
+    return owed;
+}
+
 PosPotShares PosComputePotShares(const CPubKey& signer,
                                  const std::vector<std::tuple<CAsset, int64_t, int>>& pot_inputs)
 {
@@ -1137,9 +1266,303 @@ PosPotShares PosComputePotShares(const CPubKey& signer,
     return shares;
 }
 
-bool CheckPosPotClaim(const CTransaction& tx, const std::vector<Coin>& spent_coins,
-                      std::string& reason)
+//! A coin still in the mempool (CCoinsViewMemPool reports this height).
+static constexpr uint32_t POS_COIN_UNCONFIRMED = 0x7FFFFFFF;
+
+//! SEQUENTIA split payouts, second generation: a claim spending rounds and
+//! pots created at or above pos_records_v2_height. See PosRound and
+//! doc/sequentia/split-payouts-design.md.
+//!
+//! The pots it sweeps, grouped by (epoch, asset), each become a new round;
+//! every round, new or spent, pays exactly one more bucket. A round that still
+//! has unpaid buckets continues in a round output with the same identity and
+//! that one bit added; one whose last bucket this claim pays closes, and what
+//! it leaves goes back into a pot. Each round may give up at most 1/99 of what
+//! it delivers towards the fee and the claimer's margin, and the claim as a
+//! whole stays under the first generation's withhold cap.
+static bool CheckPosPotClaimV2(const CTransaction& tx, const std::vector<Coin>& spent_coins, std::string& reason)
 {
+    struct Work {
+        CAsset asset;
+        PosRound round;              //!< before this claim (new: no bucket paid)
+        int64_t in_value{0};
+        bool fresh{false};
+        bool repot_only{false};      //!< nobody to pay: the value goes back into a pot
+        std::vector<COutPoint> pots; //!< fresh rounds: the pots they are made of
+        int bucket{-1};              //!< the bucket this claim pays
+        bool closing{false};         //!< no round output: its last bucket is paid now
+        int64_t out_value{0};
+        std::map<CPubKey, int64_t> owed;
+    };
+    std::optional<CPubKey> signer;
+    std::map<std::tuple<uint32_t, CAsset, uint256>, Work> spent_rounds;
+    std::map<std::pair<uint32_t, CAsset>, Work> fresh;
+    std::map<CAsset, int64_t> external;
+    const auto one_pool = [&](const CPubKey& s) {
+        if (signer && *signer != s) {
+            reason = "claim sweeps pots of two different pools";
+            return false;
+        }
+        signer = s;
+        return true;
+    };
+    for (size_t i = 0; i < spent_coins.size() && i < tx.vin.size(); ++i) {
+        const Coin& coin = spent_coins[i];
+        if (coin.IsSpent()) continue;
+        if (auto r = RoundFromTxOut(coin.out); r && PosSplitV2Coin(coin.nHeight)) {
+            if (!one_pool(r->signer)) return false;
+            const auto key = std::make_tuple(r->round.epoch, r->asset, r->round.salt);
+            if (spent_rounds.count(key)) {
+                reason = "claim spends two rounds with one identity";
+                return false;
+            }
+            Work& w = spent_rounds[key];
+            w.asset = r->asset;
+            w.round = r->round;
+            w.in_value = r->value;
+        } else if (auto pot = PotFromTxOut(coin.out)) {
+            if (!PosSplitV2Coin(coin.nHeight)) {
+                reason = "claim mixes first- and second-generation pots";
+                return false;
+            }
+            // A pot's epoch is its block's: one still in the mempool has none yet.
+            if (coin.nHeight >= POS_COIN_UNCONFIRMED) {
+                reason = "claim sweeps an unconfirmed pot";
+                return false;
+            }
+            if (!one_pool(pot->signer)) return false;
+            const uint32_t epoch = coin.nHeight / (uint32_t)g_pos_split_epoch;
+            Work& w = fresh[{epoch, pot->asset}];
+            w.asset = pot->asset;
+            w.fresh = true;
+            w.round.epoch = epoch;
+            w.in_value += pot->value;
+            w.pots.push_back(tx.vin[i].prevout);
+        } else {
+            if (!coin.out.nValue.IsExplicit() || !coin.out.nAsset.IsExplicit()) {
+                reason = "claim spends a blinded input";
+                return false;
+            }
+            external[coin.out.nAsset.GetAsset()] += coin.out.nValue.GetAmount();
+        }
+    }
+    if (!signer) return true;
+    const StakeRegistry& registry = StakeRegistry::GetInstance();
+
+    // New rounds: who stood behind the pool when the epoch began, as the
+    // registry stands now (a pure function of the UTXO set).
+    for (auto& [key, w] : fresh) {
+        if (!MoneyRange(w.in_value)) {
+            reason = "claim sweeps more than MAX_MONEY in one asset";
+            return false;
+        }
+        const int start = (int)std::min<int64_t>((int64_t)w.round.epoch * g_pos_split_epoch, std::numeric_limits<int>::max());
+        const std::map<CPubKey, uint64_t> members = registry.ParticipantsBefore(*signer, start);
+        uint64_t total = 0;
+        for (const auto& e : members) total += e.second;
+        std::sort(w.pots.begin(), w.pots.end());
+        w.round.salt = PosRoundSalt(w.pots);
+        if (total == 0) {
+            w.repot_only = true;
+            continue;
+        }
+        w.round.weight = total;
+        w.round.signer_weight = members.count(*signer) ? members.at(*signer) : 0;
+        w.round.distributable = w.in_value;
+        w.round.buckets = (uint16_t)PosRoundBucketCount(members.size());
+        w.round.paid.assign((w.round.buckets + 7) / 8, 0);
+    }
+
+    // Round and pot outputs. A round output continues one round of this claim,
+    // with the same identity and exactly one more bucket paid.
+    std::vector<bool> taken(tx.vout.size(), false);
+    std::map<CAsset, int64_t> pot_out;
+    std::map<CAsset, int> pot_count;
+    for (size_t n = 0; n < tx.vout.size(); ++n) {
+        const CTxOut& out = tx.vout[n];
+        if (out.IsFee()) continue;
+        if (!out.nValue.IsExplicit() || !out.nAsset.IsExplicit()) {
+            reason = "claim creates a blinded output";
+            return false;
+        }
+        if (auto r = RoundFromTxOut(out)) {
+            if (r->signer != *signer) {
+                reason = "claim creates a round for a different pool";
+                return false;
+            }
+            Work* w = nullptr;
+            auto sit = spent_rounds.find({r->round.epoch, r->asset, r->round.salt});
+            if (sit != spent_rounds.end()) w = &sit->second;
+            auto fit = fresh.find({r->round.epoch, r->asset});
+            if (!w && fit != fresh.end() && !fit->second.repot_only && fit->second.round.salt == r->round.salt) w = &fit->second;
+            if (!w || w->bucket >= 0) {
+                reason = "claim creates a round output that continues no round of the claim, or one twice";
+                return false;
+            }
+            if (r->round.weight != w->round.weight || r->round.signer_weight != w->round.signer_weight ||
+                r->round.distributable != w->round.distributable ||
+                r->round.buckets != w->round.buckets) {
+                reason = "claim changes a round's terms";
+                return false;
+            }
+            int added = -1;
+            for (int b = 0; b < w->round.buckets; ++b) {
+                const bool before = w->round.IsPaid(b), after = r->round.IsPaid(b);
+                if (before && !after) {
+                    reason = "claim marks a paid bucket unpaid";
+                    return false;
+                }
+                if (!before && after) {
+                    if (added >= 0) {
+                        reason = "claim pays two buckets of one round";
+                        return false;
+                    }
+                    added = b;
+                }
+            }
+            if (added < 0) {
+                reason = "claim continues a round without paying a bucket of it";
+                return false;
+            }
+            if (r->round.Unpaid() == 0) {
+                reason = "claim keeps a fully paid round; it must close into a pot";
+                return false;
+            }
+            w->bucket = added;
+            w->out_value = r->value;
+            taken[n] = true;
+        } else if (auto pot = ParsePotScript(out.scriptPubKey)) {
+            if (*pot != *signer) {
+                reason = "claim re-pots value under a different pool";
+                return false;
+            }
+            if (++pot_count[out.nAsset.GetAsset()] > 1) {
+                reason = "claim creates two pot outputs in one asset";
+                return false;
+            }
+            pot_out[out.nAsset.GetAsset()] += out.nValue.GetAmount();
+            taken[n] = true;
+        }
+    }
+
+    // What each round pays, and what it must keep.
+    std::map<CAsset, int64_t> need_pot;
+    std::map<CPubKey, std::map<CAsset, int64_t>> owed;
+    std::vector<Work*> all;
+    for (auto& e : spent_rounds) all.push_back(&e.second);
+    for (auto& e : fresh) all.push_back(&e.second);
+    for (Work* w : all) {
+        if (w->repot_only) {
+            need_pot[w->asset] += w->in_value;
+            continue;
+        }
+        if (w->bucket < 0) {
+            // No round output: this claim pays its last unpaid bucket.
+            if (w->round.Unpaid() != 1) {
+                reason = "claim drops a round that still has more than one bucket to pay";
+                return false;
+            }
+            for (int b = 0; b < w->round.buckets; ++b) {
+                if (!w->round.IsPaid(b)) w->bucket = b;
+            }
+            w->closing = true;
+        }
+        int64_t paid = 0;
+        for (const auto& [controller, cut] : PosRoundBucketOwed(*signer, w->round, w->bucket)) {
+            owed[controller][w->asset] += cut;
+            paid += cut;
+        }
+        if (paid > w->in_value) {
+            reason = "claim pays a bucket more than its round holds";
+            return false;
+        }
+        const int64_t keep = w->in_value - paid - paid / POS_SPLIT_WITHHOLD_RATIO;
+        if (w->closing) {
+            need_pot[w->asset] += keep;
+        } else if (w->out_value < keep) {
+            reason = strprintf("claim leaves a round %d of the %d it must keep", w->out_value, keep);
+            return false;
+        }
+    }
+    for (const auto& [asset, need] : need_pot) {
+        const int64_t got = pot_out.count(asset) ? pot_out.at(asset) : 0;
+        if (got < need) {
+            reason = strprintf("claim re-pots %d of the %d a closing round leaves", got, need);
+            return false;
+        }
+    }
+
+    // Every delegator of a paid bucket is paid exactly what it is owed, at the
+    // P2WPKH of its controller key; nobody else is paid at those scripts.
+    std::map<CScript, CPubKey> payee;
+    for (const auto& e : owed) payee[GetScriptForDestination(WitnessV0KeyHash(e.first.GetID()))] = e.first;
+    std::map<CAsset, int64_t> fee, keeper, delivered;
+    std::map<CPubKey, std::map<CAsset, int64_t>> paid_to;
+    for (size_t n = 0; n < tx.vout.size(); ++n) {
+        if (taken[n]) continue;
+        const CTxOut& out = tx.vout[n];
+        if (out.IsFee()) {
+            fee[out.nAsset.GetAsset()] += out.nValue.GetAmount();
+            continue;
+        }
+        const CAsset asset = out.nAsset.GetAsset();
+        auto pit = payee.find(out.scriptPubKey);
+        if (pit != payee.end()) {
+            paid_to[pit->second][asset] += out.nValue.GetAmount();
+            delivered[asset] += out.nValue.GetAmount();
+        } else {
+            keeper[asset] += out.nValue.GetAmount();
+        }
+    }
+    for (const auto& [controller, by_asset] : owed) {
+        for (const auto& [asset, amount] : by_asset) {
+            const auto pit = paid_to.find(controller);
+            const int64_t got = (pit != paid_to.end() && pit->second.count(asset)) ? pit->second.at(asset) : 0;
+            if (got != amount) {
+                reason = strprintf("claim pays a delegator %d of the %d it is owed", got, amount);
+                return false;
+            }
+        }
+    }
+    for (const auto& [controller, by_asset] : paid_to) {
+        for (const auto& e : by_asset) {
+            if (!owed.at(controller).count(e.first)) {
+                reason = "claim pays a delegator in an asset it is not owed";
+                return false;
+            }
+        }
+    }
+
+    // The first generation's withhold cap, per asset the claim touches.
+    std::set<CAsset> assets;
+    for (Work* w : all) assets.insert(w->asset);
+    for (const CAsset& asset : assets) {
+        const int64_t ext = external.count(asset) ? external.at(asset) : 0;
+        const int64_t withheld_raw = (fee.count(asset) ? fee.at(asset) : 0) + (keeper.count(asset) ? keeper.at(asset) : 0) - ext;
+        const int64_t withheld = withheld_raw > 0 ? withheld_raw : 0;
+        const int64_t got = delivered.count(asset) ? delivered.at(asset) : 0;
+        if (withheld * POS_SPLIT_WITHHOLD_RATIO > got) {
+            reason = strprintf("claim withholds %d against %d delivered; the cap is 1/%d",
+                               withheld, got, POS_SPLIT_WITHHOLD_RATIO);
+            return false;
+        }
+    }
+    return true;
+}
+
+bool CheckPosPotClaim(const CTransaction& tx, const std::vector<Coin>& spent_coins,
+                      int spend_height, std::string& reason)
+{
+    // From pos_records_v2_height, a claim that touches a second-generation pot
+    // or round follows the second generation's rules (CheckPosPotClaimV2).
+    if (g_pos_records_v2_height > 0 && spend_height >= g_pos_records_v2_height) {
+        for (const Coin& coin : spent_coins) {
+            if (coin.IsSpent() || !PosSplitV2Coin(coin.nHeight)) continue;
+            if (PotFromTxOut(coin.out) || RoundFromTxOut(coin.out)) {
+                return CheckPosPotClaimV2(tx, spent_coins, reason);
+            }
+        }
+    }
     // 1) Which inputs are pots. A transaction spending none is not a claim and
     //    none of this applies to it.
     std::optional<CPubKey> signer;
@@ -1619,6 +2042,10 @@ void PosApplyBlockStake(const CBlock& block, const CBlockUndo& undo, int height)
             if (auto pot = PotFromTxOut(out)) {
                 registry.AddUtxoPot(pot->signer, COutPoint(tx->GetHash(), n), pot->asset, pot->value, height, tx->IsCoinBase());
             }
+            if (auto round = RoundFromTxOut(out); round && PosSplitV2Coin(height)) {
+                registry.AddUtxoPot(round->signer, COutPoint(tx->GetHash(), n), round->asset, round->value, height,
+                                    false, round->round);
+            }
         }
     }
     // Spent outputs (recorded in the block's undo data) leave the registry.
@@ -1647,6 +2074,9 @@ void PosApplyBlockStake(const CBlock& block, const CBlockUndo& undo, int height)
             }
             if (auto pot = PotFromTxOut(coin.out)) {
                 registry.SubUtxoPot(pot->signer, tx->vin[j].prevout);
+            }
+            if (auto round = RoundFromTxOut(coin.out); round && PosSplitV2Coin(coin.nHeight)) {
+                registry.SubUtxoPot(round->signer, tx->vin[j].prevout);
             }
         }
     }
@@ -1687,6 +2117,10 @@ void PosRevertBlockStake(const CBlock& block, const CBlockUndo& undo, int height
             if (auto pot = PotFromTxOut(coin.out)) {
                 registry.AddUtxoPot(pot->signer, tx->vin[j].prevout, pot->asset, pot->value, (int)coin.nHeight, coin.IsCoinBase());
             }
+            if (auto round = RoundFromTxOut(coin.out); round && PosSplitV2Coin(coin.nHeight)) {
+                registry.AddUtxoPot(round->signer, tx->vin[j].prevout, round->asset, round->value, (int)coin.nHeight,
+                                    false, round->round);
+            }
         }
     }
     for (const CTransactionRef& tx : block.vtx) {
@@ -1706,6 +2140,9 @@ void PosRevertBlockStake(const CBlock& block, const CBlockUndo& undo, int height
             }
             if (auto pot = PotFromTxOut(out)) {
                 registry.SubUtxoPot(pot->signer, COutPoint(tx->GetHash(), n));
+            }
+            if (auto round = RoundFromTxOut(out); round && PosSplitV2Coin(height)) {
+                registry.SubUtxoPot(round->signer, COutPoint(tx->GetHash(), n));
             }
         }
     }
@@ -1768,6 +2205,9 @@ bool RebuildUtxoStake(CCoinsView& view)
         }
         if (auto pot = PotFromTxOut(coin.out)) {
             pot_utxo[pot->signer][key] = PosPotRef{pot->asset, pot->value, (int)coin.nHeight, coin.IsCoinBase()};
+        }
+        if (auto round = RoundFromTxOut(coin.out); round && PosSplitV2Coin(coin.nHeight)) {
+            pot_utxo[round->signer][key] = PosPotRef{round->asset, round->value, (int)coin.nHeight, false, round->round};
         }
         pcursor->Next();
     }

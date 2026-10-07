@@ -2717,6 +2717,212 @@ RPCHelpMan announcepayout()
     };
 }
 
+//! SEQUENTIA split payouts, second generation: one claim paying, in every
+//! round of `signer` it can reach, the bucket of `target` (or, without a
+//! target, the unpaid bucket owed the most). New rounds are made from the
+//! mature pots of each (epoch, asset). Built with the same functions every
+//! validator runs, and checked by CheckPosPotClaim before it is sent.
+static UniValue ClaimPoolRoundsV2(CWallet& wallet, const CPubKey& signer, const std::optional<CPubKey>& target,
+                                  const std::map<COutPoint, PosPotRef>& refs, int spend_height)
+    EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+{
+    const StakeRegistry& registry = StakeRegistry::GetInstance();
+    const int maturity = CoinbaseMaturityAt(spend_height);
+    struct Plan {
+        CAsset asset;
+        PosRound round;
+        int64_t in_value{0};
+        std::vector<std::pair<COutPoint, PosPotRef>> inputs;
+        int bucket{-1};
+        std::map<CPubKey, int64_t> owed;
+        int64_t paid{0};
+    };
+    std::vector<Plan> plans;
+    // Existing rounds.
+    std::map<std::pair<uint32_t, CAsset>, std::vector<std::pair<COutPoint, PosPotRef>>> groups;
+    for (const auto& [outpoint, ref] : refs) {
+        if (ref.round) {
+            Plan p;
+            p.asset = ref.asset;
+            p.round = *ref.round;
+            p.in_value = ref.value;
+            p.inputs.emplace_back(outpoint, ref);
+            plans.push_back(std::move(p));
+        } else if (PosSplitV2Coin(ref.height) && !(ref.coinbase && spend_height - ref.height < maturity)) {
+            groups[{(uint32_t)(ref.height / g_pos_split_epoch), ref.asset}].emplace_back(outpoint, ref);
+        }
+    }
+    // New rounds, one per (epoch, asset) of mature pots.
+    for (auto& [key, pots] : groups) {
+        Plan p;
+        p.asset = key.second;
+        p.round.epoch = key.first;
+        std::vector<COutPoint> outpoints;
+        for (const auto& e : pots) {
+            p.in_value += e.second.value;
+            outpoints.push_back(e.first);
+        }
+        std::sort(outpoints.begin(), outpoints.end());
+        const auto members = registry.ParticipantsBefore(signer, (int)std::min<int64_t>((int64_t)key.first * g_pos_split_epoch, std::numeric_limits<int>::max()));
+        uint64_t total = 0;
+        for (const auto& m : members) total += m.second;
+        if (total == 0) continue; // nobody to pay from this epoch
+        p.round.weight = total;
+        p.round.signer_weight = members.count(signer) ? members.at(signer) : 0;
+        p.round.distributable = p.in_value;
+        p.round.buckets = (uint16_t)PosRoundBucketCount(members.size());
+        p.round.salt = PosRoundSalt(outpoints);
+        p.round.paid.assign((p.round.buckets + 7) / 8, 0);
+        p.inputs = pots;
+        plans.push_back(std::move(p));
+    }
+    // The bucket each round pays.
+    std::vector<Plan> chosen;
+    for (Plan& p : plans) {
+        if (target) {
+            p.bucket = PosRoundBucket(p.round.salt, *target, p.round.buckets);
+            if (p.round.IsPaid(p.bucket)) continue;
+            p.owed = PosRoundBucketOwed(signer, p.round, p.bucket);
+            if (!p.owed.count(*target)) continue; // nothing for the target here
+        } else {
+            for (int b = 0; b < p.round.buckets; ++b) {
+                if (p.round.IsPaid(b)) continue;
+                auto owed = PosRoundBucketOwed(signer, p.round, b);
+                int64_t sum = 0;
+                for (const auto& e : owed) sum += e.second;
+                int64_t best = 0;
+                for (const auto& e : p.owed) best += e.second;
+                if (p.bucket < 0 || sum > best) { p.bucket = b; p.owed = std::move(owed); }
+            }
+            if (p.bucket < 0) continue;
+        }
+        for (const auto& e : p.owed) p.paid += e.second;
+        if (p.paid == 0) continue;
+        chosen.push_back(std::move(p));
+        if (chosen.size() >= 50) break; // keep the claim a modest transaction
+    }
+    if (chosen.empty()) {
+        throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
+            "pool %s has nothing to pay%s yet: no mature pot or unpaid round with a share above the minimum payout",
+            HexStr(signer), target ? " to that controller" : ""));
+    }
+
+    CMutableTransaction mtx;
+    mtx.nVersion = 2;
+    mtx.nLockTime = (uint32_t)(spend_height - 1);
+    std::vector<Coin> spent_coins;
+    std::map<CPubKey, std::map<CAsset, int64_t>> payments;
+    std::map<CAsset, int64_t> delivered, allowance;
+    for (const Plan& p : chosen) {
+        for (const auto& [outpoint, ref] : p.inputs) {
+            CTxIn in(outpoint);
+            in.nSequence = MAX_BIP125_RBF_SEQUENCE;
+            mtx.vin.push_back(in);
+            const CScript script = ref.round ? BuildRoundScript(signer, *ref.round) : BuildPotScript(signer);
+            spent_coins.emplace_back(CTxOut(ref.asset, ref.value, script), ref.height, ref.coinbase);
+        }
+        for (const auto& [controller, cut] : p.owed) payments[controller][p.asset] += cut;
+        delivered[p.asset] += p.paid;
+        allowance[p.asset] += p.paid / POS_SPLIT_WITHHOLD_RATIO;
+    }
+    int64_t delegators_paid = 0;
+    for (const auto& [controller, by_asset] : payments) {
+        const CScript script = GetScriptForDestination(WitnessV0KeyHash(controller.GetID()));
+        for (const auto& [asset, amount] : by_asset) {
+            mtx.vout.push_back(CTxOut(asset, amount, script));
+            ++delegators_paid;
+        }
+    }
+    // The fee is paid in the asset delivered most, which has the most room.
+    CAsset fee_asset;
+    int64_t fee_room = -1;
+    for (const auto& [asset, amount] : delivered) {
+        const int64_t room = std::min(amount / POS_SPLIT_WITHHOLD_RATIO, allowance[asset]);
+        if (room > fee_room) { fee_room = room; fee_asset = asset; }
+    }
+    // Round outputs and closing pots, before the fee is sized.
+    const CScript pot_script = BuildPotScript(signer);
+    std::map<CAsset, int64_t> repot;
+    std::vector<std::pair<size_t, int64_t>> fee_sources; // output index, how much it may give up
+    for (const Plan& p : chosen) {
+        PosRound next = p.round;
+        next.SetPaid(p.bucket);
+        const int64_t remainder = p.in_value - p.paid;
+        if (next.Unpaid() > 0) {
+            mtx.vout.push_back(CTxOut(p.asset, remainder, BuildRoundScript(signer, next)));
+            if (p.asset == fee_asset) fee_sources.emplace_back(mtx.vout.size() - 1, p.paid / POS_SPLIT_WITHHOLD_RATIO);
+        } else {
+            repot[p.asset] += remainder;
+        }
+    }
+    std::map<CAsset, size_t> repot_index;
+    for (const auto& [asset, amount] : repot) {
+        mtx.vout.push_back(CTxOut(asset, amount, pot_script));
+        repot_index[asset] = mtx.vout.size() - 1;
+    }
+    if (repot_index.count(fee_asset)) {
+        int64_t closing_allowance = 0;
+        for (const Plan& p : chosen) {
+            PosRound next = p.round;
+            next.SetPaid(p.bucket);
+            if (p.asset == fee_asset && next.Unpaid() == 0) closing_allowance += p.paid / POS_SPLIT_WITHHOLD_RATIO;
+        }
+        fee_sources.emplace_back(repot_index[fee_asset], closing_allowance);
+    }
+
+    CCoinControl coin_control;
+    const CAmount fee = GetMinimumFeeRate(wallet, coin_control, nullptr)
+                            .GetFee(GetVirtualTransactionSize(CTransaction(mtx)) + 2 * 70);
+    if (fee > fee_room) {
+        throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
+            "not yet worth claiming: the network fee (%s) would exceed what the rounds may give up (%s)",
+            FormatMoney(fee), FormatMoney(fee_room)));
+    }
+    bilingual_str dest_error;
+    CTxDestination margin_dest;
+    if (!wallet.GetNewDestination(wallet.m_default_address_type, "", margin_dest, dest_error)) {
+        throw JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT, dest_error.original);
+    }
+    std::visit(SetBlindingPubKeyVisitor(CPubKey()), margin_dest);
+    const CScript margin_script = GetScriptForDestination(margin_dest);
+    int64_t margin = fee_room - fee;
+    if (margin < GetDustThreshold(CTxOut(fee_asset, 1, margin_script), ::dustRelayFee)) margin = 0;
+    int64_t to_take = fee + margin;
+    for (const auto& [index, room] : fee_sources) {
+        const int64_t take = std::min(to_take, std::min(room, mtx.vout[index].nValue.GetAmount() - 1));
+        if (take <= 0) continue;
+        mtx.vout[index].nValue = mtx.vout[index].nValue.GetAmount() - take;
+        to_take -= take;
+    }
+    if (to_take > 0) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "the rounds cannot cover their own claim fee yet; claim again later");
+    }
+    if (margin > 0) mtx.vout.push_back(CTxOut(fee_asset, margin, margin_script));
+    mtx.vout.push_back(CTxOut(fee_asset, fee, CScript()));
+
+    std::string claim_reason;
+    if (!CheckPosPotClaim(CTransaction(mtx), spent_coins, spend_height, claim_reason)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, strprintf("constructed an invalid claim (%s); nothing was sent", claim_reason));
+    }
+    const CTransactionRef tx = MakeTransactionRef(std::move(mtx));
+    std::string err_string;
+    if (!wallet.chain().broadcastTransaction(tx, wallet.m_default_max_tx_fee, /*relay=*/true, err_string)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, strprintf("failed to broadcast the claim: %s", err_string));
+    }
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("txid", tx->GetHash().GetHex());
+    result.pushKV("rounds", (int64_t)chosen.size());
+    UniValue dist(UniValue::VOBJ), rep(UniValue::VOBJ);
+    for (const auto& e : delivered) dist.pushKV(e.first.GetHex(), ValueFromAmount(e.second));
+    for (const auto& e : repot) rep.pushKV(e.first.GetHex(), ValueFromAmount(e.second));
+    result.pushKV("distributed", dist);
+    result.pushKV("repotted", rep);
+    result.pushKV("fee", ValueFromAmount(fee));
+    result.pushKV("margin", ValueFromAmount(margin));
+    result.pushKV("delegators_paid", delegators_paid);
+    return result;
+}
+
 RPCHelpMan claimpoolrewards()
 {
     return RPCHelpMan{"claimpoolrewards",
@@ -2728,13 +2934,19 @@ RPCHelpMan claimpoolrewards()
                 "this wallet, which is the incentive to be the one who claims.\n"
                 "\nEach delegator is paid only from pot outputs created after its delegation (and its stake) "
                 "existed, so joining a pool just before a claim earns exactly nothing from it. Shares below the\n"
-                "minimum payout roll into a fresh pot and accumulate for the next claim.\n",
+                "minimum payout roll into a fresh pot and accumulate for the next claim.\n"
+                "\nFrom the records-v2 height (second generation) a pool's pots of one epoch become a ROUND, shared\n"
+                "among everyone who stood behind the pool when the epoch began, in buckets of about 32 delegators.\n"
+                "A claim pays one bucket of each round: by default the bucket of this wallet's delegated key, so\n"
+                "any delegator can collect its own share with a small transaction, however large the pool.\n",
                 {
                     {"signer", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "The pool to claim for (hex). Defaults to the pool this wallet's stake is delegated to."},
+                    {"controller", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Second-generation rounds (from the records-v2 height): pay the bucket of this delegator (hex) in every round of the pool. Defaults to this wallet's delegated key for the pool, else the unpaid bucket owed the most in each round."},
                 },
                 RPCResult{RPCResult::Type::OBJ, "", "", {
                     {RPCResult::Type::STR_HEX, "txid", "the claim transaction id"},
-                    {RPCResult::Type::NUM, "pot_outputs", "pot outputs swept"},
+                    {RPCResult::Type::NUM, "pot_outputs", /*optional=*/true, "first generation: pot outputs swept"},
+                    {RPCResult::Type::NUM, "rounds", /*optional=*/true, "second generation: rounds a bucket of which this claim paid"},
                     {RPCResult::Type::OBJ_DYN, "distributed", "paid to delegators, keyed by asset id", {
                         {RPCResult::Type::STR_AMOUNT, "asset", "amount"}}},
                     {RPCResult::Type::OBJ_DYN, "repotted", "rolled into the fresh pot (sub-minimum shares and remainders), keyed by asset id", {
@@ -2774,7 +2986,31 @@ RPCHelpMan claimpoolrewards()
 
     // 2) The pot, and what a claim of it must pay. Both are pure functions of
     //    the UTXO set, computed by the SAME code every validator runs.
-    const std::map<COutPoint, PosPotRef> all_pots = registry.PotsFor(signer);
+    std::map<COutPoint, PosPotRef> all_pots = registry.PotsFor(signer);
+    {
+        // Second generation: rounds, and pots created at or above the
+        // records-v2 height. First-generation pots are claimed as before, and
+        // first: a pool holding both is claimed twice.
+        const int next_height = pwallet->GetLastBlockHeight() + 1;
+        bool any_v1 = false;
+        for (const auto& e : all_pots) any_v1 |= !e.second.round && !PosSplitV2Coin(e.second.height);
+        if (!any_v1 && !all_pots.empty() && Params().GetConsensus().PosRecordsV2ActiveAt(next_height)) {
+            std::optional<CPubKey> target;
+            if (!request.params[1].isNull()) {
+                target = CPubKey(ParseHexV(request.params[1], "controller"));
+                if (!target->IsFullyValid()) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid controller public key");
+            } else {
+                for (const CPubKey& k : WalletStakerKeys(*pwallet)) {
+                    if (registry.SignerFor(k) == signer) { target = k; break; }
+                }
+            }
+            return ClaimPoolRoundsV2(*pwallet, signer, target, all_pots, next_height);
+        }
+        for (auto it = all_pots.begin(); it != all_pots.end();) {
+            if (it->second.round || PosSplitV2Coin(it->second.height)) it = all_pots.erase(it);
+            else ++it;
+        }
+    }
     if (all_pots.empty()) {
         throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
             "pool %s has no pot to claim: either it is not a split pool, or everything accrued has already "
@@ -2908,7 +3144,7 @@ RPCHelpMan claimpoolrewards()
         spent_coins.emplace_back(std::move(out), e.second.height, /*fCoinBaseIn=*/false);
     }
     std::string claim_reason;
-    if (!CheckPosPotClaim(CTransaction(mtx), spent_coins, claim_reason)) {
+    if (!CheckPosPotClaim(CTransaction(mtx), spent_coins, spend_height, claim_reason)) {
         throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
             "constructed an invalid claim (%s); nothing was sent", claim_reason));
     }

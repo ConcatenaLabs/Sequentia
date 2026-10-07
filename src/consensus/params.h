@@ -445,7 +445,9 @@ struct Params {
     //! commits to the amount it spends (the segwit-v0 signature hash) and the
     //! spend's scriptSig is canonical, so a signer that sees only the
     //! transaction cannot be lied to about the fee, and no third party can
-    //! change the txid (audit M4). 0 = off.
+    //! change the txid (audit M4). And split pools pay their delegators in
+    //! rounds, a bucket at a time, with no bound on their number (PosRound,
+    //! audit A11). 0 = off.
     int pos_records_v2_height{0};
     bool PosRecordsV2ActiveAt(int height) const
     {

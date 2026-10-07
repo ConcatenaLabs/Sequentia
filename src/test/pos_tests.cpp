@@ -2100,4 +2100,217 @@ BOOST_AUTO_TEST_CASE(pos_record_spend_v2)
     BOOST_CHECK(verify(CScript() << with_type(HighSTwin(sign(SigVersion::BASE, value))), legacy));
 }
 
+// Split payouts, second generation (audit A11): a round pays one bucket per
+// claim, and every way of bending that is refused.
+BOOST_AUTO_TEST_CASE(pos_split_round_claims)
+{
+    const int saved_v2 = g_pos_records_v2_height;
+    const int saved_epoch = g_pos_split_epoch;
+    g_pos_records_v2_height = 100;
+    g_pos_split_epoch = 20;
+    StakeRegistry& registry = StakeRegistry::GetInstance();
+    registry.Clear();
+
+    CKey pool_key;
+    pool_key.MakeNewKey(true);
+    const CPubKey pool = pool_key.GetPubKey();
+    registry.AddUtxoStake(pool, 1000, {}, /*height=*/10);
+    std::vector<CPubKey> delegators;
+    for (int i = 0; i < 40; ++i) {
+        CKey k;
+        k.MakeNewKey(true);
+        delegators.push_back(k.GetPubKey());
+        registry.AddUtxoStake(k.GetPubKey(), 1000, {}, /*height=*/10);
+        registry.AddUtxoDelegation(k.GetPubKey(), pool, /*height=*/12);
+    }
+    const CAsset asset(uint256S("22"));
+    const CScript pot_script = BuildPotScript(pool);
+    // Two pots of epoch 10 (heights 200..219), created by coinbases.
+    const COutPoint pot_a(uint256S("a1"), 0), pot_b(uint256S("b2"), 0);
+    const std::vector<Coin> pot_coins{Coin(CTxOut(asset, 600000, pot_script), 200, true),
+                                      Coin(CTxOut(asset, 400000, pot_script), 205, true)};
+
+    // The round consensus makes from them.
+    PosRound round;
+    round.epoch = 10;
+    round.weight = 41 * 1000;
+    round.signer_weight = 1000;
+    round.distributable = 1000000;
+    round.buckets = (uint16_t)PosRoundBucketCount(41);
+    BOOST_REQUIRE_EQUAL(round.buckets, 2);
+    std::vector<COutPoint> sorted{pot_a, pot_b};
+    std::sort(sorted.begin(), sorted.end());
+    round.salt = PosRoundSalt(sorted);
+    round.paid.assign(1, 0);
+
+    const auto pay = [&](CMutableTransaction& tx, const std::map<CPubKey, int64_t>& owed) {
+        int64_t paid = 0;
+        for (const auto& [c, v] : owed) {
+            tx.vout.emplace_back(asset, v, GetScriptForDestination(WitnessV0KeyHash(c.GetID())));
+            paid += v;
+        }
+        return paid;
+    };
+    // A valid claim of `bucket` from `round_in` (value `in_value`), spending
+    // `ins`: payments, the continued round (or a closing pot) and a fee of
+    // exactly what the round may give up.
+    const auto claim = [&](const PosRound& round_in, int64_t in_value, int bucket, const std::vector<COutPoint>& ins) {
+        CMutableTransaction tx;
+        tx.nVersion = 2;
+        for (const COutPoint& o : ins) tx.vin.emplace_back(o);
+        const int64_t paid = pay(tx, PosRoundBucketOwed(pool, round_in, bucket));
+        const int64_t give = paid / POS_SPLIT_WITHHOLD_RATIO;
+        PosRound next = round_in;
+        next.SetPaid(bucket);
+        const CScript keep_script = next.Unpaid() ? BuildRoundScript(pool, next) : pot_script;
+        tx.vout.emplace_back(asset, in_value - paid - give, keep_script);
+        tx.vout.emplace_back(asset, give, CScript()); // the fee
+        return tx;
+    };
+    const auto check = [&](const CMutableTransaction& tx, const std::vector<Coin>& coins, const std::string& expect) {
+        std::string reason;
+        const bool ok = CheckPosPotClaim(CTransaction(tx), coins, /*spend_height=*/400, reason);
+        if (expect.empty()) {
+            BOOST_CHECK_MESSAGE(ok, reason);
+        } else {
+            BOOST_CHECK_MESSAGE(!ok && reason.find(expect) != std::string::npos, "expected '" + expect + "', got '" + reason + "'");
+        }
+    };
+
+    const int b0 = PosRoundBucket(round.salt, delegators[0], round.buckets);
+    const int b1 = 1 - b0;
+    const CMutableTransaction good = claim(round, 1000000, b0, {pot_a, pot_b});
+    check(good, pot_coins, "");
+
+    // The round output must continue the round with exactly one more bucket.
+    {
+        CMutableTransaction tx = good;
+        PosRound both = round;
+        both.SetPaid(0);
+        both.SetPaid(1);
+        both.paid[0] |= 0; // two bits: also "fully paid", refused either way
+        tx.vout[tx.vout.size() - 2].scriptPubKey = BuildRoundScript(pool, both);
+        check(tx, pot_coins, "two buckets");
+    }
+    {
+        CMutableTransaction tx = good;
+        PosRound changed = round;
+        changed.SetPaid(b0);
+        changed.weight += 1;
+        tx.vout[tx.vout.size() - 2].scriptPubKey = BuildRoundScript(pool, changed);
+        check(tx, pot_coins, "terms");
+    }
+    {
+        // No round output: two buckets were unpaid.
+        CMutableTransaction tx = good;
+        tx.vout[tx.vout.size() - 2].scriptPubKey = CScript() << OP_TRUE;
+        check(tx, pot_coins, "drops a round");
+    }
+    {
+        // The round keeps less than it must, the difference taken as margin.
+        CMutableTransaction tx = good;
+        tx.vout[tx.vout.size() - 2].nValue = tx.vout[tx.vout.size() - 2].nValue.GetAmount() - 1;
+        tx.vout.emplace_back(asset, 1, CScript() << OP_TRUE);
+        check(tx, pot_coins, "leaves a round");
+    }
+    {
+        // A delegator short-changed by one atom, the atom left in the round.
+        CMutableTransaction tx = good;
+        tx.vout[0].nValue = tx.vout[0].nValue.GetAmount() - 1;
+        tx.vout[tx.vout.size() - 2].nValue = tx.vout[tx.vout.size() - 2].nValue.GetAmount() + 1;
+        check(tx, pot_coins, "pays a delegator");
+    }
+    {
+        // First- and second-generation pots in one claim.
+        CMutableTransaction tx = good;
+        tx.vin.emplace_back(COutPoint(uint256S("c3"), 0));
+        std::vector<Coin> coins = pot_coins;
+        coins.emplace_back(CTxOut(asset, 1000, pot_script), 50, true);
+        check(tx, coins, "mixes");
+    }
+    {
+        // A pot still in the mempool has no epoch.
+        std::vector<Coin> coins = pot_coins;
+        coins[1].nHeight = 0x7FFFFFFF;
+        check(good, coins, "unconfirmed");
+    }
+
+    // The round, once confirmed: the other bucket closes it into a pot.
+    PosRound after = round;
+    after.SetPaid(b0);
+    const COutPoint round_out(CTransaction(good).GetHash(), (uint32_t)good.vout.size() - 2);
+    const int64_t round_value = good.vout[good.vout.size() - 2].nValue.GetAmount();
+    const std::vector<Coin> round_coins{Coin(CTxOut(asset, round_value, BuildRoundScript(pool, after)), 300, false)};
+    const CMutableTransaction close = claim(after, round_value, b1, {round_out});
+    check(close, round_coins, "");
+    {
+        // The closing pot keeps less than the round leaves.
+        CMutableTransaction tx = close;
+        tx.vout[tx.vout.size() - 2].nValue = tx.vout[tx.vout.size() - 2].nValue.GetAmount() - 1;
+        tx.vout.emplace_back(asset, 1, CScript() << OP_TRUE);
+        check(tx, round_coins, "re-pots");
+    }
+    {
+        // Paying the bucket already paid: no new bit.
+        CMutableTransaction tx;
+        tx.nVersion = 2;
+        tx.vin.emplace_back(round_out);
+        tx.vout.emplace_back(asset, round_value - 1000, BuildRoundScript(pool, after));
+        tx.vout.emplace_back(asset, 1000, CScript());
+        check(tx, round_coins, "without paying a bucket");
+    }
+    {
+        // Clearing a paid bit to be paid twice.
+        CMutableTransaction tx = claim(round, round_value, b1, {round_out});
+        check(tx, round_coins, "unpaid");
+    }
+    {
+        // A fabricated round promising more than it holds.
+        PosRound fake = after;
+        fake.distributable = 100000000;
+        const std::vector<Coin> coins{Coin(CTxOut(asset, round_value, BuildRoundScript(pool, fake)), 300, false)};
+        check(claim(fake, round_value, b1, {round_out}), coins, "more than its round holds");
+    }
+    // Every delegator and the pool are owed exactly once across the two buckets.
+    {
+        std::map<CPubKey, int64_t> all = PosRoundBucketOwed(pool, round, b0);
+        for (const auto& e : PosRoundBucketOwed(pool, round, b1)) BOOST_CHECK(all.emplace(e).second);
+        BOOST_CHECK_EQUAL(all.size(), 41U);
+        BOOST_CHECK_EQUAL(all.at(pool), (1000000 - 10000) * 1000 / 41000);
+    }
+
+    // The one weight that can grow after a round is made: a signer that lent
+    // its own stake elsewhere when the epoch began and has taken it back. It is
+    // capped at what the round recorded, or the shares would exceed the round.
+    {
+        CKey p2k, xk, dk;
+        p2k.MakeNewKey(true);
+        xk.MakeNewKey(true);
+        dk.MakeNewKey(true);
+        const CPubKey pool2 = p2k.GetPubKey(), other = xk.GetPubKey(), d = dk.GetPubKey();
+        registry.AddUtxoStake(pool2, 1000, {}, 10);
+        registry.AddUtxoDelegation(pool2, other, 12);
+        registry.AddUtxoStake(d, 1000, {}, 10);
+        registry.AddUtxoDelegation(d, pool2, 12);
+        PosRound r2;
+        r2.epoch = 10;
+        const auto members = registry.ParticipantsBefore(pool2, 200);
+        BOOST_CHECK_EQUAL(members.size(), 1U);
+        r2.weight = 1000;
+        r2.signer_weight = 0;
+        r2.distributable = 100000;
+        r2.buckets = 1;
+        r2.paid.assign(1, 0);
+        registry.SubUtxoDelegation(pool2, other); // takes its stake back
+        BOOST_CHECK_EQUAL(registry.ParticipantsBefore(pool2, 200).size(), 2U);
+        const auto owed = PosRoundBucketOwed(pool2, r2, 0);
+        BOOST_CHECK(!owed.count(pool2));
+        BOOST_CHECK_EQUAL(owed.at(d), 99000);
+    }
+
+    registry.Clear();
+    g_pos_records_v2_height = saved_v2;
+    g_pos_split_epoch = saved_epoch;
+}
+
 BOOST_AUTO_TEST_SUITE_END()

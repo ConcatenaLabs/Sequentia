@@ -459,6 +459,7 @@ public:
         // Second-generation stake records (params.h), from the first block.
         consensus.pos_records_v2_height = 1;
         g_pos_records_v2_height = consensus.pos_records_v2_height;
+        g_pos_split_epoch = DEFAULT_POS_SPLIT_EPOCH;
         // Supervised assets (src/supervision.h): in force from mainnet's first
         // block, so a supervised issuance is possible from day one and there is
         // no flag day to coordinate later. 1 and not 0 for the same reason as
@@ -950,6 +951,7 @@ public:
         // Second-generation stake records (params.h): not scheduled yet.
         consensus.pos_records_v2_height = 0;
         g_pos_records_v2_height = consensus.pos_records_v2_height;
+        g_pos_split_epoch = DEFAULT_POS_SPLIT_EPOCH;
         g_coinbase_maturity = consensus.coinbase_maturity;
         g_coinbase_maturity_height = consensus.coinbase_maturity_height;
         // SEQUENTIA: 400,000 weight units — a TENTH of Bitcoin's 4,000,000 —
@@ -1672,6 +1674,7 @@ public:
         // parameters may have set earlier in this process.
         g_pos_hardening_height = 0;
         g_pos_records_v2_height = 0;
+        g_pos_split_epoch = DEFAULT_POS_SPLIT_EPOCH;
         consensus.signet_blocks = false;
         consensus.signet_challenge.clear();
         consensus.nSubsidyHalvingInterval = 150;
@@ -2102,6 +2105,10 @@ protected:
         g_pos_hardening_height = consensus.pos_hardening_height;
         consensus.pos_records_v2_height = (int)args.GetIntArg("-posrecordsv2height", 1);
         g_pos_records_v2_height = consensus.pos_records_v2_height;
+        g_pos_split_epoch = (int)args.GetIntArg("-possplitepoch", DEFAULT_POS_SPLIT_EPOCH);
+        if (g_pos_split_epoch < 1 || g_pos_split_epoch > 1000000) {
+            throw std::runtime_error("-possplitepoch must be between 1 and 1000000");
+        }
         consensus.pos_unbond_anchor_depth = (int)args.GetIntArg("-posunbonddepth", 2016);
         if (consensus.pos_unbond_anchor_depth < 1 || consensus.pos_unbond_anchor_depth > 1000000) {
             throw std::runtime_error("-posunbonddepth must be between 1 and 1000000");

@@ -253,7 +253,10 @@ function. Three modes ship:
   the `POS_SPLIT_MAX_PARTICIPANTS` (100) largest participants only, in
   proportion among themselves: the claim pays every participant in one
   transaction, and without a bound a pool of ~1,500 delegators had a pot no
-  block could hold (audit A11). The claim is fully determined by the UTXO set, so no
+  block could hold (audit A11). From `pos_records_v2_height` that cap is
+  replaced by rounds: an epoch's pots are paid a bucket of about 32 delegators
+  at a time, any bucket by anyone, so a pool may have any number of
+  delegators and each can collect its own share. The claim is fully determined by the UTXO set, so no
   payout depends on the operator staying interested, and variance is smoothed
   without any per-delegator accounting. Commission is a bp/10000 chance that a
   block pays the operator instead of the pot. Leaving the pool forfeits
