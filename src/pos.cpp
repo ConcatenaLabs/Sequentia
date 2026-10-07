@@ -1021,6 +1021,13 @@ bool PosPayoutInForce(const StakeRegistry& registry, const CPubKey& signer,
     return current && *current == policy;
 }
 
+bool PosOutputWeightsUncompressedKey(const CTxOut& out)
+{
+    if (auto stake = StakeFromTxOut(out)) return !stake->first.IsCompressed();
+    if (auto deleg = DelegationFromTxOut(out)) return !deleg->second.IsCompressed();
+    return false;
+}
+
 std::optional<std::pair<CPubKey, PosPayoutPolicy>> PayoutFromTxOut(const CTxOut& out)
 {
     return ParsePayoutScript(out.scriptPubKey);

@@ -1256,6 +1256,12 @@ bool PosTxSpendsKey(const CPubKey& key, const std::vector<Coin>& spent);
  *  weight of its own, it only re-points weight the staking outputs already hold. */
 std::optional<std::pair<CPubKey, CPubKey>> DelegationFromTxOut(const CTxOut& out);
 
+/** Whether `out` gives stake weight to an uncompressed (65-byte) key: a staking
+ *  output of one, or a delegation to one as signer. Such a key can never prove a
+ *  VRF output, so the weight could never produce and only diluted everyone
+ *  else's slots (audit CC5). Refused from pos_hardening_height. */
+bool PosOutputWeightsUncompressedKey(const CTxOut& out);
+
 /** A parsed staking script. bls_pubkey/bls_pop are empty when the output carries
  *  no committee registration (the old form, or a leader-only staker).
  *  liquid_locktime is 0 when the output carries no absolute vesting lock. */

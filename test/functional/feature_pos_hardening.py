@@ -13,7 +13,8 @@ existing, so anyone could create one naming any key. From the hardening height:
   * a delegation to the controller itself is refused;
   * a record may not be spent and re-created identically in one block;
   * the payout record in force may not be spent: ending a policy takes the
-    same notice as starting one (a superseded or still-pending record may go).
+    same notice as starting one (a superseded or still-pending record may go);
+  * no stake weight for an uncompressed key, which can never prove a VRF output.
 
 Below the height the old rules still apply, so history produced before the
 cutover stays valid.
@@ -175,6 +176,17 @@ class PosHardeningTest(BitcoinTestFramework):
         reclaim_id = self.send(spend_record(pay_id, payout))
         node.generateposblock(self.a_wif)
         assert reclaim_id in node.getblock(node.getbestblockhash())["tx"]
+
+        self.log.info("No stake, and no delegation, bound to an uncompressed key")
+        u = ECKey()
+        u.generate(compressed=False)
+        u_pub = u.get_pubkey().get_bytes().hex()
+        assert_equal(len(u_pub), 130)
+        stake = bytes.fromhex(node.getstakescript(u_pub)["script"])
+        assert_raises_rpc_error(-26, "bad-stake-uncompressed-key", self.send,
+                                self.build([change + (None, None)], [(COIN, stake)]))
+        assert_raises_rpc_error(-26, "bad-stake-uncompressed-key", self.send,
+                                self.build([change + (None, None)], [(RECORD_VALUE, record(self.a_pub, u_pub))]))
 
         self.log.info("History from below the height still validates after a restart")
         self.restart_node(0)

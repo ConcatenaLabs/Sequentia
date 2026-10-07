@@ -125,7 +125,8 @@ block 1 on mainnet): delegation and payout records need their key's
 authorisation; one supervision key rotation per asset and role per block; no
 identical record re-creation within a block; no issuance on a supervision
 record input; no supervision record in a coinbase; the payout record in force
-cannot be spent, so ending a policy takes the same notice as starting one; an
+cannot be spent, so ending a policy takes the same notice as starting one; no
+stake weight for an uncompressed key, which can never prove a VRF output; an
 anchor repeating its parent's hash must repeat its height; the
 lottery seed comes from three blocks down; a split pot is shared among at most
 100 participants; and the public committee is apportioned in seats by stake

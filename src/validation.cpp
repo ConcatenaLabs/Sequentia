@@ -2700,6 +2700,12 @@ bool PosCheckTxRecords(const CTransaction& tx, const std::vector<Coin>& spent, i
     }
 
     for (const CTxOut& out : tx.vout) {
+        // ConnectBlock, from pos_hardening_height: no weight for a key that can
+        // never prove a VRF output.
+        if (hardening && PosOutputWeightsUncompressedKey(out)) {
+            reason = "bad-stake-uncompressed-key";
+            return false;
+        }
         // ConnectBlock: at most one unspent delegation record per controller.
         if (auto deleg = DelegationFromTxOut(out)) {
             // ConnectBlock, from pos_hardening_height: controller authorisation,
@@ -3770,6 +3776,10 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
         // vanished from a running node's registry while the UTXO set, and so a
         // restarted node's rebuild, still held it: two nodes, two committees.
         //
+        // No weight for an uncompressed key. The VRF proves only with a
+        // compressed key, so stake or a delegation bound to a 65-byte key could
+        // never produce a block and only diluted everyone else's slots.
+        //
         // No removal without notice. A new policy waits g_pos_payout_notice
         // blocks before it binds, but spending the record in force removed it
         // on the spot, and with no policy the coinbase pays the signer: the
@@ -3798,6 +3808,11 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
             for (size_t t = 0; t < block.vtx.size() && state.IsValid(); ++t) {
                 const std::vector<Coin>& spent = t == 0 ? no_coins : blockundo.vtxundo[t - 1].vprevout;
                 for (const CTxOut& out : block.vtx[t]->vout) {
+                    if (PosOutputWeightsUncompressedKey(out)) {
+                        state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-stake-uncompressed-key",
+                                      "stake weight bound to an uncompressed key, which can never prove a VRF output");
+                        break;
+                    }
                     const auto deleg = DelegationFromTxOut(out);
                     const auto payout = deleg ? std::nullopt : PayoutFromTxOut(out);
                     if (!deleg && !payout) continue;
