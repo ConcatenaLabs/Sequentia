@@ -2553,10 +2553,9 @@ void StakingPage::onAnnouncePayout()
                  "may trigger the payout that sends every delegator its exact proportional share. You keep %1% "
                  "as commission. The chain enforces all of it: a block of yours that pays anywhere else is "
                  "invalid, and so is a payout that shortchanges anyone.\n\n"
-                 "Each payout is shared among at most the %2 largest delegators, in proportion among themselves: "
-                 "a payout that paid everyone would not fit in a block once a pool grows large. If your pool has "
-                 "more delegators than that, tell the smaller ones.\n\n")
-                  .arg(QString::number(commission_bp / 100.0, 'f', 2), QString::number(POS_SPLIT_MAX_PARTICIPANTS))
+                 "Your delegators are paid in groups of about 32, each group by whoever asks for its payout, so "
+                 "there is no limit on how many delegators your pool can have.\n\n")
+                  .arg(QString::number(commission_bp / 100.0, 'f', 2))
         : mode == QLatin1String("lottery")
             ? tr("From the activation height on, every block you produce must pay one of your delegators, drawn "
                  "by stake weight, and you keep %1% of blocks as commission. The chain enforces this: a block of "

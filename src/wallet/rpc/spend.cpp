@@ -2717,6 +2717,21 @@ RPCHelpMan announcepayout()
     };
 }
 
+//! A fee priced in reference fee atoms (what GetMinimumFeeRate returns), as an
+//! amount of `asset` worth at least that much. A pool claim pays its fee in a
+//! swept asset, which is the reference unit only by coincidence: paid
+//! unconverted, the fee is too small for the mempool or far too large.
+//! Returns -1 for an asset this node does not accept for fees.
+static CAmount ClaimFeeInAsset(CAmount rfa, const CAsset& asset)
+{
+    if (!g_con_any_asset_fees) return rfa;
+    ExchangeRateMap& rates = ExchangeRateMap::GetInstance();
+    if (rates.ConvertAmountToValue(exchange_rate_scale, asset).GetValue() <= 0) return -1;
+    CAmount amount = rates.ConvertValueToAmount(CValue(rfa), asset);
+    for (int i = 0; i < 1000 && rates.ConvertAmountToValue(amount, asset).GetValue() < rfa; ++i) ++amount;
+    return amount;
+}
+
 //! SEQUENTIA split payouts, second generation: one claim paying, in every
 //! round of `signer` it can reach, the bucket of `target` (or, without a
 //! target, the unpaid bucket owed the most). New rounds are made from the
@@ -2833,12 +2848,17 @@ static UniValue ClaimPoolRoundsV2(CWallet& wallet, const CPubKey& signer, const 
             ++delegators_paid;
         }
     }
-    // The fee is paid in the asset delivered most, which has the most room.
+    // The fee is paid in the asset delivered most that this node accepts for
+    // fees, which has the most room.
     CAsset fee_asset;
     int64_t fee_room = -1;
     for (const auto& [asset, amount] : delivered) {
+        if (ClaimFeeInAsset(1000, asset) < 0) continue;
         const int64_t room = std::min(amount / POS_SPLIT_WITHHOLD_RATIO, allowance[asset]);
         if (room > fee_room) { fee_room = room; fee_asset = asset; }
+    }
+    if (fee_room < 0) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "none of the assets this claim pays out is one this node accepts for fees");
     }
     // Round outputs and closing pots, before the fee is sized.
     const CScript pot_script = BuildPotScript(signer);
@@ -2871,8 +2891,8 @@ static UniValue ClaimPoolRoundsV2(CWallet& wallet, const CPubKey& signer, const 
     }
 
     CCoinControl coin_control;
-    const CAmount fee = GetMinimumFeeRate(wallet, coin_control, nullptr)
-                            .GetFee(GetVirtualTransactionSize(CTransaction(mtx)) + 2 * 70);
+    const CAmount fee = ClaimFeeInAsset(GetMinimumFeeRate(wallet, coin_control, nullptr)
+                                            .GetFee(GetVirtualTransactionSize(CTransaction(mtx)) + 2 * 70), fee_asset);
     if (fee > fee_room) {
         throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
             "not yet worth claiming: the network fee (%s) would exceed what the rounds may give up (%s)",
@@ -3089,8 +3109,12 @@ RPCHelpMan claimpoolrewards()
     CAsset fee_asset;
     int64_t fee_room = -1;
     for (const auto& e : paid) {
+        if (ClaimFeeInAsset(1000, e.first) < 0) continue;
         const int64_t room = e.second / POS_SPLIT_WITHHOLD_RATIO;
         if (room > fee_room) { fee_room = room; fee_asset = e.first; }
+    }
+    if (fee_room < 0) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "none of the assets this claim pays out is one this node accepts for fees");
     }
 
     // Fresh pots first (so sizing includes them), fee + margin after.
@@ -3106,8 +3130,9 @@ RPCHelpMan claimpoolrewards()
     // Size the fee against the finished shape: everything above, plus at most a
     // repot output, a margin output and the fee output in the fee asset.
     CCoinControl coin_control;
-    const CAmount fee_rate_estimate = GetMinimumFeeRate(*pwallet, coin_control, nullptr)
-                                          .GetFee(GetVirtualTransactionSize(CTransaction(mtx)) + 3 * 70);
+    const CAmount fee_rate_estimate = ClaimFeeInAsset(GetMinimumFeeRate(*pwallet, coin_control, nullptr)
+                                                          .GetFee(GetVirtualTransactionSize(CTransaction(mtx)) + 3 * 70),
+                                                      fee_asset);
     if (fee_rate_estimate > fee_room) {
         throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
             "the pot is not yet worth claiming: the network fee (%s) would exceed 1/%d of what the delegators "
