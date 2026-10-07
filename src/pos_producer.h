@@ -332,6 +332,10 @@ private:
     int m_signed_round{-1};                            //!< highest round index we have signed for
     int m_proposed_height{0};                          //!< height we have already proposed our own block at
     int m_propose_at_height{0};                        //!< height m_propose_at_ms is for
+    //! The tip this producer last scheduled from, and when it first saw it
+    //! (PosProposalStartMs). Producer thread only.
+    uint256 m_tip_seen_hash;
+    int64_t m_tip_seen_ms{0};
     int64_t m_propose_at_ms{0};                        //!< whole-second instant to propose at once the slot is open (see Step)
     uint256 m_last_tip;                                //!< active tip last seen by Step(); detects parent-reorg rollbacks
     std::set<uint256> m_seen_proposals;                //!< proposal dedup, by hash and staging solution

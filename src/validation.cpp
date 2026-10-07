@@ -2634,6 +2634,38 @@ static unsigned int WithRecordsV2For(unsigned int flags, int height, const Conse
 
 
 
+//! SEQUENTIA: say when this node's clock disagrees with its peers', or the
+//! newest block is stamped well after this node's clock. A wrong clock makes
+//! the node judge block times wrongly (and, on the committee, turns its
+//! timestamp check off); both are fixed by setting the system time right.
+//! Minutes, not seconds, so the message does not change with every block.
+static void UpdatePosClockWarning(const CBlockIndex* tip)
+{
+    static std::string last;
+    std::string msg;
+    const std::optional<int64_t> offset = GetPeerClockOffset();
+    if (offset && !PosClockAgreesWithPeers(offset)) {
+        const int64_t minutes = (std::abs(*offset) + 59) / 60;
+        msg = strprintf("This computer's clock is about %d minute(s) %s its peers'. Set the system date, time and "
+                        "time zone right: with a wrong clock this node judges block times wrongly.",
+                        minutes, *offset > 0 ? "behind" : "ahead of");
+    }
+    const int64_t ahead = (int64_t)tip->nTime - GetTime<std::chrono::seconds>().count();
+    if (ahead > POS_CLOCK_AGREEMENT_SECONDS) {
+        if (!msg.empty()) msg += " ";
+        msg += strprintf("The newest block is stamped about %d minute(s) after this computer's clock: either this "
+                         "clock is behind, or the block's producer has a clock running fast.", (ahead + 59) / 60);
+    }
+    if (msg == last) return;
+    if (msg.empty()) {
+        LogPrintf("Clock warning cleared\n");
+    } else {
+        LogPrintf("WARNING: %s\n", msg);
+    }
+    SetClockWarning(Untranslated(msg));
+    last = msg;
+}
+
 static int64_t nTimeCheck = 0;
 static int64_t nTimeForks = 0;
 static int64_t nTimeVerify = 0;
@@ -4661,6 +4693,7 @@ void CChainState::UpdateTip(const CBlockIndex* pindexNew)
     // newest quorum block becomes final only after its observation window
     // (-posfinalitydelayms, see RecomputePosImmediateFinality).
     if (g_con_pos) {
+        UpdatePosClockWarning(pindexNew);
         RecomputePosImmediateFinality(pindexNew, [this](const uint256& h) { return m_blockman.LookupBlockIndex(h); });
         // Only stakers with a registered BLS key sit on the public committee.
         // When fewer than two do, one key certifies and finalizes on its own

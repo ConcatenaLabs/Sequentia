@@ -2313,4 +2313,41 @@ BOOST_AUTO_TEST_CASE(pos_split_round_claims)
     g_pos_split_epoch = saved_epoch;
 }
 
+// Audit A12: block timestamps against the local clock (node policy).
+BOOST_AUTO_TEST_CASE(pos_clock_policy)
+{
+    // A clock is trusted only when enough peers have reported and their median
+    // is within a minute of it.
+    BOOST_CHECK(!PosClockAgreesWithPeers(std::nullopt));
+    BOOST_CHECK(PosClockAgreesWithPeers(0));
+    BOOST_CHECK(PosClockAgreesWithPeers(60));
+    BOOST_CHECK(PosClockAgreesWithPeers(-60));
+    BOOST_CHECK(!PosClockAgreesWithPeers(61));
+    BOOST_CHECK(!PosClockAgreesWithPeers(-2 * 3600));
+
+    const int64_t now = 1'800'000'000;
+    // Up to five minutes ahead of the clock is backed; beyond, not.
+    BOOST_CHECK(!PosProposalTooFarAhead(now + 300, now - 100, now, true));
+    BOOST_CHECK(PosProposalTooFarAhead(now + 301, now - 100, now, true));
+    // Never stricter than consensus: the earliest stamp it allows is backed
+    // however far ahead it is, and nothing after it beyond the margin.
+    BOOST_CHECK(!PosProposalTooFarAhead(now + 3600, now + 3600, now, true));
+    BOOST_CHECK(PosProposalTooFarAhead(now + 3601, now + 3600, now, true));
+    // With a doubtful clock nothing is refused.
+    BOOST_CHECK(!PosProposalTooFarAhead(now + 7200, now - 100, now, false));
+
+    const int64_t now_ms = now * 1000 + 250;
+    // A parent stamped at or before the clock: propose at the earliest stamp,
+    // exactly as before.
+    BOOST_CHECK_EQUAL(PosProposalStartMs(now - 30, now + 30, now_ms - 30000, now_ms), (now + 30) * 1000);
+    // Within the slack, ordinary skew: still by the stamp.
+    BOOST_CHECK_EQUAL(PosProposalStartMs(now + 5, now + 65, now_ms, now_ms), (now + 65) * 1000);
+    // A parent stamped an hour ahead: the same 60 s interval, counted from when
+    // it arrived, not an hour and a minute of waiting.
+    const int64_t seen_ms = now_ms - 10000;
+    BOOST_CHECK_EQUAL(PosProposalStartMs(now + 3600, now + 3660, seen_ms, now_ms), seen_ms + 60000);
+    // A larger slot gate keeps its length too.
+    BOOST_CHECK_EQUAL(PosProposalStartMs(now + 3600, now + 3690, seen_ms, now_ms), seen_ms + 90000);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

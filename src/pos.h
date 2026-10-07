@@ -856,6 +856,40 @@ uint256 PosSeedForChild(const CBlockIndex* pindexPrev);
  *  parameters to hand (set by chainparams). 0 = never. */
 extern int g_pos_hardening_height;
 
+/** SEQUENTIA (audit A12): block timestamps judged against the local clock.
+ *
+ *  Consensus bounds a block's time from below by its parent's (spacing, slot
+ *  gate, median time past) and from above only by each receiver's clock plus
+ *  MAX_FUTURE_BLOCK_TIME, two hours. A block stamped ahead of real time is
+ *  therefore valid, and every successor must be stamped after it. These are
+ *  node-side rules on top, none of them consensus:
+ *
+ *  - a producer whose parent is stamped ahead of its clock counts the spacing
+ *    and slot gate from when it SAW the parent, rather than waiting for its
+ *    clock to reach the parent's stamp (PosProposalStartMs);
+ *  - a committee member whose clock agrees with its peers' does not back a
+ *    proposal stamped more than POS_PROPOSAL_AHEAD_SECONDS beyond both its
+ *    clock and the earliest time consensus allows (PosProposalTooFarAhead);
+ *    with a doubtful clock it backs proposals as before, and says so. */
+static constexpr int64_t POS_PROPOSAL_AHEAD_SECONDS = 300;
+/** How closely the local clock must agree with the peers' median to be trusted. */
+static constexpr int64_t POS_CLOCK_AGREEMENT_SECONDS = 60;
+/** A parent stamped at most this far ahead of the local clock is ordinary skew,
+ *  scheduled from its stamp as before. */
+static constexpr int64_t POS_PARENT_AHEAD_SLACK_SECONDS = 5;
+
+/** Whether the local clock agrees with the peers' (`peer_offset`, the median of
+ *  their clocks minus ours, nullopt while too few have reported). */
+bool PosClockAgreesWithPeers(const std::optional<int64_t>& peer_offset);
+/** Whether a proposal stamped `stamp`, which consensus allows from
+ *  `consensus_min`, is too far in the future to back at local time `now`. Never
+ *  true with an untrusted clock. */
+bool PosProposalTooFarAhead(int64_t stamp, int64_t consensus_min, int64_t now, bool clock_trusted);
+/** When a producer may propose (ms): at `earliest_sec`, the earliest stamp
+ *  consensus allows; or, when the parent is stamped ahead of the local clock,
+ *  the same interval after `parent_seen_ms`, the moment this node saw it. */
+int64_t PosProposalStartMs(int64_t parent_time, int64_t earliest_sec, int64_t parent_seen_ms, int64_t now_ms);
+
 /** Consensus::Params::pos_records_v2_height, mirrored like the one above.
  *  0 = never. */
 extern int g_pos_records_v2_height;

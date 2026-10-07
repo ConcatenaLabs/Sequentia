@@ -884,7 +884,15 @@ int64_t PosProducer::Step()
                                                       : (int64_t)tip->nTime + g_pos_slot_interval;
     const int64_t earliest_sec = std::max(slot_open, cadence_floor);
     const int64_t now_ms = GetTimeMillis();
-    const int64_t target_ms = std::max(earliest_sec * 1000, (now_ms / 1000) * 1000);
+    // A parent stamped ahead of this node's clock (a producer with a clock
+    // running fast) must not hold this node back until its own clock reaches
+    // that stamp: count the interval from when the parent arrived instead.
+    if (tip->GetBlockHash() != m_tip_seen_hash) {
+        m_tip_seen_hash = tip->GetBlockHash();
+        m_tip_seen_ms = now_ms;
+    }
+    const int64_t start_ms = PosProposalStartMs((int64_t)tip->nTime, earliest_sec, m_tip_seen_ms, now_ms);
+    const int64_t target_ms = std::max(start_ms, (now_ms / 1000) * 1000);
 
     // BLS distributed committee (we lack a local quorum, e.g. one key per host):
     // drive the gossip round every poll — sign the lowest-VRF proposal once the
@@ -907,7 +915,7 @@ int64_t PosProducer::Step()
         // every poll would recede forever. After a collection restart,
         // RestartCollection has fixed it from the exhausted schedule: that is
         // the same on every node, so the re-proposals share one timestamp too.
-        int64_t propose_ms = earliest_sec * 1000;
+        int64_t propose_ms = ((start_ms + 999) / 1000) * 1000;
         bool proposed;
         {
             std::lock_guard<std::mutex> lock(m_gossip_mutex);
@@ -1809,6 +1817,31 @@ PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& blo
                   HexStr(parts->leader).substr(0, 16), height);
         Wake();                              // re-pick the backed leader promptly
         return PosGossipAction::Relay;       // propagate the evidence so all nodes exclude it
+    }
+    // Timestamp sanity (node policy, not consensus): with a clock that agrees
+    // with its peers', this member does not back a proposal stamped more than
+    // POS_PROPOSAL_AHEAD_SECONDS beyond both its clock and the earliest stamp
+    // consensus allows, so certified blocks keep times close to real time.
+    // With a doubtful clock it backs proposals as before (the node warns).
+    {
+        const Consensus::Params& cparams = m_chainparams.GetConsensus();
+        const uint64_t total_weight = PosTotalWeight(reg);
+        const uint64_t slot = PosExpRaceActive(cparams, height)
+                                  ? PosVrfSlotExp(lbeta, weight, total_weight)
+                                  : PosVrfSlot(lbeta, weight, total_weight);
+        int64_t consensus_min = (int64_t)tip->nTime + PosSlotGateSeconds(cparams, height, slot);
+        consensus_min = std::max<int64_t>(consensus_min, node::PosEarliestBlockTime(cparams, tip));
+        {
+            LOCK(cs_main);
+            consensus_min = std::max<int64_t>(consensus_min, tip->GetMedianTimePast() + 1);
+        }
+        const int64_t now = GetTime<std::chrono::seconds>().count();
+        if (PosProposalTooFarAhead(block->GetBlockTime(), consensus_min, now,
+                                   PosClockAgreesWithPeers(GetPeerClockOffset()))) {
+            LogPrintf("PoS gossip: not backing proposal %s at height %d: stamped %d s after this node's clock\n",
+                      hash.GetHex(), height, block->GetBlockTime() - now);
+            return PosGossipAction::Ignore;
+        }
     }
     // Record the proposal as a candidate after only the cheap, objective checks
     // (sortition eligibility, leader signature, equivocation). Full block

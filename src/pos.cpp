@@ -494,6 +494,25 @@ std::optional<PosChallengeParts> ParsePosBlockChallenge(const CScript& challenge
 }
 
 int g_pos_hardening_height = 0;
+
+bool PosClockAgreesWithPeers(const std::optional<int64_t>& peer_offset)
+{
+    return peer_offset && *peer_offset >= -POS_CLOCK_AGREEMENT_SECONDS && *peer_offset <= POS_CLOCK_AGREEMENT_SECONDS;
+}
+
+bool PosProposalTooFarAhead(int64_t stamp, int64_t consensus_min, int64_t now, bool clock_trusted)
+{
+    if (!clock_trusted) return false;
+    // Never stricter than consensus: the earliest stamp it allows is always
+    // acceptable, however far ahead the parent already is.
+    return stamp > std::max(now + POS_PROPOSAL_AHEAD_SECONDS, consensus_min);
+}
+
+int64_t PosProposalStartMs(int64_t parent_time, int64_t earliest_sec, int64_t parent_seen_ms, int64_t now_ms)
+{
+    if (parent_time * 1000 <= now_ms + POS_PARENT_AHEAD_SLACK_SECONDS * 1000) return earliest_sec * 1000;
+    return parent_seen_ms + std::max<int64_t>(0, earliest_sec - parent_time) * 1000;
+}
 int g_pos_records_v2_height = 0;
 
 uint256 PosPayoutSeedForChild(const CBlockIndex* pindexPrev)

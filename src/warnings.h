@@ -11,6 +11,9 @@
 struct bilingual_str;
 
 void SetMiscWarning(const bilingual_str& warning);
+/** SEQUENTIA: the clock warning (audit A12), kept apart from the misc slot so the
+ *  two never clear each other. Empty clears it. */
+void SetClockWarning(const bilingual_str& warning);
 void SetfLargeWorkInvalidChainFound(bool flag);
 /** Format a string that describes several potential problems detected by the core.
  * @param[in] verbose bool
