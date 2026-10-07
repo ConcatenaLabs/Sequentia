@@ -1,9 +1,10 @@
 # Sequentia Core 25.2.1
 
 25.2.1 is 25.2.0 plus a fix to how a node treats block times when clocks
-disagree. It changes no consensus rule: 25.2.0 and 25.2.1 agree on every block,
-and the fork at height **163,000** is the same. Run 25.2.1 before 163,000 if you
-can; a node already on 25.2.0 is not at risk of a split.
+disagree, and the relay of split pool claims. It changes no consensus rule:
+25.2.0 and 25.2.1 agree on every block, and the fork at height **163,000** is
+the same. Run 25.2.1 before 163,000: a node on 25.2.0 is not at risk of a
+split, but cannot relay split pool claims.
 
 ## Clocks and block times (audit A12)
 
@@ -27,6 +28,14 @@ live with that stamp.
   appears when the node's clock is more than a minute off its peers', or the
   newest block is stamped more than a minute after the node's clock. Setting the
   system date, time and time zone right clears it.
+
+## Split pool claims relay
+
+25.2.0 made the round script, which carries a split pool's rewards from one
+claim to the next, but did not add it to the scripts the default relay policy
+accepts. Every claim that left part of a round to pay, and every claim that
+spent a round, was refused by peers ("scriptpubkey"). 25.2.1 relays them. No
+consensus change: a block containing such a claim was always valid.
 
 ## Upgrading
 
