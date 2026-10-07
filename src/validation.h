@@ -186,6 +186,14 @@ bool PosCheckTxRecords(const CTransaction& tx, const std::vector<Coin>& spent, i
                        const Consensus::Params& params, PosRecordState& st, std::string& reason,
                        std::string& debug);
 
+/** SEQUENTIA second-generation stake records: whether `tx` spends a stake
+ *  record with a signature the block after `tip` refuses. A record spend signed
+ *  under one regime fails under the other, so one admitted for the block before
+ *  the boundary, or carried across it by a reorg, would sit in every producer's
+ *  template; validation evicts it there. */
+bool PosRecordSpendFailsNextBlock(const CTransaction& tx, const CCoinsViewCache& view,
+                                  const CBlockIndex* tip, const Consensus::Params& params)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 /** The input scripts of `tx` under the flags the mempool applies at the tip, for
  *  transactions that reach a block template without passing the mempool. */
 bool CheckTemplateTxScripts(const CTransaction& tx, const CCoinsViewCache& view, const CBlockIndex* tip,

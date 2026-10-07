@@ -166,6 +166,22 @@ enum : uint32_t {
     //
     SCRIPT_VERIFY_SIMPLICITY_BUDGET4 = (1U << 24),
 
+    // SEQUENTIA: the second generation of stake records is in force
+    // (Consensus::Params::PosRecordsV2ActiveAt). The interpreter does not read
+    // this bit: it is carried in the transaction's flags so that the script
+    // execution cache tells the two regimes apart. Validation sets the next
+    // one on each input that spends a stake record.
+    //
+    SCRIPT_VERIFY_SEQ_RECORDS_V2 = (1U << 25),
+
+    // SEQUENTIA: this input spends a stake record under the second generation.
+    // The scriptSig must be pushes only, minimally encoded, and leave exactly
+    // one true element; the record script runs with the segwit-v0 signature
+    // hash, which commits to the amount spent, and low-S signatures. Set per
+    // input by validation, never as a transaction-wide flag.
+    //
+    SCRIPT_SEQ_RECORD_INPUT = (1U << 26),
+
     // Constants to point to the highest flag in use. Add new flags above this line.
     //
     SCRIPT_VERIFY_END_MARKER

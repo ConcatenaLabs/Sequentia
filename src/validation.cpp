@@ -373,6 +373,7 @@ bool CheckSequenceLocks(CBlockIndex* tip,
 
 // Returns the script flags which should be checked for a given block
 static unsigned int GetBlockScriptFlags(const CBlockIndex* pindex, const Consensus::Params& chainparams);
+static unsigned int WithRecordsV2For(unsigned int flags, int height, const Consensus::Params& params);
 
 static void LimitMempoolSize(CTxMemPool& pool, CCoinsViewCache& coins_cache, size_t limit, std::chrono::seconds age)
     EXCLUSIVE_LOCKS_REQUIRED(::cs_main, pool.cs)
@@ -632,6 +633,12 @@ void CChainState::MaybeUpdateMempoolForReorg(
             if (PosUnbondingFailsNextBlock(tx, view, m_chain.Tip(), m_params.GetConsensus(), reason)) {
                 LogPrintf("Evicting %s from the mempool after a reorg: %s at height %d\n",
                           tx.GetHash().ToString(), reason, m_chain.Height() + 1);
+                return true;
+            }
+            if (PosRecordSpendFailsNextBlock(tx, view, m_chain.Tip(), m_params.GetConsensus())) {
+                LogPrintf("Evicting %s from the mempool after a reorg: a stake record spend signed for the "
+                          "other side of the records-v2 height, at height %d\n",
+                          tx.GetHash().ToString(), m_chain.Height() + 1);
                 return true;
             }
         }
@@ -1413,6 +1420,11 @@ bool MemPoolAccept::PolicyScriptChecks(const ATMPArgs& args, Workspace& ws)
         scriptVerifyFlags |= SCRIPT_VERIFY_SIMPLICITY_BUDGET4;
     }
 
+    if (m_active_chainstate.m_chain.Tip() != nullptr) {
+        scriptVerifyFlags = WithRecordsV2For(scriptVerifyFlags, m_active_chainstate.m_chain.Height() + 1,
+                                             args.m_chainparams.GetConsensus());
+    }
+
     // Check input scripts and signatures.
     // This is done last to help prevent CPU exhaustion denial-of-service attacks.
     if (!CheckInputScripts(tx, state, m_view, scriptVerifyFlags, true, false, ws.m_precomputed_txdata)) {
@@ -1452,6 +1464,8 @@ bool MemPoolAccept::ConsensusScriptChecks(const ATMPArgs& args, Workspace& ws)
     // invalid blocks (using TestBlockValidity), however allowing such
     // transactions into the mempool can be exploited as a DoS attack.
     unsigned int currentBlockScriptVerifyFlags = GetBlockScriptFlags(m_active_chainstate.m_chain.Tip(), chainparams.GetConsensus());
+    currentBlockScriptVerifyFlags = WithRecordsV2For(currentBlockScriptVerifyFlags,
+                                                     m_active_chainstate.m_chain.Height() + 1, chainparams.GetConsensus());
     if (!CheckInputsFromMempoolAndCache(tx, state, m_view, m_pool, currentBlockScriptVerifyFlags,
                                         ws.m_precomputed_txdata, m_active_chainstate.CoinsTip())) {
         LogPrintf("BUG! PLEASE REPORT THIS! CheckInputScripts failed against latest-block but not STANDARD flags %s, %s\n", hash.ToString(), state.ToString());
@@ -2179,8 +2193,16 @@ bool CheckInputScripts(const CTransaction& tx, TxValidationState& state,
         // failures through additional data in, eg, the coins being
         // spent being checked as a part of CScriptCheck.
 
+        // SEQUENTIA: a stake record is spent under its own rules from the
+        // second generation (SCRIPT_SEQ_RECORD_INPUT).
+        unsigned int input_flags = flags;
+        if ((flags & SCRIPT_VERIFY_SEQ_RECORDS_V2) && g_con_pos &&
+            IsSignedPosRecordScript(txdata.m_spent_outputs[i].scriptPubKey)) {
+            input_flags |= SCRIPT_SEQ_RECORD_INPUT;
+        }
+
         // Verify signature
-        CCheck* check = new CScriptCheck(txdata.m_spent_outputs[i], tx, i, flags, cacheSigStore, &txdata);
+        CCheck* check = new CScriptCheck(txdata.m_spent_outputs[i], tx, i, input_flags, cacheSigStore, &txdata);
         ScriptError serror = QueueCheck(pvChecks, check);
         if (serror != SCRIPT_ERR_OK) {
             // Tx failures never trigger disconnections/bans.
@@ -2592,7 +2614,22 @@ static unsigned int GetBlockScriptFlags(const CBlockIndex* pindex, const Consens
         flags |= SCRIPT_VERIFY_SIMPLICITY_BUDGET4;
     }
 
+    // SEQUENTIA: second-generation stake records (audit M4).
+    if (consensusparams.PosRecordsV2ActiveAt(pindex->nHeight)) {
+        flags |= SCRIPT_VERIFY_SEQ_RECORDS_V2;
+    }
+
     return flags;
+}
+
+//! SEQUENTIA: the second-generation record flag set to what the block at
+//! `height` uses. The mempool judges a transaction for the next block, and for
+//! this rule the tip's own flags are wrong on both sides of the boundary: a
+//! signature made for one regime fails under the other.
+static unsigned int WithRecordsV2For(unsigned int flags, int height, const Consensus::Params& params)
+{
+    if (params.PosRecordsV2ActiveAt(height)) return flags | SCRIPT_VERIFY_SEQ_RECORDS_V2;
+    return flags & ~(unsigned int)SCRIPT_VERIFY_SEQ_RECORDS_V2;
 }
 
 
@@ -2827,8 +2864,26 @@ bool CheckTemplateTxScripts(const CTransaction& tx, const CCoinsViewCache& view,
     if (tip != nullptr && params.SimplicityBudget4ActiveAt(tip->nHeight)) {
         flags |= SCRIPT_VERIFY_SIMPLICITY_BUDGET4;
     }
+    flags = WithRecordsV2For(flags, tip ? tip->nHeight + 1 : 0, params);
     PrecomputedTransactionData txdata;
     return CheckInputScripts(tx, state, view, flags, /*cacheSigStore=*/false, /*cacheFullScriptStore=*/false, txdata);
+}
+
+bool PosRecordSpendFailsNextBlock(const CTransaction& tx, const CCoinsViewCache& view,
+                                  const CBlockIndex* tip, const Consensus::Params& params)
+{
+    AssertLockHeld(cs_main);
+    if (!g_con_pos || params.pos_records_v2_height <= 0 || tx.IsCoinBase()) return false;
+    bool spends_record = false;
+    for (const CTxIn& in : tx.vin) {
+        if (in.m_is_pegin) continue;
+        const Coin& coin = view.AccessCoin(in.prevout);
+        if (coin.IsSpent()) return false; // judged elsewhere
+        if (IsSignedPosRecordScript(coin.out.scriptPubKey)) spends_record = true;
+    }
+    if (!spends_record) return false;
+    TxValidationState state;
+    return !CheckTemplateTxScripts(tx, view, tip, params, state);
 }
 
 /** SEQUENTIA PoS: stake-registry-dependent block rules — leader election /
@@ -4996,6 +5051,21 @@ bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew
                 if (!PosUnbondingFailsNextBlock(tx, view, pindexNew, consensus, reason)) return false;
                 LogPrintf("Evicting %s from the mempool: %s from height %d, where two-step unbonding begins\n",
                           tx.GetHash().ToString(), reason, next_height);
+                return true;
+            });
+        }
+        // Second-generation stake records, the same boundary: a record spend
+        // signed with the legacy hash is valid in this block and not in the
+        // next. The wallet signs again for the new rules.
+        if (g_con_pos && !reorg_pending && !consensus.PosRecordsV2ActiveAt(pindexNew->nHeight) &&
+            consensus.PosRecordsV2ActiveAt(next_height)) {
+            CCoinsViewMemPool view_mempool(&CoinsTip(), *m_mempool);
+            CCoinsViewCache view(&view_mempool);
+            m_mempool->removeFailing([&](const CTransaction& tx) {
+                if (!PosRecordSpendFailsNextBlock(tx, view, pindexNew, consensus)) return false;
+                LogPrintf("Evicting %s from the mempool: a stake record spend with a legacy signature, "
+                          "refused from height %d (second-generation records)\n",
+                          tx.GetHash().ToString(), next_height);
                 return true;
             });
         }

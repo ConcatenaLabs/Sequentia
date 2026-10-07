@@ -493,6 +493,7 @@ std::optional<PosChallengeParts> ParsePosBlockChallenge(const CScript& challenge
 }
 
 int g_pos_hardening_height = 0;
+int g_pos_records_v2_height = 0;
 
 uint256 PosPayoutSeedForChild(const CBlockIndex* pindexPrev)
 {
@@ -1499,6 +1500,12 @@ std::optional<std::pair<CPubKey, uint64_t>> StakeFromTxOut(const CTxOut& out)
 //! data push, so it can never be mistaken for a staking script (which begins
 //! with a CSV number and OP_CHECKSEQUENCEVERIFY).
 static const std::vector<unsigned char> UNBOND_MARKER = {'S', 'E', 'Q', 'U', 'N', 'B', 'O', 'N', 'D'};
+
+bool IsSignedPosRecordScript(const CScript& script)
+{
+    return ParseStakeScriptFull(script) || ParseUnbondScript(script) ||
+           ParseDelegationScript(script) || ParsePayoutScript(script);
+}
 
 CScript BuildUnbondScript(const CPubKey& pubkey)
 {

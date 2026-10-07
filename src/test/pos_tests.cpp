@@ -16,6 +16,7 @@
 #include <policy/policy.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
+#include <script/interpreter.h>
 #include <script/standard.h>
 #include <txmempool.h>
 #include <undo.h>
@@ -2001,6 +2002,102 @@ BOOST_AUTO_TEST_CASE(pos_unbonding_next_block)
     g_con_elementsmode = saved_elementsmode;
     g_con_pos = saved_pos;
     g_con_bitcoin_anchor = saved_anchor;
+}
+
+//! The high-S twin of a DER signature: S replaced by n - S, which ECDSA
+//! accepts and the low-S rule refuses.
+static std::vector<unsigned char> HighSTwin(const std::vector<unsigned char>& sig)
+{
+    static const unsigned char order[32] = {
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE,
+        0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36, 0x41, 0x41};
+    const size_t rlen = sig[3];
+    const std::vector<unsigned char> r(sig.begin() + 4, sig.begin() + 4 + rlen);
+    const size_t slen = sig[5 + rlen];
+    unsigned char s[32] = {0};
+    std::copy(sig.begin() + 6 + rlen, sig.begin() + 6 + rlen + slen, s + 32 - slen);
+    unsigned char t[32];
+    int borrow = 0;
+    for (int i = 31; i >= 0; --i) {
+        int d = (int)order[i] - (int)s[i] - borrow;
+        borrow = d < 0;
+        t[i] = (unsigned char)(d + (borrow ? 256 : 0));
+    }
+    std::vector<unsigned char> tb(t, t + 32);
+    while (tb.size() > 1 && tb[0] == 0 && !(tb[1] & 0x80)) tb.erase(tb.begin());
+    if (tb[0] & 0x80) tb.insert(tb.begin(), 0);
+    std::vector<unsigned char> body{0x02, (unsigned char)r.size()};
+    body.insert(body.end(), r.begin(), r.end());
+    body.push_back(0x02);
+    body.push_back((unsigned char)tb.size());
+    body.insert(body.end(), tb.begin(), tb.end());
+    std::vector<unsigned char> out{0x30, (unsigned char)body.size()};
+    out.insert(out.end(), body.begin(), body.end());
+    return out;
+}
+
+BOOST_AUTO_TEST_CASE(pos_record_spend_v2)
+{
+    // Audit M4: from pos_records_v2_height a stake record spend signs the
+    // segwit-v0 hash, which commits to the amount, with a canonical scriptSig.
+    CKey controller, signer;
+    controller.MakeNewKey(true);
+    signer.MakeNewKey(true);
+    const CScript record = BuildDelegationScript(controller.GetPubKey(), signer.GetPubKey());
+    BOOST_CHECK(IsSignedPosRecordScript(record));
+    BOOST_CHECK(!IsSignedPosRecordScript(BuildPotScript(signer.GetPubKey())));
+
+    const CAmount value = 1000000;
+    CMutableTransaction tx;
+    tx.nVersion = 2;
+    tx.vin.emplace_back(COutPoint(uint256::ONE, 0));
+    tx.vout.emplace_back(CAsset(), value - 1000, CScript() << OP_TRUE);
+
+    const auto sign = [&](SigVersion version, CAmount amount) {
+        const uint256 hash = SignatureHash(record, tx, 0, SIGHASH_ALL, CConfidentialValue(amount), version, 0);
+        std::vector<unsigned char> sig;
+        BOOST_REQUIRE(controller.Sign(hash, sig));
+        return sig;
+    };
+    const auto with_type = [](std::vector<unsigned char> sig) { sig.push_back(SIGHASH_ALL); return sig; };
+    const auto verify = [&](const CScript& script_sig, unsigned int flags) {
+        ScriptError err;
+        const MutableTransactionSignatureChecker checker(&tx, 0, CConfidentialValue(value), MissingDataBehavior::FAIL);
+        return VerifyScript(script_sig, record, nullptr, flags, checker, &err);
+    };
+    const unsigned int legacy = SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_DERSIG | SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY |
+                                SCRIPT_VERIFY_CHECKSEQUENCEVERIFY | SCRIPT_VERIFY_WITNESS;
+    const unsigned int v2 = legacy | SCRIPT_VERIFY_SEQ_RECORDS_V2 | SCRIPT_SEQ_RECORD_INPUT;
+
+    const std::vector<unsigned char> old_sig = with_type(sign(SigVersion::BASE, value));
+    const std::vector<unsigned char> raw_new = sign(SigVersion::WITNESS_V0, value);
+    const std::vector<unsigned char> new_sig = with_type(raw_new);
+
+    // Each regime takes its own signature only.
+    BOOST_CHECK(verify(CScript() << old_sig, legacy));
+    BOOST_CHECK(!verify(CScript() << old_sig, v2));
+    BOOST_CHECK(verify(CScript() << new_sig, v2));
+    BOOST_CHECK(!verify(CScript() << new_sig, legacy));
+
+    // The signature commits to the amount spent.
+    BOOST_CHECK(!verify(CScript() << with_type(sign(SigVersion::WITNESS_V0, value + 1)), v2));
+
+    // No other encoding of the same spend: an extra push, a non-minimal push,
+    // a non-push opcode, the high-S twin.
+    BOOST_CHECK(!verify(CScript() << OP_0 << new_sig, v2));
+    CScript non_minimal;
+    non_minimal.push_back(OP_PUSHDATA1);
+    non_minimal.push_back((unsigned char)new_sig.size());
+    non_minimal.insert(non_minimal.end(), new_sig.begin(), new_sig.end());
+    BOOST_CHECK(!verify(non_minimal, v2));
+    BOOST_CHECK(!verify(CScript() << new_sig << OP_NOP, v2));
+    const std::vector<unsigned char> twin = with_type(HighSTwin(raw_new));
+    BOOST_CHECK(twin != new_sig);
+    BOOST_CHECK(!verify(CScript() << twin, v2));
+    // The twin is a valid ECDSA signature: without the low-S rule (as a
+    // legacy-hash spend was) it would pass, which is what made the txid
+    // malleable.
+    BOOST_CHECK(verify(CScript() << with_type(HighSTwin(sign(SigVersion::BASE, value))), legacy));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

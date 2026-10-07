@@ -23,7 +23,7 @@ cutover stays valid.
 from test_framework.address import byte_to_base58
 from test_framework.key import ECKey
 from test_framework.messages import COutPoint, CTransaction, CTxIn, CTxOut
-from test_framework.script import CScript, LegacySignatureHash, OP_CHECKSIG, SIGHASH_ALL
+from test_framework.script import CScript, LegacySignatureHash, OP_CHECKSIG, PosRecordSignatureHash, SIGHASH_ALL
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import assert_equal, assert_raises_rpc_error
 
@@ -72,10 +72,14 @@ class PosHardeningTest(BitcoinTestFramework):
         tx.vin = [CTxIn(COutPoint(int(txid, 16), n), nSequence=0xfffffffe) for txid, n, _, _, _ in inputs]
         rest = sum(v for _, _, v, _, _ in inputs) - sum(v for v, _ in outs) - FEE
         tx.vout = [CTxOut(v, s) for v, s in outs] + [CTxOut(rest, OP_TRUE), CTxOut(FEE)]
-        for i, (_, _, _, key, script) in enumerate(inputs):
+        for i, (_, _, value, key, script) in enumerate(inputs):
             if key is None:
                 continue
-            sighash, err = LegacySignatureHash(CScript(script), tx, i, SIGHASH_ALL)
+            p2pk = len(script) == 35 and script[0] == 0x21 and script[-1] == OP_CHECKSIG
+            if p2pk:
+                sighash, err = LegacySignatureHash(CScript(script), tx, i, SIGHASH_ALL)
+            else:
+                sighash, err = PosRecordSignatureHash(CScript(script), tx, i, SIGHASH_ALL, value)
             assert err is None
             tx.vin[i].scriptSig = CScript([key.sign_ecdsa(sighash) + bytes([SIGHASH_ALL])])
         return tx

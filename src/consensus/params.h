@@ -440,6 +440,17 @@ struct Params {
     {
         return pos_hardening_height > 0 && height >= pos_hardening_height;
     }
+    //! SEQUENTIA: the second generation of stake records, from one height.
+    //! A signature spending a staking, unbonding, delegation or payout output
+    //! commits to the amount it spends (the segwit-v0 signature hash) and the
+    //! spend's scriptSig is canonical, so a signer that sees only the
+    //! transaction cannot be lied to about the fee, and no third party can
+    //! change the txid (audit M4). 0 = off.
+    int pos_records_v2_height{0};
+    bool PosRecordsV2ActiveAt(int height) const
+    {
+        return pos_records_v2_height > 0 && height >= pos_records_v2_height;
+    }
     //! SEQUENTIA: the one-time UTXO-set rewrite this chain applies, if any.
     //! Empty (height 0) on every chain but the one it was written for -- see the
     //! UtxoRecovery comment above and CTestNetParams in chainparams.cpp.

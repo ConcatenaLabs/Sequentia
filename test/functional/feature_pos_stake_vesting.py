@@ -35,7 +35,7 @@ from test_framework.util import assert_equal, assert_raises_rpc_error
 from test_framework.key import ECKey
 from test_framework.address import byte_to_base58
 from test_framework.messages import COutPoint, CTransaction, CTxIn, CTxOut
-from test_framework.script import CScript, LegacySignatureHash, SIGHASH_ALL
+from test_framework.script import CScript, PosRecordSignatureHash, SIGHASH_ALL
 
 UNBONDING = 5
 LOCK_HEIGHT = 20          # absolute height at which the vested stake goes liquid
@@ -95,7 +95,7 @@ class PosStakeVestingTest(BitcoinTestFramework):
         tx.nLockTime = nlocktime
         tx.vin = [CTxIn(COutPoint(int(txid, 16), vout), nSequence=UNBONDING)]
         tx.vout = [CTxOut(amount - FEE, CScript([0x51])), CTxOut(FEE)]
-        sighash, err = LegacySignatureHash(CScript(script), tx, 0, SIGHASH_ALL)
+        sighash, err = PosRecordSignatureHash(CScript(script), tx, 0, SIGHASH_ALL, amount)
         assert err is None
         tx.vin[0].scriptSig = CScript([key.sign_ecdsa(sighash) + bytes([SIGHASH_ALL])])
         return tx

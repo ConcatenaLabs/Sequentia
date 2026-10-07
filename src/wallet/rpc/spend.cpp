@@ -136,6 +136,24 @@ UniValue SendMoney(CWallet& wallet, const CCoinControl &coin_control, std::vecto
     return tx->GetHash().GetHex();
 }
 
+//! SEQUENTIA: the signature hash a stake record spend uses in the next block.
+//! From pos_records_v2_height it is the segwit-v0 one, which commits to the
+//! amount spent (audit M4); a spend signed for the other regime is invalid.
+static SigVersion PosRecordSigVersion(const CWallet& wallet)
+{
+    const int next_height = wallet.chain().getHeight().value_or(0) + 1;
+    return Params().GetConsensus().PosRecordsV2ActiveAt(next_height) ? SigVersion::WITNESS_V0 : SigVersion::BASE;
+}
+
+//! The script flags that check, before sending, a record spend this wallet
+//! signed with PosRecordSigVersion.
+static unsigned int PosRecordVerifyFlags(const CWallet& wallet)
+{
+    unsigned int flags = SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY | SCRIPT_VERIFY_CHECKSEQUENCEVERIFY;
+    if (PosRecordSigVersion(wallet) == SigVersion::WITNESS_V0) flags |= SCRIPT_SEQ_RECORD_INPUT;
+    return flags;
+}
+
 //! SEQUENTIA audit hardening (Consensus::Params::pos_hardening_height): a
 //! delegation or payout record must be created by a transaction that spends a
 //! coin only the record's key can spend (PosTxSpendsKey), or anyone could
@@ -1079,7 +1097,7 @@ RPCHelpMan withdrawstake()
         provider.keys[s.parsed.pubkey.GetID()] = key;
         std::vector<unsigned char> sig;
         MutableTransactionSignatureCreator creator(&mtx, i, s.txout.nValue, SIGHASH_ALL);
-        if (!creator.CreateSig(provider, sig, s.parsed.pubkey.GetID(), s.txout.scriptPubKey, SigVersion::BASE, /*flags=*/0)) {
+        if (!creator.CreateSig(provider, sig, s.parsed.pubkey.GetID(), s.txout.scriptPubKey, PosRecordSigVersion(*pwallet), /*flags=*/0)) {
             throw JSONRPCError(RPC_WALLET_ERROR, "failed to sign the staking spend");
         }
         mtx.vin[i].scriptSig = CScript() << sig;
@@ -1091,8 +1109,7 @@ RPCHelpMan withdrawstake()
     for (size_t i = 0; i < selected.size(); ++i) {
         ScriptError serror = SCRIPT_ERR_OK;
         MutableTransactionSignatureChecker checker(&mtx, i, selected[i].txout.nValue, MissingDataBehavior::FAIL);
-        if (!VerifyScript(mtx.vin[i].scriptSig, selected[i].txout.scriptPubKey, nullptr,
-                          SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY | SCRIPT_VERIFY_CHECKSEQUENCEVERIFY,
+        if (!VerifyScript(mtx.vin[i].scriptSig, selected[i].txout.scriptPubKey, nullptr, PosRecordVerifyFlags(*pwallet),
                           checker, &serror)) {
             throw JSONRPCError(RPC_WALLET_ERROR, strprintf("constructed an invalid staking spend (%s); nothing was sent", ScriptErrorString(serror)));
         }
@@ -1329,7 +1346,7 @@ RPCHelpMan claimunbonded()
         provider.keys[mature[i].pk.GetID()] = key;
         std::vector<unsigned char> sig;
         MutableTransactionSignatureCreator creator(&mtx, i, mature[i].out.nValue, SIGHASH_ALL);
-        if (!creator.CreateSig(provider, sig, mature[i].pk.GetID(), mature[i].out.scriptPubKey, SigVersion::BASE, /*flags=*/0)) {
+        if (!creator.CreateSig(provider, sig, mature[i].pk.GetID(), mature[i].out.scriptPubKey, PosRecordSigVersion(*pwallet), /*flags=*/0)) {
             throw JSONRPCError(RPC_WALLET_ERROR, "failed to sign the unbonding claim");
         }
         mtx.vin[i].scriptSig = CScript() << sig;
@@ -1655,7 +1672,7 @@ RPCHelpMan bumpwithdrawstakefee()
         provider.keys[s->parsed.pubkey.GetID()] = key;
         std::vector<unsigned char> sig;
         MutableTransactionSignatureCreator creator(&mtx, i, s->txout.nValue, SIGHASH_ALL);
-        if (!creator.CreateSig(provider, sig, s->parsed.pubkey.GetID(), s->txout.scriptPubKey, SigVersion::BASE, /*flags=*/0)) {
+        if (!creator.CreateSig(provider, sig, s->parsed.pubkey.GetID(), s->txout.scriptPubKey, PosRecordSigVersion(*pwallet), /*flags=*/0)) {
             throw JSONRPCError(RPC_WALLET_ERROR, "failed to re-sign the staking spend");
         }
         mtx.vin[i].scriptSig = CScript() << sig;
@@ -1664,8 +1681,7 @@ RPCHelpMan bumpwithdrawstakefee()
         const StakeUtxo* s = stake_ins[i];
         ScriptError serror = SCRIPT_ERR_OK;
         MutableTransactionSignatureChecker checker(&mtx, i, s->txout.nValue, MissingDataBehavior::FAIL);
-        if (!VerifyScript(mtx.vin[i].scriptSig, s->txout.scriptPubKey, nullptr,
-                          SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY | SCRIPT_VERIFY_CHECKSEQUENCEVERIFY,
+        if (!VerifyScript(mtx.vin[i].scriptSig, s->txout.scriptPubKey, nullptr, PosRecordVerifyFlags(*pwallet),
                           checker, &serror)) {
             throw JSONRPCError(RPC_WALLET_ERROR, strprintf("constructed an invalid replacement (%s); nothing was sent", ScriptErrorString(serror)));
         }
@@ -2032,7 +2048,7 @@ CTransactionRef SpendDelegationRecords(CWallet& wallet, const std::vector<Delega
         provider.keys[d.controller.GetID()] = key;
         std::vector<unsigned char> sig;
         MutableTransactionSignatureCreator creator(&mtx, i, d.txout.nValue, SIGHASH_ALL);
-        if (!creator.CreateSig(provider, sig, d.controller.GetID(), d.txout.scriptPubKey, SigVersion::BASE, /*flags=*/0)) {
+        if (!creator.CreateSig(provider, sig, d.controller.GetID(), d.txout.scriptPubKey, PosRecordSigVersion(wallet), /*flags=*/0)) {
             throw JSONRPCError(RPC_WALLET_ERROR, "failed to sign the delegation-record spend");
         }
         mtx.vin[i].scriptSig = CScript() << sig;
@@ -2043,8 +2059,7 @@ CTransactionRef SpendDelegationRecords(CWallet& wallet, const std::vector<Delega
     for (size_t i = 0; i < records.size(); ++i) {
         ScriptError serror = SCRIPT_ERR_OK;
         MutableTransactionSignatureChecker checker(&mtx, i, records[i].txout.nValue, MissingDataBehavior::FAIL);
-        if (!VerifyScript(mtx.vin[i].scriptSig, records[i].txout.scriptPubKey, nullptr,
-                          SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY | SCRIPT_VERIFY_CHECKSEQUENCEVERIFY,
+        if (!VerifyScript(mtx.vin[i].scriptSig, records[i].txout.scriptPubKey, nullptr, PosRecordVerifyFlags(wallet),
                           checker, &serror)) {
             throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
                 "constructed an invalid delegation-record spend (%s); nothing was sent", ScriptErrorString(serror)));

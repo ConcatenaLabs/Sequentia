@@ -34,7 +34,7 @@ from test_framework.util import assert_equal, assert_raises_rpc_error
 from test_framework.key import ECKey
 from test_framework.address import byte_to_base58
 from test_framework.messages import COutPoint, CTransaction, CTxIn, CTxOut
-from test_framework.script import CScript, LegacySignatureHash, SIGHASH_ALL
+from test_framework.script import CScript, PosRecordSignatureHash, SIGHASH_ALL
 
 UNBONDING = 5
 LOCK_HEIGHT = 4000        # far beyond the test: the stake stays frozen throughout
@@ -112,7 +112,7 @@ class PosDelegationTest(BitcoinTestFramework):
         tx.vout = [CTxOut(v, s) for v, s in outs]
         tx.vout.append(CTxOut(in_value - total - FEE, CScript([0x51])))
         tx.vout.append(CTxOut(FEE))
-        sighash, err = LegacySignatureHash(CScript(script), tx, 0, SIGHASH_ALL)
+        sighash, err = PosRecordSignatureHash(CScript(script), tx, 0, SIGHASH_ALL, in_value)
         assert err is None
         tx.vin[0].scriptSig = CScript([key.sign_ecdsa(sighash) + bytes([SIGHASH_ALL])])
         return tx
@@ -208,7 +208,7 @@ class PosDelegationTest(BitcoinTestFramework):
         theft.nVersion = 2
         theft.vin = [CTxIn(COutPoint(int(fund_txid, 16), 1), nSequence=UNBONDING)]
         theft.vout = [CTxOut(d_amount - FEE, CScript([0x51])), CTxOut(FEE)]
-        sighash, err = LegacySignatureHash(CScript(d_stake_script), theft, 0, SIGHASH_ALL)
+        sighash, err = PosRecordSignatureHash(CScript(d_stake_script), theft, 0, SIGHASH_ALL, d_amount)
         assert err is None
         theft.vin[0].scriptSig = CScript([self.p1_key.sign_ecdsa(sighash) + bytes([SIGHASH_ALL])])
         # The pool's signature does not satisfy the controller's OP_CHECKSIG.

@@ -43,7 +43,7 @@ from test_framework.util import (
 from test_framework.key import ECKey
 from test_framework.address import byte_to_base58
 from test_framework.messages import COutPoint, CTransaction, CTxIn, CTxOut, CTxOutAsset
-from test_framework.script import CScript, LegacySignatureHash, SIGHASH_ALL, OP_DROP, OP_CHECKSIG
+from test_framework.script import CScript, PosRecordSignatureHash, SIGHASH_ALL, OP_DROP, OP_CHECKSIG
 
 UNBONDING = 5      # staking-script CSV, in Sequentia blocks
 DEPTH = 6          # parent-chain blocks an unbonding output must wait
@@ -148,6 +148,19 @@ class PosUnbondingTest(BitcoinTestFramework):
                 return st["txid"], st["vout"], int(Decimal(str(vo["value"])) * COIN), bytes.fromhex(vo["scriptPubKey"]["hex"])
         raise AssertionError("no stake for %s" % pub)
 
+    def spent_value(self, txid, n):
+        """The value, in atoms, of output n of txid: one this test built, or one
+        a node indexes. A record spend signs it from -posrecordsv2height."""
+        built = getattr(self, "built_values", {})
+        if (txid, n) in built:
+            return built[(txid, n)]
+        for node in self.nodes:
+            try:
+                return int(Decimal(str(node.getrawtransaction(txid, True)["vout"][n]["value"])) * COIN)
+            except Exception:
+                continue
+        raise AssertionError("no node knows %s" % txid)
+
     def sign_spend(self, ins, outs):
         """ins = [(txid, n, script, key, nSequence)]; outs = [(value, script)], the fee output last."""
         tx = CTransaction()
@@ -155,11 +168,14 @@ class PosUnbondingTest(BitcoinTestFramework):
         tx.vin = [CTxIn(COutPoint(int(t, 16), n), nSequence=seq) for (t, n, _, _, seq) in ins]
         asset = b"\x01" + bytes.fromhex(self.policy_asset)[::-1]
         tx.vout = [CTxOut(v, sc, CTxOutAsset(asset)) for (v, sc) in outs]
-        for i, (_, _, script, key, _) in enumerate(ins):
-            sighash, err = LegacySignatureHash(CScript(script), tx, i, SIGHASH_ALL)
+        for i, (t, n, script, key, _) in enumerate(ins):
+            sighash, err = PosRecordSignatureHash(CScript(script), tx, i, SIGHASH_ALL, self.spent_value(t, n))
             assert err is None
             tx.vin[i].scriptSig = CScript([key.sign_ecdsa(sighash) + bytes([SIGHASH_ALL])])
         tx.rehash()
+        self.built_values = getattr(self, "built_values", {})
+        for k, (v, _) in enumerate(outs):
+            self.built_values[(tx.hash, k)] = v
         return tx
 
     def force_into_block(self, txs, expect):

@@ -885,6 +885,17 @@ def SegwitV0SignatureMsg(script, txTo, inIdx, hashtype, amount, enable_sighash_r
 def SegwitV0SignatureHash(*args, **kwargs):
     return hash256(SegwitV0SignatureMsg(*args, **kwargs))
 
+def PosRecordSignatureHash(script, txTo, inIdx, hashtype, amount, v2=True):
+    """SEQUENTIA: the hash a stake record spend signs (a staking, unbonding,
+    delegation or payout output). From -posrecordsv2height it is the segwit-v0
+    hash, committing to `amount` (atoms, or a CTxOutValue); below it, the legacy
+    hash. Returns (hash, err) like LegacySignatureHash."""
+    if not v2:
+        return LegacySignatureHash(script, txTo, inIdx, hashtype)
+    if isinstance(amount, int):
+        amount = CTxOutValue(amount)
+    return SegwitV0SignatureHash(script, txTo, inIdx, hashtype, amount), None
+
 class TestFrameworkScript(unittest.TestCase):
     def test_bn2vch(self):
         self.assertEqual(bn2vch(0), bytes([]))

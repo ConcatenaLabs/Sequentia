@@ -456,6 +456,9 @@ public:
         // a chain with no history can simply have.
         consensus.pos_hardening_height = 1;
         g_pos_hardening_height = consensus.pos_hardening_height;
+        // Second-generation stake records (params.h), from the first block.
+        consensus.pos_records_v2_height = 1;
+        g_pos_records_v2_height = consensus.pos_records_v2_height;
         // Supervised assets (src/supervision.h): in force from mainnet's first
         // block, so a supervised issuance is possible from day one and there is
         // no flag day to coordinate later. 1 and not 0 for the same reason as
@@ -944,6 +947,9 @@ public:
         // when it was set, which is the time every producer has to upgrade.
         consensus.pos_hardening_height = 163000;
         g_pos_hardening_height = consensus.pos_hardening_height;
+        // Second-generation stake records (params.h): not scheduled yet.
+        consensus.pos_records_v2_height = 0;
+        g_pos_records_v2_height = consensus.pos_records_v2_height;
         g_coinbase_maturity = consensus.coinbase_maturity;
         g_coinbase_maturity_height = consensus.coinbase_maturity_height;
         // SEQUENTIA: 400,000 weight units — a TENTH of Bitcoin's 4,000,000 —
@@ -1665,6 +1671,7 @@ public:
         // chains set it below. Reset the mirror, which another chain's
         // parameters may have set earlier in this process.
         g_pos_hardening_height = 0;
+        g_pos_records_v2_height = 0;
         consensus.signet_blocks = false;
         consensus.signet_challenge.clear();
         consensus.nSubsidyHalvingInterval = 150;
@@ -2093,6 +2100,8 @@ protected:
         // arg-readable so tests can exercise both sides of the activation.
         consensus.pos_hardening_height = (int)args.GetIntArg("-poshardeningheight", 1);
         g_pos_hardening_height = consensus.pos_hardening_height;
+        consensus.pos_records_v2_height = (int)args.GetIntArg("-posrecordsv2height", 1);
+        g_pos_records_v2_height = consensus.pos_records_v2_height;
         consensus.pos_unbond_anchor_depth = (int)args.GetIntArg("-posunbonddepth", 2016);
         if (consensus.pos_unbond_anchor_depth < 1 || consensus.pos_unbond_anchor_depth > 1000000) {
             throw std::runtime_error("-posunbonddepth must be between 1 and 1000000");

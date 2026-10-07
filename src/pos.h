@@ -814,6 +814,16 @@ uint256 PosSeedForChild(const CBlockIndex* pindexPrev);
  *  parameters to hand (set by chainparams). 0 = never. */
 extern int g_pos_hardening_height;
 
+/** Consensus::Params::pos_records_v2_height, mirrored like the one above.
+ *  0 = never. */
+extern int g_pos_records_v2_height;
+
+/** Whether `script` is a stake record a signature spends: a staking output,
+ *  an unbonding output, a delegation record or a payout record. From
+ *  pos_records_v2_height these are spent under SCRIPT_SEQ_RECORD_INPUT (audit
+ *  M4). The pot, which no signature spends, is not one. */
+bool IsSignedPosRecordScript(const CScript& script);
+
 /** The seed the payout draws (lottery winner, commission) of the block that
  *  would extend `pindexPrev` use. Below g_pos_hardening_height it is the
  *  election seed, which the PARENT's anchor fixes, so the parent's producer,

@@ -3405,6 +3405,25 @@ bool VerifyScript(const CScript& scriptSig, const CScript& scriptPubKey, const C
 
     set_error(serror, SCRIPT_ERR_UNKNOWN_ERROR);
 
+    // SEQUENTIA: a stake record spent under the second generation (audit M4).
+    // The bare record scripts used the legacy signature hash, which commits to
+    // no amount, and a scriptSig anyone relaying the transaction could re-encode.
+    // Here the record script runs as a segwit-v0 script would: its signature
+    // commits to the amount, and the scriptSig, pushes only, minimally encoded,
+    // low-S and leaving one element, has no other encoding than the signer's.
+    if (flags & SCRIPT_SEQ_RECORD_INPUT) {
+        if (!scriptSig.IsPushOnly()) return set_error(serror, SCRIPT_ERR_SIG_PUSHONLY);
+        if (!witness->IsNull()) return set_error(serror, SCRIPT_ERR_WITNESS_UNEXPECTED);
+        const unsigned int record_flags = flags | SCRIPT_VERIFY_MINIMALDATA | SCRIPT_VERIFY_LOW_S |
+                                          SCRIPT_VERIFY_STRICTENC | SCRIPT_VERIFY_NULLFAIL;
+        std::vector<std::vector<unsigned char> > stack;
+        if (!EvalScript(stack, scriptSig, record_flags, checker, SigVersion::BASE, serror)) return false;
+        if (!EvalScript(stack, scriptPubKey, record_flags, checker, SigVersion::WITNESS_V0, serror)) return false;
+        if (stack.size() != 1) return set_error(serror, SCRIPT_ERR_CLEANSTACK);
+        if (!CastToBool(stack.back())) return set_error(serror, SCRIPT_ERR_EVAL_FALSE);
+        return set_success(serror);
+    }
+
     if ((flags & SCRIPT_VERIFY_SIGPUSHONLY) != 0 && !scriptSig.IsPushOnly()) {
         return set_error(serror, SCRIPT_ERR_SIG_PUSHONLY);
     }
