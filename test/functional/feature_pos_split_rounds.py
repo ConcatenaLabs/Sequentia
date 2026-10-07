@@ -74,7 +74,10 @@ def parse_round(spk_hex):
 
 class PosSplitRoundsTest(BitcoinTestFramework):
     def set_test_params(self):
-        self.num_nodes = 1
+        # Node 1 runs the default relay policy: every claim must reach it. The
+        # setup's funding transaction spends a bare OP_TRUE coin, which only
+        # node 0 relays.
+        self.num_nodes = 2
         self.setup_clean_chain = True
         self.a_wif, self.a_pub = make_staker()
         self.extra_args = [[
@@ -85,8 +88,8 @@ class PosSplitRoundsTest(BitcoinTestFramework):
             "-signblockscript=51", "-initialfreecoins=1000000000000", "-anyonecanspendaremine=1",
             "-con_blocksubsidy=0", "-con_connect_genesis_outputs=1",
             "-staker=%s:%d" % (self.a_pub, OWN * COIN), "-validatepegin=0", "-txindex=1",
-            "-acceptnonstdtxn=1",
         ]]
+        self.extra_args = [self.extra_args[0] + ["-acceptnonstdtxn=1"], self.extra_args[0]]
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
@@ -103,6 +106,10 @@ class PosSplitRoundsTest(BitcoinTestFramework):
                     if node.gettxout(tx['txid'], vout['n']):
                         return tx['txid'], vout['n'], int(vout['value'] * COIN)
         raise AssertionError("no unspent OP_TRUE genesis output")
+
+    def relayed(self, txid):
+        """A claim is standard: it reaches the node with the default policy."""
+        self.wait_until(lambda: txid in self.nodes[1].getrawmempool(), timeout=30)
 
     def paid_in(self, txid):
         """atoms paid to each P2WPKH script, and round / pot outputs, of a claim."""
@@ -178,6 +185,7 @@ class PosSplitRoundsTest(BitcoinTestFramework):
         self.log.info("A claim for one delegator makes the round and pays its bucket")
         first = controllers[0]
         claim1 = w0.claimpoolrewards(self.a_pub, first)
+        self.relayed(claim1["txid"])
         assert_equal(claim1["rounds"], 1)
         paid1, rounds1, _ = self.paid_in(claim1["txid"])
         assert_equal(len(rounds1), 1)
@@ -203,6 +211,7 @@ class PosSplitRoundsTest(BitcoinTestFramework):
         self.log.info("A claim for a delegator in the other bucket closes the round")
         other = next(c for c in controllers if p2wpkh_hex(c) not in paid1)
         claim2 = w0.claimpoolrewards(self.a_pub, other)
+        self.relayed(claim2["txid"])
         paid2, rounds2, repotted = self.paid_in(claim2["txid"])
         assert_equal(rounds2, [])
         assert_greater_than(repotted, 0)
@@ -224,6 +233,7 @@ class PosSplitRoundsTest(BitcoinTestFramework):
         w0.settxfee(0)
         self.mine(100)
         claim3 = w0.claimpoolrewards(self.a_pub, first)
+        self.relayed(claim3["txid"])
         self.mine(1)
         _, rounds3, _ = self.paid_in(claim3["txid"])
         n, atoms, _ = rounds3[0]

@@ -111,6 +111,12 @@ bool IsStandard(const CScript& scriptPubKey, TxoutType& whichType)
         if (g_con_pos && ParsePotScript(scriptPubKey)) {
             return true;
         }
+        // ...and the round script, which carries a second-generation split
+        // round from one claim to the next (PosRound): every claim that leaves
+        // a bucket unpaid creates one, so it must relay under default policy.
+        if (g_con_pos && ParseRoundScript(scriptPubKey)) {
+            return true;
+        }
         // SEQUENTIA: and the bare supervision declaration, which is how an
         // issuance says the asset it creates is freezable (src/supervision.h).
         // Bare because the output has to survive in the UTXO set, which a
@@ -269,6 +275,7 @@ bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
             if (g_con_pos && whichType == TxoutType::NONSTANDARD &&
                 (ParseStakeScript(prev.scriptPubKey) || ParseDelegationScript(prev.scriptPubKey) ||
                  ParsePayoutScript(prev.scriptPubKey) || ParsePotScript(prev.scriptPubKey) ||
+                 ParseRoundScript(prev.scriptPubKey) ||
                  ParseUnbondScript(prev.scriptPubKey))) {
                 continue;
             }
