@@ -458,12 +458,20 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
         m_undeleg_button->setToolTip(tr("Stop delegating: your stake's weight counts for you again from the next "
                                         "confirmation. This does not unstake — your coins were never moved, and "
                                         "are not moved now."));
+        m_collect_button = new QPushButton(tr("Collect my pool rewards"), pool);
+        m_collect_button->setToolTip(tr("Split pools keep what your stake earns in the pool's pot until someone "
+                                        "collects it. This pays your share, and that of the delegators grouped "
+                                        "with you, straight to your staking key. The network fee comes out of "
+                                        "the pool's reserve, not your balance. Anyone may collect for you, and "
+                                        "you for anyone."));
+        m_collect_button->setEnabled(false);
         {
             QWidget* row = new QWidget(pool);
             QHBoxLayout* h = new QHBoxLayout(row);
             h->setContentsMargins(0, 0, 0, 0);
             h->addWidget(m_deleg_button);
             h->addWidget(m_undeleg_button);
+            h->addWidget(m_collect_button);
             h->addStretch();
             form->addRow(tr("Pool:"), m_deleg_signer);
             form->addRow(tr("Amount:"), m_deleg_amount);
@@ -791,6 +799,7 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
     connect(m_refresh_button, &QPushButton::clicked, this, &StakingPage::onRefreshClicked);
     connect(m_deleg_button, &QPushButton::clicked, this, &StakingPage::onDelegate);
     connect(m_undeleg_button, &QPushButton::clicked, this, &StakingPage::onUndelegate);
+    connect(m_collect_button, &QPushButton::clicked, this, &StakingPage::onCollectPoolRewards);
     connect(m_payout_button, &QPushButton::clicked, this, &StakingPage::onAnnouncePayout);
     connect(m_payout_preset, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &StakingPage::onPayoutPresetChanged);
 }
@@ -2068,6 +2077,7 @@ void StakingPage::refreshDelegation()
     QStringList alerts;
     QString status;
     int delegated_rows = 0;
+    bool in_split_pool = false;
     for (size_t i = 0; i < mine.size(); ++i) {
         const UniValue& row = mine[i];
         if (row["alerts"].isArray()) {
@@ -2088,6 +2098,12 @@ void StakingPage::refreshDelegation()
             if (p["mode"].getValStr() == "lottery") {
                 status += tr("It pays one delegator per block, drawn by stake weight, keeping %1% commission. "
                              "You earn your exact share over time, in occasional lumps rather than steadily.\n")
+                              .arg(QString::number(p["commission_bp"].get_int64() / 100.0, 'f', 2));
+            } else if (p["mode"].getValStr() == "split") {
+                in_split_pool = true;
+                status += tr("It pays every delegator its exact share, keeping %1% commission. What you earn "
+                             "collects in the pool's pot: use \"Collect my pool rewards\" to have your share paid "
+                             "to you. Leaving the pool forfeits what you have not collected.\n")
                               .arg(QString::number(p["commission_bp"].get_int64() / 100.0, 'f', 2));
             } else {
                 status += tr("It pays a committed address on every block. The chain stops it redirecting the "
@@ -2113,6 +2129,7 @@ void StakingPage::refreshDelegation()
         m_deleg_alerts->setVisible(true);
     }
     m_undeleg_button->setEnabled(delegated_rows > 0);
+    m_collect_button->setEnabled(in_split_pool);
 
     if (m_pool_section) {
         // An alert is the one thing a folded card must not hide: a pool's
@@ -2202,6 +2219,39 @@ void StakingPage::onUndelegate()
     m_deleg_result->setText(tr("Reclaimed. Transaction: %1\nYour weight counts for you again once it confirms.")
                                 .arg(QString::fromStdString(res["txid"].getValStr())));
     setStatus(tr("Stake reclaimed. It counts for you again once the transaction confirms."), false);
+    refresh();
+}
+
+void StakingPage::onCollectPoolRewards()
+{
+    if (!m_wallet_model) return;
+    // No confirmation: collecting spends nothing of this wallet's. The claim is
+    // fully determined by the chain, and its fee comes out of the pool's reserve.
+    bool ok = false; QString err;
+    UniValue res = callRpc("claimpoolrewards", UniValue(UniValue::VARR), ok, err);
+    if (!ok) {
+        if (err.contains(QStringLiteral("nothing to pay")) || err.contains(QStringLiteral("not yet worth")) ||
+            err.contains(QStringLiteral("maturity")) || err.contains(QStringLiteral("no pot"))) {
+            setCardResult(m_deleg_result, tr("Nothing to collect yet: %1").arg(err), false);
+        } else {
+            setCardResult(m_deleg_result, tr("Could not collect the pool rewards: %1").arg(err), true);
+        }
+        return;
+    }
+    QStringList amounts;
+    if (res["distributed"].isObject()) {
+        const UniValue& d = res["distributed"];
+        for (const std::string& asset : d.getKeys()) {
+            amounts << QStringLiteral("%1 (%2…)").arg(QString::fromStdString(d[asset].getValStr()),
+                                                     QString::fromStdString(asset.substr(0, 8)));
+        }
+    }
+    m_deleg_result->setStyleSheet(QString());
+    m_deleg_result->setText(tr("Collected. Transaction: %1\nPaid to %n delegator(s) including you: %2.\n"
+                               "It reaches your staking key once the transaction confirms.", "",
+                               res["delegators_paid"].isNum() ? (int)res["delegators_paid"].get_int64() : 0)
+                                .arg(QString::fromStdString(res["txid"].getValStr()), amounts.join(QStringLiteral(", "))));
+    setStatus(tr("Pool rewards collected. They arrive once the transaction confirms."), false);
     refresh();
 }
 

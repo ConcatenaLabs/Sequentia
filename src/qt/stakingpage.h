@@ -127,6 +127,8 @@ private Q_SLOTS:
     //! take it back. Neither moves the staked coins.
     void onDelegate();
     void onUndelegate();
+    //! Split pools: collect this wallet's share of what the pool has earned.
+    void onCollectPoolRewards();
     //! Operator side: commit on-chain to how this node's blocks pay out.
     //! Running a pool is a node operation and lives only here.
     void onAnnouncePayout();
@@ -191,6 +193,7 @@ private:
     QLineEdit* m_deleg_signer{nullptr};
     QPushButton* m_deleg_button{nullptr};
     QPushButton* m_undeleg_button{nullptr};
+    QPushButton* m_collect_button{nullptr};
     QLabel* m_deleg_result{nullptr};
 
     // --- "Run a staking pool" card: the OPERATOR console ---
