@@ -539,11 +539,13 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
     }
     // ProcessNewBlock reports only whether the block was stored: a block that
     // then fails to connect comes back as success, and the caller would be told
-    // it produced a block while the chain stood still.
+    // it produced a block while the chain stood still. A certificate failure
+    // (BLOCK_MUTATED) leaves no failed flag on the index, so also require the
+    // block to be on the active chain.
     {
         LOCK(cs_main);
         const CBlockIndex* pindex = chainman.m_blockman.LookupBlockIndex(block.GetHash());
-        if (!pindex || (pindex->nStatus & BLOCK_FAILED_MASK)) {
+        if (!pindex || (pindex->nStatus & BLOCK_FAILED_MASK) || !chainman.ActiveChain().Contains(pindex)) {
             error = "the block was rejected when it was connected; see debug.log for the reason";
             err_kind = PosProduceError::INTERNAL;
             return false;

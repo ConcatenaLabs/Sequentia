@@ -453,7 +453,9 @@ public:
         consensus.pos_unbond_height = 1;
         consensus.pos_unbond_anchor_depth = 2016;
         // The audit hardening (params.h): from the first block, like every rule
-        // a chain with no history can simply have.
+        // a chain with no history can simply have. Mainnet has a placeholder
+        // genesis and no blocks yet; were it ever launched from an existing
+        // history, both heights below must be set past that history.
         consensus.pos_hardening_height = 1;
         g_pos_hardening_height = consensus.pos_hardening_height;
         // Second-generation stake records (params.h), from the first block.

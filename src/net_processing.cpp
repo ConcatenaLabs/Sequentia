@@ -4378,6 +4378,13 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             // node's finality (validation.h), relay it, and fetch the block.
             // Each certificate once: verifying one costs pairings, and a peer
             // could otherwise make us repeat that for the same bytes at will.
+            // A certificate for a block whose parent we do not know yet cannot
+            // be judged: leave it unrecorded so a later copy, once the parent
+            // has arrived, still pins finality and fetches the block.
+            {
+                LOCK(cs_main);
+                if (!m_chainman.m_blockman.LookupBlockIndex(header.hashPrevBlock)) return;
+            }
             if (PosCertificateSeenBefore(header)) return;
             int height = 0;
             const uint256 hash = header.GetHash();
