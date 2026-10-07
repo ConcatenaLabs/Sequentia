@@ -2912,6 +2912,11 @@ static UniValue ClaimPoolRoundsV2(CWallet& wallet, const CPubKey& signer, const 
     UniValue result(UniValue::VOBJ);
     result.pushKV("txid", tx->GetHash().GetHex());
     result.pushKV("rounds", (int64_t)chosen.size());
+    UniValue yours(UniValue::VOBJ);
+    if (target && payments.count(*target)) {
+        for (const auto& [asset, amount] : payments.at(*target)) yours.pushKV(asset.GetHex(), ValueFromAmount(amount));
+    }
+    result.pushKV("paid_to_you", yours);
     UniValue dist(UniValue::VOBJ), rep(UniValue::VOBJ);
     for (const auto& e : delivered) dist.pushKV(e.first.GetHex(), ValueFromAmount(e.second));
     for (const auto& e : repot) rep.pushKV(e.first.GetHex(), ValueFromAmount(e.second));
@@ -2947,6 +2952,8 @@ RPCHelpMan claimpoolrewards()
                     {RPCResult::Type::STR_HEX, "txid", "the claim transaction id"},
                     {RPCResult::Type::NUM, "pot_outputs", /*optional=*/true, "first generation: pot outputs swept"},
                     {RPCResult::Type::NUM, "rounds", /*optional=*/true, "second generation: rounds a bucket of which this claim paid"},
+                    {RPCResult::Type::OBJ_DYN, "paid_to_you", "paid to this wallet's own staker keys (or to the controller named), keyed by asset id", {
+                        {RPCResult::Type::STR_AMOUNT, "asset", "amount"}}},
                     {RPCResult::Type::OBJ_DYN, "distributed", "paid to delegators, keyed by asset id", {
                         {RPCResult::Type::STR_AMOUNT, "asset", "amount"}}},
                     {RPCResult::Type::OBJ_DYN, "repotted", "rolled into the fresh pot (sub-minimum shares and remainders), keyed by asset id", {
@@ -3160,6 +3167,19 @@ RPCHelpMan claimpoolrewards()
     UniValue result(UniValue::VOBJ);
     result.pushKV("txid", tx->GetHash().GetHex());
     result.pushKV("pot_outputs", (int64_t)pots.size());
+    {
+        UniValue yours(UniValue::VOBJ);
+        std::map<CAsset, int64_t> mine;
+        for (const CPubKey& k : WalletStakerKeys(*pwallet)) {
+            auto it = shares.owed.find(k);
+            if (it == shares.owed.end()) continue;
+            for (const auto& [asset, amount] : it->second) {
+                if (amount >= POS_SPLIT_MIN_PAYOUT) mine[asset] += amount;
+            }
+        }
+        for (const auto& [asset, amount] : mine) yours.pushKV(asset.GetHex(), ValueFromAmount(amount));
+        result.pushKV("paid_to_you", yours);
+    }
     UniValue dist(UniValue::VOBJ), rep(UniValue::VOBJ);
     for (const auto& e : paid) dist.pushKV(e.first.GetHex(), ValueFromAmount(e.second));
     for (const auto& e : repot) rep.pushKV(e.first.GetHex(), ValueFromAmount(e.second));

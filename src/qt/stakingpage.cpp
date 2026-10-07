@@ -188,13 +188,10 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
     title->setFont(tf);
     layout->addWidget(title);
 
-    QLabel* intro = new QLabel(
-        tr("Stake %1 to become a block producer. Your stake stays yours; it is time-locked only for "
-           "the unbonding period you would wait before withdrawing, and it keeps counting the entire "
-           "time. The more you stake, the more often the committee elects you to produce a block and "
-           "collect its fees.").arg(BitcoinUnits::policyAssetTicker()), this);
-    intro->setWordWrap(true);
-    layout->addWidget(intro);
+    m_intro = new QLabel(this);
+    m_intro->setWordWrap(true);
+    setIntro();
+    layout->addWidget(m_intro);
 
     // --- Block-production status (read from this node's own config; the GUI shares the node process) ---
     m_producer_status = new QLabel(this);
@@ -425,8 +422,8 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
 
         QLabel* hint = new QLabel(tr("A pool produces blocks on your behalf, so a holding too small to stake on "
                                      "its own, or a wallet you would rather keep closed, still earns. There is no "
-                                     "minimum to delegate: the network judges a pool on what it commands in "
-                                     "total. Your coins never move and the pool can never spend them — it is only "
+                                     "minimum to delegate: what counts for a pool is the total stake behind "
+                                     "it, not what each delegator brings. Your coins never move and the pool can never spend them — it is only "
                                      "lent the right to sign with your weight, and you can take that back at any "
                                      "moment, without asking.\n\nPools are listed, with what each has committed "
                                      "to paying and how reliably it produces, on the pool board at "
@@ -444,9 +441,9 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
         m_deleg_amount = new QLineEdit(pool);
         m_deleg_amount->setPlaceholderText(tr("amount of %1 to stake and lend (leave empty to lend what you "
                                               "already stake)").arg(BitcoinUnits::policyAssetTicker()));
-        m_deleg_amount->setToolTip(tr("There is NO minimum here. The network judges a pool on the weight it "
-                                      "commands in total, not on what each delegator brings, which is exactly "
-                                      "why pooling exists. Staking on your own is the path with a minimum."));
+        m_deleg_amount->setToolTip(tr("There is no minimum here. What counts for a pool is the total stake "
+                                      "behind it, not what each delegator brings: that is what pools are for. "
+                                      "Staking on your own is the path with a minimum."));
         {
             QLocale lc(QLocale::C); lc.setNumberOptions(QLocale::RejectGroupSeparator);
             auto* v = new QDoubleValidator(0, 1e15, 8, m_deleg_amount);
@@ -459,11 +456,12 @@ StakingPage::StakingPage(const PlatformStyle* platformStyle, QWidget* parent)
                                         "confirmation. This does not unstake — your coins were never moved, and "
                                         "are not moved now."));
         m_collect_button = new QPushButton(tr("Collect my pool rewards"), pool);
-        m_collect_button->setToolTip(tr("Split pools keep what your stake earns in the pool's pot until someone "
-                                        "collects it. This pays your share, and that of the delegators grouped "
-                                        "with you, straight to your staking key. The network fee comes out of "
-                                        "the pool's reserve, not your balance. Anyone may collect for you, and "
-                                        "you for anyone."));
+        m_collect_button->setToolTip(tr("Your pool keeps what you earn in a shared pot until someone asks for "
+                                        "it to be paid out. This pays you your share, straight into this "
+                                        "wallet, together with the other delegators in your group. It costs "
+                                        "you nothing: the small network fee is paid by the pool.\n\nOther "
+                                        "people can ask for a payout too. That only gets your share to you "
+                                        "sooner: your share can only ever be paid to you."));
         m_collect_button->setEnabled(false);
         {
             QWidget* row = new QWidget(pool);
@@ -932,10 +930,12 @@ void StakingPage::refresh()
     }
     // Always stamp the update time: it is the only visible change when the
     // registry contents did not move between two refreshes.
-    m_summary->setText(tr("%1 registered staker(s) — updated at %2.")
+    // Keys that sign blocks, each with its own stake plus what is lent to it:
+    // a pool's delegators are inside its row, not rows of their own.
+    m_summary->setText(tr("%1 block-signing key(s), each with its own stake and the stake lent to it — updated at %2.")
                            .arg(keys.size())
                            .arg(QTime::currentTime().toString(Qt::TextDate)));
-    if (m_registry_section) m_registry_section->setSummary(tr("%n staker(s)", "", int(keys.size())));
+    if (m_registry_section) m_registry_section->setSummary(tr("%n block-signing key(s)", "", int(keys.size())));
 
     refreshOwnStake(reg);
     refreshProducedBlocks();
@@ -1250,18 +1250,54 @@ void StakingPage::refreshOwnStake(const UniValue& registry)
         }
     }
     m_registry_stake = mine;
-    const double share = total > 0 ? (double)mine / (double)total : 0.0;
+    // The wallet's stake, wherever it signs: stake lent to a pool is still this
+    // wallet's, and counts in the pool's weight rather than under its own key.
+    uint64_t own = 0, lent = 0;
+    QStringList pools;
+    {
+        bool ok = false; QString err;
+        const UniValue rows = callRpc("listdelegations", UniValue(UniValue::VARR), ok, err);
+        for (size_t i = 0; ok && rows.isArray() && i < rows.size(); ++i) {
+            const UniValue& row = rows[i];
+            const uint64_t w = row["weight"].isNum() ? (uint64_t)row["weight"].get_int64() : 0;
+            own += w;
+            if (row["delegated"].isBool() && row["delegated"].get_bool()) {
+                lent += w;
+                const QString signer = QString::fromStdString(row["signer"].getValStr());
+                if (!pools.contains(signer)) pools << signer;
+            }
+        }
+    }
+    if (own < mine) own = mine; // keys the wallet signs with that hold no stake record of its own
+    const double share = total > 0 ? (double)own / (double)total : 0.0;
     if (m_my_stake) {
-        m_my_stake->setText(mine > 0
-            ? tr("%1 %2").arg(FormatWeight(mine), BitcoinUnits::policyAssetTicker())
-            : tr("none yet — stake below to start producing"));
+        QString text;
+        if (own == 0) {
+            text = tr("none yet — stake below to start producing");
+        } else if (lent == 0) {
+            text = tr("%1 %2").arg(FormatWeight(own), BitcoinUnits::policyAssetTicker());
+        } else if (lent >= own) {
+            text = tr("%1 %2, lent to %n pool(s): the pool signs blocks with it", "", pools.size())
+                       .arg(FormatWeight(own), BitcoinUnits::policyAssetTicker());
+        } else {
+            text = tr("%1 %2: %3 signing on this node, %4 lent to %n pool(s)", "", pools.size())
+                       .arg(FormatWeight(own), BitcoinUnits::policyAssetTicker(),
+                            FormatWeight(own - lent), FormatWeight(lent));
+        }
+        m_my_stake->setText(text);
     }
     if (m_my_share) {
+        int delegations = 0;
+        {
+            bool ok = false; QString err;
+            const UniValue d = callRpc("getdelegationinfo", UniValue(UniValue::VARR), ok, err, /*wallet=*/false);
+            if (ok && d.isObject()) delegations = (int)d.getKeys().size();
+        }
+        const int signers = registry.isObject() ? (int)registry.getKeys().size() : 0;
         m_my_share->setText(total > 0
-            ? tr("%1% of %2 %3 staked by %4 staker(s)")
-                  .arg(QString::number(share * 100.0, 'f', share < 0.01 ? 3 : 1),
-                       FormatWeight(total), BitcoinUnits::policyAssetTicker())
-                  .arg(registry.isObject() ? (int)registry.getKeys().size() : 0)
+            ? tr("%1% of %2 %3 staked on the network (%4 block-signing key(s), %5 delegation(s))")
+                  .arg(FormatSharePct(share), FormatWeight(total), BitcoinUnits::policyAssetTicker())
+                  .arg(signers).arg(delegations)
             : tr("nothing is staked on the network yet"));
     }
     if (m_share_bar) m_share_bar->setShare(share);
@@ -1498,7 +1534,7 @@ void StakingPage::onStake()
                    .arg(res.exists("note") ? QString::fromStdString(res["note"].get_str()) : tr("see registerstake"));
     }
     if (unbond > 0) {
-        msg += tr("\nUnbonding lock: ~%1 day(s) before you could withdraw (the stake keeps counting the whole time).")
+        msg += tr("\nUnbonding lock: ~%1 day(s) before you could withdraw; the stake earns all the while.")
                    .arg(QString::number((double)unbond / 86400.0, 'f', 1));
     }
     // Turn on block production right now — no restart, no manual config, no key
@@ -1523,6 +1559,28 @@ void StakingPage::onStake()
     setStatus(enabled ? tr("Staked. Block production is on. The stake counts once the transaction confirms.")
                       : tr("Stake registered. It will count once the transaction confirms."), false);
     refresh();
+}
+
+QString StakingPage::FormatSharePct(double share)
+{
+    // One format for every share on this page, so the same stake never shows
+    // as two different numbers.
+    return QString::number(share * 100.0, 'f', share < 0.001 ? 3 : 2);
+}
+
+void StakingPage::setIntro()
+{
+    if (!m_intro) return;
+    const QString ticker = BitcoinUnits::policyAssetTicker();
+    QString wait;
+    if (m_two_step && m_unbond_depth > 0) {
+        wait = tr(" When you withdraw it, the %1 comes back to this wallet after %2 %3 (%4): the unbonding period.")
+                   .arg(ticker, QString::number(m_unbond_depth),
+                        m_unbond_parent_blocks ? tr("Bitcoin blocks") : tr("blocks"), approxUnbondWait(m_unbond_depth));
+    }
+    m_intro->setText(tr("Stake %1 to become a block producer, or lend it to a pool. Your stake stays yours and "
+                        "earns for as long as it is staked.%2 The more you stake, the more often the committee "
+                        "elects you to produce a block and collect its fees.").arg(ticker, wait));
 }
 
 QString StakingPage::approxUnbondWait(int64_t count) const
@@ -1551,6 +1609,7 @@ void StakingPage::refreshUnbonding()
     m_two_step = res["active"].isBool() && res["active"].get_bool();
     m_unbond_depth = res["unbond_depth"].isNum() ? res["unbond_depth"].get_int() : 0;
     m_unbond_parent_blocks = res["unit"].getValStr() != "block";
+    setIntro();
     const QString ticker = BitcoinUnits::policyAssetTicker();
     const QString unit = m_unbond_parent_blocks ? tr("Bitcoin blocks") : tr("blocks");
 
@@ -1726,7 +1785,7 @@ void StakingPage::refreshUnstakeInfo(const UniValue* prefetched)
             tip = tr("Withdraw %1 %2 back to this wallet.").arg(FormatWeight((uint64_t)mature), ticker);
         } else if (immature > 0) {
             tip = tr("Nothing can be withdrawn yet: your %1 %2 is still serving its unbonding wait (%3). "
-                     "The stake keeps counting — and earning — the whole time.")
+                     "It earns all the while.")
                       .arg(FormatWeight((uint64_t)immature), ticker, next_unlock);
         } else if (withdrawing > 0) {
             tip = tr("A withdrawal of %1 %2 is already on its way and waiting to confirm.")
@@ -1923,6 +1982,21 @@ void StakingPage::onUnstake()
     // Numbers for the confirmation: our registered stake and the network total.
     // Weights and coin amounts share the same unit (1e-8), so they compare directly.
     const CAmount my_total = mature_total + immature_total;
+    // Lent to a pool? Then it is the pool's weight that drops, and a split pool
+    // stops owing anything to a delegator whose stake is gone.
+    QStringList lent_to;
+    bool lent_to_split = false;
+    {
+        UniValue rows = callRpc("listdelegations", UniValue(UniValue::VARR), ok, err);
+        for (size_t i = 0; ok && rows.isArray() && i < rows.size(); ++i) {
+            const UniValue& row = rows[i];
+            if (!row["delegated"].isBool() || !row["delegated"].get_bool()) continue;
+            const QString signer = QString::fromStdString(row["signer"].getValStr());
+            if (!lent_to.contains(signer)) lent_to << signer;
+            if (row["policy_in_force"].isObject() && row["policy_in_force"]["mode"].getValStr() == "split") lent_to_split = true;
+        }
+        ok = true;
+    }
     double net_total = 0;
     UniValue reg = callRpc("getstakerinfo", UniValue(UniValue::VARR), ok, err, /*wallet=*/false);
     if (ok && reg.isObject()) {
@@ -1954,10 +2028,14 @@ void StakingPage::onUnstake()
     msg += tr("When the withdrawal confirms, your registered stake drops from %1 to %2 %3")
                .arg(FormatWeight((uint64_t)my_total), FormatWeight((uint64_t)(my_total - want)), ticker);
     if (net_total > 0) {
-        msg += tr(", and your share of the network stake goes from %1% to about %2%. You will be elected "
-                  "to produce blocks (and collect their fees) correspondingly less often.")
-                   .arg(QString::number(before * 100.0, 'f', before < 0.01 ? 3 : 1),
-                        QString::number(after * 100.0, 'f', after < 0.01 ? 3 : 1));
+        msg += tr(", and your share of the network stake goes from %1% to about %2%.")
+                   .arg(FormatSharePct(before), FormatSharePct(after));
+        if (lent_to.isEmpty()) {
+            msg += tr(" You will be elected to produce blocks (and collect their fees) correspondingly less often.");
+        } else {
+            msg += tr(" This stake is lent to pool %1: the pool loses its weight, and you stop earning from the "
+                      "pool for it.").arg(lent_to.join(QStringLiteral(", ")));
+        }
     } else {
         msg += tr(".");
     }
@@ -1965,6 +2043,12 @@ void StakingPage::onUnstake()
         msg += "\n\n";
         msg += tr("The rest of your stake keeps staking. If a staked coin has to be split to withdraw this "
                   "exact amount, the remainder is re-staked automatically and its unbonding clock restarts.");
+    }
+    if (lent_to_split) {
+        msg += "\n\n";
+        msg += tr("Collect your pool rewards first. The pool pays its delegators when someone collects, and "
+                  "whatever it owes you and has not paid when this withdrawal confirms is lost: use \"Collect my "
+                  "pool rewards\" on the pool card before withdrawing.");
     }
     if (AskCentred(this, tr("Withdraw stake?"), msg) != QMessageBox::Yes) {
         return;
@@ -2230,27 +2314,44 @@ void StakingPage::onCollectPoolRewards()
     bool ok = false; QString err;
     UniValue res = callRpc("claimpoolrewards", UniValue(UniValue::VARR), ok, err);
     if (!ok) {
-        if (err.contains(QStringLiteral("nothing to pay")) || err.contains(QStringLiteral("not yet worth")) ||
-            err.contains(QStringLiteral("maturity")) || err.contains(QStringLiteral("no pot"))) {
-            setCardResult(m_deleg_result, tr("Nothing to collect yet: %1").arg(err), false);
+        if (err.contains(QStringLiteral("nothing to pay")) || err.contains(QStringLiteral("no pot")) ||
+            err.contains(QStringLiteral("maturity")) || err.contains(QStringLiteral("no delegator's share"))) {
+            setCardResult(m_deleg_result, tr("Nothing to collect right now. Either your share has already been "
+                                             "paid, or the pool's newest rewards cannot be paid out yet: rewards "
+                                             "become collectable some time after the blocks that earned them. "
+                                             "Try again later."), false);
+        } else if (err.contains(QStringLiteral("not yet worth")) || err.contains(QStringLiteral("cannot cover"))) {
+            setCardResult(m_deleg_result, tr("Not worth collecting yet: the network fee would take more than the "
+                                             "pool's reserve allows. Try again once the pool has earned more."), false);
+        } else if (err.contains(QStringLiteral("broadcast"))) {
+            setCardResult(m_deleg_result, tr("The network did not accept the payout, so nothing happened: no coins "
+                                             "moved and nothing was lost. Try again in a few minutes; if it keeps "
+                                             "failing, check that this wallet is up to date. (Detail: %1)").arg(err), true);
         } else {
-            setCardResult(m_deleg_result, tr("Could not collect the pool rewards: %1").arg(err), true);
+            setCardResult(m_deleg_result, tr("Could not collect the pool rewards. No coins moved. (Detail: %1)").arg(err), true);
         }
         return;
     }
-    QStringList amounts;
-    if (res["distributed"].isObject()) {
-        const UniValue& d = res["distributed"];
-        for (const std::string& asset : d.getKeys()) {
-            amounts << QStringLiteral("%1 (%2…)").arg(QString::fromStdString(d[asset].getValStr()),
-                                                     QString::fromStdString(asset.substr(0, 8)));
+    const auto amounts_of = [](const UniValue& obj) {
+        QStringList out;
+        for (size_t i = 0; obj.isObject() && i < obj.getKeys().size(); ++i) {
+            const std::string& hex = obj.getKeys()[i];
+            out << QStringLiteral("%1 %2").arg(QString::fromStdString(obj[hex].getValStr()),
+                                              GUIUtil::assetDisplayName(CAsset(uint256S(hex))));
         }
-    }
+        return out.join(QStringLiteral(", "));
+    };
+    const QString yours = amounts_of(res["paid_to_you"]);
+    const QString total = amounts_of(res["distributed"]);
+    const int paid = res["delegators_paid"].isNum() ? (int)res["delegators_paid"].get_int64() : 0;
+    QString msg = yours.isEmpty()
+        ? tr("Collected, for other delegators: nothing in this payout was yours.")
+        : tr("Collected. Your share: %1, to your staking key.").arg(yours);
+    msg += QStringLiteral("\n") + tr("In all, %1 went to %n delegator(s) of your group.", "", paid).arg(total);
+    msg += QStringLiteral("\n") + tr("Transaction: %1. The coins arrive once it confirms.")
+                                      .arg(QString::fromStdString(res["txid"].getValStr()));
     m_deleg_result->setStyleSheet(QString());
-    m_deleg_result->setText(tr("Collected. Transaction: %1\nPaid to %n delegator(s) including you: %2.\n"
-                               "It reaches your staking key once the transaction confirms.", "",
-                               res["delegators_paid"].isNum() ? (int)res["delegators_paid"].get_int64() : 0)
-                                .arg(QString::fromStdString(res["txid"].getValStr()), amounts.join(QStringLiteral(", "))));
+    m_deleg_result->setText(msg);
     setStatus(tr("Pool rewards collected. They arrive once the transaction confirms."), false);
     refresh();
 }

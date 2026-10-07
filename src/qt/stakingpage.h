@@ -139,6 +139,11 @@ private:
     const PlatformStyle* m_platform_style;
 
     QLabel* m_producer_status{nullptr};
+    QLabel* m_intro{nullptr};
+    //! The page introduction, with the unbonding period once it is known.
+    void setIntro();
+    //! A share of the network stake as a percentage, the same way everywhere.
+    static QString FormatSharePct(double share);
     QPushButton* m_enable_button{nullptr};
 
     // The foldable cards this page updates a one-line summary for while closed.

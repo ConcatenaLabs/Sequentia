@@ -819,7 +819,7 @@ void OverviewPage::updateSeqStatus()
         }
         // n is the number of *registered* stakers (the full registry), which is
         // distinct from and may exceed the per-block committee cap; label it as such.
-        const QString registered = (n >= 0) ? tr("%1 registered staker(s)").arg(n) : tr("staker count unavailable");
+        const QString registered = (n >= 0) ? tr("%1 block-signing key(s)").arg(n) : tr("staker count unavailable");
         const QString role = !producer ? tr("this node observes (does not produce)")
                            : producing_wallet ? tr("this node produces blocks with this wallet's key")
                                               : tr("this node produces blocks (another wallet's key)");
