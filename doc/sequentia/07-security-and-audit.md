@@ -128,16 +128,19 @@ record input; no supervision record in a coinbase; the payout record in force
 cannot be spent, so ending a policy takes the same notice as starting one; no
 stake weight for an uncompressed key, which can never prove a VRF output; an
 anchor repeating its parent's hash must repeat its height; the
-lottery seed comes from three blocks down; a split pot is shared among at most
-100 participants; and the public committee is apportioned in seats by stake
-(see [`04-proof-of-stake.md`](04-proof-of-stake.md) §2 and §4).
+lottery seed comes from three blocks down; and the public committee is
+apportioned in seats by stake (see [`04-proof-of-stake.md`](04-proof-of-stake.md)
+§2 and §4).
 
-Fixed by the second fork (`pos_records_v2_height`, not scheduled on the testnet
-yet): a stake record spend signs the segwit-v0 hash, which commits to the
+At the same height (`pos_records_v2_height`, also 163,000 on the testnet and
+block 1 on mainnet), the second generation of stake records: a stake record spend signs the segwit-v0 hash, which commits to the
 amount, with a canonical scriptSig, so a signer cannot be lied to about the fee
 and nobody can change the txid (M4); and split rewards are paid in rounds, a
 bucket of about 32 delegators at a time, which removes the 100-participant cap
-(A11, see [`split-payouts-design.md`](split-payouts-design.md)).
+(A11, see [`split-payouts-design.md`](split-payouts-design.md)). The two
+heights are separate parameters only so a custom chain can test either alone;
+with both at one height, the 100-participant cap that the hardening fork
+introduced for split pots never applies on the bundled chains.
 
 ### Accepted by design (documented, not bugs)
 

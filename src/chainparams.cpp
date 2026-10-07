@@ -948,8 +948,9 @@ public:
         // when it was set, which is the time every producer has to upgrade.
         consensus.pos_hardening_height = 163000;
         g_pos_hardening_height = consensus.pos_hardening_height;
-        // Second-generation stake records (params.h): not scheduled yet.
-        consensus.pos_records_v2_height = 0;
+        // Second-generation stake records (params.h), at the same cutover as
+        // the audit hardening: one upgrade, one height, for all of it.
+        consensus.pos_records_v2_height = 163000;
         g_pos_records_v2_height = consensus.pos_records_v2_height;
         g_pos_split_epoch = DEFAULT_POS_SPLIT_EPOCH;
         g_coinbase_maturity = consensus.coinbase_maturity;
