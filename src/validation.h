@@ -166,6 +166,9 @@ struct PosRecordState {
     std::set<std::pair<CPubKey, int64_t>> created_payouts;
     std::map<CPubKey, std::vector<unsigned char>> bls_keys;
     std::set<CScript> spent_record_scripts;
+    //! Records created so far in the block: ConnectBlock refuses a block that
+    //! spends one of them, since its creation then matches a spend.
+    std::set<CScript> created_record_scripts;
     std::set<std::pair<CAsset, int>> supervision_rotations;
 };
 

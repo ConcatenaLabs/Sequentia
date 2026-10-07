@@ -2752,6 +2752,16 @@ bool PosCheckTxRecords(const CTransaction& tx, const std::vector<Coin>& spent, i
     // Records this transaction spends free their slot for a replacement, exactly
     // as a spend anywhere in the block does at connect.
     for (const Coin& coin : spent) {
+        // ConnectBlock, from pos_hardening_height, compares every record the
+        // block creates with every record it spends, in any order: a record
+        // created earlier in the block and spent here fails it as a re-creation.
+        // Refused here too, or a pair of transactions (one creating a record,
+        // the next spending it unconfirmed) would sit in every template.
+        if (hardening && (DelegationFromTxOut(coin.out) || PayoutFromTxOut(coin.out)) &&
+            next.created_record_scripts.count(coin.out.scriptPubKey)) {
+            reason = "bad-record-recreated";
+            return false;
+        }
         if (auto deleg = DelegationFromTxOut(coin.out)) {
             next.spent_delegations.insert(deleg->first);
             next.spent_record_scripts.insert(coin.out.scriptPubKey);
@@ -2798,6 +2808,7 @@ bool PosCheckTxRecords(const CTransaction& tx, const std::vector<Coin>& spent, i
                 reason = "bad-delegation-exists";
                 return false;
             }
+            next.created_record_scripts.insert(out.scriptPubKey);
         }
         // ConnectBlock: payout notice, and one record per (signer, activation).
         if (auto p = PayoutFromTxOut(out)) {
@@ -2823,6 +2834,7 @@ bool PosCheckTxRecords(const CTransaction& tx, const std::vector<Coin>& spent, i
                 reason = "bad-payout-exists";
                 return false;
             }
+            next.created_record_scripts.insert(out.scriptPubKey);
         }
         // CheckPosStakeRules: a BLS registration must prove possession, and a
         // staker has one key, against its registered key and within the block.
@@ -3173,11 +3185,11 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
                     return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-posbls-member-duplicate", "duplicate BLS committee member");
                 }
             }
-            // Under the public fixed-size committee (-pospubliccommittee, impl
-            // spec Option A) the quorum derives from the ACTUAL committee size
-            // min(#stakers, cap) — restoring quorum intersection (any two
-            // quorums share >= 2 members), which threshold sortition loses
-            // once the staker pool exceeds the committee target.
+            // This form only exists under private threshold sortition: under the
+            // public committee every BLS certificate takes the bitfield branch
+            // above. So the quorum here is PosSlotQuorum, a count of members,
+            // and comparing it with named.size() is the right unit; committee
+            // seats (A13) never apply to this form.
             const int quorum = PosSlotQuorumAt(registry, pindexPrev->nHeight + 1);
             const bool escaping_stall = g_con_bitcoin_anchor &&
                 PosEscapingStallAllowed(pindexPrev->m_anchor_height, block.m_anchor_height);

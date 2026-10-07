@@ -131,7 +131,7 @@ class PosRecordsV2Test(BitcoinTestFramework):
         c_p2pk = CScript([bytes.fromhex(self.c_pub), OP_CHECKSIG])
         txid, n, value = self.free_coin(node)
         wallet_spk = CScript(bytes.fromhex(node.getaddressinfo(node.getnewaddress())["scriptPubKey"]))
-        fund = self.unsigned([(txid, n, value)], [(COIN, c_p2pk), (COIN, c_p2pk), (10 * COIN, wallet_spk)])
+        fund = self.unsigned([(txid, n, value)], [(COIN, c_p2pk), (COIN, c_p2pk), (COIN, c_p2pk), (10 * COIN, wallet_spk)])
         fund_id = self.send(node, fund)
         self.produce(node)
 
@@ -186,6 +186,15 @@ class PosRecordsV2Test(BitcoinTestFramework):
 
         self.log.info("The canonical spend signing the amount is valid")
         good_id = self.send(node, good)
+
+        self.log.info("A reorg back below the height evicts it from the mempool")
+        fork_point = node.getblockhash(V2_HEIGHT - 1)
+        node.invalidateblock(fork_point)
+        assert_equal(node.getblockcount(), V2_HEIGHT - 2)
+        assert good_id not in node.getrawmempool()
+        node.reconsiderblock(fork_point)
+        assert_equal(node.getblockcount(), V2_HEIGHT - 1)
+        good_id = self.send(node, good)
         self.produce(node)
         assert good_id in node.getblock(node.getbestblockhash())["tx"]
         self.sync_all()
@@ -198,6 +207,17 @@ class PosRecordsV2Test(BitcoinTestFramework):
         withdrawn = node.withdrawstake(w_pub)
         self.produce(node)
         assert withdrawn["txid"] in node.getblock(node.getbestblockhash())["tx"]
+
+        self.log.info("A record spent while still unconfirmed waits for the next block")
+        rec3_id, _ = self.make_record(node, (fund_id, 2, COIN))
+        early, _ = self.record_spend(rec3_id, record, v2=True)
+        early_id = self.send(node, early)
+        self.produce(node)
+        mined = node.getblock(node.getbestblockhash())["tx"]
+        assert rec3_id in mined and early_id not in mined
+        assert early_id in node.getrawmempool()
+        self.produce(node)
+        assert early_id in node.getblock(node.getbestblockhash())["tx"]
 
         self.log.info("History from both sides validates after a restart")
         self.restart_node(0)
