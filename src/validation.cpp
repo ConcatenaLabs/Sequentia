@@ -636,8 +636,7 @@ void CChainState::MaybeUpdateMempoolForReorg(
                 return true;
             }
             if (PosRecordSpendFailsNextBlock(tx, view, m_chain.Tip(), m_params.GetConsensus())) {
-                LogPrintf("Evicting %s from the mempool after a reorg: a stake record spend signed for the "
-                          "other side of the records-v2 height, at height %d\n",
+                LogPrintf("Evicting %s from the mempool after a reorg: a stake record spend signed for the other side of the records-v2 height, at height %d\n",
                           tx.GetHash().ToString(), m_chain.Height() + 1);
                 return true;
             }
@@ -5096,8 +5095,7 @@ bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew
             CCoinsViewCache view(&view_mempool);
             m_mempool->removeFailing([&](const CTransaction& tx) {
                 if (!PosRecordSpendFailsNextBlock(tx, view, pindexNew, consensus)) return false;
-                LogPrintf("Evicting %s from the mempool: a stake record spend with a legacy signature, "
-                          "refused from height %d (second-generation records)\n",
+                LogPrintf("Evicting %s from the mempool: a stake record spend with a legacy signature, refused from height %d (second-generation records)\n",
                           tx.GetHash().ToString(), next_height);
                 return true;
             });

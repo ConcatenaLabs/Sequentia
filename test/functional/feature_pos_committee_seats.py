@@ -76,7 +76,7 @@ class PosCommitteeSeatsTest(BitcoinTestFramework):
     def run_test(self):
         big = self.stakers[0][0]
         small = [w for w, _ in self.stakers[1:]]
-        seated, n0, n1 = self.nodes[0], self.nodes[0], self.nodes[1]
+        n0, n1 = self.nodes[0], self.nodes[1]
 
         self.log.info("Seats: the large staker with the small ones certifies")
         res = self.produce(n0, [big] + small)

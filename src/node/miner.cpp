@@ -392,8 +392,7 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
         // keeps the chain moving and the failure loud. (A PoW miner calling
         // this gets the error, as upstream, and decides for itself.)
         if (g_con_pos && !m_coinbase_only && nBlockTx > 0) {
-            LogPrintf("CreateNewBlock: the template with %u transactions failed validation (%s); "
-                      "producing a block without transactions instead\n", nBlockTx, state.ToString());
+            LogPrintf("CreateNewBlock: the template with %u transactions failed validation (%s); producing a block without transactions instead\n", nBlockTx, state.ToString());
             m_coinbase_only = true;
             std::unique_ptr<CBlockTemplate> fallback;
             try {
