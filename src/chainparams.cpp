@@ -452,6 +452,16 @@ public:
         // left could have consolidated (2,016 Bitcoin blocks, about two weeks).
         consensus.pos_unbond_height = 1;
         consensus.pos_unbond_anchor_depth = 2016;
+        // The audit hardening (params.h): from the first block, like every rule
+        // a chain with no history can simply have. Mainnet has a placeholder
+        // genesis and no blocks yet; were it ever launched from an existing
+        // history, both heights below must be set past that history.
+        consensus.pos_hardening_height = 1;
+        g_pos_hardening_height = consensus.pos_hardening_height;
+        // Second-generation stake records (params.h), from the first block.
+        consensus.pos_records_v2_height = 1;
+        g_pos_records_v2_height = consensus.pos_records_v2_height;
+        g_pos_split_epoch = DEFAULT_POS_SPLIT_EPOCH;
         // Supervised assets (src/supervision.h): in force from mainnet's first
         // block, so a supervised issuance is possible from day one and there is
         // no flag day to coordinate later. 1 and not 0 for the same reason as
@@ -551,10 +561,25 @@ public:
         // -poscommitteesize on the real network is a node whose operator believes
         // they are changing a consensus rule; silently overriding them would leave
         // that belief intact until the fork.
-        for (const char* flag : {"-posbls", "-pospubliccommittee", "-poscommitteesize", "-posvrf", "-posaggcommittee", "-posunbonding", "-posminstake", "-pospayoutnotice", "-posslotinterval", "-poscheckpointdepth"}) {
+        // -posescapestallmtpgap and -poscheckpointscan are read live at their
+        // point of use, so a different value really does change which blocks
+        // this node accepts: the first decides whether a sub-quorum block is
+        // rejected as bad-pos-escape-stall-too-soon, the second how much of the
+        // parent chain is searched for the checkpoints behind the finality floor.
+        for (const char* flag : {"-posbls", "-pospubliccommittee", "-poscommitteesize", "-posvrf", "-posaggcommittee", "-posunbonding", "-posminstake", "-pospayoutnotice", "-posslotinterval", "-poscheckpointdepth", "-posescapestallmtpgap", "-poscheckpointscan", "-con_max_block_sig_size"}) {
             if (args.IsArgSet(flag)) {
                 throw std::runtime_error(strprintf("%s is a consensus rule of the Sequentia network and cannot be overridden; remove it from the configuration", flag));
             }
+        }
+        for (const char* flag : {"-posbyzantineequivocate", "-posbyzantineinvalid", "-posdebugroundskewms"}) {
+            if (args.IsArgSet(flag)) {
+                throw std::runtime_error(strprintf("%s is a test-only fault injection and is refused on the Sequentia network", flag));
+            }
+        }
+        // Parsed only on custom chains. Ignoring it here would leave an operator
+        // believing a static checkpoint protects them when nothing does.
+        if (args.IsArgSet("-poscheckpoint")) {
+            throw std::runtime_error("-poscheckpoint is only available on custom chains; on the Sequentia network the long-range defense is the parent-chain checkpoints");
         }
         g_pos_min_stake = 4000000000000ULL;              // 40,000 SEQ = 0.01% of 400M (§3.3)
         g_split_payout_height = 0;
@@ -920,6 +945,16 @@ public:
         // upgrade. The depth is the checkpoint depth, as on mainnet.
         consensus.pos_unbond_height = 159000;
         consensus.pos_unbond_anchor_depth = 2016;
+        // The audit hardening (params.h), one cutover for all of it. 163000
+        // was ~2,870 blocks (about 50 hours at 62.5 s a block) ahead of the tip
+        // when it was set, which is the time every producer has to upgrade.
+        consensus.pos_hardening_height = 163000;
+        g_pos_hardening_height = consensus.pos_hardening_height;
+        // Second-generation stake records (params.h), at the same cutover as
+        // the audit hardening: one upgrade, one height, for all of it.
+        consensus.pos_records_v2_height = 163000;
+        g_pos_records_v2_height = consensus.pos_records_v2_height;
+        g_pos_split_epoch = DEFAULT_POS_SPLIT_EPOCH;
         g_coinbase_maturity = consensus.coinbase_maturity;
         g_coinbase_maturity_height = consensus.coinbase_maturity_height;
         // SEQUENTIA: 400,000 weight units — a TENTH of Bitcoin's 4,000,000 —
@@ -1076,6 +1111,20 @@ public:
             refuse_int("-posminstake", (int64_t)TESTNET_POS_MIN_STAKE);
             refuse_int("-pospayoutnotice", (int64_t)TESTNET_POS_PAYOUT_NOTICE);
             refuse_int("-poscheckpointdepth", (int64_t)DEFAULT_POS_CHECKPOINT_DEPTH);
+            // Read live at the point of use, like -poscheckpointdepth: the gap
+            // decides whether a sub-quorum block is rejected outright
+            // (bad-pos-escape-stall-too-soon), so a different value forks.
+            refuse_int("-posescapestallmtpgap", (int64_t)DEFAULT_POS_ESCAPE_STALL_MTP_GAP);
+            // A wider checkpoint scan only finds more checkpoints, which can only
+            // raise the finality floor; a narrower one can miss the checkpoint
+            // that holds it, and accept forks the network refuses.
+            if (args.IsArgSet("-poscheckpointscan") &&
+                args.GetIntArg("-poscheckpointscan", DEFAULT_POS_CHECKPOINT_SCAN) < DEFAULT_POS_CHECKPOINT_SCAN) {
+                throw std::runtime_error(strprintf(
+                    "-poscheckpointscan cannot be lowered below %d on the Sequentia testnet: a narrower scan can "
+                    "miss the checkpoint that holds the finality floor and accept forks the network refuses.",
+                    DEFAULT_POS_CHECKPOINT_SCAN));
+            }
         }
 
         if (g_pos_public_committee && !g_pos_bls) {
@@ -1134,8 +1183,29 @@ public:
             // sortition is a threshold, so an above-mean draw can select more
             // members than -poscommitteesize (up to the cap) and must still fit.
             const int bls_default = 300 * MAX_POS_AGG_COMMITTEE_SIZE + 2000;
-            consensus.max_block_signature_size = args.GetIntArg(
-                "-con_max_block_sig_size", g_pos_bls ? bls_default : 200);
+            const int64_t network_value = g_pos_bls ? bls_default : 200;
+            // CheckProof enforces this on every block, so a different value
+            // rejects the network's blocks (or accepts larger ones) in silence.
+            if (args.IsArgSet("-con_max_block_sig_size") &&
+                args.GetIntArg("-con_max_block_sig_size", network_value) != network_value) {
+                throw std::runtime_error(strprintf(
+                    "-con_max_block_sig_size is a consensus rule of the Sequentia testnet and must be %d on this "
+                    "network; a different value forks this node off in silence. Remove it from the configuration, "
+                    "or use -chain=regtest / a custom chain to experiment.", network_value));
+            }
+            consensus.max_block_signature_size = network_value;
+        }
+        // Fault injection for the functional tests. On a real network it turns
+        // the node into an attacker of the network it serves.
+        for (const char* flag : {"-posbyzantineequivocate", "-posbyzantineinvalid", "-posdebugroundskewms"}) {
+            if (args.IsArgSet(flag)) {
+                throw std::runtime_error(strprintf("%s is a test-only fault injection and is refused on the Sequentia testnet", flag));
+            }
+        }
+        // Parsed only on custom chains. Ignoring it here would leave an operator
+        // believing a static checkpoint protects them when nothing does.
+        if (args.IsArgSet("-poscheckpoint")) {
+            throw std::runtime_error("-poscheckpoint is only available on custom chains; on the Sequentia testnet the long-range defense is the parent-chain checkpoints");
         }
         g_signed_blocks = true;
 
@@ -1602,6 +1672,12 @@ class CRegTestParams : public CChainParams {
 public:
     explicit CRegTestParams(const ArgsManager& args) {
         strNetworkID =  CBaseChainParams::REGTEST;
+        // The audit hardening is off here (pos_hardening_height 0); custom
+        // chains set it below. Reset the mirror, which another chain's
+        // parameters may have set earlier in this process.
+        g_pos_hardening_height = 0;
+        g_pos_records_v2_height = 0;
+        g_pos_split_epoch = DEFAULT_POS_SPLIT_EPOCH;
         consensus.signet_blocks = false;
         consensus.signet_challenge.clear();
         consensus.nSubsidyHalvingInterval = 150;
@@ -2026,6 +2102,16 @@ protected:
         // for a test of the one-step withdrawal the testnet allows below its
         // activation height.
         consensus.pos_unbond_height = (int)args.GetIntArg("-posunbondheight", 1);
+        // The audit hardening: from the first block by default, as on mainnet;
+        // arg-readable so tests can exercise both sides of the activation.
+        consensus.pos_hardening_height = (int)args.GetIntArg("-poshardeningheight", 1);
+        g_pos_hardening_height = consensus.pos_hardening_height;
+        consensus.pos_records_v2_height = (int)args.GetIntArg("-posrecordsv2height", 1);
+        g_pos_records_v2_height = consensus.pos_records_v2_height;
+        g_pos_split_epoch = (int)args.GetIntArg("-possplitepoch", DEFAULT_POS_SPLIT_EPOCH);
+        if (g_pos_split_epoch < 1 || g_pos_split_epoch > 1000000) {
+            throw std::runtime_error("-possplitepoch must be between 1 and 1000000");
+        }
         consensus.pos_unbond_anchor_depth = (int)args.GetIntArg("-posunbonddepth", 2016);
         if (consensus.pos_unbond_anchor_depth < 1 || consensus.pos_unbond_anchor_depth > 1000000) {
             throw std::runtime_error("-posunbonddepth must be between 1 and 1000000");

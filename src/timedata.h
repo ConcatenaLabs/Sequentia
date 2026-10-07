@@ -6,6 +6,7 @@
 #define BITCOIN_TIMEDATA_H
 
 #include <algorithm>
+#include <optional>
 #include <assert.h>
 #include <stdint.h>
 #include <vector>
@@ -72,6 +73,10 @@ public:
 
 /** Functions to keep track of adjusted P2P time */
 int64_t GetTimeOffset();
+/** SEQUENTIA: the median of the peers' clocks minus ours, in seconds, once at
+ *  least five peers have reported; unlike GetTimeOffset it is not clamped to
+ *  -maxtimeadjustment, so a clock hours off shows as hours off. */
+std::optional<int64_t> GetPeerClockOffset();
 int64_t GetAdjustedTime();
 void AddTimeData(const CNetAddr& ip, int64_t nTime);
 

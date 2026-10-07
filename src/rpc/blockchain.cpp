@@ -3638,7 +3638,7 @@ static RPCHelpMan getposslot()
     int64_t best_slot = -1;
     if (producer) {
         std::set<CPubKey> public_committee;
-        if (g_pos_public_committee) public_committee = PosPublicCommitteeSet(registry, seed);
+        if (g_pos_public_committee) public_committee = PosPublicCommitteeSetAt(registry, seed, next_height);
         for (const CKey& key : producer->Keys()) {
             const CPubKey pub = key.GetPubKey();
             const uint64_t weight = registry.GetWeight(pub);
@@ -4126,7 +4126,17 @@ static RPCHelpMan listpools()
                             {RPCResult::Type::OBJ_DYN, "pot", "a split pool's accrued, unclaimed rewards, keyed by asset id", {
                                 {RPCResult::Type::STR_AMOUNT, "asset", "amount accrued in that asset"},
                             }},
-                            {RPCResult::Type::NUM, "pot_outputs", "how many pot outputs a claim would sweep"},
+                            {RPCResult::Type::NUM, "pot_outputs", "how many pot and round outputs the pool holds"},
+                            {RPCResult::Type::ARR, "rounds", "second-generation rounds (from the records-v2 height): an epoch's rewards in one asset, paid by claimpoolrewards a bucket of delegators at a time", {
+                                {RPCResult::Type::OBJ, "", "", {
+                                    {RPCResult::Type::STR, "outpoint", "the round output"},
+                                    {RPCResult::Type::NUM, "epoch", "the epoch whose rewards it holds"},
+                                    {RPCResult::Type::STR_HEX, "asset", "asset id"},
+                                    {RPCResult::Type::STR_AMOUNT, "value", "what is left to pay"},
+                                    {RPCResult::Type::NUM, "buckets", "buckets of delegators"},
+                                    {RPCResult::Type::NUM, "unpaid_buckets", "buckets not yet paid"},
+                                }},
+                            }},
                             {RPCResult::Type::OBJ, "policy_in_force", /*optional=*/true, "the payout policy binding right now", {
                                 {RPCResult::Type::NUM, "activation", "height from which it binds"},
                                 {RPCResult::Type::STR, "mode", "\"direct\", \"lottery\" or \"split\""},
@@ -4325,6 +4335,21 @@ static RPCHelpMan listpools()
             for (const auto& e : per_asset) pot.pushKV(e.first.GetHex(), ValueFromAmount(e.second));
             o.pushKV("pot", pot);
             o.pushKV("pot_outputs", (int64_t)registry.PotsFor(signer).size());
+            // Second-generation rounds: an epoch's rewards, paid a bucket at a time.
+            UniValue rounds(UniValue::VARR);
+            for (const auto& pr : registry.PotsFor(signer)) {
+                if (!pr.second.round) continue;
+                const PosRound& r = *pr.second.round;
+                UniValue ro(UniValue::VOBJ);
+                ro.pushKV("outpoint", pr.first.ToString());
+                ro.pushKV("epoch", (int64_t)r.epoch);
+                ro.pushKV("asset", pr.second.asset.GetHex());
+                ro.pushKV("value", ValueFromAmount(pr.second.value));
+                ro.pushKV("buckets", (int64_t)r.buckets);
+                ro.pushKV("unpaid_buckets", (int64_t)r.Unpaid());
+                rounds.push_back(ro);
+            }
+            o.pushKV("rounds", rounds);
         }
         if (in_force) {
             UniValue pol(UniValue::VOBJ);

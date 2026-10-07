@@ -20,7 +20,12 @@
 
 static const bool DEFAULT_NAMED=false;
 static const char DEFAULT_RPCCONNECT[] = "127.0.0.1";
-static const int DEFAULT_HTTP_CLIENT_TIMEOUT=900;
+//! Seconds to wait for the parent chain daemon. Anchor and MTP checks run under
+//! cs_main, so for this long a daemon that accepts the connection and never
+//! answers freezes the whole node; an answer that does not come in seconds is
+//! treated as no connection, which every caller already handles.
+static const int DEFAULT_MAINCHAIN_RPC_TIMEOUT = 10;
+static const int MAX_MAINCHAIN_RPC_TIMEOUT = 900;
 
 //
 // Exception thrown on connection error.  This error is used to determine

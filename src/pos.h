@@ -46,14 +46,56 @@ extern bool g_con_pos;
  *  source at runtime. 0 = the mode is part of the rules from genesis. */
 extern int g_split_payout_height;
 
+/** SEQUENTIA split payouts, second generation (pos_records_v2_height): a
+ *  ROUND, the rewards a split pool earned in one epoch, in one asset, being
+ *  paid out a bucket of delegators at a time.
+ *
+ *  The first generation paid every delegator of a pot in one transaction, so a
+ *  pool's delegators were bounded by what a block can hold (audit A11), and
+ *  then capped at 100. A round is shared among everyone who stood behind the
+ *  pool when its epoch began, however many, in buckets of about
+ *  POS_ROUND_BUCKET_TARGET: anyone may pay any unpaid bucket, a small
+ *  transaction whatever the pool's size, and the round's bitmap records which
+ *  buckets are paid. See doc/sequentia/split-payouts-design.md. */
+struct PosRound {
+    uint32_t epoch{0};          //!< the epoch whose pots this round holds
+    uint64_t weight{0};         //!< total eligible weight when the round was created
+    //! The pool's own weight among it. Every other participant's weight can
+    //! only shrink after the round is made (stake leaves, records are
+    //! immutable), but the signer's own stake counts again once it stops
+    //! delegating it elsewhere, so it is capped at what it was.
+    uint64_t signer_weight{0};
+    int64_t distributable{0};   //!< the round's value when it was created
+    uint16_t buckets{1};        //!< a power of two, 1..POS_ROUND_MAX_BUCKETS
+    uint256 salt;               //!< keys the bucket assignment
+    std::vector<unsigned char> paid; //!< bitmap of paid buckets
+
+    bool IsPaid(int b) const { return (paid[b / 8] >> (b % 8)) & 1; }
+    void SetPaid(int b) { paid[b / 8] |= (unsigned char)(1 << (b % 8)); }
+    int Unpaid() const
+    {
+        int n = 0;
+        for (int b = 0; b < buckets; ++b) n += !IsPaid(b);
+        return n;
+    }
+    friend bool operator==(const PosRound& a, const PosRound& b)
+    {
+        return a.epoch == b.epoch && a.weight == b.weight && a.signer_weight == b.signer_weight &&
+               a.distributable == b.distributable &&
+               a.buckets == b.buckets && a.salt == b.salt && a.paid == b.paid;
+    }
+};
+
 /** An unspent pot output: what a claim would sweep. `coinbase` says whether a
  *  coinbase created it (a block's fees) or a claim did (a re-pot of what it
- *  could not pay out): only the first is held to coinbase maturity. */
+ *  could not pay out): only the first is held to coinbase maturity. `round` is
+ *  set for a second-generation round output (PosRound) instead of a pot. */
 struct PosPotRef {
     CAsset asset;
     int64_t value{0};
     int height{0};
     bool coinbase{false};
+    std::optional<PosRound> round;
 };
 
 /** Seconds per leader slot under the legacy election, and wherever no separate
@@ -538,10 +580,10 @@ public:
     }
     //! A pot output entered the UTXO set.
     void AddUtxoPot(const CPubKey& signer, const COutPoint& out, const CAsset& asset,
-                    int64_t value, int height, bool coinbase)
+                    int64_t value, int height, bool coinbase, std::optional<PosRound> round = std::nullopt)
     {
         LOCK(m_mutex);
-        m_pot_utxo[signer][out] = PosPotRef{asset, value, height, coinbase};
+        m_pot_utxo[signer][out] = PosPotRef{asset, value, height, coinbase, std::move(round)};
     }
     //! A pot output left the UTXO set (claimed, or its creation reverted).
     void SubUtxoPot(const CPubKey& signer, const COutPoint& out)
@@ -669,8 +711,43 @@ int PosQuorum(size_t committee_size);
 
 /** The ACTUAL committee size under the public fixed-size committee:
  *  min(#eligible stakers, g_pos_committee_size). Depends only on the registry
- *  (the seed decides WHO is in the committee, not how many). */
+ *  (the seed decides WHO is in the committee, not how many). Counted in
+ *  members; from g_pos_hardening_height the committee is counted in SEATS
+ *  instead (PosPublicCommitteeSeats). */
 int PosPublicCommitteeSize(const StakeRegistry& registry);
+
+/** SEQUENTIA: from g_pos_hardening_height (the audit hardening fork) the public
+ *  committee holds g_pos_committee_size SEATS, apportioned to stakers in
+ *  proportion to stake, rather than one place per staker (audit A13). */
+bool PosSeatsActiveAt(int height);
+
+/** The public committee for a slot: its members, in bitfield order, and the
+ *  seats each holds. Below g_pos_hardening_height every member holds one seat and
+ *  the members are the schedule prefix (PosPublicCommittee's old rule).
+ *
+ *  From it, the g_pos_committee_size seats are apportioned among the eligible,
+ *  BLS-registered stakers by stake: each has a quota K*w/W, receives its whole
+ *  part, and the seats left over go to the fractional parts by one systematic
+ *  draw from the seed, so each staker's expected seats equal its quota exactly
+ *  and no staker gets more than one seat beyond its whole part. One place per
+ *  staker capped a large stake at a single seat and handed the remaining
+ *  seats almost uniformly to whoever held many small identities: a coalition
+ *  split into minimum-stake identities captured committees far beyond its
+ *  stake. Seats proportional to stake make splitting worthless. Members (the
+ *  stakers holding at least one seat) are ordered by their ticket for the
+ *  seed, which is also the order of the draw. */
+struct PosCommitteeSeats {
+    std::vector<CPubKey> members;
+    std::vector<int> seats;          //!< seats[i] belongs to members[i]
+    int total{0};                    //!< sum of seats
+};
+PosCommitteeSeats PosPublicCommitteeSeats(const StakeRegistry& registry, const uint256& seed, int height);
+
+/** Total seats of the public committee for a slot at `height`, which the quorum
+ *  is a strict majority of: min(g_pos_committee_size, eligible registered
+ *  stakers), as members below g_pos_hardening_height and as stake-apportioned
+ *  seats from it. */
+int PosPublicSeatTotal(const StakeRegistry& registry, int height);
 
 /** Countersignature quorum for an actual committee of k members under the
  *  public fixed-size committee: a strict majority, plus one when k is odd, so
@@ -683,15 +760,21 @@ int PosPublicQuorum(int k);
  *  actual size under g_pos_public_committee, else the fixed
  *  PosQuorum(g_pos_committee_size) of the nominal size. */
 int PosSlotQuorum(const StakeRegistry& registry);
+/** PosSlotQuorum for a block at `height`, in seats from g_pos_hardening_height. */
+int PosSlotQuorumAt(const StakeRegistry& registry, int height);
 
 /** The ordered public committee for a slot under g_pos_public_committee: the
  *  schedule prefix (PosSchedule order) restricted to BLS-registered stakers and
  *  capped at g_pos_committee_size. The ORDER is the bitfield index order of the
  *  certificate, so producer and validator must derive it identically. */
 std::vector<CPubKey> PosPublicCommittee(const StakeRegistry& registry, const uint256& seed);
+/** PosPublicCommittee for a block at `height`: the seat-holding members, in
+ *  bitfield order, from g_pos_hardening_height (PosPublicCommitteeSeats). */
+std::vector<CPubKey> PosPublicCommitteeAt(const StakeRegistry& registry, const uint256& seed, int height);
 
 /** The public committee for a slot as a set, for membership checks. */
 std::set<CPubKey> PosPublicCommitteeSet(const StakeRegistry& registry, const uint256& seed);
+std::set<CPubKey> PosPublicCommitteeSetAt(const StakeRegistry& registry, const uint256& seed, int height);
 
 /** Cap on the number of committee members a certificate may name (and a node
  *  collects shares for): the configured committee size under the public
@@ -768,6 +851,66 @@ CScript PosLeaderFeeScript(const CPubKey& leader);
 
 /** Compute the election seed for the block that would extend `pindexPrev`. */
 uint256 PosSeedForChild(const CBlockIndex* pindexPrev);
+
+/** Consensus::Params::pos_hardening_height, mirrored for code that has no chain
+ *  parameters to hand (set by chainparams). 0 = never. */
+extern int g_pos_hardening_height;
+
+/** SEQUENTIA (audit A12): block timestamps judged against the local clock.
+ *
+ *  Consensus bounds a block's time from below by its parent's (spacing, slot
+ *  gate, median time past) and from above only by each receiver's clock plus
+ *  MAX_FUTURE_BLOCK_TIME, two hours. A block stamped ahead of real time is
+ *  therefore valid, and every successor must be stamped after it. These are
+ *  node-side rules on top, none of them consensus:
+ *
+ *  - a producer whose parent is stamped ahead of its clock counts the spacing
+ *    and slot gate from when it SAW the parent, rather than waiting for its
+ *    clock to reach the parent's stamp (PosProposalStartMs);
+ *  - a committee member whose clock agrees with its peers' does not back a
+ *    proposal stamped more than POS_PROPOSAL_AHEAD_SECONDS beyond both its
+ *    clock and the earliest time consensus allows (PosProposalTooFarAhead);
+ *    with a doubtful clock it backs proposals as before, and says so. */
+static constexpr int64_t POS_PROPOSAL_AHEAD_SECONDS = 300;
+/** How closely the local clock must agree with the peers' median to be trusted. */
+static constexpr int64_t POS_CLOCK_AGREEMENT_SECONDS = 60;
+/** A parent stamped at most this far ahead of the local clock is ordinary skew,
+ *  scheduled from its stamp as before. */
+static constexpr int64_t POS_PARENT_AHEAD_SLACK_SECONDS = 5;
+
+/** Whether the local clock agrees with the peers' (`peer_offset`, the median of
+ *  their clocks minus ours, nullopt while too few have reported). */
+bool PosClockAgreesWithPeers(const std::optional<int64_t>& peer_offset);
+/** Whether a proposal stamped `stamp`, which consensus allows from
+ *  `consensus_min`, is too far in the future to back at local time `now`. Never
+ *  true with an untrusted clock. */
+bool PosProposalTooFarAhead(int64_t stamp, int64_t consensus_min, int64_t now, bool clock_trusted);
+/** When a producer may propose (ms): at `earliest_sec`, the earliest stamp
+ *  consensus allows; or, when the parent is stamped ahead of the local clock,
+ *  the same interval after `parent_seen_ms`, the moment this node saw it. */
+int64_t PosProposalStartMs(int64_t parent_time, int64_t earliest_sec, int64_t parent_seen_ms, int64_t now_ms);
+
+/** Consensus::Params::pos_records_v2_height, mirrored like the one above.
+ *  0 = never. */
+extern int g_pos_records_v2_height;
+
+/** Whether `script` is a stake record a signature spends: a staking output,
+ *  an unbonding output, a delegation record or a payout record. From
+ *  pos_records_v2_height these are spent under SCRIPT_SEQ_RECORD_INPUT (audit
+ *  M4). The pot, which no signature spends, is not one. */
+bool IsSignedPosRecordScript(const CScript& script);
+
+/** The seed the payout draws (lottery winner, commission) of the block that
+ *  would extend `pindexPrev` use. Below g_pos_hardening_height it is the
+ *  election seed, which the PARENT's anchor fixes, so the parent's producer,
+ *  choosing among the recent Bitcoin blocks it could anchor to, could compute
+ *  the next block's draw for each and pick the one paying itself or a friend
+ *  (audit T2-PAY-1). From that height it is fixed by the anchor of the block
+ *  three below: whoever chose that anchor could not know who would lead the
+ *  block it decides, since two elections that depend on anchors others choose
+ *  lie in between. Only that one anchor feeds it; mixing in the parent's would
+ *  hand the lever back. */
+uint256 PosPayoutSeedForChild(const CBlockIndex* pindexPrev);
 
 // --- VRF sortition (g_pos_vrf; doc/sequentia/04-proof-of-stake.md §4) ---
 
@@ -935,6 +1078,10 @@ struct PosBlsBitfieldCert {
     std::vector<unsigned char> leader_sig;  //!< the leader's ECDSA signature over the block hash
     std::vector<unsigned char> agg_sig;     //!< 96-byte BLS aggregate of the signers' shares
     std::vector<unsigned char> bitfield;    //!< bit i set == committee[i] signed (LSB-first)
+    //! From g_pos_hardening_height: the seats the signers hold together, carried so
+    //! that a header alone tells how much of the committee certified it. Checked
+    //! against the registry when the block connects. -1 when absent.
+    int seats{-1};
 };
 
 /** Encode a bitfield BLS certificate into a block proof solution:
@@ -942,7 +1089,8 @@ struct PosBlsBitfieldCert {
  *  The signed block hash excludes the solution, so it is member-independent. */
 CScript BuildPosBlsBitfieldSolution(const std::vector<unsigned char>& leader_sig,
                                     const std::vector<unsigned char>& agg_sig,
-                                    const std::vector<unsigned char>& bitfield);
+                                    const std::vector<unsigned char>& bitfield,
+                                    int seats = -1);
 
 /** Decode a bitfield BLS certificate solution, or nullopt if malformed. */
 std::optional<PosBlsBitfieldCert> ParsePosBlsBitfieldSolution(const CScript& solution);
@@ -1078,6 +1226,12 @@ CScript BuildDelegationScript(const CPubKey& controller, const CPubKey& signer);
  *  greatest activation <= h; older records linger harmlessly until spent. */
 CScript BuildPayoutScript(const CPubKey& signer, const PosPayoutPolicy& policy);
 
+/** Whether `policy` is the signer's payout policy in force at `height`, as the
+ *  registry stands before that block. From pos_hardening_height that record may
+ *  not be spent: removing it would end the policy with no notice. */
+bool PosPayoutInForce(const StakeRegistry& registry, const CPubKey& signer,
+                      const PosPayoutPolicy& policy, int64_t height);
+
 /** SEQUENTIA split payouts: the POT, where a split pool's block rewards
  *  accumulate until a claim distributes them.
  *
@@ -1105,6 +1259,48 @@ struct PotOut {
 };
 std::optional<PotOut> PotFromTxOut(const CTxOut& out);
 
+/** Blocks per split-payout epoch (Consensus::Params::pos_split_epoch, mirrored).
+ *  A round holds the pots of one epoch and pays those who stood behind the pool
+ *  when the epoch began. */
+extern int g_pos_split_epoch;
+static constexpr int DEFAULT_POS_SPLIT_EPOCH = 1440;
+/** A round's buckets hold about this many delegators each. */
+static constexpr size_t POS_ROUND_BUCKET_TARGET = 32;
+/** At most this many buckets (the bitmap is 256 bytes). Beyond 65,536
+ *  delegators a bucket holds more than the target. */
+static constexpr int POS_ROUND_MAX_BUCKETS = 2048;
+
+/** The round script:
+ *      <"SEQRND"> OP_DROP <signer_pubkey> OP_DROP <round data> OP_DROP OP_TRUE
+ *  Anyone-can-spend at the script layer, like the pot: the claim rules are the
+ *  whole spend condition. */
+CScript BuildRoundScript(const CPubKey& signer, const PosRound& round);
+std::optional<std::pair<CPubKey, PosRound>> ParseRoundScript(const CScript& script);
+struct RoundOut {
+    CPubKey signer;
+    CAsset asset;
+    int64_t value{0};
+    PosRound round;
+};
+/** The round a txout carries, explicit outputs only. Consensus recognises one
+ *  only when it was created at or above pos_records_v2_height (PosSplitV2Coin). */
+std::optional<RoundOut> RoundFromTxOut(const CTxOut& out);
+/** Whether a pot or round output created at `coin_height` follows the second
+ *  generation's rules. */
+bool PosSplitV2Coin(uint32_t coin_height);
+/** Buckets for a round of `participants` delegators. */
+int PosRoundBucketCount(size_t participants);
+/** The bucket `controller` falls in. */
+int PosRoundBucket(const uint256& salt, const CPubKey& controller, int buckets);
+/** A new round's salt: a hash of the pot outpoints it was made from, sorted.
+ *  Unknown when the delegators' keys were fixed (before the epoch began), so
+ *  nobody can arrange to share a bucket with a victim. */
+uint256 PosRoundSalt(const std::vector<COutPoint>& sorted_pots);
+/** What paying `bucket` of `round` owes each of its delegators, by the registry
+ *  as it stands: floor(99% of the round's value at creation x weight / the
+ *  round's weight), for shares of at least POS_SPLIT_MIN_PAYOUT. */
+std::map<CPubKey, int64_t> PosRoundBucketOwed(const CPubKey& signer, const PosRound& round, int bucket);
+
 /** The smallest per-delegator payment a claim may make, in atoms. A consensus
  *  constant rather than the (node-configurable) relay dust: every validator
  *  must agree on which delegators a claim must pay. Shares below this roll
@@ -1128,6 +1324,15 @@ static const int64_t POS_SPLIT_RESERVE_DENOM = 100;
  *  must pay, per delegator per asset, plus what was swept per asset. Pure
  *  function of the registry (itself a pure function of the UTXO set), so the
  *  claim builder and every validator compute identical numbers. */
+/** From g_pos_hardening_height, a pot created at or above it is shared among at
+ *  most this many of the pool's delegators: the largest by lent weight (ties by
+ *  key), in proportion among themselves. A claim pays every participant in one
+ *  transaction, one output each (~264 weight units), so with no bound a pool of
+ *  ~1,500 delegators had a pot no block could hold, and anyone could lock a pool
+ *  that way with dust delegations; even below that, distributions crowded out
+ *  ordinary transactions. 100 participants cost about a fifteenth of a block. */
+static constexpr size_t POS_SPLIT_MAX_PARTICIPANTS = 100;
+
 struct PosPotShares {
     std::map<CPubKey, std::map<CAsset, int64_t>> owed;
     std::map<CAsset, int64_t> swept;
@@ -1140,7 +1345,7 @@ PosPotShares PosComputePotShares(const CPubKey& signer,
  *  true for any transaction that spends no pot output. */
 class Coin;
 bool CheckPosPotClaim(const CTransaction& tx, const std::vector<Coin>& spent_coins,
-                      std::string& reason);
+                      int spend_height, std::string& reason);
 
 /** The (signer, policy) a payout-record script names, or nullopt. */
 std::optional<std::pair<CPubKey, PosPayoutPolicy>> ParsePayoutScript(const CScript& script);
@@ -1165,10 +1370,25 @@ CScript PosRequiredCoinbaseScript(const CPubKey& leader, int64_t height, const u
  *  script is not of the canonical form. */
 std::optional<std::pair<CPubKey, CPubKey>> ParseDelegationScript(const CScript& script);
 
+/** Whether `spent` (the coins a transaction spends) include one only `key` can
+ *  spend: a P2PK, P2PKH or P2WPKH output of the key, its staking or unbonding
+ *  output, or a delegation or payout record it controls. From
+ *  pos_hardening_height a delegation record may only be created by a
+ *  transaction that spends such a coin of its controller, and a payout record
+ *  by one that spends such a coin of its signer: both records direct what the
+ *  key's stake earns or decides, and anyone could otherwise create them. */
+bool PosTxSpendsKey(const CPubKey& key, const std::vector<Coin>& spent);
+
 /** The (controller, signer) a txout registers, or nullopt if it is not a
  *  delegation record. Value and asset are unconstrained: the record carries no
  *  weight of its own, it only re-points weight the staking outputs already hold. */
 std::optional<std::pair<CPubKey, CPubKey>> DelegationFromTxOut(const CTxOut& out);
+
+/** Whether `out` gives stake weight to an uncompressed (65-byte) key: a staking
+ *  output of one, or a delegation to one as signer. Such a key can never prove a
+ *  VRF output, so the weight could never produce and only diluted everyone
+ *  else's slots (audit CC5). Refused from pos_hardening_height. */
+bool PosOutputWeightsUncompressedKey(const CTxOut& out);
 
 /** A parsed staking script. bls_pubkey/bls_pop are empty when the output carries
  *  no committee registration (the old form, or a leader-only staker).

@@ -5,10 +5,13 @@
 #include <anchor.h>
 
 #include <chain.h>
+#include <clientversion.h>
+#include <fs.h>
 #include <logging.h>
 #include <mainchainrpc.h>
 #include <pos.h>
 #include <primitives/bitcoin/block.h>
+#include <rpc/protocol.h>
 #include <script/script.h>
 #include <shutdown.h>
 #include <streams.h>
@@ -16,12 +19,16 @@
 #include <tinyformat.h>
 #include <util/strencodings.h>
 #include <util/system.h>
+#include <util/time.h>
 #include <validation.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <map>
+#include <mutex>
 #include <set>
+#include <tuple>
 
 bool g_validate_anchor = true;
 std::atomic<bool> g_anchor_unvalidated_by_prompt{false};
@@ -73,9 +80,18 @@ int64_t GetLastPosFinalForkRejectionTime()
 namespace {
 
 Mutex g_anchor_mutex;
-//! Checkpoints observed on the parent chain, keyed by Sequentia block hash;
-//! only the earliest commitment per block is kept.
-std::map<uint256, PosCheckpoint> g_pos_checkpoints GUARDED_BY(g_anchor_mutex);
+//! Checkpoints observed on the parent chain, one entry per COMMITMENT: keyed by
+//! the Sequentia block and height it names and the parent block carrying it.
+//! Keeping only the earliest commitment per Sequentia block let anyone posting
+//! the block's hash with a wrong height first, or a Bitcoin reorg orphaning the
+//! first commitment, shut out every later honest one for good. Each is judged
+//! on its own in UpdatePosFinality; the bogus and the orphaned simply never
+//! qualify. Persisted (SavePosCheckpointState), so a restart keeps the floor.
+using PosCheckpointKey = std::tuple<uint256, uint32_t, uint256>;
+std::map<PosCheckpointKey, PosCheckpoint> g_pos_checkpoints GUARDED_BY(g_anchor_mutex);
+//! Bound on the commitments held: each one costs its poster a parent-chain
+//! transaction, but nothing else stops the set from growing.
+constexpr size_t POS_CHECKPOINTS_MAX = 100000;
 //! The current finality point (highest checkpointed-and-buried block on the
 //! active chain). Height -1 = none.
 int g_pos_finalized_height GUARDED_BY(g_anchor_mutex) = -1;
@@ -98,8 +114,9 @@ const unsigned char POS_CKPT_TAG[7] = {'S', 'E', 'Q', 'C', 'K', 'P', 'T'};
 //! DropAnchorCachesAbove).
 std::set<std::pair<uint32_t, uint256>> g_anchor_ok_cache GUARDED_BY(g_anchor_mutex);
 //! Anchors confirmed DEFINITIVELY off the parent chain's best chain
-//! (STALE/NOT_FOUND/HEIGHT_MISMATCH — never NO_CONNECTION, which is
-//! indeterminate). This lets the recovery loop run every tick without
+//! (STALE/HEIGHT_MISMATCH — never NO_CONNECTION, which is indeterminate, and
+//! never NOT_FOUND: a daemon that does not know a block today may well know it
+//! tomorrow, so that answer lives in g_anchor_unknown below). This lets the recovery loop run every tick without
 //! re-hitting bitcoind for the same permanently-orphaned anchors, avoiding a
 //! self-inflicted RPC storm.
 //!
@@ -108,6 +125,13 @@ std::set<std::pair<uint32_t, uint256>> g_anchor_ok_cache GUARDED_BY(g_anchor_mut
 //! (see MainchainUnchangedHeight for why that is sound, and for what it costs
 //! when it is not).
 std::set<std::pair<uint32_t, uint256>> g_anchor_stale_cache GUARDED_BY(g_anchor_mutex);
+//! Anchors a fully synced daemon said it does not know, with when it said so.
+//! Kept briefly, and dropped on any parent tip move, so a peer replaying one
+//! unknown anchor costs one RPC per minute rather than one per header, while
+//! a block the daemon merely had not seen yet is re-asked about soon.
+std::map<std::pair<uint32_t, uint256>, int64_t> g_anchor_unknown GUARDED_BY(g_anchor_mutex);
+constexpr int64_t ANCHOR_UNKNOWN_TTL_SECONDS = 60;
+constexpr size_t ANCHOR_UNKNOWN_MAX = 10000;
 //! Ceiling on the OK cache. It is no longer emptied every parent tip change, so
 //! it grows by roughly one entry per parent-chain block for the life of the
 //! chain (~52k/year against Bitcoin, a few MB). The cap only exists so the
@@ -183,6 +207,44 @@ bool GetMainchainBlockCount(int& count)
     } catch (const std::exception& e) {
         return false;
     }
+}
+
+//! How recently MainchainSyncedTo asked, and what the daemon said.
+int64_t g_mainchain_sync_checked GUARDED_BY(g_anchor_mutex){0};
+int g_mainchain_sync_blocks GUARDED_BY(g_anchor_mutex){-1};
+constexpr int64_t MAINCHAIN_SYNC_RECHECK_SECONDS = 10;
+
+//! Whether the parent daemon has finished its initial sync and validated a
+//! best chain reaching `height`. Only then does "I do not know this block" say
+//! anything about the block: a daemon that is still syncing, or restarting,
+//! answers the same for every block it has not reached yet, including the ones
+//! our whole valid chain is anchored to. Answered from a short-lived snapshot,
+//! since every anchor the watcher walks would otherwise ask again.
+bool MainchainSyncedTo(uint32_t height) EXCLUSIVE_LOCKS_REQUIRED(!g_anchor_mutex)
+{
+    const int64_t now = GetTime();
+    {
+        LOCK(g_anchor_mutex);
+        if (now - g_mainchain_sync_checked < MAINCHAIN_SYNC_RECHECK_SECONDS) {
+            return g_mainchain_sync_blocks >= 0 && (int64_t)height <= g_mainchain_sync_blocks;
+        }
+    }
+    int blocks = -1;
+    try {
+        const UniValue reply = CallMainChainRPC("getblockchaininfo", UniValue(UniValue::VARR));
+        const UniValue result = find_value(reply, "result");
+        if (find_value(reply, "error").isNull() && result.isObject()) {
+            const UniValue ibd = find_value(result.get_obj(), "initialblockdownload");
+            const UniValue count = find_value(result.get_obj(), "blocks");
+            if (ibd.isBool() && !ibd.get_bool() && count.isNum()) blocks = count.get_int();
+        }
+    } catch (const std::exception&) {
+        // Unreachable: nothing can be concluded, which is what -1 says.
+    }
+    LOCK(g_anchor_mutex);
+    g_mainchain_sync_checked = now;
+    g_mainchain_sync_blocks = blocks;
+    return blocks >= 0 && (int64_t)height <= blocks;
 }
 
 //! Bounds the backwards walk that locates the fork point after a parent-chain
@@ -273,6 +335,9 @@ int MainchainUnchangedHeight(const uint256& old_tip)
 
     uint256 cursor = old_tip;
     for (int depth = 0; depth <= ANCHOR_FORK_WALK_MAX; ++depth) {
+        // Up to one RPC per step: give way to shutdown, which joins this
+        // thread. Dropping every cached verdict is always safe.
+        if (ShutdownRequested()) return -1;
         MainchainHeaderInfo info;
         if (!GetMainchainHeaderInfo(cursor, info)) {
             // Unreachable daemon, or a hash it does not know (e.g. the node was
@@ -302,6 +367,8 @@ int MainchainUnchangedHeight(const uint256& old_tip)
 //! fallback for the moves that could not be classified.
 void DropAnchorCachesAbove(int unchanged_height) EXCLUSIVE_LOCKS_REQUIRED(g_anchor_mutex)
 {
+    // The daemon may have learned any block at all: forget every "unknown".
+    g_anchor_unknown.clear();
     if (unchanged_height < 0) {
         g_anchor_ok_cache.clear();
         g_anchor_stale_cache.clear();
@@ -392,6 +459,74 @@ void ScanNewMainchainBlocks(ChainstateManager& chainman, const uint256& new_tip)
 //! Defined below: recompute the checkpoint finality point and conflicts.
 void UpdatePosFinality(ChainstateManager& chainman, int btc_tip_height);
 
+//! The checkpoint state that has to survive a restart: every commitment seen,
+//! and how far the parent chain has been scanned for them. Held only in memory,
+//! a restart dropped the finality floor, and the first pass afterwards scans
+//! only -poscheckpointscan parent blocks, so checkpoints older than that window
+//! never came back: the long-range defense silently stopped existing for any
+//! node that had restarted. The floor itself is not stored; it is re-derived
+//! from these, against the parent chain as it is now, by UpdatePosFinality.
+static constexpr uint32_t POS_CHECKPOINT_FILE_VERSION = 1;
+
+fs::path PosCheckpointFile() { return gArgs.GetDataDirNet() / "poscheckpoints.dat"; }
+
+void SavePosCheckpointState() EXCLUSIVE_LOCKS_REQUIRED(!g_anchor_mutex)
+{
+    std::vector<PosCheckpoint> entries;
+    uint256 cursor;
+    {
+        LOCK(g_anchor_mutex);
+        entries.reserve(g_pos_checkpoints.size());
+        for (const auto& e : g_pos_checkpoints) entries.push_back(e.second);
+        cursor = g_last_checkpoint_scan_tip;
+    }
+    const fs::path path = PosCheckpointFile();
+    const fs::path tmp = fs::PathFromString(fs::PathToString(path) + ".new");
+    try {
+        CAutoFile file(fsbridge::fopen(tmp, "wb"), SER_DISK, CLIENT_VERSION);
+        if (file.IsNull()) throw std::runtime_error("cannot open for writing");
+        file << POS_CHECKPOINT_FILE_VERSION << cursor << (uint64_t)entries.size();
+        for (const PosCheckpoint& c : entries) {
+            file << c.seq_hash << c.seq_height << c.btc_height << c.btc_hash;
+        }
+        if (!FileCommit(file.Get())) throw std::runtime_error("cannot flush");
+        file.fclose();
+        if (!RenameOver(tmp, path)) throw std::runtime_error("cannot rename");
+    } catch (const std::exception& e) {
+        LogPrintf("WARNING: could not save the PoS checkpoints to %s: %s\n", fs::PathToString(path), e.what());
+    }
+}
+
+void LoadPosCheckpointState() EXCLUSIVE_LOCKS_REQUIRED(!g_anchor_mutex)
+{
+    const fs::path path = PosCheckpointFile();
+    CAutoFile file(fsbridge::fopen(path, "rb"), SER_DISK, CLIENT_VERSION);
+    if (file.IsNull()) return; // first start, or none seen yet
+    try {
+        uint32_t version;
+        uint256 cursor;
+        uint64_t count;
+        file >> version;
+        if (version != POS_CHECKPOINT_FILE_VERSION) throw std::runtime_error("unknown version");
+        file >> cursor >> count;
+        std::map<PosCheckpointKey, PosCheckpoint> loaded;
+        for (uint64_t i = 0; i < count && loaded.size() < POS_CHECKPOINTS_MAX; ++i) {
+            PosCheckpoint c;
+            file >> c.seq_hash >> c.seq_height >> c.btc_height >> c.btc_hash;
+            loaded.emplace(PosCheckpointKey{c.seq_hash, c.seq_height, c.btc_hash}, c);
+        }
+        LOCK(g_anchor_mutex);
+        for (auto& [key, c] : loaded) g_pos_checkpoints.emplace(key, c);
+        if (g_last_checkpoint_scan_tip.IsNull()) g_last_checkpoint_scan_tip = cursor;
+        LogPrintf("PoS: loaded %u parent-chain checkpoint commitments from %s\n",
+                  (unsigned)loaded.size(), fs::PathToString(path));
+    } catch (const std::exception& e) {
+        // A damaged file costs what the old in-memory design cost on every
+        // restart: the checkpoints are found again by scanning.
+        LogPrintf("WARNING: ignoring unreadable %s: %s\n", fs::PathToString(path), e.what());
+    }
+}
+
 } // namespace
 
 int64_t g_pos_escape_stall_mtp_gap = DEFAULT_POS_ESCAPE_STALL_MTP_GAP;
@@ -465,9 +600,10 @@ static void CacheAnchorVerdict(uint32_t height, const uint256& hash, AnchorCheck
                           (unsigned)ANCHOR_OK_CACHE_MAX);
             }
         }
-    } else if (res != AnchorCheckResult::NO_CONNECTION) {
+    } else if (res == AnchorCheckResult::STALE || res == AnchorCheckResult::HEIGHT_MISMATCH) {
         // A definitive off-best-chain verdict. NO_CONNECTION is not a verdict
-        // and must never be memoized as one.
+        // and must never be memoized as one; NOT_FOUND is only ever kept
+        // briefly (g_anchor_unknown), by the caller that checked it.
         g_anchor_stale_cache.emplace(height, hash);
     }
 }
@@ -480,9 +616,19 @@ static void CacheAnchorVerdict(uint32_t height, const uint256& hash, AnchorCheck
 AnchorCheckResult InterpretAnchorHeaderReply(const UniValue& reply, uint32_t height)
 {
     const UniValue errval = find_value(reply, "error");
-    if (!errval.isNull()) return AnchorCheckResult::NOT_FOUND;
+    if (!errval.isNull()) {
+        // Only "block not found" says anything about the block. Every other
+        // error -- RPC_IN_WARMUP while the daemon restarts, a full work
+        // queue, a misconfigured call -- is the daemon failing to answer, and
+        // must not be read (or remembered) as a verdict that the block is off
+        // its chain: that turned a bitcoind restart into the node rejecting,
+        // and the watcher tearing down, its own valid history.
+        const UniValue code = errval.isObject() ? find_value(errval.get_obj(), "code") : UniValue();
+        return code.isNum() && code.get_int() == RPC_INVALID_ADDRESS_OR_KEY ? AnchorCheckResult::NOT_FOUND
+                                                                           : AnchorCheckResult::NO_CONNECTION;
+    }
     const UniValue result = find_value(reply, "result");
-    if (!result.isObject()) return AnchorCheckResult::NOT_FOUND;
+    if (!result.isObject()) return AnchorCheckResult::NO_CONNECTION;
     const UniValue confirmations = find_value(result.get_obj(), "confirmations");
     // confirmations == -1 means the block is not on the best chain
     if (!confirmations.isNum() || confirmations.get_int64() < 1) return AnchorCheckResult::STALE;
@@ -556,12 +702,28 @@ AnchorCheckResult CheckMainchainAnchor(uint32_t height, const uint256& hash)
         // and such a reorganization drops this entry (DropAnchorCachesAbove), so
         // while the entry is here it is still true and needs no RPC.
         if (g_anchor_stale_cache.count({height, hash})) return AnchorCheckResult::STALE;
+        auto unknown = g_anchor_unknown.find({height, hash});
+        if (unknown != g_anchor_unknown.end()) {
+            if (GetTime() - unknown->second < ANCHOR_UNKNOWN_TTL_SECONDS) return AnchorCheckResult::NOT_FOUND;
+            g_anchor_unknown.erase(unknown);
+        }
     }
     try {
         UniValue params(UniValue::VARR);
         params.push_back(hash.GetHex());
         const UniValue reply = CallMainChainRPC("getblockheader", params);
-        const AnchorCheckResult res = InterpretAnchorHeaderReply(reply, height);
+        AnchorCheckResult res = InterpretAnchorHeaderReply(reply, height);
+        if (res == AnchorCheckResult::NOT_FOUND) {
+            // A daemon that has not synced to this height yet does not know
+            // the block because it has not got there: indeterminate, not a
+            // verdict (the watcher would otherwise invalidate our valid chain
+            // against a lagging or freshly started daemon).
+            if (!MainchainSyncedTo(height)) return AnchorCheckResult::NO_CONNECTION;
+            LOCK(g_anchor_mutex);
+            if (g_anchor_unknown.size() >= ANCHOR_UNKNOWN_MAX) g_anchor_unknown.clear();
+            g_anchor_unknown[{height, hash}] = GetTime();
+            return res;
+        }
         if (res != AnchorCheckResult::OK) {
             // Memoize a DEFINITIVE off-best-chain verdict so the every-tick
             // recovery loop does not re-ask about the same orphaned anchor for
@@ -887,6 +1049,10 @@ void AnchorWatchTask(ChainstateManager& chainman)
     // Nothing worth starting on the way down; see the phase-2 verdict loop for
     // why abandoning a tick costs nothing.
     if (ShutdownRequested()) return;
+    // The checkpoints and scan position saved by the previous run, before the
+    // first tick derives a finality floor from them.
+    static std::once_flag checkpoints_loaded;
+    std::call_once(checkpoints_loaded, LoadPosCheckpointState);
 
     uint256 best;
     if (!GetMainchainBestBlockHash(best)) return;
@@ -1026,6 +1192,20 @@ void AnchorWatchTask(ChainstateManager& chainman)
                       anchor_hash.ToString(), anchor_height, hash.ToString());
             {
                 LOCK(cs_main);
+                // ResetBlockFailureFlags also clears every ancestor's failure
+                // marks, as reconsiderblock does. Those are not ours to clear
+                // when the failure is not the watcher's: an ancestor an operator
+                // invalidated (invalidateblock) or that failed validation stays
+                // failed, and so does this branch above it.
+                bool foreign_failure = false;
+                for (const CBlockIndex* a = pindex->pprev; a != nullptr && !foreign_failure; a = a->pprev) {
+                    foreign_failure = (a->nStatus & BLOCK_FAILED_VALID) && !(a->nStatus & BLOCK_FAILED_ANCHOR);
+                }
+                if (foreign_failure) {
+                    LogPrint(BCLog::VALIDATION, "Anchor watcher: not reconsidering %s: an ancestor was invalidated for another reason\n",
+                             hash.ToString());
+                    continue;
+                }
                 // ResetBlockFailureFlags also clears the BLOCK_FAILED_ANCHOR marker.
                 chainman.ActiveChainstate().ResetBlockFailureFlags(pindex);
             }
@@ -1234,6 +1414,22 @@ void AnchorWatchTask(ChainstateManager& chainman)
             return;
         }
         {
+            // InvalidateBlock stops between blocks when shutdown is requested
+            // and still reports success. Then the target is still connected
+            // and some of its descendants are failed with no provenance marker,
+            // which no restart or later tick would ever reconsider: the node
+            // would sit below the network for good. Undo the partial work
+            // instead; the next start re-derives the verdict from scratch.
+            LOCK(cs_main);
+            if (chainman.ActiveChain().Contains(pindex_bad)) {
+                LogPrintf("Anchor watcher: invalidation of %s was interrupted; undoing it so the next start can redo it\n",
+                          lowest_bad.ToString());
+                chainman.ActiveChainstate().ResetBlockFailureFlags(pindex_bad);
+                chainman.m_anchor_invalidating = nullptr;
+                return;
+            }
+        }
+        {
             LOCK(g_anchor_mutex);
             g_anchor_invalidated.insert(lowest_bad);
         }
@@ -1397,14 +1593,21 @@ void RecordCheckpointIfPresent(const CScript& script, int btc_height, const uint
     auto parsed = ParseCheckpointPayload(data);
     if (!parsed) return;
 
-    LOCK(g_anchor_mutex);
-    // Keep the earliest commitment for a given block.
-    auto it = g_pos_checkpoints.find(parsed->first);
-    if (it == g_pos_checkpoints.end() || it->second.btc_height > btc_height) {
-        g_pos_checkpoints[parsed->first] = PosCheckpoint{parsed->first, parsed->second, btc_height, btc_hash};
+    {
+        LOCK(g_anchor_mutex);
+        const PosCheckpointKey key{parsed->first, parsed->second, btc_hash};
+        if (g_pos_checkpoints.count(key)) return;
+        if (g_pos_checkpoints.size() >= POS_CHECKPOINTS_MAX) {
+            // Make room by forgetting the oldest commitment on the parent chain.
+            auto oldest = std::min_element(g_pos_checkpoints.begin(), g_pos_checkpoints.end(),
+                                           [](const auto& a, const auto& b) { return a.second.btc_height < b.second.btc_height; });
+            g_pos_checkpoints.erase(oldest);
+        }
+        g_pos_checkpoints.emplace(key, PosCheckpoint{parsed->first, parsed->second, btc_height, btc_hash});
         LogPrintf("PoS: observed checkpoint for block %s (height %u) committed in parent block %s (height %d)\n",
                   parsed->first.ToString(), parsed->second, btc_hash.ToString(), btc_height);
     }
+    SavePosCheckpointState();
 }
 
 //! Record every tagged checkpoint OP_RETURN in one already-parsed parent block.
@@ -1582,9 +1785,13 @@ void UpdatePosFinality(ChainstateManager& chainman, int btc_tip_height)
         // height: checkpoints lock in validated history, never replace it.
         bool on_active_chain = false;
         bool chain_reached_height = false;
+        bool known_elsewhere = false;
         {
             LOCK(cs_main);
             const CBlockIndex* pindex = chainman.m_blockman.LookupBlockIndex(ckpt.seq_hash);
+            // A commitment naming a block we know, at a height it is not at, is
+            // bogus by construction (a block's height is fixed by its hash).
+            known_elsewhere = pindex != nullptr && (uint32_t)pindex->nHeight != ckpt.seq_height;
             on_active_chain = pindex != nullptr && (uint32_t)pindex->nHeight == ckpt.seq_height &&
                               chainman.ActiveChain().Contains(pindex);
             const CBlockIndex* tip = chainman.ActiveChain().Tip();
@@ -1595,7 +1802,7 @@ void UpdatePosFinality(ChainstateManager& chainman, int btc_tip_height)
                 best_height = (int)ckpt.seq_height;
                 best_hash = ckpt.seq_hash;
             }
-        } else if (chain_reached_height) {
+        } else if (chain_reached_height && !known_elsewhere) {
             // Fresh-sync / long-range alarm: a buried, parent-canonical
             // checkpoint commits a block we do NOT have at a height our chain
             // already passed. Either we are on the losing side of a
@@ -1750,6 +1957,7 @@ void ScanNewMainchainBlocks(ChainstateManager& chainman, const uint256& new_tip)
         if (outcome == WindowScan::Complete) g_last_checkpoint_scan_tip = new_tip;
         g_last_btc_tip_height = tip_height;
     }
+    if (outcome == WindowScan::Complete) SavePosCheckpointState();
     UpdatePosFinality(chainman, tip_height);
 }
 

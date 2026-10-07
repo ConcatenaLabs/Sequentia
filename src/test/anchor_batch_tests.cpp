@@ -137,11 +137,23 @@ BOOST_AUTO_TEST_CASE(one_headers_reply_yields_one_verdict)
     err.pushKV("error", e);
     BOOST_CHECK(InterpretAnchorHeaderReply(err, 800000) == AnchorCheckResult::NOT_FOUND);
 
-    // A reply with no usable result is NOT quietly an OK.
+    // Any other error is the daemon failing to answer, not a verdict on the
+    // block: RPC_IN_WARMUP while bitcoind restarts must never read as "this
+    // anchor is off the chain", or the node turns on its own valid history.
+    UniValue warmup(UniValue::VOBJ);
+    UniValue w(UniValue::VOBJ);
+    w.pushKV("code", -28);
+    w.pushKV("message", "Loading block index...");
+    warmup.pushKV("result", NullUniValue);
+    warmup.pushKV("error", w);
+    BOOST_CHECK(InterpretAnchorHeaderReply(warmup, 800000) == AnchorCheckResult::NO_CONNECTION);
+
+    // A reply with no usable result is NOT quietly an OK, and not a verdict
+    // either.
     UniValue empty(UniValue::VOBJ);
     empty.pushKV("result", NullUniValue);
     empty.pushKV("error", NullUniValue);
-    BOOST_CHECK(InterpretAnchorHeaderReply(empty, 800000) == AnchorCheckResult::NOT_FOUND);
+    BOOST_CHECK(InterpretAnchorHeaderReply(empty, 800000) == AnchorCheckResult::NO_CONNECTION);
 
     // Missing fields must not read as canonical either.
     UniValue no_conf(UniValue::VOBJ);

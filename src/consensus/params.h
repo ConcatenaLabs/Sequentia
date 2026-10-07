@@ -428,6 +428,31 @@ struct Params {
     {
         return pos_unbond_height > 0 && height >= pos_unbond_height;
     }
+    //! SEQUENTIA: the October 2026 audit's consensus fixes, all from one
+    //! height so the network cuts over once. Restrictions (soft-fork shaped):
+    //! a delegation record must be authorised by its controller; at most one
+    //! supervision rotation per (asset, role) per block; a block may not spend
+    //! a stake record and re-create it identically; the anchor's parent-chain
+    //! check is skipped only when height AND hash repeat the parent's; no
+    //! issuance rides on a supervision record input. 0 = off.
+    int pos_hardening_height{0};
+    bool PosHardeningActiveAt(int height) const
+    {
+        return pos_hardening_height > 0 && height >= pos_hardening_height;
+    }
+    //! SEQUENTIA: the second generation of stake records, from one height.
+    //! A signature spending a staking, unbonding, delegation or payout output
+    //! commits to the amount it spends (the segwit-v0 signature hash) and the
+    //! spend's scriptSig is canonical, so a signer that sees only the
+    //! transaction cannot be lied to about the fee, and no third party can
+    //! change the txid (audit M4). And split pools pay their delegators in
+    //! rounds, a bucket at a time, with no bound on their number (PosRound,
+    //! audit A11). 0 = off.
+    int pos_records_v2_height{0};
+    bool PosRecordsV2ActiveAt(int height) const
+    {
+        return pos_records_v2_height > 0 && height >= pos_records_v2_height;
+    }
     //! SEQUENTIA: the one-time UTXO-set rewrite this chain applies, if any.
     //! Empty (height 0) on every chain but the one it was written for -- see the
     //! UtxoRecovery comment above and CTestNetParams in chainparams.cpp.

@@ -51,8 +51,9 @@ operator-permissioned — the opposite of the point, which is that nobody's payo
 depends on the operator staying interested.
 
 **Commission** reuses the lottery's own mechanism: a `commission_bp`/10000
-chance, drawn from the unbiasable election seed (Bitcoin's proof of work), that
-the block pays the leader instead of the pot. Exact in expectation, it keeps the
+chance, drawn from the payout seed (from the hardening fork, fixed by the anchor
+of the block three below; `PosPayoutSeedForChild`), that the block pays the
+leader instead of the pot. Exact in expectation, it keeps the
 coinbase a single required script, and it needs no claim-time policy lookup —
 which closes a rug: commission taken at claim time under "the policy in force
 now" would let an operator raise it against rewards already earned.
@@ -129,6 +130,63 @@ claim that rolls everything forward and pays nobody may withhold nothing.
 - The signer's own stake participates like any delegator's (as in the lottery).
   One corner is approximate in its favour only: a signer that had delegated its
   own weight elsewhere at pot time and reclaimed it since is counted.
+
+## Second generation: rounds, paid a bucket at a time
+
+The first generation pays every delegator of the swept pots in one transaction.
+A claim therefore grows with the pool, and past roughly 1,500 delegators no
+block could hold one: the pot was locked, and anyone could lock a pool that way
+with dust delegations (audit A11). The hardening fork capped the participants at
+the 100 heaviest as a stopgap. From `pos_records_v2_height` the cap is gone.
+
+**Rounds.** A pool's pots are grouped by **epoch** (`pos_split_epoch` blocks,
+1,440 on the real chains, about a day) and asset. A claim turns the mature pots
+of one (epoch, asset) into a **round**, an output
+
+```
+<"SEQRND"> OP_DROP <signer> OP_DROP <round data> OP_DROP OP_TRUE
+```
+
+whose data fixes, once and for all: the epoch, the total eligible weight `W`,
+the round's value at creation `D`, a bucket count and a salt, followed by a
+bitmap of paid buckets. Anyone-can-spend at the script layer, like the pot: the
+claim rules are the whole spend condition.
+
+**Eligibility is by epoch.** A round pays those who stood behind the pool when
+its epoch began: delegation record and stake created before the epoch's first
+block. Joining during an epoch earns nothing from it, from the next one in full.
+The first generation judged each pot output by its own height; the epoch is
+coarser by up to a day and keeps the same property, that arriving just before a
+claim buys nothing.
+
+**Buckets.** The participants are split into buckets of about 32 (a power of
+two, at most 2,048) by a hash of the round's salt and each controller key. The
+salt hashes the outpoints of the pots the round was made of, which did not
+exist when the delegators' keys were fixed, so nobody can arrange to share a
+bucket with a victim.
+
+**A claim pays one bucket per round it touches**, any number of rounds and new
+rounds at once. A round that keeps unpaid buckets continues in an output with
+the same terms and exactly one bit added; one whose last bucket is paid closes,
+and what it leaves (sub-minimum shares, the unused reserve, the shares of those
+who left) goes back into a pot, which joins a later epoch. Each member of the
+paid bucket gets exactly `floor(99% of D x weight / W)`, its weight as the
+registry stands now: stake can only leave a round's participant set, never join
+it, so the shares can never add up to more than the round holds.
+
+**Fees.** Each round may give up at most 1/99 of what it delivers, and the claim
+as a whole keeps the first generation's withhold cap. Over all its buckets a
+round can therefore spend at most its 1% reserve.
+
+**What it buys.** A delegator collects its own share with a transaction the size
+of one bucket, about 32 outputs per round, whatever the pool's size;
+`claimpoolrewards` does it for the wallet's own delegated key by default. Nobody
+can block anyone else's payout: any bucket of any round can be paid at any time
+by anyone. `listpools` lists each pool's open rounds.
+
+**What it does not change.** First-generation pots (created below the height)
+are claimed as before, with the 100-participant cap where it applies; a claim
+may not mix the two. The coinbase still pays the pot.
 
 ## Activation
 

@@ -125,6 +125,8 @@ bool CheckTxScripts(const CTransaction& tx, const std::map<COutPoint, CScript>& 
         try {
             const CScriptWitness *pScriptWitness = ((tx.witness.vtxinwit.size() > i) ? &tx.witness.vtxinwit[i].scriptWitness :  nullptr);
             flags &= ~SCRIPT_NO_SIGHASH_BYTE; // ELEMENTS: ensure that our random flag-setting doesn't cause the sighash byte to be misinterpreted
+            // SEQUENTIA: validation sets this per input that spends a stake record; it is never a transaction-wide flag.
+            flags &= ~SCRIPT_SEQ_RECORD_INPUT;
             tx_valid = VerifyScript(input.scriptSig, map_prevout_scriptPubKeys.at(input.prevout),
                 pScriptWitness, flags, TransactionSignatureChecker(&tx, i, amount, txdata, MissingDataBehavior::ASSERT_FAIL), &err);
         } catch (...) {

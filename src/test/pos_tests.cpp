@@ -4,6 +4,7 @@
 
 #include <pos.h>
 #include <anchor.h>
+#include <bls.h>
 
 #include <chainparams.h>
 #include <chainparamsbase.h>
@@ -15,6 +16,7 @@
 #include <policy/policy.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
+#include <script/interpreter.h>
 #include <script/standard.h>
 #include <txmempool.h>
 #include <undo.h>
@@ -1626,6 +1628,178 @@ BOOST_AUTO_TEST_CASE(pos_split_shares)
     registry.Clear();
 }
 
+// Audit A13: from the hardening height the public committee's seats are
+// apportioned by stake. These properties are consensus; pinned here.
+BOOST_AUTO_TEST_CASE(pos_committee_seats)
+{
+    const int saved_hardening = g_pos_hardening_height;
+    const int saved_size = g_pos_committee_size;
+    StakeRegistry& registry = StakeRegistry::GetInstance();
+    const auto add = [&](uint64_t weight) {
+        const CPubKey pk = MakeKey();
+        registry.SetStake(pk, weight);
+        registry.SetBls(pk, std::vector<unsigned char>(BLS_PK_SIZE, 0x42));
+        return pk;
+    };
+    const auto seats_of = [](const PosCommitteeSeats& c, const CPubKey& pk) {
+        for (size_t i = 0; i < c.members.size(); ++i) {
+            if (c.members[i] == pk) return c.seats[i];
+        }
+        return 0;
+    };
+    g_pos_hardening_height = 10;
+
+    // Equal stakes, as many seats as stakers: one seat each, as before.
+    registry.Clear();
+    g_pos_committee_size = 4;
+    std::vector<CPubKey> four;
+    for (int i = 0; i < 4; ++i) four.push_back(add(1000));
+    {
+        const PosCommitteeSeats c = PosPublicCommitteeSeats(registry, uint256S("01"), 20);
+        BOOST_CHECK_EQUAL(c.total, 4);
+        BOOST_CHECK_EQUAL(c.members.size(), 4U);
+        for (const CPubKey& pk : four) BOOST_CHECK_EQUAL(seats_of(c, pk), 1);
+        BOOST_CHECK_EQUAL(PosSlotQuorumAt(registry, 20), PosPublicQuorum(4));
+    }
+
+    // A large staker holds seats in proportion; everyone gets floor or ceil of
+    // its quota; the total is always the committee size.
+    registry.Clear();
+    g_pos_committee_size = 250;
+    const CPubKey whale = add(2000000);              // 20% of 10,000,000
+    std::vector<CPubKey> small;
+    for (int i = 0; i < 800; ++i) small.push_back(add(10000)); // 0.1% each
+    for (int s = 0; s < 50; ++s) {
+        const PosCommitteeSeats c = PosPublicCommitteeSeats(registry, ArithToUint256(arith_uint256(s + 1)), 20);
+        BOOST_CHECK_EQUAL(c.total, 250);
+        BOOST_CHECK_EQUAL(seats_of(c, whale), 50);   // quota exactly 50
+        int sum = 0;
+        for (const CPubKey& pk : small) {
+            const int v = seats_of(c, pk);
+            BOOST_CHECK(v == 0 || v == 1);           // quota 0.25: floor 0, ceil 1
+            sum += v;
+        }
+        BOOST_CHECK_EQUAL(sum, 200);
+    }
+
+    // Splitting buys nothing: a third of the stake split into 1,000 small
+    // identities, against honest stake in 10 large ones, averages a third of
+    // the seats over many seeds (one seat per identity gave it every
+    // non-large seat, i.e. the whole committee but 10).
+    registry.Clear();
+    g_pos_committee_size = 250;
+    std::set<CPubKey> coalition;
+    for (int i = 0; i < 1000; ++i) coalition.insert(add(1000));       // 1,000,000
+    for (int i = 0; i < 10; ++i) add(200000);                          // 2,000,000
+    long long coalition_seats = 0;
+    const int draws = 200;
+    for (int s = 0; s < draws; ++s) {
+        const PosCommitteeSeats c = PosPublicCommitteeSeats(registry, ArithToUint256(arith_uint256(1000 + s)), 20);
+        BOOST_CHECK_EQUAL(c.total, 250);
+        int mine = 0;
+        for (size_t i = 0; i < c.members.size(); ++i) {
+            if (coalition.count(c.members[i])) mine += c.seats[i];
+        }
+        // Quota 83.33. The leftover seats are a fixed 90, so the coalition gets
+        // whatever the 10 large stakers' fractional seats (one each at most)
+        // leave: never more than 90 nor fewer than 80.
+        BOOST_CHECK(mine >= 80 && mine <= 90);
+        coalition_seats += mine;
+    }
+    BOOST_CHECK(coalition_seats >= 83LL * draws && coalition_seats <= 84LL * draws);
+    BOOST_CHECK(PosSlotQuorumAt(registry, 20) == PosPublicQuorum(250));
+
+    // Below the hardening height: the old one-place-per-staker committee.
+    {
+        const PosCommitteeSeats c = PosPublicCommitteeSeats(registry, uint256S("05"), 5);
+        BOOST_CHECK_EQUAL(c.members.size(), 250U);
+        for (int v : c.seats) BOOST_CHECK_EQUAL(v, 1);
+    }
+    // Deterministic for a seed.
+    BOOST_CHECK(PosPublicCommitteeSeats(registry, uint256S("07"), 20).members ==
+                PosPublicCommitteeSeats(registry, uint256S("07"), 20).members);
+
+    registry.Clear();
+    g_pos_committee_size = saved_size;
+    g_pos_hardening_height = saved_hardening;
+}
+
+// The audit hardening's participant cap: a pot created from the hardening height
+// is shared among the POS_SPLIT_MAX_PARTICIPANTS largest participants only, in
+// proportion among themselves; a pot created before it keeps everyone.
+BOOST_AUTO_TEST_CASE(pos_split_participant_cap)
+{
+    const int saved_hardening = g_pos_hardening_height;
+    g_pos_hardening_height = 100;
+    StakeRegistry& registry = StakeRegistry::GetInstance();
+    registry.Clear();
+
+    const CPubKey pool = MakeKey();
+    registry.AddUtxoStake(pool, 1000000, {}, /*height=*/1);
+    // 150 delegators of weight 1000..1149: the 100 largest are 1050..1149.
+    std::vector<CPubKey> delegators;
+    for (int i = 0; i < 150; ++i) {
+        const CPubKey d = MakeKey();
+        registry.AddUtxoStake(d, 1000 + i, {}, /*height=*/1);
+        registry.AddUtxoDelegation(d, pool, /*height=*/2);
+        delegators.push_back(d);
+    }
+    const CAsset asset(uint256S("23"));
+    const int64_t value = 100000000;
+    const int64_t distributable = value - value / POS_SPLIT_RESERVE_DENOM;
+
+    // Before the hardening height: all 151 participants share.
+    {
+        const auto shares = PosComputePotShares(pool, {{asset, value, 50}});
+        BOOST_CHECK_EQUAL(shares.owed.size(), 151U);
+    }
+    // From it: the pool (largest) and the 99 largest delegators.
+    {
+        const auto shares = PosComputePotShares(pool, {{asset, value, 150}});
+        BOOST_CHECK_EQUAL(shares.owed.size(), POS_SPLIT_MAX_PARTICIPANTS);
+        uint64_t total = 1000000;
+        for (int i = 51; i < 150; ++i) total += 1000 + i;
+        BOOST_CHECK(shares.owed.count(pool));
+        BOOST_CHECK(!shares.owed.count(delegators[50]));   // 1050: the 101st largest
+        BOOST_CHECK(shares.owed.count(delegators[51]));    // 1051: the 100th
+        BOOST_CHECK_EQUAL(shares.owed.at(delegators[149]).at(asset),
+                          (int64_t)(((unsigned __int128)distributable * 1149) / total));
+    }
+    registry.Clear();
+    g_pos_hardening_height = saved_hardening;
+}
+
+// The audit hardening's payout seed: below the height it is the election seed;
+// from it, a function of the anchor three blocks down and the height alone, so
+// the parent's (and grandparent's) anchor choice cannot move the draw.
+BOOST_AUTO_TEST_CASE(pos_payout_seed_from_three_below)
+{
+    const int saved_hardening = g_pos_hardening_height;
+    std::vector<CBlockIndex> chain(10);
+    for (int h = 0; h < 10; ++h) {
+        chain[h].nHeight = h;
+        chain[h].pprev = h ? &chain[h - 1] : nullptr;
+        chain[h].m_anchor_hash = uint256S(strprintf("%x", 0x100 + h));
+        chain[h].BuildSkip();
+    }
+    g_pos_hardening_height = 0;
+    BOOST_CHECK(PosPayoutSeedForChild(&chain[8]) == PosSeedForChild(&chain[8]));
+
+    g_pos_hardening_height = 5;
+    const uint256 seed9 = PosPayoutSeedForChild(&chain[8]);    // the draw of block 9
+    BOOST_CHECK(seed9 != PosSeedForChild(&chain[8]));
+    // Changing the anchors of blocks 7 and 8 (parent and grandparent) leaves it.
+    chain[8].m_anchor_hash = uint256S("dead");
+    chain[7].m_anchor_hash = uint256S("beef");
+    BOOST_CHECK(PosPayoutSeedForChild(&chain[8]) == seed9);
+    // Changing the anchor of block 6 (three below) moves it.
+    chain[6].m_anchor_hash = uint256S("f00d");
+    BOOST_CHECK(PosPayoutSeedForChild(&chain[8]) != seed9);
+    // Below the height, the election seed as before.
+    BOOST_CHECK(PosPayoutSeedForChild(&chain[3]) == PosSeedForChild(&chain[3]));
+    g_pos_hardening_height = saved_hardening;
+}
+
 // Two-step unbonding (consensus/params.h pos_unbond_height): stake leaves only
 // through an unbonding output of the same key, and that output unlocks only
 // after the checkpoint depth of parent-chain blocks.
@@ -1828,6 +2002,425 @@ BOOST_AUTO_TEST_CASE(pos_unbonding_next_block)
     g_con_elementsmode = saved_elementsmode;
     g_con_pos = saved_pos;
     g_con_bitcoin_anchor = saved_anchor;
+}
+
+//! The high-S twin of a DER signature: S replaced by n - S, which ECDSA
+//! accepts and the low-S rule refuses.
+static std::vector<unsigned char> HighSTwin(const std::vector<unsigned char>& sig)
+{
+    static const unsigned char order[32] = {
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE,
+        0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36, 0x41, 0x41};
+    const size_t rlen = sig[3];
+    const std::vector<unsigned char> r(sig.begin() + 4, sig.begin() + 4 + rlen);
+    const size_t slen = sig[5 + rlen];
+    unsigned char s[32] = {0};
+    std::copy(sig.begin() + 6 + rlen, sig.begin() + 6 + rlen + slen, s + 32 - slen);
+    unsigned char t[32];
+    int borrow = 0;
+    for (int i = 31; i >= 0; --i) {
+        int d = (int)order[i] - (int)s[i] - borrow;
+        borrow = d < 0;
+        t[i] = (unsigned char)(d + (borrow ? 256 : 0));
+    }
+    std::vector<unsigned char> tb(t, t + 32);
+    while (tb.size() > 1 && tb[0] == 0 && !(tb[1] & 0x80)) tb.erase(tb.begin());
+    if (tb[0] & 0x80) tb.insert(tb.begin(), 0);
+    std::vector<unsigned char> body{0x02, (unsigned char)r.size()};
+    body.insert(body.end(), r.begin(), r.end());
+    body.push_back(0x02);
+    body.push_back((unsigned char)tb.size());
+    body.insert(body.end(), tb.begin(), tb.end());
+    std::vector<unsigned char> out{0x30, (unsigned char)body.size()};
+    out.insert(out.end(), body.begin(), body.end());
+    return out;
+}
+
+BOOST_AUTO_TEST_CASE(pos_record_spend_v2)
+{
+    // Audit M4: from pos_records_v2_height a stake record spend signs the
+    // segwit-v0 hash, which commits to the amount, with a canonical scriptSig.
+    CKey controller, signer;
+    controller.MakeNewKey(true);
+    signer.MakeNewKey(true);
+    const CScript record = BuildDelegationScript(controller.GetPubKey(), signer.GetPubKey());
+    BOOST_CHECK(IsSignedPosRecordScript(record));
+    BOOST_CHECK(!IsSignedPosRecordScript(BuildPotScript(signer.GetPubKey())));
+
+    const CAmount value = 1000000;
+    CMutableTransaction tx;
+    tx.nVersion = 2;
+    tx.vin.emplace_back(COutPoint(uint256::ONE, 0));
+    tx.vout.emplace_back(CAsset(), value - 1000, CScript() << OP_TRUE);
+
+    const auto sign = [&](SigVersion version, CAmount amount) {
+        const uint256 hash = SignatureHash(record, tx, 0, SIGHASH_ALL, CConfidentialValue(amount), version, 0);
+        std::vector<unsigned char> sig;
+        BOOST_REQUIRE(controller.Sign(hash, sig));
+        return sig;
+    };
+    const auto with_type = [](std::vector<unsigned char> sig) { sig.push_back(SIGHASH_ALL); return sig; };
+    const auto verify = [&](const CScript& script_sig, unsigned int flags) {
+        ScriptError err;
+        const MutableTransactionSignatureChecker checker(&tx, 0, CConfidentialValue(value), MissingDataBehavior::FAIL);
+        return VerifyScript(script_sig, record, nullptr, flags, checker, &err);
+    };
+    const unsigned int legacy = SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_DERSIG | SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY |
+                                SCRIPT_VERIFY_CHECKSEQUENCEVERIFY | SCRIPT_VERIFY_WITNESS;
+    const unsigned int v2 = legacy | SCRIPT_VERIFY_SEQ_RECORDS_V2 | SCRIPT_SEQ_RECORD_INPUT;
+
+    const std::vector<unsigned char> old_sig = with_type(sign(SigVersion::BASE, value));
+    const std::vector<unsigned char> raw_new = sign(SigVersion::WITNESS_V0, value);
+    const std::vector<unsigned char> new_sig = with_type(raw_new);
+
+    // Each regime takes its own signature only.
+    BOOST_CHECK(verify(CScript() << old_sig, legacy));
+    BOOST_CHECK(!verify(CScript() << old_sig, v2));
+    BOOST_CHECK(verify(CScript() << new_sig, v2));
+    BOOST_CHECK(!verify(CScript() << new_sig, legacy));
+
+    // The signature commits to the amount spent.
+    BOOST_CHECK(!verify(CScript() << with_type(sign(SigVersion::WITNESS_V0, value + 1)), v2));
+
+    // No other encoding of the same spend: an extra push, a non-minimal push,
+    // a non-push opcode, the high-S twin.
+    BOOST_CHECK(!verify(CScript() << OP_0 << new_sig, v2));
+    CScript non_minimal;
+    non_minimal.push_back(OP_PUSHDATA1);
+    non_minimal.push_back((unsigned char)new_sig.size());
+    non_minimal.insert(non_minimal.end(), new_sig.begin(), new_sig.end());
+    BOOST_CHECK(!verify(non_minimal, v2));
+    BOOST_CHECK(!verify(CScript() << new_sig << OP_NOP, v2));
+    const std::vector<unsigned char> twin = with_type(HighSTwin(raw_new));
+    BOOST_CHECK(twin != new_sig);
+    BOOST_CHECK(!verify(CScript() << twin, v2));
+    // The twin is a valid ECDSA signature: without the low-S rule (as a
+    // legacy-hash spend was) it would pass, which is what made the txid
+    // malleable.
+    BOOST_CHECK(verify(CScript() << with_type(HighSTwin(sign(SigVersion::BASE, value))), legacy));
+}
+
+// Split payouts, second generation (audit A11): a round pays one bucket per
+// claim, and every way of bending that is refused.
+BOOST_AUTO_TEST_CASE(pos_split_round_claims)
+{
+    const int saved_v2 = g_pos_records_v2_height;
+    const int saved_epoch = g_pos_split_epoch;
+    g_pos_records_v2_height = 100;
+    g_pos_split_epoch = 20;
+    StakeRegistry& registry = StakeRegistry::GetInstance();
+    registry.Clear();
+
+    CKey pool_key;
+    pool_key.MakeNewKey(true);
+    const CPubKey pool = pool_key.GetPubKey();
+    registry.AddUtxoStake(pool, 1000, {}, /*height=*/10);
+    std::vector<CPubKey> delegators;
+    for (int i = 0; i < 40; ++i) {
+        CKey k;
+        k.MakeNewKey(true);
+        delegators.push_back(k.GetPubKey());
+        registry.AddUtxoStake(k.GetPubKey(), 1000, {}, /*height=*/10);
+        registry.AddUtxoDelegation(k.GetPubKey(), pool, /*height=*/12);
+    }
+    const CAsset asset(uint256S("22"));
+    const CScript pot_script = BuildPotScript(pool);
+    // Two pots of epoch 10 (heights 200..219), created by coinbases.
+    const COutPoint pot_a(uint256S("a1"), 0), pot_b(uint256S("b2"), 0);
+    const std::vector<Coin> pot_coins{Coin(CTxOut(asset, 600000, pot_script), 200, true),
+                                      Coin(CTxOut(asset, 400000, pot_script), 205, true)};
+
+    // The round consensus makes from them.
+    PosRound round;
+    round.epoch = 10;
+    round.weight = 41 * 1000;
+    round.signer_weight = 1000;
+    round.distributable = 1000000;
+    round.buckets = (uint16_t)PosRoundBucketCount(41);
+    BOOST_REQUIRE_EQUAL(round.buckets, 2);
+    std::vector<COutPoint> sorted{pot_a, pot_b};
+    std::sort(sorted.begin(), sorted.end());
+    round.salt = PosRoundSalt(sorted);
+    round.paid.assign(1, 0);
+
+    const auto pay = [&](CMutableTransaction& tx, const std::map<CPubKey, int64_t>& owed) {
+        int64_t paid = 0;
+        for (const auto& [c, v] : owed) {
+            tx.vout.emplace_back(asset, v, GetScriptForDestination(WitnessV0KeyHash(c.GetID())));
+            paid += v;
+        }
+        return paid;
+    };
+    // A valid claim of `bucket` from `round_in` (value `in_value`), spending
+    // `ins`: payments, the continued round (or a closing pot) and a fee of
+    // exactly what the round may give up.
+    const auto claim = [&](const PosRound& round_in, int64_t in_value, int bucket, const std::vector<COutPoint>& ins) {
+        CMutableTransaction tx;
+        tx.nVersion = 2;
+        for (const COutPoint& o : ins) tx.vin.emplace_back(o);
+        const int64_t paid = pay(tx, PosRoundBucketOwed(pool, round_in, bucket));
+        const int64_t give = paid / POS_SPLIT_WITHHOLD_RATIO;
+        PosRound next = round_in;
+        next.SetPaid(bucket);
+        const CScript keep_script = next.Unpaid() ? BuildRoundScript(pool, next) : pot_script;
+        tx.vout.emplace_back(asset, in_value - paid - give, keep_script);
+        tx.vout.emplace_back(asset, give, CScript()); // the fee
+        return tx;
+    };
+    const auto check = [&](const CMutableTransaction& tx, const std::vector<Coin>& coins, const std::string& expect) {
+        std::string reason;
+        const bool ok = CheckPosPotClaim(CTransaction(tx), coins, /*spend_height=*/400, reason);
+        if (expect.empty()) {
+            BOOST_CHECK_MESSAGE(ok, reason);
+        } else {
+            BOOST_CHECK_MESSAGE(!ok && reason.find(expect) != std::string::npos, "expected '" + expect + "', got '" + reason + "'");
+        }
+    };
+
+    const int b0 = PosRoundBucket(round.salt, delegators[0], round.buckets);
+    const int b1 = 1 - b0;
+    const CMutableTransaction good = claim(round, 1000000, b0, {pot_a, pot_b});
+    check(good, pot_coins, "");
+
+    // The round output must continue the round with exactly one more bucket.
+    {
+        CMutableTransaction tx = good;
+        PosRound both = round;
+        both.SetPaid(0);
+        both.SetPaid(1);
+        both.paid[0] |= 0; // two bits: also "fully paid", refused either way
+        tx.vout[tx.vout.size() - 2].scriptPubKey = BuildRoundScript(pool, both);
+        check(tx, pot_coins, "two buckets");
+    }
+    {
+        CMutableTransaction tx = good;
+        PosRound changed = round;
+        changed.SetPaid(b0);
+        changed.weight += 1;
+        tx.vout[tx.vout.size() - 2].scriptPubKey = BuildRoundScript(pool, changed);
+        check(tx, pot_coins, "terms");
+    }
+    {
+        // No round output: two buckets were unpaid.
+        CMutableTransaction tx = good;
+        tx.vout[tx.vout.size() - 2].scriptPubKey = CScript() << OP_TRUE;
+        check(tx, pot_coins, "drops a round");
+    }
+    {
+        // The round keeps less than it must, the difference taken as margin.
+        CMutableTransaction tx = good;
+        tx.vout[tx.vout.size() - 2].nValue = tx.vout[tx.vout.size() - 2].nValue.GetAmount() - 1;
+        tx.vout.emplace_back(asset, 1, CScript() << OP_TRUE);
+        check(tx, pot_coins, "leaves a round");
+    }
+    {
+        // A delegator short-changed by one atom, the atom left in the round.
+        CMutableTransaction tx = good;
+        tx.vout[0].nValue = tx.vout[0].nValue.GetAmount() - 1;
+        tx.vout[tx.vout.size() - 2].nValue = tx.vout[tx.vout.size() - 2].nValue.GetAmount() + 1;
+        check(tx, pot_coins, "pays a delegator");
+    }
+    {
+        // First- and second-generation pots in one claim.
+        CMutableTransaction tx = good;
+        tx.vin.emplace_back(COutPoint(uint256S("c3"), 0));
+        std::vector<Coin> coins = pot_coins;
+        coins.emplace_back(CTxOut(asset, 1000, pot_script), 50, true);
+        check(tx, coins, "mixes");
+    }
+    {
+        // A pot still in the mempool has no epoch.
+        std::vector<Coin> coins = pot_coins;
+        coins[1].nHeight = 0x7FFFFFFF;
+        check(good, coins, "unconfirmed");
+    }
+
+    // The round, once confirmed: the other bucket closes it into a pot.
+    PosRound after = round;
+    after.SetPaid(b0);
+    const COutPoint round_out(CTransaction(good).GetHash(), (uint32_t)good.vout.size() - 2);
+    const int64_t round_value = good.vout[good.vout.size() - 2].nValue.GetAmount();
+    const std::vector<Coin> round_coins{Coin(CTxOut(asset, round_value, BuildRoundScript(pool, after)), 300, false)};
+    const CMutableTransaction close = claim(after, round_value, b1, {round_out});
+    check(close, round_coins, "");
+    {
+        // The closing pot keeps less than the round leaves.
+        CMutableTransaction tx = close;
+        tx.vout[tx.vout.size() - 2].nValue = tx.vout[tx.vout.size() - 2].nValue.GetAmount() - 1;
+        tx.vout.emplace_back(asset, 1, CScript() << OP_TRUE);
+        check(tx, round_coins, "re-pots");
+    }
+    {
+        // Paying the bucket already paid: no new bit.
+        CMutableTransaction tx;
+        tx.nVersion = 2;
+        tx.vin.emplace_back(round_out);
+        tx.vout.emplace_back(asset, round_value - 1000, BuildRoundScript(pool, after));
+        tx.vout.emplace_back(asset, 1000, CScript());
+        check(tx, round_coins, "without paying a bucket");
+    }
+    {
+        // Clearing a paid bit to be paid twice.
+        CMutableTransaction tx = claim(round, round_value, b1, {round_out});
+        check(tx, round_coins, "unpaid");
+    }
+    {
+        // A fabricated round promising more than it holds.
+        PosRound fake = after;
+        fake.distributable = 100000000;
+        const std::vector<Coin> coins{Coin(CTxOut(asset, round_value, BuildRoundScript(pool, fake)), 300, false)};
+        check(claim(fake, round_value, b1, {round_out}), coins, "more than its round holds");
+    }
+    // Every delegator and the pool are owed exactly once across the two buckets.
+    {
+        std::map<CPubKey, int64_t> all = PosRoundBucketOwed(pool, round, b0);
+        for (const auto& e : PosRoundBucketOwed(pool, round, b1)) BOOST_CHECK(all.emplace(e).second);
+        BOOST_CHECK_EQUAL(all.size(), 41U);
+        BOOST_CHECK_EQUAL(all.at(pool), (1000000 - 10000) * 1000 / 41000);
+    }
+
+    // The one weight that can grow after a round is made: a signer that lent
+    // its own stake elsewhere when the epoch began and has taken it back. It is
+    // capped at what the round recorded, or the shares would exceed the round.
+    {
+        CKey p2k, xk, dk;
+        p2k.MakeNewKey(true);
+        xk.MakeNewKey(true);
+        dk.MakeNewKey(true);
+        const CPubKey pool2 = p2k.GetPubKey(), other = xk.GetPubKey(), d = dk.GetPubKey();
+        registry.AddUtxoStake(pool2, 1000, {}, 10);
+        registry.AddUtxoDelegation(pool2, other, 12);
+        registry.AddUtxoStake(d, 1000, {}, 10);
+        registry.AddUtxoDelegation(d, pool2, 12);
+        PosRound r2;
+        r2.epoch = 10;
+        const auto members = registry.ParticipantsBefore(pool2, 200);
+        BOOST_CHECK_EQUAL(members.size(), 1U);
+        r2.weight = 1000;
+        r2.signer_weight = 0;
+        r2.distributable = 100000;
+        r2.buckets = 1;
+        r2.paid.assign(1, 0);
+        registry.SubUtxoDelegation(pool2, other); // takes its stake back
+        BOOST_CHECK_EQUAL(registry.ParticipantsBefore(pool2, 200).size(), 2U);
+        const auto owed = PosRoundBucketOwed(pool2, r2, 0);
+        BOOST_CHECK(!owed.count(pool2));
+        BOOST_CHECK_EQUAL(owed.at(d), 99000);
+    }
+
+    registry.Clear();
+    g_pos_records_v2_height = saved_v2;
+    g_pos_split_epoch = saved_epoch;
+}
+
+// Audit A12: block timestamps against the local clock (node policy).
+BOOST_AUTO_TEST_CASE(pos_clock_policy)
+{
+    // A clock is trusted only when enough peers have reported and their median
+    // is within a minute of it.
+    BOOST_CHECK(!PosClockAgreesWithPeers(std::nullopt));
+    BOOST_CHECK(PosClockAgreesWithPeers(0));
+    BOOST_CHECK(PosClockAgreesWithPeers(60));
+    BOOST_CHECK(PosClockAgreesWithPeers(-60));
+    BOOST_CHECK(!PosClockAgreesWithPeers(61));
+    BOOST_CHECK(!PosClockAgreesWithPeers(-2 * 3600));
+
+    const int64_t now = 1'800'000'000;
+    // Up to five minutes ahead of the clock is backed; beyond, not.
+    BOOST_CHECK(!PosProposalTooFarAhead(now + 300, now - 100, now, true));
+    BOOST_CHECK(PosProposalTooFarAhead(now + 301, now - 100, now, true));
+    // Never stricter than consensus: the earliest stamp it allows is backed
+    // however far ahead it is, and nothing after it beyond the margin.
+    BOOST_CHECK(!PosProposalTooFarAhead(now + 3600, now + 3600, now, true));
+    BOOST_CHECK(PosProposalTooFarAhead(now + 3601, now + 3600, now, true));
+    // With a doubtful clock nothing is refused.
+    BOOST_CHECK(!PosProposalTooFarAhead(now + 7200, now - 100, now, false));
+
+    const int64_t now_ms = now * 1000 + 250;
+    // A parent stamped at or before the clock: propose at the earliest stamp,
+    // exactly as before.
+    BOOST_CHECK_EQUAL(PosProposalStartMs(now - 30, now + 30, now_ms - 30000, now_ms), (now + 30) * 1000);
+    // Within the slack, ordinary skew: still by the stamp.
+    BOOST_CHECK_EQUAL(PosProposalStartMs(now + 5, now + 65, now_ms, now_ms), (now + 65) * 1000);
+    // A parent stamped an hour ahead: the same 60 s interval, counted from when
+    // it arrived, not an hour and a minute of waiting.
+    const int64_t seen_ms = now_ms - 10000;
+    BOOST_CHECK_EQUAL(PosProposalStartMs(now + 3600, now + 3660, seen_ms, now_ms), seen_ms + 60000);
+    // A larger slot gate keeps its length too.
+    BOOST_CHECK_EQUAL(PosProposalStartMs(now + 3600, now + 3690, seen_ms, now_ms), seen_ms + 90000);
+}
+
+// A delegation record spent and re-created with the same content in one block,
+// however it is encoded, and a record created and spent in one block: the
+// running registry must equal a rebuild from the UTXO set, and reverting the
+// block must restore it exactly.
+BOOST_AUTO_TEST_CASE(pos_record_registry_per_transaction)
+{
+    StakeRegistry& reg = StakeRegistry::GetInstance();
+    reg.Clear();
+    CKey ak, pk, bk;
+    ak.MakeNewKey(true);
+    pk.MakeNewKey(true);
+    bk.MakeNewKey(true);
+    const CPubKey alice = ak.GetPubKey(), pool = pk.GetPubKey(), bob = bk.GetPubKey();
+    reg.AddUtxoStake(alice, 1000, {}, 10);
+    reg.AddUtxoStake(bob, 500, {}, 10);
+    const CScript record = BuildDelegationScript(alice, pool);
+    reg.AddUtxoDelegation(alice, pool, 40);
+    BOOST_REQUIRE(reg.SignerFor(alice) == pool);
+
+    // The same record, re-encoded: the marker pushed with OP_PUSHDATA1.
+    static const std::vector<unsigned char> marker{'S', 'E', 'Q', 'D', 'E', 'L'};
+    CScript reencoded;
+    reencoded.push_back(OP_PUSHDATA1);
+    reencoded.push_back((unsigned char)marker.size());
+    reencoded.insert(reencoded.end(), marker.begin(), marker.end());
+    reencoded << OP_DROP << ToByteVector(pool) << OP_DROP << ToByteVector(alice) << OP_CHECKSIG;
+    BOOST_REQUIRE(reencoded != record);
+    const auto parsed = DelegationFromTxOut(CTxOut(CAsset(), 1000, reencoded));
+    BOOST_REQUIRE(parsed && parsed->first == alice && parsed->second == pool);
+
+    CBlock block;
+    CMutableTransaction cb;
+    cb.vin.emplace_back(COutPoint());
+    cb.vout.emplace_back(CAsset(), 0, CScript() << OP_TRUE);
+    block.vtx.push_back(MakeTransactionRef(cb));
+    CBlockUndo undo;
+    // tx1: spends alice's record and re-creates it, re-encoded.
+    CMutableTransaction tx1;
+    tx1.vin.emplace_back(COutPoint(uint256S("01"), 0));
+    tx1.vout.emplace_back(CAsset(), 1000, reencoded);
+    block.vtx.push_back(MakeTransactionRef(tx1));
+    undo.vtxundo.emplace_back();
+    undo.vtxundo.back().vprevout.emplace_back(CTxOut(CAsset(), 1000, record), 40, false);
+    // tx2: bob delegates; tx3 spends that record in the same block.
+    CMutableTransaction tx2;
+    tx2.vin.emplace_back(COutPoint(uint256S("02"), 0));
+    tx2.vout.emplace_back(CAsset(), 1000, BuildDelegationScript(bob, pool));
+    block.vtx.push_back(MakeTransactionRef(tx2));
+    undo.vtxundo.emplace_back();
+    undo.vtxundo.back().vprevout.emplace_back(CTxOut(CAsset(), 5000, CScript() << OP_TRUE), 20, false);
+    CMutableTransaction tx3;
+    tx3.vin.emplace_back(COutPoint(block.vtx[2]->GetHash(), 0));
+    tx3.vout.emplace_back(CAsset(), 900, CScript() << OP_TRUE);
+    block.vtx.push_back(MakeTransactionRef(tx3));
+    undo.vtxundo.emplace_back();
+    undo.vtxundo.back().vprevout.emplace_back(CTxOut(CAsset(), 1000, BuildDelegationScript(bob, pool)), 100, false);
+
+    PosApplyBlockStake(block, undo, 100);
+    // The re-created record stands, as it does in the UTXO set; bob's, created
+    // and spent in the block, does not.
+    BOOST_CHECK(reg.SignerFor(alice) == pool);
+    BOOST_CHECK(reg.SignerFor(bob) == bob);
+    // Eligibility reads the record's height: the re-created one is new.
+    BOOST_CHECK(reg.ParticipantsBefore(pool, 50).count(alice) == 0);
+    BOOST_CHECK(reg.ParticipantsBefore(pool, 101).count(alice) == 1);
+
+    PosRevertBlockStake(block, undo, 100);
+    BOOST_CHECK(reg.SignerFor(alice) == pool);
+    BOOST_CHECK(reg.SignerFor(bob) == bob);
+    BOOST_CHECK(reg.ParticipantsBefore(pool, 50).count(alice) == 1);
+    reg.Clear();
 }
 
 BOOST_AUTO_TEST_SUITE_END()

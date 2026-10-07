@@ -29,7 +29,7 @@ The producer builds the coinbase from the same function ConnectBlock enforces
 """
 
 from test_framework.test_framework import BitcoinTestFramework
-from test_framework.util import assert_equal
+from test_framework.util import assert_equal, assert_raises_rpc_error
 from test_framework.key import ECKey
 from test_framework.address import byte_to_base58
 from test_framework.messages import COutPoint, CTransaction, CTxIn, CTxOut
@@ -66,6 +66,9 @@ class PosPayoutTest(BitcoinTestFramework):
 
         self.extra_args = [[
             "-con_pos=1",
+            # Records here are funded from OP_TRUE coins, which the audit hardening
+            # rejects (feature_pos_hardening covers it); this test is about other rules.
+            "-poshardeningheight=0",
             "-posvrf=1",
             "-posunbonding=%d" % UNBONDING,
             "-pospayoutnotice=%d" % NOTICE,
@@ -158,15 +161,8 @@ class PosPayoutTest(BitcoinTestFramework):
         self.log.info("A payout policy cannot bind before its notice period elapses")
         too_soon = self.announce(n0.getblockcount() + NOTICE - 1, "direct", p2wpkh(self.ch_raw))
         change_before = self.change   # the rejected tx is dropped; rewind to its input
-        self.spend_change([(RECORD_VALUE, too_soon)])
-        tip_before, height_before = n0.getbestblockhash(), n0.getblockcount()
-        try:
-            n0.generateposblock(self.a_wif)
-        except Exception:
-            pass
-        assert_equal(n0.getbestblockhash(), tip_before)   # bad-payout-notice
-        assert_equal(n0.getblockcount(), height_before)
-        self.restart_node(0)                              # -persistmempool=0 drops it
+        # ConnectBlock would reject a block carrying it, so the mempool does.
+        assert_raises_rpc_error(-26, "bad-payout-notice", self.spend_change, [(RECORD_VALUE, too_soon)])
         self.change = change_before
 
         self.log.info("DIRECT: after activation the coinbase must pay the committed script")

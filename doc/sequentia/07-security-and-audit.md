@@ -8,8 +8,10 @@ overall implementation status.
 The threat review covered six subsystems - PoS block validation; anchoring,
 reorg-following and fork choice; the VRF and MuSig2 cryptography; genesis, money
 and tokenomics; the stake registry and unbonding; and the fee market, RPC and
-DoS surface. No reviewer found a way to steal funds, mint SEQ beyond the 400M
-cap, or force a permanent consensus split. Block **validation** is fully
+DoS surface. No reviewer of that first round found a way to steal funds, mint
+SEQ beyond the 400M cap, or force a permanent consensus split. The October 2026
+audit (below) did find ways to take a staker's weight and a producer's rewards,
+and to halt or split the chain; their fixes are listed there. Block **validation** is fully
 decentralized: every node independently verifies the VRF proofs, committee
 eligibility, the aggregate signature, the anchor, and the finality gate.
 
@@ -94,6 +96,65 @@ eligibility, the aggregate signature, the anchor, and the finality gate.
   value is not part of the genesis commitment, so changing it does not change the
   genesis. This enables the bootstrap tooling
   ([`05-operating-sequentia.md`](05-operating-sequentia.md) §7).
+
+### October 2026 audit
+
+An adversarial audit of the protocol and the node against master `bbaed47ca`.
+Fixed without a fork (local validation, mempool, block assembly, gossip, anchor
+handling, configuration):
+
+- a bad committee certificate, which the block hash does not commit to, no
+  longer marks the honest block's hash invalid (it is `BLOCK_MUTATED`, and a
+  stored copy is discarded and fetched again);
+- the BLS wrappers decode points with their length (an out-of-bounds read
+  reachable from gossip);
+- committee gossip is deduplicated on content, shares must be signed with the
+  member's registered key, and certificate, share and proposal handling stopped
+  paying for crypto and full-block fetches before classifying;
+- the block-level record rules (delegation, payout, BLS registration, pot
+  claims, per-asset fee total) are applied at mempool admission, in the block
+  assembler and in `TestBlockValidity`, so a single dust transaction can no
+  longer stall every producer; a template that still fails yields a block
+  without transactions;
+- parent-daemon errors and "not found" from a daemon still syncing are no
+  longer read as an anchor being off Bitcoin's best chain; checkpoints are kept
+  per commitment and persisted across restarts; the parent RPC timeout is 10 s.
+
+Fixed by the hardening fork (`pos_hardening_height`; 163,000 on the testnet,
+block 1 on mainnet): delegation and payout records need their key's
+authorisation; one supervision key rotation per asset and role per block; no
+identical record re-creation within a block; no issuance on a supervision
+record input; no supervision record in a coinbase; the payout record in force
+cannot be spent, so ending a policy takes the same notice as starting one; no
+stake weight for an uncompressed key, which can never prove a VRF output; an
+anchor repeating its parent's hash must repeat its height; the
+lottery seed comes from three blocks down; and the public committee is
+apportioned in seats by stake (see [`04-proof-of-stake.md`](04-proof-of-stake.md)
+§2 and §4).
+
+At the same height (`pos_records_v2_height`, also 163,000 on the testnet and
+block 1 on mainnet), the second generation of stake records: a stake record spend signs the segwit-v0 hash, which commits to the
+amount, with a canonical scriptSig, so a signer cannot be lied to about the fee
+and nobody can change the txid (M4); and split rewards are paid in rounds, a
+bucket of about 32 delegators at a time, which removes the 100-participant cap
+(A11, see [`split-payouts-design.md`](split-payouts-design.md)). The two
+heights are separate parameters only so a custom chain can test either alone;
+with both at one height, the 100-participant cap that the hardening fork
+introduced for split pots never applies on the bundled chains.
+
+Fixed without a fork in 25.2.1 (A12, node policy): a producer whose parent is
+stamped ahead of its clock counts the spacing and its slot from when the parent
+arrived instead of waiting for its clock to reach that stamp; a committee
+member whose clock agrees with its peers' does not countersign a proposal
+stamped more than five minutes ahead of both its clock and the earliest time
+consensus allows; and a node warns when its clock and the network disagree.
+Consensus still accepts a block up to two hours ahead of the receiving clock.
+25.2.1 also relays the split round script, which 25.2.0 left out of the default
+relay policy, so split pool claims reach the network.
+
+Left for later: A10 (BLS-registration skew; the committee alarm covers it), the
+fee-market and configuration items (F2, F3, F5, F7 to F10, R2), the remaining
+low-severity hardening, and the design reviews (DC*, DE*).
 
 ### Accepted by design (documented, not bugs)
 

@@ -34,7 +34,7 @@ from test_framework.util import assert_equal, assert_raises_rpc_error
 from test_framework.key import ECKey
 from test_framework.address import byte_to_base58
 from test_framework.messages import COutPoint, CTransaction, CTxIn, CTxOut
-from test_framework.script import CScript, LegacySignatureHash, SIGHASH_ALL
+from test_framework.script import CScript, PosRecordSignatureHash, SIGHASH_ALL
 
 UNBONDING = 5
 LOCK_HEIGHT = 4000        # far beyond the test: the stake stays frozen throughout
@@ -64,6 +64,9 @@ class PosDelegationTest(BitcoinTestFramework):
 
         self.extra_args = [[
             "-con_pos=1",
+            # Records here are funded from OP_TRUE coins, which the audit hardening
+            # rejects (feature_pos_hardening covers it); this test is about other rules.
+            "-poshardeningheight=0",
             "-posvrf=1",
             "-posunbonding=%d" % UNBONDING,
             # The one-step withdrawal (a staking output spent straight to an address),
@@ -109,7 +112,7 @@ class PosDelegationTest(BitcoinTestFramework):
         tx.vout = [CTxOut(v, s) for v, s in outs]
         tx.vout.append(CTxOut(in_value - total - FEE, CScript([0x51])))
         tx.vout.append(CTxOut(FEE))
-        sighash, err = LegacySignatureHash(CScript(script), tx, 0, SIGHASH_ALL)
+        sighash, err = PosRecordSignatureHash(CScript(script), tx, 0, SIGHASH_ALL, in_value)
         assert err is None
         tx.vin[0].scriptSig = CScript([key.sign_ecdsa(sighash) + bytes([SIGHASH_ALL])])
         return tx
@@ -205,7 +208,7 @@ class PosDelegationTest(BitcoinTestFramework):
         theft.nVersion = 2
         theft.vin = [CTxIn(COutPoint(int(fund_txid, 16), 1), nSequence=UNBONDING)]
         theft.vout = [CTxOut(d_amount - FEE, CScript([0x51])), CTxOut(FEE)]
-        sighash, err = LegacySignatureHash(CScript(d_stake_script), theft, 0, SIGHASH_ALL)
+        sighash, err = PosRecordSignatureHash(CScript(d_stake_script), theft, 0, SIGHASH_ALL, d_amount)
         assert err is None
         theft.vin[0].scriptSig = CScript([self.p1_key.sign_ecdsa(sighash) + bytes([SIGHASH_ALL])])
         # The pool's signature does not satisfy the controller's OP_CHECKSIG.
@@ -254,19 +257,10 @@ class PosDelegationTest(BitcoinTestFramework):
             CTxOut(change_val - RECORD_VALUE - FEE, CScript([0x51])),
             CTxOut(FEE),
         ]
-        n0.sendrawtransaction(dup_tx.serialize().hex())
-        tip_before, height_before = n0.getbestblockhash(), n0.getblockcount()
-        try:
-            n0.generateposblock(self.p2_wif)   # builds a block containing dup_tx
-        except Exception:
-            pass
-        # ConnectBlock rejects it (bad-delegation-exists): the tip does not move,
-        # and the delegation in force is unchanged.
-        assert_equal(n0.getbestblockhash(), tip_before)
-        assert_equal(n0.getblockcount(), height_before)
-        assert_equal(n0.getdelegationinfo()[self.c_pub], self.p2_pub)
-        # -persistmempool=0, so the restart drops the offending transaction.
-        self.restart_node(0)
+        # ConnectBlock would reject a block carrying it (bad-delegation-exists),
+        # so the mempool refuses it: admitted, it would sit in every template
+        # and stall every producer.
+        assert_raises_rpc_error(-26, "bad-delegation-exists", n0.sendrawtransaction, dup_tx.serialize().hex())
         assert_equal(n0.getdelegationinfo()[self.c_pub], self.p2_pub)
 
         self.log.info("Reclaiming: spending the record returns signing rights to the controller")

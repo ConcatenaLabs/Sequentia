@@ -26,7 +26,7 @@ from test_framework.util import assert_equal
 from test_framework.key import ECKey
 from test_framework.address import byte_to_base58
 from test_framework.messages import COutPoint, CTransaction, CTxIn, CTxOut
-from test_framework.script import CScript, LegacySignatureHash, SIGHASH_ALL
+from test_framework.script import CScript, PosRecordSignatureHash, SIGHASH_ALL
 
 UNBONDING = 5
 COIN = 100_000_000
@@ -140,7 +140,7 @@ class PosBlsRegistrationTest(BitcoinTestFramework):
         spend.nVersion = 2
         spend.vin = [CTxIn(COutPoint(int(stake_txid, 16), 0), nSequence=UNBONDING)]
         spend.vout = [CTxOut(stake_amount - FEE, CScript([0x51])), CTxOut(FEE)]
-        sighash, err = LegacySignatureHash(CScript(stake_script), spend, 0, SIGHASH_ALL)
+        sighash, err = PosRecordSignatureHash(CScript(stake_script), spend, 0, SIGHASH_ALL, stake_amount)
         assert err is None
         spend.vin[0].scriptSig = CScript([self.b_key.sign_ecdsa(sighash) + bytes([SIGHASH_ALL])])
         for _ in range(UNBONDING):

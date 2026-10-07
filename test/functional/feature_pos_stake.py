@@ -28,7 +28,7 @@ from test_framework.messages import (
     CTxIn,
     CTxOut,
 )
-from test_framework.script import CScript, LegacySignatureHash, SIGHASH_ALL
+from test_framework.script import CScript, PosRecordSignatureHash, SIGHASH_ALL
 
 UNBONDING = 5
 COIN = 100_000_000
@@ -145,7 +145,7 @@ class PosOnChainStakeTest(BitcoinTestFramework):
             CTxOut(stake_amount - FEE, CScript([0x51])),
             CTxOut(FEE),
         ]
-        sighash, err = LegacySignatureHash(CScript(stake_script), spend, 0, SIGHASH_ALL)
+        sighash, err = PosRecordSignatureHash(CScript(stake_script), spend, 0, SIGHASH_ALL, stake_amount)
         assert err is None
         sig = self.b_key.sign_ecdsa(sighash) + bytes([SIGHASH_ALL])
         spend.vin[0].scriptSig = CScript([sig])

@@ -373,6 +373,7 @@ bool CheckSequenceLocks(CBlockIndex* tip,
 
 // Returns the script flags which should be checked for a given block
 static unsigned int GetBlockScriptFlags(const CBlockIndex* pindex, const Consensus::Params& chainparams);
+static unsigned int WithRecordsV2For(unsigned int flags, int height, const Consensus::Params& params);
 
 static void LimitMempoolSize(CTxMemPool& pool, CCoinsViewCache& coins_cache, size_t limit, std::chrono::seconds age)
     EXCLUSIVE_LOCKS_REQUIRED(::cs_main, pool.cs)
@@ -492,7 +493,7 @@ void PosRefreshCertifiedKeys(ChainstateManager& chainman, CBlockIndex* registry_
     if (!g_con_pos) return;
     // The registry was just rebuilt from the UTXO set at `registry_tip`, so the
     // quorum its children must reach is known; no other block's is.
-    if (registry_tip) registry_tip->m_pos_child_quorum = PosSlotQuorum(StakeRegistry::GetInstance());
+    if (registry_tip) registry_tip->m_pos_child_quorum = PosSlotQuorumAt(StakeRegistry::GetInstance(), registry_tip->nHeight + 1);
     // The comparator reads m_pos_certified, so no block may change it while it
     // sits in a candidate set: empty the sets, re-measure, insert again.
     std::vector<std::pair<CChainState*, std::vector<CBlockIndex*>>> candidates;
@@ -632,6 +633,11 @@ void CChainState::MaybeUpdateMempoolForReorg(
             if (PosUnbondingFailsNextBlock(tx, view, m_chain.Tip(), m_params.GetConsensus(), reason)) {
                 LogPrintf("Evicting %s from the mempool after a reorg: %s at height %d\n",
                           tx.GetHash().ToString(), reason, m_chain.Height() + 1);
+                return true;
+            }
+            if (PosRecordSpendFailsNextBlock(tx, view, m_chain.Tip(), m_params.GetConsensus())) {
+                LogPrintf("Evicting %s from the mempool after a reorg: a stake record spend signed for the other side of the records-v2 height, at height %d\n",
+                          tx.GetHash().ToString(), m_chain.Height() + 1);
                 return true;
             }
         }
@@ -1138,27 +1144,40 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
         }
     }
 
-    // Check for non-standard pay-to-script-hash in inputs
-    // SEQUENTIA split payouts: validate pot claims here as well as at connect.
-    // The pot script is anyone-can-spend, so without this gate anyone could
-    // park an invalid pot spend in the mempool; the block assembler would mine
-    // it, the block would die at ConnectBlock, and every producer would stall
-    // on the same poison. (The delegation/payout record rules do not need this:
-    // their spends are signature-gated, so only the owner can attempt one.)
-    if (g_con_pos && m_active_chainstate.m_params.GetConsensus().SplitPayoutActiveAt(m_active_chainstate.m_chain.Height() + 1)) {
+    // SEQUENTIA PoS: the block-level stake-record rules (pot claims, delegation
+    // and payout records, BLS registrations), judged as for the next block.
+    // Every one of them only fails at ConnectBlock, and creating a record costs
+    // anyone a dust output: without this gate such a transaction would relay,
+    // be mined by every producer, and kill every block. Records the mempool
+    // holds against each other, and records that go stale while waiting, are
+    // the block assembler's to sort out (it re-judges every package).
+    if (g_con_pos) {
         std::vector<Coin> spent_coins;
         spent_coins.reserve(tx.vin.size());
         bool all_found = true;
         for (const CTxIn& in : tx.vin) {
+            // A peg-in spends no coin; its undo entry is empty (UpdateCoins).
+            if (in.m_is_pegin) { spent_coins.emplace_back(); continue; }
             const Coin& c = m_view.AccessCoin(in.prevout);
             if (c.IsSpent()) { all_found = false; break; }
             spent_coins.push_back(c);
         }
-        std::string claim_reason;
-        if (all_found && !CheckPosPotClaim(tx, spent_coins, claim_reason)) {
-            return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-pot-claim", claim_reason);
+        PosRecordState records;
+        std::string record_reason, record_debug;
+        if (all_found && !PosCheckTxRecords(tx, spent_coins, m_active_chainstate.m_chain.Height() + 1,
+                                            m_active_chainstate.m_params.GetConsensus(), records,
+                                            record_reason, record_debug)) {
+            // Pot claims have been refused here since the split payout mode
+            // shipped, so a peer relaying a bad one is misbehaving. The other
+            // rules are new to admission: older nodes still accept and relay
+            // such records, and must not be punished for it.
+            const TxValidationResult result = record_reason == "bad-pot-claim" ? TxValidationResult::TX_CONSENSUS
+                                                                                : TxValidationResult::TX_NOT_STANDARD;
+            return state.Invalid(result, record_reason, record_debug);
         }
     }
+
+    // Check for non-standard pay-to-script-hash in inputs
 
     if (fRequireStandard && !AreInputsStandard(tx, m_view)) {
         return state.Invalid(TxValidationResult::TX_INPUTS_NOT_STANDARD, "bad-txns-nonstandard-inputs");
@@ -1211,6 +1230,15 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     }
 
     CValue currentFeeValue = ExchangeRateMap::GetInstance().ConvertAmountToValue(ws.m_base_fees, feeAsset);
+    // ELEMENTS: the conversion saturates at the int64 ceiling, which a rate set
+    // high enough reaches with a handful of atoms. Saturated fees all tie at the
+    // top of every ordering, whatever they are really worth, and since nothing
+    // can pay more than the ceiling, no replacement can ever outbid one. No
+    // honest fee is worth anywhere near MAX_MONEY reference units; refuse it.
+    if (g_con_any_asset_fees && currentFeeValue.GetValue() > MAX_MONEY) {
+        return state.Invalid(TxValidationResult::TX_NOT_STANDARD, "fee-value-out-of-range",
+                             "the fee is worth more than the reference unit can express at the configured rate");
+    }
     entry.reset(new CTxMemPoolEntry(ptx, ws.m_base_fees, feeAsset, currentFeeValue, nAcceptTime, m_active_chainstate.m_chain.Height(),
             fSpendsCoinbase, nSigOpsCost, lp, setPeginsSpent));
     ws.m_vsize = entry->GetTxSize();
@@ -1391,6 +1419,11 @@ bool MemPoolAccept::PolicyScriptChecks(const ATMPArgs& args, Workspace& ws)
         scriptVerifyFlags |= SCRIPT_VERIFY_SIMPLICITY_BUDGET4;
     }
 
+    if (m_active_chainstate.m_chain.Tip() != nullptr) {
+        scriptVerifyFlags = WithRecordsV2For(scriptVerifyFlags, m_active_chainstate.m_chain.Height() + 1,
+                                             args.m_chainparams.GetConsensus());
+    }
+
     // Check input scripts and signatures.
     // This is done last to help prevent CPU exhaustion denial-of-service attacks.
     if (!CheckInputScripts(tx, state, m_view, scriptVerifyFlags, true, false, ws.m_precomputed_txdata)) {
@@ -1430,6 +1463,8 @@ bool MemPoolAccept::ConsensusScriptChecks(const ATMPArgs& args, Workspace& ws)
     // invalid blocks (using TestBlockValidity), however allowing such
     // transactions into the mempool can be exploited as a DoS attack.
     unsigned int currentBlockScriptVerifyFlags = GetBlockScriptFlags(m_active_chainstate.m_chain.Tip(), chainparams.GetConsensus());
+    currentBlockScriptVerifyFlags = WithRecordsV2For(currentBlockScriptVerifyFlags,
+                                                     m_active_chainstate.m_chain.Height() + 1, chainparams.GetConsensus());
     if (!CheckInputsFromMempoolAndCache(tx, state, m_view, m_pool, currentBlockScriptVerifyFlags,
                                         ws.m_precomputed_txdata, m_active_chainstate.CoinsTip())) {
         LogPrintf("BUG! PLEASE REPORT THIS! CheckInputScripts failed against latest-block but not STANDARD flags %s, %s\n", hash.ToString(), state.ToString());
@@ -1990,6 +2025,52 @@ void CChainState::InvalidBlockFound(CBlockIndex* pindex, const BlockValidationSt
     }
 }
 
+void CChainState::DiscardBlockData(CBlockIndex* pindex)
+{
+    AssertLockHeld(cs_main);
+    assert(pindex->pprev && !m_chain.Contains(pindex));
+
+    // Return the block to the state of a header whose body never arrived, so
+    // every invariant CheckBlockIndex holds for such a header holds again. The
+    // bytes stay in the block file, unreferenced, as after a reorg.
+    setBlockIndexCandidates.erase(pindex);
+    auto range = m_blockman.m_blocks_unlinked.equal_range(pindex->pprev);
+    for (auto it = range.first; it != range.second;) {
+        it = it->second == pindex ? m_blockman.m_blocks_unlinked.erase(it) : std::next(it);
+    }
+    pindex->nStatus &= ~(BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO | BLOCK_OPT_WITNESS |
+                         BLOCK_POS_CERT_DECIDED | BLOCK_POS_CERTIFIED);
+    pindex->nStatus = (pindex->nStatus & ~BLOCK_VALID_MASK) | BLOCK_VALID_TREE;
+    pindex->nTx = 0;
+    pindex->nChainTx = 0;
+    if (pindex->nSequenceId > 0) pindex->nSequenceId = 0;
+    pindex->nFile = 0;
+    pindex->nDataPos = 0;
+    pindex->nUndoPos = 0;
+    // The fork-choice keys were measured on the discarded certificate; the
+    // next body measures them again (SetPosForkChoiceKeys). Until then the
+    // block names nobody, like any header.
+    pindex->m_pos_countersigs = 0;
+    pindex->m_pos_vrf_score = std::numeric_limits<uint64_t>::max();
+    PosSetCertified(m_chainman, pindex, false);
+    m_blockman.m_dirty_blockindex.insert(pindex);
+
+    // Descendants we hold bodies for wait for this one, exactly as blocks that
+    // arrived before their parent: out of the candidate sets, unlinked, and
+    // relinked by ReceivedBlockTransactions when the parent's body arrives.
+    for (const auto& [hash, entry] : m_blockman.m_block_index) {
+        if (entry->nHeight <= pindex->nHeight || entry->GetAncestor(pindex->nHeight) != pindex) continue;
+        setBlockIndexCandidates.erase(entry);
+        entry->nChainTx = 0;
+        if (entry->nSequenceId > 0) entry->nSequenceId = 0;
+        if (!(entry->nStatus & BLOCK_HAVE_DATA)) continue;
+        bool linked = false;
+        auto siblings = m_blockman.m_blocks_unlinked.equal_range(entry->pprev);
+        for (auto it = siblings.first; it != siblings.second; ++it) linked |= it->second == entry;
+        if (!linked) m_blockman.m_blocks_unlinked.emplace(entry->pprev, entry);
+    }
+}
+
 void UpdateCoins(const CTransaction& tx, CCoinsViewCache& inputs, CTxUndo &txundo, int nHeight)
 {
     // mark inputs spent
@@ -2111,8 +2192,16 @@ bool CheckInputScripts(const CTransaction& tx, TxValidationState& state,
         // failures through additional data in, eg, the coins being
         // spent being checked as a part of CScriptCheck.
 
+        // SEQUENTIA: a stake record is spent under its own rules from the
+        // second generation (SCRIPT_SEQ_RECORD_INPUT).
+        unsigned int input_flags = flags;
+        if ((flags & SCRIPT_VERIFY_SEQ_RECORDS_V2) && g_con_pos &&
+            IsSignedPosRecordScript(txdata.m_spent_outputs[i].scriptPubKey)) {
+            input_flags |= SCRIPT_SEQ_RECORD_INPUT;
+        }
+
         // Verify signature
-        CCheck* check = new CScriptCheck(txdata.m_spent_outputs[i], tx, i, flags, cacheSigStore, &txdata);
+        CCheck* check = new CScriptCheck(txdata.m_spent_outputs[i], tx, i, input_flags, cacheSigStore, &txdata);
         ScriptError serror = QueueCheck(pvChecks, check);
         if (serror != SCRIPT_ERR_OK) {
             // Tx failures never trigger disconnections/bans.
@@ -2524,10 +2613,57 @@ static unsigned int GetBlockScriptFlags(const CBlockIndex* pindex, const Consens
         flags |= SCRIPT_VERIFY_SIMPLICITY_BUDGET4;
     }
 
+    // SEQUENTIA: second-generation stake records (audit M4).
+    if (consensusparams.PosRecordsV2ActiveAt(pindex->nHeight)) {
+        flags |= SCRIPT_VERIFY_SEQ_RECORDS_V2;
+    }
+
     return flags;
 }
 
+//! SEQUENTIA: the second-generation record flag set to what the block at
+//! `height` uses. The mempool judges a transaction for the next block, and for
+//! this rule the tip's own flags are wrong on both sides of the boundary: a
+//! signature made for one regime fails under the other.
+static unsigned int WithRecordsV2For(unsigned int flags, int height, const Consensus::Params& params)
+{
+    if (params.PosRecordsV2ActiveAt(height)) return flags | SCRIPT_VERIFY_SEQ_RECORDS_V2;
+    return flags & ~(unsigned int)SCRIPT_VERIFY_SEQ_RECORDS_V2;
+}
 
+
+
+//! SEQUENTIA: say when this node's clock disagrees with its peers', or the
+//! newest block is stamped well after this node's clock. A wrong clock makes
+//! the node judge block times wrongly (and, on the committee, turns its
+//! timestamp check off); both are fixed by setting the system time right.
+//! Minutes, not seconds, so the message does not change with every block.
+static void UpdatePosClockWarning(const CBlockIndex* tip)
+{
+    static std::string last;
+    std::string msg;
+    const std::optional<int64_t> offset = GetPeerClockOffset();
+    if (offset && !PosClockAgreesWithPeers(offset)) {
+        const int64_t minutes = (std::abs(*offset) + 59) / 60;
+        msg = strprintf("This computer's clock is about %d minute(s) %s its peers'. Set the system date, time and "
+                        "time zone right: with a wrong clock this node judges block times wrongly.",
+                        minutes, *offset > 0 ? "behind" : "ahead of");
+    }
+    const int64_t ahead = (int64_t)tip->nTime - GetTime<std::chrono::seconds>().count();
+    if (ahead > POS_CLOCK_AGREEMENT_SECONDS) {
+        if (!msg.empty()) msg += " ";
+        msg += strprintf("The newest block is stamped about %d minute(s) after this computer's clock: either this "
+                         "clock is behind, or the block's producer has a clock running fast.", (ahead + 59) / 60);
+    }
+    if (msg == last) return;
+    if (msg.empty()) {
+        LogPrintf("Clock warning cleared\n");
+    } else {
+        LogPrintf("WARNING: %s\n", msg);
+    }
+    SetClockWarning(Untranslated(msg));
+    last = msg;
+}
 
 static int64_t nTimeCheck = 0;
 static int64_t nTimeForks = 0;
@@ -2569,13 +2705,21 @@ int PosVerifyBitfieldCertificate(const CBlockHeader& header, const CBlockIndex* 
     std::optional<PosBlsBitfieldCert> cert = ParsePosBlsBitfieldSolution(header.proof.solution);
     if (!cert) { reason = "bad-posbls-bitfield-malformed"; return -1; }
     const uint256 seed = PosSeedForChild(pindexPrev);
-    const std::vector<CPubKey> committee = PosPublicCommittee(registry, seed);
+    const int height = pindexPrev->nHeight + 1;
+    // From the hardening height a member holds seats in proportion to stake and
+    // the certificate is weighed in seats (PosPublicCommitteeSeats); below it
+    // every member holds one.
+    const PosCommitteeSeats committee = PosPublicCommitteeSeats(registry, seed, height);
+    const bool seats_active = PosSeatsActiveAt(height);
+    if (seats_active != (cert->seats >= 0)) { reason = "bad-posbls-seats-form"; return -1; }
     std::vector<std::vector<unsigned char>> bls_pubkeys;
-    for (size_t i = 0; i < committee.size(); ++i) {
+    int signed_seats = 0;
+    for (size_t i = 0; i < committee.members.size(); ++i) {
         if (!PosBitfieldTest(cert->bitfield, i)) continue;
-        std::vector<unsigned char> bls = registry.GetBls(committee[i]);
+        std::vector<unsigned char> bls = registry.GetBls(committee.members[i]);
         if (bls.size() != BLS_PK_SIZE) { reason = "bad-posbls-member-unregistered"; return -1; }
         bls_pubkeys.push_back(std::move(bls));
+        signed_seats += committee.seats[i];
     }
     // Every set bit must map to a committee seat: a bit beyond the committee is a
     // phantom signer inflating the count, so reject if the popcount exceeds the
@@ -2588,7 +2732,201 @@ int PosVerifyBitfieldCertificate(const CBlockHeader& header, const CBlockIndex* 
     if (!BlsFastAggregateVerify(bls_pubkeys, Span<const unsigned char>(hash.begin(), 32), cert->agg_sig)) {
         reason = "bad-posbls-agg-invalid"; return -1;
     }
-    return (int)bls_pubkeys.size();
+    // The seat total a header carries is what fork choice and finality read
+    // before the block connects; it must be the true one.
+    if (seats_active && cert->seats != signed_seats) { reason = "bad-posbls-seats-mismatch"; return -1; }
+    return signed_seats;
+}
+
+bool PosCheckTxRecords(const CTransaction& tx, const std::vector<Coin>& spent, int height,
+                       const Consensus::Params& params, PosRecordState& st, std::string& reason,
+                       std::string& debug)
+{
+    if (!g_con_pos) return true;
+    const StakeRegistry& registry = StakeRegistry::GetInstance();
+    // Work on a copy, so a transaction that fails leaves no trace in `st`.
+    PosRecordState next = st;
+
+    const bool hardening = params.PosHardeningActiveAt(height);
+
+    // Records this transaction spends free their slot for a replacement, exactly
+    // as a spend anywhere in the block does at connect.
+    for (const Coin& coin : spent) {
+        // ConnectBlock, from pos_hardening_height, compares every record the
+        // block creates with every record it spends, in any order: a record
+        // created earlier in the block and spent here fails it as a re-creation.
+        // Refused here too, or a pair of transactions (one creating a record,
+        // the next spending it unconfirmed) would sit in every template.
+        if (hardening && (DelegationFromTxOut(coin.out) || PayoutFromTxOut(coin.out)) &&
+            next.created_record_scripts.count(coin.out.scriptPubKey)) {
+            reason = "bad-record-recreated";
+            return false;
+        }
+        if (auto deleg = DelegationFromTxOut(coin.out)) {
+            next.spent_delegations.insert(deleg->first);
+            next.spent_record_scripts.insert(coin.out.scriptPubKey);
+        }
+        if (auto p = PayoutFromTxOut(coin.out)) {
+            // ConnectBlock, from pos_hardening_height: the policy in force stays.
+            if (hardening && PosPayoutInForce(registry, p->first, p->second, height)) {
+                reason = "bad-payout-in-force";
+                return false;
+            }
+            next.spent_payouts.emplace(p->first, p->second.activation);
+            next.spent_record_scripts.insert(coin.out.scriptPubKey);
+        }
+    }
+
+    for (const CTxOut& out : tx.vout) {
+        // ConnectBlock, from pos_hardening_height: no weight for a key that can
+        // never prove a VRF output.
+        if (hardening && PosOutputWeightsUncompressedKey(out)) {
+            reason = "bad-stake-uncompressed-key";
+            return false;
+        }
+        // ConnectBlock: at most one unspent delegation record per controller.
+        if (auto deleg = DelegationFromTxOut(out)) {
+            // ConnectBlock, from pos_hardening_height: controller authorisation,
+            // no self-delegation, no identical re-creation.
+            if (hardening && next.spent_record_scripts.count(out.scriptPubKey)) {
+                reason = "bad-record-recreated";
+                return false;
+            }
+            if (hardening && deleg->first == deleg->second) {
+                reason = "bad-delegation-self";
+                return false;
+            }
+            if (hardening && !PosTxSpendsKey(deleg->first, spent)) {
+                reason = "bad-delegation-unauthorized";
+                return false;
+            }
+            if (!next.created_delegations.insert(deleg->first).second) {
+                reason = "bad-delegation-conflict";
+                return false;
+            }
+            if (registry.HasDelegation(deleg->first) && !next.spent_delegations.count(deleg->first)) {
+                reason = "bad-delegation-exists";
+                return false;
+            }
+            next.created_record_scripts.insert(out.scriptPubKey);
+        }
+        // ConnectBlock: payout notice, and one record per (signer, activation).
+        if (auto p = PayoutFromTxOut(out)) {
+            if (p->second.mode == PosPayoutMode::SPLIT && !params.SplitPayoutActiveAt(height)) continue;
+            if (hardening && next.spent_record_scripts.count(out.scriptPubKey)) {
+                reason = "bad-record-recreated";
+                return false;
+            }
+            if (hardening && !PosTxSpendsKey(p->first, spent)) {
+                reason = "bad-payout-unauthorized";
+                return false;
+            }
+            if (p->second.activation < height + (int64_t)g_pos_payout_notice) {
+                reason = "bad-payout-notice";
+                return false;
+            }
+            const auto key = std::make_pair(p->first, p->second.activation);
+            if (!next.created_payouts.insert(key).second) {
+                reason = "bad-payout-conflict";
+                return false;
+            }
+            if (registry.HasPayoutAt(p->first, p->second.activation) && !next.spent_payouts.count(key)) {
+                reason = "bad-payout-exists";
+                return false;
+            }
+            next.created_record_scripts.insert(out.scriptPubKey);
+        }
+        // CheckPosStakeRules: a BLS registration must prove possession, and a
+        // staker has one key, against its registered key and within the block.
+        if (g_pos_public_committee && StakeFromTxOut(out)) {
+            auto full = ParseStakeScriptFull(out.scriptPubKey);
+            if (!full || full->bls_pubkey.empty()) continue;
+            const std::vector<unsigned char> existing = registry.GetBls(full->pubkey);
+            if (!existing.empty() && existing != full->bls_pubkey) {
+                reason = "bad-stake-bls-conflict";
+                return false;
+            }
+            auto seen = next.bls_keys.find(full->pubkey);
+            if (seen != next.bls_keys.end() && seen->second != full->bls_pubkey) {
+                reason = "bad-stake-bls-conflict";
+                return false;
+            }
+            // The pairing last, after every cheap reason to refuse. Every
+            // registration is verified, even one restating a known key:
+            // ConnectBlock verifies each one.
+            if (!BlsVerifyPossession(full->bls_pubkey, full->bls_pop)) {
+                reason = "bad-stake-bls-pop";
+                return false;
+            }
+            next.bls_keys[full->pubkey] = full->bls_pubkey;
+        }
+    }
+
+    // ConnectBlock, from pos_hardening_height: no issuance on an input spending
+    // a supervision record, and one key rotation per asset and role per block.
+    if (hardening) {
+        for (size_t i = 0; i < tx.vin.size() && i < spent.size(); ++i) {
+            if (!tx.vin[i].assetIssuance.IsNull() && ParseSupervisionRecordScript(spent[i].out.scriptPubKey)) {
+                reason = "bad-issuance-on-supervision-record";
+                return false;
+            }
+        }
+        for (const CTxOut& out : tx.vout) {
+            const auto record = ParseSupervisionRecordScript(out.scriptPubKey);
+            if (record && record->IsRotation() &&
+                !next.supervision_rotations.emplace(record->asset, (int)record->kind).second) {
+                reason = "bad-supervision-rotation-conflict";
+                return false;
+            }
+        }
+    }
+
+    // ConnectBlock: a pot spend must be a valid claim, from the flag day. The
+    // shares follow the live registry, so a claim valid when it was admitted can
+    // go stale while it waits; the template re-judges it every time.
+    if (params.SplitPayoutActiveAt(height) && !CheckPosPotClaim(tx, spent, height, debug)) {
+        reason = "bad-pot-claim";
+        return false;
+    }
+
+    st = std::move(next);
+    return true;
+}
+
+bool CheckTemplateTxScripts(const CTransaction& tx, const CCoinsViewCache& view, const CBlockIndex* tip,
+                            const Consensus::Params& params, TxValidationState& state)
+{
+    AssertLockHeld(cs_main);
+    // The mempool's flags (MemPoolAccept::PolicyScriptChecks): at least as strict
+    // as any block's, so a transaction they accept cannot fail a block for its
+    // scripts.
+    unsigned int flags = STANDARD_SCRIPT_VERIFY_FLAGS;
+    if (DeploymentActiveAfter(tip, params, Consensus::DEPLOYMENT_DYNA_FED)) {
+        flags |= SCRIPT_SIGHASH_RANGEPROOF;
+    }
+    if (tip != nullptr && params.SimplicityBudget4ActiveAt(tip->nHeight)) {
+        flags |= SCRIPT_VERIFY_SIMPLICITY_BUDGET4;
+    }
+    flags = WithRecordsV2For(flags, tip ? tip->nHeight + 1 : 0, params);
+    PrecomputedTransactionData txdata;
+    return CheckInputScripts(tx, state, view, flags, /*cacheSigStore=*/false, /*cacheFullScriptStore=*/false, txdata);
+}
+
+bool PosRecordSpendFailsNextBlock(const CTransaction& tx, const CCoinsViewCache& view,
+                                  const CBlockIndex* tip, const Consensus::Params& params)
+{
+    AssertLockHeld(cs_main);
+    if (!g_con_pos || params.pos_records_v2_height <= 0 || tx.IsCoinBase()) return false;
+    bool spends_record = false;
+    for (const CTxIn& in : tx.vin) {
+        if (in.m_is_pegin) continue;
+        const Coin& coin = view.AccessCoin(in.prevout);
+        if (coin.IsSpent()) return false; // judged elsewhere
+        if (IsSignedPosRecordScript(coin.out.scriptPubKey)) spends_record = true;
+    }
+    if (!spends_record) return false;
+    TxValidationState state;
+    return !CheckTemplateTxScripts(tx, view, tip, params, state);
 }
 
 /** SEQUENTIA PoS: stake-registry-dependent block rules — leader election /
@@ -2795,26 +3133,37 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
         // would countersign and the committee could never advance. The real
         // certificate is verified when the assembled block actually connects
         // (fJustCheck == false); no block joins the chain via a fJustCheck pass.
+        //
+        // Every failure below is a failure of the CERTIFICATE, which the block
+        // hash does not commit to: anyone relaying the block can swap it for a
+        // garbage aggregate, a malformed bitfield, or a valid aggregate of too
+        // few gossiped shares, while the same hash with its real certificate is
+        // valid. So these are BLOCK_MUTATED, like a merkle mutation, and never
+        // mark the hash failed: AcceptBlock leaves an unstored block unmarked,
+        // and ConnectTip drops a stored body (DiscardBlockData) so the block is
+        // fetched again. The relaying peer is still punished.
         if (!fJustCheck && !block.proof.solution.empty()) {
             std::string reason;
             const int signers = PosVerifyBitfieldCertificate(block, pindexPrev, registry, reason);
             if (signers < 0) {
-                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, reason, "invalid bitfield BLS certificate");
+                return state.Invalid(BlockValidationResult::BLOCK_MUTATED, reason, "invalid bitfield BLS certificate");
             }
-            const int quorum = PosSlotQuorum(registry);
+            const int quorum = PosSlotQuorumAt(registry, pindexPrev->nHeight + 1);
             const bool escaping_stall = g_con_bitcoin_anchor &&
                 PosEscapingStallAllowed(pindexPrev->m_anchor_height, block.m_anchor_height);
             const int min_members = escaping_stall ? 1 : quorum;
             if (signers < min_members) {
-                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-agg-quorum", "fewer BLS committee members than the certification quorum");
+                return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-posbls-agg-quorum", "fewer BLS committee members than the certification quorum");
             }
             // Escaping-stall real-time evidence (anchor.h, incident 2026-07-17):
-            // see the aggregate-MuSig2 path above for the rationale.
+            // see the aggregate-MuSig2 path above for the rationale. A full
+            // quorum on the same hash needs no gap, so this too judges the
+            // certificate.
             if (escaping_stall && signers < quorum) {
                 switch (CheckEscapingStallMtpGap(pindexPrev->m_anchor_hash, block.m_anchor_hash, pindexPrev->nHeight + 1)) {
                 case EscapeStallTimeVerdict::ALLOWED: break;
                 case EscapeStallTimeVerdict::TOO_SOON:
-                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-pos-escape-stall-too-soon", "sub-quorum block without the escaping-stall parent-chain time gap");
+                    return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-pos-escape-stall-too-soon", "sub-quorum block without the escaping-stall parent-chain time gap");
                 case EscapeStallTimeVerdict::UNKNOWN:
                     return state.Invalid(BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE, "pos-escape-stall-unverifiable", "cannot verify the escaping-stall parent-chain time gap");
                 }
@@ -2826,25 +3175,27 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
         // a real block's certificate (leader sig, member set, aggregate) is gated
         // by CheckProof in CheckBlockHeader before connect. So validate the
         // members' sortition eligibility only when the certificate is present.
+        // The member list is part of the certificate, outside the block hash,
+        // so its failures are BLOCK_MUTATED (see the bitfield form above).
         std::optional<PosBlsCertificate> cert = ParsePosBlsSolution(block.proof.solution);
         if (cert && !cert->members.empty()) {
             std::map<CPubKey, PosBlsMember> named;
             for (const PosBlsMember& member : cert->members) {
                 if (!named.emplace(member.pubkey, member).second) {
-                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-member-duplicate", "duplicate BLS committee member");
+                    return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-posbls-member-duplicate", "duplicate BLS committee member");
                 }
             }
-            // Under the public fixed-size committee (-pospubliccommittee, impl
-            // spec Option A) the quorum derives from the ACTUAL committee size
-            // min(#stakers, cap) — restoring quorum intersection (any two
-            // quorums share >= 2 members), which threshold sortition loses
-            // once the staker pool exceeds the committee target.
-            const int quorum = PosSlotQuorum(registry);
+            // This form only exists under private threshold sortition: under the
+            // public committee every BLS certificate takes the bitfield branch
+            // above. So the quorum here is PosSlotQuorum, a count of members,
+            // and comparing it with named.size() is the right unit; committee
+            // seats (A13) never apply to this form.
+            const int quorum = PosSlotQuorumAt(registry, pindexPrev->nHeight + 1);
             const bool escaping_stall = g_con_bitcoin_anchor &&
                 PosEscapingStallAllowed(pindexPrev->m_anchor_height, block.m_anchor_height);
             const int min_members = escaping_stall ? 1 : quorum;
             if ((int)named.size() < min_members) {
-                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-agg-quorum", "fewer BLS committee members than the certification quorum");
+                return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-posbls-agg-quorum", "fewer BLS committee members than the certification quorum");
             }
             // Escaping-stall real-time evidence (anchor.h, incident 2026-07-17):
             // see the aggregate-MuSig2 path above for the rationale.
@@ -2852,27 +3203,27 @@ static bool CheckPosStakeRules(const CBlock& block, BlockValidationState& state,
                 switch (CheckEscapingStallMtpGap(pindexPrev->m_anchor_hash, block.m_anchor_hash, pindexPrev->nHeight + 1)) {
                 case EscapeStallTimeVerdict::ALLOWED: break;
                 case EscapeStallTimeVerdict::TOO_SOON:
-                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-pos-escape-stall-too-soon", "sub-quorum block without the escaping-stall parent-chain time gap");
+                    return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-pos-escape-stall-too-soon", "sub-quorum block without the escaping-stall parent-chain time gap");
                 case EscapeStallTimeVerdict::UNKNOWN:
                     return state.Invalid(BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE, "pos-escape-stall-unverifiable", "cannot verify the escaping-stall parent-chain time gap");
                 }
             }
             if ((int)named.size() > PosMaxCommitteeMembers()) {
-                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-member-count", "more BLS committee members than the aggregate committee cap");
+                return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-posbls-member-count", "more BLS committee members than the aggregate committee cap");
             }
             // Private threshold sortition: each named member proves its own VRF
             // eligibility over the slot seed (the public-committee bitfield form
             // is handled above).
             for (const auto& [member, entry] : named) {
                 if (registry.GetWeight(member) == 0) {
-                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-member-not-selected", "BLS committee member was not selected by sortition for this slot");
+                    return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-posbls-member-not-selected", "BLS committee member was not selected by sortition for this slot");
                 }
                 uint256 member_beta;
                 if (!VrfVerify(member, seed, entry.proof, member_beta)) {
-                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-member-invalid", "invalid BLS committee member VRF eligibility proof");
+                    return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-posbls-member-invalid", "invalid BLS committee member VRF eligibility proof");
                 }
                 if (!PosVrfIsCommitteeMember(member_beta, registry.GetWeight(member), total_weight)) {
-                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-posbls-member-not-selected", "BLS committee member was not selected by sortition for this slot");
+                    return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-posbls-member-not-selected", "BLS committee member was not selected by sortition for this slot");
                 }
             }
         }
@@ -2989,7 +3340,7 @@ static void SetPosForkChoiceKeys(ChainstateManager& chainman, CBlockIndex* pinde
         // Bitfield certificate: the signer count is the bitfield popcount.
         count = 0;
         if (auto cert = ParsePosBlsBitfieldSolution(block.proof.solution)) {
-            count = (size_t)PosBitfieldPopcount(cert->bitfield);
+            count = cert->seats >= 0 ? (size_t)cert->seats : (size_t)PosBitfieldPopcount(cert->bitfield);
         }
     } else if (parts->is_bls) {
         std::set<CPubKey> distinct;
@@ -3108,13 +3459,19 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
     // pos_coinbase_leader_height to grandfather pre-rule blocks an already-running
     // chain produced before this rule activated. Zero-value commitment/OP_RETURN
     // outputs (SEQCMT/SEQBLS/VRF, witness commitment) carry no value and are exempt.
-    if (g_con_pos && pindex->nHeight >= m_params.GetConsensus().pos_coinbase_leader_height) {
+    //
+    // The payee comes from the stake registry (payout policies, delegators), so
+    // like the other registry rules it is skipped by VerifyDB's reconnect pass
+    // (check_pos_rules false), whose registry is the tip's: judged against it,
+    // a historical block whose producer has since announced a policy failed,
+    // and -checklevel=4 reported a healthy chain as corrupt.
+    if (g_con_pos && check_pos_rules && pindex->nHeight >= m_params.GetConsensus().pos_coinbase_leader_height) {
         if (std::optional<PosChallengeParts> parts = ParsePosBlockChallenge(block.proof.challenge); parts && parts->leader.IsValid()) {
             // The leader is paid unless it has committed a payout policy, which
             // may redirect the reward (DIRECT) or hand it to one of its
             // delegators drawn by stake weight (LOTTERY). The producer builds the
             // coinbase from this same function, so the two cannot disagree.
-            const uint256 payout_seed = PosSeedForChild(pindex->pprev);
+            const uint256 payout_seed = PosPayoutSeedForChild(pindex->pprev);
             const CScript required_script = PosRequiredCoinbaseScript(parts->leader, pindex->nHeight, payout_seed);
             for (const auto& txout : block.vtx[0]->vout) {
                 const bool mustPay = !txout.nValue.IsExplicit() || txout.nValue.GetAmount() != 0;
@@ -3419,7 +3776,14 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
     // legal: it spends the old record and creates the new one. The record's
     // script already restricts spending to the controller, so only the stake's
     // owner can re-point or reclaim it.
-    if (g_con_pos && !fJustCheck && state.IsValid()) {
+    //
+    // Enforced for TestBlockValidity too (fJustCheck): there the registry is
+    // the tip's, which is the template's or proposal's parent state, and a
+    // producer or countersigner that skipped these rules would build or certify
+    // a block that then dies at connect. Not for VerifyDB's reconnect pass
+    // (check_pos_rules false), whose registry is the tip's rather than the
+    // historical block's parent state.
+    if (g_con_pos && check_pos_rules && state.IsValid()) {
         std::set<CPubKey> spent_records;
         for (const CTxUndo& txundo : blockundo.vtxundo) {
             for (const Coin& coin : txundo.vprevout) {
@@ -3491,6 +3855,146 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
                 }
             }
         }
+
+        // SEQUENTIA audit hardening (Consensus::Params::pos_hardening_height).
+        //
+        // Who may create a record. A delegation record re-points a controller's
+        // whole stake weight and a payout record redirects what a signer's
+        // blocks earn, yet both took effect merely by existing, so anyone could
+        // create one naming any key for a dust output: take over a victim's
+        // weight, or have its coinbase pay a script of the attacker's choosing.
+        // A record now needs a transaction spending a coin only its key can
+        // spend (PosTxSpendsKey); a rotation, which spends the old record,
+        // always does. A delegation to the controller itself is refused too: it
+        // delegates nothing and only blocks the controller's own records.
+        //
+        // No identical re-creation. The registry applies a block by adding
+        // what it creates and subtracting what it spends, keyed on the record's
+        // content, so a record spent and re-created byte for byte in one block
+        // vanished from a running node's registry while the UTXO set, and so a
+        // restarted node's rebuild, still held it: two nodes, two committees.
+        //
+        // No weight for an uncompressed key. The VRF proves only with a
+        // compressed key, so stake or a delegation bound to a 65-byte key could
+        // never produce a block and only diluted everyone else's slots.
+        //
+        // No removal without notice. A new policy waits g_pos_payout_notice
+        // blocks before it binds, but spending the record in force removed it
+        // on the spot, and with no policy the coinbase pays the signer: the
+        // very flip the notice exists to prevent, one block after a draw the
+        // operator could already see. The record in force can no longer be
+        // spent. To change or end a policy the operator announces the next one;
+        // once that binds, the old record is superseded and spendable. A record
+        // still inside its notice binds nobody yet and may be withdrawn.
+        if (state.IsValid() && m_params.GetConsensus().PosHardeningActiveAt(pindex->nHeight)) {
+            std::set<CScript> spent_record_scripts;
+            for (const CTxUndo& txundo : blockundo.vtxundo) {
+                for (const Coin& coin : txundo.vprevout) {
+                    const auto payout = PayoutFromTxOut(coin.out);
+                    if (payout && PosPayoutInForce(registry, payout->first, payout->second, pindex->nHeight)) {
+                        state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-payout-in-force",
+                                      "spends the payout record in force, ending its policy without notice");
+                        break;
+                    }
+                    if (DelegationFromTxOut(coin.out) || payout) {
+                        spent_record_scripts.insert(coin.out.scriptPubKey);
+                    }
+                }
+                if (!state.IsValid()) break;
+            }
+            static const std::vector<Coin> no_coins;
+            for (size_t t = 0; t < block.vtx.size() && state.IsValid(); ++t) {
+                const std::vector<Coin>& spent = t == 0 ? no_coins : blockundo.vtxundo[t - 1].vprevout;
+                for (const CTxOut& out : block.vtx[t]->vout) {
+                    if (PosOutputWeightsUncompressedKey(out)) {
+                        state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-stake-uncompressed-key",
+                                      "stake weight bound to an uncompressed key, which can never prove a VRF output");
+                        break;
+                    }
+                    const auto deleg = DelegationFromTxOut(out);
+                    const auto payout = deleg ? std::nullopt : PayoutFromTxOut(out);
+                    if (!deleg && !payout) continue;
+                    if (payout && payout->second.mode == PosPayoutMode::SPLIT &&
+                        !m_params.GetConsensus().SplitPayoutActiveAt(pindex->nHeight)) {
+                        continue; // inert below its flag day, as above
+                    }
+                    if (spent_record_scripts.count(out.scriptPubKey)) {
+                        state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-record-recreated",
+                                      "a stake record spent and re-created identically in one block");
+                        break;
+                    }
+                    if (deleg && deleg->first == deleg->second) {
+                        state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-delegation-self",
+                                      "delegation record naming its controller as signer");
+                        break;
+                    }
+                    const CPubKey& owner = deleg ? deleg->first : payout->first;
+                    if (!PosTxSpendsKey(owner, spent)) {
+                        state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                      deleg ? "bad-delegation-unauthorized" : "bad-payout-unauthorized",
+                                      "stake record created without spending a coin of the key it binds");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // SEQUENTIA audit hardening: at most one supervision key rotation per
+    // (asset, role) per block. Each rotation is admitted against the registry
+    // as the PARENT left it, so two of them both named the same current key and
+    // both passed; applying the block kept the first and silently dropped the
+    // second, which then sat in the UTXO set as a rotation that chains to
+    // nothing. Rebuilding the registry from the UTXO set (every restart, every
+    // fresh sync) failed on it, and the node would not start again.
+    //
+    // And no issuance may ride on an input that spends a supervision record.
+    // Those zero-value inputs are carved out of the amount check
+    // (VerifyAmounts), so an issuance on one skipped every issuance check
+    // there while CheckSupervisedIssuance still registered the asset: a
+    // supervised asset with no supply and no reissuance token, for good.
+    if (state.IsValid() && m_params.GetConsensus().PosHardeningActiveAt(pindex->nHeight)) {
+        for (size_t t = 1; t < block.vtx.size() && t - 1 < blockundo.vtxundo.size() && state.IsValid(); ++t) {
+            const CTransaction& tx = *block.vtx[t];
+            const std::vector<Coin>& spent = blockundo.vtxundo[t - 1].vprevout;
+            for (size_t i = 0; i < tx.vin.size() && i < spent.size(); ++i) {
+                if (!tx.vin[i].assetIssuance.IsNull() && ParseSupervisionRecordScript(spent[i].out.scriptPubKey)) {
+                    state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-issuance-on-supervision-record",
+                                  "an issuance on an input spending a supervision record");
+                    break;
+                }
+            }
+        }
+    }
+    // And no supervision declaration or record in a coinbase. A coinbase skips
+    // the input checks that vet them (CheckTxInputs), yet applying the block
+    // registers every such output, and a declaration overwrites the asset's
+    // keys: a forged coinbase record took freeze authority over an asset with no
+    // signature at all (audit A8). The bundled chains masked it only by accident
+    // (the coinbase must pay its leader), not on a custom chain.
+    if (state.IsValid() && m_params.GetConsensus().PosHardeningActiveAt(pindex->nHeight)) {
+        for (const CTxOut& out : block.vtx[0]->vout) {
+            if (ParseSupervisionScript(out.scriptPubKey) || ParseSupervisionRecordScript(out.scriptPubKey)) {
+                state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-cb-supervision",
+                              "a supervision declaration or record in a coinbase");
+                break;
+            }
+        }
+    }
+    if (state.IsValid() && m_params.GetConsensus().PosHardeningActiveAt(pindex->nHeight)) {
+        std::set<std::pair<CAsset, int>> rotations;
+        for (const CTransactionRef& tx : block.vtx) {
+            if (!state.IsValid()) break;
+            for (const CTxOut& out : tx->vout) {
+                const auto record = ParseSupervisionRecordScript(out.scriptPubKey);
+                if (!record || !record->IsRotation()) continue;
+                if (!rotations.emplace(record->asset, (int)record->kind).second) {
+                    state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-supervision-rotation-conflict",
+                                  "two key rotations for one asset and role in a block");
+                    break;
+                }
+            }
+        }
     }
 
     // SEQUENTIA split payouts: any transaction spending a pot output must be a
@@ -3500,10 +4004,10 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
     // staying interested), so this overlay is the entire spend condition.
     // Enforced from the flag day; below it a pot-shaped output is the ordinary
     // anyone-can-spend script it is to every node without the mode.
-    if (g_con_pos && !fJustCheck && state.IsValid() && m_params.GetConsensus().SplitPayoutActiveAt(pindex->nHeight)) {
+    if (g_con_pos && check_pos_rules && state.IsValid() && m_params.GetConsensus().SplitPayoutActiveAt(pindex->nHeight)) {
         for (size_t t = 1; t < block.vtx.size() && t - 1 < blockundo.vtxundo.size(); ++t) {
             std::string claim_reason;
-            if (!CheckPosPotClaim(*block.vtx[t], blockundo.vtxundo[t - 1].vprevout, claim_reason)) {
+            if (!CheckPosPotClaim(*block.vtx[t], blockundo.vtxundo[t - 1].vprevout, pindex->nHeight, claim_reason)) {
                 LogPrintf("ERROR: ConnectBlock(): invalid pot claim in %s: %s\n",
                           block.vtx[t]->GetHash().ToString(), claim_reason);
                 state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-pot-claim", claim_reason);
@@ -3884,6 +4388,10 @@ static int g_pos_reconcile_release_height GUARDED_BY(::cs_main) = -1;
 // to see WHY a fork was not adopted — but it must not flood the log either.
 static uint256 g_pos_final_gate_logged GUARDED_BY(::cs_main);
 static uint256 g_pos_reconcile_release_hash GUARDED_BY(::cs_main);
+// The finalized height when the release was granted. The release answers "our
+// finalized branch is abandoned"; once that branch is finalized further, it is
+// not, and the release is withdrawn.
+static int g_pos_reconcile_release_final_height GUARDED_BY(::cs_main) = -1;
 // Steady-clock seconds at the last advance of the finality point (0 = never).
 static std::atomic<int64_t> g_pos_final_advance_steady{0};
 
@@ -3913,6 +4421,18 @@ void PosSetReconcileRelease(int height, const uint256& hash)
     AssertLockHeld(::cs_main);
     g_pos_reconcile_release_height = height;
     g_pos_reconcile_release_hash = hash;
+    g_pos_reconcile_release_final_height = g_pos_immediate_final_height;
+}
+
+//! Withdraw the reconciliation release, if any.
+static void PosRevokeReconcileRelease(const char* why) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    if (g_pos_reconcile_release_height < 0) return;
+    LogPrintf("PoS finality reconciliation: withdrawing the release for %s (height %d): %s\n",
+              g_pos_reconcile_release_hash.ToString(), g_pos_reconcile_release_height, why);
+    g_pos_reconcile_release_height = -1;
+    g_pos_reconcile_release_hash.SetNull();
+    g_pos_reconcile_release_final_height = -1;
 }
 
 int64_t g_pos_finality_delay_ms = DEFAULT_POS_FINALITY_DELAY_MS;
@@ -4184,7 +4704,28 @@ void CChainState::UpdateTip(const CBlockIndex* pindexNew)
     // newest quorum block becomes final only after its observation window
     // (-posfinalitydelayms, see RecomputePosImmediateFinality).
     if (g_con_pos) {
+        UpdatePosClockWarning(pindexNew);
         RecomputePosImmediateFinality(pindexNew, [this](const uint256& h) { return m_blockman.LookupBlockIndex(h); });
+        // Only stakers with a registered BLS key sit on the public committee.
+        // When fewer than two do, one key certifies and finalizes on its own
+        // whatever the stake behind the rest, and with none no certificate can
+        // verify and the chain stops. Neither showed anywhere; say so loudly.
+        if (g_pos_public_committee && g_pos_committee_size > 1) {
+            static int warned_size = -1;
+            const int size = PosPublicCommitteeSize(StakeRegistry::GetInstance());
+            if (size <= 1 && size != warned_size) {
+                const std::string msg = size == 0
+                    ? "No staker has a registered committee BLS key: no block can be certified and the chain cannot advance until one registers."
+                    : "Only one staker has a registered committee BLS key: that single key certifies and finalizes every block, whatever the stake of the others.";
+                LogPrintf("WARNING: %s\n", msg);
+                SetMiscWarning(Untranslated(msg));
+                warned_size = size;
+            } else if (size > 1 && warned_size >= 0) {
+                LogPrintf("The committee has %d BLS-registered members again\n", size);
+                SetMiscWarning(bilingual_str());
+                warned_size = -1;
+            }
+        }
         // Release token consumed: once the active chain contains the released
         // rival block the reorg has happened and the recomputed finalized point
         // protects the adopted branch. Clear so the gate is airtight again.
@@ -4193,7 +4734,14 @@ void CChainState::UpdateTip(const CBlockIndex* pindexNew)
             if (anc && anc->GetBlockHash() == g_pos_reconcile_release_hash) {
                 g_pos_reconcile_release_height = -1;
                 g_pos_reconcile_release_hash.SetNull();
+                g_pos_reconcile_release_final_height = -1;
             }
+        }
+        // Not consumed, and our own branch was finalized further since the
+        // release: it was not abandoned after all, so finality protects it again.
+        if (g_pos_reconcile_release_height >= 0 &&
+            g_pos_immediate_final_height > g_pos_reconcile_release_final_height) {
+            PosRevokeReconcileRelease("the local finalized branch advanced again");
         }
     }
 
@@ -4305,7 +4853,7 @@ bool CChainState::DisconnectTip(BlockValidationState& state, DisconnectedBlockTr
         CBlockUndo block_undo;
         if (UndoReadFromDisk(block_undo, pindexDelete)) {
             PosRevertBlockStake(block, block_undo, pindexDelete->nHeight);
-            pindexDelete->pprev->m_pos_child_quorum = PosSlotQuorum(StakeRegistry::GetInstance());
+            pindexDelete->pprev->m_pos_child_quorum = PosSlotQuorumAt(StakeRegistry::GetInstance(), pindexDelete->nHeight);
         } else {
             return AbortNode(state, "Failed to read undo data for stake tracking; the stake registry would desync from consensus");
         }
@@ -4462,6 +5010,18 @@ bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew
                 fStall = true;
                 return true;
             }
+            // SEQUENTIA PoS: BLOCK_MUTATED here means the body on disk carries a
+            // bad committee certificate, which the block hash does not commit to
+            // (CheckPosStakeRules). The hash may be perfectly valid with its real
+            // certificate, so it must not be marked failed; but leaving the bad
+            // body in place would retry it forever (see InvalidBlockFound). Drop
+            // the body instead, so the block leaves the candidate sets and is
+            // downloaded again like any block we lack.
+            if (state.GetResult() == BlockValidationResult::BLOCK_MUTATED) {
+                LogPrintf("%s: discarding stored body of %s (height %d): %s; the block will be fetched again\n",
+                          __func__, pindexNew->GetBlockHash().ToString(), pindexNew->nHeight, state.GetRejectReason());
+                DiscardBlockData(pindexNew);
+            }
             if (state.IsInvalid()) {
                 InvalidBlockFound(pindexNew, state);
             }
@@ -4478,7 +5038,7 @@ bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew
     // settle this block's certified answer with it, whatever was provisional
     // when the block was accepted.
     if (g_con_pos && pindexNew->pprev) {
-        const int parent_quorum = PosSlotQuorum(StakeRegistry::GetInstance());
+        const int parent_quorum = PosSlotQuorumAt(StakeRegistry::GetInstance(), pindexNew->nHeight);
         pindexNew->pprev->m_pos_child_quorum = parent_quorum;
         if (PosRecordCertified(m_chainman, pindexNew, parent_quorum)) m_blockman.m_dirty_blockindex.insert(pindexNew);
     }
@@ -4538,6 +5098,20 @@ bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew
                 return true;
             });
         }
+        // Second-generation stake records, the same boundary: a record spend
+        // signed with the legacy hash is valid in this block and not in the
+        // next. The wallet signs again for the new rules.
+        if (g_con_pos && !reorg_pending && !consensus.PosRecordsV2ActiveAt(pindexNew->nHeight) &&
+            consensus.PosRecordsV2ActiveAt(next_height)) {
+            CCoinsViewMemPool view_mempool(&CoinsTip(), *m_mempool);
+            CCoinsViewCache view(&view_mempool);
+            m_mempool->removeFailing([&](const CTransaction& tx) {
+                if (!PosRecordSpendFailsNextBlock(tx, view, pindexNew, consensus)) return false;
+                LogPrintf("Evicting %s from the mempool: a stake record spend with a legacy signature, refused from height %d (second-generation records)\n",
+                          tx.GetHash().ToString(), next_height);
+                return true;
+            });
+        }
     }
     // Update m_chain & related variables.
     m_chain.SetTip(pindexNew);
@@ -4557,7 +5131,7 @@ bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew
         CBlockUndo block_undo;
         if (UndoReadFromDisk(block_undo, pindexNew)) {
             PosApplyBlockStake(blockConnecting, block_undo, pindexNew->nHeight);
-            pindexNew->m_pos_child_quorum = PosSlotQuorum(StakeRegistry::GetInstance());
+            pindexNew->m_pos_child_quorum = PosSlotQuorumAt(StakeRegistry::GetInstance(), pindexNew->nHeight + 1);
         } else {
             return AbortNode(state, "Failed to read undo data for stake tracking; the stake registry would desync from consensus");
         }
@@ -4808,6 +5382,16 @@ bool CChainState::ActivateBestChainStep(BlockValidationState& state, CBlockIndex
         for (CBlockIndex* pindexConnect : reverse_iterate(vpindexToConnect)) {
             if (!ConnectTip(state, pindexConnect, pindexConnect == pindexMostWork ? pblock : std::shared_ptr<const CBlock>(), connectTrace, disconnectpool, fStall, fBlocksDisconnected)) {
                 if (state.IsInvalid()) {
+                    // SEQUENTIA: the released rival branch does not connect. The
+                    // monitor judged it certified from its headers, which a
+                    // forger can fake; now that it has failed, finality must
+                    // protect our branch again, and the monitor wait out its
+                    // full patience before it may release anything else.
+                    if (g_pos_reconcile_release_height >= 0 && pindexConnect->nHeight >= g_pos_reconcile_release_height &&
+                        pindexConnect->GetAncestor(g_pos_reconcile_release_height)->GetBlockHash() == g_pos_reconcile_release_hash) {
+                        PosRevokeReconcileRelease("a block of the released branch failed to connect");
+                        PosStampFinalAdvanceNow();
+                    }
                     // The block violates a consensus rule.
                     if (state.GetResult() != BlockValidationResult::BLOCK_MUTATED) {
                         InvalidChainFound(vpindexToConnect.front());
@@ -5552,7 +6136,16 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
     if (g_con_pos) {
         int fin_height = -1;
         uint256 fin_hash;
-        if (GetPosFinalizedCheckpoint(fin_height, fin_hash)) {
+        const CBlockIndex* fin_index = nullptr;
+        const bool have_floor = GetPosFinalizedCheckpoint(fin_height, fin_hash);
+        if (have_floor) fin_index = blockman.LookupBlockIndex(fin_hash);
+        // Anchoring supremacy, as in PosFinalityGateRefuses: once the anchor
+        // watcher has invalidated the finalized block itself, its commitment is
+        // off Bitcoin's best chain and the floor no longer holds. The floor only
+        // retreats on the watcher's next pass over the checkpoints, which may
+        // be a whole tick or a daemon outage away; until then this gate would
+        // refuse, and punish, exactly the peers serving the recovery branch.
+        if (have_floor && !(fin_index && (fin_index->nStatus & BLOCK_FAILED_MASK))) {
             if (nHeight <= fin_height) {
                 LogPrintf("ERROR: %s: rejecting block at height %d at or below the checkpoint-finalized height %d\n", __func__, nHeight, fin_height);
                 return state.Invalid(BlockValidationResult::BLOCK_CHECKPOINT, "bad-fork-prior-to-pos-checkpoint");
@@ -5723,6 +6316,17 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
             LogPrintf("ERROR: %s: anchor hash changed at unchanged anchor height %d\n", __func__, block.m_anchor_height);
             return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-anchor-conflict");
         }
+        // ...and, from pos_hardening_height, the converse: a parent-chain block
+        // has one height, so the parent's anchor hash at another height is a
+        // false claim, whatever any daemon says (see R3 below for why it
+        // mattered).
+        if (consensusParams.PosHardeningActiveAt(nHeight) &&
+            !pindexPrev->m_anchor_hash.IsNull() &&
+            block.m_anchor_hash == pindexPrev->m_anchor_hash &&
+            block.m_anchor_height != pindexPrev->m_anchor_height) {
+            LogPrintf("ERROR: %s: anchor height changed at unchanged anchor hash %s\n", __func__, block.m_anchor_hash.ToString());
+            return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-anchor-height-conflict");
+        }
         // R3: the anchor must be on the parent chain's best chain (requires a
         // parent chain daemon connection; skipped with -validateanchor=0).
         // The check is skipped when the anchor is unchanged from the parent
@@ -5736,7 +6340,17 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
         // and the block can be accepted on a later re-announcement once the
         // local view catches up. Only HEIGHT_MISMATCH is a permanent
         // structural violation (a block hash's height never changes).
-        if (g_validate_anchor && block.m_anchor_hash != pindexPrev->m_anchor_hash) {
+        //
+        // From pos_hardening_height the skip needs the HEIGHT unchanged too.
+        // Keyed on the hash alone it let a block repeat its parent's anchor hash
+        // under any larger height: R2 only asks heights not to decrease, R3
+        // never looked, and the claimed height drives the unbonding clock, the
+        // escaping-stall gap and checkpoint burial (an unbonding claimable a
+        // block after it started). A repeated hash at a new height now reaches
+        // the parent chain, which answers HEIGHT_MISMATCH.
+        const bool anchor_unchanged = block.m_anchor_hash == pindexPrev->m_anchor_hash &&
+            (!consensusParams.PosHardeningActiveAt(nHeight) || block.m_anchor_height == pindexPrev->m_anchor_height);
+        if (g_validate_anchor && !anchor_unchanged) {
             switch (CheckMainchainAnchor(block.m_anchor_height, block.m_anchor_hash)) {
             case AnchorCheckResult::OK:
                 break;

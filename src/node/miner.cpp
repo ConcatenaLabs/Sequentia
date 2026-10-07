@@ -145,6 +145,8 @@ void BlockAssembler::resetBlock()
     // These counters do not include coinbase tx
     nBlockTx = 0;
     feeMap = CAmountMap();
+    m_pos_records = std::make_shared<PosRecordState>();
+    m_submission_spent.clear();
 }
 
 std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& scriptPubKeyIn, std::chrono::seconds min_tx_age, DynaFedParamEntry* proposed_entry, const std::vector<CScript>* commit_scripts, const CPubKey* pos_proposer, const std::vector<unsigned char>* pos_vrf_proof, const std::vector<CPubKey>* pos_vrf_committee)
@@ -265,13 +267,14 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
     // that loses its place to fee pressure is a freeze the target has another
     // block to escape, which is the whole failure this channel exists to close.
     // They are few, tiny, and only ever supervision records.
-    if (SupervisionActive(nHeight)) {
-        addSupervisionSubmissions();
-    }
-
     int nPackagesSelected = 0;
     int nDescendantsUpdated = 0;
-    addPackageTxs(nPackagesSelected, nDescendantsUpdated, min_tx_age);
+    if (!m_coinbase_only) {
+        if (SupervisionActive(nHeight)) {
+            addSupervisionSubmissions();
+        }
+        addPackageTxs(nPackagesSelected, nDescendantsUpdated, min_tx_age);
+    }
 
     int64_t nTime1 = GetTimeMicros();
 
@@ -369,7 +372,11 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
     if (g_con_bitcoin_anchor) {
         if (!GetAnchorForNewBlock(pindexPrev->m_anchor_height, pindexPrev->m_anchor_hash,
                                   pblock->m_anchor_height, pblock->m_anchor_hash)) {
-            throw std::runtime_error(strprintf("%s: unable to determine a parent chain anchor; is the mainchain daemon reachable? (see -mainchainrpc* options)", __func__));
+            // Two causes, and the second is not about connectivity at all: the
+            // daemon cannot be asked, or no parent-chain block can follow the
+            // parent's anchor (the block at that height was replaced; see
+            // debug.log for the anchor messages just before this).
+            throw std::runtime_error(strprintf("%s: unable to determine a parent chain anchor: either the mainchain daemon is unreachable (see -mainchainrpc* options) or no parent-chain block can follow the parent block's anchor (see debug.log)", __func__));
         }
     }
     pblock->nNonce         = 0;
@@ -377,6 +384,27 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
 
     BlockValidationState state;
     if (!TestBlockValidity(state, chainparams, m_chainstate, *pblock, pindexPrev, false, false)) {
+        // SEQUENTIA: a transaction the selection above should have refused got
+        // in. Throwing here costs this producer its slot, and since every
+        // producer selects from the same mempool, every producer every slot:
+        // one bad transaction stalls the chain until it is found and removed.
+        // On a PoS chain, produce a block without transactions instead, which
+        // keeps the chain moving and the failure loud. (A PoW miner calling
+        // this gets the error, as upstream, and decides for itself.)
+        if (g_con_pos && !m_coinbase_only && nBlockTx > 0) {
+            LogPrintf("CreateNewBlock: the template with %u transactions failed validation (%s); producing a block without transactions instead\n", nBlockTx, state.ToString());
+            m_coinbase_only = true;
+            std::unique_ptr<CBlockTemplate> fallback;
+            try {
+                fallback = CreateNewBlock(scriptPubKeyIn, min_tx_age, proposed_entry, commit_scripts,
+                                          pos_proposer, pos_vrf_proof, pos_vrf_committee);
+            } catch (...) {
+                m_coinbase_only = false;
+                throw;
+            }
+            m_coinbase_only = false;
+            return fallback;
+        }
         throw std::runtime_error(strprintf("%s: TestBlockValidity failed: %s", __func__, state.ToString()));
     }
     int64_t nTime2 = GetTimeMicros();
@@ -424,6 +452,11 @@ bool BlockAssembler::TestPackageTransactions(const CTxMemPool::setEntries& packa
         if (!fIncludeWitness && it->GetTx().HasWitness()) {
             return false;
         }
+        // SEQUENTIA: a privately submitted supervision record already spends
+        // this input in the block.
+        for (const CTxIn& in : it->GetTx().vin) {
+            if (!in.m_is_pegin && m_submission_spent.count(in.prevout)) return false;
+        }
         // SEQUENTIA: a coinbase spend must be mature at THIS block's height
         // under the chain's maturity there (CoinbaseMaturityAt). The mempool
         // evicts what a reorg or a maturity boundary makes premature, so this
@@ -458,6 +491,42 @@ bool BlockAssembler::TestPackageTransactions(const CTxMemPool::setEntries& packa
                 LogPrint(BCLog::MEMPOOL, "CreateNewBlock: skipping %s: %s\n", it->GetTx().GetHash().ToString(), reason);
                 return false;
             }
+        }
+    }
+    return true;
+}
+
+bool BlockAssembler::TestPackageBlockRules(const std::vector<CTxMemPool::txiter>& sorted, PosRecordState& records) const
+{
+    records = *m_pos_records;
+    // ConnectBlock: the fees of each asset summed over the block must stay in
+    // range (CheckTxInputs, bad-block-total-fee-outofrange), and so must the
+    // coinbase's claim, fees plus subsidy. Each transaction's own fee is in
+    // range, which says nothing about the sum: two large fees in one asset
+    // fail every block that carries both.
+    CAmountMap fees = feeMap;
+    for (CTxMemPool::txiter it : sorted) fees[it->GetFeeAsset()] += it->GetFee();
+    CAmountMap reward = fees;
+    reward[chainparams.GetConsensus().subsidy_asset] += GetBlockSubsidy(nHeight, chainparams.GetConsensus());
+    if (!MoneyRange(fees) || !MoneyRange(reward)) {
+        LogPrint(BCLog::MEMPOOL, "CreateNewBlock: skipping a package that would put the block's fees out of range\n");
+        return false;
+    }
+    if (!g_con_pos) return true;
+    CCoinsViewMemPool view(&m_chainstate.CoinsTip(), m_mempool);
+    for (CTxMemPool::txiter it : sorted) {
+        const CTransaction& tx = it->GetTx();
+        std::vector<Coin> spent;
+        spent.reserve(tx.vin.size());
+        for (const CTxIn& in : tx.vin) {
+            Coin coin;
+            if (!in.m_is_pegin) view.GetCoin(in.prevout, coin);
+            spent.push_back(std::move(coin));
+        }
+        std::string reason, debug;
+        if (!PosCheckTxRecords(tx, spent, nHeight, chainparams.GetConsensus(), records, reason, debug)) {
+            LogPrint(BCLog::MEMPOOL, "CreateNewBlock: skipping %s: %s %s\n", tx.GetHash().ToString(), reason, debug);
+            return false;
         }
     }
     return true;
@@ -574,8 +643,29 @@ void BlockAssembler::addSupervisionSubmissions()
                       tx->GetHash().ToString(), state.ToString());
             continue;
         }
+        // The scripts too: these transactions never pass the mempool, so
+        // nothing else runs them, and a submission with a bad signature would
+        // fail every template this node builds until it expired.
+        if (!CheckTemplateTxScripts(*tx, view, m_chainstate.m_chain.Tip(), chainparams.GetConsensus(), state)) {
+            LogPrintf("Supervision: private submission %s fails its scripts (%s); skipping\n",
+                      tx->GetHash().ToString(), state.ToString());
+            continue;
+        }
+        if (!MoneyRange(feeMap + fee_map)) continue;
+        std::vector<Coin> spent;
+        for (const CTxIn& in : tx->vin) {
+            spent.push_back(in.m_is_pegin ? Coin() : view.AccessCoin(in.prevout));
+        }
+        PosRecordState records = *m_pos_records;
+        std::string reason, debug;
+        if (!PosCheckTxRecords(*tx, spent, nHeight, chainparams.GetConsensus(), records, reason, debug)) {
+            LogPrintf("Supervision: private submission %s is refused at this height (%s %s); skipping\n",
+                      tx->GetHash().ToString(), reason, debug);
+            continue;
+        }
         const size_t weight = GetTransactionWeight(*tx);
         if (nBlockWeight + weight >= nBlockMaxWeight) continue;
+        *m_pos_records = std::move(records);
 
         pblocktemplate->block.vtx.emplace_back(tx);
         pblocktemplate->vTxFees.push_back(0);
@@ -586,7 +676,10 @@ void BlockAssembler::addSupervisionSubmissions()
         // Keep the working view in step, so a second submission spending the
         // first one's outputs still validates.
         for (const CTxIn& in : tx->vin) {
-            if (!in.m_is_pegin) view.SpendCoin(in.prevout);
+            if (!in.m_is_pegin) {
+                view.SpendCoin(in.prevout);
+                m_submission_spent.insert(in.prevout);
+            }
         }
         AddCoins(view, *tx, nHeight);
     }
@@ -719,12 +812,24 @@ void BlockAssembler::addPackageTxs(int& nPackagesSelected, int& nDescendantsUpda
             continue;
         }
 
-        // This transaction will make it in; reset the failed counter.
-        nConsecutiveFailed = 0;
-
         // Package can be added. Sort the entries in a valid order.
         std::vector<CTxMemPool::txiter> sortedEntries;
         SortForBlock(ancestors, sortedEntries);
+
+        // SEQUENTIA: the rules that judge a transaction against the rest of the
+        // block, which the mempool cannot check once and for all.
+        PosRecordState records;
+        if (!TestPackageBlockRules(sortedEntries, records)) {
+            if (fUsingModified) {
+                mapModifiedTx.get<confidential_score>().erase(modit);
+            }
+            failedTx.insert(iter);
+            continue;
+        }
+        *m_pos_records = std::move(records);
+
+        // This transaction will make it in; reset the failed counter.
+        nConsecutiveFailed = 0;
 
         for (size_t i = 0; i < sortedEntries.size(); ++i) {
             AddToBlock(sortedEntries[i]);

@@ -54,6 +54,9 @@ class PosRewardsTest(BitcoinTestFramework):
         self.a_wif, self.a_pub = make_staker()   # the producer, and the test wallet's own key
         self.extra_args = [[
             "-con_pos=1",
+            # First-generation split claims (all pots in one claim);
+            # feature_pos_split_rounds covers the second generation.
+            "-posrecordsv2height=0",
             "-posvrf=1",
             "-posunbonding=%d" % UNBONDING,
             "-posslotinterval=1",

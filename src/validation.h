@@ -19,6 +19,7 @@
 #include <node/blockstorage.h>
 #include <policy/feerate.h>
 #include <policy/packages.h>
+#include <pubkey.h>
 #include <script/script_error.h>
 #include <sync.h>
 #include <txdb.h>
@@ -155,6 +156,52 @@ extern CBlockIndex *pindexBestHeader;
  *  template. */
 bool PosUnbondingFailsNextBlock(const CTransaction& tx, const CCoinsViewCache& view, const CBlockIndex* tip,
                                 const Consensus::Params& params, std::string& reason);
+
+/** SEQUENTIA PoS: what the transactions placed so far in a block under
+ *  construction have done to the stake records (see PosCheckTxRecords). */
+struct PosRecordState {
+    std::set<CPubKey> spent_delegations;
+    std::set<std::pair<CPubKey, int64_t>> spent_payouts;
+    std::set<CPubKey> created_delegations;
+    std::set<std::pair<CPubKey, int64_t>> created_payouts;
+    std::map<CPubKey, std::vector<unsigned char>> bls_keys;
+    std::set<CScript> spent_record_scripts;
+    //! Records created so far in the block: ConnectBlock refuses a block that
+    //! spends one of them, since its creation then matches a spend.
+    std::set<CScript> created_record_scripts;
+    std::set<std::pair<CAsset, int>> supervision_rotations;
+};
+
+/** SEQUENTIA PoS: the block-level rules ConnectBlock applies to stake records,
+ *  delegation and payout records, BLS registrations and pot claims, judged for
+ *  one transaction joining a block at `height` built on the tip, after the
+ *  transactions already recorded in `st`. The stake registry must be the tip's.
+ *  `spent` holds the coins `tx` spends, in input order.
+ *
+ *  Stricter than ConnectBlock in one way only: a record may replace an existing
+ *  one only if this or an EARLIER transaction spends it, where a block may also
+ *  spend it later. So whatever passes here also passes at connect. It exists so
+ *  the mempool and the block assembler refuse what ConnectBlock would: a
+ *  transaction that only fails there is mined by every producer and kills every
+ *  block, and anyone can create these records for the cost of a dust output.
+ *  On success `st` is updated to include `tx`. */
+bool PosCheckTxRecords(const CTransaction& tx, const std::vector<Coin>& spent, int height,
+                       const Consensus::Params& params, PosRecordState& st, std::string& reason,
+                       std::string& debug);
+
+/** SEQUENTIA second-generation stake records: whether `tx` spends a stake
+ *  record with a signature the block after `tip` refuses. A record spend signed
+ *  under one regime fails under the other, so one admitted for the block before
+ *  the boundary, or carried across it by a reorg, would sit in every producer's
+ *  template; validation evicts it there. */
+bool PosRecordSpendFailsNextBlock(const CTransaction& tx, const CCoinsViewCache& view,
+                                  const CBlockIndex* tip, const Consensus::Params& params)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+/** The input scripts of `tx` under the flags the mempool applies at the tip, for
+ *  transactions that reach a block template without passing the mempool. */
+bool CheckTemplateTxScripts(const CTransaction& tx, const CCoinsViewCache& view, const CBlockIndex* tip,
+                            const Consensus::Params& params, TxValidationState& state)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
 /** SEQUENTIA PoS: derive every block's certified answer
  *  (CBlockIndex::m_pos_certified) from its headers, from the answer persisted
@@ -854,6 +901,9 @@ bool ActivateBestChainStep(BlockValidationState& state, CBlockIndex* pindexMostW
     bool ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew, const std::shared_ptr<const CBlock>& pblock, ConnectTrace& connectTrace, DisconnectedBlockTransactions& disconnectpool, bool& fStall, bool reorg_pending) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
 
     void InvalidBlockFound(CBlockIndex* pindex, const BlockValidationState& state) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    //! Forget a stored block body that turned out not to match its hash (a bad
+    //! PoS certificate), so the block is downloaded again instead of failed.
+    void DiscardBlockData(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     CBlockIndex* FindMostWorkChain() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /** SEQUENTIA: does the immediate-finality gate refuse to ACTIVATE this
