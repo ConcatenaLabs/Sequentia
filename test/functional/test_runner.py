@@ -262,6 +262,7 @@ BASE_SCRIPTS = [
     'feature_pos_template_poison.py',
     'feature_pos_hardening.py',
     'feature_pos_committee_seats.py',
+    'feature_supervised_coinbase.py',
     'feature_pos_min_stake.py',
     'feature_pos_escaping_stall.py',
     'feature_pos_escape_stall_activation_height.py',

@@ -3831,6 +3831,21 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
             }
         }
     }
+    // And no supervision declaration or record in a coinbase. A coinbase skips
+    // the input checks that vet them (CheckTxInputs), yet applying the block
+    // registers every such output, and a declaration overwrites the asset's
+    // keys: a forged coinbase record took freeze authority over an asset with no
+    // signature at all (audit A8). The bundled chains masked it only by accident
+    // (the coinbase must pay its leader), not on a custom chain.
+    if (state.IsValid() && m_params.GetConsensus().PosHardeningActiveAt(pindex->nHeight)) {
+        for (const CTxOut& out : block.vtx[0]->vout) {
+            if (ParseSupervisionScript(out.scriptPubKey) || ParseSupervisionRecordScript(out.scriptPubKey)) {
+                state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-cb-supervision",
+                              "a supervision declaration or record in a coinbase");
+                break;
+            }
+        }
+    }
     if (state.IsValid() && m_params.GetConsensus().PosHardeningActiveAt(pindex->nHeight)) {
         std::set<std::pair<CAsset, int>> rotations;
         for (const CTransactionRef& tx : block.vtx) {
