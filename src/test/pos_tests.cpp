@@ -2350,4 +2350,77 @@ BOOST_AUTO_TEST_CASE(pos_clock_policy)
     BOOST_CHECK_EQUAL(PosProposalStartMs(now + 3600, now + 3690, seen_ms, now_ms), seen_ms + 90000);
 }
 
+// A delegation record spent and re-created with the same content in one block,
+// however it is encoded, and a record created and spent in one block: the
+// running registry must equal a rebuild from the UTXO set, and reverting the
+// block must restore it exactly.
+BOOST_AUTO_TEST_CASE(pos_record_registry_per_transaction)
+{
+    StakeRegistry& reg = StakeRegistry::GetInstance();
+    reg.Clear();
+    CKey ak, pk, bk;
+    ak.MakeNewKey(true);
+    pk.MakeNewKey(true);
+    bk.MakeNewKey(true);
+    const CPubKey alice = ak.GetPubKey(), pool = pk.GetPubKey(), bob = bk.GetPubKey();
+    reg.AddUtxoStake(alice, 1000, {}, 10);
+    reg.AddUtxoStake(bob, 500, {}, 10);
+    const CScript record = BuildDelegationScript(alice, pool);
+    reg.AddUtxoDelegation(alice, pool, 40);
+    BOOST_REQUIRE(reg.SignerFor(alice) == pool);
+
+    // The same record, re-encoded: the marker pushed with OP_PUSHDATA1.
+    static const std::vector<unsigned char> marker{'S', 'E', 'Q', 'D', 'E', 'L'};
+    CScript reencoded;
+    reencoded.push_back(OP_PUSHDATA1);
+    reencoded.push_back((unsigned char)marker.size());
+    reencoded.insert(reencoded.end(), marker.begin(), marker.end());
+    reencoded << OP_DROP << ToByteVector(pool) << OP_DROP << ToByteVector(alice) << OP_CHECKSIG;
+    BOOST_REQUIRE(reencoded != record);
+    const auto parsed = DelegationFromTxOut(CTxOut(CAsset(), 1000, reencoded));
+    BOOST_REQUIRE(parsed && parsed->first == alice && parsed->second == pool);
+
+    CBlock block;
+    CMutableTransaction cb;
+    cb.vin.emplace_back(COutPoint());
+    cb.vout.emplace_back(CAsset(), 0, CScript() << OP_TRUE);
+    block.vtx.push_back(MakeTransactionRef(cb));
+    CBlockUndo undo;
+    // tx1: spends alice's record and re-creates it, re-encoded.
+    CMutableTransaction tx1;
+    tx1.vin.emplace_back(COutPoint(uint256S("01"), 0));
+    tx1.vout.emplace_back(CAsset(), 1000, reencoded);
+    block.vtx.push_back(MakeTransactionRef(tx1));
+    undo.vtxundo.emplace_back();
+    undo.vtxundo.back().vprevout.emplace_back(CTxOut(CAsset(), 1000, record), 40, false);
+    // tx2: bob delegates; tx3 spends that record in the same block.
+    CMutableTransaction tx2;
+    tx2.vin.emplace_back(COutPoint(uint256S("02"), 0));
+    tx2.vout.emplace_back(CAsset(), 1000, BuildDelegationScript(bob, pool));
+    block.vtx.push_back(MakeTransactionRef(tx2));
+    undo.vtxundo.emplace_back();
+    undo.vtxundo.back().vprevout.emplace_back(CTxOut(CAsset(), 5000, CScript() << OP_TRUE), 20, false);
+    CMutableTransaction tx3;
+    tx3.vin.emplace_back(COutPoint(block.vtx[2]->GetHash(), 0));
+    tx3.vout.emplace_back(CAsset(), 900, CScript() << OP_TRUE);
+    block.vtx.push_back(MakeTransactionRef(tx3));
+    undo.vtxundo.emplace_back();
+    undo.vtxundo.back().vprevout.emplace_back(CTxOut(CAsset(), 1000, BuildDelegationScript(bob, pool)), 100, false);
+
+    PosApplyBlockStake(block, undo, 100);
+    // The re-created record stands, as it does in the UTXO set; bob's, created
+    // and spent in the block, does not.
+    BOOST_CHECK(reg.SignerFor(alice) == pool);
+    BOOST_CHECK(reg.SignerFor(bob) == bob);
+    // Eligibility reads the record's height: the re-created one is new.
+    BOOST_CHECK(reg.ParticipantsBefore(pool, 50).count(alice) == 0);
+    BOOST_CHECK(reg.ParticipantsBefore(pool, 101).count(alice) == 1);
+
+    PosRevertBlockStake(block, undo, 100);
+    BOOST_CHECK(reg.SignerFor(alice) == pool);
+    BOOST_CHECK(reg.SignerFor(bob) == bob);
+    BOOST_CHECK(reg.ParticipantsBefore(pool, 50).count(alice) == 1);
+    reg.Clear();
+}
+
 BOOST_AUTO_TEST_SUITE_END()

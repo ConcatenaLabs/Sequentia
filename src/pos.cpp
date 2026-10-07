@@ -2044,20 +2044,6 @@ void PosApplyBlockStake(const CBlock& block, const CBlockUndo& undo, int height)
                 registry.AddUtxoStake(stake->first, stake->second, bls_pubkey, height);
                 LogPrintf("PoS: staking output adds %llu to %s\n", (unsigned long long)stake->second, HexStr(stake->first));
             }
-            if (auto deleg = DelegationFromTxOut(out)) {
-                registry.AddUtxoDelegation(deleg->first, deleg->second, height);
-                LogPrintf("PoS: %s delegates its stake weight to %s\n", HexStr(deleg->first), HexStr(deleg->second));
-            }
-            if (auto payout = PayoutFromTxOut(out)) {
-                // A split record below its flag day is exactly as inert here as
-                // it is to a node that has never heard of the mode; recognising
-                // it would diverge from that node before the flag day.
-                if (PayoutRecordRecognized(payout->second, height)) {
-                    registry.AddUtxoPayout(payout->first, payout->second);
-                    LogPrintf("PoS: %s announces a payout policy effective at height %d\n",
-                              HexStr(payout->first), (int)payout->second.activation);
-                }
-            }
             if (auto pot = PotFromTxOut(out)) {
                 registry.AddUtxoPot(pot->signer, COutPoint(tx->GetHash(), n), pot->asset, pot->value, height, tx->IsCoinBase());
             }
@@ -2080,17 +2066,6 @@ void PosApplyBlockStake(const CBlock& block, const CBlockUndo& undo, int height)
                                       ParseStakeBlsRegistration(coin.out.scriptPubKey).has_value());
                 LogPrintf("PoS: staking output spend removes %llu from %s\n", (unsigned long long)stake->second, HexStr(stake->first));
             }
-            // Conditional erase, so a rotation (old record spent + new record
-            // created in one transaction) keeps the NEW signer: the created
-            // outputs were applied above.
-            if (auto deleg = DelegationFromTxOut(coin.out)) {
-                registry.SubUtxoDelegation(deleg->first, deleg->second);
-            }
-            if (auto payout = PayoutFromTxOut(coin.out)) {
-                if (PayoutRecordRecognized(payout->second, (int)coin.nHeight)) {
-                    registry.SubUtxoPayout(payout->first, payout->second);
-                }
-            }
             if (auto pot = PotFromTxOut(coin.out)) {
                 registry.SubUtxoPot(pot->signer, tx->vin[j].prevout);
             }
@@ -2099,11 +2074,81 @@ void PosApplyBlockStake(const CBlock& block, const CBlockUndo& undo, int height)
             }
         }
     }
+    // Delegation and payout records: one transaction at a time, in block order,
+    // each removing what it spends before adding what it creates -- exactly how
+    // the UTXO set changes, so the running registry always equals a rebuild
+    // from it. Applied block-wide (every creation, then every spend), a record
+    // spent and re-created with the same content in one block was erased again
+    // right after being re-added, whatever its encoding: a running node lost a
+    // record a restarted one kept, and the two computed different committees.
+    for (size_t t = 0; t < block.vtx.size(); ++t) {
+        const CTransactionRef& tx = block.vtx[t];
+        if (t >= 1 && t - 1 < undo.vtxundo.size()) {
+            const CTxUndo& txundo = undo.vtxundo[t - 1];
+            for (size_t j = 0; j < txundo.vprevout.size() && j < tx->vin.size(); ++j) {
+                const Coin& coin = txundo.vprevout[j];
+                if (auto deleg = DelegationFromTxOut(coin.out)) {
+                    registry.SubUtxoDelegation(deleg->first, deleg->second);
+                }
+                if (auto payout = PayoutFromTxOut(coin.out)) {
+                    if (PayoutRecordRecognized(payout->second, (int)coin.nHeight)) {
+                        registry.SubUtxoPayout(payout->first, payout->second);
+                    }
+                }
+            }
+        }
+        for (const CTxOut& out : tx->vout) {
+            if (auto deleg = DelegationFromTxOut(out)) {
+                registry.AddUtxoDelegation(deleg->first, deleg->second, height);
+                LogPrintf("PoS: %s delegates its stake weight to %s\n", HexStr(deleg->first), HexStr(deleg->second));
+            }
+            if (auto payout = PayoutFromTxOut(out)) {
+                // A split record below its flag day is exactly as inert here as
+                // it is to a node that has never heard of the mode; recognising
+                // it would diverge from that node before the flag day.
+                if (PayoutRecordRecognized(payout->second, height)) {
+                    registry.AddUtxoPayout(payout->first, payout->second);
+                    LogPrintf("PoS: %s announces a payout policy effective at height %d\n",
+                              HexStr(payout->first), (int)payout->second.activation);
+                }
+            }
+        }
+    }
 }
 
 void PosRevertBlockStake(const CBlock& block, const CBlockUndo& undo, int height)
 {
     StakeRegistry& registry = StakeRegistry::GetInstance();
+    // Delegation and payout records first, the exact inverse of their
+    // per-transaction application in PosApplyBlockStake: last transaction
+    // first, each removing what it created and restoring what it spent.
+    for (size_t k = block.vtx.size(); k-- > 0;) {
+        const CTransactionRef& tx = block.vtx[k];
+        for (const CTxOut& out : tx->vout) {
+            if (auto deleg = DelegationFromTxOut(out)) {
+                registry.SubUtxoDelegation(deleg->first, deleg->second);
+            }
+            if (auto payout = PayoutFromTxOut(out)) {
+                if (PayoutRecordRecognized(payout->second, height)) {
+                    registry.SubUtxoPayout(payout->first, payout->second);
+                }
+            }
+        }
+        if (k >= 1 && k - 1 < undo.vtxundo.size()) {
+            const CTxUndo& txundo = undo.vtxundo[k - 1];
+            for (size_t j = 0; j < txundo.vprevout.size() && j < tx->vin.size(); ++j) {
+                const Coin& coin = txundo.vprevout[j];
+                if (auto deleg = DelegationFromTxOut(coin.out)) {
+                    registry.AddUtxoDelegation(deleg->first, deleg->second, (int)coin.nHeight);
+                }
+                if (auto payout = PayoutFromTxOut(coin.out)) {
+                    if (PayoutRecordRecognized(payout->second, (int)coin.nHeight)) {
+                        registry.AddUtxoPayout(payout->first, payout->second);
+                    }
+                }
+            }
+        }
+    }
     // Exact inverse of PosApplyBlockStake, which added created outputs then
     // subtracted spent ones. Undoing in reverse order — re-add the spent
     // outputs FIRST, then subtract the created ones — keeps every per-pubkey
@@ -2122,17 +2167,6 @@ void PosRevertBlockStake(const CBlock& block, const CBlockUndo& undo, int height
                 if (auto reg = ParseStakeBlsRegistration(coin.out.scriptPubKey)) bls_pubkey = reg->first;
                 registry.AddUtxoStake(stake->first, stake->second, bls_pubkey, (int)coin.nHeight);
             }
-            // Restore the record this block spent, before the created records
-            // are removed below. A rotation then lands back on the old signer:
-            // the erase of the created record is conditional and will not fire.
-            if (auto deleg = DelegationFromTxOut(coin.out)) {
-                registry.AddUtxoDelegation(deleg->first, deleg->second, (int)coin.nHeight);
-            }
-            if (auto payout = PayoutFromTxOut(coin.out)) {
-                if (PayoutRecordRecognized(payout->second, (int)coin.nHeight)) {
-                    registry.AddUtxoPayout(payout->first, payout->second);
-                }
-            }
             if (auto pot = PotFromTxOut(coin.out)) {
                 registry.AddUtxoPot(pot->signer, tx->vin[j].prevout, pot->asset, pot->value, (int)coin.nHeight, coin.IsCoinBase());
             }
@@ -2148,14 +2182,6 @@ void PosRevertBlockStake(const CBlock& block, const CBlockUndo& undo, int height
             if (auto stake = StakeFromTxOut(out)) {
                 registry.SubUtxoStake(stake->first, stake->second, height,
                                       ParseStakeBlsRegistration(out.scriptPubKey).has_value());
-            }
-            if (auto deleg = DelegationFromTxOut(out)) {
-                registry.SubUtxoDelegation(deleg->first, deleg->second);
-            }
-            if (auto payout = PayoutFromTxOut(out)) {
-                if (PayoutRecordRecognized(payout->second, height)) {
-                    registry.SubUtxoPayout(payout->first, payout->second);
-                }
             }
             if (auto pot = PotFromTxOut(out)) {
                 registry.SubUtxoPot(pot->signer, COutPoint(tx->GetHash(), n));
