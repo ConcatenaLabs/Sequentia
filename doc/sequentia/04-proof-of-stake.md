@@ -272,6 +272,13 @@ cancel an earlier policy: the policy in force at height h is the announced polic
 with the greatest activation `<= h`, so a pending change and the current rule
 coexist until the switch.
 
+Ending a policy takes the same notice. From `pos_hardening_height` the record in
+force cannot be spent (`bad-payout-in-force`): without it the coinbase would pay
+the signer from the next block, with no notice at all. To stop sharing, an
+operator announces a direct payout to itself and waits out the notice; once that
+binds, the superseded record can be reclaimed. A record still inside its notice
+binds nobody and may be withdrawn at any time.
+
 **The notice period is the only reason a delegator can act at all, and it is
 worth exactly what the delegator notices.** Since exit is instant and unilateral,
 the entire protection is "see the change, then leave" - which makes surfacing it

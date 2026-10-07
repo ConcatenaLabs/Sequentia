@@ -124,7 +124,9 @@ Fixed by the hardening fork (`pos_hardening_height`; 163,000 on the testnet,
 block 1 on mainnet): delegation and payout records need their key's
 authorisation; one supervision key rotation per asset and role per block; no
 identical record re-creation within a block; no issuance on a supervision
-record input; an anchor repeating its parent's hash must repeat its height; the
+record input; no supervision record in a coinbase; the payout record in force
+cannot be spent, so ending a policy takes the same notice as starting one; an
+anchor repeating its parent's hash must repeat its height; the
 lottery seed comes from three blocks down; a split pot is shared among at most
 100 participants; and the public committee is apportioned in seats by stake
 (see [`04-proof-of-stake.md`](04-proof-of-stake.md) §2 and §4).

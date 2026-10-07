@@ -2679,6 +2679,8 @@ bool PosCheckTxRecords(const CTransaction& tx, const std::vector<Coin>& spent, i
     // Work on a copy, so a transaction that fails leaves no trace in `st`.
     PosRecordState next = st;
 
+    const bool hardening = params.PosHardeningActiveAt(height);
+
     // Records this transaction spends free their slot for a replacement, exactly
     // as a spend anywhere in the block does at connect.
     for (const Coin& coin : spent) {
@@ -2687,11 +2689,15 @@ bool PosCheckTxRecords(const CTransaction& tx, const std::vector<Coin>& spent, i
             next.spent_record_scripts.insert(coin.out.scriptPubKey);
         }
         if (auto p = PayoutFromTxOut(coin.out)) {
+            // ConnectBlock, from pos_hardening_height: the policy in force stays.
+            if (hardening && PosPayoutInForce(registry, p->first, p->second, height)) {
+                reason = "bad-payout-in-force";
+                return false;
+            }
             next.spent_payouts.emplace(p->first, p->second.activation);
             next.spent_record_scripts.insert(coin.out.scriptPubKey);
         }
     }
-    const bool hardening = params.PosHardeningActiveAt(height);
 
     for (const CTxOut& out : tx.vout) {
         // ConnectBlock: at most one unspent delegation record per controller.
@@ -3763,14 +3769,30 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
         // content, so a record spent and re-created byte for byte in one block
         // vanished from a running node's registry while the UTXO set, and so a
         // restarted node's rebuild, still held it: two nodes, two committees.
+        //
+        // No removal without notice. A new policy waits g_pos_payout_notice
+        // blocks before it binds, but spending the record in force removed it
+        // on the spot, and with no policy the coinbase pays the signer: the
+        // very flip the notice exists to prevent, one block after a draw the
+        // operator could already see. The record in force can no longer be
+        // spent. To change or end a policy the operator announces the next one;
+        // once that binds, the old record is superseded and spendable. A record
+        // still inside its notice binds nobody yet and may be withdrawn.
         if (state.IsValid() && m_params.GetConsensus().PosHardeningActiveAt(pindex->nHeight)) {
             std::set<CScript> spent_record_scripts;
             for (const CTxUndo& txundo : blockundo.vtxundo) {
                 for (const Coin& coin : txundo.vprevout) {
-                    if (DelegationFromTxOut(coin.out) || PayoutFromTxOut(coin.out)) {
+                    const auto payout = PayoutFromTxOut(coin.out);
+                    if (payout && PosPayoutInForce(registry, payout->first, payout->second, pindex->nHeight)) {
+                        state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-payout-in-force",
+                                      "spends the payout record in force, ending its policy without notice");
+                        break;
+                    }
+                    if (DelegationFromTxOut(coin.out) || payout) {
                         spent_record_scripts.insert(coin.out.scriptPubKey);
                     }
                 }
+                if (!state.IsValid()) break;
             }
             static const std::vector<Coin> no_coins;
             for (size_t t = 0; t < block.vtx.size() && state.IsValid(); ++t) {

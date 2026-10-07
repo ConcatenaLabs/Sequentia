@@ -2484,7 +2484,7 @@ RPCHelpMan announcepayout()
                     {"activation", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Block height from which the policy binds (default: comfortably past the notice period)."},
                     {"address", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "direct mode: the address every coinbase must pay (default: a fresh address of this wallet)."},
                     {"commission_bp", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "lottery or split mode: basis points of blocks the operator keeps (0..10000, default 0). At 0 the operator still earns on its own stake, as one participant among the rest."},
-                    {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "SEQ to put in the payout record (default: just over the dust floor). Recoverable by spending the record with the signer key."},
+                    {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "SEQ to put in the payout record (default: just over the dust floor). Recoverable by spending the record with the signer key, before the policy binds or once a later one has replaced it; the policy in force cannot be removed without notice."},
                     {"payout_script", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "direct mode: the exact scriptPubKey every coinbase must pay (hex, 1..110 bytes), instead of `address`. For committing to something an address cannot express -- a multisig, a covenant, a contract that splits the reward. The chain compares the coinbase output against these bytes and nothing else, so it is on you that they are spendable by whoever should receive them."},
                 },
                 RPCResult{RPCResult::Type::OBJ, "", "", {

@@ -1014,6 +1014,13 @@ std::optional<std::pair<CPubKey, PosPayoutPolicy>> ParsePayoutScript(const CScri
     return std::make_pair(signer, policy);
 }
 
+bool PosPayoutInForce(const StakeRegistry& registry, const CPubKey& signer,
+                      const PosPayoutPolicy& policy, int64_t height)
+{
+    const std::optional<PosPayoutPolicy> current = registry.PayoutFor(signer, height);
+    return current && *current == policy;
+}
+
 std::optional<std::pair<CPubKey, PosPayoutPolicy>> PayoutFromTxOut(const CTxOut& out)
 {
     return ParsePayoutScript(out.scriptPubKey);

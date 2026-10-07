@@ -1140,6 +1140,12 @@ CScript BuildDelegationScript(const CPubKey& controller, const CPubKey& signer);
  *  greatest activation <= h; older records linger harmlessly until spent. */
 CScript BuildPayoutScript(const CPubKey& signer, const PosPayoutPolicy& policy);
 
+/** Whether `policy` is the signer's payout policy in force at `height`, as the
+ *  registry stands before that block. From pos_hardening_height that record may
+ *  not be spent: removing it would end the policy with no notice. */
+bool PosPayoutInForce(const StakeRegistry& registry, const CPubKey& signer,
+                      const PosPayoutPolicy& policy, int64_t height);
+
 /** SEQUENTIA split payouts: the POT, where a split pool's block rewards
  *  accumulate until a claim distributes them.
  *

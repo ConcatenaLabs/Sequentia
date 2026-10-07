@@ -11,7 +11,9 @@ existing, so anyone could create one naming any key. From the hardening height:
   * a record must be created by a transaction spending a coin only its key can
     spend (here a P2PK output of the key);
   * a delegation to the controller itself is refused;
-  * a record may not be spent and re-created identically in one block.
+  * a record may not be spent and re-created identically in one block;
+  * the payout record in force may not be spent: ending a policy takes the
+    same notice as starting one (a superseded or still-pending record may go).
 
 Below the height the old rules still apply, so history produced before the
 cutover stays valid.
@@ -138,10 +140,41 @@ class PosHardeningTest(BitcoinTestFramework):
         payout = bytes.fromhex(node.getpayoutscript(self.a_pub, activation, "direct", OP_TRUE.hex())["script"])
         unauth_pay = self.build([change + (None, None)], [(RECORD_VALUE, payout)])
         assert_raises_rpc_error(-26, "bad-payout-unauthorized", self.send, unauth_pay)
-        auth_pay = self.build([(fund_id, 2, COIN, self.a_key, a_p2pk)], [(RECORD_VALUE, payout)])
+        # Two more coins of the signer, to authorise the records below.
+        auth_pay = self.build([(fund_id, 2, COIN, self.a_key, a_p2pk)],
+                              [(RECORD_VALUE, payout), (COIN // 4, a_p2pk), (COIN // 4, a_p2pk)])
         pay_id = self.send(auth_pay)
         node.generateposblock(self.a_wif)
         assert pay_id in node.getblock(node.getbestblockhash())["tx"]
+
+        def spend_record(txid, script):
+            return self.build([(txid, 0, RECORD_VALUE, self.a_key, script)], [])
+
+        self.log.info("The payout record in force cannot be spent")
+        self.produce_to(activation)
+        assert_raises_rpc_error(-26, "bad-payout-in-force", self.send, spend_record(pay_id, payout))
+
+        self.log.info("...not even once its successor is announced, until the successor binds")
+        activation2 = node.getblockcount() + NOTICE + 2
+        payout2 = bytes.fromhex(node.getpayoutscript(self.a_pub, activation2, "direct", a_p2pk.hex())["script"])
+        pay2_id = self.send(self.build([(pay_id, 1, COIN // 4, self.a_key, a_p2pk)], [(RECORD_VALUE, payout2)]))
+        node.generateposblock(self.a_wif)
+        assert_raises_rpc_error(-26, "bad-payout-in-force", self.send, spend_record(pay_id, payout))
+
+        self.log.info("A record still inside its notice may be withdrawn")
+        activation3 = node.getblockcount() + NOTICE + 20
+        payout3 = bytes.fromhex(node.getpayoutscript(self.a_pub, activation3, "direct", OP_TRUE.hex())["script"])
+        pay3_id = self.send(self.build([(pay_id, 2, COIN // 4, self.a_key, a_p2pk)], [(RECORD_VALUE, payout3)]))
+        node.generateposblock(self.a_wif)
+        self.send(spend_record(pay3_id, payout3))
+        node.generateposblock(self.a_wif)
+
+        self.log.info("Once the successor binds, the superseded record is spendable and the successor is not")
+        self.produce_to(activation2)
+        assert_raises_rpc_error(-26, "bad-payout-in-force", self.send, spend_record(pay2_id, payout2))
+        reclaim_id = self.send(spend_record(pay_id, payout))
+        node.generateposblock(self.a_wif)
+        assert reclaim_id in node.getblock(node.getbestblockhash())["tx"]
 
         self.log.info("History from below the height still validates after a restart")
         self.restart_node(0)
