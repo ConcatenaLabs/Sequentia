@@ -23,7 +23,7 @@ QT_END_NAMESPACE
 /**
  * Sequentia "OpenAMP" page: be a holder of issuer-governed restricted assets.
  *
- * OpenAMP (doc/sequentia/openamp-design.md) is an issuer's policy server. A
+ * OpenAMP (DESIGN.md in the openamp repository) is an issuer's policy server. A
  * restricted asset lives in a 2-of-2 taproot "enclave" -- the holder's key and
  * the issuer's policy key -- so every transfer needs the issuer to co-sign, which
  * is how a transfer restriction is enforced with no consensus rule behind it.

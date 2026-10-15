@@ -344,7 +344,7 @@ void BitcoinGUI::createActions()
     supervisionAction->setShortcut(QKeySequence(Qt::ALT + Qt::Key_7));
     tabGroup->addAction(supervisionAction);
 
-    // SEQUENTIA: OpenAMP restricted assets (doc/sequentia/openamp-design.md). Unlike
+    // SEQUENTIA: OpenAMP restricted assets (DESIGN.md in the openamp repo). Unlike
     // supervision this cannot be detected from the chain -- whether the user holds an
     // issuer-governed asset is the issuer's knowledge rather than ours -- so the tab
     // is always present, and the page explains itself to anyone who opens it without

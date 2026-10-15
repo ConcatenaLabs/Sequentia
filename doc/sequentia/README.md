@@ -78,14 +78,11 @@ not these, are authoritative for current behavior. Status of each:
 | [`committee-seed-grind.py`](committee-seed-grind.py), [`committee-size-dist.py`](committee-size-dist.py), [`committee-sizing-tables.py`](committee-sizing-tables.py) | Analysis scripts backing the committee-sizing and seed-grinding memos. |
 | [`bls-share-verify-bench.cpp`](bls-share-verify-bench.cpp) | Micro-benchmark of BLS share verification, backing the committee-size decision. |
 
-**Ecosystem designs (implemented in other repositories)**
+**Ecosystem documents kept here**
 
-| Document | Status |
+| Document | What it covers |
 |---|---|
-| [`openamp-design.md`](openamp-design.md) | The policy server is implemented in [`openamp`](https://github.com/ConcatenaLabs/openamp) and is live on the public testnet with the demo asset BONDX. Zero consensus changes here; this repository's part is the holder's side — `getopenampaccount`, `signopenamptransfer` and the GUI's OpenAMP page, described in [`openamp-holder.md`](openamp-holder.md). |
-| [`opendamp-design.md`](opendamp-design.md) | OpenDAMP, network-enforced restricted assets through Simplicity covenants. The covenants are implemented in the [`opendamp`](https://github.com/ConcatenaLabs/opendamp) repository and the issuance path in [`openamp`](https://github.com/ConcatenaLabs/openamp); this repository's part is the Simplicity execution-budget ×4 flag day at testnet height 101,810 (24.3.0). |
-| [`sbtc-peg-design.md`](sbtc-peg-design.md) | Implemented in [`sbtc-bridge`](https://github.com/ConcatenaLabs/sbtc-bridge): SBTC is pegged bitcoin (1:1 BTC in a multisig custody reserve), an ordinary unprivileged asset; it is not Elements' federated consensus peg, which the chain does not configure. One divergence from this design: the shipped bridge does not burn returned SBTC; it holds it as float and reissues only the shortfall, so circulating (not total issued) supply equals the reserve. |
-| [`bridged-usdc-standard.md`](bridged-usdc-standard.md) | The unified bridged-stablecoin standard (one `USDC.e` fed from several chains, precision 6, issued supervised). Implemented in [`compages`](https://github.com/ConcatenaLabs/compages). |
+| [`openamp-holder.md`](openamp-holder.md) | Holding an OpenAMP restricted asset from Sequentia Core: `getopenampaccount`, `signopenamptransfer` and the GUI's OpenAMP page. |
 | [`ux-audit-spec-2026-07-02.md`](ux-audit-spec-2026-07-02.md) | UX audit and design-change spec across the ecosystem's user-facing surfaces; implementation tracked in the respective repos. |
 
 A design document belongs to the repository whose code it describes, so most of
@@ -99,6 +96,10 @@ them are **not** kept here:
 | The Pignus lending design (the loan covenant, the oracle set, Bitcoin collateral) | [`pignus`](https://github.com/ConcatenaLabs/pignus), `docs/pignus-design.md`. The covenant builder and its functional tests (`test/functional/pignus_*.py`, `feature_pignus_*.py`) live here because they run against this node. |
 | The Levo launchpad covenant and sale flow | [`levo`](https://github.com/ConcatenaLabs/levo), under `doc/`. |
 | The seqcj CoinJoin design and threat model | [`seqcj`](https://github.com/ConcatenaLabs/seqcj), `docs/DESIGN.md`. |
+| The OpenAMP design (issuer-governed assets through a co-signing policy server) | [`openamp`](https://github.com/ConcatenaLabs/openamp), [`DESIGN.md`](https://github.com/ConcatenaLabs/openamp/blob/main/DESIGN.md). |
+| The OpenDAMP design (restricted assets enforced by Simplicity covenants) | [`opendamp`](https://github.com/ConcatenaLabs/opendamp), [`DESIGN.md`](https://github.com/ConcatenaLabs/opendamp/blob/main/DESIGN.md). The node's part is the Simplicity budget rule in [`simplicity.md`](simplicity.md). |
+| The SBTC design (pegged bitcoin through a multisig bridge, and the DEX silent peg) | [`sbtc-bridge`](https://github.com/ConcatenaLabs/sbtc-bridge), [`DESIGN.md`](https://github.com/ConcatenaLabs/sbtc-bridge/blob/master/DESIGN.md). |
+| The Unified Bridged USDC standard | [`compages`](https://github.com/ConcatenaLabs/compages), [`docs/bridged-usdc-standard.md`](https://github.com/ConcatenaLabs/compages/blob/main/docs/bridged-usdc-standard.md). |
 
 What stays here is the protocol: anchoring, proof of stake, the fee market, and
 the consensus rules those other projects build on.

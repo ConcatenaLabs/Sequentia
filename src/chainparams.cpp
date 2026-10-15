@@ -471,7 +471,7 @@ public:
         // rather than migrated into supervision afterwards, which is not
         // possible at all: the descriptor is in the asset id, so an asset issued
         // unsupervised can never become supervised. See
-        // doc/sequentia/bridged-usdc-standard.md.
+        // docs/bridged-usdc-standard.md in the compages repository.
         consensus.supervised_assets_height = 1;
         // Minimum block spacing: the 60-second cadence as a CONSENSUS RULE, in
         // force from mainnet's first block. Mainnet has not launched, so there
@@ -861,7 +861,7 @@ public:
         // issued unsupervised can never be converted. Bridge deposits stay
         // closed across the fork and USDC.e is re-issued supervised immediately
         // after it, while supply is still zero. See
-        // doc/sequentia/bridged-usdc-standard.md.
+        // docs/bridged-usdc-standard.md in the compages repository.
         consensus.supervised_assets_height = 94600;
         // SEQUENTIA: 200,000 weight units — a twentieth of Bitcoin's 4,000,000
         // — so that, at ~30-second blocks (20x Bitcoin's cadence), a saturated
