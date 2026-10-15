@@ -2,7 +2,7 @@
 # Copyright (c) 2026 The Sequentia developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
-"""OpenAMP M0: restricted-asset enclave proof (doc/sequentia/openamp-design.md §12).
+"""OpenAMP M0: restricted-asset enclave proof (design: DESIGN.md in the openamp repository).
 
 Proves against the real node, with no chain-side changes:
 

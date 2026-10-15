@@ -21,7 +21,7 @@ picker already uses, and the same principle: outside staking itself, no asset is
 privileged over another.
 
 The target is never SBTC when it is "Bitcoin". SBTC is a narrow opt-in peg
-(`sbtc-peg-design.md`); a staker who asks for Bitcoin gets native parent-chain
+([SBTC design](https://github.com/ConcatenaLabs/sbtc-bridge/blob/master/DESIGN.md)); a staker who asks for Bitcoin gets native parent-chain
 BTC, and one who genuinely wants SBTC can pick it from the list like any other
 asset.
 

@@ -2,9 +2,9 @@
 
 OpenAMP is how an issuer governs a regulated asset on Sequentia: shares, bonds,
 fund units, anything whose transfers must be restricted to people the issuer has
-approved. The design is in [`openamp-design.md`](openamp-design.md), and the
-policy server that enforces it lives in the
-[`openamp`](https://github.com/ConcatenaLabs/openamp) repository.
+approved. The design and the
+policy server that enforces it live in the
+[`openamp`](https://github.com/ConcatenaLabs/openamp) repository ([`DESIGN.md`](https://github.com/ConcatenaLabs/openamp/blob/main/DESIGN.md)).
 
 This document is the other side of that relationship — what a **holder** running
 Sequentia Core does. It covers the desktop GUI and the two RPCs underneath it.

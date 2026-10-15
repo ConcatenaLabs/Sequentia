@@ -75,9 +75,9 @@ fresh chain, and height-gated only on the already-running testnet:
   Consensus-enforced from height 94,600 on the testnet. See
   [`doc/sequentia/supervised-assets-implementation.md`](doc/sequentia/supervised-assets-implementation.md).
 - **Simplicity execution budget ×4.** The per-input Simplicity budget is
-  quadrupled from height 101,810, so the covenant order book's
-  larger programs fit. See
-  [`doc/sequentia/opendamp-design.md`](doc/sequentia/opendamp-design.md).
+  quadrupled from height 101,810, so larger covenant programs fit without
+  padding. See "The budget" in
+  [`doc/sequentia/simplicity.md`](doc/sequentia/simplicity.md).
 - **Split pool payouts.** A staking pool can commit to proportional payouts
   from an on-chain pot that any delegator may claim, from height 102,150.
   See

@@ -15,7 +15,7 @@ node for nothing but the block data it serves. Two parties running it against
 their own nodes must agree to the atom, or one of their nodes is lying.
 
 It exists because a bridged stablecoin's whole claim rests on provable backing:
-see `doc/sequentia/bridged-usdc-standard.md`, which makes explicit issuance and
+see the [Unified Bridged USDC standard](https://github.com/ConcatenaLabs/compages/blob/main/docs/bridged-usdc-standard.md) in the Compages repository, which makes explicit issuance and
 burn a normative requirement precisely so that this reconstruction is exact.
 
 ## Usage

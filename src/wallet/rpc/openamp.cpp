@@ -17,7 +17,7 @@
 
 /* SEQUENTIA: the wallet-side operation OpenAMP restricted assets need.
  *
- * OpenAMP (doc/sequentia/openamp-design.md) keeps a restricted asset in a 2-of-2
+ * OpenAMP (DESIGN.md in the openamp repository) keeps a restricted asset in a 2-of-2
  * taproot "enclave": a NUMS internal key with no key path, and a leaf
  * `<K_user> CHECKSIGVERIFY <K_policy> CHECKSIG`. Every spend therefore needs the
  * holder's BIP340 signature alongside the issuer's policy server's. The server
