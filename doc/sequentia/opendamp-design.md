@@ -1,10 +1,11 @@
 # OpenDAMP: network-enforced restricted assets on Sequentia
 
 Status: M0 (this specification), M1 (the covenants) and M3 (the offline
-transfer tool) are implemented in the `opendamp` crate of the openamp
+transfer tool) are implemented in the [`opendamp`](https://github.com/ConcatenaLabs/opendamp)
 repository and proven on regtest against the node; M2 (the policy library and
-snapshot service) is implemented in `openampd`. What the shipped covenants
-enforce, and what they deliberately do not, is stated in `opendamp/STATUS.md`
+snapshot service) is implemented in `openampd`, in the
+[`openamp`](https://github.com/ConcatenaLabs/openamp) repository. What the shipped covenants
+enforce, and what they deliberately do not, is stated in opendamp's `STATUS.md`
 and summarised in section 3.6 below. Nothing is deployed on the live testnet
 beyond the pilot recorded in section 8.
 
@@ -233,10 +234,10 @@ comparison (measured: 2,807 milli-weight-units) and closes that.
 adjacency over proof indices, which a dense tree cannot express cheaply: a leaf
 is `SHA256(0x02 || lo || hi)` and absence is one ordinary membership proof of
 the bracketing interval plus two strict 256-bit comparisons. See
-`opendamp/SPEC-dmt-v1.md`.
+opendamp's `SPEC-dmt-v1.md`.
 
 For an input outpoint (t, v), the policy key is k_out = SHA256(t || BE32(v)).
-The issuer commits to a dmt-v1 interval tree (`opendamp/SPEC-dmt-v1.md`)
+The issuer commits to a dmt-v1 interval tree (opendamp's `SPEC-dmt-v1.md`)
 containing blacklisted outpoints. An earlier draft of this document reserved
 `smt-v1` and `cmt-v1`; neither fits the Simplicity budget at depth 256, which is
 why dmt-v1 exists, and a snapshot declaring one is refused rather than accepted
@@ -264,7 +265,7 @@ input owner) and `recv_after` (the receive window, binding an output
 recipient), committed INSIDE the leaf so the proof that a key is approved also
 proves which windows bind it and a holder cannot shorten their own lockup. The
 tree is dmt-v1, a sorted dense Merkle tree of depth 16, specified byte for byte
-in `opendamp/SPEC-dmt-v1.md`. The list is
+in opendamp's `SPEC-dmt-v1.md`. The list is
 compiled from SeqPal ID eligibility stamps by the registrar: enforcement is
 on-chain, vetting stays exactly where it is in the cosign model. Newly
 verified investors become spendable-to when the issuer publishes the next
