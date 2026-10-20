@@ -254,7 +254,8 @@ namespace GUIUtil
 
     /* Native parent-chain Bitcoin in pickers and tables. It is not a CAsset, so views
        that traffic in CAsset carry it as the null asset id, which no real asset can
-       have (every real id is an issuance hash). */
+       have (every real id is an issuance hash). On a chain whose own coin has the null
+       id there is no parent chain, and nothing is parent Bitcoin. */
     const CAsset& parentBtcAsset();
     bool isParentBtc(const CAsset& asset);
     QString parentBtcTicker();

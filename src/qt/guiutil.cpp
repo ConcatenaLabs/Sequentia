@@ -835,7 +835,9 @@ const CAsset& parentBtcAsset()
 
 bool isParentBtc(const CAsset& asset)
 {
-    return asset.IsNull();
+    // A chain whose own coin has the null id (a Bitcoin-mode chain, which is how the
+    // unit tests run) has no parent: the null id is its coin, not Bitcoin's.
+    return asset.IsNull() && !::policyAsset.IsNull();
 }
 
 QString parentBtcTicker()
