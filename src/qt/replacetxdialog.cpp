@@ -383,10 +383,10 @@ void ReplaceTxDialog::onFeeCellEdited()
     // bytes. Whichever cell was typed into is converted back to it.
     double atoms_per_kvb = 0.0;
     if (source == m_cell_new[RATE_ASSET]) {
-        atoms_per_kvb = typed * factor;
+        atoms_per_kvb = GUIUtil::feeRatePerKvb(typed * factor);
     } else if (source == m_cell_new[RATE_REF]) {
         if (!(unit_price > 0.0)) return;
-        atoms_per_kvb = typed / unit_price * factor;
+        atoms_per_kvb = GUIUtil::feeRatePerKvb(typed / unit_price * factor);
     } else if (source == m_cell_new[TOTAL_ASSET]) {
         if (m_vsize <= 0) return;
         atoms_per_kvb = typed * factor * 1000.0 / static_cast<double>(m_vsize);
@@ -429,8 +429,8 @@ void ReplaceTxDialog::recompute()
     const double old_price = old_info.has_market_price ? old_info.market_price : 0.0;
     const bool same_fee_asset = (fee_asset == m_orig_fee_asset);
 
-    m_row_label[RATE_ASSET]->setText(tr("Per 1000 bytes (%1)").arg(asset_name));
-    m_row_label[RATE_REF]->setText(tr("Per 1000 bytes (%1)").arg(ref));
+    m_row_label[RATE_ASSET]->setText(tr("Per %1 bytes (%2)").arg(QString::number(GUIUtil::FEE_RATE_SHOWN_BYTES), asset_name));
+    m_row_label[RATE_REF]->setText(tr("Per %1 bytes (%2)").arg(QString::number(GUIUtil::FEE_RATE_SHOWN_BYTES), ref));
     m_row_label[TOTAL_ASSET]->setText(tr("Total (%1)").arg(asset_name));
     m_row_label[TOTAL_REF]->setText(tr("Total (%1)").arg(ref));
 
@@ -493,8 +493,11 @@ void ReplaceTxDialog::recompute()
     };
     const QString dash = QStringLiteral("—");
 
-    put(m_cell_new[RATE_ASSET], GUIUtil::formatUnits(new_rate_atoms / factor, info.precision));
-    put(m_cell_new[RATE_REF], price > 0.0 ? refFigure(new_rate_atoms / factor * price) : QString());
+    // The rate rows are per FEE_RATE_SHOWN_BYTES; the totals are what they are.
+    const double new_rate_shown = GUIUtil::feeRateShown(static_cast<double>(new_rate_atoms));
+    const double old_rate_shown = GUIUtil::feeRateShown(old_rate_atoms);
+    put(m_cell_new[RATE_ASSET], GUIUtil::formatUnits(new_rate_shown / factor, GUIUtil::feeRateDecimals(info.precision)));
+    put(m_cell_new[RATE_REF], price > 0.0 ? refFigure(new_rate_shown / factor * price) : QString());
     put(m_cell_new[TOTAL_ASSET], m_vsize > 0
         ? GUIUtil::formatUnits(new_total_atoms / factor, info.precision) : dash);
     put(m_cell_new[TOTAL_REF], (m_vsize > 0 && price > 0.0)
@@ -503,9 +506,9 @@ void ReplaceTxDialog::recompute()
     // The original's rate and total in the asset column only mean anything when
     // that column's asset is the one it actually paid in.
     put(m_cell_original[RATE_ASSET], same_fee_asset
-        ? GUIUtil::formatUnits(old_rate_atoms / old_factor, old_info.precision) : dash);
+        ? GUIUtil::formatUnits(old_rate_shown / old_factor, GUIUtil::feeRateDecimals(old_info.precision)) : dash);
     put(m_cell_original[RATE_REF], old_price > 0.0
-        ? refFigure(old_rate_atoms / old_factor * old_price) : dash);
+        ? refFigure(old_rate_shown / old_factor * old_price) : dash);
     put(m_cell_original[TOTAL_ASSET], same_fee_asset
         ? GUIUtil::formatUnits(static_cast<double>(m_orig_fee_atoms) / old_factor, old_info.precision) : dash);
     put(m_cell_original[TOTAL_REF], old_price > 0.0
@@ -528,7 +531,7 @@ void ReplaceTxDialog::recompute()
         return (value >= 0 ? QStringLiteral("+") : QStringLiteral("−")) + body;
     };
     if (same_fee_asset) {
-        put(m_cell_delta[RATE_ASSET], delta((new_rate_atoms - old_rate_atoms) / factor, info.precision, false));
+        put(m_cell_delta[RATE_ASSET], delta((new_rate_shown - old_rate_shown) / factor, GUIUtil::feeRateDecimals(info.precision), false));
         put(m_cell_delta[TOTAL_ASSET], m_vsize > 0
             ? delta((new_total_atoms - static_cast<double>(m_orig_fee_atoms)) / factor, info.precision, false)
             : dash);
@@ -538,7 +541,7 @@ void ReplaceTxDialog::recompute()
     }
     const bool both_priced = price > 0.0 && old_price > 0.0;
     put(m_cell_delta[RATE_REF], both_priced
-        ? delta(new_rate_atoms / factor * price - old_rate_atoms / old_factor * old_price, 0, true) : QString());
+        ? delta(new_rate_shown / factor * price - old_rate_shown / old_factor * old_price, 0, true) : QString());
     put(m_cell_delta[TOTAL_REF], (both_priced && m_vsize > 0)
         ? delta(new_total_atoms / factor * price -
                 static_cast<double>(m_orig_fee_atoms) / old_factor * old_price, 0, true) : QString());
@@ -589,12 +592,12 @@ void ReplaceTxDialog::recompute()
     // What the next block is charging, in the asset that pays: the figure that
     // decides whether a replacement is merely valid or actually goes anywhere.
     const CAmount entry_reference = std::max(c.next_block_min, c.relay_min);
-    const CAmount entry_atoms = toAsset(entry_reference, fee_asset);
-    QString entry_text = GUIUtil::formatUnits(static_cast<double>(entry_atoms) / factor, info.precision) +
+    const double entry_shown = GUIUtil::feeRateShown(static_cast<double>(toAsset(entry_reference, fee_asset)));
+    QString entry_text = GUIUtil::formatUnits(entry_shown / factor, GUIUtil::feeRateDecimals(info.precision)) +
                          QLatin1Char(' ') + asset_name;
     if (price > 0.0) {
         entry_text += QStringLiteral(" (≈ ") +
-                      refFigure(static_cast<double>(entry_atoms) / factor * price) +
+                      refFigure(entry_shown / factor * price) +
                       QLatin1Char(' ') + ref + QLatin1Char(')');
     }
 
@@ -668,15 +671,15 @@ void ReplaceTxDialog::recompute()
         // original's place and then waits exactly as long -- which is how a fee
         // increase can feel like it did nothing at all.
         m_verdict->setStyleSheet(QStringLiteral("color:#ffb84d;"));
-        m_verdict->setText(tr("Enough for this node to take the replacement, but under the %1 per 1000 bytes "
+        m_verdict->setText(tr("Enough for this node to take the replacement, but under the %1 per %2 bytes "
                               "the next block is taking: it would replace the original and then wait in the "
-                              "same queue.").arg(entry_text));
+                              "same queue.").arg(entry_text, QString::number(GUIUtil::FEE_RATE_SHOWN_BYTES)));
     } else {
         m_verdict->setStyleSheet(QStringLiteral("color:#7ec87e;"));
         m_verdict->setText(c.next_block_full
             ? tr("Enough to replace it: this node takes the replacement from %1 in total, and blocks being "
-                 "full, the rate above also clears the %2 per 1000 bytes the next block is taking.")
-                  .arg(floor_text, entry_text)
+                 "full, the rate above also clears the %2 per %3 bytes the next block is taking.")
+                  .arg(floor_text, entry_text, QString::number(GUIUtil::FEE_RATE_SHOWN_BYTES))
             : tr("Enough to replace it: this node takes the replacement from %1 in total, and the figure "
                  "above clears that. Blocks are not full, so nothing else is competing for the space.")
                   .arg(floor_text));

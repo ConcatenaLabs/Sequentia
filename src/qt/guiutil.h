@@ -411,6 +411,19 @@ namespace GUIUtil
     double atomsPerUnit(uint8_t precision);
     QString formatUnits(double units, uint8_t precision);
 
+    /* SEQUENTIA: a fee rate is shown per this many bytes. A payment is a few
+       hundred bytes, so a rate per 100 reads close to what one actually costs,
+       where a rate per 1000 read several times larger. Internally every rate stays
+       atoms per 1000 virtual bytes, the unit CFeeRate and the node use: only what
+       is printed and typed is scaled, through these two. */
+    constexpr int FEE_RATE_SHOWN_BYTES{100};
+    inline double feeRateShown(double atoms_per_kvb) { return atoms_per_kvb * FEE_RATE_SHOWN_BYTES / 1000.0; }
+    inline double feeRatePerKvb(double shown) { return shown * 1000.0 / FEE_RATE_SHOWN_BYTES; }
+    //! The decimals a shown rate needs: one more than the asset's, because a whole
+    //! atom per 1000 bytes is a tenth of one per 100. An indivisible asset at its
+    //! floor costs 0.1 per 100 bytes, which at the asset's own precision reads "0".
+    inline uint8_t feeRateDecimals(uint8_t precision) { return precision + 1; }
+
     /* SEQUENTIA: whether a fee paid in this asset will TRAVEL, said in one line,
        or empty when there is nothing to warn about. This node accepting a fee
        asset settles only that the transaction leaves the wallet; whether other

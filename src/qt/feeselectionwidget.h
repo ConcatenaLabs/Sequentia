@@ -171,7 +171,7 @@ private:
     QRadioButton* m_radio_custom{nullptr};
 
     //! The four cells: what this costs, in the asset that pays and in the
-    //! reference currency, per transaction and per 1000 bytes.
+    //! reference currency, per transaction and per GUIUtil::FEE_RATE_SHOWN_BYTES.
     QLineEdit* m_total_asset{nullptr};
     QLineEdit* m_total_ref{nullptr};
     QLineEdit* m_kvb_asset{nullptr};
