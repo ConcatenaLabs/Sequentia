@@ -263,6 +263,7 @@ OverviewPage::OverviewPage(const PlatformStyle *platformStyle, QWidget *parent) 
         ui->scrollArea->setVisible(false);
 
         m_asset_table = new QTableWidget(0, COL_COUNT, ui->frame);
+        m_asset_table->setObjectName(QStringLiteral("assetBalances"));
         m_asset_table->setHorizontalHeaderLabels({tr("Asset name"), tr("Asset id"), tr("Available"), tr("Pending"), tr("Immature"), tr("Value")});
         // Name is short; the id gets the stretch and elides with "…" when narrowed
         // (the full id is always on hover), so the two are never confused with the

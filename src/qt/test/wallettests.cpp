@@ -26,6 +26,8 @@
 #include <qt/receivecoinsdialog.h>
 #include <qt/recentrequeststablemodel.h>
 #include <qt/receiverequestdialog.h>
+#include <qt/replacetxdialog.h>
+#include <qt/guiutil.h>
 
 #include <chrono>
 #include <memory>
@@ -39,6 +41,7 @@
 #include <QVBoxLayout>
 #include <QTextEdit>
 #include <QListView>
+#include <QTableWidget>
 #include <QDialogButtonBox>
 
 using wallet::AddWallet;
@@ -103,10 +106,39 @@ QModelIndex FindTx(const QAbstractItemModel& model, const uint256& txid)
     return {};
 }
 
+//! Answer the window "Increase transaction fee" opens: read its verdict, then,
+//! when it offers OK, press it and answer the confirmation that follows (`cancel`
+//! picks Cancel there); when it does not, press Cancel. The wallet's refusal of a
+//! bump ("not BIP 125 replaceable", "already bumped") is the window's verdict,
+//! with OK disabled, not a message box. The window is modal, so this runs from
+//! the event loop its exec() starts; a helper that only knew the confirmation
+//! dialog clicked nothing, and the window waited forever.
+void AnswerBumpWindow(QString* verdict, bool* offered_ok, QString* confirm_text, bool cancel)
+{
+    QTimer::singleShot(0, [verdict, offered_ok, confirm_text, cancel]() {
+        for (QWidget* widget : QApplication::topLevelWidgets()) {
+            auto* dialog = qobject_cast<ReplaceTxDialog*>(widget);
+            if (!dialog) continue;
+            if (QLabel* label = dialog->findChild<QLabel*>("verdict")) *verdict = label->text();
+            QDialogButtonBox* buttons = dialog->findChild<QDialogButtonBox*>();
+            QPushButton* ok = buttons ? buttons->button(QDialogButtonBox::Ok) : nullptr;
+            *offered_ok = ok && ok->isEnabled();
+            if (*offered_ok) {
+                ConfirmSend(confirm_text, cancel);
+                ok->click();
+            } else {
+                dialog->reject();
+            }
+        }
+    });
+}
+
 //! Invoke bumpfee on txid and check results.
 void BumpFee(TransactionView& view, const uint256& txid, bool expectDisabled, std::string expectError, bool cancel)
 {
-    QTableView* table = view.findChild<QTableView*>("transactionView");
+    // A tree since the list groups a payment's rows; any item view will do here.
+    QAbstractItemView* table = view.findChild<QAbstractItemView*>("transactionView");
+    QVERIFY2(table, "no transaction list in the view");
     QModelIndex index = FindTx(*table->selectionModel()->model(), txid);
     QVERIFY2(index.isValid(), "Could not find BumpFee txid");
 
@@ -119,14 +151,16 @@ void BumpFee(TransactionView& view, const uint256& txid, bool expectDisabled, st
     QCOMPARE(action->isEnabled(), !expectDisabled);
 
     action->setEnabled(true);
-    QString text;
-    if (expectError.empty()) {
-        ConfirmSend(&text, cancel);
-    } else {
-        ConfirmMessage(&text, 0ms);
-    }
+    QString verdict, text;
+    bool offered_ok = false;
+    AnswerBumpWindow(&verdict, &offered_ok, &text, cancel);
     action->trigger();
-    QVERIFY(text.indexOf(QString::fromStdString(expectError)) != -1);
+    if (expectError.empty()) {
+        QVERIFY2(offered_ok, qPrintable("the bump window refused: " + verdict));
+    } else {
+        QVERIFY2(!offered_ok, "the bump window offered OK for a transaction it cannot bump");
+        QVERIFY2(verdict.indexOf(QString::fromStdString(expectError)) != -1, qPrintable("verdict: " + verdict));
+    }
 }
 
 //! Simple qt wallet tests.
@@ -218,15 +252,26 @@ void TestGUI(interfaces::Node& node)
     BumpFee(transactionView, txid2, false /* expect disabled */, {} /* expected error */, false /* cancel */);
     BumpFee(transactionView, txid2, true /* expect disabled */, "already bumped" /* expected error */, false /* cancel */);
 
-    // Check current balance on OverviewPage
+    // Check current balance on OverviewPage: one row per asset, and the chain's own
+    // coin shows the wallet's balance in its Available column. (labelBalance is still
+    // in the form but nothing writes it since the page became a table.)
     OverviewPage overviewPage(platformStyle.get());
     overviewPage.setWalletModel(&walletModel);
-    QLabel* balanceLabel = overviewPage.findChild<QLabel*>("labelBalance");
-    QString balanceText = balanceLabel->text().trimmed();
+    QTableWidget* assets = overviewPage.findChild<QTableWidget*>("assetBalances");
+    QVERIFY2(assets, "no asset table on the overview");
+    int available_col = -1;
+    for (int col = 0; col < assets->columnCount(); ++col) {
+        if (assets->horizontalHeaderItem(col) && assets->horizontalHeaderItem(col)->text() == QObject::tr("Available")) available_col = col;
+    }
+    QVERIFY2(available_col >= 0, "no Available column on the overview");
     int unit = walletModel.getOptionsModel()->getDisplayUnit();
     CAmount balance = valueFor(walletModel.wallet().getBalance(), ::policyAsset);
-    QString balanceComparison = BitcoinUnits::formatWithUnit(unit, balance, false, BitcoinUnits::SeparatorStyle::ALWAYS);
-    QCOMPARE(balanceText, balanceComparison);
+    const QString balanceComparison = GUIUtil::formatAssetAmount(::policyAsset, balance, unit, BitcoinUnits::SeparatorStyle::ALWAYS, false);
+    QStringList shown;
+    for (int row = 0; row < assets->rowCount(); ++row) {
+        if (QTableWidgetItem* cell = assets->item(row, available_col)) shown << cell->text().trimmed();
+    }
+    QVERIFY2(shown.contains(balanceComparison), qPrintable("no row shows " + balanceComparison + "; rows show: " + shown.join(", ")));
 
     // Check Request Payment button
     ReceiveCoinsDialog receiveCoinsDialog(platformStyle.get());

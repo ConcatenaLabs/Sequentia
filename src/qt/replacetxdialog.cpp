@@ -167,6 +167,7 @@ void ReplaceTxDialog::buildUi()
     lay->addLayout(grid);
 
     m_verdict = new QLabel(this);
+    m_verdict->setObjectName(QStringLiteral("verdict"));
     m_verdict->setWordWrap(true);
     lay->addWidget(m_verdict);
     m_notes = new QLabel(this);
