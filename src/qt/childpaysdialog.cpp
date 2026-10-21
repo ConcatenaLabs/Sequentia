@@ -334,10 +334,10 @@ void ChildPaysDialog::onFeeCellEdited()
 
     double atoms_per_kvb = 0.0;
     if (source == m_cell_child[RATE_ASSET]) {
-        atoms_per_kvb = typed * factor;
+        atoms_per_kvb = GUIUtil::feeRatePerKvb(typed * factor);
     } else if (source == m_cell_child[RATE_REF]) {
         if (!(unit_price > 0.0)) return;
-        atoms_per_kvb = typed / unit_price * factor;
+        atoms_per_kvb = GUIUtil::feeRatePerKvb(typed / unit_price * factor);
     } else if (source == m_cell_child[TOTAL_ASSET]) {
         if (m_child_vsize <= 0) return;
         atoms_per_kvb = typed * factor * 1000.0 / static_cast<double>(m_child_vsize);
@@ -375,8 +375,8 @@ void ChildPaysDialog::recompute()
     const double pprice = pinfo.has_market_price ? pinfo.market_price : 0.0;
     const bool same_fee_asset = (fee_asset == m_parent_fee_asset);
 
-    m_row_label[RATE_ASSET]->setText(tr("Per 1000 bytes (%1)").arg(asset_name));
-    m_row_label[RATE_REF]->setText(tr("Per 1000 bytes (%1)").arg(ref));
+    m_row_label[RATE_ASSET]->setText(tr("Per %1 bytes (%2)").arg(QString::number(GUIUtil::FEE_RATE_SHOWN_BYTES), asset_name));
+    m_row_label[RATE_REF]->setText(tr("Per %1 bytes (%2)").arg(QString::number(GUIUtil::FEE_RATE_SHOWN_BYTES), ref));
     m_row_label[TOTAL_ASSET]->setText(tr("Total (%1)").arg(asset_name));
     m_row_label[TOTAL_REF]->setText(tr("Total (%1)").arg(ref));
 
@@ -423,21 +423,25 @@ void ChildPaysDialog::recompute()
     };
     const QString dash = QStringLiteral("—");
 
-    put(m_cell_child[RATE_ASSET], GUIUtil::formatUnits(child_rate_atoms / factor, info.precision));
-    put(m_cell_child[RATE_REF], price > 0.0 ? refFigure(child_rate_atoms / factor * price) : QString());
+    // The rate rows are per FEE_RATE_SHOWN_BYTES; the totals are what they are.
+    const double child_rate_shown = GUIUtil::feeRateShown(static_cast<double>(child_rate_atoms));
+    const double parent_rate_shown = GUIUtil::feeRateShown(parent_rate_atoms);
+    const double package_rate_shown = GUIUtil::feeRateShown(static_cast<double>(package_rate_atoms));
+    put(m_cell_child[RATE_ASSET], GUIUtil::formatUnits(child_rate_shown / factor, GUIUtil::feeRateDecimals(info.precision)));
+    put(m_cell_child[RATE_REF], price > 0.0 ? refFigure(child_rate_shown / factor * price) : QString());
     put(m_cell_child[TOTAL_ASSET], GUIUtil::formatUnits(child_total_atoms / factor, info.precision));
     put(m_cell_child[TOTAL_REF], price > 0.0 ? refFigure(child_total_atoms / factor * price) : QString());
 
     put(m_cell_parent[RATE_ASSET], same_fee_asset
-        ? GUIUtil::formatUnits(parent_rate_atoms / pfactor, pinfo.precision) : dash);
-    put(m_cell_parent[RATE_REF], pprice > 0.0 ? refFigure(parent_rate_atoms / pfactor * pprice) : dash);
+        ? GUIUtil::formatUnits(parent_rate_shown / pfactor, GUIUtil::feeRateDecimals(pinfo.precision)) : dash);
+    put(m_cell_parent[RATE_REF], pprice > 0.0 ? refFigure(parent_rate_shown / pfactor * pprice) : dash);
     put(m_cell_parent[TOTAL_ASSET], same_fee_asset
         ? GUIUtil::formatUnits(static_cast<double>(m_parent_fee_atoms) / pfactor, pinfo.precision) : dash);
     put(m_cell_parent[TOTAL_REF], pprice > 0.0
         ? refFigure(static_cast<double>(m_parent_fee_atoms) / pfactor * pprice) : dash);
 
-    put(m_cell_package[RATE_ASSET], GUIUtil::formatUnits(package_rate_atoms / factor, info.precision));
-    put(m_cell_package[RATE_REF], price > 0.0 ? refFigure(package_rate_atoms / factor * price) : QString());
+    put(m_cell_package[RATE_ASSET], GUIUtil::formatUnits(package_rate_shown / factor, GUIUtil::feeRateDecimals(info.precision)));
+    put(m_cell_package[RATE_REF], price > 0.0 ? refFigure(package_rate_shown / factor * price) : QString());
     put(m_cell_package[TOTAL_ASSET], GUIUtil::formatUnits(package_total_atoms / factor, info.precision));
     put(m_cell_package[TOTAL_REF], price > 0.0 ? refFigure(package_total_atoms / factor * price) : QString());
 
@@ -454,11 +458,11 @@ void ChildPaysDialog::recompute()
     // a perfectly valid transaction -- it simply does not buy what it was made
     // for, so this warns rather than blocks.
     const CAmount cut = std::max(c.next_block_min, c.relay_min);
-    const CAmount cut_atoms = CFeeRate(cut).GetFee(1000, fee_asset);
-    QString cut_text = GUIUtil::formatUnits(static_cast<double>(cut_atoms) / factor, info.precision) +
+    const double cut_shown = GUIUtil::feeRateShown(static_cast<double>(CFeeRate(cut).GetFee(1000, fee_asset)));
+    QString cut_text = GUIUtil::formatUnits(cut_shown / factor, GUIUtil::feeRateDecimals(info.precision)) +
                        QLatin1Char(' ') + asset_name;
     if (price > 0.0) {
-        cut_text += QStringLiteral(" (≈ ") + refFigure(static_cast<double>(cut_atoms) / factor * price) +
+        cut_text += QStringLiteral(" (≈ ") + refFigure(cut_shown / factor * price) +
                     QLatin1Char(' ') + ref + QLatin1Char(')');
     }
 
@@ -515,13 +519,13 @@ void ChildPaysDialog::recompute()
                                .arg(asset_name));
     } else if (package_rate_reference >= cut) {
         m_verdict->setStyleSheet(QStringLiteral("color:#7ec87e;"));
-        m_verdict->setText(tr("Together they pay above what the next block is taking (%1 per 1000 bytes), "
-                              "so a producer has reason to take both.").arg(cut_text));
+        m_verdict->setText(tr("Together they pay above what the next block is taking (%1 per %2 bytes), "
+                              "so a producer has reason to take both.").arg(cut_text, QString::number(GUIUtil::FEE_RATE_SHOWN_BYTES)));
     } else {
         m_verdict->setStyleSheet(QStringLiteral("color:#ffb84d;"));
-        m_verdict->setText(tr("Together they still pay less than the next block is taking (%1 per 1000 "
+        m_verdict->setText(tr("Together they still pay less than the next block is taking (%1 per %2 "
                               "bytes). The child would sit beside the parent instead of carrying it.")
-                               .arg(cut_text));
+                               .arg(cut_text, QString::number(GUIUtil::FEE_RATE_SHOWN_BYTES)));
     }
 
     QStringList notes;

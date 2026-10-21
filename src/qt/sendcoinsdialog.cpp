@@ -1333,7 +1333,7 @@ void SendCoinsDialog::updateFeeSectionControls()
     ui->labelFeeEstimation      ->setEnabled(ui->radioSmartFee->isChecked());
     ui->labelCustomPerKilobyte  ->setEnabled(ui->radioCustomFee->isChecked());
     ui->customFee               ->setEnabled(ui->radioCustomFee->isChecked());
-    // Hidden, not removed. It says the same thing as the grid's "Per 1000 bytes"
+    // Hidden, not removed. It says the same thing as the grid's "Per 100 bytes"
     // row in a second place and a second notation, and two editable copies of one
     // number invite the question of which one is real. It stays in the form and
     // keeps holding the value, because it IS the rate the wallet spends -- the

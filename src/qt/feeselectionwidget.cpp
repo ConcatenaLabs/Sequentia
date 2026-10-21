@@ -118,7 +118,7 @@ void FeeSelectionWidget::buildUi()
 
     auto total = cell(grid, 1, tr("Total for this transaction"));
     m_total_asset = total.first; m_total_ref = total.second;
-    auto perkvb = cell(grid, 2, tr("Per 1000 bytes"));
+    auto perkvb = cell(grid, 2, tr("Per %1 bytes").arg(GUIUtil::FEE_RATE_SHOWN_BYTES));
     m_kvb_asset = perkvb.first; m_kvb_ref = perkvb.second;
     grid->setColumnStretch(3, 1);
     m_layout->addLayout(grid);
@@ -451,9 +451,10 @@ void FeeSelectionWidget::updateGrid(const CAmount& asset_atoms_per_kvb)
     auto put = [this](QLineEdit* cell, const QString& text) {
         if (cell != m_cell_editing) cell->setText(text);
     };
-    put(m_kvb_asset, FormatUnits(asset_atoms_per_kvb / factor, info.precision));
+    const double shown_atoms = GUIUtil::feeRateShown(static_cast<double>(asset_atoms_per_kvb));
+    put(m_kvb_asset, FormatUnits(shown_atoms / factor, GUIUtil::feeRateDecimals(info.precision)));
     put(m_kvb_ref, unit_price > 0.0
-        ? QString::number(asset_atoms_per_kvb / factor * unit_price, 'f', 8)
+        ? QString::number(shown_atoms / factor * unit_price, 'f', 8)
         : QString());
     // A total the host was given outright beats one multiplied out here: it is the
     // fee the wallet actually charged, over the size the wallet actually estimated.
@@ -517,12 +518,13 @@ void FeeSelectionWidget::onCellEdited(QLineEdit* source)
     // Everything is derived from one figure: atoms of the fee asset per 1000
     // bytes. Whichever cell was typed into is converted back to that, and the
     // wallet's own field -- which is a rate in the reference unit -- follows.
+    // The rate cells are per FEE_RATE_SHOWN_BYTES, so they are scaled back.
     double atoms_per_kvb = 0.0;
     if (source == m_kvb_asset) {
-        atoms_per_kvb = typed * factor;
+        atoms_per_kvb = GUIUtil::feeRatePerKvb(typed * factor);
     } else if (source == m_kvb_ref) {
         if (!(unit_price > 0.0)) return;
-        atoms_per_kvb = typed / unit_price * factor;
+        atoms_per_kvb = GUIUtil::feeRatePerKvb(typed / unit_price * factor);
     } else if (source == m_total_asset) {
         if (m_tx_vsize == 0) return;
         atoms_per_kvb = typed * factor * 1000.0 / m_tx_vsize;
@@ -568,14 +570,17 @@ QString FeeSelectionWidget::formatFeeRate(const CAmount& fee_asset_atoms_per_kvb
         return tr("unavailable — this node does not accept fees in %1").arg(GUIUtil::assetDisplayName(feeAsset_));
     }
 
+    // Per FEE_RATE_SHOWN_BYTES, in the asset's own units: never "/kvB", a unit
+    // nobody reads a price in.
+    const QString per_bytes = tr("per %1 bytes").arg(GUIUtil::FEE_RATE_SHOWN_BYTES);
+    const uint8_t precision = m_model ? m_model->node().getFeeAssetInfo(feeAsset_).precision : 8;
     QStringList parts;
-    parts << GUIUtil::formatAssetAmount(feeAsset_, fee_asset_atoms_per_kvb, BitcoinUnits::BTC,
-                                        BitcoinUnits::SeparatorStyle::STANDARD, /*include_asset_name=*/true)
-             + QStringLiteral("/kvB");
+    parts << FormatUnits(GUIUtil::feeRateShown(static_cast<double>(fee_asset_atoms_per_kvb)) / AtomsPerUnit(precision), GUIUtil::feeRateDecimals(precision))
+             + QLatin1Char(' ') + GUIUtil::assetDisplayName(feeAsset_) + QLatin1Char(' ') + per_bytes;
 
     double refValue = 0.0;
     if (GUIUtil::referenceValueOf(feeAsset_, fee_asset_atoms_per_kvb, ref, refValue)) {
-        QString line = GUIUtil::formatReferenceAmount(refValue, ref) + QStringLiteral("/kvB");
+        QString line = GUIUtil::formatReferenceAmount(GUIUtil::feeRateShown(refValue), ref) + QLatin1Char(' ') + per_bytes;
         // The unit price behind it, so the conversion is checkable rather than magic.
         double unitValue = 0.0;
         if (GUIUtil::unitReferenceValue(feeAsset_, ref, unitValue)) {
@@ -750,7 +755,7 @@ void FeeSelectionWidget::updateNotes(const CAmount& custom_reference_per_kvb, bo
         const double floor_value = floor_units * UnitPriceFromFeeRate(info.rate, info.precision);
         const double network_min = static_cast<double>(c.relay_min) / static_cast<double>(exchange_rate_scale);
         if (network_min > 0.0 && floor_value > network_min * 3.0) {
-            asset_note = tr("Paying in %1 costs at least %2 per 1000 bytes — about %3 times the network "
+            asset_note = tr("Paying in %1 costs at least %2 — about %3 times the network "
                             "minimum, because one unit of %1 cannot be divided any further. A less "
                             "valuable asset pays closer to the true cost.")
                             .arg(name, in_asset(c.relay_min), QString::number(floor_value / network_min, 'f', 0));
