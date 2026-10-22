@@ -25,6 +25,15 @@ tapscript (`src/script/sign.cpp`). Programs are written in SimplicityHL and
 compiled, satisfied and pruned outside this repository; transactions spending
 them are assembled by hand and submitted as raw transactions.
 
+The signing RPCs (`signrawtransactionwithwallet`, `signrawtransactionwithkey`)
+leave a Simplicity input's witness as they find it and check it with the rest.
+A program may read the spent output of every input, so it can be run only when
+the node knows all of them. When an input's parent is unknown to the node, the
+RPC reports that input as `Input not found or already spent` and each
+Simplicity input beside it as `Simplicity input cannot be checked without the
+spent output of every input`, and signs what it can. `signrawtransactionwithkey`
+takes the missing outputs in its `prevtxs` argument.
+
 ## The output and the witness
 
 A Simplicity program lives in a taproot leaf with leaf version `0xbe`
@@ -238,3 +247,7 @@ hex the RPC interface prints.
   machine on a custom chain.
 - `test/functional/feature_taproot.py`: a minimal Simplicity spend among the
   taproot cases, run with `-evbparams=simplicity:-1:::`.
+- `src/test/simplicity_checker_tests.cpp` and
+  `test/functional/rpc_signrawtransaction_simplicity.py`: a Simplicity input
+  checked without the spent output of every input, by the script checker and
+  by the signing RPCs.

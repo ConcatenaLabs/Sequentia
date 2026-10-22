@@ -3161,10 +3161,19 @@ uint32_t GenericTransactionSignatureChecker<T>::GetnIn() const
 template <class T>
 bool GenericTransactionSignatureChecker<T>::CheckSimplicity(const valtype& program, const valtype& witness, const rawElementsTapEnv& simplicityRawTap, int64_t budget, ScriptError* serror) const
 {
+    // SEQUENTIA: a program may read the spent output of every input, so it
+    // runs only against transaction data built from all of them. Validation
+    // always has it (a missing one there is a bug, and asserts as the Schnorr
+    // sighash does); a signer handed a transaction with an input whose parent
+    // it does not know has none, and gets a script error for this input.
+    if (!txdata || !txdata->m_simplicity_tx_data) {
+        HandleMissingData(m_mdb);
+        return set_error(serror, SCRIPT_ERR_SIMPLICITY_TX_DATA_MISSING);
+    }
+
     simplicity_err error;
     elementsTapEnv* simplicityTapEnv = simplicity_elements_mallocTapEnv(&simplicityRawTap);
 
-    assert(txdata->m_simplicity_tx_data);
     assert(simplicityTapEnv);
     if (!simplicity_elements_execSimplicity(&error, 0, txdata->m_simplicity_tx_data.get(), nIn, simplicityTapEnv, txdata->m_hash_genesis_block.data(), 0, budget, 0, program.data(), program.size(), witness.data(), witness.size())) {
         assert(!"simplicity_elements_execSimplicity internal error");
