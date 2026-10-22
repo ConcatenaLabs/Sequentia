@@ -62,14 +62,27 @@ extern bool fAcceptDatacarrier;
 extern unsigned nMaxDatacarrierBytes;
 
 /**
- * Mandatory script verification flags that all new blocks must comply with for
- * them to be valid. (but old blocks may not comply with) Currently just P2SH,
- * but in the future other flags may be added.
+ * Mandatory script verification flags: the standard flags that are also
+ * consensus, so that a block's script flags (GetBlockScriptFlags in
+ * validation.cpp) hold no standard flag outside this set. The block flags
+ * that are not standard flags at all (SCRIPT_SIGHASH_RANGEPROOF,
+ * SCRIPT_VERIFY_SIMPLICITY_BUDGET4, SCRIPT_VERIFY_SEQ_RECORDS_V2) need not be
+ * listed.
  *
- * Failing one of these tests may trigger a DoS ban - see CheckInputScripts() for
- * details.
+ * CheckInputScripts() labels a script failure by them: under flags with a
+ * standard flag outside this set, the mempool's, it is a policy failure
+ * (`mempool-script-verify-flag-failed`); otherwise, as in a block, it is a
+ * consensus failure (`mandatory-script-verify-flag-failed`). The label is all
+ * they decide; the flags a script is checked under are chosen elsewhere.
  */
-static const unsigned int MANDATORY_SCRIPT_VERIFY_FLAGS = SCRIPT_VERIFY_P2SH;
+static const unsigned int MANDATORY_SCRIPT_VERIFY_FLAGS = SCRIPT_VERIFY_P2SH |
+                                                          SCRIPT_VERIFY_WITNESS |
+                                                          SCRIPT_VERIFY_DERSIG |
+                                                          SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY |
+                                                          SCRIPT_VERIFY_CHECKSEQUENCEVERIFY |
+                                                          SCRIPT_VERIFY_NULLDUMMY |
+                                                          SCRIPT_VERIFY_TAPROOT |
+                                                          SCRIPT_VERIFY_SIMPLICITY;
 
 enum class TxoutType {
     NONSTANDARD,

@@ -180,10 +180,13 @@ every `0xbe` leaf as Simplicity even where consensus does not; that is why the
 garbage spend above was refused by relay and accepted in a block. A mempool
 refusal therefore says nothing about consensus. Prove every negative case by
 forcing the transaction into a block with `generateblock` and a raw
-transaction. A block refusal reports only `block-validation-failed`; the
-script-level reason (`Assertion failed inside jet`, `Assertion failed`,
-`Program's execution cost could exceed budget`, and the like) appears only in
-the mempool's answer.
+transaction, and read the two refusals apart by their labels: the mempool's is
+`mempool-script-verify-flag-failed (…)`, a block's is
+`mandatory-script-verify-flag-failed (…)`, each with the script error found
+under its own flags (`Assertion failed inside jet`, `Assertion failed`,
+`Program's execution cost could exceed budget`, and the like). A node checking
+scripts in parallel, the default, reports a block's script failure only as
+`block-validation-failed`; start it with `-par=1` to get the script error.
 
 **The four relative-timelock jets do not bind the input being spent.**
 `check_lock_distance`, `check_lock_duration`, `tx_lock_distance` and
@@ -251,3 +254,5 @@ hex the RPC interface prints.
   `test/functional/rpc_signrawtransaction_simplicity.py`: a Simplicity input
   checked without the spent output of every input, by the script checker and
   by the signing RPCs.
+- `test/functional/feature_block_script_failure_label.py`: a failing Simplicity
+  spend refused by the mempool as policy and by a block as consensus.

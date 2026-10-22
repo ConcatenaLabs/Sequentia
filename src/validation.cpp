@@ -2210,6 +2210,11 @@ bool CheckInputScripts(const CTransaction& tx, TxValidationState& state,
             // non-standard DER encodings or non-null dummy
             // arguments) or due to new consensus rules introduced in
             // soft forks.
+            //
+            // SEQUENTIA: the label says which rules failed. The mempool's
+            // flags carry policy-only flags, so its refusal is policy; a
+            // block's flags carry none (BLOCK_SCRIPT_VERIFY_FLAGS_ALL), so its
+            // refusal is consensus.
             if (flags & STANDARD_NOT_MANDATORY_VERIFY_FLAGS) {
                 return state.Invalid(TxValidationResult::TX_NOT_STANDARD, strprintf("mempool-script-verify-flag-failed (%s)", ScriptErrorString(serror)));
             } else {
@@ -2555,6 +2560,19 @@ public:
 
 static ThresholdConditionCache warningcache[VERSIONBITS_NUM_BITS] GUARDED_BY(cs_main);
 
+//! SEQUENTIA: every flag GetBlockScriptFlags can set. None of them is a standard
+//! flag outside MANDATORY_SCRIPT_VERIFY_FLAGS, which is what makes
+//! CheckInputScripts label a script failure in a block as the consensus failure
+//! it is. A new block flag that is also a standard flag belongs in
+//! MANDATORY_SCRIPT_VERIFY_FLAGS too.
+static constexpr unsigned int BLOCK_SCRIPT_VERIFY_FLAGS_ALL =
+    SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS | SCRIPT_VERIFY_DERSIG |
+    SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY | SCRIPT_VERIFY_CHECKSEQUENCEVERIFY |
+    SCRIPT_VERIFY_TAPROOT | SCRIPT_VERIFY_NULLDUMMY | SCRIPT_SIGHASH_RANGEPROOF |
+    SCRIPT_VERIFY_SIMPLICITY | SCRIPT_VERIFY_SIMPLICITY_BUDGET4 | SCRIPT_VERIFY_SEQ_RECORDS_V2;
+static_assert((BLOCK_SCRIPT_VERIFY_FLAGS_ALL & STANDARD_NOT_MANDATORY_VERIFY_FLAGS) == 0,
+              "a block script flag that is a standard flag must be in MANDATORY_SCRIPT_VERIFY_FLAGS");
+
 static unsigned int GetBlockScriptFlags(const CBlockIndex* pindex, const Consensus::Params& consensusparams)
 {
     unsigned int flags = SCRIPT_VERIFY_NONE;
@@ -2618,6 +2636,7 @@ static unsigned int GetBlockScriptFlags(const CBlockIndex* pindex, const Consens
         flags |= SCRIPT_VERIFY_SEQ_RECORDS_V2;
     }
 
+    Assume((flags & ~BLOCK_SCRIPT_VERIFY_FLAGS_ALL) == 0);
     return flags;
 }
 
