@@ -377,10 +377,13 @@ bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
                 // them -- with one SEQUENTIA exception, decided below once the leaf
                 // version is known. A Simplicity spend buys execution budget with
                 // witness bytes, so an annex is the one place a program can be
-                // given budget without also being given bytes it has to read. It
-                // has a defined meaning there, and Simplicity's sigAllHash commits
-                // to it (txHash -> inputsHash -> inputAnnexesHash), so a relay node
-                // cannot strip it without invalidating the spend.
+                // given budget without also being given bytes it has to read.
+                // Only a program that signs Simplicity's sigAllHash commits to its
+                // annex, so on any other spend a relay could add or grow one; the
+                // interpreter's SCRIPT_VERIFY_SIMPLICITY_ANNEX_EXACT, a standard
+                // flag, therefore admits only a zero annex exactly as large as the
+                // program's cost needs. What is checked here is the leaf version
+                // and a cheap ceiling, before any program runs.
                 has_annex = true;
                 SpanPopBack(stack);
             }
@@ -393,8 +396,9 @@ bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
                 if (has_annex) {
                     // SEQUENTIA: the carve-out is deliberately narrow -- only a
                     // Simplicity leaf, and only up to a size the chain could
-                    // plausibly need. The cap is policy, not consensus, so raising
-                    // it later costs a relay update rather than a fork.
+                    // plausibly need. Its exact size is the interpreter's check
+                    // (SCRIPT_VERIFY_SIMPLICITY_ANNEX_EXACT). Both are policy, not
+                    // consensus, so changing them costs a relay update, not a fork.
                     if (leaf_version != TAPROOT_LEAF_TAPSIMPLICITY) return false;
                     if (tx.witness.vtxinwit[i].scriptWitness.stack.back().size() > MAX_STANDARD_SIMPLICITY_ANNEX_SIZE) return false;
                 }

@@ -86,7 +86,7 @@ BOOST_AUTO_TEST_CASE(simplicity_without_txdata_is_a_script_error)
 
     rawElementsTapEnv tap_env{};
     ScriptError err = SCRIPT_ERR_OK;
-    BOOST_CHECK(!no_txdata.CheckSimplicity(UNIT_PROGRAM, {}, tap_env, /*budget=*/1000, &err));
+    BOOST_CHECK(!no_txdata.CheckSimplicity(UNIT_PROGRAM, {}, tap_env, /*min_cost=*/0, /*budget=*/1000, &err));
     BOOST_CHECK_EQUAL(err, SCRIPT_ERR_SIMPLICITY_TX_DATA_MISSING);
 
     // The shape the signing RPCs build when a parent is unknown: forced

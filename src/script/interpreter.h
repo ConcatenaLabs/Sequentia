@@ -182,6 +182,17 @@ enum : uint32_t {
     //
     SCRIPT_SEQ_RECORD_INPUT = (1U << 26),
 
+    // SEQUENTIA: an annex on a Simplicity leaf spend must be all zeros after its
+    // tag and exactly as large as the program's cost needs: the program must not
+    // fit the budget of the same witness with the annex one byte shorter (or
+    // absent, when the annex is the tag alone). Policy only (it is in
+    // STANDARD_SCRIPT_VERIFY_FLAGS and in no block's flags). Without it a relay
+    // can append an annex to a spend whose program does not commit to one,
+    // growing the transaction tenfold or more under the same txid and pinning it
+    // at the floor fee rate. See SimplicityAnnexMinCost.
+    //
+    SCRIPT_VERIFY_SIMPLICITY_ANNEX_EXACT = (1U << 27),
+
     // Constants to point to the highest flag in use. Add new flags above this line.
     //
     SCRIPT_VERIFY_END_MARKER
@@ -385,7 +396,7 @@ public:
         return std::numeric_limits<uint32_t>::max();
     }
 
-    virtual bool CheckSimplicity(const std::vector<unsigned char>& witness, const std::vector<unsigned char>& program, const rawElementsTapEnv& simplicityRawTap, int64_t budget, ScriptError* serror) const
+    virtual bool CheckSimplicity(const std::vector<unsigned char>& witness, const std::vector<unsigned char>& program, const rawElementsTapEnv& simplicityRawTap, int64_t min_cost, int64_t budget, ScriptError* serror) const
     {
          return false;
     }
@@ -434,7 +445,7 @@ public:
 
     const PrecomputedTransactionData* GetPrecomputedTransactionData() const override;
     uint32_t GetnIn() const override;
-    bool CheckSimplicity(const std::vector<unsigned char>& program, const std::vector<unsigned char>& witness, const rawElementsTapEnv& simplicityRawTap, int64_t budget, ScriptError* serror) const override;
+    bool CheckSimplicity(const std::vector<unsigned char>& program, const std::vector<unsigned char>& witness, const rawElementsTapEnv& simplicityRawTap, int64_t min_cost, int64_t budget, ScriptError* serror) const override;
 };
 
 using TransactionSignatureChecker = GenericTransactionSignatureChecker<CTransaction>;
@@ -470,6 +481,19 @@ public:
 
 /** Compute the BIP341 tapleaf hash from leaf version & script. */
 uint256 ComputeTapleafHash(uint8_t leaf_version, const CScript& script);
+
+/** SEQUENTIA: the Simplicity execution budget, in weight units, that a witness
+ * stack of this serialized size buys at `per_byte` weight units a byte, plus
+ * VALIDATION_WEIGHT_OFFSET, clamped to SIMPLICITY_BUDGET_MAX. */
+int64_t SimplicityBudget(size_t serialized_witness_size, int64_t per_byte);
+
+/** SEQUENTIA: for a Simplicity witness stack whose last item is an annex, the
+ * budget of the same stack with that annex one byte shorter, or with no annex
+ * when it is the tag alone. Under SCRIPT_VERIFY_SIMPLICITY_ANNEX_EXACT a
+ * program's cost bound must exceed it: an annex is standard only when no
+ * smaller one would do. Never above SimplicityBudget of the stack itself.
+ * Precondition: stack.size() >= 2 and stack.back() is non-empty. */
+int64_t SimplicityAnnexMinCost(const std::vector<std::vector<unsigned char>>& stack, int64_t per_byte);
 /** Compute the BIP341 taproot script tree Merkle root from control block and leaf hash.
  *  Requires control block to have valid length (33 + k*32, with k in {0,1,..,128}). */
 uint256 ComputeTaprootMerkleRoot(Span<const unsigned char> control, const uint256& tapleaf_hash);

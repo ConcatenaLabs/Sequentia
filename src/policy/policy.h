@@ -50,7 +50,10 @@ static const unsigned int MAX_STANDARD_TAPSCRIPT_STACK_ITEM_SIZE = 80;
  * An annex is how a Simplicity program buys execution budget without buying
  * bytes it must read; 100,000 bytes buys 400,000 weight units of budget under
  * SIMPLICITY_BUDGET_PER_WITNESS_BYTE, which is a whole Sequentia block, so
- * nothing legitimate needs more. Annexes remain nonstandard everywhere else. */
+ * nothing legitimate needs more. Below this ceiling an annex is standard only
+ * when it is zeros and exactly as large as the program's cost needs
+ * (SCRIPT_VERIFY_SIMPLICITY_ANNEX_EXACT). Annexes remain nonstandard everywhere
+ * else. */
 static const unsigned int MAX_STANDARD_SIMPLICITY_ANNEX_SIZE = 100000;
 /** The maximum size in bytes of a standard witnessScript */
 static const unsigned int MAX_STANDARD_P2WSH_SCRIPT_SIZE = 3600;
@@ -87,7 +90,8 @@ static constexpr unsigned int STANDARD_SCRIPT_VERIFY_FLAGS = MANDATORY_SCRIPT_VE
                                                              SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_TAPROOT_VERSION |
                                                              SCRIPT_VERIFY_DISCOURAGE_OP_SUCCESS |
                                                              SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_PUBKEYTYPE |
-                                                             SCRIPT_VERIFY_SIMPLICITY;
+                                                             SCRIPT_VERIFY_SIMPLICITY |
+                                                             SCRIPT_VERIFY_SIMPLICITY_ANNEX_EXACT;
 
 
 /** For convenience, standard but not mandatory verify flags. */

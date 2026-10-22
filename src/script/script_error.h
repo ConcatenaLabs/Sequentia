@@ -127,6 +127,9 @@ typedef enum ScriptError_t
     // runs against (the spent output of every input). Never a validation
     // result: block and mempool checks always have the data.
     SCRIPT_ERR_SIMPLICITY_TX_DATA_MISSING,
+    // SEQUENTIA: an annex on a Simplicity leaf carries bytes other than zero
+    // after its tag (policy, SCRIPT_VERIFY_SIMPLICITY_ANNEX_EXACT).
+    SCRIPT_ERR_SIMPLICITY_ANNEX_NONZERO,
 
     /* Must go last */
     SCRIPT_ERR_ERROR_COUNT

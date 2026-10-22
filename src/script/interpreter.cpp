@@ -12,6 +12,9 @@
 #include <pubkey.h>
 #include <script/script.h>
 #include <uint256.h>
+
+#include <algorithm>
+
 extern "C" {
 #include <simplicity/elements/env.h>
 #include <simplicity/elements/exec.h>
@@ -3159,7 +3162,7 @@ uint32_t GenericTransactionSignatureChecker<T>::GetnIn() const
 }
 
 template <class T>
-bool GenericTransactionSignatureChecker<T>::CheckSimplicity(const valtype& program, const valtype& witness, const rawElementsTapEnv& simplicityRawTap, int64_t budget, ScriptError* serror) const
+bool GenericTransactionSignatureChecker<T>::CheckSimplicity(const valtype& program, const valtype& witness, const rawElementsTapEnv& simplicityRawTap, int64_t min_cost, int64_t budget, ScriptError* serror) const
 {
     // SEQUENTIA: a program may read the spent output of every input, so it
     // runs only against transaction data built from all of them. Validation
@@ -3175,7 +3178,7 @@ bool GenericTransactionSignatureChecker<T>::CheckSimplicity(const valtype& progr
     elementsTapEnv* simplicityTapEnv = simplicity_elements_mallocTapEnv(&simplicityRawTap);
 
     assert(simplicityTapEnv);
-    if (!simplicity_elements_execSimplicity(&error, 0, txdata->m_simplicity_tx_data.get(), nIn, simplicityTapEnv, txdata->m_hash_genesis_block.data(), 0, budget, 0, program.data(), program.size(), witness.data(), witness.size())) {
+    if (!simplicity_elements_execSimplicity(&error, 0, txdata->m_simplicity_tx_data.get(), nIn, simplicityTapEnv, txdata->m_hash_genesis_block.data(), min_cost, budget, 0, program.data(), program.size(), witness.data(), witness.size())) {
         assert(!"simplicity_elements_execSimplicity internal error");
     }
     simplicity_elements_freeTapEnv(simplicityTapEnv);
@@ -3211,6 +3214,28 @@ bool GenericTransactionSignatureChecker<T>::CheckSimplicity(const valtype& progr
     case SIMPLICITY_ERR_OVERWEIGHT: return set_error(serror, SCRIPT_ERR_SIMPLICITY_OVERWEIGHT);
     default: return set_error(serror, SCRIPT_ERR_UNKNOWN_ERROR);
     }
+}
+
+int64_t SimplicityBudget(size_t serialized_witness_size, int64_t per_byte)
+{
+    return std::min<int64_t>((int64_t)serialized_witness_size * per_byte + VALIDATION_WEIGHT_OFFSET,
+                             SIMPLICITY_BUDGET_MAX);
+}
+
+int64_t SimplicityAnnexMinCost(const std::vector<valtype>& stack, int64_t per_byte)
+{
+    assert(stack.size() >= 2 && !stack.back().empty());
+    const size_t annex_len = stack.back().size();
+    // The stack as serialized, less the annex and its length prefix...
+    size_t shorter = ::GetSerializeSize(stack, PROTOCOL_VERSION) - GetSizeOfCompactSize(annex_len) - annex_len;
+    if (annex_len > 1) {
+        // ...plus an annex one byte shorter, whose prefix may be shorter too;
+        shorter += GetSizeOfCompactSize(annex_len - 1) + annex_len - 1;
+    } else {
+        // ...or, for the tag alone, no annex, and one item fewer to count.
+        shorter -= GetSizeOfCompactSize(stack.size()) - GetSizeOfCompactSize(stack.size() - 1);
+    }
+    return SimplicityBudget(shorter, per_byte);
 }
 
 // explicit instantiation
@@ -3327,10 +3352,12 @@ static bool VerifyWitnessProgram(const CScriptWitness& witness, int witversion, 
         // BIP341 Taproot: 32-byte non-P2SH witness v1 program (which encodes a P2C-tweaked pubkey)
         if (!(flags & SCRIPT_VERIFY_TAPROOT)) return set_success(serror);
         if (stack.size() == 0) return set_error(serror, SCRIPT_ERR_WITNESS_PROGRAM_WITNESS_EMPTY);
+        const valtype* annex = nullptr;
         if (stack.size() >= 2 && !stack.back().empty() && stack.back()[0] == ANNEX_TAG) {
-            // Drop annex (this is non-standard; see IsWitnessStandard)
-            const valtype& annex = SpanPopBack(stack);
-            execdata.m_annex_hash = (CHashWriter(SER_GETHASH, 0) << annex).GetSHA256();
+            // Drop annex (this is non-standard except on a Simplicity leaf; see
+            // IsWitnessStandard and SCRIPT_VERIFY_SIMPLICITY_ANNEX_EXACT)
+            annex = &SpanPopBack(stack);
+            execdata.m_annex_hash = (CHashWriter(SER_GETHASH, 0) << *annex).GetSHA256();
             execdata.m_annex_present = true;
         } else {
             execdata.m_annex_present = false;
@@ -3374,20 +3401,30 @@ static bool VerifyWitnessProgram(const CScriptWitness& witness, int witversion, 
                 // only ever accepts more is gated by height on the running testnet.
                 //
                 // `witness.stack` is the whole stack including any annex, which is
-                // deliberate: the annex is committed to by Simplicity's sigAllHash
-                // (via txHash -> inputsHash -> inputAnnexesHash), so budget bought
-                // with annex bytes cannot be stripped by a third party without
-                // invalidating the spend.
+                // deliberate: an annex is how a program buys budget without
+                // carrying bytes it has to read.
                 const int64_t per_byte = (flags & SCRIPT_VERIFY_SIMPLICITY_BUDGET4)
                     ? SIMPLICITY_BUDGET_PER_WITNESS_BYTE : 1;
-                const int64_t budget = std::min<int64_t>(
-                    (int64_t)::GetSerializeSize(witness.stack, PROTOCOL_VERSION) * per_byte + VALIDATION_WEIGHT_OFFSET,
-                    SIMPLICITY_BUDGET_MAX);
+                const int64_t budget = SimplicityBudget(::GetSerializeSize(witness.stack, PROTOCOL_VERSION), per_byte);
+                // SEQUENTIA, policy only: an annex must be zeros and exactly as
+                // large as the program's cost needs. Only a program that signs
+                // Simplicity's sigAllHash commits to its annex; any other spend's
+                // annex can be added or grown by whoever relays it, under the
+                // same txid, to pin the spend at a lower fee rate. With this rule
+                // a spend has one standard witness size: no annex when its witness
+                // pays for the program, else the one smallest annex that does.
+                int64_t min_cost = 0;
+                if (annex != nullptr && (flags & SCRIPT_VERIFY_SIMPLICITY_ANNEX_EXACT)) {
+                    if (std::any_of(annex->begin() + 1, annex->end(), [](unsigned char b) { return b != 0; })) {
+                        return set_error(serror, SCRIPT_ERR_SIMPLICITY_ANNEX_NONZERO);
+                    }
+                    min_cost = SimplicityAnnexMinCost(witness.stack, per_byte);
+                }
                 rawElementsTapEnv simplicityRawTap;
                 simplicityRawTap.controlBlock = control.data();
                 simplicityRawTap.pathLen = (control.size() - TAPROOT_CONTROL_BASE_SIZE) / TAPROOT_CONTROL_NODE_SIZE;
                 simplicityRawTap.scriptCMR = script_bytes.data();
-                return checker.CheckSimplicity(simplicity_program, simplicity_witness, simplicityRawTap, budget, serror);
+                return checker.CheckSimplicity(simplicity_program, simplicity_witness, simplicityRawTap, min_cost, budget, serror);
             }
             if (flags & SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_TAPROOT_VERSION) {
                 return set_error(serror, SCRIPT_ERR_DISCOURAGE_UPGRADABLE_TAPROOT_VERSION);
