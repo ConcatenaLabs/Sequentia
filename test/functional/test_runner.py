@@ -377,6 +377,7 @@ BASE_SCRIPTS = [
     'feature_elements_simplicity_activation.py',
     'rpc_signrawtransaction_simplicity.py',
     'feature_block_script_failure_label.py',
+    'mempool_simplicity_annex.py',
     'p2p_invalid_messages.py',
     'p2p_invalid_tx.py',
     'feature_assumevalid.py',

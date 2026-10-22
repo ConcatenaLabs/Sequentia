@@ -82,8 +82,8 @@ of the whole witness stack of the input: the item count, every length prefix,
 the witness, the program, the CMR, the control block and the annex. The cost
 bound is computed over the whole pruned program, untaken `case` branches
 included, in milli weight units; it must be at most `budget × 1000`. Nothing is
-metered at run time, and a witness larger than the program needs is not
-refused.
+metered at run time. A block takes a witness larger than the program needs;
+relay takes one only when the excess is not an annex (see below).
 
 Worked example, measured on a regtest node: a looping program with a cost bound
 of 15,664,298 milli-WU (15,665 WU) was refused with a 3,903-byte witness stack
@@ -103,17 +103,44 @@ mainnet parameters included, it applies from genesis.
 ## The annex
 
 A program whose cost exceeds what its witness buys can buy the difference with
-an annex: bytes the program need not read, counted in the budget like any other
-witness byte.
+an annex: a last witness item, tagged `0x50`, that the program need not read,
+counted in the budget like any other witness byte.
 
-- An annex is standard only on a Simplicity leaf spend, up to 100,000 bytes
-  (`MAX_STANDARD_SIMPLICITY_ANNEX_SIZE`, `src/policy/policy.h`), which buys
-  400,000 weight units. One byte more is refused by relay with
-  `bad-witness-nonstandard`; it is still valid in a block. An annex on a
-  key-path spend or a tapscript leaf remains non-standard.
+- An annex is standard only on a Simplicity leaf spend, and there only when
+  the program needs all of it: every byte after the tag is zero, and the
+  program's cost bound exceeds the budget of the same witness with the annex
+  one byte shorter (or with no annex, when the annex is the tag alone). A spend
+  therefore has exactly one standard witness size: no annex when its witness
+  pays for the program, and otherwise the one smallest annex that does. Relay
+  refuses any other with
+  `mempool-script-verify-flag-failed (Simplicity annex is larger than the program's cost needs)`
+  or `mempool-script-verify-flag-failed (Simplicity annex must be zeros after its tag)`
+  (`SCRIPT_VERIFY_SIMPLICITY_ANNEX_EXACT`, `src/script/interpreter.h`). This
+  is the rule ElementsProject/elements#1539 proposes for Elements, at
+  Sequentia's four weight units a byte.
+- The rule is what stops a relay from pinning someone else's spend. Only a
+  program that signs `sig_all_hash` commits to its annex; on any other spend,
+  a SeqDEX order fill for one, whoever relays the transaction could otherwise
+  append an annex under the same txid, grow it tenfold, and leave it at the
+  floor fee rate, because a node keeps the first witness it sees for a txid.
+- Above 100,000 bytes (`MAX_STANDARD_SIMPLICITY_ANNEX_SIZE`,
+  `src/policy/policy.h`, which buys 400,000 weight units) an annex is refused
+  with `bad-witness-nonstandard` before any program runs. An annex on a
+  key-path spend or a tapscript leaf is non-standard at every size.
+- All of this is relay policy. A block accepts any annex on any taproot spend,
+  so these refusals are never a reason a block is invalid.
+- To size an annex, a wallet takes the cost bound of the pruned program in
+  milli weight units (rust-simplicity computes it for a satisfied program) and the
+  serialized size of the input's witness stack without an annex, and finds the
+  shortest annex `0x50 00 … 00` whose stack's budget times 1,000 reaches the
+  cost. Count the annex's own length prefix, which grows from one byte to three
+  at 253 bytes, and the item count. Fix the annex before signing: `sig_all_hash`
+  commits to it. `BudgetRule::padding` in ConcatenaLabs/smplx and
+  `lwk_contracts::budget::padding` in SWK do exactly this. Tools written for
+  Elements' one weight unit a byte compute an annex about four times too large,
+  which this rule refuses.
 - The annex is part of the transaction environment the program sees
-  (`jet::input_annexes_hash`) and is committed to by `sig_all_hash`, so a relay
-  node cannot strip it without invalidating a signed spend.
+  (`jet::input_annexes_hash`) and is committed to by `sig_all_hash`.
 - The node passes the annex to the program; the `simplicity-lang` Rust library
   used by SimplicityHL tooling passes none. A program that reads the annex, or
   that checks a signature over a `sig_all_hash` computed by that library, will
@@ -243,7 +270,12 @@ hex the RPC interface prints.
 ## Tests in this repository
 
 - `src/test/simplicity_policy_tests.cpp`: the budget arithmetic, the clamp, the
-  testnet flag day and annex standardness.
+  testnet flag day and annex standardness, including the exact-size rule run
+  on real programs.
+- `test/functional/mempool_simplicity_annex.py`: a seqdex/order fill annexed by
+  a third party is refused and cannot pin the honest copy; a program that
+  needs budget relays with its minimal annex and nothing else; blocks accept
+  both regardless.
 - `src/test/sequentia_chainparams_tests.cpp`: pins activation on `sequentia`
   and `test`.
 - `test/functional/feature_elements_simplicity_activation.py`: the BIP9 state

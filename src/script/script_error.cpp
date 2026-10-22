@@ -181,9 +181,13 @@ std::string ScriptErrorString(const ScriptError serror)
         case SCRIPT_ERR_SIMPLICITY_AMR:
             return SIMPLICITY_ERR_MSG(SIMPLICITY_ERR_AMR);
         case SCRIPT_ERR_SIMPLICITY_OVERWEIGHT:
-            return SIMPLICITY_ERR_MSG(SIMPLICITY_ERR_OVERWEIGHT);
+            // SEQUENTIA: the interpreter's "budget is too large". The only budget a
+            // spend can enlarge at will is its annex (SCRIPT_VERIFY_SIMPLICITY_ANNEX_EXACT).
+            return "Simplicity annex is larger than the program's cost needs";
         case SCRIPT_ERR_SIMPLICITY_TX_DATA_MISSING:
             return "Simplicity input cannot be checked without the spent output of every input";
+        case SCRIPT_ERR_SIMPLICITY_ANNEX_NONZERO:
+            return "Simplicity annex must be zeros after its tag";
         case SCRIPT_ERR_UNKNOWN_ERROR:
         case SCRIPT_ERR_ERROR_COUNT:
         default: break;
