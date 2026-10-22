@@ -123,6 +123,10 @@ typedef enum ScriptError_t
     SCRIPT_ERR_SIMPLICITY_HIDDEN_ROOT,
     SCRIPT_ERR_SIMPLICITY_AMR,
     SCRIPT_ERR_SIMPLICITY_OVERWEIGHT,
+    // SEQUENTIA: the checker lacks the transaction data a Simplicity program
+    // runs against (the spent output of every input). Never a validation
+    // result: block and mempool checks always have the data.
+    SCRIPT_ERR_SIMPLICITY_TX_DATA_MISSING,
 
     /* Must go last */
     SCRIPT_ERR_ERROR_COUNT

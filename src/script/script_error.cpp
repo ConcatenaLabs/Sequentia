@@ -182,6 +182,8 @@ std::string ScriptErrorString(const ScriptError serror)
             return SIMPLICITY_ERR_MSG(SIMPLICITY_ERR_AMR);
         case SCRIPT_ERR_SIMPLICITY_OVERWEIGHT:
             return SIMPLICITY_ERR_MSG(SIMPLICITY_ERR_OVERWEIGHT);
+        case SCRIPT_ERR_SIMPLICITY_TX_DATA_MISSING:
+            return "Simplicity input cannot be checked without the spent output of every input";
         case SCRIPT_ERR_UNKNOWN_ERROR:
         case SCRIPT_ERR_ERROR_COUNT:
         default: break;
