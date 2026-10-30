@@ -80,8 +80,10 @@ reissuance tokens. Verify mints hit the mempool.
 
 (Each keys off the asset ids from step 4 - do this AFTER issuance.)
 
-- **Mock price API** (`/root/price-demo/mock-price-api.py`): 5 assets, DROP WBTC,
-  but KEEP a `BTC` price (~64000) for "real" testnet4 BTC (user directive).
+- **Market-data feed** (`/root/price-demo/mock-price-api.py`, a copy of
+  `contrib/price-server/mock-price-api.py` written from a fetched commit): nothing
+  to edit. It prices the real-world assets and `tBTC` from Yahoo Finance, pins
+  USDX and USDC at 1.00 and mocks tSEQ, and dates every ticker with `as_of`.
 - **Price server** (`contrib/sequentia/gen-price-config.py`): there is no asset
   list to edit any more, the universe is DISCOVERED from the registry, so only
   node_rpcs matter. Regenerate with
