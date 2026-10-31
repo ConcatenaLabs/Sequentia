@@ -39,7 +39,8 @@ class ResendWalletTransactionsTest(BitcoinTestFramework):
         # Can take a few seconds due to transaction trickling
         peer_first.wait_for_broadcast([txid])
 
-        # Add a second peer since txs aren't rebroadcast to the same peer (see filterInventoryKnown)
+        # Add a second peer, one that has never seen the transaction, and check the
+        # wallet's resend reaches it
         peer_second = node.add_p2p_connection(P2PTxInvStore())
 
         self.log.info("Create a block")

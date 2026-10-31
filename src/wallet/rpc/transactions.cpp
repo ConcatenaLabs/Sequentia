@@ -7,6 +7,7 @@
 #include <key_io.h>
 #include <policy/rbf.h>
 #include <rpc/util.h>
+#include <util/time.h>
 #include <util/vector.h>
 #include <wallet/receive.h>
 #include <wallet/rpc/util.h>
@@ -15,6 +16,12 @@
 using interfaces::FoundBlock;
 
 namespace wallet {
+//! SEQUENTIA: how long a payment goes unfetched before it is reported
+//! unbroadcast. Announcing it and a peer fetching it take seconds, so one no
+//! peer has fetched in a minute has not reached the network; earlier, every
+//! fresh payment would read as stuck.
+static constexpr int64_t UNBROADCAST_REPORT_SECONDS{60};
+
 static void WalletTxToJSON(const CWallet& wallet, const CWalletTx& wtx, UniValue& entry)
 {
     interfaces::Chain& chain = wallet.chain();
@@ -52,6 +59,17 @@ static void WalletTxToJSON(const CWallet& wallet, const CWalletTx& wtx, UniValue
             rbfStatus = "yes";
     }
     entry.pushKV("bip125-replaceable", rbfStatus);
+
+    // SEQUENTIA: an unconfirmed payment the network has not taken says so,
+    // rather than looking like any other payment waiting for its block.
+    if (confirms == 0 && !wtx.isAbandoned()) {
+        if (wtx.m_rejection) {
+            entry.pushKV("refused", wtx.m_rejection->reason);
+        } else if (wtx.InMempool() && GetTime() - int64_t{wtx.nTimeReceived} >= UNBROADCAST_REPORT_SECONDS &&
+                   chain.isUnbroadcast(hash)) {
+            entry.pushKV("unbroadcast", true);
+        }
+    }
 
     for (const std::pair<const std::string, std::string>& item : wtx.mapValue) {
         // Skip blinding data which isn't parseable
@@ -464,6 +482,11 @@ static const std::vector<RPCResult> TransactionDescriptionString()
            {RPCResult::Type::BOOL, "generated", /*optional=*/true, "Only present if the transaction's only input is a coinbase one."},
            {RPCResult::Type::BOOL, "trusted", /*optional=*/true, "Whether we consider the transaction to be trusted and safe to spend from.\n"
                 "Only present when the transaction has 0 confirmations (or negative confirmations, if conflicted)."},
+           {RPCResult::Type::STR, "refused", /*optional=*/true, "Only present while the node refuses to take this unconfirmed transaction\n"
+                "into its mempool, so it cannot reach a block: the node's reason, e.g. non-final."},
+           {RPCResult::Type::BOOL, "unbroadcast", /*optional=*/true, "Only present, as true, while the node holds this unconfirmed transaction and no peer\n"
+                "has fetched it in the minute since the wallet first saw it: it has not reached the block producers.\n"
+                "The node offers it to every peer again every 10 to 15 minutes."},
            {RPCResult::Type::STR_HEX, "blockhash", /*optional=*/true, "The block hash containing the transaction."},
            {RPCResult::Type::NUM, "blockheight", /*optional=*/true, "The block height containing the transaction."},
            {RPCResult::Type::NUM, "blockindex", /*optional=*/true, "The index of the transaction in the block that includes it."},

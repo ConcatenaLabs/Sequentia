@@ -645,6 +645,12 @@ public:
         LOCK(m_node.mempool->cs);
         return m_node.mempool->exists(GenTxid::Txid(txid));
     }
+    bool isUnbroadcast(const uint256& txid) override
+    {
+        if (!m_node.mempool) return false;
+        LOCK(m_node.mempool->cs);
+        return m_node.mempool->IsUnbroadcastTx(txid);
+    }
     bool hasDescendantsInMempool(const uint256& txid) override
     {
         if (!m_node.mempool) return false;

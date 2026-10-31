@@ -1869,6 +1869,8 @@ void CWallet::RecheckRejectedTransactions()
     m_next_rejection_check = now + REJECTION_RECHECK_SECONDS;
 
     LOCK(cs_wallet);
+    // Payments the node has just stopped refusing, to hand back to it at once.
+    std::vector<std::pair<int64_t, CWalletTx*>> lifted;
     for (auto& item : mapWallet) {
         CWalletTx& wtx = item.second;
         // The candidates are few, and normally none. A transaction in a block or
@@ -1877,7 +1879,18 @@ void CWallet::RecheckRejectedTransactions()
         if (wtx.IsCoinBase() || wtx.isAbandoned()) continue;
         if (GetTxDepthInMainChain(wtx) != 0) continue;
         if (!wtx.isRejected() && wtx.InMempool()) continue;
-        UpdateTxRejection(wtx);
+        if (UpdateTxRejection(wtx) && !wtx.isRejected() && !wtx.InMempool()) {
+            lifted.emplace_back(wtx.nOrderPos, &wtx);
+        }
+    }
+    // A refusal that lifts is usually a lock time the chain has grown past
+    // again: a reorg that loses height -- an anchor reorg -- leaves every recent
+    // payment non-final until then. Waiting for the periodic resend would leave
+    // it in no mempool for hours. Parents first, in the order they were made.
+    std::sort(lifted.begin(), lifted.end());
+    for (const auto& [pos, wtx] : lifted) {
+        std::string err_string;
+        SubmitTxMemoryPoolAndRelay(*wtx, err_string, /*relay=*/true);
     }
 }
 
