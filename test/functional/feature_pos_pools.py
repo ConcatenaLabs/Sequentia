@@ -145,6 +145,16 @@ class PosPoolsTest(BitcoinTestFramework):
         assert_equal(row["delegated_weight"], STAKE * COIN)
         assert_equal(row["delegators"], 1)
         assert_equal(row["declared"], False)
+        # It has produced nothing, so it carries no last block: the board says
+        # "no block in the window" from the field's absence.
+        assert "last_block_height" not in row and "last_block_time" not in row
+
+        # The signer that mines every block here carries its latest one: the
+        # tip itself, with the tip's time. The board says how long ago that was.
+        producer = [p for p in feed["pools"] if p["signer"] == self.a_pub]
+        assert_equal(len(producer), 1)
+        assert_equal(producer[0]["last_block_height"], feed["height"])
+        assert_equal(producer[0]["last_block_time"], node.getblockheader(node.getbestblockhash())["time"])
 
     def run_test(self):
         n0 = self.nodes[0]

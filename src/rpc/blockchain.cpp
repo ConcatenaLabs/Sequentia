@@ -4122,6 +4122,8 @@ static RPCHelpMan listpools()
                             {RPCResult::Type::NUM, "blocks_produced", /*optional=*/true, "blocks it produced in the window"},
                             {RPCResult::Type::NUM, "blocks_expected", /*optional=*/true, "blocks its weight entitled it to over the window"},
                             {RPCResult::Type::NUM, "reliability", /*optional=*/true, "produced / expected (1.0 is on target)"},
+                            {RPCResult::Type::NUM, "last_block_height", /*optional=*/true, "height of the most recent block it produced in the window"},
+                            {RPCResult::Type::NUM_TIME, "last_block_time", /*optional=*/true, "time of that block, " + UNIX_EPOCH_TIME},
                             {RPCResult::Type::STR, "payout", "one line describing what it has committed to paying"},
                             {RPCResult::Type::OBJ_DYN, "pot", "a split pool's accrued, unclaimed rewards, keyed by asset id", {
                                 {RPCResult::Type::STR_AMOUNT, "asset", "amount accrued in that asset"},
@@ -4223,6 +4225,9 @@ static RPCHelpMan listpools()
     // challenge names the leader and lives in the block index in memory, so
     // this costs no disk reads.
     std::map<CPubKey, int> produced;
+    // And the most recent of them, which is what tells a delegator whether a
+    // pool is producing now rather than on average over the window.
+    std::map<CPubKey, std::pair<int, int64_t>> last_block;
     int scanned = 0;
     int tip_height = 0;
     {
@@ -4237,7 +4242,11 @@ static RPCHelpMan listpools()
             // column rather than the whole answer.
             try {
                 const std::optional<PosChallengeParts> parts = ParsePosBlockChallenge(pindex->get_proof().challenge);
-                if (parts) produced[parts->leader]++;
+                if (parts) {
+                    produced[parts->leader]++;
+                    // The walk runs from the tip down, so the first block seen is the latest.
+                    last_block.emplace(parts->leader, std::make_pair(pindex->nHeight, pindex->GetBlockTime()));
+                }
             } catch (const std::exception&) {
                 break;
             }
@@ -4295,6 +4304,11 @@ static RPCHelpMan listpools()
             // Undefined rather than infinite when a pool was owed nothing: a
             // signer with no weight that produced no blocks is not unreliable.
             if (expected > 0) o.pushKV("reliability", (double)blocks / expected);
+            const auto lb = last_block.find(signer);
+            if (lb != last_block.end()) {
+                o.pushKV("last_block_height", lb->second.first);
+                o.pushKV("last_block_time", lb->second.second);
+            }
         }
 
         const auto in_force = registry.PayoutFor(signer, tip_height);
