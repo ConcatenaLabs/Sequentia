@@ -167,7 +167,12 @@ while the floors stay rfa-denominated.
   original's. A replacement that pays a larger *raw* amount of a cheaper asset but
   a smaller reference value is correctly rejected.
 - **Child-pays-for-parent (CPFP)** works across assets: a child spending an
-  unconfirmed parent contributes its rfa fee to the package's rfa rate.
+  unconfirmed parent contributes its rfa fee to the package's rfa rate, and the
+  package figures stay sums of values when a rate changes. A coin of an asset no
+  node accepts for fees is sped up by a child that adds a second input in an
+  accepted asset to pay the fee. A child cannot keep a parent alive whose own
+  fee asset the node stops accepting: the parent leaves the mempool with its
+  descendants. `test/functional/feature_any_asset_fee_cpfp.py` shows each case.
 - **The absurd-fee ceiling** (`-maxtxfee`, and `testmempoolaccept`'s
   `maxfeerate`) is also evaluated in reference value, so a fee paid in a
   low-per-unit-value asset is not spuriously rejected for a large raw amount.
