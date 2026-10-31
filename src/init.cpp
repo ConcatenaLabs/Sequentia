@@ -2308,12 +2308,16 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     // (doc/sequentia/proposals/autonomous-committee.md §12).
     if (g_con_pos && args.GetBoolArg("-posproducer", false)) {
         std::vector<CKey> producer_keys;
+        // Each key once: startposproducer and startstaking save the whole key
+        // list to settings.json, so a key given in the config file as well comes
+        // back twice, and a producer holding a key twice counts it twice.
+        std::set<CPubKey> seen_producer_keys;
         for (const std::string& wif : args.GetArgs("-posproducerkey")) {
             CKey key = DecodeSecret(wif);
             if (!key.IsValid()) {
                 return InitError(_("Invalid -posproducerkey (expected a WIF private key)"));
             }
-            producer_keys.push_back(key);
+            if (seen_producer_keys.insert(key.GetPubKey()).second) producer_keys.push_back(key);
         }
         if (producer_keys.empty()) {
             return InitError(_("-posproducer requires at least one -posproducerkey"));
