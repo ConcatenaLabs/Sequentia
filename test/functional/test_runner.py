@@ -231,6 +231,7 @@ BASE_SCRIPTS = [
     'feature_pos_autonomous_producer.py',
     'feature_pos_bls_committee.py',
     'feature_pos_public_committee.py',
+    'feature_pos_quorum_holder_joins_round.py',
     'feature_pos_cert_gossip.py',
     'feature_pos_bls_registration.py',
     'feature_pos_stake_vesting.py',

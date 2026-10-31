@@ -896,14 +896,35 @@ int64_t PosProducer::Step()
     const int64_t start_ms = PosProposalStartMs((int64_t)tip->nTime, earliest_sec, m_tip_seen_ms, now_ms);
     const int64_t target_ms = std::max(start_ms, (now_ms / 1000) * 1000);
 
-    // BLS distributed committee (we lack a local quorum, e.g. one key per host):
-    // drive the gossip round every poll — sign the lowest-VRF proposal once the
-    // collection window closes, and assemble if our own proposal wins with a
-    // quorum — and propose when our slot is due if no round has started yet.
-    if (g_pos_bls && g_pos_committee_size > 1 && local_committee_eligible < quorum) {
+    // A host holding a quorum of the committee by itself may certify alone only
+    // when no other host could lead the round. Once some other host commands an
+    // eligible stake, this host must take part in the gossip round like any
+    // member: its seats are part of every quorum, so certifying its own block
+    // at its own slot while never countersigning anyone else's would leave
+    // every other staker's proposal short of a quorum for good. The chain would
+    // run, but on one producer, whatever the election said; with stake-weighted
+    // seats a single large staker is exactly such a host.
+    const bool connected = m_connman && m_connman->GetNodeCount(ConnectionDirection::Both) > 0;
+    bool others_can_lead = false;
+    if (local_committee_eligible >= quorum && connected) {
+        std::set<CPubKey> ours;
+        for (const CKey& k : keys) ours.insert(k.GetPubKey());
+        for (const auto& [pub, weight] : registry.Weights()) {
+            if (PosIsEligibleStake(weight) && ours.count(pub) == 0) {
+                others_can_lead = true;
+                break;
+            }
+        }
+    }
+
+    // BLS distributed committee (we lack a local quorum, e.g. one key per host,
+    // or other hosts can lead): drive the gossip round every poll — sign the
+    // lowest-VRF proposal once the collection window closes, and assemble once
+    // the backed proposal (ours or another leader's) has a quorum of shares —
+    // and propose when our slot is due if no round has started yet.
+    if (g_pos_bls && g_pos_committee_size > 1 && (local_committee_eligible < quorum || others_can_lead)) {
         const int height = tip->nHeight + 1;
         int64_t round_poll = DriveRound();
-        const bool connected = m_connman && m_connman->GetNodeCount(ConnectionDirection::Both) > 0;
         // The round schedule is anchored to the round-0 block's timestamp, which
         // is whole seconds. A proposal sent at a fractional second carries the
         // second already begun, so every node's collection window opened before
@@ -957,6 +978,15 @@ int64_t PosProducer::Step()
 
     if (now_ms < target_ms) {
         return std::clamp<int64_t>(target_ms - now_ms, 1, POS_PRODUCER_POLL_MS * 5);
+    }
+
+    // A host that took part in this height's gossip round and share-signed a
+    // block there (and has since lost its peers) must not now certify a
+    // different block of its own at the same height: its seats would have
+    // signed two blocks at one height.
+    {
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        if (m_lock_height == tip->nHeight + 1 && !m_lock_hash.IsNull()) return POS_PRODUCER_POLL_MS;
     }
 
     // Due now: assemble, sign, submit. The remaining keys serve as committee
