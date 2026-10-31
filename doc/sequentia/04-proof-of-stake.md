@@ -1099,7 +1099,12 @@ Three paths lead to a live network:
 - **An autonomous single-node producer** (`-posproducer`): a node holding one or
   more staking keys elects itself each slot and produces blocks on its own -
   the leader-only and single-host-committee cases - with no coordinator and no
-  RPC (`src/pos_producer.*`).
+  RPC (`src/pos_producer.*`). It certifies alone only while no other host
+  commands an eligible stake. A node that holds a quorum of seats by itself but
+  shares the network with other stakers takes part in the gossip round below
+  like any member, countersigning whichever proposal the election backs:
+  otherwise its seats, being part of every quorum, would be missing from every
+  other staker's block, and it would produce every block itself.
 
 - **An autonomous gossip-and-sign committee** (`-posbls` + `-posproducer`): the
   full decentralization, fully implemented and the default on the bundled chains.
