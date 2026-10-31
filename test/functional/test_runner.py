@@ -479,6 +479,7 @@ BASE_SCRIPTS = [
     'feature_addrman.py',
     'feature_asmap.py',
     'mempool_unbroadcast.py',
+    'p2p_reannounce_local_tx.py',
     # ELEMENTS: need to point past versions at our own release server
     #'mempool_compatibility.py',
     'mempool_accept_wtxid.py',
