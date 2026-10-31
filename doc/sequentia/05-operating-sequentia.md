@@ -742,10 +742,12 @@ Pass `include_undeclared` to see every signer with weight, each flagged
 which is how a wallet describes the signer a stake is currently lent to.
 
 **Monitoring a pool's actual work.** `listpools` reports `blocks_produced`
-against `blocks_expected` over a recent window. A signer commanding a tenth of
-the network's weight should produce about a tenth of the blocks; well under that
-means it is offline, missing its slots or losing races, and its delegators are
-earning nothing for the weight they lent it.
+against `blocks_expected` over a recent window, and `last_block_height` and
+`last_block_time` for the most recent block the signer produced in it (absent
+when it produced none). A signer commanding a tenth of the network's weight
+should produce about a tenth of the blocks; well under that means it is offline,
+missing its slots or losing races, and its delegators are earning nothing for
+the weight they lent it.
 
 **One operator caveat.** The committee BLS key rides in a *staking* output, so an
 operator with no stake of its own cannot register one. Fund a small stake output
