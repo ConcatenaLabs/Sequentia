@@ -187,6 +187,10 @@ public:
     //! Check if transaction is in mempool.
     virtual bool isInMempool(const uint256& txid) = 0;
 
+    //! Check if transaction is a local one in the mempool that no peer has
+    //! fetched yet (the node offers it again every 10 to 15 minutes).
+    virtual bool isUnbroadcast(const uint256& txid) = 0;
+
     //! Check if transaction has descendants in mempool.
     virtual bool hasDescendantsInMempool(const uint256& txid) = 0;
 

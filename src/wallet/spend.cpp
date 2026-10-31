@@ -814,6 +814,17 @@ static bool IsCurrentForAntiFeeSniping(interfaces::Chain& chain, const uint256& 
  */
 static uint32_t GetLocktimeForNewTransaction(interfaces::Chain& chain, const uint256& block_hash, int block_height)
 {
+    // SEQUENTIA: no anti-fee-sniping lock time. Fee sniping needs a block
+    // producer able to reorg the chain to take a block's fees; here a
+    // certified block is final against every internal rival, and the only
+    // reorgs come from the Bitcoin anchor, which no producer controls. The lock
+    // time would protect nothing, and it does harm: an anchor reorg that loses
+    // height leaves every recent payment's lock time in the future, so every
+    // node drops it as non-final until the chain grows back. A caller that
+    // sets a lock time still gets it. Bitcoin-mode chains keep Bitcoin Core's
+    // behaviour.
+    if (g_con_elementsmode) return 0;
+
     uint32_t locktime;
     // Discourage fee sniping.
     //

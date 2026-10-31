@@ -38,11 +38,15 @@ class CreateTxWalletTest(BitcoinTestFramework):
         tx = self.nodes[0].gettransaction(txid=txid, verbose=True)['decoded']
         assert_equal(tx['locktime'], 0)
 
-        self.log.info('Check that anti-fee-sniping is enabled when we mine a recent block')
+        # SEQUENTIA: no anti-fee-sniping lock time on a Sequentia chain, even
+        # with a recent tip: certified blocks are final, so there is no fee
+        # sniping to discourage, and an anchor reorg that loses height would
+        # make such a payment non-final (see GetLocktimeForNewTransaction).
+        self.log.info('Check that a payment carries no lock time with a recent block either')
         self.generate(self.nodes[0], 1)
         txid = self.nodes[0].sendtoaddress(address=self.nodes[0].getnewaddress(), amount=1, fee_asset_label='bitcoin')
         tx = self.nodes[0].gettransaction(txid=txid, verbose=True)['decoded']
-        assert 0 < tx['locktime'] <= 201
+        assert_equal(tx['locktime'], 0)
 
     def test_tx_size_too_large(self):
         # More than 10kB of outputs, so that we hit -maxtxfee with a high feerate
