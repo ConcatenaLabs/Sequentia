@@ -329,14 +329,14 @@ public:
     bool GetNodeStateStats(NodeId nodeid, CNodeStateStats& stats) const override;
     bool IgnoresIncomingTxs() override { return m_ignore_incoming_txs; }
     void SendPings() override;
-    void RelayTransaction(const uint256& txid, const uint256& wtxid) override;
+    void RelayTransaction(const uint256& txid, const uint256& wtxid, bool reannounce = false) override;
     void SetBestHeight(int height) override { m_best_height = height; };
     void Misbehaving(const NodeId pnode, const int howmuch, const std::string& message) override;
     void ProcessMessage(CNode& pfrom, const std::string& msg_type, CDataStream& vRecv,
                         const std::chrono::microseconds time_received, const std::atomic<bool>& interruptMsgProc) override;
 
 private:
-    void _RelayTransaction(const uint256& txid, const uint256& wtxid)
+    void _RelayTransaction(const uint256& txid, const uint256& wtxid, bool reannounce = false)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /** Consider evicting an outbound peer based on the amount of time they've been behind our tip */
@@ -1257,7 +1257,10 @@ void PeerManagerImpl::ReattemptInitialBroadcast(CScheduler& scheduler)
 
         if (tx != nullptr) {
             LOCK(cs_main);
-            _RelayTransaction(txid, tx->GetWitnessHash());
+            // No peer has fetched it since it entered our mempool, so a peer
+            // our filters say knows it has, at best, forgotten it: offer it to
+            // every peer again (see CNode::PushTxInventory).
+            _RelayTransaction(txid, tx->GetWitnessHash(), /*reannounce=*/true);
         } else {
             m_mempool.RemoveUnbroadcastTx(txid, true);
         }
@@ -1766,22 +1769,22 @@ void PeerManagerImpl::SendPings()
     for(auto& it : m_peer_map) it.second->m_ping_queued = true;
 }
 
-void PeerManagerImpl::RelayTransaction(const uint256& txid, const uint256& wtxid)
+void PeerManagerImpl::RelayTransaction(const uint256& txid, const uint256& wtxid, bool reannounce)
 {
-    WITH_LOCK(cs_main, _RelayTransaction(txid, wtxid););
+    WITH_LOCK(cs_main, _RelayTransaction(txid, wtxid, reannounce););
 }
 
-void PeerManagerImpl::_RelayTransaction(const uint256& txid, const uint256& wtxid)
+void PeerManagerImpl::_RelayTransaction(const uint256& txid, const uint256& wtxid, bool reannounce)
 {
-    m_connman.ForEachNode([&txid, &wtxid](CNode* pnode) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+    m_connman.ForEachNode([&txid, &wtxid, reannounce](CNode* pnode) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
         AssertLockHeld(::cs_main);
 
         CNodeState* state = State(pnode->GetId());
         if (state == nullptr) return;
         if (state->m_wtxid_relay) {
-            pnode->PushTxInventory(wtxid);
+            pnode->PushTxInventory(wtxid, reannounce);
         } else {
-            pnode->PushTxInventory(txid);
+            pnode->PushTxInventory(txid, reannounce);
         }
     });
 }
@@ -5189,7 +5192,10 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                 // Time to send but the peer has requested we not relay transactions.
                 if (fSendTrickle) {
                     LOCK(pto->m_tx_relay->cs_filter);
-                    if (!pto->m_tx_relay->fRelayTxes) pto->m_tx_relay->setInventoryTxToSend.clear();
+                    if (!pto->m_tx_relay->fRelayTxes) {
+                        pto->m_tx_relay->setInventoryTxToSend.clear();
+                        pto->m_tx_relay->m_tx_inventory_to_reannounce.clear();
+                    }
                 }
 
                 // Respond to BIP35 mempool requests
@@ -5204,6 +5210,7 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                         const uint256& hash = state.m_wtxid_relay ? txinfo.tx->GetWitnessHash() : txinfo.tx->GetHash();
                         CInv inv(state.m_wtxid_relay ? MSG_WTX : MSG_TX, hash);
                         pto->m_tx_relay->setInventoryTxToSend.erase(hash);
+                        pto->m_tx_relay->m_tx_inventory_to_reannounce.erase(hash);
                         // Don't send transactions that peers will not put into their mempool.
                         // SEQUENTIA: compare the native-equivalent fee value, not the raw fee
                         // (which is denominated in the tx's fee asset). The BIP133 feefilter is
@@ -5255,8 +5262,10 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                         CInv inv(state.m_wtxid_relay ? MSG_WTX : MSG_TX, hash);
                         // Remove it from the to-be-sent set
                         pto->m_tx_relay->setInventoryTxToSend.erase(it);
-                        // Check if not in the filter already
-                        if (pto->m_tx_relay->filterInventoryKnown.contains(hash)) {
+                        // Check if not in the filter already, unless it is one
+                        // of ours being offered again (see CNode::PushTxInventory)
+                        const bool reannounce = pto->m_tx_relay->m_tx_inventory_to_reannounce.erase(hash) > 0;
+                        if (!reannounce && pto->m_tx_relay->filterInventoryKnown.contains(hash)) {
                             continue;
                         }
                         // Not in the mempool anymore? don't bother sending it.

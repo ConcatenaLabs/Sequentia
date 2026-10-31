@@ -572,6 +572,12 @@ public:
         // Set of transaction ids we still have to announce.
         // They are sorted by the mempool before relay, so the order is not important.
         std::set<uint256> setInventoryTxToSend;
+        // SEQUENTIA: the subset of setInventoryTxToSend to announce even though
+        // filterInventoryKnown says the peer has seen it. That filter only ever
+        // fills: a transaction the peer saw once, and has since dropped, stays
+        // "known" for the life of the connection. Our own transactions, broadcast
+        // again, go here so they reach the peer anyway (see PushTxInventory).
+        std::set<uint256> m_tx_inventory_to_reannounce;
         // Used for BIP35 mempool sending
         bool fSendMempool GUARDED_BY(cs_tx_inventory){false};
         // Last time a "MEMPOOL" request was serviced.
@@ -669,11 +675,28 @@ public:
         }
     }
 
-    void PushTxInventory(const uint256& hash)
+    /**
+     * Queue an announcement of a transaction to this peer. It is skipped when the
+     * peer is believed to know the transaction already, unless reannounce is set.
+     *
+     * SEQUENTIA: reannounce is for a transaction of our own that is being
+     * broadcast again (a wallet's or sendrawtransaction's rebroadcast, and the
+     * retry of one no peer has fetched yet). The belief that a peer knows it can
+     * be stale: the peer may have dropped it since, as every node does when a
+     * reorg leaves a transaction's lock time in the future -- which an anchor
+     * reorg does whenever the chain loses height -- or it may have refused it
+     * once and would take it now. A long-lived connection never forgets, so
+     * without this such a transaction is never offered to that peer again, and
+     * when every peer is such a peer it never reaches a block producer.
+     */
+    void PushTxInventory(const uint256& hash, bool reannounce = false)
     {
         if (m_tx_relay == nullptr) return;
         LOCK(m_tx_relay->cs_tx_inventory);
-        if (!m_tx_relay->filterInventoryKnown.contains(hash)) {
+        if (reannounce) {
+            m_tx_relay->setInventoryTxToSend.insert(hash);
+            m_tx_relay->m_tx_inventory_to_reannounce.insert(hash);
+        } else if (!m_tx_relay->filterInventoryKnown.contains(hash)) {
             m_tx_relay->setInventoryTxToSend.insert(hash);
         }
     }

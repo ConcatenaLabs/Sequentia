@@ -62,8 +62,9 @@ public:
     /** Whether this node ignores txs received over p2p. */
     virtual bool IgnoresIncomingTxs() = 0;
 
-    /** Relay transaction to all peers. */
-    virtual void RelayTransaction(const uint256& txid, const uint256& wtxid) = 0;
+    /** Relay transaction to all peers. reannounce offers it even to peers
+     *  believed to have it already: for a local transaction broadcast again. */
+    virtual void RelayTransaction(const uint256& txid, const uint256& wtxid, bool reannounce = false) = 0;
 
     /** Send ping message to all peers */
     virtual void SendPings() = 0;

@@ -122,7 +122,9 @@ TransactionError BroadcastTransaction(NodeContext& node, const CTransactionRef t
     }
 
     if (relay) {
-        node.peerman->RelayTransaction(txid, wtxid);
+        // A local broadcast, first or repeated: offer it to every peer, even
+        // one believed to have it already (see CNode::PushTxInventory).
+        node.peerman->RelayTransaction(txid, wtxid, /*reannounce=*/true);
     }
 
     return TransactionError::OK;
