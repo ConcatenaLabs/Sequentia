@@ -5,7 +5,7 @@
 Serves REAL market prices (USD) for the tokenized real-world assets, polled from Yahoo Finance, in
 the JSON shape the price server jsonapi source expects. USD is the reference unit: USDX and USDC
 1:1 USD, EURX and EURC=EUR/USD, GOLD/SILVR/OILX=gold/silver/WTI spot, tBTC=BTC/USD. Only tSEQ (SEQ)
-is mocked: its planned day-1 price (0.375 USD), walking at most about 0.05% a tick within +/-10%,
+is mocked: its planned launch price (0.175 USD), walking at most about 0.05% a tick within +/-10%,
 the pace of a quiet market, so the books priced from it rest rather than reprice every tick.
 Issuer offering-reference prices are seeded via POST /seed (static).
 Endpoints: GET /prices,/price/<T>,/healthz ; POST /seed.
@@ -34,7 +34,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # those thresholds -- a bridged stablecoin with no price is an asset nobody can
 # pay a fee in, which is the whole point of the open fee market.
 REAL = {"EURX":"EURUSD=X", "EURC":"EURUSD=X", "GOLD":"GC=F", "SILVR":"SI=F", "OILX":"CL=F", "tBTC":"BTC-USD"}
-SEQ_DAY1 = 0.375
+SEQ_DAY1 = 0.175
 SEQ_STEP = 0.0005    # the tSEQ walk's largest step a tick, before its pull to SEQ_DAY1
 SEQ_PULL = 0.01      # the share of its distance to SEQ_DAY1 it closes a tick
 _lock = threading.Lock()
