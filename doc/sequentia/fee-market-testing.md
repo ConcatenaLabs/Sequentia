@@ -379,13 +379,12 @@ bump in another asset, or unblind the balance first.
 
 ### Two traps this cost, worth knowing before writing the next one
 
-**Blinding does not happen just because you asked for a confidential address.**
-With `ignoreblindfail` on — the default — a transaction whose blinding cannot be
-honoured silently drops it and pays to an explicit output instead. A single
-confidential output cannot be balanced, so funding a wallet by sending to one
-confidential address produces an explicit coin and a case that passes while
-testing the path it meant to avoid. Case 10 funds with **two** confidential
-outputs in one transaction, and then asserts the coins really are blinded.
+**Assert that confidential funding really is confidential.** A case meant for
+the confidential path that is funded with explicit coins passes while testing
+the path it meant to avoid. Case 10 funds with two confidential outputs in one
+transaction and then asserts the coins really are blinded. (A lone confidential
+output with no blinded input is blinded too: the wallet balances it with its
+change or with a zero-value blinded output.)
 
 **Paying yourself leaves dust that steers coin selection.** Each filler
 transaction paid to the suite's own wallet left a 0.001 coin behind, and one of

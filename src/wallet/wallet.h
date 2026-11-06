@@ -152,6 +152,15 @@ struct BlindDetails {
     // address for this transaction.
     bool blind_change_requested = false;
 
+    // SEQUENTIA: whether a lone confidential recipient, with no blinded input and
+    // nothing else to blind, is balanced (by keeping the change, or with a
+    // zero-value blinded OP_RETURN) rather than unblinded. Set when the wallet
+    // blinds and signs the transaction itself: sending to a confidential address
+    // is the holder's choice for that transfer. A PSBT is blinded later by the
+    // PSET blinder, which handles a lone blinded output itself; and an issuance
+    // the caller asked to keep explicit pays only the wallet's own addresses.
+    bool balance_lone_recipient = false;
+
     // SEQUENTIA: index in the transaction of a zero-value blinded OP_RETURN output that was
     // appended for no reason other than to give BlindTransaction a second output to blind,
     // so that a lone blinded change output can be honoured; -1 when there is none. Tracked

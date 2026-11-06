@@ -125,6 +125,8 @@ BASE_SCRIPTS = [
     'wallet_subtract_fee_too_small.py --descriptors',
     'wallet_transparent_change.py --legacy-wallet',
     'wallet_transparent_change.py --descriptors',
+    'wallet_confidential_recipient.py --legacy-wallet',
+    'wallet_confidential_recipient.py --descriptors',
     'wallet_issuance_transparent.py --legacy-wallet',
     'wallet_issuance_transparent.py --descriptors',
     'wallet_change_size.py --legacy-wallet',

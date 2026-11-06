@@ -1039,9 +1039,9 @@ static bool fillBlindDetails(BlindDetails* det, CWallet* wallet, CMutableTransac
             }
             AppendBlindingDummyOutput(det, wallet, txNew, det->i_assets[0]);
             wallet->WalletLogPrintf("Adding OP_RETURN output so the blinded issuance can be balanced despite there being no blinded inputs and no blinded outputs.\n");
-        } else {
-            // 1 blinded destination
-            // TODO Attempt to get a blinded input, OR add unblinded coin to make blinded change
+        } else if (!det->balance_lone_recipient) {
+            // 1 blinded destination, blinded later (a PSBT) or in an issuance
+            // asked to stay explicit: see BlindDetails::balance_lone_recipient.
             if (det->ignore_blind_failure) {
                 det->num_to_blind--;
                 txNew.vout[det->only_recipient_blind_index].nNonce.SetNull();
@@ -1054,6 +1054,22 @@ static bool fillBlindDetails(BlindDetails* det, CWallet* wallet, CMutableTransac
                 error = _("Transaction output could not be blinded as there are no blinded inputs and no other blinded outputs.");
                 return false;
             }
+        } else {
+            // SEQUENTIA: 1 blinded destination, and nothing else to blind it
+            // against: no blinded input, no change (a whole-balance send with
+            // the fee subtracted, or change that went to the fee). Sending to
+            // a confidential address is the holder's choice for this transfer,
+            // so it is honoured, never dropped: give BlindTransaction a zero-
+            // value blinded OP_RETURN to balance against, as for requested
+            // blinded change and a blinded issuance above, and as upstream
+            // intends for this case (the FIXME where change is dropped in
+            // CreateTransactionInternal). Whatever ignoreblindfail says. The
+            // fee is measured on the blinded transaction, dummy included. The
+            // recipient's asset is among the inputs, which funded it.
+            const int idx = det->only_recipient_blind_index;
+            det->change_blinding_dummy_pos = -1;
+            AppendBlindingDummyOutput(det, wallet, txNew, det->o_assets[idx]);
+            wallet->WalletLogPrintf("Adding OP_RETURN output so the confidential recipient at index %d can be blinded despite there being no blinded inputs and no other blinded outputs.\n", idx);
         }
     }
     // All other combinations should work.
@@ -1082,6 +1098,7 @@ static bool CreateTransactionInternal(
     if (blind_details) {
         // Clear out previous blinding/data info as needed
         resetBlindDetails(blind_details);
+        blind_details->balance_lone_recipient = sign && !(issuance_details && !IssuanceIsBlinded(*issuance_details));
     }
 
     AssertLockHeld(wallet.cs_wallet);
@@ -2050,7 +2067,20 @@ static bool CreateTransactionInternal(
             if (pk.IsValid()) ++blinded_outputs;
         }
     }
-    const bool change_slot_stays = was_blinded && blinded_outputs == 1;
+    // SEQUENTIA: nor when dropping it would leave a single output to blind
+    // and no blinded input: a lone confidential recipient would then need a
+    // zero-value blinded OP_RETURN, as large as the change it replaces, and
+    // the transaction as measured here has no room for it. Keep the change,
+    // which also hides the recipient's amount better than a dummy would. Not
+    // when the change itself came with such a dummy: then both go together.
+    bool any_input_blinded = false;
+    for (const CInputCoin& coin : selected_coins) {
+        if (coin.txout.nValue.IsCommitment() || coin.txout.nAsset.IsCommitment()) any_input_blinded = true;
+    }
+    const bool change_balances_recipient = was_blinded && blind_details->balance_lone_recipient && !any_input_blinded &&
+                                           blind_details->change_blinding_dummy_pos == -1 &&
+                                           blinded_outputs == 2 && blind_details->num_to_blind - 1 < 2;
+    const bool change_slot_stays = was_blinded && (blinded_outputs == 1 || change_balances_recipient);
     // SEQUENTIA: a mandatory change slot was priced as kept, so coins that
     // leave it negative do not cover the transaction as priced. Say so here,
     // where the transaction is exact, rather than zero the slot and run into
