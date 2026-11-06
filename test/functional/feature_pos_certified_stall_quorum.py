@@ -222,7 +222,7 @@ class PosCertifiedStallQuorumTest(BitcoinTestFramework):
             for h, certified in ((A, True), (B, True), (S, False)):
                 header = node.getblockheader(h)
                 assert_equal(header["posquorum"], 3)
-                assert_equal(header["poscertified"], certified)
+                assert_equal((header["poscertified"], header["poscertifiedknown"]), (certified, True))
             assert_equal(node.getbestblockhash(), B)
 
         self.log.info("Both finalize B")
@@ -234,7 +234,8 @@ class PosCertifiedStallQuorumTest(BitcoinTestFramework):
         self.restart_node(1, extra_args=self.anchored_args(1) + self.specs)
         assert_equal(x.getbestblockhash(), B)
         for h, certified in ((A, True), (B, True), (S, False)):
-            assert_equal(x.getblockheader(h)["poscertified"], certified)
+            header = x.getblockheader(h)
+            assert_equal((header["poscertified"], header["poscertifiedknown"]), (certified, True))
 
         self.log.info("Connected and extended, X and Y stay on one chain")
         self.connect_nodes(1, 2)

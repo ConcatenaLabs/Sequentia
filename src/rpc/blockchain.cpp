@@ -215,12 +215,14 @@ UniValue blockheaderToJSON(const CBlockIndex* tip, const CBlockIndex* blockindex
     // SEQUENTIA PoS: the certified answer and the parent's quorum are written
     // under cs_main (they can settle when the block connects).
     bool pos_certified{false};
+    bool pos_certified_known{false};
     int pos_quorum{-1};
     {
         LOCK(cs_main);
         blockindex = blockindex_->untrim_to(&tmpBlockIndexFull);
         if (g_con_pos) {
             pos_certified = blockindex_->PosCarriesQuorum();
+            pos_certified_known = blockindex_->m_pos_cert_known;
             if (!g_pos_public_committee) {
                 pos_quorum = PosSlotQuorum(StakeRegistry::GetInstance()); // fixed by configuration
             } else if (blockindex_->pprev) {
@@ -254,10 +256,14 @@ UniValue blockheaderToJSON(const CBlockIndex* tip, const CBlockIndex* blockindex
     // Certified is judged against the quorum of the stake state the block's
     // parent leaves, never this node's tip, so every node answers alike.
     // posquorum is that quorum, present once this node knows it.
+    // poscertified is false, never a guess, while this node does not know the
+    // answer yet, and poscertifiedknown says which it is: a false that is not
+    // known may still turn true, so a caller waits rather than refuses.
     if (g_con_pos) {
         result.pushKV("poscountersigs", (int)blockindex->m_pos_countersigs);
         if (pos_quorum >= 0) result.pushKV("posquorum", pos_quorum);
         result.pushKV("poscertified", pos_certified);
+        result.pushKV("poscertifiedknown", pos_certified_known);
     }
     if (!g_signed_blocks) {
         result.pushKV("nonce", (uint64_t)blockindex->nNonce);
