@@ -21,15 +21,23 @@ releases the gate when the finalized block has itself been anchor-invalidated
 finalized point from the recovered chain.
 
 Unlike feature_pos_parent_reorg_recovery.py (which uses a sub-quorum committee so
-the reorged block is NOT finalized), here COMMITTEE=1 -> quorum 1, so the founder
-FINALIZES every block, and the reorg orphans a finalized block's anchor. Both the
-producer (founder) and a non-producing validator must recover past it.
+the reorged block is NOT finalized), here a four-member public BLS committee
+certifies every block (quorum 3), so each block becomes final once its
+observation window has passed. The test checks that the victim really is final
+on both nodes before the reorg orphans its anchor, and that both recover past
+it: the producing node and a validator that only follows.
 
-Topology: node0 = parent ("Bitcoin"); node1 = founder PoS producer (sole genesis
-staker, the whole 1-member committee); node2 = a non-producing validator that
-watches the anchor and must follow the recovery (the live freeze hit such nodes).
+Topology: node0 = parent ("Bitcoin"); node1 = the producing node, holding the
+four stakers' keys and building blocks with generateposblock; node2 = a
+non-producing validator that watches the anchor and must follow the recovery
+(the live freeze hit such nodes).
 """
 
+import os
+import shutil
+import time
+
+from test_framework.authproxy import JSONRPCException
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal, get_auth_cookie, get_datadir_path, rpc_port, p2p_port,
@@ -46,16 +54,14 @@ def make_key():
     return wif, pub
 
 
-SEED_STAKE = 1000000000      # atoms in the founder's genesis staking output
-STAKE_CSV = 15
-COMMITTEE = 1                # quorum 1 -> the founder finalizes every block it produces
+COMMITTEE = 4                # four stakers of equal weight: quorum 3
 
 
 class PosFinalizedAnchorReorgTest(BitcoinTestFramework):
     def set_test_params(self):
         self.setup_clean_chain = True
         self.num_nodes = 3
-        self.founder_wif, self.founder_pub = make_key()
+        self.stakers = [make_key() for _ in range(COMMITTEE)]
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
@@ -76,54 +82,71 @@ class PosFinalizedAnchorReorgTest(BitcoinTestFramework):
 
         consensus = [
             "-validatepegin=0", "-anyonecanspendaremine=1", "-signblockscript=51",
-            "-con_pos=1", "-posvrf=1", "-posbls=1",
-            "-poscommitteesize=%d" % COMMITTEE, "-posslotinterval=1",
-            "-con_max_block_sig_size=4000",
-            "-con_blocksubsidy=5000000000",
-            "-con_genesis_stake=%s:%d:%d" % (self.founder_pub, SEED_STAKE, STAKE_CSV),
-            "-con_connect_genesis_outputs=1", "-initialfreecoins=500000000",
+            "-con_pos=1", "-posvrf=1", "-posbls=1", "-pospubliccommittee=1",
+            "-poscommitteesize=%d" % (COMMITTEE + 1), "-posslotinterval=1",
+            "-con_max_block_sig_size=8000",
+            "-con_blocksubsidy=0", "-initialfreecoins=1000000000000", "-con_connect_genesis_outputs=1",
+            "-acceptnonstdtxn=1", "-par=1",
             "-con_bitcoin_anchor=1", "-validateanchor=1", "-anchorpollinterval=1", "-anchorminconf=1",
             "-mainchainrpchost=127.0.0.1", "-mainchainrpcport=%d" % rpc_port(0),
             "-mainchainrpcuser=%s" % rpc_u, "-mainchainrpcpassword=%s" % rpc_p,
             "-parentgenesisblockhash=%s" % self.parentgenesis,
         ]
-        founder_args = consensus + ["-port=%d" % p2p_port(1), "-rpcport=%d" % rpc_port(1),
-                                    "-posproducer=1", "-posproducerkey=%s" % self.founder_wif]
-        # node2: a pure VALIDATOR (no -posproducer) that watches the anchor — the live
-        # freeze hit exactly such follower nodes (explorer/gateway).
-        validator_args = consensus + ["-port=%d" % p2p_port(2), "-rpcport=%d" % rpc_port(2)]
-        self.add_nodes(1, [founder_args], chain=[chain])
-        self.start_node(1)
-        self.add_nodes(1, [validator_args], chain=[chain])
-        self.start_node(2)
+        args = {i: consensus + ["-port=%d" % p2p_port(i), "-rpcport=%d" % rpc_port(i)] for i in (1, 2)}
+        self.add_nodes(2, [args[1], args[2]], chain=[chain] * 2)
+        # The stakers' BLS registrations are derived by a node that knows the
+        # stakers; the chain is then started afresh with them.
+        self.start_node(1, extra_args=args[1] + ["-staker=%s:1" % pub for _, pub in self.stakers])
+        specs = ["-staker=%s:1%s" % (pub, self.nodes[1].getblsregistration(wif)["spec"]) for wif, pub in self.stakers]
+        self.stop_node(1)
+        shutil.rmtree(os.path.join(self.nodes[1].datadir, chain))
+        self.start_node(1, extra_args=args[1] + specs)
+        self.start_node(2, extra_args=args[2] + specs)
         self.connect_nodes(1, 2)
         self.nodes[0].createwallet(wallet_name="w", descriptors=True)
 
+    def produce(self):
+        """One block on node1, certified by all four stakers."""
+        wifs = [w for w, _ in self.stakers]
+        last = None
+        for _ in range(40):
+            try:
+                block = self.nodes[1].generateposblock(wifs[0], wifs[1:])
+                self.sync_blocks(self.nodes[1:])
+                return block["hash"]
+            except JSONRPCException as e:
+                last = e.error
+                time.sleep(0.25)
+        raise AssertionError("could not produce: %s" % last)
+
     def run_test(self):
         parent, founder, validator = self.nodes
-        assert_equal(founder.getstakerinfo().get(self.founder_pub), SEED_STAKE)
 
         def anchor_of(node, height):
             return node.getblock(node.getblockhash(height))["anchorheight"]
 
-        # Stage 1: give the founder an early anchor, then advance the parent deeper so
-        # LATER Sequentia blocks anchor strictly above the early ones (committee=1 produces
-        # continuously, so we control anchoring via the parent, not block cadence).
+        # Stage 1: two blocks on an early anchor, then advance the parent so the
+        # later blocks anchor strictly above them.
         self.generatetoaddress(parent, 6, parent.getnewaddress(), sync_fun=self.no_op)
-        self.wait_until(lambda: founder.getblockcount() >= 2, timeout=120)
+        self.produce()
+        self.produce()
         keep_h = founder.getblockcount()                 # a FINALIZED block we will KEEP
         keep_anchor = anchor_of(founder, keep_h)
         self.log.info("finalized keep-point: height %d anchored at parent %d" % (keep_h, keep_anchor))
 
-        # Advance the parent so subsequent finalized blocks anchor ABOVE keep_anchor.
         self.generatetoaddress(parent, 12, parent.getnewaddress(), sync_fun=self.no_op)
-        self.wait_until(lambda: anchor_of(founder, founder.getblockcount()) > keep_anchor, timeout=120)
-        self.wait_until(lambda: validator.getblockcount() >= founder.getblockcount() - 1, timeout=120)
-        tip_before = min(founder.getblockcount(), validator.getblockcount())
-        # The block just past keep_h is FINALIZED (committee=1) and anchored above keep_anchor.
         victim_h = keep_h + 1
-        victim_hash_old = founder.getblockhash(victim_h)
+        victim_hash_old = self.produce()
+        self.produce()
+        tip_before = founder.getblockcount()
         assert anchor_of(founder, victim_h) > keep_anchor
+        # The victim carries the committee's quorum and is final on both nodes:
+        # this is anchoring over finality, not over an unfinalized block.
+        hdr = founder.getblockheader(victim_hash_old)
+        assert_equal((hdr["poscertified"], hdr["posquorum"]), (True, 3))
+        for node in (founder, validator):
+            self.wait_until(lambda: node.getposfinality()["finalized_height"] >= victim_h, timeout=30)
+            assert_equal(node.getblockhash(victim_h), victim_hash_old)
         self.log.info("FINALIZED victim block height %d (%s) anchored above the keep-point; tip %d"
                       % (victim_h, victim_hash_old[:16], tip_before))
 
@@ -139,20 +162,23 @@ class PosFinalizedAnchorReorgTest(BitcoinTestFramework):
                       % (fork_at, parent.getblockcount()))
 
         # Anchoring supremacy: both nodes' watchers must DISCARD the orphaned-anchor
-        # finalized blocks (roll back to <= keep_h) — finality does NOT protect them.
-        self.wait_until(lambda: founder.getblockcount() <= keep_h, timeout=150)
-        self.wait_until(lambda: validator.getblockcount() <= keep_h, timeout=150)
-        self.log.info("both nodes discarded the orphaned FINALIZED blocks (rolled back to <= %d)" % keep_h)
+        # finalized blocks — finality does NOT protect them.
+        self.wait_until(lambda: founder.getblockcount() == keep_h, timeout=60)
+        self.wait_until(lambda: validator.getblockcount() == keep_h, timeout=60)
+        self.log.info("both nodes discarded the orphaned FINALIZED blocks (rolled back to %d)" % keep_h)
 
-        # THE REGRESSION: the producer rebuilds past the rolled-back height on a fresh anchor
-        # and the validator follows. Without the gate fix the stale finalized point pins the
-        # chain to the orphaned finalized block and the recovery chain is rejected forever
+        # THE REGRESSION: a recovery chain on a fresh anchor connects on both nodes.
+        # Without the gate fix the stale finalized point pins the chain to the
+        # orphaned finalized block and the recovery chain is rejected forever
         # ("bad-fork-prior-to-pos-final") — a permanent deadlock (the live freeze).
-        self.wait_until(lambda: founder.getblockcount() >= tip_before, timeout=180)
-        self.wait_until(lambda: validator.getblockcount() >= tip_before, timeout=180)
+        while founder.getblockcount() < tip_before:
+            self.produce()
         assert founder.getblockhash(victim_h) != victim_hash_old, \
             "victim height must be a NEW block on a fresh anchor, not the orphaned finalized one"
         assert_equal(founder.getblockhash(tip_before), validator.getblockhash(tip_before))
+        for node in (founder, validator):
+            self.wait_until(lambda: node.getposfinality()["finalized_height"] >= victim_h, timeout=30)
+            assert_equal(node.getposfinality()["finalized_hash"] is not None, True)
         self.log.info("recovered past the orphaned FINALIZED block; founder+validator agree at %d"
                       % tip_before)
 
