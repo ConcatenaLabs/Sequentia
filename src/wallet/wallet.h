@@ -155,7 +155,9 @@ struct BlindDetails {
     // SEQUENTIA: whether a lone confidential recipient, with no blinded input and
     // nothing else to blind, is balanced (by keeping the change, or with a
     // zero-value blinded OP_RETURN) rather than unblinded. Set when the wallet
-    // blinds and signs the transaction itself: sending to a confidential address
+    // blinds and signs the transaction itself, or funds one for the caller to
+    // blind (fundrawtransaction, unless ignoreblindfail=true was passed: see
+    // CCoinControl::m_balance_lone_recipient): sending to a confidential address
     // is the holder's choice for that transfer. A PSBT is blinded later by the
     // PSET blinder, which handles a lone blinded output itself; and an issuance
     // the caller asked to keep explicit pays only the wallet's own addresses.

@@ -5609,8 +5609,11 @@ static std::vector<RPCArg> FundTxDoc()
                  {"descriptor", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "A descriptor"},
              }},
          }},
-        {"ignoreblindfail", RPCArg::Type::BOOL, RPCArg::Default{true}, "Return a transaction even when a blinding attempt fails due to number of blinded inputs/outputs.\n"
-            "When false, such a transaction is an error instead of one with an output silently left explicit."},
+        {"ignoreblindfail", RPCArg::Type::BOOL, RPCArg::DefaultHint{"not set"}, "Return a transaction even when a blinding attempt fails due to number of blinded inputs/outputs.\n"
+            "Passed as true, an output to a confidential address that cannot be blinded (no blinded input and nothing else to\n"
+            "blind) is left explicit, with a warning. Left unset, fundrawtransaction keeps it blindable instead, by keeping\n"
+            "the change or adding a zero-value blinded output, and a PSBT is blinded later. When false, such a transaction is\n"
+            "an error."},
     };
 }
 
@@ -5705,6 +5708,9 @@ void FundTransaction(CWallet& wallet, CMutableTransaction& tx, CAmount& fee_out,
 
         if (options.exists("ignoreblindfail")) {
             ignore_blind_fail = options["ignoreblindfail"].get_bool();
+            // SEQUENTIA: passed as true, the caller has chosen to let a lone
+            // confidential output go explicit.
+            if (ignore_blind_fail) coinControl.m_balance_lone_recipient = false;
         }
 
         if (g_con_any_asset_fees && options.exists("fee_asset")) {
@@ -6090,6 +6096,9 @@ RPCHelpMan fundrawtransaction()
     CCoinControl coin_control;
     // Automatically select (additional) coins. Can be overridden by options.add_inputs.
     coin_control.m_add_inputs = true;
+    // SEQUENTIA: the caller blinds this transaction afterwards
+    // (blindrawtransaction), so keep a lone confidential output blindable.
+    coin_control.m_balance_lone_recipient = true;
     std::vector<bilingual_str> warnings;
     FundTransaction(*pwallet, tx, fee, change_position, request.params[1], coin_control, /* override_min_fee */ true, &warnings);
 

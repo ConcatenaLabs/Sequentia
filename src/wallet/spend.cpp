@@ -1063,7 +1063,7 @@ static bool fillBlindDetails(BlindDetails* det, CWallet* wallet, CMutableTransac
             // value blinded OP_RETURN to balance against, as for requested
             // blinded change and a blinded issuance above, and as upstream
             // intends for this case (the FIXME where change is dropped in
-            // CreateTransactionInternal). Whatever ignoreblindfail says. The
+            // CreateTransactionInternal), whatever ignoreblindfail says. The
             // fee is measured on the blinded transaction, dummy included. The
             // recipient's asset is among the inputs, which funded it.
             const int idx = det->only_recipient_blind_index;
@@ -1098,7 +1098,8 @@ static bool CreateTransactionInternal(
     if (blind_details) {
         // Clear out previous blinding/data info as needed
         resetBlindDetails(blind_details);
-        blind_details->balance_lone_recipient = sign && !(issuance_details && !IssuanceIsBlinded(*issuance_details));
+        blind_details->balance_lone_recipient = (sign || coin_control.m_balance_lone_recipient) &&
+                                                !(issuance_details && !IssuanceIsBlinded(*issuance_details));
     }
 
     AssertLockHeld(wallet.cs_wallet);
@@ -1840,6 +1841,12 @@ static bool CreateTransactionInternal(
         }
         // Insert change output
         txNew.vout.insert(txNew.vout.begin() + i, newTxOut);
+        // SEQUENTIA: the lone confidential recipient's index was recorded
+        // before the change went in; a change output placed in front of it
+        // moves it. Left stale, the blinding step acted on the change instead.
+        if (blind_details && blind_details->only_recipient_blind_index >= (int)i) {
+            blind_details->only_recipient_blind_index++;
+        }
     }
 
     // Add fee output.
@@ -2137,6 +2144,10 @@ static bool CreateTransactionInternal(
             }
 
             txNew.vout.erase(change_position);
+            // SEQUENTIA: and an output after the change moves back one.
+            if (blind_details && blind_details->only_recipient_blind_index > nChangePosInOut) {
+                blind_details->only_recipient_blind_index--;
+            }
 
             change_pos[nChangePosInOut] = std::nullopt;
             tx_blinded.vout.erase(tx_blinded.vout.begin() + nChangePosInOut);

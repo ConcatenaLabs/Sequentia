@@ -75,6 +75,13 @@ public:
     //! it as bad-txns-in-ne-out. Set by the fee bumper, which rebuilds every
     //! output explicitly.
     bool m_only_explicit_inputs = false;
+    //! SEQUENTIA: keep a lone confidential output blindable when the wallet
+    //! funds a transaction it does not blind itself (fundrawtransaction): keep
+    //! the change, or add a zero-value blinded output, instead of stripping the
+    //! output's blinding key. Set by fundrawtransaction unless the caller passed
+    //! ignoreblindfail=true. The wallet always does this where it blinds and
+    //! signs itself; a PSBT is blinded later by the PSET blinder.
+    bool m_balance_lone_recipient = false;
 
     CCoinControl();
 

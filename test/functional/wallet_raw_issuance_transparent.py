@@ -8,9 +8,10 @@ fundrawtransaction -> rawissueasset(blind) -> blindrawtransaction -> sign ->
 send. Confidentiality is chosen per output, so on a wallet that does not blind
 by default the change funding adds is explicit, and a blinded issuance amount
 needs a confidential output beside it to balance its blinding. Without one,
-blindrawtransaction fails and names the missing output, whatever
-ignoreblindfail says: an issuance the caller asked to blind is never returned
-explicit (the rawissueasset and blindrawtransaction help say so). With one -- a
+blindrawtransaction fails and names the missing output, unless the caller
+passes ignoreblindfail=true, which returns an issuance without reissuance tokens
+with its amount explicit (the rawissueasset and blindrawtransaction help say
+so). With one -- a
 confidential asset_address, or a confidential changeAddress when funding -- the
 issuance confirms.
 
@@ -70,19 +71,25 @@ class WalletRawIssuanceTransparentTest(BitcoinTestFramework):
         assert_equal([v for v in vout if v.get('commitmentnonce_fully_valid')], [])
         issued = n.rawissueasset(funded_hex, [{"asset_amount": 1, "asset_address": n.getnewaddress(), "blind": True}])[0]
         assert_raises_rpc_error(-8, NO_CONFIDENTIAL_OUTPUT, n.blindrawtransaction, issued['hex'], False, [], True)
-        # ignoreblindfail (the default) does not drop a blinding the caller
-        # asked for: the call fails the same way.
+        # ignoreblindfail left unset does not drop a blinding the caller asked
+        # for: the call fails the same way.
         assert_raises_rpc_error(-8, NO_CONFIDENTIAL_OUTPUT, n.blindrawtransaction, issued['hex'])
-        assert_raises_rpc_error(-8, NO_CONFIDENTIAL_OUTPUT, n.blindrawtransaction, issued['hex'], True, [], True)
+        assert_raises_rpc_error(-8, NO_CONFIDENTIAL_OUTPUT, n.blindrawtransaction, issued['hex'], None, [], True)
+        # Passed as true, the caller has chosen: the amount comes back explicit.
+        unblinded = n.blindrawtransaction(issued['hex'], True, [], True)
+        assert_equal(unblinded, issued['hex'])
+        issuance = n.decoderawtransaction(unblinded)['vin'][issued['vin']]['issuance']
+        assert 'assetamount' in issuance and 'assetamountcommitment' not in issuance
         # Asked not to blind the issuance, it is returned as it was.
         assert_equal(n.blindrawtransaction(issued['hex'], True, [], False), issued['hex'])
 
-        self.log.info("With a token as well, blinding fails either way, and says what is missing")
+        self.log.info("With a token as well, blinding fails whatever ignoreblindfail says: the token id commits to it")
         funded_hex, _ = self.fund()
         issued = n.rawissueasset(funded_hex, [{"asset_amount": 1, "asset_address": n.getnewaddress(),
                                                "token_amount": 1, "token_address": n.getnewaddress(), "blind": True}])[0]
         assert_raises_rpc_error(-8, NO_CONFIDENTIAL_OUTPUT, n.blindrawtransaction, issued['hex'])
         assert_raises_rpc_error(-8, NO_CONFIDENTIAL_OUTPUT, n.blindrawtransaction, issued['hex'], False, [], True)
+        assert_raises_rpc_error(-8, NO_CONFIDENTIAL_OUTPUT, n.blindrawtransaction, issued['hex'], True, [], True)
 
         self.log.info("A confidential asset_address balances it")
         funded_hex, _ = self.fund()
