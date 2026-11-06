@@ -238,6 +238,8 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "listpools", 1, "window"},
     { "listpools", 2, "include_delegators"},
     { "listpools", 3, "include_undeclared"},
+    { "listrewardswaps", 0, "include_finished"},
+    { "getbtcfeerate", 0, "conf_target"},
     { "getpayoutscript", 1, "activation"},
     { "getpayoutscript", 4, "commission_bp"},
     { "getposblocktemplate", 1, "members"},
