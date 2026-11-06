@@ -17,6 +17,8 @@ needs a second blinded output beside the recipient:
 
 The recipient's output used to go out explicit in both cases, with no error.
 
+The send RPC, which builds and blinds a PSBT, blinds the same payments.
+
 On the raw path a blinding the caller asked for is dropped only when the caller
 passes ignoreblindfail=true. Left unset, fundrawtransaction keeps a lone
 confidential output blindable (as sendtoaddress does), and so does false, which
@@ -146,6 +148,27 @@ class WalletConfidentialRecipientTest(BitcoinTestFramework):
         # Only leftovers smaller than any blinded send's fee are refused.
         assert blinded_fees
         assert all(r < min(blinded_fees) for r in refused), (refused, blinded_fees)
+
+        self.log.info("The send RPC: with change, and the whole balance with the fee subtracted")
+        self.node.createwallet("send")
+        w = self.node.get_wallet_rpc("send")
+        self.explicit_coin(w, Decimal('5'))
+        conf = self.receiver.getnewaddress("", "blech32")
+        res = w.send(outputs=[{conf: 1}], options={'fee_asset': FEE_ASSET})
+        assert_equal(res['complete'], True)
+        tx = self.confirm(res['txid'])
+        assert 'valuecommitment' in self.recipient_output(tx, conf)
+        assert_equal(len([v for v in tx['vout'] if 'valuecommitment' in v]), 2)
+        self.assert_received(res['txid'], conf, Decimal('1'))
+        conf = self.receiver.getnewaddress("", "blech32")
+        balance = w.getbalances()['mine']['trusted'][FEE_ASSET]
+        res = w.send(outputs=[{conf: balance}], options={'subtract_fee_from_outputs': [0]})
+        assert_equal(res['complete'], True)
+        tx = self.confirm(res['txid'])
+        out = self.recipient_output(tx, conf)
+        assert 'valuecommitment' in out, out
+        fee = sum(v['value'] for v in tx['vout'] if v['scriptPubKey']['type'] == 'fee')
+        self.assert_received(res['txid'], conf, balance - fee)
 
         self.log.info("Raw path: a lone confidential output is returned explicit only when the caller says so")
         self.node.createwallet("raw")

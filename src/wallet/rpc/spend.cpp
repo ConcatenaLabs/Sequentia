@@ -6572,6 +6572,10 @@ RPCHelpMan send()
             // Automatically select coins, unless at least one is manually selected. Can
             // be overridden by options.add_inputs.
             coin_control.m_add_inputs = rawTx.vin.size() == 0;
+            // SEQUENTIA: the PSBT below is built from the funded transaction, so
+            // a lone confidential output must keep its blinding key through
+            // funding, as in sendtoaddress (see CCoinControl).
+            coin_control.m_balance_lone_recipient = true;
             SetOptionsInputWeights(options["inputs"], options);
             std::vector<bilingual_str> warnings;
             FundTransaction(*pwallet, rawTx, fee, change_position, options, coin_control, /* override_min_fee */ false, &warnings);
@@ -6583,11 +6587,36 @@ RPCHelpMan send()
 
             // Make a blank psbt
             PartiallySignedTransaction psbtx(rawTx, 2 /* version */);
+            // SEQUENTIA: every output to blind is blinded by this wallet, from
+            // an input of its own (as walletcreatefundedpsbt assigns them).
+            {
+                LOCK(pwallet->cs_wallet);
+                std::optional<uint32_t> blinder_index;
+                for (uint32_t i = 0; i < rawTx.vin.size() && !blinder_index; ++i) {
+                    if (InputIsMine(*pwallet, rawTx.vin[i]) != ISMINE_NO) blinder_index = i;
+                }
+                for (PSBTOutput& output : psbtx.outputs) {
+                    if (output.IsBlinded() && !output.m_blinder_index && blinder_index) output.m_blinder_index = blinder_index;
+                }
+            }
 
             // First fill transaction with our data without signing,
             // so external signers are not asked sign more than once.
             bool complete;
             pwallet->FillPSBT(psbtx, complete, SIGHASH_DEFAULT, false, true, true);
+            // SEQUENTIA: blind what is to be blinded before signing, as
+            // walletprocesspsbt does. Without this every send with a
+            // confidential output and no external blinder failed with
+            // "Transaction is not yet fully blinded".
+            for (const PSBTOutput& output : psbtx.outputs) {
+                if (output.IsBlinded() && !output.IsFullyBlinded()) {
+                    const BlindingStatus status = pwallet->WalletBlindPSBT(psbtx);
+                    if (status != BlindingStatus::OK && status != BlindingStatus::NEEDS_UTXOS) {
+                        throw JSONRPCError(RPC_WALLET_ERROR, GetBlindingStatusError(status));
+                    }
+                    break;
+                }
+            }
             const TransactionError err = pwallet->FillPSBT(psbtx, complete, SIGHASH_DEFAULT, true, false, true);
             if (err != TransactionError::OK) {
                 throw JSONRPCTransactionError(err);
