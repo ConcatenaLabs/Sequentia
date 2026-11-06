@@ -552,11 +552,9 @@ class AnyAssetFeeMarketTest(BitcoinTestFramework):
     def descriptor_wallet(self, name, *, confidential, explicit):
         """A fresh wallet holding `listed` explicitly and GASSET in the given shapes.
 
-        Confidential funding takes TWO outputs in one transaction on purpose. A
-        single one cannot be balanced, so the wallet silently drops the blinding and
-        hands back an explicit output (ignoreblindfail defaults to true) -- an
-        earlier version of these cases funded that way and passed while testing the
-        explicit path it meant to avoid.
+        Confidential funding takes TWO outputs in one transaction, and the coins
+        are then asserted blinded, so the cases cannot pass on the explicit path
+        they mean to avoid.
         """
         main = self.a.get_wallet_rpc(self.default_wallet_name)
         self.a.createwallet(wallet_name=name, descriptors=True)
