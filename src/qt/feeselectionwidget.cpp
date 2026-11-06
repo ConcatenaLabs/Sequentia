@@ -300,8 +300,13 @@ void FeeSelectionWidget::applyDefaultAsset()
     // display price feed: the whitelist is what the mempool consults, so an asset
     // missing from it fails here and now, while an asset missing from the feed
     // merely cannot be shown in dollars.
-    CAsset pick = m_preferred_asset.IsNull() ? ::policyAsset : m_preferred_asset;
-    if (!m_model->node().getFeeAssetInfo(pick).accepted) {
+    //
+    // A host with no preference (the Supervision page, whose records move no
+    // asset of the wallet's) gets the most valuable accepted holding, the same
+    // pick as for a preference this node does not accept. Never the Sequence
+    // token by default: it is one fee asset among equals.
+    CAsset pick = m_preferred_asset;
+    if (pick.IsNull() || !m_model->node().getFeeAssetInfo(pick).accepted) {
         const CAsset fallback = largestAcceptedHolding();
         // Nothing acceptable in the wallet: leave the selection alone rather than
         // moving it somewhere equally unusable, and let the warning explain.
