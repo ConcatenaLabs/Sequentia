@@ -207,11 +207,19 @@ in `rawissueasset`, or a confidential `changeAddress` in
 `fundrawtransaction`.
 
 Without one, `blindrawtransaction` fails with an error that says the
-issuance needs a confidential output, whatever `ignoreblindfail` says:
-an issuance the caller asked to blind is never returned with its amount
-explicit. To issue in the clear, mark the issuance not blind in
-`rawissueasset`, or call `blindrawtransaction` with `blind_issuances`
-set to false.
+issuance needs a confidential output. A blinding the caller asked for is
+dropped only when the caller passes `ignoreblindfail=true`: then an
+issuance without reissuance tokens comes back with its amount explicit.
+One with reissuance tokens marked blind cannot, because the token id
+commits to the blinding, so it fails either way. To issue in the clear,
+call `blindrawtransaction` with `blind_issuances` set to false.
+
+The same rule covers outputs. An output to a confidential address that
+cannot be blinded (no blinded input, and nothing else to blind) makes
+`blindrawtransaction` fail unless `ignoreblindfail=true` is passed, and
+`fundrawtransaction` keeps such an output blindable, by keeping the
+change or adding a zero-value blinded output, unless it is passed
+`ignoreblindfail=true`.
 
 
 ## Asset Issuances and Reissuances

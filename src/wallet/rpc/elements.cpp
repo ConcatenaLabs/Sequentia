@@ -1139,16 +1139,18 @@ RPCHelpMan blindrawtransaction()
                 "Returns the hex-encoded raw transaction.\n"
                 "The output keys used can be specified by using a confidential address in createrawtransaction.\n"
                 "This call may add an additional 0-value unspendable output in order to balance the blinders.\n"
-                "With no blinded input, a lone output to blind cannot be balanced: by default (ignoreblindfail) it is left explicit\n"
-                "and the transaction is returned without error; with ignoreblindfail=false the call fails.\n"
+                "Confidentiality the caller asked for is never dropped by default. With no blinded input, a lone output (or\n"
+                "issuance) to blind cannot be balanced: the call fails and says so, unless ignoreblindfail=true is passed, in\n"
+                "which case that output, or the amount of an issuance without reissuance tokens, is returned explicit.\n"
                 "A blinded issuance is balanced only by a confidential output in the same transaction. On a wallet that does not\n"
                 "blind by default, whose funding change is explicit, give it one: a confidential asset_address or token_address in\n"
-                "rawissueasset, or a confidential changeAddress in fundrawtransaction. Without one the call fails and says so,\n"
-                "whatever ignoreblindfail says: an issuance asked to be blinded (blind_issuances, true by default) is never\n"
-                "returned explicit. To keep issuances explicit, pass blind_issuances=false.\n",
+                "rawissueasset, or a confidential changeAddress in fundrawtransaction. Without one the call fails and says so;\n"
+                "an issuance asked to be blinded (blind_issuances, true by default) is returned explicit only when\n"
+                "ignoreblindfail=true is passed and it has no reissuance tokens. To keep issuances explicit, pass\n"
+                "blind_issuances=false.\n",
                 {
                     {"hexstring", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "A hex-encoded raw transaction."},
-                    {"ignoreblindfail", RPCArg::Type::BOOL , RPCArg::Default{true}, "Return a transaction even when a blinding attempt fails due to number of blinded inputs/outputs."},
+                    {"ignoreblindfail", RPCArg::Type::BOOL , RPCArg::DefaultHint{"not set: fail"}, "Return a transaction even when a blinding attempt fails due to number of blinded inputs/outputs, with what could not be blinded left explicit. Only when passed as true."},
                     {"asset_commitments", RPCArg::Type::ARR, RPCArg::Optional::OMITTED_NAMED_ARG, "An array of input asset generators. If provided, this list must be empty, or match the final input commitment list, including ordering, to make a valid surjection proof. This list does not include generators for issuances, as these assets are inherently unblinded.",
                         {
                             {"assetcommitment", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "A hex-encoded asset commitment, one for each input."
@@ -1177,10 +1179,10 @@ RPCHelpMan blindrawtransaction()
         throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "TX decode failed");
     }
 
-    bool ignore_blind_fail = true;
-    if (request.params.size() > 1) {
-        ignore_blind_fail = request.params[1].get_bool();
-    }
+    // SEQUENTIA: confidentiality the caller asked for is dropped only when the
+    // caller says so: ignoreblindfail passed as true. Left unset it fails, as
+    // false does.
+    const bool ignore_blind_fail = request.params.size() > 1 && !request.params[1].isNull() && request.params[1].get_bool();
 
     std::vector<std::vector<unsigned char> > auxiliary_generators;
     if (request.params.size() > 2) {
@@ -1303,20 +1305,23 @@ RPCHelpMan blindrawtransaction()
         num_pubkeys++;
         output_pubkeys.push_back(pwallet->GetBlindingPubKey(newTxOut.scriptPubKey));
     } else if (n_blinded_ins == 0 && num_pubkeys == 1) {
-        // SEQUENTIA: the one thing to blind is an issuance the caller asked to
-        // blind (blind_issuances). ignoreblindfail never drops that:
-        // confidentiality is the holder's choice, so the call fails and names
-        // the missing output rather than return the amount explicit. An
-        // issuance without reissuance tokens carries no blinding mark of its
-        // own, so blind_issuances is the only request there is.
-        if (!confidential_output) {
-            throw JSONRPCError(RPC_INVALID_PARAMETER, no_confidential_output);
-        } else if (ignore_blind_fail) {
-            // Just get rid of the ECDH key in the nonce field and return
-            tx.vout[key_index].nNonce.SetNull();
+        // SEQUENTIA: one thing to blind and nothing to balance it with: an
+        // output to a confidential address, or an issuance the caller asked to
+        // blind (blind_issuances; an issuance without reissuance tokens
+        // carries no blinding mark of its own). Confidentiality is the
+        // holder's choice, so it is dropped only when the caller passed
+        // ignoreblindfail=true; otherwise the call fails and says why.
+        if (ignore_blind_fail) {
+            // An output: get rid of the ECDH key in the nonce field. An
+            // issuance amount is explicit already. Return it as it is.
+            if (confidential_output) tx.vout[key_index].nNonce.SetNull();
             return EncodeHexTx(CTransaction(tx));
+        } else if (!confidential_output) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, no_confidential_output);
         } else {
-            throw JSONRPCError(RPC_INVALID_PARAMETER, "Unable to blind transaction: Add another output to blind in order to complete the blinding.");
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Unable to blind transaction: a confidential output cannot be blinded "
+                "on its own when no input is blinded. Add another output to blind (a confidential change output, for example), "
+                "spend a confidential input, or pass ignoreblindfail=true to return this output explicit.");
         }
     }
     if (!confidential_output && num_issuance_keys > 0) {

@@ -16,6 +16,12 @@ needs a second blinded output beside the recipient:
   a zero-value blinded OP_RETURN.
 
 The recipient's output used to go out explicit in both cases, with no error.
+
+On the raw path a blinding the caller asked for is dropped only when the caller
+passes ignoreblindfail=true. Left unset, fundrawtransaction keeps a lone
+confidential output blindable (as sendtoaddress does), and so does false, which
+asks for exactly that; blindrawtransaction fails rather than return such an
+output explicit, unset or false.
 """
 
 from decimal import Decimal
@@ -23,9 +29,10 @@ from decimal import Decimal
 from test_framework.authproxy import JSONRPCException
 from test_framework.blocktools import COINBASE_MATURITY
 from test_framework.test_framework import BitcoinTestFramework
-from test_framework.util import assert_equal
+from test_framework.util import assert_equal, assert_raises_rpc_error
 
 FEE_ASSET = 'bitcoin'
+LONE_OUTPUT = "Unable to blind transaction: a confidential output cannot be blinded on its own when no input is blinded."
 
 
 class WalletConfidentialRecipientTest(BitcoinTestFramework):
@@ -139,6 +146,48 @@ class WalletConfidentialRecipientTest(BitcoinTestFramework):
         # Only leftovers smaller than any blinded send's fee are refused.
         assert blinded_fees
         assert all(r < min(blinded_fees) for r in refused), (refused, blinded_fees)
+
+        self.log.info("Raw path: a lone confidential output is returned explicit only when the caller says so")
+        self.node.createwallet("raw")
+        w = self.node.get_wallet_rpc("raw")
+        coin = self.explicit_coin(w, Decimal('5'))
+        conf = self.receiver.getnewaddress("", "blech32")
+        change = w.getaddressinfo(w.getnewaddress())['unconfidential']
+        raw = w.createrawtransaction([{'txid': coin['txid'], 'vout': coin['vout']}],
+                                     [{conf: 1}, {change: Decimal('3.999')}, {'fee': Decimal('0.001')}])
+        assert_raises_rpc_error(-8, LONE_OUTPUT, w.blindrawtransaction, raw)
+        assert_raises_rpc_error(-8, LONE_OUTPUT, w.blindrawtransaction, raw, False)
+        explicit = w.decoderawtransaction(w.blindrawtransaction(raw, True))
+        out = [v for v in explicit['vout'] if v['scriptPubKey'].get('address') ==
+               self.receiver.getaddressinfo(conf)['unconfidential']][0]
+        assert 'valuecommitment' not in out and not out.get('commitmentnonce_fully_valid'), out
+
+        self.log.info("Raw path: fundrawtransaction keeps a lone confidential output blindable unless told otherwise")
+        for ignore in (None, True, False):
+            name = "fundraw_%s" % ignore
+            self.node.createwallet(name)
+            w = self.node.get_wallet_rpc(name)
+            self.explicit_coin(w, Decimal('5'))
+            conf = self.receiver.getnewaddress("", "blech32")
+            unconf = self.receiver.getaddressinfo(conf)['unconfidential']
+            raw = w.createrawtransaction([], [{conf: 5}])
+            options = {'subtractFeeFromOutputs': [0]}
+            if ignore is not None:
+                options['ignoreblindfail'] = ignore
+            funded = w.fundrawtransaction(raw, options)
+            if ignore is True:
+                # The caller chose: the output goes explicit, and is told so.
+                assert "left unblinded" in funded['warnings'][0], funded.get('warnings')
+                out = [v for v in w.decoderawtransaction(funded['hex'])['vout'] if v['scriptPubKey'].get('address') == unconf][0]
+                assert not out.get('commitmentnonce_fully_valid'), out
+                continue
+            # Unset or false: kept blindable, and blinded by blindrawtransaction.
+            assert 'warnings' not in funded, funded.get('warnings')
+            blinded = w.decoderawtransaction(w.blindrawtransaction(funded['hex']))
+            out = [v for v in blinded['vout'] if v['scriptPubKey'].get('address') == unconf][0]
+            assert 'valuecommitment' in out, out
+            signed = w.signrawtransactionwithwallet(w.blindrawtransaction(funded['hex']))
+            assert_equal(self.node.testmempoolaccept([signed['hex']])[0]['allowed'], True)
 
 if __name__ == '__main__':
     WalletConfidentialRecipientTest().main()
