@@ -1324,6 +1324,18 @@ static bool CreateTransactionInternal(
         }
     }
     const size_t change_rangeproof_size = RangeproofSize(largest_spendable);
+    // SEQUENTIA: assets other than the fee asset that this send may leave change
+    // in: each one sent of which the wallet can spend more than it sends. One
+    // the send uses up entirely, such as a reissuance token returned in full,
+    // leaves none.
+    size_t other_change_outputs = 0;
+    if (g_con_elementsmode && !coin_selection_params.m_subtract_fee_outputs) {
+        for (const auto& [asset, amount] : map_recipients_sum) {
+            if (asset == coin_selection_params.m_fee_asset) continue;
+            const auto held = spendable.find(asset);
+            if (held != spendable.end() && held->second > amount) ++other_change_outputs;
+        }
+    }
     // The witness of a blinded output: its surjection proof and its rangeproof,
     // each with its length prefix, in vbytes.
     const auto blinded_output_witness = [](size_t rangeproof_size) -> size_t {
@@ -1361,7 +1373,12 @@ static bool CreateTransactionInternal(
             blinded_change_output_size = GetSerializeSize(change_prototype_txout);
             blinded_change_output_size += blinded_output_witness(change_rangeproof_size);
 
-            change_priced_blinded = wallet_blinds_by_default ||
+            // A wallet that blinds by default attaches a blinding key to every
+            // change output, but a lone blinded output with no blinded input
+            // cannot be blinded, so a single change output is built explicit
+            // (BlindDetails): such a wallet blinds its change only when there
+            // are two, one in the fee asset and one in another asset.
+            change_priced_blinded = (wallet_blinds_by_default && other_change_outputs > 0) ||
                                     (issuance_details && IssuanceIsBlinded(*issuance_details));
             for (const auto& recipient : vecSend) {
                 if (recipient.confidentiality_key.IsFullyValid()) change_priced_blinded = true;
@@ -1523,18 +1540,6 @@ static bool CreateTransactionInternal(
     // balances the issuance. Reserving the dummy and pricing the change as
     // optional on top made selection ask for two blinded outputs where one is
     // built, and refuse coins that cover the issuance.
-    // SEQUENTIA: assets other than the fee asset that this send may leave change
-    // in: each one sent of which the wallet can spend more than it sends. One
-    // the send uses up entirely, such as a reissuance token returned in full,
-    // leaves none.
-    size_t other_change_outputs = 0;
-    if (g_con_elementsmode && !coin_selection_params.m_subtract_fee_outputs) {
-        for (const auto& [asset, amount] : map_recipients_sum) {
-            if (asset == coin_selection_params.m_fee_asset) continue;
-            const auto held = spendable.find(asset);
-            if (held != spendable.end() && held->second > amount) ++other_change_outputs;
-        }
-    }
     const size_t change_size_before_slot = coin_selection_params.change_output_size;
     const bool change_slot_mandatory = reserve_blinded_dummy && change_priced_blinded &&
                                        issuance_details && IssuanceIsBlinded(*issuance_details);

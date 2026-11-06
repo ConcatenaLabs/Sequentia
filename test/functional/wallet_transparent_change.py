@@ -12,7 +12,10 @@ hand out confidential addresses (-blindedaddresses=0) change is blinded only whe
 the transaction is confidential anyway -- a confidential recipient, a blinded
 input, a blinded issuance -- or when a confidential change address is named.
 
-A wallet that blinds by default (-blindedaddresses=1) keeps its behaviour.
+A wallet that blinds by default (-blindedaddresses=1) keeps its behaviour. Its
+lone change output in an otherwise explicit transaction cannot be blinded and is
+built explicit, so it is priced explicit too: such a wallet funds a payment
+leaving a small change exactly as a transparent wallet does.
 """
 
 from decimal import Decimal
@@ -148,6 +151,27 @@ class WalletTransparentChangeTest(BitcoinTestFramework):
         assert 'valuecommitment' not in [v for v in decoded['vout'] if v['scriptPubKey'].get('address') == dest][0]
         self.log.info("  blinding-wallet two-asset send: %d vbytes", decoded['vsize'])
         assert_greater_than(decoded['vsize'], transparent_vsize * 5)
+
+        self.log.info("Blinding wallet: a lone change output is built explicit, and priced explicit")
+        coin_addr = w2.getaddressinfo(w2.getnewaddress())['unconfidential']
+        coin_txid = self.default.sendtoaddress(address=coin_addr, amount=1, fee_asset_label=FEE_ASSET)
+        self.generatetoaddress(self.node, 1, self.miner_addr, sync_fun=self.no_op)
+        coin = [u for u in w2.listunspent() if u['txid'] == coin_txid and u['amount'] == 1]
+        assert_equal(len(coin), 1)
+        assert_equal(coin[0]['amountblinder'], '00' * 32)
+        # Pay all but 6,000 atoms at 10 per vbyte: about 2,600 of fee, the rest
+        # is change. Priced as a blinded output with a blinding dummy, that change
+        # cost more than the leftover and the payment was refused for funds.
+        raw = w2.createrawtransaction([{'txid': coin[0]['txid'], 'vout': coin[0]['vout']}],
+                                      [{dest: Decimal('0.99994')}])
+        res = w2.fundrawtransaction(raw, {'add_inputs': False, 'fee_rate': 10, 'fee_asset': FEE_ASSET})
+        funded = w2.decoderawtransaction(res['hex'])
+        change = self.change_outputs(funded, w2, dest)
+        assert_equal(len(change), 1)
+        assert 'valuecommitment' not in change[0]
+        assert_equal(blinded_outputs(funded), [])
+        assert_greater_than(Decimal('0.00006'), res['fee'])
+        assert_equal(change[0]['value'] + res['fee'], Decimal('0.00006'))
 
 
 if __name__ == '__main__':
