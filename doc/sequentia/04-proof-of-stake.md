@@ -864,7 +864,9 @@ For a block that may escape a stall the count is that of the certificate the
 node holds, which lies outside the block hash, so two nodes holding different
 certificates for it can judge it differently. `getblockheader` reports the
 answer as `poscertified`, which reads `false` while the node does not yet know
-it, and the parent's quorum as `posquorum` once the node knows it. Tested in
+it; `poscertifiedknown` says whether it knows, so a caller can tell a block that
+is not certified from one whose answer is still to come and wait on the latter.
+The parent's quorum is `posquorum`, present once the node knows it. Tested in
 `feature_pos_certified_parent_quorum.py` (siblings of which one changes the
 committee) and `feature_pos_certified_stall_quorum.py` (the same on the
 anchored committee, for blocks escaping a stall, across a restart).
