@@ -1143,9 +1143,9 @@ RPCHelpMan blindrawtransaction()
                 "and the transaction is returned without error; with ignoreblindfail=false the call fails.\n"
                 "A blinded issuance is balanced only by a confidential output in the same transaction. On a wallet that does not\n"
                 "blind by default, whose funding change is explicit, give it one: a confidential asset_address or token_address in\n"
-                "rawissueasset, or a confidential changeAddress in fundrawtransaction. Without one the call fails and says so, with\n"
-                "one exception: an issuance with no token, in a transaction with no blinded input, is by default (ignoreblindfail)\n"
-                "returned with its amount explicit.\n",
+                "rawissueasset, or a confidential changeAddress in fundrawtransaction. Without one the call fails and says so,\n"
+                "whatever ignoreblindfail says: an issuance asked to be blinded (blind_issuances, true by default) is never\n"
+                "returned explicit. To keep issuances explicit, pass blind_issuances=false.\n",
                 {
                     {"hexstring", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "A hex-encoded raw transaction."},
                     {"ignoreblindfail", RPCArg::Type::BOOL , RPCArg::Default{true}, "Return a transaction even when a blinding attempt fails due to number of blinded inputs/outputs."},
@@ -1303,12 +1303,18 @@ RPCHelpMan blindrawtransaction()
         num_pubkeys++;
         output_pubkeys.push_back(pwallet->GetBlindingPubKey(newTxOut.scriptPubKey));
     } else if (n_blinded_ins == 0 && num_pubkeys == 1) {
-        if (ignore_blind_fail) {
-            // Just get rid of the ECDH key in the nonce field and return
-            if (confidential_output) tx.vout[key_index].nNonce.SetNull();
-            return EncodeHexTx(CTransaction(tx));
-        } else if (!confidential_output) {
+        // SEQUENTIA: the one thing to blind is an issuance the caller asked to
+        // blind (blind_issuances). ignoreblindfail never drops that:
+        // confidentiality is the holder's choice, so the call fails and names
+        // the missing output rather than return the amount explicit. An
+        // issuance without reissuance tokens carries no blinding mark of its
+        // own, so blind_issuances is the only request there is.
+        if (!confidential_output) {
             throw JSONRPCError(RPC_INVALID_PARAMETER, no_confidential_output);
+        } else if (ignore_blind_fail) {
+            // Just get rid of the ECDH key in the nonce field and return
+            tx.vout[key_index].nNonce.SetNull();
+            return EncodeHexTx(CTransaction(tx));
         } else {
             throw JSONRPCError(RPC_INVALID_PARAMETER, "Unable to blind transaction: Add another output to blind in order to complete the blinding.");
         }
