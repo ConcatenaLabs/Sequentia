@@ -314,7 +314,8 @@ class IssuanceTest(BitcoinTestFramework):
         funded_tx = self.nodes[0].fundrawtransaction(raw_tx, {"fee_asset": "bitcoin"})['hex']
         issuance = self.nodes[2].rawissueasset(
             funded_tx, [{"asset_amount": 1, "asset_address": nonblind_addr, "blind": False}])[0]
-        blind_tx = self.nodes[0].blindrawtransaction(issuance["hex"]) # This is a no-op
+        # A no-op: blind_issuances=false keeps the issuance explicit, as asked.
+        blind_tx = self.nodes[0].blindrawtransaction(issuance["hex"], True, [], False)
         signed_tx = self.nodes[0].signrawtransactionwithwallet(blind_tx)
         assert_equal(signed_tx['complete'], True)
 
