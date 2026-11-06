@@ -50,10 +50,14 @@ class BumpFeeTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 2
         self.setup_clean_chain = True
+        # SEQUENTIA: with fees payable in any asset the wallet has no default
+        # -maxtxfee ceiling (wallet.cpp), so the ceiling these cases test is set
+        # explicitly, as an operator who wants one sets it.
         self.extra_args = [[
             "-walletrbf={}".format(i),
             "-mintxfee=0.00002",
             "-addresstype=bech32",
+            "-maxtxfee=0.10",
         ] for i in range(self.num_nodes)]
 
     def skip_test_if_missing_module(self):
@@ -365,7 +369,7 @@ def test_settxfee(self, rbf_node, dest_address):
     rbf_node.settxfee(Decimal("0.00000000"))  # unset paytxfee
 
     # check that settxfee respects -maxtxfee
-    self.restart_node(1, ['-maxtxfee=0.000025'] + self.extra_args[1])
+    self.restart_node(1, ['-maxtxfee=0.000025'] + [a for a in self.extra_args[1] if not a.startswith('-maxtxfee=')])
     assert_raises_rpc_error(-8, "txfee cannot be more than wallet max tx fee", rbf_node.settxfee, Decimal('0.00003'))
     self.restart_node(1, self.extra_args[1])
     rbf_node.walletpassphrase(WALLET_PASSPHRASE, WALLET_PASSPHRASE_TIMEOUT)
@@ -378,7 +382,7 @@ def test_maxtxfee_fails(self, rbf_node, dest_address):
     # size of bumped transaction (p2wpkh, 1 input, 2 outputs): 141 vbytes
     # expected bump fee of 141 vbytes * 0.00200000 BTC / 1000 vbytes = 0.00002820 BTC
     # which exceeds maxtxfee and is expected to raise
-    self.restart_node(1, ['-maxtxfee=0.000025'] + self.extra_args[1])
+    self.restart_node(1, ['-maxtxfee=0.000025'] + [a for a in self.extra_args[1] if not a.startswith('-maxtxfee=')])
     rbf_node.walletpassphrase(WALLET_PASSPHRASE, WALLET_PASSPHRASE_TIMEOUT)
     rbfid = spend_one_input(rbf_node, dest_address)
     assert_raises_rpc_error(-4, "Unable to create transaction. Fee exceeds maximum configured by user (e.g. -maxtxfee, maxfeerate)", rbf_node.bumpfee, rbfid)
