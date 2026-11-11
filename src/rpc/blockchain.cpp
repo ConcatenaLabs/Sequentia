@@ -3311,6 +3311,10 @@ static RPCHelpMan getanchorstatus()
                         {RPCResult::Type::NUM, "parentwatchtouches", "how many times a new parent-chain block has paid or spent an output this node was asked to watch; monotonic since startup, so a wallet refreshes its Bitcoin balance when it moves instead of on a timer"},
                         {RPCResult::Type::NUM, "unverifiedescapingstalls", "sub-quorum (escaping-stall) blocks accepted without checking the parent-chain evidence behind them, because this node is not watching the parent chain"},
                         {RPCResult::Type::NUM, "lastunverifiedescapingstall", "height of the most recent such block (-1 = none)"},
+                        {RPCResult::Type::ARR, "recoveryset", "blocks the anchor watcher invalidated because their parent-chain anchor was orphaned, and still tracks so it can restore them if the parent chain reorganizes back; an entry leaves once its branch reconnects to the active chain",
+                        {
+                            {RPCResult::Type::STR_HEX, "", "block hash"},
+                        }},
                         {RPCResult::Type::OBJ, "reconcile", /*optional=*/true, "state of the PoS finality reconciliation monitor (-posreconcile); only on PoS chains",
                         {
                             {RPCResult::Type::BOOL, "enabled", "whether the reconciliation monitor is on"},
@@ -3363,6 +3367,9 @@ static RPCHelpMan getanchorstatus()
     const UnverifiedEscapingStalls unverified = GetUnverifiedEscapingStalls();
     result.pushKV("unverifiedescapingstalls", unverified.count);
     result.pushKV("lastunverifiedescapingstall", unverified.last_height);
+    UniValue recovery(UniValue::VARR);
+    for (const uint256& hash : GetAnchorRecoverySet()) recovery.push_back(hash.GetHex());
+    result.pushKV("recoveryset", recovery);
     if (g_con_pos) {
         const PosReconcileStatus rec = GetPosReconcileStatus();
         UniValue reconcile(UniValue::VOBJ);
