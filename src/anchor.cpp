@@ -848,6 +848,20 @@ void SeedAnchorInvalidated(const std::vector<uint256>& block_hashes)
               (unsigned)block_hashes.size());
 }
 
+std::vector<uint256> GetAnchorRecoverySet()
+{
+    LOCK(g_anchor_mutex);
+    return {g_anchor_invalidated.begin(), g_anchor_invalidated.end()};
+}
+
+void SetAnchorRecoveryStateForTesting(const std::set<uint256>& invalidated,
+                                      const std::set<std::pair<uint32_t, uint256>>& stale)
+{
+    LOCK(g_anchor_mutex);
+    g_anchor_invalidated = invalidated;
+    g_anchor_stale_cache = stale;
+}
+
 std::optional<uint256> AnchorCertifiedSiblingPending(ChainstateManager& chainman,
                                                      const uint256& tip_hash, int child_height)
 {
@@ -890,8 +904,28 @@ std::optional<uint256> AnchorCertifiedSiblingPending(ChainstateManager& chainman
     // root; once the watcher un-fails the branch and ActivateBestChain is
     // reconnecting it block by block, the next branch block is a clean
     // (un-failed) child of the advancing tip and must stay protected until
-    // it connects. Both index scans below run only inside a recovery window
-    // (non-empty, non-stale set), never on the steady-state Step path.
+    // it connects.
+    //
+    // Whether such a child can exist is decided from the roots alone, at a
+    // cost of the set's size rather than the block index's. A child of the tip
+    // has the tip as its parent, so for a root below the child's height the
+    // child descends from the root exactly when the tip does, and a root AT
+    // the child's height can only be the child itself. Anything else has no
+    // candidate, and the scan below would find none. That matters because a
+    // root can outlive its recovery window: a branch the watcher un-failed
+    // that then lost fork choice never reconnects, so it stays in the set
+    // until the node restarts, and walking the block index for it would cost
+    // every producer poll a full pass under cs_main to learn nothing (on a
+    // 200,000-block index, tens of milliseconds while RPC, peers and
+    // validation wait for the lock). The scans below therefore run only
+    // inside a recovery window, never on the steady-state Step path.
+    const CBlockIndex* tip = chainman.m_blockman.LookupBlockIndex(tip_hash);
+    if (!tip || tip->nHeight + 1 != child_height) return std::nullopt;
+    const bool candidate = std::any_of(roots.begin(), roots.end(), [&](const CBlockIndex* root) {
+        return root->nHeight == child_height ? root->pprev == tip
+                                             : tip->GetAncestor(root->nHeight) == root;
+    });
+    if (!candidate) return std::nullopt;
     const CBlockIndex* target = nullptr;
     for (const auto& [hash, p] : chainman.m_blockman.m_block_index) {
         if (p->nHeight != child_height || !p->pprev || p->pprev->GetBlockHash() != tip_hash) continue;

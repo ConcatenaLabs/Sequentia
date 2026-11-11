@@ -310,6 +310,13 @@ Four more fields describe a node that is *not* watching Bitcoin:
 | `unverifiedescapingstalls` | Sub-quorum blocks accepted without checking the Bitcoin evidence behind them. |
 | `lastunverifiedescapingstall` | Height of the most recent one (`-1` = none). |
 
+`recoveryset` lists the blocks the anchor watcher invalidated because their
+Bitcoin anchor was orphaned and still tracks, so that it can restore them if
+Bitcoin reorganizes back. An entry leaves once its branch reconnects to the
+active chain. A block restored after the chain has moved on to a branch that
+fork choice prefers never reconnects, so it stays listed until the node
+restarts; that costs nothing.
+
 ### The `getmainchainrpcstats` RPC
 
 `getmainchainrpcstats` (also only when `con_bitcoin_anchor` is enabled) reports

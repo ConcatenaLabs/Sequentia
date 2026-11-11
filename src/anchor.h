@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -216,6 +217,16 @@ void SeedAnchorInvalidated(const std::vector<uint256>& block_hashes);
 std::optional<uint256> AnchorCertifiedSiblingPending(ChainstateManager& chainman,
                                                      const uint256& tip_hash, int child_height);
 
+/** The anchor watcher's recovery set: blocks it invalidated because their
+ *  parent-chain anchor was orphaned, kept until each one's branch reconnects
+ *  to the active chain (getanchorstatus reports it). Takes g_anchor_mutex. */
+std::vector<uint256> GetAnchorRecoverySet();
+
+/** Unit tests only: replace the recovery set and the off-best-chain anchor
+ *  cache that AnchorCertifiedSiblingPending reads. */
+void SetAnchorRecoveryStateForTesting(const std::set<uint256>& invalidated,
+                                      const std::set<std::pair<uint32_t, uint256>>& stale);
+
 /** Record that the PoS finality gate rejected a rival branch
  *  (bad-fork-prior-to-pos-final in ContextualCheckBlockHeader). Rivals being
  *  re-offered and re-rejected every few peer retries while the tip stands
@@ -358,8 +369,6 @@ PosReconcileStatus GetPosReconcileStatus();
 static const int DEFAULT_POS_CHECKPOINT_DEPTH = 2016;
 /** How many parent-chain blocks to scan backwards for checkpoints on the
  *  first watcher pass. */
-#include <set>
-
 static const int DEFAULT_POS_CHECKPOINT_SCAN = 100;
 
 /** SEQUENTIA: parent-chain outputs a wallet wants to hear about.
