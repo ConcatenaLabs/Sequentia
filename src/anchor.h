@@ -369,8 +369,6 @@ PosReconcileStatus GetPosReconcileStatus();
 static const int DEFAULT_POS_CHECKPOINT_DEPTH = 2016;
 /** How many parent-chain blocks to scan backwards for checkpoints on the
  *  first watcher pass. */
-#include <set>
-
 static const int DEFAULT_POS_CHECKPOINT_SCAN = 100;
 
 /** SEQUENTIA: parent-chain outputs a wallet wants to hear about.
