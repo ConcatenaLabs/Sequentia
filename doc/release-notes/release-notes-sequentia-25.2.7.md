@@ -1,9 +1,33 @@
-# Sequentia Core, next release (draft)
+# Sequentia Core 25.2.7
 
-These notes collect the changes merged since 25.2.6 for the release that will
-carry them; the release renames this file after its version. None of these
-changes touches a consensus rule or block production: every block 25.2.6
-accepts, this release accepts, and the reverse. A node can run it alone.
+25.2.7 is 25.2.6 plus changes to how the wallet pays a confidential address, a
+cheaper check in the block producer, and fixes to the RPC, the command line and
+the GUI. It changes no consensus rule: every block 25.2.6 accepts, 25.2.7
+accepts, and the reverse, and the two relay each other's transactions. The fork
+at height **163,000** is the same.
+
+One change is in block production, described first. It changes how much work a
+producer does before each attempt, not which blocks it makes. A committee still
+upgrades all at once.
+
+## The producer's certified-sibling check no longer walks the block index
+
+Before each attempt a producer checks whether a certified sibling of the block
+it would build is still to be restored after a parent-chain reorganization. The
+check looked through the whole block index, under the node's main lock, whenever
+the anchor watcher was tracking a block it had invalidated. Such an entry can
+outlive its use: when Bitcoin reorganizes back after this chain has moved on to
+another branch, the restored block's branch never reconnects, and the entry
+stays until the node restarts. A producer in that state walked the whole index
+on every poll and found nothing.
+
+The check now decides from the tracked blocks alone whether such a sibling can
+exist, and walks the index only when one can. Its answer is the same in every
+case.
+
+`getanchorstatus` adds `recoveryset`: the blocks the anchor watcher invalidated
+because their parent-chain anchor was orphaned, and still tracks so that it can
+restore them if the parent chain reorganizes back.
 
 ## A confidential payment is never sent in the clear unless the caller says so
 
