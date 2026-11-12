@@ -32,7 +32,9 @@ from test_framework.util import assert_equal, assert_raises_rpc_error
 COIN = 100_000_000
 FEE = 100_000
 RECORD_VALUE = 1_000_000
-V2_HEIGHT = 12
+# Above BtcPayment::FLOOR_DEPTH (60): an anchor floor is met only from block 60,
+# and the bitcoin-payment case below needs its floor met to reach the relay rule.
+V2_HEIGHT = 72
 OP_TRUE = CScript([0x51])
 
 
