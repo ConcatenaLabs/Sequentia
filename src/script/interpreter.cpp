@@ -4,6 +4,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <script/interpreter.h>
+#include <script/btcpayment.h>
 
 #include <consensus/consensus.h>
 #include <crypto/ripemd160.h>
@@ -2247,6 +2248,54 @@ bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript& 
                 }
                 break;
 
+                // SEQUENTIA: proof of a bitcoin payment. Reachable only on a
+                // tapscript leaf under SCRIPT_VERIFY_BTCPAYMENT (otherwise the
+                // opcode is OP_SUCCESS and the script never runs). The records
+                // are re-parsed and their proof re-checked here, so the script is
+                // sound on its own; validation checks them against the chain.
+                case OP_INSPECTBTCPAYMENT:
+                case OP_INSPECTBTCOUTPUT:
+                case OP_CHECKANCHORHEIGHTVERIFY:
+                {
+                    if (sigversion != SigVersion::TAPSCRIPT || !(flags & SCRIPT_VERIFY_BTCPAYMENT))
+                        return set_error(serror, SCRIPT_ERR_BAD_OPCODE);
+                    const auto* slot = checker.GetBtcPaymentSlot();
+                    BtcPayment::Records records;
+                    std::string reason;
+                    const bool parsed = slot != nullptr && BtcPayment::ParseRecords(*slot, records, reason);
+                    if (opcode == OP_CHECKANCHORHEIGHTVERIFY) {
+                        if (stack.size() < 1)
+                            return set_error(serror, SCRIPT_ERR_INVALID_STACK_OPERATION);
+                        const CScriptNum required(stacktop(-1), /*fRequireMinimal=*/true);
+                        if (!parsed || !records.floor)
+                            return set_error(serror, SCRIPT_ERR_ANCHORLOCK_MISSING);
+                        if (required < 0 || (int64_t)*records.floor != (int64_t)required.getint())
+                            return set_error(serror, SCRIPT_ERR_ANCHORLOCK_UNSATISFIED);
+                        break;
+                    }
+                    if (!parsed || !records.proof)
+                        return set_error(serror, SCRIPT_ERR_BTCPAY_MISSING);
+                    const BtcPayment::Proof& proof = *records.proof;
+                    if (opcode == OP_INSPECTBTCPAYMENT) {
+                        stack.push_back(CScriptNum((int64_t)proof.height).getvch());
+                        stack.push_back(CScriptNum((int64_t)proof.coin_anchor).getvch());
+                        break;
+                    }
+                    // OP_INSPECTBTCOUTPUT
+                    if (stack.size() < 1)
+                        return set_error(serror, SCRIPT_ERR_INVALID_STACK_OPERATION);
+                    const int64_t idx = (int64_t)CScriptNum(stacktop(-1), /*fRequireMinimal=*/true).getint();
+                    if (idx < 0 || (uint64_t)idx >= proof.tx->vout.size())
+                        return set_error(serror, SCRIPT_ERR_BTCPAY_OUTPUT);
+                    popstack(stack);
+                    const auto& out = proof.tx->vout[idx];
+                    push8_le(stack, (uint64_t)out.nValue);
+                    uint256 spk_sha;
+                    CSHA256().Write(out.scriptPubKey.data(), out.scriptPubKey.size()).Finalize(spk_sha.data());
+                    pushspk(stack, out.scriptPubKey, spk_sha);
+                }
+                break;
+
                 default:
                     return set_error(serror, SCRIPT_ERR_BAD_OPCODE);
             }
@@ -3256,7 +3305,9 @@ static bool ExecuteWitnessScript(const Span<const valtype>& stack_span, const CS
                 return set_error(serror, SCRIPT_ERR_BAD_OPCODE);
             }
             // New opcodes will be listed here. May use a different sigversion to modify existing opcodes.
-            if (IsOpSuccess(opcode)) {
+            const bool btcpay_op = (flags & SCRIPT_VERIFY_BTCPAYMENT) &&
+                (opcode == OP_INSPECTBTCPAYMENT || opcode == OP_INSPECTBTCOUTPUT || opcode == OP_CHECKANCHORHEIGHTVERIFY);
+            if (IsOpSuccess(opcode) && !btcpay_op) {
                 if (flags & SCRIPT_VERIFY_DISCOURAGE_OP_SUCCESS) {
                     return set_error(serror, SCRIPT_ERR_DISCOURAGE_OP_SUCCESS);
                 }

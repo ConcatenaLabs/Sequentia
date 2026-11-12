@@ -742,6 +742,22 @@ AnchorCheckResult CheckMainchainAnchor(uint32_t height, const uint256& hash)
     }
 }
 
+bool MainchainSyncedToHeight(uint32_t height) { return MainchainSyncedTo(height); }
+
+AnchorCheckResult CheckMainchainAnchorFresh(uint32_t height, const uint256& hash)
+{
+    try {
+        UniValue params(UniValue::VARR);
+        params.push_back(hash.GetHex());
+        const UniValue reply = CallMainChainRPC("getblockheader", params);
+        AnchorCheckResult res = InterpretAnchorHeaderReply(reply, height);
+        if (res == AnchorCheckResult::NOT_FOUND && !MainchainSyncedTo(height)) return AnchorCheckResult::NO_CONNECTION;
+        return res;
+    } catch (const std::exception&) {
+        return AnchorCheckResult::NO_CONNECTION;
+    }
+}
+
 int AnchorUncontestedHeight(int active_tip_height, int window,
                             const std::vector<std::pair<int, int>>& competing_branches,
                             int committed_height)
@@ -1131,6 +1147,9 @@ void AnchorWatchTask(ChainstateManager& chainman)
     // Sequentia checkpoints when the parent moves, and re-evaluate
     // finality/conflicts on *every* tick — our own chain may have changed
     // (e.g. new blocks, a peer-fed fork) even when the parent has not.
+    // SEQUENTIA: bitcoin-payment claims in the mempool (doc/sequentia/bitcoin-payment-proof.md 6.3).
+    BtcPaymentMempoolTick(chainman);
+
     if (g_con_pos) {
         if (tip_changed) {
             ScanNewMainchainBlocks(chainman, best);

@@ -632,6 +632,8 @@ libelements_consensus_a_SOURCES = \
   pubkey.cpp \
   pubkey.h \
   script/bitcoinconsensus.cpp \
+  script/btcpayment.cpp \
+  script/btcpayment.h \
   script/interpreter.cpp \
   script/interpreter.h \
   script/script.cpp \

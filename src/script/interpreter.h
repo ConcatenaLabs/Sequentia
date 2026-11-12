@@ -193,6 +193,11 @@ enum : uint32_t {
     //
     SCRIPT_VERIFY_SIMPLICITY_ANNEX_EXACT = (1U << 27),
 
+    // SEQUENTIA: the proof of a bitcoin payment (doc/sequentia/bitcoin-payment-proof.md):
+    // on a tapscript leaf, 0xe5 OP_INSPECTBTCPAYMENT, 0xe6 OP_INSPECTBTCOUTPUT and
+    // 0xe7 OP_CHECKANCHORHEIGHTVERIFY take meaning instead of being OP_SUCCESS.
+    SCRIPT_VERIFY_BTCPAYMENT = (1U << 28),
+
     // Constants to point to the highest flag in use. Add new flags above this line.
     //
     SCRIPT_VERIFY_END_MARKER
@@ -401,6 +406,13 @@ public:
          return false;
     }
 
+    //! SEQUENTIA: the witness slot of this (non-peg-in) input, where the
+    //! bitcoin-payment records live; nullptr when unavailable.
+    virtual const std::vector<std::vector<unsigned char>>* GetBtcPaymentSlot() const
+    {
+        return nullptr;
+    }
+
     virtual ~BaseSignatureChecker() {}
 };
 
@@ -446,6 +458,13 @@ public:
     const PrecomputedTransactionData* GetPrecomputedTransactionData() const override;
     uint32_t GetnIn() const override;
     bool CheckSimplicity(const std::vector<unsigned char>& program, const std::vector<unsigned char>& witness, const rawElementsTapEnv& simplicityRawTap, int64_t min_cost, int64_t budget, ScriptError* serror) const override;
+    const std::vector<std::vector<unsigned char>>* GetBtcPaymentSlot() const override
+    {
+        if (nIn >= txTo->vin.size() || txTo->vin[nIn].m_is_pegin) return nullptr;
+        static const std::vector<std::vector<unsigned char>> empty;
+        if (nIn >= txTo->witness.vtxinwit.size()) return &empty;
+        return &txTo->witness.vtxinwit[nIn].m_pegin_witness.stack;
+    }
 };
 
 using TransactionSignatureChecker = GenericTransactionSignatureChecker<CTransaction>;
@@ -476,6 +495,10 @@ public:
     bool CheckSequence(const CScriptNum& nSequence) const override
     {
         return m_checker.CheckSequence(nSequence);
+    }
+    const std::vector<std::vector<unsigned char>>* GetBtcPaymentSlot() const override
+    {
+        return m_checker.GetBtcPaymentSlot();
     }
 };
 

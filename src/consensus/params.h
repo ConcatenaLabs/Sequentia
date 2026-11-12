@@ -500,6 +500,20 @@ struct Params {
         if (simplicity_budget4_chain_genesis != hashGenesisBlock) return true;
         return height >= simplicity_budget4_height;
     }
+    //! SEQUENTIA: the proof of a bitcoin payment and the anchor floor
+    //! (doc/sequentia/bitcoin-payment-proof.md): opcodes 0xe5-0xe7 and the
+    //! records of a non-peg-in input's witness slot. A tightening, so gated:
+    //! 0 = active from genesis (every fresh chain); a running chain names a
+    //! height bound to its genesis hash, chosen by its operators. A null genesis
+    //! (custom chains, -con_btc_payment_height) applies the height as it is.
+    int btc_payment_height{0};
+    uint256 btc_payment_chain_genesis;
+    bool BtcPaymentActiveAt(int height) const
+    {
+        if (btc_payment_height == 0) return true;
+        if (!btc_payment_chain_genesis.IsNull() && btc_payment_chain_genesis != hashGenesisBlock) return true;
+        return height >= btc_payment_height;
+    }
     //! SEQUENTIA: flag day for the SPLIT payout mode (pos.h PosPayoutMode),
     //! under which a pool's coinbase pays a claimable pot instead of one drawn
     //! winner, and a new consensus rule constrains any transaction spending a

@@ -131,6 +131,12 @@ typedef enum ScriptError_t
     // after its tag (policy, SCRIPT_VERIFY_SIMPLICITY_ANNEX_EXACT).
     SCRIPT_ERR_SIMPLICITY_ANNEX_NONZERO,
 
+    // SEQUENTIA: proof of a bitcoin payment
+    SCRIPT_ERR_BTCPAY_MISSING,
+    SCRIPT_ERR_BTCPAY_OUTPUT,
+    SCRIPT_ERR_ANCHORLOCK_MISSING,
+    SCRIPT_ERR_ANCHORLOCK_UNSATISFIED,
+
     /* Must go last */
     SCRIPT_ERR_ERROR_COUNT
 } ScriptError;

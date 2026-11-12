@@ -4,6 +4,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <node/miner.h>
+#include <script/btcpayment.h>
 
 #include <anchor.h>
 #include <chain.h>
@@ -262,6 +263,23 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
         }
     }
 
+    // SEQUENTIA: choose the anchor before the transactions: a bitcoin-payment
+    // claim or an anchor floor is taken only when this block's anchor meets it
+    // (doc/sequentia/bitcoin-payment-proof.md 6.1). Nothing above reads it.
+    m_btcpay_active = chainparams.GetConsensus().BtcPaymentActiveAt(nHeight);
+    // SEQUENTIA: anchor the new block to the parent chain (Bitcoin) tip,
+    // respecting -anchorminconf and never decreasing the anchor height.
+    if (g_con_bitcoin_anchor) {
+        if (!GetAnchorForNewBlock(pindexPrev->m_anchor_height, pindexPrev->m_anchor_hash,
+                                  m_anchor_height, m_anchor_hash)) {
+            // Two causes, and the second is not about connectivity at all: the
+            // daemon cannot be asked, or no parent-chain block can follow the
+            // parent's anchor (the block at that height was replaced; see
+            // debug.log for the anchor messages just before this).
+            throw std::runtime_error(strprintf("%s: unable to determine a parent chain anchor: either the mainchain daemon is unreachable (see -mainchainrpc* options) or no parent-chain block can follow the parent block's anchor (see debug.log)", __func__));
+        }
+    }
+
     // SEQUENTIA: privately submitted supervision records go in FIRST
     // (src/supervision_submit.h). Before the mempool, deliberately: a freeze
     // that loses its place to fee pressure is a freeze the target has another
@@ -367,17 +385,10 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
     if (g_con_blockheightinheader) {
         pblock->block_height = nHeight;
     }
-    // SEQUENTIA: anchor the new block to the parent chain (Bitcoin) tip,
-    // respecting -anchorminconf and never decreasing the anchor height.
+    // SEQUENTIA: the anchor was chosen before the transactions (see above).
     if (g_con_bitcoin_anchor) {
-        if (!GetAnchorForNewBlock(pindexPrev->m_anchor_height, pindexPrev->m_anchor_hash,
-                                  pblock->m_anchor_height, pblock->m_anchor_hash)) {
-            // Two causes, and the second is not about connectivity at all: the
-            // daemon cannot be asked, or no parent-chain block can follow the
-            // parent's anchor (the block at that height was replaced; see
-            // debug.log for the anchor messages just before this).
-            throw std::runtime_error(strprintf("%s: unable to determine a parent chain anchor: either the mainchain daemon is unreachable (see -mainchainrpc* options) or no parent-chain block can follow the parent block's anchor (see debug.log)", __func__));
-        }
+        pblock->m_anchor_height = m_anchor_height;
+        pblock->m_anchor_hash = m_anchor_hash;
     }
     pblock->nNonce         = 0;
     pblocktemplate->vTxSigOpsCost[0] = WITNESS_SCALE_FACTOR * GetLegacySigOpCount(*pblock->vtx[0]);
@@ -451,6 +462,19 @@ bool BlockAssembler::TestPackageTransactions(const CTxMemPool::setEntries& packa
         }
         if (!fIncludeWitness && it->GetTx().HasWitness()) {
             return false;
+        }
+        // SEQUENTIA: a bitcoin-payment proof above this block's anchor, or an
+        // anchor floor it has not reached, waits for a later block.
+        if (m_btcpay_active) {
+            const CTransaction& tx = it->GetTx();
+            for (size_t i = 0; i < tx.vin.size() && i < tx.witness.vtxinwit.size(); ++i) {
+                if (tx.vin[i].m_is_pegin || tx.witness.vtxinwit[i].m_pegin_witness.stack.empty()) continue;
+                BtcPayment::Records records;
+                std::string reason;
+                if (!BtcPayment::ParseRecords(tx.witness.vtxinwit[i].m_pegin_witness.stack, records, reason)) return false;
+                if (records.proof && records.proof->height > m_anchor_height) return false;
+                if (records.floor && *records.floor > m_anchor_height) return false;
+            }
         }
         // SEQUENTIA: a privately submitted supervision record already spends
         // this input in the block.
