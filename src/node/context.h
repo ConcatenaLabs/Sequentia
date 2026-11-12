@@ -66,6 +66,10 @@ struct NodeContext {
     //! (self-deadlock under load). Joined during shutdown before chainman is
     //! reset.
     std::thread anchor_watch_thread;
+    //! SEQUENTIA: re-attaches bitcoin-payment proofs (BtcPaymentReattachTick),
+    //! on its own thread so that nothing it does can delay the anchor watcher.
+    //! Joined during shutdown with the anchor watcher.
+    std::thread btcpay_attach_thread;
     //! SEQUENTIA: started only when the user chose to start without a reachable
     //! Bitcoin daemon. Polls until Bitcoin answers again, then stops; the GUI
     //! turns that into "restart to get the checks back". Holds no references

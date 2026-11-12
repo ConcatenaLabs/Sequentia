@@ -31,7 +31,7 @@ from test_framework.messages import (COutPoint, CTransaction, CTxIn, CTxInWitnes
                                      CTxOutValue, tx_from_hex)
 from test_framework.script import (CScript, CScriptOp, OP_CHECKSIG, OP_CHECKSIGVERIFY, OP_DROP, OP_DUP,
                                    OP_EQUALVERIFY, OP_GREATERTHAN, OP_GREATERTHANOREQUAL64, OP_LESSTHANOREQUAL,
-                                   OP_VERIFY, OP_1, OP_IF, OP_ENDIF, SIGHASH_DEFAULT, TaprootSignatureHash, taproot_construct)
+                                   OP_VERIFY, OP_1, OP_2DROP, OP_IF, OP_ENDIF, SIGHASH_DEFAULT, TaprootSignatureHash, taproot_construct)
 from test_framework.test_framework import BitcoinTestFramework, SkipTest
 from test_framework.util import assert_equal, assert_raises_rpc_error, initialize_datadir, rpc_port, p2p_port
 
@@ -154,7 +154,7 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         btcdir = os.path.join(self.options.tmpdir, "btc")
         os.makedirs(btcdir)
         self.btc_proc = subprocess.Popen([BITCOIND, "-datadir=" + btcdir, "-regtest", "-port=%d" % p2p_port(3),
-                                          "-rpcport=%d" % self.btc_port, "-listen=0", "-server",
+                                          "-rpcport=%d" % self.btc_port, "-listen=0", "-server", "-debug=rpc",
                                           "-fallbackfee=0.0001", "-printtoconsole=0"],
                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         cookie = os.path.join(btcdir, "regtest", ".cookie")
@@ -458,6 +458,8 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.reorg_remined()
         self.same_txid_replacement()
         self.records_nobody_reads()
+        self.every_variant_kept()
+        self.anchoring_first()
         self.bitcoin_reorg_sweep()
         self.links_and_branches()
         self.reverse_direction()
@@ -897,6 +899,158 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         assert_equal(node.testmempoolaccept([with_floor.serialize().hex()])[0]["reject-reason"],
                      "txn-same-nonwitness-data-in-mempool")
         self.mine(1)
+
+    def every_variant_kept(self):
+        self.step("N25 (PV13 S7) a lighter proof of the seller's own payment, then that payment orphaned: the claim comes back with the buyer's proof")
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        for order in ["buyer first", "seller first"]:
+            lock = self.fresh_lock()
+            amt = Decimal(lock["amount"]) / Decimal(100000000)
+            # The seller holds one coin of the amount and a little more, so its
+            # self-payment is one input and one output: lighter than the buyer's.
+            coin_addr = self.bseller.getnewaddress(address_type="bech32")
+            ftx = self.bminer.sendtoaddress(coin_addr, amt + Decimal("0.0001"))
+            self.btc_mine(1)
+            fvout = self.vout_paying(ftx, coin_addr, self.bminer.gettransaction(ftx)["blockhash"])
+            ptx, pr, vout = self.paid(lock)
+            stx = self.bseller.sendall(recipients=[lock["addr"]],
+                                       options={"fee_rate": 2, "inputs": [{"txid": ftx, "vout": fvout}]})["txid"]
+            sh = self.btc_mine(1)[0]
+            self.mine_anchored(b.getblockheader(sh)["height"])
+            sp = self.proof_for(stx, lock["C"], sh)
+            svout = self.vout_paying(stx, lock["addr"], sh)
+            spk = bytes.fromhex(node.getaddressinfo(node.getnewaddress())["scriptPubKey"])
+            cb = self.claim(lock, pr["record"], vout, out_spk=spk)
+            cs = self.claim(lock, sp["record"], svout, out_spk=spk)
+            assert cs.hash == cb.hash and len(sp["payment"]) < len(pr["payment"])
+            wb = node.decoderawtransaction(cb.serialize().hex())["hash"]
+            ws = node.decoderawtransaction(cs.serialize().hex())["hash"]
+            if order == "buyer first":
+                node.sendrawtransaction(cb.serialize().hex())
+                node.sendrawtransaction(cs.serialize().hex())
+                assert_equal(node.getmempoolentry(cs.hash)["wtxid"], ws)
+            else:
+                node.sendrawtransaction(cs.serialize().hex())
+                # The heavier buyer's proof does not replace the seller's, but is
+                # validated and kept.
+                assert_raises_rpc_error(-26, "txn-same-nonwitness-data-in-mempool", node.sendrawtransaction,
+                                        cb.serialize().hex())
+                assert_equal(node.getmempoolentry(cs.hash)["wtxid"], ws)
+            self.log.info("    %s: the pooled proof is the seller's lighter one", order)
+            # The seller's block leaves Bitcoin's chain and its payment is double-spent.
+            b.invalidateblock(sh)
+            raw = b.getrawtransaction(stx, True)
+            new = b.createrawtransaction([{"txid": i["txid"], "vout": i["vout"]} for i in raw["vin"]],
+                                         [{self.bseller.getnewaddress(): amt + Decimal("0.0001") - Decimal("0.001")}])
+            b.sendrawtransaction(self.bseller.signrawtransactionwithwallet(new)["hex"])
+            self.btc_mine(2)
+            # The node brings the claim back with the buyer's proof, and it is mined.
+            self.wait_for(lambda: cb.hash in node.getrawmempool() and
+                          node.getmempoolentry(cb.hash)["wtxid"] != ws, "the claim re-attached", timeout=60)
+            blk = self.mine_anchored(b.getblockcount())
+            assert cb.hash in node.getblock(blk)["tx"]
+            self.results.append((self.current + " (%s)" % order, "re-attached with the buyer's proof and mined"))
+            self.log.info("    %s: the claim came back with the buyer's proof and was mined", order)
+        # The bound: at most 8 variants per transaction id, distinct by the
+        # payments they prove; the first seen stays and the oldest other goes.
+        lock = self.fresh_lock()
+        pays = [self.pay(lock["addr"], lock["amount"]) for _ in range(9)]
+        bh = self.btc_mine(1)[0]
+        self.mine_anchored(b.getblockheader(bh)["height"])
+        spk = bytes.fromhex(node.getaddressinfo(node.getnewaddress())["scriptPubKey"])
+        claims = [self.claim(lock, self.proof_for(p, lock["C"], bh)["record"], self.vout_paying(p, lock["addr"], bh),
+                             out_spk=spk) for p in pays]
+        assert len({c.hash for c in claims}) == 1
+        for c in claims:
+            try:
+                node.sendrawtransaction(c.serialize().hex())
+            except JSONRPCException as e:
+                assert "txn-same-nonwitness-data-in-mempool" in e.error["message"], e.error["message"]
+        log = open(os.path.join(node.datadir, "elementsregtest", "debug.log")).read().splitlines()
+        kept = [line for line in log if "variant(s) of %s kept" % claims[0].hash in line]
+        assert_equal(len(kept), 9)
+        assert "8 variant(s)" in kept[-1], kept[-1]
+        assert kept[-1].endswith("dropped " + node.decoderawtransaction(claims[1].serialize().hex())["hash"]), kept[-1]
+        self.results.append((self.current + " (bound)", "9 distinct proofs: 8 kept, the second seen dropped"))
+        self.log.info("    9 distinct valid proofs of one claim: 8 kept, the first seen kept, the second seen dropped")
+        self.mine(1)
+
+    def anchor_driven_delay(self):
+        """Seconds from Bitcoin orphaning the tip's anchor until the node disconnects that block."""
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        # A fresh Bitcoin block that only this Sequentia block anchors to, so the
+        # reorganization takes this block and nothing below it.
+        self.btc_mine(1)
+        blk = self.mine_anchored(b.getblockcount())
+        assert self.anchor_of(node.getblockheader(blk)["previousblockhash"]) < b.getblockcount()
+        t0 = time.time()
+        b.invalidateblock(node.getblockheader(blk)["anchorhash"])
+        self.btc_mine(2)
+        self.wait_for(lambda: node.getblockheader(blk)["confirmations"] < 0, "anchor-driven disconnect", timeout=600)
+        return time.time() - t0
+
+    def btc_rpc_count(self, method):
+        log = open(os.path.join(self.options.tmpdir, "btc", "regtest", "debug.log")).read()
+        return log.count("method=" + method + " ")
+
+    def anchoring_first(self):
+        self.step("N26 (PV13 S4) 100 claims waiting for a payment that was double-spent do not delay an anchor-driven reorganization")
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        base = self.anchor_driven_delay()
+        n = 100
+        leaves, amounts = [], {}
+        for k in range(n):
+            leaf = CScript([OP_INSPECTBTCPAYMENT, OP_2DROP, k + 17, OP_DROP, OP_1])
+            tap = taproot_construct(NUMS, [("l", leaf)])
+            addr = program_to_witness(1, tap.scriptPubKey[2:])
+            leaves.append((leaf, tap))
+            amounts[addr] = Decimal("0.01")
+        ftx = node.sendmany(amounts=amounts, output_assets={a: self.asset for a in amounts}, fee_asset=self.asset)
+        self.mine(1)
+        ft = tx_from_hex(node.getrawtransaction(ftx))
+        C = self.anchor_of(node.getrawtransaction(ftx, True)["blockhash"])
+        ptx = self.bbuyer.sendtoaddress(self.bbuyer.getnewaddress(), 1)
+        ph = self.btc_mine(1)[0]
+        self.mine_anchored(b.getblockheader(ph)["height"])
+        pr = self.proof_for(ptx, C, ph)
+        asset = CTxOutAsset(b"\x01" + bytes.fromhex(self.asset)[::-1])
+        spk = bytes.fromhex(node.getaddressinfo(node.getnewaddress())["scriptPubKey"])
+        claims = []
+        for leaf, tap in leaves:
+            v = [i for i, o in enumerate(ft.vout) if o.scriptPubKey == tap.scriptPubKey][0]
+            t = CTransaction()
+            t.nVersion = 2
+            t.vin.append(CTxIn(COutPoint(int(ftx, 16), v), nSequence=SEQ_NONFINAL_RBF))
+            t.vout.append(CTxOut(CTxOutValue(1000000 - 2000), spk, asset))
+            t.vout.append(CTxOut(CTxOutValue(2000), b"", asset))
+            t.wit.vtxinwit.append(CTxInWitness())
+            t.wit.vtxoutwit = [CTxOutWitness() for _ in t.vout]
+            t.wit.vtxinwit[0].peginWitness.stack = [pr["record"]]
+            control = bytes([tap.leaves["l"].version + tap.negflag]) + tap.internal_pubkey + tap.leaves["l"].merklebranch
+            t.wit.vtxinwit[0].scriptWitness.stack = [bytes(leaf), control]
+            t.rehash()
+            node.sendrawtransaction(t.serialize().hex())
+            claims.append(t.hash)
+        # Bitcoin orphans the payment's block and the payment is double-spent:
+        # every claim is evicted and waits for a payment that is gone.
+        b.invalidateblock(ph)
+        self.double_spend(ptx)
+        self.btc_mine(2)
+        self.wait_for(lambda: not any(c in node.getrawmempool() for c in claims), "the claims evicted", timeout=120)
+        g0 = self.btc_rpc_count("getblock")
+        time.sleep(10)
+        load = self.btc_rpc_count("getblock") - g0
+        delay = self.anchor_driven_delay()
+        self.log.info("    anchor-driven disconnect: %.1f s with no claim waiting, %.1f s with %d; %d getblock calls in 10 s",
+                      base, delay, n, load)
+        self.results.append((self.current, "disconnect %.1f s (baseline %.1f s); %d getblock calls in 10 s" % (delay, base, load)))
+        assert delay < base + 3, "anchor-driven reorganization delayed: %.1f s against %.1f s" % (delay, base)
+        # At most one read of the recent blocks per Bitcoin tip, whatever the number of claims.
+        assert load <= 2 * 144, load
+        self.mine_anchored(b.getblockcount())
 
     def bitcoin_reorg_sweep(self):
         self.step("N17 (PV13 S1) a payment not yet recorded as an anchor, then orphaned: the claim is refused by the mempool and by this node's own template")

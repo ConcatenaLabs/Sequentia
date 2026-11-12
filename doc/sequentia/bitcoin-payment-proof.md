@@ -365,12 +365,34 @@ The mempool otherwise refuses a second transaction with the same id
 records, it accepts a valid newcomer in its place when the newcomer is lighter,
 whether it carries other records or none, or when the pooled one's records are
 no longer valid. A newcomer without records is how the original of a spend
-displaces a variant someone else added records to. A seller who completes the buyer's pre-signed claim with a
-heavy proof of some other qualifying payment is then displaced by the lighter
-proof of the buyer's own payment. Each replacement must be strictly lighter or
-replace a proof that is no longer valid, so a chain of replacements cannot loop.
-`sendrawtransaction` submits such a transaction to the mempool instead of
-treating its transaction id as already known.
+displaces a variant someone else added records to. A seller who completes the
+buyer's pre-signed claim with a heavy proof of some other qualifying payment is
+then displaced by the lighter proof of the buyer's own payment. Each replacement
+must be strictly lighter or replace a proof that is no longer valid, so a chain
+of replacements cannot loop. `sendrawtransaction` submits such a transaction to
+the mempool instead of treating its transaction id as already known.
+
+**Every valid variant is kept.** A newcomer that is valid but does not replace
+the pooled one (it is heavier) is still checked in full, kept beside it, and then
+refused as the same transaction. Which proof a node pools depends on what reached
+it first and on who sent a lighter one, both of which an outsider controls; a
+claim mined with one proof also comes back alone from a disconnected block. If
+that proof's payment then leaves Bitcoin's chain, the node must still know the
+others, or the claim is stranded although the buyer's payment stands. So the node
+keeps, per transaction id, every variant it has seen valid (accepted, validated
+beside the pooled one, or returned from a disconnected block), distinct by the
+payments they prove:
+
+- at most 8 per transaction id: the first seen always stays, and of the others the
+  oldest is dropped first;
+- at most 32 MiB in all: the transaction id seen longest ago that is not waiting
+  for re-attachment is dropped first.
+
+Each kept variant is valid, so each cost its sender a payment meeting the spent
+script, to the seller's own address in the swap. A variant whose payments the
+node already knows is refused at once, without its scripts being run. The bound
+is not consensus: a node that dropped a variant re-attaches with the ones it
+kept, and the buyer's wallet can always submit its own proof.
 
 ### 6.3 Reorganizations, and the proof re-linked
 
@@ -382,15 +404,35 @@ treating its transaction id as already known.
 - **A Bitcoin reorganization** changes a claim's validity only through the
   Sequentia reorganization it causes, since validity reads only the chain.
 - **The node re-links a fresh proof itself** (node policy, on every node that
-  watches Bitcoin; every block producer does). It keeps each claim refused or
-  evicted that way, keyed by transaction id, and on each tick of the watcher
-  looks for the payment, whose transaction id it knows from the old proof: first
-  `gettxout` on the paying outputs, whose reply gives the block's depth, and if
-  they are already spent, the last 144 blocks. It links that block to the lowest
-  anchor the active chain recorded at or above it, with the headers along
-  Bitcoin's best chain, refuses if they do not end at that anchor, fills in the
-  coin anchor, and submits the claim. A claim held for 2,016 Bitcoin blocks
-  without finding its payment is dropped.
+  watches Bitcoin; every block producer does). It holds each claim evicted after
+  a reorganization, keyed by transaction id, at most 1,000 of them, with the
+  variants of section 6.2. The work runs on its own thread, beside the anchor
+  watcher and never on its path, so nothing it does delays an anchor-driven
+  reorganization:
+  - a claim is tried again only when Bitcoin's tip or the chain tip has moved
+    since its last try, and each tick stops after 500 ms of work, the rest
+    waiting for the next tick;
+  - each kept variant is first submitted as it is, which asks the Bitcoin daemon
+    nothing: a Sequentia reorganization that records the anchor again makes the
+    stored proof valid again;
+  - then each variant gets a fresh proof of the payments it names. The node
+    looks for each payment once per Bitcoin tip, however many claims name it:
+    first `gettxout` on its outputs, whose reply gives the block's depth, and if
+    they are all spent, among the transactions of the last 144 blocks, read once
+    per tip from a cache of block contents keyed by block hash. It links that
+    block to the lowest anchor the active chain recorded at or above it, with the
+    headers along Bitcoin's best chain, refuses if they do not end at that
+    anchor, fills in the coin anchor, and submits the claim.
+
+  A claim held for 2,016 Bitcoin blocks without its payment being found is
+  dropped with its variants. Held claims and variants live in memory only; after
+  a restart the buyer's wallet submits its own proof again.
+
+  Measured with claims waiting for a payment that was double-spent (PV13's case),
+  an anchor-driven reorganization disconnects the orphaned block in 1.0 s with
+  200 waiting and 1.1 s with 1,000, against 0.5 s with none, and the Bitcoin
+  daemon serves at most one read of the recent blocks per tip (144 `getblock`
+  calls in 20 s with 1,000 waiting).
 
 ## 7. Activation
 

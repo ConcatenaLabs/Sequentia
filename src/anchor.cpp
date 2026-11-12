@@ -1131,9 +1131,6 @@ void AnchorWatchTask(ChainstateManager& chainman)
     // Sequentia checkpoints when the parent moves, and re-evaluate
     // finality/conflicts on *every* tick — our own chain may have changed
     // (e.g. new blocks, a peer-fed fork) even when the parent has not.
-    // SEQUENTIA: bitcoin-payment claims in the mempool (doc/sequentia/bitcoin-payment-proof.md 6.3).
-    BtcPaymentMempoolTick(chainman);
-
     if (g_con_pos) {
         if (tip_changed) {
             ScanNewMainchainBlocks(chainman, best);

@@ -260,6 +260,7 @@ void Shutdown(NodeContext& node)
     // before chainman is torn down below. ShutdownRequested() is already set by the
     // time we reach Shutdown(), so the watcher's poll loop exits promptly.
     if (node.anchor_watch_thread.joinable()) node.anchor_watch_thread.join();
+    if (node.btcpay_attach_thread.joinable()) node.btcpay_attach_thread.join();
     if (node.anchor_retry_thread.joinable()) node.anchor_retry_thread.join();
     if (node.chainman && node.chainman->m_load_block.joinable()) node.chainman->m_load_block.join();
     if (node.scheduler) node.scheduler->stop();
@@ -2446,6 +2447,22 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                     }
                     // Interruptible poll sleep: wake promptly on shutdown rather
                     // than sleeping the full interval.
+                    for (int64_t i = 0; i < anchor_poll * 10 && !ShutdownRequested(); ++i) {
+                        UninterruptibleSleep(std::chrono::milliseconds{100});
+                    }
+                }
+            });
+            // Bitcoin-payment proof re-attachment, beside the watcher and never
+            // on its path: an anchor-driven reorganization never waits for it.
+            node.btcpay_attach_thread = std::thread(&util::TraceThread, "btcpayattach", [anchor_chainman, anchor_poll] {
+                while (!ShutdownRequested()) {
+                    try {
+                        BtcPaymentReattachTick(*anchor_chainman);
+                    } catch (const std::exception& e) {
+                        LogPrintf("WARNING: bitcoin-payment re-attachment tick failed, retrying next interval: %s\n", e.what());
+                    } catch (...) {
+                        LogPrintf("WARNING: bitcoin-payment re-attachment tick failed, retrying next interval\n");
+                    }
                     for (int64_t i = 0; i < anchor_poll * 10 && !ShutdownRequested(); ++i) {
                         UninterruptibleSleep(std::chrono::milliseconds{100});
                     }

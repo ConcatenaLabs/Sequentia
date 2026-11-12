@@ -408,9 +408,10 @@ struct PackageMempoolAcceptResult
  *
  * @returns a MempoolAcceptResult indicating whether the transaction was accepted/rejected with reason.
  */
-/** SEQUENTIA: evict stale bitcoin-payment claims and re-attach fresh proofs
- *  (doc/sequentia/bitcoin-payment-proof.md 6.3). Called by the anchor watcher. */
-void BtcPaymentMempoolTick(ChainstateManager& chainman);
+/** SEQUENTIA: one tick of bitcoin-payment proof re-attachment
+ *  (doc/sequentia/bitcoin-payment-proof.md 6.3), on its own thread beside the
+ *  anchor watcher and never on its path. Bounded by a time budget per tick. */
+void BtcPaymentReattachTick(ChainstateManager& chainman);
 
 MempoolAcceptResult AcceptToMemoryPool(CChainState& active_chainstate, const CTransactionRef& tx,
                                        int64_t accept_time, bool bypass_limits, bool test_accept)

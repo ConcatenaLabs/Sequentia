@@ -68,8 +68,13 @@ TransactionError BroadcastTransaction(NodeContext& node, const CTransactionRef t
             return false;
         };
         auto pooled = node.mempool->get(txid);
+        // Its fee is the pooled one's (same inputs and outputs), already within
+        // the limit, so the test run for the fee is skipped: the mempool may keep
+        // the newcomer as a variant even when it does not replace (section 6.3).
+        bool same_txid_variant = false;
         if (pooled && pooled->GetWitnessHash() != tx->GetWitnessHash() && has_records(*pooled)) {
             pooled = nullptr;
+            same_txid_variant = true;
         }
         if (auto mempool_tx = pooled; mempool_tx) {
             // There's already a transaction in the mempool with this txid. Don't
@@ -82,7 +87,7 @@ TransactionError BroadcastTransaction(NodeContext& node, const CTransactionRef t
             wtxid = mempool_tx->GetWitnessHash();
         } else {
             // Transaction is not already in the mempool.
-            if (max_tx_fee > 0) {
+            if (max_tx_fee > 0 && !same_txid_variant) {
                 // First, call ATMP with test_accept and check the fee. If ATMP
                 // fails here, return error immediately.
                 const MempoolAcceptResult result = node.chainman->ProcessTransaction(tx, /*test_accept=*/ true);
