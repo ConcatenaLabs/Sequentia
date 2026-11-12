@@ -1383,6 +1383,17 @@ most of the stake has upgraded.
   leads, whatever the held transaction's fee.
 - Up to half of each block an aware member leads goes to held transactions
   until the record is mined again (above).
+- A seller's refund can wait about a day. The case: a claim was certified, a
+  Bitcoin reorganization disconnected it, and the buyer's payment was
+  double-spent in Bitcoin's new best chain. The claim is then premature, not
+  invalid: its proof record could still be replaced, so it stays held. The
+  refund conflicts with it and waits until the payment-claim waiting set gives
+  the claim up, after 144 Bitcoin blocks (`BTCPAY_PENDING_WINDOW`, about a day),
+  or until the held window ends at the same depth. Without the rule the refund
+  waits only for its own lock: 60 Sequentia blocks after the first block
+  anchored at the swap's deadline `D`, about an hour. The seller bears the
+  wait, holding neither the asset nor the payment meanwhile. Only a buyer who
+  double-spends its own payment after a reorganization causes it.
 - Each round that backs a proposal carrying the respend costs that round for
   the aware members. A member keeps a block set aside for at most the backstop.
 - Filling the record costs about 7 µs per transaction (1,505 transactions in
@@ -1416,8 +1427,10 @@ block builds on it, or at the bound or the backstop.
 refused with `btcpay-not-in-anchor-chain` is a premature spend. It stays held,
 because its payment may come back with the anchor. A claim refused for a
 `bad-` reason is invalid and is released. The node's waiting set of claims is
-what decides that a payment is gone for good, so it releases the held claim
-(`HeldTxsRelease`) when it forgets it.
+what decides that a payment is gone for good. When the set gives a claim up
+because no proof of its payment was found within its window of Bitcoin blocks,
+it releases the held claim (`HeldTxsRelease`). A claim dropped only to make room
+in the set is not released: that says nothing about its payment.
 
 **Bitcoin stays supreme.** The rule decides only what a member signs and, for
 a bounded time, which of two valid branches it builds on. The watcher
