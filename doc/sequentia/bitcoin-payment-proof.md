@@ -101,7 +101,9 @@ What being unsigned costs, and how each cost is closed:
   so the valid transaction is still fetched from other peers.
 - **A valid change could make the claim heavier**, lowering its fee rate to hold
   it back until the refund. So every record has **exactly one valid encoding**
-  for a given fact (section 3), relay refuses anything else in the slot,
+  for a given fact and recorded anchor (section 3; a proof may link to any
+  anchor recorded within 2,016 blocks above its block, so one payment has a
+  valid record per such anchor, of different weights), relay refuses anything else in the slot,
   including any record the input's script does not read (section 6.1), and the
   mempool lets a lighter or fresher witness replace a pooled one with the same
   transaction id (section 6.2). What remains: a block's own producer can pad the
@@ -609,7 +611,8 @@ chain's anchor can lag Bitcoin's tip while the claim waits:
   escaping-stall block.
 
 **So `R = D + 6`.** Without `D`, a payment mined just before `R` would race the
-refund. The claim needs nobody online once it is signed (section 8.2), so the
+refund. Once the claim is signed, its completion service and every node that
+watches Bitcoin bring it back after a reorganization (sections 6.3, 8.5), so the
 margin covers only the chain's own lag.
 
 **Who signs what.** The seller signs the lock, from its own coins, and the refund
@@ -687,11 +690,16 @@ accepted assets the claim can draw on, like any other.
    Sequentia block has anchored at `h` or above, usually one Sequentia block
    later: attaches the proof, linked to that anchor, and the coin anchor, and
    submits it. It is mined in the next block, so the claim lands about two
-   Sequentia blocks after the payment confirms. Every node that watches Bitcoin
-   keeps it alive across reorganizations (section 6.3).
+   Sequentia blocks after the payment confirms. The completion service keeps it
+   alive across reorganizations until its block is final, and every node that
+   watches Bitcoin helps (sections 6.3, 8.5). **A wallet shows the claim as
+   complete only once its block is final** (certified, and its anchor buried),
+   never on its first confirmation: until then a reorganization, of Sequentia or
+   of Bitcoin beneath it, can still disconnect it.
 7. **Or the seller refunds**: if no claim has been mined by the time the anchor
    reaches `R`, and the seller's wallet sees no payment to its address mined at a
-   height above `F` and at most `D`.
+   height above `F` and at most `D`. The seller's wallet, too, shows the refund as
+   complete only once its block is final.
 
 The same steps serve both directions of a trade. Whoever holds the asset locks it
 and whoever holds the bitcoin pays: when a maker sells an asset the maker locks
@@ -747,10 +755,14 @@ A portal operator runs a service that holds no key. It receives each buyer's
 signed claims, signed cancel and the payment's transaction id, and then:
 
 - completes the claim as soon as a Sequentia block has anchored at the
-  payment's block or above, and again after any reorganization that moves it.
-  Nodes keep the proofs they have seen and re-link them (section 6.3), but only
-  in memory, so the service submits the buyer's own proof again after any
-  reorganization rather than relying on them;
+  payment's block or above;
+- **watches the claim until its block is final** (certified, and its anchor
+  buried as the swap requires), not merely mined; after every reorganization
+  that disconnects it, resubmits a fresh proof of the **buyer's own** payment,
+  linked to the lowest anchor the active chain recorded at or above it, and
+  keeps doing so, at a rising tier, until `R`. Nodes re-link proofs themselves
+  (section 6.3), but the service never relies on what they kept: this duty is
+  the swap's guarantee;
 - raises the claim's fee tier if it is not mined: to the second tier after 10
   Sequentia blocks, to the top tier after 20, well inside the margin of 6
   Bitcoin blocks (about 60 Sequentia blocks);
@@ -890,8 +902,12 @@ another accepted asset, which a claim with a second input can pay.
 nothing but the refund at `R`. A claim cannot be mined without a payment in the
 anchor chain, so the seller loses the asset only against bitcoin in the chain its
 own validating node follows. A producer, or a whole committee, that includes a
-claim with a forged or orphaned proof makes a block every validating node
-refuses.
+claim with a forged or orphaned proof makes a block every validating node that
+watches Bitcoin refuses. A node that does not watch Bitcoin takes anchors on
+trust (section 4.3) and can be shown a fabricated one; a producer's own template
+can also build, for up to one watcher interval, on a parent whose anchor its
+Bitcoin node already shows replaced, a block the network then disconnects. Both
+are why a wallet counts a swap as done only once its block is final.
 
 **9.7 After `R` both leaves are valid.** Honest mempools prefer the claim: a
 refund never replaces a pending claim, whatever it pays, and a claim replaces a
@@ -944,11 +960,13 @@ and nothing is offered as a choice.
   the seller's side: "Getting your purchase ready. This usually takes a few
   minutes." Then "Paying 0.0123 BTC. Your XYZ arrives a minute or two after Bitcoin
   confirms the payment, usually within 20 minutes." Then "Bitcoin confirmed your
-  payment. Receiving 100 XYZ", then the balance.
+  payment. Receiving 100 XYZ", and the purchase shows as done, with the balance,
+  only once the claim's block is final.
 - **Paying from another wallet:** an address, an amount and a time: "Send exactly
   0.0123 BTC to this address within the next hour."
 - **Selling.** "Sell 100 XYZ." The wallet shows the price and "Waiting for the
   buyer's bitcoin. This usually takes 20 to 30 minutes." Then the bitcoin balance.
+  A refund shows as done only once its block is final.
 - **A payment that did not confirm in time, cancelled:** "The payment did not
   confirm in time, so your wallet cancelled it. Nothing was spent."
 - **A late payment, bought from the portal's own seller:** "Your payment confirmed
