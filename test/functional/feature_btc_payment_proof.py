@@ -1939,50 +1939,57 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         assert max(ticks) < 800, "a tick ran %d ms" % max(ticks)
 
     def lighter_by_the_incremental_rate(self):
-        self.step("N40 (PV15 X3, low) a lighter proof of a pooled claim replaces it only when the fee rate rises by "
-                  "the incremental relay rate")
+        self.step("N40 (PV15 X3, low) a lighter proof of a pooled claim replaces it only when it is lighter by a "
+                  "quarter and raises the fee rate by the incremental relay rate")
         node = self.nodes[0]
         b = self.btc_rpc()
         incr = int(node.getnetworkinfo()["incrementalfee"] * 100000000)  # per kvB
         spk = bytes.fromhex(node.getaddressinfo(node.getnewaddress())["scriptPubKey"])
-        for fee, expect_replace in ((400, False), (20000, True)):
+        # (fee, links on the pooled variant, replaced?): one link lighter at a low
+        # fee (the rate rises by less than the increment); one link lighter at a
+        # high fee (the rate rises by more, but the proof is not a quarter
+        # lighter); and the buyer's case, a pooled variant padded with eight
+        # links, which the lightest proof replaces in one step.
+        for fee, nlinks, expect_replace in ((400, 1, False), (20000, 1, False), (600, 8, True)):
             lock = self.fresh_lock()
             ptx = self.pay(lock["addr"], lock["amount"])
             ph = self.btc_mine(1)[0]
             h = b.getblockheader(ph)["height"]
             self.mine_anchored(h)
-            self.btc_mine(1)
-            self.mine_anchored(h + 1)
+            for k in range(1, nlinks + 1):
+                self.btc_mine(1)
+                self.mine_anchored(h + k)
             # Two valid records of one payment: linked to the anchor at its own
-            # block (no link) and to the next one (one link, 80 bytes heavier).
+            # block (no link) and to the one nlinks above (80 bytes a link).
             pr = self.proof_for(ptx, lock["C"], ph)
             assert_equal(pr["links"], [])
             heavy_rec = payment_record(pr["height"], lock["C"], pr["header"], hashlib.sha256(pr["coinbase"]).digest(),
                                        pr["index"], pr["pbranch"], pr["cbranch"], pr["payment"],
-                                       links=self.link_headers(h, h + 1))
+                                       links=self.link_headers(h, h + nlinks))
             vout = self.vout_paying(ptx, lock["addr"], ph)
             light = self.claim(lock, pr["record"], vout, fee=fee, out_spk=spk)
             heavy = self.claim(lock, heavy_rec, vout, fee=fee, out_spk=spk)
-            vl = node.decoderawtransaction(light.serialize().hex())["vsize"]
-            vh = node.decoderawtransaction(heavy.serialize().hex())["vsize"]
-            wh = node.decoderawtransaction(heavy.serialize().hex())["hash"]
-            wl = node.decoderawtransaction(light.serialize().hex())["hash"]
+            dl = node.decoderawtransaction(light.serialize().hex())
+            dh = node.decoderawtransaction(heavy.serialize().hex())
+            vl, vh, wl, wh = dl["vsize"], dh["vsize"], dl["weight"], dh["weight"]
             gain = fee * 1000 // vl - fee * 1000 // vh
+            quarter = 4 * wl <= 3 * wh
+            assert_equal(gain >= incr and quarter, expect_replace)
             node.sendrawtransaction(heavy.serialize().hex())
-            assert_equal(gain >= incr, expect_replace)
-            if gain < incr:
+            if not expect_replace:
                 assert_raises_rpc_error(-26, "txn-same-nonwitness-data-in-mempool", node.sendrawtransaction,
                                         light.serialize().hex())
-                assert_equal(node.getmempoolentry(heavy.hash)["wtxid"], wh)
+                assert_equal(node.getmempoolentry(heavy.hash)["wtxid"], dh["hash"])
                 what = "refused, the pooled proof kept"
             else:
                 node.sendrawtransaction(light.serialize().hex())
-                assert_equal(node.getmempoolentry(heavy.hash)["wtxid"], wl)
-                what = "replaced the pooled proof"
-            self.log.info("    fee %d: %d vB against %d vB, the rate rises by %d per kvB (incremental %d): %s",
-                          fee, vl, vh, gain, incr, what)
-            self.results.append((self.current + " fee %d" % fee, "%d vB against %d vB, rate +%d per kvB, incremental "
-                                 "%d: %s" % (vl, vh, gain, incr, what)))
+                assert_equal(node.getmempoolentry(heavy.hash)["wtxid"], dl["hash"])
+                what = "replaced the pooled proof in one step"
+            self.log.info("    fee %d: %d WU against %d WU (%.0f%% lighter), %d vB against %d vB, the rate rises by %d per "
+                          "kvB (incremental %d): %s", fee, wl, wh, 100 * (wh - wl) / wh, vl, vh, gain, incr, what)
+            self.results.append((self.current + " fee %d, %d link(s)" % (fee, nlinks),
+                                 "%d WU against %d WU (%.0f%% lighter), rate +%d per kvB, incremental %d: %s"
+                                 % (wl, wh, 100 * (wh - wl) / wh, gain, incr, what)))
             blk = self.mine(1)[0]
             assert heavy.hash in node.getblock(blk)["tx"]
 

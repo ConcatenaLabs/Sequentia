@@ -447,6 +447,10 @@ static constexpr int64_t BTCPAY_MIN_CLAIM_VSIZE = 160;
 //! maps, its key and its lock outpoints.
 static constexpr int64_t BTCPAY_PENDING_ENTRY_BYTES = 256;
 static constexpr int BTCPAY_PENDING_WINDOW = 144;
+//! A lighter proof replaces a pooled one of the same transaction id only when
+//! it is lighter by at least this fraction of the pooled weight (6.2).
+static constexpr int64_t BTCPAY_LIGHTER_NUM = 1;
+static constexpr int64_t BTCPAY_LIGHTER_DEN = 4;
 static Mutex g_btcpay_pending_mutex;
 //! What a variant proves, per input (null where an input proves nothing): the
 //! payments, and the Bitcoin blocks they are in.
@@ -1571,15 +1575,18 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
             const bool pooled_stale = CheckTxBtcPaymentRecords(*pooled, pview, tip, /*in_block=*/false,
                                                                tip->m_anchor_height, tip->m_anchor_hash,
                                                                nullptr, why) != BtcPayVerdict::OK;
-            // Lighter, and by enough that its fee rate rises by at least the
-            // incremental relay rate: a replacement is never free, so a run of
-            // them (each evicting and re-adding the claim's descendants) is
-            // bounded by the claim's own fee. Both pay the same fee: the same
-            // transaction id has the same outputs.
+            // Lighter by at least a quarter of the pooled weight, and by enough
+            // that its fee rate rises by at least the incremental relay rate.
+            // Both pay the same fee (the same transaction id has the same
+            // outputs), so a step costs nothing in fee; the quarter bounds the
+            // steps instead: from the standardness ceiling down to the
+            // smallest claim, about 20 replacements per claim in all, each
+            // evicting and re-adding the claim's descendants.
             const CAmount fee = BtcPayFeeValue(tx);
             const CFeeRate new_rate(fee, BtcPayTxVsize(tx));
             const CFeeRate old_rate(fee, BtcPayTxVsize(*pooled));
-            const bool lighter = GetTransactionWeight(tx) < GetTransactionWeight(*pooled) &&
+            const bool lighter = GetTransactionWeight(tx) * BTCPAY_LIGHTER_DEN <=
+                                     GetTransactionWeight(*pooled) * (BTCPAY_LIGHTER_DEN - BTCPAY_LIGHTER_NUM) &&
                                  new_rate.GetFeePerK() >= old_rate.GetFeePerK() + ::incrementalRelayFee.GetFeePerK();
             if (pooled_stale || lighter) {
                 ws.m_btcpay_witness_replace = true;
