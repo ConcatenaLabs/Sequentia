@@ -186,6 +186,9 @@ class CMainParams : public CChainParams {
 public:
     CMainParams() {
         strNetworkID = CBaseChainParams::MAIN;
+        // SEQUENTIA: the proof of a bitcoin payment belongs to the chains this
+        // project starts. This one is running and is not ours, so it never has it.
+        consensus.btc_payment_height = std::numeric_limits<int>::max();
         consensus.signet_blocks = false;
         consensus.signet_challenge.clear();
         consensus.nSubsidyHalvingInterval = 210000;
@@ -1563,6 +1566,9 @@ public:
         }
 
         strNetworkID = CBaseChainParams::SIGNET;
+        // SEQUENTIA: the proof of a bitcoin payment belongs to the chains this
+        // project starts. This one is running and is not ours, so it never has it.
+        consensus.btc_payment_height = std::numeric_limits<int>::max();
         consensus.signet_blocks = true;
         consensus.signet_challenge.assign(bin.begin(), bin.end());
         consensus.nSubsidyHalvingInterval = 210000;
@@ -1933,7 +1939,9 @@ protected:
         consensus.split_payout_height = args.GetIntArg("-con_splitpayoutheight", 0);
         // SEQUENTIA: the bitcoin-payment-proof gate, overridable on custom chains
         // so the functional suite can show the behaviour before activation.
-        consensus.btc_payment_height = (int)args.GetIntArg("-con_btc_payment_height", 0);
+        // The default is the chain's own value: 0 for a custom chain, never for
+        // a running chain built on this class (liquidtestnet).
+        consensus.btc_payment_height = (int)args.GetIntArg("-con_btc_payment_height", consensus.btc_payment_height);
         g_split_payout_height = consensus.split_payout_height;
         // SEQUENTIA: coinbase maturity, settable on custom chains so the
         // functional suite can run a chain with the real chains' 1,000 blocks
@@ -2441,6 +2449,9 @@ public:
     CLiquidTestNetParams(const std::string& chain, const ArgsManager& args) : CCustomParams(chain, args)
     {
         strNetworkID = chain;
+        // SEQUENTIA: the proof of a bitcoin payment belongs to the chains this
+        // project starts. This one is running and is not ours, so it never has it.
+        consensus.btc_payment_height = std::numeric_limits<int>::max();
         // not a debug chain
         fDefaultConsistencyChecks = false;
 
@@ -2499,6 +2510,9 @@ public:
     {
 
         strNetworkID = "liquidv1";
+        // SEQUENTIA: the proof of a bitcoin payment belongs to the chains this
+        // project starts. This one is running and is not ours, so it never has it.
+        consensus.btc_payment_height = std::numeric_limits<int>::max();
         consensus.nSubsidyHalvingInterval = 150;
         consensus.BIP16Exception = uint256();
         consensus.BIP34Height = 0;
