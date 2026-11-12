@@ -364,13 +364,14 @@ class BtcPaymentProofPosTest(BtcPaymentProofTest):
             if mode == "S":
                 assert anchor - parent_anchor >= STALL_GAP
             counts[mode] += 1
+            # The claim passes the block checks at every height of the window,
+            # P included, where its proof links to P's own anchor.
+            assert_equal(claim_check, None)
             if k == 0:
-                self.log.info("    P = %d anchored at %d (parent at %d), the claim in it: %s", n, anchor, parent_anchor,
-                              claim_check or "passes the block checks")
+                self.log.info("    P = %d anchored at %d (parent at %d), the claim in it passes the block checks", n,
+                              anchor, parent_anchor)
                 self.results.append((self.current + " P", "first block anchored at D=%d: height %d, %s; the claim in "
-                                     "it: %s" % (D, n, mode, claim_check or "passes")))
-            else:
-                assert_equal(claim_check, None)
+                                     "it passes" % (D, n, mode)))
             if k == FLOOR_DEPTH - 1:
                 assert claims[True].hash in node.getblock(res["hash"])["tx"]
             if k == FLOOR_DEPTH:
@@ -380,7 +381,7 @@ class BtcPaymentProofPosTest(BtcPaymentProofTest):
                       "signed block at each of the 60, mined at P+60; lock A's claim mined at P+59",
                       P, P + FLOOR_DEPTH, counts["C"], counts["S"], stalls)
         self.results.append((self.current, "refund refused (bad-anchorlock-not-reached) in a signed, submitted block at "
-                             "each of P..P+59; claim passes the block checks at P+1..P+59 and is mined at P+59; refund "
+                             "each of P..P+59; claim passes the block checks at P..P+59 and is mined at P+59; refund "
                              "mined at P+60; %d certified, %d leader-only, stalls %s" % (counts["C"], counts["S"], stalls)))
 
     def leader_alone_needs_the_gap(self):
