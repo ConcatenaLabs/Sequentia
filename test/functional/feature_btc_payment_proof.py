@@ -706,7 +706,7 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         # its nSequence (nothing signs it): signalling replacement or not
         # (PV15 X4), the owner's key spend, paying more, replaces it; a key spend
         # paying less does not.
-        for nseq in (SEQ_NONFINAL_RBF,):
+        for nseq in (SEQ_NONFINAL_RBF, 0xfffffffe, 0xffffffff):
             sk = generate_privkey()
             pk = compute_xonly_pubkey(sk)[0]
             proof_leaf = CScript([OP_INSPECTBTCPAYMENT, OP_2DROP, OP_1])

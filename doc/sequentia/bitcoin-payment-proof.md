@@ -406,13 +406,16 @@ the mempool instead of treating its transaction id as already known.
 - a spend that read a proof replaces spends that read only a floor, whatever
   they pay and whether or not they signal replacement;
 - every other pair follows the usual replacement rules, by fee: two spends that
-  read a proof, and a spend with no records against either kind.
+  read a proof, and a spend with no records against either kind. A spend that
+  read a proof counts as signalling replacement whatever its `nSequence`: on a
+  keyless leaf its spender, not the coin's owner, chooses that field.
 
 In the swap this decides the race after `R`: the refund never displaces a claim,
 and the claim displaces a refund pooled before it, so between honest producers
 the buyer who paid by `D` is mined. The third rule is what keeps it from pinning
 a coin: a coin that a key can also spend is never held by a cheap proof-path
-spend, since the key spend replaces it by paying more. Relay refuses records no
+spend, signalling or not, since the key spend replaces it by paying more. Two
+payers racing to claim a keyless leaf compete by fee in the same way. Relay refuses records no
 opcode read (6.1), so a spend cannot claim the preference with a proof its script
 does not need. Block assembly takes its transactions from the mempool, which holds
 one spend per coin, so it follows the same order; a producer that is itself the

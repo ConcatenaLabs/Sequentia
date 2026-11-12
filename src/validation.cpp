@@ -1481,7 +1481,11 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
                 // Applications relying on first-seen mempool behavior should
                 // check all unconfirmed ancestors; otherwise an opt-in ancestor
                 // might be replaced, causing removal of this descendant.
-                if (!SignalsOptInRBF(*ptxConflicting)) {
+                // SEQUENTIA: a spend whose script read a payment proof is
+                // replaceable by fees whatever it signals: its spender chooses
+                // nSequence on a keyless leaf, and nothing may pin a coin that a
+                // key can also spend (doc/sequentia/bitcoin-payment-proof.md 6.2).
+                if (!SignalsOptInRBF(*ptxConflicting) && theirs != BtcPayClass::PROOF) {
                     return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "txn-mempool-conflict");
                 }
 
