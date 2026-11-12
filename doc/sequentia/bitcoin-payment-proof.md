@@ -648,6 +648,25 @@ and is lost if both stay offline until `R`.
   the longest 501 ms; 10,000 outputs paying it in an orphaned block cost nothing
   (one `gettxout` call, a 45 ms tick).
 
+  With the set full (elementsregtest, 4,000,000-weight blocks): 40,001 claims
+  of 268 virtual bytes, mined in 11 Sequentia blocks anchored to one Bitcoin
+  block, are disconnected 0.7 s after that block is orphaned, against 1.0 s
+  for an empty block and 12 s for the same blocks of ordinary spends, which
+  are re-admitted; the node follows Bitcoin's new chain 2.2 s after the
+  orphaning. The buyer's claim among them, paying less per virtual byte than
+  every other, is back in the mempool in one tick, 0.5 s after the new
+  anchor; no tick runs past 501 ms of its own work. Each sweep of the lock
+  coins takes 7.6 ms in 81 chunks, holding the chain lock at most 0.16 ms at a
+  time, and a later anchor-driven reorganization disconnects in 0.8 s. At the
+  limit, 62,500 claims in 17 blocks, all are held, the buyer's claim is back
+  in one tick, and the sweep holds the chain lock at most 0.24 ms. The node's
+  resident memory peaks at 346 MB with 40,001 claims, at 490 MB with 62,500,
+  and at 802 MB with 40,001 claims beside a mempool of 235 MB; the
+  reorganization adds about 100 MB to what the node held before it. A tick
+  can wait for the chain lock while a block is assembled (1.2 s in that last
+  case, checking transactions of 1,400 outputs); the budget bounds the
+  re-attacher's own work, not that wait.
+
 ## 7. Activation
 
 The rule only tightens: a block valid under it is valid for a node that does not
