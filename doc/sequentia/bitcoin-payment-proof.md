@@ -311,9 +311,12 @@ below `h` while Bitcoin runs more than 2,016 blocks past the payment, so that th
 next anchor recorded lies above `h + 2,016`: about two weeks in which no
 Sequentia block records a new Bitcoin anchor. Producing blocks does not avoid it
 when every block repeats the last anchor. Sequentia producing no block for that
-long is one way; the other is on Bitcoin's side, two live branches kept within
-the contest window of each other (`-anchorcontestwindow`, two blocks by default)
-for about two weeks, while producers record the block they share (below). A
+long is one way; producers whose view of Bitcoin stops advancing (a lagging or
+eclipsed Bitcoin daemon, or a choice) are another, since they keep repeating the
+last anchor and no rule bounds how far an anchor lags behind Bitcoin; a third is
+on Bitcoin's side, two live branches kept within the contest window of each
+other (`-anchorcontestwindow`, two blocks by default) for about two weeks, while
+producers record the block they share (below). A
 payment in the last 2,016 Bitcoin blocks below the next recorded anchor links to
 it and keeps its 60 blocks. The rule does not cover this limit and no cap on
 anchoring is added for it: a network that records no new Bitcoin block for two
