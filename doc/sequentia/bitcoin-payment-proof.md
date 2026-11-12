@@ -222,10 +222,18 @@ block `H` at declared height `h`, with `n` linking headers:
    first to `H` itself, so they are `H`'s real descendants up to the hash they
    end at, `E` (`H` itself when `n` is 0). At most 2,016 (`bad-btcpay-links`,
    `bad-btcpay-encoding`).
-6. **`E` is an anchor this branch recorded:** the claim's block, or one of its
-   ancestors, carries `E` as its anchor, at height `h + n`
+6. **`E` is an anchor this branch recorded, by the first block recording it:**
+   the claim's block, or one of its ancestors, carries `E` as its anchor at
+   height `h + n`, and that block's parent does not carry `E`
    (`bad-btcpay-not-in-anchor-chain`). So `H` is the ancestor of that anchor at
-   height `h`, and the declared height is true.
+   height `h`, and the declared height is true. The second condition matters
+   where rule R2's converse (a hash has one height) is not consensus, before
+   `pos_hardening_height`: there a block may repeat its parent's anchor hash at
+   a larger height, and a proof linking to that record would declare a height
+   larger than the real one and open a floor its payment does not meet. A block
+   recording an older hash again further on, not right after it, is refused by
+   rule R3 on every node that watches Bitcoin (`bad-anchor-height-mismatch`),
+   since its hash differs from its parent's.
 7. **The coin anchor is true:** `C` equals the anchor height of the block that
    created the coin this input spends, found by the coin's height on this branch,
    as for relative time locks.
@@ -257,7 +265,11 @@ the question.
 **A first sync** checks old blocks the same way, with no daemon and no index.
 **A node that does not watch Bitcoin** (`-validateanchor=0`) checks proofs fully
 as well; what it gives up is R3 and the watcher, as described in
-[`03-bitcoin-anchoring.md`](03-bitcoin-anchoring.md), section 3.
+[`03-bitcoin-anchoring.md`](03-bitcoin-anchoring.md), section 3. It therefore
+takes every anchor on trust: when a producer records a fabricated anchor, such a
+node accepts a claim whose payment exists in no Bitcoin block, and keeps it
+until a chain with more work replaces that block. **Such a node must not be used
+to decide that a swap is complete.**
 
 ### 4.4 The anchor floor
 

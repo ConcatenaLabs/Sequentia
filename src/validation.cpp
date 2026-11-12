@@ -385,7 +385,11 @@ enum class BtcPayVerdict { OK, INVALID };
 //! SEQUENTIA: whether Bitcoin block `hash` at height `a` is an anchor recorded by
 //! `index` or one of its ancestors. Anchor heights never decrease along a chain
 //! and an unchanged height carries an unchanged hash (rule R2), so the first
-//! ancestor anchored at or above `a` decides. A pure function of this branch.
+//! ancestor anchored at or above `a` decides. That block must also be the first
+//! to record `hash`: a block repeating its parent's anchor hash at a larger
+//! height is valid where R2's converse is not consensus (before
+//! pos_hardening_height), and would otherwise lend that hash a false height.
+//! A pure function of this branch.
 static bool AnchorRecordedOnBranch(const CBlockIndex* index, uint32_t a, const uint256& hash)
 {
     if (index == nullptr || index->m_anchor_height < a) return false;
@@ -395,7 +399,8 @@ static bool AnchorRecordedOnBranch(const CBlockIndex* index, uint32_t a, const u
         if (index->GetAncestor(mid)->m_anchor_height >= a) hi = mid; else lo = mid + 1;
     }
     const CBlockIndex* first = index->GetAncestor(lo);
-    return first->m_anchor_height == a && first->m_anchor_hash == hash;
+    return first->m_anchor_height == a && first->m_anchor_hash == hash &&
+           (first->pprev == nullptr || first->pprev->m_anchor_hash != hash);
 }
 
 //! SEQUENTIA: the bitcoin-payment variants of a transaction id this node has

@@ -467,6 +467,7 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.anchoring_first()
         self.bitcoin_reorg_sweep()
         self.links_and_branches()
+        self.false_height_record()
         self.one_encoding_edges()
         self.reverse_direction()
         self.congestion()
@@ -1399,6 +1400,74 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.results.append((self.current + " Q2", "fee %d, the seller's proof %d vB first; the buyer's pooled and "
                              "mined, kept as the variant mined with; the claim came back (%s)" % (fee, vs, how.strip())))
         self.log.info("    Q2: fee %d for a %d vB first proof; the claim came back with %s", fee, vs, how.strip())
+
+    def craft_anchor(self, node, new_height=None, new_hash=None):
+        """A block from getnewblockhex with its anchor rewritten, submitted."""
+        parent = node.getblockheader(node.getbestblockhash())
+        raw = bytearray.fromhex(node.getnewblockhex())
+        pos = -1
+        for c in [parent["anchorhash"], self.btc_rpc().getbestblockhash()]:
+            p = raw.find(bytes.fromhex(c)[::-1])
+            if 0 < p < 220:
+                pos = p
+                break
+        assert pos > 0, "anchor not found in the template header"
+        if new_height is not None:
+            raw[pos - 4:pos] = struct.pack("<I", new_height)
+        if new_hash is not None:
+            raw[pos:pos + 32] = bytes.fromhex(new_hash)[::-1]
+        return node.submitblock(raw.hex())
+
+    def false_height_record(self):
+        self.step("N33 (PV15 A1f) a block repeating its parent's anchor hash at a larger height lends it no height")
+        # R2's converse (a hash has one height) is consensus only from
+        # pos_hardening_height; with it off, such a block is valid on a node
+        # whose watcher has not looked yet. The proof's link must be the first
+        # block recording that hash.
+        self.disconnect_nodes(0, 1)
+        self.restart_node(0, self.seq_args(["-poshardeningheight=0", "-anchorpollinterval=600"]))
+        node = self.nodes[0]
+        node.loadwallet("w")
+        node.setfeeexchangerates(self.nodes[1].getfeeexchangerates())
+        b = self.btc_rpc()
+        p = b.getblockcount() + 1
+        lock = self.new_lock(50_000_000, p, p + 20, p + 26)  # F = p: a payment at p must not open it
+        self.mine(1)
+        lock["C"] = self.lock_coin_anchor(lock)
+        ptx = self.pay(lock["addr"], lock["amount"])
+        bh = self.btc_mine(1)[0]
+        assert_equal(b.getblockheader(bh)["height"], p)
+        self.mine_anchored(p)
+        vout = self.vout_paying(ptx, lock["addr"], bh)
+        pr = self.proof_for(ptx, lock["C"], bh)
+        assert_equal(len(pr["links"]), 0)
+        self.force([self.claim(lock, pr["record"], vout)], "Script failed an OP_VERIFY operation")
+        k = 2
+        assert_equal(self.craft_anchor(node, new_height=p + k), None)
+        tip = node.getblockheader(node.getbestblockhash())
+        assert_equal((tip["anchorheight"], tip["anchorhash"]), (p + k, bh))
+        self.btc_mine(k + 1)
+        cs = hashlib.sha256(pr["coinbase"]).digest()
+        inflated = payment_record(p + k, lock["C"], pr["header"], cs, pr["index"], pr["pbranch"], pr["cbranch"],
+                                  pr["payment"])
+        self.force([self.claim(lock, inflated, vout)], "bad-btcpay-not-in-anchor-chain")
+        # The same hash recorded again further on, not by the next block: the
+        # anchor check (R3) of a node that watches Bitcoin refuses that block,
+        # since its hash differs from its parent's.
+        crafted = node.getblockheader(node.getbestblockhash())
+        self.mine(1)
+        assert node.getblockheader(node.getbestblockhash())["anchorhash"] != bh
+        self.btc_mine(1)
+        res = self.craft_anchor(node, new_height=b.getblockcount(), new_hash=bh)
+        assert res is not None, "a block repeating an older anchor hash was accepted"
+        self.log.info("    a block recording an older anchor hash at a later height, not after it: %s", res)
+        self.results.append((self.current, "inflated h=%d (true %d) linked to the repeated record: "
+                             "bad-btcpay-not-in-anchor-chain; non-consecutive repeat refused by the watching node: %s"
+                             % (p + k, p, res)))
+        node.invalidateblock(crafted["hash"])
+        self.restart_seq0()
+        self.mine(1)
+        self.sync_blocks()
 
     def block_records(self, blockhash):
         """A maker of payment records for transactions of one Bitcoin block,
