@@ -300,7 +300,13 @@ the anchor does: the first block anchored at or above `h`, call it `P`, and the
 59 after it. The floor needs the block 60 below its own to be anchored at
 `F >= h`, and the first such block is `P` or later, so the first block that meets
 the floor is `P + 60` or later. Each of the 59 after `P` follows a block that
-records the payment, so a mempool can hold a claim for it (section 6.1).
+records the payment, so a mempool can hold a claim for it (section 6.1). This
+holds while the chain records an anchor within 2,016 Bitcoin blocks above the
+payment, the most headers a proof links (section 3). If the chain records no
+anchor for longer than that, a proof of a payment in that gap can reach no
+recorded anchor and the claim is never valid, while the refund still opens 60
+blocks after the first block anchored at `F`: a gap that long is about two
+weeks of Bitcoin with no Sequentia block.
 
 **Why the block 60 below, not the block's own anchor.** One block's anchor can
 jump. While Bitcoin has two live branches, producers keep recording the last
@@ -359,7 +365,7 @@ numbers they read must be minimally encoded.
   | Selector | Pops then | Pushes | Fails for an index out of range with |
   |---|---|---|---|
   | `0`, an output | an output index | its value as 8 bytes little-endian (the form of Elements' 64-bit arithmetic opcodes), then its script in the form `OP_INSPECTOUTPUTSCRIPTPUBKEY` uses: the witness program and then the witness version for a segwit output, the SHA-256 of the script and then `-1` for any other | `SCRIPT_ERR_BTCPAY_OUTPUT` |
-  | `1`, an input | an input index | the outpoint that input spends: its transaction id (32 bytes, in the order the transaction serializes it), then its output index | `SCRIPT_ERR_BTCPAY_INPUT` |
+  | `1`, an input | an input index | the outpoint that input spends: its transaction id (32 bytes, in the order the transaction serializes it), then its output index as 4 bytes little-endian, as Elements' `OP_INSPECTINPUTOUTPOINT` pushes it, so that `OP_CAT` of the two is the serialized outpoint | `SCRIPT_ERR_BTCPAY_INPUT` |
   | `2`, the payment itself | nothing | the payment's own transaction id (32 bytes, in serialization order) | |
 
   Any output can be read, so a script can bind a claim to data in the payment
@@ -593,8 +599,9 @@ and is lost if both stay offline until the refund is valid.
   Sequentia reorganization it causes, since validity reads only the chain.
 - **The node re-links a fresh proof itself** (node policy, on every node that
   watches Bitcoin; every block producer does). It holds each claim evicted after
-  a reorganization, keyed by transaction id, with the variants of section 6.2,
-  in a waiting set:
+  a reorganization, and each claim that a connected block displaced from the
+  mempool by spending its lock coin (the block that mined the refund, say),
+  keyed by transaction id, with the variants of section 6.2, in a waiting set:
   - **as large as the disconnected blocks can make it.** Claims of an
     attacker's own that nobody can complete (they prove its own Bitcoin
     transaction, which it double-spends) ride in the very blocks the
@@ -616,7 +623,10 @@ and is lost if both stay offline until the refund is valid.
     more, and a newcomer paying no more than every held claim is not held;
   - **forgotten at once when its lock coin is spent** on the active chain
     (checked whenever the chain tip moves, in chunks that release the chain
-    lock between them): such a claim can never be mined on that chain;
+    lock between them): such a claim can never be mined on that chain. A claim
+    a block displaced is the exception: it waits, untried, while its lock coin
+    stays spent, and is tried again once the block that spent it is
+    disconnected, which a Bitcoin reorganization can do at any depth;
   - **forgotten after one window:** a claim not re-attached within 144 Bitcoin
     blocks of being held is dropped with its variants. By then the search has
     covered the window below the height it was held at and every block mined
@@ -663,7 +673,8 @@ and is lost if both stay offline until the refund is valid.
     the node takes the outputs its variants' proofs name (an output of the
     payment whose index the input's witness carries, which the leaf reads with
     `OP_INSPECTBTCTX`) and searches Bitcoin for any other transaction paying
-    the same script. Every such output is a candidate, largest first, whatever
+    the same script. Every such output is a candidate, largest first, and a
+    transaction paying several wanted scripts is a candidate for each, whatever
     it pays: the node does not know the price the script asks, and a seller
     paying itself a little more must not hide the buyer's exact payment. For
     each candidate the node builds a fresh proof, makes the witness item that
@@ -872,9 +883,9 @@ accepted assets the claim can draw on, like any other.
      test networks, and a seller who controls a producer is the rarer half.
 4. **The buyer signs the claim, and a cancel, before it pays.** The claim pays
    the asset to the buyer, its fee in an accepted asset (section 8.1). It signs
-   three tiers of the same claim (section 8.5): the going rate with headroom, ten
-   times that, and a top tier sized so that keeping the claim out costs more than
-   the swap is worth. The cancel spends the payment's own inputs back to the buyer
+   two tiers of the same claim (section 8.5): the going rate with headroom, and
+   a top tier sized so that keeping the claim out costs more than the swap is
+   worth. The cancel spends the payment's own inputs back to the buyer
    at a high fee. The wallet hands all of them to its completion service and to
    the counterparty.
 5. **The buyer pays** the seller's address at least the amount, with an ordinary
@@ -957,9 +968,12 @@ signed claims, signed cancel and the payment's transaction id, and then:
   keeps doing so, at a rising tier, until the refund is valid. Nodes re-link proofs themselves
   (section 6.3), but the service never relies on what they kept: this duty is
   the swap's guarantee;
-- raises the claim's fee tier if it is not mined: to the second tier after 10
-  Sequentia blocks, to the top tier after 20, well inside the 60 blocks the
-  claim has to itself (section 4.4);
+- raises the claim to the top tier as soon as it misses one block it could have
+  been mined in: a block made after the claim was pooled. The top tier is
+  priced for the blocks it is pooled in (below), so a later step would leave the
+  seller the blocks before it to fill against a cheap tier. The cost is that a
+  buyer whose claim misses one block in ordinary congestion pays the top tier,
+  about 0.03 % of the value;
 - if the payment is still unconfirmed two blocks before `D`, broadcasts the
   cancel. Under Bitcoin Core's full replacement the cancel replaces the payment
   if its fee is higher; the template of section 8.3 keeps anyone from making that
@@ -981,11 +995,13 @@ the claim's virtual size, divided by the virtual size of all those blocks:
 
 with `V` the asset amount locked, `v_claim` the claim's virtual size, `B` a
 block's virtual-size limit and `N` the Sequentia blocks the claim can be mined in
-from a mempool before the refund is valid. Section 4.4 gives at least 59 of them
-whatever the anchor does: the 59 after the first block anchored at or above the
-payment (that block itself is made before anyone can complete the claim). So
-`N = 59`. With the chain's limit of 89,999 virtual bytes and a claim of 300
-virtual bytes, the top tier costs the buyer V / 17,700 (0.0056 % of the value),
+at the top tier before the refund is valid. Section 4.4 gives 59 blocks a
+mempool can feed whatever the anchor does: the 59 after the first block anchored
+at or above the payment (that block itself is made before anyone can complete
+the claim). The claim enters them at the going rate and moves to the top tier
+once it misses the first, so `N = 58`. With the chain's limit of 89,999 virtual
+bytes and a claim of 300 virtual bytes, the top tier costs the buyer V / 17,400
+(0.0057 % of the value),
 paid in the claim's fee asset, and a seller who outbids it on every block pays
 more than V. The rule is in the fee asset's own units, so it holds whatever that
 asset is worth. A stall stops the count of blocks rather than shortening it.
@@ -1012,7 +1028,7 @@ So the top tier is
 
     top fee = V × v_claim × m × 4 / (B × N × (1 - s) × 3)
 
-With `s = 1/2` and `m = 2` it is V / 3,319 (0.030 % of the value) for the figures
+With `s = 1/2` and `m = 2` it is V / 3,262 (0.031 % of the value) for the figures
 above. `m` has no bound the chain enforces: it is bounded by how closely the
 producers' rates follow the market, and a wallet sets it from the age and
 liquidity of the rates it reads.
@@ -1119,7 +1135,9 @@ Until the refund is valid the mempool refuses it outright
 mempools from the payment's first anchor on, so it is mined long before the
 refund is valid, and the claim has at least 60 blocks to itself whatever the
 anchor does (section 4.4): a jump straight past `D` after a contested Bitcoin
-fork leaves it the jump block and the 59 after it, and a stall stops the count.
+fork leaves it the jump block and the 59 after it, and a stall stops the count,
+as long as the chain records an anchor within 2,016 Bitcoin blocks above the
+payment (section 4.4).
 A seller that produces blocks can still include its refund in place of a claim
 pending when the refund becomes valid, which consensus allows; to get there
 without the claim being mined it must produce every one of the 59 blocks after
@@ -1133,7 +1151,11 @@ block leaves the chain, the buyer waits for it to be mined again and for depth `
 again. With the payment unconfirmed, nothing on either chain refers to it. After
 the payment, as in 9.3 and 9.4. After the refund, a reorganization that
 disconnects it lets it in again only 60 blocks after the new branch's first block
-anchored at `R`, and a claim on a valid payment gets those blocks first.
+anchored at `R`, and a claim on a valid payment gets those blocks first. A node
+that held the claim brings it back itself: a claim the block mining the refund
+displaced from its mempool waits for re-attachment while that block stands, and
+is re-attached once the block is disconnected (section 6.3). The completion
+service resubmits it too.
 
 ## 10. The collision class
 

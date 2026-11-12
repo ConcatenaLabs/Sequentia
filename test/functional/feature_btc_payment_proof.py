@@ -536,6 +536,8 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.contest_seller_holds_the_blocks()
         self.contest_reorg_across_the_jump()
         self.multi_input_search()
+        self.shared_replacement()
+        self.refund_block_undone()
         self.payment_fields()
         self.only_tightens()
 
@@ -2965,7 +2967,11 @@ class BtcPaymentProofTest(BitcoinTestFramework):
                 other = b_tip
             else:
                 self.switch_branch(b_tip)
+                # Mining the payment on A cleared its delta: set it again so the
+                # rival branch never mines it.
+                b.prioritisetransaction(ptx, 0, -100000000)
                 b_tip = self.btc_mine(1)[0]
+                assert ptx not in b.getblock(b_tip)["tx"]
                 other = a_tip
             b.reconsiderblock(other)
             tips = b.getchaintips()
@@ -3090,11 +3096,12 @@ class BtcPaymentProofTest(BitcoinTestFramework):
                              "the refund; the claim was mined" % (first2, FLOOR_DEPTH - 1)))
 
     # ------------------------------------------- a claim proving payments on several inputs
-    def multi_claim(self, k, paid):
+    def multi_claim(self, k, paid, together=False):
         """A keyless claim spending k coins, each read by a leaf that takes any proof and reads the output its
         witness names; input i proves a payment to address i, all mined in one Bitcoin block X. After it is
         mined, X is orphaned and those payments are kept out; replacements are paid to the addresses in
-        `paid` (indices) and mined. Returns the claim, its block and the replacements."""
+        `paid` (indices) and mined, as one transaction paying them all when `together`. Returns the claim, its
+        block and the replacements."""
         node = self.nodes[0]
         b = self.btc_rpc()
         leaf = CScript([OP_INSPECTBTCPAYMENT, OP_2DROP, FIELD_OUTPUT, OP_INSPECTBTCTX, OP_2DROP, OP_DROP, OP_1])
@@ -3130,7 +3137,11 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         b.invalidateblock(x)
         for p in payments:
             b.prioritisetransaction(p, 0, -100000000)
-        replacements = {i: self.pay(addresses[i], 10000000, wallet=self.bminer) for i in paid}
+        if together:
+            one = self.bminer.sendmany("", {addresses[i]: Decimal("0.1") for i in paid})
+            replacements = {i: one for i in paid}
+        else:
+            replacements = {i: self.pay(addresses[i], 10000000, wallet=self.bminer) for i in paid}
         self.btc_mine(2)
         assert all(self.bminer.gettransaction(p)["confirmations"] > 0 for p in replacements.values())
         self.wait_for(lambda: node.getblockheader(claim_block)["confirmations"] < 0, "the claim's block disconnected")
@@ -3163,6 +3174,108 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.results.append((self.current + " (one input without a replacement)", "left out for 8 s; re-attached once the "
                              "missing payment confirmed (%s), mined" % late[:16]))
 
+    def shared_replacement(self):
+        self.step("N51 (KR5 F2) one replacement transaction pays the scripts of several inputs: every output it pays "
+                  "to a wanted script is a candidate")
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        # (a) Review KR5's case. Two inputs with different deadlines; after the originals are orphaned, an
+        # older payment completes input 1, and a later transaction pays both scripts, input 1's first: its
+        # output to input 1's script is past that input's deadline, its output to input 0's script is not.
+        lock_block = self.mine(1)[0]
+        C = self.anchor_of(lock_block)
+        start = b.getblockcount()
+        deadlines = [start + 10, start + 2]
+        leaves = [CScript([OP_INSPECTBTCPAYMENT, OP_DROP, OP_DUP, C - 1, OP_GREATERTHAN, OP_VERIFY, d,
+                           OP_LESSTHANOREQUAL, OP_VERIFY, FIELD_OUTPUT, OP_INSPECTBTCTX, OP_2DROP, OP_DROP, OP_1])
+                  for d in deadlines]
+        coins = [self.covenant_coin(leaf) for leaf in leaves]
+        self.mine(1)
+        self.multi_payers = getattr(self, "multi_payers", 0) + 1
+        name = "payer%d" % self.multi_payers
+        b.createwallet(name)
+        payer = self.btc_rpc(name)
+        self.bminer.sendmany("", {payer.getnewaddress(): Decimal("0.2") for _ in range(2)})
+        self.btc_mine(1)
+        addresses = [self.bbuyer.getnewaddress(address_type="bech32") for _ in range(2)]
+        originals = [self.pay(a, 10000000, wallet=payer) for a in addresses]
+        x = self.btc_mine(1)[0]
+        self.mine_anchored(b.getblockheader(x)["height"])
+        spends = []
+        for i in range(2):
+            sp = coins[i][1]([self.proof_for(originals[i], C, x)["record"]])
+            sp.wit.vtxinwit[0].scriptWitness.stack.insert(0, scriptnum(self.vout_paying(originals[i], addresses[i], x)))
+            spends.append(sp)
+        claim = spends[0]
+        claim.vin.append(spends[1].vin[0])
+        claim.wit.vtxinwit.append(spends[1].wit.vtxinwit[0])
+        claim.vout[0].nValue = CTxOutValue(2 * 100000000 - 5000)
+        claim.rehash()
+        node.sendrawtransaction(claim.serialize().hex())
+        claim_block = self.mine(1)[0]
+        assert claim.hash in node.getblock(claim_block)["tx"]
+        b.invalidateblock(x)
+        for p in originals:
+            b.prioritisetransaction(p, 0, -100000000)
+        self.pay(addresses[1], 10000000, wallet=self.bminer)
+        self.btc_mine(2)
+        raw = self.bminer.createrawtransaction([], [{addresses[1]: Decimal("0.1")}, {addresses[0]: Decimal("0.1")}])
+        shared = self.bminer.sendrawtransaction(
+            self.bminer.signrawtransactionwithwallet(self.bminer.fundrawtransaction(raw, {"changePosition": 2})["hex"])["hex"])
+        self.btc_mine(2)
+        st = self.bminer.gettransaction(shared)
+        assert deadlines[1] < st["blockheight"] <= deadlines[0]
+        assert_equal(self.vout_paying(shared, addresses[1], st["blockhash"]), 0)
+        self.wait_for(lambda: node.getblockheader(claim_block)["confirmations"] < 0, "the claim's block disconnected")
+        self.mine_anchored(b.getblockcount())
+        self.wait_for(lambda: claim.hash in node.getrawmempool(), "the claim re-attached from the shared transaction")
+        late = self.debug_lines(node, "output 0 of %s does not open input 1" % shared)
+        mined = self.mine(1)[0]
+        assert claim.hash in node.getblock(mined)["tx"]
+        self.results.append((self.current + " (a)", "the shared transaction's late output failed input 1 (%d line), its "
+                             "other output completed input 0; re-attached and mined" % len(late)))
+        self.log.info("    (a) KR5's case: output 0 of the shared transaction refused by input 1, output 1 taken for input 0; "
+                      "re-attached and mined")
+        # (b) Three inputs, one transaction paying all three scripts.
+        claim, addresses, reps = self.multi_claim(3, [0, 1, 2], together=True)
+        assert len(set(reps.values())) == 1
+        self.wait_for(lambda: claim.hash in node.getrawmempool(), "the 3-input claim re-attached from one transaction")
+        mined = self.mine(1)[0]
+        assert claim.hash in node.getblock(mined)["tx"]
+        self.results.append((self.current + " (b)", "three inputs completed from one transaction paying all three scripts; mined"))
+        self.log.info("    (b) three inputs, one transaction paying all three scripts: re-attached and mined")
+
+
+    def refund_block_undone(self):
+        self.step("N52 (PV16 D4) a claim displaced by the block that mined the refund returns when that block is undone")
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        lock = self.fresh_lock(deadline_in=2, margin=0)
+        ptx, pr, vout = self.paid(lock)
+        claim = self.claim(lock, pr["record"], vout)
+        node.sendrawtransaction(claim.serialize().hex())
+        refund = self.refund(lock)
+        # The seller produces every block: the claim stays out until its refund is valid.
+        self.btc_mine(max(0, lock["refund_at"] - b.getblockcount()))
+        while self.anchor_of(node.getbestblockhash()) < lock["refund_at"]:
+            self.force([])
+        first = self.first_anchored_at(lock["refund_at"])
+        while node.getblockcount() < first + FLOOR_DEPTH - 1:
+            self.force([])
+        assert claim.hash in node.getrawmempool()
+        blk = self.force([refund])
+        assert refund.hash in node.getblock(blk)["tx"] and claim.hash not in node.getrawmempool()
+        node.invalidateblock(blk)
+        self.wait_for(lambda: claim.hash in node.getrawmempool(), "the displaced claim back in the mempool", timeout=20)
+        assert self.debug_lines(node, "%s displaced by block %s" % (claim.hash, blk))
+        assert refund.hash not in node.getrawmempool()
+        mined = self.mine(1)[0]
+        assert claim.hash in node.getblock(mined)["tx"]
+        self.results.append((self.current, "the refund mined at first+%d displaced the pooled claim; once that block was "
+                             "undone the node re-attached the claim, which replaced the refund and was mined" % FLOOR_DEPTH))
+        self.log.info("    the claim displaced by the refund's block returned when the block was undone, and was mined")
+
+
     # ------------------------------------------------ the fields OP_INSPECTBTCTX reads
     def payment_fields(self):
         self.step("N50 OP_INSPECTBTCTX reads an output, an input's outpoint or the payment's own id, by a selector the leaf writes")
@@ -3179,7 +3292,10 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         read = [OP_INSPECTBTCPAYMENT, OP_2DROP]
         cases = [
             ("the payment's own id", CScript(read + [FIELD_TXID, OP_INSPECTBTCTX, own, OP_EQUAL]), [], None),
-            ("input 0's outpoint", CScript(read + [0, FIELD_INPUT, OP_INSPECTBTCTX, prevn, OP_EQUALVERIFY, prev, OP_EQUAL]), [], None),
+            ("input 0's outpoint, its index 4 bytes little-endian", CScript(read + [0, FIELD_INPUT, OP_INSPECTBTCTX,
+             struct.pack("<I", prevn), OP_EQUALVERIFY, prev, OP_EQUAL]), [], None),
+            ("input 0's index as a script number", CScript(read + [0, FIELD_INPUT, OP_INSPECTBTCTX, prevn, OP_EQUALVERIFY,
+             prev, OP_EQUAL]), [], "Script failed an OP_EQUALVERIFY operation"),
             ("another id", CScript(read + [FIELD_TXID, OP_INSPECTBTCTX, prev, OP_EQUAL]), [],
              "Script evaluated without error but finished with a false/empty top stack element"),
             ("an unknown field", CScript(read + [0, 3, OP_INSPECTBTCTX, OP_2DROP, OP_1]), [],
