@@ -1178,8 +1178,8 @@ coin differently first. Without a further rule, one producer is enough for
 that. After a reorganization one Bitcoin block deep, the respend has to win a
 round of a committee that signs any valid block. Two or more blocks deep, the
 first new block may escape a stall (§5), and a single signer certifies it. The
-committee then builds on it. Held transactions make the respend need a
-dishonest quorum instead.
+committee then builds on it. Held transactions make the respend need the rest
+of the committee, within a bound that keeps the chain moving.
 
 **The record.** When the anchor watcher disconnects blocks, the node keeps
 every transaction of every disconnected block at or below the highest of them
@@ -1189,37 +1189,73 @@ so that it can put it back in the mempool, together with the outpoints it
 spends. Two kinds are left out because they can never be mined on the new
 chain: a transaction that spends the coinbase of a disconnected block, and one
 that spends the output of such a transaction. The record is filled after the
-disconnect, never on its path, and is written to `heldtxs.dat` in the data
-directory on every change. A member that restarts keeps it.
+disconnect, never on its path, and only the held transactions are written to
+`heldtxs.dat`. A member that restarts still refuses their respends. Nothing
+about any block is written there or anywhere else.
+
+**Held only while this node would mine it.** A transaction stays held only
+while this node's own block assembler would include it now. It must sit in the
+mempool with a package fee value at or above `-blockmintxfee`, which covers
+the fee asset being accepted and its rate. If it is not in the mempool, the
+mempool must take it on its ordinary policy. A refusal for a lock time or a
+missing input is temporary and keeps it held: a parent not back yet, or a
+conflict in a block that may still be set aside. Any other refusal releases
+it, and so does a fee below the block minimum. A transaction nobody honest
+would mine therefore freezes nothing: its owner's replacement is accepted at
+once.
 
 **Arm one: signing.** A committee member does not sign a block that spends an
 outpoint a held transaction spends, other than with that held transaction. Nor
 does it sign a block built on an ancestor, above the disconnect point, that
 does so. In the gossip round the check sits beside the lazy
-`TestBlockValidity`, and a refusal excludes the leader exactly as an invalid
-block does. The next leader holds the original in its mempool and mines it.
-The same check guards a member's own proposal, `generateposblock`, and
-`musigpartialsign`. While the node holds anything, `musigpartialsign` needs
-the block whose hash it signs. Between a disconnect and the fill that follows
-it, a member signs nothing.
+`TestBlockValidity`.
+- In a round whose backed proposal fails it, the member signs nothing.
+- In round 0 it signs instead the first later proposal, in the round order,
+  that passes.
+- The leader is not excluded. Every member, with the rule or without it,
+  keeps computing the same round order, so a round that backs an honest
+  proposal gathers every member's signature.
+
+The same check guards a member's own proposal, `generateposblock`,
+`getposblocktemplate`, `submitposblock` and `musigpartialsign`. While the node
+holds anything, `musigpartialsign` needs the block whose hash it signs. Between
+a disconnect and the fill that follows it, none of these signs anything.
 
 **Arm two: sub-quorum blocks.** When the lowest block of the active chain that
-carries such a spend does not carry its parent's quorum, a member sets it aside
-locally (`InvalidateBlock`) and signs a sibling on its parent. The member's
-mempool readmits the held transaction, which the set-aside block had evicted.
-Once a quorum-certified block stands at the set-aside block's height or above,
-the block is restored as valid side-chain history. If none arrives within
-`POS_HELD_PARK_MS` (120 s), the member restores it too, sets the same block
-aside never again, and refuses to sign on top of it. The sibling is often
-itself an escaping-stall block with one signer, because the producer assembles
-a stall-escaping block at its first share. Then the sibling and the respend
-rank by leader score, and the respend is displaced by the certified block that
-the members build on the sibling: it is higher. Nodes without the rule follow
-by ordinary fork choice.
+carries such a spend does not carry its parent's quorum, a member keeps that
+block out of its fork choice, and with it every descendant. It disconnects the
+block and signs a sibling on its parent, and its mempool readmits the held
+transaction, which the block had evicted. Nothing is marked failed: peers that
+relay the block or build on it are not punished, their headers and blocks are
+stored as usual, and a restart forgets the set-aside. The block returns to fork
+choice when any of these happens:
+- a quorum-certified block stands at its height or above on the active chain;
+- a quorum-certified block builds on it (the rest of the committee certified
+  the respend, and the member follows);
+- nothing it conflicts with is held any more;
+- the liveness bound below is reached.
+
+A member sets a given block aside once per run. The sibling is often itself an
+escaping-stall block with one signer, because the producer assembles a
+stall-escaping block at its first share. Then the sibling and the respend rank
+by leader score, and the respend is displaced by the certified block the
+members build on the sibling: it is higher. Nodes without the rule follow by
+ordinary fork choice.
 
 **The mempool** refuses a transaction that spends a held outpoint
 (`txn-held-conflict`), so honest leaders do not carry the respend even when it
 pays more and signals replacement.
+
+**The liveness bound.** A member *holds* when it declines to sign or to propose
+for a held transaction, or keeps a block set aside. A new quorum-certified
+block on its active chain ends the hold. If the chain goes
+`POS_HELD_BOUND_ROUNDS` (12) gossip rounds plus one collection window without
+one, the member releases every held transaction and every set-aside block, and
+signs as if it held nothing. Rounds take `700 + 35·cap` ms and the window
+`500 + 25·cap` ms. The bound is therefore 12.0 s for a committee cap of 7, and
+120.2 s at the testnet's cap of 250. Whatever the mix of members with and
+without the rule, the rule adds to a pause at most the bound plus the time one
+ordinary height takes.
 
 **When a held transaction is released:**
 - it is mined in a block at or below the highest quorum-certified block above
@@ -1227,71 +1263,85 @@ pays more and signals replacement.
   branch back mines it in its original block;
 - a conflicting spend is mined in such a block. Then a quorum certified the
   conflict, and the held transaction cannot come back on this chain;
+- this node would not mine it now (above);
+- the liveness bound is reached;
 - the active tip anchors `POS_HELD_WINDOW` (144) Bitcoin blocks above the
   highest anchor the disconnected blocks had.
 
 A held transaction that is not valid yet on the new chain (a lock time above
-the lowered tip, say) stays held. Its conflicts stay refused, and it is mined
-once it becomes valid.
+the lowered tip, say) stays held. Its conflicts stay refused while certified
+blocks keep coming, and it is mined once it becomes valid.
 
-**What it guarantees.** A respend of a held transaction is certified only by a
-quorum of members that are dishonest or *unaware*. An unaware member never
-disconnected the block: it was synced afresh after the disconnect, or it runs
-a binary without the rule. A member that was offline through the reorganization
-but held the block disconnects it when it starts, and holds it then.
-- *Public committee* (the testnet: 250 seats, quorum 126). The dishonest and
-  unaware members must hold 126 seats, a strict majority of the stake behind
-  the committee. With aware members holding 125 seats or more, no respend is
-  certified. The original is certified whenever the members that sign it hold
-  126 seats; unaware members sign it when a round backs it.
-- *Private-VRF committee* (quorum 51 of an expected 100). The drawn set varies
-  by slot. If 40 % of the stake is dishonest or unaware, a slot draws 51 or more
-  of them about 1.7 % of the time (binomial) to 5.3 % (Poisson, many small
-  stakers). At 30 % that falls to under 0.03 %. The attacker must also lead
-  that slot, and it has only the slots before an honest leader mines the
-  original, usually one or two.
-- *A committee of a few nodes run together* (the testnet's twenty committee
-  nodes). The figure is the same as the public committee's, by seats. Every
-  node upgraded at one cutover leaves no unaware member, so a respend then
-  needs members holding 126 seats to sign it on purpose.
+**What it guarantees.** A member is *aware* when it ran the rule through the
+disconnect: it disconnected the block and holds the record. A member is
+*unaware* when it was synced afresh after the disconnect, runs a binary
+without the rule, or left the old branch by fork choice before its own watcher
+disconnected it. A member that was offline through the reorganization but held
+the block disconnects it when it starts, and is aware. Let the aware members
+hold `A` seats, the unaware and the dishonest `U` and `D`, and the quorum be
+`q`.
+- **Aware members hold a quorum (`A >= q`).** No respend is certified, because
+  `U + D` cannot reach a quorum. The original is certified in round 0, or, after
+  a single-signer respend, by the members' certified block on the sibling,
+  well inside the bound.
+- **Neither side holds a quorum (`A < q` and `U + D < q`).** Without a stall
+  escape, the original is certified in the first round that backs an honest
+  proposal, as long as the members that sign it hold a quorum; unaware members
+  sign it like any proposal. With a single-signer respend block, the unaware
+  members stay on it whenever it outranks the sibling on leader score. Then
+  nothing is certified until the bound, the aware members release, and the
+  respend is certified. In this mix, protection against a respend that escapes
+  a stall is a matter of rank. The chain pauses at most the bound.
+- **The unaware and dishonest hold a quorum (`U + D >= q`).** The respend is
+  certified when a round backs it, as without the rule.
+
+On the public committee (the testnet: 250 seats, quorum 126) the first case
+needs aware members holding 126 seats, a strict majority of the stake behind
+the committee. On the private-VRF committee (quorum 51 of an expected 100), a
+slot draws 51 or more dishonest or unaware members, out of 40 % of the stake,
+about 1.7 % of the time (binomial) to 5.3 % (Poisson, many small stakers). At
+30 % that falls to under 0.03 %. A committee upgraded at one cutover has no
+unaware members. One whose members upgrade one by one sits in the middle case
+until most of the stake has upgraded.
 
 **What it costs.**
 - A legitimate conflicting spend (a refund, or a wallet replacing its own
   transaction after the reorganization) waits until the held transaction is
-  mined, a quorum certifies a conflict, or the window ends. Normally that is
-  the next honest block. For a held transaction that cannot be mined yet, it
-  is at most 144 Bitcoin blocks, about a day.
-- Every proposal that carries a respend costs a round. An attacker that leads
-  most rounds and proposes the respend at every height slows the chain while
-  the original cannot be mined: in `feature_pos_held_transactions.py` (f), with
-  an attacker leading about nine rounds in ten, 17 heights took 138 s and
-  174 s in two runs, against about a second each otherwise.
-- A set-aside block keeps a member off the network's tip for at most 120 s.
-  If aware members are fewer than a quorum and the rest are fewer too, no side
-  certifies meanwhile.
+  mined, a quorum certifies a conflict, the hold ends at the bound, or the
+  window ends. Normally that is the next honest block.
+- Each round that backs a proposal carrying the respend costs that round for
+  the aware members. A member keeps a block set aside for at most the bound.
 - Filling the record costs about 7 µs per transaction (1,505 transactions in
-  11.0 ms and 11.5 ms in two runs), after the disconnect. Re-admitting the same transactions to the
+  11 ms), after the disconnect. Re-admitting the same transactions to the
   mempool costs about 0.3 ms each.
 
-**What it does not cover.** A dishonest or unaware quorum, which is the chain's
-own safety assumption. Transactions of disconnected blocks above the highest
-certified one, which were never final. A conflict that a member accepted into
-its mempool before the record was filled: the next pass of the record evicts
-it, but a node that relayed it has relayed it. The contested-anchor jump of a
-payment claim's refund floor, which the floor must close itself.
+**What it does not cover.** The middle and last cases above. Transactions of
+disconnected blocks above the highest certified one, which were never final. A
+conflict that a member accepted into its mempool before the record was filled:
+the next pass evicts it, but a node that relayed it has relayed it. The
+contested-anchor jump of a payment claim's refund floor, which the floor must
+close itself.
+
+**Payment claims.** On a chain with the bitcoin payment opcodes, a claim
+refused with `btcpay-not-in-anchor-chain` is a premature spend. It stays held,
+because its payment may come back with the anchor. A claim refused for a
+`bad-` reason is invalid and is released. The node's waiting set of claims is
+what decides that a payment is gone for good, so it releases the held claim
+(`HeldTxsRelease`) when it forgets it.
 
 **Bitcoin stays supreme.** The rule decides only what a member signs and, for
-at most 120 s, which of two valid branches it builds on. The watcher
+at most the bound, which of two valid branches it builds on. The watcher
 disconnects exactly as before. A set-aside block is never one whose anchor
-Bitcoin replaced: those the watcher has already invalidated. A member restores
-a set-aside block only when no ancestor of it is invalid for another reason,
-so an anchor invalidation is never cleared. Nothing held can resist a further
-Bitcoin reorganization.
+Bitcoin replaced: the watcher has already invalidated those. A set-aside marks
+nothing failed, so it can never clear or block an anchor invalidation. Nothing
+held can resist a further Bitcoin reorganization.
 
 Like the share-lock, this is local signing policy: no block is valid or invalid
 because of it, and a node that never saw the disconnected blocks validates
-exactly as any other. `getheldtxs` lists what a node holds and what it has set
-aside. The code is in `src/pos_heldtxs.{h,cpp}`. The attacks are in
+exactly as any other. `getheldtxs` lists what a node holds, what it has set
+aside and how long the current hold has lasted. The code is in
+`src/pos_heldtxs.{h,cpp}`, and the set-aside in `FindMostWorkChain` and
+`CChainState::SetAsideBlock`. The attacks are in
 `feature_pos_held_transactions.py`: a real `bitcoind` is the parent chain, the
 attacker runs with `-posdebugignoreheld`, a debug-only switch that turns the
 rule off, and every refusal is asserted by the member's own reason.

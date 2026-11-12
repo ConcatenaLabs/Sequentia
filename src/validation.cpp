@@ -5301,6 +5301,24 @@ CBlockIndex* CChainState::FindMostWorkChain()
             continue;
         }
 
+        // SEQUENTIA held transactions, arm two (pos_heldtxs.h): a committee
+        // member does not activate a block it has set aside for respending a
+        // held transaction, nor a descendant of it, for a bounded time. The
+        // block stays valid: nothing is marked failed or written, and the
+        // branch is made a candidate again (ReaddBlockIndexCandidates) when
+        // the set-aside ends. Only candidates off the active chain are
+        // skipped; SetAsideBlock disconnects an active one first.
+        if (!m_chain.Contains(pindexNew)) {
+            if (const CBlockIndex* aside = HeldTxsSetAsideAncestor(pindexNew)) {
+                CBlockIndex* pindexAside = pindexNew;
+                while (pindexAside && !m_chain.Contains(pindexAside) && pindexAside->nHeight >= aside->nHeight) {
+                    setBlockIndexCandidates.erase(pindexAside);
+                    pindexAside = pindexAside->pprev;
+                }
+                continue;
+            }
+        }
+
         // Check whether all blocks on the path between the currently active chain and the candidate are valid.
         // Just going until the active chain is an optimization, as we know all blocks in it are valid already.
         CBlockIndex *pindexTest = pindexNew;
@@ -5854,6 +5872,36 @@ void CChainState::MarkAnchorInvalid(CBlockIndex* pindex)
     AssertLockHeld(cs_main);
     pindex->nStatus |= BLOCK_FAILED_ANCHOR;
     m_blockman.m_dirty_blockindex.insert(pindex);
+}
+
+bool CChainState::SetAsideBlock(BlockValidationState& state, CBlockIndex* pindex)
+{
+    AssertLockNotHeld(m_chainstate_mutex);
+    AssertLockNotHeld(::cs_main);
+    if (!pindex || pindex->nHeight == 0) return false;
+    // Like InvalidateBlock's disconnect, without marking anything failed: the
+    // block is only kept out of fork choice while pos_heldtxs holds it aside
+    // (FindMostWorkChain), and a restart forgets it.
+    LOCK(m_chainstate_mutex);
+    while (true) {
+        if (ShutdownRequested()) break;
+        LimitValidationInterfaceQueue();
+        LOCK(cs_main);
+        LOCK(MempoolMutex());
+        if (!m_chain.Contains(pindex)) break;
+        CBlockIndex* walk_tip = m_chain.Tip();
+        DisconnectedBlockTransactions disconnectpool;
+        const bool ret = DisconnectTip(state, &disconnectpool);
+        MaybeUpdateMempoolForReorg(disconnectpool, /*fAddToMempool=*/ret);
+        if (!ret) return false;
+        setBlockIndexCandidates.insert(walk_tip->pprev);
+    }
+    {
+        LOCK(cs_main);
+        ReaddBlockIndexCandidates();
+        setBlockIndexCandidates.insert(m_chain.Tip());
+    }
+    return true;
 }
 
 void CChainState::ReaddBlockIndexCandidates()
@@ -7547,7 +7595,10 @@ void CChainState::CheckBlockIndex()
                 // elementsregtest default (fDefaultConsistencyChecks), so the
                 // functional suite hits it while production nodes do not.
                 if (is_active && (pindexFirstMissing == nullptr || pindex == m_chain.Tip())) {
-                    assert(setBlockIndexCandidates.count(pindex) || PosFinalityGateRefuses(pindex));
+                    // A block a committee member keeps out of fork choice for
+                    // a held transaction (pos_heldtxs.h) is skipped the same way.
+                    assert(setBlockIndexCandidates.count(pindex) || PosFinalityGateRefuses(pindex) ||
+                           HeldTxsSetAsideAncestor(pindex));
                 }
                 // If some parent is missing, then it could be that this block was in
                 // setBlockIndexCandidates but had to be removed because of the missing data.

@@ -11,16 +11,20 @@
 #include <fs.h>
 #include <logging.h>
 #include <node/blockstorage.h>
+#include <policy/feerate.h>
+#include <policy/policy.h>
 #include <pos.h>
 #include <primitives/block.h>
 #include <serialize.h>
 #include <streams.h>
 #include <sync.h>
 #include <txmempool.h>
+#include <util/moneystr.h>
 #include <util/system.h>
 #include <util/time.h>
 #include <validation.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <limits>
@@ -35,27 +39,43 @@ struct HeldEntry {
     CTransactionRef tx;
     int fork_height{0};         //!< height of the highest block the disconnect kept
     uint32_t release_anchor{0}; //!< released once the tip anchors at or above this
+    uint64_t seq{0};            //!< block order across disconnects: parents before children
 };
 
-struct ParkedBlock {
-    int height{0};
+struct AsideBlock {
+    const CBlockIndex* pindex{nullptr};
     int64_t since_ms{0};
 };
 
-Mutex g_held_mutex;
 std::atomic<bool> g_held_active{false};
+std::atomic<bool> g_held_filling{false};
+
+Mutex g_held_mutex;
 std::map<uint256, HeldEntry> g_held GUARDED_BY(g_held_mutex);
 std::map<COutPoint, uint256> g_spent_by GUARDED_BY(g_held_mutex);
-std::map<uint256, ParkedBlock> g_parked GUARDED_BY(g_held_mutex);
+uint64_t g_seq GUARDED_BY(g_held_mutex){0};
+//! Arm two: blocks kept out of fork choice. Memory only.
+std::map<uint256, AsideBlock> g_aside GUARDED_BY(g_held_mutex);
+//! Blocks set aside once already; never set aside again. Memory only.
 std::set<uint256> g_given_up GUARDED_BY(g_held_mutex);
 //! Per block hash: the conflict it carries, if any. Cleared whenever the held set changes.
 std::map<uint256, std::optional<std::string>> g_block_conflict GUARDED_BY(g_held_mutex);
-//! Blocks of the active chain already examined for releases.
+//! Blocks of the active chain already examined for releases; cleared by every disconnect.
 std::set<uint256> g_release_scanned GUARDED_BY(g_held_mutex);
 uint256 g_mempool_enforced_tip GUARDED_BY(g_held_mutex);
 bool g_dirty_mempool GUARDED_BY(g_held_mutex){false};
+//! The liveness bound: when the current hold began (0: none), and the height
+//! of the highest certified block of the active chain at that moment.
+int64_t g_hold_since_ms GUARDED_BY(g_held_mutex){0};
+//! The member declined to sign or to propose for a held transaction since the
+//! last certified block; the bound's clock starts once it has an honest
+//! proposal to sign or to make at the held height.
+bool g_declined GUARDED_BY(g_held_mutex){false};
+int g_hold_progress GUARDED_BY(g_held_mutex){-1};
+int g_cert_progress GUARDED_BY(g_held_mutex){-1};
+int64_t g_last_descendant_scan_ms GUARDED_BY(g_held_mutex){0};
 
-static constexpr uint32_t HELD_FILE_VERSION = 1;
+static constexpr uint32_t HELD_FILE_VERSION = 2;
 
 int64_t SteadyMs()
 {
@@ -69,7 +89,7 @@ int MinForkHeight() EXCLUSIVE_LOCKS_REQUIRED(g_held_mutex)
 {
     int m = std::numeric_limits<int>::max();
     for (const auto& [txid, e] : g_held) m = std::min(m, e.fork_height);
-    for (const auto& [hash, p] : g_parked) m = std::min(m, p.height - 1);
+    for (const auto& [hash, a] : g_aside) m = std::min(m, a.pindex->nHeight - 1);
     return m;
 }
 
@@ -82,7 +102,7 @@ void AddEntry(const CTransactionRef& tx, int fork_height, uint32_t release_ancho
         it->second.release_anchor = std::max(it->second.release_anchor, release_anchor);
         return;
     }
-    g_held[txid] = HeldEntry{tx, fork_height, release_anchor};
+    g_held[txid] = HeldEntry{tx, fork_height, release_anchor, g_seq++};
     for (const CTxIn& in : tx->vin) {
         if (in.m_is_pegin) continue;
         g_spent_by[in.prevout] = txid;
@@ -102,9 +122,9 @@ void EraseEntry(const uint256& txid) EXCLUSIVE_LOCKS_REQUIRED(g_held_mutex)
 
 void SaveLocked() EXCLUSIVE_LOCKS_REQUIRED(g_held_mutex)
 {
-    // Written whole on every change: changes are rare (a disconnect, a
-    // release, a block set aside) and the file is small, and a node killed
-    // between the disconnect and the vote must still hold the record.
+    // Only the held transactions are written: a restarted member must still
+    // refuse to sign their respends. Set-asides are never written, so no
+    // record, lost or stale, can keep a block out of a node's fork choice.
     const fs::path tmp = gArgs.GetDataDirNet() / "heldtxs.dat.new";
     FILE* f = fsbridge::fopen(tmp, "wb");
     if (!f) {
@@ -113,15 +133,12 @@ void SaveLocked() EXCLUSIVE_LOCKS_REQUIRED(g_held_mutex)
     }
     CAutoFile file(f, SER_DISK, CLIENT_VERSION);
     try {
+        std::vector<const HeldEntry*> order;
+        for (const auto& [txid, e] : g_held) order.push_back(&e);
+        std::sort(order.begin(), order.end(), [](const HeldEntry* a, const HeldEntry* b) { return a->seq < b->seq; });
         file << HELD_FILE_VERSION;
-        file << (uint64_t)g_held.size();
-        for (const auto& [txid, e] : g_held) {
-            file << e.tx << e.fork_height << e.release_anchor;
-        }
-        file << (uint64_t)g_parked.size();
-        for (const auto& [hash, p] : g_parked) file << hash << p.height;
-        file << (uint64_t)g_given_up.size();
-        for (const uint256& hash : g_given_up) file << hash;
+        file << (uint64_t)order.size();
+        for (const HeldEntry* e : order) file << e->tx << e->fork_height << e->release_anchor;
         if (!FileCommit(file.Get())) throw std::runtime_error("FileCommit failed");
         file.fclose();
         if (!RenameOver(tmp, HeldPath())) throw std::runtime_error("rename failed");
@@ -177,11 +194,38 @@ std::optional<std::string> IndexConflictLocked(const CBlockIndex* pindex)
     return res;
 }
 
+//! Whether a block carries its parent's quorum, from what the index knows:
+//! the judged answer, or for a block that cannot escape a stall the header's.
+bool CarriesQuorum(const CBlockIndex* p) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    if (p->PosCarriesQuorum()) return true;
+    return !p->m_pos_cert_known && p->m_pos_certified && p->pprev &&
+           !PosEscapingStallAllowed(p->pprev->m_anchor_height, p->m_anchor_height);
+}
+
+CFeeRate BlockMinFeeRate()
+{
+    if (gArgs.IsArgSet("-blockmintxfee")) {
+        if (std::optional<CAmount> parsed = ParseMoney(gArgs.GetArg("-blockmintxfee", ""))) return CFeeRate{*parsed};
+    }
+    return CFeeRate{DEFAULT_BLOCK_MIN_TX_FEE};
+}
+
+void ReleaseAllLocked(const std::string& why) EXCLUSIVE_LOCKS_REQUIRED(g_held_mutex)
+{
+    LogPrintf("Held transactions: %s; released %u held transaction(s) and %u set-aside block(s)\n",
+              why, g_held.size(), g_aside.size());
+    g_held.clear();
+    g_spent_by.clear();
+    g_given_up.clear();
+    g_hold_since_ms = 0;
+    g_declined = false;
+    Changed();
+}
+
 } // namespace
 
 bool HeldTxsActive() { return g_held_active; }
-
-static std::atomic<bool> g_held_filling{false};
 void HeldTxsSetFilling(bool filling) { g_held_filling = filling && g_held_active; }
 bool HeldTxsFilling() { return g_held_filling; }
 
@@ -201,7 +245,7 @@ void HeldTxsInit()
     try {
         uint32_t version;
         file >> version;
-        if (version != HELD_FILE_VERSION) throw std::runtime_error("unknown version");
+        if (version != 1 && version != HELD_FILE_VERSION) throw std::runtime_error("unknown version");
         uint64_t n;
         file >> n;
         for (uint64_t i = 0; i < n; ++i) {
@@ -211,22 +255,9 @@ void HeldTxsInit()
             file >> mtx >> fork_height >> release_anchor;
             AddEntry(MakeTransactionRef(std::move(mtx)), fork_height, release_anchor);
         }
-        file >> n;
-        const int64_t now = SteadyMs();
-        for (uint64_t i = 0; i < n; ++i) {
-            uint256 hash;
-            int height;
-            file >> hash >> height;
-            g_parked[hash] = ParkedBlock{height, now};
-        }
-        file >> n;
-        for (uint64_t i = 0; i < n; ++i) {
-            uint256 hash;
-            file >> hash;
-            g_given_up.insert(hash);
-        }
+        // Version 1 also listed set-aside blocks; they are not carried over.
         g_dirty_mempool = true;
-        LogPrintf("Held transactions: loaded %u held, %u set-aside block(s)\n", g_held.size(), g_parked.size());
+        LogPrintf("Held transactions: loaded %u held\n", g_held.size());
     } catch (const std::exception& e) {
         LogPrintf("Held transactions: failed to read the record: %s\n", e.what());
     }
@@ -256,6 +287,8 @@ void HeldTxsRecordDisconnect(ChainstateManager& chainman, const std::vector<cons
             blocks.push_back(block);
         }
     }
+    LOCK(g_held_mutex);
+    g_release_scanned.clear();
     if (top < 0) {
         LogPrintf("Held transactions: none of the %u disconnected block(s) was certified; nothing held\n", disconnected.size());
         return;
@@ -267,7 +300,6 @@ void HeldTxsRecordDisconnect(ChainstateManager& chainman, const std::vector<cons
     // that spends its outputs: holding them would only freeze their other inputs.
     std::set<uint256> dead;
     size_t n = 0;
-    LOCK(g_held_mutex);
     for (const auto& block : blocks) {
         for (const CTransactionRef& tx : block->vtx) {
             if (tx->IsCoinBase()) {
@@ -315,42 +347,102 @@ std::optional<std::string> HeldTxsBlockConflict(const CBlock& block, const CBloc
     return std::nullopt;
 }
 
-bool HeldTxsMaintain(ChainstateManager& chainman, CTxMemPool& mempool, bool park)
+void HeldTxsNoteDecline()
+{
+    if (!g_held_active) return;
+    LOCK(g_held_mutex);
+    if (!g_held.empty()) g_declined = true;
+}
+
+void HeldTxsNoteHold()
+{
+    if (!g_held_active) return;
+    LOCK(g_held_mutex);
+    if (g_hold_since_ms == 0 && !g_held.empty() && (g_declined || !g_aside.empty())) {
+        g_hold_since_ms = SteadyMs();
+        g_hold_progress = g_cert_progress;
+    }
+}
+
+const CBlockIndex* HeldTxsSetAsideAncestor(const CBlockIndex* pindex)
+{
+    AssertLockHeld(cs_main);
+    if (!g_held_active || !pindex) return nullptr;
+    LOCK(g_held_mutex);
+    for (const auto& [hash, a] : g_aside) {
+        if (pindex->nHeight >= a.pindex->nHeight && pindex->GetAncestor(a.pindex->nHeight) == a.pindex) return a.pindex;
+    }
+    return nullptr;
+}
+
+void HeldTxsRelease(const uint256& txid, const std::string& why)
+{
+    if (!g_held_active) return;
+    LOCK(g_held_mutex);
+    if (!g_held.count(txid)) return;
+    LogPrintf("Held transactions: %s released: %s\n", txid.ToString(), why);
+    EraseEntry(txid);
+    Changed();
+}
+
+bool HeldTxsMaintain(ChainstateManager& chainman, CTxMemPool& mempool, bool park, int64_t bound_ms)
 {
     if (!g_held_active) return false;
     {
         LOCK(g_held_mutex);
-        if (g_held.empty() && g_parked.empty()) {
+        if (g_held.empty() && g_aside.empty()) {
             g_block_conflict.clear();
-            g_release_scanned.clear();
+            g_given_up.clear();
+            g_hold_since_ms = 0;
             return false;
         }
     }
 
     CBlockIndex* to_park{nullptr};
     std::vector<uint256> to_restore;
-    std::vector<CTransactionRef> to_readmit;
+    std::vector<CTransactionRef> to_check;
     {
         LOCK(cs_main);
         LOCK(g_held_mutex);
         const CBlockIndex* tip = chainman.ActiveChain().Tip();
         if (!tip) return false;
         bool changed = false;
-        const int floor = MinForkHeight();
+        const int64_t now = SteadyMs();
 
-        // The highest block above the disconnect point that carries its
-        // parent's quorum: everything at or below it is as final as Sequentia
-        // makes anything, so a held transaction mined there is done, and one
-        // that a conflicting spend there displaced cannot come back on this chain.
-        const CBlockIndex* cert_top{nullptr};
-        for (const CBlockIndex* p = tip; p && p->nHeight > floor; p = p->pprev) {
-            if (p->PosCarriesQuorum()) {
-                cert_top = p;
+        // Progress: the highest block of the active chain that carries its
+        // parent's quorum.
+        const CBlockIndex* cert_any{nullptr};
+        int scanned = 0;
+        for (const CBlockIndex* p = tip; p && scanned < 2000; p = p->pprev, ++scanned) {
+            if (CarriesQuorum(p)) {
+                cert_any = p;
                 break;
             }
         }
-        for (const CBlockIndex* p = cert_top; p && p->nHeight > floor; p = p->pprev) {
-            if (!g_release_scanned.insert(p->GetBlockHash()).second) break;
+        g_cert_progress = cert_any ? cert_any->nHeight : -1;
+
+        if (g_hold_since_ms == 0 && g_declined && g_cert_progress > g_hold_progress) g_declined = false;
+        // The liveness bound. A certified block since the hold began ends the
+        // hold; a hold that outlasts the bound releases everything.
+        if (g_hold_since_ms != 0) {
+            if (g_cert_progress > g_hold_progress) {
+                g_hold_since_ms = 0;
+                g_declined = false;
+            } else if (bound_ms > 0 && now - g_hold_since_ms >= bound_ms) {
+                for (const auto& [hash, a] : g_aside) to_restore.push_back(hash);
+                ReleaseAllLocked(strprintf("no certified block for %ds while holding (the liveness bound)",
+                                           (int)((now - g_hold_since_ms) / 1000)));
+            }
+        }
+
+        const int floor = MinForkHeight();
+        // Everything at or below the highest certified block above the
+        // disconnect point is as final as Sequentia makes anything: a held
+        // transaction mined there is done, and one that a conflicting spend
+        // there displaced cannot come back on this chain.
+        const CBlockIndex* cert_top = (cert_any && cert_any->nHeight > floor) ? cert_any : nullptr;
+        for (const CBlockIndex* p = cert_top; p && p->nHeight > floor && !g_held.empty(); p = p->pprev) {
+            if (!g_release_scanned.insert(p->GetBlockHash()).second) continue;
             CBlock block;
             if (!ReadBlockFromDisk(block, p, Params().GetConsensus())) continue;
             for (const CTransactionRef& tx : block.vtx) {
@@ -382,64 +474,62 @@ bool HeldTxsMaintain(ChainstateManager& chainman, CTxMemPool& mempool, bool park
         }
         if (changed) Changed();
 
-        // Restore set-aside blocks when they no longer conflict, when a
-        // certified block at their height or above has displaced them, or when
-        // the patience runs out (the member then only refuses to sign on them).
-        const int64_t now = SteadyMs();
-        for (auto it = g_parked.begin(); it != g_parked.end(); ++it) {
-            const CBlockIndex* b = chainman.m_blockman.LookupBlockIndex(it->first);
-            bool restore = !b;
-            if (b && cert_top && cert_top->nHeight >= it->second.height) restore = true;
-            if (b && !restore && !IndexConflictLocked(b)) restore = true;
-            if (b && !restore && now - it->second.since_ms >= POS_HELD_PARK_MS) {
-                restore = true;
-                g_given_up.insert(it->first);
-                LogPrintf("Held transactions: no certified block displaced %s within %ds; restoring it, signing nothing on it\n",
-                          it->first.ToString(), (int)(POS_HELD_PARK_MS / 1000));
+        // End set-asides that are due: nothing left to protect, a certified
+        // block at its height or above on the active chain displaced it, or a
+        // certified block was built on it (the rest of the committee certified
+        // the respend; follow it).
+        const bool scan_descendants = now - g_last_descendant_scan_ms >= 1000;
+        if (scan_descendants) g_last_descendant_scan_ms = now;
+        for (const auto& [hash, a] : g_aside) {
+            if (std::find(to_restore.begin(), to_restore.end(), hash) != to_restore.end()) continue;
+            bool restore = g_held.empty() || (cert_any && cert_any->nHeight >= a.pindex->nHeight);
+            if (!restore && !IndexConflictLocked(a.pindex)) restore = true;
+            if (!restore && scan_descendants) {
+                for (const auto& [h, p] : chainman.m_blockman.m_block_index) {
+                    if (p->nHeight > a.pindex->nHeight && CarriesQuorum(p) && p->GetAncestor(a.pindex->nHeight) == a.pindex) {
+                        LogPrintf("Held transactions: certified block %s builds on set-aside block %s; following it\n",
+                                  h.ToString(), hash.ToString());
+                        restore = true;
+                        break;
+                    }
+                }
             }
-            if (restore) to_restore.push_back(it->first);
+            if (restore) to_restore.push_back(hash);
         }
 
         // Arm two: the lowest sub-quorum block above cert_top on the active
         // chain that carries a conflict is set aside, once.
-        if (park && to_restore.empty()) {
+        if (park && to_restore.empty() && !g_held.empty()) {
             const int stop = cert_top ? cert_top->nHeight : floor;
             CBlockIndex* lowest{nullptr};
             for (CBlockIndex* p = chainman.ActiveChain().Tip(); p && p->nHeight > stop; p = p->pprev) {
                 if (IndexConflictLocked(p)) lowest = p;
             }
-            if (lowest && !g_given_up.count(lowest->GetBlockHash()) && !g_parked.count(lowest->GetBlockHash())) {
+            if (lowest && !g_given_up.count(lowest->GetBlockHash()) && !g_aside.count(lowest->GetBlockHash())) {
                 to_park = lowest;
             }
         }
 
-        // Held transactions go back into the mempool whenever the tip moved
-        // (a block that evicted them as conflicts may have been set aside).
+        // Held transactions go back into the mempool, and are checked against
+        // this node's own mining policy, whenever the tip moved or the set changed.
         if (g_dirty_mempool || g_mempool_enforced_tip != tip->GetBlockHash()) {
             g_dirty_mempool = false;
             g_mempool_enforced_tip = tip->GetBlockHash();
-            for (const auto& [txid, e] : g_held) to_readmit.push_back(e.tx);
+            std::vector<const HeldEntry*> order;
+            for (const auto& [txid, e] : g_held) order.push_back(&e);
+            std::sort(order.begin(), order.end(), [](const HeldEntry* a, const HeldEntry* b) { return a->seq < b->seq; });
+            for (const HeldEntry* e : order) to_check.push_back(e->tx);
         }
     }
 
     bool chain_changed = false;
-    for (const uint256& hash : to_restore) {
+    if (!to_restore.empty()) {
         LOCK(cs_main);
         LOCK(g_held_mutex);
-        g_parked.erase(hash);
-        SaveLocked();
-        CBlockIndex* b = chainman.m_blockman.LookupBlockIndex(hash);
-        if (!b) continue;
-        // ResetBlockFailureFlags also clears every failed ancestor: never clear
-        // one that is not ours, such as an anchor invalidation.
-        bool foreign = false;
-        for (const CBlockIndex* a = b->pprev; a && !foreign; a = a->pprev) foreign = a->nStatus & BLOCK_FAILED_MASK;
-        if (foreign) {
-            LogPrintf("Held transactions: not restoring %s: an ancestor is invalid for another reason\n", hash.ToString());
-            continue;
+        for (const uint256& hash : to_restore) {
+            if (g_aside.erase(hash)) LogPrintf("Held transactions: set-aside block %s returns to fork choice\n", hash.ToString());
         }
-        LogPrintf("Held transactions: restoring set-aside block %s\n", hash.ToString());
-        chainman.ActiveChainstate().ResetBlockFailureFlags(b);
+        chainman.ActiveChainstate().ReaddBlockIndexCandidates();
         chain_changed = true;
     }
     if (to_park) {
@@ -447,11 +537,12 @@ bool HeldTxsMaintain(ChainstateManager& chainman, CTxMemPool& mempool, bool park
                   to_park->GetBlockHash().ToString(), to_park->nHeight);
         {
             LOCK(g_held_mutex);
-            g_parked[to_park->GetBlockHash()] = ParkedBlock{to_park->nHeight, SteadyMs()};
-            SaveLocked();
+            g_aside[to_park->GetBlockHash()] = AsideBlock{to_park, SteadyMs()};
+            g_given_up.insert(to_park->GetBlockHash());
+            g_hold_progress = g_cert_progress;
         }
         BlockValidationState state;
-        if (!chainman.ActiveChainstate().InvalidateBlock(state, to_park)) {
+        if (!chainman.ActiveChainstate().SetAsideBlock(state, to_park)) {
             LogPrintf("Held transactions: could not set aside %s: %s\n", to_park->GetBlockHash().ToString(), state.ToString());
         }
         chain_changed = true;
@@ -464,29 +555,64 @@ bool HeldTxsMaintain(ChainstateManager& chainman, CTxMemPool& mempool, bool park
         return true;
     }
 
-    if (!to_readmit.empty()) {
-        LOCK(cs_main);
-        LOCK(mempool.cs);
+    if (!to_check.empty()) {
+        // A transaction is held only while this node would mine it now: it is
+        // in the mempool with a fee its block assembler takes, or the mempool
+        // takes it. A refusal for a lock time or a missing input (a parent not
+        // back yet, a conflict on a block that may still be set aside) is
+        // temporary; any other refusal, and a fee below the block minimum,
+        // ends the hold.
+        const CFeeRate min_rate = BlockMinFeeRate();
+        std::vector<std::pair<uint256, std::string>> release;
         size_t added = 0;
-        for (const CTransactionRef& tx : to_readmit) {
-            if (mempool.exists(GenTxid::Txid(tx->GetHash()))) continue;
-            // Whatever spends its inputs in the mempool is a conflict this node
-            // refuses now; make room for the held transaction.
-            for (const CTxIn& in : tx->vin) {
-                if (const CTransaction* c = mempool.GetConflictTx(in.prevout)) {
-                    if (c->GetHash() != tx->GetHash()) mempool.removeRecursive(*c, MemPoolRemovalReason::REPLACED);
+        {
+            LOCK(cs_main);
+            LOCK(mempool.cs);
+            for (const CTransactionRef& tx : to_check) {
+                const uint256 txid = tx->GetHash();
+                if (!mempool.exists(GenTxid::Txid(txid))) {
+                    for (const CTxIn& in : tx->vin) {
+                        if (const CTransaction* c = mempool.GetConflictTx(in.prevout)) {
+                            if (c->GetHash() != txid) mempool.removeRecursive(*c, MemPoolRemovalReason::REPLACED);
+                        }
+                    }
+                    const MempoolAcceptResult r = AcceptToMemoryPool(chainman.ActiveChainstate(), tx, GetTime(),
+                                                                     /*bypass_limits=*/false, /*test_accept=*/false);
+                    if (r.m_result_type != MempoolAcceptResult::ResultType::VALID) {
+                        const TxValidationResult kind = r.m_state.GetResult();
+                        const std::string reason = r.m_state.GetRejectReason();
+                        // Already mined on the active chain (in a block not yet
+                        // certified, say) or already pending is not a refusal.
+                        const bool known = reason == "txn-already-known" || reason == "txn-already-in-mempool" ||
+                                           reason == "txn-same-nonwitness-data-in-mempool";
+                        if (!known && kind != TxValidationResult::TX_MISSING_INPUTS && kind != TxValidationResult::TX_PREMATURE_SPEND) {
+                            release.emplace_back(txid, "this node would not mine it: " + r.m_state.ToString());
+                        } else {
+                            LogPrint(BCLog::MEMPOOL, "Held transactions: %s not readmitted yet: %s\n", txid.ToString(), r.m_state.ToString());
+                        }
+                        continue;
+                    }
+                    ++added;
                 }
-            }
-            const MempoolAcceptResult r = AcceptToMemoryPool(chainman.ActiveChainstate(), tx, GetTime(),
-                                                             /*bypass_limits=*/false, /*test_accept=*/false);
-            if (r.m_result_type == MempoolAcceptResult::ResultType::VALID) {
-                ++added;
-            } else {
-                LogPrint(BCLog::MEMPOOL, "Held transactions: %s not readmitted: %s\n", tx->GetHash().ToString(),
-                         r.m_state.ToString());
+                const auto it = mempool.GetIter(txid);
+                if (!it) continue;
+                const CAmount package_fee = (*it)->GetModFeesWithAncestors().GetValue();
+                const CAmount floor_fee = min_rate.GetFee((*it)->GetSizeWithAncestors());
+                if (package_fee < floor_fee) {
+                    release.emplace_back(txid, strprintf("this node would not mine it: fee value %d below the block minimum %d",
+                                                         package_fee, floor_fee));
+                }
             }
         }
         if (added) LogPrintf("Held transactions: readmitted %u held transaction(s) to the mempool\n", added);
+        if (!release.empty()) {
+            LOCK(g_held_mutex);
+            for (const auto& [txid, why] : release) {
+                LogPrintf("Held transactions: %s released: %s\n", txid.ToString(), why);
+                EraseEntry(txid);
+            }
+            Changed();
+        }
     }
     return false;
 }
@@ -499,8 +625,9 @@ HeldTxsInfo HeldTxsGetInfo()
         info.txids.push_back(txid);
         info.release_anchor = std::max(info.release_anchor, e.release_anchor);
     }
-    for (const auto& [hash, p] : g_parked) info.parked.push_back(hash);
+    for (const auto& [hash, a] : g_aside) info.parked.push_back(hash);
     for (const uint256& hash : g_given_up) info.given_up.push_back(hash);
-    if (!g_held.empty() || !g_parked.empty()) info.fork_height = MinForkHeight();
+    if (!g_held.empty() || !g_aside.empty()) info.fork_height = MinForkHeight();
+    info.hold_ms = g_hold_since_ms ? SteadyMs() - g_hold_since_ms : -1;
     return info;
 }

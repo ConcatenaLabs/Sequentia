@@ -12,8 +12,8 @@ sub-quorum block that carries R so that it can sign a sibling (arm two), and
 its mempool refuses R.
 
 A real bitcoind is the parent chain. Six members, one seat each (quorum 4):
-node 0 is the attacker, with the rule off (-posdebugignoreheld) and a stake
-that makes it the round-0 leader in most rounds; nodes 1-5 are honest and run
+node 0 is the attacker, with the rule off (-posdebugignoreheld) and 3 of the
+8 stake units, so that it leads round 0 about 3 times in 8; nodes 1-5 are honest and run
 the rule unless a case turns it off ("unaware"). Every node runs -par=1 and
 the gossip producer. To give the attacker the first word after the reorg,
 every node is taken off the network before Bitcoin reorganizes and put back
@@ -40,7 +40,7 @@ from test_framework.test_framework import BitcoinTestFramework, SkipTest
 from test_framework.util import assert_equal, p2p_port, rpc_port
 
 BITCOIND = os.environ.get("PARENT_BITCOIND", "/usr/local/bin/bitcoind")
-CASES = os.environ.get("CR1_CASES", "a,b,c,d,e,f,g,h,i").split(",")
+CASES = os.environ.get("CR1_CASES", "a,e,d,c,g,f,b,cc,i,rC,rA,rB").split(",")
 RESULTS = os.environ.get("CR1_RESULTS", "")
 N = 6
 ATTACKER = 0
@@ -100,6 +100,9 @@ class HeldTransactionsTest(BitcoinTestFramework):
         ] + self.specs + ["-posproducer=1", "-posproducerkey=%s" % self.stakers[i][0]]
         if i == ATTACKER or not aware:
             a.append("-posdebugignoreheld=1")
+        if i == ATTACKER:
+            # The attacker mines what honest policy refuses (the F4 case).
+            a += ["-minrelaytxfee=0", "-blockmintxfee=0"]
         return a
 
     def setup_network(self, split=False):
@@ -125,7 +128,8 @@ class HeldTransactionsTest(BitcoinTestFramework):
         self.btc_mine(5)
 
         # The stakers' BLS registrations come from a node that knows them.
-        weights = [50 if i == ATTACKER else 1 for i in range(N)]
+        # The attacker holds 3 of 8 stake units (it leads round 0 about 3 times in 8) and one seat of six.
+        weights = [3 if i == ATTACKER else 1 for i in range(N)]
         self.specs = ["-staker=%s:%d" % (pub, w) for (_, pub), w in zip(self.stakers, weights)]
         self.add_nodes(N, [self.node_args(i) for i in range(N)], chain=[CHAIN] * N)
         self.nodes[0].start(extra_args=[a for a in self.node_args(0) if not a.startswith("-posproducer")])
@@ -357,14 +361,14 @@ class HeldTransactionsTest(BitcoinTestFramework):
         self.log.info("(a) one producer, Bitcoin 1 deep: the members refuse R, T is mined again")
         # The attacker's proposal is weighed only when a round backs it, which the draw and the
         # share-lock's grace decide; repeat until it is, and count the tries.
-        for k in range(4):
+        for k in range(8):
             case = "a" if k == 0 else "a.%d" % (k + 1)
             st = self.attack(case, 1)
             assert_equal(self.outcome(case, st), "T")
             if self.results[case].get("member refusals", 0) > 0:
                 self.record("a", "tries until the attacker's proposal was weighed", k + 1)
                 return st
-        raise AssertionError("no round backed the attacker's proposal in 4 tries")
+        raise AssertionError("no round backed the attacker's proposal in 8 tries")
 
     def case_b(self):
         self.log.info("(b) members running the rule: 2, 4 and 3 of 6 (quorum 4)")
@@ -564,6 +568,159 @@ class HeldTransactionsTest(BitcoinTestFramework):
         self.wait_until(lambda: len(self.nodes[1].getheldtxs()["txids"]) == 0, timeout=600)
         self.record("i", "released", "every held transaction mined again and released in %.1fs" % (time.time() - t0))
 
+    # ------------------------------------------------------- review RV56 cases
+    def prepare_escape(self, case, depth=2):
+        """T certified; everyone isolated; Bitcoin reorganized `depth` deep; R in the attacker's mempool
+        (and the unaware members'); X = a 1-signer escaping-stall block carrying R, built by the attacker alone."""
+        a = self.nodes[ATTACKER]
+        coin = self.fund()
+        t_hex = self.spend(coin, self.nodes[1].getnewaddress(), Decimal("0.0001"))
+        r_hex = self.spend(coin, a.getnewaddress(), Decimal("0.001"))
+        self.btc_mine(depth)
+        self.wait_until(lambda: self.tip(self.nodes[1])["anchorheight"] == self.btc().getblockcount(), timeout=60)
+        t_id, t_h, _ = self.certify(t_hex)
+        sizes = [self.log_size(i) for i in range(N)]
+        self.isolate()
+        fork = self.bitcoin_reorg(depth)
+        self.wait_until(lambda: all(self.tip(n)["anchorheight"] <= fork for n in self.nodes), timeout=60)
+        aware = [i for i in range(1, N) if self.aware[i]]
+        self.wait_held([t_id], aware)
+        a.sendrawtransaction(r_hex)
+        for i in range(1, N):
+            if not self.aware[i]:
+                self.nodes[i].sendrawtransaction(r_hex)
+        x = a.generateposblock(self.stakers[ATTACKER][0], [])
+        r_id = tx_from_hex(r_hex).rehash()
+        xb = a.getblock(x["hash"])
+        assert r_id in xb["tx"]
+        self.record(case, "X", "%s at height %d, %d member(s), carries R" % (x["hash"], xb["height"], x["countersignatures"]))
+        return dict(t_id=t_id, r_id=r_id, x_hash=x["hash"], x_h=xb["height"], x_hex=a.getblock(x["hash"], 0),
+                    sizes=sizes, aware=aware)
+
+    def on_certified_x(self, node, st):
+        try:
+            if node.getblockcount() < st["x_h"] or node.getblockhash(st["x_h"]) != st["x_hash"]:
+                return False
+        except JSONRPCException:
+            return False
+        return any(node.getblockheader(node.getblockhash(h))["poscertified"]
+                   for h in range(st["x_h"] + 1, node.getblockcount() + 1))
+
+    def tip_status(self, node, h):
+        for t in node.getchaintips():
+            if t["hash"] == h:
+                return t["status"]
+        return "not a tip"
+
+    def connect_set(self, idx):
+        for i in idx:
+            self.nodes[i].setnetworkactive(True)
+        for k, i in enumerate(idx):
+            for j in idx[k + 1:]:
+                self.connect_nodes(i, j)
+
+    def case_rA(self):
+        """RV56 (A), F1 and F2: aware {1,2}; the unaware quorum {0,3,4,5} certifies on the set-aside block.
+        Node 2 restarts without the rule, node 1 with it. Both must follow the certified chain on X,
+        and nobody may be punished for relaying it."""
+        self.log.info("(rA) a set-aside block that an unaware quorum builds on; restarts with and without the rule")
+        self.set_aware([False, True, True, False, False, False])
+        st = self.prepare_escape("rA")
+        for i in (1, 2):
+            self.nodes[i].submitblock(st["x_hex"])
+        self.wait_until(lambda: all(st["x_hash"] in self.nodes[i].getheldtxs()["parked"] for i in (1, 2)), timeout=60)
+        self.record("rA", "set aside", "X kept out of fork choice on nodes 1 and 2")
+        # Node 2 restarts without the rule; node 1 restarts with it.
+        self.stop_node(2)
+        self.aware[2] = False
+        self.nodes[2].extra_args = self.node_args(2, aware=False)
+        self.start_node(2, extra_args=self.nodes[2].extra_args)
+        self.nodes[2].setnetworkactive(False)
+        self.nodes[2].loadwallet("w")
+        self.restart_node(1, extra_args=self.nodes[1].extra_args)
+        self.nodes[1].setnetworkactive(False)
+        self.nodes[1].loadwallet("w")
+        s2 = self.tip_status(self.nodes[2], st["x_hash"])
+        self.record("rA", "node 2 after a restart without the rule", "X status '%s', tip %s X" %
+                    (s2, "is" if self.nodes[2].getbestblockhash() == st["x_hash"] else "is not"))
+        assert s2 != "invalid", "X stayed invalid across a restart without the rule"
+        info1 = self.nodes[1].getheldtxs()
+        self.record("rA", "node 1 after a restart with the rule", "T held: %s; set-aside read from disk: %s" %
+                    (st["t_id"] in info1["txids"], st["x_hash"] in info1["parked"]))
+        assert st["t_id"] in info1["txids"]
+        # The unaware quorum builds on X and certifies.
+        self.connect_set([0, 3, 4, 5])
+        self.wait_until(lambda: self.on_certified_x(self.nodes[3], st), timeout=120)
+        sz = [self.log_size(i) for i in range(N)]
+        t0 = time.time()
+        self.rejoin()
+        self.wait_until(lambda: self.on_certified_x(self.nodes[2], st), timeout=120)
+        self.record("rA", "node 2 (rule off after the set-aside)", "follows the certified chain on X %.1fs after rejoining" % (time.time() - t0))
+        self.wait_until(lambda: self.on_certified_x(self.nodes[1], st), timeout=120)
+        self.record("rA", "node 1 (rule on)", "follows the certified chain on X %.1fs after rejoining" % (time.time() - t0))
+        for i in (1, 2):
+            bad = self.log_has(i, "bad-prevblk", sz[i]) + self.log_has(i, "Misbehaving", sz[i])
+            self.record("rA", "node %d punishments" % i, len(bad))
+            assert not bad, bad[0]
+        self.set_aware([False] + [True] * (N - 1))
+
+    def case_rB(self):
+        """RV56 (B), F3: 3 aware {1,2,3}, 3 unaware {0,4,5}, quorum 4, X a 1-signer escaping-stall block with R.
+        Certification must resume within the liveness bound."""
+        self.log.info("(rB) mixed 3/3 with an escaping-stall respend: the chain resumes within the bound")
+        bound = 12 * 0.945 + 0.675
+        self.set_aware([False, True, True, True, False, False])
+        st = self.prepare_escape("rB")
+        t0 = time.time()
+        self.rejoin()
+        n4 = self.nodes[4]
+
+        def certified_above():
+            t = n4.getblockcount()
+            return any(n4.getblockheader(n4.getblockhash(h))["poscertified"] for h in range(st["x_h"], t + 1))
+        self.wait_until(certified_above, timeout=180)
+        waited = time.time() - t0
+        self.sync_all_tips()
+        won = "T" if self.block_of(st["t_id"], n4) is not None else ("R" if self.block_of(st["r_id"], n4) is not None else "neither")
+        rel = []
+        for i in (1, 2, 3):
+            rel += self.log_has(i, "the liveness bound", st["sizes"][i])
+        self.record("rB", "first certified block", "%.1fs after rejoining (bound %.1fs); %s mined; bound releases logged: %d" %
+                    (waited, bound, won, len(rel)))
+        assert waited < bound + 30, "certification paused %.0fs" % waited
+        self.set_aware([False] + [True] * (N - 1))
+
+    def case_rC(self):
+        """RV56 (C), F4: a held transaction this node would not mine (a 1-atom fee) is released at once."""
+        self.log.info("(rC) a held transaction honest producers would not mine is not held")
+        a = self.nodes[ATTACKER]
+        coin = self.fund()
+        t0_hex = self.spend(coin, self.nodes[1].getnewaddress(), Decimal("0.00000001"))
+        t1_hex = self.spend(coin, a.getnewaddress(), Decimal("0.001"))
+        try:
+            self.nodes[1].testmempoolaccept([t0_hex])
+            self.record("rC", "honest mempool on T0", self.nodes[1].testmempoolaccept([t0_hex])[0].get("reject-reason"))
+        except JSONRPCException as e:
+            self.record("rC", "honest mempool on T0", e.error["message"])
+        self.btc_mine(1)
+        self.wait_until(lambda: self.tip(self.nodes[1])["anchorheight"] == self.btc().getblockcount(), timeout=60)
+        t0_id, t0_h, _ = self.certify(t0_hex)
+        sz = self.log_size(1)
+        self.isolate()
+        fork = self.bitcoin_reorg(1)
+        self.wait_until(lambda: all(self.tip(n)["anchorheight"] <= fork for n in self.nodes), timeout=60)
+        # It is recorded, then released by the would-mine test.
+        self.wait_until(lambda: self.log_has(1, "Held transactions: holding", sz), timeout=60)
+        self.wait_until(lambda: t0_id not in self.nodes[1].getheldtxs()["txids"], timeout=60)
+        why = self.log_has(1, "%s released" % t0_id, sz)
+        self.record("rC", "T0 released", why[0].split("released: ", 1)[1] if why else "?")
+        a.prioritisetransaction(txid=t0_id, fee_delta=-100000000)
+        self.rejoin()
+        txid = self.nodes[1].sendrawtransaction(t1_hex)
+        self.record("rC", "owner's replacement", "accepted on an aware member: %s" % txid)
+        h = self.wait_mined(txid, self.nodes[1])
+        self.record("rC", "replacement mined", "at height %d" % h)
+
     def run_test(self):
         try:
             # Wait for the committee to certify blocks on its own.
@@ -588,6 +745,12 @@ class HeldTransactionsTest(BitcoinTestFramework):
                 self.case_c_control()
             if "i" in CASES:
                 self.case_i()
+            if "rC" in CASES:
+                self.case_rC()
+            if "rA" in CASES:
+                self.case_rA()
+            if "rB" in CASES:
+                self.case_rB()
         finally:
             if RESULTS:
                 with open(RESULTS, "w") as f:

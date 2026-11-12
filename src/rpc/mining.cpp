@@ -1810,6 +1810,7 @@ static RPCHelpMan musigpartialsign()
     std::vector<std::vector<unsigned char>> pubnonces = ParseHexArray(request.params[3], "pubnonce");
     std::vector<unsigned char> msg = ParseHexV(request.params[4], "msg");
     if (msg.size() != 32) throw JSONRPCError(RPC_INVALID_PARAMETER, "msg must be 32 bytes");
+    if (HeldTxsFilling()) throw JSONRPCError(RPC_MISC_ERROR, "held-filling: the anchor watcher is recording a disconnect; try again");
     if (HeldTxsActive() && !HeldTxsGetInfo().txids.empty()) {
         if (request.params[5].isNull()) {
             throw JSONRPCError(RPC_MISC_ERROR, "held-conflict: this node holds disconnected certified transactions; pass the block to sign");
@@ -1845,10 +1846,11 @@ static RPCHelpMan getheldtxs()
                 RPCResult{RPCResult::Type::OBJ, "", "", {
                     {RPCResult::Type::BOOL, "active", "whether the rule runs on this node"},
                     {RPCResult::Type::ARR, "txids", "held transaction ids", {{RPCResult::Type::STR_HEX, "", "txid"}}},
-                    {RPCResult::Type::ARR, "parked", "blocks set aside now", {{RPCResult::Type::STR_HEX, "", "block hash"}}},
-                    {RPCResult::Type::ARR, "given_up", "blocks set aside once and restored without a displacement", {{RPCResult::Type::STR_HEX, "", "block hash"}}},
+                    {RPCResult::Type::ARR, "parked", "blocks kept out of fork choice now (memory only)", {{RPCResult::Type::STR_HEX, "", "block hash"}}},
+                    {RPCResult::Type::ARR, "given_up", "blocks set aside once, not to be set aside again (memory only)", {{RPCResult::Type::STR_HEX, "", "block hash"}}},
                     {RPCResult::Type::NUM, "fork_height", "the lowest height the disconnects kept, -1 when nothing is held"},
                     {RPCResult::Type::NUM, "release_anchor", "the tip anchor height at which the last entry is released by the window"},
+                    {RPCResult::Type::NUM, "hold_ms", "how long the current hold has lasted, -1 when none"},
                 }},
                 RPCExamples{HelpExampleCli("getheldtxs", "")},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
@@ -1865,6 +1867,7 @@ static RPCHelpMan getheldtxs()
     result.pushKV("given_up", given_up);
     result.pushKV("fork_height", info.fork_height);
     result.pushKV("release_anchor", (uint64_t)info.release_anchor);
+    result.pushKV("hold_ms", info.hold_ms);
     return result;
 },
     };
@@ -2140,6 +2143,11 @@ static RPCHelpMan getposblocktemplate()
         LOCK(cs_main);
         unsigned int extra_nonce = 0;
         IncrementExtraNonce(&block, chainman.ActiveChain().Tip(), extra_nonce);
+        // Held transactions (pos_heldtxs.h): no template that respends one.
+        if (HeldTxsFilling()) throw JSONRPCError(RPC_MISC_ERROR, "held-filling: the anchor watcher is recording a disconnect; try again");
+        if (auto why = HeldTxsBlockConflict(block, chainman.m_blockman.LookupBlockIndex(block.hashPrevBlock))) {
+            throw JSONRPCError(RPC_MISC_ERROR, strprintf("held-conflict: %s", *why));
+        }
     }
 
     auto parts = ParsePosBlockChallenge(block.proof.challenge);
@@ -2205,6 +2213,15 @@ static RPCHelpMan submitposblock()
     }
     if (key.GetPubKey() != parts->leader) {
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "leaderkey does not match the block challenge's leader");
+    }
+    {
+        // Held transactions (pos_heldtxs.h): the leader signs here, so the rule binds it.
+        ChainstateManager& cm = EnsureAnyChainman(request.context);
+        LOCK(cs_main);
+        if (HeldTxsFilling()) throw JSONRPCError(RPC_MISC_ERROR, "held-filling: the anchor watcher is recording a disconnect; try again");
+        if (auto why = HeldTxsBlockConflict(block, cm.m_blockman.LookupBlockIndex(block.hashPrevBlock))) {
+            throw JSONRPCError(RPC_MISC_ERROR, strprintf("held-conflict: %s", *why));
+        }
     }
     std::vector<unsigned char> leader_sig;
     if (!key.Sign(block.GetHash(), leader_sig)) {
