@@ -77,7 +77,7 @@ class AnchorStaleParentTest(BitcoinTestFramework):
 
     def fixed_credentials(self, n):
         conf = [f for f in os.listdir(get_datadir_path(self.options.tmpdir, n)) if f.endswith(".conf")][0]
-        with open(os.path.join(get_datadir_path(self.options.tmpdir, n), conf), "a") as f:
+        with open(os.path.join(get_datadir_path(self.options.tmpdir, n), conf), "a", encoding="utf8") as f:
             f.write("rpcuser=%s\nrpcpassword=%s\n" % (PARENT_USER, PARENT_PASS))
 
     def parent_mine(self, n, node=None):
@@ -152,7 +152,7 @@ class AnchorStaleParentTest(BitcoinTestFramework):
         prod.loadwallet("w")
         blk = self.produce(prod)
         assert_equal(self.anchor(prod, blk), before)
-        log = open(os.path.join(prod.datadir, "elementsregtest", "debug.log")).read()
+        log = open(os.path.join(prod.datadir, "elementsregtest", "debug.log"), encoding="utf8").read()
         assert "is no longer on the parent chain's best chain" not in log.split("Shutdown: done")[-1]
 
 
