@@ -1200,7 +1200,8 @@ that parents precede children. They follow only the supervision records
 (`addHeldTransactions` in `src/node/miner.cpp`). Each one is checked against
 the tip by the rules a block applies, not by mempool policy: lock time, sequence
 locks, inputs and amounts, and scripts under the block's own flags
-(`CheckTxForNextBlock`). No fee is required. The block's `TestBlockValidity`
+(`CheckTxForNextBlock`). No fee is required. Where the mempool holds the same
+transaction id, its copy is taken, since it may carry a newer witness. The block's `TestBlockValidity`
 stands behind that check: a template that fails it is built again without the
 held transactions, and only then without any. The held transactions take at
 most `POS_HELD_BLOCK_SHARE_PCT` (50 %) of the block's weight, and of its
@@ -1233,12 +1234,15 @@ outpoint a held transaction spends, other than with that held transaction. Nor
 does it sign a block built on an ancestor, above the disconnect point, that
 does so. In the gossip round the check sits beside the lazy
 `TestBlockValidity`.
-- In a round whose backed proposal fails it, the member signs nothing.
-- In round 0 it signs instead the first later proposal, in the round order,
-  that passes.
+- In a round whose backed proposal fails it, the member signs nothing, and it
+  never signs a proposal other than the round's backed one.
 - The leader is not excluded. Every member, with the rule or without it,
-  keeps computing the same round order, so a round that backs an honest
-  proposal gathers every member's signature.
+  keeps computing the same round order, so the next round that backs an honest
+  proposal gathers every member's signature on that one block.
+- A member that picked some other proposal instead, from its own view of the
+  candidates, could split the aware members across blocks. Each would then be
+  share-locked to its own pick, and they would keep splitting until the
+  collection restarted: 7 rounds on a committee of 7, 250 at the cap of 250.
 
 The same check guards a member's own proposal, `generateposblock`,
 `getposblocktemplate`, `submitposblock` and `musigpartialsign`. While the node
@@ -1299,12 +1303,15 @@ and it never keeps a hold longer than the backstop.
   branch back mines it in its original block;
 - a conflicting spend is mined in such a block. Then a quorum certified the
   conflict, and the held transaction cannot come back on this chain;
-- it is invalid for good on the active chain: its amounts or its scripts fail
-  against the very coins it spends, which can never change. A transaction that
-  spends it is released with it. A missing input (a parent held or not valid
-  yet, a conflict in a block not certified) keeps the hold. So does a lock that
-  time lifts: a lock time, a sequence lock, an immature coinbase, or a check
-  that waits for Bitcoin;
+- it is invalid for good on the active chain, by what its transaction id
+  commits to: the transaction itself, or its amounts against the very coins it
+  spends, which can never change. A transaction that spends it is released with
+  it. A script failure does not release it. The id does not commit to the
+  witness, and the same id can come back with another one: a payment claim
+  whose proof is re-attached after the lock was mined again, say. A missing
+  input (a parent held or not valid yet, a conflict in a block not certified)
+  keeps the hold too. So does a lock that time lifts: a lock time, a sequence
+  lock, an immature coinbase, or a check that waits for Bitcoin;
 - the liveness bound or the backstop is reached;
 - the active tip anchors `POS_HELD_WINDOW` (144) Bitcoin blocks above the
   highest anchor the disconnected blocks had.
@@ -1327,11 +1334,9 @@ hold `A` seats, the unaware and the dishonest `U` and `D`, and the quorum be
   member's first honest proposal, or for the backstop after its hold began.
   Once that pause is over, a respend is certified as it would be without the
   rule. Two things produce such a pause:
-  - *An attacker that leads every round of the bound.* With an honest proposal
-    present, round 0 already certifies it (its alternate), and each later round
-    that backs an honest proposal certifies it too. The attacker therefore has
-    to hold the candidates of the next 12 rounds, which repeat once a
-    collection has fewer than 12. With a share `s` of the stake spread over
+  - *An attacker that leads every round of the bound.* Each round that backs
+    an honest proposal certifies it, so the attacker has to hold the candidates
+    of 12 consecutive rounds, which repeat once a collection has fewer than 12. With a share `s` of the stake spread over
     many keys, that is about `s^12`: 1.9·10⁻⁴ at 49 %, 1.7·10⁻⁵ at 40 %,
     5.3·10⁻⁷ at 30 % and 4.1·10⁻⁹ at 20 %. The figure is the same on the
     public committee (250 seats, quorum 126) and on the private-VRF committee
@@ -1346,9 +1351,14 @@ hold `A` seats, the unaware and the dishonest `U` and `D`, and the quorum be
     Bitcoin median time past at the testnet's setting, beyond its parent's
     anchor.
 - **Neither side holds a quorum (`A < q` and `U + D < q`).** Without a stall
-  escape, the original is certified in the first round that backs an honest
+  escape, the original can be certified in a round that backs an honest
   proposal, as long as the members that sign it hold a quorum; unaware members
-  sign it like any proposal. With a single-signer respend block, the unaware
+  sign it like any proposal. Unaware mempools take the respend by replacement,
+  though, so their proposals carry it too. Unaware members that signed a
+  respend round are share-locked to it, which can split the honest rounds that
+  follow. Then nothing is certified until the bound, and the respend goes
+  through: in the harness, 3 aware of 6 (quorum 4) gave the original once and
+  the respend twice in three draws. With a single-signer respend block, the unaware
   members stay on it whenever it outranks the sibling on leader score. Then
   nothing is certified until the bound, the aware members release, and the
   respend is certified. In this mix, protection against a respend that escapes
@@ -1418,9 +1428,10 @@ nothing held can resist a further Bitcoin reorganization. No node, with the
 rule or without it, stays on a block whose anchor Bitcoin replaced for longer
 than the watcher's tick. A set-aside can keep a member on an ancestor that
 Bitcoin still anchors, instead of a sub-quorum block that carries the respend,
-for at most the backstop: 24.0 s for a committee cap of 7 and 240.3 s at the
-cap of 250. A connected member leaves sooner, at the committee's next certified
-block.
+for at most the backstop and the next tick of its anchor watcher: 24.0 s for a
+committee cap of 7 and 240.3 s at the cap of 250, plus that tick (measured: 24.0
+s and 241.3 s for an isolated member). A connected member leaves sooner, at the
+committee's next certified block.
 
 Like the share-lock, this is local signing policy: no block is valid or invalid
 because of it, and a node that never saw the disconnected blocks validates

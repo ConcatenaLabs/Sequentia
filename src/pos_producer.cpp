@@ -1461,17 +1461,20 @@ int64_t PosProducer::DriveRound()
         return 150;
     }
     // Held transactions (pos_heldtxs.h): in a round whose backed proposal
-    // respends a held transaction this member signs nothing, except in round
-    // 0, where it signs the first later proposal that respends nothing held.
-    // The leader is not excluded: the round order stays the one every member
-    // computes, rule or no rule, so a round that backs an honest proposal
-    // gathers every member's signature.
+    // respends a held transaction this member signs nothing, and in no round
+    // anything other than the round's backed proposal. The leader is not
+    // excluded: the round order stays the one every member computes, rule or
+    // no rule, so the next round that backs an honest proposal gathers every
+    // member's signature on that one block. (A member that signed some other
+    // proposal of its own choosing instead, from its own view of the
+    // candidates, could split the aware members across blocks; each would then
+    // be share-locked to its own, and they would keep splitting until the
+    // collection restarted.)
     const std::shared_ptr<const CBlock> round_backed = backed;
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
         if (m_held_skip_height == height && m_held_skip_round == round_index && backed->GetHash() == m_held_skip_hash) {
-            if (!m_held_alt) return 150;
-            backed = m_held_alt;
+            return 150;
         }
     }
 
@@ -1590,39 +1593,11 @@ int64_t PosProducer::DriveRound()
         }
         if (held_conflict) {
             HeldTxsNoteDecline();
-            std::shared_ptr<const CBlock> alt;
-            if (round_index == 0) {
-                std::vector<std::shared_ptr<const CBlock>> order;
-                {
-                    std::lock_guard<std::mutex> lock(m_gossip_mutex);
-                    if (m_round_height == height) {
-                        for (int r = 1; r < (int)m_candidates.size(); ++r) order.push_back(BackedForRound(r));
-                    }
-                }
-                LOCK(cs_main);
-                CBlockIndex* tip2 = m_chainman.ActiveChain().Tip();
-                for (const auto& c : order) {
-                    if (!c || !tip2 || c->hashPrevBlock != tip2->GetBlockHash()) continue;
-                    if (HeldTxsBlockConflict(*c, tip2)) continue;
-                    BlockValidationState state;
-                    if (TestBlockValidity(state, m_chainparams, m_chainman.ActiveChainstate(), *c, tip2,
-                                          /*fCheckPOW=*/false, /*fCheckMerkleRoot=*/true)) {
-                        alt = c;
-                        break;
-                    }
-                }
-            }
-            {
-                std::lock_guard<std::mutex> lock(m_gossip_mutex);
-                m_held_skip_height = height;
-                m_held_skip_round = round_index;
-                m_held_skip_hash = backed->GetHash();
-                m_held_alt = alt;
-            }
-            if (!alt) return 150;
-            LogPrintf("PoS gossip: round 0 at height %d: signing %s, the first proposal that respends nothing held\n",
-                      height, alt->GetHash().GetHex());
-            backed = alt;
+            std::lock_guard<std::mutex> lock(m_gossip_mutex);
+            m_held_skip_height = height;
+            m_held_skip_round = round_index;
+            m_held_skip_hash = backed->GetHash();
+            return 150;
         }
         if (!valid) {
             std::lock_guard<std::mutex> lock(m_gossip_mutex);

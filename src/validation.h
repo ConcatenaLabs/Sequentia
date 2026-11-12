@@ -203,10 +203,12 @@ bool PosRecordSpendFailsNextBlock(const CTransaction& tx, const CCoinsViewCache&
  *  sequence locks, inputs and amounts (fee_map gets the fee it pays), and the
  *  scripts under the block's own flags (sigop_cost gets their cost). A refusal
  *  that time can lift is TX_PREMATURE_SPEND, a missing or spent input
- *  TX_MISSING_INPUTS, anything else that fails a block TX_CONSENSUS. */
+ *  TX_MISSING_INPUTS, anything else that fails a block TX_CONSENSUS. With
+ *  script_failure, it is set when the scripts are what failed: a verdict on
+ *  this witness, which the transaction id does not commit to. */
 bool CheckTxForNextBlock(const CTransaction& tx, const CCoinsViewCache& view, CBlockIndex* tip,
                          const Consensus::Params& params, TxValidationState& state, CAmountMap& fee_map,
-                         int64_t& sigop_cost, bool cache)
+                         int64_t& sigop_cost, bool cache, bool* script_failure = nullptr)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 /** The input scripts of `tx` under the flags the mempool applies at the tip, for
  *  transactions that reach a block template without passing the mempool. */

@@ -732,7 +732,10 @@ void BlockAssembler::addHeldTransactions()
     int64_t sigops_used = 0;
     size_t not_now = 0;
     CCoinsViewCache view(&m_chainstate.CoinsTip());
-    for (const CTransactionRef& tx : held) {
+    for (CTransactionRef tx : held) {
+        // The mempool's copy of the same transaction id, when it has one, may
+        // carry a newer witness (a payment claim with its proof re-attached).
+        if (const auto it = m_mempool.GetIter(tx->GetHash())) tx = (*it)->GetSharedTx();
         bool clash = false;
         for (const CTxIn& in : tx->vin) {
             if (!in.m_is_pegin && m_submission_spent.count(in.prevout)) clash = true;
