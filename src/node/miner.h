@@ -166,12 +166,18 @@ private:
     //! SEQUENTIA PoS: the stake records the block's transactions create and
     //! spend so far (PosCheckTxRecords).
     std::shared_ptr<PosRecordState> m_pos_records;
-    //! Outpoints the privately submitted supervision records spend, which no
-    //! mempool transaction in the same block may spend again.
+    //! Outpoints the privately submitted supervision records and the held
+    //! transactions mined from the record spend, which no mempool transaction
+    //! in the same block may spend again.
     std::set<COutPoint> m_submission_spent;
     //! Build a coinbase-only block: the fallback when a full template fails
     //! TestBlockValidity (CreateNewBlock).
     bool m_coinbase_only{false};
+    //! Build without held transactions: the first fallback when a template
+    //! that carries some fails TestBlockValidity.
+    bool m_skip_held{false};
+    //! How many held transactions the template carries.
+    size_t m_held_added{0};
 
     // Chain context for the block
     int nHeight;
@@ -216,6 +222,12 @@ private:
      *  (src/supervision_submit.h). Before the mempool, so a freeze cannot lose
      *  its place to fee pressure and hand its target another block to escape in. */
     void addSupervisionSubmissions() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    /** SEQUENTIA held transactions (pos_heldtxs.h): add the transactions of
+     *  certified blocks a Bitcoin reorganization disconnected, from the
+     *  record and whatever their fee, oldest first, up to
+     *  POS_HELD_BLOCK_SHARE_PCT of the block. Checked against the tip by the
+     *  rules a block applies (CheckTxForNextBlock), not by mempool policy. */
+    void addHeldTransactions() EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool.cs);
     void addPackageTxs(int& nPackagesSelected, int& nDescendantsUpdated, std::chrono::seconds required_wait = std::chrono::seconds(0)) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool.cs);
 
     // helper functions for addPackageTxs()

@@ -9,6 +9,7 @@
 #include <chain.h>
 #include <musig.h>
 #include <pos.h>
+#include <pos_heldtxs.h>
 #include <vrf.h>
 #include <chainparams.h>
 #include <coins.h>
@@ -147,6 +148,7 @@ void BlockAssembler::resetBlock()
     feeMap = CAmountMap();
     m_pos_records = std::make_shared<PosRecordState>();
     m_submission_spent.clear();
+    m_held_added = 0;
 }
 
 std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& scriptPubKeyIn, std::chrono::seconds min_tx_age, DynaFedParamEntry* proposed_entry, const std::vector<CScript>* commit_scripts, const CPubKey* pos_proposer, const std::vector<unsigned char>* pos_vrf_proof, const std::vector<CPubKey>* pos_vrf_committee)
@@ -273,6 +275,12 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
         if (SupervisionActive(nHeight)) {
             addSupervisionSubmissions();
         }
+        // SEQUENTIA held transactions: next, ahead of the mempool and of any
+        // fee, so that no fee decides whether a certified transaction a
+        // Bitcoin reorganization disconnected is mined again.
+        if (g_con_pos && !m_skip_held && HeldTxsActive()) {
+            addHeldTransactions();
+        }
         addPackageTxs(nPackagesSelected, nDescendantsUpdated, min_tx_age);
     }
 
@@ -398,6 +406,23 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
         // On a PoS chain, produce a block without transactions instead, which
         // keeps the chain moving and the failure loud. (A PoW miner calling
         // this gets the error, as upstream, and decides for itself.)
+        if (g_con_pos && !m_coinbase_only && !m_skip_held && m_held_added > 0) {
+            // First without the held transactions, which reach the template
+            // without passing the mempool: the rest of the block is unaffected.
+            LogPrintf("CreateNewBlock: the template with %u held transaction(s) failed validation (%s); producing it without them\n",
+                      m_held_added, state.ToString());
+            m_skip_held = true;
+            std::unique_ptr<CBlockTemplate> fallback;
+            try {
+                fallback = CreateNewBlock(scriptPubKeyIn, min_tx_age, proposed_entry, commit_scripts,
+                                          pos_proposer, pos_vrf_proof, pos_vrf_committee);
+            } catch (...) {
+                m_skip_held = false;
+                throw;
+            }
+            m_skip_held = false;
+            return fallback;
+        }
         if (g_con_pos && !m_coinbase_only && nBlockTx > 0) {
             LogPrintf("CreateNewBlock: the template with %u transactions failed validation (%s); producing a block without transactions instead\n", nBlockTx, state.ToString());
             m_coinbase_only = true;
@@ -689,6 +714,92 @@ void BlockAssembler::addSupervisionSubmissions()
             }
         }
         AddCoins(view, *tx, nHeight);
+    }
+}
+
+void BlockAssembler::addHeldTransactions()
+{
+    const std::vector<CTransactionRef> held = HeldTxsForMining();
+    if (held.empty()) return;
+    CBlockIndex* tip = m_chainstate.m_chain.Tip();
+    const Consensus::Params& params = chainparams.GetConsensus();
+    // The share: what the disconnected certified blocks carried is mined again
+    // at most once each, and never in more than this part of any block, so the
+    // fee market keeps the rest of every block whatever those blocks held.
+    const uint64_t weight_budget = (uint64_t)nBlockMaxWeight * POS_HELD_BLOCK_SHARE_PCT / 100;
+    const int64_t sigops_budget = (int64_t)MAX_BLOCK_SIGOPS_COST * POS_HELD_BLOCK_SHARE_PCT / 100;
+    uint64_t weight_used = 0;
+    int64_t sigops_used = 0;
+    size_t not_now = 0;
+    CCoinsViewCache view(&m_chainstate.CoinsTip());
+    for (const CTransactionRef& tx : held) {
+        bool clash = false;
+        for (const CTxIn& in : tx->vin) {
+            if (!in.m_is_pegin && m_submission_spent.count(in.prevout)) clash = true;
+        }
+        if (clash) continue;
+        if (!fIncludeWitness && tx->HasWitness()) continue;
+        const uint64_t weight = GetTransactionWeight(*tx);
+        // The oldest one that fits the block always goes in, however large:
+        // the share limits what follows it, never whether the record moves.
+        if ((weight_used > 0 && weight_used + weight > weight_budget) || nBlockWeight + weight >= nBlockMaxWeight) continue;
+        TxValidationState state;
+        CAmountMap fee_map;
+        int64_t sigops = 0;
+        if (!CheckTxForNextBlock(*tx, view, tip, params, state, fee_map, sigops, /*cache=*/true)) {
+            ++not_now;
+            LogPrint(BCLog::MEMPOOL, "CreateNewBlock: held %s not minable now: %s\n", tx->GetHash().ToString(), state.ToString());
+            continue;
+        }
+        if ((sigops_used > 0 && sigops_used + sigops > sigops_budget) || nBlockSigOpsCost + sigops >= MAX_BLOCK_SIGOPS_COST) continue;
+        CAmountMap fees = feeMap + fee_map;
+        CAmountMap reward = fees;
+        reward[params.subsidy_asset] += GetBlockSubsidy(nHeight, params);
+        if (!MoneyRange(fees) || !MoneyRange(reward)) continue;
+        if (SupervisionActive(nHeight) && !SupervisionRegistry::GetInstance().Empty() &&
+            SupervisionInvalidates(*tx, view, SupervisionRegistry::GetInstance())) {
+            continue;
+        }
+        std::string reason, debug;
+        if (params.PosUnbondingActiveAt(nHeight) && PosUnbondingFailsNextBlock(*tx, view, tip, params, reason)) {
+            LogPrint(BCLog::MEMPOOL, "CreateNewBlock: held %s skipped: %s\n", tx->GetHash().ToString(), reason);
+            continue;
+        }
+        std::vector<Coin> spent;
+        for (const CTxIn& in : tx->vin) {
+            spent.push_back(in.m_is_pegin ? Coin() : view.AccessCoin(in.prevout));
+        }
+        PosRecordState records = *m_pos_records;
+        if (!PosCheckTxRecords(*tx, spent, nHeight, params, records, reason, debug)) {
+            LogPrint(BCLog::MEMPOOL, "CreateNewBlock: held %s skipped: %s %s\n", tx->GetHash().ToString(), reason, debug);
+            continue;
+        }
+        *m_pos_records = std::move(records);
+
+        pblocktemplate->block.vtx.emplace_back(tx);
+        pblocktemplate->vTxFees.push_back(fee_map.empty() ? 0 : fee_map.begin()->second);
+        pblocktemplate->vTxSigOpsCost.push_back(sigops);
+        nBlockWeight += weight;
+        weight_used += weight;
+        nBlockSigOpsCost += sigops;
+        sigops_used += sigops;
+        ++nBlockTx;
+        ++m_held_added;
+        feeMap += fee_map;
+        for (const CTxIn& in : tx->vin) {
+            if (!in.m_is_pegin) {
+                view.SpendCoin(in.prevout);
+                m_submission_spent.insert(in.prevout);
+            }
+        }
+        AddCoins(view, *tx, nHeight);
+        // The mempool's copy, if any, is in the block now: its descendants
+        // count it as included, and it is not selected a second time.
+        if (const auto it = m_mempool.GetIter(tx->GetHash())) inBlock.insert(*it);
+    }
+    if (m_held_added > 0 || not_now > 0) {
+        LogPrintf("CreateNewBlock: %u held transaction(s) mined from the record (weight %u of a share of %u); %u not minable now, %u held in all\n",
+                  m_held_added, weight_used, weight_budget, not_now, held.size());
     }
 }
 

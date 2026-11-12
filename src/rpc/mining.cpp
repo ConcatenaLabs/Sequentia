@@ -1850,7 +1850,8 @@ static RPCHelpMan getheldtxs()
                     {RPCResult::Type::ARR, "given_up", "blocks set aside once, not to be set aside again (memory only)", {{RPCResult::Type::STR_HEX, "", "block hash"}}},
                     {RPCResult::Type::NUM, "fork_height", "the lowest height the disconnects kept, -1 when nothing is held"},
                     {RPCResult::Type::NUM, "release_anchor", "the tip anchor height at which the last entry is released by the window"},
-                    {RPCResult::Type::NUM, "hold_ms", "how long the current hold has lasted, -1 when none"},
+                    {RPCResult::Type::NUM, "hold_ms", "how long the liveness bound has run (from the first honest proposal or share), -1 when it does not"},
+                    {RPCResult::Type::NUM, "held_for_ms", "how long the current hold has lasted (from its first decline or set-aside: the backstop's clock), -1 when none"},
                 }},
                 RPCExamples{HelpExampleCli("getheldtxs", "")},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
@@ -1868,6 +1869,7 @@ static RPCHelpMan getheldtxs()
     result.pushKV("fork_height", info.fork_height);
     result.pushKV("release_anchor", (uint64_t)info.release_anchor);
     result.pushKV("hold_ms", info.hold_ms);
+    result.pushKV("held_for_ms", info.held_for_ms);
     return result;
 },
     };
