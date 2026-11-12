@@ -32,7 +32,7 @@ from test_framework.script import (CScript, CScriptOp, OP_CHECKSIG, OP_CHECKSIGV
                                    OP_EQUALVERIFY, OP_GREATERTHAN, OP_GREATERTHANOREQUAL64, OP_LESSTHANOREQUAL,
                                    OP_VERIFY, OP_1, SIGHASH_DEFAULT, TaprootSignatureHash, taproot_construct)
 from test_framework.test_framework import BitcoinTestFramework, SkipTest
-from test_framework.util import assert_equal, initialize_datadir, rpc_port, p2p_port
+from test_framework.util import assert_equal, assert_raises_rpc_error, initialize_datadir, rpc_port, p2p_port
 
 OP_INSPECTBTCPAYMENT = CScriptOp(0xe5)
 OP_INSPECTBTCOUTPUT = CScriptOp(0xe6)
@@ -449,6 +449,7 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.neg_canonical_records()
         self.neg_second_lock()
         self.neg_refund()
+        self.refund_waits_for_the_anchor()
         self.neg_relative_floor()
         self.neg_not_in_anchor_chain()
         self.neg_below_anchor()
@@ -629,6 +630,26 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.mine_anchored(lock["refund_at"])
         self.force([self.refund(lock, floor=lock["refund_at"] + 0 - 1)], "Anchor floor differs")
         self.force([self.refund(lock, floor=None)])
+
+    def refund_waits_for_the_anchor(self):
+        self.step("N23 (PV13 S6) a refund whose floor Bitcoin has reached, but no block has anchored, is refused by the mempool and never displaces the claim")
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        lock = self.fresh_lock(deadline_in=2, margin=6)
+        ptx, pr, vout = self.paid(lock)
+        c = self.claim(lock, pr["record"], vout, fee=5000)
+        node.sendrawtransaction(c.serialize().hex())
+        # A stall: Bitcoin reaches R and no Sequentia block is made.
+        self.btc_mine(lock["refund_at"] - b.getblockcount())
+        tip_anchor = self.anchor_of(node.getbestblockhash())
+        assert tip_anchor < lock["refund_at"] == b.getblockcount()
+        r = self.refund(lock, fee=50000)
+        assert_raises_rpc_error(-26, "anchorlock-not-reached", node.sendrawtransaction, r.serialize().hex())
+        self.results.append((self.current, "refund refused by the mempool at Bitcoin tip R=%d, tip anchored %d: anchorlock-not-reached" % (lock["refund_at"], tip_anchor)))
+        assert c.hash in node.getrawmempool()
+        blk = self.mine(1)[0]
+        assert c.hash in node.getblock(blk)["tx"]
+        self.log.info("    the claim was mined in the next block (anchored %d)", self.anchor_of(blk))
 
     def neg_relative_floor(self):
         self.step("N10 the relative floor a covenant asks for (h > C)")

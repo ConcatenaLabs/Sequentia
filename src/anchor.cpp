@@ -742,8 +742,6 @@ AnchorCheckResult CheckMainchainAnchor(uint32_t height, const uint256& hash)
     }
 }
 
-bool MainchainSyncedToHeight(uint32_t height) { return MainchainSyncedTo(height); }
-
 int AnchorUncontestedHeight(int active_tip_height, int window,
                             const std::vector<std::pair<int, int>>& competing_branches,
                             int committed_height)

@@ -333,8 +333,13 @@ the hashing, which the block weight already bounds.
   until a block anchors at or above it, and is completed then.
 - A proof whose coin is still unconfirmed is refused (`btcpay-coin-unconfirmed`),
   so a claim never shares a block with its lock.
-- A transaction carrying a floor is accepted when the floor is at most the
-  Bitcoin tip, so the next honest block can satisfy it.
+- A transaction carrying a floor is accepted, and may replace another, only
+  when the floor is at most the anchor height of the chain tip, never Bitcoin's
+  tip. Anchor heights never fall along a branch, so the next block can mine it.
+  Everything the mempool holds can be mined now, and a spend that cannot be
+  mined yet never displaces one that can: a refund whose `R` Bitcoin has reached
+  but no block has anchored waits, and the claim pooled before it is mined first.
+  The refund costs one block after `R` is first anchored.
 - The producer chooses its anchor before its transactions, and takes only those
   whose floors it meets. It never rewrites a proof.
 

@@ -115,10 +115,6 @@ enum class AnchorCheckResult {
  *  and MainchainUnchangedHeight in anchor.cpp. */
 AnchorCheckResult CheckMainchainAnchor(uint32_t height, const uint256& hash);
 
-/** Whether the parent chain daemon is synced to at least `height` (cached for a
- *  few seconds). */
-bool MainchainSyncedToHeight(uint32_t height);
-
 /** What one `getblockheader` reply says about one anchor.
  *
  *  Shared by the single-call and batched paths, so the two cannot reach

@@ -446,10 +446,13 @@ static BtcPayVerdict CheckTxBtcPaymentRecords(const CTransaction& tx, const CCoi
         if (records.floor) {
             if (in_block) {
                 if (*records.floor > anchor_height) { reason = "bad-anchorlock-not-reached"; return BtcPayVerdict::INVALID; }
-            } else {
-                const bool reachable = g_validate_anchor ? MainchainSyncedToHeight(*records.floor)
-                                                         : (*records.floor <= anchor_height);
-                if (!reachable) { reason = "anchorlock-not-reached"; return BtcPayVerdict::INVALID; }
+            } else if (*records.floor > anchor_height) {
+                // Judged against the tip's anchor, never Bitcoin's tip: the next
+                // block anchors at least there (anchor heights never fall along
+                // a branch), so whatever the mempool holds can be mined now, and
+                // a spend that cannot be mined yet never replaces one that can.
+                reason = "anchorlock-not-reached";
+                return BtcPayVerdict::INVALID;
             }
         }
         if (!records.proof) continue;
