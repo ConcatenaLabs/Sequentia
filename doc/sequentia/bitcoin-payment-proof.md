@@ -767,8 +767,9 @@ accepted assets the claim can draw on, like any other.
 ### 8.2 The timeline
 
 1. The two sides agree the asset, the amount, the price, `D` and `R`, and the
-   seller's key. The seller's wallet sets `D = (Bitcoin tip) + k + 6` and
-   `R = D + 6`, where `k` is the buyer's wait below.
+   seller's key. The seller's wallet sets `D = (Bitcoin tip) + w + 6` and
+   `R = D + 6`, where `w` is the buyer's wait below: 0 unless the buyer has
+   turned the wait on.
 2. The seller sends the lock. It is mined in a block anchored at `L`.
 3. **The buyer's wallet checks before it pays:**
    - the lock's script, leaf for leaf, against the agreed terms, and that the
@@ -778,25 +779,41 @@ accepted assets the claim can draw on, like any other.
    - that the lock's block is final: at or below the node's finalized height
      (`getposfinality`'s `finalized_height`), so it is certified by a full quorum
      and no sibling block can replace it except through Bitcoin;
-   - that Bitcoin has added `k` blocks on top of `L`, by the default-mode policy:
+   - nothing on Bitcoin: **the buyer pays as soon as the lock's block is
+     final, at every amount.** The finality check is not a wait on Bitcoin.
+     The committee certifies a block within seconds, and without
+     certification a sibling block could replace the lock with no Bitcoin
+     reorganization at all.
 
-     | Price | `k` | Wait, typically |
-     |---|---|---|
-     | below 0.01 BTC | 0 | none: the buyer pays as soon as the lock's block is final |
-     | below 0.1 BTC | 1 | 10 minutes |
-     | below 1 BTC | 2 | 20 minutes |
-     | 1 BTC or more | 5 | 50 minutes |
+   **What paying at once leaves to the buyer**, at every amount: a Bitcoin
+   reorganization that replaces the block `L` the lock is anchored to, which
+   takes the payment's block with it, together with a seller who also controls
+   the producer of the block that would mine the lock again and has it take a
+   respend of the lock's inputs instead. Without that producer, honest producers
+   mine the lock again, the floor is absolute, and the swap completes (9.4).
+   The case needs both a reorganization of Bitcoin and a seller among the
+   chain's block producers. A standing offer made in advance does not remove
+   it: there, the seller takes the payment by paying itself beside the buyer,
+   needing neither (`bitcoin-payment-proof-standing-offer.md`).
 
-     The page meanwhile says "Getting your purchase ready. This usually takes a
-     few minutes." The wait is the buyer's policy, not what the rule's safety
-     rests on (section 9.4). **What `k = 0` risks, for the owner to weigh against
-     the ten minutes it saves:** a one-block Bitcoin reorganization that replaces
-     `L`, which takes the payment's block with it. With the absolute floor, honest
-     producers mine the lock again and the swap completes; the buyer loses only if
-     the seller also controls the producer of the block that would mine the lock
-     again and has it take a respend of the lock's inputs instead. A natural
-     one-block reorganization is rare on Bitcoin's main network and common on its
-     test networks, and a seller who controls a producer is the rarer half.
+   **The wait is a setting, off by default.** A buyer who wants cover against
+   that case turns on "Wait for Bitcoin confirmations before paying" and
+   chooses `w`, from 1 to 6 Bitcoin blocks. The wallet then also checks that
+   Bitcoin has added `w` blocks on top of `L` before it pays, and the seller's
+   wallet moves `D` and `R` out by `w`. The setting says:
+
+   > Your wallet normally pays the moment the seller's side is ready. In one
+   > rare case, a seller who also runs one of Sequentia's block producers could
+   > keep your payment if Bitcoin replaced a recent block at that moment. With
+   > this setting on, your wallet first waits for this many Bitcoin blocks
+   > (about 10 minutes each), and that seller would need Bitcoin to replace
+   > that many blocks. Every purchase takes that much longer. Leave it off
+   > unless that case matters to you.
+
+   The setting applies to every amount alike, and no amount turns it on by
+   itself. While it waits, the page says "Getting your purchase ready. This
+   takes about 10 minutes for each Bitcoin block you chose to wait for."
+
 4. **The buyer signs the claim, and a cancel, before it pays.** The claim pays
    the asset to the buyer, its fee in an accepted asset (section 8.1). It signs
    three tiers of the same claim (section 8.5): the going rate with headroom, ten
@@ -866,8 +883,12 @@ rejected: the proof carries the payment without its witness, so the key would
 need a second proof through the block's witness commitment.
 
 Two payers racing for one open offer: one claim wins; the other payer's bitcoin
-reaches the seller and buys nothing. The open form suits offers where that race
-is acceptable or ruled out.
+reaches the seller and buys nothing. **The seller can always race:** a payment to
+its own address costs it only the fees, and its claim wins on fee in honest
+mempools, with no reorganization and no block producer of its own
+(`bitcoin-payment-proof-standing-offer.md`, case SO7). So the open form protects
+no payer against the seller. It suits only a payer who trusts the seller, and a
+wallet never pays an open offer by default.
 
 ### 8.5 The completion service and the cancel as a service
 
@@ -985,7 +1006,7 @@ by `D` still opens the lock, since every version pays the same output. *What
 remains:* neither the payment nor the cancel confirms by `D`, and the payment
 confirms later. Then only the seller's goodwill returns it.
 
-**9.2 The buyer never pays.** The asset is parked until `R`, about `k + 12`
+**9.2 The buyer never pays.** The asset is parked until `R`, about `w + 12`
 Bitcoin blocks after the lock, and then goes home.
 
 **9.3 A reorganization with the payment double-spent.** The payment's block leaves
@@ -1007,12 +1028,13 @@ and the swap completes at any depth. What can still cost the buyer its payment:
 - a dishonest seller **respends the lock's inputs** while the lock is back in the
   mempool. The lock does not signal replacement, so honest mempools refuse the
   respend, and the seller needs a block producer that takes it, plus a Bitcoin
-  reorganization reaching the lock's anchor block: `k` blocks deep or more by
-  step 3.
+  reorganization reaching the lock's anchor block: one Bitcoin block deep by
+  default, or `w + 1` with the wait turned on (step 3).
 
 So the buyer's risk after paying is a deep Bitcoin reorganization, which the
-buyer prices by its `k` exactly as it would price accepting any bitcoin payment
-of that value, combined with a seller who controls a block producer. Without the
+buyer can cover with the wait setting, exactly as it would choose confirmations
+before accepting any bitcoin payment, combined with a seller who controls a
+block producer. Without the
 producer, no reorganization of any depth costs the buyer anything.
 
 **9.5 A seller who fills the blocks of the margin.** The seller pays higher fees
@@ -1052,8 +1074,9 @@ quorum for an hour; its cause is in [`04-proof-of-stake.md`](04-proof-of-stake.m
 
 **9.8 A reorganization at each step.** Before the lock is mined, nothing is at
 stake. Between the lock and the payment, the buyer has not paid; if the lock's
-block leaves the chain, the buyer waits for it to be mined again and for depth `k`
-again. With the payment unconfirmed, nothing on either chain refers to it. After
+block leaves the chain, the buyer waits for it to be mined again and final again,
+and for its `w` blocks again if the wait is on. With the payment unconfirmed,
+nothing on either chain refers to it. After
 the payment, as in 9.3 and 9.4. After the refund, it is mined again in the first
 block anchored at or above `R`, unless a claim gets in first, which needs a valid
 payment that nobody completed for the whole margin.
@@ -1083,8 +1106,8 @@ and selling one is choosing an amount. No protocol, rail, lock or proof is named
 and nothing is offered as a choice.
 
 - **Buying.** "Buy 100 XYZ for 0.0123 BTC." One button. While the wallet waits for
-  the seller's side: "Getting your purchase ready. This usually takes a few
-  minutes." Then "Paying 0.0123 BTC. Your XYZ arrives a minute or two after Bitcoin
+  the seller's side: "Getting your purchase ready. This usually takes about a
+  minute." Then "Paying 0.0123 BTC. Your XYZ arrives a minute or two after Bitcoin
   confirms the payment, usually within 20 minutes." Then "Bitcoin confirmed your
   payment. Receiving 100 XYZ", and the purchase shows as done, with the balance,
   only once the claim's block is final.
@@ -1122,12 +1145,16 @@ It replaces the hash-locked swap against on-chain bitcoin wherever one is built:
 Hash-locked swaps over Lightning are unaffected: they settle without waiting for a
 Bitcoin confirmation.
 
-Further uses, not built, none needing a further rule:
+Further uses, not built:
 
-- **resting sell orders filled by a payment:** a covenant that releases asset in
-  proportion to the bitcoin proven paid (`OP_INSPECTBTCOUTPUT` and 64-bit
-  arithmetic) and re-creates the rest under the relative floor, with the open
-  form's binding (section 8.4) so that a stranger cannot take a fill;
-- **sales for bitcoin:** a token sale that releases on payment;
-- **repayment in bitcoin:** a loan whose collateral is released on a proof that
-  the repayment was paid.
+- **resting sell orders filled by a payment** can be built from these opcodes,
+  but they are not safe for a buyer: the seller drains the order with payments
+  to itself, and the relative floor shuts out honest buyers who pay close
+  together. Making them safe needs an opcode that reads the payment's inputs
+  (`bitcoin-payment-proof-standing-offer.md`, sections 4 and 6);
+- **sales for bitcoin:** a token sale that releases on payment, through a lock
+  per buyer as in section 8.1: a sale open to any payer is drained the same way;
+- **repayment in bitcoin:** a loan whose collateral is released to the borrower
+  on a proof that the repayment was paid. The release goes to one fixed
+  destination, so a payment the lender makes to itself only returns the
+  collateral, and no further rule is needed.
