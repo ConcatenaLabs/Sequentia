@@ -3852,6 +3852,26 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
 
     std::vector<int> prevheights;
     std::set<uint256> btcpay_blocks; // SEQUENTIA: distinct Bitcoin blocks proven in this block
+    int64_t btcpay_prefetch_micros = 0;
+    // SEQUENTIA: ask the Bitcoin daemon about every proven block of this block
+    // in one batched round trip (doc/sequentia/bitcoin-payment-proof.md 5).
+    if (g_validate_anchor && m_params.GetConsensus().BtcPaymentActiveAt(pindex->nHeight)) {
+        std::vector<std::pair<uint32_t, uint256>> refs;
+        for (const auto& ptx : block.vtx) {
+            for (size_t i = 0; i < ptx->vin.size() && i < ptx->witness.vtxinwit.size(); ++i) {
+                if (ptx->vin[i].m_is_pegin || ptx->witness.vtxinwit[i].m_pegin_witness.stack.empty()) continue;
+                BtcPayment::Records records;
+                std::string why;
+                if (BtcPayment::ParseRecords(ptx->witness.vtxinwit[i].m_pegin_witness.stack, records, why) && records.proof) {
+                    refs.emplace_back(records.proof->height, records.proof->block_hash);
+                }
+            }
+        }
+        const int64_t t_prefetch = GetTimeMicros();
+        if (!refs.empty()) PrefetchAnchorVerdicts(refs);
+        btcpay_prefetch_micros = GetTimeMicros() - t_prefetch;
+    }
+    int64_t btcpay_micros = 0;
     CAmountMap fee_map;
     int nInputs = 0;
     int64_t nSigOpsCost = 0;
@@ -3947,9 +3967,11 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
             // SEQUENTIA: the proof of a bitcoin payment and the anchor floor.
             if (m_params.GetConsensus().BtcPaymentActiveAt(pindex->nHeight)) {
                 std::string reason;
+                const int64_t t_btcpay = GetTimeMicros();
                 const BtcPayVerdict v = CheckTxBtcPaymentRecords(tx, view, pindex, /*in_block=*/true,
                                                                  pindex->m_anchor_height, pindex->m_anchor_hash,
                                                                  &btcpay_blocks, reason);
+                btcpay_micros += GetTimeMicros() - t_btcpay;
                 if (v != BtcPayVerdict::OK) {
                     LogPrintf("ERROR: %s: %s in tx %s\n", __func__, reason, tx.GetHash().ToString());
                     state.Invalid(v == BtcPayVerdict::UNVERIFIABLE ? BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE
@@ -3992,6 +4014,10 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
         }
         UpdateCoins(tx, view, i == 0 ? undoDummy : blockundo.vtxundo.back(), pindex->nHeight);
 
+    }
+    if (!btcpay_blocks.empty()) {
+        LogPrint(BCLog::BENCH, "    - BtcPayment: %u distinct proven Bitcoin blocks checked in %.2fms (batched lookup %.2fms)\n",
+                 (unsigned)btcpay_blocks.size(), 0.001 * btcpay_micros, 0.001 * btcpay_prefetch_micros);
     }
     int64_t nTime3 = GetTimeMicros(); nTimeConnect += nTime3 - nTime2;
     LogPrint(BCLog::BENCH, "      - Connect %u transactions: %.2fms (%.3fms/tx, %.3fms/txin) [%.2fs (%.2fms/blk)]\n", (unsigned)block.vtx.size(), MILLI * (nTime3 - nTime2), MILLI * (nTime3 - nTime2) / block.vtx.size(), nInputs <= 1 ? 0 : MILLI * (nTime3 - nTime2) / (nInputs-1), nTimeConnect * MICRO, nTimeConnect * MILLI / nBlocksTotal);

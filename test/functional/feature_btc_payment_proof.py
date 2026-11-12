@@ -32,7 +32,7 @@ from test_framework.script import (CScript, CScriptOp, OP_CHECKSIG, OP_CHECKSIGV
                                    OP_EQUALVERIFY, OP_GREATERTHAN, OP_GREATERTHANOREQUAL64, OP_LESSTHANOREQUAL,
                                    OP_VERIFY, OP_1, SIGHASH_DEFAULT, TaprootSignatureHash, taproot_construct)
 from test_framework.test_framework import BitcoinTestFramework
-from test_framework.util import assert_equal, rpc_port, p2p_port
+from test_framework.util import assert_equal, initialize_datadir, rpc_port, p2p_port
 
 OP_INSPECTBTCPAYMENT = CScriptOp(0xe5)
 OP_INSPECTBTCOUTPUT = CScriptOp(0xe6)
@@ -428,6 +428,10 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.reorg_double_spend()
         self.reorg_remined()
         self.same_txid_replacement()
+        self.bitcoin_reorg_sweep()
+        self.reverse_direction()
+        self.congestion()
+        self.measure_distinct_blocks()
         self.only_tightens()
 
     def neg_floor(self):
@@ -752,12 +756,151 @@ class BtcPaymentProofTest(BitcoinTestFramework):
             node.decoderawtransaction(light.serialize().hex())["vsize"], node.decoderawtransaction(heavy.serialize().hex())["vsize"])))
         self.mine_anchored(self.btc_rpc().getblockcount())
 
+    def bitcoin_reorg_sweep(self):
+        self.step("N17 a Bitcoin reorganization above every anchor: the pooled claim is swept and re-attached")
+        node = self.nodes[0]
+        lock = self.fresh_lock()
+        ptx, pr, vout = self.paid(lock)
+        c = self.claim(lock, pr["record"], vout)
+        # Accepted while the Sequentia tip still anchors below the payment.
+        assert self.anchor_of(node.getbestblockhash()) < pr["height"]
+        node.sendrawtransaction(c.serialize().hex())
+        w0 = node.getmempoolentry(c.hash)["wtxid"]
+        tip = node.getbestblockhash()
+        b = self.btc_rpc()
+        b.invalidateblock(pr["blockhash"])
+        self.btc_mine(2)
+        assert self.bbuyer.gettransaction(ptx)["blockhash"] != pr["blockhash"]
+        self.wait_for(lambda: c.hash in node.getrawmempool() and node.getmempoolentry(c.hash)["wtxid"] != w0,
+                      "the swept claim comes back with a fresh proof", timeout=30)
+        assert_equal(node.getbestblockhash(), tip)
+        blk = self.mine_anchored(b.getblockcount())
+        assert c.hash in node.getblock(blk)["tx"]
+        self.results.append((self.current, "swept and re-attached; Sequentia tip untouched; mined"))
+
+    def reverse_direction(self):
+        self.step("N18 the other direction: the taker holds the asset and locks it on another node; the maker pays")
+        n0, n1 = self.nodes[0], self.nodes[1]
+        self.connect_nodes(0, 1) if not n0.getpeerinfo() else None
+        if not n1.listwallets():
+            n1.loadwallet("w")
+        addr1 = n1.getnewaddress()
+        n0.sendtoaddress(address=addr1, amount=20, assetlabel=self.asset, fee_asset_label=self.asset)
+        self.mine(1)
+        self.sync_blocks()
+        # n1 builds the lock (the node without the rule can still build and broadcast it).
+        saved = self.nodes[0]
+        lock = None
+        try:
+            self.nodes[0] = n1
+            btc_tip = self.btc_rpc().getblockcount()
+            lock = self.new_lock(30_000_000, self.anchor_of(n1.getbestblockhash(), n1), btc_tip + 20, btc_tip + 26)
+        finally:
+            self.nodes[0] = saved
+        self.sync_mempools()
+        self.mine(1)
+        self.sync_blocks()
+        lock["C"] = self.lock_coin_anchor(lock)
+        txid = self.bminer.sendtoaddress(lock["addr"], Decimal("0.3"))
+        bh = self.btc_mine(1)[0]
+        pr = self.proof_for(txid, lock["C"], bh)
+        c = self.claim(lock, pr["record"], self.vout_paying(txid, lock["addr"], bh))
+        n0.sendrawtransaction(c.serialize().hex())
+        blk = self.mine_anchored(pr["height"])
+        assert c.hash in n0.getblock(blk)["tx"]
+        self.sync_blocks()
+        self.results.append((self.current, "claim mined"))
+
+    def congestion(self):
+        self.step("N19 blocks full of higher-fee transactions through the margin: the top fee tier gets in")
+        node = self.nodes[0]
+        self.restart_seq0(["-blockmaxweight=12000"])
+        # Coins for the fillers.
+        outs = {node.getnewaddress(): 1 for _ in range(60)}
+        node.sendmany(amounts=outs, fee_asset="bitcoin")
+        for _ in range(3):
+            self.mine(1)
+        lock = self.fresh_lock()
+        ptx, pr, vout = self.paid(lock)
+        spk = bytes.fromhex(node.getaddressinfo(node.getnewaddress())["scriptPubKey"])
+        tiers = [self.claim(lock, pr["record"], vout, fee=f, out_spk=spk) for f in (400, 4000, 40000)]
+        node.sendrawtransaction(tiers[0].serialize().hex())
+        fill = []
+        for _ in range(50):
+            fill.append(node.sendtoaddress(address=node.getnewaddress(), amount=Decimal("0.5"), fee_asset_label="bitcoin",
+                                           fee_rate=50))
+        blk = self.mine(1)[0]
+        assert self.anchor_of(blk) >= pr["height"]
+        txs = node.getblock(blk)["tx"]
+        assert tiers[0].hash not in txs, "the lowest tier is crowded out"
+        n_fill = len([t for t in fill if t in txs])
+        self.log.info("    a full block took %d fillers and not the lowest tier", n_fill)
+        # The completion service moves up the tiers.
+        node.sendrawtransaction(tiers[2].serialize().hex())
+        blk = self.mine(1)[0]
+        txs = node.getblock(blk)["tx"]
+        assert tiers[2].hash in txs, "the top tier gets in"
+        self.results.append((self.current, "tier 400 crowded out by %d fillers at 50/vB; tier 40000 mined in the next full block (%d fillers left behind)" %
+                             (n_fill, len([t for t in fill if t in node.getrawmempool()]))))
+        self.restart_seq0()
+        self.mine(5)
+
+    def measure_distinct_blocks(self):
+        n = int(os.environ.get("BTCPAY_MEASURE_N", "296"))
+        self.step("N20 cost of a block whose proofs name %d distinct Bitcoin blocks, cold cache" % n)
+        node = self.nodes[0]
+        btc_tip = self.btc_rpc().getblockcount()
+        lock = self.new_lock(1000, 0, btc_tip + 100000, btc_tip + 100006, asset_amount=Decimal("0.001"))
+        # n lock outputs of the same script.
+        addr = program_to_witness(1, lock["tap"].scriptPubKey[2:])
+        outpoints = []
+        for k in range(n):
+            txid = node.sendtoaddress(address=addr, amount=Decimal("0.001"), assetlabel=self.asset,
+                                      fee_asset_label=self.asset)
+            t = tx_from_hex(node.getrawtransaction(txid))
+            v = [i for i, o in enumerate(t.vout) if o.scriptPubKey == lock["tap"].scriptPubKey][0]
+            outpoints.append((txid, v, t.vout[v]))
+            if k % 20 == 19:
+                self.mine(1)
+        self.mine(1)
+        coin_anchor = {txid: self.anchor_of(node.getrawtransaction(txid, True)["blockhash"]) for txid, _, _ in outpoints}
+        proofs = []
+        for k in range(n):
+            ptx = self.bbuyer.sendtoaddress(lock["addr"], Decimal("0.00001000"))
+            bh = self.btc_mine(1)[0]
+            proofs.append((self.proof_for(ptx, coin_anchor[outpoints[k][0]], bh), self.vout_paying(ptx, lock["addr"], bh)))
+        self.mine_anchored(self.btc_rpc().getblockcount())
+        claims = []
+        for k, (pr, v) in enumerate(proofs):
+            l = dict(lock, vout=outpoints[k][1], txout=outpoints[k][2], txid=outpoints[k][0], asset_amount=100000)
+            claims.append(self.claim(l, pr["record"], v, fee=1000))
+        t0 = time.time()
+        blk = self.force(claims)
+        t_build = time.time() - t0
+        weight = node.getblock(blk)["weight"]
+        self.log.info("    block %s: %d claims, weight %d; built and checked warm in %.2fs", blk[:16], n, weight, t_build)
+        # A fresh node: every proven block is a cache miss.
+        initialize_datadir(self.options.tmpdir, 2, "elementsregtest")
+        self.add_nodes(1, [self.seq_args()], chain=["elementsregtest"])
+        self.start_node(2)
+        t0 = time.time()
+        self.connect_nodes(2, 0)
+        self.sync_blocks([self.nodes[0], self.nodes[2]], timeout=600)
+        t_sync = time.time() - t0
+        log = open(os.path.join(self.nodes[2].datadir, "elementsregtest", "debug.log")).read().splitlines()
+        lines = [l for l in log if "BtcPayment:" in l and "%d distinct" % n in l]
+        self.log.info("    cold node: %s", lines[-1] if lines else "(no bench line)")
+        self.results.append((self.current, {"claims": n, "weight": weight, "warm_build_s": round(t_build, 2),
+                                            "cold_sync_whole_chain_s": round(t_sync, 2),
+                                            "cold_bench": lines[-1] if lines else None}))
+        self.stop_node(2)
+
     def only_tightens(self):
         self.step("N16 the rule only tightens: a node without it accepts every block, and accepts a claim without proof that this node refuses")
-        self.sync_blocks()
+        self.sync_blocks(self.nodes[:2])
         assert_equal(self.nodes[1].getbestblockhash(), self.nodes[0].getbestblockhash())
         lock = self.fresh_lock()
-        self.sync_blocks()
+        self.sync_blocks(self.nodes[:2])
         noproof = self.spend_lock(lock, "claim", [], [b""])
         self.force([noproof], "No valid proof of a bitcoin payment")
         self.disconnect_nodes(0, 1)
