@@ -485,6 +485,10 @@ struct BtcPayPending {
     double rate{0};                //!< its fee per virtual byte, valued as BtcPayFeeValue values it
     uint64_t order{0};
     std::vector<COutPoint> locks;  //!< the coins it spends on inputs that carry records
+    //! Displaced from the mempool by a block that spends its lock coin (a
+    //! refund, say). Kept, not forgotten, while that coin is spent, so that it
+    //! returns if the block leaves the chain; skipped until then.
+    bool displaced_by_block{false};
 };
 static std::map<uint256, BtcPayPending> g_btcpay_pending GUARDED_BY(g_btcpay_pending_mutex);
 //! (fee per virtual byte, order) -> txid: the lowest is dropped first.
@@ -782,6 +786,16 @@ static void BtcPaymentNotePending(const CTransactionRef& tx)
         }
     }
     BtcPaymentNoteVariant(tx, /*current=*/true);
+}
+
+//! A claim the mempool dropped because the block just connected spends its lock
+//! coin: held, so that it returns if that block is disconnected (specification
+//! 9.8). Without this only the buyer's side could bring it back.
+static void BtcPaymentNoteDisplaced(const CTransactionRef& tx)
+{
+    BtcPaymentNotePending(tx);
+    LOCK(g_btcpay_pending_mutex);
+    if (auto p = g_btcpay_pending.find(tx->GetHash()); p != g_btcpay_pending.end()) p->second.displaced_by_block = true;
 }
 
 static bool HasBtcPaymentRecords(const CTransaction& tx)
@@ -5864,8 +5878,28 @@ bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew
     if (m_mempool) {
         // ELEMENTS: We also eject peg-outs with now-invalid PAK proofs
         // as well as peg-in inputs during transitional periods.
+        // SEQUENTIA: the proof-reading spends this block displaces (a claim
+        // whose lock the block's refund spends) are held for re-attachment.
+        std::vector<CTransactionRef> btcpay_displaced;
+        if (m_params.GetConsensus().BtcPaymentActiveAt(pindexNew->nHeight)) {
+            for (const auto& btx : blockConnecting.vtx) {
+                for (const CTxIn& in : btx->vin) {
+                    if (in.m_is_pegin) continue;
+                    const auto it = m_mempool->mapNextTx.find(in.prevout);
+                    if (it == m_mempool->mapNextTx.end() || it->second->GetHash() == btx->GetHash()) continue;
+                    if (BtcPayClassOf(*it->second) != BtcPayClass::PROOF) continue;
+                    if (auto ref = m_mempool->get(it->second->GetHash())) btcpay_displaced.push_back(ref);
+                }
+            }
+        }
         m_mempool->removeForBlock(blockConnecting.vtx, pindexNew->nHeight, pindexNew);
         disconnectpool.removeForBlock(blockConnecting.vtx);
+        for (const CTransactionRef& tx : btcpay_displaced) {
+            if (m_mempool->exists(GenTxid::Txid(tx->GetHash()))) continue;
+            LogPrint(BCLog::MEMPOOL, "BtcPayment: %s displaced by block %s, held for re-attachment\n",
+                     tx->GetHash().ToString(), pindexNew->GetBlockHash().ToString());
+            BtcPaymentNoteDisplaced(tx);
+        }
         // SEQUENTIA: where the coinbase maturity rises at a height (the
         // testnet's 100 -> 1,000, CoinbaseMaturityAt), a resident spend that
         // was mature for this block is premature for the next one, with none
@@ -9114,6 +9148,9 @@ struct BtcPayAttacher {
     int64_t deadline{0};
     //! The chain tip the waiting claims' lock coins were last checked at.
     uint256 swept_seq_tip;
+    //! Claims displaced by a block whose lock coin is still spent at that tip:
+    //! held, not tried.
+    std::set<uint256> lock_spent;
     //! The search by paid script: Bitcoin block hash -> the script hashes it was
     //! read for, and script hash -> the transactions found paying that script.
     //! A block is read again only for scripts it was not read for.
@@ -9905,11 +9942,16 @@ void BtcPaymentReattachTick(ChainstateManager& chainman)
     if (seq_tip != a.swept_seq_tip) {
         a.swept_seq_tip = seq_tip;
         std::vector<std::pair<uint256, std::vector<COutPoint>>> held;
+        std::set<uint256> displaced;
         {
             LOCK(g_btcpay_pending_mutex);
             held.reserve(g_btcpay_pending.size());
-            for (const auto& [txid, p] : g_btcpay_pending) held.emplace_back(txid, p.locks);
+            for (const auto& [txid, p] : g_btcpay_pending) {
+                held.emplace_back(txid, p.locks);
+                if (p.displaced_by_block) displaced.insert(txid);
+            }
         }
+        a.lock_spent.clear();
         constexpr size_t SWEEP_CHUNK = 500;
         int64_t longest_us = 0;
         const int64_t sweep_start = GetTimeMicros();
@@ -9929,9 +9971,14 @@ void BtcPaymentReattachTick(ChainstateManager& chainman)
                 }
                 longest_us = std::max(longest_us, GetTimeMicros() - held_from);
             }
-            forgotten += spent.size();
             LOCK(g_btcpay_pending_mutex);
             for (const auto& [txid, lock] : spent) {
+                if (displaced.count(txid)) {
+                    // Held while the block that displaced it stands; not tried.
+                    a.lock_spent.insert(txid);
+                    continue;
+                }
+                ++forgotten;
                 LogPrint(BCLog::MEMPOOL, "BtcPayment: %s no longer waits: its lock coin %s is spent on the active chain\n",
                          txid.ToString(), lock.ToString());
                 BtcPaymentForget(txid);
@@ -10041,7 +10088,7 @@ void BtcPaymentReattachTick(ChainstateManager& chainman)
     // claims nobody can satisfy never use up a tick ahead of one that can.
     std::vector<uint256> may, cannot;
     for (const uint256& txid : order) {
-        if (!pending.count(txid)) continue;
+        if (!pending.count(txid) || a.lock_spent.count(txid)) continue;
         (ClaimMayComplete(a, g_btcpay_info.at(txid)) ? may : cannot).push_back(txid);
     }
     const auto state = std::make_pair(a.btc_tip, seq_tip);
