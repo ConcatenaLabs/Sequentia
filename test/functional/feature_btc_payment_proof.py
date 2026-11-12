@@ -462,6 +462,8 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.every_variant_kept()
         self.variant_fee_budget()
         self.seller_fills_the_store()
+        self.current_variant_kept()
+        self.store_order_irrelevant()
         self.anchoring_first()
         self.bitcoin_reorg_sweep()
         self.links_and_branches()
@@ -699,44 +701,46 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.results.append((self.current + " (b)", "claim at fee 5000 replaced the pooled refund at 50000 (no RBF signal) and was mined"))
         self.log.info("    (b) the claim replaced the pooled refund (higher fee, no signal) and was mined")
         # (c) No pin: a coin with a keyless proof leaf and a key leaf. Anyone
-        # spends it by the proof leaf with an old payment at a low fee; the
-        # owner's key spend, paying more, replaces it; a key spend paying less
-        # does not.
-        sk = generate_privkey()
-        pk = compute_xonly_pubkey(sk)[0]
-        proof_leaf = CScript([OP_INSPECTBTCPAYMENT, OP_2DROP, OP_1])
-        key_leaf = CScript([pk, OP_CHECKSIG])
-        tap = taproot_construct(NUMS, [("proof", proof_leaf), ("key", key_leaf)])
-        txid = node.sendtoaddress(address=program_to_witness(1, tap.scriptPubKey[2:]), amount=10,
-                                  assetlabel=self.asset, fee_asset_label=self.asset, replaceable=False)
-        t = tx_from_hex(node.getrawtransaction(txid))
-        n = [i for i, o in enumerate(t.vout) if o.scriptPubKey == tap.scriptPubKey][0]
-        blk = self.mine(1)[0]
-        coin = dict(tap=tap, proof=proof_leaf, key=key_leaf, txid=txid, vout=n, txout=t.vout[n], asset_amount=1000000000)
-        old = self.proof_for(ptx, self.anchor_of(blk), pr["blockhash"])
-        asset = CTxOutAsset(b"\x01" + bytes.fromhex(self.asset)[::-1])
-        spk = bytes.fromhex(node.getaddressinfo(node.getnewaddress())["scriptPubKey"])
-        anyone = CTransaction()
-        anyone.nVersion = 2
-        anyone.vin.append(CTxIn(COutPoint(int(txid, 16), n), nSequence=SEQ_NONFINAL_RBF))
-        anyone.vout.append(CTxOut(CTxOutValue(1000000000 - 3000), spk, asset))
-        anyone.vout.append(CTxOut(CTxOutValue(3000), b"", asset))
-        anyone.wit.vtxinwit.append(CTxInWitness())
-        anyone.wit.vtxoutwit = [CTxOutWitness() for _ in anyone.vout]
-        anyone.wit.vtxinwit[0].peginWitness.stack = [old["record"]]
-        control = bytes([tap.leaves["proof"].version + tap.negflag]) + tap.internal_pubkey + tap.leaves["proof"].merklebranch
-        anyone.wit.vtxinwit[0].scriptWitness.stack = [bytes(proof_leaf), control]
-        anyone.rehash()
-        node.sendrawtransaction(anyone.serialize().hex())
-        cheap = self.spend_lock(coin, "key", [], [], fee=2000, sign_with=sk, out_spk=spk)
-        assert_raises_rpc_error(-26, "insufficient fee", node.sendrawtransaction, cheap.serialize().hex())
-        dear = self.spend_lock(coin, "key", [], [], fee=50000, sign_with=sk, out_spk=spk)
-        node.sendrawtransaction(dear.serialize().hex())
-        pool = node.getrawmempool()
-        assert dear.hash in pool and anyone.hash not in pool
-        self.results.append((self.current + " (c)", "key spend at 50000 replaced a keyless proof spend at 3000; at 2000 refused: insufficient fee"))
-        self.log.info("    (c) no pin: the key spend paying more replaced the keyless proof spend; paying less it was refused")
-        self.mine(1)
+        # spends it by the proof leaf with an old payment at a low fee, choosing
+        # its nSequence (nothing signs it): signalling replacement or not
+        # (PV15 X4), the owner's key spend, paying more, replaces it; a key spend
+        # paying less does not.
+        for nseq in (SEQ_NONFINAL_RBF,):
+            sk = generate_privkey()
+            pk = compute_xonly_pubkey(sk)[0]
+            proof_leaf = CScript([OP_INSPECTBTCPAYMENT, OP_2DROP, OP_1])
+            key_leaf = CScript([pk, OP_CHECKSIG])
+            tap = taproot_construct(NUMS, [("proof", proof_leaf), ("key", key_leaf)])
+            txid = node.sendtoaddress(address=program_to_witness(1, tap.scriptPubKey[2:]), amount=10,
+                                      assetlabel=self.asset, fee_asset_label=self.asset, replaceable=False)
+            t = tx_from_hex(node.getrawtransaction(txid))
+            n = [i for i, o in enumerate(t.vout) if o.scriptPubKey == tap.scriptPubKey][0]
+            blk = self.mine(1)[0]
+            coin = dict(tap=tap, proof=proof_leaf, key=key_leaf, txid=txid, vout=n, txout=t.vout[n], asset_amount=1000000000)
+            old = self.proof_for(ptx, self.anchor_of(blk), pr["blockhash"])
+            asset = CTxOutAsset(b"\x01" + bytes.fromhex(self.asset)[::-1])
+            spk = bytes.fromhex(node.getaddressinfo(node.getnewaddress())["scriptPubKey"])
+            anyone = CTransaction()
+            anyone.nVersion = 2
+            anyone.vin.append(CTxIn(COutPoint(int(txid, 16), n), nSequence=nseq))
+            anyone.vout.append(CTxOut(CTxOutValue(1000000000 - 3000), spk, asset))
+            anyone.vout.append(CTxOut(CTxOutValue(3000), b"", asset))
+            anyone.wit.vtxinwit.append(CTxInWitness())
+            anyone.wit.vtxoutwit = [CTxOutWitness() for _ in anyone.vout]
+            anyone.wit.vtxinwit[0].peginWitness.stack = [old["record"]]
+            control = bytes([tap.leaves["proof"].version + tap.negflag]) + tap.internal_pubkey + tap.leaves["proof"].merklebranch
+            anyone.wit.vtxinwit[0].scriptWitness.stack = [bytes(proof_leaf), control]
+            anyone.rehash()
+            node.sendrawtransaction(anyone.serialize().hex())
+            cheap = self.spend_lock(coin, "key", [], [], fee=2000, sign_with=sk, out_spk=spk)
+            assert_raises_rpc_error(-26, "insufficient fee", node.sendrawtransaction, cheap.serialize().hex())
+            dear = self.spend_lock(coin, "key", [], [], fee=50000, sign_with=sk, out_spk=spk)
+            node.sendrawtransaction(dear.serialize().hex())
+            pool = node.getrawmempool()
+            assert dear.hash in pool and anyone.hash not in pool
+            self.results.append((self.current + " (c) nSequence 0x%08x" % nseq, "key spend at 50000 replaced a keyless proof spend at 3000; at 2000 refused: insufficient fee"))
+            self.log.info("    (c) nSequence 0x%08x, no pin: the key spend paying more replaced the keyless proof spend; paying less it was refused", nseq)
+            self.mine(1)
 
     def neg_relative_floor(self):
         self.step("N10 the relative floor a covenant asks for (h > C)")
@@ -1159,10 +1163,16 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         return b.sendrawtransaction(self.bseller.signrawtransactionwithwallet(new)["hex"])
 
     def watcher_left(self, bh):
-        """Wait until the node's anchor watcher has dropped the blocks anchored to `bh`."""
+        """Wait until the node's anchor watcher has dropped every block anchored
+        to `bh` or above it: the tip's anchor is on Bitcoin's best chain again."""
         node = self.nodes[0]
-        self.wait_for(lambda: node.getblockheader(node.getbestblockhash())["anchorhash"] != bh,
-                      "the watcher follows Bitcoin")
+        b = self.btc_rpc()
+
+        def done():
+            h = node.getblockheader(node.getbestblockhash())
+            return h["anchorhash"] != bh and b.getblockhash(h["anchorheight"]) == h["anchorhash"]
+        self.wait_for(done, "the watcher follows Bitcoin")
+        time.sleep(1.5)  # one more watcher tick: nothing left to drop
 
     def seller_fills_the_store(self):
         self.step("N32 (PV15 X2 c) the seller's own payments against the per-id bound")
@@ -1255,6 +1265,140 @@ class BtcPaymentProofTest(BitcoinTestFramework):
                              "seller's proofs and paid the buyer"))
         self.log.info("    (b) 8 slots filled by the seller first: the buyer's not kept; one orphaned block is not "
                       "enough, the claim came back and paid the buyer")
+
+    def current_variant_kept(self):
+        self.step("N34 the proof a claim is pooled or mined with is kept, whatever was seen first")
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        lock = self.fresh_lock()
+        amt = Decimal(lock["amount"]) / Decimal(100000000)
+        # Both payments in one Bitcoin block: the seller's (1 in, 2 out) is seen
+        # first and takes that block's slot; the buyer's (1 in, 1 out) is lighter
+        # and replaces it in the pool.
+        scoin = self.seller_coins(1, lock["amount"] + 1000000)[0]
+        bcoin_addr = self.bbuyer.getnewaddress(address_type="bech32")
+        ftx = self.bminer.sendtoaddress(bcoin_addr, amt + Decimal("0.0001"))
+        fraw = b.getrawtransaction(ftx, True)
+        self.btc_mine(1)
+        bvout = [o["n"] for o in fraw["vout"] if o["scriptPubKey"].get("address") == bcoin_addr][0]
+        stx = self.bseller.send(outputs=[{lock["addr"]: amt}], options={
+            "inputs": [{"txid": scoin[0], "vout": scoin[1]}], "add_inputs": False, "change_position": 1})["txid"]
+        ptx = self.bbuyer.sendall(recipients=[lock["addr"]], options={"fee_rate": 2, "inputs": [
+            {"txid": ftx, "vout": bvout}]})["txid"]
+        y = self.btc_mine(1)[0]
+        assert stx in b.getblock(y)["tx"] and ptx in b.getblock(y)["tx"]
+        self.mine_anchored(b.getblockheader(y)["height"])
+        spk = bytes.fromhex(node.getaddressinfo(node.getnewaddress())["scriptPubKey"])
+        cs = self.claim(lock, self.proof_for(stx, lock["C"], y)["record"], self.vout_paying(stx, lock["addr"], y),
+                        out_spk=spk)
+        cb = self.claim(lock, self.proof_for(ptx, lock["C"], y)["record"], self.vout_paying(ptx, lock["addr"], y),
+                        out_spk=spk)
+        ws = node.decoderawtransaction(cs.serialize().hex())["hash"]
+        wb = node.decoderawtransaction(cb.serialize().hex())["hash"]
+        assert node.decoderawtransaction(cb.serialize().hex())["weight"] < node.decoderawtransaction(cs.serialize().hex())["weight"]
+        node.sendrawtransaction(cs.serialize().hex())
+        node.sendrawtransaction(cb.serialize().hex())
+        assert_equal(node.getmempoolentry(cb.hash)["wtxid"], wb)
+        blk = self.mine(1)[0]
+        mined = node.getblock(blk, 2)["tx"]
+        assert_equal([t["hash"] for t in mined if t["txid"] == cb.hash], [wb])
+        # Y leaves Bitcoin's chain: the seller's payment is double-spent, the
+        # buyer's is mined again in another block.
+        b.invalidateblock(y)
+        self.undo_self_pay(stx)
+        y2 = self.btc_mine(2)[0]
+        assert ptx in b.getblock(y2)["tx"]
+        self.watcher_left(y)
+        self.mine_anchored(b.getblockcount())
+        self.wait_for(lambda: cb.hash in node.getrawmempool(), "the claim re-attached with the proof it was mined with",
+                      timeout=60)
+        got = node.getmempoolentry(cb.hash)["wtxid"]
+        assert got not in (ws, wb)
+        blk = self.mine_anchored(b.getblockcount())
+        assert cb.hash in node.getblock(blk)["tx"]
+        self.results.append((self.current, "seller's proof first (slot of block Y), buyer's lighter one pooled and "
+                             "mined; Y orphaned, seller's payment double-spent, buyer's mined again: the claim came "
+                             "back with a fresh proof of the buyer's payment (%s) and was mined" % got[:16]))
+        self.log.info("    the claim came back with a fresh proof of the payment it was mined with")
+
+    def seller_first_then_orphaned(self, mode):
+        """PV15's re-check of the store, Q1 and Q2. The seller's proof reaches the
+        node first. Q1 (SAME): both payments in one Bitcoin block, the seller's
+        lighter: the buyer's is never stored, and only the search by paid script
+        finds it. Q2 (HEAVY): the seller's heavy payment one block earlier, its
+        proof using the claim's whole fee budget; the buyer's lighter proof
+        replaces it in the pool and the claim is mined with it: that variant is
+        kept as the one the claim was mined with. Then the seller's payment leaves
+        Bitcoin's chain, double-spent, and the buyer's is mined again."""
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        lock = self.fresh_lock(deadline_in=40)
+        amt = Decimal(lock["amount"]) / Decimal(100000000)
+        if mode == "SAME":
+            coin = self.seller_coins(1, lock["amount"])[0]
+            stx = self.self_pay(coin, lock["addr"])
+        else:
+            coin = self.seller_coins(1, lock["amount"] + 130 * 1000 + 20000)[0]
+            outs = [{lock["addr"]: amt}] + [{self.bseller.getnewaddress(address_type="bech32"): Decimal("0.00001")}
+                                            for _ in range(130)]
+            stx = self.bseller.send(outputs=outs, options={"inputs": [{"txid": coin[0], "vout": coin[1]}],
+                                                           "add_inputs": False, "fee_rate": 2})["txid"]
+            x = self.btc_mine(1)[0]
+        ptx = self.pay(lock["addr"], lock["amount"])
+        y = self.btc_mine(1)[0]
+        if mode == "SAME":
+            x = y
+        assert stx in b.getblock(x)["tx"] and ptx in b.getblock(y)["tx"]
+        self.mine_anchored(b.getblockcount())
+        spk = bytes.fromhex(node.getaddressinfo(node.getnewaddress())["scriptPubKey"])
+        rs = (self.proof_for(stx, lock["C"], x)["record"], self.vout_paying(stx, lock["addr"], x))
+        rb = (self.proof_for(ptx, lock["C"], y)["record"], self.vout_paying(ptx, lock["addr"], y))
+        vs = node.decoderawtransaction(self.claim(lock, *rs, out_spk=spk).serialize().hex())["vsize"]
+        relay_per_kvb = int(node.getnetworkinfo()["relayfee"] * 100000000)
+        fee = 5000 if mode == "SAME" else relay_per_kvb * (vs + 50) // 1000
+        cs = self.claim(lock, *rs, out_spk=spk, fee=fee)
+        cb = self.claim(lock, *rb, out_spk=spk, fee=fee)
+        ws = node.decoderawtransaction(cs.serialize().hex())["hash"]
+        wb = node.decoderawtransaction(cb.serialize().hex())["hash"]
+        node.sendrawtransaction(cs.serialize().hex())
+        if mode == "SAME":
+            assert_raises_rpc_error(-26, "txn-same-nonwitness-data-in-mempool", node.sendrawtransaction,
+                                    cb.serialize().hex())
+            assert self.debug_lines(node, "variant %s of %s not kept: a variant proving that Bitcoin block" % (wb, cb.hash))
+            mined_with = ws
+        else:
+            node.sendrawtransaction(cb.serialize().hex())
+            mined_with = wb
+        assert_equal(node.getmempoolentry(cb.hash)["wtxid"], mined_with)
+        blk = self.mine(1)[0]
+        assert_equal([t["hash"] for t in node.getblock(blk, 2)["tx"] if t["txid"] == cb.hash], [mined_with])
+        b.invalidateblock(x)
+        self.undo_self_pay(stx)
+        self.btc_mine(1)
+        if ptx not in b.getrawmempool() and self.bbuyer.gettransaction(ptx)["confirmations"] <= 0:
+            b.sendrawtransaction(self.bbuyer.gettransaction(ptx)["hex"])  # its lock time is final again
+        self.btc_mine(2)
+        assert self.bbuyer.gettransaction(ptx)["confirmations"] > 0
+        self.watcher_left(x)
+        self.mine_anchored(b.getblockcount())
+        self.wait_for(lambda: cb.hash in node.getrawmempool(), "the claim re-attached", timeout=60)
+        got = node.getmempoolentry(cb.hash)["wtxid"]
+        how = [line for line in self.debug_lines(node, "re-attached") if cb.hash in line][-1].split("re-attached ")[1]
+        blk = self.mine_anchored(b.getblockcount())
+        assert cb.hash in node.getblock(blk)["tx"]
+        return got, how, fee, vs
+
+    def store_order_irrelevant(self):
+        self.step("N35 (PV15 re-check Q1, Q2) whatever the store holds, the claim comes back with the buyer's payment")
+        got, how, fee, vs = self.seller_first_then_orphaned("SAME")
+        assert how.startswith("a searched proof"), how
+        self.results.append((self.current + " Q1", "both payments in one block, the seller's proof first: the "
+                             "buyer's never stored; after the orphan the claim came back (%s)" % how.strip()))
+        self.log.info("    Q1: the claim came back with %s", how.strip())
+        got, how, fee, vs = self.seller_first_then_orphaned("HEAVY")
+        self.results.append((self.current + " Q2", "fee %d, the seller's proof %d vB first; the buyer's pooled and "
+                             "mined, kept as the variant mined with; the claim came back (%s)" % (fee, vs, how.strip())))
+        self.log.info("    Q2: fee %d for a %d vB first proof; the claim came back with %s", fee, vs, how.strip())
 
     def block_records(self, blockhash):
         """A maker of payment records for transactions of one Bitcoin block,

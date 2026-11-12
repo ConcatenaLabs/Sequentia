@@ -77,12 +77,12 @@ online:
   new signature: the claim's transaction id is unchanged and only its proof is
   replaced. Whoever holds the signed claim and the buyer's payment builds the
   fresh proof. The buyer's completion service does so after every reorganization
-  until the claim's block is final (section 8.5), which is what the swap relies
-  on. A node that watches Bitcoin also re-links a fresh proof itself from the
-  variants it kept (section 6.3), so a claim usually returns to the chain with
-  nobody online, as whitepaper section 5.3 says a reorganized transaction does;
-  that store is a help for a buyer whose service is down, not the guarantee
-  (section 6.2 says what can empty it).
+  until the claim's block is final (section 8.5): the completion service is
+  the guarantee the swap relies on. A node that watches Bitcoin also re-links a
+  fresh proof itself (section 6.3), from the variants it kept and, when none of
+  them stands, from a search of Bitcoin's recent blocks for any payment to the
+  script those variants name. That search is what brings a claim back with
+  nobody online, as whitepaper section 5.3 says a reorganized transaction does.
 - **Wallet libraries** sign the claim exactly as any taproot script-path spend.
 
 The taproot annex, which every signature commits to, was rejected: with it, each
@@ -416,9 +416,11 @@ keeps, per transaction id, variants it has seen valid (accepted, validated besid
 the pooled one, or returned from a disconnected block), within bounds that make
 the claim's own fee, never anyone else's, pay for what it stores:
 
-- **its fee pays for its storage:** the kept variants' total virtual size, at the
-  minimum relay rate, is at most the claim's fee. The first variant seen is kept
-  whatever its fee: it is the one the claim was pooled or mined with;
+- **the variant the claim is pooled or was mined with is always kept,** whatever
+  the bounds below say, as one more beside them: it is the proof the node needs
+  after a reorganization, whoever sent it and whatever was seen first;
+- **its fee pays for the rest:** the kept variants' total virtual size, at the
+  minimum relay rate, is at most the claim's fee;
 - **one variant per proven Bitcoin block** on each input, and at most 8 in all. A
   variant proving the same payments as a kept one takes its place (its links
   reach a later anchor);
@@ -429,38 +431,28 @@ the claim's own fee, never anyone else's, pay for what it stores:
   for re-attachment go last.
 
 A variant the node would not keep is refused at once, without its scripts being
-run. What emptying the store costs follows from these bounds:
+run. To push one claim's kept proofs out of the 32 MiB store, an outsider stores
+about 8.4 million virtual bytes of its own at a higher fee per byte than that
+claim pays: about 14,000 times the fee of a claim storing two proofs.
 
-- to push one claim's kept proofs out of the 32 MiB store, an outsider stores
-  about 8.4 million virtual bytes of its own at a higher fee per byte than that
-  claim pays, about 14,000 times the fee of a claim storing two proofs;
-- to keep the buyer's proof from being stored at all, the seller must fill the
-  claim's 8 slots first, with payments of its own in 8 distinct Bitcoin blocks,
-  before the buyer's proof reaches the node; and since any kept proof whose
-  payment stands brings the claim back, to the buyer's outputs, it must then
-  orphan all 8 of those blocks.
+**No rule over stored variants can beat a seller who is first.** The node cannot
+tell the buyer's payment from the seller's payment to itself: both pay the same
+script the same amount. A seller whose payment sits in the same Bitcoin block as
+the buyer's, or who fills the bounds first, keeps the buyer's proof from being
+stored at all. So the node does not rely on what it stored: when every kept
+variant fails, it searches Bitcoin for any payment to the script those variants
+name (section 6.3), and finds the buyer's payment whatever the store holds.
 
-The bounds are not consensus: a node that did not keep a variant re-attaches
-with the ones it kept, and the buyer's wallet or completion service can always
-submit its own proof. **The store is a help for a buyer whose service is down;
-the guarantee is the completion service** (section 8.5), which watches the
-claim until its block is final and resubmits a fresh proof of the buyer's own
-payment after every reorganization that disconnects it. What remains for an
-attacker, with every node's store emptied, is a seller who:
-
-1. holds a payment of its own to the lock's address in a Bitcoin block it can
-   orphan, by its own hash power or by double-spending into a natural
-   reorganization;
-2. completes the buyer's claim with that proof, lighter than the buyer's, before
-   the claim is mined;
-3. after the claim is mined, orphans that block without orphaning the buyer's
-   payment, and double-spends its own payment;
-4. empties every node's copy of the buyer's proof, at the cost above;
-5. finds the buyer's wallet and completion service both offline from then until
-   `R`, at least 6 Bitcoin blocks.
-
-If all five succeed, the seller refunds at `R` and holds both sides. With the
-completion service online, steps 1 to 4 buy the seller nothing.
+The bounds and the search are not consensus: they are relay help, and the
+buyer's wallet or completion service can always submit its own proof. **The
+completion service is the guarantee** (section 8.5): it watches the claim until
+its block is final and resubmits a fresh proof of the buyer's own payment after
+every reorganization that disconnects it. **The node's search is what brings a
+claim back with nobody online.** What remains for an attacker is what section
+9.3 already accepts: taking the buyer's payment itself out of Bitcoin's chain,
+or making it pay another script, which leaves the buyer with its bitcoin; and a
+buyer's payment older than the search's window (below) when the reorganization
+comes, with the buyer's wallet and completion service both offline until `R`.
 
 ### 6.3 Reorganizations, and the proof re-linked
 
@@ -479,7 +471,9 @@ completion service online, steps 1 to 4 buy the seller nothing.
   reorganization:
   - a claim is tried again only when Bitcoin's tip or the chain tip has moved
     since its last try, and each tick stops after 500 ms of work, the rest
-    waiting for the next tick;
+    waiting for the next tick. The budget is checked between claims and also
+    inside one claim's work, between daemon calls; what was read is kept, so the
+    next tick goes on from there;
   - each kept variant is first submitted as it is, which asks the Bitcoin daemon
     nothing: a Sequentia reorganization that records the anchor again makes the
     stored proof valid again;
@@ -489,8 +483,33 @@ completion service online, steps 1 to 4 buy the seller nothing.
     they are all spent, among the transactions of the last 144 blocks, read once
     per tip from a cache of block contents keyed by block hash. It links that
     block to the lowest anchor the active chain recorded at or above it, with the
-    headers along Bitcoin's best chain, refuses if they do not end at that
-    anchor, fills in the coin anchor, and submits the claim.
+    headers along Bitcoin's best chain (read in batches and kept per Bitcoin
+    tip), refuses if they do not end at that anchor, fills in the coin anchor,
+    and submits the claim;
+  - **then a search by paid script.** For each claim whose every variant failed,
+    the node takes the outputs its variants' proofs name (an output of the
+    payment whose index the input's witness carries, which the leaf reads with
+    `OP_INSPECTBTCOUTPUT`) and searches Bitcoin for any other transaction paying
+    the same script. Every such output is a candidate, largest first, whatever
+    it pays: the node does not know the price the script asks, and a seller
+    paying itself a little more must not hide the buyer's exact payment. For
+    each candidate the node builds a fresh proof, makes the witness item that
+    named the old output name the new one, and submits it; the mempool runs the
+    script, so a wrong candidate costs one refusal. The window is the last 144
+    Bitcoin blocks, reaching down to the floor a claim carries when it carries
+    one, and never more than 2,016: a proof links at most 2,016 headers to a
+    recorded anchor, and a claim waits at most that long. The blocks the
+    variants' proofs name are searched too, an orphaned one included (the
+    daemon keeps it), since a payment it held may have been mined again
+    elsewhere.
+
+  The search runs once every waiting claim has been tried at the current tips,
+  and one scan serves all of them: each block is read once (`getblock`) for the
+  scripts it was not read for yet, matched against every waiting script, and the
+  budget is checked between blocks, so a scan stopped by it goes on at the next
+  tick from what it has read. It asks the Bitcoin daemon nothing while a proof is
+  validated: like the rest of this section it is relay help, and a claim's
+  validity stays a pure function of the chain.
 
   A claim held for 2,016 Bitcoin blocks without its payment being found is
   dropped with its variants. Held claims and variants live in memory only; after
@@ -500,7 +519,12 @@ completion service online, steps 1 to 4 buy the seller nothing.
   an anchor-driven reorganization disconnects the orphaned block in 1.0 s with
   200 waiting and 1.1 s with 1,000, against 0.5 s with none, and the Bitcoin
   daemon serves at most one read of the recent blocks per tip (144 `getblock`
-  calls in 20 s with 1,000 waiting).
+  calls in 20 s with 1,000 waiting). With claims that each name a script of
+  their own, so that every one is searched for, the anchor-driven disconnect
+  stays at 0.5 s with 200 and with 1,000 waiting; one scan reads the 145 blocks
+  of the window once for all of them (289 `getblock` calls in 20 s, the recent
+  blocks and the scan), and no tick runs past its budget by more than one
+  daemon call.
 
 ## 7. Activation
 
