@@ -2945,10 +2945,11 @@ bool CheckTemplateTxScripts(const CTransaction& tx, const CCoinsViewCache& view,
 
 bool CheckTxForNextBlock(const CTransaction& tx, const CCoinsViewCache& view, CBlockIndex* tip,
                          const Consensus::Params& params, TxValidationState& state, CAmountMap& fee_map,
-                         int64_t& sigop_cost, bool cache)
+                         int64_t& sigop_cost, bool cache, bool* script_failure)
 {
     AssertLockHeld(cs_main);
     assert(tip != nullptr);
+    if (script_failure) *script_failure = false;
     if (!CheckTransaction(tx, state)) return false;
     if (tx.IsCoinBase()) return state.Invalid(TxValidationResult::TX_CONSENSUS, "coinbase");
     const int height = tip->nHeight + 1;
@@ -2976,6 +2977,7 @@ bool CheckTxForNextBlock(const CTransaction& tx, const CCoinsViewCache& view, CB
     const unsigned int flags = GetBlockScriptFlags(&next, params);
     PrecomputedTransactionData txdata;
     if (!CheckInputScripts(tx, state, view, flags, /*cacheSigStore=*/cache, /*cacheFullScriptStore=*/cache, txdata)) {
+        if (script_failure) *script_failure = true;
         return false;
     }
     sigop_cost = GetTransactionSigOpCost(tx, view, flags);

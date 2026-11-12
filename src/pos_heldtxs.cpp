@@ -613,13 +613,15 @@ bool HeldTxsMaintain(ChainstateManager& chainman, CTxMemPool& mempool, bool park
         // A transaction stays held whatever its fee, and whatever this node's
         // mempool would make of it: a producer that holds mines it from the
         // record (HeldTxsForMining). It is released here only when it is
-        // invalid for good on the active chain: its amounts or its scripts fail
-        // against the coins it spends. A missing input (a parent held or not
-        // valid yet, a conflict in a block not certified) or a lock that time
-        // lifts (a lock time, a sequence lock, an immature coinbase, a check
-        // that waits for Bitcoin) keeps the hold. So does everything else the
-        // next block refuses only for now. A transaction that spends one
-        // released as invalid is released with it.
+        // invalid for good on the active chain, by what its transaction id
+        // commits to: the transaction itself, or its inputs and amounts against
+        // the coins it spends. A script failure is a verdict on one witness,
+        // which the id does not commit to (a payment claim's proof record, say,
+        // is replaced under the same id), so it keeps the hold. So do a missing
+        // input (a parent held or not valid yet, a conflict in a block not
+        // certified) and a lock that time lifts (a lock time, a sequence lock,
+        // an immature coinbase). A transaction that spends one released as
+        // invalid is released with it.
         std::vector<std::pair<uint256, std::string>> release;
         {
             LOCK(cs_main);
@@ -659,7 +661,8 @@ bool HeldTxsMaintain(ChainstateManager& chainman, CTxMemPool& mempool, bool park
                 TxValidationState st;
                 CAmountMap fee_map;
                 int64_t sigops = 0;
-                if (CheckTxForNextBlock(*tx, view, tip, Params().GetConsensus(), st, fee_map, sigops, /*cache=*/false)) {
+                bool script_failure = false;
+                if (CheckTxForNextBlock(*tx, view, tip, Params().GetConsensus(), st, fee_map, sigops, /*cache=*/false, &script_failure)) {
                     verified_now.insert(txid);
                     for (const CTxIn& in : tx->vin) {
                         if (!in.m_is_pegin) view.SpendCoin(in.prevout);
@@ -668,7 +671,7 @@ bool HeldTxsMaintain(ChainstateManager& chainman, CTxMemPool& mempool, bool park
                     continue;
                 }
                 const TxValidationResult kind = st.GetResult();
-                if (kind == TxValidationResult::TX_CONSENSUS || kind == TxValidationResult::TX_WITNESS_MUTATED) {
+                if (kind == TxValidationResult::TX_CONSENSUS && !script_failure) {
                     release.emplace_back(txid, "invalid on the active chain: " + st.ToString());
                     dead.insert(txid);
                 } else {
