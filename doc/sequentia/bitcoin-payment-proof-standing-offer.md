@@ -205,13 +205,124 @@ input. A slot that only a payment spending one particular Bitcoin output can
 open is therefore a mutex, and Bitcoin enforces it. What follows is a design
 for the owner to decide on. Nothing of it is built or run.
 
-### 6.1 The opcode: a reading, not a proof
+### 6.1 The seller holds no bitcoin
+
+The owner's constraint: **a seller of an asset for bitcoin never needs to hold
+bitcoin, not even dust, before it is paid.** The payer's wallet may build any
+Bitcoin transaction the form needs. Everything in this subsection is reasoned,
+not run.
+
+**What the coin `U` is for.** It provides uniqueness: one spend, so one
+outcome. It need not be the seller's money. A buyer must be able to spend `U`
+only by paying the price, and the `SIGHASH_SINGLE|ANYONECANPAY` signature over
+`U` is what enforces that. Without such a signature `U` is spendable by anyone,
+for nothing: anyone can kill the slot, and fee scavengers sweep a coin of a few
+hundred sat whenever spending it costs less than its value. So `U` needs a
+**signer**: whoever holds `U`'s key and signs it. The signer and the funder can
+be anyone:
+
+- **A service, or any maker, paid by the seller in any asset**, funds `U` to its
+  own key or to a MuSig2 key of itself and the seller, and signs it. The seller
+  holds no bitcoin.
+- **What the signer can do.** It can spend `U` itself. That kills the slot: the
+  lot goes back to the seller through the take-back leaf, which needs only the
+  seller's Sequentia key. If a buyer's payment is in flight, that payment
+  becomes invalid and the buyer keeps its bitcoin. The signer can also buy the
+  slot, by paying the price like anyone else. It can never fill without paying
+  the price, so it can stall, censor or cancel a slot, and it can take nothing
+  from either side. Under a MuSig2 key it cannot even kill the slot alone.
+  Instead it can refuse to co-sign a cancel and hold the offer hostage. A
+  script path on `U` that lets the seller spend it alone after a timeout bounds
+  that, with the fee paid from `U`'s own value (or by a child of an anchor
+  output). So the funder puts in a few thousand sat, priced to the seller in
+  the asset the seller pays with.
+- **When `U` must exist.** Its outpoint is written into the slot, so it must be
+  fixed (its funding transaction signed and non-malleable) before the slot is
+  made. It should be confirmed before the slot has aged. If `U` never comes to
+  exist, no payment can spend it (a payment that tries is invalid, and its
+  payer keeps its bitcoin), but the lot can only come home by a long expiry on
+  the slot. Near that expiry the specification's 9.1 returns, so a buyer's
+  wallet does not pay a slot close to it.
+- **A coin made by the payer at trade time brings the gap back exactly.** A
+  slot made then, to bind that coin, is made from the seller's free coins, and
+  the seller's producer can replace it with a slot bound to a coin of its own.
+
+**A fresh output carries no gap when a covenant forces it.** The gap of
+section 1 is a fresh output whose inputs the seller can spend some other way.
+An output re-created by a fill has no such alternative. The only valid spend of
+slot `k` is the fill by the one payment that spent `U_k`, and the covenant fixes
+the remainder output. After a reorganization, any completer mines that fill
+again (perhaps with another fee, and so another transaction id), and the same
+remainder appears. If the payment is double-spent instead, the coins it created
+vanish with it. This opens a **chained offer**:
+
+- payment `k` carries, beside the price and the destination, the next coin
+  `U_{k+1}` as an output. Its key is one the covenant names (the seller's
+  signer), or buyer `k`'s own key, in which case the covenant checks only that
+  the output is there;
+- the fill releases in proportion and re-creates the rest bound to
+  `U_{k+1} = (payment k's transaction id, that output's index)`. The covenant
+  rebuilds the next leaf with `OP_CAT` and the streaming SHA-256 opcodes and
+  checks output 1 with `OP_TWEAKVERIFY`. For this, the opcode of 6.2 also
+  pushes the proven payment's own transaction id (index `-1`), which checks 1
+  to 4 already compute;
+- only the offer's first coin comes from outside the chain, so there is one
+  funded coin per offer, not one per lot. After its first fill the seller holds
+  bitcoin anyway, and the constraint is spent;
+- each later coin still needs its signature over `U_{k+1}`. That comes from the
+  seller's online signer, a service the seller delegates to, or buyer `k`'s
+  own wallet at payment time. Whichever signs can stall the offer, never take
+  from it. Two buyers who both build a spend of `U_{k+1}` are decided by
+  Bitcoin, and the one that is not mined spent nothing. A buyer may even spend
+  `U_{k+1}` while payment `k` is unconfirmed, as its child. If payment `k` is
+  replaced, the child is invalid and that buyer keeps its bitcoin.
+
+**No coin tied to the seller at all: an HTLC payment, with the three opcodes.**
+The payer's wallet pays an output the seller can spend with the buyer's secret
+`s`, and the buyer alone can spend after a timeout `T`. The fill leaf rebuilds
+that P2WSH program from the hash in the witness, the seller's key and the
+buyer's refund key with `OP_CAT` and `OP_SHA256`, and compares it with
+`OP_INSPECTBTCOUTPUT`. A buyer who never reveals `s` gets its bitcoin back by
+itself, whether the offer was drained (SO7, SO8), the buyer raced (SO9) or the
+floor shut it out (SO5, SO6, SO10). The seller sweeps with `s`, paying the fee
+from the output itself, so it needs no bitcoin either. Revealing `s` is what
+commits the buyer, so the fill runs in two steps: first it reserves the lot
+without `s`, then it claims with `s`. A buyer that revealed `s` in a fill that
+was then not mined would hand `s` to the seller. A reorganization before the
+reveal costs the buyer only time. One after it, when the seller controls a
+producer, is the gap of section 1. So this form moves the wait to after the
+payment, for as long as the buyer chooses, rather than removing it. The seller,
+or a watchtower acting for it, must sweep before `T`, and the buyer must
+refund after `T`. It needs no new rule, and it was not run.
+
+**The two directions.**
+
+- *A maker selling from its inventory to a person paying bitcoin.* The maker
+  holds bitcoin anyway, so it funds its own coins or buys them from a service.
+  The person pays at once, with the full guarantee of 6.4.
+- *A person or an issuer with no bitcoin selling to a payer, usually a maker.*
+  The exposed party is the payer. It carries the gap by its own choice with
+  the per-trade lock of the specification's section 8 and the wait it turns on
+  (`w`). The seller makes the lock, waits for nothing and holds nothing. No
+  fourth opcode is needed for this direction. The chained offer serves it too,
+  with a service funding the first coin.
+
+**What the best form under the constraint gives up.** Buyers give up nothing:
+no wait at any amount, and a payment is lost only to a reorganization deeper
+than the offer's first slot is old. What is given up is liveness. Whoever signs
+the first coin and each later one decides whether the offer stays open, and
+with a service as signer the seller relies on it to cancel quickly. The
+timeout path on each coin bounds that reliance.
+
+### 6.2 The opcode: a reading, not a proof
 
 **`OP_INSPECTBTCINPUT`**, on the next free `OP_SUCCESS` slot (`0xe8`), under
 `SCRIPT_VERIFY_BTCPAYMENT` and from the same activation height as the other
 three. It pops an input index and pushes that input's previous output from the
 proven payment: the transaction id (32 bytes, in the order the transaction
-serializes it), then the output index as a script number. It fails without a
+serializes it), then the output index as a script number. With index `-1` it
+pushes the proven payment's own transaction id, which the chained offer of 6.1
+needs. It fails without a
 payment proof (`SCRIPT_ERR_BTCPAY_MISSING`) and for an index out of range (a
 new `SCRIPT_ERR_BTCPAY_INPUT`). Reading it counts as reading the proof for the
 relay rule of section 6.1 of the specification.
@@ -222,19 +333,21 @@ interpreter already parses it into a Bitcoin transaction (`proof.tx` in
 `src/script/interpreter.cpp`, the object `OP_INSPECTBTCOUTPUT` reads
 `vout` from). Checks 1 to 4 tie those bytes, inputs included, to the header's
 merkle root, and checks 5 to 7 tie the header to the anchor chain. The opcode
-reads `proof.tx->vin[i].prevout` from the same object. It does not check that
+reads `proof.tx->vin[i].prevout` from the same object, and the payment's
+transaction id is the hash that check 2 already computes. It does not check that
 the input was unspent or properly signed. Bitcoin did that when it mined the
 block, which is the same trust the proof already places in Bitcoin's blocks.
 
-### 6.2 The slot, and who decides its fate
+### 6.3 The slot, and who decides its fate
 
-The maker makes, for each lot:
+For each lot there is:
 
-- **on Bitcoin, a coin `U`** of a few hundred sat to a taproot key of its own,
-  and a key-path signature over spending `U` with
+- **on Bitcoin, a coin `U`**, funded and signed as 6.1 describes (by the maker,
+  by a service, or by the payment of the previous fill), and a key-path
+  signature over spending `U` with
   `SIGHASH_SINGLE|ANYONECANPAY`. Under that signature, output `i` of the
   spending transaction, where `i` is `U`'s input index, must pay the price to a
-  receiving script `S` used for this slot alone. The maker publishes the
+  receiving script `S` used for this slot alone. The signer publishes the
   signature with the offer;
 - **on Sequentia, an output** holding the lot under an unspendable internal key
   and two leaves. Both take the input index `i` from the witness:
@@ -246,8 +359,8 @@ The maker makes, for each lot:
 
 **The slot's fate follows whichever Bitcoin transaction spends `U`.** No
 Sequentia transaction decides it. If the buyer's payment spends `U`, only the
-fill can open. If the maker spends `U` itself to cancel, only the take-back can
-open. A Bitcoin history holds one spend of `U`, so on any branch of Sequentia
+fill can open. If `U`'s signer spends it to cancel, at the maker's request or
+after the timeout of 6.1, only the take-back can open. A Bitcoin history holds one spend of `U`, so on any branch of Sequentia
 exactly one of the two leaves can ever open, and nothing on the Sequentia side
 is left for the maker to race. A maker that spends `U` and pays itself the price
 at output `i` opens the fill to a destination of its own, which is a take-back
@@ -261,7 +374,7 @@ Only the payer who built the payment wrongly loses, and nobody else can build
 it that way, because spending `U` requires the maker's signature and that
 signature requires the price.
 
-### 6.3 What each side can lose, and to whom
+### 6.4 What each side can lose, and to whom
 
 Here, in the form of the specification's section 9, the "payment" is the
 buyer's Bitcoin transaction that spends `U`.
@@ -299,7 +412,7 @@ buyer's Bitcoin transaction that spends `U`.
   delaying the fill gains the maker nothing. The fill needs only an ordinary
   fee, and no top tier.
 - **The maker (9.6).** It loses the lot only against a Bitcoin transaction in
-  its node's chain that spends `U` and pays it the price. A stale quote (6.5)
+  its node's chain that spends `U` and pays it the price. A stale quote (6.6)
   is the one cost it carries.
 - **Two honest buyers.** Both build a spend of `U`, and Bitcoin mines one. The
   other transaction never confirms, and that buyer spent nothing. A third party
@@ -310,7 +423,7 @@ buyer's Bitcoin transaction that spends `U`.
   the buyer spent nothing. After the payment, as above. After a take-back, the
   take-back stands or falls with the maker's own spend of `U`.
 
-### 6.4 What the buyer's wallet must build
+### 6.5 What the buyer's wallet must build
 
 The buyer's wallet builds a transaction around the maker's signed input:
 
@@ -335,10 +448,12 @@ paid by an ordinary payment to an address, with a deadline. Both forms run side
 by side: the slot for wallets that build the transaction, the lock for
 everything else.
 
-### 6.5 The maker's side
+### 6.6 The maker's side
 
 - **For each lot:** one Bitcoin output, about 43 virtual bytes to create in a
-  batch, holding a few hundred sat. That value passes to the buyer, so the
+  batch, holding a few hundred sat (a few thousand where it must also pay for
+  its own cancel, as in 6.1). A maker with no bitcoin buys it from a service in
+  any asset; a chained offer needs it only for its first slot. That value passes to the buyer, so the
   price accounts for it. The lot also needs one Sequentia output and one
   signature. A ladder of lots at several prices is a ladder of slots.
 - **Cancelling** is one Bitcoin transaction that spends the `U`s back to the
@@ -350,7 +465,7 @@ everything else.
 - **Repricing** is the same transaction, which also creates the new `U`s:
   about 100 virtual bytes per slot, or about 1,000 sat per slot at
   10 sat per virtual byte. New slots on Sequentia are fresh, so a buyer who
-  takes one at once carries the per-trade gap of 6.3 until the slot is old.
+  takes one at once carries the per-trade gap of 6.4 until the slot is old.
   The maker can create slots before it needs them so that buyers find old
   ones. These sizes are the standard taproot sizes and were not measured here.
 - **A stale quote.** A signature at an old price stays valid until `U` is spent.
@@ -363,7 +478,7 @@ everything else.
   The per-trade lock's quote lives until `D`, at least six Bitcoin blocks,
   which is longer.
 
-### 6.6 Before activation or after
+### 6.7 Before activation or after
 
 The rule is not active on any chain yet. The testnet gets it only at a height
 the owner chooses (specification, section 7).
@@ -401,7 +516,11 @@ reorganization deeper than the offer is old, there would be no deadline and so
 no late payment lost, and the maker could cancel within one Bitcoin
 confirmation. The cost is that the buyer's wallet must build the payment around
 the maker's signed input, so a payer that can only send to an address keeps
-the per-trade lock.
+the per-trade lock. A seller needs no bitcoin of its own for this. The coin
+that makes each lot unique can be funded by a service paid in any asset, and in
+a chained offer each payment carries the next lot's coin. The price is
+liveness: whoever signs the coins can stall or cancel an offer, but never take
+from it (section 6.1).
 
 ## 8. The runs
 
