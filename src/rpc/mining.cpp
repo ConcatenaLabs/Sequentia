@@ -20,6 +20,7 @@
 #include <musig.h>
 #include <bls.h>
 #include <pos.h>
+#include <pos_heldtxs.h>
 #include <pos_producer.h>
 #include <vrf.h>
 #include <node/context.h>
@@ -1794,6 +1795,9 @@ static RPCHelpMan musigpartialsign()
                     {"pubnonces", RPCArg::Type::ARR, RPCArg::Optional::NO, "Every member's round-1 pubnonce.",
                         {{"", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "pubnonce"}}},
                     {"msg", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The 32-byte message (must match round 1)."},
+                    {"block", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED_NAMED_ARG, "The unsigned block whose hash msg is. Required while this node "
+                        "holds transactions of certified blocks that a Bitcoin reorganization disconnected: it does not sign a block that respends one "
+                        "(doc/sequentia/04-proof-of-stake.md, \"Held transactions\")."},
                 },
                 RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::STR_HEX, "partialsig", "this member's 32-byte partial signature"}}},
                 RPCExamples{HelpExampleCli("musigpartialsign", "\"slot42\" \"cV...\" '[\"02...\"]' '[\"<nonce>\"]' \"<blockhash>\"")},
@@ -1806,11 +1810,61 @@ static RPCHelpMan musigpartialsign()
     std::vector<std::vector<unsigned char>> pubnonces = ParseHexArray(request.params[3], "pubnonce");
     std::vector<unsigned char> msg = ParseHexV(request.params[4], "msg");
     if (msg.size() != 32) throw JSONRPCError(RPC_INVALID_PARAMETER, "msg must be 32 bytes");
+    if (HeldTxsActive() && !HeldTxsGetInfo().txids.empty()) {
+        if (request.params[5].isNull()) {
+            throw JSONRPCError(RPC_MISC_ERROR, "held-conflict: this node holds disconnected certified transactions; pass the block to sign");
+        }
+        CBlock block;
+        if (!DecodeHexBlk(block, request.params[5].get_str())) throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Block decode failed");
+        const uint256 hash = block.GetHash();
+        if (std::vector<unsigned char>(hash.begin(), hash.end()) != msg) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "msg is not the hash of block");
+        }
+        ChainstateManager& chainman = EnsureAnyChainman(request.context);
+        LOCK(cs_main);
+        if (auto why = HeldTxsBlockConflict(block, chainman.m_blockman.LookupBlockIndex(block.hashPrevBlock))) {
+            throw JSONRPCError(RPC_MISC_ERROR, strprintf("held-conflict: %s", *why));
+        }
+    }
     std::string err;
     auto partial = MuSigSessionPartialSign(session_id, key, pubkeys, pubnonces, msg, err);
     if (!partial) throw JSONRPCError(RPC_MISC_ERROR, err);
     UniValue result(UniValue::VOBJ);
     result.pushKV("partialsig", HexStr(*partial));
+    return result;
+},
+    };
+}
+
+static RPCHelpMan getheldtxs()
+{
+    return RPCHelpMan{"getheldtxs",
+                "\nThe transactions this node holds from certified blocks that a Bitcoin reorganization disconnected, "
+                "and the blocks it has set aside for respending them (doc/sequentia/04-proof-of-stake.md, \"Held transactions\").\n",
+                {},
+                RPCResult{RPCResult::Type::OBJ, "", "", {
+                    {RPCResult::Type::BOOL, "active", "whether the rule runs on this node"},
+                    {RPCResult::Type::ARR, "txids", "held transaction ids", {{RPCResult::Type::STR_HEX, "", "txid"}}},
+                    {RPCResult::Type::ARR, "parked", "blocks set aside now", {{RPCResult::Type::STR_HEX, "", "block hash"}}},
+                    {RPCResult::Type::ARR, "given_up", "blocks set aside once and restored without a displacement", {{RPCResult::Type::STR_HEX, "", "block hash"}}},
+                    {RPCResult::Type::NUM, "fork_height", "the lowest height the disconnects kept, -1 when nothing is held"},
+                    {RPCResult::Type::NUM, "release_anchor", "the tip anchor height at which the last entry is released by the window"},
+                }},
+                RPCExamples{HelpExampleCli("getheldtxs", "")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    const HeldTxsInfo info = HeldTxsGetInfo();
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("active", HeldTxsActive());
+    UniValue txids(UniValue::VARR), parked(UniValue::VARR), given_up(UniValue::VARR);
+    for (const uint256& h : info.txids) txids.push_back(h.GetHex());
+    for (const uint256& h : info.parked) parked.push_back(h.GetHex());
+    for (const uint256& h : info.given_up) given_up.push_back(h.GetHex());
+    result.pushKV("txids", txids);
+    result.pushKV("parked", parked);
+    result.pushKV("given_up", given_up);
+    result.pushKV("fork_height", info.fork_height);
+    result.pushKV("release_anchor", (uint64_t)info.release_anchor);
     return result;
 },
     };
@@ -2502,6 +2556,7 @@ static const CRPCCommand commands[] =
     { "hidden",              &generatetoaddress,       },
     { "hidden",              &generatetodescriptor,    },
     { "hidden",              &generateblock,           },
+    { "hidden",              &getheldtxs,              },
 
     { "util",                &estimatesmartfee,        },
 

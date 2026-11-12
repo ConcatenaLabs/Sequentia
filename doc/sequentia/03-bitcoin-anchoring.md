@@ -172,7 +172,10 @@ and invalidates the lowest-height block whose anchor went stale via the existing
 `InvalidateBlock` path; `ActivateBestChain` then disconnects it and all its
 descendants. Block production resumes from the last still-valid Sequentia block,
 whose anchor is still canonical on Bitcoin, and disconnected transactions return
-to the mempool. Rebuilt blocks anchor to Bitcoin's new best chain.
+to the mempool. Rebuilt blocks anchor to Bitcoin's new best chain. A committee
+member also holds the transactions of the certified blocks it disconnected,
+and signs no block that respends them ("Held transactions" in
+[`04-proof-of-stake.md`](04-proof-of-stake.md) §9).
 
 This is a **consensus** invalidation, not a local policy choice: every node
 following the same Bitcoin best chain reaches the same decision, because

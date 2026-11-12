@@ -4,6 +4,8 @@
 
 #include <pos_producer.h>
 
+#include <pos_heldtxs.h>
+
 #include <anchor.h>
 #include <block_proof.h>
 #include <bls.h>
@@ -162,6 +164,13 @@ std::shared_ptr<CBlock> BuildUnsignedBlsBlock(ChainstateManager& chainman, CTxMe
         return nullptr;
     }
     if (!tmpl) return nullptr;
+    {
+        LOCK(cs_main);
+        if (auto why = HeldTxsBlockConflict(tmpl->block, chainman.m_blockman.LookupBlockIndex(tmpl->block.hashPrevBlock))) {
+            LogPrintf("PoS gossip: not proposing at height %d: %s\n", tip->nHeight + 1, *why);
+            return nullptr;
+        }
+    }
     auto block = std::make_shared<CBlock>(tmpl->block);
     // The proposal's timestamp is the origin of the committee's round schedule
     // (DriveRound), so it must be the second the proposal is actually made.
@@ -399,6 +408,13 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
         LOCK(cs_main);
         unsigned int extra_nonce = 0;
         IncrementExtraNonce(&block, chainman.ActiveChain().Tip(), extra_nonce);
+        // Held transactions (pos_heldtxs.h): the keys here sign as committee
+        // members too, so the rule binds this path as it binds the gossip round.
+        if (auto why = HeldTxsBlockConflict(block, chainman.m_blockman.LookupBlockIndex(block.hashPrevBlock))) {
+            error = strprintf("held-conflict: %s", *why);
+            err_kind = PosProduceError::INTERNAL;
+            return false;
+        }
     }
 
     // Collect all available signing keys (leader + any committee keys).
@@ -673,6 +689,11 @@ int64_t PosProducer::Step()
     // block (the bootstrap this feature exists for). The producer always builds
     // on the best validated tip; a peer-aware "don't produce if a better chain
     // is being announced" guard is a later, gossip-aware refinement (Phase 2+).
+
+    // Held transactions, arm two (pos_heldtxs.h): set aside a sub-quorum block
+    // of the active chain that respends a held transaction, so that this
+    // member signs a sibling in its place; restore it when due.
+    if (HeldTxsMaintain(m_chainman, m_mempool, /*park=*/true)) return 100;
 
     CBlockIndex* tip;
     {
@@ -1494,6 +1515,9 @@ int64_t PosProducer::DriveRound()
         }
         if (need_query) SendCertQueryOnce(locked);
     }
+    // Held transactions: while the anchor watcher is between a disconnect and
+    // recording what it took off the chain, sign nothing (pos_heldtxs.h).
+    if (want_sign && HeldTxsFilling()) return 150;
     if (want_sign && !m_byzantine_equivocate) {
         // Lazy validation (paper P6 step 10): validate the backed block only now,
         // when we are about to sign it — not every proposal on the message thread.
@@ -1507,6 +1531,16 @@ int64_t PosProducer::DriveRound()
                 BlockValidationState state;
                 valid = TestBlockValidity(state, m_chainparams, m_chainman.ActiveChainstate(), *backed, tip2,
                                           /*fCheckPOW=*/false, /*fCheckMerkleRoot=*/true);
+                // Held transactions (pos_heldtxs.h): a proposal that respends
+                // what a disconnected certified block held, or that builds on
+                // such a respend, is treated as invalid: its leader is excluded
+                // and the next one, which holds the original, is backed.
+                if (valid) {
+                    if (auto why = HeldTxsBlockConflict(*backed, tip2)) {
+                        LogPrintf("PoS gossip: not signing %s at height %d: %s\n", backed->GetHash().GetHex(), height, *why);
+                        valid = false;
+                    }
+                }
             }
         }
         if (!valid) {
