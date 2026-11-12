@@ -617,7 +617,12 @@ and is lost if both stay offline until the refund is valid.
   watches Bitcoin; every block producer does). It holds each claim evicted after
   a reorganization, and each claim that a connected block displaced from the
   mempool by spending its lock coin (the block that mined the refund, say),
-  keyed by transaction id, with the variants of section 6.2, in a waiting set:
+  keyed by transaction id, with the variants of section 6.2, in a waiting set.
+  A lock coin here is any coin the claim spends with a record. A pooled claim
+  that a block displaced by spending only another coin it spends (its fee
+  input, say) is not held: its lock coins stay unspent, so they cannot show
+  when that block leaves the chain, and it can never be mined while that block
+  stands. The set is:
   - **as large as the disconnected blocks can make it.** Claims of an
     attacker's own that nobody can complete (they prove its own Bitcoin
     transaction, which it double-spends) ride in the very blocks the
@@ -643,13 +648,17 @@ and is lost if both stay offline until the refund is valid.
     outranks none is not held. So a displaced claim never keeps out a claim
     that can be tried, whatever fee it names, and a claim newly displaced takes
     the place of the one displaced longest ago. Once the block that displaced a
-    claim is disconnected, the claim ranks by its fee again;
+    claim is disconnected, the claim ranks by its fee again, provided every
+    coin it spends is unspent on the active chain or made by a pooled
+    transaction; while a branch that replaced that block has spent one of
+    them, the claim cannot be mined there and keeps the displaced rank;
   - **forgotten at once when its lock coin is spent** on the active chain
     (checked whenever the chain tip moves, in chunks that release the chain
     lock between them): such a claim can never be mined on that chain. A claim
     a block displaced is the exception: it waits, untried, while its lock coin
-    stays spent, and is tried again once the block that spent it is
-    disconnected, which a Bitcoin reorganization can do at any depth;
+    stays spent, or while another coin it spends is spent, and is tried again
+    once the block that spent it is disconnected and every coin it spends is
+    unspent, which a Bitcoin reorganization can bring about at any depth;
   - **forgotten after one window:** a claim not re-attached within 144 Bitcoin
     blocks of being held is dropped with its variants. By then the search has
     covered the window below the height it was held at and every block mined
@@ -1185,8 +1194,11 @@ that held the claim brings it back itself: a claim the block mining the refund
 displaced from its mempool waits for re-attachment while that block stands, and
 is re-attached once the block is disconnected (section 6.3). That holds while
 its waiting set has room for it: a set full of claims that can be tried, or of
-claims displaced after it, leaves none. The node holds it in memory only, so a
-restart forgets it. The completion service resubmits it in every case.
+claims displaced after it, leaves none. It is held because that block spends its
+lock coin; a claim a block displaced by spending only another coin it spends
+(its fee input) is not held, as it cannot be mined while that block stands. The
+node holds it in memory only, so a restart forgets it. The completion service
+resubmits it in every case.
 
 ## 10. The collision class
 

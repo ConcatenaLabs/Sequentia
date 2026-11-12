@@ -539,6 +539,8 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.shared_replacement()
         self.refund_block_undone()
         self.displaced_never_crowd()
+        self.displaced_by_a_record_input()
+        self.displaced_until_every_coin_returns()
         self.payment_fields()
         self.only_tightens()
 
@@ -3366,6 +3368,181 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.log.info("    (c) a set full of claims at %.1f per vB: a spend displaced at 500,000 is not held", low)
         self.results.append((self.current + " (c)", "set of 2 full of claims at %.1f per vB that can be tried: a spend "
                              "displaced at 500,000 not held, none dropped" % low))
+        self.restart_seq0()
+
+
+    def own_coin(self):
+        """A coin of 1 unit in node 0's wallet, mined and locked (the wallet
+        funds nothing else from it): its outpoint."""
+        node = self.nodes[0]
+        addr = node.getnewaddress()
+        txid = node.sendtoaddress(address=addr, amount=1, assetlabel=self.asset, fee_asset_label=self.asset)
+        self.mine(1)
+        spk = bytes.fromhex(node.getaddressinfo(addr)["scriptPubKey"])
+        vout = [i for i, o in enumerate(tx_from_hex(node.getrawtransaction(txid)).vout) if o.scriptPubKey == spk][0]
+        assert node.lockunspent(False, [{"txid": txid, "vout": vout}])
+        return COutPoint(int(txid, 16), vout)
+
+    def outsider_with_own_coin(self):
+        """An outsider's covenant coin L under two leaves, one reading a proof and
+        one reading nothing, and a coin X of its own. Returns L's outpoint, X's,
+        and spend(fee, with_lock, with_x, record): a spend of L (input 0; by the
+        proof leaf, carrying the record, when `record`, else by the other leaf)
+        and of X (no record)."""
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        if getattr(self, "outsider_pay", None) is None:
+            self.outsider_pay = self.pay(self.bbuyer.getnewaddress(address_type="bech32"), 1000000)
+            self.outsider_block = self.btc_mine(1)[0]
+            self.mine_anchored(b.getblockheader(self.outsider_block)["height"])
+        leaves = {"proof": CScript([OP_INSPECTBTCPAYMENT, OP_2DROP, OP_1]), "free": CScript([OP_1])}
+        tap = taproot_construct(NUMS, list(leaves.items()))
+        ltxid = node.sendtoaddress(address=program_to_witness(1, tap.scriptPubKey[2:]), amount=1,
+                                   assetlabel=self.asset, fee_asset_label=self.asset)
+        C = self.anchor_of(self.mine(1)[0])
+        lvout = [i for i, o in enumerate(tx_from_hex(node.getrawtransaction(ltxid)).vout) if o.scriptPubKey == tap.scriptPubKey][0]
+        L = COutPoint(int(ltxid, 16), lvout)
+        rec = self.proof_for(self.outsider_pay, C, self.outsider_block)["record"]
+        x = self.own_coin()
+        spk = bytes.fromhex(node.getaddressinfo(node.getnewaddress())["scriptPubKey"])
+        asset = CTxOutAsset(b"\x01" + bytes.fromhex(self.asset)[::-1])
+
+        def spend(fee, with_lock=True, with_x=True, record=True):
+            t = CTransaction()
+            t.nVersion = 2
+            t.vout = [CTxOut(CTxOutValue(0), spk, asset), CTxOut(CTxOutValue(0), b"", asset)]
+            t.wit.vtxoutwit = [CTxOutWitness() for _ in t.vout]
+            if with_lock:
+                name = "proof" if record else "free"
+                control = bytes([tap.leaves[name].version + tap.negflag]) + tap.internal_pubkey + tap.leaves[name].merklebranch
+                t.vin.append(CTxIn(L, nSequence=SEQ_NONFINAL_RBF))
+                w = CTxInWitness()
+                w.scriptWitness.stack = [bytes(leaves[name]), control]
+                if record:
+                    w.peginWitness.stack = [rec]
+                t.wit.vtxinwit.append(w)
+            if with_x:
+                t.vin.append(CTxIn(x, nSequence=SEQ_NONFINAL_RBF))
+                t.wit.vtxinwit.append(CTxInWitness())
+            total = 100000000 * (int(with_lock) + int(with_x))
+            t.vout[0].nValue = CTxOutValue(total - fee)
+            t.vout[1].nValue = CTxOutValue(fee)
+            if with_x:
+                t = tx_from_hex(node.signrawtransactionwithwallet(t.serialize().hex())["hex"])
+            t.rehash()
+            if with_lock:
+                assert_equal(t.wit.vtxinwit[0].peginWitness.stack, [rec] if record else [])
+            return t
+        return L, x, spend
+
+    def displaced_by_a_record_input(self):
+        self.step("N54 (PV17 D8) a pooled spend is held as displaced only when the block spends a coin it spends with a "
+                  "record; one that lost another coin is not held")
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        self.restart_seq0(["-btcpaymaxwaiting=2"])
+        self.outsider_pay = None
+        # (a) Twice: an outsider pools a spend of its covenant coin L and its own
+        # coin X at 500,000, then gets a cheap spend of X alone mined. L stays
+        # unspent, and the pooled spend can never be mined while that block
+        # stands: it is not held. The claim the refund's block displaces is held
+        # and returns when that block is undone.
+        lost = []
+        for _ in range(2):
+            lock_coin, x, spend = self.outsider_with_own_coin()
+            hi = spend(500000)
+            node.sendrawtransaction(hi.serialize().hex())
+            blk = self.force([spend(5000, with_lock=False)])
+            assert hi.hash not in node.getrawmempool()
+            assert node.gettxout("%064x" % lock_coin.hash, lock_coin.n) is not None
+            lost.append((hi.hash, blk))
+        for _ in range(10):
+            self.force([])
+        # The re-attach thread sweeps the waiting set once a tick (every
+        # -anchorpollinterval, 1 s here): two ticks, so that a spend held
+        # wrongly would rank by its fee before the claim below is displaced.
+        time.sleep(3)
+        lock = self.fresh_lock(deadline_in=2, margin=0)
+        ptx, pr, vout = self.paid(lock)
+        claim = self.claim(lock, pr["record"], vout)
+        node.sendrawtransaction(claim.serialize().hex())
+        refund = self.refund(lock)
+        self.btc_mine(max(0, lock["refund_at"] - b.getblockcount()))
+        while self.anchor_of(node.getbestblockhash()) < lock["refund_at"]:
+            self.force([])
+        first = self.first_anchored_at(lock["refund_at"])
+        while node.getblockcount() < first + FLOOR_DEPTH - 1:
+            self.force([])
+        assert claim.hash in node.getrawmempool()
+        blk = self.force([refund])
+        assert refund.hash in node.getblock(blk)["tx"] and claim.hash not in node.getrawmempool()
+        not_held = self.debug_lines(node, "%s not held for re-attachment" % claim.hash)
+        assert not not_held, "the claim the refund's block displaced was not held: %s" % not_held
+        node.invalidateblock(blk)
+        self.wait_for(lambda: claim.hash in node.getrawmempool(), "the displaced claim back in the mempool", timeout=20)
+        assert self.debug_lines(node, "%s no longer displaced" % claim.hash)
+        assert refund.hash not in node.getrawmempool()
+        mined = self.mine(1)[0]
+        assert claim.hash in node.getblock(mined)["tx"]
+        for txid, blk in lost:
+            assert self.debug_lines(node, "%s lost a coin it spends without a record to block %s; not held" % (txid, blk))
+            assert not self.debug_lines(node, "%s displaced by block" % txid)
+            assert not self.debug_lines(node, "%s no longer displaced" % txid)
+        self.log.info("    two spends at 500,000 that lost only their own coin X to a block were not held; the claim "
+                      "the refund's block displaced was held, returned when the block was undone, and was mined")
+        self.results.append((self.current, "set of 2; two outsider spends at 500,000 lost a coin without a record "
+                             "to a block: not held; the claim the refund's block displaced held, re-attached and mined"))
+        self.restart_seq0()
+
+    def displaced_until_every_coin_returns(self):
+        self.step("N55 (PV17 D8) a displaced spend ranks by its fee again only when every coin it spends is unspent")
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        self.outsider_pay = None
+        # A spend displaced through its lock coin, by a block spending L (by
+        # the leaf that reads nothing, so that block's spend is no claim) and X
+        # cheaply, whose branch is then replaced by one spending X alone: L is
+        # unspent again, but the spend can still never be mined. It keeps the
+        # displaced rank, so two of them leave room for a buyer's claim evicted
+        # by a reorganization, which takes the place of the older one.
+        self.restart_seq0(["-btcpaymaxwaiting=2"])
+        made = [self.outsider_with_own_coin() for _ in range(2)]
+        his = [spend(500000) for _, _, spend in made]
+        for hi in his:
+            node.sendrawtransaction(hi.serialize().hex())
+        # Signed while X is unspent: the wallet signs nothing it spent.
+        x_only = [spend(5000, with_lock=False).serialize().hex() for _, _, spend in made]
+        self.sync_blocks(self.nodes[:2])
+        self.disconnect_nodes(0, 1)
+        blk = self.force([spend(5000, record=False) for _, _, spend in made])
+        for hi in his:
+            assert self.debug_lines(node, "%s displaced by block %s" % (hi.hash, blk))
+        n1 = self.nodes[1]
+        side = [n1.generateblock(n1.getnewaddress(), x_only, invalid_call=False)["hash"]]
+        side.append(n1.generateblock(n1.getnewaddress(), [], invalid_call=False)["hash"])
+        for h in side:
+            node.submitblock(n1.getblock(h, 0))
+        assert_equal(node.getbestblockhash(), side[-1])
+        assert node.getblockheader(blk)["confirmations"] < 0
+        for lock_coin, x, _ in made:
+            assert node.gettxout("%064x" % lock_coin.hash, lock_coin.n, True) is not None
+            assert node.gettxout("%064x" % x.hash, x.n, True) is None
+        self.connect_nodes(0, 1)
+        h1, h1_rate = self.honest_evicted(5000)
+        self.wait_for(lambda: h1.hash in node.getrawmempool(), "the evicted claim re-attached", timeout=60)
+        blk = self.mine_anchored(b.getblockcount())
+        assert h1.hash in node.getblock(blk)["tx"]
+        assert not self.debug_lines(node, "%s not held for re-attachment" % h1.hash)
+        assert self.debug_lines(node, "%s dropped from the waiting set (displaced by a block) for %s" % (his[0].hash, h1.hash))
+        for hi in his:
+            assert self.debug_lines(node, "%s stays displaced" % hi.hash)
+            assert not self.debug_lines(node, "%s no longer displaced" % hi.hash)
+        self.log.info("    two spends displaced through their lock coin, whose branch was replaced by one spending "
+                      "their own coin X, stayed displaced; a claim at %.1f per vB evicted by a reorganization took the "
+                      "older one's place, came back and was mined", h1_rate)
+        self.results.append((self.current, "lock coin unspent again but X spent on the new branch: the spend stays "
+                             "displaced; a claim at %.1f per vB evicted by a reorganization held in its place, re-attached "
+                             "and mined" % h1_rate))
         self.restart_seq0()
 
 

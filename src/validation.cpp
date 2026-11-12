@@ -487,7 +487,8 @@ struct BtcPayPending {
     std::vector<COutPoint> locks;  //!< the coins it spends on inputs that carry records
     //! Displaced from the mempool by a block that spends its lock coin (a
     //! refund, say). Kept, not forgotten, while that coin is spent, so that it
-    //! returns if the block leaves the chain; skipped until then.
+    //! returns if the block leaves the chain and every coin it spends is
+    //! unspent; skipped until then.
     bool displaced_by_block{false};
 };
 static std::map<uint256, BtcPayPending> g_btcpay_pending GUARDED_BY(g_btcpay_pending_mutex);
@@ -5918,17 +5919,34 @@ bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew
     if (m_mempool) {
         // ELEMENTS: We also eject peg-outs with now-invalid PAK proofs
         // as well as peg-in inputs during transitional periods.
-        // SEQUENTIA: the proof-reading spends this block displaces (a claim
-        // whose lock the block's refund spends) are held for re-attachment.
+        // SEQUENTIA: the proof-reading spends this block displaces by spending
+        // one of their lock coins, the coins they spend with a record (a claim
+        // whose lock the block's refund spends), are held for re-attachment:
+        // they return if the block leaves the chain. A spend that lost only a
+        // coin it spends without a record is not held: its lock coins stay
+        // unspent, so they would not show when the block that displaced it
+        // leaves the chain, and it can never be mined while that block stands.
         std::vector<CTransactionRef> btcpay_displaced;
+        std::vector<CTransactionRef> btcpay_lost_other;
+        std::set<uint256> btcpay_seen_lock, btcpay_seen_other;
         if (m_params.GetConsensus().BtcPaymentActiveAt(pindexNew->nHeight)) {
             for (const auto& btx : blockConnecting.vtx) {
                 for (const CTxIn& in : btx->vin) {
                     if (in.m_is_pegin) continue;
                     const auto it = m_mempool->mapNextTx.find(in.prevout);
                     if (it == m_mempool->mapNextTx.end() || it->second->GetHash() == btx->GetHash()) continue;
-                    if (BtcPayClassOf(*it->second) != BtcPayClass::PROOF) continue;
-                    if (auto ref = m_mempool->get(it->second->GetHash())) btcpay_displaced.push_back(ref);
+                    const CTransaction& pooled = *it->second;
+                    if (BtcPayClassOf(pooled) != BtcPayClass::PROOF) continue;
+                    bool lock = false;
+                    for (size_t j = 0; j < pooled.vin.size() && j < pooled.witness.vtxinwit.size(); ++j) {
+                        if (pooled.vin[j].prevout == in.prevout && !pooled.vin[j].m_is_pegin &&
+                            !pooled.witness.vtxinwit[j].m_pegin_witness.stack.empty()) {
+                            lock = true;
+                            break;
+                        }
+                    }
+                    if (!(lock ? btcpay_seen_lock : btcpay_seen_other).insert(pooled.GetHash()).second) continue;
+                    if (auto ref = m_mempool->get(pooled.GetHash())) (lock ? btcpay_displaced : btcpay_lost_other).push_back(ref);
                 }
             }
         }
@@ -5939,6 +5957,11 @@ bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew
             LogPrint(BCLog::MEMPOOL, "BtcPayment: %s displaced by block %s, held for re-attachment\n",
                      tx->GetHash().ToString(), pindexNew->GetBlockHash().ToString());
             BtcPaymentNoteDisplaced(tx);
+        }
+        for (const CTransactionRef& tx : btcpay_lost_other) {
+            if (btcpay_seen_lock.count(tx->GetHash()) || m_mempool->exists(GenTxid::Txid(tx->GetHash()))) continue;
+            LogPrint(BCLog::MEMPOOL, "BtcPayment: %s lost a coin it spends without a record to block %s; not held, its "
+                     "lock coins being unspent\n", tx->GetHash().ToString(), pindexNew->GetBlockHash().ToString());
         }
         // SEQUENTIA: where the coinbase maturity rises at a height (the
         // testnet's 100 -> 1,000, CoinbaseMaturityAt), a resident spend that
@@ -9188,8 +9211,8 @@ struct BtcPayAttacher {
     int64_t deadline{0};
     //! The chain tip the waiting claims' lock coins were last checked at.
     uint256 swept_seq_tip;
-    //! Claims displaced by a block whose lock coin is still spent at that tip:
-    //! held, not tried.
+    //! Claims displaced by a block that cannot be mined at that tip (a lock
+    //! coin, or another coin they spend, is spent there): held, not tried.
     std::set<uint256> lock_spent;
     //! The search by paid script: Bitcoin block hash -> the script hashes it was
     //! read for, and script hash -> the transactions found paying that script.
@@ -9980,17 +10003,32 @@ void BtcPaymentReattachTick(ChainstateManager& chainman)
     // mined on it: forgotten at once, whenever the chain tip moves. In chunks,
     // the chain lock released between them. A displaced claim is kept while its
     // lock coin is spent, and once that coin is unspent again (the block that
-    // displaced it has left the chain) it is a claim like any other.
+    // displaced it has left the chain) it is a claim like any other, provided
+    // every other coin it spends is unspent too: a branch that replaced that
+    // block may have spent one, and a claim that cannot be mined there keeps
+    // the displaced rank rather than its fee's.
     if (seq_tip != a.swept_seq_tip) {
         a.swept_seq_tip = seq_tip;
         std::vector<std::pair<uint256, std::vector<COutPoint>>> held;
-        std::set<uint256> displaced;
+        //! Displaced claims -> the coins they spend without a record.
+        std::map<uint256, std::vector<COutPoint>> displaced;
         {
             LOCK(g_btcpay_pending_mutex);
             held.reserve(g_btcpay_pending.size());
             for (const auto& [txid, p] : g_btcpay_pending) {
                 held.emplace_back(txid, p.locks);
-                if (p.displaced_by_block) displaced.insert(txid);
+                if (!p.displaced_by_block) continue;
+                std::vector<COutPoint>& others = displaced[txid];
+                const auto v = g_btcpay_variants.find(txid);
+                if (v == g_btcpay_variants.end()) continue;
+                // Every variant of a transaction id spends the same coins.
+                const CTransactionRef tx = v->second.current ? v->second.current :
+                                           v->second.txs.empty() ? nullptr : v->second.txs.front();
+                if (!tx) continue;
+                for (const CTxIn& in : tx->vin) {
+                    if (in.m_is_pegin || std::find(p.locks.begin(), p.locks.end(), in.prevout) != p.locks.end()) continue;
+                    others.push_back(in.prevout);
+                }
             }
         }
         a.lock_spent.clear();
@@ -10001,29 +10039,45 @@ void BtcPaymentReattachTick(ChainstateManager& chainman)
         for (size_t at = 0; at < held.size(); at += SWEEP_CHUNK) {
             std::vector<std::pair<uint256, COutPoint>> spent;
             std::vector<uint256> restored;
+            std::vector<std::pair<uint256, COutPoint>> other_spent;
             {
                 LOCK2(cs_main, pool.cs);
                 const int64_t held_from = GetTimeMicros();
+                const auto gone = [&](const COutPoint& o) {
+                    return cs.CoinsTip().AccessCoin(o).IsSpent() && !pool.exists(GenTxid::Txid(o.hash));
+                };
                 for (size_t k = at; k < std::min(held.size(), at + SWEEP_CHUNK); ++k) {
                     bool any_spent = false;
                     for (const COutPoint& lock : held[k].second) {
-                        if (cs.CoinsTip().AccessCoin(lock).IsSpent() && !pool.exists(GenTxid::Txid(lock.hash))) {
+                        if (gone(lock)) {
                             spent.emplace_back(held[k].first, lock);
                             any_spent = true;
                             break;
                         }
                     }
-                    if (!any_spent && displaced.count(held[k].first)) restored.push_back(held[k].first);
+                    const auto d = displaced.find(held[k].first);
+                    if (any_spent || d == displaced.end()) continue;
+                    const auto other = std::find_if(d->second.begin(), d->second.end(), gone);
+                    if (other == d->second.end()) {
+                        restored.push_back(held[k].first);
+                    } else {
+                        other_spent.emplace_back(held[k].first, *other);
+                    }
                 }
                 longest_us = std::max(longest_us, GetTimeMicros() - held_from);
             }
             LOCK(g_btcpay_pending_mutex);
             for (const uint256& txid : restored) {
                 if (auto p = g_btcpay_pending.find(txid); p != g_btcpay_pending.end()) {
-                    LogPrint(BCLog::MEMPOOL, "BtcPayment: %s no longer displaced: its lock coin is unspent on the active "
+                    LogPrint(BCLog::MEMPOOL, "BtcPayment: %s no longer displaced: the coins it spends are unspent on the active "
                              "chain, held at %.3f per vB\n", txid.ToString(), p->second.rate);
                     BtcPaySetDisplaced(p->second, txid, false);
                 }
+            }
+            for (const auto& [txid, other] : other_spent) {
+                LogPrint(BCLog::MEMPOOL, "BtcPayment: %s stays displaced: its lock coins are unspent on the active chain, "
+                         "but %s, which it spends without a record, is spent there\n", txid.ToString(), other.ToString());
+                a.lock_spent.insert(txid);
             }
             for (const auto& [txid, lock] : spent) {
                 if (displaced.count(txid)) {
