@@ -3063,6 +3063,7 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         # Bitcoin replaces every block above the payment's with a longer branch; the payment stays.
         a1h = b.getblockheader(a1)["height"]
         old_top = b.getblockcount()
+        seq_before = node.getblockcount()
         b.invalidateblock(b.getblockhash(a1h + 1))
         while b.getbestblockhash() != a1:   # and the contest's rival branch stays out
             assert b.getblockcount() >= a1h
@@ -3071,8 +3072,8 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         assert b.getblockheader(a1)["confirmations"] > 0
         self.wait_for(lambda: self.anchor_of(node.getbestblockhash()) < a1h + 1, "the blocks above the payment left")
         assert node.getblockcount() < first
-        self.log.info("    the watcher left %d blocks; tip %d anchored at %d", 31 + 1, node.getblockcount(),
-                      self.anchor_of(node.getbestblockhash()))
+        self.log.info("    the watcher disconnected %d blocks; tip %d anchored at %d", seq_before - node.getblockcount(),
+                      node.getblockcount(), self.anchor_of(node.getbestblockhash()))
         self.force([refund], "bad-anchorlock-not-reached")
         jump2 = self.force([])
         first2 = node.getblockheader(jump2)["height"]
