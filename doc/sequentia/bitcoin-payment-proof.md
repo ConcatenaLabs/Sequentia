@@ -371,7 +371,8 @@ the hashing, which the block weight already bounds.
   many times heavier. The rule is relay policy (the standard script flag
   `SCRIPT_VERIFY_BTCPAYMENT_RECORDS_READ`, refused as `Bitcoin payment record not
   read by any executed opcode`), not consensus: a block may still carry such a
-  record. Its verdict reads only the transaction and the outputs it spends, so
+  record. It holds on every input, a spend of a stake record included. Its
+  verdict reads only the transaction and the outputs it spends, so
   the same bytes get the same answer on every node with the rule active, at any
   tip.
 - A transaction carrying a floor is accepted, and may replace another, only

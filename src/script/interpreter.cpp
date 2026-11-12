@@ -3516,6 +3516,11 @@ bool VerifyScript(const CScript& scriptSig, const CScript& scriptPubKey, const C
         if (!EvalScript(stack, scriptPubKey, record_flags, checker, SigVersion::WITNESS_V0, serror)) return false;
         if (stack.size() != 1) return set_error(serror, SCRIPT_ERR_CLEANSTACK);
         if (!CastToBool(stack.back())) return set_error(serror, SCRIPT_ERR_EVAL_FALSE);
+        // SEQUENTIA (relay policy): as below, a record no executed opcode read.
+        if ((flags & SCRIPT_VERIFY_BTCPAYMENT) && (flags & SCRIPT_VERIFY_BTCPAYMENT_RECORDS_READ) &&
+            checker.BtcPaymentRecordsUnread()) {
+            return set_error(serror, SCRIPT_ERR_BTCPAY_UNREAD);
+        }
         return set_success(serror);
     }
 
