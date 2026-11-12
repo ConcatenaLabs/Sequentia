@@ -301,6 +301,15 @@ constant.
   twice, and a coin created in the same block as its claim can never be claimed
   there, since `h` would have to be both above `C` and at most `C`.
 
+The two differ under a Bitcoin reorganization that reaches below the coin's
+block (proof review PV13, case E18). When only the payment moves, a claim under
+either floor is mined again. When the reorganization reaches below the lock, the
+lock is mined again in a block with a later anchor, so `C` rises: a payment
+mined again at or below the new `C` still opens the absolute floor, and no longer
+opens the relative one, which then leaves the seller with both sides. So a
+two-party trade uses the absolute floor, and the relative floor belongs to
+covenants whose next fill a later payment can make.
+
 ## 5. Cost and limits
 
 **Size.** A proof is 128 bytes, plus 64 bytes per tree level (12 to 13 levels on
@@ -468,7 +477,11 @@ through `BtcPaymentActiveAt(height)` in the shape of `SimplicityBudget4ActiveAt`
   functional tests use to show the behaviour before activation;
 - the running testnet gets a height bound to its genesis hash, chosen by the
   owner, together with the version bump, the release notes and an all-at-once
-  cutover of every node. Until then the testnet does not have it.
+  cutover of every node. Until then the testnet does not have it;
+- the running chains that are not this project's (Bitcoin's `main` and `signet`,
+  and the Liquid chains) never have it. On them 0xe5 to 0xe7 stay `OP_SUCCESS`.
+
+`src/test/sequentia_chainparams_tests.cpp` pins each of these.
 
 ## 8. The swap
 
@@ -525,7 +538,25 @@ proof of any payment that meets the leaf's conditions completes it.
 
 The lock must not signal replacement. The claims do signal it (`nSequence`
 `0xfffffffd`), so that a higher fee tier of the same claim (section 8.2) replaces a
-lower one.
+lower one. A refund never replaces a claim in honest mempools, whatever either
+pays (section 6.2).
+
+**The claim's fee is paid in an asset block producers accept.** Producers take
+only the fee assets on their lists, and a node values each at broadcast, so a
+claim paying its fee in an asset no producer accepts is never mined, and the
+seller refunds at `R`. The claim therefore pays its fee:
+
+- in the locked asset itself, when producers accept it, which is the default
+  (the fee comes from the asset being moved);
+- otherwise from a second input in an accepted asset: a small output the seller
+  adds to the lock under the same two leaves, priced into the offer, or a coin of
+  the buyer's own, which the buyer's wallet keeps unspent until the claim is mined
+  or `R` has passed.
+
+The buyer's wallet checks before it pays that producers accept the claim's fee
+asset (section 8.2), and offers the trade only when one of these is available. No
+asset is the fallback: the Sequence token is used only if it is one of the
+accepted assets the claim can draw on, like any other.
 
 ### 8.2 The timeline
 
@@ -537,6 +568,7 @@ lower one.
    - the lock's script, leaf for leaf, against the agreed terms, and that the
      receiving script is the seller's template (section 8.3);
    - that `F <= L`, and that `D` leaves room to confirm a payment;
+   - that producers accept the asset the claim's fee is paid in (section 8.1);
    - that the lock's block is final: at or below the node's finalized height
      (`getposfinality`'s `finalized_height`), so it is certified by a full quorum
      and no sibling block can replace it except through Bitcoin;
@@ -560,18 +592,19 @@ lower one.
      one-block reorganization is rare on Bitcoin's main network and common on its
      test networks, and a seller who controls a producer is the rarer half.
 4. **The buyer signs the claim, and a cancel, before it pays.** The claim pays
-   the asset to the buyer less a fee in that asset. It signs three tiers of the
-   same claim (section 8.5): the going rate with headroom, ten times that, and a
-   top tier sized so that keeping the claim out costs more than the swap is
-   worth. The cancel spends the payment's own inputs back to the buyer at a high
-   fee. The wallet hands all of them to its completion service and to the
-   counterparty.
+   the asset to the buyer, its fee in an accepted asset (section 8.1). It signs
+   three tiers of the same claim (section 8.5): the going rate with headroom, ten
+   times that, and a top tier sized so that keeping the claim out costs more than
+   the swap is worth. The cancel spends the payment's own inputs back to the buyer
+   at a high fee. The wallet hands all of them to its completion service and to
+   the counterparty.
 5. **The buyer pays** the seller's address at least the amount, with an ordinary
    Bitcoin transaction, at a fee for the next block.
 6. **Anyone completes the claim** once the payment is mined at `h` and a
    Sequentia block has anchored at `h` or above, usually one Sequentia block
    later: attaches the proof, linked to that anchor, and the coin anchor, and
-   submits it. It is mined in the next block. Every node that watches Bitcoin
+   submits it. It is mined in the next block, so the claim lands about two
+   Sequentia blocks after the payment confirms. Every node that watches Bitcoin
    keeps it alive across reorganizations (section 6.3).
 7. **Or the seller refunds**: if no claim has been mined by the time the anchor
    reaches `R`, and the seller's wallet sees no payment to its address mined at a
@@ -630,8 +663,11 @@ is acceptable or ruled out.
 A portal operator runs a service that holds no key. It receives each buyer's
 signed claims, signed cancel and the payment's transaction id, and then:
 
-- completes the claim as soon as the payment is mined, and again after any
-  reorganization that moves it;
+- completes the claim as soon as a Sequentia block has anchored at the
+  payment's block or above, and again after any reorganization that moves it.
+  Nodes keep the proofs they have seen and re-link them (section 6.3), but only
+  in memory, so the service submits the buyer's own proof again after any
+  reorganization rather than relying on them;
 - raises the claim's fee tier if it is not mined: to the second tier after 10
   Sequentia blocks, to the top tier after 20, well inside the margin of 6
   Bitcoin blocks (about 60 Sequentia blocks);
@@ -641,7 +677,10 @@ signed claims, signed cancel and the payment's transaction id, and then:
   replacement costlier.
 
 The buyer's wallet does the same while it is open. Every node that watches
-Bitcoin does the first part as policy (section 6.3).
+Bitcoin does the first part as policy (section 6.3). Every tier pays its fee in
+an accepted asset (section 8.1); a wallet holding two accepted assets signs the
+tiers in both, so a fee asset dropped from the producers' lists before the claim
+is mined leaves a tier that still is.
 
 **The top tier's rule.** A seller who wants the refund can try to keep the claim
 out by filling every block of the margin with transactions paying a higher fee
@@ -655,9 +694,33 @@ with `V` the asset amount locked, `v_claim` the claim's virtual size, `B` a
 block's virtual-size limit and `N` the Sequentia blocks in the margin. With the
 chain's limit of 89,999 virtual bytes, 60 blocks and a claim of 300 virtual
 bytes, the top tier costs the buyer V / 18,000 (0.0056 % of the value), paid in
-the asset itself, and a seller who outbids it on every block pays more than V.
+the claim's fee asset, and a seller who outbids it on every block pays more than V.
 The rule is in the fee asset's own units, so it holds whatever that asset is
-worth.
+worth. `N` counts the blocks the claim can be mined in, from the first block
+anchored at or above the payment to the last one anchored below `R`; the mempool
+judging floors against the tip's anchor (section 6.1) keeps a stall from
+shortening it.
+
+Two routes make outbidding cheaper for the seller (proof review PV13, case E15),
+and the rule takes both:
+
+- **A seller that produces blocks** fills its own blocks for nothing. If it
+  produces a share `s` of them, outbidding costs it `1 - s` of the sum above. A
+  staker with half the blocks or more controls the chain outright, so the rule
+  takes `s < 1/2`.
+- **Fillers paid in a fee asset whose published rate is above what the seller
+  pays for it**, for example a stale or illiquid one: producers value the
+  fillers at the published rate, the seller pays the market price, and its cost
+  falls by the ratio `m` of the two.
+
+So the top tier is
+
+    top fee = V × v_claim × m / (B × N × (1 - s))
+
+With `s = 1/2` and `m = 2` it is V / 4,500 (0.022 % of the value) for the figures
+above. `m` has no bound the chain enforces: it is bounded by how closely the
+producers' rates follow the market, and a wallet sets it from the age and
+liquidity of the rates it reads.
 
 ### 8.6 One payment, one lock
 
@@ -685,6 +748,13 @@ whatever Bitcoin reorganizes, with nobody watching.
 The chain guarantees one thing: a claim is valid exactly when a payment meeting
 its leaf is in the Bitcoin history that the claim's block is anchored to.
 Everything below follows from it, and the risk is not zero.
+
+**What the check from the chain alone costs.** A proof links its block to an
+anchor the chain has already recorded (section 4.3), so a node never asks Bitcoin
+anything to judge it and honest nodes cannot disagree. The one cost: a claim
+waits about one Sequentia block after its payment is first anchored. The mempool
+takes it once a block has anchored at or above the payment, and the next block
+mines it.
 
 **9.1 The payment confirms after `D`.** The buyer has paid and cannot claim; the
 seller refunds at `R` and holds both. *The buyer's wallet and its service* pay at
@@ -740,13 +810,15 @@ own validating node follows. A producer, or a whole committee, that includes a
 claim with a forged or orphaned proof makes a block every validating node
 refuses.
 
-**9.7 After `R` both leaves are valid.** A claim still pending signals
-replacement, so a refund paying a higher fee replaces it in honest mempools once
-`R` is reached; before `R` the mempool refuses the refund
-(`anchorlock-not-reached`). Completion by anyone puts the claim in mempools
-from the payment's confirmation on, so in the normal case it is mined long before
-`R`. A seller that produces blocks can include its refund in place of a claim
-still pending at `R`, and that happens only after a stall: Sequentia producing no
+**9.7 After `R` both leaves are valid.** Honest mempools prefer the claim: a
+refund never replaces a pending claim, whatever it pays, and a claim replaces a
+refund pooled before it (`btcpay-floor-replaces-proof`, section 6.2). Before a
+block has anchored at `R` the mempool refuses the refund outright
+(`anchorlock-not-reached`, judged against the tip's anchor, never Bitcoin's tip).
+Completion by anyone puts the claim in mempools from the payment's first anchor
+on, so in the normal case it is mined long before `R`. A seller that produces
+blocks can still include its refund in place of a claim pending at `R`, which
+consensus allows, and that happens only after a stall: Sequentia producing no
 block anchored at or above the payment for the whole margin. A stall longer than
 the margin hands the choice to whichever producer makes the first block anchored
 at `R` or above, because nothing caps how far one block's anchor may advance over
@@ -787,7 +859,7 @@ and nothing is offered as a choice.
 
 - **Buying.** "Buy 100 XYZ for 0.0123 BTC." One button. While the wallet waits for
   the seller's side: "Getting your purchase ready. This usually takes a few
-  minutes." Then "Paying 0.0123 BTC. Your XYZ arrives a minute or so after Bitcoin
+  minutes." Then "Paying 0.0123 BTC. Your XYZ arrives a minute or two after Bitcoin
   confirms the payment, usually within 20 minutes." Then "Bitcoin confirmed your
   payment. Receiving 100 XYZ", then the balance.
 - **Paying from another wallet:** an address, an amount and a time: "Send exactly
