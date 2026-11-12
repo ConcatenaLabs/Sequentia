@@ -618,9 +618,16 @@ and is lost if both stay offline until the refund is valid.
     variants. On a chain of 400,000-weight blocks every 60 seconds, and on one
     of 4,000,000-weight blocks every 600, that is 62,500 claims and about
     56 MB;
-  - **held by fee per virtual byte within those limits.** Past either, the held
-    claim paying the least per virtual byte is dropped for a newcomer paying
-    more, and a newcomer paying no more than every held claim is not held;
+  - **held by rank within those limits.** A claim that can be tried ranks by
+    its fee per virtual byte; a claim a block displaced ranks below every one
+    of them, since it pays nothing while that block stands and cannot be
+    mined until the block leaves the chain, and among displaced claims the one
+    displaced longest ago ranks lowest. Past either limit, the lowest-ranked
+    held claim is dropped for a newcomer that outranks it, and a newcomer that
+    outranks none is not held. So a displaced claim never keeps out a claim
+    that can be tried, whatever fee it names, and a claim newly displaced takes
+    the place of the one displaced longest ago. Once the block that displaced a
+    claim is disconnected, the claim ranks by its fee again;
   - **forgotten at once when its lock coin is spent** on the active chain
     (checked whenever the chain tip moves, in chunks that release the chain
     lock between them): such a claim can never be mined on that chain. A claim
@@ -637,9 +644,12 @@ and is lost if both stay offline until the refund is valid.
   one reorganization disconnects. That takes the block space of a Bitcoin
   reorganization deeper than 10 blocks: being mined in every Sequentia block
   of that span, at fees refunded only if the reorganization comes, or causing
-  the reorganization itself. Past that depth, a claim the node did not hold, or
-  has forgotten, comes back only when someone submits it: the buyer's wallet or
-  its completion service (section 8.5), which is the guarantee.
+  the reorganization itself. A displaced claim is easier to keep out: a set
+  full of claims that can be tried keeps it out, and so do displacements of the
+  attacker's own coins after it, one mined spend for each place in the set.
+  Past that, a claim the node did not hold, or has forgotten, comes back only
+  when someone submits it: the buyer's wallet or its completion service
+  (section 8.5), which is the guarantee.
 
   The work runs on its own thread, beside the anchor watcher and never on its
   path, so nothing it does delays an anchor-driven reorganization:
@@ -1154,8 +1164,10 @@ disconnects it lets it in again only 60 blocks after the new branch's first bloc
 anchored at `R`, and a claim on a valid payment gets those blocks first. A node
 that held the claim brings it back itself: a claim the block mining the refund
 displaced from its mempool waits for re-attachment while that block stands, and
-is re-attached once the block is disconnected (section 6.3). The completion
-service resubmits it too.
+is re-attached once the block is disconnected (section 6.3). That holds while
+its waiting set has room for it: a set full of claims that can be tried, or of
+claims displaced after it, leaves none. The node holds it in memory only, so a
+restart forgets it. The completion service resubmits it in every case.
 
 ## 10. The collision class
 

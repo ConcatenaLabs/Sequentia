@@ -538,6 +538,7 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.multi_input_search()
         self.shared_replacement()
         self.refund_block_undone()
+        self.displaced_never_crowd()
         self.payment_fields()
         self.only_tightens()
 
@@ -3274,6 +3275,98 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.results.append((self.current, "the refund mined at first+%d displaced the pooled claim; once that block was "
                              "undone the node re-attached the claim, which replaced the refund and was mined" % FLOOR_DEPTH))
         self.log.info("    the claim displaced by the refund's block returned when the block was undone, and was mined")
+
+
+    def displaced_outsider(self, fee=500000):
+        """A coin of the caller's own under a leaf any proof opens: a spend of it
+        paying `fee` is pooled, then a block mines a cheaper spend of the same
+        coin. The pooled one is displaced by a block, at a fee it never pays."""
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        if getattr(self, "outsider_pay", None) is None:
+            self.outsider_pay = self.pay(self.bbuyer.getnewaddress(address_type="bech32"), 1000000)
+            self.outsider_block = self.btc_mine(1)[0]
+            self.mine_anchored(b.getblockheader(self.outsider_block)["height"])
+        txid, spend = self.covenant_coin(CScript([OP_INSPECTBTCPAYMENT, OP_2DROP, OP_1]))
+        C = self.anchor_of(self.mine(1)[0])
+        rec = self.proof_for(self.outsider_pay, C, self.outsider_block)["record"]
+        hi = spend([rec])
+        hi.vout[0].nValue = CTxOutValue(100000000 - fee)
+        hi.vout[1].nValue = CTxOutValue(fee)
+        hi.rehash()
+        lo = spend([rec])
+        node.sendrawtransaction(hi.serialize().hex())
+        blk = self.force([lo])
+        assert hi.hash not in node.getrawmempool()
+        assert self.debug_lines(node, "%s displaced by block %s" % (hi.hash, blk))
+        return hi
+
+    def displaced_never_crowd(self):
+        self.step("N53 (PV16 D6) claims displaced by a block rank below every claim that can be tried, so they never "
+                  "crowd one out of the waiting set")
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        self.restart_seq0(["-btcpaymaxwaiting=2"])
+        self.outsider_pay = None
+        # (a) Two outsiders' spends displaced at 500,000 fill the set; a buyer's
+        # claim evicted by a reorganization is held in place of one, and returns.
+        out = [self.displaced_outsider() for _ in range(2)]
+        for _ in range(10):
+            self.force([])
+        h1, h1_rate = self.honest_evicted(5000)
+        self.wait_for(lambda: h1.hash in node.getrawmempool(), "the evicted claim re-attached", timeout=60)
+        blk = self.mine_anchored(b.getblockcount())
+        assert h1.hash in node.getblock(blk)["tx"]
+        assert not self.debug_lines(node, "%s not held for re-attachment" % h1.hash)
+        assert self.debug_lines(node, "%s dropped from the waiting set (displaced by a block) for %s" % (out[0].hash, h1.hash))
+        self.log.info("    (a) two displaced spends at 500,000 held; a claim at %.1f per vB evicted by a reorganization "
+                      "took the oldest one's place, came back and was mined", h1_rate)
+        self.results.append((self.current + " (a)", "set of 2 full of spends displaced at 500,000: a claim at %.1f per vB "
+                             "evicted by a reorganization held in place of the oldest, re-attached and mined" % h1_rate))
+        # (b) The set full of displaced spends again: the buyer's claim the refund's
+        # block displaces is held in place of the oldest, and returns when that
+        # block is undone (N52's flow).
+        out.append(self.displaced_outsider())
+        lock = self.fresh_lock(deadline_in=2, margin=0)
+        ptx, pr, vout = self.paid(lock)
+        claim = self.claim(lock, pr["record"], vout)
+        node.sendrawtransaction(claim.serialize().hex())
+        refund = self.refund(lock)
+        self.btc_mine(max(0, lock["refund_at"] - b.getblockcount()))
+        while self.anchor_of(node.getbestblockhash()) < lock["refund_at"]:
+            self.force([])
+        first = self.first_anchored_at(lock["refund_at"])
+        while node.getblockcount() < first + FLOOR_DEPTH - 1:
+            self.force([])
+        assert claim.hash in node.getrawmempool()
+        blk = self.force([refund])
+        assert refund.hash in node.getblock(blk)["tx"] and claim.hash not in node.getrawmempool()
+        assert not self.debug_lines(node, "%s not held for re-attachment" % claim.hash)
+        assert self.debug_lines(node, "%s dropped from the waiting set (displaced by a block) for %s" % (out[1].hash, claim.hash))
+        node.invalidateblock(blk)
+        self.wait_for(lambda: claim.hash in node.getrawmempool(), "the displaced claim back in the mempool", timeout=20)
+        assert self.debug_lines(node, "%s no longer displaced" % claim.hash)
+        assert refund.hash not in node.getrawmempool()
+        mined = self.mine(1)[0]
+        assert claim.hash in node.getblock(mined)["tx"]
+        self.log.info("    (b) the set full of displaced spends: the claim the refund's block displaced took the oldest "
+                      "one's place and returned when the block was undone")
+        self.results.append((self.current + " (b)", "set of 2 full of displaced spends: the claim displaced by the refund's "
+                             "block held in place of the oldest; re-attached and mined once that block was undone"))
+        # (c) A set full of claims that can be tried (two claims whose payment is
+        # orphaned and double-spent, at 2,000): a newly displaced spend, at
+        # 500,000, takes no place.
+        self.restart_seq0(["-btcpaymaxwaiting=2"])
+        self.outside_spk = bytes([0, 20]) + os.urandom(20)
+        waiting, low = self.fill_waiting_set(self.attacker_coins(2), 2000)
+        drops = len(self.debug_lines(node, "dropped from the waiting set"))
+        late = self.displaced_outsider()
+        assert self.debug_lines(node, "%s not held for re-attachment: 2 claims wait, none of them displaced by a block" % late.hash)
+        assert_equal(len(self.debug_lines(node, "dropped from the waiting set")), drops)
+        self.log.info("    (c) a set full of claims at %.1f per vB: a spend displaced at 500,000 is not held", low)
+        self.results.append((self.current + " (c)", "set of 2 full of claims at %.1f per vB that can be tried: a spend "
+                             "displaced at 500,000 not held, none dropped" % low))
+        self.restart_seq0()
 
 
     # ------------------------------------------------ the fields OP_INSPECTBTCTX reads
