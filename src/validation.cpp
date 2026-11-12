@@ -1191,7 +1191,7 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
         if (btcpay_active && !tx.vin[input_index].m_is_pegin && !tx.witness.vtxinwit.empty() &&
             !tx.witness.vtxinwit[input_index].m_pegin_witness.IsNull()) {
             if (!IsStandardBtcPaymentSlot(tx.witness.vtxinwit[input_index].m_pegin_witness.stack)) {
-                return state.Invalid(TxValidationResult::TX_NOT_STANDARD, "btcpay-slot-nonstandard");
+                return state.Invalid(TxValidationResult::TX_WITNESS_MUTATED, "extra-pegin-witness");
             }
             continue;
         }

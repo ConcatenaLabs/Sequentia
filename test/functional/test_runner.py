@@ -223,6 +223,7 @@ BASE_SCRIPTS = [
     'feature_parent_coin_record.py',
     'feature_anchor_unreachable_parent.py',
     'feature_anchor_swap_consistency.py',
+    'feature_btc_payment_proof.py',
     'feature_anchor_rpc_cost.py',
     'feature_proof_of_stake.py',
     'feature_pos_committee.py',

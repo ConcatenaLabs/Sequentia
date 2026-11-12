@@ -31,7 +31,7 @@ from test_framework.messages import (COutPoint, CTransaction, CTxIn, CTxInWitnes
 from test_framework.script import (CScript, CScriptOp, OP_CHECKSIG, OP_CHECKSIGVERIFY, OP_DROP, OP_DUP,
                                    OP_EQUALVERIFY, OP_GREATERTHAN, OP_GREATERTHANOREQUAL64, OP_LESSTHANOREQUAL,
                                    OP_VERIFY, OP_1, SIGHASH_DEFAULT, TaprootSignatureHash, taproot_construct)
-from test_framework.test_framework import BitcoinTestFramework
+from test_framework.test_framework import BitcoinTestFramework, SkipTest
 from test_framework.util import assert_equal, initialize_datadir, rpc_port, p2p_port
 
 OP_INSPECTBTCPAYMENT = CScriptOp(0xe5)
@@ -123,6 +123,8 @@ class BtcPaymentProofTest(BitcoinTestFramework):
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
+        if not os.path.exists(BITCOIND):
+            raise SkipTest("needs Bitcoin Core's bitcoind (set BITCOIND)")
 
     # ------------------------------------------------------------------ setup
     def btc_rpc(self, wallet=None):
@@ -564,7 +566,7 @@ class BtcPaymentProofTest(BitcoinTestFramework):
             self.nodes[0].sendrawtransaction(unknown.serialize().hex())
             raise AssertionError("accepted")
         except JSONRPCException as e:
-            assert "btcpay-slot-nonstandard" in e.error["message"], e.error["message"]
+            assert "extra-pegin-witness" in e.error["message"], e.error["message"]
             self.log.info("    relay: %s", e.error["message"])
             self.results.append((self.current + " (relay)", e.error["message"]))
         # Consensus ignores an unknown type: a block with it is valid.
