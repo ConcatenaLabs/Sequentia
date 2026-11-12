@@ -479,6 +479,7 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.orphaned_and_longest_links()
         self.variant_flood()
         self.waiting_set()
+        self.search_budget()
         self.only_tightens()
 
     def neg_floor(self):
@@ -1868,6 +1869,63 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.results.append((self.current + " (c)", "%d claims at %.1f per vB forgotten after 144 Bitcoin blocks; a "
                              "claim at %.1f per vB held and re-attached" % (n, high, h3_rate)))
         self.restart_seq0()
+
+    def exact_btc_coin(self, sat):
+        b = self.bminer
+        mid = b.getnewaddress("", "bech32")
+        t = b.sendtoaddress(mid, Decimal(sat) / Decimal(100000000))
+        raw = b.getrawtransaction(t, True)
+        return {"txid": t, "vout": [o["n"] for o in raw["vout"] if o["scriptPubKey"].get("address") == mid][0]}
+
+    def many_outputs_tx(self, coin, spk, n, sat):
+        """A Bitcoin transaction spending `coin` into n outputs of `sat` to `spk`."""
+        raw = (struct.pack("<i", 2) + b"\x01" + bytes.fromhex(coin["txid"])[::-1] + struct.pack("<I", coin["vout"]) +
+               b"\x00" + b"\xff\xff\xff\xff")
+        raw += (bytes([0xfd]) + struct.pack("<H", n)) if n >= 0xfd else bytes([n])
+        raw += (struct.pack("<q", sat) + bytes([len(spk)]) + spk) * n
+        raw += b"\x00\x00\x00\x00"
+        return self.bminer.signrawtransactionwithwallet(raw.hex())["hex"]
+
+    def tick_lines(self, node, since):
+        out = []
+        for line in self.debug_lines(node, "BtcPayment: re-attach tick ")[since:]:
+            out.append(int(line.split("re-attach tick ")[1].split(" ms")[0]))
+        return out
+
+    def search_budget(self):
+        self.step("N41 (PV15 re-check, low) the search's budget: thousands of candidates in Bitcoin's best chain, "
+                  "each refused by the script, never make a tick run past its budget")
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        ndecoy, nout = 4, 500
+        lock = self.fresh_lock(amount=100000, deadline_in=60)
+        spk = bytes.fromhex(self.bseller.getaddressinfo(lock["addr"])["scriptPubKey"])
+        coins = [self.exact_btc_coin(nout * 99000 + 200000) for _ in range(ndecoy)]
+        self.btc_mine(1)
+        ptx, pr, vout = self.paid(lock)
+        c = self.claim(lock, pr["record"], vout)
+        node.sendrawtransaction(c.serialize().hex())
+        blk = self.mine_anchored(pr["height"])
+        assert c.hash in node.getblock(blk)["tx"]
+        ticks0 = len(self.debug_lines(node, "BtcPayment: re-attach tick "))
+        # The buyer's payment is double-spent; the new branch holds 2,000
+        # outputs paying the seller's script a little less than the price.
+        b.invalidateblock(pr["blockhash"])
+        self.double_spend(ptx)
+        decoys = [b.sendrawtransaction(self.many_outputs_tx(k, spk, nout, 99000)) for k in coins]
+        self.btc_mine(2)
+        assert all(self.bminer.gettransaction(d)["confirmations"] > 0 for d in decoys)
+        self.wait_for(lambda: node.getblockheader(blk)["confirmations"] < 0, "the claim's block is disconnected")
+        self.mine_anchored(b.getblockcount())
+        refused = "re-attach of %s (a searched proof) refused" % c.hash
+        self.wait_for(lambda: len(self.debug_lines(node, refused)) >= ndecoy * nout, "every candidate tried", timeout=180)
+        ticks = self.tick_lines(node, ticks0)
+        assert c.hash not in node.getrawmempool()
+        self.log.info("    %d candidates tried, each refused by the script, over %d ticks; longest tick %d ms",
+                      len(self.debug_lines(node, refused)), len(ticks), max(ticks))
+        self.results.append((self.current, "%d candidates refused over %d ticks, longest %d ms (budget 500)"
+                             % (len(self.debug_lines(node, refused)), len(ticks), max(ticks))))
+        assert max(ticks) < 800, "a tick ran %d ms" % max(ticks)
 
     def anchor_driven_delay(self):
         """Seconds from Bitcoin orphaning the tip's anchor until the node disconnects that block."""

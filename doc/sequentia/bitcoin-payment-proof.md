@@ -524,16 +524,19 @@ service submits it, and is lost if both stay offline until `R`.
   - held claims are tried highest fee per virtual byte first;
   - a claim is tried again only when Bitcoin's tip or the chain tip has moved
     since its last try, and each tick stops after 500 ms of work, the rest
-    waiting for the next tick. The budget is checked between claims and also
-    inside one claim's work, between daemon calls; what was read is kept, so the
-    next tick goes on from there;
+    waiting for the next tick. The budget is checked before every step: each
+    stored variant submitted, each batch of daemon calls, each block the search
+    reads, each candidate it tries. What was read and how far each claim got
+    are kept, so the next tick goes on from there, and no tick runs past its
+    budget by more than one such step;
   - each kept variant is first submitted as it is, which asks the Bitcoin daemon
     nothing: a Sequentia reorganization that records the anchor again makes the
     stored proof valid again;
   - then each variant gets a fresh proof of the payments it names. The node
     looks for each payment once per Bitcoin tip, however many claims name it:
-    first `gettxout` on its outputs, whose reply gives the block's depth, and if
-    they are all spent, among the transactions of the last 144 blocks, read once
+    first `gettxout` on its outputs (in batches of 64), whose reply gives the
+    block's depth, and if they are all spent, among the transactions of the last
+    144 blocks, read once
     per tip from a cache of block contents keyed by block hash. It links that
     block to the lowest anchor the active chain recorded at or above it, with the
     headers along Bitcoin's best chain (read in batches and kept per Bitcoin
@@ -550,11 +553,15 @@ service submits it, and is lost if both stay offline until `R`.
     named the old output name the new one, and submits it; the mempool runs the
     script, so a wrong candidate costs one refusal. The window is the last 144
     Bitcoin blocks, reaching down to the floor a claim carries when it carries
-    one, and never more than 2,016: a proof links at most 2,016 headers to a
-    recorded anchor, and a claim waits at most that long. The blocks the
-    variants' proofs name are searched too, an orphaned one included (the
-    daemon keeps it), since a payment it held may have been mined again
-    elsewhere.
+    one, and never more than 2,016, since a proof links at most 2,016 headers to
+    a recorded anchor. Only blocks of Bitcoin's best chain inside the window are
+    read, never an orphaned one: a payment an orphaned block held that was mined
+    again is in the window, and what stayed behind in the orphan can complete
+    nothing. Candidates are the transactions the scan itself found there, with
+    the block it found them in; their proofs are built from what the scan read
+    (the block's transaction ids, its header and its coinbase), so a candidate
+    costs no daemon call, and the work is bounded by the budget, not by how many
+    outputs pay the script.
 
   The search runs once every waiting claim has been tried at the current tips,
   and one scan serves all of them: each block is read once (`getblock`) for the
@@ -575,8 +582,10 @@ service submits it, and is lost if both stay offline until `R`.
   their own, so that every one is searched for, the anchor-driven disconnect
   stays at 0.5 s with 200 and with 1,000 waiting; one scan reads the 145 blocks
   of the window once for all of them (289 `getblock` calls in 20 s, the recent
-  blocks and the scan), and no tick runs past its budget by more than one
-  daemon call.
+  blocks and the scan). Against 2,000 outputs in the window paying a waiting
+  claim's script, each refused by its script, the candidates take two ticks,
+  the longest 501 ms; 10,000 outputs paying it in an orphaned block cost nothing
+  (one `gettxout` call, a 45 ms tick).
 
 ## 7. Activation
 
