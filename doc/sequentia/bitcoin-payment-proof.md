@@ -268,6 +268,14 @@ moment after a Bitcoin reorganization and accepted the claim, the other asked
 afresh and refused it for good. Linking `H` to the chain's own anchors removes
 the question.
 
+**A node whose Bitcoin daemon is behind** gives no verdict it cannot reach. A
+block recording an anchor its daemon has not reached yet is left aside under
+R3 without being marked invalid, and taken when it is announced again after the
+daemon catches up, in practice with the next block. Until then its mempool
+refuses a claim whose payment is above its tip's anchor
+(`btcpay-not-in-anchor-chain`), and a claim it holds for re-attachment waits;
+once its daemon has the payment's block, it links a fresh proof itself.
+
 **A first sync** checks old blocks the same way, with no daemon and no index.
 **A node that does not watch Bitcoin** (`-validateanchor=0`) checks proofs fully
 as well; what it gives up is R3 and the watcher, as described in

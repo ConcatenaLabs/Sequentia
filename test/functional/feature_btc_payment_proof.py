@@ -481,6 +481,7 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.waiting_set()
         self.lighter_by_the_incremental_rate()
         self.search_budget()
+        self.lagging_daemon()
         self.only_tightens()
 
     def neg_floor(self):
@@ -1975,6 +1976,132 @@ class BtcPaymentProofTest(BitcoinTestFramework):
                                  "%d: %s" % (vl, vh, gain, incr, what)))
             blk = self.mine(1)[0]
             assert heavy.hash in node.getblock(blk)["tx"]
+
+    def lagging_daemon(self):
+        self.step("N42 a node whose Bitcoin daemon is behind: it neither accepts nor condemns a claim it cannot "
+                  "check yet, and re-attaches a claim itself once its daemon catches up")
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        # A second Bitcoin daemon, fed by the first over p2p and cut off at will,
+        # and a third Sequentia node watching it.
+        d1 = os.path.join(self.options.tmpdir, "btc1")
+        os.makedirs(d1)
+        port1, p2p1 = rpc_port(5), p2p_port(5)  # 3 is the first daemon's
+        proc = subprocess.Popen([BITCOIND, "-datadir=" + d1, "-regtest", "-port=%d" % p2p1, "-bind=127.0.0.1",
+                                 "-rpcport=%d" % port1, "-server", "-connect=0", "-fallbackfee=0.0001",
+                                 "-printtoconsole=0"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        cookie = os.path.join(d1, "regtest", ".cookie")
+        self.wait_until(lambda: os.path.exists(cookie), timeout=60)
+        u1, p1 = open(cookie).read().strip().split(":", 1)
+        url1 = "http://%s:%s@127.0.0.1:%d" % (urllib.parse.quote(u1), urllib.parse.quote(p1), port1)
+        peer = "127.0.0.1:%d" % p2p1
+
+        def b1():
+            return AuthServiceProxy(url1, timeout=120)
+
+        def up():
+            try:
+                b1().getblockcount()
+                return True
+            except Exception:
+                return False
+
+        def feed():
+            b.addnode(peer, "onetry")
+            self.wait_for(lambda: b1().getbestblockhash() == b.getbestblockhash(), "the second daemon catches up", 120)
+
+        def cut():
+            b.disconnectnode(address=peer)
+            self.wait_for(lambda: not b1().getpeerinfo(), "the second daemon is cut off")
+        try:
+            self.wait_until(up, timeout=60)
+            feed()
+            args = [a for a in self.seq_args() if not a.startswith(("-mainchainrpcport=", "-mainchainrpcuser=",
+                                                                    "-mainchainrpcpassword="))]
+            args += ["-mainchainrpcport=%d" % port1, "-mainchainrpcuser=%s" % u1, "-mainchainrpcpassword=%s" % p1]
+            if len(self.nodes) > 2:   # a node 2 added earlier: start it again, watching the second daemon
+                if self.nodes[2].running:
+                    self.stop_node(2)
+                self.nodes[2].extra_args = args
+            else:
+                initialize_datadir(self.options.tmpdir, 2, "elementsregtest")
+                self.add_nodes(1, [args], chain=["elementsregtest"])
+            c = self.nodes[2]
+            self.start_node(2, args)
+            c.setfeeexchangerates(node.getfeeexchangerates())
+            self.connect_nodes(2, 0)
+            self.wait_for(lambda: c.getbestblockhash() == node.getbestblockhash(), "the third node syncs", 300)
+
+            # (a) The claim's block anchors above what the lagging daemon knows.
+            cut()
+            lock = self.fresh_lock()
+            self.wait_for(lambda: c.getbestblockhash() == node.getbestblockhash(), "the lock reaches the third node")
+            ptx, pr, vout = self.paid(lock)
+            assert b1().getblockcount() < pr["height"]
+            claim = self.claim(lock, pr["record"], vout)
+            node.sendrawtransaction(claim.serialize().hex())
+            k = self.mine(1)[0]
+            assert claim.hash in node.getblock(k)["tx"]
+            held_at = c.getbestblockhash()
+            time.sleep(5)
+            assert_equal(c.getbestblockhash(), held_at)
+            assert not [t for t in c.getchaintips() if t["status"] == "invalid"], c.getchaintips()
+            try:
+                c.sendrawtransaction(claim.serialize().hex())
+                raise AssertionError("the lagging node pooled a claim it cannot place")
+            except JSONRPCException as e:
+                why = e.error["message"]
+            assert "btcpay-not-in-anchor-chain" in why, why
+            self.log.info("    (a) daemon behind: the claim's block is left aside (tip unchanged, nothing marked "
+                          "invalid); the claim is refused by its mempool: %s", why)
+            feed()
+            # A block left aside for an anchor the daemon had not reached is
+            # taken again when it is announced again: the next block does that.
+            time.sleep(3)
+            assert_equal(c.getbestblockhash(), held_at)
+            self.mine(1)
+            self.wait_for(lambda: c.getbestblockhash() == node.getbestblockhash(), "the third node follows", 120)
+            assert claim.hash in c.getblock(k)["tx"]
+            self.log.info("    (a) daemon caught up: at the next block the third node took the claim's block")
+            self.results.append((self.current + " (a)", "daemon behind: block left aside, nothing invalid, mempool: "
+                                 "%s; caught up: block taken" % why))
+
+            # (b) The node alone, its daemon behind: the payment's block leaves its
+            # daemon's chain; the payment is mined again where it cannot see yet.
+            self.disconnect_nodes(0, 2)
+            cut()
+            y = pr["blockhash"]
+            b1().invalidateblock(y)
+            self.wait_for(lambda: c.getblockheader(k)["confirmations"] < 0, "the third node disconnects the claim")
+            b.invalidateblock(y)
+            self.btc_mine(2)
+            assert self.bbuyer.gettransaction(ptx)["confirmations"] > 0
+            time.sleep(8)
+            assert claim.hash not in c.getrawmempool()
+            assert not [line for line in self.debug_lines(c, "re-attached") if claim.hash in line]
+            ticks = self.tick_lines(c, 0)
+            self.log.info("    (b) daemon behind the payment's new block: the claim waits (ticks: longest %d ms)",
+                          max(ticks) if ticks else 0)
+            feed()
+            self.generatetoaddress(c, 1, node.getnewaddress(), sync_fun=self.no_op)
+            self.wait_for(lambda: claim.hash in c.getrawmempool(), "the third node re-attaches the claim", 60)
+            how = [line for line in self.debug_lines(c, "re-attached") if claim.hash in line][-1].split("re-attached ")[1]
+            blk = self.generatetoaddress(c, 1, node.getnewaddress(), sync_fun=self.no_op)[0]
+            assert claim.hash in c.getblock(blk)["tx"]
+            self.log.info("    (b) daemon caught up: the node re-attached %s itself and mined it", how.strip())
+            self.results.append((self.current + " (b)", "claim waited while the daemon was behind; re-attached %s "
+                                 "once it caught up" % how.strip()))
+        finally:
+            if len(self.nodes) > 2 and self.nodes[2].running:
+                self.stop_node(2)
+            try:
+                b1().stop()
+                proc.wait(timeout=60)
+            except Exception:
+                proc.terminate()
+                proc.wait(timeout=60)
+        # Node 0 follows Bitcoin on its own; back to its normal state.
+        self.mine_anchored(b.getblockcount())
 
     def anchor_driven_delay(self):
         """Seconds from Bitcoin orphaning the tip's anchor until the node disconnects that block."""
