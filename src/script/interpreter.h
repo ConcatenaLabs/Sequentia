@@ -195,7 +195,7 @@ enum : uint32_t {
     SCRIPT_VERIFY_SIMPLICITY_ANNEX_EXACT = (1U << 27),
 
     // SEQUENTIA: the proof of a bitcoin payment (doc/sequentia/bitcoin-payment-proof.md):
-    // on a tapscript leaf, 0xe5 OP_INSPECTBTCPAYMENT, 0xe6 OP_INSPECTBTCOUTPUT and
+    // on a tapscript leaf, 0xe5 OP_INSPECTBTCPAYMENT, 0xe6 OP_INSPECTBTCTX and
     // 0xe7 OP_CHECKANCHORHEIGHTVERIFY take meaning instead of being OP_SUCCESS.
     SCRIPT_VERIFY_BTCPAYMENT = (1U << 28),
 

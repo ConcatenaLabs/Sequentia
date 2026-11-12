@@ -300,7 +300,7 @@ enum opcodetype
     // SEQUENTIA: proof of a bitcoin payment (under SCRIPT_VERIFY_BTCPAYMENT;
     // OP_SUCCESS otherwise, which is why MAX_OPCODE stays below them)
     OP_INSPECTBTCPAYMENT = 0xe5,
-    OP_INSPECTBTCOUTPUT = 0xe6,
+    OP_INSPECTBTCTX = 0xe6,
     OP_CHECKANCHORHEIGHTVERIFY = 0xe7,
 
     OP_INVALIDOPCODE = 0xff,

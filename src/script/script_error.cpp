@@ -192,6 +192,10 @@ std::string ScriptErrorString(const ScriptError serror)
             return "No valid proof of a bitcoin payment on this input";
         case SCRIPT_ERR_BTCPAY_OUTPUT:
             return "Bitcoin payment output index missing or out of range";
+        case SCRIPT_ERR_BTCPAY_INPUT:
+            return "Bitcoin payment input index missing or out of range";
+        case SCRIPT_ERR_BTCPAY_FIELD:
+            return "Unknown field of the proven bitcoin payment";
         case SCRIPT_ERR_ANCHORLOCK_MISSING:
             return "No anchor floor on this input";
         case SCRIPT_ERR_ANCHORLOCK_UNSATISFIED:

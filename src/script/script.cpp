@@ -186,7 +186,7 @@ std::string GetOpName(opcodetype opcode)
     case OP_ECMULSCALARVERIFY      : return "OP_ECMULSCALARVERIFY";
     case OP_TWEAKVERIFY            : return "OP_TWEAKVERIFY";
     case OP_INSPECTBTCPAYMENT      : return "OP_INSPECTBTCPAYMENT";
-    case OP_INSPECTBTCOUTPUT       : return "OP_INSPECTBTCOUTPUT";
+    case OP_INSPECTBTCTX           : return "OP_INSPECTBTCTX";
     case OP_CHECKANCHORHEIGHTVERIFY: return "OP_CHECKANCHORHEIGHTVERIFY";
 
     case OP_INVALIDOPCODE          : return "OP_INVALIDOPCODE";

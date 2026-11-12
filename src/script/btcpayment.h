@@ -38,6 +38,10 @@ static constexpr size_t PAYMENT_FIXED_SIZE = 1 + 4 + 4 + 80 + 32 + 1 + 4;
 //! floor, whatever the anchor did to get there: a claim on a payment below F has
 //! those blocks to itself, however far one block's anchor jumped.
 static constexpr int FLOOR_DEPTH = 60;
+//! What OP_INSPECTBTCTX reads of the proven payment (specification 4.5).
+static constexpr int64_t FIELD_OUTPUT = 0; //!< <index> 0: value, then the output's script
+static constexpr int64_t FIELD_INPUT = 1;  //!< <index> 1: the outpoint the input spends
+static constexpr int64_t FIELD_TXID = 2;   //!< 2: the payment's own transaction id
 
 struct Proof {
     uint32_t height{0};       //!< declared Bitcoin height of the proven block (checked against the chain)

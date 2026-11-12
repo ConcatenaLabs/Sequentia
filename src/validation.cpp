@@ -9347,7 +9347,7 @@ std::optional<CTransactionRef> FreshVariant(BtcPayAttacher& a, CChainState& cs, 
 }
 
 //! One output a stored proof names: an output of its payment whose index the
-//! input's witness carries (the leaf reads it with OP_INSPECTBTCOUTPUT). Any
+//! input's witness carries (the leaf reads it with OP_INSPECTBTCTX). Any
 //! other transaction paying that script may complete the claim as well; the
 //! mempool runs the script to decide.
 struct BtcPayWant {

@@ -2254,7 +2254,7 @@ bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript& 
                 // are re-parsed and their proof re-checked here, so the script is
                 // sound on its own; validation checks them against the chain.
                 case OP_INSPECTBTCPAYMENT:
-                case OP_INSPECTBTCOUTPUT:
+                case OP_INSPECTBTCTX:
                 case OP_CHECKANCHORHEIGHTVERIFY:
                 {
                     if (sigversion != SigVersion::TAPSCRIPT || !(flags & SCRIPT_VERIFY_BTCPAYMENT))
@@ -2281,12 +2281,37 @@ bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript& 
                         stack.push_back(CScriptNum((int64_t)proof.coin_anchor).getvch());
                         break;
                     }
-                    // OP_INSPECTBTCOUTPUT
+                    // OP_INSPECTBTCTX: <index> <selector>, or <selector> alone
+                    // for the transaction id. The selector is a script number
+                    // the leaf writes; an index taken from the witness can
+                    // only ever address the field the leaf chose.
                     if (stack.size() < 1)
                         return set_error(serror, SCRIPT_ERR_INVALID_STACK_OPERATION);
-                    const int64_t idx = (int64_t)CScriptNum(stacktop(-1), /*fRequireMinimal=*/true).getint();
+                    const int64_t field = (int64_t)CScriptNum(stacktop(-1), /*fRequireMinimal=*/true).getint();
+                    if (field == BtcPayment::FIELD_TXID) {
+                        popstack(stack);
+                        const uint256 txid = proof.tx->GetHash();
+                        stack.emplace_back(txid.begin(), txid.end());
+                        break;
+                    }
+                    if (field != BtcPayment::FIELD_OUTPUT && field != BtcPayment::FIELD_INPUT)
+                        return set_error(serror, SCRIPT_ERR_BTCPAY_FIELD);
+                    if (stack.size() < 2)
+                        return set_error(serror, SCRIPT_ERR_INVALID_STACK_OPERATION);
+                    const int64_t idx = (int64_t)CScriptNum(stacktop(-2), /*fRequireMinimal=*/true).getint();
+                    if (field == BtcPayment::FIELD_INPUT) {
+                        if (idx < 0 || (uint64_t)idx >= proof.tx->vin.size())
+                            return set_error(serror, SCRIPT_ERR_BTCPAY_INPUT);
+                        popstack(stack);
+                        popstack(stack);
+                        const auto& prevout = proof.tx->vin[idx].prevout;
+                        stack.emplace_back(prevout.hash.begin(), prevout.hash.end());
+                        stack.push_back(CScriptNum((int64_t)prevout.n).getvch());
+                        break;
+                    }
                     if (idx < 0 || (uint64_t)idx >= proof.tx->vout.size())
                         return set_error(serror, SCRIPT_ERR_BTCPAY_OUTPUT);
+                    popstack(stack);
                     popstack(stack);
                     const auto& out = proof.tx->vout[idx];
                     push8_le(stack, (uint64_t)out.nValue);
@@ -3304,7 +3329,7 @@ static bool ExecuteWitnessScript(const Span<const valtype>& stack_span, const CS
             }
             // New opcodes will be listed here. May use a different sigversion to modify existing opcodes.
             const bool btcpay_op = (flags & SCRIPT_VERIFY_BTCPAYMENT) &&
-                (opcode == OP_INSPECTBTCPAYMENT || opcode == OP_INSPECTBTCOUTPUT || opcode == OP_CHECKANCHORHEIGHTVERIFY);
+                (opcode == OP_INSPECTBTCPAYMENT || opcode == OP_INSPECTBTCTX || opcode == OP_CHECKANCHORHEIGHTVERIFY);
             if (IsOpSuccess(opcode) && !btcpay_op) {
                 if (flags & SCRIPT_VERIFY_DISCOURAGE_OP_SUCCESS) {
                     return set_error(serror, SCRIPT_ERR_DISCOURAGE_OP_SUCCESS);
