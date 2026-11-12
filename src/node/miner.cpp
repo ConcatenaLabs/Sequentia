@@ -370,8 +370,15 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
     // SEQUENTIA: anchor the new block to the parent chain (Bitcoin) tip,
     // respecting -anchorminconf and never decreasing the anchor height.
     if (g_con_bitcoin_anchor) {
+        bool parent_anchor_replaced = false;
         if (!GetAnchorForNewBlock(pindexPrev->m_anchor_height, pindexPrev->m_anchor_hash,
-                                  pblock->m_anchor_height, pblock->m_anchor_hash)) {
+                                  pblock->m_anchor_height, pblock->m_anchor_hash, &parent_anchor_replaced)) {
+            // SEQUENTIA: never build on a parent whose anchor the daemon shows
+            // replaced: the anchor watcher is about to disconnect it, and every
+            // node watching Bitcoin already refuses it. The watcher was woken.
+            if (parent_anchor_replaced) {
+                throw std::runtime_error(strprintf("%s: the parent block's anchor %s is no longer on the parent chain's best chain; waiting for the anchor watcher to disconnect it", __func__, pindexPrev->m_anchor_hash.ToString()));
+            }
             // Two causes, and the second is not about connectivity at all: the
             // daemon cannot be asked, or no parent-chain block can follow the
             // parent's anchor (the block at that height was replaced; see

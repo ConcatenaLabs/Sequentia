@@ -173,8 +173,18 @@ int AnchorUncontestedHeight(int active_tip_height, int window,
  *  anchor, which monotonicity forbids moving onto and which resolves itself
  *  once the contesting branches leave the window. Returns false if no valid
  *  (non-null) anchor can be determined. */
+//! Set by a producer that refused to build on a parent whose anchor its daemon
+//! shows replaced: the anchor watcher's next poll runs at once.
+extern std::atomic<bool> g_anchor_watch_wake;
+
+/** With `parent_anchor_replaced`, it is set, and false returned, when the
+ *  daemon's best chain holds another block at the parent's anchor height: the
+ *  parent is about to be disconnected by the anchor watcher, so no block may be
+ *  built on it. Never set when the daemon cannot be asked or is behind (it has
+ *  no block at that height). */
 bool GetAnchorForNewBlock(uint32_t prev_anchor_height, const uint256& prev_anchor_hash,
-                          uint32_t& anchor_height, uint256& anchor_hash);
+                          uint32_t& anchor_height, uint256& anchor_hash,
+                          bool* parent_anchor_replaced = nullptr);
 
 /** Scheduler task: poll the parent chain for new tips. On a parent chain
  *  reorganization, invalidate blocks of this chain whose anchors were

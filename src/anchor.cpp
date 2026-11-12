@@ -758,9 +758,12 @@ int AnchorUncontestedHeight(int active_tip_height, int window,
     return uncontested;
 }
 
+std::atomic<bool> g_anchor_watch_wake{false};
+
 bool GetAnchorForNewBlock(uint32_t prev_anchor_height, const uint256& prev_anchor_hash,
-                          uint32_t& anchor_height, uint256& anchor_hash)
+                          uint32_t& anchor_height, uint256& anchor_hash, bool* parent_anchor_replaced)
 {
+    if (parent_anchor_replaced) *parent_anchor_replaced = false;
     const int min_conf = std::max<int64_t>(1, gArgs.GetIntArg("-anchorminconf", DEFAULT_ANCHOR_MIN_CONF));
     int count = 0;
     // Set when the daemon answered but the target it yielded is not above this
@@ -771,6 +774,21 @@ bool GetAnchorForNewBlock(uint32_t prev_anchor_height, const uint256& prev_ancho
     bool target_held = false;
     int held_target = 0;
     if (GetMainchainBlockCount(count)) {
+        // The daemon's block at the parent's anchor height, read once: whether
+        // this chain is committed to the active branch (below), and whether the
+        // parent's anchor was replaced. A daemon that is behind has no block
+        // there, and an unreachable one gives no answer: neither counts.
+        uint256 active_at_prev;
+        const bool have_prev = !prev_anchor_hash.IsNull() && count >= 0 && (uint32_t)count >= prev_anchor_height &&
+                               GetMainchainBlockHashAt(prev_anchor_height, active_at_prev);
+        if (have_prev && active_at_prev != prev_anchor_hash && g_validate_anchor && parent_anchor_replaced &&
+            gArgs.GetBoolArg("-anchorstaleparentcheck", true)) {
+            LogPrintf("Anchor: the parent block's anchor %s (height %d) is no longer on the parent chain's best chain (%s is there now); not building on it, and waking the anchor watcher\n",
+                      prev_anchor_hash.ToString(), prev_anchor_height, active_at_prev.ToString());
+            *parent_anchor_replaced = true;
+            g_anchor_watch_wake = true;
+            return false;
+        }
         int target = count - (min_conf - 1);
         // Fix A (producer-side anti-contested-anchor policy): do not advance the
         // anchor onto a parent-chain height a competing branch is currently
@@ -795,9 +813,7 @@ bool GetAnchorForNewBlock(uint32_t prev_anchor_height, const uint256& prev_ancho
         // daemon's block at its height, otherwise every rival counts as before.
         if (gArgs.GetBoolArg("-anchoravoidcontested", DEFAULT_ANCHOR_AVOID_CONTESTED)) {
             int committed = -1;
-            uint256 active_at_prev;
-            if (!prev_anchor_hash.IsNull() && GetMainchainBlockHashAt(prev_anchor_height, active_at_prev) &&
-                active_at_prev == prev_anchor_hash) {
+            if (have_prev && active_at_prev == prev_anchor_hash) {
                 committed = (int)prev_anchor_height;
             }
             int uncontested = -1;
