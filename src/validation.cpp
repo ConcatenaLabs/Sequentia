@@ -9751,10 +9751,14 @@ void BtcPaymentReattachTick(ChainstateManager& chainman)
             for (const auto& [txid, p] : g_btcpay_pending) held.emplace_back(txid, p.locks);
         }
         constexpr size_t SWEEP_CHUNK = 500;
+        int64_t longest_us = 0;
+        const int64_t sweep_start = GetTimeMicros();
+        size_t forgotten = 0;
         for (size_t at = 0; at < held.size(); at += SWEEP_CHUNK) {
             std::vector<std::pair<uint256, COutPoint>> spent;
             {
                 LOCK2(cs_main, pool.cs);
+                const int64_t held_from = GetTimeMicros();
                 for (size_t k = at; k < std::min(held.size(), at + SWEEP_CHUNK); ++k) {
                     for (const COutPoint& lock : held[k].second) {
                         if (cs.CoinsTip().AccessCoin(lock).IsSpent() && !pool.exists(GenTxid::Txid(lock.hash))) {
@@ -9763,13 +9767,21 @@ void BtcPaymentReattachTick(ChainstateManager& chainman)
                         }
                     }
                 }
+                longest_us = std::max(longest_us, GetTimeMicros() - held_from);
             }
+            forgotten += spent.size();
             LOCK(g_btcpay_pending_mutex);
             for (const auto& [txid, lock] : spent) {
                 LogPrint(BCLog::MEMPOOL, "BtcPayment: %s no longer waits: its lock coin %s is spent on the active chain\n",
                          txid.ToString(), lock.ToString());
                 BtcPaymentForget(txid);
             }
+        }
+        if (!held.empty()) {
+            LogPrint(BCLog::BENCH, "BtcPayment: lock-coin sweep of %u waiting claim(s) in %u chunk(s): %.2f ms, the chain "
+                     "lock held at most %.2f ms at a time; %u forgotten\n", (unsigned)held.size(),
+                     (unsigned)((held.size() + SWEEP_CHUNK - 1) / SWEEP_CHUNK), (GetTimeMicros() - sweep_start) * 0.001,
+                     longest_us * 0.001, (unsigned)forgotten);
         }
     }
     // Highest fee per virtual byte first.
