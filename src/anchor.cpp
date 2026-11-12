@@ -10,6 +10,7 @@
 #include <logging.h>
 #include <mainchainrpc.h>
 #include <pos.h>
+#include <pos_heldtxs.h>
 #include <primitives/bitcoin/block.h>
 #include <rpc/protocol.h>
 #include <script/script.h>
@@ -1539,20 +1540,26 @@ void AnchorWatchTask(ChainstateManager& chainman)
         LogPrintf("Parent chain reorganization detected: invalidating block %s (and descendants) whose anchor is no longer canonical\n",
                   lowest_bad.ToString());
         CBlockIndex* pindex_bad;
+        const CBlockIndex* old_tip{nullptr};
         {
             LOCK(cs_main);
             pindex_bad = chainman.m_blockman.LookupBlockIndex(lowest_bad);
             if (!pindex_bad) return;
+            old_tip = chainman.ActiveChain().Tip();
             // Until the provenance marker below is set, peers still building on
             // the blocks being disconnected are not misbehaving either
             // (ChainstateManager::IsAnchorOrphaned).
             chainman.m_anchor_invalidating = pindex_bad;
         }
+        // Members sign nothing from here until the record holds what this
+        // disconnect takes off the chain (pos_heldtxs.h).
+        HeldTxsSetFilling(true);
         BlockValidationState state;
         if (!chainman.ActiveChainstate().InvalidateBlock(state, pindex_bad)) {
             LogPrintf("WARNING: failed to invalidate block %s after parent chain reorganization: %s\n",
                       lowest_bad.ToString(), state.ToString());
             WITH_LOCK(cs_main, chainman.m_anchor_invalidating = nullptr);
+            HeldTxsSetFilling(false);
             return;
         }
         {
@@ -1568,6 +1575,7 @@ void AnchorWatchTask(ChainstateManager& chainman)
                           lowest_bad.ToString());
                 chainman.ActiveChainstate().ResetBlockFailureFlags(pindex_bad);
                 chainman.m_anchor_invalidating = nullptr;
+                HeldTxsSetFilling(false);
                 return;
             }
         }
@@ -1584,6 +1592,16 @@ void AnchorWatchTask(ChainstateManager& chainman)
             chainman.ActiveChainstate().MarkAnchorInvalid(pindex_bad);
             chainman.m_anchor_invalidating = nullptr;
         }
+        // Held transactions (doc 04, "Held transactions"): keep what the
+        // certified blocks just disconnected carried. After the disconnect,
+        // never on its path, so following Bitcoin is not delayed.
+        if (HeldTxsActive() && old_tip && old_tip->GetAncestor(pindex_bad->nHeight) == pindex_bad) {
+            std::vector<const CBlockIndex*> disconnected;
+            for (const CBlockIndex* p = old_tip; p && p->nHeight >= pindex_bad->nHeight; p = p->pprev) disconnected.push_back(p);
+            std::reverse(disconnected.begin(), disconnected.end());
+            HeldTxsRecordDisconnect(chainman, disconnected);
+        }
+        HeldTxsSetFilling(false);
         BlockValidationState abc_state;
         if (!chainman.ActiveChainstate().ActivateBestChain(abc_state)) {
             LogPrintf("WARNING: ActivateBestChain failed after anchor invalidation: %s\n", abc_state.ToString());
@@ -1598,6 +1616,12 @@ void AnchorWatchTask(ChainstateManager& chainman)
     //    network's certified branch. Reached on quiet ticks (sections 1-2 found
     //    nothing to invalidate), which is exactly the partition's signature.
     MaybeReconcileFinality(chainman);
+
+    // Held transactions: release what is due and keep the held ones in the
+    // mempool (a member also sets blocks aside, from its producer thread).
+    if (HeldTxsActive() && chainman.ActiveChainstate().GetMempool()) {
+        HeldTxsMaintain(chainman, *chainman.ActiveChainstate().GetMempool(), /*park=*/false);
+    }
 
     // 4) Retry driver for parent-chain stalls (incident 2026-07-26). When
     //    ConnectTip cannot verify a block against the parent chain (bitcoind

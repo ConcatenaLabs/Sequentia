@@ -79,6 +79,8 @@ TEST_FRAMEWORK_MODULES = [
 
 EXTENDED_SCRIPTS = [
     # These tests are not run by default.
+    # Needs Bitcoin Core's bitcoind as the parent chain (PARENT_BITCOIND); skips without it.
+    'feature_pos_held_transactions.py',
     # Longest test should go first, to favor running tests in parallel
 #    'feature_pruning.py', ELEMENTS: this is broken
 #    'feature_dbcrash.py', ELEMENTS: this is broken -- generate_small_transactions

@@ -37,6 +37,7 @@
 #include <bls.h>
 #include <musig.h>
 #include <pos.h>
+#include <pos_heldtxs.h>
 #include <vrf.h>
 #include <policy/value.h>
 #include <primitives/block.h>
@@ -942,6 +943,14 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     // Coinbase is only valid in a block, not as a loose transaction
     if (tx.IsCoinBase())
         return state.Invalid(TxValidationResult::TX_CONSENSUS, "coinbase");
+
+    // SEQUENTIA: a spend of an outpoint that a held transaction spends (a
+    // certified transaction a Bitcoin reorganization disconnected) waits until
+    // the held one is released (pos_heldtxs.h). Relay policy only.
+    if (const std::optional<uint256> held = HeldTxsConflict(tx)) {
+        return state.Invalid(TxValidationResult::TX_CONFLICT, "txn-held-conflict",
+                             strprintf("respends an input of held transaction %s", held->ToString()));
+    }
 
     // Rather not work on nonstandard transactions (unless -testnet/-regtest)
     std::string reason;
