@@ -451,6 +451,7 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.neg_second_lock()
         self.neg_refund()
         self.refund_waits_for_the_anchor()
+        self.proof_preferred_over_floor()
         self.neg_relative_floor()
         self.neg_not_in_anchor_chain()
         self.neg_below_anchor()
@@ -654,6 +655,80 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         blk = self.mine(1)[0]
         assert c.hash in node.getblock(blk)["tx"]
         self.log.info("    the claim was mined in the next block (anchored %d)", self.anchor_of(blk))
+
+    def proof_preferred_over_floor(self):
+        self.step("N27 a floor-only spend never replaces a proof-reading one; a proof-reading one replaces it whatever the fees; key spends follow the fees (no pin)")
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        # (a) After R is anchored, the claim is pooled first: the refund, paying
+        # ten times more, is refused, and the claim is mined.
+        lock = self.fresh_lock(deadline_in=2, margin=6)
+        ptx, pr, vout = self.paid(lock)
+        self.btc_mine(lock["refund_at"] - b.getblockcount())
+        self.mine_anchored(lock["refund_at"])
+        c = self.claim(lock, pr["record"], vout, fee=5000)
+        node.sendrawtransaction(c.serialize().hex())
+        r = self.refund(lock, fee=50000)
+        assert_raises_rpc_error(-26, "btcpay-floor-replaces-proof", node.sendrawtransaction, r.serialize().hex())
+        self.results.append((self.current + " (a)", "refund at fee 50000 after R refused against the pooled claim at 5000: btcpay-floor-replaces-proof"))
+        blk = self.mine(1)[0]
+        assert c.hash in node.getblock(blk)["tx"]
+        self.log.info("    (a) the refund after R did not replace the pooled claim; the claim was mined")
+        # (b) After R, the refund is pooled first (paying more, not signalling
+        # replacement): the claim replaces it, and is mined.
+        lock = self.fresh_lock(deadline_in=2, margin=6)
+        ptx, pr, vout = self.paid(lock)
+        self.btc_mine(lock["refund_at"] - b.getblockcount())
+        self.mine_anchored(lock["refund_at"])
+        r = self.refund(lock, fee=50000, nseq=0xfffffffe)
+        node.sendrawtransaction(r.serialize().hex())
+        c = self.claim(lock, pr["record"], vout, fee=5000)
+        node.sendrawtransaction(c.serialize().hex())
+        pool = node.getrawmempool()
+        assert c.hash in pool and r.hash not in pool
+        blk = self.mine(1)[0]
+        assert c.hash in node.getblock(blk)["tx"]
+        self.results.append((self.current + " (b)", "claim at fee 5000 replaced the pooled refund at 50000 (no RBF signal) and was mined"))
+        self.log.info("    (b) the claim replaced the pooled refund (higher fee, no signal) and was mined")
+        # (c) No pin: a coin with a keyless proof leaf and a key leaf. Anyone
+        # spends it by the proof leaf with an old payment at a low fee; the
+        # owner's key spend, paying more, replaces it; a key spend paying less
+        # does not.
+        sk = generate_privkey()
+        pk = compute_xonly_pubkey(sk)[0]
+        proof_leaf = CScript([OP_INSPECTBTCPAYMENT, OP_2DROP, OP_1])
+        key_leaf = CScript([pk, OP_CHECKSIG])
+        tap = taproot_construct(NUMS, [("proof", proof_leaf), ("key", key_leaf)])
+        txid = node.sendtoaddress(address=program_to_witness(1, tap.scriptPubKey[2:]), amount=10,
+                                  assetlabel=self.asset, fee_asset_label=self.asset, replaceable=False)
+        t = tx_from_hex(node.getrawtransaction(txid))
+        n = [i for i, o in enumerate(t.vout) if o.scriptPubKey == tap.scriptPubKey][0]
+        blk = self.mine(1)[0]
+        coin = dict(tap=tap, proof=proof_leaf, key=key_leaf, txid=txid, vout=n, txout=t.vout[n], asset_amount=1000000000)
+        old = self.proof_for(ptx, self.anchor_of(blk), pr["blockhash"])
+        asset = CTxOutAsset(b"\x01" + bytes.fromhex(self.asset)[::-1])
+        spk = bytes.fromhex(node.getaddressinfo(node.getnewaddress())["scriptPubKey"])
+        anyone = CTransaction()
+        anyone.nVersion = 2
+        anyone.vin.append(CTxIn(COutPoint(int(txid, 16), n), nSequence=SEQ_NONFINAL_RBF))
+        anyone.vout.append(CTxOut(CTxOutValue(1000000000 - 3000), spk, asset))
+        anyone.vout.append(CTxOut(CTxOutValue(3000), b"", asset))
+        anyone.wit.vtxinwit.append(CTxInWitness())
+        anyone.wit.vtxoutwit = [CTxOutWitness() for _ in anyone.vout]
+        anyone.wit.vtxinwit[0].peginWitness.stack = [old["record"]]
+        control = bytes([tap.leaves["proof"].version + tap.negflag]) + tap.internal_pubkey + tap.leaves["proof"].merklebranch
+        anyone.wit.vtxinwit[0].scriptWitness.stack = [bytes(proof_leaf), control]
+        anyone.rehash()
+        node.sendrawtransaction(anyone.serialize().hex())
+        cheap = self.spend_lock(coin, "key", [], [], fee=2000, sign_with=sk, out_spk=spk)
+        assert_raises_rpc_error(-26, "insufficient fee", node.sendrawtransaction, cheap.serialize().hex())
+        dear = self.spend_lock(coin, "key", [], [], fee=50000, sign_with=sk, out_spk=spk)
+        node.sendrawtransaction(dear.serialize().hex())
+        pool = node.getrawmempool()
+        assert dear.hash in pool and anyone.hash not in pool
+        self.results.append((self.current + " (c)", "key spend at 50000 replaced a keyless proof spend at 3000; at 2000 refused: insufficient fee"))
+        self.log.info("    (c) no pin: the key spend paying more replaced the keyless proof spend; paying less it was refused")
+        self.mine(1)
 
     def neg_relative_floor(self):
         self.step("N10 the relative floor a covenant asks for (h > C)")

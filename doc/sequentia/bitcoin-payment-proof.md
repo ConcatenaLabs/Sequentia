@@ -372,6 +372,25 @@ must be strictly lighter or replace a proof that is no longer valid, so a chain
 of replacements cannot loop. `sendrawtransaction` submits such a transaction to
 the mempool instead of treating its transaction id as already known.
 
+**A proof is preferred over a floor.** Among conflicting spends of one coin:
+
+- a spend that read only an anchor floor never replaces one whose script read a
+  payment proof (`btcpay-floor-replaces-proof`), whatever it pays;
+- a spend that read a proof replaces spends that read only a floor, whatever
+  they pay and whether or not they signal replacement;
+- every other pair follows the usual replacement rules, by fee: two spends that
+  read a proof, and a spend with no records against either kind.
+
+In the swap this decides the race after `R`: the refund never displaces a claim,
+and the claim displaces a refund pooled before it, so between honest producers
+the buyer who paid by `D` is mined. The third rule is what keeps it from pinning
+a coin: a coin that a key can also spend is never held by a cheap proof-path
+spend, since the key spend replaces it by paying more. Relay refuses records no
+opcode read (6.1), so a spend cannot claim the preference with a proof its script
+does not need. Block assembly takes its transactions from the mempool, which holds
+one spend per coin, so it follows the same order; a producer that is itself the
+seller can still mine its own refund after `R`, which consensus allows.
+
 **Every valid variant is kept.** A newcomer that is valid but does not replace
 the pooled one (it is heavier) is still checked in full, kept beside it, and then
 refused as the same transaction. Which proof a node pools depends on what reached

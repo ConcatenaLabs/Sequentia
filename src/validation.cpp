@@ -513,6 +513,24 @@ static bool HasBtcPaymentRecords(const CTransaction& tx)
     return false;
 }
 
+//! SEQUENTIA: what a transaction's scripts read of the bitcoin-payment records.
+//! Relay refuses a record no executed opcode read (SCRIPT_VERIFY_BTCPAYMENT_RECORDS_READ),
+//! so for a relayed transaction the records it carries are the ones it read.
+enum class BtcPayClass { NONE, FLOOR_ONLY, PROOF };
+static BtcPayClass BtcPayClassOf(const CTransaction& tx)
+{
+    bool floor = false;
+    for (size_t i = 0; i < tx.vin.size() && i < tx.witness.vtxinwit.size(); ++i) {
+        if (tx.vin[i].m_is_pegin) continue;
+        for (const auto& item : tx.witness.vtxinwit[i].m_pegin_witness.stack) {
+            if (item.empty()) continue;
+            if (item[0] == BtcPayment::RECORD_PAYMENT) return BtcPayClass::PROOF;
+            if (item[0] == BtcPayment::RECORD_FLOOR) floor = true;
+        }
+    }
+    return floor ? BtcPayClass::FLOOR_ONLY : BtcPayClass::NONE;
+}
+
 //! Relay policy: the one encoding of the records, known types only, in order.
 static bool IsStandardBtcPaymentSlot(const std::vector<std::vector<unsigned char>>& slot)
 {
@@ -1033,6 +1051,9 @@ private:
         //! transaction that does not replace it: validated in full, kept for
         //! re-attachment (6.3), and then refused as the same transaction.
         bool m_btcpay_alternate_only{false};
+        //! SEQUENTIA: a spend that read a payment proof, whose every direct
+        //! conflict read only a floor: it replaces them whatever their fees.
+        bool m_btcpay_proof_over_floor{false};
         /** Iterators to mempool entries that this transaction directly conflicts with. */
         CTxMemPool::setEntries m_iters_conflicting;
         /** Iterators to all mempool entries that would be replaced by this transaction, including
@@ -1268,6 +1289,16 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     }
 
     // Check for conflicts with in-memory transactions
+    // SEQUENTIA: among conflicting spends of one coin, the one whose script read
+    // a payment proof is preferred over one whose script read only an anchor
+    // floor (doc/sequentia/bitcoin-payment-proof.md 6.2): a floor-only spend
+    // never replaces it, and it replaces floor-only spends whatever their fees or
+    // signalling. Every other pair follows the fee rules below, so no spend can
+    // pin a coin against a key spend that pays more.
+    const bool btcpay_rules = m_active_chainstate.m_chain.Tip() &&
+        args.m_chainparams.GetConsensus().BtcPaymentActiveAt(m_active_chainstate.m_chain.Height() + 1);
+    const BtcPayClass btcpay_class = btcpay_rules ? BtcPayClassOf(tx) : BtcPayClass::NONE;
+    bool btcpay_all_floor_only = true, btcpay_any_conflict = false;
     for (const CTxIn &txin : tx.vin)
     {
         const CTransaction* ptxConflicting = m_pool.GetConflictTx(txin.prevout);
@@ -1276,7 +1307,17 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
                 // Transaction conflicts with a mempool tx, but we're not allowing replacements.
                 return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "bip125-replacement-disallowed");
             }
+            const BtcPayClass theirs = btcpay_rules ? BtcPayClassOf(*ptxConflicting) : BtcPayClass::NONE;
+            if (ptxConflicting->GetHash() != tx.GetHash()) {
+                if (theirs == BtcPayClass::PROOF && btcpay_class == BtcPayClass::FLOOR_ONLY) {
+                    return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "btcpay-floor-replaces-proof");
+                }
+                btcpay_any_conflict = true;
+                if (theirs != BtcPayClass::FLOOR_ONLY) btcpay_all_floor_only = false;
+            }
             if (ws.m_btcpay_witness_replace && ptxConflicting->GetHash() == tx.GetHash()) {
+                ws.m_conflicts.insert(ptxConflicting->GetHash());
+            } else if (btcpay_class == BtcPayClass::PROOF && theirs == BtcPayClass::FLOOR_ONLY) {
                 ws.m_conflicts.insert(ptxConflicting->GetHash());
             } else if (!ws.m_conflicts.count(ptxConflicting->GetHash()))
             {
@@ -1295,6 +1336,7 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
             }
         }
     }
+    ws.m_btcpay_proof_over_floor = btcpay_class == BtcPayClass::PROOF && btcpay_any_conflict && btcpay_all_floor_only;
 
     LockPoints lp;
     m_view.SetBackend(m_viewmempool);
@@ -1631,6 +1673,22 @@ bool MemPoolAccept::ReplacementChecks(Workspace& ws)
         }
         if (const auto err_string{GetEntriesForConflicts(tx, m_pool, ws.m_iters_conflicting, ws.m_all_conflicting)}) {
             return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "too many potential replacements", *err_string);
+        }
+        return true;
+    }
+
+    if (ws.m_btcpay_proof_over_floor) {
+        // SEQUENTIA: a proof-reading spend over floor-only ones (PreChecks):
+        // the fee rules do not apply; the limits on what it evicts do.
+        if (const auto err_string{GetEntriesForConflicts(tx, m_pool, ws.m_iters_conflicting, ws.m_all_conflicting)}) {
+            return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "too many potential replacements", *err_string);
+        }
+        if (const auto err_string{HasNoNewUnconfirmed(tx, m_pool, ws.m_iters_conflicting)}) {
+            return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "replacement-adds-unconfirmed", *err_string);
+        }
+        for (CTxMemPool::txiter it : ws.m_all_conflicting) {
+            ws.m_conflicting_fees += it->GetModifiedFee();
+            ws.m_conflicting_size += it->GetTxSize();
         }
         return true;
     }
