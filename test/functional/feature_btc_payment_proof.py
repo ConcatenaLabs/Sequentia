@@ -2117,11 +2117,17 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.log.info("    blocks of the shared window read before the buyer's claim was back: %d without the attacker's "
                       "floor, %d with it (and %d, %d read below it for the attacker's claim meanwhile); %.1f s and %.1f s "
                       "after the new anchor", without, with_floor, below0, below1, t_without, t_with)
-        # The shared window, plus the few blocks a new Bitcoin tip adds to it while
-        # claims of earlier steps wait too.
+        # Not exact equality: each new Bitcoin tip mined during a run moves the
+        # shared window up by a block, and the scan reads the new block for the
+        # scripts waiting then; how many tips land between the reorganization
+        # and the buyer's re-attachment depends on timing, so each run reads 144
+        # blocks plus one or two. A floor that widened the window would read
+        # 2,016 (the attacker's floor is 2,050 down).
         assert without <= 150, without
         assert with_floor <= without + 4, (with_floor, without)
-        # One tick's budget (500 ms) and one poll (1 s) at most, with slack for a loaded machine.
+        # The attacker's own search can be in the middle of a tick when the new
+        # anchor arrives: the buyer's claim then waits for that tick to end (its
+        # 500 ms budget) and for the next poll (1 s), with slack for a loaded machine.
         assert t_with <= t_without + 2.5, (t_with, t_without)
         # The attacker's own search, below the shared window, after the buyer's claim was served; its
         # blocks are not kept in the cache.
