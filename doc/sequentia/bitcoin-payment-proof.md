@@ -300,13 +300,24 @@ the anchor does: the first block anchored at or above `h`, call it `P`, and the
 59 after it. The floor needs the block 60 below its own to be anchored at
 `F >= h`, and the first such block is `P` or later, so the first block that meets
 the floor is `P + 60` or later. Each of the 59 after `P` follows a block that
-records the payment, so a mempool can hold a claim for it (section 6.1). This
-holds while the chain records an anchor within 2,016 Bitcoin blocks above the
-payment, the most headers a proof links (section 3). If the chain records no
-anchor for longer than that, a proof of a payment in that gap can reach no
-recorded anchor and the claim is never valid, while the refund still opens 60
-blocks after the first block anchored at `F`: a gap that long is about two
-weeks of Bitcoin with no Sequentia block.
+records the payment, so a mempool can hold a claim for it (section 6.1).
+
+**The limit.** This holds while some block of the branch records an anchor from
+`h` to `h + 2,016`, since a proof links at most 2,016 headers to a recorded
+anchor (section 3). When none does, a proof of the payment reaches no recorded
+anchor and the claim is never valid, while the refund still opens 60 blocks
+after the first block anchored at `F`. That happens only when the anchor stays
+below `h` while Bitcoin runs more than 2,016 blocks past the payment, so that the
+next anchor recorded lies above `h + 2,016`: about two weeks in which no
+Sequentia block records a new Bitcoin anchor. Producing blocks does not avoid it
+when every block repeats the last anchor. Sequentia producing no block for that
+long is one way; the other is on Bitcoin's side, two live branches kept within
+the contest window of each other (`-anchorcontestwindow`, two blocks by default)
+for about two weeks, while producers record the block they share (below). A
+payment in the last 2,016 Bitcoin blocks below the next recorded anchor links to
+it and keeps its 60 blocks. The rule does not cover this limit and no cap on
+anchoring is added for it: a network that records no new Bitcoin block for two
+weeks has stopped working.
 
 **Why the block 60 below, not the block's own anchor.** One block's anchor can
 jump. While Bitcoin has two live branches, producers keep recording the last
@@ -823,7 +834,8 @@ at `h` or above. The refund names `R = D`, so by check 8 it is valid only from t
 claim is valid, and section 4.4 shows that this leaves the claim at least 60
 blocks whatever the anchor does on the way: the usual lag of a block's anchor
 behind Bitcoin's tip, an anchor held at a contested height for as long as a
-Bitcoin fork lasts and then jumping past `D` in one block, or a stall. Without
+Bitcoin fork lasts and then jumping past `D` in one block, or a stall, up to
+the limit section 4.4 states. Without
 `D`, a payment mined just before the refund became valid would race it. Once the
 claim is signed, its completion service and every node that watches Bitcoin
 bring it back after a reorganization (sections 6.3, 8.5), so the 60 blocks cover
@@ -1146,8 +1158,10 @@ mempools from the payment's first anchor on, so it is mined long before the
 refund is valid, and the claim has at least 60 blocks to itself whatever the
 anchor does (section 4.4): a jump straight past `D` after a contested Bitcoin
 fork leaves it the jump block and the 59 after it, and a stall stops the count,
-as long as the chain records an anchor within 2,016 Bitcoin blocks above the
-payment (section 4.4).
+as long as some block records an anchor within 2,016 Bitcoin blocks above the
+payment. Blocks that all repeat an anchor below the payment do not, so the limit
+is about two weeks with no newly recorded Bitcoin anchor, whether or not
+Sequentia goes on producing blocks (section 4.4).
 A seller that produces blocks can still include its refund in place of a claim
 pending when the refund becomes valid, which consensus allows; to get there
 without the claim being mined it must produce every one of the 59 blocks after
