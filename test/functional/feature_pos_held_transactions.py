@@ -38,6 +38,16 @@ from test_framework.key import ECKey
 from test_framework.messages import COIN, tx_from_hex
 from test_framework.test_framework import BitcoinTestFramework, SkipTest
 from test_framework.util import assert_equal, p2p_port, rpc_port
+import hashlib
+from test_framework.address import program_to_witness
+from test_framework.key import compute_xonly_pubkey, generate_privkey, sign_schnorr
+from test_framework.messages import COutPoint, CTransaction, CTxIn, CTxInWitness, CTxOut, CTxOutValue, CTxOutWitness
+from test_framework.script import (CScript, OP_CHECKSIG, OP_CHECKSIGVERIFY, OP_DROP, OP_DUP, OP_EQUALVERIFY,
+                                   OP_GREATERTHAN, OP_GREATERTHANOREQUAL64, OP_LESSTHANOREQUAL, OP_VERIFY,
+                                   SIGHASH_DEFAULT, TaprootSignatureHash, taproot_construct)
+from feature_btc_payment_proof import (FIELD_OUTPUT, NUMS, OP_CHECKANCHORHEIGHTVERIFY, OP_INSPECTBTCPAYMENT,
+                                       OP_INSPECTBTCTX, SEQ_NONFINAL_RBF, le8, merkle_branch, payment_record,
+                                       scriptnum, strip_btc_tx)
 
 BITCOIND = os.environ.get("PARENT_BITCOIND", "/usr/local/bin/bitcoind")
 CASES = os.environ.get("CR1_CASES", "a,e,d,c,g,f,b,cc,i,rC,rA,rB,rD,b15,bb,dd,fs,share").split(",")
@@ -1209,6 +1219,229 @@ class HeldTransactionsTest(BitcoinTestFramework):
         self.mesh()
         self.sync_all_tips()
 
+    # ------------------------------------------------------------ the swap (payment-proof branch)
+    def swap_setup(self):
+        if getattr(self, "swap_ready", False):
+            return
+        b = self.btc()
+        for w in ("buyer", "seller"):
+            b.createwallet(w)
+        # Coinbase maturity: the buyer's coins come from a mature block reward.
+        self.btc_mine(101)
+        self.btc("miner").sendtoaddress(self.btc("buyer").getnewaddress(), 10)
+        self.btc_mine(1)
+        self.wait_until(lambda: self.tip(self.nodes[1])["anchorheight"] == self.btc().getblockcount(), timeout=120)
+        self.swap_ready = True
+
+    def swap_lock(self, coin, fee, amount_sat, deadline_in=40):
+        """The seller's lock of `coin` under the claim and refund leaves, signed, not sent."""
+        a = self.nodes[ATTACKER]
+        sk_b, sk_s = generate_privkey(), generate_privkey()
+        pk_b, pk_s = compute_xonly_pubkey(sk_b)[0], compute_xonly_pubkey(sk_s)[0]
+        bs = self.btc("seller")
+        desc = bs.getdescriptorinfo("wsh(and_v(v:pk(%s),older(1)))" % ("02" + pk_s.hex()))["descriptor"]
+        addr = bs.deriveaddresses(desc)[0]
+        info = bs.getaddressinfo(addr)
+        program, version = bytes.fromhex(info["witness_program"]), info["witness_version"]
+        F = self.tip(self.nodes[1])["anchorheight"]
+        D = self.btc().getblockcount() + deadline_in
+        claim = CScript([pk_b, OP_CHECKSIGVERIFY, OP_INSPECTBTCPAYMENT, OP_DROP, OP_DUP, F, OP_GREATERTHAN,
+                         OP_VERIFY, D, OP_LESSTHANOREQUAL, OP_VERIFY, FIELD_OUTPUT, OP_INSPECTBTCTX, version,
+                         OP_EQUALVERIFY, program, OP_EQUALVERIFY, le8(amount_sat), OP_GREATERTHANOREQUAL64])
+        refund = CScript([D, OP_CHECKANCHORHEIGHTVERIFY, OP_DROP, pk_s, OP_CHECKSIG])
+        tap = taproot_construct(NUMS, [("claim", claim), ("refund", refund)])
+        lock_addr = program_to_witness(1, tap.scriptPubKey[2:])
+        raw = a.createrawtransaction([{"txid": coin["txid"], "vout": coin["vout"]}],
+                                     [{lock_addr: coin["amount"] - fee}, {"fee": fee}])
+        hexed = a.signrawtransactionwithwallet(raw)["hex"]
+        tx = tx_from_hex(hexed)
+        vout = [i for i, o in enumerate(tx.vout) if o.scriptPubKey == tap.scriptPubKey][0]
+        return dict(hex=hexed, txid=tx.rehash(), vout=vout, txout=tx.vout[vout], sk_b=sk_b, tap=tap, claim=claim,
+                    addr=addr, amount=amount_sat, F=F, D=D, value=int((coin["amount"] - fee) * 100000000))
+
+    def swap_proof(self, lock, pay_txid, coin_anchor):
+        """The payment record for the claim, linked to an anchor the active chain recorded."""
+        b = self.btc()
+        n1 = self.nodes[1]
+        bh = self.btc("buyer").gettransaction(pay_txid)["blockhash"]
+        blk = b.getblock(bh, 1)
+        self.wait_until(lambda: self.tip(n1)["anchorheight"] >= blk["height"], timeout=180)
+        cur = n1.getblockheader(n1.getbestblockhash())
+        while "previousblockhash" in cur:
+            prev = n1.getblockheader(cur["previousblockhash"])
+            if prev["anchorheight"] < blk["height"]:
+                break
+            cur = prev
+        rec_anchor = cur["anchorheight"]
+        links = [bytes.fromhex(b.getblockheader(b.getblockhash(x), False)) for x in range(blk["height"] + 1, rec_anchor + 1)]
+        leaves = [bytes.fromhex(t)[::-1] for t in blk["tx"]]
+        index = blk["tx"].index(pay_txid)
+        header = bytes.fromhex(b.getblockheader(bh, False))
+        cb = strip_btc_tx(bytes.fromhex(b.getrawtransaction(blk["tx"][0], False, bh)))
+        pay = strip_btc_tx(bytes.fromhex(b.getrawtransaction(pay_txid, False, bh)))
+        rec = payment_record(blk["height"], coin_anchor, header, hashlib.sha256(cb).digest(), index,
+                             merkle_branch(leaves, index), merkle_branch(leaves, 0), pay, links=links)
+        vout = [o["n"] for o in b.getrawtransaction(pay_txid, True, bh)["vout"] if o["scriptPubKey"].get("address") == lock["addr"]][0]
+        return rec, vout, blk["height"]
+
+    def swap_claim(self, lock, record, vout, fee=5000):
+        """The buyer's claim of the lock, its fee in the locked asset."""
+        n1 = self.nodes[1]
+        tx = CTransaction()
+        tx.nVersion = 2
+        tx.vin.append(CTxIn(COutPoint(int(lock["txid"], 16), lock["vout"]), nSequence=SEQ_NONFINAL_RBF))
+        asset = lock["txout"].nAsset
+        spk = bytes.fromhex(n1.getaddressinfo(n1.getnewaddress())["scriptPubKey"])
+        tx.vout.append(CTxOut(CTxOutValue(lock["value"] - fee), spk, asset))
+        tx.vout.append(CTxOut(CTxOutValue(fee), b"", asset))
+        tx.wit.vtxinwit.append(CTxInWitness())
+        tx.wit.vtxoutwit = [CTxOutWitness() for _ in tx.vout]
+        tx.wit.vtxinwit[0].peginWitness.stack = [record]
+        genesis = int(n1.getblockhash(0), 16)
+        sighash = TaprootSignatureHash(tx, [lock["txout"]], SIGHASH_DEFAULT, genesis, 0, scriptpath=True, script=lock["claim"])
+        sig = sign_schnorr(lock["sk_b"], sighash)
+        tap = lock["tap"]
+        leaf = tap.leaves["claim"]
+        control = bytes([leaf.version + tap.negflag]) + tap.internal_pubkey + leaf.merklebranch
+        tx.wit.vtxinwit[0].scriptWitness.stack = [scriptnum(vout), sig, bytes(lock["claim"]), control]
+        tx.rehash()
+        return tx
+
+    def case_swap(self):
+        """The first brief's case j: a seller that controls one producer (the attacker, rule off) certifies the
+        lock at the lowest fee it can, the buyer pays, Bitcoin reorganizes the lock's anchor block away (and the
+        payment's block with it), the seller's producer offers the respend in a single-signer block: the members
+        refuse it, the lock is mined again from the record, and the buyer's claim completes."""
+        self.log.info("(swap) the swap's lock comes back and the buyer's claim completes")
+        self.swap_setup()
+        a = self.nodes[ATTACKER]
+        coin = self.fund()
+        lock = self.swap_lock(coin, Decimal("0.00000001"), 50000)
+        r_hex = self.spend(coin, a.getnewaddress(), Decimal("0.001"))
+        r_id = tx_from_hex(r_hex).rehash()
+        self.record("swap", "lock", "%s at a 1-atom fee; honest mempool: %s" %
+                    (lock["txid"], self.nodes[1].testmempoolaccept([lock["hex"]])[0].get("reject-reason")))
+        self.btc_mine(1)
+        self.wait_until(lambda: self.tip(self.nodes[1])["anchorheight"] == self.btc().getblockcount(), timeout=120)
+        l_id, l_h, l_anchor = self.certify(lock["hex"])
+        pay = self.btc("buyer").sendtoaddress(lock["addr"], Decimal(lock["amount"]) / Decimal(100000000))
+        hp = self.btc().getblockheader(self.btc_mine(1)[0])["height"]
+        self.record("swap", "certified", "lock at height %d anchored at Bitcoin %d; the buyer's payment %s mined at Bitcoin %d" %
+                    (l_h, l_anchor, pay, hp))
+        pay_hex = self.btc("buyer").gettransaction(pay)["hex"]
+        sizes = [self.log_size(i) for i in range(N)]
+        self.isolate()
+        depth = self.btc().getblockcount() - l_anchor + 1
+        fork = self.bitcoin_reorg(depth)
+        self.wait_until(lambda: all(self.tip(n)["anchorheight"] <= fork for n in self.nodes), timeout=120)
+        self.wait_held([l_id], [1, 2, 3, 4, 5])
+        # The buyer's wallet set an anti-fee-sniping lock time at the old tip, which the shorter new
+        # chain had not reached when Bitcoin dropped the payment from its mempool: the wallet sends it
+        # again, and the next Bitcoin block mines it.
+        if not self.btc("buyer").gettransaction(pay).get("blockhash"):
+            self.btc().sendrawtransaction(pay_hex)
+            self.btc_mine(1)
+        new_hp = self.btc("buyer").gettransaction(pay).get("blockhash")
+        assert new_hp
+        self.record("swap", "reorganization", "Bitcoin %d deep from %d: the lock's anchor block and the payment's block replaced; "
+                    "the payment re-mined in %s; the lock held on members 1-5" % (depth, fork, new_hp))
+        # The seller's producer: its mempool forgets the lock, takes the respend, and certifies it alone.
+        self.stop_node(ATTACKER)
+        self.start_node(ATTACKER, extra_args=self.node_args(ATTACKER) + ["-persistmempool=0", "-walletbroadcast=0"])
+        self.nodes[ATTACKER].setnetworkactive(False)
+        self.nodes[ATTACKER].loadwallet("w")
+        a = self.nodes[ATTACKER]
+        a.sendrawtransaction(r_hex)
+        x = self.escape_block(a)
+        assert r_id in a.getblock(x["hash"])["tx"]
+        self.record("swap", "X", "%s: the seller's single-signer block carrying the respend %s" % (x["hash"], r_id))
+        self.rejoin()
+        st = dict(t_id=l_id, r_id=r_id, sizes=sizes, aware=[1, 2, 3, 4, 5])
+        won = self.outcome("swap", st, timeout=300)
+        assert_equal(won, "T")
+        parked = sum(len(self.log_has(i, "setting aside sub-quorum block %s" % x["hash"], sizes[i])) for i in range(1, N))
+        rec = []
+        for i in range(1, N):
+            rec += [l for l in self.log_has(i, "mined from the record", sizes[i]) if "1 held" in l or "held transaction(s) mined" in l]
+        self.record("swap", "members", "%d set X aside; record lines on the members: %d" % (parked, len(rec)))
+        assert parked > 0
+        n1 = self.nodes[1]
+        lh = self.block_of(l_id, n1)
+        c_anchor = n1.getblockheader(n1.getblockhash(lh))["anchorheight"]
+        rec, vout, ph = self.swap_proof(lock, pay, c_anchor)
+        claim = self.swap_claim(lock, rec, vout)
+        cid = n1.sendrawtransaction(claim.serialize().hex())
+        ch = self.wait_mined(cid, n1, timeout=180)
+        self.wait_certified_above(ch)
+        self.record("swap", "claim", "%s mined at height %d and certified: the buyer has the asset (payment at Bitcoin %d, lock anchor %d)" %
+                    (cid, ch, ph, c_anchor))
+        self.swap_done = dict(lock=lock, pay=pay, claim=claim, cid=cid, ch=ch)
+        # The seller's node back to its ordinary settings.
+        self.stop_node(ATTACKER)
+        self.start_node(ATTACKER, extra_args=self.node_args(ATTACKER))
+        self.nodes[ATTACKER].loadwallet("w")
+        self.mesh()
+        self.sync_all_tips()
+
+    def case_swaprel(self):
+        """The release: a certified claim is disconnected by a Bitcoin reorganization in which the buyer's
+        payment is double-spent, so its proof can never hold again. The claim is held (premature, not
+        invalid); the waiting set gives it up after its window of Bitcoin blocks, and HeldTxsRelease ends the
+        hold then. Every node is isolated meanwhile, so the tip's anchor stays where it was and the held
+        window (counted on the tip's anchor) cannot be what releases it."""
+        self.log.info("(swaprel) a held claim whose Bitcoin payment is gone for good is released")
+        self.swap_setup()
+        a = self.nodes[ATTACKER]
+        n1 = self.nodes[1]
+        coin = self.fund()
+        lock = self.swap_lock(coin, Decimal("0.0001"), 40000)
+        self.btc_mine(1)
+        self.wait_until(lambda: self.tip(n1)["anchorheight"] == self.btc().getblockcount(), timeout=120)
+        l_id, l_h, l_anchor = self.certify(lock["hex"])
+        buyer = self.btc("buyer")
+        pay = buyer.sendtoaddress(lock["addr"], Decimal(lock["amount"]) / Decimal(100000000))
+        hp_hash = self.btc_mine(1)[0]
+        rec, vout, ph = self.swap_proof(lock, pay, l_anchor)
+        claim = self.swap_claim(lock, rec, vout)
+        cid = n1.sendrawtransaction(claim.serialize().hex())
+        ch = self.wait_mined(cid, n1, timeout=180)
+        self.wait_certified_above(ch)
+        self.sync_all_tips()
+        self.record("swaprel", "claim", "%s certified at height %d; payment %s at Bitcoin %d" % (cid, ch, pay, ph))
+        sizes = [self.log_size(i) for i in range(N)]
+        self.isolate()
+        b = self.btc()
+        # Bitcoin drops the payment's block; the buyer double-spends the payment back to itself.
+        b.invalidateblock(hp_hash)
+        raw = b.getrawtransaction(pay, True)
+        ins = [{"txid": i["txid"], "vout": i["vout"]} for i in raw["vin"]]
+        value = sum(Decimal(str(buyer.gettransaction(i["txid"], True, True)["decoded"]["vout"][i["vout"]]["value"])) for i in ins)
+        ds = b.sendrawtransaction(buyer.signrawtransactionwithwallet(
+            b.createrawtransaction(ins, [{buyer.getnewaddress(): value - Decimal("0.001")}]))["hex"])
+        self.btc_mine(3)
+        assert buyer.gettransaction(ds).get("confirmations", 0) > 0
+        fork = ph - 1
+        self.wait_until(lambda: all(self.tip(n)["anchorheight"] <= fork for n in self.nodes), timeout=120)
+        self.wait_held([cid], [1, 2, 3, 4, 5])
+        self.record("swaprel", "held", "payment double-spent by %s in Bitcoin's best chain; the claim held on members 1-5, tip anchor %d" %
+                    (ds, self.tip(n1)["anchorheight"]))
+        try:
+            n1.sendrawtransaction(claim.serialize().hex())
+        except JSONRPCException as e:
+            self.record("swaprel", "the claim on the new chain", e.error["message"][:200])
+        anchor_before = self.tip(n1)["anchorheight"]
+        self.wait_until(lambda: self.log_has(1, "re-attach of %s" % cid, sizes[1]) != [], timeout=60)
+        self.btc_mine(150)
+        self.wait_until(lambda: cid not in n1.getheldtxs()["txids"], timeout=300)
+        why = self.log_has(1, "%s released" % cid, sizes[1])
+        self.record("swaprel", "released", why[0].split("released: ", 1)[1] if why else "?")
+        self.record("swaprel", "tip anchor", "%d before, %d after: the held window did not release it" %
+                    (anchor_before, self.tip(n1)["anchorheight"]))
+        assert why and "gone for good" in why[0], why
+        assert self.tip(n1)["anchorheight"] == anchor_before
+        self.rejoin()
+        self.sync_all_tips(timeout=300)
+
     def run_test(self):
         try:
             # Wait for the committee to certify blocks on its own.
@@ -1251,6 +1484,10 @@ class HeldTransactionsTest(BitcoinTestFramework):
                 self.case_fs()
             if "share" in CASES:
                 self.case_share()
+            if "swap" in CASES:
+                self.case_swap()
+            if "swaprel" in CASES:
+                self.case_swaprel()
         finally:
             if RESULTS:
                 with open(RESULTS, "w") as f:

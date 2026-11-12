@@ -3756,6 +3756,18 @@ bool CheckTxForNextBlock(const CTransaction& tx, const CCoinsViewCache& view, CB
     if (!Consensus::CheckTxInputs(tx, state, view, height, fee_map, pegins_spent, nullptr, false, true, fedpegscripts)) {
         return false;
     }
+    // The bitcoin-payment records, checked outside the script against this
+    // branch's anchors, as for the next block. They are under no signature, so
+    // a refusal is a verdict on this witness and never ends a hold.
+    if (params.BtcPaymentActiveAt(height) && HasBtcPaymentRecords(tx)) {
+        std::string reason;
+        if (CheckTxBtcPaymentRecords(tx, view, tip, /*in_block=*/false, tip->m_anchor_height, tip->m_anchor_hash,
+                                     nullptr, reason) != BtcPayVerdict::OK) {
+            if (script_failure) *script_failure = true;
+            return state.Invalid(reason.rfind("bad-", 0) == 0 ? TxValidationResult::TX_CONSENSUS
+                                                              : TxValidationResult::TX_PREMATURE_SPEND, reason);
+        }
+    }
     // The block's own flags, not the mempool's: a transaction a block may carry
     // is what is asked, and a certified one passed them once already.
     const unsigned int flags = GetBlockScriptFlags(&next, params);
@@ -10159,6 +10171,11 @@ void BtcPaymentReattachTick(ChainstateManager& chainman)
                      txid.ToString(), BTCPAY_PENDING_WINDOW);
             BtcPaymentForget(txid);
             pending.erase(txid);
+            // SEQUENTIA held transactions: a claim whose payment no proof can
+            // reach any more is invalid for good; its hold ends here (a drop for
+            // room in the waiting set says nothing of the payment, and does not).
+            HeldTxsRelease(txid, strprintf("its Bitcoin payment is gone for good: not re-attached in %d Bitcoin blocks",
+                                           BTCPAY_PENDING_WINDOW));
         }
     }
     const auto variants_of = [&](const uint256& txid) {

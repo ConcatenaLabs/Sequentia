@@ -770,6 +770,20 @@ void BlockAssembler::addHeldTransactions()
         }
         if (clash) continue;
         if (!fIncludeWitness && tx->HasWitness()) continue;
+        // A bitcoin-payment proof above this block's anchor, or an anchor floor
+        // not reached yet, waits for a later block, as in TestPackageTransactions.
+        if (m_btcpay_active) {
+            bool later = false;
+            for (size_t i = 0; i < tx->vin.size() && i < tx->witness.vtxinwit.size() && !later; ++i) {
+                if (tx->vin[i].m_is_pegin || tx->witness.vtxinwit[i].m_pegin_witness.stack.empty()) continue;
+                BtcPayment::Records records;
+                std::string reason;
+                if (!BtcPayment::ParseRecords(tx->witness.vtxinwit[i].m_pegin_witness.stack, records, reason)) later = true;
+                else if (records.proof && records.proof->height > m_anchor_height) later = true;
+                else if (records.floor && (m_floor_anchor_height < 0 || *records.floor > m_floor_anchor_height)) later = true;
+            }
+            if (later) continue;
+        }
         const uint64_t weight = GetTransactionWeight(*tx);
         // The oldest one that fits the block always goes in, however large:
         // the share limits what follows it, never whether the record moves.
