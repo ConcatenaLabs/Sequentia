@@ -29,8 +29,8 @@ block's coinbase to that block's merkle root) and an **anchor floor** (a Bitcoin
 height). The script reads them through the opcodes; the node checks them against
 the block, the spent coin and the anchor, outside the script, the way it checks
 `nLockTime` for `OP_CHECKLOCKTIMEVERIFY` and `nSequence` for
-`OP_CHECKSEQUENCEVERIFY`. A payment proof is valid in a block only if its Bitcoin
-block is in that block's anchor chain. An anchor floor is valid in a block only
+`OP_CHECKSEQUENCEVERIFY`. A payment proof is valid in a block only if headers it carries
+link its Bitcoin block to an anchor that block or one of its ancestors recorded. An anchor floor is valid in a block only
 if the block's anchor height is at least the floor. Neither record is under any
 signature.
 
@@ -42,7 +42,7 @@ signature.
 |---|---|---|---|
 | Only tightens | yes: the opcodes are `OP_SUCCESS` today (`src/script/script.cpp:451-459` covers 229 to 254), and the slot is ignored by consensus | no: a new jet is a program old nodes refuse to parse, so a spend using it is a relaxation | yes |
 | What scripts can do with it | anything tapscript does around it: keys, deadlines, Elements introspection, 64-bit arithmetic | the most, once written | nothing: the node checks one fixed condition |
-| Code reused | the interpreter's `OP_SUCCESS` path, the Bitcoin transaction type of the peg-in code, `CheckMainchainAnchor` and its verdict cache | the same node side, plus changes inside the vendored interpreter | the same node side |
+| Code reused | the interpreter's `OP_SUCCESS` path, the Bitcoin transaction and header types of the peg-in code, and the anchors every block already records | the same node side, plus changes inside the vendored interpreter | the same node side |
 
 **Decision: the tapscript opcode.** It is the only form that both tightens and
 composes. The node does all checking that depends on the chain; the opcodes only
@@ -75,7 +75,7 @@ online:
   payment is mined: the buyer's wallet, a service, the counterparty, a node.
 - **A Bitcoin reorganization that moves the payment to another block** needs no
   new signature: the claim's transaction id is unchanged and only its proof is
-  replaced. A node that watches Bitcoin re-attaches the fresh proof itself
+  replaced. A node that watches Bitcoin re-links the fresh proof itself
   (section 6.3), so a claim returns to the chain with nobody online, as
   whitepaper section 5.3 says a reorganized transaction does.
 - **Wallet libraries** sign the claim exactly as any taproot script-path spend.
@@ -120,7 +120,7 @@ a block's own producer can add ignored items.
 | Field | Bytes |
 |---|---|
 | type `0x01` | 1 |
-| Bitcoin height `h` of the block | 4, little-endian |
+| Bitcoin height `h` of the block, which the node checks is the recorded anchor's height less `n` | 4, little-endian |
 | coin anchor `C`: the anchor height of the block that created the coin this input spends | 4, little-endian |
 | the block's 80-byte header | 80 |
 | `SHA256(coinbase)`: the single SHA-256 of the block's coinbase transaction | 32 |
@@ -128,6 +128,8 @@ a block's own producer can add ignored items.
 | payment index | 4, little-endian, below `2^d` |
 | payment branch | `32 × d` |
 | coinbase branch | `32 × d` |
+| number of linking headers `n` | 2, little-endian, at most 2,016 |
+| linking headers | `80 × n` |
 | the payment transaction without its witness | the rest of the item, at most 100,000 bytes |
 
 The payment transaction comes last, so its length is the item's remainder and
@@ -207,67 +209,54 @@ vouches for it (section 4.3).
 
 ### 4.2 The proof, in its block
 
-For a transaction in a block anchored at Bitcoin height `A` with hash `A_hash`,
-each input carrying a payment proof for block `H` at height `h`:
+For a transaction in a block, each input carrying a payment proof for Bitcoin
+block `H` at declared height `h`, with `n` linking headers:
 
-5. **Below the anchor:** `h <= A`.
-6. **The coin anchor is true:** `C` equals the anchor height of the block that
-   created the coin this input spends, found by the coin's height on the chain
-   being connected, as for relative time locks. The node does not compare `h`
-   with `C`; a script does, if it wants to (section 4.5).
-7. **In the anchor chain:** `H` is `A_hash` or one of its ancestors.
+5. **The linking headers** each commit to the one before (`hashPrevBlock`), the
+   first to `H` itself, so they are `H`'s real descendants up to the hash they
+   end at, `E` (`H` itself when `n` is 0). At most 2,016 (`bad-btcpay-links`,
+   `bad-btcpay-encoding`).
+6. **`E` is an anchor this branch recorded:** the claim's block, or one of its
+   ancestors, carries `E` as its anchor, at height `h + n`
+   (`bad-btcpay-not-in-anchor-chain`). So `H` is the ancestor of that anchor at
+   height `h`, and the declared height is true.
+7. **The coin anchor is true:** `C` equals the anchor height of the block that
+   created the coin this input spends, found by the coin's height on this branch,
+   as for relative time locks.
 
-### 4.3 How every validating node reaches the same verdict on check 7
+### 4.3 How every validating node reaches the same verdict
 
-"`H` is an ancestor of `A_hash`" is a fact about two Bitcoin blocks that never
-changes. A node answers it from its Bitcoin daemon by asking whether `H` is on the
-best chain at height `h`. When `A_hash` is on the best chain (rule R3 checked it,
-and the watcher keeps checking it), `H` on the best chain at a height at most `A`
-is the same thing as `H` being its ancestor. Bitcoin's best chain is the shared
-oracle here exactly as it is for the anchor.
+Checks 5 to 7 read only the record and the chain the block extends. No Bitcoin
+daemon is asked, so the verdict is a function of the block and its ancestors,
+the same on every node, at any time; and a block refused is refused for good.
 
-The node asks through `CheckMainchainAnchor(h, H)` (`src/anchor.h:115`), the call
-R3 makes, with the same verdict cache and the same invalidation: a verdict is
-dropped only when Bitcoin reorganizes at or below its height. The answers map as
-R3's do (`src/validation.cpp:6343-6363`):
+Finding `E` costs a binary search over the block's ancestors. Anchor heights
+never decrease along a chain, and a block anchored at the same height as its
+parent carries the same hash (rule R2), so the first ancestor anchored at or
+above `h + n` decides: its anchor must be exactly `E` at exactly `h + n`.
 
-| The daemon says | Verdict |
-|---|---|
-| `H` on the best chain at `h` | valid |
-| `H` on the best chain at another height | invalid for good (`bad-btcpay-height-mismatch`): a hash has one height |
-| `H` unknown or off the best chain | asked again together with `A_hash` in one fresh read; if `A_hash` is on the best chain in that read, invalid for good (`bad-btcpay-not-in-anchor-chain`); otherwise unverifiable for now |
-| no answer | unverifiable for now (`btcpay-unverifiable`) |
+What depends on a node's view of Bitcoin stays where it was: rule R3, when a block
+records a new anchor, and the watcher, which disconnects every block whose anchor
+leaves Bitcoin's best chain. If `H` leaves Bitcoin's chain, so does every anchor
+above it on its branch, `E` included, so the watcher disconnects the claim's
+block, and the claim cannot be mined on the new branch because no anchor there
+descends from `H`.
 
-"Unverifiable for now" is `BLOCK_RECENT_CONSENSUS_CHANGE`, which the node already
-uses for the anchor and for the escaping-stall time gap. At connect time it makes
-`ConnectTip` stall and retry rather than mark the block failed
-(`src/validation.cpp:4963-5002`). A verdict that depends on this node's view of
-Bitcoin is never stored as permanent; a permanent verdict is stored only when the
-node has seen, in one read, a canonical anchor that `H` is not under.
+**Earlier designs asked the daemon** whether `H` was on its best chain. A proof
+review split two honest nodes that way: one answered from a cached verdict a
+moment after a Bitcoin reorganization and accepted the claim, the other asked
+afresh and refused it for good. Linking `H` to the chain's own anchors removes
+the question.
 
-**A Bitcoin node that is behind.** If it does not know `A_hash`, R3 has already
-deferred the block (`anchor-unknown`). If it knows `A_hash` it knows every
-ancestor's header, `H` included.
-
-**A first sync.** Old blocks are checked exactly like new ones: one
-`getblockheader` per distinct proven block, cached, as R3 asks one per distinct
-anchor. Only headers are needed, so a pruned Bitcoin node serves.
-
-**A node that does not watch Bitcoin** (`-validateanchor=0`) runs every check but
-7, as it skips R3, and trusts the proof's header as far as it trusts its anchors:
-on its peers' word ([`03-bitcoin-anchoring.md`](03-bitcoin-anchoring.md),
-section 3).
-
-**When `H` leaves Bitcoin's chain later**, every anchor at or above it on that
-branch leaves with it, `A_hash` included, so the watcher disconnects the claim's
-block as it disconnects any block with an orphaned anchor. The watcher needs no
-change for blocks.
+**A first sync** checks old blocks the same way, with no daemon and no index.
+**A node that does not watch Bitcoin** (`-validateanchor=0`) checks proofs fully
+as well; what it gives up is R3 and the watcher, as described in
+[`03-bitcoin-anchoring.md`](03-bitcoin-anchoring.md), section 3.
 
 ### 4.4 The anchor floor
 
 For an input carrying a floor `F` in a block anchored at `A`: `F <= A`
-(`bad-anchorlock-not-reached`). This reads only the block header, so every node,
-watching Bitcoin or not, reaches the same verdict.
+(`bad-anchorlock-not-reached`). This reads only the block header.
 
 ### 4.5 The opcodes
 
@@ -293,9 +282,11 @@ numbers they read must be minimally encoded.
   `OP_CHECKLOCKTIMEVERIFY`, is possible because the floor belongs to one input,
   and it gives the floor one valid encoding.
 
-Both `OP_INSPECTBTC*` opcodes re-run checks 1 to 4 on the record, which cost
-microseconds, so a script is never sound only because the node checked something
-elsewhere.
+Both `OP_INSPECTBTC*` opcodes check the record (checks 1 to 4) themselves, so a
+script is never sound only because the node checked something elsewhere. An
+input's records are parsed and checked once, however many times its script reads
+them, and each output script's hash is computed once; an execution then costs a
+constant.
 
 **Floors: absolute in a script, or relative to the coin.** The node guarantees
 `C`, so a script chooses its own floor:
@@ -311,43 +302,41 @@ elsewhere.
 
 ## 5. Cost and limits
 
-**Size.** A proof is 126 bytes, plus 64 bytes per tree level (12 to 13 levels on
-a full block today, 800 bytes or so), plus the payment, typically 200 to 400
-bytes: about 1.2 kilobytes. It is witness data, so it counts one weight unit per
-byte toward the block's weight limit and the transaction's virtual size, and the
-claim pays for it at the fee rate of whichever accepted asset pays its fee, like
-any other witness byte. Its size does not depend on the coinbase.
+**Size.** A proof is 128 bytes, plus 64 bytes per tree level (12 to 13 levels on
+a full block today, about 800 bytes), plus 80 bytes per linking header, plus the
+payment, typically 200 to 400 bytes. A claim completed as soon as its payment is
+recorded needs no links: about 1.2 kilobytes. A claim completed later links to
+the lowest anchor recorded at or above its payment, typically a few headers. It
+is witness data, so it counts one weight unit per byte toward the block's weight
+limit and the transaction's virtual size, paid at the fee rate of whichever
+accepted asset pays the claim's fee. The 2,016-link cap bounds a proof at about
+161 kilobytes of headers.
 
-**Work.** Checks 1 to 6 hash the payment and up to 48 tree nodes: microseconds.
-Check 7 is one Bitcoin-daemon lookup per distinct proven block, cached, and
-dropped only by a Bitcoin reorganization at or below it.
+**Work.** Checks 1 to 7 hash the payment, up to 48 tree nodes and the linking
+headers, and run one binary search over the block's ancestors: no network. On a
+node with an empty cache, a full block (weight 360,829) of 296 claims, each naming
+a different Bitcoin block, spent 0.46 ms in these checks. A script that reads its
+records 50,000 times over an 80-kilobyte proof (transaction weight 181,006) was
+accepted in 0.02 s.
 
-**No limit on distinct proven blocks.** An absolute floor of 0 lets a script
-accept any payment in Bitcoin's history, so a block's claims can name as many
-distinct Bitcoin blocks as the block weight allows: about 300 in a full block.
-The node asks about all of them in one batched round trip before checking the
-block, as the watcher batches its anchors (`PrefetchAnchorVerdicts`,
-`src/anchor.h:129`). Measured on a node with an empty cache against a local
-Bitcoin Core: a full block (weight 360,231) of 296 claims, each naming a
-different Bitcoin block, cost 6.75 ms of batched lookups and 0.41 ms of checks;
-asked one by one, the same lookups took 82 ms. Since the cost is a single round
-trip whatever the count, no cap is set: a cap would be a shared resource that a
-seller could fill with cheap claims of its own to keep a buyer's claim out.
+**No limit on distinct proven blocks**: nothing in the check grows with them but
+the hashing, which the block weight already bounds.
 
 ## 6. The mempool and block assembly
 
 ### 6.1 Acceptance and assembly
 
-- A transaction carrying a payment proof is accepted when checks 1 to 6 pass
-  against the chain tip and `H` is on Bitcoin's best chain. A proof whose coin
-  is still unconfirmed is refused (`btcpay-coin-unconfirmed`), so a claim never
-  shares a block with its lock.
+- A transaction carrying a payment proof is accepted only when checks 1 to 7
+  pass against the chain tip, that is, when its links end at an anchor the active
+  chain has recorded. Validity in the mempool is then validity in the next block.
+  A claim whose payment is above every recorded anchor waits, about one block,
+  until a block anchors at or above it, and is completed then.
+- A proof whose coin is still unconfirmed is refused (`btcpay-coin-unconfirmed`),
+  so a claim never shares a block with its lock.
 - A transaction carrying a floor is accepted when the floor is at most the
   Bitcoin tip, so the next honest block can satisfy it.
-- The producer chooses its anchor first and then takes only transactions whose
-  proofs are at or below it, and whose floors it meets.
-  A claim is therefore mined in the first block anchored at or above its
-  payment.
+- The producer chooses its anchor before its transactions, and takes only those
+  whose floors it meets. It never rewrites a proof.
 
 ### 6.2 One transaction id, a better proof
 
@@ -362,27 +351,25 @@ replace a proof that is no longer valid, so a chain of replacements cannot loop.
 `sendrawtransaction` submits such a transaction to the mempool instead of
 treating its transaction id as already known.
 
-### 6.3 Reorganizations, and the proof re-attached
+### 6.3 Reorganizations, and the proof re-linked
 
-- **A Sequentia reorganization.** Transactions of disconnected blocks return to
-  the mempool through the normal checks, which now include the record checks. A
-  claim whose payment has left Bitcoin's chain is refused there. A claim still in
-  the mempool whose lock was in a disconnected block now spends an unconfirmed
-  coin and is removed, as a non-final transaction would be.
-- **A Bitcoin reorganization that leaves the Sequentia tip alone** (it forks above
-  every anchor) cannot touch a mined claim but can make a pooled claim's proof
-  stale. On each Bitcoin reorganization the watcher sees, it re-checks the
-  mempool's transactions carrying proofs.
-- **The node re-attaches a fresh proof itself** (node policy, on every node that
+- **A Sequentia reorganization** (including every one the watcher makes after a
+  Bitcoin reorganization): transactions of disconnected blocks return through the
+  normal checks, and the mempool re-checks every claim it holds against the new
+  tip. A claim whose links end at an anchor the new branch did not record, whose
+  lock left the chain, or whose coin anchor moved is evicted.
+- **A Bitcoin reorganization** changes a claim's validity only through the
+  Sequentia reorganization it causes, since validity reads only the chain.
+- **The node re-links a fresh proof itself** (node policy, on every node that
   watches Bitcoin; every block producer does). It keeps each claim refused or
-  evicted for a stale proof, keyed by transaction id. On each Bitcoin tip change
-  it looks for the payment, whose transaction id it knows from the stale proof:
-  first `gettxout` on the paying outputs, whose reply gives the block's depth;
-  if the outputs are already spent, the blocks from the reorganization's fork
-  point to the tip, which hold the payment if it was mined again. It builds the
-  proof from `getblock <hash> 1` and `getblockheader`, fills in the coin anchor
-  from its own chain, and submits the claim. A claim it has held for 2,016
-  Bitcoin blocks without finding its payment is dropped.
+  evicted that way, keyed by transaction id, and on each tick of the watcher
+  looks for the payment, whose transaction id it knows from the old proof: first
+  `gettxout` on the paying outputs, whose reply gives the block's depth, and if
+  they are already spent, the last 144 blocks. It links that block to the lowest
+  anchor the active chain recorded at or above it, with the headers along
+  Bitcoin's best chain, refuses if they do not end at that anchor, fills in the
+  coin anchor, and submits the claim. A claim held for 2,016 Bitcoin blocks
+  without finding its payment is dropped.
 
 ## 7. Activation
 
@@ -499,10 +486,11 @@ lower one.
    counterparty.
 5. **The buyer pays** the seller's address at least the amount, with an ordinary
    Bitcoin transaction, at a fee for the next block.
-6. **Anyone completes the claim** as soon as the payment is mined at `h`: attaches
-   the proof and the coin anchor, and submits it. It is mined in the first block
-   anchored at `h` or above, usually within one Sequentia block. Every node that
-   watches Bitcoin keeps it alive across reorganizations (section 6.3).
+6. **Anyone completes the claim** once the payment is mined at `h` and a
+   Sequentia block has anchored at `h` or above, usually one Sequentia block
+   later: attaches the proof, linked to that anchor, and the coin anchor, and
+   submits it. It is mined in the next block. Every node that watches Bitcoin
+   keeps it alive across reorganizations (section 6.3).
 7. **Or the seller refunds**: if no claim has been mined by the time the anchor
    reaches `R`, and the seller's wallet sees no payment to its address mined at a
    height above `F` and at most `D`.
