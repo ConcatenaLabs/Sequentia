@@ -379,8 +379,24 @@ static unsigned int WithRecordsV2For(unsigned int flags, int height, const Conse
 // SEQUENTIA: the records of non-peg-in inputs' witness slots, against the chain
 // (doc/sequentia/bitcoin-payment-proof.md, section 4). `index` is the block being
 // connected (in_block) or the chain tip (mempool); coins are looked up in `view`.
-// UNVERIFIABLE is a verdict of this node's view of Bitcoin, never permanent.
-enum class BtcPayVerdict { OK, INVALID, UNVERIFIABLE };
+// The verdict is a pure function of the chain (no Bitcoin daemon is asked).
+enum class BtcPayVerdict { OK, INVALID };
+
+//! SEQUENTIA: whether Bitcoin block `hash` at height `a` is an anchor recorded by
+//! `index` or one of its ancestors. Anchor heights never decrease along a chain
+//! and an unchanged height carries an unchanged hash (rule R2), so the first
+//! ancestor anchored at or above `a` decides. A pure function of this branch.
+static bool AnchorRecordedOnBranch(const CBlockIndex* index, uint32_t a, const uint256& hash)
+{
+    if (index == nullptr || index->m_anchor_height < a) return false;
+    int lo = 0, hi = index->nHeight;
+    while (lo < hi) {
+        const int mid = lo + (hi - lo) / 2;
+        if (index->GetAncestor(mid)->m_anchor_height >= a) hi = mid; else lo = mid + 1;
+    }
+    const CBlockIndex* first = index->GetAncestor(lo);
+    return first->m_anchor_height == a && first->m_anchor_hash == hash;
+}
 
 //! SEQUENTIA: claims refused or evicted for a proof that is no longer true,
 //! waiting for the node to find their payment again (6.3). Keyed by txid.
@@ -451,36 +467,15 @@ static BtcPayVerdict CheckTxBtcPaymentRecords(const CTransaction& tx, const CCoi
             return BtcPayVerdict::INVALID;
         }
         if ((int64_t)proof.coin_anchor != coin_anchor) { reason = "bad-btcpay-coin-anchor"; return BtcPayVerdict::INVALID; }
-        // Check 5: at or below the block's anchor.
-        if (in_block && proof.height > anchor_height) { reason = "bad-btcpay-above-anchor"; return BtcPayVerdict::INVALID; }
-        if (proven_blocks) proven_blocks->insert(proof.block_hash);
-        // Check 7: in the anchor chain (skipped, as R3 is, without -validateanchor).
-        if (!g_validate_anchor) continue;
-        switch (CheckMainchainAnchor(proof.height, proof.block_hash)) {
-        case AnchorCheckResult::OK: break;
-        case AnchorCheckResult::HEIGHT_MISMATCH:
-            reason = "bad-btcpay-height-mismatch";
+        // Check 5: the proven block is an ancestor of an anchor this branch
+        // recorded, `links` headers below it, at the declared height. A pure
+        // function of the chain: no Bitcoin daemon is asked.
+        if ((uint64_t)proof.height + proof.links > std::numeric_limits<uint32_t>::max() ||
+            !AnchorRecordedOnBranch(index, proof.height + proof.links, proof.link_end)) {
+            reason = in_block ? "bad-btcpay-not-in-anchor-chain" : "btcpay-not-in-anchor-chain";
             return BtcPayVerdict::INVALID;
-        case AnchorCheckResult::NO_CONNECTION:
-            reason = "btcpay-unverifiable";
-            return BtcPayVerdict::UNVERIFIABLE;
-        case AnchorCheckResult::NOT_FOUND:
-        case AnchorCheckResult::STALE: {
-            if (!in_block) { reason = "btcpay-block-not-canonical"; return BtcPayVerdict::INVALID; }
-            // Permanent only on a fresh read showing a canonical anchor that the
-            // proven block is not under.
-            const AnchorCheckResult a = CheckMainchainAnchorFresh(anchor_height, anchor_hash);
-            const AnchorCheckResult p = CheckMainchainAnchorFresh(proof.height, proof.block_hash);
-            if (a == AnchorCheckResult::OK && p == AnchorCheckResult::OK) break;
-            if (a == AnchorCheckResult::OK && (p == AnchorCheckResult::NOT_FOUND || p == AnchorCheckResult::STALE ||
-                                               p == AnchorCheckResult::HEIGHT_MISMATCH)) {
-                reason = "bad-btcpay-not-in-anchor-chain";
-                return BtcPayVerdict::INVALID;
-            }
-            reason = "btcpay-unverifiable";
-            return BtcPayVerdict::UNVERIFIABLE;
         }
-        }
+        if (proven_blocks) proven_blocks->insert(proof.block_hash);
     }
     return BtcPayVerdict::OK;
 }
@@ -3852,25 +3847,6 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
 
     std::vector<int> prevheights;
     std::set<uint256> btcpay_blocks; // SEQUENTIA: distinct Bitcoin blocks proven in this block
-    int64_t btcpay_prefetch_micros = 0;
-    // SEQUENTIA: ask the Bitcoin daemon about every proven block of this block
-    // in one batched round trip (doc/sequentia/bitcoin-payment-proof.md 5).
-    if (g_validate_anchor && m_params.GetConsensus().BtcPaymentActiveAt(pindex->nHeight)) {
-        std::vector<std::pair<uint32_t, uint256>> refs;
-        for (const auto& ptx : block.vtx) {
-            for (size_t i = 0; i < ptx->vin.size() && i < ptx->witness.vtxinwit.size(); ++i) {
-                if (ptx->vin[i].m_is_pegin || ptx->witness.vtxinwit[i].m_pegin_witness.stack.empty()) continue;
-                BtcPayment::Records records;
-                std::string why;
-                if (BtcPayment::ParseRecords(ptx->witness.vtxinwit[i].m_pegin_witness.stack, records, why) && records.proof) {
-                    refs.emplace_back(records.proof->height, records.proof->block_hash);
-                }
-            }
-        }
-        const int64_t t_prefetch = GetTimeMicros();
-        if (!refs.empty()) PrefetchAnchorVerdicts(refs);
-        btcpay_prefetch_micros = GetTimeMicros() - t_prefetch;
-    }
     int64_t btcpay_micros = 0;
     CAmountMap fee_map;
     int nInputs = 0;
@@ -3974,8 +3950,7 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
                 btcpay_micros += GetTimeMicros() - t_btcpay;
                 if (v != BtcPayVerdict::OK) {
                     LogPrintf("ERROR: %s: %s in tx %s\n", __func__, reason, tx.GetHash().ToString());
-                    state.Invalid(v == BtcPayVerdict::UNVERIFIABLE ? BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE
-                                                                   : BlockValidationResult::BLOCK_CONSENSUS, reason);
+                    state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, reason);
                     break;
                 }
             }
@@ -4016,8 +3991,8 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
 
     }
     if (!btcpay_blocks.empty()) {
-        LogPrint(BCLog::BENCH, "    - BtcPayment: %u distinct proven Bitcoin blocks checked in %.2fms (batched lookup %.2fms)\n",
-                 (unsigned)btcpay_blocks.size(), 0.001 * btcpay_micros, 0.001 * btcpay_prefetch_micros);
+        LogPrint(BCLog::BENCH, "    - BtcPayment: %u distinct proven Bitcoin blocks checked in %.2fms\n",
+                 (unsigned)btcpay_blocks.size(), 0.001 * btcpay_micros);
     }
     int64_t nTime3 = GetTimeMicros(); nTimeConnect += nTime3 - nTime2;
     LogPrint(BCLog::BENCH, "      - Connect %u transactions: %.2fms (%.3fms/tx, %.3fms/txin) [%.2fs (%.2fms/blk)]\n", (unsigned)block.vtx.size(), MILLI * (nTime3 - nTime2), MILLI * (nTime3 - nTime2) / block.vtx.size(), nInputs <= 1 ? 0 : MILLI * (nTime3 - nTime2) / (nInputs-1), nTimeConnect * MICRO, nTimeConnect * MILLI / nBlocksTotal);
@@ -8533,7 +8508,8 @@ std::optional<std::pair<int, uint256>> FindBtcPayment(const Sidechain::Bitcoin::
 
 //! A fresh payment record for `payment` in block `hash` at `height`.
 std::optional<std::vector<unsigned char>> BuildFreshProof(const Sidechain::Bitcoin::CTransaction& payment,
-                                                          int height, const uint256& hash, uint32_t coin_anchor)
+                                                          int height, const uint256& hash, uint32_t coin_anchor,
+                                                          int anchor_height, const uint256& anchor_hash)
 {
     UniValue bp(UniValue::VARR); bp.push_back(hash.GetHex()); bp.push_back(1);
     const UniValue txs = find_value(BtcRpc("getblock", bp), "tx");
@@ -8556,12 +8532,25 @@ std::optional<std::vector<unsigned char>> BuildFreshProof(const Sidechain::Bitco
     cstrip << coinbase;
     uint256 coinbase_sha;
     CSHA256().Write(reinterpret_cast<const unsigned char*>(cstrip.data()), cstrip.size()).Finalize(coinbase_sha.begin());
+    // The headers from the payment's block up to the recorded anchor, along
+    // Bitcoin's best chain; it must end at exactly that anchor.
+    std::vector<Sidechain::Bitcoin::CBlockHeader> links;
+    for (int h = height + 1; h <= anchor_height; ++h) {
+        UniValue gp(UniValue::VARR); gp.push_back(h);
+        UniValue lp(UniValue::VARR); lp.push_back(BtcRpc("getblockhash", gp).get_str()); lp.push_back(false);
+        CDataStream ls(ParseHex(BtcRpc("getblockheader", lp).get_str()), SER_NETWORK, PROTOCOL_VERSION);
+        Sidechain::Bitcoin::CBlockHeader link;
+        ls >> link;
+        links.push_back(link);
+    }
+    const uint256 end = links.empty() ? header.GetHash() : links.back().GetHash();
+    if (end != anchor_hash) return std::nullopt;
     CDataStream pstrip(SER_NETWORK, PROTOCOL_VERSION | Sidechain::Bitcoin::SERIALIZE_TRANSACTION_NO_WITNESS);
     pstrip << payment;
     const auto* pp = reinterpret_cast<const unsigned char*>(pstrip.data());
     return BtcPayment::BuildPaymentRecord(height, coin_anchor, header, coinbase_sha, index,
                                           BtcPayment::MerkleBranch(leaves, index), BtcPayment::MerkleBranch(leaves, 0),
-                                          std::vector<unsigned char>(pp, pp + pstrip.size()));
+                                          links, std::vector<unsigned char>(pp, pp + pstrip.size()));
 }
 } // namespace
 
@@ -8570,27 +8559,13 @@ void BtcPaymentMempoolTick(ChainstateManager& chainman)
     CChainState& cs = chainman.ActiveChainstate();
     if (!cs.GetMempool()) return;
     CTxMemPool& pool = *cs.GetMempool();
-    // 1. Sweep: claims whose proven block is no longer on the best chain.
+    // A claim's validity depends only on this chain (its proof links to an anchor
+    // the chain recorded), so a Bitcoin reorganization changes it only through
+    // the Sequentia reorganization the watcher makes, whose re-check evicts it.
     {
-        LOCK2(cs_main, pool.cs);
+        LOCK(cs_main);
         const CBlockIndex* tip = cs.m_chain.Tip();
         if (!tip || !Params().GetConsensus().BtcPaymentActiveAt(tip->nHeight + 1)) return;
-        std::vector<CTransactionRef> stale;
-        CCoinsViewMemPool view_mempool(&cs.CoinsTip(), pool);
-        for (const auto& entry : pool.mapTx) {
-            if (!HasBtcPaymentRecords(entry.GetTx())) continue;
-            CCoinsViewCache view(&view_mempool);
-            std::string reason;
-            if (CheckTxBtcPaymentRecords(entry.GetTx(), view, tip, false, tip->m_anchor_height, tip->m_anchor_hash,
-                                         nullptr, reason) != BtcPayVerdict::OK) {
-                stale.push_back(entry.GetSharedTx());
-            }
-        }
-        for (const auto& tx : stale) {
-            LogPrintf("BtcPayment: evicting %s, its proof is no longer valid\n", tx->GetHash().ToString());
-            BtcPaymentNotePending(tx);
-            pool.removeRecursive(*tx, MemPoolRemovalReason::REORG);
-        }
     }
     // 2. Re-attach.
     std::map<uint256, std::pair<CTransactionRef, int>> pending;
@@ -8628,16 +8603,30 @@ void BtcPaymentMempoolTick(ChainstateManager& chainman)
                     BtcPayment::Proof old;
                     std::string why;
                     if (!BtcPayment::ParsePaymentRecord(item, old, why)) { ready = false; break; }
+                    const auto where = FindBtcPayment(*old.tx);
+                    if (!where) { ready = false; break; }
                     uint32_t coin_anchor;
+                    int anchor_height;
+                    uint256 anchor_hash;
                     {
+                        // The lowest anchor this chain recorded at or above the payment.
                         LOCK(cs_main);
                         const Coin& coin = cs.CoinsTip().AccessCoin(mtx.vin[i].prevout);
                         if (coin.IsSpent() || (int)coin.nHeight > cs.m_chain.Height()) { ready = false; break; }
                         coin_anchor = cs.m_chain[coin.nHeight]->m_anchor_height;
+                        const CBlockIndex* tip = cs.m_chain.Tip();
+                        if ((int)tip->m_anchor_height < where->first) { ready = false; break; }
+                        int lo = 0, hi = tip->nHeight;
+                        while (lo < hi) {
+                            const int mid = lo + (hi - lo) / 2;
+                            if ((int)tip->GetAncestor(mid)->m_anchor_height >= where->first) hi = mid; else lo = mid + 1;
+                        }
+                        anchor_height = tip->GetAncestor(lo)->m_anchor_height;
+                        anchor_hash = tip->GetAncestor(lo)->m_anchor_hash;
+                        if (anchor_height - where->first > (int)BtcPayment::MAX_LINKS) { ready = false; break; }
                     }
-                    const auto where = FindBtcPayment(*old.tx);
-                    if (!where) { ready = false; break; }
-                    const auto fresh = BuildFreshProof(*old.tx, where->first, where->second, coin_anchor);
+                    const auto fresh = BuildFreshProof(*old.tx, where->first, where->second, coin_anchor,
+                                                       anchor_height, anchor_hash);
                     if (!fresh) { ready = false; break; }
                     if (*fresh != item) { item = *fresh; changed = true; }
                 }

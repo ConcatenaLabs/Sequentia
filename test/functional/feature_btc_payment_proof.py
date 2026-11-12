@@ -98,10 +98,13 @@ def merkle_branch(leaves, index):
     return branch
 
 
-def payment_record(height, coin_anchor, header, coinbase_sha, index, pbranch, cbranch, payment, depth=None):
+def payment_record(height, coin_anchor, header, coinbase_sha, index, pbranch, cbranch, payment, depth=None, links=(),
+                   nlinks=None):
     d = len(pbranch) if depth is None else depth
+    n = len(links) if nlinks is None else nlinks
     return (b"\x01" + struct.pack("<I", height) + struct.pack("<I", coin_anchor) + header + coinbase_sha +
-            bytes([d]) + struct.pack("<I", index) + b"".join(pbranch) + b"".join(cbranch) + payment)
+            bytes([d]) + struct.pack("<I", index) + b"".join(pbranch) + b"".join(cbranch) +
+            struct.pack("<H", n) + b"".join(links) + payment)
 
 
 def floor_record(h):
@@ -268,7 +271,24 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         txid = w.sendtoaddress(addr, Decimal(sat) / Decimal(100000000))
         return txid
 
-    def proof_for(self, txid, coin_anchor, blockhash=None):
+    def recorded_anchor_at_or_above(self, h, node=None):
+        """The lowest Bitcoin height >= h that the active chain recorded as an anchor."""
+        node = node or self.nodes[0]
+        cur = node.getblockheader(node.getbestblockhash())
+        if cur["anchorheight"] < h:
+            return None
+        while "previousblockhash" in cur:
+            prev = node.getblockheader(cur["previousblockhash"])
+            if prev["anchorheight"] < h:
+                break
+            cur = prev
+        return cur["anchorheight"], cur["anchorhash"]
+
+    def link_headers(self, h, a):
+        b = self.btc_rpc()
+        return [bytes.fromhex(b.getblockheader(b.getblockhash(x), False)) for x in range(h + 1, a + 1)]
+
+    def proof_for(self, txid, coin_anchor, blockhash=None, link=True):
         b = self.btc_rpc()
         if blockhash is None:
             blockhash = self.bbuyer.gettransaction(txid)["blockhash"]
@@ -278,10 +298,14 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         header = bytes.fromhex(b.getblockheader(blockhash, False))
         cb = strip_btc_tx(bytes.fromhex(b.getrawtransaction(blk["tx"][0], False, blockhash)))
         pay = strip_btc_tx(bytes.fromhex(b.getrawtransaction(txid, False, blockhash)))
-        return dict(height=blk["height"], header=header, coinbase=cb, index=index, leaves=leaves,
+        links = []
+        rec_anchor = self.recorded_anchor_at_or_above(blk["height"]) if link else None
+        if rec_anchor is not None:
+            links = self.link_headers(blk["height"], rec_anchor[0])
+        return dict(height=blk["height"], header=header, coinbase=cb, index=index, leaves=leaves, links=links,
                     pbranch=merkle_branch(leaves, index), cbranch=merkle_branch(leaves, 0), payment=pay,
                     record=payment_record(blk["height"], coin_anchor, header, hashlib.sha256(cb).digest(), index,
-                                          merkle_branch(leaves, index), merkle_branch(leaves, 0), pay),
+                                          merkle_branch(leaves, index), merkle_branch(leaves, 0), pay, links=links),
                     blockhash=blockhash)
 
     def vout_paying(self, txid, addr, blockhash=None):
@@ -367,6 +391,7 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         a = addr or lock["addr"]
         txid = self.pay(a, lock["amount"] if sat is None else sat, wallet)
         bh = self.btc_mine(1)[0]
+        self.mine_anchored(self.btc_rpc().getblockheader(bh)["height"])
         pr = self.proof_for(txid, lock["C"], bh)
         return txid, pr, self.vout_paying(txid, a, bh)
 
@@ -431,6 +456,7 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.reorg_remined()
         self.same_txid_replacement()
         self.bitcoin_reorg_sweep()
+        self.links_and_branches()
         self.reverse_direction()
         self.congestion()
         self.measure_distinct_blocks()
@@ -483,9 +509,9 @@ class BtcPaymentProofTest(BitcoinTestFramework):
             self.bminer.sendtoaddress(self.bminer.getnewaddress(), 1)
         ptx = self.pay(lock["addr"], lock["amount"])
         bh = self.btc_mine(1)[0]
+        self.mine_anchored(self.btc_rpc().getblockcount())
         pr = self.proof_for(ptx, lock["C"], bh)
         vout = self.vout_paying(ptx, lock["addr"], bh)
-        self.mine_anchored(pr["height"])
         assert len(pr["leaves"]) >= 3 and len(pr["pbranch"]) >= 2
         cs = hashlib.sha256(pr["coinbase"]).digest()
         bad_branch = [bytes([pr["pbranch"][0][0] ^ 1]) + pr["pbranch"][0][1:]] + pr["pbranch"][1:]
@@ -550,9 +576,9 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.bminer.sendtoaddress(self.bminer.getnewaddress(), 1)
         ptx = self.pay(lock["addr"], lock["amount"])
         bh = self.btc_mine(1)[0]
+        self.mine_anchored(self.btc_rpc().getblockcount())
         pr = self.proof_for(ptx, lock["C"], bh)
         vout = self.vout_paying(ptx, lock["addr"], bh)
-        self.mine_anchored(pr["height"])
         self.force([self.spend_lock(lock, "claim", [pr["record"], pr["record"]], [scriptnum(vout)])], "bad-btcpay-duplicate")
         # The last leaf of an odd level is its own sibling; only index 2 (left) is canonical for it.
         assert len(pr["leaves"]) == 3
@@ -668,13 +694,16 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         lock = self.fresh_lock()
         # A producer whose anchor trails Bitcoin's tip (-anchorminconf=3).
         self.restart_seq0(["-anchorminconf=3"])
-        ptx, pr, vout = self.paid(lock)
+        ptx = self.pay(lock["addr"], lock["amount"])
+        bh = self.btc_mine(1)[0]
+        vout = self.vout_paying(ptx, lock["addr"], bh)
         self.mine(1)
-        assert self.anchor_of(self.nodes[0].getbestblockhash()) < pr["height"]
-        self.force([self.claim(lock, pr["record"], vout)], "bad-btcpay-above-anchor")
+        pr = self.proof_for(ptx, lock["C"], bh)
+        assert self.anchor_of(self.nodes[0].getbestblockhash()) < pr["height"] and not pr["links"]
+        self.force([self.claim(lock, pr["record"], vout)], "bad-btcpay-not-in-anchor-chain")
         self.restart_seq0()
         self.mine_anchored(pr["height"])
-        self.force([self.claim(lock, pr["record"], vout)])
+        self.force([self.claim(lock, self.proof_for(ptx, lock["C"], bh)["record"], vout)])
 
     def reorg_double_spend(self):
         self.step("N13 a reorganization with the payment double-spent: the claim is unminable for good")
@@ -715,11 +744,13 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         new_bh = self.bbuyer.gettransaction(ptx)["blockhash"]
         assert new_bh != pr["blockhash"]
         self.wait_for(lambda: node.getblockheader(blk)["confirmations"] < 0, "the claim's block is disconnected")
-        # Nobody re-signs: the node finds the payment and attaches a fresh proof.
+        # The claim waits until the chain records an anchor at the payment's new
+        # block; then, with nobody re-signing, the node links a fresh proof itself.
+        self.mine_anchored(b.getblockcount())
         self.wait_for(lambda: c.hash in node.getrawmempool(), "the node re-attaches a fresh proof", timeout=30)
         new_wtxid = node.getmempoolentry(c.hash)["wtxid"]
         assert new_wtxid != old_wtxid
-        blk2 = self.mine_anchored(b.getblockcount())
+        blk2 = self.mine(1)[0]
         assert c.hash in node.getblock(blk2)["tx"]
         self.results.append((self.current, "claim %s re-mined with a fresh proof (wtxid %s -> %s)" % (c.hash, old_wtxid[:16], new_wtxid[:16])))
 
@@ -733,6 +764,7 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         outs[lock["addr"]] = Decimal(lock["amount"]) / Decimal(100000000)
         heavy_tx = self.bminer.sendmany("", outs)
         hb = self.btc_mine(1)[0]
+        self.mine_anchored(self.btc_rpc().getblockcount())
         hp = self.proof_for(heavy_tx, lock["C"], hb)
         hv = self.vout_paying(heavy_tx, lock["addr"], hb)
         spk = bytes.fromhex(node.getaddressinfo(node.getnewaddress())["scriptPubKey"])
@@ -759,26 +791,63 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.mine_anchored(self.btc_rpc().getblockcount())
 
     def bitcoin_reorg_sweep(self):
-        self.step("N17 a Bitcoin reorganization above every anchor: the pooled claim is swept and re-attached")
+        self.step("N17 (PV13 S1) a payment not yet recorded as an anchor, then orphaned: the claim is refused by the mempool and by this node's own template")
         node = self.nodes[0]
         lock = self.fresh_lock()
-        ptx, pr, vout = self.paid(lock)
-        c = self.claim(lock, pr["record"], vout)
-        # Accepted while the Sequentia tip still anchors below the payment.
+        ptx = self.pay(lock["addr"], lock["amount"])
+        bh = self.btc_mine(1)[0]
+        vout = self.vout_paying(ptx, lock["addr"], bh)
+        pr = self.proof_for(ptx, lock["C"], bh)
         assert self.anchor_of(node.getbestblockhash()) < pr["height"]
-        node.sendrawtransaction(c.serialize().hex())
-        w0 = node.getmempoolentry(c.hash)["wtxid"]
-        tip = node.getbestblockhash()
+        c = self.claim(lock, pr["record"], vout)
+        try:
+            node.sendrawtransaction(c.serialize().hex())
+            raise AssertionError("accepted before its payment was recorded as an anchor")
+        except JSONRPCException as e:
+            assert "btcpay-not-in-anchor-chain" in e.error["message"], e.error["message"]
+            self.results.append((self.current + " (mempool)", e.error["message"]))
         b = self.btc_rpc()
-        b.invalidateblock(pr["blockhash"])
+        b.invalidateblock(bh)
+        self.double_spend(ptx)
         self.btc_mine(2)
-        assert self.bbuyer.gettransaction(ptx)["blockhash"] != pr["blockhash"]
-        self.wait_for(lambda: c.hash in node.getrawmempool() and node.getmempoolentry(c.hash)["wtxid"] != w0,
-                      "the swept claim comes back with a fresh proof", timeout=30)
-        assert_equal(node.getbestblockhash(), tip)
-        blk = self.mine_anchored(b.getblockcount())
-        assert c.hash in node.getblock(blk)["tx"]
-        self.results.append((self.current, "swept and re-attached; Sequentia tip untouched; mined"))
+        time.sleep(0.5)  # before the watcher's next tick
+        self.force([c], "bad-btcpay-not-in-anchor-chain")
+        # And with one link to the new branch's block at that height: not its ancestor.
+        newb = b.getblockhash(pr["height"] + 1)
+        rec = payment_record(pr["height"], lock["C"], pr["header"], hashlib.sha256(pr["coinbase"]).digest(), pr["index"],
+                             pr["pbranch"], pr["cbranch"], pr["payment"], links=[bytes.fromhex(b.getblockheader(newb, False))])
+        self.mine_anchored(b.getblockcount())
+        self.force([self.claim(lock, rec, vout)], "bad-btcpay-links")
+
+    def links_and_branches(self):
+        self.step("N21 linked headers: valid links, a broken link, a false height, too many links, an anchor recorded only on another branch")
+        node = self.nodes[0]
+        lock = self.fresh_lock()
+        ptx = self.pay(lock["addr"], lock["amount"])
+        bh = self.btc_mine(1)[0]
+        h = self.btc_rpc().getblockheader(bh)["height"]
+        vout = self.vout_paying(ptx, lock["addr"], bh)
+        # Recorded at h on a branch that is then replaced.
+        side = self.mine_anchored(h)
+        self.btc_mine(3)
+        node.invalidateblock(side)
+        self.mine_anchored(h + 3)
+        assert self.recorded_anchor_at_or_above(h)[0] == h + 3
+        pr = self.proof_for(ptx, lock["C"], bh, link=False)
+        cs = hashlib.sha256(pr["coinbase"]).digest()
+        args = (lock["C"], pr["header"], cs, pr["index"], pr["pbranch"], pr["cbranch"], pr["payment"])
+        self.force([self.claim(lock, payment_record(h, *args), vout)], "bad-btcpay-not-in-anchor-chain")
+        links = self.link_headers(h, h + 3)
+        broken = [links[0], links[2], links[1]]
+        self.force([self.claim(lock, payment_record(h, *args, links=broken), vout)], "bad-btcpay-links")
+        self.force([self.claim(lock, payment_record(h + 1, *args, links=links), vout)], "bad-btcpay-not-in-anchor-chain")
+        self.force([self.claim(lock, payment_record(h, *args, links=[links[0]] * 3, nlinks=2017), vout)], "bad-btcpay-encoding")
+        good = self.claim(lock, payment_record(h, *args, links=links), vout)
+        node.sendrawtransaction(good.serialize().hex())
+        blk = self.mine(1)[0]
+        assert good.hash in node.getblock(blk)["tx"]
+        self.results.append((self.current + " (3 links to the recorded anchor)", "mined"))
+        node.reconsiderblock(side)
 
     def reverse_direction(self):
         self.step("N18 the other direction: the taker holds the asset and locks it on another node; the maker pays")
@@ -805,6 +874,7 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         lock["C"] = self.lock_coin_anchor(lock)
         txid = self.bminer.sendtoaddress(lock["addr"], Decimal("0.3"))
         bh = self.btc_mine(1)[0]
+        self.mine_anchored(self.btc_rpc().getblockcount())
         pr = self.proof_for(txid, lock["C"], bh)
         c = self.claim(lock, pr["record"], self.vout_paying(txid, lock["addr"], bh))
         n0.sendrawtransaction(c.serialize().hex())
@@ -870,6 +940,7 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         for k in range(n):
             ptx = self.bbuyer.sendtoaddress(lock["addr"], Decimal("0.00001000"))
             bh = self.btc_mine(1)[0]
+            self.mine(1)  # record each Bitcoin block as an anchor
             proofs.append((self.proof_for(ptx, coin_anchor[outpoints[k][0]], bh), self.vout_paying(ptx, lock["addr"], bh)))
         self.mine_anchored(self.btc_rpc().getblockcount())
         claims = []

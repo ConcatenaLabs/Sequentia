@@ -74,6 +74,25 @@ bool ParsePaymentRecord(const std::vector<unsigned char>& item, Proof& out, std:
     std::vector<uint256> payment_branch, coinbase_branch;
     for (unsigned int i = 0; i < depth; ++i) { payment_branch.push_back(ReadHashAt(item, pos)); pos += 32; }
     for (unsigned int i = 0; i < depth; ++i) { coinbase_branch.push_back(ReadHashAt(item, pos)); pos += 32; }
+    // The headers linking the proven block forward, each committing to the one
+    // before it, so they are the proven block's real descendants.
+    if (item.size() < pos + 2) { reason = "bad-btcpay-encoding"; return false; }
+    out.links = ReadLE16(item.data() + pos); pos += 2;
+    if (out.links > MAX_LINKS || item.size() < pos + 80 * (size_t)out.links) {
+        reason = "bad-btcpay-encoding";
+        return false;
+    }
+    out.block_hash = out.header.GetHash();
+    uint256 prev = out.block_hash;
+    for (uint32_t i = 0; i < out.links; ++i) {
+        Sidechain::Bitcoin::CBlockHeader link;
+        CDataStream ls(std::vector<unsigned char>(item.begin() + pos, item.begin() + pos + 80), SER_NETWORK, PROTOCOL_VERSION);
+        ls >> link;
+        pos += 80;
+        if (link.hashPrevBlock != prev) { reason = "bad-btcpay-links"; return false; }
+        prev = link.GetHash();
+    }
+    out.link_end = prev;
     const size_t tx_size = item.size() - pos;
     if (tx_size == 0 || tx_size > MAX_PAYMENT_TX_SIZE) {
         reason = "bad-btcpay-encoding";
@@ -122,7 +141,12 @@ bool ParsePaymentRecord(const std::vector<unsigned char>& item, Proof& out, std:
         reason = "bad-btcpay-merkle";
         return false;
     }
-    out.block_hash = out.header.GetHash();
+    out.spk_hashes.clear();
+    for (const auto& o : out.tx->vout) {
+        uint256 h;
+        CSHA256().Write(o.scriptPubKey.data(), o.scriptPubKey.size()).Finalize(h.begin());
+        out.spk_hashes.push_back(h);
+    }
     return true;
 }
 
@@ -153,6 +177,7 @@ std::vector<unsigned char> BuildPaymentRecord(uint32_t height, uint32_t coin_anc
                                               const uint256& coinbase_sha256, uint32_t index,
                                               const std::vector<uint256>& payment_branch,
                                               const std::vector<uint256>& coinbase_branch,
+                                              const std::vector<Sidechain::Bitcoin::CBlockHeader>& links,
                                               const std::vector<unsigned char>& payment_tx_stripped)
 {
     std::vector<unsigned char> v;
@@ -169,6 +194,14 @@ std::vector<unsigned char> BuildPaymentRecord(uint32_t height, uint32_t coin_anc
     WriteLE32(b4, index); v.insert(v.end(), b4, b4 + 4);
     for (const auto& h : payment_branch) v.insert(v.end(), h.begin(), h.end());
     for (const auto& h : coinbase_branch) v.insert(v.end(), h.begin(), h.end());
+    unsigned char b2[2];
+    WriteLE16(b2, (uint16_t)links.size()); v.insert(v.end(), b2, b2 + 2);
+    for (const auto& l : links) {
+        CDataStream ls(SER_NETWORK, PROTOCOL_VERSION);
+        ls << l;
+        const auto* lp = reinterpret_cast<const unsigned char*>(ls.data());
+        v.insert(v.end(), lp, lp + ls.size());
+    }
     v.insert(v.end(), payment_tx_stripped.begin(), payment_tx_stripped.end());
     return v;
 }

@@ -115,10 +115,6 @@ enum class AnchorCheckResult {
  *  and MainchainUnchangedHeight in anchor.cpp. */
 AnchorCheckResult CheckMainchainAnchor(uint32_t height, const uint256& hash);
 
-/** SEQUENTIA: CheckMainchainAnchor without the verdict caches, for a verdict
- *  that will be stored as permanent (doc/sequentia/bitcoin-payment-proof.md 4.3). */
-AnchorCheckResult CheckMainchainAnchorFresh(uint32_t height, const uint256& hash);
-
 /** Whether the parent chain daemon is synced to at least `height` (cached for a
  *  few seconds). */
 bool MainchainSyncedToHeight(uint32_t height);

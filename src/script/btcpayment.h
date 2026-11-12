@@ -28,17 +28,24 @@ static constexpr unsigned char RECORD_FLOOR = 0x02;
 static constexpr unsigned int MAX_DEPTH = 24;
 //! Bitcoin's standardness ceiling for a relayed transaction, stripped bytes.
 static constexpr size_t MAX_PAYMENT_TX_SIZE = 100000;
-//! Distinct Bitcoin blocks the proofs of one Sequentia block may name.
-static constexpr size_t MAX_DISTINCT_BLOCKS = 64;
+//! Headers that may link the proven block forward to a recorded anchor.
+static constexpr size_t MAX_LINKS = 2016;
 //! type, height, coin anchor, header, SHA256(coinbase), depth, index.
 static constexpr size_t PAYMENT_FIXED_SIZE = 1 + 4 + 4 + 80 + 32 + 1 + 4;
 
 struct Proof {
-    uint32_t height{0};       //!< Bitcoin height of the proven block
-    uint32_t coin_anchor{0};  //!< claimed anchor height of the spent coin's block
+    uint32_t height{0};       //!< declared Bitcoin height of the proven block (checked against the chain)
+    uint32_t coin_anchor{0};  //!< declared anchor height of the spent coin's block (checked against the chain)
     Sidechain::Bitcoin::CBlockHeader header;
     uint256 block_hash;
+    //! Number of headers linking the proven block forward, and the hash they end
+    //! at (the proven block's own hash when there are none). That hash must be an
+    //! anchor recorded by the claim's block or one of its ancestors.
+    uint32_t links{0};
+    uint256 link_end;
     Sidechain::Bitcoin::CTransactionRef tx;
+    //! SHA-256 of each output script of the payment, computed once.
+    std::vector<uint256> spk_hashes;
 };
 
 struct Records {
@@ -62,6 +69,7 @@ std::vector<unsigned char> BuildPaymentRecord(uint32_t height, uint32_t coin_anc
                                               const uint256& coinbase_sha256, uint32_t index,
                                               const std::vector<uint256>& payment_branch,
                                               const std::vector<uint256>& coinbase_branch,
+                                              const std::vector<Sidechain::Bitcoin::CBlockHeader>& links,
                                               const std::vector<unsigned char>& payment_tx_stripped);
 
 /** The branch and canonical index of leaf `index` among `leaves` (Bitcoin's
