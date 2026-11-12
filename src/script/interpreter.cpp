@@ -2304,9 +2304,12 @@ bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript& 
                             return set_error(serror, SCRIPT_ERR_BTCPAY_INPUT);
                         popstack(stack);
                         popstack(stack);
+                        // As Elements' OP_INSPECTINPUTOUTPOINT and the outpoint's
+                        // own serialization: the index as 4 bytes little-endian,
+                        // so OP_CAT of the two items is the serialized outpoint.
                         const auto& prevout = proof.tx->vin[idx].prevout;
                         stack.emplace_back(prevout.hash.begin(), prevout.hash.end());
-                        stack.push_back(CScriptNum((int64_t)prevout.n).getvch());
+                        push4_le(stack, prevout.n);
                         break;
                     }
                     if (idx < 0 || (uint64_t)idx >= proof.tx->vout.size())
