@@ -58,9 +58,9 @@ TransactionError BroadcastTransaction(NodeContext& node, const CTransactionRef t
             if (!existingCoin.IsSpent()) return TransactionError::ALREADY_IN_CHAIN;
         }
 
-        // SEQUENTIA: a bitcoin-payment claim with another proof than the pooled
-        // one is submitted (the mempool may replace the pooled one, section 6.2
-        // of doc/sequentia/bitcoin-payment-proof.md).
+        // SEQUENTIA: another witness for a pooled transaction that carries
+        // bitcoin-payment records is submitted (the mempool may replace the
+        // pooled one, section 6.2 of doc/sequentia/bitcoin-payment-proof.md).
         auto has_records = [](const CTransaction& t) {
             for (size_t i = 0; i < t.vin.size() && i < t.witness.vtxinwit.size(); ++i) {
                 if (!t.vin[i].m_is_pegin && !t.witness.vtxinwit[i].m_pegin_witness.stack.empty()) return true;
@@ -68,7 +68,7 @@ TransactionError BroadcastTransaction(NodeContext& node, const CTransactionRef t
             return false;
         };
         auto pooled = node.mempool->get(txid);
-        if (pooled && pooled->GetWitnessHash() != tx->GetWitnessHash() && has_records(*tx) && has_records(*pooled)) {
+        if (pooled && pooled->GetWitnessHash() != tx->GetWitnessHash() && has_records(*pooled)) {
             pooled = nullptr;
         }
         if (auto mempool_tx = pooled; mempool_tx) {

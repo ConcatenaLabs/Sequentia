@@ -11,7 +11,8 @@ refund leaf (seller's key + an anchor floor); the buyer pays with an ordinary
 bitcoin transaction; anyone completes the claim with the proof.
 
 Every negative is forced into a block with generateblock and the reason the
-block was refused is asserted. Requires BITCOIND (default /usr/local/bin/bitcoind).
+block was refused is asserted. Requires Bitcoin Core, named by PARENT_BITCOIND
+(default /usr/local/bin/bitcoind); BITCOIND names the Sequentia node under test.
 """
 
 import hashlib
@@ -30,7 +31,7 @@ from test_framework.messages import (COutPoint, CTransaction, CTxIn, CTxInWitnes
                                      CTxOutValue, tx_from_hex)
 from test_framework.script import (CScript, CScriptOp, OP_CHECKSIG, OP_CHECKSIGVERIFY, OP_DROP, OP_DUP,
                                    OP_EQUALVERIFY, OP_GREATERTHAN, OP_GREATERTHANOREQUAL64, OP_LESSTHANOREQUAL,
-                                   OP_VERIFY, OP_1, SIGHASH_DEFAULT, TaprootSignatureHash, taproot_construct)
+                                   OP_VERIFY, OP_1, OP_IF, OP_ENDIF, SIGHASH_DEFAULT, TaprootSignatureHash, taproot_construct)
 from test_framework.test_framework import BitcoinTestFramework, SkipTest
 from test_framework.util import assert_equal, assert_raises_rpc_error, initialize_datadir, rpc_port, p2p_port
 
@@ -38,7 +39,7 @@ OP_INSPECTBTCPAYMENT = CScriptOp(0xe5)
 OP_INSPECTBTCOUTPUT = CScriptOp(0xe6)
 OP_CHECKANCHORHEIGHTVERIFY = CScriptOp(0xe7)
 
-BITCOIND = os.environ.get("BITCOIND", "/usr/local/bin/bitcoind")
+BITCOIND = os.environ.get("PARENT_BITCOIND", "/usr/local/bin/bitcoind")
 NUMS = bytes.fromhex("50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0")
 SEQ_NONFINAL_RBF = 0xfffffffd
 
@@ -127,7 +128,7 @@ class BtcPaymentProofTest(BitcoinTestFramework):
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
         if not os.path.exists(BITCOIND):
-            raise SkipTest("needs Bitcoin Core's bitcoind (set BITCOIND)")
+            raise SkipTest("needs Bitcoin Core's bitcoind (set PARENT_BITCOIND)")
 
     # ------------------------------------------------------------------ setup
     def btc_rpc(self, wallet=None):
@@ -456,6 +457,7 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.reorg_double_spend()
         self.reorg_remined()
         self.same_txid_replacement()
+        self.records_nobody_reads()
         self.bitcoin_reorg_sweep()
         self.links_and_branches()
         self.reverse_direction()
@@ -811,6 +813,90 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.results.append((self.current, "light (%d vB) replaced heavy (%d vB)" % (
             node.decoderawtransaction(light.serialize().hex())["vsize"], node.decoderawtransaction(heavy.serialize().hex())["vsize"])))
         self.mine_anchored(self.btc_rpc().getblockcount())
+
+    def records_nobody_reads(self):
+        self.step("N24 (PV13 S5) records on someone else's transaction: relay refuses a record no executed opcode read; the original displaces a pooled variant")
+        node = self.nodes[0]
+        unread = "Bitcoin payment record not read by any executed opcode"
+        # (a) An ordinary wallet payment (a P2WPKH input): an outsider adds a
+        # floor, or a whole payment record, to its input.
+        lock = self.fresh_lock()
+        ptx, pr, vout = self.paid(lock)
+        wpkh = node.getnewaddress("", "bech32")
+        t = node.sendtoaddress(address=wpkh, amount=5, assetlabel=self.asset, fee_asset_label=self.asset)
+        self.mine(1)
+        n = [o["n"] for o in node.getrawtransaction(t, True)["vout"] if o["scriptPubKey"].get("address") == wpkh][0]
+        raw = node.createrawtransaction(inputs=[{"txid": t, "vout": n}], outputs=[
+            {node.getnewaddress(): Decimal("4.999"), "asset": self.asset}, {"fee": Decimal("0.001"), "fee_asset": self.asset}])
+        signed = node.signrawtransactionwithwallet(raw)["hex"]
+        orig = tx_from_hex(signed)
+        assert node.testmempoolaccept([signed])[0]["allowed"]
+        assert orig.wit.vtxinwit[0].peginWitness.stack == []
+        # A payment record that is valid for this coin, but that its script never reads.
+        own = self.proof_for(ptx, self.anchor_of(node.getrawtransaction(t, True)["blockhash"]), pr["blockhash"])
+        for what, items in [("a floor", [floor_record(self.btc_rpc().getblockcount())]), ("a payment record", [own["record"]])]:
+            v = tx_from_hex(signed)
+            v.wit.vtxinwit[0].peginWitness.stack = list(items)
+            assert v.hash == orig.hash
+            assert_raises_rpc_error(-26, unread, node.sendrawtransaction, v.serialize().hex())
+            self.results.append((self.current + " (%s on a P2WPKH input)" % what, unread))
+            self.log.info("    %s on a P2WPKH input: refused by relay: %s", what, unread)
+            if what == "a floor":
+                floor_variant = v.serialize().hex()
+        # The verdict reads only the transaction and the outputs it spends: the
+        # same bytes get the same answer at another tip and after a restart
+        # (no cache, a fresh mempool).
+        self.btc_mine(1)
+        self.mine_anchored(self.btc_rpc().getblockcount())
+        self.restart_seq0()
+        node = self.nodes[0]
+        assert unread in node.testmempoolaccept([floor_variant])[0]["reject-reason"]
+        assert node.testmempoolaccept([signed])[0]["allowed"]
+        self.log.info("    the same verdicts at a new tip, after a restart")
+        # The rule is relay policy: forced into a block, the variant is valid.
+        v.rehash()
+        blk = self.force([v])
+        assert v.hash in node.getblock(blk)["tx"]
+        self.log.info("    the variant forced into a block is valid (policy only): %s", blk[:16])
+        # (b) A claim carrying a floor its leaf never reads.
+        c = self.spend_lock(lock, "claim", [pr["record"], floor_record(lock["floor"])], [scriptnum(vout)])
+        assert_raises_rpc_error(-26, unread, node.sendrawtransaction, c.serialize().hex())
+        self.log.info("    a claim with a floor its leaf never reads: refused by relay")
+        good = self.claim(lock, pr["record"], vout)
+        node.sendrawtransaction(good.serialize().hex())
+        self.mine(1)
+        # (c) Same-txid replacement whenever the pooled one carries records: a
+        # leaf that reads a floor only on its IF branch, pooled with the floor,
+        # is displaced by the same spend taking the other branch without it.
+        sk = generate_privkey()
+        pk = compute_xonly_pubkey(sk)[0]
+        floor = self.anchor_of(node.getbestblockhash())
+        opt = CScript([pk, OP_CHECKSIGVERIFY, OP_IF, floor, OP_CHECKANCHORHEIGHTVERIFY, OP_DROP, OP_ENDIF, OP_1])
+        tap = taproot_construct(NUMS, [("opt", opt)])
+        txid = node.sendtoaddress(address=program_to_witness(1, tap.scriptPubKey[2:]), amount=10,
+                                  assetlabel=self.asset, fee_asset_label=self.asset, replaceable=False)
+        t = tx_from_hex(node.getrawtransaction(txid))
+        n = [i for i, o in enumerate(t.vout) if o.scriptPubKey == tap.scriptPubKey][0]
+        self.mine(1)
+        olock = dict(tap=tap, opt=opt, txid=txid, vout=n, txout=t.vout[n], asset_amount=1000000000, sk_b=sk)
+        spk = bytes.fromhex(node.getaddressinfo(node.getnewaddress())["scriptPubKey"])
+        with_floor = self.spend_lock(olock, "opt", [floor_record(floor)], [b"\x01"], sign_with=sk, out_spk=spk)
+        without = self.spend_lock(olock, "opt", [], [b""], sign_with=sk, out_spk=spk)
+        assert with_floor.hash == without.hash
+        # The floor on the branch that does not read it: refused.
+        skipped = self.spend_lock(olock, "opt", [floor_record(floor)], [b""], sign_with=sk, out_spk=spk)
+        assert_raises_rpc_error(-26, unread, node.sendrawtransaction, skipped.serialize().hex())
+        self.log.info("    a floor read only on the branch not taken: refused by relay")
+        node.sendrawtransaction(with_floor.serialize().hex())
+        node.sendrawtransaction(without.serialize().hex())
+        assert_equal(node.getmempoolentry(without.hash)["wtxid"], node.decoderawtransaction(without.serialize().hex())["hash"])
+        self.results.append((self.current + " (c)", "the variant without records displaced the pooled one with a floor"))
+        self.log.info("    the spend without records displaced the pooled variant carrying a floor")
+        node.sendrawtransaction(with_floor.serialize().hex())
+        assert_equal(node.getmempoolentry(without.hash)["wtxid"], node.decoderawtransaction(without.serialize().hex())["hash"])
+        assert_equal(node.testmempoolaccept([with_floor.serialize().hex()])[0]["reject-reason"],
+                     "txn-same-nonwitness-data-in-mempool")
+        self.mine(1)
 
     def bitcoin_reorg_sweep(self):
         self.step("N17 (PV13 S1) a payment not yet recorded as an anchor, then orphaned: the claim is refused by the mempool and by this node's own template")

@@ -1128,13 +1128,15 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     } else if (m_pool.exists(GenTxid::Txid(tx.GetHash()))) {
         // Transaction with the same non-witness data but different witness (same txid, different
         // wtxid) already exists in the mempool.
-        // SEQUENTIA: except a bitcoin-payment claim whose pooled proof is stale,
-        // or which comes with a lighter proof. Its scripts and records are still
-        // checked in full below before the pooled one is removed.
+        // SEQUENTIA: except when the pooled one carries bitcoin-payment records
+        // and its proof is stale, or the newcomer is lighter (with other records,
+        // or none: the original of a spend someone else added records to). The
+        // newcomer's scripts and records are still checked in full below before
+        // the pooled one is removed.
         const CBlockIndex* tip = m_active_chainstate.m_chain.Tip();
         const auto pooled = m_pool.get(tx.GetHash());
         if (tip && pooled && args.m_chainparams.GetConsensus().BtcPaymentActiveAt(tip->nHeight + 1) &&
-            HasBtcPaymentRecords(tx) && HasBtcPaymentRecords(*pooled)) {
+            HasBtcPaymentRecords(*pooled)) {
             CCoinsViewCache pview(&m_active_chainstate.CoinsTip());
             std::string why;
             const bool pooled_stale = CheckTxBtcPaymentRecords(*pooled, pview, tip, /*in_block=*/false,

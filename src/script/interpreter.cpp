@@ -2267,12 +2267,14 @@ bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript& 
                         const CScriptNum required(stacktop(-1), /*fRequireMinimal=*/true);
                         if (!parsed || !rec->floor)
                             return set_error(serror, SCRIPT_ERR_ANCHORLOCK_MISSING);
+                        rec->floor_read = true;
                         if (required < 0 || (int64_t)*rec->floor != (int64_t)required.getint())
                             return set_error(serror, SCRIPT_ERR_ANCHORLOCK_UNSATISFIED);
                         break;
                     }
                     if (!parsed || !rec->proof)
                         return set_error(serror, SCRIPT_ERR_BTCPAY_MISSING);
+                    rec->proof_read = true;
                     const BtcPayment::Proof& proof = *rec->proof;
                     if (opcode == OP_INSPECTBTCPAYMENT) {
                         stack.push_back(CScriptNum((int64_t)proof.height).getvch());
@@ -3623,6 +3625,13 @@ bool VerifyScript(const CScript& scriptSig, const CScript& scriptPubKey, const C
         if (!hadWitness && !witness->IsNull()) {
             return set_error(serror, SCRIPT_ERR_WITNESS_UNEXPECTED);
         }
+    }
+
+    // SEQUENTIA (relay policy): a bitcoin-payment record that this input's
+    // script did not read is not the spender's to add, whoever added it.
+    if ((flags & SCRIPT_VERIFY_BTCPAYMENT) && (flags & SCRIPT_VERIFY_BTCPAYMENT_RECORDS_READ) &&
+        checker.BtcPaymentRecordsUnread()) {
+        return set_error(serror, SCRIPT_ERR_BTCPAY_UNREAD);
     }
 
     return set_success(serror);

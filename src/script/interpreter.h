@@ -199,6 +199,13 @@ enum : uint32_t {
     // 0xe7 OP_CHECKANCHORHEIGHTVERIFY take meaning instead of being OP_SUCCESS.
     SCRIPT_VERIFY_BTCPAYMENT = (1U << 28),
 
+    // SEQUENTIA (relay policy only): every bitcoin-payment record in an input's
+    // slot must have been read by an opcode the input's script executed. A record
+    // on an input that is not a tapscript spend can never be read, so it is
+    // refused too. The verdict is a pure function of the transaction and the
+    // outputs it spends, the same on every node and at every tip.
+    SCRIPT_VERIFY_BTCPAYMENT_RECORDS_READ = (1U << 29),
+
     // Constants to point to the highest flag in use. Add new flags above this line.
     //
     SCRIPT_VERIFY_END_MARKER
@@ -415,6 +422,13 @@ public:
         return nullptr;
     }
 
+    //! SEQUENTIA: whether this input's slot holds a record that no executed
+    //! opcode read (or a slot that does not parse).
+    virtual bool BtcPaymentRecordsUnread() const
+    {
+        return false;
+    }
+
     virtual ~BaseSignatureChecker() {}
 };
 
@@ -476,6 +490,16 @@ public:
         }
         return m_btcpay_records ? &*m_btcpay_records : nullptr;
     }
+    bool BtcPaymentRecordsUnread() const override
+    {
+        if (nIn >= txTo->vin.size() || txTo->vin[nIn].m_is_pegin || nIn >= txTo->witness.vtxinwit.size() ||
+            txTo->witness.vtxinwit[nIn].m_pegin_witness.stack.empty()) {
+            return false;
+        }
+        const BtcPayment::Records* rec = GetBtcPaymentRecords();
+        if (rec == nullptr) return true;
+        return (rec->proof && !rec->proof_read) || (rec->floor && !rec->floor_read);
+    }
 };
 
 using TransactionSignatureChecker = GenericTransactionSignatureChecker<CTransaction>;
@@ -510,6 +534,10 @@ public:
     const BtcPayment::Records* GetBtcPaymentRecords() const override
     {
         return m_checker.GetBtcPaymentRecords();
+    }
+    bool BtcPaymentRecordsUnread() const override
+    {
+        return m_checker.BtcPaymentRecordsUnread();
     }
 };
 

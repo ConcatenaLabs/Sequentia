@@ -51,6 +51,10 @@ struct Proof {
 struct Records {
     std::optional<Proof> proof;
     std::optional<uint32_t> floor;
+    //! Set by the opcodes that read each record during one script run (relay
+    //! policy refuses a record no executed opcode read).
+    mutable bool proof_read{false};
+    mutable bool floor_read{false};
     bool Empty() const { return !proof && !floor; }
 };
 

@@ -96,8 +96,9 @@ What being unsigned costs, and how each cost is closed:
   so the valid transaction is still fetched from other peers.
 - **A valid change could make the claim heavier**, lowering its fee rate to hold
   it back until the refund. So every record has **exactly one valid encoding**
-  for a given fact (section 3), relay refuses anything else in the slot, and the
-  mempool lets a lighter or fresher proof replace a pooled one with the same
+  for a given fact (section 3), relay refuses anything else in the slot,
+  including any record the input's script does not read (section 6.1), and the
+  mempool lets a lighter or fresher witness replace a pooled one with the same
   transaction id (section 6.2). What remains: a block's own producer can pad the
   slot with records of an unknown type, which consensus ignores, and a script
   that reads a witness value it does not constrain admits equal-weight
@@ -333,6 +334,20 @@ the hashing, which the block weight already bounds.
   until a block anchors at or above it, and is completed then.
 - A proof whose coin is still unconfirmed is refused (`btcpay-coin-unconfirmed`),
   so a claim never shares a block with its lock.
+- **Relay refuses a record no executed opcode read**: every record in an input's
+  slot must have been read by an opcode the input's script executed
+  (`OP_INSPECTBTCPAYMENT` or `OP_INSPECTBTCOUTPUT` for a proof,
+  `OP_CHECKANCHORHEIGHTVERIFY` for a floor). A record on an input that is not a
+  tapscript spend can never be read, so it is refused too, as is one read only on
+  a branch the script did not take. Without this anyone could add a floor or a
+  whole payment record to an ordinary input of someone else's transaction: the
+  variant pools first, refuses the original as the same transaction, and may be
+  many times heavier. The rule is relay policy (the standard script flag
+  `SCRIPT_VERIFY_BTCPAYMENT_RECORDS_READ`, refused as `Bitcoin payment record not
+  read by any executed opcode`), not consensus: a block may still carry such a
+  record. Its verdict reads only the transaction and the outputs it spends, so
+  the same bytes get the same answer on every node with the rule active, at any
+  tip.
 - A transaction carrying a floor is accepted, and may replace another, only
   when the floor is at most the anchor height of the chain tip, never Bitcoin's
   tip. Anchor heights never fall along a branch, so the next block can mine it.
@@ -346,10 +361,11 @@ the hashing, which the block weight already bounds.
 ### 6.2 One transaction id, a better proof
 
 The mempool otherwise refuses a second transaction with the same id
-(`txn-same-nonwitness-data-in-mempool`, `src/validation.cpp:1002-1006`). For a
-transaction carrying records it accepts the newcomer in place of the pooled one
-when both are valid and the newcomer is lighter, or when the pooled one's proof
-is no longer valid. A seller who completes the buyer's pre-signed claim with a
+(`txn-same-nonwitness-data-in-mempool`). When the pooled transaction carries
+records, it accepts a valid newcomer in its place when the newcomer is lighter,
+whether it carries other records or none, or when the pooled one's records are
+no longer valid. A newcomer without records is how the original of a spend
+displaces a variant someone else added records to. A seller who completes the buyer's pre-signed claim with a
 heavy proof of some other qualifying payment is then displaced by the lighter
 proof of the buyer's own payment. Each replacement must be strictly lighter or
 replace a proof that is no longer valid, so a chain of replacements cannot loop.

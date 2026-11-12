@@ -196,6 +196,8 @@ std::string ScriptErrorString(const ScriptError serror)
             return "No anchor floor on this input";
         case SCRIPT_ERR_ANCHORLOCK_UNSATISFIED:
             return "Anchor floor differs from the one the script requires";
+        case SCRIPT_ERR_BTCPAY_UNREAD:
+            return "Bitcoin payment record not read by any executed opcode";
         case SCRIPT_ERR_UNKNOWN_ERROR:
         case SCRIPT_ERR_ERROR_COUNT:
         default: break;
