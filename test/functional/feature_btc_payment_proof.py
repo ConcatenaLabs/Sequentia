@@ -468,6 +468,7 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.congestion()
         self.measure_distinct_blocks()
         self.opcode_cost()
+        self.orphaned_and_longest_links()
         self.only_tightens()
 
     def neg_floor(self):
@@ -1263,6 +1264,9 @@ class BtcPaymentProofTest(BitcoinTestFramework):
                       struct.pack("<I", 0))
         assert len(sixty_four) == 64
         case("a 64-byte payment that parses", read, lambda C: [rec(C, payment=sixty_four)], "bad-btcpay-tx-64-bytes")
+        # The coinbase shown as the payment, and a payment shown at the coinbase's index.
+        case("the coinbase as the payment", read, lambda C: [rec(C, payment=pr["coinbase"])], "bad-btcpay-tx-coinbase")
+        case("a payment at index 0", read, lambda C: [rec(C, index=0)], "bad-btcpay-index")
         # The floor record.
         chk = CScript([5, OP_CHECKANCHORHEIGHTVERIFY, OP_DROP, OP_1])
         case("a duplicate floor", chk, [floor_record(5), floor_record(5)], "bad-anchorlock-duplicate")
@@ -1436,6 +1440,50 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         assert accept_s < 5 and mine_s < 5, (accept_s, mine_s)
         self.results.append((self.current, {"proof_bytes": len(rec), "weight": dec["weight"],
                                             "accept_s": round(accept_s, 2), "block_s": round(mine_s, 2)}))
+
+    def orphaned_and_longest_links(self):
+        self.step("N29 a proof of an orphaned block at a height the chain recorded; 2,016 links and 2,017")
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        lock = self.fresh_lock(deadline_in=2200, margin=6)
+        # The payment is mined in X at h and recorded; Bitcoin then replaces X by
+        # Y at the same height (the payment not in it), and the chain records Y.
+        ptx = self.pay(lock["addr"], lock["amount"])
+        x = self.btc_mine(1)[0]
+        h = b.getblockheader(x)["height"]
+        self.mine_anchored(h)
+        orphan = self.proof_for(ptx, lock["C"], x, link=False)
+        vout = self.vout_paying(ptx, lock["addr"], x)
+        b.invalidateblock(x)
+        b.prioritisetransaction(ptx, 0, -100000000)
+        y = self.btc_mine(1)[0]
+        assert b.getblockheader(y)["height"] == h and ptx not in b.getblock(y)["tx"]
+        self.wait_for(lambda: self.anchor_of(node.getbestblockhash()) < h or
+                      node.getblockheader(node.getbestblockhash())["anchorhash"] == y, "the watcher follows")
+        blk = self.mine_anchored(h)
+        assert node.getblockheader(blk)["anchorhash"] == y
+        self.force([self.claim(lock, orphan["record"], vout)], "bad-btcpay-not-in-anchor-chain")
+        self.log.info("    the orphaned block X at a height the chain recorded (as Y): refused")
+        # The payment mined again; the longest proof the rule allows, and one more.
+        b.prioritisetransaction(ptx, 0, 100000000)
+        p2 = self.btc_mine(1)[0]
+        h2 = b.getblockheader(p2)["height"]
+        assert ptx in b.getblock(p2)["tx"]
+        self.btc_mine(2016)
+        self.mine_anchored(h2 + 2016)
+        self.btc_mine(1)
+        self.mine_anchored(h2 + 2017)
+        pr = self.proof_for(ptx, lock["C"], p2, link=False)
+        cs = hashlib.sha256(pr["coinbase"]).digest()
+        args = (lock["C"], pr["header"], cs, pr["index"], pr["pbranch"], pr["cbranch"], pr["payment"])
+        links = self.link_headers(h2, h2 + 2017)
+        self.force([self.claim(lock, payment_record(h2, *args, links=links), self.vout_paying(ptx, lock["addr"], p2))],
+                   "bad-btcpay-encoding")
+        self.log.info("    2,017 links to a recorded anchor: refused")
+        good = self.claim(lock, payment_record(h2, *args, links=links[:2016]), self.vout_paying(ptx, lock["addr"], p2))
+        blk = self.force([good])
+        self.results.append((self.current, "2,016 links mined, 2,017 refused: bad-btcpay-encoding; orphaned block at a recorded height refused"))
+        self.log.info("    2,016 links to a recorded anchor: mined in %s", blk[:16])
 
     def only_tightens(self):
         self.step("N16 the rule only tightens: a node without it accepts every block, and accepts a claim without proof that this node refuses")
