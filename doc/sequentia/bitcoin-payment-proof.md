@@ -79,10 +79,12 @@ online:
   fresh proof. The buyer's completion service does so after every reorganization
   until the claim's block is final (section 8.5): the completion service is
   the guarantee the swap relies on. A node that watches Bitcoin also re-links a
-  fresh proof itself (section 6.3), from the variants it kept and, when none of
-  them stands, from a search of Bitcoin's recent blocks for any payment to the
-  script those variants name. That search is what brings a claim back with
-  nobody online, as whitepaper section 5.3 says a reorganized transaction does.
+  fresh proof itself for the claims it holds (section 6.3: at most 1,000, held
+  by fee per virtual byte, each for at most 144 Bitcoin blocks), from the
+  variants it kept and, when none of them stands, from a search of Bitcoin's
+  recent blocks for any payment to the script those variants name. That search
+  is what brings a held claim back with nobody online, as whitepaper section 5.3
+  says a reorganized transaction does.
 - **Wallet libraries** sign the claim exactly as any taproot script-path spend.
 
 The taproot annex, which every signature commits to, was rejected: with it, each
@@ -469,11 +471,15 @@ buyer's wallet or completion service can always submit its own proof. **The
 completion service is the guarantee** (section 8.5): it watches the claim until
 its block is final and resubmits a fresh proof of the buyer's own payment after
 every reorganization that disconnects it. **The node's search is what brings a
-claim back with nobody online.** What remains for an attacker is what section
-9.3 already accepts: taking the buyer's payment itself out of Bitcoin's chain,
-or making it pay another script, which leaves the buyer with its bitcoin; and a
-buyer's payment older than the search's window (below) when the reorganization
-comes, with the buyer's wallet and completion service both offline until `R`.
+claim it holds back with nobody online.** What remains for an attacker is what
+section 9.3 already accepts: taking the buyer's payment itself out of Bitcoin's
+chain, or making it pay another script, which leaves the buyer with its
+bitcoin; a buyer's payment older than the search's window (section 6.3) when the
+reorganization comes; and a claim kept out of a node's waiting set by 1,000
+claims that each pay more per virtual byte (section 6.3), which costs about 830
+times the claim's own fee at every reorganization it is aimed at. In the
+last two, the claim comes back only when the buyer's wallet or completion
+service submits it, and is lost if both stay offline until `R`.
 
 ### 6.3 Reorganizations, and the proof re-linked
 
@@ -486,10 +492,36 @@ comes, with the buyer's wallet and completion service both offline until `R`.
   Sequentia reorganization it causes, since validity reads only the chain.
 - **The node re-links a fresh proof itself** (node policy, on every node that
   watches Bitcoin; every block producer does). It holds each claim evicted after
-  a reorganization, keyed by transaction id, at most 1,000 of them, with the
-  variants of section 6.2. The work runs on its own thread, beside the anchor
-  watcher and never on its path, so nothing it does delays an anchor-driven
-  reorganization:
+  a reorganization, keyed by transaction id, with the variants of section 6.2,
+  in a waiting set of at most 1,000 claims:
+  - **held by fee per virtual byte.** When the set is full, the held claim
+    paying the least per virtual byte is dropped for a newcomer paying more,
+    and a newcomer paying no more than every held claim is not held at all;
+  - **forgotten at once when its lock coin is spent** on the active chain
+    (checked whenever the chain tip moves): such a claim can never be mined on
+    that chain;
+  - **forgotten after one window:** a claim not re-attached within 144 Bitcoin
+    blocks of being held is dropped with its variants. By then the search has
+    covered the window below the height it was held at and every block mined
+    since, so every payment that could still complete it has been looked for.
+
+  A claim the node did not hold, or has forgotten, comes back only when someone
+  submits it: the buyer's wallet or its completion service (section 8.5), which
+  is the guarantee. To keep one claim out of a node's waiting set an attacker
+  needs 1,000 claims of its own held there at the moment the reorganization
+  evicts it, each paying more per virtual byte. A claim is held only when a
+  reorganization evicts it from the pool or from a disconnected block, so those
+  claims must have been pooled or mined just before it, offering their fees:
+  1,000 times the claim's fee per virtual byte times their own size. With the
+  smallest claims (252 virtual bytes, a leaf any proof opens, against 304 for a
+  buyer's claim) that is about 830 times the claim's own fee, paid in full
+  whenever the Bitcoin block the attacker bets on is not orphaned. A
+  held claim lasts one window at most and goes as soon as its coin is spent, so
+  the cost is paid again for every reorganization aimed at.
+
+  The work runs on its own thread, beside the anchor watcher and never on its
+  path, so nothing it does delays an anchor-driven reorganization:
+  - held claims are tried highest fee per virtual byte first;
   - a claim is tried again only when Bitcoin's tip or the chain tip has moved
     since its last try, and each tick stops after 500 ms of work, the rest
     waiting for the next tick. The budget is checked between claims and also
@@ -532,9 +564,8 @@ comes, with the buyer's wallet and completion service both offline until `R`.
   validated: like the rest of this section it is relay help, and a claim's
   validity stays a pure function of the chain.
 
-  A claim held for 2,016 Bitcoin blocks without its payment being found is
-  dropped with its variants. Held claims and variants live in memory only; after
-  a restart the buyer's wallet submits its own proof again.
+  Held claims and variants live in memory only; after a restart the buyer's
+  wallet submits its own proof again.
 
   Measured with claims waiting for a payment that was double-spent (PV13's case),
   an anchor-driven reorganization disconnects the orphaned block in 1.0 s with

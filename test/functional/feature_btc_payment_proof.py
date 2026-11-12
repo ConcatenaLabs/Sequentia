@@ -478,6 +478,7 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.opcode_cost()
         self.orphaned_and_longest_links()
         self.variant_flood()
+        self.waiting_set()
         self.only_tightens()
 
     def neg_floor(self):
@@ -1702,6 +1703,171 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.results.append((self.current, "a lighter proof replaced the pooled claim; its child (fee %d) stayed in "
                              "the pool and was mined with it" % kid_fee))
         self.log.info("    the claim's child stayed in the pool through the same-txid replacement and was mined")
+
+    # ------------------------------------------------------- the waiting set
+    def attacker_coins(self, n):
+        """n coins, each under a leaf of its own that any proof of any payment
+        opens: what a claim nobody can satisfy needs."""
+        node = self.nodes[0]
+        coins = []
+        per_tx = 400
+        for start in range(0, n, per_tx):
+            leaves, amounts = {}, {}
+            for k in range(start, min(n, start + per_tx)):
+                leaf = CScript([OP_INSPECTBTCPAYMENT, OP_2DROP, k + 17, OP_DROP, OP_1])
+                tap = taproot_construct(NUMS, [("l", leaf)])
+                addr = program_to_witness(1, tap.scriptPubKey[2:])
+                leaves[tap.scriptPubKey] = (leaf, tap)
+                amounts[addr] = Decimal("0.01")
+            ftx = node.sendmany(amounts=amounts, output_assets={a: self.asset for a in amounts}, fee_asset=self.asset)
+            self.mine(1)
+            ft = tx_from_hex(node.getrawtransaction(ftx))
+            C = self.anchor_of(node.getrawtransaction(ftx, True)["blockhash"])
+            for v, o in enumerate(ft.vout):
+                if o.scriptPubKey in leaves:
+                    coins.append(dict(txid=ftx, vout=v, C=C, leaf=leaves[o.scriptPubKey][0], tap=leaves[o.scriptPubKey][1]))
+        return coins
+
+    def attacker_spend(self, coin, record, fee, spk):
+        t = CTransaction()
+        t.nVersion = 2
+        t.vin.append(CTxIn(COutPoint(int(coin["txid"], 16), coin["vout"]), nSequence=SEQ_NONFINAL_RBF))
+        asset = CTxOutAsset(b"\x01" + bytes.fromhex(self.asset)[::-1])
+        t.vout.append(CTxOut(CTxOutValue(1000000 - fee), spk, asset))
+        t.vout.append(CTxOut(CTxOutValue(fee), b"", asset))
+        t.wit.vtxinwit.append(CTxInWitness())
+        t.wit.vtxoutwit = [CTxOutWitness() for _ in t.vout]
+        t.wit.vtxinwit[0].peginWitness.stack = [record]
+        tap = coin["tap"]
+        control = bytes([tap.leaves["l"].version + tap.negflag]) + tap.internal_pubkey + tap.leaves["l"].merklebranch
+        t.wit.vtxinwit[0].scriptWitness.stack = [bytes(coin["leaf"]), control]
+        t.rehash()
+        return t
+
+    def fill_waiting_set(self, coins, fee):
+        """One claim per coin, each proving one payment that is then orphaned and
+        double-spent: every claim is evicted, held, and can never be satisfied.
+        Returns the claims' fee per vB."""
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        # Paid to a script outside the node's wallet: a wallet holding a thousand
+        # rejected transactions re-checks them all under the chain lock.
+        spk = self.outside_spk
+        ptx = self.bbuyer.sendtoaddress(self.bbuyer.getnewaddress(), 1)
+        ph = self.btc_mine(1)[0]
+        self.mine_anchored(b.getblockheader(ph)["height"])
+        make = self.block_records(ph)
+        records = {}
+        claims = []
+        for c in coins:
+            if c["C"] not in records:
+                records[c["C"]] = make(ptx, c["C"])
+            t = self.attacker_spend(c, records[c["C"]], fee, spk)
+            node.sendrawtransaction(t.serialize().hex())
+            claims.append(t.hash)
+        rate = fee / node.getmempoolentry(claims[0])["vsize"]
+        b.invalidateblock(ph)
+        self.double_spend(ptx)
+        self.btc_mine(2)
+        self.wait_for(lambda: not set(claims) & set(node.getrawmempool()), "the claims evicted", timeout=180)
+        return claims, rate
+
+    def honest_evicted(self, fee):
+        """A buyer's claim mined, then its payment's block orphaned and the payment
+        mined again: the claim is evicted and waits for its proof to be re-linked."""
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        lock = self.fresh_lock(deadline_in=400)
+        ptx, pr, vout = self.paid(lock)
+        c = self.claim(lock, pr["record"], vout, fee=fee)
+        node.sendrawtransaction(c.serialize().hex())
+        rate = fee / node.getmempoolentry(c.hash)["vsize"]
+        blk = self.mine_anchored(pr["height"])
+        assert c.hash in node.getblock(blk)["tx"]
+        b.invalidateblock(pr["blockhash"])
+        self.btc_mine(2)
+        assert self.bbuyer.gettransaction(ptx)["confirmations"] > 0
+        self.wait_for(lambda: node.getblockheader(blk)["confirmations"] < 0, "the claim's block is disconnected")
+        self.mine_anchored(b.getblockcount())
+        return c, rate
+
+    def waiting_set(self):
+        self.step("N39 (PV15 X6) the waiting set: held by fee per vB, forgotten when the lock coin is spent, "
+                  "and after one window")
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        n = 1000
+        # The regtest default re-checks the whole pool after every change; with
+        # a thousand claims pooled that is most of the run.
+        fast = ["-checkmempool=0"]
+        self.outside_spk = bytes([0, 20]) + os.urandom(20)
+        coins = self.attacker_coins(n + 2)
+
+        def reattached(c, timeout=60):
+            self.wait_for(lambda: c.hash in node.getrawmempool(), "%s re-attached" % c.hash, timeout=timeout)
+            blk = self.mine_anchored(b.getblockcount())
+            assert c.hash in node.getblock(blk)["tx"]
+
+        # (a) A full set of claims paying little: a claim paying more per vB
+        # takes the place of the lowest, and comes back.
+        self.restart_seq0(fast)
+        attackers, low = self.fill_waiting_set(coins[:n], 2000)
+        h1, h1_rate = self.honest_evicted(20000)
+        assert h1_rate > low
+        reattached(h1)
+        dropped = [line for line in self.debug_lines(node, "dropped from the waiting set") if h1.hash in line]
+        assert dropped, "the claim paying more was not held"
+        self.log.info("    (a) %d claims at %.1f per vB held; the buyer's at %.1f per vB took the lowest one's place "
+                      "and came back", n, low, h1_rate)
+        self.results.append((self.current + " (a)", "%d claims at %.1f per vB waiting; a claim at %.1f per vB held in "
+                             "the lowest one's place and re-attached" % (n, low, h1_rate)))
+
+        # (b) A full set of claims paying more: a claim paying less is not held;
+        # once a held claim's lock coin is spent on the active chain, it is
+        # forgotten and the next claim is held, and comes back.
+        self.restart_seq0(fast)
+        attackers, high = self.fill_waiting_set(coins[:n], 50000)
+        h0, h0_rate = self.honest_evicted(5000)
+        assert h0_rate < high
+        self.wait_for(lambda: [line for line in self.debug_lines(node, "not held for re-attachment") if h0.hash in line],
+                      "the cheaper claim is not held")
+        spk = self.outside_spk
+        ptx = self.bbuyer.sendtoaddress(self.bbuyer.getnewaddress(), 1)
+        ph = self.btc_mine(1)[0]
+        self.mine_anchored(b.getblockheader(ph)["height"])
+        spent = coins[0]
+        other = self.attacker_spend(spent, self.block_records(ph)(ptx, spent["C"]), 3000, spk)
+        assert other.hash != attackers[0]
+        node.sendrawtransaction(other.serialize().hex())
+        blk = self.mine(1)[0]
+        assert other.hash in node.getblock(blk)["tx"]
+        self.wait_for(lambda: self.debug_lines(node, "%s no longer waits: its lock coin" % attackers[0]),
+                      "the claim whose lock coin is spent is forgotten", timeout=30)
+        h2, h2_rate = self.honest_evicted(5000)
+        reattached(h2)
+        assert not [line for line in self.debug_lines(node, "not held for re-attachment") if h2.hash in line]
+        self.log.info("    (b) %d claims at %.1f per vB held: a claim at %.1f per vB not held; one lock coin spent: "
+                      "that claim forgotten, the next claim held and re-attached", n, high, h0_rate)
+        self.results.append((self.current + " (b)", "%d claims at %.1f per vB waiting: a claim at %.1f per vB not held; "
+                             "one held claim's lock coin spent: forgotten at once; the next claim held and re-attached"
+                             % (n, high, h2_rate)))
+
+        # (c) The same full set: after one window of Bitcoin blocks every held
+        # claim is forgotten, and a claim paying less is held and comes back.
+        self.restart_seq0(fast)
+        attackers, high = self.fill_waiting_set(coins[2:n + 2], 50000)
+        time.sleep(3)  # the worker notes the Bitcoin height each claim was held at
+        self.btc_mine(144)
+        self.wait_for(lambda: len(self.debug_lines(node, "not re-attached in 144 Bitcoin blocks")) >= n,
+                      "every held claim forgotten after one window", timeout=120)
+        self.mine_anchored(b.getblockcount())
+        h3, h3_rate = self.honest_evicted(5000)
+        reattached(h3)
+        self.log.info("    (c) after 144 Bitcoin blocks the %d claims at %.1f per vB are forgotten; a claim at %.1f "
+                      "per vB is held and re-attached", n, high, h3_rate)
+        self.results.append((self.current + " (c)", "%d claims at %.1f per vB forgotten after 144 Bitcoin blocks; a "
+                             "claim at %.1f per vB held and re-attached" % (n, high, h3_rate)))
+        self.restart_seq0()
 
     def anchor_driven_delay(self):
         """Seconds from Bitcoin orphaning the tip's anchor until the node disconnects that block."""
