@@ -928,11 +928,17 @@ and the rule takes both:
   fillers at the published rate, the seller pays the market price, and its cost
   falls by the ratio `m` of the two.
 
+And one route lowers the claim's own rate: **a padded proof.** A pooled variant
+up to a third heavier than the claim's lightest proof stays pooled (section
+6.2), so a seller who sends one first makes the claim weigh up to 4/3 of
+`v_claim`. The fee is fixed by the transaction id, so its rate falls by up to a
+quarter, and the tier pays 4/3 of the rate it needs.
+
 So the top tier is
 
-    top fee = V × v_claim × m / (B × N × (1 - s))
+    top fee = V × v_claim × m × 4 / (B × N × (1 - s) × 3)
 
-With `s = 1/2` and `m = 2` it is V / 4,500 (0.022 % of the value) for the figures
+With `s = 1/2` and `m = 2` it is V / 3,375 (0.030 % of the value) for the figures
 above. `m` has no bound the chain enforces: it is bounded by how closely the
 producers' rates follow the market, and a wallet sets it from the age and
 liquidity of the rates it reads.
