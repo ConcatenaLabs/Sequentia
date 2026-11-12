@@ -6,12 +6,12 @@
 
 #include <chain.h>
 #include <chainparams.h>
+#include <coins.h>
 #include <clientversion.h>
 #include <consensus/validation.h>
 #include <fs.h>
 #include <logging.h>
 #include <node/blockstorage.h>
-#include <policy/feerate.h>
 #include <policy/policy.h>
 #include <pos.h>
 #include <primitives/block.h>
@@ -19,7 +19,6 @@
 #include <streams.h>
 #include <sync.h>
 #include <txmempool.h>
-#include <util/moneystr.h>
 #include <util/system.h>
 #include <util/time.h>
 #include <validation.h>
@@ -40,6 +39,7 @@ struct HeldEntry {
     int fork_height{0};         //!< height of the highest block the disconnect kept
     uint32_t release_anchor{0}; //!< released once the tip anchors at or above this
     uint64_t seq{0};            //!< block order across disconnects: parents before children
+    bool verified{false};       //!< passed every check against the active chain once (amounts, scripts)
 };
 
 struct AsideBlock {
@@ -49,6 +49,8 @@ struct AsideBlock {
 
 std::atomic<bool> g_held_active{false};
 std::atomic<bool> g_held_filling{false};
+//! How many blocks are set aside, read without the lock by the certification hook.
+std::atomic<size_t> g_aside_count{0};
 
 Mutex g_held_mutex;
 std::map<uint256, HeldEntry> g_held GUARDED_BY(g_held_mutex);
@@ -58,6 +60,8 @@ uint64_t g_seq GUARDED_BY(g_held_mutex){0};
 std::map<uint256, AsideBlock> g_aside GUARDED_BY(g_held_mutex);
 //! Blocks set aside once already; never set aside again. Memory only.
 std::set<uint256> g_given_up GUARDED_BY(g_held_mutex);
+//! Set-aside blocks a certified block is known to build on (HeldTxsNoteCertified).
+std::set<uint256> g_follow GUARDED_BY(g_held_mutex);
 //! Per block hash: the conflict it carries, if any. Cleared whenever the held set changes.
 std::map<uint256, std::optional<std::string>> g_block_conflict GUARDED_BY(g_held_mutex);
 //! Blocks of the active chain already examined for releases; cleared by every disconnect.
@@ -73,7 +77,11 @@ int64_t g_hold_since_ms GUARDED_BY(g_held_mutex){0};
 bool g_declined GUARDED_BY(g_held_mutex){false};
 int g_hold_progress GUARDED_BY(g_held_mutex){-1};
 int g_cert_progress GUARDED_BY(g_held_mutex){-1};
-int64_t g_last_descendant_scan_ms GUARDED_BY(g_held_mutex){0};
+//! The backstop's clock: when the current hold began (its first decline or
+//! set-aside), 0 when none. Ends with the hold, at a new certified block.
+int64_t g_hold_first_ms GUARDED_BY(g_held_mutex){0};
+//! The liveness bound the producer last passed (0: no producer).
+int64_t g_bound_ms GUARDED_BY(g_held_mutex){0};
 
 static constexpr uint32_t HELD_FILE_VERSION = 2;
 
@@ -203,12 +211,13 @@ bool CarriesQuorum(const CBlockIndex* p) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
            !PosEscapingStallAllowed(p->pprev->m_anchor_height, p->m_anchor_height);
 }
 
-CFeeRate BlockMinFeeRate()
+//! A hold begins (its first decline or set-aside): start the backstop's clock.
+void BeginHoldLocked() EXCLUSIVE_LOCKS_REQUIRED(g_held_mutex)
 {
-    if (gArgs.IsArgSet("-blockmintxfee")) {
-        if (std::optional<CAmount> parsed = ParseMoney(gArgs.GetArg("-blockmintxfee", ""))) return CFeeRate{*parsed};
+    if (g_hold_first_ms == 0) {
+        g_hold_first_ms = SteadyMs();
+        g_hold_progress = g_cert_progress;
     }
-    return CFeeRate{DEFAULT_BLOCK_MIN_TX_FEE};
 }
 
 void ReleaseAllLocked(const std::string& why) EXCLUSIVE_LOCKS_REQUIRED(g_held_mutex)
@@ -218,7 +227,9 @@ void ReleaseAllLocked(const std::string& why) EXCLUSIVE_LOCKS_REQUIRED(g_held_mu
     g_held.clear();
     g_spent_by.clear();
     g_given_up.clear();
+    g_follow.clear();
     g_hold_since_ms = 0;
+    g_hold_first_ms = 0;
     g_declined = false;
     Changed();
 }
@@ -351,7 +362,9 @@ void HeldTxsNoteDecline()
 {
     if (!g_held_active) return;
     LOCK(g_held_mutex);
-    if (!g_held.empty()) g_declined = true;
+    if (g_held.empty()) return;
+    g_declined = true;
+    BeginHoldLocked();
 }
 
 void HeldTxsNoteHold()
@@ -375,6 +388,32 @@ const CBlockIndex* HeldTxsSetAsideAncestor(const CBlockIndex* pindex)
     return nullptr;
 }
 
+void HeldTxsNoteCertified(const CBlockIndex* pindex)
+{
+    AssertLockHeld(cs_main);
+    if (!g_held_active || g_aside_count.load() == 0 || !pindex) return;
+    LOCK(g_held_mutex);
+    if (!CarriesQuorum(pindex)) return;
+    for (const auto& [hash, a] : g_aside) {
+        if (pindex->nHeight > a.pindex->nHeight && pindex->GetAncestor(a.pindex->nHeight) == a.pindex && g_follow.insert(hash).second) {
+            LogPrintf("Held transactions: certified block %s builds on set-aside block %s; following it\n",
+                      pindex->GetBlockHash().ToString(), hash.ToString());
+        }
+    }
+}
+
+std::vector<CTransactionRef> HeldTxsForMining()
+{
+    std::vector<CTransactionRef> out;
+    if (!g_held_active) return out;
+    LOCK(g_held_mutex);
+    std::vector<const HeldEntry*> order;
+    for (const auto& [txid, e] : g_held) order.push_back(&e);
+    std::sort(order.begin(), order.end(), [](const HeldEntry* a, const HeldEntry* b) { return a->seq < b->seq; });
+    for (const HeldEntry* e : order) out.push_back(e->tx);
+    return out;
+}
+
 void HeldTxsRelease(const uint256& txid, const std::string& why)
 {
     if (!g_held_active) return;
@@ -393,7 +432,10 @@ bool HeldTxsMaintain(ChainstateManager& chainman, CTxMemPool& mempool, bool park
         if (g_held.empty() && g_aside.empty()) {
             g_block_conflict.clear();
             g_given_up.clear();
+            g_follow.clear();
             g_hold_since_ms = 0;
+            g_hold_first_ms = 0;
+            g_declined = false;
             return false;
         }
     }
@@ -421,18 +463,27 @@ bool HeldTxsMaintain(ChainstateManager& chainman, CTxMemPool& mempool, bool park
         }
         g_cert_progress = cert_any ? cert_any->nHeight : -1;
 
-        if (g_hold_since_ms == 0 && g_declined && g_cert_progress > g_hold_progress) g_declined = false;
-        // The liveness bound. A certified block since the hold began ends the
-        // hold; a hold that outlasts the bound releases everything.
-        if (g_hold_since_ms != 0) {
-            if (g_cert_progress > g_hold_progress) {
-                g_hold_since_ms = 0;
-                g_declined = false;
-            } else if (bound_ms > 0 && now - g_hold_since_ms >= bound_ms) {
-                for (const auto& [hash, a] : g_aside) to_restore.push_back(hash);
-                ReleaseAllLocked(strprintf("no certified block for %ds while holding (the liveness bound)",
-                                           (int)((now - g_hold_since_ms) / 1000)));
-            }
+        if (bound_ms > 0) g_bound_ms = bound_ms;
+        const int64_t bound = g_bound_ms;
+        // A certified block since the hold began ends the hold (the bound's
+        // clock and the backstop's).
+        if ((g_hold_since_ms != 0 || g_hold_first_ms != 0 || g_declined) && g_cert_progress > g_hold_progress) {
+            g_hold_since_ms = 0;
+            g_hold_first_ms = 0;
+            g_declined = false;
+        }
+        if (g_hold_first_ms == 0 && !g_aside.empty()) BeginHoldLocked();
+        if (bound > 0 && g_hold_since_ms != 0 && now - g_hold_since_ms >= bound) {
+            // The liveness bound: counted from the first honest proposal or share.
+            for (const auto& [hash, a] : g_aside) to_restore.push_back(hash);
+            ReleaseAllLocked(strprintf("no certified block for %ds while holding (the liveness bound)",
+                                       (int)((now - g_hold_since_ms) / 1000)));
+        } else if (bound > 0 && g_hold_first_ms != 0 && now - g_hold_first_ms >= POS_HELD_BACKSTOP_BOUNDS * bound) {
+            // The backstop: counted from the hold's first decline or set-aside,
+            // whatever this member has done or seen since.
+            for (const auto& [hash, a] : g_aside) to_restore.push_back(hash);
+            ReleaseAllLocked(strprintf("held for %.1fs since the first decline or set-aside (the backstop, %.1fs)",
+                                       (now - g_hold_first_ms) * 0.001, POS_HELD_BACKSTOP_BOUNDS * bound * 0.001));
         }
 
         const int floor = MinForkHeight();
@@ -477,23 +528,13 @@ bool HeldTxsMaintain(ChainstateManager& chainman, CTxMemPool& mempool, bool park
         // End set-asides that are due: nothing left to protect, a certified
         // block at its height or above on the active chain displaced it, or a
         // certified block was built on it (the rest of the committee certified
-        // the respend; follow it).
-        const bool scan_descendants = now - g_last_descendant_scan_ms >= 1000;
-        if (scan_descendants) g_last_descendant_scan_ms = now;
+        // the respend; follow it). The last is learnt from the certification
+        // hook (HeldTxsNoteCertified), and from one scan of the block index
+        // when the block is set aside, never by scanning it again.
         for (const auto& [hash, a] : g_aside) {
             if (std::find(to_restore.begin(), to_restore.end(), hash) != to_restore.end()) continue;
-            bool restore = g_held.empty() || (cert_any && cert_any->nHeight >= a.pindex->nHeight);
+            bool restore = g_held.empty() || (cert_any && cert_any->nHeight >= a.pindex->nHeight) || g_follow.count(hash);
             if (!restore && !IndexConflictLocked(a.pindex)) restore = true;
-            if (!restore && scan_descendants) {
-                for (const auto& [h, p] : chainman.m_blockman.m_block_index) {
-                    if (p->nHeight > a.pindex->nHeight && CarriesQuorum(p) && p->GetAncestor(a.pindex->nHeight) == a.pindex) {
-                        LogPrintf("Held transactions: certified block %s builds on set-aside block %s; following it\n",
-                                  h.ToString(), hash.ToString());
-                        restore = true;
-                        break;
-                    }
-                }
-            }
             if (restore) to_restore.push_back(hash);
         }
 
@@ -507,6 +548,16 @@ bool HeldTxsMaintain(ChainstateManager& chainman, CTxMemPool& mempool, bool park
             }
             if (lowest && !g_given_up.count(lowest->GetBlockHash()) && !g_aside.count(lowest->GetBlockHash())) {
                 to_park = lowest;
+                // A certified block may already build on it: one scan, now.
+                for (const auto& [h, p] : chainman.m_blockman.m_block_index) {
+                    if (p->nHeight > lowest->nHeight && CarriesQuorum(p) && p->GetAncestor(lowest->nHeight) == lowest) {
+                        LogPrintf("Held transactions: certified block %s builds on %s; not setting it aside\n",
+                                  h.ToString(), lowest->GetBlockHash().ToString());
+                        to_park = nullptr;
+                        g_given_up.insert(lowest->GetBlockHash());
+                        break;
+                    }
+                }
             }
         }
 
@@ -528,7 +579,9 @@ bool HeldTxsMaintain(ChainstateManager& chainman, CTxMemPool& mempool, bool park
         LOCK(g_held_mutex);
         for (const uint256& hash : to_restore) {
             if (g_aside.erase(hash)) LogPrintf("Held transactions: set-aside block %s returns to fork choice\n", hash.ToString());
+            g_follow.erase(hash);
         }
+        g_aside_count = g_aside.size();
         chainman.ActiveChainstate().ReaddBlockIndexCandidates();
         chain_changed = true;
     }
@@ -538,8 +591,9 @@ bool HeldTxsMaintain(ChainstateManager& chainman, CTxMemPool& mempool, bool park
         {
             LOCK(g_held_mutex);
             g_aside[to_park->GetBlockHash()] = AsideBlock{to_park, SteadyMs()};
+            g_aside_count = g_aside.size();
             g_given_up.insert(to_park->GetBlockHash());
-            g_hold_progress = g_cert_progress;
+            BeginHoldLocked();
         }
         BlockValidationState state;
         if (!chainman.ActiveChainstate().SetAsideBlock(state, to_park)) {
@@ -556,63 +610,110 @@ bool HeldTxsMaintain(ChainstateManager& chainman, CTxMemPool& mempool, bool park
     }
 
     if (!to_check.empty()) {
-        // A transaction is held only while this node would mine it now: it is
-        // in the mempool with a fee its block assembler takes, or the mempool
-        // takes it. A refusal for a lock time or a missing input (a parent not
-        // back yet, a conflict on a block that may still be set aside) is
-        // temporary; any other refusal, and a fee below the block minimum,
-        // ends the hold.
-        const CFeeRate min_rate = BlockMinFeeRate();
+        // A transaction stays held whatever its fee, and whatever this node's
+        // mempool would make of it: a producer that holds mines it from the
+        // record (HeldTxsForMining). It is released here only when it is
+        // invalid for good on the active chain: its amounts or its scripts fail
+        // against the coins it spends. A missing input (a parent held or not
+        // valid yet, a conflict in a block not certified) or a lock that time
+        // lifts (a lock time, a sequence lock, an immature coinbase, a check
+        // that waits for Bitcoin) keeps the hold. So does everything else the
+        // next block refuses only for now. A transaction that spends one
+        // released as invalid is released with it.
         std::vector<std::pair<uint256, std::string>> release;
+        {
+            LOCK(cs_main);
+            CBlockIndex* tip = chainman.ActiveChain().Tip();
+            CCoinsViewCache view(&chainman.ActiveChainstate().CoinsTip());
+            std::set<uint256> verified_now;
+            std::set<uint256> dead;
+            std::set<uint256> already;
+            {
+                LOCK(g_held_mutex);
+                for (const auto& [txid, e] : g_held) {
+                    if (e.verified) already.insert(txid);
+                }
+            }
+            for (const CTransactionRef& tx : to_check) {
+                if (!tip) break;
+                const uint256 txid = tx->GetHash();
+                bool parent_dead = false;
+                for (const CTxIn& in : tx->vin) {
+                    if (!in.m_is_pegin && dead.count(in.prevout.hash)) parent_dead = true;
+                }
+                if (parent_dead) {
+                    release.emplace_back(txid, "it spends a held transaction released as invalid");
+                    dead.insert(txid);
+                    continue;
+                }
+                if (already.count(txid)) {
+                    // Checked once already; only its outputs matter now, for its children.
+                    if (view.HaveInputs(*tx)) {
+                        for (const CTxIn& in : tx->vin) {
+                            if (!in.m_is_pegin) view.SpendCoin(in.prevout);
+                        }
+                        AddCoins(view, *tx, tip->nHeight + 1);
+                    }
+                    continue;
+                }
+                TxValidationState st;
+                CAmountMap fee_map;
+                int64_t sigops = 0;
+                if (CheckTxForNextBlock(*tx, view, tip, Params().GetConsensus(), st, fee_map, sigops, /*cache=*/false)) {
+                    verified_now.insert(txid);
+                    for (const CTxIn& in : tx->vin) {
+                        if (!in.m_is_pegin) view.SpendCoin(in.prevout);
+                    }
+                    AddCoins(view, *tx, tip->nHeight + 1);
+                    continue;
+                }
+                const TxValidationResult kind = st.GetResult();
+                if (kind == TxValidationResult::TX_CONSENSUS || kind == TxValidationResult::TX_WITNESS_MUTATED) {
+                    release.emplace_back(txid, "invalid on the active chain: " + st.ToString());
+                    dead.insert(txid);
+                } else {
+                    LogPrint(BCLog::MEMPOOL, "Held transactions: %s not minable yet: %s\n", txid.ToString(), st.ToString());
+                }
+            }
+            LOCK(g_held_mutex);
+            for (const uint256& txid : verified_now) {
+                auto it = g_held.find(txid);
+                if (it != g_held.end()) it->second.verified = true;
+            }
+            if (!release.empty()) {
+                for (const auto& [txid, why] : release) {
+                    LogPrintf("Held transactions: %s released: %s\n", txid.ToString(), why);
+                    EraseEntry(txid);
+                }
+                Changed();
+            }
+        }
+        // The rest go back into the mempool where its policy takes them, so
+        // that nodes without the rule relay and mine them too. A refusal here
+        // releases nothing.
         size_t added = 0;
         {
             LOCK(cs_main);
             LOCK(mempool.cs);
             for (const CTransactionRef& tx : to_check) {
                 const uint256 txid = tx->GetHash();
-                if (!mempool.exists(GenTxid::Txid(txid))) {
-                    for (const CTxIn& in : tx->vin) {
-                        if (const CTransaction* c = mempool.GetConflictTx(in.prevout)) {
-                            if (c->GetHash() != txid) mempool.removeRecursive(*c, MemPoolRemovalReason::REPLACED);
-                        }
+                if (mempool.exists(GenTxid::Txid(txid))) continue;
+                if (std::any_of(release.begin(), release.end(), [&](const auto& r) { return r.first == txid; })) continue;
+                for (const CTxIn& in : tx->vin) {
+                    if (const CTransaction* c = mempool.GetConflictTx(in.prevout)) {
+                        if (c->GetHash() != txid) mempool.removeRecursive(*c, MemPoolRemovalReason::REPLACED);
                     }
-                    const MempoolAcceptResult r = AcceptToMemoryPool(chainman.ActiveChainstate(), tx, GetTime(),
-                                                                     /*bypass_limits=*/false, /*test_accept=*/false);
-                    if (r.m_result_type != MempoolAcceptResult::ResultType::VALID) {
-                        const TxValidationResult kind = r.m_state.GetResult();
-                        const std::string reason = r.m_state.GetRejectReason();
-                        // Already mined on the active chain (in a block not yet
-                        // certified, say) or already pending is not a refusal.
-                        const bool known = reason == "txn-already-known" || reason == "txn-already-in-mempool" ||
-                                           reason == "txn-same-nonwitness-data-in-mempool";
-                        if (!known && kind != TxValidationResult::TX_MISSING_INPUTS && kind != TxValidationResult::TX_PREMATURE_SPEND) {
-                            release.emplace_back(txid, "this node would not mine it: " + r.m_state.ToString());
-                        } else {
-                            LogPrint(BCLog::MEMPOOL, "Held transactions: %s not readmitted yet: %s\n", txid.ToString(), r.m_state.ToString());
-                        }
-                        continue;
-                    }
-                    ++added;
                 }
-                const auto it = mempool.GetIter(txid);
-                if (!it) continue;
-                const CAmount package_fee = (*it)->GetModFeesWithAncestors().GetValue();
-                const CAmount floor_fee = min_rate.GetFee((*it)->GetSizeWithAncestors());
-                if (package_fee < floor_fee) {
-                    release.emplace_back(txid, strprintf("this node would not mine it: fee value %d below the block minimum %d",
-                                                         package_fee, floor_fee));
+                const MempoolAcceptResult r = AcceptToMemoryPool(chainman.ActiveChainstate(), tx, GetTime(),
+                                                                 /*bypass_limits=*/false, /*test_accept=*/false);
+                if (r.m_result_type == MempoolAcceptResult::ResultType::VALID) {
+                    ++added;
+                } else {
+                    LogPrint(BCLog::MEMPOOL, "Held transactions: %s not readmitted to the mempool: %s\n", txid.ToString(), r.m_state.ToString());
                 }
             }
         }
         if (added) LogPrintf("Held transactions: readmitted %u held transaction(s) to the mempool\n", added);
-        if (!release.empty()) {
-            LOCK(g_held_mutex);
-            for (const auto& [txid, why] : release) {
-                LogPrintf("Held transactions: %s released: %s\n", txid.ToString(), why);
-                EraseEntry(txid);
-            }
-            Changed();
-        }
     }
     return false;
 }
@@ -629,5 +730,6 @@ HeldTxsInfo HeldTxsGetInfo()
     for (const uint256& hash : g_given_up) info.given_up.push_back(hash);
     if (!g_held.empty() || !g_aside.empty()) info.fork_height = MinForkHeight();
     info.hold_ms = g_hold_since_ms ? SteadyMs() - g_hold_since_ms : -1;
+    info.held_for_ms = g_hold_first_ms ? SteadyMs() - g_hold_first_ms : -1;
     return info;
 }

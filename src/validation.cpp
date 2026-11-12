@@ -468,6 +468,9 @@ static void PosSetCertified(ChainstateManager& chainman, CBlockIndex* pindex, st
             if (chainstate->m_chain.Contains(pindex)) ++g_pos_cert_epoch;
         }
     }
+    // SEQUENTIA held transactions: a certified block on a set-aside block ends
+    // that set-aside (pos_heldtxs.h).
+    HeldTxsNoteCertified(pindex);
 }
 
 //! SEQUENTIA PoS: judge `pindex` against `parent_quorum` and record the answer.
@@ -2938,6 +2941,45 @@ bool CheckTemplateTxScripts(const CTransaction& tx, const CCoinsViewCache& view,
     flags = WithRecordsV2For(flags, tip ? tip->nHeight + 1 : 0, params);
     PrecomputedTransactionData txdata;
     return CheckInputScripts(tx, state, view, flags, /*cacheSigStore=*/false, /*cacheFullScriptStore=*/false, txdata);
+}
+
+bool CheckTxForNextBlock(const CTransaction& tx, const CCoinsViewCache& view, CBlockIndex* tip,
+                         const Consensus::Params& params, TxValidationState& state, CAmountMap& fee_map,
+                         int64_t& sigop_cost, bool cache)
+{
+    AssertLockHeld(cs_main);
+    assert(tip != nullptr);
+    if (!CheckTransaction(tx, state)) return false;
+    if (tx.IsCoinBase()) return state.Invalid(TxValidationResult::TX_CONSENSUS, "coinbase");
+    const int height = tip->nHeight + 1;
+    // ContextualCheckBlock judges lock times by the parent's median time past.
+    if (!IsFinalTx(tx, height, tip->GetMedianTimePast())) {
+        return state.Invalid(TxValidationResult::TX_PREMATURE_SPEND, "bad-txns-nonfinal", "lock time not reached in the next block");
+    }
+    if (!view.HaveInputs(tx)) {
+        return state.Invalid(TxValidationResult::TX_MISSING_INPUTS, "bad-txns-inputs-missingorspent");
+    }
+    CBlockIndex next;
+    next.pprev = tip;
+    next.nHeight = height;
+    if (DeploymentActiveAt(next, params, Consensus::DEPLOYMENT_CSV) &&
+        !CheckSequenceLocks(tip, view, tx, LOCKTIME_VERIFY_SEQUENCE)) {
+        return state.Invalid(TxValidationResult::TX_PREMATURE_SPEND, "non-BIP68-final");
+    }
+    std::set<std::pair<uint256, COutPoint>> pegins_spent;
+    const auto& fedpegscripts = GetValidFedpegScripts(tip, params, true);
+    if (!Consensus::CheckTxInputs(tx, state, view, height, fee_map, pegins_spent, nullptr, false, true, fedpegscripts)) {
+        return false;
+    }
+    // The block's own flags, not the mempool's: a transaction a block may carry
+    // is what is asked, and a certified one passed them once already.
+    const unsigned int flags = GetBlockScriptFlags(&next, params);
+    PrecomputedTransactionData txdata;
+    if (!CheckInputScripts(tx, state, view, flags, /*cacheSigStore=*/cache, /*cacheFullScriptStore=*/cache, txdata)) {
+        return false;
+    }
+    sigop_cost = GetTransactionSigOpCost(tx, view, flags);
+    return true;
 }
 
 bool PosRecordSpendFailsNextBlock(const CTransaction& tx, const CCoinsViewCache& view,

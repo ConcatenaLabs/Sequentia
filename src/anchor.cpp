@@ -1504,6 +1504,10 @@ void AnchorWatchTask(ChainstateManager& chainman)
         // certified blocks just disconnected carried. After the disconnect,
         // never on its path, so following Bitcoin is not delayed.
         if (HeldTxsActive() && old_tip && old_tip->GetAncestor(pindex_bad->nHeight) == pindex_bad) {
+            // Test only (-posdebugheldfillms): widen the fill window.
+            if (const int64_t fill_ms = gArgs.GetIntArg("-posdebugheldfillms", 0); fill_ms > 0) {
+                UninterruptibleSleep(std::chrono::milliseconds{fill_ms});
+            }
             std::vector<const CBlockIndex*> disconnected;
             for (const CBlockIndex* p = old_tip; p && p->nHeight >= pindex_bad->nHeight; p = p->pprev) disconnected.push_back(p);
             std::reverse(disconnected.begin(), disconnected.end());

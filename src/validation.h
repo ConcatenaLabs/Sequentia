@@ -197,6 +197,17 @@ bool PosCheckTxRecords(const CTransaction& tx, const std::vector<Coin>& spent, i
 bool PosRecordSpendFailsNextBlock(const CTransaction& tx, const CCoinsViewCache& view,
                                   const CBlockIndex* tip, const Consensus::Params& params)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+/** SEQUENTIA held transactions: whether `tx` can go in the block after `tip`,
+ *  on `view` (the coins the template so far leaves), by the rules a block
+ *  applies and not the mempool's policy: no fee is required. Lock time and
+ *  sequence locks, inputs and amounts (fee_map gets the fee it pays), and the
+ *  scripts under the block's own flags (sigop_cost gets their cost). A refusal
+ *  that time can lift is TX_PREMATURE_SPEND, a missing or spent input
+ *  TX_MISSING_INPUTS, anything else that fails a block TX_CONSENSUS. */
+bool CheckTxForNextBlock(const CTransaction& tx, const CCoinsViewCache& view, CBlockIndex* tip,
+                         const Consensus::Params& params, TxValidationState& state, CAmountMap& fee_map,
+                         int64_t& sigop_cost, bool cache)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 /** The input scripts of `tx` under the flags the mempool applies at the tip, for
  *  transactions that reach a block template without passing the mempool. */
 bool CheckTemplateTxScripts(const CTransaction& tx, const CCoinsViewCache& view, const CBlockIndex* tip,

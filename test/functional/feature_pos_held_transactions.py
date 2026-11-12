@@ -40,8 +40,18 @@ from test_framework.test_framework import BitcoinTestFramework, SkipTest
 from test_framework.util import assert_equal, p2p_port, rpc_port
 
 BITCOIND = os.environ.get("PARENT_BITCOIND", "/usr/local/bin/bitcoind")
-CASES = os.environ.get("CR1_CASES", "a,e,d,c,g,f,b,cc,i,rC,rA,rB").split(",")
+CASES = os.environ.get("CR1_CASES", "a,e,d,c,g,f,b,cc,i,rC,rA,rB,rD,b15,bb,fs,share").split(",")
 RESULTS = os.environ.get("CR1_RESULTS", "")
+# The testnet's settings (CR1_TESTNET=1): 9.45 s rounds and a 6.75 s collection
+# window (the formulas at the committee cap of 250), so a liveness bound of
+# 120.15 s, and a 600 s Bitcoin median-time-past gap for a block that escapes a
+# stall, with Bitcoin's blocks 600 s apart. Otherwise the harness's: the
+# formulas at this committee (7 seats: 945 ms, 675 ms, a 12.0 s bound), no gap.
+TESTNET = os.environ.get("CR1_TESTNET", "") == "1"
+ROUND_MS = 9450 if TESTNET else 700 + 35 * 7
+WINDOW_MS = 6750 if TESTNET else 500 + 25 * 7
+BOUND_S = (12 * ROUND_MS + WINDOW_MS) / 1000.0
+BACKSTOP_S = 2 * BOUND_S
 N = 6
 ATTACKER = 0
 CHAIN = "elementsregtest"
@@ -71,7 +81,19 @@ class HeldTransactionsTest(BitcoinTestFramework):
         return AuthServiceProxy(url + ("/wallet/" + wallet if wallet else ""), timeout=120)
 
     def btc_mine(self, n):
-        return self.btc().generatetoaddress(n, self.btc_addr)
+        # A fresh address each time: a block mined in the same second to the same
+        # address as one just invalidated would be that block again.
+        self.btc_addr = self.btc("miner").getnewaddress()
+        if not TESTNET:
+            return self.btc().generatetoaddress(n, self.btc_addr)
+        # Bitcoin's blocks 600 s apart, so that its median time past moves as on
+        # the live network and the 600 s gap binds as it does there.
+        hashes = []
+        for _ in range(n):
+            self.btc_time = max(getattr(self, "btc_time", int(time.time())), int(time.time())) + 600
+            self.btc().setmocktime(self.btc_time)
+            hashes += self.btc().generatetoaddress(1, self.btc_addr)
+        return hashes
 
     def stop_bitcoind(self):
         if getattr(self, "btc_proc", None) and self.btc_proc.poll() is None:
@@ -92,12 +114,15 @@ class HeldTransactionsTest(BitcoinTestFramework):
             "-con_connect_genesis_outputs=1", "-acceptnonstdtxn=1", "-par=1", "-fallbackfee=0.0001",
             "-blindedaddresses=0", "-con_default_blinded_addresses=0",
             "-con_bitcoin_anchor=1", "-validateanchor=1", "-anchorpollinterval=1", "-anchorminconf=1",
-            "-posescapestallmtpgap=0",
+            "-posescapestallmtpgap=%d" % (600 if TESTNET else 0),
             "-mainchainrpchost=127.0.0.1", "-mainchainrpcport=%d" % self.btc_port,
             "-mainchainrpcuser=%s" % self.btc_user, "-mainchainrpcpassword=%s" % self.btc_pass,
             "-parentgenesisblockhash=%s" % self.btc_genesis, "-debug=mempool", "-txindex=1",
             "-port=%d" % p2p_port(i), "-rpcport=%d" % rpc_port(i),
         ] + self.specs + ["-posproducer=1", "-posproducerkey=%s" % self.stakers[i][0]]
+        if TESTNET:
+            a += ["-posroundms=%d" % ROUND_MS, "-poswindowms=%d" % WINDOW_MS]
+        a += getattr(self, "extra_node_args", {}).get(i, [])
         if i == ATTACKER or not aware:
             a.append("-posdebugignoreheld=1")
         if i == ATTACKER:
@@ -323,7 +348,7 @@ class HeldTransactionsTest(BitcoinTestFramework):
         x_hash = None
         if escape_block:
             # The attacker certifies alone: a single-signer block escaping the stall, carrying R.
-            x = a.generateposblock(self.stakers[ATTACKER][0], [])
+            x = self.escape_block(a)
             x_hash = x["hash"]
             xb = a.getblock(x_hash)
             assert r_id in xb["tx"]
@@ -523,7 +548,7 @@ class HeldTransactionsTest(BitcoinTestFramework):
         self.wait_held([t1_id, t2_id], [1, 2, 3, 4, 5])
         self.record("g", "held chain", "T1 %s and its child T2 %s held" % (t1_id, t2_id))
         a.sendrawtransaction(r2_hex)
-        x = a.generateposblock(self.stakers[ATTACKER][0], [])
+        x = self.escape_block(a)
         self.record("g", "X", "%s carries R2, a respend of T1's output" % x["hash"])
         self.rejoin()
         st = dict(t_id=t2_id, r_id=tx_from_hex(r2_hex).rehash(), sizes=[self.log_size(i) for i in range(N)], aware=[1, 2, 3, 4, 5])
@@ -589,7 +614,7 @@ class HeldTransactionsTest(BitcoinTestFramework):
         for i in range(1, N):
             if not self.aware[i]:
                 self.nodes[i].sendrawtransaction(r_hex)
-        x = a.generateposblock(self.stakers[ATTACKER][0], [])
+        x = self.escape_block(a)
         r_id = tx_from_hex(r_hex).rehash()
         xb = a.getblock(x["hash"])
         assert r_id in xb["tx"]
@@ -668,7 +693,7 @@ class HeldTransactionsTest(BitcoinTestFramework):
         """RV56 (B), F3: 3 aware {1,2,3}, 3 unaware {0,4,5}, quorum 4, X a 1-signer escaping-stall block with R.
         Certification must resume within the liveness bound."""
         self.log.info("(rB) mixed 3/3 with an escaping-stall respend: the chain resumes within the bound")
-        bound = 12 * 0.945 + 0.675
+        bound = BOUND_S
         self.set_aware([False, True, True, True, False, False])
         st = self.prepare_escape("rB")
         t0 = time.time()
@@ -691,35 +716,373 @@ class HeldTransactionsTest(BitcoinTestFramework):
         self.set_aware([False] + [True] * (N - 1))
 
     def case_rC(self):
-        """RV56 (C), F4: a held transaction this node would not mine (a 1-atom fee) is released at once."""
-        self.log.info("(rC) a held transaction honest producers would not mine is not held")
+        """RV56 (C) / RV57 (C), F4 and N1: T0 pays a 1-atom fee, which no honest mempool takes. Held anyway,
+        whatever its fee: the respend is refused and the next block an aware member leads mines T0 from
+        the record, so the seller's fee buys no release and the coin is not frozen."""
+        self.log.info("(rC) a held transaction honest mempools refuse (a 1-atom fee) is mined from the record")
         a = self.nodes[ATTACKER]
         coin = self.fund()
         t0_hex = self.spend(coin, self.nodes[1].getnewaddress(), Decimal("0.00000001"))
-        t1_hex = self.spend(coin, a.getnewaddress(), Decimal("0.001"))
-        try:
-            self.nodes[1].testmempoolaccept([t0_hex])
-            self.record("rC", "honest mempool on T0", self.nodes[1].testmempoolaccept([t0_hex])[0].get("reject-reason"))
-        except JSONRPCException as e:
-            self.record("rC", "honest mempool on T0", e.error["message"])
+        r_hex = self.spend(coin, a.getnewaddress(), Decimal("0.001"))
+        self.record("rC", "honest mempool on T0", self.nodes[1].testmempoolaccept([t0_hex])[0].get("reject-reason"))
         self.btc_mine(1)
         self.wait_until(lambda: self.tip(self.nodes[1])["anchorheight"] == self.btc().getblockcount(), timeout=60)
         t0_id, t0_h, _ = self.certify(t0_hex)
-        sz = self.log_size(1)
+        self.record("rC", "T0", "1-atom fee %s certified at height %d" % (t0_id, t0_h))
+        sizes = [self.log_size(i) for i in range(N)]
         self.isolate()
         fork = self.bitcoin_reorg(1)
         self.wait_until(lambda: all(self.tip(n)["anchorheight"] <= fork for n in self.nodes), timeout=60)
-        # It is recorded, then released by the would-mine test.
-        self.wait_until(lambda: self.log_has(1, "Held transactions: holding", sz), timeout=60)
-        self.wait_until(lambda: t0_id not in self.nodes[1].getheldtxs()["txids"], timeout=60)
-        why = self.log_has(1, "%s released" % t0_id, sz)
-        self.record("rC", "T0 released", why[0].split("released: ", 1)[1] if why else "?")
+        self.wait_held([t0_id], [1, 2, 3, 4, 5])
+        time.sleep(5)
+        info = self.nodes[1].getheldtxs()
+        assert t0_id in info["txids"], "T0 released: %s" % self.log_has(1, "%s released" % t0_id, sizes[1])
+        self.record("rC", "T0 after 5 s", "still held on every aware member; not in node 1's mempool: %s" %
+                    (t0_id not in self.nodes[1].getrawmempool()))
+        try:
+            self.nodes[1].sendrawtransaction(r_hex)
+            raise AssertionError("aware member took the respend")
+        except JSONRPCException as e:
+            assert "txn-held-conflict" in e.error["message"], e.error
+            self.record("rC", "respend on an aware member", e.error["message"])
+        # The attacker offers R (its mempool drops T0 for it).
         a.prioritisetransaction(txid=t0_id, fee_delta=-100000000)
+        a.sendrawtransaction(r_hex)
+        t_join = time.time()
+        h_join = self.nodes[1].getblockcount()
         self.rejoin()
-        txid = self.nodes[1].sendrawtransaction(t1_hex)
-        self.record("rC", "owner's replacement", "accepted on an aware member: %s" % txid)
-        h = self.wait_mined(txid, self.nodes[1])
-        self.record("rC", "replacement mined", "at height %d" % h)
+        st = dict(t_id=t0_id, r_id=tx_from_hex(r_hex).rehash(), sizes=sizes, aware=[1, 2, 3, 4, 5])
+        won = self.outcome("rC", st)
+        assert_equal(won, "T")
+        n1 = self.nodes[1]
+        h = self.block_of(t0_id, n1)
+        self.record("rC", "T0 mined again", "at height %d, %d block(s) after the rejoin, %.1fs" % (h, h - h_join, time.time() - t_join))
+        mined = []
+        for i in range(1, N):
+            mined += self.log_has(i, "mined from the record", sizes[i])
+        self.record("rC", "record lines", len(mined))
+        if mined:
+            self.record("rC", "record line", mined[0].split(" ", 1)[1])
+        self.wait_until(lambda: t0_id not in n1.getheldtxs()["txids"], timeout=60)
+
+    def case_rD(self):
+        """RV57 (D), N2: the attacker's escaping-stall block X (Bitcoin-consistent) is set aside on member 1,
+        whose own sibling S then loses its anchor. Member 1 is isolated, so it never proposes or signs; the
+        backstop, counted from the set-aside, must return it to X's branch. Node 5 (rule on, no producer)
+        follows X at once."""
+        self.log.info("(rD) the backstop: a set-aside ends within %.1fs of itself, whatever the member does", BACKSTOP_S)
+        a = self.nodes[ATTACKER]
+        coin = self.fund()
+        t_hex = self.spend(coin, self.nodes[1].getnewaddress(), Decimal("0.0001"))
+        r_hex = self.spend(coin, a.getnewaddress(), Decimal("0.001"))
+        self.btc_mine(2)
+        self.wait_until(lambda: self.tip(self.nodes[1])["anchorheight"] == self.btc().getblockcount(), timeout=60)
+        t_id, t_h, _ = self.certify(t_hex)
+        sizes = [self.log_size(i) for i in range(N)]
+        self.isolate()
+        fork = self.bitcoin_reorg(2)
+        self.wait_until(lambda: all(self.tip(n)["anchorheight"] <= fork for n in self.nodes), timeout=60)
+        self.wait_held([t_id], [1, 5])
+        p_hash = self.nodes[1].getbestblockhash()
+        self.stop_node(5)
+        args5 = [x for x in self.node_args(5, aware=True) if not x.startswith("-posproducer")]
+        self.nodes[5].extra_args = args5
+        self.start_node(5, extra_args=args5)
+        self.nodes[5].setnetworkactive(False)
+        a.sendrawtransaction(r_hex)
+        x = self.escape_block(a)
+        x_hash, x_hex = x["hash"], a.getblock(x["hash"], 0)
+        x_anchor = a.getblockheader(x_hash)["anchorheight"]
+        self.btc_mine(1)
+        b1 = self.btc().getblockcount()
+        self.nodes[1].submitblock(x_hex)
+        self.wait_until(lambda: x_hash in self.nodes[1].getheldtxs()["parked"], timeout=30)
+        t_aside = time.time()
+        if self.nodes[1].getbestblockhash() in (p_hash, x_hash):
+            self.escape_block(self.nodes[1], 1)
+        s_hash = self.nodes[1].getbestblockhash()
+        s_hdr = self.nodes[1].getblockheader(s_hash)
+        self.record("rD", "setup", "P %s; X %s anchor %d, set aside on node 1; node 1's sibling S %s anchor %d, %.1fs after the set-aside" %
+                    (p_hash[:16], x_hash[:16], x_anchor, s_hash[:16], s_hdr["anchorheight"], time.time() - t_aside))
+        assert s_hdr["anchorheight"] == b1 > x_anchor
+        self.nodes[5].submitblock(x_hex)
+        self.nodes[5].submitblock(self.nodes[1].getblock(s_hash, 0))
+        # Bitcoin takes S's anchor away and keeps X's.
+        b = self.btc()
+        b.invalidateblock(b.getblockhash(b1))
+        self.btc_mine(2)
+        t_re = time.time()
+        samples = {1: [], 5: []}
+        follow = {1: None, 5: None}
+        while time.time() - t_re < BACKSTOP_S + 60 and (follow[1] is None or follow[5] is None):
+            for i in (1, 5):
+                n = self.nodes[i]
+                tip = n.getbestblockhash()
+                hdr = n.getblockheader(tip)
+                try:
+                    ok = self.btc().getblockheader(hdr["anchorhash"])["confirmations"] > 0
+                except Exception:
+                    ok = False
+                on_x = hdr["height"] >= x["height"] and n.getblockhash(x["height"]) == x_hash
+                tag = "X-branch" if on_x else ("P" if tip == p_hash else ("S" if tip == s_hash else "other"))
+                if not samples[i] or samples[i][-1][1:] != (tag, ok):
+                    samples[i].append((round(time.time() - t_re, 1), tag, ok))
+                if on_x and follow[i] is None:
+                    follow[i] = time.time()
+            time.sleep(0.25)
+        for i in (1, 5):
+            self.record("rD", "node %d tips after the Bitcoin reorg (s, tip, anchor canonical)" % i, samples[i])
+        assert follow[1] is not None, "node 1 never returned to X's branch"
+        since_aside = follow[1] - t_aside
+        self.record("rD", "node 1 on X's branch", "%.1fs after the set-aside (backstop %.1fs), %.1fs after the Bitcoin reorg" %
+                    (since_aside, BACKSTOP_S, follow[1] - t_re))
+        self.record("rD", "node 5 on X's branch", "%.1fs after the Bitcoin reorg" % (follow[5] - t_re))
+        lines = self.log_has(1, "the backstop", sizes[1])
+        self.record("rD", "node 1 backstop line", lines[0].split(" ", 1)[1] if lines else "none")
+        assert since_aside < BACKSTOP_S + 3, "node 1 was kept off X's branch %.1fs" % since_aside
+        # No sample of either node on a block whose anchor Bitcoin replaced, beyond the watcher's tick.
+        for i in (1, 5):
+            stale = [smp for smp in samples[i] if not smp[2]]
+            self.record("rD", "node %d stale-anchor samples" % i, stale)
+        self.stop_node(5)
+        self.nodes[5].extra_args = self.node_args(5, aware=True)
+        self.start_node(5, extra_args=self.nodes[5].extra_args)
+        self.nodes[5].loadwallet("w")
+        self.rejoin()
+        self.sync_all_tips(timeout=BACKSTOP_S + 120)
+
+    def escape_block(self, node, signer=ATTACKER):
+        """A single-signer escaping-stall block on `node`'s tip. At the testnet's settings Bitcoin must first
+        move its median time past 600 s beyond the parent's anchor: mine until the block is allowed."""
+        for _ in range(12):
+            try:
+                return node.generateposblock(self.stakers[signer][0], [])
+            except JSONRPCException as e:
+                if not TESTNET:
+                    raise
+                self.log.info("  escaping-stall block not allowed yet (%s); one more Bitcoin block", e.error["message"][:120])
+                self.btc_mine(1)
+                target = self.btc().getblockcount()
+                self.wait_until(lambda: node.getblockheader(node.getbestblockhash())["anchorheight"] <= target, timeout=30)
+                time.sleep(2)
+        raise AssertionError("no escaping-stall block allowed")
+
+    def case_b15(self):
+        self.log.info("(b15) members running the rule: 1 and 5 of 6 (quorum 4)")
+        for n_aware, attempts in ((1, 4), (5, 3)):
+            self.set_aware([False] + [i <= n_aware for i in range(1, N)])
+            wins = []
+            for k in range(attempts):
+                case = "b%d.%d" % (n_aware, k + 1)
+                st = self.attack(case, 1)
+                try:
+                    won = self.outcome(case, st, timeout=240)
+                except AssertionError:
+                    won = "neither"
+                    self.record(case, "outcome", "neither T nor R certified within 240s")
+                wins.append(won)
+                if n_aware == 1 and won == "R":
+                    break
+            self.record("b%d" % n_aware, "outcomes", wins)
+            if n_aware == 5:
+                assert "R" not in wins, wins
+        self.set_aware([False] + [True] * (N - 1))
+
+    def case_bb(self):
+        """Reorganizations back to back: T certified; Bitcoin reorganizes 1 deep; while T is held, before any
+        vote, Bitcoin reorganizes again, 2 deep from its new tip, taking the blocks built since away too.
+        The record must keep T across both, and T must be mined, not R."""
+        self.log.info("(bb) two Bitcoin reorganizations back to back")
+        a = self.nodes[ATTACKER]
+        coin = self.fund()
+        t_hex = self.spend(coin, self.nodes[1].getnewaddress(), Decimal("0.0001"))
+        r_hex = self.spend(coin, a.getnewaddress(), Decimal("0.001"))
+        self.btc_mine(1)
+        self.wait_until(lambda: self.tip(self.nodes[1])["anchorheight"] == self.btc().getblockcount(), timeout=60)
+        t_id, t_h, _ = self.certify(t_hex)
+        sizes = [self.log_size(i) for i in range(N)]
+        self.isolate()
+        fork1 = self.bitcoin_reorg(1)
+        self.wait_until(lambda: all(self.tip(n)["anchorheight"] <= fork1 for n in self.nodes), timeout=60)
+        self.wait_held([t_id], [1, 2, 3, 4, 5])
+        # The attacker certifies nothing alone at 1 deep; it does put R first.
+        a.sendrawtransaction(r_hex)
+        fork2 = self.bitcoin_reorg(2)
+        self.wait_until(lambda: all(self.tip(n)["anchorheight"] <= fork2 for n in self.nodes), timeout=60)
+        held = [t_id in self.nodes[i].getheldtxs()["txids"] for i in range(1, N)]
+        self.record("bb", "after the second reorganization", "fork %d then %d; T held on members 1-5: %s" % (fork1, fork2, held))
+        assert all(held)
+        x = self.escape_block(a)
+        self.record("bb", "X", "%s carries R (single signer)" % x["hash"])
+        self.rejoin()
+        st = dict(t_id=t_id, r_id=tx_from_hex(r_hex).rehash(), sizes=sizes, aware=[1, 2, 3, 4, 5])
+        assert_equal(self.outcome("bb", st), "T")
+        # Phase 2: T, mined again and certified above, is disconnected again at once by a further
+        # Bitcoin reorganization that takes the new anchor away. The second record holds it afresh.
+        n1 = self.nodes[1]
+        h2 = self.block_of(t_id, n1)
+        self.wait_certified_above(h2)
+        self.wait_until(lambda: self.tip(n1)["anchorheight"] == self.btc().getblockcount(), timeout=60)
+        self.btc_mine(1)
+        self.wait_until(lambda: n1.getblockheader(n1.getblockhash(h2))["anchorheight"] >= 0 and
+                        self.tip(n1)["anchorheight"] == self.btc().getblockcount(), timeout=60)
+        a_t = n1.getblockheader(n1.getblockhash(h2))["anchorheight"]
+        sizes = [self.log_size(i) for i in range(N)]
+        self.isolate()
+        depth = self.btc().getblockcount() - a_t + 1
+        fork3 = self.bitcoin_reorg(depth)
+        self.wait_until(lambda: all(self.tip(n)["anchorheight"] <= fork3 for n in self.nodes), timeout=60)
+        self.wait_held([t_id], [1, 2, 3, 4, 5])
+        self.record("bb", "phase 2", "T mined again at height %d (anchor %d) and certified; Bitcoin reorganized %d deep; T held again on members 1-5" %
+                    (h2, a_t, depth))
+        try:
+            a.sendrawtransaction(r_hex)
+        except JSONRPCException as e:
+            self.record("bb", "attacker's mempool on R", e.error["message"])
+        if depth >= 2:
+            x2 = self.escape_block(a)
+            self.record("bb", "X2", "%s carries R: %s" % (x2["hash"], st["r_id"] in a.getblock(x2["hash"])["tx"]))
+        self.rejoin()
+        st["sizes"] = sizes
+        assert_equal(self.outcome("bb2", st), "T")
+
+    def case_fs(self):
+        """A node synced afresh between the disconnect and the vote: member 5's data directory is wiped after
+        the disconnect and it syncs from the network. It is unaware (it never saw T certified); the other
+        four aware members hold a quorum, so R must still not be certified."""
+        self.log.info("(fs) a member synced afresh between the disconnect and the vote")
+        a = self.nodes[ATTACKER]
+        coin = self.fund()
+        t_hex = self.spend(coin, self.nodes[1].getnewaddress(), Decimal("0.0001"))
+        r_hex = self.spend(coin, a.getnewaddress(), Decimal("0.001"))
+        self.btc_mine(1)
+        self.wait_until(lambda: self.tip(self.nodes[1])["anchorheight"] == self.btc().getblockcount(), timeout=60)
+        t_id, t_h, _ = self.certify(t_hex)
+        sizes = [self.log_size(i) for i in range(N)]
+        self.isolate()
+        fork = self.bitcoin_reorg(1)
+        self.wait_until(lambda: all(self.tip(n)["anchorheight"] <= fork for n in self.nodes), timeout=60)
+        self.wait_held([t_id], [1, 2, 3, 4, 5])
+        self.stop_node(5)
+        shutil.rmtree(os.path.join(self.nodes[5].datadir, CHAIN))
+        self.start_node(5, extra_args=self.node_args(5))
+        self.nodes[5].setnetworkactive(False)
+        self.nodes[5].createwallet(wallet_name="w", descriptors=True)
+        a.sendrawtransaction(r_hex)
+        self.rejoin()
+        self.wait_until(lambda: self.nodes[5].getblockcount() >= self.nodes[1].getblockcount() - 1, timeout=180)
+        info5 = self.nodes[5].getheldtxs()
+        self.record("fs", "node 5 after the fresh sync", "holds %d transaction(s); T held: %s" % (len(info5["txids"]), t_id in info5["txids"]))
+        sizes[5] = 0
+        st = dict(t_id=t_id, r_id=tx_from_hex(r_hex).rehash(), sizes=sizes, aware=[1, 2, 3, 4])
+        assert_equal(self.outcome("fs", st), "T")
+
+    def case_share(self):
+        """N1's share: after a disconnect of blocks full of transactions no honest mempool takes (1-atom fees),
+        aware leaders mine them from the record, oldest first, never in more than half of a block, and
+        fee-paying transactions still get the rest. The honest nodes run small blocks (-blockmaxweight)
+        so that the record outgrows several of them."""
+        self.log.info("(share) many held 1-atom transactions: re-mined at most %d%% of each block", 50)
+        maxw = 60000
+        self.extra_node_args = {i: ["-blockmaxweight=%d" % maxw] for i in range(1, N)}
+        changed = list(range(1, N))
+        for i in changed:
+            self.stop_node(i)
+        for i in changed:
+            self.nodes[i].extra_args = self.node_args(i, self.aware[i])
+            self.start_node(i, extra_args=self.nodes[i].extra_args)
+            self.nodes[i].loadwallet("w")
+        self.mesh()
+        self.sync_all_tips()
+        a = self.nodes[ATTACKER]
+        # An honest wallet with coins, to send fee-paying transactions while the record is re-mined.
+        payer = self.nodes[2]
+        fund_id = a.sendtoaddress(address=payer.getnewaddress(), amount=Decimal("5"), fee_asset_label="bitcoin")
+        self.wait_mined(fund_id, self.nodes[1])
+        self.wait_certified_above(self.nodes[1].getblockcount() - 1)
+        self.btc_mine(1)
+        self.wait_until(lambda: self.tip(self.nodes[1])["anchorheight"] == self.btc().getblockcount(), timeout=60)
+        # Two parents: one of 120 outputs, heavier than the share (the oldest always goes in), one of 80.
+        coins = []
+        parents = []
+        for n_out in (120, 80):
+            addrs = {a.getnewaddress(): Decimal("0.01") for _ in range(n_out)}
+            txid = a.sendmany(dummy="", amounts=addrs, fee_asset="bitcoin")
+            parents.append(txid)
+            coins += [{"txid": txid, "vout": o["n"], "amount": Decimal("0.01")} for o in a.getrawtransaction(txid, 1)["vout"]
+                      if o["value"] == Decimal("0.01")]
+        for txid in parents:
+            self.wait_mined(txid, self.nodes[1])
+        self.wait_certified_above(self.nodes[1].getblockcount() - 1)
+        pw = [a.getrawtransaction(t, 1)["weight"] for t in parents]
+        self.record("share", "parents", "weights %s against a share of %d in blocks of %d" % (pw, maxw // 2, maxw))
+        dest = a.getnewaddress()
+        h_before = self.nodes[1].getblockcount()
+        ids = []
+        for c in coins:
+            ids.append(a.sendrawtransaction(self.spend(c, dest, Decimal("0.00000001"))))
+        ids_children = list(ids)
+        self.wait_until(lambda: a.getmempoolinfo()["size"] == 0, timeout=600)
+        self.wait_certified_above(self.nodes[1].getblockcount() - 1)
+        self.sync_all_tips()
+        n1 = self.nodes[1]
+        carriers = [h for h in range(h_before + 1, n1.getblockcount() + 1) if set(ids) & set(n1.getblock(n1.getblockhash(h))["tx"])]
+        self.record("share", "setup", "%d 1-atom spends certified in blocks %s (the attacker's, the only producer that takes them)" % (len(ids), carriers))
+        sizes = [self.log_size(i) for i in range(N)]
+        self.isolate()
+        fork = self.bitcoin_reorg(1)
+        self.wait_until(lambda: all(self.tip(n)["anchorheight"] <= fork for n in self.nodes), timeout=60)
+        self.wait_until(lambda: len(set(ids) & set(n1.getheldtxs()["txids"])) == len(ids), timeout=120)
+        h0 = n1.getblockcount()
+        # The attacker's mempool holds the same transactions, and a block it leads would mine them all from
+        # there: take it offline, so that every block measured is one an aware member assembled.
+        self.stop_node(ATTACKER)
+        # Fee-paying traffic from an honest wallet, queued before the members meet again.
+        paid = []
+        for _ in range(15):
+            paid.append(payer.sendtoaddress(address=payer.getnewaddress(), amount=Decimal("0.001"), fee_asset_label="bitcoin"))
+        # In every honest mempool already, so that whoever leads has them.
+        for txid in paid:
+            hexed = payer.gettransaction(txid)["hex"]
+            for i in (1, 3, 4, 5):
+                self.nodes[i].sendrawtransaction(hexed)
+        self.connect_set(list(range(1, N)))
+        t0 = time.time()
+        while (len(set(ids) & set(n1.getheldtxs()["txids"])) > 0 or n1.getmempoolinfo()["size"] > 0) and time.time() - t0 < 600:
+            time.sleep(1)
+        left = len(set(ids) & set(n1.getheldtxs()["txids"]))
+        self.wait_until(lambda: len({self.nodes[i].getbestblockhash() for i in range(1, N)}) == 1, timeout=120)
+        rows = []
+        worst = 0.0
+        for h in range(h0 + 1, n1.getblockcount() + 1):
+            b = n1.getblock(n1.getblockhash(h), 2)
+            held_w = sum(t["weight"] for t in b["tx"][1:] if t["txid"] in ids or t["txid"] in parents)
+            n_held = sum(1 for t in b["tx"][1:] if t["txid"] in ids or t["txid"] in parents)
+            n_paid = sum(1 for t in b["tx"][1:] if t["txid"] in paid)
+            honest = self.stakers[ATTACKER][1] not in b.get("signblock_challenge", "")
+            if n_held or n_paid:
+                rows.append((h, "honest" if honest else "attacker", n_held, held_w, n_paid, b["weight"]))
+                # The oldest held transaction always goes in, however large; any more only within half.
+                if honest and n_held > 1:
+                    worst = max(worst, held_w / maxw)
+        self.record("share", "blocks after the rejoin (height, leader, held txs, their weight, paid txs, block weight)", rows)
+        self.record("share", "largest held share in an honest block with more than one", "%.3f of %d" % (worst, maxw))
+        self.record("share", "left held", left)
+        assert left == 0
+        assert worst <= 0.5, worst
+        assert any(r[1] == "honest" and r[2] > 0 for r in rows), "no honest block mined a held transaction"
+        assert any(r[1] == "honest" and r[2] > 0 and r[4] > 0 for r in rows), "no honest block carried held and paid transactions together"
+        self.extra_node_args = {}
+        self.start_node(ATTACKER, extra_args=self.node_args(ATTACKER))
+        self.nodes[ATTACKER].loadwallet("w")
+        for i in changed:
+            self.stop_node(i)
+        for i in changed:
+            self.nodes[i].extra_args = self.node_args(i, self.aware[i])
+            self.start_node(i, extra_args=self.nodes[i].extra_args)
+            self.nodes[i].loadwallet("w")
+        self.mesh()
+        self.sync_all_tips()
 
     def run_test(self):
         try:
@@ -751,6 +1114,16 @@ class HeldTransactionsTest(BitcoinTestFramework):
                 self.case_rA()
             if "rB" in CASES:
                 self.case_rB()
+            if "rD" in CASES:
+                self.case_rD()
+            if "b15" in CASES:
+                self.case_b15()
+            if "bb" in CASES:
+                self.case_bb()
+            if "fs" in CASES:
+                self.case_fs()
+            if "share" in CASES:
+                self.case_share()
         finally:
             if RESULTS:
                 with open(RESULTS, "w") as f:
