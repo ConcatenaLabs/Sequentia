@@ -945,10 +945,16 @@ bool ActivateBestChainStep(BlockValidationState& state, CBlockIndex* pindexMostW
      *
      * Passing fAddToMempool=false will skip trying to add the transactions back,
      * and instead just erase from the mempool as needed.
+     *
+     * SEQUENTIA: `final_tip` is where a reorganization that disconnects block by
+     * block will end. A claim whose payment proof links to an anchor above that
+     * tip's anchor can never be valid there, so it is held for re-attachment at
+     * once instead of being admitted while the tip still records that anchor and
+     * evicted again when the last block goes.
      */
     void MaybeUpdateMempoolForReorg(
         DisconnectedBlockTransactions& disconnectpool,
-        bool fAddToMempool) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
+        bool fAddToMempool, const CBlockIndex* final_tip = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
 
     /** Check warning conditions and do some notifications on new chain tip set. */
     void UpdateTip(const CBlockIndex* pindexNew)

@@ -1030,9 +1030,27 @@ bool PosUnbondingFailsNextBlock(const CTransaction& tx, const CCoinsViewCache& v
     return !CheckPosUnbondingTx(tx, view, spend_anchor, anchor_at, params.pos_unbond_anchor_depth, reason);
 }
 
+//! SEQUENTIA: whether a transaction carries a payment proof whose links end at
+//! an anchor above `anchor_height`. No block at or below a tip anchored at that
+//! height recorded such an anchor (anchor heights never fall along a branch), so
+//! the proof cannot be valid there.
+static bool BtcPayProofAbove(const CTransaction& tx, uint32_t anchor_height)
+{
+    for (size_t i = 0; i < tx.vin.size() && i < tx.witness.vtxinwit.size(); ++i) {
+        if (tx.vin[i].m_is_pegin) continue;
+        const auto& slot = tx.witness.vtxinwit[i].m_pegin_witness.stack;
+        if (slot.empty()) continue;
+        BtcPayment::Records records;
+        std::string why;
+        if (!BtcPayment::ParseRecords(slot, records, why) || !records.proof) continue;
+        if ((uint64_t)records.proof->height + records.proof->links > anchor_height) return true;
+    }
+    return false;
+}
+
 void CChainState::MaybeUpdateMempoolForReorg(
     DisconnectedBlockTransactions& disconnectpool,
-    bool fAddToMempool)
+    bool fAddToMempool, const CBlockIndex* final_tip)
 {
     if (!m_mempool) return;
 
@@ -1045,8 +1063,19 @@ void CChainState::MaybeUpdateMempoolForReorg(
     // Iterate disconnectpool in reverse, so that we add transactions
     // back to the mempool starting with the earliest transaction that had
     // been previously seen in a block.
+    // SEQUENTIA: a claim that cannot be valid where this reorganization ends
+    // waits for re-attachment at once, without the mempool's checks (6.3).
+    const bool divert = fAddToMempool && final_tip && m_params.GetConsensus().BtcPaymentActiveAt(final_tip->nHeight + 1);
+    unsigned diverted = 0;
     auto it = disconnectpool.queuedTx.get<insertion_order>().rbegin();
     while (it != disconnectpool.queuedTx.get<insertion_order>().rend()) {
+        if (divert && HasBtcPaymentRecords(**it) && BtcPayProofAbove(**it, final_tip->m_anchor_height)) {
+            BtcPaymentNotePending(*it);
+            m_mempool->removeRecursive(**it, MemPoolRemovalReason::REORG);
+            ++diverted;
+            ++it;
+            continue;
+        }
         // ignore validation errors in resurrected transactions
         if (!fAddToMempool || (*it)->IsCoinBase() ||
             AcceptToMemoryPool(*this, *it, GetTime(),
@@ -1061,6 +1090,10 @@ void CChainState::MaybeUpdateMempoolForReorg(
             vHashUpdate.push_back((*it)->GetHash());
         }
         ++it;
+    }
+    if (diverted) {
+        LogPrint(BCLog::MEMPOOL, "BtcPayment: %u claim(s) of a disconnected block held for re-attachment: their proofs "
+                 "link to anchors above %u, where this reorganization ends\n", diverted, final_tip->m_anchor_height);
     }
     disconnectpool.queuedTx.clear();
     // AcceptToMemoryPool/addUnchecked all assume that new mempool entries have
@@ -6444,7 +6477,7 @@ bool CChainState::InvalidateBlock(BlockValidationState& state, CBlockIndex* pind
         // size limit. Upstream's 10-block cap is kept only for non-anchored
         // chains, where deep invalidation is a rare manual op.
         const bool add_to_mempool = (g_con_bitcoin_anchor || (++disconnected <= 10)) && ret;
-        MaybeUpdateMempoolForReorg(disconnectpool, /* fAddToMempool = */ add_to_mempool);
+        MaybeUpdateMempoolForReorg(disconnectpool, /* fAddToMempool = */ add_to_mempool, pindex->pprev);
         if (!ret) return false;
         assert(invalid_walk_tip->pprev == m_chain.Tip());
 

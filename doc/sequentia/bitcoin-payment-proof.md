@@ -509,7 +509,16 @@ and is lost if both stay offline until `R`.
   Bitcoin reorganization): transactions of disconnected blocks return through the
   normal checks, and the mempool re-checks every claim it holds against the new
   tip. A claim whose links end at an anchor the new branch did not record, whose
-  lock left the chain, or whose coin anchor moved is evicted.
+  lock left the chain, or whose coin anchor moved is evicted. The watcher
+  disconnects block by block, down to a tip it knows from the start; a claim of a
+  disconnected block whose proof links to an anchor above that tip's (anchor
+  heights never fall along a branch, so no block there recorded it) goes straight
+  to the waiting set below, without the mempool's checks. Re-admitting it while
+  the tip still records the orphaned anchor would only evict it again at the last
+  disconnect, all at once under the chain lock, so a reorganization would take
+  longer for blocks of claims than for the same blocks of ordinary spends. A
+  claim whose proof can still stand there is re-admitted like any transaction,
+  with any child spending it.
 - **A Bitcoin reorganization** changes a claim's validity only through the
   Sequentia reorganization it causes, since validity reads only the chain.
 - **The node re-links a fresh proof itself** (node policy, on every node that

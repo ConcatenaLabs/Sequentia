@@ -487,6 +487,7 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.variant_flood()
         self.waiting_set()
         self.waiting_set_holds_the_disconnected_blocks()
+        self.claims_not_readmitted()
         self.lighter_by_the_incremental_rate()
         self.search_budget()
         self.lagging_daemon()
@@ -2164,6 +2165,118 @@ class BtcPaymentProofTest(BitcoinTestFramework):
                       "buyer's claim re-attached %.1f s after the new anchor and mined", n, high, low, took)
         self.results.append((self.current, "%d unsatisfiable claims at %.1f per vB and the buyer's at %.1f per vB in the "
                              "disconnected block: the buyer's re-attached in %.1f s and mined" % (n, high, low, took)))
+        self.restart_seq0()
+
+    def plain_coins(self, n):
+        """n coins, each under a leaf of its own that reads no proof: six pushes dropped, so a spend of one
+        weighs about what a claim does."""
+        node = self.nodes[0]
+        coins = []
+        for start in range(0, n, 400):
+            leaves, amounts = {}, {}
+            for k in range(start, min(n, start + 400)):
+                leaf = CScript([OP_2DROP, OP_2DROP, OP_2DROP, k + 17, OP_DROP, OP_1])
+                tap = taproot_construct(NUMS, [("l", leaf)])
+                addr = program_to_witness(1, tap.scriptPubKey[2:])
+                leaves[tap.scriptPubKey] = (leaf, tap)
+                amounts[addr] = Decimal("0.01")
+            ftx = node.sendmany(amounts=amounts, output_assets={a: self.asset for a in amounts}, fee_asset=self.asset)
+            self.mine(1)
+            ft = tx_from_hex(node.getrawtransaction(ftx))
+            for v, o in enumerate(ft.vout):
+                if o.scriptPubKey in leaves:
+                    coins.append(dict(txid=ftx, vout=v, leaf=leaves[o.scriptPubKey][0], tap=leaves[o.scriptPubKey][1]))
+        return coins
+
+    def plain_spend(self, coin, fee, spk):
+        t = self.attacker_spend(coin, b"", fee, spk)
+        t.wit.vtxinwit[0].peginWitness.stack = []
+        tap = coin["tap"]
+        control = bytes([tap.leaves["l"].version + tap.negflag]) + tap.internal_pubkey + tap.leaves["l"].merklebranch
+        t.wit.vtxinwit[0].scriptWitness.stack = [b"\x00" * 80] * 6 + [bytes(coin["leaf"]), control]
+        t.rehash()
+        return t
+
+    def reorg_of_blocks(self, txs, per_block):
+        """Mine `txs` in blocks of `per_block`, all anchored at one fresh Bitcoin block X, orphan X (its
+        replacement holds none of them), and return (seconds until the first block is disconnected, the
+        blocks, X)."""
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        x = self.btc_mine(1)[0]
+        self.mine_anchored(b.getblockheader(x)["height"])
+        blocks = []
+        for at in range(0, max(len(txs), per_block * 4) if not txs else len(txs), per_block):
+            for t in txs[at:at + per_block]:
+                node.sendrawtransaction(t.serialize().hex())
+            blocks.append(self.mine(1)[0])
+            assert_equal(node.getmempoolinfo()["size"], 0)
+        assert all(self.anchor_of(h) == b.getblockheader(x)["height"] for h in blocks)
+        t0 = time.time()
+        b.invalidateblock(x)
+        self.btc_mine(2)
+        self.wait_for(lambda: node.getblockheader(blocks[0])["confirmations"] < 0, "the blocks are disconnected", 600)
+        took = time.time() - t0
+        self.watcher_left(x)
+        return took, blocks, x
+
+    def claims_not_readmitted(self):
+        self.step("N45 an anchor-driven disconnect of blocks full of claims costs no more than the same blocks of "
+                  "ordinary spends: claims whose proofs cannot stand where it ends wait, never re-admitted")
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        n, per_block = 2000, 500
+        self.restart_seq0(["-checkmempool=0"])
+        spk = bytes([0, 20]) + os.urandom(20)
+        self.outside_spk = spk
+        base, _, _ = self.reorg_of_blocks([], 1)   # four empty blocks
+        plain = [self.plain_spend(c, 1000, spk) for c in self.plain_coins(n)]
+        t_plain, _, _ = self.reorg_of_blocks(plain, per_block)
+        assert_equal(node.getmempoolinfo()["size"], n)   # ordinary spends come back
+        self.mine(1)
+        # The claims prove a payment in a Bitcoin block of their own, linked to the anchor X.
+        coins = self.attacker_coins(n)
+        atx = self.bminer.sendtoaddress(self.bminer.getnewaddress(), 1)
+        p = self.btc_mine(1)[0]
+        self.mine_anchored(b.getblockheader(p)["height"])
+        make = self.block_records(p)
+        records = {}
+        claims = []
+        for c in coins:
+            if c["C"] not in records:
+                records[c["C"]] = make(atx, c["C"])
+            claims.append(self.attacker_spend(c, records[c["C"]], 1000, spk))
+        since = len(self.debug_lines(node, "Evicting "))
+        # X is the payment's own block here: the claims link to it with no header.
+        node_x = p
+        for at in range(0, n, per_block):
+            for t in claims[at:at + per_block]:
+                node.sendrawtransaction(t.serialize().hex())
+            self.mine(1)
+        blocks = [h for h in [node.getblockhash(k) for k in range(node.getblockcount() - n // per_block + 1,
+                                                                    node.getblockcount() + 1)]]
+        assert all(self.anchor_of(h) == b.getblockheader(node_x)["height"] for h in blocks)
+        t0 = time.time()
+        b.invalidateblock(node_x)
+        self.double_spend(atx, self.bminer)
+        self.btc_mine(2)
+        self.wait_for(lambda: node.getblockheader(blocks[0])["confirmations"] < 0, "the claims' blocks disconnected", 600)
+        t_claims = time.time() - t0
+        self.watcher_left(node_x)
+        evicted = [l for l in self.debug_lines(node, "Evicting ")[since:] if "after a reorg" in l]
+        held = sum(int(l.split("BtcPayment: ")[1].split(" ")[0])
+                   for l in self.debug_lines(node, "of a disconnected block held for re-attachment"))
+        self.log.info("    disconnect of %d blocks: empty %.1f s, %d ordinary spends %.1f s, %d claims %.1f s; claims "
+                      "re-admitted then evicted: %d, held at once: %d", n // per_block, base, n, t_plain, n, t_claims,
+                      len(evicted), held)
+        self.results.append((self.current, "%d blocks: empty %.1f s, %d ordinary spends %.1f s, %d claims %.1f s; "
+                             "re-admitted then evicted %d, held at once %d" % (n // per_block, base, n, t_plain, n,
+                                                                               t_claims, len(evicted), held)))
+        assert not evicted, "%d claims were re-admitted, then evicted: %s" % (len(evicted), evicted[0][-120:])
+        assert held >= n, held
+        assert not set(c.hash for c in claims) & set(node.getrawmempool())
+        # The stated factor: no slower than the ordinary spends, with a second of polling slack.
+        assert t_claims <= 1.5 * t_plain + 1.0, (t_claims, t_plain)
         self.restart_seq0()
 
     def anchor_driven_delay(self):
