@@ -463,6 +463,7 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.anchoring_first()
         self.bitcoin_reorg_sweep()
         self.links_and_branches()
+        self.one_encoding_edges()
         self.reverse_direction()
         self.congestion()
         self.measure_distinct_blocks()
@@ -643,14 +644,17 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         lock = self.fresh_lock(deadline_in=2, margin=6)
         ptx, pr, vout = self.paid(lock)
         c = self.claim(lock, pr["record"], vout, fee=5000)
-        node.sendrawtransaction(c.serialize().hex())
         # A stall: Bitcoin reaches R and no Sequentia block is made.
         self.btc_mine(lock["refund_at"] - b.getblockcount())
         tip_anchor = self.anchor_of(node.getbestblockhash())
         assert tip_anchor < lock["refund_at"] == b.getblockcount()
         r = self.refund(lock, fee=50000)
+        # On its own the refund cannot be mined yet, so it is not pooled.
         assert_raises_rpc_error(-26, "anchorlock-not-reached", node.sendrawtransaction, r.serialize().hex())
         self.results.append((self.current, "refund refused by the mempool at Bitcoin tip R=%d, tip anchored %d: anchorlock-not-reached" % (lock["refund_at"], tip_anchor)))
+        # Against the pooled claim it is refused first for the claim's proof (N27).
+        node.sendrawtransaction(c.serialize().hex())
+        assert_raises_rpc_error(-26, "btcpay-floor-replaces-proof", node.sendrawtransaction, r.serialize().hex())
         assert c.hash in node.getrawmempool()
         blk = self.mine(1)[0]
         assert c.hash in node.getblock(blk)["tx"]
@@ -1178,6 +1182,9 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         broken = [links[0], links[2], links[1]]
         self.force([self.claim(lock, payment_record(h, *args, links=broken), vout)], "bad-btcpay-links")
         self.force([self.claim(lock, payment_record(h + 1, *args, links=links), vout)], "bad-btcpay-not-in-anchor-chain")
+        # A false lower height whose links still end at a recorded anchor: the
+        # anchor is not at the height the record implies.
+        self.force([self.claim(lock, payment_record(h - 1, *args, links=links), vout)], "bad-btcpay-not-in-anchor-chain")
         self.force([self.claim(lock, payment_record(h, *args, links=[links[0]] * 3, nlinks=2017), vout)], "bad-btcpay-encoding")
         good = self.claim(lock, payment_record(h, *args, links=links), vout)
         node.sendrawtransaction(good.serialize().hex())
@@ -1185,6 +1192,89 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         assert good.hash in node.getblock(blk)["tx"]
         self.results.append((self.current + " (3 links to the recorded anchor)", "mined"))
         node.reconsiderblock(side)
+
+    def one_encoding_edges(self):
+        self.step("N28 (PV13 F20, S10) every encoding check forced into a block for its own reason")
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        ptx = self.pay(self.bbuyer.getnewaddress(), 10000000)
+        bh = self.btc_mine(1)[0]
+        self.mine_anchored(b.getblockheader(bh)["height"])
+        read = CScript([OP_INSPECTBTCPAYMENT, OP_2DROP, OP_1])
+        asset = CTxOutAsset(b"\x01" + bytes.fromhex(self.asset)[::-1])
+
+        def fund(spk_script):
+            if spk_script[0] == 0x51:
+                addr = program_to_witness(1, spk_script[2:])
+            else:
+                addr = program_to_witness(0, spk_script[2:])
+            txid = node.sendtoaddress(address=addr, amount=1, assetlabel=self.asset, fee_asset_label=self.asset)
+            blk = self.mine(1)[0]
+            t = tx_from_hex(node.getrawtransaction(txid))
+            n = [i for i, o in enumerate(t.vout) if o.scriptPubKey == spk_script][0]
+            return txid, n, self.anchor_of(blk)
+
+        def spend(txid, n, slot, wstack):
+            t = CTransaction()
+            t.nVersion = 2
+            t.vin.append(CTxIn(COutPoint(int(txid, 16), n), nSequence=SEQ_NONFINAL_RBF))
+            t.vout.append(CTxOut(CTxOutValue(100000000 - 5000), bytes.fromhex(node.getaddressinfo(node.getnewaddress())["scriptPubKey"]), asset))
+            t.vout.append(CTxOut(CTxOutValue(5000), b"", asset))
+            t.wit.vtxinwit.append(CTxInWitness())
+            t.wit.vtxoutwit = [CTxOutWitness() for _ in t.vout]
+            t.wit.vtxinwit[0].peginWitness.stack = list(slot)
+            t.wit.vtxinwit[0].scriptWitness.stack = list(wstack)
+            t.rehash()
+            return t
+
+        def case(label, leaf, slot, expect):
+            tap = taproot_construct(NUMS, [("l", leaf)])
+            txid, n, C = fund(tap.scriptPubKey)
+            control = bytes([tap.leaves["l"].version + tap.negflag]) + tap.internal_pubkey + tap.leaves["l"].merklebranch
+            t = spend(txid, n, slot(C) if callable(slot) else slot, [bytes(leaf), control])
+            self.log.info("    %s", label)
+            self.force([t], expect)
+
+        pr = self.proof_for(ptx, 0, bh)
+        cs = hashlib.sha256(pr["coinbase"]).digest()
+
+        def rec(C, **kw):
+            a = dict(height=pr["height"], index=pr["index"], pbranch=pr["pbranch"], cbranch=pr["cbranch"],
+                     payment=pr["payment"], depth=None)
+            a.update(kw)
+            return payment_record(a["height"], C, pr["header"], cs, a["index"], a["pbranch"], a["cbranch"], a["payment"],
+                                  depth=a["depth"], links=pr["links"])
+        # The baseline opens.
+        tap = taproot_construct(NUMS, [("l", read)])
+        txid, n, C = fund(tap.scriptPubKey)
+        control = bytes([tap.leaves["l"].version + tap.negflag]) + tap.internal_pubkey + tap.leaves["l"].merklebranch
+        self.force([spend(txid, n, [rec(C)], [bytes(read), control])])
+        # The parser: one encoding for each fact.
+        case("depth 0", read, lambda C: [rec(C, depth=0, pbranch=[], cbranch=[])], "bad-btcpay-encoding")
+        case("depth 25", read, lambda C: [rec(C, depth=25, pbranch=[bytes(32)] * 25, cbranch=[bytes(32)] * 25)], "bad-btcpay-encoding")
+        case("a payment of 100,001 bytes", read, lambda C: [rec(C, payment=b"\x02" * 100001)], "bad-btcpay-encoding")
+        case("a trailing byte after the payment (a second encoding if allowed)", read,
+             lambda C: [rec(C, payment=pr["payment"] + b"\x00")], "bad-btcpay-tx-encoding")
+        case("an index bit above the depth (a second encoding if allowed)", read,
+             lambda C: [rec(C, index=pr["index"] | (1 << len(pr["pbranch"])))], "bad-btcpay-index")
+        # A payment of 64 bytes that parses as a transaction: refused for its size.
+        sixty_four = (struct.pack("<i", 2) + b"\x01" + bytes(range(1, 33)) + struct.pack("<I", 0) + b"\x00" +
+                      struct.pack("<I", 0xffffffff) + b"\x01" + struct.pack("<q", 1000) + b"\x04" + b"\x51" * 4 +
+                      struct.pack("<I", 0))
+        assert len(sixty_four) == 64
+        case("a 64-byte payment that parses", read, lambda C: [rec(C, payment=sixty_four)], "bad-btcpay-tx-64-bytes")
+        # The floor record.
+        chk = CScript([5, OP_CHECKANCHORHEIGHTVERIFY, OP_DROP, OP_1])
+        case("a duplicate floor", chk, [floor_record(5), floor_record(5)], "bad-anchorlock-duplicate")
+        case("a floor of 6 bytes (a second encoding if allowed)", chk, [floor_record(5) + b"\x00"], "bad-anchorlock-encoding")
+        case("a floor above the script's, which the anchor meets (a second encoding if allowed)", chk, [floor_record(6)],
+             "Anchor floor differs from the one the script requires")
+        # Outside tapscript the opcode has no meaning.
+        ws = CScript([OP_INSPECTBTCPAYMENT, OP_2DROP, OP_1])
+        wsh = CScript([0, hashlib.sha256(bytes(ws)).digest()])
+        txid, n, C = fund(wsh)
+        self.log.info("    0xe5 in a segwit v0 script")
+        self.force([spend(txid, n, [rec(C)], [bytes(ws)])], "Opcode missing or not understood")
 
     def reverse_direction(self):
         self.step("N18 the other direction: the taker holds the asset and locks it on another node; the maker pays")
@@ -1355,10 +1445,25 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.sync_blocks(self.nodes[:2])
         noproof = self.spend_lock(lock, "claim", [], [b""])
         self.force([noproof], "No valid proof of a bitcoin payment")
+        node = self.nodes[0]
+        wpkh = node.getnewaddress("", "bech32")
+        t = node.sendtoaddress(address=wpkh, amount=1, assetlabel=self.asset, fee_asset_label=self.asset)
+        self.mine(1)
+        self.sync_blocks(self.nodes[:2])
+        n = [o["n"] for o in node.getrawtransaction(t, True)["vout"] if o["scriptPubKey"].get("address") == wpkh][0]
+        raw = node.createrawtransaction(inputs=[{"txid": t, "vout": n}], outputs=[
+            {node.getnewaddress(): Decimal("0.999"), "asset": self.asset}, {"fee": Decimal("0.001"), "fee_asset": self.asset}])
+        v = tx_from_hex(node.signrawtransactionwithwallet(raw)["hex"])
+        v.wit.vtxinwit[0].peginWitness.stack = [floor_record(0xffffffff)]
+        self.force([v], "bad-anchorlock-not-reached")
         self.disconnect_nodes(0, 1)
         n1 = self.nodes[1]
         n1.generateblock(n1.getnewaddress(), [noproof.serialize().hex()], invalid_call=False)
         self.results.append((self.current + " (old node)", "mined the claim without proof"))
+        # Nor does it check records: a floor no anchor meets, on an ordinary input
+        # (a coin both nodes have, spent by node 0's wallet, mined by node 1).
+        n1.generateblock(n1.getnewaddress(), [v.serialize().hex()], invalid_call=False)
+        self.results.append((self.current + " (old node)", "mined a floor no anchor meets"))
 
 
 if __name__ == '__main__':
