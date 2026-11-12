@@ -30,13 +30,16 @@ from test_framework.key import compute_xonly_pubkey, generate_privkey, sign_schn
 from test_framework.messages import (COutPoint, CTransaction, CTxIn, CTxInWitness, CTxOut, CTxOutAsset, CTxOutWitness,
                                      CTxOutValue, tx_from_hex)
 from test_framework.script import (CScript, CScriptOp, OP_CHECKSIG, OP_CHECKSIGVERIFY, OP_DROP, OP_DUP,
-                                   OP_EQUALVERIFY, OP_GREATERTHAN, OP_GREATERTHANOREQUAL64, OP_LESSTHANOREQUAL,
+                                   OP_EQUAL, OP_EQUALVERIFY, OP_GREATERTHAN, OP_GREATERTHANOREQUAL64, OP_LESSTHANOREQUAL,
                                    OP_VERIFY, OP_1, OP_2DROP, OP_IF, OP_ENDIF, SIGHASH_DEFAULT, TaprootSignatureHash, taproot_construct)
 from test_framework.test_framework import BitcoinTestFramework, SkipTest
 from test_framework.util import assert_equal, assert_raises_rpc_error, initialize_datadir, rpc_port, p2p_port
 
 OP_INSPECTBTCPAYMENT = CScriptOp(0xe5)
-OP_INSPECTBTCOUTPUT = CScriptOp(0xe6)
+OP_INSPECTBTCTX = CScriptOp(0xe6)
+# OP_INSPECTBTCTX's fields, and the depth an anchor floor is judged at (src/script/btcpayment.h).
+FIELD_OUTPUT, FIELD_INPUT, FIELD_TXID = 0, 1, 2
+FLOOR_DEPTH = 60
 OP_CHECKANCHORHEIGHTVERIFY = CScriptOp(0xe7)
 
 BITCOIND = os.environ.get("PARENT_BITCOIND", "/usr/local/bin/bitcoind")
@@ -218,6 +221,37 @@ class BtcPaymentProofTest(BitcoinTestFramework):
             time.sleep(0.3)
         raise AssertionError("no block anchored at >= %d" % h)
 
+    def reached_floor(self, node=None):
+        """The highest floor a spend in the next block meets: the anchor of the block FLOOR_DEPTH below it."""
+        node = node or self.nodes[0]
+        return self.anchor_of(node.getblockhash(node.getblockcount() + 1 - FLOOR_DEPTH), node)
+
+    def first_anchored_at(self, h, node=None):
+        """The height of the active chain's first block anchored at or above h (None if none is)."""
+        node = node or self.nodes[0]
+        lo, hi = 0, node.getblockcount()
+        if self.anchor_of(node.getblockhash(hi), node) < h:
+            return None
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if self.anchor_of(node.getblockhash(mid), node) >= h:
+                hi = mid
+            else:
+                lo = mid + 1
+        return lo
+
+    def floor_reached(self, F, node=None):
+        """Mine until a spend carrying floor F can go in the next block: the block FLOOR_DEPTH below
+        the next one is anchored at F or above. Returns the height of the first block anchored at F."""
+        node = node or self.nodes[0]
+        if self.anchor_of(node.getbestblockhash(), node) < F:
+            self.mine_anchored(F)
+        first = self.first_anchored_at(F, node)
+        need = first + FLOOR_DEPTH - 1 - node.getblockcount()
+        if need > 0:
+            self.mine(need, node)
+        return first
+
     def force(self, txs, expect=None):
         """generateblock with exactly these transactions. With `expect`, assert
         it is refused and the reason contains it."""
@@ -248,7 +282,7 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         else:
             addr = None
         claim = CScript([pk_b, OP_CHECKSIGVERIFY, OP_INSPECTBTCPAYMENT, OP_DROP, OP_DUP, floor, OP_GREATERTHAN,
-                         OP_VERIFY, deadline, OP_LESSTHANOREQUAL, OP_VERIFY, OP_INSPECTBTCOUTPUT, version,
+                         OP_VERIFY, deadline, OP_LESSTHANOREQUAL, OP_VERIFY, FIELD_OUTPUT, OP_INSPECTBTCTX, version,
                          OP_EQUALVERIFY, program, OP_EQUALVERIFY, le8(amount_btc_sat), OP_GREATERTHANOREQUAL64])
         refund = CScript([refund_at, OP_CHECKANCHORHEIGHTVERIFY, OP_DROP, pk_s, OP_CHECKSIG])
         tap = taproot_construct(NUMS, [("claim", claim), ("refund", refund)])
@@ -353,6 +387,12 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         try:
             self.results = []
             self.setup_chain_state()
+            # BTCPAY_CASES=name,name runs those scenarios alone, after the setup.
+            only = os.environ.get("BTCPAY_CASES")
+            if only:
+                for name in only.split(","):
+                    getattr(self, name)()
+                return
             self.test_swap_and_negatives()
         finally:
             self.write_results()
@@ -492,6 +532,11 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.search_budget()
         self.lagging_daemon()
         self.floor_never_widens_the_window()
+        self.contest_jump()
+        self.contest_seller_holds_the_blocks()
+        self.contest_reorg_across_the_jump()
+        self.multi_input_search()
+        self.payment_fields()
         self.only_tightens()
 
     def neg_floor(self):
@@ -652,14 +697,30 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.results.append((self.current + " (same address twice)", "both opened, as specified in 8.6"))
 
     def neg_refund(self):
-        self.step("N9 the refund before R, with another floor, and at R")
+        self.step("N9 the refund before R, with another floor, in the first FLOOR_DEPTH blocks anchored at R, and after")
+        node = self.nodes[0]
         lock = self.fresh_lock(deadline_in=2, margin=6)
         self.mine(1)
         self.force([self.refund(lock)], "bad-anchorlock-not-reached")
         self.btc_mine(lock["refund_at"] - self.btc_rpc().getblockcount())
-        self.mine_anchored(lock["refund_at"])
-        self.force([self.refund(lock, floor=lock["refund_at"] + 0 - 1)], "Anchor floor differs")
-        self.force([self.refund(lock, floor=None)])
+        # The first block anchored at R cannot carry the refund, nor can the
+        # FLOOR_DEPTH - 1 after it: the floor is judged FLOOR_DEPTH blocks down.
+        self.force([self.refund(lock)], "bad-anchorlock-not-reached")
+        first = self.mine_anchored(lock["refund_at"])
+        first_h = node.getblockheader(first)["height"]
+        assert_equal(self.first_anchored_at(lock["refund_at"]), first_h)
+        self.mine(FLOOR_DEPTH - 2)
+        assert_equal(node.getblockcount(), first_h + FLOOR_DEPTH - 2)
+        self.force([self.refund(lock)], "bad-anchorlock-not-reached")
+        assert_raises_rpc_error(-26, "anchorlock-not-reached", node.sendrawtransaction, self.refund(lock).serialize().hex())
+        self.log.info("    refused in block %d, the %dth from the first anchored at R (%d); the mempool refuses it too",
+                      first_h + FLOOR_DEPTH - 1, FLOOR_DEPTH, first_h)
+        self.mine(1)
+        self.force([self.refund(lock, floor=lock["refund_at"] - 1)], "Anchor floor differs")
+        blk = self.force([self.refund(lock, floor=None)])
+        assert_equal(node.getblockheader(blk)["height"], first_h + FLOOR_DEPTH)
+        self.results.append((self.current, "refund refused in the first block anchored at R and in the %dth after it "
+                             "(bad-anchorlock-not-reached), accepted in the %dth" % (FLOOR_DEPTH - 1, FLOOR_DEPTH)))
 
     def refund_waits_for_the_anchor(self):
         self.step("N23 (PV13 S6) a refund whose floor Bitcoin has reached, but no block has anchored, is refused by the mempool and never displaces the claim")
@@ -693,7 +754,7 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         lock = self.fresh_lock(deadline_in=2, margin=6)
         ptx, pr, vout = self.paid(lock)
         self.btc_mine(lock["refund_at"] - b.getblockcount())
-        self.mine_anchored(lock["refund_at"])
+        self.floor_reached(lock["refund_at"])
         c = self.claim(lock, pr["record"], vout, fee=5000)
         node.sendrawtransaction(c.serialize().hex())
         r = self.refund(lock, fee=50000)
@@ -707,7 +768,7 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         lock = self.fresh_lock(deadline_in=2, margin=6)
         ptx, pr, vout = self.paid(lock)
         self.btc_mine(lock["refund_at"] - b.getblockcount())
-        self.mine_anchored(lock["refund_at"])
+        self.floor_reached(lock["refund_at"])
         r = self.refund(lock, fee=50000, nseq=0xfffffffe)
         node.sendrawtransaction(r.serialize().hex())
         c = self.claim(lock, pr["record"], vout, fee=5000)
@@ -857,7 +918,7 @@ class BtcPaymentProofTest(BitcoinTestFramework):
     def records_in_order(self):
         self.step("N37 (PV15 P12) relay takes the records in their one order; a block may carry another")
         node = self.nodes[0]
-        F = self.anchor_of(node.getbestblockhash())
+        F = self.reached_floor()
         leaf = CScript([F, OP_CHECKANCHORHEIGHTVERIFY, OP_DROP, OP_INSPECTBTCPAYMENT, OP_2DROP, OP_1])
         coins = [self.covenant_coin(leaf) for _ in range(2)]
         self.mine(1)
@@ -1017,7 +1078,7 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         assert orig.wit.vtxinwit[0].peginWitness.stack == []
         # A payment record that is valid for this coin, but that its script never reads.
         own = self.proof_for(ptx, self.anchor_of(node.getrawtransaction(t, True)["blockhash"]), pr["blockhash"])
-        for what, items in [("a floor", [floor_record(self.btc_rpc().getblockcount())]), ("a payment record", [own["record"]])]:
+        for what, items in [("a floor", [floor_record(self.reached_floor())]), ("a payment record", [own["record"]])]:
             v = tx_from_hex(signed)
             v.wit.vtxinwit[0].peginWitness.stack = list(items)
             assert v.hash == orig.hash
@@ -1042,7 +1103,7 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         assert v.hash in node.getblock(blk)["tx"]
         self.log.info("    the variant forced into a block is valid (policy only): %s", blk[:16])
         # (b) A claim carrying a floor its leaf never reads.
-        c = self.spend_lock(lock, "claim", [pr["record"], floor_record(lock["floor"])], [scriptnum(vout)])
+        c = self.spend_lock(lock, "claim", [pr["record"], floor_record(self.reached_floor())], [scriptnum(vout)])
         assert_raises_rpc_error(-26, unread, node.sendrawtransaction, c.serialize().hex())
         self.log.info("    a claim with a floor its leaf never reads: refused by relay")
         good = self.claim(lock, pr["record"], vout)
@@ -1053,7 +1114,7 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         # is displaced by the same spend taking the other branch without it.
         sk = generate_privkey()
         pk = compute_xonly_pubkey(sk)[0]
-        floor = self.anchor_of(node.getbestblockhash())
+        floor = self.reached_floor()
         opt = CScript([pk, OP_CHECKSIGVERIFY, OP_IF, floor, OP_CHECKANCHORHEIGHTVERIFY, OP_DROP, OP_ENDIF, OP_1])
         tap = taproot_construct(NUMS, [("opt", opt)])
         txid = node.sendtoaddress(address=program_to_witness(1, tap.scriptPubKey[2:]), amount=10,
@@ -1946,11 +2007,11 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         assert all(self.bminer.gettransaction(d)["confirmations"] > 0 for d in decoys)
         self.wait_for(lambda: node.getblockheader(blk)["confirmations"] < 0, "the claim's block is disconnected")
         self.mine_anchored(b.getblockcount())
-        refused = "re-attach of %s (a searched proof) refused" % c.hash
+        refused = "re-attach of %s: output " % c.hash
         self.wait_for(lambda: len(self.debug_lines(node, refused)) >= ndecoy * nout, "every candidate tried", timeout=180)
         ticks = self.tick_lines(node, ticks0)
         assert c.hash not in node.getrawmempool()
-        self.log.info("    %d candidates tried, each refused by the script, over %d ticks; longest tick %d ms",
+        self.log.info("    %d candidates tried, each refused by its input's script, over %d ticks; longest tick %d ms",
                       len(self.debug_lines(node, refused)), len(ticks), max(ticks))
         self.results.append((self.current, "%d candidates refused over %d ticks, longest %d ms (budget 500)"
                              % (len(self.debug_lines(node, refused)), len(ticks), max(ticks))))
@@ -2035,10 +2096,10 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         b = self.btc_rpc()
         lowf = b.getblockcount() - 2050
         if floor:
-            leaf = CScript([lowf, OP_CHECKANCHORHEIGHTVERIFY, OP_DROP, OP_INSPECTBTCPAYMENT, OP_2DROP, OP_INSPECTBTCOUTPUT,
+            leaf = CScript([lowf, OP_CHECKANCHORHEIGHTVERIFY, OP_DROP, OP_INSPECTBTCPAYMENT, OP_2DROP, FIELD_OUTPUT, OP_INSPECTBTCTX,
                             OP_2DROP, OP_DROP, OP_1])
         else:
-            leaf = CScript([OP_INSPECTBTCPAYMENT, OP_2DROP, OP_INSPECTBTCOUTPUT, OP_2DROP, OP_DROP, OP_1])
+            leaf = CScript([OP_INSPECTBTCPAYMENT, OP_2DROP, FIELD_OUTPUT, OP_INSPECTBTCTX, OP_2DROP, OP_DROP, OP_1])
         tap = taproot_construct(NUMS, [("a", leaf)])
         t = node.sendtoaddress(address=program_to_witness(1, tap.scriptPubKey[2:]), amount=1, assetlabel=self.asset,
                                fee_asset_label=self.asset)
@@ -2868,6 +2929,286 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         blk = self.force([good])
         self.results.append((self.current, "2,016 links mined, 2,017 refused: bad-btcpay-encoding; orphaned block at a recorded height refused"))
         self.log.info("    2,016 links to a recorded anchor: mined in %s", blk[:16])
+
+    # ------------------------------------------------- a contested anchor jump
+    def switch_branch(self, target_tip):
+        b = self.btc_rpc()
+        target_height = b.getblockheader(target_tip)["height"]
+        while b.getblockcount() >= target_height and b.getbestblockhash() != target_tip:
+            b.invalidateblock(b.getbestblockhash())
+        b.reconsiderblock(target_tip)
+        assert_equal(b.getbestblockhash(), target_tip)
+
+    def contest(self, margin, past):
+        """Review KR4's construction. The buyer pays in the first Bitcoin block above the shared anchor
+        `common`; two live Bitcoin branches then advance through common + 9 while every Sequentia block
+        stays anchored at common (the producer avoids contested tips); the payment's branch wins and
+        reaches R + past (or common + 10, if higher), so the next Sequentia block's anchor jumps from below the payment to above R.
+        Returns the lock, the payment, its output, its block and common."""
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        lock = self.fresh_lock(deadline_in=2, margin=margin)
+        common = b.getblockcount()
+        assert_equal(lock["deadline"], common + 2)
+        ptx = self.pay(lock["addr"], lock["amount"])
+        a1 = self.btc_mine(1)[0]
+        vout = self.vout_paying(ptx, lock["addr"], a1)
+        a_tip = a1
+        b.invalidateblock(a1)
+        b.prioritisetransaction(ptx, 0, -100000000)
+        b_tip = self.btc_mine(1)[0]
+        assert ptx not in b.getblock(b_tip)["tx"]
+        for height in range(common + 2, common + 10):
+            if height % 2 == 0:
+                self.switch_branch(a_tip)
+                a_tip = self.btc_mine(1)[0]
+                other = b_tip
+            else:
+                self.switch_branch(b_tip)
+                b_tip = self.btc_mine(1)[0]
+                other = a_tip
+            b.reconsiderblock(other)
+            tips = b.getchaintips()
+            assert any(t["hash"] == a_tip for t in tips) and any(t["hash"] == b_tip for t in tips)
+            assert_equal(self.anchor_of(self.mine(1)[0]), common)
+        self.switch_branch(a_tip)
+        self.btc_mine(max(lock["refund_at"] + past, common + 10) - b.getblockcount())
+        assert b.getblockcount() >= lock["refund_at"] + past
+        assert ptx in b.getblock(a1)["tx"] and b.getblockheader(a1)["confirmations"] > 0
+        assert_equal(self.anchor_of(node.getbestblockhash()), common)
+        self.log.info("    payment at %d (D=%d, R=%d); %d Sequentia blocks anchored at %d through the contest; "
+                      "Bitcoin now at %d", common + 1, lock["deadline"], lock["refund_at"], 8, common, b.getblockcount())
+        return lock, ptx, vout, a1, common
+
+    def proof_linked_to(self, txid, coin_anchor, blockhash, top):
+        """A proof of txid in blockhash whose headers link it up to Bitcoin height `top`."""
+        pr = self.proof_for(txid, coin_anchor, blockhash, link=False)
+        links = self.link_headers(pr["height"], top)
+        return payment_record(pr["height"], coin_anchor, pr["header"], hashlib.sha256(pr["coinbase"]).digest(),
+                              pr["index"], pr["pbranch"], pr["cbranch"], pr["payment"], links=links)
+
+    def contest_jump(self):
+        self.step("N46 (KR4 F1) a contested anchor jumps past R in one block: that block refuses the seller's refund "
+                  "and takes a claim completed in it")
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        lock, ptx, vout, a1, common = self.contest(margin=6, past=2)
+        # Before the jump neither leaf can be pooled.
+        unlinked = self.claim(lock, self.proof_for(ptx, lock["C"], a1, link=False)["record"], vout)
+        refund = self.refund(lock)
+        assert_raises_rpc_error(-26, "btcpay-not-in-anchor-chain", node.sendrawtransaction, unlinked.serialize().hex())
+        assert_raises_rpc_error(-26, "anchorlock-not-reached", node.sendrawtransaction, refund.serialize().hex())
+        # The seller produces the jump block with its refund: refused for the floor.
+        self.force([refund], "bad-anchorlock-not-reached")
+        # A claim completed in the jump block itself, linked to the anchor it records.
+        top = b.getblockcount()
+        claim = self.claim(lock, self.proof_linked_to(ptx, lock["C"], a1, top), vout)
+        blk = self.force([claim])
+        assert_equal(self.anchor_of(blk), top)
+        assert claim.hash in node.getblock(blk)["tx"]
+        self.results.append((self.current, "payment at %d, R=%d, anchor %d -> %d in one block: the refund in that block "
+                             "refused (bad-anchorlock-not-reached), the claim in it mined" %
+                             (common + 1, lock["refund_at"], common, top)))
+        self.log.info("    jump %d -> %d past R=%d: refund refused in the jump block, the claim mined in it",
+                      common, top, lock["refund_at"])
+
+    def contest_seller_holds_the_blocks(self):
+        self.step("N47 (KR4 F1) R = D and a jump far past R: a seller producing the jump block and every block after "
+                  "it is refused the refund for FLOOR_DEPTH blocks; the mempool agrees; then the claim replaces it")
+        node = self.nodes[0]
+        lock, ptx, vout, a1, common = self.contest(margin=0, past=10)
+        refund = self.refund(lock)
+        self.force([refund], "bad-anchorlock-not-reached")
+        jump = self.force([])
+        first = node.getblockheader(jump)["height"]
+        assert_equal(self.first_anchored_at(lock["refund_at"]), first)
+        assert self.anchor_of(jump) >= lock["refund_at"] + 10
+        # The seller's blocks, without the claim (it never reached this node).
+        self.force([refund], "bad-anchorlock-not-reached")
+        self.mine(FLOOR_DEPTH - 2)
+        assert_equal(node.getblockcount(), first + FLOOR_DEPTH - 2)
+        self.force([refund], "bad-anchorlock-not-reached")
+        assert_raises_rpc_error(-26, "anchorlock-not-reached", node.sendrawtransaction, refund.serialize().hex())
+        self.log.info("    refund refused in blocks %d, %d and %d (the jump block and the %d after it), and by the mempool",
+                      first, first + 1, first + FLOOR_DEPTH - 1, FLOOR_DEPTH - 1)
+        self.mine(1)
+        # A seller holding all FLOOR_DEPTH blocks gets the refund in the next: the bound is exact.
+        assert node.testmempoolaccept([refund.serialize().hex()])[0]["allowed"]
+        blk = self.force([refund])
+        assert_equal(node.getblockheader(blk)["height"], first + FLOOR_DEPTH)
+        # Undone; with the refund pooled, the buyer's claim, completed after the jump, replaces it and is mined.
+        node.invalidateblock(blk)
+        assert refund.hash in node.getrawmempool()
+        claim = self.claim(lock, self.proof_for(ptx, lock["C"], a1)["record"], vout)
+        node.sendrawtransaction(claim.serialize().hex())
+        pool = node.getrawmempool()
+        assert claim.hash in pool and refund.hash not in pool
+        mined = self.mine(1)[0]
+        assert claim.hash in node.getblock(mined)["tx"]
+        self.results.append((self.current, "jump %d -> %d (R=D=%d): refund refused in the jump block and the %d after it, "
+                             "pooled and mineable in block first+%d; the claim replaced it and was mined" %
+                             (common, self.anchor_of(jump), lock["refund_at"], FLOOR_DEPTH - 1, FLOOR_DEPTH)))
+
+    def contest_reorg_across_the_jump(self):
+        self.step("N48 (KR4 F1) a Bitcoin reorganization across the jump: the blocks after it leave, the count starts "
+                  "again from the new branch's first block at R")
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        lock, ptx, vout, a1, common = self.contest(margin=0, past=2)
+        refund = self.refund(lock)
+        jump = self.force([])
+        first = node.getblockheader(jump)["height"]
+        self.mine(30)
+        assert_equal(self.first_anchored_at(lock["refund_at"]), first)
+        # Bitcoin replaces every block above the payment's with a longer branch; the payment stays.
+        a1h = b.getblockheader(a1)["height"]
+        old_top = b.getblockcount()
+        b.invalidateblock(b.getblockhash(a1h + 1))
+        while b.getbestblockhash() != a1:   # and the contest's rival branch stays out
+            assert b.getblockcount() >= a1h
+            b.invalidateblock(b.getbestblockhash())
+        self.btc_mine(old_top - a1h + 1)
+        assert b.getblockheader(a1)["confirmations"] > 0
+        self.wait_for(lambda: self.anchor_of(node.getbestblockhash()) < a1h + 1, "the blocks above the payment left")
+        assert node.getblockcount() < first
+        self.log.info("    the watcher left %d blocks; tip %d anchored at %d", 31 + 1, node.getblockcount(),
+                      self.anchor_of(node.getbestblockhash()))
+        self.force([refund], "bad-anchorlock-not-reached")
+        jump2 = self.force([])
+        first2 = node.getblockheader(jump2)["height"]
+        assert_equal(self.first_anchored_at(lock["refund_at"]), first2)
+        self.mine(FLOOR_DEPTH - 2)
+        self.force([refund], "bad-anchorlock-not-reached")
+        self.mine(1)
+        assert node.testmempoolaccept([refund.serialize().hex()])[0]["allowed"]
+        claim = self.claim(lock, self.proof_for(ptx, lock["C"], a1)["record"], vout)
+        node.sendrawtransaction(claim.serialize().hex())
+        mined = self.mine(1)[0]
+        assert claim.hash in node.getblock(mined)["tx"]
+        self.results.append((self.current, "after the reorganization the new jump block (%d) and the %d after it refused "
+                             "the refund; the claim was mined" % (first2, FLOOR_DEPTH - 1)))
+
+    # ------------------------------------------- a claim proving payments on several inputs
+    def multi_claim(self, k, paid):
+        """A keyless claim spending k coins, each read by a leaf that takes any proof and reads the output its
+        witness names; input i proves a payment to address i, all mined in one Bitcoin block X. After it is
+        mined, X is orphaned and those payments are kept out; replacements are paid to the addresses in
+        `paid` (indices) and mined. Returns the claim, its block and the replacements."""
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        leaf = CScript([OP_INSPECTBTCPAYMENT, OP_2DROP, FIELD_OUTPUT, OP_INSPECTBTCTX, OP_2DROP, OP_DROP, OP_1])
+        coins = [self.covenant_coin(leaf) for _ in range(k)]
+        lock_block = self.mine(1)[0]
+        C = self.anchor_of(lock_block)
+        # A payer wallet of its own: its payments stay unconfirmed in Bitcoin's mempool once X is orphaned.
+        self.multi_payers = getattr(self, "multi_payers", 0) + 1
+        name = "payer%d" % self.multi_payers
+        b.createwallet(name)
+        payer = self.btc_rpc(name)
+        self.bminer.sendmany("", {payer.getnewaddress(): Decimal("0.2") for _ in range(k)})
+        self.btc_mine(1)
+        addresses = [self.bbuyer.getnewaddress(address_type="bech32") for _ in range(k)]
+        payments = [self.pay(a, 10000000, wallet=payer) for a in addresses]
+        x = self.btc_mine(1)[0]
+        self.mine_anchored(b.getblockheader(x)["height"])
+        spends = []
+        for i in range(k):
+            pr = self.proof_for(payments[i], C, x)
+            sp = coins[i][1]([pr["record"]])
+            sp.wit.vtxinwit[0].scriptWitness.stack.insert(0, scriptnum(self.vout_paying(payments[i], addresses[i], x)))
+            spends.append(sp)
+        claim = spends[0]
+        for sp in spends[1:]:
+            claim.vin.append(sp.vin[0])
+            claim.wit.vtxinwit.append(sp.wit.vtxinwit[0])
+        claim.vout[0].nValue = CTxOutValue(k * 100000000 - 5000)
+        claim.rehash()
+        node.sendrawtransaction(claim.serialize().hex())
+        claim_block = self.mine(1)[0]
+        assert claim.hash in node.getblock(claim_block)["tx"]
+        b.invalidateblock(x)
+        for p in payments:
+            b.prioritisetransaction(p, 0, -100000000)
+        replacements = {i: self.pay(addresses[i], 10000000, wallet=self.bminer) for i in paid}
+        self.btc_mine(2)
+        assert all(self.bminer.gettransaction(p)["confirmations"] > 0 for p in replacements.values())
+        self.wait_for(lambda: node.getblockheader(claim_block)["confirmations"] < 0, "the claim's block disconnected")
+        self.mine_anchored(b.getblockcount())
+        return claim, addresses, replacements
+
+    def multi_input_search(self):
+        self.step("N49 (KR4 F2) the search completes a claim whose inputs each need a different replacement payment")
+        node = self.nodes[0]
+        for k in (2, 3):
+            claim, addresses, _ = self.multi_claim(k, range(k))
+            start = time.time()
+            self.wait_for(lambda: claim.hash in node.getrawmempool(), "%d-input claim re-attached" % k, timeout=60)
+            took = time.time() - start
+            mined = self.mine(1)[0]
+            assert claim.hash in node.getblock(mined)["tx"]
+            self.results.append((self.current + " (%d inputs)" % k, "re-attached %.1f s after the new anchor, every input "
+                                 "with its own replacement payment; mined" % took))
+            self.log.info("    %d inputs, each with a different replacement payment: re-attached in %.1f s, mined", k, took)
+        # Two inputs, one of which has no replacement: the claim stays out; once that payment is made, it returns.
+        claim, addresses, _ = self.multi_claim(2, [0])
+        time.sleep(8)
+        assert claim.hash not in node.getrawmempool()
+        late = self.pay(addresses[1], 10000000, wallet=self.bminer)
+        self.btc_mine(1)
+        self.mine_anchored(self.btc_rpc().getblockcount())
+        self.wait_for(lambda: claim.hash in node.getrawmempool(), "the claim re-attached once its second payment confirmed")
+        mined = self.mine(1)[0]
+        assert claim.hash in node.getblock(mined)["tx"]
+        self.results.append((self.current + " (one input without a replacement)", "left out for 8 s; re-attached once the "
+                             "missing payment confirmed (%s), mined" % late[:16]))
+
+    # ------------------------------------------------ the fields OP_INSPECTBTCTX reads
+    def payment_fields(self):
+        self.step("N50 OP_INSPECTBTCTX reads an output, an input's outpoint or the payment's own id, by a selector the leaf writes")
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        ptx = self.pay(self.bbuyer.getnewaddress(address_type="bech32"), 10000000)
+        bh = self.btc_mine(1)[0]
+        self.mine_anchored(b.getblockheader(bh)["height"])
+        raw = b.getrawtransaction(ptx, True, bh)
+        own = bytes.fromhex(ptx)[::-1]
+        prev = bytes.fromhex(raw["vin"][0]["txid"])[::-1]
+        prevn = raw["vin"][0]["vout"]
+        nin = len(raw["vin"])
+        read = [OP_INSPECTBTCPAYMENT, OP_2DROP]
+        cases = [
+            ("the payment's own id", CScript(read + [FIELD_TXID, OP_INSPECTBTCTX, own, OP_EQUAL]), [], None),
+            ("input 0's outpoint", CScript(read + [0, FIELD_INPUT, OP_INSPECTBTCTX, prevn, OP_EQUALVERIFY, prev, OP_EQUAL]), [], None),
+            ("another id", CScript(read + [FIELD_TXID, OP_INSPECTBTCTX, prev, OP_EQUAL]), [],
+             "Script evaluated without error but finished with a false/empty top stack element"),
+            ("an unknown field", CScript(read + [0, 3, OP_INSPECTBTCTX, OP_2DROP, OP_1]), [],
+             "Unknown field of the proven bitcoin payment"),
+            ("an input out of range", CScript(read + [nin, FIELD_INPUT, OP_INSPECTBTCTX, OP_2DROP, OP_1]), [],
+             "Bitcoin payment input index missing or out of range"),
+            # An index from the witness reaches only the field the leaf chose.
+            ("an output index of -1 from the witness", CScript(read + [FIELD_OUTPUT, OP_INSPECTBTCTX, OP_2DROP, OP_DROP, OP_1]),
+             [b"\x81"], "Bitcoin payment output index missing or out of range"),
+            ("an input index past the last from the witness",
+             CScript(read + [FIELD_INPUT, OP_INSPECTBTCTX, OP_2DROP, OP_1]), [scriptnum(nin)],
+             "Bitcoin payment input index missing or out of range"),
+        ]
+        for label, leaf, items, expect in cases:
+            txid, spend = self.covenant_coin(leaf)
+            blk = self.mine(1)[0]
+            C = self.anchor_of(blk)
+            t = spend([self.proof_for(ptx, C, bh)["record"]])
+            for it in reversed(items):
+                t.wit.vtxinwit[0].scriptWitness.stack.insert(0, it)
+            t.rehash()
+            self.log.info("    %s", label)
+            if expect is None:
+                node.sendrawtransaction(t.serialize().hex())
+                mined = self.mine(1)[0]
+                assert t.hash in node.getblock(mined)["tx"]
+                self.results.append((self.current + " (" + label + ")", "pooled and mined"))
+            else:
+                self.force([t], expect)
+
 
     def only_tightens(self):
         self.step("N16 the rule only tightens: a node without it accepts every block, and accepts a claim without proof that this node refuses")
