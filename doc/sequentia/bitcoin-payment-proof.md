@@ -404,15 +404,16 @@ the hashing, which the block weight already bounds.
 
 The mempool otherwise refuses a second transaction with the same id
 (`txn-same-nonwitness-data-in-mempool`). When the pooled transaction carries
-records, it accepts a valid newcomer in its place when the newcomer is lighter
-by at least a quarter of the pooled one's weight and its fee rate rises by at
-least the incremental relay rate (`-incrementalrelayfee`, 100 per thousand
-virtual bytes by default), whether it carries other records or none, or when the
-pooled one's records are no longer valid. A newcomer without records is how the original of a spend
+records, it accepts a valid newcomer in its place when the newcomer is lighter,
+its fee rate rises by at least the incremental relay rate
+(`-incrementalrelayfee`, 100 per thousand virtual bytes by default), and, if it
+carries records itself, it is lighter by at least a quarter of the pooled one's
+weight; or when the pooled one's records are no longer valid. A newcomer without records is how the original of a spend
 displaces a variant someone else added records to. A seller who completes the
 buyer's pre-signed claim with a heavy proof of some other qualifying payment is
 then displaced by the lighter proof of the buyer's own payment. Each replacement
-must make the claim lighter by a quarter or replace a proof that is no longer
+must make the claim lighter by a quarter, drop its records (after which no
+replacement of the same id follows), or replace a proof that is no longer
 valid, so a chain of replacements cannot loop. The fee is the same for every
 variant (the same transaction id has the same outputs), so a step costs its
 sender nothing, and each one re-checks the claim and its descendants on every

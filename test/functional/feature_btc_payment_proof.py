@@ -1108,9 +1108,15 @@ class BtcPaymentProofTest(BitcoinTestFramework):
             wb = node.decoderawtransaction(cb.serialize().hex())["hash"]
             ws = node.decoderawtransaction(cs.serialize().hex())["hash"]
             if order == "buyer first":
+                # The seller's proof is lighter, but by less than a quarter: it
+                # does not replace the buyer's; it is validated and kept.
                 node.sendrawtransaction(cb.serialize().hex())
-                node.sendrawtransaction(cs.serialize().hex())
-                assert_equal(node.getmempoolentry(cs.hash)["wtxid"], ws)
+                assert_raises_rpc_error(-26, "txn-same-nonwitness-data-in-mempool", node.sendrawtransaction,
+                                        cs.serialize().hex())
+                assert_equal(node.getmempoolentry(cb.hash)["wtxid"], wb)
+                self.log.info("    buyer first: the seller's lighter proof (%d WU against %d) is kept, the buyer's "
+                              "stays pooled", node.decoderawtransaction(cs.serialize().hex())["weight"],
+                              node.decoderawtransaction(cb.serialize().hex())["weight"])
             else:
                 node.sendrawtransaction(cs.serialize().hex())
                 # The heavier buyer's proof does not replace the seller's, but is
@@ -1118,7 +1124,7 @@ class BtcPaymentProofTest(BitcoinTestFramework):
                 assert_raises_rpc_error(-26, "txn-same-nonwitness-data-in-mempool", node.sendrawtransaction,
                                         cb.serialize().hex())
                 assert_equal(node.getmempoolentry(cs.hash)["wtxid"], ws)
-            self.log.info("    %s: the pooled proof is the seller's lighter one", order)
+                self.log.info("    seller first: the pooled proof is the seller's lighter one")
             # The seller's block leaves Bitcoin's chain and its payment is double-spent.
             b.invalidateblock(sh)
             raw = b.getrawtransaction(stx, True)
@@ -1126,13 +1132,15 @@ class BtcPaymentProofTest(BitcoinTestFramework):
                                          [{self.bseller.getnewaddress(): amt + Decimal("0.0001") - Decimal("0.001")}])
             b.sendrawtransaction(self.bseller.signrawtransactionwithwallet(new)["hex"])
             self.btc_mine(2)
+            self.watcher_left(sh)
             # The node brings the claim back with the buyer's proof, and it is mined.
             self.wait_for(lambda: cb.hash in node.getrawmempool() and
                           node.getmempoolentry(cb.hash)["wtxid"] != ws, "the claim re-attached", timeout=60)
             blk = self.mine_anchored(b.getblockcount())
             assert cb.hash in node.getblock(blk)["tx"]
-            self.results.append((self.current + " (%s)" % order, "re-attached with the buyer's proof and mined"))
-            self.log.info("    %s: the claim came back with the buyer's proof and was mined", order)
+            self.results.append((self.current + " (%s)" % order, "pooled with the buyer's proof and mined"))
+            self.log.info("    %s: after the seller's payment left Bitcoin's chain, the claim is pooled with the buyer's "
+                          "proof and was mined", order)
         self.variant_bound()
 
     def debug_lines(self, node, needle):
@@ -1366,17 +1374,18 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         b = self.btc_rpc()
         lock = self.fresh_lock()
         amt = Decimal(lock["amount"]) / Decimal(100000000)
-        # Both payments in one Bitcoin block: the seller's (1 in, 2 out) is seen
+        # Both payments in one Bitcoin block: the seller's (1 in, 22 out) is seen
         # first and takes that block's slot; the buyer's (1 in, 1 out) is lighter
-        # and replaces it in the pool.
+        # by more than a quarter and replaces it in the pool.
         scoin = self.seller_coins(1, lock["amount"] + 1000000)[0]
         bcoin_addr = self.bbuyer.getnewaddress(address_type="bech32")
         ftx = self.bminer.sendtoaddress(bcoin_addr, amt + Decimal("0.0001"))
         fraw = b.getrawtransaction(ftx, True)
         self.btc_mine(1)
         bvout = [o["n"] for o in fraw["vout"] if o["scriptPubKey"].get("address") == bcoin_addr][0]
-        stx = self.bseller.send(outputs=[{lock["addr"]: amt}], options={
-            "inputs": [{"txid": scoin[0], "vout": scoin[1]}], "add_inputs": False, "change_position": 1})["txid"]
+        extra = [{self.bseller.getnewaddress(address_type="bech32"): Decimal("0.0001")} for _ in range(20)]
+        stx = self.bseller.send(outputs=[{lock["addr"]: amt}] + extra, options={
+            "inputs": [{"txid": scoin[0], "vout": scoin[1]}], "add_inputs": False, "change_position": 21})["txid"]
         ptx = self.bbuyer.sendall(recipients=[lock["addr"]], options={"fee_rate": 2, "inputs": [
             {"txid": ftx, "vout": bvout}]})["txid"]
         y = self.btc_mine(1)[0]
@@ -1682,7 +1691,15 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         node = self.nodes[0]
         b = self.btc_rpc()
         lock = self.fresh_lock()
-        ptx, pr, vout = self.paid(lock)
+        # The buyer's payment also pays 20 outputs of its own: the seller's
+        # proof is lighter by more than a quarter.
+        amt = Decimal(lock["amount"]) / Decimal(100000000)
+        ptx = self.bbuyer.send(outputs=[{lock["addr"]: amt}] + [{self.bbuyer.getnewaddress(): Decimal("0.0001")}
+                                                                for _ in range(20)])["txid"]
+        pbh = self.btc_mine(1)[0]
+        self.mine_anchored(b.getblockheader(pbh)["height"])
+        pr = self.proof_for(ptx, lock["C"], pbh)
+        vout = self.vout_paying(ptx, lock["addr"], pbh)
         coin = self.seller_coins(1, lock["amount"])[0]
         stx = self.self_pay(coin, lock["addr"])
         sh = self.btc_mine(1)[0]
