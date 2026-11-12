@@ -168,6 +168,7 @@ std::shared_ptr<CBlock> BuildUnsignedBlsBlock(ChainstateManager& chainman, CTxMe
         LOCK(cs_main);
         if (auto why = HeldTxsBlockConflict(tmpl->block, chainman.m_blockman.LookupBlockIndex(tmpl->block.hashPrevBlock))) {
             LogPrintf("PoS gossip: not proposing at height %d: %s\n", tip->nHeight + 1, *why);
+            HeldTxsNoteDecline();
             return nullptr;
         }
     }
@@ -418,7 +419,13 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
         IncrementExtraNonce(&block, chainman.ActiveChain().Tip(), extra_nonce);
         // Held transactions (pos_heldtxs.h): the keys here sign as committee
         // members too, so the rule binds this path as it binds the gossip round.
+        if (HeldTxsFilling()) {
+            error = "held-filling: the anchor watcher is recording a disconnect; try again";
+            err_kind = PosProduceError::INTERNAL;
+            return false;
+        }
         if (auto why = HeldTxsBlockConflict(block, chainman.m_blockman.LookupBlockIndex(block.hashPrevBlock))) {
+            HeldTxsNoteDecline();
             error = strprintf("held-conflict: %s", *why);
             err_kind = PosProduceError::INTERNAL;
             return false;
@@ -714,7 +721,8 @@ int64_t PosProducer::Step()
     // Held transactions, arm two (pos_heldtxs.h): set aside a sub-quorum block
     // of the active chain that respends a held transaction, so that this
     // member signs a sibling in its place; restore it when due.
-    if (HeldTxsMaintain(m_chainman, m_mempool, /*park=*/true)) return 100;
+    if (HeldTxsMaintain(m_chainman, m_mempool, /*park=*/true,
+                        /*bound_ms=*/POS_HELD_BOUND_ROUNDS * RoundMs() + WindowMs())) return 100;
 
     CBlockIndex* tip;
     {
@@ -1360,6 +1368,7 @@ void PosProducer::ProposeGossip(const CKey& leader_key)
     }
 
     LogPrintf("PoS gossip: proposing block %s at height %d\n", hash.GetHex(), height);
+    HeldTxsNoteHold();
     FloodCompactProposal(*block);
 }
 
@@ -1450,6 +1459,20 @@ int64_t PosProducer::DriveRound()
     if (!backed) {
         if (restart_lock) SendCertQueryOnce(*restart_lock);
         return 150;
+    }
+    // Held transactions (pos_heldtxs.h): in a round whose backed proposal
+    // respends a held transaction this member signs nothing, except in round
+    // 0, where it signs the first later proposal that respends nothing held.
+    // The leader is not excluded: the round order stays the one every member
+    // computes, rule or no rule, so a round that backs an honest proposal
+    // gathers every member's signature.
+    const std::shared_ptr<const CBlock> round_backed = backed;
+    {
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        if (m_held_skip_height == height && m_held_skip_round == round_index && backed->GetHash() == m_held_skip_hash) {
+            if (!m_held_alt) return 150;
+            backed = m_held_alt;
+        }
     }
 
     // Share-lock, ancestry arm (3A residual): our current parent is a
@@ -1545,6 +1568,7 @@ int64_t PosProducer::DriveRound()
         // An invalid block excludes its leader; next pass we back the next-lowest
         // valid candidate.
         bool valid = false;
+        bool held_conflict = false;
         {
             LOCK(cs_main);
             CBlockIndex* tip2 = m_chainman.ActiveChain().Tip();
@@ -1552,17 +1576,53 @@ int64_t PosProducer::DriveRound()
                 BlockValidationState state;
                 valid = TestBlockValidity(state, m_chainparams, m_chainman.ActiveChainstate(), *backed, tip2,
                                           /*fCheckPOW=*/false, /*fCheckMerkleRoot=*/true);
-                // Held transactions (pos_heldtxs.h): a proposal that respends
-                // what a disconnected certified block held, or that builds on
-                // such a respend, is treated as invalid: its leader is excluded
-                // and the next one, which holds the original, is backed.
+                // Held transactions (pos_heldtxs.h): a valid proposal that
+                // respends what a disconnected certified block held, or that
+                // builds on such a respend, is not signed.
                 if (valid) {
                     if (auto why = HeldTxsBlockConflict(*backed, tip2)) {
-                        LogPrintf("PoS gossip: not signing %s at height %d: %s\n", backed->GetHash().GetHex(), height, *why);
-                        valid = false;
+                        LogPrintf("PoS gossip: not signing %s at height %d (round %d): %s\n", backed->GetHash().GetHex(),
+                                  height, round_index, *why);
+                        held_conflict = true;
                     }
                 }
             }
+        }
+        if (held_conflict) {
+            HeldTxsNoteDecline();
+            std::shared_ptr<const CBlock> alt;
+            if (round_index == 0) {
+                std::vector<std::shared_ptr<const CBlock>> order;
+                {
+                    std::lock_guard<std::mutex> lock(m_gossip_mutex);
+                    if (m_round_height == height) {
+                        for (int r = 1; r < (int)m_candidates.size(); ++r) order.push_back(BackedForRound(r));
+                    }
+                }
+                LOCK(cs_main);
+                CBlockIndex* tip2 = m_chainman.ActiveChain().Tip();
+                for (const auto& c : order) {
+                    if (!c || !tip2 || c->hashPrevBlock != tip2->GetBlockHash()) continue;
+                    if (HeldTxsBlockConflict(*c, tip2)) continue;
+                    BlockValidationState state;
+                    if (TestBlockValidity(state, m_chainparams, m_chainman.ActiveChainstate(), *c, tip2,
+                                          /*fCheckPOW=*/false, /*fCheckMerkleRoot=*/true)) {
+                        alt = c;
+                        break;
+                    }
+                }
+            }
+            {
+                std::lock_guard<std::mutex> lock(m_gossip_mutex);
+                m_held_skip_height = height;
+                m_held_skip_round = round_index;
+                m_held_skip_hash = backed->GetHash();
+                m_held_alt = alt;
+            }
+            if (!alt) return 150;
+            LogPrintf("PoS gossip: round 0 at height %d: signing %s, the first proposal that respends nothing held\n",
+                      height, alt->GetHash().GetHex());
+            backed = alt;
         }
         if (!valid) {
             std::lock_guard<std::mutex> lock(m_gossip_mutex);
@@ -1586,7 +1646,7 @@ int64_t PosProducer::DriveRound()
             // share-locks us away from the leader the rest of the committee
             // now backs. Release the shares only if the block is still the
             // round's choice; otherwise re-evaluate on the next poll.
-            if (m_round_height != height || BackedForRound(round_index) != backed) {
+            if (m_round_height != height || BackedForRound(round_index) != round_backed) {
                 still_backed = false;
             } else {
                 m_signed_round = round_index;
@@ -1607,6 +1667,7 @@ int64_t PosProducer::DriveRound()
             }
         }
         if (!still_backed) return 150;
+        HeldTxsNoteHold();
         for (const PosShare& sh : shares) FloodShare(sh);
     }
 

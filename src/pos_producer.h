@@ -316,6 +316,13 @@ private:
     //! consensus-invalid block (two coinbases), to test that lazy validation
     //! excludes the leader and the committee routes to the next valid one.
     bool m_byzantine_invalid{false};
+    //! Held transactions: the round this member declined to sign because its
+    //! backed proposal respends a held transaction, and in round 0 the later
+    //! proposal it signs instead. m_gossip_mutex.
+    int m_held_skip_height{-1};
+    int m_held_skip_round{-1};
+    uint256 m_held_skip_hash;
+    std::shared_ptr<const CBlock> m_held_alt;
     //! Regtest only (-posdebugroundskewms): offset added to this node's round
     //! scheduler clock, to study how inter-node clock skew affects round
     //! agreement. Always 0 on a real node.

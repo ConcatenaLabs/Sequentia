@@ -12,11 +12,13 @@
 // their anchor away, this node keeps their transactions ("held"). A committee
 // member then does not sign a block that spends an outpoint a held transaction
 // spends, other than with that same transaction, in the block itself or in an
-// ancestor above the disconnect point (arm one), and it sets aside a
-// sub-quorum block of its active chain that carries such a spend, so that it
-// can sign a sibling in its place (arm two). The mempool refuses such spends
-// too. It is signing policy and local state, like the share-lock: no block is
-// valid or invalid because of it.
+// ancestor above the disconnect point (arm one), and it keeps a sub-quorum
+// block of its active chain that carries such a spend out of its fork choice
+// for a while, so that it can sign a sibling in its place (arm two). The
+// mempool refuses such spends too. A transaction is held only while this node
+// would mine it now, and every hold ends within a bounded number of rounds.
+// It is signing policy and local state, like the share-lock: no block is valid
+// or invalid because of it, and nothing about a block is written to disk.
 
 #include <primitives/transaction.h>
 #include <uint256.h>
@@ -30,9 +32,13 @@ class CBlockIndex;
 class ChainstateManager;
 class CTxMemPool;
 
-//! How long a member keeps a block set aside (arm two) when no certified block
-//! has displaced it, before it gives up and only refuses to sign on top of it.
-static constexpr int64_t POS_HELD_PARK_MS = 120 * 1000;
+//! The liveness bound, in gossip rounds: once a member that holds (declined to
+//! sign for a held transaction, or keeps a block set aside) has an honest
+//! proposal to sign or to make, the chain may go this many rounds plus one
+//! collection window without a new certified block.
+//! Then the member releases everything it holds and signs as if it held
+//! nothing, so the rule never pauses the chain longer than that.
+static constexpr int POS_HELD_BOUND_ROUNDS = 12;
 //! A held transaction is released at the latest once the active tip anchors
 //! this many Bitcoin blocks above the highest anchor the disconnected blocks had.
 static constexpr uint32_t POS_HELD_WINDOW = 144;
@@ -66,16 +72,36 @@ std::optional<uint256> HeldTxsConflict(const CTransaction& tx);
 //! conflicts with a held transaction. nullopt when it may sign. cs_main held.
 std::optional<std::string> HeldTxsBlockConflict(const CBlock& block, const CBlockIndex* prev);
 
-//! Release what is due, put held transactions back into the mempool, and with
-//! `park` (a committee member) set aside the lowest sub-quorum block of the
-//! active chain that conflicts, and restore the blocks set aside earlier when
-//! due. Returns true when it changed the active chain. No lock held.
-bool HeldTxsMaintain(ChainstateManager& chainman, CTxMemPool& mempool, bool park);
+//! Release what is due, put held transactions back into the mempool and
+//! release those this node would not mine now, and with `park` (a committee
+//! member) set aside the lowest sub-quorum block of the active chain that
+//! conflicts and end set-asides that are due. With `bound_ms` > 0, release
+//! everything once a hold has lasted that long with no new certified block.
+//! Returns true when it changed the active chain. No lock held.
+bool HeldTxsMaintain(ChainstateManager& chainman, CTxMemPool& mempool, bool park, int64_t bound_ms = 0);
+
+//! A member declined to sign or to propose for a held transaction.
+void HeldTxsNoteDecline();
+//! A member signs or makes a proposal that respends nothing held. If it is
+//! holding (it declined something, or keeps a block set aside), the liveness
+//! bound runs from now unless it already runs: waiting for an honest proposal
+//! to exist is a pause an attacker that withholds its own causes anyway.
+void HeldTxsNoteHold();
+
+//! The set-aside block `pindex` is or descends from, if any (fork choice
+//! skips such candidates). Memory only: nothing is marked failed, and a
+//! restart forgets every set-aside. cs_main held.
+const CBlockIndex* HeldTxsSetAsideAncestor(const CBlockIndex* pindex);
+
+//! Release one held transaction (a caller that knows it can never be mined
+//! again, such as a payment claim whose payment is gone for good).
+void HeldTxsRelease(const uint256& txid, const std::string& why);
 
 struct HeldTxsInfo {
     std::vector<uint256> txids;
-    std::vector<uint256> parked;   //!< blocks set aside now
-    std::vector<uint256> given_up; //!< blocks set aside once and restored without a displacement
+    std::vector<uint256> parked;   //!< blocks set aside now (memory only)
+    std::vector<uint256> given_up; //!< blocks set aside once and not to be set aside again (memory only)
+    int64_t hold_ms{-1};           //!< how long the current hold has lasted, -1 when none
     int fork_height{-1};
     uint32_t release_anchor{0};
 };
