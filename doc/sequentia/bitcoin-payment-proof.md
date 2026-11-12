@@ -334,7 +334,12 @@ down, the jump block and the 59 after it refuse the floor.
 The rule only narrows what is valid, follows Bitcoin exactly as before, and keeps
 no block whose anchor Bitcoin replaced. A reorganization that disconnects blocks
 starts the count again on the new branch, from that branch's own first block at
-`F`. A stall stops the count rather than shortening it. Every floor is met about
+`F`. A stall stops the count rather than shortening it, and the blocks after one
+count like any other: a block certified below the committee's quorum once the
+anchor has moved three Bitcoin blocks (the escaping stall,
+[`04-proof-of-stake.md`](04-proof-of-stake.md), section 5) is one of the 60, as
+a block the full quorum certifies is, since check 8 reads anchors and never
+certification. Every floor is met about
 an hour (60 blocks at the chain's 60-second spacing) after the anchor first
 reaches it.
 
