@@ -824,54 +824,68 @@ static bool IsStandardBtcPaymentSlot(const std::vector<std::vector<unsigned char
     return true;
 }
 
+//! The records of input `i` of `tx`, judged for the block `index` (in_block)
+//! or for the block after it (the mempool). Checks 5 to 8 of the specification;
+//! the opcodes check 1 to 4.
+static BtcPayVerdict CheckInputBtcPaymentRecords(const CTransaction& tx, size_t i, const CCoinsViewCache& view,
+                                                 const CBlockIndex* index, bool in_block, uint32_t anchor_height,
+                                                 std::set<uint256>* proven_blocks, std::string& reason)
+{
+    if (tx.vin[i].m_is_pegin || tx.witness.vtxinwit.size() <= i) return BtcPayVerdict::OK;
+    const auto& slot = tx.witness.vtxinwit[i].m_pegin_witness.stack;
+    if (slot.empty()) return BtcPayVerdict::OK;
+    BtcPayment::Records records;
+    if (!BtcPayment::ParseRecords(slot, records, reason)) return BtcPayVerdict::INVALID;
+    if (records.floor) {
+        // Check 8: the floor is judged against the anchor of the block
+        // FLOOR_DEPTH below the one the spend is in (for the mempool, the
+        // next block), never the block's own: a block whose anchor jumps
+        // to the floor leaves the next FLOOR_DEPTH - 1 blocks to a claim
+        // the jump has just made provable. The mempool reads exactly the
+        // ancestor consensus will read for the next block.
+        const int judged = in_block ? index->nHeight : index->nHeight + 1;
+        const CBlockIndex* below = judged >= BtcPayment::FLOOR_DEPTH ? index->GetAncestor(judged - BtcPayment::FLOOR_DEPTH)
+                                                                     : nullptr;
+        if (below == nullptr || *records.floor > below->m_anchor_height) {
+            reason = in_block ? "bad-anchorlock-not-reached" : "anchorlock-not-reached";
+            return BtcPayVerdict::INVALID;
+        }
+    }
+    if (!records.proof) return BtcPayVerdict::OK;
+    const BtcPayment::Proof& proof = *records.proof;
+    // Check 6: the coin anchor is true.
+    const Coin& coin = view.AccessCoin(tx.vin[i].prevout);
+    if (coin.IsSpent()) { reason = "bad-btcpay-coin-missing"; return BtcPayVerdict::INVALID; }
+    int64_t coin_anchor;
+    if (in_block && (int)coin.nHeight == index->nHeight) {
+        coin_anchor = anchor_height;
+    } else if ((int)coin.nHeight <= index->nHeight && coin.nHeight != MEMPOOL_HEIGHT) {
+        coin_anchor = index->GetAncestor(coin.nHeight)->m_anchor_height;
+    } else {
+        reason = "btcpay-coin-unconfirmed";
+        return BtcPayVerdict::INVALID;
+    }
+    if ((int64_t)proof.coin_anchor != coin_anchor) { reason = "bad-btcpay-coin-anchor"; return BtcPayVerdict::INVALID; }
+    // Check 5: the proven block is an ancestor of an anchor this branch
+    // recorded, `links` headers below it, at the declared height. A pure
+    // function of the chain: no Bitcoin daemon is asked.
+    if ((uint64_t)proof.height + proof.links > std::numeric_limits<uint32_t>::max() ||
+        !AnchorRecordedOnBranch(index, proof.height + proof.links, proof.link_end)) {
+        reason = in_block ? "bad-btcpay-not-in-anchor-chain" : "btcpay-not-in-anchor-chain";
+        return BtcPayVerdict::INVALID;
+    }
+    if (proven_blocks) proven_blocks->insert(proof.block_hash);
+    return BtcPayVerdict::OK;
+}
+
 static BtcPayVerdict CheckTxBtcPaymentRecords(const CTransaction& tx, const CCoinsViewCache& view,
                                               const CBlockIndex* index, bool in_block,
                                               uint32_t anchor_height, const uint256& anchor_hash,
                                               std::set<uint256>* proven_blocks, std::string& reason)
 {
     for (size_t i = 0; i < tx.vin.size(); ++i) {
-        if (tx.vin[i].m_is_pegin) continue;
-        if (tx.witness.vtxinwit.size() <= i) continue;
-        const auto& slot = tx.witness.vtxinwit[i].m_pegin_witness.stack;
-        if (slot.empty()) continue;
-        BtcPayment::Records records;
-        if (!BtcPayment::ParseRecords(slot, records, reason)) return BtcPayVerdict::INVALID;
-        if (records.floor) {
-            if (in_block) {
-                if (*records.floor > anchor_height) { reason = "bad-anchorlock-not-reached"; return BtcPayVerdict::INVALID; }
-            } else if (*records.floor > anchor_height) {
-                // Judged against the tip's anchor, never Bitcoin's tip: the next
-                // block anchors at least there (anchor heights never fall along
-                // a branch), so whatever the mempool holds can be mined now, and
-                // a spend that cannot be mined yet never replaces one that can.
-                reason = "anchorlock-not-reached";
-                return BtcPayVerdict::INVALID;
-            }
-        }
-        if (!records.proof) continue;
-        const BtcPayment::Proof& proof = *records.proof;
-        // Check 6: the coin anchor is true.
-        const Coin& coin = view.AccessCoin(tx.vin[i].prevout);
-        if (coin.IsSpent()) { reason = "bad-btcpay-coin-missing"; return BtcPayVerdict::INVALID; }
-        int64_t coin_anchor;
-        if (in_block && (int)coin.nHeight == index->nHeight) {
-            coin_anchor = anchor_height;
-        } else if ((int)coin.nHeight <= index->nHeight && coin.nHeight != MEMPOOL_HEIGHT) {
-            coin_anchor = index->GetAncestor(coin.nHeight)->m_anchor_height;
-        } else {
-            reason = "btcpay-coin-unconfirmed";
-            return BtcPayVerdict::INVALID;
-        }
-        if ((int64_t)proof.coin_anchor != coin_anchor) { reason = "bad-btcpay-coin-anchor"; return BtcPayVerdict::INVALID; }
-        // Check 5: the proven block is an ancestor of an anchor this branch
-        // recorded, `links` headers below it, at the declared height. A pure
-        // function of the chain: no Bitcoin daemon is asked.
-        if ((uint64_t)proof.height + proof.links > std::numeric_limits<uint32_t>::max() ||
-            !AnchorRecordedOnBranch(index, proof.height + proof.links, proof.link_end)) {
-            reason = in_block ? "bad-btcpay-not-in-anchor-chain" : "btcpay-not-in-anchor-chain";
-            return BtcPayVerdict::INVALID;
-        }
-        if (proven_blocks) proven_blocks->insert(proof.block_hash);
+        const BtcPayVerdict v = CheckInputBtcPaymentRecords(tx, i, view, index, in_block, anchor_height, proven_blocks, reason);
+        if (v != BtcPayVerdict::OK) return v;
     }
     return BtcPayVerdict::OK;
 }

@@ -264,9 +264,12 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
     }
 
     // SEQUENTIA: choose the anchor before the transactions: a bitcoin-payment
-    // claim or an anchor floor is taken only when this block's anchor meets it
-    // (doc/sequentia/bitcoin-payment-proof.md 6.1). Nothing above reads it.
+    // claim is taken only when this block's anchor meets it, and an anchor floor
+    // only when the anchor of the block FLOOR_DEPTH below this one meets it
+    // (doc/sequentia/bitcoin-payment-proof.md 4.4, 6.1). Nothing above reads it.
     m_btcpay_active = chainparams.GetConsensus().BtcPaymentActiveAt(nHeight);
+    m_floor_anchor_height = nHeight >= BtcPayment::FLOOR_DEPTH
+        ? (int64_t)pindexPrev->GetAncestor(nHeight - BtcPayment::FLOOR_DEPTH)->m_anchor_height : -1;
     // SEQUENTIA: anchor the new block to the parent chain (Bitcoin) tip,
     // respecting -anchorminconf and never decreasing the anchor height.
     if (g_con_bitcoin_anchor) {
@@ -464,7 +467,8 @@ bool BlockAssembler::TestPackageTransactions(const CTxMemPool::setEntries& packa
             return false;
         }
         // SEQUENTIA: a bitcoin-payment proof above this block's anchor, or an
-        // anchor floor it has not reached, waits for a later block.
+        // anchor floor the block FLOOR_DEPTH below this one has not reached,
+        // waits for a later block.
         if (m_btcpay_active) {
             const CTransaction& tx = it->GetTx();
             for (size_t i = 0; i < tx.vin.size() && i < tx.witness.vtxinwit.size(); ++i) {
@@ -473,7 +477,7 @@ bool BlockAssembler::TestPackageTransactions(const CTxMemPool::setEntries& packa
                 std::string reason;
                 if (!BtcPayment::ParseRecords(tx.witness.vtxinwit[i].m_pegin_witness.stack, records, reason)) return false;
                 if (records.proof && records.proof->height > m_anchor_height) return false;
-                if (records.floor && *records.floor > m_anchor_height) return false;
+                if (records.floor && (m_floor_anchor_height < 0 || *records.floor > m_floor_anchor_height)) return false;
             }
         }
         // SEQUENTIA: a privately submitted supervision record already spends

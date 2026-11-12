@@ -32,6 +32,12 @@ static constexpr size_t MAX_PAYMENT_TX_SIZE = 100000;
 static constexpr size_t MAX_LINKS = 2016;
 //! type, height, coin anchor, header, SHA256(coinbase), depth, index.
 static constexpr size_t PAYMENT_FIXED_SIZE = 1 + 4 + 4 + 80 + 32 + 1 + 4;
+//! An anchor floor F is reached in a block only when the block this many below
+//! it is anchored at F or above (specification 4.4). So once the chain's anchor
+//! first reaches F, that block and the FLOOR_DEPTH - 1 after it still refuse the
+//! floor, whatever the anchor did to get there: a claim on a payment below F has
+//! those blocks to itself, however far one block's anchor jumped.
+static constexpr int FLOOR_DEPTH = 60;
 
 struct Proof {
     uint32_t height{0};       //!< declared Bitcoin height of the proven block (checked against the chain)
