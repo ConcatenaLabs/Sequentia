@@ -6,7 +6,9 @@ relative floors (section 4.5), the per-trade lock (section 8.1) and the open
 form's binding (section 8.4). It asks whether a swap for bitcoin can run with
 no wait at any amount, built from the three payment opcodes as they are and
 from the tapscript opcodes the chain already has, with no new rule. It
-answers no, and names the one rule that would make the answer yes.
+answers no, and then weighs what would close the gap: a fourth opcode (section
+6) or a signing rule for the committee (section 7). Section 8 compares every
+form.
 
 ## 1. The gap
 
@@ -494,35 +496,162 @@ the owner chooses (specification, section 7).
   must wait for that height before they offer the slot form. Mainnet has not
   started, so it would get the opcode from genesis either way.
 
-## 7. Verdict
+## 7. Certification as the guard
 
-The standing offer does not close the gap; it widens it. With the per-trade lock
-and no wait, a buyer can lose its payment only if Bitcoin reorganizes the very
-block the seller's lock is anchored to and the seller also runs a block
-producer that drops the lock. With a standing offer, the seller takes the
-buyer's payment whenever it likes: it pays itself in the same Bitcoin block and
-its claim wins on fee, with no reorganization and no producer (run on regtest,
-SO7). Even an honest seller's offer turns away honest buyers who pay close
-together, and their bitcoin is gone (SO5, SO6, SO10). What it would cost, for
-nothing: a fill of about 400 virtual bytes plus the proof, and for the maker a
-wait of about two hours to reprice, a wait that holds nobody. So the wallets
-should use the per-trade lock, and by default pay with no wait at any amount. A
-wait for Bitcoin confirmations stays available as a setting, off by default,
-for a buyer who wants to cover the one remaining case. Closing that case
-without any wait would take one new opcode that reads the inputs of the proven
-bitcoin payment (section 6). Bitcoin's own rule that a coin is spent once then
-decides between buyers. A buyer could then lose a payment only to a
-reorganization deeper than the offer is old, there would be no deadline and so
-no late payment lost, and the maker could cancel within one Bitcoin
-confirmation. The cost is that the buyer's wallet must build the payment around
-the maker's signed input, so a payer that can only send to an address keeps
-the per-trade lock. A seller needs no bitcoin of its own for this. The coin
-that makes each lot unique can be funded by a service paid in any asset, and in
-a chained offer each payment carries the next lot's coin. The price is
-liveness: whoever signs the coins can stall or cancel an offer, but never take
-from it (section 6.1).
+This section asks whether the gap can be closed where blocks are certified
+rather than in a script. It is a feasibility reading of the code and of
+[`04-proof-of-stake.md`](04-proof-of-stake.md). Nothing in it is built or run.
 
-## 8. The runs
+**The rule.** After an anchor-driven disconnect, a committee member does not
+sign a block that spends an outpoint already spent by a transaction it holds
+as **protected**. A protected transaction is one from a certified block that
+the node itself disconnected, and the rule applies unless the block spends the
+outpoint with that same transaction id (a fresh proof keeps the id). Like the
+share-lock (section 9 of the PoS document), this is local signing policy, not a
+validity rule: no block becomes invalid because of it, and every node still
+accepts a conflicting block that a quorum did certify.
+
+**7.1 Where a member decides to sign.**
+- **The gossip committee.** In `PosProducer::DriveRound` (`src/pos_producer.cpp`)
+  a member picks the round's proposal with `BackedForRound`, then validates it
+  lazily just before signing: `TestBlockValidity` against the active tip, under
+  `cs_main`. An invalid proposal adds its leader to `m_excluded` and the next
+  candidate is backed. The check belongs exactly there, beside
+  `TestBlockValidity`. A conflict excludes the leader the same way, and the
+  next leader, who holds the protected transaction in its mempool, mines it.
+- **The other signing paths** (`musigpartialsign` and `generateposblock`, which
+  coordinators use) need the same check.
+- **What the member has at that moment.** It has the mempool. `InvalidateBlock`
+  re-admits every disconnected transaction on anchored chains
+  (`MaybeUpdateMempoolForReorg`; the `add_to_mempool` line is uncapped when
+  `g_con_bitcoin_anchor` is set). It also has the waiting set of claims
+  (specification, section 6.3).
+- **What it lacks.** Neither of those records where a transaction came from,
+  and a transaction the mempool later evicts or refuses would drop out. So the
+  protected set must be a new local record: the transaction ids and spent
+  outpoints of the disconnected certified blocks. It is filled from the
+  disconnect pool after the disconnect, never on its path. No consensus data is
+  needed.
+
+**7.2 Who must be dishonest.** The replacement block's committee is drawn again
+from the new state, but any member that holds the protected set refuses to
+sign. A conflicting block therefore needs a quorum made only of members that
+are dishonest, or unaware of the disconnected block (offline through it,
+restarted since, or never having had it):
+
+- **Public committee** (the testnet: 250 seats, quorum 126): dishonest plus
+  unaware members must hold at least 126 seats, a strict majority of the stake
+  behind the committee. That is the same coalition that can already certify two
+  blocks at one height. The gap falls back to the chain's own safety
+  assumption, from one producer plus a Bitcoin reorganization.
+- **Private-VRF committee** (quorum: a strict majority of the expected size,
+  51 of 100): the drawn set varies. With 40 % of stake dishonest or unaware, a
+  draw holds 51 or more of them about 1.6 % of the time. The attacker also has
+  to lead that slot, and it has only the slots before an honest leader re-mines
+  the protected transaction, usually one or two.
+- **A restart.** The set lives in memory, so a member that restarts between the
+  disconnect and the vote is unaware. Persisting it at shutdown, as the mempool
+  is persisted, closes that.
+
+**7.3 The escaping-stall path is the hole the rule must also cover.** A Bitcoin
+reorganization `d` blocks deep leaves Sequentia's tip anchored at or below the
+fork point, while Bitcoin's new tip is at least `d + 1` above it. From `d = 2`,
+the first new block can therefore escape a stall (an anchor gap of 3 or more,
+PoS document section 5) and be certified by **a single signer**: the seller's
+producer, carrying the respend. Refusing to sign is then not enough. The rule
+needs a second arm:
+- a member refuses to sign any block whose own transactions, or those of its
+  ancestors above the disconnect point, conflict with the protected set. So it
+  never extends that block;
+- it signs a sibling at that block's height, on that block's parent, which is
+  what the share-lock's rival-parent arm already does for same-height rivals.
+
+A certified sibling beats an escaping-stall block at the same height (the
+comparator's first key, PoS document section 6), so every node, including
+those without the rule, moves to it. This works when the honest and aware
+members hold a quorum themselves. If they hold fewer than a quorum but more
+than `K` minus the quorum, neither side certifies at full quorum. The
+conflicting block then stays a tip that no honest member extends: finality
+stalls until stake moves, and the respend never becomes final.
+
+**7.4 Bounds.**
+- **Size.** A reorganization `N` Bitcoin blocks deep disconnects about `10N`
+  Sequentia blocks of at most 89,999 virtual bytes each. That is at most about
+  8,200 transactions per Bitcoin block of depth at the smallest transaction
+  size, so about 82,000 for `N = 10`. Each entry is one transaction id plus its
+  spent outpoints, a few megabytes in all. Filling the set is a hash insertion
+  per input, negligible beside the 0.3 ms per transaction that re-admission
+  already costs (Sequentia #351), and it is done after the disconnect so as
+  not to lengthen it. Checking a proposal is one lookup per input.
+- **What removes an entry:**
+  - the transaction is mined on the active chain;
+  - the original branch returns;
+  - the transaction becomes invalid for good. A claim is invalid for good
+    when its payment is double-spent in Bitcoin's best chain, which the node
+    checks with its daemon. A claim whose payment is merely above the anchor
+    stays protected;
+  - a window ends: 144 Bitcoin blocks, as for the waiting set.
+- **What protection costs a seller:** inside the window, a legitimate refund
+  is delayed while a claim that conflicts with it may still return.
+
+**7.5 Anchoring stays supreme.** The rule changes only which new blocks a member
+signs. The watcher disconnects exactly as now, nothing holds a block whose
+anchor Bitcoin replaced, and following a reorganization is not delayed: the set
+is filled after the disconnect. A conflicting proposal costs at most one round
+before the next leader. Nothing protected can resist a later Bitcoin
+reorganization. Every protected transaction is still checked against the new
+chain, and one whose Bitcoin facts moved stops being valid there.
+
+**7.6 The contested-anchor jump (proof review KR4, F1).** During a sustained
+Bitcoin fork, producers keep recording the shared ancestor. The anchor can then
+jump from below the payment to above `R` in one block, and a seller producing
+that block mines its refund. A signing rule ("do not certify a refund while
+holding a valid claim for the same coin") does not close this, for two
+reasons:
+- members do not hold the claim before the jump. The mempool refuses it with
+  `btcpay-not-in-anchor-chain`, and the waiting set holds only claims
+  disconnected by a reorganization;
+- a jump of 3 or more lets the jump block escape a stall with one signer, as
+  in 7.3.
+
+The fix belongs in the floor, and it is free before activation, since the rule
+is active nowhere. Judge an anchor floor not against the block's own anchor but
+against the anchor of the block `M` places below it. A refund is then valid only
+once `M` blocks anchored at or above `R` have passed, in each of which the claim
+was valid and preferred by every honest mempool. A seller who also produces
+must then produce all `M` of them, which happens with probability `s^M` for a
+seller with a share `s` of the blocks. The check is deterministic, needs no
+member's state, and reuses the ancestor search that check 6 already does. A
+script cannot do this, because a script is a pure function of the transaction
+and cannot read an ancestor's anchor.
+
+## 8. Verdict
+
+| Form | What it closes | What it rests on | Cost |
+|---|---|---|---|
+| Per-trade lock, no default wait (three opcodes, as specified) | Front-running, races, the seller's self-payment (the claim needs the buyer's key) | No Bitcoin reorganization through the lock's anchor while the seller controls the producer that re-mines it; the opt-in wait covers that for a buyer who wants it | Nothing new. The seller is online for each trade. Needs the KR4 F1 floor fix (7.6) |
+| Certification rule (signing policy, no opcode) | The per-trade gap, with both arms of 7.3 | Members holding a quorum honest and aware of the disconnected block: the chain's own safety assumption | Node policy in `DriveRound` and the signing RPCs, a protected set of a few MB persisted across restarts, a refund delayed up to the window. Nothing for wallets; sellers hold nothing; nobody waits. Needs F1's floor fix |
+| Bitcoin-coin mutex (fourth opcode), one coin per lot | The gap, drains, races, late payments (no deadline, so no 9.1), filled margins, and F1 (there is no `R`) | Bitcoin's one-spend rule; the slot older than the reorganization | One opcode (free before activation). A coin per lot, which a service can fund. A payer able to build transactions. Cancelling takes one Bitcoin confirmation. Liveness depends on the coin's signer |
+| The same, chained (6.1) | As above, with proportional fills | As above | One funded coin per offer; index `-1` (the payment's transaction id); a signer online per fill; throughput bounded by Bitcoin's unconfirmed chains |
+| HTLC payment (three opcodes) | Drains, races and late payments, which all become refunds | The buyer reveals its secret only after its reservation is as old as it chooses | The gap moves to after the payment rather than going. Two-step fills; the seller or a watchtower sweeps before `T`; the buyer refunds after `T` |
+
+**In plain words.** The standing offer built from today's opcodes does not
+work: the seller takes the buyer's payment by paying itself (SO7). The cheapest
+real fix needs no new opcode and no change for anyone's wallet. Committee
+members refuse to certify a block that undoes a certified transaction which a
+Bitcoin reorganization disconnected, and they refuse to build on such a block.
+Making the seller's attack work then takes a majority of the committee, which
+is what the whole chain already trusts. It must also cover blocks that escape a
+stall, or a single producer still suffices after a reorganization two Bitcoin
+blocks deep. The bitcoin-coin mutex is stronger, because it rests on Bitcoin
+alone and also ends late-payment losses and the anchor-jump refund. In return
+it needs a fourth opcode, a payer able to build transactions, and a signer for
+each coin, which a service can be, so the seller holds no bitcoin. For the
+wallets now: the per-trade lock with no default wait, the certification rule in
+the node, and F1's fix in the floor. The fourth opcode is for the owner to add
+before activation if he wants the guarantee to rest on Bitcoin alone.
+
+## 9. The runs
 
 `test/functional/feature_btc_payment_standing_offer.py` uses the pinned
 binaries of `f9386f36`, Bitcoin Core 28 as the parent chain, `-par=1` and
