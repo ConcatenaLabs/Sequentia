@@ -79,8 +79,9 @@ online:
   fresh proof. The buyer's completion service does so after every reorganization
   until the claim's block is final (section 8.5): the completion service is
   the guarantee the swap relies on. A node that watches Bitcoin also re-links a
-  fresh proof itself for the claims it holds (section 6.3: at most 1,000, held
-  by fee per virtual byte, each for at most 144 Bitcoin blocks), from the
+  fresh proof itself for the claims it holds (section 6.3: every claim the
+  blocks disconnected by a Bitcoin reorganization 10 blocks deep can carry,
+  each for at most 144 Bitcoin blocks), from the
   variants it kept and, when none of them stands, from a search of Bitcoin's
   recent blocks for any payment to the script those variants name. That search
   is what brings a held claim back with nobody online, as whitepaper section 5.3
@@ -496,11 +497,11 @@ claim it holds back with nobody online.** What remains for an attacker is what
 section 9.3 already accepts: taking the buyer's payment itself out of Bitcoin's
 chain, or making it pay another script, which leaves the buyer with its
 bitcoin; a buyer's payment older than the search's window (section 6.3) when the
-reorganization comes; and a claim kept out of a node's waiting set by 1,000
-claims that each pay more per virtual byte (section 6.3), which costs about 830
-times the claim's own fee at every reorganization it is aimed at. In the
-last two, the claim comes back only when the buyer's wallet or completion
-service submits it, and is lost if both stay offline until `R`.
+reorganization comes; and a claim kept out of a node's waiting set because a
+reorganization deeper than the set covers disconnected more claims, each paying
+more per virtual byte, than the set holds (section 6.3). In the last two, the
+claim comes back only when the buyer's wallet or completion service submits it,
+and is lost if both stay offline until `R`.
 
 ### 6.3 Reorganizations, and the proof re-linked
 
@@ -514,35 +515,51 @@ service submits it, and is lost if both stay offline until `R`.
 - **The node re-links a fresh proof itself** (node policy, on every node that
   watches Bitcoin; every block producer does). It holds each claim evicted after
   a reorganization, keyed by transaction id, with the variants of section 6.2,
-  in a waiting set of at most 1,000 claims:
-  - **held by fee per virtual byte.** When the set is full, the held claim
-    paying the least per virtual byte is dropped for a newcomer paying more,
-    and a newcomer paying no more than every held claim is not held at all;
+  in a waiting set:
+  - **as large as the disconnected blocks can make it.** Claims of an
+    attacker's own that nobody can complete (they prove its own Bitcoin
+    transaction, which it double-spends) ride in the very blocks the
+    reorganization disconnects, and the reorganization refunds their fees. So
+    fees price nothing here, and the only bound on such claims is the block
+    space they take. The set holds every claim the Sequentia blocks of a
+    Bitcoin reorganization 10 blocks deep can carry: those blocks' count (10
+    Bitcoin blocks of 600 seconds over the chain's block spacing) times a
+    block's virtual size over the smallest claim's (160 virtual bytes, below
+    the 172 a claim can reach at the least: an input whose leaf only reads a
+    proof, the fee output alone, a 60-byte payment with one-level branches),
+    and their bytes: those blocks' weight, since a serialized byte weighs at
+    least one unit, plus 256 bytes an entry costs in memory besides its
+    variants. On a chain of 400,000-weight blocks every 60 seconds, and on one
+    of 4,000,000-weight blocks every 600, that is 62,500 claims and about
+    56 MB;
+  - **held by fee per virtual byte within those limits.** Past either, the held
+    claim paying the least per virtual byte is dropped for a newcomer paying
+    more, and a newcomer paying no more than every held claim is not held;
   - **forgotten at once when its lock coin is spent** on the active chain
-    (checked whenever the chain tip moves): such a claim can never be mined on
-    that chain;
+    (checked whenever the chain tip moves, in chunks that release the chain
+    lock between them): such a claim can never be mined on that chain;
   - **forgotten after one window:** a claim not re-attached within 144 Bitcoin
     blocks of being held is dropped with its variants. By then the search has
     covered the window below the height it was held at and every block mined
     since, so every payment that could still complete it has been looked for.
 
-  A claim the node did not hold, or has forgotten, comes back only when someone
-  submits it: the buyer's wallet or its completion service (section 8.5), which
-  is the guarantee. To keep one claim out of a node's waiting set an attacker
-  needs 1,000 claims of its own held there at the moment the reorganization
-  evicts it, each paying more per virtual byte. A claim is held only when a
-  reorganization evicts it from the pool or from a disconnected block, so those
-  claims must have been pooled or mined just before it, offering their fees:
-  1,000 times the claim's fee per virtual byte times their own size. With the
-  smallest claims (252 virtual bytes, a leaf any proof opens, against 304 for a
-  buyer's claim) that is about 830 times the claim's own fee, paid in full
-  whenever the Bitcoin block the attacker bets on is not orphaned. A
-  held claim lasts one window at most and goes as soon as its coin is spent, so
-  the cost is paid again for every reorganization aimed at.
+  To keep one claim out of the set, an attacker must have had more claims than
+  the set holds, each paying more per virtual byte, mined in the blocks that
+  one reorganization disconnects. That takes the block space of a Bitcoin
+  reorganization deeper than 10 blocks: being mined in every Sequentia block
+  of that span, at fees refunded only if the reorganization comes, or causing
+  the reorganization itself. Past that depth, a claim the node did not hold, or
+  has forgotten, comes back only when someone submits it: the buyer's wallet or
+  its completion service (section 8.5), which is the guarantee.
 
   The work runs on its own thread, beside the anchor watcher and never on its
   path, so nothing it does delays an anchor-driven reorganization:
-  - held claims are tried highest fee per virtual byte first;
+  - held claims that may still complete are tried before those that cannot,
+    and each group highest fee per virtual byte first. A claim may still
+    complete when a payment its proofs prove is in the recent blocks of
+    Bitcoin's best chain (or is older than them, so not known to be gone), or
+    when the search found a transaction in the window paying a script it
+    names. Claims nobody can satisfy never use up a tick ahead of one that can;
   - a claim is tried again only when Bitcoin's tip or the chain tip has moved
     since its last try, and each tick stops after 500 ms of work, the rest
     waiting for the next tick. The budget is checked before every step: each

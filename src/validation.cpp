@@ -423,14 +423,29 @@ static bool AnchorRecordedOnBranch(const CBlockIndex* index, uint32_t a, const u
 //!   after a reorganization, whatever was seen first.
 //! In total at most -btcpaymaxvariantbytes are kept. Over that, the transaction
 //! id paying the least per stored virtual byte is dropped first, as the mempool
-//! evicts, and ids waiting for re-attachment go last.
+//! evicts. Claims waiting for re-attachment, and their variants, are bounded by
+//! the waiting set's own limits instead (below).
 static constexpr size_t BTCPAY_MAX_VARIANTS = 8;
 static constexpr int64_t BTCPAY_MAX_VARIANT_BYTES = 32 << 20;
-//! Claims waiting for re-attachment: at most this many, held by fee per
-//! virtual byte (the lowest is dropped for a newcomer paying more), each for at
-//! most one search window of Bitcoin blocks, and forgotten at once when a coin
-//! it spends with a record is spent on the active chain (doc 6.3).
-static constexpr size_t BTCPAY_MAX_PENDING = 1000;
+//! Claims waiting for re-attachment (doc 6.3). The set holds every claim the
+//! blocks disconnected by a Bitcoin reorganization BTCPAY_COVERED_BTC_DEPTH
+//! blocks deep can carry. A claim of an attacker's own rides in those blocks and
+//! the reorganization refunds its fee, so fees price nothing here: only the
+//! block space such claims take bounds them. Within the limits, claims are held
+//! by fee per virtual byte (the lowest dropped for a newcomer paying more), each
+//! for one search window of Bitcoin blocks, and forgotten at once when a coin
+//! they spend with a record is spent on the active chain.
+static constexpr int64_t BTCPAY_COVERED_BTC_DEPTH = 10;
+static constexpr int64_t BTCPAY_BTC_BLOCK_SECONDS = 600;
+//! The smallest claim a block can hold: one input whose leaf only reads a proof
+//! (a 3-byte script and a 33-byte control block), the fee output alone, and a
+//! record (178 bytes) over a 60-byte payment, branches of depth 1 and no link:
+//! 96 bytes outside the witness and about 305 in it, 172 virtual bytes. A
+//! smaller figure only makes the set larger.
+static constexpr int64_t BTCPAY_MIN_CLAIM_VSIZE = 160;
+//! What a held entry costs in memory besides its variants: its node in two
+//! maps, its key and its lock outpoints.
+static constexpr int64_t BTCPAY_PENDING_ENTRY_BYTES = 256;
 static constexpr int BTCPAY_PENDING_WINDOW = 144;
 static Mutex g_btcpay_pending_mutex;
 //! What a variant proves, per input (null where an input proves nothing): the
@@ -457,7 +472,9 @@ static std::map<uint256, BtcPayVariants> g_btcpay_variants GUARDED_BY(g_btcpay_p
 //! (fee per stored virtual byte, order) -> txid: the eviction order.
 static std::map<std::pair<double, uint64_t>, uint256> g_btcpay_by_density GUARDED_BY(g_btcpay_pending_mutex);
 static uint64_t g_btcpay_variant_next GUARDED_BY(g_btcpay_pending_mutex) = 0;
-static int64_t g_btcpay_variant_bytes GUARDED_BY(g_btcpay_pending_mutex) = 0;
+static int64_t g_btcpay_variant_bytes GUARDED_BY(g_btcpay_pending_mutex) = 0;   //!< of ids not waiting
+//! The waiting set's memory: each entry's own cost and its variants' bytes.
+static int64_t g_btcpay_pending_bytes GUARDED_BY(g_btcpay_pending_mutex) = 0;
 //! A claim waiting for re-attachment.
 struct BtcPayPending {
     int first_seen{-1};            //!< the Bitcoin height when first held (-1 until the worker sees it)
@@ -514,6 +531,51 @@ static int64_t BtcPayMaxVariantBytes()
     return limit;
 }
 
+//! The waiting set's limits, from this chain's block size and spacing: the
+//! claims (count) and the bytes (every serialized byte weighs at least one
+//! weight unit) that the Sequentia blocks of BTCPAY_COVERED_BTC_DEPTH Bitcoin
+//! blocks can carry. 62,500 claims and about 56 MB on a chain of 400,000-weight
+//! blocks every 60 seconds, and on one of 4,000,000-weight blocks every 600.
+struct BtcPayPendingLimits {
+    size_t count;
+    int64_t bytes;
+};
+static const BtcPayPendingLimits& BtcPayPendingCaps()
+{
+    static const BtcPayPendingLimits caps = [] {
+        const Consensus::Params& p = Params().GetConsensus();
+        const int64_t weight = p.nMaxBlockWeight ? p.nMaxBlockWeight : MAX_BLOCK_WEIGHT;
+        const int64_t spacing = std::max<int64_t>(1, p.pos_block_spacing > 0 ? p.pos_block_spacing : p.nPowTargetSpacing);
+        const int64_t blocks = BTCPAY_COVERED_BTC_DEPTH * std::max<int64_t>(1, (BTCPAY_BTC_BLOCK_SECONDS + spacing - 1) / spacing);
+        BtcPayPendingLimits c;
+        c.count = (size_t)(blocks * (weight / WITNESS_SCALE_FACTOR) / BTCPAY_MIN_CLAIM_VSIZE);
+        c.bytes = blocks * weight + (int64_t)c.count * BTCPAY_PENDING_ENTRY_BYTES;
+        return c;
+    }();
+    return caps;
+}
+
+static size_t BtcPayMaxWaiting()
+{
+    static const size_t limit = (size_t)std::max<int64_t>(1, gArgs.GetIntArg("-btcpaymaxwaiting", (int64_t)BtcPayPendingCaps().count));
+    return limit;
+}
+
+static void BtcPaymentForget(const uint256& txid) EXCLUSIVE_LOCKS_REQUIRED(g_btcpay_pending_mutex);
+
+//! Over either limit, the waiting claim paying the least per virtual byte goes
+//! first, with its variants.
+static void BtcPayEnforcePendingCaps() EXCLUSIVE_LOCKS_REQUIRED(g_btcpay_pending_mutex)
+{
+    while (!g_btcpay_pending_by_rate.empty() &&
+           (g_btcpay_pending_by_rate.size() > BtcPayMaxWaiting() || g_btcpay_pending_bytes > BtcPayPendingCaps().bytes)) {
+        const auto lowest = g_btcpay_pending_by_rate.begin();
+        LogPrint(BCLog::MEMPOOL, "BtcPayment: %s dropped from the waiting set (%.3f per vB): %u claims, %d bytes wait\n",
+                 lowest->second.ToString(), lowest->first.first, (unsigned)g_btcpay_pending_by_rate.size(), g_btcpay_pending_bytes);
+        BtcPaymentForget(uint256(lowest->second));
+    }
+}
+
 //! Whether a newcomer with `key`, `vsize` and `fee` would be kept beside the
 //! variants `v` already holds: nullopt if it would, else why not. `refresh` is
 //! set to the slot it would take over (a variant proving the same payments).
@@ -543,7 +605,7 @@ static std::optional<std::string> BtcPayWouldKeep(const BtcPayVariants* v, const
 
 static void BtcPayDropTxid(std::map<uint256, BtcPayVariants>::iterator it) EXCLUSIVE_LOCKS_REQUIRED(g_btcpay_pending_mutex)
 {
-    g_btcpay_variant_bytes -= it->second.bytes;
+    (g_btcpay_pending.count(it->first) ? g_btcpay_pending_bytes : g_btcpay_variant_bytes) -= it->second.bytes;
     g_btcpay_by_density.erase({it->second.Density(), it->second.order});
     g_btcpay_variants.erase(it);
 }
@@ -566,10 +628,12 @@ static void BtcPaymentNoteVariant(const CTransactionRef& tx, bool current)
         g_btcpay_by_density.erase({v.Density(), v.order});
     }
     v.fee = fee;
+    const bool waiting = g_btcpay_pending.count(txid);
+    int64_t& counted = waiting ? g_btcpay_pending_bytes : g_btcpay_variant_bytes;
     const auto take = [&](const CTransactionRef& t, int64_t sign) {
         v.vsize += sign * BtcPayTxVsize(*t);
         v.bytes += sign * BtcPayTxBytes(t);
-        g_btcpay_variant_bytes += sign * BtcPayTxBytes(t);
+        counted += sign * BtcPayTxBytes(t);
     };
     // The previous current variant, when another takes its place: kept if the
     // bounds admit it, else dropped.
@@ -633,27 +697,34 @@ static void BtcPaymentNoteVariant(const CTransactionRef& tx, bool current)
         return;
     }
     g_btcpay_by_density.emplace(std::make_pair(v.Density(), v.order), txid);
-    // Over the bound: the lowest fee per stored virtual byte goes first; claims
-    // waiting for re-attachment go last.
-    for (int pass = 0; pass < 2 && g_btcpay_variant_bytes > BtcPayMaxVariantBytes(); ++pass) {
-        for (auto d = g_btcpay_by_density.begin(); g_btcpay_variant_bytes > BtcPayMaxVariantBytes() && d != g_btcpay_by_density.end();) {
-            const uint256 victim = d->second;
-            if (pass == 0 && g_btcpay_pending.count(victim)) { ++d; continue; }
-            ++d;
-            LogPrint(BCLog::MEMPOOL, "BtcPayment: variants of %s dropped (%.3f per stored vB)%s\n", victim.ToString(),
-                     g_btcpay_variants.at(victim).Density(), pass ? ", waiting for re-attachment" : "");
-            BtcPayDropTxid(g_btcpay_variants.find(victim));
-        }
+    if (waiting) {
+        BtcPayEnforcePendingCaps();
+        return;
+    }
+    // Over the bound: the lowest fee per stored virtual byte goes first. The
+    // variants of waiting claims are the waiting set's, under its own limits.
+    for (auto d = g_btcpay_by_density.begin(); g_btcpay_variant_bytes > BtcPayMaxVariantBytes() && d != g_btcpay_by_density.end();) {
+        const uint256 victim = d->second;
+        ++d;
+        if (g_btcpay_pending.count(victim)) continue;
+        LogPrint(BCLog::MEMPOOL, "BtcPayment: variants of %s dropped (%.3f per stored vB)\n", victim.ToString(),
+                 g_btcpay_variants.at(victim).Density());
+        BtcPayDropTxid(g_btcpay_variants.find(victim));
     }
 }
 
-//! No longer waiting; its variants stay under the store's own bounds.
+//! No longer waiting; its variants go back under the store's own bounds.
 static void BtcPaymentNotWaiting(const uint256& txid) EXCLUSIVE_LOCKS_REQUIRED(g_btcpay_pending_mutex)
 {
     auto it = g_btcpay_pending.find(txid);
     if (it == g_btcpay_pending.end()) return;
     g_btcpay_pending_by_rate.erase({it->second.rate, it->second.order});
     g_btcpay_pending.erase(it);
+    g_btcpay_pending_bytes -= BTCPAY_PENDING_ENTRY_BYTES;
+    if (auto v = g_btcpay_variants.find(txid); v != g_btcpay_variants.end()) {
+        g_btcpay_pending_bytes -= v->second.bytes;
+        g_btcpay_variant_bytes += v->second.bytes;
+    }
 }
 
 //! Neither waiting nor stored.
@@ -667,9 +738,9 @@ static void BtcPaymentForget(const uint256& txid) EXCLUSIVE_LOCKS_REQUIRED(g_btc
 
 //! Hold a claim evicted after a reorganization for re-attachment. When the set
 //! is full, the claim paying the least per virtual byte is dropped for one
-//! paying more; a claim paying no more than every held one is not held. Who
-//! holds the set full therefore pays more per byte than the claim it keeps out,
-//! with claims that were pooled or mined (6.3).
+//! paying more; a claim paying no more than every held one is not held. The
+//! limits are what the disconnected blocks of a reorganization
+//! BTCPAY_COVERED_BTC_DEPTH Bitcoin blocks deep can carry (6.3).
 static void BtcPaymentNotePending(const CTransactionRef& tx)
 {
     const uint256 txid = tx->GetHash();
@@ -682,7 +753,7 @@ static void BtcPaymentNotePending(const CTransactionRef& tx)
     {
         LOCK(g_btcpay_pending_mutex);
         if (!g_btcpay_pending.count(txid)) {
-            if (g_btcpay_pending.size() >= BTCPAY_MAX_PENDING) {
+            if (g_btcpay_pending.size() >= BtcPayMaxWaiting()) {
                 const auto lowest = g_btcpay_pending_by_rate.begin();
                 if (lowest == g_btcpay_pending_by_rate.end() || rate <= lowest->first.first) {
                     LogPrint(BCLog::MEMPOOL, "BtcPayment: %s not held for re-attachment: %u claims wait, none paying "
@@ -698,6 +769,11 @@ static void BtcPaymentNotePending(const CTransactionRef& tx)
             p.order = g_btcpay_pending_next++;
             p.locks = std::move(locks);
             g_btcpay_pending_by_rate.emplace(std::make_pair(p.rate, p.order), txid);
+            g_btcpay_pending_bytes += BTCPAY_PENDING_ENTRY_BYTES;
+            if (auto v = g_btcpay_variants.find(txid); v != g_btcpay_variants.end()) {
+                g_btcpay_variant_bytes -= v->second.bytes;
+                g_btcpay_pending_bytes += v->second.bytes;
+            }
             g_btcpay_pending.emplace(txid, std::move(p));
         }
     }
@@ -9009,6 +9085,34 @@ const std::vector<uint256>& BlockTxids(BtcPayAttacher& a, const uint256& hash, i
     return a.block_txids.emplace(hash, std::make_pair(height, std::move(ids))).first->second.second;
 }
 
+//! The transactions of the last BTCPAY_RECENT_BLOCKS blocks of Bitcoin's best
+//! chain, by txid: read once per Bitcoin tip, the blocks' contents cached by hash.
+const std::map<uint256, std::pair<int, uint256>>& RecentTxids(BtcPayAttacher& a)
+{
+    if (!a.recent) {
+        std::map<uint256, std::pair<int, uint256>> recent;
+        const int low = std::max(0, a.btc_height - BTCPAY_RECENT_BLOCKS + 1);
+        std::vector<UniValue> params;
+        for (int h = a.btc_height; h >= low; --h) {
+            UniValue hp(UniValue::VARR); hp.push_back(h);
+            params.push_back(hp);
+        }
+        const std::vector<UniValue> replies = CallMainChainRPCBatch("getblockhash", params);
+        for (size_t k = 0; k < replies.size(); ++k) {
+            const UniValue& r = find_value(replies[k], "result");
+            if (!r.isStr()) throw std::runtime_error("getblockhash failed");
+            const int h = a.btc_height - (int)k;
+            const uint256 hash = uint256S(r.get_str());
+            if (!a.block_txids.count(hash)) CheckBtcPayBudget(a);
+            for (const uint256& id : BlockTxids(a, hash, h)) recent.emplace(id, std::make_pair(h, hash));
+        }
+        a.recent = std::move(recent);
+        LogPrint(BCLog::MEMPOOL, "BtcPayment: read the %u most recent Bitcoin blocks at height %d (%u blocks known)\n",
+                 (unsigned)replies.size(), a.btc_height, (unsigned)a.block_txids.size());
+    }
+    return *a.recent;
+}
+
 //! Where the payment is on Bitcoin's best chain now, or nullopt.
 std::optional<std::pair<int, uint256>> FindBtcPayment(BtcPayAttacher& a, const Sidechain::Bitcoin::CTransaction& payment)
 {
@@ -9048,27 +9152,7 @@ std::optional<std::pair<int, uint256>> FindBtcPayment(BtcPayAttacher& a, const S
     if (!found && !any_unspent_seen) {
         // Every output already spent: the payment can only be found in the
         // blocks it is still searched in, the recent ones, read once per tip.
-        if (!a.recent) {
-            std::map<uint256, std::pair<int, uint256>> recent;
-            const int low = std::max(0, a.btc_height - BTCPAY_RECENT_BLOCKS + 1);
-            std::vector<UniValue> params;
-            for (int h = a.btc_height; h >= low; --h) {
-                UniValue hp(UniValue::VARR); hp.push_back(h);
-                params.push_back(hp);
-            }
-            const std::vector<UniValue> replies = CallMainChainRPCBatch("getblockhash", params);
-            for (size_t k = 0; k < replies.size(); ++k) {
-                const UniValue& r = find_value(replies[k], "result");
-                if (!r.isStr()) throw std::runtime_error("getblockhash failed");
-                const int h = a.btc_height - (int)k;
-                const uint256 hash = uint256S(r.get_str());
-                if (!a.block_txids.count(hash)) CheckBtcPayBudget(a);
-                for (const uint256& id : BlockTxids(a, hash, h)) recent.emplace(id, std::make_pair(h, hash));
-            }
-            a.recent = std::move(recent);
-            LogPrint(BCLog::MEMPOOL, "BtcPayment: read the %u most recent Bitcoin blocks at height %d (%u blocks known)\n",
-                     (unsigned)replies.size(), a.btc_height, (unsigned)a.block_txids.size());
-        }
+        RecentTxids(a);
         if (auto r = a.recent->find(txid); r != a.recent->end()) found = r->second;
     }
     a.lookup_next.erase(txid);
@@ -9258,12 +9342,9 @@ std::vector<BtcPayWant> WantsOf(const CTransactionRef& v)
 //! recorded anchor and a claim waits at most that long.
 constexpr int BTCPAY_SEARCH_BLOCKS = 144;
 
-//! A waiting claim whose stored variants all failed: the outputs they name, how
-//! far down the search reaches for it, and the tips it was last searched at.
-//! Only the worker thread touches it.
+//! A waiting claim whose stored variants all failed: the tips it was last
+//! searched at, and the candidates tried there. Only the worker thread touches it.
 struct BtcPayWaiting {
-    std::vector<BtcPayWant> wants;
-    int low{0};
     std::pair<uint256, uint256> searched;
     //! The candidates tried at `tried_at`, so a search stopped by the budget
     //! goes on with the next one.
@@ -9398,6 +9479,56 @@ bool TrySubmit(CChainState& cs, const CTransactionRef& tx, const uint256& txid, 
              res.m_state.GetRejectReason());
     return false;
 }
+//! What a held claim names, read once from its variants: the payments its
+//! proofs prove (with the height each proof declares), the outputs the search
+//! looks for, and how far down the search reaches for it.
+struct BtcPayClaimInfo {
+    std::vector<std::pair<uint256, uint32_t>> payments;
+    std::vector<BtcPayWant> wants;
+    int low{0};
+};
+std::map<uint256, BtcPayClaimInfo> g_btcpay_info;
+
+BtcPayClaimInfo ClaimInfoOf(const std::vector<CTransactionRef>& variants, int btc_height)
+{
+    BtcPayClaimInfo info;
+    info.low = btc_height - BTCPAY_SEARCH_BLOCKS + 1;
+    for (const auto& v : variants) {
+        for (auto& want : WantsOf(v)) info.wants.push_back(std::move(want));
+        for (size_t i = 0; i < v->vin.size() && i < v->witness.vtxinwit.size(); ++i) {
+            BtcPayment::Records records;
+            std::string why;
+            if (v->vin[i].m_is_pegin ||
+                !BtcPayment::ParseRecords(v->witness.vtxinwit[i].m_pegin_witness.stack, records, why)) continue;
+            if (records.floor) info.low = std::min<int>(info.low, (int)*records.floor);   // a claim carrying a floor: down to it
+            if (records.proof) info.payments.emplace_back(records.proof->tx->GetHash(), records.proof->height);
+        }
+    }
+    return info;
+}
+
+//! Whether a held claim may still complete at the current tips: a payment its
+//! proofs prove may still be on Bitcoin's best chain (it is in the recent
+//! blocks, or older than them and so not known to be gone), or the search found
+//! a candidate in the window paying a script it names. Read from what this
+//! tick's lookups already hold; asks the daemon nothing.
+bool ClaimMayComplete(const BtcPayAttacher& a, const BtcPayClaimInfo& info)
+{
+    for (const auto& [payment, height] : info.payments) {
+        if ((int)height <= a.btc_height - BTCPAY_RECENT_BLOCKS) return true;
+        if (a.recent && a.recent->count(payment)) return true;
+    }
+    for (const BtcPayWant& w : info.wants) {
+        const auto f = a.found.find(w.spk_hash);
+        if (f == a.found.end()) continue;
+        for (const auto& cand : f->second) {
+            if (cand.tx->GetHash() == w.proven_tx) continue;
+            const auto hdr = a.headers.find(cand.height);
+            if (hdr != a.headers.end() && hdr->second.GetHash() == cand.block) return true;
+        }
+    }
+    return false;
+}
 } // namespace
 
 void BtcPaymentReattachTick(ChainstateManager& chainman)
@@ -9414,24 +9545,36 @@ void BtcPaymentReattachTick(ChainstateManager& chainman)
     }
     BtcPayAttacher& a = g_btcpay_attacher;
     // A waiting claim whose lock coin is spent on the active chain can never be
-    // mined on it: forgotten at once, whenever the chain tip moves.
+    // mined on it: forgotten at once, whenever the chain tip moves. In chunks,
+    // the chain lock released between them.
     if (seq_tip != a.swept_seq_tip) {
         a.swept_seq_tip = seq_tip;
-        LOCK2(cs_main, pool.cs);
-        LOCK(g_btcpay_pending_mutex);
-        std::vector<std::pair<uint256, COutPoint>> spent;
-        for (const auto& [txid, p] : g_btcpay_pending) {
-            for (const COutPoint& lock : p.locks) {
-                if (cs.CoinsTip().AccessCoin(lock).IsSpent() && !pool.exists(GenTxid::Txid(lock.hash))) {
-                    spent.emplace_back(txid, lock);
-                    break;
+        std::vector<std::pair<uint256, std::vector<COutPoint>>> held;
+        {
+            LOCK(g_btcpay_pending_mutex);
+            held.reserve(g_btcpay_pending.size());
+            for (const auto& [txid, p] : g_btcpay_pending) held.emplace_back(txid, p.locks);
+        }
+        constexpr size_t SWEEP_CHUNK = 500;
+        for (size_t at = 0; at < held.size(); at += SWEEP_CHUNK) {
+            std::vector<std::pair<uint256, COutPoint>> spent;
+            {
+                LOCK2(cs_main, pool.cs);
+                for (size_t k = at; k < std::min(held.size(), at + SWEEP_CHUNK); ++k) {
+                    for (const COutPoint& lock : held[k].second) {
+                        if (cs.CoinsTip().AccessCoin(lock).IsSpent() && !pool.exists(GenTxid::Txid(lock.hash))) {
+                            spent.emplace_back(held[k].first, lock);
+                            break;
+                        }
+                    }
                 }
             }
-        }
-        for (const auto& [txid, lock] : spent) {
-            LogPrint(BCLog::MEMPOOL, "BtcPayment: %s no longer waits: its lock coin %s is spent on the active chain\n",
-                     txid.ToString(), lock.ToString());
-            BtcPaymentForget(txid);
+            LOCK(g_btcpay_pending_mutex);
+            for (const auto& [txid, lock] : spent) {
+                LogPrint(BCLog::MEMPOOL, "BtcPayment: %s no longer waits: its lock coin %s is spent on the active chain\n",
+                         txid.ToString(), lock.ToString());
+                BtcPaymentForget(txid);
+            }
         }
     }
     // Highest fee per virtual byte first.
@@ -9439,6 +9582,7 @@ void BtcPaymentReattachTick(ChainstateManager& chainman)
     std::set<uint256> pending;
     {
         LOCK(g_btcpay_pending_mutex);
+        order.reserve(g_btcpay_pending_by_rate.size());
         for (auto r = g_btcpay_pending_by_rate.rbegin(); r != g_btcpay_pending_by_rate.rend(); ++r) order.push_back(r->second);
         pending.insert(order.begin(), order.end());
     }
@@ -9447,6 +9591,12 @@ void BtcPaymentReattachTick(ChainstateManager& chainman)
     }
     for (auto t = a.progress.begin(); t != a.progress.end();) {
         if (!pending.count(t->first)) t = a.progress.erase(t); else ++t;
+    }
+    for (auto t = g_btcpay_info.begin(); t != g_btcpay_info.end();) {
+        if (!pending.count(t->first)) t = g_btcpay_info.erase(t); else ++t;
+    }
+    for (auto w = g_btcpay_waiting.begin(); w != g_btcpay_waiting.end();) {
+        if (!pending.count(w->first)) w = g_btcpay_waiting.erase(w); else ++w;
     }
     if (pending.empty()) return;
     const int64_t started = GetTimeMillis();
@@ -9493,132 +9643,131 @@ void BtcPaymentReattachTick(ChainstateManager& chainman)
             pending.erase(txid);
         }
     }
+    const auto variants_of = [&](const uint256& txid) {
+        std::vector<CTransactionRef> variants;
+        LOCK(g_btcpay_pending_mutex);
+        if (auto v = g_btcpay_variants.find(txid); v != g_btcpay_variants.end()) {
+            if (v->second.current) variants.push_back(v->second.current);
+            variants.insert(variants.end(), v->second.txs.begin(), v->second.txs.end());
+        }
+        return variants;
+    };
+    // What each claim names, the recent blocks, and the scan for every script a
+    // held claim names: all kept across ticks, the budget checked throughout.
+    try {
+        for (const uint256& txid : order) {
+            if (!pending.count(txid) || g_btcpay_info.count(txid)) continue;
+            CheckBtcPayBudget(a);
+            g_btcpay_info.emplace(txid, ClaimInfoOf(variants_of(txid), a.btc_height));
+        }
+        RecentTxids(a);
+        std::vector<BtcPayWant> wants;
+        int low = a.btc_height - BTCPAY_SEARCH_BLOCKS + 1;
+        for (const auto& [txid, info] : g_btcpay_info) {
+            wants.insert(wants.end(), info.wants.begin(), info.wants.end());
+            low = std::min(low, info.low);
+        }
+        if (!wants.empty()) SearchPaidScripts(a, wants, low);
+    } catch (const std::exception& e) {
+        LogPrint(BCLog::MEMPOOL, "BtcPayment: re-attach lookups: %s\n", e.what());
+        return report(", the lookups go on next tick");
+    }
+    // A claim that may still complete is tried before every claim that cannot:
+    // claims nobody can satisfy never use up a tick ahead of one that can.
+    std::vector<uint256> may, cannot;
     for (const uint256& txid : order) {
         if (!pending.count(txid)) continue;
-        if (ShutdownRequested() || GetTimeMillis() > deadline) return report(", stopped at its budget");
-        const auto state = std::make_pair(a.btc_tip, seq_tip);
-        if (auto t = a.tried.find(txid); t != a.tried.end() && t->second == state) continue;
-        ++worked;
-        if (WITH_LOCK(pool.cs, return pool.exists(GenTxid::Txid(txid)))) {
-            LOCK(g_btcpay_pending_mutex);
-            BtcPaymentNotWaiting(txid);
-            pending.erase(txid);
-            continue;
-        }
-        std::vector<CTransactionRef> variants;
-        {
-            LOCK(g_btcpay_pending_mutex);
-            if (auto v = g_btcpay_variants.find(txid); v != g_btcpay_variants.end()) {
-                if (v->second.current) variants.push_back(v->second.current);
-                variants.insert(variants.end(), v->second.txs.begin(), v->second.txs.end());
-            }
-        }
-        bool done = false;
-        // The stored variants first, as they are: no Bitcoin daemon is asked.
-        // Then each with a fresh proof of the payments it names. The budget is
-        // checked before every step, and a tick it stops goes on from that step.
-        BtcPayClaimProgress& prog = a.progress[txid];
-        if (prog.state != state) {
-            prog.state = state;
-            prog.step = 0;
-        }
-        const size_t nvar = variants.size();
-        try {
-            for (; prog.step < 2 * nvar && !done; ++prog.step) {
-                CheckBtcPayBudget(a);
-                const CTransactionRef& v = variants[prog.step % nvar];
-                if (prog.step < nvar) {
-                    done = TrySubmit(cs, v, txid, "a stored");
-                } else {
-                    const auto fresh = FreshVariant(a, cs, v);
-                    if (fresh && (*fresh)->GetWitnessHash() != v->GetWitnessHash()) done = TrySubmit(cs, *fresh, txid, "a fresh");
-                }
-            }
-        } catch (const std::exception& e) {
-            // The budget or the daemon, not the claim: it goes on next tick.
-            LogPrint(BCLog::MEMPOOL, "BtcPayment: re-attach of %s: %s\n", txid.ToString(), e.what());
-            return report(", stopped at its budget");
-        }
-        a.tried[txid] = state;
-        a.progress.erase(txid);
-        if (done) {
-            LOCK(g_btcpay_pending_mutex);
-            BtcPaymentNotWaiting(txid);
-            pending.erase(txid);
-        } else {
-            // Kept for the search by paid script, which runs once every waiting
-            // claim has been tried at these tips.
-            BtcPayWaiting& w = g_btcpay_waiting[txid];
-            w.wants.clear();
-            w.low = a.btc_height - BTCPAY_SEARCH_BLOCKS + 1;
-            for (const auto& v : variants) {
-                for (auto& want : WantsOf(v)) w.wants.push_back(std::move(want));
-                for (size_t i = 0; i < v->vin.size() && i < v->witness.vtxinwit.size(); ++i) {
-                    BtcPayment::Records records;
-                    std::string why;
-                    if (!v->vin[i].m_is_pegin &&
-                        BtcPayment::ParseRecords(v->witness.vtxinwit[i].m_pegin_witness.stack, records, why) &&
-                        records.floor) {
-                        w.low = std::min<int>(w.low, (int)*records.floor);   // a claim carrying a floor: down to it
-                    }
-                }
-            }
-            w.searched = {};
-        }
-    }
-    // Every stored variant failed: search Bitcoin for any transaction paying the
-    // scripts those proofs name. The node cannot tell the buyer's payment from
-    // the seller's (same script, same amount), so the order the variants arrived
-    // in must not decide; this finds the buyer's payment whatever the store
-    // holds. One scan serves every waiting claim: it runs once all of them have
-    // been tried, each block read once for the scripts not yet looked for.
-    for (auto w = g_btcpay_waiting.begin(); w != g_btcpay_waiting.end();) {
-        if (!pending.count(w->first)) w = g_btcpay_waiting.erase(w); else ++w;
-    }
-    if (g_btcpay_waiting.empty()) return report("");
-    std::vector<BtcPayWant> wants;
-    int low = a.btc_height - BTCPAY_SEARCH_BLOCKS + 1;
-    for (const auto& [txid, w] : g_btcpay_waiting) {
-        wants.insert(wants.end(), w.wants.begin(), w.wants.end());
-        low = std::min(low, w.low);
-    }
-    try {
-        SearchPaidScripts(a, wants, low);
-    } catch (const std::exception& e) {
-        LogPrint(BCLog::MEMPOOL, "BtcPayment: search by paid script: %s\n", e.what());
-        return report(", the search goes on next tick");
+        (ClaimMayComplete(a, g_btcpay_info.at(txid)) ? may : cannot).push_back(txid);
     }
     const auto state = std::make_pair(a.btc_tip, seq_tip);
-    for (auto& [txid, waiting] : g_btcpay_waiting) {
-        if (ShutdownRequested() || GetTimeMillis() > deadline) return report(", stopped at its budget");
-        if (waiting.searched == state) continue;
-        if (waiting.tried_at != state) {
-            waiting.tried.clear();
-            waiting.tried_at = state;
-        }
-        bool done = false;
-        for (const BtcPayWant& w : waiting.wants) {
-            const auto f = a.found.find(w.spk_hash);
-            if (f == a.found.end()) continue;
-            // Every output paying the script is a candidate, largest first. Not
-            // only those paying at least the stored proof's value: the node does
-            // not know the price the script asks, and a seller paying itself a
-            // little more would otherwise hide the buyer's exact payment.
-            // Only transactions of the window's blocks on Bitcoin's best chain:
-            // where each is was recorded by the scan, so no daemon call locates it.
-            std::vector<std::tuple<CAmount, BtcPayFound, size_t>> cands;
-            for (const auto& cand : f->second) {
-                if (cand.tx->GetHash() == w.proven_tx) continue; // tried above, with a fresh proof
-                const auto hdr = a.headers.find(cand.height);
-                if (hdr == a.headers.end() || hdr->second.GetHash() != cand.block) continue;
-                for (size_t j = 0; j < cand.tx->vout.size(); ++j) {
-                    if (cand.tx->vout[j].scriptPubKey == w.spk) cands.emplace_back(cand.tx->vout[j].nValue, cand, j);
-                }
+    for (const std::vector<uint256>* group : {&may, &cannot}) {
+        for (const uint256& txid : *group) {
+            if (ShutdownRequested() || GetTimeMillis() > deadline) return report(", stopped at its budget");
+            if (auto t = a.tried.find(txid); t != a.tried.end() && t->second == state) continue;
+            ++worked;
+            if (WITH_LOCK(pool.cs, return pool.exists(GenTxid::Txid(txid)))) {
+                LOCK(g_btcpay_pending_mutex);
+                BtcPaymentNotWaiting(txid);
+                pending.erase(txid);
+                continue;
             }
-            std::stable_sort(cands.begin(), cands.end(), [](const auto& l, const auto& r) { return std::get<0>(l) > std::get<0>(r); });
-            for (const auto& [value, cand, j] : cands) {
-                if (done) break;
-                {
+            const std::vector<CTransactionRef> variants = variants_of(txid);
+            bool done = false;
+            // The stored variants first, as they are: no Bitcoin daemon is asked.
+            // Then each with a fresh proof of the payments it names. The budget is
+            // checked before every step, and a tick it stops goes on from that step.
+            BtcPayClaimProgress& prog = a.progress[txid];
+            if (prog.state != state) {
+                prog.state = state;
+                prog.step = 0;
+            }
+            const size_t nvar = variants.size();
+            try {
+                for (; prog.step < 2 * nvar && !done; ++prog.step) {
+                    CheckBtcPayBudget(a);
+                    const CTransactionRef& v = variants[prog.step % nvar];
+                    if (prog.step < nvar) {
+                        done = TrySubmit(cs, v, txid, "a stored");
+                    } else {
+                        const auto fresh = FreshVariant(a, cs, v);
+                        if (fresh && (*fresh)->GetWitnessHash() != v->GetWitnessHash()) done = TrySubmit(cs, *fresh, txid, "a fresh");
+                    }
+                }
+            } catch (const std::exception& e) {
+                // The budget or the daemon, not the claim: it goes on next tick.
+                LogPrint(BCLog::MEMPOOL, "BtcPayment: re-attach of %s: %s\n", txid.ToString(), e.what());
+                return report(", stopped at its budget");
+            }
+            a.tried[txid] = state;
+            a.progress.erase(txid);
+            if (done) {
+                LOCK(g_btcpay_pending_mutex);
+                BtcPaymentNotWaiting(txid);
+                pending.erase(txid);
+            } else {
+                // Kept for the search by paid script, which runs once every claim
+                // of its group has been tried at these tips.
+                g_btcpay_waiting[txid];
+            }
+        }
+        // Every stored variant failed: try every transaction the scan found
+        // paying a script those proofs name. The node cannot tell the buyer's
+        // payment from the seller's (same script, same amount), so the order
+        // the variants arrived in must not decide; this finds the buyer's
+        // payment whatever the store holds.
+        for (const uint256& txid : *group) {
+            if (!pending.count(txid)) continue;
+            const auto wit = g_btcpay_waiting.find(txid);
+            if (wit == g_btcpay_waiting.end()) continue;
+            BtcPayWaiting& waiting = wit->second;
+            if (ShutdownRequested() || GetTimeMillis() > deadline) return report(", stopped at its budget");
+            if (waiting.searched == state) continue;
+            if (waiting.tried_at != state) {
+                waiting.tried.clear();
+                waiting.tried_at = state;
+            }
+            bool done = false;
+            for (const BtcPayWant& w : g_btcpay_info.at(txid).wants) {
+                const auto f = a.found.find(w.spk_hash);
+                if (f == a.found.end()) continue;
+                // Every output paying the script is a candidate, largest first. Not
+                // only those paying at least the stored proof's value: the node does
+                // not know the price the script asks, and a seller paying itself a
+                // little more would otherwise hide the buyer's exact payment. Only
+                // transactions of the window's blocks on Bitcoin's best chain:
+                // where each is was recorded by the scan, so no daemon call locates it.
+                std::vector<std::tuple<CAmount, BtcPayFound, size_t>> cands;
+                for (const auto& cand : f->second) {
+                    if (cand.tx->GetHash() == w.proven_tx) continue; // tried above, with a fresh proof
+                    const auto hdr = a.headers.find(cand.height);
+                    if (hdr == a.headers.end() || hdr->second.GetHash() != cand.block) continue;
+                    for (size_t j = 0; j < cand.tx->vout.size(); ++j) {
+                        if (cand.tx->vout[j].scriptPubKey == w.spk) cands.emplace_back(cand.tx->vout[j].nValue, cand, j);
+                    }
+                }
+                std::stable_sort(cands.begin(), cands.end(), [](const auto& l, const auto& r) { return std::get<0>(l) > std::get<0>(r); });
+                for (const auto& [value, cand, j] : cands) {
+                    if (done) break;
                     if (waiting.tried.count({cand.tx->GetHash(), w.input * 65536 + j})) continue;
                     try {
                         CheckBtcPayBudget(a);   // per candidate; the next tick goes on with the next one
@@ -9645,13 +9794,14 @@ void BtcPaymentReattachTick(ChainstateManager& chainman)
                         return report(", the search goes on next tick");   // the budget or the daemon
                     }
                 }
+                if (done) break;
             }
-            if (done) break;
-        }
-        waiting.searched = state;
-        if (done) {
-            LOCK(g_btcpay_pending_mutex);
-            BtcPaymentNotWaiting(txid);
+            waiting.searched = state;
+            if (done) {
+                LOCK(g_btcpay_pending_mutex);
+                BtcPaymentNotWaiting(txid);
+                pending.erase(txid);
+            }
         }
     }
     report("");

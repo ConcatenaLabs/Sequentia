@@ -405,9 +405,16 @@ class BtcPaymentProofTest(BitcoinTestFramework):
             time.sleep(0.25)
         raise AssertionError("timed out: " + what)
 
-    def double_spend(self, txid):
-        """Replace an unconfirmed payment by one paying the buyer back."""
+    def double_spend(self, txid, wallet=None):
+        """Replace an unconfirmed payment by one paying the payer back."""
         b = self.btc_rpc()
+        if wallet is not None:
+            raw = b.getrawtransaction(txid, True)
+            ins = [{"txid": i["txid"], "vout": i["vout"]} for i in raw["vin"]]
+            value = sum(Decimal(str(wallet.gettransaction(i["txid"], True, True)["decoded"]["vout"][i["vout"]]["value"]))
+                        for i in ins)
+            new = b.createrawtransaction(ins, [{wallet.getnewaddress(): value - Decimal("0.001")}])
+            return b.sendrawtransaction(wallet.signrawtransactionwithwallet(new)["hex"])
         raw = b.getrawtransaction(txid, True)
         ins = [{"txid": i["txid"], "vout": i["vout"]} for i in raw["vin"]]
         total = sum(self.bbuyer.gettransaction(i["txid"])["details"] and
@@ -479,6 +486,7 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.orphaned_and_longest_links()
         self.variant_flood()
         self.waiting_set()
+        self.waiting_set_holds_the_disconnected_blocks()
         self.lighter_by_the_incremental_rate()
         self.search_budget()
         self.lagging_daemon()
@@ -1802,7 +1810,7 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         n = 1000
         # The regtest default re-checks the whole pool after every change; with
         # a thousand claims pooled that is most of the run.
-        fast = ["-checkmempool=0"]
+        fast = ["-checkmempool=0", "-btcpaymaxwaiting=%d" % n]   # the eviction rules, on a set of 1,000
         self.outside_spk = bytes([0, 20]) + os.urandom(20)
         coins = self.attacker_coins(n + 2)
 
@@ -2102,6 +2110,61 @@ class BtcPaymentProofTest(BitcoinTestFramework):
                 proc.wait(timeout=60)
         # Node 0 follows Bitcoin on its own; back to its normal state.
         self.mine_anchored(b.getblockcount())
+
+    def waiting_set_holds_the_disconnected_blocks(self):
+        self.step("N43 (PV15 X6) the waiting set holds what the disconnected blocks carry: 1,100 claims nobody can "
+                  "satisfy, mined with an honest claim paying less, do not keep it out")
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        n = 1100
+        self.restart_seq0(["-checkmempool=0"])
+        self.outside_spk = bytes([0, 20]) + os.urandom(20)
+        coins = self.attacker_coins(n)
+        lock = self.fresh_lock(deadline_in=400)
+        # The attacker's payment and the buyer's in one Bitcoin block X.
+        atx = self.bminer.sendtoaddress(self.bminer.getnewaddress(), 1)
+        ptx = self.pay(lock["addr"], lock["amount"])
+        x = self.btc_mine(1)[0]
+        self.mine_anchored(b.getblockheader(x)["height"])
+        make = self.block_records(x)
+        records = {}
+        attackers = []
+        for c in coins:
+            if c["C"] not in records:
+                records[c["C"]] = make(atx, c["C"])
+            t = self.attacker_spend(c, records[c["C"]], 1000, self.outside_spk)
+            node.sendrawtransaction(t.serialize().hex())
+            attackers.append(t.hash)
+        pr = self.proof_for(ptx, lock["C"], x)
+        honest = self.claim(lock, pr["record"], self.vout_paying(ptx, lock["addr"], x), fee=600)
+        node.sendrawtransaction(honest.serialize().hex())
+        high = 1000 / node.getmempoolentry(attackers[0])["vsize"]
+        low = 600 / node.getmempoolentry(honest.hash)["vsize"]
+        assert low < high
+        blk = self.mine(1)[0]
+        mined = set(node.getblock(blk)["tx"])
+        assert honest.hash in mined and all(t in mined for t in attackers)
+        # X leaves Bitcoin's chain: the attacker's payment is double-spent, the
+        # buyer's is mined again.
+        b.invalidateblock(x)
+        self.double_spend(atx, self.bminer)
+        self.btc_mine(2)
+        assert self.bbuyer.gettransaction(ptx)["confirmations"] > 0
+        self.wait_for(lambda: node.getblockheader(blk)["confirmations"] < 0, "the claims' block is disconnected", 120)
+        self.watcher_left(x)
+        t0 = time.time()
+        self.mine_anchored(b.getblockcount())
+        self.wait_for(lambda: honest.hash in node.getrawmempool(), "the honest claim re-attached", 120)
+        took = time.time() - t0
+        assert not [line for line in self.debug_lines(node, "not held for re-attachment") if honest.hash in line]
+        blk2 = self.mine(1)[0]
+        assert honest.hash in node.getblock(blk2)["tx"]
+        assert not set(attackers) & set(node.getblock(blk2)["tx"])
+        self.log.info("    %d claims at %.1f per vB nobody can satisfy and the buyer's at %.1f per vB, one block: the "
+                      "buyer's claim re-attached %.1f s after the new anchor and mined", n, high, low, took)
+        self.results.append((self.current, "%d unsatisfiable claims at %.1f per vB and the buyer's at %.1f per vB in the "
+                             "disconnected block: the buyer's re-attached in %.1f s and mined" % (n, high, low, took)))
+        self.restart_seq0()
 
     def anchor_driven_delay(self):
         """Seconds from Bitcoin orphaning the tip's anchor until the node disconnects that block."""
