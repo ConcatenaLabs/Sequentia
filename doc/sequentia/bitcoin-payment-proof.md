@@ -96,20 +96,24 @@ What being unsigned costs, and how each cost is closed:
   so the valid transaction is still fetched from other peers.
 - **A valid change could make the claim heavier**, lowering its fee rate to hold
   it back until the refund. So every record has **exactly one valid encoding**
-  for a given fact (section 3), and the mempool lets a lighter or fresher proof
-  replace a pooled one with the same transaction id (section 6.2). Equal-weight
-  variants remain possible only where a script reads a witness value it does not
-  constrain, as with any tapscript.
+  for a given fact (section 3), relay refuses anything else in the slot, and the
+  mempool lets a lighter or fresher proof replace a pooled one with the same
+  transaction id (section 6.2). What remains: a block's own producer can pad the
+  slot with records of an unknown type, which consensus ignores, and a script
+  that reads a witness value it does not constrain admits equal-weight
+  variants, as any tapscript does.
 - **A Simplicity jet** would see the slot through the change that adds the jet;
   the records do not move.
 
 ## 3. The records
 
 On a non-peg-in input the slot is either empty or holds records, one stack item
-each, in ascending type order, each type at most once. From activation, anything
-else in the slot of a non-peg-in input makes the transaction invalid: unknown
-types, a repeated type, items out of order, or bytes left over. This gives every
-record one valid encoding and ends the slot's use as unchecked data.
+each, whose first byte is the type. A record of a known type must be valid and
+may appear at most once. An item of any other type is ignored by consensus, so
+a later record type can be added as a tightening (read by a new opcode on a new
+`OP_SUCCESS` slot), and refused by relay policy, which accepts only the known
+types, in ascending order. So relayed transactions carry one encoding, and only
+a block's own producer can add ignored items.
 
 **Type `0x01`, payment proof.** One item:
 
@@ -212,8 +216,6 @@ each input carrying a payment proof for block `H` at height `h`:
    being connected, as for relative time locks. The node does not compare `h`
    with `C`; a script does, if it wants to (section 4.5).
 7. **In the anchor chain:** `H` is `A_hash` or one of its ancestors.
-8. **A bound on lookups:** the block's proofs name at most 64 distinct Bitcoin
-   blocks (`bad-btcpay-too-many-blocks`).
 
 ### 4.3 How every validating node reaches the same verdict on check 7
 
@@ -320,12 +322,17 @@ any other witness byte. Its size does not depend on the coinbase.
 Check 7 is one Bitcoin-daemon lookup per distinct proven block, cached, and
 dropped only by a Bitcoin reorganization at or below it.
 
-**The lookup bound.** An absolute floor of 0 lets a script accept any payment in
-Bitcoin's history, so the lookups a block can demand are bounded by check 8, not
-by the floors: at most 64 distinct Bitcoin blocks per Sequentia block, asked in
-one batched round trip as the watcher batches its anchors
-(`PrefetchAnchorVerdicts`, `src/anchor.h:129`). Claims in normal use name the
-last few Bitcoin blocks, far below the bound.
+**No limit on distinct proven blocks.** An absolute floor of 0 lets a script
+accept any payment in Bitcoin's history, so a block's claims can name as many
+distinct Bitcoin blocks as the block weight allows: about 300 in a full block.
+The node asks about all of them in one batched round trip before checking the
+block, as the watcher batches its anchors (`PrefetchAnchorVerdicts`,
+`src/anchor.h:129`). Measured on a node with an empty cache against a local
+Bitcoin Core: a full block (weight 360,231) of 296 claims, each naming a
+different Bitcoin block, cost 6.75 ms of batched lookups and 0.41 ms of checks;
+asked one by one, the same lookups took 82 ms. Since the cost is a single round
+trip whatever the count, no cap is set: a cap would be a shared resource that a
+seller could fill with cheap claims of its own to keep a buyer's claim out.
 
 ## 6. The mempool and block assembly
 
@@ -338,7 +345,7 @@ last few Bitcoin blocks, far below the bound.
 - A transaction carrying a floor is accepted when the floor is at most the
   Bitcoin tip, so the next honest block can satisfy it.
 - The producer chooses its anchor first and then takes only transactions whose
-  proofs are at or below it, whose floors it meets, and whose proofs fit check 8.
+  proofs are at or below it, and whose floors it meets.
   A claim is therefore mined in the first block anchored at or above its
   payment.
 
@@ -350,7 +357,10 @@ transaction carrying records it accepts the newcomer in place of the pooled one
 when both are valid and the newcomer is lighter, or when the pooled one's proof
 is no longer valid. A seller who completes the buyer's pre-signed claim with a
 heavy proof of some other qualifying payment is then displaced by the lighter
-proof of the buyer's own payment.
+proof of the buyer's own payment. Each replacement must be strictly lighter or
+replace a proof that is no longer valid, so a chain of replacements cannot loop.
+`sendrawtransaction` submits such a transaction to the mempool instead of
+treating its transaction id as already known.
 
 ### 6.3 Reorganizations, and the proof re-attached
 
@@ -444,7 +454,9 @@ the chain's genesis, so it spends only this lock, through this leaf, on this
 chain. It does not commit to the proof, which is the point (section 2.2): any
 proof of any payment that meets the leaf's conditions completes it.
 
-The lock must not signal replacement.
+The lock must not signal replacement. The claims do signal it (`nSequence`
+`0xfffffffd`), so that a higher fee tier of the same claim (section 8.2) replaces a
+lower one.
 
 ### 8.2 The timeline
 
@@ -459,24 +471,32 @@ The lock must not signal replacement.
    - that the lock's block is final: at or below the node's finalized height
      (`getposfinality`'s `finalized_height`), so it is certified by a full quorum
      and no sibling block can replace it except through Bitcoin;
-   - that Bitcoin block `L` has `k` confirmations, by the default-mode policy:
+   - that Bitcoin has added `k` blocks on top of `L`, by the default-mode policy:
 
-     | Price | `k` |
-     |---|---|
-     | below 0.01 BTC | 1 |
-     | below 0.1 BTC | 2 |
-     | below 1 BTC | 3 |
-     | 1 BTC or more | 6 |
+     | Price | `k` | Wait, typically |
+     |---|---|---|
+     | below 0.01 BTC | 0 | none: the buyer pays as soon as the lock's block is final |
+     | below 0.1 BTC | 1 | 10 minutes |
+     | below 1 BTC | 2 | 20 minutes |
+     | 1 BTC or more | 5 | 50 minutes |
 
      The page meanwhile says "Getting your purchase ready. This usually takes a
      few minutes." The wait is the buyer's policy, not what the rule's safety
-     rests on (section 9.4).
+     rests on (section 9.4). **What `k = 0` risks, for the owner to weigh against
+     the ten minutes it saves:** a one-block Bitcoin reorganization that replaces
+     `L`, which takes the payment's block with it. With the absolute floor, honest
+     producers mine the lock again and the swap completes; the buyer loses only if
+     the seller also controls the producer of the block that would mine the lock
+     again and has it take a respend of the lock's inputs instead. A natural
+     one-block reorganization is rare on Bitcoin's main network and common on its
+     test networks, and a seller who controls a producer is the rarer half.
 4. **The buyer signs the claim, and a cancel, before it pays.** The claim pays
-   the asset to the buyer less a fee in that asset at a rate with headroom; the
-   wallet also signs two more claims at higher fees, since the fee asset's rate
-   at a node can change before the claim is mined. The cancel spends the
-   payment's own inputs back to the buyer at a high fee. The wallet hands both to
-   its completion service (section 8.5) and to the counterparty.
+   the asset to the buyer less a fee in that asset. It signs three tiers of the
+   same claim (section 8.5): the going rate with headroom, ten times that, and a
+   top tier sized so that keeping the claim out costs more than the swap is
+   worth. The cancel spends the payment's own inputs back to the buyer at a high
+   fee. The wallet hands all of them to its completion service and to the
+   counterparty.
 5. **The buyer pays** the seller's address at least the amount, with an ordinary
    Bitcoin transaction, at a fee for the next block.
 6. **Anyone completes the claim** as soon as the payment is mined at `h`: attaches
@@ -542,6 +562,9 @@ signed claims, signed cancel and the payment's transaction id, and then:
 
 - completes the claim as soon as the payment is mined, and again after any
   reorganization that moves it;
+- raises the claim's fee tier if it is not mined: to the second tier after 10
+  Sequentia blocks, to the top tier after 20, well inside the margin of 6
+  Bitcoin blocks (about 60 Sequentia blocks);
 - if the payment is still unconfirmed two blocks before `D`, broadcasts the
   cancel. Under Bitcoin Core's full replacement the cancel replaces the payment
   if its fee is higher; the template of section 8.3 keeps anyone from making that
@@ -549,6 +572,22 @@ signed claims, signed cancel and the payment's transaction id, and then:
 
 The buyer's wallet does the same while it is open. Every node that watches
 Bitcoin does the first part as policy (section 6.3).
+
+**The top tier's rule.** A seller who wants the refund can try to keep the claim
+out by filling every block of the margin with transactions paying a higher fee
+rate. It must outbid the claim on every block's whole weight, the buyer on one
+claim. So the top tier's fee is the value of the asset locked, times the claim's
+virtual size, divided by the virtual size of all the blocks in the margin:
+
+    top fee = V × v_claim / (B × N)
+
+with `V` the asset amount locked, `v_claim` the claim's virtual size, `B` a
+block's virtual-size limit and `N` the Sequentia blocks in the margin. With the
+chain's limit of 89,999 virtual bytes, 60 blocks and a claim of 300 virtual
+bytes, the top tier costs the buyer V / 18,000 (0.0056 % of the value), paid in
+the asset itself, and a seller who outbids it on every block pays more than V.
+The rule is in the fee asset's own units, so it holds whatever that asset is
+worth.
 
 ### 8.6 One payment, one lock
 
@@ -615,16 +654,26 @@ buyer prices by its `k` exactly as it would price accepting any bitcoin payment
 of that value, combined with a seller who controls a block producer. Without the
 producer, no reorganization of any depth costs the buyer anything.
 
-**9.5 The seller.** Once the lock is mined the seller cannot cancel, and needs
+**9.5 A seller who fills the blocks of the margin.** The seller pays higher fees
+than the claim's on every block from the payment to `R`, so that the refund
+becomes valid with the claim still unmined. The completion service raises the
+claim to its top tier (section 8.5), which the seller can outbid only by paying
+more than the asset is worth. What remains: a seller willing to lose more than
+the swap's value to deny it, and a fee asset whose accepted rate collapses at
+the producers before the top tier is mined; the buyer then needs a tier in
+another accepted asset, which a claim with a second input can pay.
+
+**9.6 The seller.** Once the lock is mined the seller cannot cancel, and needs
 nothing but the refund at `R`. A claim cannot be mined without a payment in the
 anchor chain, so the seller loses the asset only against bitcoin in the chain its
 own validating node follows. A producer, or a whole committee, that includes a
 claim with a forged or orphaned proof makes a block every validating node
 refuses.
 
-**9.6 After `R` both leaves are valid.** The first seen wins: neither the claim
-nor the refund signals replacement, and the mempool refuses whichever comes
-second (`txn-mempool-conflict`). Completion by anyone puts the claim in mempools
+**9.7 After `R` both leaves are valid.** A claim still pending signals
+replacement, so a refund paying a higher fee replaces it in honest mempools once
+`R` is reached; before `R` the mempool refuses the refund
+(`anchorlock-not-reached`). Completion by anyone puts the claim in mempools
 from the payment's confirmation on, so in the normal case it is mined long before
 `R`. A seller that produces blocks can include its refund in place of a claim
 still pending at `R`, and that happens only after a stall: Sequentia producing no
@@ -634,7 +683,7 @@ at `R` or above, because nothing caps how far one block's anchor may advance ove
 its parent's. A stall of that length means the committee has been short of its
 quorum for an hour; its cause is in [`04-proof-of-stake.md`](04-proof-of-stake.md).
 
-**9.7 A reorganization at each step.** Before the lock is mined, nothing is at
+**9.8 A reorganization at each step.** Before the lock is mined, nothing is at
 stake. Between the lock and the payment, the buyer has not paid; if the lock's
 block leaves the chain, the buyer waits for it to be mined again and for depth `k`
 again. With the payment unconfirmed, nothing on either chain refers to it. After
