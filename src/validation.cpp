@@ -9494,18 +9494,20 @@ void CacheBtcBlock(BtcPayAttacher& a, const Sidechain::Bitcoin::CBlock& block, c
 }
 
 //! The transactions of `block` (not its coinbase) with an output paying one of
-//! `look`, by script hash.
+//! `look`, by script hash: one hit for each wanted script a transaction pays.
 void MatchBtcBlock(const Sidechain::Bitcoin::CBlock& block, const std::set<uint256>& look,
                    const std::function<void(const uint256&, const Sidechain::Bitcoin::CTransactionRef&)>& hit)
 {
     for (size_t t = 1; t < block.vtx.size(); ++t) {
         const auto& tx = block.vtx[t];
+        // Every wanted script the transaction pays, once each: one payment can
+        // complete several inputs of a claim, each through its own output.
+        std::set<uint256> seen;
         for (const auto& out : tx->vout) {
             uint256 h;
             CSHA256().Write(out.scriptPubKey.data(), out.scriptPubKey.size()).Finalize(h.begin());
-            if (!look.count(h)) continue;
+            if (!look.count(h) || !seen.insert(h).second) continue;
             hit(h, tx);
-            break;
         }
     }
 }
