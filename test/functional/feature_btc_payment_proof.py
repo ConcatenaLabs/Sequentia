@@ -491,6 +491,7 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.lighter_by_the_incremental_rate()
         self.search_budget()
         self.lagging_daemon()
+        self.floor_never_widens_the_window()
         self.only_tightens()
 
     def neg_floor(self):
@@ -1992,6 +1993,130 @@ class BtcPaymentProofTest(BitcoinTestFramework):
                                  % (wl, wh, 100 * (wh - wl) / wh, gain, incr, what)))
             blk = self.mine(1)[0]
             assert heavy.hash in node.getblock(blk)["tx"]
+
+    def searched_before(self, node, since, needle):
+        """Bitcoin blocks the search read, from log line `since` up to the first line holding `needle`:
+        (blocks read in the shared window, blocks read below it, whether `needle` was seen)."""
+        shared = below = 0
+        for line in self.debug_lines(node, "BtcPayment: ")[since:]:
+            if needle in line:
+                return shared, below, True
+            if "BtcPayment: searched " in line:
+                k = int(line.split("BtcPayment: searched ")[1].split(" ")[0])
+                if "below the shared window" in line:
+                    below += k
+                else:
+                    shared += k
+        return shared, below, False
+
+    def floor_window_run(self, floor):
+        """A buyer's claim that needs the search (the seller's proof pooled and mined, the buyer's payment in
+        the same Bitcoin block, mined again after that block is orphaned), waiting beside an attacker's claim
+        whose leaf reads an output, and with `floor` also checks a floor 2,050 blocks below Bitcoin's tip.
+        Returns (blocks read before the buyer's claim was back, seconds, the attacker's claim id, log index)."""
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        lowf = b.getblockcount() - 2050
+        if floor:
+            leaf = CScript([lowf, OP_CHECKANCHORHEIGHTVERIFY, OP_DROP, OP_INSPECTBTCPAYMENT, OP_2DROP, OP_INSPECTBTCOUTPUT,
+                            OP_2DROP, OP_DROP, OP_1])
+        else:
+            leaf = CScript([OP_INSPECTBTCPAYMENT, OP_2DROP, OP_INSPECTBTCOUTPUT, OP_2DROP, OP_DROP, OP_1])
+        tap = taproot_construct(NUMS, [("a", leaf)])
+        t = node.sendtoaddress(address=program_to_witness(1, tap.scriptPubKey[2:]), amount=1, assetlabel=self.asset,
+                               fee_asset_label=self.asset)
+        an = [k for k, o in enumerate(tx_from_hex(node.getrawtransaction(t)).vout) if o.scriptPubKey == tap.scriptPubKey][0]
+        lock = self.fresh_lock(deadline_in=40)
+        aC = self.anchor_of(node.getrawtransaction(t, True)["blockhash"])
+        # Block X: the attacker's T, the seller's light self-payment, the buyer's payment.
+        mid = self.bminer.getnewaddress("", "bech32")
+        f1 = self.bminer.sendtoaddress(mid, 0.01)
+        coin = self.seller_coins(1, lock["amount"])[0]
+        self.btc_mine(1)
+        d1 = self.bminer.gettransaction(f1, True, True)["decoded"]
+        c1 = {"txid": f1, "vout": [o["n"] for o in d1["vout"] if o["scriptPubKey"].get("address") == mid][0]}
+        T = b.sendrawtransaction(self.bminer.signrawtransactionwithwallet(
+            b.createrawtransaction([c1], [{self.bminer.getnewaddress(): Decimal("0.0099")}]))["hex"])
+        ps = self.self_pay(coin, lock["addr"])
+        pb = self.pay(lock["addr"], lock["amount"])
+        x = self.btc_mine(1)[0]
+        assert all(z in b.getblock(x)["tx"] for z in (T, ps, pb))
+        self.mine_anchored(b.getblockcount())
+        asset = CTxOutAsset(b"\x01" + bytes.fromhex(self.asset)[::-1])
+        ctrl = bytes([tap.leaves["a"].version + tap.negflag]) + tap.internal_pubkey + tap.leaves["a"].merklebranch
+        ac = CTransaction()
+        ac.nVersion = 2
+        ac.vin.append(CTxIn(COutPoint(int(t, 16), an), nSequence=SEQ_NONFINAL_RBF))
+        ac.vout.append(CTxOut(CTxOutValue(100000000 - 5000), bytes.fromhex("51"), asset))
+        ac.vout.append(CTxOut(CTxOutValue(5000), b"", asset))
+        ac.wit.vtxinwit.append(CTxInWitness())
+        ac.wit.vtxoutwit = [CTxOutWitness() for _ in ac.vout]
+        ac.wit.vtxinwit[0].peginWitness.stack = [self.proof_for(T, aC, x)["record"]] + ([floor_record(lowf)] if floor else [])
+        ac.wit.vtxinwit[0].scriptWitness.stack = [b"", bytes(leaf), ctrl]
+        ac.rehash()
+        node.sendrawtransaction(ac.serialize().hex())
+        prs = self.proof_for(ps, lock["C"], x)
+        cs = self.claim(lock, prs["record"], self.vout_paying(ps, lock["addr"], x))
+        node.sendrawtransaction(cs.serialize().hex())
+        blk = self.mine(1)[0]
+        assert ac.hash in node.getblock(blk)["tx"] and cs.hash in node.getblock(blk)["tx"]
+        since = len(self.debug_lines(node, "BtcPayment: "))
+        # X leaves Bitcoin's chain; T and the seller's payment are never mined
+        # again, the buyer's is.
+        b.invalidateblock(x)
+        b.prioritisetransaction(T, 0, -100000000)
+        b.prioritisetransaction(ps, 0, -100000000)
+        if pb not in b.getrawmempool():
+            b.sendrawtransaction(self.bbuyer.gettransaction(pb)["hex"])
+        self.btc_mine(2)
+        assert self.bbuyer.gettransaction(pb)["confirmations"] > 0
+        self.wait_for(lambda: node.getblockheader(blk)["confirmations"] < 0, "the claims' block is disconnected", 120)
+        self.watcher_left(x)
+        t0 = time.time()
+        self.mine_anchored(b.getblockcount())
+        self.wait_for(lambda: cs.hash in node.getrawmempool(), "the buyer's claim re-attached", 180)
+        took = time.time() - t0
+        shared, below, seen = self.searched_before(node, since, "re-attached a searched proof to %s" % cs.hash)
+        assert seen
+        # Any block read below the shared window was read for a claim of its own, never the buyer's.
+        assert not [l for l in self.debug_lines(node, "below the shared window for %s" % cs.hash)]
+        blk2 = self.mine(1)[0]
+        assert cs.hash in node.getblock(blk2)["tx"]
+        return shared, below, took, ac.hash
+
+    def floor_never_widens_the_window(self):
+        self.step("N44 (PV15 low) one claim's floor never widens the search for the others: an attacker's claim "
+                  "with a floor 2,050 blocks down costs the buyer's claim nothing, and its own search runs after")
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        if b.getblockcount() < 2200:
+            self.btc_mine(2200 - b.getblockcount())
+            self.mine_anchored(b.getblockcount())
+        without, below0, t_without, _ = self.floor_window_run(False)
+        with_floor, below1, t_with, attacker = self.floor_window_run(True)
+        self.log.info("    blocks of the shared window read before the buyer's claim was back: %d without the attacker's "
+                      "floor, %d with it (and %d, %d read below it for the attacker's claim meanwhile); %.1f s and %.1f s "
+                      "after the new anchor", without, with_floor, below0, below1, t_without, t_with)
+        assert without <= 145, without
+        assert_equal(with_floor, without)
+        # One tick's budget (500 ms) and one poll (1 s) at most, with slack for a loaded machine.
+        assert t_with <= t_without + 2.5, (t_with, t_without)
+        # The attacker's own search, below the shared window, after the buyer's claim was served; its
+        # blocks are not kept in the cache.
+        deep = "below the shared window for %s" % attacker
+
+        def deep_done():
+            lines = [l for l in self.debug_lines(node, deep)]
+            total = sum(int(l.split("BtcPayment: searched ")[1].split(" ")[0]) for l in lines)
+            return (total, lines[-1]) if total >= 2016 - 144 - 2 else None
+        total, last = self.wait_for(deep_done, "the attacker's own search below the window", 180)
+        cached = int(last.split("; ")[-1].split(" ")[0])
+        assert cached <= 150 + 6, cached
+        self.log.info("    the attacker's claim: %d blocks read below the shared window, on its own, after; %d blocks "
+                      "cached after it", total, cached)
+        self.results.append((self.current, "buyer's claim back after %d shared-window blocks read without the floor "
+                             "and %d with it (%.1f s, %.1f s); the attacker's own search read %d blocks below the window, "
+                             "%d blocks cached after" % (without, with_floor, t_without, t_with, total, cached)))
 
     def lagging_daemon(self):
         self.step("N42 a node whose Bitcoin daemon is behind: it neither accepts nor condemns a claim it cannot "

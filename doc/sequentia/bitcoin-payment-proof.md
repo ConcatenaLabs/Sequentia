@@ -601,10 +601,15 @@ and is lost if both stay offline until `R`.
     paying itself a little more must not hide the buyer's exact payment. For
     each candidate the node builds a fresh proof, makes the witness item that
     named the old output name the new one, and submits it; the mempool runs the
-    script, so a wrong candidate costs one refusal. The window is the last 144
-    Bitcoin blocks, reaching down to the floor a claim carries when it carries
-    one, and never more than 2,016, since a proof links at most 2,016 headers to
-    a recorded anchor. Only blocks of Bitcoin's best chain inside the window are
+    script, so a wrong candidate costs one refusal. The window shared by every
+    claim is the last 144 Bitcoin blocks, and no claim widens it. A claim that
+    carries a floor below it is searched further down, to that floor and never
+    more than 2,016 blocks below the tip (a proof links at most 2,016 headers to
+    a recorded anchor), on its own: for its own scripts only, after every
+    waiting claim has been served the shared window, newest block first, each
+    block's candidates tried as soon as it is read, and the blocks it reads kept
+    only while their candidates are tried. Its depth is its own cost: it delays
+    no other claim's search. Only blocks of Bitcoin's best chain are
     read, never an orphaned one: a payment an orphaned block held that was mined
     again is in the window, and what stayed behind in the orphan can complete
     nothing. Candidates are the transactions the scan itself found there, with
@@ -613,11 +618,16 @@ and is lost if both stay offline until `R`.
     costs no daemon call, and the work is bounded by the budget, not by how many
     outputs pay the script.
 
-  The search runs once every waiting claim has been tried at the current tips,
-  and one scan serves all of them: each block is read once (`getblock`) for the
-  scripts it was not read for yet, matched against every waiting script, and the
-  budget is checked between blocks, so a scan stopped by it goes on at the next
-  tick from what it has read. It asks the Bitcoin daemon nothing while a proof is
+  The shared window is scanned before the claims are tried, since which claims
+  may still complete depends on what it holds, and one scan serves all of them:
+  each block is read once (`getblock`) for the scripts it was not read for yet,
+  matched against every waiting script, and the budget is checked between
+  blocks, so a scan stopped by it goes on at the next tick from what it has read.
+  The scan reads the 144 blocks newest first, at most once per Bitcoin tip for a
+  given set of scripts, and what it cached for blocks below the recent window is
+  dropped once it ends. A claim's search below the window keeps its place across
+  ticks and across new tips while the last block it read stays on Bitcoin's best
+  chain. It asks the Bitcoin daemon nothing while a proof is
   validated: like the rest of this section it is relay help, and a claim's
   validity stays a pure function of the chain.
 

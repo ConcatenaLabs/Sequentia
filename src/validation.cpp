@@ -9104,6 +9104,8 @@ void CheckBtcPayBudget(const BtcPayAttacher& a)
     if (GetTimeMillis() > a.deadline) throw BtcPayBudgetSpent();
 }
 
+void PruneBtcBlockCache(BtcPayAttacher& a);
+
 const std::vector<uint256>& BlockTxids(BtcPayAttacher& a, const uint256& hash, int height)
 {
     auto it = a.block_txids.find(hash);
@@ -9114,14 +9116,7 @@ const std::vector<uint256>& BlockTxids(BtcPayAttacher& a, const uint256& hash, i
     ids.reserve(txs.size());
     for (size_t i = 0; i < txs.size(); ++i) ids.push_back(uint256S(txs[i].get_str()));
     // Keep only blocks that can still be within the recent window.
-    for (auto b = a.block_txids.begin(); b != a.block_txids.end();) {
-        if (b->second.first <= a.btc_height - BTCPAY_RECENT_BLOCKS - 6) {
-            a.block_meta.erase(b->first);
-            b = a.block_txids.erase(b);
-        } else {
-            ++b;
-        }
-    }
+    PruneBtcBlockCache(a);
     return a.block_txids.emplace(hash, std::make_pair(height, std::move(ids))).first->second.second;
 }
 
@@ -9376,42 +9371,23 @@ std::vector<BtcPayWant> WantsOf(const CTransactionRef& v)
     return wants;
 }
 
-//! Blocks within this many of Bitcoin's tip are searched by paid script, or
-//! from the floor a claim carries when it carries one; never more than
-//! BtcPayment::MAX_LINKS, since a proof links at most that many headers to a
-//! recorded anchor and a claim waits at most that long.
+//! Blocks within this many of Bitcoin's tip are searched by paid script for
+//! every waiting claim at once: the shared window. A claim carrying a floor
+//! below it is searched further down, to that floor, on its own and after the
+//! shared window has been served; never more than BtcPayment::MAX_LINKS blocks
+//! below the tip, since a proof links at most that many headers to a recorded
+//! anchor.
 constexpr int BTCPAY_SEARCH_BLOCKS = 144;
 
-//! A waiting claim whose stored variants all failed: the tips it was last
-//! searched at, and the candidates tried there. Only the worker thread touches it.
-struct BtcPayWaiting {
-    std::pair<uint256, uint256> searched;
-    //! The candidates tried at `tried_at`, so a search stopped by the budget
-    //! goes on with the next one.
-    std::set<std::pair<uint256, size_t>> tried;
-    std::pair<uint256, uint256> tried_at;
-};
-std::map<uint256, BtcPayWaiting> g_btcpay_waiting;
-
-//! One scan for every waiting claim: each block of the window on Bitcoin's best
-//! chain is read once for the scripts it was not read for yet, the budget checked
-//! between blocks. A payment mined again after a reorganization is in the window;
-//! an orphaned block is never read, so what it held is never a candidate.
-void SearchPaidScripts(BtcPayAttacher& a, const std::vector<BtcPayWant>& wants, int low)
+//! Headers of Bitcoin's best chain at `heights` into the header cache, read in
+//! batches, the budget checked between them.
+void ReadBtcHeaders(BtcPayAttacher& a, const std::vector<int>& heights)
 {
-    std::set<uint256> want_hashes;
-    for (const auto& w : wants) want_hashes.insert(w.spk_hash);
-    // Forget what no waiting claim asks for.
-    for (auto f = a.found.begin(); f != a.found.end();) {
-        if (!want_hashes.count(f->first)) f = a.found.erase(f); else ++f;
-    }
-    low = std::max({low, 1, a.btc_height - (int)BtcPayment::MAX_LINKS + 1});
-    // The window's block hashes, from the header cache (read in batches).
+    constexpr size_t BATCH = 256;
     std::vector<int> missing;
-    for (int h = low; h <= a.btc_height; ++h) {
+    for (int h : heights) {
         if (!a.headers.count(h)) missing.push_back(h);
     }
-    constexpr size_t BATCH = 256;
     for (size_t at = 0; at < missing.size(); at += BATCH) {
         CheckBtcPayBudget(a);
         const size_t n = std::min(BATCH, missing.size() - at);
@@ -9438,6 +9414,112 @@ void SearchPaidScripts(BtcPayAttacher& a, const std::vector<BtcPayWant>& wants, 
             a.headers.emplace(missing[at + k], hdr);
         }
     }
+}
+
+//! Drop the per-block cache (transaction ids, header and coinbase hash) of
+//! every block below the recent window: what a scan read for a candidate's
+//! proof is not kept past it.
+void PruneBtcBlockCache(BtcPayAttacher& a)
+{
+    for (auto b = a.block_txids.begin(); b != a.block_txids.end();) {
+        if (b->second.first <= a.btc_height - BTCPAY_RECENT_BLOCKS - 6) {
+            a.block_meta.erase(b->first);
+            b = a.block_txids.erase(b);
+        } else {
+            ++b;
+        }
+    }
+    for (auto m = a.block_meta.begin(); m != a.block_meta.end();) {
+        if (!a.block_txids.count(m->first)) m = a.block_meta.erase(m); else ++m;
+    }
+}
+
+//! A raw block of Bitcoin's best chain, read whole; nullopt when the daemon no
+//! longer holds it.
+std::optional<Sidechain::Bitcoin::CBlock> ReadBtcBlock(const uint256& bh)
+{
+    UniValue bp(UniValue::VARR); bp.push_back(bh.GetHex()); bp.push_back(0);
+    const UniValue reply = CallMainChainRPC("getblock", bp);
+    const UniValue& raw = find_value(reply, "result");
+    if (!raw.isStr()) return std::nullopt;
+    CDataStream bs(ParseHex(raw.get_str()), SER_NETWORK, PROTOCOL_VERSION);
+    Sidechain::Bitcoin::CBlock block;
+    bs >> block;
+    if (block.vtx.empty() || block.GetHash() != bh) throw std::runtime_error("getblock returned another block");
+    return block;
+}
+
+//! What a candidate's proof needs from a block it is in, so building it asks
+//! the daemon nothing: its txids, its header and its coinbase's hash.
+void CacheBtcBlock(BtcPayAttacher& a, const Sidechain::Bitcoin::CBlock& block, const uint256& bh, int height)
+{
+    if (!a.block_txids.count(bh)) {
+        std::vector<uint256> ids;
+        ids.reserve(block.vtx.size());
+        for (const auto& tx : block.vtx) ids.push_back(tx->GetHash());
+        a.block_txids.emplace(bh, std::make_pair(height, std::move(ids)));
+    }
+    if (!a.block_meta.count(bh)) {
+        CDataStream cstrip(SER_NETWORK, PROTOCOL_VERSION | Sidechain::Bitcoin::SERIALIZE_TRANSACTION_NO_WITNESS);
+        cstrip << *block.vtx[0];
+        uint256 coinbase_sha;
+        CSHA256().Write(reinterpret_cast<const unsigned char*>(cstrip.data()), cstrip.size()).Finalize(coinbase_sha.begin());
+        a.block_meta.emplace(bh, std::make_pair(block.GetBlockHeader(), coinbase_sha));
+    }
+}
+
+//! The transactions of `block` (not its coinbase) with an output paying one of
+//! `look`, by script hash.
+void MatchBtcBlock(const Sidechain::Bitcoin::CBlock& block, const std::set<uint256>& look,
+                   const std::function<void(const uint256&, const Sidechain::Bitcoin::CTransactionRef&)>& hit)
+{
+    for (size_t t = 1; t < block.vtx.size(); ++t) {
+        const auto& tx = block.vtx[t];
+        for (const auto& out : tx->vout) {
+            uint256 h;
+            CSHA256().Write(out.scriptPubKey.data(), out.scriptPubKey.size()).Finalize(h.begin());
+            if (!look.count(h)) continue;
+            hit(h, tx);
+            break;
+        }
+    }
+}
+
+//! A waiting claim whose stored variants all failed: the tips it was last
+//! searched at, and the candidates tried there. Only the worker thread touches it.
+struct BtcPayWaiting {
+    std::pair<uint256, uint256> searched;
+    //! The candidates tried at `tried_at`, so a search stopped by the budget
+    //! goes on with the next one.
+    std::set<std::pair<uint256, size_t>> tried;
+    std::pair<uint256, uint256> tried_at;
+    //! The search below the shared window, for a claim carrying a floor: the
+    //! last block read (height, hash; height -1 before the first), whether it
+    //! reached the floor, and the candidates tried there. Kept while the block
+    //! last read stays on Bitcoin's best chain.
+    std::pair<int, uint256> deep_last{-1, uint256()};
+    bool deep_complete{false};
+    std::set<std::pair<uint256, size_t>> deep_tried;
+};
+std::map<uint256, BtcPayWaiting> g_btcpay_waiting;
+
+//! One scan for every waiting claim: each block of the window on Bitcoin's best
+//! chain is read once for the scripts it was not read for yet, the budget checked
+//! between blocks. A payment mined again after a reorganization is in the window;
+//! an orphaned block is never read, so what it held is never a candidate.
+void SearchPaidScripts(BtcPayAttacher& a, const std::vector<BtcPayWant>& wants)
+{
+    std::set<uint256> want_hashes;
+    for (const auto& w : wants) want_hashes.insert(w.spk_hash);
+    // Forget what no waiting claim asks for.
+    for (auto f = a.found.begin(); f != a.found.end();) {
+        if (!want_hashes.count(f->first)) f = a.found.erase(f); else ++f;
+    }
+    // The shared window, never widened by any claim's floor.
+    const int low = std::max(1, a.btc_height - BTCPAY_SEARCH_BLOCKS + 1);
+    std::vector<int> heights;
+    for (int h = low; h <= a.btc_height; ++h) heights.push_back(h);
+    ReadBtcHeaders(a, heights);
     std::vector<std::pair<int, uint256>> blocks;
     for (int h = a.btc_height; h >= low; --h) blocks.emplace_back(h, a.headers.at(h).GetHash());
     std::set<uint256> in_window;
@@ -9458,52 +9540,26 @@ void SearchPaidScripts(BtcPayAttacher& a, const std::vector<BtcPayWant>& wants, 
                             std::inserter(look, look.end()));
         if (look.empty()) continue;
         CheckBtcPayBudget(a);
-        UniValue bp(UniValue::VARR); bp.push_back(bh.GetHex()); bp.push_back(0);
-        const UniValue reply = CallMainChainRPC("getblock", bp);
-        const UniValue& raw = find_value(reply, "result");
-        if (!raw.isStr()) {
+        const auto block = ReadBtcBlock(bh);
+        if (!block) {
             // A block the daemon no longer holds (an orphan it pruned): nothing to find there.
             done.insert(look.begin(), look.end());
             continue;
         }
         ++read;
-        CDataStream bs(ParseHex(raw.get_str()), SER_NETWORK, PROTOCOL_VERSION);
-        Sidechain::Bitcoin::CBlock block;
-        bs >> block;
-        if (block.vtx.empty() || block.GetHash() != bh) throw std::runtime_error("getblock returned another block");
-        // What a candidate's proof needs from this block, so building it asks
-        // the daemon nothing: its txids, its header and its coinbase's hash.
-        if (!a.block_txids.count(bh)) {
-            std::vector<uint256> ids;
-            ids.reserve(block.vtx.size());
-            for (const auto& tx : block.vtx) ids.push_back(tx->GetHash());
-            a.block_txids.emplace(bh, std::make_pair(height, std::move(ids)));
-        }
-        if (!a.block_meta.count(bh)) {
-            CDataStream cstrip(SER_NETWORK, PROTOCOL_VERSION | Sidechain::Bitcoin::SERIALIZE_TRANSACTION_NO_WITNESS);
-            cstrip << *block.vtx[0];
-            uint256 coinbase_sha;
-            CSHA256().Write(reinterpret_cast<const unsigned char*>(cstrip.data()), cstrip.size()).Finalize(coinbase_sha.begin());
-            a.block_meta.emplace(bh, std::make_pair(block.GetBlockHeader(), coinbase_sha));
-        }
-        for (size_t t = 1; t < block.vtx.size(); ++t) {
-            const auto& tx = block.vtx[t];
-            for (const auto& out : tx->vout) {
-                uint256 h;
-                CSHA256().Write(out.scriptPubKey.data(), out.scriptPubKey.size()).Finalize(h.begin());
-                if (!look.count(h)) continue;
-                auto& list = a.found[h];
-                const bool known = std::any_of(list.begin(), list.end(),
-                                               [&](const BtcPayFound& x) { return x.tx->GetHash() == tx->GetHash(); });
-                if (!known) list.push_back({tx, height, bh});
-                break;
-            }
-        }
+        CacheBtcBlock(a, *block, bh, height);
+        MatchBtcBlock(*block, look, [&, height = height, bh = bh](const uint256& h, const Sidechain::Bitcoin::CTransactionRef& tx) {
+            auto& list = a.found[h];
+            const bool known = std::any_of(list.begin(), list.end(),
+                                           [&](const BtcPayFound& x) { return x.tx->GetHash() == tx->GetHash(); });
+            if (!known) list.push_back({tx, height, bh});
+        });
         done.insert(look.begin(), look.end());
     }
+    PruneBtcBlockCache(a);
     if (read) {
-        LogPrint(BCLog::MEMPOOL, "BtcPayment: searched %u Bitcoin block(s) for %u paid script(s)\n", read,
-                 (unsigned)want_hashes.size());
+        LogPrint(BCLog::MEMPOOL, "BtcPayment: searched %u Bitcoin block(s) for %u paid script(s); %u block(s) cached\n", read,
+                 (unsigned)want_hashes.size(), (unsigned)a.block_txids.size());
     }
 }
 
@@ -9519,20 +9575,44 @@ bool TrySubmit(CChainState& cs, const CTransactionRef& tx, const uint256& txid, 
              res.m_state.GetRejectReason());
     return false;
 }
+
+//! The claim `w` names, completed by output `j` of `cand` (in block `block` at
+//! `height` of Bitcoin's best chain): a fresh proof of it, the witness item that
+//! named the old output now naming this one, submitted. The block's contents
+//! must be in the per-block cache.
+bool TryCandidate(BtcPayAttacher& a, CChainState& cs, const uint256& txid, const BtcPayWant& w,
+                  const Sidechain::Bitcoin::CTransactionRef& cand, int height, const uint256& block, size_t j)
+{
+    CMutableTransaction mtx(*w.variant);
+    const std::pair<int, uint256> where{height, block};
+    const auto record = FreshRecordAt(a, cs, mtx.vin[w.input].prevout, *cand, &where);
+    if (!record) return false;
+    for (auto& item : mtx.witness.vtxinwit[w.input].m_pegin_witness.stack) {
+        if (!item.empty() && item[0] == BtcPayment::RECORD_PAYMENT) item = *record;
+    }
+    auto& stack = mtx.witness.vtxinwit[w.input].scriptWitness.stack;
+    const std::vector<unsigned char> named = CScriptNum((int64_t)j).getvch();
+    size_t nargs = stack.size() >= 2 ? stack.size() - 2 : 0;
+    if (stack.size() >= 2 && !stack.back().empty() && stack.back()[0] == ANNEX_TAG && nargs > 0) --nargs;
+    for (size_t k = 0; k < nargs; ++k) {
+        if (stack[k] == w.index_item) stack[k] = named;
+    }
+    return TrySubmit(cs, MakeTransactionRef(std::move(mtx)), txid, "a searched");
+}
 //! What a held claim names, read once from its variants: the payments its
 //! proofs prove (with the height each proof declares), the outputs the search
-//! looks for, and how far down the search reaches for it.
+//! looks for, and the lowest floor it carries, to which its own search reaches
+//! below the shared window (INT_MAX when it carries none).
 struct BtcPayClaimInfo {
     std::vector<std::pair<uint256, uint32_t>> payments;
     std::vector<BtcPayWant> wants;
-    int low{0};
+    int low{std::numeric_limits<int>::max()};
 };
 std::map<uint256, BtcPayClaimInfo> g_btcpay_info;
 
-BtcPayClaimInfo ClaimInfoOf(const std::vector<CTransactionRef>& variants, int btc_height)
+BtcPayClaimInfo ClaimInfoOf(const std::vector<CTransactionRef>& variants)
 {
     BtcPayClaimInfo info;
-    info.low = btc_height - BTCPAY_SEARCH_BLOCKS + 1;
     for (const auto& v : variants) {
         for (auto& want : WantsOf(v)) info.wants.push_back(std::move(want));
         for (size_t i = 0; i < v->vin.size() && i < v->witness.vtxinwit.size(); ++i) {
@@ -9568,6 +9648,81 @@ bool ClaimMayComplete(const BtcPayAttacher& a, const BtcPayClaimInfo& info)
         }
     }
     return false;
+}
+
+//! The search below the shared window for one claim carrying a floor: its own
+//! scripts only, newest block first, each block's candidates tried as soon as it
+//! is read, the budget checked before every block and every candidate. The
+//! blocks read are not kept: each one's cache entry goes once its candidates
+//! are tried. Returns whether the claim was re-attached.
+bool SearchBelowWindow(BtcPayAttacher& a, CChainState& cs, const uint256& txid, const BtcPayClaimInfo& info,
+                       BtcPayWaiting& waiting, unsigned& candidates)
+{
+    const int top = a.btc_height - BTCPAY_SEARCH_BLOCKS;   // the highest block below the shared window
+    const int bottom = std::max({info.low, 1, a.btc_height - (int)BtcPayment::MAX_LINKS + 1});
+    if (bottom > top || info.wants.empty()) return false;
+    // Go on from the last block read while it is still on Bitcoin's best chain.
+    if (waiting.deep_last.first >= 0) {
+        ReadBtcHeaders(a, {waiting.deep_last.first});
+        if (a.headers.at(waiting.deep_last.first).GetHash() != waiting.deep_last.second) {
+            waiting.deep_last = {-1, uint256()};
+            waiting.deep_complete = false;
+            waiting.deep_tried.clear();
+        }
+    }
+    if (waiting.deep_complete) return false;
+    std::set<uint256> look;
+    for (const BtcPayWant& w : info.wants) look.insert(w.spk_hash);
+    int next = waiting.deep_last.first >= 0 ? std::min(waiting.deep_last.first - 1, top) : top;
+    unsigned read = 0;
+    bool done = false;
+    const auto log_read = [&] {
+        if (read) {
+            LogPrint(BCLog::MEMPOOL, "BtcPayment: searched %u Bitcoin block(s) below the shared window for %s, down to %d; "
+                     "%u block(s) cached\n", read, txid.ToString(), next + 1, (unsigned)a.block_txids.size());
+        }
+    };
+    try {
+        for (; next >= bottom && !done; --next) {
+            std::vector<int> batch;
+            for (int h = next; h >= std::max(bottom, next - 255); --h) batch.push_back(h);
+            ReadBtcHeaders(a, batch);
+            CheckBtcPayBudget(a);
+            const uint256 bh = a.headers.at(next).GetHash();
+            const auto block = ReadBtcBlock(bh);
+            ++read;
+            if (block) {
+                std::vector<std::pair<Sidechain::Bitcoin::CTransactionRef, uint256>> hits;
+                MatchBtcBlock(*block, look, [&](const uint256& h, const Sidechain::Bitcoin::CTransactionRef& tx) {
+                    hits.emplace_back(tx, h);
+                });
+                if (!hits.empty()) {
+                    CacheBtcBlock(a, *block, bh, next);
+                    for (const BtcPayWant& w : info.wants) {
+                        for (const auto& [tx, h] : hits) {
+                            if (done || h != w.spk_hash || tx->GetHash() == w.proven_tx) continue;
+                            for (size_t j = 0; j < tx->vout.size() && !done; ++j) {
+                                if (tx->vout[j].scriptPubKey != w.spk) continue;
+                                if (!waiting.deep_tried.emplace(tx->GetHash(), w.input * 65536 + j).second) continue;
+                                CheckBtcPayBudget(a);
+                                ++candidates;
+                                done = TryCandidate(a, cs, txid, w, tx, next, bh, j);
+                            }
+                        }
+                    }
+                    a.block_txids.erase(bh);
+                    a.block_meta.erase(bh);
+                }
+            }
+            waiting.deep_last = {next, bh};
+        }
+    } catch (...) {
+        log_read();
+        throw;
+    }
+    if (next < bottom) waiting.deep_complete = true;
+    log_read();
+    return done;
 }
 } // namespace
 
@@ -9698,16 +9853,14 @@ void BtcPaymentReattachTick(ChainstateManager& chainman)
         for (const uint256& txid : order) {
             if (!pending.count(txid) || g_btcpay_info.count(txid)) continue;
             CheckBtcPayBudget(a);
-            g_btcpay_info.emplace(txid, ClaimInfoOf(variants_of(txid), a.btc_height));
+            g_btcpay_info.emplace(txid, ClaimInfoOf(variants_of(txid)));
         }
         RecentTxids(a);
         std::vector<BtcPayWant> wants;
-        int low = a.btc_height - BTCPAY_SEARCH_BLOCKS + 1;
         for (const auto& [txid, info] : g_btcpay_info) {
             wants.insert(wants.end(), info.wants.begin(), info.wants.end());
-            low = std::min(low, info.low);
         }
-        if (!wants.empty()) SearchPaidScripts(a, wants, low);
+        if (!wants.empty()) SearchPaidScripts(a, wants);
     } catch (const std::exception& e) {
         LogPrint(BCLog::MEMPOOL, "BtcPayment: re-attach lookups: %s\n", e.what());
         return report(", the lookups go on next tick");
@@ -9813,22 +9966,7 @@ void BtcPaymentReattachTick(ChainstateManager& chainman)
                         CheckBtcPayBudget(a);   // per candidate; the next tick goes on with the next one
                         waiting.tried.emplace(cand.tx->GetHash(), w.input * 65536 + j);
                         ++candidates;
-                        CMutableTransaction mtx(*w.variant);
-                        const std::pair<int, uint256> where{cand.height, cand.block};
-                        const auto record = FreshRecordAt(a, cs, mtx.vin[w.input].prevout, *cand.tx, &where);
-                        if (!record) continue;
-                        for (auto& item : mtx.witness.vtxinwit[w.input].m_pegin_witness.stack) {
-                            if (!item.empty() && item[0] == BtcPayment::RECORD_PAYMENT) item = *record;
-                        }
-                        // The witness item that named the old output now names this one.
-                        auto& stack = mtx.witness.vtxinwit[w.input].scriptWitness.stack;
-                        const std::vector<unsigned char> named = CScriptNum((int64_t)j).getvch();
-                        size_t nargs = stack.size() >= 2 ? stack.size() - 2 : 0;
-                        if (stack.size() >= 2 && !stack.back().empty() && stack.back()[0] == ANNEX_TAG && nargs > 0) --nargs;
-                        for (size_t k = 0; k < nargs; ++k) {
-                            if (stack[k] == w.index_item) stack[k] = named;
-                        }
-                        done = TrySubmit(cs, MakeTransactionRef(std::move(mtx)), txid, "a searched");
+                        done = TryCandidate(a, cs, txid, w, cand.tx, cand.height, cand.block, j);
                     } catch (const std::exception& e) {
                         LogPrint(BCLog::MEMPOOL, "BtcPayment: re-attach of %s: %s\n", txid.ToString(), e.what());
                         return report(", the search goes on next tick");   // the budget or the daemon
@@ -9837,6 +9975,31 @@ void BtcPaymentReattachTick(ChainstateManager& chainman)
                 if (done) break;
             }
             waiting.searched = state;
+            if (done) {
+                LOCK(g_btcpay_pending_mutex);
+                BtcPaymentNotWaiting(txid);
+                pending.erase(txid);
+            }
+        }
+    }
+    // Below the shared window: each claim carrying a floor under it, its own
+    // scripts only, once every claim has been served the shared window at these
+    // tips. One claim's floor never widens the search for any other.
+    for (const std::vector<uint256>* group : {&may, &cannot}) {
+        for (const uint256& txid : *group) {
+            if (!pending.count(txid)) continue;
+            const auto wit = g_btcpay_waiting.find(txid);
+            if (wit == g_btcpay_waiting.end() || wit->second.searched != state) continue;
+            const BtcPayClaimInfo& info = g_btcpay_info.at(txid);
+            if (info.low > a.btc_height - BTCPAY_SEARCH_BLOCKS) continue;
+            if (ShutdownRequested() || GetTimeMillis() > deadline) return report(", stopped at its budget");
+            bool done = false;
+            try {
+                done = SearchBelowWindow(a, cs, txid, info, wit->second, candidates);
+            } catch (const std::exception& e) {
+                LogPrint(BCLog::MEMPOOL, "BtcPayment: re-attach of %s: %s\n", txid.ToString(), e.what());
+                return report(", the search below the window goes on next tick");
+            }
             if (done) {
                 LOCK(g_btcpay_pending_mutex);
                 BtcPaymentNotWaiting(txid);
