@@ -2259,23 +2259,21 @@ bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript& 
                 {
                     if (sigversion != SigVersion::TAPSCRIPT || !(flags & SCRIPT_VERIFY_BTCPAYMENT))
                         return set_error(serror, SCRIPT_ERR_BAD_OPCODE);
-                    const auto* slot = checker.GetBtcPaymentSlot();
-                    BtcPayment::Records records;
-                    std::string reason;
-                    const bool parsed = slot != nullptr && BtcPayment::ParseRecords(*slot, records, reason);
+                    const BtcPayment::Records* rec = checker.GetBtcPaymentRecords();
+                    const bool parsed = rec != nullptr;
                     if (opcode == OP_CHECKANCHORHEIGHTVERIFY) {
                         if (stack.size() < 1)
                             return set_error(serror, SCRIPT_ERR_INVALID_STACK_OPERATION);
                         const CScriptNum required(stacktop(-1), /*fRequireMinimal=*/true);
-                        if (!parsed || !records.floor)
+                        if (!parsed || !rec->floor)
                             return set_error(serror, SCRIPT_ERR_ANCHORLOCK_MISSING);
-                        if (required < 0 || (int64_t)*records.floor != (int64_t)required.getint())
+                        if (required < 0 || (int64_t)*rec->floor != (int64_t)required.getint())
                             return set_error(serror, SCRIPT_ERR_ANCHORLOCK_UNSATISFIED);
                         break;
                     }
-                    if (!parsed || !records.proof)
+                    if (!parsed || !rec->proof)
                         return set_error(serror, SCRIPT_ERR_BTCPAY_MISSING);
-                    const BtcPayment::Proof& proof = *records.proof;
+                    const BtcPayment::Proof& proof = *rec->proof;
                     if (opcode == OP_INSPECTBTCPAYMENT) {
                         stack.push_back(CScriptNum((int64_t)proof.height).getvch());
                         stack.push_back(CScriptNum((int64_t)proof.coin_anchor).getvch());
@@ -2290,9 +2288,7 @@ bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript& 
                     popstack(stack);
                     const auto& out = proof.tx->vout[idx];
                     push8_le(stack, (uint64_t)out.nValue);
-                    uint256 spk_sha;
-                    CSHA256().Write(out.scriptPubKey.data(), out.scriptPubKey.size()).Finalize(spk_sha.data());
-                    pushspk(stack, out.scriptPubKey, spk_sha);
+                    pushspk(stack, out.scriptPubKey, proof.spk_hashes[idx]);
                 }
                 break;
 

@@ -460,6 +460,7 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.reverse_direction()
         self.congestion()
         self.measure_distinct_blocks()
+        self.opcode_cost()
         self.only_tightens()
 
     def neg_floor(self):
@@ -967,6 +968,48 @@ class BtcPaymentProofTest(BitcoinTestFramework):
                                             "cold_sync_whole_chain_s": round(t_sync, 2),
                                             "cold_bench": lines[-1] if lines else None}))
         self.stop_node(2)
+
+    def opcode_cost(self):
+        k = 50000
+        self.step("N22 (PV13 S3) one standard transaction running OP_INSPECTBTCPAYMENT %d times over an 80 kB proof" % k)
+        node = self.nodes[0]
+        early = self.bbuyer.sendtoaddress(self.bbuyer.getnewaddress(address_type="bech32"), Decimal("0.1"))
+        eb = self.btc_mine(1)[0]
+        self.btc_mine(1000)
+        cov = CScript([OP_INSPECTBTCPAYMENT, CScriptOp(0x6d)] * k + [OP_1])  # OP_2DROP
+        tap = taproot_construct(NUMS, [("cov", cov)])
+        addr = program_to_witness(1, tap.scriptPubKey[2:])
+        txid = node.sendtoaddress(address=addr, amount=1, assetlabel=self.asset, fee_asset_label=self.asset)
+        self.mine_anchored(self.btc_rpc().getblockcount())
+        tx = tx_from_hex(node.getrawtransaction(txid))
+        vout = [i for i, o in enumerate(tx.vout) if o.scriptPubKey == tap.scriptPubKey][0]
+        C = self.anchor_of(node.getrawtransaction(txid, True)["blockhash"])
+        rec = self.proof_for(early, C, eb)["record"]
+        t = CTransaction()
+        t.nVersion = 2
+        t.vin.append(CTxIn(COutPoint(int(txid, 16), vout), nSequence=SEQ_NONFINAL_RBF))
+        asset = CTxOutAsset(b"\x01" + bytes.fromhex(self.asset)[::-1])
+        t.vout.append(CTxOut(CTxOutValue(100000000 - 300000), bytes.fromhex(node.getaddressinfo(node.getnewaddress())["scriptPubKey"]), asset))
+        t.vout.append(CTxOut(CTxOutValue(300000), b"", asset))
+        t.wit.vtxinwit.append(CTxInWitness())
+        t.wit.vtxoutwit = [CTxOutWitness() for _ in t.vout]
+        t.wit.vtxinwit[0].peginWitness.stack = [rec]
+        control = bytes([tap.leaves["cov"].version + tap.negflag]) + tap.internal_pubkey + tap.leaves["cov"].merklebranch
+        t.wit.vtxinwit[0].scriptWitness.stack = [bytes(cov), control]
+        t.rehash()
+        dec = node.decoderawtransaction(t.serialize().hex())
+        t0 = time.time()
+        node.sendrawtransaction(t.serialize().hex())
+        accept_s = time.time() - t0
+        t0 = time.time()
+        blk = self.mine(1)[0]
+        mine_s = time.time() - t0
+        assert t.hash in node.getblock(blk)["tx"]
+        self.log.info("    proof %d bytes, tx weight %d: accepted in %.2fs, block made and checked in %.2fs",
+                      len(rec), dec["weight"], accept_s, mine_s)
+        assert accept_s < 5 and mine_s < 5, (accept_s, mine_s)
+        self.results.append((self.current, {"proof_bytes": len(rec), "weight": dec["weight"],
+                                            "accept_s": round(accept_s, 2), "block_s": round(mine_s, 2)}))
 
     def only_tightens(self):
         self.step("N16 the rule only tightens: a node without it accepts every block, and accepts a claim without proof that this node refuses")

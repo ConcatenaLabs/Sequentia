@@ -8,6 +8,7 @@
 
 #include <hash.h>
 #include <script/script_error.h>
+#include <script/btcpayment.h>
 #include <span.h>
 #include <primitives/transaction.h>
 
@@ -406,9 +407,10 @@ public:
          return false;
     }
 
-    //! SEQUENTIA: the witness slot of this (non-peg-in) input, where the
-    //! bitcoin-payment records live; nullptr when unavailable.
-    virtual const std::vector<std::vector<unsigned char>>* GetBtcPaymentSlot() const
+    //! SEQUENTIA: the bitcoin-payment records of this (non-peg-in) input,
+    //! parsed and checked once per input however often a script reads them;
+    //! nullptr when unavailable or invalid.
+    virtual const BtcPayment::Records* GetBtcPaymentRecords() const
     {
         return nullptr;
     }
@@ -438,6 +440,8 @@ private:
     const CConfidentialValue amount;
     const PrecomputedTransactionData* txdata;
     mutable SigHashCache m_sighash_cache;
+    mutable bool m_btcpay_parsed{false};
+    mutable std::optional<BtcPayment::Records> m_btcpay_records;
 
 protected:
     virtual bool VerifyECDSASignature(const std::vector<unsigned char>& vchSig, const CPubKey& vchPubKey, const uint256& sighash) const;
@@ -458,12 +462,19 @@ public:
     const PrecomputedTransactionData* GetPrecomputedTransactionData() const override;
     uint32_t GetnIn() const override;
     bool CheckSimplicity(const std::vector<unsigned char>& program, const std::vector<unsigned char>& witness, const rawElementsTapEnv& simplicityRawTap, int64_t min_cost, int64_t budget, ScriptError* serror) const override;
-    const std::vector<std::vector<unsigned char>>* GetBtcPaymentSlot() const override
+    const BtcPayment::Records* GetBtcPaymentRecords() const override
     {
-        if (nIn >= txTo->vin.size() || txTo->vin[nIn].m_is_pegin) return nullptr;
-        static const std::vector<std::vector<unsigned char>> empty;
-        if (nIn >= txTo->witness.vtxinwit.size()) return &empty;
-        return &txTo->witness.vtxinwit[nIn].m_pegin_witness.stack;
+        if (!m_btcpay_parsed) {
+            m_btcpay_parsed = true;
+            if (nIn < txTo->vin.size() && !txTo->vin[nIn].m_is_pegin) {
+                BtcPayment::Records records;
+                std::string reason;
+                static const std::vector<std::vector<unsigned char>> empty;
+                const auto& slot = nIn < txTo->witness.vtxinwit.size() ? txTo->witness.vtxinwit[nIn].m_pegin_witness.stack : empty;
+                if (BtcPayment::ParseRecords(slot, records, reason)) m_btcpay_records = std::move(records);
+            }
+        }
+        return m_btcpay_records ? &*m_btcpay_records : nullptr;
     }
 };
 
@@ -496,9 +507,9 @@ public:
     {
         return m_checker.CheckSequence(nSequence);
     }
-    const std::vector<std::vector<unsigned char>>* GetBtcPaymentSlot() const override
+    const BtcPayment::Records* GetBtcPaymentRecords() const override
     {
-        return m_checker.GetBtcPaymentSlot();
+        return m_checker.GetBtcPaymentRecords();
     }
 };
 
