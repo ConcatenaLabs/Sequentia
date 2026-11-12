@@ -1462,7 +1462,16 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
             const bool pooled_stale = CheckTxBtcPaymentRecords(*pooled, pview, tip, /*in_block=*/false,
                                                                tip->m_anchor_height, tip->m_anchor_hash,
                                                                nullptr, why) != BtcPayVerdict::OK;
-            const bool lighter = GetTransactionWeight(tx) < GetTransactionWeight(*pooled);
+            // Lighter, and by enough that its fee rate rises by at least the
+            // incremental relay rate: a replacement is never free, so a run of
+            // them (each evicting and re-adding the claim's descendants) is
+            // bounded by the claim's own fee. Both pay the same fee: the same
+            // transaction id has the same outputs.
+            const CAmount fee = BtcPayFeeValue(tx);
+            const CFeeRate new_rate(fee, BtcPayTxVsize(tx));
+            const CFeeRate old_rate(fee, BtcPayTxVsize(*pooled));
+            const bool lighter = GetTransactionWeight(tx) < GetTransactionWeight(*pooled) &&
+                                 new_rate.GetFeePerK() >= old_rate.GetFeePerK() + ::incrementalRelayFee.GetFeePerK();
             if (pooled_stale || lighter) {
                 ws.m_btcpay_witness_replace = true;
             } else if (args.m_allow_bip125_replacement && HasBtcPaymentRecords(tx)) {

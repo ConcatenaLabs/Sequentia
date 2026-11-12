@@ -107,8 +107,10 @@ What being unsigned costs, and how each cost is closed:
   anchor recorded within 2,016 blocks above its block, so one payment has a
   valid record per such anchor, of different weights), relay refuses anything else in the slot,
   including any record the input's script does not read (section 6.1), and the
-  mempool lets a lighter or fresher witness replace a pooled one with the same
-  transaction id (section 6.2). What remains: a block's own producer can pad the
+  mempool lets a lighter witness (raising the fee rate by at least the
+  incremental relay rate) or a fresher one replace a pooled one with the same
+  transaction id (section 6.2). What remains: a padding that lowers the claim's
+  fee rate by less than that incremental rate; a block's own producer can pad the
   slot with records of an unknown type, which consensus ignores, and a script
   that reads a witness value it does not constrain admits equal-weight
   variants, as any tapscript does.
@@ -393,14 +395,25 @@ the hashing, which the block weight already bounds.
 
 The mempool otherwise refuses a second transaction with the same id
 (`txn-same-nonwitness-data-in-mempool`). When the pooled transaction carries
-records, it accepts a valid newcomer in its place when the newcomer is lighter,
-whether it carries other records or none, or when the pooled one's records are
-no longer valid. A newcomer without records is how the original of a spend
+records, it accepts a valid newcomer in its place when the newcomer is lighter
+by enough that its fee rate rises by at least the incremental relay rate
+(`-incrementalrelayfee`, 100 per thousand virtual bytes by default), whether it
+carries other records or none, or when the pooled one's records are no longer
+valid. A newcomer without records is how the original of a spend
 displaces a variant someone else added records to. A seller who completes the
 buyer's pre-signed claim with a heavy proof of some other qualifying payment is
 then displaced by the lighter proof of the buyer's own payment. Each replacement
-must be strictly lighter or replace a proof that is no longer valid, so a chain
-of replacements cannot loop. `sendrawtransaction` submits such a transaction to
+must raise the fee rate or replace a proof that is no longer valid, so a chain
+of replacements cannot loop, and since a replacement re-checks the claim's
+descendants it is never free: the fee is the same for every variant (the same
+transaction id has the same outputs), so a claim paying `f` per virtual byte at
+its lightest is replaced at most `f` / 0.1 times in all (fees valued as the
+mempool values them, in `rfa`, the reference unit's 10⁻⁸). That rule cannot keep
+a buyer's better proof out by more than the incremental rate: the pooled variant
+pays at most 0.1 `rfa` per virtual byte less than the best one, so whoever pads
+the claim lowers its rate by less than that, and the buyer's wallet covers it by
+paying 0.1 `rfa` per virtual byte more: about 30 `rfa` for a claim of 304
+virtual bytes. `sendrawtransaction` submits such a transaction to
 the mempool instead of treating its transaction id as already known. The pooled
 transaction's descendants spend its outputs, which the replacement leaves
 unchanged with its transaction id, so they stay in the pool: a better proof never

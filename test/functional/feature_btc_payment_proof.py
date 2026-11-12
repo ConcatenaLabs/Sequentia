@@ -479,6 +479,7 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.orphaned_and_longest_links()
         self.variant_flood()
         self.waiting_set()
+        self.lighter_by_the_incremental_rate()
         self.search_budget()
         self.only_tightens()
 
@@ -1926,6 +1927,54 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.results.append((self.current, "%d candidates refused over %d ticks, longest %d ms (budget 500)"
                              % (len(self.debug_lines(node, refused)), len(ticks), max(ticks))))
         assert max(ticks) < 800, "a tick ran %d ms" % max(ticks)
+
+    def lighter_by_the_incremental_rate(self):
+        self.step("N40 (PV15 X3, low) a lighter proof of a pooled claim replaces it only when the fee rate rises by "
+                  "the incremental relay rate")
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        incr = int(node.getnetworkinfo()["incrementalfee"] * 100000000)  # per kvB
+        spk = bytes.fromhex(node.getaddressinfo(node.getnewaddress())["scriptPubKey"])
+        for fee, expect_replace in ((400, False), (20000, True)):
+            lock = self.fresh_lock()
+            ptx = self.pay(lock["addr"], lock["amount"])
+            ph = self.btc_mine(1)[0]
+            h = b.getblockheader(ph)["height"]
+            self.mine_anchored(h)
+            self.btc_mine(1)
+            self.mine_anchored(h + 1)
+            # Two valid records of one payment: linked to the anchor at its own
+            # block (no link) and to the next one (one link, 80 bytes heavier).
+            pr = self.proof_for(ptx, lock["C"], ph)
+            assert_equal(pr["links"], [])
+            heavy_rec = payment_record(pr["height"], lock["C"], pr["header"], hashlib.sha256(pr["coinbase"]).digest(),
+                                       pr["index"], pr["pbranch"], pr["cbranch"], pr["payment"],
+                                       links=self.link_headers(h, h + 1))
+            vout = self.vout_paying(ptx, lock["addr"], ph)
+            light = self.claim(lock, pr["record"], vout, fee=fee, out_spk=spk)
+            heavy = self.claim(lock, heavy_rec, vout, fee=fee, out_spk=spk)
+            vl = node.decoderawtransaction(light.serialize().hex())["vsize"]
+            vh = node.decoderawtransaction(heavy.serialize().hex())["vsize"]
+            wh = node.decoderawtransaction(heavy.serialize().hex())["hash"]
+            wl = node.decoderawtransaction(light.serialize().hex())["hash"]
+            gain = fee * 1000 // vl - fee * 1000 // vh
+            node.sendrawtransaction(heavy.serialize().hex())
+            assert_equal(gain >= incr, expect_replace)
+            if gain < incr:
+                assert_raises_rpc_error(-26, "txn-same-nonwitness-data-in-mempool", node.sendrawtransaction,
+                                        light.serialize().hex())
+                assert_equal(node.getmempoolentry(heavy.hash)["wtxid"], wh)
+                what = "refused, the pooled proof kept"
+            else:
+                node.sendrawtransaction(light.serialize().hex())
+                assert_equal(node.getmempoolentry(heavy.hash)["wtxid"], wl)
+                what = "replaced the pooled proof"
+            self.log.info("    fee %d: %d vB against %d vB, the rate rises by %d per kvB (incremental %d): %s",
+                          fee, vl, vh, gain, incr, what)
+            self.results.append((self.current + " fee %d" % fee, "%d vB against %d vB, rate +%d per kvB, incremental "
+                                 "%d: %s" % (vl, vh, gain, incr, what)))
+            blk = self.mine(1)[0]
+            assert heavy.hash in node.getblock(blk)["tx"]
 
     def anchor_driven_delay(self):
         """Seconds from Bitcoin orphaning the tip's anchor until the node disconnects that block."""
