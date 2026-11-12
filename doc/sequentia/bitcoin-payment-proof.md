@@ -75,9 +75,14 @@ online:
   payment is mined: the buyer's wallet, a service, the counterparty, a node.
 - **A Bitcoin reorganization that moves the payment to another block** needs no
   new signature: the claim's transaction id is unchanged and only its proof is
-  replaced. A node that watches Bitcoin re-links the fresh proof itself
-  (section 6.3), so a claim returns to the chain with nobody online, as
-  whitepaper section 5.3 says a reorganized transaction does.
+  replaced. Whoever holds the signed claim and the buyer's payment builds the
+  fresh proof. The buyer's completion service does so after every reorganization
+  until the claim's block is final (section 8.5), which is what the swap relies
+  on. A node that watches Bitcoin also re-links a fresh proof itself from the
+  variants it kept (section 6.3), so a claim usually returns to the chain with
+  nobody online, as whitepaper section 5.3 says a reorganized transaction does;
+  that store is a help for a buyer whose service is down, not the guarantee
+  (section 6.2 says what can empty it).
 - **Wallet libraries** sign the claim exactly as any taproot script-path spend.
 
 The taproot annex, which every signature commits to, was rejected: with it, each
@@ -400,27 +405,62 @@ does not need. Block assembly takes its transactions from the mempool, which hol
 one spend per coin, so it follows the same order; a producer that is itself the
 seller can still mine its own refund after `R`, which consensus allows.
 
-**Every valid variant is kept.** A newcomer that is valid but does not replace
-the pooled one (it is heavier) is still checked in full, kept beside it, and then
-refused as the same transaction. Which proof a node pools depends on what reached
-it first and on who sent a lighter one, both of which an outsider controls; a
-claim mined with one proof also comes back alone from a disconnected block. If
-that proof's payment then leaves Bitcoin's chain, the node must still know the
-others, or the claim is stranded although the buyer's payment stands. So the node
-keeps, per transaction id, every variant it has seen valid (accepted, validated
-beside the pooled one, or returned from a disconnected block), distinct by the
-payments they prove:
+**Valid variants are kept, paid for by their claim's own fee.** A newcomer that
+is valid but does not replace the pooled one (it is not lighter) is still checked
+in full, kept beside it, and then refused as the same transaction. Which proof a
+node pools depends on what reached it first and on who sent a lighter one, both of
+which an outsider controls; a claim mined with one proof also comes back alone
+from a disconnected block. If that proof's payment then leaves Bitcoin's chain,
+another kept variant whose payment stands brings the claim back. So the node
+keeps, per transaction id, variants it has seen valid (accepted, validated beside
+the pooled one, or returned from a disconnected block), within bounds that make
+the claim's own fee, never anyone else's, pay for what it stores:
 
-- at most 8 per transaction id: the first seen always stays, and of the others the
-  oldest is dropped first;
-- at most 32 MiB in all: the transaction id seen longest ago that is not waiting
-  for re-attachment is dropped first.
+- **its fee pays for its storage:** the kept variants' total virtual size, at the
+  minimum relay rate, is at most the claim's fee. The first variant seen is kept
+  whatever its fee: it is the one the claim was pooled or mined with;
+- **one variant per proven Bitcoin block** on each input, and at most 8 in all. A
+  variant proving the same payments as a kept one takes its place (its links
+  reach a later anchor);
+- **the newest seen is the one not kept** when a bound is reached, so nothing a
+  later sender adds can push out a proof already kept;
+- **at most 32 MiB in all:** over that, the transaction id paying the least per
+  stored virtual byte is dropped first, as the mempool evicts, and claims waiting
+  for re-attachment go last.
 
-Each kept variant is valid, so each cost its sender a payment meeting the spent
-script, to the seller's own address in the swap. A variant whose payments the
-node already knows is refused at once, without its scripts being run. The bound
-is not consensus: a node that dropped a variant re-attaches with the ones it
-kept, and the buyer's wallet can always submit its own proof.
+A variant the node would not keep is refused at once, without its scripts being
+run. What emptying the store costs follows from these bounds:
+
+- to push one claim's kept proofs out of the 32 MiB store, an outsider stores
+  about 8.4 million virtual bytes of its own at a higher fee per byte than that
+  claim pays, about 14,000 times the fee of a claim storing two proofs;
+- to keep the buyer's proof from being stored at all, the seller must fill the
+  claim's 8 slots first, with payments of its own in 8 distinct Bitcoin blocks,
+  before the buyer's proof reaches the node; and since any kept proof whose
+  payment stands brings the claim back, to the buyer's outputs, it must then
+  orphan all 8 of those blocks.
+
+The bounds are not consensus: a node that did not keep a variant re-attaches
+with the ones it kept, and the buyer's wallet or completion service can always
+submit its own proof. **The store is a help for a buyer whose service is down;
+the guarantee is the completion service** (section 8.5), which watches the
+claim until its block is final and resubmits a fresh proof of the buyer's own
+payment after every reorganization that disconnects it. What remains for an
+attacker, with every node's store emptied, is a seller who:
+
+1. holds a payment of its own to the lock's address in a Bitcoin block it can
+   orphan, by its own hash power or by double-spending into a natural
+   reorganization;
+2. completes the buyer's claim with that proof, lighter than the buyer's, before
+   the claim is mined;
+3. after the claim is mined, orphans that block without orphaning the buyer's
+   payment, and double-spends its own payment;
+4. empties every node's copy of the buyer's proof, at the cost above;
+5. finds the buyer's wallet and completion service both offline from then until
+   `R`, at least 6 Bitcoin blocks.
+
+If all five succeed, the seller refunds at `R` and holds both sides. With the
+completion service online, steps 1 to 4 buy the seller nothing.
 
 ### 6.3 Reorganizations, and the proof re-linked
 

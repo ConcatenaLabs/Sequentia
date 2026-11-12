@@ -460,6 +460,8 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.same_txid_replacement()
         self.records_nobody_reads()
         self.every_variant_kept()
+        self.variant_fee_budget()
+        self.seller_fills_the_store()
         self.anchoring_first()
         self.bitcoin_reorg_sweep()
         self.links_and_branches()
@@ -469,6 +471,7 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.measure_distinct_blocks()
         self.opcode_cost()
         self.orphaned_and_longest_links()
+        self.variant_flood()
         self.only_tightens()
 
     def neg_floor(self):
@@ -1032,29 +1035,338 @@ class BtcPaymentProofTest(BitcoinTestFramework):
             assert cb.hash in node.getblock(blk)["tx"]
             self.results.append((self.current + " (%s)" % order, "re-attached with the buyer's proof and mined"))
             self.log.info("    %s: the claim came back with the buyer's proof and was mined", order)
-        # The bound: at most 8 variants per transaction id, distinct by the
-        # payments they prove; the first seen stays and the oldest other goes.
-        lock = self.fresh_lock()
-        pays = [self.pay(lock["addr"], lock["amount"]) for _ in range(9)]
-        bh = self.btc_mine(1)[0]
-        self.mine_anchored(b.getblockheader(bh)["height"])
-        spk = bytes.fromhex(node.getaddressinfo(node.getnewaddress())["scriptPubKey"])
-        claims = [self.claim(lock, self.proof_for(p, lock["C"], bh)["record"], self.vout_paying(p, lock["addr"], bh),
-                             out_spk=spk) for p in pays]
-        assert len({c.hash for c in claims}) == 1
-        for c in claims:
-            try:
-                node.sendrawtransaction(c.serialize().hex())
-            except JSONRPCException as e:
-                assert "txn-same-nonwitness-data-in-mempool" in e.error["message"], e.error["message"]
+        self.variant_bound()
+
+    def debug_lines(self, node, needle):
         log = open(os.path.join(node.datadir, "elementsregtest", "debug.log")).read().splitlines()
-        kept = [line for line in log if "variant(s) of %s kept" % claims[0].hash in line]
-        assert_equal(len(kept), 9)
+        return [line for line in log if needle in line]
+
+    def variant_bound(self):
+        """6.2: one variant per proven Bitcoin block, at most 8; when full the
+        newest seen is the one not kept, so the first seen and every earlier one
+        stay. A proof of equal weight never replaces the pooled one (P07, P08)."""
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        lock = self.fresh_lock()
+        pays, blocks = [], []
+        amt = Decimal(lock["amount"]) / Decimal(100000000)
+        for k in range(9):
+            if k == 8:
+                # Two payments of one shape in one block, the lock's output first
+                # in both, so their claims weigh the same.
+                pays.append(self.bbuyer.send(outputs=[{lock["addr"]: amt}], options={"change_position": 1})["txid"])
+                twin = self.bbuyer.send(outputs=[{lock["addr"]: amt}], options={"change_position": 1})["txid"]
+            else:
+                pays.append(self.pay(lock["addr"], lock["amount"]))
+            blocks.append(self.btc_mine(1)[0])
+        self.mine_anchored(b.getblockheader(blocks[-1])["height"])
+        spk = bytes.fromhex(node.getaddressinfo(node.getnewaddress())["scriptPubKey"])
+
+        def claim_for(p, bh):
+            return self.claim(lock, self.proof_for(p, lock["C"], bh)["record"], self.vout_paying(p, lock["addr"], bh),
+                              out_spk=spk)
+        latest = claim_for(pays[8], blocks[8])
+        same_block = claim_for(twin, blocks[8])
+        older = [claim_for(pays[k], blocks[k]) for k in range(7, -1, -1)]  # each heavier than the last
+        assert len({c.hash for c in [latest, same_block] + older}) == 1
+        wl = node.decoderawtransaction(latest.serialize().hex())
+        assert_equal(node.decoderawtransaction(same_block.serialize().hex())["weight"], wl["weight"])
+        node.sendrawtransaction(latest.serialize().hex())
+        # P07: an equal-weight proof of another payment does not replace the
+        # pooled one ("strictly lighter, so no loop"), and (c): its Bitcoin block
+        # is proven already, so it is not kept either.
+        assert_raises_rpc_error(-26, "txn-same-nonwitness-data-in-mempool", node.sendrawtransaction,
+                                same_block.serialize().hex())
+        assert_equal(node.getmempoolentry(latest.hash)["wtxid"], wl["hash"])
+        wsame = node.decoderawtransaction(same_block.serialize().hex())["hash"]
+        assert self.debug_lines(node, "variant %s of %s not kept: a variant proving that Bitcoin block is kept already"
+                                % (wsame, latest.hash)), "the same-block proof was kept"
+        for c in older:
+            assert_raises_rpc_error(-26, "txn-same-nonwitness-data-in-mempool", node.sendrawtransaction,
+                                    c.serialize().hex())
+            assert_equal(node.getmempoolentry(latest.hash)["wtxid"], wl["hash"])
+        kept = self.debug_lines(node, "variant(s) of %s kept" % latest.hash)
+        assert_equal(len(kept), 8)
         assert "8 variant(s)" in kept[-1], kept[-1]
-        assert kept[-1].endswith("dropped " + node.decoderawtransaction(claims[1].serialize().hex())["hash"]), kept[-1]
-        self.results.append((self.current + " (bound)", "9 distinct proofs: 8 kept, the second seen dropped"))
-        self.log.info("    9 distinct valid proofs of one claim: 8 kept, the first seen kept, the second seen dropped")
+        # P08: when full, the newest seen is the one not kept; nothing is dropped.
+        wnew = node.decoderawtransaction(older[-1].serialize().hex())["hash"]
+        assert self.debug_lines(node, "variant %s of %s not kept: 8 variants are kept already" % (wnew, latest.hash)), \
+            "the ninth distinct block was kept"
+        assert not self.debug_lines(node, ", dropped "), "a kept variant was dropped"
+        self.results.append((self.current + " (bound)", "9 Bitcoin blocks and a second payment in one of them: "
+                             "8 kept, one per block, first seen first; the same-block one and the ninth not kept"))
+        self.log.info("    one variant per proven Bitcoin block, 8 at most, the newest seen not kept; "
+                      "an equal-weight proof does not replace the pooled one")
         self.mine(1)
+
+    def variant_fee_budget(self):
+        self.step("N30 (PV15 X2 b1) a claim's kept variants are paid for by its own fee")
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        lock = self.fresh_lock()
+        pays, blocks = [], []
+        for _ in range(3):
+            pays.append(self.pay(lock["addr"], lock["amount"]))
+            blocks.append(self.btc_mine(1)[0])
+        self.mine_anchored(b.getblockheader(blocks[-1])["height"])
+        spk = bytes.fromhex(node.getaddressinfo(node.getnewaddress())["scriptPubKey"])
+        relay_per_kvb = int(node.getnetworkinfo()["relayfee"] * 100000000)
+        recs = [(self.proof_for(pays[k], lock["C"], blocks[k])["record"],
+                 self.vout_paying(pays[k], lock["addr"], blocks[k])) for k in (2, 1, 0)]
+        vs = [node.decoderawtransaction(self.claim(lock, r, v, out_spk=spk).serialize().hex())["vsize"] for r, v in recs]
+        # The fee pays for the storage of the first two variants, not the third.
+        fee = relay_per_kvb * (vs[0] + vs[1]) // 1000 + 1
+        assert relay_per_kvb * (vs[0] + vs[1] + vs[2]) // 1000 > fee
+        claims = [self.claim(lock, r, v, out_spk=spk, fee=fee) for r, v in recs]
+        node.sendrawtransaction(claims[0].serialize().hex())
+        assert_raises_rpc_error(-26, "txn-same-nonwitness-data-in-mempool", node.sendrawtransaction,
+                                claims[1].serialize().hex())
+        assert_raises_rpc_error(-26, "txn-same-nonwitness-data-in-mempool", node.sendrawtransaction,
+                                claims[2].serialize().hex())
+        kept = self.debug_lines(node, "variant(s) of %s kept" % claims[0].hash)
+        assert_equal(len(kept), 2)
+        w2 = node.decoderawtransaction(claims[2].serialize().hex())["hash"]
+        assert self.debug_lines(node, "variant %s of %s not kept: its fee %d pays for" % (w2, claims[0].hash, fee)), \
+            "a variant the claim's fee does not pay for was kept"
+        self.results.append((self.current, "fee %d, vsizes %s: 2 kept, the third not kept (its fee pays for %d vB)" %
+                             (fee, vs, fee * 1000 // relay_per_kvb)))
+        self.log.info("    fee %d pays for %d vB: two variants (%d + %d vB) kept, the third (%d vB) not",
+                      fee, fee * 1000 // relay_per_kvb, vs[0], vs[1], vs[2])
+        self.mine_anchored(b.getblockcount())
+
+    def seller_coins(self, k, sat):
+        """k coins of the seller's, each of `sat` and a little more, confirmed."""
+        amt = Decimal(sat) / Decimal(100000000) + Decimal("0.0001")
+        addrs = [self.bseller.getnewaddress(address_type="bech32") for _ in range(k)]
+        ftx = self.bminer.send(outputs=[{a: amt} for a in addrs])["txid"]
+        raw = self.btc_rpc().getrawtransaction(ftx, True)
+        self.btc_mine(1)
+        return [(ftx, [o["n"] for o in raw["vout"] if o["scriptPubKey"].get("address") == a][0]) for a in addrs]
+
+    def self_pay(self, coin, addr):
+        """The seller pays the lock's address from one coin: 1 in, 1 out, lighter than the buyer's."""
+        return self.bseller.sendall(recipients=[addr], options={"fee_rate": 2, "inputs": [
+            {"txid": coin[0], "vout": coin[1]}]})["txid"]
+
+    def undo_self_pay(self, stx):
+        """Double-spend a seller self-payment that left Bitcoin's chain."""
+        b = self.btc_rpc()
+        raw = self.bseller.gettransaction(stx, True, True)["decoded"]
+        value = sum(Decimal(str(self.bseller.gettransaction(i["txid"], True, True)["decoded"]["vout"][i["vout"]]["value"]))
+                    for i in raw["vin"])
+        new = b.createrawtransaction([{"txid": i["txid"], "vout": i["vout"]} for i in raw["vin"]],
+                                     [{self.bseller.getnewaddress(): value - Decimal("0.001")}])
+        return b.sendrawtransaction(self.bseller.signrawtransactionwithwallet(new)["hex"])
+
+    def watcher_left(self, bh):
+        """Wait until the node's anchor watcher has dropped the blocks anchored to `bh`."""
+        node = self.nodes[0]
+        self.wait_for(lambda: node.getblockheader(node.getbestblockhash())["anchorhash"] != bh,
+                      "the watcher follows Bitcoin")
+
+    def seller_fills_the_store(self):
+        self.step("N32 (PV15 X2 c) the seller's own payments against the per-id bound")
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        spk = bytes.fromhex(node.getaddressinfo(node.getnewaddress())["scriptPubKey"])
+
+        # (a) The seller's proof pooled, the buyer's kept, then 7 more payments
+        # of the seller's in the same Bitcoin block: they take no slot. The claim
+        # is mined; that block leaves Bitcoin's chain with every payment of the
+        # seller's double-spent; the node brings the claim back with the buyer's
+        # proof.
+        lock = self.fresh_lock()
+        coins = self.seller_coins(8, lock["amount"])
+        ptx = self.pay(lock["addr"], lock["amount"])
+        for _ in range(12):  # the buyer's block is fuller, so its proof is the heavier
+            self.bminer.sendtoaddress(self.bminer.getnewaddress(), 0.001)
+        y = self.btc_mine(1)[0]
+        stxs = [self.self_pay(c, lock["addr"]) for c in coins]
+        x = self.btc_mine(1)[0]
+        assert all(t in b.getblock(x)["tx"] for t in stxs)
+        self.mine_anchored(b.getblockheader(x)["height"])
+        cs = [self.claim(lock, self.proof_for(t, lock["C"], x)["record"], self.vout_paying(t, lock["addr"], x),
+                         out_spk=spk) for t in stxs]
+        cb = self.claim(lock, self.proof_for(ptx, lock["C"], y)["record"], self.vout_paying(ptx, lock["addr"], y),
+                        out_spk=spk)
+        node.sendrawtransaction(cs[0].serialize().hex())
+        for c in [cb] + cs[1:]:
+            assert_raises_rpc_error(-26, "txn-same-nonwitness-data-in-mempool", node.sendrawtransaction,
+                                    c.serialize().hex())
+        assert_equal(len(self.debug_lines(node, "variant(s) of %s kept" % cb.hash)), 2)
+        ws = node.decoderawtransaction(cs[0].serialize().hex())["hash"]
+        blk = self.mine_anchored(b.getblockheader(x)["height"])
+        blk = node.getbestblockhash()
+        assert cb.hash in node.getblock(blk)["tx"]
+        assert_equal(node.getblock(blk, 2)["tx"][[t["txid"] for t in node.getblock(blk, 2)["tx"]].index(cb.hash)]["hash"], ws)
+        b.invalidateblock(x)
+        for t in stxs:
+            self.undo_self_pay(t)
+        self.btc_mine(2)
+        self.watcher_left(x)
+        self.mine_anchored(b.getblockcount())  # an anchor at or above the buyer's payment, recorded again
+        self.wait_for(lambda: cb.hash in node.getrawmempool(), "the claim re-attached", timeout=60)
+        wb = node.decoderawtransaction(cb.serialize().hex())["hash"]
+        got = node.getmempoolentry(cb.hash)["wtxid"]
+        assert got != ws
+        blk = self.mine_anchored(b.getblockcount())
+        assert cb.hash in node.getblock(blk)["tx"]
+        self.results.append((self.current + " (a)", "8 seller payments in one Bitcoin block take one slot; after it "
+                             "was orphaned the claim came back with the buyer's proof (stored %s, re-attached %s) "
+                             "and was mined" % (wb[:16], got[:16])))
+        self.log.info("    (a) 8 seller payments in one block, one slot: the claim came back with the buyer's proof")
+
+        # (b) The seller fills all 8 slots, with payments in 8 Bitcoin blocks,
+        # before the buyer's proof is seen: the buyer's is not kept. The claim
+        # still comes back while any one of the 8 stands, and pays the buyer.
+        lock = self.fresh_lock()
+        coins = self.seller_coins(8, lock["amount"])
+        ptx = self.pay(lock["addr"], lock["amount"])
+        y = self.btc_mine(1)[0]
+        stxs, xs = [], []
+        for c in coins:
+            stxs.append(self.self_pay(c, lock["addr"]))
+            xs.append(self.btc_mine(1)[0])
+        self.mine_anchored(b.getblockheader(xs[-1])["height"])
+        cs = [self.claim(lock, self.proof_for(stxs[k], lock["C"], xs[k])["record"],
+                         self.vout_paying(stxs[k], lock["addr"], xs[k]), out_spk=spk) for k in range(7, -1, -1)]
+        cb = self.claim(lock, self.proof_for(ptx, lock["C"], y)["record"], self.vout_paying(ptx, lock["addr"], y),
+                        out_spk=spk)
+        node.sendrawtransaction(cs[0].serialize().hex())
+        for c in cs[1:] + [cb]:
+            assert_raises_rpc_error(-26, "txn-same-nonwitness-data-in-mempool", node.sendrawtransaction,
+                                    c.serialize().hex())
+        wb = node.decoderawtransaction(cb.serialize().hex())["hash"]
+        assert self.debug_lines(node, "variant %s of %s not kept: 8 variants are kept already" % (wb, cb.hash))
+        # Only the pooled proof's block leaves Bitcoin's chain.
+        b.invalidateblock(xs[-1])
+        self.undo_self_pay(stxs[-1])
+        self.btc_mine(2)
+        self.watcher_left(xs[-1])
+        self.mine_anchored(b.getblockcount())
+        ws = node.decoderawtransaction(cs[0].serialize().hex())["hash"]
+        self.wait_for(lambda: cb.hash in node.getrawmempool() and node.getmempoolentry(cb.hash)["wtxid"] != ws,
+                      "the claim re-attached with a proof that stands", timeout=60)
+        blk = self.mine_anchored(b.getblockcount())
+        assert cb.hash in node.getblock(blk)["tx"]
+        assert_equal(node.getblock(blk, 2)["tx"][[t["txid"] for t in node.getblock(blk, 2)["tx"]].index(cb.hash)]["vout"][0]["scriptPubKey"]["hex"], spk.hex())
+        self.results.append((self.current + " (b)", "the seller filled 8 slots from 8 Bitcoin blocks first: the buyer's "
+                             "proof not kept; with one of the 8 orphaned the claim came back with another of the "
+                             "seller's proofs and paid the buyer"))
+        self.log.info("    (b) 8 slots filled by the seller first: the buyer's not kept; one orphaned block is not "
+                      "enough, the claim came back and paid the buyer")
+
+    def block_records(self, blockhash):
+        """A maker of payment records for transactions of one Bitcoin block,
+        linked to the lowest recorded anchor at or above it (fetched once)."""
+        b = self.btc_rpc()
+        blk = b.getblock(blockhash, 1)
+        leaves = [bytes.fromhex(t)[::-1] for t in blk["tx"]]
+        header = bytes.fromhex(b.getblockheader(blockhash, False))
+        cbsha = hashlib.sha256(strip_btc_tx(bytes.fromhex(b.getrawtransaction(blk["tx"][0], False, blockhash)))).digest()
+        rec_anchor = self.recorded_anchor_at_or_above(blk["height"])
+        links = self.link_headers(blk["height"], rec_anchor[0])
+
+        def make(txid, coin_anchor):
+            i = blk["tx"].index(txid)
+            pay = strip_btc_tx(bytes.fromhex(b.getrawtransaction(txid, False, blockhash)))
+            return payment_record(blk["height"], coin_anchor, header, cbsha, i, merkle_branch(leaves, i),
+                                  merkle_branch(leaves, 0), pay, links=links)
+        return make
+
+    def variant_flood(self):
+        self.step("N31 (PV15 X2) a flood of other claims' variants does not flush a claim's stored proof")
+        nattack, nlinks, bound = 30, 1000, 2000000
+        self.restart_seq0(["-btcpaymaxvariantbytes=%d" % bound])
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        spk = bytes.fromhex(node.getaddressinfo(node.getnewaddress())["scriptPubKey"])
+        # The victim, as in N25 (seller first): the seller's lighter proof
+        # pooled, the buyer's validated and kept.
+        lock = self.fresh_lock(deadline_in=3000)
+        coin = self.seller_coins(1, lock["amount"])[0]
+        ptx = self.pay(lock["addr"], lock["amount"])
+        y = self.btc_mine(1)[0]
+        stx = self.self_pay(coin, lock["addr"])
+        x = self.btc_mine(1)[0]
+        self.mine_anchored(b.getblockheader(x)["height"])
+        cs = self.claim(lock, self.proof_for(stx, lock["C"], x)["record"], self.vout_paying(stx, lock["addr"], x),
+                        out_spk=spk)
+        cb = self.claim(lock, self.proof_for(ptx, lock["C"], y)["record"], self.vout_paying(ptx, lock["addr"], y),
+                        out_spk=spk)
+        ws = node.decoderawtransaction(cs.serialize().hex())["hash"]
+        node.sendrawtransaction(cs.serialize().hex())
+        assert_raises_rpc_error(-26, "txn-same-nonwitness-data-in-mempool", node.sendrawtransaction, cb.serialize().hex())
+        assert_equal(len(self.debug_lines(node, "variant(s) of %s kept" % cb.hash)), 2)
+        # The attacker: coins under a leaf any proof of any payment opens, a light
+        # claim of each pooled at a fee of its own, and heavy variants proving
+        # arbitrary Bitcoin transactions nobody paid anyone for.
+        anyleaf = CScript([OP_INSPECTBTCPAYMENT, OP_2DROP, OP_1])
+        tap = taproot_construct(NUMS, [("any", anyleaf)])
+        addr = program_to_witness(1, tap.scriptPubKey[2:])
+        coins = []
+        for i in range(nattack):
+            if i % 10 == 9:
+                self.mine(1)
+            t = node.sendtoaddress(address=addr, amount=1, assetlabel=self.asset, fee_asset_label=self.asset)
+            coins.append((t, [k for k, o in enumerate(tx_from_hex(node.getrawtransaction(t)).vout)
+                              if o.scriptPubKey == tap.scriptPubKey][0]))
+        self.mine(1)
+        anchors = {t: self.anchor_of(node.getrawtransaction(t, True)["blockhash"]) for t, _ in coins}
+        heavy_src = [self.bminer.sendtoaddress(self.bminer.getnewaddress(), 0.001) for _ in range(2 * nattack)]
+        b0 = self.btc_mine(1)[0]
+        self.btc_mine(nlinks - 1)
+        light_src = [self.bminer.sendtoaddress(self.bminer.getnewaddress(), 0.001) for _ in range(nattack)]
+        top = self.btc_mine(1)[0]
+        self.mine_anchored(b.getblockcount())
+        heavy_rec, light_rec = self.block_records(b0), self.block_records(top)
+        fee = 50000
+        control = bytes([tap.leaves["any"].version + tap.negflag]) + tap.internal_pubkey + tap.leaves["any"].merklebranch
+
+        def spend(coin, record):
+            t = CTransaction()
+            t.nVersion = 2
+            t.vin.append(CTxIn(COutPoint(int(coin[0], 16), coin[1]), nSequence=SEQ_NONFINAL_RBF))
+            asset = CTxOutAsset(b"\x01" + bytes.fromhex(self.asset)[::-1])
+            t.vout.append(CTxOut(CTxOutValue(100000000 - fee), spk, asset))
+            t.vout.append(CTxOut(CTxOutValue(fee), b"", asset))
+            t.wit.vtxinwit.append(CTxInWitness())
+            t.wit.vtxoutwit = [CTxOutWitness() for _ in t.vout]
+            t.wit.vtxinwit[0].peginWitness.stack = [record]
+            t.wit.vtxinwit[0].scriptWitness.stack = [bytes(anyleaf), control]
+            t.rehash()
+            return t
+        heavy_bytes = 0
+        for i, c in enumerate(coins):
+            node.sendrawtransaction(spend(c, light_rec(light_src[i], anchors[c[0]])).serialize().hex())
+            for j in range(2):
+                h = spend(c, heavy_rec(heavy_src[2 * i + j], anchors[c[0]]))
+                heavy_bytes += len(h.serialize())
+                assert_raises_rpc_error(-26, "txn-same-nonwitness-data-in-mempool", node.sendrawtransaction,
+                                        h.serialize().hex())
+        dropped = self.debug_lines(node, "BtcPayment: variants of ")
+        assert dropped, "the bound was never reached"
+        assert not [line for line in dropped if cb.hash in line], "the victim's variants were dropped"
+        self.log.info("    flood: %d light claims pooled, %d heavy variants (%.1f MB, %d links): %d transaction ids "
+                      "dropped, lowest fee per stored vB first; the victim's kept", nattack, 2 * nattack,
+                      heavy_bytes / 1e6, nlinks, len(dropped))
+        # The seller's payment leaves Bitcoin's chain and is double-spent.
+        tip_anchor = node.getblockheader(node.getbestblockhash())["anchorhash"]
+        b.invalidateblock(x)
+        self.undo_self_pay(stx)
+        self.btc_mine(2)
+        self.watcher_left(tip_anchor)
+        self.mine_anchored(b.getblockcount())
+        self.wait_for(lambda: cb.hash in node.getrawmempool() and node.getmempoolentry(cb.hash)["wtxid"] != ws,
+                      "the claim re-attached after the flood", timeout=60)
+        blk = self.mine_anchored(b.getblockcount())
+        assert cb.hash in node.getblock(blk)["tx"]
+        self.results.append((self.current, "%d heavy variants (%.1f MB) against a %d-byte bound: %d ids dropped, "
+                             "the victim's proof kept; its claim came back with the buyer's proof and was mined"
+                             % (2 * nattack, heavy_bytes / 1e6, bound, len(dropped))))
+        self.log.info("    the victim's claim came back with the buyer's proof and was mined")
+        self.mine(1)
+        self.restart_seq0()
 
     def anchor_driven_delay(self):
         """Seconds from Bitcoin orphaning the tip's anchor until the node disconnects that block."""

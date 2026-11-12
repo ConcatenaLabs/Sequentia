@@ -399,100 +399,192 @@ static bool AnchorRecordedOnBranch(const CBlockIndex* index, uint32_t a, const u
 }
 
 //! SEQUENTIA: the bitcoin-payment variants of a transaction id this node has
-//! seen valid (doc/sequentia/bitcoin-payment-proof.md 6.3), and the claims
+//! seen valid (doc/sequentia/bitcoin-payment-proof.md 6.2, 6.3), and the claims
 //! waiting to have a proof re-attached.
 //!
-//! Variants are distinct by the payments they prove. Every variant was valid
-//! when seen (accepted, validated in full beside the pooled one, or taken from a
-//! disconnected block), so each one cost its sender a real payment matching the
-//! spent script. Per transaction id at most BTCPAY_MAX_VARIANTS are kept: the
-//! first seen always, and of the others the oldest is dropped first. In total
-//! at most BTCPAY_MAX_VARIANT_BYTES are kept: the transaction id seen longest
-//! ago that is not waiting for re-attachment is dropped first.
+//! Every variant was valid when seen (accepted, validated in full beside the
+//! pooled one, or taken from a disconnected block). What a transaction id may
+//! keep is paid for by its own fee, never by anyone else's:
+//! - its variants' total virtual size, at the minimum relay rate, is at most its
+//!   fee (the first variant seen is kept whatever its fee: it is the one the
+//!   claim was pooled or mined with);
+//! - one variant per proven Bitcoin block (per input), and at most
+//!   BTCPAY_MAX_VARIANTS in all; a variant proving the same payments as a kept
+//!   one takes its place (its links reach a later anchor);
+//! - when full, the newest seen is the one not kept, so nothing a later sender
+//!   adds can push out a proof already kept.
+//! In total at most -btcpaymaxvariantbytes are kept. Over that, the transaction
+//! id paying the least per stored virtual byte is dropped first, as the mempool
+//! evicts, and ids waiting for re-attachment go last.
 static constexpr size_t BTCPAY_MAX_VARIANTS = 8;
-static constexpr size_t BTCPAY_MAX_VARIANT_BYTES = 32 << 20;
+static constexpr int64_t BTCPAY_MAX_VARIANT_BYTES = 32 << 20;
 static constexpr size_t BTCPAY_MAX_PENDING = 1000;
 static Mutex g_btcpay_pending_mutex;
+//! What a variant proves, per input (null where an input proves nothing): the
+//! payments, and the Bitcoin blocks they are in.
+struct BtcPayKey {
+    std::vector<uint256> payments;
+    std::vector<uint256> blocks;
+    bool operator==(const BtcPayKey& o) const { return payments == o.payments; }
+};
 struct BtcPayVariants {
     std::vector<CTransactionRef> txs;
-    std::vector<std::vector<uint256>> keys; //!< the payments each variant proves, per input
+    std::vector<BtcPayKey> keys;
+    CAmount fee{0};      //!< the fee value its transaction id pays (every variant pays the same)
+    int64_t vsize{0};    //!< the kept variants' total virtual size
+    int64_t bytes{0};    //!< and their serialized size
     uint64_t order{0};
+    double Density() const { return vsize > 0 ? (double)fee / (double)vsize : 0.0; }
 };
 static std::map<uint256, BtcPayVariants> g_btcpay_variants GUARDED_BY(g_btcpay_pending_mutex);
-static std::map<uint64_t, uint256> g_btcpay_variant_order GUARDED_BY(g_btcpay_pending_mutex);
+//! (fee per stored virtual byte, order) -> txid: the eviction order.
+static std::map<std::pair<double, uint64_t>, uint256> g_btcpay_by_density GUARDED_BY(g_btcpay_pending_mutex);
 static uint64_t g_btcpay_variant_next GUARDED_BY(g_btcpay_pending_mutex) = 0;
-static size_t g_btcpay_variant_bytes GUARDED_BY(g_btcpay_pending_mutex) = 0;
+static int64_t g_btcpay_variant_bytes GUARDED_BY(g_btcpay_pending_mutex) = 0;
 //! Claims waiting for re-attachment: txid -> the Bitcoin height when first held (-1 until the worker sees it).
 static std::map<uint256, int> g_btcpay_pending GUARDED_BY(g_btcpay_pending_mutex);
 
-//! The payments `tx` proves, per input (null where an input proves none).
-static std::vector<uint256> BtcPaymentKey(const CTransaction& tx)
+static BtcPayKey BtcPaymentKey(const CTransaction& tx)
 {
-    std::vector<uint256> key(tx.vin.size());
+    BtcPayKey key;
+    key.payments.resize(tx.vin.size());
+    key.blocks.resize(tx.vin.size());
     for (size_t i = 0; i < tx.vin.size() && i < tx.witness.vtxinwit.size(); ++i) {
         if (tx.vin[i].m_is_pegin) continue;
         for (const auto& item : tx.witness.vtxinwit[i].m_pegin_witness.stack) {
             if (item.empty() || item[0] != BtcPayment::RECORD_PAYMENT) continue;
             BtcPayment::Proof proof;
             std::string why;
-            if (BtcPayment::ParsePaymentRecord(item, proof, why)) key[i] = proof.tx->GetHash();
+            if (BtcPayment::ParsePaymentRecord(item, proof, why)) {
+                key.payments[i] = proof.tx->GetHash();
+                key.blocks[i] = proof.block_hash;
+            }
         }
     }
     return key;
 }
 
-static size_t BtcPayTxBytes(const CTransactionRef& tx) { return ::GetSerializeSize(*tx, PROTOCOL_VERSION); }
+static int64_t BtcPayTxBytes(const CTransactionRef& tx) { return ::GetSerializeSize(*tx, PROTOCOL_VERSION); }
+static int64_t BtcPayTxVsize(const CTransaction& tx) { return GetVirtualTransactionSize(tx); }
+
+//! The fee `tx` pays, valued as the mempool values it (its one fee asset at
+//! this node's rate; 0 when this node does not value it). It is in the
+//! transaction's own outputs, so every variant of a transaction id pays the same.
+static CAmount BtcPayFeeValue(const CTransaction& tx)
+{
+    const CAmountMap fees = GetFeeMap(tx);
+    if (!g_con_any_asset_fees) {
+        const auto it = fees.find(::policyAsset);
+        return it == fees.end() ? 0 : std::max<CAmount>(0, it->second);
+    }
+    if (fees.size() != 1 || fees.begin()->second <= 0) return 0;
+    const CAmount value = ExchangeRateMap::GetInstance().ConvertAmountToValue(fees.begin()->second, fees.begin()->first).GetValue();
+    return std::clamp<CAmount>(value, 0, MAX_MONEY);
+}
+
+static int64_t BtcPayMaxVariantBytes()
+{
+    static const int64_t limit = std::max<int64_t>(0, gArgs.GetIntArg("-btcpaymaxvariantbytes", BTCPAY_MAX_VARIANT_BYTES));
+    return limit;
+}
+
+//! Whether a newcomer with `key`, `vsize` and `fee` would be kept beside the
+//! variants `v` already holds: nullopt if it would, else why not. `refresh` is
+//! set to the slot it would take over (a variant proving the same payments).
+static std::optional<std::string> BtcPayWouldKeep(const BtcPayVariants* v, const BtcPayKey& key, int64_t vsize,
+                                                  CAmount fee, std::optional<size_t>& refresh)
+{
+    refresh.reset();
+    if (v == nullptr || v->txs.empty()) return std::nullopt;
+    int64_t kept_vsize = v->vsize;
+    for (size_t n = 0; n < v->keys.size(); ++n) {
+        if (v->keys[n] == key) {
+            refresh = n;
+            kept_vsize -= BtcPayTxVsize(*v->txs[n]);
+            break;
+        }
+        if (v->keys[n].blocks == key.blocks) return std::string("a variant proving that Bitcoin block is kept already");
+    }
+    if (!refresh && v->txs.size() >= BTCPAY_MAX_VARIANTS) return strprintf("%u variants are kept already", (unsigned)BTCPAY_MAX_VARIANTS);
+    const CAmount needed = ::minRelayTxFee.GetFee(kept_vsize + vsize);
+    if (needed > fee) {
+        return strprintf("its fee %d pays for the storage of %d vB, %d vB kept", fee,
+                         ::minRelayTxFee.GetFeePerK() > 0 ? fee * 1000 / ::minRelayTxFee.GetFeePerK() : 0, kept_vsize);
+    }
+    return std::nullopt;
+}
+
+static void BtcPayDropTxid(std::map<uint256, BtcPayVariants>::iterator it) EXCLUSIVE_LOCKS_REQUIRED(g_btcpay_pending_mutex)
+{
+    g_btcpay_variant_bytes -= it->second.bytes;
+    g_btcpay_by_density.erase({it->second.Density(), it->second.order});
+    g_btcpay_variants.erase(it);
+}
 
 static void BtcPaymentNoteVariant(const CTransactionRef& tx)
 {
-    std::vector<uint256> key = BtcPaymentKey(*tx);
+    const BtcPayKey key = BtcPaymentKey(*tx);
+    const int64_t vsize = BtcPayTxVsize(*tx);
+    const int64_t bytes = BtcPayTxBytes(tx);
+    const CAmount fee = BtcPayFeeValue(*tx);
     LOCK(g_btcpay_pending_mutex);
     const uint256 txid = tx->GetHash();
     auto [it, inserted] = g_btcpay_variants.try_emplace(txid);
     BtcPayVariants& v = it->second;
     if (inserted) {
         v.order = g_btcpay_variant_next++;
-        g_btcpay_variant_order.emplace(v.order, txid);
+    } else {
+        g_btcpay_by_density.erase({v.Density(), v.order});
     }
-    bool replaced = false;
-    std::string dropped;
-    for (size_t n = 0; n < v.keys.size(); ++n) {
-        if (v.keys[n] != key) continue;
-        // The same payments: keep the newest (its links reach the newest anchor).
-        g_btcpay_variant_bytes -= BtcPayTxBytes(v.txs[n]);
-        v.txs[n] = tx;
-        replaced = true;
-        break;
-    }
-    if (!replaced) {
-        if (v.txs.size() >= BTCPAY_MAX_VARIANTS) {
-            // The first seen stays; of the others the oldest goes.
-            g_btcpay_variant_bytes -= BtcPayTxBytes(v.txs[1]);
-            dropped = v.txs[1]->GetWitnessHash().ToString();
-            v.txs.erase(v.txs.begin() + 1);
-            v.keys.erase(v.keys.begin() + 1);
-        }
+    v.fee = fee;
+    std::optional<size_t> refresh;
+    const auto why_not = BtcPayWouldKeep(&v, key, vsize, fee, refresh);
+    if (why_not) {
+        LogPrint(BCLog::MEMPOOL, "BtcPayment: variant %s of %s not kept: %s\n", tx->GetWitnessHash().ToString(),
+                 txid.ToString(), *why_not);
+    } else if (refresh) {
+        v.vsize -= BtcPayTxVsize(*v.txs[*refresh]);
+        v.bytes -= BtcPayTxBytes(v.txs[*refresh]);
+        g_btcpay_variant_bytes -= BtcPayTxBytes(v.txs[*refresh]);
+        v.txs[*refresh] = tx;
+        v.keys[*refresh] = key;
+    } else {
         v.txs.push_back(tx);
-        v.keys.push_back(std::move(key));
+        v.keys.push_back(key);
     }
-    g_btcpay_variant_bytes += BtcPayTxBytes(tx);
-    LogPrint(BCLog::MEMPOOL, "BtcPayment: %u variant(s) of %s kept%s%s\n", (unsigned)v.txs.size(), txid.ToString(),
-             dropped.empty() ? "" : ", dropped ", dropped);
-    for (auto o = g_btcpay_variant_order.begin(); g_btcpay_variant_bytes > BTCPAY_MAX_VARIANT_BYTES && o != g_btcpay_variant_order.end();) {
-        if (o->second == txid || g_btcpay_pending.count(o->second)) { ++o; continue; }
-        auto victim = g_btcpay_variants.find(o->second);
-        for (const auto& t : victim->second.txs) g_btcpay_variant_bytes -= BtcPayTxBytes(t);
-        g_btcpay_variants.erase(victim);
-        o = g_btcpay_variant_order.erase(o);
+    if (!why_not) {
+        v.vsize += vsize;
+        v.bytes += bytes;
+        g_btcpay_variant_bytes += bytes;
+        LogPrint(BCLog::MEMPOOL, "BtcPayment: %u variant(s) of %s kept (%d vB, fee %d)\n", (unsigned)v.txs.size(),
+                 txid.ToString(), v.vsize, v.fee);
+    }
+    if (v.txs.empty()) {
+        g_btcpay_variants.erase(it);
+        return;
+    }
+    g_btcpay_by_density.emplace(std::make_pair(v.Density(), v.order), txid);
+    // Over the bound: the lowest fee per stored virtual byte goes first; claims
+    // waiting for re-attachment go last.
+    for (int pass = 0; pass < 2 && g_btcpay_variant_bytes > BtcPayMaxVariantBytes(); ++pass) {
+        for (auto d = g_btcpay_by_density.begin(); g_btcpay_variant_bytes > BtcPayMaxVariantBytes() && d != g_btcpay_by_density.end();) {
+            const uint256 victim = d->second;
+            if (pass == 0 && g_btcpay_pending.count(victim)) { ++d; continue; }
+            ++d;
+            LogPrint(BCLog::MEMPOOL, "BtcPayment: variants of %s dropped (%.3f per stored vB)%s\n", victim.ToString(),
+                     g_btcpay_variants.at(victim).Density(), pass ? ", waiting for re-attachment" : "");
+            BtcPayDropTxid(g_btcpay_variants.find(victim));
+        }
     }
 }
 
 static void BtcPaymentNotePending(const CTransactionRef& tx)
 {
+    {
+        LOCK(g_btcpay_pending_mutex);
+        if (g_btcpay_pending.size() < BTCPAY_MAX_PENDING) g_btcpay_pending.emplace(tx->GetHash(), -1);
+    }
     BtcPaymentNoteVariant(tx);
-    LOCK(g_btcpay_pending_mutex);
-    if (g_btcpay_pending.size() >= BTCPAY_MAX_PENDING) return;
-    g_btcpay_pending.emplace(tx->GetHash(), -1);
 }
 
 static void BtcPaymentForget(const uint256& txid) EXCLUSIVE_LOCKS_REQUIRED(g_btcpay_pending_mutex)
@@ -500,9 +592,7 @@ static void BtcPaymentForget(const uint256& txid) EXCLUSIVE_LOCKS_REQUIRED(g_btc
     g_btcpay_pending.erase(txid);
     auto it = g_btcpay_variants.find(txid);
     if (it == g_btcpay_variants.end()) return;
-    for (const auto& t : it->second.txs) g_btcpay_variant_bytes -= BtcPayTxBytes(t);
-    g_btcpay_variant_order.erase(it->second.order);
-    g_btcpay_variants.erase(it);
+    BtcPayDropTxid(it);
 }
 
 static bool HasBtcPaymentRecords(const CTransaction& tx)
@@ -1269,18 +1359,26 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
             } else if (args.m_allow_bip125_replacement && HasBtcPaymentRecords(tx)) {
                 // Not better than the pooled one, but a proof of other payments is
                 // still worth keeping: if the pooled one's payment leaves
-                // Bitcoin's chain, this one may be the proof that stands. Known
-                // payments are refused at once, without the script checks.
-                const std::vector<uint256> key = BtcPaymentKey(tx);
-                bool known = false;
+                // Bitcoin's chain, this one may be the proof that stands. One the
+                // store would not keep (known payments, a Bitcoin block already
+                // proven, or no room the claim's own fee pays for) is refused at
+                // once, without the script checks.
+                const BtcPayKey key = BtcPaymentKey(tx);
+                std::optional<std::string> why_not;
                 {
                     LOCK(g_btcpay_pending_mutex);
                     const auto v = g_btcpay_variants.find(tx.GetHash());
-                    if (v != g_btcpay_variants.end()) {
-                        known = std::find(v->second.keys.begin(), v->second.keys.end(), key) != v->second.keys.end();
-                    }
+                    std::optional<size_t> refresh;
+                    why_not = BtcPayWouldKeep(v == g_btcpay_variants.end() ? nullptr : &v->second, key,
+                                              BtcPayTxVsize(tx), BtcPayFeeValue(tx), refresh);
+                    if (refresh) why_not = "its payments are known";
                 }
-                if (!known) ws.m_btcpay_witness_replace = ws.m_btcpay_alternate_only = true;
+                if (!why_not) {
+                    ws.m_btcpay_witness_replace = ws.m_btcpay_alternate_only = true;
+                } else {
+                    LogPrint(BCLog::MEMPOOL, "BtcPayment: variant %s of %s not kept: %s\n", tx.GetWitnessHash().ToString(),
+                             tx.GetHash().ToString(), *why_not);
+                }
             }
         }
         if (!ws.m_btcpay_witness_replace) {
