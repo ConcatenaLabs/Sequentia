@@ -2334,6 +2334,40 @@ MempoolAcceptResult AcceptToMemoryPool(CChainState& active_chainstate, const CTr
     std::vector<COutPoint> coins_to_uncache;
     auto args = MemPoolAccept::ATMPArgs::SingleAccept(chainparams, accept_time, bypass_limits, coins_to_uncache, test_accept);
     const MempoolAcceptResult result = MemPoolAccept(pool, active_chainstate).AcceptSingleTransaction(tx, args);
+    // SEQUENTIA: a same-txid replacement by another payment proof (6.2) evicts
+    // the pooled transaction's descendants with it, though they still spend
+    // valid outputs: the txid and the outputs are unchanged. Put them back, so
+    // nobody's better proof costs a buyer its onward spend or the child paying
+    // for its claim's inclusion.
+    if (result.m_result_type == MempoolAcceptResult::ResultType::VALID && !test_accept &&
+        result.m_replaced_transactions) {
+        const auto& replaced = *result.m_replaced_transactions;
+        const bool same_txid = std::any_of(replaced.begin(), replaced.end(),
+                                           [&](const CTransactionRef& r) { return r->GetHash() == tx->GetHash(); });
+        if (same_txid) {
+            std::list<CTransactionRef> rest;
+            for (const auto& r : replaced) {
+                if (r->GetHash() != tx->GetHash()) rest.push_back(r);
+            }
+            for (bool progress = true; progress && !rest.empty();) {
+                progress = false;
+                for (auto it = rest.begin(); it != rest.end();) {
+                    const MempoolAcceptResult back = AcceptToMemoryPool(active_chainstate, *it, accept_time, bypass_limits,
+                                                                        /*test_accept=*/false);
+                    if (back.m_result_type == MempoolAcceptResult::ResultType::VALID) {
+                        it = rest.erase(it);
+                        progress = true;
+                    } else {
+                        ++it;
+                    }
+                }
+            }
+            if (!rest.empty()) {
+                LogPrint(BCLog::MEMPOOL, "BtcPayment: %u descendant(s) of %s not restored after its proof was replaced\n",
+                         (unsigned)rest.size(), tx->GetHash().ToString());
+            }
+        }
+    }
     if (result.m_result_type != MempoolAcceptResult::ResultType::VALID) {
         // Remove coins that were not present in the coins cache before calling
         // AcceptSingleTransaction(); this is to prevent memory DoS in case we receive a large

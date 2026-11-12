@@ -397,7 +397,10 @@ buyer's pre-signed claim with a heavy proof of some other qualifying payment is
 then displaced by the lighter proof of the buyer's own payment. Each replacement
 must be strictly lighter or replace a proof that is no longer valid, so a chain
 of replacements cannot loop. `sendrawtransaction` submits such a transaction to
-the mempool instead of treating its transaction id as already known.
+the mempool instead of treating its transaction id as already known. The pooled
+transaction's descendants spend its outputs, which the replacement leaves
+unchanged with its transaction id, so they stay in the pool: a better proof never
+costs a buyer its onward spend or a child paying for the claim's inclusion.
 
 **A proof is preferred over a floor.** Among conflicting spends of one coin:
 

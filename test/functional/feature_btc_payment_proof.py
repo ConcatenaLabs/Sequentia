@@ -453,6 +453,8 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.refund_waits_for_the_anchor()
         self.proof_preferred_over_floor()
         self.neg_relative_floor()
+        self.same_block_coin_anchor()
+        self.records_in_order()
         self.neg_not_in_anchor_chain()
         self.neg_below_anchor()
         self.reorg_double_spend()
@@ -463,6 +465,7 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.variant_fee_budget()
         self.seller_fills_the_store()
         self.current_variant_kept()
+        self.replacement_keeps_descendants()
         self.store_order_irrelevant()
         self.anchoring_first()
         self.bitcoin_reorg_sweep()
@@ -780,6 +783,82 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         lb = self.btc_mine(1)[0]
         self.mine_anchored(self.btc_rpc().getblockcount())
         self.force([spend(self.proof_for(late, C, lb)["record"])])
+
+    def covenant_coin(self, leaf):
+        """A coin of 1 unit under a one-leaf taproot with an unspendable key; returns
+        the funding transaction (unconfirmed) and a spender taking a slot."""
+        node = self.nodes[0]
+        tap = taproot_construct(NUMS, [("leaf", leaf)])
+        txid = node.sendtoaddress(address=program_to_witness(1, tap.scriptPubKey[2:]), amount=1,
+                                  assetlabel=self.asset, fee_asset_label=self.asset)
+        tx = tx_from_hex(node.getrawtransaction(txid))
+        vout = [i for i, o in enumerate(tx.vout) if o.scriptPubKey == tap.scriptPubKey][0]
+        control = bytes([tap.leaves["leaf"].version + tap.negflag]) + tap.internal_pubkey + tap.leaves["leaf"].merklebranch
+        spk = bytes.fromhex(node.getaddressinfo(node.getnewaddress())["scriptPubKey"])
+
+        def spend(slot):
+            t = CTransaction()
+            t.nVersion = 2
+            t.vin.append(CTxIn(COutPoint(int(txid, 16), vout), nSequence=SEQ_NONFINAL_RBF))
+            asset = CTxOutAsset(b"\x01" + bytes.fromhex(self.asset)[::-1])
+            t.vout.append(CTxOut(CTxOutValue(100000000 - 5000), spk, asset))
+            t.vout.append(CTxOut(CTxOutValue(5000), b"", asset))
+            t.wit.vtxinwit.append(CTxInWitness())
+            t.wit.vtxoutwit = [CTxOutWitness() for _ in t.vout]
+            t.wit.vtxinwit[0].peginWitness.stack = list(slot)
+            t.wit.vtxinwit[0].scriptWitness.stack = [bytes(leaf), control]
+            t.rehash()
+            return t
+        return txid, spend
+
+    def same_block_coin_anchor(self):
+        self.step("N36 (PV15 P05) a claim in the same block as its coin takes C = that block's own anchor")
+        # Specification 4.2 check 7: C is the anchor height of the block that
+        # created the coin; for a coin created in the claim's own block, that
+        # block's anchor. A relative floor (h > C) then never opens there: no
+        # proof in a block is above the block's own anchor. With the parent's
+        # anchor it would.
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        txid, spend = self.covenant_coin(CScript([OP_INSPECTBTCPAYMENT, OP_GREATERTHAN]))
+        lock_hex = node.getrawtransaction(txid)
+        pay = self.bbuyer.sendtoaddress(self.bbuyer.getnewaddress(address_type="bech32"), Decimal("0.01"))
+        pb = self.btc_mine(1)[0]
+        p = b.getblockheader(pb)["height"]
+        parent_anchor = self.anchor_of(node.getbestblockhash())
+        assert parent_anchor < p
+        pr = self.proof_for(pay, parent_anchor, pb)
+        assert_equal(len(pr["links"]), 0)
+        self.force([lock_hex, spend([pr["record"]])], "bad-btcpay-coin-anchor")
+        own = payment_record(p, p, pr["header"], hashlib.sha256(pr["coinbase"]).digest(), pr["index"], pr["pbranch"],
+                             pr["cbranch"], pr["payment"])
+        self.force([lock_hex, spend([own])],
+                   "Script evaluated without error but finished with a false/empty top stack element")
+        # The anchor those blocks would have carried: the same template, without the claim.
+        blk = self.force([lock_hex])
+        assert_equal(self.anchor_of(blk), p)
+        self.results.append((self.current, "C = parent's anchor %d: bad-btcpay-coin-anchor; C = the block's own "
+                             "anchor %d: the relative floor h > C fails" % (parent_anchor, p)))
+
+    def records_in_order(self):
+        self.step("N37 (PV15 P12) relay takes the records in their one order; a block may carry another")
+        node = self.nodes[0]
+        F = self.anchor_of(node.getbestblockhash())
+        leaf = CScript([F, OP_CHECKANCHORHEIGHTVERIFY, OP_DROP, OP_INSPECTBTCPAYMENT, OP_2DROP, OP_1])
+        coins = [self.covenant_coin(leaf) for _ in range(2)]
+        self.mine(1)
+        C = self.anchor_of(node.getrawtransaction(coins[0][0], True)["blockhash"])
+        pay = self.bbuyer.sendtoaddress(self.bbuyer.getnewaddress(address_type="bech32"), Decimal("0.01"))
+        pb = self.btc_mine(1)[0]
+        self.mine_anchored(self.btc_rpc().getblockheader(pb)["height"])
+        rec = self.proof_for(pay, C, pb)["record"]
+        swapped = coins[0][1]([floor_record(F), rec])
+        assert_raises_rpc_error(-26, "extra-pegin-witness", node.sendrawtransaction, swapped.serialize().hex())
+        node.sendrawtransaction(coins[0][1]([rec, floor_record(F)]).serialize().hex())
+        blk = self.force([coins[1][1]([floor_record(F), rec])])
+        self.results.append((self.current, "floor before proof: relay extra-pegin-witness; in order: accepted; "
+                             "out of order forced into a block: valid (%s)" % blk[:16]))
+        self.mine(1)
 
     def neg_not_in_anchor_chain(self):
         self.step("N11 a proven block that is not in the anchor chain (orphaned)")
@@ -1580,6 +1659,49 @@ class BtcPaymentProofTest(BitcoinTestFramework):
         self.log.info("    the victim's claim came back with the buyer's proof and was mined")
         self.mine(1)
         self.restart_seq0()
+
+    def replacement_keeps_descendants(self):
+        self.step("N38 (PV15 X3) a better proof of a pooled claim keeps the claim's children in the pool")
+        # A same-txid replacement evicts the pooled one's descendants with it,
+        # though they still spend valid outputs (same txid). A buyer's onward
+        # spend, or a child paying for the claim's inclusion, must come back.
+        node = self.nodes[0]
+        b = self.btc_rpc()
+        lock = self.fresh_lock()
+        ptx, pr, vout = self.paid(lock)
+        coin = self.seller_coins(1, lock["amount"])[0]
+        stx = self.self_pay(coin, lock["addr"])
+        sh = self.btc_mine(1)[0]
+        self.mine_anchored(b.getblockheader(sh)["height"])
+        addr = node.getnewaddress()
+        spk = bytes.fromhex(node.getaddressinfo(addr)["scriptPubKey"])
+        cb = self.claim(lock, self.proof_for(ptx, lock["C"], pr["blockhash"])["record"], vout, out_spk=spk)
+        cs = self.claim(lock, self.proof_for(stx, lock["C"], sh)["record"], self.vout_paying(stx, lock["addr"], sh),
+                        out_spk=spk)
+        assert node.decoderawtransaction(cs.serialize().hex())["weight"] < node.decoderawtransaction(cb.serialize().hex())["weight"]
+        node.sendrawtransaction(cb.serialize().hex())
+        # The buyer's child, spending the claim's output and paying a high fee.
+        child = CTransaction()
+        child.nVersion = 2
+        child.vin.append(CTxIn(COutPoint(int(cb.hash, 16), 0), nSequence=SEQ_NONFINAL_RBF))
+        asset = CTxOutAsset(b"\x01" + bytes.fromhex(self.asset)[::-1])
+        kid_fee = 20000
+        child.vout.append(CTxOut(CTxOutValue(lock["asset_amount"] - 5000 - kid_fee),
+                                 bytes.fromhex(node.getaddressinfo(node.getnewaddress())["scriptPubKey"]), asset))
+        child.vout.append(CTxOut(CTxOutValue(kid_fee), b"", asset))
+        signed = node.signrawtransactionwithwallet(child.serialize().hex())
+        assert signed["complete"], signed
+        kid = node.sendrawtransaction(signed["hex"])
+        assert kid in node.getrawmempool()
+        # The seller's lighter proof replaces the buyer's: same txid.
+        node.sendrawtransaction(cs.serialize().hex())
+        assert_equal(node.getmempoolentry(cs.hash)["wtxid"], node.decoderawtransaction(cs.serialize().hex())["hash"])
+        assert kid in node.getrawmempool(), "the claim's child was evicted by a same-txid replacement"
+        blk = self.mine(1)[0]
+        assert kid in node.getblock(blk)["tx"] and cs.hash in node.getblock(blk)["tx"]
+        self.results.append((self.current, "a lighter proof replaced the pooled claim; its child (fee %d) stayed in "
+                             "the pool and was mined with it" % kid_fee))
+        self.log.info("    the claim's child stayed in the pool through the same-txid replacement and was mined")
 
     def anchor_driven_delay(self):
         """Seconds from Bitcoin orphaning the tip's anchor until the node disconnects that block."""
