@@ -1267,8 +1267,10 @@ block out of its fork choice, and with it every descendant. It disconnects the
 block and signs a sibling on its parent, and its mempool readmits the held
 transaction, which the block had evicted. Nothing is marked failed: peers that
 relay the block or build on it are not punished, their headers and blocks are
-stored as usual, and a restart forgets the set-aside. The block returns to fork
-choice when any of these happens:
+stored as usual, and a restart forgets the set-aside. A restart can also
+leave the member off the block until a peer sends it again, because the node's
+start-up can discard the stored body of a stall-escaping block. The
+block returns to fork choice when any of these happens:
 - a quorum-certified block stands at its height or above on the active chain;
 - a quorum-certified block builds on it (the rest of the committee certified
   the respend, and the member follows). The member learns this when that block
@@ -1292,8 +1294,8 @@ pays more and signals replacement.
 **The liveness bound and the backstop.** A member *holds* from its first
 decline to sign or to propose for a held transaction, or its first set-aside,
 until a new quorum-certified block appears on its active chain. A certified
-block is new when the member first judged it certified after the hold began,
-and after the last disconnect since. What counts is when the block was
+block is new when the member first received it with a certificate after the
+hold began, and after the last disconnect since. What counts is when the block was
 certified, never its height or its branch:
 - when a further Bitcoin reorganization lowers the chain, the certified
   blocks of the new branch end the hold although they stand lower;
@@ -1302,9 +1304,9 @@ certified, never its height or its branch:
   again does not certify it again. So Bitcoin flipping between branches that
   already carry certified blocks restarts neither clock below.
 
-The member numbers the blocks in the order it first judges them certified,
-while it holds anything, and marks the hold with the number reached when the
-hold begins; a block without a number was certified before everything the
+The member numbers the blocks in the order it first receives them with a
+certificate, while it holds anything, and marks the hold with the number
+reached when the hold begins (and again at each disconnect); a block without a number was certified before everything the
 member holds, and is older than every mark. The numbers and the clocks are
 kept in memory only. A restart keeps the record and forgets them: the member
 still refuses the respends of what it holds, its hold begins again at its

@@ -31,6 +31,7 @@
 #include <chrono>
 #include <limits>
 #include <map>
+#include <optional>
 #include <set>
 #include <thread>
 
@@ -89,7 +90,8 @@ const CBlockIndex* g_cert_block GUARDED_BY(g_held_mutex){nullptr};
 //! judged before everything held now. Memory only.
 uint64_t g_cert_seq GUARDED_BY(g_held_mutex){0};
 std::map<const CBlockIndex*, uint64_t> g_cert_order GUARDED_BY(g_held_mutex);
-//! g_cert_seq when the hold's clocks started, or at the last disconnect since.
+//! g_cert_seq when the hold began (its first decline or set-aside), or at the
+//! last disconnect since.
 //! The hold ends once the active chain's highest certified block was judged
 //! after that: by when it was certified, never by its height or its branch,
 //! so that a Bitcoin reorganization that lowers the chain does not hide the
@@ -152,11 +154,39 @@ void EraseEntry(const uint256& txid) EXCLUSIVE_LOCKS_REQUIRED(g_held_mutex)
     g_held.erase(it);
 }
 
+//! The record as it is to be written, waiting for FlushRecord, and the mutex
+//! that orders the writes. The file is written, and synced, with g_held_mutex
+//! released: validation takes g_held_mutex for every newly certified block
+//! (HeldTxsNoteCertified), and must never wait on a disk sync.
+std::optional<std::vector<unsigned char>> g_pending_save GUARDED_BY(g_held_mutex);
+Mutex g_held_file_mutex;
+
 void SaveLocked() EXCLUSIVE_LOCKS_REQUIRED(g_held_mutex)
 {
     // Only the held transactions are written: a restarted member must still
     // refuse to sign their respends. Set-asides are never written, so no
     // record, lost or stale, can keep a block out of a node's fork choice.
+    // Serialized here, in memory; FlushRecord writes the latest form.
+    std::vector<const HeldEntry*> order;
+    for (const auto& [txid, e] : g_held) order.push_back(&e);
+    std::sort(order.begin(), order.end(), [](const HeldEntry* a, const HeldEntry* b) { return a->seq < b->seq; });
+    CDataStream ss(SER_DISK, CLIENT_VERSION);
+    ss << HELD_FILE_VERSION;
+    ss << (uint64_t)order.size();
+    for (const HeldEntry* e : order) ss << e->tx << e->fork_height << e->release_anchor;
+    g_pending_save.emplace(UCharCast(ss.data()), UCharCast(ss.data()) + ss.size());
+}
+
+//! Write the record's latest form, if one waits. Called with no lock held,
+//! at the end of every public function that can change the record, and by
+//! the maintenance thread. A later form always replaces an earlier one that
+//! has not been written yet, and writes happen one at a time in that order.
+void FlushRecord() LOCKS_EXCLUDED(g_held_mutex, g_held_file_mutex)
+{
+    LOCK(g_held_file_mutex);
+    std::optional<std::vector<unsigned char>> data;
+    WITH_LOCK(g_held_mutex, data.swap(g_pending_save));
+    if (!data) return;
     const fs::path tmp = gArgs.GetDataDirNet() / "heldtxs.dat.new";
     FILE* f = fsbridge::fopen(tmp, "wb");
     if (!f) {
@@ -165,12 +195,7 @@ void SaveLocked() EXCLUSIVE_LOCKS_REQUIRED(g_held_mutex)
     }
     CAutoFile file(f, SER_DISK, CLIENT_VERSION);
     try {
-        std::vector<const HeldEntry*> order;
-        for (const auto& [txid, e] : g_held) order.push_back(&e);
-        std::sort(order.begin(), order.end(), [](const HeldEntry* a, const HeldEntry* b) { return a->seq < b->seq; });
-        file << HELD_FILE_VERSION;
-        file << (uint64_t)order.size();
-        for (const HeldEntry* e : order) file << e->tx << e->fork_height << e->release_anchor;
+        file.write(MakeByteSpan(*data));
         if (!FileCommit(file.Get())) throw std::runtime_error("FileCommit failed");
         file.fclose();
         if (!RenameOver(tmp, HeldPath())) throw std::runtime_error("rename failed");
@@ -325,7 +350,7 @@ void HeldTxsInit()
     }
 }
 
-void HeldTxsRecordDisconnect(ChainstateManager& chainman, const std::vector<const CBlockIndex*>& disconnected)
+static void RecordDisconnect(ChainstateManager& chainman, const std::vector<const CBlockIndex*>& disconnected)
 {
     if (!g_held_active || disconnected.empty()) return;
     const int64_t start = GetTimeMicros();
@@ -434,9 +459,11 @@ void HeldTxsNoteHold()
 {
     if (!g_held_active) return;
     LOCK(g_held_mutex);
+    // The bound's clock starts here; the mark stays where the hold began
+    // (BeginHoldLocked), so a block first certified between the first decline
+    // and this share still ends the hold.
     if (g_hold_since_ms == 0 && !g_held.empty() && (g_declined || !g_aside.empty())) {
         g_hold_since_ms = SteadyMs();
-        g_hold_mark = g_cert_seq;
     }
 }
 
@@ -482,7 +509,7 @@ std::vector<CTransactionRef> HeldTxsForMining()
     return out;
 }
 
-void HeldTxsRelease(const uint256& txid, const std::string& why)
+static void Release(const uint256& txid, const std::string& why)
 {
     if (!g_held_active) return;
     LOCK(g_held_mutex);
@@ -492,7 +519,7 @@ void HeldTxsRelease(const uint256& txid, const std::string& why)
     Changed();
 }
 
-bool HeldTxsMaintain(ChainstateManager& chainman, CTxMemPool& mempool, bool park)
+static bool Maintain(ChainstateManager& chainman, CTxMemPool& mempool, bool park)
 {
     if (!g_held_active) return false;
     {
@@ -782,6 +809,25 @@ bool HeldTxsMaintain(ChainstateManager& chainman, CTxMemPool& mempool, bool park
     return false;
 }
 
+void HeldTxsRecordDisconnect(ChainstateManager& chainman, const std::vector<const CBlockIndex*>& disconnected)
+{
+    RecordDisconnect(chainman, disconnected);
+    FlushRecord();
+}
+
+void HeldTxsRelease(const uint256& txid, const std::string& why)
+{
+    Release(txid, why);
+    FlushRecord();
+}
+
+bool HeldTxsMaintain(ChainstateManager& chainman, CTxMemPool& mempool, bool park)
+{
+    const bool changed_chain = Maintain(chainman, mempool, park);
+    FlushRecord();
+    return changed_chain;
+}
+
 void HeldTxsStart(ChainstateManager& chainman, CTxMemPool& mempool)
 {
     if (!g_held_active || g_held_thread.joinable()) return;
@@ -804,6 +850,7 @@ void HeldTxsStop()
 {
     g_held_stop = true;
     if (g_held_thread.joinable()) g_held_thread.join();
+    FlushRecord();
 }
 
 HeldTxsInfo HeldTxsGetInfo()
