@@ -79,11 +79,20 @@ bool g_declined GUARDED_BY(g_held_mutex){false};
 //! the last maintenance pass or disconnect saw it (nullptr: none in reach).
 //! Block index entries live as long as the node, so the pointers stay valid.
 const CBlockIndex* g_cert_block GUARDED_BY(g_held_mutex){nullptr};
-//! g_cert_block when the hold's clocks started. The hold ends once the active
-//! chain's highest certified block is neither this block nor an ancestor of
-//! it: a block, not a height, so that a Bitcoin reorganization that lowers
-//! the chain does not hide the certified blocks of the new branch.
-const CBlockIndex* g_hold_mark GUARDED_BY(g_held_mutex){nullptr};
+//! The order in which blocks were first judged to carry their parent's quorum
+//! (HeldTxsNoteCertified), for the blocks judged while this member held
+//! anything. A block is judged once: connecting it again, after Bitcoin
+//! returned to its branch, gives it no new place. A block that is absent was
+//! judged before everything held now. Memory only.
+uint64_t g_cert_seq GUARDED_BY(g_held_mutex){0};
+std::map<const CBlockIndex*, uint64_t> g_cert_order GUARDED_BY(g_held_mutex);
+//! g_cert_seq when the hold's clocks started, or at the last disconnect since.
+//! The hold ends once the active chain's highest certified block was judged
+//! after that: by when it was certified, never by its height or its branch,
+//! so that a Bitcoin reorganization that lowers the chain does not hide the
+//! certified blocks of the new branch, and one that returns to a branch
+//! already seen does not pass its old certified blocks off as new.
+uint64_t g_hold_mark GUARDED_BY(g_held_mutex){0};
 //! The backstop's clock: when the current hold began (its first decline or
 //! set-aside), 0 when none. Ends with the hold, at a new certified block.
 int64_t g_hold_first_ms GUARDED_BY(g_held_mutex){0};
@@ -231,16 +240,13 @@ const CBlockIndex* HighestCertified(const CBlockIndex* tip) EXCLUSIVE_LOCKS_REQU
 }
 
 //! Whether a block has been certified since the hold's clocks started: the
-//! active chain's highest certified block is neither the mark nor an ancestor
-//! of it. A deeper disconnect lowers the chain below the mark; the certified
-//! blocks of the new branch are not the mark's ancestors, so they count.
-bool CertifiedSinceMarkLocked() EXCLUSIVE_LOCKS_REQUIRED(cs_main, g_held_mutex)
+//! active chain's highest certified block was first judged certified after
+//! the mark. The blocks of a branch Bitcoin returns to were judged before it,
+//! so flipping between branches already seen restarts no clock.
+bool CertifiedSinceMarkLocked() EXCLUSIVE_LOCKS_REQUIRED(g_held_mutex)
 {
-    const CBlockIndex* cert = g_cert_block;
-    if (!cert) return false;
-    if (!g_hold_mark) return true;
-    if (cert->nHeight > g_hold_mark->nHeight) return true;
-    return g_hold_mark->GetAncestor(cert->nHeight) != cert;
+    const auto it = g_cert_order.find(g_cert_block);
+    return it != g_cert_order.end() && it->second > g_hold_mark;
 }
 
 //! A hold begins (its first decline or set-aside): start the backstop's clock.
@@ -248,7 +254,7 @@ void BeginHoldLocked() EXCLUSIVE_LOCKS_REQUIRED(g_held_mutex)
 {
     if (g_hold_first_ms == 0) {
         g_hold_first_ms = SteadyMs();
-        g_hold_mark = g_cert_block;
+        g_hold_mark = g_cert_seq;
     }
 }
 
@@ -341,15 +347,15 @@ void HeldTxsRecordDisconnect(ChainstateManager& chainman, const std::vector<cons
     LOCK(g_held_mutex);
     g_release_scanned.clear();
     // The disconnect lowered the chain: progress is read again from the new
-    // tip, not left for the next maintenance pass (a share or proposal noted
-    // meanwhile would mark the hold with a block of the old branch). The
+    // tip, not left for the next maintenance pass, and counted from here on:
+    // only a block certified after this disconnect ends the hold. The
     // bound's clock starts again from the member's next honest proposal or
     // share after a decline, since what it now holds has had no round yet.
     // The backstop's clock runs on, so a set-aside stays bounded.
     g_cert_block = cert_now;
     g_hold_since_ms = 0;
     g_declined = false;
-    if (g_hold_first_ms != 0) g_hold_mark = cert_now;
+    if (g_hold_first_ms != 0) g_hold_mark = g_cert_seq;
     if (top < 0) {
         LogPrintf("Held transactions: none of the %u disconnected block(s) was certified; nothing held\n", disconnected.size());
         return;
@@ -423,7 +429,7 @@ void HeldTxsNoteHold()
     LOCK(g_held_mutex);
     if (g_hold_since_ms == 0 && !g_held.empty() && (g_declined || !g_aside.empty())) {
         g_hold_since_ms = SteadyMs();
-        g_hold_mark = g_cert_block;
+        g_hold_mark = g_cert_seq;
     }
 }
 
@@ -438,12 +444,17 @@ const CBlockIndex* HeldTxsSetAsideAncestor(const CBlockIndex* pindex)
     return nullptr;
 }
 
-void HeldTxsNoteCertified(const CBlockIndex* pindex)
+void HeldTxsNoteCertified(const CBlockIndex* pindex, bool newly)
 {
     AssertLockHeld(cs_main);
-    if (!g_held_active || g_aside_count.load() == 0 || !pindex) return;
+    if (!g_held_active || !pindex) return;
+    if (!newly && g_aside_count.load() == 0) return;
     LOCK(g_held_mutex);
-    if (!CarriesQuorum(pindex)) return;
+    // Its place in the order of certification, given once (emplace keeps a
+    // place already given), and only while something is held: a hold compares
+    // nothing older.
+    if (newly && (!g_held.empty() || !g_aside.empty())) g_cert_order.emplace(pindex, ++g_cert_seq);
+    if (g_aside.empty() || !CarriesQuorum(pindex)) return;
     for (const auto& [hash, a] : g_aside) {
         if (pindex->nHeight > a.pindex->nHeight && pindex->GetAncestor(a.pindex->nHeight) == a.pindex && g_follow.insert(hash).second) {
             LogPrintf("Held transactions: certified block %s builds on set-aside block %s; following it\n",
@@ -483,6 +494,7 @@ bool HeldTxsMaintain(ChainstateManager& chainman, CTxMemPool& mempool, bool park
             g_block_conflict.clear();
             g_given_up.clear();
             g_follow.clear();
+            g_cert_order.clear();
             g_hold_since_ms = 0;
             g_hold_first_ms = 0;
             g_declined = false;
