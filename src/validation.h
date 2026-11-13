@@ -857,12 +857,14 @@ public:
     /** Remove invalidity status from a block and its descendants. */
     void ResetBlockFailureFlags(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
-    /** SEQUENTIA anchor watcher: ResetBlockFailureFlags(pindex), then, in the
-     *  same cs_main hold, mark failed again every descendant of pindex that
-     *  anchor_ok rejects (BLOCK_FAILED_VALID and BLOCK_FAILED_ANCHOR) together
-     *  with the blocks above it (BLOCK_FAILED_CHILD), so that no activation can
-     *  connect a block whose own anchor is still off Bitcoin's best chain.
-     *  Returns the blocks marked BLOCK_FAILED_ANCHOR, lowest first. */
+    /** SEQUENTIA, on a node that watches Bitcoin: ResetBlockFailureFlags(pindex),
+     *  then, in the same cs_main hold, mark failed again every block that
+     *  clearing revived (pindex, its ancestors off the active chain and its
+     *  descendants) whose anchor anchor_ok rejects (BLOCK_FAILED_VALID and
+     *  BLOCK_FAILED_ANCHOR), together with the blocks above it
+     *  (BLOCK_FAILED_CHILD), so that no activation can connect a block whose
+     *  own anchor is still off Bitcoin's best chain. Returns the blocks marked
+     *  BLOCK_FAILED_ANCHOR, lowest first. */
     std::vector<CBlockIndex*> ReconsiderAnchoredBlock(CBlockIndex* pindex,
                                                       const std::function<bool(const CBlockIndex*)>& anchor_ok)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);

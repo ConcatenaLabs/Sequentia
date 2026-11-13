@@ -2272,7 +2272,9 @@ static RPCHelpMan reconsiderblock()
 {
     return RPCHelpMan{"reconsiderblock",
                 "\nRemoves invalidity status of a block, its ancestors and its descendants, reconsider them for activation.\n"
-                "This can be used to undo the effects of invalidateblock.\n",
+                "This can be used to undo the effects of invalidateblock.\n"
+                "On a node that watches Bitcoin (-validateanchor), a block whose anchor is not on Bitcoin's best chain stays\n"
+                "invalid, with the blocks above it, until Bitcoin has its anchor again.\n",
                 {
                     {"blockhash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "the hash of the block to reconsider"},
                 },
@@ -2286,15 +2288,20 @@ static RPCHelpMan reconsiderblock()
     ChainstateManager& chainman = EnsureAnyChainman(request.context);
     uint256 hash(ParseHashV(request.params[0], "blockhash"));
 
+    CBlockIndex* pblockindex;
     {
         LOCK(cs_main);
-        CBlockIndex* pblockindex = chainman.m_blockman.LookupBlockIndex(hash);
+        pblockindex = chainman.m_blockman.LookupBlockIndex(hash);
         if (!pblockindex) {
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
         }
-
-        chainman.ActiveChainstate().ResetBlockFailureFlags(pblockindex);
+        // SEQUENTIA: a node that watches Bitcoin revives only what Bitcoin's
+        // anchors allow (below); any other node clears every mark, as upstream.
+        if (!g_con_bitcoin_anchor || !g_validate_anchor) {
+            chainman.ActiveChainstate().ResetBlockFailureFlags(pblockindex);
+        }
     }
+    if (g_con_bitcoin_anchor && g_validate_anchor) AnchorReconsiderBlock(chainman, pblockindex);
 
     BlockValidationState state;
     chainman.ActiveChainstate().ActivateBestChain(state);
