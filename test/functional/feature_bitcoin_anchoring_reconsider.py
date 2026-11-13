@@ -26,6 +26,7 @@ parent moves, so the only way blocks can come back is the validator's watcher.
 """
 
 import os
+import time
 
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
@@ -154,13 +155,12 @@ class AnchorReconsiderTest(BitcoinTestFramework):
         parent.reconsiderblock(n[0])
         self.wait_until(lambda: parent.getblockhash(parent.getblockheader(n[1])["height"]) == n[1], timeout=30)
 
-    def check_return(self, c, d, p, size):
+    def check_return(self, c, d, size):
         """The validator is back on C's top; no block of D was connected on the way; D stays invalid."""
         validator = self.nodes[2]
         self.wait_until(lambda: validator.getbestblockhash() == c[-1], timeout=60)
-        # Let the watcher run several more passes (-anchorpollinterval=1).
-        self.wait_until(lambda: len(self.log_lines_since(size, "Anchor watcher: block ")) > 0 or
-                        validator.getbestblockhash() != c[-1], timeout=30)
+        # A few more passes of the watcher (-anchorpollinterval=1) before the log is read.
+        time.sleep(3)
         connected = self.updatetips_since(size, d)
         for line in connected:
             self.log.info("  connected with an orphaned anchor: %s", line[:160])
@@ -184,7 +184,11 @@ class AnchorReconsiderTest(BitcoinTestFramework):
         parent, founder, validator = self.nodes
         self.mine_parent(6)
         self.wait_until(lambda: founder.getblockcount() >= 2, timeout=120)
+        self.shape_a()
+        self.shape_b()
 
+    def shape_a(self):
+        parent, _, validator = self.nodes
         self.log.info("(a) D and C invalidated one after the other; Bitcoin returns to N without P")
         n, p, c, d = self.build_c_and_d()
         parent.invalidateblock(p)
@@ -195,25 +199,27 @@ class AnchorReconsiderTest(BitcoinTestFramework):
         self.wait_until(lambda: validator.getblockcount() < validator.getblockheader(c[0])["height"], timeout=60)
         size = os.path.getsize(validator.debug_log_path)
         self.return_to_n(n, alt[0])
-        self.check_return(c, d, p, size)
+        self.check_return(c, d, size)
         self.check_p_returns(d, p_alt[0])
 
+    def shape_b(self):
         self.log.info("(b) the node is down while Bitcoin replaces P and N: only C is invalidated")
-        self.start_node(1, extra_args=self.founder_args)
-        self.connect_nodes(1, 2)
+        if not self.nodes[1].running:
+            self.start_node(1, extra_args=self.founder_args)
+            self.connect_nodes(1, 2)
         n, p, c, d = self.build_c_and_d()
+        validator = self.nodes[2]
         self.stop_node(2)
         p_alt1, alt1 = self.replace_p_and_n(n, p)
         size = os.path.getsize(validator.debug_log_path)
         self.start_node(2, extra_args=self.validator_args)
-        validator = self.nodes[2]
         self.wait_until(lambda: validator.getblockcount() < validator.getblockheader(c[0])["height"], timeout=60)
         invalidated = self.log_lines_since(size, "reorganization detected: invalidating block")
         assert any(c[0] in line for line in invalidated), "C's first block was not invalidated"
         assert not any(h in line for line in invalidated for h in d), "a block of D was invalidated on its own"
         size = os.path.getsize(validator.debug_log_path)
         self.return_to_n(n, alt1)
-        self.check_return(c, d, p, size)
+        self.check_return(c, d, size)
         self.check_p_returns(d, p_alt1)
 
 

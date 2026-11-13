@@ -177,6 +177,28 @@ member also holds the transactions of the certified blocks it disconnected,
 and signs no block that respends them ("Held transactions" in
 [`04-proof-of-stake.md`](04-proof-of-stake.md) §9).
 
+When Bitcoin returns to a branch it showed before, the blocks the watcher
+invalidated for that branch are valid again. The watcher keeps every block it
+invalidated in a recovery set (the block index marks them, so a restart keeps
+the set) and checks their anchors on every tick. A block whose anchor is
+canonical again is reconsidered together with the blocks above it, but only as
+far as Bitcoin's anchors allow: before it clears anything, the watcher checks the
+anchor of every block the reconsideration would bring back, and in the same step
+it keeps invalid each block above whose own anchor is still off Bitcoin's best
+chain, with everything above that one. Those blocks wait in the recovery set for
+their own anchor. A block whose ancestors off the active chain include one with
+an orphaned anchor waits for that ancestor. So no block whose anchor Bitcoin
+does not have is ever connected, not even for the moment before the walk would
+disconnect it again; and an anchor the Bitcoin daemon cannot judge right now
+revives nothing until a later tick can.
+
+In each pass the walk for orphaned anchors runs before the reconsideration, and
+once more after it when something was reconsidered. A branch whose anchors
+Bitcoin has just dropped therefore leaves the chain through the watcher's own
+invalidation, which records what it disconnects, and not through fork choice
+inside the reconsideration, even when the returning branch is the heavier one.
+Both happen in the same pass, so the node ends the tick on the returning branch.
+
 This is a **consensus** invalidation, not a local policy choice: every node
 following the same Bitcoin best chain reaches the same decision, because
 Bitcoin's best chain is the shared oracle. The only sanctioned reason to discard
