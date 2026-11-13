@@ -162,7 +162,10 @@ class PosStopUnderGossipTest(BitcoinTestFramework):
             # A runtime start persists itself; start each attempt with none.
             if os.path.exists(settings):
                 os.remove(settings)
-            self.start_node(host, extra_args=common)
+            # The race opens RPC connections of its own that stay idle; a short
+            # server timeout closes them, so the next stop does not wait the
+            # default 30 s for them in StopHTTPServer.
+            self.start_node(host, extra_args=common + ["-rpcservertimeout=1"])
             node = self.nodes[host]
             log_from = node.debug_log_bytes()
             proxies = [get_rpc_proxy(node.url, host, timeout=120) for _ in wifs]
