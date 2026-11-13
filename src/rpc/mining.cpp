@@ -1824,12 +1824,16 @@ static RPCHelpMan musigpartialsign()
         ChainstateManager& chainman = EnsureAnyChainman(request.context);
         LOCK(cs_main);
         if (auto why = HeldTxsBlockConflict(block, chainman.m_blockman.LookupBlockIndex(block.hashPrevBlock))) {
+            HeldTxsNoteDecline();
             throw JSONRPCError(RPC_MISC_ERROR, strprintf("held-conflict: %s", *why));
         }
     }
     std::string err;
     auto partial = MuSigSessionPartialSign(session_id, key, pubkeys, pubnonces, msg, err);
     if (!partial) throw JSONRPCError(RPC_MISC_ERROR, err);
+    // A share for a block that respends nothing held: the liveness bound runs
+    // from here if this member is holding (pos_heldtxs.h).
+    HeldTxsNoteHold();
     UniValue result(UniValue::VOBJ);
     result.pushKV("partialsig", HexStr(*partial));
     return result;
@@ -2148,6 +2152,7 @@ static RPCHelpMan getposblocktemplate()
         // Held transactions (pos_heldtxs.h): no template that respends one.
         if (HeldTxsFilling()) throw JSONRPCError(RPC_MISC_ERROR, "held-filling: the anchor watcher is recording a disconnect; try again");
         if (auto why = HeldTxsBlockConflict(block, chainman.m_blockman.LookupBlockIndex(block.hashPrevBlock))) {
+            HeldTxsNoteDecline();
             throw JSONRPCError(RPC_MISC_ERROR, strprintf("held-conflict: %s", *why));
         }
     }
@@ -2222,9 +2227,13 @@ static RPCHelpMan submitposblock()
         LOCK(cs_main);
         if (HeldTxsFilling()) throw JSONRPCError(RPC_MISC_ERROR, "held-filling: the anchor watcher is recording a disconnect; try again");
         if (auto why = HeldTxsBlockConflict(block, cm.m_blockman.LookupBlockIndex(block.hashPrevBlock))) {
+            HeldTxsNoteDecline();
             throw JSONRPCError(RPC_MISC_ERROR, strprintf("held-conflict: %s", *why));
         }
     }
+    // The leader signs a block that respends nothing held: the liveness bound
+    // runs from here if this member is holding (pos_heldtxs.h).
+    HeldTxsNoteHold();
     std::vector<unsigned char> leader_sig;
     if (!key.Sign(block.GetHash(), leader_sig)) {
         throw JSONRPCError(RPC_MISC_ERROR, "Failed to sign block as leader");

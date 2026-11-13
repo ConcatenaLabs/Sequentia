@@ -129,6 +129,13 @@ std::shared_ptr<CBlock> BuildUnsignedBlsBlock(ChainstateManager& chainman, CTxMe
                                               const CChainParams& chainparams, const CKey& leader_key,
                                               int& out_height)
 {
+    // Held transactions (pos_heldtxs.h): while the anchor watcher is between a
+    // disconnect and recording what it took off the chain, the leader neither
+    // builds nor signs a proposal, as members sign no share (DriveRound).
+    if (HeldTxsFilling()) {
+        LogPrint(BCLog::VALIDATION, "PoS gossip: not proposing while the held record is being filled\n");
+        return nullptr;
+    }
     const CPubKey pubkey = leader_key.GetPubKey();
     CBlockIndex* tip;
     {
@@ -166,6 +173,7 @@ std::shared_ptr<CBlock> BuildUnsignedBlsBlock(ChainstateManager& chainman, CTxMe
     if (!tmpl) return nullptr;
     {
         LOCK(cs_main);
+        if (HeldTxsFilling()) return nullptr;
         if (auto why = HeldTxsBlockConflict(tmpl->block, chainman.m_blockman.LookupBlockIndex(tmpl->block.hashPrevBlock))) {
             LogPrintf("PoS gossip: not proposing at height %d: %s\n", tip->nHeight + 1, *why);
             HeldTxsNoteDecline();
@@ -423,6 +431,9 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
             return false;
         }
     }
+    // An honest proposal: the liveness bound runs from here if this member is
+    // holding (pos_heldtxs.h), as it does from a gossip proposal or share.
+    HeldTxsNoteHold();
 
     // Collect all available signing keys (leader + any committee keys).
     FillableSigningProvider keystore;
@@ -596,6 +607,24 @@ static constexpr int64_t POS_PRODUCER_POLL_MS = 1000;
 //! deliberately withheld costs a bounded pause, never a deadlock.
 static constexpr int64_t POS_CERT_HOLD_MS = 30000;
 
+namespace {
+int64_t GossipWindowMs(int64_t override_ms)
+{
+    return override_ms > 0 ? override_ms : 500 + 25 * (int64_t)g_pos_committee_size;
+}
+int64_t GossipRoundMs(int64_t override_ms)
+{
+    return override_ms > 0 ? override_ms : 700 + 35 * (int64_t)g_pos_committee_size;
+}
+int64_t GossipOverrideMs(const char* arg)
+{
+    return std::clamp<int64_t>(gArgs.GetIntArg(arg, 0), 0, 60000);
+}
+} // namespace
+
+int64_t PosGossipWindowMs() { return GossipWindowMs(GossipOverrideMs("-poswindowms")); }
+int64_t PosGossipRoundMs() { return GossipRoundMs(GossipOverrideMs("-posroundms")); }
+
 PosProducer::PosProducer(ChainstateManager& chainman, CTxMemPool& mempool,
                          const CChainParams& chainparams, CConnman* connman, std::vector<CKey> keys)
     : m_chainman(chainman), m_mempool(mempool), m_chainparams(chainparams),
@@ -610,8 +639,8 @@ PosProducer::PosProducer(ChainstateManager& chainman, CTxMemPool& mempool,
     // values still agree on the round): an operator on weak hardware or a
     // slow link can lengthen them without asking anyone. 0 = the per-member
     // formula default (500+25/member window, 700+35/member rounds).
-    m_window_override_ms = std::clamp<int64_t>(gArgs.GetIntArg("-poswindowms", 0), 0, 60000);
-    m_round_override_ms = std::clamp<int64_t>(gArgs.GetIntArg("-posroundms", 0), 0, 60000);
+    m_window_override_ms = GossipOverrideMs("-poswindowms");
+    m_round_override_ms = GossipOverrideMs("-posroundms");
 }
 
 PosProducer::~PosProducer() { Stop(); }
@@ -700,8 +729,7 @@ int64_t PosProducer::Step()
     // Held transactions, arm two (pos_heldtxs.h): set aside a sub-quorum block
     // of the active chain that respends a held transaction, so that this
     // member signs a sibling in its place; restore it when due.
-    if (HeldTxsMaintain(m_chainman, m_mempool, /*park=*/true,
-                        /*bound_ms=*/POS_HELD_BOUND_ROUNDS * RoundMs() + WindowMs())) return 100;
+    if (HeldTxsMaintain(m_chainman, m_mempool, /*park=*/true)) return 100;
 
     CBlockIndex* tip;
     {
@@ -1202,12 +1230,12 @@ std::shared_ptr<const CBlock> PosProducer::BackedForRound(int r) const
 
 int64_t PosProducer::WindowMs() const
 {
-    return m_window_override_ms > 0 ? m_window_override_ms : 500 + 25 * (int64_t)g_pos_committee_size;
+    return GossipWindowMs(m_window_override_ms);
 }
 
 int64_t PosProducer::RoundMs() const
 {
-    return m_round_override_ms > 0 ? m_round_override_ms : 700 + 35 * (int64_t)g_pos_committee_size;
+    return GossipRoundMs(m_round_override_ms);
 }
 
 int PosProducer::RoundsPerCollection() const
@@ -1285,6 +1313,8 @@ void PosProducer::ProposeGossip(const CKey& leader_key)
     // proof solution, which is excluded from the hash — so any node that later
     // gathers a quorum of shares can assemble the certificate without us.
     const uint256 hash = block->GetHash();
+    // A disconnect may have begun since the block was built: sign nothing then.
+    if (HeldTxsFilling()) return;
     std::vector<unsigned char> leader_sig;
     if (!leader_key.Sign(hash, leader_sig)) {
         LogPrint(BCLog::VALIDATION, "PoS gossip: failed to sign proposal\n");
