@@ -581,6 +581,7 @@ PosProducer::PosProducer(ChainstateManager& chainman, CTxMemPool& mempool,
     m_byzantine_equivocate = gArgs.GetBoolArg("-posbyzantineequivocate", false);
     m_byzantine_invalid = gArgs.GetBoolArg("-posbyzantineinvalid", false);
     m_debug_round_skew_ms = gArgs.GetIntArg("-posdebugroundskewms", 0);
+    m_debug_share_delay_ms = std::clamp<int64_t>(gArgs.GetIntArg("-posdebugsharedelayms", 0), 0, 10000);
     m_recovery_wait_ms = std::clamp<int64_t>(gArgs.GetIntArg("-posanchorrecoverywait", 30), 0, 3600) * 1000;
     // Local liveness timings, NOT consensus rules (every node derives the
     // round index from the same global anchor, so nodes with different
@@ -1893,6 +1894,7 @@ PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& blo
 
 PosGossipAction PosProducer::OnShare(const PosShare& share)
 {
+    if (m_debug_share_delay_ms > 0) UninterruptibleSleep(std::chrono::milliseconds{m_debug_share_delay_ms});
     // Deduplicate on the share's whole content, never on (block, member) alone:
     // anyone can sign a share for a block under a key of their own and name a
     // committee member as its author, and keying on the pair let that forgery

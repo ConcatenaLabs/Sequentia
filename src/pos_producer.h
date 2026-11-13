@@ -311,6 +311,10 @@ private:
     //! scheduler clock, to study how inter-node clock skew affects round
     //! agreement. Always 0 on a real node.
     int64_t m_debug_round_skew_ms{0};
+    //! Regtest only (-posdebugsharedelayms): how long OnShare holds a received
+    //! share before handling it, to stop a node with its message handler inside
+    //! the producer. Always 0 on a real node.
+    int64_t m_debug_share_delay_ms{0};
 
     //! One round candidate: a validated proposal and its leader's VRF.
     struct RoundCandidate {
