@@ -60,6 +60,18 @@ reusing the parent's anchor, which is monotone by construction and already
 validated. Anchoring to the freshest available Bitcoin block is what keeps the
 Sequentia tip synchronized with Bitcoin's tip within a ~1-block lag (§4).
 
+**Never on a parent whose anchor was replaced.** Before choosing, the producer
+reads the Bitcoin node's block at the parent's anchor height. If another block is
+there now, the parent's anchor has left Bitcoin's best chain: the anchor watcher
+is about to disconnect the parent, and every node that watches Bitcoin already
+refuses it. So the producer builds nothing on it (`CreateNewBlock` fails with
+"the parent block's anchor ... is no longer on the parent chain's best chain")
+and wakes its anchor watcher at once, which disconnects the parent and lets
+production resume on the canonical branch. The check needs an answer it can
+trust: an unreachable Bitcoin node, or one behind the parent's anchor height,
+gives none, and the producer then proceeds as above. It applies only to a node
+that watches Bitcoin (`-validateanchor`), the one whose watcher will act.
+
 **Backing off a contested parent height.** One condition lowers that target.
 When Bitcoin has live competing branches at or near its own tip, the tip block
 may be the one that loses, and a Sequentia block anchored to it has to be

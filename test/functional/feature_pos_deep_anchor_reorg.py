@@ -133,6 +133,9 @@ class PosDeepAnchorReorgTest(BitcoinTestFramework):
             "-con_bitcoin_anchor=1",
             "-validateanchor=1",
             "-anchorpollinterval=1",
+            # Scenario C builds blocks on a parent whose anchor was replaced, the
+            # state a producer without this check leaves behind.
+            "-anchorstaleparentcheck=0",
             "-anchorminconf=1",
             "-poscheckpointdepth=%d" % CHECKPOINT_DEPTH,
             "-mainchainrpchost=127.0.0.1",
