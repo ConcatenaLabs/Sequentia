@@ -5830,6 +5830,44 @@ void CChainState::ResetBlockFailureFlags(CBlockIndex *pindex) {
     }
 }
 
+std::vector<CBlockIndex*> CChainState::ReconsiderAnchoredBlock(CBlockIndex* pindex,
+                                                              const std::function<bool(const CBlockIndex*)>& anchor_ok)
+{
+    AssertLockHeld(cs_main);
+    // The descendants, lowest first, so that a block is judged after its parent.
+    std::vector<CBlockIndex*> descendants;
+    for (const auto& [_, entry] : m_blockman.m_block_index) {
+        if (entry->nHeight > pindex->nHeight && entry->GetAncestor(pindex->nHeight) == pindex) {
+            descendants.push_back(entry);
+        }
+    }
+    std::sort(descendants.begin(), descendants.end(),
+              [](const CBlockIndex* a, const CBlockIndex* b) { return a->nHeight < b->nHeight; });
+
+    ResetBlockFailureFlags(pindex);
+
+    // ResetBlockFailureFlags cleared every descendant. Mark again, before any
+    // activation can see them, the ones whose anchor is still orphaned and
+    // everything above them: the same marks InvalidateBlock leaves.
+    std::set<const CBlockIndex*> failed;
+    std::vector<CBlockIndex*> roots;
+    for (CBlockIndex* entry : descendants) {
+        if (failed.count(entry->pprev)) {
+            entry->nStatus |= BLOCK_FAILED_CHILD;
+        } else if (!anchor_ok(entry)) {
+            entry->nStatus |= BLOCK_FAILED_VALID | BLOCK_FAILED_ANCHOR;
+            m_chainman.m_failed_blocks.insert(entry);
+            roots.push_back(entry);
+        } else {
+            continue;
+        }
+        failed.insert(entry);
+        m_blockman.m_dirty_blockindex.insert(entry);
+        setBlockIndexCandidates.erase(entry);
+    }
+    return roots;
+}
+
 void CChainState::RecalculateBestHeader()
 {
     AssertLockHeld(cs_main);
