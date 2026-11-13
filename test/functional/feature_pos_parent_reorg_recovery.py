@@ -26,14 +26,25 @@ node2 = a non-staking PoS peer providing gossip connectivity.
 
 The two anchor watchers poll at different rates on purpose: the peer every
 second, the founder never within the test (FOUNDER_POLL), so the peer always
-sees the parent reorg first. Meanwhile the founder, which reads the parent tip
-live when it picks an anchor, certifies a block on top of the block the peer has
-just invalidated, and relays it. The founder notices the reorg only when it is
-restarted with a short poll, whose first pass drops the orphaned block. That is honest: its watcher simply has not ticked
-yet. The peer must reject the block without treating the founder as
-misbehaving. It used to score it 100 ("invalid header via cmpctblock") and
-drop the connection, leaving the founder with no peers. A producer without
-peers never proposes, so the chain never resumed.
+sees the parent reorg first.
+
+The test runs twice over the same reorganization:
+
+- First with the founder's -anchorstaleparentcheck=0, which builds the state a
+  producer without that check leaves (an older release during a cutover, or a
+  producer whose Bitcoin daemon was behind when it built). The founder, which
+  reads the parent tip live when it picks an anchor, certifies a block on top of
+  the block the peer has just invalidated, and relays it. It notices the reorg
+  only when it is restarted with a short poll, whose first pass drops the
+  orphaned block. That is honest: its watcher simply has not ticked yet. The
+  peer must reject the block without treating the founder as misbehaving. It
+  used to score it 100 ("invalid header via cmpctblock") and drop the
+  connection, leaving the founder with no peers. A producer without peers never
+  proposes, so the chain never resumed.
+- Then with the check on, as every producer runs: the founder, still blind to
+  the reorg through its own watcher, reads the parent's anchor when it builds,
+  finds it replaced, and builds nothing on it. It wakes its watcher, which drops
+  the stale block at once, and production resumes on the rolled-back tip.
 """
 
 from test_framework.test_framework import BitcoinTestFramework
@@ -102,7 +113,8 @@ class PosParentReorgRecoveryTest(BitcoinTestFramework):
         founder_args = consensus + ["-port=%d" % p2p_port(1), "-rpcport=%d" % rpc_port(1),
                                     "-posproducer=1", "-posproducerkey=%s" % self.founder_wif]
         self.founder_args = founder_args
-        founder_args = founder_args + ["-anchorpollinterval=%d" % FOUNDER_POLL]
+        # The first pass needs the founder to build on a stale-anchored parent.
+        founder_args = founder_args + ["-anchorpollinterval=%d" % FOUNDER_POLL, "-anchorstaleparentcheck=0"]
         peer_args = consensus + ["-port=%d" % p2p_port(2), "-rpcport=%d" % rpc_port(2),
                                  "-anchorpollinterval=1",
                                  "-posproducer=1", "-posproducerkey=%s" % self.peer_wif]
@@ -227,6 +239,57 @@ class PosParentReorgRecoveryTest(BitcoinTestFramework):
         assert_equal(founder.getblockhash(3), peer.getblockhash(3))
         self.log.info("Autonomous producer resumed after the parent reorg; rebuilt to height %d (no fork)"
                       % founder.getblockcount())
+
+        self.log.info("With the producer's check on, a founder blind to the reorg builds nothing on the stale parent")
+        # Blind again (its watcher does not poll within the test), now with the
+        # check every producer runs.
+        self.restart_node(1, extra_args=self.founder_args + ["-anchorpollinterval=%d" % FOUNDER_POLL])
+        self.connect_nodes(1, 2)
+        start = founder.getblockcount()
+        for target in (start + 1, start + 2):
+            self.advance_parent(PARENT_BLOCKS_PER_ROUND)
+            self.wait_until(lambda: founder.getblockcount() >= target, timeout=90)
+        n = founder.getblockcount()
+        stale = founder.getbestblockhash()
+        self.wait_until(lambda: peer.getbestblockhash() == stale, timeout=60)
+        stale_anchor = founder.getblockheader(stale)["anchorheight"]
+        prev_anchor = founder.getblockheader(founder.getblockhash(n - 1))["anchorheight"]
+        assert prev_anchor < stale_anchor
+        parent_h = parent.getblockcount()
+        fork_at = prev_anchor + 1  # replaces the stale block's anchor, keeps its parent's
+
+        def stale_replaced():
+            try:
+                return founder.getblockhash(n) != stale
+            except JSONRPCException:  # tip rolled back below n
+                return True
+
+        log_from = founder.debug_log_bytes()
+        with peer.assert_debug_log(expected_msgs=[], unexpected_msgs=["Misbehaving", "prev block invalid"]):
+            parent.invalidateblock(parent.getblockhash(fork_at))
+            self.advance_parent(1)
+            self.wait_until(lambda: peer.getblockcount() == n - 1, timeout=30)
+            self.advance_parent((parent_h - fork_at) + 5)
+            assert parent.getblockcount() > parent_h
+            self.log.info("parent reorged below block %d's anchor; the founder's own watcher has not ticked" % n)
+            # The founder refuses to build on the stale block and wakes its
+            # watcher, which drops it: well inside the hour its poll would take.
+            self.wait_until(stale_replaced, timeout=60)
+            with open(founder.debug_log_path, encoding="utf-8") as f:
+                f.seek(log_from)
+                assert "is no longer on the parent chain's best chain" in f.read()
+            # Nothing was built on the stale block: it is the only invalid tip at
+            # its height or above (the first pass left its own, lower down).
+            invalid = [t["hash"] for t in founder.getchaintips() if t["status"] == "invalid" and t["height"] >= n]
+            assert_equal(invalid, [stale])
+            self.log.info("the founder refused the stale parent and dropped block %d" % n)
+
+            # Production resumes on the rolled-back tip, and the peer follows.
+            self.wait_until(lambda: founder.getblockcount() >= n and founder.getblockhash(n) != stale, timeout=120)
+            self.wait_until(lambda: peer.getblockcount() >= n, timeout=60)
+            assert_equal(founder.getblockhash(n), peer.getblockhash(n))
+        assert_equal(len(founder.getpeerinfo()), 1)
+        self.log.info("the founder resumed on the rolled-back tip; rebuilt height %d (no fork)" % n)
 
 
 if __name__ == '__main__':
