@@ -150,16 +150,23 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
  *  best-ranked of its keys as leader and produces a block once that leader's
  *  slot opens (never faster than one slot interval since the parent — the
  *  paper's soft lower-bound cadence floor). */
-class PosProducer final : public CValidationInterface
+class PosProducer final : public CValidationInterface, public std::enable_shared_from_this<PosProducer>
 {
 public:
     PosProducer(ChainstateManager& chainman, CTxMemPool& mempool,
                 const CChainParams& chainparams, CConnman* connman, std::vector<CKey> keys);
     ~PosProducer();
 
-    /** Register for tip notifications and start the worker thread. */
+    /** Register for tip notifications and gossip, and start the worker thread.
+     *  The producer must be owned by a std::shared_ptr: each gossip message and
+     *  each validation callback holds a reference while it runs, so a thread
+     *  still inside one when the producer is stopped keeps it alive until it
+     *  returns. */
     void Start();
-    /** Unregister, stop the worker thread, and join it. Idempotent. */
+    /** Unregister from tip notifications and gossip, stop the worker thread,
+     *  and join it. Idempotent. A callback already running may still finish
+     *  after this returns; the object is destroyed when its last reference
+     *  goes. */
     void Stop();
 
     /** A snapshot of the producer's signing keys. */
@@ -422,7 +429,8 @@ bool PosCertificateSeenBefore(const CBlockHeader& header);
 PosGossipAction PosVerifyCertificate(const CBlockHeader& header, ChainstateManager& chainman,
                                      const Consensus::Params& consensus, int& height_out);
 
-/** The running producer (for net_processing to deliver gossip to), or nullptr. */
-PosProducer* GetActivePosProducer();
+/** The running producer (for net_processing to deliver gossip to), or nullptr.
+ *  The caller holds a reference for as long as it uses the producer. */
+std::shared_ptr<PosProducer> GetActivePosProducer();
 
 #endif // BITCOIN_POS_PRODUCER_H

@@ -45,12 +45,12 @@ bool StartPosProducerWithKeys(NodeContext& node, const std::vector<CKey>& keys,
     }
     if (all_wifs.empty()) { error = "Provide at least one staker private key"; return false; }
 
-    // A running producer takes the new keys live: net_processing reads the
-    // active producer pointer locklessly on the message thread, so it must
-    // never be rebuilt, but adding keys under the producer's key lock is safe
-    // and lets a stake registered from the wallet produce without a restart.
+    // A running producer takes the new keys live rather than being rebuilt (a
+    // rebuild would drop the round state the gossip has built): adding keys
+    // under the producer's key lock is safe and lets a stake registered from
+    // the wallet produce without a restart.
     if (!already_running) {
-        node.pos_producer = std::make_unique<PosProducer>(*Assert(node.chainman), *Assert(node.mempool), Params(),
+        node.pos_producer = std::make_shared<PosProducer>(*Assert(node.chainman), *Assert(node.mempool), Params(),
                                                           Assert(node.connman.get()), new_keys);
         node.pos_producer->Start();
         out.started = true;

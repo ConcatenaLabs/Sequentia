@@ -183,9 +183,17 @@ std::shared_ptr<CBlock> BuildUnsignedBlsBlock(ChainstateManager& chainman, CTxMe
 }
 } // namespace
 
-//! The running producer, for net_processing to deliver gossip to.
-static std::atomic<PosProducer*> g_active_producer{nullptr};
-PosProducer* GetActivePosProducer() { return g_active_producer.load(); }
+//! The running producer, for net_processing to deliver gossip to. A reference,
+//! not a raw pointer: a message handler that took it before the producer was
+//! stopped keeps it alive until its call returns, instead of using a producer
+//! that shutdown has already destroyed.
+static Mutex g_active_producer_mutex;
+static std::shared_ptr<PosProducer> g_active_producer GUARDED_BY(g_active_producer_mutex);
+std::shared_ptr<PosProducer> GetActivePosProducer()
+{
+    LOCK(g_active_producer_mutex);
+    return g_active_producer;
+}
 
 PosCompactProposal MakePosCompactProposal(const CBlock& block)
 {
@@ -598,8 +606,12 @@ void PosProducer::Start()
 {
     if (m_running) return;
     m_running = true;
-    g_active_producer.store(this);
-    RegisterValidationInterface(this);
+    // Shared, so a validation callback in flight when Stop() unregisters us
+    // also keeps the producer alive until it returns (the validation interface
+    // holds the reference while it calls).
+    const std::shared_ptr<PosProducer> self = shared_from_this();
+    WITH_LOCK(g_active_producer_mutex, g_active_producer = self);
+    RegisterSharedValidationInterface(self);
     m_thread = std::thread(&util::TraceThread, "posproducer", [this] { ThreadLoop(); });
     LogPrintf("PoS producer: started with %d staking key(s)\n", (int)Keys().size());
 }
@@ -607,7 +619,7 @@ void PosProducer::Start()
 void PosProducer::Stop()
 {
     if (!m_running) return;
-    g_active_producer.store(nullptr);
+    WITH_LOCK(g_active_producer_mutex, g_active_producer.reset());
     UnregisterValidationInterface(this);
     {
         std::lock_guard<std::mutex> lock(m_mutex);

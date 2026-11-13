@@ -3644,7 +3644,7 @@ static RPCHelpMan getposslot()
 
     // Only the running producer holds the secret keys the VRF draw needs; with no
     // producer there is nothing to report beyond the network-wide numbers above.
-    PosProducer* producer = GetActivePosProducer();
+    const std::shared_ptr<PosProducer> producer = GetActivePosProducer();
     result.pushKV("producing", producer != nullptr);
 
     UniValue arr(UniValue::VARR);

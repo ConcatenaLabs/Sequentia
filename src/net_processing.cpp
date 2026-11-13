@@ -4260,7 +4260,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         // A full proposal: a getposproposal reply (or an unsolicited full block).
         std::shared_ptr<CBlock> pblock = std::make_shared<CBlock>();
         vRecv >> *pblock;
-        PosProducer* prod = GetActivePosProducer();
+        const std::shared_ptr<PosProducer> prod = GetActivePosProducer();
         if (!prod) return; // not participating; do not relay committee traffic
         switch (prod->OnProposal(pblock)) {
         case PosGossipAction::Invalid:
@@ -4278,7 +4278,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
     if (msg_type == NetMsgType::POSCMPCTPROPOSAL) {
         PosCompactProposal compact;
         vRecv >> compact;
-        PosProducer* prod = GetActivePosProducer();
+        const std::shared_ptr<PosProducer> prod = GetActivePosProducer();
         if (!prod) return;
         // Reconstruction walks the mempool; a proposal already processed is
         // not worth that again, however many peers relay it.
@@ -4309,7 +4309,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
     if (msg_type == NetMsgType::GETPOSPROPOSAL) {
         uint256 hash;
         vRecv >> hash;
-        PosProducer* prod = GetActivePosProducer();
+        const std::shared_ptr<PosProducer> prod = GetActivePosProducer();
         if (!prod) return;
         if (std::shared_ptr<const CBlock> block = prod->GetProposalBlock(hash)) {
             m_connman.PushMessage(&pfrom, CNetMsgMaker(pfrom.GetCommonVersion()).Make(NetMsgType::POSPROPOSAL, *block));
@@ -4337,7 +4337,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
     if (msg_type == NetMsgType::POSSHARE) {
         PosShare share;
         vRecv >> share;
-        PosProducer* prod = GetActivePosProducer();
+        const std::shared_ptr<PosProducer> prod = GetActivePosProducer();
         if (!prod) return;
         switch (prod->OnShare(share)) {
         case PosGossipAction::Invalid:
@@ -4360,7 +4360,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         // answer with the certificate if we hold one; silence otherwise.
         uint256 hash;
         vRecv >> hash;
-        PosProducer* prod = GetActivePosProducer();
+        const std::shared_ptr<PosProducer> prod = GetActivePosProducer();
         if (!prod) return;
         if (std::optional<CBlockHeader> cert = prod->GetCertificate(hash)) {
             m_connman.PushMessage(&pfrom, CNetMsgMaker(pfrom.GetCommonVersion()).Make(NetMsgType::POSCERT, *cert));
@@ -4375,7 +4375,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         // fetched from the sender when we lack it.
         CBlockHeader header;
         vRecv >> header;
-        PosProducer* prod = GetActivePosProducer();
+        const std::shared_ptr<PosProducer> prod = GetActivePosProducer();
         if (!prod) {
             // No producer: still verify, so a competing certificate holds this
             // node's finality (validation.h), relay it, and fetch the block.

@@ -241,7 +241,10 @@ void Shutdown(NodeContext& node)
     StopMapPort();
 
     // SEQUENTIA: stop the autonomous PoS producer (unregisters its validation
-    // interface and joins its worker thread) before tearing down chain state.
+    // interface and its gossip, and joins its worker thread) before tearing
+    // down chain state. A message handler or validation callback still inside
+    // the producer holds its own reference, so the producer is destroyed when
+    // the last of them returns, never under it.
     if (node.pos_producer) {
         node.pos_producer->Stop();
         node.pos_producer.reset();
@@ -2324,7 +2327,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         if (producer_keys.empty()) {
             return InitError(_("-posproducer requires at least one -posproducerkey"));
         }
-        node.pos_producer = std::make_unique<PosProducer>(chainman, *node.mempool, chainparams, node.connman.get(), std::move(producer_keys));
+        node.pos_producer = std::make_shared<PosProducer>(chainman, *node.mempool, chainparams, node.connman.get(), std::move(producer_keys));
         node.pos_producer->Start();
     }
 
