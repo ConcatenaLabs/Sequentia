@@ -247,6 +247,9 @@ void Shutdown(NodeContext& node)
         node.pos_producer->Stop();
         node.pos_producer.reset();
     }
+    // SEQUENTIA: join the held-transactions maintenance thread, which uses the
+    // chain state and the mempool, before either is torn down.
+    HeldTxsStop();
 
     // Because these depend on each-other, we make sure that neither can be
     // using the other before destroying them.
@@ -2310,8 +2313,12 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         gArgs.GetIntArg("-posreconcilemindepth", DEFAULT_POS_RECONCILE_MIN_DEPTH), 1, 1000);
 
     // SEQUENTIA: the held-transactions record (pos_heldtxs.h), read before the
-    // producer and the anchor watcher, which use it, start.
+    // producer and the anchor watcher, which use it, start. Its maintenance
+    // (the liveness bound and the backstop, the releases, the mempool) runs on
+    // a thread of its own from here, so that it never waits on the parent
+    // daemon; Shutdown joins it before the chain state and the mempool go.
     HeldTxsInit();
+    HeldTxsStart(chainman, *node.mempool);
 
     // SEQUENTIA PoS: start the autonomous block producer if configured. With
     // one or more staking keys it elects the best-ranked key each round, waits
@@ -2454,18 +2461,6 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                         LogPrintf("WARNING: anchor watcher tick failed, retrying next interval: %s\n", e.what());
                     } catch (...) {
                         LogPrintf("WARNING: anchor watcher tick failed (non-standard exception), retrying next interval\n");
-                    }
-                    // Held transactions (pos_heldtxs.h): release what is due,
-                    // the liveness bound and the backstop included, and keep
-                    // the held ones in the mempool, at every tick, whether or
-                    // not the parent daemon answered this one. A member that
-                    // runs the producer also does it there, and sets blocks aside.
-                    try {
-                        if (HeldTxsActive() && anchor_chainman->ActiveChainstate().GetMempool()) {
-                            HeldTxsMaintain(*anchor_chainman, *anchor_chainman->ActiveChainstate().GetMempool(), /*park=*/false);
-                        }
-                    } catch (const std::exception& e) {
-                        LogPrintf("WARNING: held-transactions maintenance failed, retrying next interval: %s\n", e.what());
                     }
                     // Interruptible poll sleep: wake promptly on shutdown rather
                     // than sleeping the full interval.

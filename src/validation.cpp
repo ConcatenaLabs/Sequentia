@@ -998,8 +998,9 @@ static void PosSetCertified(ChainstateManager& chainman, CBlockIndex* pindex, st
         }
     }
     // SEQUENTIA held transactions: a certified block on a set-aside block ends
-    // that set-aside (pos_heldtxs.h).
-    HeldTxsNoteCertified(pindex);
+    // that set-aside, and a block first found certified here is the progress
+    // that ends a hold (pos_heldtxs.h).
+    HeldTxsNoteCertified(pindex, !carried && pindex->PosCarriesQuorum());
 }
 
 //! SEQUENTIA PoS: judge `pindex` against `parent_quorum` and record the answer.

@@ -1137,12 +1137,19 @@ class HeldTransactionsTest(BitcoinTestFramework):
         self.wait_certified_above(self.nodes[1].getblockcount() - 1)
         self.btc_mine(1)
         self.wait_until(lambda: self.tip(self.nodes[1])["anchorheight"] == self.btc().getblockcount(), timeout=60)
-        # Two parents: one of 120 outputs, heavier than the share (the oldest always goes in), one of 80.
+        # Two parents: one of 120 outputs, heavier than the share (the first always goes in), one of 80.
+        # Each spends one chosen coin, so that its weight is that of its outputs whatever the attacker's
+        # wallet holds by now: a parent that wallet coin selection made heavier than an honest block
+        # could never be mined again by an honest producer.
         coins = []
         parents = []
         for n_out in (120, 80):
-            addrs = {a.getnewaddress(): Decimal("0.01") for _ in range(n_out)}
-            txid = a.sendmany(dummy="", amounts=addrs, fee_asset="bitcoin")
+            coin = self.fund(Decimal("0.01") * (n_out + 1))
+            fee = Decimal("0.005")
+            outs = [{a.getnewaddress(): Decimal("0.01")} for _ in range(n_out)]
+            raw = a.createrawtransaction([{"txid": coin["txid"], "vout": coin["vout"]}],
+                                         outs + [{a.getnewaddress(): Decimal("0.01") - fee}, {"fee": fee}])
+            txid = a.sendrawtransaction(a.signrawtransactionwithwallet(raw)["hex"])
             parents.append(txid)
             coins += [{"txid": txid, "vout": o["n"], "amount": Decimal("0.01")} for o in a.getrawtransaction(txid, 1)["vout"]
                       if o["value"] == Decimal("0.01")]
@@ -1151,6 +1158,7 @@ class HeldTransactionsTest(BitcoinTestFramework):
         self.wait_certified_above(self.nodes[1].getblockcount() - 1)
         pw = [a.getrawtransaction(t, 1)["weight"] for t in parents]
         self.record("share", "parents", "weights %s against a share of %d in blocks of %d" % (pw, maxw // 2, maxw))
+        assert maxw // 2 < pw[0] < maxw and pw[1] < maxw, "the parents do not fit the case: %s" % pw
         dest = a.getnewaddress()
         h_before = self.nodes[1].getblockcount()
         ids = []

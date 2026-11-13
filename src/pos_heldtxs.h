@@ -50,6 +50,8 @@ static constexpr int POS_HELD_BLOCK_SHARE_PCT = 50;
 //! A held transaction is released at the latest once the active tip anchors
 //! this many Bitcoin blocks above the highest anchor the disconnected blocks had.
 static constexpr uint32_t POS_HELD_WINDOW = 144;
+//! How often the maintenance thread applies the clocks and the releases, in ms.
+static constexpr int64_t POS_HELD_MAINTAIN_MS = 1000;
 
 //! Whether the rule runs here: a Bitcoin-anchored PoS chain, not turned off
 //! with the debug-only -posdebugignoreheld. Fixed by HeldTxsInit.
@@ -89,19 +91,33 @@ int64_t HeldTxsBoundMs();
 //! backstop, the window), put held transactions back into the mempool for
 //! relay, and with `park` (a committee member running the producer) set aside
 //! the lowest sub-quorum block of the active chain that conflicts and end
-//! set-asides that are due. The producer calls it at every pass and the anchor
-//! watcher at every tick, so both clocks apply on every member, whichever way
-//! it signs. Returns true when it changed the active chain. No lock held.
+//! set-asides that are due. The producer calls it at every pass and the
+//! maintenance thread every POS_HELD_MAINTAIN_MS, so both clocks apply on
+//! every member, whichever way it signs and whether or not it watches Bitcoin.
+//! Returns true when it changed the active chain. No lock held.
 bool HeldTxsMaintain(ChainstateManager& chainman, CTxMemPool& mempool, bool park);
+
+//! Start the maintenance thread, which calls HeldTxsMaintain without `park`
+//! every POS_HELD_MAINTAIN_MS. It is a thread of its own, not a step of the
+//! anchor watcher, because the watcher waits on the parent daemon for up to
+//! -mainchainrpctimeout per call, and the clocks must not wait with it.
+//! `chainman` and `mempool` must outlive it: call HeldTxsStop first. Does
+//! nothing when the rule is off.
+void HeldTxsStart(ChainstateManager& chainman, CTxMemPool& mempool);
+//! Stop the maintenance thread and wait for it. Safe when it never started.
+void HeldTxsStop();
 
 //! The held transactions, oldest first (parents before children), for a
 //! producer to mine from the record (node::BlockAssembler).
 std::vector<CTransactionRef> HeldTxsForMining();
 
-//! `pindex` was just judged certified or not (validation.cpp PosSetCertified).
-//! A certified block that builds on a set-aside block ends that set-aside at the
-//! next maintenance pass. cs_main held.
-void HeldTxsNoteCertified(const CBlockIndex* pindex);
+//! `pindex` was just judged certified or not (validation.cpp PosSetCertified);
+//! `newly` when this judgement is the one that found it to carry its parent's
+//! quorum, which happens once per block and not again when it is re-connected.
+//! Only such a block, judged after a hold began, ends the hold. A certified
+//! block that builds on a set-aside block ends that set-aside at the next
+//! maintenance pass. cs_main held.
+void HeldTxsNoteCertified(const CBlockIndex* pindex, bool newly);
 
 //! A member declined to sign or to propose for a held transaction.
 void HeldTxsNoteDecline();
