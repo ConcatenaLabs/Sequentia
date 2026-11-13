@@ -19,6 +19,7 @@
 #include <crypto/sha256.h>
 
 #include <assert.h>
+#include <type_traits>
 
 #include <iostream>
 
@@ -3036,6 +3037,8 @@ public:
 
 
 static std::unique_ptr<const CChainParams> globalChainParams;
+static_assert(std::has_virtual_destructor_v<CChainParams>,
+              "chain parameters are deleted through the base class");
 
 const CChainParams &Params() {
     assert(globalChainParams);
