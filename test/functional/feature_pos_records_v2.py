@@ -14,12 +14,15 @@ its scriptSig is canonical: one minimally pushed, low-S signature.
   * below the height only the legacy signature is valid;
   * a legacy-signed spend waiting in the mempool is evicted at the boundary;
   * from the height only the new signature is valid, and none of its
-    re-encodings (an extra push, a non-minimal push, the high-S twin) is.
+    re-encodings (an extra push, a non-minimal push, the high-S twin) is;
+  * relay refuses a bitcoin-payment record added to the spend's unsigned
+    per-input slot, which its script never reads.
 """
+import struct
 
 from test_framework.address import byte_to_base58
 from test_framework.key import ECKey, SECP256K1_ORDER
-from test_framework.messages import COutPoint, CTransaction, CTxIn, CTxOut
+from test_framework.messages import COutPoint, CTransaction, CTxIn, CTxInWitness, CTxOut, CTxOutWitness
 from test_framework.script import (
     CScript, LegacySignatureHash, OP_0, OP_CHECKSIG, OP_PUSHDATA1, PosRecordSignatureHash, SIGHASH_ALL,
 )
@@ -29,7 +32,9 @@ from test_framework.util import assert_equal, assert_raises_rpc_error
 COIN = 100_000_000
 FEE = 100_000
 RECORD_VALUE = 1_000_000
-V2_HEIGHT = 12
+# Above BtcPayment::FLOOR_DEPTH (60): an anchor floor is met only from block 60,
+# and the bitcoin-payment case below needs its floor met to reach the relay rule.
+V2_HEIGHT = 72
 OP_TRUE = CScript([0x51])
 
 
@@ -183,6 +188,15 @@ class PosRecordsV2Test(BitcoinTestFramework):
         high_s = CTransaction(good)
         high_s.vin[0].scriptSig = CScript([high_s_twin(sig[:-1]) + bytes([SIGHASH_ALL])])
         assert_raises_rpc_error(-26, "script-verify-flag-failed", self.send, node, high_s)
+
+        self.log.info("...and so is the spend with a bitcoin-payment record added, which its script never reads")
+        floored = CTransaction(good)
+        floored.wit.vtxinwit = [CTxInWitness() for _ in floored.vin]
+        floored.wit.vtxoutwit = [CTxOutWitness() for _ in floored.vout]
+        floored.wit.vtxinwit[0].peginWitness.stack = [b"\x02" + struct.pack("<I", 0)]
+        floored.rehash()
+        assert_equal(floored.hash, good.hash)
+        assert_raises_rpc_error(-26, "Bitcoin payment record not read by any executed opcode", self.send, node, floored)
 
         self.log.info("The canonical spend signing the amount is valid")
         good_id = self.send(node, good)

@@ -8,6 +8,7 @@
 
 #include <hash.h>
 #include <script/script_error.h>
+#include <script/btcpayment.h>
 #include <span.h>
 #include <primitives/transaction.h>
 
@@ -192,6 +193,18 @@ enum : uint32_t {
     // at the floor fee rate. See SimplicityAnnexMinCost.
     //
     SCRIPT_VERIFY_SIMPLICITY_ANNEX_EXACT = (1U << 27),
+
+    // SEQUENTIA: the proof of a bitcoin payment (doc/sequentia/bitcoin-payment-proof.md):
+    // on a tapscript leaf, 0xe5 OP_INSPECTBTCPAYMENT, 0xe6 OP_INSPECTBTCTX and
+    // 0xe7 OP_CHECKANCHORHEIGHTVERIFY take meaning instead of being OP_SUCCESS.
+    SCRIPT_VERIFY_BTCPAYMENT = (1U << 28),
+
+    // SEQUENTIA (relay policy only): every bitcoin-payment record in an input's
+    // slot must have been read by an opcode the input's script executed. A record
+    // on an input that is not a tapscript spend can never be read, so it is
+    // refused too. The verdict is a pure function of the transaction and the
+    // outputs it spends, the same on every node and at every tip.
+    SCRIPT_VERIFY_BTCPAYMENT_RECORDS_READ = (1U << 29),
 
     // Constants to point to the highest flag in use. Add new flags above this line.
     //
@@ -401,6 +414,21 @@ public:
          return false;
     }
 
+    //! SEQUENTIA: the bitcoin-payment records of this (non-peg-in) input,
+    //! parsed and checked once per input however often a script reads them;
+    //! nullptr when unavailable or invalid.
+    virtual const BtcPayment::Records* GetBtcPaymentRecords() const
+    {
+        return nullptr;
+    }
+
+    //! SEQUENTIA: whether this input's slot holds a record that no executed
+    //! opcode read (or a slot that does not parse).
+    virtual bool BtcPaymentRecordsUnread() const
+    {
+        return false;
+    }
+
     virtual ~BaseSignatureChecker() {}
 };
 
@@ -426,6 +454,8 @@ private:
     const CConfidentialValue amount;
     const PrecomputedTransactionData* txdata;
     mutable SigHashCache m_sighash_cache;
+    mutable bool m_btcpay_parsed{false};
+    mutable std::optional<BtcPayment::Records> m_btcpay_records;
 
 protected:
     virtual bool VerifyECDSASignature(const std::vector<unsigned char>& vchSig, const CPubKey& vchPubKey, const uint256& sighash) const;
@@ -446,6 +476,30 @@ public:
     const PrecomputedTransactionData* GetPrecomputedTransactionData() const override;
     uint32_t GetnIn() const override;
     bool CheckSimplicity(const std::vector<unsigned char>& program, const std::vector<unsigned char>& witness, const rawElementsTapEnv& simplicityRawTap, int64_t min_cost, int64_t budget, ScriptError* serror) const override;
+    const BtcPayment::Records* GetBtcPaymentRecords() const override
+    {
+        if (!m_btcpay_parsed) {
+            m_btcpay_parsed = true;
+            if (nIn < txTo->vin.size() && !txTo->vin[nIn].m_is_pegin) {
+                BtcPayment::Records records;
+                std::string reason;
+                static const std::vector<std::vector<unsigned char>> empty;
+                const auto& slot = nIn < txTo->witness.vtxinwit.size() ? txTo->witness.vtxinwit[nIn].m_pegin_witness.stack : empty;
+                if (BtcPayment::ParseRecords(slot, records, reason)) m_btcpay_records = std::move(records);
+            }
+        }
+        return m_btcpay_records ? &*m_btcpay_records : nullptr;
+    }
+    bool BtcPaymentRecordsUnread() const override
+    {
+        if (nIn >= txTo->vin.size() || txTo->vin[nIn].m_is_pegin || nIn >= txTo->witness.vtxinwit.size() ||
+            txTo->witness.vtxinwit[nIn].m_pegin_witness.stack.empty()) {
+            return false;
+        }
+        const BtcPayment::Records* rec = GetBtcPaymentRecords();
+        if (rec == nullptr) return true;
+        return (rec->proof && !rec->proof_read) || (rec->floor && !rec->floor_read);
+    }
 };
 
 using TransactionSignatureChecker = GenericTransactionSignatureChecker<CTransaction>;
@@ -476,6 +530,14 @@ public:
     bool CheckSequence(const CScriptNum& nSequence) const override
     {
         return m_checker.CheckSequence(nSequence);
+    }
+    const BtcPayment::Records* GetBtcPaymentRecords() const override
+    {
+        return m_checker.GetBtcPaymentRecords();
+    }
+    bool BtcPaymentRecordsUnread() const override
+    {
+        return m_checker.BtcPaymentRecordsUnread();
     }
 };
 

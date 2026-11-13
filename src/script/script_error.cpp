@@ -188,6 +188,20 @@ std::string ScriptErrorString(const ScriptError serror)
             return "Simplicity input cannot be checked without the spent output of every input";
         case SCRIPT_ERR_SIMPLICITY_ANNEX_NONZERO:
             return "Simplicity annex must be zeros after its tag";
+        case SCRIPT_ERR_BTCPAY_MISSING:
+            return "No valid proof of a bitcoin payment on this input";
+        case SCRIPT_ERR_BTCPAY_OUTPUT:
+            return "Bitcoin payment output index missing or out of range";
+        case SCRIPT_ERR_BTCPAY_INPUT:
+            return "Bitcoin payment input index missing or out of range";
+        case SCRIPT_ERR_BTCPAY_FIELD:
+            return "Unknown field of the proven bitcoin payment";
+        case SCRIPT_ERR_ANCHORLOCK_MISSING:
+            return "No anchor floor on this input";
+        case SCRIPT_ERR_ANCHORLOCK_UNSATISFIED:
+            return "Anchor floor differs from the one the script requires";
+        case SCRIPT_ERR_BTCPAY_UNREAD:
+            return "Bitcoin payment record not read by any executed opcode";
         case SCRIPT_ERR_UNKNOWN_ERROR:
         case SCRIPT_ERR_ERROR_COUNT:
         default: break;

@@ -261,6 +261,7 @@ void Shutdown(NodeContext& node)
     // before chainman is torn down below. ShutdownRequested() is already set by the
     // time we reach Shutdown(), so the watcher's poll loop exits promptly.
     if (node.anchor_watch_thread.joinable()) node.anchor_watch_thread.join();
+    if (node.btcpay_attach_thread.joinable()) node.btcpay_attach_thread.join();
     if (node.anchor_retry_thread.joinable()) node.anchor_retry_thread.join();
     if (node.chainman && node.chainman->m_load_block.joinable()) node.chainman->m_load_block.join();
     if (node.scheduler) node.scheduler->stop();
@@ -448,6 +449,8 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-dbcache=<n>", strprintf("Maximum database cache size <n> MiB (%d to %d, default: %d). In addition, unused mempool memory is shared for this cache (see -maxmempool).", nMinDbCache, nMaxDbCache, nDefaultDbCache), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-includeconf=<file>", "Specify additional configuration file, relative to the -datadir path (only useable from configuration file, not command line)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-loadblock=<file>", "Imports blocks from external file on startup", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-btcpaymaxwaiting=<n>", "Hold at most <n> bitcoin-payment claims for re-attachment (default: what the blocks disconnected by a 10-block Bitcoin reorganization can carry)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+    argsman.AddArg("-btcpaymaxvariantbytes=<n>", strprintf("Keep at most <n> bytes of bitcoin-payment proof variants for re-attachment (default: %u)", 32 << 20), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-maxmempool=<n>", strprintf("Keep the transaction memory pool below <n> megabytes (default: %u)", DEFAULT_MAX_MEMPOOL_SIZE), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-maxorphantx=<n>", strprintf("Keep at most <n> unconnectable transactions in memory (default: %u)", DEFAULT_MAX_ORPHAN_TRANSACTIONS), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-mempoolexpiry=<n>", strprintf("Do not keep transactions in the mempool longer than <n> hours (default: %u)", DEFAULT_MEMPOOL_EXPIRY), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -2468,6 +2471,22 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                     // than sleeping the full interval.
                     // A producer that refused a stale parent wakes it at once.
                     for (int64_t i = 0; i < anchor_poll * 10 && !ShutdownRequested() && !g_anchor_watch_wake.exchange(false); ++i) {
+                        UninterruptibleSleep(std::chrono::milliseconds{100});
+                    }
+                }
+            });
+            // Bitcoin-payment proof re-attachment, beside the watcher and never
+            // on its path: an anchor-driven reorganization never waits for it.
+            node.btcpay_attach_thread = std::thread(&util::TraceThread, "btcpayattach", [anchor_chainman, anchor_poll] {
+                while (!ShutdownRequested()) {
+                    try {
+                        BtcPaymentReattachTick(*anchor_chainman);
+                    } catch (const std::exception& e) {
+                        LogPrintf("WARNING: bitcoin-payment re-attachment tick failed, retrying next interval: %s\n", e.what());
+                    } catch (...) {
+                        LogPrintf("WARNING: bitcoin-payment re-attachment tick failed, retrying next interval\n");
+                    }
+                    for (int64_t i = 0; i < anchor_poll * 10 && !ShutdownRequested(); ++i) {
                         UninterruptibleSleep(std::chrono::milliseconds{100});
                     }
                 }

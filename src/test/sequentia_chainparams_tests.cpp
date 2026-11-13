@@ -38,6 +38,25 @@ static void CheckTaprootAlwaysActive(const std::string& chain)
     BOOST_CHECK_EQUAL(taproot.min_activation_height, 0);
 }
 
+//! The proof of a bitcoin payment (doc/sequentia/bitcoin-payment-proof.md 7) is
+//! active from genesis on the chains this project starts, and never on a running
+//! chain that is not ours: Bitcoin's main and signet, and the Liquid chains.
+//! The Sequentia testnet waits for a height its operators choose.
+BOOST_AUTO_TEST_CASE(btc_payment_proof_activation_is_pinned)
+{
+    ArgsManager empty;
+    for (const std::string chain : {CBaseChainParams::SEQUENTIA, CBaseChainParams::REGTEST, std::string("elementsregtest")}) {
+        const auto params = CreateChainParams(empty, chain);
+        BOOST_CHECK_MESSAGE(params->GetConsensus().BtcPaymentActiveAt(0), chain);
+    }
+    for (const std::string chain : {CBaseChainParams::MAIN, CBaseChainParams::SIGNET, std::string("liquidv1"),
+                                    std::string("liquidv1test"), std::string("liquidtestnet"), CBaseChainParams::TESTNET}) {
+        const auto params = CreateChainParams(empty, chain);
+        BOOST_CHECK_MESSAGE(!params->GetConsensus().BtcPaymentActiveAt(1000000), chain);
+    }
+    SelectParams(CBaseChainParams::REGTEST);
+}
+
 BOOST_AUTO_TEST_CASE(taproot_always_active_on_sequentia_networks)
 {
     CheckTaprootAlwaysActive(CBaseChainParams::SEQUENTIA);

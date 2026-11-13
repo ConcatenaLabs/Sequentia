@@ -170,6 +170,14 @@ private:
     //! transactions mined from the record spend, which no mempool transaction
     //! in the same block may spend again.
     std::set<COutPoint> m_submission_spent;
+    //! SEQUENTIA: the anchor this block carries, chosen before its transactions
+    //! so bitcoin-payment claims and anchor floors are taken only when it meets them.
+    uint32_t m_anchor_height{0};
+    uint256 m_anchor_hash;
+    bool m_btcpay_active{false};
+    //! SEQUENTIA: the anchor height of the block BtcPayment::FLOOR_DEPTH below
+    //! this one, which an anchor floor is judged against; -1 when there is none.
+    int64_t m_floor_anchor_height{-1};
     //! Build a coinbase-only block: the fallback when a full template fails
     //! TestBlockValidity (CreateNewBlock).
     bool m_coinbase_only{false};

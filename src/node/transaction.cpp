@@ -58,7 +58,25 @@ TransactionError BroadcastTransaction(NodeContext& node, const CTransactionRef t
             if (!existingCoin.IsSpent()) return TransactionError::ALREADY_IN_CHAIN;
         }
 
-        if (auto mempool_tx = node.mempool->get(txid); mempool_tx) {
+        // SEQUENTIA: another witness for a pooled transaction that carries
+        // bitcoin-payment records is submitted (the mempool may replace the
+        // pooled one, section 6.2 of doc/sequentia/bitcoin-payment-proof.md).
+        auto has_records = [](const CTransaction& t) {
+            for (size_t i = 0; i < t.vin.size() && i < t.witness.vtxinwit.size(); ++i) {
+                if (!t.vin[i].m_is_pegin && !t.witness.vtxinwit[i].m_pegin_witness.stack.empty()) return true;
+            }
+            return false;
+        };
+        auto pooled = node.mempool->get(txid);
+        // Its fee is the pooled one's (same inputs and outputs), already within
+        // the limit, so the test run for the fee is skipped: the mempool may keep
+        // the newcomer as a variant even when it does not replace (section 6.3).
+        bool same_txid_variant = false;
+        if (pooled && pooled->GetWitnessHash() != tx->GetWitnessHash() && has_records(*pooled)) {
+            pooled = nullptr;
+            same_txid_variant = true;
+        }
+        if (auto mempool_tx = pooled; mempool_tx) {
             // There's already a transaction in the mempool with this txid. Don't
             // try to submit this transaction to the mempool (since it'll be
             // rejected as a TX_CONFLICT), but do attempt to reannounce the mempool
@@ -69,7 +87,7 @@ TransactionError BroadcastTransaction(NodeContext& node, const CTransactionRef t
             wtxid = mempool_tx->GetWitnessHash();
         } else {
             // Transaction is not already in the mempool.
-            if (max_tx_fee > 0) {
+            if (max_tx_fee > 0 && !same_txid_variant) {
                 // First, call ATMP with test_accept and check the fee. If ATMP
                 // fails here, return error immediately.
                 const MempoolAcceptResult result = node.chainman->ProcessTransaction(tx, /*test_accept=*/ true);

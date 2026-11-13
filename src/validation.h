@@ -421,6 +421,11 @@ struct PackageMempoolAcceptResult
  *
  * @returns a MempoolAcceptResult indicating whether the transaction was accepted/rejected with reason.
  */
+/** SEQUENTIA: one tick of bitcoin-payment proof re-attachment
+ *  (doc/sequentia/bitcoin-payment-proof.md 6.3), on its own thread beside the
+ *  anchor watcher and never on its path. Bounded by a time budget per tick. */
+void BtcPaymentReattachTick(ChainstateManager& chainman);
+
 MempoolAcceptResult AcceptToMemoryPool(CChainState& active_chainstate, const CTransactionRef& tx,
                                        int64_t accept_time, bool bypass_limits, bool test_accept)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main);
@@ -960,10 +965,16 @@ bool ActivateBestChainStep(BlockValidationState& state, CBlockIndex* pindexMostW
      *
      * Passing fAddToMempool=false will skip trying to add the transactions back,
      * and instead just erase from the mempool as needed.
+     *
+     * SEQUENTIA: `final_tip` is where a reorganization that disconnects block by
+     * block will end. A claim whose payment proof links to an anchor above that
+     * tip's anchor can never be valid there, so it is held for re-attachment at
+     * once instead of being admitted while the tip still records that anchor and
+     * evicted again when the last block goes.
      */
     void MaybeUpdateMempoolForReorg(
         DisconnectedBlockTransactions& disconnectpool,
-        bool fAddToMempool) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
+        bool fAddToMempool, const CBlockIndex* final_tip = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
 
     /** Check warning conditions and do some notifications on new chain tip set. */
     void UpdateTip(const CBlockIndex* pindexNew)
