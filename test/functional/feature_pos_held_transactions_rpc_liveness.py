@@ -11,9 +11,9 @@ that a Bitcoin reorganization disconnected; node 1 runs without the rule
 with -posdebugheldfillms) every signing RPC refuses with held-filling; then
 each refuses a block carrying R, a respend of T, or built on the
 single-signer block X that carries it. No block is certified afterwards, so
-the backstop, counted from node 0's first refusal and applied by its anchor
-watcher, must release T: the liveness bound and the backstop bind a member
-whatever way it signs. A real bitcoind is the parent chain.
+the backstop, counted from node 0's first refusal and applied by its
+maintenance thread, must release T: the liveness bound and the backstop bind a
+member whatever way it signs. A real bitcoind is the parent chain.
 """
 
 import os
@@ -267,12 +267,12 @@ class HeldTransactionsRpcLivenessTest(BitcoinTestFramework):
         info = m.getheldtxs()
         self.record("RPC-only backstop", "after %.2f s: %s" % (backstop + 5, info))
         assert t_id not in info["txids"], "RPC-only member kept T beyond the backstop"
-        # Released by the backstop's clock, applied by the anchor watcher (no producer runs here).
+        # Released by the backstop's clock, applied by the maintenance thread (no producer runs here).
         with open(log0, encoding="utf-8", errors="replace") as f:
             f.seek(size0)
             rel = [line.strip() for line in f if "(the backstop," in line]
         self.record("RPC-only release", rel[0].split(" ", 1)[1] if rel else "none")
-        assert rel and "[anchorwatch]" in rel[0], rel
+        assert rel and "[heldtxs]" in rel[0], rel
 
 
 if __name__ == '__main__':

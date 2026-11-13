@@ -17,10 +17,12 @@
 #include <pos_producer.h>
 #include <primitives/block.h>
 #include <serialize.h>
+#include <shutdown.h>
 #include <streams.h>
 #include <sync.h>
 #include <txmempool.h>
 #include <util/system.h>
+#include <util/thread.h>
 #include <util/time.h>
 #include <validation.h>
 
@@ -30,6 +32,7 @@
 #include <limits>
 #include <map>
 #include <set>
+#include <thread>
 
 using node::ReadBlockFromDisk;
 
@@ -99,6 +102,10 @@ int64_t g_hold_first_ms GUARDED_BY(g_held_mutex){0};
 //! The liveness bound, fixed at startup from the gossip timings
 //! (HeldTxsBoundMs), so that every member applies it, producer or not.
 int64_t g_bound_ms GUARDED_BY(g_held_mutex){0};
+
+//! The maintenance thread (HeldTxsStart, HeldTxsStop).
+std::thread g_held_thread;
+std::atomic<bool> g_held_stop{false};
 
 static constexpr uint32_t HELD_FILE_VERSION = 2;
 
@@ -773,6 +780,30 @@ bool HeldTxsMaintain(ChainstateManager& chainman, CTxMemPool& mempool, bool park
         if (added) LogPrintf("Held transactions: readmitted %u held transaction(s) to the mempool\n", added);
     }
     return false;
+}
+
+void HeldTxsStart(ChainstateManager& chainman, CTxMemPool& mempool)
+{
+    if (!g_held_active || g_held_thread.joinable()) return;
+    g_held_stop = false;
+    g_held_thread = std::thread(&util::TraceThread, "heldtxs", [&chainman, &mempool] {
+        while (!g_held_stop && !ShutdownRequested()) {
+            try {
+                HeldTxsMaintain(chainman, mempool, /*park=*/false);
+            } catch (const std::exception& e) {
+                LogPrintf("WARNING: held-transactions maintenance failed, retrying at the next pass: %s\n", e.what());
+            }
+            for (int64_t i = 0; i < POS_HELD_MAINTAIN_MS / 100 && !g_held_stop && !ShutdownRequested(); ++i) {
+                UninterruptibleSleep(std::chrono::milliseconds{100});
+            }
+        }
+    });
+}
+
+void HeldTxsStop()
+{
+    g_held_stop = true;
+    if (g_held_thread.joinable()) g_held_thread.join();
 }
 
 HeldTxsInfo HeldTxsGetInfo()
