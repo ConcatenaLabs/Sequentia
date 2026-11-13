@@ -1485,8 +1485,9 @@ returns to a branch it showed earlier, the watcher first reconsiders the
 Sequentia blocks anchored on that branch and lets fork choice compare them
 with the chain the node stands on; only afterwards does it disconnect what is
 anchored on the branch Bitcoin has just left. If the returning Sequentia
-branch is as high as the current one or higher, the node moves to it by fork
-choice in that first step. The watcher then has nothing left to disconnect,
+branch is higher than the current one, the node moves to it by fork choice in
+that first step; at equal height the tie-break of fork choice decides, and it
+has gone both ways. The watcher then has nothing left to disconnect,
 the record takes nothing, and no member holds the transactions that were
 certified on the branch Bitcoin left, although every member ran the rule: a
 Bitcoin reorganization has disconnected certified blocks, and the rule
@@ -1496,8 +1497,8 @@ watcher disconnects it and its transactions are held as described above.
 The Bitcoin shape that opens the hole is a reorganization followed by its
 reversal: Bitcoin leaves branch A for branch B, the committee certifies
 transactions in blocks anchored on B, and Bitcoin returns to A while the
-Sequentia blocks once anchored on A still stand as high as those anchored on
-B. Producers do not anchor at a height that a live Bitcoin branch contests
+Sequentia blocks once anchored on A still stand higher than those anchored on
+B, or as high. Producers do not anchor at a height that a live Bitcoin branch contests
 (`-anchoravoidcontested`), so blocks are anchored on B only once B leads A by
 more than `-anchorcontestwindow` (2) Bitcoin blocks, and the return to A is
 then a reorganization more than two blocks deep that follows an earlier one.
