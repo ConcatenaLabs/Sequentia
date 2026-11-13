@@ -1479,41 +1479,43 @@ the next pass evicts it, but a node that relayed it has relayed it. The
 contested-anchor jump of a payment claim's refund floor, which the floor must
 close itself.
 
-**A return to a Bitcoin branch seen before: a hole in the rule.** The record
-is filled only when the anchor watcher itself disconnects blocks. When Bitcoin
-returns to a branch it showed earlier, the watcher first reconsiders the
-Sequentia blocks anchored on that branch and lets fork choice compare them
-with the chain the node stands on; only afterwards does it disconnect what is
-anchored on the branch Bitcoin has just left. If the returning Sequentia
-branch is higher than the current one, the node moves to it by fork choice in
-that first step; at equal height the tie-break of fork choice decides, and it
-has gone both ways. The watcher then has nothing left to disconnect,
-the record takes nothing, and no member holds the transactions that were
-certified on the branch Bitcoin left, although every member ran the rule: a
-Bitcoin reorganization has disconnected certified blocks, and the rule
-protects none of their transactions. If the current branch is higher, the
-watcher disconnects it and its transactions are held as described above.
+**A return to a Bitcoin branch seen before.** When Bitcoin returns to a
+branch it showed earlier, the Sequentia blocks once anchored on that branch
+become valid again, and the branch the node stands on loses its anchors. The
+watcher takes the current branch off the chain first: in each pass, its walk
+for orphaned anchors runs before it reconsiders anything, so the blocks
+anchored on the branch Bitcoin has just left are disconnected by the walk's
+own invalidation, and their transactions are held as described above. Only
+then does it reconsider the returning branch, and fork choice moves the node
+onto it in the same pass. Whatever that reconsideration's activation still
+takes off the active chain is recorded too, with members signing nothing
+until the record holds it: a branch that loses fork choice to the returning
+one, or one whose anchor Bitcoin dropped while the pass ran. Either way the
+departure is Bitcoin's doing, and its certified transactions are held. It
+makes no difference whether the returning branch is higher than the current
+one, as high, or lower.
 
-The Bitcoin shape that opens the hole is a reorganization followed by its
-reversal: Bitcoin leaves branch A for branch B, the committee certifies
-transactions in blocks anchored on B, and Bitcoin returns to A while the
-Sequentia blocks once anchored on A still stand higher than those anchored on
-B, or as high. Producers do not anchor at a height that a live Bitcoin branch contests
-(`-anchoravoidcontested`), so blocks are anchored on B only once B leads A by
-more than `-anchorcontestwindow` (2) Bitcoin blocks, and the return to A is
-then a reorganization more than two blocks deep that follows an earlier one.
-On Bitcoin's main network that takes an attacker who out-mines the network
-twice. On testnet4, where deep reorganizations and their reversals occur, it
-can happen without one.
+The reconsideration revives only blocks whose anchors Bitcoin has again. A
+block above the reconsidered one whose own anchor is still off Bitcoin's best
+chain stays invalid, together with everything above it, in the same step
+(doc 03, "The reorg-following watcher"). So a held transaction never reads as
+mined in a block that Bitcoin does not allow, not even for a moment.
 
-The same first step has a second effect. Reconsidering a block also clears
-the failure marks of its descendants, including descendants whose own anchor
-is still orphaned. Such blocks are connected and, within the same pass of the
-watcher, disconnected again (a few milliseconds). A held transaction that one
-of them carries reads as mined in a certified block during that moment, and a
-maintenance pass that falls into it releases the transaction. The disconnect
-that follows holds it again; if nothing else was held meanwhile, a new hold
-begins with clocks of its own.
+**What can still take a certified block off the chain without the record.**
+Departures that are not Bitcoin's doing: an operator's `invalidateblock` or
+`reconsiderblock`, and the finality reconciliation that releases a finalized
+branch the committee abandoned. They are not covered. Two departures are
+Bitcoin's doing but happen outside the watcher's pass:
+- a block arriving from a peer can win fork choice over a branch whose anchor
+  Bitcoin has dropped, before the watcher's next pass. It needs a branch that
+  outweighs the current one within one poll interval (`-anchorpollinterval`),
+  and it cannot cross a finalized block: only the newest certified block, still
+  in its observation window, can leave this way;
+- a node that stops in the middle of the watcher's disconnect: the record is
+  filled after the disconnect, so a node killed between the two restarts
+  without those transactions held, and a stop that interrupts a deep
+  disconnect has the watcher undo it for the next start to redo, from the
+  chain the node restarts on.
 
 **Why a set-aside does not end when the sibling loses its anchor.** It can
 happen that Bitcoin reorganizes again while a member keeps the respend block X
