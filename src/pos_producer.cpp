@@ -183,9 +183,17 @@ std::shared_ptr<CBlock> BuildUnsignedBlsBlock(ChainstateManager& chainman, CTxMe
 }
 } // namespace
 
-//! The running producer, for net_processing to deliver gossip to.
-static std::atomic<PosProducer*> g_active_producer{nullptr};
-PosProducer* GetActivePosProducer() { return g_active_producer.load(); }
+//! The running producer, for net_processing to deliver gossip to. A reference,
+//! not a raw pointer: a message handler that took it before the producer was
+//! stopped keeps it alive until its call returns, instead of using a producer
+//! that shutdown has already destroyed.
+static Mutex g_active_producer_mutex;
+static std::shared_ptr<PosProducer> g_active_producer GUARDED_BY(g_active_producer_mutex);
+std::shared_ptr<PosProducer> GetActivePosProducer()
+{
+    LOCK(g_active_producer_mutex);
+    return g_active_producer;
+}
 
 PosCompactProposal MakePosCompactProposal(const CBlock& block)
 {
@@ -581,6 +589,7 @@ PosProducer::PosProducer(ChainstateManager& chainman, CTxMemPool& mempool,
     m_byzantine_equivocate = gArgs.GetBoolArg("-posbyzantineequivocate", false);
     m_byzantine_invalid = gArgs.GetBoolArg("-posbyzantineinvalid", false);
     m_debug_round_skew_ms = gArgs.GetIntArg("-posdebugroundskewms", 0);
+    m_debug_share_delay_ms = std::clamp<int64_t>(gArgs.GetIntArg("-posdebugsharedelayms", 0), 0, 10000);
     m_recovery_wait_ms = std::clamp<int64_t>(gArgs.GetIntArg("-posanchorrecoverywait", 30), 0, 3600) * 1000;
     // Local liveness timings, NOT consensus rules (every node derives the
     // round index from the same global anchor, so nodes with different
@@ -593,20 +602,32 @@ PosProducer::PosProducer(ChainstateManager& chainman, CTxMemPool& mempool,
 
 PosProducer::~PosProducer() { Stop(); }
 
-void PosProducer::Start()
+bool PosProducer::Start()
 {
-    if (m_running) return;
+    if (m_running) return true;
+    // Shared, so a validation callback in flight when Stop() unregisters us
+    // also keeps the producer alive until it returns (the validation interface
+    // holds the reference while it calls).
+    const std::shared_ptr<PosProducer> self = shared_from_this();
+    {
+        LOCK(g_active_producer_mutex);
+        if (g_active_producer) {
+            LogPrintf("PoS producer: not starting a second producer while one is running\n");
+            return false;
+        }
+        g_active_producer = self;
+    }
     m_running = true;
-    g_active_producer.store(this);
-    RegisterValidationInterface(this);
+    RegisterSharedValidationInterface(self);
     m_thread = std::thread(&util::TraceThread, "posproducer", [this] { ThreadLoop(); });
     LogPrintf("PoS producer: started with %d staking key(s)\n", (int)Keys().size());
+    return true;
 }
 
 void PosProducer::Stop()
 {
     if (!m_running) return;
-    g_active_producer.store(nullptr);
+    WITH_LOCK(g_active_producer_mutex, g_active_producer.reset());
     UnregisterValidationInterface(this);
     {
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -1893,6 +1914,7 @@ PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& blo
 
 PosGossipAction PosProducer::OnShare(const PosShare& share)
 {
+    if (m_debug_share_delay_ms > 0) UninterruptibleSleep(std::chrono::milliseconds{m_debug_share_delay_ms});
     // Deduplicate on the share's whole content, never on (block, member) alone:
     // anyone can sign a share for a block under a key of their own and name a
     // committee member as its author, and keying on the pair let that forgery

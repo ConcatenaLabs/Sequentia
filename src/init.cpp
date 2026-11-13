@@ -241,7 +241,10 @@ void Shutdown(NodeContext& node)
     StopMapPort();
 
     // SEQUENTIA: stop the autonomous PoS producer (unregisters its validation
-    // interface and joins its worker thread) before tearing down chain state.
+    // interface and its gossip, and joins its worker thread) before tearing
+    // down chain state. A message handler or validation callback still inside
+    // the producer holds its own reference, so the producer is destroyed when
+    // the last of them returns, never under it.
     if (node.pos_producer) {
         node.pos_producer->Stop();
         node.pos_producer.reset();
@@ -689,6 +692,7 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-posproducerkey=<wif>", "SEQUENTIA: a staking private key (WIF) the autonomous producer (-posproducer) signs blocks with. May be specified multiple times (a leader plus, for a single-host committee, its committee keys). Keep this value secret.", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::ELEMENTS);
     argsman.AddArg("-posbyzantineequivocate", "SEQUENTIA TEST ONLY: make the autonomous producer act as a Byzantine leader — when elected it equivocates (proposes two different blocks to disjoint halves of the committee) and contributes no signature shares. Used to test that the committee's round-robin routes around a faulty leader. Never set this on a real node.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-posbyzantineinvalid", "SEQUENTIA TEST ONLY: make the autonomous producer propose a consensus-invalid block when elected, to test that lazy validation excludes the leader and the committee routes to the next valid one. Never set this on a real node.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::ELEMENTS);
+    argsman.AddArg("-posdebugsharedelayms", "SEQUENTIA TEST ONLY: hold every received proof-of-stake share this many milliseconds before handling it, so a test can stop the node while its message handler is inside the producer. Never set this on a real node.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-posdebugroundskewms", "SEQUENTIA TEST ONLY: add this many milliseconds of clock skew to the autonomous producer's gossip round scheduler, to measure how much inter-node synchrony loss the round anchor tolerates before rounds desync. Never set this on a real node.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-posanchorrecoverywait=<n>", "SEQUENTIA: seconds the autonomous producer refuses to treat a height as vacant while a quorum-certified block at that height awaits anchor-reorg recovery (committee-equivocation prevention: it neither proposes nor countersigns a rival there). The hold ends early when the block is restored or its anchor is confirmed off the parent chain's best chain; 0 disables the guard. (default: 30)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-posescapestallmtpgap=<n>", strprintf("SEQUENTIA: seconds of parent-chain (Bitcoin) median-time-past that must separate a sub-quorum (escaping-stall) block's anchor from its parent's anchor, in addition to the consensus anchor-height gap. Real-time stall evidence: during a parent-chain block-storm heights advance in seconds, so the height gap alone can be met with the chain fully alive (the 2026-07-17 finality partition). 0 disables. Skipped with -validateanchor=0. (default: %d)", (int)DEFAULT_POS_ESCAPE_STALL_MTP_GAP), ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
@@ -2323,8 +2327,8 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         if (producer_keys.empty()) {
             return InitError(_("-posproducer requires at least one -posproducerkey"));
         }
-        node.pos_producer = std::make_unique<PosProducer>(chainman, *node.mempool, chainparams, node.connman.get(), std::move(producer_keys));
-        node.pos_producer->Start();
+        node.pos_producer = std::make_shared<PosProducer>(chainman, *node.mempool, chainparams, node.connman.get(), std::move(producer_keys));
+        if (!node.pos_producer->Start()) return InitError(Untranslated("The proof-of-stake producer could not be started"));
     }
 
     // SEQUENTIA: Bitcoin anchoring. Verify the connection to the parent chain

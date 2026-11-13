@@ -72,7 +72,9 @@ struct NodeContext {
     //! into the node, so it may be joined at any point in shutdown.
     std::thread anchor_retry_thread;
     //! SEQUENTIA: autonomous Proof-of-Stake block producer (-posproducer).
-    std::unique_ptr<PosProducer> pos_producer;
+    //! Shared: net_processing and the validation interface hold references
+    //! while a gossip message or a callback is being handled.
+    std::shared_ptr<PosProducer> pos_producer;
     std::function<void()> rpc_interruption_point = [] {};
 
     //! Declare default constructor and destructor that are not inline, so code
