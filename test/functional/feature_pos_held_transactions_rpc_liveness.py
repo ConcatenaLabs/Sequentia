@@ -32,6 +32,12 @@ from test_framework.util import assert_equal, p2p_port, rpc_port
 BITCOIND = os.environ.get("PARENT_BITCOIND", "/usr/local/bin/bitcoind")
 CHAIN = "elementsregtest"
 FILL_MS = 8000
+# The testnet's gossip timings (CR1_TESTNET=1): 9.45 s rounds and a 6.75 s
+# window, so a 240.3 s backstop; otherwise the formulas at this three-seat
+# committee (805 ms, 575 ms: a 20.47 s backstop).
+TESTNET = os.environ.get("CR1_TESTNET", "") == "1"
+ROUND_MS = 9450 if TESTNET else 700 + 35 * 3
+WINDOW_MS = 6750 if TESTNET else 500 + 25 * 3
 
 
 def make_key():
@@ -72,6 +78,8 @@ class HeldTransactionsRpcLivenessTest(BitcoinTestFramework):
             "-parentgenesisblockhash=%s" % self.btc_genesis, "-txindex=1", "-debug=mempool",
             "-port=%d" % p2p_port(i), "-rpcport=%d" % rpc_port(i),
         ] + ["-staker=%s:1" % pub for _, pub in self.stakers]
+        if TESTNET:
+            a += ["-posroundms=%d" % ROUND_MS, "-poswindowms=%d" % WINDOW_MS]
         a.append("-posdebugheldfillms=%d" % FILL_MS if i == 0 else "-posdebugignoreheld=1")
         return a
 
@@ -253,9 +261,8 @@ class HeldTransactionsRpcLivenessTest(BitcoinTestFramework):
         e_sig = self.musig(att, e, "eA")
         self.refused("ancestor: submitposblock", anc, lambda: m.submitposblock(e["block"], self.stakers[0][0], e_sig))
 
-        # Neither node runs the autonomous producer. The specification's backstop
-        # is 20.47 s for this three-seat committee. No new block is certified.
-        backstop = 2 * (12 * (700 + 35 * 3) + (500 + 25 * 3)) / 1000.0
+        # Neither node runs the autonomous producer. No new block is certified.
+        backstop = 2 * (12 * ROUND_MS + WINDOW_MS) / 1000.0
         time.sleep(backstop + 5)
         info = m.getheldtxs()
         self.record("RPC-only backstop", "after %.2f s: %s" % (backstop + 5, info))
