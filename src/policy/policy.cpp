@@ -74,7 +74,7 @@ bool IsStandard(const CScript& scriptPubKey, TxoutType& whichType)
     std::vector<std::vector<unsigned char> > vSolutions;
     whichType = Solver(scriptPubKey, vSolutions);
 
-    CChainParams params = Params();
+    const CChainParams& params = Params();
     if (whichType == TxoutType::NONSTANDARD) {
         // SEQUENTIA: on Proof-of-Stake chains, on-chain stake is registered by
         // paying to a bare staking script (<csv> OP_CSV OP_DROP <pubkey>
@@ -190,7 +190,7 @@ bool IsStandardTx(const CTransaction& tx, bool permit_bare_multisig, const CFeeR
         }
     }
 
-    CChainParams params = Params();
+    const CChainParams& params = Params();
     unsigned int nDataOut = 0;
     TxoutType whichType;
     for (const CTxOut& txout : tx.vout) {

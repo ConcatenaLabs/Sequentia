@@ -69,6 +69,11 @@ struct ChainTxData {
 class CChainParams
 {
 public:
+    // The parameters are held, and deleted, through this base class
+    // (CreateChainParams), while subclasses such as CCustomParams add members
+    // of their own.
+    virtual ~CChainParams() = default;
+
     enum Base58Type {
         PUBKEY_ADDRESS,
         SCRIPT_ADDRESS,
