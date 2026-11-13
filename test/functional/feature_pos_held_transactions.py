@@ -971,8 +971,12 @@ class HeldTransactionsTest(BitcoinTestFramework):
         for k in range(4):
             case = "dd" if k == 0 else "dd.%d" % (k + 1)
             buyer = n1.getnewaddress()
+            # Each coin is locked in the attacker's wallet once funded, so that the next
+            # funding cannot spend it before T and T1 (signed later) do.
             coin_t = self.fund()
+            a.lockunspent(False, [{"txid": coin_t["txid"], "vout": coin_t["vout"]}])
             coin_t1 = self.fund()
+            a.lockunspent(False, [{"txid": coin_t1["txid"], "vout": coin_t1["vout"]}])
             # 1. Bitcoin block A, k_blocks blocks anchored at it, T near the end with lock time = tip.
             self.btc_mine(1)
             A = self.btc().getblockcount()
