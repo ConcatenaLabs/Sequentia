@@ -714,7 +714,10 @@ class HeldTransactionsTest(BitcoinTestFramework):
             rel += self.log_has(i, "the liveness bound", st["sizes"][i])
         self.record("rB", "first certified block", "%.1fs after rejoining (bound %.1fs); %s mined; bound releases logged: %d" %
                     (waited, bound, won, len(rel)))
-        assert waited < bound + 30, "certification paused %.0fs" % waited
+        # After the release the chain still needs one ordinary height, which a committee split by
+        # share-locks certifies once its collection restarts: up to a committee's worth of rounds.
+        # At the testnet's 9.45 s rounds that is more than 30 s.
+        assert waited < bound + max(30, (N + 2) * ROUND_MS / 1000.0), "certification paused %.0fs" % waited
         self.set_aware([False] + [True] * (N - 1))
 
     def case_rC(self):
