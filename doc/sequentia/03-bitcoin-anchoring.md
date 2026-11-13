@@ -203,7 +203,14 @@ their own anchor. A block whose ancestors off the active chain include one with
 an orphaned anchor waits for that ancestor. So no block whose anchor Bitcoin
 does not have is ever connected, not even for the moment before the walk would
 disconnect it again; and an anchor the Bitcoin daemon cannot judge right now
-revives nothing until a later tick can.
+revives nothing until a later tick can. The `reconsiderblock` RPC follows the
+same rule on a node that watches Bitcoin: it clears an operator's
+`invalidateblock` as before, but every block it would revive whose anchor is
+off Bitcoin's best chain (the block named included) stays invalid, with the
+blocks above it, and waits for its anchor in the recovery set. When the Bitcoin
+daemon does not answer, a block the watcher itself invalidated stays invalid
+until the watcher can judge its anchor, and every other mark is cleared as
+usual, so an operator can still undo an `invalidateblock` during an outage.
 
 This is a **consensus** invalidation, not a local policy choice: every node
 following the same Bitcoin best chain reaches the same decision, because
