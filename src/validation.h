@@ -245,6 +245,12 @@ extern int64_t g_pos_finality_hold_ms;
  *  Returns false if it was already known. */
 bool PosNoteCompetingCertificate(const uint256& hash, int height);
 
+/** SEQUENTIA: bumped by the anchor watcher (anchor.cpp, RefetchDeferredBlocks)
+ *  each time peers are to be asked again for blocks left aside because the
+ *  parent chain daemon could not yet vouch for their anchor. net_processing
+ *  sends every peer one getheaders per bump. */
+extern std::atomic<uint64_t> g_anchor_refetch_epoch;
+
 /** Immediate-finality state, for getposfinality. */
 struct PosFinalityInfo {
     int final_height{-1};

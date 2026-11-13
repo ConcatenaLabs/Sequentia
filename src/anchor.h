@@ -115,6 +115,25 @@ enum class AnchorCheckResult {
  *  and MainchainUnchangedHeight in anchor.cpp. */
 AnchorCheckResult CheckMainchainAnchor(uint32_t height, const uint256& hash);
 
+/** What the parent chain daemon last said about its sync, as CheckMainchainAnchor
+ *  last read it: whether it answered, whether it was still in its initial
+ *  download, and its block count (-1 when it did not answer or was syncing).
+ *  For explaining an indeterminate verdict; never a verdict itself. */
+struct MainchainSyncSnapshot {
+    bool reachable{false};
+    bool initial_download{false};
+    int blocks{-1};
+};
+MainchainSyncSnapshot GetMainchainSyncSnapshot();
+
+/** A block whose anchor the daemon could not yet vouch for (NOT_FOUND, STALE or
+ *  NO_CONNECTION) is rejected without being remembered, so that it can be taken
+ *  once the daemon's view catches up. Record that one was left aside: the
+ *  anchor watcher then asks every peer for headers again as soon as the daemon
+ *  moves or answers again, instead of the block waiting for its next
+ *  announcement. */
+void NoteAnchorDeferredBlock(uint32_t anchor_height);
+
 /** What one `getblockheader` reply says about one anchor.
  *
  *  Shared by the single-call and batched paths, so the two cannot reach
