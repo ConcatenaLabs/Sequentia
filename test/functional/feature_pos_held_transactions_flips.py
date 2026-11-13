@@ -212,25 +212,96 @@ class HeldTransactionsFlipsTest(HeldTransactionsRpcLivenessTest):
         assert r_id in m.getblock(b_r)["tx"]
         assert_equal(m.getheldtxs()["txids"], [])
 
+    def returning(self, case, vout, higher):
+        """Bitcoin branch A carries the certified Sequentia branch CA (no transaction). Bitcoin replaces A by
+        B; on B the committee certifies T in CB. Bitcoin returns to A, where CA is one block higher than CB
+        (higher) or as high (fork choice's tie-break decides). Node 0 must hold T and decline the respend R,
+        whichever way fork choice leaves CB."""
+        m, att = self.nodes
+        b = self.btc()
+
+        def spend(to, fee):
+            r = att.createrawtransaction([{"txid": self.fund_txid, "vout": vout, "sequence": 0xfffffffd}],
+                                         [{to: Decimal("100") - fee}, {"fee": fee}])
+            return att.signrawtransactionwithwallet(r)["hex"]
+        t_hex, r_hex = spend(m.getnewaddress(), Decimal("0.0001")), spend(att.getnewaddress(), Decimal("0.001"))
+        t_id, r_id = tx_from_hex(t_hex).rehash(), tx_from_hex(r_hex).rehash()
+        self.btc_mine(1)
+        self.wait_until(lambda: self.certified_block(m) and self.anchored_at_tip(m), timeout=60)
+        h0 = b.getblockcount()
+        base = m.getbestblockhash()
+        a_blk = self.btc_mine(1)[0]
+        ca = self.anchored_blocks(m, 4 if higher else 3, h0)
+        self.sync_blocks()
+        b.invalidateblock(a_blk)
+        b_blk = self.btc_mine(3)[0]
+        self.both_on(base)
+        assert_equal(m.getheldtxs()["txids"], [])
+        self.anchored_blocks(m, 1, h0)
+        m.sendrawtransaction(t_hex)
+        b_t = self.certified_block(m)
+        cb_top = self.certified_block(m)
+        self.sync_blocks()
+        assert t_id in m.getblock(b_t)["tx"]
+        self.record(case + ": branches", "CA tops at height %d (on Bitcoin branch A), CB at %d (on B) with T certified at %d" %
+                    (m.getblockheader(ca[-1])["height"], m.getblockheader(cb_top)["height"], m.getblockheader(b_t)["height"]))
+        size0 = os.path.getsize(m.debug_log_path)
+        b.invalidateblock(b_blk)
+        b.reconsiderblock(a_blk)
+        t_back = time.time()
+        # Following time: from Bitcoin's return to node 0 on CA's top, read by polling, and inside the
+        # watcher's tick from its log: its first line after the return to the UpdateTip that reaches CA's top.
+        while m.getbestblockhash() != ca[-1]:
+            assert time.time() - t_back < 30, "node 0 did not reach CA's top in 30s"
+            time.sleep(0.02)
+        follow_s = time.time() - t_back
+        stamp = lambda x: float(x[17:26]) + 60 * int(x[14:16])
+        with open(m.debug_log_path, encoding="utf-8", errors="replace") as f:
+            f.seek(size0)
+            lines = [x.strip() for x in f if "is canonical again; reconsidering" in x or "reorganization detected" in x
+                     or "Held transactions: holding" in x or "the reconsideration took" in x
+                     or ("UpdateTip: new best=" + ca[-1]) in x]
+        first = [x for x in lines if "[anchorwatch]" in x and "UpdateTip" not in x]
+        top = [x for x in lines if ("UpdateTip: new best=" + ca[-1]) in x]
+        in_tick = "%.1f ms (%s)" % ((stamp(top[0]) - stamp(first[0])) * 1000, top[0].split(" ")[1]) if first and top else "n/a"
+        self.record(case + ": followed", "node 0 on CA's top %.2fs after Bitcoin's return; in the watcher's tick %s" % (follow_s, in_tick))
+        self.wait_until(lambda: t_id in m.getheldtxs()["txids"], timeout=30)
+        self.both_on(ca[-1])
+        for x in lines:
+            self.log.info("    node 0: %s", (x.split(" ", 1)[0][11:] + " " + x.split("] ", 3)[-1])[:150])
+        assert any("Held transactions: holding" in x for x in lines)
+        att.prioritisetransaction(txid=t_id, fee_delta=-100000000)
+        att.sendrawtransaction(r_hex)
+        assert self.offer_r(case, t_id, r_id), "node 0 signed the attacker's block carrying R"
+        self.record(case + ": after Bitcoin's return to A", "on CA's top, T held, R declined")
+        # The hold ends by the backstop at the latest; the next case starts with nothing held.
+        self.wait_until(lambda: m.getheldtxs()["txids"] == [], timeout=BACKSTOP_S + 30)
+
     def body(self):
         m, att = self.nodes
         g = m.getblock(m.getblockhash(0), 2)
         coin = [(tx["txid"], vo["n"], Decimal(vo["value"])) for tx in g["tx"] for vo in tx["vout"]
                 if vo["scriptPubKey"]["hex"] == "51" and vo.get("value", 0) > 0][0]
         raw = m.createrawtransaction([{"txid": coin[0], "vout": coin[1]}],
-                                     [{att.getnewaddress(): Decimal("100")}, {att.getnewaddress(): Decimal("100")},
-                                      {att.getnewaddress(): coin[2] - Decimal("200.001")}, {"fee": Decimal("0.001")}])
+                                     [{att.getnewaddress(): Decimal("100")} for _ in range(4)] +
+                                     [{att.getnewaddress(): coin[2] - Decimal("400.001")}, {"fee": Decimal("0.001")}])
         self.fund_txid = m.sendrawtransaction(raw)
         self.certified_block(m)
         self.sync_blocks()
         vouts = [o["n"] for o in m.getrawtransaction(self.fund_txid, 1)["vout"] if o.get("value") == Decimal("100")]
-        cases = os.environ.get("CR4_FLIPS", "flips,restart").split(",")
+        cases = os.environ.get("CR4_FLIPS", "flips,restart,return,return_equal").split(",")
         if "flips" in cases:
             self.log.info("(flips) the backstop while Bitcoin flips between two branches already seen: %.2fs", BACKSTOP_S)
             self.flips("flips", vouts[0], restart=False)
         if "restart" in cases:
             self.log.info("(restart) the same, with node 0 restarted in the middle of the flips")
             self.flips("restart", vouts[1], restart=True)
+        if "return" in cases:
+            self.log.info("(return) Bitcoin returns to a branch it showed before, whose Sequentia branch is higher")
+            self.returning("return", vouts[2], higher=True)
+        if "return_equal" in cases:
+            self.log.info("(return_equal) the same, with the returning Sequentia branch as high as the current one")
+            self.returning("return_equal", vouts[3], higher=False)
 
 
 if __name__ == '__main__':

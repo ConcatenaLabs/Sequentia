@@ -1094,6 +1094,256 @@ static void MaybeReconcileFinality(ChainstateManager& chainman)
     }
 }
 
+//! Section 2 of AnchorWatchTask (see there). False when the tick must end here.
+static bool InvalidateOrphanedAnchors(ChainstateManager& chainman)
+{
+    // 2) Walk the active chain down from the tip looking for blocks whose
+    //    anchors were reorganized away, and invalidate the LOWEST such block.
+    //
+    //    Anchor *heights* are monotone along the chain, but anchor *canonicality*
+    //    is NOT: a low block can anchor to a Bitcoin block that is later orphaned
+    //    while a higher block anchors to a still-canonical Bitcoin block on a
+    //    different/newer parent branch (heights stay monotone, e.g. 140803 then
+    //    140838). So a canonical tip does NOT imply the blocks below it are
+    //    anchored canonically — we must NOT stop the walk at the first OK block.
+    //    Doing so left the chain permanently wedged on a stale base: SEQ 1..4
+    //    anchored to an orphaned parent block with canonical SEQ 5+ built on top,
+    //    where the down-walk saw the canonical tip, broke, and never reached the
+    //    stale low blocks. We instead descend to height 1 and track the lowest
+    //    block whose anchor is off Bitcoin's best chain, then invalidate it:
+    //    InvalidateBlock + ActivateBestChain disconnects it AND every block above
+    //    it (including the canonical-anchor blocks built on the stale base), and
+    //    the chain rebuilds on the parent's best chain.
+    //
+    //    This runs on EVERY tick, not only when the parent tip just changed: a
+    //    block is invalid iff its anchor is off Bitcoin's best chain (doc 03
+    //    §intro, §3), and the active tip could be stale on a tick where the
+    //    parent tip did not change since the previous tick (e.g. the parent
+    //    reorg was missed/coalesced, the node restarted onto an already-reorged
+    //    parent, or a transiently-canonical anchor was cached OK and then went
+    //    stale). Gating the walk on tip_changed left such a tip stuck forever.
+    //
+    //    Cost. Per the invariant the walk must reach ANY depth (doc 03 §intro/§3,
+    //    doc 04 §6): there is deliberately NO depth floor and no reorg horizon,
+    //    so it examines the whole active chain on every tick and always will.
+    //    What it must NOT do is pay the parent chain daemon for that. Two things
+    //    keep the price flat as the chain grows:
+    //
+    //      - runs of blocks sharing one anchor collapse below (~20 blocks per
+    //        anchor at a 30-second block against a 10-minute parent), so the
+    //        number of verdicts needed per tick is the number of DISTINCT
+    //        anchors, not the number of blocks;
+    //      - each distinct anchor's verdict is served from g_anchor_ok_cache,
+    //        and that cache now survives a parent-chain extension instead of
+    //        being emptied by it (see AnchorWatchTask's tip-change handling and
+    //        MainchainUnchangedHeight). Only verdicts a parent reorganization
+    //        could actually have changed are dropped and re-fetched.
+    //
+    //    So a steady-state tick costs no parent-chain RPC at all, and a tick on
+    //    which the parent appended a block costs one. What it used to cost was
+    //    one RPC per distinct anchor on the whole chain, every time the parent
+    //    moved — thousands, growing linearly with the age of the chain, all of
+    //    them re-asking about Bitcoin history that had not changed.
+    //
+    //    Two costs remain linear in chain length and are in-memory only: the
+    //    index walk in phase 1 and the set lookups in phase 2. Should a chain
+    //    ever grow long enough for those to matter, the way out is a watermark
+    //    of "verified below here against a parent prefix that is still intact",
+    //    invalidated exactly like the caches — again re-verification skipped,
+    //    never verification. A depth floor remains forbidden.
+    uint256 lowest_bad;
+    while (true) {
+        // Top of the loop only. Never between the InvalidateBlock and the
+        // ActivateBestChain below: those two are one step, and a shutdown
+        // wedged between them would leave a block invalidated with the chain
+        // never reactivated onto its replacement.
+        if (ShutdownRequested()) return false;
+        lowest_bad.SetNull();
+        // Phase 1: snapshot the (immutable) anchor of each candidate block under
+        // cs_main, top-down, down to height 1 — there is NO finality floor on
+        // this walk. A block is valid iff its anchor is on Bitcoin's best chain,
+        // to ANY depth (doc 03 §intro/§3, doc 04 §6); a checkpoint-finalized
+        // block whose anchor was reorged away is just as invalid as any other,
+        // and finality is always modulo a Bitcoin reorg. (The checkpoint floor
+        // is a defense against SEQ-INTERNAL long-range forks, enforced at
+        // accept time in ContextualCheckBlockHeader — it must never keep a block
+        // whose Bitcoin anchor is off the best chain.) We do NOT call bitcoind
+        // here: the RPC must not run under cs_main, or a slow/hung parent daemon
+        // would stall the whole node (block processing, RPC, net) for the RPC
+        // timeout.
+        struct AnchorRef { uint256 block_hash; uint32_t anchor_height; uint256 anchor_hash; };
+        std::vector<AnchorRef> to_check;
+        {
+            LOCK(cs_main);
+            const CBlockIndex* pindex = chainman.ActiveChain().Tip();
+            for (; pindex && pindex->nHeight > 0; pindex = pindex->pprev) {
+                if (pindex->m_anchor_hash.IsNull()) break; // pre-anchor blocks
+                // Collapse each run of blocks sharing one anchor down to the
+                // LOWEST block of the run. Anchor heights are monotone along the
+                // chain, so blocks with the same anchor are contiguous, and
+                // descending means the last one seen in a run is its lowest.
+                // Nothing is lost: the verdict is a property of the anchor, not
+                // of the block, and the block this walk wants when an anchor is
+                // bad is exactly the lowest one carrying it — invalidating that
+                // one disconnects it and every block above. This is what keeps
+                // the phase-2 verdict loop proportional to the number of
+                // distinct anchors (~1 per parent block) rather than to the
+                // number of Sequentia blocks (~20 per parent block).
+                if (!to_check.empty() &&
+                    to_check.back().anchor_height == pindex->m_anchor_height &&
+                    to_check.back().anchor_hash == pindex->m_anchor_hash) {
+                    to_check.back().block_hash = pindex->GetBlockHash();
+                    continue;
+                }
+                to_check.push_back({pindex->GetBlockHash(), pindex->m_anchor_height, pindex->m_anchor_hash});
+            }
+        }
+        // Phase 2: query bitcoind OUTSIDE cs_main. anchor_height/anchor_hash are
+        // fixed per block, so the snapshot stays valid even if the SEQ tip moves
+        // meanwhile; InvalidateBlock below re-looks-up by hash and the loop
+        // re-evaluates, so the (pre-existing) snapshot→act gap is harmless.
+        //
+        // to_check is top-down (tip first, height 1 last), one entry per run of
+        // blocks sharing an anchor. Descend the WHOLE chain — do NOT break on OK
+        // (canonicality is not monotone, see above) — and remember the lowest
+        // (deepest) block whose anchor is definitively off Bitcoin's best chain
+        // (STALE/NOT_FOUND/HEIGHT_MISMATCH); since we overwrite lowest_bad as we
+        // descend, the last bad we record is the lowest one.
+        //
+        // g_anchor_ok_cache can only ever mark an anchor OK, never bad, so the
+        // question is whether it can hide a now-orphaned anchor from this walk.
+        // It cannot. For an anchor at parent height h to stop being canonical,
+        // the parent's best chain AT height h must change, which is a parent
+        // reorganization forking strictly BELOW h — so the fork height computed
+        // on the tip change is < h and DropAnchorCachesAbove removes that entry,
+        // leaving the walk to re-ask the daemon. When the move cannot be
+        // classified at all the whole cache goes. In every case a stale low
+        // block reaches this loop as a live RPC.
+        //
+        // NO_CONNECTION partway is indeterminate, not a verdict, so we stop
+        // descending (cannot judge the NO_CONNECTION block or anything below it).
+        // Any stale block already recorded sits ABOVE the NO_CONNECTION block
+        // (the walk is top-down, so it was found earlier/higher), and invalidating
+        // a definitively off-best-chain block is always correct: InvalidateBlock
+        // disconnects that block and everything ABOVE it, while the NO_CONNECTION
+        // block (below it) stays connected and is simply re-judged next tick. If no
+        // stale block was found before the NO_CONNECTION, there is nothing to act
+        // on — bail and retry next tick.
+        // One round trip per few hundred anchors instead of one per anchor.
+        // Purely a transport change: the loop below still asks about every
+        // entry, it simply finds most of the answers already in hand.
+        {
+            std::vector<std::pair<uint32_t, uint256>> refs;
+            refs.reserve(to_check.size());
+            for (const AnchorRef& ref : to_check) refs.emplace_back(ref.anchor_height, ref.anchor_hash);
+            PrefetchAnchorVerdicts(refs);
+        }
+
+        for (const AnchorRef& ref : to_check) {
+            // Abandon the tick if the node is going down. This loop is the one
+            // place the watcher runs for minutes at a time: every verdict it
+            // cannot serve from g_anchor_ok_cache is a round trip to the parent
+            // daemon, and that cache lives in memory only -- so the FIRST tick
+            // after any start asks about every distinct anchor on the whole
+            // chain, thousands of them once the chain has any age.
+            //
+            // Shutdown joins this thread, so with no check here `sequentiad
+            // stop` sat holding the datadir lock until the walk finished:
+            // five minutes, measured, on a freshly synced 100k-block chain,
+            // during which the GUI cannot open the datadir it just closed.
+            //
+            // Abandoning is safe, and is not even a new behaviour. The tick
+            // re-derives every verdict from ground truth each time and carries
+            // nothing across the point where it stops -- which is exactly why
+            // the next line already abandons the walk on NO_CONNECTION. All that
+            // is lost is work the next tick, or the next start, does again.
+            if (ShutdownRequested()) return false;
+            AnchorCheckResult res = CheckMainchainAnchor(ref.anchor_height, ref.anchor_hash);
+            if (res == AnchorCheckResult::NO_CONNECTION) break; // cannot judge deeper
+            if (res != AnchorCheckResult::OK) lowest_bad = ref.block_hash;
+        }
+        if (lowest_bad.IsNull()) break; // quiet tick: fall through to section 3
+
+        LogPrintf("Parent chain reorganization detected: invalidating block %s (and descendants) whose anchor is no longer canonical\n",
+                  lowest_bad.ToString());
+        CBlockIndex* pindex_bad;
+        const CBlockIndex* old_tip{nullptr};
+        {
+            LOCK(cs_main);
+            pindex_bad = chainman.m_blockman.LookupBlockIndex(lowest_bad);
+            if (!pindex_bad) return false;
+            old_tip = chainman.ActiveChain().Tip();
+            // Until the provenance marker below is set, peers still building on
+            // the blocks being disconnected are not misbehaving either
+            // (ChainstateManager::IsAnchorOrphaned).
+            chainman.m_anchor_invalidating = pindex_bad;
+        }
+        // Members sign nothing from here until the record holds what this
+        // disconnect takes off the chain (pos_heldtxs.h).
+        HeldTxsSetFilling(true);
+        BlockValidationState state;
+        if (!chainman.ActiveChainstate().InvalidateBlock(state, pindex_bad)) {
+            LogPrintf("WARNING: failed to invalidate block %s after parent chain reorganization: %s\n",
+                      lowest_bad.ToString(), state.ToString());
+            WITH_LOCK(cs_main, chainman.m_anchor_invalidating = nullptr);
+            HeldTxsSetFilling(false);
+            return false;
+        }
+        {
+            // InvalidateBlock stops between blocks when shutdown is requested
+            // and still reports success. Then the target is still connected
+            // and some of its descendants are failed with no provenance marker,
+            // which no restart or later tick would ever reconsider: the node
+            // would sit below the network for good. Undo the partial work
+            // instead; the next start re-derives the verdict from scratch.
+            LOCK(cs_main);
+            if (chainman.ActiveChain().Contains(pindex_bad)) {
+                LogPrintf("Anchor watcher: invalidation of %s was interrupted; undoing it so the next start can redo it\n",
+                          lowest_bad.ToString());
+                chainman.ActiveChainstate().ResetBlockFailureFlags(pindex_bad);
+                chainman.m_anchor_invalidating = nullptr;
+                HeldTxsSetFilling(false);
+                return false;
+            }
+        }
+        {
+            LOCK(g_anchor_mutex);
+            g_anchor_invalidated.insert(lowest_bad);
+        }
+        // Persist the provenance: tag this block as ANCHOR-invalidated (distinct
+        // from `invalidateblock` / consensus failures) so the recovery worklist
+        // can be re-seeded from the block index after a restart and ONLY anchor-
+        // orphaned blocks are reconsidered. pindex_bad is stable across the lock gap.
+        {
+            LOCK(cs_main);
+            chainman.ActiveChainstate().MarkAnchorInvalid(pindex_bad);
+            chainman.m_anchor_invalidating = nullptr;
+        }
+        // Held transactions (doc 04, "Held transactions"): keep what the
+        // certified blocks just disconnected carried. After the disconnect,
+        // never on its path, so following Bitcoin is not delayed.
+        if (HeldTxsActive() && old_tip && old_tip->GetAncestor(pindex_bad->nHeight) == pindex_bad) {
+            // Test only (-posdebugheldfillms): widen the fill window.
+            if (const int64_t fill_ms = gArgs.GetIntArg("-posdebugheldfillms", 0); fill_ms > 0) {
+                UninterruptibleSleep(std::chrono::milliseconds{fill_ms});
+            }
+            std::vector<const CBlockIndex*> disconnected;
+            for (const CBlockIndex* p = old_tip; p && p->nHeight >= pindex_bad->nHeight; p = p->pprev) disconnected.push_back(p);
+            std::reverse(disconnected.begin(), disconnected.end());
+            HeldTxsRecordDisconnect(chainman, disconnected);
+        }
+        HeldTxsSetFilling(false);
+        BlockValidationState abc_state;
+        if (!chainman.ActiveChainstate().ActivateBestChain(abc_state)) {
+            LogPrintf("WARNING: ActivateBestChain failed after anchor invalidation: %s\n", abc_state.ToString());
+            return false;
+        }
+        // Loop: the new tip may itself have a stale anchor (e.g. a competing
+        // branch that anchored to the same reorganized-away parent block).
+    }
+    return true;
+}
+
 void AnchorWatchTask(ChainstateManager& chainman)
 {
     if (!g_con_bitcoin_anchor || !g_validate_anchor) return;
@@ -1160,6 +1410,18 @@ void AnchorWatchTask(ChainstateManager& chainman)
             if (last_height >= 0) UpdatePosFinality(chainman, last_height);
         }
     }
+    // 2) Invalidate what is orphaned on the active chain (InvalidateOrphanedAnchors,
+    //    above). Run before the reconsideration of section 1 as well as after it:
+    //    a branch section 1 revives can be heavier than the active one, and fork
+    //    choice would then leave the active branch inside section 1's activation,
+    //    before this walk had invalidated it, so neither the recovery set nor the
+    //    record of held transactions would ever learn that it left for an anchor
+    //    reason. Run first, the walk takes it off the chain the one way that does
+    //    both; the second run, only after a reconsideration, catches an anchor
+    //    Bitcoin dropped while section 1 ran.
+    if (!InvalidateOrphanedAnchors(chainman)) return;
+    bool reconsidered = false;
+
     // 1) Reconsider blocks we invalidated earlier whose anchors are canonical
     //    again (the parent chain reorganized back — a reorg-of-reorg, common on
     //    testnet4). This runs whenever the recovery set is non-empty, NOT only on
@@ -1335,9 +1597,35 @@ void AnchorWatchTask(ChainstateManager& chainman)
             any_reconsidered = true;
         }
         if (any_reconsidered) {
+            reconsidered = true;
+            // Held transactions (doc 04, "Held transactions"): whatever this
+            // activation takes off the active chain is recorded like a
+            // disconnect of section 2. The walk above has already invalidated
+            // every block whose anchor was orphaned, so what can still leave
+            // here is a branch that loses fork choice to the one revived, or
+            // one whose anchor Bitcoin dropped since the walk; either way it
+            // leaves because Bitcoin moved. Members sign nothing until the
+            // record holds it.
+            const CBlockIndex* old_tip = WITH_LOCK(cs_main, return chainman.ActiveChain().Tip());
+            if (HeldTxsActive()) HeldTxsSetFilling(true);
             BlockValidationState state;
             if (!chainman.ActiveChainstate().ActivateBestChain(state)) {
                 LogPrintf("WARNING: ActivateBestChain failed after anchor reconsideration: %s\n", state.ToString());
+            }
+            if (HeldTxsActive()) {
+                std::vector<const CBlockIndex*> disconnected;
+                {
+                    LOCK(cs_main);
+                    const CBlockIndex* fork = old_tip ? chainman.ActiveChain().FindFork(old_tip) : nullptr;
+                    for (const CBlockIndex* p = old_tip; p && p != fork; p = p->pprev) disconnected.push_back(p);
+                }
+                std::reverse(disconnected.begin(), disconnected.end());
+                if (!disconnected.empty()) {
+                    LogPrintf("Anchor watcher: the reconsideration took %u block(s) above height %d off the active chain\n",
+                              (unsigned)disconnected.size(), disconnected.front()->nHeight - 1);
+                    HeldTxsRecordDisconnect(chainman, disconnected);
+                }
+                HeldTxsSetFilling(false);
             }
             // Raise pindexBestHeader onto the recovered branch (once per batch) so
             // a branch known only as headers re-requests its bodies and reconnects,
@@ -1347,250 +1635,8 @@ void AnchorWatchTask(ChainstateManager& chainman)
         }
     }
 
-    // 2) Walk the active chain down from the tip looking for blocks whose
-    //    anchors were reorganized away, and invalidate the LOWEST such block.
-    //
-    //    Anchor *heights* are monotone along the chain, but anchor *canonicality*
-    //    is NOT: a low block can anchor to a Bitcoin block that is later orphaned
-    //    while a higher block anchors to a still-canonical Bitcoin block on a
-    //    different/newer parent branch (heights stay monotone, e.g. 140803 then
-    //    140838). So a canonical tip does NOT imply the blocks below it are
-    //    anchored canonically — we must NOT stop the walk at the first OK block.
-    //    Doing so left the chain permanently wedged on a stale base: SEQ 1..4
-    //    anchored to an orphaned parent block with canonical SEQ 5+ built on top,
-    //    where the down-walk saw the canonical tip, broke, and never reached the
-    //    stale low blocks. We instead descend to height 1 and track the lowest
-    //    block whose anchor is off Bitcoin's best chain, then invalidate it:
-    //    InvalidateBlock + ActivateBestChain disconnects it AND every block above
-    //    it (including the canonical-anchor blocks built on the stale base), and
-    //    the chain rebuilds on the parent's best chain.
-    //
-    //    This runs on EVERY tick, not only when the parent tip just changed: a
-    //    block is invalid iff its anchor is off Bitcoin's best chain (doc 03
-    //    §intro, §3), and the active tip could be stale on a tick where the
-    //    parent tip did not change since the previous tick (e.g. the parent
-    //    reorg was missed/coalesced, the node restarted onto an already-reorged
-    //    parent, or a transiently-canonical anchor was cached OK and then went
-    //    stale). Gating the walk on tip_changed left such a tip stuck forever.
-    //
-    //    Cost. Per the invariant the walk must reach ANY depth (doc 03 §intro/§3,
-    //    doc 04 §6): there is deliberately NO depth floor and no reorg horizon,
-    //    so it examines the whole active chain on every tick and always will.
-    //    What it must NOT do is pay the parent chain daemon for that. Two things
-    //    keep the price flat as the chain grows:
-    //
-    //      - runs of blocks sharing one anchor collapse below (~20 blocks per
-    //        anchor at a 30-second block against a 10-minute parent), so the
-    //        number of verdicts needed per tick is the number of DISTINCT
-    //        anchors, not the number of blocks;
-    //      - each distinct anchor's verdict is served from g_anchor_ok_cache,
-    //        and that cache now survives a parent-chain extension instead of
-    //        being emptied by it (see AnchorWatchTask's tip-change handling and
-    //        MainchainUnchangedHeight). Only verdicts a parent reorganization
-    //        could actually have changed are dropped and re-fetched.
-    //
-    //    So a steady-state tick costs no parent-chain RPC at all, and a tick on
-    //    which the parent appended a block costs one. What it used to cost was
-    //    one RPC per distinct anchor on the whole chain, every time the parent
-    //    moved — thousands, growing linearly with the age of the chain, all of
-    //    them re-asking about Bitcoin history that had not changed.
-    //
-    //    Two costs remain linear in chain length and are in-memory only: the
-    //    index walk in phase 1 and the set lookups in phase 2. Should a chain
-    //    ever grow long enough for those to matter, the way out is a watermark
-    //    of "verified below here against a parent prefix that is still intact",
-    //    invalidated exactly like the caches — again re-verification skipped,
-    //    never verification. A depth floor remains forbidden.
-    uint256 lowest_bad;
-    while (true) {
-        // Top of the loop only. Never between the InvalidateBlock and the
-        // ActivateBestChain below: those two are one step, and a shutdown
-        // wedged between them would leave a block invalidated with the chain
-        // never reactivated onto its replacement.
-        if (ShutdownRequested()) return;
-        lowest_bad.SetNull();
-        // Phase 1: snapshot the (immutable) anchor of each candidate block under
-        // cs_main, top-down, down to height 1 — there is NO finality floor on
-        // this walk. A block is valid iff its anchor is on Bitcoin's best chain,
-        // to ANY depth (doc 03 §intro/§3, doc 04 §6); a checkpoint-finalized
-        // block whose anchor was reorged away is just as invalid as any other,
-        // and finality is always modulo a Bitcoin reorg. (The checkpoint floor
-        // is a defense against SEQ-INTERNAL long-range forks, enforced at
-        // accept time in ContextualCheckBlockHeader — it must never keep a block
-        // whose Bitcoin anchor is off the best chain.) We do NOT call bitcoind
-        // here: the RPC must not run under cs_main, or a slow/hung parent daemon
-        // would stall the whole node (block processing, RPC, net) for the RPC
-        // timeout.
-        struct AnchorRef { uint256 block_hash; uint32_t anchor_height; uint256 anchor_hash; };
-        std::vector<AnchorRef> to_check;
-        {
-            LOCK(cs_main);
-            const CBlockIndex* pindex = chainman.ActiveChain().Tip();
-            for (; pindex && pindex->nHeight > 0; pindex = pindex->pprev) {
-                if (pindex->m_anchor_hash.IsNull()) break; // pre-anchor blocks
-                // Collapse each run of blocks sharing one anchor down to the
-                // LOWEST block of the run. Anchor heights are monotone along the
-                // chain, so blocks with the same anchor are contiguous, and
-                // descending means the last one seen in a run is its lowest.
-                // Nothing is lost: the verdict is a property of the anchor, not
-                // of the block, and the block this walk wants when an anchor is
-                // bad is exactly the lowest one carrying it — invalidating that
-                // one disconnects it and every block above. This is what keeps
-                // the phase-2 verdict loop proportional to the number of
-                // distinct anchors (~1 per parent block) rather than to the
-                // number of Sequentia blocks (~20 per parent block).
-                if (!to_check.empty() &&
-                    to_check.back().anchor_height == pindex->m_anchor_height &&
-                    to_check.back().anchor_hash == pindex->m_anchor_hash) {
-                    to_check.back().block_hash = pindex->GetBlockHash();
-                    continue;
-                }
-                to_check.push_back({pindex->GetBlockHash(), pindex->m_anchor_height, pindex->m_anchor_hash});
-            }
-        }
-        // Phase 2: query bitcoind OUTSIDE cs_main. anchor_height/anchor_hash are
-        // fixed per block, so the snapshot stays valid even if the SEQ tip moves
-        // meanwhile; InvalidateBlock below re-looks-up by hash and the loop
-        // re-evaluates, so the (pre-existing) snapshot→act gap is harmless.
-        //
-        // to_check is top-down (tip first, height 1 last), one entry per run of
-        // blocks sharing an anchor. Descend the WHOLE chain — do NOT break on OK
-        // (canonicality is not monotone, see above) — and remember the lowest
-        // (deepest) block whose anchor is definitively off Bitcoin's best chain
-        // (STALE/NOT_FOUND/HEIGHT_MISMATCH); since we overwrite lowest_bad as we
-        // descend, the last bad we record is the lowest one.
-        //
-        // g_anchor_ok_cache can only ever mark an anchor OK, never bad, so the
-        // question is whether it can hide a now-orphaned anchor from this walk.
-        // It cannot. For an anchor at parent height h to stop being canonical,
-        // the parent's best chain AT height h must change, which is a parent
-        // reorganization forking strictly BELOW h — so the fork height computed
-        // on the tip change is < h and DropAnchorCachesAbove removes that entry,
-        // leaving the walk to re-ask the daemon. When the move cannot be
-        // classified at all the whole cache goes. In every case a stale low
-        // block reaches this loop as a live RPC.
-        //
-        // NO_CONNECTION partway is indeterminate, not a verdict, so we stop
-        // descending (cannot judge the NO_CONNECTION block or anything below it).
-        // Any stale block already recorded sits ABOVE the NO_CONNECTION block
-        // (the walk is top-down, so it was found earlier/higher), and invalidating
-        // a definitively off-best-chain block is always correct: InvalidateBlock
-        // disconnects that block and everything ABOVE it, while the NO_CONNECTION
-        // block (below it) stays connected and is simply re-judged next tick. If no
-        // stale block was found before the NO_CONNECTION, there is nothing to act
-        // on — bail and retry next tick.
-        // One round trip per few hundred anchors instead of one per anchor.
-        // Purely a transport change: the loop below still asks about every
-        // entry, it simply finds most of the answers already in hand.
-        {
-            std::vector<std::pair<uint32_t, uint256>> refs;
-            refs.reserve(to_check.size());
-            for (const AnchorRef& ref : to_check) refs.emplace_back(ref.anchor_height, ref.anchor_hash);
-            PrefetchAnchorVerdicts(refs);
-        }
-
-        for (const AnchorRef& ref : to_check) {
-            // Abandon the tick if the node is going down. This loop is the one
-            // place the watcher runs for minutes at a time: every verdict it
-            // cannot serve from g_anchor_ok_cache is a round trip to the parent
-            // daemon, and that cache lives in memory only -- so the FIRST tick
-            // after any start asks about every distinct anchor on the whole
-            // chain, thousands of them once the chain has any age.
-            //
-            // Shutdown joins this thread, so with no check here `sequentiad
-            // stop` sat holding the datadir lock until the walk finished:
-            // five minutes, measured, on a freshly synced 100k-block chain,
-            // during which the GUI cannot open the datadir it just closed.
-            //
-            // Abandoning is safe, and is not even a new behaviour. The tick
-            // re-derives every verdict from ground truth each time and carries
-            // nothing across the point where it stops -- which is exactly why
-            // the next line already abandons the walk on NO_CONNECTION. All that
-            // is lost is work the next tick, or the next start, does again.
-            if (ShutdownRequested()) return;
-            AnchorCheckResult res = CheckMainchainAnchor(ref.anchor_height, ref.anchor_hash);
-            if (res == AnchorCheckResult::NO_CONNECTION) break; // cannot judge deeper
-            if (res != AnchorCheckResult::OK) lowest_bad = ref.block_hash;
-        }
-        if (lowest_bad.IsNull()) break; // quiet tick: fall through to section 3
-
-        LogPrintf("Parent chain reorganization detected: invalidating block %s (and descendants) whose anchor is no longer canonical\n",
-                  lowest_bad.ToString());
-        CBlockIndex* pindex_bad;
-        const CBlockIndex* old_tip{nullptr};
-        {
-            LOCK(cs_main);
-            pindex_bad = chainman.m_blockman.LookupBlockIndex(lowest_bad);
-            if (!pindex_bad) return;
-            old_tip = chainman.ActiveChain().Tip();
-            // Until the provenance marker below is set, peers still building on
-            // the blocks being disconnected are not misbehaving either
-            // (ChainstateManager::IsAnchorOrphaned).
-            chainman.m_anchor_invalidating = pindex_bad;
-        }
-        // Members sign nothing from here until the record holds what this
-        // disconnect takes off the chain (pos_heldtxs.h).
-        HeldTxsSetFilling(true);
-        BlockValidationState state;
-        if (!chainman.ActiveChainstate().InvalidateBlock(state, pindex_bad)) {
-            LogPrintf("WARNING: failed to invalidate block %s after parent chain reorganization: %s\n",
-                      lowest_bad.ToString(), state.ToString());
-            WITH_LOCK(cs_main, chainman.m_anchor_invalidating = nullptr);
-            HeldTxsSetFilling(false);
-            return;
-        }
-        {
-            // InvalidateBlock stops between blocks when shutdown is requested
-            // and still reports success. Then the target is still connected
-            // and some of its descendants are failed with no provenance marker,
-            // which no restart or later tick would ever reconsider: the node
-            // would sit below the network for good. Undo the partial work
-            // instead; the next start re-derives the verdict from scratch.
-            LOCK(cs_main);
-            if (chainman.ActiveChain().Contains(pindex_bad)) {
-                LogPrintf("Anchor watcher: invalidation of %s was interrupted; undoing it so the next start can redo it\n",
-                          lowest_bad.ToString());
-                chainman.ActiveChainstate().ResetBlockFailureFlags(pindex_bad);
-                chainman.m_anchor_invalidating = nullptr;
-                HeldTxsSetFilling(false);
-                return;
-            }
-        }
-        {
-            LOCK(g_anchor_mutex);
-            g_anchor_invalidated.insert(lowest_bad);
-        }
-        // Persist the provenance: tag this block as ANCHOR-invalidated (distinct
-        // from `invalidateblock` / consensus failures) so the recovery worklist
-        // can be re-seeded from the block index after a restart and ONLY anchor-
-        // orphaned blocks are reconsidered. pindex_bad is stable across the lock gap.
-        {
-            LOCK(cs_main);
-            chainman.ActiveChainstate().MarkAnchorInvalid(pindex_bad);
-            chainman.m_anchor_invalidating = nullptr;
-        }
-        // Held transactions (doc 04, "Held transactions"): keep what the
-        // certified blocks just disconnected carried. After the disconnect,
-        // never on its path, so following Bitcoin is not delayed.
-        if (HeldTxsActive() && old_tip && old_tip->GetAncestor(pindex_bad->nHeight) == pindex_bad) {
-            // Test only (-posdebugheldfillms): widen the fill window.
-            if (const int64_t fill_ms = gArgs.GetIntArg("-posdebugheldfillms", 0); fill_ms > 0) {
-                UninterruptibleSleep(std::chrono::milliseconds{fill_ms});
-            }
-            std::vector<const CBlockIndex*> disconnected;
-            for (const CBlockIndex* p = old_tip; p && p->nHeight >= pindex_bad->nHeight; p = p->pprev) disconnected.push_back(p);
-            std::reverse(disconnected.begin(), disconnected.end());
-            HeldTxsRecordDisconnect(chainman, disconnected);
-        }
-        HeldTxsSetFilling(false);
-        BlockValidationState abc_state;
-        if (!chainman.ActiveChainstate().ActivateBestChain(abc_state)) {
-            LogPrintf("WARNING: ActivateBestChain failed after anchor invalidation: %s\n", abc_state.ToString());
-            return;
-        }
-        // Loop: the new tip may itself have a stale anchor (e.g. a competing
-        // branch that anchored to the same reorganized-away parent block).
-    }
+    // 2, again) Only after a reconsideration: see before section 1.
+    if (reconsidered && !InvalidateOrphanedAnchors(chainman)) return;
 
     // 3) Finality reconciliation monitor (anchor.h, Change 4b): detect a local
     //    finalized branch abandoned by the committee and release it for the
