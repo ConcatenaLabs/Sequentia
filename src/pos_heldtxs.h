@@ -80,16 +80,19 @@ std::optional<uint256> HeldTxsConflict(const CTransaction& tx);
 //! conflicts with a held transaction. nullopt when it may sign. cs_main held.
 std::optional<std::string> HeldTxsBlockConflict(const CBlock& block, const CBlockIndex* prev);
 
+//! The liveness bound in ms: POS_HELD_BOUND_ROUNDS gossip rounds plus one
+//! collection window (PosGossipRoundMs, PosGossipWindowMs). Fixed at startup.
+int64_t HeldTxsBoundMs();
+
 //! Release what is due (mined under a certified block, respent by a certified
-//! block, invalid for good on the active chain, the window), put held
-//! transactions back into the mempool for relay, and with `park` (a committee
-//! member) set aside the lowest sub-quorum block of the active chain that
-//! conflicts and end set-asides that are due. With `bound_ms` > 0 (the
-//! producer's), the liveness bound and the backstop are that long and
-//! POS_HELD_BACKSTOP_BOUNDS times that long; a caller that passes 0 applies the
-//! last ones the producer passed. Returns true when it changed the active
-//! chain. No lock held.
-bool HeldTxsMaintain(ChainstateManager& chainman, CTxMemPool& mempool, bool park, int64_t bound_ms = 0);
+//! block, invalid for good on the active chain, the liveness bound and the
+//! backstop, the window), put held transactions back into the mempool for
+//! relay, and with `park` (a committee member running the producer) set aside
+//! the lowest sub-quorum block of the active chain that conflicts and end
+//! set-asides that are due. The producer calls it at every pass and the anchor
+//! watcher at every tick, so both clocks apply on every member, whichever way
+//! it signs. Returns true when it changed the active chain. No lock held.
+bool HeldTxsMaintain(ChainstateManager& chainman, CTxMemPool& mempool, bool park);
 
 //! The held transactions, oldest first (parents before children), for a
 //! producer to mine from the record (node::BlockAssembler).

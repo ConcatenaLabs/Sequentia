@@ -2456,6 +2456,18 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                     } catch (...) {
                         LogPrintf("WARNING: anchor watcher tick failed (non-standard exception), retrying next interval\n");
                     }
+                    // Held transactions (pos_heldtxs.h): release what is due,
+                    // the liveness bound and the backstop included, and keep
+                    // the held ones in the mempool, at every tick, whether or
+                    // not the parent daemon answered this one. A member that
+                    // runs the producer also does it there, and sets blocks aside.
+                    try {
+                        if (HeldTxsActive() && anchor_chainman->ActiveChainstate().GetMempool()) {
+                            HeldTxsMaintain(*anchor_chainman, *anchor_chainman->ActiveChainstate().GetMempool(), /*park=*/false);
+                        }
+                    } catch (const std::exception& e) {
+                        LogPrintf("WARNING: held-transactions maintenance failed, retrying next interval: %s\n", e.what());
+                    }
                     // Interruptible poll sleep: wake promptly on shutdown rather
                     // than sleeping the full interval.
                     // A producer that refused a stale parent wakes it at once.

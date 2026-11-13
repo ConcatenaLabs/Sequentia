@@ -440,4 +440,12 @@ PosGossipAction PosVerifyCertificate(const CBlockHeader& header, ChainstateManag
  *  The caller holds a reference for as long as it uses the producer. */
 std::shared_ptr<PosProducer> GetActivePosProducer();
 
+/** The gossip proposal collection window and round length (ms): local liveness
+ *  timings scaled with the committee size, or the -poswindowms/-posroundms
+ *  override when it is set. One definition, read by the producer and by the
+ *  held transactions' liveness bound (pos_heldtxs.h), which applies on every
+ *  member whether or not it runs the producer. */
+int64_t PosGossipWindowMs();
+int64_t PosGossipRoundMs();
+
 #endif // BITCOIN_POS_PRODUCER_H

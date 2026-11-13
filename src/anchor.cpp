@@ -1621,12 +1621,6 @@ void AnchorWatchTask(ChainstateManager& chainman)
     //    nothing to invalidate), which is exactly the partition's signature.
     MaybeReconcileFinality(chainman);
 
-    // Held transactions: release what is due and keep the held ones in the
-    // mempool (a member also sets blocks aside, from its producer thread).
-    if (HeldTxsActive() && chainman.ActiveChainstate().GetMempool()) {
-        HeldTxsMaintain(chainman, *chainman.ActiveChainstate().GetMempool(), /*park=*/false);
-    }
-
     // 4) Retry driver for parent-chain stalls (incident 2026-07-26). When
     //    ConnectTip cannot verify a block against the parent chain (bitcoind
     //    unreachable: pos-escape-stall-unverifiable), it deliberately makes no

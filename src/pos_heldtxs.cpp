@@ -14,6 +14,7 @@
 #include <node/blockstorage.h>
 #include <policy/policy.h>
 #include <pos.h>
+#include <pos_producer.h>
 #include <primitives/block.h>
 #include <serialize.h>
 #include <streams.h>
@@ -68,19 +69,26 @@ std::map<uint256, std::optional<std::string>> g_block_conflict GUARDED_BY(g_held
 std::set<uint256> g_release_scanned GUARDED_BY(g_held_mutex);
 uint256 g_mempool_enforced_tip GUARDED_BY(g_held_mutex);
 bool g_dirty_mempool GUARDED_BY(g_held_mutex){false};
-//! The liveness bound: when the current hold began (0: none), and the height
-//! of the highest certified block of the active chain at that moment.
+//! The liveness bound: when the current hold began (0: none).
 int64_t g_hold_since_ms GUARDED_BY(g_held_mutex){0};
 //! The member declined to sign or to propose for a held transaction since the
 //! last certified block; the bound's clock starts once it has an honest
 //! proposal to sign or to make at the held height.
 bool g_declined GUARDED_BY(g_held_mutex){false};
-int g_hold_progress GUARDED_BY(g_held_mutex){-1};
-int g_cert_progress GUARDED_BY(g_held_mutex){-1};
+//! The highest block of the active chain that carries its parent's quorum, as
+//! the last maintenance pass or disconnect saw it (nullptr: none in reach).
+//! Block index entries live as long as the node, so the pointers stay valid.
+const CBlockIndex* g_cert_block GUARDED_BY(g_held_mutex){nullptr};
+//! g_cert_block when the hold's clocks started. The hold ends once the active
+//! chain's highest certified block is neither this block nor an ancestor of
+//! it: a block, not a height, so that a Bitcoin reorganization that lowers
+//! the chain does not hide the certified blocks of the new branch.
+const CBlockIndex* g_hold_mark GUARDED_BY(g_held_mutex){nullptr};
 //! The backstop's clock: when the current hold began (its first decline or
 //! set-aside), 0 when none. Ends with the hold, at a new certified block.
 int64_t g_hold_first_ms GUARDED_BY(g_held_mutex){0};
-//! The liveness bound the producer last passed (0: no producer).
+//! The liveness bound, fixed at startup from the gossip timings
+//! (HeldTxsBoundMs), so that every member applies it, producer or not.
 int64_t g_bound_ms GUARDED_BY(g_held_mutex){0};
 
 static constexpr uint32_t HELD_FILE_VERSION = 2;
@@ -211,12 +219,36 @@ bool CarriesQuorum(const CBlockIndex* p) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
            !PosEscapingStallAllowed(p->pprev->m_anchor_height, p->m_anchor_height);
 }
 
+//! The highest block of `tip`'s chain that carries its parent's quorum,
+//! looking back at most 2000 blocks.
+const CBlockIndex* HighestCertified(const CBlockIndex* tip) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    int scanned = 0;
+    for (const CBlockIndex* p = tip; p && scanned < 2000; p = p->pprev, ++scanned) {
+        if (CarriesQuorum(p)) return p;
+    }
+    return nullptr;
+}
+
+//! Whether a block has been certified since the hold's clocks started: the
+//! active chain's highest certified block is neither the mark nor an ancestor
+//! of it. A deeper disconnect lowers the chain below the mark; the certified
+//! blocks of the new branch are not the mark's ancestors, so they count.
+bool CertifiedSinceMarkLocked() EXCLUSIVE_LOCKS_REQUIRED(cs_main, g_held_mutex)
+{
+    const CBlockIndex* cert = g_cert_block;
+    if (!cert) return false;
+    if (!g_hold_mark) return true;
+    if (cert->nHeight > g_hold_mark->nHeight) return true;
+    return g_hold_mark->GetAncestor(cert->nHeight) != cert;
+}
+
 //! A hold begins (its first decline or set-aside): start the backstop's clock.
 void BeginHoldLocked() EXCLUSIVE_LOCKS_REQUIRED(g_held_mutex)
 {
     if (g_hold_first_ms == 0) {
         g_hold_first_ms = SteadyMs();
-        g_hold_progress = g_cert_progress;
+        g_hold_mark = g_cert_block;
     }
 }
 
@@ -240,9 +272,15 @@ bool HeldTxsActive() { return g_held_active; }
 void HeldTxsSetFilling(bool filling) { g_held_filling = filling && g_held_active; }
 bool HeldTxsFilling() { return g_held_filling; }
 
+int64_t HeldTxsBoundMs()
+{
+    return POS_HELD_BOUND_ROUNDS * PosGossipRoundMs() + PosGossipWindowMs();
+}
+
 void HeldTxsInit()
 {
     g_held_active = g_con_pos && g_con_bitcoin_anchor && !gArgs.GetBoolArg("-posdebugignoreheld", false);
+    WITH_LOCK(g_held_mutex, g_bound_ms = HeldTxsBoundMs());
     if (!g_held_active) {
         if (gArgs.GetBoolArg("-posdebugignoreheld", false)) {
             LogPrintf("Held transactions: rule turned off (-posdebugignoreheld)\n");
@@ -283,8 +321,10 @@ void HeldTxsRecordDisconnect(ChainstateManager& chainman, const std::vector<cons
     int top = -1;
     uint32_t release_anchor = 0;
     std::vector<std::shared_ptr<CBlock>> blocks;
+    const CBlockIndex* cert_now{nullptr};
     {
         LOCK(cs_main);
+        cert_now = HighestCertified(chainman.ActiveChain().Tip());
         for (size_t i = 0; i < disconnected.size(); ++i) {
             if (disconnected[i]->PosCarriesQuorum()) top = (int)i;
             release_anchor = std::max(release_anchor, disconnected[i]->m_anchor_height);
@@ -300,6 +340,16 @@ void HeldTxsRecordDisconnect(ChainstateManager& chainman, const std::vector<cons
     }
     LOCK(g_held_mutex);
     g_release_scanned.clear();
+    // The disconnect lowered the chain: progress is read again from the new
+    // tip, not left for the next maintenance pass (a share or proposal noted
+    // meanwhile would mark the hold with a block of the old branch). The
+    // bound's clock starts again from the member's next honest proposal or
+    // share after a decline, since what it now holds has had no round yet.
+    // The backstop's clock runs on, so a set-aside stays bounded.
+    g_cert_block = cert_now;
+    g_hold_since_ms = 0;
+    g_declined = false;
+    if (g_hold_first_ms != 0) g_hold_mark = cert_now;
     if (top < 0) {
         LogPrintf("Held transactions: none of the %u disconnected block(s) was certified; nothing held\n", disconnected.size());
         return;
@@ -373,7 +423,7 @@ void HeldTxsNoteHold()
     LOCK(g_held_mutex);
     if (g_hold_since_ms == 0 && !g_held.empty() && (g_declined || !g_aside.empty())) {
         g_hold_since_ms = SteadyMs();
-        g_hold_progress = g_cert_progress;
+        g_hold_mark = g_cert_block;
     }
 }
 
@@ -424,7 +474,7 @@ void HeldTxsRelease(const uint256& txid, const std::string& why)
     Changed();
 }
 
-bool HeldTxsMaintain(ChainstateManager& chainman, CTxMemPool& mempool, bool park, int64_t bound_ms)
+bool HeldTxsMaintain(ChainstateManager& chainman, CTxMemPool& mempool, bool park)
 {
     if (!g_held_active) return false;
     {
@@ -453,21 +503,13 @@ bool HeldTxsMaintain(ChainstateManager& chainman, CTxMemPool& mempool, bool park
 
         // Progress: the highest block of the active chain that carries its
         // parent's quorum.
-        const CBlockIndex* cert_any{nullptr};
-        int scanned = 0;
-        for (const CBlockIndex* p = tip; p && scanned < 2000; p = p->pprev, ++scanned) {
-            if (CarriesQuorum(p)) {
-                cert_any = p;
-                break;
-            }
-        }
-        g_cert_progress = cert_any ? cert_any->nHeight : -1;
+        const CBlockIndex* cert_any = HighestCertified(tip);
+        g_cert_block = cert_any;
 
-        if (bound_ms > 0) g_bound_ms = bound_ms;
         const int64_t bound = g_bound_ms;
         // A certified block since the hold began ends the hold (the bound's
         // clock and the backstop's).
-        if ((g_hold_since_ms != 0 || g_hold_first_ms != 0 || g_declined) && g_cert_progress > g_hold_progress) {
+        if ((g_hold_since_ms != 0 || g_hold_first_ms != 0 || g_declined) && CertifiedSinceMarkLocked()) {
             g_hold_since_ms = 0;
             g_hold_first_ms = 0;
             g_declined = false;
