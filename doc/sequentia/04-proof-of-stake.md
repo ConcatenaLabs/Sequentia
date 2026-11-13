@@ -1225,9 +1225,12 @@ held, and each is released once it is mined under a certified block. An
 attacker that filled the blocks it led with fee-less transactions therefore
 makes honest producers re-mine at most what those disconnected blocks carried,
 and only after Bitcoin reorganizes under them. That work is spread over blocks
-whose other half stays open to the fee market. A disconnect of `k` full blocks
-is re-mined within about `2k` blocks, and fee-paying transactions keep half of
-each of those.
+that stay open to the fee market. A disconnect of `k` full blocks is re-mined
+within about `2k` blocks. In each of them the held transactions take at most
+half the weight, or the first held transaction alone when it weighs more than
+half; fee-paying transactions keep the rest. So the fee market keeps at least
+half of a block unless one held transaction larger than that leads it, and
+then it keeps what that one leaves.
 
 **Arm one: signing.** A committee member does not sign a block that spends an
 outpoint a held transaction spends, other than with that held transaction. Nor
@@ -1279,8 +1282,12 @@ pays more and signals replacement.
 
 **The liveness bound and the backstop.** A member *holds* from its first
 decline to sign or to propose for a held transaction, or its first set-aside,
-until a new quorum-certified block appears on its active chain. Two clocks end
-a hold that lasts too long. Either one releases every held transaction and
+until a new quorum-certified block appears on its active chain. The hold is
+marked with the highest certified block of the active chain when it begins,
+and a certified block is new when it is neither that block nor an ancestor of
+it. A block, not a height: when a further Bitcoin reorganization lowers the
+chain below the mark, the certified blocks of the new branch end the hold
+although they stand lower. Two clocks end a hold that lasts too long. Either one releases every held transaction and
 every set-aside block, after which the member signs as if it held nothing.
 - **The bound** runs from the member's first honest proposal or share during
   the hold. It ends the hold when the chain goes `POS_HELD_BOUND_ROUNDS` (12)
@@ -1292,10 +1299,20 @@ every set-aside block, after which the member signs as if it held nothing.
   say. It ends the hold at `POS_HELD_BACKSTOP_BOUNDS` (2) bounds: 24.0 s for a
   cap of 7 and 240.3 s at the cap of 250.
 
-The producer applies both clocks at every pass, and the anchor watcher applies
-them at every tick. Whatever the mix of members with and without the rule, the
-rule adds to a pause at most the bound plus the time one ordinary height takes,
-and it never keeps a hold longer than the backstop.
+A disconnect restarts the bound's clock: what the member holds now has had no
+round yet, so the bound runs again from its next honest proposal or share
+after a decline. The backstop's clock runs on through it.
+
+The bound is fixed at startup from the gossip timings (`-posroundms` and
+`-poswindowms`, or the formulas), so it is the same on every member, whether
+or not it runs the producer. The producer applies both clocks at every pass,
+and the anchor watcher at every tick, whether or not Bitcoin Core answered
+that tick. A member that signs only through the RPCs is bound as well: a
+refusal by `generateposblock`, `getposblocktemplate`, `submitposblock` or
+`musigpartialsign` starts its hold, and a block or share they sign starts its
+bound. Whatever the mix of members with and without the rule, the rule adds to
+a pause at most the bound plus the time one ordinary height takes, and it
+never keeps a hold longer than the backstop.
 
 **When a held transaction is released:**
 - it is mined in a block at or below the highest quorum-certified block above
@@ -1317,8 +1334,13 @@ and it never keeps a hold longer than the backstop.
   highest anchor the disconnected blocks had.
 
 A held transaction that is not valid yet on the new chain (a lock time above
-the lowered tip, say) stays held. Its conflicts stay refused while certified
-blocks keep coming, and it is mined once it becomes valid.
+the lowered tip, say) stays held, and it is mined once it becomes valid. Its
+conflicts stay refused meanwhile, as long as certified blocks keep coming:
+each new one ends the member's hold, and with it both clocks, so neither the
+bound nor the backstop runs out while the chain certifies. They stay refused
+only until the window, and no longer once the chain certifies nothing for the
+bound after a member's honest proposal, or for the backstop after its hold
+began.
 
 **What it guarantees.** A member is *aware* when it ran the rule through the
 disconnect: it disconnected the block and holds the record. A member is
@@ -1343,6 +1365,13 @@ hold `A` seats, the unaware and the dishonest `U` and `D`, and the quorum be
     (quorum 51 of an expected 100), because rounds are led by proposals, not
     by seats. With `c <= 12` candidates at the height the attacker needs all
     `c` of them. On the testnet's 20 operated nodes that means 12 of the 20.
+    The figure is reasoned, not measured, and it is the chance at one height.
+    A held transaction that is not minable yet (a lock time above the tip)
+    gives the attacker one such try at every height until it is. It also
+    takes the rounds as independent draws, while a round backs candidates in
+    order of anchor freshness first, and a proposal is admitted at any time
+    during a collection: an attacker that times its proposals to a fresh
+    Bitcoin block can rank ahead more often than its stake alone gives it.
   - *A natural pause longer than the bound* after a disconnect: the committee
     cut off from itself for more than 12.0 s (harness) or 120.15 s (the cap of
     250), or for more than the backstop when no aware member could propose at
@@ -1357,8 +1386,10 @@ hold `A` seats, the unaware and the dishonest `U` and `D`, and the quorum be
   though, so their proposals carry it too. Unaware members that signed a
   respend round are share-locked to it, which can split the honest rounds that
   follow. Then nothing is certified until the bound, and the respend goes
-  through: in the harness, 3 aware of 6 (quorum 4) gave the original once and
-  the respend twice in three draws. With a single-signer respend block, the unaware
+  through. Which of the two is certified is a draw on the round order and the
+  share-locks: with 3 aware of 6 (quorum 4), separate runs of the test of
+  three attempts each have given the original once, twice and three times.
+  With a single-signer respend block, the unaware
   members stay on it whenever it outranks the sibling on leader score. Then
   nothing is certified until the bound, the aware members release, and the
   respend is certified. In this mix, protection against a respend that escapes
@@ -1452,8 +1483,11 @@ exactly as any other. `getheldtxs` lists what a node holds, what it has set
 aside, and how long the bound and the backstop have run. The code is in
 `src/pos_heldtxs.{h,cpp}`, the block assembler's `addHeldTransactions`, and,
 for the set-aside, `FindMostWorkChain` and `CChainState::SetAsideBlock`. The
-attacks are in `feature_pos_held_transactions.py` and, for the MuSig2 signing
-paths, `feature_pos_held_transactions_musig.py`. In both, a real `bitcoind` is
+attacks are in `feature_pos_held_transactions.py`; the MuSig2 signing paths
+in `feature_pos_held_transactions_musig.py`; a member that signs only through
+the RPCs, held past the backstop, in `feature_pos_held_transactions_rpc_liveness.py`;
+and the autonomous leader during the record's fill in
+`feature_pos_held_transactions_fill_probe.py`. In each, a real `bitcoind` is
 the parent chain, the attacker runs with `-posdebugignoreheld`, a debug-only
 switch that turns the rule off, and every refusal is asserted by the member's
 own reason.
