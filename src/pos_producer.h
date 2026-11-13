@@ -161,8 +161,10 @@ public:
      *  The producer must be owned by a std::shared_ptr: each gossip message and
      *  each validation callback holds a reference while it runs, so a thread
      *  still inside one when the producer is stopped keeps it alive until it
-     *  returns. */
-    void Start();
+     *  returns. Returns false, and starts nothing, while another producer is
+     *  active: a second one would never be stopped, since shutdown stops only
+     *  the node's own. */
+    bool Start();
     /** Unregister from tip notifications and gossip, stop the worker thread,
      *  and join it. Idempotent. A callback already running may still finish
      *  after this returns; the object is destroyed when its last reference

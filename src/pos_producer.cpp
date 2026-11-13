@@ -602,18 +602,26 @@ PosProducer::PosProducer(ChainstateManager& chainman, CTxMemPool& mempool,
 
 PosProducer::~PosProducer() { Stop(); }
 
-void PosProducer::Start()
+bool PosProducer::Start()
 {
-    if (m_running) return;
-    m_running = true;
+    if (m_running) return true;
     // Shared, so a validation callback in flight when Stop() unregisters us
     // also keeps the producer alive until it returns (the validation interface
     // holds the reference while it calls).
     const std::shared_ptr<PosProducer> self = shared_from_this();
-    WITH_LOCK(g_active_producer_mutex, g_active_producer = self);
+    {
+        LOCK(g_active_producer_mutex);
+        if (g_active_producer) {
+            LogPrintf("PoS producer: not starting a second producer while one is running\n");
+            return false;
+        }
+        g_active_producer = self;
+    }
+    m_running = true;
     RegisterSharedValidationInterface(self);
     m_thread = std::thread(&util::TraceThread, "posproducer", [this] { ThreadLoop(); });
     LogPrintf("PoS producer: started with %d staking key(s)\n", (int)Keys().size());
+    return true;
 }
 
 void PosProducer::Stop()

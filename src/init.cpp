@@ -2328,7 +2328,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             return InitError(_("-posproducer requires at least one -posproducerkey"));
         }
         node.pos_producer = std::make_shared<PosProducer>(chainman, *node.mempool, chainparams, node.connman.get(), std::move(producer_keys));
-        node.pos_producer->Start();
+        if (!node.pos_producer->Start()) return InitError(Untranslated("The proof-of-stake producer could not be started"));
     }
 
     // SEQUENTIA: Bitcoin anchoring. Verify the connection to the parent chain

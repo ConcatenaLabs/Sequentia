@@ -23,18 +23,25 @@ almost always inside the producer when the stop comes: the case a heavily
 loaded node meets by chance. The other six hold twelve keys, above the quorum,
 so the chain does not wait for it.
 
+Last, a host started with no producer is given one at runtime by two
+startposproducer calls at once (the RPC and the wallet's startstaking can run
+together): exactly one producer must result, holding both keys, and the host
+must still stop cleanly.
+
 Run it under a build configured with --with-sanitizers=address to find a use
 after free; without one it still catches a crash at exit. --cycles sets the
-number of cycles.
+number of cycles, --race-attempts the number of concurrent starts.
 """
 
 import os
 import random
+import threading
 import time
 
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.key import ECKey
 from test_framework.address import byte_to_base58
+from test_framework.util import assert_equal, get_rpc_proxy
 
 SANITIZER_MARKERS = ("AddressSanitizer", "LeakSanitizer", "runtime error:", "ThreadSanitizer")
 
@@ -57,6 +64,8 @@ class PosStopUnderGossipTest(BitcoinTestFramework):
     def add_options(self, parser):
         parser.add_argument("--cycles", dest="cycles", type=int, default=8,
                             help="number of stop/start cycles (default: %(default)s)")
+        parser.add_argument("--race-attempts", dest="race_attempts", type=int, default=5,
+                            help="number of times two producer starts race (default: %(default)s)")
 
     def set_test_params(self):
         self.num_nodes = HOSTS
@@ -142,6 +151,44 @@ class PosStopUnderGossipTest(BitcoinTestFramework):
         self.wait_until(lambda: all(n.getblockcount() >= target for n in fast), timeout=180)
         h = min(n.getblockcount() for n in fast) - 1
         assert all(n.getblockhash(h) == fast[0].getblockhash(h) for n in fast)
+
+        self.log.info("Two runtime starts at once leave one producer, which stops cleanly")
+        host = 0
+        common = [a for a in self.extra_args[host] if not a.startswith("-posproducer")]
+        wifs = [wif for wif, _ in self.stakers[host::HOSTS]]
+        settings = os.path.join(self.nodes[host].chain_path, "settings.json")
+        for _ in range(self.options.race_attempts):
+            self.stop_at_once([host])
+            # A runtime start persists itself; start each attempt with none.
+            if os.path.exists(settings):
+                os.remove(settings)
+            self.start_node(host, extra_args=common)
+            node = self.nodes[host]
+            log_from = node.debug_log_bytes()
+            proxies = [get_rpc_proxy(node.url, host, timeout=120) for _ in wifs]
+            barrier = threading.Barrier(len(wifs))
+            results = [None] * len(wifs)
+
+            def start(i):
+                barrier.wait()
+                results[i] = proxies[i].startposproducer([wifs[i]])
+
+            threads = [threading.Thread(target=start, args=(i,)) for i in range(len(wifs))]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            assert all(r is not None for r in results), results
+            assert_equal(sorted(r["started"] for r in results), [False, True])
+            assert_equal(node.getposslot()["producing"], True)
+            with open(node.debug_log_path, encoding="utf8") as f:
+                f.seek(log_from)
+                assert_equal(f.read().count("PoS producer: started with"), 1)
+            assert_equal(max(r["keys"] for r in results), len(wifs))
+        self.stop_at_once([host])
+        self.start_node(host)
+        for j in range(1, HOSTS):
+            self.connect_nodes(host, j)
 
         self.log.info("Every host stops cleanly at the end, all at once")
         self.stop_at_once(list(range(HOSTS)))

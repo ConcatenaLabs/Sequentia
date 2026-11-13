@@ -10,6 +10,7 @@
 #include <node/context.h>
 #include <pos.h>
 #include <pos_producer.h>
+#include <sync.h>
 #include <txmempool.h>
 #include <util/check.h>
 #include <util/settings.h>
@@ -21,9 +22,17 @@
 
 namespace node {
 
+//! Serializes every runtime start (the startposproducer RPC and the wallet's
+//! startstaking can run at once on different RPC threads), from reading
+//! whether a producer runs to persisting the key set. Without it, two calls
+//! could each see no producer and each build one; the one that lost its place
+//! in the node context kept running, unstopped, past shutdown.
+static Mutex g_pos_control_mutex;
+
 bool StartPosProducerWithKeys(NodeContext& node, const std::vector<CKey>& keys,
                               interfaces::PosProducerStart& out, std::string& error)
 {
+    LOCK(g_pos_control_mutex);
     out = interfaces::PosProducerStart{};
     if (!g_con_pos) { error = "Proof-of-Stake (con_pos) is not enabled on this chain"; return false; }
 
@@ -50,9 +59,10 @@ bool StartPosProducerWithKeys(NodeContext& node, const std::vector<CKey>& keys,
     // under the producer's key lock is safe and lets a stake registered from
     // the wallet produce without a restart.
     if (!already_running) {
-        node.pos_producer = std::make_shared<PosProducer>(*Assert(node.chainman), *Assert(node.mempool), Params(),
-                                                          Assert(node.connman.get()), new_keys);
-        node.pos_producer->Start();
+        auto producer = std::make_shared<PosProducer>(*Assert(node.chainman), *Assert(node.mempool), Params(),
+                                                      Assert(node.connman.get()), new_keys);
+        if (!producer->Start()) { error = "Another proof-of-stake producer is already running"; return false; }
+        node.pos_producer = std::move(producer);
         out.started = true;
         out.added = (int)new_keys.size();
     } else {
