@@ -40,7 +40,7 @@ from test_framework.test_framework import BitcoinTestFramework, SkipTest
 from test_framework.util import assert_equal, p2p_port, rpc_port
 
 BITCOIND = os.environ.get("PARENT_BITCOIND", "/usr/local/bin/bitcoind")
-CASES = os.environ.get("CR1_CASES", "a,e,d,c,g,f,b,cc,i,rC,rA,rB,rD,b15,bb,fs,share").split(",")
+CASES = os.environ.get("CR1_CASES", "a,e,d,c,g,f,b,cc,i,rC,rA,rB,rD,b15,bb,dd,fs,share").split(",")
 RESULTS = os.environ.get("CR1_RESULTS", "")
 # The testnet's settings (CR1_TESTNET=1): 9.45 s rounds and a 6.75 s collection
 # window (the formulas at the committee cap of 250), so a liveness bound of
@@ -670,7 +670,9 @@ class HeldTransactionsTest(BitcoinTestFramework):
                     (s2, "is" if self.nodes[2].getbestblockhash() == st["x_hash"] else "is not"))
         assert s2 != "invalid", "X stayed invalid across a restart without the rule"
         info1 = self.nodes[1].getheldtxs()
-        self.record("rA", "node 1 after a restart with the rule", "T held: %s; set-aside read from disk: %s" %
+        # Only the held transactions are on disk; a set-aside is memory only, so X is parked here
+        # only if the restarted producer set it aside again from the record.
+        self.record("rA", "node 1 after a restart with the rule", "T held (read from the record): %s; X set aside again since the restart: %s" %
                     (st["t_id"] in info1["txids"], st["x_hash"] in info1["parked"]))
         assert st["t_id"] in info1["txids"]
         # The unaware quorum builds on X and certifies.
@@ -737,8 +739,10 @@ class HeldTransactionsTest(BitcoinTestFramework):
         time.sleep(5)
         info = self.nodes[1].getheldtxs()
         assert t0_id in info["txids"], "T0 released: %s" % self.log_has(1, "%s released" % t0_id, sizes[1])
-        self.record("rC", "T0 after 5 s", "still held on every aware member; not in node 1's mempool: %s" %
-                    (t0_id not in self.nodes[1].getrawmempool()))
+        # Held whatever the mempool makes of it: the reorganization's own readmission may keep T0 in
+        # node 1's mempool although a fresh broadcast is refused (above). Neither releases it.
+        self.record("rC", "T0 after 5 s", "still held on every aware member; in node 1's mempool (readmitted by the reorganization): %s" %
+                    (t0_id in self.nodes[1].getrawmempool()))
         try:
             self.nodes[1].sendrawtransaction(r_hex)
             raise AssertionError("aware member took the respend")
@@ -946,6 +950,123 @@ class HeldTransactionsTest(BitcoinTestFramework):
         st["sizes"] = sizes
         assert_equal(self.outcome("bb2", st), "T")
 
+    def cert_heights(self, node, lo):
+        t = node.getblockcount()
+        return [h for h in range(lo + 1, t + 1) if node.getblockheader(node.getblockhash(h))["poscertified"]]
+
+    def case_dd(self):
+        """RV59 (S1): a hold whose clocks started before a second, deeper Bitcoin reorganization.
+        T (lock time at the tip, as anti-fee-sniping sets it) is certified, then T1 one Bitcoin block
+        later. Bitcoin goes 1 deep: T1 is held and the members decline the attacker's R1, so their hold
+        begins, marked at the highest certified block. A short partition starts their bound. Then Bitcoin
+        goes deeper, taking T's block too, which lowers the chain below the mark; T is held and not minable
+        until the new branch passes its lock time. Certified blocks of the new branch must end the hold, so
+        no bound or backstop fires while they keep coming, R stays refused, and T is mined at its lock time."""
+        self.log.info("(dd) a hold begun before a second, deeper Bitcoin reorganization")
+        k_blocks = int(os.environ.get("CR1_DD_K", "20" if TESTNET else "40"))
+        iso_wait = float(os.environ.get("CR1_DD_ISO_WAIT", "3"))
+        a = self.nodes[ATTACKER]
+        n1 = self.nodes[1]
+        aware = [i for i in range(1, N) if self.aware[i]]
+        for k in range(4):
+            case = "dd" if k == 0 else "dd.%d" % (k + 1)
+            buyer = n1.getnewaddress()
+            coin_t = self.fund()
+            coin_t1 = self.fund()
+            # 1. Bitcoin block A, k_blocks blocks anchored at it, T near the end with lock time = tip.
+            self.btc_mine(1)
+            A = self.btc().getblockcount()
+            self.wait_until(lambda: self.tip(n1)["anchorheight"] == A, timeout=120)
+            h_a = n1.getblockcount()
+            while h_a > 0 and n1.getblockheader(n1.getblockhash(h_a - 1))["anchorheight"] >= A:
+                h_a -= 1
+            self.wait_until(lambda: n1.getblockcount() >= h_a + k_blocks, timeout=60 + 30 * k_blocks)
+            lock = n1.getblockcount()
+            t_hex = self.spend(coin_t, buyer, Decimal("0.0001"), locktime=lock)
+            r_hex = self.spend(coin_t, a.getnewaddress(), Decimal("0.001"))
+            t_id, t_h, _ = self.certify(t_hex)
+            r_id = tx_from_hex(r_hex).rehash()
+            self.record(case, "T", "%s lock time %d, certified at height %d; first block anchored at A=%d is %d" % (t_id, lock, t_h, A, h_a))
+            # 2. Bitcoin block B, T1 anchored at it.
+            self.btc_mine(1)
+            B = self.btc().getblockcount()
+            self.wait_until(lambda: self.tip(n1)["anchorheight"] == B, timeout=120)
+            t1_hex = self.spend(coin_t1, buyer, Decimal("0.0001"))
+            r1_hex = self.spend(coin_t1, a.getnewaddress(), Decimal("0.001"))
+            t1_id, t1_h, _ = self.certify(t1_hex)
+            self.record(case, "T1", "%s certified at height %d" % (t1_id, t1_h))
+            sizes = [self.log_size(i) for i in range(N)]
+            # 3. Bitcoin 1 deep: T1 held, R1 on the attacker; rejoin until a member declines, then isolate.
+            self.isolate()
+            fork1 = self.bitcoin_reorg(1)
+            self.wait_until(lambda: all(self.tip(n)["anchorheight"] <= fork1 for n in self.nodes), timeout=60)
+            self.wait_held([t1_id], aware)
+            a.sendrawtransaction(r1_hex)
+            self.rejoin()
+            t_rejoin = time.time()
+            declined = False
+            while time.time() - t_rejoin < 60 + 6 * ROUND_MS / 1000.0:
+                if any(self.nodes[i].getheldtxs()["held_for_ms"] >= 0 for i in aware):
+                    declined = True
+                    break
+                if t1_id not in n1.getheldtxs()["txids"]:
+                    break
+                time.sleep(0.05)
+            if not declined:
+                self.record(case, "decline", "no member declined R1 before T1 settled; again")
+                self.rejoin()
+                self.sync_all_tips()
+                continue
+            self.isolate()
+            time.sleep(iso_wait)
+            mark = max(self.cert_heights(n1, 0) or [0])
+            clocks = {i: (self.nodes[i].getheldtxs()["hold_ms"], self.nodes[i].getheldtxs()["held_for_ms"]) for i in aware}
+            self.record(case, "before the second reorganization", "node 1's highest certified height %d; (bound, backstop) clocks in ms %s" % (mark, clocks))
+            # 4. Bitcoin deeper: A goes, T's block with it.
+            fork2 = self.bitcoin_reorg(B - A + 2 if B > A else 3)
+            self.wait_until(lambda: all(self.tip(n)["anchorheight"] <= fork2 for n in self.nodes), timeout=60)
+            f2 = n1.getblockcount()
+            self.wait_held([t_id], aware)
+            assert f2 < mark, "the second reorganization did not lower the chain below the hold's mark"
+            a.sendrawtransaction(r_hex)
+            self.record(case, "second reorganization", "Bitcoin fork %d; node 1 back at height %d (T's lock time %d, hold mark %d); T held on %s" %
+                        (fork2, f2, lock, mark, aware))
+            sizes2 = [self.log_size(i) for i in range(N)]
+            self.rejoin()
+            t_rj2 = time.time()
+            # 5. Watch until T or R is certified.
+            won = None
+            samples = []
+            while won is None and time.time() - t_rj2 < 240 + 40 * ROUND_MS / 1000.0 * (lock - f2) / 10.0:
+                ch = self.cert_heights(n1, f2)
+                inf = n1.getheldtxs()
+                samples.append((round(time.time() - t_rj2, 1), n1.getblockcount(), len(ch), inf["hold_ms"], inf["held_for_ms"]))
+                for txid, name in ((t_id, "T"), (r_id, "R")):
+                    h = self.block_of(txid, n1)
+                    if h is not None and any(n1.getblockheader(n1.getblockhash(j))["poscertified"] for j in range(h, n1.getblockcount() + 1)):
+                        won = (name, h)
+                time.sleep(1)
+            for smp in samples[::max(1, len(samples) // 8)] + samples[-1:]:
+                self.log.info("    t=%5.1fs height %d, certified above %d: %d; node 1 hold_ms %d, held_for_ms %d" %
+                              (smp[0], smp[1], f2, smp[2], smp[3], smp[4]))
+            releases = []
+            for i in aware:
+                releases += self.log_has(i, "(the liveness bound)", sizes2[i]) + self.log_has(i, "(the backstop,", sizes2[i])
+            self.record(case, "outcome", "%s certified at height %s, %.1fs after the rejoin" % (won[0], won[1], time.time() - t_rj2)
+                        if won else "neither")
+            self.record(case, "bound or backstop releases after the second reorganization", len(releases))
+            assert won is not None and won[0] == "T", "R won or nothing settled: %s; releases %s" % (won, releases[:3])
+            assert won[1] > lock, "T mined below its lock time"
+            assert not releases, releases[0]
+            refusals = []
+            for i in aware:
+                refusals += self.log_has(i, "respends an input of held transaction %s" % t_id, sizes2[i])
+            self.record(case, "refusals of R after the second reorganization", len(refusals))
+            self.sync_all_tips()
+            self.wait_until(lambda: not n1.getheldtxs()["txids"], timeout=120)
+            return
+        raise AssertionError("no member declined R1 in 4 tries")
+
     def case_fs(self):
         """A node synced afresh between the disconnect and the vote: member 5's data directory is wiped after
         the disconnect and it syncs from the network. It is unaware (it never saw T certified); the other
@@ -1120,6 +1241,8 @@ class HeldTransactionsTest(BitcoinTestFramework):
                 self.case_b15()
             if "bb" in CASES:
                 self.case_bb()
+            if "dd" in CASES:
+                self.case_dd()
             if "fs" in CASES:
                 self.case_fs()
             if "share" in CASES:
