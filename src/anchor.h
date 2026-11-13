@@ -28,6 +28,7 @@
 #include <utility>
 #include <vector>
 
+class CBlockIndex;
 class ChainstateManager;
 
 /** Default number of parent-chain confirmations a block needs before new
@@ -86,6 +87,19 @@ struct UnverifiedEscapingStalls {
 
 /** Record a sub-quorum block accepted without the parent-chain time evidence. */
 void NoteUnverifiedEscapingStall(int height);
+
+/** SEQUENTIA: reconsider `pindex` (clear the failure marks of the block, its
+ *  ancestors and its descendants) as far as Bitcoin's anchors allow, on a node
+ *  that watches Bitcoin: every block that clearing would revive and whose
+ *  anchor is off Bitcoin's best chain stays invalid, with the blocks above it,
+ *  in the same cs_main hold, and joins the watcher's recovery set. Asks the
+ *  parent daemon first, with no lock held. An anchor the daemon cannot judge
+ *  keeps invalid only a block the watcher itself invalidated
+ *  (BLOCK_FAILED_ANCHOR), which it revives once it can judge it; other marks
+ *  are cleared as upstream's reconsiderblock clears them. Used by
+ *  `reconsiderblock`; the watcher's own reconsideration does the same, and
+ *  waits instead when the daemon is silent. */
+void AnchorReconsiderBlock(ChainstateManager& chainman, CBlockIndex* pindex);
 
 /** SEQUENTIA: does the parent chain daemon answer right now? One RPC, no
  *  retries, no locks — unlike MainchainRPCCheck it never waits out an RPC

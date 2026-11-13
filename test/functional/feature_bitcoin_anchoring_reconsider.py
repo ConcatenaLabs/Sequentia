@@ -16,7 +16,10 @@ C anchored on N and D anchored on P:
       invalidated D and C separately.
   (b) The same, but the node is down while Bitcoin replaces P and N, so the
       watcher invalidates only C and D is failed as C's descendant.
-In both, the node must return to C's top without any block of D ever being
+  (c) After (a)'s return to N, an operator calls reconsiderblock on C's first
+      block, which clears D's marks too, and then on D's first block, whose own
+      anchor is the orphaned P.
+In each, the node must return to C's top without any block of D ever being
 connected (read from the node's own log: no UpdateTip names a block of D), and
 then to D's top once Bitcoin returns to P.
 
@@ -186,6 +189,7 @@ class AnchorReconsiderTest(BitcoinTestFramework):
         self.wait_until(lambda: founder.getblockcount() >= 2, timeout=120)
         self.shape_a()
         self.shape_b()
+        self.shape_c()
 
     def shape_a(self):
         parent, _, validator = self.nodes
@@ -221,6 +225,38 @@ class AnchorReconsiderTest(BitcoinTestFramework):
         self.return_to_n(n, alt1)
         self.check_return(c, d, size)
         self.check_p_returns(d, p_alt1)
+
+    def shape_c(self):
+        parent, _, validator = self.nodes
+        self.log.info("(c) the reconsiderblock RPC, on an ancestor and on a block whose own anchor is orphaned")
+        if not self.nodes[1].running:
+            self.start_node(1, extra_args=self.founder_args)
+            self.connect_nodes(1, 2)
+        n, p, c, d = self.build_c_and_d()
+        parent.invalidateblock(p)
+        p_alt = self.mine_parent(2)
+        self.wait_until(lambda: validator.getbestblockhash() == c[-1], timeout=60)
+        parent.invalidateblock(n[0])
+        alt = self.mine_parent(5)
+        self.wait_until(lambda: validator.getblockcount() < validator.getblockheader(c[0])["height"], timeout=60)
+        self.return_to_n(n, alt[0])
+        self.wait_until(lambda: validator.getbestblockhash() == c[-1], timeout=60)
+        size = os.path.getsize(validator.debug_log_path)
+        # C's first block is on the active chain; reconsidering it clears the marks of D above it.
+        validator.reconsiderblock(c[0])
+        assert_equal(validator.getbestblockhash(), c[-1])
+        # D's first block carries the orphaned anchor itself.
+        validator.reconsiderblock(d[0])
+        assert_equal(validator.getbestblockhash(), c[-1])
+        time.sleep(3)
+        connected = self.updatetips_since(size, d)
+        for line in connected:
+            self.log.info("  connected with an orphaned anchor: %s", line[:160])
+        assert not connected, "reconsiderblock connected %d block(s) of D, anchored on a Bitcoin block off the best chain" % len(connected)
+        assert_equal(validator.getbestblockhash(), c[-1])
+        assert_equal({t["hash"]: t["status"] for t in validator.getchaintips()}.get(d[-1]), "invalid")
+        self.log.info("  reconsiderblock on C's first block and on D's: no block of D connected; D stays invalid")
+        self.check_p_returns(d, p_alt[0])
 
 
 if __name__ == '__main__':

@@ -6741,24 +6741,27 @@ std::vector<CBlockIndex*> CChainState::ReconsiderAnchoredBlock(CBlockIndex* pind
                                                               const std::function<bool(const CBlockIndex*)>& anchor_ok)
 {
     AssertLockHeld(cs_main);
-    // The descendants, lowest first, so that a block is judged after its parent.
-    std::vector<CBlockIndex*> descendants;
+    // Every block ResetBlockFailureFlags can revive into a candidate: the
+    // ancestors off the active chain, the block itself and its descendants,
+    // lowest first, so that a block is judged after its parent.
+    std::vector<CBlockIndex*> branch;
+    for (CBlockIndex* a = pindex; a != nullptr && !m_chain.Contains(a); a = a->pprev) branch.push_back(a);
     for (const auto& [_, entry] : m_blockman.m_block_index) {
         if (entry->nHeight > pindex->nHeight && entry->GetAncestor(pindex->nHeight) == pindex) {
-            descendants.push_back(entry);
+            branch.push_back(entry);
         }
     }
-    std::sort(descendants.begin(), descendants.end(),
+    std::sort(branch.begin(), branch.end(),
               [](const CBlockIndex* a, const CBlockIndex* b) { return a->nHeight < b->nHeight; });
 
     ResetBlockFailureFlags(pindex);
 
-    // ResetBlockFailureFlags cleared every descendant. Mark again, before any
-    // activation can see them, the ones whose anchor is still orphaned and
-    // everything above them: the same marks InvalidateBlock leaves.
+    // Mark again, before any activation can see them, the blocks whose anchor
+    // is still orphaned and everything above them: the same marks
+    // InvalidateBlock leaves.
     std::set<const CBlockIndex*> failed;
     std::vector<CBlockIndex*> roots;
-    for (CBlockIndex* entry : descendants) {
+    for (CBlockIndex* entry : branch) {
         if (failed.count(entry->pprev)) {
             entry->nStatus |= BLOCK_FAILED_CHILD;
         } else if (!anchor_ok(entry)) {
