@@ -80,6 +80,7 @@
 #include <numeric>
 #include <optional>
 #include <string>
+#include <tuple>
 
 #include <boost/algorithm/string/replace.hpp>
 
@@ -487,18 +488,19 @@ struct BtcPayPending {
     std::vector<COutPoint> locks;  //!< the coins it spends on inputs that carry records
     //! Displaced from the mempool by a block that spends its lock coin (a
     //! refund, say). Kept, not forgotten, while that coin is spent, so that it
-    //! returns if the block leaves the chain and every coin it spends is
-    //! unspent; skipped until then.
+    //! returns if the block leaves the chain; tried only when every coin it
+    //! spends is unspent. It keeps the displaced rank for as long as it waits.
     bool displaced_by_block{false};
 };
 static std::map<uint256, BtcPayPending> g_btcpay_pending GUARDED_BY(g_btcpay_pending_mutex);
 //! (rank, order) -> txid: the lowest is dropped first.
 static std::map<std::pair<double, uint64_t>, uint256> g_btcpay_pending_by_rate GUARDED_BY(g_btcpay_pending_mutex);
-//! The rank a displaced claim holds: below every other claim (whose rank is its
-//! fee per virtual byte, never negative). It pays nothing while the block that
-//! displaced it stands, so its own fee says nothing, and it cannot be mined
-//! until that block leaves the chain. Among displaced claims the one displaced
-//! longest ago goes first.
+//! The rank a displaced claim holds, for as long as it waits: below every other
+//! claim (whose rank is its fee per virtual byte, never negative). It pays
+//! nothing until a try puts it back in the mempool, so its own fee says nothing
+//! about its place: whether it can be mined is known only by trying it, and a
+//! try that succeeds takes it out of the waiting set. Among displaced claims
+//! the one displaced longest ago goes first.
 static constexpr double BTCPAY_DISPLACED_RANK = -1.0;
 static std::pair<double, uint64_t> BtcPayRankOf(const BtcPayPending& p)
 {
@@ -756,15 +758,15 @@ static void BtcPaymentForget(const uint256& txid) EXCLUSIVE_LOCKS_REQUIRED(g_btc
     BtcPayDropTxid(it);
 }
 
-//! Mark a held claim displaced by a block, or no longer displaced, and move it
-//! to its new place in the eviction order (a newly displaced one is the last of
-//! the displaced to go).
-static void BtcPaySetDisplaced(BtcPayPending& p, const uint256& txid, bool displaced) EXCLUSIVE_LOCKS_REQUIRED(g_btcpay_pending_mutex)
+//! Mark a held claim displaced by a block and move it to its place in the
+//! eviction order (a newly displaced one is the last of the displaced to go).
+//! Nothing marks it otherwise: it is displaced until it leaves the set.
+static void BtcPaySetDisplaced(BtcPayPending& p, const uint256& txid) EXCLUSIVE_LOCKS_REQUIRED(g_btcpay_pending_mutex)
 {
-    if (p.displaced_by_block == displaced) return;
+    if (p.displaced_by_block) return;
     g_btcpay_pending_by_rate.erase(BtcPayRankOf(p));
-    p.displaced_by_block = displaced;
-    if (displaced) p.order = g_btcpay_pending_next++;
+    p.displaced_by_block = true;
+    p.order = g_btcpay_pending_next++;
     g_btcpay_pending_by_rate.emplace(BtcPayRankOf(p), txid);
 }
 
@@ -789,7 +791,7 @@ static void BtcPaymentNotePending(const CTransactionRef& tx, bool displaced = fa
     {
         LOCK(g_btcpay_pending_mutex);
         if (auto held = g_btcpay_pending.find(txid); held != g_btcpay_pending.end()) {
-            if (displaced) BtcPaySetDisplaced(held->second, txid, true);
+            if (displaced) BtcPaySetDisplaced(held->second, txid);
         } else {
             if (g_btcpay_pending.size() >= BtcPayMaxWaiting()) {
                 const auto lowest = g_btcpay_pending_by_rate.begin();
@@ -9211,9 +9213,9 @@ struct BtcPayAttacher {
     int64_t deadline{0};
     //! The chain tip the waiting claims' lock coins were last checked at.
     uint256 swept_seq_tip;
-    //! Claims displaced by a block that cannot be mined at that tip (a lock
-    //! coin, or another coin they spend, is spent there): held, not tried.
-    std::set<uint256> lock_spent;
+    //! Claims displaced by a block that are not tried at this tip: a coin they
+    //! spend (a lock coin or another) is spent on the active chain.
+    std::set<uint256> untried;
     //! The search by paid script: Bitcoin block hash -> the script hashes it was
     //! read for, and script hash -> the transactions found paying that script.
     //! A block is read again only for scripts it was not read for.
@@ -10002,11 +10004,15 @@ void BtcPaymentReattachTick(ChainstateManager& chainman)
     // A waiting claim whose lock coin is spent on the active chain can never be
     // mined on it: forgotten at once, whenever the chain tip moves. In chunks,
     // the chain lock released between them. A displaced claim is kept while its
-    // lock coin is spent, and once that coin is unspent again (the block that
-    // displaced it has left the chain) it is a claim like any other, provided
-    // every other coin it spends is unspent too: a branch that replaced that
-    // block may have spent one, and a claim that cannot be mined there keeps
-    // the displaced rank rather than its fee's.
+    // lock coin is spent, and is not tried while any coin it spends (a lock
+    // coin or another: a branch that replaced the displacing block may have
+    // spent one) is spent on the active chain. Once every one is unspent, or
+    // made by a pooled transaction, it is tried; a pooled transaction spending
+    // one is left to the mempool's replacement rules at the try (a refund the
+    // undo returned to the mempool, which the claim replaces). The sweep never
+    // gives it back its fee's rank: it keeps the displaced rank until a try
+    // puts it in the mempool, so a claim that cannot be mined never ranks above
+    // one that can, whatever spends its coins.
     if (seq_tip != a.swept_seq_tip) {
         a.swept_seq_tip = seq_tip;
         std::vector<std::pair<uint256, std::vector<COutPoint>>> held;
@@ -10031,14 +10037,14 @@ void BtcPaymentReattachTick(ChainstateManager& chainman)
                 }
             }
         }
-        a.lock_spent.clear();
+        a.untried.clear();
         constexpr size_t SWEEP_CHUNK = 500;
         int64_t longest_us = 0;
         const int64_t sweep_start = GetTimeMicros();
         size_t forgotten = 0;
         for (size_t at = 0; at < held.size(); at += SWEEP_CHUNK) {
             std::vector<std::pair<uint256, COutPoint>> spent;
-            std::vector<uint256> restored;
+            std::vector<uint256> freed;
             std::vector<std::pair<uint256, COutPoint>> other_spent;
             {
                 LOCK2(cs_main, pool.cs);
@@ -10059,7 +10065,7 @@ void BtcPaymentReattachTick(ChainstateManager& chainman)
                     if (any_spent || d == displaced.end()) continue;
                     const auto other = std::find_if(d->second.begin(), d->second.end(), gone);
                     if (other == d->second.end()) {
-                        restored.push_back(held[k].first);
+                        freed.push_back(held[k].first);
                     } else {
                         other_spent.emplace_back(held[k].first, *other);
                     }
@@ -10067,22 +10073,21 @@ void BtcPaymentReattachTick(ChainstateManager& chainman)
                 longest_us = std::max(longest_us, GetTimeMicros() - held_from);
             }
             LOCK(g_btcpay_pending_mutex);
-            for (const uint256& txid : restored) {
+            for (const uint256& txid : freed) {
                 if (auto p = g_btcpay_pending.find(txid); p != g_btcpay_pending.end()) {
-                    LogPrint(BCLog::MEMPOOL, "BtcPayment: %s no longer displaced: the coins it spends are unspent on the active "
-                             "chain, held at %.3f per vB\n", txid.ToString(), p->second.rate);
-                    BtcPaySetDisplaced(p->second, txid, false);
+                    LogPrint(BCLog::MEMPOOL, "BtcPayment: %s to be tried: the coins it spends are unspent on the active "
+                             "chain; it keeps the displaced rank until it is back in the mempool\n", txid.ToString());
                 }
             }
             for (const auto& [txid, other] : other_spent) {
                 LogPrint(BCLog::MEMPOOL, "BtcPayment: %s stays displaced: its lock coins are unspent on the active chain, "
                          "but %s, which it spends without a record, is spent there\n", txid.ToString(), other.ToString());
-                a.lock_spent.insert(txid);
+                a.untried.insert(txid);
             }
             for (const auto& [txid, lock] : spent) {
                 if (displaced.count(txid)) {
                     // Held while the block that displaced it stands; not tried.
-                    a.lock_spent.insert(txid);
+                    a.untried.insert(txid);
                     continue;
                 }
                 ++forgotten;
@@ -10098,13 +10103,21 @@ void BtcPaymentReattachTick(ChainstateManager& chainman)
                      longest_us * 0.001, (unsigned)forgotten);
         }
     }
-    // Highest fee per virtual byte first.
+    // Highest fee per virtual byte first, displaced claims among the others by
+    // their fee: the try order. The fee orders the tries only; the eviction
+    // order is the rank, where a displaced claim stays below every other.
     std::vector<uint256> order;
     std::set<uint256> pending;
     {
         LOCK(g_btcpay_pending_mutex);
-        order.reserve(g_btcpay_pending_by_rate.size());
-        for (auto r = g_btcpay_pending_by_rate.rbegin(); r != g_btcpay_pending_by_rate.rend(); ++r) order.push_back(r->second);
+        std::vector<std::tuple<double, uint64_t, uint256>> by_fee;
+        by_fee.reserve(g_btcpay_pending.size());
+        for (const auto& [txid, p] : g_btcpay_pending) by_fee.emplace_back(p.rate, p.order, txid);
+        std::sort(by_fee.begin(), by_fee.end(), [](const auto& x, const auto& y) {
+            return std::tie(std::get<0>(x), std::get<1>(x)) > std::tie(std::get<0>(y), std::get<1>(y));
+        });
+        order.reserve(by_fee.size());
+        for (const auto& e : by_fee) order.push_back(std::get<2>(e));
         pending.insert(order.begin(), order.end());
     }
     for (auto t = a.tried.begin(); t != a.tried.end();) {
@@ -10195,7 +10208,7 @@ void BtcPaymentReattachTick(ChainstateManager& chainman)
     // claims nobody can satisfy never use up a tick ahead of one that can.
     std::vector<uint256> may, cannot;
     for (const uint256& txid : order) {
-        if (!pending.count(txid) || a.lock_spent.count(txid)) continue;
+        if (!pending.count(txid) || a.untried.count(txid)) continue;
         (ClaimMayComplete(a, g_btcpay_info.at(txid)) ? may : cannot).push_back(txid);
     }
     const auto state = std::make_pair(a.btc_tip, seq_tip);

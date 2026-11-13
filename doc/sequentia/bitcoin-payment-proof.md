@@ -650,11 +650,15 @@ and is lost if both stay offline until the refund is valid.
     held claim is dropped for a newcomer that outranks it, and a newcomer that
     outranks none is not held. So a displaced claim never keeps out a claim
     that can be tried, whatever fee it names, and a claim newly displaced takes
-    the place of the one displaced longest ago. Once the block that displaced a
-    claim is disconnected, the claim ranks by its fee again, provided every
-    coin it spends is unspent on the active chain or made by a pooled
-    transaction; while a branch that replaced that block has spent one of
-    them, the claim cannot be mined there and keeps the displaced rank;
+    the place of the one displaced longest ago. A displaced claim keeps the
+    displaced rank for as long as it is held, and leaves the set only when a
+    try puts it back in the mempool (or when it is dropped or forgotten), so
+    a claim that cannot be mined never outranks one that can, whatever spent
+    its coins and whatever spends them now. It is tried once every coin it
+    spends is unspent on the active chain or made by a pooled transaction; a
+    pooled transaction that spends one of them (the refund that the
+    disconnected block returned to the mempool, say) is left to the mempool's
+    replacement rules at the try;
   - **forgotten at once when its lock coin is spent** on the active chain
     (checked whenever the chain tip moves, in chunks that release the chain
     lock between them): such a claim can never be mined on that chain. A claim
@@ -675,6 +679,10 @@ and is lost if both stay offline until the refund is valid.
   the reorganization itself. A displaced claim is easier to keep out: a set
   full of claims that can be tried keeps it out, and so do displacements of the
   attacker's own coins after it, one mined spend for each place in the set.
+  The displaced rank is for claims a block displaced: a claim held after a
+  reorganization ranks by its fee, whatever later happens to the coins it
+  spends. The waiting set is a bounded aid: a claim that loses its place loses
+  the node's automatic recovery, never the claim.
   Past that, a claim the node did not hold, or has forgotten, comes back only
   when someone submits it: the buyer's wallet or its completion service
   (section 8.5), which is the guarantee.
@@ -682,11 +690,12 @@ and is lost if both stay offline until the refund is valid.
   The work runs on its own thread, beside the anchor watcher and never on its
   path, so nothing it does delays an anchor-driven reorganization:
   - held claims that may still complete are tried before those that cannot,
-    and each group highest fee per virtual byte first. A claim may still
-    complete when a payment its proofs prove is in the recent blocks of
-    Bitcoin's best chain (or is older than them, so not known to be gone), or
-    when the search found a transaction in the window paying a script it
-    names. Claims nobody can satisfy never use up a tick ahead of one that can;
+    and each group highest fee per virtual byte first, displaced claims among
+    the others by their fee: the fee orders the tries, never the evictions. A
+    claim may still complete when a payment its proofs prove is in the recent
+    blocks of Bitcoin's best chain (or is older than them, so not known to be
+    gone), or when the search found a transaction in the window paying a
+    script it names. Claims nobody can satisfy never use up a tick ahead of one that can;
   - a claim is tried again only when Bitcoin's tip or the chain tip has moved
     since its last try, and each tick stops after 500 ms of work, the rest
     waiting for the next tick. The budget is checked before every step: each
@@ -1195,7 +1204,11 @@ disconnects it lets it in again only 60 blocks after the new branch's first bloc
 anchored at `R`, and a claim on a valid payment gets those blocks first. A node
 that held the claim brings it back itself: a claim the block mining the refund
 displaced from its mempool waits for re-attachment while that block stands, and
-is re-attached once the block is disconnected (section 6.3). That holds while
+is re-attached once the block is disconnected (section 6.3), replacing the refund
+that the disconnect returned to the mempool. While it waits it holds the
+displaced rank, below every claim that can be tried, and it keeps that rank until
+a try puts it back in the mempool. So a displaced claim that cannot be mined never
+outranks it, whatever spent that claim's coins. That holds while
 its waiting set has room for it: a set full of claims that can be tried, or of
 claims displaced after it, leaves none. It is held because that block spends its
 lock coin; a claim a block displaced by spending only another coin it spends
