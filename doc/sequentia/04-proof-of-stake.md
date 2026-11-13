@@ -1205,9 +1205,10 @@ transaction id, its copy is taken, since it may carry a newer witness. The block
 stands behind that check: a template that fails it is built again without the
 held transactions, and only then without any. The held transactions take at
 most `POS_HELD_BLOCK_SHARE_PCT` (50 %) of the block's weight, and of its
-signature operations. The oldest one that fits the block always goes in,
-however large; the share limits only what follows it. The rest wait for the
-next block. The transactions also go back into the mempool where its policy
+signature operations. The first held transaction that is minable and fits the
+block always goes in, however large; an older one that is not minable yet is
+passed over, and the share limits only what follows the first. The rest wait
+for the next block. The transactions also go back into the mempool where its policy
 takes them, so that nodes without the rule relay and mine them too, but a
 refusal there releases nothing.
 
@@ -1252,6 +1253,14 @@ The same check guards a member's own proposal, `generateposblock`,
 holds anything, `musigpartialsign` needs the block whose hash it signs. Between
 a disconnect and the fill that follows it, none of these signs anything.
 
+One signature escapes these checks. An autonomous leader checks its proposal
+when it builds it, and signs it a moment later without holding a lock across
+the two steps. A disconnect that falls between them, and the record filled
+after it, can leave that leader's signature on a proposal the record would now
+refuse. It is one member's signature, never a quorum: a member gives a share
+only after it has checked the block again against the record, with the
+validation lock held and the block still built on its tip.
+
 **Arm two: sub-quorum blocks.** When the lowest block of the active chain that
 carries such a spend does not carry its parent's quorum, a member keeps that
 block out of its fork choice, and with it every descendant. It disconnects the
@@ -1282,13 +1291,30 @@ pays more and signals replacement.
 
 **The liveness bound and the backstop.** A member *holds* from its first
 decline to sign or to propose for a held transaction, or its first set-aside,
-until a new quorum-certified block appears on its active chain. The hold is
-marked with the highest certified block of the active chain when it begins,
-and a certified block is new when it is neither that block nor an ancestor of
-it. A block, not a height: when a further Bitcoin reorganization lowers the
-chain below the mark, the certified blocks of the new branch end the hold
-although they stand lower. Two clocks end a hold that lasts too long. Either one releases every held transaction and
-every set-aside block, after which the member signs as if it held nothing.
+until a new quorum-certified block appears on its active chain. A certified
+block is new when the member first judged it certified after the hold began,
+and after the last disconnect since. What counts is when the block was
+certified, never its height or its branch:
+- when a further Bitcoin reorganization lowers the chain, the certified
+  blocks of the new branch end the hold although they stand lower;
+- when Bitcoin returns to a branch it showed before, the certified blocks of
+  that branch end nothing. They were certified before, and connecting a block
+  again does not certify it again. So Bitcoin flipping between branches that
+  already carry certified blocks restarts neither clock below.
+
+The member numbers the blocks in the order it first judges them certified,
+while it holds anything, and marks the hold with the number reached when the
+hold begins; a block without a number was certified before everything the
+member holds, and is older than every mark. The numbers and the clocks are
+kept in memory only. A restart keeps the record and forgets them: the member
+still refuses the respends of what it holds, its hold begins again at its
+first decline after the restart, and the blocks it had connected before the
+restart are old. A block the member connects for the first time is judged
+then, however long ago it was signed.
+
+Two clocks end a hold that lasts too long. Either one releases every held
+transaction and every set-aside block, after which the member signs as if it
+held nothing.
 - **The bound** runs from the member's first honest proposal or share during
   the hold. It ends the hold when the chain goes `POS_HELD_BOUND_ROUNDS` (12)
   gossip rounds plus one collection window without a certified block. Rounds
@@ -1304,15 +1330,29 @@ round yet, so the bound runs again from its next honest proposal or share
 after a decline. The backstop's clock runs on through it.
 
 The bound is fixed at startup from the gossip timings (`-posroundms` and
-`-poswindowms`, or the formulas), so it is the same on every member, whether
-or not it runs the producer. The producer applies both clocks at every pass,
-and the anchor watcher at every tick, whether or not Bitcoin Core answered
-that tick. A member that signs only through the RPCs is bound as well: a
-refusal by `generateposblock`, `getposblocktemplate`, `submitposblock` or
+`-poswindowms`, or the formulas), on each member, whether or not it runs the
+producer. Members whose operators set those timings differently have different
+bounds. A member that signs only through the RPCs is bound as well: a refusal
+by `generateposblock`, `getposblocktemplate`, `submitposblock` or
 `musigpartialsign` starts its hold, and a block or share they sign starts its
-bound. Whatever the mix of members with and without the rule, the rule adds to
-a pause at most the bound plus the time one ordinary height takes, and it
-never keeps a hold longer than the backstop.
+bound.
+
+Both clocks are applied by the producer at every pass and by the node's
+maintenance thread once a second (`POS_HELD_MAINTAIN_MS`). That thread is not
+the anchor watcher's and asks Bitcoin Core nothing, so a Bitcoin Core that is
+stopped, or that takes calls and never answers them, delays no release. It
+runs on every node that has the rule, with or without the producer and with
+or without the anchor watcher. A node started with `-validateanchor=0` takes
+no new record, because only the watcher disconnects blocks for Bitcoin; it
+still refuses the respends of what its record file holds, and releases them by
+the same clocks and the same window. A pass takes the node's validation lock
+(`cs_main`), which every signature and every block needs too: while validation
+keeps that lock, the release waits, and so does everything the release would
+allow.
+
+Whatever the mix of members with and without the rule, the rule adds to a
+pause at most the bound plus the time one ordinary height takes, and no hold
+lasts longer than the backstop plus one period of the maintenance thread.
 
 **When a held transaction is released:**
 - it is mined in a block at or below the highest quorum-certified block above
@@ -1439,6 +1479,41 @@ the next pass evicts it, but a node that relayed it has relayed it. The
 contested-anchor jump of a payment claim's refund floor, which the floor must
 close itself.
 
+**A return to a Bitcoin branch seen before: a hole in the rule.** The record
+is filled only when the anchor watcher itself disconnects blocks. When Bitcoin
+returns to a branch it showed earlier, the watcher first reconsiders the
+Sequentia blocks anchored on that branch and lets fork choice compare them
+with the chain the node stands on; only afterwards does it disconnect what is
+anchored on the branch Bitcoin has just left. If the returning Sequentia
+branch is as high as the current one or higher, the node moves to it by fork
+choice in that first step. The watcher then has nothing left to disconnect,
+the record takes nothing, and no member holds the transactions that were
+certified on the branch Bitcoin left, although every member ran the rule: a
+Bitcoin reorganization has disconnected certified blocks, and the rule
+protects none of their transactions. If the current branch is higher, the
+watcher disconnects it and its transactions are held as described above.
+
+The Bitcoin shape that opens the hole is a reorganization followed by its
+reversal: Bitcoin leaves branch A for branch B, the committee certifies
+transactions in blocks anchored on B, and Bitcoin returns to A while the
+Sequentia blocks once anchored on A still stand as high as those anchored on
+B. Producers do not anchor at a height that a live Bitcoin branch contests
+(`-anchoravoidcontested`), so blocks are anchored on B only once B leads A by
+more than `-anchorcontestwindow` (2) Bitcoin blocks, and the return to A is
+then a reorganization more than two blocks deep that follows an earlier one.
+On Bitcoin's main network that takes an attacker who out-mines the network
+twice. On testnet4, where deep reorganizations and their reversals occur, it
+can happen without one.
+
+The same first step has a second effect. Reconsidering a block also clears
+the failure marks of its descendants, including descendants whose own anchor
+is still orphaned. Such blocks are connected and, within the same pass of the
+watcher, disconnected again (a few milliseconds). A held transaction that one
+of them carries reads as mined in a certified block during that moment, and a
+maintenance pass that falls into it releases the transaction. The disconnect
+that follows holds it again; if nothing else was held meanwhile, a new hold
+begins with clocks of its own.
+
 **Why a set-aside does not end when the sibling loses its anchor.** It can
 happen that Bitcoin reorganizes again while a member keeps the respend block X
 set aside and stands on the sibling it signed. The sibling's anchor goes, X's
@@ -1472,9 +1547,12 @@ nothing held can resist a further Bitcoin reorganization. No node, with the
 rule or without it, stays on a block whose anchor Bitcoin replaced for longer
 than the watcher's tick. A set-aside can keep a member on an ancestor that
 Bitcoin still anchors, instead of a sub-quorum block that carries the respend,
-for at most the backstop and the next tick of its anchor watcher: 24.0 s for a
-committee cap of 7 and 240.3 s at the cap of 250, plus that tick (measured: 24.0
-s and 241.3 s for an isolated member). A connected member leaves sooner, at the
+for at most the backstop and one period of the maintenance thread: 24.0 s for
+a committee cap of 7 and 240.3 s at the cap of 250, plus that second. Bitcoin
+flipping between branches that already carry certified blocks does not
+lengthen it, because only a block certified after the set-aside began ends
+the hold and starts another (measured with Bitcoin flipping four times per
+backstop: 25.0 s and 241.3 s). A connected member leaves sooner, at the
 committee's next certified block.
 
 Like the share-lock, this is local signing policy: no block is valid or invalid
@@ -1486,8 +1564,13 @@ for the set-aside, `FindMostWorkChain` and `CChainState::SetAsideBlock`. The
 attacks are in `feature_pos_held_transactions.py`; the MuSig2 signing paths
 in `feature_pos_held_transactions_musig.py`; a member that signs only through
 the RPCs, held past the backstop, in `feature_pos_held_transactions_rpc_liveness.py`;
-and the autonomous leader during the record's fill in
-`feature_pos_held_transactions_fill_probe.py`. In each, a real `bitcoind` is
+the autonomous leader during the record's fill in
+`feature_pos_held_transactions_fill_probe.py`; Bitcoin flipping between two
+branches it has already shown, also across a restart of the member, in
+`feature_pos_held_transactions_flips.py`; and a Bitcoin Core that stops
+answering, a release that falls between a disconnect and the fill of the
+record, and a member stopped while it holds, in
+`feature_pos_held_transactions_parent_hang.py`. In each, a real `bitcoind` is
 the parent chain, the attacker runs with `-posdebugignoreheld`, a debug-only
 switch that turns the rule off, and every refusal is asserted by the member's
 own reason.
