@@ -98,10 +98,13 @@ bool HeldTxsMaintain(ChainstateManager& chainman, CTxMemPool& mempool, bool park
 //! producer to mine from the record (node::BlockAssembler).
 std::vector<CTransactionRef> HeldTxsForMining();
 
-//! `pindex` was just judged certified or not (validation.cpp PosSetCertified).
-//! A certified block that builds on a set-aside block ends that set-aside at the
-//! next maintenance pass. cs_main held.
-void HeldTxsNoteCertified(const CBlockIndex* pindex);
+//! `pindex` was just judged certified or not (validation.cpp PosSetCertified);
+//! `newly` when this judgement is the one that found it to carry its parent's
+//! quorum, which happens once per block and not again when it is re-connected.
+//! Only such a block, judged after a hold began, ends the hold. A certified
+//! block that builds on a set-aside block ends that set-aside at the next
+//! maintenance pass. cs_main held.
+void HeldTxsNoteCertified(const CBlockIndex* pindex, bool newly);
 
 //! A member declined to sign or to propose for a held transaction.
 void HeldTxsNoteDecline();

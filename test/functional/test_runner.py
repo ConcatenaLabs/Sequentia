@@ -84,6 +84,7 @@ EXTENDED_SCRIPTS = [
     'feature_pos_held_transactions_musig.py',
     'feature_pos_held_transactions_rpc_liveness.py',
     'feature_pos_held_transactions_fill_probe.py',
+    'feature_pos_held_transactions_flips.py',
     # Longest test should go first, to favor running tests in parallel
 #    'feature_pruning.py', ELEMENTS: this is broken
 #    'feature_dbcrash.py', ELEMENTS: this is broken -- generate_small_transactions
