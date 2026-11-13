@@ -29,6 +29,7 @@
 #include <mutex>
 #include <set>
 #include <tuple>
+#include <utility>
 
 bool g_validate_anchor = true;
 std::atomic<bool> g_anchor_unvalidated_by_prompt{false};
@@ -209,9 +210,16 @@ bool GetMainchainBlockCount(int& count)
     }
 }
 
+//! Set whenever the daemon failed to answer, cleared when peers are asked
+//! again: an answer after a failure may make an anchor verifiable even though
+//! the daemon's tip did not move.
+static std::atomic<bool> g_mainchain_failed_since_refetch{false};
+
 //! How recently MainchainSyncedTo asked, and what the daemon said.
 int64_t g_mainchain_sync_checked GUARDED_BY(g_anchor_mutex){0};
 int g_mainchain_sync_blocks GUARDED_BY(g_anchor_mutex){-1};
+bool g_mainchain_sync_reachable GUARDED_BY(g_anchor_mutex){false};
+bool g_mainchain_sync_ibd GUARDED_BY(g_anchor_mutex){false};
 constexpr int64_t MAINCHAIN_SYNC_RECHECK_SECONDS = 10;
 
 //! Whether the parent daemon has finished its initial sync and validated a
@@ -230,21 +238,72 @@ bool MainchainSyncedTo(uint32_t height) EXCLUSIVE_LOCKS_REQUIRED(!g_anchor_mutex
         }
     }
     int blocks = -1;
+    bool reachable = false;
+    bool in_ibd = false;
     try {
         const UniValue reply = CallMainChainRPC("getblockchaininfo", UniValue(UniValue::VARR));
         const UniValue result = find_value(reply, "result");
         if (find_value(reply, "error").isNull() && result.isObject()) {
+            reachable = true;
             const UniValue ibd = find_value(result.get_obj(), "initialblockdownload");
             const UniValue count = find_value(result.get_obj(), "blocks");
+            in_ibd = ibd.isBool() && ibd.get_bool();
             if (ibd.isBool() && !ibd.get_bool() && count.isNum()) blocks = count.get_int();
         }
     } catch (const std::exception&) {
         // Unreachable: nothing can be concluded, which is what -1 says.
     }
+    if (!reachable) g_mainchain_failed_since_refetch = true;
     LOCK(g_anchor_mutex);
     g_mainchain_sync_checked = now;
     g_mainchain_sync_blocks = blocks;
+    g_mainchain_sync_reachable = reachable;
+    g_mainchain_sync_ibd = in_ibd;
     return blocks >= 0 && (int64_t)height <= blocks;
+}
+
+//! Record that the daemon could not be reached just now, so an explanation of
+//! the verdict that failure caused does not quote an older, reachable snapshot.
+//! The snapshot is marked for renewal: the next check asks the daemon again.
+static void NoteMainchainUnreachable() EXCLUSIVE_LOCKS_REQUIRED(!g_anchor_mutex)
+{
+    g_mainchain_failed_since_refetch = true;
+    LOCK(g_anchor_mutex);
+    g_mainchain_sync_checked = 0;
+    g_mainchain_sync_blocks = -1;
+    g_mainchain_sync_reachable = false;
+    g_mainchain_sync_ibd = false;
+}
+
+//! A block was left aside on an indeterminate anchor verdict since the last
+//! request to peers, and the highest anchor height among them (for the log).
+static std::atomic<bool> g_anchor_deferred_pending{false};
+static std::atomic<uint32_t> g_anchor_deferred_height{0};
+
+//! Ask every peer for headers again when a block was left aside, the daemon has
+//! changed since peers were last asked (its tip moved, or it answered again
+//! after failing to), and it has reached the highest anchor left aside. Run at
+//! every watcher tick; the sync snapshot it reads is renewed at once when the
+//! daemon moves or answers again. Not before the daemon reaches that height:
+//! until then every reply would only bring back headers refused again, and a
+//! daemon in its initial download moves at every poll. And at most once per
+//! daemon state: a block whose anchor stays unverifiable on an unchanged daemon
+//! (stale on its best chain, or unknown to it) is left aside again and not asked
+//! for again until the daemon changes, so no peer can make this a loop.
+static void RefetchDeferredBlocks(const uint256& daemon_tip) EXCLUSIVE_LOCKS_REQUIRED(!g_anchor_mutex)
+{
+    static uint256 s_tip_asked; // the anchor watcher thread is the only caller
+    if (!g_anchor_deferred_pending.load()) return;
+    if (daemon_tip == s_tip_asked && !g_mainchain_failed_since_refetch.load()) return;
+    const uint32_t anchor_height = g_anchor_deferred_height.load();
+    if (!MainchainSyncedTo(anchor_height)) return;
+    g_anchor_deferred_pending = false;
+    g_anchor_deferred_height = 0;
+    g_mainchain_failed_since_refetch = false;
+    s_tip_asked = daemon_tip;
+    ++g_anchor_refetch_epoch;
+    LogPrintf("Anchor: the parent chain daemon is at height %d; asking peers again for the block(s) left aside while it could not vouch for their anchor (up to height %u)\n",
+              GetMainchainSyncSnapshot().blocks, anchor_height);
 }
 
 //! Bounds the backwards walk that locates the fork point after a parent-chain
@@ -529,6 +588,23 @@ void LoadPosCheckpointState() EXCLUSIVE_LOCKS_REQUIRED(!g_anchor_mutex)
 
 } // namespace
 
+MainchainSyncSnapshot GetMainchainSyncSnapshot()
+{
+    LOCK(g_anchor_mutex);
+    MainchainSyncSnapshot snap;
+    snap.reachable = g_mainchain_sync_reachable;
+    snap.initial_download = g_mainchain_sync_ibd;
+    snap.blocks = g_mainchain_sync_blocks;
+    return snap;
+}
+
+void NoteAnchorDeferredBlock(uint32_t anchor_height)
+{
+    uint32_t seen = g_anchor_deferred_height.load();
+    while (anchor_height > seen && !g_anchor_deferred_height.compare_exchange_weak(seen, anchor_height)) {}
+    g_anchor_deferred_pending = true;
+}
+
 int64_t g_pos_escape_stall_mtp_gap = DEFAULT_POS_ESCAPE_STALL_MTP_GAP;
 bool g_pos_reconcile = true;
 int64_t g_pos_reconcile_patience = DEFAULT_POS_RECONCILE_PATIENCE;
@@ -735,9 +811,11 @@ AnchorCheckResult CheckMainchainAnchor(uint32_t height, const uint256& hash)
         return AnchorCheckResult::OK;
     } catch (const CConnectionFailed&) {
         LogPrintf("WARNING: lost connection to mainchain daemon while checking anchor %s\n", hash.ToString());
+        NoteMainchainUnreachable();
         return AnchorCheckResult::NO_CONNECTION;
     } catch (const std::exception& e) {
         LogPrintf("WARNING: error checking anchor %s against mainchain daemon: %s\n", hash.ToString(), e.what());
+        NoteMainchainUnreachable();
         return AnchorCheckResult::NO_CONNECTION;
     }
 }
@@ -1104,8 +1182,16 @@ void AnchorWatchTask(ChainstateManager& chainman)
     static std::once_flag checkpoints_loaded;
     std::call_once(checkpoints_loaded, LoadPosCheckpointState);
 
+    // Whether the previous tick failed to reach the daemon: an answer now may
+    // make a block left aside meanwhile verifiable even with the tip unchanged.
+    static bool s_daemon_was_unreachable{false};
     uint256 best;
-    if (!GetMainchainBestBlockHash(best)) return;
+    if (!GetMainchainBestBlockHash(best)) {
+        s_daemon_was_unreachable = true;
+        g_mainchain_failed_since_refetch = true;
+        return;
+    }
+    const bool answered_again = std::exchange(s_daemon_was_unreachable, false);
     uint256 old_tip;
     bool tip_changed;
     {
@@ -1142,6 +1228,12 @@ void AnchorWatchTask(ChainstateManager& chainman)
         g_last_mainchain_tip = best;
         DropAnchorCachesAbove(unchanged_height);
     }
+    if (tip_changed || answered_again) {
+        // The daemon moved, or answers again: the next check of its sync must
+        // ask it rather than trust a snapshot saying it is behind or unreachable.
+        WITH_LOCK(g_anchor_mutex, g_mainchain_sync_checked = 0);
+    }
+    RefetchDeferredBlocks(best);
 
     // PoS checkpoints (paper §11): scan new parent blocks for committed
     // Sequentia checkpoints when the parent moves, and re-evaluate

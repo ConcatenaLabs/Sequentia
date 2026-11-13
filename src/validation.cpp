@@ -4467,6 +4467,8 @@ static int64_t PosSteadyMs()
         std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+std::atomic<uint64_t> g_anchor_refetch_epoch{0};
+
 bool PosNoteCompetingCertificate(const uint256& hash, int height)
 {
     LOCK(::cs_main);
@@ -6376,19 +6378,36 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
             case AnchorCheckResult::NOT_FOUND:
                 LogPrintf("WARNING: %s: anchor %s not (yet) known to the parent chain daemon; rejecting block for now\n",
                           __func__, block.m_anchor_hash.ToString());
+                NoteAnchorDeferredBlock(block.m_anchor_height);
                 return state.Invalid(BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE, "anchor-unknown");
             case AnchorCheckResult::STALE:
                 LogPrintf("WARNING: %s: anchor %s is not on the parent chain's best chain; rejecting block for now\n",
                           __func__, block.m_anchor_hash.ToString());
+                NoteAnchorDeferredBlock(block.m_anchor_height);
                 return state.Invalid(BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE, "anchor-stale");
             case AnchorCheckResult::HEIGHT_MISMATCH:
                 LogPrintf("ERROR: %s: anchor %s is not at claimed parent chain height %d\n", __func__,
                           block.m_anchor_hash.ToString(), block.m_anchor_height);
                 return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-anchor-height-mismatch");
-            case AnchorCheckResult::NO_CONNECTION:
-                LogPrintf("WARNING: %s: cannot validate anchor %s: parent chain daemon unreachable\n", __func__,
-                          block.m_anchor_hash.ToString());
+            case AnchorCheckResult::NO_CONNECTION: {
+                // The same verdict for a daemon that answered but has not
+                // reached the anchor yet, one still in its initial download,
+                // and one that did not answer: say which, since only the last
+                // is something for the operator to fix.
+                const MainchainSyncSnapshot sync = GetMainchainSyncSnapshot();
+                if (sync.reachable && sync.initial_download) {
+                    LogPrintf("WARNING: %s: cannot validate anchor %s yet: the parent chain daemon is still in its initial block download (anchor at height %u); the block is asked for again once it has synced\n",
+                              __func__, block.m_anchor_hash.ToString(), block.m_anchor_height);
+                } else if (sync.reachable && sync.blocks >= 0 && sync.blocks < (int64_t)block.m_anchor_height) {
+                    LogPrintf("WARNING: %s: cannot validate anchor %s yet: the parent chain daemon is behind (at height %d, anchor at %u); the block is asked for again once it catches up\n",
+                              __func__, block.m_anchor_hash.ToString(), sync.blocks, block.m_anchor_height);
+                } else {
+                    LogPrintf("WARNING: %s: cannot validate anchor %s: parent chain daemon unreachable; the block is asked for again once it answers\n", __func__,
+                              block.m_anchor_hash.ToString());
+                }
+                NoteAnchorDeferredBlock(block.m_anchor_height);
                 return state.Invalid(BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE, "anchor-unverifiable");
+            }
             }
         }
     }

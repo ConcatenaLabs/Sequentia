@@ -277,6 +277,9 @@ struct Peer {
     std::atomic_bool m_wants_addrv2{false};
     /** Whether this peer has already sent us a getaddr message. */
     bool m_getaddr_recvd{false};
+    /** SEQUENTIA: the last g_anchor_refetch_epoch this peer was asked for
+     *  headers under. Only the message handler thread touches it. */
+    uint64_t m_anchor_refetch_seen{0};
     /** Number of addresses that can be processed from this peer. Start at 1 to
      *  permit self-announcement. */
     double m_addr_token_bucket{1.0};
@@ -1243,6 +1246,8 @@ void PeerManagerImpl::InitializeNode(const CNode *pnode)
     }
     {
         PeerRef peer = std::make_shared<Peer>(nodeid);
+        // A new peer gets the normal header sync; only later bumps concern it.
+        peer->m_anchor_refetch_seen = g_anchor_refetch_epoch.load();
         LOCK(m_peer_mutex);
         m_peer_map.emplace_hint(m_peer_map.end(), nodeid, std::move(peer));
     }
@@ -5014,6 +5019,22 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                 if (pindexStart->pprev)
                     pindexStart = pindexStart->pprev;
                 LogPrint(BCLog::NET, "initial getheaders (%d) to peer=%d (startheight:%d)\n", pindexStart->nHeight, pto->GetId(), peer->m_starting_height);
+                m_connman.PushMessage(pto, msgMaker.Make(NetMsgType::GETHEADERS, m_chainman.ActiveChain().GetLocator(pindexStart), uint256()));
+            }
+        }
+
+        // SEQUENTIA: a block whose anchor our parent chain daemon could not yet
+        // vouch for was rejected without being remembered, and the daemon has
+        // since moved (anchor.h, NoteAnchorDeferredBlock). Ask the peer for the
+        // headers past our best one, so the block is taken now rather than at
+        // the next announcement. A block still unverifiable is left aside again.
+        const uint64_t anchor_refetch = g_anchor_refetch_epoch.load();
+        if (peer->m_anchor_refetch_seen != anchor_refetch) {
+            peer->m_anchor_refetch_seen = anchor_refetch;
+            if (!pto->fClient && !fImporting && !fReindex) {
+                const CBlockIndex* pindexStart = pindexBestHeader;
+                if (pindexStart->pprev) pindexStart = pindexStart->pprev;
+                LogPrint(BCLog::NET, "getheaders (%d) to peer=%d for blocks left aside on their anchor\n", pindexStart->nHeight, pto->GetId());
                 m_connman.PushMessage(pto, msgMaker.Make(NetMsgType::GETHEADERS, m_chainman.ActiveChain().GetLocator(pindexStart), uint256()));
             }
         }

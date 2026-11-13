@@ -190,9 +190,10 @@ mainchainrpcpassword=<the-same-password>
 sync.** Sequentia blocks anchor to *recent* testnet4 blocks. While your local
 Bitcoin Core is still in initial block download it does not yet know those
 blocks, so your Sequentia node rejects every incoming header with
-`anchor-unknown` ("not (yet) known to the parent chain daemon; rejecting block
-for now" in the log). This is deliberate and transient — nothing is banned and
-the headers are re-accepted automatically — but the practical effect is that
+`anchor-unverifiable` ("the parent chain daemon is still in its initial block
+download" in the log). This is deliberate and transient — nothing is banned, and
+the node asks its peers for the headers again once Bitcoin Core has caught up — but
+the practical effect is that
 **Sequentia stays at 0 blocks until `getblockchaininfo` on the Bitcoin node
 shows `"initialblockdownload": false`**. Testnet4 is small (well under 10 GB);
 first sync typically takes under an hour on a normal connection.
@@ -460,7 +461,7 @@ re-extend, with finality holding modulo the Bitcoin reorg - exactly as designed.
 | Stuck in `initialblockdownload` | give it time on first sync; confirm you have a peer (§3) and the testnet4 RPC works (`getanchorstatus`). |
 | `getanchorstatus` not `"ok"` | your `mainchainrpc*` settings are wrong/unreachable - fix them in `elements.conf` and restart. |
 | Startup error "no valid response was received from the mainchain daemon" | the testnet4 RPC endpoint in `mainchainrpc*` is down or refusing the connection. If it points at your own Bitcoin Core, test it with the `curl.exe` command in §2b - if that fails too, it's the wrong-datadir pitfall (§2b step 2) or a missing `server=1`. |
-| Peer connected but `blocks`/`headers` stay at 0 | your own Bitcoin testnet4 node is still in initial block download, so anchors can't be verified yet (`anchor-unknown` in the log). Wait until Bitcoin Core's `getblockchaininfo` shows `"initialblockdownload": false` (§2b step 5). |
+| Peer connected but `blocks`/`headers` stay at 0 | your own Bitcoin testnet4 node is still in initial block download, so anchors can't be verified yet (`anchor-unverifiable` in the log). Wait until Bitcoin Core's `getblockchaininfo` shows `"initialblockdownload": false` (§2b step 5). |
 | Peer connected, still 0 blocks, and the log (with `-debug=validation`) shows `block-proof-invalid, proof of work failed` / `Misbehaving: ... invalid header received` | your `elements.conf` is missing the consensus params from §2 (`pospubliccommittee=1`, `poscommitteesize=250` under `[test]`). Without them the node expects a different committee-certificate form and rejects every network block as invalid. Nothing is logged at the default level, which makes this the most silent failure in this table. Add the two lines and restart. |
 | `getstakescript` says the lock "is below the chain's minimum" | raise the `csv_seconds` argument to at least `1296000` (~15 days). |
 | Your staker never appears in `getposschedule` | confirm the registration tx is mined (`getstakerinfo`), that `posproducer=1` and `posproducerkey` are set, and the node has been restarted. |

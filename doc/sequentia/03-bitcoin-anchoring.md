@@ -161,6 +161,22 @@ A block's anchor is checked against its parent and against the Bitcoin daemon:
   (the hash is known but no longer on the best chain), `HEIGHT_MISMATCH`, and
   `NO_CONNECTION`.
 
+Only `HEIGHT_MISMATCH` is permanent: a Bitcoin block's height never changes.
+The other refusals depend on this node's own Bitcoin daemon, which may be behind
+the network, still in its initial block download, unreachable, or in the middle
+of a reorganization, so they are rejected as `BLOCK_RECENT_CONSENSUS_CHANGE`
+(`anchor-unknown`, `anchor-stale`, `anchor-unverifiable`): nothing is marked
+invalid and the peer is not penalized. The log says which state the daemon is
+in: for `anchor-unverifiable`, whether it is behind (with its height and the
+anchor's), still syncing, or unreachable. Such a block is not remembered, so the
+node asks for it again: when the watcher sees the daemon's tip move, or the
+daemon answer again after failing to, and the daemon has reached the highest
+anchor left aside, it sends every peer a `getheaders`. The block is then taken
+within about one `anchorpollinterval` of the daemon catching up, rather than at
+the next block's announcement. One whose anchor is still not verifiable (the
+daemon reached the height on another branch) is left aside again until the next
+move.
+
 ### The reorg-following watcher
 
 A background watcher polls the Bitcoin daemon every `anchorpollinterval` seconds
